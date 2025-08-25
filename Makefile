@@ -62,3 +62,12 @@ git: ## Commit + push με προσαρμοσμένο μήνυμα
 	git add . && \
 	git commit -m "$$MSG" && \
 	git push
+
+release: build ## Build & create GitHub release with timestamp
+	@TAG=v$(shell date +%Y.%m.%d-%H%M%S)
+	@echo "🚀 Creating release $$TAG..."
+	@git tag $$TAG
+	@git push origin $$TAG
+	@gh release create $$TAG ./bin/cfm \
+		-t "cfm $$TAG" -n "Automated release" --draft
+	@echo "✅ Release $$TAG created (draft)"
