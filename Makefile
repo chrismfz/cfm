@@ -69,5 +69,5 @@ release: build ## Build & create GitHub release with timestamp
 	@git tag $$TAG
 	@git push origin $$TAG
 	@gh release create $$TAG ./bin/cfm \
-		-t "cfm $$TAG" -n "Automated release" --draft
-	@echo "✅ Release $$TAG created (draft)"
+		-t "cfm $$TAG" -n "Automated release"
+	@echo "✅ Release $$TAG created"
