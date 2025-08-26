@@ -1,0 +1,4 @@
+SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
+DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
+MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
+

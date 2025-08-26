@@ -1,3 +1,3 @@
-module github.com/chrismfz/cfm
+module cfm
 
 go 1.24.4
