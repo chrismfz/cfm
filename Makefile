@@ -64,7 +64,7 @@ git: ## Commit + push με προσαρμοσμένο μήνυμα
 	git push
 
 release: build ## Build & create GitHub release with timestamp
-	@TAG=v$(shell date +%Y.%m.%d-%H%M%S)
+	@TAG=v$(shell date +%Y-%m-%d-%H%M%S)
 	@echo "🚀 Creating release $$TAG..."
 	@git tag $$TAG
 	@git push origin $$TAG
