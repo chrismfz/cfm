@@ -28,6 +28,8 @@ const (
 	setV6   = "block_v6"
 	allowV4 = "allow_v4"
 	allowV6 = "allow_v6"
+	allowDynV4 = "allow_dyn_v4"
+	allowDynV6 = "allow_dyn_v6"
 
 	// external (SPLIT: hosts vs nets)
 	allowExtV4Hosts = "allow_ext_v4_hosts" // type ipv4_addr; flags timeout
@@ -87,6 +89,9 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSet(setV6, "ipv6_addr"); err != nil { return err }
 	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
+	// Dynamic DNS Allow (hosts μόνο)
+	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
+	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
 
 	// external sets (split hosts/nets)
 	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout"); err != nil { return err }
@@ -115,6 +120,9 @@ func (b *Backend) EnsureBase() error {
 	}
 	if err := addRule(`ip saddr @allow_v4 accept`); err != nil { return err }
 	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil { return err }
+	//DynDNS
+        if err := addRule(`ip saddr @allow_dyn_v4 accept`); err != nil { return err }
+        if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil { return err }
 
 	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`); err != nil { return err }
 	if err := addRule(`ip6 saddr @allow_ext_v6_hosts accept`); err != nil { return err }
@@ -520,12 +528,14 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	}
 
 	// Αν είναι *nets set, καθάρισε επικαλύψεις
-	if setName == allowExtV4Nets || setName == blockExtV4Nets {
-		elems = normalizeCIDRsV4(elems)
-	}
-	if setName == allowExtV6Nets || setName == blockExtV6Nets {
-		elems = normalizeCIDRsV6(elems)
-	}
+
+if strings.Contains(setName, "_v4_nets") {
+    elems = normalizeCIDRsV4(elems)
+}
+if strings.Contains(setName, "_v6_nets") {
+    elems = normalizeCIDRsV6(elems)
+}
+
 
 	ttlStr := ""
 	if ttl != nil && *ttl > 0 {
