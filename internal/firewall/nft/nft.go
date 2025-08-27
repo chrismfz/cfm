@@ -42,10 +42,6 @@ const (
 )
 
 
-type ipRange struct {
-    From net.IP
-    To   net.IP
-}
 
 
 type setDesc struct {
@@ -54,66 +50,6 @@ type setDesc struct {
     action string // "ALLOW" ή "BLOCK"
     scope  string // "hosts" ή "nets"
     feed   string // π.χ. "dshield", "myallow" (κενό για manual)
-}
-
-func DiscoverSetsForFamily(family string) ([]setDesc, error) {
-    // nft -j list table inet cfm
-    out, err := exec.Command("nft", "-j", "list", "table", "inet", "cfm").CombinedOutput()
-    if err != nil {
-        return nil, fmt.Errorf("list table: %v: %s", err, out)
-    }
-
-    var doc struct {
-        Nftables []struct {
-            Set *struct {
-                Name  string   `json:"name"`
-                Type  string   `json:"type"`   // ipv4_addr / ipv6_addr
-                Flags []string `json:"flags"`  // μπορεί να περιέχει "interval"
-            } `json:"set,omitempty"`
-        } `json:"nftables"`
-    }
-    _ = json.Unmarshal(out, &doc)
-
-    var sets []setDesc
-    for _, n := range doc.Nftables {
-        if n.Set == nil {
-            continue
-        }
-        // φίλτρο οικογένειας
-        isV4 := strings.Contains(n.Set.Type, "ipv4")
-        if family == "ip" && !isV4 { continue }
-        if family == "ip6" &&  isV4 { continue }
-
-        name := n.Set.Name
-        sd := setDesc{name: name, family: family}
-
-        switch {
-        // manual sets
-        case name == "allow_v4" || name == "allow_v6":
-            sd.action, sd.scope = "ALLOW", "hosts"
-        case name == "block_v4" || name == "block_v6":
-            sd.action, sd.scope = "BLOCK", "hosts"
-
-        // external, fixed prefixes
-        case strings.HasPrefix(name, "allow_ext_"):
-            sd.action = "ALLOW"
-            if strings.Contains(name, "_nets") { sd.scope = "nets" } else { sd.scope = "hosts" }
-        case strings.HasPrefix(name, "block_ext_"):
-            sd.action = "BLOCK"
-            if strings.Contains(name, "_nets") { sd.scope = "nets" } else { sd.scope = "hosts" }
-        default:
-            continue
-        }
-
-        // απόσπαση feed name αν υπάρχει suffix (π.χ. *_dshield)
-        parts := strings.Split(name, "_")
-        if len(parts) >= 5 { // allow_ext_v4_nets_<feed...>
-            sd.feed = strings.Join(parts[4:], "_")
-        }
-
-        sets = append(sets, sd)
-    }
-    return sets, nil
 }
 
 
@@ -890,14 +826,6 @@ func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
     return b.ensureSetWithFlags(name, typ, flags)
 }
 
-// Προαιρετικό: drop set αν πλέον δεν υπάρχει feed
-func (b *Backend) DeleteSetIfExists(name string) {
-    if b.setExists(name) {
-        _ = b.nftCmd(fmt.Sprintf("delete set %s %s %s", family, tableName, name))
-    }
-}
-
-
 
 
 // --- WHICH IP support --------------------------------------------------------
@@ -908,162 +836,6 @@ type setMeta struct {
 	Type string // ipv4_addr | ipv6_addr
 	Flags []string // e.g. ["timeout","interval"]
 }
-
-
-// setMeta υπάρχει ήδη:
-// type setMeta struct { Name string; Type string; Flags []string }
-
-func (b *Backend) listCfmSets() ([]setMeta, error) {
-    out, err := exec.Command("nft", "-j", "list", "table", "inet", "cfm").CombinedOutput()
-    if err != nil {
-        return nil, fmt.Errorf("list table inet cfm: %v: %s", err, out)
-    }
-    var doc struct {
-        Nftables []struct {
-            Set *struct {
-                Name  string   `json:"name"`
-                Type  string   `json:"type"`
-                Flags []string `json:"flags"`
-            } `json:"set,omitempty"`
-        } `json:"nftables"`
-    }
-    if err := json.Unmarshal(out, &doc); err != nil {
-        return nil, err
-    }
-    var sets []setMeta
-    for _, n := range doc.Nftables {
-        if n.Set == nil { continue }
-        if !strings.Contains(n.Set.Type, "ipv4_addr") && !strings.Contains(n.Set.Type, "ipv6_addr") {
-            continue
-        }
-        sets = append(sets, setMeta{Name: n.Set.Name, Type: n.Set.Type, Flags: n.Set.Flags})
-    }
-    return sets, nil
-}
-
-
-func (b *Backend) dumpSetElems(set string) (hosts []string, cidrs []string, ranges []ipRange, err error) {
-    out, err := exec.Command("nft", "-j", "list", "set", "inet", tableName, set).CombinedOutput()
-    if err != nil {
-        return nil, nil, nil, err
-    }
-
-    var root map[string]any
-    if err := json.Unmarshal(out, &root); err != nil {
-        return nil, nil, nil, err
-    }
-
-    arr, _ := root["nftables"].([]any)
-    for _, it := range arr {
-        m, _ := it.(map[string]any)
-        setObj, ok := m["set"].(map[string]any)
-        if !ok { continue }
-        // elems
-        elems, _ := setObj["elem"].([]any)
-        for _, e := range elems {
-            em, _ := e.(map[string]any)
-
-            // host (σκέτο string)
-            if s, ok := em["elem"].(string); ok && s != "" {
-                hosts = append(hosts, s)
-                continue
-            }
-
-            // prefix {addr,len}
-            if pfx, ok := em["prefix"].(map[string]any); ok {
-                addr, _ := pfx["addr"].(string)
-                if l, ok := pfx["len"].(float64); ok && addr != "" {
-                    cidrs = append(cidrs, fmt.Sprintf("%s/%d", addr, int(l)))
-                }
-                continue
-            }
-
-            // interval {from,to}
-            if iv, ok := em["interval"].(map[string]any); ok {
-                fromStr, _ := iv["from"].(string)
-                toStr, _   := iv["to"].(string)
-                if fromStr != "" && toStr != "" {
-                    from := net.ParseIP(fromStr)
-                    to   := net.ParseIP(toStr)
-                    if from != nil && to != nil {
-                        ranges = append(ranges, ipRange{From: from, To: to})
-                    }
-                }
-                continue
-            }
-        }
-    }
-    return hosts, cidrs, ranges, nil
-}
-
-
-
-
-// Περπατάει γενικά τα elem και μαζεύει:
-//  - hosts: "1.2.3.4" ή {"elem":{"val":"1.2.3.4"}} ή {"val":"1.2.3.4"}
-//  - cidrs: {"prefix":{"addr":"1.2.3.0","len":24}} ή nested μέσα σε "elem"
-func collectElems(v any, hosts map[string]struct{}, cidrs map[string]struct{}) {
-    switch t := v.(type) {
-    case nil:
-        return
-    case string:
-        hosts[t] = struct{}{}
-    case []any:
-        for _, it := range t { collectElems(it, hosts, cidrs) }
-    case map[string]any:
-        if sub, ok := t["elem"]; ok {
-            collectElems(sub, hosts, cidrs)
-        }
-        if vv, ok := t["val"]; ok {
-            if s, ok := vv.(string); ok && s != "" {
-                hosts[s] = struct{}{}
-            }
-        }
-        if pf, ok := t["prefix"]; ok {
-            if m, ok := pf.(map[string]any); ok {
-                addr, _ := m["addr"].(string)
-                var length int
-                if lf, ok := m["len"].(float64); ok { length = int(lf) }
-                if addr != "" && length > 0 {
-                    cidrs[fmt.Sprintf("%s/%d", addr, length)] = struct{}{}
-                }
-            }
-        }
-    }
-}
-
-
-
-
-
-// Προαιρετικό: βοηθός για το printing σου (αν θες feed/kind από το set name)
-func classifySet(name string) (kind, feed string) {
-    // kind
-    if strings.HasPrefix(name, "allow_") {
-        kind = "ALLOW"
-    } else if strings.HasPrefix(name, "block_") {
-        kind = "BLOCK"
-    } else {
-        kind = "UNKNOWN"
-    }
-    // feed (για external sets έχουμε suffix μετά το "hosts"/"nets")
-    parts := strings.Split(name, "_")
-    // ψάξε για "hosts" ή "nets" και πάρε ό,τι ακολουθεί ως feed
-    idx := -1
-    for i, p := range parts {
-        if p == "hosts" || p == "nets" {
-            idx = i
-            break
-        }
-    }
-    if idx >= 0 && idx+1 < len(parts) {
-        feed = strings.Join(parts[idx+1:], "_")
-    } else {
-        feed = "" // manual ή χωρίς suffix
-    }
-    return
-}
-
 
 
 // DropFeedSets διαγράφει όλα τα per-feed sets (hosts/nets, v4/v6, allow/block)
