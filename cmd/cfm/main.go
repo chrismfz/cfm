@@ -314,11 +314,14 @@ func runDaemon(args []string) {
 
 	// --- watchers setup ---
 	var allowW, denyW, blW, confW *fileWatcher
+	var dynW *fileWatcher
+	dyn := map[string]*dynRecord{}
 	if cfgDir != "" {
 		allowW = newFileWatcher(filepath.Join(cfgDir, "cfm.allow"))
 		denyW = newFileWatcher(filepath.Join(cfgDir, "cfm.deny"))
 		blW = newFileWatcher(filepath.Join(cfgDir, "cfm.blocklists"))
 		confW = newFileWatcher(filepath.Join(cfgDir, "cfm.conf"))
+		dynW = newFileWatcher(filepath.Join(cfgDir, "cfm.dyndns"))
 	}
 
 	// Track seen allow/block entries to avoid pointless TTL refreshes
@@ -461,6 +464,83 @@ func runDaemon(args []string) {
 			reloadBlocklists() // only if cfm.blocklists changed
 			loadAll()          // only if cfm.allow/cfm.deny changed
 			applyPorts()       // only if cfm.conf changed
+//DynDNS parse
+// reload cfm.dyndns on file change (add/remove hosts)
+if dynW != nil {
+    if b, ok := dynW.Changed(); ok {
+        want := parseDynDNS(b)
+        seen := map[string]struct{}{}
+        for _, it := range want {
+            seen[it.Host] = struct{}{}
+            if rec, ok := dyn[it.Host]; ok {
+                rec.Interval = it.Interval
+            } else {
+                dyn[it.Host] = &dynRecord{Host: it.Host, Interval: it.Interval}
+            }
+        }
+        // drop removed
+        for h := range dyn {
+            if _, ok := seen[h]; !ok {
+                delete(dyn, h)
+            }
+        }
+    }
+}
+
+// refresh dyndns by TTL/interval
+// refresh dyndns by TTL/interval
+if len(dyn) > 0 {
+    now := time.Now()
+    if nb, ok := be.(*nft.Backend); ok {
+        var allV4, allV6 []string
+        changed := false
+
+        for _, rec := range dyn { // <- Πάρε απευθείας *dynRecord από το map
+            if now.Before(rec.NextRefresh) {
+                allV4 = append(allV4, rec.LastV4...)
+                allV6 = append(allV6, rec.LastV6...)
+                continue
+            }
+
+            ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+            v4, v6, ttl, err := resolveWithTTL(ctx, rec.Host, 5*time.Minute)
+            cancel()
+
+            if err != nil {
+                rec.NextRefresh = now.Add(1 * time.Minute)
+            } else {
+                if !eqStrSet(rec.LastV4, v4) || !eqStrSet(rec.LastV6, v6) {
+                    rec.LastV4, rec.LastV6 = v4, v6
+                    changed = true
+                }
+                next := ttl
+                if rec.Interval > 0 {
+                    next = rec.Interval
+                }
+                rec.NextRefresh = now.Add(next)
+            }
+
+            allV4 = append(allV4, rec.LastV4...)
+            allV6 = append(allV6, rec.LastV6...)
+        }
+
+        if changed {
+            allV4 = dedupStrings(allV4)
+            allV6 = dedupStrings(allV6)
+            if err := nb.ReplaceSetFlushAdd("allow_dyn_v4", allV4, nil); err != nil {
+                fmt.Fprintln(os.Stderr, "dyndns apply v4 error:", err)
+            }
+            if err := nb.ReplaceSetFlushAdd("allow_dyn_v6", allV6, nil); err != nil {
+                fmt.Fprintln(os.Stderr, "dyndns apply v6 error:", err)
+            }
+            if os.Getenv("CFM_DEBUG") != "" {
+                fmt.Printf("[dyndns] updated hosts: v4=%d v6=%d\n", len(allV4), len(allV6))
+            }
+        }
+    }
+}
+
+
 
 			// Per-feed refresh by schedule
 			if feeds != nil && len(feeds) > 0 {
@@ -508,6 +588,18 @@ func runDaemon(args []string) {
 // ----------------------------------------------------------------------------
 // helpers shared by commands
 // ----------------------------------------------------------------------------
+
+func dedupStrings(in []string) []string {
+    seen := make(map[string]struct{}, len(in))
+    out := make([]string, 0, len(in))
+    for _, s := range in {
+        if _, ok := seen[s]; ok { continue }
+        seen[s] = struct{}{}
+        out = append(out, s)
+    }
+    return out
+}
+
 
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) { return false }
@@ -780,6 +872,10 @@ func extractCfmSets(tableJSON []byte, ip net.IP) []setDesc {
 func classifySetName(name string) setDesc {
 	if name == "allow_v4" { return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"} }
 	if name == "allow_v6" { return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"} }
+
+	if name == "allow_dyn_v4" { return setDesc{name: name, family: "v4", kind: "hosts", action: "ALLOW"} }
+	if name == "allow_dyn_v6" { return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"} }
+
 	if name == "block_v4" { return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"} }
 	if name == "block_v6" { return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"} }
 	parts := strings.Split(name, "_")
@@ -875,6 +971,8 @@ func classifyStatusSet(name, typ string) (action, family, scope, feed string, ok
 	switch name {
 	case "allow_v4": return "ALLOW", "v4", "manual", "", true
 	case "allow_v6": return "ALLOW", "v6", "manual", "", true
+	case "allow_dyn_v4": return "ALLOW", "v4", "dyn", "", true
+	case "allow_dyn_v6": return "ALLOW", "v6", "dyn", "", true
 	case "block_v4": return "BLOCK", "v4", "manual", "", true
 	case "block_v6": return "BLOCK", "v6", "manual", "", true
 	}
