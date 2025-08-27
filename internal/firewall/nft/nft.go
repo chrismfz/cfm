@@ -857,3 +857,25 @@ func (b *Backend) DropFeedSets(feedName string) {
         _ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
     }
 }
+
+
+
+
+
+// DropEverything: delete whole table inet cfm
+func (b *Backend) DropEverything() error {
+	if !b.tableExists() {
+		return nil
+	}
+	// best-effort flush first (μην αποτύχει delete λόγω refs)
+	_ = exec.Command("nft", "flush", "table", family, tableName).Run()
+	return b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
+}
+
+// ResetTable: flush whole table (rules + sets content), κρατώντας το table
+func (b *Backend) ResetTable() error {
+	if !b.tableExists() {
+		return nil
+	}
+	return b.nftCmd(fmt.Sprintf("flush table %s %s", family, tableName))
+}

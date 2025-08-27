@@ -1,4 +1,18 @@
-SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
-DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
 MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
+SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
+SPAMDROPV6|BLOCK|14400|0|https://www.spamhaus.org/drop/dropv6.txt
+SPAMEDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/edrop.txt
+DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
+TOR|BLOCK|14400|0|https://check.torproject.org/cgi-bin/TorBulkExitList.py?ip=1.2.3.4
+BOGON|BLOCK|14400|0|http://www.cymru.com/Documents/bogon-bn-agg.txt
+HONEYPOT|BLOCK|14400|0|https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1
+CIARMY|BLOCK|14400|0|http://www.ciarmy.com/list/ci-badguys.txt
+BFB|BLOCK|14400|0|http://danger.rulez.sk/projects/bruteforceblocker/blist.php
+MAXMIND|BLOCK|14400|0|https://www.maxmind.com/en/anonymous_proxies
+BDE|BLOCK|3600|0|https://api.blocklist.de/getlast.php?time=3600
+BDEALL|BLOCK|14400|0|http://lists.blocklist.de/lists/all.txt
+STOPFORUMSPAM|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1.zip
+STOPFORUMSPAMV6|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1_ipv6.zip
+GREENSNOW|BLOCK|14400|0|https://blocklist.greensnow.co/greensnow.txt
+
 
