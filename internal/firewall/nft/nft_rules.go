@@ -253,7 +253,9 @@ func (b *Backend) DumpFloodCounters() {
 					prev := b.last[cur]
 					delta := pkts - prev
 					if delta > 0 {
-						fmt.Printf("[flood] %-24s packets %d (+%d)\n", cur, pkts, delta)
+						//fmt.Printf("[flood] %-24s packets %d (+%d)\n", cur, pkts, delta)
+						fmt.Printf("[flood] %-24s packets %d (+%d) reason=%s\n", cur, pkts, delta, reasonForName(cur))
+
 					}
 					b.last[cur] = pkts
 				}
@@ -263,6 +265,43 @@ func (b *Backend) DumpFloodCounters() {
 
 	b.DumpThrottledIPs()
 }
+
+
+
+func reasonForName(name string) string {
+    switch {
+    case strings.HasPrefix(name, "synrate"):
+        return "SYN flood"
+    case strings.HasPrefix(name, "ppsrate"):
+        return "Packet flood (pps)"
+    case strings.HasPrefix(name, "portflood_"):
+        return "Port flood"
+    case strings.HasPrefix(name, "connlimit_"):
+        return "Connection limit"
+    case strings.HasPrefix(name, "th_syn"):
+        return "SYN flood"
+    case strings.HasPrefix(name, "th_pps"):
+        return "Packet flood (pps)"
+    case strings.HasPrefix(name, "th_pf_tcp"):
+        return "TCP port flood"
+    case strings.HasPrefix(name, "th_pf_udp"):
+        return "UDP port flood"
+    case strings.HasPrefix(name, "throttled"):
+        return "General throttle"
+    case strings.HasPrefix(name, "block_v4"), strings.HasPrefix(name, "block_v6"):
+        return "Auto-block"
+    default:
+        return "unknown"
+    }
+}
+
+
+
+
+
+
+
+
 
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6).
 func (b *Backend) DumpThrottledIPs() {
@@ -295,7 +334,8 @@ func (b *Backend) DumpThrottledIPs() {
 			ips = append(ips, t)
 		}
 		if len(ips) > 0 {
-			fmt.Printf("[throttle] %s: %s\n", set, strings.Join(ips, ", "))
+			//fmt.Printf("[throttle] %s: %s\n", set, strings.Join(ips, ", "))
+			fmt.Printf("[throttle] %s (%s): %s\n", set, reasonForName(set), strings.Join(ips, ", "))
 		}
 		return ips
 	}
@@ -458,17 +498,22 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     case "ttl":
         ttl := tc.TTLSeconds
         if fam == "v4" {
-            fmt.Printf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds)\n", ip, ttl, tc.Hits, tc.WindowSec)
+            fmt.Printf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s\n",
+                ip, ttl, tc.Hits, tc.WindowSec, reasonForName("block_v4"))
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
         }
-        fmt.Printf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds)\n", ip, ttl, tc.Hits, tc.WindowSec)
+        fmt.Printf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s\n",
+            ip, ttl, tc.Hits, tc.WindowSec, reasonForName("block_v6"))
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
+
     default: // permanent
         if fam == "v4" {
-            fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds)\n", ip, tc.Hits, tc.WindowSec)
+            fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s\n",
+                ip, tc.Hits, tc.WindowSec, reasonForName("block_v4"))
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
         }
-        fmt.Printf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds)\n", ip, tc.Hits, tc.WindowSec)
+        fmt.Printf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s\n",
+            ip, tc.Hits, tc.WindowSec, reasonForName("block_v6"))
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
     }
 }
