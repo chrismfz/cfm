@@ -18,7 +18,7 @@ type PortsConfig struct {
 	Flood  FloodConfig
 }
 
-// ConnlimitRule = "limit;port"
+// ConnlimitRule = "port;limit"
 type ConnlimitRule struct {
 	Port  int
 	Proto string
@@ -35,8 +35,24 @@ type PortFloodRule struct {
 type FloodConfig struct {
 	Connlimit []ConnlimitRule
 	PortFlood []PortFloodRule
+	// NEW: per-IP packet rate limiting (kernel-only)
+	PktRate  int    // packets per second per source IP (0=disabled)
+	PktBurst int    // burst allowance in packets (<=0 -> default 2*PktRate)
+	PktMode  string // "syn" or "all" (default: "syn")
+
+	Throttle   ThrottleConfig
 }
 
+
+type ThrottleConfig struct {
+    Enabled     bool
+    WindowSec   int
+    Hits        int
+    Mode        string   // "permanent" | "ttl"
+    TTLSeconds  int
+    Sources     []string  // e.g. ["syn","portflood","pps"]
+    SetTTL      int       // seconds (th_* set element timeout)
+}
 
 // default: "0:65535" = όλα
 func defaultAny() []PortRange { return []PortRange{{0, 65535}} }
@@ -60,8 +76,13 @@ func ParseCFMConf(r io.Reader) (*PortsConfig, error) {
 		if len(parts) != 2 { continue }
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"`) // βγάλε προαιρετικά quotes
-
+//		val = strings.Trim(val, `"`) // βγάλε προαιρετικά quotes
+// κόψε inline σχόλια (# …), μετά whitespace και περιμετρικά quotes
+val = strings.TrimSpace(val)
+if i := strings.Index(val, "#"); i != -1 {
+    val = strings.TrimSpace(val[:i])
+}
+val = strings.Trim(val, `"`)
 
 
 
@@ -84,6 +105,54 @@ case "CONNLIMIT":
     cfg.Flood.Connlimit = append(cfg.Flood.Connlimit, parseConnlimit(val)...)
 case "PORTFLOOD":
     cfg.Flood.PortFlood = append(cfg.Flood.PortFlood, parsePortFlood(val)...)
+
+
+
+case "PKT_RATE":
+    if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+        cfg.Flood.PktRate = n
+    }
+case "PKT_BURST":
+    if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+        cfg.Flood.PktBurst = n
+    }
+case "PKT_MODE":
+    v := strings.ToLower(strings.TrimSpace(val))
+    if v != "all" { v = "syn" }
+    cfg.Flood.PktMode = v
+
+
+
+
+
+
+case "THROTTLE_ENABLED":
+    cfg.Flood.Throttle.Enabled = (val == "1" || strings.ToLower(val) == "true")
+case "THROTTLE_WINDOW":
+    if n, err := strconv.Atoi(val); err == nil && n > 0 {
+        cfg.Flood.Throttle.WindowSec = n
+    }
+case "THROTTLE_HITS":
+    if n, err := strconv.Atoi(val); err == nil && n > 0 {
+        cfg.Flood.Throttle.Hits = n
+    }
+case "THROTTLE_MODE":
+    v := strings.ToLower(val)
+    if v != "ttl" { v = "permanent" }
+    cfg.Flood.Throttle.Mode = v
+case "THROTTLE_TTL":
+    if n, err := strconv.Atoi(val); err == nil && n > 0 {
+        cfg.Flood.Throttle.TTLSeconds = n
+    }
+case "THROTTLE_SOURCES":
+    cfg.Flood.Throttle.Sources = strings.Split(val, ",")
+case "THROTTLE_SET_TTL":
+    if n, err := strconv.Atoi(val); err == nil && n > 0 {
+        cfg.Flood.Throttle.SetTTL = n
+    }
+
+
+
 
         default:
                 // αγνόησέ το (future keys)
@@ -130,17 +199,39 @@ func parsePortsList(s string) ([]PortRange, error) {
 
 
 //connlimit helpers
+
 func parseConnlimit(s string) []ConnlimitRule {
-	var out []ConnlimitRule
-	for _, tok := range strings.Split(s, ",") {
-		parts := strings.Split(tok, ";")
-		if len(parts) != 2 { continue }
-		lim, _ := strconv.Atoi(parts[0])
-		port, _ := strconv.Atoi(parts[1])
-		out = append(out, ConnlimitRule{Port: port, Proto: "tcp", Limit: lim})
-	}
-	return out
+    var out []ConnlimitRule
+    for _, tok := range strings.Split(s, ",") {
+        tok = strings.TrimSpace(tok)
+        if tok == "" { continue }
+        parts := strings.Split(tok, ";")
+        if len(parts) != 2 { continue }
+
+        a, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+        b, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+
+        // Προεπιλογή: "port;limit"
+        port, limit := a, b
+
+        // Προαιρετική ανοχή στην παλιά μορφή "limit;port":
+        // Αν φαίνεται ανάποδα (π.χ. πρώτο >65535 ή δεύτερο εντός 0..65535 με νόημα port),
+        // γύρνα τα.
+        if port < 0 || port > 65535 {
+            port, limit = b, a
+        }
+        // Ελάχιστος έλεγχος ορίων
+        if port < 0 || port > 65535 || limit < 1 {
+            continue
+        }
+
+        out = append(out, ConnlimitRule{Port: port, Proto: "tcp", Limit: limit})
+    }
+    return out
 }
+
+
+
 
 func parsePortFlood(s string) []PortFloodRule {
 	var out []PortFloodRule
