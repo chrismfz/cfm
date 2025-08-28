@@ -77,68 +77,104 @@ func (b *Backend) ensureSet(name, typ string) error {
 	return nil
 }
 
+
+
+
+
+
+
 func (b *Backend) EnsureBase() error {
-	// table
+	// 1) Ensure table
 	if !b.tableExists() {
 		if err := b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName)); err != nil {
 			return err
 		}
 	}
-	// manual sets
-	if err := b.ensureSet(setV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(setV6, "ipv6_addr"); err != nil { return err }
-	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
-	// Dynamic DNS Allow (hosts μόνο)
-	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
 
-	// external sets (split hosts/nets)
-	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout"); err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV6Hosts, "ipv6_addr", "timeout"); err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
-
-	if err := b.ensureSetWithFlags(blockExtV4Hosts, "ipv4_addr", "timeout"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV6Hosts, "ipv6_addr", "timeout"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
-
-	// chain
+	// 2) Ensure chains
+	// input (with hook)
 	if !b.chainExists("input") {
-		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s input { type filter hook input priority 0; policy accept; }`, family, tableName)); err != nil {
+		if err := b.nftCmd(fmt.Sprintf(
+			`add chain %s %s input { type filter hook input priority filter; policy accept; }`,
+			family, tableName,
+		)); err != nil {
+			return err
+		}
+	}
+	// flood (no hook)
+	if !b.chainExists("flood") {
+		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s flood`, family, tableName)); err != nil {
 			return err
 		}
 	}
 
-	// RULE ORDER: manual allow → ext allow hosts → ext allow nets → manual block → ext block hosts → ext block nets
+	// 3) Ensure sets (manual/dyn/external)
+	// manual allow/block
+	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
+	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
+	if err := b.ensureSet(setV4,   "ipv4_addr"); err != nil { return err }
+	if err := b.ensureSet(setV6,   "ipv6_addr"); err != nil { return err }
+	// dyn allow
+	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
+	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
+	// external allow (hosts/nets)
+	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags(allowExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags(allowExtV4Nets,  "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(allowExtV6Nets,  "ipv6_addr", "timeout,interval"); err != nil { return err }
+	// external block (hosts/nets)
+	if err := b.ensureSetWithFlags(blockExtV4Hosts, "ipv4_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags(blockExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags(blockExtV4Nets,  "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(blockExtV6Nets,  "ipv6_addr", "timeout,interval"); err != nil { return err }
+
+	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	addRule := func(expr string) error {
 		if !b.ruleExists("input", expr) {
 			return b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr))
 		}
 		return nil
 	}
-	if err := addRule(`ip saddr @allow_v4 accept`); err != nil { return err }
+	// 1) manual allow
+	if err := addRule(`ip saddr @allow_v4 accept`);  err != nil { return err }
 	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil { return err }
-	//DynDNS
-        if err := addRule(`ip saddr @allow_dyn_v4 accept`); err != nil { return err }
-        if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil { return err }
-
-	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`); err != nil { return err }
+	// 2) dyn allow
+	if err := addRule(`ip saddr @allow_dyn_v4 accept`);  err != nil { return err }
+	if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil { return err }
+	// 3) external allow (hosts, then nets)
+	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`);  err != nil { return err }
 	if err := addRule(`ip6 saddr @allow_ext_v6_hosts accept`); err != nil { return err }
-	if err := addRule(`ip saddr @allow_ext_v4_nets accept`); err != nil { return err }
-	if err := addRule(`ip6 saddr @allow_ext_v6_nets accept`); err != nil { return err }
-
-	if err := addRule(`ip saddr @block_v4 drop`); err != nil { return err }
+	if err := addRule(`ip saddr @allow_ext_v4_nets accept`);   err != nil { return err }
+	if err := addRule(`ip6 saddr @allow_ext_v6_nets accept`);  err != nil { return err }
+	// 4) manual block
+	if err := addRule(`ip saddr @block_v4 drop`);  err != nil { return err }
 	if err := addRule(`ip6 saddr @block_v6 drop`); err != nil { return err }
-
-	if err := addRule(`ip saddr @block_ext_v4_hosts drop`); err != nil { return err }
+	// 5) external block (hosts, then nets)
+	if err := addRule(`ip saddr @block_ext_v4_hosts drop`);  err != nil { return err }
 	if err := addRule(`ip6 saddr @block_ext_v6_hosts drop`); err != nil { return err }
-	if err := addRule(`ip saddr @block_ext_v4_nets drop`); err != nil { return err }
-	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`); err != nil { return err }
+	if err := addRule(`ip saddr @block_ext_v4_nets drop`);   err != nil { return err }
+	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
+
+	// 5) Ensure jump flood is present *μετά* τα allow/deny και *πριν* τα port rules
+	if !b.ruleExists("input", "jump flood") {
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
+
+
+
+
+
+
+
+
+
+
+
 
 // -------- block (manual) --------
 
@@ -888,4 +924,14 @@ func (b *Backend) ResetTable() error {
 		return nil
 	}
 	return b.nftCmd(fmt.Sprintf("flush table %s %s", family, tableName))
+}
+
+
+
+//
+func (b *Backend) ResetCFMTable() error {
+    // Σβήσε το table αν υπάρχει (αγνόησε error αν δεν υπάρχει)
+    _ = b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
+    // Ξαναφτιάξ’ το άδειο
+    return b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName))
 }

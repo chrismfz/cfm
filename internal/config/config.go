@@ -14,7 +14,29 @@ type PortsConfig struct {
 	TCPOut []PortRange
 	UDPIn  []PortRange
 	UDPOut []PortRange
+
+	Flood  FloodConfig
 }
+
+// ConnlimitRule = "limit;port"
+type ConnlimitRule struct {
+	Port  int
+	Proto string
+	Limit int
+}
+
+type PortFloodRule struct {
+	Port     int
+	Proto    string
+	Interval int // seconds
+	Max      int // max new conns per interval
+}
+
+type FloodConfig struct {
+	Connlimit []ConnlimitRule
+	PortFlood []PortFloodRule
+}
+
 
 // default: "0:65535" = όλα
 func defaultAny() []PortRange { return []PortRange{{0, 65535}} }
@@ -25,6 +47,7 @@ func ParseCFMConf(r io.Reader) (*PortsConfig, error) {
 		TCPOut: defaultAny(),
 		UDPIn:  defaultAny(),
 		UDPOut: defaultAny(),
+
 	}
 	sc := bufio.NewScanner(r)
 	ln := 0
@@ -39,21 +62,36 @@ func ParseCFMConf(r io.Reader) (*PortsConfig, error) {
 		val := strings.TrimSpace(parts[1])
 		val = strings.Trim(val, `"`) // βγάλε προαιρετικά quotes
 
-		prs, err := parsePortsList(val)
-		if err != nil { return nil, fmt.Errorf("line %d: %w", ln, err) }
 
-		switch strings.ToUpper(key) {
-		case "TCP_IN":
-			cfg.TCPIn = prs
-		case "TCP_OUT":
-			cfg.TCPOut = prs
-		case "UDP_IN":
-			cfg.UDPIn = prs
-		case "UDP_OUT":
-			cfg.UDPOut = prs
-		default:
-			// αγνόησέ το (μελλοντικά: SYNFLOOD, CONNLIMIT κ.λπ.)
-		}
+
+
+        switch strings.ToUpper(key) {
+        case "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT":
+                prs, err := parsePortsList(val)
+                if err != nil { return nil, fmt.Errorf("line %d: %w", ln, err) }
+                switch strings.ToUpper(key) {
+                case "TCP_IN":
+                        cfg.TCPIn = prs
+                case "TCP_OUT":
+                        cfg.TCPOut = prs
+                case "UDP_IN":
+                        cfg.UDPIn = prs
+                case "UDP_OUT":
+                        cfg.UDPOut = prs
+                }
+
+case "CONNLIMIT":
+    cfg.Flood.Connlimit = append(cfg.Flood.Connlimit, parseConnlimit(val)...)
+case "PORTFLOOD":
+    cfg.Flood.PortFlood = append(cfg.Flood.PortFlood, parsePortFlood(val)...)
+
+        default:
+                // αγνόησέ το (future keys)
+        }
+
+
+
+
 	}
 	return cfg, sc.Err()
 }
@@ -89,3 +127,33 @@ func parsePortsList(s string) ([]PortRange, error) {
 	}
 	return out, nil
 }
+
+
+//connlimit helpers
+func parseConnlimit(s string) []ConnlimitRule {
+	var out []ConnlimitRule
+	for _, tok := range strings.Split(s, ",") {
+		parts := strings.Split(tok, ";")
+		if len(parts) != 2 { continue }
+		lim, _ := strconv.Atoi(parts[0])
+		port, _ := strconv.Atoi(parts[1])
+		out = append(out, ConnlimitRule{Port: port, Proto: "tcp", Limit: lim})
+	}
+	return out
+}
+
+func parsePortFlood(s string) []PortFloodRule {
+	var out []PortFloodRule
+	for _, tok := range strings.Split(s, ",") {
+		parts := strings.Split(tok, ";")
+		if len(parts) != 4 { continue }
+		port, _ := strconv.Atoi(parts[0])
+		proto := parts[1]
+		interval, _ := strconv.Atoi(parts[2])
+		limit, _ := strconv.Atoi(parts[3])
+		out = append(out, PortFloodRule{Port: port, Proto: proto, Interval: interval, Max: limit})
+	}
+	return out
+}
+
+//for debugging//
