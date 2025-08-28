@@ -309,6 +309,9 @@ func runDaemon(args []string) {
 		fmt.Println("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
+
+
+
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
 
@@ -437,6 +440,12 @@ func runDaemon(args []string) {
 			if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
 				if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
 					if err := nb.ApplyPortsPolicy(cfg); err != nil { fmt.Fprintln(os.Stderr, "apply ports policy error:", err) }
+                
+if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+}
+
+
 				}
 			} else { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err) }
 		}
@@ -446,10 +455,21 @@ func runDaemon(args []string) {
 				if err != nil { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err); return }
 				if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
 					if err := nb.ApplyPortsPolicy(cfg); err != nil { fmt.Fprintln(os.Stderr, "apply ports policy error:", err) } else if os.Getenv("CFM_DEBUG") != "" { fmt.Println("[ports] policy updated from cfm.conf") }
+
+
+
+if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+}
+
 				}
 			}
 		}
 	}
+
+
+//chris
+
 
 	// Initial load
 	reloadBlocklists()
@@ -486,6 +506,16 @@ if dynW != nil {
         }
     }
 }
+
+//debugging for connlimit portflood//
+// Flood counters dump (debug only)
+if os.Getenv("CFM_DEBUG") != "" {
+    if nb, ok := be.(*nft.Backend); ok {
+        nb.DumpFloodCounters()
+    }
+}
+
+
 
 // refresh dyndns by TTL/interval
 // refresh dyndns by TTL/interval
