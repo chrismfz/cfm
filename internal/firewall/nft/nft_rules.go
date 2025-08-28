@@ -253,7 +253,7 @@ func (b *Backend) DumpFloodCounters() {
 					prev := b.last[cur]
 					delta := pkts - prev
 					if delta > 0 {
-						fmt.Println("[flood] %-24s packets %d (+%d)", cur, pkts, delta)
+						fmt.Printf("[flood] %-24s packets %d (+%d)\n", cur, pkts, delta)
 					}
 					b.last[cur] = pkts
 				}
@@ -295,7 +295,7 @@ func (b *Backend) DumpThrottledIPs() {
 			ips = append(ips, t)
 		}
 		if len(ips) > 0 {
-			fmt.Println("[throttle] %s: %s", set, strings.Join(ips, ", "))
+			fmt.Printf("[throttle] %s: %s\n", set, strings.Join(ips, ", "))
 		}
 		return ips
 	}
@@ -458,17 +458,17 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     case "ttl":
         ttl := tc.TTLSeconds
         if fam == "v4" {
-            fmt.Println("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds)", ip, ttl, tc.Hits, tc.WindowSec)
+            fmt.Printf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds)\n", ip, ttl, tc.Hits, tc.WindowSec)
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
         }
-        fmt.Println("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds)", ip, ttl, tc.Hits, tc.WindowSec)
+        fmt.Printf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds)\n", ip, ttl, tc.Hits, tc.WindowSec)
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
     default: // permanent
         if fam == "v4" {
-            fmt.Println("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds)", ip, tc.Hits, tc.WindowSec)
+            fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds)\n", ip, tc.Hits, tc.WindowSec)
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
         }
-        fmt.Println("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds)", ip, tc.Hits, tc.WindowSec)
+        fmt.Printf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds)\n", ip, tc.Hits, tc.WindowSec)
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
     }
 }
