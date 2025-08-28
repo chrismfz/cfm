@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -55,7 +56,23 @@ func getBackend() fwBackend {
 // CLI entrypoint
 // ----------------------------------------------------------------------------
 
+func requireRoot() {
+    if os.Geteuid() != 0 {
+        u, _ := user.Current()
+        fmt.Fprintf(os.Stderr,
+            "cfm requires root (current user: %s, uid=%d). Try running with sudo.\n",
+            u.Username, os.Geteuid())
+        os.Exit(1)
+    }
+}
+
+
+
+
 func main() {
+    requireRoot()
+
+
 	if BuildTime == "" {
 		BuildTime = time.Now().Format(time.RFC3339)
 	}
@@ -441,6 +458,7 @@ func runDaemon(args []string) {
 				if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
 					if err := nb.ApplyPortsPolicy(cfg); err != nil { fmt.Fprintln(os.Stderr, "apply ports policy error:", err) }
                 
+
 if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
     fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
 }
