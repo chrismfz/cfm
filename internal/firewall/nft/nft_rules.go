@@ -33,8 +33,11 @@ func (b *Backend) ApplyFloodRules(f cfgpkg.FloodConfig) error {
 	_ = b.nftExpr("flush chain inet cfm flood;")
 
 	// ensure runtime sets for tracking throttled IPs exist
+if !b.tableExists() {
+    if err := b.EnsureBase(); err != nil { return err }
+}
 	b.ensureThrottleSets()
-	
+
 	// per-IP packet/SYN rate limiting (kernel-only; overflow-only)
 	if f.PktRate > 0 {
 		burst := f.PktBurst
@@ -212,6 +215,9 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 
 // DumpFloodCounters logs flood-related counters with delta since last tick.
 func (b *Backend) DumpFloodCounters() {
+if !b.tableExists() {
+    _ = b.EnsureBase() // προσπάθησε να επαναφέρεις βάση
+}
 	out, err := b.runCmdOutput("list counters table inet cfm")
 	if err != nil {
 		fmt.Println("[flood] cannot list counters:", err)
@@ -310,7 +316,11 @@ func reasonForName(name string) string {
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6).
 func (b *Backend) DumpThrottledIPs() {
 
+
 dump := func(set string) []string {
+
+if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχα skip
+
     out, err := b.runCmdOutput("list set inet cfm " + set)
     if err != nil {
         return nil
@@ -339,14 +349,6 @@ dump := func(set string) []string {
         ips = append(ips, t)
     }
 
-
-//    if len(ips) > 0 {
-//        reason := reasonForName(set)
-//        fmt.Printf("[throttle] %s (%s): %s\n", set, reason, strings.Join(ips, ", "))
-//        for _, ip := range ips {
-//            lastThrottleReason[ip] = reason
-//        }
-//    }
 
 
 
