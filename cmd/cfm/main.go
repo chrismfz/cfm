@@ -354,6 +354,7 @@ func runDaemon(args []string) {
 
 if nb, ok := be.(*nft.Backend); ok {
     nb.EnableEnrichment(cfgDir, "/etc/cfm", "./configs")
+    nb.SetConfigDir(cfgDir)
 }
 
 	// --- watchers setup ---
