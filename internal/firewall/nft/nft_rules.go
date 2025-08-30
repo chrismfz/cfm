@@ -8,7 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
+	"os"
+	"path/filepath"
 	cfgpkg "cfm/internal/config"
 )
 
@@ -134,12 +135,14 @@ func mapRate(max, intervalSeconds int) (int, string) {
 // -----------------------------------------------------------------------------
 
 // ApplyPortFlood: per-port new-connection rate limiting (per-IP, overflow-only).
+
 func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 	for _, r := range rules {
 		cname := fmt.Sprintf("portflood_%d_%s", r.Port, r.Proto)
 		b.ensureCounter(cname)
 
 		num, unit := mapRate(r.Max, r.Interval)
+		ttl := b.cfg.Flood.Throttle.SetTTL
 
 		switch strings.ToLower(r.Proto) {
 		case "tcp":
@@ -147,10 +150,10 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 			expr4 := fmt.Sprintf(
 				"add rule inet cfm flood tcp dport %d ct state new "+
 					"meter pf_%d_v4 { ip saddr limit rate over %d/%s burst %d packets } "+
-					"add @th_pf_tcp_v4 { ip saddr timeout 60s } "+
-					"add @throttled_v4 { ip saddr timeout 60s } "+
+					"add @th_pf_tcp_v4 { ip saddr timeout %ds } "+
+					"add @throttled_v4 { ip saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;tcp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
 			)
 			if err := b.nftExpr(expr4); err != nil {
 				return fmt.Errorf("portflood v4 tcp failed: %w", err)
@@ -160,10 +163,10 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 			expr6 := fmt.Sprintf(
 				"add rule inet cfm flood tcp dport %d ct state new "+
 					"meter pf_%d_v6 { ip6 saddr limit rate over %d/%s burst %d packets } "+
-					"add @th_pf_tcp_v6 { ip6 saddr timeout 60s } "+
-					"add @throttled_v6 { ip6 saddr timeout 60s } "+
+					"add @th_pf_tcp_v6 { ip6 saddr timeout %ds } "+
+					"add @throttled_v6 { ip6 saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;tcp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
 			)
 			if err := b.nftExpr(expr6); err != nil {
 				return fmt.Errorf("portflood v6 tcp failed: %w", err)
@@ -174,10 +177,10 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 			expr4 := fmt.Sprintf(
 				"add rule inet cfm flood udp dport %d ct state new "+
 					"meter pf_%d_udp_v4 { ip saddr limit rate over %d/%s burst %d packets } "+
-					"add @th_pf_udp_v4 { ip saddr timeout 60s } "+
-					"add @throttled_v4 { ip saddr timeout 60s } "+
+					"add @th_pf_udp_v4 { ip saddr timeout %ds } "+
+					"add @throttled_v4 { ip saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;udp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
 			)
 			if err := b.nftExpr(expr4); err != nil {
 				return fmt.Errorf("portflood v4 udp failed: %w", err)
@@ -187,14 +190,15 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 			expr6 := fmt.Sprintf(
 				"add rule inet cfm flood udp dport %d ct state new "+
 					"meter pf_%d_udp_v6 { ip6 saddr limit rate over %d/%s burst %d packets } "+
-					"add @th_pf_udp_v6 { ip6 saddr timeout 60s } "+
-					"add @throttled_v6 { ip6 saddr timeout 60s } "+
+					"add @th_pf_udp_v6 { ip6 saddr timeout %ds } "+
+					"add @throttled_v6 { ip6 saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;udp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
 			)
 			if err := b.nftExpr(expr6); err != nil {
 				return fmt.Errorf("portflood v6 udp failed: %w", err)
 			}
+
 		default:
 			return fmt.Errorf("unknown proto %q in PORTFLOOD", r.Proto)
 		}
@@ -305,40 +309,95 @@ func reasonForName(name string) string {
 
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6).
 func (b *Backend) DumpThrottledIPs() {
-	dump := func(set string) []string {
-		out, err := b.runCmdOutput("list set inet cfm " + set)
-		if err != nil {
-			return nil
-		}
-		i := strings.Index(out, "elements = {")
-		if i < 0 {
-			return nil
-		}
-		rest := out[i+len("elements = {"):]
-		j := strings.Index(rest, "}")
-		if j < 0 {
-			return nil
-		}
-		elems := rest[:j]
 
-		raw := strings.Split(elems, ",")
-		var ips []string
-		for _, t := range raw {
-			t = strings.TrimSpace(t)
-			if t == "" {
-				continue
-			}
-			if k := strings.IndexByte(t, ' '); k >= 0 { // cut any "timeout 58s"
-				t = t[:k]
-			}
-			ips = append(ips, t)
-		}
-		if len(ips) > 0 {
-			//fmt.Printf("[throttle] %s: %s\n", set, strings.Join(ips, ", "))
-			fmt.Printf("[throttle] %s (%s): %s\n", set, reasonForName(set), strings.Join(ips, ", "))
-		}
-		return ips
-	}
+dump := func(set string) []string {
+    out, err := b.runCmdOutput("list set inet cfm " + set)
+    if err != nil {
+        return nil
+    }
+    i := strings.Index(out, "elements = {")
+    if i < 0 {
+        return nil
+    }
+    rest := out[i+len("elements = {"):]
+    j := strings.Index(rest, "}")
+    if j < 0 {
+        return nil
+    }
+    elems := rest[:j]
+
+    raw := strings.Split(elems, ",")
+    var ips []string
+    for _, t := range raw {
+        t = strings.TrimSpace(t)
+        if t == "" {
+            continue
+        }
+        if k := strings.IndexByte(t, ' '); k >= 0 {
+            t = t[:k]
+        }
+        ips = append(ips, t)
+    }
+
+
+//    if len(ips) > 0 {
+//        reason := reasonForName(set)
+//        fmt.Printf("[throttle] %s (%s): %s\n", set, reason, strings.Join(ips, ", "))
+//        for _, ip := range ips {
+//            lastThrottleReason[ip] = reason
+//        }
+//    }
+
+
+
+if len(ips) > 0 {
+    reason := reasonForName(set)
+    if b.enr == nil {
+        // χωρίς enrichment, κράτα το παλιό συμπεριφορά
+        fmt.Printf("[throttle] %s (%s): %s\n", set, reason, strings.Join(ips, ", "))
+        for _, ip := range ips {
+            lastThrottleReason[ip] = reason
+        }
+        return ips
+    }
+
+    // Με enrichment: τύπωσε ανά IP με PTR/ASN/Country/City
+    for _, ip := range ips {
+        r := b.enr.Lookup(ip)
+        extra := ""
+        if r.PTR != "" { extra = r.PTR }
+        if r.ASN > 0 {
+            if extra != "" { extra += " | " }
+            if r.ASNName != "" {
+                extra += fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+            } else {
+                extra += fmt.Sprintf("AS%d", r.ASN)
+            }
+        }
+        if r.Country != "" || r.City != "" {
+            if extra != "" { extra += " | " }
+            if r.City != "" {
+                extra += fmt.Sprintf("%s, %s", r.City, r.Country)
+            } else {
+                extra += r.Country
+            }
+        }
+        if extra != "" {
+            fmt.Printf("[throttle] %s (%s): %s  —  %s\n", set, reason, ip, extra)
+        } else {
+            fmt.Printf("[throttle] %s (%s): %s\n", set, reason, ip)
+        }
+        lastThrottleReason[ip] = reason
+    }
+}
+
+
+
+
+    return ips
+}
+
+
 
 	_ = dump("th_syn_v4")
 	_ = dump("th_syn_v6")
@@ -389,18 +448,20 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 // -----------------------------------------------------------------------------
 
 // applyPerIPRateLimit installs per-IP packet/SYN rate limiting using nft "meter".
+
 func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
+	ttl := b.cfg.Flood.Throttle.SetTTL
 
 	switch mode {
 	case "all":
 		b.ensureCounter("ppsrate_v4")
 		expr4 := fmt.Sprintf(
 			"add rule inet cfm flood meter pps_v4 { ip saddr limit rate over %d/second burst %d packets } "+
-				"add @th_pps_v4 { ip saddr timeout 60s } "+
-				"add @throttled_v4 { ip saddr timeout 60s } "+
+				"add @th_pps_v4 { ip saddr timeout %ds } "+
+				"add @throttled_v4 { ip saddr timeout %ds } "+
 				"counter name ppsrate_v4 drop comment \"per-ip pps rate %d/%d\";",
-			rate, burst, rate, burst,
+			rate, burst, ttl, ttl, rate, burst,
 		)
 		if err := b.nftExpr(expr4); err != nil {
 			return fmt.Errorf("per-ip pps v4 failed: %w", err)
@@ -409,10 +470,10 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 		b.ensureCounter("ppsrate_v6")
 		expr6 := fmt.Sprintf(
 			"add rule inet cfm flood meter pps_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
-				"add @th_pps_v6 { ip6 saddr timeout 60s } "+
-				"add @throttled_v6 { ip6 saddr timeout 60s } "+
+				"add @th_pps_v6 { ip6 saddr timeout %ds } "+
+				"add @throttled_v6 { ip6 saddr timeout %ds } "+
 				"counter name ppsrate_v6 drop comment \"per-ip pps rate %d/%d\";",
-			rate, burst, rate, burst,
+			rate, burst, ttl, ttl, rate, burst,
 		)
 		if err := b.nftExpr(expr6); err != nil {
 			return fmt.Errorf("per-ip pps v6 failed: %w", err)
@@ -422,10 +483,10 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 		b.ensureCounter("synrate_v4")
 		expr4 := fmt.Sprintf(
 			"add rule inet cfm flood tcp flags syn meter syn_v4 { ip saddr limit rate over %d/second burst %d packets } "+
-				"add @th_syn_v4 { ip saddr timeout 60s } "+
-				"add @throttled_v4 { ip saddr timeout 60s } "+
+				"add @th_syn_v4 { ip saddr timeout %ds } "+
+				"add @throttled_v4 { ip saddr timeout %ds } "+
 				"counter name synrate_v4 drop comment \"per-ip syn rate %d/%d\";",
-			rate, burst, rate, burst,
+			rate, burst, ttl, ttl, rate, burst,
 		)
 		if err := b.nftExpr(expr4); err != nil {
 			return fmt.Errorf("per-ip syn v4 failed: %w", err)
@@ -434,10 +495,10 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 		b.ensureCounter("synrate_v6")
 		expr6 := fmt.Sprintf(
 			"add rule inet cfm flood tcp flags syn meter syn_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
-				"add @th_syn_v6 { ip6 saddr timeout 60s } "+
-				"add @throttled_v6 { ip6 saddr timeout 60s } "+
+				"add @th_syn_v6 { ip6 saddr timeout %ds } "+
+				"add @throttled_v6 { ip6 saddr timeout %ds } "+
 				"counter name synrate_v6 drop comment \"per-ip syn rate %d/%d\";",
-			rate, burst, rate, burst,
+			rate, burst, ttl, ttl, rate, burst,
 		)
 		if err := b.nftExpr(expr6); err != nil {
 			return fmt.Errorf("per-ip syn v6 failed: %w", err)
@@ -445,6 +506,7 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	}
 	return nil
 }
+
 
 // -----------------------------------------------------------------------------
 // Simple autoblock (throttling hits -> block)
@@ -458,6 +520,8 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 var (
 	thV4Hits = map[string][]time.Time{}
 	thV6Hits = map[string][]time.Time{}
+
+	lastThrottleReason = map[string]string{} // ip -> reason string
 )
 
 
@@ -493,34 +557,116 @@ func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 	return out
 }
 
+
+
 func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error {
+    reason := lastThrottleReason[ip]
+    if reason == "" {
+        reason = "Auto-block" // fallback
+    }
+
+    // Enrichment για log/comment
+    var extra string
+    if b.enr != nil {
+        r := b.enr.Lookup(ip)
+        if r.ASN > 0 {
+            if r.ASNName != "" {
+                extra = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+            } else {
+                extra = fmt.Sprintf("AS%d", r.ASN)
+            }
+        }
+        if r.Country != "" || r.City != "" {
+            if extra != "" { extra += " | " }
+            if r.City != "" {
+                extra += fmt.Sprintf("%s, %s", r.City, r.Country)
+            } else {
+                extra += r.Country
+            }
+        }
+        if r.PTR != "" {
+            if extra != "" { extra += " | " }
+            extra += r.PTR
+        }
+    }
+
+    // helper για όμορφο log με/χωρίς enrichment
+    logIP := ip
+    if extra != "" {
+        logIP = fmt.Sprintf("%s  —  %s", ip, extra)
+    }
+
     switch tc.Mode {
     case "ttl":
         ttl := tc.TTLSeconds
         if fam == "v4" {
             fmt.Printf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s\n",
-                ip, ttl, tc.Hits, tc.WindowSec, reasonForName("block_v4"))
+                logIP, ttl, tc.Hits, tc.WindowSec, reason)
+            // TTL: ΔΕΝ γράφουμε στο cfm.deny
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
         }
         fmt.Printf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s\n",
-            ip, ttl, tc.Hits, tc.WindowSec, reasonForName("block_v6"))
+            logIP, ttl, tc.Hits, tc.WindowSec, reason)
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
 
     default: // permanent
+        // Σχόλιο για το cfm.deny
+        comment := reason
+        if extra != "" { comment += " | " + extra }
+
         if fam == "v4" {
             fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s\n",
-                ip, tc.Hits, tc.WindowSec, reasonForName("block_v4"))
+                logIP, tc.Hits, tc.WindowSec, reason)
+            _ = appendToDenyFile(ip, comment) // γράψε στο cfm.deny
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
         }
         fmt.Printf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s\n",
-            ip, tc.Hits, tc.WindowSec, reasonForName("block_v6"))
+            logIP, tc.Hits, tc.WindowSec, reason)
+        _ = appendToDenyFile(ip, comment)
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
     }
 }
 
 
 
+
 // GetFloodConfig returns the current flood configuration.
 func (b *Backend) GetFloodConfig() cfgpkg.FloodConfig {
     return b.cfg.Flood
+}
+
+
+
+// helper: επίλεξε config dir (προτίμηση /etc/cfm, αλλιώς ./configs)
+func pickConfigDir() string {
+    if st, err := os.Stat("/etc/cfm"); err == nil && st.IsDir() {
+        return "/etc/cfm"
+    }
+    if _, err := os.Stat("configs"); os.IsNotExist(err) {
+        // μην αγγίξεις /etc/cfm αν δεν υπάρχει· για τοπικά labs φτιάξε configs/
+        _ = os.MkdirAll("configs", 0755)
+    }
+    return "configs"
+}
+
+// helper: άνοιξε για append ένα αρχείο μέσα στο επιλεγμένο config dir
+func openConfigFileForAppend(name string) (*os.File, string, error) {
+    dir := pickConfigDir()
+    fp := filepath.Join(dir, name)
+    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    return f, dir, err
+}
+
+// αντικατάστησε ΟΛΗ τη συνάρτηση appendToDenyFile με αυτή
+func appendToDenyFile(ip, reason string) error {
+    f, _, err := openConfigFileForAppend("cfm.deny")
+    if err != nil {
+        return err
+    }
+    defer f.Close()
+
+    ts := time.Now().Format("2006-01-02 15:04:05")
+    line := fmt.Sprintf("%s # autoblock: %s at %s\n", ip, reason, ts)
+    _, err = f.WriteString(line)
+    return err
 }

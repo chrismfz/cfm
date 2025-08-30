@@ -23,6 +23,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
 	cfgpkg "cfm/internal/config"
+	agentpkg "cfm/internal/agent"
 )
 
 var (
@@ -202,10 +203,16 @@ func runBlock(args []string) {
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
 	if err := be.AddBlock(ip, *reason, dur); err != nil { fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1) }
 
-	if cfgDir, ok := resolveConfigDir(""); ok {
-		line := ip.String(); if dur != nil && *dur > 0 { line += " ttl=" + dur.String() }
-		if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil { fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err) }
+if cfgDir, ok := resolveConfigDir(""); ok {
+	// Γράφε στο cfm.deny μόνο για permanent (δηλ. χωρίς TTL)
+	if dur == nil || (dur != nil && *dur <= 0) {
+		line := ip.String()
+		if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
+			fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err)
+		}
 	}
+}
+
 	fmt.Printf("✔ blocked %s\n", ip.String())
 }
 
@@ -216,6 +223,10 @@ func runUnblock(args []string) {
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
 	if err := be.RemoveBlock(ip); err != nil { fmt.Fprintln(os.Stderr, "unblock error:", err); os.Exit(1) }
 	fmt.Printf("✔ unblocked %s\n", ip.String())
+	if cfgDir, ok := resolveConfigDir(""); ok {
+		_ = removeIPFromFile(cfgDir, "cfm.deny", ip.String())
+	}
+
 }
 
 func runAllow(args []string) {
@@ -254,6 +265,10 @@ func runUnallow(args []string) {
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
 	if err := be.RemoveAllow(ip); err != nil { fmt.Fprintln(os.Stderr, "unallow error:", err); os.Exit(1) }
 	fmt.Printf("✔ unallowed %s\n", ip.String())
+	if cfgDir, ok := resolveConfigDir(""); ok {
+	_ = removeIPFromFile(cfgDir, "cfm.allow", ip.String())
+}
+
 }
 
 func runAllowList(args []string) {
@@ -329,8 +344,17 @@ func runDaemon(args []string) {
 
 
 
+
+
+
+
+
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+if nb, ok := be.(*nft.Backend); ok {
+    nb.EnableEnrichment(cfgDir, "/etc/cfm", "./configs")
+}
 
 	// --- watchers setup ---
 	var allowW, denyW, blW, confW *fileWatcher
@@ -451,48 +475,85 @@ func runDaemon(args []string) {
 	}
 
 	// Ports policy (cfm.conf) — run once on startup if present; then only on change
-	applyPorts := func() {}
-	if cfgDir != "" && confW != nil {
-		if b, ok := confW.Changed(); ok {
-			if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
-				if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-					if err := nb.ApplyPortsPolicy(cfg); err != nil { fmt.Fprintln(os.Stderr, "apply ports policy error:", err) }
-                
-
-if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
-    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-}
-
-
-				}
-			} else { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err) }
-		}
-		applyPorts = func() {
-			if b, ok := confW.Changed(); ok {
-				cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
-				if err != nil { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err); return }
-				if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-					if err := nb.ApplyPortsPolicy(cfg); err != nil { fmt.Fprintln(os.Stderr, "apply ports policy error:", err) } else if os.Getenv("CFM_DEBUG") != "" { fmt.Println("[ports] policy updated from cfm.conf") }
 
 
 
-if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
-    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-}
 
-				}
-			}
-		}
-	}
+   var (
+        ag           *agentpkg.Runner
+        agStarted    bool
+        lastCfg      *cfgpkg.PortsConfig // <- θα το ενημερώνουμε στο applyPorts()
+        lastAgentKey string              // "APIURL|TOKEN"
+    )
 
+    startOrUpdateAgent := func(cfg *cfgpkg.PortsConfig) {
+        if cfg == nil || cfg.APIURL == "" || cfg.AuthToken == "" { return }
+        key := cfg.APIURL + "|" + cfg.AuthToken
+        if key == lastAgentKey && agStarted { return } // no-op
 
-//chris
+        ac := agentpkg.Config{
+            BaseURL:  cfg.APIURL,
+            Token:    cfg.AuthToken,
+            Version:  Version,
+            Interval: 30 * time.Second,
+        }
+        if ag == nil {
+            ag = agentpkg.New(ac)
+            ag.Start()
+            agStarted = true
+        } else {
+            ag.Update(ac)
+        }
+        lastAgentKey = key
+    }
+
+    // ... εκεί που ορίζεις το applyPorts() ...
+    applyPorts := func() {}
+    if cfgDir != "" && confW != nil {
+        if b, ok := confW.Changed(); ok {
+            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
+                lastCfg = cfg // <-- κρατάμε το parsed cfg
+                if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
+                    if err := nb.ApplyPortsPolicy(cfg); err != nil {
+                        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+                    }
+                    if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+                        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+                    }
+                }
+            } else {
+                fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
+            }
+        }
+        applyPorts = func() {
+            if b, ok := confW.Changed(); ok {
+                cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
+                if err != nil { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err); return }
+                lastCfg = cfg // <-- update κάθε φορά που το conf αλλάζει
+                if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
+                    if err := nb.ApplyPortsPolicy(cfg); err != nil {
+                        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+                    } else if os.Getenv("CFM_DEBUG") != "" {
+                        fmt.Println("[ports] policy updated from cfm.conf")
+                    }
+                    if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+                        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+                    }
+                }
+            }
+        }
+    }
+
+    // NEW: απλό wrapper που κοιτάει μόνο το lastCfg
+    loadAgent := func() { startOrUpdateAgent(lastCfg) }
+
 
 
 	// Initial load
 	reloadBlocklists()
 	loadAll()
 	applyPorts()
+	loadAgent()
 	fmt.Printf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
 	t := time.NewTicker(*interval); defer t.Stop()
@@ -502,6 +563,7 @@ if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
 			reloadBlocklists() // only if cfm.blocklists changed
 			loadAll()          // only if cfm.allow/cfm.deny changed
 			applyPorts()       // only if cfm.conf changed
+			loadAgent()
 //DynDNS parse
 // reload cfm.dyndns on file change (add/remove hosts)
 if dynW != nil {
@@ -527,11 +589,11 @@ if dynW != nil {
 
 //debugging for connlimit portflood//
 // Flood counters dump (debug only)
-if os.Getenv("CFM_DEBUG") != "" {
+//if os.Getenv("CFM_DEBUG") != "" {
     if nb, ok := be.(*nft.Backend); ok {
         nb.DumpFloodCounters()
     }
-}
+//}
 
 
 
@@ -783,6 +845,34 @@ func appendUniqueLine(dir, base, line string) error {
 	_, err = fmt.Fprintln(f, line)
 	return err
 }
+
+func removeIPFromFile(dir, base, ip string) error {
+	fp := filepath.Join(dir, base)
+	b, err := os.ReadFile(fp)
+	if err != nil {
+		if os.IsNotExist(err) { return nil }
+		return err
+	}
+	var out bytes.Buffer
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := sc.Text()
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") {
+			fmt.Fprintln(&out, line)
+			continue
+		}
+		// σβήσε γραμμές που ΞΕΚΙΝΑΝ με το IP (αγνοώντας σχόλια/ttl)
+		if strings.HasPrefix(trim, ip) {
+			continue
+		}
+		fmt.Fprintln(&out, line)
+	}
+	if err := sc.Err(); err != nil { return err }
+	return os.WriteFile(fp, out.Bytes(), 0644)
+}
+
+
 
 // entries parsing -----------------------------------------------------------
 

@@ -16,6 +16,9 @@ type PortsConfig struct {
 	UDPOut []PortRange
 
 	Flood  FloodConfig
+
+	APIURL    string
+	AuthToken string
 }
 
 // ConnlimitRule = "port;limit"
@@ -151,6 +154,11 @@ case "THROTTLE_SET_TTL":
         cfg.Flood.Throttle.SetTTL = n
     }
 
+
+case "API_URL":
+    cfg.APIURL = val
+case "AUTH_TOKEN", "TOKEN":
+    cfg.AuthToken = val
 
 
 

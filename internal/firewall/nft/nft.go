@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	cfgpkg "cfm/internal/config"
 )
@@ -61,9 +62,29 @@ var debugEnv = os.Getenv("CFM_DEBUG") == "1"
 type Backend struct{
     last map[string]int // last seen packets per counter (for delta logging)
     cfg  *cfgpkg.PortsConfig
+
+    enr  *enrichpkg.Enricher
 }
 
-func New() *Backend { return &Backend{} }
+//func New() *Backend { return &Backend{} }
+
+func New() *Backend {
+    return &Backend{
+        last: make(map[string]int),
+    }
+}
+
+// Προαιρετικός helper: ενεργοποιεί enrichment αν βρεθούν mmdb σε dirs
+func (b *Backend) EnableEnrichment(dirs ...string) {
+    if b == nil || b.enr != nil { return }
+    if e, _ := enrichpkg.New(dirs...); e != nil {
+        b.enr = e
+    }
+}
+
+// (προαιρετικά) Setter αν θέλεις να το περνάς “έτοιμο”
+func (b *Backend) SetEnricher(e *enrichpkg.Enricher) { b.enr = e }
+
 
 // ---------- ensure base ----------
 
