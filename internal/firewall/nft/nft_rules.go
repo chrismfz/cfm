@@ -639,25 +639,6 @@ func (b *Backend) GetFloodConfig() cfgpkg.FloodConfig {
 
 
 
-// helper: επίλεξε config dir (προτίμηση /etc/cfm, αλλιώς ./configs)
-func pickConfigDir() string {
-    if st, err := os.Stat("/etc/cfm"); err == nil && st.IsDir() {
-        return "/etc/cfm"
-    }
-    if _, err := os.Stat("configs"); os.IsNotExist(err) {
-        // μην αγγίξεις /etc/cfm αν δεν υπάρχει· για τοπικά labs φτιάξε configs/
-        _ = os.MkdirAll("configs", 0755)
-    }
-    return "configs"
-}
-
-// helper: άνοιξε για append ένα αρχείο μέσα στο επιλεγμένο config dir
-func openConfigFileForAppend(name string) (*os.File, string, error) {
-    dir := pickConfigDir()
-    fp := filepath.Join(dir, name)
-    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    return f, dir, err
-}
 
 func (b *Backend) appendToDenyFile(ip, reason string) error {
     if strings.TrimSpace(b.cfgDir) == "" {
