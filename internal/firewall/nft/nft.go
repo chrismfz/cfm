@@ -64,6 +64,8 @@ type Backend struct{
     cfg  *cfgpkg.PortsConfig
 
     enr  *enrichpkg.Enricher
+
+    cfgDir string // resolve config dir
 }
 
 //func New() *Backend { return &Backend{} }
@@ -84,6 +86,8 @@ func (b *Backend) EnableEnrichment(dirs ...string) {
 
 // (προαιρετικά) Setter αν θέλεις να το περνάς “έτοιμο”
 func (b *Backend) SetEnricher(e *enrichpkg.Enricher) { b.enr = e }
+
+func (b *Backend) SetConfigDir(dir string) { b.cfgDir = strings.TrimSpace(dir) }
 
 
 // ---------- ensure base ----------

@@ -617,12 +617,12 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
         if fam == "v4" {
             fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s\n",
                 logIP, tc.Hits, tc.WindowSec, reason)
-            _ = appendToDenyFile(ip, comment) // γράψε στο cfm.deny
+            _ = b.appendToDenyFile(ip, comment) // γράψε στο cfm.deny
             return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
         }
         fmt.Printf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s\n",
             logIP, tc.Hits, tc.WindowSec, reason)
-        _ = appendToDenyFile(ip, comment)
+        _ = b.appendToDenyFile(ip, comment)
         return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
     }
 }
@@ -657,12 +657,16 @@ func openConfigFileForAppend(name string) (*os.File, string, error) {
     return f, dir, err
 }
 
-// αντικατάστησε ΟΛΗ τη συνάρτηση appendToDenyFile με αυτή
-func appendToDenyFile(ip, reason string) error {
-    f, _, err := openConfigFileForAppend("cfm.deny")
-    if err != nil {
-        return err
+func (b *Backend) appendToDenyFile(ip, reason string) error {
+    if strings.TrimSpace(b.cfgDir) == "" {
+        // ο daemon τρέχει χωρίς persistence — σεβόμαστε την επιλογή
+        return nil
     }
+    if err := os.MkdirAll(b.cfgDir, 0755); err != nil { return err }
+    fp := filepath.Join(b.cfgDir, "cfm.deny")
+
+    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil { return err }
     defer f.Close()
 
     ts := time.Now().Format("2006-01-02 15:04:05")
