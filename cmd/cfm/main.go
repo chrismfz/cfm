@@ -217,17 +217,50 @@ if cfgDir, ok := resolveConfigDir(""); ok {
 }
 
 func runUnblock(args []string) {
-	if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>"); os.Exit(2) }
-	ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-	if err := be.RemoveBlock(ip); err != nil { fmt.Fprintln(os.Stderr, "unblock error:", err); os.Exit(1) }
-	fmt.Printf("✔ unblocked %s\n", ip.String())
-	if cfgDir, ok := resolveConfigDir(""); ok {
-		_ = removeIPFromFile(cfgDir, "cfm.deny", ip.String())
-	}
+    if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>"); os.Exit(2) }
+    ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
 
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+    // Προ-έλεγχοι: υπήρχε σε block set; υπήρχε στο cfm.deny;
+    wasInSet := false
+    if entries, err := be.ListBlocks(); err == nil {
+        for _, e := range entries { if e.IP.Equal(ip) { wasInSet = true; break } }
+    }
+
+    cfgDir, _ := resolveConfigDir("")
+    wasInFile := false
+    if cfgDir != "" {
+        wasInFile = containsIPInFile(cfgDir, "cfm.deny", ip.String())
+    }
+
+    // Εκτέλεση unblocking
+    if err := be.RemoveBlock(ip); err != nil {
+        fmt.Fprintln(os.Stderr, "unblock error:", err); os.Exit(1)
+    }
+
+    removedFromFile := false
+    if cfgDir != "" {
+        if ok, _ := removeIPFromFile(cfgDir, "cfm.deny", ip.String()); ok {
+            removedFromFile = true
+        }
+    }
+
+    if wasInSet || wasInFile || removedFromFile {
+        // “κανονικό” success
+        fmt.Printf("✔ unblocked %s\n", ip.String())
+        // προαιρετικά, μπορείς να προσθέσεις λεπτομέρειες:
+        // if os.Getenv("CFM_DEBUG") != "" {
+        //     fmt.Printf("   details: wasInSet=%v wasInFile=%v removedFromFile=%v\n", wasInSet, wasInFile, removedFromFile)
+        // }
+    } else {
+        // δεν βρέθηκε πουθενά — πιο χρήσιμο μήνυμα
+        fmt.Printf("ℹ %s not found in block sets or cfm.deny (nothing to do)\n", ip.String())
+    }
 }
+
+
 
 func runAllow(args []string) {
 	fs := flag.NewFlagSet("allow", flag.ExitOnError)
@@ -258,18 +291,22 @@ func runAllow(args []string) {
 	fmt.Printf("✔ allowed %s\n", ip.String())
 }
 
+
+
+
 func runUnallow(args []string) {
-	if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP>"); os.Exit(2) }
-	ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-	if err := be.RemoveAllow(ip); err != nil { fmt.Fprintln(os.Stderr, "unallow error:", err); os.Exit(1) }
-	fmt.Printf("✔ unallowed %s\n", ip.String())
-	if cfgDir, ok := resolveConfigDir(""); ok {
-	_ = removeIPFromFile(cfgDir, "cfm.allow", ip.String())
+    if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP>"); os.Exit(2) }
+    ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    if err := be.RemoveAllow(ip); err != nil { fmt.Fprintln(os.Stderr, "unallow error:", err); os.Exit(1) }
+    fmt.Printf("✔ unallowed %s\n", ip.String())
+    if cfgDir, ok := resolveConfigDir(""); ok {
+        _, _ = removeIPFromFile(cfgDir, "cfm.allow", ip.String())
+    }
 }
 
-}
+
 
 func runAllowList(args []string) {
 	fs := flag.NewFlagSet("allow-list", flag.ExitOnError)
@@ -851,30 +888,57 @@ func appendUniqueLine(dir, base, line string) error {
 	return err
 }
 
-func removeIPFromFile(dir, base, ip string) error {
-	fp := filepath.Join(dir, base)
-	b, err := os.ReadFile(fp)
-	if err != nil {
-		if os.IsNotExist(err) { return nil }
-		return err
-	}
-	var out bytes.Buffer
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-		line := sc.Text()
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			fmt.Fprintln(&out, line)
-			continue
-		}
-		// σβήσε γραμμές που ΞΕΚΙΝΑΝ με το IP (αγνοώντας σχόλια/ttl)
-		if strings.HasPrefix(trim, ip) {
-			continue
-		}
-		fmt.Fprintln(&out, line)
-	}
-	if err := sc.Err(); err != nil { return err }
-	return os.WriteFile(fp, out.Bytes(), 0644)
+// παλιά υπογραφή:
+// func removeIPFromFile(dir, base, ip string) error {
+
+// νέα υπογραφή:
+func removeIPFromFile(dir, base, ip string) (bool, error) {
+    fp := filepath.Join(dir, base)
+    b, err := os.ReadFile(fp)
+    if err != nil {
+        if os.IsNotExist(err) { return false, nil }
+        return false, err
+    }
+    var out bytes.Buffer
+    removed := false
+
+    sc := bufio.NewScanner(bytes.NewReader(b))
+    for sc.Scan() {
+        line := sc.Text()
+        trim := strings.TrimSpace(line)
+        if trim == "" || strings.HasPrefix(trim, "#") {
+            fmt.Fprintln(&out, line)
+            continue
+        }
+        // κόψε στο 1ο token (πριν από κενό/σχόλιο)
+        first := trim
+        if i := strings.IndexAny(first, " \t#"); i >= 0 {
+            first = first[:i]
+        }
+        if first == ip || first == ip+"/32" {
+            removed = true
+            continue
+        }
+        fmt.Fprintln(&out, line)
+    }
+    if err := sc.Err(); err != nil { return false, err }
+    if !removed { return false, nil }
+    return true, os.WriteFile(fp, out.Bytes(), 0644)
+}
+
+func containsIPInFile(dir, base, ip string) bool {
+    fp := filepath.Join(dir, base)
+    b, err := os.ReadFile(fp)
+    if err != nil { return false }
+    sc := bufio.NewScanner(bytes.NewReader(b))
+    for sc.Scan() {
+        trim := strings.TrimSpace(sc.Text())
+        if trim == "" || strings.HasPrefix(trim, "#") { continue }
+        first := trim
+        if i := strings.IndexAny(first, " \t#"); i >= 0 { first = first[:i] }
+        if first == ip || first == ip+"/32" { return true }
+    }
+    return false
 }
 
 
