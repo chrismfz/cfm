@@ -619,10 +619,11 @@ if strings.Contains(setName, "_v6_nets") {
 }
 
 
-	ttlStr := ""
-	if ttl != nil && *ttl > 0 {
-		ttlStr = ttl.String()
-	}
+ttlStr := ""
+if ttl != nil && *ttl > 0 {
+    ttlStr = humanTimeout(*ttl)
+}
+
 	return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
 }
 
