@@ -19,6 +19,7 @@ type PortsConfig struct {
 
 	APIURL    string
 	AuthToken string
+	NFTInputPriority int
 }
 
 // ConnlimitRule = "port;limit"
@@ -90,6 +91,15 @@ val = strings.Trim(val, `"`)
 
 
         switch strings.ToUpper(key) {
+
+
+case "NFT_INPUT_PRIORITY", "HOOK_PRIORITY":
+    if n, err := strconv.Atoi(val); err == nil { // <-- val, όχι v
+        if n < -300 { n = -300 }
+        if n >  300 { n =  300 }
+        cfg.NFTInputPriority = n
+    }
+
         case "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT":
                 prs, err := parsePortsList(val)
                 if err != nil { return nil, fmt.Errorf("line %d: %w", ln, err) }

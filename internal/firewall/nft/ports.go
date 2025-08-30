@@ -99,6 +99,7 @@ func (b *Backend) replacePortSet(name string, prs []config.PortRange) error {
 
 // Εφαρμογή πολιτικής ports (κανόνες έρχονται ΜΕΤΑ τους allow/block κανόνες)
 func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
+ b.cfg = cfg
 	// chains: input υπάρχει ήδη. Θέλουμε και output.
 	if !b.chainExists("output") {
 		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s output { type filter hook output priority 0; policy accept; }`, family, tableName)); err != nil {

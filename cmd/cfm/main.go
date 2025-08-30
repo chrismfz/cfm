@@ -555,6 +555,7 @@ if nb, ok := be.(*nft.Backend); ok {
 	loadAll()
 	applyPorts()
 	loadAgent()
+        if os.Getenv("CFM_DEBUG") == "2" { fmt.Printf("Starting MAD COW FIREWALL v2 \n") }
 	fmt.Printf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
 	t := time.NewTicker(*interval); defer t.Stop()
@@ -565,6 +566,12 @@ if nb, ok := be.(*nft.Backend); ok {
 			loadAll()          // only if cfm.allow/cfm.deny changed
 			applyPorts()       // only if cfm.conf changed
 			loadAgent()
+
+    if nb, ok := be.(*nft.Backend); ok {
+        nb.DumpFloodCounters()
+    }
+
+
 //DynDNS parse
 // reload cfm.dyndns on file change (add/remove hosts)
 if dynW != nil {
@@ -591,9 +598,6 @@ if dynW != nil {
 //debugging for connlimit portflood//
 // Flood counters dump (debug only)
 //if os.Getenv("CFM_DEBUG") != "" {
-    if nb, ok := be.(*nft.Backend); ok {
-        nb.DumpFloodCounters()
-    }
 //}
 
 

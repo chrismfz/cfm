@@ -120,24 +120,42 @@ func (b *Backend) EnsureBase() error {
 		}
 	}
 
-	// 2) Ensure chains
-	// input (with hook)
+	// desired priority (default -50; override από cfg)
+	prio := -50
+	if b.cfg != nil && b.cfg.NFTInputPriority != 0 {
+		prio = b.cfg.NFTInputPriority
+	}
+
+	// 2) Ensure chains (input με σωστό priority, flood χωρίς hook)
+	needCreate := false
 	if !b.chainExists("input") {
+		needCreate = true
+	} else {
+		out, _ := exec.Command("nft", "list", "chain", family, tableName, "input").CombinedOutput()
+		s := string(out)
+		want := fmt.Sprintf("priority %d", prio)
+		same := strings.Contains(s, want) || (prio == 0 && strings.Contains(s, "priority filter"))
+		if !same {
+			_ = b.nftCmd(fmt.Sprintf("flush chain %s %s input", family, tableName))
+			_ = b.nftCmd(fmt.Sprintf("delete chain %s %s input", family, tableName))
+			needCreate = true
+		}
+	}
+	if needCreate {
 		if err := b.nftCmd(fmt.Sprintf(
-			`add chain %s %s input { type filter hook input priority filter; policy accept; }`,
-			family, tableName,
+			`add chain %s %s input { type filter hook input priority %d; policy accept; }`,
+			family, tableName, prio,
 		)); err != nil {
 			return err
 		}
 	}
-	// flood (no hook)
 	if !b.chainExists("flood") {
 		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s flood`, family, tableName)); err != nil {
 			return err
 		}
 	}
 
-	// 3) Ensure sets (manual/dyn/external)
+	// 3) Ensure sets (manual/dyn/external + throttling)
 	// manual allow/block
 	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
@@ -156,23 +174,17 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSetWithFlags(blockExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
 	if err := b.ensureSetWithFlags(blockExtV4Nets,  "ipv4_addr", "timeout,interval"); err != nil { return err }
 	if err := b.ensureSetWithFlags(blockExtV6Nets,  "ipv6_addr", "timeout,interval"); err != nil { return err }
-
-
-
-// reason-specific throttled sets
-_ = b.ensureSetWithFlags("th_syn_v4",      "ipv4_addr", "timeout")
-_ = b.ensureSetWithFlags("th_syn_v6",      "ipv6_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pps_v4",      "ipv4_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pps_v6",      "ipv6_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pf_tcp_v4",   "ipv4_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pf_tcp_v6",   "ipv6_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pf_udp_v4",   "ipv4_addr", "timeout")
-_ = b.ensureSetWithFlags("th_pf_udp_v6",   "ipv6_addr", "timeout")
-// (προαιρετικά) συγκεντρωτικά
-_ = b.ensureSetWithFlags("throttled_v4",   "ipv4_addr", "timeout")
-_ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
-
-
+	// throttling sets (per-reason και aggregate)
+	_ = b.ensureSetWithFlags("th_syn_v4",      "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_syn_v6",      "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pps_v4",      "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pps_v6",      "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_tcp_v4",   "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_tcp_v6",   "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_udp_v4",   "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_udp_v6",   "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("throttled_v4",   "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	addRule := func(expr string) error {
@@ -201,7 +213,7 @@ _ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
 	if err := addRule(`ip saddr @block_ext_v4_nets drop`);   err != nil { return err }
 	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
 
-	// 5) Ensure jump flood is present *μετά* τα allow/deny και *πριν* τα port rules
+	// 6) jump flood στο τέλος του base layer
 	if !b.ruleExists("input", "jump flood") {
 		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
 			return err
@@ -210,7 +222,6 @@ _ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
 
 	return nil
 }
-
 
 
 
