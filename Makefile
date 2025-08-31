@@ -4,6 +4,7 @@
 BIN_DIR := bin
 MAIN_DIR := cmd/cfm
 BINARY := $(BIN_DIR)/cfm
+TAG := v$(shell date +%Y-%m-%d-%H%M%S)
 
 # -------------------------------
 # Phony targets
@@ -64,10 +65,59 @@ git: ## Commit + push με προσαρμοσμένο μήνυμα
 	git push
 
 release: build ## Build & create GitHub release with timestamp
-	@TAG=v$(shell date +%Y-%m-%d-%H%M%S)
-	@echo "🚀 Creating release $$TAG..."
-	@git tag $$TAG
-	@git push origin $$TAG
-	@gh release create $$TAG ./bin/cfm \
-		-t "cfm $$TAG" -n "Automated release"
-	@echo "✅ Release $$TAG created"
+	@echo "🚀 Creating release $(TAG)..."
+	@git tag "$(TAG)"
+	@git push origin "$(TAG)"
+	@gh release create "$(TAG)" ./bin/cfm \
+		-t "cfm $(TAG)" -n "Automated release"
+	@echo "✅ Release $(TAG) created"
+
+
+
+
+
+
+
+
+
+
+
+
+override ARCH    := amd64
+override VERSION := $(shell date +%Y.%m.%d-%H%M%S)
+override PKGROOT := build/pkgroot
+override OUTDIR  := build/deb
+BIN := bin/cfm
+CONFIG_DIR := configs
+DEB_SRC := packaging/debian/DEBIAN
+
+deb: build
+	@echo "PKGROOT=[$(PKGROOT)] OUTDIR=[$(OUTDIR)]"
+	@test -n "$(PKGROOT)" && test -n "$(OUTDIR)"
+	@rm -rf "$(PKGROOT)" && mkdir -p "$(PKGROOT)/DEBIAN" \
+		"$(PKGROOT)/usr/bin" \
+		"$(PKGROOT)/lib/systemd/system" \
+		"$(PKGROOT)/etc/cfm" \
+		"$(OUTDIR)"
+
+	# copy DEBIAN metadata/scripts
+	@cp -a "$(DEB_SRC)/." "$(PKGROOT)/DEBIAN/"
+	@sed -i "s/^Version:.*/Version: $(VERSION)-1/" "$(PKGROOT)/DEBIAN/control"
+
+	# payload
+	@install -m0755 "$(BIN)" "$(PKGROOT)/usr/bin/cfm"
+	@install -m0644 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
+	@install -m0644 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
+	@install -m0644 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
+	@install -m0644 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
+	@install -m0644 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
+	@install -m0644 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
+
+	# executables
+	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
+
+	# build artifact -> build/deb/
+	@fakeroot dpkg-deb --build "$(PKGROOT)" "$(OUTDIR)/cfm_$(VERSION)-1_$(ARCH).deb"
+	@echo "📦 Built: $(OUTDIR)/cfm_$(VERSION)-1_$(ARCH).deb"
+
+

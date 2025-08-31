@@ -1,0 +1,14 @@
+[Unit]
+Description=CFM daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/cfm/cfm.conf
+ExecStart=/usr/bin/cfm daemon -c /etc/cfm/
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

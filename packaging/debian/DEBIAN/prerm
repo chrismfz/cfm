@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+# stop/disable on remove
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop cfm.service || true
+        systemctl disable cfm.service || true
+    fi
+fi
+
+exit 0
