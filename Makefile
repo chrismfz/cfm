@@ -12,6 +12,7 @@ TAG := v$(shell date +%Y-%m-%d-%H%M%S)
 GOOS    ?= linux
 GOARCH  ?= amd64
 GOAMD64 ?= v1
+GOAMD64 := $(strip $(GOAMD64))
 # v1=vintage (μέγιστη συμβατότητα), v2, v3, v4
 
 # -------------------------------
@@ -49,12 +50,12 @@ update: ## Update all dependencies
 build: ## Build the binary into ./bin/
 	@mkdir -p $(BIN_DIR)
 	@echo "→ Building for $(GOOS)/$(GOARCH) (GOAMD64=$(GOAMD64))"
+	env -u GOAMD64 \
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) \
-	go build \
+	go build -a \
 		-ldflags "-X 'main.Version=$(shell date +%Y.%m.%d)' -X 'main.BuildTime=$(shell date +%Y-%m-%dT%H:%M:%S)'" \
 		-o $(BINARY) ./$(MAIN_DIR)
 	@echo "✅ Built: $(BINARY)"
-
 run: build ## Run the application
 	@./$(BINARY)
 
