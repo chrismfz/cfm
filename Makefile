@@ -7,6 +7,13 @@ BINARY := $(BIN_DIR)/cfm
 TAG := v$(shell date +%Y-%m-%d-%H%M%S)
 
 # -------------------------------
+# Go build target config (CPU/OS)
+# -------------------------------
+GOOS    ?= linux
+GOARCH  ?= amd64
+GOAMD64 ?= v1   # v1=vintage (μέγιστη συμβατότητα), v2, v3, v4
+
+# -------------------------------
 # Phony targets
 # -------------------------------
 .PHONY: help setup update build run clean git
@@ -40,6 +47,8 @@ update: ## Update all dependencies
 # -------------------------------
 build: ## Build the binary into ./bin/
 	@mkdir -p $(BIN_DIR)
+	@echo "→ Building for $(GOOS)/$(GOARCH) (GOAMD64=$(GOAMD64))"
+	GOOS=$(GOOS) GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) \
 	go build \
 		-ldflags "-X 'main.Version=$(shell date +%Y.%m.%d)' -X 'main.BuildTime=$(shell date +%Y-%m-%dT%H:%M:%S)'" \
 		-o $(BINARY) ./$(MAIN_DIR)
