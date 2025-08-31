@@ -11,7 +11,8 @@ TAG := v$(shell date +%Y-%m-%d-%H%M%S)
 # -------------------------------
 GOOS    ?= linux
 GOARCH  ?= amd64
-GOAMD64 ?= v1   # v1=vintage (μέγιστη συμβατότητα), v2, v3, v4
+GOAMD64 ?= v1
+# v1=vintage (μέγιστη συμβατότητα), v2, v3, v4
 
 # -------------------------------
 # Phony targets
