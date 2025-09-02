@@ -61,7 +61,7 @@ var debugEnv = os.Getenv("CFM_DEBUG") == "1"
 
 type Backend struct{
     last map[string]int // last seen packets per counter (for delta logging)
-    cfg  *cfgpkg.PortsConfig
+    cfg *cfgpkg.Config
 
     enr  *enrichpkg.Enricher
 
@@ -122,8 +122,8 @@ func (b *Backend) EnsureBase() error {
 
 	// desired priority (default -50; override από cfg)
 	prio := -50
-	if b.cfg != nil && b.cfg.NFTInputPriority != 0 {
-		prio = b.cfg.NFTInputPriority
+	if b.cfg != nil && b.cfg.NFT.InputPriority != 0 {
+		prio = b.cfg.NFT.InputPriority
 	}
 
 	// 2) Ensure chains (input με σωστό priority, flood χωρίς hook)

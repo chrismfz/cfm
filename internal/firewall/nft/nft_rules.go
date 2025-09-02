@@ -17,49 +17,38 @@ import (
 // Flood rules application
 // -----------------------------------------------------------------------------
 
+func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
+    if b.cfg == nil {
+        b.cfg = c
+    } else {
+        b.cfg = c // πάντα αντικατάσταση για το νέο tick/config
+    }
 
+    _ = b.nftExpr("flush chain inet cfm flood;")
 
-// ApplyFloodRules flushes the flood chain and re-applies all rules from config.
-func (b *Backend) ApplyFloodRules(f cfgpkg.FloodConfig) error {
-	// First, check if the private cfg field is nil and initialize it.
-	if b.cfg == nil {
-		b.cfg = &cfgpkg.PortsConfig{}
-	}
+    if !b.tableExists() {
+        if err := b.EnsureBase(); err != nil { return err }
+    }
+    b.ensureThrottleSets()
 
-	// Now, store the received FloodConfig in the Backend's cfg field.
-	b.cfg.Flood = f
+    // PacketRate (per-IP pps/syn)
+    if c.PacketRate.Rate > 0 {
+        burst := c.PacketRate.Burst
+        if burst <= 0 {
+            burst = c.PacketRate.Rate * 2
+        }
+        if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
+            return err
+        }
+    }
 
-	// make idempotent
-	_ = b.nftExpr("flush chain inet cfm flood;")
-
-	// ensure runtime sets for tracking throttled IPs exist
-if !b.tableExists() {
-    if err := b.EnsureBase(); err != nil { return err }
+if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
+    return err
 }
-	b.ensureThrottleSets()
-
-	// per-IP packet/SYN rate limiting (kernel-only; overflow-only)
-	if f.PktRate > 0 {
-		burst := f.PktBurst
-		if burst <= 0 {
-			burst = f.PktRate * 2
-		}
-		mode := f.PktMode
-		if mode == "" {
-			mode = "syn"
-		}
-		if err := b.applyPerIPRateLimit(f.PktRate, burst, mode); err != nil {
-			return err
-		}
-	}
-
-	if err := b.ApplyConnlimit(f.Connlimit); err != nil {
-		return err
-	}
-	if err := b.ApplyPortFlood(f.PortFlood); err != nil {
-		return err
-	}
-	return nil
+if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
+    return err
+}
+    return nil
 }
 
 
@@ -138,16 +127,16 @@ func mapRate(max, intervalSeconds int) (int, string) {
 // -----------------------------------------------------------------------------
 
 // ApplyPortFlood: per-port new-connection rate limiting (per-IP, overflow-only).
-
 func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 	for _, r := range rules {
-		cname := fmt.Sprintf("portflood_%d_%s", r.Port, r.Proto)
+		proto := strings.ToLower(r.Proto)
+		cname := fmt.Sprintf("portflood_%d_%s", r.Port, proto)
 		b.ensureCounter(cname)
 
-		num, unit := mapRate(r.Max, r.Interval)
-		ttl := b.cfg.Flood.Throttle.SetTTL
+		num, unit := mapRate(r.Packets, r.WindowSec)
+		ttl := b.cfg.Throttle.SetTTL
 
-		switch strings.ToLower(r.Proto) {
+		switch proto {
 		case "tcp":
 			// IPv4
 			expr4 := fmt.Sprintf(
@@ -156,7 +145,7 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 					"add @th_pf_tcp_v4 { ip saddr timeout %ds } "+
 					"add @throttled_v4 { ip saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;tcp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Packets, ttl, ttl, cname, r.Port, r.WindowSec, r.Packets,
 			)
 			if err := b.nftExpr(expr4); err != nil {
 				return fmt.Errorf("portflood v4 tcp failed: %w", err)
@@ -169,7 +158,7 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 					"add @th_pf_tcp_v6 { ip6 saddr timeout %ds } "+
 					"add @throttled_v6 { ip6 saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;tcp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Packets, ttl, ttl, cname, r.Port, r.WindowSec, r.Packets,
 			)
 			if err := b.nftExpr(expr6); err != nil {
 				return fmt.Errorf("portflood v6 tcp failed: %w", err)
@@ -183,7 +172,7 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 					"add @th_pf_udp_v4 { ip saddr timeout %ds } "+
 					"add @throttled_v4 { ip saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;udp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Packets, ttl, ttl, cname, r.Port, r.WindowSec, r.Packets,
 			)
 			if err := b.nftExpr(expr4); err != nil {
 				return fmt.Errorf("portflood v4 udp failed: %w", err)
@@ -196,7 +185,7 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 					"add @th_pf_udp_v6 { ip6 saddr timeout %ds } "+
 					"add @throttled_v6 { ip6 saddr timeout %ds } "+
 					"counter name %s drop comment \"portflood %d;udp;%d;%d\";",
-				r.Port, r.Port, num, unit, r.Max, ttl, ttl, cname, r.Port, r.Interval, r.Max,
+				r.Port, r.Port, num, unit, r.Packets, ttl, ttl, cname, r.Port, r.WindowSec, r.Packets,
 			)
 			if err := b.nftExpr(expr6); err != nil {
 				return fmt.Errorf("portflood v6 udp failed: %w", err)
@@ -208,6 +197,8 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 	}
 	return nil
 }
+
+
 
 // -----------------------------------------------------------------------------
 // Debug/telemetry
@@ -390,10 +381,9 @@ if len(ips) > 0 {
 	v6 := dump("throttled_v6")
 
 
-if b.cfg.Flood.Throttle.Enabled {
-    b.autoBlockEval(v4, v6, b.cfg.Flood.Throttle)
+if b.cfg.Throttle.Enabled {
+    b.autoBlockEval(v4, v6, b.cfg.Throttle)
 }
-
 
 }
 
@@ -430,7 +420,7 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 
 func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	ttl := b.cfg.Flood.Throttle.SetTTL
+	ttl := b.cfg.Throttle.SetTTL
 
 	switch mode {
 	case "all":
@@ -588,10 +578,6 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 
 
 
-// GetFloodConfig returns the current flood configuration.
-func (b *Backend) GetFloodConfig() cfgpkg.FloodConfig {
-    return b.cfg.Flood
-}
 
 
 
@@ -757,7 +743,7 @@ func (b *Backend) LoadPortScanner() {
 	if b.cfg == nil {
 		return
 	}
-	ps := b.cfg.Flood.Portscan
+	ps := b.cfg.Portscan
 	if !ps.Enabled || ps.Interval <= 0 || ps.Limit <= 0 {
 		return
 	}

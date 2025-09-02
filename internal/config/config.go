@@ -2,404 +2,446 @@ package config
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 )
 
-type PortRange struct{ From, To int }
-type PortsConfig struct {
-	TCPIn  []PortRange
-	TCPOut []PortRange
-	UDPIn  []PortRange
-	UDPOut []PortRange
-
-	Flood  FloodConfig
-
-	APIURL    string
-	AuthToken string
-	NFTInputPriority int
-	Logging LoggingConfig
-
+// Config is flat-by-category: one struct per logical area.
+type Config struct {
+	API        APIConfig
+	Logging    LoggingConfig
+	NFT        NFTConfig
+	Ports      PortsConfig
+	Connlimit  ConnlimitConfig
+	PortFlood  PortFloodConfig
+	PacketRate PacketRateConfig
+	Throttle   ThrottleConfig
+	Portscan   PortscanConfig
 }
 
-// ConnlimitRule = "port;limit"
+// --- Categories ---
+
+type APIConfig struct {
+	URL       string
+	AuthToken string
+}
+
+type LoggingConfig struct {
+	Stdout bool   // true = log to stdout (LOG_STDOUT)
+	File   string // path to logfile, "" = disabled (LOG_FILE)
+}
+
+type NFTConfig struct {
+	InputPriority int // clamped -300..+300
+}
+
+type PortsConfig struct {
+	TCPIn, TCPOut []PortRange
+	UDPIn, UDPOut []PortRange
+}
+
+type ConnlimitConfig struct {
+	Rules []ConnlimitRule
+}
+
+type PortFloodConfig struct {
+	Rules []PortFloodRule
+}
+
+type PacketRateConfig struct {
+	Rate  int    // packets per second per IP (0 = disabled)
+	Burst int    // burst size in packets
+	Mode  string // "syn" | "all"
+}
+
+type ThrottleConfig struct {
+	Enabled    bool
+	WindowSec  int
+	Hits       int
+	Mode       string   // "permanent" | "ttl"
+	TTLSeconds int
+	Sources    []string // e.g. ["syn","portflood","pps"]
+	SetTTL     int      // seconds for nft set timeout (tracking)
+}
+
+type PortscanConfig struct {
+	Enabled    bool
+	Interval   int    // seconds between scans/rotations; 0 disables if Enabled not set explicitly
+	Mode       string // "temporary" | "permanent" | "alert"
+	TTLSeconds int
+	Limit      int    // distinct ports threshold
+	Diversity  int    // >=1 persistent port presence
+	TrackTCP   bool
+	TrackUDP   bool
+	OnlyPorts  []PortRange // optional filters (ranges)
+	Ports      []int       // optional focus ports (exact)
+}
+
+// --- Common leaf types ---
+
+type PortRange struct{ From, To int }
+
 type ConnlimitRule struct {
+	Proto string // "tcp" | "udp"
 	Port  int
-	Proto string
-	Limit int
+	Limit int // concurrent conns per source IP
 }
 
 type PortFloodRule struct {
-	Port     int
-	Proto    string
-	Interval int // seconds
-	Max      int // max new conns per interval
+	Proto     string // "tcp" | "udp"
+	Port      int
+	WindowSec int // window size in seconds
+	Packets   int // max packets in window
 }
 
-type FloodConfig struct {
-	Connlimit []ConnlimitRule
-	PortFlood []PortFloodRule
-	// NEW: per-IP packet rate limiting (kernel-only)
-	PktRate  int    // packets per second per source IP (0=disabled)
-	PktBurst int    // burst allowance in packets (<=0 -> default 2*PktRate)
-	PktMode  string // "syn" or "all" (default: "syn")
-
-	Throttle   ThrottleConfig
-	Portscan PortscanConfig
-
+// SetDefaults populates sane defaults where zero values are ambiguous.
+func (c *Config) SetDefaults() {
+	// NFT
+	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
+	// PacketRate
+	if c.PacketRate.Mode == "" { c.PacketRate.Mode = "syn" }
+	if c.PacketRate.Burst < 0 { c.PacketRate.Burst = 0 }
+	if c.PacketRate.Rate < 0 { c.PacketRate.Rate = 0 }
+	// Throttle
+	if c.Throttle.WindowSec == 0 { c.Throttle.WindowSec = 120 }
+	if c.Throttle.Hits == 0 { c.Throttle.Hits = 3 }
+	if c.Throttle.Mode == "" { c.Throttle.Mode = "permanent" }
+	if c.Throttle.Mode != "permanent" && c.Throttle.Mode != "ttl" { c.Throttle.Mode = "permanent" }
+	if c.Throttle.TTLSeconds == 0 { c.Throttle.TTLSeconds = 24 * 3600 }
+	if c.Throttle.SetTTL == 0 { c.Throttle.SetTTL = 60 }
+	// Portscan
+	if c.Portscan.Interval == 0 { c.Portscan.Interval = 60 }
+	if c.Portscan.Mode == "" { c.Portscan.Mode = "ttl" }
+	if c.Portscan.TTLSeconds == 0 { c.Portscan.TTLSeconds = 3600 }
+	if c.Portscan.Limit == 0 { c.Portscan.Limit = 10 }
+	if c.Portscan.Diversity == 0 { c.Portscan.Diversity = 1 }
+	// If PS_ENABLED not set explicitly, infer from interval>0
+	if !c.Portscan.Enabled && c.Portscan.Interval > 0 { c.Portscan.Enabled = true }
 }
 
-
-type LoggingConfig struct {
-    Stdout bool
-    File   string
-}
-
-// PortscanConfig ρυθμίσεις τύπου CSF για Port Scan Tracking
-type PortscanConfig struct {
-	Enabled    bool         // ενεργό αν Interval > 0
-	Interval   int          // PS_INTERVAL (sec), 0 = disabled
-	Limit      int          // PS_LIMIT (distinct ports threshold)
-	Diversity  int          // PS_DIVERSITY (ελάχιστος #διαφορετικών ports)
-	TrackTCP   bool         // PS_TRACK_TCP (default: true)
-	TrackUDP   bool         // PS_TRACK_UDP (default: false)
-	Mode       string       // "permanent" | "ttl"  (CSF: PS_PERMANENT 1/0)
-	TTLSeconds int          // αν Mode == "ttl": PS_BLOCK_TIME / PS_TTL
-	Ports      []PortRange  // προαιρετικός περιορισμός σε ranges (PS_PORTS)
-}
-
-
-
-type ThrottleConfig struct {
-    Enabled     bool
-    WindowSec   int
-    Hits        int
-    Mode        string   // "permanent" | "ttl"
-    TTLSeconds  int
-    Sources     []string  // e.g. ["syn","portflood","pps"]
-    SetTTL      int       // seconds (th_* set element timeout)
-}
-
-// default: "0:65535" = όλα
-func defaultAny() []PortRange { return []PortRange{{0, 65535}} }
-
-func ParseCFMConf(r io.Reader) (*PortsConfig, error) {
-	cfg := &PortsConfig{
-		TCPIn:  defaultAny(),
-		TCPOut: defaultAny(),
-		UDPIn:  defaultAny(),
-		UDPOut: defaultAny(),
-
+// Validate clamps, normalizes and ensures cross-field coherence.
+func (c *Config) Validate() error {
+	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
+	if c.PacketRate.Mode != "syn" && c.PacketRate.Mode != "all" {
+		c.PacketRate.Mode = "syn"
 	}
-
-
-cfg.Flood.Portscan = PortscanConfig{
-    Interval:   60,
-    Limit:      10,
-    Diversity:  1,
-    TrackTCP:   true,
-    TrackUDP:   false,
-    Mode:       "ttl",    // "ttl" | "permanent"
-    TTLSeconds: 3600,
-    Enabled:    false,    // θα γίνει true αν PS_INTERVAL > 0
-}
-
-
-	sc := bufio.NewScanner(r)
-	ln := 0
-	for sc.Scan() {
-		ln++
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") { continue }
-		// μορφή: KEY = "val"  ή  KEY = val
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 { continue }
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-//		val = strings.Trim(val, `"`) // βγάλε προαιρετικά quotes
-// κόψε inline σχόλια (# …), μετά whitespace και περιμετρικά quotes
-val = strings.TrimSpace(val)
-if i := strings.Index(val, "#"); i != -1 {
-    val = strings.TrimSpace(val[:i])
-}
-val = strings.Trim(val, `"`)
-
-
-
-        switch strings.ToUpper(key) {
-
-
-case "NFT_INPUT_PRIORITY", "HOOK_PRIORITY":
-    if n, err := strconv.Atoi(val); err == nil { // <-- val, όχι v
-        if n < -300 { n = -300 }
-        if n >  300 { n =  300 }
-        cfg.NFTInputPriority = n
-    }
-
-        case "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT":
-                prs, err := parsePortsList(val)
-                if err != nil { return nil, fmt.Errorf("line %d: %w", ln, err) }
-                switch strings.ToUpper(key) {
-                case "TCP_IN":
-                        cfg.TCPIn = prs
-                case "TCP_OUT":
-                        cfg.TCPOut = prs
-                case "UDP_IN":
-                        cfg.UDPIn = prs
-                case "UDP_OUT":
-                        cfg.UDPOut = prs
-                }
-
-case "CONNLIMIT":
-    cfg.Flood.Connlimit = append(cfg.Flood.Connlimit, parseConnlimit(val)...)
-case "PORTFLOOD":
-    cfg.Flood.PortFlood = append(cfg.Flood.PortFlood, parsePortFlood(val)...)
-
-
-
-case "PKT_RATE":
-    if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-        cfg.Flood.PktRate = n
-    }
-case "PKT_BURST":
-    if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-        cfg.Flood.PktBurst = n
-    }
-case "PKT_MODE":
-    v := strings.ToLower(strings.TrimSpace(val))
-    if v != "all" { v = "syn" }
-    cfg.Flood.PktMode = v
-
-
-
-
-
-// --- Port Scan Tracking (CSF-like) ---
-case "PS_INTERVAL":
-    if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-        cfg.Flood.Portscan.Interval = n
-        cfg.Flood.Portscan.Enabled = n > 0
-    }
-
-case "PS_LIMIT":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Portscan.Limit = n
-    }
-
-case "PS_DIVERSITY":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Portscan.Diversity = n
-    }
-
-case "PS_TRACK_TCP":
-    v := strings.ToLower(val)
-    cfg.Flood.Portscan.TrackTCP = (v == "1" || v == "true" || v == "yes")
-
-case "PS_TRACK_UDP":
-    v := strings.ToLower(val)
-    cfg.Flood.Portscan.TrackUDP = (v == "1" || v == "true" || v == "yes")
-
-case "PS_PERMANENT":
-    // CSF-συμβατότητα: 1=permanent, 0=temporary (ttl)
-    v := strings.ToLower(val)
-    if v == "1" || v == "true" || v == "yes" {
-        cfg.Flood.Portscan.Mode = "permanent"
-    } else {
-        cfg.Flood.Portscan.Mode = "ttl"
-    }
-
-case "PS_BLOCK_TIME":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Portscan.TTLSeconds = n
-    }
-
-
-case "PS_MODE":
-    v := strings.ToLower(val)
-    switch v {
-    case "permanent":
-        cfg.Flood.Portscan.Mode = "permanent"
-    case "ttl", "temporary":
-        cfg.Flood.Portscan.Mode = "ttl"
-    case "alert", "log", "test":
-        cfg.Flood.Portscan.Mode = "alert"
-    default:
-        cfg.Flood.Portscan.Mode = "alert"
-    }
-
-
-
-case "PS_TTL":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Portscan.TTLSeconds = n
-    }
-
-case "PS_PORTS":
-    if prs, err := parsePSPortsCSV(val); err != nil {
-        return nil, fmt.Errorf("line %d: %v", ln, err)
-    } else {
-        cfg.Flood.Portscan.Ports = prs
-    }
-
-
-
-
-case "THROTTLE_ENABLED":
-    cfg.Flood.Throttle.Enabled = (val == "1" || strings.ToLower(val) == "true")
-case "THROTTLE_WINDOW":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Throttle.WindowSec = n
-    }
-case "THROTTLE_HITS":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Throttle.Hits = n
-    }
-case "THROTTLE_MODE":
-    v := strings.ToLower(val)
-    if v != "ttl" { v = "permanent" }
-    cfg.Flood.Throttle.Mode = v
-case "THROTTLE_TTL":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Throttle.TTLSeconds = n
-    }
-case "THROTTLE_SOURCES":
-    cfg.Flood.Throttle.Sources = strings.Split(val, ",")
-case "THROTTLE_SET_TTL":
-    if n, err := strconv.Atoi(val); err == nil && n > 0 {
-        cfg.Flood.Throttle.SetTTL = n
-    }
-
-
-case "API_URL":
-    cfg.APIURL = val
-case "AUTH_TOKEN", "TOKEN":
-    cfg.AuthToken = val
-
-
-
-case "LOG_STDOUT":
-    cfg.Logging.Stdout = (val == "1" || strings.ToLower(val) == "true")
-case "LOG_FILE":
-    cfg.Logging.File = val
-
-        default:
-                // αγνόησέ το (future keys)
-        }
-
-
-
-
+	if c.Throttle.Hits < 0 || c.Throttle.WindowSec < 0 || c.Throttle.TTLSeconds < 0 || c.Throttle.SetTTL < 0 {
+		return errors.New("negative values not allowed in Throttle config")
 	}
-	return cfg, sc.Err()
-}
-
-
-
-
-
-func parsePSPortsCSV(val string) ([]PortRange, error) {
-    // Αγνόησε special tokens του CSF
-    var only []string
-    for _, tok := range strings.Split(val, ",") {
-        t := strings.TrimSpace(tok)
-        if t == "" { continue }
-        switch strings.ToUpper(t) {
-        case "ICMP", "OPEN", "INVALID", "BRD":
-            continue
-        default:
-            only = append(only, t)
-        }
-    }
-    if len(only) == 0 {
-        return []PortRange{}, nil
-    }
-    return parsePortsList(strings.Join(only, ","))
-}
-
-
-
-func parsePortsList(s string) ([]PortRange, error) {
-	if strings.TrimSpace(s) == "" {
-		return []PortRange{}, nil
+	if c.Portscan.Interval < 0 || c.Portscan.TTLSeconds < 0 || c.Portscan.Limit < 0 || c.Portscan.Diversity < 0 {
+		return errors.New("negative values not allowed in Portscan config")
 	}
-	var out []PortRange
-	for _, tok := range strings.Split(s, ",") {
-		tok = strings.TrimSpace(tok)
-		if tok == "" { continue }
-		// δέξου "80", "0:65535", "7770:7800"
-		var from, to int
-		if strings.Contains(tok, ":") || strings.Contains(tok, "-") {
-			sep := ":"
-			if strings.Contains(tok, "-") { sep = "-" }
-			parts := strings.SplitN(tok, sep, 2)
-			if len(parts) != 2 { return nil, fmt.Errorf("bad range %q", tok) }
-			f, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-			t, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err1 != nil || err2 != nil || f < 0 || t < 0 || f > 65535 || t > 65535 || f > t {
-				return nil, fmt.Errorf("bad range %q", tok)
-			}
-			from, to = f, t
-		} else {
-			// single port
-			p, err := strconv.Atoi(tok)
-			if err != nil || p < 0 || p > 65535 { return nil, fmt.Errorf("bad port %q", tok) }
-			from, to = p, p
+	// Normalize mode
+	if c.Portscan.Mode != "temporary" && c.Portscan.Mode != "permanent" && c.Portscan.Mode != "alert" {
+		c.Portscan.Mode = "ttl" // backwards-compat alias; will be interpreted by code that treats ttl/permanent
+	}
+	return nil
+}
+
+// ParseCFMConf parses a flat key=value configuration from r into Config.
+// Lines starting with '#' or ';' or '//' are treated as comments.
+func ParseCFMConf(r io.Reader) (*Config, error) {
+	s := bufio.NewScanner(r)
+	cfg := &Config{}
+	lineNo := 0
+	for s.Scan() {
+		lineNo++
+		line := strings.TrimSpace(s.Text())
+		if line == "" || isComment(line) {
+			continue
 		}
-		out = append(out, PortRange{From: from, To: to})
+		k, v, ok := splitKV(line)
+		if !ok {
+			return nil, fmt.Errorf("config: invalid line %d: %q", lineNo, line)
+		}
+		key := strings.ToUpper(strings.TrimSpace(k))
+		val := strings.TrimSpace(v)
+		val = trimQuotes(val)
+
+		switch key {
+		// API
+		case "API_URL":
+			cfg.API.URL = val
+		case "AUTH_TOKEN", "TOKEN":
+			cfg.API.AuthToken = val
+
+		// Logging
+		case "LOG_STDOUT":
+			cfg.Logging.Stdout = parseBool(val)
+		case "LOG_FILE":
+			cfg.Logging.File = val
+
+		// NFT
+		case "NFT_INPUT_PRIORITY":
+			cfg.NFT.InputPriority = clamp(parseInt(val), -300, 300)
+
+		// Ports
+		case "TCP_IN":
+			cfg.Ports.TCPIn = parsePorts(val)
+		case "TCP_OUT":
+			cfg.Ports.TCPOut = parsePorts(val)
+		case "UDP_IN":
+			cfg.Ports.UDPIn = parsePorts(val)
+		case "UDP_OUT":
+			cfg.Ports.UDPOut = parsePorts(val)
+
+		// Connlimit & PortFlood
+		case "CONNLIMIT":
+			cfg.Connlimit.Rules = parseConnlimit(val)
+		case "PORTFLOOD":
+			cfg.PortFlood.Rules = parsePortFlood(val)
+
+		// PacketRate
+		case "PKT_RATE":
+			cfg.PacketRate.Rate = parseInt(val)
+		case "PKT_BURST":
+			cfg.PacketRate.Burst = parseInt(val)
+		case "PKT_MODE":
+			cfg.PacketRate.Mode = val
+
+		// Throttle
+		case "THROTTLE_ENABLED":
+			cfg.Throttle.Enabled = parseBool(val)
+		case "THROTTLE_WINDOW":
+			cfg.Throttle.WindowSec = parseInt(val)
+		case "THROTTLE_HITS":
+			cfg.Throttle.Hits = parseInt(val)
+		case "THROTTLE_MODE":
+			cfg.Throttle.Mode = val
+		case "THROTTLE_TTL":
+			cfg.Throttle.TTLSeconds = parseInt(val)
+		case "THROTTLE_SOURCES":
+			cfg.Throttle.Sources = splitCSV(val)
+		case "THROTTLE_SET_TTL":
+			cfg.Throttle.SetTTL = parseInt(val)
+
+		// Portscan
+		case "PS_ENABLED":
+			cfg.Portscan.Enabled = parseBool(val)
+		case "PS_INTERVAL":
+			cfg.Portscan.Interval = parseInt(val)
+		case "PS_MODE":
+			cfg.Portscan.Mode = val
+		case "PS_TTL":
+			cfg.Portscan.TTLSeconds = parseInt(val)
+		case "PS_LIMIT":
+			cfg.Portscan.Limit = parseInt(val)
+		case "PS_DIVERSITY":
+			cfg.Portscan.Diversity = parseInt(val)
+		case "PS_TRACK_TCP":
+			cfg.Portscan.TrackTCP = parseBool(val)
+		case "PS_TRACK_UDP":
+			cfg.Portscan.TrackUDP = parseBool(val)
+		case "PS_ONLY_PORTS":
+			cfg.Portscan.OnlyPorts = parsePorts(val)
+		case "PS_PORTS":
+			cfg.Portscan.Ports = parseIntCSV(val)
+
+		default:
+			// Unknown key: ignore (forward-compat) or return error if you prefer
+			// fmt.Printf("config: warning: unknown key %q at line %d", key, lineNo)
+		}
 	}
-	return out, nil
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
+// --- Helpers (parsing & small utils) ---
 
-//connlimit helpers
+func isComment(line string) bool {
+	if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+		return true
+	}
+	// allow leading whitespace before //
+	trim := strings.TrimSpace(line)
+	return strings.HasPrefix(trim, "//")
+}
 
-func parseConnlimit(s string) []ConnlimitRule {
-    var out []ConnlimitRule
-    for _, tok := range strings.Split(s, ",") {
-        tok = strings.TrimSpace(tok)
-        if tok == "" { continue }
-        parts := strings.Split(tok, ";")
-        if len(parts) != 2 { continue }
+func splitKV(line string) (k, v string, ok bool) {
+	// Accept KEY=VALUE or KEY: VALUE
+	if strings.Contains(line, "=") {
+		parts := strings.SplitN(line, "=", 2)
+		return parts[0], parts[1], true
+	}
+	if strings.Contains(line, ":") {
+		parts := strings.SplitN(line, ":", 2)
+		return parts[0], parts[1], true
+	}
+	return "", "", false
+}
 
-        a, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-        b, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+func trimQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
 
-        // Προεπιλογή: "port;limit"
-        port, limit := a, b
+func parseBool(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return false
+	}
+}
 
-        // Προαιρετική ανοχή στην παλιά μορφή "limit;port":
-        // Αν φαίνεται ανάποδα (π.χ. πρώτο >65535 ή δεύτερο εντός 0..65535 με νόημα port),
-        // γύρνα τα.
-        if port < 0 || port > 65535 {
-            port, limit = b, a
+func parseInt(s string) int {
+	i, _ := strconv.Atoi(strings.TrimSpace(s))
+	return i
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parseIntCSV parses comma-separated integers, ignoring blanks.
+func parseIntCSV(s string) []int {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if v, err := strconv.Atoi(p); err == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// parsePorts understands formats like:
+//   "22"            -> 22-22
+//   "80-90" or "80:90" -> 80-90
+//   "80;tcp, 53;udp" -> ignored here (proto handled elsewhere) — this function only parses numeric ranges
+// If the value is a composite list like "22,80-90", it returns both entries.
+// replace parsePorts with a 0..65535-friendly version
+func parsePorts(s string) []PortRange {
+    clamp16 := func(x int) int {
+        if x < 0 { return 0 }
+        if x > 65535 { return 65535 }
+        return x
+    }
+    var out []PortRange
+    for _, token := range strings.Split(s, ",") {
+        token = strings.TrimSpace(token)
+        if token == "" { continue }
+        if i := strings.IndexByte(token, ';'); i >= 0 { token = token[:i] } // drop proto part
+
+        sep := "-"
+        if strings.Contains(token, ":") && !strings.Contains(token, "-") { sep = ":" }
+
+        if strings.Contains(token, sep) {
+            ab := strings.SplitN(token, sep, 2)
+            if len(ab) == 2 {
+                a := clamp16(parseInt(strings.TrimSpace(ab[0])))
+                b := clamp16(parseInt(strings.TrimSpace(ab[1])))
+                // now allow 0..65535
+                if a > b { a, b = b, a }
+                out = append(out, PortRange{From: a, To: b})
+            }
+        } else {
+            p := clamp16(parseInt(token))
+            out = append(out, PortRange{From: p, To: p})
         }
-        // Ελάχιστος έλεγχος ορίων
-        if port < 0 || port > 65535 || limit < 1 {
-            continue
-        }
-
-        out = append(out, ConnlimitRule{Port: port, Proto: "tcp", Limit: limit})
     }
     return out
 }
 
 
 
-
-func parsePortFlood(s string) []PortFloodRule {
-	var out []PortFloodRule
-	for _, tok := range strings.Split(s, ",") {
-		parts := strings.Split(tok, ";")
-		if len(parts) != 4 { continue }
-		port, _ := strconv.Atoi(parts[0])
-		proto := parts[1]
-		interval, _ := strconv.Atoi(parts[2])
-		limit, _ := strconv.Atoi(parts[3])
-		out = append(out, PortFloodRule{Port: port, Proto: proto, Interval: interval, Max: limit})
+// parseConnlimit parses rules like: "80;100" (legacy TCP-only) or "80;tcp;60"
+func parseConnlimit(s string) []ConnlimitRule {
+	var out []ConnlimitRule
+	for _, token := range strings.Split(s, ",") {
+		t := strings.TrimSpace(token)
+		if t == "" { continue }
+		fields := strings.Split(t, ";")
+		// Support both: port;limit  (TCP-only, legacy)  and port;proto;limit
+		if len(fields) == 2 {
+			port := parseInt(fields[0])
+			limit := parseInt(fields[1])
+			if port > 0 && limit > 0 {
+				out = append(out, ConnlimitRule{Proto: "tcp", Port: port, Limit: limit})
+			}
+			continue
+		}
+		if len(fields) >= 3 {
+			port := parseInt(fields[0])
+			proto := strings.ToLower(strings.TrimSpace(fields[1]))
+			limit := parseInt(fields[2])
+			if (proto == "tcp" || proto == "udp") && port > 0 && limit > 0 {
+				out = append(out, ConnlimitRule{Proto: proto, Port: port, Limit: limit})
+			}
+		}
 	}
 	return out
 }
 
-//for debugging//
+// parsePortFlood parses rules like: "80;tcp;60;200" (port;proto;window;packets)
+func parsePortFlood(s string) []PortFloodRule {
+	var out []PortFloodRule
+	for _, token := range strings.Split(s, ",") {
+		t := strings.TrimSpace(token)
+		if t == "" {
+			continue
+		}
+		fields := strings.Split(t, ";")
+		if len(fields) < 4 {
+			// expect port;proto;window;packets
+			continue
+		}
+		port := parseInt(fields[0])
+		proto := strings.ToLower(strings.TrimSpace(fields[1]))
+		window := parseInt(fields[2])
+		pkts := parseInt(fields[3])
+		if port <= 0 || window <= 0 || pkts <= 0 {
+			continue
+		}
+		if proto != "tcp" && proto != "udp" {
+			continue
+		}
+		out = append(out, PortFloodRule{Proto: proto, Port: port, WindowSec: window, Packets: pkts})
+	}
+	return out
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}

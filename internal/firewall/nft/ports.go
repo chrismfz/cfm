@@ -99,12 +99,16 @@ func (b *Backend) replacePortSet(name string, prs []config.PortRange) error {
 }
 
 // Εφαρμογή πολιτικής ports (μπαίνουν ΜΕΤΑ τα base allow/block & jump flood)
+// Εφαρμογή πολιτικής ports (μπαίνουν ΜΕΤΑ τα base allow/block & jump flood)
 func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
-	b.cfg = cfg
+	// ΣΚΟΠΙΜΑ δεν κάνουμε b.cfg = cfg, γιατί εδώ παίρνουμε μόνο Ports ranges.
+	// Το full b.cfg (*config.Config) ορίζεται αλλού (daemon / ApplyFloodRules).
 
 	// chains: input υπάρχει ήδη. Θέλουμε και output.
 	if !b.chainExists("output") {
-		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s output { type filter hook output priority 0; policy accept; }`, family, tableName)); err != nil {
+		if err := b.nftCmd(fmt.Sprintf(
+			`add chain %s %s output { type filter hook output priority 0; policy accept; }`,
+			family, tableName)); err != nil {
 			return err
 		}
 	}
@@ -115,8 +119,8 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
 	}
 
 	// load set contents
-	if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
-	if err := b.replacePortSet(setUDPIn,  cfg.UDPIn);  err != nil { return err }
+	if err := b.replacePortSet(setTCPIn, cfg.TCPIn); err != nil { return err }
+	if err := b.replacePortSet(setUDPIn, cfg.UDPIn); err != nil { return err }
 	if err := b.replacePortSet(setTCPOut, cfg.TCPOut); err != nil { return err }
 	if err := b.replacePortSet(setUDPOut, cfg.UDPOut); err != nil { return err }
 
@@ -133,29 +137,31 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
 	if err := addRule("input", `udp dport @`+setUDPIn+` accept`); err != nil { return err }
 
 	// 2) Port-scan tracking: γράψε τα ζεύγη (srcIP . dport) για Ο,ΤΙ δεν είναι στα allowed sets
-	if cfg.Flood.Portscan.Enabled {
+	//    -> από το νέο schema τα flags είναι στο b.cfg.Portscan
+	if b.cfg != nil && b.cfg.Portscan.Enabled {
+		ps := b.cfg.Portscan
 		b.ensurePortscanSets()
 
 		// TCP (IPv4 & IPv6)
-		if cfg.Flood.Portscan.TrackTCP {
+		if ps.TrackTCP {
 			// IPv4
 			if err := addRule("input",
 				fmt.Sprintf(`tcp dport != @%s add @%s { ip saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV4, cfg.Flood.Portscan.Interval)); err != nil { return err }
-			// IPv6 (nft συχνά δείχνει ip6 nexthdr tcp)
+					setTCPIn, psPairsV4, ps.Interval)); err != nil { return err }
+			// IPv6
 			if err := addRule("input",
 				fmt.Sprintf(`ip6 nexthdr tcp tcp dport != @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV6, cfg.Flood.Portscan.Interval)); err != nil { return err }
+					setTCPIn, psPairsV6, ps.Interval)); err != nil { return err }
 		}
 
 		// UDP (IPv4 & IPv6)
-		if cfg.Flood.Portscan.TrackUDP {
+		if ps.TrackUDP {
 			if err := addRule("input",
 				fmt.Sprintf(`udp dport != @%s add @%s { ip saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV4, cfg.Flood.Portscan.Interval)); err != nil { return err }
+					setUDPIn, psPairsUDPV4, ps.Interval)); err != nil { return err }
 			if err := addRule("input",
 				fmt.Sprintf(`udp dport != @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV6, cfg.Flood.Portscan.Interval)); err != nil { return err }
+					setUDPIn, psPairsUDPV6, ps.Interval)); err != nil { return err }
 		}
 	}
 

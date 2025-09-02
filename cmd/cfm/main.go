@@ -391,6 +391,12 @@ func runDaemon(args []string) {
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
 
+// --- DynDNS manager ---
+ddm := NewDynDNSManager(be, cfgDir)
+// αν υπάρχει αρχείο cfm.dyndns, φόρτωσέ το και κάνε άμεσα resolve/apply
+_ = ddm.FileChanged()
+_ = ddm.LoadOnce(context.Background())
+
 if nb, ok := be.(*nft.Backend); ok {
     nb.EnableEnrichment(cfgDir, "/etc/cfm", "./configs")
     nb.SetConfigDir(cfgDir)
@@ -398,14 +404,11 @@ if nb, ok := be.(*nft.Backend); ok {
 
 	// --- watchers setup ---
 	var allowW, denyW, blW, confW *fileWatcher
-	var dynW *fileWatcher
-	dyn := map[string]*dynRecord{}
 	if cfgDir != "" {
 		allowW = newFileWatcher(filepath.Join(cfgDir, "cfm.allow"))
 		denyW = newFileWatcher(filepath.Join(cfgDir, "cfm.deny"))
 		blW = newFileWatcher(filepath.Join(cfgDir, "cfm.blocklists"))
 		confW = newFileWatcher(filepath.Join(cfgDir, "cfm.conf"))
-		dynW = newFileWatcher(filepath.Join(cfgDir, "cfm.dyndns"))
 	}
 
 	// Track seen allow/block entries to avoid pointless TTL refreshes
@@ -522,30 +525,36 @@ if nb, ok := be.(*nft.Backend); ok {
    var (
         ag           *agentpkg.Runner
         agStarted    bool
-        lastCfg      *cfgpkg.PortsConfig // <- θα το ενημερώνουμε στο applyPorts()
+	lastCfg      *cfgpkg.Config 
         lastAgentKey string              // "APIURL|TOKEN"
     )
 
-    startOrUpdateAgent := func(cfg *cfgpkg.PortsConfig) {
-        if cfg == nil || cfg.APIURL == "" || cfg.AuthToken == "" { return }
-        key := cfg.APIURL + "|" + cfg.AuthToken
-        if key == lastAgentKey && agStarted { return } // no-op
 
-        ac := agentpkg.Config{
-            BaseURL:  cfg.APIURL,
-            Token:    cfg.AuthToken,
-            Version:  Version,
-            Interval: 30 * time.Second,
-        }
-        if ag == nil {
-            ag = agentpkg.New(ac)
-            ag.Start()
-            agStarted = true
-        } else {
-            ag.Update(ac)
-        }
-        lastAgentKey = key
+
+startOrUpdateAgent := func(cfg *cfgpkg.Config) {
+    if cfg == nil || cfg.API.URL == "" || cfg.API.AuthToken == "" {
+        return
     }
+    key := cfg.API.URL + "|" + cfg.API.AuthToken
+    if key == lastAgentKey && agStarted {
+        return // no-op
+    }
+
+    ac := agentpkg.Config{
+        BaseURL:  cfg.API.URL,
+        Token:    cfg.API.AuthToken,
+        Version:  Version,
+        Interval: 30 * time.Second,
+    }
+    if ag == nil {
+        ag = agentpkg.New(ac)
+        ag.Start()
+        agStarted = true
+    } else {
+        ag.Update(ac)
+    }
+    lastAgentKey = key
+}
 
     // ... εκεί που ορίζεις το applyPorts() ...
     applyPorts := func() {}
@@ -554,10 +563,10 @@ if nb, ok := be.(*nft.Backend); ok {
             if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
                 lastCfg = cfg // <-- κρατάμε το parsed cfg
                 if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                    if err := nb.ApplyPortsPolicy(cfg); err != nil {
+                    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
                         fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
                     }
-                    if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+                    if err := nb.ApplyFloodRules(cfg); err != nil {
                         fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
                     }
                 }
@@ -571,12 +580,12 @@ if nb, ok := be.(*nft.Backend); ok {
                 if err != nil { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err); return }
                 lastCfg = cfg // <-- update κάθε φορά που το conf αλλάζει
                 if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                    if err := nb.ApplyPortsPolicy(cfg); err != nil {
+                    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
                         fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
                     } else if os.Getenv("CFM_DEBUG") != "" {
                         fmt.Println("[ports] policy updated from cfm.conf")
                     }
-                    if err := nb.ApplyFloodRules(cfg.Flood); err != nil {
+                    if err := nb.ApplyFloodRules(cfg); err != nil {
                         fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
                     }
                 }
@@ -609,91 +618,17 @@ if nb, ok := be.(*nft.Backend); ok {
     if nb, ok := be.(*nft.Backend); ok {
         nb.DumpFloodCounters()
 	nb.LoadPortScanner()
-    }
 
-
-//DynDNS parse
-// reload cfm.dyndns on file change (add/remove hosts)
-if dynW != nil {
-    if b, ok := dynW.Changed(); ok {
-        want := parseDynDNS(b)
-        seen := map[string]struct{}{}
-        for _, it := range want {
-            seen[it.Host] = struct{}{}
-            if rec, ok := dyn[it.Host]; ok {
-                rec.Interval = it.Interval
-            } else {
-                dyn[it.Host] = &dynRecord{Host: it.Host, Interval: it.Interval}
-            }
-        }
-        // drop removed
-        for h := range dyn {
-            if _, ok := seen[h]; !ok {
-                delete(dyn, h)
-            }
-        }
-    }
+if ddm.FileChanged() {
+    _ = ddm.LoadOnce(context.Background())
+} else {
+    ddm.Tick(context.Background(), time.Now())
 }
 
-//debugging for connlimit portflood//
-// Flood counters dump (debug only)
-//if os.Getenv("CFM_DEBUG") != "" {
-//}
 
-
-
-// refresh dyndns by TTL/interval
-// refresh dyndns by TTL/interval
-if len(dyn) > 0 {
-    now := time.Now()
-    if nb, ok := be.(*nft.Backend); ok {
-        var allV4, allV6 []string
-        changed := false
-
-        for _, rec := range dyn { // <- Πάρε απευθείας *dynRecord από το map
-            if now.Before(rec.NextRefresh) {
-                allV4 = append(allV4, rec.LastV4...)
-                allV6 = append(allV6, rec.LastV6...)
-                continue
-            }
-
-            ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-            v4, v6, ttl, err := resolveWithTTL(ctx, rec.Host, 5*time.Minute)
-            cancel()
-
-            if err != nil {
-                rec.NextRefresh = now.Add(1 * time.Minute)
-            } else {
-                if !eqStrSet(rec.LastV4, v4) || !eqStrSet(rec.LastV6, v6) {
-                    rec.LastV4, rec.LastV6 = v4, v6
-                    changed = true
-                }
-                next := ttl
-                if rec.Interval > 0 {
-                    next = rec.Interval
-                }
-                rec.NextRefresh = now.Add(next)
-            }
-
-            allV4 = append(allV4, rec.LastV4...)
-            allV6 = append(allV6, rec.LastV6...)
-        }
-
-        if changed {
-            allV4 = dedupStrings(allV4)
-            allV6 = dedupStrings(allV6)
-            if err := nb.ReplaceSetFlushAdd("allow_dyn_v4", allV4, nil); err != nil {
-                fmt.Fprintln(os.Stderr, "dyndns apply v4 error:", err)
-            }
-            if err := nb.ReplaceSetFlushAdd("allow_dyn_v6", allV6, nil); err != nil {
-                fmt.Fprintln(os.Stderr, "dyndns apply v6 error:", err)
-            }
-            if os.Getenv("CFM_DEBUG") != "" {
-                fmt.Printf("[dyndns] updated hosts: v4=%d v6=%d\n", len(allV4), len(allV6))
-            }
-        }
     }
-}
+
+
 
 
 
@@ -744,16 +679,6 @@ if len(dyn) > 0 {
 // helpers shared by commands
 // ----------------------------------------------------------------------------
 
-func dedupStrings(in []string) []string {
-    seen := make(map[string]struct{}, len(in))
-    out := make([]string, 0, len(in))
-    for _, s := range in {
-        if _, ok := seen[s]; ok { continue }
-        seen[s] = struct{}{}
-        out = append(out, s)
-    }
-    return out
-}
 
 
 func equalSlices(a, b []string) bool {
