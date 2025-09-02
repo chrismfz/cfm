@@ -22,6 +22,7 @@ import (
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
+	"cfm/internal/logging"
 	cfgpkg "cfm/internal/config"
 	agentpkg "cfm/internal/agent"
 )
@@ -373,9 +374,10 @@ func runDaemon(args []string) {
 	cfgDir, _ := resolveConfigDir(*cfgFlag)
 	if cfgDir != "" {
 		writeConfigState(cfgDir)
-		fmt.Printf("→ using config dir: %s\n", cfgDir)
+		logging.Logf("CFM Starting")
+		logging.Logf("→ using config dir: %s\n", cfgDir)
 	} else {
-		fmt.Println("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
+		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
 
@@ -606,6 +608,7 @@ if nb, ok := be.(*nft.Backend); ok {
 
     if nb, ok := be.(*nft.Backend); ok {
         nb.DumpFloodCounters()
+	nb.LoadPortScanner()
     }
 
 

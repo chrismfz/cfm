@@ -363,34 +363,11 @@ if len(ips) > 0 {
         return ips
     }
 
-    // Με enrichment: τύπωσε ανά IP με PTR/ASN/Country/City
     for _, ip := range ips {
-        r := b.enr.Lookup(ip)
-        extra := ""
-        if r.PTR != "" { extra = r.PTR }
-        if r.ASN > 0 {
-            if extra != "" { extra += " | " }
-            if r.ASNName != "" {
-                extra += fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
-            } else {
-                extra += fmt.Sprintf("AS%d", r.ASN)
-            }
-        }
-        if r.Country != "" || r.City != "" {
-            if extra != "" { extra += " | " }
-            if r.City != "" {
-                extra += fmt.Sprintf("%s, %s", r.City, r.Country)
-            } else {
-                extra += r.Country
-            }
-        }
-        if extra != "" {
-            fmt.Printf("[throttle] %s (%s): %s  —  %s\n", set, reason, ip, extra)
-        } else {
-            fmt.Printf("[throttle] %s (%s): %s\n", set, reason, ip)
-        }
+        fmt.Printf("[throttle] %s (%s): %s%s\n", set, reason, ip, b.enrichLabel(ip))
         lastThrottleReason[ip] = reason
     }
+
 }
 
 
@@ -567,35 +544,14 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
         reason = "Auto-block" // fallback
     }
 
-    // Enrichment για log/comment
-    var extra string
-    if b.enr != nil {
-        r := b.enr.Lookup(ip)
-        if r.ASN > 0 {
-            if r.ASNName != "" {
-                extra = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
-            } else {
-                extra = fmt.Sprintf("AS%d", r.ASN)
-            }
-        }
-        if r.Country != "" || r.City != "" {
-            if extra != "" { extra += " | " }
-            if r.City != "" {
-                extra += fmt.Sprintf("%s, %s", r.City, r.Country)
-            } else {
-                extra += r.Country
-            }
-        }
-        if r.PTR != "" {
-            if extra != "" { extra += " | " }
-            extra += r.PTR
-        }
-    }
-
-    // helper για όμορφο log με/χωρίς enrichment
-    logIP := ip
-    if extra != "" {
-        logIP = fmt.Sprintf("%s  —  %s", ip, extra)
+    // Ενιαίο enrichment για όλα τα logs
+    extraLabel := b.enrichLabel(ip) // π.χ. "  —  PTR | ASxxx Name | City, Country"
+    logIP := ip + extraLabel
+    // Για σχόλιο στο cfm.deny θέλουμε χωρίς το leading "—  "
+    cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
+    cleanExtra = strings.TrimLeft(cleanExtra, "–— ") // ασφάλεια για διαφορετικά dashes
+    if cleanExtra == "" {
+        cleanExtra = ""
     }
 
     switch tc.Mode {
@@ -614,7 +570,7 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     default: // permanent
         // Σχόλιο για το cfm.deny
         comment := reason
-        if extra != "" { comment += " | " + extra }
+ if cleanExtra != "" { comment += " | " + cleanExtra }
 
         if fam == "v4" {
             fmt.Printf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s\n",
@@ -656,4 +612,316 @@ func (b *Backend) appendToDenyFile(ip, reason string) error {
     line := fmt.Sprintf("%s # autoblock: %s at %s\n", ip, reason, ts)
     _, err = f.WriteString(line)
     return err
+}
+
+
+
+
+
+// -----------------------------------------------------------------------------
+// Port-scan tracking: harvest ps_pairs_* sets and reuse autoblock
+// -----------------------------------------------------------------------------
+
+// ensurePortscanSets creates (idempotently) the dynamic sets that hold (srcIP . dport).
+// ΣΗΜ.: Τα ονόματα των sets (psPairsV4 κ.λπ.) τα έχουμε δηλώσει ήδη στο ports.go
+// και επειδή ανήκουν στο ίδιο package `nft`, είναι ορατά εδώ.
+func (b *Backend) ensurePortscanSets() {
+	_ = b.nftExpr("add set inet cfm " + psPairsV4 + "     { type ipv4_addr . inet_service; flags timeout; }")
+	_ = b.nftExpr("add set inet cfm " + psPairsV6 + "     { type ipv6_addr . inet_service; flags timeout; }")
+	_ = b.nftExpr("add set inet cfm " + psPairsUDPV4 + "  { type ipv4_addr . inet_service; flags timeout; }")
+	_ = b.nftExpr("add set inet cfm " + psPairsUDPV6 + "  { type ipv6_addr . inet_service; flags timeout; }")
+}
+
+// dumpPortscanPairs διαβάζει τα ps_pairs_* και επιστρέφει:
+//  - tcp: map[ip] -> set(distinct dports)
+//  - udp: map[ip] -> set(distinct dports)
+func (b *Backend) dumpPortscanPairs() (map[string]map[int]struct{}, map[string]map[int]struct{}) {
+	parse := func(set string) map[string]map[int]struct{} {
+		m := map[string]map[int]struct{}{}
+		if !b.setExists(set) {
+			return m
+		}
+
+		out, err := b.runCmdOutput("list set inet cfm " + set)
+		if err != nil {
+			return m
+		}
+
+		i := strings.Index(out, "elements = {")
+		if i < 0 {
+			return m
+		}
+		rest := out[i+len("elements = {"):]
+		j := strings.Index(rest, "}")
+		if j < 0 {
+			return m
+		}
+		elems := rest[:j]
+
+		for _, tok := range strings.Split(elems, ",") {
+			t := strings.TrimSpace(tok)
+			if t == "" {
+				continue
+			}
+
+			// Κόψε metadata (" timeout ...", " expires ...") χωρίς να χαθεί το " . port"
+			if k := strings.Index(t, " timeout "); k >= 0 {
+				t = t[:k]
+			}
+			if k := strings.Index(t, " expires "); k >= 0 {
+				t = t[:k]
+			}
+			t = strings.TrimSpace(t)
+
+			// Αναμένουμε μορφή: "<ip> . <port>"
+			var ip, portStr string
+			if strings.Contains(t, " . ") {
+				parts := strings.SplitN(t, " . ", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				ip = strings.TrimSpace(parts[0])
+				portStr = strings.TrimSpace(parts[1])
+			} else {
+				// Fallback: πεδίο-πεδίο "IP . PORT"
+				fields := strings.Fields(t)
+				if len(fields) >= 3 && fields[1] == "." {
+					ip = fields[0]
+					portStr = fields[2]
+				} else {
+					// Τελευταία άμυνα: χώρισε στο τελευταίο '.'
+					if idx := strings.LastIndex(t, "."); idx > 0 && idx < len(t)-1 {
+						ip = strings.TrimSpace(t[:idx])
+						portStr = strings.TrimSpace(t[idx+1:])
+					} else {
+						continue
+					}
+				}
+			}
+
+			p, err := strconv.Atoi(portStr)
+			if err != nil || p < 0 || p > 65535 {
+				continue
+			}
+
+			if _, ok := m[ip]; !ok {
+				m[ip] = map[int]struct{}{}
+			}
+			m[ip][p] = struct{}{}
+		}
+		return m
+	}
+
+	// TCP = v4 + v6 μαζί
+	tcp := map[string]map[int]struct{}{}
+	addAll := func(src map[string]map[int]struct{}, dst map[string]map[int]struct{}) {
+		for ip, ports := range src {
+			if _, ok := dst[ip]; !ok {
+				dst[ip] = map[int]struct{}{}
+			}
+			for p := range ports {
+				dst[ip][p] = struct{}{}
+			}
+		}
+	}
+	addAll(parse(psPairsV4), tcp)
+	addAll(parse(psPairsV6), tcp)
+
+	// UDP = v4 + v6 μαζί
+	udp := map[string]map[int]struct{}{}
+	addAll(parse(psPairsUDPV4), udp)
+	addAll(parse(psPairsUDPV6), udp)
+
+	return tcp, udp
+}
+
+
+
+
+
+// LoadPortScanner: καλείται σε κάθε tick.
+// - ensure base & sets
+// - αν Portscan disabled -> return
+// - harvest ps_pairs_*, μετρά distinct dports ανά IP
+// - φτιάχνει reason και καλεί autoBlockEval() με reuse του throttle tc
+func (b *Backend) LoadPortScanner() {
+	// σιγουρέψου ότι υπάρχει η βάση
+	if !b.tableExists() {
+		if err := b.EnsureBase(); err != nil {
+			return
+		}
+	}
+	b.ensurePortscanSets()
+
+	// προστασία αν δεν έχει φορτωθεί config
+	if b.cfg == nil {
+		return
+	}
+	ps := b.cfg.Flood.Portscan
+	if !ps.Enabled || ps.Interval <= 0 || ps.Limit <= 0 {
+		return
+	}
+
+	// μάζεψε τα ζεύγη
+	tcp, udp := b.dumpPortscanPairs()
+
+	// υπολόγισε counts ανά IP (ανά πρωτόκολλο) και συγχώνευσε αυτά που θες
+	counts := map[string]int{}
+	addCounts := func(m map[string]map[int]struct{}) {
+		for ip, ports := range m {
+			counts[ip] += len(ports)
+		}
+	}
+	if ps.TrackTCP {
+		addCounts(tcp)
+	}
+	if ps.TrackUDP {
+		addCounts(udp)
+	}
+
+	// ετοίμασε ThrottleConfig για reuse του autoBlockEval:
+	//  - Hits=1 (το threshold είναι ήδη PS_LIMIT)
+	//  - WindowSec=PS_INTERVAL
+	tc := cfgpkg.ThrottleConfig{
+		WindowSec:  ps.Interval,
+		Hits:       1,
+		Mode:       "ttl",
+		TTLSeconds: ps.TTLSeconds,
+	}
+	if strings.ToLower(ps.Mode) == "permanent" {
+		tc.Mode = "permanent"
+	}
+
+	var v4, v6 []string
+	for ip, n := range counts {
+		if n >= ps.Limit {
+			// Φτιάξε reason. Προαιρετικά: δείξε και μερικά ports.
+			reason := fmt.Sprintf("portscan (%d distinct ports)", n)
+
+			// Αν θέλεις top-6 ports στο reason:
+			// (δούλεψε πάνω στο tcp/udp maps — εδώ παίρνουμε απλά από όπου βρούμε)
+			var some []int
+			if ps.TrackTCP {
+				for p := range tcp[ip] {
+					some = append(some, p)
+				}
+			}
+			if ps.TrackUDP {
+				for p := range udp[ip] {
+					some = append(some, p)
+				}
+			}
+			if len(some) > 0 {
+				// μικρό sort
+				for i := 0; i < len(some); i++ {
+					for j := i + 1; j < len(some); j++ {
+						if some[j] < some[i] {
+							some[i], some[j] = some[j], some[i]
+						}
+					}
+				}
+				if len(some) > 6 {
+					some = some[:6]
+				}
+				var parts []string
+				for _, p := range some {
+					parts = append(parts, strconv.Itoa(p))
+				}
+				reason = fmt.Sprintf("%s: %s", reason, strings.Join(parts, ","))
+			}
+
+			lastThrottleReason[ip] = reason
+			if net := parseIPFam(ip); net == 4 {
+				v4 = append(v4, ip)
+			} else if net == 6 {
+				v6 = append(v6, ip)
+			}
+		}
+	}
+
+
+
+
+// ... αφού έχεις υπολογίσει τα v4, v6 και έχεις φτιάξει τα lastThrottleReason[..]
+// και έχεις γεμίσει το tc (threshold config) με limit/interval κλπ.
+
+mode := strings.ToLower(ps.Mode)
+
+// ALERT / LOG-ONLY / TEST: μόνο log, καθόλου block.
+if mode == "alert" || mode == "log" || mode == "test" {
+    for _, ip := range v4 {
+        enrich := b.enrichLabel(ip) // optional: αν έχεις τον enricher
+        reason := lastThrottleReason[ip]
+        fmt.Printf("[portscan] possible port scan v4 %s%s %s\n", ip, enrich, reason)
+    }
+    for _, ip := range v6 {
+        enrich := b.enrichLabel(ip)
+        reason := lastThrottleReason[ip]
+        fmt.Printf("[portscan] possible port scan v6 %s%s %s\n", ip, enrich, reason)
+    }
+    return // τερματίζουμε εδώ — ΔΕΝ γίνεται block
+}
+
+// TTL/PERMANENT: κάνε block
+switch mode {
+case "ttl", "temporary":
+    tc.Mode = "ttl"
+    tc.TTLSeconds = ps.TTLSeconds
+default:
+    tc.Mode = "permanent"
+}
+
+// μόνο αν υπάρχουν hits προχώρα σε block
+if len(v4) > 0 || len(v6) > 0 {
+    b.autoBlockEval(v4, v6, tc)
+}
+
+
+
+
+}
+
+
+
+// parseIPFam: μικρός helper που γυρίζει 4|6 ή 0 αν δεν είναι IP
+func parseIPFam(ip string) int {
+	if strings.Contains(ip, ":") {
+		return 6
+	}
+	if strings.Count(ip, ".") == 3 {
+		return 4
+	}
+	return 0
+}
+
+
+
+// enrichLabel επιστρέφει " — PTR | ASNNAME | City, Country" ή "" αν δεν υπάρχει enricher.
+func (b *Backend) enrichLabel(ip string) string {
+	if b.enr == nil {
+		return ""
+	}
+	r := b.enr.Lookup(ip)
+	var parts []string
+	if r.PTR != "" {
+		parts = append(parts, r.PTR)
+	}
+	if r.ASN > 0 {
+		if r.ASNName != "" {
+			parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
+		} else {
+			parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
+		}
+	}
+	if r.City != "" || r.Country != "" {
+		if r.City != "" {
+			parts = append(parts, fmt.Sprintf("%s, %s", r.City, r.Country))
+		} else {
+			parts = append(parts, r.Country)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  —  " + strings.Join(parts, " | ")
 }
