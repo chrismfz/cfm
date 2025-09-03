@@ -193,6 +193,11 @@ func (b *Backend) EnsureBase() error {
 		}
 		return nil
 	}
+
+// 0) Early stateful base  <<< ΠΡΟΣΘΗΚΗ
+if err := addRule(`ct state established,related accept`); err != nil { return err }
+if err := addRule(`ct state invalid drop`); err != nil { return err }
+
 	// 1) manual allow
 	if err := addRule(`ip saddr @allow_v4 accept`);  err != nil { return err }
 	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil { return err }

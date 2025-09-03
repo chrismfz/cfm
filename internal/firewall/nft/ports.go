@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sort"
-
+	"os/exec"
 	"cfm/internal/config"
         "cfm/internal/logging"
 
@@ -137,6 +137,24 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
         return nil
     }
 
+
+delRule := func(chain, contains string) {
+    out, err := exec.Command("nft", "-a", "list", "chain", family, tableName, chain).CombinedOutput()
+    if err != nil { return }
+    for _, ln := range strings.Split(string(out), "\n") {
+        s := strings.TrimSpace(ln)
+        if s == "" || !strings.Contains(s, contains) { continue }
+        // βρες handle στο "# handle N"
+        idx := strings.LastIndex(s, "# handle ")
+        if idx < 0 { continue }
+        h := strings.TrimSpace(s[idx+len("# handle "):])
+        if sp := strings.Fields(h); len(sp) > 0 { h = sp[0] }
+        _, _ = exec.Command("nft", "delete", "rule", family, tableName, chain, "handle", h).CombinedOutput()
+    }
+}
+
+
+
     // -------------------------
     // Port-scan tracking (πριν τα accepts ΟΤΑΝ έχεις φίλτρο υπηρεσιών)
     // -------------------------
@@ -194,11 +212,19 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
         }
     }
 
-    // -------------------------
-    // Allow lists (INPUT)
-    // -------------------------
-    if err := addRule("input", `tcp dport @`+setTCPIn+` accept`); err != nil { return err }
-    if err := addRule("input", `udp dport @`+setUDPIn+` accept`); err != nil { return err }
+
+_ = addRule("input", `ct state established,related accept`)
+_ = addRule("input", `ct state invalid drop`)
+
+
+// --- Allow lists (INPUT) ---
+// Καθάρισε παλιούς “γυμνούς” κανόνες:
+delRule("input", `tcp dport @`+setTCPIn+` accept`)
+delRule("input", `udp dport @`+setUDPIn+` accept`)
+
+// ΝΕΟΙ: μόνο για NEW
+if err := addRule("input", `ct state new tcp dport @`+setTCPIn+` accept`); err != nil { return err }
+if err := addRule("input", `ct state new udp dport @`+setUDPIn+` accept`); err != nil { return err }
 
     // -------------------------
     // Port-scan tracking (ΜΕΤΑ τα accepts όταν ΔΕΝ έχεις φίλτρο υπηρεσιών)
@@ -229,16 +255,35 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
     // -------------------------
     // Default DROPs (INPUT)
     // -------------------------
-    if err := addRule("input", `tcp dport 0-65535 drop`); err != nil { return err }
-    if err := addRule("input", `udp dport 0-65535 drop`); err != nil { return err }
+// --- Default DROPs (INPUT) ---
+// Καθάρισε παλιούς
+delRule("input", `tcp dport 0-65535 drop`)
+delRule("input", `udp dport 0-65535 drop`)
+
+// ΝΕΟΙ: NEW-only
+if err := addRule("input", `ct state new tcp dport 0-65535 drop`); err != nil { return err }
+if err := addRule("input", `ct state new udp dport 0-65535 drop`); err != nil { return err }
 
     // -------------------------
     // OUTPUT policy
     // -------------------------
-    if err := addRule("output", `tcp dport @`+setTCPOut+` accept`); err != nil { return err }
-    if err := addRule("output", `udp dport @`+setUDPOut+` accept`); err != nil { return err }
-    if err := addRule("output", `tcp dport 0-65535 drop`); err != nil { return err }
-    if err := addRule("output", `udp dport 0-65535 drop`); err != nil { return err }
+
+_ = addRule("output", `ct state established,related accept`)
+_ = addRule("output", `ct state invalid drop`)
+
+// καθάρισε παλιούς “γυμνούς” drops στο OUTPUT
+delRule("output", `tcp dport 0-65535 drop`)
+delRule("output", `udp dport 0-65535 drop`)
+
+// accept μόνο για NEW
+if err := addRule("output", `ct state new tcp dport @`+setTCPOut+` accept`); err != nil { return err }
+if err := addRule("output", `ct state new udp dport @`+setUDPOut+` accept`); err != nil { return err }
+
+// catch-all NEW drops
+if err := addRule("output", `ct state new tcp dport 0-65535 drop`); err != nil { return err }
+if err := addRule("output", `ct state new udp dport 0-65535 drop`); err != nil { return err }
+
+
 
     return nil
 }
