@@ -175,6 +175,8 @@ stage-pkgroot: build
 	@[ -f $(PKGROOT)/etc/cfm/cfm.deny ]       || cp -f $(CONFIG_DIR)/cfm.deny       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.blocklists ] || cp -f $(CONFIG_DIR)/cfm.blocklists $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.dyndns ]     || cp -f $(CONFIG_DIR)/cfm.dyndns     $(PKGROOT)/etc/cfm/
+
+
 	# systemd unit (RPM-friendly path)
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
 	@cp -f $(CONFIG_DIR)/cfm.service $(PKGROOT)/usr/lib/systemd/system/cfm.service
@@ -217,27 +219,38 @@ rpm: rpm_prep_dirs rpm_spec_version stage-rpm ## Δημιουργεί .rpm
 
 .PHONY: release
 
+# at top (or before recipe)
+GH := env -u GH_TOKEN -u GITHUB_TOKEN gh
+
 release: deb rpm
-	@echo "🔐 Checking GitHub auth..."
-	@gh auth status -h github.com >/dev/null 2>&1 || { echo "Run: gh auth login"; exit 1; }
-	@echo "🔎 Locating latest artifacts..."
-	@DEB_FILE="$$(ls -1t build/deb/cfm_*_amd64.deb 2>/dev/null | head -n1)"; \
-	 RPM_FILE="$$(ls -1t packaging/rpm/RPMS/*/cfm-*.rpm 2>/dev/null | head -n1)"; \
-	 if [ -z "$$DEB_FILE" ]; then echo "No .deb package found in build/deb"; exit 1; fi; \
-	 if [ -z "$$RPM_FILE" ]; then echo "No .rpm package found in packaging/rpm/RPMS"; exit 1; fi; \
-	 sha256sum "$$DEB_FILE" "$$RPM_FILE" > checksums.txt; \
-	 REPO="youruser/yourrepo"; \
-	 NOW_UTC="$$(date -u +'%Y-%m-%dT%H:%M:%S')"; \
-	 echo "🔐 Checking GitHub auth..."; \
-	 echo "📦 DEB=$$DEB_FILE"; echo "📦 RPM=$$RPM_FILE"; \
-	 if ! gh release view "$(TAG)" --repo "$$REPO" >/dev/null 2>&1; then \
-	   echo "🚀 Creating GitHub release $(TAG)"; \
-	   gh release create "$(TAG)" "$$DEB_FILE" "$$RPM_FILE" checksums.txt \
-	     --repo "$$REPO" --title "cfm $(TAG)" \
-	     --notes "Automated release built on $$NOW_UTC"; \
-	 else \
-	   echo "↻ Release exists — uploading assets (clobber)"; \
-	   gh release upload "$(TAG)" "$$DEB_FILE" "$$RPM_FILE" checksums.txt \
-	     --repo "$$REPO" --clobber; \
-	 fi; \
-	 echo "✅ Release $(TAG) updated."
+	@set -euo pipefail; \
+	echo "🔐 Checking GitHub auth..."; \
+	$(GH) auth status -h github.com >/dev/null || { echo "Run: gh auth login"; exit 1; }; \
+	DEB_FILE="$$(ls -1t build/deb/cfm_*_amd64.deb | head -n1)"; \
+	RPM_FILE="$$(ls -1t packaging/rpm/RPMS/*/cfm-*.rpm | head -n1)"; \
+	[ -n "$$DEB_FILE" ] || { echo "No .deb package found in build/deb"; exit 1; }; \
+	[ -n "$$RPM_FILE" ] || { echo "No .rpm package found in packaging/rpm/RPPS"; exit 1; }; \
+	echo "📦 DEB=$$DEB_FILE"; echo "📦 RPM=$$RPM_FILE"; \
+	sha256sum "$$DEB_FILE" "$$RPM_FILE" > checksums.txt; \
+	REPO="chrismfz/cfm"; \
+	# 1) create (no assets). If it exists (422), continue.
+	echo "🚀 Ensuring release $(TAG) exists..."; \
+	if ! $(GH) release view "$(TAG)" --repo "$$REPO" >/dev/null 2>&1; then \
+	  $(GH) release create "$(TAG)" \
+	    --repo "$$REPO" \
+	    --title "cfm $(TAG)" \
+	    --notes "Automated release" \
+	    --draft ; \
+	  echo "✅ Created draft release $(TAG)."; \
+	else \
+	  echo "↻ Release $(TAG) already exists."; \
+	fi; \
+	# 2) upload assets (clobber)
+	echo "⬆️  Uploading assets..."; \
+	$(GH) release upload "$(TAG)" "$$DEB_FILE" "$$RPM_FILE" checksums.txt \
+	  --repo "$$REPO" --clobber; \
+	echo "✅ Assets uploaded."; \
+	# 3) publish (optional – only if you want non-draft)
+	echo "📣 Publishing release..."; \
+	$(GH) release edit "$(TAG)" --repo "$$REPO" --draft=false ; \
+	echo "✅ Release $(TAG) published."

@@ -159,6 +159,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		}
 		key := strings.ToUpper(strings.TrimSpace(k))
 		val := strings.TrimSpace(v)
+		val = stripInlineComment(val)
 		val = trimQuotes(val)
 
 		switch key {
@@ -190,9 +191,11 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 
 		// Connlimit & PortFlood
 		case "CONNLIMIT":
-			cfg.Connlimit.Rules = parseConnlimit(val)
+			cfg.Connlimit.Rules = append(cfg.Connlimit.Rules, parseConnlimit(val)...)
+
 		case "PORTFLOOD":
-			cfg.PortFlood.Rules = parsePortFlood(val)
+			cfg.PortFlood.Rules = append(cfg.PortFlood.Rules, parsePortFlood(val)...)
+
 
 		// PacketRate
 		case "PKT_RATE":
@@ -313,7 +316,7 @@ func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
+		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
 		if p != "" {
 			out = append(out, p)
 		}
@@ -329,7 +332,7 @@ func parseIntCSV(s string) []int {
 	parts := strings.Split(s, ",")
 	out := make([]int, 0, len(parts))
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
+		p = trimQuotes(strings.TrimSpace(p))
 		if p == "" {
 			continue
 		}
@@ -444,4 +447,26 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// κόβει inline σχόλια που ξεκινούν μετά από κενό: " # ..." ή " // ..."
+// (δεν πειράζει "http://..." γιατί απαιτούμε προηγούμενο space)
+func stripInlineComment(s string) string {
+    cut := func(txt, token string) string {
+        for {
+            i := strings.Index(txt, token)
+            if i < 0 { return txt }
+            if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
+                return strings.TrimSpace(txt[:i])
+            }
+            // βρες επόμενο
+            j := strings.Index(txt[i+len(token):], token)
+            if j < 0 { return txt }
+            txt = txt[:i+len(token)+j] + txt[i+len(token)+j:]
+        }
+    }
+    // πρώτα " #", μετά " //"
+    s = cut(s, " #")
+    s = cut(s, " //")
+    return strings.TrimSpace(s)
 }

@@ -1,6 +1,6 @@
 Name:           cfm
 Version:        2025.09.03
-Release:        1.213524%{?dist}
+Release:        1.222047%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
@@ -53,6 +53,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.deny
 %config(noreplace) /etc/cfm/cfm.blocklists
 %config(noreplace) /etc/cfm/cfm.dyndns
+
 
 %post
 %systemd_post cfm.service

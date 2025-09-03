@@ -134,7 +134,7 @@ Usage:
   cfm allow <IP> [--ttl 1h]
   cfm unallow <IP>
   cfm allow-list [--json]
-  cfm daemon [--interval 30s]
+  cfm daemon [--interval 20s]
   cfm flush
   cfm which <IP> [--json]   -- search <IP>
   cfm status [--json]
@@ -367,7 +367,7 @@ func (w *fileWatcher) Changed() ([]byte, bool) {
 
 func runDaemon(args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	interval := fs.Duration("interval", 30*time.Second, "tick interval")
+	interval := fs.Duration("interval", 20*time.Second, "tick interval")
 	cfgFlag := fs.String("c", "", "config directory (contains cfm.allow / cfm.deny)")
 	_ = fs.Parse(args)
 
@@ -375,7 +375,7 @@ func runDaemon(args []string) {
 	if cfgDir != "" {
 		writeConfigState(cfgDir)
 		logging.Logf("CFM Starting")
-		logging.Logf("→ using config dir: %s\n", cfgDir)
+		logging.Logf("→ using config dir: %s", cfgDir)
 	} else {
 		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
@@ -478,7 +478,7 @@ if nb, ok := be.(*nft.Backend); ok {
 				delete(feeds, name)
 			}
 		}
-		if os.Getenv("CFM_DEBUG") != "" { fmt.Printf("[blocklists] config reloaded: %d feeds\n", len(feeds)) }
+		 logging.Logf("[blocklists] config reloaded: %d feeds", len(feeds))
 	}
 
 	applyUnion := func(be fwBackend, feeds map[string]*feedState) {
@@ -544,7 +544,7 @@ startOrUpdateAgent := func(cfg *cfgpkg.Config) {
         BaseURL:  cfg.API.URL,
         Token:    cfg.API.AuthToken,
         Version:  Version,
-        Interval: 30 * time.Second,
+        Interval: 20 * time.Second,
     }
     if ag == nil {
         ag = agentpkg.New(ac)
@@ -556,46 +556,68 @@ startOrUpdateAgent := func(cfg *cfgpkg.Config) {
     lastAgentKey = key
 }
 
-    // ... εκεί που ορίζεις το applyPorts() ...
-    applyPorts := func() {}
-    if cfgDir != "" && confW != nil {
-        if b, ok := confW.Changed(); ok {
-            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
-                lastCfg = cfg // <-- κρατάμε το parsed cfg
-                if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-                        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-                    }
-                    if err := nb.ApplyFloodRules(cfg); err != nil {
-                        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-                    }
+// ... εκεί που ορίζεις το applyPorts() ...
+applyPorts := func() {}
+if cfgDir != "" && confW != nil {
+    if b, ok := confW.Changed(); ok {
+        if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
+            lastCfg = cfg // <-- κρατάμε το parsed cfg
+
+            // NEW: init logger από το conf (ασφαλές: once.Do μέσα στο Init)
+            logging.Init(&cfg.Logging)
+
+
+            if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
+                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
                 }
-            } else {
-                fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
+                if err := nb.ApplyFloodRules(cfg); err != nil {
+                    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+                }
             }
+        } else {
+            fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
         }
-        applyPorts = func() {
-            if b, ok := confW.Changed(); ok {
-                cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
-                if err != nil { fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err); return }
-                lastCfg = cfg // <-- update κάθε φορά που το conf αλλάζει
-                if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-                        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-                    } else if os.Getenv("CFM_DEBUG") != "" {
-                        fmt.Println("[ports] policy updated from cfm.conf")
-                    }
-                    if err := nb.ApplyFloodRules(cfg); err != nil {
-                        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-                    }
+    }
+
+    applyPorts = func() {
+        if b, ok := confW.Changed(); ok {
+            cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
+            if err != nil {
+                fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
+                return
+            }
+            lastCfg = cfg // <-- update κάθε φορά που το conf αλλάζει
+
+            // NEW: re-init (idempotent) + summary σε κάθε reload
+            logging.Init(&cfg.Logging)
+            for _, ln := range cfg.Summary() {
+                logging.Logf("[config] %s", ln)
+            }
+
+            if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
+                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+                } else if os.Getenv("CFM_DEBUG") != "" {
+                    fmt.Println("[ports] policy updated from cfm.conf")
+                }
+                if err := nb.ApplyFloodRules(cfg); err != nil {
+                    fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
                 }
             }
         }
     }
+}
 
-    // NEW: απλό wrapper που κοιτάει μόνο το lastCfg
-    loadAgent := func() { startOrUpdateAgent(lastCfg) }
+// NEW: απλό wrapper που κοιτάει μόνο το lastCfg
+loadAgent := func() { startOrUpdateAgent(lastCfg) }
 
+
+
+
+for _, ln := range lastCfg.Summary() {
+	logging.Logf("[config] %s", ln)
+}
 
 
 	// Initial load
@@ -604,7 +626,7 @@ startOrUpdateAgent := func(cfg *cfgpkg.Config) {
 	applyPorts()
 	loadAgent()
         if os.Getenv("CFM_DEBUG") == "2" { fmt.Printf("Starting MAD COW FIREWALL v2 \n") }
-	fmt.Printf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
+	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
 	t := time.NewTicker(*interval); defer t.Stop()
 	for {
