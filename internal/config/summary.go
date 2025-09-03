@@ -60,6 +60,36 @@ func (c *Config) Summary() []string {
 		c.Throttle.TTLSeconds, c.Throttle.SetTTL, src,
 	))
 
+// -- tweaks
+// 
+lines = append(lines, fmt.Sprintf(
+	"sys_tweaks: enable=%t persist=%t ct[perGB=%d min=%d max=%d] strict=%t synR=%d synAckR=%d fin=%d tw=%d finw=%d closew=%d rp_filter=%d redir(acc=%t,send=%t)",
+	c.SystemTweaks.Enable, c.SystemTweaks.Persist,
+	c.SystemTweaks.CTPerGB, c.SystemTweaks.CTMin, c.SystemTweaks.CTMax,
+	c.SystemTweaks.TCPLooseStrict,
+	c.SystemTweaks.TCPSynRetries, c.SystemTweaks.TCPSynAckRetries, c.SystemTweaks.TCPFinTimeout,
+	c.SystemTweaks.CTTimeWait, c.SystemTweaks.CTFinWait, c.SystemTweaks.CTCloseWait,
+	c.SystemTweaks.RPFilter, c.SystemTweaks.AcceptRedirects, c.SystemTweaks.SendRedirects,
+))
+
+
+
+// --- Synproxy
+spAuto := "-"
+if c.Synproxy.AutoTCPIn { spAuto = "TCP_IN" }
+extra := "-"
+if len(c.Synproxy.Ports) > 0 {
+	var ss []string
+	for _, p := range c.Synproxy.Ports { ss = append(ss, fmt.Sprintf("%d", p)) }
+	extra = strings.Join(ss, ",")
+}
+lines = append(lines, fmt.Sprintf(
+	"synproxy: enable=%t auto=%s extra=[%s] mss=%d wscale=%d sack=%t tstamp=%t",
+	c.Synproxy.Enable, spAuto, extra, c.Synproxy.MSS, c.Synproxy.WScale, c.Synproxy.SACK, c.Synproxy.TStamp,
+))
+
+
+
 	// --- Portscan
 	psOnly := "-"
 	if len(c.Portscan.OnlyPorts) > 0 {

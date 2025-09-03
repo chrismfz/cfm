@@ -6,6 +6,8 @@ import (
 	"sort"
 
 	"cfm/internal/config"
+        "cfm/internal/logging"
+
 )
 
 // sets για ports (type inet_service)
@@ -98,82 +100,145 @@ func (b *Backend) replacePortSet(name string, prs []config.PortRange) error {
 	return b.nftExpr(expr)
 }
 
-// Εφαρμογή πολιτικής ports (μπαίνουν ΜΕΤΑ τα base allow/block & jump flood)
-// Εφαρμογή πολιτικής ports (μπαίνουν ΜΕΤΑ τα base allow/block & jump flood)
+
+
+
+// ApplyPortsPolicy συνθέτει τα allow/drop των θυρών και (προαιρετικά) το port-scan tracking.
 func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
-	// ΣΚΟΠΙΜΑ δεν κάνουμε b.cfg = cfg, γιατί εδώ παίρνουμε μόνο Ports ranges.
-	// Το full b.cfg (*config.Config) ορίζεται αλλού (daemon / ApplyFloodRules).
+    // μικρό summary
+    logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
+        len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
 
-	// chains: input υπάρχει ήδη. Θέλουμε και output.
-	if !b.chainExists("output") {
-		if err := b.nftCmd(fmt.Sprintf(
-			`add chain %s %s output { type filter hook output priority 0; policy accept; }`,
-			family, tableName)); err != nil {
-			return err
-		}
-	}
+    // ensure OUTPUT chain
+    if !b.chainExists("output") {
+        if err := b.nftCmd(fmt.Sprintf(
+            `add chain %s %s output { type filter hook output priority 0; policy accept; }`,
+            family, tableName)); err != nil {
+            return err
+        }
+    }
 
-	// ensure sets
-	for _, s := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
-		if err := b.ensurePortSet(s); err != nil { return err }
-	}
+    // ensure base port sets
+    for _, s := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
+        if err := b.ensurePortSet(s); err != nil { return err }
+    }
 
-	// load set contents
-	if err := b.replacePortSet(setTCPIn, cfg.TCPIn); err != nil { return err }
-	if err := b.replacePortSet(setUDPIn, cfg.UDPIn); err != nil { return err }
-	if err := b.replacePortSet(setTCPOut, cfg.TCPOut); err != nil { return err }
-	if err := b.replacePortSet(setUDPOut, cfg.UDPOut); err != nil { return err }
+    // load contents
+    if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
+    if err := b.replacePortSet(setUDPIn,  cfg.UDPIn);  err != nil { return err }
+    if err := b.replacePortSet(setTCPOut, cfg.TCPOut); err != nil { return err }
+    if err := b.replacePortSet(setUDPOut, cfg.UDPOut); err != nil { return err }
 
-	// INPUT rules (με απλή σύνταξη ώστε ruleExists να ταιριάζει με `nft list`)
-	addRule := func(chain, expr string) error {
-		if !b.ruleExists(chain, expr) {
-			return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, chain, expr))
-		}
-		return nil
-	}
+    // helper: idempotent rule add (ίδιο expr όπως το “nft list”)
+    addRule := func(chain, expr string) error {
+        if !b.ruleExists(chain, expr) {
+            return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, chain, expr))
+        }
+        return nil
+    }
 
-	// 1) Επιτρέπουμε ό,τι είναι στο set
-	if err := addRule("input", `tcp dport @`+setTCPIn+` accept`); err != nil { return err }
-	if err := addRule("input", `udp dport @`+setUDPIn+` accept`); err != nil { return err }
+    // -------------------------
+    // Port-scan tracking (πριν τα accepts ΟΤΑΝ έχεις φίλτρο υπηρεσιών)
+    // -------------------------
+    hasSvcFilter := false
+    if b.cfg != nil && b.cfg.Portscan.Enabled {
+        ps := b.cfg.Portscan
+        b.ensurePortscanSets()
 
-	// 2) Port-scan tracking: γράψε τα ζεύγη (srcIP . dport) για Ο,ΤΙ δεν είναι στα allowed sets
-	//    -> από το νέο schema τα flags είναι στο b.cfg.Portscan
-	if b.cfg != nil && b.cfg.Portscan.Enabled {
-		ps := b.cfg.Portscan
-		b.ensurePortscanSets()
+        pairTTL := ps.Interval
+        if pairTTL <= 0 { pairTTL = 60 }
 
-		// TCP (IPv4 & IPv6)
-		if ps.TrackTCP {
-			// IPv4
-			if err := addRule("input",
-				fmt.Sprintf(`tcp dport != @%s add @%s { ip saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV4, ps.Interval)); err != nil { return err }
-			// IPv6
-			if err := addRule("input",
-				fmt.Sprintf(`ip6 nexthdr tcp tcp dport != @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV6, ps.Interval)); err != nil { return err }
-		}
+        // Συγκρότηση service filter από PS_ONLY_PORTS (ranges) + PS_PORTS (single)
+        svc := make([]config.PortRange, 0, len(ps.OnlyPorts)+len(ps.Ports))
+        svc = append(svc, ps.OnlyPorts...)
+        for _, p := range ps.Ports {
+            if p < 0 { p = 0 }
+            if p > 65535 { p = 65535 }
+            svc = append(svc, config.PortRange{From: p, To: p})
+        }
+        hasSvcFilter = len(svc) > 0
 
-		// UDP (IPv4 & IPv6)
-		if ps.TrackUDP {
-			if err := addRule("input",
-				fmt.Sprintf(`udp dport != @%s add @%s { ip saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV4, ps.Interval)); err != nil { return err }
-			if err := addRule("input",
-				fmt.Sprintf(`udp dport != @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV6, ps.Interval)); err != nil { return err }
-		}
-	}
+        logging.Logf("[ports] portscan: enabled=%v interval=%ds track_tcp=%v track_udp=%v only_ranges=%d focus_ports=%d",
+            ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
 
-	// 3) Τέλος, τα γενικά DROP
-	if err := addRule("input", `tcp dport 0-65535 drop`); err != nil { return err }
-	if err := addRule("input", `udp dport 0-65535 drop`); err != nil { return err }
+        if hasSvcFilter {
+            const trackTCP = "ps_track_tcp_ports"
+            const trackUDP = "ps_track_udp_ports"
 
-	// OUTPUT (όμοια λογική για εξερχόμενα)
-	if err := addRule("output", `tcp dport @`+setTCPOut+` accept`); err != nil { return err }
-	if err := addRule("output", `udp dport @`+setUDPOut+` accept`); err != nil { return err }
-	if err := addRule("output", `tcp dport 0-65535 drop`); err != nil { return err }
-	if err := addRule("output", `udp dport 0-65535 drop`); err != nil { return err }
+            // sets τύπου inet_service
+            if err := b.ensurePortSet(trackTCP); err != nil { return err }
+            if err := b.replacePortSet(trackTCP, svc); err != nil { return err }
+            if ps.TrackUDP {
+                if err := b.ensurePortSet(trackUDP); err != nil { return err }
+                if err := b.replacePortSet(trackUDP, svc); err != nil { return err }
+            }
+            logging.Logf("[ports] ps_track_tcp_ports loaded (%d entries)", len(svc))
 
-	return nil
+            // positive-match tracking ΠΡΙΝ τα accepts
+            if ps.TrackTCP {
+                if err := addRule("input",
+                    fmt.Sprintf(`tcp dport @%s add @%s { ip saddr . tcp dport timeout %ds }`,
+                        trackTCP, psPairsV4, pairTTL)); err != nil { return err }
+                if err := addRule("input",
+                    fmt.Sprintf(`ip6 nexthdr tcp tcp dport @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
+                        trackTCP, psPairsV6, pairTTL)); err != nil { return err }
+            }
+            if ps.TrackUDP {
+                if err := addRule("input",
+                    fmt.Sprintf(`udp dport @%s add @%s { ip saddr . udp dport timeout %ds }`,
+                        trackUDP, psPairsUDPV4, pairTTL)); err != nil { return err }
+                if err := addRule("input",
+                    fmt.Sprintf(`ip6 nexthdr udp udp dport @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
+                        trackUDP, psPairsUDPV6, pairTTL)); err != nil { return err }
+            }
+        }
+    }
+
+    // -------------------------
+    // Allow lists (INPUT)
+    // -------------------------
+    if err := addRule("input", `tcp dport @`+setTCPIn+` accept`); err != nil { return err }
+    if err := addRule("input", `udp dport @`+setUDPIn+` accept`); err != nil { return err }
+
+    // -------------------------
+    // Port-scan tracking (ΜΕΤΑ τα accepts όταν ΔΕΝ έχεις φίλτρο υπηρεσιών)
+    // -------------------------
+    if b.cfg != nil && b.cfg.Portscan.Enabled && !hasSvcFilter {
+        ps := b.cfg.Portscan
+        pairTTL := ps.Interval
+        if pairTTL <= 0 { pairTTL = 60 }
+
+        if ps.TrackTCP {
+            if err := addRule("input",
+                fmt.Sprintf(`tcp dport != @%s add @%s { ip saddr . tcp dport timeout %ds }`,
+                    setTCPIn, psPairsV4, pairTTL)); err != nil { return err }
+            if err := addRule("input",
+                fmt.Sprintf(`ip6 nexthdr tcp tcp dport != @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
+                    setTCPIn, psPairsV6, pairTTL)); err != nil { return err }
+        }
+        if ps.TrackUDP {
+            if err := addRule("input",
+                fmt.Sprintf(`udp dport != @%s add @%s { ip saddr . udp dport timeout %ds }`,
+                    setUDPIn, psPairsUDPV4, pairTTL)); err != nil { return err }
+            if err := addRule("input",
+                fmt.Sprintf(`ip6 nexthdr udp udp dport != @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
+                    setUDPIn, psPairsUDPV6, pairTTL)); err != nil { return err }
+        }
+    }
+
+    // -------------------------
+    // Default DROPs (INPUT)
+    // -------------------------
+    if err := addRule("input", `tcp dport 0-65535 drop`); err != nil { return err }
+    if err := addRule("input", `udp dport 0-65535 drop`); err != nil { return err }
+
+    // -------------------------
+    // OUTPUT policy
+    // -------------------------
+    if err := addRule("output", `tcp dport @`+setTCPOut+` accept`); err != nil { return err }
+    if err := addRule("output", `udp dport @`+setUDPOut+` accept`); err != nil { return err }
+    if err := addRule("output", `tcp dport 0-65535 drop`); err != nil { return err }
+    if err := addRule("output", `udp dport 0-65535 drop`); err != nil { return err }
+
+    return nil
 }

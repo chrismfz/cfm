@@ -25,6 +25,8 @@ import (
 	"cfm/internal/logging"
 	cfgpkg "cfm/internal/config"
 	agentpkg "cfm/internal/agent"
+	"cfm/internal/sysctl"
+	status "cfm/internal/status"
 )
 
 var (
@@ -111,7 +113,7 @@ func main() {
 	case "which", "search":
 		runWhich(os.Args[2:])
 	case "status":
-		runStatus(os.Args[1:])
+		status.Run(os.Args[1:])
 	case "reset":
 		runReset(os.Args[2:])
 	case "disable":
@@ -557,28 +559,54 @@ startOrUpdateAgent := func(cfg *cfgpkg.Config) {
 }
 
 // ... εκεί που ορίζεις το applyPorts() ...
+
+// ... εκεί που ορίζεις το applyPorts() ...
 applyPorts := func() {}
+
 if cfgDir != "" && confW != nil {
     if b, ok := confW.Changed(); ok {
         if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
-            lastCfg = cfg // <-- κρατάμε το parsed cfg
+            lastCfg = cfg // κρατάμε το parsed cfg
 
-            // NEW: init logger από το conf (ασφαλές: once.Do μέσα στο Init)
+            // init logger από το conf (idempotent)
             logging.Init(&cfg.Logging)
+
+            // (προαιρετικό) summary στην εκκίνηση
+            for _, ln := range cfg.Summary() {
+                logging.Logf("[config] %s", ln)
+            }
+
+        // NEW: apply system tweaks early
+cfg.SystemTweaks.SetDefaults()
+cfg.Synproxy.SetDefaults()
+
+        if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
+            fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
+        }
+
 
 
             if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-                }
+                // ΠΡΩΤΑ flood rules (για να γεμίσει b.cfg)
                 if err := nb.ApplyFloodRules(cfg); err != nil {
                     fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
                 }
+                // ΜΕΤΑ ports policy (βλέπει Portscan & στήνει ps_* κανόνες)
+                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+                }
+    // SYNPROXY (νέο)
+    if err := nb.ApplySynproxyPolicy(&cfg.Synproxy, &cfg.Ports, cfg.NFT.InputPriority); err != nil {
+        fmt.Fprintln(os.Stderr, "apply synproxy error:", err)
+    }
+
             }
         } else {
             fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
         }
     }
+
+
 
     applyPorts = func() {
         if b, ok := confW.Changed(); ok {
@@ -587,27 +615,45 @@ if cfgDir != "" && confW != nil {
                 fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
                 return
             }
-            lastCfg = cfg // <-- update κάθε φορά που το conf αλλάζει
+            lastCfg = cfg // update κάθε φορά που αλλάζει το conf
 
-            // NEW: re-init (idempotent) + summary σε κάθε reload
+            // re-init logging (idempotent) + summary σε κάθε reload
             logging.Init(&cfg.Logging)
             for _, ln := range cfg.Summary() {
                 logging.Logf("[config] %s", ln)
             }
 
+// μετά το lastCfg = cfg, logging.Init, κ.λπ.
+cfg.SystemTweaks.SetDefaults()
+cfg.Synproxy.SetDefaults()
+
+
+if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
+    fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
+}
+
+
             if nb, ok2 := be.(*nft.Backend); ok2 && cfg != nil {
-                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-                } else if os.Getenv("CFM_DEBUG") != "" {
-                    fmt.Println("[ports] policy updated from cfm.conf")
-                }
+                // ΠΡΩΤΑ flood rules (για να «δέσει» b.cfg)
                 if err := nb.ApplyFloodRules(cfg); err != nil {
                     fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+                }
+                // ΜΕΤΑ ports policy (port-scan tracking πριν/μετά τα accepts αναλόγως config)
+                if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+                    fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+
+    // SYNPROXY (νέο)
+    if err := nb.ApplySynproxyPolicy(&cfg.Synproxy, &cfg.Ports, cfg.NFT.InputPriority); err != nil {
+        fmt.Fprintln(os.Stderr, "apply synproxy error:", err)
+    }
+                } else if os.Getenv("CFM_DEBUG") != "" {
+                    fmt.Println("[ports] policy updated from cfm.conf")
                 }
             }
         }
     }
 }
+
 
 // NEW: απλό wrapper που κοιτάει μόνο το lastCfg
 loadAgent := func() { startOrUpdateAgent(lastCfg) }
@@ -1099,102 +1145,7 @@ func querySetForIP(raw []byte, ip net.IP, sd setDesc) []whichHit {
 	return hits
 }
 
-// ----------------------------------------------------------------------------
-// status command
-// ----------------------------------------------------------------------------
 
-type statusRow struct {
-	Set      string `json:"set"`
-	Action   string `json:"action"`
-	Family   string `json:"family"`
-	Scope    string `json:"scope"`
-	Feed     string `json:"feed"`
-	Hosts    int    `json:"hosts"`
-	Prefixes int    `json:"prefixes"`
-}
-
-type statusOut struct {
-	TablePresent bool        `json:"table_present"`
-	RulesPresent bool        `json:"rules_present"`
-	Sets         []statusRow `json:"sets"`
-	Totals       struct {
-		Allow struct{ Hosts, Prefixes, Entries int `json:"hosts_prefixes_entries"` } `json:"allow"`
-		Block struct{ Hosts, Prefixes, Entries int `json:"hosts_prefixes_entries"` } `json:"block"`
-		Overall int `json:"overall_entries"`
-	} `json:"totals"`
-}
-
-func classifyStatusSet(name, typ string) (action, family, scope, feed string, ok bool) {
-	switch name {
-	case "allow_v4": return "ALLOW", "v4", "manual", "", true
-	case "allow_v6": return "ALLOW", "v6", "manual", "", true
-	case "allow_dyn_v4": return "ALLOW", "v4", "dyn", "", true
-	case "allow_dyn_v6": return "ALLOW", "v6", "dyn", "", true
-	case "block_v4": return "BLOCK", "v4", "manual", "", true
-	case "block_v6": return "BLOCK", "v6", "manual", "", true
-	}
-	if strings.HasPrefix(name, "allow_ext_") || strings.HasPrefix(name, "block_ext_") {
-		parts := strings.Split(name, "_")
-		if len(parts) >= 5 {
-			action = strings.ToUpper(parts[0])
-			fam := parts[2]; if fam == "v4" || fam == "v6" { family = fam }
-			if parts[3] == "hosts" || parts[3] == "nets" { scope = parts[3] }
-			feed = strings.Join(parts[4:], "_")
-			return action, family, scope, feed, true
-		}
-	}
-	return "", "", "", "", false
-}
-
-func runStatus(args []string) {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
-	out, err := exec.Command("nft", "-j", "list", "table", "inet", "cfm").CombinedOutput()
-	if err != nil { so := statusOut{TablePresent: false, RulesPresent: false}; if *asJSON { b, _ := json.MarshalIndent(so, "", "  "); fmt.Println(string(b)) } else { fmt.Println("Firewall: inactive (table inet cfm NOT present)") }; return }
-	var parsed struct{ Nftables []struct{ Set *struct{ Family, Name, Table, Type string; Flags []string; Elem []interface{} } `json:"set,omitempty"`; Rule *struct{ Expr []interface{}; Chain string } `json:"rule,omitempty"` } `json:"nftables"` }
-	_ = json.Unmarshal(out, &parsed)
-	st := statusOut{TablePresent: true}
-	rulesCount := 0
-	for _, it := range parsed.Nftables { if it.Rule != nil { rulesCount++ } }
-	st.RulesPresent = rulesCount > 0
-	for _, it := range parsed.Nftables {
-		if it.Set == nil { continue }
-		s := it.Set
-		action, family, scope, feed, ok := classifyStatusSet(s.Name, s.Type); if !ok { continue }
-		if s.Type == "ipv4_addr" && family != "v4" { family = "v4" }
-		if s.Type == "ipv6_addr" && family != "v6" { family = "v6" }
-		row := statusRow{Set: s.Name, Action: action, Family: family, Scope: scope, Feed: feed}
-		for _, el := range s.Elem { switch el.(type) { case string: row.Hosts++; case map[string]interface{}: if _, ok := el.(map[string]interface{})["prefix"]; ok { row.Prefixes++ } } }
-		st.Sets = append(st.Sets, row)
-		if action == "ALLOW" { st.Totals.Allow.Hosts += row.Hosts; st.Totals.Allow.Prefixes += row.Prefixes } else { st.Totals.Block.Hosts += row.Hosts; st.Totals.Block.Prefixes += row.Prefixes }
-	}
-	st.Totals.Allow.Entries = st.Totals.Allow.Hosts + st.Totals.Allow.Prefixes
-	st.Totals.Block.Entries = st.Totals.Block.Hosts + st.Totals.Block.Prefixes
-	st.Totals.Overall = st.Totals.Allow.Entries + st.Totals.Block.Entries
-	sort.Slice(st.Sets, func(i, j int) bool {
-		a, b := st.Sets[i], st.Sets[j]
-		ai := 1; if a.Scope == "manual" { ai = 0 }
-		bj := 1; if b.Scope == "manual" { bj = 0 }
-		if ai != bj { return ai < bj }
-		if a.Action != b.Action { return a.Action < b.Action }
-		if a.Family != b.Family { return a.Family < b.Family }
-		if a.Feed != b.Feed { return a.Feed < b.Feed }
-		return a.Set < b.Set
-	})
-	if *asJSON { b, _ := json.MarshalIndent(st, "", "  "); fmt.Println(string(b)); return }
-	if st.TablePresent { if st.RulesPresent { fmt.Println("Firewall: active (table inet cfm present, rules installed)") } else { fmt.Println("Firewall: table present, but no rules found") } } else { fmt.Println("Firewall: inactive (table inet cfm NOT present)") }
-	fmt.Printf("Totals: ALLOW=%d (hosts=%d, prefixes=%d)  BLOCK=%d (hosts=%d, prefixes=%d)  Overall=%d\n",
-		st.Totals.Allow.Entries, st.Totals.Allow.Hosts, st.Totals.Allow.Prefixes,
-		st.Totals.Block.Entries, st.Totals.Block.Hosts, st.Totals.Block.Prefixes,
-		st.Totals.Overall,
-	)
-	fmt.Println("Sets:")
-	for _, r := range st.Sets {
-		extra := ""; if r.Feed != "" { extra = " [feed: " + r.Feed + "]" }
-		fmt.Printf(" - %-5s %-2s %-6s %-35s hosts=%-5d prefixes=%-5d%s\n", r.Action, r.Family, r.Scope, r.Set, r.Hosts, r.Prefixes, extra)
-	}
-}
 
 // reset/disable -------------------------------------------------------------
 

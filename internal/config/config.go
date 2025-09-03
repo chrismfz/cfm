@@ -20,9 +20,46 @@ type Config struct {
 	PacketRate PacketRateConfig
 	Throttle   ThrottleConfig
 	Portscan   PortscanConfig
+	SystemTweaks SystemTweaksConfig
+	Synproxy   SynproxyConfig
 }
 
 // --- Categories ---
+type SynproxyConfig struct {
+	Enable    bool   // SYNPROXY_ENABLE
+	AutoTCPIn bool   // SYNPROXY_AUTO_TCP_IN
+	Ports     []int  // SYNPROXY_PORTS (comma-separated)
+	MSS       int    // SYNPROXY_MSS
+	WScale    int    // SYNPROXY_WSCALE
+	SACK      bool   // SYNPROXY_SACK
+	TStamp    bool   // SYNPROXY_TSTAMP
+}
+
+
+
+type SystemTweaksConfig struct {
+	Enable  bool // SYS_TWEAKS_ENABLE
+	Persist bool // SYS_TWEAKS_PERSIST
+	// Conntrack sizing
+	CTPerGB int // SYS_CT_PER_GB
+	CTMin   int // SYS_CT_MIN
+	CTMax   int // SYS_CT_MAX
+
+	// Strictness/timeouts
+	TCPLooseStrict   bool // SYS_TCP_LOOSE_STRICT  (true => nf_conntrack_tcp_loose=0)
+	TCPSynRetries    int  // SYS_TCP_SYN_RETRIES
+	TCPSynAckRetries int  // SYS_TCP_SYNACK_RETRIES
+	TCPFinTimeout    int  // SYS_TCP_FIN_TIMEOUT
+	CTTimeWait       int  // SYS_CT_TIMEWAIT
+	CTFinWait        int  // SYS_CT_FINWAIT
+	CTCloseWait      int  // SYS_CT_CLOSEWAIT
+
+	// Hygiene
+	RPFilter        int  // SYS_RP_FILTER (0/1/2 σε κάποια συστήματα, αλλά 1 είναι το σύνηθες)
+	AcceptRedirects bool // SYS_ACCEPT_REDIRECTS
+	SendRedirects   bool // SYS_SEND_REDIRECTS
+}
+
 
 type APIConfig struct {
 	URL       string
@@ -242,6 +279,64 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Portscan.OnlyPorts = parsePorts(val)
 		case "PS_PORTS":
 			cfg.Portscan.Ports = parseIntCSV(val)
+
+		// System / Kernel Tweaks
+		case "SYS_TWEAKS_ENABLE":
+			cfg.SystemTweaks.Enable = parseBool(val)
+		case "SYS_TWEAKS_PERSIST":
+			cfg.SystemTweaks.Persist = parseBool(val)
+
+case "SYS_CT_PER_GB":
+	cfg.SystemTweaks.CTPerGB = parseInt(val)
+case "SYS_CT_MIN":
+	cfg.SystemTweaks.CTMin = parseInt(val)
+case "SYS_CT_MAX":
+	cfg.SystemTweaks.CTMax = parseInt(val)
+
+case "SYS_TCP_LOOSE_STRICT":
+	cfg.SystemTweaks.TCPLooseStrict = parseBool(val)
+case "SYS_TCP_SYN_RETRIES":
+	cfg.SystemTweaks.TCPSynRetries = parseInt(val)
+case "SYS_TCP_SYNACK_RETRIES":
+	cfg.SystemTweaks.TCPSynAckRetries = parseInt(val)
+case "SYS_TCP_FIN_TIMEOUT":
+	cfg.SystemTweaks.TCPFinTimeout = parseInt(val)
+case "SYS_CT_TIMEWAIT":
+	cfg.SystemTweaks.CTTimeWait = parseInt(val)
+case "SYS_CT_FINWAIT":
+	cfg.SystemTweaks.CTFinWait = parseInt(val)
+case "SYS_CT_CLOSEWAIT":
+	cfg.SystemTweaks.CTCloseWait = parseInt(val)
+
+case "SYS_RP_FILTER":
+	cfg.SystemTweaks.RPFilter = parseInt(val)
+case "SYS_ACCEPT_REDIRECTS":
+	cfg.SystemTweaks.AcceptRedirects = parseBool(val)
+case "SYS_SEND_REDIRECTS":
+	cfg.SystemTweaks.SendRedirects = parseBool(val)
+
+
+case "SYNPROXY_ENABLE":
+	cfg.Synproxy.Enable = parseBool(val)
+case "SYNPROXY_AUTO_TCP_IN":
+	cfg.Synproxy.AutoTCPIn = parseBool(val)
+case "SYNPROXY_PORTS":
+	// parse comma-separated ints
+	if strings.TrimSpace(val) != "" {
+		var out []int
+		for _, t := range strings.Split(val, ",") {
+			if p := parseInt(strings.TrimSpace(t)); p > 0 { out = append(out, p) }
+		}
+		cfg.Synproxy.Ports = out
+	}
+case "SYNPROXY_MSS":
+	cfg.Synproxy.MSS = parseInt(val)
+case "SYNPROXY_WSCALE":
+	cfg.Synproxy.WScale = parseInt(val)
+case "SYNPROXY_SACK":
+	cfg.Synproxy.SACK = parseBool(val)
+case "SYNPROXY_TSTAMP":
+	cfg.Synproxy.TStamp = parseBool(val)
 
 		default:
 			// Unknown key: ignore (forward-compat) or return error if you prefer
@@ -470,3 +565,58 @@ func stripInlineComment(s string) string {
     s = cut(s, " //")
     return strings.TrimSpace(s)
 }
+
+
+
+
+func (c *SystemTweaksConfig) SetDefaults() {
+        if c.CTPerGB == 0 {
+                c.CTPerGB = 12288
+        }
+        if c.CTMin == 0 {
+                c.CTMin = 262144
+        }
+        if c.CTMax == 0 {
+                c.CTMax = 16777216
+        }
+        if c.TCPSynRetries == 0 {
+                c.TCPSynRetries = 3
+        }
+        if c.TCPSynAckRetries == 0 {
+                c.TCPSynAckRetries = 3
+        }
+        if c.TCPFinTimeout == 0 {
+                c.TCPFinTimeout = 20
+        }
+        if c.CTTimeWait == 0 {
+                c.CTTimeWait = 30
+        }
+        if c.CTFinWait == 0 {
+                c.CTFinWait = 45
+        }
+        if c.CTCloseWait == 0 {
+                c.CTCloseWait = 60
+        }
+        // RPFilter default = 1
+        if c.RPFilter == 0 {
+                c.RPFilter = 1
+        }
+}
+
+
+func (s *SynproxyConfig) SetDefaults() {
+	if s.MSS == 0 { s.MSS = 1440 }
+	if s.WScale == 0 { s.WScale = 7 }
+	// Αν δεν οριστούν, θεώρησε enabled για SACK/TStamp (σύμφωνα με το πρότυπο μας)
+	// αλλά ΜΟΝΟ αν έχουν ενεργοποιηθεί γενικά τα synproxy rules.
+	if s.Enable {
+		// keep explicit false if user set "0"
+		if !s.SACK && !s.TStamp {
+			s.SACK, s.TStamp = true, true
+		}
+	}
+}
+
+
+
+
