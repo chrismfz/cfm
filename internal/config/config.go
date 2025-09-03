@@ -155,7 +155,14 @@ func (c *Config) SetDefaults() {
 	if c.Throttle.WindowSec == 0 { c.Throttle.WindowSec = 120 }
 	if c.Throttle.Hits == 0 { c.Throttle.Hits = 3 }
 	if c.Throttle.Mode == "" { c.Throttle.Mode = "permanent" }
-	if c.Throttle.Mode != "permanent" && c.Throttle.Mode != "ttl" { c.Throttle.Mode = "permanent" }
+
+c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
+ switch c.Throttle.Mode {
+ case "permanent", "ttl", "dryrun", "alert":
+     // ok
+ default:
+     c.Throttle.Mode = "permanent"
+ }
 	if c.Throttle.TTLSeconds == 0 { c.Throttle.TTLSeconds = 24 * 3600 }
 	if c.Throttle.SetTTL == 0 { c.Throttle.SetTTL = 60 }
 	// Portscan

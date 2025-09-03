@@ -432,7 +432,6 @@ case strings.HasPrefix(name, "th_icmp_"):
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6).
 func (b *Backend) DumpThrottledIPs() {
 
-
 dump := func(set string) []string {
 
 if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχα skip
@@ -451,7 +450,6 @@ if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχ�
         return nil
     }
     elems := rest[:j]
-
     raw := strings.Split(elems, ",")
     var ips []string
     for _, t := range raw {
@@ -464,9 +462,6 @@ if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχ�
         }
         ips = append(ips, t)
     }
-
-
-
 
 if len(ips) > 0 {
     reason := reasonForName(set)
@@ -485,13 +480,8 @@ if len(ips) > 0 {
     }
 
 }
-
-
-
-
     return ips
 }
-
 
 
 // ----------------------------
@@ -536,13 +526,11 @@ if len(ips) > 0 {
         merge(dump("th_syn_v4"))
         merge(dump("th_syn_v6"))
     }
-
     // PPS source
     if enabled["pps"] {
         merge(dump("th_pps_v4"))
         merge(dump("th_pps_v6"))
     }
-
 // NEW-rate source
 if enabled["new"] {
     merge(dump("th_new_v4"))
@@ -554,7 +542,6 @@ if enabled["icmp"] {
     merge(dump("th_icmp_v4"))
     merge(dump("th_icmp_v6"))
 }
-
 
     // PortFlood source (per-port sets)
     if enabled["portflood"] {
@@ -569,18 +556,14 @@ if enabled["icmp"] {
             merge(dump(s))
         }
     }
-
     // Προσοχή: δεν κάνουμε dump των generic 'throttled_v4/v6' για να μη φαίνεται "General throttle".
     // Αυτό κρατάει το output καθαρό, αλλά το autoblock μετράει κανονικά από τα enabled sources.
-
     if b.cfg.Throttle.Enabled {
         var v4, v6 []string
         for ip := range uniq4 { v4 = append(v4, ip) }
         for ip := range uniq6 { v6 = append(v6, ip) }
         b.autoBlockEval(v4, v6, b.cfg.Throttle)
     }
-
-
 
 
 }
@@ -743,6 +726,26 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     }
 
     switch tc.Mode {
+
+
+case "alert", "dryrun":
+    // v4
+    if fam == "v4" {
+        logging.Logf(
+            "[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+            logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason,
+        )
+        return nil
+    }
+    // v6
+    logging.Logf(
+        "[dryrun] v6 %s -> would block_v6 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+        logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason,
+    )
+    return nil
+
+
+
     case "ttl":
         ttl := tc.TTLSeconds
         if fam == "v4" {

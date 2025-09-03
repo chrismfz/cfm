@@ -1,0 +1,1 @@
+sudo nft list table inet cfm
