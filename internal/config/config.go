@@ -22,6 +22,7 @@ type Config struct {
 	Portscan   PortscanConfig
 	SystemTweaks SystemTweaksConfig
 	Synproxy   SynproxyConfig
+	Hardening  HardeningConfig
 }
 
 // --- Categories ---
@@ -35,6 +36,14 @@ type SynproxyConfig struct {
 	TStamp    bool   // SYNPROXY_TSTAMP
 }
 
+
+type HardeningConfig struct {
+    BlockBadTCPFlags bool // BLOCK_BAD_TCP_FLAGS
+    NewRate          int  // NEW_RATE (per-IP ct state new / sec; 0=off)
+    NewBurst         int  // NEW_BURST (packets)
+    ICMPRate         int  // ICMP_RATE_LIMIT (per-IP echo-request / sec; 0=off)
+    ICMPBurst        int  // ICMP_RATE_BURST
+}
 
 
 type SystemTweaksConfig struct {
@@ -157,6 +166,13 @@ func (c *Config) SetDefaults() {
 	if c.Portscan.Diversity == 0 { c.Portscan.Diversity = 1 }
 	// If PS_ENABLED not set explicitly, infer from interval>0
 	if !c.Portscan.Enabled && c.Portscan.Interval > 0 { c.Portscan.Enabled = true }
+
+// Hardening
+if c.Hardening.NewRate < 0 { c.Hardening.NewRate = 0 }
+if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
+if c.Hardening.ICMPRate < 0 { c.Hardening.ICMPRate = 0 }
+if c.Hardening.ICMPBurst < 0 { c.Hardening.ICMPBurst = 0 }
+
 }
 
 // Validate clamps, normalizes and ensures cross-field coherence.
@@ -279,6 +295,21 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Portscan.OnlyPorts = parsePorts(val)
 		case "PS_PORTS":
 			cfg.Portscan.Ports = parseIntCSV(val)
+
+
+// Hardening
+case "BLOCK_BAD_TCP_FLAGS":
+    cfg.Hardening.BlockBadTCPFlags = parseBool(val)
+case "NEW_RATE":
+    cfg.Hardening.NewRate = parseInt(val)
+case "NEW_BURST":
+    cfg.Hardening.NewBurst = parseInt(val)
+case "ICMP_RATE_LIMIT":
+    cfg.Hardening.ICMPRate = parseInt(val)
+case "ICMP_RATE_BURST":
+    cfg.Hardening.ICMPBurst = parseInt(val)
+
+
 
 		// System / Kernel Tweaks
 		case "SYS_TWEAKS_ENABLE":

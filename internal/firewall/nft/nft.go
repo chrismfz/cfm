@@ -195,6 +195,24 @@ func (b *Backend) EnsureBase() error {
 	}
 
 // 0) Early stateful base  <<< ΠΡΟΣΘΗΚΗ
+// 0) Early ICMP echo → flood (so echo-requests don't bypass via 'established,related')
+if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
+    // IPv4
+    expr4 := `ip protocol icmp icmp type echo-request jump flood`
+    if !b.ruleExists("input", expr4) {
+        if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr4)); err != nil {
+            return err
+        }
+    }
+    // IPv6
+    expr6 := `ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`
+    if !b.ruleExists("input", expr6) {
+        if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr6)); err != nil {
+            return err
+        }
+    }
+}
+
 if err := addRule(`ct state established,related accept`); err != nil { return err }
 if err := addRule(`ct state invalid drop`); err != nil { return err }
 

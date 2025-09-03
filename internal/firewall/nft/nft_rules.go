@@ -30,7 +30,10 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
     if !b.tableExists() {
         if err := b.EnsureBase(); err != nil { return err }
     }
+
     b.ensureThrottleSets()
+
+if err := b.ApplyHardeningRules(c); err != nil { return err }
 
     // PacketRate (per-IP pps/syn)
     if c.PacketRate.Rate > 0 {
@@ -295,6 +298,11 @@ if !b.tableExists() {
 	}
 
 	wanted := func(name string) bool {
+
+ if name == "badflags_drop" || name == "newrate_v4" || name == "newrate_v6" || name == "icmp_v4" || name == "icmp_v6" {
+        return true
+    }
+
 		return strings.HasPrefix(name, "connlimit_") ||
 			strings.HasPrefix(name, "portflood_") ||
 			strings.HasPrefix(name, "synrate_") ||
@@ -395,6 +403,19 @@ case strings.HasPrefix(name, "th_pf_"):
     return "TCP port flood"
 
 
+case name == "badflags_drop":
+    return "Bad TCP flags"
+case name == "newrate_v4", name == "newrate_v6":
+    return "Global NEW-rate"
+case name == "icmp_v4", name == "icmp_v6":
+    return "ICMP echo limit"
+case strings.HasPrefix(name, "th_new_"):
+    return "NEW-rate"
+case strings.HasPrefix(name, "th_icmp_"):
+    return "ICMP echo limit"
+
+
+
     default:
         return "unknown"
     }
@@ -484,7 +505,7 @@ if len(ips) > 0 {
     } else {
         s := os.Getenv("THROTTLE_SOURCES")
         if s == "" {
-            s = "syn,portflood,pps" // default
+            s = "syn,portflood,pps,new,icmp" // default
         }
         for _, t := range strings.Split(s, ",") {
             srcs = append(srcs, t)
@@ -521,6 +542,19 @@ if len(ips) > 0 {
         merge(dump("th_pps_v4"))
         merge(dump("th_pps_v6"))
     }
+
+// NEW-rate source
+if enabled["new"] {
+    merge(dump("th_new_v4"))
+    merge(dump("th_new_v6"))
+}
+
+// ICMP source
+if enabled["icmp"] {
+    merge(dump("th_icmp_v4"))
+    merge(dump("th_icmp_v6"))
+}
+
 
     // PortFlood source (per-port sets)
     if enabled["portflood"] {

@@ -73,6 +73,12 @@ lines = append(lines, fmt.Sprintf(
 ))
 
 
+lines = append(lines, fmt.Sprintf(
+  "hardening: badflags=%t new=%d/s burst=%d icmp=%d/s burst=%d",
+  c.Hardening.BlockBadTCPFlags, c.Hardening.NewRate, c.Hardening.NewBurst,
+  c.Hardening.ICMPRate, c.Hardening.ICMPBurst,
+))
+
 
 // --- Synproxy
 spAuto := "-"
