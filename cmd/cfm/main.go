@@ -533,17 +533,34 @@ func runDaemon(args []string) {
 		}
 
 		// nft rules
-		if nb, ok2 := be.(*nft.Backend); ok2 {
-			if err := nb.ApplyFloodRules(cfg); err != nil {
-				fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-			}
-			if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-				fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-			}
-			if err := nb.ApplySynproxyPolicy(&cfg.Synproxy, &cfg.Ports, cfg.NFT.InputPriority); err != nil {
-				fmt.Fprintln(os.Stderr, "apply synproxy error:", err)
-			}
-		}
+
+if nb, ok2 := be.(*nft.Backend); ok2 {
+
+    logging.Logf("[daemon] === Begin ApplyFloodRules ===")
+    if err := nb.ApplyFloodRules(cfg); err != nil {
+        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+    }
+    logging.Logf("[daemon] === End ApplyFloodRules ===")
+
+    logging.Logf("[daemon] === Begin ApplySynproxyPolicy ===")
+    if err := nb.ApplySynproxyPolicy(&cfg.Synproxy, &cfg.Ports, cfg.NFT.InputPriority); err != nil {
+        fmt.Fprintln(os.Stderr, "apply synproxy error:", err)
+    }
+    logging.Logf("[daemon] === End ApplySynproxyPolicy ===")
+
+    logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
+    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+    }
+    logging.Logf("[daemon] === End ApplyPortsPolicy ===")
+
+    logging.Logf("[daemon] === Finished all nft applies ===")
+}
+
+
+
+
+
 
 		// agent
 		startOrUpdateAgent(cfg)

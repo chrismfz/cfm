@@ -19,39 +19,35 @@ import (
 // -----------------------------------------------------------------------------
 
 func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
-    if b.cfg == nil {
-        b.cfg = c
-    } else {
-        b.cfg = c // πάντα αντικατάσταση για το νέο tick/config
-    }
+    b.cfg = c // απλό replace
 
-    _ = b.nftExpr("flush chain inet cfm flood;")
-
+    // 1) Ensure βάσης (πίνακας/αλυσίδες/sets + refreshSelfSets μέσα στο EnsureBase)
     if !b.tableExists() {
         if err := b.EnsureBase(); err != nil { return err }
+    } else {
+        // καλό είναι να ανανεώνεις τα self sets ανά tick αν αλλάζουν IPs
+        // π.χ. b.refreshSelfSets() εδώ, αν δεν το καλείς ήδη μέσα στο EnsureBase
     }
 
+    // 2) Καθαρό flood και early self-bypass (να μη γράφουν counters)
+    _ = b.nftExpr("flush chain inet cfm flood;")
+    _ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
+    _ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
+
+    // 3) Συνέχισε με τα υπόλοιπα
     b.ensureThrottleSets()
 
-if err := b.ApplyHardeningRules(c); err != nil { return err }
+    if err := b.ApplyHardeningRules(c); err != nil { return err }  // badflags/newrate/icmp κ.λπ. :contentReference[oaicite:0]{index=0}
 
-    // PacketRate (per-IP pps/syn)
+    // PacketRate (pps/syn per-IP)
     if c.PacketRate.Rate > 0 {
         burst := c.PacketRate.Burst
-        if burst <= 0 {
-            burst = c.PacketRate.Rate * 2
-        }
-        if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
-            return err
-        }
+        if burst <= 0 { burst = c.PacketRate.Rate * 2 }
+        if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil { return err }
     }
 
-if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
-    return err
-}
-if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
-    return err
-}
+    if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil { return err }
+    if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil { return err }
     return nil
 }
 
@@ -462,6 +458,18 @@ if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχ�
         }
         ips = append(ips, t)
     }
+
+{
+    filtered := make([]string, 0, len(ips))
+    for _, ip := range ips {
+        if b.isSelfIPString(ip) {
+            continue
+        }
+        filtered = append(filtered, ip)
+    }
+    ips = filtered
+}
+
 
 if len(ips) > 0 {
     reason := reasonForName(set)
@@ -1026,6 +1034,29 @@ func (b *Backend) LoadPortScanner() {
 		}
 	}
 
+
+
+{
+    keep4 := make([]string, 0, len(v4))
+    for _, s := range v4 {
+        if !b.isSelfIPString(s) {
+            keep4 = append(keep4, s)
+        } else {
+            delete(lastThrottleReason, s) // μην αφήνεις stale reason
+        }
+    }
+    v4 = keep4
+
+    keep6 := make([]string, 0, len(v6))
+    for _, s := range v6 {
+        if !b.isSelfIPString(s) {
+            keep6 = append(keep6, s)
+        } else {
+            delete(lastThrottleReason, s)
+        }
+    }
+    v6 = keep6
+}
 
 
 

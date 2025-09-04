@@ -161,6 +161,12 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
 	if err := b.ensureSet(setV4,   "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(setV6,   "ipv6_addr"); err != nil { return err }
+	// local and server-IPs
+        if err := b.ensureSet("self_v4" , "ipv4_addr"); err != nil { return err }
+        if err := b.ensureSet("self_v6" , "ipv6_addr"); err != nil { return err }
+	// quickly load our self-IPs
+	b.refreshSelfSets()
+
 	// dyn allow
 	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
@@ -194,27 +200,49 @@ func (b *Backend) EnsureBase() error {
 		return nil
 	}
 
-// 0) Early stateful base  <<< ΠΡΟΣΘΗΚΗ
-// 0) Early ICMP echo → flood (so echo-requests don't bypass via 'established,related')
-if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
-    // IPv4
-    expr4 := `ip protocol icmp icmp type echo-request jump flood`
-    if !b.ruleExists("input", expr4) {
-        if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr4)); err != nil {
-            return err
-        }
-    }
-    // IPv6
-    expr6 := `ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`
-    if !b.ruleExists("input", expr6) {
-        if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr6)); err != nil {
-            return err
-        }
+
+
+// --- EARLY ACCEPTS & ICMP→flood (insert at top = position 0) ---
+
+// μικρό helper για να μην επαναλαμβανόμαστε
+addEarly := func(expr string) {
+    if !b.ruleExists("input", expr) {
+        _ = b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
     }
 }
 
+// 1) loopback
+addEarly(`iif lo accept`)
+
+// 2) self IPs (γεμίζουν από refreshSelfSets)
+addEarly(`ip saddr @self_v4 accept`)
+addEarly(`ip6 saddr @self_v6 accept`)
+
+// 3) ALLOW sets (manual + dyn + external)
+addEarly(`ip saddr @allow_v4 accept`)
+addEarly(`ip6 saddr @allow_v6 accept`)
+
+addEarly(`ip saddr @allow_dyn_v4 accept`)
+addEarly(`ip6 saddr @allow_dyn_v6 accept`)
+
+addEarly(`ip saddr @allow_ext_v4_hosts accept`)
+addEarly(`ip6 saddr @allow_ext_v6_hosts accept`)
+
+addEarly(`ip saddr @allow_ext_v4_nets accept`)
+addEarly(`ip6 saddr @allow_ext_v6_nets accept`)
+
+// 4) Early ICMP echo → flood (τελευταίο ώστε να μείνει ΚΑΤΩ από τα accepts)
+if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
+    addEarly(`ip protocol icmp icmp type echo-request jump flood`)          // IPv4
+    addEarly(`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`)   // IPv6
+}
+
+
+
+
+
 if err := addRule(`ct state established,related accept`); err != nil { return err }
-if err := addRule(`ct state invalid drop`); err != nil { return err }
+
 
 	// 1) manual allow
 	if err := addRule(`ip saddr @allow_v4 accept`);  err != nil { return err }
@@ -237,12 +265,14 @@ if err := addRule(`ct state invalid drop`); err != nil { return err }
 	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
 
 	// 6) jump flood στο τέλος του base layer
-//	if !b.ruleExists("input", "jump flood") {
-//		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
-//			return err
-//		}
+	if !b.ruleExists("input", "jump flood") {
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
+			return err
+		}
+	}
 
-//	}
+//moved to ports.go 
+// if err := addRule(`ct state invalid drop`); err != nil { return err }
 
 	return nil
 }
@@ -1016,4 +1046,60 @@ func (b *Backend) ResetCFMTable() error {
     _ = b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
     // Ξαναφτιάξ’ το άδειο
     return b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName))
+}
+
+
+func (b *Backend) refreshSelfSets() {
+    // άδειασε τα sets
+    _ = b.nftExpr("flush set inet cfm self_v4;")
+    _ = b.nftExpr("flush set inet cfm self_v6;")
+    // loopbacks πάντα μέσα
+    _ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
+    _ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
+    // όλες οι τοπικές
+    ifaces, _ := net.Interfaces()
+    var v4s, v6s []string
+    for _, ifc := range ifaces {
+        if (ifc.Flags & net.FlagUp) == 0 { continue }
+        addrs, _ := ifc.Addrs()
+        for _, a := range addrs {
+            ip, _, err := net.ParseCIDR(a.String())
+            if err != nil || ip == nil { continue }
+            if ip.IsLoopback() { continue }
+            if v4 := ip.To4(); v4 != nil {
+                v4s = append(v4s, v4.String())
+            } else {
+                v6s = append(v6s, ip.String())
+            }
+        }
+    }
+    // batch add
+    for _, ip := range v4s { _ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", ip)) }
+    for _, ip := range v6s { _ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", ip)) }
+}
+
+
+
+// isSelfIPString: true αν είναι loopback ή υπάρχει στα self_v4/self_v6
+func (b *Backend) isSelfIPString(s string) bool {
+    ip := net.ParseIP(strings.TrimSpace(s))
+    if ip == nil {
+        return false
+    }
+    if ip.IsLoopback() {
+        return true
+    }
+    // γρήγορος έλεγχος: κοιτάμε το text των sets (αρκετό για skip)
+    if ip.To4() != nil {
+        out4, _ := b.runCmdOutput("list set inet cfm self_v4")
+        if strings.Contains(out4, ip.String()) {
+            return true
+        }
+    } else {
+        out6, _ := b.runCmdOutput("list set inet cfm self_v6")
+        if strings.Contains(out6, ip.String()) {
+            return true
+        }
+    }
+    return false
 }
