@@ -17,13 +17,6 @@ func (b *Backend) ApplyHardeningRules(c *cfgpkg.Config) error {
 		_ = b.nftExpr(`add counter inet cfm badflags_drop`)
 	}
 
-	// NEW-rate: counters + per-source tracking sets (for logging / autoblock)
-	if c.Hardening.NewRate > 0 {
-		_ = b.nftExpr(`add counter inet cfm newrate_v4`)
-		_ = b.nftExpr(`add counter inet cfm newrate_v6`)
-		_ = b.nftExpr(`add set inet cfm th_new_v4 { type ipv4_addr; flags timeout; }`)
-		_ = b.nftExpr(`add set inet cfm th_new_v6 { type ipv6_addr; flags timeout; }`)
-	}
 
 	// ICMP echo: counters + per-source tracking sets (for logging / autoblock)
 	if c.Hardening.ICMPRate > 0 {
@@ -33,11 +26,19 @@ func (b *Backend) ApplyHardeningRules(c *cfgpkg.Config) error {
 		_ = b.nftExpr(`add set inet cfm th_icmp_v6 { type ipv6_addr; flags timeout; }`)
 	}
 
+
+	// NEW-rate: counters + per-source tracking sets (for logging / autoblock)
+	if c.Hardening.NewRate > 0 {
+		_ = b.nftExpr(`add counter inet cfm newrate_v4`)
+		_ = b.nftExpr(`add counter inet cfm newrate_v6`)
+		_ = b.nftExpr(`add set inet cfm th_new_v4 { type ipv4_addr; flags timeout; }`)
+		_ = b.nftExpr(`add set inet cfm th_new_v6 { type ipv6_addr; flags timeout; }`)
+	}
+
+
 	// --- 1) Bad TCP flags (placed early in 'flood') ---
 	if c.Hardening.BlockBadTCPFlags {
 		badflags := []string{
-			// NEW without SYN: drop ACK in ct state NEW (prevents some scan tricks)
-			`add rule inet cfm flood ct state new tcp flags & ack == ack counter name "badflags_drop" drop comment "new-without-SYN"`,
 			// SYN+FIN (illegal)
 			`add rule inet cfm flood tcp flags & (syn|fin) == (syn|fin) counter name "badflags_drop" drop comment "SYN+FIN"`,
 			// SYN+RST (illegal)
@@ -69,24 +70,28 @@ func (b *Backend) ApplyHardeningRules(c *cfgpkg.Config) error {
 	// --- 2) Global per-IP NEW-rate (meters) ---
 	// If a source exceeds NEW_RATE (with burst), drop + mark in th_new_* and throttled_*
 	if c.Hardening.NewRate > 0 {
-		expr4 := fmt.Sprintf(
-			`add rule inet cfm flood ct state new `+
-				`meter new_v4 { ip saddr limit rate over %d/second burst %d packets } `+
-				`add @th_new_v4 { ip saddr timeout %ds } `+
-				`add @throttled_v4 { ip saddr timeout %ds } `+
-				`counter name "newrate_v4" drop comment "global-new-v4"`,
-			c.Hardening.NewRate, burstNew, ttl, ttl,
-		)
+expr4 := fmt.Sprintf(
+  `add rule inet cfm flood ct state new `+
+    `ip protocol != icmp `+ // <-- ΕΞΑΙΡΕΣΗ ICMPv4
+    `meter new_v4 { ip saddr limit rate over %d/second burst %d packets } `+
+    `add @th_new_v4 { ip saddr timeout %ds } `+
+    `add @throttled_v4 { ip saddr timeout %ds } `+
+    `counter name "newrate_v4" drop comment "global-new-v4(no-icmp)"`,
+  c.Hardening.NewRate, burstNew, ttl, ttl,
+)
+
 		if err := b.nftExpr(expr4); err != nil { return err }
 
-		expr6 := fmt.Sprintf(
-			`add rule inet cfm flood ct state new `+
-				`meter new_v6 { ip6 saddr limit rate over %d/second burst %d packets } `+
-				`add @th_new_v6 { ip6 saddr timeout %ds } `+
-				`add @throttled_v6 { ip6 saddr timeout %ds } `+
-				`counter name "newrate_v6" drop comment "global-new-v6"`,
-			c.Hardening.NewRate, burstNew, ttl, ttl,
-		)
+expr6 := fmt.Sprintf(
+  `add rule inet cfm flood ct state new `+
+    `ip6 nexthdr != ipv6-icmp `+ // <-- ΕΞΑΙΡΕΣΗ ICMPv6
+    `meter new_v6 { ip6 saddr limit rate over %d/second burst %d packets } `+
+    `add @th_new_v6 { ip6 saddr timeout %ds } `+
+    `add @throttled_v6 { ip6 saddr timeout %ds } `+
+    `counter name "newrate_v6" drop comment "global-new-v6(no-icmp6)"`,
+  c.Hardening.NewRate, burstNew, ttl, ttl,
+)
+
 		if err := b.nftExpr(expr6); err != nil { return err }
 	}
 

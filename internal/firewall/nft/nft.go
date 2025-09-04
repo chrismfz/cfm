@@ -237,11 +237,12 @@ if err := addRule(`ct state invalid drop`); err != nil { return err }
 	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
 
 	// 6) jump flood στο τέλος του base layer
-	if !b.ruleExists("input", "jump flood") {
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
-			return err
-		}
-	}
+//	if !b.ruleExists("input", "jump flood") {
+//		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
+//			return err
+//		}
+
+//	}
 
 	return nil
 }

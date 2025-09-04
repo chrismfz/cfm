@@ -285,5 +285,14 @@ if err := addRule("output", `ct state new udp dport 0-65535 drop`); err != nil {
 
 
 
+
+        // 6) jump flood στο τέλος του base layer - moved from nft.go
+        if !b.ruleExists("input", "jump flood") {
+                if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
+                        return err
+                }
+	}
+
+
     return nil
 }
