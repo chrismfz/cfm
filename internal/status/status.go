@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"bytes"
 
 	"cfm/internal/enrich"
 )
@@ -21,18 +22,101 @@ const topN = 10 // δεν διαβάζουμε από config
 // Public entry
 // ---------------------------------------------------------------------------
 
+type DaemonInfo struct {
+	Running  bool     `json:"running"`
+	PIDs     []int    `json:"pids,omitempty"`
+	Cmdlines []string `json:"cmdlines,omitempty"`
+}
+
+type ServiceInfo struct {
+	Installed bool   `json:"installed"`
+	Enabled   string `json:"enabled,omitempty"` // enabled/disabled/static/indirect/unknown
+	Active    string `json:"active,omitempty"`  // active/inactive/failed/unknown
+}
+
+func getDaemonInfo() DaemonInfo {
+	if _, err := exec.LookPath("pgrep"); err == nil {
+		out, _ := exec.Command("pgrep", "-fa", "cfm daemon").CombinedOutput()
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		var pids []int; var cmds []string
+		for _, ln := range lines {
+			ln = strings.TrimSpace(ln)
+			if ln == "" { continue }
+			parts := strings.Fields(ln)
+			if len(parts) < 2 { continue }
+			pid, _ := strconv.Atoi(parts[0])
+			cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
+			if !strings.Contains(cmd, "cfm") || !strings.Contains(cmd, "daemon") { continue }
+			pids = append(pids, pid); cmds = append(cmds, cmd)
+		}
+		return DaemonInfo{Running: len(pids) > 0, PIDs: pids, Cmdlines: cmds}
+	}
+	// fallback με ps
+	out, _ := exec.Command("ps", "ax", "-o", "pid=,cmd=").CombinedOutput()
+	var pids []int; var cmds []string
+	for _, ln := range strings.Split(string(out), "\n") {
+		ln = strings.TrimSpace(ln); if ln == "" { continue }
+		parts := strings.Fields(ln); if len(parts) < 2 { continue }
+		pid, _ := strconv.Atoi(parts[0]); cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
+		if strings.Contains(cmd, "cfm") && strings.Contains(cmd, "daemon") { pids = append(pids, pid); cmds = append(cmds, cmd) }
+	}
+	return DaemonInfo{Running: len(pids) > 0, PIDs: pids, Cmdlines: cmds}
+}
+
+func trim1(b []byte) string { return strings.TrimSpace(string(b)) }
+func must(b []byte, _ error) []byte { return b }
+
+func getServiceInfo() ServiceInfo {
+	si := ServiceInfo{}
+	if _, err := exec.LookPath("systemctl"); err != nil { return si } // όχι systemd
+	// Installed?
+	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", "cfm.service").CombinedOutput()
+	if bytes.Contains(loadOut, []byte("LoadState=loaded")) { si.Installed = true }
+	// Enabled?
+	en := trim1(must(exec.Command("systemctl", "is-enabled", "cfm.service").CombinedOutput()))
+	if en == "" { en = "unknown" }; si.Enabled = en
+	// Active?
+	ac := trim1(must(exec.Command("systemctl", "is-active", "cfm.service").CombinedOutput()))
+	if ac == "" { ac = "unknown" }; si.Active = ac
+	return si
+}
+
+func serviceHuman(si ServiceInfo) string {
+	if !si.Installed { return "Service is not installed" }
+	en := si.Enabled
+	switch en { case "enabled","disabled","static","indirect": default: en = "unknown" }
+	var act string
+	switch si.Active { case "active": act="started"; case "inactive": act="stopped"; case "failed": act="failed"; default: act="unknown" }
+	return fmt.Sprintf("Service is %s and %s", en, act)
+}
+
+
+
 func Run(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
 
+	// Daemon/Service state
+	di := getDaemonInfo()
+	si := getServiceInfo()
+
+
 	// 1) Table/sets summary (ίδιο output με το παλιό runStatus)
 	st := readTableSummary()
+	st.Daemon = di
+	st.Service = si
+
 	if *asJSON {
 		b, _ := json.MarshalIndent(st, "", "  ")
 		fmt.Println(string(b))
 		return
 	}
+
+	hdrLeft := "CFM daemon not running"
+	if di.Running && len(di.PIDs) > 0 { hdrLeft = fmt.Sprintf("CFM daemon running (PID:%d)", di.PIDs[0]) }
+	fmt.Printf("-%s | %s-\n", hdrLeft, serviceHuman(si))
+
 	printSummary(st)
 
 // --- NEW: Conntrack usage ---
@@ -148,6 +232,10 @@ type statusOut struct {
 		Block struct{ Hosts, Prefixes, Entries int } `json:"block"`
 		Overall int                                   `json:"overall"`
 	} `json:"totals"`
+
+	Daemon  DaemonInfo  `json:"daemon"`
+	Service ServiceInfo `json:"service"`
+
 }
 
 func readTableSummary() statusOut {
