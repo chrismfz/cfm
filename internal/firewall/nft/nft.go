@@ -162,8 +162,8 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSet(setV4,   "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(setV6,   "ipv6_addr"); err != nil { return err }
 	// local and server-IPs
-        if err := b.ensureSet("self_v4" , "ipv4_addr"); err != nil { return err }
-        if err := b.ensureSet("self_v6" , "ipv6_addr"); err != nil { return err }
+	if err := b.ensureSetWithFlags("self_v4", "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags("self_v6", "ipv6_addr", "timeout,interval"); err != nil { return err }
 	// quickly load our self-IPs
 	b.refreshSelfSets()
 
@@ -1056,6 +1056,8 @@ func (b *Backend) refreshSelfSets() {
     // loopbacks πάντα μέσα
     _ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
     _ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
+    _ = b.nftExpr("add element inet cfm self_v6 { fe80::/10 };")
+
     // όλες οι τοπικές
     ifaces, _ := net.Interfaces()
     var v4s, v6s []string
