@@ -55,13 +55,13 @@ func (c *APIClient) ReportBlock(ip, reason, source, mode string, ttlSec int) err
         "description": {reason},
         "timestamp":   {time.Now().Format(time.RFC3339)},
     }
-    logging.Logf("[api] → /api/blocklist/report ip=%s", ip)
+    logging.LogfAPI("[api] → /api/blocklist/report ip=%s", ip)
     _, err := c.doPOST("/api/blocklist/report", p)
     if err != nil {
-        logging.Logf("[api] report block FAILED ip=%s err=%v", ip, err)
+        logging.LogfAPI("[api] report block FAILED ip=%s err=%v", ip, err)
         return err
     }
-    logging.Logf("[api] ← report block OK ip=%s", ip)
+    logging.LogfAPI("[api] ← report block OK ip=%s", ip)
     return nil
 }
 
@@ -72,13 +72,13 @@ func (c *APIClient) ReportUnblock(ip, source, why string) error {
         "source": {source}, // "manual"
         "reason": {why},    // optional
     }
-    logging.Logf("[api] → /api/blocklist/unblock ip=%s source=%s", ip, source)
+    logging.LogfAPI("[api] → /api/blocklist/unblock ip=%s source=%s", ip, source)
     _, err := c.doPOST("/api/blocklist/unblock", p)
     if err != nil {
-        logging.Logf("[api] report unblock FAILED ip=%s err=%v", ip, err)
+        logging.LogfAPI("[api] report unblock FAILED ip=%s err=%v", ip, err)
         return err
     }
-    logging.Logf("[api] ← report unblock OK ip=%s", ip)
+    logging.LogfAPI("[api] ← report unblock OK ip=%s", ip)
     return nil
 }
 
@@ -94,26 +94,36 @@ type PendingUnblock struct {
 }
 
 
+
 func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
-    u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/pending-unblocks"
-    req, _ := http.NewRequest("GET", u, nil)
-    req.Header.Set("Token", c.Token)
-    req.Header.Set("Accept", "application/json")
-    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
-    resp, err := c.http().Do(req)
-    if err != nil { return nil, err }
-    defer resp.Body.Close()
-    if resp.StatusCode >= 300 {
-        b, _ := io.ReadAll(resp.Body)
-        return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
-    }
-    var out struct {
-        Pending []PendingUnblock `json:"pending_unblocks"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-        return nil, err
-    }
-    return out.Pending, nil
+	u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/pending-unblocks"
+	logging.LogfAPI("[api] → GET %s", u)
+
+	req, _ := http.NewRequest("GET", u, nil)
+	req.Header.Set("Token", c.Token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
+	}
+
+	var out struct {
+		Pending []PendingUnblock `json:"pending_unblocks"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+
+	logging.LogfAPI("[api] ← pending_unblocks=%d", len(out.Pending))
+	return out.Pending, nil
 }
 
 

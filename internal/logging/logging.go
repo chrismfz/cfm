@@ -1,30 +1,53 @@
+// internal/logging/logging.go
 package logging
 
 import (
     "cfm/internal/config"
     "fmt"
     "os"
+    "path/filepath"
+    "strings"
     "sync"
     "time"
 )
 
 var (
-    logFile *os.File
-    once    sync.Once
-    cfg     *config.LoggingConfig
+    logFile    *os.File
+    apiLogFile *os.File
+
+    once sync.Once
+    cfg  *config.LoggingConfig
 )
 
 // Init πρέπει να καλεστεί από main με την config
 func Init(c *config.LoggingConfig) {
     cfg = c
     once.Do(func() {
+        // κύριο log
         if cfg.File != "" {
-            f, err := os.OpenFile(cfg.File,
-                os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-            if err == nil {
+            if f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
                 logFile = f
             } else {
                 fmt.Printf("failed to open log file %s: %v\n", cfg.File, err)
+            }
+        }
+
+        // API log
+        apiPath := cfg.APIFile
+        if apiPath == "" && cfg.File != "" {
+            base := cfg.File
+            ext := filepath.Ext(base)
+            if ext == "" {
+                apiPath = base + ".api"
+            } else {
+                apiPath = strings.TrimSuffix(base, ext) + ".api" + ext
+            }
+        }
+        if apiPath != "" {
+            if f, err := os.OpenFile(apiPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+                apiLogFile = f
+            } else {
+                fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
             }
         }
     })
@@ -39,6 +62,22 @@ func Logf(format string, args ...interface{}) {
         fmt.Print(line)
     }
     if logFile != nil {
+        _, _ = logFile.WriteString(line)
+    }
+}
+
+// NEW: ξεχωριστό κανάλι για API logs
+func LogfAPI(format string, args ...interface{}) {
+    ts := time.Now().Format("2006-01-02 15:04:05")
+    msg := fmt.Sprintf(format, args...)
+    line := fmt.Sprintf("%s %s\n", ts, msg)
+
+    if cfg == nil || cfg.APIStdout {
+        fmt.Print(line)
+    }
+    if apiLogFile != nil {
+        _, _ = apiLogFile.WriteString(line)
+    } else if logFile != nil { // fallback: αν δεν άνοιξε API log, γράψε στο κύριο
         _, _ = logFile.WriteString(line)
     }
 }

@@ -85,6 +85,9 @@ func (r *Runner) loop() {
 		case <-t.C:
 			r.doHeartbeat(context.Background())
 			r.fetchPendingUnblocks(context.Background())
+			r.pollExecutions(context.Background())
+			r.syncConfigs(context.Background())
+
 			// μελλοντικά: r.pollExecutions(), r.fetchPendingUnblocks(), r.syncConfigs()...
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)

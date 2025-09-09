@@ -81,6 +81,8 @@ type APIConfig struct {
 type LoggingConfig struct {
 	Stdout bool   // true = log to stdout (LOG_STDOUT)
 	File   string // path to logfile, "" = disabled (LOG_FILE)
+	APIStdout bool   // API_LOG_STDOUT: αν δεν οριστεί, θα κληρονομήσει το Stdout
+	APIFile   string // API_LOG_FILE: path για API log, "" = derive από File (π.χ. /var/log/cfm.api.log)
 }
 
 type NFTConfig struct {
@@ -245,19 +247,27 @@ case "UNBLOCK_SEND_TO_API":
 		case "LOG_FILE":
 			cfg.Logging.File = val
 
+// NEW:
+case "API_LOG_STDOUT":
+    cfg.Logging.APIStdout = parseBool(val)
+case "API_LOG_FILE":
+    cfg.Logging.APIFile = val
+
 		// NFT
 		case "NFT_INPUT_PRIORITY":
 			cfg.NFT.InputPriority = clamp(parseInt(val), -300, 300)
 
-		// Ports
-		case "TCP_IN":
-			cfg.Ports.TCPIn = parsePorts(val)
-		case "TCP_OUT":
-			cfg.Ports.TCPOut = parsePorts(val)
-		case "UDP_IN":
-			cfg.Ports.UDPIn = parsePorts(val)
-		case "UDP_OUT":
-			cfg.Ports.UDPOut = parsePorts(val)
+
+// Ports
+case "TCP_IN":
+    cfg.Ports.TCPIn = append(cfg.Ports.TCPIn, parsePorts(val)...)
+case "TCP_OUT":
+    cfg.Ports.TCPOut = append(cfg.Ports.TCPOut, parsePorts(val)...)
+case "UDP_IN":
+    cfg.Ports.UDPIn = append(cfg.Ports.UDPIn, parsePorts(val)...)
+case "UDP_OUT":
+    cfg.Ports.UDPOut = append(cfg.Ports.UDPOut, parsePorts(val)...)
+
 
 		// Connlimit & PortFlood
 		case "CONNLIMIT":

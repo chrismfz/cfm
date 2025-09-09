@@ -28,6 +28,8 @@ import (
 	"cfm/internal/sysctl"
 	status "cfm/internal/status"
 	ipquery "cfm/internal/ipquery"
+	"cfm/internal/unblock"
+	"cfm/internal/reporting"
 )
 
 var (
@@ -266,72 +268,82 @@ func runBlock(args []string) {
 }
 
 
-
-
-
-
+//global unblock//
 func runUnblock(args []string) {
-    if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>"); os.Exit(2) }
-    ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
+    if len(args) < 1 {
+        fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>")
+        os.Exit(2)
+    }
+    ip := net.ParseIP(args[0])
+    if ip == nil {
+        fmt.Fprintln(os.Stderr, "invalid IP")
+        os.Exit(2)
+    }
 
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-
-    // Προ-έλεγχοι: υπήρχε σε block set; υπήρχε στο cfm.deny;
-    wasInSet := false
-    if entries, err := be.ListBlocks(); err == nil {
-        for _, e := range entries { if e.IP.Equal(ip) { wasInSet = true; break } }
+    be := getBackend()
+    if be == nil {
+        fmt.Fprintln(os.Stderr, "no firewall backend available")
+        os.Exit(1)
+    }
+    if err := be.EnsureBase(); err != nil {
+        fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+        os.Exit(1)
     }
 
     cfgDir, _ := resolveConfigDir("")
-    wasInFile := false
-    if cfgDir != "" {
-        wasInFile = containsIPInFile(cfgDir, "cfm.deny", ip.String())
-    }
 
-    // Εκτέλεση unblocking
-    if err := be.RemoveBlock(ip); err != nil {
-        fmt.Fprintln(os.Stderr, "unblock error:", err); os.Exit(1)
-    }
-
-    removedFromFile := false
-    if cfgDir != "" {
-        if ok, _ := removeIPFromFile(cfgDir, "cfm.deny", ip.String()); ok {
-            removedFromFile = true
-        }
-    }
-
-
-
-if wasInSet || wasInFile || removedFromFile {
-    // “κανονικό” success
-    sentToAPI := false
+    // --- εδώ ακριβώς όπως το έχεις σήμερα ---
+    var reporter reporting.Reporter
+    var sendAPI bool
     if cfgDir != "" {
         if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
-            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.UnblockSend {
-                if cfg.API.URL != "" && cfg.API.AuthToken != "" {
-                    api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
-                    if err := api.ReportUnblock(ip.String(), "manual", "cli"); err != nil {
-                        fmt.Printf("✔ unblocked %s (API report failed: %v)\n", ip.String(), err)
-                        return
-                    }
-                    fmt.Printf("✔ unblocked %s (also sent to API)\n", ip.String())
-                    sentToAPI = true
-                }
+            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil &&
+                cfg.API.UnblockSend &&
+                cfg.API.URL != "" &&
+                cfg.API.AuthToken != "" {
+                reporter = &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
+                sendAPI = true
             }
         }
     }
-    if !sentToAPI {
-        fmt.Printf("✔ unblocked %s\n", ip.String())
+
+    ttl := 1 * time.Hour
+    res, err := unblock.Do(context.Background(), ip, unblock.Options{
+        BE:            be,
+        ConfigDir:     cfgDir,
+        TempWhitelist: true,
+        AllowTTL:      &ttl,
+        Reporter:      reporter,
+        ReportWhy:     "cli",
+        SendAPI:       sendAPI,
+    })
+    if err != nil {
+        fmt.Fprintln(os.Stderr, "unblock error:", err)
+        os.Exit(1)
     }
-} else {
-    // δεν βρέθηκε πουθενά — πιο χρήσιμο μήνυμα
-    fmt.Printf("ℹ %s not found in block sets or cfm.deny (nothing to do)\n", ip.String())
+
+    // --- εκτύπωση report ---
+    suffix := ipquery.EnrichSuffix(cfgDir, ip.String())
+    fmt.Printf("Unblock report for %s%s\n", ip, suffix)
+    for _, s := range res.Steps {
+        feeds := ""
+        if len(s.Feeds) > 0 {
+            feeds = " [feeds: " + strings.Join(s.Feeds, ",") + "]"
+        }
+        extra := s.Detail
+        if s.Err != "" {
+            extra = "ERR: " + s.Err + " " + extra
+        }
+        fmt.Printf(" - %-9s via %-10s %s%s\n",
+            s.Action, s.Source, strings.TrimSpace(extra), feeds)
+    }
+    if res.Whitelisted {
+        fmt.Println("✔ applied local whitelist override (due to feeds)")
+    }
 }
 
 
 
-}
 
 
 
