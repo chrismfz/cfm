@@ -19,6 +19,7 @@ import (
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/reporting"
 )
 
 const (
@@ -64,9 +65,11 @@ type Backend struct{
     cfg *cfgpkg.Config
 
     enr  *enrichpkg.Enricher
-
+    reporter reporting.Reporter
     cfgDir string // resolve config dir
 }
+
+func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 
 //func New() *Backend { return &Backend{} }
 

@@ -73,6 +73,9 @@ type SystemTweaksConfig struct {
 type APIConfig struct {
 	URL       string
 	AuthToken string
+	AutoBlockSend     bool // AUTOBLOCK_SEND_TO_API
+	ManualBlockSend   bool // MANUAL_BLOCK_SEND_TO_API
+	UnblockSend       bool // UNBLOCK_SEND_TO_API
 }
 
 type LoggingConfig struct {
@@ -228,6 +231,13 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.API.URL = val
 		case "AUTH_TOKEN", "TOKEN":
 			cfg.API.AuthToken = val
+
+case "AUTOBLOCK_SEND_TO_API":
+    cfg.API.AutoBlockSend = parseBool(val)
+case "MANUAL_BLOCK_SEND_TO_API":
+    cfg.API.ManualBlockSend = parseBool(val)
+case "UNBLOCK_SEND_TO_API":
+    cfg.API.UnblockSend = parseBool(val)
 
 		// Logging
 		case "LOG_STDOUT":

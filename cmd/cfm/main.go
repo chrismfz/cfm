@@ -183,41 +183,91 @@ func detectBackend() string {
 // ----------------------------------------------------------------------------
 
 func runBlock(args []string) {
-	fs := flag.NewFlagSet("block", flag.ExitOnError)
-	reason := fs.String("r", "", "reason/comment (currently ignored)")
-	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
-	flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true, "-r": true})
-	_ = fs.Parse(flagArgs)
+    fs := flag.NewFlagSet("block", flag.ExitOnError)
+    // reason done
+    reasonFlag := fs.String("r", "", "reason/comment")
+    ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
+    flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true, "-r": true})
+    _ = fs.Parse(flagArgs)
 
-	ipStr := ""
-	if len(posArgs) > 0 { ipStr = posArgs[0] }
-	if ipStr == "" { rem := fs.Args(); if len(rem) > 0 { ipStr = rem[0] } }
-	if ipStr == "" { fmt.Fprintln(os.Stderr, "usage: cfm block <IP> [-r REASON] [--ttl 1h]"); os.Exit(2) }
+    // IP
+    if len(posArgs) == 0 && len(fs.Args()) > 0 {
+        posArgs = append(posArgs, fs.Args()[0])
+        if len(fs.Args()) > 1 { posArgs = append(posArgs, fs.Args()[1:]...) }
+    }
+    if len(posArgs) == 0 {
+        fmt.Fprintln(os.Stderr, "usage: cfm block <IP> [-r REASON] [--ttl 1h] | cfm block <IP> <REASON...>")
+        os.Exit(2)
+    }
+    ipStr := posArgs[0]
+    ip := net.ParseIP(ipStr)
+    if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
 
-	ip := net.ParseIP(ipStr)
-	if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
+    // Reason: είτε από -r, είτε από τα υπόλοιπα positionals
+    rsn := strings.TrimSpace(*reasonFlag)
+    if rsn == "" && len(posArgs) > 1 {
+        rsn = strings.TrimSpace(strings.Join(posArgs[1:], " "))
+    }
+    if rsn == "" { rsn = "manual block" }
 
-	var dur *time.Duration
-	if *ttlFlag != "" {
-		if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 { dur = &d } else { fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)"); os.Exit(2) }
-	}
+    // TTL
+    var dur *time.Duration
+    if *ttlFlag != "" {
+        if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 {
+            dur = &d
+        } else {
+            fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)")
+            os.Exit(2)
+        }
+    }
 
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-	if err := be.AddBlock(ip, *reason, dur); err != nil { fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1) }
+    // Firewall apply
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    if err := be.AddBlock(ip, rsn, dur); err != nil { fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1) }
 
-if cfgDir, ok := resolveConfigDir(""); ok {
-	// Γράφε στο cfm.deny μόνο για permanent (δηλ. χωρίς TTL)
-	if dur == nil || (dur != nil && *dur <= 0) {
-		line := ip.String()
-		if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
-			fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err)
-		}
-	}
+    // cfm.deny (μόνο σε permanent)
+    if cfgDir, ok := resolveConfigDir(""); ok {
+        if dur == nil || (dur != nil && *dur <= 0) {
+            // Γράφουμε σχόλιο μετά το IP — οι helpers σου αγνοούν ό,τι είναι μετά από κενό/# όταν κάνουν remove/search
+            line := ip.String()
+            if rsn != "" { line += "  # " + rsn }
+            if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
+                fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err)
+            }
+        }
+    }
+
+    // API report (προαιρετικό)
+    if cfgDir, ok := resolveConfigDir(""); ok {
+        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
+                if cfg.API.URL != "" && cfg.API.AuthToken != "" {
+                    api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
+                    // Στέλνουμε comment = reason, description = reason
+                    // derive mode/ttl from --ttl
+                    mode, ttlSec := "permanent", 0
+                    if dur != nil && *dur > 0 {
+                        mode, ttlSec = "ttl", int(dur.Seconds())
+                    }
+                                    if err := api.ReportBlock(ip.String(), rsn, "manual-cli", mode, ttlSec); err != nil {
+                        fmt.Printf("✔ blocked %s (API report failed: %v)\n", ip.String(), err)
+                        return
+                    }
+                    fmt.Printf("✔ blocked %s (also sent to API)\n", ip.String())
+                    return
+                }
+            }
+        }
+    }
+
+    fmt.Printf("✔ blocked %s\n", ip.String())
 }
 
-	fmt.Printf("✔ blocked %s\n", ip.String())
-}
+
+
+
+
 
 func runUnblock(args []string) {
     if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>"); os.Exit(2) }
@@ -250,17 +300,36 @@ func runUnblock(args []string) {
         }
     }
 
-    if wasInSet || wasInFile || removedFromFile {
-        // “κανονικό” success
-        fmt.Printf("✔ unblocked %s\n", ip.String())
-        // προαιρετικά, μπορείς να προσθέσεις λεπτομέρειες:
-        // if os.Getenv("CFM_DEBUG") != "" {
-        //     fmt.Printf("   details: wasInSet=%v wasInFile=%v removedFromFile=%v\n", wasInSet, wasInFile, removedFromFile)
-        // }
-    } else {
-        // δεν βρέθηκε πουθενά — πιο χρήσιμο μήνυμα
-        fmt.Printf("ℹ %s not found in block sets or cfm.deny (nothing to do)\n", ip.String())
+
+
+if wasInSet || wasInFile || removedFromFile {
+    // “κανονικό” success
+    sentToAPI := false
+    if cfgDir != "" {
+        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.UnblockSend {
+                if cfg.API.URL != "" && cfg.API.AuthToken != "" {
+                    api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
+                    if err := api.ReportUnblock(ip.String(), "manual", "cli"); err != nil {
+                        fmt.Printf("✔ unblocked %s (API report failed: %v)\n", ip.String(), err)
+                        return
+                    }
+                    fmt.Printf("✔ unblocked %s (also sent to API)\n", ip.String())
+                    sentToAPI = true
+                }
+            }
+        }
     }
+    if !sentToAPI {
+        fmt.Printf("✔ unblocked %s\n", ip.String())
+    }
+} else {
+    // δεν βρέθηκε πουθενά — πιο χρήσιμο μήνυμα
+    fmt.Printf("ℹ %s not found in block sets or cfm.deny (nothing to do)\n", ip.String())
+}
+
+
+
 }
 
 
@@ -555,6 +624,13 @@ if nb, ok2 := be.(*nft.Backend); ok2 {
     logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
     logging.Logf("[daemon] === Finished all nft applies ===")
+
+
+  if cfg.API.URL != "" && cfg.API.AuthToken != "" {
+        api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
+        nb.SetReporter(api) // από εδώ και πέρα τα autoblocks θα κάνουν ReportBlock
+    }
+
 }
 
 

@@ -754,34 +754,60 @@ case "alert", "dryrun":
 
 
 
-    case "ttl":
-        ttl := tc.TTLSeconds
-        if fam == "v4" {
-            logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
-                logIP, ttl, tc.Hits, tc.WindowSec, reason)
-            // TTL: ΔΕΝ γράφουμε στο cfm.deny
-            return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
-        }
-        logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
+case "ttl":
+    ttl := tc.TTLSeconds
+    if fam == "v4" {
+        logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
             logIP, ttl, tc.Hits, tc.WindowSec, reason)
-        return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
 
-    default: // permanent
-        // Σχόλιο για το cfm.deny
-        comment := reason
- if cleanExtra != "" { comment += " | " + cleanExtra }
-
-        if fam == "v4" {
-            logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
-                logIP, tc.Hits, tc.WindowSec, reason)
-            _ = b.appendToDenyFile(ip, comment) // γράψε στο cfm.deny
-            return b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
+        // 1) Κάνε το nft add
+        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
+        // 2) Report ΜΟΝΟ αν πέτυχε και είναι on το flag
+        if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+            _ = b.reporter.ReportBlock(ip, reason, "autoblock", "ttl", ttl)
         }
-        logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+        return err
+    }
+    logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
+        logIP, ttl, tc.Hits, tc.WindowSec, reason)
+    err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
+    if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+
+  cmt := reason
+        if cleanExtra != "" { cmt += " | " + cleanExtra }
+        _ = b.reporter.ReportBlock(ip, cmt, "autoblock", "ttl", ttl)
+
+    }
+    return err
+
+default: // permanent
+    comment := reason
+    if cleanExtra != "" { comment += " | " + cleanExtra }
+
+    if fam == "v4" {
+        logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
             logIP, tc.Hits, tc.WindowSec, reason)
         _ = b.appendToDenyFile(ip, comment)
-        return b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
+
+        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
+        if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+
+    _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+        }
+        return err
     }
+
+    logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+        logIP, tc.Hits, tc.WindowSec, reason)
+    _ = b.appendToDenyFile(ip, comment)
+
+    err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
+    if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+        _ = b.reporter.ReportBlock(ip, reason, "autoblock", "permanent", 0)
+    }
+    return err
+
+}
 }
 
 
