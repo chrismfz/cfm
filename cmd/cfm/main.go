@@ -30,6 +30,8 @@ import (
 	ipquery "cfm/internal/ipquery"
 	"cfm/internal/unblock"
 	"cfm/internal/reporting"
+
+	detpkg "cfm/internal/detectors"
 )
 
 var (
@@ -669,6 +671,17 @@ if nb, ok2 := be.(*nft.Backend); ok2 {
 	applyPorts()
 	if os.Getenv("CFM_DEBUG") == "2" { fmt.Printf("Starting MAD COW FIREWALL v2 \n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
+
+
+
+// detectors logic
+detpkg.Start(context.Background(), detpkg.Options{
+    CfgPath: filepath.Join(cfgDir, "detections.conf"),
+    Sink:    detpkg.LoggerSink{},
+})
+
+
+
 
 	// Loop
 	t := time.NewTicker(*interval); defer t.Stop()
