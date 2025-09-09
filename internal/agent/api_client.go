@@ -1,6 +1,7 @@
 package agent
 
 import (
+    "encoding/json"
     "fmt"
     "io"
     "net/http"
@@ -78,5 +79,58 @@ func (c *APIClient) ReportUnblock(ip, source, why string) error {
         return err
     }
     logging.Logf("[api] ← report unblock OK ip=%s", ip)
+    return nil
+}
+
+
+
+
+
+// Pending unblock flow ------------------------------------------------------
+
+type PendingUnblock struct {
+    ID int    `json:"id"`
+    IP string `json:"ip"`
+}
+
+
+func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
+    u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/pending-unblocks"
+    req, _ := http.NewRequest("GET", u, nil)
+    req.Header.Set("Token", c.Token)
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+    resp, err := c.http().Do(req)
+    if err != nil { return nil, err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        b, _ := io.ReadAll(resp.Body)
+        return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
+    }
+    var out struct {
+        Pending []PendingUnblock `json:"pending_unblocks"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+        return nil, err
+    }
+    return out.Pending, nil
+}
+
+
+func (c *APIClient) ConfirmUnblock(id int, ip string, success bool) error {
+    u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/unblock-confirm"
+    body := fmt.Sprintf(`{"id":%d,"ip":"%s","success":%t}`, id, ip, success)
+    req, _ := http.NewRequest("POST", u, strings.NewReader(body))
+    req.Header.Set("Token", c.Token)
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+    resp, err := c.http().Do(req)
+    if err != nil { return err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        b, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
+    }
     return nil
 }

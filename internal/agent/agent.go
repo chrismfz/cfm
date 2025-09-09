@@ -9,6 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"cfm/internal/firewall"
+	"cfm/internal/logging"
 )
 
 type Config struct {
@@ -26,6 +29,8 @@ type Runner struct {
 	stop   chan struct{}
 	wg     sync.WaitGroup
 	once   sync.Once
+	backend firewall.Backend
+	cfgDir  string
 }
 
 func New(cfg Config) *Runner {
@@ -45,6 +50,25 @@ func New(cfg Config) *Runner {
 func (r *Runner) Start() { r.once.Do(func() { r.wg.Add(1); go r.loop() }) }
 func (r *Runner) Stop()  { select { case <-r.stop: default: close(r.stop) }; r.wg.Wait() }
 func (r *Runner) Update(cfg Config) { r.cfg.Store(normalize(cfg)) }
+// Setters so main can wire dependencies without exporting fields
+func (r *Runner) SetBackend(b firewall.Backend) { r.backend = b }
+func (r *Runner) SetConfigDir(dir string)       { r.cfgDir = dir }
+
+
+func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
+    cfg := r.cur()
+    if cfg.BaseURL == "" || cfg.Token == "" { return }
+
+    api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
+    reqs, err := api.FetchPendingUnblocks()
+    if err != nil {
+        logging.Logf("[unblock] fetch pending failed: %v", err)
+        return
+    }
+    for _, it := range reqs {
+        go api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+    }
+}
 
 func (r *Runner) loop() {
 	defer r.wg.Done()
@@ -60,6 +84,7 @@ func (r *Runner) loop() {
 			return
 		case <-t.C:
 			r.doHeartbeat(context.Background())
+			r.fetchPendingUnblocks(context.Background())
 			// μελλοντικά: r.pollExecutions(), r.fetchPendingUnblocks(), r.syncConfigs()...
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)
