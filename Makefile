@@ -222,7 +222,7 @@ rpm: rpm_prep_dirs rpm_spec_version stage-rpm ## Δημιουργεί .rpm
 .PHONY: release
 
 # at top (or before recipe)
-GH := env -u GH_TOKEN -u GITHUB_TOKEN gh
+GH := gh
 
 release: deb rpm
 	@set -euo pipefail; \
