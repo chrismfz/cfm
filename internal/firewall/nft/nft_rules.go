@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	"os"
+	"encoding/json"
 	"path/filepath"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
@@ -87,6 +88,11 @@ func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
 		// idempotently create the sets
 		_ = b.nftExpr(fmt.Sprintf("add set inet cfm %s { type ipv4_addr; flags timeout; }", setV4))
 		_ = b.nftExpr(fmt.Sprintf("add set inet cfm %s { type ipv6_addr; flags timeout; }", setV6))
+
+
+
+b.registerClSet(setV4)
+b.registerClSet(setV6)
 
 		switch r.Proto {
 		case "tcp":
@@ -217,6 +223,10 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 
 		num, unit := mapRate(r.Packets, r.WindowSec)
 		ttl := b.cfg.Throttle.SetTTL
+
+b.registerPfSet(setV4)
+b.registerPfSet(setV6)
+
 
 		switch proto {
 		case "tcp":
@@ -425,98 +435,49 @@ case strings.HasPrefix(name, "th_icmp_"):
 
 
 
-// DumpThrottledIPs prints current IPs present in throttled sets (v4/v6).
+// DumpThrottledIPs prints current IPs present in throttled sets (v4/v6),
+// χωρίς full table dump. Διαβάζει ΜΟΝΟ τα στοχευμένα throttling sets.
 func (b *Backend) DumpThrottledIPs() {
+    // --- helpers ---
 
-dump := func(set string) []string {
-
-if !b.setExists(set) { return nil } // το set δεν υπάρχει; ήσυχα skip
-
-    out, err := b.runCmdOutput("list set inet cfm " + set)
-    if err != nil {
-        return nil
-    }
-    i := strings.Index(out, "elements = {")
-    if i < 0 {
-        return nil
-    }
-    rest := out[i+len("elements = {"):]
-    j := strings.Index(rest, "}")
-    if j < 0 {
-        return nil
-    }
-    elems := rest[:j]
-    raw := strings.Split(elems, ",")
-    var ips []string
-    for _, t := range raw {
-        t = strings.TrimSpace(t)
-        if t == "" {
-            continue
+    // Στοχευμένο dump ενός set σε []string IPs (αγνοεί self IPs).
+    dumpSet := func(set string) []string {
+        if set == "" || !b.setExists(set) {
+            return nil
         }
-        if k := strings.IndexByte(t, ' '); k >= 0 {
-            t = t[:k]
+        out, err := b.runCmdOutput("list set inet cfm " + set)
+        if err != nil {
+            return nil
         }
-        ips = append(ips, t)
-    }
-
-{
-    filtered := make([]string, 0, len(ips))
-    for _, ip := range ips {
-        if b.isSelfIPString(ip) {
-            continue
+        i := strings.Index(out, "elements = {")
+        if i < 0 {
+            return nil
         }
-        filtered = append(filtered, ip)
-    }
-    ips = filtered
-}
-
-
-if len(ips) > 0 {
-    reason := reasonForName(set)
-    if b.enr == nil {
-        // χωρίς enrichment, κράτα το παλιό συμπεριφορά
-        logging.Logf("[throttle] %s (%s): %s", set, reason, strings.Join(ips, ", "))
-        for _, ip := range ips {
-            lastThrottleReason[ip] = reason
+        rest := out[i+len("elements = {"):]
+        j := strings.Index(rest, "}")
+        if j < 0 {
+            return nil
+        }
+        elems := strings.Split(strings.TrimSpace(rest[:j]), ",")
+        ips := make([]string, 0, len(elems))
+        for _, t := range elems {
+            t = strings.TrimSpace(t)
+            if t == "" {
+                continue
+            }
+            // Κόψε οτιδήποτε μετά το IP (π.χ. "timeout 60s")
+            if k := strings.IndexByte(t, ' '); k >= 0 {
+                t = t[:k]
+            }
+            if t == "" || b.isSelfIPString(t) {
+                continue
+            }
+            ips = append(ips, t)
         }
         return ips
     }
 
-    for _, ip := range ips {
-        logging.Logf("[throttle] %s (%s): %s%s", set, reason, ip, b.enrichLabel(ip))
-        lastThrottleReason[ip] = reason
-    }
-
-}
-    return ips
-}
-
-
-// ----------------------------
-    // Source-aware collection (honors THROTTLE_SOURCES)
-    // ----------------------------
-    // Parse enabled sources from config (or env fallback)
-    enabled := map[string]bool{}
-    var srcs []string
-    if len(b.cfg.Throttle.Sources) > 0 {
-        srcs = b.cfg.Throttle.Sources
-    } else {
-        s := os.Getenv("THROTTLE_SOURCES")
-        if s == "" {
-            s = "syn,portflood,pps,new,icmp" // default
-        }
-        for _, t := range strings.Split(s, ",") {
-            srcs = append(srcs, t)
-        }
-    }
-    for _, t := range srcs {
-        k := strings.ToLower(strings.TrimSpace(t))
-        if k != "" {
-            enabled[k] = true
-        }
-    }
-
-    // We’ll union all IPs we dumped (but still print per-set lines above).
+    // Ενοποίηση (v4/v6) για autoblock.
     uniq4 := map[string]struct{}{}
     uniq6 := map[string]struct{}{}
     merge := func(ips []string) {
@@ -529,52 +490,123 @@ if len(ips) > 0 {
         }
     }
 
-    // SYN source
+    // Πηγές (THROTTLE_SOURCES ή cfg.Throttle.Sources)
+    enabled := map[string]bool{}
+    var srcs []string
+    if b.cfg != nil && len(b.cfg.Throttle.Sources) > 0 {
+        srcs = b.cfg.Throttle.Sources
+    } else {
+        env := strings.TrimSpace(os.Getenv("THROTTLE_SOURCES"))
+        if env == "" {
+            env = "syn,portflood,pps,new,icmp" // default
+        }
+        for _, t := range strings.Split(env, ",") {
+            srcs = append(srcs, t)
+        }
+    }
+    for _, t := range srcs {
+        k := strings.ToLower(strings.TrimSpace(t))
+        if k != "" {
+            enabled[k] = true
+        }
+    }
+
+    // --- σταθερά throttling sets (λίγα, μικρά) ---
     if enabled["syn"] {
-        merge(dump("th_syn_v4"))
-        merge(dump("th_syn_v6"))
+        merge(dumpSet("th_syn_v4"))
+        merge(dumpSet("th_syn_v6"))
     }
-    // PPS source
     if enabled["pps"] {
-        merge(dump("th_pps_v4"))
-        merge(dump("th_pps_v6"))
+        merge(dumpSet("th_pps_v4"))
+        merge(dumpSet("th_pps_v6"))
     }
-// NEW-rate source
-if enabled["new"] {
-    merge(dump("th_new_v4"))
-    merge(dump("th_new_v6"))
-}
-
-// ICMP source
-if enabled["icmp"] {
-    merge(dump("th_icmp_v4"))
-    merge(dump("th_icmp_v6"))
-}
-
-    // PortFlood source (per-port sets)
-    if enabled["portflood"] {
-        for _, s := range b.listSetsWithPrefix("th_pf_") {
-            merge(dump(s))
-        }
+    if enabled["new"] {
+        merge(dumpSet("th_new_v4"))
+        merge(dumpSet("th_new_v6"))
+    }
+    if enabled["icmp"] {
+        merge(dumpSet("th_icmp_v4"))
+        merge(dumpSet("th_icmp_v6"))
     }
 
-    // Optional: Connlimit (include only if user adds it to THROTTLE_SOURCES)
+    // --- per-port PortFlood / Connlimit sets, ΜΟΝΟ στοχευμένα ---
+    // Προτεραιότητα: registries (αν τα έχεις υλοποιήσει). Αλλιώς ελαφρύ JSON metadata scan.
+
+    // 1) PortFlood
+    var pfNames []string
+    if len(b.pfSets) > 0 {
+        pfNames = append(pfNames, b.pfSets...)
+    } else if enabled["portflood"] {
+        pfNames = append(pfNames, b.listSetsMetaWithPrefix("th_pf_")...)
+    }
+    for _, s := range pfNames {
+        merge(dumpSet(s))
+    }
+
+    // 2) Connlimit (αν ενεργοποιηθεί ως source)
     if enabled["connlimit"] {
-        for _, s := range b.listSetsWithPrefix("th_connlimit_") {
-            merge(dump(s))
+        var clNames []string
+        if len(b.clSets) > 0 {
+            clNames = append(clNames, b.clSets...)
+        } else {
+            clNames = append(clNames, b.listSetsMetaWithPrefix("th_connlimit_")...)
+        }
+        for _, s := range clNames {
+            merge(dumpSet(s))
         }
     }
-    // Προσοχή: δεν κάνουμε dump των generic 'throttled_v4/v6' για να μη φαίνεται "General throttle".
-    // Αυτό κρατάει το output καθαρό, αλλά το autoblock μετράει κανονικά από τα enabled sources.
-    if b.cfg.Throttle.Enabled {
+
+    // --- autoblock από τις ενεργές πηγές ---
+    if b.cfg != nil && b.cfg.Throttle.Enabled {
         var v4, v6 []string
         for ip := range uniq4 { v4 = append(v4, ip) }
         for ip := range uniq6 { v6 = append(v6, ip) }
         b.autoBlockEval(v4, v6, b.cfg.Throttle)
     }
-
-
 }
+
+// listSetsMetaWithPrefix: ΕΛΑΦΡΥ metadata scan (χωρίς elements).
+// Χρησιμοποιεί `nft -j list sets inet cfm` και φιλτράρει με prefix.
+func (b *Backend) listSetsMetaWithPrefix(prefix string) []string {
+    raw, err := exec.Command("nft", "-j", "list", "sets", "inet", "cfm").CombinedOutput()
+    if err != nil {
+        return nil
+    }
+    var root map[string]any
+    if json.Unmarshal(raw, &root) != nil {
+        return nil
+    }
+    arr, _ := root["nftables"].([]any)
+    var names []string
+    for _, it := range arr {
+        m, _ := it.(map[string]any)
+        setObj, _ := m["set"].(map[string]any)
+        if setObj == nil {
+            continue
+        }
+        name := toStr(setObj["name"])
+        if strings.HasPrefix(name, prefix) {
+            names = append(names, name)
+        }
+    }
+    return names
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ensureCounter creates the named counter if it doesn't already exist (idempotent).
 func (b *Backend) ensureCounter(name string) {
@@ -606,6 +638,11 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 // -----------------------------------------------------------------------------
 
 // applyPerIPRateLimit installs per-IP packet/SYN rate limiting using nft "meter".
+
+
+
+
+
 
 func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))

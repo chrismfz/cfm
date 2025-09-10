@@ -57,7 +57,6 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
-rm -f /etc/cfm/*.rpmnew
 %systemd_post cfm.service
 
 %preun

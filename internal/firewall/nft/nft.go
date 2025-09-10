@@ -67,6 +67,9 @@ type Backend struct{
     enr  *enrichpkg.Enricher
     reporter reporting.Reporter
     cfgDir string // resolve config dir
+
+    pfSets   []string // th_pf_<port>_<proto>_v4/v6
+    clSets   []string // th_connlimit_<port>_<proto>_v4/v6
 }
 
 func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
@@ -78,6 +81,20 @@ func New() *Backend {
         last: make(map[string]int),
     }
 }
+
+
+
+
+func (b *Backend) registerPfSet(name string) {
+    for _, s := range b.pfSets { if s == name { return } }
+    b.pfSets = append(b.pfSets, name)
+}
+func (b *Backend) registerClSet(name string) {
+    for _, s := range b.clSets { if s == name { return } }
+    b.clSets = append(b.clSets, name)
+}
+
+
 
 // Προαιρετικός helper: ενεργοποιεί enrichment αν βρεθούν mmdb σε dirs
 func (b *Backend) EnableEnrichment(dirs ...string) {
