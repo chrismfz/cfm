@@ -28,6 +28,41 @@ func init() {
 	})
 
 
+Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+    defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
+    defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
+    rawDirs := kvStr(kv, "ENRICH_DIRS", "")
+    var dirs []string
+    if rawDirs != "" {
+        fields := strings.FieldsFunc(rawDirs, func(r rune) bool { return r == ',' || r == ':' || r == ' ' || r == '\t' })
+        for _, f := range fields { if f != "" { dirs = append(dirs, f) } }
+    }
+    cfg := exim.SecConfig{
+        LogPath:     kvStr(kv, "LOG_PATH", ""),
+        Every:       kvDur(kv, "EVERY", defEvery),
+        Window:      kvDur(kv, "WINDOW", 15*time.Minute),
+        SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+        Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+
+        RulesPath:   kvStr(kv, "RULES", ""),
+
+        UseEnrich:   kvBool(kv, "ENRICH", true),
+        UsePTR:      kvBool(kv, "PTR", true),
+        EnrichDirs:  dirs,
+    }
+    return exim.NewSecurity(cfg), nil
+})
+
+
+
+
+
+
+
+
+
+
+
 
   Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
         // defaults από [global]

@@ -461,39 +461,28 @@ func (w *windowCounter) Add(key string, t time.Time) int {
 
 // ---- helpers ----
 
-func autoDetectEximLog() string {
-    // 1) γνωστά paths
-    paths := []string{
-        "/var/log/exim_mainlog",
-        "/var/log/exim4/mainlog",
-        "/var/log/exim/mainlog",
-    }
-    for _, p := range paths {
-        if _, err := os.Stat(p); err == nil {
-            return p
-        }
-    }
 
-    // 2) scan /var/log
-    var found string
-    _ = filepath.Walk("/var/log", func(path string, info os.FileInfo, err error) error {
-        if err != nil || info.IsDir() {
-            return nil
+
+func autoDetectEximLog() string {
+        paths := []string{"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog"}
+        for _, p := range paths {
+                if _, err := os.Stat(p); err == nil { return p }
         }
-        base := filepath.Base(path)
-        if base != "exim_mainlog" && base != "mainlog" {
-            return nil
-        }
-        // ελαφρύ check ότι είναι όντως exim log
-        out, _ := exec.Command("/bin/sh", "-lc", fmt.Sprintf("head -n1 %q | grep -qi exim", path)).CombinedOutput()
-        if len(out) == 0 { // grep -q -> no output on match
-            found = path
-            return filepath.SkipDir // σταμάτα νωρίς
-        }
-        return nil
-    })
-    return found
+        var found string
+        _ = filepath.Walk("/var/log", func(path string, info os.FileInfo, err error) error {
+                if err != nil || info.IsDir() { return nil }
+                base := filepath.Base(path)
+                if base != "exim_mainlog" && base != "mainlog" { return nil }
+                out, _ := exec.Command("/bin/sh", "-lc", fmt.Sprintf("head -n1 %q | grep -qi exim", path)).CombinedOutput()
+                if len(out) == 0 { found = path; return filepath.SkipDir }
+                return nil
+        })
+        return found
 }
+
+
+
+
 
 
 

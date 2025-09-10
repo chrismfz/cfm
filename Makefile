@@ -231,7 +231,7 @@ release: deb rpm
 	DEB_FILE="$$(ls -1t build/deb/cfm_*_amd64.deb | head -n1)"; \
 	RPM_FILE="$$(ls -1t packaging/rpm/RPMS/*/cfm-*.rpm | head -n1)"; \
 	[ -n "$$DEB_FILE" ] || { echo "No .deb package found in build/deb"; exit 1; }; \
-	[ -n "$$RPM_FILE" ] || { echo "No .rpm package found in packaging/rpm/RPPS"; exit 1; }; \
+	[ -n "$$RPM_FILE" ] || { echo "No .rpm package found in packaging/rpm/RPMS"; exit 1; }; \
 	echo "📦 DEB=$$DEB_FILE"; echo "📦 RPM=$$RPM_FILE"; \
 	sha256sum "$$DEB_FILE" "$$RPM_FILE" > checksums.txt; \
 	REPO="chrismfz/cfm"; \
@@ -248,7 +248,7 @@ release: deb rpm
 	  echo "↻ Release $(TAG) already exists."; \
 	fi; \
 	# 2) upload assets (clobber)
-	echo "⬆️  Uploading assets..."; \
+	echo "⬆️  Uploading: $$DEB_FILE $$RPM_FILE"; \
 	$(GH) release upload "$(TAG)" "$$DEB_FILE" "$$RPM_FILE" checksums.txt \
 	  --repo "$$REPO" --clobber; \
 	echo "✅ Assets uploaded."; \
