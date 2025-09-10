@@ -83,6 +83,9 @@ type LoggingConfig struct {
 	File   string // path to logfile, "" = disabled (LOG_FILE)
 	APIStdout bool   // API_LOG_STDOUT: αν δεν οριστεί, θα κληρονομήσει το Stdout
 	APIFile   string // API_LOG_FILE: path για API log, "" = derive από File (π.χ. /var/log/cfm.api.log)
+        DETECTORStdout bool
+        DETECTORFile   string
+
 }
 
 type NFTConfig struct {
@@ -252,6 +255,13 @@ case "API_LOG_STDOUT":
     cfg.Logging.APIStdout = parseBool(val)
 case "API_LOG_FILE":
     cfg.Logging.APIFile = val
+
+
+case "DETECTOR_LOG_STDOUT":
+    cfg.Logging.DETECTORStdout = parseBool(val)
+case "DETECTOR_LOG_FILE":
+    cfg.Logging.DETECTORFile = val
+
 
 		// NFT
 		case "NFT_INPUT_PRIORITY":

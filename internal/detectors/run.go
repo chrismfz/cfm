@@ -17,7 +17,7 @@ func (LoggerSink) Publish(a core.Alert) {
         lim = a.Extra["limit"]
     }
     if lim != "" {
-        logging.Logf(
+        logging.LogfDETECTOR(
             "\nTime:  %s\nType:  %s, %s\nCount: %d (limit: %s)\nBlocked: No\n\nSample of the first %d lines:\n\n%s\n",
             a.When.Format("Mon Jan 2 15:04:05 2006 -0700"),
             a.Kind, a.Key, a.Count, lim,
@@ -25,7 +25,7 @@ func (LoggerSink) Publish(a core.Alert) {
             joinLines(a.Samples),
         )
     } else {
-        logging.Logf(
+        logging.LogfDETECTOR(
             "\nTime:  %s\nType:  %s, %s\nCount: %d\nBlocked: No\n\nSample of the first %d lines:\n\n%s\n",
             a.When.Format("Mon Jan 2 15:04:05 2006 -0700"),
             a.Kind, a.Key, a.Count,

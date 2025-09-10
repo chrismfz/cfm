@@ -14,6 +14,7 @@ import (
 var (
     logFile    *os.File
     apiLogFile *os.File
+    detectorLogFile *os.File
 
     once sync.Once
     cfg  *config.LoggingConfig
@@ -50,8 +51,39 @@ func Init(c *config.LoggingConfig) {
                 fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
             }
         }
+
+
+
+
+
+
+
+        // DETECTOR log
+        detectorPath := cfg.DETECTORFile
+        if detectorPath == "" && cfg.File != "" {
+            base := cfg.File
+            ext := filepath.Ext(base)
+            if ext == "" {
+                detectorPath = base + ".detector"
+            } else {
+                detectorPath = strings.TrimSuffix(base, ext) + ".detector" + ext
+            }
+        }
+        if detectorPath != "" {
+            if f, err := os.OpenFile(detectorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+                detectorLogFile = f
+            } else {
+                fmt.Printf("failed to open detector log file %s: %v\n", detectorPath, err)
+            }
+        }
     })
+
 }
+
+
+
+
+
 
 func Logf(format string, args ...interface{}) {
     ts := time.Now().Format("2006-01-02 15:04:05")
@@ -81,3 +113,23 @@ func LogfAPI(format string, args ...interface{}) {
         _, _ = logFile.WriteString(line)
     }
 }
+
+
+
+
+// NEW: ξεχωριστό κανάλι για Detector Logs
+func LogfDETECTOR(format string, args ...interface{}) {
+    ts := time.Now().Format("2006-01-02 15:04:05")
+    msg := fmt.Sprintf(format, args...)
+    line := fmt.Sprintf("%s %s\n", ts, msg)
+
+    if cfg == nil || cfg.DETECTORStdout {
+        fmt.Print(line)
+    }
+    if detectorLogFile != nil {
+        _, _ = detectorLogFile.WriteString(line)
+    } else if logFile != nil { // fallback: αν δεν άνοιξε API log, γράψε στο κύριο
+        _, _ = logFile.WriteString(line)
+    }
+}
+
