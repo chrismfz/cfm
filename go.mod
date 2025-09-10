@@ -5,6 +5,7 @@ go 1.24.4
 require (
 	github.com/miekg/dns v1.1.68
 	github.com/oschwald/geoip2-golang v1.13.0
+	golang.org/x/text v0.28.0
 )
 
 require (

@@ -2,7 +2,7 @@ package detectors
 
 import (
 	"context"
-	"log"
+//	"log"
 	"time"
 
 	"cfm/internal/logging"
@@ -12,14 +12,31 @@ import (
 type LoggerSink struct{}
 
 func (LoggerSink) Publish(a core.Alert) {
-	log.Printf(
-		"\nTime:  %s\nType:  %s, %s\nCount: %d\nBlocked: No\n\nSample of the first %d lines:\n\n%s\n",
-		a.When.Format("Mon Jan 2 15:04:05 2006 -0700"),
-		a.Kind, a.Key, a.Count,
-		len(a.Samples),
-		joinLines(a.Samples),
-	)
+    lim := ""
+    if a.Extra != nil {
+        lim = a.Extra["limit"]
+    }
+    if lim != "" {
+        logging.Logf(
+            "\nTime:  %s\nType:  %s, %s\nCount: %d (limit: %s)\nBlocked: No\n\nSample of the first %d lines:\n\n%s\n",
+            a.When.Format("Mon Jan 2 15:04:05 2006 -0700"),
+            a.Kind, a.Key, a.Count, lim,
+            len(a.Samples),
+            joinLines(a.Samples),
+        )
+    } else {
+        logging.Logf(
+            "\nTime:  %s\nType:  %s, %s\nCount: %d\nBlocked: No\n\nSample of the first %d lines:\n\n%s\n",
+            a.When.Format("Mon Jan 2 15:04:05 2006 -0700"),
+            a.Kind, a.Key, a.Count,
+            len(a.Samples),
+            joinLines(a.Samples),
+        )
+    }
 }
+
+
+
 
 func joinLines(ss []string) string {
 	out := ""

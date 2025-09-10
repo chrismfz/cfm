@@ -143,7 +143,37 @@ func (m *manager) maybeReload(parent context.Context) {
 
 			logging.Logf("[detectors] start %s (every=%s timeout=%s cooldown=%s total>%d frozen>%d total_cmd=%q list_cmd=%q)",
 				secName, every, timeout, cooldown, totalMax, frozenMax, totalCmd, listCmd)
-		} else {
+
+		}else if typ == "exim_relays" {
+    defEvery := kvDur(secs.Global, "DEFAULT_EVERY", 5*time.Second)
+    defCooldown := kvDur(secs.Global, "DEFAULT_COOLDOWN", 10*time.Minute)
+    every := kvDur(kv, "EVERY", defEvery)
+    window := kvDur(kv, "WINDOW", 15*time.Minute)
+    cooldown := kvDur(kv, "COOLDOWN", defCooldown)
+    logPath := kvStr(kv, "LOG_PATH", "")
+    logDisp := logPath
+    if logDisp == "" {
+        logDisp = "(autodetect)"
+    }
+    localUser := kvInt(kv, "LOCAL_USER_MAX", 40)
+    authUser := kvInt(kv, "AUTH_USER_MAX", 50)
+    authIP := kvInt(kv, "AUTH_IP_MAX", 80)
+    authUserIP := kvInt(kv, "AUTH_USERIP_MAX", 40)
+    unauthIP := kvInt(kv, "UNAUTH_IP_MAX", 10)
+
+enrichOn := kvBool(kv, "ENRICH", true)
+ptrOn    := kvBool(kv, "PTR", true)
+dirsDisp := kvStr(kv, "ENRICH_DIRS", "(defaults)")
+
+
+logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresholds: local/user>%d auth/user>%d auth/ip>%d auth/userip>%d unauth/ip>%d enrich=%t ptr=%t dirs=%s)",
+    secName, every, window, cooldown, logDisp,
+    localUser, authUser, authIP, authUserIP, unauthIP,
+    enrichOn, ptrOn, dirsDisp,
+)
+
+
+}else {
 			logging.Logf("[detectors] start %s (every=%s)", secName, det.Every())
 		}
 
