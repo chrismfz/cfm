@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 	"os"
-	"encoding/json"
+//	"encoding/json"
 	"path/filepath"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
@@ -301,34 +301,50 @@ b.registerPfSet(setV6)
 // -----------------------------------------------------------------------------
 // Debug/telemetry
 // -----------------------------------------------------------------------------
-
 // DumpFloodCounters logs flood-related counters with delta since last tick.
+// Ελαφριά: δεν κάνει ποτέ "list table", μόνο "list counters".
 func (b *Backend) DumpFloodCounters() {
-if !b.tableExists() {
-    _ = b.EnsureBase() // προσπάθησε να επαναφέρεις βάση
-}
+	// Πάρε όλους τους counters του table (χωρίς sets/elements).
 	out, err := b.runCmdOutput("list counters table inet cfm")
 	if err != nil {
+		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
+		_ = b.EnsureBase()
 		fmt.Println("[flood] cannot list counters:", err)
 		return
 	}
 
-	wanted := func(name string) bool {
-
- if name == "badflags_drop" || name == "newrate_v4" || name == "newrate_v6" || name == "icmp_v4" || name == "icmp_v6" {
-        return true
-    }
-
+	// Γρήγορο φίλτρο: counters που μας ενδιαφέρουν 1) ονομαστικά, 2) με prefixes
+	wantedExact := map[string]struct{}{
+		"badflags_drop":     {},
+		"newrate_v4":        {},
+		"newrate_v6":        {},
+		"icmp_v4":           {},
+		"icmp_v6":           {},
+		"synproxy_probe_v4": {},
+		"synproxy_probe_v6": {},
+		"synproxy_challenge": {},
+		"synproxy_pass":     {},
+	}
+	hasWantedPrefix := func(name string) bool {
 		return strings.HasPrefix(name, "connlimit_") ||
 			strings.HasPrefix(name, "portflood_") ||
 			strings.HasPrefix(name, "synrate_") ||
 			strings.HasPrefix(name, "ppsrate_")
+	}
+	isWanted := func(name string) bool {
+		if _, ok := wantedExact[name]; ok {
+			return true
+		}
+		return hasWantedPrefix(name)
 	}
 
 	if b.last == nil {
 		b.last = map[string]int{}
 	}
 
+	// Παράδειγμα output (text):
+	// counter badflags_drop { packets 1234 bytes 5678 }
+	// counter portflood_80_tcp { packets 42 bytes 1234 }
 	var cur string
 	scan := bufio.NewScanner(strings.NewReader(out))
 	for scan.Scan() {
@@ -337,11 +353,13 @@ if !b.tableExists() {
 			continue
 		}
 
+		// Νέα καταμέτρηση counter
 		if strings.HasPrefix(s, "counter ") {
+			// "counter <name> {"
 			f := strings.Fields(s)
 			if len(f) >= 2 {
 				name := strings.TrimSuffix(f[1], "{")
-				if wanted(name) {
+				if isWanted(name) {
 					cur = name
 				} else {
 					cur = ""
@@ -350,24 +368,33 @@ if !b.tableExists() {
 			continue
 		}
 
+		// Γραμμή πακέτων
 		if cur != "" && strings.HasPrefix(s, "packets ") {
-			f := strings.Fields(s) // ["packets", "<N>", "bytes", "<M>"]
+			// "packets <N> bytes <M>"
+			f := strings.Fields(s)
 			if len(f) >= 2 {
-				if pkts, err := strconv.Atoi(f[1]); err == nil && pkts > 0 {
+				if pkts64, err := strconv.ParseUint(f[1], 10, 64); err == nil {
+					pkts := int(pkts64)
 					prev := b.last[cur]
-					delta := pkts - prev
-					if delta > 0 {
-						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s", cur, pkts, delta, reasonForName(cur))
-
+					if pkts > prev {
+						delta := pkts - prev
+						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
+							cur, pkts, delta, reasonForName(cur))
 					}
+					// handle reset (pkts < prev) σιωπηλά: απλά ενημέρωσε την τιμή
 					b.last[cur] = pkts
 				}
 			}
 		}
 	}
 
-	b.DumpThrottledIPs()
+	// Throttle IPs dump μόνο όταν είναι ενεργό.
+	if b.cfg != nil && b.cfg.Throttle.Enabled {
+		b.DumpThrottledIPs()
+	}
 }
+
+
 
 
 
@@ -575,37 +602,6 @@ if enabled["connlimit"] {
         b.autoBlockEval(v4, v6, b.cfg.Throttle)
     }
 }
-
-// listSetsMetaWithPrefix: ΕΛΑΦΡΥ metadata scan (χωρίς elements).
-// Χρησιμοποιεί `nft -j list sets inet cfm` και φιλτράρει με prefix.
-func (b *Backend) listSetsMetaWithPrefix(prefix string) []string {
-    raw, err := exec.Command("nft", "-j", "list", "sets", "inet", "cfm").CombinedOutput()
-    if err != nil {
-        return nil
-    }
-    var root map[string]any
-    if json.Unmarshal(raw, &root) != nil {
-        return nil
-    }
-    arr, _ := root["nftables"].([]any)
-    var names []string
-    for _, it := range arr {
-        m, _ := it.(map[string]any)
-        setObj, _ := m["set"].(map[string]any)
-        if setObj == nil {
-            continue
-        }
-        name := toStr(setObj["name"])
-        if strings.HasPrefix(name, prefix) {
-            names = append(names, name)
-        }
-    }
-    return names
-}
-
-
-
-
 
 
 

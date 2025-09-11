@@ -616,10 +616,24 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 
 // -------- shell helpers --------
 
+//func (b *Backend) tableExists() bool {
+//	_, err := exec.Command("nft", "list", "table", family, tableName).CombinedOutput()
+//	return err == nil
+//}
+
+// list tables, ΟΧΙ list table inet cfm
 func (b *Backend) tableExists() bool {
-	_, err := exec.Command("nft", "list", "table", family, tableName).CombinedOutput()
-	return err == nil
+    // προτιμώ απλό text για μέγιστη συμβατότητα
+    out, err := exec.Command("sh","-lc", "nft list tables 2>/dev/null").Output()
+    if err != nil { return false }
+    for _, ln := range strings.Split(string(out), "\n") {
+        if strings.TrimSpace(ln) == "table inet cfm" { return true }
+    }
+    return false
 }
+
+
+
 func (b *Backend) chainExists(chain string) bool {
 	_, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	return err == nil
