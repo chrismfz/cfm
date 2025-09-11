@@ -21,6 +21,7 @@ func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blockli
 		return nil
 	}
 	feedKey := SanitizeFeedName(f.Name)
+
 	isAllow := (f.Type == blocklists.TypeAllow)
 	base := "block_ext"
 	if isAllow {
@@ -45,6 +46,7 @@ func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blockli
 	if err := b.EnsureSetDynamic(nameN6, true,  true);  err == nil { _ = b.ReplaceSetFlushAdd(nameN6, n6, ttl) }
 
 	// μετά από κάθε apply, ξαναχτίσε τα unions που κοιτούν οι rules
+b.registerFeedKey(feedKey)
 	return b.RebuildExternalUnions()
 }
 

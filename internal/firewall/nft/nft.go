@@ -70,6 +70,7 @@ type Backend struct{
 
     pfSets   []string // th_pf_<port>_<proto>_v4/v6
     clSets   []string // th_connlimit_<port>_<proto>_v4/v6
+    feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
 }
 
 func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
@@ -79,10 +80,20 @@ func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 func New() *Backend {
     return &Backend{
         last: make(map[string]int),
+	feedKeys: make(map[string]struct{}),
     }
 }
 
 
+
+func (b *Backend) registerFeedKey(k string) {
+    if b.feedKeys == nil { b.feedKeys = map[string]struct{}{} }
+    b.feedKeys[k] = struct{}{}
+}
+func (b *Backend) unregisterFeedKey(k string) {
+    if b.feedKeys == nil { return }
+    delete(b.feedKeys, k)
+}
 
 
 func (b *Backend) registerPfSet(name string) {
@@ -1034,6 +1045,10 @@ func (b *Backend) DropFeedSets(feedName string) {
         _ = exec.Command("nft", "flush", "set", "inet", tableName, s).Run()
         _ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
     }
+  // ➊ βγάλε το feed από το registry για να μην το “δει” ξανά
+    b.unregisterFeedKey(suff)
+    // ➋ ξαναχτίσε τα union sets χωρίς αυτό το feed
+    _ = b.RebuildExternalUnions()
 }
 
 

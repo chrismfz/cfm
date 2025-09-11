@@ -151,27 +151,37 @@ b.registerClSet(setV6)
 // Helpers
 // -----------------------------------------------------------------------------
 // listSetsWithPrefix lists set names in table 'inet cfm' that start with the given prefix.
+
+// listSetsWithPrefix: φτιάχνει τα ονόματα από το in-memory registry· κανένα nft call.
 func (b *Backend) listSetsWithPrefix(prefix string) []string {
-	out, err := b.runCmdOutput("list table inet cfm")
-	if err != nil {
-		return nil
-	}
-	var names []string
-	// sets show as: 'set <name> { ... }'
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "set ") {
-			continue
-		}
-		name := strings.TrimPrefix(line, "set ")
-		if i := strings.Index(name, " "); i >= 0 {
-			name = name[:i]
-		}
-		if strings.HasPrefix(name, prefix) {
-			names = append(names, name)
-		}
-	}
-	return names
+    var out []string
+
+    // per-feed sets (allow/block, v4/v6, hosts/nets)
+    if strings.HasPrefix(prefix, "allow_ext_") || strings.HasPrefix(prefix, "block_ext_") {
+        for k := range b.feedKeys {
+            cand := []string{
+                "allow_ext_v4_hosts_" + k, "allow_ext_v4_nets_" + k,
+                "allow_ext_v6_hosts_" + k, "allow_ext_v6_nets_" + k,
+                "block_ext_v4_hosts_" + k, "block_ext_v4_nets_" + k,
+                "block_ext_v6_hosts_" + k, "block_ext_v6_nets_" + k,
+            }
+            for _, name := range cand {
+                if strings.HasPrefix(name, prefix) {
+                    out = append(out, name)
+                }
+            }
+        }
+    }
+
+    // throttling per-port registries (ήδη τα γεμίζεις στην ApplyPortFlood/ApplyConnlimit)
+    if strings.HasPrefix(prefix, "th_pf_") {
+        out = append(out, b.pfSets...)
+    }
+    if strings.HasPrefix(prefix, "th_connlimit_") {
+        out = append(out, b.clSets...)
+    }
+
+    return out
 }
 
 
@@ -533,28 +543,29 @@ func (b *Backend) DumpThrottledIPs() {
     // Προτεραιότητα: registries (αν τα έχεις υλοποιήσει). Αλλιώς ελαφρύ JSON metadata scan.
 
     // 1) PortFlood
-    var pfNames []string
-    if len(b.pfSets) > 0 {
-        pfNames = append(pfNames, b.pfSets...)
-    } else if enabled["portflood"] {
-        pfNames = append(pfNames, b.listSetsMetaWithPrefix("th_pf_")...)
+
+// --- per-port PortFlood / Connlimit sets, ΜΟΝΟ μέσω registry ---
+
+if enabled["portflood"] {
+    if len(b.pfSets) == 0 {
+        // προαιρετικό debug για να ξέρεις γιατί δεν βλέπεις dumps:
+        // logging.Debugf("[throttle] no registered PortFlood sets yet")
     }
-    for _, s := range pfNames {
+    for _, s := range b.pfSets {
         merge(dumpSet(s))
     }
+}
 
-    // 2) Connlimit (αν ενεργοποιηθεί ως source)
-    if enabled["connlimit"] {
-        var clNames []string
-        if len(b.clSets) > 0 {
-            clNames = append(clNames, b.clSets...)
-        } else {
-            clNames = append(clNames, b.listSetsMetaWithPrefix("th_connlimit_")...)
-        }
-        for _, s := range clNames {
-            merge(dumpSet(s))
-        }
+// conn limit
+if enabled["connlimit"] {
+    if len(b.clSets) == 0 {
+        // logging.Debugf("[throttle] no registered Connlimit sets yet")
     }
+    for _, s := range b.clSets {
+        merge(dumpSet(s))
+    }
+}
+
 
     // --- autoblock από τις ενεργές πηγές ---
     if b.cfg != nil && b.cfg.Throttle.Enabled {
