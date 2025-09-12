@@ -634,6 +634,12 @@ if nb, ok2 := be.(*nft.Backend); ok2 {
     logging.Logf("[daemon] === End ApplyFloodRules ===")
 
 
+// after cfg.Summary() logging, before ApplyFloodRules
+if cfg.AckGuard.Enabled {
+    logging.Logf("[ackguard] will protect ports with NEW+ACK filter (rate=%d/s burst=%d)",
+        cfg.AckGuard.Rate, cfg.AckGuard.Burst)
+}
+
 
 
     logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")

@@ -22,10 +22,18 @@ type Config struct {
 	Portscan   PortscanConfig
 	SystemTweaks SystemTweaksConfig
 	Hardening  HardeningConfig
+	AckGuard AckGuardConfig
 }
 
 // --- Categories ---
 
+
+type AckGuardConfig struct {
+    Enabled bool            `conf:"ACKGUARD_ENABLED"`        // 1/0
+    Rate    int             `conf:"ACKGUARD_RATE"`           // packets per second
+    Burst   int             `conf:"ACKGUARD_BURST"`          // packets
+    Ports   []PortRange     `conf:"ACKGUARD_PORTS"`          // same PortRange you use elsewhere
+}
 
 type HardeningConfig struct {
     BlockBadTCPFlags bool // BLOCK_BAD_TCP_FLAGS
@@ -322,6 +330,28 @@ case "UDP_OUT":
 			cfg.Portscan.OnlyPorts = parsePorts(val)
 		case "PS_PORTS":
 			cfg.Portscan.Ports = parseIntCSV(val)
+
+
+
+
+
+    // --- ACKGUARD ---
+    case "ACKGUARD_ENABLED":
+        cfg.AckGuard.Enabled = (val == "1" || strings.ToLower(val) == "true")
+
+    case "ACKGUARD_RATE":
+        if n, err := strconv.Atoi(val); err == nil {
+            cfg.AckGuard.Rate = n
+        }
+
+    case "ACKGUARD_BURST":
+        if n, err := strconv.Atoi(val); err == nil {
+            cfg.AckGuard.Burst = n
+        }
+
+    case "ACKGUARD_PORTS":
+        cfg.AckGuard.Ports = append(cfg.AckGuard.Ports, parsePorts(val)...)
+
 
 
 // Hardening

@@ -34,6 +34,8 @@ type ServiceInfo struct {
 	Active    string `json:"active,omitempty"`  // active/inactive/failed/unknown
 }
 
+type nftCounter struct{ Name string; Packets int }
+
 func getDaemonInfo() DaemonInfo {
 	if _, err := exec.LookPath("pgrep"); err == nil {
 		out, _ := exec.Command("pgrep", "-fa", "cfm daemon").CombinedOutput()
@@ -118,6 +120,17 @@ func Run(args []string) {
 	fmt.Printf("-%s | %s-\n", hdrLeft, serviceHuman(si))
 
 	printSummary(st)
+
+
+// NEW ACK-Guard
+if ctrs, err := readNftCounters(); err == nil {
+    if v, ok := ctrs["acknew_drop"]; ok && v > 0 {
+        fmt.Printf("ACK-NEW drops: %d packets\n", v)
+    } else {
+        fmt.Println("ACK-NEW drops: 0")
+    }
+}
+
 
 // --- NEW: Conntrack usage ---
 	if ct, mx, err := readConntrackUsage(); err == nil && mx > 0 {
@@ -612,3 +625,25 @@ func readConntrackUsage() (count, max int, err error) {
 	return
 }
 
+
+
+
+// helper to read counters from nft JSON
+func readNftCounters() (map[string]int, error) {
+    out := map[string]int{}
+    b, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", "cfm").CombinedOutput()
+    if err != nil { return out, err }
+    var root map[string]any
+    if err := json.Unmarshal(b, &root); err != nil { return out, err }
+    arr, _ := root["nftables"].([]any)
+    for _, it := range arr {
+        m, _ := it.(map[string]any)
+        c, ok := m["counter"].(map[string]any)
+        if !ok { continue }
+        name, _ := c["name"].(string)
+        pkts := 0
+        if pk, ok := c["packets"].(float64); ok { pkts = int(pk) }
+        if name != "" { out[name] = pkts }
+    }
+    return out, nil
+}

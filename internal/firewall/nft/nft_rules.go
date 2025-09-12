@@ -35,6 +35,12 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
     _ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
     _ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
 
+// NEW: AckGuard (runs first if enabled)
+if c.AckGuard.Enabled {
+    if err := b.ApplyAckGuard(&c.AckGuard); err != nil { return err }
+}
+
+
     // 3) Συνέχισε με τα υπόλοιπα
     b.ensureThrottleSets()
 
