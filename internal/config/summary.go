@@ -80,20 +80,6 @@ lines = append(lines, fmt.Sprintf(
 ))
 
 
-// --- Synproxy
-spAuto := "-"
-if c.Synproxy.AutoTCPIn { spAuto = "TCP_IN" }
-extra := "-"
-if len(c.Synproxy.Ports) > 0 {
-	var ss []string
-	for _, p := range c.Synproxy.Ports { ss = append(ss, fmt.Sprintf("%d", p)) }
-	extra = strings.Join(ss, ",")
-}
-lines = append(lines, fmt.Sprintf(
-	"synproxy: enable=%t auto=%s extra=[%s] mss=%d wscale=%d sack=%t tstamp=%t",
-	c.Synproxy.Enable, spAuto, extra, c.Synproxy.MSS, c.Synproxy.WScale, c.Synproxy.SACK, c.Synproxy.TStamp,
-))
-
 
 
 	// --- Portscan

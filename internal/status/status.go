@@ -125,10 +125,7 @@ func Run(args []string) {
 		fmt.Printf("Conntrack: %d / %d (%.0f%%)\n", ct, mx, p)
 	}
 
-// --- NEW: SYNPROXY counters ---
-if ch, ps, err := readSynproxyCounters(); err == nil {
-    fmt.Printf("SYNPROXY: challenge=%d pass=%d\n", ch, ps)
-}
+
 
 
 	// 2) Top N από conntrack (inbound προς TCP_IN)
@@ -615,35 +612,3 @@ func readConntrackUsage() (count, max int, err error) {
 	return
 }
 
-// --- SYNPROXY counters (sum challenge/pass) ---
-func readSynproxyCounters() (challenge, pass uint64, err error) {
-	raw, e := exec.Command("nft", "-j", "list", "chain", "inet", "cfm", "input").CombinedOutput()
-	if e != nil { err = e; return }
-	var root map[string]any
-	if e := json.Unmarshal(raw, &root); e != nil { err = e; return }
-	arr, _ := root["nftables"].([]any)
-	for _, it := range arr {
-		m, _ := it.(map[string]any)
-		rule, ok := m["rule"].(map[string]any)
-		if !ok { continue }
-		expr, _ := rule["expr"].([]any)
-		for _, ex := range expr {
-			em, _ := ex.(map[string]any)
-			cm, ok := em["counter"].(map[string]any)
-			if !ok { continue }
-			name, _ := cm["name"].(string)
-			// packets μπορεί να έρθει ως float64
-			var pk uint64
-			switch v := cm["packets"].(type) {
-			case float64: pk = uint64(v)
-			case int:     pk = uint64(v)
-			}
-			if name == "synproxy_challenge" {
-				challenge += pk
-			} else if name == "synproxy_pass" {
-				pass += pk
-			}
-		}
-	}
-	return
-}

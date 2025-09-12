@@ -611,7 +611,6 @@ func runDaemon(args []string) {
 
 		// Defaults BEFORE summary
 		cfg.SystemTweaks.SetDefaults()
-		cfg.Synproxy.SetDefaults()
 
 		// logger + summary
 		logging.Init(&cfg.Logging)
@@ -634,11 +633,8 @@ if nb, ok2 := be.(*nft.Backend); ok2 {
     }
     logging.Logf("[daemon] === End ApplyFloodRules ===")
 
-    logging.Logf("[daemon] === Begin ApplySynproxyPolicy ===")
-    if err := nb.ApplySynproxyPolicy(&cfg.Synproxy, &cfg.Ports, cfg.NFT.InputPriority); err != nil {
-        fmt.Fprintln(os.Stderr, "apply synproxy error:", err)
-    }
-    logging.Logf("[daemon] === End ApplySynproxyPolicy ===")
+
+
 
     logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
     if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {

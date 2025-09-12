@@ -21,20 +21,10 @@ type Config struct {
 	Throttle   ThrottleConfig
 	Portscan   PortscanConfig
 	SystemTweaks SystemTweaksConfig
-	Synproxy   SynproxyConfig
 	Hardening  HardeningConfig
 }
 
 // --- Categories ---
-type SynproxyConfig struct {
-	Enable    bool   // SYNPROXY_ENABLE
-	AutoTCPIn bool   // SYNPROXY_AUTO_TCP_IN
-	Ports     []int  // SYNPROXY_PORTS (comma-separated)
-	MSS       int    // SYNPROXY_MSS
-	WScale    int    // SYNPROXY_WSCALE
-	SACK      bool   // SYNPROXY_SACK
-	TStamp    bool   // SYNPROXY_TSTAMP
-}
 
 
 type HardeningConfig struct {
@@ -384,27 +374,6 @@ case "SYS_SEND_REDIRECTS":
 	cfg.SystemTweaks.SendRedirects = parseBool(val)
 
 
-case "SYNPROXY_ENABLE":
-	cfg.Synproxy.Enable = parseBool(val)
-case "SYNPROXY_AUTO_TCP_IN":
-	cfg.Synproxy.AutoTCPIn = parseBool(val)
-case "SYNPROXY_PORTS":
-	// parse comma-separated ints
-	if strings.TrimSpace(val) != "" {
-		var out []int
-		for _, t := range strings.Split(val, ",") {
-			if p := parseInt(strings.TrimSpace(t)); p > 0 { out = append(out, p) }
-		}
-		cfg.Synproxy.Ports = out
-	}
-case "SYNPROXY_MSS":
-	cfg.Synproxy.MSS = parseInt(val)
-case "SYNPROXY_WSCALE":
-	cfg.Synproxy.WScale = parseInt(val)
-case "SYNPROXY_SACK":
-	cfg.Synproxy.SACK = parseBool(val)
-case "SYNPROXY_TSTAMP":
-	cfg.Synproxy.TStamp = parseBool(val)
 
 		default:
 			// Unknown key: ignore (forward-compat) or return error if you prefer
@@ -670,21 +639,5 @@ func (c *SystemTweaksConfig) SetDefaults() {
                 c.RPFilter = 1
         }
 }
-
-
-func (s *SynproxyConfig) SetDefaults() {
-	if s.MSS == 0 { s.MSS = 1440 }
-	if s.WScale == 0 { s.WScale = 7 }
-	// Αν δεν οριστούν, θεώρησε enabled για SACK/TStamp (σύμφωνα με το πρότυπο μας)
-	// αλλά ΜΟΝΟ αν έχουν ενεργοποιηθεί γενικά τα synproxy rules.
-	if s.Enable {
-		// keep explicit false if user set "0"
-		if !s.SACK && !s.TStamp {
-			s.SACK, s.TStamp = true, true
-		}
-	}
-}
-
-
 
 

@@ -320,10 +320,6 @@ func (b *Backend) DumpFloodCounters() {
 		"newrate_v6":        {},
 		"icmp_v4":           {},
 		"icmp_v6":           {},
-		"synproxy_probe_v4": {},
-		"synproxy_probe_v6": {},
-		"synproxy_challenge": {},
-		"synproxy_pass":     {},
 	}
 	hasWantedPrefix := func(name string) bool {
 		return strings.HasPrefix(name, "connlimit_") ||
@@ -378,6 +374,8 @@ func (b *Backend) DumpFloodCounters() {
 					prev := b.last[cur]
 					if pkts > prev {
 						delta := pkts - prev
+
+
 						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
 							cur, pkts, delta, reasonForName(cur))
 					}
@@ -456,6 +454,7 @@ case strings.HasPrefix(name, "th_new_"):
     return "NEW-rate"
 case strings.HasPrefix(name, "th_icmp_"):
     return "ICMP echo limit"
+
 
 
 
