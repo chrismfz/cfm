@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"bytes"
+	"regexp"
 
 	"cfm/internal/enrich"
 )
@@ -92,9 +93,131 @@ func serviceHuman(si ServiceInfo) string {
 	return fmt.Sprintf("Service is %s and %s", en, act)
 }
 
+func shOut(cmd string) string {
+	out, _ := exec.Command("sh", "-lc", cmd).CombinedOutput()
+	return string(out)
+}
 
+func ackguardInstalled() bool {
+	s := shOut("nft list chain inet cfm flood 2>/dev/null")
+	return strings.Contains(s, "jump ackguard")
+}
+
+func ackguardPorts() string {
+	s := shOut("nft list set inet cfm ackguard_tcp_ports 2>/dev/null")
+	i := strings.Index(s, "elements = {")
+	if i == -1 { return "(none)" }
+	j := strings.Index(s[i:], "}")
+	if j == -1 { return "(none)" }
+	inner := strings.TrimSpace(s[i+len("elements = {") : i+j])
+	// collapse spaces
+	inner = strings.ReplaceAll(inner, "\n", " ")
+	inner = strings.Join(strings.Fields(inner), " ")
+	// return as-is (e.g., "80, 443, 25-30")
+	return strings.ReplaceAll(inner, " ,", ",")
+}
+
+type AckguardFeatures struct {
+	MatchInvalid  bool
+	DropNonSynNew bool
+	DropSynAckNew bool
+	RSTGuard      bool
+	FragGuard     bool
+}
+
+var (
+    reAckOnly = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == ack|ack / syn,ack)`)
+    reSynAck  = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == \(syn\|ack\)|syn,ack / syn,ack)`)
+    reNoSyn   = regexp.MustCompile(`tcp flags (?:& syn == 0|! syn)`)
+)
+
+func ackguardFeatures() AckguardFeatures {
+    s := shOut("nft list chain inet cfm ackguard 2>/dev/null")
+
+    // helpers to check both state and flag patterns
+    has := func(needState, needFlag *regexp.Regexp) bool {
+        for _, line := range strings.Split(s, "\n") {
+            line = strings.TrimSpace(line)
+            if needState.MatchString(line) && needFlag.MatchString(line) {
+                return true
+            }
+        }
+        return false
+    }
+
+    reStateNew     := regexp.MustCompile(`\bct state new\b`)
+    reStateInvalid := regexp.MustCompile(`\bct state invalid\b`)
+
+    return AckguardFeatures{
+        MatchInvalid:  has(reStateInvalid, reAckOnly),
+        DropNonSynNew: has(reStateNew,     reNoSyn),
+        DropSynAckNew: has(reStateNew,     reSynAck),
+
+        // RSTGuard: treat as enabled if we see *any* rst rule (NEW+RST or ESTABLISHED RST meter)
+        RSTGuard: strings.Contains(s, "flags & rst == rst") || strings.Contains(s, " flags rst"),
+
+        // FragGuard: either IPv4 or IPv6 fragment match present
+        FragGuard: strings.Contains(s, " ip frag-off ") || strings.Contains(s, " ip6 frag "),
+    }
+}
+
+
+type AckguardCounters struct {
+	AckNewDrop   int
+	NonSynNew    int
+	SynAckIn     int
+	RSTNew       int
+	RSTEstV4     int
+	RSTEstV6     int
+	TCPFragV4    int
+	TCPFragV6    int
+}
+
+func readAckguardCounters() AckguardCounters {
+	out := shOut("nft list counters table inet cfm 2>/dev/null")
+	// very similar style to your daemon’s DumpFloodCounters scanner. :contentReference[oaicite:1]{index=1}
+	get := func(name string) int {
+		// look for:
+		// counter <name> { packets N bytes M }
+		idx := strings.Index(out, "counter "+name+" ")
+		if idx == -1 { return 0 }
+		frag := out[idx:]
+		// find "packets <num>"
+		p := strings.Index(frag, "packets ")
+		if p == -1 { return 0 }
+		frag = frag[p+len("packets "):]
+		end := strings.IndexFunc(frag, func(r rune) bool { return r < '0' || r > '9' })
+		if end == -1 { end = len(frag) }
+		n, _ := strconv.Atoi(strings.TrimSpace(frag[:end]))
+		return n
+	}
+	return AckguardCounters{
+		AckNewDrop: get("acknew_drop"),
+		NonSynNew:  get("nonsynnew_drop"),
+		SynAckIn:   get("synack_in_drop"),
+		RSTNew:     get("rstnew_drop"),
+		RSTEstV4:   get("rst_est_v4"),
+		RSTEstV6:   get("rst_est_v6"),
+		TCPFragV4:  get("tcp_frag_drop"),
+		TCPFragV6:  get("tcp6_frag_drop"),
+	}
+}
 
 func Run(args []string) {
+
+	// optional enrich (δεν διαβάζουμε config· ψάχνει μόνο σε standard dirs)
+	en, _ := enrich.New("/etc/cfm", "./configs")
+	defer func() {
+		if en != nil {
+			en.Close()
+		}
+	}()
+
+
+
+
+
+
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
@@ -123,13 +246,108 @@ func Run(args []string) {
 
 
 // NEW ACK-Guard
-if ctrs, err := readNftCounters(); err == nil {
-    if v, ok := ctrs["acknew_drop"]; ok && v > 0 {
-        fmt.Printf("ACK-NEW drops: %d packets\n", v)
+
+    // --- AckGuard summary & counters ---
+    if ackguardInstalled() {
+        ports := ackguardPorts()
+        feats := ackguardFeatures()
+        fmt.Printf("AckGuard: installed | ports=[%s]\n", ports)
+        // features line
+        fmt.Printf("  features: invalid=%v, nonsyn-new=%v, synack-new=%v, rst=%v, frag=%v\n",
+            feats.MatchInvalid, feats.DropNonSynNew, feats.DropSynAckNew, feats.RSTGuard, feats.FragGuard)
+        // counters (non-zero first, then zeros compact)
+        ac := readAckguardCounters()
+        type kv struct{ name string; val int }
+        all := []kv{
+            {"acknew_drop", ac.AckNewDrop},
+            {"nonsynnew_drop", ac.NonSynNew},
+            {"synack_in_drop", ac.SynAckIn},
+            {"rstnew_drop", ac.RSTNew},
+            {"rst_est_v4", ac.RSTEstV4},
+            {"rst_est_v6", ac.RSTEstV6},
+            {"tcp_frag_drop", ac.TCPFragV4},
+            {"tcp6_frag_drop", ac.TCPFragV6},
+        }
+        var nonzero, zero []kv
+        for _, x := range all {
+            if x.val > 0 { nonzero = append(nonzero, x) } else { zero = append(zero, x) }
+        }
+        if len(nonzero) > 0 {
+            fmt.Print("  counters: ")
+            for i, x := range nonzero {
+                if i > 0 { fmt.Print(", ") }
+                fmt.Printf("%s=%d", x.name, x.val)
+            }
+            fmt.Println()
+        }
+        if len(zero) > 0 {
+            // keep this compact; it helps confirm wiring even when idle
+            fmt.Print("  counters(zero): ")
+            for i, x := range zero {
+                if i > 0 { fmt.Print(", ") }
+                fmt.Print(x.name)
+            }
+            fmt.Println()
+        }
     } else {
-        fmt.Println("ACK-NEW drops: 0")
+        fmt.Println("AckGuard: not installed (no jump in flood)")
+    }
+
+
+// ACKGuard IP List
+r4 := listSetElemsDetailed("ackguard_recent_v4", 20)
+r6 := listSetElemsDetailed("ackguard_recent_v6", 20)
+
+printRecent := func(label string, items []recentHit) {
+    if len(items) == 0 { return }
+    fmt.Printf("  recent(%s):\n", label)
+    for _, it := range items {
+        if en != nil {
+            r := en.Lookup(it.IP)
+            metaParts := make([]string, 0, 3)
+            if r.ASNName != "" {
+                metaParts = append(metaParts, r.ASNName)
+            } else if r.ASN != 0 {
+                metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
+            }
+            if r.Country != "" {
+                if r.City != "" {
+                    metaParts = append(metaParts, r.Country+" / "+r.City)
+                } else {
+                    metaParts = append(metaParts, r.Country)
+                }
+            }
+            if r.PTR != "" {
+                metaParts = append(metaParts, r.PTR)
+            }
+            if it.Expires != "" {
+                metaParts = append(metaParts, "ttl="+it.Expires)
+            }
+            if len(metaParts) > 0 {
+                fmt.Printf("    %-39s [%s]\n", it.IP, strings.Join(metaParts, " | "))
+                continue
+            }
+        }
+        // fallback (no enrich or no meta)
+        if it.Expires != "" {
+            fmt.Printf("    %-39s [ttl=%s]\n", it.IP, it.Expires)
+        } else {
+            fmt.Printf("    %s\n", it.IP)
+        }
     }
 }
+
+printRecent("acknew v4", r4)
+printRecent("acknew v6", r6)
+
+//
+
+
+
+
+////
+
+
 
 
 // --- NEW: Conntrack usage ---
@@ -158,13 +376,8 @@ if ctrs, err := readNftCounters(); err == nil {
 
 	total, byState, topPorts, topIPs := topNStats(entries, tcpIn, locals, topN)
 
-	// optional enrich (δεν διαβάζουμε config· ψάχνει μόνο σε standard dirs)
-	en, _ := enrich.New("/etc/cfm", "./configs")
-	defer func() {
-		if en != nil {
-			en.Close()
-		}
-	}()
+
+
 
 	fmt.Printf("\nConnections: total=%d", total)
 	if len(byState) > 0 {
@@ -188,35 +401,72 @@ if ctrs, err := readNftCounters(); err == nil {
 		}
 	}
 
-	if len(topIPs) > 0 {
-		fmt.Println("Top remote IPs (active inbound conns):")
-		for _, h := range topIPs {
-			if en != nil {
-				r := en.Lookup(h.IP)
-				metaParts := make([]string, 0, 3)
-				if r.ASNName != "" {
-					metaParts = append(metaParts, r.ASNName)
-				} else if r.ASN != 0 {
-					metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
-				}
-				if r.Country != "" {
-					if r.City != "" {
-						metaParts = append(metaParts, r.Country+" / "+r.City)
-					} else {
-						metaParts = append(metaParts, r.Country)
-					}
-				}
-				if r.PTR != "" {
-					metaParts = append(metaParts, r.PTR)
-				}
-				if len(metaParts) > 0 {
-					fmt.Printf("  %-39s %6d [%s]\n", h.IP, h.Count, strings.Join(metaParts, " | "))
-					continue
-				}
-			}
-			fmt.Printf("  %-39s %6d\n", h.IP, h.Count)
-		}
-	}
+
+if len(topIPs) > 0 {
+    fmt.Println("Top remote IPs (active inbound conns):")
+    for _, h := range topIPs {
+        // --- extras: states & ports ---
+        states := stateBreakdownByIP(entries, tcpIn, locals, h.IP)
+        ports  := portBreakdownByIP(entries, tcpIn, locals, h.IP)
+
+        var extras []string
+        if est := states["ESTABLISHED"]; est > 0 {
+            extras = append(extras, fmt.Sprintf("EST:%d", est))
+        }
+        if syn := states["SYN_SENT"]; syn > 0 {
+            extras = append(extras, fmt.Sprintf("SYN:%d", syn))
+        }
+        if tw := states["TIME_WAIT"]; tw > 0 {
+            extras = append(extras, fmt.Sprintf("TW:%d", tw))
+        }
+        // top port μόνο (όπως το παράδειγμά σου "Port: 443")
+        if len(ports) > 0 {
+            topPort, topCnt := 0, 0
+            for p, c := range ports {
+                if c > topCnt {
+                    topPort, topCnt = p, c
+                }
+            }
+            // αν θέλεις μόνο το port χωρίς "=count", βάλε fmt.Sprintf("Port:%d", topPort)
+            extras = append(extras, fmt.Sprintf("Port:%d", topPort))
+        }
+        extraStr := ""
+        if len(extras) > 0 {
+            extraStr = " - " + strings.Join(extras, ", ")
+        }
+
+        // --- enrich meta όπως πριν ---
+        meta := ""
+        if en != nil {
+            r := en.Lookup(h.IP)
+            metaParts := make([]string, 0, 3)
+            if r.ASNName != "" {
+                metaParts = append(metaParts, r.ASNName)
+            } else if r.ASN != 0 {
+                metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
+            }
+            if r.Country != "" {
+                if r.City != "" {
+                    metaParts = append(metaParts, r.Country+" / "+r.City)
+                } else {
+                    metaParts = append(metaParts, r.Country)
+                }
+            }
+            if r.PTR != "" {
+                metaParts = append(metaParts, r.PTR)
+            }
+            if len(metaParts) > 0 {
+                meta = " - [" + strings.Join(metaParts, " | ") + "]"
+            }
+        }
+
+        // Μικραίνω το padding της IP για να χωρέσουν όλα σε μία γραμμή
+        fmt.Printf("  %-17s %6d%s%s\n", h.IP, h.Count, extraStr, meta)
+    }
+}
+
+
+
 }
 
 // ---------------------------------------------------------------------------
@@ -646,4 +896,75 @@ func readNftCounters() (map[string]int, error) {
         if name != "" { out[name] = pkts }
     }
     return out, nil
+}
+
+
+
+// Parse "nft list set inet cfm <set>" and return up to max IPs with TTL if present.
+type recentHit struct {
+    IP      string
+    Expires string // e.g. "59m31s" (empty if not parsed)
+}
+
+var (
+    reElem = regexp.MustCompile(`(?P<ip>(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+)(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`)
+)
+
+func listSetElemsDetailed(set string, max int) []recentHit {
+    s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
+    out := make([]recentHit, 0, max)
+    for _, m := range reElem.FindAllStringSubmatch(s, -1) {
+        ip := strings.Trim(m[1], ",}")
+        if net.ParseIP(ip) == nil {
+            continue
+        }
+        ttl := ""
+        if len(m) > 2 {
+            ttl = strings.Trim(m[2], ",}")
+        }
+        out = append(out, recentHit{IP: ip, Expires: ttl})
+        if len(out) >= max {
+            break
+        }
+    }
+    return out
+}
+
+
+//helpers for IP status conntrack
+
+//helpers for IP status conntrack (inbound προς local + μόνο TCP_IN ports)
+func stateBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}, ip string) map[string]int {
+    m := map[string]int{}
+    for _, e := range entries {
+        if e.Src != ip {
+            continue
+        }
+        // ίδια λογική με topNStats: inbound προς local & dport ∈ TCP_IN
+        if _, inbound := locals[e.Dst]; !inbound {
+            continue
+        }
+        if _, isServer := tcpIn[e.Dport]; !isServer {
+            continue
+        }
+        m[e.State]++
+    }
+    return m
+}
+
+func portBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}, ip string) map[int]int {
+    m := map[int]int{}
+    for _, e := range entries {
+        if e.Src != ip {
+            continue
+        }
+        if _, inbound := locals[e.Dst]; !inbound {
+            continue
+        }
+        if _, isServer := tcpIn[e.Dport]; !isServer {
+            continue
+        }
+        m[e.Dport]++
+    }
+    return m
 }

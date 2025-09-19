@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"cfm/internal/logging"
-//	core "cfm/internal/detectors/core"
+	core "cfm/internal/detectors/core"
 )
 
 type manager struct {
@@ -17,6 +17,7 @@ type manager struct {
 	cancelAll context.CancelFunc
 	lastStamp int64
 	running   bool
+	state *core.State
 }
 
 func Start(parent context.Context, opts Options) {
@@ -30,6 +31,14 @@ func Start(parent context.Context, opts Options) {
 	logging.Logf("[detectors] watching %s", opts.CfgPath)
 
 	m := &manager{opts: opts}
+st, err := core.LoadState(core.DefaultStateDir)
+if err != nil {
+	logging.Logf("[detectors] state load failed: %v", err)
+} else {
+    m.state = st
+}
+m.state = st
+
 	go m.loop(parent)
 }
 
@@ -127,6 +136,13 @@ func (m *manager) maybeReload(parent context.Context) {
 			continue
 		}
 
+if pa, ok := det.(core.PositionAware); ok && m.state != nil {
+	if p, ok2 := m.state.Get(pa.Name()); ok2 {
+		pa.ApplyPosition(p)
+	}
+}
+
+
 		// Pretty print known config for exim_queues (baby steps)
 		if typ == "exim_queues" {
 			defEvery := kvDur(secs.Global, "DEFAULT_EVERY", 60*time.Second)
@@ -177,7 +193,8 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 			logging.Logf("[detectors] start %s (every=%s)", secName, det.Every())
 		}
 
-		go RunPeriodic(ctx, det, m.opts.Sink)
+		//go RunPeriodic(ctx, det, m.opts.Sink)
+		go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
 	}
 }
 

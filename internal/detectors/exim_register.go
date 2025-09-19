@@ -28,15 +28,18 @@ func init() {
 	})
 
 
+
 Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
     defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
     defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
+
     rawDirs := kvStr(kv, "ENRICH_DIRS", "")
     var dirs []string
     if rawDirs != "" {
         fields := strings.FieldsFunc(rawDirs, func(r rune) bool { return r == ',' || r == ':' || r == ' ' || r == '\t' })
         for _, f := range fields { if f != "" { dirs = append(dirs, f) } }
     }
+
     cfg := exim.SecConfig{
         LogPath:     kvStr(kv, "LOG_PATH", ""),
         Every:       kvDur(kv, "EVERY", defEvery),
@@ -45,12 +48,15 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
         Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
 
         RulesPath:   kvStr(kv, "RULES", ""),
-
         UseEnrich:   kvBool(kv, "ENRICH", true),
         UsePTR:      kvBool(kv, "PTR", true),
         EnrichDirs:  dirs,
     }
-    return exim.NewSecurity(cfg), nil
+
+    sec := exim.NewSecurity(cfg) // ✅ correct constructor
+    sec.SetName(section)         // ensure unique persistence key
+
+    return sec, nil
 })
 
 
@@ -64,48 +70,43 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
 
 
 
-  Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
-        // defaults από [global]
-        defEvery    := kvDur(global, "DEFAULT_EVERY",   5*time.Second)
-        defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
+Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+    defEvery    := kvDur(global, "DEFAULT_EVERY", 5*time.Second)
+    defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
 
-
-   // parse ENRICH_DIRS as comma/colon/space-separated list
     rawDirs := kvStr(kv, "ENRICH_DIRS", "")
     var dirs []string
     if rawDirs != "" {
-        fields := strings.FieldsFunc(rawDirs, func(r rune) bool { return r == ',' || r == ':' || r == ' ' || r == '\t' })
+        fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
+            return r == ',' || r == ':' || r == ' ' || r == '\t'
+        })
         for _, f := range fields {
             if f != "" { dirs = append(dirs, f) }
         }
     }
 
+    cfg := exim.RelaysConfig{
+        LogPath:       kvStr(kv, "LOG_PATH", ""),
+        Every:         kvDur(kv, "EVERY", defEvery),
+        Window:        kvDur(kv, "WINDOW", 15*time.Minute),
+        SampleLimit:   kvInt(kv, "SAMPLE_LIMIT", 10),
+        Cooldown:      kvDur(kv, "COOLDOWN", defCooldown),
 
+        LocalUserMax:  kvInt(kv, "LOCAL_USER_MAX",  50),
+        AuthUserMax:   kvInt(kv, "AUTH_USER_MAX",   50),
+        AuthIPMax:     kvInt(kv, "AUTH_IP_MAX",     80),
+        AuthUserIPMax: kvInt(kv, "AUTH_USERIP_MAX", 40),
+        UnauthIPMax:   kvInt(kv, "UNAUTH_IP_MAX",   20),
 
-        cfg := exim.RelaysConfig{
-            LogPath:       kvStr(kv, "LOG_PATH", ""),
-            Every:         kvDur(kv, "EVERY", defEvery),
-            Window:        kvDur(kv, "WINDOW", 15*time.Minute),
-            SampleLimit:   kvInt(kv, "SAMPLE_LIMIT", 10),
-            Cooldown:      kvDur(kv, "COOLDOWN", defCooldown),
-
-            LocalUserMax:  kvInt(kv, "LOCAL_USER_MAX",  50),
-            AuthUserMax:   kvInt(kv, "AUTH_USER_MAX",   50),
-            AuthIPMax:     kvInt(kv, "AUTH_IP_MAX",     80),
-            AuthUserIPMax: kvInt(kv, "AUTH_USERIP_MAX", 40),
-            UnauthIPMax:   kvInt(kv, "UNAUTH_IP_MAX",   20),
         UseEnrich:     kvBool(kv, "ENRICH", true),
         UsePTR:        kvBool(kv, "PTR", true),
         EnrichDirs:    dirs,
-        }
-        return exim.NewRelays(cfg), nil
-    })
+    }
+
+    rr := exim.NewRelays(cfg) // rr is *exim.Relays
+    rr.SetName(section)       // exported setter
+
+    return rr, nil // implicit upcast to core.PeriodicDetector
+})
+
 }
-
-
-
-
-
-
-
-

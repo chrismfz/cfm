@@ -33,6 +33,23 @@ type AckGuardConfig struct {
     Rate    int             `conf:"ACKGUARD_RATE"`           // packets per second
     Burst   int             `conf:"ACKGUARD_BURST"`          // packets
     Ports   []PortRange     `conf:"ACKGUARD_PORTS"`          // same PortRange you use elsewhere
+
+   // NEW toggles (all apply only to the Ports above)
+    MatchInvalid    bool `conf:"ACKGUARD_MATCH_INVALID"`     // count+drop INVALID+ACK
+    DropNonSynNew   bool `conf:"ACKGUARD_DROP_NONSYN_NEW"`   // drop NEW without SYN
+    DropSynAckNew   bool `conf:"ACKGUARD_DROP_SYNACK_NEW"`   // drop unsolicited SYN-ACK
+    RSTGuard        bool `conf:"ACKGUARD_RST_GUARD"`         // enable RST rules below
+    RSTRate         int  `conf:"ACKGUARD_RST_RATE"`          // per-source RST rate (established)
+    RSTBurst        int  `conf:"ACKGUARD_RST_BURST"`         // per-source RST burst
+    FragGuard       bool `conf:"ACKGUARD_FRAG_GUARD"`        // drop TCP fragments to ports
+
+  // Recent (tracking)
+    RecentMode string // "dryrun"|"ttl"|"permanent"
+    RecentTTL  int    // seconds when RecentMode == "ttl"
+
+    // Action (blocking decision now)
+    ActionMode string // "off"|"dryrun"|"ttl"|"permanent"
+    ActionTTL  int    // seconds when ActionMode == "ttl"
 }
 
 type HardeningConfig struct {
@@ -186,6 +203,37 @@ if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
 if c.Hardening.ICMPRate < 0 { c.Hardening.ICMPRate = 0 }
 if c.Hardening.ICMPBurst < 0 { c.Hardening.ICMPBurst = 0 }
 
+
+
+  // AckGuard defaults
+    if c.AckGuard.RecentMode == "" {
+        c.AckGuard.RecentMode = "ttl"
+    }
+    switch c.AckGuard.RecentMode {
+    case "dryrun", "ttl", "permanent":
+        // ok
+    default:
+        c.AckGuard.RecentMode = "ttl"
+    }
+    if c.AckGuard.RecentMode == "ttl" && c.AckGuard.RecentTTL <= 0 {
+        c.AckGuard.RecentTTL = 3600
+    }
+
+    if c.AckGuard.ActionMode == "" {
+        c.AckGuard.ActionMode = "off"
+    }
+    switch c.AckGuard.ActionMode {
+    case "off", "dryrun", "ttl", "permanent":
+        // ok
+    default:
+        c.AckGuard.ActionMode = "off"
+    }
+    if c.AckGuard.ActionMode == "ttl" && c.AckGuard.ActionTTL <= 0 {
+        c.AckGuard.ActionTTL = 86400
+    }
+
+
+
 }
 
 // Validate clamps, normalizes and ensures cross-field coherence.
@@ -338,19 +386,73 @@ case "UDP_OUT":
     // --- ACKGUARD ---
     case "ACKGUARD_ENABLED":
         cfg.AckGuard.Enabled = (val == "1" || strings.ToLower(val) == "true")
-
     case "ACKGUARD_RATE":
         if n, err := strconv.Atoi(val); err == nil {
             cfg.AckGuard.Rate = n
         }
-
     case "ACKGUARD_BURST":
         if n, err := strconv.Atoi(val); err == nil {
             cfg.AckGuard.Burst = n
         }
-
     case "ACKGUARD_PORTS":
         cfg.AckGuard.Ports = append(cfg.AckGuard.Ports, parsePorts(val)...)
+    case "ACKGUARD_MATCH_INVALID":
+        cfg.AckGuard.MatchInvalid = (val == "1" || strings.ToLower(val) == "true")
+
+    case "ACKGUARD_DROP_NONSYN_NEW":
+        cfg.AckGuard.DropNonSynNew = (val == "1" || strings.ToLower(val) == "true")
+
+    case "ACKGUARD_DROP_SYNACK_NEW":
+        cfg.AckGuard.DropSynAckNew = (val == "1" || strings.ToLower(val) == "true")
+
+    case "ACKGUARD_RST_GUARD":
+        cfg.AckGuard.RSTGuard = (val == "1" || strings.ToLower(val) == "true")
+
+    case "ACKGUARD_RST_RATE":
+        if n, err := strconv.Atoi(val); err == nil {
+            cfg.AckGuard.RSTRate = n
+        }
+
+    case "ACKGUARD_RST_BURST":
+        if n, err := strconv.Atoi(val); err == nil {
+            cfg.AckGuard.RSTBurst = n
+        }
+
+    case "ACKGUARD_FRAG_GUARD":
+        cfg.AckGuard.FragGuard = (val == "1" || strings.ToLower(val) == "true")
+
+
+
+
+
+  // --- ACKGUARD (modes & ttls) ---
+    case "ACKGUARD_RECENT_MODE":
+        v := strings.ToLower(val)
+        switch v {
+        case "dryrun", "ttl", "permanent":
+            cfg.AckGuard.RecentMode = v
+        default:
+            cfg.AckGuard.RecentMode = "ttl"
+        }
+
+    case "ACKGUARD_RECENT_TTL":
+        cfg.AckGuard.RecentTTL = parseInt(val)
+
+    case "ACKGUARD_ACTION_MODE":
+        v := strings.ToLower(val)
+        switch v {
+        case "off", "dryrun", "ttl", "permanent":
+            cfg.AckGuard.ActionMode = v
+        default:
+            cfg.AckGuard.ActionMode = "off"
+        }
+
+    case "ACKGUARD_ACTION_TTL":
+        cfg.AckGuard.ActionTTL = parseInt(val)
+
+
+
+
 
 
 
@@ -668,6 +770,7 @@ func (c *SystemTweaksConfig) SetDefaults() {
         if c.RPFilter == 0 {
                 c.RPFilter = 1
         }
+
 }
 
 

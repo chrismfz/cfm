@@ -1,19 +1,18 @@
 package exim
 
 import (
-	"bufio"
+//	"bufio"
 	"context"
 	"fmt"
-	"os"
-//	"os/exec"
-//	"path/filepath"
+//	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"net"
-	"syscall"
+//	"syscall"
+	"io"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
@@ -61,6 +60,9 @@ type EximSecurity struct {
 	enr      *enrich.Enricher
 	reHostIP *regexp.Regexp
 	lastFire map[string]time.Time
+
+	name string          // unique instance name (section)
+	src  *core.FileTailer
 }
 
 func NewSecurity(cfg SecConfig) *EximSecurity {
@@ -102,7 +104,12 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 	return d
 }
 
-func (d *EximSecurity) Name() string        { return "exim_security" }
+func (d *EximSecurity) Name() string {
+	if d.name != "" { return d.name }
+	return "exim/security"
+}
+
+
 func (d *EximSecurity) Every() time.Duration { return d.cfg.Every }
 
 // φόρτωσε κανόνες από rules file ή βάλε defaults
@@ -144,38 +151,35 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 		}
 	}
 
-	// reset per-run aggregation
-	d.pending = make(map[string]pend)
+// reset per-run aggregation
+d.pending = make(map[string]pend)
 
-	// (2) open + seek (όπως στο relays)
-	f, off, inode, err := openAtOffset(d.path, d.off, d.inode)
-	if err != nil {
-		return err
-	}
-	if f == nil {
-		return nil
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	buf := make([]byte, 0, 256*1024)
-	sc.Buffer(buf, 2*1024*1024)
-
-	now := time.Now()
-	for sc.Scan() {
-		line := sc.Text()
-		d.processLine(now, line)
-		off += int64(len(line)) + 1
-	}
-	if err := sc.Err(); err != nil {
-		return err
-	}
-	// (3) persist offset
-	d.off, d.inode = off, inode
-
-	// (4) flush aggregated alerts
-	d.flush(now, out)
+// Use FileTailer (starts at "now" unless ApplyPosition() injected a resume)
+if d.src == nil {
+	d.src = core.NewFileTailer(d.path)
+}
+if err := d.src.Open(); err != nil {
+	// quiet: missing/rotating log; next tick will retry
 	return nil
+}
+defer d.src.Close()
+
+now := time.Now()
+for {
+	line, err := d.src.ReadNext(ctx)
+	if err == io.EOF {
+		break // caught up
+	}
+	if err != nil {
+		break // transient read issue; retry next tick
+	}
+	d.processLine(now, line)
+}
+
+// flush aggregated alerts
+d.flush(now, out)
+return nil
+
 }
 
 func (d *EximSecurity) processLine(now time.Time, line string) {
@@ -293,24 +297,7 @@ func (d *EximSecurity) lookupMeta(ip string) string {
 	return as
 }
 
-// άνοιγμα + seek (ίδιο με relays.go)
-func openAtOffset(path string, off int64, wantInode uint64) (*os.File, int64, uint64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	st, err := f.Stat(); if err != nil { f.Close(); return nil, 0, 0, err }
-	inode := getInode(st) // έχεις ήδη υλοποίηση στο relays.go
-	// handle rotate/truncate
-	if inode != wantInode || off > st.Size() {
-		off = st.Size() - 64*1024
-		if off < 0 { off = 0 }
-	}
-	if _, err := f.Seek(off, 0); err != nil {
-		f.Close(); return nil, 0, 0, err
-	}
-	return f, off, inode, nil
-}
+
 
 
 func (d *EximSecurity) cool(key string, now time.Time) bool {
@@ -329,9 +316,20 @@ func (d *EximSecurity) cool(key string, now time.Time) bool {
 
 
 
-func getInode(fi os.FileInfo) uint64 {
-    if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-        return st.Ino
+//new position
+func (d *EximSecurity) ApplyPosition(p core.Position) {
+    if d.src != nil {
+        d.src.ApplyResume(p.Inode, p.Offset)
     }
-    return 0
 }
+
+func (d *EximSecurity) Position() core.Position {
+    if d.src == nil {
+        return core.Position{}
+    }
+    off, ino, ts := d.src.Position()
+    return core.Position{Offset: off, Inode: ino, TS: ts}
+}
+
+// Setter used by the factory
+func (d *EximSecurity) SetName(n string) { d.name = n }

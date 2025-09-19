@@ -1,15 +1,16 @@
 package exim
 
 import (
-	"bufio"
+//	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sync"
-	"syscall"
+//	"syscall"
 	"time"
 	"net"
 	"strings"
@@ -72,6 +73,9 @@ type Relays struct {
 	recent []string // last few lines to infer PHP context
 	enr *enrich.Enricher //enrich output
 	pending map[string]pend
+
+	name string
+	src  *core.FileTailer
 }
 
 
@@ -116,13 +120,13 @@ func NewRelays(cfg RelaysConfig) *Relays {
 
 
 
-func (d *Relays) Name() string         { return "exim/relays" }
 func (d *Relays) Every() time.Duration { return d.cfg.Every }
 
 func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
-d.pending = make(map[string]pend)
+	// fresh aggregation for this tick
+	d.pending = make(map[string]pend)
 
-	// Ensure log path (one-off autodetect)
+	// 1) Ensure log path (one-off autodetect)
 	if d.path == "" {
 		if d.cfg.LogPath != "" {
 			d.path = d.cfg.LogPath
@@ -142,118 +146,95 @@ d.pending = make(map[string]pend)
 		}
 	}
 
-	f, err := os.Open(d.path)
-	if err != nil {
-		return nil // quiet: ίσως προσωρινό
-	}
-	defer f.Close()
-
-	// rotation check
-	stat, _ := f.Stat()
-	if stat != nil {
-		if st, ok := stat.Sys().(*syscall.Stat_t); ok {
-			in := uint64(st.Ino)
-			if d.inode != 0 && in != d.inode {
-				// rotated: reset offset
-				d.off = 0
-			}
-			d.inode = in
-		}
+	// 2) Init non-blocking tailer (starts at "now" unless ApplyPosition set a resume)
+	if d.src == nil {
+		d.src = core.NewFileTailer(d.path)
 	}
 
-	// adjust offset
-	if d.off > 0 {
-		if _, err := f.Seek(d.off, 0); err != nil {
-			d.off = 0
-			f.Seek(0, 0)
-		}
+	// Open source (quietly skip if missing/rotating)
+	if err := d.src.Open(); err != nil {
+		return nil
 	}
+	defer d.src.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
+	// 3) Read all newly appended lines and process
 	now := time.Now()
 	lines := 0
-	for sc.Scan() {
-		line := sc.Text()
+	for {
+		line, err := d.src.ReadNext(ctx)
+		if err == io.EOF {
+			break // caught up
+		}
+		if err != nil {
+			// transient read issue — bail out; next tick will retry
+			break
+		}
 		lines++
 		d.processLine(now, line, out)
 	}
-	// record new offset
-	if pos, err := f.Seek(0, 1); err == nil {
-		d.off = pos
-	}
 
-// ---- flush aggregated alerts (τέλος run) ----
-nowSend := time.Now()
-for _, p := range d.pending {
-	threshold, alertKind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
-	if threshold <= 0 || p.n < threshold {
-		continue
-	}
-	// cooldown per key
-	sk := p.kindKey + ":" + p.key
-	if !d.cool(sk, nowSend) {
-		continue
-	}
-
-
-// --- META ---
-isPHP, cwd, uid := false, "", ""
-if alertKind == KindLocalRelay {
-    if ok, c, u := d.guessPHP(); ok {
-        isPHP, cwd, uid = true, c, u
-        baseKey += " (php)"
-    }
-}
-	// εμπλουτισμός key
-	displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
-
-	// δείγματα (και subject decode, αν το έχεις)
-	samples := d.samples[sk]
-	if len(samples) > d.cfg.SampleLimit {
-		samples = samples[:d.cfg.SampleLimit]
-	}
-	pretty := make([]string, 0, len(samples)*2)
-	for _, ln := range samples {
-		pretty = append(pretty, ln)
-		if subj := decodeSubjectFromLine(ln); subj != "" {
-			pretty = append(pretty, "SUBJ: "+subj)
+	// ---- 4) flush aggregated alerts (τέλος run) ----
+	nowSend := time.Now()
+	for _, p := range d.pending {
+		threshold, alertKind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
+		if threshold <= 0 || p.n < threshold {
+			continue
 		}
-	}
+		// cooldown per key
+		sk := p.kindKey + ":" + p.key
+		if !d.cool(sk, nowSend) {
+			continue
+		}
 
-	// extra info (βάζουμε και το limit)
-	extra := map[string]string{
-		"log":      d.path,
-		"window":   d.cfg.Window.String(),
-		"cooldown": d.cfg.Cooldown.String(),
-		"limit":    strconv.Itoa(threshold),
-	}
-if isPHP {
-    if cwd != "" { extra["cwd"] = cwd }
-    if uid != "" { extra["uid"] = uid }
-}
-	// για LOCALRELAY: web/php context
-	if alertKind == KindLocalRelay {
-		if isPHP, cwd, uid := d.guessPHP(); isPHP {
+		// --- META (php context) ---
+		isPHP, cwd, uid := false, "", ""
+		if alertKind == KindLocalRelay {
+			if ok, c, u := d.guessPHP(); ok {
+				isPHP, cwd, uid = true, c, u
+				baseKey += " (php)"
+			}
+		}
+
+		// εμπλουτισμός key
+		displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
+
+		// δείγματα (και subject decode)
+		samples := d.samples[sk]
+		if len(samples) > d.cfg.SampleLimit {
+			samples = samples[:d.cfg.SampleLimit]
+		}
+		pretty := make([]string, 0, len(samples)*2)
+		for _, ln := range samples {
+			pretty = append(pretty, ln)
+			if subj := decodeSubjectFromLine(ln); subj != "" {
+				pretty = append(pretty, "SUBJ: "+subj)
+			}
+		}
+
+		// extra info (βάζουμε και το limit)
+		extra := map[string]string{
+			"log":      d.path,
+			"window":   d.cfg.Window.String(),
+			"cooldown": d.cfg.Cooldown.String(),
+			"limit":    strconv.Itoa(threshold),
+		}
+		if isPHP {
 			if cwd != "" { extra["cwd"] = cwd }
 			if uid != "" { extra["uid"] = uid }
 		}
+
+		out <- core.Alert{
+			When:    nowSend,
+			Kind:    alertKind,
+			Key:     displayKey,
+			Count:   p.n,
+			Samples: pretty,
+			Extra:   extra,
+		}
+
+		// reset samples για φρέσκα entries στο επόμενο alert
+		d.samples[sk] = nil
 	}
-
-	out <- core.Alert{
-		When:    nowSend,
-		Kind:    alertKind,
-		Key:     displayKey,
-		Count:   p.n,        // <— ΤΟ ΣΥΝΟΛΟ που είδες (π.χ. 180)
-		Samples: pretty,
-		Extra:   extra,
-	}
-
-	// reset samples για φρέσκα entries στο επόμενο alert
-	d.samples[sk] = nil
-}
-
 
 	// προαιρετικό metrics όταν τρέχεις με debug
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
@@ -261,6 +242,14 @@ if isPHP {
 	}
 	return nil
 }
+
+
+
+
+
+
+
+
 
 // ---- Parsing ----
 // Δουλεύουμε πάνω σε γραμμές τύπου:
@@ -740,4 +729,33 @@ func hexVal(c byte) int {
 func hasRFC2047(s string) bool {
 	// very loose check
 	return strings.Contains(s, "=?") && strings.Contains(s, "?=")
+}
+
+
+
+
+
+func (d *Relays) SetName(n string) { d.name = n }
+
+func (d *Relays) setSource(src *core.FileTailer) { d.src = src }
+
+// --- PositionAware implementation ---
+
+func (d *Relays) Name() string { 
+    if d.name != "" { return d.name }
+    return "exim/relays" // fallback
+}
+
+func (d *Relays) ApplyPosition(p core.Position) {
+    if d.src != nil {
+        d.src.ApplyResume(p.Inode, p.Offset) // resume from saved inode/offset
+    }
+}
+
+func (d *Relays) Position() core.Position {
+    if d.src == nil {
+        return core.Position{}
+    }
+    off, ino, ts := d.src.Position()
+    return core.Position{Offset: off, Inode: ino, TS: ts}
 }
