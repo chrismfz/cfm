@@ -71,39 +71,70 @@ func (b *Backend) ApplyAckGuard(ac *cfgpkg.AckGuardConfig) error {
             ackGuardPortsSet, ackRecentTTL))
     }
 
-    // --- 3) (optional) NEW without SYN (PSH/FIN/RST etc.) → drop+count ---
-    if ac.DropNonSynNew {
-        _ = b.nftExpr(fmt.Sprintf(
-            `add rule inet cfm ackguard ct state new tcp dport @%s tcp flags & syn == 0 `+
-                `counter name "nonsynnew_drop" drop comment "NEW-without-SYN"`,
-            ackGuardPortsSet))
-    }
 
-    // --- 4) (optional) unsolicited SYN-ACK inbound to our ports → drop+count ---
-    if ac.DropSynAckNew {
-        _ = b.nftExpr(fmt.Sprintf(
-            `add rule inet cfm ackguard ct state new tcp dport @%s tcp flags & (syn|ack) == (syn|ack) `+
-                `counter name "synack_in_drop" drop comment "unsolicited SYN-ACK"`,
-            ackGuardPortsSet))
-    }
+// --- 3) (optional) NEW without SYN (PSH/FIN/RST etc.) → add-to-recent + drop+count ---
+if ac.DropNonSynNew {
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip protocol tcp ct state new tcp dport @%s tcp flags & syn == 0 `+
+            `add @ackguard_recent_v4 { ip saddr timeout %ds } `+
+            `counter name "nonsynnew_drop" drop comment "NEW-without-SYN"`,
+        ackGuardPortsSet, ackRecentTTL))
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip6 nexthdr tcp ct state new tcp dport @%s tcp flags & syn == 0 `+
+            `add @ackguard_recent_v6 { ip6 saddr timeout %ds } `+
+            `counter name "nonsynnew_drop" drop comment "NEW-without-SYN"`,
+        ackGuardPortsSet, ackRecentTTL))
+}
 
-    // --- 5) (optional) RST guards ---
-    if ac.RSTGuard {
-        rRate := ac.RSTRate; if rRate <= 0 { rRate = 200 }
-        rBurst := ac.RSTBurst; if rBurst <= 0 { rBurst = 300 }
 
-        _ = b.nftExpr(`add rule inet cfm ackguard ct state new tcp flags & rst == rst counter name "rstnew_drop" drop`)
-        _ = b.nftExpr(fmt.Sprintf(
-            `add rule inet cfm ackguard ct state established tcp dport @%s tcp flags & rst == rst `+
-                `meter rst_v4 { ip saddr limit rate over %d/second burst %d packets } `+
-                `counter name "rst_est_v4" drop`,
-            ackGuardPortsSet, rRate, rBurst))
-        _ = b.nftExpr(fmt.Sprintf(
-            `add rule inet cfm ackguard ct state established ip6 nexthdr tcp tcp dport @%s tcp flags & rst == rst `+
-                `meter rst_v6 { ip6 saddr limit rate over %d/second burst %d packets } `+
-                `counter name "rst_est_v6" drop`,
-            ackGuardPortsSet, rRate, rBurst))
-    }
+// --- 4) (optional) unsolicited SYN-ACK inbound → add-to-recent + drop+count ---
+if ac.DropSynAckNew {
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip protocol tcp ct state new tcp dport @%s tcp flags & (syn|ack) == (syn|ack) `+
+            `add @ackguard_recent_v4 { ip saddr timeout %ds } `+
+            `counter name "synack_in_drop" drop comment "unsolicited SYN-ACK"`,
+        ackGuardPortsSet, ackRecentTTL))
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip6 nexthdr tcp ct state new tcp dport @%s tcp flags & (syn|ack) == (syn|ack) `+
+            `add @ackguard_recent_v6 { ip6 saddr timeout %ds } `+
+            `counter name "synack_in_drop" drop comment "unsolicited SYN-ACK"`,
+        ackGuardPortsSet, ackRecentTTL))
+}
+
+
+// --- 5) (optional) RST guards ---
+if ac.RSTGuard {
+    rRate := ac.RSTRate; if rRate <= 0 { rRate = 200 }
+    rBurst := ac.RSTBurst; if rBurst <= 0 { rBurst = 300 }
+
+    // NEW+RST nonsense → add-to-recent + drop (v4/v6) and keep it scoped to protected ports
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip protocol tcp ct state new tcp dport @%s tcp flags & rst == rst `+
+            `add @ackguard_recent_v4 { ip saddr timeout %ds } `+
+            `counter name "rstnew_drop" drop`,
+        ackGuardPortsSet, ackRecentTTL))
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ip6 nexthdr tcp ct state new tcp dport @%s tcp flags & rst == rst `+
+            `add @ackguard_recent_v6 { ip6 saddr timeout %ds } `+
+            `counter name "rstnew_drop" drop`,
+        ackGuardPortsSet, ackRecentTTL))
+
+    // ESTABLISHED RST rate-limit → add-to-recent + drop (v4/v6)
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ct state established tcp dport @%s tcp flags & rst == rst `+
+            `meter rst_v4 { ip saddr limit rate over %d/second burst %d packets } `+
+            `add @ackguard_recent_v4 { ip saddr timeout %ds } `+
+            `counter name "rst_est_v4" drop`,
+        ackGuardPortsSet, rRate, rBurst, ackRecentTTL))
+    _ = b.nftExpr(fmt.Sprintf(
+        `add rule inet cfm ackguard ct state established ip6 nexthdr tcp tcp dport @%s tcp flags & rst == rst `+
+            `meter rst_v6 { ip6 saddr limit rate over %d/second burst %d packets } `+
+            `add @ackguard_recent_v6 { ip6 saddr timeout %ds } `+
+            `counter name "rst_est_v6" drop`,
+        ackGuardPortsSet, rRate, rBurst, ackRecentTTL))
+}
+
+
 
     // --- 6) (optional) fragmented TCP to our ports → drop+count ---
     if ac.FragGuard {
