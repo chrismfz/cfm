@@ -16,6 +16,7 @@ type Backend interface {
 	AddBlock(ip net.IP, comment string, ttl *time.Duration) error
 	RemoveBlock(ip net.IP) error
 	ListBlocks() ([]BlockedEntry, error)
+	ListAllows() ([]BlockedEntry, error)
 	AddAllow(ip net.IP, ttl *time.Duration) error
 	RemoveAllow(ip net.IP) error
 }

@@ -15,8 +15,8 @@ func init() {
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
 
 		cfg := exim.QueuesConfig{
-			TotalCmd:    kvStr(kv, "TOTAL_CMD", "exim -bpc"),
-			ListCmd:     kvStr(kv, "LIST_CMD", "exim -bp"),
+			TotalCmd:    kvStrClean(kv, "TOTAL_CMD", "exim -bpc"),
+			ListCmd:     kvStrClean(kv, "LIST_CMD", "exim -bp"),
 			Every:       kvDur(kv, "EVERY", defEvery),
 			Timeout:     kvDur(kv, "TIMEOUT", defTimeout),
 			MaxTotal:    kvInt(kv, "QUEUE_TOTAL_MAX", 500),
@@ -33,24 +33,32 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
     defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
     defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
 
-    rawDirs := kvStr(kv, "ENRICH_DIRS", "")
+    // Enrichment: global defaults, allow per-section override
+    rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
     var dirs []string
     if rawDirs != "" {
         fields := strings.FieldsFunc(rawDirs, func(r rune) bool { return r == ',' || r == ':' || r == ' ' || r == '\t' })
         for _, f := range fields { if f != "" { dirs = append(dirs, f) } }
     }
 
+        useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+        usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
+
     cfg := exim.SecConfig{
-        LogPath:     kvStr(kv, "LOG_PATH", ""),
+        LogPath:     kvStrClean(kv, "LOG_PATH", ""),
         Every:       kvDur(kv, "EVERY", defEvery),
         Window:      kvDur(kv, "WINDOW", 15*time.Minute),
         SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
         Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
 
-        RulesPath:   kvStr(kv, "RULES", ""),
-        UseEnrich:   kvBool(kv, "ENRICH", true),
-        UsePTR:      kvBool(kv, "PTR", true),
+        RulesPath:   kvStrClean(kv, "RULES", ""),
+        UseEnrich:   useEnrich,
+        UsePTR:      usePTR,
         EnrichDirs:  dirs,
+        Thresholds:  map[string]int{
+            "AUTHFAIL_IP":   kvInt(kv, "AUTHFAIL_IP",   0),
+            "AUTHFAIL_USER": kvInt(kv, "AUTHFAIL_USER", 0),
+        },
     }
 
     sec := exim.NewSecurity(cfg) // ✅ correct constructor
@@ -74,7 +82,8 @@ Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDet
     defEvery    := kvDur(global, "DEFAULT_EVERY", 5*time.Second)
     defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
 
-    rawDirs := kvStr(kv, "ENRICH_DIRS", "")
+    // Enrichment: global defaults, allow per-section override
+    rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
     var dirs []string
     if rawDirs != "" {
         fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
@@ -85,8 +94,11 @@ Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDet
         }
     }
 
+        useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+        usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
+
     cfg := exim.RelaysConfig{
-        LogPath:       kvStr(kv, "LOG_PATH", ""),
+        LogPath:       kvStrClean(kv, "LOG_PATH", ""),
         Every:         kvDur(kv, "EVERY", defEvery),
         Window:        kvDur(kv, "WINDOW", 15*time.Minute),
         SampleLimit:   kvInt(kv, "SAMPLE_LIMIT", 10),
@@ -98,8 +110,8 @@ Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDet
         AuthUserIPMax: kvInt(kv, "AUTH_USERIP_MAX", 40),
         UnauthIPMax:   kvInt(kv, "UNAUTH_IP_MAX",   20),
 
-        UseEnrich:     kvBool(kv, "ENRICH", true),
-        UsePTR:        kvBool(kv, "PTR", true),
+        UseEnrich:     useEnrich,
+        UsePTR:        usePTR,
         EnrichDirs:    dirs,
     }
 

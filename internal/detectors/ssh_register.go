@@ -15,22 +15,27 @@ func init() {
 		defWindow   := kvDur(global, "DEFAULT_WINDOW",   10*time.Minute)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
 
-		// dirs list
-		rawDirs := kvStr(kv, "ENRICH_DIRS", "")
-		var dirs []string
-		if rawDirs != "" {
-			fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
-				return r == ',' || r == ':' || r == ' ' || r == '\t'
-			})
-			for _, f := range fields {
-				if f != "" { dirs = append(dirs, f) }
-			}
-		}
+
+        // Enrichment: global defaults, allow per-section override
+        rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
+        var dirs []string
+        if rawDirs != "" {
+            fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
+                return r == ',' || r == ':' || r == ' ' || r == '\t'
+            })
+            for _, f := range fields {
+                if f != "" { dirs = append(dirs, f) }
+            }
+        }
+        useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+        usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
+
+		
 
 		cfg := ssh.AuthConfig{
-			Mode:        kvStr(kv, "MODE", "journal"), // Debian 13 defaults journal
-			LogPath:     kvStr(kv, "LOG_PATH", "/var/log/secure"),
-			JournalUnit: kvStr(kv, "JOURNAL_UNIT", "sshd.service"),
+			Mode:        kvStrClean(kv, "MODE", "journal"), // Debian 13 defaults journal
+			LogPath:     kvStrClean(kv, "LOG_PATH", "/var/log/secure"),
+			JournalUnit: kvStrClean(kv, "JOURNAL_UNIT", "sshd.service"),
 
 			Every:       kvDur(kv, "EVERY", defEvery),
 			Window:      kvDur(kv, "WINDOW", defWindow),
@@ -41,8 +46,8 @@ func init() {
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
 			DDOSPerIP:       kvInt(kv, "DDOS_IP",       30),
 
-			UseEnrich:  kvBool(kv, "ENRICH", true),
-			UsePTR:     kvBool(kv, "PTR",    true),
+			UseEnrich:  useEnrich,
+			UsePTR:     usePTR,
 			EnrichDirs: dirs,
 		}
 

@@ -1,2 +1,2 @@
 /etc/cfm/cfm.conf
-/etc/cfm/detections.conf
+/etc/cfm/detectors.conf

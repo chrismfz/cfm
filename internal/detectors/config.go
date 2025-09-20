@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"os"
-	"strconv"
+//	"strconv"
 	"strings"
-	"time"
+//	"time"
 )
 
 type KV = map[string]string
@@ -74,30 +74,3 @@ func splitTypeInstance(section string) (typ, inst string) {
 	return
 }
 
-// helpers
-func kvBool(kv KV, key string, def bool) bool {
-	v, ok := kv[strings.ToUpper(key)]
-	if !ok { return def }
-	switch strings.ToLower(v) {
-	case "1","true","yes","on": return true
-	case "0","false","no","off": return false
-	}
-	return def
-}
-func kvInt(kv KV, key string, def int) int {
-	v, ok := kv[strings.ToUpper(key)]
-	if !ok { return def }
-	if n, err := strconv.Atoi(v); err == nil { return n }
-	return def
-}
-func kvDur(kv KV, key string, def time.Duration) time.Duration {
-	v, ok := kv[strings.ToUpper(key)]
-	if !ok || v == "" { return def }
-	if d, err := time.ParseDuration(v); err == nil { return d }
-	return def
-}
-func kvStr(kv KV, key, def string) string {
-	v, ok := kv[strings.ToUpper(key)]
-	if !ok || v == "" { return def }
-	return v
-}

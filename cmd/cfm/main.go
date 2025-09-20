@@ -43,18 +43,8 @@ var (
 // Backend abstraction
 // ----------------------------------------------------------------------------
 
-type fwBackend interface {
-	EnsureBase() error
-	AddBlock(net.IP, string, *time.Duration) error
-	RemoveBlock(net.IP) error
-	ListBlocks() ([]firewall.BlockedEntry, error)
 
-	AddAllow(net.IP, *time.Duration) error
-	RemoveAllow(net.IP) error
-	ListAllows() ([]firewall.BlockedEntry, error)
-}
-
-func getBackend() fwBackend {
+func getBackend() firewall.Backend {
 	if _, ok := lookPath("nft"); ok {
 		return nft.New()
 	}
@@ -677,11 +667,14 @@ if cfg.AckGuard.Enabled {
 
 
 // detectors logic
-detpkg.Start(context.Background(), detpkg.Options{
-    CfgPath: filepath.Join(cfgDir, "detections.conf"),
-    Sink:    detpkg.LoggerSink{},
-})
+// wherever you start detectors (e.g., runDaemon)
 
+// detectors logic
+detpkg.Start(context.Background(), detpkg.Options{
+    CfgPath: filepath.Join(cfgDir, "detectors.conf"), // use the actual filename
+    Sink:    detpkg.OutcomeLoggerSink{},              // prints final "Blocked:" outcome
+    FW:      be,                                      // reuse the backend created above
+})
 
 
 

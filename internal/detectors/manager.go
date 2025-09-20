@@ -154,8 +154,8 @@ if pa, ok := det.(core.PositionAware); ok && m.state != nil {
 			cooldown := kvDur(kv, "COOLDOWN", defCooldown)
 			totalMax := kvInt(kv, "QUEUE_TOTAL_MAX", 500)
 			frozenMax := kvInt(kv, "QUEUE_FROZEN_MAX", 200)
-			totalCmd := kvStr(kv, "TOTAL_CMD", "exim -bpc")
-			listCmd := kvStr(kv, "LIST_CMD", "exim -bp")
+			totalCmd := kvStrClean(kv, "TOTAL_CMD", "exim -bpc")
+			listCmd := kvStrClean(kv, "LIST_CMD", "exim -bp")
 
 			logging.Logf("[detectors] start %s (every=%s timeout=%s cooldown=%s total>%d frozen>%d total_cmd=%q list_cmd=%q)",
 				secName, every, timeout, cooldown, totalMax, frozenMax, totalCmd, listCmd)
@@ -166,7 +166,7 @@ if pa, ok := det.(core.PositionAware); ok && m.state != nil {
     every := kvDur(kv, "EVERY", defEvery)
     window := kvDur(kv, "WINDOW", 15*time.Minute)
     cooldown := kvDur(kv, "COOLDOWN", defCooldown)
-    logPath := kvStr(kv, "LOG_PATH", "")
+    logPath := kvStrClean(kv, "LOG_PATH", "")
     logDisp := logPath
     if logDisp == "" {
         logDisp = "(autodetect)"
@@ -179,7 +179,7 @@ if pa, ok := det.(core.PositionAware); ok && m.state != nil {
 
 enrichOn := kvBool(kv, "ENRICH", true)
 ptrOn    := kvBool(kv, "PTR", true)
-dirsDisp := kvStr(kv, "ENRICH_DIRS", "(defaults)")
+dirsDisp := kvStrClean(kv, "ENRICH_DIRS", "(defaults)")
 
 
 logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresholds: local/user>%d auth/user>%d auth/ip>%d auth/userip>%d unauth/ip>%d enrich=%t ptr=%t dirs=%s)",
@@ -194,7 +194,11 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 		}
 
 		//go RunPeriodic(ctx, det, m.opts.Sink)
-		go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
+		//go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
+		// per-section blocking policy + wrapped sink
+		pol := parseBlockPolicy(kv)
+		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW)
+		go RunPeriodicWithState(ctx, det, secSink, m.state)
 	}
 }
 
@@ -210,3 +214,43 @@ func (m *manager) stopAll() {
 	}
 	m.running = false
 }
+
+
+
+
+
+
+
+
+//helpers for autoblock
+// internal/detectors/manager.go (top or new file section_sink.go)
+type blockPolicy struct {
+    Mode     string        // "no", "dryrun", "permanent", "ttl"
+    TTL      time.Duration // valid only if Mode == "ttl"
+    Cooldown time.Duration // optional
+}
+
+func parseBlockPolicy(kv KV) blockPolicy {
+    raw := strings.TrimSpace(kvStrClean(kv, "BLOCK", "no"))
+    p := blockPolicy{ Mode: "no" }
+    switch strings.ToLower(raw) {
+    case "", "no", "off", "0":
+        p.Mode = "no"
+    case "dryrun", "alert":
+        p.Mode = "dryrun"
+    case "permanent", "perm":
+        p.Mode = "permanent"
+    default:
+        if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+            p.Mode = "ttl"
+            p.TTL  = d
+        } else {
+            p.Mode = "no"
+        }
+    }
+    if cd := kvDur(kv, "BLOCK_COOLDOWN", 15*time.Minute); cd > 0 {
+        p.Cooldown = cd
+    }
+    return p
+}
+

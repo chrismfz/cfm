@@ -59,11 +59,39 @@ type EximSecurity struct {
 	rules    []secRule
 	enr      *enrich.Enricher
 	reHostIP *regexp.Regexp
+	reSetID  *regexp.Regexp   // (set_id=foo)
+	reUserAng*regexp.Regexp   // user=<foo>
 	lastFire map[string]time.Time
 
 	name string          // unique instance name (section)
 	src  *core.FileTailer
+	// per-user recent distinct IPs (small, capped)
+	userIPs map[string]*recentIPs
 }
+
+
+// small deduped, ordered list
+type recentIPs struct {
+    order []string
+    set   map[string]struct{}
+}
+func (r *recentIPs) Add(ip string, capN int) {
+    if ip == "" { return }
+    if r.set == nil { r.set = make(map[string]struct{}) }
+    if _, ok := r.set[ip]; ok { return }
+    r.order = append(r.order, ip)
+    r.set[ip] = struct{}{}
+    if capN > 0 && len(r.order) > capN {
+        old := r.order[0]
+        r.order = r.order[1:]
+        delete(r.set, old)
+    }
+}
+
+func (r *recentIPs) CSV() (csv string, n int) {
+    return strings.Join(r.order, ","), len(r.order)
+}
+
 
 func NewSecurity(cfg SecConfig) *EximSecurity {
 	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
@@ -74,8 +102,8 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
 	}
-	if cfg.Thresholds == nil {
-		cfg.Thresholds = map[string]int{
+
+defaults := map[string]int{
 			"AUTHFAIL":            15,
 			"SENDER_VERIFY_FAIL":  20,
 			"RCPT_REJECT":         30,
@@ -84,14 +112,32 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 			"NO_MAIL":             12,
 			"DROP_ACL":             6,
 		}
-	}
+
+
+    if cfg.Thresholds == nil {
+        cfg.Thresholds = defaults
+    } else {
+        // merge: keep existing keys, fill the rest from defaults
+        for k, v := range defaults {
+            if _, ok := cfg.Thresholds[k]; !ok {
+                cfg.Thresholds[k] = v
+            }
+        }
+    }
+
+
 	d := &EximSecurity{
 		cfg:     cfg,
 		counts:  newWindowCounter(cfg.Window),
 		samples: make(map[string][]string),
 		reHostIP: regexp.MustCompile(`\[(\d{1,3}(?:\.\d{1,3}){3})\]`), // IP σε αγκύλες
 		lastFire: make(map[string]time.Time),
+	        userIPs:  make(map[string]*recentIPs),
 	}
+
+    d.reSetID   = regexp.MustCompile(`\bset_id=([^) \t]+)`)
+    d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
+
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
 			d.enr = e
@@ -197,10 +243,46 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
 	// πέρασε από όλους τους κανόνες
 	for _, r := range d.rules {
 		if r.Re.MatchString(line) {
-			d.bump(now, r.Name, ip, line)
+
+            if r.Name == "AUTHFAIL" {
+                // per-IP
+                d.bump(now, "AUTHFAIL|ip", ip, line)
+                // per-user (best-effort from set_id=... or user=<...>)
+                if u := d.extractUser(line); u != "" {
+                    d.bump(now, "AUTHFAIL|user", u, line)
+                    d.addUserIP(u, ip)
+                }
+            } else {
+                d.bump(now, r.Name, ip, line)
+            }
+
 		}
 	}
 }
+
+
+func (d *EximSecurity) extractUser(line string) string {
+    if m := d.reSetID.FindStringSubmatch(line); m != nil && m[1] != "" {
+        return strings.ToLower(m[1])
+    }
+    if m := d.reUserAng.FindStringSubmatch(line); m != nil && m[1] != "" {
+        return strings.ToLower(m[1])
+    }
+    return ""
+}
+
+func (d *EximSecurity) addUserIP(user, ip string) {
+    if user == "" || ip == "" { return }
+    d.mu.Lock()
+    rp := d.userIPs[user]
+    if rp == nil {
+        rp = &recentIPs{}
+        d.userIPs[user] = rp
+    }
+    d.mu.Unlock()
+    rp.Add(ip, 20) // keep last ~20 distinct IPs per user
+}
+
 
 func (d *EximSecurity) bump(now time.Time, tag, ip, line string) {
 	n := d.counts.Add(tag+":"+ip, now)
@@ -221,51 +303,96 @@ func (d *EximSecurity) bump(now time.Time, tag, ip, line string) {
 	d.pending[sk] = pend{kindKey: tag, key: ip, n: n}
 }
 
+
+
+
+
 func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
-	for sk, p := range d.pending {
-		thr := d.cfg.Thresholds[p.kindKey]
-		if thr <= 0 || p.n < thr {
-			continue
-		}
-		// cooldown per key
-		if !d.cool(sk, now) {
-			continue
-		}
+    for sk, p := range d.pending {
+        thr, kind, isIP, base := d.thresholdAndKey(p.kindKey, p.key)
+        if thr <= 0 || p.n < thr {
+            continue
+        }
+        if !d.cool(sk, now) {
+            continue
+        }
 
-		// enrich display key (ip -> geo/asn/ptr)
-		displayKey := "ip " + p.key
-		if d.cfg.UseEnrich || d.cfg.UsePTR {
-			if meta := d.lookupMeta(p.key); meta != "" {
-				displayKey = displayKey + " (" + meta + ")"
-			}
-		}
+        // display key
+        displayKey := base
+        if isIP {
+            displayKey = "ip " + base
+            if d.cfg.UseEnrich || d.cfg.UsePTR {
+                if meta := d.lookupMeta(base); meta != "" {
+                    displayKey += " (" + meta + ")"
+                }
+            }
+        }
 
-		// samples (+ decoded subject αν θέλεις: ανακύκλωσε decodeSubjectFromLine από relays.go)
-		samples := d.samples[sk]
-		if len(samples) > d.cfg.SampleLimit {
-			samples = samples[:d.cfg.SampleLimit]
-		}
+        samples := d.samples[sk]
+        if len(samples) > d.cfg.SampleLimit {
+            samples = samples[:d.cfg.SampleLimit]
+        }
 
-		extra := map[string]string{
-			"log":      d.path,
-			"window":   d.cfg.Window.String(),
-			"cooldown": d.cfg.Cooldown.String(),
-			"limit":    strconv.Itoa(thr),
-			"rule":     p.kindKey,
-		}
-		out <- core.Alert{
-			When:    now,
-			Kind:    core.AlertKind("SECURITY/" + p.kindKey),
-			Key:     displayKey,
-			Count:   p.n, // <- Σύνολο μέσα στο window σε αυτό το run
-			Samples: samples,
-			Extra:   extra,
-		}
+        extra := map[string]string{
+            "log":      d.path,
+            "window":   d.cfg.Window.String(),
+            "cooldown": d.cfg.Cooldown.String(),
+            "limit":    strconv.Itoa(thr),
+            "rule":     p.kindKey,
+        }
+        if isIP {
+            extra["ip"] = base
+        } else {
+            // per-user: include recent distinct source IPs
+            if rp := d.userIPs[base]; rp != nil {
+                csv, n := rp.CSV()
+                if n > 0 {
+                    extra["ips"] = csv
+                    extra["unique_ips"] = strconv.Itoa(n)
+                }
+            }
+        }
 
-		// reset samples για αυτό το key
-		d.samples[sk] = nil
-	}
+        out <- core.Alert{
+            When:    now,
+            Kind:    core.AlertKind(kind), // "SECURITY/AUTHFAIL" or "SECURITY/<TAG>"
+            Key:     displayKey,           // ip (...) or username
+            Count:   p.n,
+            Samples: samples,
+            Extra:   extra,
+        }
+        d.samples[sk] = nil
+    }
 }
+
+func (d *EximSecurity) thresholdAndKey(kindKey, rawKey string) (thr int, alertKind string, isIP bool, base string) {
+    // AUTHFAIL per-IP/per-user
+    if strings.HasPrefix(kindKey, "AUTHFAIL|") {
+        alertKind = "SECURITY/AUTHFAIL"
+        base = rawKey
+        if strings.HasSuffix(kindKey, "|ip") {
+            thr = d.cfg.Thresholds["AUTHFAIL_IP"]
+            if thr == 0 { thr = d.cfg.Thresholds["AUTHFAIL"] }
+            return thr, alertKind, true, base
+        }
+        if strings.HasSuffix(kindKey, "|user") {
+            thr = d.cfg.Thresholds["AUTHFAIL_USER"]
+            if thr == 0 { thr = d.cfg.Thresholds["AUTHFAIL"] }
+            return thr, alertKind, false, base
+        }
+        thr = d.cfg.Thresholds["AUTHFAIL"]
+        return thr, alertKind, false, base
+    }
+    // other tags unchanged
+    thr = d.cfg.Thresholds[kindKey]
+    alertKind = "SECURITY/" + kindKey
+    base = rawKey // ip
+    return thr, alertKind, true, base
+}
+
+
+
+
 
 // --- helpers που ήδη έχεις στο relays.go, ανακύκλωσε/εξήγαγε κοινά αν θέλεις ---
 

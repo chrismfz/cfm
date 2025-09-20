@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
+	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
 	"github.com/miekg/dns"
 )
@@ -168,19 +168,17 @@ func parseDynDNS(b []byte) []struct {
 
 // Σημείωση: fwBackend και fileWatcher ορίζονται ήδη στο package main (όπως τα χρησιμοποιείς στη main.go).
 type DynDNSManager struct {
-	be      fwBackend
 	nb      *nft.Backend
 	watcher *fileWatcher
 	records map[string]*dynRecord // host -> rec
 }
 
-func NewDynDNSManager(be fwBackend, cfgDir string) *DynDNSManager {
+func NewDynDNSManager(be firewall.Backend, cfgDir string) *DynDNSManager {
 	var w *fileWatcher
 	if cfgDir != "" {
 		w = newFileWatcher(filepath.Join(cfgDir, "cfm.dyndns"))
 	}
 	ddm := &DynDNSManager{
-		be:      be,
 		watcher: w,
 		records: map[string]*dynRecord{},
 	}
