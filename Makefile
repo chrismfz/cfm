@@ -148,6 +148,7 @@ deb: build
 	@install -m0644 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
 	@install -m0644 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
 	@install -m0644 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
+	@install -m0644 "$(CONFIG_DIR)/notify.conf"      "$(PKGROOT)/etc/cfm/notify.conf"
 	@install -m0644 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
 	@install -m0644 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
 	@install -m0644 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
@@ -173,6 +174,7 @@ stage-pkgroot: build
 	@mkdir -p $(PKGROOT)/etc/cfm
 	@[ -f $(PKGROOT)/etc/cfm/cfm.conf ]       || cp -f $(CONFIG_DIR)/cfm.conf       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/detectors.conf ]       || cp -f $(CONFIG_DIR)/detectors.conf       $(PKGROOT)/etc/cfm/
+	@[ -f $(PKGROOT)/etc/cfm/notify.conf ]       || cp -f $(CONFIG_DIR)/notify.conf       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.allow ]      || cp -f $(CONFIG_DIR)/cfm.allow      $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.deny ]       || cp -f $(CONFIG_DIR)/cfm.deny       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.blocklists ] || cp -f $(CONFIG_DIR)/cfm.blocklists $(PKGROOT)/etc/cfm/

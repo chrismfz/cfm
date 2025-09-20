@@ -1,2 +1,3 @@
 /etc/cfm/cfm.conf
 /etc/cfm/detectors.conf
+/etc/cfm/notify.conf
