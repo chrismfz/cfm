@@ -134,6 +134,7 @@ type ThrottleConfig struct {
 	TTLSeconds int
 	Sources    []string // e.g. ["syn","portflood","pps"]
 	SetTTL     int      // seconds for nft set timeout (tracking)
+	CooldownSec int     // seconds to suppress repeat autoblocks per IP
 }
 
 type PortscanConfig struct {
@@ -188,6 +189,8 @@ c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
  }
 	if c.Throttle.TTLSeconds == 0 { c.Throttle.TTLSeconds = 24 * 3600 }
 	if c.Throttle.SetTTL == 0 { c.Throttle.SetTTL = 60 }
+	// Cooldown: avoid duplicate autoblocks/logs/notifications for the same IP
+	if c.Throttle.CooldownSec == 0 { c.Throttle.CooldownSec = 180 }
 	// Portscan
 	if c.Portscan.Interval == 0 { c.Portscan.Interval = 60 }
 	if c.Portscan.Mode == "" { c.Portscan.Mode = "ttl" }
@@ -242,7 +245,7 @@ func (c *Config) Validate() error {
 	if c.PacketRate.Mode != "syn" && c.PacketRate.Mode != "all" {
 		c.PacketRate.Mode = "syn"
 	}
-	if c.Throttle.Hits < 0 || c.Throttle.WindowSec < 0 || c.Throttle.TTLSeconds < 0 || c.Throttle.SetTTL < 0 {
+	if c.Throttle.Hits < 0 || c.Throttle.WindowSec < 0 || c.Throttle.TTLSeconds < 0 || c.Throttle.SetTTL < 0 || c.Throttle.CooldownSec < 0 {
 		return errors.New("negative values not allowed in Throttle config")
 	}
 	if c.Portscan.Interval < 0 || c.Portscan.TTLSeconds < 0 || c.Portscan.Limit < 0 || c.Portscan.Diversity < 0 {
@@ -356,6 +359,8 @@ case "UDP_OUT":
 			cfg.Throttle.Sources = splitCSV(val)
 		case "THROTTLE_SET_TTL":
 			cfg.Throttle.SetTTL = parseInt(val)
+		case "THROTTLE_COOLDOWN":
+			cfg.Throttle.CooldownSec = parseInt(val)
 
 		// Portscan
 		case "PS_ENABLED":

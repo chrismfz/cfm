@@ -17,6 +17,20 @@ import (
 	"cfm/internal/notify"
 )
 
+
+// Keep the last time we successfully autoblocked (and/or notified) a given IP
+var (
+    thV4Hits = map[string][]time.Time{}
+    thV6Hits = map[string][]time.Time{}
+
+    lastThrottleReason = map[string]string{} // ip -> reason
+
+    // NEW: last successful autoblock per IP (v4/v6 share the key as a string)
+    lastAutoBlockAt = map[string]time.Time{}
+)
+
+
+
 // -----------------------------------------------------------------------------
 // Flood rules application
 // -----------------------------------------------------------------------------
@@ -736,12 +750,6 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 
 
 
-var (
-	thV4Hits = map[string][]time.Time{}
-	thV6Hits = map[string][]time.Time{}
-
-	lastThrottleReason = map[string]string{} // ip -> reason string
-)
 
 
 func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
@@ -782,107 +790,115 @@ func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 
 
 
+
+
+
+
+
+
+
+// nft_rules.go
 func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error {
     reason := lastThrottleReason[ip]
-    if reason == "" {
-        reason = "Auto-block" // fallback
+    if reason == "" { reason = "Auto-block" }
+
+    // NEW: cooldown gate (applies to both v4/v6)
+    if tc.CooldownSec > 0 {
+        if t, ok := lastAutoBlockAt[ip]; ok {
+            if time.Since(t) < time.Duration(tc.CooldownSec)*time.Second {
+                // Within cooldown → skip quietly (no log, no notify)
+                return nil
+            }
+        }
     }
 
-    // Ενιαίο enrichment για όλα τα logs
-    extraLabel := b.enrichLabel(ip) // π.χ. "  —  PTR | ASxxx Name | City, Country"
+    extraLabel := b.enrichLabel(ip)
     logIP := ip + extraLabel
-    // Για σχόλιο στο cfm.deny θέλουμε χωρίς το leading "—  "
     cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
-    cleanExtra = strings.TrimLeft(cleanExtra, "–— ") // ασφάλεια για διαφορετικά dashes
-    if cleanExtra == "" {
-        cleanExtra = ""
-    }
-    // unified reporter comment: "reason | PTR | ASN | City, Country"
+    cleanExtra = strings.TrimLeft(cleanExtra, "–— ")
     comment := reason
-    if cleanExtra != "" {
-        comment += " | " + cleanExtra
-    }
+    if cleanExtra != "" { comment += " | " + cleanExtra }
 
-
-
-
-
-switch tc.Mode {
-
-case "alert", "dryrun":
-    // DRY-RUN: only log, no firewall changes
-    if fam == "v4" {
-        logging.Logf(
-            "[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
-            logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason,
-        )
+    switch tc.Mode {
+    case "alert", "dryrun":
+        // unchanged: only log
+        if fam == "v4" {
+            logging.Logf("[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+                logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
+            return nil
+        }
+        logging.Logf("[dryrun] v6 %s -> would block_v6 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+            logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
         return nil
-    }
-    logging.Logf(
-        "[dryrun] v6 %s -> would block_v6 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
-        logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason,
-    )
-    return nil
 
-case "ttl":
-    ttl := tc.TTLSeconds
-    if ttl <= 0 { ttl = 3600 }
+    case "ttl":
+        ttl := tc.TTLSeconds
+        if ttl <= 0 { ttl = 3600 }
 
-    if fam == "v4" {
-        logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
-            logIP, ttl, tc.Hits, tc.WindowSec, reason)
-        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
-        if err == nil {
+        // TRY insert first; only log+notify on success
+        if fam == "v4" {
+            err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
+            if err != nil {
+                // Optional: detect "File exists" and stay silent to avoid spam
+                return err
+            }
+            logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
+                logIP, ttl, tc.Hits, tc.WindowSec, reason)
+            lastAutoBlockAt[ip] = time.Now()
             if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
                 _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
             }
             b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
+            return nil
         }
-        return err
-    }
 
-    logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
-        logIP, ttl, tc.Hits, tc.WindowSec, reason)
-    err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
-    if err == nil {
+        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
+        if err != nil {
+            return err
+        }
+        logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
+            logIP, ttl, tc.Hits, tc.WindowSec, reason)
+        lastAutoBlockAt[ip] = time.Now()
         if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
             _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
         }
         b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
-    }
-    return err
+        return nil
 
-default: // "permanent"
-    if fam == "v4" {
-        logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
-            logIP, tc.Hits, tc.WindowSec, reason)
-        _ = b.appendToDenyFile(ip, comment)
-        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
-        if err == nil {
+    default: // "permanent"
+        if fam == "v4" {
+            err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
+            if err != nil {
+                return err
+            }
+            logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
+                logIP, tc.Hits, tc.WindowSec, reason)
+            lastAutoBlockAt[ip] = time.Now()
+            _ = b.appendToDenyFile(ip, comment)
             if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
                 _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
             }
             b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
+            return nil
         }
-        return err
-    }
 
-    logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
-        logIP, tc.Hits, tc.WindowSec, reason)
-    _ = b.appendToDenyFile(ip, comment)
-    err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
-    if err == nil {
+        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
+        if err != nil {
+            return err
+        }
+        logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+            logIP, tc.Hits, tc.WindowSec, reason)
+        lastAutoBlockAt[ip] = time.Now()
+        _ = b.appendToDenyFile(ip, comment)
         if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
             _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
         }
         b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
+        return nil
     }
-    return err
-
 }
 
 
-}
 
 
 

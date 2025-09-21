@@ -54,10 +54,11 @@ func (c *Config) Summary() []string {
 	if len(c.Throttle.Sources) > 0 {
 		src = strings.Join(c.Throttle.Sources, ",")
 	}
+
 	lines = append(lines, fmt.Sprintf(
-		"throttle: enabled=%t window=%ds hits=%d mode=%s ttl=%ds set_ttl=%ds sources=[%s]",
+		"throttle: enabled=%t window=%ds hits=%d mode=%s ttl=%ds set_ttl=%ds cooldown=%ds sources=[%s]",
 		c.Throttle.Enabled, c.Throttle.WindowSec, c.Throttle.Hits, c.Throttle.Mode,
-		c.Throttle.TTLSeconds, c.Throttle.SetTTL, src,
+		c.Throttle.TTLSeconds, c.Throttle.SetTTL, c.Throttle.CooldownSec, src,
 	))
 
 // -- tweaks
