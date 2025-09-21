@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
+	"cfm/internal/notify"
 )
 
 // -----------------------------------------------------------------------------
@@ -806,7 +807,6 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 
 
 
-
 switch tc.Mode {
 
 case "alert", "dryrun":
@@ -826,57 +826,59 @@ case "alert", "dryrun":
 
 case "ttl":
     ttl := tc.TTLSeconds
-    if ttl <= 0 {
-        ttl = 3600 // last-resort guard; config should usually set this
-    }
+    if ttl <= 0 { ttl = 3600 }
 
     if fam == "v4" {
-        logging.Logf(
-            "[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
-            logIP, ttl, tc.Hits, tc.WindowSec, reason,
-        )
+        logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
+            logIP, ttl, tc.Hits, tc.WindowSec, reason)
         err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
-        if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+        if err == nil {
+            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+            }
+            b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
         }
         return err
     }
 
-    logging.Logf(
-        "[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
-        logIP, ttl, tc.Hits, tc.WindowSec, reason,
-    )
+    logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
+        logIP, ttl, tc.Hits, tc.WindowSec, reason)
     err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
-    if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-        _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+    if err == nil {
+        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+        }
+        b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
     }
     return err
 
 default: // "permanent"
-    // Note: 'comment' already = reason [+ " | enrichment"]
     if fam == "v4" {
-        logging.Logf(
-            "[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
-            logIP, tc.Hits, tc.WindowSec, reason,
-        )
+        logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
+            logIP, tc.Hits, tc.WindowSec, reason)
         _ = b.appendToDenyFile(ip, comment)
         err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
-        if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+        if err == nil {
+            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+            }
+            b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
         }
         return err
     }
 
-    logging.Logf(
-        "[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
-        logIP, tc.Hits, tc.WindowSec, reason,
-    )
+    logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+        logIP, tc.Hits, tc.WindowSec, reason)
     _ = b.appendToDenyFile(ip, comment)
     err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
-    if err == nil && b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-        _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+    if err == nil {
+        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+        }
+        b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
     }
     return err
+
 }
 
 
@@ -1276,3 +1278,45 @@ func (b *Backend) overrideByReason(ip string, tc cfgpkg.ThrottleConfig) (cfgpkg.
         return tc, false
     }
 }
+
+
+
+
+// notify package helper
+
+func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, hits, window int) {
+    ev := notify.Event{
+        Kind:     "autoblock",
+        SrcIP:    ip,
+        Reason:   reason,
+        TTL:      time.Duration(ttlSeconds) * time.Second,
+        Count:    hits,
+        Section:  "autoblock",
+        When:     time.Now(),
+        Severity: "warning",
+        Extra: map[string]string{
+            "family": fam,
+            "mode":   mode,                  // "ttl" | "permanent"
+            "window": fmt.Sprintf("%ds", window),
+        },
+    }
+
+    if b.enr != nil {
+        r := b.enr.Lookup(ip)
+        ev.PTR = r.PTR
+        if r.ASN > 0 {
+            if r.ASNName != "" {
+                ev.ASN = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+            } else {
+                ev.ASN = fmt.Sprintf("AS%d", r.ASN)
+            }
+        }
+        if r.City != "" && r.Country != "" {
+            ev.Country = r.City + ", " + r.Country
+        } else {
+            ev.Country = r.Country
+        }
+    }
+    notify.Enqueue(ev) // non-blocking
+}
+

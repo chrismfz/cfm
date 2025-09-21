@@ -9,6 +9,12 @@ import (
     core "cfm/internal/detectors/core"
     "cfm/internal/firewall"
 //    "cfm/internal/logging"
+
+//for notifications//
+//    "strings"
+//    "fmt"
+    "cfm/internal/notify"
+
 )
 
 type sectionSink struct {
@@ -105,6 +111,49 @@ func (s *sectionSink) Publish(a core.Alert) {
 			out.Extra["ttl"]        = ttl.String()
 		}
 	}
+
+
+
+
+// --- emit notify once if a real block happened ---
+if out.Extra["blocked"] == "yes" {
+    // compute TTL seconds only for ttl blocks
+    ttlSec := 0
+    if out.Extra["block_mode"] == "ttl" {
+        if d, err := time.ParseDuration(out.Extra["ttl"]); err == nil {
+            ttlSec = int(d / time.Second)
+        }
+    }
+
+    // cap samples to first 10 lines
+    smp := out.Samples
+    if len(smp) > 10 {
+        smp = smp[:10]
+    }
+
+    ev := notify.Event{
+        Kind:     "detector",       // generic kind for detector-originated blocks
+        SrcIP:    ipStr,            // from pickIP(a)
+        Reason:   string(a.Kind),   // e.g. "SSH/AUTHFAIL" (your detector kind)
+        TTL:      time.Duration(ttlSec) * time.Second,
+        Count:    0,                // (optional) put any counters in Extra if you want
+        Section:  s.section,        // detectors.conf section name
+        When:     time.Now(),
+        Severity: "warning",
+        Samples:  smp,
+        Extra: map[string]string{
+            "block_mode": out.Extra["block_mode"], // "ttl" | "permanent"
+            "ttl_text":   out.Extra["ttl"],        // e.g. "4h0m0s" if ttl
+            "key":        a.Key,                   // detector-specific key (may be same as IP)
+        },
+    }
+
+    notify.Enqueue(ev) // non-blocking; templates will include host + ASN, Country if set
+}
+// --- end notify ---
+
+
+
 
 	// Now publish ONCE with the final outcome
 	if s.inner != nil {

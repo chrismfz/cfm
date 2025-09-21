@@ -32,6 +32,7 @@ import (
 	"cfm/internal/reporting"
 
 	detpkg "cfm/internal/detectors"
+	"cfm/internal/notify"
 )
 
 var (
@@ -284,6 +285,8 @@ func runUnblock(args []string) {
 
     cfgDir, _ := resolveConfigDir("")
 
+
+
     // --- εδώ ακριβώς όπως το έχεις σήμερα ---
     var reporter reporting.Reporter
     var sendAPI bool
@@ -465,6 +468,14 @@ func runDaemon(args []string) {
 	be := getBackend()
 	if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+	//Notify manager
+	if err := notify.Init(cfgDir); err != nil {
+	    logging.Logf("[notify] init error: %v", err)
+	} else {
+	    logging.Logf("[notify] init OK")
+	}
+
 
 	// DynDNS manager (whitelist)
 	ddm := NewDynDNSManager(be, cfgDir)
