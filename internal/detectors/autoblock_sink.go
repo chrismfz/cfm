@@ -63,18 +63,17 @@ func (s *sectionSink) Publish(a core.Alert) {
 		return
 	}
 
-	// Cooldown
-	if s.pol.Cooldown > 0 {
-		s.mu.Lock()
-		if last, ok := s.last[ipStr]; ok && time.Since(last) < s.pol.Cooldown {
-			s.mu.Unlock()
-			// Suppressed by cooldown → still print with "No"
-			if s.inner != nil { s.inner.Publish(out) }
-			return
-		}
-		s.last[ipStr] = time.Now()
-		s.mu.Unlock()
-	}
+
+    // Cooldown check (do NOT stamp yet; stamp only after a real block)
+    if s.pol.Cooldown > 0 {
+        s.mu.Lock()
+        if last, ok := s.last[ipStr]; ok && time.Since(last) < s.pol.Cooldown {
+            s.mu.Unlock()
+            if s.inner != nil { s.inner.Publish(out) }
+            return
+        }
+        s.mu.Unlock()
+    }
 
 	// Comment for firewall
 	comment := string(a.Kind)
@@ -91,6 +90,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 		return
 	}
 
+    var blockOK bool
 	switch s.pol.Mode {
 	case "dryrun":
 		out.Extra["blocked"]    = "dryrun"
@@ -100,6 +100,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if err := s.fw.AddBlock(ip, comment, nil); err == nil {
 			out.Extra["blocked"]    = "yes"
 			out.Extra["block_mode"] = "permanent"
+			blockOK = true
 		}
 
 	case "ttl":
@@ -109,10 +110,18 @@ func (s *sectionSink) Publish(a core.Alert) {
 			out.Extra["blocked"]    = "yes"
 			out.Extra["block_mode"] = "ttl"
 			out.Extra["ttl"]        = ttl.String()
+			blockOK = true
 		}
 	}
 
 
+
+    // If we truly blocked and a cooldown is set, stamp it now (after success)
+    if blockOK && s.pol.Cooldown > 0 {
+        s.mu.Lock()
+        s.last[ipStr] = time.Now()
+        s.mu.Unlock()
+    }
 
 
 // --- emit notify once if a real block happened ---
@@ -136,7 +145,7 @@ if out.Extra["blocked"] == "yes" {
         SrcIP:    ipStr,            // from pickIP(a)
         Reason:   string(a.Kind),   // e.g. "SSH/AUTHFAIL" (your detector kind)
         TTL:      time.Duration(ttlSec) * time.Second,
-        Count:    0,                // (optional) put any counters in Extra if you want
+        Count:    a.Count,                // (optional) put any counters in Extra if you want
         Section:  s.section,        // detectors.conf section name
         When:     time.Now(),
         Severity: "warning",
@@ -147,6 +156,9 @@ if out.Extra["blocked"] == "yes" {
             "key":        a.Key,                   // detector-specific key (may be same as IP)
         },
     }
+
+
+
 
     notify.Enqueue(ev) // non-blocking; templates will include host + ASN, Country if set
 }

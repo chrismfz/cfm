@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"cfm/internal/enrich"
+	"fmt"
 )
 
 type config struct {
@@ -41,6 +43,15 @@ var (
 	dedup    *deduper
 	hostname string
 )
+
+
+// enrichment (optional)
+var enricher *enrich.Enricher
+
+// Allow wiring the same enricher instance used by firewall/backend.
+func SetEnricher(e *enrich.Enricher) { enricher = e }
+
+
 
 func Init(cfgDir string) error {
 	hostname, _ = os.Hostname()
@@ -180,6 +191,34 @@ func Emit(ev Event) error {
 func worker() { for ev := range queueCh { _ = Emit(ev) } }
 
 func Enqueue(ev Event) {
+        // Best-effort enrichment (PTR/ASN/Country) if missing.
+        // Centralizing here means all callers benefit (detectors, autoblock, etc.).
+        if (ev.PTR == "" || ev.ASN == "" || ev.Country == "") && ev.SrcIP != "" {
+                if enr := enricher; enr != nil {
+                        info := enr.Lookup(ev.SrcIP)
+                        if ev.PTR == "" && info.PTR != "" {
+                                ev.PTR = info.PTR
+                        }
+                        if ev.ASN == "" && (info.ASNName != "" || info.ASN > 0) {
+                                if info.ASN > 0 && info.ASNName != "" {
+                                        ev.ASN = fmt.Sprintf("AS%d %s", info.ASN, info.ASNName)
+                                } else if info.ASNName != "" {
+                                        ev.ASN = info.ASNName
+                                } else {
+                                        ev.ASN = fmt.Sprintf("AS%d", info.ASN)
+                                }
+                        }
+                        if ev.Country == "" {
+                                // Prefer "City, Country" when city is available (matches your autoblock vibe)
+                                if info.City != "" && info.Country != "" {
+                                        ev.Country = info.City + ", " + info.Country
+                                } else if info.Country != "" {
+                                        ev.Country = info.Country
+                                }
+                        }
+                }
+        }
+
 	select {
 	case queueCh <- ev:
 	default:
