@@ -1,0 +1,67 @@
+package detectors
+
+import (
+    "strings"
+    "time"
+    "strconv"
+
+    core "cfm/internal/detectors/core"
+    "cfm/internal/detectors/health"
+//    "cfm/internal/logging"
+)
+
+func init() {
+    Register("health", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+        defEvery    := kvDur(global, "DEFAULT_EVERY",    10*time.Second)
+        defWindow   := kvDur(global, "DEFAULT_WINDOW",   2*time.Minute)
+        defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 15*time.Minute)
+
+        var ports []int
+
+if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
+    for _, s := range strings.Split(p, ",") {
+        s = strings.TrimSpace(s)
+        if s == "" { continue }
+        if n, err := strconv.Atoi(s); err == nil && n > 0 {
+            ports = append(ports, n)
+        }
+    }
+}
+
+
+        cfg := health.Config{
+            Every:       kvDur(kv, "EVERY", defEvery),
+            Window:      kvDur(kv, "WINDOW", defWindow),
+            Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+
+            CpuLoadPct:  kvInt(kv, "CPU_LOAD_PCT", 120),
+            RamUsedPct:  kvInt(kv, "RAM_USED_PCT", 90),
+            DiskRootPct: kvInt(kv, "DISK_ROOT_PCT", 90),
+
+            ConnTotalSpikeX: kvFlt(kv, "CONN_TOTAL_SPIKE", 3.0),
+            ConnEstSpikeX:   kvFlt(kv, "CONN_EST_SPIKE",   3.0),
+            ConnSynSpikeX:   kvFlt(kv, "CONN_SYN_SPIKE",   3.0),
+            ConnTotalAbs:    kvInt(kv, "CONN_TOTAL_ABS",   20000),
+            EstablishedAbs:  kvInt(kv, "ESTABLISHED_ABS",  8000),
+            SynRecvAbs:      kvInt(kv, "SYN_RECV_ABS",     500),
+
+            ThruSpikeX:      kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
+
+            TempWarnC:       kvInt(kv, "TEMP_C_WARN", 85),
+            TempCritC:       kvInt(kv, "TEMP_C_CRIT", 95),
+
+            SmartAlert: kvBool(kv, "SMART_FAIL_ALERT", true),
+            MdadmAlert: kvBool(kv, "MDADM_ALERT", true),
+            ZfsAlert:   kvBool(kv, "ZFS_ALERT", true),
+
+            PortWatch:  ports,
+            PortSpikeX: kvFlt(kv, "PORT_SPIKE_X", 3.0),
+        }
+
+        d := health.New(cfg)
+        d.SetName(section)
+        // Source isn’t a file; the detector actively samples (/proc, smartctl, sensors).
+        // Implement with a ticker inside health.New(..). No core.LineSource needed.
+        return d, nil
+    })
+}

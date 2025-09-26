@@ -39,7 +39,6 @@ type Config struct {
 type pend struct {
 	kindKey string // "AUTHFAIL|ip" | "AUTHFAIL|user"
 	key     string // ip or username
-	n       int
 }
 
 type Auth struct {
@@ -48,8 +47,9 @@ type Auth struct {
 	src  core.LineSource
 
 	pending map[string]pend
-	samples map[string][]string
-	lastHit map[string]time.Time
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 
 	// regexes
 	reQuick *regexp.Regexp
@@ -60,11 +60,25 @@ type Auth struct {
 }
 
 func NewAuth(cfg Config) *Auth {
+
+	// sensible defaults
+	if cfg.Mode == "" { cfg.Mode = "file" }
+	if cfg.LogPath == "" && cfg.Mode == "file" { cfg.LogPath = "/var/log/maillog" }
+	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
+	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
+	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
+	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
+	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+	}
+
 	a := &Auth{cfg: cfg}
 	a.pending = make(map[string]pend)
-	a.samples = make(map[string][]string)
-	a.lastHit = make(map[string]time.Time)
-
+	// core window primitives
+	a.samples = core.NewSampleRing(cfg.SampleLimit)
+	a.gate    = core.NewAlertGate(cfg.Cooldown)
+	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
 	// Lines we care about (keep this fast pre-filter)
 	a.reQuick = regexp.MustCompile(`dovecot:\s+(imap|pop3)-login:.*(auth failed|Aborted login|Authentication failure)`)
 	a.reRip   = regexp.MustCompile(`\brip=(\d{1,3}(?:\.\d{1,3}){3})\b`)
@@ -159,37 +173,26 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + key
-	p, ok := a.pending[sk]
-	if !ok {
-		p = pend{kindKey: kindKey, key: key}
+	if _, ok := a.pending[sk]; !ok {
+		a.pending[sk] = pend{kindKey: kindKey, key: key}
 	}
-	p.n++
-	a.pending[sk] = p
-
-	// keep samples per key
-	a.samples[sk] = append(a.samples[sk], line)
-	if a.cfg.SampleLimit > 0 && len(a.samples[sk]) > a.cfg.SampleLimit {
-		a.samples[sk] = a.samples[sk][len(a.samples[sk])-a.cfg.SampleLimit:]
-	}
+	_ = a.counts.Add(sk, now)
+	a.samples.Add(sk, line)
 }
 
 // ---------- flush ----------
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
+
 	for sk, p := range a.pending {
 		limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
-		if limit <= 0 || p.n < limit {
-			continue
-		}
-		if !a.cool(sk, now) {
-			continue
-		}
+		if limit <= 0 { continue }
+		n := a.counts.Count(sk, now)
+		if n < limit { continue }
+		if !a.gate.Allow(sk, now, n, limit) { continue }
 
 		displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
-		samples := a.samples[sk]
-		if a.cfg.SampleLimit > 0 && len(samples) > a.cfg.SampleLimit {
-			samples = samples[:a.cfg.SampleLimit]
-		}
 
+		samples := a.samples.GetAndClear(sk)
 		extra := map[string]string{
 			"window":   a.cfg.Window.String(),
 			"cooldown": a.cfg.Cooldown.String(),
@@ -210,12 +213,10 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			When:    now,
 			Kind:    core.AlertKind(kindStr), // "DOVECOT/AUTHFAIL"
 			Key:     displayKey,
-			Count:   p.n,
+			Count:   n,
 			Samples: samples,
 			Extra:   extra,
 		}
-		// drop samples for next round
-		a.samples[sk] = nil
 	}
 }
 
@@ -230,17 +231,6 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, ba
 	}
 }
 
-func (a *Auth) cool(sk string, now time.Time) bool {
-	cd := a.cfg.Cooldown
-	if cd <= 0 {
-		cd = 10 * time.Minute
-	}
-	if last, ok := a.lastHit[sk]; ok && now.Sub(last) < cd {
-		return false
-	}
-	a.lastHit[sk] = now
-	return true
-}
 
 // ---------- enrichment (only for IP keys) ----------
 func (a *Auth) enrichDisplay(kindKey, baseKey, rawKey string) string {

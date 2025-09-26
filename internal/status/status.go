@@ -15,6 +15,7 @@ import (
 	"regexp"
 
 	"cfm/internal/enrich"
+	"cfm/internal/detectors/health"
 )
 
 const topN = 10 // δεν διαβάζουμε από config
@@ -245,6 +246,67 @@ func Run(args []string) {
 	printSummary(st)
 
 
+
+
+
+
+
+
+
+
+// --- Health snapshot (works even if daemon is not running) ---
+hs := health.SnapshotNow()
+fmt.Printf("\n ====================================================================== \n")
+fmt.Printf("\nHealth:\n")
+fmt.Printf("  Hostname: %s\n", hs.Host)
+fmt.Printf("  CPU load: %.2f (1m)\n", hs.Load1)
+fmt.Printf("  RAM: %.1f%%\n", hs.RamUsedPct)
+fmt.Printf("  Disk /: %.1f%%\n", hs.DiskRootPct)
+fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
+    hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
+
+if hs.Mdadm != "" && hs.Mdadm != "NO RAID" {
+    fmt.Printf("  RAID: %s\n", hs.Mdadm)
+}
+
+// Compact SMART summary
+if len(hs.Smart) > 0 {
+    total, fails := 0, 0
+    temps := make([]string, 0, 3)
+    for dev, info := range hs.Smart {
+        total++
+        h := strings.ToUpper(info.Health)
+        if strings.Contains(h, "FAIL") || strings.Contains(h, "CRIT") {
+            fails++
+        }
+        if info.TempC != "" && len(temps) < 3 {
+            temps = append(temps, fmt.Sprintf("%s=%sC", dev, info.TempC))
+        }
+    }
+    if fails > 0 {
+        fmt.Printf("  SMART: FAIL=%d/%d", fails, total)
+    } else {
+        fmt.Printf("  SMART: PASS (%d)", total)
+    }
+    if len(temps) > 0 {
+        fmt.Printf(" | temps: %s", strings.Join(temps, ", "))
+    }
+    fmt.Println()
+}
+fmt.Printf("\n ====================================================================== \n")
+
+
+
+
+
+
+
+
+
+
+
+
+
 // NEW ACK-Guard
 
     // --- AckGuard summary & counters ---
@@ -295,8 +357,8 @@ func Run(args []string) {
 
 
 // ACKGuard IP List
-r4 := listSetElemsDetailed("ackguard_recent_v4", 20)
-r6 := listSetElemsDetailed("ackguard_recent_v6", 20)
+r4 := listSetElemsDetailed("ackguard_recent_v4", 10)
+r6 := listSetElemsDetailed("ackguard_recent_v6", 10)
 
 printRecent := func(label string, items []recentHit) {
     if len(items) == 0 { return }
@@ -464,6 +526,12 @@ if len(topIPs) > 0 {
         fmt.Printf("  %-17s %6d%s%s\n", h.IP, h.Count, extraStr, meta)
     }
 }
+
+
+
+
+
+
 
 
 

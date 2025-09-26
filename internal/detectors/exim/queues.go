@@ -26,7 +26,7 @@ type QueuesConfig struct {
 
 type Queues struct {
 	cfg      QueuesConfig
-	lastFire map[core.AlertKind]time.Time
+	gate *core.AlertGate
 	mu       sync.Mutex
 }
 
@@ -49,10 +49,8 @@ func NewQueues(cfg QueuesConfig) *Queues {
 	if cfg.Cooldown == 0 {
 		cfg.Cooldown = 10 * time.Minute
 	}
-	return &Queues{
-		cfg:      cfg,
-		lastFire: make(map[core.AlertKind]time.Time),
-	}
+
+return &Queues{ cfg: cfg, gate: core.NewAlertGate(cfg.Cooldown) }
 }
 
 func (q *Queues) Name() string         { return "exim/queues" }
@@ -71,7 +69,8 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	frozen, samples, _ := q.frozenCountAndSamples(ctx)
 
 	now := time.Now()
-	if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal && q.cool(QueueTotal, now) {
+if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
+   q.gate.Allow(string(QueueTotal), now, total, q.cfg.MaxTotal) {
 		out <- core.Alert{
 			When:    now,
 			Kind:    QueueTotal,
@@ -85,7 +84,8 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			},
 		}
 	}
-	if q.cfg.MaxFrozen > 0 && frozen > q.cfg.MaxFrozen && q.cool(QueueFrozen, now) {
+if q.cfg.MaxFrozen > 0 && frozen > q.cfg.MaxFrozen &&
+   q.gate.Allow(string(QueueFrozen), now, frozen, q.cfg.MaxFrozen) {
 		out <- core.Alert{
 			When:    now,
 			Kind:    QueueFrozen,
@@ -149,16 +149,7 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, erro
 	return frozen, samples, nil
 }
 
-func (q *Queues) cool(kind core.AlertKind, now time.Time) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	last := q.lastFire[kind]
-	if now.Sub(last) < q.cfg.Cooldown {
-		return false
-	}
-	q.lastFire[kind] = now
-	return true
-}
+
 
 func trimSamples(a []string, n int) []string {
 	if len(a) <= n {

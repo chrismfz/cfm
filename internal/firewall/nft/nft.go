@@ -73,6 +73,12 @@ type Backend struct{
     feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
 }
 
+
+// GetEnricher returns the enrichment engine (if enabled).
+func (b *Backend) GetEnricher() *enrichpkg.Enricher {
+    return b.enr
+}
+
 func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 
 //func New() *Backend { return &Backend{} }

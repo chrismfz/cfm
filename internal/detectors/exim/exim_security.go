@@ -53,20 +53,22 @@ type EximSecurity struct {
 	off      int64
 	readyLog bool
 
-	counts   *windowCounter
-	samples  map[string][]string           // key=tag:ip
 	pending  map[string]pend               // στο τέλος του RunOnce στέλνουμε alerts
 	rules    []secRule
 	enr      *enrich.Enricher
 	reHostIP *regexp.Regexp
 	reSetID  *regexp.Regexp   // (set_id=foo)
 	reUserAng*regexp.Regexp   // user=<foo>
-	lastFire map[string]time.Time
 
 	name string          // unique instance name (section)
 	src  *core.FileTailer
 	// per-user recent distinct IPs (small, capped)
 	userIPs map[string]*recentIPs
+
+samples *core.SampleRing
+gate    *core.AlertGate
+counts  *core.SlidingCounter
+
 }
 
 
@@ -104,12 +106,12 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 	}
 
 defaults := map[string]int{
-			"AUTHFAIL":            15,
-			"SENDER_VERIFY_FAIL":  20,
-			"RCPT_REJECT":         30,
+			"AUTHFAIL":            10,
+			"SENDER_VERIFY_FAIL":  10,
+			"RCPT_REJECT":         10,
 			"SYNC_ERR":             8,
 			"PROTO_ERR":            8,
-			"NO_MAIL":             12,
+			"NO_MAIL":             10,
 			"DROP_ACL":             6,
 		}
 
@@ -126,17 +128,20 @@ defaults := map[string]int{
     }
 
 
-	d := &EximSecurity{
-		cfg:     cfg,
-		counts:  newWindowCounter(cfg.Window),
-		samples: make(map[string][]string),
-		reHostIP: regexp.MustCompile(`\[(\d{1,3}(?:\.\d{1,3}){3})\]`), // IP σε αγκύλες
-		lastFire: make(map[string]time.Time),
-	        userIPs:  make(map[string]*recentIPs),
-	}
+    d := &EximSecurity{
+        cfg:      cfg,
+        reHostIP: regexp.MustCompile(`\[(\d{1,3}(?:\.\d{1,3}){3})\]`), // IP σε αγκύλες
+        userIPs:  make(map[string]*recentIPs),
+    }
+
+    // init core window primitives
+    d.samples = core.NewSampleRing(cfg.SampleLimit)
+    d.gate    = core.NewAlertGate(cfg.Cooldown)
+    d.counts  = core.NewSlidingCounter(cfg.Window, 0) // optional cap=0
 
     d.reSetID   = regexp.MustCompile(`\bset_id=([^) \t]+)`)
     d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
+
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -165,7 +170,7 @@ func (d *EximSecurity) loadRules() {
 	}{
 		{"AUTHFAIL", "Incorrect authentication data", `authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data`},
 		{"SENDER_VERIFY_FAIL", "sender verify fail",  `sender verify fail\b`},
-		{"RCPT_REJECT", "RCPT rejected",              `rejected RCPT [^@]+@\S+: (?:relay not permitted|Sender verify failed|Unknown user|Unrouteable address)`},
+		{"RCPT_REJECT", "RCPT rejected", `rejected RCPT\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|Sender verify failed|Unknown user|Unrouteable address)`},
 		{"SYNC_ERR", "protocol sync error",           `SMTP protocol synchronization error .* rejected .*`},
 		{"PROTO_ERR", "AUTH used when not advertised",`SMTP protocol error in ".*" .*AUTH command used when not advertised`},
 		{"NO_MAIL", "no MAIL in SMTP connection",     `no MAIL in SMTP connection .*`},
@@ -284,23 +289,13 @@ func (d *EximSecurity) addUserIP(user, ip string) {
 }
 
 
-func (d *EximSecurity) bump(now time.Time, tag, ip, line string) {
-	n := d.counts.Add(tag+":"+ip, now)
+func (d *EximSecurity) bump(now time.Time, tag, key, line string) {
+    sk := tag + ":" + key
+    d.samples.Add(sk, line)
+    _ = d.counts.Add(sk, now) // real counting in sliding window
 
-	d.mu.Lock()
-	sk := tag + ":" + ip
-	if _, ok := d.samples[sk]; !ok {
-		d.samples[sk] = make([]string, 0, d.cfg.SampleLimit)
-	}
-	if len(d.samples[sk]) < d.cfg.SampleLimit {
-		d.samples[sk] = append(d.samples[sk], line)
-	}
-	d.mu.Unlock()
-
-	if d.pending == nil {
-		d.pending = make(map[string]pend)
-	}
-	d.pending[sk] = pend{kindKey: tag, key: ip, n: n}
+    if d.pending == nil { d.pending = make(map[string]pend) }
+    d.pending[sk] = pend{kindKey: tag, key: key} // no per-tick n here
 }
 
 
@@ -310,14 +305,12 @@ func (d *EximSecurity) bump(now time.Time, tag, ip, line string) {
 func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
     for sk, p := range d.pending {
         thr, kind, isIP, base := d.thresholdAndKey(p.kindKey, p.key)
-        if thr <= 0 || p.n < thr {
-            continue
-        }
-        if !d.cool(sk, now) {
-            continue
-        }
+        if thr <= 0 { continue }
 
-        // display key
+        n := d.counts.Count(sk, now)
+        if !d.gate.Allow(sk, now, n, thr) { continue }
+
+        // display + enrichment exactly as before
         displayKey := base
         if isIP {
             displayKey = "ip " + base
@@ -328,10 +321,7 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
             }
         }
 
-        samples := d.samples[sk]
-        if len(samples) > d.cfg.SampleLimit {
-            samples = samples[:d.cfg.SampleLimit]
-        }
+        samples := d.samples.GetAndClear(sk)
 
         extra := map[string]string{
             "log":      d.path,
@@ -342,28 +332,22 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
         }
         if isIP {
             extra["ip"] = base
-        } else {
-            // per-user: include recent distinct source IPs
-            if rp := d.userIPs[base]; rp != nil {
-                csv, n := rp.CSV()
-                if n > 0 {
-                    extra["ips"] = csv
-                    extra["unique_ips"] = strconv.Itoa(n)
-                }
-            }
+        } else if rp := d.userIPs[base]; rp != nil {
+            csv, n := rp.CSV()
+            if n > 0 { extra["ips"], extra["unique_ips"] = csv, strconv.Itoa(n) }
         }
 
         out <- core.Alert{
-            When:    now,
-            Kind:    core.AlertKind(kind), // "SECURITY/AUTHFAIL" or "SECURITY/<TAG>"
-            Key:     displayKey,           // ip (...) or username
-            Count:   p.n,
-            Samples: samples,
-            Extra:   extra,
+            When: now, Kind: core.AlertKind(kind),
+            Key: displayKey, Count: n, Samples: samples, Extra: extra,
         }
-        d.samples[sk] = nil
     }
 }
+
+
+
+
+
 
 func (d *EximSecurity) thresholdAndKey(kindKey, rawKey string) (thr int, alertKind string, isIP bool, base string) {
     // AUTHFAIL per-IP/per-user
@@ -427,19 +411,7 @@ func (d *EximSecurity) lookupMeta(ip string) string {
 
 
 
-func (d *EximSecurity) cool(key string, now time.Time) bool {
-    if d.cfg.Cooldown <= 0 {
-        return true
-    }
-    if last, ok := d.lastFire[key]; ok {
-        if now.Sub(last) < d.cfg.Cooldown {
-            return false
-        }
-    }
-    d.lastFire[key] = now
-    return true
-}
-
+// (cooldown handled by core.AlertGate; no local cool())
 
 
 

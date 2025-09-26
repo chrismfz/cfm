@@ -65,9 +65,11 @@ type Relays struct {
 	mu       sync.Mutex
 	off      int64      // file offset
 	inode    uint64     // file inode για rotation
-	lastFire map[string]time.Time // per-kind/key cooldown
-	samples  map[string][]string  // per-kind/key rolling samples
-	counts   *windowCounter       // per-kind/key sliding window
+
+samples *core.SampleRing
+gate    *core.AlertGate
+counts  *core.SlidingCounter
+
 	path     string               // effective path
 	readyLog bool
 	recent []string // last few lines to infer PHP context
@@ -91,6 +93,7 @@ func NewRelays(cfg RelaysConfig) *Relays {
     if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
     if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
     if cfg.Cooldown <= 0 { cfg.Cooldown = 10 * time.Minute }
+
     // enrichment defaults
     if !cfg.UseEnrich && !cfg.UsePTR {
         cfg.UsePTR = true
@@ -99,12 +102,12 @@ func NewRelays(cfg RelaysConfig) *Relays {
         cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
     }
 
-    d := &Relays{
-        cfg:      cfg,
-        lastFire: make(map[string]time.Time),
-        samples:  make(map[string][]string),
-        counts:   newWindowCounter(cfg.Window),
-    }
+    d := &Relays{ cfg: cfg }
+
+    // init core window primitives
+    d.samples = core.NewSampleRing(cfg.SampleLimit)
+    d.gate    = core.NewAlertGate(cfg.Cooldown)
+    d.counts  = core.NewSlidingCounter(cfg.Window, 0)
 
     if cfg.UseEnrich {
         if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -174,67 +177,51 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 
 	// ---- 4) flush aggregated alerts (τέλος run) ----
-	nowSend := time.Now()
-	for _, p := range d.pending {
-		threshold, alertKind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
-		if threshold <= 0 || p.n < threshold {
-			continue
-		}
-		// cooldown per key
-		sk := p.kindKey + ":" + p.key
-		if !d.cool(sk, nowSend) {
-			continue
-		}
 
-		// --- META (php context) ---
-		isPHP, cwd, uid := false, "", ""
-		if alertKind == KindLocalRelay {
-			if ok, c, u := d.guessPHP(); ok {
-				isPHP, cwd, uid = true, c, u
-				baseKey += " (php)"
-			}
-		}
+nowSend := time.Now()
+for _, p := range d.pending {
+    thr, kind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
+    if thr <= 0 { continue }
 
-		// εμπλουτισμός key
-		displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
+    sk := p.kindKey + ":" + p.key
+    n := d.counts.Count(sk, nowSend)
+    if !d.gate.Allow(sk, nowSend, n, thr) { continue }
 
-		// δείγματα (και subject decode)
-		samples := d.samples[sk]
-		if len(samples) > d.cfg.SampleLimit {
-			samples = samples[:d.cfg.SampleLimit]
-		}
-		pretty := make([]string, 0, len(samples)*2)
-		for _, ln := range samples {
-			pretty = append(pretty, ln)
-			if subj := decodeSubjectFromLine(ln); subj != "" {
-				pretty = append(pretty, "SUBJ: "+subj)
-			}
-		}
+    // PHP guess stays unchanged
+    isPHP, cwd, uid := false, "", ""
+    if kind == KindLocalRelay {
+        if ok, c, u := d.guessPHP(); ok {
+            isPHP, cwd, uid = true, c, u
+            baseKey += " (php)"
+        }
+    }
 
-		// extra info (βάζουμε και το limit)
-		extra := map[string]string{
-			"log":      d.path,
-			"window":   d.cfg.Window.String(),
-			"cooldown": d.cfg.Cooldown.String(),
-			"limit":    strconv.Itoa(threshold),
-		}
-		if isPHP {
-			if cwd != "" { extra["cwd"] = cwd }
-			if uid != "" { extra["uid"] = uid }
-		}
+    displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
+    samples := d.samples.GetAndClear(sk)
+    pretty  := make([]string, 0, len(samples)*2)
+    for _, ln := range samples {
+        pretty = append(pretty, ln)
+        if subj := decodeSubjectFromLine(ln); subj != "" {
+            pretty = append(pretty, "SUBJ: "+subj)
+        }
+    }
 
-		out <- core.Alert{
-			When:    nowSend,
-			Kind:    alertKind,
-			Key:     displayKey,
-			Count:   p.n,
-			Samples: pretty,
-			Extra:   extra,
-		}
+    extra := map[string]string{
+        "log": d.path, "window": d.cfg.Window.String(),
+        "cooldown": d.cfg.Cooldown.String(), "limit": strconv.Itoa(thr),
+    }
+    if isPHP {
+        if cwd != "" { extra["cwd"] = cwd }
+        if uid != "" { extra["uid"] = uid }
+    }
 
-		// reset samples για φρέσκα entries στο επόμενο alert
-		d.samples[sk] = nil
-	}
+    out <- core.Alert{
+        When: nowSend, Kind: kind, Key: displayKey,
+        Count: n, Samples: pretty, Extra: extra,
+    }
+}
+
+
 
 	// προαιρετικό metrics όταν τρέχεις με debug
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
@@ -328,26 +315,13 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 
 
 //func bump
-func (d *Relays) bump(now time.Time, kindKey, key, line string, out chan<- core.Alert) {
-	// sliding window count
-	n := d.counts.Add(kindKey+":"+key, now)
 
-	// samples per key
-	d.mu.Lock()
-	sk := kindKey + ":" + key
-	if _, ok := d.samples[sk]; !ok {
-		d.samples[sk] = make([]string, 0, d.cfg.SampleLimit)
-	}
-	if len(d.samples[sk]) < d.cfg.SampleLimit {
-		d.samples[sk] = append(d.samples[sk], line)
-	}
-	d.mu.Unlock()
-
-	// aggregate για αυτό το RunOnce
-	if d.pending == nil {
-		d.pending = make(map[string]pend)
-	}
-	d.pending[sk] = pend{kindKey: kindKey, key: key, n: n}
+func (d *Relays) bump(now time.Time, kindKey, key, line string, _ chan<- core.Alert) {
+    sk := kindKey + ":" + key
+    d.samples.Add(sk, line)
+    _ = d.counts.Add(sk, now)
+    if d.pending == nil { d.pending = make(map[string]pend) }
+    d.pending[sk] = pend{kindKey: kindKey, key: key}
 }
 
 //fun bump end
@@ -410,43 +384,6 @@ func (d *Relays) enrichDisplay(kindKey, alertKey, rawKey string) string {
 
 
 
-func (d *Relays) cool(sk string, now time.Time) bool {
-	last, ok := d.lastFire[sk]
-	if ok && now.Sub(last) < d.cfg.Cooldown {
-		return false
-	}
-	d.lastFire[sk] = now
-	return true
-}
-
-// ---- window counter ----
-
-type windowCounter struct {
-	mu     sync.Mutex
-	window time.Duration
-	events map[string][]time.Time
-}
-
-func newWindowCounter(d time.Duration) *windowCounter {
-	return &windowCounter{
-		window: d,
-		events: make(map[string][]time.Time),
-	}
-}
-
-func (w *windowCounter) Add(key string, t time.Time) int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	ts := append(w.events[key], t)
-	cut := t.Add(-w.window)
-	i := 0
-	for i < len(ts) && ts[i].Before(cut) {
-		i++
-	}
-	ts = ts[i:]
-	w.events[key] = ts
-	return len(ts)
-}
 
 // ---- helpers ----
 

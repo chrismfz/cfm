@@ -41,19 +41,23 @@ type LoginConfig struct {
 	IgnoreCpanel    bool // ignore cPanel internal user 'Cpanel::MysqlUtils::Unprivileged'
 }
 
+type pend struct {
+	kindKey string // e.g. "DENY|ip", "DENY|user", "ROOT|ip", "SCAN|ip"
+	key     string // ip or user
+}
+
+
 type MySQL struct {
 	cfg LoginConfig
 
 	name string
 	src  core.LineSource
 
-	// aggregation
-	nByIP    map[string]int
-	nByUser  map[string]int
-	nRootIP  map[string]int
-	nScanIP  map[string]int // unauthenticated aborted connections per IP
-	samples  map[string][]string
-	lastFire map[string]time.Time
+	// window primitives
+	pending map[string]pend
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 
 	// enrichment
 	enr *enrich.Enricher
@@ -70,15 +74,29 @@ type MySQL struct {
 	reHostNX       *regexp.Regexp // "Host name '...' could not be resolved"
 }
 
-func NewMySQL(cfg LoginConfig) *MySQL {
-	m := &MySQL{cfg: cfg}
 
-	m.nByIP = make(map[string]int)
-	m.nByUser = make(map[string]int)
-	m.nRootIP = make(map[string]int)
-	m.nScanIP = make(map[string]int)
-	m.samples = make(map[string][]string)
-	m.lastFire = make(map[string]time.Time)
+func NewMySQL(cfg LoginConfig) *MySQL {
+
+	// sensible defaults
+	if cfg.Mode == "" { cfg.Mode = "file" }
+	if cfg.LogPath == "auto" || cfg.LogPath == "" {
+		if p := resolveMySQLErrorLog(); p != "" { cfg.LogPath = p }
+	}
+	if cfg.Every <= 0    { cfg.Every = 2 * time.Second }
+	if cfg.Window <= 0   { cfg.Window = 15 * time.Minute }
+	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
+	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
+	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+	}
+
+	m := &MySQL{cfg: cfg}
+	// window primitives
+	m.pending = make(map[string]pend)
+	m.samples = core.NewSampleRing(cfg.SampleLimit)
+	m.gate    = core.NewAlertGate(cfg.Cooldown)
+	m.counts  = core.NewSlidingCounter(cfg.Window, 0)
 
 	// Denied
 	m.reDenied = regexp.MustCompile(`(?i)\bAccess denied for user '([^']+)'@'([^']+)'(?:\s+\(using password: (YES|NO)\))?`)
@@ -137,6 +155,10 @@ func (m *MySQL) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	return nil
 }
 
+
+
+
+
 func (m *MySQL) processLine(s string) {
 	// quick skip
 	if m.reHostResemble.MatchString(s) || m.reHostNX.MatchString(s) {
@@ -155,15 +177,17 @@ func (m *MySQL) processLine(s string) {
 			return
 		}
 
-		keyIP := "DENY|ip:" + host
-		keyUser := "DENY|user:" + strings.ToLower(user)
-		m.nByIP[host]++
-		m.nByUser[strings.ToLower(user)]++
+		luser := strings.ToLower(user)
+		now := time.Now()
+
+		// deny per IP
+		m.bump(now, "DENY|ip", host, s)
+		// deny per user
+		m.bump(now, "DENY|user", luser, s)
+		// root per IP (separate threshold; own counter+samples)
 		if strings.EqualFold(user, "root") {
-			m.nRootIP[host]++
+			m.bump(now, "ROOT|ip", host, s)
 		}
-		m.samples[keyIP] = appendSample(m.samples[keyIP], s, 64)
-		m.samples[keyUser] = appendSample(m.samples[keyUser], s, 64)
 		return
 	}
 
@@ -173,83 +197,89 @@ func (m *MySQL) processLine(s string) {
 		if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1") {
 			return
 		}
-		key := "SCAN|ip:" + host
-		m.nScanIP[host]++
-		m.samples[key] = appendSample(m.samples[key], s, 64)
+
+		now := time.Now()
+		m.bump(now, "SCAN|ip", host, s)
 		return
 	}
 
 	// else ignore
 }
 
+
+
+
+
 func (m *MySQL) flush(now time.Time, out chan<- core.Alert) {
-	// Access denied – per IP
-	for ip, n := range m.nByIP {
-		if m.cfg.DeniedPerIP > 0 && n >= m.cfg.DeniedPerIP && m.cool("DENY|ip:"+ip, now) {
-			out <- core.Alert{
-				When:    now,
-				Kind:    core.AlertKind("MYSQL/ACCESS_DENIED"),
-				Key:     m.decorateIP(ip),
-				Count:   n,
-				Samples: limit(m.samples["DENY|ip:"+ip], m.cfg.SampleLimit),
-				Extra:   map[string]string{"limit": itoa(m.cfg.DeniedPerIP), "log": m.cfg.LogPath},
-			}
-			m.samples["DENY|ip:"+ip] = nil
+	for sk, p := range m.pending {
+		limit, kindStr, displayKey := m.thresholdAndDisplay(p.kindKey, p.key)
+		if limit <= 0 { continue }
+		n := m.counts.Count(sk, now)
+		if n < limit { continue }
+		if !m.gate.Allow(sk, now, n, limit) { continue }
+
+		extra := map[string]string{
+			"window":   m.cfg.Window.String(),
+			"cooldown": m.cfg.Cooldown.String(),
+			"limit":    strconv.Itoa(limit),
+			"log":      m.cfg.LogPath,
+		}
+		samples := m.samples.GetAndClear(sk)
+		out <- core.Alert{
+			When:    now,
+			Kind:    core.AlertKind(kindStr),
+			Key:     displayKey,
+			Count:   n,
+			Samples: samples,
+			Extra:   extra,
 		}
 	}
-
-	// Access denied – per user
-	for user, n := range m.nByUser {
-		if m.cfg.DeniedPerUser > 0 && n >= m.cfg.DeniedPerUser && m.cool("DENY|user:"+user, now) {
-			out <- core.Alert{
-				When:    now,
-				Kind:    core.AlertKind("MYSQL/ACCESS_DENIED"),
-				Key:     user,
-				Count:   n,
-				Samples: limit(m.samples["DENY|user:"+user], m.cfg.SampleLimit),
-				Extra:   map[string]string{"limit": itoa(m.cfg.DeniedPerUser), "log": m.cfg.LogPath},
-			}
-			m.samples["DENY|user:"+user] = nil
-		}
-	}
-
-	// Access denied – root per IP (special)
-	for ip, n := range m.nRootIP {
-		lim := m.cfg.RootPerIP
-		if lim <= 0 { lim = m.cfg.DeniedPerIP }
-		if lim > 0 && n >= lim && m.cool("ROOT|ip:"+ip, now) {
-			out <- core.Alert{
-				When:    now,
-				Kind:    core.AlertKind("MYSQL/ROOT_DENIED"),
-				Key:     m.decorateIP(ip),
-				Count:   n,
-				Samples: limit(m.samples["DENY|ip:"+ip], m.cfg.SampleLimit), // reuse same sample pool
-				Extra:   map[string]string{"limit": itoa(lim), "log": m.cfg.LogPath},
-			}
-		}
-	}
-
-	// Scanner bursts – unauthenticated aborted connections per IP
-	for ip, n := range m.nScanIP {
-		if m.cfg.ScanPerIP > 0 && n >= m.cfg.ScanPerIP && m.cool("SCAN|ip:"+ip, now) {
-			out <- core.Alert{
-				When:    now,
-				Kind:    core.AlertKind("MYSQL/UNAUTH_SCANS"),
-				Key:     m.decorateIP(ip),
-				Count:   n,
-				Samples: limit(m.samples["SCAN|ip:"+ip], m.cfg.SampleLimit),
-				Extra:   map[string]string{"limit": itoa(m.cfg.ScanPerIP), "log": m.cfg.LogPath},
-			}
-			m.samples["SCAN|ip:"+ip] = nil
-		}
-	}
-
-	// reset counters for next window
-	clearMap(m.nByIP)
-	clearMap(m.nByUser)
-	clearMap(m.nRootIP)
-	clearMap(m.nScanIP)
 }
+
+// bump aggregates into window primitives and tracks the key for this tick
+func (m *MySQL) bump(now time.Time, kindKey, key, line string) {
+	sk := kindKey + ":" + key
+	if _, ok := m.pending[sk]; !ok {
+		m.pending[sk] = pend{kindKey: kindKey, key: key}
+	}
+	_ = m.counts.Add(sk, now)
+	m.samples.Add(sk, line)
+}
+
+// threshold + display resolution per key
+func (m *MySQL) thresholdAndDisplay(kindKey, key string) (limit int, kindStr, displayKey string) {
+	switch kindKey {
+	case "DENY|ip":
+		limit = m.cfg.DeniedPerIP
+		kindStr = "MYSQL/ACCESS_DENIED"
+		displayKey = m.decorateIP(key)
+	case "DENY|user":
+		limit = m.cfg.DeniedPerUser
+		kindStr = "MYSQL/ACCESS_DENIED"
+		displayKey = key
+	case "ROOT|ip":
+		limit = m.cfg.RootPerIP
+		if limit <= 0 { limit = m.cfg.DeniedPerIP }
+		kindStr = "MYSQL/ROOT_DENIED"
+		displayKey = m.decorateIP(key)
+	case "SCAN|ip":
+		limit = m.cfg.ScanPerIP
+		kindStr = "MYSQL/UNAUTH_SCANS"
+		displayKey = m.decorateIP(key)
+	default:
+		limit = 0
+	}
+	return
+}
+
+
+
+
+
+
+
+
+
 
 func (m *MySQL) decorateIP(ip string) string {
 	if (!m.cfg.UseEnrich && !m.cfg.UsePTR) || ip == "" {
@@ -276,36 +306,8 @@ func (m *MySQL) decorateIP(ip string) string {
 	return strings.Join(parts, " ")
 }
 
-func (m *MySQL) cool(key string, now time.Time) bool {
-	cd := m.cfg.Cooldown
-	if cd <= 0 { cd = 20 * time.Minute }
-	if last, ok := m.lastFire[key]; ok {
-		if now.Sub(last) < cd {
-			return false
-		}
-	}
-	m.lastFire[key] = now
-	return true
-}
 
 // ---- helpers ----
-
-func appendSample(ss []string, s string, max int) []string {
-	ss = append(ss, s)
-	if len(ss) > max {
-		return ss[len(ss)-max:]
-	}
-	return ss
-}
-func limit(ss []string, n int) []string {
-	if n <= 0 || len(ss) <= n { return ss }
-	return ss[:n]
-}
-func clearMap[M ~map[string]int](m M) {
-	for k := range m { delete(m, k) }
-}
-func itoa(i int) string { return strconv.Itoa(i) }
-
 // ---- Auto resolve MySQL error log path (LOG_PATH="auto") ----
 
 // resolveMySQLErrorLog tries:

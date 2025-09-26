@@ -6,6 +6,7 @@ import (
 
     core "cfm/internal/detectors/core"
     "cfm/internal/detectors/dovecot"
+    "cfm/internal/logging"
 )
 
 func init() {
@@ -45,6 +46,32 @@ func init() {
 
         det := dovecot.NewAuth(cfg)
         det.SetName(section)
+
+
+
+        // choose source based on MODE and log it
+        mode := strings.ToLower(cfg.Mode)
+        switch mode {
+        case "file":
+            det.SetSource(core.NewFileTailer(cfg.LogPath))
+            logging.Logf("[detectors][%s] using log: %s", section, cfg.LogPath)
+        default: // "journal"
+            j := core.NewJournalTailer(cfg.JournalUnit)
+            det.SetSource(j)
+            logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
+        }
+
+        // pretty start line
+        if mode == "file" {
+            logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
+                section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+        } else {
+            logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
+                section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.JournalUnit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+        }
+
         return det, nil
+
+
     })
 }

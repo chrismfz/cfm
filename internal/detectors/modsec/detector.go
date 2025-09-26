@@ -37,7 +37,6 @@ type Config struct {
 
 type pend struct {
 	key string // ip
-	n   int
 }
 
 type meta struct {
@@ -56,8 +55,11 @@ type Detector struct {
 	src  core.LineSource
 
 	pending map[string]pend
-	samples map[string][]string
-	lastHit map[string]time.Time
+
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
+
 	metas   map[string]meta
 
 	// text extractors (Apache error_log style)
@@ -79,11 +81,24 @@ type Detector struct {
 }
 
 func New(cfg Config) *Detector {
+
+	// sensible defaults
+	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
+	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
+	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
+	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
+	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+	}
+
 	d := &Detector{cfg: cfg}
 	d.pending = make(map[string]pend)
-	d.samples = make(map[string][]string)
-	d.lastHit = make(map[string]time.Time)
-	d.metas = make(map[string]meta)
+	d.metas   = make(map[string]meta)
+	// core window primitives
+	d.samples = core.NewSampleRing(cfg.SampleLimit)
+	d.gate    = core.NewAlertGate(cfg.Cooldown)
+	d.counts  = core.NewSlidingCounter(cfg.Window, 0) // cap=0 → unbounded keys
 
 	// Only handle hard blocks (403)
 	d.reQuick = regexp.MustCompile(`ModSecurity:\s+Access denied with code 403`)
@@ -288,34 +303,35 @@ func (d *Detector) tryJSON(now time.Time, raw string) bool {
 }
 
 func (d *Detector) bump(now time.Time, ip, sample string) {
-	p := d.pending[ip]
-	p.key, p.n = ip, p.n+1
-	d.pending[ip] = p
 
-	d.samples[ip] = append(d.samples[ip], sample)
-	if d.cfg.SampleLimit > 0 && len(d.samples[ip]) > d.cfg.SampleLimit {
-		d.samples[ip] = d.samples[ip][len(d.samples[ip])-d.cfg.SampleLimit:]
+	sk := "ip:" + ip
+	d.samples.Add(sk, sample)
+	_ = d.counts.Add(sk, now)
+	if _, ok := d.pending[ip]; !ok {
+		d.pending[ip] = pend{key: ip}
 	}
+
+
 }
+
+
 
 func (d *Detector) flush(now time.Time, out chan<- core.Alert) {
 	thr := d.cfg.ModsecPerIP
 	if thr <= 0 {
 		thr = 20
 	}
-	for ip, p := range d.pending {
-		if p.n < thr {
-			continue
-		}
+
+	for ip := range d.pending {
 		sk := "ip:" + ip
-		if !d.cool(sk, now) {
-			continue
-		}
+		n := d.counts.Count(sk, now)
+		if n < thr { continue }
+		if !d.gate.Allow(sk, now, n, thr) { continue }
+
 		displayKey := d.decorate(ip)
-		samples := d.samples[ip]
-		if d.cfg.SampleLimit > 0 && len(samples) > d.cfg.SampleLimit {
-			samples = samples[:d.cfg.SampleLimit]
-		}
+
+		samples := d.samples.GetAndClear(sk)
+
 		extra := map[string]string{
 			"window":   d.cfg.Window.String(),
 			"cooldown": d.cfg.Cooldown.String(),
@@ -346,26 +362,15 @@ func (d *Detector) flush(now time.Time, out chan<- core.Alert) {
 			When:    now,
 			Kind:    core.AlertKind("MODSEC/403"),
 			Key:     displayKey,
-			Count:   p.n,
+			Count:   n,
 			Samples: samples,
 			Extra:   extra,
 		}
-		// reset per-IP samples
-		d.samples[ip] = nil
 	}
 }
 
-func (d *Detector) cool(sk string, now time.Time) bool {
-	cd := d.cfg.Cooldown
-	if cd <= 0 {
-		cd = 10 * time.Minute
-	}
-	if last, ok := d.lastHit[sk]; ok && now.Sub(last) < cd {
-		return false
-	}
-	d.lastHit[sk] = now
-	return true
-}
+
+
 
 func (d *Detector) decorate(ip string) string {
 	if !d.cfg.UseEnrich && !d.cfg.UsePTR {

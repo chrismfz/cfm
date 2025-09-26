@@ -35,7 +35,6 @@ type Config struct {
 type pend struct {
 	kindKey string // "AUTHFAIL|ip" | "AUTHFAIL|user"
 	key     string // ip or user
-	n       int
 }
 
 type Auth struct {
@@ -44,8 +43,10 @@ type Auth struct {
 	src  core.LineSource
 
 	pending map[string]pend
-	samples map[string][]string
-	lastHit map[string]time.Time
+
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 
 	// fast prefilters
 	reQuick *regexp.Regexp
@@ -62,10 +63,22 @@ type Auth struct {
 }
 
 func NewAuth(cfg Config) *Auth {
+	// sensible defaults (align with other detectors)
+	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
+	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
+	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
+	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
+	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+	}
+
 	a := &Auth{cfg: cfg}
 	a.pending = make(map[string]pend)
-	a.samples = make(map[string][]string)
-	a.lastHit = make(map[string]time.Time)
+	// core window primitives
+	a.samples = core.NewSampleRing(cfg.SampleLimit)
+	a.gate    = core.NewAlertGate(cfg.Cooldown)
+	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
 
 	// quick filter if line looks ftp-ish & failed
 	a.reQuick = regexp.MustCompile(`(?i)(vsftpd|pure-?ftpd|proftpd|ftp-login).*?(fail|failed|violation|authentication failure|maximum login)`)
@@ -180,31 +193,29 @@ func pickUser(rx *regexp.Regexp, s string) string {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
-	p := a.pending[sk]
-	p.kindKey, p.key, p.n = kindKey, key, p.n+1
-	a.pending[sk] = p
-
-	a.samples[sk] = append(a.samples[sk], line)
-	if a.cfg.SampleLimit > 0 && len(a.samples[sk]) > a.cfg.SampleLimit {
-		a.samples[sk] = a.samples[sk][len(a.samples[sk])-a.cfg.SampleLimit:]
+sk := kindKey + ":" + key
+	if _, ok := a.pending[sk]; !ok {
+		a.pending[sk] = pend{kindKey: kindKey, key: key}
 	}
+	_ = a.counts.Add(sk, now)
+	a.samples.Add(sk, line)
 }
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 	for sk, p := range a.pending {
 		limit, kindStr, isIP, base := a.thresholdAndKey(p.kindKey, p.key)
-		if limit <= 0 || p.n < limit { continue }
-		if !a.cool(sk, now) { continue }
+
+		if limit <= 0 { continue }
+		n := a.counts.Count(sk, now)
+		if n < limit { continue }
+		if !a.gate.Allow(sk, now, n, limit) { continue }
 
 		displayKey := base
 		if isIP {
 			displayKey = a.decorate(base)
 		}
-		samples := a.samples[sk]
-		if a.cfg.SampleLimit > 0 && len(samples) > a.cfg.SampleLimit {
-			samples = samples[:a.cfg.SampleLimit]
-		}
+
+samples := a.samples.GetAndClear(sk)
 
 		extra := map[string]string{
 			"window":   a.cfg.Window.String(),
@@ -219,11 +230,10 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			When:    now,
 			Kind:    core.AlertKind(kindStr), // "FTP/AUTHFAIL"
 			Key:     displayKey,              // ip(...) or user
-			Count:   p.n,
+			Count:   n,
 			Samples: samples,
 			Extra:   extra,
 		}
-		a.samples[sk] = nil
 	}
 }
 
@@ -241,15 +251,6 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind str
 
 
 
-func (a *Auth) cool(sk string, now time.Time) bool {
-	cd := a.cfg.Cooldown
-	if cd <= 0 { cd = 10 * time.Minute }
-	if last, ok := a.lastHit[sk]; ok && now.Sub(last) < cd {
-		return false
-	}
-	a.lastHit[sk] = now
-	return true
-}
 
 func (a *Auth) decorate(ip string) string {
 	if !a.cfg.UseEnrich && !a.cfg.UsePTR {

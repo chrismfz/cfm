@@ -40,7 +40,6 @@ type LoginConfig struct {
 type pend struct {
 	kindKey string // e.g. "AUTHFAIL|ip", "AUTHFAIL|user", "ROOT|ip"
 	key     string // ip or username
-	n       int
 }
 
 type Login struct {
@@ -52,9 +51,9 @@ type Login struct {
 
 	// state
 	pending map[string]pend
-	samples map[string][]string
-	lastHit map[string]time.Time
-
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 	// regexes (multiple formats in login_log)
 	// 1) Bracketed cpaneld/whostmgrd/webmaild:
 	// [YYYY-MM-DD hh:mm:ss +TZ] info [svc] IP - user "..." FAILED LOGIN svc: <reason...>
@@ -73,9 +72,24 @@ type Login struct {
 }
 
 func NewLogin(cfg LoginConfig) *Login {
+	// sensible defaults
+	if cfg.Mode == "" { cfg.Mode = "file" }
+	if cfg.LogPath == "" { cfg.LogPath = "/usr/local/cpanel/logs/login_log" }
+	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
+	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
+	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
+	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
+	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+	}
+
 	l := &Login{cfg: cfg}
-	l.samples = make(map[string][]string)
-	l.lastHit = make(map[string]time.Time)
+	l.pending = make(map[string]pend)
+	// core window primitives
+	l.samples = core.NewSampleRing(cfg.SampleLimit)
+	l.gate    = core.NewAlertGate(cfg.Cooldown)
+	l.counts  = core.NewSlidingCounter(cfg.Window, 0) // cap=0 → unbounded per-key
 
 	// IPv4/IPv6 tolerant ip token (not hyper-strict on v6)
 	ipTok := `(?P<ip>[0-9a-fA-F:\.]+)`
@@ -229,35 +243,31 @@ func (l *Login) processLine(now time.Time, line string) {
 
 func (l *Login) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + key
-	l.samples[sk] = append(l.samples[sk], line)
-	if len(l.samples[sk]) > 64 {
-		l.samples[sk] = l.samples[sk][len(l.samples[sk])-64:]
+	l.samples.Add(sk, line)
+	_ = l.counts.Add(sk, now)
+	if _, ok := l.pending[sk]; !ok {
+		l.pending[sk] = pend{kindKey: kindKey, key: key}
 	}
-	p := l.pending[sk]
-	p.kindKey, p.key, p.n = kindKey, key, p.n+1
-	l.pending[sk] = p
 }
 
 // -------- flush --------
 
 func (l *Login) flush(now time.Time, out chan<- core.Alert) {
+
 	for _, p := range l.pending {
 		limit, kindStr, baseKey := l.thresholdAndKey(p.kindKey, p.key)
-		if limit <= 0 || p.n < limit {
+		if limit <= 0 {
 			continue
 		}
-		// cooldown per key
 		sk := p.kindKey + ":" + p.key
-		if !l.cool(sk, now) {
-			continue
-		}
+		n := l.counts.Count(sk, now)
+		if n < limit { continue }
+		if !l.gate.Allow(sk, now, n, limit) { continue }
+
 
 		displayKey := l.enrichDisplay(p.kindKey, baseKey, p.key)
 
-		samples := l.samples[sk]
-		if l.cfg.SampleLimit > 0 && len(samples) > l.cfg.SampleLimit {
-			samples = samples[:l.cfg.SampleLimit]
-		}
+		samples := l.samples.GetAndClear(sk)
 
 		extra := map[string]string{
 			"window":   l.cfg.Window.String(),
@@ -271,13 +281,11 @@ func (l *Login) flush(now time.Time, out chan<- core.Alert) {
 			When:    now,
 			Kind:    core.AlertKind(kindStr),
 			Key:     displayKey,
-			Count:   p.n,
+			Count:   n,
 			Samples: samples,
 			Extra:   extra,
 		}
 
-		// reset samples for next alert
-		l.samples[sk] = nil
 	}
 }
 
@@ -296,19 +304,7 @@ func (l *Login) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, b
 	}
 }
 
-func (l *Login) cool(sk string, now time.Time) bool {
-	cd := l.cfg.Cooldown
-	if cd <= 0 {
-		cd = 10 * time.Minute
-	}
-	if last, ok := l.lastHit[sk]; ok {
-		if now.Sub(last) < cd {
-			return false
-		}
-	}
-	l.lastHit[sk] = now
-	return true
-}
+// cooldown handled by core.AlertGate
 
 // -------- enrichment (same approach as SSH) --------
 

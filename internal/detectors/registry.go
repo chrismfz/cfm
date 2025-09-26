@@ -153,3 +153,17 @@ func kvStr(kv KV, key, def string) string {
         return v
 }
 
+
+
+// kvFlt returns a float64 config value, with comment/quote stripping (via kvStrClean).
+func kvFlt(kv KV, key string, def float64) float64 {
+    s := kvStrClean(kv, key, "")
+    if s == "" {
+        return def
+    }
+    v, err := strconv.ParseFloat(s, 64)
+    if err != nil {
+        return def
+    }
+    return v
+}

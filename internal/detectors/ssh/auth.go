@@ -36,6 +36,7 @@ type AuthConfig struct {
 	UseEnrich  bool
 	UsePTR     bool
 	EnrichDirs []string
+
 }
 
 type pend struct {
@@ -52,9 +53,12 @@ type Auth struct {
 	src  core.LineSource
 
 	// state
-	pending map[string]pend
-	samples map[string][]string
-	lastHit map[string]time.Time
+
+        pending    map[string]pend
+        samples    *core.SampleRing
+        gate       *core.AlertGate
+        counts     *core.SlidingCounter
+	lastHit map[string]time.Time        // (legacy) still here so cool() compiles
 
 	// regexes
 	reAuthFail    *regexp.Regexp
@@ -71,8 +75,9 @@ type Auth struct {
 
 func NewAuth(cfg AuthConfig) *Auth {
 	a := &Auth{cfg: cfg}
-	a.samples = make(map[string][]string)
-	a.lastHit = make(map[string]time.Time)
+	a.samples = core.NewSampleRing(cfg.SampleLimit)
+	a.gate    = core.NewAlertGate(cfg.Cooldown)
+	a.counts  = core.NewSlidingCounter(cfg.Window, 0) // cap optional
 
 	// useful base patterns (extend later as needed)
 	a.reAuthFail = regexp.MustCompile(`(?i)failed (?:password|publickey|keyboard-interactive) for (?:invalid user )?(?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
@@ -238,65 +243,65 @@ func (a *Auth) processLine(now time.Time, line string) {
 	// else ignore
 }
 
+
+
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	// samples ring
-	sk := kindKey + ":" + key
-	a.samples[sk] = append(a.samples[sk], line)
-	if len(a.samples[sk]) > 64 {
-		a.samples[sk] = a.samples[sk][len(a.samples[sk])-64:]
-	}
-	// per-run count
-	p := a.pending[sk]
-	p.kindKey, p.key, p.n = kindKey, key, p.n+1
-	a.pending[sk] = p
+    sk := kindKey + ":" + key
+
+    // samples (ring)
+    a.samples.Add(sk, line)
+
+    // mark as touched this tick (no per-tick increment anymore)
+    p := a.pending[sk]
+    p.kindKey, p.key = kindKey, key
+    a.pending[sk] = p
+
+    // real counting happens in the sliding window
+    _ = a.counts.Add(sk, now)
 }
+
+
+
 
 // -------- flush --------
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
-	for _, p := range a.pending {
-		limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
-		if limit <= 0 || p.n < limit {
-			continue
-		}
-		// cooldown per key
-		sk := p.kindKey + ":" + p.key
-		if !a.cool(sk, now) {
-			continue
-		}
+    for _, p := range a.pending {
+        limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
 
-		displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
+        sk := p.kindKey + ":" + p.key
+        n := a.counts.Count(sk, now)
+        if !a.gate.Allow(sk, now, n, limit) {
+            continue
+        }
 
-		samples := a.samples[sk]
-		if a.cfg.SampleLimit > 0 && len(samples) > a.cfg.SampleLimit {
-			samples = samples[:a.cfg.SampleLimit]
-		}
+        displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
 
-		extra := map[string]string{
-			"window":   a.cfg.Window.String(),
-			"cooldown": a.cfg.Cooldown.String(),
-			"limit":    strconv.Itoa(limit),
-			"mode":     a.cfg.Mode,
-		}
-		if a.cfg.Mode == "file" {
-			extra["log"] = a.cfg.LogPath
-		} else {
-			extra["unit"] = a.cfg.JournalUnit
-		}
+        samples := a.samples.GetAndClear(sk)
 
-		out <- core.Alert{
-			When:    now,
-			Kind:    core.AlertKind(kindStr), // cast to your AlertKind type
-			Key:     displayKey,
-			Count:   p.n,
-			Samples: samples,
-			Extra:   extra,
-		}
+        extra := map[string]string{
+            "window":   a.cfg.Window.String(),
+            "cooldown": a.cfg.Cooldown.String(),
+            "limit":    strconv.Itoa(limit),
+            "mode":     a.cfg.Mode,
+        }
+        if a.cfg.Mode == "file" {
+            extra["log"] = a.cfg.LogPath
+        } else {
+            extra["unit"] = a.cfg.JournalUnit
+        }
 
-		// reset samples for next alert
-		a.samples[sk] = nil
-	}
+        out <- core.Alert{
+            When:    now,
+            Kind:    core.AlertKind(kindStr),
+            Key:     displayKey,
+            Count:   n,
+            Samples: samples,
+            Extra:   extra,
+        }
+    }
 }
+
 
 func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, baseKey string) {
 	switch kindKey {

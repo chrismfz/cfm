@@ -486,6 +486,7 @@ func runDaemon(args []string) {
 	if nb, ok := be.(*nft.Backend); ok {
 		nb.EnableEnrichment(cfgDir, "/etc/cfm", "./configs")
 		nb.SetConfigDir(cfgDir)
+		notify.SetEnricher(nb.GetEnricher()) //  give notifier the same enricher instance
 	}
 
 	// Blocklists Manager (scheduler+apply)
