@@ -140,6 +140,26 @@ func Init(cfgDir string) error {
 	}
 	c.Channels = chans
 
+
+
+	// detectors (per-detector routing/overrides)
+	for name, sec := range ini.sectionsWithPrefix(`detector "`) {
+		id := between(name, `detector "`, `"`)
+		if id == "" { continue }
+		key := strings.ToLower(strings.TrimSpace(id)) // store lowercase for matching
+		ov := detectorOverride{
+			Notify:      parseBool(sec["notify"], true),
+			MinSeverity: strings.ToLower(strings.TrimSpace(sec["min_severity"])),
+			Channels:    splitCSV(sec["channels"]),
+		}
+		if cd := strings.TrimSpace(sec["cooldown"]); cd != "" {
+			if dur, err := time.ParseDuration(cd); err == nil { ov.Cooldown = dur }
+		}
+		if c.Detectors == nil { c.Detectors = map[string]detectorOverride{} }
+		c.Detectors[key] = ov
+	}
+
+
 	cfgMu.Lock(); cfg = c; cfgMu.Unlock()
 
 	dedup = newDeduper(c.DedupeTTL)
@@ -158,8 +178,24 @@ func Emit(ev Event) error {
 	// dedupe
 	key := c.DedupeKey; if key == "" { key = "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}" }
 	key = renderLiteral(key, ev)
+
+	// detector override lookup
+	ov, hasOV := matchOverride(c, ev)
+	if hasOV && !ov.Notify {
+		return nil // detector explicitly disabled
+	}
 	ttl := c.DedupeTTL; if ttl <= 0 { ttl = c.DefaultCooldown }
+	if hasOV && ov.Cooldown > 0 { ttl = ov.Cooldown }
+
 	if !dedup.allow(key, ttl) { return nil }
+
+	// severity gate (if configured)
+	if hasOV && ov.MinSeverity != "" {
+		if severityRank(ev.Severity) < severityRank(ov.MinSeverity) {
+			return nil
+		}
+	}
+
 
 	// render
 	subj, _ := renderSubject(c.SubjectTmpl, ev)
@@ -167,7 +203,8 @@ func Emit(ev Event) error {
 
 	// send
 	var firstErr error
-	for _, ch := range c.Channels {
+	dest := selectChannels(c, ov, hasOV)
+	for _, ch := range dest {
 		if err := ch.Send(ev, subj, body); err != nil && firstErr == nil { firstErr = err }
 	}
 	// audit JSONL
@@ -275,3 +312,42 @@ func between(s, a, b string) string {
 }
 
 func errString(err error) string { if err == nil { return "" }; return err.Error() }
+
+
+// ---- helpers for detector overrides ----
+func matchOverride(c *config, ev Event) (detectorOverride, bool) {
+	if c == nil || len(c.Detectors) == 0 { return detectorOverride{}, false }
+	sec := strings.ToLower(strings.TrimSpace(ev.Section))
+	kind := strings.ToLower(strings.TrimSpace(ev.Kind))
+	root := kind
+	if i := strings.Index(kind, "/"); i > 0 { root = kind[:i] } // e.g., "health" from "HEALTH/PORT_CONN_SPIKE"
+
+	// priority: exact section → exact kind → kind root → "*" default
+	if ov, ok := c.Detectors[sec]; ok && sec != "" { return ov, true }
+	if ov, ok := c.Detectors[kind]; ok && kind != "" { return ov, true }
+	if ov, ok := c.Detectors[root]; ok && root != "" { return ov, true }
+	if ov, ok := c.Detectors["*"]; ok { return ov, true }
+	return detectorOverride{}, false
+}
+
+func selectChannels(c *config, ov detectorOverride, hasOV bool) []Channel {
+	if !hasOV || len(ov.Channels) == 0 {
+		return c.Channels
+	}
+	want := map[string]struct{}{}
+	for _, n := range ov.Channels { want[strings.TrimSpace(n)] = struct{}{} }
+	out := make([]Channel, 0, len(want))
+	for _, ch := range c.Channels {
+		if _, ok := want[ch.Name()]; ok { out = append(out, ch) }
+	}
+	return out
+}
+
+func severityRank(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "critical": return 2
+	case "warn", "warning": return 1
+	case "info", "": return 0
+	default: return 0
+	}
+}
