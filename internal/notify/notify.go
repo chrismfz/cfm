@@ -288,11 +288,19 @@ func fileExists(p string) bool { fi, err := os.Stat(p); return err == nil && !fi
 func zv(s, def string) string { s = strings.TrimSpace(s); if s == "" { return def }; return s }
 
 func splitCSV(s string) []string {
-	s = strings.TrimSpace(s); if s == "" { return nil }
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts { t := strings.TrimSpace(p); if t != "" { out = append(out, t) } }
-	return out
+    s = strings.TrimSpace(s)
+    if s == "" { return nil }
+    // Best-effort guard in case ini.go wasn’t patched yet:
+    if i := strings.IndexAny(s, "#;"); i >= 0 {
+        s = strings.TrimSpace(s[:i])
+    }
+    fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+    out := make([]string, 0, len(fields))
+    for _, f := range fields {
+        f = strings.TrimSpace(f)
+        if f != "" { out = append(out, f) }
+    }
+    return out
 }
 
 func parseBool(s string, def bool) bool {
@@ -331,17 +339,18 @@ func matchOverride(c *config, ev Event) (detectorOverride, bool) {
 }
 
 func selectChannels(c *config, ov detectorOverride, hasOV bool) []Channel {
-	if !hasOV || len(ov.Channels) == 0 {
-		return c.Channels
-	}
-	want := map[string]struct{}{}
-	for _, n := range ov.Channels { want[strings.TrimSpace(n)] = struct{}{} }
-	out := make([]Channel, 0, len(want))
-	for _, ch := range c.Channels {
-		if _, ok := want[ch.Name()]; ok { out = append(out, ch) }
-	}
-	return out
+    if !hasOV || len(ov.Channels) == 0 { return c.Channels }
+    want := map[string]struct{}{}
+    for _, n := range ov.Channels {
+        want[strings.ToLower(strings.TrimSpace(n))] = struct{}{}
+    }
+    out := make([]Channel, 0, len(want))
+    for _, ch := range c.Channels {
+        if _, ok := want[strings.ToLower(ch.Name())]; ok { out = append(out, ch) }
+    }
+    return out
 }
+
 
 func severityRank(s string) int {
 	switch strings.ToLower(strings.TrimSpace(s)) {

@@ -141,7 +141,7 @@ if out.Extra["blocked"] == "yes" {
     }
 
     ev := notify.Event{
-        Kind:     "detector",       // generic kind for detector-originated blocks
+        Kind:     string(a.Kind),       //  e.g. "SSH/AUTHFAIL", "MYSQL/ROOT_DENIED", "MODSEC/403"
         SrcIP:    ipStr,            // from pickIP(a)
         Reason:   string(a.Kind),   // e.g. "SSH/AUTHFAIL" (your detector kind)
         TTL:      time.Duration(ttlSec) * time.Second,

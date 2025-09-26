@@ -285,6 +285,15 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
             "limit":    strconv.Itoa(limit),
             "mode":     a.cfg.Mode,
         }
+
+        // tag entity for sinks (blockers/formatters)
+        if strings.Contains(p.kindKey, "|ip") {
+            extra["ip"] = p.key
+        }
+        if strings.Contains(p.kindKey, "|user") {
+            extra["user"] = p.key
+        }
+
         if a.cfg.Mode == "file" {
             extra["log"] = a.cfg.LogPath
         } else {

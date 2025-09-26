@@ -224,6 +224,15 @@ func (m *MySQL) flush(now time.Time, out chan<- core.Alert) {
 			"limit":    strconv.Itoa(limit),
 			"log":      m.cfg.LogPath,
 		}
+
+        // help autoblock sink: tag what to block / who
+        if strings.HasSuffix(p.kindKey, "|ip") {
+            extra["ip"] = p.key
+        }
+        if strings.HasSuffix(p.kindKey, "|user") {
+            extra["user"] = p.key
+        }
+
 		samples := m.samples.GetAndClear(sk)
 		out <- core.Alert{
 			When:    now,

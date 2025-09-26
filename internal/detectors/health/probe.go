@@ -73,6 +73,63 @@ func (d *Detector) probeTopTalkers(port int, states []string, topN int) []string
 	return out
 }
 
+
+
+
+
+
+// probeSynRecvTalkers returns top remote IPs across ALL local ports in SYN_RECV.
+func (d *Detector) probeSynRecvTalkers(topN int) []string {
+	if topN <= 0 { topN = 10 }
+	counts := map[string]int{}
+	readProc := func(path string, v6 bool) {
+		f, err := os.Open(path)
+		if err != nil { return }
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		if sc.Scan() { /* skip header */ }
+		for sc.Scan() {
+			fields := strings.Fields(strings.TrimSpace(sc.Text()))
+			if len(fields) < 4 { continue }
+			remHex := fields[2]
+			stHex  := fields[3]
+			st, err := strconv.ParseUint(stHex, 16, 8)
+			if err != nil || uint8(st) != 0x03 { // 0x03 = SYN_RECV
+				continue
+			}
+			rpIP, _ := parseAddr(remHex, v6)
+			if ip := rpIP.String(); ip != "" && ip != "0.0.0.0" && ip != "::" {
+				counts[ip]++
+			}
+		}
+	}
+	readProc("/proc/net/tcp", false)
+	readProc("/proc/net/tcp6", true)
+
+	type kv struct{ ip string; n int }
+	agg := make([]kv, 0, len(counts))
+	for ip, n := range counts { agg = append(agg, kv{ip, n}) }
+	sort.Slice(agg, func(i, j int) bool {
+		if agg[i].n == agg[j].n { return agg[i].ip < agg[j].ip }
+		return agg[i].n > agg[j].n
+	})
+	if len(agg) > topN { agg = agg[:topN] }
+
+	out := make([]string, 0, len(agg))
+	for _, t := range agg {
+		label := d.decorateIP(t.ip)
+		out = append(out, fmt.Sprintf("%s  conns=%d", label, t.n))
+	}
+	return out
+}
+
+
+
+
+
+
+
+
 // parseAddr converts the /proc hex address into net.IP + port.
 func parseAddr(hexPair string, v6 bool) (ip net.IP, port int) {
 	parts := strings.Split(hexPair, ":")

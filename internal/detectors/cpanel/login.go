@@ -277,6 +277,14 @@ func (l *Login) flush(now time.Time, out chan<- core.Alert) {
 			"log":      l.cfg.LogPath,
 		}
 
+        // annotate entity for sinks
+        if strings.Contains(p.kindKey, "|ip") {
+            extra["ip"] = p.key
+        }
+        if strings.Contains(p.kindKey, "|user") {
+            extra["user"] = p.key
+        }
+
 		out <- core.Alert{
 			When:    now,
 			Kind:    core.AlertKind(kindStr),

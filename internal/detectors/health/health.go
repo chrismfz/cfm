@@ -609,19 +609,39 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	}
 
 	// TCP spikes / absolutes
-	bTot := upd("conn.total", float64(s.TCP["total"]))
-	if s.TCP["total"] >= d.cfg.ConnTotalAbs || float64(s.TCP["total"]) > d.cfg.ConnTotalSpikeX*bTot {
-		emit("HEALTH/CONN_TOTAL_SPIKE", "net.total")
-	}
-	bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
-	if s.TCP["ESTABLISHED"] >= d.cfg.EstablishedAbs || float64(s.TCP["ESTABLISHED"]) > d.cfg.ConnEstSpikeX*bEst {
-		emit("HEALTH/CONN_EST_SPIKE", "net.est")
-	}
-	bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
-	if s.TCP["SYN_RECV"] >= d.cfg.SynRecvAbs || float64(s.TCP["SYN_RECV"]) > d.cfg.ConnSynSpikeX*bSyn {
-		emit("HEALTH/SYN_RECV_SPIKE", "net.syn")
-	}
+    bTot := upd("conn.total", float64(s.TCP["total"]))
+    if s.TCP["total"] >= d.cfg.ConnTotalAbs || float64(s.TCP["total"]) > d.cfg.ConnTotalSpikeX*bTot {
+        emitS("HEALTH/CONN_TOTAL_SPIKE", "net.total",
+            []string{fmt.Sprintf(
+                "Total conn spike  cur=%d  baseline≈%.0f  x=%.2f",
+                s.TCP["total"], bTot, float64(s.TCP["total"])/maxf(bTot, 1),
+            )})
+    }
 
+    bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
+    if s.TCP["ESTABLISHED"] >= d.cfg.EstablishedAbs || float64(s.TCP["ESTABLISHED"]) > d.cfg.ConnEstSpikeX*bEst {
+        emitS("HEALTH/CONN_EST_SPIKE", "net.est",
+            []string{fmt.Sprintf(
+                "ESTABLISHED spike  cur=%d  baseline≈%.0f  x=%.2f",
+                s.TCP["ESTABLISHED"], bEst, float64(s.TCP["ESTABLISHED"])/maxf(bEst, 1),
+            )})
+    }
+
+    bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
+    if s.TCP["SYN_RECV"] >= d.cfg.SynRecvAbs || float64(s.TCP["SYN_RECV"]) > d.cfg.ConnSynSpikeX*bSyn {
+        samples := []string{
+            fmt.Sprintf("SYN_RECV spike  cur=%d  baseline≈%.0f  x=%.2f",
+                s.TCP["SYN_RECV"], bSyn, float64(s.TCP["SYN_RECV"])/maxf(bSyn, 1)),
+        }
+        if d.cfg.SpikeProbeTopN > 0 {
+            top := d.probeSynRecvTalkers(d.cfg.SpikeProbeTopN)
+            if len(top) > 0 {
+                samples = append(samples, "Top remote IPs (SYN_RECV):")
+                samples = append(samples, top...)
+            }
+        }
+        emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
+    }
 	// per-port conn spikes (watchlist)
 	for p, c := range s.PortConn {
 		if !containsInt(d.cfg.PortWatch, p) {
