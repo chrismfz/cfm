@@ -5,3 +5,13 @@ nft list set inet cfm block_v4_nets | grep 47.128.0.0/14
 
 nft list chain inet cfm input
 
+#smtpblock
+sudo nft list chain inet cfm smtpblock
+sudo nft list chain inet cfm smtp_redir
+
+sudo nft list set inet cfm smtp_ports
+sudo nft list set inet cfm smtp_allow_uids
+sudo nft list set inet cfm smtp_allow_gids
+sudo nft list set inet cfm self_v4
+sudo nft list set inet cfm self_v6
+

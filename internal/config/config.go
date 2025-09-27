@@ -23,9 +23,30 @@ type Config struct {
 	SystemTweaks SystemTweaksConfig
 	Hardening  HardeningConfig
 	AckGuard AckGuardConfig
+	SMTPBlock SMTPBlockConfig
 }
 
 // --- Categories ---
+
+// SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
+type SMTPBlockConfig struct {
+	Enabled      bool     // SMTP_BLOCK
+	Ports        []uint16 // SMTP_PORTS (defaults: 25,465,587)
+	AllowLocal   bool     // SMTP_ALLOWLOCAL
+	Redirect     bool     // SMTP_REDIRECT
+	RedirectPort uint16   // SMTP_REDIRECT_PORT (default 25)
+	AllowUsers   []string // SMTP_ALLOWUSER (usernames)
+	AllowGroups  []string // SMTP_ALLOWGROUP (group names)
+	AllowUIDs    []uint32 // SMTP_ALLOW_UIDS (optional explicit UIDs)
+	AllowGIDs    []uint32 // SMTP_ALLOW_GIDS (optional explicit GIDs)
+	// Logging knobs (for nft log/NFLOG + our own file sink)
+	LogEnabled bool   // SMTP_LOG
+	LogLimit   string // SMTP_LOG_LIMIT (e.g. "5/second")
+	LogBurst   int    // SMTP_LOG_BURST
+	LogNFLOG   int    // SMTP_LOG_NFLOG (0=kernel log, >0=nflog group)
+	LogEnrich  bool   // SMTP_LOG_ENRICH (use enrich on DST IP in our consumer)
+}
+
 
 
 type AckGuardConfig struct {
@@ -100,6 +121,8 @@ type LoggingConfig struct {
 	APIFile   string // API_LOG_FILE: path για API log, "" = derive από File (π.χ. /var/log/cfm.api.log)
         DETECTORStdout bool
         DETECTORFile   string
+        SMTPStdout bool   // SMTP_LOG_STDOUT
+        SMTPFile   string // SMTP_LOG_FILE (e.g. /var/log/cfm.smtp.log)
 
 }
 
@@ -200,6 +223,23 @@ c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
 	// If PS_ENABLED not set explicitly, infer from interval>0
 	if !c.Portscan.Enabled && c.Portscan.Interval > 0 { c.Portscan.Enabled = true }
 
+
+	// SMTPBlock defaults
+	if len(c.SMTPBlock.Ports) == 0 {
+		c.SMTPBlock.Ports = []uint16{25, 465, 587}
+	}
+	if c.SMTPBlock.RedirectPort == 0 {
+		c.SMTPBlock.RedirectPort = 25
+	}
+	if c.SMTPBlock.LogEnabled && c.SMTPBlock.LogBurst == 0 {
+		c.SMTPBlock.LogBurst = 20
+	}
+	// default SMTP log file if enabled and not set explicitly
+	if c.SMTPBlock.LogEnabled && c.Logging.SMTPFile == "" {
+		c.Logging.SMTPFile = "/var/log/cfm.smtp.log"
+	}
+
+
 // Hardening
 if c.Hardening.NewRate < 0 { c.Hardening.NewRate = 0 }
 if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
@@ -255,6 +295,18 @@ func (c *Config) Validate() error {
 	if c.Portscan.Mode != "temporary" && c.Portscan.Mode != "permanent" && c.Portscan.Mode != "alert" {
 		c.Portscan.Mode = "ttl" // backwards-compat alias; will be interpreted by code that treats ttl/permanent
 	}
+
+	// Clamp SMTPBlock ports
+	if len(c.SMTPBlock.Ports) > 0 {
+		out := make([]uint16, 0, len(c.SMTPBlock.Ports))
+		for _, p := range c.SMTPBlock.Ports {
+			if p <= 0 { continue }
+			if p > 65535 { p = 65535 }
+			out = append(out, uint16(p))
+		}
+		c.SMTPBlock.Ports = out
+	}
+
 	return nil
 }
 
@@ -311,6 +363,12 @@ case "DETECTOR_LOG_STDOUT":
 case "DETECTOR_LOG_FILE":
     cfg.Logging.DETECTORFile = val
 
+
+// SMTP log sink (file/stdout) — CSF-like flat keys
+case "SMTP_LOG_STDOUT":
+    cfg.Logging.SMTPStdout = parseBool(val)
+case "SMTP_LOG_FILE":
+    cfg.Logging.SMTPFile = val
 
 		// NFT
 		case "NFT_INPUT_PRIORITY":
@@ -384,6 +442,35 @@ case "UDP_OUT":
 		case "PS_PORTS":
 			cfg.Portscan.Ports = parseIntCSV(val)
 
+		// --- SMTPBlock (CSF-like keys only) ---
+		case "SMTP_BLOCK":
+			cfg.SMTPBlock.Enabled = parseBool(val)
+		case "SMTP_PORTS":
+			cfg.SMTPBlock.Ports = append(cfg.SMTPBlock.Ports, parseUint16CSV(val)...)
+		case "SMTP_ALLOWLOCAL":
+			cfg.SMTPBlock.AllowLocal = parseBool(val)
+		case "SMTP_REDIRECT":
+			cfg.SMTPBlock.Redirect = parseBool(val)
+		case "SMTP_REDIRECT_PORT":
+			if n := parseInt(val); n > 0 && n <= 65535 { cfg.SMTPBlock.RedirectPort = uint16(n) }
+		case "SMTP_ALLOWUSER":
+			cfg.SMTPBlock.AllowUsers = append(cfg.SMTPBlock.AllowUsers, splitCSV(val)...)
+		case "SMTP_ALLOWGROUP":
+			cfg.SMTPBlock.AllowGroups = append(cfg.SMTPBlock.AllowGroups, splitCSV(val)...)
+		case "SMTP_ALLOW_UIDS":
+			cfg.SMTPBlock.AllowUIDs = append(cfg.SMTPBlock.AllowUIDs, parseUint32CSV(val)...)
+		case "SMTP_ALLOW_GIDS":
+			cfg.SMTPBlock.AllowGIDs = append(cfg.SMTPBlock.AllowGIDs, parseUint32CSV(val)...)
+		case "SMTP_LOG":
+			cfg.SMTPBlock.LogEnabled = parseBool(val)
+		case "SMTP_LOG_LIMIT":
+			cfg.SMTPBlock.LogLimit = val
+		case "SMTP_LOG_BURST":
+			cfg.SMTPBlock.LogBurst = parseInt(val)
+		case "SMTP_LOG_NFLOG":
+			cfg.SMTPBlock.LogNFLOG = parseInt(val)
+		case "SMTP_LOG_ENRICH":
+			cfg.SMTPBlock.LogEnrich = parseBool(val)
 
 
 
@@ -607,6 +694,33 @@ func parseIntCSV(s string) []int {
 		}
 		if v, err := strconv.Atoi(p); err == nil {
 			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// parseUint16CSV: "25,465,587"
+func parseUint16CSV(s string) []uint16 {
+	ints := parseIntCSV(s)
+	out := make([]uint16, 0, len(ints))
+	for _, v := range ints {
+		if v <= 0 { continue }
+		if v > 65535 { v = 65535 }
+		out = append(out, uint16(v))
+	}
+	return out
+}
+
+// parseUint32CSV: "0,1001,1002"
+func parseUint32CSV(s string) []uint32 {
+	if strings.TrimSpace(s) == "" { return nil }
+	parts := strings.Split(s, ",")
+	out := make([]uint32, 0, len(parts))
+	for _, p := range parts {
+		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		if p == "" { continue }
+		if v, err := strconv.ParseUint(p, 10, 32); err == nil {
+			out = append(out, uint32(v))
 		}
 	}
 	return out

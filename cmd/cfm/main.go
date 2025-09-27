@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
-
+	"strconv"
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -36,6 +36,8 @@ import (
 	//Debugging profiler for CPU usage
 	"net/http"
 	_ "net/http/pprof"
+	//Debugging End
+	nflog "cfm/internal/nflog"
 
 )
 
@@ -804,6 +806,9 @@ startDebug()
 	loadAgent := func() { startOrUpdateAgent(lastCfg) }
 
 	// cfm.conf loader/applier (single place)
+	ctx, _ := context.WithCancel(context.Background())
+	var smtpSnoopStarted bool
+
 	applyPorts := func() {
 		if cfgDir == "" || confW == nil { return }
 		b, ok := confW.Changed()
@@ -824,6 +829,10 @@ startDebug()
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)
 		}
+
+		// --- SMTPBlock: resolve names -> IDs, then apply nft rules, then (optionally) start NFLOG snooper
+		resolveSMTPAllowOwners(cfg)
+
 
 		// sysctl tweaks
 		if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
@@ -855,6 +864,19 @@ if cfg.AckGuard.Enabled {
     }
     logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
+
+    // Apply SMTPBlock rules (if enabled)
+    if cfg.SMTPBlock.Enabled {
+        if err := nb.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
+            fmt.Fprintln(os.Stderr, "smtpblock apply error:", err)
+        } else {
+            logging.Logf("[smtpblock] applied (mode=%s, ports=%v, allow_local=%v, nflog=%d)",
+                map[bool]string{false:"block", true:"redirect"}[cfg.SMTPBlock.Redirect],
+                cfg.SMTPBlock.Ports, cfg.SMTPBlock.AllowLocal, cfg.SMTPBlock.LogNFLOG,
+            )
+        }
+    }
+
     logging.Logf("[daemon] === Finished all nft applies ===")
 
 
@@ -863,7 +885,32 @@ if cfg.AckGuard.Enabled {
         nb.SetReporter(api) // από εδώ και πέρα τα autoblocks θα κάνουν ReportBlock
     }
 
+
+// Start SMTP NFLOG snooper once (only if enabled + using NFLOG group)
+if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG > 0 && !smtpSnoopStarted {
+    go func(grp int, enrich bool) {
+        err := nflog.Start(ctx, nflog.SnoopConfig{
+            Group:  uint16(grp),
+            Enrich: enrich,
+            Queue:  1024,
+        })
+        if err != nil {
+            logging.Logf("[smtpblock] nflog start error: %v", err)
+        } else {
+            logging.Logf("[smtpblock] nflog reader started (group=%d, enrich=%v)", grp, enrich)
+        }
+    }(cfg.SMTPBlock.LogNFLOG, cfg.SMTPBlock.LogEnrich)
+    smtpSnoopStarted = true
 }
+
+
+
+
+	}
+
+
+
+
 
 
 
@@ -1047,6 +1094,40 @@ func nearestConfigsDir() (string, bool) {
 }
 
 func ensureDir(p string) error { return os.MkdirAll(p, 0755) }
+
+// Resolve SMTP allow-list owners (usernames/groups) into numeric IDs in-place.
+func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
+	if cfg == nil { return }
+	// Users → UIDs
+	seenUID := map[uint32]struct{}{}
+	for _, u := range cfg.SMTPBlock.AllowUIDs { seenUID[u] = struct{}{} }
+	for _, name := range cfg.SMTPBlock.AllowUsers {
+		name = strings.TrimSpace(name); if name == "" { continue }
+		if u, err := user.Lookup(name); err == nil {
+			if id, err := strconv.Atoi(u.Uid); err == nil {
+				seenUID[uint32(id)] = struct{}{}
+			}
+		}
+	}
+	// Always allow root
+	seenUID[0] = struct{}{}
+	cfg.SMTPBlock.AllowUIDs = cfg.SMTPBlock.AllowUIDs[:0]
+	for id := range seenUID { cfg.SMTPBlock.AllowUIDs = append(cfg.SMTPBlock.AllowUIDs, id) }
+
+	// Groups → GIDs
+	seenGID := map[uint32]struct{}{}
+	for _, g := range cfg.SMTPBlock.AllowGIDs { seenGID[g] = struct{}{} }
+	for _, name := range cfg.SMTPBlock.AllowGroups {
+		name = strings.TrimSpace(name); if name == "" { continue }
+		if g, err := user.LookupGroup(name); err == nil {
+			if id, err := strconv.Atoi(g.Gid); err == nil {
+				seenGID[uint32(id)] = struct{}{}
+			}
+		}
+	}
+	cfg.SMTPBlock.AllowGIDs = cfg.SMTPBlock.AllowGIDs[:0]
+	for id := range seenGID { cfg.SMTPBlock.AllowGIDs = append(cfg.SMTPBlock.AllowGIDs, id) }
+}
 
 func appendUniqueLine(dir, base, line string) error {
 	if err := ensureDir(dir); err != nil { return err }

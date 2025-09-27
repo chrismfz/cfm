@@ -99,5 +99,32 @@ lines = append(lines, fmt.Sprintf(
 		psOnly, psPorts,
 	))
 
+
+
+	// --- SMTPBlock ---
+	if c.SMTPBlock.Enabled {
+		mode := "block"
+		if c.SMTPBlock.Redirect {
+			mode = "redirect"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"smtpblock: enabled=true mode=%s allow_local=%t ports=%d redirect_port=%d allow_users=%d allow_groups=%d log=%t nflog=%d limit=%q burst=%d enrich=%t log_file=%s",
+			mode, c.SMTPBlock.AllowLocal,
+			len(c.SMTPBlock.Ports),
+			c.SMTPBlock.RedirectPort,
+			len(c.SMTPBlock.AllowUsers),
+			len(c.SMTPBlock.AllowGroups),
+			c.SMTPBlock.LogEnabled,
+			c.SMTPBlock.LogNFLOG,
+			c.SMTPBlock.LogLimit,
+			c.SMTPBlock.LogBurst,
+			c.SMTPBlock.LogEnrich,
+			c.Logging.SMTPFile,
+		))
+	} else {
+		lines = append(lines, "smtpblock: enabled=false")
+	}
+
+
 	return lines
 }

@@ -15,9 +15,10 @@ var (
     logFile    *os.File
     apiLogFile *os.File
     detectorLogFile *os.File
-
+    smtpLogFile *os.File
     once sync.Once
     cfg  *config.LoggingConfig
+
 )
 
 // Init πρέπει να καλεστεί από main με την config
@@ -53,7 +54,24 @@ func Init(c *config.LoggingConfig) {
         }
 
 
-
+        // SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
+        smtpPath := cfg.SMTPFile
+        if smtpPath == "" && cfg.File != "" {
+            base := cfg.File
+            ext := filepath.Ext(base)
+            if ext == "" {
+                smtpPath = base + ".smtp"
+            } else {
+                smtpPath = strings.TrimSuffix(base, ext) + ".smtp" + ext
+            }
+        }
+        if smtpPath != "" {
+            if f, err := os.OpenFile(smtpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+                smtpLogFile = f
+            } else {
+                fmt.Printf("failed to open smtp log file %s: %v\n", smtpPath, err)
+            }
+        }
 
 
 
@@ -133,3 +151,19 @@ func LogfDETECTOR(format string, args ...interface{}) {
     }
 }
 
+
+
+
+
+
+
+
+
+
+
+func LogfSMTP(format string, args ...interface{}) {
+    ts := time.Now().Format("2006-01-02 15:04:05")
+    line := fmt.Sprintf("%s %s\n", ts, fmt.Sprintf(format, args...))
+    if smtpLogFile != nil { _, _ = smtpLogFile.WriteString(line) }
+    if cfg == nil || cfg.SMTPStdout { fmt.Print(line) }
+}
