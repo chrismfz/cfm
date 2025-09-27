@@ -63,6 +63,13 @@ func init() {
 			d.SetSource(j)
 		}
 
+
+if cfg.Mode == "file" {
+    logging.Logf("[detectors][%s] source=file path=%s (explicit)", section, cfg.LogPath)
+} else {
+    logging.Logf("[detectors][%s] source=journal unit=%s (explicit)", section, cfg.JournalUnit)
+}
+
 		// pretty start line
 		if cfg.Mode == "file" {
 			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d ddos=%d enrich=%t ptr=%t dirs=%v)",

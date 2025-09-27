@@ -100,7 +100,7 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 	if every <= 0 {
 		every = 60 * time.Second
 	}
-	logging.Logf("[detectors] %s started (every=%s)", d.Name(), every)
+	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
 	// fixed-delay schedule with panic-safe RunOnce
 	err := periodicLoop(ctx, every, func() error {
@@ -140,7 +140,7 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 	if every <= 0 {
 		every = 60 * time.Second
 	}
-	logging.Logf("[detectors] %s started (every=%s)", d.Name(), every)
+	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
 	// fixed-delay schedule with position save on successful runs
 	err := periodicLoop(ctx, every, func() error {
