@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-//	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -33,6 +32,11 @@ import (
 
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
+
+	//Debugging profiler for CPU usage
+	"net/http"
+	_ "net/http/pprof"
+
 )
 
 var (
@@ -51,6 +55,27 @@ func getBackend() firewall.Backend {
 	}
 	return nil
 }
+
+
+// ----------------------------------------------------------------------------
+// Debugger - Start in runDaemon
+// ----------------------------------------------------------------------------
+
+func startDebug() {
+    addr := os.Getenv("CFM_DEBUG_HTTP")
+    if addr == "" {
+        addr = "127.0.0.1:6060"
+    }
+
+    // Optional: small banner without requiring logging.Init
+    go func(a string) {
+        // give the main thread a head start; avoid interleaving early prints
+        time.Sleep(50 * time.Millisecond)
+        // don't fatal if taken; just skip quietly
+        _ = http.ListenAndServe(a, nil)
+    }(addr)
+}
+
 
 // ----------------------------------------------------------------------------
 // CLI entrypoint
@@ -126,7 +151,7 @@ func usage() {
 Usage:
   cfm version
   cfm test
-  cfm block <IP> [-r REASON] [--ttl 1h]
+  cfm block <IP|CIDR> [-r REASON] [--ttl 1h]
   cfm unblock <IP>
   cfm list [--json]
   cfm allow <IP> [--ttl 1h]
@@ -192,12 +217,30 @@ func runBlock(args []string) {
         if len(fs.Args()) > 1 { posArgs = append(posArgs, fs.Args()[1:]...) }
     }
     if len(posArgs) == 0 {
-        fmt.Fprintln(os.Stderr, "usage: cfm block <IP> [-r REASON] [--ttl 1h] | cfm block <IP> <REASON...>")
+        fmt.Fprintln(os.Stderr, "usage: cfm block <IP|CIDR> [-r REASON] [--ttl 1h] | cfm block <IP|CIDR> <REASON...>")
         os.Exit(2)
     }
-    ipStr := posArgs[0]
-    ip := net.ParseIP(ipStr)
-    if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
+
+    target := strings.TrimSpace(posArgs[0])
+    ip := net.ParseIP(target)
+    var isCIDR bool
+    var cidrNet string
+    if ip == nil {
+        if strings.ContainsRune(target, '/') {
+            if _, nw, err := net.ParseCIDR(target); err == nil {
+                // canonicalize: use network IP/mask
+                nw.IP = nw.IP.Mask(nw.Mask)
+                cidrNet = nw.String()
+                isCIDR = true
+            } else {
+                fmt.Fprintln(os.Stderr, "invalid CIDR")
+                os.Exit(2)
+            }
+        } else {
+            fmt.Fprintln(os.Stderr, "invalid IP")
+            os.Exit(2)
+        }
+    }
 
     // Reason: είτε από -r, είτε από τα υπόλοιπα positionals
     rsn := strings.TrimSpace(*reasonFlag)
@@ -220,13 +263,22 @@ func runBlock(args []string) {
     // Firewall apply
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
     if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-    if err := be.AddBlock(ip, rsn, dur); err != nil { fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1) }
+    if isCIDR {
+        if err := be.AddBlockNet(cidrNet, dur); err != nil {
+            fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1)
+        }
+    } else {
+        if err := be.AddBlock(ip, rsn, dur); err != nil {
+            fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1)
+        }
+    }
 
     // cfm.deny (μόνο σε permanent)
     if cfgDir, ok := resolveConfigDir(""); ok {
         if dur == nil || (dur != nil && *dur <= 0) {
             // Γράφουμε σχόλιο μετά το IP — οι helpers σου αγνοούν ό,τι είναι μετά από κενό/# όταν κάνουν remove/search
-            line := ip.String()
+            line := target
+            if isCIDR { line = cidrNet } else { line = ip.String() }
             if rsn != "" { line += "  # " + rsn }
             if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
                 fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err)
@@ -234,7 +286,7 @@ func runBlock(args []string) {
         }
     }
 
-    // API report (προαιρετικό)
+    // API report
     if cfgDir, ok := resolveConfigDir(""); ok {
         if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
             if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
@@ -246,18 +298,30 @@ func runBlock(args []string) {
                     if dur != nil && *dur > 0 {
                         mode, ttlSec = "ttl", int(dur.Seconds())
                     }
-                                    if err := api.ReportBlock(ip.String(), rsn, "manual-cli", mode, ttlSec); err != nil {
-                        fmt.Printf("✔ blocked %s (API report failed: %v)\n", ip.String(), err)
+               // Προσοχή: αν το API δεν δέχεται CIDR, στείλ’ το μόνο για host IP.
+                    if !isCIDR {
+                        if err := api.ReportBlock(ip.String(), rsn, "manual-cli", mode, ttlSec); err != nil {
+                            fmt.Printf("✔ blocked %s (API report failed: %v)\n", target, err)
+                            return
+                        }
+                        fmt.Printf("✔ blocked %s (also sent to API)\n", target)
                         return
                     }
-                    fmt.Printf("✔ blocked %s (also sent to API)\n", ip.String())
+                    // CIDR: skip API report για να μη σπάσει
+                    fmt.Printf("✔ blocked %s (API report skipped for CIDR)\n", cidrNet)
                     return
+
                 }
             }
         }
     }
 
-    fmt.Printf("✔ blocked %s\n", ip.String())
+    if isCIDR {
+        fmt.Printf("✔ blocked %s\n", cidrNet)
+    } else {
+        fmt.Printf("✔ blocked %s\n", ip.String())
+    }
+
 }
 
 
@@ -348,43 +412,147 @@ func runAllow(args []string) {
 	flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
 	_ = fs.Parse(flagArgs)
 
-	ipStr := ""
-	if len(posArgs) > 0 { ipStr = posArgs[0] }
-	if ipStr == "" { rem := fs.Args(); if len(rem) > 0 { ipStr = rem[0] } }
-	if ipStr == "" { fmt.Fprintln(os.Stderr, "usage: cfm allow <IP> [--ttl 1h]"); os.Exit(2) }
+	// Πάρε το 1ο positional (ή από fs.Args() αν δεν πέρασαν με flag-split)
+	target := ""
+	if len(posArgs) > 0 {
+		target = strings.TrimSpace(posArgs[0])
+	}
+	if target == "" {
+		rem := fs.Args()
+		if len(rem) > 0 {
+			target = strings.TrimSpace(rem[0])
+		}
+	}
+	if target == "" {
+		fmt.Fprintln(os.Stderr, "usage: cfm allow <IP|CIDR> [--ttl 1h]")
+		os.Exit(2)
+	}
 
-	ip := net.ParseIP(ipStr); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
+	// IP ή CIDR;
+	var (
+		ip      = net.ParseIP(target)
+		isCIDR  bool
+		cidrNet string
+	)
+	if ip == nil {
+		if strings.ContainsRune(target, '/') {
+			if _, nw, err := net.ParseCIDR(target); err == nil {
+				nw.IP = nw.IP.Mask(nw.Mask) // canonicalize
+				cidrNet = nw.String()
+				isCIDR  = true
+			} else {
+				fmt.Fprintln(os.Stderr, "invalid CIDR")
+				os.Exit(2)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "invalid IP")
+			os.Exit(2)
+		}
+	}
 
+	// TTL
 	var dur *time.Duration
 	if *ttlFlag != "" {
-		if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 { dur = &d } else { fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)"); os.Exit(2) }
+		if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 {
+			dur = &d
+		} else {
+			fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)")
+			os.Exit(2)
+		}
 	}
 
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-	if err := be.AddAllow(ip, dur); err != nil { fmt.Fprintln(os.Stderr, "allow error:", err); os.Exit(1) }
+	// Firewall apply
+	be := getBackend()
+	if be == nil {
+		fmt.Fprintln(os.Stderr, "no firewall backend available")
+		os.Exit(1)
+	}
+	if err := be.EnsureBase(); err != nil {
+		fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+		os.Exit(1)
+	}
+	if isCIDR {
+		if err := be.AddAllowNet(cidrNet, dur); err != nil {
+			fmt.Fprintln(os.Stderr, "allow error:", err)
+			os.Exit(1)
+		}
+	} else {
+		if err := be.AddAllow(ip, dur); err != nil {
+			fmt.Fprintln(os.Stderr, "allow error:", err)
+			os.Exit(1)
+		}
+	}
 
+	// cfm.allow — μόνο για permanent (να μην αποθηκεύουμε TTL που θα λήξουν)
 	if cfgDir, ok := resolveConfigDir(""); ok {
-		line := ip.String(); if dur != nil && *dur > 0 { line += " ttl=" + dur.String() }
-		if err := appendUniqueLine(cfgDir, "cfm.allow", line); err != nil { fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err) }
+		if dur == nil || (dur != nil && *dur <= 0) {
+			line := target
+			if isCIDR {
+				line = cidrNet // canonical μορφή στο αρχείο
+			} else {
+				line = ip.String()
+			}
+			if err := appendUniqueLine(cfgDir, "cfm.allow", line); err != nil {
+				fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err)
+			}
+		}
 	}
-	fmt.Printf("✔ allowed %s\n", ip.String())
+
+	if isCIDR {
+		fmt.Printf("✔ allowed %s\n", cidrNet)
+	} else {
+		fmt.Printf("✔ allowed %s\n", ip.String())
+	}
 }
 
 
 
 
 func runUnallow(args []string) {
-    if len(args) < 1 { fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP>"); os.Exit(2) }
-    ip := net.ParseIP(args[0]); if ip == nil { fmt.Fprintln(os.Stderr, "invalid IP"); os.Exit(2) }
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    if len(args) < 1 {
+        fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP|CIDR>")
+        os.Exit(2)
+    }
+    raw := strings.TrimSpace(args[0])
+
+    // Κανονικοποίηση IP/CIDR (χρησιμοποιεί τη normalizeTarget που ήδη έχεις)
+    isCIDR, ipStr, cidrStr, err := normalizeTarget(raw)
+    if err != nil {
+        fmt.Fprintln(os.Stderr, "invalid IP/CIDR")
+        os.Exit(2)
+    }
+
+    be := getBackend()
+    if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
     if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-    if err := be.RemoveAllow(ip); err != nil { fmt.Fprintln(os.Stderr, "unallow error:", err); os.Exit(1) }
-    fmt.Printf("✔ unallowed %s\n", ip.String())
+
+    if isCIDR {
+        if err := be.RemoveAllowNet(cidrStr); err != nil {
+            fmt.Fprintln(os.Stderr, "unallow error:", err)
+            os.Exit(1)
+        }
+    } else {
+        if err := be.RemoveAllow(net.ParseIP(ipStr)); err != nil {
+            fmt.Fprintln(os.Stderr, "unallow error:", err)
+            os.Exit(1)
+        }
+    }
+
+    // Καθάρισε από το cfm.allow (exact first-token match, canonicalized)
     if cfgDir, ok := resolveConfigDir(""); ok {
-        _, _ = removeIPFromFile(cfgDir, "cfm.allow", ip.String())
+        if err := removeIPFromFile(cfgDir, "cfm.allow", raw); err != nil {
+            // optional προειδοποίηση, δεν είναι fatal
+            fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err)
+        }
+    }
+
+    if isCIDR {
+        fmt.Printf("✔ unallowed %s\n", cidrStr)
+    } else {
+        fmt.Printf("✔ unallowed %s\n", ipStr)
     }
 }
+
 
 
 
@@ -464,6 +632,11 @@ func runDaemon(args []string) {
 		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
+//Start Debug//
+startDebug()
+//End Debug//
+
+
 	// Backend
 	be := getBackend()
 	if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
@@ -517,7 +690,9 @@ func runDaemon(args []string) {
 		for _, e := range entries {
 			spec := "perm"
 			if e.Until != nil { spec = "until=" + e.Until.UTC().Format(time.RFC3339) } else if e.TTL != nil { spec = "ttl=" + e.TTL.String() }
-			key := e.IP.String()
+	   // διαφοροποίηση key για IP vs CIDR
+	             key := ""
+	            if e.CIDR != "" { key = "cidr|" + e.CIDR } else { key = "ip|" + e.IP.String() }
 			if isAllow {
 				if prev, ok := seenAllow[key]; ok && prev == spec { continue }
 			} else {
@@ -525,11 +700,20 @@ func runDaemon(args []string) {
 			}
 			dur := durationFromEntryNow(e, now)
 			if isAllow {
-				if err := be.AddAllow(e.IP, dur); err != nil { fmt.Fprintln(os.Stderr, "allow apply error:", err); continue }
-				seenAllow[key] = spec
+                if e.CIDR != "" {
+                    if err := be.AddAllowNet(e.CIDR, dur); err != nil { fmt.Fprintln(os.Stderr, "allow apply error:", err); continue }
+                } else {
+                    if err := be.AddAllow(e.IP, dur); err != nil { fmt.Fprintln(os.Stderr, "allow apply error:", err); continue }
+                }
+                seenAllow[key] = spec
 			} else {
-				if err := be.AddBlock(e.IP, "", dur); err != nil { fmt.Fprintln(os.Stderr, "block apply error:", err); continue }
-				seenBlock[key] = spec
+
+                if e.CIDR != "" {
+                    if err := be.AddBlockNet(e.CIDR, dur); err != nil { fmt.Fprintln(os.Stderr, "block apply error:", err); continue }
+                } else {
+                    if err := be.AddBlock(e.IP, "", dur); err != nil { fmt.Fprintln(os.Stderr, "block apply error:", err); continue }
+                }
+                seenBlock[key] = spec
 			}
 		}
 	}
@@ -856,64 +1040,61 @@ func appendUniqueLine(dir, base, line string) error {
 	return err
 }
 
-// παλιά υπογραφή:
-// func removeIPFromFile(dir, base, ip string) error {
 
-// νέα υπογραφή:
-func removeIPFromFile(dir, base, ip string) (bool, error) {
-    fp := filepath.Join(dir, base)
-    b, err := os.ReadFile(fp)
-    if err != nil {
-        if os.IsNotExist(err) { return false, nil }
-        return false, err
-    }
-    var out bytes.Buffer
-    removed := false
+ func removeIPFromFile(dir, filename, target string) error {
+     isCIDR, ipStr, cidrStr, err := normalizeTarget(target)
+     if err != nil { return err }
+     want := ipStr
+     if isCIDR { want = cidrStr }
 
-    sc := bufio.NewScanner(bytes.NewReader(b))
-    for sc.Scan() {
-        line := sc.Text()
-        trim := strings.TrimSpace(line)
-        if trim == "" || strings.HasPrefix(trim, "#") {
-            fmt.Fprintln(&out, line)
-            continue
-        }
-        // κόψε στο 1ο token (πριν από κενό/σχόλιο)
-        first := trim
-        if i := strings.IndexAny(first, " \t#"); i >= 0 {
-            first = first[:i]
-        }
-        if first == ip || first == ip+"/32" {
-            removed = true
-            continue
-        }
-        fmt.Fprintln(&out, line)
-    }
-    if err := sc.Err(); err != nil { return false, err }
-    if !removed { return false, nil }
-    return true, os.WriteFile(fp, out.Bytes(), 0644)
-}
+     path := filepath.Join(dir, filename)
+     b, err := os.ReadFile(path); if err != nil { return err }
+     var out []string
+     sc := bufio.NewScanner(bytes.NewReader(b))
+     for sc.Scan() {
+         raw := sc.Text()
+         line := strings.TrimSpace(raw)
+         if line == "" || strings.HasPrefix(line, "#") { out = append(out, raw); continue }
+         head := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+         fields := strings.Fields(head); if len(fields) == 0 { out = append(out, raw); continue }
+         // drop exact IP or canonical CIDR
+         if fields[0] == want { continue }
+         out = append(out, raw)
+     }
+     // keep ending newline
+     return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0644)
+ }
 
-func containsIPInFile(dir, base, ip string) bool {
-    fp := filepath.Join(dir, base)
-    b, err := os.ReadFile(fp)
-    if err != nil { return false }
-    sc := bufio.NewScanner(bytes.NewReader(b))
-    for sc.Scan() {
-        trim := strings.TrimSpace(sc.Text())
-        if trim == "" || strings.HasPrefix(trim, "#") { continue }
-        first := trim
-        if i := strings.IndexAny(first, " \t#"); i >= 0 { first = first[:i] }
-        if first == ip || first == ip+"/32" { return true }
-    }
-    return false
-}
+ func containsIPInFile(dir, filename, target string) bool {
+     isCIDR, ipStr, cidrStr, err := normalizeTarget(target)
+     if err != nil { return false }
+     want := ipStr
+     if isCIDR { want = cidrStr }
 
+     path := filepath.Join(dir, filename)
+     b, err := os.ReadFile(path); if err != nil { return false }
+     sc := bufio.NewScanner(bytes.NewReader(b))
+     for sc.Scan() {
+         line := strings.TrimSpace(sc.Text())
+         if line == "" || strings.HasPrefix(line, "#") { continue }
+         head := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+         fields := strings.Fields(head); if len(fields) == 0 { continue }
+         if fields[0] == want { return true }
+     }
+     return false
+ }
 
 
 // entries parsing -----------------------------------------------------------
 
-type fileEntry struct { IP net.IP; TTL *time.Duration; Until *time.Time }
+ type fileEntry struct {
+     IP   net.IP     // single ip
+     CIDR string     // subnet
+     TTL  *time.Duration
+     Until *time.Time
+ }
+
+
 
 func readEntriesFromFile(path string) ([]fileEntry, error) {
 	b, err := os.ReadFile(path)
@@ -921,18 +1102,34 @@ func readEntriesFromFile(path string) ([]fileEntry, error) {
 	var out []fileEntry
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text()); if line == "" || strings.HasPrefix(line, "#") { continue }
-		fields := strings.Fields(line); if len(fields) == 0 { continue }
-		ip := net.ParseIP(fields[0]); if ip == nil { continue }
-		var ttl *time.Duration; var until *time.Time
-		for _, f := range fields[1:] {
+
+        raw := strings.TrimSpace(sc.Text())
+        if raw == "" || strings.HasPrefix(raw, "#") { continue }
+        // κόψε inline σχόλια: "value ... # comment"
+        head := strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
+        fields := strings.Fields(head); if len(fields) == 0 { continue }
+
+        tok := fields[0]
+        var ttl *time.Duration; var until *time.Time
+        for _, f := range fields[1:] {
 			if strings.HasPrefix(f, "ttl=") {
 				if d, err := time.ParseDuration(strings.TrimPrefix(f, "ttl=")); err == nil && d > 0 { ttl = &d }
 			} else if strings.HasPrefix(f, "until=") {
 				if t, err := time.Parse(time.RFC3339, strings.TrimPrefix(f, "until=")); err == nil { until = &t }
 			}
 		}
-		out = append(out, fileEntry{IP: ip, TTL: ttl, Until: until})
+        // IP ή CIDR;
+        if strings.ContainsRune(tok, '/') {
+            if _, nw, err := net.ParseCIDR(tok); err == nil {
+                nw.IP = nw.IP.Mask(nw.Mask) // canonicalize
+                out = append(out, fileEntry{CIDR: nw.String(), TTL: ttl, Until: until})
+            }
+            continue
+        }
+        if ip := net.ParseIP(tok); ip != nil {
+            out = append(out, fileEntry{IP: ip, TTL: ttl, Until: until})
+        }
+
 	}
 	return out, nil
 }
@@ -1025,3 +1222,23 @@ func runDisable(args []string) {
 	fmt.Fprintln(os.Stderr, "disable: unsupported backend"); os.Exit(1)
 }
 
+
+// normalizeTarget canonicalizes an input target to either an IP string or a CIDR string.
+// Returns: isCIDR, ipStr, cidrStr, error
+func normalizeTarget(s string) (bool, string, string, error) {
+    s = strings.TrimSpace(s)
+    if s == "" {
+        return false, "", "", fmt.Errorf("empty target")
+    }
+    if ip := net.ParseIP(s); ip != nil {
+        return false, ip.String(), "", nil
+    }
+    if strings.ContainsRune(s, '/') {
+        if _, nw, err := net.ParseCIDR(s); err == nil {
+            nw.IP = nw.IP.Mask(nw.Mask)
+            return true, "", nw.String(), nil
+        }
+        return false, "", "", fmt.Errorf("invalid CIDR")
+    }
+    return false, "", "", fmt.Errorf("invalid IP or CIDR")
+}
