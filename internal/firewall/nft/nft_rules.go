@@ -1302,7 +1302,8 @@ func (b *Backend) overrideByReason(ip string, tc cfgpkg.ThrottleConfig) (cfgpkg.
 
 func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, hits, window int) {
     ev := notify.Event{
-        Kind:     "autoblock",
+//        Kind:     "autoblock",
+	Kind:	  reason,
         SrcIP:    ip,
         Reason:   reason,
         TTL:      time.Duration(ttlSeconds) * time.Second,

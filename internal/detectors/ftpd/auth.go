@@ -48,8 +48,9 @@ type Auth struct {
 	gate    *core.AlertGate
 	counts  *core.SlidingCounter
 
-	// fast prefilters
+	// fast prefilters (kept minimal; we mainly use strings.Contains gates now)
 	reQuick *regexp.Regexp
+
 
 	// extractors (shared across daemons)
 	rePamHost  *regexp.Regexp // pam_unix(...): ... rhost=IP user=USER
@@ -58,8 +59,13 @@ type Auth struct {
 	rePureAt   *regexp.Regexp // (user@IP)   pure-ftpd style
 	reUserKV   *regexp.Regexp // user=<USER> or user=USER
 	reUserVs   *regexp.Regexp // \[USER\] in vsftpd prefix
+	reVsUserPrefix *regexp.Regexp // precompiled extractor for vsftpd "[USER] FAIL LOGIN:"
 
 	enr *enrich.Enricher
+
+	// daemon hint (vsftpd|proftpd|pure-ftpd|"")
+	daemon string
+
 }
 
 func NewAuth(cfg Config) *Auth {
@@ -80,8 +86,10 @@ func NewAuth(cfg Config) *Auth {
 	a.gate    = core.NewAlertGate(cfg.Cooldown)
 	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
 
-	// quick filter if line looks ftp-ish & failed
-	a.reQuick = regexp.MustCompile(`(?i)(vsftpd|pure-?ftpd|proftpd|ftp-login).*?(fail|failed|violation|authentication failure|maximum login)`)
+	// (1) QUICK FILTER: make it cheaper (no (?i), no wide backtracking).
+	// We now lowercase the line and use strings.Contains first; keep a narrow regex as a fallback.
+	a.reQuick = regexp.MustCompile(`\b(vsftpd|pure-?ftpd|proftpd|ftp-login)\b.*\b(fail|failed|violation|authentication failure|maximum login)\b`)
+
 
 	// common extractors
 	a.rePamHost  = regexp.MustCompile(`\brhost=(\d{1,3}(?:\.\d{1,3}){3})\b`)
@@ -90,6 +98,7 @@ func NewAuth(cfg Config) *Auth {
 	a.rePureAt   = regexp.MustCompile(`\([^@]+@(\d{1,3}(?:\.\d{1,3}){3})\)`)
 	a.reUserKV   = regexp.MustCompile(`\buser=<([^>]+)>|\buser=([^\s,]+)`)
 	a.reUserVs   = regexp.MustCompile(`\[[^\]]+\]\s+FAIL LOGIN:`) // vsftpd: pid [USER] FAIL LOGIN:
+	a.reVsUserPrefix = regexp.MustCompile(`\[(?P<u>[^\]]+)\]\s+FAIL LOGIN:`) // precompiled (was inside consume)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -102,6 +111,8 @@ func NewAuth(cfg Config) *Auth {
 
 func (a *Auth) SetName(n string)             { a.name = n }
 func (a *Auth) SetSource(src core.LineSource) { a.src = src }
+func (a *Auth) SetDaemon(d string)           { a.daemon = strings.ToLower(d) }
+
 func (a *Auth) Name() string {
 	if a.name != "" { return a.name }
 	return "ftpd/auth"
@@ -135,7 +146,13 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	defer a.src.Close()
 
 	now := time.Now()
+
+	// (4) CAP WORK PER TICK: prevent backlog-driven CPU stairs.
+	const maxLines = 2000
+	deadline := now.Add(800 * time.Millisecond)
+	processed := 0
 	for {
+
 		select {
 		case <-ctx.Done():
 			a.flush(now, out)
@@ -146,28 +163,81 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if err == io.EOF { break }
 		if err != nil { break }
 		a.consume(now, line)
+		processed++
+		if processed >= maxLines || time.Now().After(deadline) {
+			break
+		}
 	}
 	a.flush(now, out)
 	return nil
 }
 
 func (a *Auth) consume(now time.Time, line string) {
-	if !a.reQuick.MatchString(line) {
+	// (2) CHEAP CONTAINS GATES + DAEMON HINT (no Unicode SimpleFold)
+	ll := strings.ToLower(line)
+	// require an ftp daemon token
+	if !(strings.Contains(ll, "ftpd") || strings.Contains(ll, "ftp-login")) {
 		return
 	}
-	ip := first(
-		a.rePamHost.FindStringSubmatch(line),
-		a.reVsFail.FindStringSubmatch(line),
-		a.rePureAt.FindStringSubmatch(line),
-		a.reBracketH.FindStringSubmatch(line),
-	)
+	// require a failure-ish verb
+	if !(strings.Contains(ll, "fail") ||
+		strings.Contains(ll, "authentication failure") ||
+		strings.Contains(ll, "maximum login") ||
+		strings.Contains(ll, "violation")) {
+		return
+	}
+	// if we know the daemon, require it to appear in the line
+	switch a.daemon {
+	case "vsftpd":
+		if !strings.Contains(ll, "vsftpd") { return }
+	case "proftpd":
+		if !strings.Contains(ll, "proftpd") { return }
+	case "pure-ftpd", "pureftpd":
+		if !(strings.Contains(ll, "pure-ftpd") || strings.Contains(ll, "pureftpd")) { return }
+	}
+	// optional extra guard using the narrowed regex (kept for safety)
+	if !a.reQuick.MatchString(line) { return }
+	// Prefer extractors based on daemon hint to minimize regex tries
+	var ip string
+	if a.daemon == "vsftpd" {
+		ip = first(
+			a.reVsFail.FindStringSubmatch(line),
+			a.rePamHost.FindStringSubmatch(line),
+			a.rePureAt.FindStringSubmatch(line),
+			a.reBracketH.FindStringSubmatch(line),
+		)
+	} else if a.daemon == "proftpd" {
+		ip = first(
+			a.reBracketH.FindStringSubmatch(line),
+			a.rePamHost.FindStringSubmatch(line),
+			a.rePureAt.FindStringSubmatch(line),
+			a.reVsFail.FindStringSubmatch(line),
+		)
+	} else if a.daemon == "pure-ftpd" || a.daemon == "pureftpd" {
+		ip = first(
+			a.rePureAt.FindStringSubmatch(line),
+			a.rePamHost.FindStringSubmatch(line),
+			a.reBracketH.FindStringSubmatch(line),
+			a.reVsFail.FindStringSubmatch(line),
+		)
+	} else {
+		// unknown daemon → try all (old order)
+		ip = first(
+			a.rePamHost.FindStringSubmatch(line),
+			a.reVsFail.FindStringSubmatch(line),
+			a.rePureAt.FindStringSubmatch(line),
+			a.reBracketH.FindStringSubmatch(line),
+		)
+	}
+
 	if ip != "" {
 		a.bump(now, "AUTHFAIL|ip", ip, line)
 	}
+
 	user := pickUser(a.reUserKV, line)
 	if user == "" && a.reUserVs.MatchString(line) {
-		// optional: try to pull the [USER] token from vsftpd prefix
-		if m := regexp.MustCompile(`\[(?P<u>[^\]]+)\]\s+FAIL LOGIN:`).FindStringSubmatch(line); m != nil {
+		// (3) PRECOMPILED extractor (no per-line compile)
+		if m := a.reVsUserPrefix.FindStringSubmatch(line); m != nil {
 			user = m[1]
 		}
 	}

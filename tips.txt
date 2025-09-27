@@ -1,1 +1,7 @@
 sudo nft list table inet cfm
+
+#find a subnet block
+nft list set inet cfm block_v4_nets | grep 47.128.0.0/14
+
+nft list chain inet cfm input
+

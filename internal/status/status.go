@@ -246,22 +246,29 @@ func Run(args []string) {
 	printSummary(st)
 
 
-// --- TTL summary (manual sets) ---
-if st.TablePresent {
-    b4ttl, b4total := countTTLInSet("block_v4")
-    b6ttl, b6total := countTTLInSet("block_v6")
-    a4ttl, a4total := countTTLInSet("allow_v4")     // σε περίπτωση που έχεις allow με TTL
-    a6ttl, a6total := countTTLInSet("allow_v6")
+    // --- TTL summary (manual hosts + nets) ---
+    if st.TablePresent {
+        // BLOCK v4
+        b4hTTL, b4hTot := countTTLInSet("block_v4")
+        b4nTTL, b4nTot := countTTLInSet("block_v4_nets")
+        // BLOCK v6
+        b6hTTL, b6hTot := countTTLInSet("block_v6")
+        b6nTTL, b6nTot := countTTLInSet("block_v6_nets")
+        // ALLOW v4
+        a4hTTL, a4hTot := countTTLInSet("allow_v4")
+        a4nTTL, a4nTot := countTTLInSet("allow_v4_nets")
+        // ALLOW v6
+        a6hTTL, a6hTot := countTTLInSet("allow_v6")
+        a6nTTL, a6nTot := countTTLInSet("allow_v6_nets")
 
-    fmt.Println("TTL summary:")
-    fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4ttl, b4total)
-    fmt.Printf("  BLOCK v6: %d/%d with TTL\n", b6ttl, b6total)
-    if a4total+b6total+a6total+a4total > 0 {
-        fmt.Printf("  ALLOW v4: %d/%d with TTL\n", a4ttl, a4total)
-        fmt.Printf("  ALLOW v6: %d/%d with TTL\n", a6ttl, a6total)
+        fmt.Println("TTL summary:")
+        fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4hTTL+b4nTTL, b4hTot+b4nTot)
+        fmt.Printf("  BLOCK v6: %d/%d with TTL\n", b6hTTL+b6nTTL, b6hTot+b6nTot)
+        if (a4hTot+a4nTot+a6hTot+a6nTot) > 0 {
+            fmt.Printf("  ALLOW v4: %d/%d with TTL\n", a4hTTL+a4nTTL, a4hTot+a4nTot)
+            fmt.Printf("  ALLOW v6: %d/%d with TTL\n", a6hTTL+a6nTTL, a6hTot+a6nTot)
+        }
     }
-}
-
 
 
 
@@ -724,6 +731,19 @@ func classifyStatusSet(name, typ string) (action, family, scope, feed string, ok
 	case "block_v6":
 		return "BLOCK", "v6", "manual", "", true
 	}
+
+	// --- NEW: recognize manual *_nets sets so they show up in "Sets:" ---
+	switch name {
+	case "allow_v4_nets":
+		return "ALLOW", "v4", "manual", "", true
+	case "allow_v6_nets":
+		return "ALLOW", "v6", "manual", "", true
+	case "block_v4_nets":
+		return "BLOCK", "v4", "manual", "", true
+	case "block_v6_nets":
+		return "BLOCK", "v6", "manual", "", true
+	}
+
 	if strings.HasPrefix(name, "allow_ext_") || strings.HasPrefix(name, "block_ext_") {
 		parts := strings.Split(name, "_")
 		if len(parts) >= 5 {
@@ -988,9 +1008,17 @@ func readNftCounters() (map[string]int, error) {
 // helper list count elements with  "expires/timeout"
 func countTTLInSet(set string) (withTTL, total int) {
     s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
-    for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem υπάρχει ήδη
-        ip := strings.Trim(m[1], ",}")
-        if net.ParseIP(ip) == nil { continue }
+
+    for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem matches IP or CIDR
+        addr := strings.Trim(m[1], ",}")
+        valid := false
+        if strings.Contains(addr, "/") {
+            if _, _, err := net.ParseCIDR(addr); err == nil { valid = true }
+        } else {
+            if net.ParseIP(addr) != nil { valid = true }
+        }
+        if !valid { continue }
+
         total++
         if len(m) > 2 && strings.Trim(m[2], ",}") != "" {
             withTTL++
@@ -1007,7 +1035,13 @@ type recentHit struct {
 }
 
 var (
-    reElem = regexp.MustCompile(`(?P<ip>(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+)(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`)
+    // NEW: match IP **or CIDR** (v4/v6) plus optional expires/timeout
+    reElem = regexp.MustCompile(
+        `(?P<addr>(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?|` +
+        `[0-9a-fA-F:]+(?:/\d{1,3})?)` +
+        `(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`,
+    )
+
 )
 
 func listSetElemsDetailed(set string, max int) []recentHit {
@@ -1015,7 +1049,8 @@ func listSetElemsDetailed(set string, max int) []recentHit {
     out := make([]recentHit, 0, max)
     for _, m := range reElem.FindAllStringSubmatch(s, -1) {
         ip := strings.Trim(m[1], ",}")
-        if net.ParseIP(ip) == nil {
+        // keep only host IPs here (recent hits list is per-IP)
+        if net.ParseIP(strings.TrimSuffix(ip, "/32")) == nil || strings.Contains(ip, "/") {
             continue
         }
         ttl := ""

@@ -162,6 +162,16 @@ func init() {
 						logging.Logf("[detectors][ftpd] journal: using %s", unit)
 					}
 					d.SetSource(core.NewJournalTailer(unit))
+					// (5) PASS DAEMON HINT from unit name
+					switch {
+					case strings.Contains(unit, "vsftpd"):
+						d.SetDaemon("vsftpd")
+					case strings.Contains(unit, "proftpd"):
+						d.SetDaemon("proftpd")
+					case strings.Contains(unit, "pure-ftpd"), strings.Contains(unit, "pureftpd"):
+						d.SetDaemon("pure-ftpd")
+					}
+
 					return d, nil
 				}
 			} else {
@@ -170,6 +180,10 @@ func init() {
 					if probeJournalUnit(u, 800*time.Millisecond) {
 						logging.Logf("[detectors][ftpd] autodetect: using journal unit %s", u)
 						d.SetSource(core.NewJournalTailer(u))
+						if strings.Contains(u, "vsftpd") { d.SetDaemon("vsftpd") }
+						if strings.Contains(u, "proftpd") { d.SetDaemon("proftpd") }
+						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") { d.SetDaemon("pure-ftpd") }
+
 						return d, nil
 					}
 				}
@@ -178,6 +192,9 @@ func init() {
 					if isUnitActive(u) {
 						logging.Logf("[detectors][ftpd] autodetect: using journal unit %s (active; no recent lines seen yet)", u)
 						d.SetSource(core.NewJournalTailer(u))
+						if strings.Contains(u, "vsftpd") { d.SetDaemon("vsftpd") }
+						if strings.Contains(u, "proftpd") { d.SetDaemon("proftpd") }
+						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") { d.SetDaemon("pure-ftpd") }
 						return d, nil
 					}
 				}
@@ -215,6 +232,16 @@ func init() {
 						logging.Logf("[detectors][ftpd] autodetect: using %s (daemon_hits=%d, no recent failures; monitoring)", best, bestDaemon)
 					}
 					d.SetSource(core.NewFileTailer(best))
+					// (5) PASS DAEMON HINT from path heuristic
+					lb := strings.ToLower(best)
+					switch {
+					case strings.Contains(lb, "vsftpd"):
+						d.SetDaemon("vsftpd")
+					case strings.Contains(lb, "proftpd"):
+						d.SetDaemon("proftpd")
+					case strings.Contains(lb, "pure-ftpd"), strings.Contains(lb, "pureftpd"):
+						d.SetDaemon("pure-ftpd")
+					}
 					return d, nil
 				}
 				logging.Logf("[detectors][ftpd] autodetect: no suitable log source found; set LOG_PATH or JOURNAL_UNIT explicitly")
@@ -222,6 +249,11 @@ func init() {
 			}
 			// explicit file path
 			d.SetSource(core.NewFileTailer(path))
+			// best effort daemon hint from explicit path
+			lb := strings.ToLower(path)
+			if strings.Contains(lb, "vsftpd") { d.SetDaemon("vsftpd") }
+			if strings.Contains(lb, "proftpd") { d.SetDaemon("proftpd") }
+			if strings.Contains(lb, "pure-ftpd") || strings.Contains(lb, "pureftpd") { d.SetDaemon("pure-ftpd") }
 			return d, nil
 
 		default:

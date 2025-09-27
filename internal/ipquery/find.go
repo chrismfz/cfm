@@ -108,44 +108,66 @@ func extractCfmSets(tableJSON []byte, ip net.IP) []setDesc {
 }
 
 func classifySetName(name string) setDesc {
-	if name == "allow_v4" {
-		return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
-	}
-	if name == "allow_v6" {
-		return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
-	}
-	if name == "allow_dyn_v4" {
-		return setDesc{name: name, family: "v4", kind: "hosts", action: "ALLOW"}
-	}
-	if name == "allow_dyn_v6" {
-		return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"}
-	}
-	if name == "block_v4" {
-		return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
-	}
-	if name == "block_v6" {
-		return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
-	}
-	parts := strings.Split(name, "_")
-	if (len(parts) == 4 || len(parts) >= 5) &&
-		(parts[0] == "allow" || parts[0] == "block") &&
-		parts[1] == "ext" &&
-		(parts[2] == "v4" || parts[2] == "v6") &&
-		(parts[3] == "hosts" || parts[3] == "nets") {
-		feed := ""
-		if len(parts) >= 5 {
-			feed = strings.Join(parts[4:], "_")
-		}
-		return setDesc{
-			name:   name,
-			family: parts[2],
-			kind:   parts[3],
-			action: strings.ToUpper(parts[0]),
-			feed:   feed,
-		}
-	}
-	return setDesc{}
+    // --- manual hosts ---
+    if name == "allow_v4" {
+        return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
+    }
+    if name == "allow_v6" {
+        return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
+    }
+    if name == "block_v4" {
+        return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
+    }
+    if name == "block_v6" {
+        return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
+    }
+
+    // --- manual nets ---
+    if name == "allow_v4_nets" {
+        return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
+    }
+    if name == "allow_v6_nets" {
+        return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
+    }
+    if name == "block_v4_nets" {
+        return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
+    }
+    if name == "block_v6_nets" {
+        return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
+    }
+
+    // --- dynamic hosts ---
+    if name == "allow_dyn_v4" {
+        return setDesc{name: name, family: "v4", kind: "hosts", action: "ALLOW"}
+    }
+    if name == "allow_dyn_v6" {
+        return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"}
+    }
+
+    // --- external feeds (hosts or nets) ---
+    parts := strings.Split(name, "_")
+    if (len(parts) == 4 || len(parts) >= 5) &&
+        (parts[0] == "allow" || parts[0] == "block") &&
+        parts[1] == "ext" &&
+        (parts[2] == "v4" || parts[2] == "v6") &&
+        (parts[3] == "hosts" || parts[3] == "nets") {
+        feed := ""
+        if len(parts) >= 5 {
+            feed = strings.Join(parts[4:], "_")
+        }
+        return setDesc{
+            name:   name,
+            family: parts[2],
+            kind:   parts[3],
+            action: strings.ToUpper(parts[0]),
+            feed:   feed,
+        }
+    }
+
+    // unknown set
+    return setDesc{}
 }
+
 
 func netsOverlap(a, b *net.IPNet) bool {
 	if (a.IP.To4() != nil) != (b.IP.To4() != nil) {

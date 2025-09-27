@@ -57,15 +57,33 @@ func getBackend() firewall.Backend {
 }
 
 
+
 // ----------------------------------------------------------------------------
 // Debugger - Start in runDaemon
 // ----------------------------------------------------------------------------
-
+// startDebug launches a local pprof/metrics server on 127.0.0.1:6060
+//
+// Access only from localhost unless you change the bind address.
+// Safe to leave running permanently; overhead is near zero until endpoints hit.
+//
+// Example usage when daemon is running:
+//
+//   # 60-second CPU profile → load in go tool pprof
+//   curl -o /tmp/cfm.cpu http://127.0.0.1:6060/debug/pprof/profile?seconds=60
+//   go tool pprof /usr/bin/cfm /tmp/cfm.cpu
+//
+//   # Goroutine dump (text)
+//   curl http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
+//
+//   # Heap profile
+//   curl -o /tmp/cfm.heap http://127.0.0.1:6060/debug/pprof/heap
+//   go tool pprof /usr/bin/cfm /tmp/cfm.heap
+//
+//   # Metrics (if promhttp enabled)
+//   curl http://127.0.0.1:6060/metrics
+//
 func startDebug() {
-    addr := os.Getenv("CFM_DEBUG_HTTP")
-    if addr == "" {
-        addr = "127.0.0.1:6060"
-    }
+    addr := "127.0.0.1:6060"
 
     // Optional: small banner without requiring logging.Init
     go func(a string) {
@@ -75,6 +93,9 @@ func startDebug() {
         _ = http.ListenAndServe(a, nil)
     }(addr)
 }
+
+
+
 
 
 // ----------------------------------------------------------------------------
