@@ -19,4 +19,11 @@ type Backend interface {
 	ListAllows() ([]BlockedEntry, error)
 	AddAllow(ip net.IP, ttl *time.Duration) error
 	RemoveAllow(ip net.IP) error
+
+	// NEW: CIDR subnets (manual)
+	// cidr must be canonical (but we’ll also accept any valid ParseCIDR) e.g. "47.128.0.0/14"
+	AddBlockNet(cidr string, ttl *time.Duration) error
+	RemoveBlockNet(cidr string) error
+	AddAllowNet(cidr string, ttl *time.Duration) error
+	RemoveAllowNet(cidr string) error
 }

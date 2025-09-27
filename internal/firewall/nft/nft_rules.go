@@ -357,7 +357,7 @@ func (b *Backend) DumpFloodCounters() {
 	}
 
 	if b.last == nil {
-		b.last = map[string]int{}
+		b.last = map[string]uint64{}
 	}
 
 	// Παράδειγμα output (text):
@@ -392,17 +392,17 @@ func (b *Backend) DumpFloodCounters() {
 			f := strings.Fields(s)
 			if len(f) >= 2 {
 				if pkts64, err := strconv.ParseUint(f[1], 10, 64); err == nil {
-					pkts := int(pkts64)
-					prev := b.last[cur]
-					if pkts > prev {
-						delta := pkts - prev
 
+       pkts := pkts64
+       prev := b.last[cur] // 0 αν δεν υπάρχει
+       if pkts > prev {
+           delta := pkts - prev
+           logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
+               cur, pkts, delta, reasonForName(cur))
+       }
+       // reset (pkts < prev) το χειρίζεσαι ήδη “σιωπηλά” ενημερώνοντας την τιμή
+       b.last[cur] = pkts
 
-						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
-							cur, pkts, delta, reasonForName(cur))
-					}
-					// handle reset (pkts < prev) σιωπηλά: απλά ενημέρωσε την τιμή
-					b.last[cur] = pkts
 				}
 			}
 		}

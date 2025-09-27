@@ -246,6 +246,22 @@ func Run(args []string) {
 	printSummary(st)
 
 
+// --- TTL summary (manual sets) ---
+if st.TablePresent {
+    b4ttl, b4total := countTTLInSet("block_v4")
+    b6ttl, b6total := countTTLInSet("block_v6")
+    a4ttl, a4total := countTTLInSet("allow_v4")     // σε περίπτωση που έχεις allow με TTL
+    a6ttl, a6total := countTTLInSet("allow_v6")
+
+    fmt.Println("TTL summary:")
+    fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4ttl, b4total)
+    fmt.Printf("  BLOCK v6: %d/%d with TTL\n", b6ttl, b6total)
+    if a4total+b6total+a6total+a4total > 0 {
+        fmt.Printf("  ALLOW v4: %d/%d with TTL\n", a4ttl, a4total)
+        fmt.Printf("  ALLOW v6: %d/%d with TTL\n", a6ttl, a6total)
+    }
+}
+
 
 
 
@@ -966,6 +982,22 @@ func readNftCounters() (map[string]int, error) {
     return out, nil
 }
 
+
+
+
+// helper list count elements with  "expires/timeout"
+func countTTLInSet(set string) (withTTL, total int) {
+    s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
+    for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem υπάρχει ήδη
+        ip := strings.Trim(m[1], ",}")
+        if net.ParseIP(ip) == nil { continue }
+        total++
+        if len(m) > 2 && strings.Trim(m[2], ",}") != "" {
+            withTTL++
+        }
+    }
+    return
+}
 
 
 // Parse "nft list set inet cfm <set>" and return up to max IPs with TTL if present.

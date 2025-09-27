@@ -31,6 +31,12 @@ const (
 	setV6   = "block_v6"
 	allowV4 = "allow_v4"
 	allowV6 = "allow_v6"
+	// NEW: manual nets
+	allowV4Nets = "allow_v4_nets"
+	allowV6Nets = "allow_v6_nets"
+	blockV4Nets = "block_v4_nets"
+	blockV6Nets = "block_v6_nets"
+
 	allowDynV4 = "allow_dyn_v4"
 	allowDynV6 = "allow_dyn_v6"
 
@@ -61,7 +67,7 @@ type setDesc struct {
 var debugEnv = os.Getenv("CFM_DEBUG") == "1"
 
 type Backend struct{
-    last map[string]int // last seen packets per counter (for delta logging)
+    last map[string]uint64 // last seen packets per counter (for delta logging)
     cfg *cfgpkg.Config
 
     enr  *enrichpkg.Enricher
@@ -85,7 +91,7 @@ func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 
 func New() *Backend {
     return &Backend{
-        last: make(map[string]int),
+        last: make(map[string]uint64),
 	feedKeys: make(map[string]struct{}),
     }
 }
@@ -198,6 +204,12 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
 	if err := b.ensureSet(setV4,   "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(setV6,   "ipv6_addr"); err != nil { return err }
+	// NEW: manual nets (for CIDR)
+	if err := b.ensureSetWithFlags(allowV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(allowV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(blockV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
+
 	// local and server-IPs
 	if err := b.ensureSetWithFlags("self_v4", "ipv4_addr", "timeout,interval"); err != nil { return err }
 	if err := b.ensureSetWithFlags("self_v6", "ipv6_addr", "timeout,interval"); err != nil { return err }
@@ -268,6 +280,11 @@ addEarly(`ip6 saddr @allow_ext_v6_hosts accept`)
 addEarly(`ip saddr @allow_ext_v4_nets accept`)
 addEarly(`ip6 saddr @allow_ext_v6_nets accept`)
 
+// NEW: manual allow nets (early accept)
+addEarly(`ip saddr @allow_v4_nets accept`)
+addEarly(`ip6 saddr @allow_v6_nets accept`)
+
+
 // 4) Early ICMP echo → flood (τελευταίο ώστε να μείνει ΚΑΤΩ από τα accepts)
 if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
     addEarly(`ip protocol icmp icmp type echo-request jump flood`)          // IPv4
@@ -300,6 +317,11 @@ if err := addRule(`ct state established,related accept`); err != nil { return er
 	if err := addRule(`ip6 saddr @block_ext_v6_hosts drop`); err != nil { return err }
 	if err := addRule(`ip saddr @block_ext_v4_nets drop`);   err != nil { return err }
 	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
+
+	// NEW: manual block nets
+	if err := addRule(`ip saddr @block_v4_nets drop`);  err != nil { return err }
+	if err := addRule(`ip6 saddr @block_v6_nets drop`); err != nil { return err }
+
 
 	// 6) jump flood στο τέλος του base layer
 	if !b.ruleExists("input", "jump flood") {
@@ -426,6 +448,8 @@ func (b *Backend) AddAllow(ip net.IP, ttl *time.Duration) error {
 	return fmt.Errorf("nft add allow failed: %v: %s", err, out)
 }
 
+
+
 func (b *Backend) RemoveAllow(ip net.IP) error {
 	if ip == nil {
 		return errors.New("nil ip")
@@ -442,6 +466,90 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	}
 	return nil
 }
+
+
+
+
+// -------- manual nets (CIDR) --------
+
+func canonCIDR(s string) (cidr string, v6 bool, err error) {
+    ip, nw, e := net.ParseCIDR(strings.TrimSpace(s))
+    if e != nil || ip == nil || nw == nil {
+        return "", false, fmt.Errorf("invalid cidr: %s", s)
+    }
+    // canonical string "ip/mask"
+    nw.IP = ip.Mask(nw.Mask)
+    return nw.String(), ip.To4() == nil, nil
+}
+
+func (b *Backend) AddBlockNet(cidr string, ttl *time.Duration) error {
+    canon, v6, err := canonCIDR(cidr)
+    if err != nil { return err }
+    set := blockV4Nets
+    if v6 { set = blockV6Nets }
+    ttlStr := ""
+    if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+    // best-effort: first delete, then add
+    _ = b.RemoveBlockNet(canon)
+    if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
+        if !strings.Contains(out, "already exists") {
+            return fmt.Errorf("nft add element failed: %v: %s", err, out)
+        }
+    }
+    return nil
+}
+
+func (b *Backend) RemoveBlockNet(cidr string) error {
+    canon, v6, err := canonCIDR(cidr)
+    if err != nil { return err }
+    set := blockV4Nets
+    if v6 { set = blockV6Nets }
+    cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
+    out, err2 := b.nftOut(cmd)
+    if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+        return fmt.Errorf("nft: %v: %s", err2, out)
+    }
+    return nil
+}
+
+func (b *Backend) AddAllowNet(cidr string, ttl *time.Duration) error {
+    canon, v6, err := canonCIDR(cidr)
+    if err != nil { return err }
+    set := allowV4Nets
+    if v6 { set = allowV6Nets }
+    ttlStr := ""
+    if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+    _ = b.RemoveAllowNet(canon)
+    if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
+        if !strings.Contains(out, "already exists") {
+            return fmt.Errorf("nft add element failed: %v: %s", err, out)
+        }
+    }
+    return nil
+}
+
+func (b *Backend) RemoveAllowNet(cidr string) error {
+    canon, v6, err := canonCIDR(cidr)
+    if err != nil { return err }
+    set := allowV4Nets
+    if v6 { set = allowV6Nets }
+    cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
+    out, err2 := b.nftOut(cmd)
+    if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+        return fmt.Errorf("nft: %v: %s", err2, out)
+    }
+    return nil
+}
+
+
+
+
+
+
+
+
+
+
 
 func (b *Backend) ListAllows() ([]firewall.BlockedEntry, error) {
 	var outAll []firewall.BlockedEntry
