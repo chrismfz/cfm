@@ -11,7 +11,7 @@ import (
 //    "cfm/internal/logging"
 
 //for notifications//
-//    "strings"
+    "strings"
 //    "fmt"
     "cfm/internal/notify"
 
@@ -164,6 +164,33 @@ if out.Extra["blocked"] == "yes" {
 }
 // --- end notify ---
 
+// --- [NEW] emit notify for NON-blocked events as well ---
+if out.Extra["blocked"] != "yes" {
+    // Optional: pick an IP if υπάρχει (health συνήθως δεν έχει)
+    ipStr := s.pickIP(a)
+
+    // cap samples to first 10 lines
+    smp := out.Samples
+    if len(smp) > 10 { smp = smp[:10] }
+
+    ev := notify.Event{
+        Kind:     string(a.Kind),      // π.χ. "HEALTH/SYN_RECV_SPIKE"
+        Section:  s.section,           // κρίσιμο για το [detector "health"] routing
+        SrcIP:    ipStr,               // μπορεί να είναι ""
+        Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+        Count:    a.Count,
+        When:     a.When,              // ή time.Now()
+        Severity: "warn",              // ή "info" ανάλογα το health sub-event
+        Samples:  smp,
+        Extra:    map[string]string{
+            "key": a.Key,
+        },
+    }
+    notify.Enqueue(ev)
+}
+// --- end NEW ---
+
+
 
 
 
@@ -191,6 +218,13 @@ func (s *sectionSink) pickIP(a core.Alert) string {
         if ip := net.ParseIP(a.Extra["ip"]); ip != nil {
             return ip.String()
         }
+    }
+    return ""
+}
+
+func firstNonEmpty(ss ...string) string {
+    for _, s := range ss {
+        if strings.TrimSpace(s) != "" { return s }
     }
     return ""
 }

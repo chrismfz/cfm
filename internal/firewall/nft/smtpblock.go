@@ -72,6 +72,9 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 
 	// Build common allow rules (localhost + allowed owners)
 	buildCommon := func(chain string, prefix string) {
+        // Always let root (uid/gid 0) bypass SMTP block
+        _ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s meta skuid 0 tcp dport @%ssmtp_ports accept`, chain, prefix))
+        _ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s meta skgid 0 tcp dport @%ssmtp_ports accept`, chain, prefix))
 		if cfg.AllowLocal {
 			_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s ip daddr 127.0.0.0/8  tcp dport @%ssmtp_ports accept`, chain, prefix))
 			_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s ip6 daddr ::1       tcp dport @%ssmtp_ports accept`, chain, prefix))
@@ -88,14 +91,15 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		if !cfg.LogEnabled { return }
 		parts := []string{`log prefix "CFM SMTPBLOCK "`}
 		if cfg.LogNFLOG > 0 {
-			parts = []string{fmt.Sprintf(`log prefix "CFM SMTPBLOCK " group %d`, cfg.LogNFLOG)}
+			parts = []string{fmt.Sprintf(`log prefix "CFM SMTPBLOCK " group %d snaplen 512`, cfg.LogNFLOG)}
 		}
 		if cfg.LogLimit != "" && cfg.LogBurst > 0 {
 			parts = append(parts, fmt.Sprintf(`limit rate %s burst %d packets`, cfg.LogLimit, cfg.LogBurst))
 		} else if cfg.LogLimit != "" {
 			parts = append(parts, fmt.Sprintf(`limit rate %s`, cfg.LogLimit))
 		}
-		 _ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s tcp dport @%ssmtp_ports counter name smtpblock_hits %s`, chain, prefix, strings.Join(parts, " ")))
+		// Log only first connection attempts (keeps RST/ACK noise out; helps with uid=0 kernel RSTs)
+	        _ = b.nftExpr(fmt.Sprintf( `add rule inet cfm %s ct state new tcp dport @%ssmtp_ports counter name smtpblock_hits %s`, chain, prefix, strings.Join(parts, " ")))
 	}
 
 	// Mode: block (filter OUTPUT) or redirect (nat OUTPUT)
@@ -109,7 +113,10 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		_ = b.nftExpr(`flush chain inet cfm smtpblock`)
 		buildCommon("smtpblock", "")
 		logRule("smtpblock", "")
-		_ = b.nftExpr(`add rule inet cfm smtpblock tcp dport @smtp_ports counter name smtpblock_denied reject with tcp reset`)
+
+        // Reject only connection attempts (SYN/new)
+        _ = b.nftExpr(`add rule inet cfm smtpblock ct state new tcp dport @smtp_ports counter name smtpblock_denied reject with tcp reset`)
+
 	} else {
 		// NAT/output redirect
 		if !b.chainExists("smtp_redir") {
@@ -121,7 +128,7 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		// When redirecting from inet cfm, reference sets with @cfm: prefix if the table differs.
 		buildCommon("smtp_redir", "cfm:")
 		logRule("smtp_redir", "cfm:")
-		_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm smtp_redir tcp dport @cfm:smtp_ports counter name smtpblock_denied redirect to :%d`, cfg.RedirectPort))
+		 _ = b.nftExpr(fmt.Sprintf( `add rule inet cfm smtp_redir ct state new tcp dport @cfm:smtp_ports counter name smtpblock_denied redirect to :%d`, cfg.RedirectPort))
 	}
 
 	return nil

@@ -294,9 +294,31 @@ if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
 
 
 
+// let's try to block someone that already abuse us//
+//if err := addRule(`ct state established,related accept`); err != nil { return err }
 
+    // Block established/related traffic από sources που είναι ήδη σε block sets,
+
+// Κόψε established/related από IPs που είναι ήδη σε block sets
+if err := addRule(`ct state established,related ip saddr @block_v4 drop`); err != nil { return err }
+if err := addRule(`ct state established,related ip6 saddr @block_v6 drop`); err != nil { return err }
+
+// External feeds — hosts & nets
+if err := addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`); err != nil { return err }
+if err := addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`); err != nil { return err }
+if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`); err != nil { return err }
+if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`); err != nil { return err }
+
+// Manual/aggregate nets (αν τα έχεις)
+if err := addRule(`ct state established,related ip saddr @block_v4_nets drop`); err != nil { return err }
+if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil { return err }
+
+// Τώρα το γενικό established/related accept (μετά τα drops)
 if err := addRule(`ct state established,related accept`); err != nil { return err }
 
+
+
+// Rules continue //
 
 	// 1) manual allow
 	if err := addRule(`ip saddr @allow_v4 accept`);  err != nil { return err }
