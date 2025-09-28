@@ -230,9 +230,10 @@ With autoblock → the same limits apply, but repeated violations escalate to a 
 
 
 ## 🛠 Roadmap
-- [ ] SMTP Block based on nft and uid/gid
+- [ ] Explore new features based on uid/guid/nflog/syslookup/proc-watching
 - [ ] More notifier channels (Telegram, Webhooks).
 - [ ] Advanced anomaly detection (geo-login alerts, ML baselines).
+- [ ] Autoblock thresholds based on ASN/Country (Phase System - Grace Period for known Countries/ASN)
 
 ---
 
