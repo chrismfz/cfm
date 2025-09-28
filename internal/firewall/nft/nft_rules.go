@@ -91,83 +91,69 @@ func (b *Backend) ensureThrottleSets() {
 }
 
 // -----------------------------------------------------------------------------
-// Connlimit (global per port; nft does not support per-IP ct count)
+// Connlimit 
 // -----------------------------------------------------------------------------
 
 
 
 func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
-	for _, r := range rules {
-		cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
-		b.ensureCounter(cname)
-		ttl := b.cfg.Throttle.SetTTL
 
-		// dynamic per-port set names so reason can reflect the exact rule (port/proto)
-		// Example: th_connlimit_993_tcp_v4, th_connlimit_993_tcp_v6
-		setV4 := fmt.Sprintf("th_connlimit_%d_%s_v4", r.Port, r.Proto)
-		setV6 := fmt.Sprintf("th_connlimit_%d_%s_v6", r.Port, r.Proto)
+        const meterSize = 65535
+        for _, r := range rules {
+                cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
+                b.ensureCounter(cname)
 
-		// idempotently create the sets
-		_ = b.nftExpr(fmt.Sprintf("add set inet cfm %s { type ipv4_addr; flags timeout; }", setV4))
-		_ = b.nftExpr(fmt.Sprintf("add set inet cfm %s { type ipv6_addr; flags timeout; }", setV6))
+                switch strings.ToLower(r.Proto) {
+                case "tcp":
+                        // IPv4 per-IP concurrent NEW connections on tcp dport
+                        expr4 := fmt.Sprintf(
+                                "add rule inet cfm flood ip protocol tcp ct state new tcp dport %d "+
+                                "meter cl_%d_tcp_v4 size %d { ip saddr ct count over %d } "+
+                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
+                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+                        )
+                        if err := b.nftExpr(expr4); err != nil {
+                                return fmt.Errorf("connlimit per-ip v4 tcp rule failed: %w", err)
+                        }
+                        // IPv6
+                        expr6 := fmt.Sprintf(
+                                "add rule inet cfm flood ip6 nexthdr tcp ct state new tcp dport %d "+
+                                "meter cl_%d_tcp_v6 size %d { ip6 saddr ct count over %d } "+
+                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
+                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+                        )
+                        if err := b.nftExpr(expr6); err != nil {
+                                return fmt.Errorf("connlimit per-ip v6 tcp rule failed: %w", err)
+                        }
 
+                case "udp":
+                        // IPv4 (UDP: counts conntrack entries per-IP; μικρότερη διάρκεια)
+                        expr4 := fmt.Sprintf(
+                                "add rule inet cfm flood ip protocol udp ct state new udp dport %d "+
+                                "meter cl_%d_udp_v4 size %d { ip saddr ct count over %d } "+
+                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
+                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+                        )
+                        if err := b.nftExpr(expr4); err != nil {
+                                return fmt.Errorf("connlimit per-ip v4 udp rule failed: %w", err)
+                        }
+                        // IPv6
+                        expr6 := fmt.Sprintf(
+                                "add rule inet cfm flood ip6 nexthdr udp ct state new udp dport %d "+
+                                "meter cl_%d_udp_v6 size %d { ip6 saddr ct count over %d } "+
+                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
+                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+                        )
+                        if err := b.nftExpr(expr6); err != nil {
+                                return fmt.Errorf("connlimit per-ip v6 udp rule failed: %w", err)
+                        }
 
-
-b.registerClSet(setV4)
-b.registerClSet(setV6)
-
-		switch r.Proto {
-		case "tcp":
-			// IPv4
-			expr4 := fmt.Sprintf(
-				"add rule inet cfm flood ip protocol tcp tcp dport %d ct count over %d "+
-					"add @%s { ip saddr timeout %ds } "+
-					"counter name %s drop comment \"connlimit %d;%d\";",
-				r.Port, r.Limit, setV4, ttl, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr4); err != nil {
-				return fmt.Errorf("connlimit v4 tcp rule failed: %w", err)
-			}
-			// IPv6
-			expr6 := fmt.Sprintf(
-				"add rule inet cfm flood ip6 nexthdr tcp tcp dport %d ct count over %d "+
-					"add @%s { ip6 saddr timeout %ds } "+
-					"counter name %s drop comment \"connlimit %d;%d\";",
-				r.Port, r.Limit, setV6, ttl, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr6); err != nil {
-				return fmt.Errorf("connlimit v6 tcp rule failed: %w", err)
-			}
-
-		case "udp":
-			// IPv4
-			expr4 := fmt.Sprintf(
-				"add rule inet cfm flood ip protocol udp udp dport %d ct count over %d "+
-					"add @%s { ip saddr timeout %ds } "+
-					"counter name %s drop comment \"connlimit %d;%d\";",
-				r.Port, r.Limit, setV4, ttl, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr4); err != nil {
-				return fmt.Errorf("connlimit v4 udp rule failed: %w", err)
-			}
-			// IPv6
-			expr6 := fmt.Sprintf(
-				"add rule inet cfm flood ip6 nexthdr udp udp dport %d ct count over %d "+
-					"add @%s { ip6 saddr timeout %ds } "+
-					"counter name %s drop comment \"connlimit %d;%d\";",
-				r.Port, r.Limit, setV6, ttl, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr6); err != nil {
-				return fmt.Errorf("connlimit v6 udp rule failed: %w", err)
-			}
-
-		default:
-			return fmt.Errorf("unknown proto %q in CONNLIMIT", r.Proto)
-		}
-	}
-	return nil
-}
-
+                default:
+                        return fmt.Errorf("unknown proto %q in CONNLIMIT", r.Proto)
+                }
+        }
+        return nil
+ }
 
 // -----------------------------------------------------------------------------
 // Helpers
