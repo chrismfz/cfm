@@ -52,6 +52,20 @@ Detectors parse logs and metrics to spot abuse:
   - Modes: `dryrun`, TTL autoblock, permanent autoblock.
 - **Reflection/handshake junk filtering** before service rules.
 
+### 📧 SMTP Autoblock
+Blocks unauthorized **outgoing SMTP** to prevent web scripts or compromised accounts from bypassing the local MTA
+- **CSF-style behavior**: forces scripts to relay via Exim/Postfix instead of direct sockets.
+- **Ruleset**:
+- Allow listed **MTA accounts** (e.g. `exim`, `postfix`, `mailman`) and groups (`mail`).
+- Allow **loopback** (`127.0.0.0/8`, `::1`) and the server’s own IPs (`self_v4`, `self_v6`) for local delivery/webmail.
+- **Rejects** (TCP RST) unauthorized outbound SMTP, or optionally **redirects** to local port 25.
+- Always allow **root** and configured MTA users/groups.
+- Allows **loopback** and the server’s own IPs for local/webmail.
+- Unauthorized SMTP is **rejected** (RST) or **redirected** to local port 25.
+- NFLOG support with optional **ASN/Geo/PTR enrichment** into `/var/log/cfm.smtp.log`.
+- Tracks activity via `smtpblock_hits` and `smtpblock_denied` counters.
+
+
 ### 🖥️ System Hardening
 - Auto-applies **sysctl tweaks** on startup (`SYS_TWEAKS_ENABLE`).
 - Scales conntrack size with RAM.
