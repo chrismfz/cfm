@@ -144,23 +144,23 @@ Extra: ports=148,668,1018,2083,2087,2096
 
 Each defense works independently and only enforces its own limit.
 
-SYN-rate:
+- **SYN-rate**:
 Per-IP limit on how many SYN packets can arrive per second.
 ➝ If an IP sends SYNs faster than allowed, the excess SYNs are dropped. Existing connections are not affected.
 
-PortFlood:
+- **PortFlood**:
 Per-IP rate limit for new connections per port (X connections per interval, with burst).
 ➝ If an IP exceeds the allowed rate, the extra new attempts are dropped. Normal connections continue.
 
-Connlimit (per-IP concurrent):
+- **Connlimit (per-IP concurrent)**:
 Per-IP maximum number of concurrent tracked connections to a given port.
 ➝ If an IP already has N open connections and tries to open more, the new ones are dropped. The established ones stay alive.
 
-ACK guard / bad TCP flags:
+- **ACK guard / bad TCP flags**:
 Detects abnormal TCP handshakes (e.g. ACK without SYN, floods of RST, invalid flag combos).
 ➝ Suspicious packets are dropped immediately, without touching normal flows.
 
-ICMP rate/pps limits:
+- **ICMP rate/pps limits**:
 Caps the number of ICMP requests (e.g. echo requests) per IP or globally.
 ➝ Only excessive ICMP packets are dropped; normal pings pass.
 
@@ -193,7 +193,7 @@ Good for limiting but still letting some traffic through (e.g. NAT’d carriers 
 
 With autoblock:
 
-Defenses are still doing their job (dropping excess/new/abnormal packets).
+**Defenses are still doing their job (dropping excess/new/abnormal packets).**
 
 Autoblock “learns” from these hits. If an IP keeps hammering the limits, it escalates to a hard block.
 
