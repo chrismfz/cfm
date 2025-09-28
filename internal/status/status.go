@@ -383,7 +383,7 @@ fmt.Printf("\n =================================================================
 r4 := listSetElemsDetailed("ackguard_recent_v4", 10)
 r6 := listSetElemsDetailed("ackguard_recent_v6", 10)
 
-printRecent := func(label string, items []recentHit) {
+ printRecent := func(label string, items []recentHit, entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}) {
     if len(items) == 0 { return }
     fmt.Printf("  recent(%s):\n", label)
     for _, it := range items {
@@ -408,10 +408,25 @@ printRecent := func(label string, items []recentHit) {
             if it.Expires != "" {
                 metaParts = append(metaParts, "ttl="+it.Expires)
             }
+
+            // --- gather ports from conntrack ---
+            ports := portBreakdownByIP(entries, tcpIn, locals, it.IP)
+            portList := make([]string, 0, len(ports))
+            for p := range ports {
+                portList = append(portList, strconv.Itoa(p))
+            }
+            sort.Strings(portList)
+
+            extra := ""
+            if len(portList) > 0 {
+                extra = " (Ports triggered: " + strings.Join(portList, ",") + ")"
+            }
+
             if len(metaParts) > 0 {
-                fmt.Printf("    %-39s [%s]\n", it.IP, strings.Join(metaParts, " | "))
+                fmt.Printf("    %-39s [%s]%s\n", it.IP, strings.Join(metaParts, " | "), extra)
                 continue
             }
+
         }
         // fallback (no enrich or no meta)
         if it.Expires != "" {
@@ -422,8 +437,13 @@ printRecent := func(label string, items []recentHit) {
     }
 }
 
-printRecent("acknew v4", r4)
-printRecent("acknew v6", r6)
+ entries, _ := readConntrack()
+ locals := localIPs()
+ tcpIn := readTCPInPorts()
+
+ printRecent("acknew v4", r4, entries, tcpIn, locals)
+ printRecent("acknew v6", r6, entries, tcpIn, locals)
+
 
 //
 
@@ -444,20 +464,13 @@ printRecent("acknew v6", r6)
 
 
 
-	// 2) Top N από conntrack (inbound προς TCP_IN)
-	//    - TCP_IN ports: από nft set "tcp_in_ports"
-	//    - inbound: conn.Dst ∈ local IPs
-	tcpIn := readTCPInPorts()
-	if len(tcpIn) == 0 {
-		// καμία πολιτική TCP_IN φορτωμένη — δεν δείχνουμε Top N
-		return
-	}
+    // 2) Top N από conntrack (inbound προς TCP_IN)
+    //    - Χρησιμοποίησε τα entries/locals/tcpIn που ήδη υπολογίστηκαν πριν το printRecent
+    if len(tcpIn) == 0 {
+        // καμία πολιτική TCP_IN φορτωμένη — δεν δείχνουμε Top N
+        return
+    }
 
-	entries, err := readConntrack()
-	if err != nil {
-		return
-	}
-	locals := localIPs()
 
 	total, byState, topPorts, topIPs := topNStats(entries, tcpIn, locals, topN)
 
