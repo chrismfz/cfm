@@ -139,8 +139,8 @@ Extra: ports=148,668,1018,2083,2087,2096
 
 ---
 
-### Explaining Defenses: 
-1. Without autoblock
+## Explaining Defenses: 
+### 1. Without autoblock
 
 Each defense works independently and only enforces its own limit.
 
@@ -167,7 +167,7 @@ Caps the number of ICMP requests (e.g. echo requests) per IP or globally.
 So without autoblock, these defenses act like throttles: they prevent abuse from going beyond a threshold, but the offending IP is not globally blocked — only the extra traffic is dropped.
 
 
-2. With autoblock enabled
+### 2. With autoblock enabled
 
 Autoblock acts as an escalation layer on top of the defenses.
 
@@ -183,7 +183,7 @@ All of its traffic is dropped, not just the excess on one port.
 
 This stops repeated offenders more aggressively and frees resources.
 
-3. Combined behavior
+### 3. Combined behavior
 
 Without autoblock:
 
@@ -199,13 +199,13 @@ Autoblock “learns” from these hits. If an IP keeps hammering the limits, it 
 
 This reduces noise (no repeated hits from the same IP) but can increase false positives if thresholds are too low.
 
-4. Practical analogy
+### 4. Practical analogy
 
 SYN-rate / PortFlood / Connlimit / ACK / ICMP = speed bumps: slow you down, stop excess traffic, but don’t eject you from the road.
 
 Autoblock = the police: if you hit the speed bumps too often, you get pulled over and removed entirely.
 
-✅ So:
+So:
 
 Without autoblock → limits and filters are enforced, but offenders can keep retrying.
 
