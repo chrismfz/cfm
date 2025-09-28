@@ -95,7 +95,7 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		} else if cfg.LogLimit != "" {
 			parts = append(parts, fmt.Sprintf(`limit rate %s`, cfg.LogLimit))
 		}
-		_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s tcp dport @%ssmtp_ports %s`, chain, prefix, strings.Join(parts, " ")))
+		 _ = b.nftExpr(fmt.Sprintf(`add rule inet cfm %s tcp dport @%ssmtp_ports counter name smtpblock_hits %s`, chain, prefix, strings.Join(parts, " ")))
 	}
 
 	// Mode: block (filter OUTPUT) or redirect (nat OUTPUT)
@@ -124,7 +124,5 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm smtp_redir tcp dport @cfm:smtp_ports counter name smtpblock_denied redirect to :%d`, cfg.RedirectPort))
 	}
 
-	// A small “hit” counter rule so you can see matches even if allowed later
-	_ = b.nftExpr(`add rule inet cfm smtpblock tcp dport @smtp_ports counter name smtpblock_hits accept 2>/dev/null`)
 	return nil
 }

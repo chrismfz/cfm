@@ -14,21 +14,26 @@ import (
 	"cfm/internal/logging"
 )
 
+// SnoopConfig holds runtime settings for the NFLOG SMTP snooper.
 type SnoopConfig struct {
 	Group  uint16
 	Enrich bool
 	Queue  int
 }
 
+// Start begins listening to NFLOG for SMTP block events.
 func Start(ctx context.Context, c SnoopConfig) error {
 	if c.Group == 0 {
 		return nil
 	}
 
-    nf, err := nflog.Open(&nflog.Config{
-        Group: c.Group,  // minimal, portable across v2.x
-    })
-
+	// Minimal config. If your go-nflog version supports payload copy,
+	// uncomment the relevant field below.
+	nf, err := nflog.Open(&nflog.Config{
+		Group: c.Group,
+		// Copysize:  0xFFFF, // some v2.x releases
+		// CopyRange: 0xFFFF, // others use CopyRange
+	})
 	if err != nil {
 		return err
 	}
@@ -39,7 +44,7 @@ func Start(ctx context.Context, c SnoopConfig) error {
 	}
 	events := make(chan evt, q)
 
-	// Optional enricher (like status.go)
+	// Optional enricher (GeoIP/ASN/etc.)
 	var en *enrich.Enricher
 	if c.Enrich {
 		if e, _ := enrich.New("/etc/cfm", "./configs"); e != nil {
@@ -47,7 +52,7 @@ func Start(ctx context.Context, c SnoopConfig) error {
 		}
 	}
 
-	// Worker: log lines (optionally enriched)
+	// Worker goroutine: consumes events and writes logs
 	go func() {
 		defer nf.Close()
 		if en != nil {
@@ -58,31 +63,37 @@ func Start(ctx context.Context, c SnoopConfig) error {
 			case <-ctx.Done():
 				return
 			case e := <-events:
-				if e.ipver == 0 {
-					continue
-				}
-				if en != nil {
-					info := en.Lookup(e.dst.String())
-					logging.LogfSMTP(
-						"blocked uid=%d gid=%d TCP %s:%d -> %s:%d | ASN=%s (%d) CC=%s City=%s PTR=%s",
-						e.uid, e.gid, e.src, e.sport, e.dst, e.dport,
-						info.ASNName, info.ASN, info.Country, info.City, info.PTR,
-					)
+				if e.ipver != 0 {
+					if en != nil {
+						info := en.Lookup(e.dst.String())
+						logging.LogfSMTP(
+							"blocked uid=%d gid=%d TCP %s:%d -> %s:%d | ASN=%s (%d) CC=%s City=%s PTR=%s",
+							e.uid, e.gid,
+							e.src.String(), e.sport,
+							e.dst.String(), e.dport,
+							info.ASNName, info.ASN, info.Country, info.City, info.PTR,
+						)
+					} else {
+						logging.LogfSMTP(
+							"blocked uid=%d gid=%d TCP %s:%d -> %s:%d",
+							e.uid, e.gid,
+							e.src.String(), e.sport,
+							e.dst.String(), e.dport,
+						)
+					}
 				} else {
+					// No payload data captured
 					logging.LogfSMTP(
-						"blocked uid=%d gid=%d TCP %s:%d -> %s:%d",
-						e.uid, e.gid, e.src, e.sport, e.dst, e.dport,
+						"blocked uid=%d gid=%d (no payload; NFLOG payload copy may be disabled)",
+						e.uid, e.gid,
 					)
 				}
 			}
 		}
 	}()
 
-	// Callback: keep it lean
+	// Callback from kernel
 	cb := func(a nflog.Attribute) int {
-		if a.Payload == nil {
-			return 0
-		}
 		var uid, gid uint32
 		if a.UID != nil {
 			uid = *a.UID
@@ -90,11 +101,20 @@ func Start(ctx context.Context, c SnoopConfig) error {
 		if a.GID != nil {
 			gid = *a.GID
 		}
-		ipver, src, dst, sport, dport := parseTCP(*a.Payload) // a.Payload is *[]byte in v2
+
+		// Defaults if no payload
+		ipver := 0
+		var src, dst net.IP
+		var sport, dport uint16
+
+		if a.Payload != nil && len(*a.Payload) > 0 {
+			ipver, src, dst, sport, dport = parseTCP(*a.Payload)
+		}
+
 		select {
 		case events <- evt{time.Now(), uid, gid, ipver, src, dst, sport, dport}:
 		default:
-			// drop when backlog full; nft "limit" on the log rule already helps
+			// drop if queue is full
 		}
 		return 0
 	}
@@ -102,14 +122,16 @@ func Start(ctx context.Context, c SnoopConfig) error {
 	return nf.Register(context.Background(), cb)
 }
 
+// evt holds one NFLOG event
 type evt struct {
-	when        time.Time
-	uid, gid    uint32
-	ipver       int
-	src, dst    net.IP
+	when         time.Time
+	uid, gid     uint32
+	ipver        int
+	src, dst     net.IP
 	sport, dport uint16
 }
 
+// parseTCP decodes IPv4/IPv6 TCP headers from a raw packet.
 func parseTCP(p []byte) (ipver int, src, dst net.IP, sport, dport uint16) {
 	if len(p) < 1 {
 		return
@@ -151,7 +173,7 @@ func parseTCP(p []byte) (ipver int, src, dst net.IP, sport, dport uint16) {
 	}
 }
 
-// helper if you prefer the old style
+// FromConfig converts SMTPBlockConfig into SnoopConfig.
 func FromConfig(c *config.SMTPBlockConfig) SnoopConfig {
 	return SnoopConfig{
 		Group:  uint16(c.LogNFLOG),
