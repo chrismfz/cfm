@@ -139,6 +139,82 @@ Extra: ports=148,668,1018,2083,2087,2096
 
 ---
 
+### Explaining Defenses: 
+1. Without autoblock
+
+Each defense works independently and only enforces its own limit.
+
+SYN-rate:
+Per-IP limit on how many SYN packets can arrive per second.
+➝ If an IP sends SYNs faster than allowed, the excess SYNs are dropped. Existing connections are not affected.
+
+PortFlood:
+Per-IP rate limit for new connections per port (X connections per interval, with burst).
+➝ If an IP exceeds the allowed rate, the extra new attempts are dropped. Normal connections continue.
+
+Connlimit (per-IP concurrent):
+Per-IP maximum number of concurrent tracked connections to a given port.
+➝ If an IP already has N open connections and tries to open more, the new ones are dropped. The established ones stay alive.
+
+ACK guard / bad TCP flags:
+Detects abnormal TCP handshakes (e.g. ACK without SYN, floods of RST, invalid flag combos).
+➝ Suspicious packets are dropped immediately, without touching normal flows.
+
+ICMP rate/pps limits:
+Caps the number of ICMP requests (e.g. echo requests) per IP or globally.
+➝ Only excessive ICMP packets are dropped; normal pings pass.
+
+So without autoblock, these defenses act like throttles: they prevent abuse from going beyond a threshold, but the offending IP is not globally blocked — only the extra traffic is dropped.
+
+
+2. With autoblock enabled
+
+Autoblock acts as an escalation layer on top of the defenses.
+
+It counts how many times an IP hits a defense (e.g. SYN-rate exceeded, connlimit exceeded, portflood exceeded).
+
+If an IP triggers these rules multiple times (e.g. 3 strikes in a short period), autoblock concludes this is not accidental.
+
+The IP is then added to a block set.
+
+Once an IP is in the block set:
+
+All of its traffic is dropped, not just the excess on one port.
+
+This stops repeated offenders more aggressively and frees resources.
+
+3. Combined behavior
+
+Without autoblock:
+
+Defenses are “soft throttles.” They cut off just the overflow, so a misbehaving client might keep retrying forever but won’t overwhelm you.
+
+Good for limiting but still letting some traffic through (e.g. NAT’d carriers or CDNs).
+
+With autoblock:
+
+Defenses are still doing their job (dropping excess/new/abnormal packets).
+
+Autoblock “learns” from these hits. If an IP keeps hammering the limits, it escalates to a hard block.
+
+This reduces noise (no repeated hits from the same IP) but can increase false positives if thresholds are too low.
+
+4. Practical analogy
+
+SYN-rate / PortFlood / Connlimit / ACK / ICMP = speed bumps: slow you down, stop excess traffic, but don’t eject you from the road.
+
+Autoblock = the police: if you hit the speed bumps too often, you get pulled over and removed entirely.
+
+✅ So:
+
+Without autoblock → limits and filters are enforced, but offenders can keep retrying.
+
+With autoblock → the same limits apply, but repeated violations escalate to a full, global block for that IP.
+
+
+
+
+
 ## 🛠 Roadmap
 - [ ] SMTP Block based on nft and uid/gid
 - [ ] More notifier channels (Telegram, Webhooks).
