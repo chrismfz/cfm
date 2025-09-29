@@ -1,9 +1,10 @@
 module cfm
 
-go 1.24.4
+go 1.24.6
 
 require (
 	github.com/florianl/go-nflog/v2 v2.1.0
+	github.com/mdlayher/netlink v1.6.0
 	github.com/miekg/dns v1.1.68
 	github.com/oschwald/geoip2-golang v1.13.0
 	golang.org/x/text v0.29.0
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/josharian/native v1.0.0 // indirect
-	github.com/mdlayher/netlink v1.6.0 // indirect
 	github.com/mdlayher/socket v0.1.1 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	golang.org/x/mod v0.28.0 // indirect
