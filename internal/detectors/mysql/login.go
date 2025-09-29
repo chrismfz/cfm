@@ -138,15 +138,22 @@ func (m *MySQL) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if err := m.src.Open(); err != nil { return nil }
 	defer m.src.Close()
 
-	now := time.Now()
-	lines := 0
-	for {
-		line, err := m.src.ReadNext(ctx)
-		if err == io.EOF { break }
-		if err != nil { break }
-		lines++
-		m.processLine(line)
-	}
+    now := time.Now()
+    lines := 0
+    // cap work per tick so backlogs don't create CPU "stairs"
+    const maxLines = 3000
+    deadline := now.Add(900 * time.Millisecond)
+    processed := 0
+    for {
+            line, err := m.src.ReadNext(ctx)
+            if err == io.EOF { break }
+            if err != nil { break }
+            lines++
+            m.processLine(line)
+            processed++
+            if processed >= maxLines || time.Now().After(deadline) { break }
+    }
+
 	m.flush(now, out)
 
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
@@ -164,6 +171,10 @@ func (m *MySQL) processLine(s string) {
 	if m.reHostResemble.MatchString(s) || m.reHostNX.MatchString(s) {
 		return
 	}
+
+    if strings.Contains(s, "This connection closed normally without authentication") {
+        return
+    }
 
 	// Access denied
 	if md := m.reDenied.FindStringSubmatch(s); md != nil {

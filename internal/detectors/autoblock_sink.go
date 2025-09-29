@@ -161,6 +161,11 @@ if out.Extra["blocked"] == "yes" {
 
 
     notify.Enqueue(ev) // non-blocking; templates will include host + ASN, Country if set
+
+
+    // Also report to API via firewall backend policy (respects DETECTORS_SEND_TO_API & fallbacks)
+    _ = s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec)
+
 }
 // --- end notify ---
 

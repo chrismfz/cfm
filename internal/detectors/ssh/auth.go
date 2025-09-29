@@ -80,11 +80,13 @@ func NewAuth(cfg AuthConfig) *Auth {
 	a.counts  = core.NewSlidingCounter(cfg.Window, 0) // cap optional
 
 	// useful base patterns (extend later as needed)
-	a.reAuthFail = regexp.MustCompile(`(?i)failed (?:password|publickey|keyboard-interactive) for (?:invalid user )?(?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
-	a.reInvalidUser = regexp.MustCompile(`(?i)(?:illegal|invalid) user (?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
-	a.reTooManyAuth = regexp.MustCompile(`(?i)too many authentication failures(?: for (?P<user>[^\s]+))?`)
-	a.reDDOSBucket = regexp.MustCompile(`(?i)(?:Did not receive identification string from|kex_exchange_identification|Bad protocol version identification|banner exchange|ssh_dispatch_run_fatal|Connection (?:closed|reset) by peer|Timeout before authentication).*?(?:from )?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
-	a.rePamAuthFail = regexp.MustCompile(`(?i)pam.*authentication failure.*rhost=(?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:.*user=(?P<user>[^\s]+))?`)
+	// NOTE: we avoid (?i). We will lowercase lines before matching.
+	a.reAuthFail = regexp.MustCompile(`failed (?:password|publickey|keyboard-interactive) for (?:invalid user )?(?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
+	a.reInvalidUser = regexp.MustCompile(`(?:illegal|invalid) user (?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
+	a.reTooManyAuth = regexp.MustCompile(`too many authentication failures(?: for (?P<user>[^\s]+))?`)
+	a.reDDOSBucket = regexp.MustCompile(`(?:did not receive identification string from|kex_exchange_identification|bad protocol version identification|banner exchange|ssh_dispatch_run_fatal|connection (?:closed|reset) by peer|timeout before authentication).*?(?:from )?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
+	a.rePamAuthFail = regexp.MustCompile(`pam.*authentication failure.*rhost=(?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:.*user=(?P<user>[^\s]+))?`)
+
 
 	// enricher like exim: build once, use per lookup
 	if cfg.UseEnrich {
@@ -151,18 +153,19 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 	now := time.Now()
 	lines := 0
-
+	// CAP WORK PER TICK to avoid backlog-driven CPU stairs
+	const maxLines = 3000
+	deadline := now.Add(900 * time.Millisecond)
 	for {
 		line, err := a.src.ReadNext(ctx)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			break
-		}
+		if err == io.EOF { break }
+		if err != nil { break }
 		lines++
 		a.processLine(now, line)
+		if lines >= maxLines || time.Now().After(deadline) { break }
 	}
+
+
 
 	a.flush(now, out)
 
@@ -175,7 +178,25 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 // -------- parsing & aggregation --------
 
 func (a *Auth) processLine(now time.Time, line string) {
-	l := line
+
+	// CHEAP ASCII GATES: lowercase once, then contains checks, then regex.
+	l := strings.ToLower(line)
+	// Only bother if it’s clearly sshd and failure-ish
+	if !(strings.Contains(l, "sshd") || strings.Contains(l, "pam")) {
+		return
+	}
+	if !(strings.Contains(l, "fail") ||
+		strings.Contains(l, "invalid user") ||
+		strings.Contains(l, "illegal user") ||
+		strings.Contains(l, "kex_exchange_identification") ||
+		strings.Contains(l, "did not receive identification string") ||
+		strings.Contains(l, "bad protocol version identification") ||
+		strings.Contains(l, "timeout before authentication") ||
+		strings.Contains(l, "ssh_dispatch_run_fatal") ||
+		strings.Contains(l, "banner exchange")) {
+		return
+	}
+
 
 	// 1) failed password/publickey/keyboard-interactive
 	if m := a.reAuthFail.FindStringSubmatch(l); m != nil {

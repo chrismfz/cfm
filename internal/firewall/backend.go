@@ -26,4 +26,12 @@ type Backend interface {
 	RemoveBlockNet(cidr string) error
 	AddAllowNet(cidr string, ttl *time.Duration) error
 	RemoveAllowNet(cidr string) error
+
+        // ReportBlock: centralized policy-aware API reporting.
+        // source: "detector" | "autoblock" | "manual"
+        // mode:   "ttl" | "permanent" | "dryrun"
+        // ttlSeconds used only when mode == "ttl".
+        ReportBlock(ip, comment, source, mode string, ttlSeconds int) error
+
+
 }

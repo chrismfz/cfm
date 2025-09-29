@@ -15,3 +15,41 @@ sudo nft list set inet cfm smtp_allow_gids
 sudo nft list set inet cfm self_v4
 sudo nft list set inet cfm self_v6
 
+
+
+
+#debug steps
+
+1) Find the PID
+PID=$(pgrep -f "/usr/bin/cfm daemon" | head -n1)
+echo "PID=$PID"
+
+
+
+2) Grab profiles from pprof
+
+CPU profile (60s sample):
+curl -s -o /tmp/cfm.cpu http://127.0.0.1:6060/debug/pprof/profile?seconds=60
+
+Goroutine dump:
+curl -s -o /tmp/cfm.gor http://127.0.0.1:6060/debug/pprof/goroutine?debug=2
+
+Heap profile (optional but useful if it’s a leak):
+curl -s -o /tmp/cfm.heap http://127.0.0.1:6060/debug/pprof/heap
+
+
+3) Inspect CPU profile
+
+
+go tool pprof /usr/bin/cfm /tmp/cfm.cpu
+# in pprof shell:
+(pprof) top          # top hot functions
+(pprof) top -cum     # cumulative view
+(pprof) quit
+
+
+
+4) Check goroutines
+grep -c '^goroutine ' /tmp/cfm.gor    # total goroutines
+grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
+

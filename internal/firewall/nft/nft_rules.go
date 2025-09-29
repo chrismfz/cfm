@@ -831,9 +831,11 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
             logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
                 logIP, ttl, tc.Hits, tc.WindowSec, reason)
             lastAutoBlockAt[ip] = time.Now()
-            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-            }
+
+//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+//            }
+_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
             b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
             return nil
         }
@@ -845,10 +847,13 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
         logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
             logIP, ttl, tc.Hits, tc.WindowSec, reason)
         lastAutoBlockAt[ip] = time.Now()
-        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-        }
-        b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
+
+//        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+//            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+//        }
+_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+
+	b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
         return nil
 
     default: // "permanent"
@@ -861,9 +866,11 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
                 logIP, tc.Hits, tc.WindowSec, reason)
             lastAutoBlockAt[ip] = time.Now()
             _ = b.appendToDenyFile(ip, comment)
-            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-            }
+//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+//            }
+ _ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+
             b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
             return nil
         }
@@ -876,9 +883,12 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
             logIP, tc.Hits, tc.WindowSec, reason)
         lastAutoBlockAt[ip] = time.Now()
         _ = b.appendToDenyFile(ip, comment)
-        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-        }
+//        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+//            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+//        }
+_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+
+
         b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
         return nil
     }

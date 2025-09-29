@@ -112,6 +112,7 @@ type APIConfig struct {
 	AutoBlockSend     bool // AUTOBLOCK_SEND_TO_API
 	ManualBlockSend   bool // MANUAL_BLOCK_SEND_TO_API
 	UnblockSend       bool // UNBLOCK_SEND_TO_API
+	DetectorsSend     bool // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
 }
 
 type LoggingConfig struct {
@@ -344,7 +345,8 @@ case "MANUAL_BLOCK_SEND_TO_API":
     cfg.API.ManualBlockSend = parseBool(val)
 case "UNBLOCK_SEND_TO_API":
     cfg.API.UnblockSend = parseBool(val)
-
+case "DETECTORS_SEND_TO_API":
+    cfg.API.DetectorsSend = parseBool(val)
 		// Logging
 		case "LOG_STDOUT":
 			cfg.Logging.Stdout = parseBool(val)
