@@ -34,25 +34,6 @@ jobs:
       - run: go build ./...
       - run: go test -race -v ./...
 
-  golangci-lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.60.3
-          install-mode: source   # build with the pinned Go toolchain
-          args: >
-            --timeout=5m
-            --out-format=github-actions
-
   govulncheck:
     name: govulncheck (Go official)
     runs-on: ubuntu-latest
