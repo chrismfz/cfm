@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 	"strconv"
+	"math"
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -888,21 +889,26 @@ if cfg.AckGuard.Enabled {
 
 // Start SMTP NFLOG snooper once (only if enabled + using NFLOG group)
 if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG > 0 && !smtpSnoopStarted {
-    go func(grp int, enrich bool) {
-        err := nflog.Start(ctx, nflog.SnoopConfig{
-            Group:  uint16(grp),
-            Enrich: enrich,
-            Queue:  1024,
-        })
-        if err != nil {
-            logging.Logf("[smtpblock] nflog start error: %v", err)
-        } else {
-            logging.Logf("[smtpblock] nflog reader started (group=%d, enrich=%v)", grp, enrich)
-        }
-    }(cfg.SMTPBlock.LogNFLOG, cfg.SMTPBlock.LogEnrich)
-    smtpSnoopStarted = true
+    grpInt := cfg.SMTPBlock.LogNFLOG
+    if grpInt < 0 || grpInt > int(math.MaxUint16) {
+        logging.Logf("[smtpblock] invalid NFLOG group %d (must be 0..65535) — skipping snooper", grpInt)
+    } else {
+        grp := uint16(grpInt)
+        go func(grp uint16, enrich bool) {
+            err := nflog.Start(ctx, nflog.SnoopConfig{
+                Group:  grp,
+                Enrich: enrich,
+                Queue:  1024,
+            })
+            if err != nil {
+                logging.Logf("[smtpblock] nflog start error: %v", err)
+            } else {
+                logging.Logf("[smtpblock] nflog reader started (group=%d, enrich=%v)", grp, enrich)
+            }
+        }(grp, cfg.SMTPBlock.LogEnrich)
+        smtpSnoopStarted = true
+    }
 }
-
 
 
 
@@ -1104,9 +1110,10 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 	for _, name := range cfg.SMTPBlock.AllowUsers {
 		name = strings.TrimSpace(name); if name == "" { continue }
 		if u, err := user.Lookup(name); err == nil {
-			if id, err := strconv.Atoi(u.Uid); err == nil {
-				seenUID[uint32(id)] = struct{}{}
-			}
+            // Parse as unsigned and ensure it fits in uint32
+            if uid64, err := strconv.ParseUint(u.Uid, 10, 32); err == nil {
+                seenUID[uint32(uid64)] = struct{}{}
+            }
 		}
 	}
 	// Always allow root
@@ -1120,9 +1127,9 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 	for _, name := range cfg.SMTPBlock.AllowGroups {
 		name = strings.TrimSpace(name); if name == "" { continue }
 		if g, err := user.LookupGroup(name); err == nil {
-			if id, err := strconv.Atoi(g.Gid); err == nil {
-				seenGID[uint32(id)] = struct{}{}
-			}
+            if gid64, err := strconv.ParseUint(g.Gid, 10, 32); err == nil {
+                seenGID[uint32(gid64)] = struct{}{}
+            }
 		}
 	}
 	cfg.SMTPBlock.AllowGIDs = cfg.SMTPBlock.AllowGIDs[:0]
