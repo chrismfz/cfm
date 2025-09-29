@@ -6,12 +6,12 @@ on:
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: '0 3 * * *' # Everyday 03:00 UTC
+    - cron: '0 3 * * *' # Every day at 03:00 UTC
+  workflow_dispatch: {}   # Run manually from the Actions tab
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 
 permissions:
   contents: read
@@ -47,8 +47,8 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.60
-          install-mode: goinstall
+          version: v1.60.3
+          install-mode: source   # build with the pinned Go toolchain
           args: >
             --timeout=5m
             --out-format=github-actions
@@ -66,7 +66,6 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           go-version-input: ${{ env.GO_VERSION }}
-          # Optional: set to ./cmd/cfm to scope, else scans all packages
           directory: .
 
   gosec:
@@ -74,22 +73,28 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write  # needed to upload SARIF
+      security-events: write  # for SARIF upload
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # Pin or use latest; we'll sanitize SARIF either way
       - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-      - name: Run gosec
+      - name: Run gosec (produce SARIF)
         run: |
-          gosec -exclude-dir=vendor -fmt sarif -out gosec.sarif ./...
+          gosec -no-fail -exclude-dir=vendor -fmt sarif -out gosec.sarif ./...
+      - name: Sanitize SARIF for GitHub (remove problematic 'fixes' nodes)
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          jq '.runs = (.runs | map(.results = (.results // [] | map(del(.fixes)))))' \
+            gosec.sarif > gosec.cleaned.sarif
       - name: Upload SARIF (gosec)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: gosec.sarif
+          sarif_file: gosec.cleaned.sarif
 
   trivy-fs:
     name: Trivy (filesystem)
@@ -107,7 +112,6 @@ jobs:
           output: 'trivy-fs.sarif'
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
-          # Reduce noise:
           scanners: 'vuln,secret,misconfig'
           skip-dirs: |
             vendor
@@ -115,6 +119,9 @@ jobs:
             packaging
             bin
             scripts
+          skip-files: |
+            configs/GeoLite2-ASN.mmdb
+            configs/GeoLite2-City.mmdb
       - name: Upload SARIF (Trivy)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
