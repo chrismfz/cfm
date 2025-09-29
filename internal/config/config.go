@@ -701,17 +701,24 @@ func parseIntCSV(s string) []int {
 	return out
 }
 
+
 // parseUint16CSV: "25,465,587"
+// Parses as unsigned 16-bit directly to avoid int→uint16 narrowing.
+// Skips zero (keeps your original <=0 skip) and invalid/out-of-range values.
 func parseUint16CSV(s string) []uint16 {
-	ints := parseIntCSV(s)
-	out := make([]uint16, 0, len(ints))
-	for _, v := range ints {
-		if v <= 0 { continue }
-		if v > 65535 { v = 65535 }
-		out = append(out, uint16(v))
-	}
-	return out
+    if strings.TrimSpace(s) == "" { return nil }
+    parts := strings.Split(s, ",")
+    out := make([]uint16, 0, len(parts))
+    for _, p := range parts {
+        p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+        if p == "" { continue }
+        v, err := strconv.ParseUint(p, 10, 16) // only accept values that fit in 16 bits
+        if err != nil || v == 0 { continue }
+        out = append(out, uint16(v))
+    }
+    return out
 }
+
 
 // parseUint32CSV: "0,1001,1002"
 func parseUint32CSV(s string) []uint32 {

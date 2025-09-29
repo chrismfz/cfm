@@ -32,7 +32,8 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 		portElems = []string{"25", "465", "587"}
 	} else {
 		for _, p := range cfg.Ports {
-			portElems = append(portElems, strconv.Itoa(int(p)))
+			// Avoid narrowing via int; stringify as unsigned directly
+			portElems = append(portElems, strconv.FormatUint(uint64(p), 10))
 		}
 	}
 	_ = b.nftExpr(`add element inet cfm smtp_ports { ` + strings.Join(portElems, ", ") + ` }`)
@@ -49,20 +50,25 @@ func (b *Backend) ApplySMTPBlock(cfg *cfgpkg.SMTPBlockConfig) error {
 	// If you want to accept names here too, add lookups similar to earlier examples.
 
 	if len(uidSet) > 0 {
-		uids := make([]int, 0, len(uidSet))
-		for id := range uidSet { uids = append(uids, int(id)) }
-		sort.Ints(uids)
+
+		// Sort as uint32 (no int narrowing) then stringify
+		uids := make([]uint32, 0, len(uidSet))
+		for id := range uidSet { uids = append(uids, id) }
+		sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
 		s := make([]string, len(uids))
-		for i, v := range uids { s[i] = strconv.Itoa(v) }
+		for i, v := range uids { s[i] = strconv.FormatUint(uint64(v), 10) }
+
 		_ = b.nftExpr(`add element inet cfm smtp_allow_uids { ` + strings.Join(s, ", ") + ` }`)
 	}
 
 	if len(cfg.AllowGIDs) > 0 {
-		gids := make([]int, 0, len(cfg.AllowGIDs))
-		for _, id := range cfg.AllowGIDs { gids = append(gids, int(id)) }
-		sort.Ints(gids)
+
+		// Keep as uint32 and avoid int casts
+		gids := make([]uint32, 0, len(cfg.AllowGIDs))
+		for _, id := range cfg.AllowGIDs { gids = append(gids, id) }
+		sort.Slice(gids, func(i, j int) bool { return gids[i] < gids[j] })
 		s := make([]string, len(gids))
-		for i, v := range gids { s[i] = strconv.Itoa(v) }
+		for i, v := range gids { s[i] = strconv.FormatUint(uint64(v), 10) }
 		_ = b.nftExpr(`add element inet cfm smtp_allow_gids { ` + strings.Join(s, ", ") + ` }`)
 	}
 
