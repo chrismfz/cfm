@@ -1066,7 +1066,7 @@ func splitFlagsAndPositionals(args []string, valueFlags map[string]bool) (flagAr
 
 const cfmStatePath = "/run/cfm/config.path" // daemon writes here the active config dir
 
-func writeConfigState(dir string) { _ = os.MkdirAll(filepath.Dir(cfmStatePath), 0755); _ = os.WriteFile(cfmStatePath, []byte(dir), 0644) }
+func writeConfigState(dir string) { _ = os.MkdirAll(filepath.Dir(cfmStatePath), 0750); _ = os.WriteFile(cfmStatePath, []byte(dir), 0600) }
 
 func readConfigState() (string, bool) {
 	b, err := os.ReadFile(cfmStatePath); if err != nil { return "", false }
@@ -1099,7 +1099,7 @@ func nearestConfigsDir() (string, bool) {
 	return "", false
 }
 
-func ensureDir(p string) error { return os.MkdirAll(p, 0755) }
+func ensureDir(p string) error { return os.MkdirAll(p, 0750) }
 
 // Resolve SMTP allow-list owners (usernames/groups) into numeric IDs in-place.
 func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
@@ -1143,7 +1143,7 @@ func appendUniqueLine(dir, base, line string) error {
 		sc := bufio.NewScanner(bytes.NewReader(b))
 		for sc.Scan() { if strings.TrimSpace(sc.Text()) == strings.TrimSpace(line) { return nil } }
 	}
-	f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); if err != nil { return err }
+	f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); if err != nil { return err }
 	defer f.Close()
 	_, err = fmt.Fprintln(f, line)
 	return err
@@ -1171,7 +1171,7 @@ func appendUniqueLine(dir, base, line string) error {
          out = append(out, raw)
      }
      // keep ending newline
-     return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0644)
+     return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0600)
  }
 
  func containsIPInFile(dir, filename, target string) bool {
