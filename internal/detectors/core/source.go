@@ -31,6 +31,10 @@ type FileTailer struct {
 	inode      uint64
 	lastLineTS int64
 
+        // Idle backoff: limit how often we Stat() at EOF (non-blocking).
+        idleStatMinInterval time.Duration
+        lastEOFStat         time.Time
+
 	// Optional: resume position (set via ApplyResume)
 	LastOffset int64
 	LastInode  uint64
@@ -44,7 +48,11 @@ func (t *FileTailer) ApplyResume(inode, offset uint64) {
 }
 
 func NewFileTailer(path string) *FileTailer {
-	return &FileTailer{Path: path}
+        return &FileTailer{
+                Path:                path,
+                // sensible default: only check rotation at most 5x/sec when idle
+                idleStatMinInterval: 200 * time.Millisecond,
+        }
 }
 
 func (t *FileTailer) Open() error {
@@ -80,6 +88,7 @@ if t.LastOffset > 0 && t.LastOffset <= st.Size() && t.LastInode == curInode {
 	return nil
 }
 
+
 func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -88,41 +97,48 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 		return "", io.EOF
 	}
 
-	// Detect rotation/truncate before read
-	st, err := t.f.Stat()
-	if err == nil {
-		curIn := inodeOf(st)
-		if curIn != t.inode || t.off > st.Size() {
-			// Reopen and jump to end ("now")
-			_ = t.f.Close()
-			f, err := os.Open(t.Path)
-			if err != nil {
-				t.f = nil
-				t.r = nil
-				return "", io.EOF
-			}
-			st2, _ := f.Stat()
-			end := st2.Size()
-			if _, err := f.Seek(end, io.SeekStart); err != nil {
-				f.Close()
-				t.f = nil
-				t.r = nil
-				return "", io.EOF
-			}
-			t.f = f
-			t.r = bufio.NewReaderSize(f, 256*1024)
-			t.inode = inodeOf(st2)
-			t.off = end
-		}
-	}
-
+       // NOTE: We deliberately avoid Stat() here.
+       // We only Stat on EOF to detect rotation/truncate, which removes a syscall per line.
 	// Attempt one line (non-blocking)
 	line, err := t.r.ReadString('\n')
 	if err != nil {
-		if err == io.EOF {
-			return "", io.EOF // caught up
-		}
-		return "", err
+
+               if err == io.EOF {
+                       // We are caught up. Optionally check for rotation/truncate,
+                       // but rate-limit this Stat() while idle to reduce syscalls.
+                       now := time.Now()
+                       if t.idleStatMinInterval > 0 && !t.lastEOFStat.IsZero() &&
+                               now.Sub(t.lastEOFStat) < t.idleStatMinInterval {
+                               return "", io.EOF
+                       }
+                       t.lastEOFStat = now
+
+                       // Check for rotation/truncate (non-blocking path).
+
+                       if st, serr := t.f.Stat(); serr == nil {
+                               curIn := inodeOf(st)
+                               if curIn != t.inode || t.off > st.Size() {
+                                       // Reopen and jump to end ("now")
+                                       _ = t.f.Close()
+                                       if f, oerr := os.Open(t.Path); oerr == nil {
+                                               if st2, _ := f.Stat(); st2 != nil {
+                                                       end := st2.Size()
+                                                       if _, sek := f.Seek(end, io.SeekStart); sek == nil {
+                                                               t.f = f
+                                                               t.r = bufio.NewReaderSize(f, 256*1024)
+                                                               t.inode = inodeOf(st2)
+                                                               t.off = end
+                                                               // reset idle timer after change
+                                                               t.lastEOFStat = time.Time{}
+                                                       } else { f.Close(); t.f = nil; t.r = nil }
+                                               } else { f.Close() }
+                                       } else { t.f = nil; t.r = nil }
+                               }
+                       }
+                       return "", io.EOF
+               }
+               return "", err
+
 	}
 	t.off += int64(len(line))
 	t.lastLineTS = time.Now().Unix()
@@ -132,6 +148,22 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 	}
 	return line, nil
 }
+
+
+
+
+// SetIdleStatInterval lets callers override how often Stat() is allowed
+// while the tailer is idle (at EOF). Zero disables the rate limit.
+func (t *FileTailer) SetIdleStatInterval(d time.Duration) {
+        t.mu.Lock()
+        defer t.mu.Unlock()
+        t.idleStatMinInterval = d
+        // reset timer so next EOF can check immediately
+        t.lastEOFStat = time.Time{}
+}
+
+
+
 
 func (t *FileTailer) Position() (offset uint64, inode uint64, ts int64) {
 	t.mu.Lock()
