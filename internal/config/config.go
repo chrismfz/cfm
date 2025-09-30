@@ -7,6 +7,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
+	"encoding/json"
 )
 
 // Config is flat-by-category: one struct per logical area.
@@ -24,6 +26,7 @@ type Config struct {
 	Hardening  HardeningConfig
 	AckGuard AckGuardConfig
 	SMTPBlock SMTPBlockConfig
+	MaxMind  MaxMindConfig
 }
 
 // --- Categories ---
@@ -47,6 +50,21 @@ type SMTPBlockConfig struct {
 	LogEnrich  bool   // SMTP_LOG_ENRICH (use enrich on DST IP in our consumer)
 }
 
+
+// MaxMindConfig — updater and DB locations for GeoLite/GeoIP2
+type MaxMindConfig struct {
+	Enabled         bool              // MAXMIND_ENABLED
+	AccountID       string            // MAXMIND_ACCOUNT_ID
+	LicenseKey      string            // MAXMIND_LICENSE_KEY
+	Editions        []string          // MAXMIND_EDITIONS (comma-separated), e.g. GeoLite2-ASN,GeoLite2-City
+	Dir             string            // MAXMIND_DIR (default: /var/lib/cfm/maxmind)
+	CheckEvery      time.Duration     // MAXMIND_CHECK_EVERY (default: 24h)
+	MinAgeBetweenDL time.Duration     // MAXMIND_MIN_AGE (default: 72h)
+	HTTPTimeout     time.Duration     // MAXMIND_HTTP_TIMEOUT (default: 30s)
+	// Optional: override permalinks per edition
+	// {"GeoLite2-ASN":"https://download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz", ...}
+	Permalinks      map[string]string // MAXMIND_PERMALINKS_JSON (edition->url)
+}
 
 
 type AckGuardConfig struct {
@@ -127,6 +145,10 @@ type LoggingConfig struct {
 
 }
 
+
+
+
+
 type NFTConfig struct {
 	InputPriority int // clamped -300..+300
 }
@@ -191,6 +213,10 @@ type PortFloodRule struct {
 	Packets   int // max packets in window
 }
 
+
+
+
+
 // SetDefaults populates sane defaults where zero values are ambiguous.
 func (c *Config) SetDefaults() {
 	// NFT
@@ -203,6 +229,27 @@ func (c *Config) SetDefaults() {
 	if c.Throttle.WindowSec == 0 { c.Throttle.WindowSec = 120 }
 	if c.Throttle.Hits == 0 { c.Throttle.Hits = 3 }
 	if c.Throttle.Mode == "" { c.Throttle.Mode = "permanent" }
+
+
+
+	// --- MaxMind defaults ---
+	if c.MaxMind.Dir == "" {
+		c.MaxMind.Dir = "/var/lib/cfm/maxmind"
+	}
+	if c.MaxMind.CheckEvery <= 0 {
+		c.MaxMind.CheckEvery = 24 * time.Hour
+	}
+	if c.MaxMind.MinAgeBetweenDL <= 0 {
+		c.MaxMind.MinAgeBetweenDL = 72 * time.Hour
+	}
+	if c.MaxMind.HTTPTimeout <= 0 {
+		c.MaxMind.HTTPTimeout = 30 * time.Second
+	}
+	// Editions: no hard default; user may choose ASN or City or both
+
+
+
+
 
 c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
  switch c.Throttle.Mode {
@@ -307,6 +354,23 @@ func (c *Config) Validate() error {
 		}
 		c.SMTPBlock.Ports = out
 	}
+
+
+
+	// MaxMind sanity
+	if c.MaxMind.CheckEvery < 0 || c.MaxMind.MinAgeBetweenDL < 0 || c.MaxMind.HTTPTimeout < 0 {
+		return errors.New("negative durations are not allowed in MaxMind config")
+	}
+	// Normalize editions (trim spaces)
+	if len(c.MaxMind.Editions) > 0 {
+		eds := make([]string, 0, len(c.MaxMind.Editions))
+		for _, e := range c.MaxMind.Editions {
+			e = strings.TrimSpace(e)
+			if e != "" { eds = append(eds, e) }
+		}
+		c.MaxMind.Editions = eds
+	}
+
 
 	return nil
 }
@@ -473,6 +537,36 @@ case "UDP_OUT":
 			cfg.SMTPBlock.LogNFLOG = parseInt(val)
 		case "SMTP_LOG_ENRICH":
 			cfg.SMTPBlock.LogEnrich = parseBool(val)
+
+
+		// --- MaxMind (GeoLite/GeoIP2 updater) ---
+		case "MAXMIND_ENABLED":
+			cfg.MaxMind.Enabled = parseBool(val)
+		case "MAXMIND_ACCOUNT_ID":
+			cfg.MaxMind.AccountID = val
+		case "MAXMIND_LICENSE_KEY":
+			cfg.MaxMind.LicenseKey = val
+		case "MAXMIND_EDITIONS":
+			// e.g. GeoLite2-ASN,GeoLite2-City
+			cfg.MaxMind.Editions = append(cfg.MaxMind.Editions, splitCSV(val)...)
+		case "MAXMIND_DIR":
+			cfg.MaxMind.Dir = val
+		case "MAXMIND_CHECK_EVERY":
+			if d := parseDuration(val); d > 0 {
+				cfg.MaxMind.CheckEvery = d
+			}
+		case "MAXMIND_MIN_AGE":
+			if d := parseDuration(val); d > 0 {
+				cfg.MaxMind.MinAgeBetweenDL = d
+			}
+		case "MAXMIND_HTTP_TIMEOUT":
+			if d := parseDuration(val); d > 0 {
+				cfg.MaxMind.HTTPTimeout = d
+			}
+		case "MAXMIND_PERMALINKS_JSON":
+			if m := parseStringMapJSON(val); m != nil {
+				cfg.MaxMind.Permalinks = m
+			}
 
 
 
@@ -901,4 +995,26 @@ func (c *SystemTweaksConfig) SetDefaults() {
 
 }
 
+
+// parseDuration parses Go-style durations like "24h", "30s", "168h".
+// Returns 0 on error (caller decides on defaulting).
+func parseDuration(s string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// parseStringMapJSON parses a JSON object into map[string]string; returns nil on error.
+func parseStringMapJSON(s string) map[string]string {
+	var m map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &m); err != nil {
+		return nil
+	}
+	return m
+}
 

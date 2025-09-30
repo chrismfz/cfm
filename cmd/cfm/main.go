@@ -40,6 +40,8 @@ import (
 	//Debugging End
 	nflog "cfm/internal/nflog"
 
+	mmdb "cfm/internal/maxmindupdater"
+
 )
 
 var (
@@ -681,7 +683,7 @@ startDebug()
 
 	// NFT backend extras
 	if nb, ok := be.(*nft.Backend); ok {
-		nb.EnableEnrichment(cfgDir, "/etc/cfm", "./configs")
+		nb.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
 		nb.SetConfigDir(cfgDir)
 		notify.SetEnricher(nb.GetEnricher()) //  give notifier the same enricher instance
 	}
@@ -810,6 +812,29 @@ startDebug()
 	ctx, _ := context.WithCancel(context.Background())
 	var smtpSnoopStarted bool
 
+    // Ensure base data dir exists very early
+    ensureDir := func(path string, mode os.FileMode) {
+        if err := os.MkdirAll(path, mode); err != nil {
+            logging.Logf("[init] failed to create %s: %v", path, err)
+            return
+        }
+        // Honor desired perms even if umask interfered
+        if err := os.Chmod(path, mode); err != nil {
+            logging.Logf("[init] failed to chmod %s to %o: %v", path, mode, err)
+        }
+    }
+
+
+ensureDir("/var/lib/cfm", 0o700)
+ensureDir("/var/log/cfm", 0o700)
+
+
+	// MaxMind updater lifecycle
+	var mmdbStarted bool
+	var mmdbCancel context.CancelFunc
+	// (we create the updater instance inside applyPorts after config is parsed)
+
+
 	applyPorts := func() {
 		if cfgDir == "" || confW == nil { return }
 		b, ok := confW.Changed()
@@ -821,6 +846,40 @@ startDebug()
 			return
 		}
 		lastCfg = cfg
+
+        // Ensure MaxMind dir exists after config defaults/overrides
+        if cfg.MaxMind.Dir == "" {
+            cfg.MaxMind.Dir = "/var/lib/cfm/maxmind"
+        }
+        ensureDir(cfg.MaxMind.Dir, 0o700)
+
+
+		// ---- MaxMind updater start/stop based on config ----
+		if cfg.MaxMind.Enabled && !mmdbStarted {
+			upd := mmdb.New(mmdb.Config{
+				Enabled:         cfg.MaxMind.Enabled,
+				AccountID:       cfg.MaxMind.AccountID,
+				LicenseKey:      cfg.MaxMind.LicenseKey,
+				Editions:        cfg.MaxMind.Editions,
+				Dir:             cfg.MaxMind.Dir,
+				CheckEvery:      cfg.MaxMind.CheckEvery,
+				MinAgeBetweenDL: cfg.MaxMind.MinAgeBetweenDL,
+				HTTPTimeout:     cfg.MaxMind.HTTPTimeout,
+				Permalinks:      cfg.MaxMind.Permalinks,
+			})
+			var c context.Context
+			c, mmdbCancel = context.WithCancel(ctx)
+			go func() {
+				if err := upd.Run(c, func(f string, a ...any) { logging.Logf(f, a...) }); err != nil && c.Err() == nil {
+					logging.Logf("[maxmind] updater stopped: %v", err)
+				}
+			}()
+			mmdbStarted = true
+			logging.Logf("[maxmind] updater started (editions=%v dir=%s every=%s min_age=%s)", cfg.MaxMind.Editions, cfg.MaxMind.Dir, cfg.MaxMind.CheckEvery, cfg.MaxMind.MinAgeBetweenDL)
+		} else if !cfg.MaxMind.Enabled && mmdbStarted {
+			mmdbCancel(); mmdbStarted = false; logging.Logf("[maxmind] updater stopped (disabled)")
+		}
+
 
 		// Defaults BEFORE summary
 		cfg.SystemTweaks.SetDefaults()
