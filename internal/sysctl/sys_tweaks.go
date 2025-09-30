@@ -121,7 +121,7 @@ func itoa(i int) string { return strconv.Itoa(i) }
 
 func writeProcSys(key, val string) error {
 	path := filepath.Join("/proc/sys", filepath.FromSlash(key))
-	return os.WriteFile(path, []byte(strings.TrimSpace(val)), 0644)
+	return os.WriteFile(path, []byte(strings.TrimSpace(val)), 0600)
 }
 
 func persistSysctlFile(kv map[string]string) error {
@@ -151,7 +151,7 @@ func persistSysctlFile(kv map[string]string) error {
 			fmt.Fprintf(&b, "%s = %s\n", k, v)
 		}
 	}
-	return os.WriteFile(persistPath, []byte(b.String()), 0644)
+	return os.WriteFile(persistPath, []byte(b.String()), 0600)
 }
 
 // Best-effort set hashsize (τρέχει μόνο αν υπάρχει parameter file)
@@ -163,7 +163,7 @@ func trySetHashsize(v int) {
 	// Αν δεν υπάρχει, το kernel δεν επιτρέπει runtime write (χρειάζεται modprobe param).
 	// Δεν θεωρείται σφάλμα.
 	if _, err := os.Stat(path); err == nil {
-		_ = os.WriteFile(path, []byte(itoa(v)), 0644)
+		_ = os.WriteFile(path, []byte(itoa(v)), 0600)
 	}
 }
 
