@@ -27,7 +27,7 @@ func Init(c *config.LoggingConfig) {
     once.Do(func() {
         // κύριο log
         if cfg.File != "" {
-            if f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+            if f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
                 logFile = f
             } else {
                 fmt.Printf("failed to open log file %s: %v\n", cfg.File, err)
@@ -46,7 +46,7 @@ func Init(c *config.LoggingConfig) {
             }
         }
         if apiPath != "" {
-            if f, err := os.OpenFile(apiPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+            if f, err := os.OpenFile(apiPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
                 apiLogFile = f
             } else {
                 fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
@@ -66,7 +66,7 @@ func Init(c *config.LoggingConfig) {
             }
         }
         if smtpPath != "" {
-            if f, err := os.OpenFile(smtpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+            if f, err := os.OpenFile(smtpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
                 smtpLogFile = f
             } else {
                 fmt.Printf("failed to open smtp log file %s: %v\n", smtpPath, err)
@@ -88,7 +88,7 @@ func Init(c *config.LoggingConfig) {
             }
         }
         if detectorPath != "" {
-            if f, err := os.OpenFile(detectorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+            if f, err := os.OpenFile(detectorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
                 detectorLogFile = f
             } else {
                 fmt.Printf("failed to open detector log file %s: %v\n", detectorPath, err)
