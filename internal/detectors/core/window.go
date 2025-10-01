@@ -3,6 +3,7 @@ package core
 import (
 	"sync"
 	"time"
+	"hash/fnv"
 )
 
 type SlidingCounter struct {
@@ -114,4 +115,37 @@ func (r *SampleRing) GetAndClear(key string) []string {
 	a := r.M[key]
 	delete(r.M, key)
 	return a
+}
+
+
+
+// --- Optional: lightweight content de-duplicator ---
+// Drop identical log lines seen within a short interval (default 1s).
+type DeDuper struct {
+	mu    sync.Mutex
+	seen  map[uint64]int64 // hash(line) -> unixSec last seen
+	ttl   time.Duration
+}
+
+func NewDeDuper(ttl time.Duration) *DeDuper {
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+	return &DeDuper{seen: make(map[uint64]int64), ttl: ttl}
+}
+
+func (d *DeDuper) Once(line string, now time.Time) bool {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(line))
+	key := h.Sum64()
+	sec := now.Unix()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if last, ok := d.seen[key]; ok {
+		if sec-int64(time.Duration(last)*time.Second/time.Second) <= int64(d.ttl/time.Second) {
+			return false
+		}
+	}
+	d.seen[key] = sec
+	return true
 }

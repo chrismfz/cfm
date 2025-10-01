@@ -41,6 +41,9 @@ type Auth struct {
 	cfg  Config
 	name string
 	src  core.LineSource
+	// state wiring (offset/inode for file, ts for journal)
+	state    *core.State
+	stateKey string
 
 	pending map[string]pend
 
@@ -133,44 +136,77 @@ func (a *Auth) Position() core.Position {
 	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
 
+
+// State wiring
+func (a *Auth) SetState(st *core.State, key string) { a.state = st; a.stateKey = key }
+
+
 func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// reset batch
-	for k := range a.pending { delete(a.pending, k) }
+	for k := range a.pending {
+		delete(a.pending, k)
+	}
 
 	if a.src == nil {
 		return nil
 	}
+
+	// Resume file/journal position BEFORE opening
+	if a.state != nil && a.stateKey != "" {
+		if p, ok := a.state.Get(a.stateKey); ok {
+			a.ApplyPosition(p)
+		}
+	}
+
 	if err := a.src.Open(); err != nil {
 		return nil
 	}
 	defer a.src.Close()
 
+	// Always save position on exit (even on ctx cancel or errors)
+	if a.state != nil && a.stateKey != "" {
+		defer func() {
+			a.state.Put(a.stateKey, a.Position())
+		}()
+	}
+
 	now := time.Now()
 
-	// (4) CAP WORK PER TICK: prevent backlog-driven CPU stairs.
+	// CAP WORK PER TICK: prevent backlog-driven CPU stairs.
 	const maxLines = 2000
-	deadline := now.Add(800 * time.Millisecond)
+	start := time.Now()
+	deadline := start.Add(800 * time.Millisecond)
 	processed := 0
-	for {
 
+	for {
 		select {
 		case <-ctx.Done():
 			a.flush(now, out)
 			return nil
 		default:
 		}
+
 		line, err := a.src.ReadNext(ctx)
-		if err == io.EOF { break }
-		if err != nil { break }
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
 		a.consume(now, line)
 		processed++
+
 		if processed >= maxLines || time.Now().After(deadline) {
 			break
 		}
 	}
+
 	a.flush(now, out)
 	return nil
 }
+
+
 
 func (a *Auth) consume(now time.Time, line string) {
 	// (2) CHEAP CONTAINS GATES + DAEMON HINT (no Unicode SimpleFold)

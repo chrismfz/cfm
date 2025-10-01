@@ -14,6 +14,7 @@ import (
 	"cfm/internal/logging"
 )
 
+
 type Config struct {
 	// source
 	Mode        string // "file" | "journal"
@@ -45,6 +46,10 @@ type Auth struct {
 	cfg  Config
 	name string
 	src  core.LineSource
+
+	// state wiring (offset/inode for file, ts for journal)
+	state    *core.State
+	stateKey string
 
 	pending map[string]pend
 	samples *core.SampleRing
@@ -119,6 +124,11 @@ func (a *Auth) Position() core.Position {
 	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
 
+// State wiring
+func (a *Auth) SetState(st *core.State, key string) { a.state = st; a.stateKey = key }
+
+
+
 // ---------- run loop ----------
 func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// reset pending map
@@ -128,10 +138,22 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// source is wired by the factory; if nil, nothing to do
 		return nil
 	}
+
+	// Resume file/journal position BEFORE opening
+	if a.state != nil && a.stateKey != "" {
+		if p, ok := a.state.Get(a.stateKey); ok {
+			a.ApplyPosition(p)
+		}
+	}
+
 	if err := a.src.Open(); err != nil {
 		return nil
 	}
 	defer a.src.Close()
+	// Always save position on exit (even on ctx cancel or errors)
+	if a.state != nil && a.stateKey != "" {
+		defer func() { a.state.Put(a.stateKey, a.Position()) }()
+	}
 
 	now := time.Now()
 	lines := 0

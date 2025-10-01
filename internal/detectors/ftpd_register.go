@@ -15,6 +15,10 @@ import (
 	"cfm/internal/logging"
 )
 
+
+// shared state for detectors
+var ftpdState, _ = core.LoadState("")
+
 /*
 Autodetect strategy
 - Prefer journald if a known unit emits ftp failure lines (fast probe).
@@ -161,7 +165,13 @@ func init() {
 					} else {
 						logging.Logf("[detectors][ftpd] journal: using %s", unit)
 					}
-					d.SetSource(core.NewJournalTailer(unit))
+					src := core.NewJournalTailer(unit)
+					d.SetSource(src)
+					// resume state (unique key per section+unit)
+					if ftpdState != nil {
+						key := core.FileStateKey(section, "journal:"+unit)
+						d.SetState(ftpdState, key)
+					}
 					// (5) PASS DAEMON HINT from unit name
 					switch {
 					case strings.Contains(unit, "vsftpd"):
@@ -179,7 +189,13 @@ func init() {
 				for _, u := range known {
 					if probeJournalUnit(u, 800*time.Millisecond) {
 						logging.Logf("[detectors][ftpd] autodetect: using journal unit %s", u)
-						d.SetSource(core.NewJournalTailer(u))
+						src := core.NewJournalTailer(u)
+						d.SetSource(src)
+						if ftpdState != nil {
+							key := core.FileStateKey(section, "journal:"+u)
+							d.SetState(ftpdState, key)
+						}
+
 						if strings.Contains(u, "vsftpd") { d.SetDaemon("vsftpd") }
 						if strings.Contains(u, "proftpd") { d.SetDaemon("proftpd") }
 						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") { d.SetDaemon("pure-ftpd") }
@@ -231,7 +247,13 @@ func init() {
 					} else {
 						logging.Logf("[detectors][ftpd] autodetect: using %s (daemon_hits=%d, no recent failures; monitoring)", best, bestDaemon)
 					}
-					d.SetSource(core.NewFileTailer(best))
+					src := core.NewFileTailer(best)
+					d.SetSource(src)
+					if ftpdState != nil {
+						key := core.FileStateKey(section, best)
+						d.SetState(ftpdState, key)
+					}
+
 					// (5) PASS DAEMON HINT from path heuristic
 					lb := strings.ToLower(best)
 					switch {
@@ -248,7 +270,12 @@ func init() {
 				return d, nil
 			}
 			// explicit file path
-			d.SetSource(core.NewFileTailer(path))
+			src := core.NewFileTailer(path)
+			d.SetSource(src)
+			if ftpdState != nil {
+				key := core.FileStateKey(section, path)
+				d.SetState(ftpdState, key)
+			}
 			// best effort daemon hint from explicit path
 			lb := strings.ToLower(path)
 			if strings.Contains(lb, "vsftpd") { d.SetDaemon("vsftpd") }

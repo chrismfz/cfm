@@ -9,6 +9,9 @@ import (
 	"cfm/internal/logging"
 )
 
+// shared state for detectors
+var sshState, _ = core.LoadState("")
+
 func init() {
 	Register("ssh_auth", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
@@ -57,10 +60,21 @@ func init() {
 		// choose source based on MODE
 		switch cfg.Mode {
 		case "file":
-			d.SetSource(core.NewFileTailer(cfg.LogPath))
+			src := core.NewFileTailer(cfg.LogPath)
+			d.SetSource(src)
+			if sshState != nil {
+				key := core.FileStateKey(section, cfg.LogPath)
+				d.SetState(sshState, key)
+			}
 		default: // "journal"
 			j := core.NewJournalTailer(cfg.JournalUnit)
 			d.SetSource(j)
+
+			if sshState != nil {
+				// pseudo-path for a unique journal key
+				key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
+				d.SetState(sshState, key)
+			}
 		}
 
 

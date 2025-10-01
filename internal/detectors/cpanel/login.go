@@ -49,6 +49,10 @@ type Login struct {
 	name string
 	src  core.LineSource
 
+	// state wiring (offset/inode resume)
+	state    *core.State
+	stateKey string
+
 	// state
 	pending map[string]pend
 	samples *core.SampleRing
@@ -147,6 +151,10 @@ func (l *Login) Position() core.Position {
 	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
 
+// State wiring
+func (l *Login) SetState(st *core.State, key string) { l.state = st; l.stateKey = key }
+
+
 // wiring from factory
 func (l *Login) SetName(n string)             { l.name = n }
 func (l *Login) SetSource(src core.LineSource) { l.src = src }
@@ -166,6 +174,15 @@ func (l *Login) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if l.src == nil {
 		return nil
 	}
+
+
+	// Resume file position BEFORE opening
+	if l.state != nil && l.stateKey != "" {
+		if p, ok := l.state.Get(l.stateKey); ok {
+			l.ApplyPosition(p)
+		}
+	}
+
 	if err := l.src.Open(); err != nil {
 		return nil
 	}
@@ -191,6 +208,13 @@ func (l *Login) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
 		logging.Logf("[detectors] cpanel/login scanned %d new lines", lines)
 	}
+
+
+	// Save file position AFTER reading
+	if l.state != nil && l.stateKey != "" {
+		l.state.Put(l.stateKey, l.Position())
+	}
+
 	return nil
 }
 

@@ -9,6 +9,9 @@ import (
 	"cfm/internal/logging"
 )
 
+// shared state for detectors
+var cpanelState, _ = core.LoadState("")
+
 func init() {
 	Register("cpanel", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
@@ -49,7 +52,13 @@ func init() {
 
 		d := cpanel.NewLogin(cfg)
 		d.SetName(section)
-		d.SetSource(core.NewFileTailer(cfg.LogPath)) // file tailer w/ resume (like SSH) :contentReference[oaicite:3]{index=3}
+		src := core.NewFileTailer(cfg.LogPath)
+		d.SetSource(src)
+		// resume state (unique key per section+path)
+		if cpanelState != nil {
+			key := core.FileStateKey(section, cfg.LogPath)
+			d.SetState(cpanelState, key)
+		}
 
 		logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s limits: ip=%d user=%d root=%d enrich=%t ptr=%t dirs=%v)",
 			section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.RootFailPerIP, cfg.UseEnrich, cfg.UsePTR, dirs)

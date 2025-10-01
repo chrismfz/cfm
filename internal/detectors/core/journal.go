@@ -50,7 +50,17 @@ func (j *JournalTailer) Open() error {
 	if j.startTS > 0 {
 		since = j.startTS
 	}
-	if since <= 0 {
+
+	// IMPORTANT:
+	// journalctl's --since is INCLUSIVE, so using --since=@<lastTS> will replay
+	// any entries that occurred in that same second on the next run.
+	// To avoid duplicates without needing cursors, bump by +1s when resuming.
+	if since > 0 {
+		since = since + 1
+	}
+
+	if since <= 1 {
+
 		// first run: start from "now" (no replay)
 		// Use --since=now to avoid historical output.
 		args = append(args, "--since=now")
@@ -159,12 +169,15 @@ func (j *JournalTailer) Close() error {
 
 // Helper to describe args (debug)
 func (j *JournalTailer) String() string {
+
 	since := "now"
-	if j.lastTS > 0 {
-		since = "@" + strconv.FormatInt(j.lastTS, 10)
-	} else if j.startTS > 0 {
-		since = "@" + strconv.FormatInt(j.startTS, 10)
+	// mirror the inclusive-skip logic used in Open()
+	if j.startTS > 0 {
+		since = "@" + strconv.FormatInt(j.startTS+1, 10)
+	} else if j.lastTS > 0 {
+		since = "@" + strconv.FormatInt(j.lastTS+1, 10)
 	}
+
 	filter := j.Unit
 	if filter == "" && len(j.Matches) > 0 {
 		filter = strings.Join(j.Matches, " ")

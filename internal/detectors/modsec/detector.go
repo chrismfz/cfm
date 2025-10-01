@@ -54,6 +54,10 @@ type Detector struct {
 	name string
 	src  core.LineSource
 
+	// state wiring (offset/inode resume)
+	state    *core.State
+	stateKey string
+
 	pending map[string]pend
 
 	samples *core.SampleRing
@@ -120,6 +124,10 @@ func New(cfg Config) *Detector {
 	return d
 }
 
+// State wiring
+func (d *Detector) SetState(st *core.State, key string) { d.state = st; d.stateKey = key }
+
+
 func (d *Detector) SetName(n string)             { d.name = n }
 func (d *Detector) SetSource(src core.LineSource) { d.src = src }
 func (d *Detector) Name() string {
@@ -155,6 +163,16 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if d.src == nil {
 		return nil
 	}
+
+	// Resume file position BEFORE opening
+	if d.state != nil && d.stateKey != "" {
+		if p, ok := d.state.Get(d.stateKey); ok {
+			d.ApplyPosition(p)
+		}
+	}
+
+
+
 	if err := d.src.Open(); err != nil {
 		return nil
 	}
@@ -173,6 +191,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 	// flush any unterminated JSON record safely (ignore)
 	d.flush(now, out)
+
+
+	// Save file position AFTER reading
+	if d.state != nil && d.stateKey != "" {
+		d.state.Put(d.stateKey, d.Position())
+	}
+
+
 	return nil
 }
 

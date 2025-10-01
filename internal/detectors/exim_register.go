@@ -7,6 +7,9 @@ import (
 	"cfm/internal/detectors/exim"
 )
 
+// Shared state for Exim detectors
+var eximState, _ = core.LoadState("")
+
 func init() {
 	Register("exim_queues", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		// defaults από global, με fallback στα defaults του detector
@@ -63,6 +66,7 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
 
     sec := exim.NewSecurity(cfg) // ✅ correct constructor
     sec.SetName(section)         // ensure unique persistence key
+    if eximState != nil { sec.SetState(eximState) }
 
     return sec, nil
 })
@@ -117,6 +121,7 @@ Register("exim_relays", func(section string, kv KV, global KV) (core.PeriodicDet
 
     rr := exim.NewRelays(cfg) // rr is *exim.Relays
     rr.SetName(section)       // exported setter
+    if eximState != nil { rr.SetState(eximState) }
 
     return rr, nil // implicit upcast to core.PeriodicDetector
 })

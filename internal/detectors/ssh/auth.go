@@ -52,6 +52,10 @@ type Auth struct {
 	name string
 	src  core.LineSource
 
+	// state wiring (offset/inode for file, ts for journal)
+	state    *core.State
+	stateKey string
+
 	// state
 
         pending    map[string]pend
@@ -126,6 +130,11 @@ func (a *Auth) Position() core.Position {
 	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
 
+// State wiring
+func (a *Auth) SetState(st *core.State, key string) { a.state = st; a.stateKey = key }
+
+
+
 // wiring from factory
 func (a *Auth) SetName(n string)             { a.name = n }
 func (a *Auth) SetSource(src core.LineSource) { a.src = src }
@@ -146,6 +155,15 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if a.src == nil {
 		return nil
 	}
+
+	// --- RESUME FROM STATE (before Open) ---
+	if a.state != nil && a.stateKey != "" {
+		if p, ok := a.state.Get(a.stateKey); ok {
+			a.ApplyPosition(p)
+		}
+	}
+
+
 	if err := a.src.Open(); err != nil {
 		return nil
 	}
@@ -172,6 +190,13 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
 		logging.Logf("[detectors] ssh/auth scanned %d new lines", lines)
 	}
+
+
+	// --- SAVE POSITION TO STATE (after reading) ---
+	if a.state != nil && a.stateKey != "" {
+		a.state.Put(a.stateKey, a.Position())
+	}
+
 	return nil
 }
 

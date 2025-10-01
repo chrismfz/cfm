@@ -9,6 +9,10 @@ import (
     "cfm/internal/logging"
 )
 
+
+// shared state for detectors
+var dovecotState, _ = core.LoadState("")
+
 func init() {
     Register("dovecot_auth", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
         defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
@@ -53,11 +57,23 @@ func init() {
         mode := strings.ToLower(cfg.Mode)
         switch mode {
         case "file":
-            det.SetSource(core.NewFileTailer(cfg.LogPath))
+            src := core.NewFileTailer(cfg.LogPath)
+            det.SetSource(src)
+            if dovecotState != nil {
+                key := core.FileStateKey(section, cfg.LogPath)
+                det.SetState(dovecotState, key)
+            }
             logging.Logf("[detectors][%s] using log: %s", section, cfg.LogPath)
         default: // "journal"
             j := core.NewJournalTailer(cfg.JournalUnit)
             det.SetSource(j)
+
+            if dovecotState != nil {
+                // pseudo-path ensures uniqueness per journal unit
+                key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
+                det.SetState(dovecotState, key)
+            }
+
             logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
         }
 

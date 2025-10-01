@@ -63,6 +63,7 @@ type EximSecurity struct {
 	name string          // unique instance name (section)
 	src  *core.FileTailer
 	// per-user recent distinct IPs (small, capped)
+	state *core.State
 	userIPs map[string]*recentIPs
 
 samples *core.SampleRing
@@ -160,6 +161,9 @@ func (d *EximSecurity) Name() string {
 	return "exim/security"
 }
 
+// SetState allows the register to inject a shared state handle.
+func (d *EximSecurity) SetState(st *core.State) { d.state = st }
+
 
 func (d *EximSecurity) Every() time.Duration { return d.cfg.Every }
 
@@ -202,19 +206,32 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 		}
 	}
 
-// reset per-run aggregation
-d.pending = make(map[string]pend)
+	// reset per-run aggregation
+	d.pending = make(map[string]pend)
 
-// Use FileTailer (starts at "now" unless ApplyPosition() injected a resume)
-if d.src == nil {
-	d.src = core.NewFileTailer(d.path)
-}
-if err := d.src.Open(); err != nil {
-	// quiet: missing/rotating log; next tick will retry
-	return nil
-}
-defer d.src.Close()
 
+	// Prepare tailer and resume from state (after path is known)
+	if d.src == nil {
+		d.src = core.NewFileTailer(d.path)
+	}
+	var stateKey string
+	if d.state != nil && d.path != "" {
+		stateKey = core.FileStateKey(d.Name(), d.path)
+		if p, ok := d.state.Get(stateKey); ok {
+			d.ApplyPosition(p)
+		}
+	}
+	if err := d.src.Open(); err != nil {
+		// quiet: missing/rotating log; next tick will retry
+		return nil
+	}
+	defer d.src.Close()
+	// Always persist position on exit
+	if stateKey != "" {
+		defer func() {
+			d.state.Put(stateKey, d.Position())
+		}()
+	}
 now := time.Now()
 for {
 	line, err := d.src.ReadNext(ctx)

@@ -78,6 +78,7 @@ counts  *core.SlidingCounter
 
 	name string
 	src  *core.FileTailer
+	state *core.State
 }
 
 
@@ -149,9 +150,19 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 	}
 
+var stateKey string
+
 	// 2) Init non-blocking tailer (starts at "now" unless ApplyPosition set a resume)
 	if d.src == nil {
 		d.src = core.NewFileTailer(d.path)
+	}
+
+	// Resume from saved position (after path resolved and tailer exists)
+	if d.state != nil && d.path != "" {
+		stateKey = core.FileStateKey(d.Name(), d.path)
+		if p, ok := d.state.Get(stateKey); ok {
+			d.ApplyPosition(p)
+		}
 	}
 
 	// Open source (quietly skip if missing/rotating)
@@ -159,6 +170,11 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		return nil
 	}
 	defer d.src.Close()
+
+	// Always persist position on exit
+	if stateKey != "" {
+		defer func() { d.state.Put(stateKey, d.Position()) }()
+	}
 
 	// 3) Read all newly appended lines and process
 	now := time.Now()
@@ -669,6 +685,8 @@ func hasRFC2047(s string) bool {
 }
 
 
+// State wiring from register
+func (d *Relays) SetState(st *core.State) { d.state = st }
 
 
 

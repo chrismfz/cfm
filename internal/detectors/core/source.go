@@ -73,9 +73,18 @@ func (t *FileTailer) Open() error {
 	// Decide starting offset: resume if valid, else start at end ("now")
 	off := st.Size()
 
-if t.LastOffset > 0 && t.LastOffset <= st.Size() && t.LastInode == curInode {
-	off = t.LastOffset
-}
+	if t.LastInode == curInode {
+		switch {
+		case t.LastOffset > 0 && t.LastOffset <= st.Size():
+			off = t.LastOffset
+		case t.LastOffset > st.Size():
+			// file was truncated (e.g., logrotate with truncate)
+			// start from beginning to avoid missing any new lines
+			off = 0
+		}
+	}
+
+
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		f.Close()
 		return err

@@ -9,6 +9,8 @@ import (
 	"cfm/internal/logging"
 )
 
+var mysqlState, _ = core.LoadState("")
+
 func init() {
 	Register("mysql", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
@@ -57,7 +59,13 @@ func init() {
 
 		d := mysql.NewMySQL(cfg)
 		d.SetName(section)
-		d.SetSource(core.NewFileTailer(cfg.LogPath))
+		src := core.NewFileTailer(cfg.LogPath)
+		d.SetSource(src)
+		if mysqlState != nil {
+			// you can add d.SetState like we did for modsec (a tiny method),
+			// or rely on your manager if it already Get/Put's by detector name
+			// key := core.FileStateKey(section, cfg.LogPath); d.SetState(mysqlState, key)
+		}
 
 		logging.Logf("[detectors] start %s (log=%s every=%s window=%s cooldown=%s limits: ip=%d user=%d root=%d scan=%d enrich=%t ptr=%t)",
 			section, cfg.LogPath, cfg.Every, cfg.Window, cfg.Cooldown,

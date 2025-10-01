@@ -13,6 +13,9 @@ import (
 	"cfm/internal/logging"
 )
 
+// shared state for detectors
+var modsecState, _ = core.LoadState("")
+
 var (
 	modsecQuick403 = regexp.MustCompile(`ModSecurity:\s+Access denied with code 403`)
 	jsonHTTP403    = regexp.MustCompile(`"http_code"\s*:\s*403`)
@@ -116,7 +119,13 @@ func init() {
 				}
 				if best != "" && bestHits >= 1 {
 					logging.Logf("[detectors][modsec] autodetect: using %s (hits=%d)", best, bestHits)
-					d.SetSource(core.NewFileTailer(best))
+					src := core.NewFileTailer(best)
+					d.SetSource(src)
+					// resume state (unique key per section+path)
+					if modsecState != nil {
+						key := core.FileStateKey(section, best)
+						d.SetState(modsecState, key)
+					}
 					return d, nil
 				}
 				logging.Logf("[detectors][modsec] autodetect: no suitable log source found; set LOG_PATH explicitly")
@@ -124,7 +133,12 @@ func init() {
 			}
 			// explicit path
 			logging.Logf("[detectors][modsec] using log: %s", path)
-			d.SetSource(core.NewFileTailer(path))
+			src := core.NewFileTailer(path)
+			d.SetSource(src)
+			if modsecState != nil {
+				key := core.FileStateKey(section, path)
+				d.SetState(modsecState, key)
+			}
 			return d, nil
 		}
 

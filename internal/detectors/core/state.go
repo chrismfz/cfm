@@ -52,6 +52,23 @@ func (s *State) file(name string) string {
 	return filepath.Join(s.dir, sanitize(name)+".json")
 }
 
+
+// FileStateKey builds a stable, unique key for a detector+file path pair.
+// Use it to store per-source positions without collisions.
+func FileStateKey(detectorName, path string) string {
+	if detectorName == "" {
+		detectorName = "_"
+	}
+	abs := path
+	if p, err := filepath.Abs(path); err == nil {
+		abs = p
+	}
+	joined := detectorName + "__" + abs
+	return sanitize(joined)
+}
+
+
+
 // Get reads a single detector's position from its file.
 func (s *State) Get(name string) (Position, bool) {
 	fn := s.file(name)
