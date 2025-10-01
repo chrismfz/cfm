@@ -102,7 +102,7 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
 	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
-		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 
 defaults := map[string]int{

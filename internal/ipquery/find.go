@@ -366,7 +366,7 @@ func EnrichSuffix(cfgDir, ipStr string) string {
 	ip := net.ParseIP(ipStr)
 	if ip == nil { return "" }
 
-	paths := preferExisting(cfgDir, "/etc/cfm", "/usr/share/GeoIP", "/var/lib/GeoIP", "/usr/share/cfm")
+	paths := preferExisting(cfgDir, "/etc/cfm", "/var/lib/cfm/maxmind" )
 	enr, err := enrichpkg.New(paths...)
 	if err != nil || enr == nil { return "" }
 	defer enr.Close()

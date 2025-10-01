@@ -59,7 +59,7 @@ func Start(ctx context.Context, c SnoopConfig) error {
 	// Optional enricher (GeoIP/ASN/etc.)
 	var en *enrich.Enricher
 	if c.Enrich {
-		if e, _ := enrich.New("/etc/cfm", "./configs"); e != nil {
+		if e, _ := enrich.New("/etc/cfm", "/var/lib/cfm/maxmind"); e != nil {
 			en = e
 		}
 	}

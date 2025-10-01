@@ -29,6 +29,18 @@ CONFIG_DIR := configs
 DEB_SRC := packaging/debian/DEBIAN
 
 
+# --- Remote Sync ---
+REMOTE_USER ?= chris
+REMOTE_HOST ?= repo.nixpal.com
+REMOTE_PORT ?= 65535
+REMOTE_DIR  ?= ~/packages/
+SYNC_ON_RELEASE ?= 1
+
+# rsync options (ασφαλής default)
+RSYNC_FLAGS ?= -av --partial --inplace
+SSH_CMD     ?= ssh -p $(REMOTE_PORT)
+
+
 # -------------------------------
 # Go build target config (CPU/OS)
 # -------------------------------
@@ -219,6 +231,27 @@ rpm: rpm_prep_dirs rpm_spec_version stage-rpm ## Δημιουργεί .rpm
 
 
 
+# --- Sync both DEB & RPM to remote repo ---
+.PHONY: sync
+sync:
+	@set -euo pipefail; \
+	DEB_FILE="$$(ls -1t build/deb/cfm_*_amd64.deb | head -n1)"; \
+	RPM_FILE="$$(ls -1t packaging/rpm/RPMS/*/cfm-*.rpm | head -n1)"; \
+	[ -n "$$DEB_FILE" ] || { echo "❌ No .deb package found in build/deb"; exit 1; }; \
+	[ -n "$$RPM_FILE" ] || { echo "❌ No .rpm package found in packaging/rpm/RPMS"; exit 1; }; \
+	echo "🌐 Syncing to $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_DIR)"; \
+	$(SSH_CMD) $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_DIR)/deb $(REMOTE_DIR)/rpm"; \
+	echo "→ Upload: $$DEB_FILE -> $(REMOTE_DIR)/deb/"; \
+	rsync $(RSYNC_FLAGS) -e "$(SSH_CMD)" "$$DEB_FILE" "$(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_DIR)/deb/"; \
+	echo "→ Upload: $$RPM_FILE -> $(REMOTE_DIR)/rpm/"; \
+	rsync $(RSYNC_FLAGS) -e "$(SSH_CMD)" "$$RPM_FILE" "$(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_DIR)/rpm/"; \
+	echo "→ Upload: checksums.txt -> $(REMOTE_DIR)/"; \
+	if [ -f checksums.txt ]; then \
+	  rsync $(RSYNC_FLAGS) -e "$(SSH_CMD)" checksums.txt "$(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_DIR)/"; \
+	fi; \
+	echo "✅ Remote sync complete."
+
+
 
 
 .PHONY: release
@@ -258,3 +291,5 @@ release: deb rpm
 	echo "📣 Publishing release..."; \
 	$(GH) release edit "$(TAG)" --repo "$$REPO" --draft=false ; \
 	echo "✅ Release $(TAG) published."
+
+

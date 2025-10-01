@@ -72,7 +72,7 @@ func New(cfg Config) *Detector {
 	if cfg.SpikeProbeTopN == 0 { cfg.SpikeProbeTopN = 10 }
 	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
-		cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 
 	d := &Detector{

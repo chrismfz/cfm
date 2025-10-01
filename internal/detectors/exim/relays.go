@@ -99,7 +99,7 @@ func NewRelays(cfg RelaysConfig) *Relays {
         cfg.UsePTR = true
     }
     if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
-        cfg.EnrichDirs = []string{"/etc/cfm", "/usr/share/GeoIP", "/usr/local/share/GeoIP", "./configs"}
+        cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
     }
 
     d := &Relays{ cfg: cfg }
