@@ -64,6 +64,15 @@ func (s *sectionSink) Publish(a core.Alert) {
 	}
 
 
+    // --- ignore loopback addresses (127.0.0.0/8, ::1) ---
+    if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback()) {
+        out.Extra["blocked"] = "no"
+        out.Extra["reason"]  = "ignored_loopback"
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
+
+
     // Cooldown check (do NOT stamp yet; stamp only after a real block)
     if s.pol.Cooldown > 0 {
         s.mu.Lock()
