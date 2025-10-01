@@ -665,15 +665,56 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 		}
 	}
 
-	// throughput spikes
-	bRx := upd("rx", s.RxMbps)
-	bTx := upd("tx", s.TxMbps)
-	if s.RxMbps > d.cfg.ThruSpikeX*bRx {
-		emit("HEALTH/RX_THRU_SPIKE", "net.rx")
-	}
-	if s.TxMbps > d.cfg.ThruSpikeX*bTx {
-		emit("HEALTH/TX_THRU_SPIKE", "net.tx")
-	}
+
+
+
+
+// throughput spikes (now with samples)
+bRx := upd("rx", s.RxMbps)
+bTx := upd("tx", s.TxMbps)
+
+if s.RxMbps > d.cfg.ThruSpikeX*bRx {
+    samples := []string{
+        fmt.Sprintf("RX spike  rx=%.1f Mbps  baseline≈%.1f  x=%.2f",
+            s.RxMbps, bRx, s.RxMbps/maxf(bRx, 1)),
+    }
+    if d.cfg.SpikeProbeTopN > 0 {
+        if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
+            samples = append(samples, "Top PIDs (ESTABLISHED):")
+            samples = append(samples, top...)
+        }
+        if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
+            samples = append(samples, "Top remote IPs (ESTABLISHED):")
+            samples = append(samples, talk...)
+        }
+    }
+    emitS("HEALTH/RX_THRU_SPIKE", "net.rx", samples)
+}
+
+if s.TxMbps > d.cfg.ThruSpikeX*bTx {
+    samples := []string{
+        fmt.Sprintf("TX spike  tx=%.1f Mbps  baseline≈%.1f  x=%.2f",
+            s.TxMbps, bTx, s.TxMbps/maxf(bTx, 1)),
+    }
+    if d.cfg.SpikeProbeTopN > 0 {
+        if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
+            samples = append(samples, "Top PIDs (ESTABLISHED):")
+            samples = append(samples, top...)
+        }
+        if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
+            samples = append(samples, "Top remote IPs (ESTABLISHED):")
+            samples = append(samples, talk...)
+        }
+    }
+    emitS("HEALTH/TX_THRU_SPIKE", "net.tx", samples)
+}
+
+
+
+
+
+
+
 
 	// temperature
 	if s.TempMaxC >= float64(d.cfg.TempCritC) {
