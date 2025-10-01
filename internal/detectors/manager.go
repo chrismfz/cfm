@@ -6,9 +6,10 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+//	"fmt"
 	"cfm/internal/logging"
 	core "cfm/internal/detectors/core"
+	"cfm/internal/enrich"
 )
 
 type manager struct {
@@ -41,6 +42,10 @@ m.state = st
 
 	go m.loop(parent)
 }
+
+
+
+
 
 func (m *manager) loop(parent context.Context) {
 	t := time.NewTicker(2 * time.Second)
@@ -79,6 +84,31 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 
 	secs, _, _ := readSections(path)
+
+
+
+
+    // Build a shared enricher from [global], if enabled
+    var enr *enrich.Enricher
+    if kvBool(secs.Global, "ENRICH", true) {
+        rawDirs := kvStrClean(secs.Global, "ENRICH_DIRS", "/var/lib/cfm/maxmind:/etc/cfm")
+        // split on comma/colon/space
+        var dirs []string
+        for _, p := range strings.FieldsFunc(rawDirs, func(r rune) bool { return r == ',' || r == ':' || r == ' ' || r == '\t' }) {
+            p = strings.TrimSpace(p)
+            if p != "" { dirs = append(dirs, p) }
+        }
+        if e, err := enrich.New(dirs...); err == nil {
+            enr = e
+        } else {
+            logging.Logf("[detectors] enrich disabled (init failed): %v (dirs=%v)", err, dirs)
+        }
+    }
+
+
+
+
+
 
 	// stop all on any change (baby steps, clean & robust)
 	if m.running {
@@ -197,7 +227,7 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 		//go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
 		// per-section blocking policy + wrapped sink
 		pol := parseBlockPolicy(kv)
-		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW)
+		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr)
 		go RunPeriodicWithState(ctx, det, secSink, m.state)
 	}
 }

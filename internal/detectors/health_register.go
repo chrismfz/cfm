@@ -29,6 +29,21 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
 }
 
 
+    // --- Enrichment options ---
+    enrichOn := kvBool(kv, "ENRICH", true)
+    ptrOn    := kvBool(kv, "PTR", true)
+    // default dirs already handled in health.New, but allow override
+    dirsRaw  := kvStrClean(kv, "ENRICH_DIRS", "")
+    var dirs []string
+    if dirsRaw != "" {
+        for _, p := range strings.Split(dirsRaw, ",") {
+            p = strings.TrimSpace(p)
+            if p != "" { dirs = append(dirs, p) }
+        }
+    }
+    spikeTopN := kvInt(kv, "SPIKE_PROBE_TOPN", 10)
+
+
         cfg := health.Config{
             Every:       kvDur(kv, "EVERY", defEvery),
             Window:      kvDur(kv, "WINDOW", defWindow),
@@ -56,6 +71,13 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
 
             PortWatch:  ports,
             PortSpikeX: kvFlt(kv, "PORT_SPIKE_X", 3.0),
+
+        // enrichment
+        SpikeProbeTopN: spikeTopN,
+        UseEnrich:      enrichOn,
+        UsePTR:         ptrOn,
+        EnrichDirs:     dirs,
+
         }
 
         d := health.New(cfg)

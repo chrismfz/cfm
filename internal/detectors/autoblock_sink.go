@@ -5,17 +5,17 @@ import (
     "regexp"
     "sync"
     "time"
+    "fmt"
+    "context"
 
     core "cfm/internal/detectors/core"
     "cfm/internal/firewall"
-//    "cfm/internal/logging"
-
-//for notifications//
     "strings"
-//    "fmt"
     "cfm/internal/notify"
+    "cfm/internal/enrich"
 
 )
+
 
 type sectionSink struct {
     section string
@@ -25,21 +25,27 @@ type sectionSink struct {
     fw   firewall.Backend
     mu   sync.Mutex
     last map[string]time.Time // ip -> last block time (per section)
+enr  *enrich.Enricher
+
 }
 
-
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend) core.Sink {
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher) core.Sink {
     return &sectionSink{
         section: section,
         pol:     pol,
         inner:   inner,
         fw:      fw,
         last:    make(map[string]time.Time),
+        enr:     enr,
     }
 }
 
 
 var reIP = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
+
+
+
+
 
 
 func (s *sectionSink) Publish(a core.Alert) {
@@ -50,19 +56,53 @@ func (s *sectionSink) Publish(a core.Alert) {
 	}
 	out.Extra["blocked"] = "no"
 
+        // --- pick & decorate IP EARLY so every path (even early returns) gets enrichment ---
+        ipStr := s.pickIP(a)
+        if ipStr != "" {
+            out.Extra["src_ip"] = ipStr
+            // set the key that the logger prints after the comma in the "Type: ..." line
+            out.Key = s.decorateIP(ipStr)
+        }
+
+
+
 	// No policy or no backend → just print with "No"
-	if s.pol.Mode == "no" || s.fw == nil {
-		if s.inner != nil { s.inner.Publish(out) }
-		return
-	}
+ if s.pol.Mode == "no" || s.fw == nil {
+     smp := out.Samples
+     if len(smp) > 10 { smp = smp[:10] }
+     notify.Enqueue(notify.Event{
+         Kind:     string(a.Kind),
+         Section:  s.section,
+	 SrcIP:    ipStr, // may be ""
+         Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+         Count:    a.Count,
+         When:     a.When,
+         Severity: "warn",
+         Samples:  smp,
+         Extra:    map[string]string{"key": a.Key},
+     })
+     if s.inner != nil { s.inner.Publish(out) }
+     return
+ }
 
-	ipStr := s.pickIP(a)
-	if ipStr == "" {
-		// No actionable IP → still print with "No"
-		if s.inner != nil { s.inner.Publish(out) }
-		return
-	}
 
+ if ipStr == "" {
+     smp := out.Samples
+     if len(smp) > 10 { smp = smp[:10] }
+     notify.Enqueue(notify.Event{
+         Kind:     string(a.Kind),
+         Section:  s.section,
+         SrcIP:    "", // unknown
+         Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+         Count:    a.Count,
+         When:     a.When,
+         Severity: "warn",
+         Samples:  smp,
+         Extra:    map[string]string{"key": a.Key},
+     })
+     if s.inner != nil { s.inner.Publish(out) }
+     return
+ }
 
     // --- ignore loopback addresses (127.0.0.0/8, ::1) ---
     if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback()) {
@@ -180,8 +220,7 @@ if out.Extra["blocked"] == "yes" {
 
 // --- [NEW] emit notify for NON-blocked events as well ---
 if out.Extra["blocked"] != "yes" {
-    // Optional: pick an IP if υπάρχει (health συνήθως δεν έχει)
-    ipStr := s.pickIP(a)
+
 
     // cap samples to first 10 lines
     smp := out.Samples
@@ -241,4 +280,61 @@ func firstNonEmpty(ss ...string) string {
         if strings.TrimSpace(s) != "" { return s }
     }
     return ""
+}
+
+
+
+
+
+
+func lookupPTR(ip string) string {
+    ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+    defer cancel()
+    names, _ := net.DefaultResolver.LookupAddr(ctx, ip)
+    if len(names) > 0 { return strings.TrimSuffix(names[0], ".") }
+    return ""
+}
+
+
+
+func (s *sectionSink) decorateIP(ip string) string {
+    label := ip
+
+    // Prefer the injected enricher if available
+    if s.enr != nil {
+        r := s.enr.Lookup(ip)
+        parts := []string{}
+        if r.ASN > 0 {
+            if r.ASNName != "" {
+                parts = append(parts, fmt.Sprintf("%d %s", r.ASN, r.ASNName))
+            } else {
+                parts = append(parts, fmt.Sprintf("%d", r.ASN))
+            }
+        }
+        if r.Country != "" {
+            parts = append(parts, r.Country)
+        }
+        if len(parts) > 0 {
+            label += " [" + strings.Join(parts, " ") + "]"
+        }
+        // PTR from enricher if present; else fall back below
+        if r.PTR != "" {
+            if strings.Contains(label, "[") {
+                label = strings.TrimSuffix(label, "]") + "; PTR " + r.PTR + "]"
+            } else {
+                label += " [[PTR " + r.PTR + "]]"
+            }
+            return label
+        }
+    }
+
+    // PTR fallback (no enricher or PTR not found)
+    if ptr := lookupPTR(ip); ptr != "" {
+        if strings.Contains(label, "[") {
+            label = strings.TrimSuffix(label, "]") + "; PTR " + ptr + "]"
+        } else {
+            label += " [[PTR " + ptr + "]]"
+        }
+    }
+    return label
 }
