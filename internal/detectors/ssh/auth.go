@@ -88,7 +88,7 @@ func NewAuth(cfg AuthConfig) *Auth {
 	a.reAuthFail = regexp.MustCompile(`failed (?:password|publickey|keyboard-interactive) for (?:invalid user )?(?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
 	a.reInvalidUser = regexp.MustCompile(`(?:illegal|invalid) user (?P<user>[^\s]+).* from (?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
 	a.reTooManyAuth = regexp.MustCompile(`too many authentication failures(?: for (?P<user>[^\s]+))?`)
-	a.reDDOSBucket = regexp.MustCompile(`(?:did not receive identification string from|kex_exchange_identification|bad protocol version identification|banner exchange|ssh_dispatch_run_fatal|connection (?:closed|reset) by peer|timeout before authentication).*?(?:from )?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})`)
+	a.reDDOSBucket = regexp.MustCompile(`(?:did not receive identification string from|kex_exchange_identification|bad protocol version identification|banner exchange|ssh_dispatch_run_fatal|connection (?:closed|reset) by peer|timeout before authentication).*?(?:from )?(?P<ip>(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+))`)
 	a.rePamAuthFail = regexp.MustCompile(`pam.*authentication failure.*rhost=(?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:.*user=(?P<user>[^\s]+))?`)
 
 
@@ -448,7 +448,7 @@ func sub(m []string, re *regexp.Regexp, name string) string {
 	return ""
 }
 
-var cheapIPRe = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
+var cheapIPRe = regexp.MustCompile(`\b((?:\d{1,3}(?:\.\d{1,3}){3})|[0-9a-fA-F:]+)\b`)
 
 func cheapIP(s string) string {
 	m := cheapIPRe.FindStringSubmatch(s)

@@ -53,7 +53,7 @@ type EximSecurity struct {
 	off      int64
 	readyLog bool
 
-	pending  map[string]pend               // στο τέλος του RunOnce στέλνουμε alerts
+	pending  map[string]pend
 	rules    []secRule
 	enr      *enrich.Enricher
 	reHostIP *regexp.Regexp
@@ -65,10 +65,10 @@ type EximSecurity struct {
 	// per-user recent distinct IPs (small, capped)
 	state *core.State
 	userIPs map[string]*recentIPs
-
-samples *core.SampleRing
-gate    *core.AlertGate
-counts  *core.SlidingCounter
+	reSrvPort *regexp.Regexp  // I=<server_ip>:<port> (for 465/587 inference)
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 
 }
 
@@ -131,7 +131,7 @@ defaults := map[string]int{
 
     d := &EximSecurity{
         cfg:      cfg,
-        reHostIP: regexp.MustCompile(`\[(\d{1,3}(?:\.\d{1,3}){3})\]`), // IP σε αγκύλες
+        reHostIP: regexp.MustCompile(`\[((?:\d{1,3}(?:\.\d{1,3}){3})|[0-9a-fA-F:]+)\]`), // IPv4 ή IPv6 σε αγκύλες
         userIPs:  make(map[string]*recentIPs),
     }
 
@@ -139,6 +139,7 @@ defaults := map[string]int{
     d.samples = core.NewSampleRing(cfg.SampleLimit)
     d.gate    = core.NewAlertGate(cfg.Cooldown)
     d.counts  = core.NewSlidingCounter(cfg.Window, 0) // optional cap=0
+    d.reSrvPort = regexp.MustCompile(`\bI=\S+:(\d{2,5})\b`)
 
     d.reSetID   = regexp.MustCompile(`\bset_id=([^) \t]+)`)
     d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
@@ -172,7 +173,8 @@ func (d *EximSecurity) loadRules() {
 	var raws = []struct{
 		name, desc, re string
 	}{
-		{"AUTHFAIL", "Incorrect authentication data", `authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data`},
+//		{"AUTHFAIL", "Incorrect authentication data", `authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data`},
+		{"AUTHFAIL", "SMTP AUTH failed",`(?:authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
 		{"SENDER_VERIFY_FAIL", "sender verify fail",  `sender verify fail\b`},
 		{"RCPT_REJECT", "RCPT rejected", `rejected RCPT\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|Sender verify failed|Unknown user|Unrouteable address)`},
 		{"SYNC_ERR", "protocol sync error",           `SMTP protocol synchronization error .* rejected .*`},
@@ -251,8 +253,11 @@ return nil
 }
 
 func (d *EximSecurity) processLine(now time.Time, line string) {
-	// γρήγορο skip: κοιτάμε αν έχει IP σε αγκύλες
-	if !strings.Contains(line, "[") || !strings.Contains(line, "]") {
+        // Normalise once for cheap, case-insensitive matching
+        s := strings.ToLower(line)
+
+        // γρήγορο skip: κοιτάμε αν έχει IP σε αγκύλες
+        if !strings.Contains(s, "[") || !strings.Contains(s, "]") {
 		return
 	}
 	ip := ""
@@ -264,13 +269,13 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
 	}
 	// πέρασε από όλους τους κανόνες
 	for _, r := range d.rules {
-		if r.Re.MatchString(line) {
+		if r.Re.MatchString(s) {
 
             if r.Name == "AUTHFAIL" {
                 // per-IP
                 d.bump(now, "AUTHFAIL|ip", ip, line)
                 // per-user (best-effort from set_id=... or user=<...>)
-                if u := d.extractUser(line); u != "" {
+                if u := d.extractUser(s); u != "" {
                     d.bump(now, "AUTHFAIL|user", u, line)
                     d.addUserIP(u, ip)
                 }
@@ -339,6 +344,14 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
         }
 
         samples := d.samples.GetAndClear(sk)
+        // Derive submission transport info (best-effort) from first sample
+        enc := ""
+        port := ""
+        if len(samples) > 0 {
+            s0 := strings.ToLower(samples[0])
+            if strings.Contains(s0, "ssl on the wire") { enc = "smtps" } else if strings.Contains(s0, "tls") { enc = "tls" }
+            if m := d.reSrvPort.FindStringSubmatch(samples[0]); m != nil { port = m[1] }
+        }
 
         extra := map[string]string{
             "log":      d.path,
@@ -354,6 +367,8 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
             if n > 0 { extra["ips"], extra["unique_ips"] = csv, strconv.Itoa(n) }
         }
 
+        if enc != "" { extra["enc"] = enc }   // smtps or tls
+        if port != "" { extra["port"] = port } // often 465 or 587
         out <- core.Alert{
             When: now, Kind: core.AlertKind(kind),
             Key: displayKey, Count: n, Samples: samples, Extra: extra,
