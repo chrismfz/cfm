@@ -80,6 +80,12 @@ Blocks unauthorized **outgoing SMTP** to prevent web scripts or compromised acco
   - ASN, ASN Name, Country, PTR hostname.
 - Used in notifications, logs, CLI, and API.
 
+### 🌍 MaxMind Database Auto-Updater
+
+ - CFM can automatically download and refresh MaxMind GeoLite2 databases (ASN, City, etc.).
+ - This ensures your ASN/Geo enrichment data stays current without manual updates.
+
+
 ### 📬 Notifiers
 - Configurable **channels**:
   - Sendmail (local MTA).

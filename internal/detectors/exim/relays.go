@@ -262,15 +262,17 @@ for _, p := range d.pending {
 
 // πιο χαλαρά regex για να μην «σπάνε» σε edge cases
 var (
-	reHasArrowIn = regexp.MustCompile(`\s<=\s`) // μόνο εισερχόμενα στο exim (γένεση μηνύματος)
-	reIP         = regexp.MustCompile(`\[(\d{1,3}(?:\.\d{1,3}){3})\]`)
+	reHasArrowIn  = regexp.MustCompile(`\s<=\s`) // μόνο εισερχόμενα στο exim (γένεση μηνύματος)
+	// Strictly capture the *socket* IP that Exim logs in brackets after H=...
+	// We deliberately ignore any numeric prefix inside H= hostname.
+	reSocketIP    = regexp.MustCompile(`H=[^\[]*\[([0-9]{1,3}(?:\.[0-9]{1,3}){3})\]`)
 	reUserLocal  = regexp.MustCompile(`\bU=([^\s]+)\s+P=local\b`)
 	reAuthUser   = regexp.MustCompile(`\bA=[^:\s]+:([^\s]+)`)
 	reProto      = regexp.MustCompile(`\bP=(\w+)\b`) // esmtp, esmtps, esmtpa, esmtpsa, local
 )
 
 // process a single line
-// process a single line
+
 func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) {
 	// πάντα κράτα την γραμμή στο μικρό buffer των "recent"
 	defer d.pushRecent(line)
@@ -292,11 +294,19 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 		return
 	}
 
-	// Remote IP (αν υπάρχει)
-	ip := ""
-	if m := reIP.FindStringSubmatch(line); m != nil {
-		ip = m[1]
-	}
+    // Remote socket IP (must come from the [ ... ] after H=)
+    ip := ""
+    if m := reSocketIP.FindStringSubmatch(line); m != nil {
+        ip = m[1]
+    } else {
+        // fallback: last bracketed IPv4 on the line (safer than "first IPv4 anywhere")
+        if i := strings.LastIndexByte(line, '['); i >= 0 {
+            if j := strings.IndexByte(line[i:], ']'); j > 1 {
+                cand := line[i+1 : i+j]
+                if regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}$`).MatchString(cand) { ip = cand }
+            }
+        }
+    }
 
 	// AUTH
 	if proto == "esmtpa" || proto == "esmtpsa" {
