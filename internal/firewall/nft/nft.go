@@ -280,54 +280,59 @@ func (b *Backend) EnsureBase() error {
 	}
 
 
+// --- EARLY RULES (insert in reverse so final order is top-down) ---
 
-// --- EARLY ACCEPTS & ICMP→flood (insert at top = position 0) ---
-
-// μικρό helper για να μην επαναλαμβανόμαστε
+// helper stays the same
 addEarly := func(expr string) {
     if !b.ruleExists("input", expr) {
         _ = b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
     }
 }
 
-// 1) loopback
-addEarly(`iif lo accept`)
+// Build desired top-down order:
+early := []string{
+    // 1) loopback
+    `iif lo accept`,
 
-// 2) self IPs (γεμίζουν από refreshSelfSets)
-addEarly(`ip saddr @self_v4 accept`)
-addEarly(`ip6 saddr @self_v6 accept`)
+    // 2) self IPs
+    `ip saddr @self_v4 accept`,
+    `ip6 saddr @self_v6 accept`,
 
-// 3) ALLOW sets (manual + dyn + external)
-addEarly(`ip saddr @allow_v4 accept`)
-addEarly(`ip6 saddr @allow_v6 accept`)
+    // 3) ALLOW sets (manual + dyn + external + nets)
+    `ip saddr @allow_v4 accept`,
+    `ip6 saddr @allow_v6 accept`,
+    `ip saddr @allow_dyn_v4 accept`,
+    `ip6 saddr @allow_dyn_v6 accept`,
+    `ip saddr @allow_ext_v4_hosts accept`,
+    `ip6 saddr @allow_ext_v6_hosts accept`,
+    `ip saddr @allow_ext_v4_nets accept`,
+    `ip6 saddr @allow_ext_v6_nets accept`,
+    `ip saddr @allow_v4_nets accept`,
+    `ip6 saddr @allow_v6_nets accept`,
 
-addEarly(`ip saddr @allow_dyn_v4 accept`)
-addEarly(`ip6 saddr @allow_dyn_v6 accept`)
-
-addEarly(`ip saddr @allow_ext_v4_hosts accept`)
-addEarly(`ip6 saddr @allow_ext_v6_hosts accept`)
-
-addEarly(`ip saddr @allow_ext_v4_nets accept`)
-addEarly(`ip6 saddr @allow_ext_v6_nets accept`)
-
-// NEW: manual allow nets (early accept)
-addEarly(`ip saddr @allow_v4_nets accept`)
-addEarly(`ip6 saddr @allow_v6_nets accept`)
-
-
-// 4) Early ICMP echo → flood (τελευταίο ώστε να μείνει ΚΑΤΩ από τα accepts)
-if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
-    addEarly(`ip protocol icmp icmp type echo-request jump flood`)          // IPv4
-    addEarly(`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`)   // IPv6
+    // 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
+    `ip saddr @block_v4 drop`,
+    `ip6 saddr @block_v6 drop`,
+    `ip saddr @block_ext_v4_hosts drop`,
+    `ip6 saddr @block_ext_v6_hosts drop`,
+    `ip saddr @block_ext_v4_nets drop`,
+    `ip6 saddr @block_ext_v6_nets drop`,
+    `ip saddr @block_v4_nets drop`,
+    `ip6 saddr @block_v6_nets drop`,
 }
 
+// 5) ICMP → flood (below unconditional drops)
+if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
+    early = append(early,
+        `ip protocol icmp icmp type echo-request jump flood`,
+        `ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
+    )
+}
 
-
-
-// let's try to block someone that already abuse us//
-//if err := addRule(`ct state established,related accept`); err != nil { return err }
-
-    // Block established/related traffic από sources που είναι ήδη σε block sets,
+// Insert in reverse so first item ends up highest in chain
+for i := len(early) - 1; i >= 0; i-- {
+    addEarly(early[i])
+}
 
 // Κόψε established/related από IPs που είναι ήδη σε block sets
 if err := addRule(`ct state established,related ip saddr @block_v4 drop`); err != nil { return err }
@@ -804,10 +809,31 @@ func (b *Backend) chainExists(chain string) bool {
 	_, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	return err == nil
 }
-func (b *Backend) ruleExists(chain, contains string) bool {
-	out, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
-	return err == nil && strings.Contains(string(out), contains)
+
+
+func (b *Backend) ruleExists(chain, needle string) bool {
+    out, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
+    if err != nil {
+        return false
+    }
+
+    normalize := func(s string) string {
+        s = strings.ReplaceAll(s, "\r", "")
+        s = strings.ReplaceAll(s, "\t", " ")
+        // collapse all runs of whitespace into a single space
+        return strings.Join(strings.Fields(s), " ")
+    }
+
+    s := normalize(string(out))
+    n := normalize(needle)
+
+    return strings.Contains(s, " "+n+" ")
 }
+
+
+
+
+
 func (b *Backend) setExists(name string) bool {
 	_, err := exec.Command("nft", "list", "set", family, tableName, name).CombinedOutput()
 	return err == nil

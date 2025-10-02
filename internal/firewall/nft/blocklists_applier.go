@@ -51,28 +51,38 @@ b.registerFeedKey(feedKey)
 }
 
 // RebuildExternalUnions: union όλων των per-feed sets σε 4 “global” sets
+
 func (b *Backend) RebuildExternalUnions() error {
 	type bucketKey struct{ action, fam, kind string } // action: allow|block; fam: v4|v6; kind: hosts|nets
 	re := regexp.MustCompile(`^(allow|block)_ext_(v4|v6)_(hosts|nets)_(.+)$`)
 
-	// μάζεψε ονόματα per-feed sets από το table
+	// Collect all per-feed set names present in the table
 	names := append(b.listSetsWithPrefix("allow_ext_"), b.listSetsWithPrefix("block_ext_")...)
+
+	// Build map from bucket -> list of per-feed set names
 	buckets := map[bucketKey][]string{}
 	for _, name := range names {
-		m := re.FindStringSubmatch(name)
-		if m == nil {
-			continue
+		if m := re.FindStringSubmatch(name); m != nil {
+			k := bucketKey{action: m[1], fam: m[2], kind: m[3]}
+			buckets[k] = append(buckets[k], name)
 		}
-		k := bucketKey{action: m[1], fam: m[2], kind: m[3]}
-		buckets[k] = append(buckets[k], name)
 	}
 
-	// για κάθε bucket, διάβασε elements και γράψε το union set χωρίς suffix
-	for k, sets := range buckets {
-		union := fmt.Sprintf("%s_ext_%s_%s", k.action, k.fam, k.kind) // π.χ. allow_ext_v4_hosts
+	// We want to ALWAYS touch all 8 unions so they get flushed when empty
+	all := []bucketKey{
+		{"allow", "v4", "hosts"}, {"allow", "v4", "nets"},
+		{"allow", "v6", "hosts"}, {"allow", "v6", "nets"},
+		{"block", "v4", "hosts"}, {"block", "v4", "nets"},
+		{"block", "v6", "hosts"}, {"block", "v6", "nets"},
+	}
+
+	for _, k := range all {
+		union := fmt.Sprintf("%s_ext_%s_%s", k.action, k.fam, k.kind) // e.g. allow_ext_v4_hosts
+
+		// Read elements from all per-feed sets under this bucket
 		var elems []string
-		for _, s := range sets {
-			items, _ := b.ListSetElementsRaw(s) // []string με IP ή CIDR όπως το κρατάει το nft
+		for _, s := range buckets[k] {
+			items, _ := b.ListSetElementsRaw(s)
 			elems = append(elems, items...)
 		}
 		elems = dedupKeepOrder(elems)
@@ -82,12 +92,12 @@ func (b *Backend) RebuildExternalUnions() error {
 		if err := b.EnsureSetDynamic(union, isV6, isNets); err != nil {
 			continue
 		}
-		if err := b.ReplaceSetFlushAdd(union, elems, nil); err != nil {
-			continue
-		}
+		// Flush & add (even if elems is empty → union becomes empty)
+		_ = b.ReplaceSetFlushAdd(union, elems, nil)
 	}
 	return nil
 }
+
 
 // --- Helpers -------------------------------------------------------------
 
@@ -204,4 +214,56 @@ func dedupKeepOrder(in []string) []string {
 		out = append(out, x)
 	}
 	return out
+}
+
+
+
+
+
+// Optional: remove all per-feed sets for a given sanitized feed key
+func (b *Backend) RemoveFeedByKey(feedKey string) error {
+	names := []string{
+		fmt.Sprintf("allow_ext_v4_hosts_%s", feedKey),
+		fmt.Sprintf("allow_ext_v4_nets_%s",  feedKey),
+		fmt.Sprintf("allow_ext_v6_hosts_%s", feedKey),
+		fmt.Sprintf("allow_ext_v6_nets_%s",  feedKey),
+		fmt.Sprintf("block_ext_v4_hosts_%s", feedKey),
+		fmt.Sprintf("block_ext_v4_nets_%s",  feedKey),
+		fmt.Sprintf("block_ext_v6_hosts_%s", feedKey),
+		fmt.Sprintf("block_ext_v6_nets_%s",  feedKey),
+	}
+	for _, n := range names {
+		_ = b.DeleteSetIfExists(n) // best-effort
+	}
+	return b.RebuildExternalUnions()
+}
+
+// Bulk prune: delete per-feed sets whose key is NOT in activeKeys
+func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
+	allowed := map[string]struct{}{}
+	for _, k := range activeKeys {
+		allowed[SanitizeFeedName(k)] = struct{}{}
+	}
+
+	allNames := append(b.listSetsWithPrefix("allow_ext_"), b.listSetsWithPrefix("block_ext_")...)
+	re := regexp.MustCompile(`^(allow|block)_ext_(v4|v6)_(hosts|nets)_(.+)$`)
+	for _, name := range allNames {
+		m := re.FindStringSubmatch(name)
+		if m == nil { continue }
+		key := m[4] // suffix after last underscore(s)
+		if _, ok := allowed[key]; !ok {
+			_ = b.DeleteSetIfExists(name)
+		}
+	}
+	return b.RebuildExternalUnions()
+}
+
+
+func (b *Backend) DeleteSetIfExists(name string) error {
+	// nft delete set inet cfm <name> (ignore error if missing)
+	args := []string{"delete", "set", family, tableName, name}
+	if out, err := exec.Command("nft", args...).CombinedOutput(); err != nil {
+		_ = out // ignore; it's fine if it wasn't there
+	}
+	return nil
 }

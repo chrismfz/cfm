@@ -13,6 +13,10 @@ type Applier interface {
 	ApplyFeed(ctx context.Context, f Feed, res *FetchResult) error
 }
 
+type Pruner interface {
+	PruneExternalFeeds(active []string) error
+}
+
 // ApplierFunc: βοηθητικό για να περάσεις σκέτη συνάρτηση ως Applier.
 type ApplierFunc func(ctx context.Context, f Feed, res *FetchResult) error
 func (fn ApplierFunc) ApplyFeed(ctx context.Context, f Feed, res *FetchResult) error { return fn(ctx, f, res) }
@@ -81,27 +85,32 @@ func (m *Manager) Reload(feeds []Feed) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Index νέων feeds
 	next := map[string]Feed{}
-	for _, f := range feeds {
-		next[f.Name] = f
-	}
+	for _, f := range feeds { next[f.Name] = f }
 
-	// Σταμάτα όσα αφαιρέθηκαν
+	// stop removed runners
 	for name := range m.runs {
 		if _, ok := next[name]; !ok {
 			m.stopOneLocked(name)
 		}
 	}
-
-	// Ενημέρωσε τρέχον set feeds
 	m.feeds = next
 
-	// (Re)start όσα πρέπει
+	// (Re)start
 	for name := range m.feeds {
 		m.startOneLocked(name)
 	}
+
+	// NEW: ask applier to prune stale per-feed sets
+	if pr, ok := m.applier.(Pruner); ok {
+		var active []string
+		for name := range m.feeds {
+			active = append(active, name)
+		}
+		_ = pr.PruneExternalFeeds(active)
+	}
 }
+
 
 func (m *Manager) startOneLocked(name string) {
 	f, ok := m.feeds[name]
