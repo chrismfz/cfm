@@ -1,6 +1,8 @@
 package detectors
 
 import (
+	"fmt"
+	"strconv"
 	"time"
 	"strings"
 	core "cfm/internal/detectors/core"
@@ -49,6 +51,7 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
 
     cfg := exim.SecConfig{
         LogPath:     kvStrClean(kv, "LOG_PATH", ""),
+	RejectPath:  kvStrClean(kv, "REJECT_LOG_PATH", ""),
         Every:       kvDur(kv, "EVERY", defEvery),
         Window:      kvDur(kv, "WINDOW", 15*time.Minute),
         SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
@@ -58,11 +61,67 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
         UseEnrich:   useEnrich,
         UsePTR:      usePTR,
         EnrichDirs:  dirs,
-        Thresholds:  map[string]int{
-            "AUTHFAIL_IP":   kvInt(kv, "AUTHFAIL_IP",   0),
-            "AUTHFAIL_USER": kvInt(kv, "AUTHFAIL_USER", 0),
-        },
+	Thresholds:  map[string]int{}, // start empty; fill below
+
     }
+
+
+    // ---- thresholds from config ------------------------------------------
+    // Specials (per-IP / per-user counters)
+    if v := kvInt(kv, "AUTHFAIL_IP", 0); v > 0 {
+        cfg.Thresholds["AUTHFAIL_IP"] = v
+    }
+    if v := kvInt(kv, "AUTHFAIL_USER", 0); v > 0 {
+        cfg.Thresholds["AUTHFAIL_USER"] = v
+    }
+    // Known rule keys (all 13)
+    known := []string{
+        "AUTHFAIL",
+        "SENDER_VERIFY_FAIL",
+        "RCPT_REJECT",
+        "SYNC_ERR",
+        "PROTO_ERR",
+        "NO_MAIL",
+        "DROP_ACL",
+        "RCPT_AUTH_REQUIRED",
+        "NONMAIL_CMD",
+        "NO_HELO",
+        "BAD_HELO_IMPERSONATION",
+        "HELO_SYNTAX",
+        "PIPELINING",
+        "RATE_CONN",
+        "RCPT_TOO_MANY",
+    }
+    // Direct per-rule keys override
+    for _, k := range known {
+        if v := kvInt(kv, k, 0); v > 0 {
+            cfg.Thresholds[k] = v
+        }
+    }
+    // Optional bundle: RULE_THRESHOLDS=KEY=VAL,KEY=VAL,...
+    if raw := kvStrClean(kv, "RULE_THRESHOLDS", ""); raw != "" {
+        parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+        for _, p := range parts {
+            if p == "" || !strings.Contains(p, "=") { continue }
+            kvp := strings.SplitN(p, "=", 2)
+            name := strings.TrimSpace(kvp[0])
+            val := strings.TrimSpace(kvp[1])
+            if name == "" || val == "" { continue }
+            if n, err := strconv.Atoi(val); err == nil && n > 0 {
+                cfg.Thresholds[name] = n
+            } else {
+                fmt.Printf("[detectors][%s] ignoring RULE_THRESHOLDS entry %q (invalid int)\n", section, p)
+            }
+        }
+    }
+
+
+
+
+
+
+
+
 
     sec := exim.NewSecurity(cfg) // ✅ correct constructor
     sec.SetName(section)         // ensure unique persistence key

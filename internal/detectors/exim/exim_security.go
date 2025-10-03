@@ -4,14 +4,14 @@ import (
 //	"bufio"
 	"context"
 	"fmt"
-//	"os"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"net"
-//	"syscall"
+	"path/filepath"
 	"io"
 
 	core "cfm/internal/detectors/core"
@@ -21,6 +21,7 @@ import (
 
 type SecConfig struct {
 	LogPath     string
+	RejectPath  string
 	Every       time.Duration
 	Window      time.Duration
 	SampleLimit int
@@ -49,6 +50,8 @@ type EximSecurity struct {
 
 	mu       sync.Mutex
 	path     string
+	rpaths   []string            // zero, one, or two: rejectlog / exim_rejectlog
+
 	inode    uint64
 	off      int64
 	readyLog bool
@@ -61,7 +64,10 @@ type EximSecurity struct {
 	reUserAng*regexp.Regexp   // user=<foo>
 
 	name string          // unique instance name (section)
-	src  *core.FileTailer
+
+    src   *core.FileTailer       // mainlog
+    rsrcs []*core.FileTailer     // reject logs
+
 	// per-user recent distinct IPs (small, capped)
 	state *core.State
 	userIPs map[string]*recentIPs
@@ -114,6 +120,12 @@ defaults := map[string]int{
 			"PROTO_ERR":            8,
 			"NO_MAIL":             10,
 			"DROP_ACL":             6,
+			"RCPT_AUTH_REQUIRED":      6,
+			"NONMAIL_CMD":             4,
+			"NO_HELO":                 6,
+			"BAD_HELO_IMPERSONATION":  6,
+			"HELO_SYNTAX":             6,
+			"PIPELINING":              6,
 		}
 
 
@@ -173,7 +185,6 @@ func (d *EximSecurity) loadRules() {
 	var raws = []struct{
 		name, desc, re string
 	}{
-//		{"AUTHFAIL", "Incorrect authentication data", `authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data`},
 		{"AUTHFAIL", "SMTP AUTH failed",`(?:authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
 		{"SENDER_VERIFY_FAIL", "sender verify fail",  `sender verify fail\b`},
 		{"RCPT_REJECT", "RCPT rejected", `rejected RCPT\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|Sender verify failed|Unknown user|Unrouteable address)`},
@@ -181,6 +192,14 @@ func (d *EximSecurity) loadRules() {
 		{"PROTO_ERR", "AUTH used when not advertised",`SMTP protocol error in ".*" .*AUTH command used when not advertised`},
 		{"NO_MAIL", "no MAIL in SMTP connection",     `no MAIL in SMTP connection .*`},
 		{"DROP_ACL", "closed by DROP in ACL",         `SMTP connection .* closed by DROP in ACL`},
+
+        {"RCPT_AUTH_REQUIRED", "RCPT rejected: auth required on submission", `rejected RCPT\b.*:\s*(?:SMTP )?AUTH (?:is )?required(?: for (?:message )?submission)?(?: on port \d+)?|rejected RCPT\b.*:\s*authentication required|RCPT .* rejected: authentication required`},
+        {"NONMAIL_CMD", "Too many nonmail commands", `SMTP call from \[[^\]]+\] dropped: too many nonmail commands`},
+        {"NO_HELO", "No HELO/EHLO given", `rejected (?:MAIL|RCPT) .*: no HELO/EHLO given`},
+        {"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `Bad HELO - Host impersonating domain name`},
+        {"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:EHLO|HELO)\b.*\b(?:syntax error|invalid|bad)\b`},
+        {"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
+
 	}
 	// TODO: αν υπάρχει d.cfg.RulesPath → διάβασέ το (macros, κ.λπ.). Για αρχή βάλε τα defaults.
 	d.rules = make([]secRule, 0, len(raws))
@@ -202,10 +221,23 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 			}
 			return nil
 		}
-		if !d.readyLog {
-			logging.Logf("[detectors] exim/security using log: %s", d.path)
-			d.readyLog = true
-		}
+
+    // Decide reject logs:
+    if d.rpaths == nil {
+        d.rpaths = d.pickRejectLogs(d.path, d.cfg.RejectPath)
+    }
+    if !d.readyLog {
+        logging.Logf("[detectors] exim/security using main log: %s", d.path)
+        if len(d.rpaths) == 0 {
+            logging.Logf("[detectors] exim/security no reject log found (looked for rejectlog/exim_rejectlog next to main or at REJECT_LOG_PATH)")
+        } else {
+            for _, p := range d.rpaths {
+                logging.Logf("[detectors] exim/security using reject log: %s", p)
+            }
+        }
+        d.readyLog = true
+    }
+
 	}
 
 	// reset per-run aggregation
@@ -216,25 +248,61 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 	if d.src == nil {
 		d.src = core.NewFileTailer(d.path)
 	}
+
+    if d.rsrcs == nil && len(d.rpaths) > 0 {
+        for _, rp := range d.rpaths {
+            d.rsrcs = append(d.rsrcs, core.NewFileTailer(rp))
+        }
+    }
 	var stateKey string
+	rStateKeys := make([]string, len(d.rsrcs))
+
 	if d.state != nil && d.path != "" {
 		stateKey = core.FileStateKey(d.Name(), d.path)
 		if p, ok := d.state.Get(stateKey); ok {
 			d.ApplyPosition(p)
 		}
 	}
+
+    if d.state != nil && len(d.rsrcs) > 0 {
+        for i, t := range d.rsrcs {
+            if t == nil { continue }
+            k := core.FileStateKey(d.Name(), d.rpaths[i])
+            rStateKeys[i] = k
+            if p, ok := d.state.Get(k); ok {
+                t.ApplyResume(p.Inode, p.Offset)
+            }
+        }
+    }
+
+
 	if err := d.src.Open(); err != nil {
 		// quiet: missing/rotating log; next tick will retry
 		return nil
 	}
 	defer d.src.Close()
+    // Open reject tailers (best-effort)
+    for _, t := range d.rsrcs { if t != nil { _ = t.Open(); defer t.Close() } }
+
 	// Always persist position on exit
 	if stateKey != "" {
 		defer func() {
 			d.state.Put(stateKey, d.Position())
 		}()
 	}
+    // Persist reject positions
+    if len(rStateKeys) > 0 {
+        defer func() {
+            for i, t := range d.rsrcs {
+                if t == nil || rStateKeys[i] == "" { continue }
+                off, ino, ts := t.Position()
+                d.state.Put(rStateKeys[i], core.Position{Offset: off, Inode: ino, TS: ts})
+            }
+        }()
+    }
+
 now := time.Now()
+// drain mainlog
 for {
 	line, err := d.src.ReadNext(ctx)
 	if err == io.EOF {
@@ -245,6 +313,16 @@ for {
 	}
 	d.processLine(now, line)
 }
+    // drain reject logs
+    for _, t := range d.rsrcs {
+        if t == nil { continue }
+        for {
+            line, err := t.ReadNext(ctx)
+            if err == io.EOF { break }
+            if err != nil    { break }
+            d.processLine(now, line)
+        }
+    }
 
 // flush aggregated alerts
 d.flush(now, out)
@@ -464,3 +542,25 @@ func (d *EximSecurity) Position() core.Position {
 
 // Setter used by the factory
 func (d *EximSecurity) SetName(n string) { d.name = n }
+
+// ---- helpers ---------------------------------------------------------------
+func (d *EximSecurity) pickRejectLogs(mainPath, override string) []string {
+    // If explicit, use that (and only that) if it exists.
+    if s := strings.TrimSpace(override); s != "" {
+        if fileExists(s) { return []string{s} }
+        return nil
+    }
+    // Otherwise, try siblings next to mainPath: rejectlog, exim_rejectlog (cPanel)
+    dir := filepath.Dir(mainPath)
+    c1 := filepath.Join(dir, "rejectlog")
+    c2 := filepath.Join(dir, "exim_rejectlog")
+    out := make([]string, 0, 2)
+    if fileExists(c1) { out = append(out, c1) }
+    if fileExists(c2) { out = append(out, c2) }
+    return out
+}
+func fileExists(p string) bool {
+    if p == "" { return false }
+    fi, err := os.Stat(p)
+    return err == nil && !fi.IsDir()
+}

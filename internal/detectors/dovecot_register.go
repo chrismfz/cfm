@@ -3,7 +3,7 @@ package detectors
 import (
     "strings"
     "time"
-
+    "os"
     core "cfm/internal/detectors/core"
     "cfm/internal/detectors/dovecot"
     "cfm/internal/logging"
@@ -53,41 +53,83 @@ func init() {
 
 
 
-        // choose source based on MODE and log it
+        // choose source based on MODE, with autodetect + fallback
         mode := strings.ToLower(cfg.Mode)
         switch mode {
         case "file":
-            src := core.NewFileTailer(cfg.LogPath)
+            // autodetect file path if blank
+            logPath := cfg.LogPath
+            if strings.TrimSpace(logPath) == "" {
+                logPath = guessMailLog()
+            }
+            src := core.NewFileTailer(logPath)
             det.SetSource(src)
             if dovecotState != nil {
-                key := core.FileStateKey(section, cfg.LogPath)
+                key := core.FileStateKey(section, logPath)
                 det.SetState(dovecotState, key)
             }
-            logging.Logf("[detectors][%s] using log: %s", section, cfg.LogPath)
+            logging.Logf("[detectors][%s] using file log: %s", section, logPath)
+            cfg.LogPath = logPath
+
         default: // "journal"
-            j := core.NewJournalTailer(cfg.JournalUnit)
-            det.SetSource(j)
 
-            if dovecotState != nil {
-                // pseudo-path ensures uniqueness per journal unit
-                key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
-                det.SetState(dovecotState, key)
+            // Try journal first; if unavailable, fall back to file
+            j := core.NewJournalTailer(cfg.JournalUnit)
+            if err := j.Open(); err == nil {
+                j.Close()
+                det.SetSource(j)
+                if dovecotState != nil {
+                    key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
+                    det.SetState(dovecotState, key)
+                }
+                logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
+            } else {
+                // Fallback to file
+                logPath := cfg.LogPath
+                if strings.TrimSpace(logPath) == "" {
+                    logPath = guessMailLog()
+                }
+                src := core.NewFileTailer(logPath)
+                det.SetSource(src)
+                if dovecotState != nil {
+                    key := core.FileStateKey(section, logPath)
+                    det.SetState(dovecotState, key)
+                }
+                logging.Logf("[detectors][%s] journal unavailable (unit=%s): %v — falling back to file log: %s",
+                    section, cfg.JournalUnit, err, logPath)
+                cfg.Mode = "file"
+                cfg.LogPath = logPath
             }
 
-            logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
         }
 
         // pretty start line
-        if mode == "file" {
+
+        if strings.ToLower(cfg.Mode) == "file" {
             logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
                 section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
         } else {
             logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
                 section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.JournalUnit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
         }
-
         return det, nil
 
 
     })
+}
+
+
+
+
+// ---- helpers ---------------------------------------------------------------
+func guessMailLog() string {
+   // Prefer /var/log/maillog (RHEL/cPanel), else /var/log/mail.log (Debian/Ubuntu)
+    if fileExists("/var/log/maillog") { return "/var/log/maillog" }
+    if fileExists("/var/log/mail.log") { return "/var/log/mail.log" }
+    // last resort: dovecot’s own default in Auth.NewAuth will use /var/log/maillog
+    return "/var/log/maillog"
+}
+func fileExists(p string) bool {
+    fi, err := os.Stat(p)
+    return err == nil && !fi.IsDir()
 }

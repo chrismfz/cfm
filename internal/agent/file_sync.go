@@ -41,7 +41,7 @@ if err != nil {
     return
 }
 if len(tracked) == 0 {
-    logging.LogfAPI("[files] no tracked files (nothing to do)")
+    //logging.LogfAPI("[files] no tracked files (nothing to do)")
     return
 }
 
