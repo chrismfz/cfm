@@ -43,6 +43,14 @@ type Config struct {
 	PortWatch  []int
 	PortSpikeX float64
 
+// Minimum absolute counts required for spike-style alerts to fire
+	ConnTotalMin   int     // default 50
+	EstablishedMin int     // default 30
+	SynRecvMin     int     // default 50
+	PortConnMin    int     // default 50
+// Optional: require a minimum absolute jump vs baseline for spike alerts
+	SpikeMinDelta  int     // default 10
+
 	// --- NEW: enrichment & spike probe ---
 	SpikeProbeTopN int      // how many top talkers to include on a spike (default 10; 0 disables)
 	UseEnrich      bool     // enable ASN/Country/PTR via enricher
@@ -74,6 +82,13 @@ func New(cfg Config) *Detector {
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
+
+	if cfg.ConnTotalMin == 0 { cfg.ConnTotalMin = 50 }
+	if cfg.EstablishedMin == 0 { cfg.EstablishedMin = 30 }
+	if cfg.SynRecvMin == 0 { cfg.SynRecvMin = 50 }
+	if cfg.PortConnMin == 0 { cfg.PortConnMin = 50 } // aligns with your current hardcoded 50
+	if cfg.SpikeMinDelta == 0 { cfg.SpikeMinDelta = 10 }
+
 
 	d := &Detector{
 		cfg:  cfg,
@@ -608,62 +623,83 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 		emit("HEALTH/DISK_ROOT_HIGH", "fs")
 	}
 
-	// TCP spikes / absolutes
-    bTot := upd("conn.total", float64(s.TCP["total"]))
-    if s.TCP["total"] >= d.cfg.ConnTotalAbs || float64(s.TCP["total"]) > d.cfg.ConnTotalSpikeX*bTot {
-        emitS("HEALTH/CONN_TOTAL_SPIKE", "net.total",
-            []string{fmt.Sprintf(
-                "Total conn spike  cur=%d  baseline≈%.0f  x=%.2f",
-                s.TCP["total"], bTot, float64(s.TCP["total"])/maxf(bTot, 1),
-            )})
-    }
 
-    bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
-    if s.TCP["ESTABLISHED"] >= d.cfg.EstablishedAbs || float64(s.TCP["ESTABLISHED"]) > d.cfg.ConnEstSpikeX*bEst {
-        emitS("HEALTH/CONN_EST_SPIKE", "net.est",
-            []string{fmt.Sprintf(
-                "ESTABLISHED spike  cur=%d  baseline≈%.0f  x=%.2f",
-                s.TCP["ESTABLISHED"], bEst, float64(s.TCP["ESTABLISHED"])/maxf(bEst, 1),
-            )})
-    }
 
-    bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
-    if s.TCP["SYN_RECV"] >= d.cfg.SynRecvAbs || float64(s.TCP["SYN_RECV"]) > d.cfg.ConnSynSpikeX*bSyn {
+// --- Total connections spike ---
+bTot := upd("conn.total", float64(s.TCP["total"]))
+tot := s.TCP["total"]
+if tot >= d.cfg.ConnTotalAbs ||
+   (tot >= d.cfg.ConnTotalMin &&
+    float64(tot) > d.cfg.ConnTotalSpikeX*bTot &&
+    tot - int(bTot) >= d.cfg.SpikeMinDelta) {
+    emitS("HEALTH/CONN_TOTAL_SPIKE", "net.total",
+        []string{fmt.Sprintf(
+            "Total conn spike  cur=%d  baseline≈%.0f  x=%.2f",
+            tot, bTot, float64(tot)/maxf(bTot, 1),
+        )})
+}
+
+// --- ESTABLISHED spike ---
+bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
+est := s.TCP["ESTABLISHED"]
+if est >= d.cfg.EstablishedAbs ||
+   (est >= d.cfg.EstablishedMin &&
+    float64(est) > d.cfg.ConnEstSpikeX*bEst &&
+    est - int(bEst) >= d.cfg.SpikeMinDelta) {
+    emitS("HEALTH/CONN_EST_SPIKE", "net.est",
+        []string{fmt.Sprintf(
+            "ESTABLISHED spike  cur=%d  baseline≈%.0f  x=%.2f",
+            est, bEst, float64(est)/maxf(bEst, 1),
+        )})
+}
+
+// --- SYN_RECV spike ---
+bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
+syn := s.TCP["SYN_RECV"]
+if syn >= d.cfg.SynRecvAbs ||
+   (syn >= d.cfg.SynRecvMin &&
+    float64(syn) > d.cfg.ConnSynSpikeX*bSyn &&
+    syn - int(bSyn) >= d.cfg.SpikeMinDelta) {
+    samples := []string{
+        fmt.Sprintf("SYN_RECV spike  cur=%d  baseline≈%.0f  x=%.2f",
+            syn, bSyn, float64(syn)/maxf(bSyn, 1)),
+    }
+    if d.cfg.SpikeProbeTopN > 0 {
+        top := d.probeSynRecvTalkers(d.cfg.SpikeProbeTopN)
+        if len(top) > 0 {
+            samples = append(samples, "Top remote IPs (SYN_RECV):")
+            samples = append(samples, top...)
+        }
+    }
+    emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
+}
+
+// --- Per-port spikes (watchlist) ---
+for p, c := range s.PortConn {
+    if !containsInt(d.cfg.PortWatch, p) { continue }
+    key := "port." + strconv.Itoa(p)
+    b := upd(key, float64(c))
+    if c >= d.cfg.PortConnMin &&
+       float64(c) > d.cfg.PortSpikeX*b &&
+       c - int(b) >= d.cfg.SpikeMinDelta {
         samples := []string{
-            fmt.Sprintf("SYN_RECV spike  cur=%d  baseline≈%.0f  x=%.2f",
-                s.TCP["SYN_RECV"], bSyn, float64(s.TCP["SYN_RECV"])/maxf(bSyn, 1)),
+            fmt.Sprintf("Spike on tcp/%d  conns=%d  baseline≈%.0f  x=%.2f", p, c, b, float64(c)/maxf(b,1)),
         }
         if d.cfg.SpikeProbeTopN > 0 {
-            top := d.probeSynRecvTalkers(d.cfg.SpikeProbeTopN)
+            top := d.probeTopTalkers(p, []string{"SYN_RECV", "ESTABLISHED"}, d.cfg.SpikeProbeTopN)
             if len(top) > 0 {
-                samples = append(samples, "Top remote IPs (SYN_RECV):")
+                samples = append(samples, "Top talkers:")
                 samples = append(samples, top...)
             }
         }
-        emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
+        emitS("HEALTH/PORT_CONN_SPIKE", key, samples)
     }
-	// per-port conn spikes (watchlist)
-	for p, c := range s.PortConn {
-		if !containsInt(d.cfg.PortWatch, p) {
-			continue
-		}
-		key := "port." + strconv.Itoa(p)
-		b := upd(key, float64(c))
-		if float64(c) > d.cfg.PortSpikeX*b && c > 50 {
-			// include top talkers (if enabled)
-			samples := []string{
-				fmt.Sprintf("Spike on tcp/%d  conns=%d  baseline≈%.0f  x=%.2f", p, c, b, float64(c)/maxf(b,1)),
-			}
-			if d.cfg.SpikeProbeTopN > 0 {
-				top := d.probeTopTalkers(p, []string{"SYN_RECV", "ESTABLISHED"}, d.cfg.SpikeProbeTopN)
-				if len(top) > 0 {
-					samples = append(samples, "Top talkers:")
-					samples = append(samples, top...)
-				}
-			}
-			emitS("HEALTH/PORT_CONN_SPIKE", key, samples)
-		}
-	}
+}
+
+
+
+
+
 
 
 

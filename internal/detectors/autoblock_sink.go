@@ -13,6 +13,7 @@ import (
     "strings"
     "cfm/internal/notify"
     "cfm/internal/enrich"
+    "cfm/internal/logging"
 
 )
 
@@ -213,7 +214,13 @@ if out.Extra["blocked"] == "yes" {
 
 
     // Also report to API via firewall backend policy (respects DETECTORS_SEND_TO_API & fallbacks)
-    _ = s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec)
+//    _ = s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec)
+ if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
+     logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
+         ipStr, err, out.Extra["block_mode"], ttlSec)
+ }
+
+
 
 }
 // --- end notify ---

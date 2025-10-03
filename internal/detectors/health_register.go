@@ -60,6 +60,14 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
             EstablishedAbs:  kvInt(kv, "ESTABLISHED_ABS",  8000),
             SynRecvAbs:      kvInt(kv, "SYN_RECV_ABS",     500),
 
+ // NEW floors for spike alerts
+            ConnTotalMin:    kvInt(kv, "CONN_TOTAL_MIN",   50),
+            EstablishedMin:  kvInt(kv, "ESTABLISHED_MIN",  30),
+            SynRecvMin:      kvInt(kv, "SYN_RECV_MIN",     50),
+            PortConnMin:     kvInt(kv, "PORT_CONN_MIN",    50),
+            SpikeMinDelta:   kvInt(kv, "SPIKE_MIN_DELTA",  10),
+
+
             ThruSpikeX:      kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
 
             TempWarnC:       kvInt(kv, "TEMP_C_WARN", 85),

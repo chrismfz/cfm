@@ -62,7 +62,7 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
     api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
     reqs, err := api.FetchPendingUnblocks()
     if err != nil {
-        logging.Logf("[unblock] fetch pending failed: %v", err)
+        logging.LogfAPI("[unblock] fetch pending failed: %v", err)
         return
     }
     for _, it := range reqs {

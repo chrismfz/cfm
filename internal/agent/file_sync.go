@@ -37,11 +37,11 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 
 tracked, err := api.ListTrackedFiles()
 if err != nil {
-    logging.Logf("[files] list failed: %v", err)
+    logging.LogfAPI("[files] list failed: %v", err)
     return
 }
 if len(tracked) == 0 {
-    logging.Logf("[files] no tracked files (nothing to do)")
+    logging.LogfAPI("[files] no tracked files (nothing to do)")
     return
 }
 
@@ -55,7 +55,7 @@ if len(tracked) == 0 {
     if len(need) == 0 { return }
 
     updates, err := api.GetUpdates(need)
-    if err != nil { logging.Logf("[files] updates failed: %v", err); return }
+    if err != nil { logging.LogfAPI("[files] updates failed: %v", err); return }
 
     // apply + dedup post-update commands
     dedup := map[string]struct{}{}
@@ -67,14 +67,14 @@ if len(tracked) == 0 {
             continue
         }
         if err := os.MkdirAll(filepath.Dir(u.TargetPath), 0755); err != nil {
-            logging.Logf("[files] mkdir %s: %v", filepath.Dir(u.TargetPath), err)
+            logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(u.TargetPath), err)
             continue
         }
         if err := atomicWrite(u.TargetPath, []byte(u.Content), 0644); err != nil {
-            logging.Logf("[files] write %s: %v", u.TargetPath, err)
+            logging.LogfAPI("[files] write %s: %v", u.TargetPath, err)
             continue
         }
-        logging.Logf("[files] updated %s", u.TargetPath)
+        logging.LogfAPI("[files] updated %s", u.TargetPath)
         if u.PostUpdateCommand != nil && *u.PostUpdateCommand != "" {
             if _, ok := dedup[*u.PostUpdateCommand]; !ok {
                 dedup[*u.PostUpdateCommand] = struct{}{}
