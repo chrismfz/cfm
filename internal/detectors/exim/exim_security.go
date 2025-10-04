@@ -179,26 +179,28 @@ func (d *EximSecurity) SetState(st *core.State) { d.state = st }
 
 
 func (d *EximSecurity) Every() time.Duration { return d.cfg.Every }
-
+//if you want to shave a bit more CPU, add a coarse strings.Contains(s, "rejected rcpt") / "authenticator failed" guard per rule before the regex .MatchString(s)
 // φόρτωσε κανόνες από rules file ή βάλε defaults
 func (d *EximSecurity) loadRules() {
 	var raws = []struct{
 		name, desc, re string
 	}{
-		{"AUTHFAIL", "SMTP AUTH failed",`(?:authenticator failed .* \[[^\]]+\].* 535 Incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
-		{"SENDER_VERIFY_FAIL", "sender verify fail",  `sender verify fail\b`},
-		{"RCPT_REJECT", "RCPT rejected", `rejected RCPT\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|Sender verify failed|Unknown user|Unrouteable address)`},
-		{"SYNC_ERR", "protocol sync error",           `SMTP protocol synchronization error .* rejected .*`},
-		{"PROTO_ERR", "AUTH used when not advertised",`SMTP protocol error in ".*" .*AUTH command used when not advertised`},
-		{"NO_MAIL", "no MAIL in SMTP connection",     `no MAIL in SMTP connection .*`},
-		{"DROP_ACL", "closed by DROP in ACL",         `SMTP connection .* closed by DROP in ACL`},
 
-        {"RCPT_AUTH_REQUIRED", "RCPT rejected: auth required on submission", `rejected RCPT\b.*:\s*(?:SMTP )?AUTH (?:is )?required(?: for (?:message )?submission)?(?: on port \d+)?|rejected RCPT\b.*:\s*authentication required|RCPT .* rejected: authentication required`},
-        {"NONMAIL_CMD", "Too many nonmail commands", `SMTP call from \[[^\]]+\] dropped: too many nonmail commands`},
-        {"NO_HELO", "No HELO/EHLO given", `rejected (?:MAIL|RCPT) .*: no HELO/EHLO given`},
-        {"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `Bad HELO - Host impersonating domain name`},
-        {"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:EHLO|HELO)\b.*\b(?:syntax error|invalid|bad)\b`},
-        {"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
+	{"AUTHFAIL", "SMTP AUTH failed", `(?:authenticator failed .* \[[^\]]+\].* 535 incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
+	{"SENDER_VERIFY_FAIL", "sender verify fail", `sender verify fail\b`},
+	{"RCPT_REJECT", "RCPT rejected", `rejected rcpt\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|rejected relay attempt|sender verify failed|unknown user|unrouteable address)`},
+	{"SYNC_ERR", "protocol sync error", `smtp protocol synchronization error .* rejected .*`},
+	{"PROTO_ERR", "AUTH used when not advertised", `smtp protocol error in ".*" .*auth command used when not advertised`},
+	{"NO_MAIL", "no MAIL in SMTP connection", `no mail in smtp connection .*`},
+	{"DROP_ACL", "closed by DROP in ACL", `smtp connection .* closed by drop in acl`},
+	{"RCPT_AUTH_REQUIRED", "RCPT rejected: auth required on submission", `rejected rcpt\b.*:\s*(?:smtp )?auth (?:is )?required(?: for (?:message )?submission)?(?: on port \d+)?|rejected rcpt\b.*:\s*authentication required|rcpt .* rejected: authentication required`},
+	{"NONMAIL_CMD", "Too many nonmail commands", `smtp call from \[[^\]]+\] dropped: too many nonmail commands`},
+	{"NO_HELO", "No HELO/EHLO given", `rejected (?:mail|rcpt) .*: no helo/ehlo given`},
+	{"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `bad helo - host impersonating domain name`},
+	{"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:ehlo|helo)\b.*\b(?:syntax error|invalid|bad)\b`},
+	{"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
+
+
 
 	}
 	// TODO: αν υπάρχει d.cfg.RulesPath → διάβασέ το (macros, κ.λπ.). Για αρχή βάλε τα defaults.
