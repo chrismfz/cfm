@@ -833,9 +833,9 @@ func (b *Backend) ruleExists(chain, needle string) bool {
 
 
 
-
+// -t terse - don't print the contents ffs//
 func (b *Backend) setExists(name string) bool {
-	_, err := exec.Command("nft", "list", "set", family, tableName, name).CombinedOutput()
+	_, err := exec.Command("nft", "-t", "list", "set", family, tableName, name).CombinedOutput()
 	return err == nil
 }
 func (b *Backend) nftCmd(expr string) error {
