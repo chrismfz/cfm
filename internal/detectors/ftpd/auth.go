@@ -94,14 +94,22 @@ func NewAuth(cfg Config) *Auth {
 	a.reQuick = regexp.MustCompile(`\b(vsftpd|pure-?ftpd|proftpd|ftp-login)\b.*\b(fail|failed|violation|authentication failure|maximum login)\b`)
 
 
-	// common extractors
-	a.rePamHost  = regexp.MustCompile(`\brhost=(\d{1,3}(?:\.\d{1,3}){3})\b`)
-	a.reVsFail   = regexp.MustCompile(`FAIL LOGIN: Client "(\d{1,3}(?:\.\d{1,3}){3})"`)
-	a.reBracketH = regexp.MustCompile(`\([^\[]*\[(\d{1,3}(?:\.\d{1,3}){3})\]\)`)
-	a.rePureAt   = regexp.MustCompile(`\([^@]+@(\d{1,3}(?:\.\d{1,3}){3})\)`)
-	a.reUserKV   = regexp.MustCompile(`\buser=<([^>]+)>|\buser=([^\s,]+)`)
-	a.reUserVs   = regexp.MustCompile(`\[[^\]]+\]\s+FAIL LOGIN:`) // vsftpd: pid [USER] FAIL LOGIN:
-	a.reVsUserPrefix = regexp.MustCompile(`\[(?P<u>[^\]]+)\]\s+FAIL LOGIN:`) // precompiled (was inside consume)
+
+// IP class that matches v4, v6, and v4-mapped (::ffff:1.2.3.4)
+const ipClass = `[0-9a-f:.]+`
+
+// common extractors (used on the LOWERCASED line s := strings.ToLower(line))
+a.rePamHost  = regexp.MustCompile(`\brhost=(` + ipClass + `)(?:[,\s]|$)`)
+a.reVsFail   = regexp.MustCompile(`fail login:\s+client\s+"(` + ipClass + `)"`)
+a.reBracketH = regexp.MustCompile(`\([^\[]*\[(` + ipClass + `)\]\)`)
+a.rePureAt   = regexp.MustCompile(`\([^@]+@(` + ipClass + `)\)`)
+
+// user extractors (lowercased tokens to match the lowercased line)
+a.reUserKV       = regexp.MustCompile(`\buser=<([^>]+)>|\buser=([^\s,]+)`)
+a.reUserVs       = regexp.MustCompile(`\[[^\]]+\]\s+fail login:`)
+// Go's regexp doesn't support named groups; use a normal capture group:
+a.reVsUserPrefix = regexp.MustCompile(`\[([^\]]+)\]\s+fail login:`)
+
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -232,51 +240,36 @@ func (a *Auth) consume(now time.Time, line string) {
 		if !(strings.Contains(ll, "pure-ftpd") || strings.Contains(ll, "pureftpd")) { return }
 	}
 	// optional extra guard using the narrowed regex (kept for safety)
-	if !a.reQuick.MatchString(line) { return }
+	if !a.reQuick.MatchString(ll) { return }
 	// Prefer extractors based on daemon hint to minimize regex tries
-	var ip string
-	if a.daemon == "vsftpd" {
-		ip = first(
-			a.reVsFail.FindStringSubmatch(line),
-			a.rePamHost.FindStringSubmatch(line),
-			a.rePureAt.FindStringSubmatch(line),
-			a.reBracketH.FindStringSubmatch(line),
-		)
-	} else if a.daemon == "proftpd" {
-		ip = first(
-			a.reBracketH.FindStringSubmatch(line),
-			a.rePamHost.FindStringSubmatch(line),
-			a.rePureAt.FindStringSubmatch(line),
-			a.reVsFail.FindStringSubmatch(line),
-		)
-	} else if a.daemon == "pure-ftpd" || a.daemon == "pureftpd" {
-		ip = first(
-			a.rePureAt.FindStringSubmatch(line),
-			a.rePamHost.FindStringSubmatch(line),
-			a.reBracketH.FindStringSubmatch(line),
-			a.reVsFail.FindStringSubmatch(line),
-		)
-	} else {
-		// unknown daemon → try all (old order)
-		ip = first(
-			a.rePamHost.FindStringSubmatch(line),
-			a.reVsFail.FindStringSubmatch(line),
-			a.rePureAt.FindStringSubmatch(line),
-			a.reBracketH.FindStringSubmatch(line),
-		)
-	}
+
+var ip string
+if a.daemon == "vsftpd" {
+	ip = firstIP(ll, a.reVsFail, a.rePamHost, a.rePureAt, a.reBracketH)
+} else if a.daemon == "proftpd" {
+	ip = firstIP(ll, a.reBracketH, a.rePamHost, a.rePureAt, a.reVsFail)
+} else if a.daemon == "pure-ftpd" || a.daemon == "pureftpd" {
+	ip = firstIP(ll, a.rePureAt, a.rePamHost, a.reBracketH, a.reVsFail)
+} else {
+	// unknown daemon → try all
+	ip = firstIP(ll, a.rePamHost, a.reVsFail, a.rePureAt, a.reBracketH)
+}
+
 
 	if ip != "" {
 		a.bump(now, "AUTHFAIL|ip", ip, line)
 	}
 
-	user := pickUser(a.reUserKV, line)
-	if user == "" && a.reUserVs.MatchString(line) {
-		// (3) PRECOMPILED extractor (no per-line compile)
-		if m := a.reVsUserPrefix.FindStringSubmatch(line); m != nil {
-			user = m[1]
-		}
+
+user := pickUser(a.reUserKV, ll)
+if user == "" && a.reUserVs.MatchString(ll) {
+	if m := a.reVsUserPrefix.FindStringSubmatch(ll); m != nil {
+		user = m[1]
 	}
+}
+
+
+
 	if user != "" {
 		user = strings.ToLower(user)
 		a.bump(now, "AUTHFAIL|user", user, line)
@@ -297,6 +290,36 @@ func pickUser(rx *regexp.Regexp, s string) string {
 	}
 	return ""
 }
+
+
+// normalizeIP returns canonical "1.2.3.4" for IPv4 and compressed form for IPv6.
+// It also collapses IPv4-mapped IPv6 (::ffff:1.2.3.4) down to plain IPv4.
+func normalizeIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+// firstIP tries each regex against the LOWERCASED line and returns
+// the first valid, normalized IP it finds (v4 / v6 / v4-mapped).
+func firstIP(lowercased string, regs ...*regexp.Regexp) string {
+	for _, rx := range regs {
+		if m := rx.FindStringSubmatch(lowercased); len(m) > 1 && m[1] != "" {
+			if ip := normalizeIP(m[1]); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 sk := kindKey + ":" + key

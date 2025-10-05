@@ -68,7 +68,8 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
             SpikeMinDelta:   kvInt(kv, "SPIKE_MIN_DELTA",  10),
 
 
-            ThruSpikeX:      kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
+        ThruSpikeX:      kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
+	ThruMinMbps:     kvFlt(kv, "THROUGHPUT_MIN_MBPS", 0.0),
 
             TempWarnC:       kvInt(kv, "TEMP_C_WARN", 85),
             TempCritC:       kvInt(kv, "TEMP_C_CRIT", 95),

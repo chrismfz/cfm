@@ -332,29 +332,22 @@ return nil
 
 }
 
+
+
 func (d *EximSecurity) processLine(now time.Time, line string) {
-        // Normalise once for cheap, case-insensitive matching
-        s := strings.ToLower(line)
+    s := strings.ToLower(line)
 
-        // γρήγορο skip: κοιτάμε αν έχει IP σε αγκύλες
-        if !strings.Contains(s, "[") || !strings.Contains(s, "]") {
-		return
-	}
-	ip := ""
-	if m := d.reHostIP.FindStringSubmatch(line); m != nil {
-		ip = m[1]
-	}
-	if ip == "" {
-		return
-	}
-	// πέρασε από όλους τους κανόνες
-	for _, r := range d.rules {
-		if r.Re.MatchString(s) {
+    // quick skip: must have brackets (socket ip is always bracketed)
+    if !strings.Contains(s, "[") || !strings.Contains(s, "]") { return }
 
+    ip := lastBracketIP(line) // <-- only trust bracketed token, validated
+    if ip == "" { return }
+
+    // ... keep the rest the same ...
+    for _, r := range d.rules {
+        if r.Re.MatchString(s) {
             if r.Name == "AUTHFAIL" {
-                // per-IP
-                d.bump(now, "AUTHFAIL|ip", ip, line)
-                // per-user (best-effort from set_id=... or user=<...>)
+                d.bump(now, "AUTHFAIL|ip", ip, line) // now always the real socket IP
                 if u := d.extractUser(s); u != "" {
                     d.bump(now, "AUTHFAIL|user", u, line)
                     d.addUserIP(u, ip)
@@ -362,10 +355,12 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
             } else {
                 d.bump(now, r.Name, ip, line)
             }
-
-		}
-	}
+        }
+    }
 }
+
+
+
 
 
 func (d *EximSecurity) extractUser(line string) string {
@@ -521,7 +516,22 @@ func (d *EximSecurity) lookupMeta(ip string) string {
 }
 
 
-
+// helper: return canonical IPv4 or IPv6 from the last [ ... ] token on the line
+func lastBracketIP(line string) string {
+    i := strings.LastIndexByte(line, '[')
+    for i >= 0 {
+        j := strings.IndexByte(line[i:], ']')
+        if j <= 1 { break }
+        cand := strings.TrimSpace(line[i+1 : i+j])
+        if ip := net.ParseIP(cand); ip != nil {
+            if v4 := ip.To4(); v4 != nil { return v4.String() }
+            return ip.String()
+        }
+        // if this bracket wasn't an IP, look for an earlier '['
+        i = strings.LastIndexByte(line[:i], '[')
+    }
+    return ""
+}
 
 // (cooldown handled by core.AlertGate; no local cool())
 

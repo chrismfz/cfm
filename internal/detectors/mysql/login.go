@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"net"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
@@ -181,6 +182,15 @@ func (m *MySQL) processLine(s string) {
 		user := md[1]
 		host := md[2]
 
+                // If the MySQL log shows a hostname, resolve it to an IP so the
+                // autoblock sink can act on it.
+		if net.ParseIP(host) == nil && host != "" && host != "localhost" {
+			if ip := m.lookupHostFast(host); ip != "" {
+				host = ip
+			}
+		}
+
+
 		if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1") {
 			return
 		}
@@ -203,9 +213,14 @@ func (m *MySQL) processLine(s string) {
 	}
 
 	// Aborted unauthenticated: treat as scanning only when remote (not localhost)
-	if ma := m.reAbortedUnauth.FindStringSubmatch(s); ma != nil {
-		host := ma[1]
-		if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1") {
+        if ma := m.reAbortedUnauth.FindStringSubmatch(s); ma != nil {
+                host := ma[1]
+                if net.ParseIP(host) == nil && host != "" && host != "localhost" {
+                        if ip := m.lookupHostFast(host); ip != "" {
+                                host = ip
+                        }
+                }
+                if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
 			return
 		}
 
@@ -431,3 +446,26 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+
+
+
+// lookupHostFast resolves a hostname to an IP quickly (prefer IPv4).
+// Returns empty string on failure or timeout.
+func (m *MySQL) lookupHostFast(h string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", h)
+	if err != nil || len(ips) == 0 {
+		return ""
+	}
+	// Prefer IPv4
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	// Fallback to first result
+	return ips[0].String()
+}
+

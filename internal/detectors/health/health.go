@@ -35,6 +35,7 @@ type Config struct {
 	ConnTotalAbs, EstablishedAbs, SynRecvAbs      int
 
 	ThruSpikeX float64
+	ThruMinMbps float64
 
 	TempWarnC, TempCritC int
 
@@ -88,6 +89,7 @@ func New(cfg Config) *Detector {
 	if cfg.SynRecvMin == 0 { cfg.SynRecvMin = 50 }
 	if cfg.PortConnMin == 0 { cfg.PortConnMin = 50 } // aligns with your current hardcoded 50
 	if cfg.SpikeMinDelta == 0 { cfg.SpikeMinDelta = 10 }
+
 
 
 	d := &Detector{
@@ -709,7 +711,7 @@ for p, c := range s.PortConn {
 bRx := upd("rx", s.RxMbps)
 bTx := upd("tx", s.TxMbps)
 
-if s.RxMbps > d.cfg.ThruSpikeX*bRx {
+if s.RxMbps >= d.cfg.ThruMinMbps && s.RxMbps > d.cfg.ThruSpikeX*bRx {
     samples := []string{
         fmt.Sprintf("RX spike  rx=%.1f Mbps  baseline≈%.1f  x=%.2f",
             s.RxMbps, bRx, s.RxMbps/maxf(bRx, 1)),
@@ -727,7 +729,7 @@ if s.RxMbps > d.cfg.ThruSpikeX*bRx {
     emitS("HEALTH/RX_THRU_SPIKE", "net.rx", samples)
 }
 
-if s.TxMbps > d.cfg.ThruSpikeX*bTx {
+if s.TxMbps >= d.cfg.ThruMinMbps && s.TxMbps > d.cfg.ThruSpikeX*bTx {
     samples := []string{
         fmt.Sprintf("TX spike  tx=%.1f Mbps  baseline≈%.1f  x=%.2f",
             s.TxMbps, bTx, s.TxMbps/maxf(bTx, 1)),

@@ -85,8 +85,8 @@ func NewAuth(cfg Config) *Auth {
 	a.gate    = core.NewAlertGate(cfg.Cooldown)
 	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
 	// Lines we care about (keep this fast pre-filter)
-	a.reQuick = regexp.MustCompile(`dovecot:\s+(imap|pop3)-login:.*(auth failed|Aborted login|Authentication failure)`)
-	a.reRip   = regexp.MustCompile(`\brip=(\d{1,3}(?:\.\d{1,3}){3})\b`)
+	a.reQuick = regexp.MustCompile(`dovecot:\s+(imap|pop3)-login:.*(auth failed|aborted login|authentication failure)`)
+	a.reRip = regexp.MustCompile(`\brip=([0-9a-f:.]+)(?:[,\s]|$)`)
 	a.reUser  = regexp.MustCompile(`\buser=<([^>]+)>\b`)
 
 	if cfg.UseEnrich {
@@ -179,19 +179,33 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 }
 
 func (a *Auth) processLine(now time.Time, line string) {
-	if !a.reQuick.MatchString(line) {
-		return
-	}
+    ll := strings.ToLower(line)
+    if !a.reQuick.MatchString(ll) { return }
+
 	// ip
-	if m := a.reRip.FindStringSubmatch(line); m != nil && m[1] != "" {
-		a.bump(now, "AUTHFAIL|ip", m[1], line)
-	}
-	// user
-	if m := a.reUser.FindStringSubmatch(line); m != nil && m[1] != "" {
-		u := strings.ToLower(m[1])
-		a.bump(now, "AUTHFAIL|user", u, line)
-	}
+if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
+    if ip := net.ParseIP(m[1]); ip != nil {
+        if v4 := ip.To4(); v4 != nil {
+            a.bump(now, "AUTHFAIL|ip", v4.String(), line)
+        } else {
+            a.bump(now, "AUTHFAIL|ip", ip.String(), line)
+        }
+    }
 }
+
+	// user
+// user
+ if m := a.reUser.FindStringSubmatch(ll); m != nil {
+    for i := 1; i < len(m); i++ {
+        if m[i] != "" {
+            a.bump(now, "AUTHFAIL|user", m[i], line) // already lowercased from ll
+            break
+        }
+    }
+ }
+
+}
+
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + key

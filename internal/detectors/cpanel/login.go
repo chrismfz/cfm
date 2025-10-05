@@ -105,17 +105,15 @@ func NewLogin(cfg LoginConfig) *Login {
 	// [2025-09-10 16:13:59 +0300] info [cpaneld] 34.26.85.25 - 2083 "POST ... " FAILED LOGIN cpaneld: invalid user name specified
 	// [2025-09-09 22:24:30 +0300] info [webmaild] 154.255.80.148 - info@... "GET ... " FAILED LOGIN webmaild: user password incorrect
 	l.reBracket = regexp.MustCompile(
-		`^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[+\-]\d{4}\]\s+info\s+\[` + svcTok + `\]\s+` + ipTok + `\s+-\s+` + userTok + `\s+".*?"\s+FAILED LOGIN\s+` + svcTok + `:`,
+		`^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[+\-]\d{4}\]\s+info\s+\[` + svcTok + `\]\s+` + ipTok + `\s+-\s+` + userTok + `\s+".*?"\s+failed login\s+` + svcTok + `:`,
 	)
 
 	// cpdavd format samples:
 	// 127.0.0.1 - user [09/10/2025:07:46:04 -0000] "PROPFIND" FAILED LOGIN cpdavd: Authentication failed for user: user
-	l.reDavd = regexp.MustCompile(
-		`^` + ipTok + `\s+-\s+` + userTok + `\s+\[[^\]]+\]\s+"[A-Z]+"(?:\s+[^"]*)?\s+FAILED LOGIN\s+cpdavd:`,
-	)
+	l.reDavd = regexp.MustCompile( `^` + ipTok + `\s+-\s+` + userTok + `\s+\[[^\]]+\]\s+"[a-z]+"(?:\s+[^"]*)?\s+failed login\s+cpdavd:`,  )
 
 	// Fallback: just find FAILED LOGIN and try to pick ip/user cheaply
-	l.reGeneric = regexp.MustCompile(`(?i)FAILED LOGIN`)
+	l.reGeneric = regexp.MustCompile(`(?:failed login|login failed)`)
 
 	// enrichment
 	if cfg.UseEnrich {
@@ -221,7 +219,8 @@ func (l *Login) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 // -------- parsing & aggregation --------
 
 func (l *Login) processLine(now time.Time, line string) {
-	s := line
+	//s := line
+	s := strings.ToLower(line)
 
 	// 1) Bracketed (cpaneld/whostmgrd/webmaild)
 	if m := l.reBracket.FindStringSubmatch(s); m != nil {

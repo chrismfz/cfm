@@ -30,7 +30,7 @@ import (
 	ipquery "cfm/internal/ipquery"
 	"cfm/internal/unblock"
 	"cfm/internal/reporting"
-
+	nginxdet "cfm/internal/detectors/nginx"
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
 
@@ -89,6 +89,29 @@ func getBackend() firewall.Backend {
 //
 func startDebug() {
     addr := "127.0.0.1:6060"
+
+
+
+
+    http.HandleFunc("/nginx/top", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query()
+        limit := 10
+        if v := q.Get("limit"); v != "" {
+            if n, err := strconv.Atoi(v); err == nil && n > 0 {
+                limit = n
+            }
+        }
+        d := nginxdet.Live()
+        if d == nil {
+            http.Error(w, "nginx detector not live", http.StatusNotFound)
+            return
+        }
+        rows := d.SnapshotTop(limit)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
+
+
 
     // Optional: small banner without requiring logging.Init
     go func(a string) {
@@ -165,6 +188,8 @@ func main() {
 		runReset(os.Args[2:])
 	case "disable":
 		runDisable(os.Args[2:])
+case "nginx-top":
+    runHTTPTop(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
@@ -189,6 +214,7 @@ Usage:
   cfm status [--json]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
+  cfm nginx-top -- Live stats from nginx detector
 
 Description:
   local nftables manager (block/allow with optional TTL),
@@ -600,6 +626,59 @@ func runAllowList(args []string) {
 	fmt.Printf("%-40s %-20s\n", "IP", "Expires")
 	for _, e := range entries { exp := "-"; if e.Expires != nil { exp = e.Expires.Format(time.RFC3339) }; fmt.Printf("%-40s %-20s\n", e.IP.String(), exp) }
 }
+
+
+
+//nginx top
+
+func runHTTPTop(args []string) {
+    fs := flag.NewFlagSet("http-top", flag.ExitOnError)
+    limit := fs.Int("limit", 10, "rows")
+    jsonOut := fs.Bool("json", false, "JSON output")
+    _ = fs.Parse(args)
+
+    // Try daemon first
+    url := fmt.Sprintf("http://127.0.0.1:6060/nginx/top?limit=%d", *limit)
+    resp, err := http.Get(url)
+    if err == nil && resp.StatusCode == 200 {
+        defer resp.Body.Close()
+
+var rows []struct {
+    Host      string  `json:"host"`
+    RPSTotal  float64 `json:"rps"`
+    RPS2xx    float64 `json:"rps_2xx"`
+    RPS3xx    float64 `json:"rps_3xx"`
+    RPS4xx    float64 `json:"rps_4xx"`
+    RPS5xx    float64 `json:"rps_5xx"`
+    RPS499    float64 `json:"rps_499"`
+    UniqueIPs int     `json:"unique_ips"`
+    ErrRatio  float64 `json:"err_ratio"`
+}
+
+        if err := json.NewDecoder(resp.Body).Decode(&rows); err == nil {
+            if *jsonOut {
+                b, _ := json.MarshalIndent(rows, "", "  ")
+                fmt.Println(string(b))
+                return
+            }
+
+fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s\n",
+    "HOST","RPS","2xx","3xx","4xx","5xx","499","uniqIP","err%")
+for _, r := range rows {
+    fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f\n",
+        r.Host, r.RPSTotal, r.RPS2xx, r.RPS3xx, r.RPS4xx, r.RPS5xx, r.RPS499, r.UniqueIPs, r.ErrRatio*100)
+}
+
+
+            return
+        }
+    }
+
+    // Fallback: tail the log (if daemon not running). (Use the simple tail+filter approach we discussed earlier.)
+    // ... (you can keep the log-tail implementation you already pasted in earlier)
+}
+
+
 
 // ----------------------------------------------------------------------------
 // Daemon
