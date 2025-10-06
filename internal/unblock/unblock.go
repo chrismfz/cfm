@@ -2,6 +2,7 @@
 package unblock
 
 import (
+"sort"
     "bufio"
     "context"
     "errors"
@@ -12,11 +13,14 @@ import (
     "strings"
     "sync"
     "time"
+"bytes"
+"fmt"
 
     "cfm/internal/firewall"
-    ipquery "cfm/internal/ipquery"
-//    "cfm/internal/logging"
     "cfm/internal/reporting"
+nftbe "cfm/internal/firewall/nft"
+
+
 )
 
 type StepAction string
@@ -73,8 +77,8 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
     }
     r := Result{IP: ip}
 
-    // 0) Feeds detection (χρησιμοποιεί το νέο helper)
-    feeds, _ := ipquery.FeedsBlocking(ip.String()) // []string feedIDs/names
+    // 0) Feeds detection — FAST: discover per-feed sets (terse) and probe membership with HasElem
+    feeds := feedsBlockingFast(opts.BE, ip)
     if len(feeds) > 0 {
         r.FromFeeds = feeds
         r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionChecked, Feeds: feeds})
@@ -226,3 +230,94 @@ func removeFromFile(cfgDir, filename, ip string) bool {
     _ = os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
     return removed
 }
+
+
+// feedsBlockingFast returns the feed keys whose per-feed HOSTS sets contain the given IP,
+// without dumping any large set. It uses one terse table listing to discover set names,
+// and constant-time "nft get element" (via Backend.HasElem) to test membership.
+func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
+    if be == nil || ip == nil {
+        return nil
+    }
+    nb, ok := be.(*nftbe.Backend)
+    if !ok {
+        // only supported for nft backend; silently fall back to none
+        return nil
+    }
+    // Discover per-feed set names once (no elements printed).
+    sets, err := listSetNamesByPrefixes(
+        "allow_ext_v4_hosts_", "block_ext_v4_hosts_",
+        "allow_ext_v6_hosts_", "block_ext_v6_hosts_",
+    )
+    if err != nil {
+        return nil
+    }
+    ipStr := ip.String()
+    seen := map[string]struct{}{}
+    for _, s := range sets {
+        ok, _ := nb.HasElem(s, ipStr)
+        if ok {
+            if fk := feedKeyFromSet(s); fk != "" {
+                seen[fk] = struct{}{}
+            }
+        }
+    }
+    out := make([]string, 0, len(seen))
+    for k := range seen {
+        out = append(out, k)
+    }
+    // (optional) keep stable order
+    sort.Strings(out)
+    return out
+}
+
+
+
+// listSetNamesByPrefixes parses a single "nft -t -n list table inet cfm" output
+// and returns set names that start with any of the provided prefixes.
+func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
+    out, err := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
+    if err != nil {
+        return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
+    }
+    // normalize prefixes
+    pfx := make([]string, 0, len(prefixes))
+    for _, p := range prefixes {
+        p = strings.TrimSpace(p)
+        if p != "" {
+            pfx = append(pfx, p)
+        }
+    }
+    var names []string
+    sc := bufio.NewScanner(bytes.NewReader(out))
+    for sc.Scan() {
+        line := strings.TrimSpace(sc.Text())
+        // lines like:  set block_ext_v4_hosts_myblock { type ipv4_addr; flags timeout; }
+        if !strings.HasPrefix(line, "set ") {
+            continue
+        }
+        fields := strings.Fields(line)
+        if len(fields) < 2 {
+            continue
+        }
+        name := fields[1]
+        for _, p := range pfx {
+            if strings.HasPrefix(name, p) {
+                names = append(names, name)
+                break
+            }
+        }
+   }
+    return names, nil
+}
+
+
+// feedKeyFromSet extracts the feed key from a set name like "block_ext_v4_hosts_myblock".
+
+func feedKeyFromSet(setName string) string {
+    if i := strings.LastIndex(setName, "_"); i > 0 && i < len(setName)-1 {
+        return setName[i+1:]
+    }
+    return ""
+}
+

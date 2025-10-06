@@ -314,7 +314,13 @@ func runBlock(args []string) {
 
     // Firewall apply
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    // Fast path: table is already there in normal operation
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil {
+            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+            os.Exit(1)
+        }
+    }
     if isCIDR {
         if err := be.AddBlockNet(cidrNet, dur); err != nil {
             fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1)
@@ -463,7 +469,6 @@ func runAllow(args []string) {
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
 	flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
 	_ = fs.Parse(flagArgs)
-
 	// Πάρε το 1ο positional (ή από fs.Args() αν δεν πέρασαν με flag-split)
 	target := ""
 	if len(posArgs) > 0 {
@@ -479,7 +484,6 @@ func runAllow(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: cfm allow <IP|CIDR> [--ttl 1h]")
 		os.Exit(2)
 	}
-
 	// IP ή CIDR;
 	var (
 		ip      = net.ParseIP(target)
@@ -501,7 +505,6 @@ func runAllow(args []string) {
 			os.Exit(2)
 		}
 	}
-
 	// TTL
 	var dur *time.Duration
 	if *ttlFlag != "" {
@@ -512,17 +515,17 @@ func runAllow(args []string) {
 			os.Exit(2)
 		}
 	}
-
 	// Firewall apply
-	be := getBackend()
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "no firewall backend available")
-		os.Exit(1)
-	}
-	if err := be.EnsureBase(); err != nil {
-		fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-		os.Exit(1)
-	}
+
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    // Fast path: table is already there in normal operation
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil {
+            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+            os.Exit(1)
+        }
+    }
+
 	if isCIDR {
 		if err := be.AddAllowNet(cidrNet, dur); err != nil {
 			fmt.Fprintln(os.Stderr, "allow error:", err)
@@ -534,7 +537,6 @@ func runAllow(args []string) {
 			os.Exit(1)
 		}
 	}
-
 	// cfm.allow — μόνο για permanent (να μην αποθηκεύουμε TTL που θα λήξουν)
 	if cfgDir, ok := resolveConfigDir(""); ok {
 		if dur == nil || (dur != nil && *dur <= 0) {
@@ -549,7 +551,6 @@ func runAllow(args []string) {
 			}
 		}
 	}
-
 	if isCIDR {
 		fmt.Printf("✔ allowed %s\n", cidrNet)
 	} else {
@@ -574,9 +575,14 @@ func runUnallow(args []string) {
         os.Exit(2)
     }
 
-    be := getBackend()
-    if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    // Fast path: table is already there in normal operation
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil {
+            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+            os.Exit(1)
+        }
+    }
 
     if isCIDR {
         if err := be.RemoveAllowNet(cidrStr); err != nil {
@@ -1423,34 +1429,32 @@ func runWhich(args []string) {
     }
 
     arg := fs.Arg(0)
+    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    hitsFast, err := fastWhich(be, arg)
+    if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
 
-    hits, err := ipquery.Find(arg)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, err.Error())
-        os.Exit(1)
-    }
 
-    // πάρ’ το cfgDir (αν έχεις ήδη αυτή τη helper)
     cfgDir, _ := resolveConfigDir("")
     suffix := ipquery.EnrichSuffix(cfgDir, arg)
 
     if *asJSON {
-        b, _ := json.MarshalIndent(hits, "", "  ")
+        b, _ := json.MarshalIndent(hitsFast, "", "  ")
         fmt.Println(string(b))
         return
     }
-    if len(hits) == 0 {
+    if len(hitsFast) == 0 {
         fmt.Println("(no matches)")
         return
     }
     fmt.Printf("Matches for %s%s:\n", arg, suffix)
-    for _, h := range hits {
+
+    for _, h := range hitsFast {
         feed := ""
-        if h.Feed != "" {
-            feed = fmt.Sprintf(" (feed: %s)", h.Feed)
-        }
+        if h.Feed != "" { feed = fmt.Sprintf(" (feed: %s)", h.Feed) }
         fmt.Printf(" - %s via %s %s in set %s%s\n", h.Action, h.Via, h.Match, h.Set, feed)
     }
+
 }
 
 
@@ -1488,4 +1492,137 @@ func normalizeTarget(s string) (bool, string, string, error) {
         return false, "", "", fmt.Errorf("invalid CIDR")
     }
     return false, "", "", fmt.Errorf("invalid IP or CIDR")
+}
+
+
+
+
+// listSetNamesByPrefixes returns set names that start with any of the given prefixes,
+// using a single 'nft -t list table inet cfm' (no elements printed).
+func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
+	out, err := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
+	if err != nil { return nil, fmt.Errorf("nft list table: %v: %s", err, string(out)) }
+
+	var names []string
+	pfx := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		p = strings.TrimSpace(p)
+		if p != "" { pfx = append(pfx, p) }
+	}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "set ") { continue }
+		fields := strings.Fields(line)
+		if len(fields) < 2 { continue }
+		name := fields[1]
+		for _, p := range pfx {
+			if strings.HasPrefix(name, p) { names = append(names, name); break }
+		}
+	}
+	return names, nil
+}
+
+
+// fastWhich returns hits by probing membership (no full dumps).
+type whichHit struct {
+	Action string // "ALLOW"/"BLOCK"
+	Via    string // "manual"/"feed"
+	Set    string // set name
+	Match  string // exact ip or cidr
+	Feed   string // optional feed key, if set name encodes it
+}
+
+func fastWhich(be firewall.Backend, ipStr string) ([]whichHit, error) {
+	nb, ok := be.(*nft.Backend)
+	if !ok {
+		return nil, fmt.Errorf("nft backend required")
+	}
+
+	var hits []whichHit
+
+	// -------- manual sets (hosts + nets) --------
+	manualHostSets := []string{"allow_v4", "block_v4", "allow_v6", "block_v6"}
+	manualNetSets  := []string{"allow_v4_nets", "block_v4_nets", "allow_v6_nets", "block_v6_nets"}
+
+	// hosts membership (if arg is an IP)
+	if ip := net.ParseIP(ipStr); ip != nil {
+		ipNorm := ip.String()
+		for _, s := range manualHostSets {
+			ok, _ := nb.HasElem(s, ipNorm)
+			if ok {
+				act := "ALLOW"
+				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
+				hits = append(hits, whichHit{Action: act, Via: "manual", Set: s, Match: ipNorm})
+			}
+		}
+	}
+
+	// nets membership (if arg is a CIDR)
+	if _, nw, err := net.ParseCIDR(ipStr); err == nil && nw != nil {
+		cidr := nw.String()
+		for _, s := range manualNetSets {
+			ok, _ := nb.HasElem(s, cidr)
+			if ok {
+				act := "ALLOW"
+				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
+				hits = append(hits, whichHit{Action: act, Via: "manual", Set: s, Match: cidr})
+			}
+		}
+	}
+
+	// -------- feed sets (discover once, terse; then HasElem) --------
+	feedSets, _ := listSetNamesByPrefixes(
+		"allow_ext_v4_hosts_", "allow_ext_v6_hosts_", "allow_ext_v4_nets_", "allow_ext_v6_nets_",
+		"block_ext_v4_hosts_", "block_ext_v6_hosts_", "block_ext_v4_nets_", "block_ext_v6_nets_",
+	)
+
+	// feed hosts
+	if ip := net.ParseIP(ipStr); ip != nil {
+		ipNorm := ip.String()
+		for _, s := range feedSets {
+			if !strings.Contains(s, "_hosts_") { continue }
+			ok, _ := nb.HasElem(s, ipNorm)
+			if ok {
+				act := "ALLOW"
+				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
+				hits = append(hits, whichHit{
+					Action: act, Via: "feed", Set: s, Match: ipNorm, Feed: feedKeyFromSet(s),
+				})
+			}
+		}
+	}
+
+	// feed nets
+	if _, nw, err := net.ParseCIDR(ipStr); err == nil && nw != nil {
+		cidr := nw.String()
+		for _, s := range feedSets {
+			if !strings.Contains(s, "_nets_") { continue }
+			ok, _ := nb.HasElem(s, cidr)
+			if ok {
+				act := "ALLOW"
+				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
+				hits = append(hits, whichHit{
+					Action: act, Via: "feed", Set: s, Match: cidr, Feed: feedKeyFromSet(s),
+				})
+			}
+		}
+	}
+
+	return hits, nil
+}
+
+// feedKeyFromSet extracts the feed name from a set like "block_ext_v4_hosts_myblock".
+func feedKeyFromSet(setName string) string {
+	if i := strings.LastIndex(setName, "_"); i > 0 && i < len(setName)-1 {
+		return setName[i+1:]
+	}
+	return ""
+}
+
+// put near other helpers in cmd/cfm/main.go
+func tableExistsCFM() bool {
+    // terse + numeric; no set elements printed
+    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
+    return cmd.Run() == nil
 }

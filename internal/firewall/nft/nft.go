@@ -1346,3 +1346,28 @@ func (b *Backend) isSelfIPString(s string) bool {
     }
     return false
 }
+
+
+
+
+
+
+
+// HasElem returns true if elem is in setName without dumping the set.
+func (b *Backend) HasElem(setName, elem string) (bool, error) {
+    args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
+    out, err := exec.Command("nft", args...).CombinedOutput()
+    if err == nil {
+        return true, nil // found
+    }
+    s := string(out)
+    // "Could not get element", "not found", etc. = not present (not an error for us)
+    if strings.Contains(s, "Could not get element") || strings.Contains(s, "not found") {
+        return false, nil
+    }
+    if strings.Contains(s, "No such file or directory") {
+        // set missing -> treat as not present; caller may decide what to do
+        return false, nil
+    }
+    return false, fmt.Errorf("nft get element %s{%s}: %v: %s", setName, elem, err, s)
+}
