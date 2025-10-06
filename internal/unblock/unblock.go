@@ -48,6 +48,7 @@ type Step struct {
     Detail  string
     Feeds   []string
     Err     string
+    Dur     time.Duration // how long this step took
 }
 
 type Result struct {
@@ -78,11 +79,15 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
     r := Result{IP: ip}
 
     // 0) Feeds detection — FAST: discover per-feed sets (terse) and probe membership with HasElem
+    t0 := time.Now()
     feeds := feedsBlockingFast(opts.BE, ip)
     if len(feeds) > 0 {
         r.FromFeeds = feeds
-        r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionChecked, Feeds: feeds})
+        r.Steps = append(r.Steps, Step{
+            Source: SrcFeeds, Action: ActionChecked, Feeds: feeds, Dur: time.Since(t0),
+        })
     }
+
 
     // 1) nft remove (no expensive EnsureBase; table should already exist in normal ops)
     if opts.BE != nil {
@@ -92,27 +97,29 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
                 r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
             }
         }
+	t1 := time.Now()
         if err := opts.BE.RemoveBlock(ip); err != nil {
             r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "RemoveBlock failed", Err: err.Error()})
         } else {
-            r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved})
+            r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved, Dur: time.Since(t1)})
             r.WasBlocked = true
         }
     }
 
     // 1a) cfm.deny cleanup
     if opts.ConfigDir != "" {
+t2 := time.Now()
         if removed := removeFromFile(opts.ConfigDir, "cfm.deny", ip.String()); removed {
-            r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionRemoved})
+            r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionRemoved, Dur: time.Since(t2)})
             r.WasBlocked = true
         } else {
-            r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionNotFound})
+            r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionNotFound, Dur: time.Since(t2)})
         }
     }
 
     // 2) CSF (παράλληλα με άλλες εντολές)
     var wg sync.WaitGroup
-    if binaryExists("csf") {
+    if binaryExists("csf") && unitActive("csf") {
         wg.Add(1)
         go func() {
             defer wg.Done()
@@ -122,32 +129,30 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
             runCmd(ctx, &r, SrcCSF, "csf", "-ta", ip.String())
         }()
     } else {
-        r.Steps = append(r.Steps, Step{Source: SrcCSF, Action: ActionChecked, Detail: "not present"})
+r.Steps = append(r.Steps, Step{Source: SrcCSF, Action: ActionChecked, Detail: "not present or inactive"})
     }
 
 
-// 2.5) Fail2Ban (προαιρετικό): unban μόνο αν ενεργοποιηθεί μέσω opts
-if opts.Fail2BanUnban {
-    if binaryExists("fail2ban-client") {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            runCmd(ctx, &r, SrcFail2Ban, "fail2ban-client", "unban", ip.String())
-        }()
-    } else {
-        r.Steps = append(r.Steps, Step{Source: SrcFail2Ban, Action: ActionChecked, Detail: "fail2ban-client not present"})
-    }
+// 2.5) Fail2Ban (no opts; check binary + unit)
+t3 := time.Now()
+if binaryExists("fail2ban-client") && unitActive("fail2ban") {
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        runCmd(ctx, &r, SrcFail2Ban, "fail2ban-client", "unban", ip.String())
+    }()
 } else {
-    // Αν δεν είναι ενεργό, μπορείς είτε να μη γράψεις τίποτα είτε να αφήσεις ένα “disabled”
-    r.Steps = append(r.Steps, Step{Source: SrcFail2Ban, Action: ActionChecked, Detail: "disabled"})
+    r.Steps = append(r.Steps, Step{
+        Source: SrcFail2Ban, Action: ActionChecked, Detail: "not present or inactive", Dur: time.Since(t3),
+    })
 }
 
 
 
 
-
     // 3) Imunify360
-    if binaryExists("imunify360-agent") {
+	imunifyActive := unitActive("imunify360") || unitActive("imunify360-agent") || unitActive("imunify360.service") || unitActive("imunify360-agent.service")
+    if binaryExists("imunify360-agent") && imunifyActive {
         wg.Add(1)
         go func() {
             defer wg.Done()
@@ -159,7 +164,7 @@ if opts.Fail2BanUnban {
             }
         }()
     } else {
-        r.Steps = append(r.Steps, Step{Source: SrcImunify, Action: ActionChecked, Detail: "not present"})
+        r.Steps = append(r.Steps, Step{Source: SrcImunify, Action: ActionChecked, Detail: "not present or inactive"})
     }
 
     wg.Wait()
@@ -191,19 +196,24 @@ if opts.Fail2BanUnban {
 
 func binaryExists(name string) bool { _, err := exec.LookPath(name); return err == nil }
 
+
 func runCmd(ctx context.Context, r *Result, src Source, name string, args ...string) {
+    start := time.Now()
     cmd := exec.CommandContext(ctx, name, args...)
     out, err := cmd.CombinedOutput()
-    step := Step{Source: src, Action: ActionChecked}
+    step := Step{Source: src, Action: ActionChecked, Dur: time.Since(start)}
     if err != nil {
         step.Action = ActionError
         step.Err = err.Error()
-        step.Detail = string(out)
+        step.Detail = strings.TrimSpace(string(out))
     } else {
         step.Detail = strings.TrimSpace(string(out))
     }
     r.Steps = append(r.Steps, step)
 }
+
+
+
 
 func removeFromFile(cfgDir, filename, ip string) bool {
     if cfgDir == "" { return false }
@@ -328,4 +338,12 @@ func feedKeyFromSet(setName string) string {
 func nftTableExists() bool {
     cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
     return cmd.Run() == nil
+}
+
+// unitActive returns true if `systemctl is-active --quiet <unit>` succeeds.
+func unitActive(unit string) bool {
+    if !binaryExists("systemctl") {
+        return true // best-effort: if no systemd, don't block
+    }
+    return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
 }

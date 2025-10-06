@@ -455,8 +455,13 @@ func runUnblock(args []string) {
         if s.Err != "" {
             extra = "ERR: " + s.Err + " " + extra
         }
-        fmt.Printf(" - %-9s via %-10s %s%s\n",
-            s.Action, s.Source, strings.TrimSpace(extra), feeds)
+        dur := ""
+        if s.Dur > 0 {
+            dur = fmt.Sprintf(" (%.2fs)", s.Dur.Seconds())
+        }
+        fmt.Printf(" - %-9s via %-10s %s%s%s\n",
+            s.Action, s.Source, strings.TrimSpace(extra), feeds, dur)
+
     }
     if res.Whitelisted {
         fmt.Println("✔ applied local whitelist override (due to feeds)")

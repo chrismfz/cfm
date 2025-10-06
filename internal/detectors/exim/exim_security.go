@@ -516,24 +516,113 @@ func (d *EximSecurity) lookupMeta(ip string) string {
 }
 
 
-// helper: return canonical IPv4 or IPv6 from the last [ ... ] token on the line
+
+// helper: return canonical IPv4 or IPv6 from the last/right-most [ ... ] token on the line,
+// preferring a global/public address if multiple bracketed IPs exist.
 func lastBracketIP(line string) string {
-    i := strings.LastIndexByte(line, '[')
-    for i >= 0 {
-        j := strings.IndexByte(line[i:], ']')
-        if j <= 1 { break }
-        cand := strings.TrimSpace(line[i+1 : i+j])
-        if ip := net.ParseIP(cand); ip != nil {
-            if v4 := ip.To4(); v4 != nil { return v4.String() }
-            return ip.String()
-        }
-        // if this bracket wasn't an IP, look for an earlier '['
-        i = strings.LastIndexByte(line[:i], '[')
-    }
-    return ""
+	type span struct{ lo, hi int }
+
+	// collect all [ ... ] spans
+	var spans []span
+	for i := 0; i < len(line); i++ {
+		if line[i] != '[' {
+			continue
+		}
+		j := strings.IndexByte(line[i:], ']')
+		if j <= 1 {
+			continue
+		}
+		spans = append(spans, span{lo: i + 1, hi: i + j})
+		i += j
+	}
+	if len(spans) == 0 {
+		return ""
+	}
+
+	// parseCanonical returns (parsed net.IP, canonical string) and handles IPv6-mapped v4.
+	parseCanonical := func(s string) (net.IP, string) {
+		s = strings.TrimSpace(s)
+
+		// Try to pull a trailing IPv4 from IPv6-mapped literals like ::ffff:1.2.3.4
+		if strings.Count(s, ":") >= 2 {
+			if k := strings.LastIndexByte(s, ':'); k >= 0 && k+1 < len(s) {
+				if v4 := net.ParseIP(s[k+1:]); v4 != nil {
+					if q := v4.To4(); q != nil {
+						return q, q.String()
+					}
+				}
+			}
+		}
+
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return nil, ""
+		}
+		if v4 := ip.To4(); v4 != nil {
+			return v4, v4.String()
+		}
+		return ip, ip.String()
+	}
+
+	isGlobal := func(ip net.IP) bool {
+		if ip == nil {
+			return false
+		}
+		if v4 := ip.To4(); v4 != nil {
+			// RFC1918
+			if v4[0] == 10 {
+				return false
+			}
+			if v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31 {
+				return false
+			}
+			if v4[0] == 192 && v4[1] == 168 {
+				return false
+			}
+			// link-local 169.254/16
+			if v4[0] == 169 && v4[1] == 254 {
+				return false
+			}
+			// loopback 127/8
+			if v4[0] == 127 {
+				return false
+			}
+			return true
+		}
+		// IPv6: loopback ::1, ULA fc00::/7, link-local fe80::/10
+		if ip.IsLoopback() {
+			return false
+		}
+		if ip[0]&0xfe == 0xfc { // fc00::/7
+			return false
+		}
+		if ip[0] == 0xfe && (ip[1]&0xc0) == 0x80 { // fe80::/10
+			return false
+		}
+		return true
+	}
+
+	// Pass 1: right → left, return first global/public IP
+	for i := len(spans) - 1; i >= 0; i-- {
+		cand := line[spans[i].lo:spans[i].hi]
+		ip, canon := parseCanonical(cand)
+		if canon != "" && isGlobal(ip) {
+			return canon
+		}
+	}
+
+	// Pass 2: right → left, return first valid IP (even if private)
+	for i := len(spans) - 1; i >= 0; i-- {
+		cand := line[spans[i].lo:spans[i].hi]
+		_, canon := parseCanonical(cand)
+		if canon != "" {
+			return canon
+		}
+	}
+
+	return ""
 }
 
-// (cooldown handled by core.AlertGate; no local cool())
 
 
 
