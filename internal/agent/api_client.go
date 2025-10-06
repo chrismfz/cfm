@@ -6,7 +6,7 @@ import (
     "io"
     "net/http"
     "net/url"
-//    "strconv"
+    "strconv"
     "strings"
     "time"
 
@@ -48,20 +48,22 @@ var _ reporting.Reporter = (*APIClient)(nil)
 
 
 func (c *APIClient) ReportBlock(ip, reason, source, mode string, ttlSec int) error {
-    // Στέλνουμε reason ως comment/description· timestamp = now()
     p := url.Values{
         "ip":          {ip},
         "comment":     {reason},
         "description": {reason},
         "timestamp":   {time.Now().Format(time.RFC3339)},
     }
-    logging.LogfAPI("[api] → /api/blocklist/report ip=%s", ip)
+    if ttlSec > 0 {
+        p.Set("ttl", strconv.Itoa(ttlSec)) // e.g. 3600
+    }
+    logging.LogfAPI("[api] → /api/blocklist/report ip=%s ttl=%d", ip, ttlSec)
     _, err := c.doPOST("/api/blocklist/report", p)
     if err != nil {
         logging.LogfAPI("[api] report block FAILED ip=%s err=%v", ip, err)
         return err
     }
-    logging.LogfAPI("[api] ← report block OK ip=%s", ip)
+    logging.LogfAPI("[api] ← report block OK ip=%s ttl=%d", ip, ttlSec)
     return nil
 }
 
