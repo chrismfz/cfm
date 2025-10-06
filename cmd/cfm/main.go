@@ -400,9 +400,13 @@ func runUnblock(args []string) {
         fmt.Fprintln(os.Stderr, "no firewall backend available")
         os.Exit(1)
     }
-    if err := be.EnsureBase(); err != nil {
-        fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-        os.Exit(1)
+
+    // Only ensure on a truly fresh box; otherwise skip the expensive bootstrapping.
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil {
+            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+            os.Exit(1)
+        }
     }
 
     cfgDir, _ := resolveConfigDir("")

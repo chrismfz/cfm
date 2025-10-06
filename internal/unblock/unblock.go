@@ -84,17 +84,19 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
         r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionChecked, Feeds: feeds})
     }
 
-    // 1) nft remove
+    // 1) nft remove (no expensive EnsureBase; table should already exist in normal ops)
     if opts.BE != nil {
-        if err := opts.BE.EnsureBase(); err != nil {
-            r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
-        } else {
-            if err := opts.BE.RemoveBlock(ip); err != nil {
-                r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "RemoveBlock failed", Err: err.Error()})
-            } else {
-                r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved})
-                r.WasBlocked = true
+        if !nftTableExists() {
+            // last-resort bootstrap, but extremely rare in practice
+            if err := opts.BE.EnsureBase(); err != nil {
+                r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
             }
+        }
+        if err := opts.BE.RemoveBlock(ip); err != nil {
+            r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "RemoveBlock failed", Err: err.Error()})
+        } else {
+            r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved})
+            r.WasBlocked = true
         }
     }
 
@@ -321,3 +323,9 @@ func feedKeyFromSet(setName string) string {
     return ""
 }
 
+
+
+func nftTableExists() bool {
+    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
+    return cmd.Run() == nil
+}
