@@ -5,6 +5,7 @@ import (
     "net"
     "strings"
     "time"
+    "os/exec"
 
     "cfm/internal/firewall"
     "cfm/internal/logging"
@@ -30,9 +31,14 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         _ = c.ConfirmUnblock(id, ipStr, true)
         return
     }
-    if err := be.EnsureBase(); err != nil {
-        logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
-    }
+
+ // Only bootstrap if the table is missing (fast path on normal systems).
+ if !tableExistsCFM() {
+     if err := be.EnsureBase(); err != nil {
+         logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
+     }
+ }
+
     ttl := 1 * time.Hour // TODO: ρυθμιζόμενο από config αν θέλεις
     res, err := unblock.Do(ctx, ip, unblock.Options{
         BE:             be,
@@ -41,7 +47,7 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         AllowTTL:       &ttl,
         Reporter:       c,          // θα στείλει reason "feeds:..." ή "manual"
         ReportWhy:      "agent",
-        SendAPI:        true,
+        SendAPI:        false,
         Fail2BanUnban:  true,      // baby-step: OFF στον agent για να αποφύγουμε loops
     })
     if err != nil {
@@ -65,3 +71,16 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
     }
     logging.LogfAPI("[api] unblock-confirm OK id=%d ip=%s", id, ipStr)
 }
+
+
+
+
+
+
+// put near other helpers in cmd/cfm/main.go
+func tableExistsCFM() bool {
+    // terse + numeric; no set elements printed
+    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
+    return cmd.Run() == nil
+}
+

@@ -91,7 +91,7 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 
     // 1) nft remove (no expensive EnsureBase; table should already exist in normal ops)
     if opts.BE != nil {
-        if !nftTableExists() {
+        if !tableExistsCFM() {
             // last-resort bootstrap, but extremely rare in practice
             if err := opts.BE.EnsureBase(); err != nil {
                 r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
@@ -180,7 +180,7 @@ if binaryExists("fail2ban-client") && unitActive("fail2ban") {
     }
 
     // 5) Optional API report (ενοποιημένα — π.χ. να στείλουμε reason = "feeds: a,b" ή "manual")
-    if opts.SendAPI && opts.Reporter != nil {
+if opts.SendAPI && opts.Reporter != nil && opts.ReportWhy != "agent" {
         why := "manual"
         if len(r.FromFeeds) > 0 {
             why = "feeds:" + strings.Join(r.FromFeeds, ",")
@@ -335,7 +335,7 @@ func feedKeyFromSet(setName string) string {
 
 
 
-func nftTableExists() bool {
+func tableExistsCFM() bool {
     cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
     return cmd.Run() == nil
 }
@@ -347,3 +347,5 @@ func unitActive(unit string) bool {
     }
     return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
 }
+
+

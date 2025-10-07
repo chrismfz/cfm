@@ -628,7 +628,11 @@ func runAllowList(args []string) {
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+    // read-only; only bootstrap when table is missing
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    }
 	entries, err := be.ListAllows(); if err != nil { fmt.Fprintln(os.Stderr, "list error:", err); os.Exit(1) }
 	if *asJSON {
 		type out struct{ IP string `json:"ip"`; Expires *time.Time `json:"expires,omitempty"` }
@@ -1166,7 +1170,12 @@ func runList(args []string) {
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+    // read-only; only bootstrap when table is missing
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    }
+
 	entries, err := be.ListBlocks(); if err != nil { fmt.Fprintln(os.Stderr, "list error:", err); os.Exit(1) }
 	if *asJSON {
 		type out struct{ IP string `json:"ip"`; Expires *time.Time `json:"expires,omitempty"`; Comment string `json:"comment,omitempty"` }
@@ -1184,7 +1193,11 @@ func runList(args []string) {
 
 func runFlush(args []string) {
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+
+    // mutate existing sets; only ensure when table is missing
+    if !tableExistsCFM() {
+        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+    }
 	cmds := []string{
 		fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "block_v4"),
 		fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "block_v6"),
@@ -1439,7 +1452,12 @@ func runWhich(args []string) {
 
     arg := fs.Arg(0)
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+ // read-only: only ensure on a fresh box
+ if !tableExistsCFM() {
+     if err := be.EnsureBase(); err != nil {
+         fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1)
+     }
+ }
     hitsFast, err := fastWhich(be, arg)
     if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
 
