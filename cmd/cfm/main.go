@@ -66,7 +66,7 @@ func getBackend() firewall.Backend {
 // ----------------------------------------------------------------------------
 // Debugger - Start in runDaemon
 // ----------------------------------------------------------------------------
-// startDebug launches a local pprof/metrics server on 127.0.0.1:6060
+// startDebug launches a local pprof/metrics server on given address (e.g. "127.0.0.1:6060")
 //
 // Access only from localhost unless you change the bind address.
 // Safe to leave running permanently; overhead is near zero until endpoints hit.
@@ -87,11 +87,16 @@ func getBackend() firewall.Backend {
 //   # Metrics (if promhttp enabled)
 //   curl http://127.0.0.1:6060/metrics
 //
-func startDebug() {
-    addr := "127.0.0.1:6060"
 
+func startDebug(addr string) {
+    // Resolve cfgDir once (so /unblock’s background job can edit cfm.deny)
+    var cfgDir string
+    if d, ok := resolveConfigDir(""); ok {
+        cfgDir = d
+    }
 
-
+    // Grab the already-initialized backend (daemon mode)
+    be := getBackend()
 
     http.HandleFunc("/nginx/top", func(w http.ResponseWriter, r *http.Request) {
         q := r.URL.Query()
@@ -111,13 +116,114 @@ func startDebug() {
         _ = json.NewEncoder(w).Encode(rows)
     })
 
+    // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
+    http.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        w.Header().Set("Content-Type", "application/json")
 
+        // ---- Parse IP from query, form, JSON, or raw body ----
+        ipStr := strings.TrimSpace(r.URL.Query().Get("ip"))
+        if ipStr == "" && r.Method == http.MethodPost {
+            ct := strings.ToLower(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
+            switch {
+            case ct == "application/json":
+                var tmp struct{ IP string `json:"ip"` }
+                _ = json.NewDecoder(r.Body).Decode(&tmp)
+                ipStr = strings.TrimSpace(tmp.IP)
+            case ct == "application/x-www-form-urlencoded" || strings.HasPrefix(ct, "multipart/form-data"):
+                if err := r.ParseForm(); err == nil {
+                    ipStr = strings.TrimSpace(r.Form.Get("ip"))
+                    if ipStr == "" && len(r.Form) == 1 {
+                        // Allow bare payload: -d "1.2.3.4"
+                        for k := range r.Form { ipStr = strings.TrimSpace(k); break }
+                    }
+                }
+            default:
+                // text/plain or unknown: support "IP" or "IP # comment"
+                b, _ := io.ReadAll(r.Body)
+                s := strings.TrimSpace(string(b))
+                if i := strings.IndexAny(s, " \t#"); i > 0 { s = strings.TrimSpace(s[:i]) }
+                ipStr = s
+            }
+        }
+
+        ip := net.ParseIP(ipStr)
+        if ip == nil {
+            w.WriteHeader(http.StatusBadRequest)
+            _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid or missing ip"})
+            return
+        }
+        if be == nil {
+            w.WriteHeader(http.StatusServiceUnavailable)
+            _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no firewall backend"})
+            return
+        }
+
+        // ---- FAST local path: detect + remove from nft
+        wasBlocked := false
+        if entries, err := be.ListBlocks(); err == nil {
+            for _, e := range entries {
+                if e.IP.Equal(ip) { wasBlocked = true; break }
+            }
+        }
+        _ = be.RemoveBlock(ip) // idempotent; fine if not present
+
+        // (A) capture requester once (for logs later)
+        requester := func() string {
+            if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+                parts := strings.Split(xf, ",")
+                return strings.TrimSpace(parts[0])
+            }
+            host, _, err := net.SplitHostPort(r.RemoteAddr)
+            if err != nil { return r.RemoteAddr }
+            return host
+        }()
+
+        // ---- Immediate response
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "ok":          true,
+            "ip":          ip.String(),
+            "was_blocked": wasBlocked,
+            "duration_ms": time.Since(start).Milliseconds(),
+            "bg_cleanup":  true,
+        })
+
+        // ---- Fire-and-forget: CSF / Fail2Ban / Imunify (and logs) ----
+        go func(ip net.IP, requester string) {
+            bgStart := time.Now()
+            ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+            defer cancel()
+
+            // Re-run local removals idempotently + cfm.deny cleanup + csf/fail2ban/imunify + feed detection
+            res, _ := unblock.Do(ctx, ip, unblock.Options{
+                BE:            be,
+                ConfigDir:     cfgDir,
+                TempWhitelist: true,     // add allow if feed-blocked (override); set to false if you don’t want this
+                AllowTTL:      nil,      // e.g. &ttl := 24*time.Hour
+                Reporter:      nil,      // no API chatter from this endpoint
+                ReportWhy:     "debug-endpoint",
+                SendAPI:       false,
+                Fail2BanUnban: true,
+                // RemoveFromFeeds: true, // enable if you also want to delete from block_ext_* host sets (not recommended)
+            })
+
+            // (B) Summarize to api.log (single summary + per-step)
+            elapsed := time.Since(bgStart)
+            logging.LogfAPI("[unblock] requester=%s ip=%s took=%s was_blocked=%t from_feeds=%s whitelisted=%t steps=%d",
+                requester, ip.String(), elapsed, res.WasBlocked, strings.Join(res.FromFeeds, ","), res.Whitelisted, len(res.Steps))
+
+            for _, s := range res.Steps {
+                detail := s.Detail
+                if len(detail) > 200 { detail = detail[:200] + "…" }
+                logging.LogfAPI("[unblock.step] ip=%s src=%s action=%s dur=%s feeds=%v err=%q detail=%q",
+                    ip.String(), s.Source, s.Action, s.Dur, s.Feeds, s.Err, detail)
+            }
+        }(ip, requester)
+    })
 
     // Optional: small banner without requiring logging.Init
     go func(a string) {
-        // give the main thread a head start; avoid interleaving early prints
         time.Sleep(50 * time.Millisecond)
-        // don't fatal if taken; just skip quietly
         _ = http.ListenAndServe(a, nil)
     }(addr)
 }
@@ -315,7 +421,7 @@ func runBlock(args []string) {
     // Firewall apply
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
     // Fast path: table is already there in normal operation
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil {
             fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
             os.Exit(1)
@@ -335,7 +441,7 @@ func runBlock(args []string) {
     if cfgDir, ok := resolveConfigDir(""); ok {
         if dur == nil || (dur != nil && *dur <= 0) {
             // Γράφουμε σχόλιο μετά το IP — οι helpers σου αγνοούν ό,τι είναι μετά από κενό/# όταν κάνουν remove/search
-            line := target
+            var line string
             if isCIDR { line = cidrNet } else { line = ip.String() }
             if rsn != "" { line += "  # " + rsn }
             if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
@@ -402,7 +508,7 @@ func runUnblock(args []string) {
     }
 
     // Only ensure on a truly fresh box; otherwise skip the expensive bootstrapping.
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil {
             fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
             os.Exit(1)
@@ -528,7 +634,7 @@ func runAllow(args []string) {
 
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
     // Fast path: table is already there in normal operation
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil {
             fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
             os.Exit(1)
@@ -547,14 +653,15 @@ func runAllow(args []string) {
 		}
 	}
 	// cfm.allow — μόνο για permanent (να μην αποθηκεύουμε TTL που θα λήξουν)
-	if cfgDir, ok := resolveConfigDir(""); ok {
-		if dur == nil || (dur != nil && *dur <= 0) {
-			line := target
-			if isCIDR {
-				line = cidrNet // canonical μορφή στο αρχείο
-			} else {
-				line = ip.String()
-			}
+
+    if cfgDir, ok := resolveConfigDir(""); ok {
+        if dur == nil || (dur != nil && *dur <= 0) {
+            var line string
+            if isCIDR {
+                line = cidrNet // canonical μορφή στο αρχείο
+            } else {
+                line = ip.String()
+            }
 			if err := appendUniqueLine(cfgDir, "cfm.allow", line); err != nil {
 				fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err)
 			}
@@ -586,7 +693,7 @@ func runUnallow(args []string) {
 
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
     // Fast path: table is already there in normal operation
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil {
             fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
             os.Exit(1)
@@ -630,7 +737,7 @@ func runAllowList(args []string) {
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 
     // read-only; only bootstrap when table is missing
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
     }
 	entries, err := be.ListAllows(); if err != nil { fmt.Fprintln(os.Stderr, "list error:", err); os.Exit(1) }
@@ -657,7 +764,24 @@ func runHTTPTop(args []string) {
     _ = fs.Parse(args)
 
     // Try daemon first
-    url := fmt.Sprintf("http://127.0.0.1:6060/nginx/top?limit=%d", *limit)
+//    url := fmt.Sprintf("http://127.0.0.1:6060/nginx/top?limit=%d", *limit)
+    // Resolve address from active config (cfm.conf), fallback to defaults
+    host := "127.0.0.1"
+    port := 6060
+    if cfgDir, ok := resolveConfigDir(""); ok {
+        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
+                if strings.TrimSpace(cfg.Debug.ListenAddress) != "" {
+                    host = strings.TrimSpace(cfg.Debug.ListenAddress)
+                }
+                if cfg.Debug.Port > 0 && cfg.Debug.Port <= 65535 {
+                    port = cfg.Debug.Port
+                }
+            }
+        }
+    }
+    // Try daemon first
+    url := fmt.Sprintf("http://%s:%d/nginx/top?limit=%d", host, port, *limit)
     resp, err := http.Get(url)
     if err == nil && resp.StatusCode == 200 {
         defer resp.Body.Close()
@@ -757,7 +881,8 @@ func runDaemon(args []string) {
 	}
 
 //Start Debug//
-startDebug()
+//startDebug()
+// Debug server will be started after we parse cfm.conf in applyPorts (respects LISTEN_ADDRESS/PORT)
 //End Debug//
 
 
@@ -907,7 +1032,10 @@ startDebug()
 	loadAgent := func() { startOrUpdateAgent(lastCfg) }
 
 	// cfm.conf loader/applier (single place)
-	ctx, _ := context.WithCancel(context.Background())
+//	ctx, _ := context.WithCancel(context.Background())
+        ctx, cancel := context.WithCancel(context.Background())
+        defer cancel()
+
 	var smtpSnoopStarted bool
 
     // Ensure base data dir exists very early
@@ -944,6 +1072,21 @@ ensureDir("/var/log/cfm", 0o700)
 			return
 		}
 		lastCfg = cfg
+
+
+        // ---- Debug server (start once, with config values) ----
+        // Build addr from config defaults (defaults are applied by SetDefaults)
+        debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+        // start only once; rely on ListenAndServe returning error if already bound
+        // (we gate with an env flag to avoid accidental multiple starts if applyPorts runs many times)
+        if os.Getenv("CFM_DEBUG_HTTP_STARTED") == "" {
+            startDebug(debugAddr)
+            // mark as started in-process (no need to export to env; just set process-wide)
+            _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
+            logging.Logf("[debug] http server on %s", debugAddr)
+        }
+
+
 
         // Ensure MaxMind dir exists after config defaults/overrides
         if cfg.MaxMind.Dir == "" {
@@ -1106,27 +1249,27 @@ detpkg.Start(context.Background(), detpkg.Options{
 
 
 	// Loop
-	t := time.NewTicker(*interval); defer t.Stop()
-	for {
-		select {
-		case <-t.C:
-			reloadBlocklists() // only if cfm.blocklists changed
-			loadAll()          // only if cfm.allow/cfm.deny changed
-			applyPorts()       // only if cfm.conf changed
-			loadAgent()
 
-			// periodic maintenance
-			if nb, ok := be.(*nft.Backend); ok {
-				nb.DumpFloodCounters()
-				nb.LoadPortScanner()
-			}
-			if ddm.FileChanged() {
-				_ = ddm.LoadOnce(context.Background())
-			} else {
-				ddm.Tick(context.Background(), time.Now())
-			}
-		}
-	}
+    t := time.NewTicker(*interval); defer t.Stop()
+    for range t.C {
+        reloadBlocklists() // only if cfm.blocklists changed
+        loadAll()          // only if cfm.allow/cfm.deny changed
+        applyPorts()       // only if cfm.conf changed
+        loadAgent()
+
+        // periodic maintenance
+        if nb, ok := be.(*nft.Backend); ok {
+            nb.DumpFloodCounters()
+            nb.LoadPortScanner()
+        }
+        if ddm.FileChanged() {
+            _ = ddm.LoadOnce(context.Background())
+        } else {
+            ddm.Tick(context.Background(), time.Now())
+        }
+    }
+
+
 }
 
 
@@ -1136,13 +1279,6 @@ detpkg.Start(context.Background(), detpkg.Options{
 
 
 
-func equalSlices(a, b []string) bool {
-	if len(a) != len(b) { return false }
-	ma := make(map[string]struct{}, len(a))
-	for _, x := range a { ma[x] = struct{}{} }
-	for _, x := range b { if _, ok := ma[x]; !ok { return false } }
-	return true
-}
 
 func hasBinary(name string) (string, bool) { if p, ok := lookPath(name); ok { return p, true }; return "not found in PATH", false }
 func lookPath(name string) (string, bool) { p, err := exec.LookPath(name); return p, err == nil }
@@ -1172,7 +1308,7 @@ func runList(args []string) {
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 
     // read-only; only bootstrap when table is missing
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
     }
 
@@ -1195,7 +1331,7 @@ func runFlush(args []string) {
 	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
 
     // mutate existing sets; only ensure when table is missing
-    if !tableExistsCFM() {
+    if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
     }
 	cmds := []string{
@@ -1340,25 +1476,6 @@ func appendUniqueLine(dir, base, line string) error {
      return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0600)
  }
 
- func containsIPInFile(dir, filename, target string) bool {
-     isCIDR, ipStr, cidrStr, err := normalizeTarget(target)
-     if err != nil { return false }
-     want := ipStr
-     if isCIDR { want = cidrStr }
-
-     path := filepath.Join(dir, filename)
-     b, err := os.ReadFile(path); if err != nil { return false }
-     sc := bufio.NewScanner(bytes.NewReader(b))
-     for sc.Scan() {
-         line := strings.TrimSpace(sc.Text())
-         if line == "" || strings.HasPrefix(line, "#") { continue }
-         head := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-         fields := strings.Fields(head); if len(fields) == 0 { continue }
-         if fields[0] == want { return true }
-     }
-     return false
- }
-
 
 // entries parsing -----------------------------------------------------------
 
@@ -1414,29 +1531,6 @@ func durationFromEntryNow(e fileEntry, now time.Time) *time.Duration {
 	return e.TTL
 }
 
-// blocklist utils -----------------------------------------------------------
-
-// split into hosts (IPs or /32|/128) vs nets (CIDR < max prefix)
-func partitionHostsNets(elems []string, isV6 bool) (hosts []string, nets []string) {
-	seenH, seenN := map[string]struct{}{}, map[string]struct{}{}
-	maxBits := 32; if isV6 { maxBits = 128 }
-	for _, s := range elems {
-		s = strings.TrimSpace(s); if s == "" { continue }
-		if strings.Contains(s, "/") {
-			_, n, err := net.ParseCIDR(s); if err != nil { continue }
-			ones, bits := n.Mask.Size(); if bits != maxBits { continue }
-			if ones == maxBits { ip := n.IP.String(); if _, ok := seenH[ip]; !ok { seenH[ip] = struct{}{}; hosts = append(hosts, ip) } } else {
-				if _, ok := seenN[s]; !ok { seenN[s] = struct{}{}; nets = append(nets, s) }
-			}
-		} else {
-			ip := net.ParseIP(s); if ip == nil { continue }
-			if !isV6 && ip.To4() == nil { continue }
-			if isV6 && (ip.To16() == nil || ip.To4() != nil) { continue }
-			ipS := ip.String(); if _, ok := seenH[ipS]; !ok { seenH[ipS] = struct{}{}; hosts = append(hosts, ipS) }
-		}
-	}
-	return
-}
 
 // ----------------------------------------------------------------------------
 // which command (read-only query)
@@ -1453,7 +1547,7 @@ func runWhich(args []string) {
     arg := fs.Arg(0)
     be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
  // read-only: only ensure on a fresh box
- if !tableExistsCFM() {
+ if !nft.TableExistsCFM() {
      if err := be.EnsureBase(); err != nil {
          fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1)
      }
@@ -1647,9 +1741,3 @@ func feedKeyFromSet(setName string) string {
 	return ""
 }
 
-// put near other helpers in cmd/cfm/main.go
-func tableExistsCFM() bool {
-    // terse + numeric; no set elements printed
-    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
-    return cmd.Run() == nil
-}

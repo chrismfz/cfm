@@ -16,9 +16,9 @@ import (
 "bytes"
 "fmt"
 
-    "cfm/internal/firewall"
-    "cfm/internal/reporting"
-nftbe "cfm/internal/firewall/nft"
+"cfm/internal/firewall"
+"cfm/internal/reporting"
+"cfm/internal/firewall/nft"
 
 
 )
@@ -91,7 +91,7 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 
     // 1) nft remove (no expensive EnsureBase; table should already exist in normal ops)
     if opts.BE != nil {
-        if !tableExistsCFM() {
+        if !nft.TableExistsCFM() {
             // last-resort bootstrap, but extremely rare in practice
             if err := opts.BE.EnsureBase(); err != nil {
                 r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
@@ -251,7 +251,7 @@ func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
     if be == nil || ip == nil {
         return nil
     }
-    nb, ok := be.(*nftbe.Backend)
+    nb, ok := be.(*nft.Backend)
     if !ok {
         // only supported for nft backend; silently fall back to none
         return nil
@@ -334,11 +334,6 @@ func feedKeyFromSet(setName string) string {
 }
 
 
-
-func tableExistsCFM() bool {
-    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
-    return cmd.Run() == nil
-}
 
 // unitActive returns true if `systemctl is-active --quiet <unit>` succeeds.
 func unitActive(unit string) bool {

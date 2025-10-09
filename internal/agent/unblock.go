@@ -5,9 +5,9 @@ import (
     "net"
     "strings"
     "time"
-    "os/exec"
 
     "cfm/internal/firewall"
+    "cfm/internal/firewall/nft"
     "cfm/internal/logging"
     "cfm/internal/unblock"
 )
@@ -33,7 +33,7 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
     }
 
  // Only bootstrap if the table is missing (fast path on normal systems).
- if !tableExistsCFM() {
+ if !nft.TableExistsCFM() {
      if err := be.EnsureBase(); err != nil {
          logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
      }
@@ -76,11 +76,4 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
 
 
 
-
-// put near other helpers in cmd/cfm/main.go
-func tableExistsCFM() bool {
-    // terse + numeric; no set elements printed
-    cmd := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm")
-    return cmd.Run() == nil
-}
 

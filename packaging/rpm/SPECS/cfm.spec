@@ -1,6 +1,6 @@
 Name:           cfm
-Version:        2025.10.06
-Release:        1.214010%{?dist}
+Version:        2025.10.09
+Release:        1.115555%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
@@ -17,8 +17,6 @@ cfm: local nftables manager (block/allow with optional TTL), plus simple list/un
 
 %build
 # nothing
-
-
 
 %install
 rm -rf %{buildroot}
@@ -58,7 +56,34 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
-%systemd_post cfm.service
+# Ensure correct SELinux context in case older versions used /lib path
+[ -f /lib/systemd/system/cfm.service ] && \
+  chcon -h system_u:object_r:systemd_unit_file_t:s0 /lib/systemd/system/cfm.service || true
+
+systemctl daemon-reload || true
+
+# Step 1: check if running
+was_active=0
+if systemctl is-active --quiet cfm.service; then
+    echo "CFM is currently running — stopping..."
+    was_active=1
+    systemctl stop cfm.service || true
+fi
+
+# Step 2: always disable (flush nftables)
+if [ -x "%{_bindir}/cfm" ]; then
+    echo "Flushing tables with: cfm disable"
+    "%{_bindir}/cfm" disable || true
+fi
+
+# Step 3: if it was running, start again
+if [ "$was_active" -eq 1 ]; then
+    echo "CFM was active — starting it again..."
+    systemctl start cfm.service || true
+else
+    echo "CFM was not running — leaving stopped."
+fi
+
 
 %preun
 %systemd_preun cfm.service

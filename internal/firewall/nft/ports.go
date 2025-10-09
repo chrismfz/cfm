@@ -45,7 +45,8 @@ func normalizeRanges(prs []config.PortRange) []config.PortRange {
 	// αν υπάρχει full-range -> ένα range
 	for _, r := range prs {
 		if r.From == 0 && r.To == 65535 {
-			return []config.PortRange{{0, 65535}}
+			//return []config.PortRange{{0, 65535}}
+			return []config.PortRange{{From: 0, To: 65535}}
 		}
 	}
 
@@ -124,7 +125,19 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
     }
 
     // load contents
-    if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
+//    if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
+    // --- Debug port: remove it from the generic tcp_in set so it won't open to the world
+    filteredTCPIn := cfg.TCPIn
+    dbgPort := 0
+    if b.cfg != nil && b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
+        dbgPort = b.cfg.Debug.Port
+        if dbgPort > 0 {
+            filteredTCPIn = subtractPort(filteredTCPIn, dbgPort)
+        }
+    }
+
+    // load contents (with debug port removed)
+    if err := b.replacePortSet(setTCPIn,  filteredTCPIn);  err != nil { return err }
     if err := b.replacePortSet(setUDPIn,  cfg.UDPIn);  err != nil { return err }
     if err := b.replacePortSet(setTCPOut, cfg.TCPOut); err != nil { return err }
     if err := b.replacePortSet(setUDPOut, cfg.UDPOut); err != nil { return err }
@@ -226,6 +239,22 @@ delRule("input", `udp dport @`+setUDPIn+` accept`)
 if err := addRule("input", `ct state new tcp dport @`+setTCPIn+` accept`); err != nil { return err }
 if err := addRule("input", `ct state new udp dport @`+setUDPIn+` accept`); err != nil { return err }
 
+    // === Debug HTTP server exposure (strict) ===
+    // If debug port is configured, permit it ONLY from loopback/self and the resolved API IPs.
+    if dbgPort > 0 {
+        // Ensure API debug sets exist and are refreshed
+        if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil { return err }
+        if err := b.ensureSet(debugAPIV6, "ipv6_addr"); err != nil { return err }
+        b.refreshAPISets()
+
+        // Accept NEW only from self + API sets
+        if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @self_v4 accept`, dbgPort)); err != nil { return err }
+        if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @self_v6 accept`, dbgPort)); err != nil { return err }
+        if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @%s accept`, dbgPort, debugAPIV4)); err != nil { return err }
+        if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @%s accept`, dbgPort, debugAPIV6)); err != nil { return err }
+        // No generic accept for this port here — everyone else ends up in the default NEW drops below.
+    }
+
     // -------------------------
     // Port-scan tracking (ΜΕΤΑ τα accepts όταν ΔΕΝ έχεις φίλτρο υπηρεσιών)
     // -------------------------
@@ -291,4 +320,26 @@ if err := addRule("output", `ct state new udp dport 0-65535 drop`); err != nil {
 
 
     return nil
+}
+
+
+// subtractPort removes a single TCP port from a slice of PortRange, splitting ranges as needed.
+func subtractPort(prs []config.PortRange, p int) []config.PortRange {
+    if p <= 0 || p > 65535 || len(prs) == 0 { return prs }
+    out := make([]config.PortRange, 0, len(prs)+1)
+    for _, r := range prs {
+        if p < r.From || p > r.To {
+            out = append(out, r)
+            continue
+        }
+        // p intersects this range; split around p
+        if r.From < p {
+            out = append(out, config.PortRange{From: r.From, To: p - 1})
+        }
+        if p < r.To {
+            out = append(out, config.PortRange{From: p + 1, To: r.To})
+        }
+        // if p == From == To -> drop entirely
+    }
+    return out
 }

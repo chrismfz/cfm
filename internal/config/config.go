@@ -27,9 +27,17 @@ type Config struct {
 	AckGuard AckGuardConfig
 	SMTPBlock SMTPBlockConfig
 	MaxMind  MaxMindConfig
+	Debug     DebugConfig
 }
 
 // --- Categories ---
+
+
+// DebugConfig — controls the internal debug/metrics HTTP server
+type DebugConfig struct {
+	ListenAddress string // LISTEN_ADDRESS
+	Port          int    // PORT
+}
 
 // SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
 type SMTPBlockConfig struct {
@@ -538,6 +546,14 @@ case "UDP_OUT":
 		case "SMTP_LOG_ENRICH":
 			cfg.SMTPBlock.LogEnrich = parseBool(val)
 
+		// --- Debug / HTTP listen ---
+		case "LISTEN_ADDRESS":
+			cfg.Debug.ListenAddress = val
+		case "PORT":
+			if n := parseInt(val); n > 0 && n <= 65535 {
+				cfg.Debug.Port = n
+			}
+			// if invalid, keep zero; defaults will fill
 
 		// --- MaxMind (GeoLite/GeoIP2 updater) ---
 		case "MAXMIND_ENABLED":

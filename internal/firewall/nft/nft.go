@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -39,6 +40,10 @@ const (
 
 	allowDynV4 = "allow_dyn_v4"
 	allowDynV6 = "allow_dyn_v6"
+
+	// Debug server: resolved API IPs (strictly for the debug port rules)
+	debugAPIV4 = "debug_api_v4"
+	debugAPIV6 = "debug_api_v6"
 
 	// external (SPLIT: hosts vs nets)
 	allowExtV4Hosts = "allow_ext_v4_hosts" // type ipv4_addr; flags timeout
@@ -249,6 +254,9 @@ func (b *Backend) EnsureBase() error {
 	// dyn allow
 	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
 	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
+	// debug-only API sets (hosts)
+	if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil { return err }
+	if err := b.ensureSet(debugAPIV6, "ipv6_addr"); err != nil { return err }
 	// external allow (hosts/nets)
 	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout");          err != nil { return err }
 	if err := b.ensureSetWithFlags(allowExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
@@ -395,6 +403,49 @@ if err := addRule(`ct state established,related accept`); err != nil { return er
 
 
 
+// refreshAPISets resolves cfg.API.URL (hostname in API_URL), populating debug_api_v4 / debug_api_v6.
+// No-op if URL is empty, invalid, or resolution fails. Best-effort.
+// Notes: We don’t add these sets to the global “ALLOW” early rules, so the API doesn’t get blanket access to other services. 
+// Only the debug port rules (below) will consult these sets.
+func (b *Backend) refreshAPISets() {
+	if b.cfg == nil || strings.TrimSpace(b.cfg.API.URL) == "" {
+		_ = b.nftExpr("flush set inet cfm " + debugAPIV4 + ";")
+		_ = b.nftExpr("flush set inet cfm " + debugAPIV6 + ";")
+		return
+	}
+	u := strings.TrimSpace(b.cfg.API.URL)
+	// Accept raw host or full URL
+	host := u
+	if strings.Contains(u, "://") {
+		if parsed, err := url.Parse(u); err == nil && parsed != nil {
+			host = parsed.Hostname()
+		}
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	var v4s, v6s []string
+	for _, ip := range ips {
+		if v := ip.To4(); v != nil {
+			v4s = append(v4s, v.String())
+		} else {
+			v6s = append(v6s, ip.String())
+		}
+	}
+	_ = b.nftExpr("flush set inet cfm " + debugAPIV4 + ";")
+	_ = b.nftExpr("flush set inet cfm " + debugAPIV6 + ";")
+	for _, ip := range v4s {
+		_ = b.nftExpr("add element inet cfm " + debugAPIV4 + " { " + ip + " };")
+	}
+	for _, ip := range v6s {
+		_ = b.nftExpr("add element inet cfm " + debugAPIV6 + " { " + ip + " };")
+	}
+}
 
 
 
@@ -802,6 +853,14 @@ func (b *Backend) tableExists() bool {
     }
     return false
 }
+
+
+
+func TableExistsCFM() bool {
+    var b Backend
+    return b.tableExists()
+}
+
 
 
 
