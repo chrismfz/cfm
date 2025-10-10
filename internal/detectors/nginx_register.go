@@ -43,6 +43,9 @@ func init() {
             RPS5xxMin:       kvFlt(kv, "RPS_5XX_MIN", 60),
             MedianIPRPSMax:  kvFlt(kv, "MEDIAN_IP_RPS_MAX", 3),
 
+RPS401Min:       kvFlt(kv, "RPS_401_MIN", 0),
+Auth401RatioMin: kvFlt(kv, "AUTH401_RATIO_MIN", 0),
+
 			UseEnrich:  useEnrich,
 			UsePTR:     usePTR,
 			EnrichDirs: dirs,

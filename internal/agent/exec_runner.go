@@ -35,11 +35,13 @@ func runCommand(ctx context.Context, command string) error {
         logging.LogfAPI("[exec] %s FAILED: %v (out: %s)", command, err, strings.TrimSpace(string(out)))
         return err
     }
-    if len(out) > 0 {
-        logging.LogfAPI("[exec] %s OK: %s", command, strings.TrimSpace(string(out)))
-    } else {
-        logging.LogfAPI("[exec] %s OK", command)
-    }
+
+if len(out) > 0 {
+    logging.LogfAPI("[exec] %s: %s", command, strings.TrimSpace(string(out)))
+}
+// no log on silent success
+
+
     return nil
 }
 
@@ -50,6 +52,9 @@ func (r *Runner) pollExecutions(ctx context.Context) {
     api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
     items, err := api.FetchExecutionTargets()
     if err != nil { logging.LogfAPI("[exec] fetch failed: %v", err); return }
+if len(items) == 0 { return }
+logging.LogfAPI("[exec] %d pending execution(s)", len(items))
+
     for _, it := range items {
         // timeout ανά command (π.χ. 20s)
         cctx, cancel := context.WithTimeout(ctx, 20*time.Second)

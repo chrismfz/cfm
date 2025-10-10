@@ -31,6 +31,7 @@ import (
 	"cfm/internal/unblock"
 	"cfm/internal/reporting"
 	nginxdet "cfm/internal/detectors/nginx"
+	httpddet "cfm/internal/detectors/httpd"
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
 
@@ -115,6 +116,27 @@ func startDebug(addr string) {
         w.Header().Set("Content-Type", "application/json")
         _ = json.NewEncoder(w).Encode(rows)
     })
+
+
+   // /httpd/top: live snapshot (same shape as nginx with extra 401 fields)
+    http.HandleFunc("/httpd/top", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query()
+        limit := 10
+        if v := q.Get("limit"); v != "" {
+            if n, err := strconv.Atoi(v); err == nil && n > 0 {
+                limit = n
+            }
+        }
+        d := httpddet.Live()
+        if d == nil {
+            http.Error(w, "httpd detector not live", http.StatusNotFound)
+            return
+        }
+        rows := d.SnapshotTop(limit)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
+
 
     // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
     http.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
@@ -294,8 +316,13 @@ func main() {
 		runReset(os.Args[2:])
 	case "disable":
 		runDisable(os.Args[2:])
+
 case "nginx-top":
-    runHTTPTop(os.Args[2:])
+    runWebTop("nginx", flag.Args())
+case "httpd-top":
+    runWebTop("httpd", flag.Args())
+
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
@@ -755,17 +782,15 @@ func runAllowList(args []string) {
 
 
 
-//nginx top
-
-func runHTTPTop(args []string) {
-    fs := flag.NewFlagSet("http-top", flag.ExitOnError)
+// Apache and Nginx "top" cli command
+// Apache and Nginx "top" cli command
+func runWebTop(kind string, args []string) {
+    fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
     limit := fs.Int("limit", 10, "rows")
     jsonOut := fs.Bool("json", false, "JSON output")
     _ = fs.Parse(args)
 
-    // Try daemon first
-//    url := fmt.Sprintf("http://127.0.0.1:6060/nginx/top?limit=%d", *limit)
-    // Resolve address from active config (cfm.conf), fallback to defaults
+    // Resolve host/port from active config (same logic as nginx-top)
     host := "127.0.0.1"
     port := 6060
     if cfgDir, ok := resolveConfigDir(""); ok {
@@ -780,46 +805,51 @@ func runHTTPTop(args []string) {
             }
         }
     }
-    // Try daemon first
-    url := fmt.Sprintf("http://%s:%d/nginx/top?limit=%d", host, port, *limit)
+
+    url := fmt.Sprintf("http://%s:%d/%s/top?limit=%d", host, port, kind, *limit)
     resp, err := http.Get(url)
-    if err == nil && resp.StatusCode == 200 {
-        defer resp.Body.Close()
+    if err != nil || resp.StatusCode != 200 {
+        fmt.Fprintf(os.Stderr, "%s daemon not reachable\n", kind)
+        os.Exit(1)
+    }
+    defer resp.Body.Close()
 
-var rows []struct {
-    Host      string  `json:"host"`
-    RPSTotal  float64 `json:"rps"`
-    RPS2xx    float64 `json:"rps_2xx"`
-    RPS3xx    float64 `json:"rps_3xx"`
-    RPS4xx    float64 `json:"rps_4xx"`
-    RPS5xx    float64 `json:"rps_5xx"`
-    RPS499    float64 `json:"rps_499"`
-    UniqueIPs int     `json:"unique_ips"`
-    ErrRatio  float64 `json:"err_ratio"`
-}
-
-        if err := json.NewDecoder(resp.Body).Decode(&rows); err == nil {
-            if *jsonOut {
-                b, _ := json.MarshalIndent(rows, "", "  ")
-                fmt.Println(string(b))
-                return
-            }
-
-fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s\n",
-    "HOST","RPS","2xx","3xx","4xx","5xx","499","uniqIP","err%")
-for _, r := range rows {
-    fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f\n",
-        r.Host, r.RPSTotal, r.RPS2xx, r.RPS3xx, r.RPS4xx, r.RPS5xx, r.RPS499, r.UniqueIPs, r.ErrRatio*100)
-}
-
-
-            return
-        }
+    // superset row struct (works for both nginx & httpd)
+    var rows []struct {
+        Host         string  `json:"host"`
+        RPSTotal     float64 `json:"rps"`
+        RPS2xx       float64 `json:"rps_2xx"`
+        RPS3xx       float64 `json:"rps_3xx"`
+        RPS4xx       float64 `json:"rps_4xx"`
+        RPS5xx       float64 `json:"rps_5xx"`
+        RPS499       float64 `json:"rps_499"`
+        RPS401       float64 `json:"rps_401"`         // may be 0 for nginx
+        UniqueIPs    int     `json:"unique_ips"`
+        ErrRatio     float64 `json:"err_ratio"`
+        Auth401Ratio float64 `json:"auth401_ratio"`   // may be 0/omitted for nginx
     }
 
-    // Fallback: tail the log (if daemon not running). (Use the simple tail+filter approach we discussed earlier.)
-    // ... (you can keep the log-tail implementation you already pasted in earlier)
+    if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+        fmt.Fprintln(os.Stderr, "decode error:", err)
+        os.Exit(1)
+    }
+
+    if *jsonOut {
+        b, _ := json.MarshalIndent(rows, "", "  ")
+        fmt.Println(string(b))
+        return
+    }
+
+    // print table (works for both; nginx just shows 0.00 for 401)
+    fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s %8s\n",
+        "HOST", "RPS", "2xx", "3xx", "4xx", "5xx", "401", "499", "uniqIP", "err%")
+    for _, r := range rows {
+        fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f\n",
+            r.Host, r.RPSTotal, r.RPS2xx, r.RPS3xx, r.RPS4xx, r.RPS5xx,
+            r.RPS401, r.RPS499, r.UniqueIPs, r.ErrRatio*100)
+    }
 }
+
 
 
 

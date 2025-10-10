@@ -99,7 +99,7 @@ type PendingUnblock struct {
 
 func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/pending-unblocks"
-	logging.LogfAPI("[api] → GET %s", u)
+	//logging.LogfAPI("[api] → GET %s", u)
 
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Token", c.Token)
@@ -124,7 +124,7 @@ func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
 		return nil, err
 	}
 
-	logging.LogfAPI("[api] ← pending_unblocks=%d", len(out.Pending))
+	//logging.LogfAPI("[api] ← pending_unblocks=%d", len(out.Pending))
 	return out.Pending, nil
 }
 

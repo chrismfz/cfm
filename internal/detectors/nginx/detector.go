@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
+	"fmt"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
@@ -29,6 +29,8 @@ type Config struct {
 	RPS499Min      float64
 	RPS5xxMin      float64
 	MedianIPRPSMax float64
+RPS401Min float64
+Auth401RatioMin float64
 
 	// enrich
 	UseEnrich  bool
@@ -62,9 +64,27 @@ type Row struct {
     R4        float64 `json:"rps_4xx"`
     R5        float64 `json:"rps_5xx"`
     R499      float64 `json:"rps_499"`
+    R401      float64 `json:"rps_401"`
     UniqueIPs int     `json:"unique_ips"`
     ErrRatio  float64 `json:"err_ratio"`
+    Auth401Ratio float64 `json:"auth401_ratio"` // optional to expose
 }
+
+
+// formatTop builds a brief inline “nginx-top” snapshot from current agg
+func (d *Detector) formatTop(n int) string {
+    rows := d.SnapshotTop(n)
+    if len(rows) == 0 { return "[nginx-top] (no data)" }
+    b := &strings.Builder{}
+    b.WriteString("[nginx-top] host rps 2xx 3xx 4xx 5xx 499 err% uniqIP\n")
+    for _, r := range rows {
+        fmt.Fprintf(b, "%s %.2f %.2f %.2f %.2f %.2f %.2f %.1f%% %d\n",
+            r.Host, r.RPSTotal, r.R2, r.R3, r.R4, r.R5, r.R499, r.ErrRatio*100, r.UniqueIPs)
+    }
+    return b.String()
+}
+
+
 
 // SnapshotTop returns the current top vhosts by RPS from the in-memory window.
 func (d *Detector) SnapshotTop(limit int) []Row {
@@ -75,7 +95,7 @@ func (d *Detector) SnapshotTop(limit int) []Row {
         m := d.agg.Metrics(h)
         rows = append(rows, Row{
             Host: h, RPSTotal: m.RPSTotal,
-            R2: m.RPS2xx, R3: m.RPS3xx, R4: m.RPS4xx, R5: m.RPS5xx, R499: m.RPS499,
+	R2: m.RPS2xx, R3: m.RPS3xx, R4: m.RPS4xx, R5: m.RPS5xx, R499: m.RPS499, R401: m.RPS401,
             UniqueIPs: m.UniqueIPs, ErrRatio: m.ErrRatio,
         })
     }
@@ -175,14 +195,18 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 					"window":        d.cfg.Window.String(),
 					"cooldown":      d.cfg.Cooldown.String(),
 				}
-				out <- core.Alert{
+		                topPeek := d.formatTop(5)
+		                alert := core.Alert{
 					When:    now,
 					Kind:    core.AlertKind("NGINX/ACCESS_DDOS"),
 					Key:     host,
 					Count:   int(m.RPSTotal),
-					Samples: d.agg.SampleLines(host, 10),
-					Extra:   extra,
+		                        Samples: append([]string{topPeek}, d.agg.SampleLines(host, 20)...),
+                    			Extra:   extra,
 				}
+                alert.Extra["top"] = topPeek
+                out <- alert
+
 			}
 		}
 	}
@@ -241,7 +265,7 @@ func zero(s string) string { if s == "-" || s == "" { return "0" }; return s }
 
 
 type classCtr struct {
-	total, c2xx, c3xx, c4xx, c5xx, c499 int
+	total, c2xx, c3xx, c4xx, c5xx, c499, c401 int
 	ips map[string]int
 }
 
@@ -282,7 +306,13 @@ func (a *hostAggregator) Add(r LogRec, line string) {
 	switch r.Status/100 {
 	case 2: b.c2xx++
 	case 3: b.c3xx++
-	case 4: b.c4xx++
+
+        case 4:
+        b.c4xx++
+        if r.Status == 401 {
+            b.c401++
+        }
+
 	case 5: b.c5xx++
 	}
 	if r.Status == 499 { b.c499++ }
@@ -305,19 +335,20 @@ func (a *hostAggregator) RotateIfDue(now time.Time) bool {
 }
 
 type Metrics struct {
-	RPSTotal, RPS2xx, RPS3xx, RPS4xx, RPS5xx, RPS499 float64
+	RPSTotal, RPS2xx, RPS3xx, RPS4xx, RPS5xx, RPS499, RPS401 float64
 	ErrRatio float64
 	UniqueIPs int
 	MedianPerIPRPS float64
+	Auth401Ratio float64
 }
 
 func (a *hostAggregator) Metrics(host string) Metrics {
 	h := a.hosts[host]; if h == nil { return Metrics{} }
-	var tot, c2, c3, c4, c5, c499 int
+	var tot, c2, c3, c4, c5, c499, c401 int
 	ipCounts := map[string]int{}
 	for i := range h.bkt {
 		b := &h.bkt[i]
-		tot += b.total; c2 += b.c2xx; c3 += b.c3xx; c4 += b.c4xx; c5 += b.c5xx; c499 += b.c499
+        tot += b.total; c2 += b.c2xx; c3 += b.c3xx; c4 += b.c4xx; c5 += b.c5xx; c499 += b.c499; c401 += b.c401
 		for ip, n := range b.ips { ipCounts[ip] += n }
 	}
 	winSec := a.win.Seconds()
@@ -328,10 +359,14 @@ func (a *hostAggregator) Metrics(host string) Metrics {
 		RPS4xx:   float64(c4)/winSec,
 		RPS5xx:   float64(c5)/winSec,
 		RPS499:   float64(c499)/winSec,
+		RPS401:   float64(c401)/winSec,
 	}
 	if m.RPSTotal > 0 {
 		m.ErrRatio = (m.RPS5xx + m.RPS499) / m.RPSTotal
 	}
+    if m.RPS4xx > 0 {
+        m.Auth401Ratio = m.RPS401 / m.RPS4xx
+    }
 	// unique IPs & median-per-IP RPS (approx via histogram)
 	m.UniqueIPs = len(ipCounts)
 	if m.UniqueIPs > 0 {

@@ -65,9 +65,15 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
         logging.LogfAPI("[unblock] fetch pending failed: %v", err)
         return
     }
-    for _, it := range reqs {
-        go api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
-    }
+
+if len(reqs) == 0 { return }
+for _, it := range reqs {
+    logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
+    go api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+}
+
+
+
 }
 
 func (r *Runner) loop() {
