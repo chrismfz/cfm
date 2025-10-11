@@ -243,11 +243,27 @@ func startDebug(addr string) {
         }(ip, requester)
     })
 
-    // Optional: small banner without requiring logging.Init
-    go func(a string) {
-        time.Sleep(50 * time.Millisecond)
-        _ = http.ListenAndServe(a, nil)
-    }(addr)
+// Optional: small banner without requiring logging.Init
+go func(a string) {
+    time.Sleep(50 * time.Millisecond)
+
+    srv := &http.Server{
+        Addr:              a,
+        Handler:           http.DefaultServeMux, // you registered with http.HandleFunc above
+        ReadHeaderTimeout: 2 * time.Second,
+        ReadTimeout:       5 * time.Second,
+        WriteTimeout:      10 * time.Second,
+        IdleTimeout:       60 * time.Second,
+        MaxHeaderBytes:    1 << 20, // 1MB
+    }
+
+    // Start server
+    if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+        // log if you want: logging.Logf("debug HTTP: %v", err)
+    }
+}(addr)
+
+
 }
 
 
