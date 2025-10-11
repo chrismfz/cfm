@@ -65,8 +65,8 @@ func (t *FileTailer) Open() error {
 	}
 	st, err := f.Stat()
 	if err != nil {
-		f.Close()
-		return err
+        _ = f.Close()
+        return err
 	}
 	curInode := inodeOf(st)
 
@@ -85,10 +85,10 @@ func (t *FileTailer) Open() error {
 	}
 
 
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		f.Close()
-		return err
-	}
+    if _, err := f.Seek(off, io.SeekStart); err != nil {
+        _ = f.Close()
+        return err
+    }
 
 	t.f = f
 	t.r = bufio.NewReaderSize(f, 256*1024)
@@ -96,6 +96,62 @@ func (t *FileTailer) Open() error {
 	t.off = off
 	return nil
 }
+
+
+
+
+
+
+
+// safeClose ensures file handles are closed safely
+func safeClose(f *os.File) error {
+    if f == nil {
+        return nil
+    }
+    return f.Close()
+}
+
+// reopenAtEndUnlocked reopens the tailed file at its end after rotation/truncate.
+// Caller must hold t.mu.
+func (t *FileTailer) reopenAtEndUnlocked() error {
+    f, err := os.Open(t.Path)
+    if err != nil {
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+
+    st2, err := f.Stat()
+    if err != nil {
+        _ = safeClose(f)
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+
+    end := st2.Size()
+    if _, err := f.Seek(end, io.SeekStart); err != nil {
+        _ = safeClose(f)
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+
+    _ = safeClose(t.f)
+    t.f = f
+    t.r = bufio.NewReaderSize(f, 256*1024)
+    t.inode = inodeOf(st2)
+    t.off = end
+    t.lastEOFStat = time.Time{}
+    return nil
+}
+
+
+
+
+
+
+
 
 
 func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
@@ -124,29 +180,22 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 
                        // Check for rotation/truncate (non-blocking path).
 
-                       if st, serr := t.f.Stat(); serr == nil {
-                               curIn := inodeOf(st)
-                               if curIn != t.inode || t.off > st.Size() {
-                                       // Reopen and jump to end ("now")
-                                       _ = t.f.Close()
-                                       if f, oerr := os.Open(t.Path); oerr == nil {
-                                               if st2, _ := f.Stat(); st2 != nil {
-                                                       end := st2.Size()
-                                                       if _, sek := f.Seek(end, io.SeekStart); sek == nil {
-                                                               t.f = f
-                                                               t.r = bufio.NewReaderSize(f, 256*1024)
-                                                               t.inode = inodeOf(st2)
-                                                               t.off = end
-                                                               // reset idle timer after change
-                                                               t.lastEOFStat = time.Time{}
-                                                       } else { f.Close(); t.f = nil; t.r = nil }
-                                               } else { f.Close() }
-                                       } else { t.f = nil; t.r = nil }
-                               }
+
+                       st, serr := t.f.Stat()
+                       if serr != nil {
+                               // Keep non-blocking contract, but don't rotate on stat failure
+                               return "", io.EOF
+                       }
+
+                       curIn := inodeOf(st)
+                       if curIn != t.inode || t.off > st.Size() {
+                               _ = t.reopenAtEndUnlocked()
                        }
                        return "", io.EOF
                }
                return "", err
+
+
 
 	}
 	t.off += int64(len(line))
