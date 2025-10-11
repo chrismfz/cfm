@@ -215,17 +215,25 @@ func (u *Updater) downloadAndInstall(ctx context.Context, url, edition string) e
         tmp, err := os.CreateTemp(u.cfg.Dir, outBase+".tmp-*")
         if err != nil { return err }
         tmpPath = tmp.Name()
+
         if _, err := io.Copy(tmp, tr); err != nil {
-            tmp.Close()
-            os.Remove(tmpPath)
+            // Make best effort to close and remove; join errors if any.
+            cerr := tmp.Close()
+            rerr := os.Remove(tmpPath)
+            return errors.Join(err, cerr, rerr)
+        }
+        if err := tmp.Chmod(0o600); err != nil { /* non-fatal */ }
+        if err := tmp.Close(); err != nil {
+            // Ensure temp file is not left behind on close failure.
+            _ = os.Remove(tmpPath)
             return err
         }
-        if err := tmp.Chmod(0o644); err != nil { /* non-fatal */ }
-        if err := tmp.Close(); err != nil { return err }
-
         // Atomic swap
         if err := os.Rename(tmpPath, outPath); err != nil {
-            os.Remove(tmpPath)
+            // Try to remove the temp file; if that also fails, join errors.
+            if rerr := os.Remove(tmpPath); rerr != nil {
+                return errors.Join(err, rerr)
+            }
             return err
         }
         // Extract first .mmdb only
