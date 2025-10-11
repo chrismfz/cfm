@@ -145,7 +145,10 @@ func (u *Updater) checkOnce(ctx context.Context, logf func(string, ...any)) {
 }
 
 func (u *Updater) head(ctx context.Context, url string) (time.Time, string, error) {
-    req, _ := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+    if err != nil {
+        return time.Time{}, "", err
+    }
     req.SetBasicAuth(u.cfg.AccountID, u.cfg.LicenseKey)
     resp, err := u.httpc.Do(req)
     if err != nil { return time.Time{}, "", err }
@@ -177,7 +180,11 @@ func (u *Updater) head(ctx context.Context, url string) (time.Time, string, erro
 }
 
 func (u *Updater) downloadAndInstall(ctx context.Context, url, edition string) error {
-    req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+    if err != nil {
+        return err
+    }
+
     req.SetBasicAuth(u.cfg.AccountID, u.cfg.LicenseKey)
     resp, err := u.httpc.Do(req)
     if err != nil { return err }
@@ -242,7 +249,10 @@ func (u *Updater) loadState() (*state, error) {
 }
 
 func (u *Updater) saveState(s *state) error {
-    b, _ := json.MarshalIndent(s, "", "  ")
+    b, err := json.MarshalIndent(s, "", "  ")
+    if err != nil {
+        return err
+    }
     tmp := u.statePath() + ".tmp"
     if err := os.WriteFile(tmp, b, 0o644); err != nil { return err }
     return os.Rename(tmp, u.statePath())
