@@ -76,7 +76,10 @@ func init() {
             // Try journal first; if unavailable, fall back to file
             j := core.NewJournalTailer(cfg.JournalUnit)
             if err := j.Open(); err == nil {
-                j.Close()
+                if cerr := j.Close(); cerr != nil {
+                    // Not fatal: we only probed availability; detector will reopen later.
+                    logging.Logf("[detectors][%s] journal probe close error (unit=%s): %v", section, cfg.JournalUnit, cerr)
+                }
                 det.SetSource(j)
                 if dovecotState != nil {
                     key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
