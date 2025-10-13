@@ -239,7 +239,7 @@ func removeFromFile(cfgDir, filename, ip string) bool {
         }
         kept = append(kept, line)
     }
-    _ = os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+    _ = os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
     return removed
 }
 

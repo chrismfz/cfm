@@ -909,10 +909,10 @@ func (b *Backend) appendToDenyFile(ip, reason string) error {
         // ο daemon τρέχει χωρίς persistence — σεβόμαστε την επιλογή
         return nil
     }
-    if err := os.MkdirAll(b.cfgDir, 0755); err != nil { return err }
+    if err := os.MkdirAll(b.cfgDir, 0750); err != nil { return err }
     fp := filepath.Join(b.cfgDir, "cfm.deny")
 
-    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
     if err != nil { return err }
     defer f.Close()
 

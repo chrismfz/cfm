@@ -364,6 +364,7 @@ Usage:
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
   cfm nginx-top -- Live stats from nginx detector
+  cfm httpd-top -- Live stats from httpd detector
 
 Description:
   local nftables manager (block/allow with optional TTL),

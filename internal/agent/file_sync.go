@@ -66,11 +66,11 @@ if len(tracked) == 0 {
         if local := sha1File(u.TargetPath); strings.EqualFold(local, u.Hash) {
             continue
         }
-        if err := os.MkdirAll(filepath.Dir(u.TargetPath), 0755); err != nil {
+        if err := os.MkdirAll(filepath.Dir(u.TargetPath), 0750); err != nil {
             logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(u.TargetPath), err)
             continue
         }
-        if err := atomicWrite(u.TargetPath, []byte(u.Content), 0644); err != nil {
+        if err := atomicWrite(u.TargetPath, []byte(u.Content), 0600); err != nil {
             logging.LogfAPI("[files] write %s: %v", u.TargetPath, err)
             continue
         }

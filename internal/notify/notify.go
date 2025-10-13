@@ -266,8 +266,8 @@ func Enqueue(ev Event) {
 
 func appendJSONL(path string, v interface{}) error {
 	if path == "" { return nil }
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { return err }
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil { return err }
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil { return err }
 	defer f.Close()
 	enc := json.NewEncoder(f)
