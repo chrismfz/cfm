@@ -37,7 +37,7 @@ import (
 
 	//Debugging profiler for CPU usage
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	//Debugging End
 	nflog "cfm/internal/nflog"
 
@@ -99,7 +99,8 @@ func startDebug(addr string) {
     // Grab the already-initialized backend (daemon mode)
     be := getBackend()
 
-    http.HandleFunc("/nginx/top", func(w http.ResponseWriter, r *http.Request) {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/nginx/top", func(w http.ResponseWriter, r *http.Request) {
         q := r.URL.Query()
         limit := 10
         if v := q.Get("limit"); v != "" {
@@ -119,7 +120,7 @@ func startDebug(addr string) {
 
 
    // /httpd/top: live snapshot (same shape as nginx with extra 401 fields)
-    http.HandleFunc("/httpd/top", func(w http.ResponseWriter, r *http.Request) {
+        mux.HandleFunc("/httpd/top", func(w http.ResponseWriter, r *http.Request) {
         q := r.URL.Query()
         limit := 10
         if v := q.Get("limit"); v != "" {
@@ -139,7 +140,7 @@ func startDebug(addr string) {
 
 
     // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
-    http.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
+        mux.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
         start := time.Now()
         w.Header().Set("Content-Type", "application/json")
 
@@ -243,13 +244,26 @@ func startDebug(addr string) {
         }(ip, requester)
     })
 
+
+
+
+// pprof endpoints — registered on our private mux only
+    mux.HandleFunc("/debug/pprof/", pprof.Index)
+    mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+    mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+    mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+    mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+
+
+
 // Optional: small banner without requiring logging.Init
 go func(a string) {
     time.Sleep(50 * time.Millisecond)
 
     srv := &http.Server{
         Addr:              a,
-        Handler:           http.DefaultServeMux, // you registered with http.HandleFunc above
+        Handler:           mux,
         ReadHeaderTimeout: 2 * time.Second,
         ReadTimeout:       5 * time.Second,
         WriteTimeout:      10 * time.Second,
