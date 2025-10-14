@@ -7,7 +7,7 @@ import (
     "time"
     "fmt"
     "context"
-
+//    "os"
     core "cfm/internal/detectors/core"
     "cfm/internal/firewall"
     "strings"
@@ -67,7 +67,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 
 // DEBUG: log what the sink finally decided to use before any early returns
-    logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",s.section, s.pol.Mode, ipStr, a.Kind, out.Key,)
+    if logging.DebugEnabled() { logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",s.section, s.pol.Mode, ipStr, a.Kind, out.Key, ) }
 //DEBUG END
 
 

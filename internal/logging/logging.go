@@ -21,6 +21,10 @@ var (
 
 )
 
+var debugEnabled = os.Getenv("CFM_DEBUG") == "1"
+func DebugEnabled() bool { return debugEnabled }
+
+
 // Init πρέπει να καλεστεί από main με την config
 func Init(c *config.LoggingConfig) {
     cfg = c
