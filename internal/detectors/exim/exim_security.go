@@ -341,12 +341,23 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
     if !strings.Contains(s, "[") || !strings.Contains(s, "]") { return }
 
     ip := lastBracketIP(line) // <-- only trust bracketed token, validated
+
+    // DEBUG: show what we picked for every matching line
+    if ip != "" {
+        logging.LogfDETECTOR("[exim/security][debug] picked_ip=%q line=%s", ip, line)
+    } else {
+        logging.LogfDETECTOR("[exim/security][debug] no_ip line=%s", line)
+    }
+//debug end
+
     if ip == "" { return }
 
     // ... keep the rest the same ...
     for _, r := range d.rules {
         if r.Re.MatchString(s) {
+
             if r.Name == "AUTHFAIL" {
+	logging.LogfDETECTOR("[exim/security][debug] bump AUTHFAIL ip=%q", ip)
                 d.bump(now, "AUTHFAIL|ip", ip, line) // now always the real socket IP
                 if u := d.extractUser(s); u != "" {
                     d.bump(now, "AUTHFAIL|user", u, line)
@@ -427,6 +438,17 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
             if strings.Contains(s0, "ssl on the wire") { enc = "smtps" } else if strings.Contains(s0, "tls") { enc = "tls" }
             if m := d.reSrvPort.FindStringSubmatch(samples[0]); m != nil { port = m[1] }
         }
+
+
+// DEBUG: single line that mirrors what will be emitted as an alert
+        if len(samples) > 0 {
+            logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s first=%q",
+                kind, displayKey, isIP, base, n, thr, len(samples), enc, port, samples[0])
+        } else {
+            logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s",
+                kind, displayKey, isIP, base, n, thr, len(samples), enc, port)
+        }
+//DEBUG END
 
         extra := map[string]string{
             "log":      d.path,

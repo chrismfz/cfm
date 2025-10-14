@@ -156,18 +156,18 @@ deb: build
 	@sed -i "s/^Version:.*/Version: $(VERSION)-1/" "$(PKGROOT)/DEBIAN/control"
 
 	# payload
-	@install -m0750 "$(BIN)" "$(PKGROOT)/usr/bin/cfm"
-	@install -m0600 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
-	@install -m0600 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
-	@install -m0600 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
-	@install -m0600 "$(CONFIG_DIR)/notify.conf"      "$(PKGROOT)/etc/cfm/notify.conf"
-	@install -m0600 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
-	@install -m0600 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
-	@install -m0600 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
-	@install -m0600 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
+	@install -m0755 "$(BIN)" "$(PKGROOT)/usr/bin/cfm"
+	@install -m0640 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
+	@install -m0640 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
+	@install -m0640 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
+	@install -m0640 "$(CONFIG_DIR)/notify.conf"      "$(PKGROOT)/etc/cfm/notify.conf"
+	@install -m0640 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
+	@install -m0640 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
+	@install -m0640 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
+	@install -m0640 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
 
 	# executables
-	@chmod 0750 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
+	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
 	# build artifact -> build/deb/
 	@fakeroot dpkg-deb --build "$(PKGROOT)" "$(OUTDIR)/cfm_$(VERSION)-1_$(ARCH).deb"

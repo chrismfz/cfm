@@ -66,6 +66,10 @@ func (s *sectionSink) Publish(a core.Alert) {
         }
 
 
+// DEBUG: log what the sink finally decided to use before any early returns
+    logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",s.section, s.pol.Mode, ipStr, a.Kind, out.Key,)
+//DEBUG END
+
 
 	// No policy or no backend → just print with "No"
  if s.pol.Mode == "no" || s.fw == nil {
@@ -263,24 +267,133 @@ if out.Extra["blocked"] != "yes" {
 
 
 func (s *sectionSink) pickIP(a core.Alert) string {
-    // 1) If the alert key itself is an IP (e.g., SSH per-IP alerts), use it.
+    // 0) Prefer detector-provided IP (authoritative).
+    if a.Extra != nil {
+        if ip := net.ParseIP(strings.TrimSpace(a.Extra["ip"])); ip != nil {
+            return ip.String()
+        }
+    }
+    // 1) If alert key itself is an IP, or "ip X..." (from decorateIP), use it.
     if ip := net.ParseIP(a.Key); ip != nil {
         return ip.String()
     }
-    // 2) Try to parse the first IP from the samples (works for exim detectors)
+    if strings.HasPrefix(a.Key, "ip ") {
+        // e.g. "ip 91.138.225.80 (AS...)" or "ip 91.138.225.80 [ASN ...]"
+        f := strings.Fields(a.Key)
+        if len(f) >= 2 {
+            // strip trailing punctuation just in case
+            cand := strings.TrimRight(f[1], "],)")
+            if ip := net.ParseIP(cand); ip != nil {
+                return ip.String()
+            }
+        }
+    }
+    // 2) Fallback: scan samples like the detector does (right-most bracket, prefer public).
     for _, ln := range a.Samples {
+        if ip := rightMostBracketIP(ln); ip != "" {
+            return ip
+        }
+        // last resort: first IPv4 in line
         if m := reIP.FindStringSubmatch(ln); m != nil && m[1] != "" {
             return m[1]
         }
+        // ultimate fallback: token scan (IPv4/IPv6)
+        if ip := firstParsedIP(ln); ip != "" {
+            return ip
+        }
     }
-    // 3) If detectors stash an ip in Extra["ip"], use it.
-    if a.Extra != nil {
-        if ip := net.ParseIP(a.Extra["ip"]); ip != nil {
+    return ""
+}
+
+
+
+// tokenize and return the first token that parses as an IP (v4 or v6)
+func firstParsedIP(s string) string {
+    // split on anything that's not a hex digit, dot, or colon
+    f := func(r rune) bool {
+        if r == '.' || r == ':' { return false }
+        if (r >= '0' && r <= '9') || (r|32 >= 'a' && r|32 <= 'f') { return false }
+        return true
+    }
+    for _, tok := range strings.FieldsFunc(s, f) {
+        if ip := net.ParseIP(tok); ip != nil {
             return ip.String()
         }
     }
     return ""
 }
+
+
+// rightMostBracketIP replicates the detector’s selection:
+// choose the right-most [ ... ] token; prefer global/public; supports IPv4 & IPv6 and IPv6-mapped v4.
+func rightMostBracketIP(line string) string {
+    type span struct{ lo, hi int }
+    spans := make([]span, 0, 4)
+    for i := 0; i < len(line); i++ {
+        if line[i] != '[' { continue }
+        j := strings.IndexByte(line[i:], ']')
+        if j <= 1 { continue }
+        lo, hi := i+1, i+j
+        if lo < hi && hi <= len(line) {
+            spans = append(spans, span{lo: lo, hi: hi})
+        }
+        i += j
+    }
+    if len(spans) == 0 { return "" }
+
+    parseCanonical := func(s string) (net.IP, string) {
+        s = strings.TrimSpace(s)
+        if strings.Count(s, ":") >= 2 {
+            if k := strings.LastIndexByte(s, ':'); k >= 0 && k+1 < len(s) {
+                if v4 := net.ParseIP(s[k+1:]); v4 != nil {
+                    if q := v4.To4(); q != nil { return q, q.String() }
+                }
+            }
+        }
+        ip := net.ParseIP(s)
+        if ip == nil { return nil, "" }
+        if v4 := ip.To4(); v4 != nil { return v4, v4.String() }
+        return ip, ip.String()
+    }
+    isGlobal := func(ip net.IP) bool {
+        if ip == nil { return false }
+        if v4 := ip.To4(); v4 != nil {
+            if v4[0] == 10 { return false }
+            if v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31 { return false }
+            if v4[0] == 192 && v4[1] == 168 { return false }
+            if v4[0] == 169 && v4[1] == 254 { return false }
+            if v4[0] == 127 { return false }
+            return true
+        }
+        if ip.IsLoopback() { return false }
+        if ip[0]&0xfe == 0xfc { return false }                        // fc00::/7
+        if ip[0] == 0xfe && (ip[1]&0xc0) == 0x80 { return false }     // fe80::/10
+        return true
+    }
+    // Pass 1: prefer right-most global
+    for i := len(spans) - 1; i >= 0; i-- {
+        ip, canon := parseCanonical(line[spans[i].lo:spans[i].hi])
+        if canon != "" && isGlobal(ip) { return canon }
+    }
+    // Pass 2: right-most valid
+    for i := len(spans) - 1; i >= 0; i-- {
+        _, canon := parseCanonical(line[spans[i].lo:spans[i].hi])
+        if canon != "" { return canon }
+    }
+    return ""
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 func firstNonEmpty(ss ...string) string {
     for _, s := range ss {
