@@ -510,7 +510,8 @@ func runBlock(args []string) {
 
     // API report
     if cfgDir, ok := resolveConfigDir(""); ok {
-        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+        cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
+	if b, err := os.ReadFile(cfgPath); err == nil {
             if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
                 if cfg.API.URL != "" && cfg.API.AuthToken != "" {
                     api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
@@ -581,7 +582,8 @@ func runUnblock(args []string) {
     var reporter reporting.Reporter
     var sendAPI bool
     if cfgDir != "" {
-        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+        cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
+	if b, err := os.ReadFile(cfgPath); err == nil {
             if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil &&
                 cfg.API.UnblockSend &&
                 cfg.API.URL != "" &&
@@ -825,7 +827,8 @@ func runWebTop(kind string, args []string) {
     host := "127.0.0.1"
     port := 6060
     if cfgDir, ok := resolveConfigDir(""); ok {
-        if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+        cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
+	if b, err := os.ReadFile(cfgPath); err == nil {
             if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
                 if strings.TrimSpace(cfg.Debug.ListenAddress) != "" {
                     host = strings.TrimSpace(cfg.Debug.ListenAddress)
@@ -1395,14 +1398,10 @@ func runFlush(args []string) {
     if !nft.TableExistsCFM() {
         if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
     }
-	cmds := []string{
-		fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "block_v4"),
-		fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "block_v6"),
-		//fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "allow_v4"), // don't touch our whitelists
-		//fmt.Sprintf("flush set %s %s %s", "inet", "cfm", "allow_v6"),
-	}
-	for _, c := range cmds {
-		out, err := exec.Command("nft", strings.Split(c, " ")...).CombinedOutput()
+        sets := []string{"block_v4", "block_v6"}
+        for _, setName := range sets {
+                out, err := exec.Command("nft", "-n", "flush", "set", "inet", "cfm", setName).CombinedOutput()
+
 		if err != nil { fmt.Fprintf(os.Stderr, "flush error: %s: %v\n", string(out), err); os.Exit(1) }
 	}
 	fmt.Println("✔ flushed all blocked/allowed IPs")
@@ -1500,13 +1499,14 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 }
 
 func appendUniqueLine(dir, base, line string) error {
-	if err := ensureDir(dir); err != nil { return err }
-	fp := filepath.Join(dir, base)
+        if err := ensureDir(dir); err != nil { return err }
+        fp := filepath.Clean(filepath.Join(dir, base))
 	if b, err := os.ReadFile(fp); err == nil {
 		sc := bufio.NewScanner(bytes.NewReader(b))
 		for sc.Scan() { if strings.TrimSpace(sc.Text()) == strings.TrimSpace(line) { return nil } }
 	}
-	f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); if err != nil { return err }
+        // #nosec G304 - fp is a constant filename under a trusted dir
+        f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); if err != nil { return err }
 	defer f.Close()
 	_, err = fmt.Fprintln(f, line)
 	return err
@@ -1519,8 +1519,8 @@ func appendUniqueLine(dir, base, line string) error {
      want := ipStr
      if isCIDR { want = cidrStr }
 
-     path := filepath.Join(dir, filename)
-     b, err := os.ReadFile(path); if err != nil { return err }
+     path := filepath.Clean(filepath.Join(dir, filename))
+     b, err := os.ReadFile(path) // #nosec G304 - constant filename under trusted dir
      var out []string
      sc := bufio.NewScanner(bytes.NewReader(b))
      for sc.Scan() {
@@ -1550,7 +1550,9 @@ func appendUniqueLine(dir, base, line string) error {
 
 
 func readEntriesFromFile(path string) ([]fileEntry, error) {
-	b, err := os.ReadFile(path)
+        path = filepath.Clean(path)
+        b, err := os.ReadFile(path) // #nosec G304 - callers pass constant filenames from a trusted config dir
+
 	if err != nil { if os.IsNotExist(err) { return nil, nil }; return nil, err }
 	var out []fileEntry
 	sc := bufio.NewScanner(bytes.NewReader(b))
