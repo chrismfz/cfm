@@ -91,13 +91,20 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
         "PIPELINING",
         "RATE_CONN",
         "RCPT_TOO_MANY",
+        "SESSION_ALL_FAILED",
+        "SLOW_FAIL_BLOCK",
     }
-    // Direct per-rule keys override
+
+    // Direct per-rule keys override (δέχεται και 0 για απενεργοποίηση)
     for _, k := range known {
-        if v := kvInt(kv, k, 0); v > 0 {
-            cfg.Thresholds[k] = v
+        raw := kvStrClean(kv, k, "__MISSING__")
+        if raw == "__MISSING__" { continue }         // δεν ορίστηκε
+        n, err := strconv.Atoi(strings.TrimSpace(raw))
+        if err == nil {
+            cfg.Thresholds[k] = n                     // π.χ. 0 => disable
         }
     }
+
     // Optional bundle: RULE_THRESHOLDS=KEY=VAL,KEY=VAL,...
     if raw := kvStrClean(kv, "RULE_THRESHOLDS", ""); raw != "" {
         parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
@@ -107,8 +114,8 @@ Register("exim_security", func(section string, kv KV, global KV) (core.PeriodicD
             name := strings.TrimSpace(kvp[0])
             val := strings.TrimSpace(kvp[1])
             if name == "" || val == "" { continue }
-            if n, err := strconv.Atoi(val); err == nil && n > 0 {
-                cfg.Thresholds[name] = n
+            if n, err := strconv.Atoi(val); err == nil {
+                cfg.Thresholds[name] = n              // επιτρέπει 0
             } else {
                 fmt.Printf("[detectors][%s] ignoring RULE_THRESHOLDS entry %q (invalid int)\n", section, p)
             }

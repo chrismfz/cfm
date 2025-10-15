@@ -128,6 +128,8 @@ defaults := map[string]int{
 			"BAD_HELO_IMPERSONATION":  6,
 			"HELO_SYNTAX":             6,
 			"PIPELINING":              6,
+			"SESSION_ALL_FAILED":     5, // "Detected session with all messages failed"
+			"SLOW_FAIL_BLOCK":        5, // "Increment slow_fail_block Ratelimit"
 		}
 
 
@@ -201,7 +203,8 @@ func (d *EximSecurity) loadRules() {
 	{"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `bad helo - host impersonating domain name`},
 	{"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:ehlo|helo)\b.*\b(?:syntax error|invalid|bad)\b`},
 	{"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
-
+	{"SESSION_ALL_FAILED", "Session all messages failed", `\bwarning:\s*"detected session with all messages failed"`},
+	{"SLOW_FAIL_BLOCK", "Slow fail block ratelimit", `\bwarning:\s*"increment slow_fail_block ratelimit\b`},
 
 
 	}
