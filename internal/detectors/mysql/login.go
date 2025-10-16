@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 	"net"
-
+	"sync"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
@@ -40,6 +40,9 @@ type LoginConfig struct {
 	// ignore/self-noise
 	IgnoreLocalhost bool // ignore host: 'localhost' and 127.0.0.1
 	IgnoreCpanel    bool // ignore cPanel internal user 'Cpanel::MysqlUtils::Unprivileged'
+
+	StrictEmbeddedConfirm bool          // default true: απαιτεί PTR-επιβεβαίωση για embedded
+	DnsTimeout           time.Duration  // default 600ms
 }
 
 type pend struct {
@@ -63,6 +66,15 @@ type MySQL struct {
 	// enrichment
 	enr *enrich.Enricher
 
+    resCache struct {
+        mu sync.RWMutex
+        m  map[string]struct {
+            ip     string
+            at     time.Time
+            method string
+        }
+    }
+
 	// regexes
 	// 2025-01-01  4:08:33 997817 [Warning] Access denied for user 'root'@'34.140.130.14' (using password: NO)
 	reDenied *regexp.Regexp
@@ -73,6 +85,11 @@ type MySQL struct {
 	// noisy-but-irrelevant lines we just ignore (optional)
 	reHostResemble *regexp.Regexp // "has been resolved to the host name ... which resembles IPv4-address itself."
 	reHostNX       *regexp.Regexp // "Host name '...' could not be resolved"
+
+	reIPv4Dash    *regexp.Regexp // 200-105-141-150
+	reIPv4Inside  *regexp.Regexp // 200.105.141.150 μέσα στο hostname
+	reInAddrArpa  *regexp.Regexp // 150.141.105.200.in-addr.arpa
+
 }
 
 
@@ -91,6 +108,9 @@ func NewMySQL(cfg LoginConfig) *MySQL {
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
+if cfg.DnsTimeout <= 0 { cfg.DnsTimeout = 600 * time.Millisecond }
+if !cfg.StrictEmbeddedConfirm { /* leave as is */ } else { cfg.StrictEmbeddedConfirm = true }
+
 
 	m := &MySQL{cfg: cfg}
 	// window primitives
@@ -99,11 +119,23 @@ func NewMySQL(cfg LoginConfig) *MySQL {
 	m.gate    = core.NewAlertGate(cfg.Cooldown)
 	m.counts  = core.NewSlidingCounter(cfg.Window, 0)
 
+m.reIPv4Dash   = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,3}(?:-\d{1,3}){3})(?:[^0-9]|$)`)
+m.reIPv4Inside = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,3}(?:\.\d{1,3}){3})(?:[^0-9]|$)`)
+m.reInAddrArpa = regexp.MustCompile(`(?i)\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.in-addr\.arpa\.?$`)
+
+    m.resCache.m = make(map[string]struct {
+        ip     string
+        at     time.Time
+        method string
+    })
+
+
 	// Denied
 	m.reDenied = regexp.MustCompile(`(?i)\bAccess denied for user '([^']+)'@'([^']+)'(?:\s+\(using password: (YES|NO)\))?`)
 
 	// Aborted unauthenticated
 	m.reAbortedUnauth = regexp.MustCompile(`(?i)\bAborted connection \d+ to db: 'unconnected' user: 'unauthenticated' host: '([^']+)'`)
+
 
 	// Noisy informational
 	m.reHostResemble = regexp.MustCompile(`(?i)has been resolved to the host name .* resembles IPv4-address`)
@@ -185,7 +217,7 @@ func (m *MySQL) processLine(s string) {
                 // If the MySQL log shows a hostname, resolve it to an IP so the
                 // autoblock sink can act on it.
 		if net.ParseIP(host) == nil && host != "" && host != "localhost" {
-			if ip := m.lookupHostFast(host); ip != "" {
+			if ip, _ := m.hostToIPSafe(host); ip != "" {
 				host = ip
 			}
 		}
@@ -216,7 +248,7 @@ func (m *MySQL) processLine(s string) {
         if ma := m.reAbortedUnauth.FindStringSubmatch(s); ma != nil {
                 host := ma[1]
                 if net.ParseIP(host) == nil && host != "" && host != "localhost" {
-                        if ip := m.lookupHostFast(host); ip != "" {
+                        if ip, _ := m.hostToIPSafe(host); ip != "" {
                                 host = ip
                         }
                 }
@@ -450,22 +482,124 @@ func fileExists(p string) bool {
 
 
 
-// lookupHostFast resolves a hostname to an IP quickly (prefer IPv4).
-// Returns empty string on failure or timeout.
-func (m *MySQL) lookupHostFast(h string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", h)
-	if err != nil || len(ips) == 0 {
-		return ""
-	}
-	// Prefer IPv4
-	for _, ip := range ips {
-		if v4 := ip.To4(); v4 != nil {
-			return v4.String()
-		}
-	}
-	// Fallback to first result
-	return ips[0].String()
+// returns validated IPv4 or "".
+// method: "A", "INADDR", "EMBED+PTROK", "EMBED+UNCONF" (μόνο αν StrictEmbeddedConfirm=false)
+func (m *MySQL) hostToIPSafe(host string) (ip, method string) {
+    host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+    if host == "" || strings.EqualFold(host, "localhost") {
+        return "", ""
+    }
+
+    // 0) Already an IP?
+    if p := net.ParseIP(host); p != nil {
+        if v4 := p.To4(); v4 != nil { return v4.String(), "IP" }
+        return "", ""
+    }
+
+    // Cache
+    m.resCache.mu.RLock()
+    if ent, ok := m.resCache.m[host]; ok && time.Since(ent.at) < 15*time.Minute {
+        m.resCache.mu.RUnlock()
+        return ent.ip, ent.method
+    }
+    m.resCache.mu.RUnlock()
+
+    ctx, cancel := context.WithTimeout(context.Background(), m.cfg.DnsTimeout)
+    defer cancel()
+
+    // 1) Pure forward A/AAAA lookup (προτιμά IPv4)
+    if ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host); err == nil && len(ips) > 0 {
+        for _, ip := range ips {
+            if v4 := ip.To4(); v4 != nil {
+                // Προαιρετικά, FCrDNS: does PTR contain the host?
+                if names, _ := net.DefaultResolver.LookupAddr(ctx, v4.String()); len(names) > 0 {
+                    for _, n := range names {
+                        n = strings.TrimSuffix(n, ".")
+                        if strings.EqualFold(n, host) || strings.HasSuffix(n, "."+host) {
+                            m.saveResolve2(host, v4.String(), "A+PTROK")
+                            return v4.String(), "A+PTROK"
+                        }
+                    }
+                }
+                m.saveResolve2(host, v4.String(), "A")
+                return v4.String(), "A"
+            }
+        }
+        // fallback: first (even v6 → όχι χρήσιμο για block ipv4-only)
+    }
+
+    // 2) in-addr.arpa → reverse octets
+    if g := m.reInAddrArpa.FindStringSubmatch(host); g != nil {
+        // g: [full a b c d]
+        a, b, c, d := g[1], g[2], g[3], g[4]
+        cand := strings.Join([]string{d, c, b, a}, ".")
+        if ip := net.ParseIP(cand); ip != nil && ip.To4() != nil {
+            m.saveResolve2(host, cand, "INADDR")
+            return cand, "INADDR"
+        }
+    }
+
+    // 3) Embedded IPv4 (dash or dotted) → δύο candidates: normal & reversed
+    var candidates []string
+    if g := m.reIPv4Dash.FindStringSubmatch(host); g != nil {
+        normal := strings.ReplaceAll(g[1], "-", ".")
+        if p := net.ParseIP(normal); p != nil && p.To4() != nil {
+            candidates = append(candidates, normal)
+            // reversed
+            parts := strings.Split(normal, ".")
+            if len(parts) == 4 {
+                rev := parts[3] + "." + parts[2] + "." + parts[1] + "." + parts[0]
+                if pr := net.ParseIP(rev); pr != nil && pr.To4() != nil && rev != normal {
+                    candidates = append(candidates, rev)
+                }
+            }
+        }
+    } else if g := m.reIPv4Inside.FindStringSubmatch(host); g != nil {
+        normal := g[1]
+        if p := net.ParseIP(normal); p != nil && p.To4() != nil {
+            candidates = append(candidates, normal)
+            parts := strings.Split(normal, ".")
+            if len(parts) == 4 {
+                rev := parts[3] + "." + parts[2] + "." + parts[1] + "." + parts[0]
+                if pr := net.ParseIP(rev); pr != nil && pr.To4() != nil && rev != normal {
+                    candidates = append(candidates, rev)
+                }
+            }
+        }
+    }
+
+    if len(candidates) > 0 {
+        // Προσπάθησε PTR confirm για καθεμία
+        for _, cand := range candidates {
+            if names, err := net.DefaultResolver.LookupAddr(ctx, cand); err == nil {
+                for _, n := range names {
+                    n = strings.TrimSuffix(n, ".")
+                    // exact ή suffix match
+                    if strings.EqualFold(n, host) || strings.HasSuffix(n, "."+host) {
+                        m.saveResolve2(host, cand, "EMBED+PTROK")
+                        return cand, "EMBED+PTROK"
+                    }
+                }
+            }
+        }
+        // Αν επιτρέπεις fallback χωρίς confirm (όχι προτεινόμενο)
+        if !m.cfg.StrictEmbeddedConfirm {
+            m.saveResolve2(host, candidates[0], "EMBED+UNCONF")
+            return candidates[0], "EMBED+UNCONF"
+        }
+    }
+
+    // fail
+    m.saveResolve2(host, "", "")
+    return "", ""
 }
 
+func (m *MySQL) saveResolve2(host, ip, method string) {
+    m.resCache.mu.Lock()
+    m.resCache.m[host] = struct {
+        ip     string
+        at     time.Time
+        method string
+    }{ip: ip, at: time.Now(), method: method}
+    m.resCache.mu.Unlock()
+}
