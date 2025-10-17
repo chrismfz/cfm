@@ -1,4 +1,4 @@
-#MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
+MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 #SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
 #SPAMDROPV6|BLOCK|14400|0|https://www.spamhaus.org/drop/dropv6.txt
 #SPAMEDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/edrop.txt
