@@ -27,6 +27,7 @@ var (
 
     // NEW: last successful autoblock per IP (v4/v6 share the key as a string)
     lastAutoBlockAt = map[string]time.Time{}
+    lastIgnoredAt   = map[string]time.Time{}
 )
 
 
@@ -788,6 +789,10 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     reason := lastThrottleReason[ip]
     if reason == "" { reason = "Auto-block" }
 
+    // local debounce for repeated "ignored" logs/notifies
+    const ignoreNotifyCooldown = 90 * time.Second
+    if lastIgnoredAt == nil { lastIgnoredAt = map[string]time.Time{} }
+
 
     // --- NEW: skip if IP is ignored or allowed ---
     if skip, why := b.shouldSkipAutoBlock(ip); skip {
@@ -795,12 +800,17 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
         logIP := ip + extraLabel
         ignReason := why
         if ignReason == "" { ignReason = "matched allow/ignore policy" }
-        logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
-        // still report/notify (dryrun/ignored)
-        _ = b.ReportBlock(ip, reason+" | IGNORED: "+ignReason, "autoblock", "dryrun", 0)
-        note := reason
-        if ignReason != "" { note += " | " + ignReason }
-        b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
+
+        // Debounce loudness
+        t := lastIgnoredAt[ip]
+        if time.Since(t) >= ignoreNotifyCooldown {
+            logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
+            // Do NOT report to API for ignored events (no external noise)
+            note := reason
+            if ignReason != "" { note += " | " + ignReason }
+            b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
+            lastIgnoredAt[ip] = time.Now()
+        }
         return nil
     }
 
