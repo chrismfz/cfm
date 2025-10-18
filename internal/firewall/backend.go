@@ -27,6 +27,13 @@ type Backend interface {
 	AddAllowNet(cidr string, ttl *time.Duration) error
 	RemoveAllowNet(cidr string) error
 
+
+	// NEW: Ignore (manual) — skip enforcement but still log/notify/report
+	AddIgnore(ip net.IP, ttl *time.Duration) error
+	RemoveIgnore(ip net.IP) error
+	AddIgnoreNet(cidr string, ttl *time.Duration) error
+	RemoveIgnoreNet(cidr string) error
+
         // ReportBlock: centralized policy-aware API reporting.
         // source: "detector" | "autoblock" | "manual"
         // mode:   "ttl" | "permanent" | "dryrun"

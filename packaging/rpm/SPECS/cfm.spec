@@ -52,6 +52,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.allow
 %config(noreplace) /etc/cfm/cfm.deny
 %config(noreplace) /etc/cfm/cfm.blocklists
+%config(noreplace) /etc/cfm/cfm.ignore
 %config(noreplace) /etc/cfm/cfm.dyndns
 
 # shared examples (always overwritten on upgrade)

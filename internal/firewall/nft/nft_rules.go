@@ -788,6 +788,23 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
     reason := lastThrottleReason[ip]
     if reason == "" { reason = "Auto-block" }
 
+
+    // --- NEW: skip if IP is ignored or allowed ---
+    if skip, why := b.shouldSkipAutoBlock(ip); skip {
+        extraLabel := b.enrichLabel(ip)
+        logIP := ip + extraLabel
+        ignReason := why
+        if ignReason == "" { ignReason = "matched allow/ignore policy" }
+        logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
+        // still report/notify (dryrun/ignored)
+        _ = b.ReportBlock(ip, reason+" | IGNORED: "+ignReason, "autoblock", "dryrun", 0)
+        note := reason
+        if ignReason != "" { note += " | " + ignReason }
+        b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
+        return nil
+    }
+
+
     // NEW: cooldown gate (applies to both v4/v6)
     if tc.CooldownSec > 0 {
         if t, ok := lastAutoBlockAt[ip]; ok {
@@ -822,35 +839,37 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
         if ttl <= 0 { ttl = 3600 }
 
         // TRY insert first; only log+notify on success
-        if fam == "v4" {
+	if fam == "v4" {
             err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
             if err != nil {
-                // Optional: detect "File exists" and stay silent to avoid spam
+                // ignore duplicates to avoid spam
+                if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+                    return nil
+                }
                 return err
             }
             logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
                 logIP, ttl, tc.Hits, tc.WindowSec, reason)
             lastAutoBlockAt[ip] = time.Now()
 
-//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-//            }
-_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+	_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+
             b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
             return nil
         }
 
         err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
         if err != nil {
+            if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+                return nil
+            }
             return err
         }
+
         logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
             logIP, ttl, tc.Hits, tc.WindowSec, reason)
         lastAutoBlockAt[ip] = time.Now()
 
-//        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-//            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-//        }
 _ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 
 	b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
@@ -858,10 +877,15 @@ _ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 
     default: // "permanent"
         if fam == "v4" {
+
             err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
             if err != nil {
+                if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+                    return nil
+                }
                 return err
             }
+
             logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
                 logIP, tc.Hits, tc.WindowSec, reason)
             lastAutoBlockAt[ip] = time.Now()
@@ -877,8 +901,12 @@ _ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 
         err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
         if err != nil {
+            if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+                return nil
+            }
             return err
         }
+
         logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
             logIP, tc.Hits, tc.WindowSec, reason)
         lastAutoBlockAt[ip] = time.Now()
@@ -1333,3 +1361,37 @@ func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, 
     notify.Enqueue(ev) // non-blocking
 }
 
+
+// shouldSkipAutoBlock returns (true, reason) if ip is in ignore_* OR any allow_* union.
+func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
+	f := parseIPFam(ip)
+	if f == 0 { return false, "" }
+	// host sets
+	hostSets := []string{
+		"ignore_v4", "allow_v4", "allow_dyn_v4", "allow_ext_v4_hosts",
+	}
+	netSets := []string{
+		"ignore_v4_nets", "allow_v4_nets", "allow_ext_v4_nets",
+	}
+	if f == 6 {
+		hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6", "allow_ext_v6_hosts"}
+		netSets  = []string{"ignore_v6_nets", "allow_v6_nets", "allow_ext_v6_nets"}
+	}
+	// direct host membership (fast)
+	for _, s := range hostSets {
+		ok, _ := b.HasElem(s, ip)
+		if ok {
+			if strings.HasPrefix(s, "ignore_") { return true, "in ignore list" }
+			return true, "already allowed"
+		}
+	}
+	// interval (CIDR) membership: nft get element works against interval sets
+	for _, s := range netSets {
+		ok, _ := b.HasElem(s, ip) // with interval sets, lookup by /32 or bare IP matches containment
+		if ok {
+			if strings.HasPrefix(s, "ignore_") { return true, "in ignore CIDR" }
+			return true, "allowed by CIDR"
+		}
+	}
+	return false, ""
+}

@@ -984,17 +984,19 @@ func runDaemon(args []string) {
 	}
 
 	// Watchers
-	var allowW, denyW, blW, confW *fileWatcher
+	var allowW, denyW, blW, confW, ignW *fileWatcher
 	if cfgDir != "" {
 		allowW = newFileWatcher(filepath.Join(cfgDir, "cfm.allow"))
 		denyW  = newFileWatcher(filepath.Join(cfgDir, "cfm.deny"))
 		blW    = newFileWatcher(filepath.Join(cfgDir, "cfm.blocklists"))
 		confW  = newFileWatcher(filepath.Join(cfgDir, "cfm.conf"))
+		ignW   = newFileWatcher(filepath.Join(cfgDir, "cfm.ignore"))
 	}
 
 	// Track seen allow/block entries to avoid pointless TTL refreshes
 	seenAllow := map[string]string{} // ip -> spec (perm|ttl=..|until=..)
 	seenBlock := map[string]string{}
+	seenIgnore := map[string]string{}
 
 	applyFile := func(filePath string, isAllow bool) {
 		now := time.Now()
@@ -1031,15 +1033,44 @@ func runDaemon(args []string) {
 		}
 	}
 
+
+
+//ignore feature //
+        applyIgnoreFile := func(filePath string) {
+                now := time.Now()
+                entries, err := readEntriesFromFile(filePath)
+                if err != nil { fmt.Fprintln(os.Stderr, "read ignore error:", err); return }
+                for _, e := range entries {
+                        spec := "perm"
+                        if e.Until != nil { spec = "until=" + e.Until.UTC().Format(time.RFC3339) } else if e.TTL != nil { spec = "ttl=" + e.TTL.String() }
+                        key := ""
+                        if e.CIDR != "" { key = "cidr|" + e.CIDR } else { key = "ip|" + e.IP.String() }
+                        if prev, ok := seenIgnore[key]; ok && prev == spec { continue }
+                        dur := durationFromEntryNow(e, now)
+                        if e.CIDR != "" {
+                                if err := be.AddIgnoreNet(e.CIDR, dur); err != nil { fmt.Fprintln(os.Stderr, "ignore apply error:", err); continue }
+                        } else {
+                                if err := be.AddIgnore(e.IP, dur); err != nil { fmt.Fprintln(os.Stderr, "ignore apply error:", err); continue }
+                        }
+                        seenIgnore[key] = spec
+                }
+        }
+// ignore end//
+
+
+
+
 	loadAll := func() {
 		if cfgDir == "" { return }
 		run := false
 		if allowW != nil { if _, ch := allowW.Changed(); ch { run = true } }
 		if denyW  != nil { if _, ch := denyW.Changed();  ch { run = true } }
+		if ignW   != nil { if _, ch := ignW.Changed();   ch { run = true } }
 		if !run { return }
 		applyFile(filepath.Join(cfgDir, "cfm.allow"), true)
 		applyFile(filepath.Join(cfgDir, "cfm.deny"),  false)
-		if os.Getenv("CFM_DEBUG") != "" { fmt.Println("[allow/deny] updated from files") }
+		if ignW != nil { applyIgnoreFile(ignW.path) }
+		if os.Getenv("CFM_DEBUG") != "" { fmt.Println("[allow/deny/ignore] updated from files") }
 	}
 
 	reloadBlocklists := func() {
@@ -1295,7 +1326,8 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 	reloadBlocklists()
 	loadAll()
 	applyPorts()
-	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 \n") }
+	if ignW != nil { applyIgnoreFile(ignW.path) }
+	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
 

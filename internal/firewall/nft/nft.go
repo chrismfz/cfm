@@ -245,6 +245,13 @@ func (b *Backend) EnsureBase() error {
 	if err := b.ensureSetWithFlags(blockV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
 	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
 
+	// NEW: ignore (manual) hosts + nets
+	if err := b.ensureSetWithFlags("ignore_v4",      "ipv4_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags("ignore_v6",      "ipv6_addr", "timeout");          err != nil { return err }
+	if err := b.ensureSetWithFlags("ignore_v4_nets", "ipv4_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags("ignore_v6_nets", "ipv6_addr", "timeout,interval"); err != nil { return err }
+
+
 	// local and server-IPs
 	if err := b.ensureSetWithFlags("self_v4", "ipv4_addr", "timeout,interval"); err != nil { return err }
 	if err := b.ensureSetWithFlags("self_v6", "ipv6_addr", "timeout,interval"); err != nil { return err }
@@ -556,6 +563,56 @@ func (b *Backend) AddAllow(ip net.IP, ttl *time.Duration) error {
 	return fmt.Errorf("nft add allow failed: %v: %s", err, out)
 }
 
+
+
+// -------- ignore (manual) --------
+func (b *Backend) AddIgnore(ip net.IP, ttl *time.Duration) error {
+	if ip == nil { return errors.New("nil ip") }
+	set := "ignore_v4"
+	if ip.To4() == nil { set = "ignore_v6" }
+	_ = b.RemoveIgnore(ip)
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+	out, err := b.nftAddElementArgv(set, ip.String(), ttlStr)
+	if err == nil { return nil }
+	if strings.Contains(out, "already exists") || strings.Contains(out, "File exists") {
+		_ = b.RemoveIgnore(ip)
+		if _, err2 := b.nftAddElementArgv(set, ip.String(), ttlStr); err2 == nil { return nil }
+	}
+	return fmt.Errorf("nft add ignore failed: %v: %s", err, out)
+}
+func (b *Backend) RemoveIgnore(ip net.IP) error {
+	if ip == nil { return errors.New("nil ip") }
+	set := "ignore_v4"
+	if ip.To4() == nil { set = "ignore_v6" }
+	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, ip.String())
+	out, err := b.nftOut(cmd)
+	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+		return fmt.Errorf("nft: %v: %s", err, out)
+	}
+	return nil
+}
+func (b *Backend) AddIgnoreNet(cidr string, ttl *time.Duration) error {
+	canon, v6, err := canonCIDR(cidr); if err != nil { return err }
+	set := "ignore_v4_nets"; if v6 { set = "ignore_v6_nets" }
+	_ = b.RemoveIgnoreNet(canon)
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+	if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil && !strings.Contains(out, "already exists") {
+		return fmt.Errorf("nft add ignore net failed: %v: %s", err, out)
+	}
+	return nil
+}
+func (b *Backend) RemoveIgnoreNet(cidr string) error {
+	canon, v6, err := canonCIDR(cidr); if err != nil { return err }
+	set := "ignore_v4_nets"; if v6 { set = "ignore_v6_nets" }
+	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
+	out, err2 := b.nftOut(cmd)
+	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+		return fmt.Errorf("nft: %v: %s", err2, out)
+	}
+	return nil
+}
 
 
 func (b *Backend) RemoveAllow(ip net.IP) error {
