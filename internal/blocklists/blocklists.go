@@ -25,13 +25,18 @@ type ListType int
 const (
 	TypeBlock ListType = iota
 	TypeAllow
+	TypeIgnore
 )
 
 func (t ListType) String() string {
-	if t == TypeAllow {
-		return "ALLOW"
-	}
-	return "BLOCK"
+        switch t {
+        case TypeAllow:
+                return "ALLOW"
+        case TypeIgnore:
+                return "IGNORE"
+        default:
+                return "BLOCK"
+        }
 }
 
 type Feed struct {
@@ -71,6 +76,8 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 			typ = TypeBlock
 		case "ALLOW":
 			typ = TypeAllow
+                case "IGNORE":
+                        typ = TypeIgnore
 		default:
 			// συμβατότητα με CSF που δεν έχει TYPE: αν δίνεται μόνο 4 πεδία και λείπει TYPE,
 			// μπορείς να προσαρμόσεις εδώ. Προς το παρόν απαιτούμε 5 πεδία.

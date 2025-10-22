@@ -1376,17 +1376,17 @@ func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, 
 func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
 	f := parseIPFam(ip)
 	if f == 0 { return false, "" }
-	// host sets
-	hostSets := []string{
-		"ignore_v4", "allow_v4", "allow_dyn_v4", "allow_ext_v4_hosts",
-	}
-	netSets := []string{
-		"ignore_v4_nets", "allow_v4_nets", "allow_ext_v4_nets",
-	}
-	if f == 6 {
-		hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6", "allow_ext_v6_hosts"}
-		netSets  = []string{"ignore_v6_nets", "allow_v6_nets", "allow_ext_v6_nets"}
-	}
+
+    // manual + dyn allow/ignore first (fast paths)
+    var hostSets, netSets []string
+    if f == 6 {
+        hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6"}
+        netSets  = []string{"ignore_v6_nets", "allow_v6_nets"}
+    } else {
+        hostSets = []string{"ignore_v4", "allow_v4", "allow_dyn_v4"}
+        netSets  = []string{"ignore_v4_nets", "allow_v4_nets"}
+    }
+
 	// direct host membership (fast)
 	for _, s := range hostSets {
 		ok, _ := b.HasElem(s, ip)
@@ -1403,5 +1403,20 @@ func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
 			return true, "allowed by CIDR"
 		}
 	}
+
+
+
+    // per-feed external ALLOW sets (cached discovery)
+    extHosts, extNets := b.getExtAllowSets(f)
+    for _, s := range extHosts {
+        ok, _ := b.HasElem(s, ip)
+        if ok { return true, "already allowed (feed)" }
+    }
+    for _, s := range extNets {
+        ok, _ := b.HasElem(s, ip)
+        if ok { return true, "allowed by CIDR (feed)" }
+    }
+
+
 	return false, ""
 }

@@ -1,0 +1,30 @@
+/var/log/nginx/access_cfm_combined.log \
+/var/log/apache2/access_cfm_tsv.log \
+/var/log/httpd/access_cfm_tsv.log {
+    daily
+    size 250M
+    rotate 10
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    create 0640 root adm
+
+    postrotate
+        # Nginx: reopen logs if running
+        if [ -f /run/nginx.pid ]; then
+            kill -USR1 $(cat /run/nginx.pid) 2>/dev/null || true
+        fi
+
+        # Apache (Debian/Ubuntu path)
+        if [ -f /var/run/apache2/apache2.pid ]; then
+            /usr/sbin/apachectl graceful > /dev/null 2>&1 || true
+        fi
+
+        # Apache (CentOS/RHEL path)
+        if [ -f /var/run/httpd/httpd.pid ]; then
+            /usr/sbin/apachectl graceful > /dev/null 2>&1 || true
+        fi
+    endscript
+}

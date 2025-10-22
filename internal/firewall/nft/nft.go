@@ -21,6 +21,10 @@ import (
 	"cfm/internal/firewall"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/reporting"
+
+	"bufio"
+	"sync"
+
 )
 
 const (
@@ -82,6 +86,14 @@ type Backend struct{
     pfSets   []string // th_pf_<port>_<proto>_v4/v6
     clSets   []string // th_connlimit_<port>_<proto>_v4/v6
     feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
+
+    // cache of external ALLOW set names (per-feed), to avoid expensive table scans on every check
+    extMu             sync.RWMutex
+    extAllowCacheAt   time.Time
+    extAllowV4Hosts   []string
+    extAllowV4Nets    []string
+    extAllowV6Hosts   []string
+    extAllowV6Nets    []string
 }
 
 
@@ -1486,4 +1498,77 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
         return false, nil
     }
     return false, fmt.Errorf("nft get element %s{%s}: %v: %s", setName, elem, err, s)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+////// helpers caching allow lists for ignore feature /////
+// listSetsByPrefixes returns set names that start with any of the given prefixes.
+func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
+    out, err := exec.Command("nft", "-t", "-n", "list", "table", string(family), tableName).CombinedOutput()
+    if err != nil {
+        return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
+    }
+    var names []string
+    pfx := make([]string, 0, len(prefixes))
+    for _, p := range prefixes {
+        p = strings.TrimSpace(p)
+        if p != "" { pfx = append(pfx, p) }
+    }
+    sc := bufio.NewScanner(bytes.NewReader(out))
+    for sc.Scan() {
+        line := strings.TrimSpace(sc.Text())
+        if !strings.HasPrefix(line, "set ") { continue }
+        fields := strings.Fields(line)
+        if len(fields) < 2 { continue }
+        name := fields[1]
+        for _, p := range pfx {
+            if strings.HasPrefix(name, p) {
+                names = append(names, name)
+                break
+            }
+        }
+    }
+    return names, nil
+}
+
+// refreshExtAllowCache reloads per-feed allow set names with a small TTL.
+func (b *Backend) refreshExtAllowCache() {
+    b.extMu.Lock()
+    defer b.extMu.Unlock()
+    if time.Since(b.extAllowCacheAt) < 300*time.Second {
+        return
+    }
+    // discover per-feed allow sets
+    v4h, _ := b.listSetsByPrefixes("allow_ext_v4_hosts_")
+    v4n, _ := b.listSetsByPrefixes("allow_ext_v4_nets_")
+    v6h, _ := b.listSetsByPrefixes("allow_ext_v6_hosts_")
+    v6n, _ := b.listSetsByPrefixes("allow_ext_v6_nets_")
+    b.extAllowV4Hosts = v4h
+    b.extAllowV4Nets  = v4n
+    b.extAllowV6Hosts = v6h
+    b.extAllowV6Nets  = v6n
+    b.extAllowCacheAt = time.Now()
+}
+
+func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
+    b.refreshExtAllowCache()
+    b.extMu.RLock()
+    defer b.extMu.RUnlock()
+    if fam == 6 {
+        return append([]string(nil), b.extAllowV6Hosts...), append([]string(nil), b.extAllowV6Nets...)
+    }
+    return append([]string(nil), b.extAllowV4Hosts...), append([]string(nil), b.extAllowV4Nets...)
 }
