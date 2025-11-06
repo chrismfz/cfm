@@ -128,8 +128,8 @@ defaults := map[string]int{
 			"BAD_HELO_IMPERSONATION":  6,
 			"HELO_SYNTAX":             6,
 			"PIPELINING":              6,
-			"SESSION_ALL_FAILED":     5, // "Detected session with all messages failed"
-			"SLOW_FAIL_BLOCK":        5, // "Increment slow_fail_block Ratelimit"
+			"SESSION_ALL_FAILED":     10, // "Detected session with all messages failed"
+			"SLOW_FAIL_BLOCK":        10, // "Increment slow_fail_block Ratelimit"
 		}
 
 

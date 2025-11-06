@@ -106,13 +106,18 @@ func Init(cfgDir string) error {
 
 		switch strings.TrimSpace(sec["type"]) {
 		case "sendmail":
-			ch := &sendmailChannel{
-				name: id,
-				path: zv(sec["path"], "/usr/sbin/sendmail"),
-				from: sec["from"],
-				to:   splitCSV(sec["to"]),
-			}
-			if ch.from != "" && len(ch.to) > 0 { chans = append(chans, ch) }
+    from := strings.TrimSpace(sec["from"])
+    if from == "" {
+        if hostname == "" { hostname, _ = os.Hostname() }
+        from = fmt.Sprintf("root@%s", hostname)
+    }
+    ch := &sendmailChannel{
+        name: id,
+        path: zv(sec["path"], "/usr/sbin/sendmail"),
+        from: from,
+        to:   splitCSV(sec["to"]),
+    }
+    if len(ch.to) > 0 { chans = append(chans, ch) }
 
 		case "smtp":
 			ch := &smtpChannel{

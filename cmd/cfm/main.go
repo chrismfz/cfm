@@ -299,6 +299,70 @@ func requireRoot() {
 }
 
 
+//CUSTOM CONFIG CODE//
+// loadConfigWithAPIOverride parses cfm.conf, then (if present) parses cfm.api.conf
+// and overwrites only API fields when set.  If cfm.api.conf exists, it ensures
+// safe permissions (0600) since it may contain credentials.
+func loadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config, error) {
+    cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(baseBytes))
+    if err != nil {
+        return nil, err
+    }
+
+    if cfgDir == "" {
+        return cfg, nil
+    }
+
+    apiPath := filepath.Clean(filepath.Join(cfgDir, "cfm.api.conf"))
+
+    info, err := os.Stat(apiPath)
+    if err != nil {
+        // file missing or unreadable → return base config
+        return cfg, nil
+    }
+
+    // tighten permissions if too open (group/other readable)
+    if info.Mode().Perm()&0o077 != 0 {
+        if chErr := os.Chmod(apiPath, 0o600); chErr != nil {
+            fmt.Fprintf(os.Stderr, "warning: could not chmod 600 %s: %v\n", apiPath, chErr)
+        }
+    }
+
+    b, err := os.ReadFile(apiPath)
+    if err != nil || len(b) == 0 {
+        return cfg, nil
+    }
+
+    if api, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
+        // Only override API fields when present in the override file.
+        if s := strings.TrimSpace(api.API.URL); s != "" {
+            cfg.API.URL = s
+        }
+        if s := strings.TrimSpace(api.API.AuthToken); s != "" {
+            cfg.API.AuthToken = s
+        }
+
+        // Merge boolean flags (allow enabling but not forcing off)
+        if api.API.AutoBlockSend {
+            cfg.API.AutoBlockSend = true
+        }
+        if api.API.ManualBlockSend {
+            cfg.API.ManualBlockSend = true
+        }
+        if api.API.UnblockSend {
+            cfg.API.UnblockSend = true
+        }
+        if api.API.DetectorsSend {
+            cfg.API.DetectorsSend = true
+        }
+    }
+
+    return cfg, nil
+}
+
+
+
+
 
 
 func main() {
@@ -512,7 +576,9 @@ func runBlock(args []string) {
     if cfgDir, ok := resolveConfigDir(""); ok {
         cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
 	if b, err := os.ReadFile(cfgPath); err == nil {
-            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
+            //if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
+		//use new custom conf if exists
+		if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil && cfg.API.ManualBlockSend {
                 if cfg.API.URL != "" && cfg.API.AuthToken != "" {
                     api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
                     // Στέλνουμε comment = reason, description = reason
@@ -578,13 +644,12 @@ func runUnblock(args []string) {
 
 
 
-    // --- εδώ ακριβώς όπως το έχεις σήμερα ---
     var reporter reporting.Reporter
     var sendAPI bool
     if cfgDir != "" {
         cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
 	if b, err := os.ReadFile(cfgPath); err == nil {
-            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil &&
+            if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil &&
                 cfg.API.UnblockSend &&
                 cfg.API.URL != "" &&
                 cfg.API.AuthToken != "" {
@@ -829,7 +894,7 @@ func runWebTop(kind string, args []string) {
     if cfgDir, ok := resolveConfigDir(""); ok {
         cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
 	if b, err := os.ReadFile(cfgPath); err == nil {
-            if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
+            if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil {
                 if strings.TrimSpace(cfg.Debug.ListenAddress) != "" {
                     host = strings.TrimSpace(cfg.Debug.ListenAddress)
                 }
@@ -1161,7 +1226,7 @@ ensureDir("/var/log/cfm", 0o700)
 		b, ok := confW.Changed()
 		if !ok { return }
 
-		cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
+		cfg, err := loadConfigWithAPIOverride(cfgDir, b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
 			return
