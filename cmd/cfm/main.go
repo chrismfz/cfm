@@ -45,6 +45,7 @@ import (
 	nflog "cfm/internal/nflog"
 
 	mmdb "cfm/internal/maxmindupdater"
+	policy "cfm/internal/policy"
 
 )
 
@@ -140,6 +141,41 @@ func startDebug(addr string) {
         w.Header().Set("Content-Type", "application/json")
         _ = json.NewEncoder(w).Encode(rows)
     })
+
+
+
+    // /httpd/suspicious?min=0.6&limit=20
+    mux.HandleFunc("/httpd/suspicious", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query()
+        limit := 10
+        if v := q.Get("limit"); v != "" {
+            if n, err := strconv.Atoi(v); err == nil && n > 0 { limit = n }
+        }
+        min := 0.60
+        if v := q.Get("min"); v != "" {
+            if x, err := strconv.ParseFloat(v, 64); err == nil && x > 0 { min = x }
+        }
+        rows := policy.SuspiciousTop("httpd", min, limit)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
+
+    // /nginx/suspicious?min=0.6&limit=20
+    mux.HandleFunc("/nginx/suspicious", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query()
+        limit := 10
+        if v := q.Get("limit"); v != "" {
+            if n, err := strconv.Atoi(v); err == nil && n > 0 { limit = n }
+        }
+        min := 0.60
+        if v := q.Get("min"); v != "" {
+            if x, err := strconv.ParseFloat(v, 64); err == nil && x > 0 { min = x }
+        }
+        rows := policy.SuspiciousTop("nginx", min, limit)
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
+
 
 
 
@@ -462,8 +498,17 @@ Usage:
   cfm status [--json]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
+
   cfm nginx-top -- Live stats from nginx detector
   cfm httpd-top -- Live stats from httpd detector
+  cfm httpd/nginx-top <vhost> -- Live stats for specific vhost
+
+Options (overall top):
+  --limit N        rows for the main top table (default 10)
+  --smin F         suspicious score threshold (default 0.60)
+  --slimit N       rows under "Suspicious vhosts" (default 10)
+  --json           output JSON of the main top table (suppresses the pretty table)
+
 
 Description:
   local nftables manager (block/allow with optional TTL),
@@ -922,10 +967,11 @@ func runWebTop(kind string, args []string) {
         }
     }
 
+
     if len(args) >= 1 {
         targetHost := strings.TrimSpace(args[0])
         // fetch drill-down JSON
-        url := fmt.Sprintf("http://%s:%d/%s/host?name=%s&top=10", "127.0.0.1", port, kind, urlQueryEscape(targetHost))
+        url := fmt.Sprintf("http://%s:%d/%s/host?name=%s&top=10", host, port, kind, urlQueryEscape(targetHost))
         var d struct {
             Host       string   `json:"host"`
             WindowSec  float64  `json:"window_sec"`
@@ -938,51 +984,97 @@ func runWebTop(kind string, args []string) {
             TopReferrers    []struct{ Key string; Count int } `json:"top_referrers"`
             TopPaths        []struct{ Key string; Count int } `json:"top_paths"`
             EnrichedTopIPs  []map[string]string              `json:"enriched_top_ips"`
+            IPClass         map[string]struct{
+                C2 int `json:"c2xx"`
+                C3 int `json:"c3xx"`
+                C4 int `json:"c4xx"`
+                C5 int `json:"c5xx"`
+            } `json:"ip_class"`
+
         }
         if err := httpGetJSON(url, &d); err != nil {
             log.Fatal(err)
         }
+
+        // Soft retry once if the snapshot is momentarily empty (window rollover)
+        if d.TotalReq == 0 {
+            time.Sleep(250 * time.Millisecond)
+            _ = httpGetJSON(url, &d) // ignore second error; best effort
+        }
+
+
         fmt.Printf("[%s] window=%.0fs total=%d rt_avg=%.3fs direct=%.1f%% bots=%.1f%%\n",
             d.Host, d.WindowSec, d.TotalReq, d.ProcAvgSec, d.DirectPct, d.BotPct)
-        // Top IPs (enriched if present)
         fmt.Println("Top IPs:")
+        // Prefer enriched list (has ASN/PTR and class counters we added)
         if len(d.EnrichedTopIPs) > 0 {
             for i, m := range d.EnrichedTopIPs {
-                if i >= 10 { break }
-                fmt.Printf("  %-2d %-15s x%-5s  %-40s  %-6s %-2s %s\n",
-                    i+1, m["ip"], m["count"], m["ptr"], m["asn"], m["cc"], m["asn_name"])
+                if i >= 15 { break }
+                // class counters (may be absent if enricher disabled)
+                c2, c3, c4, c5 := m["c2xx"], m["c3xx"], m["c4xx"], m["c5xx"]
+                cls := ""
+                if c2 != "" || c3 != "" || c4 != "" || c5 != "" {
+                    if c2 == "" { c2 = "0" }
+                    if c3 == "" { c3 = "0" }
+                    if c4 == "" { c4 = "0" }
+                    if c5 == "" { c5 = "0" }
+                    cls = fmt.Sprintf(" (2xx:%s, 3xx:%s, 4xx:%s, 5xx:%s)", c2, c3, c4, c5)
+                }
+                fmt.Printf("  %-2d %-15s x%-5s%-28s %-40s  %-6s %-2s %s\n",
+                    i+1, m["ip"], m["count"], cls, m["ptr"], m["asn"], m["cc"], m["asn_name"])
             }
+            
         } else {
-            for i, kv := range d.TopIPs {
-                if i >= 10 { break }
-                fmt.Printf("  %-2d %-15s x%d\n", i+1, kv.Key, kv.Count)
-            }
+        // Fallback: plain TopIPs + class lookup from d.IPClass
+        for i, kv := range d.TopIPs {
+            if i >= 15 { break }
+            cls := d.IPClass[kv.Key]
+            fmt.Printf("  %-2d %-15s x%-5d (2xx:%d, 3xx:%d, 4xx:%d, 5xx:%d)\n",
+                i+1, kv.Key, kv.Count, cls.C2, cls.C3, cls.C4, cls.C5)
         }
+}
+
+
         // Top agents
         fmt.Println("Top Agents:")
+        if len(d.TopAgents) == 0 {
+            fmt.Println("  (no data in the last window)")
+        }
         for i, kv := range d.TopAgents {
             if i >= 8 { break }
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
+
         // Referrer mix
         fmt.Println("Top Referrers:")
+        if len(d.TopReferrers) == 0 {
+            fmt.Println("  (no data in the last window)")
+        }
         for i, kv := range d.TopReferrers {
             if i >= 8 { break }
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
+
         // Paths
+
         fmt.Println("Top Paths:")
+        if len(d.TopPaths) == 0 {
+            fmt.Println("  (no data in the last window)")
+        }
         for i, kv := range d.TopPaths {
             if i >= 10 { break }
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
         return
     }
-    // fallback: existing overall top table
 
+    // fallback: existing overall top table (+ inline suspicious section)
     fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
-    limit := fs.Int("limit", 10, "rows")
-    jsonOut := fs.Bool("json", false, "JSON output")
+    limit   := fs.Int("limit", 10, "rows")
+    sMin    := fs.Float64("smin", 0.60, "minimum suspicious score to show")
+    sLimit  := fs.Int("slimit", 10, "suspicious rows")
+    jsonOut := fs.Bool("json", false, "JSON output (top table only)")
+
     _ = fs.Parse(args)
 
 
@@ -1029,6 +1121,35 @@ func runWebTop(kind string, args []string) {
         fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f %8.3f\n",
             r.Host, r.RPSTotal, r.RPS2xx, r.RPS3xx, r.RPS4xx, r.RPS5xx,
             r.RPS401, r.RPS499, r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec)
+    }
+
+
+    // ---- Inline Suspicious Section (pretty table) ----
+    suspURL := fmt.Sprintf("http://%s:%d/%s/suspicious?min=%.2f&limit=%d",
+        host, port, kind, *sMin, *sLimit)
+    var susp []struct {
+        Host         string   `json:"host"`
+        Score        float64  `json:"score"`
+        Reasons      []string `json:"reasons"`
+        RPS          float64  `json:"rps"`
+        R3xx         float64  `json:"rps_3xx"`
+        R4xx         float64  `json:"rps_4xx"`
+        R5xx         float64  `json:"rps_5xx"`
+        UniqueIPs    int      `json:"unique_ips"`
+        ErrRatio     float64  `json:"err_ratio"`
+        Auth401Ratio float64  `json:"auth401_ratio"`
+    }
+    if err := httpGetJSON(suspURL, &susp); err == nil && len(susp) > 0 {
+        fmt.Println()
+        fmt.Println("---- Suspicious vhosts ----")
+        fmt.Printf("%-30s %6s %-28s %6s %6s %6s %6s %7s %6s\n",
+            "HOST", "SCORE", "REASONS", "RPS", "3xx", "4xx", "5xx", "uniqIP", "err%")
+        for _, r := range susp {
+            rsn := strings.Join(r.Reasons, ",")
+            if len(rsn) > 28 { rsn = rsn[:27] + "…" }
+            fmt.Printf("%-30.30s %6.2f %-28.28s %6.2f %6.2f %6.2f %6.2f %7d %6.1f\n",
+                r.Host, r.Score, rsn, r.RPS, r.R3xx, r.R4xx, r.R5xx, r.UniqueIPs, 100*r.ErrRatio)
+        }
     }
 
 }

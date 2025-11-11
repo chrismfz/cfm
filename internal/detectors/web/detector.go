@@ -12,6 +12,9 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+
+	"cfm/internal/policy"
+
 )
 
 type Kind string
@@ -66,6 +69,8 @@ type Detector struct {
 
 	agg *hostAggregator
 	enr *enrich.Enricher
+	scorer   *policy.Scorer
+
 }
 
 type Row struct {
@@ -90,10 +95,23 @@ func New(cfg Config) *Detector {
 	if cfg.Cooldown <= 0 { cfg.Cooldown = 10 * time.Minute }
 	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 20 }
 
-	d := &Detector{cfg: cfg}
+    // Gentle auto-tuning: keep buckets aligned with window to avoid surprises.
+    if cfg.Every <= 0 { cfg.Every = 5 * time.Second }
+    if cfg.Window <= 0 { cfg.Window = 60 * time.Second }
+    if cfg.Window/time.Second != (cfg.Every*12)/time.Second {
+        // Snap Every so that 12 buckets ~ Window
+        cfg.Every = cfg.Window / 12
+        if cfg.Every <= 0 { cfg.Every = 5 * time.Second }
+    }
+    d := &Detector{cfg: cfg}
+
 	d.samples = core.NewSampleRing(cfg.SampleLimit)
 	d.gate = core.NewAlertGate(cfg.Cooldown)
 	d.agg = NewHostAggregator(cfg.Window, cfg.Every, cfg.SampleLimit)
+
+    // ML-ready policy scorer (heuristics for now)
+    d.scorer  = policy.New(policy.DefaultConfig())
+
 
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
@@ -106,6 +124,59 @@ func New(cfg Config) *Detector {
 	}
 	return d
 }
+
+
+
+// SuspiciousRow is a scored view for UI/CLI endpoints.
+type SuspiciousRow struct {
+    Host      string   `json:"host"`
+    Score     float64  `json:"score"`
+    Reasons   []string `json:"reasons"`
+    RPS       float64  `json:"rps"`
+    R3xx      float64  `json:"rps_3xx"`
+    R4xx      float64  `json:"rps_4xx"`
+    R5xx      float64  `json:"rps_5xx"`
+    UniqueIPs int      `json:"unique_ips"`
+    ErrRatio  float64  `json:"err_ratio"`
+    Auth401Ratio float64 `json:"auth401_ratio"`
+}
+
+// SuspiciousTop evaluates all hosts via policy scorer and returns top N over a minimum score.
+func (d *Detector) SuspiciousTop(limit int, minScore float64) []SuspiciousRow {
+    if d == nil || d.agg == nil || d.scorer == nil { return nil }
+    if minScore <= 0 { minScore = 0.60 }
+    hosts := d.agg.Hosts()
+    out := make([]SuspiciousRow, 0, len(hosts))
+    for _, h := range hosts {
+        m := d.agg.Metrics(h)
+        sig := policy.Signals{
+            RPS:          m.RPSTotal,
+            R3xx:         m.RPS3xx,
+            R4xx:         m.RPS4xx,
+            R5xx:         m.RPS5xx,
+            ErrRatio:     m.ErrRatio,
+            Auth401Ratio: m.Auth401Ratio,
+            UniqueIPs:    m.UniqueIPs,
+            MedianPerIP:  m.MedianPerIPRPS,
+        }
+        res := d.scorer.Score(sig)
+        if res.Score >= minScore {
+            out = append(out, SuspiciousRow{
+                Host: h, Score: res.Score, Reasons: res.Reasons,
+                RPS: m.RPSTotal, R3xx: m.RPS3xx, R4xx: m.RPS4xx, R5xx: m.RPS5xx,
+                UniqueIPs: m.UniqueIPs, ErrRatio: m.ErrRatio, Auth401Ratio: m.Auth401Ratio,
+            })
+        }
+    }
+    sort.Slice(out, func(i, j int) bool {
+        if out[i].Score == out[j].Score { return out[i].RPS > out[j].RPS }
+        return out[i].Score > out[j].Score
+    })
+    if limit > 0 && len(out) > limit { out = out[:limit] }
+    return out
+}
+/////
+
 
 func (d *Detector) SetName(n string)                    { d.name = n }
 func (d *Detector) SetSource(src core.LineSource)       { d.src = src }
@@ -194,8 +265,12 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 	}
 
-	// evaluate on rotation
-	if d.agg.RotateIfDue(now) {
+        // evaluate on rotation
+        if d.agg.RotateIfDue(now) {
+                // ---- FEED long-window policy (10× by default) ----
+                snap := d.snapshotMini() // per-host metrics from the short window
+                policy.IngestWindowSnapshot(string(d.cfg.Kind), d.cfg.Every, 10 /*factor*/, d.cfg.Window.Seconds(), snap)
+
 		for _, host := range d.agg.Hosts() {
 			m := d.agg.Metrics(host)
 
@@ -253,6 +328,29 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 func f2(x float64) string { return strconv.FormatFloat(x, 'f', 2, 64) }
 
+
+// snapshotMini returns a per-host snapshot of MiniMetrics for the last short window.
+func (d *Detector) snapshotMini() map[string]policy.MiniMetrics {
+        out := make(map[string]policy.MiniMetrics, 128)
+        for _, h := range d.agg.Hosts() {
+                m := d.agg.Metrics(h)
+                out[h] = policy.MiniMetrics{
+                        RPSTotal:      m.RPSTotal,
+                        R3xx:          m.RPS3xx,
+                        R4xx:          m.RPS4xx,
+                        R5xx:          m.RPS5xx,
+                        R401:          m.RPS401,
+                        R499:          m.RPS499,
+                        ErrRatio:      m.ErrRatio,
+                        Auth401Ratio:  m.Auth401Ratio,
+                        UniqueIPs:     m.UniqueIPs,
+                        MedianPerIPRPS: m.MedianPerIPRPS,
+                        ProcAvgSec:    m.ProcAvgSec,
+                }
+        }
+        return out
+}
+
 // ---- parsing (12-field TSV unified) ----
 type LogRec struct {
 	TS      float64
@@ -304,6 +402,7 @@ func zero(s string) string { if s == "" || s == "-" { return "0" }; return s }
 type classCtr struct {
 	total, c2xx, c3xx, c4xx, c5xx, c499, c401 int
 	ips                                       map[string]int
+	ip2xx, ip3xx, ip4xx, ip5xx               map[string]int          // per-IP class counters
 	sumRT                                     float64
 	uas, refs, paths                          map[string]int
 }
@@ -334,6 +433,10 @@ func (a *hostAggregator) get(host string) *hostAgg {
 		h = &hostAgg{sample: core.NewSampleRing(64), last: time.Now()}
 		for i := range h.bkt {
 			h.bkt[i].ips = make(map[string]int)
+                        h.bkt[i].ip2xx = make(map[string]int)
+                        h.bkt[i].ip3xx = make(map[string]int)
+                        h.bkt[i].ip4xx = make(map[string]int)
+                        h.bkt[i].ip5xx = make(map[string]int)
 			h.bkt[i].uas = make(map[string]int)
 			h.bkt[i].refs = make(map[string]int)
 			h.bkt[i].paths = make(map[string]int)
@@ -347,13 +450,26 @@ func (a *hostAggregator) Add(r LogRec, line string) {
 	b := &h.bkt[h.idx]
 	b.total++
 	switch r.Status / 100 {
-	case 2: b.c2xx++
-	case 3: b.c3xx++
+
+        case 2:
+                b.c2xx++
+                b.ip2xx[r.IP]++
+        case 3:
+                b.c3xx++
+                b.ip3xx[r.IP]++
+
+
 	case 4:
 		b.c4xx++
 		if r.Status == 401 { b.c401++ }
-	case 5: b.c5xx++
+                b.ip4xx[r.IP]++
+
+        case 5:
+                b.c5xx++
+                b.ip5xx[r.IP]++
+
 	}
+
 	if r.Status == 499 { b.c499++ }
 	b.ips[r.IP]++
 
@@ -379,6 +495,10 @@ func (a *hostAggregator) RotateIfDue(now time.Time) bool {
 			h.idx = (h.idx + 1) % len(h.bkt)
 			h.bkt[h.idx] = classCtr{
 				ips:   make(map[string]int),
+                                ip2xx: make(map[string]int),
+                                ip3xx: make(map[string]int),
+                                ip4xx: make(map[string]int),
+                                ip5xx: make(map[string]int),
 				uas:   make(map[string]int),
 				refs:  make(map[string]int),
 				paths: make(map[string]int),
@@ -408,7 +528,11 @@ func (a *hostAggregator) Metrics(host string) Metrics {
 		sumRT += b.sumRT
 		for ip, n := range b.ips { ipCounts[ip] += n }
 	}
-	winSec := a.win.Seconds(); if winSec <= 0 { winSec = 1 }
+    // Use the *effective* coverage of the ring: len(bkt) * step.
+    // This avoids RPS inflation when Window != 12*Every.
+    effWin := a.step * time.Duration(len(h.bkt)) // len(h.bkt) == 12
+    winSec := effWin.Seconds(); if winSec <= 0 { winSec = 1 }
+
 	m := Metrics{
 		RPSTotal: float64(tot) / winSec,
 		RPS2xx:   float64(c2) / winSec,
@@ -487,6 +611,15 @@ type TopKV struct {
 	Key   string `json:"key"`
 	Count int    `json:"count"`
 }
+
+// IPClass holds per-IP status class counts (over the current window)
+type IPClass struct {
+        C2 int `json:"c2xx"`
+        C3 int `json:"c3xx"`
+        C4 int `json:"c4xx"`
+        C5 int `json:"c5xx"`
+}
+
 type HostDetail struct {
 	Host            string  `json:"host"`
 	WindowSec       float64 `json:"window_sec"`
@@ -499,6 +632,7 @@ type HostDetail struct {
 	TopReferrers    []TopKV `json:"top_referrers"`
 	TopPaths        []TopKV `json:"top_paths"`
 	EnrichedTopIPs  []map[string]string `json:"enriched_top_ips,omitempty"`
+        IPClass         map[string]IPClass  `json:"ip_class,omitempty"`
 }
 
 func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDetail {
@@ -507,6 +641,10 @@ func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDe
 	m := a.Metrics(host)
 
 	ipc := map[string]int{}
+        ip2 := map[string]int{}
+        ip3 := map[string]int{}
+        ip4 := map[string]int{}
+        ip5 := map[string]int{}
 	uac := map[string]int{}
 	rfc := map[string]int{}
 	ptc := map[string]int{}
@@ -515,6 +653,10 @@ func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDe
 		b := &h.bkt[i]
 		tot += b.total
 		for k, v := range b.ips { ipc[k] += v }
+                for k, v := range b.ip2xx { ip2[k] += v }
+                for k, v := range b.ip3xx { ip3[k] += v }
+                for k, v := range b.ip4xx { ip4[k] += v }
+                for k, v := range b.ip5xx { ip5[k] += v }
 		for k, v := range b.uas { uac[k] += v }
 		for k, v := range b.refs {
 			rfc[k] += v
@@ -537,7 +679,12 @@ func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDe
 	}
 	var botCnt int
 	for ua, c := range uac { if botLike(ua) { botCnt += c } }
-	detail := HostDetail{
+
+        ipClass := make(map[string]IPClass, len(ipc))
+        for ip := range ipc {
+                ipClass[ip] = IPClass{C2: ip2[ip], C3: ip3[ip], C4: ip4[ip], C5: ip5[ip]}
+        }
+        detail := HostDetail{
 		Host:       host,
 		WindowSec:  win.Seconds(),
 		TotalReq:   tot,
@@ -548,6 +695,7 @@ func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDe
 		TopAgents:    top(uac),
 		TopReferrers: top(rfc),
 		TopPaths:     top(ptc),
+                IPClass:      ipClass,
 	}
 	return detail
 }
@@ -569,6 +717,15 @@ func (d *Detector) HostDetail(host string, topN int) HostDetail {
                         "ip":    ip,
                         "count": strconv.Itoa(kv.Count),
                 }
+
+                // attach per-IP class breakdown (if available)
+                if cls, ok := hd.IPClass[ip]; ok {
+                        row["c2xx"] = strconv.Itoa(cls.C2)
+                        row["c3xx"] = strconv.Itoa(cls.C3)
+                        row["c4xx"] = strconv.Itoa(cls.C4)
+                        row["c5xx"] = strconv.Itoa(cls.C5)
+                }
+
                 if rec.ASN > 0 {
                         row["asn"] = fmt.Sprintf("AS%d", rec.ASN)
                 }
