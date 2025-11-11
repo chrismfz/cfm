@@ -30,10 +30,12 @@ import (
 	ipquery "cfm/internal/ipquery"
 	"cfm/internal/unblock"
 	"cfm/internal/reporting"
-	nginxdet "cfm/internal/detectors/nginx"
-	httpddet "cfm/internal/detectors/httpd"
+//	nginxdet "cfm/internal/detectors/nginx"
+//	httpddet "cfm/internal/detectors/httpd"
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
+//new combined detector
+	webdet   "cfm/internal/detectors/web"
 
 	//Debugging profiler for CPU usage
 	"net/http"
@@ -108,7 +110,7 @@ func startDebug(addr string) {
                 limit = n
             }
         }
-        d := nginxdet.Live()
+        d := webdet.Live(webdet.KindNginx)
         if d == nil {
             http.Error(w, "nginx detector not live", http.StatusNotFound)
             return
@@ -128,7 +130,7 @@ func startDebug(addr string) {
                 limit = n
             }
         }
-        d := httpddet.Live()
+        d := webdet.Live(webdet.KindHTTPD)
         if d == nil {
             http.Error(w, "httpd detector not live", http.StatusNotFound)
             return
@@ -926,6 +928,7 @@ func runWebTop(kind string, args []string) {
         UniqueIPs    int     `json:"unique_ips"`
         ErrRatio     float64 `json:"err_ratio"`
         Auth401Ratio float64 `json:"auth401_ratio"`   // may be 0/omitted for nginx
+        ProcAvgSec   float64 `json:"proc_avg_sec"`
     }
 
     if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
@@ -940,13 +943,15 @@ func runWebTop(kind string, args []string) {
     }
 
     // print table (works for both; nginx just shows 0.00 for 401)
-    fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s %8s\n",
-        "HOST", "RPS", "2xx", "3xx", "4xx", "5xx", "401", "499", "uniqIP", "err%")
+
+    fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s %8s %8s\n",
+        "HOST", "RPS", "2xx", "3xx", "4xx", "5xx", "401", "499", "uniqIP", "err%", "rt_avg")
     for _, r := range rows {
-        fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f\n",
+        fmt.Printf("%-30.30s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8d %7.1f %8.3f\n",
             r.Host, r.RPSTotal, r.RPS2xx, r.RPS3xx, r.RPS4xx, r.RPS5xx,
-            r.RPS401, r.RPS499, r.UniqueIPs, r.ErrRatio*100)
+            r.RPS401, r.RPS499, r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec)
     }
+
 }
 
 
