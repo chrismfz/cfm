@@ -265,6 +265,7 @@ type LogRec struct {
 	Bytes   int64
 	RT, URT float64
 	UA      string
+	Ref     string
 }
 
 func parseTSV(line string) (LogRec, bool) {
@@ -278,9 +279,7 @@ func parseTSV(line string) (LogRec, bool) {
 
     rt, _ := strconv.ParseFloat(zero(f[8]), 64)
     // If Apache wrote microseconds via %D, normalize to seconds.
-    if rt > 10000 { // >10ms → likely μs
-        rt = rt / 1_000_000.0
-    }
+    if rt > 10000 {rt = rt / 1_000_000.0}
 
 	ut, _ := strconv.ParseFloat(zero(f[9]), 64)
 
@@ -296,6 +295,7 @@ func parseTSV(line string) (LogRec, bool) {
 		RT:     rt,
 		URT:    ut,
 		UA:     strings.ToLower(f[11]),
+		Ref:    strings.ToLower(f[10]),
 	}, true
 }
 func zero(s string) string { if s == "" || s == "-" { return "0" }; return s }
@@ -305,7 +305,9 @@ type classCtr struct {
 	total, c2xx, c3xx, c4xx, c5xx, c499, c401 int
 	ips                                       map[string]int
 	sumRT                                     float64
+	uas, refs, paths                          map[string]int
 }
+
 type hostAgg struct {
 	bkt    [12]classCtr
 	idx    int
@@ -313,10 +315,12 @@ type hostAgg struct {
 	sample *core.SampleRing
 	consec int
 }
+
 type hostAggregator struct {
 	win, step time.Duration
 	hosts     map[string]*hostAgg
 }
+
 func NewHostAggregator(win, step time.Duration, sampleCap int) *hostAggregator {
 	return &hostAggregator{
 		win:   win,
@@ -328,7 +332,12 @@ func (a *hostAggregator) get(host string) *hostAgg {
 	h := a.hosts[host]
 	if h == nil {
 		h = &hostAgg{sample: core.NewSampleRing(64), last: time.Now()}
-		for i := range h.bkt { h.bkt[i].ips = make(map[string]int) }
+		for i := range h.bkt {
+			h.bkt[i].ips = make(map[string]int)
+			h.bkt[i].uas = make(map[string]int)
+			h.bkt[i].refs = make(map[string]int)
+			h.bkt[i].paths = make(map[string]int)
+		}
 		a.hosts[host] = h
 	}
 	return h
@@ -347,6 +356,19 @@ func (a *hostAggregator) Add(r LogRec, line string) {
 	}
 	if r.Status == 499 { b.c499++ }
 	b.ips[r.IP]++
+
+	// record UA/ref/path (cheap counters)
+	if r.UA != "" { b.uas[r.UA]++ }
+	ref := r.Ref
+	if ref == "" || ref == "-" { ref = "(direct)" }
+	b.refs[ref]++
+	p := r.URI
+	if p == "" || p == "-" { p = "/" }
+	// collapse querystring
+	if i := strings.IndexByte(p, '?'); i >= 0 { p = p[:i] }
+	b.paths[p]++
+
+
 	b.sumRT += r.RT
 	h.sample.Add("host:"+r.Host, line)
 }
@@ -355,7 +377,12 @@ func (a *hostAggregator) RotateIfDue(now time.Time) bool {
 	for _, h := range a.hosts {
 		if h.last.IsZero() || now.Sub(h.last) >= a.step {
 			h.idx = (h.idx + 1) % len(h.bkt)
-			h.bkt[h.idx] = classCtr{ips: make(map[string]int)}
+			h.bkt[h.idx] = classCtr{
+				ips:   make(map[string]int),
+				uas:   make(map[string]int),
+				refs:  make(map[string]int),
+				paths: make(map[string]int),
+			}
 			h.last = now
 			rot = true
 		}
@@ -453,4 +480,110 @@ func (a *hostAggregator) SampleLines(host string, n int) []string {
 	all := h.sample.GetAndClear(key)
 	if n > 0 && len(all) > n { return all[len(all)-n:] }
 	return all
+}
+
+// ---- Drill-down detail ----
+type TopKV struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+type HostDetail struct {
+	Host            string  `json:"host"`
+	WindowSec       float64 `json:"window_sec"`
+	TotalReq        int     `json:"total_req"`
+	DirectPct       float64 `json:"direct_pct"`
+	BotPct          float64 `json:"bot_pct"`
+	ProcAvgSec      float64 `json:"proc_avg_sec"`
+	TopIPs          []TopKV `json:"top_ips"`
+	TopAgents       []TopKV `json:"top_agents"`
+	TopReferrers    []TopKV `json:"top_referrers"`
+	TopPaths        []TopKV `json:"top_paths"`
+	EnrichedTopIPs  []map[string]string `json:"enriched_top_ips,omitempty"`
+}
+
+func (a *hostAggregator) Detail(host string, win time.Duration, topN int) HostDetail {
+	h := a.hosts[host]
+	if h == nil { return HostDetail{Host: host, WindowSec: win.Seconds()} }
+	m := a.Metrics(host)
+
+	ipc := map[string]int{}
+	uac := map[string]int{}
+	rfc := map[string]int{}
+	ptc := map[string]int{}
+	var tot, direct int
+	for i := range h.bkt {
+		b := &h.bkt[i]
+		tot += b.total
+		for k, v := range b.ips { ipc[k] += v }
+		for k, v := range b.uas { uac[k] += v }
+		for k, v := range b.refs {
+			rfc[k] += v
+			if k == "(direct)" { direct += v }
+		}
+		for k, v := range b.paths { ptc[k] += v }
+	}
+	top := func(m map[string]int) []TopKV {
+		out := make([]TopKV, 0, len(m))
+		for k, v := range m { out = append(out, TopKV{Key: k, Count: v}) }
+		sort.Slice(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+		if topN > 0 && len(out) > topN { out = out[:topN] }
+		return out
+	}
+	botLike := func(ua string) bool {
+		// conservative UA bot detector
+		sub := []string{"bot", "spider", "crawl", "scanner", "ahrefs", "semrush", "python-requests", "curl", "wget", "headless", "puppeteer"}
+		for _, s := range sub { if strings.Contains(ua, s) { return true } }
+		return false
+	}
+	var botCnt int
+	for ua, c := range uac { if botLike(ua) { botCnt += c } }
+	detail := HostDetail{
+		Host:       host,
+		WindowSec:  win.Seconds(),
+		TotalReq:   tot,
+		DirectPct:  pct(float64(direct), float64(max1(tot))),
+		BotPct:     pct(float64(botCnt), float64(max1(tot))),
+		ProcAvgSec: m.ProcAvgSec,
+		TopIPs:       top(ipc),
+		TopAgents:    top(uac),
+		TopReferrers: top(rfc),
+		TopPaths:     top(ptc),
+	}
+	return detail
+}
+
+func pct(x, y float64) float64 { return (x / y) * 100.0 }
+func max1(x int) int { if x < 1 { return 1 }; return x }
+
+// Public wrapper that also enriches top IPs if available.
+func (d *Detector) HostDetail(host string, topN int) HostDetail {
+	hd := d.agg.Detail(host, d.cfg.Window, topN)
+	if d.enr == nil || len(hd.TopIPs) == 0 { return hd }
+	enriched := make([]map[string]string, 0, len(hd.TopIPs))
+	for _, kv := range hd.TopIPs {
+		ip := kv.Key
+
+                // Use Enricher.Lookup(ip) instead of non-existent ASN/Country/PTR methods
+                rec := d.enr.Lookup(ip)
+                row := map[string]string{
+                        "ip":    ip,
+                        "count": strconv.Itoa(kv.Count),
+                }
+                if rec.ASN > 0 {
+                        row["asn"] = fmt.Sprintf("AS%d", rec.ASN)
+                }
+                if rec.ASNName != "" {
+                        row["asn_name"] = rec.ASNName
+                }
+                if rec.Country != "" {
+                        row["cc"] = rec.Country
+                }
+                if rec.PTR != "" {
+                        row["ptr"] = rec.PTR
+                }
+                enriched = append(enriched, row)
+
+	}
+	hd.EnrichedTopIPs = enriched
+	return hd
 }

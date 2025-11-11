@@ -166,6 +166,17 @@ func (m *manager) maybeReload(parent context.Context) {
 			continue
 		}
 
+
+
+        // If detector supports enrichment, inject the shared enricher
+        if enr != nil {
+            if ea, ok := det.(interface{ SetEnricher(*enrich.Enricher) }); ok {
+                ea.SetEnricher(enr)
+            }
+        }
+
+
+
 if pa, ok := det.(core.PositionAware); ok && m.state != nil {
 	if p, ok2 := m.state.Get(pa.Name()); ok2 {
 		pa.ApplyPosition(p)

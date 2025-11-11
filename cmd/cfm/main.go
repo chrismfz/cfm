@@ -19,6 +19,7 @@ import (
 	"time"
 	"strconv"
 	"math"
+	"log"
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -139,6 +140,25 @@ func startDebug(addr string) {
         w.Header().Set("Content-Type", "application/json")
         _ = json.NewEncoder(w).Encode(rows)
     })
+
+
+
+mux.HandleFunc("/nginx/host", func(w http.ResponseWriter, r *http.Request) {
+    name := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("name")))
+    topN, _ := strconv.Atoi(r.URL.Query().Get("top"))
+    if topN <= 0 { topN = 10 }
+    d := webdet.Live(webdet.KindNginx)
+    if d == nil || name == "" { http.Error(w, "missing", 400); return }
+    _ = json.NewEncoder(w).Encode(d.HostDetail(name, topN))
+})
+mux.HandleFunc("/httpd/host", func(w http.ResponseWriter, r *http.Request) {
+    name := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("name")))
+    topN, _ := strconv.Atoi(r.URL.Query().Get("top"))
+    if topN <= 0 { topN = 10 }
+    d := webdet.Live(webdet.KindHTTPD)
+    if d == nil || name == "" { http.Error(w, "missing", 400); return }
+    _ = json.NewEncoder(w).Encode(d.HostDetail(name, topN))
+})
 
 
     // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
@@ -414,10 +434,9 @@ func main() {
 		runDisable(os.Args[2:])
 
 case "nginx-top":
-    runWebTop("nginx", flag.Args())
+    runWebTop("nginx", os.Args[2:])
 case "httpd-top":
-    runWebTop("httpd", flag.Args())
-
+    runWebTop("httpd", os.Args[2:])
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
@@ -885,17 +904,13 @@ func runAllowList(args []string) {
 // Apache and Nginx "top" cli command
 // Apache and Nginx "top" cli command
 func runWebTop(kind string, args []string) {
-    fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
-    limit := fs.Int("limit", 10, "rows")
-    jsonOut := fs.Bool("json", false, "JSON output")
-    _ = fs.Parse(args)
 
-    // Resolve host/port from active config (same logic as nginx-top)
+    // Resolve host/port from active config once (used by both modes)
     host := "127.0.0.1"
     port := 6060
     if cfgDir, ok := resolveConfigDir(""); ok {
         cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
-	if b, err := os.ReadFile(cfgPath); err == nil {
+        if b, err := os.ReadFile(cfgPath); err == nil {
             if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil {
                 if strings.TrimSpace(cfg.Debug.ListenAddress) != "" {
                     host = strings.TrimSpace(cfg.Debug.ListenAddress)
@@ -906,6 +921,70 @@ func runWebTop(kind string, args []string) {
             }
         }
     }
+
+    if len(args) >= 1 {
+        targetHost := strings.TrimSpace(args[0])
+        // fetch drill-down JSON
+        url := fmt.Sprintf("http://%s:%d/%s/host?name=%s&top=10", "127.0.0.1", port, kind, urlQueryEscape(targetHost))
+        var d struct {
+            Host       string   `json:"host"`
+            WindowSec  float64  `json:"window_sec"`
+            TotalReq   int      `json:"total_req"`
+            DirectPct  float64  `json:"direct_pct"`
+            BotPct     float64  `json:"bot_pct"`
+            ProcAvgSec float64  `json:"proc_avg_sec"`
+            TopIPs          []struct{ Key string; Count int } `json:"top_ips"`
+            TopAgents       []struct{ Key string; Count int } `json:"top_agents"`
+            TopReferrers    []struct{ Key string; Count int } `json:"top_referrers"`
+            TopPaths        []struct{ Key string; Count int } `json:"top_paths"`
+            EnrichedTopIPs  []map[string]string              `json:"enriched_top_ips"`
+        }
+        if err := httpGetJSON(url, &d); err != nil {
+            log.Fatal(err)
+        }
+        fmt.Printf("[%s] window=%.0fs total=%d rt_avg=%.3fs direct=%.1f%% bots=%.1f%%\n",
+            d.Host, d.WindowSec, d.TotalReq, d.ProcAvgSec, d.DirectPct, d.BotPct)
+        // Top IPs (enriched if present)
+        fmt.Println("Top IPs:")
+        if len(d.EnrichedTopIPs) > 0 {
+            for i, m := range d.EnrichedTopIPs {
+                if i >= 10 { break }
+                fmt.Printf("  %-2d %-15s x%-5s  %-40s  %-6s %-2s %s\n",
+                    i+1, m["ip"], m["count"], m["ptr"], m["asn"], m["cc"], m["asn_name"])
+            }
+        } else {
+            for i, kv := range d.TopIPs {
+                if i >= 10 { break }
+                fmt.Printf("  %-2d %-15s x%d\n", i+1, kv.Key, kv.Count)
+            }
+        }
+        // Top agents
+        fmt.Println("Top Agents:")
+        for i, kv := range d.TopAgents {
+            if i >= 8 { break }
+            fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
+        }
+        // Referrer mix
+        fmt.Println("Top Referrers:")
+        for i, kv := range d.TopReferrers {
+            if i >= 8 { break }
+            fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
+        }
+        // Paths
+        fmt.Println("Top Paths:")
+        for i, kv := range d.TopPaths {
+            if i >= 10 { break }
+            fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
+        }
+        return
+    }
+    // fallback: existing overall top table
+
+    fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
+    limit := fs.Int("limit", 10, "rows")
+    jsonOut := fs.Bool("json", false, "JSON output")
+    _ = fs.Parse(args)
+
 
     url := fmt.Sprintf("http://%s:%d/%s/top?limit=%d", host, port, kind, *limit)
     resp, err := http.Get(url)
@@ -1906,3 +1985,12 @@ func feedKeyFromSet(setName string) string {
 	return ""
 }
 
+
+
+
+func urlQueryEscape(s string) string { return strings.ReplaceAll(s, " ", "%20") }
+func httpGetJSON(url string, out any) error {
+    resp, err := http.Get(url); if err != nil { return err }
+    defer resp.Body.Close()
+    return json.NewDecoder(resp.Body).Decode(out)
+}
