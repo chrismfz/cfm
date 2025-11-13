@@ -105,9 +105,10 @@ It powers:
 Available in:
 
 ```
-/usr/share/cfm/confs/nginx/
-/usr/share/cfm/confs/apache/
-/usr/share/cfm/confs/litespeed/
+/usr/share/cfm/
+
+ready .conf examples for httpd and nginx to be placed in /etc/nginx/conf.d/ or /etc/apache2/conf.d/
+
 ```
 
 Each includes a **TSV format**:
@@ -125,23 +126,63 @@ For Apache we normalize `%D` or `%T` to seconds.
 ### Example in `detectors.conf`
 
 ```
-[web.nginx]
-kind = "nginx"
-mode = "files"
-files = ["/var/log/nginx/access.log", "/var/log/nginx/access.*.log"]
-window = "60s"
+[nginx_access]
+ENABLED = 1
+MODE = file
+LOG_PATH = "/var/log/nginx/access_cfm_combined.log"
 
-[web.httpd]
-kind = "httpd"
-mode = "journal"
-journal_match = ["_SYSTEMD_UNIT=httpd.service"]
-window = "60s"
+EVERY   = "5s"
+WINDOW  = "60s"
+COOLDOWN = "10m"
+SAMPLE_LIMIT = 20
 
-[web.litespeed]
-kind = "httpd"
-mode = "files"
-files = ["/usr/local/lsws/logs/access.log"]
-window = "60s"
+# Thresholds (notify-only to start)
+RPS_TOTAL_MIN     = 500
+UNIQUE_IPS_MIN    = 300
+ERR_RATIO_MIN     = 0.20
+RPS_499_MIN       = 100
+RPS_5XX_MIN       = 60
+MEDIAN_IP_RPS_MAX = 3
+
+# Optional 401-focused triggers
+RPS_401_MIN = 200
+AUTH401_RATIO_MIN = 0.60
+
+
+# Optional enrichment
+ENRICH = 1
+PTR    = 1
+ENRICH_DIRS = "/var/lib/cfm/maxmind"
+
+
+[httpd_access]
+ENABLED = 1
+MODE = file
+LOG_PATH = "/var/log/apache2/access_cfm_tsv.log"
+
+EVERY = "5s"
+WINDOW = "60s"
+COOLDOWN = "10m"
+SAMPLE_LIMIT = 20
+
+RPS_TOTAL_MIN = 500
+UNIQUE_IPS_MIN = 300
+ERR_RATIO_MIN = 0.20
+RPS_499_MIN = 100
+RPS_5XX_MIN = 60
+MEDIAN_IP_RPS_MAX = 3
+
+# Optional 401-focused triggers
+RPS_401_MIN = 200
+AUTH401_RATIO_MIN = 0.60
+
+# Enrichment
+ENRICH = 1
+PTR = 1
+ENRICH_DIRS = "/var/lib/cfm/maxmind"
+
+
+
 ```
 
 Works with any source that outputs the TSV line format.
