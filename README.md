@@ -4,6 +4,8 @@ CFM is a modern **firewall + intrusion detection manager** written in Go.
 It combines nftables policy enforcement, log-driven detection, autoblocking, system hardening, and notifications into one daemon.
 It now includes a **unified Web detector** for Nginx / Apache / LiteSpeed with live “top” views, per-vhost drill-downs, and a “Suspicious vhosts” scorer.
 
+More information at [https://infected.gr/category/cfm/](https://infected.gr/category/cfm/) 
+
 ---
 
 ## ✨ Key Features

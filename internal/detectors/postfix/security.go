@@ -2,7 +2,6 @@ package postfix
 
 import (
     "context"
-    "fmt"
     "io"
     "regexp"
     "strconv"
@@ -165,11 +164,22 @@ func NewSecurity(cfg SecConfig) *PostfixSecurity {
 
 // ---- core.PeriodicDetector minimal hooks ----------------------------------
 
-func (d *PostfixSecurity) Name() string { return d.name }
+func (d *PostfixSecurity) Name() string {
+    if d.name != "" {
+        return d.name
+    }
+    // fallback so PositionAware state key is stable even if SetName is forgotten
+    return "postfix/security"
+}
+
+
 func (d *PostfixSecurity) SetName(n string) { d.name = n }
 
+// SetState lets a shared core.State be injected by the manager or a register.
 func (d *PostfixSecurity) SetState(st *core.State) { d.state = st }
-func (d *PostfixSecurity) Every() time.Duration    { return d.cfg.Every }
+
+func (d *PostfixSecurity) Every() time.Duration { return d.cfg.Every }
+
 
 // RunOnce will be wired to FileTailer / JournalTailer in next step.
 // For now, assume d.src is already set by the factory.
@@ -189,15 +199,26 @@ func (d *PostfixSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) er
         d.processLine(now, line)
     }
     d.flush(now, out)
-    if d.state != nil {
-        d.state.Set(d.Name(), d.Position())
-    }
     return nil
 }
 
 func (d *PostfixSecurity) ApplyPosition(p core.Position) {
-    if d.src != nil {
-        d.src.ApplyResume(p.Inode, p.Offset)
+    if d.src == nil {
+        return
+    }
+
+    // We don't know at compile time if src is a FileTailer or JournalTailer,
+    // so we use type assertions. This mirrors what Exim does but works for
+    // both file logs and journalctl.
+    switch t := d.src.(type) {
+    case *core.FileTailer:
+        // resume by inode + offset (classic file tail)
+        t.ApplyResume(p.Inode, p.Offset)
+    case *core.JournalTailer:
+        // resume by last timestamp (journalctl --since)
+        t.ApplyResume(p.Inode, p.Offset, p.TS)
+    default:
+        // unknown LineSource implementation – nothing to do
     }
 }
 
@@ -390,13 +411,37 @@ func (d *PostfixSecurity) thresholdAndKey(kindKey, rawKey string) (thr int, aler
 }
 
 func (d *PostfixSecurity) lookupMeta(ip string) string {
+
     if ip == "" {
         return ""
     }
-    if d.enr != nil {
-        if meta, err := d.enr.Lookup(ip); err == nil && meta != "" {
-            return meta
+    if d.enr == nil {
+        return ""
+    }
+
+    r := d.enr.Lookup(ip)
+
+    // Απλό format, αντίστοιχο με exim_relays: ASN + Country + PTR (αν υπάρχουν)
+    parts := []string{}
+
+    if r.ASN > 0 {
+        if r.ASNName != "" {
+            parts = append(parts, "AS"+strconv.FormatUint(uint64(r.ASN), 10)+" "+r.ASNName)
+        } else {
+            parts = append(parts, "AS"+strconv.FormatUint(uint64(r.ASN), 10))
         }
     }
-    return ""
+
+    // enrich.Result έχει Country (όχι CC)
+    if r.Country != "" {
+        parts = append(parts, r.Country)
+    }
+
+    if r.PTR != "" {
+        // optional: βγάζουμε το τελικό dot, όπως στο exim
+        parts = append(parts, strings.TrimSuffix(r.PTR, "."))
+    }
+
+    return strings.Join(parts, " | ")
+
 }
