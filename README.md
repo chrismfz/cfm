@@ -1,7 +1,8 @@
 # CFM – Configurable Firewall Manager
 
-CFM is a modern **firewall + intrusion detection manager** written in Go.  
+CFM is a modern **firewall + intrusion detection manager** written in Go.
 It combines nftables policy enforcement, log-driven detection, autoblocking, system hardening, and notifications into one daemon.
+It now includes a **unified Web detector** for Nginx / Apache / LiteSpeed with live “top” views, per-vhost drill-downs, and a “Suspicious vhosts” scorer.
 
 ---
 
@@ -33,6 +34,7 @@ Detectors parse logs and metrics to spot abuse:
 - **FTP** (pure-ftpd/proftpd/vsftpd).
 - **cPanel logins**.
 - **MySQL denied/scanner attempts**.
+- **Web (nginx/httpd/LiteSpeed)**: live per-vhost stats (RPS, status-mix, unique IPs, 499/401), top IPs/agents/referrers/paths, “Suspicious vhosts” scoring and drill-downs.
 - **ModSecurity alerts**.
 - **Health detector** (CPU, RAM, disk, conntrack spikes, throughput, SMART/RAID/ZFS).
 - Configurable thresholds, cooldowns, and autoblock modes per detector.
@@ -40,208 +42,227 @@ Detectors parse logs and metrics to spot abuse:
 ### 🚨 Autoblock Engine
 - Inserts IPs into nftables sets with **TTL** or **permanent**.
 - Per-detector policies: `dryrun`, `ttl=1h`, `permanent`.
-- **Throttle autoblock**: if IP hits PPS/SYN/ConnLimit/ICMP throttles ≥N times in a window, block with TTL.
+- **Throttle autoblock**: if IP hits PPS/SYN/ConnLimit/PortFlood triggers repeatedly → autoblock.
 - Dedupe suppresses noisy repeats (`host|kind|ip|reason`).
 - Reasons: `SSH_BRUTE`, `PORTSCAN`, `CONNLIMIT`, `HEALTH_SPIKE`, etc.
 
 ### 🛡️ Portscan & Flood Defenses
 - **Portscan detection** (distinct ports per window, TCP+UDP).
-- **AckGuard**:
-  - Blocks fake ACK floods, unsolicited SYN+ACKs, invalid ACK packets.
-  - Drops `NEW+ACK`, RST floods, SYN/ACK floods, optionally fragments.
-  - Modes: `dryrun`, TTL autoblock, permanent autoblock.
-- **Reflection/handshake junk filtering** before service rules.
+- **AckGuard** to block invalid ACK/SYN/ACK/RST floods.
+- **Reflection/handshake junk filtering**.
 
 ### 📧 SMTP Autoblock
-Blocks unauthorized **outgoing SMTP** to prevent web scripts or compromised accounts from bypassing the local MTA
-- **CSF-style behavior**: forces scripts to relay via Exim/Postfix instead of direct sockets.
-- **Ruleset**:
-- Allow listed **MTA accounts** (e.g. `exim`, `postfix`, `mailman`) and groups (`mail`).
-- Allow **loopback** (`127.0.0.0/8`, `::1`) and the server’s own IPs (`self_v4`, `self_v6`) for local delivery/webmail.
-- **Rejects** (TCP RST) unauthorized outbound SMTP, or optionally **redirects** to local port 25.
-- Always allow **root** and configured MTA users/groups.
-- Allows **loopback** and the server’s own IPs for local/webmail.
-- Unauthorized SMTP is **rejected** (RST) or **redirected** to local port 25.
-- NFLOG support with optional **ASN/Geo/PTR enrichment** into `/var/log/cfm.smtp.log`.
-- Tracks activity via `smtpblock_hits` and `smtpblock_denied` counters.
-
+Blocks unauthorized **outgoing SMTP**, forces scripts to relay via the local MTA.
+Includes PTR/ASN/Geo enrichment.
 
 ### 🖥️ System Hardening
-- Auto-applies **sysctl tweaks** on startup (`SYS_TWEAKS_ENABLE`).
-- Scales conntrack size with RAM.
-- Tightens TCP timeouts and retries.
-- Anti-spoofing (`rp_filter=1`).
-- Disables ICMP redirects (`accept_redirects=0`, `send_redirects=0`).
-- Can persist sysctl config (`SYS_TWEAKS_PERSIST=1`).
+Includes sysctl tweaks, conntrack scaling, anti-spoofing, redirect suppression, persistent configuration.
 
 ### 🌍 Enrichment
-- MaxMind GeoIP + reverse DNS PTR lookups.
-- Every block/detection is enriched with:
-  - ASN, ASN Name, Country, PTR hostname.
-- Used in notifications, logs, CLI, and API.
+PTR, ASN, ASN Name, Country using MaxMind + async DNS.
 
-### 🌍 MaxMind Database Auto-Updater
-
- - CFM can automatically download and refresh MaxMind GeoLite2 databases (ASN, City, etc.).
- - This ensures your ASN/Geo enrichment data stays current without manual updates.
-
+### 🌍 MaxMind Auto-Updater
+Downloads and refreshes GeoLite2 databases automatically.
 
 ### 📬 Notifiers
-- Configurable **channels**:
-  - Sendmail (local MTA).
-  - Remote SMTP relay.
-  - Slack webhook.
-- JSON Lines audit log (`notify.log.jsonl`).
-- Per-detector routing (e.g. SSH → email only, Health → Slack+email).
-- Subject/body templates (`{{.Host}} {{.SrcIP}} {{.Reason}}`).
-- Dedupe cooldown avoids alert spam.
+Email, SMTP, Slack. JSONL audit log.
 
 ### 🖧 API Integration
-- **Outbound sync**:
-  - Send autoblock, manual block, and unblock events to controller (`API_URL`, `AUTH_TOKEN`).
-- **Agent runner** (`agentpkg.Runner`):
-  - Runs inside daemon, keeps syncing with API.
-- **Inbound logs**: optional API log file (`cfm.api.log`).
-- Roadmap: full REST API (block/unblock/list).
+Outbound sync + agent runner + inbound logs.
 
 ### 🛠 CLI Commands
 ```
 cfm version
-cfm test                      # check environment, backends, kernel modules
-cfm block <IP|CIDR> [-r REASON] [--ttl 1h]
+cfm test
+cfm block <IP>
 cfm unblock <IP>
-cfm list [--json]             # list blocked IPs
-cfm allow <IP|CIDR> [--ttl 1h]
-cfm unallow <IP|CIDR>
-cfm allow-list [--json]       # list allowed IPs
-cfm daemon [--interval 20s]
-cfm status [--json]
-cfm flush                     # flush block_v4/v6 sets
-cfm which <IP> [--json]       # show which set/feed an IP belongs to
-cfm reset                     # reset table (flush rules & sets)
-cfm disable                   # drop everything (firewall off)
-```
-
-### 🧩 Extra Features
-- **Live config reload**: daemon watches `cfm.allow`, `cfm.deny`, `cfm.blocklists`, `cfm.conf` and applies changes live.
-- **DynDNS allow**: maintains hostnames in `allow_dyn_v4/v6` by periodic resolution.
-- **Inline TTL/until**: `cfm.allow`/`cfm.deny` entries can include `ttl=1h` or `until=2025-09-30T12:00:00Z`.
-- **Unblock reports**: `cfm unblock` prints detailed step-by-step report (feeds, sources, whitelist overrides).
-- **Debug server**: daemon runs a local **pprof** server (`127.0.0.1:6060`) for profiling & metrics.
-
----
-
-## 📂 Config Overview
-
-- **`cfm.conf`** → Core firewall, ports, connlimit, portflood, ackguard, sysctl.
-- **`detectors.conf`** → Log detectors, thresholds, autoblock policy per service.
-- **`notify.conf`** → Notifier channels, templates, routing, dedupe.
-- **`cfm.blocklists`** → External feeds for IP/domain blocking.
-
----
-
-## 🚀 Example Autoblock
-
-```
-[CFM] titan.myip.gr — autoblock 47.237.101.145 (AS45102 Alibaba US Technology Co., Ltd., Singapore) reason=PORTSCAN ttl=1h0m0s
-Host: titan.myip.gr
-Kind: autoblock
-IP: 47.237.101.145
-ASN: AS45102 Alibaba US Technology Co., Ltd.
-Country: Singapore
-PTR:
-Reason: PORTSCAN
-TTL: 1h0m0s
-Count: 1
-Section: autoblock
-Extra: ports=148,668,1018,2083,2087,2096
+cfm list
+cfm allow <IP>
+cfm daemon
+cfm httpd-top [vhost]
+cfm nginx-top [vhost]
+...
 ```
 
 ---
 
-## Explaining Defenses: 
-### 1. Without autoblock
+# 🌐 Unified Web Detector (nginx / Apache / LiteSpeed)
 
-Each defense works independently and only enforces its own limit.
+The **web detector** ingests access logs and keeps a rolling window  
+(**default 60 seconds**) per vhost.
 
-- **SYN-rate**:
-Per-IP limit on how many SYN packets can arrive per second.
-➝ If an IP sends SYNs faster than allowed, the excess SYNs are dropped. Existing connections are not affected.
+It powers:
 
-- **PortFlood**:
-Per-IP rate limit for new connections per port (X connections per interval, with burst).
-➝ If an IP exceeds the allowed rate, the extra new attempts are dropped. Normal connections continue.
-
-- **Connlimit (per-IP concurrent)**:
-Per-IP maximum number of concurrent tracked connections to a given port.
-➝ If an IP already has N open connections and tries to open more, the new ones are dropped. The established ones stay alive.
-
-- **ACK guard / bad TCP flags**:
-Detects abnormal TCP handshakes (e.g. ACK without SYN, floods of RST, invalid flag combos).
-➝ Suspicious packets are dropped immediately, without touching normal flows.
-
-- **ICMP rate/pps limits**:
-Caps the number of ICMP requests (e.g. echo requests) per IP or globally.
-➝ Only excessive ICMP packets are dropped; normal pings pass.
-
-So without autoblock, these defenses act like throttles: they prevent abuse from going beyond a threshold, but the offending IP is not globally blocked — only the extra traffic is dropped.
-
-
-### 2. With autoblock enabled
-
-Autoblock acts as an escalation layer on top of the defenses.
-
-It counts how many times an IP hits a defense (e.g. SYN-rate exceeded, connlimit exceeded, portflood exceeded).
-
-If an IP triggers these rules multiple times (e.g. 3 strikes in a short period), autoblock concludes this is not accidental.
-
-The IP is then added to a block set.
-
-Once an IP is in the block set:
-
-All of its traffic is dropped, not just the excess on one port.
-
-This stops repeated offenders more aggressively and frees resources.
-
-### 3. Combined behavior
-
-Without autoblock:
-
-Defenses are “soft throttles.” They cut off just the overflow, so a misbehaving client might keep retrying forever but won’t overwhelm you.
-
-Good for limiting but still letting some traffic through (e.g. NAT’d carriers or CDNs).
-
-With autoblock:
-
-**Defenses are still doing their job (dropping excess/new/abnormal packets).**
-
-Autoblock “learns” from these hits. If an IP keeps hammering the limits, it escalates to a hard block.
-
-This reduces noise (no repeated hits from the same IP) but can increase false positives if thresholds are too low.
-
-### 4. Practical analogy
-
-SYN-rate / PortFlood / Connlimit / ACK / ICMP = speed bumps: slow you down, stop excess traffic, but don’t eject you from the road.
-
-Autoblock = the police: if you hit the speed bumps too often, you get pulled over and removed entirely.
-
-So:
-
-Without autoblock → limits and filters are enforced, but offenders can keep retrying.
-
-With autoblock → the same limits apply, but repeated violations escalate to a full, global block for that IP.
-
-
-
-
-
-## 🛠 Roadmap
-- [ ] Explore new features based on uid/guid/nflog/syslookup/proc-watching
-- [ ] More notifier channels (Telegram, Webhooks).
-- [ ] Advanced anomaly detection (geo-login alerts, ML baselines).
-- [ ] Autoblock thresholds based on ASN/Country (Phase System - Grace Period for known Countries/ASN)
+- `cfm nginx-top`
+- `cfm httpd-top`
+- Drill-down details (`cfm httpd-top <vhost>`)
+- Suspicious vhosts detection
+- ML-ready scoring (HBOS / EHBOS / iForest pipeline compatible)
 
 ---
 
-## 📜 License
+## 📁 Log Format Samples
+Available in:
+
+```
+/usr/share/cfm/confs/nginx/
+/usr/share/cfm/confs/apache/
+/usr/share/cfm/confs/litespeed/
+```
+
+Each includes a **TSV format**:
+
+```
+ts  ip  host  method  uri  proto  status  bytes  rt  urt  ref  ua
+```
+
+For Apache we normalize `%D` or `%T` to seconds.
+
+---
+
+# 🧭 How to Configure Web Detection
+
+### Example in `detectors.conf`
+
+```
+[web.nginx]
+kind = "nginx"
+mode = "files"
+files = ["/var/log/nginx/access.log", "/var/log/nginx/access.*.log"]
+window = "60s"
+
+[web.httpd]
+kind = "httpd"
+mode = "journal"
+journal_match = ["_SYSTEMD_UNIT=httpd.service"]
+window = "60s"
+
+[web.litespeed]
+kind = "httpd"
+mode = "files"
+files = ["/usr/local/lsws/logs/access.log"]
+window = "60s"
+```
+
+Works with any source that outputs the TSV line format.
+
+---
+
+# 📊 cfm httpd-top / nginx-top
+
+### Live table
+```
+cfm httpd-top
+cfm nginx-top
+```
+
+Columns:
+- **RPS** — Requests/sec  
+- **2xx / 3xx / 4xx / 5xx** — status buckets  
+- **401** — auth failures  
+- **499** — Nginx client aborts  
+- **uniqIP** — distinct IPs in window  
+- **err%** — (499 + 5xx) / total  
+- **rt_avg** — average request CPU time (seconds)
+
+Example:
+
+```
+HOST            RPS   2xx 3xx 4xx 5xx 401 499 uniqIP err% rt_avg
+mysite.gr       8.2   7.1 0.4 0.6 0.0  0   0    19    0.0  0.120
+```
+
+---
+
+# 🔍 Per-vhost Drill-down
+
+```
+cfm httpd-top <vhost>
+```
+
+Outputs:
+
+- Top IPs (with `(2xx:x, 3xx:x, 4xx:x, 5xx:x)` per IP)
+- Top User Agents
+- Top Referrers
+- Top Paths
+- PTR + ASN + Country enrichment
+
+---
+
+# 🚨 Suspicious Vhosts
+
+Run:
+
+```
+cfm httpd-top suspicious
+cfm nginx-top suspicious
+```
+
+Or combined with top:
+
+```
+cfm httpd-top --smin 0.60 --slimit 10
+```
+
+### Signals used:
+- High 3xx ratio (redirect loops)
+- High 4xx / 5xx (broken app or scanners)
+- High uniq IPs (scatter)
+- High median-per-IP rate (hammering)
+- High auth 401 ratio (brutes)
+- High error%  
+- Low diversity + high volume  
+- Dominant IP making too many requests
+
+This **does not autoblock** — it is advisory so the admin investigates.
+
+---
+
+# 🤖 ML‑Ready (optional)
+
+The web detector emits clean numerical features making it compatible with:
+
+- **HBOS**
+- **EHBOS**
+- **Isolation Forest**
+
+Future mode (optional) will:
+
+- Write `web.features.log` and `web.anom.log` into `/var/log/cfm/`
+- Add `ml_suspect` reason in Suspicious  
+- Allow tuning or training thresholds offline  
+
+Matches the anomaly engine in FlowEnricher.
+
+---
+
+# 🧪 Debug Server
+Enabled from `cfm.conf`.
+
+Endpoints:
+
+```
+/nginx/top?limit=10
+/nginx/host?name=<vhost>&top=10
+/nginx/suspicious?min=0.6&limit=10
+
+/httpd/top?limit=10
+/httpd/host?name=<vhost>&top=10
+/httpd/suspicious?min=0.6&limit=10
+```
+
+---
+
+# 🛠 Roadmap Additions (Web Detector)
+- Configurable suspicious weights  
+- Docker log tailer support  
+- JSON export of feature vectors  
+- Optional full ML integration  
+- Notifications for suspicious vhosts  
+- Auto-block policies per-host (opt‑in)
+
+---
+
+# 📜 License
 MIT
