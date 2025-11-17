@@ -159,8 +159,87 @@ func NewSecurity(cfg SecConfig) *PostfixSecurity {
         }
     }
 
+    d.loadRules()
+    logging.Logf("[detectors] postfix/security loaded %d rules", len(d.rules))
+
+
     return d
 }
+
+// loadRules fills d.rules with compiled regexes (similar style to exim/security).
+func (d *PostfixSecurity) loadRules() {
+    type rawRule struct {
+        name string
+        desc string
+        re   string
+    }
+
+    raws := []rawRule{
+        {
+            name: "AUTHFAIL",
+            desc: "SASL authentication failed",
+            // lowercase match (we run on strings.ToLower(line))
+            re: `warning:\s+\S+\[\d{1,3}(?:\.\d{1,3}){3}\]: sasl [a-z0-9_-]+ authentication failed:`,
+        },
+        {
+            name: "USER_UNKNOWN",
+            desc: "User unknown / undeliverable",
+            // from exre-user: user unknown / undeliverable address
+            re: `\b(user unknown|undeliverable address)\b`,
+        },
+        {
+            name: "RCPT_REJECT",
+            desc: "RCPT rejected",
+            // generic 5xx reject on recipient/sender (χωρίς τα ειδικά user unknown / relay denied)
+            re: `[45][50][04]\s+[45]\.\d\.\d+ .*?(recipient address rejected|sender address rejected)`,
+        },
+        {
+            name: "RELAY_DENIED",
+            desc: "Relay access denied",
+            re: `\brelay (?:access denied|denied)\b`,
+        },
+        {
+            name: "RBL_HIT",
+            desc: "RBL blocked client",
+            // capture IP ως group 1, για χρήση στο processLine (RBL_HIT case)
+            re: `service unavailable;\s+client host \[(\d{1,3}(?:\.\d{1,3}){3})\] blocked\b`,
+        },
+        {
+            name: "NONSMTP_CMD",
+            desc: "Non-SMTP command / too many errors",
+            // από mdpr-normal: improper command pipelining | too many errors
+            // Εδώ κρατάμε κυρίως το "too many errors"
+            re: `\btoo many errors\b`,
+        },
+        {
+            name: "PIPELINING",
+            desc: "Improper command pipelining",
+            re: `\bimproper command pipelining\b`,
+        },
+        {
+            name: "TLS_ERR",
+            desc: "TLS/SSL error",
+            // αρκετά generic TLS / SSL failures
+            re: `(?:lost connection after starttls|ssl_accept error|tls connection failed)`,
+        },
+    }
+
+    d.rules = make([]secRule, 0, len(raws))
+    for _, rr := range raws {
+        re := regexp.MustCompile(rr.re)
+        d.rules = append(d.rules, secRule{
+            Name: rr.name,
+            Desc: rr.desc,
+            Re:   re,
+        })
+    }
+}
+
+
+
+
+
+
 
 // ---- core.PeriodicDetector minimal hooks ----------------------------------
 
@@ -247,7 +326,7 @@ func (d *PostfixSecurity) processLine(now time.Time, line string) {
     }
 
     for _, r := range d.rules {
-        m := r.Re.FindStringSubmatch(line)
+        m := r.Re.FindStringSubmatch(s)
         if m == nil {
             continue
         }

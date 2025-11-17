@@ -10,9 +10,7 @@ import (
     "cfm/internal/detectors/postfix"
 )
 
-// Shared state for Postfix detector (same dir as Exim’s)
-// you *can* reuse eximState, but separate is cleaner.
-var postfixState, _ = core.LoadState("")
+
 
 func init() {
     Register("postfix_security", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
@@ -109,10 +107,97 @@ func init() {
 
         sec := postfix.NewSecurity(cfg)
         sec.SetName(section)
-        if postfixState != nil {
-            sec.SetState(postfixState)
-        }
 
         return sec, nil
     })
+
+
+
+    // ───────────────────── postfix_queues ─────────────────────
+    Register("postfix_queues", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+        defEvery    := kvDur(global, "DEFAULT_EVERY",    60*time.Second)
+        defTimeout  := kvDur(global, "DEFAULT_TIMEOUT",   8*time.Second)
+        defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
+
+        cfg := postfix.QueuesConfig{
+            TotalCmd:    kvStrClean(kv, "TOTAL_CMD", "mailq | tail -n +2 | grep -v 'Mail queue is empty' | wc -l"),
+            ListCmd:     kvStrClean(kv, "LIST_CMD",  "mailq"),
+            Every:       kvDur(kv, "EVERY", defEvery),
+            Timeout:     kvDur(kv, "TIMEOUT", defTimeout),
+            MaxTotal:    kvInt(kv, "QUEUE_TOTAL_MAX",  500),
+            MaxFrozen:   kvInt(kv, "QUEUE_FROZEN_MAX", 200),
+            SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+            Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+        }
+
+        q := postfix.NewQueues(cfg)
+        // Name δεν είναι τόσο κρίσιμο εδώ, αλλά βάλε το section για να ξεχωρίζει στα logs
+        _ = section
+        return q, nil
+    })
+
+
+
+
+
+    Register("postfix_relays", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+        defEvery := kvDur(global, "DEFAULT_EVERY", 5*time.Second)
+        defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
+
+        // Enrichment dirs: section overrides global
+        rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
+        var dirs []string
+        if rawDirs != "" {
+            fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
+                return r == ',' || r == ':' || r == ' ' || r == '\t'
+            })
+            for _, f := range fields {
+                if f != "" {
+                    dirs = append(dirs, f)
+                }
+            }
+        }
+
+        useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+        usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
+
+        cfg := postfix.RelaysConfig{
+            LogPath:     kvStrClean(kv, "LOG_PATH", ""),
+            Every:       kvDur(kv, "EVERY", defEvery),
+            Window:      kvDur(kv, "WINDOW", 15*time.Minute),
+            SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+            Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+
+            LocalUserMax:  kvInt(kv, "LOCAL_USER_MAX", 50),
+            AuthUserMax:   kvInt(kv, "AUTH_USER_MAX", 50),
+            AuthIPMax:     kvInt(kv, "AUTH_IP_MAX", 80),
+            AuthUserIPMax: kvInt(kv, "AUTH_USERIP_MAX", 40),
+            UnauthIPMax:   kvInt(kv, "UNAUTH_IP_MAX", 20),
+
+            UseEnrich:  useEnrich,
+            UsePTR:     usePTR,
+            EnrichDirs: dirs,
+        }
+
+        rr := postfix.NewRelays(cfg)
+        rr.SetName(section)
+        return rr, nil
+    })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
+
