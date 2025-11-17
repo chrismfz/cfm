@@ -98,12 +98,44 @@ func init() {
             cfg.LogPath = logPath
 
         case "docker":
-            // docker logs mode
+
+            // docker logs mode (με fallback αν δεν έχει container)
             container := strings.TrimSpace(cfg.DockerContainer)
             if container == "" {
                 // αν δεν έδωσες container, πέφτουμε πίσω σε journal/file
                 logging.Logf("[detectors][%s] MODE=docker αλλά DOCKER_CONTAINER είναι κενό – falling back to journal/file", section)
-                mode = "journal"
+
+                // Try journal first; if unavailable, fall back to file
+                j := core.NewJournalTailer(cfg.JournalUnit)
+                if err := j.Open(); err == nil {
+                    if cerr := j.Close(); cerr != nil {
+                        // Not fatal: we only probed availability; detector will reopen later.
+                        logging.Logf("[detectors][%s] journal probe close error (unit=%s): %v", section, cfg.JournalUnit, cerr)
+                    }
+                    det.SetSource(j)
+                    if dovecotState != nil {
+                        key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
+                        det.SetState(dovecotState, key)
+                    }
+                    logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
+                    cfg.Mode = "journal"
+                } else {
+                    // Fallback to file
+                    logPath := cfg.LogPath
+                    if strings.TrimSpace(logPath) == "" {
+                        logPath = guessMailLog()
+                    }
+                    src := core.NewFileTailer(logPath)
+                    det.SetSource(src)
+                    if dovecotState != nil {
+                        key := core.FileStateKey(section, logPath)
+                        det.SetState(dovecotState, key)
+                    }
+                    logging.Logf("[detectors][%s] journal unavailable (unit=%s): %v — falling back to file log: %s",
+                        section, cfg.JournalUnit, err, logPath)
+                    cfg.Mode = "file"
+                    cfg.LogPath = logPath
+                }
             } else {
                 src := core.NewDockerTailer(container, cfg.DockerArgs...)
                 det.SetSource(src)
@@ -113,7 +145,6 @@ func init() {
                 }
                 logging.Logf("[detectors][%s] using docker logs (container=%s, args=%v)", section, container, cfg.DockerArgs)
             }
-            fallthrough
 
         default: // "journal"
 
