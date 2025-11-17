@@ -31,14 +31,16 @@ func init() {
         useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
         usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
 
+
         cfg := dovecot.Config{
-            Mode:        kvStrClean(kv, "MODE", "journal"),
-            LogPath:     kvStrClean(kv, "LOG_PATH", ""),
-            JournalUnit: kvStrClean(kv, "JOURNAL_UNIT", "dovecot.service"),
-            Every:       kvDur(kv, "EVERY", defEvery),
-            Window:      kvDur(kv, "WINDOW", defWindow),
-            Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
-            SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+            Mode:           kvStrClean(kv, "MODE", "journal"),
+            LogPath:        kvStrClean(kv, "LOG_PATH", ""),
+            JournalUnit:    kvStrClean(kv, "JOURNAL_UNIT", "dovecot.service"),
+            DockerContainer: kvStrClean(kv, "DOCKER_CONTAINER", ""),
+            Every:          kvDur(kv, "EVERY", defEvery),
+            Window:         kvDur(kv, "WINDOW", defWindow),
+            Cooldown:       kvDur(kv, "COOLDOWN", defCooldown),
+            SampleLimit:    kvInt(kv, "SAMPLE_LIMIT", 10),
 
             AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP",   20),
             AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 10),
@@ -48,13 +50,37 @@ func init() {
             EnrichDirs: dirs,
         }
 
+        // Optional docker args: DOCKER_ARGS = --details,--tail=200
+        if raw := kvStrClean(kv, "DOCKER_ARGS", ""); raw != "" {
+            var extra []string
+            fields := strings.FieldsFunc(raw, func(r rune) bool {
+                return r == ',' || r == ';' || r == ' ' || r == '\t'
+            })
+            for _, f := range fields {
+                if f != "" {
+                    extra = append(extra, f)
+                }
+            }
+            if len(extra) > 0 {
+                cfg.DockerArgs = extra
+            }
+        }
+
+
+
+        // Αν δώσεις DOCKER_CONTAINER και δεν έχεις βάλει ρητά MODE,
+        // γύρνα σε docker mode (αντί για default "journal").
+        if cfg.DockerContainer != "" && strings.EqualFold(cfg.Mode, "journal") {
+            cfg.Mode = "docker"
+        }
+
         det := dovecot.NewAuth(cfg)
         det.SetName(section)
 
 
-
         // choose source based on MODE, with autodetect + fallback
         mode := strings.ToLower(cfg.Mode)
+
         switch mode {
         case "file":
             // autodetect file path if blank
@@ -70,6 +96,24 @@ func init() {
             }
             logging.Logf("[detectors][%s] using file log: %s", section, logPath)
             cfg.LogPath = logPath
+
+        case "docker":
+            // docker logs mode
+            container := strings.TrimSpace(cfg.DockerContainer)
+            if container == "" {
+                // αν δεν έδωσες container, πέφτουμε πίσω σε journal/file
+                logging.Logf("[detectors][%s] MODE=docker αλλά DOCKER_CONTAINER είναι κενό – falling back to journal/file", section)
+                mode = "journal"
+            } else {
+                src := core.NewDockerTailer(container, cfg.DockerArgs...)
+                det.SetSource(src)
+                if dovecotState != nil {
+                    key := core.FileStateKey(section, "docker:"+container)
+                    det.SetState(dovecotState, key)
+                }
+                logging.Logf("[detectors][%s] using docker logs (container=%s, args=%v)", section, container, cfg.DockerArgs)
+            }
+            fallthrough
 
         default: // "journal"
 
@@ -108,10 +152,15 @@ func init() {
 
         // pretty start line
 
-        if strings.ToLower(cfg.Mode) == "file" {
+        switch strings.ToLower(cfg.Mode) {
+        case "file":
+
             logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
                 section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
-        } else {
+        case "docker":
+            logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=docker container=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
+                section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.DockerContainer, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+        default: // journal
             logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
                 section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.JournalUnit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
         }

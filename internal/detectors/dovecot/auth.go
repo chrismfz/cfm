@@ -16,11 +16,12 @@ import (
 
 
 type Config struct {
-	// source
-	Mode        string // "file" | "journal"
-	LogPath     string
-	JournalUnit string
-
+        // source
+        Mode           string // "file" | "journal" | "docker"
+        LogPath        string
+        JournalUnit    string
+        DockerContainer string
+        DockerArgs      []string
 	// cadence
 	Every       time.Duration
 	Window      time.Duration
@@ -66,7 +67,7 @@ type Auth struct {
 
 func NewAuth(cfg Config) *Auth {
 
-	// sensible defaults
+	// sensible defaults (Mode επιλέγεται κυρίως στο register)
 	if cfg.Mode == "" { cfg.Mode = "file" }
 	if cfg.LogPath == "" && cfg.Mode == "file" { cfg.LogPath = "/var/log/maillog" }
 	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
@@ -115,8 +116,16 @@ func (a *Auth) Every() time.Duration {
 
 // PositionAware (optional) — keep parity with ssh detector
 func (a *Auth) ApplyPosition(p core.Position) {
-	if ft, ok := a.src.(*core.FileTailer); ok { ft.ApplyResume(p.Inode, p.Offset) }
-	if jt, ok := a.src.(*core.JournalTailer); ok { jt.ApplyResume(0, 0, p.TS) }
+        if ft, ok := a.src.(*core.FileTailer); ok {
+                ft.ApplyResume(p.Inode, p.Offset)
+        }
+        if jt, ok := a.src.(*core.JournalTailer); ok {
+                jt.ApplyResume(0, 0, p.TS)
+        }
+        if dt, ok := a.src.(*core.DockerTailer); ok {
+                dt.ApplyResume(0, 0, p.TS)
+        }
+
 }
 func (a *Auth) Position() core.Position {
 	if a.src == nil { return core.Position{} }
@@ -239,11 +248,15 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 		if strings.Contains(p.kindKey, "|ip") {
 			extra["ip"] = p.key
 		}
-		if a.cfg.Mode == "file" {
-			extra["log"] = a.cfg.LogPath
-		} else {
-			extra["unit"] = a.cfg.JournalUnit
-		}
+
+                switch strings.ToLower(a.cfg.Mode) {
+                case "file":
+                        extra["log"] = a.cfg.LogPath
+                case "docker":
+                        extra["container"] = a.cfg.DockerContainer
+                default:
+                        extra["unit"] = a.cfg.JournalUnit
+                }
 
 		out <- core.Alert{
 			When:    now,
