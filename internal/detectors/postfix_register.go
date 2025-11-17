@@ -34,20 +34,38 @@ func init() {
         useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
         usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
 
-        cfg := postfix.SecConfig{
-            LogPath:      kvStrClean(kv, "LOG_PATH", ""),
-            JournalUnit:  kvStrClean(kv, "JOURNAL_UNIT", ""),
-            JournalMatch: kvStrClean(kv, "JOURNAL_MATCHES", ""),
-            Every:        kvDur(kv, "EVERY", defEvery),
-            Window:       kvDur(kv, "WINDOW", 15*time.Minute),
-            SampleLimit:  kvInt(kv, "SAMPLE_LIMIT", 10),
-            Cooldown:     kvDur(kv, "COOLDOWN", defCooldown),
+		cfg := postfix.SecConfig{
+			LogPath:        kvStrClean(kv, "LOG_PATH", ""),
+			JournalUnit:    kvStrClean(kv, "JOURNAL_UNIT", ""),
+			JournalMatch:   kvStrClean(kv, "JOURNAL_MATCHES", ""),
+			DockerContainer: kvStrClean(kv, "DOCKER_CONTAINER", ""),
+			Every:          kvDur(kv, "EVERY", defEvery),
+			Window:         kvDur(kv, "WINDOW", 15*time.Minute),
+			SampleLimit:    kvInt(kv, "SAMPLE_LIMIT", 10),
+			Cooldown:       kvDur(kv, "COOLDOWN", defCooldown),
 
-            UseEnrich:  useEnrich,
-            UsePTR:     usePTR,
-            EnrichDirs: dirs,
-            Thresholds: map[string]int{}, // we’ll populate below
-        }
+			UseEnrich:  useEnrich,
+			UsePTR:     usePTR,
+			EnrichDirs: dirs,
+			Thresholds: map[string]int{}, // we’ll populate below
+		}
+
+		// Optional comma/space/colon-separated Docker args, e.g.:
+		// DOCKER_ARGS = --details,--tail=200
+		if raw := kvStrClean(kv, "DOCKER_ARGS", ""); raw != "" {
+			var extra []string
+			fields := strings.FieldsFunc(raw, func(r rune) bool {
+				return r == ',' || r == ';' || r == ' ' || r == '\t'
+			})
+			for _, f := range fields {
+				if f != "" {
+					extra = append(extra, f)
+				}
+			}
+			if len(extra) > 0 {
+				cfg.DockerArgs = extra
+			}
+		}
 
         // ---- thresholds ----
         // Specials
@@ -161,12 +179,15 @@ func init() {
         useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
         usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
 
-        cfg := postfix.RelaysConfig{
-            LogPath:     kvStrClean(kv, "LOG_PATH", ""),
-            Every:       kvDur(kv, "EVERY", defEvery),
-            Window:      kvDur(kv, "WINDOW", 15*time.Minute),
-            SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
-            Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+		cfg := postfix.RelaysConfig{
+			LogPath:        kvStrClean(kv, "LOG_PATH", ""),
+			JournalUnit:    kvStrClean(kv, "JOURNAL_UNIT", ""),
+			JournalMatch:   kvStrClean(kv, "JOURNAL_MATCHES", ""),
+			DockerContainer: kvStrClean(kv, "DOCKER_CONTAINER", ""),
+			Every:          kvDur(kv, "EVERY", defEvery),
+			Window:         kvDur(kv, "WINDOW", 15*time.Minute),
+			SampleLimit:    kvInt(kv, "SAMPLE_LIMIT", 10),
+			Cooldown:       kvDur(kv, "COOLDOWN", defCooldown),
 
             LocalUserMax:  kvInt(kv, "LOCAL_USER_MAX", 50),
             AuthUserMax:   kvInt(kv, "AUTH_USER_MAX", 50),
@@ -178,6 +199,23 @@ func init() {
             UsePTR:     usePTR,
             EnrichDirs: dirs,
         }
+
+
+		// Optional Docker args (όπως και στο postfix_security)
+		if raw := kvStrClean(kv, "DOCKER_ARGS", ""); raw != "" {
+			var extra []string
+			fields := strings.FieldsFunc(raw, func(r rune) bool {
+				return r == ',' || r == ';' || r == ' ' || r == '\t'
+			})
+			for _, f := range fields {
+				if f != "" {
+					extra = append(extra, f)
+				}
+			}
+			if len(extra) > 0 {
+				cfg.DockerArgs = extra
+			}
+		}
 
         rr := postfix.NewRelays(cfg)
         rr.SetName(section)

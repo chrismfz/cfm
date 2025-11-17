@@ -16,17 +16,21 @@ import (
 
 // Config for postfix_security (similar to exim.SecConfig)
 type SecConfig struct {
-    LogPath       string        // file tail mode
-    JournalUnit   string        // journald unit (e.g. postfix@-.service)
-    JournalMatch  string        // optional extra match, e.g. "_SYSTEMD_UNIT=postfix@-.service"
-    Every         time.Duration
-    Window        time.Duration
-    SampleLimit   int
-    Cooldown      time.Duration
-    UseEnrich     bool
-    UsePTR        bool
-    EnrichDirs    []string
-    Thresholds    map[string]int
+
+	LogPath        string        // file tail mode
+	JournalUnit    string        // journald unit (e.g. postfix@-.service)
+	JournalMatch   string        // optional extra match, e.g. "_SYSTEMD_UNIT=postfix@-.service"
+	DockerContainer string       // docker logs mode (container name)
+	DockerArgs      []string     // extra args to docker logs (e.g. --details, --tail=200)
+	Every           time.Duration
+	Window          time.Duration
+	SampleLimit     int
+	Cooldown        time.Duration
+	UseEnrich       bool
+	UsePTR          bool
+	EnrichDirs      []string
+	Thresholds      map[string]int
+
 }
 
 // internal rule descriptor
@@ -36,7 +40,7 @@ type secRule struct {
     Re   *regexp.Regexp
 }
 
-type pend struct {
+type secPend struct {
     kindKey string
     key     string
 }
@@ -84,7 +88,7 @@ type PostfixSecurity struct {
     gate    *core.AlertGate
     counts  *core.SlidingCounter
 
-    pending map[string]pend
+    pending map[string]secPend
     rules   []secRule
     enr     *enrich.Enricher
 
@@ -161,6 +165,33 @@ func NewSecurity(cfg SecConfig) *PostfixSecurity {
 
     d.loadRules()
     logging.Logf("[detectors] postfix/security loaded %d rules", len(d.rules))
+
+
+	// Select log source: journald > docker > file.
+	switch {
+	case cfg.JournalUnit != "" || cfg.JournalMatch != "":
+		jt := core.NewJournalTailer(cfg.JournalUnit)
+		if cfg.JournalMatch != "" {
+			// simple split on spaces; αν θες πιο σύνθετο, μπορείς αργότερα
+			jt.Matches = strings.Fields(cfg.JournalMatch)
+		}
+		d.src = jt
+		d.path = "journal:" + strings.TrimSpace(cfg.JournalUnit+" "+cfg.JournalMatch)
+		logging.Logf("[detectors] postfix/security using journald: %s", d.path)
+
+	case cfg.DockerContainer != "":
+		d.src = core.NewDockerTailer(cfg.DockerContainer, cfg.DockerArgs...)
+		d.path = "docker:" + cfg.DockerContainer
+		logging.Logf("[detectors] postfix/security using docker logs for container %s", cfg.DockerContainer)
+
+	case cfg.LogPath != "":
+		d.src = core.NewFileTailer(cfg.LogPath)
+		d.path = cfg.LogPath
+		logging.Logf("[detectors] postfix/security using log file: %s", cfg.LogPath)
+
+	default:
+		logging.Logf("[detectors] postfix/security: no log source configured (LOG_PATH/JOURNAL_*/DOCKER_CONTAINER)")
+	}
 
 
     return d
@@ -296,6 +327,9 @@ func (d *PostfixSecurity) ApplyPosition(p core.Position) {
     case *core.JournalTailer:
         // resume by last timestamp (journalctl --since)
         t.ApplyResume(p.Inode, p.Offset, p.TS)
+    case *core.DockerTailer:
+	// resume by last timestamp (docker logs --since ...)
+	t.ApplyResume(p.Inode, p.Offset, p.TS)
     default:
         // unknown LineSource implementation – nothing to do
     }
@@ -400,9 +434,9 @@ func (d *PostfixSecurity) bump(now time.Time, tag, key, line string) {
     d.samples.Add(sk, line)
     _ = d.counts.Add(sk, now)
     if d.pending == nil {
-        d.pending = make(map[string]pend)
+        d.pending = make(map[string]secPend)
     }
-    d.pending[sk] = pend{kindKey: tag, key: key}
+    d.pending[sk] = secPend{kindKey: tag, key: key}
 }
 
 func (d *PostfixSecurity) flush(now time.Time, out chan<- core.Alert) {

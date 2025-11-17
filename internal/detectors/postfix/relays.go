@@ -19,11 +19,16 @@ import (
 // ---- Config ----
 
 type RelaysConfig struct {
-    LogPath     string        // αν κενό, δοκιμάζουμε autoDetectPostfixLog()
-    Every       time.Duration // default: 5s
-    Window      time.Duration // default: 15m
-    SampleLimit int           // default: 10
-    Cooldown    time.Duration // default: 10m
+
+	LogPath        string        // αν κενό, δοκιμάζουμε autoDetectPostfixLog()
+	JournalUnit    string        // journald unit (optional)
+	JournalMatch   string        // extra matches (optional)
+	DockerContainer string       // docker logs mode (container name)
+	DockerArgs      []string     // extra args to docker logs
+	Every           time.Duration // default: 5s
+	Window          time.Duration // default: 15m
+	SampleLimit     int           // default: 10
+	Cooldown        time.Duration // default: 10m
 
     // Thresholds (>= triggers)
     LocalUserMax   int // local submissions (postfix/pickup uid=...)
@@ -62,7 +67,8 @@ type Relays struct {
     pending map[string]pend
 
     name string
-    src  *core.FileTailer
+    src  core.LineSource
+
 }
 
 type pend struct {
@@ -123,9 +129,21 @@ func (d *Relays) Name() string {
 func (d *Relays) SetName(n string) { d.name = n }
 
 func (d *Relays) ApplyPosition(p core.Position) {
-    if d.src != nil {
-        d.src.ApplyResume(p.Inode, p.Offset)
-    }
+	if d.src == nil {
+		return
+	}
+	switch t := d.src.(type) {
+	case *core.FileTailer:
+		t.ApplyResume(p.Inode, p.Offset)
+	case *core.JournalTailer:
+		t.ApplyResume(p.Inode, p.Offset, p.TS)
+	case *core.DockerTailer:
+		t.ApplyResume(p.Inode, p.Offset, p.TS)
+	default:
+		// unknown LineSource – τίποτα
+	}
+
+
 }
 
 func (d *Relays) Position() core.Position {
@@ -141,30 +159,59 @@ func (d *Relays) Position() core.Position {
 func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     d.pending = make(map[string]pend)
 
-    // 1) ensure log path (μία φορά)
-    if d.path == "" {
-        if d.cfg.LogPath != "" {
-            d.path = d.cfg.LogPath
-        } else {
-            d.path = autoDetectPostfixLog()
-        }
-        if d.path == "" {
-            if !d.readyLog {
-                logging.Logf("[detectors] postfix/relays: no log path found (set LOG_PATH)")
-                d.readyLog = true
-            }
-            return nil
-        }
-        if !d.readyLog {
-            logging.Logf("[detectors] postfix/relays using log: %s", d.path)
-            d.readyLog = true
-        }
-    }
 
-    // 2) tailer
-    if d.src == nil {
-        d.src = core.NewFileTailer(d.path)
-    }
+	// 1) Select / init log source (μία φορά)
+	if d.src == nil {
+		switch {
+		case d.cfg.JournalUnit != "" || d.cfg.JournalMatch != "":
+			jt := core.NewJournalTailer(d.cfg.JournalUnit)
+			if d.cfg.JournalMatch != "" {
+				jt.Matches = strings.Fields(d.cfg.JournalMatch)
+			}
+			d.src = jt
+			if d.path == "" {
+				d.path = "journal:" + strings.TrimSpace(d.cfg.JournalUnit+" "+d.cfg.JournalMatch)
+			}
+			if !d.readyLog {
+				logging.Logf("[detectors] postfix/relays using journald: %s", d.path)
+				d.readyLog = true
+			}
+
+		case d.cfg.DockerContainer != "":
+			d.src = core.NewDockerTailer(d.cfg.DockerContainer, d.cfg.DockerArgs...)
+			if d.path == "" {
+				d.path = "docker:" + d.cfg.DockerContainer
+			}
+			if !d.readyLog {
+				logging.Logf("[detectors] postfix/relays using docker logs for container %s", d.cfg.DockerContainer)
+				d.readyLog = true
+			}
+
+		default:
+			// file mode (όπως πριν)
+			if d.path == "" {
+				if d.cfg.LogPath != "" {
+					d.path = d.cfg.LogPath
+				} else {
+					d.path = autoDetectPostfixLog()
+				}
+				if d.path == "" {
+					if !d.readyLog {
+						logging.Logf("[detectors] postfix/relays: no log path found (set LOG_PATH)")
+						d.readyLog = true
+					}
+					return nil
+				}
+			}
+			if !d.readyLog {
+				logging.Logf("[detectors] postfix/relays using log: %s", d.path)
+				d.readyLog = true
+			}
+			d.src = core.NewFileTailer(d.path)
+		}
+	}
+
+
     if err := d.src.Open(); err != nil {
         // missing / rotated; θα ξαναδοκιμάσουμε στο επόμενο tick
         return nil
