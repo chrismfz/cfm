@@ -191,6 +191,12 @@ func (a *Auth) processLine(now time.Time, line string) {
     ll := strings.ToLower(line)
     if !a.reQuick.MatchString(ll) { return }
 
+    // Pure noise: client συνδέθηκε και έκλεισε χωρίς ούτε μία auth προσπάθεια.
+    // Π.χ. "Aborted login by logging out (no auth attempts in 0 secs)"
+    if strings.Contains(ll, "no auth attempts in 0 secs") {
+        return
+    }
+
 	// ip
 if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
     if ip := net.ParseIP(m[1]); ip != nil {
@@ -202,16 +208,16 @@ if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
     }
 }
 
-	// user
 // user
- if m := a.reUser.FindStringSubmatch(ll); m != nil {
-    for i := 1; i < len(m); i++ {
-        if m[i] != "" {
-            a.bump(now, "AUTHFAIL|user", m[i], line) // already lowercased from ll
-            break
+    if m := a.reUser.FindStringSubmatch(ll); m != nil {
+        for i := 1; i < len(m); i++ {
+            if m[i] != "" {
+                // already lowercased from ll
+                a.bump(now, "AUTHFAIL|user", m[i], line)
+                break
+            }
         }
     }
- }
 
 }
 
