@@ -94,7 +94,9 @@ type Backend struct{
     extAllowV4Nets    []string
     extAllowV6Hosts   []string
     extAllowV6Nets    []string
+
 }
+
 
 
 // GetEnricher returns the enrichment engine (if enabled).
@@ -375,6 +377,8 @@ if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_nets dro
 if err := addRule(`ct state established,related ip saddr @block_v4_nets drop`); err != nil { return err }
 if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil { return err }
 
+
+
 // Τώρα το γενικό established/related accept (μετά τα drops)
 if err := addRule(`ct state established,related accept`); err != nil { return err }
 
@@ -416,6 +420,7 @@ if err := addRule(`ct state established,related accept`); err != nil { return er
 
 //moved to ports.go 
 // if err := addRule(`ct state invalid drop`); err != nil { return err }
+
 
 	return nil
 }

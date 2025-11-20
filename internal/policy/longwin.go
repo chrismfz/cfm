@@ -135,12 +135,21 @@ func ensure(kind string, every time.Duration, buckets int) *ring {
 // IngestWindowSnapshot is called by the detector when it completes its short window.
 // winSec is the detector window seconds (e.g., 60).
 // snap maps host -> MiniMetrics (per-window averages); we scale back to counts.
+// internal/policy/longwin.go
+
 func IngestWindowSnapshot(kind string, every time.Duration, longFactor int, winSec float64, snap map[string]MiniMetrics) {
 	if longFactor <= 0 { longFactor = 10 }
-	// We store longFactor buckets for each 1× detector window.
-	// Example: detector window = 60s, longFactor=10 -> 10 buckets ≈ 10 minutes.
+
+	// Each bucket represents one full detector window, not the internal tick.
+	// Example: winSec=60 → each bucket is 60s, factor=10 → ~10 minutes horizon.
 	buckets := longFactor
-	r := ensure(strings.ToLower(kind), every, buckets)
+	bucketDur := time.Duration(winSec * float64(time.Second))
+	if bucketDur <= 0 {
+		// Fallback: if winSec is 0/invalid, use the detector's "every".
+		bucketDur = every
+	}
+
+	r := ensure(strings.ToLower(kind), bucketDur, buckets)
 
 	// Convert averages to approximate counts for this window (integers)
 	conv := make(map[string]bucket, len(snap))
@@ -164,6 +173,7 @@ func IngestWindowSnapshot(kind string, every time.Duration, longFactor int, winS
 	}
 	r.advanceAndApply(conv)
 }
+
 
 // SuspiciousRow is the long-window version used by CLI/HTTP endpoints.
 type SuspiciousRow struct {
@@ -231,6 +241,144 @@ func SuspiciousTop(kind string, minScore float64, limit int) []SuspiciousRow {
 	if limit > 0 && len(rows) > limit { rows = rows[:limit] }
 	return rows
 }
+
+
+
+
+
+// LongRow: "ωμή" long-window εικόνα, χωρίς scoring.
+type LongRow struct {
+        Host         string  `json:"host"`
+        RPS          float64 `json:"rps"`
+        R3xx         float64 `json:"rps_3xx"`
+        R4xx         float64 `json:"rps_4xx"`
+        R5xx         float64 `json:"rps_5xx"`
+        UniqueIPs    int     `json:"unique_ips"`
+        ErrRatio     float64 `json:"err_ratio"`
+        Auth401Ratio float64 `json:"auth401_ratio"`
+}
+
+// LongWindowAll: επιστρέφει ΟΛΑ τα hosts στο long window (χωρίς threshold/score),
+// ταξινομημένα κατά RPS φθίνουσα.
+func LongWindowAll(kind string) []LongRow {
+        InitLongWindow(0, 10, DefaultConfig()) // ensure gMgr
+
+        gMgr.mu.RLock()
+        r := gMgr.rings[strings.ToLower(kind)]
+        gMgr.mu.RUnlock()
+        if r == nil {
+                return nil
+        }
+
+        sums := r.sumAll()
+        horizonSec := float64(len(r.slots)) * r.every.Seconds()
+        if horizonSec <= 0 {
+                horizonSec = 1
+        }
+
+        rows := make([]LongRow, 0, len(sums))
+        for h, b := range sums {
+                if b.Tot <= 0 {
+                        continue
+                }
+                rps := float64(b.Tot) / horizonSec
+                r3  := float64(b.C3)  / horizonSec
+                r4  := float64(b.C4)  / horizonSec
+                r5  := float64(b.C5)  / horizonSec
+
+                errR := b.ErrRatio
+                if errR == 0 {
+                        errR = (float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+                }
+
+                rows = append(rows, LongRow{
+                        Host:         h,
+                        RPS:          rps,
+                        R3xx:         r3,
+                        R4xx:         r4,
+                        R5xx:         r5,
+                        UniqueIPs:    b.Uniq,
+                        ErrRatio:     errR,
+                        Auth401Ratio: b.Auth401Ratio,
+                })
+        }
+
+        sort.Slice(rows, func(i, j int) bool {
+                if rows[i].RPS == rows[j].RPS {
+                        return rows[i].Host < rows[j].Host
+                }
+                return rows[i].RPS > rows[j].RPS
+        })
+
+        return rows
+}
+
+
+// LongWindowOne: returns scored long-window metrics for a single host,
+// regardless of score (no MinScore threshold).
+func LongWindowOne(kind, host string) (SuspiciousRow, bool) {
+	InitLongWindow(0, 10, DefaultConfig()) // ensure gMgr
+
+	gMgr.mu.RLock()
+	r := gMgr.rings[strings.ToLower(kind)]
+	sc := gMgr.scorer
+	gMgr.mu.RUnlock()
+	if r == nil || sc == nil {
+		return SuspiciousRow{}, false
+	}
+
+	sums := r.sumAll()
+	b, ok := sums[host]
+	if !ok || b.Tot <= 0 {
+		return SuspiciousRow{}, false
+	}
+
+	horizonSec := float64(len(r.slots)) * r.every.Seconds()
+	if horizonSec <= 0 {
+		horizonSec = 1
+	}
+
+	rps := float64(b.Tot) / horizonSec
+	r3  := float64(b.C3)  / horizonSec
+	r4  := float64(b.C4)  / horizonSec
+	r5  := float64(b.C5)  / horizonSec
+
+	errR := b.ErrRatio
+	if errR == 0 {
+		errR = (float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+	}
+
+	sig := Signals{
+		RPS:          rps,
+		R3xx:         r3,
+		R4xx:         r4,
+		R5xx:         r5,
+		ErrRatio:     errR,
+		Auth401Ratio: b.Auth401Ratio,
+		UniqueIPs:    b.Uniq,
+		MedianPerIP:  b.MedPerIP,
+	}
+
+	res := sc.Score(sig)
+
+	row := SuspiciousRow{
+		Host:         host,
+		Score:        res.Score,
+		Reasons:      res.Reasons,
+		RPS:          rps,
+		R3xx:         r3,
+		R4xx:         r4,
+		R5xx:         r5,
+		UniqueIPs:    b.Uniq,
+		ErrRatio:     errR,
+		Auth401Ratio: b.Auth401Ratio,
+	}
+	return row, true
+}
+
+
+
+
 
 func max1(x int) int { if x < 1 { return 1 }; return x }
 func maxf(x, y float64) float64 { if x > y { return x }; return y }

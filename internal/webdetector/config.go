@@ -1,0 +1,60 @@
+// internal/webdetector/config.go
+package webdetector
+
+import "time"
+
+// Config is the full configuration for the webdetector engine.
+// It is built from [webdetector] in cfm.conf by the detector register.
+type Config struct {
+	// Log ingestion
+	Mode     string        // "file" (for now)
+	LogPath  string        // TSV log path
+	Every    time.Duration // detector tick interval
+	Window   time.Duration // short-window horizon (sliding)
+	Cooldown time.Duration // reserved for future alert gating
+	SampleLimit int        // max sample lines per host for drilldown
+
+	// Enrichment
+	UseEnrich  bool
+	UsePTR     bool
+	EnrichDirs []string
+
+	// Long-window scoring
+	LongFactor int     // how many short windows ~= long horizon (e.g. 10)
+	MinScore   float64 // minimum suspicious score
+
+	// API
+	APIListen string // "127.0.0.1:9070" etc.
+
+}
+
+// FillDefaults ensures sane defaults if some fields are zero.
+func (c *Config) FillDefaults() {
+	if c.Every <= 0 {
+		c.Every = 5 * time.Second
+	}
+	if c.Window <= 0 {
+		c.Window = 120 * time.Second
+	}
+	if c.Cooldown <= 0 {
+		c.Cooldown = 10 * time.Minute
+	}
+	if c.SampleLimit <= 0 {
+		c.SampleLimit = 20
+	}
+	if c.LongFactor <= 0 {
+		c.LongFactor = 10
+	}
+	if c.MinScore <= 0 {
+		c.MinScore = 0.60
+	}
+	if c.APIListen == "" {
+		c.APIListen = "127.0.0.1:9070"
+	}
+}
+
+// LongHorizon returns the long-window horizon duration.
+func (c Config) LongHorizon() time.Duration {
+	return time.Duration(c.LongFactor) * c.Window
+}
+

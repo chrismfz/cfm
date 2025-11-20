@@ -19,6 +19,8 @@ type manager struct {
 	lastStamp int64
 	running   bool
 	state *core.State
+
+        ignore *IPIgnore // New ignore IP and Subnets
 }
 
 func Start(parent context.Context, opts Options) {
@@ -85,6 +87,15 @@ func (m *manager) maybeReload(parent context.Context) {
 
 	secs, _, _ := readSections(path)
 
+// --- ΝΕΟ: build global ignore από [global] ---
+ig := newIPIgnoreFromGlobal(secs.Global)
+if ig != nil {
+    logging.Logf("[detectors] global ignore enabled: IGNORE_IPS=%q IGNORE_NETS=%q",
+        kvStrClean(secs.Global, "IGNORE_IPS", ""),
+        kvStrClean(secs.Global, "IGNORE_NETS", ""),
+    )
+}
+// --------------------------------------------
 
 
 
@@ -121,6 +132,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	m.cancelAll = cancel
 	m.lastStamp = secs.StampNS
 	m.running = true
+	m.ignore  = ig
 	m.mu.Unlock()
 
 	// Summary: list sections & enabled/disabled
@@ -238,7 +250,7 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 		//go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
 		// per-section blocking policy + wrapped sink
 		pol := parseBlockPolicy(kv)
-		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr)
+		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore)
 		go RunPeriodicWithState(ctx, det, secSink, m.state)
 	}
 }

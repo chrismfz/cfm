@@ -47,6 +47,8 @@ import (
 	mmdb "cfm/internal/maxmindupdater"
 	policy "cfm/internal/policy"
 
+    newwebdet "cfm/internal/webdetector"
+
 )
 
 var (
@@ -176,6 +178,21 @@ func startDebug(addr string) {
         _ = json.NewEncoder(w).Encode(rows)
     })
 
+
+
+    // /httpd/long  → raw long-window metrics (all hosts)
+    mux.HandleFunc("/httpd/long", func(w http.ResponseWriter, r *http.Request) {
+        rows := policy.LongWindowAll("httpd")
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
+
+    // /nginx/long → raw long-window metrics (all hosts)
+    mux.HandleFunc("/nginx/long", func(w http.ResponseWriter, r *http.Request) {
+        rows := policy.LongWindowAll("nginx")
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(rows)
+    })
 
 
 
@@ -469,6 +486,21 @@ func main() {
 	case "disable":
 		runDisable(os.Args[2:])
 
+
+        case "webtop":
+            // Default to the same address as API_LISTEN
+            addr := os.Getenv("CFM_WEBDETECTOR_ADDR")
+            if addr == "" {
+                addr = "http://127.0.0.1:9070"
+            }
+            if err := newwebdet.RunWebTop(addr, os.Args[2:]); err != nil {
+                fmt.Fprintln(os.Stderr, "webtop error:", err)
+                os.Exit(1)
+            }
+
+
+
+
 case "nginx-top":
     runWebTop("nginx", os.Args[2:])
 case "httpd-top":
@@ -508,7 +540,6 @@ Options (overall top):
   --smin F         suspicious score threshold (default 0.60)
   --slimit N       rows under "Suspicious vhosts" (default 10)
   --json           output JSON of the main top table (suppresses the pretty table)
-
 
 Description:
   local nftables manager (block/allow with optional TTL),
@@ -945,11 +976,37 @@ func runAllowList(args []string) {
 }
 
 
+// Shape of /{nginx,httpd}/suspicious JSON rows
+// Must match policy.SuspiciousTop() output.
+type suspRow struct {
+    Host      string   `json:"host"`
+    Score     float64  `json:"score"`
+    Reasons   []string `json:"reasons"`
+    RPS       float64  `json:"rps"`
+    R3xx      float64  `json:"rps_3xx"`
+    R4xx      float64  `json:"rps_4xx"`
+    R5xx      float64  `json:"rps_5xx"`
+    UniqueIPs int      `json:"unique_ips"`
+    ErrRatio  float64  `json:"err_ratio"`
+}
+
+// Shape of /{nginx,httpd}/long JSON rows
+type longRow struct {
+    Host         string  `json:"host"`
+    RPS          float64 `json:"rps"`
+    R3xx         float64 `json:"rps_3xx"`
+    R4xx         float64 `json:"rps_4xx"`
+    R5xx         float64 `json:"rps_5xx"`
+    UniqueIPs    int     `json:"unique_ips"`
+    ErrRatio     float64 `json:"err_ratio"`
+    Auth401Ratio float64 `json:"auth401_ratio"`
+}
 
 // Apache and Nginx "top" cli command
-// Apache and Nginx "top" cli command
+// Supports:
+//   cfm httpd-top
+//   cfm httpd-top <vhost>
 func runWebTop(kind string, args []string) {
-
     // Resolve host/port from active config once (used by both modes)
     host := "127.0.0.1"
     port := 6060
@@ -967,10 +1024,30 @@ func runWebTop(kind string, args []string) {
         }
     }
 
+    // Flags για overall mode + shared settings
+    fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
+    limit   := fs.Int("limit", 10, "rows")
+    sMin    := fs.Float64("smin", 0.60, "minimum suspicious score to show")
+    sLimit  := fs.Int("slimit", 10, "suspicious rows")
+    jsonOut := fs.Bool("json", false, "JSON output (top table only)")
 
-    if len(args) >= 1 {
-        targetHost := strings.TrimSpace(args[0])
-        // fetch drill-down JSON
+    flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{
+        "--limit": true,
+        "--smin":  true,
+        "--slimit": true,
+        "--json":  false,
+    })
+    _ = fs.Parse(flagArgs)
+
+    var targetHost string
+    if len(posArgs) > 0 {
+        targetHost = strings.TrimSpace(posArgs[0])
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-vhost mode: cfm httpd-top <vhost> [--long]
+    // ---------------------------------------------------------------------
+    if targetHost != "" {
         url := fmt.Sprintf("http://%s:%d/%s/host?name=%s&top=10", host, port, kind, urlQueryEscape(targetHost))
         var d struct {
             Host       string   `json:"host"`
@@ -990,7 +1067,6 @@ func runWebTop(kind string, args []string) {
                 C4 int `json:"c4xx"`
                 C5 int `json:"c5xx"`
             } `json:"ip_class"`
-
         }
         if err := httpGetJSON(url, &d); err != nil {
             log.Fatal(err)
@@ -999,18 +1075,18 @@ func runWebTop(kind string, args []string) {
         // Soft retry once if the snapshot is momentarily empty (window rollover)
         if d.TotalReq == 0 {
             time.Sleep(250 * time.Millisecond)
-            _ = httpGetJSON(url, &d) // ignore second error; best effort
+            _ = httpGetJSON(url, &d) // best effort
         }
-
 
         fmt.Printf("[%s] window=%.0fs total=%d rt_avg=%.3fs direct=%.1f%% bots=%.1f%%\n",
             d.Host, d.WindowSec, d.TotalReq, d.ProcAvgSec, d.DirectPct, d.BotPct)
+
+        // --- Top IPs ---
         fmt.Println("Top IPs:")
-        // Prefer enriched list (has ASN/PTR and class counters we added)
         if len(d.EnrichedTopIPs) > 0 {
+            // enriched με ASN/PTR
             for i, m := range d.EnrichedTopIPs {
                 if i >= 15 { break }
-                // class counters (may be absent if enricher disabled)
                 c2, c3, c4, c5 := m["c2xx"], m["c3xx"], m["c4xx"], m["c5xx"]
                 cls := ""
                 if c2 != "" || c3 != "" || c4 != "" || c5 != "" {
@@ -1023,19 +1099,17 @@ func runWebTop(kind string, args []string) {
                 fmt.Printf("  %-2d %-15s x%-5s%-28s %-40s  %-6s %-2s %s\n",
                     i+1, m["ip"], m["count"], cls, m["ptr"], m["asn"], m["cc"], m["asn_name"])
             }
-            
         } else {
-        // Fallback: plain TopIPs + class lookup from d.IPClass
-        for i, kv := range d.TopIPs {
-            if i >= 15 { break }
-            cls := d.IPClass[kv.Key]
-            fmt.Printf("  %-2d %-15s x%-5d (2xx:%d, 3xx:%d, 4xx:%d, 5xx:%d)\n",
-                i+1, kv.Key, kv.Count, cls.C2, cls.C3, cls.C4, cls.C5)
+            // fallback χωρίς enrichment
+            for i, kv := range d.TopIPs {
+                if i >= 15 { break }
+                cls := d.IPClass[kv.Key]
+                fmt.Printf("  %-2d %-15s x%-5d (2xx:%d, 3xx:%d, 4xx:%d, 5xx:%d)\n",
+                    i+1, kv.Key, kv.Count, cls.C2, cls.C3, cls.C4, cls.C5)
+            }
         }
-}
 
-
-        // Top agents
+        // --- Agents ---
         fmt.Println("Top Agents:")
         if len(d.TopAgents) == 0 {
             fmt.Println("  (no data in the last window)")
@@ -1045,7 +1119,7 @@ func runWebTop(kind string, args []string) {
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
 
-        // Referrer mix
+        // --- Referrers ---
         fmt.Println("Top Referrers:")
         if len(d.TopReferrers) == 0 {
             fmt.Println("  (no data in the last window)")
@@ -1055,8 +1129,7 @@ func runWebTop(kind string, args []string) {
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
 
-        // Paths
-
+        // --- Paths ---
         fmt.Println("Top Paths:")
         if len(d.TopPaths) == 0 {
             fmt.Println("  (no data in the last window)")
@@ -1065,19 +1138,93 @@ func runWebTop(kind string, args []string) {
             if i >= 10 { break }
             fmt.Printf("  %-2d x%-5d %s\n", i+1, kv.Count, kv.Key)
         }
+
+        // Long-window summary (trend) – ask daemon via /{kind}/suspicious
+        fmt.Println()
+        fmt.Println("Long-window summary (trend):")
+
+        // Get long-window scores for all hosts, then pick our vhost
+        suspURL := fmt.Sprintf(
+            "http://%s:%d/%s/suspicious?min=0&limit=%d",
+            host, port, kind, 1000,
+        )
+
+        var susp []suspRow
+        if err := httpGetJSON(suspURL, &susp); err != nil || len(susp) == 0 {
+            fmt.Println("  (no long-window data yet for this host)")
+        } else {
+            var lw *suspRow
+            for i := range susp {
+                if susp[i].Host == d.Host {
+                    lw = &susp[i]
+                    break
+                }
+            }
+            if lw == nil {
+                fmt.Println("  (no long-window data yet for this host)")
+            } else {
+                reasons := strings.Join(lw.Reasons, ",")
+                if reasons == "" {
+                    reasons = "-"
+                }
+                fmt.Printf(
+                    "  rps=%.2f 3xx=%.2f 4xx=%.2f 5xx=%.2f uniqIP=%d err=%.1f%% score=%.2f reasons=%s\n",
+                    lw.RPS, lw.R3xx, lw.R4xx, lw.R5xx, lw.UniqueIPs, lw.ErrRatio*100, lw.Score, reasons,
+                )
+            }
+        }
+
+        // Σε per-host mode δεν θέλουμε να συνεχίσουμε στο global top/long-window
+        return
+
+
+    }
+
+    // ---------------------------------------------------------------------
+    // Overall mode (no vhost): cfm httpd-top [--long]
+    // ---------------------------------------------------------------------
+
+    // Κοινός τύπος για τα /top rows (JSON & human output)
+    type webTopRow struct {
+        Host         string  `json:"host"`
+        RPSTotal     float64 `json:"rps"`
+        RPS2xx       float64 `json:"rps_2xx"`
+        RPS3xx       float64 `json:"rps_3xx"`
+        RPS4xx       float64 `json:"rps_4xx"`
+        RPS5xx       float64 `json:"rps_5xx"`
+        RPS499       float64 `json:"rps_499"`
+        RPS401       float64 `json:"rps_401"`
+        UniqueIPs    int     `json:"unique_ips"`
+        ErrRatio     float64 `json:"err_ratio"`
+        Auth401Ratio float64 `json:"auth401_ratio"`
+        ProcAvgSec   float64 `json:"proc_avg_sec"`
+    }
+
+    // JSON mode → κρατάμε τη συμπεριφορά όπως είναι (short-window /top only)
+
+    if *jsonOut {
+        url := fmt.Sprintf("http://%s:%d/%s/top?limit=%d", host, port, kind, *limit)
+       resp, err := http.Get(url)
+        if err != nil || resp.StatusCode != 200 {
+            fmt.Fprintf(os.Stderr, "%s daemon not reachable\n", kind)
+            os.Exit(1)
+        }
+
+        defer resp.Body.Close()
+
+        var rows []webTopRow
+
+        if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+            fmt.Fprintln(os.Stderr, "decode error:", err)
+            os.Exit(1)
+        }
+        b, _ := json.MarshalIndent(rows, "", "  ")
+        fmt.Println(string(b))
         return
     }
 
-    // fallback: existing overall top table (+ inline suspicious section)
-    fs := flag.NewFlagSet(kind+"-top", flag.ExitOnError)
-    limit   := fs.Int("limit", 10, "rows")
-    sMin    := fs.Float64("smin", 0.60, "minimum suspicious score to show")
-    sLimit  := fs.Int("slimit", 10, "suspicious rows")
-    jsonOut := fs.Bool("json", false, "JSON output (top table only)")
 
-    _ = fs.Parse(args)
-
-
+    // ------- default: short-window top + inline long-window suspicious -------
     url := fmt.Sprintf("http://%s:%d/%s/top?limit=%d", host, port, kind, *limit)
     resp, err := http.Get(url)
     if err != nil || resp.StatusCode != 200 {
@@ -1086,7 +1233,6 @@ func runWebTop(kind string, args []string) {
     }
     defer resp.Body.Close()
 
-    // superset row struct (works for both nginx & httpd)
     var rows []struct {
         Host         string  `json:"host"`
         RPSTotal     float64 `json:"rps"`
@@ -1095,25 +1241,16 @@ func runWebTop(kind string, args []string) {
         RPS4xx       float64 `json:"rps_4xx"`
         RPS5xx       float64 `json:"rps_5xx"`
         RPS499       float64 `json:"rps_499"`
-        RPS401       float64 `json:"rps_401"`         // may be 0 for nginx
+        RPS401       float64 `json:"rps_401"`
         UniqueIPs    int     `json:"unique_ips"`
         ErrRatio     float64 `json:"err_ratio"`
-        Auth401Ratio float64 `json:"auth401_ratio"`   // may be 0/omitted for nginx
+        Auth401Ratio float64 `json:"auth401_ratio"`
         ProcAvgSec   float64 `json:"proc_avg_sec"`
     }
-
     if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
         fmt.Fprintln(os.Stderr, "decode error:", err)
         os.Exit(1)
     }
-
-    if *jsonOut {
-        b, _ := json.MarshalIndent(rows, "", "  ")
-        fmt.Println(string(b))
-        return
-    }
-
-    // print table (works for both; nginx just shows 0.00 for 401)
 
     fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %8s %7s %8s %8s\n",
         "HOST", "RPS", "2xx", "3xx", "4xx", "5xx", "401", "499", "uniqIP", "err%", "rt_avg")
@@ -1123,22 +1260,10 @@ func runWebTop(kind string, args []string) {
             r.RPS401, r.RPS499, r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec)
     }
 
-
-    // ---- Inline Suspicious Section (pretty table) ----
+    // Inline suspicious (long-window, όπως πριν)
     suspURL := fmt.Sprintf("http://%s:%d/%s/suspicious?min=%.2f&limit=%d",
         host, port, kind, *sMin, *sLimit)
-    var susp []struct {
-        Host         string   `json:"host"`
-        Score        float64  `json:"score"`
-        Reasons      []string `json:"reasons"`
-        RPS          float64  `json:"rps"`
-        R3xx         float64  `json:"rps_3xx"`
-        R4xx         float64  `json:"rps_4xx"`
-        R5xx         float64  `json:"rps_5xx"`
-        UniqueIPs    int      `json:"unique_ips"`
-        ErrRatio     float64  `json:"err_ratio"`
-        Auth401Ratio float64  `json:"auth401_ratio"`
-    }
+    var susp []suspRow
     if err := httpGetJSON(suspURL, &susp); err == nil && len(susp) > 0 {
         fmt.Println()
         fmt.Println("---- Suspicious vhosts ----")
@@ -1152,9 +1277,34 @@ func runWebTop(kind string, args []string) {
         }
     }
 
+
+
+    // ---- Πλήρης long-window πίνακας (τύπου /httpd/long), πάντα στο τέλος ----
+    longURL := fmt.Sprintf("http://%s:%d/%s/long", host, port, kind)
+    var longRows []longRow
+    if err := httpGetJSON(longURL, &longRows); err == nil && len(longRows) > 0 {
+        fmt.Println()
+        fmt.Println("---- Long-window vhosts (raw) ----")
+        fmt.Printf("%-30s %8s %8s %8s %8s %7s %8s\n",
+            "HOST", "RPS", "3xx", "4xx", "5xx", "uniqIP", "err%")
+
+        maxRows := len(longRows)
+        if *limit > 0 && *limit < maxRows {
+            maxRows = *limit
+        }
+        for i := 0; i < maxRows; i++ {
+            r := longRows[i]
+            fmt.Printf(
+                "%-30.30s %8.2f %8.2f %8.2f %8.2f %7d %8.1f\n",
+                r.Host, r.RPS, r.R3xx, r.R4xx, r.R5xx, r.UniqueIPs, r.ErrRatio*100,
+            )
+        }
+    }
+
+
+
+
 }
-
-
 
 
 // ----------------------------------------------------------------------------
@@ -1243,6 +1393,8 @@ func runDaemon(args []string) {
 		nb.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
 		nb.SetConfigDir(cfgDir)
 		notify.SetEnricher(nb.GetEnricher()) //  give notifier the same enricher instance
+
+
 	}
 
 	// Blocklists Manager (scheduler+apply)

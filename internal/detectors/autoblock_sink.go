@@ -26,11 +26,12 @@ type sectionSink struct {
     fw   firewall.Backend
     mu   sync.Mutex
     last map[string]time.Time // ip -> last block time (per section)
-enr  *enrich.Enricher
+    enr  *enrich.Enricher
+    ignore *IPIgnore // <-- ΝΕΟ
 
 }
 
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher) core.Sink {
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig   *IPIgnore) core.Sink {
     return &sectionSink{
         section: section,
         pol:     pol,
@@ -38,6 +39,7 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
         fw:      fw,
         last:    make(map[string]time.Time),
         enr:     enr,
+	ignore: ig,
     }
 }
 
@@ -65,10 +67,28 @@ func (s *sectionSink) Publish(a core.Alert) {
             out.Key = s.decorateIP(ipStr)
         }
 
+        // DEBUG: log what the sink finally decided to use before any early returns
+        if logging.DebugEnabled() {
+            logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",
+                s.section, s.pol.Mode, ipStr, a.Kind, out.Key)
+        }
+        // DEBUG END
 
-// DEBUG: log what the sink finally decided to use before any early returns
-    if logging.DebugEnabled() { logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",s.section, s.pol.Mode, ipStr, a.Kind, out.Key, ) }
-//DEBUG END
+        // --- [NEW] Global ignore για IPs / subnets από [global] IGNORE_IPS / IGNORE_NETS ---
+        // Αν το επιλεγμένο IP είναι σε ignore list, δεν προχωράμε σε block/cooldown.
+        if s.ignore != nil && ipStr != "" && s.ignore.ShouldIgnore(ipStr) {
+            out.Extra["blocked"] = "no"
+            out.Extra["reason"]  = "ignored_global_ip"
+            if logging.DebugEnabled() {
+                logging.LogfDETECTOR("[autoblock] ignoring alert for %s (section=%s kind=%s) due to global ignore list",
+                    ipStr, s.section, a.Kind)
+            }
+            // Παρ' όλα αυτά, το στέλνουμε στο inner sink για log/debug αν χρειάζεται.
+            if s.inner != nil {
+                s.inner.Publish(out)
+            }
+            return
+        }
 
 
 	// No policy or no backend → just print with "No"

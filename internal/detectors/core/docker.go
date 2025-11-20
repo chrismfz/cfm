@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+	"strings"
 )
 
 // DockerTailer implements LineSource using `docker logs`.
@@ -45,23 +46,37 @@ func (d *DockerTailer) Open() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	args := []string{"logs", "--timestamps"}
+    // Χρησιμοποιούμε το default format του docker logs (όπως το βλέπεις στο shell),
+    // χωρίς extra RFC3339 prefix, για να μην σπάμε το syslog parser.
+    args := []string{"logs"}
 
 	// Από πότε:
 	since := d.lastTS
 	if d.startTS > 0 {
 		since = d.startTS
 	}
-	if since > 0 {
-		// docker περιμένει RFC3339
-		t := time.Unix(since+1, 0).UTC()
-		args = append(args, "--since", t.Format(time.RFC3339))
-	} else {
-		// Πρώτο run: για να μην μας πνίξει ιστορικό, μπορείς να βάλεις tail=0 ή tail=N.
-		args = append(args, "--tail", "0")
-	}
 
-	// Extra args από config, αν υπάρχουν (π.χ. --details).
+    if since > 0 {
+        // docker περιμένει RFC3339
+        t := time.Unix(since+1, 0).UTC()
+        args = append(args, "--since", t.Format(time.RFC3339))
+    }
+
+    // Αν ο χρήστης δεν έχει ήδη βάλει --tail στο DOCKER_ARGS και είναι το πρώτο run,
+    // βάλε ένα προσεκτικό default για να μην αναπαράγουμε όλο το ιστορικό.
+    hasTail := false
+    for _, a := range d.ExtraArgs {
+        if strings.HasPrefix(a, "--tail") {
+            hasTail = true
+            break
+        }
+    }
+    if !hasTail && since == 0 {
+        args = append(args, "--tail", "0")
+    }
+
+    // Extra args από config, αν υπάρχουν (π.χ. --details, --tail=200).
+
 	args = append(args, d.ExtraArgs...)
 
 	// Τέλος, το container name
