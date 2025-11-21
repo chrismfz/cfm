@@ -291,12 +291,38 @@ func (d *PostfixSecurity) SetState(st *core.State) { d.state = st }
 func (d *PostfixSecurity) Every() time.Duration { return d.cfg.Every }
 
 
-// RunOnce will be wired to FileTailer / JournalTailer in next step.
-// For now, assume d.src is already set by the factory.
 func (d *PostfixSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error {
+    // καθάρισε τυχόν pending από προηγούμενο run
+   if d.pending != nil {
+        for k := range d.pending {
+            delete(d.pending, k)
+        }
+    }
+
     if d.src == nil {
         return nil
     }
+
+    // Επαναφορά θέσης (αν έχουμε shared state)
+    if d.state != nil {
+        if p, ok := d.state.Get(d.Name()); ok {
+            d.ApplyPosition(p)
+        }
+    }
+
+    // Άνοιγμα log source (file / journal / docker)
+    if err := d.src.Open(); err != nil {
+        return nil
+    }
+    defer d.src.Close()
+
+    // Αποθήκευση θέσης στο τέλος του run
+    if d.state != nil {
+        defer func() {
+            d.state.Put(d.Name(), d.Position())
+        }()
+    }
+
     now := time.Now()
     for {
         line, err := d.src.ReadNext(ctx)

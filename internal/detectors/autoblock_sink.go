@@ -7,31 +7,29 @@ import (
     "time"
     "fmt"
     "context"
-//    "os"
+
     core "cfm/internal/detectors/core"
     "cfm/internal/firewall"
-    "strings"
-    "cfm/internal/notify"
     "cfm/internal/enrich"
     "cfm/internal/logging"
+    "cfm/internal/notify"
 
+    "strings"
 )
-
 
 type sectionSink struct {
     section string
     pol     blockPolicy
     inner   core.Sink
 
-    fw   firewall.Backend
-    mu   sync.Mutex
-    last map[string]time.Time // ip -> last block time (per section)
-    enr  *enrich.Enricher
-    ignore *IPIgnore // <-- ΝΕΟ
-
+    fw    firewall.Backend
+    mu    sync.Mutex
+    last  map[string]time.Time // ip -> last block time (per section)
+    enr   *enrich.Enricher
+    ignore *IPIgnore // global ignore from [global]
 }
 
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig   *IPIgnore) core.Sink {
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore) core.Sink {
     return &sectionSink{
         section: section,
         pol:     pol,
@@ -39,95 +37,91 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
         fw:      fw,
         last:    make(map[string]time.Time),
         enr:     enr,
-	ignore: ig,
+        ignore:  ig,
     }
 }
 
-
 var reIP = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
 
-
-
-
-
-
 func (s *sectionSink) Publish(a core.Alert) {
-	// Default outcome
-	out := a
-	if out.Extra == nil {
-		out.Extra = map[string]string{}
-	}
-	out.Extra["blocked"] = "no"
+    // Default outcome
+    out := a
+    if out.Extra == nil {
+        out.Extra = map[string]string{}
+    }
+    out.Extra["blocked"] = "no"
 
-        // --- pick & decorate IP EARLY so every path (even early returns) gets enrichment ---
-        ipStr := s.pickIP(a)
-        if ipStr != "" {
-            out.Extra["src_ip"] = ipStr
-            // set the key that the logger prints after the comma in the "Type: ..." line
-            out.Key = s.decorateIP(ipStr)
-        }
+    // --- pick & decorate IP EARLY so every path (even early returns) gets enrichment ---
+    ipStr := s.pickIP(a)
+    if ipStr != "" {
+        out.Extra["src_ip"] = ipStr
+        // set the key that the logger prints after the comma in the "Type: ..." line
+        out.Key = s.decorateIP(ipStr)
+    }
 
-        // DEBUG: log what the sink finally decided to use before any early returns
+    // DEBUG: log what the sink finally decided to use before any early returns
+    if logging.DebugEnabled() {
+        logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",
+            s.section, s.pol.Mode, ipStr, a.Kind, out.Key)
+    }
+    // DEBUG END
+
+    // --- Global ignore για IPs / subnets από [global] IGNORE_IPS / IGNORE_NETS ---
+    // Αν το επιλεγμένο IP είναι σε ignore list, δεν προχωράμε σε block/cooldown/notify.
+    if s.ignore != nil && ipStr != "" && s.ignore.ShouldIgnore(ipStr) {
+        out.Extra["blocked"] = "no"
+        out.Extra["reason"]  = "ignored_global_ip"
+
         if logging.DebugEnabled() {
-            logging.LogfDETECTOR("[autoblock][debug] section=%s mode=%s picked_ip=%q kind=%s key=%q",
-                s.section, s.pol.Mode, ipStr, a.Kind, out.Key)
-        }
-        // DEBUG END
-
-        // --- [NEW] Global ignore για IPs / subnets από [global] IGNORE_IPS / IGNORE_NETS ---
-        // Αν το επιλεγμένο IP είναι σε ignore list, δεν προχωράμε σε block/cooldown.
-        if s.ignore != nil && ipStr != "" && s.ignore.ShouldIgnore(ipStr) {
-            out.Extra["blocked"] = "no"
-            out.Extra["reason"]  = "ignored_global_ip"
-            if logging.DebugEnabled() {
-                logging.LogfDETECTOR("[autoblock] ignoring alert for %s (section=%s kind=%s) due to global ignore list",
-                    ipStr, s.section, a.Kind)
-            }
-            // Παρ' όλα αυτά, το στέλνουμε στο inner sink για log/debug αν χρειάζεται.
-            if s.inner != nil {
-                s.inner.Publish(out)
-            }
-            return
+            logging.LogfDETECTOR("[autoblock] ignoring alert for %s (section=%s kind=%s) due to global ignore list",
+                ipStr, s.section, a.Kind)
         }
 
+        // Αν LOG_IGNORED=yes (global), τότε μόνο το γράφουμε στο inner sink (logfile).
+        if s.inner != nil && s.ignore.LogIgnoredReports() {
+            s.inner.Publish(out)
+        }
 
-	// No policy or no backend → just print with "No"
- if s.pol.Mode == "no" || s.fw == nil {
-     smp := out.Samples
-     if len(smp) > 10 { smp = smp[:10] }
-     notify.Enqueue(notify.Event{
-         Kind:     string(a.Kind),
-         Section:  s.section,
-	 SrcIP:    ipStr, // may be ""
-         Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
-         Count:    a.Count,
-         When:     a.When,
-         Severity: "warn",
-         Samples:  smp,
-         Extra:    map[string]string{"key": a.Key},
-     })
-     if s.inner != nil { s.inner.Publish(out) }
-     return
- }
+        // Σε κάθε περίπτωση κόβουμε εδώ: δεν προχωράμε σε block / cooldown / notify.
+        return
+    }
 
+    // No policy or no backend → just print with "No"
+    if s.pol.Mode == "no" || s.fw == nil {
+        smp := out.Samples
+        if len(smp) > 10 { smp = smp[:10] }
+        notify.Enqueue(notify.Event{
+            Kind:     string(a.Kind),
+            Section:  s.section,
+            SrcIP:    ipStr, // may be ""
+            Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+            Count:    a.Count,
+            When:     a.When,
+            Severity: "warn",
+            Samples:  smp,
+            Extra:    map[string]string{"key": a.Key},
+        })
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
 
- if ipStr == "" {
-     smp := out.Samples
-     if len(smp) > 10 { smp = smp[:10] }
-     notify.Enqueue(notify.Event{
-         Kind:     string(a.Kind),
-         Section:  s.section,
-         SrcIP:    "", // unknown
-         Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
-         Count:    a.Count,
-         When:     a.When,
-         Severity: "warn",
-         Samples:  smp,
-         Extra:    map[string]string{"key": a.Key},
-     })
-     if s.inner != nil { s.inner.Publish(out) }
-     return
- }
+    if ipStr == "" {
+        smp := out.Samples
+        if len(smp) > 10 { smp = smp[:10] }
+        notify.Enqueue(notify.Event{
+            Kind:     string(a.Kind),
+            Section:  s.section,
+            SrcIP:    "", // unknown
+            Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+            Count:    a.Count,
+            When:     a.When,
+            Severity: "warn",
+            Samples:  smp,
+            Extra:    map[string]string{"key": a.Key},
+        })
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
 
     // --- ignore loopback addresses (127.0.0.0/8, ::1) ---
     if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback()) {
@@ -136,7 +130,6 @@ func (s *sectionSink) Publish(a core.Alert) {
         if s.inner != nil { s.inner.Publish(out) }
         return
     }
-
 
     // Cooldown check (do NOT stamp yet; stamp only after a real block)
     if s.pol.Cooldown > 0 {
@@ -149,46 +142,44 @@ func (s *sectionSink) Publish(a core.Alert) {
         s.mu.Unlock()
     }
 
-	// Comment for firewall
-	comment := string(a.Kind)
-	if s.section != "" {
-		comment += " | " + s.section
-	}
-	if a.Key != "" && a.Key != ipStr {
-		comment += " | " + a.Key
-	}
+    // Comment for firewall
+    comment := string(a.Kind)
+    if s.section != "" {
+        comment += " | " + s.section
+    }
+    if a.Key != "" && a.Key != ipStr {
+        comment += " | " + a.Key
+    }
 
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		if s.inner != nil { s.inner.Publish(out) }
-		return
-	}
+    ip := net.ParseIP(ipStr)
+    if ip == nil {
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
 
     var blockOK bool
-	switch s.pol.Mode {
-	case "dryrun":
-		out.Extra["blocked"]    = "dryrun"
-		out.Extra["block_mode"] = "dryrun"
+    switch s.pol.Mode {
+    case "dryrun":
+        out.Extra["blocked"]    = "dryrun"
+        out.Extra["block_mode"] = "dryrun"
 
-	case "permanent":
-		if err := s.fw.AddBlock(ip, comment, nil); err == nil {
-			out.Extra["blocked"]    = "yes"
-			out.Extra["block_mode"] = "permanent"
-			blockOK = true
-		}
+    case "permanent":
+        if err := s.fw.AddBlock(ip, comment, nil); err == nil {
+            out.Extra["blocked"]    = "yes"
+            out.Extra["block_mode"] = "permanent"
+            blockOK = true
+        }
 
-	case "ttl":
-		ttl := s.pol.TTL
-		if ttl <= 0 { ttl = time.Hour }
-		if err := s.fw.AddBlock(ip, comment, &ttl); err == nil {
-			out.Extra["blocked"]    = "yes"
-			out.Extra["block_mode"] = "ttl"
-			out.Extra["ttl"]        = ttl.String()
-			blockOK = true
-		}
-	}
-
-
+    case "ttl":
+        ttl := s.pol.TTL
+        if ttl <= 0 { ttl = time.Hour }
+        if err := s.fw.AddBlock(ip, comment, &ttl); err == nil {
+            out.Extra["blocked"]    = "yes"
+            out.Extra["block_mode"] = "ttl"
+            out.Extra["ttl"]        = ttl.String()
+            blockOK = true
+        }
+    }
 
     // If we truly blocked and a cooldown is set, stamp it now (after success)
     if blockOK && s.pol.Cooldown > 0 {
@@ -197,94 +188,77 @@ func (s *sectionSink) Publish(a core.Alert) {
         s.mu.Unlock()
     }
 
+    // --- emit notify once if a real block happened ---
+    if out.Extra["blocked"] == "yes" {
+        // compute TTL seconds only for ttl blocks
+        ttlSec := 0
+        if out.Extra["block_mode"] == "ttl" {
+            if d, err := time.ParseDuration(out.Extra["ttl"]); err == nil {
+                ttlSec = int(d / time.Second)
+            }
+        }
 
-// --- emit notify once if a real block happened ---
-if out.Extra["blocked"] == "yes" {
-    // compute TTL seconds only for ttl blocks
-    ttlSec := 0
-    if out.Extra["block_mode"] == "ttl" {
-        if d, err := time.ParseDuration(out.Extra["ttl"]); err == nil {
-            ttlSec = int(d / time.Second)
+        // cap samples to first 10 lines
+        smp := out.Samples
+        if len(smp) > 10 {
+            smp = smp[:10]
+        }
+
+        ev := notify.Event{
+            Kind:     string(a.Kind),      // e.g. "SSH/AUTHFAIL", "MYSQL/ROOT_DENIED", "MODSEC/403"
+            SrcIP:    ipStr,              // from pickIP(a)
+            Reason:   string(a.Kind),     // e.g. "SSH/AUTHFAIL"
+            TTL:      time.Duration(ttlSec) * time.Second,
+            Count:    a.Count,
+            Section:  s.section,          // detectors.conf section name
+            When:     time.Now(),
+            Severity: "warning",
+            Samples:  smp,
+            Extra: map[string]string{
+                "block_mode": out.Extra["block_mode"], // "ttl" | "permanent"
+                "ttl_text":   out.Extra["ttl"],        // e.g. "4h0m0s"
+                "key":        a.Key,                   // detector-specific key
+            },
+        }
+
+        notify.Enqueue(ev)
+
+        // Also report to API via firewall backend policy
+        if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
+            logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
+                ipStr, err, out.Extra["block_mode"], ttlSec)
         }
     }
+    // --- end notify ---
 
-    // cap samples to first 10 lines
-    smp := out.Samples
-    if len(smp) > 10 {
-        smp = smp[:10]
+    // --- emit notify for NON-blocked events as well ---
+    if out.Extra["blocked"] != "yes" {
+        // cap samples to first 10 lines
+        smp := out.Samples
+        if len(smp) > 10 { smp = smp[:10] }
+
+        ev := notify.Event{
+            Kind:     string(a.Kind),      // π.χ. "HEALTH/SYN_RECV_SPIKE"
+            Section:  s.section,           // κρίσιμο για το [detector "health"] routing
+            SrcIP:    ipStr,               // μπορεί να είναι ""
+            Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+            Count:    a.Count,
+            When:     a.When,              // ή time.Now()
+            Severity: "warn",              // ή "info" ανάλογα το health sub-event
+            Samples:  smp,
+            Extra: map[string]string{
+                "key": a.Key,
+            },
+        }
+        notify.Enqueue(ev)
     }
+    // --- end NEW ---
 
-    ev := notify.Event{
-        Kind:     string(a.Kind),       //  e.g. "SSH/AUTHFAIL", "MYSQL/ROOT_DENIED", "MODSEC/403"
-        SrcIP:    ipStr,            // from pickIP(a)
-        Reason:   string(a.Kind),   // e.g. "SSH/AUTHFAIL" (your detector kind)
-        TTL:      time.Duration(ttlSec) * time.Second,
-        Count:    a.Count,                // (optional) put any counters in Extra if you want
-        Section:  s.section,        // detectors.conf section name
-        When:     time.Now(),
-        Severity: "warning",
-        Samples:  smp,
-        Extra: map[string]string{
-            "block_mode": out.Extra["block_mode"], // "ttl" | "permanent"
-            "ttl_text":   out.Extra["ttl"],        // e.g. "4h0m0s" if ttl
-            "key":        a.Key,                   // detector-specific key (may be same as IP)
-        },
+    // Now publish ONCE with the final outcome
+    if s.inner != nil {
+        s.inner.Publish(out)
     }
-
-
-
-
-    notify.Enqueue(ev) // non-blocking; templates will include host + ASN, Country if set
-
-
-    // Also report to API via firewall backend policy (respects DETECTORS_SEND_TO_API & fallbacks)
-//    _ = s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec)
- if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
-     logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
-         ipStr, err, out.Extra["block_mode"], ttlSec)
- }
-
-
-
 }
-// --- end notify ---
-
-// --- [NEW] emit notify for NON-blocked events as well ---
-if out.Extra["blocked"] != "yes" {
-
-
-    // cap samples to first 10 lines
-    smp := out.Samples
-    if len(smp) > 10 { smp = smp[:10] }
-
-    ev := notify.Event{
-        Kind:     string(a.Kind),      // π.χ. "HEALTH/SYN_RECV_SPIKE"
-        Section:  s.section,           // κρίσιμο για το [detector "health"] routing
-        SrcIP:    ipStr,               // μπορεί να είναι ""
-        Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
-        Count:    a.Count,
-        When:     a.When,              // ή time.Now()
-        Severity: "warn",              // ή "info" ανάλογα το health sub-event
-        Samples:  smp,
-        Extra:    map[string]string{
-            "key": a.Key,
-        },
-    }
-    notify.Enqueue(ev)
-}
-// --- end NEW ---
-
-
-
-
-
-	// Now publish ONCE with the final outcome
-	if s.inner != nil {
-		s.inner.Publish(out)
-	}
-}
-
-
 
 func (s *sectionSink) pickIP(a core.Alert) string {
     // 0) Prefer detector-provided IP (authoritative).
@@ -325,8 +299,6 @@ func (s *sectionSink) pickIP(a core.Alert) string {
     return ""
 }
 
-
-
 // tokenize and return the first token that parses as an IP (v4 or v6)
 func firstParsedIP(s string) string {
     // split on anything that's not a hex digit, dot, or colon
@@ -342,7 +314,6 @@ func firstParsedIP(s string) string {
     }
     return ""
 }
-
 
 // rightMostBracketIP replicates the detector’s selection:
 // choose the right-most [ ... ] token; prefer global/public; supports IPv4 & IPv6 and IPv6-mapped v4.
@@ -403,29 +374,12 @@ func rightMostBracketIP(line string) string {
     return ""
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 func firstNonEmpty(ss ...string) string {
     for _, s := range ss {
         if strings.TrimSpace(s) != "" { return s }
     }
     return ""
 }
-
-
-
-
-
 
 func lookupPTR(ip string) string {
     ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
@@ -434,8 +388,6 @@ func lookupPTR(ip string) string {
     if len(names) > 0 { return strings.TrimSuffix(names[0], ".") }
     return ""
 }
-
-
 
 func (s *sectionSink) decorateIP(ip string) string {
     label := ip

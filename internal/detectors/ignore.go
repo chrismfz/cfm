@@ -8,11 +8,17 @@ import (
 type IPIgnore struct {
     exact map[string]struct{}
     nets  []*net.IPNet
+    logIgnored bool
+
 }
 
 func newIPIgnoreFromGlobal(global KV) *IPIgnore {
     rawIPs  := kvStrClean(global, "IGNORE_IPS", "")
     rawNets := kvStrClean(global, "IGNORE_NETS", "")
+
+    // Default: δεν κάνουμε log τα ignored στο sink (LOG_IGNORED absent → false)
+    logIgnored := kvBool(global, "LOG_IGNORED", false)
+
 
     exact := make(map[string]struct{})
     var nets []*net.IPNet
@@ -48,7 +54,12 @@ func newIPIgnoreFromGlobal(global KV) *IPIgnore {
     if len(exact) == 0 && len(nets) == 0 {
         return nil
     }
-    return &IPIgnore{exact: exact, nets: nets}
+    return &IPIgnore{
+        exact:      exact,
+        nets:       nets,
+        logIgnored: logIgnored,
+    }
+
 }
 
 func (ig *IPIgnore) ShouldIgnore(ipStr string) bool {
@@ -74,4 +85,12 @@ func (ig *IPIgnore) ShouldIgnore(ipStr string) bool {
         }
     }
     return false
+}
+
+
+// LogIgnoredReports επιστρέφει αν πρέπει να περνάνε τα ignored events στα sinks.
+// Ελέγχεται από το LOG_IGNORED στο [global].
+func (ig *IPIgnore) LogIgnoredReports() bool {
+    if ig == nil { return false }
+    return ig.logIgnored
 }

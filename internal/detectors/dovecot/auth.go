@@ -86,7 +86,12 @@ func NewAuth(cfg Config) *Auth {
 	a.gate    = core.NewAlertGate(cfg.Cooldown)
 	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
 	// Lines we care about (keep this fast pre-filter)
-	a.reQuick = regexp.MustCompile(`dovecot:\s+(imap|pop3)-login:.*(auth failed|aborted login|authentication failure)`)
+        // Expanded to also catch:
+        //   - auth-worker(...): Password mismatch
+        //   - passwd-file(...): Password mismatch
+        //   - imap-login: ... (auth failed, N attempts)
+        //   - any "authentication failure" or "aborted login"
+        a.reQuick = regexp.MustCompile(`dovecot:.*(auth failed|authentication failure|aborted login|password mismatch)`)
 	a.reRip = regexp.MustCompile(`\brip=([0-9a-f:.]+)(?:[,\s]|$)`)
 	a.reUser  = regexp.MustCompile(`\buser=<([^>]+)>\b`)
 
@@ -191,22 +196,32 @@ func (a *Auth) processLine(now time.Time, line string) {
     ll := strings.ToLower(line)
     if !a.reQuick.MatchString(ll) { return }
 
-    // Pure noise: client συνδέθηκε και έκλεισε χωρίς ούτε μία auth προσπάθεια.
-    // Π.χ. "Aborted login by logging out (no auth attempts in 0 secs)"
+
+
+    // Ignore pure noise:
+    // e.g. "Aborted login by logging out (no auth attempts in 0 secs)"
     if strings.Contains(ll, "no auth attempts in 0 secs") {
         return
     }
 
+
+
 	// ip
-if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
-    if ip := net.ParseIP(m[1]); ip != nil {
-        if v4 := ip.To4(); v4 != nil {
-            a.bump(now, "AUTHFAIL|ip", v4.String(), line)
-        } else {
-            a.bump(now, "AUTHFAIL|ip", ip.String(), line)
+    ipStr := ""
+    if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
+        ipStr = m[1]
+    } else {
+        ipStr = firstIPInLine(ll)
+    }
+    if ipStr != "" {
+        if ip := net.ParseIP(ipStr); ip != nil {
+            if v4 := ip.To4(); v4 != nil {
+                a.bump(now, "AUTHFAIL|ip", v4.String(), line)
+            } else {
+                a.bump(now, "AUTHFAIL|ip", ip.String(), line)
+            }
         }
     }
-}
 
 // user
     if m := a.reUser.FindStringSubmatch(ll); m != nil {
@@ -285,6 +300,32 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, ba
 		return 0, "", rawKey
 	}
 }
+
+// ---------- helper: first valid IP in line (IPv4 or IPv6) ----------
+func firstIPInLine(s string) string {
+    // split tokens on non-IP chars
+    f := func(r rune) bool {
+        if r == '.' || r == ':' {
+            return false
+        }
+        if (r >= '0' && r <= '9') || (r|32 >= 'a' && r|32 <= 'f') {
+            return false
+        }
+        return true
+    }
+
+    toks := strings.FieldsFunc(s, f)
+    for _, tok := range toks {
+        if ip := net.ParseIP(tok); ip != nil {
+            if v4 := ip.To4(); v4 != nil {
+                return v4.String()
+            }
+            return ip.String()
+        }
+    }
+    return ""
+}
+
 
 
 // ---------- enrichment (only for IP keys) ----------
