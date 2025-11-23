@@ -60,6 +60,12 @@ type longTopCLIResponse struct {
         Rows           []SuspiciousRow `json:"rows"`
 }
 
+// ipShortCLIResponse για το /webdet/ip-short.
+type ipShortCLIResponse struct {
+        WindowSec float64     `json:"window_sec"`
+        Rows      []IPSignals `json:"rows"`
+}
+
 // small help printer for cfm webtop
 func printWebTopHelp() {
 	fmt.Println(" Usage:")
@@ -68,8 +74,9 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop top [N]             # show top N vhosts by RPS (default 20)")
 	fmt.Println("  cfm webtop --limit 15 --sort 5xx")
 	fmt.Println("  cfm webtop top 20 rt")
-	fmt.Println("  cfm webtop hot [N]         # global hot IPs (short window)")
         fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
+        fmt.Println("  cfm webtop ip [N]               # global IP view (top IPs by score)")
+        fmt.Println("  cfm webtop ip <IP>              # drilldown specific IP")
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
         fmt.Println("------------")
@@ -82,32 +89,51 @@ func RunWebTop(baseURL string, args []string) error {
 
 
 
-    // Ειδικό mode: hot IPs (short window)
-    if len(args) > 0 && args[0] == "hot" {
-        limit := 20
-        if len(args) > 1 {
-            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
-                limit = n
-            } else {
-                return fmt.Errorf("invalid hot limit: %s", args[1])
+    // Ειδικά modes: IP-top (hot / ip-top) & long window
+    if len(args) > 0 {
+        switch args[0] {
+        case "hot", "ip-top":
+            limit := 20
+            if len(args) > 1 {
+                if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                    limit = n
+                } else {
+                    return fmt.Errorf("invalid IP limit: %s", args[1])
+                }
             }
+            return runIPTop(baseURL, limit)
+
+        case "long":
+            limit := 20
+            if len(args) > 1 {
+                if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                    limit = n
+                } else {
+                    return fmt.Errorf("invalid long limit: %s", args[1])
+                }
+            }
+            return runLongTop(baseURL, limit)
         }
-        return runHotIPs(baseURL, limit)
     }
 
-    // Ειδικό mode: long window top-by-score
-    if len(args) > 0 && args[0] == "long" {
-        limit := 20
-        if len(args) > 1 {
-            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
-                limit = n
-            } else {
-                return fmt.Errorf("invalid long limit: %s", args[1])
-            }
+    // Ειδικό mode: IP (aliases: ip, ips)
+    // ip / ips χωρίς δεύτερο arg → IP-top default 20
+    // ip / ips + αριθμός        → IP-top με limit
+    // ip / ips + κάτι άλλο      → drilldown για αυτή την IP
+    if len(args) > 0 && (args[0] == "ip" || args[0] == "ips") {
+        if len(args) == 1 {
+            // cfm webtop ip  → IP-top (όπως πριν)
+            return runIPTop(baseURL, 20)
         }
-        return runLongTop(baseURL, limit)
-    }
 
+        // δοκίμασε αν είναι αριθμός (limit)
+        if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+            return runIPTop(baseURL, n)
+        }
+
+        // αλλιώς θεώρησέ το ως IP για drilldown
+        return runIPDrilldown(baseURL, args[1])
+    }
 
 	// Help modes: cfm webtop help / -h / --help
 	if len(args) > 0 {
@@ -289,6 +315,83 @@ func runTopSummaryExt(baseURL string, limit int, sortKey string) error {
 	return printWebShort(baseURL, rows, payload)
 }
 
+
+
+func runIPTop(baseURL string, limit int) error {
+        u := fmt.Sprintf("%s/api/v1/webdet/ip-short?limit=%d", baseURL, limit)
+        resp, err := http.Get(u)
+        if err != nil {
+                return err
+        }
+        defer resp.Body.Close()
+
+        var payload ipShortCLIResponse
+        if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+                return err
+        }
+
+        rows := payload.Rows
+
+        // sort: πρώτα score, μετά RPS
+        sort.Slice(rows, func(i, j int) bool {
+                if rows[i].Score == rows[j].Score {
+                        return rows[i].RPS > rows[j].RPS
+                }
+                return rows[i].Score > rows[j].Score
+        })
+
+        if limit > 0 && len(rows) > limit {
+                rows = rows[:limit]
+        }
+
+        fmt.Printf("[webtop ip] short window=%.0fs (top %d by ip_score)\n",
+                payload.WindowSec, limit)
+
+        w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+        fmt.Fprintln(w, "IP\tSCORE\tRPS\txReqs\tvhosts\tPTR\tASN\tCC\tREASONS\tACTION")
+
+        for _, r := range rows {
+                asField := ""
+                if r.ASN != "" {
+                        asField = "AS" + r.ASN
+                        if r.ASNName != "" {
+                                asField += " " + r.ASNName
+                        }
+                }
+
+                cc := r.Country
+
+                action := "-"
+                if len(r.Proposals) > 0 {
+                        p := r.Proposals[0]
+                        if p.TTLSeconds > 0 {
+                                action = fmt.Sprintf("%s(%ds)", p.Action, p.TTLSeconds)
+                        } else {
+                                action = p.Action
+                        }
+                }
+
+                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+                        r.IP,
+                        r.Score,
+                        r.RPS,
+                        r.Req,
+                        r.Vhosts,
+                        r.PTR,
+                        asField,
+                        cc,
+                        joinReasons(r.Reasons),
+                        action,
+                )
+        }
+
+        w.Flush()
+        return nil
+}
+
+
+
+
 func runTopDrilldown(baseURL, host string) error {
 	u := baseURL + "/api/v1/webdet/drilldown?host=" + url.QueryEscape(host)
 	resp, err := http.Get(u)
@@ -316,6 +419,20 @@ func runTopDrilldown(baseURL, host string) error {
                 short.UADiversity, short.UniqueUAs,
                 short.PathDiversity, short.UniquePaths,
                 short.PostRatio)
+
+
+        // Feature dump για ML / debug
+        fmt.Printf("  features: median_ip_rps=%.3f bytes_rps=%.1f hot_ips=%d ip_skew=%.2f failure_idx=%.2f ua_entropy=%.2f path_entropy=%.2f\n",
+                short.MedianPerIPRPS,
+                short.BytesRPS,
+                short.HotIPs,
+                short.IPSkew,
+                short.FailureIndex,
+                short.UAEntropy,
+                short.PathEntropy,
+        )
+
+
 
         if len(short.ShortReasons) > 0 {
                 fmt.Printf("Short-window reasons: %s\n", strings.Join(short.ShortReasons, ","))
@@ -393,15 +510,40 @@ func runTopDrilldown(baseURL, host string) error {
 	return nil
 }
 
-func joinReasons(r []string) string {
-	if len(r) == 0 {
-		return "-"
-	}
-	if len(r) == 1 {
-		return r[0]
-	}
-	return strings.Join(r, ",")
+// shortReason χαρτογραφεί τα verbose reason IDs σε πιο μικρά labels για CLI.
+func shortReason(r string) string {
+        switch r {
+        case "auth401_bruteforce_like":
+                return "401_brute"
+        case "high_error_ratio":
+                return "high_err"
+        case "many_bot_user_agents":
+                return "bot_UA"
+        case "post_heavy_login_abuse_like":
+                return "POST_abuse"
+        default:
+                return r
+        }
 }
+
+// joinReasons: dedup + χρήση shortReason ώστε τα reasons να είναι μικρά και χωρίς διπλά.
+func joinReasons(rs []string) string {
+        if len(rs) == 0 {
+            return "-"
+        }
+        seen := make(map[string]struct{})
+        out := make([]string, 0, len(rs))
+        for _, r := range rs {
+                s := shortReason(r)
+                if _, ok := seen[s]; ok {
+                        continue
+                }
+                seen[s] = struct{}{}
+                out = append(out, s)
+        }
+        return strings.Join(out, ",")
+}
+
 
 // printWebShort prints the main RPS table + TOTAL + suspicious section.
 func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse) error {
@@ -477,12 +619,26 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 		fmt.Println()
 		fmt.Println("---- Suspicious vhosts (long window) ----")
 		w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w2, "HOST\tSCORE\tREASONS\tRPS\t3xx\t4xx\t5xx\tuniqIP\terr%")
-		for _, s := range sus {
-			fmt.Fprintf(w2, "%s\t%.2f\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\n",
-				s.Host, s.Score, joinReasons(s.Reasons),
-				s.RPS, s.R3xx, s.R4xx, s.R5xx,
-				s.UniqueIPs, s.ErrRatio*100)
+
+fmt.Fprintln(w2, "HOST\tSCORE\tREASONS\tRPS\t3xx\t4xx\t5xx\tuniqIP\terr%\tauth401%\thotIPs\tbot%\tua_div\tpath_div\tpost%")
+for _, s := range sus {
+    fmt.Fprintf(w2, "%s\t%.2f\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.1f\t%d\t%.1f\t%.3f\t%.3f\t%.1f\n",
+        s.Host,
+        s.Score,
+        joinReasons(s.Reasons),
+        s.RPS,
+        s.R3xx,
+        s.R4xx,
+        s.R5xx,
+        s.UniqueIPs,
+        s.ErrRatio*100,
+        s.Auth401Ratio*100,
+        s.HotIPs,
+        s.BotRatio*100,
+        s.UADiversity,
+        s.PathDiversity,
+        s.PostRatio*100,
+    )
 		}
 		w2.Flush()
 	}
@@ -491,41 +647,62 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 
 
 
-
-// runHotIPs καλεί /hot-ips και τυπώνει global "ζεστά" IPs.
-func runHotIPs(baseURL string, limit int) error {
-    u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=%d", baseURL, limit)
+// runIPDrilldown καλεί /ip-drilldown και τυπώνει per-IP σύνοψη.
+func runIPDrilldown(baseURL, ip string) error {
+    u := fmt.Sprintf("%s/api/v1/webdet/ip-drilldown?ip=%s", baseURL, url.QueryEscape(ip))
     resp, err := http.Get(u)
     if err != nil {
         return err
     }
     defer resp.Body.Close()
 
-    var rows []HotIPRow
-    if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+    var d IPDetail
+    if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
         return err
     }
 
-    fmt.Printf("[webtop hot] top %d hot IPs (short window aggregate)\n", limit)
+    fmt.Printf("[ip %s] window=%.0fs total=%d vhosts=%d rps=%.2f\n",
+        d.IP, d.WindowSec, d.Req, d.Vhosts, d.RPS)
 
-    w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-    fmt.Fprintln(w, "IP\txReqs\tvhosts\tPTR\tASN\tCC")
-
-    for _, r := range rows {
-        asField := ""
-        if r.ASN != "" {
-            asField = "AS" + r.ASN
-            if r.ASNName != "" {
-                asField += " " + r.ASNName
-            }
+    if d.PTR != "" || d.ASN != "" || d.ASNName != "" || d.Country != "" {
+        asField := d.ASN
+        if asField != "" && !strings.HasPrefix(asField, "AS") {
+            asField = "AS" + asField
         }
-        fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t%s\n",
-            r.IP, r.Req, r.Vhosts, r.PTR, asField, r.Country)
+
+        parts := make([]string, 0, 3)
+        if d.PTR != "" {
+            parts = append(parts, d.PTR)
+        }
+        if asField != "" || d.ASNName != "" {
+            parts = append(parts, strings.TrimSpace(asField+" "+d.ASNName))
+        }
+        if d.Country != "" {
+            parts = append(parts, d.Country)
+        }
+
+        if len(parts) > 0 {
+            fmt.Println("  " + strings.Join(parts, "  "))
+        }
     }
 
-    w.Flush()
+    if len(d.Hosts) > 0 {
+        fmt.Println("Top vhosts:")
+        w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+        fmt.Fprintln(w, "VHOST\txReqs\t%")
+        for _, kv := range d.Hosts {
+            pct := 0.0
+            if d.Req > 0 {
+                pct = 100 * float64(kv.Count) / float64(d.Req)
+            }
+            fmt.Fprintf(w, "%s\t%d\t%.1f\n", kv.Key, kv.Count, pct)
+        }
+        w.Flush()
+    }
+
     return nil
 }
+
 
 
 

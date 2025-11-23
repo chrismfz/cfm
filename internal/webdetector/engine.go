@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"math"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
@@ -184,6 +185,16 @@ type HostDetail struct {
 	TopReferrers   []TopKV          `json:"top_referrers"`
 	TopPaths       []TopKV          `json:"top_paths"`
 	EnrichedTopIPs []map[string]string `json:"enriched_top_ips,omitempty"`
+
+        // Feature dump (για ML / debug)
+        MedianPerIPRPS float64          `json:"median_per_ip_rps"`
+        BytesRPS       float64          `json:"bytes_rps"`
+        HotIPs         int              `json:"hot_ips"`
+        FailureIndex   float64          `json:"failure_index"`
+        UAEntropy      float64          `json:"ua_entropy"`
+        PathEntropy    float64          `json:"path_entropy"`
+        IPSkew         float64          `json:"ip_skew"`
+
 }
 
 // HotIPRow είναι global aggregated view per IP.
@@ -197,6 +208,52 @@ type HotIPRow struct {
     ASNName string `json:"asn_name,omitempty"`
     Country string `json:"country,omitempty"`
 }
+
+// IPDetail είναι short-window drilldown για ένα IP.
+type IPDetail struct {
+    IP        string  `json:"ip"`
+    WindowSec float64 `json:"window_sec"`
+    Req       int     `json:"req"`
+    Vhosts    int     `json:"vhosts"`
+
+    // per-vhost breakdown
+    Hosts []TopKV `json:"hosts"`
+
+    // απλό rate
+    RPS float64 `json:"rps"`
+
+    // enrichment
+    PTR     string `json:"ptr,omitempty"`
+    ASN     string `json:"asn,omitempty"`
+    ASNName string `json:"asn_name,omitempty"`
+    Country string `json:"country,omitempty"`
+}
+
+// IPSignals είναι το "full" IP-level row με score & προτάσεις.
+type IPSignals struct {
+    IP      string   `json:"ip"`
+    Req     int      `json:"req"`
+    Vhosts  int      `json:"vhosts"`
+    RPS     float64  `json:"rps"`
+    Score   float64  `json:"score"`
+    Reasons []string `json:"reasons,omitempty"`
+
+    PTR     string `json:"ptr,omitempty"`
+    ASN     string `json:"asn,omitempty"`
+    ASNName string `json:"asn_name,omitempty"`
+    Country string `json:"country,omitempty"`
+
+    Proposals []IPActionProposal `json:"proposals,omitempty"`
+}
+
+// IPActionProposal είναι απλές firewall / notify προτάσεις για την IP.
+type IPActionProposal struct {
+    Action     string  `json:"action"`                // "block", "notify", "watch", ...
+    Reason     string  `json:"reason"`                // π.χ. "ip_score_high"
+    Score      float64 `json:"score"`                 // το score που οδήγησε στην πρόταση
+    TTLSeconds int     `json:"ttl_seconds,omitempty"` // π.χ. block για 900s
+}
+
 
 
 // Engine is the main web detector instance.
@@ -848,6 +905,35 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
                 botRatio = float64(botHits) / float64(tot)
         }
 
+
+        // Failure index ~ πόσο “αποτυγχάνει” η κίνηση
+        failureIndex := 0.0
+        if tot > 0 {
+                failureIndex = float64(c4+c5+c401) / float64(tot)
+        }
+
+        // UA entropy (0–1, normalized)
+        uaEntropy := entropyFromCounts(uac, tot)
+
+        // Path entropy (0–1, normalized)
+        pathEntropy := entropyFromCounts(ptc, tot)
+
+        // IP skew = max_per_ip / mean_per_ip (>=1)
+        ipSkew := 0.0
+        if len(ipc) > 0 {
+                maxCnt := 0
+                for _, cnt := range ipc {
+                        if cnt > maxCnt {
+                                maxCnt = cnt
+                        }
+                }
+                mean := float64(tot) / float64(len(ipc))
+                if mean > 0 {
+                        ipSkew = float64(maxCnt) / mean
+                }
+        }
+
+
         mini := MiniMetrics{
                 RPSTotal:       float64(tot) / winSec,
                 RPS2xx:         float64(c2) / winSec,
@@ -904,24 +990,39 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		return out
 	}
 
-	props := HostDetail{
-		Host:       host,
-		WindowSec:  winSec,
-		TotalReq:   tot,
-		DirectPct:  pct(direct, tot),
-		ProcAvgSec: 0,
+        props := HostDetail{
+                Host:       host,
+                WindowSec:  winSec,
+                TotalReq:   tot,
+                DirectPct:  pct(direct, tot),
+                ProcAvgSec: 0,
+
                 PathDiversity: pathDiv,
                 UniquePaths:   uniquePaths,
                 UADiversity:   uaDiv,
                 UniqueUAs:     uniqueUAs,
                 PostRatio:     postRatio,
+
+                // Score / reasons
                 ShortScore:   res.Score,
                 ShortReasons: res.Reasons,
-		TopIPs:       top(ipc),
-		TopAgents:    top(uac),
-		TopReferrers: top(rfc),
-		TopPaths:     top(ptc),
-	}
+
+                // Feature dump
+                MedianPerIPRPS: medianPerIP,
+                BytesRPS:       bytesRPS,
+                HotIPs:         hotIPs,
+                FailureIndex:   failureIndex,
+                UAEntropy:      uaEntropy,
+                PathEntropy:    pathEntropy,
+                IPSkew:         ipSkew,
+
+                // Top lists
+                TopIPs:       top(ipc),
+                TopAgents:    top(uac),
+                TopReferrers: top(rfc),
+                TopPaths:     top(ptc),
+        }
+
 
 	if tot > 0 {
 		props.ProcAvgSec = sumRT / float64(tot)
@@ -979,6 +1080,27 @@ func pct(a, b int) float64 {
 	return 100 * float64(a) / float64(b)
 }
 
+// entropyFromCounts υπολογίζει normalized entropy [0,1] πάνω σε counts.
+func entropyFromCounts(m map[string]int, total int) float64 {
+        if total <= 0 || len(m) == 0 {
+            return 0
+        }
+        var h float64
+        t := float64(total)
+        for _, c := range m {
+                if c <= 0 {
+                        continue
+                }
+                p := float64(c) / t
+                h += -p * math.Log2(p)
+        }
+        maxH := math.Log2(float64(len(m)))
+        if maxH <= 0 {
+                return 0
+        }
+        return h / maxH
+}
+
 // Marshalable helper for debugging.
 func (e *Engine) DebugDump() string {
 	e.mu.RLock()
@@ -989,78 +1111,277 @@ func (e *Engine) DebugDump() string {
 
 
 
+// scoreIPSimple: basic heuristic score για IPs.
+// Χρησιμοποιεί μόνο RPS, total requests και πόσα vhosts χτυπάει.
+func scoreIPSimple(rps float64, req int, vhosts int) (float64, []string) {
+        score := 0.0
+        reasons := []string{}
 
-// HotIPs υπολογίζει global "ζεστά" IPs από το short-window state.
-// Δεν κρατά extra state· περνάει όλα τα hosts και τα buckets και μαζεύει per-IP counters.
-func (e *Engine) HotIPs(limit int) []HotIPRow {
-    e.mu.RLock()
-    defer e.mu.RUnlock()
-
-    type agg struct {
-        req   int
-        hosts map[string]struct{}
-    }
-
-    stats := make(map[string]*agg)
-
-    for host, hs := range e.hosts {
-        if hs == nil {
-            continue
+        // RPS contribution
+        if rps >= 5 {
+                score += 0.6
+                reasons = append(reasons, "hi_rps")
+        } else if rps >= 1 {
+                score += 0.4
+                reasons = append(reasons, "med_rps")
+        } else if rps >= 0.1 {
+                score += 0.2
+                reasons = append(reasons, "low_rps")
         }
-        for i := range hs.buckets {
-            b := &hs.buckets[i]
-            for ip, n := range b.ips {
-                a := stats[ip]
-                if a == nil {
-                    a = &agg{
-                        hosts: make(map[string]struct{}),
-                    }
-                    stats[ip] = a
+
+        // Vhost diversity contribution
+        if vhosts >= 10 {
+            score += 0.3
+            reasons = append(reasons, "many_vhosts")
+        } else if vhosts >= 3 {
+            score += 0.2
+            reasons = append(reasons, "multi_vhosts")
+        }
+
+        // Slow-but-persistent crawler hint (δεν αυξάνει score, απλά reason)
+        if req >= 200 && rps < 0.1 {
+            reasons = append(reasons, "slow_crawler_like")
+        }
+
+        if score > 1 {
+                score = 1
+        }
+        return score, reasons
+}
+
+// proposeIPActions φτιάχνει απλές firewall / notify προτάσεις με βάση το score.
+func proposeIPActions(row IPSignals) []IPActionProposal {
+        s := row.Score
+        out := []IPActionProposal{}
+
+        switch {
+        case s >= 0.90:
+                out = append(out, IPActionProposal{
+                        Action:     "block",
+                        Reason:     "ip_score_high",
+                        Score:      s,
+                        TTLSeconds: 900,
+                })
+        case s >= 0.70:
+                out = append(out, IPActionProposal{
+                        Action: "notify",
+                        Reason: "ip_score_elevated",
+                        Score:  s,
+                })
+        case s >= 0.50:
+                out = append(out, IPActionProposal{
+                        Action: "watch",
+                        Reason: "ip_score_borderline",
+                        Score:  s,
+                })
+        }
+        return out
+}
+
+// IPShort παράγει full IP signals (με score & proposals) από το short-window state.
+func (e *Engine) IPShort(limit int) []IPSignals {
+        e.mu.RLock()
+        defer e.mu.RUnlock()
+
+        type agg struct {
+                req    int
+                vhosts map[string]struct{}
+        }
+
+        stats := make(map[string]*agg)
+
+        for host, hs := range e.hosts {
+                if hs == nil {
+                        continue
                 }
-                a.req += n
-                a.hosts[host] = struct{}{}
-            }
+                for i := range hs.buckets {
+                        b := &hs.buckets[i]
+                        for ip, n := range b.ips {
+                                a := stats[ip]
+                                if a == nil {
+                                        a = &agg{
+                                                vhosts: make(map[string]struct{}),
+                                        }
+                                        stats[ip] = a
+                                }
+                                a.req += n
+                                a.vhosts[host] = struct{}{}
+                        }
+                }
         }
-    }
 
-    rows := make([]HotIPRow, 0, len(stats))
+        winSec := e.cfg.Window.Seconds()
+        if winSec <= 0 {
+                winSec = 60
+        }
+
+    rows := make([]IPSignals, 0, len(stats))
     for ip, a := range stats {
-        row := HotIPRow{
-            IP:     ip,
-            Req:    a.req,
-            Vhosts: len(a.hosts),
-        }
+        rps := float64(a.req) / winSec
+        vhosts := len(a.vhosts)
 
-        // enrichment αν είναι ενεργό
-        if e.enr != nil && net.ParseIP(ip) != nil {
-            geo := e.enr.Lookup(ip)
-            if geo.PTR != "" {
-                row.PTR = geo.PTR
-            }
-            if geo.ASN != 0 {
-                // κρατάμε το νούμερο σαν string, το "AS" prefix το βάζουμε στο CLI
-                row.ASN = strconv.FormatUint(uint64(geo.ASN), 10)
-            }
-            if geo.ASNName != "" {
-                row.ASNName = geo.ASNName
-            }
-            if geo.Country != "" {
-                row.Country = geo.Country
-            }
-        }
+        score, reasons := scoreIPSimple(rps, a.req, vhosts)
 
-        rows = append(rows, row)
+        rows = append(rows, IPSignals{
+            IP:      ip,
+            Req:     a.req,
+            Vhosts:  vhosts,
+            RPS:     rps,
+            Score:   score,
+            Reasons: reasons,
+        })
     }
 
-    sort.Slice(rows, func(i, j int) bool {
-        if rows[i].Req == rows[j].Req {
-            return rows[i].IP < rows[j].IP
-        }
-        return rows[i].Req > rows[j].Req
-    })
+        sort.Slice(rows, func(i, j int) bool {
+                if rows[i].Score == rows[j].Score {
+                        return rows[i].RPS > rows[j].RPS
+                }
+                return rows[i].Score > rows[j].Score
+        })
 
     if limit > 0 && len(rows) > limit {
         rows = rows[:limit]
     }
+
+    // 🔥 Enrichment + proposals ΜΟΝΟ για τις top-N
+    for i := range rows {
+        rows[i].Proposals = proposeIPActions(rows[i])
+
+        if e.enr == nil {
+            continue
+        }
+
+        ip := rows[i].IP
+        if net.ParseIP(ip) == nil {
+            continue
+        }
+
+        geo := e.enr.Lookup(ip)
+        if geo.PTR != "" {
+            rows[i].PTR = geo.PTR
+        }
+        if geo.ASN != 0 {
+            rows[i].ASN = strconv.FormatUint(uint64(geo.ASN), 10)
+        }
+        if geo.ASNName != "" {
+            rows[i].ASNName = geo.ASNName
+        }
+        if geo.Country != "" {
+            rows[i].Country = geo.Country
+        }
+    }
+
     return rows
+
+
+}
+
+// HotIPs υπολογίζει global "ζεστά" IPs από το short-window state.
+// Τώρα βασίζεται πάνω στο IPShort και επιστρέφει μόνο το "παλιό" view για συμβατότητα.
+func (e *Engine) HotIPs(limit int) []HotIPRow {
+        sigs := e.IPShort(limit)
+        rows := make([]HotIPRow, 0, len(sigs))
+        for _, s := range sigs {
+                rows = append(rows, HotIPRow{
+                        IP:      s.IP,
+                        Req:     s.Req,
+                        Vhosts:  s.Vhosts,
+                        PTR:     s.PTR,
+                        ASN:     s.ASN,
+                        ASNName: s.ASNName,
+                        Country: s.Country,
+                })
+        }
+        return rows
+}
+
+
+// IPDetail σκανάρει το short-window state και κάνει drilldown για ένα IP.
+func (e *Engine) IPDetail(ip string) IPDetail {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
+
+    d := IPDetail{
+        IP:        ip,
+        WindowSec: e.cfg.Window.Seconds(),
+    }
+
+    if net.ParseIP(ip) == nil {
+        return d
+    }
+
+    hostCounts := make(map[string]int)
+    var firstSet bool
+    var first, last time.Time
+
+    for host, hs := range e.hosts {
+        if hs == nil || len(hs.buckets) == 0 {
+            continue
+        }
+        for i := range hs.buckets {
+            b := &hs.buckets[i]
+            n, ok := b.ips[ip]
+            if !ok || n == 0 {
+                continue
+            }
+            hostCounts[host] += n
+            d.Req += n
+
+            if !firstSet {
+                first = b.from
+                last = b.to
+                firstSet = true
+            } else {
+                if b.from.Before(first) {
+                    first = b.from
+                }
+                if b.to.After(last) {
+                    last = b.to
+                }
+            }
+        }
+    }
+
+    d.Vhosts = len(hostCounts)
+
+    if firstSet {
+        winSec := last.Sub(first).Seconds()
+        if winSec <= 0 {
+            winSec = d.WindowSec
+        }
+        if winSec <= 0 {
+            winSec = 1
+        }
+        d.RPS = float64(d.Req) / winSec
+    }
+
+    if len(hostCounts) > 0 {
+        hosts := make([]TopKV, 0, len(hostCounts))
+        for h, c := range hostCounts {
+            hosts = append(hosts, TopKV{Key: h, Count: c})
+        }
+        sort.Slice(hosts, func(i, j int) bool {
+            return hosts[i].Count > hosts[j].Count
+        })
+        d.Hosts = hosts
+    }
+
+    // enrichment
+    if e.enr != nil {
+        geo := e.enr.Lookup(ip)
+        if geo.PTR != "" {
+            d.PTR = geo.PTR
+        }
+        if geo.ASN != 0 {
+            d.ASN = strconv.FormatUint(uint64(geo.ASN), 10)
+        }
+        if geo.ASNName != "" {
+            d.ASNName = geo.ASNName
+        }
+        if geo.Country != "" {
+            d.Country = geo.Country
+        }
+    }
+
+    return d
 }

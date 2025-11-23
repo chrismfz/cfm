@@ -19,6 +19,8 @@ func (e *Engine) ServeHTTP(addr string) {
 	mux.HandleFunc("/api/v1/webdet/drilldown", e.handleDrilldown)
 	mux.HandleFunc("/api/v1/webdet/hot-ips", e.handleHotIPs)
         mux.HandleFunc("/api/v1/webdet/long-top", e.handleLongTop)
+        mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
+        mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -60,6 +62,12 @@ type topShortResponse struct {
 
 }
 
+// ipShortResponse: IP-level short window (δεν έχει long horizon ακόμη).
+type ipShortResponse struct {
+    WindowSec float64     `json:"window_sec"`
+    Rows      []IPSignals `json:"rows"`
+}
+
 
 func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
     rows := e.TopShort(0)
@@ -71,6 +79,25 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
     }
 
 
+
+    writeJSON(w, http.StatusOK, resp)
+}
+
+
+// handleIPShort: επιστρέφει IPSignals από το short window με optional ?limit=
+func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
+    limit := 0
+    if v := r.URL.Query().Get("limit"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            limit = n
+        }
+    }
+
+    rows := e.IPShort(limit)
+    resp := ipShortResponse{
+        WindowSec: e.cfg.Window.Seconds(),
+        Rows:      rows,
+    }
 
     writeJSON(w, http.StatusOK, resp)
 }
@@ -152,4 +179,17 @@ func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
 
     rows := e.HotIPs(limit)
     writeJSON(w, http.StatusOK, rows)
+}
+
+
+// handleIPDrilldown: short-window drilldown per IP.
+func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
+    ip := r.URL.Query().Get("ip")
+    if ip == "" {
+        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
+        return
+    }
+
+    d := e.IPDetail(ip)
+    writeJSON(w, http.StatusOK, d)
 }
