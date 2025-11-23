@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 	"time"
-
+	"strconv"
 	"cfm/internal/logging"
 )
 
@@ -17,6 +17,8 @@ func (e *Engine) ServeHTTP(addr string) {
 	mux.HandleFunc("/api/v1/webdet/top-short", e.handleTopShort)
 	mux.HandleFunc("/api/v1/webdet/suspicious", e.handleSuspicious)
 	mux.HandleFunc("/api/v1/webdet/drilldown", e.handleDrilldown)
+	mux.HandleFunc("/api/v1/webdet/hot-ips", e.handleHotIPs)
+        mux.HandleFunc("/api/v1/webdet/long-top", e.handleLongTop)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -85,6 +87,33 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
+// longTopResponse: scored long-window rows χωρίς minScore threshold.
+type longTopResponse struct {
+        LongHorizonSec float64        `json:"long_horizon_sec"`
+        Rows           []SuspiciousRow `json:"rows"`
+}
+
+// handleLongTop επιστρέφει ΟΛΑ τα hosts από το long window, scored,
+// ταξινομημένα by score desc, χωρίς minScore filter.
+func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
+        // optional ?limit=N (default 50)
+        limit := 50
+        if v := r.URL.Query().Get("limit"); v != "" {
+                if n, err := strconv.Atoi(v); err == nil && n > 0 {
+                        limit = n
+                }
+        }
+
+        rows := e.longwin.SuspiciousTop(limit, 0) // minScore=0 → όλα με score
+
+        resp := longTopResponse{
+                LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+                Rows:           rows,
+        }
+        writeJSON(w, http.StatusOK, resp)
+}
+
+
 func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	if host == "" {
@@ -103,4 +132,21 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"short": d,
 	})
+}
+
+
+
+
+
+func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
+    // προαιρετικό ?limit=N
+    limit := 20
+    if v := r.URL.Query().Get("limit"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            limit = n
+        }
+    }
+
+    rows := e.HotIPs(limit)
+    writeJSON(w, http.StatusOK, rows)
 }

@@ -15,6 +15,8 @@ type MiniMetrics struct {
 	RPS3xx         float64
 	RPS4xx         float64
 	RPS5xx         float64
+        RPS50x        float64
+        RPS504        float64
 	RPS401         float64
 	RPS403         float64
 	RPS404         float64
@@ -24,6 +26,7 @@ type MiniMetrics struct {
 	UniqueIPs      int
 	MedianPerIPRPS float64
 	BytesRPS       float64
+	HotIPs         int
 }
 
 // SuspiciousRow is the scored long-window output for CLI / API.
@@ -38,6 +41,7 @@ type SuspiciousRow struct {
 	UniqueIPs    int      `json:"unique_ips"`
 	ErrRatio     float64  `json:"err_ratio"`
 	Auth401Ratio float64  `json:"auth401_ratio"`
+	HotIPs       int      `json:"hot_ips"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.
@@ -50,11 +54,13 @@ type LongRow struct {
 	UniqueIPs    int     `json:"unique_ips"`
 	ErrRatio     float64 `json:"err_ratio"`
 	Auth401Ratio float64 `json:"auth401_ratio"`
+	HotIPs       int     `json:"hot_ips"`
 }
 
 type bucket struct {
 	Tot         int
 	C3, C4, C5  int
+        C50x, C504  int
 	C401, C403  int
 	C404        int
 	C499        int
@@ -63,6 +69,7 @@ type bucket struct {
 	Auth401     float64
 	MedPerIP    float64
 	BytesRPSMax float64 // π.χ. κρατάμε max BytesRPS στα slots
+	HotIPsMax   int
 }
 
 
@@ -135,6 +142,8 @@ for host, m := range snap {
     b.C3   += int(m.RPS3xx * sec)
     b.C4   += int(m.RPS4xx * sec)
     b.C5   += int(m.RPS5xx * sec)
+    b.C50x += int(m.RPS50x * sec)
+    b.C504 += int(m.RPS504 * sec)
     b.C401 += int(m.RPS401 * sec)
     b.C403 += int(m.RPS403 * sec)
     b.C404 += int(m.RPS404 * sec)
@@ -155,6 +164,10 @@ for host, m := range snap {
     if m.BytesRPS > b.BytesRPSMax {
         b.BytesRPSMax = m.BytesRPS
     }
+            if m.HotIPs > b.HotIPsMax {
+                b.HotIPsMax = m.HotIPs
+            }
+
 }
 
 
@@ -180,6 +193,8 @@ func (lw *LongWindow) sumAll() map[string]bucket {
 			agg.C3  += b.C3
 			agg.C4  += b.C4
 			agg.C5  += b.C5
+                        agg.C50x += b.C50x
+                        agg.C504 += b.C504
 			agg.C401+= b.C401
 			agg.C403  += b.C403
 			agg.C404  += b.C404
@@ -199,6 +214,9 @@ func (lw *LongWindow) sumAll() map[string]bucket {
 			if b.BytesRPSMax > agg.BytesRPSMax {
 			    agg.BytesRPSMax = b.BytesRPSMax
 			}
+                        if b.HotIPsMax > agg.HotIPsMax {
+                                agg.HotIPsMax = b.HotIPsMax
+                        }
 			out[h] = agg
 		}
 	}
@@ -227,13 +245,12 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 		rps := float64(b.Tot) / hor
 		r3  := float64(b.C3)  / hor
 		r4  := float64(b.C4)  / hor
-		r5  := float64(b.C5)  / hor
-
-r401 := float64(b.C401) / hor
-r403 := float64(b.C403) / hor
-r404 := float64(b.C404) / hor
-var r50x float64
-var r504 float64
+                r5  := float64(b.C5)   / hor
+                r401 := float64(b.C401) / hor
+                r403 := float64(b.C403) / hor
+                r404 := float64(b.C404) / hor
+                r50x := float64(b.C50x) / hor
+                r504 := float64(b.C504) / hor
 
 		errR := b.ErrRatio
 		if errR == 0 {
@@ -255,6 +272,7 @@ sig := 	Signals{
     UniqueIPs:    b.Uniq,
     MedianPerIP:  b.MedPerIP,
     BytesRPS:     b.BytesRPSMax,
+    HotIPs:       b.HotIPsMax,
 }
 		res := lw.scorer.Score(sig)
 		if res.Score >= minScore {
@@ -269,6 +287,7 @@ sig := 	Signals{
 				UniqueIPs:    b.Uniq,
 				ErrRatio:     errR,
 				Auth401Ratio: b.Auth401,
+				HotIPs:       b.HotIPsMax,
 			})
 		}
 	}
@@ -318,6 +337,7 @@ func (lw *LongWindow) All() []LongRow {
 			UniqueIPs:    b.Uniq,
 			ErrRatio:     errR,
 			Auth401Ratio: b.Auth401,
+			HotIPs:       b.HotIPsMax,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -346,12 +366,12 @@ func (lw *LongWindow) One(host string) (SuspiciousRow, bool) {
 	rps := float64(b.Tot) / hor
 	r3  := float64(b.C3)  / hor
 	r4  := float64(b.C4)  / hor
-	r5  := float64(b.C5)  / hor
-r401 := float64(b.C401) / hor
-r403 := float64(b.C403) / hor
-r404 := float64(b.C404) / hor
-var r50x float64
-var r504 float64
+        r5  := float64(b.C5)   / hor
+        r401 := float64(b.C401) / hor
+        r403 := float64(b.C403) / hor
+        r404 := float64(b.C404) / hor
+        r50x := float64(b.C50x) / hor
+        r504 := float64(b.C504) / hor
 
 	errR := b.ErrRatio
 	if errR == 0 {
@@ -373,6 +393,7 @@ sig := Signals{
     UniqueIPs:    b.Uniq,
     MedianPerIP:  b.MedPerIP,
     BytesRPS:     b.BytesRPSMax,
+    HotIPs:       b.HotIPsMax,
 }
 
 	res := lw.scorer.Score(sig)
@@ -387,6 +408,7 @@ sig := Signals{
 		UniqueIPs:    b.Uniq,
 		ErrRatio:     errR,
 		Auth401Ratio: b.Auth401,
+		HotIPs:       b.HotIPsMax,
 	}
 	return row, true
 }

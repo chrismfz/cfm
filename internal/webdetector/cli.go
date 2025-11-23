@@ -35,6 +35,8 @@ func sortShortRows(rows []ShortRow, key string) {
 			return a.ErrRatio > b.ErrRatio
 		case "rt", "rt_avg", "lat", "latency":
 			return a.ProcAvgSec > b.ProcAvgSec
+                case "score":
+                        return a.Score > b.Score
 		}
 		// fallback
 		return a.RPS > b.RPS
@@ -48,21 +50,61 @@ type topShortCLIResponse struct {
 	Rows           []ShortRow `json:"rows"`
 }
 
+// longTopCLIResponse για το /webdet/long-top.
+type longTopCLIResponse struct {
+        LongHorizonSec float64         `json:"long_horizon_sec"`
+        Rows           []SuspiciousRow `json:"rows"`
+}
+
 // small help printer for cfm webtop
 func printWebTopHelp() {
-	fmt.Println("Usage:")
+	fmt.Println(" Usage:")
 	fmt.Println("  cfm webtop                     # summary view (short window + suspicious)")
 	fmt.Println("  cfm webtop <vhost>             # drilldown into a single vhost")
 	fmt.Println("  cfm webtop top [N]             # show top N vhosts by RPS (default 20)")
 	fmt.Println("  cfm webtop --limit 15 --sort 5xx")
 	fmt.Println("  cfm webtop top 20 rt")
+	fmt.Println("  cfm webtop hot [N]         # global hot IPs (short window)")
+        fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt")
+        fmt.Println("------------")
+
 }
 
 // RunWebTop is the CLI entrypoint for `cfm webtop`.
 // baseURL is something like "http://127.0.0.1:9070".
 func RunWebTop(baseURL string, args []string) error {
+
+
+
+    // Ειδικό mode: hot IPs (short window)
+    if len(args) > 0 && args[0] == "hot" {
+        limit := 20
+        if len(args) > 1 {
+            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                limit = n
+            } else {
+                return fmt.Errorf("invalid hot limit: %s", args[1])
+            }
+        }
+        return runHotIPs(baseURL, limit)
+    }
+
+    // Ειδικό mode: long window top-by-score
+    if len(args) > 0 && args[0] == "long" {
+        limit := 20
+        if len(args) > 1 {
+            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                limit = n
+            } else {
+                return fmt.Errorf("invalid long limit: %s", args[1])
+            }
+        }
+        return runLongTop(baseURL, limit)
+    }
+
+
 	// Help modes: cfm webtop help / -h / --help
 	if len(args) > 0 {
 		switch args[0] {
@@ -152,13 +194,28 @@ func RunWebTop(baseURL string, args []string) error {
 		}
 
 		// If none matched, it must be a host (drilldown)
-		if host == "" {
-			host = a
-			i++
-			continue
-		}
+// --- sort shortcut for: cfm webtop top 10 rt ---
+if inTop && sortKey == "" && host == "" {
+    // If argument looks like a valid sort key -> treat as sort
+    low := strings.ToLower(a)
+    switch low {
+    case "rps", "2xx", "3xx", "4xx", "5xx", "uniq", "uniqip", "unique", "err", "err%", "rt", "rt_avg", "lat", "latency","score":
+        sortKey = low
+        i++
+        continue
+    }
+}
 
-		return fmt.Errorf("unexpected arg: %s", a)
+// Otherwise treat as host (drilldown)
+if host == "" {
+    host = a
+    i++
+    continue
+}
+
+return fmt.Errorf("unexpected arg: %s", a)
+
+
 	}
 
 	// host mode cannot mix with top mode
@@ -333,17 +390,18 @@ func joinReasons(r []string) string {
 // printWebShort prints the main RPS table + TOTAL + suspicious section.
 func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "HOST\tRPS\t2xx\t3xx\t4xx\t5xx\t401\t403\t404\t499\tuniqIP\terr%\trt_avg")
+
+        fmt.Fprintln(w, "HOST\tRPS\t2xx\t3xx\t4xx\t5xx\t401\t403\t404\t499\tuniqIP\terr%\trt_avg\tscore")
 
 	var totRPS, tot2, tot3, tot4, tot5, tot401, tot403, tot404, tot499 float64
 	var totUniq int
 	var rtN, rtD float64
 
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\n",
+                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t%.2f\n",
 			r.Host, r.RPS, r.R2xx, r.R3xx, r.R4xx, r.R5xx,
 			r.R401, r.R403, r.R404, r.R499,
-			r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec)
+			r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec, r.Score)
 
 		totRPS += r.RPS
 		tot2 += r.R2xx
@@ -373,7 +431,7 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 		}
 
 		fmt.Fprintf(w,
-			"TOTAL\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\n",
+                        "TOTAL\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t-\n",
 			totRPS, tot2, tot3, tot4, tot5, tot401, tot403, tot404, tot499,
 			totUniq, errPct, rtAvg)
 	}
@@ -407,4 +465,85 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 		w2.Flush()
 	}
 	return nil
+}
+
+
+
+
+// runHotIPs καλεί /hot-ips και τυπώνει global "ζεστά" IPs.
+func runHotIPs(baseURL string, limit int) error {
+    u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=%d", baseURL, limit)
+    resp, err := http.Get(u)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    var rows []HotIPRow
+    if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+        return err
+    }
+
+    fmt.Printf("[webtop hot] top %d hot IPs (short window aggregate)\n", limit)
+
+    w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+    fmt.Fprintln(w, "IP\txReqs\tvhosts\tPTR\tASN\tCC")
+
+    for _, r := range rows {
+        asField := ""
+        if r.ASN != "" {
+            asField = "AS" + r.ASN
+            if r.ASNName != "" {
+                asField += " " + r.ASNName
+            }
+        }
+        fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t%s\n",
+            r.IP, r.Req, r.Vhosts, r.PTR, asField, r.Country)
+    }
+
+    w.Flush()
+    return nil
+}
+
+
+
+// runLongTop καλεί /long-top και τυπώνει long-window scored rows.
+func runLongTop(baseURL string, limit int) error {
+        u := fmt.Sprintf("%s/api/v1/webdet/long-top?limit=%d", baseURL, limit)
+        resp, err := http.Get(u)
+        if err != nil {
+                return err
+        }
+        defer resp.Body.Close()
+
+        var payload longTopCLIResponse
+        if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+                return err
+        }
+
+        rows := payload.Rows
+
+        fmt.Printf("[webtop long] horizon≈%.0fs (top %d by score)\n",
+                payload.LongHorizonSec, limit)
+
+        w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+        fmt.Fprintln(w, "HOST\tSCORE\tRPS\t3xx\t4xx\t5xx\tuniqIP\terr%\tauth401%\thotIPs")
+
+        for _, r := range rows {
+                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.1f\t%d\n",
+                        r.Host,
+                        r.Score,
+                        r.RPS,
+                        r.R3xx,
+                        r.R4xx,
+                        r.R5xx,
+                        r.UniqueIPs,
+                        r.ErrRatio*100,
+                        r.Auth401Ratio*100,
+                        r.HotIPs,
+                )
+        }
+
+        w.Flush()
+        return nil
 }

@@ -27,6 +27,7 @@ type Signals struct {
 	UniqueIPs    int
 	MedianPerIP  float64
 	BytesRPS     float64 // bytes per second
+	HotIPs       int
 
 }
 
@@ -74,6 +75,7 @@ const (
 	refAuth401     = 0.10
 	refMedianPerIP = 3
 	refBytesRPS    = 10 * 1024 * 1024 // 10 MB/s π.χ.
+	refHotIPs      = 50
 )
 
 
@@ -100,6 +102,7 @@ func (s *heuristicScorer) Score(sig Signals) Result {
         authNorm  := norm(sig.Auth401Ratio, refAuth401)
         medNorm   := norm(sig.MedianPerIP, refMedianPerIP)
         bytesNorm := norm(sig.BytesRPS, refBytesRPS)
+hotNorm   := norm(float64(sig.HotIPs), refHotIPs)
 
         // Fine-grained status norms
         r401Norm := norm(sig.R401, refRPS401)
@@ -127,6 +130,7 @@ func (s *heuristicScorer) Score(sig Signals) Result {
         raw += 1.5 * r504Norm
         // Δίνουμε και στα bytes ένα μικρό βάρος (ενδεικτικά)
         raw += 0.5 * bytesNorm
+raw += 0.8 * hotNorm
 
 
         // Reasons – short and stable for CLI / logs.
@@ -153,6 +157,9 @@ func (s *heuristicScorer) Score(sig Signals) Result {
         }
         if sig.MedianPerIP > refMedianPerIP {
                 reasons = append(reasons, "few_ips_with_high_rps")
+        }
+        if sig.HotIPs > int(refHotIPs) {
+                reasons = append(reasons, "many_hot_ips")
         }
 
         // Extra reasons από fine-grained status mix

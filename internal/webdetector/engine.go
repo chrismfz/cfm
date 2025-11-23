@@ -146,6 +146,19 @@ type HostDetail struct {
 	EnrichedTopIPs []map[string]string `json:"enriched_top_ips,omitempty"`
 }
 
+// HotIPRow είναι global aggregated view per IP.
+type HotIPRow struct {
+    IP      string `json:"ip"`
+    Req     int    `json:"req"`
+    Vhosts  int    `json:"vhosts"`
+
+    PTR     string `json:"ptr,omitempty"`
+    ASN     string `json:"asn,omitempty"`
+    ASNName string `json:"asn_name,omitempty"`
+    Country string `json:"country,omitempty"`
+}
+
+
 // Engine is the main web detector instance.
 type Engine struct {
 	cfg      Config
@@ -395,6 +408,7 @@ case 5:
 	b.paths[p]++
 
 	b.sumRT += rec.RT
+	b.sumBytes += rec.Bytes
 
 
 }
@@ -416,22 +430,21 @@ func tsToTime(ts float64) time.Time {
 	return time.Unix(sec, nsec)
 }
 
-// snapshotMini builds MiniMetrics per host from current short-window buckets.
-func (e *Engine) snapshotMini(now time.Time) map[string]MiniMetrics {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
-	out := make(map[string]MiniMetrics, len(e.hosts))
+// snapshotMiniLocked builds MiniMetrics per host from current short-window buckets.
+// Προϋποθέτει ότι ο caller κρατά ήδη e.mu.RLock ή Lock.
+func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
+        out := make(map[string]MiniMetrics, len(e.hosts))
 	for host, hs := range e.hosts {
 		if len(hs.buckets) == 0 {
 			continue
 		}
 
-var tot, c2, c3, c4, c5, c401, c403, c404, c499 int
-var sumRT float64
-var sumBytes int64
-ipCounts := map[string]int{}
-
+                var tot, c2, c3, c4, c5, c401, c403, c404, c499 int
+                var c500, c502, c503, c504 int
+                var sumRT float64
+                var sumBytes int64
+                ipCounts := map[string]int{}
 
 		first := hs.buckets[0].from
 		last := hs.buckets[len(hs.buckets)-1].to
@@ -443,38 +456,49 @@ ipCounts := map[string]int{}
 			winSec = 1
 		}
 
-		for i := range hs.buckets {
-			b := &hs.buckets[i]
-			tot += b.total
-			c2 += b.c2xx
-			c3 += b.c3xx
-			c4 += b.c4xx
-			c5 += b.c5xx
-			c401 += b.c401
-			c403 += b.c403
-			c404 += b.c404
-			c499 += b.c499
-			sumRT += b.sumRT
-			sumBytes += b.sumBytes
-			for ip, n := range b.ips {
-				ipCounts[ip] += n
-			}
-		}
+                for i := range hs.buckets {
+                        b := &hs.buckets[i]
+                        tot += b.total
+                        c2 += b.c2xx
+                        c3 += b.c3xx
+                        c4 += b.c4xx
+                        c5 += b.c5xx
+                        c401 += b.c401
+                        c403 += b.c403
+                        c404 += b.c404
+                        c499 += b.c499
+                        c500 += b.c500
+                        c502 += b.c502
+                        c503 += b.c503
+                        c504 += b.c504
+                        sumRT += b.sumRT
+                        sumBytes += b.sumBytes
+                        for ip, n := range b.ips {
+                                ipCounts[ip] += n
+                        }
+                }
+
 
 		if tot == 0 {
 			continue
 		}
 
-		m := MiniMetrics{}
-		m.RPSTotal = float64(tot) / winSec
-		m.RPS2xx   = float64(c2)  / winSec
-		m.RPS3xx   = float64(c3)  / winSec
-		m.RPS4xx   = float64(c4)  / winSec
-		m.RPS5xx   = float64(c5)  / winSec
-		m.RPS401   = float64(c401)/ winSec
-		m.RPS403   = float64(c403) / winSec
-		m.RPS404   = float64(c404) / winSec
-		m.RPS499   = float64(c499)/ winSec
+                m := MiniMetrics{}
+                m.RPSTotal = float64(tot) / winSec
+                m.RPS2xx   = float64(c2)  / winSec
+                m.RPS3xx   = float64(c3)  / winSec
+                m.RPS4xx   = float64(c4)  / winSec
+                m.RPS5xx   = float64(c5)  / winSec
+                m.RPS401   = float64(c401)/ winSec
+                m.RPS403   = float64(c403)/ winSec
+                m.RPS404   = float64(c404)/ winSec
+                m.RPS499   = float64(c499)/ winSec
+
+                // 50x breakdown (χωρίς 504, που το κρατάμε ξεχωριστά)
+                c50x := c500 + c502 + c503
+                m.RPS50x = float64(c50x) / winSec
+                m.RPS504 = float64(c504) / winSec
+
 
 		m.ErrRatio = float64(c4+c5+c499) / float64(tot)
 		if m.ErrRatio < 0 {
@@ -484,21 +508,33 @@ ipCounts := map[string]int{}
 			m.ErrRatio = 1
 		}
 
-		m.Auth401Ratio = float64(c401) / float64(tot)
-// bytes/sec
-if winSec > 0 {
-    m.BytesRPS = float64(sumBytes) / winSec
-}
+                m.Auth401Ratio = float64(c401) / float64(tot)
+
+                // bytes/sec
+                if winSec > 0 {
+                        m.BytesRPS = float64(sumBytes) / winSec
+                }
+
 
 		// median per-IP RPS (approx)
 		if len(ipCounts) > 0 {
-			m.UniqueIPs = len(ipCounts)
-			vals := make([]float64, 0, len(ipCounts))
-			for _, cnt := range ipCounts {
-				vals = append(vals, float64(cnt)/winSec)
-			}
-			sort.Float64s(vals)
-			m.MedianPerIPRPS = vals[len(vals)/2]
+                        m.UniqueIPs = len(ipCounts)
+                        vals := make([]float64, 0, len(ipCounts))
+
+                        // μετράμε και “ζεστές” IPs
+                        hotCount := 0
+                        const hotRPS = 1.0 // TODO: κάν’ το tunable αν θέλεις
+
+                        for _, cnt := range ipCounts {
+                                rps := float64(cnt) / winSec
+                                vals = append(vals, rps)
+                                if rps >= hotRPS {
+                                        hotCount++
+                                }
+                        }
+                        sort.Float64s(vals)
+                        m.MedianPerIPRPS = vals[len(vals)/2]
+                        m.HotIPs = hotCount
 		}
 
 		out[host] = m
@@ -506,27 +542,45 @@ if winSec > 0 {
 	return out
 }
 
+// snapshotMini είναι safe wrapper για callers που δεν κρατούν το mutex.
+func (e *Engine) snapshotMini(now time.Time) map[string]MiniMetrics {
+        e.mu.RLock()
+        defer e.mu.RUnlock()
+        return e.snapshotMiniLocked(now)
+}
+
+
 // TopShort returns short-window stats + score for all hosts, sorted by RPS.
 func (e *Engine) TopShort(limit int) []ShortRow {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	now := time.Now()
-	snap := e.snapshotMini(now)
+
+        e.mu.RLock()
+        defer e.mu.RUnlock()
+        snap := e.snapshotMiniLocked(now)
 
 	rows := make([]ShortRow, 0, len(snap))
 	for host, m := range snap {
-		sig := Signals{
-			RPS:          m.RPSTotal,
-			R3xx:         m.RPS3xx,
-			R4xx:         m.RPS4xx,
-			R5xx:         m.RPS5xx,
-			ErrRatio:     m.ErrRatio,
-			Auth401Ratio: m.Auth401Ratio,
-			UniqueIPs:    m.UniqueIPs,
-			MedianPerIP:  m.MedianPerIPRPS,
-		}
+                sig := Signals{
+                        RPS:          m.RPSTotal,
+                        R3xx:         m.RPS3xx,
+                        R4xx:         m.RPS4xx,
+                        R5xx:         m.RPS5xx,
 
+                        R401:         m.RPS401,
+                        R403:         m.RPS403,
+                        R404:         m.RPS404,
+
+                        R50x:         m.RPS50x,
+                        R504:         m.RPS504,
+
+                        ErrRatio:     m.ErrRatio,
+                        Auth401Ratio: m.Auth401Ratio,
+                        UniqueIPs:    m.UniqueIPs,
+                        MedianPerIP:  m.MedianPerIPRPS,
+                        BytesRPS:     m.BytesRPS,
+                        HotIPs:       m.HotIPs,
+                }
 		res := e.scorer.Score(sig)
 
 		// derive proc avg sec from mini (we stored total RT / total req inside buckets)
@@ -551,10 +605,12 @@ func (e *Engine) TopShort(limit int) []ShortRow {
 			R3xx:         m.RPS3xx,
 			R4xx:         m.RPS4xx,
 			R5xx:         m.RPS5xx,
+
 			R401:         m.RPS401,
 			R403:         m.RPS403,
 			R404:         m.RPS404,
 			R499:         m.RPS499,
+
 			UniqueIPs:    m.UniqueIPs,
 			ErrRatio:     m.ErrRatio,
 			Auth401Ratio: m.Auth401Ratio,
@@ -728,3 +784,80 @@ func (e *Engine) DebugDump() string {
 	return string(b)
 }
 
+
+
+
+// HotIPs υπολογίζει global "ζεστά" IPs από το short-window state.
+// Δεν κρατά extra state· περνάει όλα τα hosts και τα buckets και μαζεύει per-IP counters.
+func (e *Engine) HotIPs(limit int) []HotIPRow {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
+
+    type agg struct {
+        req   int
+        hosts map[string]struct{}
+    }
+
+    stats := make(map[string]*agg)
+
+    for host, hs := range e.hosts {
+        if hs == nil {
+            continue
+        }
+        for i := range hs.buckets {
+            b := &hs.buckets[i]
+            for ip, n := range b.ips {
+                a := stats[ip]
+                if a == nil {
+                    a = &agg{
+                        hosts: make(map[string]struct{}),
+                    }
+                    stats[ip] = a
+                }
+                a.req += n
+                a.hosts[host] = struct{}{}
+            }
+        }
+    }
+
+    rows := make([]HotIPRow, 0, len(stats))
+    for ip, a := range stats {
+        row := HotIPRow{
+            IP:     ip,
+            Req:    a.req,
+            Vhosts: len(a.hosts),
+        }
+
+        // enrichment αν είναι ενεργό
+        if e.enr != nil && net.ParseIP(ip) != nil {
+            geo := e.enr.Lookup(ip)
+            if geo.PTR != "" {
+                row.PTR = geo.PTR
+            }
+            if geo.ASN != 0 {
+                // κρατάμε το νούμερο σαν string, το "AS" prefix το βάζουμε στο CLI
+                row.ASN = strconv.FormatUint(uint64(geo.ASN), 10)
+            }
+            if geo.ASNName != "" {
+                row.ASNName = geo.ASNName
+            }
+            if geo.Country != "" {
+                row.Country = geo.Country
+            }
+        }
+
+        rows = append(rows, row)
+    }
+
+    sort.Slice(rows, func(i, j int) bool {
+        if rows[i].Req == rows[j].Req {
+            return rows[i].IP < rows[j].IP
+        }
+        return rows[i].Req > rows[j].Req
+    })
+
+    if limit > 0 && len(rows) > limit {
+        rows = rows[:limit]
+    }
+    return rows
+}
