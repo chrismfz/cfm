@@ -83,6 +83,9 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	minScore := e.cfg.MinScore
+    if minScore <= 0 {
+        minScore = 0.50
+    }
 	rows := e.longwin.SuspiciousTop(limit, minScore)
 	writeJSON(w, http.StatusOK, rows)
 }

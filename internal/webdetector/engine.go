@@ -73,6 +73,25 @@ func zero(s string) string {
 	return s
 }
 
+// isBotUA κάνει ένα απλό substring-based detection για bot-like UAs.
+// Το χρησιμοποιούμε και στο short drilldown και στο short snapshot (MiniMetrics).
+func isBotUA(ua string) bool {
+        sub := []string{
+                "bot", "spider", "crawl", "scanner",
+                "ahrefs", "semrush",
+                "python-requests", "curl", "wget",
+                "headless", "puppeteer",
+        }
+        l := strings.ToLower(ua)
+        for _, s := range sub {
+            if strings.Contains(l, s) {
+                    return true
+            }
+        }
+        return false
+}
+
+
 type bucketSW struct {
 	from, to time.Time
 	total    int
@@ -89,6 +108,12 @@ type bucketSW struct {
 	c503  int
 	c504  int
 	c499  int
+
+        // Method mix
+        cGET   int
+        cPOST  int
+        cHEAD  int
+        cOTHER int
 
 	sumRT    float64
 	sumBytes int64
@@ -123,6 +148,11 @@ type ShortRow struct {
 	Score        float64 `json:"score"`
 	Reasons      []string `json:"reasons"`
 	BytesRPS float64 `json:"bytes_rps"`
+
+        BotRatio      float64 `json:"bot_ratio"`
+        UADiversity   float64 `json:"ua_diversity"`
+        PathDiversity float64 `json:"path_diversity"`
+        PostRatio     float64 `json:"post_ratio"`
 }
 
 // TopKV for drilldown views.
@@ -138,7 +168,17 @@ type HostDetail struct {
 	TotalReq       int              `json:"total_req"`
 	DirectPct      float64          `json:"direct_pct"`
 	BotPct         float64          `json:"bot_pct"`
+        PathDiversity  float64          `json:"path_diversity"`
+        UniquePaths    int              `json:"unique_paths"`
+        UADiversity    float64          `json:"ua_diversity"`
+        UniqueUAs      int              `json:"unique_uas"`
+        PostRatio      float64          `json:"post_ratio"`
 	ProcAvgSec     float64          `json:"proc_avg_sec"`
+
+        // Short-window scoring for this vhost
+        ShortScore     float64          `json:"short_score"`
+        ShortReasons   []string         `json:"short_reasons"`
+
 	TopIPs         []TopKV          `json:"top_ips"`
 	TopAgents      []TopKV          `json:"top_agents"`
 	TopReferrers   []TopKV          `json:"top_referrers"`
@@ -372,6 +412,19 @@ case 5:
 		b.c499++
 	}
 
+        // Method mix
+        switch rec.Method {
+        case "get":
+                b.cGET++
+        case "post":
+                b.cPOST++
+        case "head":
+                b.cHEAD++
+        default:
+                b.cOTHER++
+        }
+
+
 	if b.ips == nil {
 		b.ips = make(map[string]int)
 	}
@@ -431,30 +484,35 @@ func tsToTime(ts float64) time.Time {
 }
 
 
+
 // snapshotMiniLocked builds MiniMetrics per host from current short-window buckets.
 // Προϋποθέτει ότι ο caller κρατά ήδη e.mu.RLock ή Lock.
 func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
         out := make(map[string]MiniMetrics, len(e.hosts))
-	for host, hs := range e.hosts {
-		if len(hs.buckets) == 0 {
-			continue
-		}
+        for host, hs := range e.hosts {
+                if len(hs.buckets) == 0 {
+                        continue
+                }
 
                 var tot, c2, c3, c4, c5, c401, c403, c404, c499 int
                 var c500, c502, c503, c504 int
                 var sumRT float64
                 var sumBytes int64
                 ipCounts := map[string]int{}
+                // για diversity / bot signals / methods
+                uaCounts := map[string]int{}
+                pathsUnion := map[string]struct{}{}
+                var cGET, cPOST, cHEAD, cOTHER int
 
-		first := hs.buckets[0].from
-		last := hs.buckets[len(hs.buckets)-1].to
-		winSec := last.Sub(first).Seconds()
-		if winSec <= 0 {
-			winSec = e.cfg.Window.Seconds()
-		}
-		if winSec <= 0 {
-			winSec = 1
-		}
+                first := hs.buckets[0].from
+                last := hs.buckets[len(hs.buckets)-1].to
+                winSec := last.Sub(first).Seconds()
+                if winSec <= 0 {
+                        winSec = e.cfg.Window.Seconds()
+                }
+                if winSec <= 0 {
+                        winSec = 1
+                }
 
                 for i := range hs.buckets {
                         b := &hs.buckets[i]
@@ -476,12 +534,21 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
                         for ip, n := range b.ips {
                                 ipCounts[ip] += n
                         }
+                        for ua, n := range b.uas {
+                                uaCounts[ua] += n
+                        }
+                        for p := range b.paths {
+                                pathsUnion[p] = struct{}{}
+                        }
+                        cGET += b.cGET
+                        cPOST += b.cPOST
+                        cHEAD += b.cHEAD
+                        cOTHER += b.cOTHER
                 }
 
-
-		if tot == 0 {
-			continue
-		}
+                if tot == 0 {
+                        continue
+                }
 
                 m := MiniMetrics{}
                 m.RPSTotal = float64(tot) / winSec
@@ -499,14 +566,13 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
                 m.RPS50x = float64(c50x) / winSec
                 m.RPS504 = float64(c504) / winSec
 
-
-		m.ErrRatio = float64(c4+c5+c499) / float64(tot)
-		if m.ErrRatio < 0 {
-			m.ErrRatio = 0
-		}
-		if m.ErrRatio > 1 {
-			m.ErrRatio = 1
-		}
+                m.ErrRatio = float64(c4+c5+c499) / float64(tot)
+                if m.ErrRatio < 0 {
+                        m.ErrRatio = 0
+                }
+                if m.ErrRatio > 1 {
+                        m.ErrRatio = 1
+                }
 
                 m.Auth401Ratio = float64(c401) / float64(tot)
 
@@ -515,9 +581,8 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
                         m.BytesRPS = float64(sumBytes) / winSec
                 }
 
-
-		// median per-IP RPS (approx)
-		if len(ipCounts) > 0 {
+                // median per-IP RPS (approx)
+                if len(ipCounts) > 0 {
                         m.UniqueIPs = len(ipCounts)
                         vals := make([]float64, 0, len(ipCounts))
 
@@ -535,12 +600,42 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
                         sort.Float64s(vals)
                         m.MedianPerIPRPS = vals[len(vals)/2]
                         m.HotIPs = hotCount
-		}
+                }
 
-		out[host] = m
-	}
-	return out
+                // UA diversity + bot ratio
+                uniqueUAs := len(uaCounts)
+                if uniqueUAs > 0 {
+                        m.UADiversity = float64(uniqueUAs) / maxf(float64(tot), 1)
+                }
+                var botHits int
+                for ua, cnt := range uaCounts {
+                        if isBotUA(ua) {
+                                botHits += cnt
+                        }
+                }
+                if tot > 0 {
+                        m.BotRatio = float64(botHits) / float64(tot)
+                }
+
+                // Path diversity
+                uniquePaths := len(pathsUnion)
+                if uniquePaths > 0 {
+                        m.PathDiversity = float64(uniquePaths) / maxf(float64(tot), 1)
+                }
+
+                // POST ratio (method mix)
+                if tot > 0 {
+                        m.PostRatio = float64(cPOST) / float64(tot)
+                }
+
+                out[host] = m
+        }
+        return out
 }
+
+
+
+
 
 // snapshotMini είναι safe wrapper για callers που δεν κρατούν το mutex.
 func (e *Engine) snapshotMini(now time.Time) map[string]MiniMetrics {
@@ -580,6 +675,10 @@ func (e *Engine) TopShort(limit int) []ShortRow {
                         MedianPerIP:  m.MedianPerIPRPS,
                         BytesRPS:     m.BytesRPS,
                         HotIPs:       m.HotIPs,
+                        BotRatio:     m.BotRatio,
+                        PathDiversity: m.PathDiversity,
+                        UADiversity:   m.UADiversity,
+                        PostRatio:     m.PostRatio,
                 }
 		res := e.scorer.Score(sig)
 
@@ -617,6 +716,11 @@ func (e *Engine) TopShort(limit int) []ShortRow {
 			ProcAvgSec:   procAvg,
 			Score:        res.Score,
 			Reasons:      res.Reasons,
+			BytesRPS:     m.BytesRPS,
+                        BotRatio:     m.BotRatio,
+                        UADiversity:  m.UADiversity,
+                        PathDiversity:m.PathDiversity,
+                        PostRatio:    m.PostRatio,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -646,11 +750,17 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 	}
 
 	var tot, direct int
+
+        // status counters για scoring
+        var c2, c3, c4, c5, c401, c403, c404, c499 int
+        var sumBytes int64
+
 	ipc := map[string]int{}
 	uac := map[string]int{}
 	rfc := map[string]int{}
 	ptc := map[string]int{}
 	var sumRT float64
+        var postCount int
 
 	first := hs.buckets[0].from
 	last := hs.buckets[len(hs.buckets)-1].to
@@ -662,10 +772,21 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		winSec = 1
 	}
 
-	for i := range hs.buckets {
-		b := &hs.buckets[i]
-		tot += b.total
-		sumRT += b.sumRT
+        for i := range hs.buckets {
+                b := &hs.buckets[i]
+                tot += b.total
+                sumRT += b.sumRT
+                sumBytes += b.sumBytes
+
+                c2 += b.c2xx
+                c3 += b.c3xx
+                c4 += b.c4xx
+                c5 += b.c5xx
+                c401 += b.c401
+                c403 += b.c403
+                c404 += b.c404
+                c499 += b.c499
+
 		for k, v := range b.ips {
 			ipc[k] += v
 		}
@@ -681,7 +802,95 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		for k, v := range b.paths {
 			ptc[k] += v
 		}
+                postCount += b.cPOST
 	}
+
+        // --- Short-window scoring για αυτό το host ---
+        // UniqueIPs + median per-IP RPS + hot IPs
+        var uniqueIPs int
+        var medianPerIP, bytesRPS float64
+        var hotIPs int
+
+        if len(ipc) > 0 {
+                uniqueIPs = len(ipc)
+                vals := make([]float64, 0, len(ipc))
+                const hotRPS = 1.0
+                for _, cnt := range ipc {
+                        rps := float64(cnt) / winSec
+                        vals = append(vals, rps)
+                        if rps >= hotRPS {
+                                hotIPs++
+                        }
+                }
+                sort.Float64s(vals)
+                medianPerIP = vals[len(vals)/2]
+        }
+        if winSec > 0 {
+                bytesRPS = float64(sumBytes) / winSec
+        }
+
+        // υπολογισμός diversity & ratios
+        uniquePaths := len(ptc)
+        uniqueUAs := len(uac)
+        pathDiv := float64(uniquePaths) / maxf(float64(tot), 1)
+        uaDiv := float64(uniqueUAs) / maxf(float64(tot), 1)
+        postRatio := float64(postCount) / maxf(float64(tot), 1)
+
+        // bot ratio από UAs (όπως και παραπάνω helper)
+        var botHits int
+        for ua, cnt := range uac {
+                if isBotUA(ua) {
+                        botHits += cnt
+                }
+        }
+        botRatio := 0.0
+        if tot > 0 {
+                botRatio = float64(botHits) / float64(tot)
+        }
+
+        mini := MiniMetrics{
+                RPSTotal:       float64(tot) / winSec,
+                RPS2xx:         float64(c2) / winSec,
+                RPS3xx:         float64(c3) / winSec,
+                RPS4xx:         float64(c4) / winSec,
+                RPS5xx:         float64(c5) / winSec,
+                RPS401:         float64(c401) / winSec,
+                RPS403:         float64(c403) / winSec,
+                RPS404:         float64(c404) / winSec,
+                RPS499:         float64(c499) / winSec,
+                ErrRatio:       float64(c4+c5+c499) / maxf(float64(tot), 1),
+                Auth401Ratio:   float64(c401) / maxf(float64(tot), 1),
+                UniqueIPs:      uniqueIPs,
+                MedianPerIPRPS: medianPerIP,
+                BytesRPS:       bytesRPS,
+                HotIPs:         hotIPs,
+                BotRatio:       botRatio,
+                PathDiversity:  pathDiv,
+                UADiversity:    uaDiv,
+                PostRatio:      postRatio,
+        }
+
+        sig := Signals{
+                RPS:          mini.RPSTotal,
+                R3xx:         mini.RPS3xx,
+                R4xx:         mini.RPS4xx,
+                R5xx:         mini.RPS5xx,
+                R401:         mini.RPS401,
+                R403:         mini.RPS403,
+                R404:         mini.RPS404,
+                // R50x / R504 παραμένουν 0 στο short
+                ErrRatio:     mini.ErrRatio,
+                Auth401Ratio: mini.Auth401Ratio,
+                UniqueIPs:    mini.UniqueIPs,
+                MedianPerIP:  mini.MedianPerIPRPS,
+                BytesRPS:     mini.BytesRPS,
+                HotIPs:       mini.HotIPs,
+                BotRatio:     mini.BotRatio,
+                PathDiversity: mini.PathDiversity,
+                UADiversity:   mini.UADiversity,
+                PostRatio:     mini.PostRatio,
+        }
+        res := e.scorer.Score(sig)
 
 	top := func(m map[string]int) []TopKV {
 		out := make([]TopKV, 0, len(m))
@@ -701,6 +910,13 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		TotalReq:   tot,
 		DirectPct:  pct(direct, tot),
 		ProcAvgSec: 0,
+                PathDiversity: pathDiv,
+                UniquePaths:   uniquePaths,
+                UADiversity:   uaDiv,
+                UniqueUAs:     uniqueUAs,
+                PostRatio:     postRatio,
+                ShortScore:   res.Score,
+                ShortReasons: res.Reasons,
 		TopIPs:       top(ipc),
 		TopAgents:    top(uac),
 		TopReferrers: top(rfc),
@@ -711,24 +927,11 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		props.ProcAvgSec = sumRT / float64(tot)
 	}
 
-	// simplistic bot%: UAs containing common bot substrings.
-	botLike := func(ua string) bool {
-		sub := []string{"bot", "spider", "crawl", "scanner", "ahrefs", "semrush", "python-requests", "curl", "wget", "headless", "puppeteer"}
-		l := strings.ToLower(ua)
-		for _, s := range sub {
-			if strings.Contains(l, s) {
-				return true
-			}
-		}
-		return false
-	}
-	var botHits int
-	for ua, cnt := range uac {
-		if botLike(ua) {
-			botHits += cnt
-		}
-	}
-	props.BotPct = pct(botHits, tot)
+
+        // Bot% σε μορφή % για CLI
+        props.BotPct = pct(botHits, tot)
+
+
 
 	// Enrich top IPs via MaxMind if enabled.
 	if e.enr != nil && len(props.TopIPs) > 0 {

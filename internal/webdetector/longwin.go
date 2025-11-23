@@ -27,6 +27,12 @@ type MiniMetrics struct {
 	MedianPerIPRPS float64
 	BytesRPS       float64
 	HotIPs         int
+
+        // Νέα short-window derived signals
+        BotRatio      float64 // 0–1, αναλογία bot-like UAs
+        PathDiversity float64 // unique_paths / total_req
+        UADiversity   float64 // unique_uas / total_req
+        PostRatio     float64 // POST / total_req
 }
 
 // SuspiciousRow is the scored long-window output for CLI / API.
@@ -42,6 +48,11 @@ type SuspiciousRow struct {
 	ErrRatio     float64  `json:"err_ratio"`
 	Auth401Ratio float64  `json:"auth401_ratio"`
 	HotIPs       int      `json:"hot_ips"`
+
+        BotRatio      float64 `json:"bot_ratio"`
+        PathDiversity float64 `json:"path_diversity"`
+        UADiversity   float64 `json:"ua_diversity"`
+        PostRatio     float64 `json:"post_ratio"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.
@@ -55,6 +66,11 @@ type LongRow struct {
 	ErrRatio     float64 `json:"err_ratio"`
 	Auth401Ratio float64 `json:"auth401_ratio"`
 	HotIPs       int     `json:"hot_ips"`
+
+       BotRatio      float64 `json:"bot_ratio"`
+       PathDiversity float64 `json:"path_diversity"`
+       UADiversity   float64 `json:"ua_diversity"`
+       PostRatio     float64 `json:"post_ratio"`
 }
 
 type bucket struct {
@@ -70,6 +86,11 @@ type bucket struct {
 	MedPerIP    float64
 	BytesRPSMax float64 // π.χ. κρατάμε max BytesRPS στα slots
 	HotIPsMax   int
+        // Max values από τα νέα signals στο horizon
+        BotRatioMax      float64
+        PathDivMax       float64
+        UADivMax         float64
+        PostRatioMax     float64
 }
 
 
@@ -164,9 +185,21 @@ for host, m := range snap {
     if m.BytesRPS > b.BytesRPSMax {
         b.BytesRPSMax = m.BytesRPS
     }
-            if m.HotIPs > b.HotIPsMax {
-                b.HotIPsMax = m.HotIPs
-            }
+    if m.HotIPs > b.HotIPsMax {
+        b.HotIPsMax = m.HotIPs
+    }
+    if m.BotRatio > b.BotRatioMax {
+        b.BotRatioMax = m.BotRatio
+    }
+    if m.PathDiversity > b.PathDivMax {
+        b.PathDivMax = m.PathDiversity
+    }
+    if m.UADiversity > b.UADivMax {
+        b.UADivMax = m.UADiversity
+    }
+    if m.PostRatio > b.PostRatioMax {
+        b.PostRatioMax = m.PostRatio
+    }
 
 }
 
@@ -217,6 +250,18 @@ func (lw *LongWindow) sumAll() map[string]bucket {
                         if b.HotIPsMax > agg.HotIPsMax {
                                 agg.HotIPsMax = b.HotIPsMax
                         }
+                        if b.BotRatioMax > agg.BotRatioMax {
+                                agg.BotRatioMax = b.BotRatioMax
+                        }
+                        if b.PathDivMax > agg.PathDivMax {
+                                agg.PathDivMax = b.PathDivMax
+                        }
+                        if b.UADivMax > agg.UADivMax {
+                                agg.UADivMax = b.UADivMax
+                        }
+                        if b.PostRatioMax > agg.PostRatioMax {
+                                agg.PostRatioMax = b.PostRatioMax
+                        }
 			out[h] = agg
 		}
 	}
@@ -228,9 +273,7 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 	if lw == nil || lw.scorer == nil {
 		return nil
 	}
-	if minScore <= 0 {
-		minScore = 0.60
-	}
+
 	sums := lw.sumAll()
 	hor := lw.horizonSec()
 	if hor <= 0 {
@@ -254,7 +297,7 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 
 		errR := b.ErrRatio
 		if errR == 0 {
-			errR = (float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+			errR = (float64(b.C4) + float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
 		}
 
 sig := 	Signals{
@@ -273,6 +316,10 @@ sig := 	Signals{
     MedianPerIP:  b.MedPerIP,
     BytesRPS:     b.BytesRPSMax,
     HotIPs:       b.HotIPsMax,
+    BotRatio:     b.BotRatioMax,
+    PathDiversity: b.PathDivMax,
+    UADiversity:   b.UADivMax,
+    PostRatio:     b.PostRatioMax,
 }
 		res := lw.scorer.Score(sig)
 		if res.Score >= minScore {
@@ -288,6 +335,10 @@ sig := 	Signals{
 				ErrRatio:     errR,
 				Auth401Ratio: b.Auth401,
 				HotIPs:       b.HotIPsMax,
+                                BotRatio:     b.BotRatioMax,
+                                PathDiversity: b.PathDivMax,
+                                UADiversity:   b.UADivMax,
+                                PostRatio:     b.PostRatioMax,
 			})
 		}
 	}
@@ -325,7 +376,7 @@ func (lw *LongWindow) All() []LongRow {
 
 		errR := b.ErrRatio
 		if errR == 0 {
-			errR = (float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+			errR = (float64(b.C4) + float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
 		}
 
 		out = append(out, LongRow{
@@ -338,6 +389,10 @@ func (lw *LongWindow) All() []LongRow {
 			ErrRatio:     errR,
 			Auth401Ratio: b.Auth401,
 			HotIPs:       b.HotIPsMax,
+                        BotRatio:     b.BotRatioMax,
+                        PathDiversity: b.PathDivMax,
+                        UADiversity:   b.UADivMax,
+                        PostRatio:     b.PostRatioMax,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -375,7 +430,7 @@ func (lw *LongWindow) One(host string) (SuspiciousRow, bool) {
 
 	errR := b.ErrRatio
 	if errR == 0 {
-		errR = (float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+		errR = (float64(b.C4) + float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
 	}
 
 sig := Signals{
@@ -394,6 +449,10 @@ sig := Signals{
     MedianPerIP:  b.MedPerIP,
     BytesRPS:     b.BytesRPSMax,
     HotIPs:       b.HotIPsMax,
+    BotRatio:     b.BotRatioMax,
+    PathDiversity: b.PathDivMax,
+    UADiversity:   b.UADivMax,
+    PostRatio:     b.PostRatioMax,
 }
 
 	res := lw.scorer.Score(sig)
@@ -409,6 +468,10 @@ sig := Signals{
 		ErrRatio:     errR,
 		Auth401Ratio: b.Auth401,
 		HotIPs:       b.HotIPsMax,
+                BotRatio:     b.BotRatioMax,
+                PathDiversity: b.PathDivMax,
+                UADiversity:   b.UADivMax,
+                PostRatio:     b.PostRatioMax,
 	}
 	return row, true
 }

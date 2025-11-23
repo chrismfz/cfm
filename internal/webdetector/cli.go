@@ -37,6 +37,10 @@ func sortShortRows(rows []ShortRow, key string) {
 			return a.ProcAvgSec > b.ProcAvgSec
                 case "score":
                         return a.Score > b.Score
+                case "bot", "bot%":
+                        return a.BotRatio > b.BotRatio
+                case "ua", "ua_div", "uadiv":
+                        return a.UADiversity > b.UADiversity
 		}
 		// fallback
 		return a.RPS > b.RPS
@@ -67,7 +71,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop hot [N]         # global hot IPs (short window)")
         fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
 	fmt.Println()
-	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt")
+	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
         fmt.Println("------------")
 
 }
@@ -303,8 +307,20 @@ func runTopDrilldown(baseURL, host string) error {
 		_ = json.Unmarshal(b, &short)
 	}
 
-	fmt.Printf("[%s] window=%.0fs total=%d direct=%.1f%% bots=%.1f%% rt_avg=%.3fs\n",
-		short.Host, short.WindowSec, short.TotalReq, short.DirectPct, short.BotPct, short.ProcAvgSec)
+        fmt.Printf("[%s] window=%.0fs total=%d direct=%.1f%% bots=%.1f%% rt_avg=%.3fs short_score=%.2f\n",
+                short.Host, short.WindowSec, short.TotalReq,
+                short.DirectPct, short.BotPct, short.ProcAvgSec,
+                short.ShortScore)
+
+        fmt.Printf("  ua_div=%.3f (unique=%d) path_div=%.3f (unique=%d) post_ratio=%.3f\n",
+                short.UADiversity, short.UniqueUAs,
+                short.PathDiversity, short.UniquePaths,
+                short.PostRatio)
+
+        if len(short.ShortReasons) > 0 {
+                fmt.Printf("Short-window reasons: %s\n", strings.Join(short.ShortReasons, ","))
+        }
+
 
 	fmt.Println("Top IPs:")
 
@@ -391,17 +407,22 @@ func joinReasons(r []string) string {
 func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-        fmt.Fprintln(w, "HOST\tRPS\t2xx\t3xx\t4xx\t5xx\t401\t403\t404\t499\tuniqIP\terr%\trt_avg\tscore")
+        fmt.Fprintln(w, "HOST\tRPS\t2xx\t3xx\t4xx\t5xx\t401\t403\t404\t499\tuniqIP\terr%\trt_avg\tscore\tbot%\tua_div\tpath_div\tpost%")
 
 	var totRPS, tot2, tot3, tot4, tot5, tot401, tot403, tot404, tot499 float64
 	var totUniq int
 	var rtN, rtD float64
 
-	for _, r := range rows {
-                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t%.2f\n",
-			r.Host, r.RPS, r.R2xx, r.R3xx, r.R4xx, r.R5xx,
-			r.R401, r.R403, r.R404, r.R499,
-			r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec, r.Score)
+        for _, r := range rows {
+                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t%.2f\t%.1f\t%.3f\t%.3f\t%.1f\n",
+                        r.Host, r.RPS, r.R2xx, r.R3xx, r.R4xx, r.R5xx,
+                        r.R401, r.R403, r.R404, r.R499,
+                        r.UniqueIPs, r.ErrRatio*100, r.ProcAvgSec, r.Score,
+                        r.BotRatio*100,      // bot%
+                        r.UADiversity,       // raw (0–1-ish)
+                        r.PathDiversity,     // raw
+                        r.PostRatio*100,     // %
+                )
 
 		totRPS += r.RPS
 		tot2 += r.R2xx
@@ -430,10 +451,11 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 			rtAvg = rtN / rtD
 		}
 
-		fmt.Fprintf(w,
-                        "TOTAL\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t-\n",
-			totRPS, tot2, tot3, tot4, tot5, tot401, tot403, tot404, tot499,
-			totUniq, errPct, rtAvg)
+                fmt.Fprintf(w,
+                        "TOTAL\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.3f\t-\t-\t-\t-\t-\n",
+                        totRPS, tot2, tot3, tot4, tot5, tot401, tot403, tot404, tot499,
+                        totUniq, errPct, rtAvg)
+
 	}
 
 	w.Flush()
@@ -527,10 +549,10 @@ func runLongTop(baseURL string, limit int) error {
                 payload.LongHorizonSec, limit)
 
         w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-        fmt.Fprintln(w, "HOST\tSCORE\tRPS\t3xx\t4xx\t5xx\tuniqIP\terr%\tauth401%\thotIPs")
+        fmt.Fprintln(w, "HOST\tSCORE\tRPS\t3xx\t4xx\t5xx\tuniqIP\terr%\tauth401%\thotIPs\tbot%\tua_div\tpath_div\tpost%")
 
         for _, r := range rows {
-                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.1f\t%d\n",
+                fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%.1f\t%.1f\t%d\t%.1f\t%.3f\t%.3f\t%.1f\n",
                         r.Host,
                         r.Score,
                         r.RPS,
@@ -541,9 +563,12 @@ func runLongTop(baseURL string, limit int) error {
                         r.ErrRatio*100,
                         r.Auth401Ratio*100,
                         r.HotIPs,
+                        r.BotRatio*100,
+                        r.UADiversity,
+                        r.PathDiversity,
+                        r.PostRatio*100,
                 )
         }
-
         w.Flush()
         return nil
 }

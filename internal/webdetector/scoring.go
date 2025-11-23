@@ -29,6 +29,11 @@ type Signals struct {
 	BytesRPS     float64 // bytes per second
 	HotIPs       int
 
+        BotRatio      float64 // 0–1
+        PathDiversity float64 // unique_paths / total
+        UADiversity   float64 // unique_uas / total
+        PostRatio     float64 // POST / total
+
 }
 
 
@@ -70,12 +75,17 @@ const (
 	refRPS50x      = 20
 	refRPS504      = 10
 
-	refUniqueIPs   = 400
+	refUniqueIPs   = 300
 	refErrRatio    = 0.20
 	refAuth401     = 0.10
 	refMedianPerIP = 3
 	refBytesRPS    = 10 * 1024 * 1024 // 10 MB/s π.χ.
 	refHotIPs      = 50
+        // Αναμενόμενες τάξεις μεγέθους για τα νέα ratios
+        refBotRatio      = 0.50 // πάνω από 50% bot UAs αρχίζει και βρωμάει
+        refPathDiversity = 0.20 // scanners συχνά έχουν >20% unique path / req
+        refUADiversity   = 0.05 // συνήθως λίγα UAs για πολλά req
+        refPostRatio     = 0.30 // πολλά POST → πιθανό login abuse / API abuse
 )
 
 
@@ -102,8 +112,12 @@ func (s *heuristicScorer) Score(sig Signals) Result {
         authNorm  := norm(sig.Auth401Ratio, refAuth401)
         medNorm   := norm(sig.MedianPerIP, refMedianPerIP)
         bytesNorm := norm(sig.BytesRPS, refBytesRPS)
-hotNorm   := norm(float64(sig.HotIPs), refHotIPs)
+        hotNorm   := norm(float64(sig.HotIPs), refHotIPs)
 
+        botNorm      := norm(sig.BotRatio, refBotRatio)
+        pathDivNorm  := norm(sig.PathDiversity, refPathDiversity)
+        uaDivNorm    := norm(sig.UADiversity, refUADiversity)
+        postRatioNorm:= norm(sig.PostRatio, refPostRatio)
         // Fine-grained status norms
         r401Norm := norm(sig.R401, refRPS401)
         r403Norm := norm(sig.R403, refRPS403)
@@ -130,8 +144,13 @@ hotNorm   := norm(float64(sig.HotIPs), refHotIPs)
         raw += 1.5 * r504Norm
         // Δίνουμε και στα bytes ένα μικρό βάρος (ενδεικτικά)
         raw += 0.5 * bytesNorm
-raw += 0.8 * hotNorm
+        raw += 0.8 * hotNorm
 
+        // νέα weights
+        raw += 0.8 * botNorm
+        raw += 0.8 * pathDivNorm
+        raw += 0.5 * uaDivNorm
+        raw += 0.7 * postRatioNorm
 
         // Reasons – short and stable for CLI / logs.
         if sig.RPS > refRPSTotal {
@@ -160,6 +179,16 @@ raw += 0.8 * hotNorm
         }
         if sig.HotIPs > int(refHotIPs) {
                 reasons = append(reasons, "many_hot_ips")
+        }
+
+        if sig.BotRatio > refBotRatio {
+                reasons = append(reasons, "many_bot_user_agents")
+        }
+        if sig.PathDiversity > refPathDiversity && sig.RPS > 1 {
+                reasons = append(reasons, "scanner_like_path_diversity")
+        }
+        if sig.PostRatio > refPostRatio && sig.Auth401Ratio > refAuth401 {
+                reasons = append(reasons, "post_heavy_login_abuse_like")
         }
 
         // Extra reasons από fine-grained status mix
