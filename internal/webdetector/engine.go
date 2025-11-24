@@ -222,6 +222,14 @@ type IPDetail struct {
     // απλό rate
     RPS float64 `json:"rps"`
 
+   // 🔥 Long-window (EMA) view
+    LongHorizonSec float64  `json:"long_horizon_sec,omitempty"`
+    LongReq        int      `json:"long_req,omitempty"`
+    LongVhosts     int      `json:"long_vhosts,omitempty"`
+    LongRPS        float64  `json:"long_rps,omitempty"`
+    LongScore      float64  `json:"long_score,omitempty"`
+    LongReasons    []string `json:"long_reasons,omitempty"`
+
     // enrichment
     PTR     string `json:"ptr,omitempty"`
     ASN     string `json:"asn,omitempty"`
@@ -1506,6 +1514,18 @@ func (e *Engine) IPDetail(ip string) IPDetail {
         }
     }
 
+    // attach long-window EMA view
+    if snap, ok := e.ipLongOne(ip); ok {
+        d.LongHorizonSec = e.cfg.LongHorizon().Seconds()
+        d.LongReq        = snap.Req
+        d.LongVhosts     = snap.Vhosts
+        d.LongRPS        = snap.RPS
+        d.LongScore      = snap.Score
+        d.LongReasons    = snap.Reasons
+    }
+
+
+
     return d
 }
 
@@ -1582,4 +1602,46 @@ func (e *Engine) IPLong(limit int) []IPSignals {
     }
 
     return rows
+}
+
+
+type ipLongSnapshot struct {
+    Req     int
+    Vhosts  int
+    RPS     float64
+    Score   float64
+    Reasons []string
+}
+
+// ipLongOne επιστρέφει ένα EMA-based long snapshot για συγκεκριμένη IP.
+func (e *Engine) ipLongOne(ip string) (ipLongSnapshot, bool) {
+    if e.ipLong == nil {
+        return ipLongSnapshot{}, false
+    }
+
+    e.ipLong.mu.RLock()
+    defer e.ipLong.mu.RUnlock()
+
+    agg, ok := e.ipLong.stats[ip]
+    if !ok || agg == nil {
+        return ipLongSnapshot{}, false
+    }
+
+    req := int(agg.Req + 0.5)
+    vhosts := int(agg.Vhosts + 0.5)
+    rps := agg.RPS
+
+    if req <= 0 {
+        return ipLongSnapshot{}, false
+    }
+
+    score, reasons := scoreIPSimple(rps, req, vhosts)
+
+    return ipLongSnapshot{
+        Req:     req,
+        Vhosts:  vhosts,
+        RPS:     rps,
+        Score:   score,
+        Reasons: reasons,
+    }, true
 }

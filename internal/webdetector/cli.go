@@ -707,8 +707,24 @@ func runIPDrilldown(baseURL, ip string) error {
         return err
     }
 
-    fmt.Printf("[ip %s] window=%.0fs total=%d vhosts=%d rps=%.2f\n",
-        d.IP, d.WindowSec, d.Req, d.Vhosts, d.RPS)
+
+fmt.Printf("[ip %s] window=%.0fs total=%d vhosts=%d rps=%.2f\n",
+    d.IP, d.WindowSec, d.Req, d.Vhosts, d.RPS)
+
+if d.LongHorizonSec > 0 && d.LongReq > 0 {
+    fmt.Printf("  long: horizon≈%.0fs total≈%d vhosts≈%d rps≈%.2f score=%.2f reasons=%s\n",
+        d.LongHorizonSec,
+        d.LongReq,
+        d.LongVhosts,
+        d.LongRPS,
+        d.LongScore,
+        joinReasons(d.LongReasons),
+    )
+} else if d.LongHorizonSec > 0 {
+    fmt.Printf("  long: horizon≈%.0fs (no EMA traffic yet for this IP)\n", d.LongHorizonSec)
+}
+
+
 
     if d.PTR != "" || d.ASN != "" || d.ASNName != "" || d.Country != "" {
         asField := d.ASN
