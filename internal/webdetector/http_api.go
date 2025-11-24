@@ -63,9 +63,12 @@ type topShortResponse struct {
 }
 
 // ipShortResponse: IP-level short window (δεν έχει long horizon ακόμη).
+
 type ipShortResponse struct {
-    WindowSec float64     `json:"window_sec"`
-    Rows      []IPSignals `json:"rows"`
+    WindowSec      float64     `json:"window_sec"`
+    LongHorizonSec float64     `json:"long_horizon_sec"`
+    Short          []IPSignals `json:"short"`
+    Long           []IPSignals `json:"long,omitempty"`
 }
 
 
@@ -93,11 +96,15 @@ func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
         }
     }
 
-    rows := e.IPShort(limit)
-    resp := ipShortResponse{
-        WindowSec: e.cfg.Window.Seconds(),
-        Rows:      rows,
-    }
+rowsShort := e.IPShort(limit)
+rowsLong  := e.IPLong(limit)
+
+resp := ipShortResponse{
+    WindowSec:      e.cfg.Window.Seconds(),
+    LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+    Short:          rowsShort,
+    Long:           rowsLong,
+}
 
     writeJSON(w, http.StatusOK, resp)
 }

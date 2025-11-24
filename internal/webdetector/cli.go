@@ -62,9 +62,12 @@ type longTopCLIResponse struct {
 
 // ipShortCLIResponse για το /webdet/ip-short.
 type ipShortCLIResponse struct {
-        WindowSec float64     `json:"window_sec"`
-        Rows      []IPSignals `json:"rows"`
+        WindowSec      float64     `json:"window_sec"`
+        LongHorizonSec float64     `json:"long_horizon_sec"`
+        Short          []IPSignals `json:"short"`
+        Long           []IPSignals `json:"long"`
 }
+
 
 // small help printer for cfm webtop
 func printWebTopHelp() {
@@ -330,27 +333,26 @@ func runIPTop(baseURL string, limit int) error {
                 return err
         }
 
-        rows := payload.Rows
+        rowsShort := payload.Short
+        rowsLong  := payload.Long
 
-        // sort: πρώτα score, μετά RPS
-        sort.Slice(rows, func(i, j int) bool {
-                if rows[i].Score == rows[j].Score {
-                        return rows[i].RPS > rows[j].RPS
+        if limit > 0 {
+                if len(rowsShort) > limit {
+                        rowsShort = rowsShort[:limit]
                 }
-                return rows[i].Score > rows[j].Score
-        })
-
-        if limit > 0 && len(rows) > limit {
-                rows = rows[:limit]
+                if len(rowsLong) > limit {
+                        rowsLong = rowsLong[:limit]
+                }
         }
 
-        fmt.Printf("[webtop ip] short window=%.0fs (top %d by ip_score)\n",
-                payload.WindowSec, limit)
+        fmt.Printf("[webtop ip] short window=%.0fs, long horizon≈%.0fs (top %d by ip_score)\n",
+                payload.WindowSec, payload.LongHorizonSec, limit)
 
+        // ---- Short window πίνακας ----
         w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
         fmt.Fprintln(w, "IP\tSCORE\tRPS\txReqs\tvhosts\tPTR\tASN\tCC\tREASONS\tACTION")
 
-        for _, r := range rows {
+        for _, r := range rowsShort {
                 asField := ""
                 if r.ASN != "" {
                         asField = "AS" + r.ASN
@@ -384,8 +386,52 @@ func runIPTop(baseURL string, limit int) error {
                         action,
                 )
         }
-
         w.Flush()
+
+        // ---- Long window πίνακας (αν έχουμε) ----
+        if len(rowsLong) > 0 {
+                fmt.Println()
+                fmt.Println("---- IP long window (EMA over long horizon) ----")
+                w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+                fmt.Fprintln(w2, "IP\tSCORE\tRPS\txReqs\tvhosts\tPTR\tASN\tCC\tREASONS\tACTION")
+
+                for _, r := range rowsLong {
+                        asField := ""
+                        if r.ASN != "" {
+                                asField = "AS" + r.ASN
+                                if r.ASNName != "" {
+                                        asField += " " + r.ASNName
+                                }
+                        }
+
+                        cc := r.Country
+
+                        action := "-"
+                        if len(r.Proposals) > 0 {
+                                p := r.Proposals[0]
+                                if p.TTLSeconds > 0 {
+                                        action = fmt.Sprintf("%s(%ds)", p.Action, p.TTLSeconds)
+                                } else {
+                                        action = p.Action
+                                }
+                        }
+
+                        fmt.Fprintf(w2, "%s\t%.2f\t%.2f\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+                                r.IP,
+                                r.Score,
+                                r.RPS,
+                                r.Req,
+                                r.Vhosts,
+                                r.PTR,
+                                asField,
+                                cc,
+                                joinReasons(r.Reasons),
+                                action,
+                        )
+                }
+                w2.Flush()
+        }
+
         return nil
 }
 

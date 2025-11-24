@@ -255,6 +255,22 @@ type IPActionProposal struct {
 }
 
 
+// ipLongAgg κρατά “μαλακά” averages για το long window.
+type ipLongAgg struct {
+    Req    float64
+    Vhosts float64
+    RPS    float64
+}
+
+// ipLongMem είναι το global IP long-window state.
+type ipLongMem struct {
+    mu         sync.RWMutex
+    stats      map[string]*ipLongAgg
+    lastUpdate time.Time
+}
+
+
+
 
 // Engine is the main web detector instance.
 type Engine struct {
@@ -271,6 +287,8 @@ type Engine struct {
 	enr     *enrich.Enricher
 
 	lastFeed time.Time // last time we fed long-window
+	ipLong *ipLongMem  // long-window IP aggregates (EMA)
+
 }
 
 // NewEngine creates a webdetector Engine. It does NOT start any goroutines.
@@ -283,6 +301,9 @@ func NewEngine(cfg Config) *Engine {
 		hosts: make(map[string]*hostState),
 		scorer:  DefaultScorer(),
 		longwin: NewLongWindow(cfg.LongHorizon(), cfg.Window, DefaultScorer()),
+    ipLong: &ipLongMem{
+        stats: make(map[string]*ipLongAgg),
+    },
 	}
 
 	// Enrichment is optional.
@@ -367,6 +388,7 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if e.lastFeed.IsZero() || now.Sub(e.lastFeed) >= e.cfg.Window {
 		snap := e.snapshotMini(now)
 		e.longwin.Tick(now, snap)
+		e.updateIPLong(now) //  update EMA-based IP long view
 		e.lastFeed = now
 	}
 
@@ -700,6 +722,107 @@ func (e *Engine) snapshotMini(now time.Time) map[string]MiniMetrics {
         defer e.mu.RUnlock()
         return e.snapshotMiniLocked(now)
 }
+
+
+// updateIPLong ανανεώνει το EMA-based long window για IPs,
+// βασισμένο στο τρέχον short-window state.
+func (e *Engine) updateIPLong(now time.Time) {
+    if e.ipLong == nil {
+        return
+    }
+
+    // 1) Φτιάχνουμε ένα short snapshot per IP (χωρίς enrichment).
+    type aggShort struct {
+        req    int
+        vhosts map[string]struct{}
+    }
+
+    stats := make(map[string]*aggShort)
+
+    e.mu.RLock()
+    for host, hs := range e.hosts {
+        if hs == nil {
+            continue
+        }
+        for i := range hs.buckets {
+            b := &hs.buckets[i]
+            for ip, n := range b.ips {
+                a := stats[ip]
+                if a == nil {
+                    a = &aggShort{
+                        vhosts: make(map[string]struct{}),
+                    }
+                    stats[ip] = a
+                }
+                a.req += n
+                a.vhosts[host] = struct{}{}
+            }
+        }
+    }
+    e.mu.RUnlock()
+
+    if len(stats) == 0 {
+        return
+    }
+
+    winSec := e.cfg.Window.Seconds()
+    if winSec <= 0 {
+        winSec = 60
+    }
+
+    // 2) Υπολογίζουμε alpha σε σχέση με το long horizon.
+    e.ipLong.mu.Lock()
+    defer e.ipLong.mu.Unlock()
+
+    if e.ipLong.stats == nil {
+        e.ipLong.stats = make(map[string]*ipLongAgg)
+    }
+
+    var alpha float64
+    if e.ipLong.lastUpdate.IsZero() {
+        alpha = 1.0
+    } else {
+        horizon := e.cfg.LongHorizon()
+        if horizon <= 0 {
+            horizon = 10 * e.cfg.Window
+        }
+        delta := now.Sub(e.ipLong.lastUpdate)
+        alpha = delta.Seconds() / horizon.Seconds()
+        if alpha > 1 {
+            alpha = 1
+        } else if alpha < 0 {
+            alpha = 0
+        }
+    }
+
+    for ip, a := range stats {
+        rps := float64(a.req) / winSec
+        vhosts := float64(len(a.vhosts))
+        req := float64(a.req)
+
+        agg := e.ipLong.stats[ip]
+        if agg == nil || alpha >= 1.0 || e.ipLong.lastUpdate.IsZero() {
+            // πρώτη φορά ή μεγάλο gap → γράψε κατευθείαν
+            if agg == nil {
+                agg = &ipLongAgg{}
+                e.ipLong.stats[ip] = agg
+            }
+            agg.Req = req
+            agg.Vhosts = vhosts
+            agg.RPS = rps
+            continue
+        }
+
+        // EMA: new = (1-alpha)*old + alpha*current
+        oneMinus := 1.0 - alpha
+        agg.Req = oneMinus*agg.Req + alpha*req
+        agg.Vhosts = oneMinus*agg.Vhosts + alpha*vhosts
+        agg.RPS = oneMinus*agg.RPS + alpha*rps
+    }
+
+    e.ipLong.lastUpdate = now
+}
+
 
 
 // TopShort returns short-window stats + score for all hosts, sorted by RPS.
@@ -1384,4 +1507,79 @@ func (e *Engine) IPDetail(ip string) IPDetail {
     }
 
     return d
+}
+
+
+
+// IPLong επιστρέφει EMA-based long-window IP view με score & proposals.
+func (e *Engine) IPLong(limit int) []IPSignals {
+    if e.ipLong == nil {
+        return nil
+    }
+
+    e.ipLong.mu.RLock()
+    defer e.ipLong.mu.RUnlock()
+
+    rows := make([]IPSignals, 0, len(e.ipLong.stats))
+    for ip, agg := range e.ipLong.stats {
+        req := int(agg.Req + 0.5)
+        vhosts := int(agg.Vhosts + 0.5)
+        rps := agg.RPS
+
+        if req <= 0 {
+            continue
+        }
+
+        score, reasons := scoreIPSimple(rps, req, vhosts)
+
+        rows = append(rows, IPSignals{
+            IP:      ip,
+            Req:     req,
+            Vhosts:  vhosts,
+            RPS:     rps,
+            Score:   score,
+            Reasons: reasons,
+        })
+    }
+
+    sort.Slice(rows, func(i, j int) bool {
+        if rows[i].Score == rows[j].Score {
+            return rows[i].RPS > rows[j].RPS
+        }
+        return rows[i].Score > rows[j].Score
+    })
+
+    if limit > 0 && len(rows) > limit {
+        rows = rows[:limit]
+    }
+
+    // Enrichment + proposals για τις top-N
+    for i := range rows {
+        rows[i].Proposals = proposeIPActions(rows[i])
+
+        if e.enr == nil {
+            continue
+        }
+
+        ip := rows[i].IP
+        if net.ParseIP(ip) == nil {
+            continue
+        }
+
+        geo := e.enr.Lookup(ip)
+        if geo.PTR != "" {
+            rows[i].PTR = geo.PTR
+        }
+        if geo.ASN != 0 {
+            rows[i].ASN = strconv.FormatUint(uint64(geo.ASN), 10)
+        }
+        if geo.ASNName != "" {
+            rows[i].ASNName = geo.ASNName
+        }
+        if geo.Country != "" {
+            rows[i].Country = geo.Country
+        }
+    }
+
+    return rows
 }
