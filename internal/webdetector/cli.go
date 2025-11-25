@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"sort"
@@ -80,6 +81,8 @@ func printWebTopHelp() {
         fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
         fmt.Println("  cfm webtop ip [N]               # global IP view (top IPs by score)")
         fmt.Println("  cfm webtop ip <IP>              # drilldown specific IP")
+        fmt.Println("  cfm webtop analyze ip <IP>              # drilldown specific IP from log offline")
+
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
         fmt.Println("------------")
@@ -89,6 +92,21 @@ func printWebTopHelp() {
 // RunWebTop is the CLI entrypoint for `cfm webtop`.
 // baseURL is something like "http://127.0.0.1:9070".
 func RunWebTop(baseURL string, args []string) error {
+
+    // 🔥 Offline analyze mode: cfm webtop analyze <ip>|<host>
+    if len(args) > 0 && args[0] == "analyze" {
+        if len(args) < 2 {
+            return fmt.Errorf("usage: cfm webtop analyze <ip|host>")
+        }
+        target := args[1]
+
+        // Πρώτα δοκιμάζουμε αν μοιάζει για IP.
+        if net.ParseIP(target) != nil {
+            return runAnalyzeIP(baseURL, target)
+        }
+        // (μελλοντικά: runAnalyzeHost)
+        return fmt.Errorf("host analyze not implemented yet; only IP supported for now")
+    }
 
 
 
@@ -810,4 +828,49 @@ func runLongTop(baseURL string, limit int) error {
         }
         w.Flush()
         return nil
+}
+
+
+
+// runAnalyzeIP καλεί το /analyze-ip (offline log scan) και τυπώνει vhost breakdown.
+func runAnalyzeIP(baseURL, ip string) error {
+    u := fmt.Sprintf("%s/api/v1/webdet/analyze-ip?ip=%s", baseURL, url.QueryEscape(ip))
+    resp, err := http.Get(u)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        var msg map[string]string
+        _ = json.NewDecoder(resp.Body).Decode(&msg)
+        if e, ok := msg["error"]; ok && e != "" {
+            return fmt.Errorf("analyze-ip error: %s", e)
+        }
+        return fmt.Errorf("analyze-ip HTTP %s", resp.Status)
+    }
+
+    var res AnalyzeIPResult
+    if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+        return err
+    }
+
+    f, l := formatAnalyzeRange(res.FirstTS, res.LastTS)
+
+    fmt.Printf("[analyze ip %s] total=%d vhosts=%d\n", res.IP, res.TotalReq, len(res.VhostCnt))
+    fmt.Printf("  range: %s  →  %s (from TSV log)\n", f, l)
+
+    if len(res.VhostCnt) == 0 {
+        fmt.Println("  (no matches in log)")
+        return nil
+    }
+
+    w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+    fmt.Fprintln(w, "VHOST\txReqs")
+    for _, kv := range res.VhostCnt {
+        fmt.Fprintf(w, "%s\t%d\n", kv.Key, kv.Count)
+    }
+    w.Flush()
+
+    return nil
 }
