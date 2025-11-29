@@ -15,6 +15,15 @@ import (
 
 )
 
+const (
+    // Μόνο IPs με τουλάχιστον N requests θα μπουν στο breakdown / enrichment.
+    analyzeHostMinCount = 2
+
+    // Προστασία: ακόμα κι αν υπάρχουν χιλιάδες IPs, κάνε enrich μόνο στα top N.
+    analyzeHostMaxIPs = 500
+)
+
+
 // AnalyzeIPResult είναι offline ανάλυση μιας IP απευθείας από το log.
 type AnalyzeIPResult struct {
     IP       string  `json:"ip"`
@@ -176,16 +185,35 @@ func (e *Engine) AnalyzeHost(host string, maxLines int64) (AnalyzeHostResult, er
         return res, err
     }
 
-    // Μετατροπή ipCounts → []TopKV (ταξινομημένα desc)
+
+ // Μετατροπή ipCounts → []TopKV (ταξινομημένα desc),
+    // αλλά αγνοούμε IPs με πολύ λίγα hits (π.χ. μόνο 1).
     kvs := make([]TopKV, 0, len(ipCounts))
     for ip, c := range ipCounts {
+        if c < analyzeHostMinCount {
+            // Σουρεαλιστικά πολλές IPs με 1 hit → skip για να μην κάνουμε enrich.
+            continue
+        }
         kvs = append(kvs, TopKV{Key: ip, Count: c})
     }
+
+    // Αν μετά το φιλτράρισμα δεν έμεινε τίποτα, τελειώσαμε.
+    if len(kvs) == 0 {
+        res.IPCnt = nil
+        return res, nil
+    }
+
     sort.Slice(kvs, func(i, j int) bool { return kvs[i].Count > kvs[j].Count })
 
+    // Προστασία: enrichment μόνο στα top N IPs.
+    if len(kvs) > analyzeHostMaxIPs {
+        kvs = kvs[:analyzeHostMaxIPs]
+    }
+
     res.IPCnt = kvs
-//enrich
- if e.enr != nil && len(kvs) > 0 {
+
+    // Enrich μόνο τις φιλτραρισμένες + sliced IPs.
+    if e.enr != nil {
         enriched := make([]map[string]string, 0, len(kvs))
         for _, kv := range kvs {
             ipStr := kv.Key
@@ -222,6 +250,8 @@ func (e *Engine) AnalyzeHost(host string, maxLines int64) (AnalyzeHostResult, er
 
     return res, nil
 }
+
+
 
 
 
