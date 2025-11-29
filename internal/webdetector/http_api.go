@@ -22,6 +22,7 @@ func (e *Engine) ServeHTTP(addr string) {
         mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
         mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
+	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -219,6 +220,31 @@ func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
     }
 
     res, err := e.AnalyzeIP(ip, maxLines)
+    if err != nil {
+        writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+        return
+    }
+
+    writeJSON(w, http.StatusOK, res)
+}
+
+// handleAnalyzeHost: offline log scan για ένα vhost.
+func (e *Engine) handleAnalyzeHost(w http.ResponseWriter, r *http.Request) {
+    host := r.URL.Query().Get("host")
+    if host == "" {
+        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+        return
+    }
+
+    // προαιρετικό ?max_lines=N (debug / safety)
+    var maxLines int64
+    if v := r.URL.Query().Get("max_lines"); v != "" {
+        if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+            maxLines = n
+        }
+    }
+
+    res, err := e.AnalyzeHost(host, maxLines)
     if err != nil {
         writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
         return
