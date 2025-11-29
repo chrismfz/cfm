@@ -10,6 +10,8 @@ import (
     "sort"
     "time"
     "strings"
+    "net"
+    "strconv"
 
 )
 
@@ -31,6 +33,8 @@ type AnalyzeHostResult struct {
 
     FirstTS float64 `json:"first_ts"`
     LastTS  float64 `json:"last_ts"`
+    EnrichedIPs []map[string]string `json:"enriched_ips,omitempty"`
+
 }
 
 // AnalyzeIP σκανάρει το πλήρες TSV log και βρίσκει όλα τα hits αυτής της IP.
@@ -180,6 +184,42 @@ func (e *Engine) AnalyzeHost(host string, maxLines int64) (AnalyzeHostResult, er
     sort.Slice(kvs, func(i, j int) bool { return kvs[i].Count > kvs[j].Count })
 
     res.IPCnt = kvs
+//enrich
+ if e.enr != nil && len(kvs) > 0 {
+        enriched := make([]map[string]string, 0, len(kvs))
+        for _, kv := range kvs {
+            ipStr := kv.Key
+            if net.ParseIP(ipStr) == nil {
+                continue
+            }
+
+            info := map[string]string{
+                "ip":    ipStr,
+                "count": strconv.Itoa(kv.Count),
+            }
+
+            geo := e.enr.Lookup(ipStr)
+            if geo.PTR != "" {
+                info["ptr"] = geo.PTR
+            }
+            if geo.ASN != 0 {
+                info["asn"] = strconv.FormatUint(uint64(geo.ASN), 10)
+            }
+            if geo.ASNName != "" {
+                info["asn_name"] = geo.ASNName
+            }
+            if geo.Country != "" {
+                info["country"] = geo.Country
+            }
+
+            enriched = append(enriched, info)
+        }
+
+        if len(enriched) > 0 {
+            res.EnrichedIPs = enriched
+        }
+    }
+
     return res, nil
 }
 

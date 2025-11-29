@@ -908,6 +908,48 @@ func runAnalyzeHost(baseURL, host string) error {
         return nil
     }
 
+
+   // 🔥 Αν έχουμε enrichment, δείξε view τύπου "Top IPs" με PTR/ASN/CC.
+    if len(res.EnrichedIPs) > 0 {
+        fmt.Println("Top IPs:")
+
+        for i, row := range res.EnrichedIPs {
+            ip := row["ip"]
+            count := row["count"]
+            ptr := row["ptr"]
+            asn := row["asn"]
+            asnNm := row["asn_name"]
+            cc := row["country"]
+
+            n, _ := strconv.Atoi(count)
+
+            parts := make([]string, 0, 3)
+            if ptr != "" {
+                parts = append(parts, ptr)
+            }
+            if asn != "" || asnNm != "" {
+                asField := asn
+                if asField != "" && !strings.HasPrefix(asField, "AS") {
+                    asField = "AS" + asField
+                }
+                parts = append(parts, strings.TrimSpace(asField+" "+asnNm))
+            }
+            if cc != "" {
+                parts = append(parts, cc)
+            }
+
+            extra := ""
+            if len(parts) > 0 {
+                extra = "  " + strings.Join(parts, "  ")
+            }
+
+            fmt.Printf("  %2d %-15s x%-5d%s\n", i+1, ip, n, extra)
+        }
+
+        return nil
+    }
+
+    // Fallback: παλιό απλό table IP + xReqs
     w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
     fmt.Fprintln(w, "IP\txReqs")
     for _, kv := range res.IPCnt {
