@@ -1122,7 +1122,7 @@ func runDaemon(args []string) {
     }
 
 
-ensureDir("/var/lib/cfm", 0o700)
+ensureDir("/var/lib/cfm", 0o701)
 ensureDir("/var/log/cfm", 0o700)
 
 
@@ -1163,7 +1163,7 @@ ensureDir("/var/log/cfm", 0o700)
         if cfg.MaxMind.Dir == "" {
             cfg.MaxMind.Dir = "/var/lib/cfm/maxmind"
         }
-        ensureDir(cfg.MaxMind.Dir, 0o700)
+        ensureDir(cfg.MaxMind.Dir, 0o755)
 
 
 		// ---- MaxMind updater start/stop based on config ----

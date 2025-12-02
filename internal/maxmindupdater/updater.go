@@ -222,7 +222,7 @@ func (u *Updater) downloadAndInstall(ctx context.Context, url, edition string) e
             rerr := os.Remove(tmpPath)
             return errors.Join(err, cerr, rerr)
         }
-        if err := tmp.Chmod(0o600); err != nil { /* non-fatal */ }
+        if err := tmp.Chmod(0o644); err != nil { /* non-fatal */ }
         if err := tmp.Close(); err != nil {
             // Ensure temp file is not left behind on close failure.
             _ = os.Remove(tmpPath)

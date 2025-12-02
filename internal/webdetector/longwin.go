@@ -104,6 +104,14 @@ type LongWindow struct {
 	scorer     Scorer
 }
 
+
+// Hard thresholds για να μην βαφτίζουμε "ύποπτα" vhosts με ελάχιστη κίνηση.
+const (
+    minSuspiciousRPS       = 0.5  // ελάχιστο μέσο RPS στο long window
+    minSuspiciousUniqueIPs = 3    // ελάχιστες μοναδικές IPs
+    minSuspiciousTotReq    = 30   // ελάχιστα συνολικά requests στο horizon
+)
+
 // NewLongWindow creates a long-window over the given horizon with bucket step `every`.
 func NewLongWindow(horizon, every time.Duration, scorer Scorer) *LongWindow {
 	if horizon <= 0 {
@@ -280,12 +288,12 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 		hor = 1
 	}
 
-	rows := make([]SuspiciousRow, 0, len(sums))
-	for h, b := range sums {
-		if b.Tot <= 0 {
-			continue
-		}
-		rps := float64(b.Tot) / hor
+        rows := make([]SuspiciousRow, 0, len(sums))
+        for h, b := range sums {
+                if b.Tot <= 0 {
+                        continue
+                }
+                rps := float64(b.Tot) / hor
 		r3  := float64(b.C3)  / hor
 		r4  := float64(b.C4)  / hor
                 r5  := float64(b.C5)   / hor
@@ -299,6 +307,20 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 		if errR == 0 {
 			errR = (float64(b.C4) + float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
 		}
+
+                // --- Noise filters: κόβουμε πολύ χαμηλής έντασης vhosts ---
+                // 1) Πολύ χαμηλό μέσο RPS στο long window → σκουπίδια / τυχαία probes.
+                if rps < minSuspiciousRPS {
+                        continue
+                }
+                // 2) Λίγες μοναδικές IPs στο horizon → μεμονωμένο bot / scan.
+                if b.Uniq < minSuspiciousUniqueIPs {
+                        continue
+                }
+                // 3) Πολύ λίγα συνολικά requests → δεν έχει στατιστικό βάρος.
+                if b.Tot < minSuspiciousTotReq {
+                        continue
+                }
 
 sig := 	Signals{
     RPS:          rps,
