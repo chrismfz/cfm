@@ -52,6 +52,7 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
             CpuLoadPct:  kvInt(kv, "CPU_LOAD_PCT", 120),
             RamUsedPct:  kvInt(kv, "RAM_USED_PCT", 90),
             DiskRootPct: kvInt(kv, "DISK_ROOT_PCT", 90),
+            TmpUsedPct:  kvInt(kv, "TMP_PCT", 0),
 
             ConnTotalSpikeX: kvFlt(kv, "CONN_TOTAL_SPIKE", 3.0),
             ConnEstSpikeX:   kvFlt(kv, "CONN_EST_SPIKE",   3.0),
@@ -86,6 +87,8 @@ if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
         UseEnrich:      enrichOn,
         UsePTR:         ptrOn,
         EnrichDirs:     dirs,
+
+        TmpCleanOlder:  kvDur(kv, "TMP_CLEAN_OLDER", 0),
 
         }
 

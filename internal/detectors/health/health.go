@@ -30,6 +30,7 @@ type Config struct {
 	Every, Window, Cooldown time.Duration
 
 	CpuLoadPct, RamUsedPct, DiskRootPct int
+	TmpUsedPct int
 
 	ConnTotalSpikeX, ConnEstSpikeX, ConnSynSpikeX float64
 	ConnTotalAbs, EstablishedAbs, SynRecvAbs      int
@@ -57,6 +58,10 @@ type Config struct {
 	UseEnrich      bool     // enable ASN/Country/PTR via enricher
 	UsePTR         bool     // fallback PTR when enricher is off/misses
 	EnrichDirs     []string // enricher databases (e.g. "/etc/cfm", "/usr/share/GeoIP", ...)
+
+	// tmp filesystem cleanup
+	TmpCleanOlder  time.Duration // if >0 and /tmp usage exceeds TmpUsedPct, delete files older than this
+
 }
 
 type Detector struct {
@@ -150,6 +155,7 @@ type Snapshot struct {
 	Load1       float64
 	RamUsedPct  float64
 	DiskRootPct float64
+	DiskTmpPct  float64
 
 	TCP      map[string]int // state counts incl total
 	PortConn map[int]int    // approx per-local-port active conns
@@ -217,6 +223,11 @@ func (d *Detector) snapshot() Snapshot {
 		s.DiskRootPct = pct
 	}
 
+    // Disk /tmp via syscall.Statfs
+    if pct, err := fsUsagePct("/tmp"); err == nil {
+        s.DiskTmpPct = pct
+    }
+
 	// TCP states + per-port
 	s.TCP, s.PortConn = readTCPandPorts()
 
@@ -239,7 +250,7 @@ func (d *Detector) snapshot() Snapshot {
 	body := map[string]any{
 		"hostname": s.Host, "time": s.Time.Format(time.RFC3339),
 		"cpu_cores": s.CPUCores, "load1": s.Load1,
-		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct,
+		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct, "disk_tmp_pct": s.DiskTmpPct,
 		"tcp": s.TCP, "port_conn": s.PortConn,
 		"rx_mbps": s.RxMbps, "tx_mbps": s.TxMbps,
 		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart,
@@ -260,16 +271,20 @@ func parseLastFloat(line string) (float64, error) {
 	return strconv.ParseFloat(val, 64)
 }
 
+func fsUsagePct(path string) (float64, error) {
+    var st syscall.Statfs_t
+    if err := syscall.Statfs(path, &st); err != nil {
+        return 0, err
+    }
+    if st.Blocks == 0 {
+        return 0, errors.New("blocks=0")
+    }
+    used := 1.0 - float64(st.Bavail)/float64(st.Blocks)
+    return 100.0 * used, nil
+}
+
 func rootUsagePct() (float64, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs("/", &st); err != nil {
-		return 0, err
-	}
-	if st.Blocks == 0 {
-		return 0, errors.New("blocks=0")
-	}
-	used := 1.0 - float64(st.Bavail)/float64(st.Blocks)
-	return 100.0 * used, nil
+    return fsUsagePct("/")
 }
 
 // Parse /proc/net/tcp and /proc/net/tcp6
@@ -627,6 +642,21 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 
 
 
+    // Disk /tmp
+    if d.cfg.TmpUsedPct > 0 && int(s.DiskTmpPct+0.5) >= d.cfg.TmpUsedPct {
+        if d.cfg.TmpCleanOlder > 0 {
+            removed, freed := cleanupTmp("/tmp", d.cfg.TmpCleanOlder)
+            samples := []string{
+                fmt.Sprintf("/tmp usage=%.1f%% threshold=%d%% removed_files=%d freed≈%s",
+                    s.DiskTmpPct, d.cfg.TmpUsedPct, removed, humanBytes(freed)),
+            }
+            emitS("HEALTH/DISK_TMP_HIGH", "fs.tmp", samples)
+        } else {
+            emit("HEALTH/DISK_TMP_HIGH", "fs.tmp")
+        }
+    }
+
+
 // --- Total connections spike ---
 bTot := upd("conn.total", float64(s.TCP["total"]))
 tot := s.TCP["total"]
@@ -809,6 +839,59 @@ func maxf(a, b float64) float64 {
 	if a > b { return a }
 	return b
 }
+
+
+
+// cleanupTmp deletes regular files under root that are older than maxAge.
+// It returns number of files removed and total bytes freed.
+func cleanupTmp(root string, maxAge time.Duration) (removed int, freedBytes int64) {
+    now := time.Now()
+    filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+        if err != nil {
+            return nil
+        }
+        if d.IsDir() {
+            return nil
+        }
+        info, err := d.Info()
+        if err != nil {
+            return nil
+        }
+        // skip sockets/FIFOs/devices just in case
+        if !info.Mode().IsRegular() {
+            return nil
+        }
+        if now.Sub(info.ModTime()) < maxAge {
+            return nil
+        }
+        if err := os.Remove(path); err == nil {
+            removed++
+            freedBytes += info.Size()
+        }
+        return nil
+    })
+    return removed, freedBytes
+}
+
+// humanBytes renders a rough human-readable size string.
+func humanBytes(b int64) string {
+    const (
+        kb = 1024
+        mb = 1024 * kb
+        gb = 1024 * mb
+    )
+    switch {
+    case b >= gb:
+        return fmt.Sprintf("%.1fGiB", float64(b)/float64(gb))
+    case b >= mb:
+        return fmt.Sprintf("%.1fMiB", float64(b)/float64(mb))
+    case b >= kb:
+        return fmt.Sprintf("%.1fKiB", float64(b)/float64(kb))
+    default:
+        return fmt.Sprintf("%dB", b)
+    }
+}
+
 
 
 
