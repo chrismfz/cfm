@@ -13,7 +13,7 @@ import (
 	"net"
 	"path/filepath"
 	"io"
-
+//	"bufio"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	"cfm/internal/enrich"
@@ -339,6 +339,38 @@ return nil
 
 
 
+// sender verify fail can be triggered for totally benign local reasons:
+// mailbox full / disk quota / inode limit / blocks limit, etc.
+// We must NOT treat these as hostile and block the sender IP.
+func isBenignSenderVerifyFail(s string) bool {
+	// s is already lowercase in processLine()
+	if !strings.Contains(s, "sender verify fail") {
+		return false
+	}
+	// common quota/storage phrases seen in exim/cpanel
+	if strings.Contains(s, "mailbox is full") { return true }
+	if strings.Contains(s, "blocks limit exceeded") { return true }
+	if strings.Contains(s, "inode limit exceeded") { return true }
+	if strings.Contains(s, "disk quota") { return true }          // "Disk quota exceeded", etc
+	if strings.Contains(s, "over quota") { return true }
+	if strings.Contains(s, "quota exceeded") { return true }
+	if strings.Contains(s, "maildirsize") { return true }         // maildir quota mechanism
+	if strings.Contains(s, "maildir size exceeded") { return true }
+	if strings.Contains(s, "quota is full") { return true }
+	if strings.Contains(s, "user is over quota") { return true }
+	if strings.Contains(s, "recipient is over quota") { return true }
+	if strings.Contains(s, "storage full") { return true }
+	if strings.Contains(s, "insufficient storage") { return true } // SMTP 452/552 wording sometimes
+	if strings.Contains(s, "not enough storage") { return true }
+	if strings.Contains(s, "no space left on device") { return true }
+	if strings.Contains(s, "not enough disk space") { return true }
+
+	return false
+}
+
+
+
+
 func (d *EximSecurity) processLine(now time.Time, line string) {
     s := strings.ToLower(line)
 
@@ -362,6 +394,15 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
     // ... keep the rest the same ...
     for _, r := range d.rules {
         if r.Re.MatchString(s) {
+
+            // Ignore benign SENDER_VERIFY_FAIL caused by local mailbox quota/storage limits
+            if r.Name == "SENDER_VERIFY_FAIL" && isBenignSenderVerifyFail(s) {
+                if logging.DebugEnabled() {
+                    logging.LogfDETECTOR("[exim/security][debug] ignore benign SENDER_VERIFY_FAIL ip=%q line=%s", ip, line)
+                }
+                continue
+            }
+
 
             if r.Name == "AUTHFAIL" {
 
