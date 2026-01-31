@@ -71,11 +71,20 @@ func (t *FileTailer) Open() error {
 	curInode := inodeOf(st)
 
 	// Decide starting offset: resume if valid, else start at end ("now")
+	//off := st.Size() //old method
+	// Decide starting offset.
+	// If we have NO resume info at all => start at end ("now") to avoid replaying old logs.
+	// If we DO have resume info and inode changed (rotate rename+newfile) => start at 0
+	// so we don't miss lines already written to the new file before this tick.
 	off := st.Size()
+	resumeKnown := (t.LastInode != 0 || t.LastOffset != 0)
+	if resumeKnown && t.LastInode != curInode {
+		off = 0
+	}
 
 	if t.LastInode == curInode {
 		switch {
-		case t.LastOffset > 0 && t.LastOffset <= st.Size():
+		case t.LastOffset >= 0 && t.LastOffset <= st.Size():
 			off = t.LastOffset
 		case t.LastOffset > st.Size():
 			// file was truncated (e.g., logrotate with truncate)
@@ -149,6 +158,37 @@ func (t *FileTailer) reopenAtEndUnlocked() error {
 
 
 
+// reopenAtStartUnlocked reopens the tailed file at offset 0.
+// Caller must hold t.mu.
+func (t *FileTailer) reopenAtStartUnlocked() error {
+    f, err := os.Open(t.Path)
+    if err != nil {
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+    st2, err := f.Stat()
+    if err != nil {
+        _ = safeClose(f)
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+    if _, err := f.Seek(0, io.SeekStart); err != nil {
+        _ = safeClose(f)
+        _ = safeClose(t.f)
+        t.f, t.r = nil, nil
+        return err
+    }
+    _ = safeClose(t.f)
+    t.f = f
+    t.r = bufio.NewReaderSize(f, 256*1024)
+    t.inode = inodeOf(st2)
+    t.off = 0
+    t.lastEOFStat = time.Time{}
+    return nil
+}
+
 
 
 
@@ -181,7 +221,8 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
                        // Check for rotation/truncate (non-blocking path).
 
 
-                       st, serr := t.f.Stat()
+                       // IMPORTANT: stat the PATH, not the FD, so we can detect rename+newfile rotation.
+                       st, serr := os.Stat(t.Path)
                        if serr != nil {
                                // Keep non-blocking contract, but don't rotate on stat failure
                                return "", io.EOF
@@ -189,7 +230,9 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 
                        curIn := inodeOf(st)
                        if curIn != t.inode || t.off > st.Size() {
-                               _ = t.reopenAtEndUnlocked()
+                               // After rotate/truncate, read from start to avoid missing lines written
+                               // before this tick (webdetector is non-blocking + closes each run).
+                               _ = t.reopenAtStartUnlocked()
                        }
                        return "", io.EOF
                }
