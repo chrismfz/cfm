@@ -32,7 +32,11 @@ func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blockli
 	h4, n4 := splitHostsNets(res.V4, false)
 	h6, n6 := splitHostsNets(res.V6, true)
 
-	ttl := f.TTL // *time.Duration ή nil (όπως το έχεις στο Feed)
+	ttl := f.TTL // *time.Duration
+
+	// cache raw elems in-memory so union rebuild never needs `nft -j list set`
+	b.cacheExternalFeed(isAllow, feedKey, h4, n4, h6, n6, ttl)
+
 
 	// per-feed δυναμικά sets
 	nameH4 := fmt.Sprintf("%s_v4_hosts_%s", base, feedKey)
@@ -52,51 +56,73 @@ b.registerFeedKey(feedKey)
 
 // RebuildExternalUnions: union όλων των per-feed sets σε 4 “global” sets
 
+
+
+
 func (b *Backend) RebuildExternalUnions() error {
-	type bucketKey struct{ action, fam, kind string } // action: allow|block; fam: v4|v6; kind: hosts|nets
-	re := regexp.MustCompile(`^(allow|block)_ext_(v4|v6)_(hosts|nets)_(.+)$`)
+	// Build the 8 unions purely from in-memory feed caches.
+	// This avoids the extremely expensive `nft -j list set ...` that blocks startup on huge sets.
+	var (
+		allowH4, allowN4, allowH6, allowN6 []string
+		blockH4, blockN4, blockH6, blockN6 []string
+	)
 
-	// Collect all per-feed set names present in the table
-	names := append(b.listSetsWithPrefix("allow_ext_"), b.listSetsWithPrefix("block_ext_")...)
-
-	// Build map from bucket -> list of per-feed set names
-	buckets := map[bucketKey][]string{}
-	for _, name := range names {
-		if m := re.FindStringSubmatch(name); m != nil {
-			k := bucketKey{action: m[1], fam: m[2], kind: m[3]}
-			buckets[k] = append(buckets[k], name)
-		}
+	b.extFeedMu.RLock()
+	for _, fd := range b.extAllow {
+		allowH4 = append(allowH4, fd.H4...)
+		allowN4 = append(allowN4, fd.N4...)
+		allowH6 = append(allowH6, fd.H6...)
+		allowN6 = append(allowN6, fd.N6...)
 	}
-
-	// We want to ALWAYS touch all 8 unions so they get flushed when empty
-	all := []bucketKey{
-		{"allow", "v4", "hosts"}, {"allow", "v4", "nets"},
-		{"allow", "v6", "hosts"}, {"allow", "v6", "nets"},
-		{"block", "v4", "hosts"}, {"block", "v4", "nets"},
-		{"block", "v6", "hosts"}, {"block", "v6", "nets"},
+	for _, fd := range b.extBlock {
+		blockH4 = append(blockH4, fd.H4...)
+		blockN4 = append(blockN4, fd.N4...)
+		blockH6 = append(blockH6, fd.H6...)
+		blockN6 = append(blockN6, fd.N6...)
 	}
+	b.extFeedMu.RUnlock()
 
-	for _, k := range all {
-		union := fmt.Sprintf("%s_ext_%s_%s", k.action, k.fam, k.kind) // e.g. allow_ext_v4_hosts
+	// Optional: dedup (keeps unions stable if multiple feeds overlap)
+	allowH4 = dedupKeepOrder(allowH4)
+	allowN4 = dedupKeepOrder(allowN4)
+	allowH6 = dedupKeepOrder(allowH6)
+	allowN6 = dedupKeepOrder(allowN6)
+	blockH4 = dedupKeepOrder(blockH4)
+	blockN4 = dedupKeepOrder(blockN4)
+	blockH6 = dedupKeepOrder(blockH6)
+	blockN6 = dedupKeepOrder(blockN6)
 
-		// Read elements from all per-feed sets under this bucket
-		var elems []string
-		for _, s := range buckets[k] {
-			items, _ := b.ListSetElementsRaw(s)
-			elems = append(elems, items...)
-		}
-		elems = dedupKeepOrder(elems)
+	// Ensure unions exist (they are referenced by the base rules)
+	_ = b.EnsureSetDynamic("allow_ext_v4_hosts", false, false)
+	_ = b.EnsureSetDynamic("allow_ext_v4_nets",  false, true)
+	_ = b.EnsureSetDynamic("allow_ext_v6_hosts", true,  false)
+	_ = b.EnsureSetDynamic("allow_ext_v6_nets",  true,  true)
+	_ = b.EnsureSetDynamic("block_ext_v4_hosts", false, false)
+	_ = b.EnsureSetDynamic("block_ext_v4_nets",  false, true)
+	_ = b.EnsureSetDynamic("block_ext_v6_hosts", true,  false)
+	_ = b.EnsureSetDynamic("block_ext_v6_nets",  true,  true)
 
-		isV6 := (k.fam == "v6")
-		isNets := (k.kind == "nets")
-		if err := b.EnsureSetDynamic(union, isV6, isNets); err != nil {
-			continue
-		}
-		// Flush & add (even if elems is empty → union becomes empty)
-		_ = b.ReplaceSetFlushAdd(union, elems, nil)
-	}
+	// Flush & add (even if empty → union becomes empty)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v4_hosts", allowH4, nil)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v4_nets",  allowN4, nil)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v6_hosts", allowH6, nil)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v6_nets",  allowN6, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v4_hosts", blockH4, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v4_nets",  blockN4, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v6_hosts", blockH6, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v6_nets",  blockN6, nil)
+
 	return nil
 }
+
+
+
+
+
+
+
+
+
 
 
 // --- Helpers -------------------------------------------------------------
@@ -253,6 +279,8 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 		key := m[4] // suffix after last underscore(s)
 		if _, ok := allowed[key]; !ok {
 			_ = b.DeleteSetIfExists(name)
+			b.unregisterFeedKey(key)
+			b.dropExternalFeedCache(key)
 		}
 	}
 	return b.RebuildExternalUnions()

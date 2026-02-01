@@ -73,6 +73,14 @@ type setDesc struct {
 }
 
 
+type extFeedData struct {
+	H4  []string
+	N4  []string
+	H6  []string
+	N6  []string
+	TTL *time.Duration // optional; used only if you decide to honor per-feed TTLs in unions later
+}
+
 var debugEnv = os.Getenv("CFM_DEBUG") == "1"
 
 type Backend struct{
@@ -86,6 +94,12 @@ type Backend struct{
     pfSets   []string // th_pf_<port>_<proto>_v4/v6
     clSets   []string // th_connlimit_<port>_<proto>_v4/v6
     feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
+
+	// external feed element caches (so RebuildExternalUnions NEVER needs `nft -j list set`)
+	extFeedMu sync.RWMutex
+	extAllow  map[string]extFeedData // key -> elems
+	extBlock  map[string]extFeedData // key -> elems
+
 
     // cache of external ALLOW set names (per-feed), to avoid expensive table scans on every check
     extMu             sync.RWMutex
@@ -109,10 +123,12 @@ func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 //func New() *Backend { return &Backend{} }
 
 func New() *Backend {
-    return &Backend{
-        last: make(map[string]uint64),
-	feedKeys: make(map[string]struct{}),
-    }
+	return &Backend{
+		last:    make(map[string]uint64),
+		feedKeys: make(map[string]struct{}),
+		extAllow: make(map[string]extFeedData),
+		extBlock: make(map[string]extFeedData),
+	}
 }
 
 
@@ -155,6 +171,31 @@ func (b *Backend) unregisterFeedKey(k string) {
     if b.feedKeys == nil { return }
     delete(b.feedKeys, k)
 }
+
+
+
+func (b *Backend) cacheExternalFeed(isAllow bool, key string, h4, n4, h6, n6 []string, ttl *time.Duration) {
+	b.extFeedMu.Lock()
+	defer b.extFeedMu.Unlock()
+
+	if b.extAllow == nil { b.extAllow = map[string]extFeedData{} }
+	if b.extBlock == nil { b.extBlock = map[string]extFeedData{} }
+
+	fd := extFeedData{H4: h4, N4: n4, H6: h6, N6: n6, TTL: ttl}
+	if isAllow {
+		b.extAllow[key] = fd
+	} else {
+		b.extBlock[key] = fd
+	}
+}
+
+func (b *Backend) dropExternalFeedCache(key string) {
+	b.extFeedMu.Lock()
+	defer b.extFeedMu.Unlock()
+	if b.extAllow != nil { delete(b.extAllow, key) }
+	if b.extBlock != nil { delete(b.extBlock, key) }
+}
+
 
 
 func (b *Backend) registerPfSet(name string) {
@@ -1384,9 +1425,10 @@ func (b *Backend) DropFeedSets(feedName string) {
         _ = exec.Command("nft", "flush", "set", "inet", tableName, s).Run()
         _ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
     }
-  // ➊ βγάλε το feed από το registry για να μην το “δει” ξανά
+
     b.unregisterFeedKey(suff)
-    // ➋ ξαναχτίσε τα union sets χωρίς αυτό το feed
+    b.dropExternalFeedCache(suff)
+
     _ = b.RebuildExternalUnions()
 }
 

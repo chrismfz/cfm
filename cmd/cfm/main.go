@@ -953,12 +953,38 @@ func runDaemon(args []string) {
 	}
 
 	// Blocklists Manager (scheduler+apply)
-	var blMgr *blocklists.Manager
-	if nb, ok := be.(*nft.Backend); ok {
+	var (
+		blMgr      *blocklists.Manager
+		nb         *nft.Backend
+		blReloadCh chan []blocklists.Feed
+	)
+
+	if x, ok := be.(*nft.Backend); ok {
+		nb = x
 		blMgr = blocklists.NewManager(blocklists.ApplierFunc(nb.ApplyFeed))
 		blMgr.Start(context.Background())
 		defer blMgr.Stop()
+
+		// Run Reload() async so startup (agent/detectors/heartbeat) is never blocked by huge feeds
+		blReloadCh = make(chan []blocklists.Feed, 1)
+		go func() {
+			for feeds := range blReloadCh {
+				start := time.Now()
+				blMgr.Reload(feeds)
+				logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
+				// Best-effort: prune old per-feed sets (keeps nft clean). Safe & fast.
+				if nb != nil {
+					keys := make([]string, 0, len(feeds))
+					for _, f := range feeds { keys = append(keys, f.Name) }
+					_ = nb.PruneExternalFeeds(keys)
+				}
+			}
+		}()
+		defer close(blReloadCh)
 	}
+
+
+
 
 	// Watchers
 	var allowW, denyW, blW, confW, ignW *fileWatcher
@@ -1059,8 +1085,24 @@ func runDaemon(args []string) {
 			fmt.Fprintln(os.Stderr, "blocklists parse error:", err)
 			return
 		}
+
+		// enqueue (coalesce) so we never block the main tick loop
+		if blReloadCh != nil {
+			select {
+			case blReloadCh <- feeds:
+				// ok
+			default:
+				// replace pending work with the latest config
+				select { case <-blReloadCh: default: }
+				blReloadCh <- feeds
+			}
+			logging.Logf("[blocklists] config reloaded (queued): %d feeds", len(feeds))
+			return
+		}
+		// fallback (shouldn't happen)
 		blMgr.Reload(feeds)
 		logging.Logf("[blocklists] config reloaded: %d feeds", len(feeds))
+
 	}
 
 	var (
@@ -1299,9 +1341,9 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 	}
 
 	// Initial load
-	reloadBlocklists()
 	loadAll()
 	applyPorts()
+	reloadBlocklists() // async-queued
 	if ignW != nil { applyIgnoreFile(ignW.path) }
 	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
