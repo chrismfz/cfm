@@ -32,24 +32,45 @@ func init() {
 			}
 		}
 
-		cfg := webdet.Config{
-			Mode:        strings.ToLower(kvStrClean(kv, "MODE", "file")),
-			LogPath:     kvStrClean(kv, "LOG_PATH", "/var/log/apache2/access_cfm_tsv.log"),
-			Every:       kvDur(kv, "EVERY", defEvery),
-			Window:      kvDur(kv, "WINDOW", defWindow),
-			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
-			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 20),
 
-			UseEnrich:  useEnrich,
-			UsePTR:     usePTR,
-			EnrichDirs: dirs,
 
-			LongFactor: kvInt(kv, "LONG_FACTOR", 10),
-			MinScore:   kvFlt(kv, "MIN_SCORE", 0.60),
+cfg := webdet.Config{
+	Mode:        strings.ToLower(kvStrClean(kv, "MODE", "file")),
+	LogPath:     kvStrClean(kv, "LOG_PATH", "/var/log/apache2/access_cfm_tsv.log"),
+	Every:       kvDur(kv, "EVERY", defEvery),
+	Window:      kvDur(kv, "WINDOW", defWindow),
+	Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+	SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 20),
 
-			APIListen: kvStrClean(kv, "API_LISTEN", "127.0.0.1:9070"),
+	UseEnrich:  useEnrich,
+	UsePTR:     usePTR,
+	EnrichDirs: dirs,
 
+	LongFactor: kvInt(kv, "LONG_FACTOR", 10),
+	MinScore:   kvFlt(kv, "MIN_SCORE", 0.60),
+
+	APIListen: kvStrClean(kv, "API_LISTEN", "127.0.0.1:9070"),
+
+	IP404Count: kvInt(kv, "IP404_COUNT", 0),
+	IP403Count: kvInt(kv, "IP403_COUNT", 0),
+
+	AgentCount: kvInt(kv, "AGENT_COUNT", 0),
+}
+
+rawAgents := kvStrClean(kv, "AGENT_LIST", "")
+if rawAgents != "" {
+	for _, a := range strings.FieldsFunc(rawAgents, func(r rune) bool {
+		return r == ',' || r == ':' || r == ' ' || r == '\t'
+	}) {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a != "" {
+			cfg.AgentList = append(cfg.AgentList, a)
 		}
+	}
+}
+
+
+
 
 		engine := webdet.NewEngine(cfg)
 

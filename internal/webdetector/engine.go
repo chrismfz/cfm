@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 	"math"
+	"fmt"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
@@ -120,6 +121,15 @@ type bucketSW struct {
 	sumBytes int64
 
 	ips   map[string]int
+
+        // Keep a few representative raw lines per IP for alert samples.
+        // (We store the first line seen per IP per bucket.)
+        ipSample map[string]string
+
+	ips403 map[string]int
+	ips404 map[string]int
+	ipsAgent map[string]int
+
 	uas   map[string]int
 	refs  map[string]int
 	paths map[string]int
@@ -254,13 +264,13 @@ type IPSignals struct {
     Proposals []IPActionProposal `json:"proposals,omitempty"`
 }
 
-// IPActionProposal είναι απλές firewall / notify προτάσεις για την IP.
-type IPActionProposal struct {
-    Action     string  `json:"action"`                // "block", "notify", "watch", ...
-    Reason     string  `json:"reason"`                // π.χ. "ip_score_high"
-    Score      float64 `json:"score"`                 // το score που οδήγησε στην πρόταση
-    TTLSeconds int     `json:"ttl_seconds,omitempty"` // π.χ. block για 900s
-}
+
+ type IPActionProposal struct {
+     Action     string  `json:"action"`                // "block", "notify", "watch", ...
+     Reason     string  `json:"reason"`                // π.χ. "ip_score_high"
+     Score      float64 `json:"score"`                 // το score που οδήγησε στην πρόταση
+    TTLSeconds int     `json:"ttl_seconds,omitempty"` // (CLI compatibility; unused for now)
+ }
 
 
 // ipLongAgg κρατά “μαλακά” averages για το long window.
@@ -297,7 +307,14 @@ type Engine struct {
 	lastFeed time.Time // last time we fed long-window
 	ipLong *ipLongMem  // long-window IP aggregates (EMA)
 
+        // Emit rate-limit so we don't spam blocker every tick.
+        emitMu    sync.Mutex
+        ipLastEmit map[string]time.Time
+
 }
+
+
+
 
 // NewEngine creates a webdetector Engine. It does NOT start any goroutines.
 func NewEngine(cfg Config) *Engine {
@@ -312,6 +329,7 @@ func NewEngine(cfg Config) *Engine {
     ipLong: &ipLongMem{
         stats: make(map[string]*ipLongAgg),
     },
+                ipLastEmit: make(map[string]time.Time),
 	}
 
 	// Enrichment is optional.
@@ -392,6 +410,11 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		e.ingest(rec, line)
 	}
 
+       // Ensure buckets age out even when there are no new log lines.
+       // (Without this, snapshots can look "stuck" until traffic resumes.)
+       now = time.Now()
+       e.pruneShort(now)
+
 	// Feed long-window approx once per short-window horizon.
 	if e.lastFeed.IsZero() || now.Sub(e.lastFeed) >= e.cfg.Window {
 		snap := e.snapshotMini(now)
@@ -399,6 +422,9 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		e.updateIPLong(now) //  update EMA-based IP long view
 		e.lastFeed = now
 	}
+
+        // Emit block-worthy IP alerts (picked up by autosink blocker).
+        e.emitIPBlocks(now, out)
 
 	// save pos
 	if e.state != nil && e.stateKey != "" {
@@ -517,7 +543,30 @@ case 5:
 	}
 	if rec.IP != "" {
 		b.ips[rec.IP]++
+
+                if b.ipSample == nil { b.ipSample = make(map[string]string) }
+                if _, ok := b.ipSample[rec.IP]; !ok { b.ipSample[rec.IP] = rawLine }
 	}
+
+	// Per-IP error thresholds (optional)
+	if rec.IP != "" {
+		if rec.Status == 403 && e.cfg.IP403Count > 0 {
+			if b.ips403 == nil { b.ips403 = make(map[string]int) }
+			b.ips403[rec.IP]++
+		}
+		if rec.Status == 404 && e.cfg.IP404Count > 0 {
+			if b.ips404 == nil { b.ips404 = make(map[string]int) }
+			b.ips404[rec.IP]++
+		}
+		if len(e.cfg.AgentList) > 0 && e.cfg.AgentCount > 0 && rec.UA != "" {
+			if uaMatchAny(rec.UA, e.cfg.AgentList) {
+				if b.ipsAgent == nil { b.ipsAgent = make(map[string]int) }
+				b.ipsAgent[rec.IP]++
+			}
+		}
+	}
+
+
 
 	if b.uas == nil {
 		b.uas = make(map[string]int)
@@ -558,6 +607,7 @@ func newBucketSW(start time.Time, dur time.Duration) bucketSW {
 		from:  start,
 		to:    start.Add(dur),
 		ips:   make(map[string]int),
+                ipSample: make(map[string]string),
 		uas:   make(map[string]int),
 		refs:  make(map[string]int),
 		paths: make(map[string]int),
@@ -569,6 +619,40 @@ func tsToTime(ts float64) time.Time {
 	nsec := int64((ts - float64(sec)) * float64(time.Second))
 	return time.Unix(sec, nsec)
 }
+
+
+// pruneShort prunes per-host buckets older than the configured short window,
+// even when there is no new traffic (so the view stays "live").
+func (e *Engine) pruneShort(now time.Time) {
+       win := e.cfg.Window
+       if win <= 0 {
+               return
+       }
+       cutoff := now.Add(-win)
+
+       e.mu.Lock()
+       defer e.mu.Unlock()
+
+       for host, hs := range e.hosts {
+               if hs == nil || len(hs.buckets) == 0 {
+                       delete(e.hosts, host)
+                       continue
+               }
+               i := 0
+               for ; i < len(hs.buckets); i++ {
+                       if hs.buckets[i].to.After(cutoff) {
+                               break
+                       }
+               }
+               if i > 0 {
+                       hs.buckets = hs.buckets[i:]
+               }
+               if len(hs.buckets) == 0 {
+                       delete(e.hosts, host)
+               }
+       }
+}
+
 
 
 
@@ -1242,6 +1326,25 @@ func (e *Engine) DebugDump() string {
 
 
 
+// isLocalInterfaceIP returns true if ip is assigned to any local interface.
+func isLocalInterfaceIP(ip net.IP) bool {
+    addrs, err := net.InterfaceAddrs()
+    if err != nil {
+        return false
+    }
+    for _, a := range addrs {
+        _, n, err := net.ParseCIDR(a.String())
+        if err != nil || n == nil {
+            continue
+        }
+        if n.Contains(ip) {
+            return true
+        }
+    }
+    return false
+}
+
+
 // scoreIPSimple: basic heuristic score για IPs.
 // Χρησιμοποιεί μόνο RPS, total requests και πόσα vhosts χτυπάει.
 func scoreIPSimple(rps float64, req int, vhosts int) (float64, []string) {
@@ -1280,33 +1383,43 @@ func scoreIPSimple(rps float64, req int, vhosts int) (float64, []string) {
         return score, reasons
 }
 
-// proposeIPActions φτιάχνει απλές firewall / notify προτάσεις με βάση το score.
 func proposeIPActions(row IPSignals) []IPActionProposal {
-        s := row.Score
-        out := []IPActionProposal{}
-
+    // Hard triggers (404/403/agent floods) should always propose a block.
+    for _, r := range row.Reasons {
         switch {
-        case s >= 0.90:
-                out = append(out, IPActionProposal{
-                        Action:     "block",
-                        Reason:     "ip_score_high",
-                        Score:      s,
-                        TTLSeconds: 900,
-                })
-        case s >= 0.70:
-                out = append(out, IPActionProposal{
-                        Action: "notify",
-                        Reason: "ip_score_elevated",
-                        Score:  s,
-                })
-        case s >= 0.50:
-                out = append(out, IPActionProposal{
-                        Action: "watch",
-                        Reason: "ip_score_borderline",
-                        Score:  s,
-                })
+        case strings.HasPrefix(r, "404_flood"):
+            return []IPActionProposal{{Action: "block", Reason: "web_404_flood", Score: row.Score}}
+        case strings.HasPrefix(r, "403_flood"):
+            return []IPActionProposal{{Action: "block", Reason: "web_403_flood", Score: row.Score}}
+        case strings.HasPrefix(r, "agent_flood"):
+            return []IPActionProposal{{Action: "block", Reason: "web_agent_flood", Score: row.Score}}
         }
-        return out
+    }
+
+    s := row.Score
+    out := []IPActionProposal{}
+
+    switch {
+    case s >= 0.90:
+        out = append(out, IPActionProposal{
+            Action: "block",
+            Reason: "ip_score_high",
+            Score:  s,
+        })
+    case s >= 0.70:
+        out = append(out, IPActionProposal{
+            Action: "notify",
+            Reason: "ip_score_elevated",
+            Score:  s,
+        })
+    case s >= 0.50:
+        out = append(out, IPActionProposal{
+            Action: "watch",
+            Reason: "ip_score_borderline",
+            Score:  s,
+        })
+    }
+    return out
 }
 
 // IPShort παράγει full IP signals (με score & proposals) από το short-window state.
@@ -1317,6 +1430,9 @@ func (e *Engine) IPShort(limit int) []IPSignals {
         type agg struct {
                 req    int
                 vhosts map[string]struct{}
+                c403   int
+                c404   int
+                cAgent int
         }
 
         stats := make(map[string]*agg)
@@ -1338,6 +1454,40 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                                 a.req += n
                                 a.vhosts[host] = struct{}{}
                         }
+
+                        // Per-IP threshold counters (evaluated over the same short WINDOW)
+                        if b.ips403 != nil {
+                                for ip, n := range b.ips403 {
+                                        a := stats[ip]
+                                        if a == nil {
+                                                a = &agg{vhosts: make(map[string]struct{})}
+                                                stats[ip] = a
+                                        }
+                                        a.c403 += n
+                                }
+                        }
+                        if b.ips404 != nil {
+                                for ip, n := range b.ips404 {
+                                        a := stats[ip]
+                                        if a == nil {
+                                                a = &agg{vhosts: make(map[string]struct{})}
+                                                stats[ip] = a
+                                        }
+                                        a.c404 += n
+                                }
+                        }
+                        if b.ipsAgent != nil {
+                                for ip, n := range b.ipsAgent {
+                                        a := stats[ip]
+                                        if a == nil {
+                                                a = &agg{vhosts: make(map[string]struct{})}
+                                                stats[ip] = a
+                                        }
+                                        a.cAgent += n
+                                }
+                        }
+
+
                 }
         }
 
@@ -1352,6 +1502,24 @@ func (e *Engine) IPShort(limit int) []IPSignals {
         vhosts := len(a.vhosts)
 
         score, reasons := scoreIPSimple(rps, a.req, vhosts)
+
+        // Per-IP flood triggers (same WINDOW)
+        hard := false
+        if e.cfg.IP404Count > 0 && a.c404 >= e.cfg.IP404Count {
+            hard = true
+            reasons = append(reasons, fmt.Sprintf("404_flood(%d/%d)", a.c404, e.cfg.IP404Count))
+        }
+        if e.cfg.IP403Count > 0 && a.c403 >= e.cfg.IP403Count {
+            hard = true
+            reasons = append(reasons, fmt.Sprintf("403_flood(%d/%d)", a.c403, e.cfg.IP403Count))
+        }
+        if e.cfg.AgentCount > 0 && a.cAgent >= e.cfg.AgentCount {
+            hard = true
+            reasons = append(reasons, fmt.Sprintf("agent_flood(%d/%d)", a.cAgent, e.cfg.AgentCount))
+        }
+        if hard && score < 1.0 {
+            score = 1.0
+        }
 
         rows = append(rows, IPSignals{
             IP:      ip,
@@ -1644,4 +1812,192 @@ func (e *Engine) ipLongOne(ip string) (ipLongSnapshot, bool) {
         Score:   score,
         Reasons: reasons,
     }, true
+}
+
+
+
+func uaMatchAny(ua string, subs []string) bool {
+	u := strings.ToLower(ua)
+	for _, s := range subs {
+		if s != "" && strings.Contains(u, s) {
+			return true
+		}
+	}
+	return false
+}
+
+
+
+
+
+
+// emitIPBlocks emits core.Alert for IPs that should be blocked (per IPShort proposals).
+// This is meant to be consumed by the existing autosink blocker pipeline.
+func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
+        if out == nil {
+                return
+        }
+
+        // how many candidates to consider per tick
+        const topN = 50
+
+        // rate-limit per IP
+        const cooldown = 30 * time.Second
+
+        // how many sample lines to attach
+        const maxSamples = 8
+
+        rows := e.IPShort(topN)
+        if len(rows) == 0 {
+                return
+        }
+
+        for _, row := range rows {
+                // find "block" proposal
+                blockReason := ""
+                wantBlock := false
+                for _, p := range row.Proposals {
+                        if p.Action == "block" {
+                                wantBlock = true
+                                blockReason = p.Reason
+                                break
+                        }
+                }
+                if !wantBlock {
+                        continue
+                }
+
+                // classify (so you can instantly see WHY it blocked)
+                kind := "WEB/ABUSE"
+                class := "abuse"
+                limit := ""
+                for _, r := range row.Reasons {
+                        switch {
+                        case strings.HasPrefix(r, "404_flood"):
+                                kind = "WEB/404"
+                                class = "404_flood"
+                                limit = r
+                        case strings.HasPrefix(r, "403_flood"):
+                                kind = "WEB/403"
+                                class = "403_flood"
+                                limit = r
+                        case strings.HasPrefix(r, "agent_flood"):
+                                kind = "WEB/BOT"
+                                class = "agent_flood"
+                                limit = r
+                        }
+                        if limit != "" {
+                                break
+                        }
+                }
+                if class == "abuse" && strings.HasPrefix(blockReason, "ip_score") {
+                        kind = "WEB/RPS"
+                        class = "score_high"
+                }
+
+                ip := net.ParseIP(row.IP)
+                if ip == nil {
+                        continue
+                }
+
+// don't block ourselves (any local interface address)
+if isLocalInterfaceIP(ip) {
+    continue
+}
+
+// avoid blocking private/loopback/link-local (defensive)
+if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+    continue
+}
+
+
+                // avoid blocking private/loopback/link-local (defensive)
+                if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+                        continue
+                }
+
+                // cooldown check
+                e.emitMu.Lock()
+                last, ok := e.ipLastEmit[row.IP]
+                if ok && now.Sub(last) < cooldown {
+                        e.emitMu.Unlock()
+                        continue
+                }
+                e.ipLastEmit[row.IP] = now
+                e.emitMu.Unlock()
+
+                samples := e.ipSamples(row.IP, maxSamples)
+
+
+                // IMPORTANT:
+                // If your autosink blocker expects a different Kind, change this:
+
+                extra := map[string]string{
+                        "detector": "webdetector",
+                        "ip":       row.IP,
+                        "class":    class,
+                        "score":    fmt.Sprintf("%.2f", row.Score),
+                        "rps":      fmt.Sprintf("%.3f", row.RPS),
+                        "vhosts":   strconv.Itoa(row.Vhosts),
+                        "req":      strconv.Itoa(row.Req),
+                        "reason":   strings.Join(row.Reasons, ","),
+                        "action":   "block",
+                }
+                if limit != "" {
+                        extra["limit"] = limit
+                } else if blockReason != "" {
+                        extra["limit"] = blockReason
+                }                // e.g. "web_ip" or "webdetector.ip"
+                a := core.Alert{
+                        When:    now,
+                        Kind:    core.AlertKind(kind),
+                        Key:     row.IP,
+                        Count:   row.Req,
+                        Samples: samples,
+                        Extra:   extra,
+                }
+
+                // non-blocking send: if channel is full, skip
+                select {
+                case out <- a:
+                default:
+               }
+        }
+}
+
+// ipSamples collects representative raw log lines for an IP from the short-window buckets.
+func (e *Engine) ipSamples(ip string, max int) []string {
+        if max <= 0 {
+                return nil
+        }
+        out := make([]string, 0, max)
+        seen := make(map[string]struct{}, max)
+
+        e.mu.RLock()
+        defer e.mu.RUnlock()
+
+        for _, hs := range e.hosts {
+                if hs == nil {
+                        continue
+                }
+                for i := range hs.buckets {
+                        b := &hs.buckets[i]
+                        if b.ipSample == nil {
+                                continue
+                        }
+                        s, ok := b.ipSample[ip]
+                        if !ok || s == "" {
+                                continue
+                        }
+                        if _, dup := seen[s]; dup {
+                                continue
+                        }
+                        seen[s] = struct{}{}
+                        out = append(out, s)
+                        if len(out) >= max {
+                                return out
+                        }
+                }
+        }
+        return out
 }

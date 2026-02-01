@@ -124,12 +124,36 @@ func (s *sectionSink) Publish(a core.Alert) {
     }
 
     // --- ignore loopback addresses (127.0.0.0/8, ::1) ---
-    if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback()) {
+    // Parse once (used by self/loopback and firewall add)
+    ip := net.ParseIP(ipStr)
+    if ip == nil {
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
+
+    // --- ignore SELF IPs (all local interface addresses) ---
+if core.IsSelfIP(ipStr) {
+        out.Extra["blocked"] = "no"
+        out.Extra["reason"]  = "ignored_self_ip"
+
+        if logging.DebugEnabled() {
+            logging.LogfDETECTOR("[autoblock] ignoring SELF ip=%s (section=%s kind=%s)", ipStr, s.section, a.Kind)
+        }
+
+        // Keep the log record so you can debug why it happened
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
+
+    // --- ignore loopback addresses (127.0.0.0/8, ::1) ---
+    if ip.IsLoopback() {
         out.Extra["blocked"] = "no"
         out.Extra["reason"]  = "ignored_loopback"
         if s.inner != nil { s.inner.Publish(out) }
         return
     }
+
+
 
     // Cooldown check (do NOT stamp yet; stamp only after a real block)
     if s.pol.Cooldown > 0 {
@@ -149,12 +173,6 @@ func (s *sectionSink) Publish(a core.Alert) {
     }
     if a.Key != "" && a.Key != ipStr {
         comment += " | " + a.Key
-    }
-
-    ip := net.ParseIP(ipStr)
-    if ip == nil {
-        if s.inner != nil { s.inner.Publish(out) }
-        return
     }
 
     var blockOK bool

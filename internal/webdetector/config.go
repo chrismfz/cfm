@@ -26,6 +26,14 @@ type Config struct {
 	// API
 	APIListen string // "127.0.0.1:9070" etc.
 
+
+	// IP threshold detectors (CSF-like)
+	IP404Count int
+	IP403Count int
+
+	AgentList  []string      // substrings (lowercased)
+	AgentCount int
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -51,6 +59,8 @@ func (c *Config) FillDefaults() {
 	if c.APIListen == "" {
 		c.APIListen = "127.0.0.1:9070"
 	}
+
+
 }
 
 // LongHorizon returns the long-window horizon duration.
