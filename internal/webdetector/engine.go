@@ -13,6 +13,7 @@ import (
 	"time"
 	"math"
 	"fmt"
+	"hash/fnv"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
@@ -130,6 +131,11 @@ type bucketSW struct {
 	ips404 map[string]int
 	ipsAgent map[string]int
 	ipsMalPath map[string]int
+
+	// 40x combo support (403+404) for IP-level detectors
+	ips40x     map[string]int
+	ip40xPaths map[string]map[uint64]struct{}
+
 
 	uas   map[string]int
 	refs  map[string]int
@@ -613,6 +619,31 @@ case 5:
 			b.ipsMalPath[rec.IP]++
 		}
 	}
+
+
+// 40x combo counters (403+404) per IP, with optional ignore prefixes + unique-path gating.
+if rec.IP != "" && e.cfg.IP40xComboCount > 0 && (rec.Status == 403 || rec.Status == 404) {
+    if !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
+        if b.ips40x == nil {
+            b.ips40x = make(map[string]int)
+        }
+        b.ips40x[rec.IP]++
+
+        if e.cfg.IP40xComboUniquePaths > 0 {
+            if b.ip40xPaths == nil {
+                b.ip40xPaths = make(map[string]map[uint64]struct{})
+            }
+            set := b.ip40xPaths[rec.IP]
+            if set == nil {
+                set = make(map[uint64]struct{})
+                b.ip40xPaths[rec.IP] = set
+            }
+            set[hash64(p)] = struct{}{}
+        }
+    }
+}
+
+
 
 
 
@@ -1415,6 +1446,8 @@ func proposeIPActions(row IPSignals) []IPActionProposal {
             return []IPActionProposal{{Action: "block", Reason: "web_agent_flood", Score: row.Score}}
         case strings.HasPrefix(r, "malpath_flood"):
             return []IPActionProposal{{Action: "block", Reason: "web_malpath_flood", Score: row.Score}}
+        case strings.HasPrefix(r, "40x_combo"):
+            return []IPActionProposal{{Action: "block", Reason: "web_40x_combo", Score: row.Score}}
         }
     }
 
@@ -1456,6 +1489,9 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                 c404   int
                 cAgent int
                 cMal   int
+		c40x int
+		p40x map[uint64]struct{}
+
         }
 
         stats := make(map[string]*agg)
@@ -1524,6 +1560,34 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 
 
 
+if b.ips40x != nil {
+    for ip, n := range b.ips40x {
+        a := stats[ip]
+        if a == nil {
+            a = &agg{vhosts: make(map[string]struct{})}
+            stats[ip] = a
+        }
+        a.c40x += n
+    }
+}
+if b.ip40xPaths != nil {
+    for ip, set := range b.ip40xPaths {
+        a := stats[ip]
+        if a == nil {
+            a = &agg{vhosts: make(map[string]struct{})}
+            stats[ip] = a
+        }
+        if a.p40x == nil {
+            a.p40x = make(map[uint64]struct{})
+        }
+        for h := range set {
+            a.p40x[h] = struct{}{}
+        }
+    }
+}
+
+
+
 
                 }
         }
@@ -1558,6 +1622,20 @@ func (e *Engine) IPShort(limit int) []IPSignals {
         if e.cfg.MalPathCount > 0 && a.cMal >= e.cfg.MalPathCount {
             hard = true
             reasons = append(reasons, fmt.Sprintf("malpath_flood(%d/%d)", a.cMal, e.cfg.MalPathCount))
+        }
+
+        // 40x combo (403+404) with unique-path gating (safer)
+        if e.cfg.IP40xComboCount > 0 && a.c40x >= e.cfg.IP40xComboCount {
+            uniq := 0
+            if a.p40x != nil {
+                uniq = len(a.p40x)
+            }
+            if e.cfg.IP40xComboUniquePaths <= 0 || uniq >= e.cfg.IP40xComboUniquePaths {
+                hard = true
+                reasons = append(reasons,
+                    fmt.Sprintf("40x_combo(%d/%d paths=%d/%d)", a.c40x, e.cfg.IP40xComboCount, uniq, e.cfg.IP40xComboUniquePaths),
+                )
+            }
         }
 
         if hard && score < 1.0 {
@@ -1948,6 +2026,10 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
                                 kind = "WEB/MALPATH"
                                 class = "malpath_flood"
                                 limit = r
+                        case strings.HasPrefix(r, "40x_combo"):
+                                kind = "WEB/40X"
+                                class = "40x_combo"
+                                limit = r
                         }
                         if limit != "" {
                                 break
@@ -2064,3 +2146,27 @@ func (e *Engine) ipSamples(ip string, max int) []string {
         }
         return out
 }
+
+
+
+
+
+//40x combo helpers
+func hash64(s string) uint64 {
+    h := fnv.New64a()
+    _, _ = h.Write([]byte(s))
+    return h.Sum64()
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+    for _, p := range prefixes {
+        if p == "" {
+            continue
+        }
+        if strings.HasPrefix(s, p) {
+            return true
+        }
+    }
+    return false
+}
+

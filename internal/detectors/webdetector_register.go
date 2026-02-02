@@ -55,6 +55,11 @@ cfg := webdet.Config{
 	IP404Count: kvInt(kv, "IP404_COUNT", 0),
 	IP403Count: kvInt(kv, "IP403_COUNT", 0),
 
+	// 40x combo (403+404) detector
+	IP40xComboCount:       kvInt(kv, "IP40X_COMBO", 0),
+	IP40xComboUniquePaths: kvInt(kv, "IP40X_UNIQUE_PATHS", 0),
+
+
 	AgentCount: kvInt(kv, "AGENT_COUNT", 0),
 	MalPathCount: kvInt(kv, "MALPATH_COUNT", 0),
 
@@ -70,6 +75,20 @@ if rawAgents != "" {
 			cfg.AgentList = append(cfg.AgentList, a)
 		}
 	}
+}
+
+
+// IGNORE40X_PREFIXES (comma/space separated)
+rawIgnore := kvStrClean(kv, "IGNORE40X_PREFIXES", "")
+if rawIgnore != "" {
+    for _, p := range strings.FieldsFunc(rawIgnore, func(r rune) bool {
+        return r == ',' || r == ':' || r == ' ' || r == '\t'
+    }) {
+        p = strings.ToLower(strings.TrimSpace(p))
+        if p != "" {
+            cfg.Ignore40xPrefixes = append(cfg.Ignore40xPrefixes, p)
+        }
+    }
 }
 
 

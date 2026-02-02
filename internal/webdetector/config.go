@@ -31,6 +31,11 @@ type Config struct {
 	IP404Count int
 	IP403Count int
 
+	// 40x combo detector (403+404) with optional unique-path gating.
+	IP40xComboCount       int
+	IP40xComboUniquePaths int
+	Ignore40xPrefixes     []string // optional: "/.well-known/", "/robots.txt", ...
+
 	AgentList  []string      // substrings (lowercased)
 	AgentCount int
 
@@ -64,6 +69,16 @@ func (c *Config) FillDefaults() {
 	if c.APIListen == "" {
 		c.APIListen = "127.0.0.1:9070"
 	}
+
+// Sensible defaults for the 40x combo detector (window defaults to 120s).
+if c.IP40xComboCount > 0 {
+    if c.IP40xComboUniquePaths <= 0 {
+        c.IP40xComboUniquePaths = 20
+    }
+    if len(c.Ignore40xPrefixes) == 0 {
+        c.Ignore40xPrefixes = []string{"/.well-known/", "/robots.txt", "/favicon.ico", "/sitemap", "/apple-touch-icon", "/manifest.json"}
+    }
+}
 
 
 }
