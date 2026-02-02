@@ -1,0 +1,72 @@
+# CFM webdetector malicious path substrings (case-insensitive)
+# One entry per line. Matching is substring-based (strings.Contains).
+# Keep entries high-signal. Prefer scoped paths when filenames are generic.
+
+# --- Env / dotfiles ---
+/.env
+/.env.
+/.env.bak
+/.env.old
+/.env.local
+/.env.prod
+/.env.dev
+/.env.example
+/.env.save
+
+# --- Webshell families (classic) ---
+wso.php
+wso2.php
+wso29.php
+ws.php
+wsd.php
+wso1337.php
+r57.php
+c99.php
+b374k.php
+xleet.php
+minishell.php
+shell.php
+cmd.php
+
+# --- Uploaders / file managers ---
+upload.php
+uploader.php
+up.php
+filemanager.php
+wp_filemanager.php
+
+# --- Common probe / dropper names seen in your logs ---
+simple.php
+bs1.php
+repeater.php
+l.php
+adminfusm.php
+dbcthbohhr.php
+
+# --- Hidden webshell stash dirs ---
+/.tmb/
+/.well-known/header.php
+
+# --- PHPUnit RCE probe ---
+/vendor/phpunit/phpunit/src/util/php/files.php
+
+# --- WordPress-targeted probes (scoped to reduce false positives) ---
+/wp-content/upgrade/pdf.php
+/wp-content/mu-plugins/admin.php
+/wp-content/install.php
+/wp-content/item.php
+/wp-content/content.php
+
+/wp-includes/as.php
+/wp-includes/network.php
+/wp-includes/autoload_classmap.php
+/wp-includes/sitemaps/chosen.php
+/wp-includes/simplepie/login.php
+/wp-includes/js/thickbox/about.php
+
+/wp-admin/network/
+/wp-admin/css/colors/
+
+# --- Joomla template probes  ---
+/templates/beez3/
+/templates/beez5/

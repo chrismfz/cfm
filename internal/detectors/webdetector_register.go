@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"bufio"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
@@ -55,6 +56,8 @@ cfg := webdet.Config{
 	IP403Count: kvInt(kv, "IP403_COUNT", 0),
 
 	AgentCount: kvInt(kv, "AGENT_COUNT", 0),
+	MalPathCount: kvInt(kv, "MALPATH_COUNT", 0),
+
 }
 
 rawAgents := kvStrClean(kv, "AGENT_LIST", "")
@@ -68,6 +71,48 @@ if rawAgents != "" {
 		}
 	}
 }
+
+
+
+// MALPATH_LIST (comma/space separated)
+rawMal := kvStrClean(kv, "MALPATH_LIST", "")
+if rawMal != "" {
+	for _, a := range strings.FieldsFunc(rawMal, func(r rune) bool {
+		return r == ',' || r == ':' || r == ' ' || r == '\t'
+	}) {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a != "" {
+			cfg.MalPathList = append(cfg.MalPathList, a)
+		}
+	}
+}
+
+// MALPATH_FILE (one entry per line; supports comments with #)
+cfg.MalPathFile = kvStrClean(kv, "MALPATH_FILE", "")
+if cfg.MalPathFile != "" {
+	f, err := os.Open(cfg.MalPathFile)
+	if err != nil {
+		logging.Logf("[webdetector] MALPATH_FILE open failed: %s: %v", cfg.MalPathFile, err)
+	} else {
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.ToLower(line)
+			cfg.MalPathList = append(cfg.MalPathList, line)
+		}
+		if err := sc.Err(); err != nil {
+			logging.Logf("[webdetector] MALPATH_FILE scan failed: %s: %v", cfg.MalPathFile, err)
+		}
+	}
+}
+
+
+
+
 
 
 
@@ -98,3 +143,5 @@ if rawAgents != "" {
 		return engine, nil
 	})
 }
+
+

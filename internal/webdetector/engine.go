@@ -129,6 +129,7 @@ type bucketSW struct {
 	ips403 map[string]int
 	ips404 map[string]int
 	ipsAgent map[string]int
+	ipsMalPath map[string]int
 
 	uas   map[string]int
 	refs  map[string]int
@@ -568,6 +569,14 @@ case 5:
 
 
 
+	// Malicious path probe thresholds (optional)
+	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
+		// p is already normalized below; but we can safely use rec.URI too (lowercased).
+		// We'll count based on the normalized path (no query string).
+	}
+
+
+
 	if b.uas == nil {
 		b.uas = make(map[string]int)
 	}
@@ -595,6 +604,17 @@ case 5:
 		p = p[:i]
 	}
 	b.paths[p]++
+
+
+	// Now that we have normalized path `p`, count malicious probes per IP.
+	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
+		if pathMatchAny(p, e.cfg.MalPathList) {
+			if b.ipsMalPath == nil { b.ipsMalPath = make(map[string]int) }
+			b.ipsMalPath[rec.IP]++
+		}
+	}
+
+
 
 	b.sumRT += rec.RT
 	b.sumBytes += rec.Bytes
@@ -1393,6 +1413,8 @@ func proposeIPActions(row IPSignals) []IPActionProposal {
             return []IPActionProposal{{Action: "block", Reason: "web_403_flood", Score: row.Score}}
         case strings.HasPrefix(r, "agent_flood"):
             return []IPActionProposal{{Action: "block", Reason: "web_agent_flood", Score: row.Score}}
+        case strings.HasPrefix(r, "malpath_flood"):
+            return []IPActionProposal{{Action: "block", Reason: "web_malpath_flood", Score: row.Score}}
         }
     }
 
@@ -1433,6 +1455,7 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                 c403   int
                 c404   int
                 cAgent int
+                cMal   int
         }
 
         stats := make(map[string]*agg)
@@ -1488,6 +1511,20 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                         }
 
 
+                        if b.ipsMalPath != nil {
+                                for ip, n := range b.ipsMalPath {
+                                        a := stats[ip]
+                                        if a == nil {
+                                                a = &agg{vhosts: make(map[string]struct{})}
+                                                stats[ip] = a
+                                        }
+                                        a.cMal += n
+                                }
+                        }
+
+
+
+
                 }
         }
 
@@ -1517,6 +1554,12 @@ func (e *Engine) IPShort(limit int) []IPSignals {
             hard = true
             reasons = append(reasons, fmt.Sprintf("agent_flood(%d/%d)", a.cAgent, e.cfg.AgentCount))
         }
+
+        if e.cfg.MalPathCount > 0 && a.cMal >= e.cfg.MalPathCount {
+            hard = true
+            reasons = append(reasons, fmt.Sprintf("malpath_flood(%d/%d)", a.cMal, e.cfg.MalPathCount))
+        }
+
         if hard && score < 1.0 {
             score = 1.0
         }
@@ -1827,6 +1870,22 @@ func uaMatchAny(ua string, subs []string) bool {
 }
 
 
+func pathMatchAny(path string, subs []string) bool {
+	p := strings.ToLower(path)
+	for _, s := range subs {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "" {
+			continue
+		}
+		// If config entry doesn't start with '/', allow matching filenames too.
+		// This makes "wso.php" match "/wp-content/uploads/wso.php".
+		if strings.Contains(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
 
 
 
@@ -1884,6 +1943,10 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
                         case strings.HasPrefix(r, "agent_flood"):
                                 kind = "WEB/BOT"
                                 class = "agent_flood"
+                                limit = r
+                        case strings.HasPrefix(r, "malpath_flood"):
+                                kind = "WEB/MALPATH"
+                                class = "malpath_flood"
                                 limit = r
                         }
                         if limit != "" {

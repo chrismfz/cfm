@@ -34,6 +34,11 @@ type Config struct {
 	AgentList  []string      // substrings (lowercased)
 	AgentCount int
 
+	// Malicious path probes (webshell/env/uploader/etc)
+	MalPathList  []string // substrings or paths (lowercased)
+	MalPathFile  string   // optional file with one entry per line
+	MalPathCount int
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.

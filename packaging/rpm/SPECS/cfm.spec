@@ -1,6 +1,6 @@
 Name:           cfm
-Version:        2026.02.01
-Release:        1.211955%{?dist}
+Version:        2026.02.02
+Release:        1.182802%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
@@ -48,6 +48,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %{_unitdir}/cfm.service
 %config(noreplace) /etc/cfm/cfm.conf
 %config(noreplace) /etc/cfm/detectors.conf
+%config(noreplace) /etc/cfm/webdetector_malpaths.txt
 %config(noreplace) /etc/cfm/notify.conf
 %config(noreplace) /etc/cfm/cfm.allow
 %config(noreplace) /etc/cfm/cfm.deny
