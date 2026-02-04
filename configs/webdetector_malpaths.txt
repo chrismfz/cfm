@@ -64,8 +64,6 @@ dbcthbohhr.php
 /wp-includes/simplepie/login.php
 /wp-includes/js/thickbox/about.php
 
-/wp-admin/network/
-/wp-admin/css/colors/
 
 # --- Joomla template probes  ---
 /templates/beez3/
