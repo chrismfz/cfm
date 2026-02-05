@@ -29,7 +29,6 @@ shell.php
 cmd.php
 
 # --- Uploaders / file managers ---
-upload.php
 uploader.php
 up.php
 filemanager.php
