@@ -26,6 +26,26 @@ dnf install cfm
 
 ---
 
+## Simple breakdown:
+
+### Primary categories:
+
+- Firewall manager (nftables-based, similar to CSF)
+- Intrusion Detection System (IDS) with log monitoring
+- Intrusion Prevention System (IPS) with automatic blocking
+- Connection/rate limiter (PPS limits, connection limits, port flood protection)
+- System hardening tool (sysctl tweaks, anti-spoofing)
+
+### What makes it unique:
+- Written in Go (modern, lightweight, single binary)
+- Direct nftables backend (not iptables)
+- Very comprehensive detection modules: SSH, Exim, Dovecot, FTP, MySQL, cPanel, ModSec, and a sophisticated unified web detector for Nginx/Apache/LiteSpeed
+- Built-in health monitoring (CPU, RAM, disk, SMART/RAID/ZFS)
+- ML-ready features for anomaly detection (HBOS, Isolation Forest compatible)
+- API integration support
+- Web-based "top" views for analyzing traffic patterns per vhost
+
+
 ## ✨ Key Features
 
 ### 🔒 Firewall Core
