@@ -8,12 +8,19 @@ More information at [https://infected.gr/category/cfm/](https://infected.gr/cate
 
 ## Ready to run packages for Debian and EL (Almalinux/Rocky/Cloudlinux)
 Debian:
+
 wget -qO - https://repo.nixpal.com/debian/nixpal-repo.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/nixpal-repo.gpg
+
 wget https://repo.nixpal.com/debian/nixpal.list -O /etc/apt/sources.list.d/nixpal.list
+
 apt update ; apt install cfm
 
+
+
 EL:
+
 dnf install https://repo.nixpal.com/el/nixpal.rpm
+
 dnf install cfm
 
 
