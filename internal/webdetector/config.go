@@ -7,8 +7,12 @@ import "time"
 // It is built from [webdetector] in cfm.conf by the detector register.
 type Config struct {
 	// Log ingestion
-	Mode     string        // "file" (for now)
-	LogPath  string        // TSV log path
+	Mode     string        // "file" | "folder"
+	LogPath  string        // file mode: TSV log path
+	LogDir   string        // folder mode: directory root
+	Recursive bool         // folder mode: recurse into subfolders (cpanel domlogs)
+	Glob     string        // folder mode: glob match for filenames, e.g. "*.log" (optional)
+
 	Every    time.Duration // detector tick interval
 	Window   time.Duration // short-window horizon (sliding)
 	Cooldown time.Duration // reserved for future alert gating
@@ -68,6 +72,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.APIListen == "" {
 		c.APIListen = "127.0.0.1:9070"
+	}
+	if c.Glob == "" {
+		c.Glob = "*.log"
 	}
 
 // Sensible defaults for the 40x combo detector (window defaults to 120s).

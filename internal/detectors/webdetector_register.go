@@ -38,6 +38,9 @@ func init() {
 cfg := webdet.Config{
 	Mode:        strings.ToLower(kvStrClean(kv, "MODE", "file")),
 	LogPath:     kvStrClean(kv, "LOG_PATH", "/var/log/apache2/access_cfm_tsv.log"),
+        LogDir:      kvStrClean(kv, "LOG_DIR", ""),
+        Recursive:   kvBool(kv, "RECURSIVE", false),
+        Glob:        kvStrClean(kv, "GLOB", "*.log"),
 	Every:       kvDur(kv, "EVERY", defEvery),
 	Window:      kvDur(kv, "WINDOW", defWindow),
 	Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
@@ -138,8 +141,13 @@ if cfg.MalPathFile != "" {
 
 		engine := webdet.NewEngine(cfg)
 
+// normalize aliases
+if cfg.Mode == "dir" {
+        cfg.Mode = "folder"
+}
+
 		// MODE=file: attach tailer if file exists
-		if cfg.Mode == "file" {
+		if cfg.Mode == "file" || cfg.Mode == "" {
 			path := cfg.LogPath
 			if st, err := os.Stat(path); err == nil && !st.IsDir() {
 				logging.Logf("[webdetector] using log: %s", path)
@@ -153,6 +161,27 @@ if cfg.MalPathFile != "" {
 				logging.Logf("[webdetector] log path not found: %s (set LOG_PATH)", path)
 			}
 		}
+
+
+		// MODE=folder: tail multiple files under a directory (DirectAdmin/cPanel domlogs)
+		if cfg.Mode == "folder" {
+			dir := cfg.LogDir
+			if dir == "" {
+				logging.Logf("[webdetector] folder mode requires LOG_DIR")
+			} else if st, err := os.Stat(dir); err == nil && st.IsDir() {
+				logging.Logf("[webdetector] using log dir: %s (recursive=%v glob=%s)", dir, cfg.Recursive, cfg.Glob)
+				src := core.NewDirTailer(dir, cfg.Recursive, cfg.Glob)
+                                if stt, _ := core.LoadState(""); stt != nil {
+                                        // persist per-file offsets: key = FileStateKey(section, fullpath)
+                                        src.SetState(stt, section)
+                                }
+				engine.SetSource(src)
+			} else {
+				logging.Logf("[webdetector] log dir not found: %s (set LOG_DIR)", dir)
+			}
+		}
+
+
 
 		// Start HTTP API in a goroutine (if API_LISTEN is non-empty).
 		if cfg.APIListen != "" {

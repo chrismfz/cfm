@@ -304,6 +304,8 @@ type Engine struct {
 	state    *core.State
 	stateKey string
 
+	adapter LogFormatAdapter
+
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
@@ -333,8 +335,11 @@ func NewEngine(cfg Config) *Engine {
 		hosts: make(map[string]*hostState),
 		scorer:  DefaultScorer(),
 		longwin: NewLongWindow(cfg.LongHorizon(), cfg.Window, DefaultScorer()),
-    ipLong: &ipLongMem{
-        stats: make(map[string]*ipLongAgg),
+		//chris//
+		adapter: NewAutoDetectAdapter(),
+
+	        ipLong: &ipLongMem{
+                stats: make(map[string]*ipLongAgg),
     },
                 ipLastEmit: make(map[string]time.Time),
 	}
@@ -410,7 +415,9 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if err != nil {
 			break
 		}
-		rec, ok := parseTSV(line)
+		//chris//
+		//rec, ok := parseTSV(line)
+		rec, ok := e.adapter.Parse(line)
 		if !ok {
 			continue
 		}
