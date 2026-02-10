@@ -241,7 +241,7 @@ func (d *DirTailer) scanLocked(first bool) {
 
 		// skip compressed / rotated junk
 		lb := strings.ToLower(base)
-		if strings.HasSuffix(lb, ".gz") || strings.HasSuffix(lb, ".bz2") || strings.HasSuffix(lb, ".zip") {
+		if strings.HasSuffix(lb, ".gz") || strings.HasSuffix(lb, ".bz2") || strings.HasSuffix(lb, ".xz") || strings.HasSuffix(lb, ".zst") || strings.HasSuffix(lb, ".zip") {
 			return nil
 		}
 
@@ -267,16 +267,83 @@ func (d *DirTailer) scanLocked(first bool) {
 
 func extractHostFromPath(path string) string {
 	base := filepath.Base(path)
+	lb := strings.ToLower(base)
 
-	// strip common suffixes
-	base = strings.TrimSuffix(base, ".log")
-	base = strings.TrimSuffix(base, ".access")
-	base = strings.TrimSuffix(base, ".bytes")
-	base = strings.TrimSuffix(base, ".error")
+	// NOTE: scanLocked() already skips compressed files ("*.gz" etc), but keep safe.
+	for _, suf := range []string{".gz", ".bz2", ".xz", ".zst", ".zip"} {
+		if strings.HasSuffix(lb, suf) {
+			base = strings.TrimSuffix(base, suf)
+			lb = strings.ToLower(base)
+			break
+		}
+	}
 
-	// strip any remaining extension
-	if ext := filepath.Ext(base); ext != "" {
-		base = strings.TrimSuffix(base, ext)
+	// Virtualmin: example.com_access_log / example.com_error_log
+	base = strings.TrimSuffix(base, "_access_log")
+	base = strings.TrimSuffix(base, "_error_log")
+	base = stripDashDateSuffix(base) // if you ever scan rotated non-gz: ..._log-YYYYMMDD
+
+	// cPanel domlogs commonly use: domain.tld-ssl_log / domain.tld-bytes_log
+	// (also sometimes with extra rotation suffixes)
+	base = strings.TrimSuffix(base, "-ssl_log")
+	base = strings.TrimSuffix(base, "-bytes_log")
+	base = strings.TrimSuffix(base, "-ftp_log")
+
+	// DirectAdmin/custom naming (strip longer suffixes first)
+	lb = strings.ToLower(base)
+	if strings.HasSuffix(lb, ".error.log") {
+		base = base[:len(base)-len(".error.log")]
+	} else if strings.HasSuffix(lb, ".bytes.log") {
+		base = base[:len(base)-len(".bytes.log")]
+	} else if strings.HasSuffix(lb, ".access.log") {
+		base = base[:len(base)-len(".access.log")]
+	} else {
+		base = strings.TrimSuffix(base, ".log")
+		base = strings.TrimSuffix(base, ".access")
+		base = strings.TrimSuffix(base, ".bytes")
+		base = strings.TrimSuffix(base, ".error")
+	}
+
+	// Strip numeric rotation suffixes like ".1", ".2", ".10"
+	// IMPORTANT: do NOT use filepath.Ext() here (it would strip ".gr", ".com", etc).
+	base = stripDotNumericSuffix(base)
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "unknown"
 	}
 	return strings.ToLower(base)
+}
+
+func stripDotNumericSuffix(s string) string {
+	if i := strings.LastIndexByte(s, '.'); i > 0 {
+		tail := s[i+1:]
+		if isAllDigits(tail) {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func stripDashDateSuffix(s string) string {
+	// remove trailing -YYYYMMDD (8 digits) or -YYYYMMDDHHMM (12 digits)
+	if i := strings.LastIndexByte(s, '-'); i > 0 {
+		tail := s[i+1:]
+		if (len(tail) == 8 || len(tail) == 12) && isAllDigits(tail) {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+
 }

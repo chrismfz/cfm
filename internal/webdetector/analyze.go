@@ -346,15 +346,58 @@ func (e *Engine) scanOfflineLines(maxLines int64, fn func(line string) bool) err
 // Mirrors the logic used in DirTailer.
 func hostFromPath(path string) string {
     base := filepath.Base(path)
-    base = strings.TrimSuffix(base, ".log")
-    base = strings.TrimSuffix(base, ".access")
-    base = strings.TrimSuffix(base, ".bytes")
-    base = strings.TrimSuffix(base, ".error")
-    if ext := filepath.Ext(base); ext != "" {
-        base = strings.TrimSuffix(base, ext)
+    lb := strings.ToLower(base)
+
+    // 0) ignore compressed rotated files (offline scan already ignores, but keep safe)
+    for _, suf := range []string{".gz", ".bz2", ".xz", ".zst", ".zip"} {
+        if strings.HasSuffix(lb, suf) {
+            base = strings.TrimSuffix(base, suf)
+            lb = strings.ToLower(base)
+            break
+        }
     }
+
+    // 1) Virtualmin style:
+    //    example.com_access_log
+    //    example.com_error_log
+    //    (sometimes rotated as ..._log-YYYYMMDD[.gz] but .gz ignored above)
+    base = strings.TrimSuffix(base, "_access_log")
+    base = strings.TrimSuffix(base, "_error_log")
+
+    // Also handle Virtualmin date suffix if you ever scan rotated non-gz:
+    //    example.com_access_log-20260111
+    base = stripDashDateSuffix(base)
+
+    // 2) DirectAdmin / custom naming you use:
+    //    thikishop.gr.log
+    //    thikishop.gr.error.log
+    //    thikishop.gr.bytes(.N)
+    //    thikishop.gr.access (if used)
+    // Order matters: strip longer suffixes first.
+    lb = strings.ToLower(base)
+    if strings.HasSuffix(lb, ".error.log") {
+        base = base[:len(base)-len(".error.log")]
+    } else if strings.HasSuffix(lb, ".bytes.log") {
+        base = base[:len(base)-len(".bytes.log")]
+    } else if strings.HasSuffix(lb, ".access.log") {
+        base = base[:len(base)-len(".access.log")]
+    } else {
+        base = strings.TrimSuffix(base, ".log")
+        base = strings.TrimSuffix(base, ".access")
+        base = strings.TrimSuffix(base, ".bytes")
+        base = strings.TrimSuffix(base, ".error")
+    }
+
+    // 3) Strip numeric rotation suffixes like ".1", ".2", ".10"
+    // IMPORTANT: do NOT use filepath.Ext() (it would strip ".gr", ".com", etc).
+    base = stripDotNumericSuffix(base)
+
+    base = strings.TrimSpace(base)
     return strings.ToLower(base)
+
 }
+
+
 
 
 
@@ -367,4 +410,38 @@ func formatAnalyzeRange(firstTS, lastTS float64) (string, string) {
     f := tsToTime(firstTS).Format(time.RFC3339)
     l := tsToTime(lastTS).Format(time.RFC3339)
     return f, l
+}
+
+
+func stripDotNumericSuffix(s string) string {
+    if i := strings.LastIndexByte(s, '.'); i > 0 {
+        tail := s[i+1:]
+        if isAllDigits(tail) {
+            return s[:i]
+        }
+    }
+    return s
+}
+
+func stripDashDateSuffix(s string) string {
+    // remove trailing -YYYYMMDD (8 digits) or -YYYYMMDDHHMM (12 digits)
+    if i := strings.LastIndexByte(s, '-'); i > 0 {
+        tail := s[i+1:]
+        if (len(tail) == 8 || len(tail) == 12) && isAllDigits(tail) {
+            return s[:i]
+        }
+    }
+    return s
+}
+
+func isAllDigits(s string) bool {
+    if s == "" {
+        return false
+    }
+    for i := 0; i < len(s); i++ {
+        if s[i] < '0' || s[i] > '9' {
+            return false
+        }
+    }
+    return true
 }
