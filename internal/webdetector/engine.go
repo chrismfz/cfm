@@ -131,6 +131,7 @@ type bucketSW struct {
 	ips404 map[string]int
 	ipsAgent map[string]int
 	ipsMalPath map[string]int
+	ipsMalRule map[string]map[int]int // ip -> ruleIndex -> count
 
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
@@ -305,6 +306,7 @@ type Engine struct {
 	stateKey string
 
 	adapter LogFormatAdapter
+	malRules []malRule
 
 	mu    sync.RWMutex
 	hosts map[string]*hostState
@@ -323,6 +325,10 @@ type Engine struct {
 }
 
 
+type malRule struct {
+    sub   string // already lowercased
+    count int
+}
 
 
 // NewEngine creates a webdetector Engine. It does NOT start any goroutines.
@@ -343,6 +349,9 @@ func NewEngine(cfg Config) *Engine {
     },
                 ipLastEmit: make(map[string]time.Time),
 	}
+
+    // Compile MALPATH rules. Supports "N:substring" override syntax.
+    e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
 
 	// Enrichment is optional.
 	if cfg.UseEnrich {
@@ -621,11 +630,31 @@ case 5:
 
 	// Now that we have normalized path `p`, count malicious probes per IP.
 	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
-		if pathMatchAny(p, e.cfg.MalPathList) {
-			if b.ipsMalPath == nil { b.ipsMalPath = make(map[string]int) }
-			b.ipsMalPath[rec.IP]++
+
+        if rec.IP != "" && len(e.malRules) > 0 {
+            pl := strings.ToLower(p)
+            for ridx, r := range e.malRules {
+                if r.sub != "" && strings.Contains(pl, r.sub) {
+                    if b.ipsMalPath == nil { b.ipsMalPath = make(map[string]int) }
+                    b.ipsMalPath[rec.IP]++ // total MALPATH hits (for stats)
+
+                    if b.ipsMalRule == nil {
+                        b.ipsMalRule = make(map[string]map[int]int)
+                    }
+                    m := b.ipsMalRule[rec.IP]
+                    if m == nil {
+                        m = make(map[int]int)
+                        b.ipsMalRule[rec.IP] = m
+                    }
+                    m[ridx]++
+                    break // count only the first matching rule per request (prevents double-count inflation)
+                }
+            }
+        }
+
+
 		}
-	}
+
 
 
 // 40x combo counters (403+404) per IP, with optional ignore prefixes + unique-path gating.
@@ -1496,6 +1525,7 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                 c404   int
                 cAgent int
                 cMal   int
+		mal    map[int]int
 		c40x int
 		p40x map[uint64]struct{}
 
@@ -1567,6 +1597,23 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 
 
 
+        if b.ipsMalRule != nil {
+            for ip, mm := range b.ipsMalRule {
+                a := stats[ip]
+                if a == nil {
+                    a = &agg{vhosts: make(map[string]struct{})}
+                    stats[ip] = a
+                }
+                if a.mal == nil {
+                    a.mal = make(map[int]int)
+                }
+                for ridx, n := range mm {
+                    a.mal[ridx] += n
+                }
+            }
+        }
+
+
 if b.ips40x != nil {
     for ip, n := range b.ips40x {
         a := stats[ip]
@@ -1626,10 +1673,26 @@ if b.ip40xPaths != nil {
             reasons = append(reasons, fmt.Sprintf("agent_flood(%d/%d)", a.cAgent, e.cfg.AgentCount))
         }
 
-        if e.cfg.MalPathCount > 0 && a.cMal >= e.cfg.MalPathCount {
+        // Per-rule MALPATH thresholds (supports "N:pattern")
+        if a.mal != nil && len(e.malRules) > 0 {
+            for ridx, n := range a.mal {
+                if ridx >= 0 && ridx < len(e.malRules) {
+                    thr := e.malRules[ridx].count
+                    if thr > 0 && n >= thr {
+                        hard = true
+                        reasons = append(reasons, fmt.Sprintf("malpath(%d/%d:%s)", n, thr, e.malRules[ridx].sub))
+                        break
+                    }
+                }
+            }
+        }
+
+        // Global MALPATH threshold (legacy/default)
+        if !hard && e.cfg.MalPathCount > 0 && a.cMal >= e.cfg.MalPathCount {
             hard = true
             reasons = append(reasons, fmt.Sprintf("malpath_flood(%d/%d)", a.cMal, e.cfg.MalPathCount))
         }
+
 
         // 40x combo (403+404) with unique-path gating (safer)
         if e.cfg.IP40xComboCount > 0 && a.c40x >= e.cfg.IP40xComboCount {
@@ -2177,3 +2240,28 @@ func hasAnyPrefix(s string, prefixes []string) bool {
     return false
 }
 
+func compileMalRules(list []string, def int) []malRule {
+    if def <= 0 {
+        def = 1
+    }
+    rules := make([]malRule, 0, len(list))
+    for _, raw := range list {
+        s := strings.TrimSpace(raw)
+        if s == "" || strings.HasPrefix(s, "#") {
+            continue
+        }
+        c := def
+        // Allow "N:pattern"
+        if i := strings.IndexByte(s, ':'); i > 0 {
+            if n, err := strconv.Atoi(strings.TrimSpace(s[:i])); err == nil {
+                c = n
+                s = strings.TrimSpace(s[i+1:])
+            }
+        }
+        if s == "" || c <= 0 {
+            continue
+        }
+        rules = append(rules, malRule{sub: strings.ToLower(s), count: c})
+    }
+    return rules
+}
