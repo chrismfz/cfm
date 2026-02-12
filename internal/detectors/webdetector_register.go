@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"bufio"
+	"context"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
@@ -54,6 +55,9 @@ cfg := webdet.Config{
 	MinScore:   kvFlt(kv, "MIN_SCORE", 0.60),
 
 	APIListen: kvStrClean(kv, "API_LISTEN", "127.0.0.1:9070"),
+
+        ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
+        ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),
 
 	IP404Count: kvInt(kv, "IP404_COUNT", 0),
 	IP403Count: kvInt(kv, "IP403_COUNT", 0),
@@ -187,6 +191,37 @@ if cfg.Mode == "dir" {
 		if cfg.APIListen != "" {
 			go engine.ServeHTTP(cfg.APIListen)
 		}
+
+
+
+                // Start Challenge server (optional).
+
+// Start Challenge server (optional).
+if cfg.ChallengeHTTPListen != "" || cfg.ChallengeHTTPSListen != "" {
+        // Use the global sslcollector that webdetector exposes via SSLCollector()
+        srv := webdet.NewChallengeServer(webdet.SSLCollector())
+
+        go func() {
+                // Start expects (context, httpAddr, httpsAddr)
+                if err := srv.Start(context.Background(), cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen); err != nil {
+                        logging.Logf("[webdetector] challenge start failed: %v", err)
+                }
+        }()
+
+        if cfg.ChallengeHTTPListen != "" {
+                logging.Logf("[webdetector] challenge HTTP listening on %s", cfg.ChallengeHTTPListen)
+        }
+        if cfg.ChallengeHTTPSListen != "" {
+                logging.Logf("[webdetector] challenge HTTPS listening on %s", cfg.ChallengeHTTPSListen)
+        }
+}
+
+
+
+
+
+
+
 
 		return engine, nil
 	})

@@ -42,7 +42,8 @@ import (
 
 	mmdb "cfm/internal/maxmindupdater"
 
-    webdet "cfm/internal/webdetector"
+        webdet "cfm/internal/webdetector"
+	"cfm/internal/sslcollector"
 
 )
 
@@ -373,6 +374,10 @@ func main() {
 	case "disable":
 		runDisable(os.Args[2:])
 
+case "ssl", "sslcollector", "ssl-collector":
+    sslcollector.RunCLI(os.Args[2:])
+
+
 
         case "webtop" , "nginx-top" , "httpd-top":
             // Default to the same address as API_LISTEN
@@ -413,6 +418,11 @@ Usage:
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
 
+  cfm ssl stats [--json]
+  cfm ssl scan  [--json]
+  cfm ssl dump <host> [--json]
+  cfm ssl refresh [--json]
+
   cfm nginx-top -- Backwards compat with "webtop"
   cfm httpd-top -- Backwards compat with "webtop"
   cfm webtop  <vhost> -- Live stats for specific vhost
@@ -423,9 +433,10 @@ Options (overall top):
   --slimit N       rows under "Suspicious vhosts" (default 10)
   --json           output JSON of the main top table (suppresses the pretty table)
 
+
 Description:
   local nftables manager (block/allow with optional TTL),
-  plus simple (lol) list/unlist/flush. `)
+  plus -NOT SO SIMPLE NOW- simple (lol) list/unlist/flush. `)
 }
 
 // ----------------------------------------------------------------------------
@@ -1149,6 +1160,38 @@ func runDaemon(args []string) {
         ctx, cancel := context.WithCancel(context.Background())
         defer cancel()
 
+
+
+// --- SSL collector (start once; used later by webdetector TLS proxy) ---
+sslcol := sslcollector.New(sslcollector.Config{
+    Enabled:        true,
+    CacheDir:       "/var/lib/cfm/sslcollector",
+    StatEvery:      60 * time.Second,
+    DiscoveryEvery: 6 * time.Hour,
+    NegativeTTL:    30 * time.Second,
+    MaxCertCache:   20000,
+})
+
+// Do one refresh now so we can log totals immediately
+_ = sslcol.Refresh(context.Background())
+st := sslcol.Stats()
+logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
+    st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
+
+// Background loop for ongoing refresh
+go func() {
+    if err := sslcol.Run(ctx); err != nil && ctx.Err() == nil {
+        logging.Logf("[sslcollector] stopped: %v", err)
+    }
+}()
+
+webdet.SetSSLCollector(sslcol)
+logging.Logf("[sslcollector] started")
+
+
+////// SSL COLLECTOR END////
+
+
 	var smtpSnoopStarted bool
 
     // Ensure base data dir exists very early
@@ -1253,6 +1296,11 @@ ensureDir("/var/log/cfm", 0o700)
 			fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
 		}
 
+
+
+
+
+
 		// nft rules
 
 if nb, ok2 := be.(*nft.Backend); ok2 {
@@ -1354,7 +1402,8 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 // wherever you start detectors (e.g., runDaemon)
 
 // detectors logic
-detpkg.Start(context.Background(), detpkg.Options{
+//detpkg.Start(context.Background(), detpkg.Options{
+detpkg.Start(ctx, detpkg.Options{
     CfgPath: filepath.Join(cfgDir, "detectors.conf"), // use the actual filename
     Sink:    detpkg.OutcomeLoggerSink{},              // prints final "Blocked:" outcome
     FW:      be,                                      // reuse the backend created above

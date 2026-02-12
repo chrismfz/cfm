@@ -30,6 +30,10 @@ type Config struct {
 	// API
 	APIListen string // "127.0.0.1:9070" etc.
 
+        // Challenge server listeners (optional)
+        ChallengeHTTPListen  string
+        ChallengeHTTPSListen string
+
 
 	// IP threshold detectors (CSF-like)
 	IP404Count int
