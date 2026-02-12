@@ -1,6 +1,5 @@
 # Build artifacts - DO NOT COMMIT
 /bin/
-/build/
 
 # Large data files
 *.mmdb
