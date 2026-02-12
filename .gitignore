@@ -1,0 +1,20 @@
+# Build artifacts - DO NOT COMMIT
+/bin/
+/build/
+
+# Large data files
+*.mmdb
+configs/*.mmdb
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
