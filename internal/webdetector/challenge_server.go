@@ -94,6 +94,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		tlsCfg := &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			NextProtos: []string{"h2", "http/1.1"},
 			GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				if s.ssl == nil {
 					return nil, fmt.Errorf("sslcollector not set")
