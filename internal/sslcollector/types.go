@@ -13,6 +13,7 @@ const (
 	SrcCPanel      Source = "cpanel"
 	SrcDirectAdmin Source = "directadmin"
 	SrcVirtualmin  Source = "virtualmin"
+	SrcWebmin      Source = "webmin"
 	SrcGeneric     Source = "generic"
 )
 

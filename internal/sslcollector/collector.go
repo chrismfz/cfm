@@ -231,3 +231,17 @@ func absClean(p string) string {
 	ap, _ := filepath.Abs(p)
 	return filepath.Clean(ap)
 }
+
+
+// EntryForHost returns the best matching entry for host (exact or wildcard).
+func (c *Collector) EntryForHost(host string) *Entry {
+	host = normalizeHost(host)
+	if host == "" {
+		return nil
+	}
+	e, ok := c.getEntryLocked(host)
+	if !ok {
+		return nil
+	}
+	return e
+}

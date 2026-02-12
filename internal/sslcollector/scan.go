@@ -145,6 +145,7 @@ func prefer(a, b Source) bool {
 		SrcCPanel:      4,
 		SrcDirectAdmin: 4,
 		SrcVirtualmin:  3,
+		SrcWebmin:      3,
 		SrcGeneric:     1,
 	}
 	return order[a] > order[b]

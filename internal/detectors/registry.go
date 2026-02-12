@@ -16,6 +16,12 @@ type Options struct {
 }
 
 
+var fwBackend firewall.Backend
+
+func SetFW(be firewall.Backend) { // unexported is fine, same package
+	fwBackend = be
+}
+
 
 
 type Factory func(sectionName string, kv KV, global KV) (core.PeriodicDetector, error)

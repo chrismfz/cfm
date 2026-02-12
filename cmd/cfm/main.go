@@ -1403,10 +1403,14 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 
 // detectors logic
 //detpkg.Start(context.Background(), detpkg.Options{
+detpkg.SetFW(be)
+
 detpkg.Start(ctx, detpkg.Options{
     CfgPath: filepath.Join(cfgDir, "detectors.conf"), // use the actual filename
     Sink:    detpkg.OutcomeLoggerSink{},              // prints final "Blocked:" outcome
     FW:      be,                                      // reuse the backend created above
+
+
 })
 
 

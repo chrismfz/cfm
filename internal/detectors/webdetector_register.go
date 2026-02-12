@@ -11,6 +11,10 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
+
+//        "os/exec"
+//        nft "cfm/internal/firewall/nft"
+
 )
 
 func init() {
@@ -194,15 +198,39 @@ if cfg.Mode == "dir" {
 
 
 
-                // Start Challenge server (optional).
+                // Start Challenge server (optional) + ensure nft redirect rules.
+                //
+                // IMPORTANT:
+                // - EnsureChallengeRedirect installs NAT prerouting redirect rules:
+                //   src IP in @challenge_v4/@challenge_v6 + dport 80/443 -> redirect to challenge ports.
+                // - This is idempotent: safe to call on startup.
 
 // Start Challenge server (optional).
+
 if cfg.ChallengeHTTPListen != "" || cfg.ChallengeHTTPSListen != "" {
-        // Use the global sslcollector that webdetector exposes via SSLCollector()
-        srv := webdet.NewChallengeServer(webdet.SSLCollector())
+
+        // 1) Ensure redirect/accept rules using the SAME firewall backend (best-effort)
+        if fwBackend != nil {
+                if cr, ok := any(fwBackend).(interface {
+                        EnsureChallengeRedirect(httpListen, httpsListen string) error
+                }); ok {
+                        if err := cr.EnsureChallengeRedirect(cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen); err != nil {
+                                logging.Logf("[webdetector] EnsureChallengeRedirect failed: %v", err)
+                        } else {
+                                logging.Logf("[webdetector] challenge redirect rules ensured (http=%q https=%q)",
+                                        cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen)
+                        }
+                } else {
+                        logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect")
+                }
+        } else {
+                logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules")
+        }
+
+        // 2) Start challenge server with SSL collector + SAME firewall backend
+        srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
 
         go func() {
-                // Start expects (context, httpAddr, httpsAddr)
                 if err := srv.Start(context.Background(), cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen); err != nil {
                         logging.Logf("[webdetector] challenge start failed: %v", err)
                 }

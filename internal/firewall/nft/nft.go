@@ -31,6 +31,12 @@ const (
 	tableName = "cfm"
 	family    = "inet"
 
+	//web challenge nets
+	challengeV4 = "challenge_v4"
+	challengeV6 = "challenge_v6"
+	challengeNatChain = "prerouting"
+
+
 	// manual
 	setV4   = "block_v4"
 	setV6   = "block_v6"
@@ -288,6 +294,20 @@ func (b *Backend) EnsureBase() error {
 		}
 	}
 
+
+
+
+	// 2b) Ensure NAT prerouting chain for challenge redirects
+	if !b.chainExists(challengeNatChain) {
+		if err := b.nftCmd(fmt.Sprintf(
+			`add chain %s %s %s { type nat hook prerouting priority dstnat; policy accept; }`,
+			family, tableName, challengeNatChain,
+		)); err != nil {
+			return err
+		}
+	}
+
+
 	// 3) Ensure sets (manual/dyn/external + throttling)
 	// manual allow/block
 	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
@@ -340,6 +360,11 @@ func (b *Backend) EnsureBase() error {
 	_ = b.ensureSetWithFlags("th_pf_udp_v6",   "ipv6_addr", "timeout")
 	_ = b.ensureSetWithFlags("throttled_v4",   "ipv4_addr", "timeout")
 	_ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
+
+	// Challenge sets (source IPs that should be redirected to challenge ports)
+	if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil { return err }
+	if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil { return err }
+
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	addRule := func(expr string) error {
@@ -1618,4 +1643,164 @@ func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
         return append([]string(nil), b.extAllowV6Hosts...), append([]string(nil), b.extAllowV6Nets...)
     }
     return append([]string(nil), b.extAllowV4Hosts...), append([]string(nil), b.extAllowV4Nets...)
+}
+
+
+
+
+// EnsureChallengeRedirect installs NAT redirect rules for IPs in challenge sets.
+// httpListen / httpsListen are like "127.0.0.1:9098" or ":9098".
+func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error {
+	httpPort, okHTTP := parseListenPort(httpListen)
+	httpsPort, okHTTPS := parseListenPort(httpsListen)
+	if !okHTTP && !okHTTPS {
+		// nothing to do
+		return nil
+	}
+
+	// Ensure base exists (chains/sets)
+	if err := b.EnsureBase(); err != nil {
+		return err
+	}
+
+    addInputAccept := func(expr string) error {
+        // IMPORTANT: insert at top so it wins vs later drops from PortsPolicy
+        if !b.ruleExists("input", expr) {
+            return b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
+        }
+        return nil
+    }
+
+
+	addNatRule := func(expr string) error {
+		if !b.ruleExists(challengeNatChain, expr) {
+			return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr))
+		}
+		return nil
+	}
+
+	// HTTP :80 -> challenge httpPort
+	if okHTTP && httpPort > 0 {
+		// v4
+		if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
+			return err
+		}
+		// v6
+		if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
+			return err
+		}
+
+        // allow redirected traffic to reach local challenge listener
+        if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
+            return err
+        }
+        if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
+            return err
+        }
+
+
+	}
+
+
+
+	// HTTPS :443 -> challenge httpsPort
+	if okHTTPS && httpsPort > 0 {
+		// v4
+		if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
+			return err
+		}
+		// v6
+		if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
+			return err
+		}
+
+        // allow redirected traffic to reach local challenge listener
+        if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
+            return err
+        }
+        if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
+            return err
+        }
+
+
+
+	}
+
+	return nil
+}
+
+func parseListenPort(addr string) (int, bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0, false
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		// handle ":9098" (SplitHostPort accepts it) or "9098" (not valid)
+		if strings.Count(addr, ":") == 0 {
+			return 0, false
+		}
+		_ = host
+		return 0, false
+	}
+	_ = host
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 {
+		return 0, false
+	}
+	return p, true
+}
+
+
+
+
+// -------- challenge (source IP redirect) --------
+
+func (b *Backend) AddChallenge(ip net.IP, ttl *time.Duration) error {
+	if ip == nil {
+		return errors.New("nil ip")
+	}
+	set := challengeV4
+	if ip.To4() == nil {
+		set = challengeV6
+	}
+	elem := ip.String()
+
+	_ = b.RemoveChallenge(ip)
+
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
+
+	out, err := b.nftAddElementArgv(set, elem, ttlStr)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(out, "already exists") || strings.Contains(out, "File exists") {
+		_ = b.RemoveChallenge(ip)
+		if out2, err2 := b.nftAddElementArgv(set, elem, ttlStr); err2 == nil {
+			return nil
+		} else {
+			return fmt.Errorf("nft add challenge (retry) failed: %v: %s", err2, out2)
+		}
+	}
+	return fmt.Errorf("nft add challenge failed: %v: %s", err, out)
+}
+
+func (b *Backend) RemoveChallenge(ip net.IP) error {
+	if ip == nil {
+		return errors.New("nil ip")
+	}
+	set := challengeV4
+	elem := ip.String()
+	if ip.To4() == nil {
+		set = challengeV6
+	}
+	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
+	out, err := b.nftOut(cmd)
+	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+		return fmt.Errorf("nft: %v: %s", err, out)
+	}
+	return nil
 }
