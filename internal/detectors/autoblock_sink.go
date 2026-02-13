@@ -15,6 +15,8 @@ import (
     "cfm/internal/notify"
 
     "strings"
+
+    "cfm/internal/challengeid"
 )
 
 type sectionSink struct {
@@ -187,6 +189,10 @@ if core.IsSelfIP(ipStr) {
             }
         }
 
+// ✅ CID issue: stable per-IP for this challenge TTL
+cid := challengeid.Global.GetOrNew(ipStr, ttl)
+out.Extra["cid"] = cid
+
         // Global challenge cooldown per IP (prevents loops/spam)
         if s.chalCooldown > 0 {
             now := out.When
@@ -202,17 +208,18 @@ if core.IsSelfIP(ipStr) {
                 out.Extra["cooldown"] = s.chalCooldown.String()
                 s.chalMu.Unlock()
 
-                // log once (optional)
-                logging.LogfCHALLENGES(
-                    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s",
-                    ipStr,
-                    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-                    out.Extra["host"],
-                    out.Extra["uri"],
-                    ttl.String(),
-                    out.Extra["enforced"],
-                    out.Extra["cooldown"],
-                )
+                // log first
+logging.LogfCHALLENGES(
+    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s",
+    ipStr,
+    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+    out.Extra["host"],
+    out.Extra["uri"],
+    ttl.String(),
+    out.Extra["enforced"],
+    out.Extra["cooldown"],
+    out.Extra["cid"],
+)
 
                 if s.inner != nil { s.inner.Publish(out) }
                 return
@@ -299,19 +306,20 @@ if enforced == "challenge" && s.chalCooldown > 0 {
         }
 
         // --- Challenges log file (separate) ---
-        logging.LogfCHALLENGES(
-            "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s",
-            ipStr,
-            firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-            out.Extra["host"],
-            out.Extra["uri"],
-            out.Extra["method"],
-            out.Extra["status"],
-            ttl.String(),
-            out.Extra["enforced"],
-            out.Extra["challenge_fails"],
-            out.Extra["escalated"],
-        )
+logging.LogfCHALLENGES(
+    "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s",
+    ipStr,
+    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+    out.Extra["host"],
+    out.Extra["uri"],
+    out.Extra["method"],
+    out.Extra["status"],
+    ttl.String(),
+    out.Extra["enforced"],
+    out.Extra["challenge_fails"],
+    out.Extra["escalated"],
+    out.Extra["cid"],
+)
 
         // --- Notify (same notify system) ---
         smp := out.Samples

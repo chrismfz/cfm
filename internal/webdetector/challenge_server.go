@@ -3,7 +3,6 @@ package webdetector
 import (
 	"context"
 	"crypto/tls"
-//	"encoding/json"
 	"io"
 	"fmt"
 	"net"
@@ -24,6 +23,7 @@ import (
         "crypto/subtle"
 	"crypto/rand"
 	"sync"
+	"cfm/internal/challengeid"
 
 )
 
@@ -83,6 +83,13 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
         }
 }
 
+func clampCID(s string) string {
+        s = strings.TrimSpace(s)
+        if len(s) < 8 || len(s) > 64 { // sanity
+                return ""
+        }
+        return s
+}
 
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
 	mux := http.NewServeMux()
@@ -124,12 +131,13 @@ verifyStart := time.Now()
 host := cleanHost(r.Host)
 
 ip := clientIP(r)
-
+ipStr := ""
                 if ip == nil {
                         http.Error(w, "bad client ip", http.StatusBadRequest)
                         return
                 }
 
+                ipStr = ip.String()
                 next := r.URL.Query().Get("next")
                 if next == "" { next = "/" }
                 // prevent open redirect
@@ -185,11 +193,20 @@ if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
 }
 
 
-cid := strings.TrimSpace(r.Header.Get("X-CFM-CID"))
+
+
+cid := clampCID(r.Header.Get("X-CFM-CID"))
 if cid == "" {
-        http.Error(w, "missing cid", http.StatusForbidden)
+        http.Error(w, "bad cid", http.StatusForbidden)
         return
 }
+
+        // IMPORTANT: cid must match what was issued for this IP by the sink/challengeid store
+        if !challengeid.Global.Verify(ipStr, cid) {
+                http.Error(w, "cid mismatch", http.StatusForbidden)
+                return
+        }
+
 if !s.cidMarkOnce(cid, cfg.TTL) {
         http.Error(w, "reused cid", http.StatusForbidden)
         return
@@ -207,6 +224,8 @@ logging.LogfCHALLENGES(
 )
 
 
+                // consume CID after a successful solve
+                _ = challengeid.Global.Solved(ipStr, cid)
 
                 // Release:
                 // 1) remove from challenge set (so no more redirect)
@@ -223,21 +242,6 @@ logging.LogfCHALLENGES(
                 time.Sleep(400 * time.Millisecond)
 
 
-/* OLD Method - had issues with http://
-                // Redirect back to original host+path
-                host := cleanHost(r.Host)
-                scheme := "http"
-                if r.TLS != nil {
-                        scheme = "https"
-                } else {
-                        // if you always want https after solve, force it:
-                       // scheme = "https"
-                }
-                target := scheme + "://" + host + next
-                w.Header().Set("Cache-Control", "no-store")
-                w.Header().Set("Connection", "close")
-                http.Redirect(w, r, target, http.StatusFound)
-*/
 
 // Redirect back to original path (relative redirect avoids scheme/host loops)
 w.Header().Set("Cache-Control", "no-store")
@@ -276,6 +280,7 @@ http.Redirect(w, r, next, http.StatusSeeOther) // 303
     if r.URL.Path != "/" {
         next := r.URL.RequestURI()
         w.Header().Set("Cache-Control", "no-store")
+
         http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusFound)
         return
     }
@@ -291,6 +296,7 @@ http.Redirect(w, r, next, http.StatusSeeOther) // 303
                         return
                 }
 
+                ipStr := ip.String()
                 // If already solved (cookie present + token valid), release and redirect.
                 next := r.URL.Query().Get("next")
                 if next == "" { next = "/" }
@@ -336,6 +342,11 @@ cfg := defaultPowConfig()
 powTok := ""
 cid := ""
 
+                // CID must already be issued by the sink for this IP
+                if cfg.Enabled {
+                        cid = clampCID(challengeid.Global.Get(ipStr))
+                }
+
 if cfg.Enabled {
         nonce16 := make([]byte, 16)
         if _, err := rand.Read(nonce16); err == nil {
@@ -346,14 +357,14 @@ if cfg.Enabled {
                 }
         }
 
-        // CID: one-time-use id to prevent PoW/token replay within TTL
-        cidBytes := make([]byte, 12)
-        if _, err := rand.Read(cidBytes); err == nil {
-                cid = base64.RawURLEncoding.EncodeToString(cidBytes)
-        }
 }
 
-if cfg.Enabled && (powTok == "" || cid == "") {
+if cfg.Enabled && cid == "" {
+        http.Error(w, "missing cid", http.StatusForbidden)
+        return
+}
+
+if cfg.Enabled && powTok == "" {
         http.Error(w, "pow unavailable", http.StatusInternalServerError)
         return
 }
