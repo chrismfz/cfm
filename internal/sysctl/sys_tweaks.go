@@ -40,8 +40,24 @@ func ApplyTweaks(c *cfg.SystemTweaksConfig) error {
 		"net/ipv4/conf/all/rp_filter":                             itoa(c.RPFilter),
 		"net/ipv4/conf/all/accept_redirects":                      bool01(c.AcceptRedirects),
 		"net/ipv4/conf/all/send_redirects":                        bool01(c.SendRedirects),
-		// Safety net (συμπληρωματικό)
-		"net/ipv4/tcp_syncookies":                                 "1",
+
+    "net/ipv4/conf/default/rp_filter":                    itoa(c.RPFilter),
+    "net/ipv4/conf/default/accept_redirects":             bool01(c.AcceptRedirects),
+    "net/ipv4/conf/default/send_redirects":               bool01(c.SendRedirects),
+
+    // IPv6 hygiene (safe defaults)
+    "net/ipv6/conf/all/accept_redirects":                 "0",
+    "net/ipv6/conf/all/send_redirects":                   "0",
+    "net/ipv6/conf/default/accept_redirects":             "0",
+    "net/ipv6/conf/default/send_redirects":               "0",
+
+    // Needed for DNAT -> 127.0.0.1 (challenge loopback listeners)
+    // Default ON (when SYS_TWEAKS_ENABLE=1)
+    "net/ipv4/conf/all/route_localnet":                   "1",
+    "net/ipv4/conf/default/route_localnet":               "1",
+
+	// Safety net (συμπληρωματικό)
+	"net/ipv4/tcp_syncookies":                                 "1",
 	}
 
 	// nf_conntrack_tcp_loose -> 0 όταν strict
@@ -142,12 +158,20 @@ func persistSysctlFile(kv map[string]string) error {
 		"net.ipv4.conf.all.rp_filter",
 		"net.ipv4.conf.all.accept_redirects",
 		"net.ipv4.conf.all.send_redirects",
+    "net.ipv4.conf.default.rp_filter",
+    "net.ipv4.conf.default.accept_redirects",
+    "net.ipv4.conf.default.send_redirects",
+    "net.ipv4.conf.all.route_localnet",
+    "net.ipv4.conf.default.route_localnet",
+    "net.ipv6.conf.all.accept_redirects",
+    "net.ipv6.conf.all.send_redirects",
+    "net.ipv6.conf.default.accept_redirects",
+    "net.ipv6.conf.default.send_redirects",
 	}
 	// Γράψε μόνο όσα υπήρχαν στο kv
 	for _, k := range keys {
-		kProc := strings.ReplaceAll(k, ".", "/") // μετατροπή σε proc-style
-		kProc = strings.ReplaceAll(kProc, "net/", "net/") // noop, απλώς οπτική
-		if v, ok := kv[strings.ReplaceAll(k, ".", "/")]; ok {
+ kProc := strings.ReplaceAll(k, ".", "/")
+ if v, ok := kv[kProc]; ok {
 			fmt.Fprintf(&b, "%s = %s\n", k, v)
 		}
 	}

@@ -3,11 +3,13 @@ package webdetector
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
+//	"encoding/json"
+	"io"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+        "unicode/utf8"
 	"strings"
 	"time"
 
@@ -44,6 +46,17 @@ type challengeRedirector interface {
         EnsureChallengeRedirect(httpListen, httpsListen string) error
 }
 
+func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
+        h, p, err := net.SplitHostPort(strings.TrimSpace(addr))
+        if err != nil {
+                return "", false
+        }
+        if strings.TrimSpace(h) != "127.0.0.1" {
+                return "", false
+        }
+        // build "[::1]:port"
+        return net.JoinHostPort("::1", p), true
+}
 
 // Optional: cooldown-bypass set (recommended to avoid loops).
 type challengeOKer interface {
@@ -51,6 +64,13 @@ type challengeOKer interface {
         RemoveChallengeOK(ip net.IP) error
 }
 
+const (
+        maxVerifyBodyBytes   = 1 << 10    // 1KB
+        maxUALen             = 256
+        maxHostLen           = 253
+        maxNextLen           = 2048
+        maxHeaderBytesTight  = 16 << 10   // 16KB (challenge server only)
+)
 
 
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
@@ -68,113 +88,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
         }
 
 	// basic endpoints
-
-mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-    host := r.Host
-    if h, _, err := net.SplitHostPort(host); err == nil {
-        host = h
-    }
-
-    w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-    // TLS details (only present on HTTPS)
-    tlsBlock := ""
-    if r.TLS != nil {
-        cs := r.TLS
-
-        // NOTE: PeerCertificates are *client* certs (mTLS). Most clients won't send any.
-        // For "served server cert", look it up from sslcollector using SNI.
-        served := "not_found"
-        servedFP := ""
-        servedNA := ""
-        servedSrc := ""
-        servedCertPath := ""
-        servedKeyPath := ""
-
-        if s.ssl != nil {
-            name := cs.ServerName
-            if name == "" {
-                name = host
-            }
-            if e := s.ssl.EntryForHost(name); e != nil {
-                served = "ok"
-                servedFP = e.Fingerprint
-                servedNA = e.NotAfter.Format(time.RFC3339)
-                servedSrc = string(e.Source)
-                servedCertPath = e.CertPath
-                servedKeyPath = e.KeyPath
-            }
-        }
-
-
-        tlsBlock = fmt.Sprintf(`
-<h3>TLS</h3>
-<ul>
-<li>tls_version: %s</li>
-<li>alpn: %s</li>
-<li>cipher: %s (0x%04x)</li>
-<li>sni: %s</li>
-<li>server_name: %s</li>
-<li>did_resume: %v</li>
-<li>mutual_tls: %v</li>
-<li>served: %s</li>
-<li>served_fp: %s</li>
-<li>served_not_after: %s</li>
-<li>served_source: %s</li>
-<li>served_cert_path: %s</li>
-<li>served_key_path: %s</li>
-</ul>`,
-            htmlEscape(tlsVersionString(cs.Version)),
-            htmlEscape(cs.NegotiatedProtocol),
-            htmlEscape(tls.CipherSuiteName(cs.CipherSuite)),
-            cs.CipherSuite,
-            htmlEscape(cs.ServerName),
-            htmlEscape(cs.ServerName),
-            cs.DidResume,
-            cs.HandshakeComplete && len(cs.VerifiedChains) > 0, // rough indicator
-            htmlEscape(served),
-            htmlEscape(servedFP),
-            htmlEscape(servedNA),
-            htmlEscape(servedSrc),
-            htmlEscape(servedCertPath),
-            htmlEscape(servedKeyPath),
-        )
-    }
-
-    fmt.Fprintf(w,
-        `<html><body style="font-family:sans-serif">
-<h2>CFM challenge MVP</h2>
-<p><b>OK</b></p>
-<ul>
-<li>proto: %s</li>
-<li>host: %s</li>
-<li>remote: %s</li>
-<li>time: %s</li>
-</ul>
-%s
-</body></html>`,
-        htmlEscape(r.Proto),
-        htmlEscape(host),
-        htmlEscape(r.RemoteAddr),
-        time.Now().Format(time.RFC3339),
-        tlsBlock,
-    )
-})
-
-
-
-
-
-
-
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": time.Now().Unix()})
-	})
-
-
-
-
         // --- VERIFY endpoint ---
         // JS will POST here with ?next=... and cookie set.
         mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +95,23 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
                         w.WriteHeader(http.StatusMethodNotAllowed)
                         return
                 }
+
+                // Hard cap body even though we don't use it (abuse / slowloris-ish clients)
+                r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
+                // Drain/close (some clients send junk; prevent resource pinning)
+                _, _ = io.Copy(io.Discard, r.Body)
+                _ = r.Body.Close()
+
+                // Header / Host / UA sanity (defense-in-depth)
+                if !basicHeaderSanity(w, r) {
+                        return
+                }
+                if isWeirdUA(r.UserAgent()) {
+                        // Optional: you can also add a short penalty here (block/extend challenge)
+                        http.Error(w, "bad ua", http.StatusForbidden)
+                        return
+                }
+
 
                 ip := clientIP(r)
                 if ip == nil {
@@ -195,6 +125,11 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
                 if !strings.HasPrefix(next, "/") {
                         next = "/"
                 }
+
+                if len(next) > maxNextLen {
+                        next = "/"
+                }
+
 
                 // Require cookie + HMAC token
                 c, err := r.Cookie("cfm_chal")
@@ -249,6 +184,15 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 
         mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 
+                // Header / Host / UA sanity (defense-in-depth)
+                if !basicHeaderSanity(w, r) {
+                        return
+                }
+                if isWeirdUA(r.UserAgent()) {
+                        http.Error(w, "bad ua", http.StatusForbidden)
+                        return
+                }
+
     // Only GET/HEAD should ever get the challenge HTML.
     if r.Method != http.MethodGet && r.Method != http.MethodHead {
         w.WriteHeader(http.StatusMethodNotAllowed)
@@ -279,7 +223,9 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
                 next := r.URL.Query().Get("next")
                 if next == "" { next = "/" }
                 if !strings.HasPrefix(next, "/") { next = "/" }
-
+                if len(next) > maxNextLen {
+                        next = "/"
+                }
 
                 // cookie challenge: set ONLY if missing (prevents token mismatch loops)
                 cookieVal := ""
@@ -314,26 +260,6 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 	// ---------------- HTTP server ----------------
 	if httpAddr != "" {
 		ln, err := net.Listen("tcp", httpAddr)
@@ -348,7 +274,7 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      20 * time.Second,
 			IdleTimeout:       60 * time.Second,
-			MaxHeaderBytes:    1 << 20,
+			MaxHeaderBytes:    maxHeaderBytesTight,
 		}
 
                 s.httpSrv.SetKeepAlivesEnabled(false)
@@ -359,6 +285,22 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 				logging.Logf("[challenge] HTTP serve error: %v", err)
 			}
 		}()
+
+                // If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
+                if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpAddr); ok {
+                        if ln6, err := net.Listen("tcp", v6addr); err == nil {
+                                go func() {
+                                        logging.Logf("[challenge] HTTP listening on %s", v6addr)
+                                        if err := s.httpSrv.Serve(ln6); err != nil && err != http.ErrServerClosed {
+                                                logging.Logf("[challenge] HTTP serve error (v6): %v", err)
+                                        }
+                                }()
+                        } else {
+                                logging.Logf("[challenge] HTTP v6 loopback listen failed on %s: %v", v6addr, err)
+                        }
+                }
+
+
 	}
 
 	// ---------------- HTTPS server ----------------
@@ -394,7 +336,7 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      20 * time.Second,
 			IdleTimeout:       60 * time.Second,
-			MaxHeaderBytes:    1 << 20,
+			MaxHeaderBytes:    maxHeaderBytesTight,
 			TLSConfig:         tlsCfg,
 		}
 
@@ -406,6 +348,21 @@ mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 				logging.Logf("[challenge] HTTPS serve error: %v", err)
 			}
 		}()
+
+                // If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
+                if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
+                        if ln6, err := net.Listen("tcp", v6addr); err == nil {
+                                go func() {
+                                        logging.Logf("[challenge] HTTPS listening on %s", v6addr)
+                                        if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
+                                                logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
+                                        }
+                                }()
+                        } else {
+                                logging.Logf("[challenge] HTTPS v6 loopback listen failed on %s: %v", v6addr, err)
+                        }
+                }
+
 	}
 
 	// stop on ctx cancel
@@ -480,6 +437,72 @@ func clientIP(r *http.Request) net.IP {
         ip := net.ParseIP(strings.TrimSpace(host))
         return ip
 }
+
+
+func basicHeaderSanity(w http.ResponseWriter, r *http.Request) bool {
+        // Host sanity (prevents some oddballs; also avoids huge Host headers)
+        host := r.Host
+        if host == "" || len(host) > maxHostLen {
+            http.Error(w, "bad host", http.StatusBadRequest)
+            return false
+        }
+        // Optional: reject whitespace/control in Host
+        for _, ch := range host {
+                if ch <= 0x20 || ch == 0x7f {
+                        http.Error(w, "bad host", http.StatusBadRequest)
+                        return false
+                }
+        }
+        // If you want: require SNI on HTTPS (most browsers do; stops random scanners)
+        if r.TLS != nil && strings.TrimSpace(r.TLS.ServerName) == "" {
+                http.Error(w, "missing sni", http.StatusBadRequest)
+                return false
+        }
+        return true
+}
+
+func isWeirdUA(ua string) bool {
+        ua = strings.TrimSpace(ua)
+        if ua == "" {
+                return true
+        }
+        if len(ua) > maxUALen {
+                return true
+        }
+        if !utf8.ValidString(ua) {
+                return true
+        }
+        // reject control chars / newlines (header smuggling-ish junk)
+        for _, r := range ua {
+                if r == '\r' || r == '\n' || r == 0 {
+                        return true
+                }
+                if r < 0x20 || r == 0x7f {
+                        return true
+                }
+        }
+        // very cheap heuristics: too repetitive, looks like binary, or obvious tools
+        lower := strings.ToLower(ua)
+        if strings.Contains(lower, "sqlmap") ||
+           strings.Contains(lower, "nikto") ||
+           strings.Contains(lower, "masscan") ||
+           strings.Contains(lower, "nmap") {
+                return true
+        }
+        // If it's insanely "dense" with punctuation, it's usually junk
+        punct := 0
+        for _, r := range ua {
+                if strings.ContainsRune(`"'\<>[]{}()|;`, r) {
+                        punct++
+                }
+        }
+        if punct >= 16 {
+                return true
+        }
+        return false
+}
+
+
 
 func secretKey() []byte {
         // Set once in service env for stability across restarts:

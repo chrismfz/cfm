@@ -1651,8 +1651,8 @@ func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
 // EnsureChallengeRedirect installs NAT redirect rules for IPs in challenge sets.
 // httpListen / httpsListen are like "127.0.0.1:9098" or ":9098".
 func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error {
-	httpPort, okHTTP := parseListenPort(httpListen)
-	httpsPort, okHTTPS := parseListenPort(httpsListen)
+    httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
+    httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
 	if !okHTTP && !okHTTPS {
 		// nothing to do
 		return nil
@@ -1681,23 +1681,42 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 
 	// HTTP :80 -> challenge httpPort
 	if okHTTP && httpPort > 0 {
-		// v4
-		if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
-			return err
-		}
-		// v6
-		if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
-			return err
-		}
 
-        // allow redirected traffic to reach local challenge listener
-        if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
-            return err
-        }
-        if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
-            return err
+        // DNAT to loopback if server is bound to loopback
+        if httpHost == "127.0.0.1" {
+            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 dnat to 127.0.0.1:%d`, challengeV4, httpPort)); err != nil {
+                return err
+            }
+            // allow challenged sources to reach loopback-dnatted listener
+            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpPort)); err != nil {
+                return err
+            }
+        } else {
+            // fallback: keep old behavior if not loopback-bound
+            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
+                return err
+            }
         }
 
+if httpHost == "::1" || httpHost == "127.0.0.1" {
+            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 dnat to [::1]:%d`, challengeV6, httpPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpPort)); err != nil {
+                return err
+            }
+        } else {
+            // fallback for v6
+            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
+                return err
+            }
+        }
 
 	}
 
@@ -1705,23 +1724,38 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 
 	// HTTPS :443 -> challenge httpsPort
 	if okHTTPS && httpsPort > 0 {
-		// v4
-		if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
-			return err
-		}
-		// v6
-		if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
-			return err
-		}
 
-        // allow redirected traffic to reach local challenge listener
-        if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
-            return err
-        }
-        if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
-            return err
+        if httpsHost == "127.0.0.1" {
+            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 dnat to 127.0.0.1:%d`, challengeV4, httpsPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
+                return err
+            }
+        } else {
+            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
+                return err
+            }
         }
 
+        if httpsHost == "::1" || httpsHost == "127.0.0.1" {
+            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 dnat to [::1]:%d`, challengeV6, httpsPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
+                return err
+            }
+        } else {
+            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
+                return err
+            }
+            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
+                return err
+            }
+        }
 
 
 	}
@@ -1729,26 +1763,26 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 	return nil
 }
 
-func parseListenPort(addr string) (int, bool) {
+func parseListenHostPort(addr string) (host string, port int, ok bool) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
-		return 0, false
+        return "", 0, false
 	}
-	host, portStr, err := net.SplitHostPort(addr)
+        h, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		// handle ":9098" (SplitHostPort accepts it) or "9098" (not valid)
 		if strings.Count(addr, ":") == 0 {
-			return 0, false
+               return "", 0, false
 		}
-		_ = host
-		return 0, false
+        return "", 0, false
 	}
-	_ = host
+
+        host = strings.TrimSpace(h)
 	p, err := strconv.Atoi(portStr)
 	if err != nil || p <= 0 {
-		return 0, false
+        return host, 0, false
 	}
-	return p, true
+       return host, p, true
 }
 
 

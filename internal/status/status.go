@@ -99,110 +99,12 @@ func shOut(cmd string) string {
 	return string(out)
 }
 
-func ackguardInstalled() bool {
-	s := shOut("nft list chain inet cfm flood 2>/dev/null")
-	return strings.Contains(s, "jump ackguard")
-}
-
-func ackguardPorts() string {
-	s := shOut("nft list set inet cfm ackguard_tcp_ports 2>/dev/null")
-	i := strings.Index(s, "elements = {")
-	if i == -1 { return "(none)" }
-	j := strings.Index(s[i:], "}")
-	if j == -1 { return "(none)" }
-	inner := strings.TrimSpace(s[i+len("elements = {") : i+j])
-	// collapse spaces
-	inner = strings.ReplaceAll(inner, "\n", " ")
-	inner = strings.Join(strings.Fields(inner), " ")
-	// return as-is (e.g., "80, 443, 25-30")
-	return strings.ReplaceAll(inner, " ,", ",")
-}
-
-type AckguardFeatures struct {
-	MatchInvalid  bool
-	DropNonSynNew bool
-	DropSynAckNew bool
-	RSTGuard      bool
-	FragGuard     bool
-}
-
 var (
     reAckOnly = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == ack|ack / syn,ack)`)
     reSynAck  = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == \(syn\|ack\)|syn,ack / syn,ack)`)
     reNoSyn   = regexp.MustCompile(`tcp flags (?:& syn == 0|! syn)`)
 )
 
-func ackguardFeatures() AckguardFeatures {
-    s := shOut("nft list chain inet cfm ackguard 2>/dev/null")
-
-    // helpers to check both state and flag patterns
-    has := func(needState, needFlag *regexp.Regexp) bool {
-        for _, line := range strings.Split(s, "\n") {
-            line = strings.TrimSpace(line)
-            if needState.MatchString(line) && needFlag.MatchString(line) {
-                return true
-            }
-        }
-        return false
-    }
-
-    reStateNew     := regexp.MustCompile(`\bct state new\b`)
-    reStateInvalid := regexp.MustCompile(`\bct state invalid\b`)
-
-    return AckguardFeatures{
-        MatchInvalid:  has(reStateInvalid, reAckOnly),
-        DropNonSynNew: has(reStateNew,     reNoSyn),
-        DropSynAckNew: has(reStateNew,     reSynAck),
-
-        // RSTGuard: treat as enabled if we see *any* rst rule (NEW+RST or ESTABLISHED RST meter)
-        RSTGuard: strings.Contains(s, "flags & rst == rst") || strings.Contains(s, " flags rst"),
-
-        // FragGuard: either IPv4 or IPv6 fragment match present
-        FragGuard: strings.Contains(s, " ip frag-off ") || strings.Contains(s, " ip6 frag "),
-    }
-}
-
-
-type AckguardCounters struct {
-	AckNewDrop   int
-	NonSynNew    int
-	SynAckIn     int
-	RSTNew       int
-	RSTEstV4     int
-	RSTEstV6     int
-	TCPFragV4    int
-	TCPFragV6    int
-}
-
-func readAckguardCounters() AckguardCounters {
-	out := shOut("nft list counters table inet cfm 2>/dev/null")
-	// very similar style to your daemon’s DumpFloodCounters scanner. :contentReference[oaicite:1]{index=1}
-	get := func(name string) int {
-		// look for:
-		// counter <name> { packets N bytes M }
-		idx := strings.Index(out, "counter "+name+" ")
-		if idx == -1 { return 0 }
-		frag := out[idx:]
-		// find "packets <num>"
-		p := strings.Index(frag, "packets ")
-		if p == -1 { return 0 }
-		frag = frag[p+len("packets "):]
-		end := strings.IndexFunc(frag, func(r rune) bool { return r < '0' || r > '9' })
-		if end == -1 { end = len(frag) }
-		n, _ := strconv.Atoi(strings.TrimSpace(frag[:end]))
-		return n
-	}
-	return AckguardCounters{
-		AckNewDrop: get("acknew_drop"),
-		NonSynNew:  get("nonsynnew_drop"),
-		SynAckIn:   get("synack_in_drop"),
-		RSTNew:     get("rstnew_drop"),
-		RSTEstV4:   get("rst_est_v4"),
-		RSTEstV6:   get("rst_est_v6"),
-		TCPFragV4:  get("tcp_frag_drop"),
-		TCPFragV6:  get("tcp6_frag_drop"),
-	}
-}
 
 func Run(args []string) {
 
@@ -318,143 +220,6 @@ if len(hs.Smart) > 0 {
 }
 fmt.Printf("\n ====================================================================== \n")
 
-
-
-
-
-
-
-
-
-
-
-
-
-// NEW ACK-Guard
-
-    // --- AckGuard summary & counters ---
-    if ackguardInstalled() {
-        ports := ackguardPorts()
-        feats := ackguardFeatures()
-        fmt.Printf("AckGuard: installed | ports=[%s]\n", ports)
-        // features line
-        fmt.Printf("  features: invalid=%v, nonsyn-new=%v, synack-new=%v, rst=%v, frag=%v\n",
-            feats.MatchInvalid, feats.DropNonSynNew, feats.DropSynAckNew, feats.RSTGuard, feats.FragGuard)
-        // counters (non-zero first, then zeros compact)
-        ac := readAckguardCounters()
-        type kv struct{ name string; val int }
-        all := []kv{
-            {"acknew_drop", ac.AckNewDrop},
-            {"nonsynnew_drop", ac.NonSynNew},
-            {"synack_in_drop", ac.SynAckIn},
-            {"rstnew_drop", ac.RSTNew},
-            {"rst_est_v4", ac.RSTEstV4},
-            {"rst_est_v6", ac.RSTEstV6},
-            {"tcp_frag_drop", ac.TCPFragV4},
-            {"tcp6_frag_drop", ac.TCPFragV6},
-        }
-        var nonzero, zero []kv
-        for _, x := range all {
-            if x.val > 0 { nonzero = append(nonzero, x) } else { zero = append(zero, x) }
-        }
-        if len(nonzero) > 0 {
-            fmt.Print("  counters: ")
-            for i, x := range nonzero {
-                if i > 0 { fmt.Print(", ") }
-                fmt.Printf("%s=%d", x.name, x.val)
-            }
-            fmt.Println()
-        }
-        if len(zero) > 0 {
-            // keep this compact; it helps confirm wiring even when idle
-            fmt.Print("  counters(zero): ")
-            for i, x := range zero {
-                if i > 0 { fmt.Print(", ") }
-                fmt.Print(x.name)
-            }
-            fmt.Println()
-        }
-    } else {
-        fmt.Println("AckGuard: not installed (no jump in flood)")
-    }
-
-
-// ACKGuard IP List
-r4 := listSetElemsDetailed("ackguard_recent_v4", 10)
-r6 := listSetElemsDetailed("ackguard_recent_v6", 10)
-
- printRecent := func(label string, items []recentHit, entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}) {
-    if len(items) == 0 { return }
-    fmt.Printf("  recent(%s):\n", label)
-    for _, it := range items {
-        if en != nil {
-            r := en.Lookup(it.IP)
-            metaParts := make([]string, 0, 3)
-            if r.ASNName != "" {
-                metaParts = append(metaParts, r.ASNName)
-            } else if r.ASN != 0 {
-                metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
-            }
-            if r.Country != "" {
-                if r.City != "" {
-                    metaParts = append(metaParts, r.Country+" / "+r.City)
-                } else {
-                    metaParts = append(metaParts, r.Country)
-                }
-            }
-            if r.PTR != "" {
-                metaParts = append(metaParts, r.PTR)
-            }
-            if it.Expires != "" {
-                metaParts = append(metaParts, "ttl="+it.Expires)
-            }
-
-            // --- gather ports from conntrack ---
-            ports := portBreakdownByIP(entries, tcpIn, locals, it.IP)
-            portList := make([]string, 0, len(ports))
-            for p := range ports {
-                portList = append(portList, strconv.Itoa(p))
-            }
-            sort.Strings(portList)
-
-            extra := ""
-            if len(portList) > 0 {
-                extra = " (Ports triggered: " + strings.Join(portList, ",") + ")"
-            }
-
-            if len(metaParts) > 0 {
-                fmt.Printf("    %-39s [%s]%s\n", it.IP, strings.Join(metaParts, " | "), extra)
-                continue
-            }
-
-        }
-        // fallback (no enrich or no meta)
-        if it.Expires != "" {
-            fmt.Printf("    %-39s [ttl=%s]\n", it.IP, it.Expires)
-        } else {
-            fmt.Printf("    %s\n", it.IP)
-        }
-    }
-}
-
- entries, _ := readConntrack()
- locals := localIPs()
- tcpIn := readTCPInPorts()
-
- printRecent("acknew v4", r4, entries, tcpIn, locals)
- printRecent("acknew v6", r6, entries, tcpIn, locals)
-
-
-//
-
-
-
-
-////
-
-
-
-
 // --- NEW: Conntrack usage ---
 	if ct, mx, err := readConntrackUsage(); err == nil && mx > 0 {
 		p := float64(ct) * 100 / float64(mx)
@@ -462,6 +227,13 @@ r6 := listSetElemsDetailed("ackguard_recent_v6", 10)
 	}
 
 
+// --- Conntrack + locals + TCP_IN ports (needed for TopN) ---
+entries, err := readConntrack()
+if err != nil {
+    return
+}
+locals := localIPs()
+tcpIn  := readTCPInPorts()
 
 
     // 2) Top N από conntrack (inbound προς TCP_IN)

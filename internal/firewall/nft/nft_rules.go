@@ -52,11 +52,6 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
     _ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
     _ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
 
-// NEW: AckGuard (runs first if enabled)
-if c.AckGuard.Enabled {
-    if err := b.ApplyAckGuard(&c.AckGuard); err != nil { return err }
-}
-
 
     // 3) Συνέχισε με τα υπόλοιπα
     b.ensureThrottleSets()
@@ -428,8 +423,6 @@ func reasonForName(name string) string {
     case strings.HasPrefix(name, "block_v4"), strings.HasPrefix(name, "block_v6"):
         return "Auto-block"
 
-    case name == "ackguard_recent_v4", name == "ackguard_recent_v6":
-        return "ack-new"
 
 case strings.HasPrefix(name, "th_connlimit_"):
 	// th_connlimit_<port>_<proto>_(v4|v6) → reason = "connlimit_<port>_<proto>"
@@ -605,11 +598,6 @@ if enabled["connlimit"] {
 
 }
 
-// AckGuard recent offenders → autoblock, with reason.
-if enabled["ack"] {
-    record("ackguard_recent_v4")
-    record("ackguard_recent_v6")
-}
 
     // --- autoblock από τις ενεργές πηγές ---
     if b.cfg != nil && b.cfg.Throttle.Enabled {
@@ -746,9 +734,7 @@ func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
         thV4Hits[ip] = append(thV4Hits[ip], now)
         thV4Hits[ip] = pruneOld(thV4Hits[ip], now.Add(-window))
         if len(thV4Hits[ip]) >= tc.Hits {
-              if newTC, skip := b.overrideByReason(ip, tc); !skip {
-            _ = b.addToBlockSet("v4", ip, newTC)
-        }
+            _ = b.addToBlockSet("v4", ip, tc)
             delete(thV4Hits, ip)
         }
     }
@@ -756,9 +742,7 @@ func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
         thV6Hits[ip] = append(thV6Hits[ip], now)
         thV6Hits[ip] = pruneOld(thV6Hits[ip], now.Add(-window))
         if len(thV6Hits[ip]) >= tc.Hits {
-                 if newTC, skip := b.overrideByReason(ip, tc); !skip {
-            _ = b.addToBlockSet("v6", ip, newTC)
-        }
+            _ = b.addToBlockSet("v6", ip, tc)
             delete(thV6Hits, ip)
         }
     }
@@ -1294,41 +1278,6 @@ func (b *Backend) enrichLabel(ip string) string {
 	}
 	return "  —  " + strings.Join(parts, " | ")
 }
-
-
-
-
-
-
-
-// nft_rules.go (near other small helpers)
-func (b *Backend) overrideByReason(ip string, tc cfgpkg.ThrottleConfig) (cfgpkg.ThrottleConfig, bool /*skip*/) {
-    r := strings.ToLower(strings.TrimSpace(lastThrottleReason[ip]))
-    if r != "ack-new" || b.cfg == nil {
-        return tc, false
-    }
-    ac := b.cfg.AckGuard
-    switch strings.ToLower(ac.ActionMode) {
-    case "off":
-        // do nothing for ack-new; skip enforcement entirely
-        return tc, true
-    case "dryrun":
-        tc.Mode = "dryrun"
-        if ac.ActionTTL > 0 { tc.TTLSeconds = ac.ActionTTL }
-        return tc, false
-    case "ttl":
-        tc.Mode = "ttl"
-        if ac.ActionTTL > 0 { tc.TTLSeconds = ac.ActionTTL }
-        return tc, false
-    case "permanent":
-        tc.Mode = "permanent"
-        return tc, false
-    default:
-        // fall back to global autoblock config
-        return tc, false
-    }
-}
-
 
 
 

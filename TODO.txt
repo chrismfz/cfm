@@ -1,0 +1,41 @@
+
+# ---------- Hardening (root-friendly baseline) ----------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+
+# Memory / exec hardening (usually OK for Go)
+MemoryDenyWriteExecute=yes
+
+# Don't let it write to the OS except where you allow
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cfm /var/log/cfm /run/cfm
+
+# If you need to read lots of logs, prefer read-only (do NOT add to ReadWritePaths)
+ReadOnlyPaths=/var/log /etc /usr /run
+
+# Networking: keep it enabled, but block raw sockets etc.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Optional: system call filtering (conservative)
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io @file-system @io-event @signal
+
+# Tighten proc visibility a bit
+ProcSubset=pid
+ProtectProc=invisible
+
+# Resource limits (prevent silly DoS)
+LimitNOFILE=65536
+TasksMax=4096

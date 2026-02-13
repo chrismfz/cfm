@@ -24,7 +24,6 @@ type Config struct {
 	Portscan   PortscanConfig
 	SystemTweaks SystemTweaksConfig
 	Hardening  HardeningConfig
-	AckGuard AckGuardConfig
 	SMTPBlock SMTPBlockConfig
 	MaxMind  MaxMindConfig
 	Debug     DebugConfig
@@ -75,29 +74,6 @@ type MaxMindConfig struct {
 }
 
 
-type AckGuardConfig struct {
-    Enabled bool            `conf:"ACKGUARD_ENABLED"`        // 1/0
-    Rate    int             `conf:"ACKGUARD_RATE"`           // packets per second
-    Burst   int             `conf:"ACKGUARD_BURST"`          // packets
-    Ports   []PortRange     `conf:"ACKGUARD_PORTS"`          // same PortRange you use elsewhere
-
-   // NEW toggles (all apply only to the Ports above)
-    MatchInvalid    bool `conf:"ACKGUARD_MATCH_INVALID"`     // count+drop INVALID+ACK
-    DropNonSynNew   bool `conf:"ACKGUARD_DROP_NONSYN_NEW"`   // drop NEW without SYN
-    DropSynAckNew   bool `conf:"ACKGUARD_DROP_SYNACK_NEW"`   // drop unsolicited SYN-ACK
-    RSTGuard        bool `conf:"ACKGUARD_RST_GUARD"`         // enable RST rules below
-    RSTRate         int  `conf:"ACKGUARD_RST_RATE"`          // per-source RST rate (established)
-    RSTBurst        int  `conf:"ACKGUARD_RST_BURST"`         // per-source RST burst
-    FragGuard       bool `conf:"ACKGUARD_FRAG_GUARD"`        // drop TCP fragments to ports
-
-  // Recent (tracking)
-    RecentMode string // "dryrun"|"ttl"|"permanent"
-    RecentTTL  int    // seconds when RecentMode == "ttl"
-
-    // Action (blocking decision now)
-    ActionMode string // "off"|"dryrun"|"ttl"|"permanent"
-    ActionTTL  int    // seconds when ActionMode == "ttl"
-}
 
 type HardeningConfig struct {
     BlockBadTCPFlags bool // BLOCK_BAD_TCP_FLAGS
@@ -129,6 +105,14 @@ type SystemTweaksConfig struct {
 	RPFilter        int  // SYS_RP_FILTER (0/1/2 σε κάποια συστήματα, αλλά 1 είναι το σύνηθες)
 	AcceptRedirects bool // SYS_ACCEPT_REDIRECTS
 	SendRedirects   bool // SYS_SEND_REDIRECTS
+
+        // DNAT-to-loopback support (needed for challenge DNAT -> 127.0.0.1)
+        RouteLocalnet     bool   // SYS_ROUTE_LOCALNET (0/1)
+        RouteLocalnetIF   string // SYS_ROUTE_LOCALNET_IF (e.g. eth0) optional
+IPv6AcceptRedirects bool // SYS_IPV6_ACCEPT_REDIRECTS
+IPv6SendRedirects   bool // SYS_IPV6_SEND_REDIRECTS
+IPv6Disable         bool // SYS_IPV6_DISABLE (0/1) optional hard kill switch if you ever want it
+
 }
 
 
@@ -302,38 +286,8 @@ if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
 if c.Hardening.ICMPRate < 0 { c.Hardening.ICMPRate = 0 }
 if c.Hardening.ICMPBurst < 0 { c.Hardening.ICMPBurst = 0 }
 
-
-
-  // AckGuard defaults
-    if c.AckGuard.RecentMode == "" {
-        c.AckGuard.RecentMode = "ttl"
-    }
-    switch c.AckGuard.RecentMode {
-    case "dryrun", "ttl", "permanent":
-        // ok
-    default:
-        c.AckGuard.RecentMode = "ttl"
-    }
-    if c.AckGuard.RecentMode == "ttl" && c.AckGuard.RecentTTL <= 0 {
-        c.AckGuard.RecentTTL = 3600
-    }
-
-    if c.AckGuard.ActionMode == "" {
-        c.AckGuard.ActionMode = "off"
-    }
-    switch c.AckGuard.ActionMode {
-    case "off", "dryrun", "ttl", "permanent":
-        // ok
-    default:
-        c.AckGuard.ActionMode = "off"
-    }
-    if c.AckGuard.ActionMode == "ttl" && c.AckGuard.ActionTTL <= 0 {
-        c.AckGuard.ActionTTL = 86400
-    }
-
-
-
 }
+
 
 // Validate clamps, normalizes and ensures cross-field coherence.
 func (c *Config) Validate() error {
@@ -587,77 +541,6 @@ case "UDP_OUT":
 
 
 
-    // --- ACKGUARD ---
-    case "ACKGUARD_ENABLED":
-        cfg.AckGuard.Enabled = (val == "1" || strings.ToLower(val) == "true")
-    case "ACKGUARD_RATE":
-        if n, err := strconv.Atoi(val); err == nil {
-            cfg.AckGuard.Rate = n
-        }
-    case "ACKGUARD_BURST":
-        if n, err := strconv.Atoi(val); err == nil {
-            cfg.AckGuard.Burst = n
-        }
-    case "ACKGUARD_PORTS":
-        cfg.AckGuard.Ports = append(cfg.AckGuard.Ports, parsePorts(val)...)
-    case "ACKGUARD_MATCH_INVALID":
-        cfg.AckGuard.MatchInvalid = (val == "1" || strings.ToLower(val) == "true")
-
-    case "ACKGUARD_DROP_NONSYN_NEW":
-        cfg.AckGuard.DropNonSynNew = (val == "1" || strings.ToLower(val) == "true")
-
-    case "ACKGUARD_DROP_SYNACK_NEW":
-        cfg.AckGuard.DropSynAckNew = (val == "1" || strings.ToLower(val) == "true")
-
-    case "ACKGUARD_RST_GUARD":
-        cfg.AckGuard.RSTGuard = (val == "1" || strings.ToLower(val) == "true")
-
-    case "ACKGUARD_RST_RATE":
-        if n, err := strconv.Atoi(val); err == nil {
-            cfg.AckGuard.RSTRate = n
-        }
-
-    case "ACKGUARD_RST_BURST":
-        if n, err := strconv.Atoi(val); err == nil {
-            cfg.AckGuard.RSTBurst = n
-        }
-
-    case "ACKGUARD_FRAG_GUARD":
-        cfg.AckGuard.FragGuard = (val == "1" || strings.ToLower(val) == "true")
-
-
-
-
-
-  // --- ACKGUARD (modes & ttls) ---
-    case "ACKGUARD_RECENT_MODE":
-        v := strings.ToLower(val)
-        switch v {
-        case "dryrun", "ttl", "permanent":
-            cfg.AckGuard.RecentMode = v
-        default:
-            cfg.AckGuard.RecentMode = "ttl"
-        }
-
-    case "ACKGUARD_RECENT_TTL":
-        cfg.AckGuard.RecentTTL = parseInt(val)
-
-    case "ACKGUARD_ACTION_MODE":
-        v := strings.ToLower(val)
-        switch v {
-        case "off", "dryrun", "ttl", "permanent":
-            cfg.AckGuard.ActionMode = v
-        default:
-            cfg.AckGuard.ActionMode = "off"
-        }
-
-    case "ACKGUARD_ACTION_TTL":
-        cfg.AckGuard.ActionTTL = parseInt(val)
-
-
-
-
-
 
 
 // Hardening
@@ -708,6 +591,10 @@ case "SYS_ACCEPT_REDIRECTS":
 	cfg.SystemTweaks.AcceptRedirects = parseBool(val)
 case "SYS_SEND_REDIRECTS":
 	cfg.SystemTweaks.SendRedirects = parseBool(val)
+case "SYS_ROUTE_LOCALNET":
+        cfg.SystemTweaks.RouteLocalnet = parseBool(val)
+case "SYS_ROUTE_LOCALNET_IF":
+        cfg.SystemTweaks.RouteLocalnetIF = val
 
 
 
@@ -1008,6 +895,11 @@ func (c *SystemTweaksConfig) SetDefaults() {
         if c.RPFilter == 0 {
                 c.RPFilter = 1
         }
+        // RouteLocalnet default: ON (safe + required for DNAT->127.0.0.1 patterns)
+        // Only applied when SYS_TWEAKS_ENABLE=1.
+        c.RouteLocalnet = true
+
+
 
 }
 

@@ -1,0 +1,107 @@
+mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+    host := r.Host
+    if h, _, err := net.SplitHostPort(host); err == nil {
+        host = h
+    }
+
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+    // TLS details (only present on HTTPS)
+    tlsBlock := ""
+    if r.TLS != nil {
+        cs := r.TLS
+
+        // NOTE: PeerCertificates are *client* certs (mTLS). Most clients won't send any.
+        // For "served server cert", look it up from sslcollector using SNI.
+        served := "not_found"
+        servedFP := ""
+        servedNA := ""
+        servedSrc := ""
+        servedCertPath := ""
+        servedKeyPath := ""
+
+        if s.ssl != nil {
+            name := cs.ServerName
+            if name == "" {
+                name = host
+            }
+            if e := s.ssl.EntryForHost(name); e != nil {
+                served = "ok"
+                servedFP = e.Fingerprint
+                servedNA = e.NotAfter.Format(time.RFC3339)
+                servedSrc = string(e.Source)
+                servedCertPath = e.CertPath
+                servedKeyPath = e.KeyPath
+            }
+        }
+
+        tlsBlock = fmt.Sprintf(`
+<h3>TLS</h3>
+<ul>
+<li>tls_version: %s</li>
+<li>alpn: %s</li>
+<li>cipher: %s (0x%04x)</li>
+<li>sni: %s</li>
+<li>server_name: %s</li>
+<li>did_resume: %v</li>
+<li>mutual_tls: %v</li>
+<li>served: %s</li>
+<li>served_fp: %s</li>
+<li>served_not_after: %s</li>
+<li>served_source: %s</li>
+<li>served_cert_path: %s</li>
+<li>served_key_path: %s</li>
+</ul>`,
+            htmlEscape(tlsVersionString(cs.Version)),
+            htmlEscape(cs.NegotiatedProtocol),
+            htmlEscape(tls.CipherSuiteName(cs.CipherSuite)),
+            cs.CipherSuite,
+            htmlEscape(cs.ServerName),
+            htmlEscape(cs.ServerName),
+            cs.DidResume,
+            cs.HandshakeComplete && len(cs.VerifiedChains) > 0, // rough indicator
+            htmlEscape(served),
+            htmlEscape(servedFP),
+            htmlEscape(servedNA),
+            htmlEscape(servedSrc),
+            htmlEscape(servedCertPath),
+            htmlEscape(servedKeyPath),
+        )
+    }
+    fmt.Fprintf(w,
+        `<html><body style="font-family:sans-serif">
+<h2>CFM challenge MVP</h2>
+<p><b>OK</b></p>
+<ul>
+<li>proto: %s</li>
+<li>host: %s</li>
+<li>remote: %s</li>
+<li>time: %s</li>
+</ul>
+%s
+</body></html>`,
+        htmlEscape(r.Proto),
+        htmlEscape(host),
+        htmlEscape(r.RemoteAddr),
+        time.Now().Format(time.RFC3339),
+        tlsBlock,
+    )
+})
+
+
+
+
+
+
+
+
+
+
+
+
+
+        mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+                w.Header().Set("Content-Type", "application/json")
+                _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": time.Now().Unix()})
+        })
+
