@@ -18,6 +18,23 @@ func (OutcomeLoggerSink) Publish(a core.Alert) {
 		switch a.Extra["blocked"] {
 		case "dryrun":
 			blocked = "DryRun"
+
+               case "challenge":
+                        // show challenge result
+                        if t := a.Extra["ttl"]; t != "" {
+                                blocked = "Challenged (ttl=" + t + ")"
+                        } else {
+                                blocked = "Challenged"
+                        }
+                        if esc := a.Extra["escalated"]; esc != "" {
+                                if bt := a.Extra["block_ttl"]; bt != "" {
+                                        blocked += " -> Escalated: " + esc + " (ttl=" + bt + ")"
+                                } else {
+                                        blocked += " -> Escalated: " + esc
+                                }
+                        }
+
+
 		case "yes":
 			switch a.Extra["block_mode"] {
 			case "permanent":

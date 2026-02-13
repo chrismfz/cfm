@@ -74,6 +74,13 @@ cfg := webdet.Config{
 	AgentCount: kvInt(kv, "AGENT_COUNT", 0),
 	MalPathCount: kvInt(kv, "MALPATH_COUNT", 0),
 
+        // Challenge-only paths (like MALPATH but for CHALLENGE action)
+        ChallengePathsEnabled: kvBool(kv, "CHALLENGE_PATHS", false),
+        ChallengePathsFile:    kvStrClean(kv, "CHALLENGE_PATHS_FILE", "/etc/cfm/webdetector_challenge_paths.txt"),
+        ChallengePathsCount:   kvInt(kv, "CHALLENGE_PATHS_COUNT", 1),
+        ChallengePathsTTL:     kvDur(kv, "CHALLENGE_PATHS_TTL", 30*time.Minute),
+
+
 }
 
 rawAgents := kvStrClean(kv, "AGENT_LIST", "")
@@ -143,11 +150,35 @@ if cfg.MalPathFile != "" {
 
 
 
+// CHALLENGE_PATHS_FILE (one entry per line; supports comments with #)
+if cfg.ChallengePathsEnabled && cfg.ChallengePathsFile != "" {
+        f, err := os.Open(cfg.ChallengePathsFile)
+        if err != nil {
+                logging.Logf("[webdetector] CHALLENGE_PATHS_FILE open failed: %s: %v", cfg.ChallengePathsFile, err)
+        } else {
+                defer f.Close()
+                sc := bufio.NewScanner(f)
+                for sc.Scan() {
+                        line := strings.TrimSpace(sc.Text())
+                        if line == "" || strings.HasPrefix(line, "#") {
+                                continue
+                        }
+                        line = strings.ToLower(line)
+
+                        // IMPORTANT: needs cfg.ChallengePathsList []string in webdet.Config
+                        cfg.ChallengePathsList = append(cfg.ChallengePathsList, line)
+                }
+                if err := sc.Err(); err != nil {
+                        logging.Logf("[webdetector] CHALLENGE_PATHS_FILE scan failed: %s: %v", cfg.ChallengePathsFile, err)
+                }
+        }
+}
 
 
 
+if cfg.Mode == "dir" { cfg.Mode = "folder" }
+engine := webdet.NewEngine(cfg)
 
-		engine := webdet.NewEngine(cfg)
 
 // normalize aliases
 if cfg.Mode == "dir" {

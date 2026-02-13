@@ -27,6 +27,14 @@ type sectionSink struct {
     last  map[string]time.Time // ip -> last block time (per section)
     enr   *enrich.Enricher
     ignore *IPIgnore // global ignore from [global]
+    chalMu    sync.Mutex
+    chalState map[string]challengeState
+
+}
+
+type challengeState struct {
+    Count    int
+    LastSeen time.Time
 }
 
 func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore) core.Sink {
@@ -38,8 +46,18 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
         last:    make(map[string]time.Time),
         enr:     enr,
         ignore:  ig,
+        chalState: make(map[string]challengeState),
     }
 }
+
+
+const (
+    defaultChallengeTTL        = 30 * time.Minute
+    defaultChallengeFailWindow = 30 * time.Minute
+    defaultChallengeFailN      = 3
+    defaultChallengeEscalate   = true
+)
+
 
 var reIP = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
 
@@ -152,6 +170,131 @@ if core.IsSelfIP(ipStr) {
         if s.inner != nil { s.inner.Publish(out) }
         return
     }
+
+
+
+    // --- CHALLENGE branch ---
+    // Triggered when detector emits Extra["action"]="challenge"
+    if out.Extra != nil && out.Extra["action"] == "challenge" {
+
+        // TTL (alert override -> default)
+        ttl := defaultChallengeTTL
+        if t := out.Extra["ttl"]; t != "" {
+            if d, err := time.ParseDuration(t); err == nil && d > 0 {
+                ttl = d
+            }
+        }
+
+        // Enforce challenge (no block here)
+        enforced := "challenge_failed"
+        if s.pol.Mode == "dryrun" {
+            enforced = "challenge_dryrun"
+        } else {
+            if err := s.fw.AddChallenge(ip, &ttl); err == nil {
+                enforced = "challenge"
+            } else {
+                out.Extra["challenge_err"] = err.Error()
+            }
+        }
+
+        // Mark outcome for outcome_sink + detector log
+        out.Extra["blocked"]    = "challenge"
+        out.Extra["block_mode"] = "ttl"
+        out.Extra["ttl"]        = ttl.String()
+        out.Extra["enforced"]   = enforced
+
+        // --- Escalation: challenged N times within window => block ---
+        // (simple heuristic: repeated challenge alerts means they keep hitting challenge rules)
+        if defaultChallengeEscalate && enforced == "challenge" {
+            now := out.When
+            if now.IsZero() { now = time.Now() }
+
+            s.chalMu.Lock()
+            st := s.chalState[ipStr]
+
+            if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) > defaultChallengeFailWindow {
+                st.Count = 0
+            }
+            st.Count++
+            st.LastSeen = now
+            s.chalState[ipStr] = st
+            s.chalMu.Unlock()
+
+            out.Extra["challenge_fails"] = fmt.Sprintf("%d", st.Count)
+
+            if st.Count >= defaultChallengeFailN {
+                // Escalate to normal block (TTL block)
+                bttl := s.pol.TTL
+                if bttl <= 0 { bttl = time.Hour }
+
+                comment := "CHALLENGE_FAIL"
+                if r := firstNonEmpty(out.Extra["rule"], out.Extra["reason"], string(out.Kind)); r != "" {
+                    comment = "CHALLENGE_FAIL | " + r
+                }
+
+                if s.pol.Mode != "dryrun" {
+                    if err := s.fw.AddBlock(ip, comment, &bttl); err == nil {
+                        out.Extra["escalated"] = "block"
+                        out.Extra["block_ttl"] = bttl.String()
+                    } else {
+                        out.Extra["escalated"] = "block_failed"
+                        out.Extra["block_err"] = err.Error()
+                    }
+                } else {
+                    out.Extra["escalated"] = "block_dryrun"
+                    out.Extra["block_ttl"] = bttl.String()
+                }
+            }
+        }
+
+        // --- Challenges log file (separate) ---
+        logging.LogfCHALLENGES(
+            "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s",
+            ipStr,
+            firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+            out.Extra["host"],
+            out.Extra["uri"],
+            out.Extra["method"],
+            out.Extra["status"],
+            ttl.String(),
+            out.Extra["enforced"],
+            out.Extra["challenge_fails"],
+            out.Extra["escalated"],
+        )
+
+        // --- Notify (same notify system) ---
+        smp := out.Samples
+        if len(smp) > 10 { smp = smp[:10] }
+
+        notify.Enqueue(notify.Event{
+            Kind:     "WEB/CHALLENGE",
+            Section:  s.section,
+            SrcIP:    ipStr,
+            Reason:   firstNonEmpty(out.Extra["rule"], out.Extra["reason"], "WEB/CHALLENGE"),
+            TTL:      ttl,
+            Count:    out.Count,
+            When:     time.Now(),
+            Severity: "info",
+            Samples:  smp,
+            Extra: map[string]string{
+                "rule":      out.Extra["rule"],
+                "host":      out.Extra["host"],
+                "uri":       out.Extra["uri"],
+                "method":    out.Extra["method"],
+                "status":    out.Extra["status"],
+                "enforced":  out.Extra["enforced"],
+                "fails":     out.Extra["challenge_fails"],
+                "escalated": out.Extra["escalated"],
+                "ttl_text":  out.Extra["ttl"],
+                "key":       a.Key,
+            },
+        })
+
+        // Publish final outcome once (like blocks) and exit.
+        if s.inner != nil { s.inner.Publish(out) }
+        return
+    }
+    // --- end CHALLENGE branch ---
 
 
 

@@ -52,6 +52,16 @@ type Config struct {
 	MalPathFile  string   // optional file with one entry per line
 	MalPathCount int
 
+// NEW CHALLENGE RULES//
+ChallengePathsList []string // loaded from CHALLENGE_PATHS_FILE
+
+ChallengePathsEnabled bool   // CHALLENGE_PATHS
+ChallengePathsFile    string // CHALLENGE_PATHS_FILE
+ChallengePathsCount   int    // CHALLENGE_PATHS_COUNT (optional threshold)
+ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
+
+
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -80,6 +90,17 @@ func (c *Config) FillDefaults() {
 	if c.Glob == "" {
 		c.Glob = "*.log"
 	}
+
+if c.ChallengePathsFile == "" {
+    c.ChallengePathsFile = "/etc/cfm/webdetector_challenge_paths.txt"
+}
+if c.ChallengePathsCount <= 0 {
+    c.ChallengePathsCount = 1 // challenge on first hit by default
+}
+if c.ChallengePathsTTL <= 0 {
+    c.ChallengePathsTTL = 30 * time.Minute
+}
+
 
 // Sensible defaults for the 40x combo detector (window defaults to 120s).
 if c.IP40xComboCount > 0 {
