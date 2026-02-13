@@ -126,15 +126,21 @@ type APIConfig struct {
 }
 
 type LoggingConfig struct {
-	Stdout bool   // true = log to stdout (LOG_STDOUT)
-	File   string // path to logfile, "" = disabled (LOG_FILE)
-	APIStdout bool   // API_LOG_STDOUT: αν δεν οριστεί, θα κληρονομήσει το Stdout
-	APIFile   string // API_LOG_FILE: path για API log, "" = derive από File (π.χ. /var/log/cfm.api.log)
-        DETECTORStdout bool
-        DETECTORFile   string
-        SMTPStdout bool   // SMTP_LOG_STDOUT
-        SMTPFile   string // SMTP_LOG_FILE (e.g. /var/log/cfm.smtp.log)
+    Stdout bool   // LOG_STDOUT
+    File   string // LOG_FILE
 
+    APIStdout bool   // API_LOG_STDOUT
+    APIFile   string // API_LOG_FILE
+
+    DETECTORStdout bool // DETECTOR_LOG_STDOUT
+    DETECTORFile   string // DETECTOR_LOG_FILE
+
+    // NEW: web challenges log sink
+    CHALLENGESStdout bool   // CHALLENGES_LOG_STDOUT
+    CHALLENGESFile   string // CHALLENGES_LOG_FILE
+
+    SMTPStdout bool   // SMTP_LOG_STDOUT
+    SMTPFile   string // SMTP_LOG_FILE
 }
 
 
@@ -390,6 +396,12 @@ case "DETECTOR_LOG_STDOUT":
     cfg.Logging.DETECTORStdout = parseBool(val)
 case "DETECTOR_LOG_FILE":
     cfg.Logging.DETECTORFile = val
+
+
+case "CHALLENGES_LOG_STDOUT":
+    cfg.Logging.CHALLENGESStdout = parseBool(val)
+case "CHALLENGES_LOG_FILE":
+    cfg.Logging.CHALLENGESFile = val
 
 
 // SMTP log sink (file/stdout) — CSF-like flat keys

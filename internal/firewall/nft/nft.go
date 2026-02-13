@@ -1176,6 +1176,19 @@ func (b *Backend) nftAddElementsExpr(setName string, elems []string, ttlStr stri
 	return nil
 }
 
+// AddElementsBulk: add elems to set in batches (no flush).
+// ttl==nil => no timeout. Safe/fast for large PERM loads.
+// NOTE: If elems already exist in the set, nft will error for that batch.
+// Use your seen-maps (or prefill them) to avoid duplicates.
+func (b *Backend) AddElementsBulk(setName string, elems []string, ttl *time.Duration) error {
+    ttlStr := ""
+    if ttl != nil && *ttl > 0 {
+        ttlStr = humanTimeout(*ttl)
+    }
+    return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
+}
+
+
 // expr runner
 func (b *Backend) nftExpr(expr string) error {
 	if debugEnv {
@@ -1672,6 +1685,15 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
     }
 
 
+    addInputRuleAt := func(pos int, expr string) error {
+        // Used for deterministic ordering relative to our accept-at-top rules.
+        if !b.ruleExists("input", expr) {
+            return b.nftCmd(fmt.Sprintf(`insert rule %s %s input position %d %s`, family, tableName, pos, expr))
+        }
+        return nil
+    }
+
+
 	addNatRule := func(expr string) error {
 		if !b.ruleExists(challengeNatChain, expr) {
 			return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr))
@@ -1759,6 +1781,17 @@ if httpHost == "::1" || httpHost == "127.0.0.1" {
 
 
 	}
+
+
+    // Kill existing keepalive connections to real web ports for challenged IPs.
+    // This forces clients to reconnect, so the next NEW connection hits the NAT redirect.
+    if err := addInputRuleAt(1, fmt.Sprintf(`ip saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV4)); err != nil {
+        return err
+    }
+    if err := addInputRuleAt(1, fmt.Sprintf(`ip6 saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV6)); err != nil {
+        return err
+    }
+
 
 	return nil
 }

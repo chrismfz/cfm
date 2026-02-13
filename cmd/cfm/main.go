@@ -914,6 +914,19 @@ func (w *fileWatcher) Changed() ([]byte, bool) {
 
 
 func runDaemon(args []string) {
+
+
+// timing helper for startup profiling
+step := func(name string) func() {
+    t := time.Now()
+    logging.Logf("[startup] begin %s", name)
+    return func() {
+        logging.Logf("[startup] end %s (%s)", name, time.Since(t))
+    }
+}
+
+
+
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	interval := fs.Duration("interval", 20*time.Second, "tick interval")
 	cfgFlag := fs.String("c", "", "config directory (contains cfm.allow / cfm.deny)")
@@ -935,62 +948,96 @@ func runDaemon(args []string) {
 
 
 	// Backend
-	be := getBackend()
-	if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
+done := step("backend:getBackend")
+be := getBackend()
+done()
+if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
+
+done = step("backend:EnsureBase")
+if err := be.EnsureBase(); err != nil {
+    done()
+    fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
+    os.Exit(1)
+}
+done()
+
+
 
 	//Notify manager
-	if err := notify.Init(cfgDir); err != nil {
-	    logging.Logf("[notify] init error: %v", err)
-	} else {
-	    logging.Logf("[notify] init OK")
-	}
+
+done = step("notify.Init")
+if err := notify.Init(cfgDir); err != nil {
+    done()
+    logging.Logf("[notify] init error: %v", err)
+} else {
+    done()
+    logging.Logf("[notify] init OK")
+}
+
 
 
 	// DynDNS manager (whitelist)
-	ddm := NewDynDNSManager(be, cfgDir)
-	_ = ddm.FileChanged()
-	_ = ddm.LoadOnce(context.Background())
+done = step("dyndns:NewDynDNSManager")
+ddm := NewDynDNSManager(be, cfgDir)
+done()
+
+done = step("dyndns:FileChanged")
+_ = ddm.FileChanged()
+done()
+
+done = step("dyndns:LoadOnce")
+_ = ddm.LoadOnce(context.Background())
+done()
+
+
+
 
 	// NFT backend extras
-	if nb, ok := be.(*nft.Backend); ok {
-		nb.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
-		nb.SetConfigDir(cfgDir)
-		notify.SetEnricher(nb.GetEnricher()) //  give notifier the same enricher instance
+done = step("nft:extras")
+if nb, ok := be.(*nft.Backend); ok {
+    nb.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
+    nb.SetConfigDir(cfgDir)
+    notify.SetEnricher(nb.GetEnricher())
+}
+done()
 
-
-	}
 
 	// Blocklists Manager (scheduler+apply)
-	var (
-		blMgr      *blocklists.Manager
-		nb         *nft.Backend
-		blReloadCh chan []blocklists.Feed
-	)
 
-	if x, ok := be.(*nft.Backend); ok {
-		nb = x
-		blMgr = blocklists.NewManager(blocklists.ApplierFunc(nb.ApplyFeed))
-		blMgr.Start(context.Background())
-		defer blMgr.Stop()
+done = step("blocklists:wiring")
+var (
+    blMgr      *blocklists.Manager
+    nb         *nft.Backend
+    blReloadCh chan []blocklists.Feed
+)
 
-		// Run Reload() async so startup (agent/detectors/heartbeat) is never blocked by huge feeds
-		blReloadCh = make(chan []blocklists.Feed, 1)
-		go func() {
-			for feeds := range blReloadCh {
-				start := time.Now()
-				blMgr.Reload(feeds)
-				logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
-				// Best-effort: prune old per-feed sets (keeps nft clean). Safe & fast.
-				if nb != nil {
-					keys := make([]string, 0, len(feeds))
-					for _, f := range feeds { keys = append(keys, f.Name) }
-					_ = nb.PruneExternalFeeds(keys)
-				}
-			}
-		}()
-		defer close(blReloadCh)
-	}
+if x, ok := be.(*nft.Backend); ok {
+    nb = x
+
+    blMgr = blocklists.NewManager(blocklists.ApplierFunc(nb.ApplyFeed))
+
+    // Start scheduler
+    blMgr.Start(context.Background())
+    defer blMgr.Stop()
+
+    blReloadCh = make(chan []blocklists.Feed, 1)
+
+    go func() {
+        for feeds := range blReloadCh {
+            start := time.Now()
+            blMgr.Reload(feeds)
+            logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
+
+            if nb != nil {
+                keys := make([]string, 0, len(feeds))
+                for _, f := range feeds { keys = append(keys, f.Name) }
+                _ = nb.PruneExternalFeeds(keys)
+            }
+        }
+    }()
+    defer close(blReloadCh)
+}
+done()
 
 
 
@@ -1070,20 +1117,75 @@ func runDaemon(args []string) {
 // ignore end//
 
 
+loadAll := func() {
+    if cfgDir == "" { return }
+
+    // decide what changed (and avoid reapplying both if only one changed)
+    var allowChanged, denyChanged, ignChanged bool
+
+    if allowW != nil {
+        if _, ch := allowW.Changed(); ch { allowChanged = true }
+    }
+    if denyW != nil {
+        if _, ch := denyW.Changed(); ch { denyChanged = true }
+    }
+    if ignW != nil {
+        if _, ch := ignW.Changed(); ch { ignChanged = true }
+    }
+
+    if !allowChanged && !denyChanged && !ignChanged {
+        return
+    }
+
+    // timing helper (local)
+    step := func(name string) func() {
+        t := time.Now()
+        logging.Logf("[startup] begin %s", name)
+        return func() { logging.Logf("[startup] end %s (%s)", name, time.Since(t)) }
+    }
+
+    doneTop := step("loadAll(total)")
+    defer doneTop()
+
+    // Apply only what's needed
+    if allowChanged {
+        done := step("loadAll:applyFile cfm.allow")
+        applyFile(filepath.Join(cfgDir, "cfm.allow"), true)
+        done()
+    } else {
+        logging.Logf("[startup] loadAll: skip cfm.allow (unchanged)")
+    }
+
+    if denyChanged {
+        done := step("loadAll:applyFile cfm.deny")
+        applyFile(filepath.Join(cfgDir, "cfm.deny"), false)
+        done()
+    } else {
+        logging.Logf("[startup] loadAll: skip cfm.deny (unchanged)")
+    }
+
+    if ignChanged && ignW != nil {
+        done := step("loadAll:applyIgnoreFile")
+        applyIgnoreFile(ignW.path)
+        done()
+    } else if ignW != nil {
+        logging.Logf("[startup] loadAll: skip ignore (unchanged)")
+    }
+
+    if os.Getenv("CFM_DEBUG") != "" {
+        fmt.Println("[allow/deny/ignore] updated from files",
+            "allowChanged=", allowChanged,
+            "denyChanged=", denyChanged,
+            "ignChanged=", ignChanged,
+        )
+    }
+}
 
 
-	loadAll := func() {
-		if cfgDir == "" { return }
-		run := false
-		if allowW != nil { if _, ch := allowW.Changed(); ch { run = true } }
-		if denyW  != nil { if _, ch := denyW.Changed();  ch { run = true } }
-		if ignW   != nil { if _, ch := ignW.Changed();   ch { run = true } }
-		if !run { return }
-		applyFile(filepath.Join(cfgDir, "cfm.allow"), true)
-		applyFile(filepath.Join(cfgDir, "cfm.deny"),  false)
-		if ignW != nil { applyIgnoreFile(ignW.path) }
-		if os.Getenv("CFM_DEBUG") != "" { fmt.Println("[allow/deny/ignore] updated from files") }
-	}
+
+
+
+
 
 	reloadBlocklists := func() {
 		if cfgDir == "" || blW == nil || blMgr == nil { return }
@@ -1157,7 +1259,6 @@ func runDaemon(args []string) {
 	// cfm.conf loader/applier (single place)
         ctx, cancel := context.WithCancel(context.Background())
         defer cancel()
-
 
 
 // --- SSL collector (start once; used later by webdetector TLS proxy) ---
@@ -1381,9 +1482,21 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 	}
 
 	// Initial load
-	loadAll()
-	applyPorts()
-	reloadBlocklists() // async-queued
+
+done = step("initial:loadAll")
+loadAll()
+done()
+
+done = step("initial:applyPorts")
+applyPorts()
+done()
+
+done = step("initial:reloadBlocklists(queue)")
+reloadBlocklists()
+done()
+
+
+
 	if ignW != nil { applyIgnoreFile(ignW.path) }
 	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())

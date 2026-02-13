@@ -16,6 +16,7 @@ var (
     apiLogFile *os.File
     detectorLogFile *os.File
     smtpLogFile *os.File
+    challengesLogFile *os.File
     once sync.Once
     cfg  *config.LoggingConfig
 
@@ -77,6 +78,25 @@ func Init(c *config.LoggingConfig) {
             }
         }
 
+
+// CHALLENGES log
+challengesPath := cfg.CHALLENGESFile
+if challengesPath == "" && cfg.File != "" {
+    base := cfg.File
+    ext := filepath.Ext(base)
+    if ext == "" {
+        challengesPath = base + ".challenges"
+    } else {
+        challengesPath = strings.TrimSuffix(base, ext) + ".challenges" + ext
+    }
+}
+if challengesPath != "" {
+    if f, err := os.OpenFile(challengesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+        challengesLogFile = f
+    } else {
+        fmt.Printf("failed to open challenges log file %s: %v\n", challengesPath, err)
+    }
+}
 
 
 
@@ -159,6 +179,21 @@ func LogfDETECTOR(format string, args ...interface{}) {
 
 
 
+// NEW: ξεχωριστό κανάλι για Challenges Logs (web challenges, captcha/js challenge, etc.)
+func LogfCHALLENGES(format string, args ...interface{}) {
+    ts := time.Now().Format("2006-01-02 15:04:05")
+    msg := fmt.Sprintf(format, args...)
+    line := fmt.Sprintf("%s %s\n", ts, msg)
+
+    if cfg == nil || cfg.CHALLENGESStdout {
+        fmt.Print(line)
+    }
+    if challengesLogFile != nil {
+        _, _ = challengesLogFile.WriteString(line)
+    } else if logFile != nil { // fallback
+        _, _ = logFile.WriteString(line)
+    }
+}
 
 
 
