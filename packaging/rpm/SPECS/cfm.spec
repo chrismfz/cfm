@@ -1,6 +1,6 @@
 Name:           cfm
 Version:        2026.02.13
-Release:        1.142434%{?dist}
+Release:        1.201215%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
@@ -22,7 +22,6 @@ cfm: local nftables manager (block/allow with optional TTL), plus simple list/un
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
 
-# Αντέγραψε ΜΟΝΟ ό,τι θες από το pkgroot (και όχι ολόκληρο το pkgroot)
 if [ -d "%{pkgroot}/usr" ]; then
   cp -a "%{pkgroot}/usr" "%{buildroot}/"
 fi
@@ -30,14 +29,12 @@ if [ -d "%{pkgroot}/etc" ]; then
   cp -a "%{pkgroot}/etc" "%{buildroot}/"
 fi
 
-# Αν για οποιονδήποτε λόγο υπάρχει service κάτω από /lib/systemd/system, μετακίνησέ το στο _unitdir
 if [ -f "%{buildroot}/lib/systemd/system/cfm.service" ]; then
   mkdir -p "%{buildroot}%{_unitdir}"
   mv "%{buildroot}/lib/systemd/system/cfm.service" "%{buildroot}%{_unitdir}/"
   rm -rf "%{buildroot}/lib/systemd"
 fi
 
-# Βάλε το LICENSE στη σωστή θέση (και ΜΟΝΟ εκεί)
 install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENSE
 
 

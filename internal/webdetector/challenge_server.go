@@ -149,6 +149,33 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
                         return
                 }
 
+
+// Require PoW too (token + cookie + PoW)
+powTok := strings.TrimSpace(r.Header.Get("X-CFM-Pow"))
+sol := strings.TrimSpace(r.Header.Get("X-CFM-Sol"))
+if powTok == "" || sol == "" {
+        http.Error(w, "missing pow", http.StatusForbidden)
+        return
+}
+
+cfg := defaultPowConfig()
+if !cfg.Enabled {
+        http.Error(w, "pow disabled", http.StatusForbidden)
+        return
+}
+
+// IMPORTANT: bind must be JS-reproducible => UA + cookie (no IP)
+bind := powBind(r.UserAgent(), c.Value)
+
+diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
+if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
+        http.Error(w, "bad pow", http.StatusForbidden)
+        return
+}
+
+
+
+
                 // Release:
                 // 1) remove from challenge set (so no more redirect)
                 if s.fw != nil {
@@ -163,6 +190,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
                 // Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
                 time.Sleep(400 * time.Millisecond)
 
+
+/* OLD Method - had issues with http://
                 // Redirect back to original host+path
                 host := cleanHost(r.Host)
                 scheme := "http"
@@ -176,6 +205,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
                 w.Header().Set("Cache-Control", "no-store")
                 w.Header().Set("Connection", "close")
                 http.Redirect(w, r, target, http.StatusFound)
+*/
+
+// Redirect back to original path (relative redirect avoids scheme/host loops)
+w.Header().Set("Cache-Control", "no-store")
+w.Header().Set("Connection", "close")
+
+// Safety: next is already forced to start with "/" above.
+http.Redirect(w, r, next, http.StatusSeeOther) // 303
+
+
+
         })
 
         // --- CATCH-ALL: handle any path ---
@@ -251,10 +291,42 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
                 host := cleanHost(r.Host)
 
                 // token binds to IP+UA+cookie
-                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
-
+//                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
                 // challengeHTML placeholders are: host, token, next
-                fmt.Fprintf(w, challengeHTML(), htmlEscape(host), htmlEscape(tok), htmlEscape(next))
+//                fmt.Fprintf(w, challengeHTML(), htmlEscape(host), htmlEscape(tok), htmlEscape(next))
+
+// token binds to IP+UA+cookie
+tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
+
+// PoW challenge token (additive, but required at verify time)
+cfg := defaultPowConfig()
+powTok := ""
+if cfg.Enabled {
+        nonce16 := make([]byte, 16)
+        if _, err := rand.Read(nonce16); err == nil {
+                // bind must be reproducible by JS => UA + cookie
+                bind := powBind(r.UserAgent(), cookieVal)
+                if pt, err := issuePowChallenge(powSecretKey(), time.Now().UTC(), cfg.Difficulty, nonce16, bind); err == nil {
+                        powTok = pt
+                }
+        }
+}
+
+if cfg.Enabled && powTok == "" {
+    http.Error(w, "pow unavailable", http.StatusInternalServerError)
+    return
+}
+
+// challengeHTML placeholders are: host, token, powTok, next, difficulty
+fmt.Fprintf(w, challengeHTML(),
+        htmlEscape(host),
+        htmlEscape(tok),
+        htmlEscape(powTok),
+        htmlEscape(next),
+        cfg.Difficulty,
+)
+
+
 
         })
 
@@ -540,6 +612,20 @@ func verifyToken(tok, ip, ua, cookieVal string) bool {
         return subtle.ConstantTimeCompare(a, b) == 1
 }
 
+// --- PoW helpers (additive to token/cookie) ---
+// Important: bind must be reproducible by JS in the browser.
+// Do NOT include client IP here (browser can't know it reliably behind NAT/LB).
+func powSecretKey() []byte {
+        // reuse the same secret as the token mechanism
+        return secretKey()
+}
+
+func powBind(ua, cookieVal string) string {
+        ua = strings.TrimSpace(ua)
+        return ua + "|" + cookieVal
+}
+
+
 
 func randomCookieValue() string {
         b := make([]byte, 32)
@@ -553,7 +639,7 @@ func randomCookieValue() string {
 
 
 func challengeHTML() string {
-        // placeholders: host, token, next
+// placeholders: host, token, powTok, next, powDifficulty
         return `<!doctype html>
 <html>
 <head>
@@ -578,25 +664,107 @@ func challengeHTML() string {
     <div class="spinner"></div>
     <div class="muted">This should take less than a second. If you’re stuck, enable JavaScript & cookies.</div>
   </div>
-  <script>
-    (function(){
-      var token = "%s";
-      var next = "%s";
-      // POST /verify with token header; redirect handled by server.
+
+<script>
+(function(){
+  var token = "%s";
+  var powTok = "%s";
+  var next = "%s";
+  var difficulty = %d;
+
+  function getCookie(name){
+    var parts = ("; " + document.cookie).split("; " + name + "=");
+    if (parts.length === 2) return decodeURIComponent(parts.pop().split(";").shift());
+    return "";
+  }
+
+  function b64urlToBytes(s){
+    s = (s || "").replace(/-/g,'+').replace(/_/g,'/');
+    while (s.length %% 4) s += '=';
+    var bin = atob(s);
+    var out = new Uint8Array(bin.length);
+    for (var i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function hasLeadingZeroBits(bytes, bits){
+    if (bits <= 0) return true;
+    var full = Math.floor(bits/8);
+    var rem = bits %% 8;
+    for (var i=0;i<full;i++) if (bytes[i] !== 0) return false;
+    if (rem === 0) return true;
+    var mask = 0xFF << (8 - rem);
+    return (bytes[full] & mask) === 0;
+  }
+
+  async function sha256(u8){
+    var buf = await crypto.subtle.digest('SHA-256', u8);
+    return new Uint8Array(buf);
+  }
+
+  async function solvePow(){
+    // token layout: ts(8) diff(2) nonce(16) mac(32) => nonce starts at offset 10
+    var raw = b64urlToBytes(powTok);
+    if (raw.length !== 58) throw new Error("bad pow token");
+    var nonce = raw.slice(10, 26);
+
+    // bind must match server powBind(): UA + "|" + cookie
+    var ua = (navigator.userAgent || "").trim();
+
+    var c = getCookie("cfm_chal");
+    var bindStr = ua + "|" + c;
+
+    var enc = new TextEncoder();
+    var bindBytes = enc.encode(bindStr);
+
+    // prefix = nonce || 0 || bind || 0
+    var prefix = new Uint8Array(nonce.length + 1 + bindBytes.length + 1);
+    prefix.set(nonce, 0);
+    prefix[nonce.length] = 0;
+    prefix.set(bindBytes, nonce.length + 1);
+    prefix[prefix.length - 1] = 0;
+
+    var i = 0;
+    while (true){
+      var solStr = String(i++);
+      var solBytes = enc.encode(solStr);
+
+      var msg = new Uint8Array(prefix.length + solBytes.length);
+      msg.set(prefix, 0);
+      msg.set(solBytes, prefix.length);
+
+      var dig = await sha256(msg);
+      if (hasLeadingZeroBits(dig, difficulty)) return solStr;
+
+      if ((i %% 2000) === 0) await new Promise(function(r){ setTimeout(r, 0); });
+    }
+  }
+
+  (async function(){
+    try {
+      var sol = await solvePow();
+
       fetch("/verify?next="+encodeURIComponent(next), {
         method: "POST",
-        headers: {"X-CFM-Token": token},
+        headers: {
+          "X-CFM-Token": token,
+          "X-CFM-Pow": powTok,
+          "X-CFM-Sol": sol
+        },
         credentials: "include"
       }).then(function(res){
         if (res.redirected) { window.location = res.url; return; }
-        if (res.status >= 300 && res.status < 400) { return; }
-        // fallback: try reloading original target after a moment
- setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, 1200);
+        setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, 1200);
       }).catch(function(){
- setTimeout(function(){ location.reload(); }, 1200);
+        setTimeout(function(){ location.reload(); }, 1200);
       });
-    })();
-  </script>
+    } catch(e) {
+      setTimeout(function(){ location.reload(); }, 1200);
+    }
+  })();
+})();
+</script>
+
 </body>
 </html>`
 }

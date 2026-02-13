@@ -133,6 +133,10 @@ type bucketSW struct {
 	ipsMalPath map[string]int
 	ipsMalRule map[string]map[int]int // ip -> ruleIndex -> count
 
+    // Challenge paths counters (for "challenge-only" actions)
+    ipsChalPath map[string]int
+    ipsChalRule map[string]map[int]int // ip -> ruleIndex -> count
+
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
 	ip40xPaths map[string]map[uint64]struct{}
@@ -308,6 +312,8 @@ type Engine struct {
 	adapter LogFormatAdapter
 	malRules []malRule
 
+    chalRules []chalRule
+
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
@@ -321,6 +327,13 @@ type Engine struct {
         // Emit rate-limit so we don't spam blocker every tick.
         emitMu    sync.Mutex
         ipLastEmit map[string]time.Time
+
+    // Challenge emit cooldown separate from blocks
+    ipLastChalEmit map[string]time.Time
+
+    // last context for an IP that matched a challenge rule (host/uri/pattern)
+    chalLast map[string]chalCtx
+
 
 }
 
@@ -352,6 +365,15 @@ func NewEngine(cfg Config) *Engine {
 
     // Compile MALPATH rules. Supports "N:substring" override syntax.
     e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
+
+
+    // Compile CHALLENGE rules (paths). Supports "N:substring" override syntax.
+    if cfg.ChallengePathsEnabled {
+        e.chalRules = compileChalRules(cfg.ChallengePathsList, cfg.ChallengePathsCount)
+    }
+
+    e.ipLastChalEmit = make(map[string]time.Time)
+    e.chalLast = make(map[string]chalCtx)
 
 	// Enrichment is optional.
 	if cfg.UseEnrich {
@@ -445,6 +467,9 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		e.updateIPLong(now) //  update EMA-based IP long view
 		e.lastFeed = now
 	}
+
+// Emit challenge-worthy IP alerts (before blocks)
+e.emitIPChallenges(now, out)
 
         // Emit block-worthy IP alerts (picked up by autosink blocker).
         e.emitIPBlocks(now, out)
@@ -626,6 +651,9 @@ case 5:
 		p = p[:i]
 	}
 	b.paths[p]++
+
+// Challenge-only rule checks (paths)
+e.trackChallengePaths(rec, p, b)
 
 
 	// Now that we have normalized path `p`, count malicious probes per IP.

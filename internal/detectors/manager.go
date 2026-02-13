@@ -248,9 +248,17 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 
 		//go RunPeriodic(ctx, det, m.opts.Sink)
 		//go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
-		// per-section blocking policy + wrapped sink
-		pol := parseBlockPolicy(kv)
-		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore)
+
+        // per-section blocking policy + wrapped sink
+        pol := parseBlockPolicy(kv)
+
+        // NEW: global/per-section challenge cooldown (suppresses re-challenge spam)
+        // [global] CHALLENGE_COOLDOWN=30m
+        // [webdetector] CHALLENGE_COOLDOWN=5m  (override)
+        defChalCooldown := kvDur(secs.Global, "CHALLENGE_COOLDOWN", 30*time.Minute)
+        chalCooldown := kvDur(kv, "CHALLENGE_COOLDOWN", defChalCooldown)
+
+        secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown)
 		go RunPeriodicWithState(ctx, det, secSink, m.state)
 	}
 }

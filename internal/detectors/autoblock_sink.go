@@ -29,6 +29,7 @@ type sectionSink struct {
     ignore *IPIgnore // global ignore from [global]
     chalMu    sync.Mutex
     chalState map[string]challengeState
+    chalCooldown time.Duration
 
 }
 
@@ -37,7 +38,7 @@ type challengeState struct {
     LastSeen time.Time
 }
 
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore) core.Sink {
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration) core.Sink {
     return &sectionSink{
         section: section,
         pol:     pol,
@@ -47,6 +48,7 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
         enr:     enr,
         ignore:  ig,
         chalState: make(map[string]challengeState),
+        chalCooldown: chalCooldown,
     }
 }
 
@@ -54,8 +56,8 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
 const (
     defaultChallengeTTL        = 30 * time.Minute
     defaultChallengeFailWindow = 30 * time.Minute
-    defaultChallengeFailN      = 3
-    defaultChallengeEscalate   = true
+    defaultChallengeFailN      = 5
+    defaultChallengeEscalate   = false
 )
 
 
@@ -185,17 +187,66 @@ if core.IsSelfIP(ipStr) {
             }
         }
 
-        // Enforce challenge (no block here)
-        enforced := "challenge_failed"
-        if s.pol.Mode == "dryrun" {
-            enforced = "challenge_dryrun"
-        } else {
-            if err := s.fw.AddChallenge(ip, &ttl); err == nil {
-                enforced = "challenge"
-            } else {
-                out.Extra["challenge_err"] = err.Error()
+        // Global challenge cooldown per IP (prevents loops/spam)
+        if s.chalCooldown > 0 {
+            now := out.When
+            if now.IsZero() { now = time.Now() }
+
+            s.chalMu.Lock()
+            st := s.chalState[ipStr]
+            if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) < s.chalCooldown {
+                // Suppress re-challenge within cooldown window
+                out.Extra["blocked"]  = "challenge"
+                out.Extra["enforced"] = "challenge_suppressed"
+                out.Extra["ttl"]      = ttl.String()
+                out.Extra["cooldown"] = s.chalCooldown.String()
+                s.chalMu.Unlock()
+
+                // log once (optional)
+                logging.LogfCHALLENGES(
+                    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s",
+                    ipStr,
+                    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                    out.Extra["host"],
+                    out.Extra["uri"],
+                    ttl.String(),
+                    out.Extra["enforced"],
+                    out.Extra["cooldown"],
+                )
+
+                if s.inner != nil { s.inner.Publish(out) }
+                return
             }
+            s.chalMu.Unlock()
         }
+
+
+
+// Enforce challenge (no block here)
+enforced := "challenge_failed"
+if s.pol.Mode == "dryrun" {
+    enforced = "challenge_dryrun"
+} else {
+    if err := s.fw.AddChallenge(ip, &ttl); err == nil {
+        enforced = "challenge"
+    } else {
+        out.Extra["challenge_err"] = err.Error()
+    }
+}
+
+// stamp cooldown only if challenge enforcement succeeded
+if enforced == "challenge" && s.chalCooldown > 0 {
+    now := out.When
+    if now.IsZero() { now = time.Now() }
+
+    s.chalMu.Lock()
+    st := s.chalState[ipStr]
+    st.LastSeen = now
+    s.chalState[ipStr] = st
+    s.chalMu.Unlock()
+}
+
+
 
         // Mark outcome for outcome_sink + detector log
         out.Extra["blocked"]    = "challenge"
