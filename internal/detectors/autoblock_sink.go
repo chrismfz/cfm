@@ -192,6 +192,7 @@ if core.IsSelfIP(ipStr) {
 // ✅ CID issue: stable per-IP for this challenge TTL
 cid := challengeid.Global.GetOrNew(ipStr, ttl)
 out.Extra["cid"] = cid
+enrSuffix := s.challengeEnrichSuffix(ipStr)
 
         // Global challenge cooldown per IP (prevents loops/spam)
         if s.chalCooldown > 0 {
@@ -210,7 +211,7 @@ out.Extra["cid"] = cid
 
                 // log first
 logging.LogfCHALLENGES(
-    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s",
+    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
     ipStr,
     firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
     out.Extra["host"],
@@ -219,6 +220,7 @@ logging.LogfCHALLENGES(
     out.Extra["enforced"],
     out.Extra["cooldown"],
     out.Extra["cid"],
+    enrSuffix,
 )
 
                 if s.inner != nil { s.inner.Publish(out) }
@@ -307,7 +309,7 @@ if enforced == "challenge" && s.chalCooldown > 0 {
 
         // --- Challenges log file (separate) ---
 logging.LogfCHALLENGES(
-    "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s",
+    "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s%s",
     ipStr,
     firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
     out.Extra["host"],
@@ -319,6 +321,7 @@ logging.LogfCHALLENGES(
     out.Extra["challenge_fails"],
     out.Extra["escalated"],
     out.Extra["cid"],
+    enrSuffix,
 )
 
         // --- Notify (same notify system) ---
@@ -649,4 +652,37 @@ func (s *sectionSink) decorateIP(ip string) string {
         }
     }
     return label
+}
+
+
+
+
+
+// challengeEnrichSuffix returns: ` - (AS16509 Amazon.com, Inc., Singapore)`
+// or "" if enrichment is unavailable.
+func (s *sectionSink) challengeEnrichSuffix(ip string) string {
+    ip = strings.TrimSpace(ip)
+    if ip == "" || s.enr == nil {
+        return ""
+    }
+    r := s.enr.Lookup(ip)
+    parts := []string{}
+
+    // AS first
+    if r.ASN > 0 {
+        if r.ASNName != "" {
+            parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
+        } else {
+            parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
+        }
+    }
+    // Country next (you can swap ordering if you want)
+    if r.Country != "" {
+        parts = append(parts, r.Country)
+    }
+
+    if len(parts) == 0 {
+        return ""
+    }
+    return " - (" + strings.Join(parts, ", ") + ")"
 }
