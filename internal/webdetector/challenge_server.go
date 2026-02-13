@@ -23,8 +23,7 @@ import (
         "os"
         "crypto/subtle"
 	"crypto/rand"
-//	"errors"
-
+	"sync"
 
 )
 
@@ -37,6 +36,9 @@ type ChallengeServer struct {
 
 	ssl *sslcollector.Collector
 	fw  firewall.Backend
+
+        cidMu   sync.Mutex
+        cidUsed map[string]time.Time // cid -> expiresAt (UTC)
 
 }
 
@@ -74,8 +76,13 @@ const (
 
 
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
-   return &ChallengeServer{ssl: ssl, fw: fw}
+        return &ChallengeServer{
+                ssl:     ssl,
+                fw:      fw,
+                cidUsed: make(map[string]time.Time),
+        }
 }
+
 
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
 	mux := http.NewServeMux()
@@ -113,7 +120,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
                 }
 
 
-                ip := clientIP(r)
+verifyStart := time.Now()
+host := cleanHost(r.Host)
+
+ip := clientIP(r)
+
                 if ip == nil {
                         http.Error(w, "bad client ip", http.StatusBadRequest)
                         return
@@ -173,6 +184,27 @@ if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
         return
 }
 
+
+cid := strings.TrimSpace(r.Header.Get("X-CFM-CID"))
+if cid == "" {
+        http.Error(w, "missing cid", http.StatusForbidden)
+        return
+}
+if !s.cidMarkOnce(cid, cfg.TTL) {
+        http.Error(w, "reused cid", http.StatusForbidden)
+        return
+}
+
+
+logging.LogfCHALLENGES(
+        "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
+        ip.String(),
+        host,
+        next,
+        time.Since(verifyStart).Milliseconds(),
+        diff,
+        cid,
+)
 
 
 
@@ -277,7 +309,7 @@ http.Redirect(w, r, next, http.StatusSeeOther) // 303
                                 Name:     "cfm_chal",
                                 Value:    cookieVal,
                                 Path:     "/",
-                                MaxAge:   600,
+                                MaxAge:   300,
                                 HttpOnly: false, // JS reads it
                                 Secure:   (r.TLS != nil),
                                 SameSite: http.SameSiteLaxMode,
@@ -299,8 +331,11 @@ http.Redirect(w, r, next, http.StatusSeeOther) // 303
 tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
 
 // PoW challenge token (additive, but required at verify time)
+
 cfg := defaultPowConfig()
 powTok := ""
+cid := ""
+
 if cfg.Enabled {
         nonce16 := make([]byte, 16)
         if _, err := rand.Read(nonce16); err == nil {
@@ -310,21 +345,32 @@ if cfg.Enabled {
                         powTok = pt
                 }
         }
+
+        // CID: one-time-use id to prevent PoW/token replay within TTL
+        cidBytes := make([]byte, 12)
+        if _, err := rand.Read(cidBytes); err == nil {
+                cid = base64.RawURLEncoding.EncodeToString(cidBytes)
+        }
 }
 
-if cfg.Enabled && powTok == "" {
-    http.Error(w, "pow unavailable", http.StatusInternalServerError)
-    return
+if cfg.Enabled && (powTok == "" || cid == "") {
+        http.Error(w, "pow unavailable", http.StatusInternalServerError)
+        return
 }
 
-// challengeHTML placeholders are: host, token, powTok, next, difficulty
+
+
+// challengeHTML placeholders are: host, token, powTok, cid, next, difficulty
 fmt.Fprintf(w, challengeHTML(),
         htmlEscape(host),
         htmlEscape(tok),
         htmlEscape(powTok),
+        htmlEscape(cid),
         htmlEscape(next),
         cfg.Difficulty,
 )
+
+
 
 
 
@@ -493,6 +539,52 @@ func tlsVersionString(v uint16) string {
 
 // ---------------- helpers ----------------
 
+
+// --- CID one-time use store (anti-replay for solved challenges) ---
+
+func (s *ChallengeServer) cidCleanLocked(now time.Time) {
+        for cid, exp := range s.cidUsed {
+                if now.After(exp) {
+                        delete(s.cidUsed, cid)
+                }
+        }
+}
+
+// cidMarkOnce returns true on first use; false if reused within ttl.
+func (s *ChallengeServer) cidMarkOnce(cid string, ttl time.Duration) bool {
+        cid = strings.TrimSpace(cid)
+        if cid == "" {
+                return false
+        }
+
+    // cheap sanity: base64url-ish size
+    if len(cid) < 8 || len(cid) > 64 {
+        return false
+    }
+
+
+        now := time.Now().UTC()
+        if ttl <= 0 {
+                ttl = 2 * time.Minute
+        }
+
+        s.cidMu.Lock()
+        defer s.cidMu.Unlock()
+
+        if s.cidUsed == nil {
+                s.cidUsed = make(map[string]time.Time)
+        }
+        s.cidCleanLocked(now)
+
+        if exp, ok := s.cidUsed[cid]; ok && now.Before(exp) {
+                return false
+        }
+
+        s.cidUsed[cid] = now.Add(ttl)
+        return true
+}
+
+
 func cleanHost(h string) string {
         if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
                 return hh
@@ -639,7 +731,7 @@ func randomCookieValue() string {
 
 
 func challengeHTML() string {
-// placeholders: host, token, powTok, next, powDifficulty
+// placeholders: host, token, powTok, cid, next, powDifficulty
         return `<!doctype html>
 <html>
 <head>
@@ -669,6 +761,7 @@ func challengeHTML() string {
 (function(){
   var token = "%s";
   var powTok = "%s";
+  var cid = "%s";
   var next = "%s";
   var difficulty = %d;
 
@@ -749,7 +842,8 @@ func challengeHTML() string {
         headers: {
           "X-CFM-Token": token,
           "X-CFM-Pow": powTok,
-          "X-CFM-Sol": sol
+          "X-CFM-Sol": sol,
+          "X-CFM-CID": cid
         },
         credentials: "include"
       }).then(function(res){
