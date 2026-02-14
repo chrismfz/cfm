@@ -17,14 +17,13 @@ import (
 	"strings"
 	"time"
 
+	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
-	cfgpkg "cfm/internal/config"
 	"cfm/internal/reporting"
 
 	"bufio"
 	"sync"
-
 )
 
 const (
@@ -32,10 +31,9 @@ const (
 	family    = "inet"
 
 	//web challenge nets
-	challengeV4 = "challenge_v4"
-	challengeV6 = "challenge_v6"
+	challengeV4       = "challenge_v4"
+	challengeV6       = "challenge_v6"
 	challengeNatChain = "prerouting"
-
 
 	// manual
 	setV4   = "block_v4"
@@ -67,17 +65,13 @@ const (
 	blockExtV6Nets  = "block_ext_v6_nets"
 )
 
-
-
-
 type setDesc struct {
-    name   string // π.χ. block_ext_v4_nets_dshield
-    family string // "ip" ή "ip6"
-    action string // "ALLOW" ή "BLOCK"
-    scope  string // "hosts" ή "nets"
-    feed   string // π.χ. "dshield", "myallow" (κενό για manual)
+	name   string // π.χ. block_ext_v4_nets_dshield
+	family string // "ip" ή "ip6"
+	action string // "ALLOW" ή "BLOCK"
+	scope  string // "hosts" ή "nets"
+	feed   string // π.χ. "dshield", "myallow" (κενό για manual)
 }
-
 
 type extFeedData struct {
 	H4  []string
@@ -89,103 +83,117 @@ type extFeedData struct {
 
 var debugEnv = os.Getenv("CFM_DEBUG") == "1"
 
-type Backend struct{
-    last map[string]uint64 // last seen packets per counter (for delta logging)
-    cfg *cfgpkg.Config
+type Backend struct {
+	last map[string]uint64 // last seen packets per counter (for delta logging)
+	cfg  *cfgpkg.Config
 
-    enr  *enrichpkg.Enricher
-    reporter reporting.Reporter
-    cfgDir string // resolve config dir
+	enr      *enrichpkg.Enricher
+	reporter reporting.Reporter
+	cfgDir   string // resolve config dir
 
-    pfSets   []string // th_pf_<port>_<proto>_v4/v6
-    clSets   []string // th_connlimit_<port>_<proto>_v4/v6
-    feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
+	// Optional logger used by the challenge server so nft can log rule installs
+	// into the same cfm.challenges.log stream.
+	challengeLogf func(format string, args ...any)
+
+	pfSets   []string            // th_pf_<port>_<proto>_v4/v6
+	clSets   []string            // th_connlimit_<port>_<proto>_v4/v6
+	feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
 
 	// external feed element caches (so RebuildExternalUnions NEVER needs `nft -j list set`)
 	extFeedMu sync.RWMutex
 	extAllow  map[string]extFeedData // key -> elems
 	extBlock  map[string]extFeedData // key -> elems
 
-
-    // cache of external ALLOW set names (per-feed), to avoid expensive table scans on every check
-    extMu             sync.RWMutex
-    extAllowCacheAt   time.Time
-    extAllowV4Hosts   []string
-    extAllowV4Nets    []string
-    extAllowV6Hosts   []string
-    extAllowV6Nets    []string
-
+	// cache of external ALLOW set names (per-feed), to avoid expensive table scans on every check
+	extMu           sync.RWMutex
+	extAllowCacheAt time.Time
+	extAllowV4Hosts []string
+	extAllowV4Nets  []string
+	extAllowV6Hosts []string
+	extAllowV6Nets  []string
 }
-
-
 
 // GetEnricher returns the enrichment engine (if enabled).
 func (b *Backend) GetEnricher() *enrichpkg.Enricher {
-    return b.enr
+	return b.enr
 }
 
 func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
+
+// SetChallengeLogger allows the challenge server to pass its log function so nft
+// can emit per-rule debug lines into cfm.challenges.log.
+func (b *Backend) SetChallengeLogger(f func(format string, args ...any)) {
+	b.challengeLogf = f
+}
+
+func (b *Backend) chlogf(format string, args ...any) {
+	if b != nil && b.challengeLogf != nil {
+		b.challengeLogf(format, args...)
+	}
+}
 
 //func New() *Backend { return &Backend{} }
 
 func New() *Backend {
 	return &Backend{
-		last:    make(map[string]uint64),
+		last:     make(map[string]uint64),
 		feedKeys: make(map[string]struct{}),
 		extAllow: make(map[string]extFeedData),
 		extBlock: make(map[string]extFeedData),
 	}
 }
 
-
-
-
 // ReportBlock decides (based on config + source) whether to notify the API and then calls reporter.
 // source: "detector" | "autoblock" | "manual"
 // mode:   "ttl" | "permanent" | "dryrun"
 func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) error {
-    if b == nil || b.reporter == nil || b.cfg == nil {
-        return nil
-    }
-    switch source {
-    case "detector":
-        // Allow if DETECTORS_SEND_TO_API enabled, OR fall back to AUTOBLOCK_SEND_TO_API.
-        if !(b.cfg.API.DetectorsSend || b.cfg.API.AutoBlockSend) {
-            return nil
-        }
-    case "autoblock":
-        if !b.cfg.API.AutoBlockSend {
-            return nil
-        }
-    case "manual":
-        if !b.cfg.API.ManualBlockSend {
-            return nil
-        }
-    default:
-        // Unknown source → be conservative (no report)
-        return nil
-    }
-    return b.reporter.ReportBlock(ip, comment, source, mode, ttlSeconds)
+	if b == nil || b.reporter == nil || b.cfg == nil {
+		return nil
+	}
+	switch source {
+	case "detector":
+		// Allow if DETECTORS_SEND_TO_API enabled, OR fall back to AUTOBLOCK_SEND_TO_API.
+		if !(b.cfg.API.DetectorsSend || b.cfg.API.AutoBlockSend) {
+			return nil
+		}
+	case "autoblock":
+		if !b.cfg.API.AutoBlockSend {
+			return nil
+		}
+	case "manual":
+		if !b.cfg.API.ManualBlockSend {
+			return nil
+		}
+	default:
+		// Unknown source → be conservative (no report)
+		return nil
+	}
+	return b.reporter.ReportBlock(ip, comment, source, mode, ttlSeconds)
 }
-
 
 func (b *Backend) registerFeedKey(k string) {
-    if b.feedKeys == nil { b.feedKeys = map[string]struct{}{} }
-    b.feedKeys[k] = struct{}{}
+	if b.feedKeys == nil {
+		b.feedKeys = map[string]struct{}{}
+	}
+	b.feedKeys[k] = struct{}{}
 }
 func (b *Backend) unregisterFeedKey(k string) {
-    if b.feedKeys == nil { return }
-    delete(b.feedKeys, k)
+	if b.feedKeys == nil {
+		return
+	}
+	delete(b.feedKeys, k)
 }
-
-
 
 func (b *Backend) cacheExternalFeed(isAllow bool, key string, h4, n4, h6, n6 []string, ttl *time.Duration) {
 	b.extFeedMu.Lock()
 	defer b.extFeedMu.Unlock()
 
-	if b.extAllow == nil { b.extAllow = map[string]extFeedData{} }
-	if b.extBlock == nil { b.extBlock = map[string]extFeedData{} }
+	if b.extAllow == nil {
+		b.extAllow = map[string]extFeedData{}
+	}
+	if b.extBlock == nil {
+		b.extBlock = map[string]extFeedData{}
+	}
 
 	fd := extFeedData{H4: h4, N4: n4, H6: h6, N6: n6, TTL: ttl}
 	if isAllow {
@@ -198,36 +206,45 @@ func (b *Backend) cacheExternalFeed(isAllow bool, key string, h4, n4, h6, n6 []s
 func (b *Backend) dropExternalFeedCache(key string) {
 	b.extFeedMu.Lock()
 	defer b.extFeedMu.Unlock()
-	if b.extAllow != nil { delete(b.extAllow, key) }
-	if b.extBlock != nil { delete(b.extBlock, key) }
+	if b.extAllow != nil {
+		delete(b.extAllow, key)
+	}
+	if b.extBlock != nil {
+		delete(b.extBlock, key)
+	}
 }
-
-
 
 func (b *Backend) registerPfSet(name string) {
-    for _, s := range b.pfSets { if s == name { return } }
-    b.pfSets = append(b.pfSets, name)
+	for _, s := range b.pfSets {
+		if s == name {
+			return
+		}
+	}
+	b.pfSets = append(b.pfSets, name)
 }
 func (b *Backend) registerClSet(name string) {
-    for _, s := range b.clSets { if s == name { return } }
-    b.clSets = append(b.clSets, name)
+	for _, s := range b.clSets {
+		if s == name {
+			return
+		}
+	}
+	b.clSets = append(b.clSets, name)
 }
-
-
 
 // Προαιρετικός helper: ενεργοποιεί enrichment αν βρεθούν mmdb σε dirs
 func (b *Backend) EnableEnrichment(dirs ...string) {
-    if b == nil || b.enr != nil { return }
-    if e, _ := enrichpkg.New(dirs...); e != nil {
-        b.enr = e
-    }
+	if b == nil || b.enr != nil {
+		return
+	}
+	if e, _ := enrichpkg.New(dirs...); e != nil {
+		b.enr = e
+	}
 }
 
 // (προαιρετικά) Setter αν θέλεις να το περνάς “έτοιμο”
 func (b *Backend) SetEnricher(e *enrichpkg.Enricher) { b.enr = e }
 
 func (b *Backend) SetConfigDir(dir string) { b.cfgDir = strings.TrimSpace(dir) }
-
 
 // ---------- ensure base ----------
 
@@ -244,12 +261,6 @@ func (b *Backend) ensureSet(name, typ string) error {
 	}
 	return nil
 }
-
-
-
-
-
-
 
 func (b *Backend) EnsureBase() error {
 	// 1) Ensure table
@@ -294,9 +305,6 @@ func (b *Backend) EnsureBase() error {
 		}
 	}
 
-
-
-
 	// 2b) Ensure NAT prerouting chain for challenge redirects
 	if !b.chainExists(challengeNatChain) {
 		if err := b.nftCmd(fmt.Sprintf(
@@ -307,64 +315,117 @@ func (b *Backend) EnsureBase() error {
 		}
 	}
 
-
 	// 3) Ensure sets (manual/dyn/external + throttling)
 	// manual allow/block
-	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil { return err }
-	if err := b.ensureSet(setV4,   "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(setV6,   "ipv6_addr"); err != nil { return err }
+	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(allowV6, "ipv6_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(setV4, "ipv4_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(setV6, "ipv6_addr"); err != nil {
+		return err
+	}
 	// NEW: manual nets (for CIDR)
-	if err := b.ensureSetWithFlags(allowV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(allowV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockV4Nets, "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(allowV4Nets, "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(allowV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(blockV4Nets, "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 
 	// NEW: ignore (manual) hosts + nets
-	if err := b.ensureSetWithFlags("ignore_v4",      "ipv4_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags("ignore_v6",      "ipv6_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags("ignore_v4_nets", "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags("ignore_v6_nets", "ipv6_addr", "timeout,interval"); err != nil { return err }
-
+	if err := b.ensureSetWithFlags("ignore_v4", "ipv4_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags("ignore_v6", "ipv6_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags("ignore_v4_nets", "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags("ignore_v6_nets", "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 
 	// local and server-IPs
-	if err := b.ensureSetWithFlags("self_v4", "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags("self_v6", "ipv6_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags("self_v4", "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags("self_v6", "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 	// quickly load our self-IPs
 	b.refreshSelfSets()
 
 	// dyn allow
-	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil { return err }
+	if err := b.ensureSet(allowDynV4, "ipv4_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(allowDynV6, "ipv6_addr"); err != nil {
+		return err
+	}
 	// debug-only API sets (hosts)
-	if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil { return err }
-	if err := b.ensureSet(debugAPIV6, "ipv6_addr"); err != nil { return err }
+	if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(debugAPIV6, "ipv6_addr"); err != nil {
+		return err
+	}
 	// external allow (hosts/nets)
-	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV4Nets,  "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(allowExtV6Nets,  "ipv6_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(allowExtV4Hosts, "ipv4_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(allowExtV6Hosts, "ipv6_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(allowExtV4Nets, "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(allowExtV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 	// external block (hosts/nets)
-	if err := b.ensureSetWithFlags(blockExtV4Hosts, "ipv4_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV6Hosts, "ipv6_addr", "timeout");          err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV4Nets,  "ipv4_addr", "timeout,interval"); err != nil { return err }
-	if err := b.ensureSetWithFlags(blockExtV6Nets,  "ipv6_addr", "timeout,interval"); err != nil { return err }
+	if err := b.ensureSetWithFlags(blockExtV4Hosts, "ipv4_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(blockExtV6Hosts, "ipv6_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(blockExtV4Nets, "ipv4_addr", "timeout,interval"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(blockExtV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 	// throttling sets (per-reason και aggregate)
-	_ = b.ensureSetWithFlags("th_syn_v4",      "ipv4_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_syn_v6",      "ipv6_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pps_v4",      "ipv4_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pps_v6",      "ipv6_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pf_tcp_v4",   "ipv4_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pf_tcp_v6",   "ipv6_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pf_udp_v4",   "ipv4_addr", "timeout")
-	_ = b.ensureSetWithFlags("th_pf_udp_v6",   "ipv6_addr", "timeout")
-	_ = b.ensureSetWithFlags("throttled_v4",   "ipv4_addr", "timeout")
-	_ = b.ensureSetWithFlags("throttled_v6",   "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_syn_v4", "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_syn_v6", "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pps_v4", "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pps_v6", "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_tcp_v4", "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_tcp_v6", "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_udp_v4", "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("th_pf_udp_v6", "ipv6_addr", "timeout")
+	_ = b.ensureSetWithFlags("throttled_v4", "ipv4_addr", "timeout")
+	_ = b.ensureSetWithFlags("throttled_v6", "ipv6_addr", "timeout")
 
 	// Challenge sets (source IPs that should be redirected to challenge ports)
-	if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil { return err }
-	if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil { return err }
-
+	if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil {
+		return err
+	}
+	if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil {
+		return err
+	}
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	addRule := func(expr string) error {
@@ -374,108 +435,152 @@ func (b *Backend) EnsureBase() error {
 		return nil
 	}
 
+	// --- EARLY RULES (insert in reverse so final order is top-down) ---
 
-// --- EARLY RULES (insert in reverse so final order is top-down) ---
+	// helper stays the same
+	addEarly := func(expr string) {
+		if !b.ruleExists("input", expr) {
+			_ = b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
+		}
+	}
 
-// helper stays the same
-addEarly := func(expr string) {
-    if !b.ruleExists("input", expr) {
-        _ = b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
-    }
-}
+	// Build desired top-down order:
+	early := []string{
+		// 1) loopback
+		`iif lo accept`,
 
-// Build desired top-down order:
-early := []string{
-    // 1) loopback
-    `iif lo accept`,
+		// 2) self IPs
+		`ip saddr @self_v4 accept`,
+		`ip6 saddr @self_v6 accept`,
 
-    // 2) self IPs
-    `ip saddr @self_v4 accept`,
-    `ip6 saddr @self_v6 accept`,
+		// 3) ALLOW sets (manual + dyn + external + nets)
+		`ip saddr @allow_v4 accept`,
+		`ip6 saddr @allow_v6 accept`,
+		`ip saddr @allow_dyn_v4 accept`,
+		`ip6 saddr @allow_dyn_v6 accept`,
+		`ip saddr @allow_ext_v4_hosts accept`,
+		`ip6 saddr @allow_ext_v6_hosts accept`,
+		`ip saddr @allow_ext_v4_nets accept`,
+		`ip6 saddr @allow_ext_v6_nets accept`,
+		`ip saddr @allow_v4_nets accept`,
+		`ip6 saddr @allow_v6_nets accept`,
 
-    // 3) ALLOW sets (manual + dyn + external + nets)
-    `ip saddr @allow_v4 accept`,
-    `ip6 saddr @allow_v6 accept`,
-    `ip saddr @allow_dyn_v4 accept`,
-    `ip6 saddr @allow_dyn_v6 accept`,
-    `ip saddr @allow_ext_v4_hosts accept`,
-    `ip6 saddr @allow_ext_v6_hosts accept`,
-    `ip saddr @allow_ext_v4_nets accept`,
-    `ip6 saddr @allow_ext_v6_nets accept`,
-    `ip saddr @allow_v4_nets accept`,
-    `ip6 saddr @allow_v6_nets accept`,
+		// 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
+		`ip saddr @block_v4 drop`,
+		`ip6 saddr @block_v6 drop`,
+		`ip saddr @block_ext_v4_hosts drop`,
+		`ip6 saddr @block_ext_v6_hosts drop`,
+		`ip saddr @block_ext_v4_nets drop`,
+		`ip6 saddr @block_ext_v6_nets drop`,
+		`ip saddr @block_v4_nets drop`,
+		`ip6 saddr @block_v6_nets drop`,
+	}
 
-    // 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
-    `ip saddr @block_v4 drop`,
-    `ip6 saddr @block_v6 drop`,
-    `ip saddr @block_ext_v4_hosts drop`,
-    `ip6 saddr @block_ext_v6_hosts drop`,
-    `ip saddr @block_ext_v4_nets drop`,
-    `ip6 saddr @block_ext_v6_nets drop`,
-    `ip saddr @block_v4_nets drop`,
-    `ip6 saddr @block_v6_nets drop`,
-}
+	// 5) ICMP → flood (below unconditional drops)
+	if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
+		early = append(early,
+			`ip protocol icmp icmp type echo-request jump flood`,
+			`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
+		)
+	}
 
-// 5) ICMP → flood (below unconditional drops)
-if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
-    early = append(early,
-        `ip protocol icmp icmp type echo-request jump flood`,
-        `ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-    )
-}
+	// Insert in reverse so first item ends up highest in chain
+	for i := len(early) - 1; i >= 0; i-- {
+		addEarly(early[i])
+	}
 
-// Insert in reverse so first item ends up highest in chain
-for i := len(early) - 1; i >= 0; i-- {
-    addEarly(early[i])
-}
+	// Κόψε established/related από IPs που είναι ήδη σε block sets
+	if err := addRule(`ct state established,related ip saddr @block_v4 drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_v6 drop`); err != nil {
+		return err
+	}
 
-// Κόψε established/related από IPs που είναι ήδη σε block sets
-if err := addRule(`ct state established,related ip saddr @block_v4 drop`); err != nil { return err }
-if err := addRule(`ct state established,related ip6 saddr @block_v6 drop`); err != nil { return err }
+	// External feeds — hosts & nets
+	if err := addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`); err != nil {
+		return err
+	}
 
-// External feeds — hosts & nets
-if err := addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`); err != nil { return err }
-if err := addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`); err != nil { return err }
-if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`); err != nil { return err }
-if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`); err != nil { return err }
+	// Manual/aggregate nets (αν τα έχεις)
+	if err := addRule(`ct state established,related ip saddr @block_v4_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil {
+		return err
+	}
 
-// Manual/aggregate nets (αν τα έχεις)
-if err := addRule(`ct state established,related ip saddr @block_v4_nets drop`); err != nil { return err }
-if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil { return err }
+	// Τώρα το γενικό established/related accept (μετά τα drops)
+	if err := addRule(`ct state established,related accept`); err != nil {
+		return err
+	}
 
-
-
-// Τώρα το γενικό established/related accept (μετά τα drops)
-if err := addRule(`ct state established,related accept`); err != nil { return err }
-
-
-
-// Rules continue //
+	// Rules continue //
 
 	// 1) manual allow
-	if err := addRule(`ip saddr @allow_v4 accept`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil { return err }
+	if err := addRule(`ip saddr @allow_v4 accept`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil {
+		return err
+	}
 	// 2) dyn allow
-	if err := addRule(`ip saddr @allow_dyn_v4 accept`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil { return err }
+	if err := addRule(`ip saddr @allow_dyn_v4 accept`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil {
+		return err
+	}
 	// 3) external allow (hosts, then nets)
-	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @allow_ext_v6_hosts accept`); err != nil { return err }
-	if err := addRule(`ip saddr @allow_ext_v4_nets accept`);   err != nil { return err }
-	if err := addRule(`ip6 saddr @allow_ext_v6_nets accept`);  err != nil { return err }
+	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @allow_ext_v6_hosts accept`); err != nil {
+		return err
+	}
+	if err := addRule(`ip saddr @allow_ext_v4_nets accept`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @allow_ext_v6_nets accept`); err != nil {
+		return err
+	}
 	// 4) manual block
-	if err := addRule(`ip saddr @block_v4 drop`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @block_v6 drop`); err != nil { return err }
+	if err := addRule(`ip saddr @block_v4 drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @block_v6 drop`); err != nil {
+		return err
+	}
 	// 5) external block (hosts, then nets)
-	if err := addRule(`ip saddr @block_ext_v4_hosts drop`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @block_ext_v6_hosts drop`); err != nil { return err }
-	if err := addRule(`ip saddr @block_ext_v4_nets drop`);   err != nil { return err }
-	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`);  err != nil { return err }
+	if err := addRule(`ip saddr @block_ext_v4_hosts drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @block_ext_v6_hosts drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ip saddr @block_ext_v4_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`); err != nil {
+		return err
+	}
 
 	// NEW: manual block nets
-	if err := addRule(`ip saddr @block_v4_nets drop`);  err != nil { return err }
-	if err := addRule(`ip6 saddr @block_v6_nets drop`); err != nil { return err }
-
+	if err := addRule(`ip saddr @block_v4_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ip6 saddr @block_v6_nets drop`); err != nil {
+		return err
+	}
 
 	// 6) jump flood στο τέλος του base layer
 	if !b.ruleExists("input", "jump flood") {
@@ -484,18 +589,15 @@ if err := addRule(`ct state established,related accept`); err != nil { return er
 		}
 	}
 
-//moved to ports.go 
-// if err := addRule(`ct state invalid drop`); err != nil { return err }
-
+	//moved to ports.go
+	// if err := addRule(`ct state invalid drop`); err != nil { return err }
 
 	return nil
 }
 
-
-
 // refreshAPISets resolves cfg.API.URL (hostname in API_URL), populating debug_api_v4 / debug_api_v6.
 // No-op if URL is empty, invalid, or resolution fails. Best-effort.
-// Notes: We don’t add these sets to the global “ALLOW” early rules, so the API doesn’t get blanket access to other services. 
+// Notes: We don’t add these sets to the global “ALLOW” early rules, so the API doesn’t get blanket access to other services.
 // Only the debug port rules (below) will consult these sets.
 func (b *Backend) refreshAPISets() {
 	if b.cfg == nil || strings.TrimSpace(b.cfg.API.URL) == "" {
@@ -536,13 +638,6 @@ func (b *Backend) refreshAPISets() {
 		_ = b.nftExpr("add element inet cfm " + debugAPIV6 + " { " + ip + " };")
 	}
 }
-
-
-
-
-
-
-
 
 // -------- block (manual) --------
 
@@ -646,28 +741,40 @@ func (b *Backend) AddAllow(ip net.IP, ttl *time.Duration) error {
 	return fmt.Errorf("nft add allow failed: %v: %s", err, out)
 }
 
-
-
 // -------- ignore (manual) --------
 func (b *Backend) AddIgnore(ip net.IP, ttl *time.Duration) error {
-	if ip == nil { return errors.New("nil ip") }
+	if ip == nil {
+		return errors.New("nil ip")
+	}
 	set := "ignore_v4"
-	if ip.To4() == nil { set = "ignore_v6" }
+	if ip.To4() == nil {
+		set = "ignore_v6"
+	}
 	_ = b.RemoveIgnore(ip)
 	ttlStr := ""
-	if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
 	out, err := b.nftAddElementArgv(set, ip.String(), ttlStr)
-	if err == nil { return nil }
+	if err == nil {
+		return nil
+	}
 	if strings.Contains(out, "already exists") || strings.Contains(out, "File exists") {
 		_ = b.RemoveIgnore(ip)
-		if _, err2 := b.nftAddElementArgv(set, ip.String(), ttlStr); err2 == nil { return nil }
+		if _, err2 := b.nftAddElementArgv(set, ip.String(), ttlStr); err2 == nil {
+			return nil
+		}
 	}
 	return fmt.Errorf("nft add ignore failed: %v: %s", err, out)
 }
 func (b *Backend) RemoveIgnore(ip net.IP) error {
-	if ip == nil { return errors.New("nil ip") }
+	if ip == nil {
+		return errors.New("nil ip")
+	}
 	set := "ignore_v4"
-	if ip.To4() == nil { set = "ignore_v6" }
+	if ip.To4() == nil {
+		set = "ignore_v6"
+	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, ip.String())
 	out, err := b.nftOut(cmd)
 	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
@@ -676,19 +783,33 @@ func (b *Backend) RemoveIgnore(ip net.IP) error {
 	return nil
 }
 func (b *Backend) AddIgnoreNet(cidr string, ttl *time.Duration) error {
-	canon, v6, err := canonCIDR(cidr); if err != nil { return err }
-	set := "ignore_v4_nets"; if v6 { set = "ignore_v6_nets" }
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := "ignore_v4_nets"
+	if v6 {
+		set = "ignore_v6_nets"
+	}
 	_ = b.RemoveIgnoreNet(canon)
 	ttlStr := ""
-	if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
 	if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil && !strings.Contains(out, "already exists") {
 		return fmt.Errorf("nft add ignore net failed: %v: %s", err, out)
 	}
 	return nil
 }
 func (b *Backend) RemoveIgnoreNet(cidr string) error {
-	canon, v6, err := canonCIDR(cidr); if err != nil { return err }
-	set := "ignore_v4_nets"; if v6 { set = "ignore_v6_nets" }
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := "ignore_v4_nets"
+	if v6 {
+		set = "ignore_v6_nets"
+	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
 	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
@@ -696,7 +817,6 @@ func (b *Backend) RemoveIgnoreNet(cidr string) error {
 	}
 	return nil
 }
-
 
 func (b *Backend) RemoveAllow(ip net.IP) error {
 	if ip == nil {
@@ -715,89 +835,96 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	return nil
 }
 
-
-
-
 // -------- manual nets (CIDR) --------
 
 func canonCIDR(s string) (cidr string, v6 bool, err error) {
-    ip, nw, e := net.ParseCIDR(strings.TrimSpace(s))
-    if e != nil || ip == nil || nw == nil {
-        return "", false, fmt.Errorf("invalid cidr: %s", s)
-    }
-    // canonical string "ip/mask"
-    nw.IP = ip.Mask(nw.Mask)
-    return nw.String(), ip.To4() == nil, nil
+	ip, nw, e := net.ParseCIDR(strings.TrimSpace(s))
+	if e != nil || ip == nil || nw == nil {
+		return "", false, fmt.Errorf("invalid cidr: %s", s)
+	}
+	// canonical string "ip/mask"
+	nw.IP = ip.Mask(nw.Mask)
+	return nw.String(), ip.To4() == nil, nil
 }
 
 func (b *Backend) AddBlockNet(cidr string, ttl *time.Duration) error {
-    canon, v6, err := canonCIDR(cidr)
-    if err != nil { return err }
-    set := blockV4Nets
-    if v6 { set = blockV6Nets }
-    ttlStr := ""
-    if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
-    // best-effort: first delete, then add
-    _ = b.RemoveBlockNet(canon)
-    if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
-        if !strings.Contains(out, "already exists") {
-            return fmt.Errorf("nft add element failed: %v: %s", err, out)
-        }
-    }
-    return nil
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := blockV4Nets
+	if v6 {
+		set = blockV6Nets
+	}
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
+	// best-effort: first delete, then add
+	_ = b.RemoveBlockNet(canon)
+	if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
+		if !strings.Contains(out, "already exists") {
+			return fmt.Errorf("nft add element failed: %v: %s", err, out)
+		}
+	}
+	return nil
 }
 
 func (b *Backend) RemoveBlockNet(cidr string) error {
-    canon, v6, err := canonCIDR(cidr)
-    if err != nil { return err }
-    set := blockV4Nets
-    if v6 { set = blockV6Nets }
-    cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
-    out, err2 := b.nftOut(cmd)
-    if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
-        return fmt.Errorf("nft: %v: %s", err2, out)
-    }
-    return nil
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := blockV4Nets
+	if v6 {
+		set = blockV6Nets
+	}
+	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
+	out, err2 := b.nftOut(cmd)
+	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+		return fmt.Errorf("nft: %v: %s", err2, out)
+	}
+	return nil
 }
 
 func (b *Backend) AddAllowNet(cidr string, ttl *time.Duration) error {
-    canon, v6, err := canonCIDR(cidr)
-    if err != nil { return err }
-    set := allowV4Nets
-    if v6 { set = allowV6Nets }
-    ttlStr := ""
-    if ttl != nil && *ttl > 0 { ttlStr = humanTimeout(*ttl) }
-    _ = b.RemoveAllowNet(canon)
-    if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
-        if !strings.Contains(out, "already exists") {
-            return fmt.Errorf("nft add element failed: %v: %s", err, out)
-        }
-    }
-    return nil
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := allowV4Nets
+	if v6 {
+		set = allowV6Nets
+	}
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
+	_ = b.RemoveAllowNet(canon)
+	if out, err := b.nftAddElementArgv(set, canon, ttlStr); err != nil {
+		if !strings.Contains(out, "already exists") {
+			return fmt.Errorf("nft add element failed: %v: %s", err, out)
+		}
+	}
+	return nil
 }
 
 func (b *Backend) RemoveAllowNet(cidr string) error {
-    canon, v6, err := canonCIDR(cidr)
-    if err != nil { return err }
-    set := allowV4Nets
-    if v6 { set = allowV6Nets }
-    cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
-    out, err2 := b.nftOut(cmd)
-    if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
-        return fmt.Errorf("nft: %v: %s", err2, out)
-    }
-    return nil
+	canon, v6, err := canonCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	set := allowV4Nets
+	if v6 {
+		set = allowV6Nets
+	}
+	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
+	out, err2 := b.nftOut(cmd)
+	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+		return fmt.Errorf("nft: %v: %s", err2, out)
+	}
+	return nil
 }
-
-
-
-
-
-
-
-
-
-
 
 func (b *Backend) ListAllows() ([]firewall.BlockedEntry, error) {
 	var outAll []firewall.BlockedEntry
@@ -985,52 +1112,47 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 
 // list tables, ΟΧΙ list table inet cfm
 func (b *Backend) tableExists() bool {
-    // προτιμώ απλό text για μέγιστη συμβατότητα
-    out, err := exec.Command("sh","-lc", "nft list tables 2>/dev/null").Output()
-    if err != nil { return false }
-    for _, ln := range strings.Split(string(out), "\n") {
-        if strings.TrimSpace(ln) == "table inet cfm" { return true }
-    }
-    return false
+	// προτιμώ απλό text για μέγιστη συμβατότητα
+	out, err := exec.Command("sh", "-lc", "nft list tables 2>/dev/null").Output()
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(ln) == "table inet cfm" {
+			return true
+		}
+	}
+	return false
 }
-
-
 
 func TableExistsCFM() bool {
-    var b Backend
-    return b.tableExists()
+	var b Backend
+	return b.tableExists()
 }
-
-
-
 
 func (b *Backend) chainExists(chain string) bool {
 	_, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	return err == nil
 }
 
-
 func (b *Backend) ruleExists(chain, needle string) bool {
-    out, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
-    if err != nil {
-        return false
-    }
+	out, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
+	if err != nil {
+		return false
+	}
 
-    normalize := func(s string) string {
-        s = strings.ReplaceAll(s, "\r", "")
-        s = strings.ReplaceAll(s, "\t", " ")
-        // collapse all runs of whitespace into a single space
-        return strings.Join(strings.Fields(s), " ")
-    }
+	normalize := func(s string) string {
+		s = strings.ReplaceAll(s, "\r", "")
+		s = strings.ReplaceAll(s, "\t", " ")
+		// collapse all runs of whitespace into a single space
+		return strings.Join(strings.Fields(s), " ")
+	}
 
-    s := normalize(string(out))
-    n := normalize(needle)
+	s := normalize(string(out))
+	n := normalize(needle)
 
-    return strings.Contains(s, " "+n+" ")
+	return strings.Contains(s, " "+n+" ")
 }
-
-
-
 
 // -t terse - don't print the contents ffs//
 func (b *Backend) setExists(name string) bool {
@@ -1112,18 +1234,17 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 
 	// Αν είναι *nets set, καθάρισε επικαλύψεις
 
-if strings.Contains(setName, "_v4_nets") {
-    elems = normalizeCIDRsV4(elems)
-}
-if strings.Contains(setName, "_v6_nets") {
-    elems = normalizeCIDRsV6(elems)
-}
+	if strings.Contains(setName, "_v4_nets") {
+		elems = normalizeCIDRsV4(elems)
+	}
+	if strings.Contains(setName, "_v6_nets") {
+		elems = normalizeCIDRsV6(elems)
+	}
 
-
-ttlStr := ""
-if ttl != nil && *ttl > 0 {
-    ttlStr = humanTimeout(*ttl)
-}
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
 
 	return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
 }
@@ -1181,13 +1302,12 @@ func (b *Backend) nftAddElementsExpr(setName string, elems []string, ttlStr stri
 // NOTE: If elems already exist in the set, nft will error for that batch.
 // Use your seen-maps (or prefill them) to avoid duplicates.
 func (b *Backend) AddElementsBulk(setName string, elems []string, ttl *time.Duration) error {
-    ttlStr := ""
-    if ttl != nil && *ttl > 0 {
-        ttlStr = humanTimeout(*ttl)
-    }
-    return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
+	ttlStr := ""
+	if ttl != nil && *ttl > 0 {
+		ttlStr = humanTimeout(*ttl)
+	}
+	return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
 }
-
 
 // expr runner
 func (b *Backend) nftExpr(expr string) error {
@@ -1394,85 +1514,82 @@ func normalizeCIDRsV6(in []string) []string {
 	return out
 }
 
-
-
 // Sanitizer για feed names: lower, [a-z0-9_], κόψιμο μήκους, prefix αν αρχίζει με digit
 func SanitizeFeedName(s string) string {
-    s = strings.ToLower(s)
-    b := make([]rune, 0, len(s))
-    for _, r := range s {
-        if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-            b = append(b, r)
-        } else {
-            b = append(b, '_')
-        }
-    }
-    out := strings.Trim(bulkUnderscores(string(b)), "_")
-    if out == "" { out = "feed" }
-    if out[0] >= '0' && out[0] <= '9' {
-        out = "f_" + out
-    }
-    if len(out) > 40 { // αυθαίρετο όριο για καθαρότητα ονόματος
-        out = out[:40]
-    }
-    return out
+	s = strings.ToLower(s)
+	b := make([]rune, 0, len(s))
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b = append(b, r)
+		} else {
+			b = append(b, '_')
+		}
+	}
+	out := strings.Trim(bulkUnderscores(string(b)), "_")
+	if out == "" {
+		out = "feed"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "f_" + out
+	}
+	if len(out) > 40 { // αυθαίρετο όριο για καθαρότητα ονόματος
+		out = out[:40]
+	}
+	return out
 }
 func bulkUnderscores(s string) string {
-    for strings.Contains(s, "__") {
-        s = strings.ReplaceAll(s, "__", "_")
-    }
-    return s
+	for strings.Contains(s, "__") {
+		s = strings.ReplaceAll(s, "__", "_")
+	}
+	return s
 }
 
 // Δημιουργεί δυναμικό set με flags ανάλογα με hosts/nets και v4/v6
 func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
-    typ := "ipv4_addr"
-    if v6 { typ = "ipv6_addr" }
-    flags := "timeout"
-    if isNet { flags = "timeout,interval" }
-    return b.ensureSetWithFlags(name, typ, flags)
+	typ := "ipv4_addr"
+	if v6 {
+		typ = "ipv6_addr"
+	}
+	flags := "timeout"
+	if isNet {
+		flags = "timeout,interval"
+	}
+	return b.ensureSetWithFlags(name, typ, flags)
 }
-
-
 
 // --- WHICH IP support --------------------------------------------------------
 // --- inside package nft (internal/firewall/nft/nft.go) ---
 
 type setMeta struct {
-	Name string
-	Type string // ipv4_addr | ipv6_addr
+	Name  string
+	Type  string   // ipv4_addr | ipv6_addr
 	Flags []string // e.g. ["timeout","interval"]
 }
 
-
 // DropFeedSets διαγράφει όλα τα per-feed sets (hosts/nets, v4/v6, allow/block)
 func (b *Backend) DropFeedSets(feedName string) {
-    suff := SanitizeFeedName(feedName)
-    sets := []string{
-        "allow_ext_v4_hosts_" + suff,
-        "allow_ext_v4_nets_"  + suff,
-        "allow_ext_v6_hosts_" + suff,
-        "allow_ext_v6_nets_"  + suff,
-        "block_ext_v4_hosts_" + suff,
-        "block_ext_v4_nets_"  + suff,
-        "block_ext_v6_hosts_" + suff,
-        "block_ext_v6_nets_"  + suff,
-    }
-    for _, s := range sets {
-        // αγνόησε σφάλματα αν δεν υπάρχουν ή είναι δεσμευμένα
-        _ = exec.Command("nft", "flush", "set", "inet", tableName, s).Run()
-        _ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
-    }
+	suff := SanitizeFeedName(feedName)
+	sets := []string{
+		"allow_ext_v4_hosts_" + suff,
+		"allow_ext_v4_nets_" + suff,
+		"allow_ext_v6_hosts_" + suff,
+		"allow_ext_v6_nets_" + suff,
+		"block_ext_v4_hosts_" + suff,
+		"block_ext_v4_nets_" + suff,
+		"block_ext_v6_hosts_" + suff,
+		"block_ext_v6_nets_" + suff,
+	}
+	for _, s := range sets {
+		// αγνόησε σφάλματα αν δεν υπάρχουν ή είναι δεσμευμένα
+		_ = exec.Command("nft", "flush", "set", "inet", tableName, s).Run()
+		_ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
+	}
 
-    b.unregisterFeedKey(suff)
-    b.dropExternalFeedCache(suff)
+	b.unregisterFeedKey(suff)
+	b.dropExternalFeedCache(suff)
 
-    _ = b.RebuildExternalUnions()
+	_ = b.RebuildExternalUnions()
 }
-
-
-
-
 
 // DropEverything: delete whole table inet cfm
 func (b *Backend) DropEverything() error {
@@ -1492,180 +1609,167 @@ func (b *Backend) ResetTable() error {
 	return b.nftCmd(fmt.Sprintf("flush table %s %s", family, tableName))
 }
 
-
-
-//
 func (b *Backend) ResetCFMTable() error {
-    // Σβήσε το table αν υπάρχει (αγνόησε error αν δεν υπάρχει)
-    _ = b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
-    // Ξαναφτιάξ’ το άδειο
-    return b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName))
+	// Σβήσε το table αν υπάρχει (αγνόησε error αν δεν υπάρχει)
+	_ = b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
+	// Ξαναφτιάξ’ το άδειο
+	return b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName))
 }
-
 
 func (b *Backend) refreshSelfSets() {
-    // άδειασε τα sets
-    _ = b.nftExpr("flush set inet cfm self_v4;")
-    _ = b.nftExpr("flush set inet cfm self_v6;")
-    // loopbacks πάντα μέσα
-    _ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
-    _ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
-    _ = b.nftExpr("add element inet cfm self_v6 { fe80::/10 };")
+	// άδειασε τα sets
+	_ = b.nftExpr("flush set inet cfm self_v4;")
+	_ = b.nftExpr("flush set inet cfm self_v6;")
+	// loopbacks πάντα μέσα
+	_ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
+	_ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
+	_ = b.nftExpr("add element inet cfm self_v6 { fe80::/10 };")
 
-    // όλες οι τοπικές
-    ifaces, _ := net.Interfaces()
-    var v4s, v6s []string
-    for _, ifc := range ifaces {
-        if (ifc.Flags & net.FlagUp) == 0 { continue }
-        addrs, _ := ifc.Addrs()
-        for _, a := range addrs {
-            ip, _, err := net.ParseCIDR(a.String())
-            if err != nil || ip == nil { continue }
-            if ip.IsLoopback() { continue }
-            if v4 := ip.To4(); v4 != nil {
-                v4s = append(v4s, v4.String())
-            } else {
-                v6s = append(v6s, ip.String())
-            }
-        }
-    }
-    // batch add
-    for _, ip := range v4s { _ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", ip)) }
-    for _, ip := range v6s { _ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", ip)) }
+	// όλες οι τοπικές
+	ifaces, _ := net.Interfaces()
+	var v4s, v6s []string
+	for _, ifc := range ifaces {
+		if (ifc.Flags & net.FlagUp) == 0 {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ip, _, err := net.ParseCIDR(a.String())
+			if err != nil || ip == nil {
+				continue
+			}
+			if ip.IsLoopback() {
+				continue
+			}
+			if v4 := ip.To4(); v4 != nil {
+				v4s = append(v4s, v4.String())
+			} else {
+				v6s = append(v6s, ip.String())
+			}
+		}
+	}
+	// batch add
+	for _, ip := range v4s {
+		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", ip))
+	}
+	for _, ip := range v6s {
+		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", ip))
+	}
 }
-
-
 
 // isSelfIPString: true αν είναι loopback ή υπάρχει στα self_v4/self_v6
 func (b *Backend) isSelfIPString(s string) bool {
-    ip := net.ParseIP(strings.TrimSpace(s))
-    if ip == nil {
-        return false
-    }
-    if ip.IsLoopback() {
-        return true
-    }
-    // γρήγορος έλεγχος: κοιτάμε το text των sets (αρκετό για skip)
-    if ip.To4() != nil {
-        out4, _ := b.runCmdOutput("list set inet cfm self_v4")
-        if strings.Contains(out4, ip.String()) {
-            return true
-        }
-    } else {
-        out6, _ := b.runCmdOutput("list set inet cfm self_v6")
-        if strings.Contains(out6, ip.String()) {
-            return true
-        }
-    }
-    return false
+	ip := net.ParseIP(strings.TrimSpace(s))
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	// γρήγορος έλεγχος: κοιτάμε το text των sets (αρκετό για skip)
+	if ip.To4() != nil {
+		out4, _ := b.runCmdOutput("list set inet cfm self_v4")
+		if strings.Contains(out4, ip.String()) {
+			return true
+		}
+	} else {
+		out6, _ := b.runCmdOutput("list set inet cfm self_v6")
+		if strings.Contains(out6, ip.String()) {
+			return true
+		}
+	}
+	return false
 }
-
-
-
-
-
-
 
 // HasElem returns true if elem is in setName without dumping the set.
 func (b *Backend) HasElem(setName, elem string) (bool, error) {
-    args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
-    out, err := exec.Command("nft", args...).CombinedOutput()
-    if err == nil {
-        return true, nil // found
-    }
-    s := string(out)
-    // "Could not get element", "not found", etc. = not present (not an error for us)
-    if strings.Contains(s, "Could not get element") || strings.Contains(s, "not found") {
-        return false, nil
-    }
-    if strings.Contains(s, "No such file or directory") {
-        // set missing -> treat as not present; caller may decide what to do
-        return false, nil
-    }
-    return false, fmt.Errorf("nft get element %s{%s}: %v: %s", setName, elem, err, s)
+	args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
+	out, err := exec.Command("nft", args...).CombinedOutput()
+	if err == nil {
+		return true, nil // found
+	}
+	s := string(out)
+	// "Could not get element", "not found", etc. = not present (not an error for us)
+	if strings.Contains(s, "Could not get element") || strings.Contains(s, "not found") {
+		return false, nil
+	}
+	if strings.Contains(s, "No such file or directory") {
+		// set missing -> treat as not present; caller may decide what to do
+		return false, nil
+	}
+	return false, fmt.Errorf("nft get element %s{%s}: %v: %s", setName, elem, err, s)
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-////// helpers caching allow lists for ignore feature /////
+// //// helpers caching allow lists for ignore feature /////
 // listSetsByPrefixes returns set names that start with any of the given prefixes.
 func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
-    out, err := exec.Command("nft", "-t", "-n", "list", "table", string(family), tableName).CombinedOutput()
-    if err != nil {
-        return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
-    }
-    var names []string
-    pfx := make([]string, 0, len(prefixes))
-    for _, p := range prefixes {
-        p = strings.TrimSpace(p)
-        if p != "" { pfx = append(pfx, p) }
-    }
-    sc := bufio.NewScanner(bytes.NewReader(out))
-    for sc.Scan() {
-        line := strings.TrimSpace(sc.Text())
-        if !strings.HasPrefix(line, "set ") { continue }
-        fields := strings.Fields(line)
-        if len(fields) < 2 { continue }
-        name := fields[1]
-        for _, p := range pfx {
-            if strings.HasPrefix(name, p) {
-                names = append(names, name)
-                break
-            }
-        }
-    }
-    return names, nil
+	out, err := exec.Command("nft", "-t", "-n", "list", "table", string(family), tableName).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
+	}
+	var names []string
+	pfx := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			pfx = append(pfx, p)
+		}
+	}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "set ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[1]
+		for _, p := range pfx {
+			if strings.HasPrefix(name, p) {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	return names, nil
 }
 
 // refreshExtAllowCache reloads per-feed allow set names with a small TTL.
 func (b *Backend) refreshExtAllowCache() {
-    b.extMu.Lock()
-    defer b.extMu.Unlock()
-    if time.Since(b.extAllowCacheAt) < 300*time.Second {
-        return
-    }
-    // discover per-feed allow sets
-    v4h, _ := b.listSetsByPrefixes("allow_ext_v4_hosts_")
-    v4n, _ := b.listSetsByPrefixes("allow_ext_v4_nets_")
-    v6h, _ := b.listSetsByPrefixes("allow_ext_v6_hosts_")
-    v6n, _ := b.listSetsByPrefixes("allow_ext_v6_nets_")
-    b.extAllowV4Hosts = v4h
-    b.extAllowV4Nets  = v4n
-    b.extAllowV6Hosts = v6h
-    b.extAllowV6Nets  = v6n
-    b.extAllowCacheAt = time.Now()
+	b.extMu.Lock()
+	defer b.extMu.Unlock()
+	if time.Since(b.extAllowCacheAt) < 300*time.Second {
+		return
+	}
+	// discover per-feed allow sets
+	v4h, _ := b.listSetsByPrefixes("allow_ext_v4_hosts_")
+	v4n, _ := b.listSetsByPrefixes("allow_ext_v4_nets_")
+	v6h, _ := b.listSetsByPrefixes("allow_ext_v6_hosts_")
+	v6n, _ := b.listSetsByPrefixes("allow_ext_v6_nets_")
+	b.extAllowV4Hosts = v4h
+	b.extAllowV4Nets = v4n
+	b.extAllowV6Hosts = v6h
+	b.extAllowV6Nets = v6n
+	b.extAllowCacheAt = time.Now()
 }
 
 func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
-    b.refreshExtAllowCache()
-    b.extMu.RLock()
-    defer b.extMu.RUnlock()
-    if fam == 6 {
-        return append([]string(nil), b.extAllowV6Hosts...), append([]string(nil), b.extAllowV6Nets...)
-    }
-    return append([]string(nil), b.extAllowV4Hosts...), append([]string(nil), b.extAllowV4Nets...)
+	b.refreshExtAllowCache()
+	b.extMu.RLock()
+	defer b.extMu.RUnlock()
+	if fam == 6 {
+		return append([]string(nil), b.extAllowV6Hosts...), append([]string(nil), b.extAllowV6Nets...)
+	}
+	return append([]string(nil), b.extAllowV4Hosts...), append([]string(nil), b.extAllowV4Nets...)
 }
-
-
-
 
 // EnsureChallengeRedirect installs NAT redirect rules for IPs in challenge sets.
 // httpListen / httpsListen are like "127.0.0.1:9098" or ":9098".
 func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error {
-    httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
-    httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
+	httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
+	httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
 	if !okHTTP && !okHTTPS {
 		// nothing to do
 		return nil
@@ -1676,122 +1780,164 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		return err
 	}
 
-    addInputAccept := func(expr string) error {
-        // IMPORTANT: insert at top so it wins vs later drops from PortsPolicy
-        if !b.ruleExists("input", expr) {
-            return b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
-        }
-        return nil
-    }
+	hasComment := func(chain, label string) bool {
+		// Match by comment only so formatting differences can't cause duplicates.
+		return b.ruleExists(chain, fmt.Sprintf(`comment "cfm:challenge:%s"`, label))
+	}
 
-
-    addInputRuleAt := func(pos int, expr string) error {
-        // Used for deterministic ordering relative to our accept-at-top rules.
-        if !b.ruleExists("input", expr) {
-            return b.nftCmd(fmt.Sprintf(`insert rule %s %s input position %d %s`, family, tableName, pos, expr))
-        }
-        return nil
-    }
-
-
-	addNatRule := func(expr string) error {
-		if !b.ruleExists(challengeNatChain, expr) {
-			return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr))
+	// Ensure dedicated guard chain + early jump (so it runs BEFORE established/related accept).
+	// The jump rule must not reference any sets.
+	if !b.chainExists("challenge_guard") {
+		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s challenge_guard`, family, tableName)); err != nil {
+			return fmt.Errorf("nft add chain challenge_guard: %w", err)
 		}
+		b.chlogf("nft add chain challenge_guard")
+	}
+	if !b.ruleExists("input", "jump challenge_guard") {
+		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 jump challenge_guard`, family, tableName)); err != nil {
+			return fmt.Errorf("nft insert jump challenge_guard failed: %w", err)
+		}
+		b.chlogf("nft insert jump challenge_guard at input pos0")
+	}
+
+	addGuardRule := func(label, expr string) error {
+		if hasComment("challenge_guard", label) {
+			return nil
+		}
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s challenge_guard %s`, family, tableName, expr)); err != nil {
+			return err
+		}
+		b.chlogf("nft add %s: %s", label, expr)
+		return nil
+	}
+
+	addInputAccept := func(label, expr string) error {
+		if hasComment("input", label) {
+			return nil
+		}
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		// IMPORTANT: insert at top so it wins vs later drops from PortsPolicy
+		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err != nil {
+			return err
+		}
+		b.chlogf("nft insert %s: %s", label, expr)
+		return nil
+	}
+
+	// NOTE: we no longer insert set-dependent enforcement rules directly into input (position juggling can be brittle).
+	// Challenge enforcement rules live in the dedicated challenge_guard chain.
+
+	addNatRule := func(label, expr string) error {
+		if hasComment(challengeNatChain, label) {
+			return nil
+		}
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr)); err != nil {
+			return err
+		}
+		b.chlogf("nft add %s: %s", label, expr)
 		return nil
 	}
 
 	// HTTP :80 -> challenge httpPort
 	if okHTTP && httpPort > 0 {
 
-        // DNAT to loopback if server is bound to loopback
-        if httpHost == "127.0.0.1" {
-            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 dnat to 127.0.0.1:%d`, challengeV4, httpPort)); err != nil {
-                return err
-            }
-            // allow challenged sources to reach loopback-dnatted listener
-            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpPort)); err != nil {
-                return err
-            }
-        } else {
-            // fallback: keep old behavior if not loopback-bound
-            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
-                return err
-            }
-        }
+		// DNAT to loopback if server is bound to loopback
+		if httpHost == "127.0.0.1" {
+			if err := addNatRule("nat_v4_80", fmt.Sprintf(`ip saddr @%s tcp dport 80 dnat to 127.0.0.1:%d`, challengeV4, httpPort)); err != nil {
+				return err
+			}
+			// allow challenged sources to reach loopback-dnatted listener
+			if err := addInputAccept("accept_v4_http", fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpPort)); err != nil {
+				return err
+			}
+		} else {
+			// fallback: keep old behavior if not loopback-bound
+			if err := addNatRule("nat_v4_80", fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v4_http", fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
+				return err
+			}
+		}
 
-if httpHost == "::1" || httpHost == "127.0.0.1" {
-            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 dnat to [::1]:%d`, challengeV6, httpPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpPort)); err != nil {
-                return err
-            }
-        } else {
-            // fallback for v6
-            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
-                return err
-            }
-        }
+		if httpHost == "::1" || httpHost == "127.0.0.1" {
+			if err := addNatRule("nat_v6_80", fmt.Sprintf(`ip6 saddr @%s tcp dport 80 dnat to [::1]:%d`, challengeV6, httpPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v6_http", fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpPort)); err != nil {
+				return err
+			}
+		} else {
+			// fallback for v6
+			if err := addNatRule("nat_v6_80", fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v6_http", fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
+				return err
+			}
+		}
 
 	}
-
-
 
 	// HTTPS :443 -> challenge httpsPort
 	if okHTTPS && httpsPort > 0 {
 
-        if httpsHost == "127.0.0.1" {
-            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 dnat to 127.0.0.1:%d`, challengeV4, httpsPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
-                return err
-            }
-        } else {
-            if err := addNatRule(fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
-                return err
-            }
-        }
+		if httpsHost == "127.0.0.1" {
+			if err := addNatRule("nat_v4_443", fmt.Sprintf(`ip saddr @%s tcp dport 443 dnat to 127.0.0.1:%d`, challengeV4, httpsPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v4_https", fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
+				return err
+			}
+		} else {
+			if err := addNatRule("nat_v4_443", fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v4_https", fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
+				return err
+			}
+		}
 
-        if httpsHost == "::1" || httpsHost == "127.0.0.1" {
-            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 dnat to [::1]:%d`, challengeV6, httpsPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
-                return err
-            }
-        } else {
-            if err := addNatRule(fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
-                return err
-            }
-            if err := addInputAccept(fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
-                return err
-            }
-        }
-
+		if httpsHost == "::1" || httpsHost == "127.0.0.1" {
+			if err := addNatRule("nat_v6_443", fmt.Sprintf(`ip6 saddr @%s tcp dport 443 dnat to [::1]:%d`, challengeV6, httpsPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v6_https", fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
+				return err
+			}
+		} else {
+			if err := addNatRule("nat_v6_443", fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
+				return err
+			}
+			if err := addInputAccept("accept_v6_https", fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
+				return err
+			}
+		}
 
 	}
 
+	// QUIC/HTTP3 bypass fix:
+	// Challenged IPs must not be able to keep browsing via UDP/443 (h3/quic).
+	// Dropping UDP/443 forces browsers to fall back to TCP so DNAT redirect can work.
+	if okHTTPS && httpsPort > 0 {
+		if err := addGuardRule("guard_v4_quic_drop", fmt.Sprintf(`ip saddr @%s udp dport 443 drop`, challengeV4)); err != nil {
+			return err
+		}
+		if err := addGuardRule("guard_v6_quic_drop", fmt.Sprintf(`ip6 saddr @%s udp dport 443 drop`, challengeV6)); err != nil {
+			return err
+		}
+	}
 
-    // Kill existing keepalive connections to real web ports for challenged IPs.
-    // This forces clients to reconnect, so the next NEW connection hits the NAT redirect.
-    if err := addInputRuleAt(1, fmt.Sprintf(`ip saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV4)); err != nil {
-        return err
-    }
-    if err := addInputRuleAt(1, fmt.Sprintf(`ip6 saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV6)); err != nil {
-        return err
-    }
-
+	// Kill existing keepalive connections to real web ports for challenged IPs.
+	// This forces clients to reconnect, so the next NEW connection hits the NAT redirect.
+	if err := addGuardRule("guard_v4_reset", fmt.Sprintf(`ip saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV4)); err != nil {
+		return err
+	}
+	if err := addGuardRule("guard_v6_reset", fmt.Sprintf(`ip6 saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV6)); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1799,27 +1945,24 @@ if httpHost == "::1" || httpHost == "127.0.0.1" {
 func parseListenHostPort(addr string) (host string, port int, ok bool) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
-        return "", 0, false
+		return "", 0, false
 	}
-        h, portStr, err := net.SplitHostPort(addr)
+	h, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		// handle ":9098" (SplitHostPort accepts it) or "9098" (not valid)
 		if strings.Count(addr, ":") == 0 {
-               return "", 0, false
+			return "", 0, false
 		}
-        return "", 0, false
+		return "", 0, false
 	}
 
-        host = strings.TrimSpace(h)
+	host = strings.TrimSpace(h)
 	p, err := strconv.Atoi(portStr)
 	if err != nil || p <= 0 {
-        return host, 0, false
+		return host, 0, false
 	}
-       return host, p, true
+	return host, p, true
 }
-
-
-
 
 // -------- challenge (source IP redirect) --------
 
@@ -1871,3 +2014,4 @@ func (b *Backend) RemoveChallenge(ip net.IP) error {
 	}
 	return nil
 }
+

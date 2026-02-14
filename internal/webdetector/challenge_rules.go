@@ -21,6 +21,7 @@ type chalCtx struct {
 	Host string
 	URI  string
 	Sub  string // matched substring (rule)
+	TS   float64
 }
 
 func compileChalRules(list []string, defCount int) []chalRule {
@@ -95,6 +96,7 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
 			Host: rec.Host,
 			URI:  path,
 			Sub:  r.sub,
+			TS:   rec.TS,
 		}
 
 		// count only first matching rule per request (avoid inflation)
@@ -112,9 +114,15 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
 	const (
 		topN       = 50
-		cooldown   = 30 * time.Second
+		// Burst safety only. Real gating is "new hit since last emit".
+		cooldown   = 5 * time.Second
 		maxSamples = 8
 	)
+
+	tsToTime := func(ts float64) time.Time {
+		return time.Unix(0, int64(ts*1e9))
+	}
+
 
 	// Aggregate counts over current short window
 	type cand struct {
@@ -209,9 +217,22 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 			continue
 		}
 
-		// cooldown check (separate from block cooldown)
+		// Emit only if there was a NEW matching request since last emit for this IP.
+		// This prevents re-emitting the same window aggregate every RunOnce.
+		ctx := lastCtx[c.ip]
+		matchAt := tsToTime(ctx.TS)
+
 		e.emitMu.Lock()
 		last, ok := e.ipLastChalEmit[c.ip]
+
+		// 1) If the most recent match timestamp is not newer than our last emit,
+		//    it means we are re-evaluating the same old hit(s) inside the window.
+		if ok && !matchAt.After(last) {
+			e.emitMu.Unlock()
+			continue
+		}
+		// 2) Burst safety: avoid extremely frequent emits if multiple new matches arrive
+		//    almost at once (e.g. log flush batching).
 		if ok && now.Sub(last) < cooldown {
 			e.emitMu.Unlock()
 			continue

@@ -3,28 +3,27 @@ package webdetector
 import (
 	"context"
 	"crypto/tls"
-	"io"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
-        "unicode/utf8"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
-	"cfm/internal/firewall"
 
-        "crypto/hmac"
-        "crypto/sha256"
-        "encoding/base64"
-        "os"
-        "crypto/subtle"
-	"crypto/rand"
-	"sync"
 	"cfm/internal/challengeid"
-
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"os"
+	"sync"
 )
 
 type ChallengeServer struct {
@@ -37,357 +36,358 @@ type ChallengeServer struct {
 	ssl *sslcollector.Collector
 	fw  firewall.Backend
 
-        cidMu   sync.Mutex
-        cidUsed map[string]time.Time // cid -> expiresAt (UTC)
+	cidMu   sync.Mutex
+	cidUsed map[string]time.Time // cid -> expiresAt (UTC)
 
 }
-
 
 // Optional interface: only nft backend implements this.
 type challengeRedirector interface {
-        EnsureChallengeRedirect(httpListen, httpsListen string) error
+	EnsureChallengeRedirect(httpListen, httpsListen string) error
 }
 
 func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
-        h, p, err := net.SplitHostPort(strings.TrimSpace(addr))
-        if err != nil {
-                return "", false
-        }
-        if strings.TrimSpace(h) != "127.0.0.1" {
-                return "", false
-        }
-        // build "[::1]:port"
-        return net.JoinHostPort("::1", p), true
+	h, p, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return "", false
+	}
+	if strings.TrimSpace(h) != "127.0.0.1" {
+		return "", false
+	}
+	// build "[::1]:port"
+	return net.JoinHostPort("::1", p), true
 }
 
 // Optional: cooldown-bypass set (recommended to avoid loops).
 type challengeOKer interface {
-        AddChallengeOK(ip net.IP, ttl *time.Duration) error
-        RemoveChallengeOK(ip net.IP) error
+	AddChallengeOK(ip net.IP, ttl *time.Duration) error
+	RemoveChallengeOK(ip net.IP) error
 }
 
 const (
-        maxVerifyBodyBytes   = 1 << 10    // 1KB
-        maxUALen             = 256
-        maxHostLen           = 253
-        maxNextLen           = 2048
-        maxHeaderBytesTight  = 16 << 10   // 16KB (challenge server only)
+	maxVerifyBodyBytes  = 1 << 10 // 1KB
+	maxUALen            = 256
+	maxHostLen          = 253
+	maxNextLen          = 2048
+	maxHeaderBytesTight = 16 << 10 // 16KB (challenge server only)
 )
 
-
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
-        return &ChallengeServer{
-                ssl:     ssl,
-                fw:      fw,
-                cidUsed: make(map[string]time.Time),
-        }
+	return &ChallengeServer{
+		ssl:     ssl,
+		fw:      fw,
+		cidUsed: make(map[string]time.Time),
+	}
 }
 
 func clampCID(s string) string {
-        s = strings.TrimSpace(s)
-        if len(s) < 8 || len(s) > 64 { // sanity
-                return ""
-        }
-        return s
+	s = strings.TrimSpace(s)
+	if len(s) < 8 || len(s) > 64 { // sanity
+		return ""
+	}
+	return s
 }
 
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
 	mux := http.NewServeMux()
 
-    // Ensure nft NAT redirect rules exist (only if challenge listeners are set)
-        if s.fw != nil {
-                if cr, ok := any(s.fw).(challengeRedirector); ok {
-                        _ = cr.EnsureChallengeRedirect(httpAddr, httpsAddr)
-                }
-        }
+	// Ensure nft NAT redirect rules exist (only if challenge listeners are set)
+	if s.fw != nil {
+		// Allow nft backend to emit rule-install debug lines into the same log file.
+		if ls, ok := any(s.fw).(interface {
+			SetChallengeLogger(func(format string, args ...any))
+		}); ok {
+			ls.SetChallengeLogger(logging.LogfCHALLENGES)
+		}
+
+		if cr, ok := any(s.fw).(challengeRedirector); ok {
+			if err := cr.EnsureChallengeRedirect(httpAddr, httpsAddr); err != nil {
+				// IMPORTANT: do NOT swallow; this is exactly how we ended up with DNAT but missing reset rules.
+				logging.LogfCHALLENGES(
+					"[challenge] nft ensure redirect FAILED http=%s https=%s err=%v",
+					httpAddr, httpsAddr, err,
+				)
+			} else {
+				// Optional: one-line confirmation (useful during debugging)
+				logging.LogfCHALLENGES(
+					"[challenge] nft ensure redirect OK http=%s https=%s",
+					httpAddr, httpsAddr,
+				)
+			}
+		}
+	}
 
 	// basic endpoints
-        // --- VERIFY endpoint ---
-        // JS will POST here with ?next=... and cookie set.
-        mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
-                if r.Method != http.MethodPost {
-                        w.WriteHeader(http.StatusMethodNotAllowed)
-                        return
-                }
-
-                // Hard cap body even though we don't use it (abuse / slowloris-ish clients)
-                r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
-                // Drain/close (some clients send junk; prevent resource pinning)
-                _, _ = io.Copy(io.Discard, r.Body)
-                _ = r.Body.Close()
-
-                // Header / Host / UA sanity (defense-in-depth)
-                if !basicHeaderSanity(w, r) {
-                        return
-                }
-                if isWeirdUA(r.UserAgent()) {
-                        // Optional: you can also add a short penalty here (block/extend challenge)
-                        http.Error(w, "bad ua", http.StatusForbidden)
-                        return
-                }
-
-
-verifyStart := time.Now()
-host := cleanHost(r.Host)
-
-ip := clientIP(r)
-ipStr := ""
-                if ip == nil {
-                        http.Error(w, "bad client ip", http.StatusBadRequest)
-                        return
-                }
-
-                ipStr = ip.String()
-                next := r.URL.Query().Get("next")
-                if next == "" { next = "/" }
-                // prevent open redirect
-                if !strings.HasPrefix(next, "/") {
-                        next = "/"
-                }
-
-                if len(next) > maxNextLen {
-                        next = "/"
-                }
-
-
-                // Require cookie + HMAC token
-                c, err := r.Cookie("cfm_chal")
-                if err != nil || strings.TrimSpace(c.Value) == "" {
-                        http.Error(w, "missing cookie", http.StatusForbidden)
-                        return
-                }
-
-                // Expect token in header (sent by JS)
-                tok := strings.TrimSpace(r.Header.Get("X-CFM-Token"))
-                if tok == "" {
-                        http.Error(w, "missing token", http.StatusForbidden)
-                        return
-                }
-                if !verifyToken(tok, ip.String(), r.UserAgent(), c.Value) {
-                        http.Error(w, "bad token", http.StatusForbidden)
-                        return
-                }
-
-
-// Require PoW too (token + cookie + PoW)
-powTok := strings.TrimSpace(r.Header.Get("X-CFM-Pow"))
-sol := strings.TrimSpace(r.Header.Get("X-CFM-Sol"))
-if powTok == "" || sol == "" {
-        http.Error(w, "missing pow", http.StatusForbidden)
-        return
-}
-
-cfg := defaultPowConfig()
-if !cfg.Enabled {
-        http.Error(w, "pow disabled", http.StatusForbidden)
-        return
-}
-
-// IMPORTANT: bind must be JS-reproducible => UA + cookie (no IP)
-bind := powBind(r.UserAgent(), c.Value)
-
-diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
-if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
-        http.Error(w, "bad pow", http.StatusForbidden)
-        return
-}
-
-
-
-
-cid := clampCID(r.Header.Get("X-CFM-CID"))
-if cid == "" {
-        http.Error(w, "bad cid", http.StatusForbidden)
-        return
-}
-
-        // IMPORTANT: cid must match what was issued for this IP by the sink/challengeid store
-        if !challengeid.Global.Verify(ipStr, cid) {
-                http.Error(w, "cid mismatch", http.StatusForbidden)
-                return
-        }
-
-if !s.cidMarkOnce(cid, cfg.TTL) {
-        http.Error(w, "reused cid", http.StatusForbidden)
-        return
-}
-
-
-logging.LogfCHALLENGES(
-        "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
-        ip.String(),
-        host,
-        next,
-        time.Since(verifyStart).Milliseconds(),
-        diff,
-        cid,
-)
-
-
-                // consume CID after a successful solve
-                _ = challengeid.Global.Solved(ipStr, cid)
-
-                // Release:
-                // 1) remove from challenge set (so no more redirect)
-                if s.fw != nil {
-                        _ = s.fw.RemoveChallenge(ip)
-                        // 2) add cooldown OK (prevents immediate re-challenge loop)
-                        if oker, ok := any(s.fw).(challengeOKer); ok {
-                                ttl := 60 * time.Minute
-                                _ = oker.AddChallengeOK(ip, &ttl)
-                        }
-                }
-
-                // Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
-                time.Sleep(400 * time.Millisecond)
-
-
-
-// Redirect back to original path (relative redirect avoids scheme/host loops)
-w.Header().Set("Cache-Control", "no-store")
-w.Header().Set("Connection", "close")
-
-// Safety: next is already forced to start with "/" above.
-http.Redirect(w, r, next, http.StatusSeeOther) // 303
-
-
-
-        })
-
-        // --- CATCH-ALL: handle any path ---
-        // Important: register after /hello,/healthz,/verify.
-
-
-        mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
-                // Header / Host / UA sanity (defense-in-depth)
-                if !basicHeaderSanity(w, r) {
-                        return
-                }
-                if isWeirdUA(r.UserAgent()) {
-                        http.Error(w, "bad ua", http.StatusForbidden)
-                        return
-                }
-
-    // Only GET/HEAD should ever get the challenge HTML.
-    if r.Method != http.MethodGet && r.Method != http.MethodHead {
-        w.WriteHeader(http.StatusMethodNotAllowed)
-        return
-    }
-
-    // Avoid browsers hitting /favicon.ico etc causing token/cookie churn.
-    // Always serve the challenge page from "/" only.
-    if r.URL.Path != "/" {
-        next := r.URL.RequestURI()
-        w.Header().Set("Cache-Control", "no-store")
-
-        http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusFound)
-        return
-    }
-                // let existing endpoints win (ServeMux does this anyway)
-                if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == "/verify" {
-                        http.NotFound(w, r)
-                        return
-                }
-
-                ip := clientIP(r)
-                if ip == nil {
-                        http.Error(w, "bad client ip", http.StatusBadRequest)
-                        return
-                }
-
-                ipStr := ip.String()
-                // If already solved (cookie present + token valid), release and redirect.
-                next := r.URL.Query().Get("next")
-                if next == "" { next = "/" }
-                if !strings.HasPrefix(next, "/") { next = "/" }
-                if len(next) > maxNextLen {
-                        next = "/"
-                }
-
-                // cookie challenge: set ONLY if missing (prevents token mismatch loops)
-                cookieVal := ""
-                if c, err := r.Cookie("cfm_chal"); err == nil && strings.TrimSpace(c.Value) != "" {
-                        cookieVal = c.Value
-                } else {
-                        cookieVal = randomCookieValue()
-                        http.SetCookie(w, &http.Cookie{
-                                Name:     "cfm_chal",
-                                Value:    cookieVal,
-                                Path:     "/",
-                                MaxAge:   300,
-                                HttpOnly: false, // JS reads it
-                                Secure:   (r.TLS != nil),
-                                SameSite: http.SameSiteLaxMode,
-                        })
-                }
-
-
-                // Render challenge page (JS calls /verify with token)
-                w.Header().Set("Content-Type", "text/html; charset=utf-8")
-                w.Header().Set("Cache-Control", "no-store")
-                host := cleanHost(r.Host)
-
-                // token binds to IP+UA+cookie
-//                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
-                // challengeHTML placeholders are: host, token, next
-//                fmt.Fprintf(w, challengeHTML(), htmlEscape(host), htmlEscape(tok), htmlEscape(next))
-
-// token binds to IP+UA+cookie
-tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
-
-// PoW challenge token (additive, but required at verify time)
-
-cfg := defaultPowConfig()
-powTok := ""
-cid := ""
-
-                // CID must already be issued by the sink for this IP
-                if cfg.Enabled {
-                        cid = clampCID(challengeid.Global.Get(ipStr))
-                }
-
-if cfg.Enabled {
-        nonce16 := make([]byte, 16)
-        if _, err := rand.Read(nonce16); err == nil {
-                // bind must be reproducible by JS => UA + cookie
-                bind := powBind(r.UserAgent(), cookieVal)
-                if pt, err := issuePowChallenge(powSecretKey(), time.Now().UTC(), cfg.Difficulty, nonce16, bind); err == nil {
-                        powTok = pt
-                }
-        }
-
-}
-
-if cfg.Enabled && cid == "" {
-        http.Error(w, "missing cid", http.StatusForbidden)
-        return
-}
-
-if cfg.Enabled && powTok == "" {
-        http.Error(w, "pow unavailable", http.StatusInternalServerError)
-        return
-}
-
-
-
-// challengeHTML placeholders are: host, token, powTok, cid, next, difficulty
-fmt.Fprintf(w, challengeHTML(),
-        htmlEscape(host),
-        htmlEscape(tok),
-        htmlEscape(powTok),
-        htmlEscape(cid),
-        htmlEscape(next),
-        cfg.Difficulty,
-)
-
-
-
-
-
-        })
-
-
+	// --- VERIFY endpoint ---
+	// JS will POST here with ?next=... and cookie set.
+	mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Hard cap body even though we don't use it (abuse / slowloris-ish clients)
+		r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
+		// Drain/close (some clients send junk; prevent resource pinning)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+
+		// Header / Host / UA sanity (defense-in-depth)
+		if !basicHeaderSanity(w, r) {
+			return
+		}
+		if isWeirdUA(r.UserAgent()) {
+			// Optional: you can also add a short penalty here (block/extend challenge)
+			http.Error(w, "bad ua", http.StatusForbidden)
+			return
+		}
+
+		verifyStart := time.Now()
+		host := cleanHost(r.Host)
+
+		ip := clientIP(r)
+		ipStr := ""
+		if ip == nil {
+			http.Error(w, "bad client ip", http.StatusBadRequest)
+			return
+		}
+
+		ipStr = ip.String()
+		next := r.URL.Query().Get("next")
+		if next == "" {
+			next = "/"
+		}
+		// prevent open redirect
+		if !strings.HasPrefix(next, "/") {
+			next = "/"
+		}
+
+		if len(next) > maxNextLen {
+			next = "/"
+		}
+
+		// Require cookie + HMAC token
+		c, err := r.Cookie("cfm_chal")
+		if err != nil || strings.TrimSpace(c.Value) == "" {
+			http.Error(w, "missing cookie", http.StatusForbidden)
+			return
+		}
+
+		// Expect token in header (sent by JS)
+		tok := strings.TrimSpace(r.Header.Get("X-CFM-Token"))
+		if tok == "" {
+			http.Error(w, "missing token", http.StatusForbidden)
+			return
+		}
+		if !verifyToken(tok, ip.String(), r.UserAgent(), c.Value) {
+			http.Error(w, "bad token", http.StatusForbidden)
+			return
+		}
+
+		// Require PoW too (token + cookie + PoW)
+		powTok := strings.TrimSpace(r.Header.Get("X-CFM-Pow"))
+		sol := strings.TrimSpace(r.Header.Get("X-CFM-Sol"))
+		if powTok == "" || sol == "" {
+			http.Error(w, "missing pow", http.StatusForbidden)
+			return
+		}
+
+		cfg := defaultPowConfig()
+		if !cfg.Enabled {
+			http.Error(w, "pow disabled", http.StatusForbidden)
+			return
+		}
+
+		// IMPORTANT: bind must be JS-reproducible => UA + cookie (no IP)
+		bind := powBind(r.UserAgent(), c.Value)
+
+		diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
+		if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
+			http.Error(w, "bad pow", http.StatusForbidden)
+			return
+		}
+
+		cid := clampCID(r.Header.Get("X-CFM-CID"))
+		if cid == "" {
+			http.Error(w, "bad cid", http.StatusForbidden)
+			return
+		}
+
+		// IMPORTANT: cid must match what was issued for this IP by the sink/challengeid store
+		if !challengeid.Global.Verify(ipStr, cid) {
+			http.Error(w, "cid mismatch", http.StatusForbidden)
+			return
+		}
+
+		if !s.cidMarkOnce(cid, cfg.TTL) {
+			http.Error(w, "reused cid", http.StatusForbidden)
+			return
+		}
+
+		logging.LogfCHALLENGES(
+			"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
+			ip.String(),
+			host,
+			next,
+			time.Since(verifyStart).Milliseconds(),
+			diff,
+			cid,
+		)
+
+		// consume CID after a successful solve
+		_ = challengeid.Global.Solved(ipStr, cid)
+
+		// Release:
+		// 1) remove from challenge set (so no more redirect)
+		if s.fw != nil {
+			_ = s.fw.RemoveChallenge(ip)
+			// 2) add cooldown OK (prevents immediate re-challenge loop)
+			if oker, ok := any(s.fw).(challengeOKer); ok {
+				ttl := 60 * time.Minute
+				_ = oker.AddChallengeOK(ip, &ttl)
+			}
+		}
+
+		// Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
+		time.Sleep(400 * time.Millisecond)
+
+		// Redirect back to original path (relative redirect avoids scheme/host loops)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Connection", "close")
+
+		// Safety: next is already forced to start with "/" above.
+		http.Redirect(w, r, next, http.StatusSeeOther) // 303
+
+	})
+
+	// --- CATCH-ALL: handle any path ---
+	// Important: register after /hello,/healthz,/verify.
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+		// Header / Host / UA sanity (defense-in-depth)
+		if !basicHeaderSanity(w, r) {
+			return
+		}
+		if isWeirdUA(r.UserAgent()) {
+			http.Error(w, "bad ua", http.StatusForbidden)
+			return
+		}
+
+		// Only GET/HEAD should ever get the challenge HTML.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Avoid browsers hitting /favicon.ico etc causing token/cookie churn.
+		// Always serve the challenge page from "/" only.
+		if r.URL.Path != "/" {
+			next := r.URL.RequestURI()
+			w.Header().Set("Cache-Control", "no-store")
+
+			http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusFound)
+			return
+		}
+		// let existing endpoints win (ServeMux does this anyway)
+		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == "/verify" {
+			http.NotFound(w, r)
+			return
+		}
+
+		ip := clientIP(r)
+		if ip == nil {
+			http.Error(w, "bad client ip", http.StatusBadRequest)
+			return
+		}
+
+		ipStr := ip.String()
+		// If already solved (cookie present + token valid), release and redirect.
+		next := r.URL.Query().Get("next")
+		if next == "" {
+			next = "/"
+		}
+		if !strings.HasPrefix(next, "/") {
+			next = "/"
+		}
+		if len(next) > maxNextLen {
+			next = "/"
+		}
+
+		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
+		cookieVal := ""
+		if c, err := r.Cookie("cfm_chal"); err == nil && strings.TrimSpace(c.Value) != "" {
+			cookieVal = c.Value
+		} else {
+			cookieVal = randomCookieValue()
+			http.SetCookie(w, &http.Cookie{
+				Name:     "cfm_chal",
+				Value:    cookieVal,
+				Path:     "/",
+				MaxAge:   300,
+				HttpOnly: false, // JS reads it
+				Secure:   (r.TLS != nil),
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
+
+		// Render challenge page (JS calls /verify with token)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		host := cleanHost(r.Host)
+
+		// token binds to IP+UA+cookie
+		//                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
+		// challengeHTML placeholders are: host, token, next
+		//                fmt.Fprintf(w, challengeHTML(), htmlEscape(host), htmlEscape(tok), htmlEscape(next))
+
+		// token binds to IP+UA+cookie
+		tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
+
+		// PoW challenge token (additive, but required at verify time)
+
+		cfg := defaultPowConfig()
+		powTok := ""
+		cid := ""
+
+		// CID must already be issued by the sink for this IP
+		if cfg.Enabled {
+			cid = clampCID(challengeid.Global.Get(ipStr))
+		}
+
+		if cfg.Enabled {
+			nonce16 := make([]byte, 16)
+			if _, err := rand.Read(nonce16); err == nil {
+				// bind must be reproducible by JS => UA + cookie
+				bind := powBind(r.UserAgent(), cookieVal)
+				if pt, err := issuePowChallenge(powSecretKey(), time.Now().UTC(), cfg.Difficulty, nonce16, bind); err == nil {
+					powTok = pt
+				}
+			}
+
+		}
+
+		if cfg.Enabled && cid == "" {
+			http.Error(w, "missing cid", http.StatusForbidden)
+			return
+		}
+
+		if cfg.Enabled && powTok == "" {
+			http.Error(w, "pow unavailable", http.StatusInternalServerError)
+			return
+		}
+
+		// challengeHTML placeholders are: host, token, powTok, cid, next, difficulty
+		fmt.Fprintf(w, challengeHTML(),
+			htmlEscape(host),
+			htmlEscape(tok),
+			htmlEscape(powTok),
+			htmlEscape(cid),
+			htmlEscape(next),
+			cfg.Difficulty,
+		)
+
+	})
 
 	// ---------------- HTTP server ----------------
 	if httpAddr != "" {
@@ -406,7 +406,7 @@ fmt.Fprintf(w, challengeHTML(),
 			MaxHeaderBytes:    maxHeaderBytesTight,
 		}
 
-                s.httpSrv.SetKeepAlivesEnabled(false)
+		s.httpSrv.SetKeepAlivesEnabled(false)
 
 		go func() {
 			logging.Logf("[challenge] HTTP listening on %s", httpAddr)
@@ -415,20 +415,19 @@ fmt.Fprintf(w, challengeHTML(),
 			}
 		}()
 
-                // If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
-                if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpAddr); ok {
-                        if ln6, err := net.Listen("tcp", v6addr); err == nil {
-                                go func() {
-                                        logging.Logf("[challenge] HTTP listening on %s", v6addr)
-                                        if err := s.httpSrv.Serve(ln6); err != nil && err != http.ErrServerClosed {
-                                                logging.Logf("[challenge] HTTP serve error (v6): %v", err)
-                                        }
-                                }()
-                        } else {
-                                logging.Logf("[challenge] HTTP v6 loopback listen failed on %s: %v", v6addr, err)
-                        }
-                }
-
+		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
+		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpAddr); ok {
+			if ln6, err := net.Listen("tcp", v6addr); err == nil {
+				go func() {
+					logging.Logf("[challenge] HTTP listening on %s", v6addr)
+					if err := s.httpSrv.Serve(ln6); err != nil && err != http.ErrServerClosed {
+						logging.Logf("[challenge] HTTP serve error (v6): %v", err)
+					}
+				}()
+			} else {
+				logging.Logf("[challenge] HTTP v6 loopback listen failed on %s: %v", v6addr, err)
+			}
+		}
 
 	}
 
@@ -469,7 +468,7 @@ fmt.Fprintf(w, challengeHTML(),
 			TLSConfig:         tlsCfg,
 		}
 
-                s.httpsSrv.SetKeepAlivesEnabled(false)
+		s.httpsSrv.SetKeepAlivesEnabled(false)
 
 		go func() {
 			logging.Logf("[challenge] HTTPS listening on %s", httpsAddr)
@@ -478,19 +477,19 @@ fmt.Fprintf(w, challengeHTML(),
 			}
 		}()
 
-                // If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
-                if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
-                        if ln6, err := net.Listen("tcp", v6addr); err == nil {
-                                go func() {
-                                        logging.Logf("[challenge] HTTPS listening on %s", v6addr)
-                                        if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
-                                                logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
-                                        }
-                                }()
-                        } else {
-                                logging.Logf("[challenge] HTTPS v6 loopback listen failed on %s: %v", v6addr, err)
-                        }
-                }
+		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
+		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
+			if ln6, err := net.Listen("tcp", v6addr); err == nil {
+				go func() {
+					logging.Logf("[challenge] HTTPS listening on %s", v6addr)
+					if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
+						logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
+					}
+				}()
+			} else {
+				logging.Logf("[challenge] HTTPS v6 loopback listen failed on %s: %v", v6addr, err)
+			}
+		}
 
 	}
 
@@ -532,218 +531,207 @@ func htmlEscape(s string) string {
 }
 
 func tlsVersionString(v uint16) string {
-        switch v {
-        case tls.VersionTLS10:
-                return "TLS1.0"
-        case tls.VersionTLS11:
-                return "TLS1.1"
-        case tls.VersionTLS12:
-                return "TLS1.2"
-        case tls.VersionTLS13:
-                return "TLS1.3"
-        default:
-                return fmt.Sprintf("0x%04x", v)
-        }
+	switch v {
+	case tls.VersionTLS10:
+		return "TLS1.0"
+	case tls.VersionTLS11:
+		return "TLS1.1"
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return fmt.Sprintf("0x%04x", v)
+	}
 }
 
-
-
 // ---------------- helpers ----------------
-
 
 // --- CID one-time use store (anti-replay for solved challenges) ---
 
 func (s *ChallengeServer) cidCleanLocked(now time.Time) {
-        for cid, exp := range s.cidUsed {
-                if now.After(exp) {
-                        delete(s.cidUsed, cid)
-                }
-        }
+	for cid, exp := range s.cidUsed {
+		if now.After(exp) {
+			delete(s.cidUsed, cid)
+		}
+	}
 }
 
 // cidMarkOnce returns true on first use; false if reused within ttl.
 func (s *ChallengeServer) cidMarkOnce(cid string, ttl time.Duration) bool {
-        cid = strings.TrimSpace(cid)
-        if cid == "" {
-                return false
-        }
+	cid = strings.TrimSpace(cid)
+	if cid == "" {
+		return false
+	}
 
-    // cheap sanity: base64url-ish size
-    if len(cid) < 8 || len(cid) > 64 {
-        return false
-    }
+	// cheap sanity: base64url-ish size
+	if len(cid) < 8 || len(cid) > 64 {
+		return false
+	}
 
+	now := time.Now().UTC()
+	if ttl <= 0 {
+		ttl = 2 * time.Minute
+	}
 
-        now := time.Now().UTC()
-        if ttl <= 0 {
-                ttl = 2 * time.Minute
-        }
+	s.cidMu.Lock()
+	defer s.cidMu.Unlock()
 
-        s.cidMu.Lock()
-        defer s.cidMu.Unlock()
+	if s.cidUsed == nil {
+		s.cidUsed = make(map[string]time.Time)
+	}
+	s.cidCleanLocked(now)
 
-        if s.cidUsed == nil {
-                s.cidUsed = make(map[string]time.Time)
-        }
-        s.cidCleanLocked(now)
+	if exp, ok := s.cidUsed[cid]; ok && now.Before(exp) {
+		return false
+	}
 
-        if exp, ok := s.cidUsed[cid]; ok && now.Before(exp) {
-                return false
-        }
-
-        s.cidUsed[cid] = now.Add(ttl)
-        return true
+	s.cidUsed[cid] = now.Add(ttl)
+	return true
 }
 
-
 func cleanHost(h string) string {
-        if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
-                return hh
-        }
-        return h
+	if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
+		return hh
+	}
+	return h
 }
 
 func clientIP(r *http.Request) net.IP {
-        host, _, err := net.SplitHostPort(r.RemoteAddr)
-        if err != nil {
-                // best-effort fallback
-                host = r.RemoteAddr
-        }
-        ip := net.ParseIP(strings.TrimSpace(host))
-        return ip
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// best-effort fallback
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip
 }
 
-
 func basicHeaderSanity(w http.ResponseWriter, r *http.Request) bool {
-        // Host sanity (prevents some oddballs; also avoids huge Host headers)
-        host := r.Host
-        if host == "" || len(host) > maxHostLen {
-            http.Error(w, "bad host", http.StatusBadRequest)
-            return false
-        }
-        // Optional: reject whitespace/control in Host
-        for _, ch := range host {
-                if ch <= 0x20 || ch == 0x7f {
-                        http.Error(w, "bad host", http.StatusBadRequest)
-                        return false
-                }
-        }
-        // If you want: require SNI on HTTPS (most browsers do; stops random scanners)
-        if r.TLS != nil && strings.TrimSpace(r.TLS.ServerName) == "" {
-                http.Error(w, "missing sni", http.StatusBadRequest)
-                return false
-        }
-        return true
+	// Host sanity (prevents some oddballs; also avoids huge Host headers)
+	host := r.Host
+	if host == "" || len(host) > maxHostLen {
+		http.Error(w, "bad host", http.StatusBadRequest)
+		return false
+	}
+	// Optional: reject whitespace/control in Host
+	for _, ch := range host {
+		if ch <= 0x20 || ch == 0x7f {
+			http.Error(w, "bad host", http.StatusBadRequest)
+			return false
+		}
+	}
+	// If you want: require SNI on HTTPS (most browsers do; stops random scanners)
+	if r.TLS != nil && strings.TrimSpace(r.TLS.ServerName) == "" {
+		http.Error(w, "missing sni", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func isWeirdUA(ua string) bool {
-        ua = strings.TrimSpace(ua)
-        if ua == "" {
-                return true
-        }
-        if len(ua) > maxUALen {
-                return true
-        }
-        if !utf8.ValidString(ua) {
-                return true
-        }
-        // reject control chars / newlines (header smuggling-ish junk)
-        for _, r := range ua {
-                if r == '\r' || r == '\n' || r == 0 {
-                        return true
-                }
-                if r < 0x20 || r == 0x7f {
-                        return true
-                }
-        }
-        // very cheap heuristics: too repetitive, looks like binary, or obvious tools
-        lower := strings.ToLower(ua)
-        if strings.Contains(lower, "sqlmap") ||
-           strings.Contains(lower, "nikto") ||
-           strings.Contains(lower, "masscan") ||
-           strings.Contains(lower, "nmap") {
-                return true
-        }
-        // If it's insanely "dense" with punctuation, it's usually junk
-        punct := 0
-        for _, r := range ua {
-                if strings.ContainsRune(`"'\<>[]{}()|;`, r) {
-                        punct++
-                }
-        }
-        if punct >= 16 {
-                return true
-        }
-        return false
+	ua = strings.TrimSpace(ua)
+	if ua == "" {
+		return true
+	}
+	if len(ua) > maxUALen {
+		return true
+	}
+	if !utf8.ValidString(ua) {
+		return true
+	}
+	// reject control chars / newlines (header smuggling-ish junk)
+	for _, r := range ua {
+		if r == '\r' || r == '\n' || r == 0 {
+			return true
+		}
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	// very cheap heuristics: too repetitive, looks like binary, or obvious tools
+	lower := strings.ToLower(ua)
+	if strings.Contains(lower, "sqlmap") ||
+		strings.Contains(lower, "nikto") ||
+		strings.Contains(lower, "masscan") ||
+		strings.Contains(lower, "nmap") {
+		return true
+	}
+	// If it's insanely "dense" with punctuation, it's usually junk
+	punct := 0
+	for _, r := range ua {
+		if strings.ContainsRune(`"'\<>[]{}()|;`, r) {
+			punct++
+		}
+	}
+	if punct >= 16 {
+		return true
+	}
+	return false
 }
 
-
-
 func secretKey() []byte {
-        // Set once in service env for stability across restarts:
-        //   CFM_CHALLENGE_SECRET="random-long-string"
-        s := strings.TrimSpace(os.Getenv("CFM_CHALLENGE_SECRET"))
-        if s == "" {
-                // fallback (works but not persistent across deployments)
-                s = "cfm-default-secret-change-me"
-        }
-        return []byte(s)
+	// Set once in service env for stability across restarts:
+	//   CFM_CHALLENGE_SECRET="random-long-string"
+	s := strings.TrimSpace(os.Getenv("CFM_CHALLENGE_SECRET"))
+	if s == "" {
+		// fallback (works but not persistent across deployments)
+		s = "cfm-default-secret-change-me"
+	}
+	return []byte(s)
 }
 
 func issueToken(ip, ua, cookieVal string) string {
-        mac := hmac.New(sha256.New, secretKey())
-        mac.Write([]byte(ip))
-        mac.Write([]byte{0})
-        mac.Write([]byte(ua))
-        mac.Write([]byte{0})
-        mac.Write([]byte(cookieVal))
-        sum := mac.Sum(nil)
-        return base64.RawURLEncoding.EncodeToString(sum)
+	mac := hmac.New(sha256.New, secretKey())
+	mac.Write([]byte(ip))
+	mac.Write([]byte{0})
+	mac.Write([]byte(ua))
+	mac.Write([]byte{0})
+	mac.Write([]byte(cookieVal))
+	sum := mac.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(sum)
 }
 
 func verifyToken(tok, ip, ua, cookieVal string) bool {
-        want := issueToken(ip, ua, cookieVal)
+	want := issueToken(ip, ua, cookieVal)
 
-        a, err1 := base64.RawURLEncoding.DecodeString(tok)
-        b, err2 := base64.RawURLEncoding.DecodeString(want)
-        if err1 != nil || err2 != nil {
-                return false
-        }
-        if len(a) != len(b) {
-                return false
-        }
-        return subtle.ConstantTimeCompare(a, b) == 1
+	a, err1 := base64.RawURLEncoding.DecodeString(tok)
+	b, err2 := base64.RawURLEncoding.DecodeString(want)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 // --- PoW helpers (additive to token/cookie) ---
 // Important: bind must be reproducible by JS in the browser.
 // Do NOT include client IP here (browser can't know it reliably behind NAT/LB).
 func powSecretKey() []byte {
-        // reuse the same secret as the token mechanism
-        return secretKey()
+	// reuse the same secret as the token mechanism
+	return secretKey()
 }
 
 func powBind(ua, cookieVal string) string {
-        ua = strings.TrimSpace(ua)
-        return ua + "|" + cookieVal
+	ua = strings.TrimSpace(ua)
+	return ua + "|" + cookieVal
 }
-
-
 
 func randomCookieValue() string {
-        b := make([]byte, 32)
-        if _, err := rand.Read(b); err != nil {
-                // last resort fallback
-                h := sha256.Sum256([]byte(time.Now().UTC().String()))
-                b = h[:]
-        }
-        return base64.RawURLEncoding.EncodeToString(b)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// last resort fallback
+		h := sha256.Sum256([]byte(time.Now().UTC().String()))
+		b = h[:]
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-
 func challengeHTML() string {
-// placeholders: host, token, powTok, cid, next, powDifficulty
-        return `<!doctype html>
+	// placeholders: host, token, powTok, cid, next, powDifficulty
+	return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -873,3 +861,4 @@ func challengeHTML() string {
 </body>
 </html>`
 }
+
