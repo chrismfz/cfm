@@ -61,6 +61,14 @@ ChallengePathsCount   int    // CHALLENGE_PATHS_COUNT (optional threshold)
 ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
 
 
+    // Additional challenge triggers (all optional; 0 disables)
+    ChallengeIPRPSMin       float64 // CHALLENGE_RPS_TOTAL_MIN (per-IP rps)
+    ChallengeIP4xxRPSMin    float64 // CHALLENGE_RPS_4XX_MIN
+    ChallengeIP5xxRPSMin    float64 // CHALLENGE_RPS_5XX_MIN
+    ChallengeIPErrRatioMin  float64 // CHALLENGE_ERR_RATIO_MIN (err/total where err=4xx+5xx)
+    ChallengeIPPostRatioMin float64 // CHALLENGE_POST_RATIO_MIN (POST/total)
+    ChallengeIPNoUAMin      int     // CHALLENGE_NO_UA_MIN (empty/"-" UA hits)
+    ChallengeIPHTTP10Min    int     // CHALLENGE_HTTP10_MIN (proto == http/1.0)
 
 }
 

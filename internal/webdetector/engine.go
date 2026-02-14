@@ -137,6 +137,13 @@ type bucketSW struct {
     ipsChalPath map[string]int
     ipsChalRule map[string]map[int]int // ip -> ruleIndex -> count
 
+    // Lightweight per-IP counters for challenge thresholds
+    ips4xx   map[string]int
+    ips5xx   map[string]int
+    ipsPOST  map[string]int
+    ipsNoUA  map[string]int
+    ipsHTTP10 map[string]int
+
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
 	ip40xPaths map[string]map[uint64]struct{}
@@ -596,6 +603,8 @@ case 5:
                 if _, ok := b.ipSample[rec.IP]; !ok { b.ipSample[rec.IP] = rawLine }
 	}
 
+
+
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
 		if rec.Status == 403 && e.cfg.IP403Count > 0 {
@@ -651,6 +660,46 @@ case 5:
 		p = p[:i]
 	}
 	b.paths[p]++
+
+
+        // Per-IP challenge counters (only allocate maps if a related threshold is enabled)
+        if rec.IP != "" {
+                // status class counters
+                if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 {
+                        if b.ips4xx == nil { b.ips4xx = make(map[string]int) }
+                        b.ips4xx[rec.IP]++
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "4xx", TS: rec.TS}
+                }
+                if (e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 5 {
+                        if b.ips5xx == nil { b.ips5xx = make(map[string]int) }
+                        b.ips5xx[rec.IP]++
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "5xx", TS: rec.TS}
+                }
+
+                // method ratio
+                if e.cfg.ChallengeIPPostRatioMin > 0 && rec.Method == "post" {
+                        if b.ipsPOST == nil { b.ipsPOST = make(map[string]int) }
+                        b.ipsPOST[rec.IP]++
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "post", TS: rec.TS}
+                }
+
+                // empty UA
+                if e.cfg.ChallengeIPNoUAMin > 0 {
+                        if rec.UA == "" || rec.UA == "-" {
+                                if b.ipsNoUA == nil { b.ipsNoUA = make(map[string]int) }
+                                b.ipsNoUA[rec.IP]++
+                                e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "no_ua", TS: rec.TS}
+                        }
+                }
+
+                // http/1.0
+                if e.cfg.ChallengeIPHTTP10Min > 0 && rec.Proto == "http/1.0" {
+                        if b.ipsHTTP10 == nil { b.ipsHTTP10 = make(map[string]int) }
+                        b.ipsHTTP10[rec.IP]++
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "http/1.0", TS: rec.TS}
+                }
+        }
+
 
 // Challenge-only rule checks (paths)
 e.trackChallengePaths(rec, p, b)
