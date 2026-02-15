@@ -13,6 +13,8 @@
 /.env.example
 /.env.save
 
+/.aws/credentials
+
 # --- Webshell families (classic) ---
 wso.php
 wso2.php
