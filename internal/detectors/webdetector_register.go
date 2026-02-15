@@ -7,13 +7,71 @@ import (
 	"time"
 	"bufio"
 	"context"
-
+	"sync"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 
 
 )
+
+
+// webdetectorWrapped ensures that background servers (API + challenge)
+// are tied to the manager's ctx, so they STOP on reload.
+// Without this, hot-reload can leave orphan listeners serving a stale snapshot.
+type webdetectorWrapped struct {
+    eng       *webdet.Engine
+    cfg       webdet.Config
+    startOnce sync.Once
+}
+
+func (w *webdetectorWrapped) Name() string         { return w.eng.Name() }
+func (w *webdetectorWrapped) Every() time.Duration { return w.eng.Every() }
+
+func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert) error {
+    w.startOnce.Do(func() {
+        // API server (ctx-bound)
+        if w.cfg.APIListen != "" {
+            go func() {
+                if err := w.eng.ServeHTTPWithContext(ctx, w.cfg.APIListen); err != nil {
+                    logging.Logf("[webdetector] API server exited: %v", err)
+                }
+            }()
+        }
+
+        // Challenge server + nft redirect rules (ctx-bound)
+        if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
+            if fwBackend != nil {
+                if cr, ok := any(fwBackend).(interface {
+                    EnsureChallengeRedirect(httpListen, httpsListen string) error
+                }); ok {
+                    if err := cr.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
+                        logging.Logf("[webdetector] EnsureChallengeRedirect failed: %v", err)
+                    } else {
+                        logging.Logf("[webdetector] challenge redirect rules ensured (http=%q https=%q)",
+                            w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
+                    }
+                } else {
+                    logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect")
+                }
+            } else {
+                logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules")
+            }
+
+            srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
+            go func() {
+                if err := srv.Start(ctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
+                    logging.Logf("[webdetector] challenge server exited: %v", err)
+                }
+            }()
+        }
+    })
+
+    return w.eng.RunOnce(ctx, out)
+}
+
+
+
 
 func init() {
 	Register("webdetector", func(section string, kv, global KV) (core.PeriodicDetector, error) {
@@ -222,10 +280,6 @@ if cfg.Mode == "dir" { cfg.Mode = "folder" }
 engine := webdet.NewEngine(cfg)
 
 
-// normalize aliases
-if cfg.Mode == "dir" {
-        cfg.Mode = "folder"
-}
 
 		// MODE=file: attach tailer if file exists
 		if cfg.Mode == "file" || cfg.Mode == "" {
@@ -263,68 +317,12 @@ if cfg.Mode == "dir" {
 		}
 
 
-
-		// Start HTTP API in a goroutine (if API_LISTEN is non-empty).
-		if cfg.APIListen != "" {
-			go engine.ServeHTTP(cfg.APIListen)
-		}
-
+        // IMPORTANT: do NOT start background servers here.
+        // Bind them to the manager ctx via webdetectorWrapped.RunOnce(ctx),
+        // otherwise reload can leave orphan listeners serving stale stats.
+        return &webdetectorWrapped{eng: engine, cfg: cfg}, nil
 
 
-                // Start Challenge server (optional) + ensure nft redirect rules.
-                //
-                // IMPORTANT:
-                // - EnsureChallengeRedirect installs NAT prerouting redirect rules:
-                //   src IP in @challenge_v4/@challenge_v6 + dport 80/443 -> redirect to challenge ports.
-                // - This is idempotent: safe to call on startup.
-
-// Start Challenge server (optional).
-
-if cfg.ChallengeHTTPListen != "" || cfg.ChallengeHTTPSListen != "" {
-
-        // 1) Ensure redirect/accept rules using the SAME firewall backend (best-effort)
-        if fwBackend != nil {
-                if cr, ok := any(fwBackend).(interface {
-                        EnsureChallengeRedirect(httpListen, httpsListen string) error
-                }); ok {
-                        if err := cr.EnsureChallengeRedirect(cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen); err != nil {
-                                logging.Logf("[webdetector] EnsureChallengeRedirect failed: %v", err)
-                        } else {
-                                logging.Logf("[webdetector] challenge redirect rules ensured (http=%q https=%q)",
-                                        cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen)
-                        }
-                } else {
-                        logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect")
-                }
-        } else {
-                logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules")
-        }
-
-        // 2) Start challenge server with SSL collector + SAME firewall backend
-        srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
-
-        go func() {
-                if err := srv.Start(context.Background(), cfg.ChallengeHTTPListen, cfg.ChallengeHTTPSListen); err != nil {
-                        logging.Logf("[webdetector] challenge start failed: %v", err)
-                }
-        }()
-
-        if cfg.ChallengeHTTPListen != "" {
-                logging.Logf("[webdetector] challenge HTTP listening on %s", cfg.ChallengeHTTPListen)
-        }
-        if cfg.ChallengeHTTPSListen != "" {
-                logging.Logf("[webdetector] challenge HTTPS listening on %s", cfg.ChallengeHTTPSListen)
-        }
-}
-
-
-
-
-
-
-
-
-		return engine, nil
 	})
 }
 

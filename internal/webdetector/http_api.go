@@ -8,11 +8,14 @@ import (
 	"time"
 	"strconv"
 	"cfm/internal/logging"
+	"os"
+	"context"
+
 )
 
-// ServeHTTP starts a small HTTP server for webdetector API.
-// It should be called from the detector register (in a goroutine).
-func (e *Engine) ServeHTTP(addr string) {
+// ServeHTTPWithContext starts a small HTTP server for webdetector API.
+// When ctx is canceled, the server is gracefully shut down.
+func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/webdet/top-short", e.handleTopShort)
 	mux.HandleFunc("/api/v1/webdet/suspicious", e.handleSuspicious)
@@ -30,23 +33,48 @@ func (e *Engine) ServeHTTP(addr string) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+    // Shutdown on ctx cancel.
+    go func() {
+        <-ctx.Done()
+        ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+        defer cancel()
+        _ = srv.Shutdown(ctx2)
+    }()
+
+
 	// If addr looks like "unix:/path", listen on unix socket instead.
 	if len(addr) > 5 && addr[:5] == "unix:" {
 		path := addr[5:]
+	        _ = os.Remove(path)
 		l, err := net.Listen("unix", path)
 		if err != nil {
 			logging.Logf("[webdetector] HTTP listen (unix %s) failed: %v", path, err)
-			return
+			return err
 		}
+        defer func() {
+            _ = l.Close()
+            _ = os.Remove(path)
+        }()
 		logging.Logf("[webdetector] HTTP API listening on unix:%s", path)
-		_ = srv.Serve(l)
-		return
+        if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
+            logging.Logf("[webdetector] HTTP server error: %v", err)
+            return err
+        }
+        return nil
 	}
 
 	logging.Logf("[webdetector] HTTP API listening on %s", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logging.Logf("[webdetector] HTTP server error: %v", err)
+		return err
 	}
+    return nil
+}
+
+// ServeHTTP starts the webdetector API server without a cancelable context.
+// Prefer ServeHTTPWithContext when running under a manager that supports reload.
+func (e *Engine) ServeHTTP(addr string) {
+    _ = e.ServeHTTPWithContext(context.Background(), addr)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

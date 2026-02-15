@@ -769,9 +769,28 @@ func (s *sectionSink) challengeEnrichSuffix(ip string) string {
 // extractUserAgent tries to pull a User-Agent from common combined log samples.
 // Best-effort only.
 func extractUserAgent(samples []string) string {
-    // Typical Apache/Nginx combined format ends with: "ref" "ua"
+    // Best-effort:
+    // 1) TSV samples (webdetector): UA is usually the last TAB-separated column
+    // 2) Apache/Nginx combined logs: last quoted segment is UA: "ref" "ua"
     for i := len(samples) - 1; i >= 0; i-- {
-        ln := samples[i]
+        ln := strings.TrimSpace(samples[i])
+        if ln == "" {
+            continue
+        }
+
+        // --- (1) TSV mode ---
+        if strings.Contains(ln, "\t") {
+            cols := strings.Split(ln, "\t")
+            if len(cols) > 0 {
+                ua := strings.TrimSpace(cols[len(cols)-1])
+                if ua != "" && ua != "-" {
+                    return ua
+                }
+            }
+        }
+
+
+        // --- (2) Quoted combined log mode ---
         segs := make([]string, 0, 4)
         in := false
         start := 0

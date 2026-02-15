@@ -107,6 +107,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 					"[challenge] nft ensure redirect FAILED http=%s https=%s err=%v",
 					httpAddr, httpsAddr, err,
 				)
+                return fmt.Errorf("EnsureChallengeRedirect: %w", err)
 			} else {
 				// Optional: one-line confirmation (useful during debugging)
 				logging.LogfCHALLENGES(
@@ -249,7 +250,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 
 		// Redirect back to original path (relative redirect avoids scheme/host loops)
 		w.Header().Set("Cache-Control", "no-store")
@@ -496,7 +497,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 	// stop on ctx cancel
 	go func() {
 		<-ctx.Done()
-		_ = s.Stop(context.Background())
+		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.Stop(ctx2)
+
 	}()
 
 	return nil
