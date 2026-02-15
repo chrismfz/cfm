@@ -342,6 +342,12 @@ type Engine struct {
     chalLast map[string]chalCtx
 
 
+    // VHOST under-attack state (auto suspicious)
+    vhostMu           sync.Mutex
+    vhostUnderAttack  map[string]bool
+    vhostLastChange   map[string]time.Time
+
+
 }
 
 
@@ -381,6 +387,9 @@ func NewEngine(cfg Config) *Engine {
 
     e.ipLastChalEmit = make(map[string]time.Time)
     e.chalLast = make(map[string]chalCtx)
+
+    e.vhostUnderAttack = make(map[string]bool)
+    e.vhostLastChange  = make(map[string]time.Time)
 
 	// Enrichment is optional.
 	if cfg.UseEnrich {

@@ -70,6 +70,24 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
     ChallengeIPNoUAMin      int     // CHALLENGE_NO_UA_MIN (empty/"-" UA hits)
     ChallengeIPHTTP10Min    int     // CHALLENGE_HTTP10_MIN (proto == http/1.0)
 
+    // --- VHOST-wide challenge modes ---
+
+    // Manual panic mode: challenge every IP that hits these vhosts (or their subdomains).
+    // Example: "victim.com, *.victim.com"
+    ChallengeVHost        []string // CHALLENGE_VHOST
+
+    // Ignore list for vhost-wide actions (wins over manual+auto).
+    // Example: "api.mybank.gr"
+    ChallengeVHostIgnore  []string // CHALLENGE_VHOST_IGNORE
+
+    // Auto under-attack mode using long-window suspicious scoring.
+    ChallengeSuspiciousVHost      bool          // CHALLENGE_SUSPICIOUS_VHOST (1/0)
+    ChallengeSuspiciousScoreOn    float64       // CHALLENGE_SUSPICIOUS_VHOST_SCORE_ON
+    ChallengeSuspiciousScoreOff   float64       // CHALLENGE_SUSPICIOUS_VHOST_SCORE_OFF
+    ChallengeSuspiciousMinUniqIP  int           // CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP
+    ChallengeSuspiciousHolddown   time.Duration // CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN
+
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -108,6 +126,28 @@ if c.ChallengePathsCount <= 0 {
 if c.ChallengePathsTTL <= 0 {
     c.ChallengePathsTTL = 30 * time.Minute
 }
+
+
+    // Defaults for auto suspicious vhost mode (only meaningful when enabled).
+    if c.ChallengeSuspiciousVHost {
+        if c.ChallengeSuspiciousScoreOn <= 0 {
+            c.ChallengeSuspiciousScoreOn = 0.70
+        }
+        // If OFF not set, default to ON-0.10 (but never below 0).
+        if c.ChallengeSuspiciousScoreOff <= 0 {
+            off := c.ChallengeSuspiciousScoreOn - 0.10
+            if off < 0 {
+                off = 0
+            }
+            c.ChallengeSuspiciousScoreOff = off
+        }
+        if c.ChallengeSuspiciousMinUniqIP <= 0 {
+            c.ChallengeSuspiciousMinUniqIP = 80
+        }
+        if c.ChallengeSuspiciousHolddown <= 0 {
+            c.ChallengeSuspiciousHolddown = 10 * time.Minute
+        }
+    }
 
 
 // Sensible defaults for the 40x combo detector (window defaults to 120s).

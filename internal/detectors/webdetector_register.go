@@ -12,8 +12,6 @@ import (
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 
-//        "os/exec"
-//        nft "cfm/internal/firewall/nft"
 
 )
 
@@ -89,8 +87,43 @@ cfg := webdet.Config{
     ChallengeIPNoUAMin:      kvInt(kv, "CHALLENGE_NO_UA_MIN", 0),
     ChallengeIPHTTP10Min:    kvInt(kv, "CHALLENGE_HTTP10_MIN", 0),
 
+    // VHOST-wide challenge knobs
+    ChallengeSuspiciousVHost:     kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST", false),
+    ChallengeSuspiciousScoreOn:   kvFlt(kv, "CHALLENGE_SUSPICIOUS_VHOST_SCORE_ON", 0),
+    ChallengeSuspiciousScoreOff:  kvFlt(kv, "CHALLENGE_SUSPICIOUS_VHOST_SCORE_OFF", 0),
+    ChallengeSuspiciousMinUniqIP: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP", 0),
+    ChallengeSuspiciousHolddown:  kvDur(kv, "CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN", 0),
 
 }
+
+
+// CHALLENGE_VHOST (comma/space separated)
+rawVHosts := kvStrClean(kv, "CHALLENGE_VHOST", "")
+if rawVHosts != "" {
+    for _, h := range strings.FieldsFunc(rawVHosts, func(r rune) bool {
+        return r == ',' || r == ':' || r == ' ' || r == '\t'
+    }) {
+        h = strings.ToLower(strings.TrimSpace(h))
+        if h != "" {
+            cfg.ChallengeVHost = append(cfg.ChallengeVHost, h)
+        }
+    }
+}
+
+// CHALLENGE_VHOST_IGNORE (comma/space separated)
+rawIgnoreV := kvStrClean(kv, "CHALLENGE_VHOST_IGNORE", "")
+if rawIgnoreV != "" {
+    for _, h := range strings.FieldsFunc(rawIgnoreV, func(r rune) bool {
+        return r == ',' || r == ':' || r == ' ' || r == '\t'
+    }) {
+        h = strings.ToLower(strings.TrimSpace(h))
+        if h != "" {
+            cfg.ChallengeVHostIgnore = append(cfg.ChallengeVHostIgnore, h)
+        }
+    }
+}
+
+
 
 rawAgents := kvStrClean(kv, "AGENT_LIST", "")
 if rawAgents != "" {

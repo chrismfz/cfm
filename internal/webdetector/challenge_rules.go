@@ -7,8 +7,9 @@ import (
 	"sort"
 	"strings"
 	"time"
-
+        "cfm/internal/logging"
 	core "cfm/internal/detectors/core"
+
 )
 
 // chalRule supports "N:substring" overrides like MALPATH.
@@ -23,6 +24,35 @@ type chalCtx struct {
 	Sub  string // matched substring (rule)
 	TS   float64
 }
+
+
+// hostMatch returns true if host matches pattern exactly or as a subdomain.
+// Supports patterns like "example.com" or "*.example.com".
+func hostMatch(host, pattern string) bool {
+    host = strings.ToLower(strings.TrimSpace(host))
+    pattern = strings.ToLower(strings.TrimSpace(pattern))
+    if host == "" || pattern == "" {
+        return false
+    }
+    if strings.HasPrefix(pattern, "*.") {
+        pattern = strings.TrimPrefix(pattern, "*.")
+    }
+    if host == pattern {
+        return true
+    }
+    return strings.HasSuffix(host, "."+pattern)
+}
+
+func hostMatchAny(host string, patterns []string) bool {
+    for _, p := range patterns {
+        if hostMatch(host, p) {
+            return true
+        }
+    }
+    return false
+}
+
+
 
 func compileChalRules(list []string, defCount int) []chalRule {
 	if defCount <= 0 {
@@ -115,7 +145,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIP5xxRPSMin > 0 ||
         e.cfg.ChallengeIPErrRatioMin > 0 || e.cfg.ChallengeIPPostRatioMin > 0 ||
         e.cfg.ChallengeIPNoUAMin > 0 || e.cfg.ChallengeIPHTTP10Min > 0
-        if !havePaths && !haveThr { return }
+        haveVhostManual := len(e.cfg.ChallengeVHost) > 0
+        haveVhostAuto   := e.cfg.ChallengeSuspiciousVHost
+        if !havePaths && !haveThr && !haveVhostManual && !haveVhostAuto { return }
 
 	const (
 		topN       = 50
@@ -428,4 +460,273 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             select { case out <- alet: default: }
         }
     }
+
+
+
+
+
+     // ---- 3) VHOST-wide challenge (manual panic + auto suspicious) ----
+    //
+    // Manual panic:
+    //   CHALLENGE_VHOST = victim.com, *.victim.com
+    // Ignore (wins):
+    //   CHALLENGE_VHOST_IGNORE = api.mybank.gr
+    //
+    // Auto suspicious:
+    //   CHALLENGE_SUSPICIOUS_VHOST=1
+    //   CHALLENGE_SUSPICIOUS_VHOST_SCORE_ON/OFF, MIN_UNIQIP, HOLDDOWN
+    //
+    // Emits:
+    //   - Per-IP WEB/CHALLENGE (action=challenge) for affected IPs
+    //   - WEB/VHOST_CHALLENGE_ON/OFF once per state change (auto only)
+    if haveVhostManual || haveVhostAuto {
+        // 1) Build short-window host -> (ip -> count)
+        type hostAgg struct {
+            ips map[string]int
+        }
+        short := make(map[string]*hostAgg)
+
+        e.mu.RLock()
+        for host, hs := range e.hosts {
+            if hs == nil {
+                continue
+            }
+            ha := short[host]
+            if ha == nil {
+                ha = &hostAgg{ips: make(map[string]int)}
+                short[host] = ha
+            }
+            for i := range hs.buckets {
+                b := &hs.buckets[i]
+                for ip, n := range b.ips {
+                    ha.ips[ip] += n
+                }
+            }
+        }
+        e.mu.RUnlock()
+
+        // 2) Candidate hosts = union of:
+        //    - hosts we saw recently (short window)
+        //    - hosts currently in under-attack state
+        //    - hosts present in long window (for auto off)
+        candHosts := make(map[string]struct{}, len(short))
+        for h := range short { candHosts[h] = struct{}{} }
+
+        e.vhostMu.Lock()
+        for h := range e.vhostUnderAttack { candHosts[h] = struct{}{} }
+        e.vhostMu.Unlock()
+
+        if e.longwin != nil {
+            for _, r := range e.longwin.All() {
+                if r.Host != "" {
+                    candHosts[r.Host] = struct{}{}
+                }
+            }
+        }
+
+        // 3) Evaluate each host
+        for host := range candHosts {
+            if host == "" {
+                continue
+            }
+            // Ignore list wins for vhost-wide actions
+            if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore) {
+                // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
+                if haveVhostAuto {
+                    e.vhostMu.Lock()
+                    cur := e.vhostUnderAttack[host]
+                    if cur {
+                        e.vhostUnderAttack[host] = false
+                        e.vhostLastChange[host] = now
+                        e.vhostMu.Unlock()
+
+                        logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
+                        a := core.Alert{
+                            When:  now,
+                            Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                            Key:   host,
+                            Count: 0,
+                            Extra: map[string]string{
+                                "host":   host,
+                                "action": "auto_off",
+                                "reason": "ignored",
+                            },
+                        }
+                        select { case out <- a: default: }
+                    } else {
+                        e.vhostMu.Unlock()
+                    }
+                }
+                continue
+            }
+
+            // Manual panic applies immediately.
+            manual := haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost)
+
+            // Auto suspicious: long-window score with hysteresis + holddown.
+            autoActive := false
+            var row SuspiciousRow
+            if haveVhostAuto && e.longwin != nil {
+                r, ok := e.longwin.One(host)
+                if ok {
+                    row = r
+                } else {
+                    row = SuspiciousRow{Host: host}
+                }
+
+                on  := e.cfg.ChallengeSuspiciousScoreOn
+                off := e.cfg.ChallengeSuspiciousScoreOff
+                minUniq := e.cfg.ChallengeSuspiciousMinUniqIP
+                hold := e.cfg.ChallengeSuspiciousHolddown
+
+                e.vhostMu.Lock()
+                cur := e.vhostUnderAttack[host]
+                last := e.vhostLastChange[host]
+
+                // holddown keeps it ON for a minimum duration
+                if cur && hold > 0 && !last.IsZero() && now.Sub(last) < hold {
+                    autoActive = true
+                } else {
+                    if !cur {
+                        if row.Score >= on && row.UniqueIPs >= minUniq {
+                            autoActive = true
+                            e.vhostUnderAttack[host] = true
+                            e.vhostLastChange[host] = now
+
+                            // state change -> log + event
+                            logging.LogfCHALLENGES(
+                                "[challenge][vhost] action=auto_on host=%s score=%.2f on=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s hold=%s",
+                                host, row.Score, on, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
+                            )
+                            a := core.Alert{
+                                When:  now,
+                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_ON"),
+                                Key:   host,
+                                Count: row.UniqueIPs,
+                                Extra: map[string]string{
+                                    "host":    host,
+                                    "action":  "auto_on",
+                                    "score":   fmt.Sprintf("%.2f", row.Score),
+                                    "score_on": fmt.Sprintf("%.2f", on),
+                                    "score_off": fmt.Sprintf("%.2f", off),
+                                    "uniqIP":  fmt.Sprintf("%d", row.UniqueIPs),
+                                    "rps":     fmt.Sprintf("%.2f", row.RPS),
+                                    "reasons": strings.Join(row.Reasons, ","),
+                                    "holddown": hold.String(),
+                                },
+                            }
+                            e.vhostMu.Unlock()
+                            select { case out <- a: default: }
+                        } else {
+                            e.vhostMu.Unlock()
+                        }
+                    } else {
+                        // currently ON: turn OFF when score <= off (and holddown already passed above)
+                        if row.Score <= off {
+                            e.vhostUnderAttack[host] = false
+                            e.vhostLastChange[host] = now
+                            e.vhostMu.Unlock()
+
+                            logging.LogfCHALLENGES(
+                                "[challenge][vhost] action=auto_off host=%s score=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s",
+                                host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
+                            )
+                            a := core.Alert{
+                                When:  now,
+                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                                Key:   host,
+                                Count: 0,
+                                Extra: map[string]string{
+                                    "host":    host,
+                                    "action":  "auto_off",
+                                    "score":   fmt.Sprintf("%.2f", row.Score),
+                                    "score_off": fmt.Sprintf("%.2f", off),
+                                    "uniqIP":  fmt.Sprintf("%d", row.UniqueIPs),
+                                    "rps":     fmt.Sprintf("%.2f", row.RPS),
+                                    "reasons": strings.Join(row.Reasons, ","),
+                                },
+                            }
+                            select { case out <- a: default: }
+                        } else {
+                            autoActive = true
+                            e.vhostMu.Unlock()
+                        }
+                    }
+                }
+            }
+
+            effective := manual || autoActive
+            if !effective {
+                continue
+            }
+
+            // Challenge all IPs seen for this host in short window.
+            ha := short[host]
+            if ha == nil || len(ha.ips) == 0 {
+                continue
+            }
+
+            rule := "CHALLENGE_VHOST"
+            if manual {
+                rule = "CHALLENGE_VHOST"
+            } else {
+                rule = "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
+            }
+
+            for ipStr, reqN := range ha.ips {
+                ip := net.ParseIP(ipStr)
+                if ip == nil {
+                    continue
+                }
+                if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+                    continue
+                }
+
+                // Burst safety (IP-level) — sink enforces real global cooldown
+                e.emitMu.Lock()
+                last, ok := e.ipLastChalEmit[ipStr]
+                if ok && now.Sub(last) < cooldown {
+                    e.emitMu.Unlock()
+                    continue
+                }
+                e.ipLastChalEmit[ipStr] = now
+                e.emitMu.Unlock()
+
+                samples := e.ipSamples(ipStr, maxSamples)
+                ttl := e.cfg.ChallengePathsTTL
+                if ttl <= 0 {
+                    ttl = 30 * time.Minute
+                }
+
+                extra := map[string]string{
+                    "detector": "webdetector",
+                    "ip":       ipStr,
+                    "action":   "challenge",
+                    "rule":     rule,
+                    "ttl":      ttl.String(),
+                    "host":     host,
+                }
+                if !manual {
+                    extra["score"]   = fmt.Sprintf("%.2f", row.Score)
+                    extra["reasons"] = strings.Join(row.Reasons, ",")
+                    extra["uniqIP"]  = fmt.Sprintf("%d", row.UniqueIPs)
+                    extra["rps"]     = fmt.Sprintf("%.2f", row.RPS)
+                }
+
+                a := core.Alert{
+                    When:    now,
+                    Kind:    core.AlertKind("WEB/CHALLENGE"),
+                    Key:     ipStr,
+                    Count:   reqN,
+                    Samples: samples,
+                    Extra:   extra,
+                }
+                select { case out <- a: default: }
+            }
+        }
+    }
+
+
+
+
 }

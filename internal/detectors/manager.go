@@ -21,6 +21,7 @@ type manager struct {
 	state *core.State
 
         ignore *IPIgnore // New ignore IP and Subnets
+	chalExclude *ChallengeExclude
 }
 
 func Start(parent context.Context, opts Options) {
@@ -121,6 +122,35 @@ if ig != nil {
 
 
 
+
+    // --- NEW: Challenge exclude rules (whitelist for verified crawlers etc.) ---
+    // [global]
+    //   CHALLENGE_EXCLUDE=1
+    //   CHALLENGE_EXCLUDE_FILE=/etc/cfm/webdetector_challenge_exclude.txt
+    var chalExclude *ChallengeExclude
+    if kvBool(secs.Global, "CHALLENGE_EXCLUDE", false) {
+        p := kvStrClean(secs.Global, "CHALLENGE_EXCLUDE_FILE", "/etc/cfm/webdetector_challenge_exclude.txt")
+        if ce, err := LoadChallengeExclude(p); err == nil {
+            chalExclude = ce
+            if chalExclude != nil {
+                logging.Logf("[detectors] challenge exclude enabled: file=%q", p)
+            } else {
+                logging.Logf("[detectors] challenge exclude enabled but no valid rules: file=%q", p)
+            }
+        } else {
+            logging.Logf("[detectors] challenge exclude disabled (failed to load %q): %v", p, err)
+        }
+    }
+
+
+
+
+
+
+
+
+
+
 	// stop all on any change (baby steps, clean & robust)
 	if m.running {
 		logging.Logf("[detectors] reloading config")
@@ -133,6 +163,7 @@ if ig != nil {
 	m.lastStamp = secs.StampNS
 	m.running = true
 	m.ignore  = ig
+	m.chalExclude = chalExclude
 	m.mu.Unlock()
 
 	// Summary: list sections & enabled/disabled
@@ -258,7 +289,22 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
         defChalCooldown := kvDur(secs.Global, "CHALLENGE_COOLDOWN", 30*time.Minute)
         chalCooldown := kvDur(kv, "CHALLENGE_COOLDOWN", defChalCooldown)
 
-        secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown)
+        // Allow per-section override for challenge exclude (useful if only webdetector should apply it).
+        secExclude := m.chalExclude
+        rawEx := strings.TrimSpace(kvStrClean(kv, "CHALLENGE_EXCLUDE", ""))
+        if rawEx != "" {
+            if kvBool(kv, "CHALLENGE_EXCLUDE", false) {
+                p := kvStrClean(kv, "CHALLENGE_EXCLUDE_FILE",
+                    kvStrClean(secs.Global, "CHALLENGE_EXCLUDE_FILE", "/etc/cfm/webdetector_challenge_exclude.txt"))
+                if ce, err := LoadChallengeExclude(p); err == nil {
+                    secExclude = ce
+                }
+            } else {
+                secExclude = nil
+            }
+        }
+
+        secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude)
 		go RunPeriodicWithState(ctx, det, secSink, m.state)
 	}
 }

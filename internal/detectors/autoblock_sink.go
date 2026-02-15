@@ -33,6 +33,8 @@ type sectionSink struct {
     chalState map[string]challengeState
     chalCooldown time.Duration
 
+    chalExclude *ChallengeExclude
+
 }
 
 type challengeState struct {
@@ -40,7 +42,7 @@ type challengeState struct {
     LastSeen time.Time
 }
 
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration) core.Sink {
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration, chalExclude *ChallengeExclude) core.Sink {
     return &sectionSink{
         section: section,
         pol:     pol,
@@ -51,6 +53,7 @@ func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewal
         ignore:  ig,
         chalState: make(map[string]challengeState),
         chalCooldown: chalCooldown,
+        chalExclude: chalExclude,
     }
 }
 
@@ -180,6 +183,80 @@ if core.IsSelfIP(ipStr) {
     // --- CHALLENGE branch ---
     // Triggered when detector emits Extra["action"]="challenge"
     if out.Extra != nil && out.Extra["action"] == "challenge" {
+
+        // --- Challenge exclude / whitelist (ASN+UA+PTR combos etc.) ---
+        if s.chalExclude != nil {
+            host := strings.TrimSpace(out.Extra["host"])
+            rule := strings.TrimSpace(out.Extra["rule"])
+            ua := strings.TrimSpace(out.Extra["ua"])
+            if ua == "" {
+                ua = extractUserAgent(out.Samples)
+            }
+            asn := ""
+            ptr := ""
+            if s.enr != nil {
+                r := s.enr.Lookup(ipStr)
+                if r.ASN > 0 {
+                    asn = fmt.Sprintf("AS%d", r.ASN)
+                }
+                if r.PTR != "" {
+                    ptr = r.PTR
+                }
+            }
+            if ptr == "" {
+                // fallback (bounded timeout)
+                ptr = lookupPTR(ipStr)
+            }
+
+            if act, why, ok := s.chalExclude.Match(ipStr, host, ua, asn, ptr, rule); ok {
+                // Action may suppress all challenges or only vhost-wide ones.
+                if act == "skip" || act == "skip_vhost_only" {
+                    out.Extra["blocked"]  = "challenge"
+                    out.Extra["enforced"] = "challenge_suppressed"
+                    out.Extra["reason"]   = "excluded"
+                    out.Extra["exclude"]  = why
+
+                    logging.LogfCHALLENGES(
+                        "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s reason=%s exclude=%s%s",
+                        ipStr,
+                        firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                        out.Extra["host"],
+                        out.Extra["uri"],
+                        firstNonEmpty(out.Extra["ttl"], defaultChallengeTTL.String()),
+                        out.Extra["enforced"],
+                        out.Extra["reason"],
+                        out.Extra["exclude"],
+                        s.challengeEnrichSuffix(ipStr),
+                    )
+
+                    // Optional notify (audit)
+                    smp := out.Samples
+                    if len(smp) > 10 { smp = smp[:10] }
+                    notify.Enqueue(notify.Event{
+                        Kind:     "WEB/CHALLENGE_EXCLUDED",
+                        Section:  s.section,
+                        SrcIP:    ipStr,
+                        Reason:   why,
+                        Count:    out.Count,
+                        When:     time.Now(),
+                        Severity: "info",
+                        Samples:  smp,
+                        Extra: map[string]string{
+                            "rule": rule,
+                            "host": host,
+                            "ua":   ua,
+                            "asn":  asn,
+                            "ptr":  ptr,
+                            "key":  a.Key,
+                        },
+                    })
+
+                    if s.inner != nil { s.inner.Publish(out) }
+                    return
+                }
+            }
+        }
+
 
         // TTL (alert override -> default)
         ttl := defaultChallengeTTL
@@ -685,4 +762,38 @@ func (s *sectionSink) challengeEnrichSuffix(ip string) string {
         return ""
     }
     return " - (" + strings.Join(parts, ", ") + ")"
+}
+
+
+
+// extractUserAgent tries to pull a User-Agent from common combined log samples.
+// Best-effort only.
+func extractUserAgent(samples []string) string {
+    // Typical Apache/Nginx combined format ends with: "ref" "ua"
+    for i := len(samples) - 1; i >= 0; i-- {
+        ln := samples[i]
+        segs := make([]string, 0, 4)
+        in := false
+        start := 0
+        for j := 0; j < len(ln); j++ {
+            if ln[j] == '"' {
+                if !in {
+                    in = true
+                    start = j + 1
+                } else {
+                    if start <= j {
+                        segs = append(segs, ln[start:j])
+                    }
+                    in = false
+                }
+            }
+        }
+        if len(segs) >= 1 {
+            ua := strings.TrimSpace(segs[len(segs)-1])
+            if ua != "" && ua != "-" {
+                return ua
+            }
+        }
+    }
+    return ""
 }
