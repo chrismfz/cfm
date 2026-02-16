@@ -276,17 +276,25 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
             now := out.When
             if now.IsZero() { now = time.Now() }
 
-            s.chalMu.Lock()
-            st := s.chalState[ipStr]
-            if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) < s.chalCooldown {
-                // Suppress re-challenge within cooldown window
-                out.Extra["blocked"]  = "challenge"
-                out.Extra["enforced"] = "challenge_suppressed"
-                out.Extra["ttl"]      = ttl.String()
-                out.Extra["cooldown"] = s.chalCooldown.String()
-                s.chalMu.Unlock()
+            suppressed := func() bool {
+                s.chalMu.Lock()
+                defer s.chalMu.Unlock()
 
+                st := s.chalState[ipStr]
+                if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) < s.chalCooldown {
+                    // Suppress re-challenge within cooldown window
+                    out.Extra["blocked"]  = "challenge"
+                    out.Extra["enforced"] = "challenge_suppressed"
+                    out.Extra["ttl"]      = ttl.String()
+                    out.Extra["cooldown"] = s.chalCooldown.String()
+                    return true
+                }
+                return false
+            }()
+
+            if suppressed {
                 // log first
+
 logging.LogfCHALLENGES(
     "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
     ipStr,
@@ -302,8 +310,7 @@ logging.LogfCHALLENGES(
 
                 if s.inner != nil { s.inner.Publish(out) }
                 return
-            }
-            s.chalMu.Unlock()
+    	    }
         }
 
 
@@ -326,10 +333,10 @@ if enforced == "challenge" && s.chalCooldown > 0 {
     if now.IsZero() { now = time.Now() }
 
     s.chalMu.Lock()
+    defer s.chalMu.Unlock()
     st := s.chalState[ipStr]
     st.LastSeen = now
     s.chalState[ipStr] = st
-    s.chalMu.Unlock()
 }
 
 
@@ -439,13 +446,19 @@ logging.LogfCHALLENGES(
 
     // Cooldown check (do NOT stamp yet; stamp only after a real block)
     if s.pol.Cooldown > 0 {
-        s.mu.Lock()
-        if last, ok := s.last[ipStr]; ok && time.Since(last) < s.pol.Cooldown {
-            s.mu.Unlock()
+
+        skip := func() bool {
+            s.mu.Lock()
+            defer s.mu.Unlock()
+            if last, ok := s.last[ipStr]; ok && time.Since(last) < s.pol.Cooldown {
+                return true
+            }
+            return false
+        }()
+        if skip {
             if s.inner != nil { s.inner.Publish(out) }
             return
         }
-        s.mu.Unlock()
     }
 
     // Comment for firewall
@@ -484,8 +497,8 @@ logging.LogfCHALLENGES(
     // If we truly blocked and a cooldown is set, stamp it now (after success)
     if blockOK && s.pol.Cooldown > 0 {
         s.mu.Lock()
+        defer s.mu.Unlock()
         s.last[ipStr] = time.Now()
-        s.mu.Unlock()
     }
 
     // --- emit notify once if a real block happened ---

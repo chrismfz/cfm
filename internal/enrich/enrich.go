@@ -177,9 +177,12 @@ func (e *Enricher) Enabled() bool {
 }
 
 
-// refreshIfChanged ελέγχει αν άλλαξαν τα αρχεία και κάνει ασφαλές reopen.
+// refreshIfChanged checks if files changed and safely reopens them.
+// CRITICAL: Does file I/O OUTSIDE the mutex to avoid blocking all Lookup() calls.
 func (e *Enricher) refreshIfChanged() {
 	now := time.Now()
+
+	// Quick check + snapshot under lock
 	e.mu.Lock()
 	if now.Sub(e.lastStatChk) < statEvery {
 		e.mu.Unlock()
@@ -187,34 +190,68 @@ func (e *Enricher) refreshIfChanged() {
 	}
 	e.lastStatChk = now
 
-	// ASN
-	if e.asnPath != "" {
-		if fi, err := os.Stat(e.asnPath); err == nil {
-			if fi.ModTime().After(e.asnMTime) {
-				if db, err := geoip2.Open(e.asnPath); err == nil {
-					old := e.asnDB
-					e.asnDB = db
-					e.asnMTime = fi.ModTime()
-					if old != nil { _ = old.Close() }
-				}
-			}
-		}
-	}
-	// City
-	if e.cityPath != "" {
-		if fi, err := os.Stat(e.cityPath); err == nil {
-			if fi.ModTime().After(e.cityMTime) {
-				if db, err := geoip2.Open(e.cityPath); err == nil {
-					old := e.cityDB
-					e.cityDB = db
-					e.cityMTime = fi.ModTime()
-					if old != nil { _ = old.Close() }
-				}
-			}
-		}
-	}
+
+
+	asnPath := e.asnPath
+	cityPath := e.cityPath
+	asnMTime := e.asnMTime
+	cityMTime := e.cityMTime
 	e.mu.Unlock()
+
+	// Do ALL file I/O outside lock (CRITICAL FIX)
+	var newASN, newCity *geoip2.Reader
+	var newASNTime, newCityTime time.Time
+
+	// Check and load ASN DB (outside lock)
+	if asnPath != "" {
+		if fi, err := os.Stat(asnPath); err == nil {
+			if fi.ModTime().After(asnMTime) {
+				if db, err := geoip2.Open(asnPath); err == nil {
+					newASN = db
+					newASNTime = fi.ModTime()
+				}
+			}
+		}
+
+	}
+
+
+
+	// Check and load City DB (outside lock)
+	if cityPath != "" {
+		if fi, err := os.Stat(cityPath); err == nil {
+			if fi.ModTime().After(cityMTime) {
+				if db, err := geoip2.Open(cityPath); err == nil {
+					newCity = db
+					newCityTime = fi.ModTime()
+				}
+			}
+		}
+
+
+	}
+
+
+	// Quick lock to swap pointers
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if newASN != nil {
+		old := e.asnDB
+		e.asnDB = newASN
+		e.asnMTime = newASNTime
+		if old != nil { _ = old.Close() }
+	}
+	if newCity != nil {
+		old := e.cityDB
+		e.cityDB = newCity
+		e.cityMTime = newCityTime
+		if old != nil { _ = old.Close() }
+	}
+
 }
+
+
 
 // isRoutable: αποφυγή PTR για private/loopback/link-local/multicast/unspecified
 func isRoutable(ip net.IP) bool {

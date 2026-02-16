@@ -3,7 +3,7 @@ package detectors
 import (
 	"context"
 	"time"
-
+	"fmt"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 )
@@ -42,17 +42,42 @@ func joinLines(ss []string) string {
 	return out
 }
 
-// runOnceSafe wraps a detector RunOnce with panic recovery so one bad detector
-// cannot crash the daemon.
-func runOnceSafe(ctx context.Context, d core.PeriodicDetector, out chan<- core.Alert) (err error) {
+// runOnceSafeTimed wraps a detector RunOnce with:
+//  - panic recovery (so one bad detector cannot crash the daemon)
+//  - a per-run watchdog timeout (so a stuck tailer / infinite loop can't freeze the scheduler)
+//
+// NOTE: The detector must respect ctx; otherwise a truly stuck goroutine can't be force-killed.
+func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- core.Alert, timeout time.Duration) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			logging.Logf("[detectors] %s panic: %v", d.Name(), r)
-			// keep the loop alive; convert panic into an error-ish signal
-			err = context.Canceled
+	            logging.Logf("[detectors] %s PANIC: %v", d.Name(), r)
+	            err = fmt.Errorf("%s panic: %v", d.Name(), r)
 		}
 	}()
-	return d.RunOnce(ctx, out)
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctxRun, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		// RunOnce may block; isolate it so the watchdog can trigger.
+		done <- d.RunOnce(ctxRun, out)
+	}()
+
+	select {
+	case e := <-done:
+		return e
+	case <-ctxRun.Done():
+		// distinguish "caller canceled" vs "watchdog timeout"
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logging.Logf("[detectors] %s run timeout after %s", d.Name(), timeout)
+		return ctxRun.Err()
+	}
+
 }
 
 // Fixed-delay loop: waits `every` after each successful (or failed) run.
@@ -77,7 +102,8 @@ func periodicLoop(ctx context.Context, every time.Duration, fn func() error) err
 }
 
 func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) error {
-	out := make(chan core.Alert, 8)
+	// webdetector can burst; keep this large to avoid backpressure deadlocks.
+	out := make(chan core.Alert, 1024)
 
 	// publisher
 	pubDone := make(chan struct{})
@@ -102,9 +128,19 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 	}
 	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
+	// Per-run watchdog: >=30s, <=5m, scaled by schedule.
+	runTimeout := 2 * every
+	if runTimeout < 30*time.Second {
+		runTimeout = 30 * time.Second
+	}
+	if runTimeout > 5*time.Minute {
+		runTimeout = 5 * time.Minute
+	}
+
+
 	// fixed-delay schedule with panic-safe RunOnce
 	err := periodicLoop(ctx, every, func() error {
-		if err := runOnceSafe(ctx, d, out); err != nil && err != context.Canceled {
+		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
 			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
 		}
 		return nil
@@ -117,7 +153,8 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 }
 
 func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink core.Sink, state *core.State) error {
-	out := make(chan core.Alert, 8)
+	// webdetector can burst; keep this large to avoid backpressure deadlocks.
+	out := make(chan core.Alert, 1024)
 
 	// publisher
 	pubDone := make(chan struct{})
@@ -142,9 +179,19 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 	}
 	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
+	// Per-run watchdog: >=30s, <=5m, scaled by schedule.
+	runTimeout := 2 * every
+	if runTimeout < 30*time.Second {
+		runTimeout = 30 * time.Second
+	}
+	if runTimeout > 5*time.Minute {
+		runTimeout = 5 * time.Minute
+	}
+
+
 	// fixed-delay schedule with position save on successful runs
 	err := periodicLoop(ctx, every, func() error {
-		if err := runOnceSafe(ctx, d, out); err != nil && err != context.Canceled {
+		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
 			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
 			return nil
 		}

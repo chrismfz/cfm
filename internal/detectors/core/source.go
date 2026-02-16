@@ -35,6 +35,9 @@ type FileTailer struct {
         idleStatMinInterval time.Duration
         lastEOFStat         time.Time
 
+        // When the path is missing, retry Stat/Open more aggressively.
+        missingStatMinInterval time.Duration
+
 	// Optional: resume position (set via ApplyResume)
 	LastOffset int64
 	LastInode  uint64
@@ -52,6 +55,8 @@ func NewFileTailer(path string) *FileTailer {
                 Path:                path,
                 // sensible default: only check rotation at most 5x/sec when idle
                 idleStatMinInterval: 200 * time.Millisecond,
+                // faster recovery when file is missing (rotate gaps / rm+recreate)
+                missingStatMinInterval: 50 * time.Millisecond,
         }
 }
 
@@ -198,9 +203,24 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.f == nil {
-		return "", io.EOF
-	}
+    if t.f == nil {
+        // Try to reopen if the file has reappeared. Rate-limited to keep non-blocking contract.
+        now := time.Now()
+        minInt := t.missingStatMinInterval
+        if minInt <= 0 {
+            minInt = 50 * time.Millisecond
+        }
+        if !t.lastEOFStat.IsZero() && now.Sub(t.lastEOFStat) < minInt {
+            return "", io.EOF
+        }
+        t.lastEOFStat = now
+
+        if _, err := os.Stat(t.Path); err == nil {
+            _ = t.reopenAtStartUnlocked()
+        }
+        return "", io.EOF
+    }
+
 
        // NOTE: We deliberately avoid Stat() here.
        // We only Stat on EOF to detect rotation/truncate, which removes a syscall per line.
@@ -257,8 +277,16 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
                        // IMPORTANT: stat the PATH, not the FD, so we can detect rename+newfile rotation.
                        st, serr := os.Stat(t.Path)
                        if serr != nil {
-                               // Keep non-blocking contract, but don't rotate on stat failure
+
+                               // Path missing/unreadable: close old FD (may point to deleted inode)
+                               // and let the top-of-ReadNext reopen when it reappears.
+                               _ = safeClose(t.f)
+                               t.f, t.r = nil, nil
+                               t.inode = 0
+                               // reset so missing retry uses missingStatMinInterval
+                               t.lastEOFStat = time.Now()
                                return "", io.EOF
+
                        }
 
                        curIn := inodeOf(st)

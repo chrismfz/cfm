@@ -6,7 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-//	"fmt"
+	"encoding/binary"
+	"hash/fnv"
+	"syscall"
 	"cfm/internal/logging"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
@@ -17,12 +19,51 @@ type manager struct {
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 	cancelAll context.CancelFunc
-	lastStamp int64
+//	lastStamp int64
+	lastSig   uint64
 	running   bool
 	state *core.State
 
         ignore *IPIgnore // New ignore IP and Subnets
 	chalExclude *ChallengeExclude
+}
+
+// cfgSig changes when either detections.conf changes (StampNS) OR any watched
+// LOG_PATH is rotated (inode/dev changes). Prevents tailers sticking to deleted FD.
+func cfgSig(secs *Sections) uint64 {
+    h := fnv.New64a()
+    var b [8]byte
+    binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
+    _, _ = h.Write(b[:])
+
+    for name, kv := range secs.ByName {
+        if name == "global" {
+            continue
+        }
+        p := strings.TrimSpace(kvStrClean(kv, "LOG_PATH", ""))
+        if p == "" {
+            continue
+        }
+
+        // Always incorporate the path so missing/present transitions change sig.
+        _, _ = h.Write([]byte("logpath="))
+        _, _ = h.Write([]byte(p))
+        _, _ = h.Write([]byte{0})
+
+        if st, err := os.Stat(p); err == nil {
+            if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+                binary.LittleEndian.PutUint64(b[:], uint64(sys.Dev))
+                _, _ = h.Write(b[:])
+                binary.LittleEndian.PutUint64(b[:], uint64(sys.Ino))
+                _, _ = h.Write(b[:])
+            }
+        } else {
+            // Missing / unreadable marker
+            _, _ = h.Write([]byte("missing"))
+            _, _ = h.Write([]byte{0})
+        }
+    }
+    return h.Sum64()
 }
 
 func Start(parent context.Context, opts Options) {
@@ -89,7 +130,8 @@ func (m *manager) maybeReload(parent context.Context) {
         logging.Logf("[detectors] config read failed (%s): %v — keeping current detectors", path, err)
 		return
 	}
-    if secs.StampNS == m.lastStamp && m.running {
+    sig := cfgSig(&secs)
+    if sig == m.lastSig && m.running {
 		return
 	}
 
@@ -164,13 +206,15 @@ if ig != nil {
 	m.stopAll()
 
 	ctx, cancel := context.WithCancel(parent)
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.cancelAll = cancel
-	m.lastStamp = secs.StampNS
+//	m.lastStamp = secs.StampNS
+	m.lastSig = sig
 	m.running = true
 	m.ignore  = ig
 	m.chalExclude = chalExclude
-	m.mu.Unlock()
 
 	// Summary: list sections & enabled/disabled
 	var enabled, disabled []string
@@ -330,14 +374,16 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 func (m *manager) stopAll() {
     // Cancel current run context and wait for detectors to fully exit.
     // This prevents hot-reload port races (e.g. webdetector API/challenge listeners).
+
     m.mu.Lock()
+    defer m.mu.Unlock()
     if m.cancelAll != nil {
         m.cancelAll()
         m.cancelAll = nil
     }
     wasRunning := m.running
     m.running = false
-    m.mu.Unlock()
+
 
     // Wait outside the mutex.
     m.wg.Wait()

@@ -141,32 +141,65 @@ func (d *DirTailer) ReadNext(ctx context.Context) (string, error) {
 	}
 
 	// periodic rescan to discover new files (cpanel domlogs etc)
+	// CRITICAL FIX: Open files OUTSIDE the lock to avoid blocking other ReadNext() calls
 	d.mu.Lock()
 	now := time.Now()
 	if d.ScanEvery > 0 && (d.lastScan.IsZero() || now.Sub(d.lastScan) >= d.ScanEvery) {
 		d.scanLocked(false)
-		// add new tailers if any (open immediately at end unless we have lastPos)
+
+		// Identify files that need opening (under lock)
+		var needOpen []string
 		for _, p := range d.files {
 			if _, ok := d.tailers[p]; ok {
 				continue
 			}
-			t := NewFileTailer(p)
-                        // persistent resume for newly discovered files too
-                        if d.st != nil && d.detName != "" {
-                                key := FileStateKey(d.detName, p)
-                                if pos, ok := d.st.Get(key); ok {
-                                        t.ApplyResume(pos.Inode, pos.Offset)
-                                }
-                        }
 
-			if pos, ok := d.lastPos[p]; ok {
+
+			needOpen = append(needOpen, p)
+		}
+		
+		// Snapshot state for resume (under lock)
+		stCopy := d.st
+		detNameCopy := d.detName
+		lastPosCopy := make(map[string]Position, len(d.lastPos))
+		for k, v := range d.lastPos {
+			lastPosCopy[k] = v
+		}
+		d.mu.Unlock()
+		
+		// Open files OUTSIDE lock (CRITICAL FIX - this is where the blocking happens)
+		newTailers := make(map[string]*FileTailer)
+		for _, p := range needOpen {
+			t := NewFileTailer(p)
+			
+			// persistent resume for newly discovered files
+			if stCopy != nil && detNameCopy != "" {
+				key := FileStateKey(detNameCopy, p)
+				if pos, ok := stCopy.Get(key); ok {
+					t.ApplyResume(pos.Inode, pos.Offset)
+				}
+			}
+			
+			if pos, ok := lastPosCopy[p]; ok {
 				t.ApplyResume(pos.Inode, pos.Offset)
 			}
 			if err := t.Open(); err != nil {
 				continue
 			}
+			newTailers[p] = t
+	}
+
+		// Quick lock to add new tailers
+		d.mu.Lock()
+		for p, t := range newTailers {
 			d.tailers[p] = t
-		}
+
+
+
+			}
+		d.mu.Unlock()
+	} else {
+		d.mu.Unlock()
 	}
 
 	// snapshot tailers + rr pointer

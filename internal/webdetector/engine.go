@@ -1077,26 +1077,28 @@ func (e *Engine) updateIPLong(now time.Time) {
     stats := make(map[string]*aggShort)
 
     e.mu.RLock()
-    for host, hs := range e.hosts {
-        if hs == nil {
-            continue
-        }
-        for i := range hs.buckets {
-            b := &hs.buckets[i]
-            for ip, n := range b.ips {
-                a := stats[ip]
-                if a == nil {
-                    a = &aggShort{
-                        vhosts: make(map[string]struct{}),
+    func() {
+        defer e.mu.RUnlock()
+        for host, hs := range e.hosts {
+            if hs == nil {
+                continue
+            }
+            for i := range hs.buckets {
+                b := &hs.buckets[i]
+                for ip, n := range b.ips {
+                    a := stats[ip]
+                    if a == nil {
+                        a = &aggShort{vhosts: make(map[string]struct{})}
+                        stats[ip] = a
                     }
-                    stats[ip] = a
+                    a.req += n
+                    a.vhosts[host] = struct{}{}
                 }
-                a.req += n
-                a.vhosts[host] = struct{}{}
             }
         }
-    }
-    e.mu.RUnlock()
+    }()
+
+
 
     if len(stats) == 0 {
         return
@@ -2290,14 +2292,20 @@ if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLoca
                 }
 
                 // cooldown check
-                e.emitMu.Lock()
-                last, ok := e.ipLastEmit[row.IP]
-                if ok && now.Sub(last) < cooldown {
-                        e.emitMu.Unlock()
+                skip := func() bool {
+                        e.emitMu.Lock()
+                        defer e.emitMu.Unlock()
+                        last, ok := e.ipLastEmit[row.IP]
+                        if ok && now.Sub(last) < cooldown {
+                                return true
+                        }
+                        e.ipLastEmit[row.IP] = now
+                        return false
+                }()
+                if skip {
                         continue
                 }
-                e.ipLastEmit[row.IP] = now
-                e.emitMu.Unlock()
+
 
                 samples := e.ipSamples(row.IP, maxSamples)
 

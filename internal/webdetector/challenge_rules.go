@@ -161,6 +161,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 	}
 
 
+        var lastCtx map[string]chalCtx
+
     // ---- 1) CHALLENGE_PATHS (existing behavior) ----
     // Aggregate counts over current short window
 	type cand struct {
@@ -177,34 +179,36 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 // Aggregate counts over current short window
                 agg := make(map[string]map[int]int) // ip -> ridx -> count
 
+                func() {
                 e.mu.RLock()
-                for _, hs := range e.hosts {
-                        if hs == nil {
-                                continue
-                        }
-                        for i := range hs.buckets {
-                                b := &hs.buckets[i]
-                                if b.ipsChalRule == nil {
+                        defer e.mu.RUnlock()
+                        for _, hs := range e.hosts {
+                                if hs == nil {
                                         continue
                                 }
-                                for ip, mm := range b.ipsChalRule {
-                                        a := agg[ip]
-                                        if a == nil {
-                                                a = make(map[int]int)
-                                                agg[ip] = a
+                                for i := range hs.buckets {
+                                        b := &hs.buckets[i]
+                                        if b.ipsChalRule == nil {
+                                                continue
                                         }
-                                        for ridx, n := range mm {
-                                                a[ridx] += n
+                                        for ip, mm := range b.ipsChalRule {
+                                                a := agg[ip]
+                                                if a == nil {
+                                                        a = make(map[int]int)
+                                                        agg[ip] = a
+                                                }
+                                                for ridx, n := range mm {
+                                                        a[ridx] += n
+                                                }
                                         }
                                 }
                         }
-                }
-                // snapshot last ctx too (under same lock)
-                lastCtx := make(map[string]chalCtx, len(e.chalLast))
-                for ip, ctx := range e.chalLast {
-                        lastCtx[ip] = ctx
-                }
-                e.mu.RUnlock()
+                        // snapshot last ctx too (under same lock)
+                        lastCtx = make(map[string]chalCtx, len(e.chalLast))
+                        for ip, ctx := range e.chalLast {
+                                lastCtx[ip] = ctx
+                        }
+                }()
 
                 if len(agg) > 0 {
                         // Build candidates (first rule that breaches threshold)
@@ -255,18 +259,25 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         ctx := lastCtx[c.ip]
                                         matchAt := tsToTime(ctx.TS)
 
-                                        e.emitMu.Lock()
-                                        last, ok := e.ipLastChalEmit[c.ip]
-                                        if ok && !matchAt.After(last) {
-                                                e.emitMu.Unlock()
+
+                                        skip := func() bool {
+                                                e.emitMu.Lock()
+                                                defer e.emitMu.Unlock()
+                                                last, ok := e.ipLastChalEmit[c.ip]
+                                                if ok && !matchAt.After(last) {
+                                                        return true
+                                                }
+                                                if ok && now.Sub(last) < cooldown {
+                                                        return true
+                                                }
+                                                e.ipLastChalEmit[c.ip] = now
+                                                return false
+                                        }()
+                                        if skip {
                                                 continue
                                         }
-                                        if ok && now.Sub(last) < cooldown {
-                                                e.emitMu.Unlock()
-                                                continue
-                                        }
-                                        e.ipLastChalEmit[c.ip] = now
-                                        e.emitMu.Unlock()
+
+
 
                                         samples := e.ipSamples(c.ip, maxSamples)
 
@@ -322,56 +333,64 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         }
         st := make(map[string]*agg2)
 
+
+
+        func() {
         e.mu.RLock()
-        for _, hs := range e.hosts {
-            if hs == nil { continue }
-            for i := range hs.buckets {
-                b := &hs.buckets[i]
-                for ip, n := range b.ips {
-                    a := st[ip]
-                    if a == nil { a = &agg2{}; st[ip] = a }
-                    a.total += n
-                }
-                if b.ips4xx != nil {
-                    for ip, n := range b.ips4xx {
+
+            defer e.mu.RUnlock()
+            for _, hs := range e.hosts {
+                if hs == nil { continue }
+                for i := range hs.buckets {
+                    b := &hs.buckets[i]
+                    for ip, n := range b.ips {
                         a := st[ip]
                         if a == nil { a = &agg2{}; st[ip] = a }
-                        a.c4xx += n
+                        a.total += n
                     }
-                }
-                if b.ips5xx != nil {
-                    for ip, n := range b.ips5xx {
-                        a := st[ip]
-                        if a == nil { a = &agg2{}; st[ip] = a }
-                        a.c5xx += n
+                    if b.ips4xx != nil {
+                        for ip, n := range b.ips4xx {
+                            a := st[ip]
+                            if a == nil { a = &agg2{}; st[ip] = a }
+                            a.c4xx += n
+                        }
                     }
-                }
-                if b.ipsPOST != nil {
-                    for ip, n := range b.ipsPOST {
-                        a := st[ip]
-                        if a == nil { a = &agg2{}; st[ip] = a }
-                        a.cPOST += n
+                    if b.ips5xx != nil {
+                        for ip, n := range b.ips5xx {
+                            a := st[ip]
+                            if a == nil { a = &agg2{}; st[ip] = a }
+                            a.c5xx += n
+                        }
                     }
-                }
-                if b.ipsNoUA != nil {
-                    for ip, n := range b.ipsNoUA {
-                        a := st[ip]
-                        if a == nil { a = &agg2{}; st[ip] = a }
-                        a.cNoUA += n
+                    if b.ipsPOST != nil {
+                        for ip, n := range b.ipsPOST {
+                            a := st[ip]
+                            if a == nil { a = &agg2{}; st[ip] = a }
+                            a.cPOST += n
+                        }
                     }
-                }
-                if b.ipsHTTP10 != nil {
-                    for ip, n := range b.ipsHTTP10 {
-                        a := st[ip]
-                        if a == nil { a = &agg2{}; st[ip] = a }
-                        a.cH10 += n
+                    if b.ipsNoUA != nil {
+                        for ip, n := range b.ipsNoUA {
+                            a := st[ip]
+                            if a == nil { a = &agg2{}; st[ip] = a }
+                            a.cNoUA += n
+                        }
+                    }
+                    if b.ipsHTTP10 != nil {
+                        for ip, n := range b.ipsHTTP10 {
+                            a := st[ip]
+                            if a == nil { a = &agg2{}; st[ip] = a }
+                            a.cH10 += n
+                        }
                     }
                 }
             }
-        }
-        lastCtx := make(map[string]chalCtx, len(e.chalLast))
-        for ip, ctx := range e.chalLast { lastCtx[ip] = ctx }
-        e.mu.RUnlock()
+            // snapshot last ctx under same lock
+            lastCtx = make(map[string]chalCtx, len(e.chalLast))
+            for ip, ctx := range e.chalLast {
+                lastCtx[ip] = ctx
+            }
+        }()
 
         winSec := e.cfg.Window.Seconds()
         if winSec <= 0 { winSec = 60 }
@@ -423,14 +442,21 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             }
 
             // cooldown gating (reuses the same per-IP chal emit map)
-            e.emitMu.Lock()
-            last, ok := e.ipLastChalEmit[ipStr]
-            if ok && now.Sub(last) < cooldown {
-                e.emitMu.Unlock()
+
+            skip := func() bool {
+                e.emitMu.Lock()
+                defer e.emitMu.Unlock()
+                last, ok := e.ipLastChalEmit[ipStr]
+                if ok && now.Sub(last) < cooldown {
+                    return true
+                }
+                e.ipLastChalEmit[ipStr] = now
+                return false
+            }()
+            if skip {
                 continue
             }
-            e.ipLastChalEmit[ipStr] = now
-            e.emitMu.Unlock()
+
 
             ctx := lastCtx[ipStr]
             samples := e.ipSamples(ipStr, maxSamples)
@@ -486,24 +512,27 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         }
         short := make(map[string]*hostAgg)
 
+        func() {
         e.mu.RLock()
-        for host, hs := range e.hosts {
-            if hs == nil {
-                continue
-            }
-            ha := short[host]
-            if ha == nil {
-                ha = &hostAgg{ips: make(map[string]int)}
-                short[host] = ha
-            }
-            for i := range hs.buckets {
-                b := &hs.buckets[i]
-                for ip, n := range b.ips {
-                    ha.ips[ip] += n
+            defer e.mu.RUnlock()
+
+            for host, hs := range e.hosts {
+                if hs == nil {
+                    continue
+                }
+                ha := short[host]
+                if ha == nil {
+                    ha = &hostAgg{ips: make(map[string]int)}
+                    short[host] = ha
+                }
+                for i := range hs.buckets {
+                    b := &hs.buckets[i]
+                    for ip, n := range b.ips {
+                        ha.ips[ip] += n
+                    }
                 }
             }
-        }
-        e.mu.RUnlock()
+        }()
 
         // 2) Candidate hosts = union of:
         //    - hosts we saw recently (short window)
@@ -512,9 +541,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         candHosts := make(map[string]struct{}, len(short))
         for h := range short { candHosts[h] = struct{}{} }
 
-        e.vhostMu.Lock()
-        for h := range e.vhostUnderAttack { candHosts[h] = struct{}{} }
-        e.vhostMu.Unlock()
+        func() {
+            e.vhostMu.Lock()
+            defer e.vhostMu.Unlock()
+            for h := range e.vhostUnderAttack { candHosts[h] = struct{}{} }
+        }()
 
         if e.longwin != nil {
             for _, r := range e.longwin.All() {
@@ -533,30 +564,38 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore) {
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
                 if haveVhostAuto {
-                    e.vhostMu.Lock()
-                    cur := e.vhostUnderAttack[host]
-                    if cur {
-                        e.vhostUnderAttack[host] = false
-                        e.vhostLastChange[host] = now
-                        e.vhostMu.Unlock()
 
-                        logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
-                        a := core.Alert{
-                            When:  now,
-                            Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
-                            Key:   host,
-                            Count: 0,
-                            Extra: map[string]string{
-                                "host":   host,
-                                "action": "auto_off",
-                                "reason": "ignored",
-                            },
+
+
+
+                        wasOn := false
+                        func() {
+                            e.vhostMu.Lock()
+                            defer e.vhostMu.Unlock()
+                            if e.vhostUnderAttack[host] {
+                                wasOn = true
+                                e.vhostUnderAttack[host] = false
+                                e.vhostLastChange[host] = now
+                            }
+                        }()
+
+                        if wasOn {
+                            logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
+                            a := core.Alert{
+                                When:  now,
+                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                                Key:   host,
+                                Count: 0,
+                                Extra: map[string]string{
+                                    "host":   host,
+                                    "action": "auto_off",
+                                    "reason": "ignored",
+                                },
+                            }
+                            select { case out <- a: default: }
                         }
-                        select { case out <- a: default: }
-                    } else {
-                        e.vhostMu.Unlock()
-                    }
-                }
+		}
+
                 continue
             }
 
@@ -579,21 +618,35 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 minUniq := e.cfg.ChallengeSuspiciousMinUniqIP
                 hold := e.cfg.ChallengeSuspiciousHolddown
 
-                e.vhostMu.Lock()
-                cur := e.vhostUnderAttack[host]
-                last := e.vhostLastChange[host]
 
-                // holddown keeps it ON for a minimum duration
-                if cur && hold > 0 && !last.IsZero() && now.Sub(last) < hold {
-                    autoActive = true
-                } else {
+
+
+
+
+
+
+
+
+
+                // IMPORTANT: don't defer-unlock in the outer loop, or you'll hold the lock
+                // for all hosts and deadlock. Scope it to this iteration.
+                autoActive = func() bool {
+                    e.vhostMu.Lock()
+                    defer e.vhostMu.Unlock()
+
+                    cur := e.vhostUnderAttack[host]
+                    last := e.vhostLastChange[host]
+
+                    // holddown keeps it ON for a minimum duration
+                    if cur && hold > 0 && !last.IsZero() && now.Sub(last) < hold {
+                        return true
+                    }
+
                     if !cur {
                         if row.Score >= on && row.UniqueIPs >= minUniq {
-                            autoActive = true
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
 
-                            // state change -> log + event
                             logging.LogfCHALLENGES(
                                 "[challenge][vhost] action=auto_on host=%s score=%.2f on=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s hold=%s",
                                 host, row.Score, on, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
@@ -604,55 +657,55 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                 Key:   host,
                                 Count: row.UniqueIPs,
                                 Extra: map[string]string{
-                                    "host":    host,
-                                    "action":  "auto_on",
-                                    "score":   fmt.Sprintf("%.2f", row.Score),
+                                    "host":     host,
+                                    "action":   "auto_on",
+                                    "score":    fmt.Sprintf("%.2f", row.Score),
                                     "score_on": fmt.Sprintf("%.2f", on),
                                     "score_off": fmt.Sprintf("%.2f", off),
-                                    "uniqIP":  fmt.Sprintf("%d", row.UniqueIPs),
-                                    "rps":     fmt.Sprintf("%.2f", row.RPS),
-                                    "reasons": strings.Join(row.Reasons, ","),
+                                    "uniqIP":   fmt.Sprintf("%d", row.UniqueIPs),
+                                    "rps":      fmt.Sprintf("%.2f", row.RPS),
+                                    "reasons":  strings.Join(row.Reasons, ","),
                                     "holddown": hold.String(),
                                 },
                             }
-                            e.vhostMu.Unlock()
                             select { case out <- a: default: }
-                        } else {
-                            e.vhostMu.Unlock()
+                            return true
                         }
-                    } else {
-                        // currently ON: turn OFF when score <= off (and holddown already passed above)
-                        if row.Score <= off {
-                            e.vhostUnderAttack[host] = false
-                            e.vhostLastChange[host] = now
-                            e.vhostMu.Unlock()
-
-                            logging.LogfCHALLENGES(
-                                "[challenge][vhost] action=auto_off host=%s score=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s",
-                                host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
-                            )
-                            a := core.Alert{
-                                When:  now,
-                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
-                                Key:   host,
-                                Count: 0,
-                                Extra: map[string]string{
-                                    "host":    host,
-                                    "action":  "auto_off",
-                                    "score":   fmt.Sprintf("%.2f", row.Score),
-                                    "score_off": fmt.Sprintf("%.2f", off),
-                                    "uniqIP":  fmt.Sprintf("%d", row.UniqueIPs),
-                                    "rps":     fmt.Sprintf("%.2f", row.RPS),
-                                    "reasons": strings.Join(row.Reasons, ","),
-                                },
-                            }
-                            select { case out <- a: default: }
-                        } else {
-                            autoActive = true
-                            e.vhostMu.Unlock()
-                        }
+                        return false
                     }
-                }
+
+                    // currently ON: turn OFF when score <= off (and holddown already passed above)
+                    if row.Score <= off {
+                        e.vhostUnderAttack[host] = false
+                        e.vhostLastChange[host] = now
+
+                        logging.LogfCHALLENGES(
+                            "[challenge][vhost] action=auto_off host=%s score=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s",
+                            host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
+                        )
+                        a := core.Alert{
+                            When:  now,
+                            Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                            Key:   host,
+                            Count: 0,
+                            Extra: map[string]string{
+                                "host":      host,
+                                "action":    "auto_off",
+                                "score":     fmt.Sprintf("%.2f", row.Score),
+                                "score_off": fmt.Sprintf("%.2f", off),
+                                "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+                                "rps":       fmt.Sprintf("%.2f", row.RPS),
+                                "reasons":   strings.Join(row.Reasons, ","),
+                            },
+                        }
+                        select { case out <- a: default: }
+                        return false
+                    }
+                    return true
+                }()
+
+
+
             }
 
             effective := manual || autoActive

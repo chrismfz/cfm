@@ -39,6 +39,10 @@ type ChallengeServer struct {
 	cidMu   sync.Mutex
 	cidUsed map[string]time.Time // cid -> expiresAt (UTC)
 
+	// Tracks all goroutines started by Start(), including Serve() loops and the
+	// ctx-cancel shutdown goroutine. Used on hot-reload to avoid port bind races.
+	wg sync.WaitGroup
+
 }
 
 // Optional interface: only nft backend implements this.
@@ -409,7 +413,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		s.httpSrv.SetKeepAlivesEnabled(false)
 
-		go func() {
+        s.wg.Add(1)
+        go func() {
+            defer s.wg.Done()
 			logging.Logf("[challenge] HTTP listening on %s", httpAddr)
 			if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				logging.Logf("[challenge] HTTP serve error: %v", err)
@@ -419,7 +425,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
 		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpAddr); ok {
 			if ln6, err := net.Listen("tcp", v6addr); err == nil {
-				go func() {
+                s.wg.Add(1)
+                go func() {
+                    defer s.wg.Done()
 					logging.Logf("[challenge] HTTP listening on %s", v6addr)
 					if err := s.httpSrv.Serve(ln6); err != nil && err != http.ErrServerClosed {
 						logging.Logf("[challenge] HTTP serve error (v6): %v", err)
@@ -471,7 +479,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		s.httpsSrv.SetKeepAlivesEnabled(false)
 
-		go func() {
+        s.wg.Add(1)
+        go func() {
+            defer s.wg.Done()
 			logging.Logf("[challenge] HTTPS listening on %s", httpsAddr)
 			if err := s.httpsSrv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
 				logging.Logf("[challenge] HTTPS serve error: %v", err)
@@ -481,7 +491,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
 		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
 			if ln6, err := net.Listen("tcp", v6addr); err == nil {
-				go func() {
+                s.wg.Add(1)
+                go func() {
+                    defer s.wg.Done()
 					logging.Logf("[challenge] HTTPS listening on %s", v6addr)
 					if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
 						logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
@@ -495,7 +507,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 	}
 
 	// stop on ctx cancel
-	go func() {
+    s.wg.Add(1)
+    go func() {
+        defer s.wg.Done()
 		<-ctx.Done()
 		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -549,6 +563,8 @@ func tlsVersionString(v uint16) string {
 	}
 }
 
+
+
 // ---------------- helpers ----------------
 
 // --- CID one-time use store (anti-replay for solved challenges) ---
@@ -560,6 +576,27 @@ func (s *ChallengeServer) cidCleanLocked(now time.Time) {
 		}
 	}
 }
+
+
+
+// Wait blocks until all goroutines started by Start() have exited.
+// Critical for hot-reload to avoid "address already in use" races.
+func (s *ChallengeServer) Wait(ctx context.Context) error {
+    done := make(chan struct{})
+    go func() {
+        s.wg.Wait()
+        close(done)
+    }()
+    select {
+    case <-done:
+        return nil
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+
+
+
 
 // cidMarkOnce returns true on first use; false if reused within ttl.
 func (s *ChallengeServer) cidMarkOnce(cid string, ttl time.Duration) bool {

@@ -24,6 +24,11 @@ type webdetectorWrapped struct {
     cfg       webdet.Config
     startOnce sync.Once
 
+    // Track background servers so hot-reload waits for ports to be free.
+    srvWG    sync.WaitGroup
+    stopOnce sync.Once
+    chalSrv  *webdet.ChallengeServer
+
     // challenge redirect rules can be lost if firewall reloads/recreates tables.
     // Re-ensure periodically from RunOnce as a self-healing watchdog.
     lastEnsureMu sync.Mutex
@@ -38,23 +43,44 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
     w.startOnce.Do(func() {
         // API server (ctx-bound)
         if w.cfg.APIListen != "" {
+
+            w.srvWG.Add(1)
             go func() {
+                defer w.srvWG.Done()
                 if err := w.eng.ServeHTTPWithContext(ctx, w.cfg.APIListen); err != nil {
                     logging.Logf("[webdetector] API server exited: %v", err)
                 }
             }()
+
         }
 
         // Challenge server + nft redirect rules (ctx-bound)
         if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
             // initial ensure (best-effort)
             w.ensureChallengeRedirect("init")
+
+
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
+            w.chalSrv = srv
+
+            // Start in goroutine so RunOnce never blocks. Also detect if Start()
+            // stalls with a small timeout (best-effort watchdog).
+            started := make(chan error, 1)
+            w.srvWG.Add(1)
             go func() {
-                if err := srv.Start(ctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
-                    logging.Logf("[webdetector] challenge server exited: %v", err)
-                }
+                defer w.srvWG.Done()
+                started <- srv.Start(ctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
             }()
+
+            select {
+            case err := <-started:
+                if err != nil {
+                    logging.Logf("[webdetector] challenge server start failed: %v", err)
+                }
+            case <-time.After(5 * time.Second):
+                logging.Logf("[webdetector] challenge server start timeout (still starting)")
+            }
+
         }
     })
 
@@ -64,20 +90,57 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
         w.ensureChallengeRedirect("tick")
     }
 
-    return w.eng.RunOnce(ctx, out)
+    err := w.eng.RunOnce(ctx, out)
+
+    // On shutdown (reload), wait for background servers to actually exit so
+    // ports are free before the new instance starts.
+    if ctx.Err() != nil {
+        w.stopOnce.Do(func() {
+            waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+            defer cancel()
+
+            if w.chalSrv != nil {
+                _ = w.chalSrv.Wait(waitCtx)
+            }
+
+            done := make(chan struct{})
+            go func() {
+                w.srvWG.Wait()
+                close(done)
+            }()
+
+            select {
+            case <-done:
+            case <-waitCtx.Done():
+                logging.Logf("[webdetector] server shutdown wait timeout")
+            }
+        })
+    }
+
+    return err
+
+
 }
 
 // ensureChallengeRedirect runs EnsureChallengeRedirect at most once per minute.
 // This is intentionally cheap and self-healing.
 func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
     // throttle
-    w.lastEnsureMu.Lock()
-    if !w.lastEnsure.IsZero() && time.Since(w.lastEnsure) < 1*time.Minute {
-        w.lastEnsureMu.Unlock()
+
+    skip := func() bool {
+        w.lastEnsureMu.Lock()
+        defer w.lastEnsureMu.Unlock()
+        if !w.lastEnsure.IsZero() && time.Since(w.lastEnsure) < 10*time.Minute {
+            return true
+        }
+        w.lastEnsure = time.Now()
+        return false
+    }()
+    if skip {
         return
     }
-    w.lastEnsure = time.Now()
-    w.lastEnsureMu.Unlock()
+
+
 
     if fwBackend == nil {
         logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules (%s)", tag)
