@@ -9,9 +9,11 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 	"syscall"
+	"sort"
 	"cfm/internal/logging"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
+
 )
 
 type manager struct {
@@ -36,14 +38,25 @@ func cfgSig(secs *Sections) uint64 {
     binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
     _, _ = h.Write(b[:])
 
-    for name, kv := range secs.ByName {
+
+    // IMPORTANT: map iteration order is random -> must hash in stable order,
+    // otherwise cfgSig changes every tick and forces reload loops.
+    names := make([]string, 0, len(secs.ByName))
+    for name := range secs.ByName {
         if name == "global" {
             continue
         }
+        names = append(names, name)
+    }
+    sort.Strings(names)
+
+    for _, name := range names {
+        kv := secs.ByName[name]
         p := strings.TrimSpace(kvStrClean(kv, "LOG_PATH", ""))
         if p == "" {
             continue
         }
+
 
         // Always incorporate the path so missing/present transitions change sig.
         _, _ = h.Write([]byte("logpath="))
