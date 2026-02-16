@@ -15,6 +15,7 @@ import (
 type manager struct {
 	opts      Options
 	mu        sync.Mutex
+	wg        sync.WaitGroup
 	cancelAll context.CancelFunc
 	lastStamp int64
 	running   bool
@@ -305,21 +306,32 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
         }
 
         secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude)
-		go RunPeriodicWithState(ctx, det, secSink, m.state)
+        m.wg.Add(1)
+        go func() {
+            defer m.wg.Done()
+            RunPeriodicWithState(ctx, det, secSink, m.state)
+        }()
 	}
 }
 
 func (m *manager) stopAll() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cancelAll != nil {
-		m.cancelAll()
-		m.cancelAll = nil
-	}
-	if m.running {
-		logging.Logf("[detectors] all stopped")
-	}
-	m.running = false
+    // Cancel current run context and wait for detectors to fully exit.
+    // This prevents hot-reload port races (e.g. webdetector API/challenge listeners).
+    m.mu.Lock()
+    if m.cancelAll != nil {
+        m.cancelAll()
+        m.cancelAll = nil
+    }
+    wasRunning := m.running
+    m.running = false
+    m.mu.Unlock()
+
+    // Wait outside the mutex.
+    m.wg.Wait()
+
+    if wasRunning {
+        logging.Logf("[detectors] all stopped")
+    }
 }
 
 
