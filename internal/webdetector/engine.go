@@ -347,6 +347,11 @@ type Engine struct {
     vhostUnderAttack  map[string]bool
     vhostLastChange   map[string]time.Time
 
+    // --- ingest progress / stall logging (for "silent stops") ---
+    progMu            sync.Mutex
+    lastParsedAt      time.Time
+    lastProgressLogAt time.Time
+    parsedSinceLog    int64
 
 }
 
@@ -449,7 +454,11 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 
 	if err := e.src.Open(); err != nil {
-		return nil
+		// This can happen during log rotation/atomic writes. We keep the periodic
+		// loop alive, but log enough context to diagnose "stuck" behavior.
+		logging.Logf("[webdetector] tail open failed: %v (mode=%s log=%q)", err, e.cfg.Mode, e.cfg.LogPath)
+		return fmt.Errorf("webdetector: tail open failed: %w", err)
+
 	}
 	defer e.src.Close()
 
@@ -460,7 +469,10 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			break
 		}
 		if err != nil {
-			break
+			off, ino, ts := e.src.Position()
+			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s log=%q)",
+				err, off, ino, ts, e.cfg.Mode, e.cfg.LogPath)
+			return fmt.Errorf("webdetector: tail read failed: %w", err)
 		}
 		//chris//
 		//rec, ok := parseTSV(line)
@@ -468,6 +480,13 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if !ok {
 			continue
 		}
+
+        // progress marker: we successfully parsed a record
+        e.progMu.Lock()
+        e.lastParsedAt = time.Now()
+        e.parsedSinceLog++
+        e.progMu.Unlock()
+
 		e.ingest(rec, line)
 	}
 
@@ -494,7 +513,60 @@ e.emitIPChallenges(now, out)
 	if e.state != nil && e.stateKey != "" {
 		e.state.Put(e.stateKey, e.Position())
 	}
+
+    // Long-window heartbeat: once per long horizon (e.g. 20m) log either:
+    // - progress: last parsed timestamp + count since last log
+    // - stall: no parsed lines for >= long horizon
+    e.logIngestHeartbeat(now)
+
+
 	return nil
+}
+
+// logIngestHeartbeat emits a low-noise progress/stall log line at long-window cadence.
+// This helps diagnose "silent stop" scenarios (tail stuck, goroutine hung, file rotated, etc.)
+// without spamming every tick.
+func (e *Engine) logIngestHeartbeat(now time.Time) {
+    horizon := e.cfg.LongHorizon()
+    if horizon <= 0 {
+        return
+    }
+
+    e.progMu.Lock()
+    defer e.progMu.Unlock()
+
+    // throttle to once per horizon
+    if !e.lastProgressLogAt.IsZero() && now.Sub(e.lastProgressLogAt) < horizon {
+        return
+    }
+    e.lastProgressLogAt = now
+
+    // If we never parsed anything, treat as stall-ish but explicit.
+    if e.lastParsedAt.IsZero() {
+        logging.Logf("[webdetector][stall] no parsed lines yet (horizon=%s mode=%s log=%q)",
+            horizon, e.cfg.Mode, e.cfg.LogPath)
+        e.parsedSinceLog = 0
+        return
+    }
+
+    idle := now.Sub(e.lastParsedAt)
+    if idle >= horizon {
+        logging.Logf("[webdetector][stall] no parsed lines for %s (last=%s horizon=%s mode=%s log=%q)",
+            idle.Truncate(time.Second), e.lastParsedAt.UTC().Format(time.RFC3339), horizon, e.cfg.Mode, e.cfg.LogPath)
+        e.parsedSinceLog = 0
+        return
+    }
+
+    // normal progress log
+    logging.Logf("[webdetector][progress] parsed=%d last=%s idle=%s horizon=%s mode=%s log=%q",
+        e.parsedSinceLog,
+        e.lastParsedAt.UTC().Format(time.RFC3339),
+        idle.Truncate(time.Second),
+        horizon,
+        e.cfg.Mode,
+        e.cfg.LogPath,
+    )
+    e.parsedSinceLog = 0
 }
 
 // ingest updates per-host buckets with one log record.

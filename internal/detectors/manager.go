@@ -40,10 +40,9 @@ st, err := core.LoadState(core.DefaultStateDir)
 if err != nil {
 	logging.Logf("[detectors] state load failed: %v", err)
 } else {
+
     m.state = st
 }
-m.state = st
-
 	go m.loop(parent)
 }
 
@@ -72,22 +71,28 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	fi, err := os.Stat(path)
+    secs, _, err := readSections(path)
 	if err != nil {
-		// missing: stop all (if needed) and say it once
-		if m.running {
-			logging.Logf("[detectors] stopping (cfg removed)")
-		} else {
-			logging.Logf("[detectors] no detections.conf at %s — disabled", path)
-		}
-		m.stopAll()
+
+        // If the config is missing, stop everything (detectors disabled).
+        if os.IsNotExist(err) {
+            if m.running {
+                logging.Logf("[detectors] stopping (cfg removed)")
+            } else {
+                logging.Logf("[detectors] no detections.conf at %s — disabled", path)
+            }
+            m.stopAll()
+            return
+        }
+        // IMPORTANT: transient read/parse errors must NOT tear down running detectors.
+        // Common during atomic writes/editors: file replaced while we read.
+        logging.Logf("[detectors] config read failed (%s): %v — keeping current detectors", path, err)
 		return
 	}
-	if fi.ModTime().UnixNano() == m.lastStamp && m.running {
+    if secs.StampNS == m.lastStamp && m.running {
 		return
 	}
 
-	secs, _, _ := readSections(path)
 
 // --- ΝΕΟ: build global ignore από [global] ---
 ig := newIPIgnoreFromGlobal(secs.Global)
@@ -309,7 +314,15 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
         m.wg.Add(1)
         go func() {
             defer m.wg.Done()
-            RunPeriodicWithState(ctx, det, secSink, m.state)
+
+            // If a detector goroutine exits unexpectedly (ctx not canceled),
+            // it will silently stop. Log exits so we can spot stuck/failed loops.
+            if err := RunPeriodicWithState(ctx, det, secSink, m.state); err != nil && err != context.Canceled {
+                logging.Logf("[detectors][%s] exited: %v", secName, err)
+            } else {
+                logging.Logf("[detectors][%s] exited", secName)
+            }
+
         }()
 	}
 }

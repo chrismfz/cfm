@@ -23,6 +23,12 @@ type webdetectorWrapped struct {
     eng       *webdet.Engine
     cfg       webdet.Config
     startOnce sync.Once
+
+    // challenge redirect rules can be lost if firewall reloads/recreates tables.
+    // Re-ensure periodically from RunOnce as a self-healing watchdog.
+    lastEnsureMu sync.Mutex
+    lastEnsure   time.Time
+
 }
 
 func (w *webdetectorWrapped) Name() string         { return w.eng.Name() }
@@ -41,23 +47,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
         // Challenge server + nft redirect rules (ctx-bound)
         if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
-            if fwBackend != nil {
-                if cr, ok := any(fwBackend).(interface {
-                    EnsureChallengeRedirect(httpListen, httpsListen string) error
-                }); ok {
-                    if err := cr.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
-                        logging.Logf("[webdetector] EnsureChallengeRedirect failed: %v", err)
-                    } else {
-                        logging.Logf("[webdetector] challenge redirect rules ensured (http=%q https=%q)",
-                            w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
-                    }
-                } else {
-                    logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect")
-                }
-            } else {
-                logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules")
-            }
-
+            // initial ensure (best-effort)
+            w.ensureChallengeRedirect("init")
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             go func() {
                 if err := srv.Start(ctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
@@ -67,10 +58,46 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
         }
     })
 
+    // Watchdog: re-ensure redirect rules periodically to recover from
+    // nft table reloads (e.g. autoblock/loadAll paths).
+    if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
+        w.ensureChallengeRedirect("tick")
+    }
+
     return w.eng.RunOnce(ctx, out)
 }
 
+// ensureChallengeRedirect runs EnsureChallengeRedirect at most once per minute.
+// This is intentionally cheap and self-healing.
+func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
+    // throttle
+    w.lastEnsureMu.Lock()
+    if !w.lastEnsure.IsZero() && time.Since(w.lastEnsure) < 1*time.Minute {
+        w.lastEnsureMu.Unlock()
+        return
+    }
+    w.lastEnsure = time.Now()
+    w.lastEnsureMu.Unlock()
 
+    if fwBackend == nil {
+        logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules (%s)", tag)
+        return
+    }
+    cr, ok := any(fwBackend).(interface {
+        EnsureChallengeRedirect(httpListen, httpsListen string) error
+    })
+    if !ok {
+        logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect (%s)", tag)
+        return
+    }
+
+    if err := cr.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
+        logging.Logf("[webdetector] EnsureChallengeRedirect failed (%s): %v", tag, err)
+        return
+    }
+    logging.Logf("[webdetector] challenge redirect rules ensured (%s) (http=%q https=%q)",
+        tag, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
+}
 
 
 func init() {
