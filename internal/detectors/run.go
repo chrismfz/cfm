@@ -8,6 +8,26 @@ import (
 	"cfm/internal/logging"
 )
 
+
+// ctxParentKey stashes the long-lived manager ctx inside the per-run ctx that
+// may have a watchdog timeout. Some detectors (webdetector) need a ctx that
+// outlives a single RunOnce tick for background listeners.
+type ctxParentKey struct{}
+
+// parentCtxFrom returns the long-lived manager ctx if embedded by runOnceSafeTimed.
+func parentCtxFrom(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if v := ctx.Value(ctxParentKey{}); v != nil {
+		if p, ok := v.(context.Context); ok {
+			return p
+		}
+	}
+	return nil
+}
+
+
 type LoggerSink struct{}
 
 func (LoggerSink) Publish(a core.Alert) {
@@ -59,6 +79,9 @@ func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- c
 	}
 	ctxRun, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Embed long-lived ctx into ctxRun (so detectors can opt into it).
+	ctxRun = context.WithValue(ctxRun, ctxParentKey{}, ctx)
 
 	done := make(chan error, 1)
 	go func() {

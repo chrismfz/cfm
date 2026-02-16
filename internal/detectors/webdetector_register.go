@@ -41,13 +41,24 @@ func (w *webdetectorWrapped) Every() time.Duration { return w.eng.Every() }
 
 func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     w.startOnce.Do(func() {
+
+        // IMPORTANT:
+        // ctx here is a per-run watchdog ctx (timeout) from runOnceSafeTimed.
+        // If we bind background servers to it, they will be shut down at the end
+        // of every tick and ports will never stay open.
+        pctx := parentCtxFrom(ctx)
+        if pctx == nil {
+            pctx = ctx
+        }
+
+
         // API server (ctx-bound)
         if w.cfg.APIListen != "" {
 
             w.srvWG.Add(1)
             go func() {
                 defer w.srvWG.Done()
-                if err := w.eng.ServeHTTPWithContext(ctx, w.cfg.APIListen); err != nil {
+                if err := w.eng.ServeHTTPWithContext(pctx, w.cfg.APIListen); err != nil {
                     logging.Logf("[webdetector] API server exited: %v", err)
                 }
             }()
@@ -69,7 +80,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
             w.srvWG.Add(1)
             go func() {
                 defer w.srvWG.Done()
-                started <- srv.Start(ctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
+                started <- srv.Start(pctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
             }()
 
             select {
@@ -94,7 +105,13 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
     // On shutdown (reload), wait for background servers to actually exit so
     // ports are free before the new instance starts.
-    if ctx.Err() != nil {
+    // Use the long-lived parent ctx, not the per-run ctx.
+    pctx := parentCtxFrom(ctx)
+    if pctx == nil {
+        pctx = ctx
+    }
+
+    if pctx.Err() != nil {
         w.stopOnce.Do(func() {
             waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
             defer cancel()

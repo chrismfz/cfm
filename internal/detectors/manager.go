@@ -23,6 +23,13 @@ type manager struct {
 	cancelAll context.CancelFunc
 //	lastStamp int64
 	lastSig   uint64
+
+	// Debounce reloads: when we see a change, wait for it to be stable
+	// for a short period before doing stopAll()+restart.
+	pendingSig   uint64
+	pendingSince time.Time
+	hasPending   bool
+
 	running   bool
 	state *core.State
 
@@ -105,7 +112,11 @@ if err != nil {
 
 
 func (m *manager) loop(parent context.Context) {
-	t := time.NewTicker(2 * time.Second)
+
+	// Poll frequently, but reload only after debounce (stable signature).
+	// Config is tiny, so 1500ms polling is fine.
+	t := time.NewTicker(2500 * time.Millisecond)
+
 	defer t.Stop()
 	m.maybeReload(parent) // first run
 	for {
@@ -120,6 +131,8 @@ func (m *manager) loop(parent context.Context) {
 }
 
 func (m *manager) maybeReload(parent context.Context) {
+	const debounceDur = 2000 * time.Millisecond
+
 	path := m.opts.CfgPath
 	if path == "" {
 		return
@@ -144,9 +157,30 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
     sig := cfgSig(&secs)
-    if sig == m.lastSig && m.running {
+	// No change from current running config: clear any pending reload.
+	if sig == m.lastSig && m.running {
+		m.hasPending = false
 		return
 	}
+
+	// Debounce: require the new signature to remain stable for debounceDur
+	// before we actually reload (prevents flapping / transient states).
+	now := time.Now()
+	if !m.hasPending || m.pendingSig != sig {
+		m.pendingSig = sig
+		m.pendingSince = now
+		m.hasPending = true
+		// First observation of this change: wait for stability.
+		return
+	}
+	if now.Sub(m.pendingSince) < debounceDur {
+		// Still within debounce window: wait.
+		return
+	}
+
+	// Stable change confirmed: proceed with reload.
+	m.hasPending = false
+
 
 
 // --- ΝΕΟ: build global ignore από [global] ---
