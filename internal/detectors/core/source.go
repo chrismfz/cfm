@@ -208,6 +208,39 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 	line, err := t.r.ReadString('\n')
 	if err != nil {
 
+        // If a single log line is larger than our buffer, ReadString returns
+        // a partial fragment + bufio.ErrBufferFull. If we don't advance offset,
+        // we will hit the same fragment forever and the detector will "freeze".
+        if err == bufio.ErrBufferFull {
+            // Account for the fragment we already consumed
+            if len(line) > 0 {
+                t.off += int64(len(line))
+            }
+
+            // Drain the remainder of this oversized line until we reach '\n'
+            for {
+                frag, e2 := t.r.ReadString('\n')
+                if len(frag) > 0 {
+                    t.off += int64(len(frag))
+                }
+                if e2 == nil {
+                    // finished skipping the long line
+                    t.lastLineTS = time.Now().Unix()
+                    // return empty line; caller will ignore it
+                    return "", nil
+                }
+                if e2 == bufio.ErrBufferFull {
+                    continue
+                }
+                if e2 == io.EOF {
+                    // line still incomplete; keep non-blocking contract
+                    return "", io.EOF
+                }
+                return "", e2
+            }
+        }
+
+
                if err == io.EOF {
                        // We are caught up. Optionally check for rotation/truncate,
                        // but rate-limit this Stat() while idle to reduce syscalls.
