@@ -13,7 +13,8 @@ import (
 	"strings"
 	"bytes"
 	"regexp"
-
+	"time"
+	"io"
 	"cfm/internal/enrich"
 	"cfm/internal/detectors/health"
 )
@@ -37,6 +38,38 @@ type ServiceInfo struct {
 }
 
 type nftCounter struct{ Name string; Packets int }
+
+// ---------------------------------------------------------------------------
+// Challenge status (nft + journal)
+// ---------------------------------------------------------------------------
+
+type ChallengeStatus struct {
+	Enabled bool `json:"enabled"`
+
+	PreroutingOK bool     `json:"prerouting_ok,omitempty"`
+	Prerouting   []string `json:"prerouting,omitempty"`
+
+	GuardOK bool     `json:"guard_ok,omitempty"`
+	Guard   []string `json:"guard,omitempty"`
+
+	CurrentV4 []recentHit `json:"current_v4,omitempty"`
+	CurrentV6 []recentHit `json:"current_v6,omitempty"`
+
+	SinceServiceStart bool   `json:"since_service_start,omitempty"`
+	ServiceSince      string `json:"service_since,omitempty"`
+
+	TotalChallenged int `json:"total_challenged,omitempty"`
+	TotalSolved     int `json:"total_solved,omitempty"`
+
+	TopIPs  []HitCount  `json:"top_ips,omitempty"`
+	TopASNs []HitCount  `json:"top_asns,omitempty"`
+}
+
+type HitCount struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+
 
 func getDaemonInfo() DaemonInfo {
 	if _, err := exec.LookPath("pgrep"); err == nil {
@@ -146,6 +179,10 @@ func Run(args []string) {
 	fmt.Printf("-%s | %s-\n", hdrLeft, serviceHuman(si))
 
 	printSummary(st)
+
+
+	// --- Challenge section (nft + journal) ---
+	printChallengeStatus(st, en)
 
 
     // --- TTL summary (manual hosts + nets) ---
@@ -888,3 +925,332 @@ func portBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[str
     }
     return m
 }
+
+
+
+//////////////CHALLENGE//////////////
+// ---------------------------------------------------------------------------
+// Challenge printing
+// ---------------------------------------------------------------------------
+
+func printChallengeStatus(st statusOut, en *enrich.Enricher) {
+	// Enabled if challenge sets or chains exist
+	if !st.TablePresent {
+		return
+	}
+
+	// Check for presence via nft output (cheap + robust)
+	pre := listChainFiltered("prerouting", "cfm_challenge_nat_")
+	guard := listChainFiltered("challenge_guard", "cfm_challenge_guard_")
+
+	// Also treat as enabled if sets exist even if chain listing fails
+	v4 := listSetElemsDetailed("challenge_v4", 50)
+	v6 := listSetElemsDetailed("challenge_v6", 50)
+
+	enabled := len(pre) > 0 || len(guard) > 0 || len(v4) > 0 || len(v6) > 0
+	if !enabled {
+		return
+	}
+
+	fmt.Printf("\n---- Challenge ----\n")
+
+	// Prerouting rules
+	if len(pre) > 0 {
+		fmt.Println("Prerouting OK:")
+		for _, ln := range pre {
+			fmt.Printf("  %s\n", ln)
+		}
+	} else {
+		fmt.Println("Prerouting: MISSING (no cfm_challenge_nat_* rules found)")
+	}
+
+	// Guard chain rules
+	if len(guard) > 0 {
+		fmt.Println("Guard chain OK (challenge_guard):")
+		for _, ln := range guard {
+			fmt.Printf("  %s\n", ln)
+		}
+	} else {
+		fmt.Println("Guard chain: MISSING (no cfm_challenge_guard_* rules found)")
+	}
+
+	// Current challenged IPs with TTLs
+	if len(v4) > 0 || len(v6) > 0 {
+		fmt.Println("Current IPs challenged (TTL):")
+		if len(v4) > 0 {
+			fmt.Println("  v4:")
+			for _, h := range v4 {
+				if h.Expires != "" {
+					fmt.Printf("    %-16s  expires %s\n", h.IP, h.Expires)
+				} else {
+					fmt.Printf("    %-16s\n", h.IP)
+				}
+			}
+		}
+		if len(v6) > 0 {
+			fmt.Println("  v6:")
+			for _, h := range v6 {
+				if h.Expires != "" {
+					fmt.Printf("    %-39s  expires %s\n", h.IP, h.Expires)
+				} else {
+					fmt.Printf("    %-39s\n", h.IP)
+				}
+			}
+		}
+	}
+
+	// Journal-based totals (since service start)
+	since, ok := serviceActiveSince()
+	if ok {
+		ch, sol, topIPs, topASNs := readChallengeJournalStats(since, en)
+		fmt.Printf("Totals since service start (%s): %d challenged / %d solved\n", since, ch, sol)
+
+		if len(topIPs) > 0 {
+			fmt.Println("Top 5 IPs challenged:")
+			for _, kv := range topIPs {
+				fmt.Printf("  %-17s %6d\n", kv.Key, kv.Count)
+			}
+		}
+		if len(topASNs) > 0 {
+			fmt.Println("Top 5 ASNs challenged:")
+			for _, kv := range topASNs {
+				fmt.Printf("  %-28s %6d\n", kv.Key, kv.Count)
+			}
+		}
+	} else {
+		// Still show a hint
+		fmt.Println("Totals since startup: (unavailable - systemd/journalctl not found or service not running)")
+	}
+}
+
+func listChainFiltered(chain, contains string) []string {
+	// Use -a so handles present; but we print compact lines without the "table inet cfm {"
+	out, err := exec.Command("nft", "-a", "list", "chain", "inet", "cfm", chain).CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(out), "\n")
+	var keep []string
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		// skip wrappers
+		if strings.HasPrefix(ln, "table ") || strings.HasPrefix(ln, "chain ") || ln == "}" {
+			continue
+		}
+		if contains != "" && !strings.Contains(ln, contains) {
+			continue
+		}
+		keep = append(keep, ln)
+	}
+	return keep
+}
+
+func serviceActiveSince() (string, bool) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return "", false
+	}
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		return "", false
+	}
+	out, err := exec.Command("systemctl", "show", "-p", "ActiveEnterTimestamp", "cfm.service").CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	s := strings.TrimSpace(string(out))
+	s = strings.TrimPrefix(s, "ActiveEnterTimestamp=")
+	s = strings.TrimSpace(s)
+	if s == "" || s == "n/a" {
+		return "", false
+	}
+	// journalctl likes it as-is (e.g. "Tue 2026-02-17 16:12:03 EET")
+	return s, true
+}
+
+var (
+	reChalIP = regexp.MustCompile(`\bip=([0-9a-fA-F:.]+)\b`)
+)
+
+func readChallengeJournalStats(since string, en *enrich.Enricher) (challenged, solved int, topIPs, topASNs []HitCount) {
+	// Try journald first (if service logs go there)
+	lines := journalChallengeLines(since)
+
+
+	ipCounts := map[string]int{}
+	asnCounts := map[string]int{}
+
+	for _, ln := range lines {
+		if !strings.Contains(ln, "[challenge]") && !strings.Contains(ln, " [challenge]") {
+			continue
+		}
+		m := reChalIP.FindStringSubmatch(ln)
+		if len(m) < 2 {
+			continue
+		}
+		ip := m[1]
+
+		// Count "challenged" only when actually enforced (not suppressed)
+		if strings.Contains(ln, "enforced=challenge") && !strings.Contains(ln, "challenge_suppressed") {
+			challenged++
+			ipCounts[ip]++
+
+			// ASN bucket (best-effort)
+			if en != nil {
+				r := en.Lookup(ip)
+				if r.ASN != 0 {
+					key := fmt.Sprintf("AS%d", r.ASN)
+					if r.ASNName != "" {
+						key = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+					}
+					asnCounts[key]++
+				}
+			}
+		}
+
+		if strings.Contains(ln, "result=solved") {
+			solved++
+		}
+	}
+
+	topIPs = topHitCounts(ipCounts, 5)
+	topASNs = topHitCounts(asnCounts, 5)
+
+	// Fallback: if journald is empty, parse file logs (common in your setup)
+	if challenged == 0 && solved == 0 {
+		fileLines := fileChallengeLinesSince(since)
+		if len(fileLines) > 0 {
+			ipCounts = map[string]int{}
+			asnCounts = map[string]int{}
+			for _, ln := range fileLines {
+				if !strings.Contains(ln, "[challenge]") && !strings.Contains(ln, " [challenge]") {
+					continue
+				}
+				m := reChalIP.FindStringSubmatch(ln)
+				if len(m) < 2 {
+					continue
+				}
+				ip := m[1]
+
+				if strings.Contains(ln, "enforced=challenge") && !strings.Contains(ln, "challenge_suppressed") {
+					challenged++
+					ipCounts[ip]++
+					if en != nil {
+						r := en.Lookup(ip)
+						if r.ASN != 0 {
+							key := fmt.Sprintf("AS%d", r.ASN)
+							if r.ASNName != "" {
+								key = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+							}
+							asnCounts[key]++
+						}
+					}
+				}
+				if strings.Contains(ln, "result=solved") {
+					solved++
+				}
+			}
+			topIPs = topHitCounts(ipCounts, 5)
+			topASNs = topHitCounts(asnCounts, 5)
+		}
+	}
+
+	return
+}
+
+
+func journalChallengeLines(since string) []string {
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		return nil
+	}
+	// -o cat: no syslog prefixes, easier parsing
+	cmd := exec.Command("journalctl",
+		"-u", "cfm.service",
+		"--no-pager",
+		"-o", "cat",
+		"--since", since,
+		"-n", "20000",
+	)
+	b, err := cmd.CombinedOutput()
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	return strings.Split(string(b), "\n")
+}
+
+func fileChallengeLinesSince(since string) []string {
+	// Parse since time (best-effort). If we can't parse, we still return last lines.
+	var sinceT time.Time
+	var haveSince bool
+	if t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", since); err == nil {
+		sinceT, haveSince = t, true
+	}
+
+	paths := []string{
+		"/var/log/cfm-service.log",
+		"/var/log/cfm/cfm.challenges.log",
+		"/var/log/cfm.log",
+	}
+
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		defer f.Close()
+
+		// Read only tail (last ~2MB) to keep it fast
+		st, _ := f.Stat()
+		if st != nil && st.Size() > 2*1024*1024 {
+			_, _ = f.Seek(st.Size()-2*1024*1024, io.SeekStart)
+		}
+		b, _ := io.ReadAll(f)
+		lines := strings.Split(string(b), "\n")
+
+		// Optional time filter: lines start with "YYYY-MM-DD HH:MM:SS ..."
+		if haveSince {
+			var out []string
+			for _, ln := range lines {
+				if len(ln) < 19 {
+					continue
+				}
+				ts := ln[:19]
+				t, err := time.Parse("2006-01-02 15:04:05", ts)
+				if err != nil {
+					continue
+				}
+				if t.Before(sinceT) {
+					continue
+				}
+				out = append(out, ln)
+			}
+			return out
+		}
+		return lines
+	}
+	return nil
+}
+
+
+
+func topHitCounts(m map[string]int, n int) []HitCount {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]HitCount, 0, len(m))
+	for k, v := range m {
+		out = append(out, HitCount{Key: k, Count: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Key < out[j].Key
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+

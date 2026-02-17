@@ -569,7 +569,14 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             }
         }
 
-        // 3) Evaluate each host
+        // 3) Evaluate each host.
+        // Pre-compute the long-window sum ONCE here so the per-host
+        // OneFromCache call below is O(1) instead of O(slots*hosts).
+        var longSums map[string]bucket
+        if haveVhostAuto && e.longwin != nil {
+            longSums = e.longwin.SumAll()
+        }
+
         for host := range candHosts {
             if host == "" {
                 continue
@@ -624,7 +631,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             autoActive := false
             var row SuspiciousRow
             if haveVhostAuto && e.longwin != nil {
-                r, ok := e.longwin.One(host)
+                r, ok := e.longwin.OneFromCache(longSums, host)
                 if ok {
                     row = r
                 } else {

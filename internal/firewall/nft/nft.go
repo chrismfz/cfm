@@ -249,17 +249,27 @@ func (b *Backend) SetConfigDir(dir string) { b.cfgDir = strings.TrimSpace(dir) }
 // ---------- ensure base ----------
 
 func (b *Backend) ensureSetWithFlags(name, typ, flags string) error {
-	if !b.setExists(name) {
-		return b.nftCmd(fmt.Sprintf(`add set %s %s %s { type %s; flags %s; }`, family, tableName, name, typ, flags))
+	// Be robust/idempotent: try to create the set and ignore "already exists".
+	// We've seen cases where setExists() can be misleading under concurrent
+	// applies/resets; failing here later breaks rule insertion at @set.
+	expr := fmt.Sprintf(`add set %s %s %s { type %s; flags %s; }`, family, tableName, name, typ, flags)
+	out, err := b.nftOut(expr)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// Common idempotent errors from nft when the set already exists.
+	if strings.Contains(out, "File exists") || strings.Contains(out, "already exists") {
+		return nil
+	}
+	// Fallback to old check as a last resort.
+	if b.setExists(name) {
+		return nil
+	}
+	return err
 }
 
 func (b *Backend) ensureSet(name, typ string) error {
-	if !b.setExists(name) {
-		return b.nftCmd(fmt.Sprintf(`add set %s %s %s { type %s; flags timeout; }`, family, tableName, name, typ))
-	}
-	return nil
+	return b.ensureSetWithFlags(name, typ, "timeout")
 }
 
 func (b *Backend) EnsureBase() error {
@@ -1780,9 +1790,19 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		return err
 	}
 
+	// Ensure challenge sets exist BEFORE any rule references @challenge_v4/@challenge_v6
+	// (otherwise nft insert rule fails with "No such file or directory" at @challenge_v4)
+	if err := b.ensureSet(challengeV4, "ipv4_addr"); err != nil {
+		return err
+	}
+	if err := b.ensureSet(challengeV6, "ipv6_addr"); err != nil {
+		return err
+	}
+
+
 	hasComment := func(chain, label string) bool {
 		// Match by comment only so formatting differences can't cause duplicates.
-		return b.ruleExists(chain, fmt.Sprintf(`comment "cfm:challenge:%s"`, label))
+		return b.ruleExists(chain, fmt.Sprintf(`comment "cfm_challenge_%s"`, label))
 	}
 
 	// Ensure dedicated guard chain + early jump (so it runs BEFORE established/related accept).
@@ -1804,7 +1824,7 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		if hasComment("challenge_guard", label) {
 			return nil
 		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
 		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s challenge_guard %s`, family, tableName, expr)); err != nil {
 			return err
 		}
@@ -1816,10 +1836,10 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		if hasComment("input", label) {
 			return nil
 		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
 		// IMPORTANT: keep the jump-to-guard at position 0, so the guard chain runs FIRST.
 		// Insert accepts right after it.
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 1 %s`, family, tableName, expr)); err != nil {
+		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err != nil {
 			return err
 		}
 		b.chlogf("nft insert %s (pos1): %s", label, expr)
@@ -1833,7 +1853,7 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		if hasComment(challengeNatChain, label) {
 			return nil
 		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
+		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
 		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr)); err != nil {
 			return err
 		}

@@ -222,7 +222,7 @@ func (lw *LongWindow) horizonSec() float64 {
 	return float64(len(lw.slots)) * lw.every.Seconds()
 }
 
-func (lw *LongWindow) sumAll() map[string]bucket {
+func (lw *LongWindow) SumAll() map[string]bucket {
 	lw.mu.RLock()
 	defer lw.mu.RUnlock()
 
@@ -282,7 +282,7 @@ func (lw *LongWindow) SuspiciousTop(limit int, minScore float64) []SuspiciousRow
 		return nil
 	}
 
-	sums := lw.sumAll()
+	sums := lw.SumAll()
 	hor := lw.horizonSec()
 	if hor <= 0 {
 		hor = 1
@@ -381,7 +381,7 @@ func (lw *LongWindow) All() []LongRow {
 	if lw == nil {
 		return nil
 	}
-	sums := lw.sumAll()
+	sums := lw.SumAll()
 	hor := lw.horizonSec()
 	if hor <= 0 {
 		hor = 1
@@ -431,7 +431,7 @@ func (lw *LongWindow) One(host string) (SuspiciousRow, bool) {
 	if lw == nil || lw.scorer == nil {
 		return SuspiciousRow{}, false
 	}
-	sums := lw.sumAll()
+	sums := lw.SumAll()
 	b, ok := sums[host]
 	if !ok || b.Tot <= 0 {
 		return SuspiciousRow{}, false
@@ -497,6 +497,55 @@ sig := Signals{
 	}
 	return row, true
 }
+
+
+// OneFromCache is like One but uses a pre-computed SumAll result.
+// Call SumAll() once before a loop, then use this per-host to avoid
+// O(N * slots * hosts) cost.
+func (lw *LongWindow) OneFromCache(sums map[string]bucket, host string) (SuspiciousRow, bool) {
+	if lw == nil || lw.scorer == nil {
+		return SuspiciousRow{}, false
+	}
+	b, ok := sums[host]
+	if !ok || b.Tot <= 0 {
+		return SuspiciousRow{}, false
+	}
+	hor := lw.horizonSec()
+	if hor <= 0 {
+		hor = 1
+	}
+	rps  := float64(b.Tot) / hor
+	r3   := float64(b.C3)  / hor
+	r4   := float64(b.C4)  / hor
+	r5   := float64(b.C5)  / hor
+	r401 := float64(b.C401) / hor
+	r403 := float64(b.C403) / hor
+	r404 := float64(b.C404) / hor
+	r50x := float64(b.C50x) / hor
+	r504 := float64(b.C504) / hor
+	errR := b.ErrRatio
+	if errR == 0 {
+		errR = (float64(b.C4) + float64(b.C5) + float64(b.C499)) / maxf(float64(b.Tot), 1)
+	}
+	sig := Signals{
+		RPS: rps, R3xx: r3, R4xx: r4, R5xx: r5,
+		R401: r401, R403: r403, R404: r404, R50x: r50x, R504: r504,
+		ErrRatio: errR, Auth401Ratio: b.Auth401, UniqueIPs: b.Uniq,
+		MedianPerIP: b.MedPerIP, BytesRPS: b.BytesRPSMax, HotIPs: b.HotIPsMax,
+		BotRatio: b.BotRatioMax, PathDiversity: b.PathDivMax,
+		UADiversity: b.UADivMax, PostRatio: b.PostRatioMax,
+	}
+	res := lw.scorer.Score(sig)
+	return SuspiciousRow{
+		Host: host, Score: res.Score, Reasons: res.Reasons,
+		RPS: rps, R3xx: r3, R4xx: r4, R5xx: r5,
+		UniqueIPs: b.Uniq, ErrRatio: errR, Auth401Ratio: b.Auth401,
+		HotIPs: b.HotIPsMax, BotRatio: b.BotRatioMax,
+		PathDiversity: b.PathDivMax, UADiversity: b.UADivMax, PostRatio: b.PostRatioMax,
+	}, true
+}
+
+
 
 func maxf(a, b float64) float64 {
 	if a > b {
