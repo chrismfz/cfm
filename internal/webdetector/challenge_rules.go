@@ -84,6 +84,16 @@ func compileChalRules(list []string, defCount int) []chalRule {
 	return out
 }
 
+// boolFlag encodes a bool as "1" or "0" for transport via Alert.Extra.
+// The sink reads this to decide whether to log/notify, since it has no direct
+// access to webdetector.Config.
+func boolFlag(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 // trackChallengePaths increments per-IP counters if path matches any challenge rule.
 // Called from ingest() while engine lock is already held.
 func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
@@ -287,13 +297,15 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         }
 
                                         extra := map[string]string{
-                                                "detector": "webdetector",
-                                                "ip":       c.ip,
-                                                "action":   "challenge",
-                                                "rule":     "CHALLENGE_PATHS",
-                                                "match":    c.sub,
-                                                "limit":    fmt.Sprintf("challenge_paths(%d/%d:%s)", c.count, c.thr, c.sub),
-                                                "ttl":      ttl.String(),
+                                                "detector":         "webdetector",
+                                                "ip":               c.ip,
+                                                "action":           "challenge",
+                                                "rule":             "CHALLENGE_PATHS",
+                                                "match":            c.sub,
+                                                "limit":            fmt.Sprintf("challenge_paths(%d/%d:%s)", c.count, c.thr, c.sub),
+                                                "ttl":              ttl.String(),
+                                                "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                                                "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
                                         }
                                         if c.host != "" {
                                                 extra["host"] = c.host
@@ -465,12 +477,14 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             if ttl <= 0 { ttl = 30 * time.Minute }
 
             extra := map[string]string{
-                "detector": "webdetector",
-                "ip":       ipStr,
-                "action":   "challenge",
-                "rule":     rule,
-                "limit":    limit,
-                "ttl":      ttl.String(),
+                "detector":         "webdetector",
+                "ip":               ipStr,
+                "action":           "challenge",
+                "rule":             rule,
+                "limit":            limit,
+                "ttl":              ttl.String(),
+                "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
             }
             if ctx.Host != "" { extra["host"] = ctx.Host }
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
@@ -580,19 +594,23 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                         }()
 
                         if wasOn {
-                            logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
-                            a := core.Alert{
-                                When:  now,
-                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
-                                Key:   host,
-                                Count: 0,
-                                Extra: map[string]string{
-                                    "host":   host,
-                                    "action": "auto_off",
-                                    "reason": "ignored",
-                                },
+                            if e.cfg.ChallengeLog {
+                                logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
                             }
-                            select { case out <- a: default: }
+                            if e.cfg.ChallengeNotify {
+                                a := core.Alert{
+                                    When:  now,
+                                    Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                                    Key:   host,
+                                    Count: 0,
+                                    Extra: map[string]string{
+                                        "host":   host,
+                                        "action": "auto_off",
+                                        "reason": "ignored",
+                                    },
+                                }
+                                select { case out <- a: default: }
+                            }
                         }
 		}
 
@@ -647,28 +665,32 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
 
-                            logging.LogfCHALLENGES(
-                                "[challenge][vhost] action=auto_on host=%s score=%.2f on=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s hold=%s",
-                                host, row.Score, on, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
-                            )
-                            a := core.Alert{
-                                When:  now,
-                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_ON"),
-                                Key:   host,
-                                Count: row.UniqueIPs,
-                                Extra: map[string]string{
-                                    "host":     host,
-                                    "action":   "auto_on",
-                                    "score":    fmt.Sprintf("%.2f", row.Score),
-                                    "score_on": fmt.Sprintf("%.2f", on),
-                                    "score_off": fmt.Sprintf("%.2f", off),
-                                    "uniqIP":   fmt.Sprintf("%d", row.UniqueIPs),
-                                    "rps":      fmt.Sprintf("%.2f", row.RPS),
-                                    "reasons":  strings.Join(row.Reasons, ","),
-                                    "holddown": hold.String(),
-                                },
+                            if e.cfg.ChallengeLog {
+                                logging.LogfCHALLENGES(
+                                    "[challenge][vhost] action=auto_on host=%s score=%.2f on=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s hold=%s",
+                                    host, row.Score, on, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
+                                )
                             }
-                            select { case out <- a: default: }
+                            if e.cfg.ChallengeNotify {
+                                a := core.Alert{
+                                    When:  now,
+                                    Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_ON"),
+                                    Key:   host,
+                                    Count: row.UniqueIPs,
+                                    Extra: map[string]string{
+                                        "host":      host,
+                                        "action":    "auto_on",
+                                        "score":     fmt.Sprintf("%.2f", row.Score),
+                                        "score_on":  fmt.Sprintf("%.2f", on),
+                                        "score_off": fmt.Sprintf("%.2f", off),
+                                        "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+                                        "rps":       fmt.Sprintf("%.2f", row.RPS),
+                                        "reasons":   strings.Join(row.Reasons, ","),
+                                        "holddown":  hold.String(),
+                                    },
+                                }
+                                select { case out <- a: default: }
+                            }
                             return true
                         }
                         return false
@@ -679,26 +701,30 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                         e.vhostUnderAttack[host] = false
                         e.vhostLastChange[host] = now
 
-                        logging.LogfCHALLENGES(
-                            "[challenge][vhost] action=auto_off host=%s score=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s",
-                            host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
-                        )
-                        a := core.Alert{
-                            When:  now,
-                            Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
-                            Key:   host,
-                            Count: 0,
-                            Extra: map[string]string{
-                                "host":      host,
-                                "action":    "auto_off",
-                                "score":     fmt.Sprintf("%.2f", row.Score),
-                                "score_off": fmt.Sprintf("%.2f", off),
-                                "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
-                                "rps":       fmt.Sprintf("%.2f", row.RPS),
-                                "reasons":   strings.Join(row.Reasons, ","),
-                            },
+                        if e.cfg.ChallengeLog {
+                            logging.LogfCHALLENGES(
+                                "[challenge][vhost] action=auto_off host=%s score=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s",
+                                host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
+                            )
                         }
-                        select { case out <- a: default: }
+                        if e.cfg.ChallengeNotify {
+                            a := core.Alert{
+                                When:  now,
+                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                                Key:   host,
+                                Count: 0,
+                                Extra: map[string]string{
+                                    "host":      host,
+                                    "action":    "auto_off",
+                                    "score":     fmt.Sprintf("%.2f", row.Score),
+                                    "score_off": fmt.Sprintf("%.2f", off),
+                                    "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+                                    "rps":       fmt.Sprintf("%.2f", row.RPS),
+                                    "reasons":   strings.Join(row.Reasons, ","),
+                                },
+                            }
+                            select { case out <- a: default: }
+                        }
                         return false
                     }
                     return true
@@ -752,12 +778,14 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 }
 
                 extra := map[string]string{
-                    "detector": "webdetector",
-                    "ip":       ipStr,
-                    "action":   "challenge",
-                    "rule":     rule,
-                    "ttl":      ttl.String(),
-                    "host":     host,
+                    "detector":         "webdetector",
+                    "ip":               ipStr,
+                    "action":           "challenge",
+                    "rule":             rule,
+                    "ttl":              ttl.String(),
+                    "host":             host,
+                    "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                    "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
                 }
                 if !manual {
                     extra["score"]   = fmt.Sprintf("%.2f", row.Score)

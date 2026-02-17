@@ -35,6 +35,9 @@ var ftpDaemon = regexp.MustCompile(`(?i)\b(pure-?ftpd|vsftpd|proftpd|cpanel_ftp_
 // Hard exclude: ssh noise (e.g., "sshd: Invalid user ftpuser …")
 var sshNoise = regexp.MustCompile(`\bsshd\b`)
 
+// Exclude file-transfer activity lines that may contain "failed" in filenames (uploads/downloads etc.)
+var ftpXferNoise = regexp.MustCompile(`(?i)\b(uploaded|downloaded|renamed|deleted|chmod|chown|mkdir|rmdir)\b`)
+
 // read the last N bytes and count ftp daemon lines and failure lines (excluding sshNoise)
 func scoreFTPFile(path string, maxTailBytes int64) (daemonHits, failHits int, _ error) {
 	f, err := os.Open(path)
@@ -65,6 +68,9 @@ func scoreFTPFile(path string, maxTailBytes int64) (daemonHits, failHits int, _ 
 		if sshNoise.MatchString(line) {
 			continue
 		}
+		if ftpXferNoise.MatchString(line) {
+			continue
+		}
 		if ftpDaemon.MatchString(line) {
 			daemonHits++
 			if ftpQuick.MatchString(line) {
@@ -92,6 +98,9 @@ func probeJournalUnit(unit string, deadline time.Duration) bool {
 			break
 		}
 		if sshNoise.MatchString(line) {
+			continue
+		}
+		if ftpXferNoise.MatchString(line) {
 			continue
 		}
 		if ftpQuick.MatchString(line) {

@@ -219,6 +219,21 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 func (a *Auth) consume(now time.Time, line string) {
 	// (2) CHEAP CONTAINS GATES + DAEMON HINT (no Unicode SimpleFold)
 	ll := strings.ToLower(line)
+
+	// Ignore file-transfer activity lines that can contain "failed" in filenames
+	// (e.g. WooCommerce "*-failed-order.php" uploads) and would otherwise trip AUTHFAIL.
+	// We only want authentication failures here.
+	if strings.Contains(ll, " uploaded") ||
+		strings.Contains(ll, " downloaded") ||
+		strings.Contains(ll, " renamed") ||
+		strings.Contains(ll, " deleted") ||
+		strings.Contains(ll, " chmod") ||
+		strings.Contains(ll, " chown") ||
+		strings.Contains(ll, " mkdir") ||
+		strings.Contains(ll, " rmdir") {
+		return
+	}
+
 	// require an ftp daemon token
 	if !(strings.Contains(ll, "ftpd") || strings.Contains(ll, "ftp-login")) {
 		return

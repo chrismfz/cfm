@@ -1817,12 +1817,11 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 			return nil
 		}
 		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm:challenge:%s"`, label)
-		// IMPORTANT: keep the jump-to-guard at position 0, so the guard chain runs FIRST.
-		// Insert accepts right after it.
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 1 %s`, family, tableName, expr)); err != nil {
+		// IMPORTANT: insert at top so it wins vs later drops from PortsPolicy
+		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err != nil {
 			return err
 		}
-		b.chlogf("nft insert %s (pos1): %s", label, expr)
+		b.chlogf("nft insert %s: %s", label, expr)
 		return nil
 	}
 
@@ -1917,45 +1916,6 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 			}
 		}
 
-	}
-
-	// Challenge port connlimit (protect the challenge listener itself):
-	// If a challenged IP tries to open too many concurrent connections to the challenge ports,
-	// drop NEW connections beyond the threshold.
-	// This is per-source-IP, and state naturally disappears as conns close.
-	// NOTE: this matches the post-DNAT destination ports (httpPort/httpsPort), not 80/443.
-	const chalConnLimit = 16 // per-IP NEW connections/sec to challenge ports
-	if okHTTP && httpPort > 0 {
-		if err := addGuardRule("guard_v4_http_connlimit",
-			fmt.Sprintf(
-				`ip saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_http_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
-				challengeV4, httpPort, chalConnLimit)); err != nil {
-			return err
-		}
-		if err := addGuardRule("guard_v6_http_connlimit",
-			fmt.Sprintf(
-				`ip6 saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_http_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
-				challengeV6, httpPort, chalConnLimit)); err != nil {
-			return err
-		}
-	}
-	if okHTTPS && httpsPort > 0 {
-		if err := addGuardRule("guard_v4_https_connlimit",
-			fmt.Sprintf(
-				`ip saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_https_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
-				challengeV4, httpsPort, chalConnLimit)); err != nil {
-			return err
-		}
-		if err := addGuardRule("guard_v6_https_connlimit",
-			fmt.Sprintf(
-				`ip6 saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_https_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
-				challengeV6, httpsPort, chalConnLimit)); err != nil {
-			return err
-		}
 	}
 
 	// QUIC/HTTP3 bypass fix:

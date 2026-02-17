@@ -216,40 +216,44 @@ if core.IsSelfIP(ipStr) {
                     out.Extra["reason"]   = "excluded"
                     out.Extra["exclude"]  = why
 
-                    logging.LogfCHALLENGES(
-                        "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s reason=%s exclude=%s%s",
-                        ipStr,
-                        firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-                        out.Extra["host"],
-                        out.Extra["uri"],
-                        firstNonEmpty(out.Extra["ttl"], defaultChallengeTTL.String()),
-                        out.Extra["enforced"],
-                        out.Extra["reason"],
-                        out.Extra["exclude"],
-                        s.challengeEnrichSuffix(ipStr),
-                    )
+                    if out.Extra["challenge_log"] != "0" {
+                        logging.LogfCHALLENGES(
+                            "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s reason=%s exclude=%s%s",
+                            ipStr,
+                            firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                            out.Extra["host"],
+                            out.Extra["uri"],
+                            firstNonEmpty(out.Extra["ttl"], defaultChallengeTTL.String()),
+                            out.Extra["enforced"],
+                            out.Extra["reason"],
+                            out.Extra["exclude"],
+                            s.challengeEnrichSuffix(ipStr),
+                        )
+                    }
 
-                    // Optional notify (audit)
-                    smp := out.Samples
-                    if len(smp) > 10 { smp = smp[:10] }
-                    notify.Enqueue(notify.Event{
-                        Kind:     "WEB/CHALLENGE_EXCLUDED",
-                        Section:  s.section,
-                        SrcIP:    ipStr,
-                        Reason:   why,
-                        Count:    out.Count,
-                        When:     time.Now(),
-                        Severity: "info",
-                        Samples:  smp,
-                        Extra: map[string]string{
-                            "rule": rule,
-                            "host": host,
-                            "ua":   ua,
-                            "asn":  asn,
-                            "ptr":  ptr,
-                            "key":  a.Key,
-                        },
-                    })
+                    // Optional notify (audit) — gated by challenge_notify flag.
+                    if out.Extra["challenge_notify"] != "0" {
+                        smp := out.Samples
+                        if len(smp) > 10 { smp = smp[:10] }
+                        notify.Enqueue(notify.Event{
+                            Kind:     "WEB/CHALLENGE_EXCLUDED",
+                            Section:  s.section,
+                            SrcIP:    ipStr,
+                            Reason:   why,
+                            Count:    out.Count,
+                            When:     time.Now(),
+                            Severity: "info",
+                            Samples:  smp,
+                            Extra: map[string]string{
+                                "rule": rule,
+                                "host": host,
+                                "ua":   ua,
+                                "asn":  asn,
+                                "ptr":  ptr,
+                                "key":  a.Key,
+                            },
+                        })
+                    }
 
                     if s.inner != nil { s.inner.Publish(out) }
                     return
@@ -293,24 +297,23 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
             }()
 
             if suppressed {
-                // log first
-
-logging.LogfCHALLENGES(
-    "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
-    ipStr,
-    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-    out.Extra["host"],
-    out.Extra["uri"],
-    ttl.String(),
-    out.Extra["enforced"],
-    out.Extra["cooldown"],
-    out.Extra["cid"],
-    enrSuffix,
-)
-
+                if out.Extra["challenge_log"] != "0" {
+                    logging.LogfCHALLENGES(
+                        "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
+                        ipStr,
+                        firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                        out.Extra["host"],
+                        out.Extra["uri"],
+                        ttl.String(),
+                        out.Extra["enforced"],
+                        out.Extra["cooldown"],
+                        out.Extra["cid"],
+                        enrSuffix,
+                    )
+                }
                 if s.inner != nil { s.inner.Publish(out) }
                 return
-    	    }
+            }
         }
 
 
@@ -392,49 +395,52 @@ if enforced == "challenge" && s.chalCooldown > 0 {
         }
 
         // --- Challenges log file (separate) ---
-logging.LogfCHALLENGES(
-    "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s%s",
-    ipStr,
-    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-    out.Extra["host"],
-    out.Extra["uri"],
-    out.Extra["method"],
-    out.Extra["status"],
-    ttl.String(),
-    out.Extra["enforced"],
-    out.Extra["challenge_fails"],
-    out.Extra["escalated"],
-    out.Extra["cid"],
-    enrSuffix,
-)
+        if out.Extra["challenge_log"] != "0" {
+            logging.LogfCHALLENGES(
+                "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s%s",
+                ipStr,
+                firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                out.Extra["host"],
+                out.Extra["uri"],
+                out.Extra["method"],
+                out.Extra["status"],
+                ttl.String(),
+                out.Extra["enforced"],
+                out.Extra["challenge_fails"],
+                out.Extra["escalated"],
+                out.Extra["cid"],
+                enrSuffix,
+            )
+        }
 
         // --- Notify (same notify system) ---
-        smp := out.Samples
-        if len(smp) > 10 { smp = smp[:10] }
-
-        notify.Enqueue(notify.Event{
-            Kind:     "WEB/CHALLENGE",
-            Section:  s.section,
-            SrcIP:    ipStr,
-            Reason:   firstNonEmpty(out.Extra["rule"], out.Extra["reason"], "WEB/CHALLENGE"),
-            TTL:      ttl,
-            Count:    out.Count,
-            When:     time.Now(),
-            Severity: "info",
-            Samples:  smp,
-            Extra: map[string]string{
-                "rule":      out.Extra["rule"],
-                "host":      out.Extra["host"],
-                "uri":       out.Extra["uri"],
-                "method":    out.Extra["method"],
-                "status":    out.Extra["status"],
-                "enforced":  out.Extra["enforced"],
-                "fails":     out.Extra["challenge_fails"],
-                "escalated": out.Extra["escalated"],
-                "ttl_text":  out.Extra["ttl"],
-                "key":       a.Key,
-            },
-        })
+        if out.Extra["challenge_notify"] != "0" {
+            smp := out.Samples
+            if len(smp) > 10 { smp = smp[:10] }
+            notify.Enqueue(notify.Event{
+                Kind:     "WEB/CHALLENGE",
+                Section:  s.section,
+                SrcIP:    ipStr,
+                Reason:   firstNonEmpty(out.Extra["rule"], out.Extra["reason"], "WEB/CHALLENGE"),
+                TTL:      ttl,
+                Count:    out.Count,
+                When:     time.Now(),
+                Severity: "info",
+                Samples:  smp,
+                Extra: map[string]string{
+                    "rule":      out.Extra["rule"],
+                    "host":      out.Extra["host"],
+                    "uri":       out.Extra["uri"],
+                    "method":    out.Extra["method"],
+                    "status":    out.Extra["status"],
+                    "enforced":  out.Extra["enforced"],
+                    "fails":     out.Extra["challenge_fails"],
+                    "escalated": out.Extra["escalated"],
+                    "ttl_text":  out.Extra["ttl"],
+                    "key":       a.Key,
+                },
+            })
+        }
 
         // Publish final outcome once (like blocks) and exit.
         if s.inner != nil { s.inner.Publish(out) }

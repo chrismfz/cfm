@@ -34,6 +34,9 @@ type Config struct {
         ChallengeHTTPListen  string
         ChallengeHTTPSListen string
 
+    // Challenge emit controls
+    ChallengeLog    bool // controls [challenge] logging
+    ChallengeNotify bool // controls Alert emissions for challenge actions
 
 	// IP threshold detectors (CSF-like)
 	IP404Count int
@@ -127,7 +130,6 @@ if c.ChallengePathsTTL <= 0 {
     c.ChallengePathsTTL = 30 * time.Minute
 }
 
-
     // Defaults for auto suspicious vhost mode (only meaningful when enabled).
     if c.ChallengeSuspiciousVHost {
         if c.ChallengeSuspiciousScoreOn <= 0 {
@@ -167,4 +169,3 @@ if c.IP40xComboCount > 0 {
 func (c Config) LongHorizon() time.Duration {
 	return time.Duration(c.LongFactor) * c.Window
 }
-

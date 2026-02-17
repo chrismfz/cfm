@@ -226,6 +226,13 @@ cfg := webdet.Config{
         ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
         ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),
 
+        // Challenge emit controls:
+        // - CHALLENGE_LOG=0 disables [challenge] logs
+        // - CHALLENGE_NOTIFY=0 disables Alert emissions (notifications)
+        // (CHALLENGE_NOTIFICATION is accepted as an alias)
+        ChallengeLog:    kvBool(kv, "CHALLENGE_LOG", true),
+        ChallengeNotify: kvBool(kv, "CHALLENGE_NOTIFY", kvBool(kv, "CHALLENGE_NOTIFICATION", true)),
+
 	IP404Count: kvInt(kv, "IP404_COUNT", 0),
 	IP403Count: kvInt(kv, "IP403_COUNT", 0),
 
