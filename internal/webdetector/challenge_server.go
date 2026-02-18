@@ -43,6 +43,19 @@ type ChallengeServer struct {
 	// ctx-cancel shutdown goroutine. Used on hot-reload to avoid port bind races.
 	wg sync.WaitGroup
 
+	// Self-protection: in-process rate limiting (per source IP) to reduce CPU
+	// burn from spammers hitting / and especially /verify.
+	rlMu     sync.Mutex
+	rlByIP   map[string]*ipRateState
+	rlLastGC time.Time
+
+	// Optional: escalate self-protection bans into firewall blocks (local nft set with timeout).
+	// Disabled by default to avoid surprises; enable later via config/plumbing if desired.
+	rlFwEnabled bool
+	rlFwTTLPage time.Duration
+	rlFwTTLVerify time.Duration
+
+
 }
 
 // Optional interface: only nft backend implements this.
@@ -74,6 +87,21 @@ const (
 	maxHostLen          = 253
 	maxNextLen          = 2048
 	maxHeaderBytesTight = 16 << 10 // 16KB (challenge server only)
+
+	// ---- challenge server self-protection ----
+	// /verify is the expensive endpoint (token + PoW verify). Keep it tight.
+	rlVerifyWindow = 10 * time.Second
+	rlVerifyBurst  = 8
+	rlBanVerify    = 2 * time.Minute
+
+	// Challenge page (/) can be a bit looser.
+	rlPageWindow = 10 * time.Second
+	rlPageBurst  = 30
+	rlBanPage    = 30 * time.Second
+
+	rlGCInterval = 30 * time.Second
+	rlStateTTL   = 10 * time.Minute
+
 )
 
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
@@ -81,6 +109,16 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
 		ssl:     ssl,
 		fw:      fw,
 		cidUsed: make(map[string]time.Time),
+
+		rlByIP:   make(map[string]*ipRateState),
+		rlLastGC: time.Now().UTC(),
+
+		// firewall escalation defaults: OFF
+		rlFwEnabled:  false,
+		rlFwTTLPage:  2 * time.Minute,
+		rlFwTTLVerify: 10 * time.Minute,
+
+
 	}
 }
 
@@ -131,6 +169,19 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
+		// Self-protection: reject abusive IPs early (before reading body / verifying).
+		if ip := clientIP(r); ip != nil {
+			if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindVerify); !ok {
+				if bannedNow {
+					s.rlLogAbuse(r, ip.String(), rlKindVerify, retry)
+					s.rlFirewallBlock(ip, rlKindVerify)
+				}
+				s.rlReject(w, retry)
+				return
+			}
+		}
+
+
 		// Hard cap body even though we don't use it (abuse / slowloris-ish clients)
 		r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
 		// Drain/close (some clients send junk; prevent resource pinning)
@@ -156,6 +207,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			http.Error(w, "bad client ip", http.StatusBadRequest)
 			return
 		}
+
+
 
 		ipStr = ip.String()
 		next := r.URL.Query().Get("next")
@@ -305,6 +358,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			http.Error(w, "bad client ip", http.StatusBadRequest)
 			return
 		}
+
+
+                // Self-protection: rate limit challenge page requests per IP.
+                if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindPage); !ok {
+                        if bannedNow {
+				s.rlLogAbuse(r, ip.String(), rlKindPage, retry)
+                                s.rlFirewallBlock(ip, rlKindPage)
+                        }
+                        s.rlReject(w, retry)
+                        return
+                }
+
+
+
 
 		ipStr := ip.String()
 		// If already solved (cookie present + token valid), release and redirect.
@@ -561,6 +628,170 @@ func tlsVersionString(v uint16) string {
 	default:
 		return fmt.Sprintf("0x%04x", v)
 	}
+}
+
+
+// ---------------- self-protection (in-process rate limit) ----------------
+
+type ipRateState struct {
+	winStart time.Time
+	count    int
+	banUntil time.Time
+	lastSeen time.Time
+	fwBlockedUntil time.Time
+}
+
+const (
+	rlKindPage = iota
+	rlKindVerify
+)
+
+
+
+
+
+func (s *ChallengeServer) rlLogAbuse(r *http.Request, ip string, kind int, retry time.Duration) {
+	k := "page"
+	if kind == rlKindVerify {
+		k = "verify"
+	}
+
+	ua := r.UserAgent()
+	if len(ua) > 160 {
+		ua = ua[:160] + "…"
+	}
+
+	host := r.Host
+	if len(host) > 120 {
+		host = host[:120] + "…"
+	}
+
+	path := ""
+	if r.URL != nil {
+		path = r.URL.Path
+	}
+	if len(path) > 200 {
+		path = path[:200] + "…"
+	}
+
+	// Log to challenge log (cfm.challenges.log) to keep it isolated from detector spam.
+	logging.Logf(
+		"[challenge server] selfprotect ip=%s kind=%s action=challenge_mem_ban retry=%s host=%s path=%s ua=%q",
+		ip, k, retry, host, path, ua,
+	)
+}
+
+
+
+
+
+// rlAllow returns whether the request should proceed and, if not, how long the
+// client should wait before retrying.
+func (s *ChallengeServer) rlAllow(ip string, kind int) (allowed bool, retry time.Duration, bannedNow bool) {
+	now := time.Now().UTC()
+
+	s.rlMu.Lock()
+	defer s.rlMu.Unlock()
+
+	if s.rlByIP == nil {
+		s.rlByIP = make(map[string]*ipRateState)
+	}
+
+	// periodic GC
+	if s.rlLastGC.IsZero() {
+		s.rlLastGC = now
+	}
+	if now.Sub(s.rlLastGC) >= rlGCInterval {
+		for k, st := range s.rlByIP {
+			if now.Sub(st.lastSeen) > rlStateTTL {
+				delete(s.rlByIP, k)
+			}
+		}
+		s.rlLastGC = now
+	}
+
+	st := s.rlByIP[ip]
+	if st == nil {
+		st = &ipRateState{winStart: now, count: 0, lastSeen: now}
+		s.rlByIP[ip] = st
+	}
+	st.lastSeen = now
+
+	if now.Before(st.banUntil) {
+	return false, st.banUntil.Sub(now), false
+	}
+
+	var win time.Duration
+	var burst int
+	var ban time.Duration
+	if kind == rlKindVerify {
+		win, burst, ban = rlVerifyWindow, rlVerifyBurst, rlBanVerify
+	} else {
+		win, burst, ban = rlPageWindow, rlPageBurst, rlBanPage
+	}
+
+	// reset window
+	if now.Sub(st.winStart) >= win {
+		st.winStart = now
+		st.count = 0
+	}
+
+	st.count++
+	if st.count > burst {
+		st.banUntil = now.Add(ban)
+		return false, ban, true
+	}
+
+	return true, 0, false
+}
+
+func (s *ChallengeServer) rlReject(w http.ResponseWriter, retry time.Duration) {
+	secs := int(retry.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "close")
+	http.Error(w, "rate limited", http.StatusTooManyRequests)
+}
+
+
+// rlFirewallBlock optionally escalates a self-protection ban into a local firewall block.
+// This helps protect CPU by keeping future traffic from reaching userspace at all.
+func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
+	if !s.rlFwEnabled || s.fw == nil {
+		return
+	}
+
+	// Pick TTL and comment by endpoint kind
+	var ttl time.Duration
+	comment := "cfm:challenge_selfprotect:page"
+	if kind == rlKindVerify {
+		ttl = s.rlFwTTLVerify
+		comment = "cfm:challenge_selfprotect:verify"
+	} else {
+		ttl = s.rlFwTTLPage
+	}
+
+	// De-dupe: don't keep re-adding the same block every time we ban in memory.
+	now := time.Now().UTC()
+	ipStr := ip.String()
+
+	s.rlMu.Lock()
+	st := s.rlByIP[ipStr]
+	if st == nil {
+		st = &ipRateState{winStart: now, lastSeen: now}
+		s.rlByIP[ipStr] = st
+	}
+	if !st.fwBlockedUntil.IsZero() && now.Before(st.fwBlockedUntil) {
+		s.rlMu.Unlock()
+		return
+	}
+	st.fwBlockedUntil = now.Add(ttl)
+	s.rlMu.Unlock()
+
+	_ = s.fw.AddBlock(ip, comment, &ttl)
 }
 
 
@@ -902,4 +1133,6 @@ func challengeHTML() string {
 </body>
 </html>`
 }
+
+
 

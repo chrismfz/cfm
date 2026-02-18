@@ -8,6 +8,17 @@ import (
 type OutcomeLoggerSink struct{}
 
 func (OutcomeLoggerSink) Publish(a core.Alert) {
+
+	// WEB/CHALLENGE can be extremely noisy. We already log challenge activity
+	// to cfm.challenges.log, so keep cfm.detector.log focused on real outcomes.
+	//
+	// Suppress ONLY the "plain challenge" outcome (no escalation). If the
+	// challenge escalates to a block, we still log it here.
+	if a.Kind == "WEB/CHALLENGE" && a.Extra != nil && a.Extra["blocked"] == "challenge" && a.Extra["escalated"] == "" {
+		return
+	}
+
+
 	lim := ""
 	if a.Extra != nil {
 		lim = a.Extra["limit"]
