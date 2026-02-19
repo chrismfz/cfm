@@ -27,10 +27,20 @@ type Config struct {
 	SMTPBlock SMTPBlockConfig
 	MaxMind  MaxMindConfig
 	Debug     DebugConfig
+	SSLCollectorSock SSLCollectorSockConfig
 }
 
 // --- Categories ---
 
+
+// SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
+type SSLCollectorSockConfig struct {
+    Enabled  bool          // SSLCOLLECTOR_SOCK_ENABLE
+    SockPath string        // SSLCOLLECTOR_SOCK_PATH
+    Token    string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
+    PEMTTL   time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
+    PEMMax   int           // SSLCOLLECTOR_SOCK_PEM_MAX (default 50000)
+}
 
 // DebugConfig — controls the internal debug/metrics HTTP server
 type DebugConfig struct {
@@ -292,6 +302,18 @@ if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
 if c.Hardening.ICMPRate < 0 { c.Hardening.ICMPRate = 0 }
 if c.Hardening.ICMPBurst < 0 { c.Hardening.ICMPBurst = 0 }
 
+    // SSLCollector unix socket defaults
+    if c.SSLCollectorSock.SockPath == "" {
+        c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
+    }
+    if c.SSLCollectorSock.PEMTTL <= 0 {
+        c.SSLCollectorSock.PEMTTL = 10 * time.Minute
+    }
+    if c.SSLCollectorSock.PEMMax <= 0 {
+        c.SSLCollectorSock.PEMMax = 50000
+    }
+
+
 }
 
 
@@ -552,6 +574,20 @@ case "UDP_OUT":
 
 
 
+
+    // SSLCollector unix socket (OpenResty ssl_certificate_by_lua)
+    case "SSLCOLLECTOR_SOCK_ENABLE":
+        cfg.SSLCollectorSock.Enabled = parseBool(val)
+    case "SSLCOLLECTOR_SOCK_PATH":
+        cfg.SSLCollectorSock.SockPath = val
+    case "SSLCOLLECTOR_SOCK_TOKEN":
+        cfg.SSLCollectorSock.Token = val
+    case "SSLCOLLECTOR_SOCK_PEM_TTL":
+        if d := parseDuration(val); d > 0 {
+            cfg.SSLCollectorSock.PEMTTL = d
+        }
+    case "SSLCOLLECTOR_SOCK_PEM_MAX":
+        cfg.SSLCollectorSock.PEMMax = parseInt(val)
 
 
 

@@ -1287,6 +1287,77 @@ go func() {
 webdet.SetSSLCollector(sslcol)
 logging.Logf("[sslcollector] started")
 
+// --- sslcollector sock server lifecycle (driven by config reload) ---
+var sslSockCancel context.CancelFunc
+var sslSockCfgKey string
+
+onConfigLoaded := func(cfg *cfgpkg.Config) {
+    if cfg == nil {
+        return
+    }
+
+    // Normalize defaults (config.SetDefaults should do this too, but be defensive)
+    sp := cfg.SSLCollectorSock.SockPath
+    if sp == "" {
+        sp = "/var/run/sslcollector.sock"
+    }
+    ttl := cfg.SSLCollectorSock.PEMTTL
+    if ttl <= 0 {
+        ttl = 10 * time.Minute
+    }
+    max := cfg.SSLCollectorSock.PEMMax
+    if max <= 0 {
+        max = 50000
+    }
+
+    enabled := cfg.SSLCollectorSock.Enabled
+    token := cfg.SSLCollectorSock.Token
+
+    // Key used to detect changes that require restart
+    key := fmt.Sprintf("%t|%s|%s|%s|%d", enabled, sp, token, ttl.String(), max)
+
+    // Disable -> stop if running
+    if !enabled {
+        if sslSockCancel != nil {
+            sslSockCancel()
+            sslSockCancel = nil
+            sslSockCfgKey = ""
+            logging.Logf("[sslcollector] sock server stopped (disabled)")
+        }
+        return
+    }
+
+    // No change -> do nothing
+    if key == sslSockCfgKey && sslSockCancel != nil {
+        return
+    }
+
+    // Change -> restart
+    if sslSockCancel != nil {
+        sslSockCancel()
+        sslSockCancel = nil
+    }
+
+    c, cancel := context.WithCancel(ctx)
+    sslSockCancel = cancel
+    sslSockCfgKey = key
+
+    go func(sockPath string) {
+        err := sslcollector.ServeSock(c, sslcol, sslcollector.SockServerConfig{
+            Enabled:  true,
+            SockPath: sockPath,
+            Token:    token,
+            PEMTTL:   ttl,
+            PEMMax:   max,
+        })
+        if err != nil && c.Err() == nil {
+            logging.Logf("[sslcollector] sock server stopped: %v", err)
+        }
+    }(sp)
+
+    logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
+}
+
 
 ////// SSL COLLECTOR END////
 
@@ -1327,6 +1398,7 @@ ensureDir("/var/log/cfm", 0o700)
 			return
 		}
 		lastCfg = cfg
+		onConfigLoaded(cfg)
 
 
         // ---- Debug server (start once, with config values) ----
