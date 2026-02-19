@@ -12,7 +12,7 @@ import (
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 
-
+	"fmt"
 )
 
 
@@ -73,6 +73,38 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             w.chalSrv = srv
+
+            // Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
+            webdet.SetChallengeSolvedHook(func(ip, cid, host, uri string, diff int, ms int64) {
+                // Best-effort enrichment using the same enricher as the engine.
+                suffix := ""
+                if enr := w.eng.Enricher(); enr != nil {
+                    r := enr.Lookup(ip)
+                    parts := []string{}
+                    if r.ASN > 0 {
+                        if r.ASNName != "" {
+                            parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
+                        } else {
+                            parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
+                        }
+                    }
+                    if r.Country != "" {
+                        parts = append(parts, r.Country)
+                    }
+                    if len(parts) > 0 {
+                        suffix = " - (" + strings.Join(parts, ", ") + ")"
+                    }
+                }
+
+                logging.LogfCHALLENGES(
+                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s%s",
+                    ip, host, uri, ms, diff, cid, suffix,
+                )
+
+                challengeTrackSolved(cid)
+            })
+
+
 
             // Start in goroutine so RunOnce never blocks. Also detect if Start()
             // stalls with a small timeout (best-effort watchdog).

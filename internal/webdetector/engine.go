@@ -419,6 +419,9 @@ func (e *Engine) SetSource(src core.LineSource)       { e.src = src }
 func (e *Engine) SetState(st *core.State, key string) { e.state = st; e.stateKey = key }
 func (e *Engine) Every() time.Duration                { return e.cfg.Every }
 
+// Enricher returns the optional MaxMind/DNS enricher instance (may be nil).
+func (e *Engine) Enricher() *enrich.Enricher { return e.enr }
+
 // Name implements core.PeriodicDetector.
 func (e *Engine) Name() string {
     return "webdetector"

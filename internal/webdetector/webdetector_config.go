@@ -38,6 +38,14 @@ type Config struct {
     ChallengeLog    bool // controls [challenge] logging
     ChallengeNotify bool // controls Alert emissions for challenge actions
 
+    // Optional: log extremely noisy per-request suppressed entries (cooldown/excluded).
+    // Default: false.
+    ChallengeLogSuppressed bool
+
+    // Log one-line expiry when a challenged CID wasn't solved before TTL.
+    // Default: true.
+    ChallengeLogExpired bool
+
 	// IP threshold detectors (CSF-like)
 	IP404Count int
 	IP403Count int
@@ -129,6 +137,17 @@ if c.ChallengePathsCount <= 0 {
 if c.ChallengePathsTTL <= 0 {
     c.ChallengePathsTTL = 30 * time.Minute
 }
+
+// Challenge logging defaults
+// - Suppressed is noisy -> default off
+// - Expired is useful -> default on
+if !c.ChallengeLogSuppressed {
+    // keep default false
+}
+if !c.ChallengeLogExpired {
+    c.ChallengeLogExpired = true
+}
+
 
     // Defaults for auto suspicious vhost mode (only meaningful when enabled).
     if c.ChallengeSuspiciousVHost {

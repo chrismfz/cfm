@@ -58,6 +58,8 @@ type ChallengeServer struct {
 
 }
 
+
+
 // Optional interface: only nft backend implements this.
 type challengeRedirector interface {
 	EnsureChallengeRedirect(httpListen, httpsListen string) error
@@ -103,6 +105,19 @@ const (
 	rlStateTTL   = 10 * time.Minute
 
 )
+
+
+
+// ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
+// It is optional; if unset, ChallengeServer will log a minimal solved line.
+type ChallengeSolvedHook func(ip, cid, host, uri string, diff int, ms int64)
+
+var challengeSolvedHook ChallengeSolvedHook
+
+// SetChallengeSolvedHook installs a callback invoked after a successful solve.
+func SetChallengeSolvedHook(h ChallengeSolvedHook) { challengeSolvedHook = h }
+
+
 
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
 	return &ChallengeServer{
@@ -282,15 +297,19 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
-		logging.LogfCHALLENGES(
-			"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
-			ip.String(),
-			host,
-			next,
-			time.Since(verifyStart).Milliseconds(),
-			diff,
-			cid,
-		)
+		if challengeSolvedHook != nil {
+			challengeSolvedHook(ipStr, cid, host, next, diff, time.Since(verifyStart).Milliseconds())
+		} else {
+			logging.LogfCHALLENGES(
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
+				ip.String(),
+				host,
+				next,
+				time.Since(verifyStart).Milliseconds(),
+				diff,
+				cid,
+			)
+		}
 
 		// consume CID after a successful solve
 		_ = challengeid.Global.Solved(ipStr, cid)

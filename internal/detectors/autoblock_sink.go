@@ -40,7 +40,100 @@ type sectionSink struct {
 type challengeState struct {
     Count    int
     LastSeen time.Time
+
+    // Suppressed re-triggers within cooldown (for summary only)
+    Suppressed int
+    SuppFirstURI string
+    SuppLastURI  string
+
 }
+
+
+// --- Challenge expiry tracker (emits one "expired" line if not solved within TTL) ---
+type challengeTrackRec struct {
+    cid      string
+    ip       string
+    rule     string
+    host     string
+    uri      string
+    ttl      time.Duration
+    started  time.Time
+    expires  time.Time
+    suffix   string
+    logExpired bool
+    timer    *time.Timer
+}
+
+type challengeTracker struct {
+    mu   sync.Mutex
+    byCID map[string]*challengeTrackRec
+}
+
+var chalTracker = &challengeTracker{byCID: make(map[string]*challengeTrackRec)}
+
+// challengeTrackRegister schedules an expiry log for this cid (unless disabled).
+func challengeTrackRegister(ip, cid, rule, host, uri string, ttl time.Duration, suffix string, logExpired bool) {
+    if cid == "" || ip == "" || ttl <= 0 {
+        return
+    }
+    rec := &challengeTrackRec{
+        cid: cid, ip: ip, rule: rule, host: host, uri: uri,
+        ttl: ttl, started: time.Now(), expires: time.Now().Add(ttl),
+        suffix: suffix, logExpired: logExpired,
+    }
+
+    chalTracker.mu.Lock()
+    // Replace any existing record for the same CID.
+    if old := chalTracker.byCID[cid]; old != nil && old.timer != nil {
+        old.timer.Stop()
+    }
+    chalTracker.byCID[cid] = rec
+    chalTracker.mu.Unlock()
+
+    rec.timer = time.AfterFunc(ttl, func() {
+        chalTracker.mu.Lock()
+        cur := chalTracker.byCID[cid]
+        // If it was solved/removed, nothing to do.
+        if cur == nil || cur.ip != ip {
+            chalTracker.mu.Unlock()
+            return
+        }
+        delete(chalTracker.byCID, cid)
+        chalTracker.mu.Unlock()
+
+        if !cur.logExpired {
+            return
+        }
+
+        logging.LogfCHALLENGES(
+            "[challenge] ip=%s rule=%s host=%s uri=%s result=expired ttl=%s cid=%s%s",
+            cur.ip,
+            firstNonEmpty(cur.rule, "WEB/CHALLENGE"),
+            cur.host,
+            cur.uri,
+            cur.ttl.String(),
+            cur.cid,
+            cur.suffix,
+        )
+    })
+}
+
+// challengeTrackSolved cancels expiry and forgets the cid.
+func challengeTrackSolved(cid string) {
+    cid = strings.TrimSpace(cid)
+    if cid == "" {
+        return
+    }
+    chalTracker.mu.Lock()
+    if rec := chalTracker.byCID[cid]; rec != nil {
+        if rec.timer != nil {
+            rec.timer.Stop()
+        }
+        delete(chalTracker.byCID, cid)
+    }
+    chalTracker.mu.Unlock()
+}
+
 
 func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration, chalExclude *ChallengeExclude) core.Sink {
     return &sectionSink{
@@ -216,7 +309,7 @@ if core.IsSelfIP(ipStr) {
                     out.Extra["reason"]   = "excluded"
                     out.Extra["exclude"]  = why
 
-                    if out.Extra["challenge_log"] != "0" {
+                    if out.Extra["challenge_log"] != "0" && out.Extra["challenge_log_suppressed"] == "1" {
                         logging.LogfCHALLENGES(
                             "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s reason=%s exclude=%s%s",
                             ipStr,
@@ -291,13 +384,22 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
                     out.Extra["enforced"] = "challenge_suppressed"
                     out.Extra["ttl"]      = ttl.String()
                     out.Extra["cooldown"] = s.chalCooldown.String()
+
+                    // Track suppressed count for optional summary
+                    st.Suppressed++
+                    if st.SuppFirstURI == "" {
+                        st.SuppFirstURI = out.Extra["uri"]
+                    }
+                    st.SuppLastURI = out.Extra["uri"]
+                    s.chalState[ipStr] = st
+
                     return true
                 }
                 return false
             }()
 
             if suppressed {
-                if out.Extra["challenge_log"] != "0" {
+                if out.Extra["challenge_log"] != "0" && out.Extra["challenge_log_suppressed"] == "1" {
                     logging.LogfCHALLENGES(
                         "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
                         ipStr,
@@ -317,6 +419,32 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
         }
 
 
+// If we suppressed repeated triggers during cooldown, emit one summary now (optional).
+if s.chalCooldown > 0 {
+    s.chalMu.Lock()
+    st := s.chalState[ipStr]
+    // Only log summary if enabled explicitly; otherwise just reset counters silently.
+    if st.Suppressed > 0 {
+        if out.Extra["challenge_log"] != "0" && out.Extra["challenge_log_suppressed"] == "1" {
+            logging.LogfCHALLENGES(
+                "[challenge] ip=%s rule=%s host=%s suppressed_count=%d first_uri=%s last_uri=%s window=%s%s",
+                ipStr,
+                firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                out.Extra["host"],
+                st.Suppressed,
+                st.SuppFirstURI,
+                st.SuppLastURI,
+                s.chalCooldown.String(),
+                enrSuffix,
+            )
+        }
+        st.Suppressed = 0
+        st.SuppFirstURI = ""
+        st.SuppLastURI = ""
+        s.chalState[ipStr] = st
+    }
+    s.chalMu.Unlock()
+}
 
 // Enforce challenge (no block here)
 enforced := "challenge_failed"
@@ -342,6 +470,19 @@ if enforced == "challenge" && s.chalCooldown > 0 {
     s.chalState[ipStr] = st
 }
 
+
+// Schedule an expiry log for this challenge CID (if enabled).
+logExpired := (out.Extra["challenge_log_expired"] != "0")
+challengeTrackRegister(
+    ipStr,
+    out.Extra["cid"],
+    out.Extra["rule"],
+    out.Extra["host"],
+    out.Extra["uri"],
+    ttl,
+    enrSuffix,
+    logExpired,
+)
 
 
         // Mark outcome for outcome_sink + detector log

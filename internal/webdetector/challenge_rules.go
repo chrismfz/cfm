@@ -306,6 +306,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 "ttl":              ttl.String(),
                                                 "challenge_log":    boolFlag(e.cfg.ChallengeLog),
                                                 "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+                                                "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+                                                "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
                                         }
                                         if c.host != "" {
                                                 extra["host"] = c.host
@@ -485,6 +487,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 "ttl":              ttl.String(),
                 "challenge_log":    boolFlag(e.cfg.ChallengeLog),
                 "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+         "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+         "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
             }
             if ctx.Host != "" { extra["host"] = ctx.Host }
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
@@ -793,6 +797,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     "host":             host,
                     "challenge_log":    boolFlag(e.cfg.ChallengeLog),
                     "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+	            "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+                    "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
                 }
                 if !manual {
                     extra["score"]   = fmt.Sprintf("%.2f", row.Score)
