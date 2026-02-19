@@ -320,6 +320,7 @@ type Engine struct {
 	malRules []malRule
 
     chalRules []chalRule
+nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
 
 	mu    sync.RWMutex
 	hosts map[string]*hostState
@@ -381,6 +382,10 @@ func NewEngine(cfg Config) *Engine {
                 ipLastEmit: make(map[string]time.Time),
 	}
 
+// enable openresty mode//
+if cfg.OpenRestyMode {
+    e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL)
+}
     // Compile MALPATH rules. Supports "N:substring" override syntax.
     e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
 
@@ -422,6 +427,10 @@ func (e *Engine) Every() time.Duration                { return e.cfg.Every }
 // Enricher returns the optional MaxMind/DNS enricher instance (may be nil).
 func (e *Engine) Enricher() *enrich.Enricher { return e.enr }
 
+// NginxBridge returns the bridge instance (may be nil).
+func (e *Engine) NginxBridge() *NginxBridge { return e.nginxBridge }
+
+
 // Name implements core.PeriodicDetector.
 func (e *Engine) Name() string {
     return "webdetector"
@@ -445,6 +454,8 @@ func (e *Engine) Position() core.Position {
 // feeds the long-window ring. It does NOT currently emit Alerts (L7 autotune),
 // only maintains data for webtop/HTTP API.
 func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
+
+
 	if e.src == nil {
 		return nil
 	}

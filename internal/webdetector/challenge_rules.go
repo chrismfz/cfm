@@ -329,6 +329,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         case out <- a:
                                         default:
                                         }
+
+                                       if e.nginxBridge != nil {
+                                           e.nginxBridge.ChallengeIP(c.ip, ttl)
+							}
+
                                 }
                         }
                 }
@@ -502,6 +507,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 Extra:   extra,
             }
             select { case out <- alet: default: }
+
+           if e.nginxBridge != nil {
+               e.nginxBridge.ChallengeIP(ipStr, ttl)
+		}
+
         }
     }
 
@@ -621,6 +631,12 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                     },
                                 }
                                 select { case out <- a: default: }
+
+                           if e.nginxBridge != nil {
+                               e.nginxBridge.ClearVhost(host)
+                           }
+
+
                             }
                         }
 		}
@@ -711,6 +727,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     if row.Score <= off {
                         e.vhostUnderAttack[host] = false
                         e.vhostLastChange[host] = now
+
+                       if e.nginxBridge != nil {
+                           e.nginxBridge.ClearVhost(host)
+                       }
+
 
                         if e.cfg.ChallengeLog {
                             logging.LogfCHALLENGES(
@@ -815,7 +836,17 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Samples: samples,
                     Extra:   extra,
                 }
-                select { case out <- a: default: }
+
+               // In OpenResty mode the vhost is already challenged at the
+               // host level (Patch 3 above) — no need to enumerate per-IP.
+               // In DNAT mode we still need per-IP alerts for the nft sink.
+               if e.nginxBridge != nil {
+                   e.nginxBridge.ChallengeIP(ipStr, ttl)
+               } else {
+                   select { case out <- a: default: }
+               }
+
+
             }
         }
     }

@@ -65,6 +65,22 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
         }
 
+
+        // NginxBridge decision socket — same lifecycle as API server
+        if w.cfg.OpenRestyMode {
+            if b := w.eng.NginxBridge(); b != nil {
+                go b.RunExpireLoop(pctx)
+                w.srvWG.Add(1)
+                go func() {
+                    defer w.srvWG.Done()
+                    if err := b.ServeDecisions(pctx); err != nil {
+                        logging.Logf("[webdetector] nginx bridge exited: %v", err)
+                    }
+                }()
+            }
+        }
+
+
         // Challenge server + nft redirect rules (ctx-bound)
         if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
             // initial ensure (best-effort)
@@ -257,6 +273,12 @@ cfg := webdet.Config{
 
         ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
         ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),
+
+       // OpenResty in-path mode (replaces standalone challenge_server)
+       OpenRestyMode:  kvBool(kv,     "OPENRESTY_MODE",  false),
+       OpenRestySock:  kvStrClean(kv, "OPENRESTY_SOCK",  "/var/run/cfm_nginx.sock"),
+       OpenRestyToken: kvStrClean(kv, "OPENRESTY_TOKEN", ""),
+
 
         // Challenge emit controls:
         // - CHALLENGE_LOG=0 disables [challenge] logs

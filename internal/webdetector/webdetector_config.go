@@ -42,6 +42,11 @@ type Config struct {
     // Default: false.
     ChallengeLogSuppressed bool
 
+// OpenResty integration (optional)
+OpenRestyMode  bool          // OPENRESTY_MODE = 1
+OpenRestySock  string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
+OpenRestyToken string        // OPENRESTY_TOKEN = sometoken
+
     // Log one-line expiry when a challenged CID wasn't solved before TTL.
     // Default: true.
     ChallengeLogExpired bool

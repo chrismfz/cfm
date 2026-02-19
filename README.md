@@ -323,7 +323,8 @@ The Challenge Server can serve HTTPS and choose the correct certificate via **SS
 
 # SSLCollector (CFM) — Certificate Discovery + Unix Socket API for OpenResty
 
-CFM includes an **SSLCollector** subsystem that discovers and tracks TLS certificates and private keys that already exist on the server (e.g. cPanel/Let’s Encrypt and other common layouts). It keeps an in-memory index so other parts of CFM (and optionally OpenResty) can quickly resolve a hostname/SNI to the correct `cert+key` pair.
+CFM includes an **SSLCollector** subsystem that discovers and tracks TLS certificates and private keys that already exist on the server (e.g. cPanel/Let’s Encrypt and other common layouts). 
+It keeps an in-memory index so other parts of CFM (and optionally OpenResty) can quickly resolve a hostname/SNI to the correct `cert+key` pair.
 
 ## What SSLCollector does
 - Continuously discovers certificates/keys from supported sources and builds an index:
