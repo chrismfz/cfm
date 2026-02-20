@@ -1054,6 +1054,23 @@ func challengeHTML() string {
   var next = "%s";
   var difficulty = %d;
 
+  // WebCrypto (crypto.subtle) requires a secure context in modern browsers.
+  // If we were reached over plain HTTP, auto-upgrade to HTTPS to avoid
+  // infinite reload loops (PoW would fail on insecure context).
+  try {
+    if (!window.isSecureContext || !window.crypto || !window.crypto.subtle) {
+      var u = "https://" + window.location.host + window.location.pathname +
+              window.location.search + window.location.hash;
+      window.location.replace(u);
+      return;
+    }
+  } catch (e) {
+    var u2 = "https://" + window.location.host + window.location.pathname +
+             window.location.search + window.location.hash;
+    window.location.replace(u2);
+    return;
+  }
+
   function getCookie(name){
     var parts = ("; " + document.cookie).split("; " + name + "=");
     if (parts.length === 2) return decodeURIComponent(parts.pop().split(";").shift());
