@@ -46,6 +46,8 @@ type Config struct {
 OpenRestyMode  bool          // OPENRESTY_MODE = 1
 OpenRestySock  string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
 OpenRestyToken string        // OPENRESTY_TOKEN = sometoken
+OpenRestyOkIPTTL time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)
+
 
     // Log one-line expiry when a challenged CID wasn't solved before TTL.
     // Default: true.
@@ -131,6 +133,13 @@ func (c *Config) FillDefaults() {
 	}
 	if c.Glob == "" {
 		c.Glob = "*.log"
+	}
+
+	// OpenResty: keep IP ok-state short by default (avoid CGNAT/Tor "whitelisting").
+	// Set to 0 for cookie-only.
+	if c.OpenRestyOkIPTTL == 0 {
+		// default: 1 minute (only to prevent immediate redirect loops after solve)
+		c.OpenRestyOkIPTTL = 1 * time.Minute
 	}
 
 if c.ChallengePathsFile == "" {

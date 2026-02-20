@@ -1,0 +1,86 @@
+-- /opt/openresty/nginx/lua/sslcollector.lua
+local ssl  = require "ngx.ssl"
+local http = require "resty.http"
+local json = require "cjson.safe"
+
+local SOCK  = "/var/run/sslcollector.sock"
+local TOKEN = "supersecret"
+
+local M = {}
+
+function M.set_cert()
+    local sni = ssl.server_name()
+    if not sni or sni == "" then
+        ngx.log(ngx.WARN, "sslcollector: no SNI")
+        return
+    end
+    sni = string.lower(sni)
+    ngx.log(ngx.INFO, "sslcollector: looking up SNI=", sni)
+
+    -- connect to unix socket
+    local httpc = http.new()
+    httpc:set_timeout(200)
+
+    local ok, err = httpc:connect("unix:" .. SOCK)
+    if not ok then
+        ngx.log(ngx.ERR, "sslcollector: socket connect failed: ", err)
+        return
+    end
+
+    local res, err = httpc:request({
+        method  = "GET",
+        path    = "/cert?host=" .. sni,
+        headers = {
+            ["Host"]                 = "localhost",
+            ["X-SSLCollector-Token"] = TOKEN,
+        },
+    })
+    if not res then
+        ngx.log(ngx.ERR, "sslcollector: request failed: ", err)
+        httpc:close()
+        return
+    end
+
+    local body = res:read_body()
+    httpc:close()
+
+    ngx.log(ngx.INFO, "sslcollector: status=", res.status, " body_len=", #(body or ""))
+
+    if res.status ~= 200 then
+        ngx.log(ngx.WARN, "sslcollector: no cert for ", sni, " (http ", res.status, ")")
+        return
+    end
+
+    local data, jerr = json.decode(body)
+    if not data then
+        ngx.log(ngx.ERR, "sslcollector: json decode: ", jerr)
+        return
+    end
+
+    -- parse
+    local cert_der, cerr = ssl.parse_pem_cert(data.cert_pem)
+    if not cert_der then
+        ngx.log(ngx.ERR, "sslcollector: parse cert: ", cerr)
+        return
+    end
+    local key_der, kerr = ssl.parse_pem_priv_key(data.key_pem)
+    if not key_der then
+        ngx.log(ngx.ERR, "sslcollector: parse key: ", kerr)
+        return
+    end
+
+    ssl.clear_certs()
+
+    local ok1, e1 = ssl.set_cert(cert_der)
+    local ok2, e2 = ssl.set_priv_key(key_der)
+
+    if not ok1 or not ok2 then
+        ngx.log(ngx.ERR, "sslcollector: set cert/key: ", e1, " / ", e2)
+        return
+    end
+
+    ngx.log(ngx.INFO, "sslcollector: OK cert installed for ", sni)
+end
+
+return M
+

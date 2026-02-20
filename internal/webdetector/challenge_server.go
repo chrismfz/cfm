@@ -16,7 +16,6 @@ import (
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
 
-	"cfm/internal/challengeid"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,6 +25,11 @@ import (
 	"sync"
 )
 
+const (
+    verifyPath     = "/__cfm_verify" // new preferred endpoint
+    verifyPathOld  = "/verify"       // legacy (keep during rollout)
+)
+
 type ChallengeServer struct {
 	httpSrv  *http.Server
 	httpsSrv *http.Server
@@ -33,11 +37,9 @@ type ChallengeServer struct {
 	httpLn  net.Listener
 	httpsLn net.Listener
 
-	ssl *sslcollector.Collector
-	fw  firewall.Backend
-
-	cidMu   sync.Mutex
-	cidUsed map[string]time.Time // cid -> expiresAt (UTC)
+	ssl    *sslcollector.Collector
+	fw     firewall.Backend
+	bridge *NginxBridge // OpenResty mode: ClearIP after solve
 
 	// Tracks all goroutines started by Start(), including Serve() loops and the
 	// ctx-cancel shutdown goroutine. Used on hot-reload to avoid port bind races.
@@ -51,12 +53,15 @@ type ChallengeServer struct {
 
 	// Optional: escalate self-protection bans into firewall blocks (local nft set with timeout).
 	// Disabled by default to avoid surprises; enable later via config/plumbing if desired.
-	rlFwEnabled bool
-	rlFwTTLPage time.Duration
+	rlFwEnabled   bool
+	rlFwTTLPage   time.Duration
 	rlFwTTLVerify time.Duration
-
-
 }
+
+// SetNginxBridge wires the OpenResty bridge into the challenge server so that
+// a successful PoW solve calls bridge.ClearIP(), letting Lua pass the IP through
+// on the next request without querying the bridge again.
+func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
 
 
 
@@ -92,13 +97,13 @@ const (
 
 	// ---- challenge server self-protection ----
 	// /verify is the expensive endpoint (token + PoW verify). Keep it tight.
-	rlVerifyWindow = 10 * time.Second
-	rlVerifyBurst  = 8
-	rlBanVerify    = 2 * time.Minute
+	rlVerifyWindow = 15 * time.Second
+	rlVerifyBurst  = 16
+	rlBanVerify    = 1 * time.Minute
 
 	// Challenge page (/) can be a bit looser.
-	rlPageWindow = 10 * time.Second
-	rlPageBurst  = 30
+	rlPageWindow = 15 * time.Second
+	rlPageBurst  = 60
 	rlBanPage    = 30 * time.Second
 
 	rlGCInterval = 30 * time.Second
@@ -110,7 +115,7 @@ const (
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
 // It is optional; if unset, ChallengeServer will log a minimal solved line.
-type ChallengeSolvedHook func(ip, cid, host, uri string, diff int, ms int64)
+type ChallengeSolvedHook func(ip, host, uri string, diff int, ms int64)
 
 var challengeSolvedHook ChallengeSolvedHook
 
@@ -123,7 +128,6 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
 	return &ChallengeServer{
 		ssl:     ssl,
 		fw:      fw,
-		cidUsed: make(map[string]time.Time),
 
 		rlByIP:   make(map[string]*ipRateState),
 		rlLastGC: time.Now().UTC(),
@@ -137,13 +141,6 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
 	}
 }
 
-func clampCID(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) < 8 || len(s) > 64 { // sanity
-		return ""
-	}
-	return s
-}
 
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
 	mux := http.NewServeMux()
@@ -178,7 +175,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 	// basic endpoints
 	// --- VERIFY endpoint ---
 	// JS will POST here with ?next=... and cookie set.
-	mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+	verifyHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -280,42 +277,24 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
-		cid := clampCID(r.Header.Get("X-CFM-CID"))
-		if cid == "" {
-			http.Error(w, "bad cid", http.StatusForbidden)
-			return
-		}
 
-		// IMPORTANT: cid must match what was issued for this IP by the sink/challengeid store
-		if !challengeid.Global.Verify(ipStr, cid) {
-			http.Error(w, "cid mismatch", http.StatusForbidden)
-			return
-		}
-
-		if !s.cidMarkOnce(cid, cfg.TTL) {
-			http.Error(w, "reused cid", http.StatusForbidden)
-			return
-		}
-
-		if challengeSolvedHook != nil {
-			challengeSolvedHook(ipStr, cid, host, next, diff, time.Since(verifyStart).Milliseconds())
+        if challengeSolvedHook != nil {
+            challengeSolvedHook(ipStr, host, next, diff, time.Since(verifyStart).Milliseconds())
 		} else {
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d",
 				ip.String(),
 				host,
 				next,
 				time.Since(verifyStart).Milliseconds(),
 				diff,
-				cid,
+
 			)
 		}
 
-		// consume CID after a successful solve
-		_ = challengeid.Global.Solved(ipStr, cid)
 
 		// Release:
-		// 1) remove from challenge set (so no more redirect)
+		// 1) remove from nft challenge set (DNAT mode)
 		if s.fw != nil {
 			_ = s.fw.RemoveChallenge(ip)
 			// 2) add cooldown OK (prevents immediate re-challenge loop)
@@ -324,6 +303,42 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				_ = oker.AddChallengeOK(ip, &ttl)
 			}
 		}
+
+		// 3) OpenResty mode: clear IP from bridge so Lua passes it through.
+		//    This is the primary release path when fw == nil (no DNAT).
+		if s.bridge != nil {
+			s.bridge.ClearIP(ipStr)
+		}
+
+
+        // 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
+        // Secure should follow the *original* scheme (OpenResty terminates TLS),
+        // so trust X-Forwarded-Proto when present.
+        xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+        secure := (r.TLS != nil) || (xfProto == "https")
+
+        // Random token is enough: unguessable => cannot be forged.
+        // (Lua only checks presence; it doesn't validate, so don't use something guessable.)
+        okVal := randomCookieValue()
+        http.SetCookie(w, &http.Cookie{
+            Name:     "cfm_ok",
+            Value:    okVal,
+            Path:     "/",
+            MaxAge:   int((60 * time.Minute).Seconds()),
+            HttpOnly: true,
+            Secure:   secure,
+            SameSite: http.SameSiteLaxMode,
+        })
+
+        // Optional: expire the challenge cookie to reduce confusion/churn.
+        http.SetCookie(w, &http.Cookie{
+            Name:   "cfm_chal",
+            Value:  "",
+            Path:   "/",
+            MaxAge: -1,
+        })
+
+
 
 		// Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
 		time.Sleep(500 * time.Millisecond)
@@ -335,7 +350,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Safety: next is already forced to start with "/" above.
 		http.Redirect(w, r, next, http.StatusSeeOther) // 303
 
-	})
+		}
+
+	// New endpoint + legacy alias.
+	mux.HandleFunc(verifyPath, verifyHandler)
+	mux.HandleFunc(verifyPathOld, verifyHandler)
+
 
 	// --- CATCH-ALL: handle any path ---
 	// Important: register after /hello,/healthz,/verify.
@@ -367,7 +387,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 		// let existing endpoints win (ServeMux does this anyway)
-		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == "/verify" {
+		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == verifyPath || r.URL.Path == verifyPathOld {
 			http.NotFound(w, r)
 			return
 		}
@@ -392,7 +412,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 
 
-		ipStr := ip.String()
 		// If already solved (cookie present + token valid), release and redirect.
 		next := r.URL.Query().Get("next")
 		if next == "" {
@@ -439,12 +458,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		cfg := defaultPowConfig()
 		powTok := ""
-		cid := ""
 
-		// CID must already be issued by the sink for this IP
-		if cfg.Enabled {
-			cid = clampCID(challengeid.Global.Get(ipStr))
-		}
 
 		if cfg.Enabled {
 			nonce16 := make([]byte, 16)
@@ -458,22 +472,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		}
 
-		if cfg.Enabled && cid == "" {
-			http.Error(w, "missing cid", http.StatusForbidden)
-			return
-		}
 
 		if cfg.Enabled && powTok == "" {
 			http.Error(w, "pow unavailable", http.StatusInternalServerError)
 			return
 		}
 
-		// challengeHTML placeholders are: host, token, powTok, cid, next, difficulty
+		// challengeHTML placeholders are: host, token, powTok, next, difficulty
 		fmt.Fprintf(w, challengeHTML(),
 			htmlEscape(host),
 			htmlEscape(tok),
 			htmlEscape(powTok),
-			htmlEscape(cid),
 			htmlEscape(next),
 			cfg.Difficulty,
 		)
@@ -817,15 +826,6 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 
 // ---------------- helpers ----------------
 
-// --- CID one-time use store (anti-replay for solved challenges) ---
-
-func (s *ChallengeServer) cidCleanLocked(now time.Time) {
-	for cid, exp := range s.cidUsed {
-		if now.After(exp) {
-			delete(s.cidUsed, cid)
-		}
-	}
-}
 
 
 
@@ -848,38 +848,6 @@ func (s *ChallengeServer) Wait(ctx context.Context) error {
 
 
 
-// cidMarkOnce returns true on first use; false if reused within ttl.
-func (s *ChallengeServer) cidMarkOnce(cid string, ttl time.Duration) bool {
-	cid = strings.TrimSpace(cid)
-	if cid == "" {
-		return false
-	}
-
-	// cheap sanity: base64url-ish size
-	if len(cid) < 8 || len(cid) > 64 {
-		return false
-	}
-
-	now := time.Now().UTC()
-	if ttl <= 0 {
-		ttl = 2 * time.Minute
-	}
-
-	s.cidMu.Lock()
-	defer s.cidMu.Unlock()
-
-	if s.cidUsed == nil {
-		s.cidUsed = make(map[string]time.Time)
-	}
-	s.cidCleanLocked(now)
-
-	if exp, ok := s.cidUsed[cid]; ok && now.Before(exp) {
-		return false
-	}
-
-	s.cidUsed[cid] = now.Add(ttl)
-	return true
-}
 
 func cleanHost(h string) string {
 	if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
@@ -889,13 +857,45 @@ func cleanHost(h string) string {
 }
 
 func clientIP(r *http.Request) net.IP {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		// best-effort fallback
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(strings.TrimSpace(host))
-	return ip
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        host = r.RemoteAddr
+    }
+    peer := net.ParseIP(strings.TrimSpace(host))
+    if peer == nil {
+        return nil
+    }
+
+    // Trust proxy headers ONLY when the immediate peer is local/trusted
+    // (OpenResty connects from 127.0.0.1 or private addr). In DNAT mode
+    // peer is the real public client -> ignore spoofable headers.
+    if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
+        // 1) Cloudflare real IP (if present)
+        if h := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); h != "" {
+            if ip := net.ParseIP(h); ip != nil {
+                return ip
+            }
+        }
+        // 2) X-Real-IP
+        if h := strings.TrimSpace(r.Header.Get("X-Real-IP")); h != "" {
+            if ip := net.ParseIP(h); ip != nil {
+                return ip
+            }
+        }
+        // 3) X-Forwarded-For: take first
+        if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+            parts := strings.Split(xff, ",")
+            if len(parts) > 0 {
+                first := strings.TrimSpace(parts[0])
+                if ip := net.ParseIP(first); ip != nil {
+                    return ip
+                }
+            }
+        }
+    }
+
+    return peer
+
 }
 
 func basicHeaderSanity(w http.ResponseWriter, r *http.Request) bool {
@@ -1021,7 +1021,7 @@ func randomCookieValue() string {
 }
 
 func challengeHTML() string {
-	// placeholders: host, token, powTok, cid, next, powDifficulty
+	// placeholders: host, token, powTok, next, powDifficulty
 	return `<!doctype html>
 <html>
 <head>
@@ -1051,7 +1051,6 @@ func challengeHTML() string {
 (function(){
   var token = "%s";
   var powTok = "%s";
-  var cid = "%s";
   var next = "%s";
   var difficulty = %d;
 
@@ -1127,13 +1126,12 @@ func challengeHTML() string {
     try {
       var sol = await solvePow();
 
-      fetch("/verify?next="+encodeURIComponent(next), {
+       fetch("/__cfm_verify?next="+encodeURIComponent(next), {
         method: "POST",
         headers: {
           "X-CFM-Token": token,
           "X-CFM-Pow": powTok,
           "X-CFM-Sol": sol,
-          "X-CFM-CID": cid
         },
         credentials: "include"
       }).then(function(res){
@@ -1152,6 +1150,3 @@ func challengeHTML() string {
 </body>
 </html>`
 }
-
-
-

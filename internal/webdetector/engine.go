@@ -384,7 +384,7 @@ func NewEngine(cfg Config) *Engine {
 
 // enable openresty mode//
 if cfg.OpenRestyMode {
-    e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL)
+    e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
 }
     // Compile MALPATH rules. Supports "N:substring" override syntax.
     e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)

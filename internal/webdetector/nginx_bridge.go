@@ -32,7 +32,7 @@ import (
 	"os"
 	"sync"
 	"time"
-
+	"strings"
 	"cfm/internal/logging"
 )
 
@@ -56,6 +56,7 @@ type NginxBridge struct {
 	mu      sync.RWMutex
 	ipState map[string]bridgeIPEntry    // ip   → current decision
 	vhState map[string]bridgeVhostEntry // host → current decision
+	okState map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
 
 	stats BridgeStats
 }
@@ -65,6 +66,7 @@ type bridgeCfg struct {
 	SockPath   string
 	Token      string
 	DefaultTTL time.Duration
+	OkIPTTL    time.Duration // if 0 -> cookie-only (no IP ok-state)
 }
 
 type bridgeIPEntry struct {
@@ -124,9 +126,14 @@ type nginxVhostClearMsg struct {
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 // NewNginxBridge creates a bridge. If cfg.Enabled is false all methods are no-ops.
-func NewNginxBridge(sockPath, token string, defaultTTL time.Duration) *NginxBridge {
+func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *NginxBridge {
 	if defaultTTL <= 0 {
 		defaultTTL = 10 * time.Minute
+	}
+
+	// okIPTTL: default 1 minute if not specified (caller may pass 0 for cookie-only)
+	if okIPTTL < 0 {
+		okIPTTL = 0
 	}
 
 	b := &NginxBridge{
@@ -135,9 +142,11 @@ func NewNginxBridge(sockPath, token string, defaultTTL time.Duration) *NginxBrid
 			SockPath:   sockPath,
 			Token:      token,
 			DefaultTTL: defaultTTL,
+			OkIPTTL:    okIPTTL,
 		},
 		ipState: make(map[string]bridgeIPEntry),
 		vhState: make(map[string]bridgeVhostEntry),
+		okState: make(map[string]time.Time),
 	}
 
 	if b.cfg.Enabled {
@@ -192,7 +201,9 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 	b.post("/nginx/ip", nginxIPMsg{IP: ip, Action: "block", TTLSec: int(ttl.Seconds())})
 }
 
-// ClearIP removes any active decision for this IP (e.g. after PoW solved).
+// ClearIP removes any active challenge/block for this IP (e.g. after PoW solved).
+// Also adds the IP to the solved-ok set so it bypasses vhost-wide challenge
+// for the next 60 minutes — matching the solved cookie TTL.
 func (b *NginxBridge) ClearIP(ip string) {
 	if !b.cfg.Enabled {
 		return
@@ -200,6 +211,11 @@ func (b *NginxBridge) ClearIP(ip string) {
 
 	b.mu.Lock()
 	delete(b.ipState, ip)
+	if b.cfg.OkIPTTL > 0 {
+		b.okState[ip] = time.Now().Add(b.cfg.OkIPTTL)
+	} else {
+		delete(b.okState, ip)
+	}
 	b.mu.Unlock()
 
 	b.post("/nginx/ip/clear", nginxIPClearMsg{IP: ip})
@@ -298,6 +314,11 @@ func (b *NginxBridge) RunExpireLoop(ctx context.Context) {
 			for h, e := range b.vhState {
 				if e.Expires.Before(now) {
 					delete(b.vhState, h)
+				}
+			}
+			for ip, exp := range b.okState {
+				if exp.Before(now) {
+					delete(b.okState, ip)
 				}
 			}
 			b.mu.Unlock()
@@ -417,19 +438,47 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip   := r.URL.Query().Get("ip")
-	host := r.URL.Query().Get("host")
+    ip   := strings.TrimSpace(r.URL.Query().Get("ip"))
+    host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+    if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
+        host = hh
+    }
 	now  := time.Now()
 
 	ipAction   := "allow"
 	vhAction   := "allow"
 
-	b.mu.RLock()
-	if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
-		ipAction = e.Action
-	}
-	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
-		vhAction = h.Action
+    b.mu.RLock()
+    if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
+        ipAction = e.Action
+    }
+
+    // vhost exact match first, else wildcard
+    if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
+        vhAction = h.Action
+    } else if host != "" {
+
+       // wildcard match: keys like "*.example.com"
+        for pat, e := range b.vhState {
+            if !e.Expires.After(now) {
+                continue
+            }
+            if len(pat) > 2 && pat[:2] == "*." {
+                suf := pat[1:] // ".example.com"
+                if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
+                    vhAction = e.Action
+                    break
+                }
+            }
+        }
+    }
+
+
+	// Solved-ok: IP passed PoW recently — bypass vhost-wide challenge.
+	if b.cfg.OkIPTTL > 0 {
+		if exp, ok := b.okState[ip]; ok && exp.After(now) {
+			vhAction = "allow"
+		}
 	}
 	b.mu.RUnlock()
 
@@ -500,7 +549,11 @@ func (b *NginxBridge) handleVhostPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if msg.Host == "" {
+    msg.Host = strings.ToLower(strings.TrimSpace(msg.Host))
+    if hh, _, err := net.SplitHostPort(msg.Host); err == nil && hh != "" {
+        msg.Host = hh
+    }
+    if msg.Host == "" {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}

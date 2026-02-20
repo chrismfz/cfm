@@ -534,6 +534,26 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
     //   - Per-IP WEB/CHALLENGE (action=challenge) for affected IPs
     //   - WEB/VHOST_CHALLENGE_ON/OFF once per state change (auto only)
     if haveVhostManual || haveVhostAuto {
+
+        // OpenResty mode: push manual panic vhosts unconditionally
+        // so they work even before the host appears in short/long windows.
+        if e.nginxBridge != nil && haveVhostManual {
+            vttl := 60 * time.Minute
+            for _, pat := range e.cfg.ChallengeVHost {
+                if pat == "" {
+                    continue
+                }
+                // ignore list wins (only meaningful for exact hosts)
+                // If someone puts an exact host in IGNORE, don't push it.
+                if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(pat, e.cfg.ChallengeVHostIgnore) {
+                    e.nginxBridge.ClearVhost(pat)
+                    continue
+                }
+                e.nginxBridge.ChallengeVhost(pat, vttl)
+            }
+        }
+
+
         // 1) Build short-window host -> (ip -> count)
         type hostAgg struct {
             ips map[string]int
@@ -618,6 +638,13 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
                             }
+
+
+                            if e.nginxBridge != nil {
+                                e.nginxBridge.ClearVhost(host)
+                            }
+
+
                             if e.cfg.ChallengeNotify {
                                 a := core.Alert{
                                     When:  now,
@@ -771,6 +798,19 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 continue
             }
 
+            // OpenResty mode: push vhost-wide challenge to the bridge.
+            // No per-IP enumeration needed (saves CPU & avoids loops/rate-limit issues).
+            if e.nginxBridge != nil {
+                vttl := 60 * time.Minute
+                if !manual && e.cfg.ChallengeSuspiciousHolddown > 0 {
+                    // keep it at least holddown (+small cushion), refreshed each cycle
+                    vttl = e.cfg.ChallengeSuspiciousHolddown + (2 * time.Minute)
+                }
+                e.nginxBridge.ChallengeVhost(host, vttl)
+                continue
+            }
+
+
             // Challenge all IPs seen for this host in short window.
             ha := short[host]
             if ha == nil || len(ha.ips) == 0 {
@@ -837,14 +877,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Extra:   extra,
                 }
 
-               // In OpenResty mode the vhost is already challenged at the
-               // host level (Patch 3 above) — no need to enumerate per-IP.
-               // In DNAT mode we still need per-IP alerts for the nft sink.
-               if e.nginxBridge != nil {
-                   e.nginxBridge.ChallengeIP(ipStr, ttl)
-               } else {
-                   select { case out <- a: default: }
-               }
+               // DNAT mode: emit per-IP alert so nft sink can DNAT only those IPs.
+               select { case out <- a: default: }
 
 
             }

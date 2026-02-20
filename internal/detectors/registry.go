@@ -7,6 +7,7 @@ import (
 	"cfm/internal/firewall"
 	"time"
 	"strconv"
+        webdet "cfm/internal/webdetector"
 )
 
 type Options struct {
@@ -23,6 +24,12 @@ func SetFW(be firewall.Backend) { // unexported is fine, same package
 }
 
 
+// nginxBridge is used in OpenResty mode to enforce web challenges without nft DNAT sets.
+var nginxBridge *webdet.NginxBridge
+
+func SetNginxBridge(b *webdet.NginxBridge) {
+    nginxBridge = b
+}
 
 type Factory func(sectionName string, kv KV, global KV) (core.PeriodicDetector, error)
 

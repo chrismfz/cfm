@@ -41,6 +41,7 @@ func (w *webdetectorWrapped) Every() time.Duration { return w.eng.Every() }
 
 func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     w.startOnce.Do(func() {
+        SetNginxBridge(nil) // default (DNAT mode)
 
         // IMPORTANT:
         // ctx here is a per-run watchdog ctx (timeout) from runOnceSafeTimed.
@@ -68,7 +69,23 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
         // NginxBridge decision socket — same lifecycle as API server
         if w.cfg.OpenRestyMode {
+
+            // Disable nft dynamic DNAT challenge sets in OpenResty mode
+            if fwBackend != nil {
+                if t, ok := any(fwBackend).(interface{ SetChallengeDNATEnabled(bool) }); ok {
+                    t.SetChallengeDNATEnabled(false)
+                } else if t, ok := any(fwBackend).(interface{ CleanupChallengeDNAT() error }); ok {
+                    _ = t.CleanupChallengeDNAT()
+                }
+            }
+
+
             if b := w.eng.NginxBridge(); b != nil {
+
+                // expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
+                SetNginxBridge(b)
+
+
                 go b.RunExpireLoop(pctx)
                 w.srvWG.Add(1)
                 go func() {
@@ -90,8 +107,15 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             w.chalSrv = srv
 
+            // OpenResty mode: wire bridge so solve → ClearIP instead of nft remove.
+            if w.cfg.OpenRestyMode {
+                if b := w.eng.NginxBridge(); b != nil {
+                    srv.SetNginxBridge(b)
+                }
+            }
+
             // Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
-            webdet.SetChallengeSolvedHook(func(ip, cid, host, uri string, diff int, ms int64) {
+    webdet.SetChallengeSolvedHook(func(ip, host, uri string, diff int, ms int64) {
                 // Best-effort enrichment using the same enricher as the engine.
                 suffix := ""
                 if enr := w.eng.Enricher(); enr != nil {
@@ -113,11 +137,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
                 }
 
                 logging.LogfCHALLENGES(
-                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d cid=%s%s",
-                    ip, host, uri, ms, diff, cid, suffix,
+                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d ",
+                    ip, host, uri, ms, diff, suffix,
                 )
 
-                challengeTrackSolved(cid)
             })
 
 
@@ -161,6 +184,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
     if pctx.Err() != nil {
         w.stopOnce.Do(func() {
+            SetNginxBridge(nil) // avoid stale pointer after reload
             waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
             defer cancel()
 
@@ -205,6 +229,17 @@ func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
         return
     }
 
+    // OpenResty mode: do not manage challenge DNAT sets/rules
+    if w.cfg.OpenRestyMode {
+        if fwBackend != nil {
+            if t, ok := any(fwBackend).(interface{ SetChallengeDNATEnabled(bool) }); ok {
+                t.SetChallengeDNATEnabled(false)
+            } else if t, ok := any(fwBackend).(interface{ CleanupChallengeDNAT() error }); ok {
+                _ = t.CleanupChallengeDNAT()
+            }
+        }
+        return
+    }
 
 
     if fwBackend == nil {
@@ -279,6 +314,7 @@ cfg := webdet.Config{
        OpenRestySock:  kvStrClean(kv, "OPENRESTY_SOCK",  "/var/run/cfm_nginx.sock"),
        OpenRestyToken: kvStrClean(kv, "OPENRESTY_TOKEN", ""),
 
+       OpenRestyOkIPTTL: kvDur(kv, "OPENRESTY_OK_IP_TTL", 1*time.Minute),
 
         // Challenge emit controls:
         // - CHALLENGE_LOG=0 disables [challenge] logs
@@ -493,5 +529,3 @@ engine := webdet.NewEngine(cfg)
 
 	})
 }
-
-

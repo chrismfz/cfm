@@ -54,7 +54,6 @@ dbcthbohhr.php
 # --- WordPress-targeted probes (scoped to reduce false positives) ---
 /wp-content/upgrade/pdf.php
 /wp-content/mu-plugins/admin.php
-/wp-content/install.php
 /wp-content/item.php
 /wp-content/content.php
 

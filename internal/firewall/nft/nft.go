@@ -95,6 +95,10 @@ type Backend struct {
 	// into the same cfm.challenges.log stream.
 	challengeLogf func(format string, args ...any)
 
+    // When false (OpenResty mode), do NOT create challenge_v4/challenge_v6 sets.
+    // Also remove them if they already exist.
+    challengeDNATEnabled bool
+
 	pfSets   []string            // th_pf_<port>_<proto>_v4/v6
 	clSets   []string            // th_connlimit_<port>_<proto>_v4/v6
 	feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
@@ -140,7 +144,32 @@ func New() *Backend {
 		feedKeys: make(map[string]struct{}),
 		extAllow: make(map[string]extFeedData),
 		extBlock: make(map[string]extFeedData),
+	        challengeDNATEnabled: true,
 	}
+}
+
+func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
+    if b == nil { return }
+    b.challengeDNATEnabled = enabled
+    if !enabled {
+        _ = b.CleanupChallengeDNAT()
+    }
+}
+
+func (b *Backend) CleanupChallengeDNAT() error {
+    if b == nil { return nil }
+    if b.setExists(challengeV4) {
+        _ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV4))
+        _ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV4))
+    }
+    if b.setExists(challengeV6) {
+        _ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV6))
+        _ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV6))
+    }
+    if b.chainExists("challenge_guard") {
+        _ = b.nftCmd(fmt.Sprintf(`flush chain %s %s challenge_guard`, family, tableName))
+    }
+    return nil
 }
 
 // ReportBlock decides (based on config + source) whether to notify the API and then calls reporter.
@@ -430,12 +459,14 @@ func (b *Backend) EnsureBase() error {
 	_ = b.ensureSetWithFlags("throttled_v6", "ipv6_addr", "timeout")
 
 	// Challenge sets (source IPs that should be redirected to challenge ports)
-	if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil {
-		return err
-	}
-	if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil {
-		return err
-	}
+    // Challenge sets (dynamic DNAT mode only)
+    if b.challengeDNATEnabled {
+        if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil { return err }
+        if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil { return err }
+    } else {
+        _ = b.CleanupChallengeDNAT()
+    }
+
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	addRule := func(expr string) error {
@@ -1784,6 +1815,11 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		// nothing to do
 		return nil
 	}
+
+    if !b.challengeDNATEnabled {
+        _ = b.CleanupChallengeDNAT()
+        return nil
+    }
 
 	// Ensure base exists (chains/sets)
 	if err := b.EnsureBase(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,13 @@ type pemCacheItem struct {
 	certMT   time.Time
 	keyMT    time.Time
 	cachedAt time.Time
+}
+
+type dumpAllResponse struct {
+    Version     string    `json:"version"`
+    GeneratedAt time.Time `json:"generated_at"`
+    Exact       []any     `json:"exact"`
+    Wild        []any     `json:"wild"`
 }
 
 type sockServer struct {
@@ -140,6 +148,97 @@ func (s *sockServer) writeCertJSON(w http.ResponseWriter, host string, e *Entry,
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+
+func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
+    if !s.authOK(r) {
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+    if r.Method != http.MethodGet {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    st := s.col.Stats()
+
+    // Snapshot maps
+    s.col.mu.RLock()
+    exact := make(map[string]*Entry, len(s.col.exact))
+    for k, v := range s.col.exact {
+        exact[k] = v
+    }
+    wild := make(map[string]*Entry, len(s.col.wildSuffix))
+    for k, v := range s.col.wildSuffix {
+        wild[k] = v
+    }
+    s.col.mu.RUnlock()
+
+    // Stable order
+    exactKeys := make([]string, 0, len(exact))
+    for k := range exact { exactKeys = append(exactKeys, k) }
+    sort.Strings(exactKeys)
+
+    wildKeys := make([]string, 0, len(wild))
+    for k := range wild { wildKeys = append(wildKeys, k) }
+    sort.Strings(wildKeys)
+
+    // Read PEM once per unique entry (avoid duplicate disk reads)
+    type pemPair struct{ cert, key string }
+    pemByFP := map[string]pemPair{} // fingerprint -> pem
+
+    getPEM := func(e *Entry) (string, string, bool) {
+        if e == nil {
+            return "", "", false
+        }
+        if pp, ok := pemByFP[e.Fingerprint]; ok {
+            return pp.cert, pp.key, true
+        }
+        certPEM, err := os.ReadFile(e.CertPath)
+        if err != nil { return "", "", false }
+        keyPEM, err := os.ReadFile(e.KeyPath)
+        if err != nil { return "", "", false }
+        pemByFP[e.Fingerprint] = pemPair{cert: string(certPEM), key: string(keyPEM)}
+        return pemByFP[e.Fingerprint].cert, pemByFP[e.Fingerprint].key, true
+    }
+
+    out := dumpAllResponse{
+        Version:     st.Version,
+        GeneratedAt: st.GeneratedAt,
+        Exact:       make([]any, 0, len(exactKeys)),
+        Wild:        make([]any, 0, len(wildKeys)),
+    }
+
+    for _, host := range exactKeys {
+        e := exact[host]
+        certPEM, keyPEM, ok := getPEM(e)
+        if !ok { continue }
+        out.Exact = append(out.Exact, map[string]any{
+            "host":        host,
+            "fingerprint": e.Fingerprint,
+            "not_after":   e.NotAfter.Format(time.RFC3339),
+            "cert_pem":    certPEM,
+            "key_pem":     keyPEM,
+        })
+    }
+
+    for _, suf := range wildKeys {
+        e := wild[suf]
+        certPEM, keyPEM, ok := getPEM(e)
+        if !ok { continue }
+        out.Wild = append(out.Wild, map[string]any{
+            "suffix":      suf, // represents "*.suffix"
+            "fingerprint": e.Fingerprint,
+            "not_after":   e.NotAfter.Format(time.RFC3339),
+            "cert_pem":    certPEM,
+            "key_pem":     keyPEM,
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(out)
+}
+
+
 func (s *sockServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.authOK(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -195,6 +294,7 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cert", s.handleCert)
 	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/dumpall", s.handleDumpAll)
 	mux.HandleFunc("/refresh", s.handleRefresh)
 
 	srv := &http.Server{

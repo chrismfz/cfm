@@ -132,13 +132,13 @@ func (d *DirTailer) Position() (offset uint64, inode uint64, ts int64) {
 }
 
 func (d *DirTailer) ReadNext(ctx context.Context) (string, error) {
-	d.mu.Lock()
-	opened := d.opened
-	d.mu.Unlock()
 
-	if !opened {
+	d.mu.Lock()
+	if !d.opened {
+		d.mu.Unlock()
 		return "", io.EOF
 	}
+	d.mu.Unlock()
 
 	// periodic rescan to discover new files (cpanel domlogs etc)
 	// CRITICAL FIX: Open files OUTSIDE the lock to avoid blocking other ReadNext() calls
@@ -193,16 +193,15 @@ func (d *DirTailer) ReadNext(ctx context.Context) (string, error) {
 		d.mu.Lock()
 		for p, t := range newTailers {
 			d.tailers[p] = t
+		}
 
-
-
-			}
 		d.mu.Unlock()
 	} else {
 		d.mu.Unlock()
 	}
 
-	// snapshot tailers + rr pointer
+	// snapshot tailers + rr pointer (UNDER LOCK)
+	d.mu.Lock()
 	paths := make([]string, 0, len(d.tailers))
 	for p := range d.tailers {
 		paths = append(paths, p)

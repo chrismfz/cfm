@@ -16,7 +16,6 @@ import (
 
     "strings"
 
-    "cfm/internal/challengeid"
 )
 
 type sectionSink struct {
@@ -49,90 +48,6 @@ type challengeState struct {
 }
 
 
-// --- Challenge expiry tracker (emits one "expired" line if not solved within TTL) ---
-type challengeTrackRec struct {
-    cid      string
-    ip       string
-    rule     string
-    host     string
-    uri      string
-    ttl      time.Duration
-    started  time.Time
-    expires  time.Time
-    suffix   string
-    logExpired bool
-    timer    *time.Timer
-}
-
-type challengeTracker struct {
-    mu   sync.Mutex
-    byCID map[string]*challengeTrackRec
-}
-
-var chalTracker = &challengeTracker{byCID: make(map[string]*challengeTrackRec)}
-
-// challengeTrackRegister schedules an expiry log for this cid (unless disabled).
-func challengeTrackRegister(ip, cid, rule, host, uri string, ttl time.Duration, suffix string, logExpired bool) {
-    if cid == "" || ip == "" || ttl <= 0 {
-        return
-    }
-    rec := &challengeTrackRec{
-        cid: cid, ip: ip, rule: rule, host: host, uri: uri,
-        ttl: ttl, started: time.Now(), expires: time.Now().Add(ttl),
-        suffix: suffix, logExpired: logExpired,
-    }
-
-    chalTracker.mu.Lock()
-    // Replace any existing record for the same CID.
-    if old := chalTracker.byCID[cid]; old != nil && old.timer != nil {
-        old.timer.Stop()
-    }
-    chalTracker.byCID[cid] = rec
-    chalTracker.mu.Unlock()
-
-    rec.timer = time.AfterFunc(ttl, func() {
-        chalTracker.mu.Lock()
-        cur := chalTracker.byCID[cid]
-        // If it was solved/removed, nothing to do.
-        if cur == nil || cur.ip != ip {
-            chalTracker.mu.Unlock()
-            return
-        }
-        delete(chalTracker.byCID, cid)
-        chalTracker.mu.Unlock()
-
-        if !cur.logExpired {
-            return
-        }
-
-        logging.LogfCHALLENGES(
-            "[challenge] ip=%s rule=%s host=%s uri=%s result=expired ttl=%s cid=%s%s",
-            cur.ip,
-            firstNonEmpty(cur.rule, "WEB/CHALLENGE"),
-            cur.host,
-            cur.uri,
-            cur.ttl.String(),
-            cur.cid,
-            cur.suffix,
-        )
-    })
-}
-
-// challengeTrackSolved cancels expiry and forgets the cid.
-func challengeTrackSolved(cid string) {
-    cid = strings.TrimSpace(cid)
-    if cid == "" {
-        return
-    }
-    chalTracker.mu.Lock()
-    if rec := chalTracker.byCID[cid]; rec != nil {
-        if rec.timer != nil {
-            rec.timer.Stop()
-        }
-        delete(chalTracker.byCID, cid)
-    }
-    chalTracker.mu.Unlock()
-}
 
 
 func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration, chalExclude *ChallengeExclude) core.Sink {
@@ -205,7 +120,8 @@ func (s *sectionSink) Publish(a core.Alert) {
     }
 
     // No policy or no backend → just print with "No"
-    if s.pol.Mode == "no" || s.fw == nil {
+    // BUT: in OpenResty mode we may still enforce WEB/CHALLENGE via nginxBridge even if fw is nil.
+    if s.pol.Mode == "no" || (s.fw == nil && nginxBridge == nil) {
         smp := out.Samples
         if len(smp) > 10 { smp = smp[:10] }
         notify.Enqueue(notify.Event{
@@ -363,9 +279,6 @@ if core.IsSelfIP(ipStr) {
             }
         }
 
-// ✅ CID issue: stable per-IP for this challenge TTL
-cid := challengeid.Global.GetOrNew(ipStr, ttl)
-out.Extra["cid"] = cid
 enrSuffix := s.challengeEnrichSuffix(ipStr)
 
         // Global challenge cooldown per IP (prevents loops/spam)
@@ -401,7 +314,7 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
             if suppressed {
                 if out.Extra["challenge_log"] != "0" && out.Extra["challenge_log_suppressed"] == "1" {
                     logging.LogfCHALLENGES(
-                        "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s cid=%s%s",
+                        "[challenge] ip=%s rule=%s host=%s uri=%s ttl=%s enforced=%s cooldown=%s%s",
                         ipStr,
                         firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
                         out.Extra["host"],
@@ -409,7 +322,6 @@ enrSuffix := s.challengeEnrichSuffix(ipStr)
                         ttl.String(),
                         out.Extra["enforced"],
                         out.Extra["cooldown"],
-                        out.Extra["cid"],
                         enrSuffix,
                     )
                 }
@@ -451,11 +363,24 @@ enforced := "challenge_failed"
 if s.pol.Mode == "dryrun" {
     enforced = "challenge_dryrun"
 } else {
-    if err := s.fw.AddChallenge(ip, &ttl); err == nil {
+    // OpenResty mode: enforce via nginx bridge, not nft backend.
+    if nginxBridge != nil {
+        nginxBridge.ChallengeIP(ipStr, ttl)
         enforced = "challenge"
+        out.Extra["enforced_via"] = "nginx_bridge"
     } else {
-        out.Extra["challenge_err"] = err.Error()
+        if s.fw != nil {
+            if err := s.fw.AddChallenge(ip, &ttl); err == nil {
+                enforced = "challenge"
+            } else {
+                out.Extra["challenge_err"] = err.Error()
+            }
+        } else {
+            // Should not happen due to earlier guard, but keep safe behavior.
+            out.Extra["challenge_err"] = "no_firewall_backend"
+        }
     }
+
 }
 
 // stamp cooldown only if challenge enforcement succeeded
@@ -470,19 +395,6 @@ if enforced == "challenge" && s.chalCooldown > 0 {
     s.chalState[ipStr] = st
 }
 
-
-// Schedule an expiry log for this challenge CID (if enabled).
-logExpired := (out.Extra["challenge_log_expired"] != "0")
-challengeTrackRegister(
-    ipStr,
-    out.Extra["cid"],
-    out.Extra["rule"],
-    out.Extra["host"],
-    out.Extra["uri"],
-    ttl,
-    enrSuffix,
-    logExpired,
-)
 
 
         // Mark outcome for outcome_sink + detector log
@@ -538,7 +450,7 @@ challengeTrackRegister(
         // --- Challenges log file (separate) ---
         if out.Extra["challenge_log"] != "0" {
             logging.LogfCHALLENGES(
-                "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s cid=%s%s",
+                "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s%s",
                 ipStr,
                 firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
                 out.Extra["host"],
@@ -549,7 +461,6 @@ challengeTrackRegister(
                 out.Extra["enforced"],
                 out.Extra["challenge_fails"],
                 out.Extra["escalated"],
-                out.Extra["cid"],
                 enrSuffix,
             )
         }
