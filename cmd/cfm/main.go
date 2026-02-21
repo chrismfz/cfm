@@ -1444,6 +1444,7 @@ onConfigLoaded := func(cfg *cfgpkg.Config) {
 
 
 ensureDir("/var/lib/cfm", 0o701)
+ensureDir("/var/lib/cfm/sslcollector", 0o701)
 ensureDir("/var/log/cfm", 0o700)
 
 
