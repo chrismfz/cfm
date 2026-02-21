@@ -64,8 +64,19 @@ end
 local function esc(s) return ngx.escape_uri(s or "") end
 
 local function real_ip()
-  return ngx.var.realip_remote_addr or ngx.var.remote_addr or "-"
+  -- With realip enabled, remote_addr is already the real client.
+  -- realip_remote_addr is the *proxy peer* (Cloudflare edge).
+  local rip = ngx.var.remote_addr
+  if rip and rip ~= "" then return rip end
+
+  -- Fallback: if realip is disabled for some reason
+  local cf = ngx.var.http_cf_connecting_ip
+  if cf and cf ~= "" then return cf end
+
+  return "-"
 end
+
+
 
 -- Minimal HTTP GET over unix socket
 local function http_get_unix(path_qs)
