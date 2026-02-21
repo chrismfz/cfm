@@ -270,6 +270,10 @@ local function write_snapshot(body, parsed_data)
     return false, "rename: " .. (ren_err or "?")
   end
 
+-- best-effort tighten permissions (snapshot contains private keys)
+os.execute("chmod 0750 " .. SNAP_DIR .. " >/dev/null 2>&1")
+os.execute("chmod 0640 " .. SNAP_FILE .. " >/dev/null 2>&1")
+
   dict:set("meta:snapshot_written_at", ngx.time(), 0)
   return true
 end
