@@ -1,6 +1,6 @@
--- /opt/openresty/nginx/lua/cfm.lua
+-- /usr/local/openresty/nginx/lua/cfm.lua
 --
--- CFM OpenResty in-path enforcement (single-file version).
+-- CFM OpenResty in-path enforcement (route-by-variable version).
 --
 -- Flow:
 --   1) Determine client IP (realip_remote_addr if available, else remote_addr)
@@ -10,68 +10,60 @@
 --      Header: X-CFM-Token: <token>
 --   3) Enforce:
 --      - block     -> ngx.exit(403 by default)
---      - challenge -> ngx.var.cfm_upstream = "cfm_challenge"
---      - allow     -> ngx.var.cfm_upstream = "cfm_apache"
+--      - challenge -> ngx.var.cfm_pass = "http://cfm_challenge"
+--      - allow     -> ngx.var.cfm_pass = "http(s)://$server_addr:80|443" (dedicated-IP safe)
 --
--- Nginx requirements:
---   - In nginx.conf:
---       lua_shared_dict cfm_decisions 10m;
---       set $cfm_upstream "cfm_apache";
---       access_by_lua_file /opt/openresty/nginx/lua/cfm.lua;
---       location / { proxy_pass http://$cfm_upstream; ... }
---       location = /verify { bypass lua; proxy_pass http://cfm_challenge; ... }
+-- IMPORTANT:
+--   Nginx must define: set $cfm_pass "";
+--   and use:          proxy_pass $cfm_pass;
 --
 -- Notes:
---   - This file does NOT define upstreams; it only sets ngx.var.cfm_upstream.
---   - Token can come from env (preferred) or fallback hardcoded.
---   - If the bridge call fails, we "fail-open" to allow (availability first).
---   - Change FAIL_OPEN=false if you want failures to block instead.
+--   - If bridge fails, fail-open by default (availability first).
+--   - Optional debug headers available via env flags.
 
 local cjson = require "cjson.safe"
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- CONFIG (edit here)
+-- CONFIG
 -- ─────────────────────────────────────────────────────────────────────────────
 local CFG = {
-  -- Bridge socket (CFM serves HTTP on this unix socket)
   sock_path = "/var/run/cfm/cfm_nginx.sock",
 
-  -- Required auth token for bridge (header X-CFM-Token)
-  -- Prefer setting OPENRESTY_TOKEN via systemd. Fallback is okay for testing.
   token = "cfm",
   token_header = "X-CFM-Token",
 
-  -- Timeouts and cache
-  decision_timeout_ms =  80,
-  decision_cache_ttl_ms =  1500,
+  decision_timeout_ms   = 80,
+  decision_cache_ttl_ms = 1500,
 
-  -- Enforcement behavior
-  upstream_allow = "cfm_apache",
-  upstream_challenge = "cfm_challenge",
-  block_code =  403,
+  block_code = 403,
 
   -- Fail-open vs fail-closed when bridge is unreachable/forbidden/etc.
-  -- true  => if bridge errors, allow traffic (recommended initially)
-  -- false => if bridge errors, block traffic (strict)
   fail_open = true,
 
-  -- Debugging
-  debug = (os.getenv("CFM_DEBUG") == "1"),
+  -- Debugging (set env vars in systemd if needed)
+  debug         = (os.getenv("CFM_DEBUG") == "1"),
   debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
+
+  -- Log ALL allow decisions too (can be noisy on busy hosts)
+  log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 }
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local SH = ngx.shared.cfm_decisions
 
+local function log_route(level, msg)
+  ngx.log(level or ngx.WARN, "[cfm] ", msg)
+end
+
 local function dbg(msg)
-  if CFG.debug then ngx.log(ngx.WARN, "[cfm] ", msg) end
+  if CFG.debug then
+    log_route(ngx.WARN, msg)
+  end
 end
 
 local function esc(s) return ngx.escape_uri(s or "") end
 
 local function real_ip()
-  -- Works with realip module. If you trust Cloudflare/proxies properly,
-  -- realip_remote_addr becomes the real visitor IP.
   return ngx.var.realip_remote_addr or ngx.var.remote_addr or "-"
 end
 
@@ -157,7 +149,6 @@ end
 local function get_decision(ip, host, uri, method, scheme)
   local key = "d|" .. ip .. "|" .. host
 
-  -- Read cache
   if SH then
     local cached = SH:get(key)
     if cached then
@@ -186,7 +177,6 @@ local function get_decision(ip, host, uri, method, scheme)
     return fail_decision("decode_failed")
   end
 
-  -- Store cache
   if SH then
     SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
   end
@@ -198,17 +188,19 @@ end
 -- Main enforcement
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local ip = real_ip()
-local host = ngx.var.host or "-"
-local uri = ngx.var.request_uri or "-"
+local ip     = real_ip()
+local host   = ngx.var.host or "-"
+local uri    = ngx.var.request_uri or "-"
 local method = ngx.req.get_method() or "-"
-local scheme = ngx.var.scheme or "-"
+local scheme = ngx.var.scheme or "http"
 
 local d = get_decision(ip, host, uri, method, scheme)
-local ip_action = d.ip_action or "allow"
-local vhost_action = d.vhost_action or "allow"
 
--- Optional debug headers (very useful while tuning)
+local ip_action    = d.ip_action or "allow"
+local vhost_action = d.vhost_action or "allow"
+local cache_flag   = d._cache and " cache=1" or ""
+
+-- Optional debug headers
 if CFG.debug_headers then
   ngx.header["X-CFM-IP"] = ip
   ngx.header["X-CFM-Host"] = host
@@ -218,22 +210,46 @@ if CFG.debug_headers then
   if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
 
+-- Helper: build origin target from destination IP (dedicated-IP safe with port-only DNAT)
+local function origin_pass_for(scheme_)
+  local dst = ngx.var.server_addr or "127.0.0.1"
+  if scheme_ == "https" then
+    return "https://" .. dst .. ":443"
+  end
+  return "http://" .. dst .. ":80"
+end
+
 -- Block wins
 if ip_action == "block" or vhost_action == "block" then
   ngx.header["X-CFM-Action"] = "block"
-  dbg("block ip=" .. ip .. " host=" .. host .. " uri=" .. uri)
+  ngx.var.cfm_upstream = "cfm_block"
+  ngx.var.cfm_pass = "" -- not used
+  log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. " uri=" .. uri .. " scheme=" .. scheme .. cache_flag ..
+    (d.err and (" err=" .. tostring(d.err)) or ""))
   return ngx.exit(CFG.block_code)
 end
 
 -- Challenge if either says challenge
 if ip_action == "challenge" or vhost_action == "challenge" then
   ngx.header["X-CFM-Action"] = "challenge"
-  dbg("challenge ip=" .. ip .. " host=" .. host .. " uri=" .. uri)
+  ngx.var.cfm_upstream = "cfm_challenge"
+  ngx.var.cfm_pass = "http://cfm_challenge"
 
-  ngx.var.cfm_upstream = CFG.upstream_challenge
+  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. " uri=" .. uri .. " scheme=" .. scheme ..
+    " pass=" .. ngx.var.cfm_pass .. cache_flag ..
+    (d.err and (" err=" .. tostring(d.err)) or ""))
+
   return
 end
 
 -- Allow
-ngx.var.cfm_upstream = CFG.upstream_allow
+ngx.header["X-CFM-Action"] = "allow"
+ngx.var.cfm_upstream = "cfm_apache"
+ngx.var.cfm_pass = origin_pass_for(scheme)
+
+if CFG.log_allows or CFG.debug then
+  log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " uri=" .. uri .. " scheme=" .. scheme ..
+    " pass=" .. ngx.var.cfm_pass .. cache_flag)
+end
+
 return

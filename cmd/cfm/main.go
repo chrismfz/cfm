@@ -44,6 +44,7 @@ import (
 
         webdet "cfm/internal/webdetector"
 	"cfm/internal/sslcollector"
+	"cfm/internal/vhostmap"
 
 )
 
@@ -1291,6 +1292,11 @@ logging.Logf("[sslcollector] started")
 var sslSockCancel context.CancelFunc
 var sslSockCfgKey string
 
+// vhostmap
+var vhostMapCancel context.CancelFunc
+var vhostMapCfgKey string
+
+
 onConfigLoaded := func(cfg *cfgpkg.Config) {
     if cfg == nil {
         return
@@ -1356,11 +1362,71 @@ onConfigLoaded := func(cfg *cfgpkg.Config) {
     }(sp)
 
     logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
-}
 
 
 ////// SSL COLLECTOR END////
 
+
+// vhostmap //
+
+// --- vhostmap lifecycle (driven by config reload) ---
+{
+    vm := cfg.VHostMap
+
+    // defaults
+    if vm.TTL <= 0 {
+        vm.TTL = 10 * time.Minute
+    }
+    if vm.VarName == "" {
+        vm.VarName = "origin_http_ip"
+    }
+    if vm.ReloadCmd == "" {
+        vm.ReloadCmd = "systemctl reload openresty"
+    }
+
+    enabled := vm.Enable
+    key := fmt.Sprintf("%t|%s|%s|%s|%s|%s|%s",
+        enabled, vm.WritePath, vm.TTL.String(), vm.VarName, vm.Source, vm.DefaultIP, vm.ReloadCmd)
+
+    if !enabled {
+        if vhostMapCancel != nil {
+            vhostMapCancel()
+            vhostMapCancel = nil
+            vhostMapCfgKey = ""
+            logging.Logf("[vhostmap] stopped (disabled)")
+        }
+    } else {
+        if vm.WritePath == "" {
+            logging.Logf("[vhostmap] enabled but VHOST_MAP_WRITE is empty (skipping)")
+        } else if key != vhostMapCfgKey || vhostMapCancel == nil {
+            if vhostMapCancel != nil {
+                vhostMapCancel()
+                vhostMapCancel = nil
+            }
+            c, cancel := context.WithCancel(ctx)
+            vhostMapCancel = cancel
+            vhostMapCfgKey = key
+
+            go func(local cfgpkg.Config, vmCfg cfgpkg.VHostMapConfig) {
+                _ = vhostmap.Run(c, vhostmap.Config{
+                    Enable:    true,
+                    WritePath: vmCfg.WritePath,
+                    TTL:       vmCfg.TTL,
+                    VarName:   vmCfg.VarName,
+                    Source:    vmCfg.Source,
+                    DefaultIP: vmCfg.DefaultIP,
+                    ReloadCmd: vmCfg.ReloadCmd,
+                }, loggerAdapter{})
+            }(*cfg, vm)
+
+            logging.Logf("[vhostmap] started write=%s ttl=%s var=%s", vm.WritePath, vm.TTL, vm.VarName)
+        }
+    }
+}
+
+//vhostmap end//
+
+}
 
 	var smtpSnoopStarted bool
 
@@ -2093,3 +2159,7 @@ func httpGetJSON(url string, out any) error {
     defer resp.Body.Close()
     return json.NewDecoder(resp.Body).Decode(out)
 }
+
+type loggerAdapter struct{}
+func (loggerAdapter) Logf(f string, a ...any) { logging.Logf(f, a...) }
+

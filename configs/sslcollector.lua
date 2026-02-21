@@ -10,14 +10,15 @@ local json = require "cjson.safe"
 local dict = ngx.shared.sslcache
 
 -- Socket + token (token fallback for now; you can remove fallback once env is always set)
-local SOCK  = os.getenv("OPENRESTY_SOCK")  or "/var/run/sslcollector.sock"
-local TOKEN = os.getenv("OPENRESTY_TOKEN") or "supersecret"
+local SOCK  = "/var/run/sslcollector.sock"
+local TOKEN = "supersecret"
 
 -- Tunables
-local POLL_SECS = tonumber(os.getenv("SSL_POLL_SECS") or "20")    -- how often to poll /stats
-local DUMP_TTL  = tonumber(os.getenv("SSL_DUMP_TTL")  or "3600")  -- TTL for cached entries
-local LOCK_TTL  = tonumber(os.getenv("SSL_LOCK_TTL")  or "30")    -- dumpall lock ttl
-local HTTP_TIMEOUT_MS = tonumber(os.getenv("SSL_HTTP_TIMEOUT_MS") or "5000")
+local POLL_SECS = 60        -- poll /stats every 60s (version change detection)
+local DUMP_TTL  = 3600      -- 1h TTL for cached PEM entries
+local REFRESH_SECS = 600    -- refresh dumpall every 10m (keeps cache warm)
+local LOCK_TTL  = 30        -- dumpall lock ttl
+local HTTP_TIMEOUT_MS = 5000
 
 local M = {}
 
@@ -192,6 +193,15 @@ function M.start_background()
     do_dumpall()
     -- slight delay avoids immediate "version change from empty" double-run
     ngx.timer.at(1, poll_stats)
+
+    -- NEW: periodic refresh so cached entries never expire and force fallback cert
+    local ok2, e2 = ngx.timer.every(REFRESH_SECS, function(prem)
+      if prem then return end
+      do_dumpall()
+    end)
+    if not ok2 then
+      ngx.log(ngx.ERR, "[sslcollector] refresh timer error: ", e2)
+    end
   end)
   if not ok then
     ngx.log(ngx.ERR, "[sslcollector] start_background timer error: ", e)
@@ -226,6 +236,7 @@ function M.set_cert()
   end
 
   if not cert_pem or not key_pem then
+    ngx.log(ngx.WARN, "[sslcollector] cache miss sni=", sni, " -> fallback cert")
     return -- keep fallback cert
   end
 

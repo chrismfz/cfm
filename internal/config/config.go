@@ -28,9 +28,20 @@ type Config struct {
 	MaxMind  MaxMindConfig
 	Debug     DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
+	VHostMap VHostMapConfig
 }
 
 // --- Categories ---
+
+type VHostMapConfig struct {
+    Enable    bool          // VHOST_MAP_ENABLE
+    WritePath string        // VHOST_MAP_WRITE
+    TTL       time.Duration // VHOST_MAP_TTL (default 10m)
+    VarName   string        // VHOST_MAP_VAR (default origin_http_ip)
+    Source    string        // VHOST_MAP_SOURCE (optional)
+    DefaultIP string        // VHOST_MAP_DEFAULT_IP (optional override)
+    ReloadCmd string        // VHOST_MAP_RELOAD_CMD (default systemctl reload openresty)
+}
 
 
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
@@ -589,6 +600,21 @@ case "UDP_OUT":
     case "SSLCOLLECTOR_SOCK_PEM_MAX":
         cfg.SSLCollectorSock.PEMMax = parseInt(val)
 
+
+case "VHOST_MAP_ENABLE":
+    cfg.VHostMap.Enable = parseBool(val)
+case "VHOST_MAP_WRITE":
+    cfg.VHostMap.WritePath = val
+case "VHOST_MAP_TTL":
+    if d, err := time.ParseDuration(val); err == nil { cfg.VHostMap.TTL = d }
+case "VHOST_MAP_VAR":
+    cfg.VHostMap.VarName = val
+case "VHOST_MAP_SOURCE":
+    cfg.VHostMap.Source = val
+case "VHOST_MAP_DEFAULT_IP":
+    cfg.VHostMap.DefaultIP = val
+case "VHOST_MAP_RELOAD_CMD":
+    cfg.VHostMap.ReloadCmd = val
 
 
 // Hardening

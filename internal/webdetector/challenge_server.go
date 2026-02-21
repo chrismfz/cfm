@@ -41,6 +41,8 @@ type ChallengeServer struct {
 	fw     firewall.Backend
 	bridge *NginxBridge // OpenResty mode: ClearIP after solve
 
+	cookieLife time.Duration // solved cookie lifetime (cfm_ok) and OK TTL
+
 	// Tracks all goroutines started by Start(), including Serve() loops and the
 	// ctx-cancel shutdown goroutine. Used on hot-reload to avoid port bind races.
 	wg sync.WaitGroup
@@ -57,6 +59,18 @@ type ChallengeServer struct {
 	rlFwTTLPage   time.Duration
 	rlFwTTLVerify time.Duration
 }
+
+// SetCookieLife configures how long the solved cookie should live.
+// If <=0, a safe default is used.
+func (s *ChallengeServer) SetCookieLife(d time.Duration) { s.cookieLife = d }
+
+func (s *ChallengeServer) cookieTTL() time.Duration {
+    if s.cookieLife > 0 {
+        return s.cookieLife
+    }
+    return 60 * time.Minute
+}
+
 
 // SetNginxBridge wires the OpenResty bridge into the challenge server so that
 // a successful PoW solve calls bridge.ClearIP(), letting Lua pass the IP through
@@ -299,7 +313,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			_ = s.fw.RemoveChallenge(ip)
 			// 2) add cooldown OK (prevents immediate re-challenge loop)
 			if oker, ok := any(s.fw).(challengeOKer); ok {
-				ttl := 60 * time.Minute
+		                ttl := s.cookieTTL()
 				_ = oker.AddChallengeOK(ip, &ttl)
 			}
 		}
@@ -320,11 +334,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
         // Random token is enough: unguessable => cannot be forged.
         // (Lua only checks presence; it doesn't validate, so don't use something guessable.)
         okVal := randomCookieValue()
+        ttl := s.cookieTTL()
         http.SetCookie(w, &http.Cookie{
             Name:     "cfm_ok",
             Value:    okVal,
             Path:     "/",
-            MaxAge:   int((60 * time.Minute).Seconds()),
+            MaxAge:   int(ttl.Seconds()),
             HttpOnly: true,
             Secure:   secure,
             SameSite: http.SameSiteLaxMode,

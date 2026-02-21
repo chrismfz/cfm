@@ -1,4 +1,4 @@
-// internal/webdetector/config.go
+// internal/webdetector/webdetector_config.go
 package webdetector
 
 import "time"
@@ -48,6 +48,9 @@ OpenRestySock  string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
 OpenRestyToken string        // OPENRESTY_TOKEN = sometoken
 OpenRestyOkIPTTL time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)
 
+    // How long the solved cookie (cfm_ok) should live (challenge server).
+    // If 0, detector register will default it to CHALLENGE_COOLDOWN.
+    ChallengeCookieLife time.Duration // CHALLENGE_COOKIE_LIFE = 10m
 
     // Log one-line expiry when a challenged CID wasn't solved before TTL.
     // Default: true.

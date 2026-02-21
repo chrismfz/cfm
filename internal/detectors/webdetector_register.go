@@ -107,6 +107,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             w.chalSrv = srv
 
+            // Make cookie + OK TTL match configured cookie life
+            if w.cfg.ChallengeCookieLife > 0 {
+                srv.SetCookieLife(w.cfg.ChallengeCookieLife)
+            }
+
             // OpenResty mode: wire bridge so solve → ClearIP instead of nft remove.
             if w.cfg.OpenRestyMode {
                 if b := w.eng.NginxBridge(); b != nil {
@@ -268,6 +273,10 @@ func init() {
 		defEvery    := kvDur(global, "DEFAULT_EVERY",    5*time.Second)
 		defWindow   := kvDur(global, "DEFAULT_WINDOW",   120*time.Second)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
+        // Global cooldown used by challenge logic (can be overridden in [webdetector]).
+        defChalCooldown := kvDur(global, "CHALLENGE_COOLDOWN", 30*time.Minute)
+        chalCooldown    := kvDur(kv,     "CHALLENGE_COOLDOWN", defChalCooldown)
+
 
 		useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
 		usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR", true))
@@ -316,6 +325,9 @@ cfg := webdet.Config{
 
        OpenRestyOkIPTTL: kvDur(kv, "OPENRESTY_OK_IP_TTL", 1*time.Minute),
 
+       // How long the solved cookie should live. If unset/0 => inherit CHALLENGE_COOLDOWN.
+       ChallengeCookieLife: 0,
+
         // Challenge emit controls:
         // - CHALLENGE_LOG=0 disables [challenge] logs
         // - CHALLENGE_NOTIFY=0 disables Alert emissions (notifications)
@@ -358,6 +370,12 @@ cfg := webdet.Config{
 
 }
 
+// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN
+if _, ok := kv["CHALLENGE_COOKIE_LIFE"]; ok {
+    cfg.ChallengeCookieLife = kvDur(kv, "CHALLENGE_COOKIE_LIFE", chalCooldown)
+} else {
+    cfg.ChallengeCookieLife = chalCooldown
+}
 
 // CHALLENGE_VHOST (comma/space separated)
 rawVHosts := kvStrClean(kv, "CHALLENGE_VHOST", "")
