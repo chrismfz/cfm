@@ -5,8 +5,8 @@ NFT="${NFT:-nft}"
 TABLE_FAMILY="inet"
 TABLE_NAME="cfm_redirect"
 
-HTTP_TARGET="${HTTP_TARGET:-127.0.0.1:9080}"
-HTTPS_TARGET="${HTTPS_TARGET:-127.0.0.1:9043}"
+HTTP_PORT="${HTTP_PORT:-9080}"
+HTTPS_PORT="${HTTPS_PORT:-9043}"
 
 table_exists() {
   $NFT list table "$TABLE_FAMILY" "$TABLE_NAME" >/dev/null 2>&1
@@ -14,7 +14,7 @@ table_exists() {
 
 do_status() {
   if table_exists; then
-    echo "ON  (tcp/80->${HTTP_TARGET}, tcp+udp/443->${HTTPS_TARGET})"
+    echo "ON  (tcp/80->:${HTTP_PORT}, tcp+udp/443->:${HTTPS_PORT})"
   else
     echo "OFF"
   fi
@@ -34,9 +34,9 @@ table ${TABLE_FAMILY} ${TABLE_NAME} {
 
     iif "lo" accept
 
-    tcp dport 80  dnat ip to ${HTTP_TARGET}
-    tcp dport 443 dnat ip to ${HTTPS_TARGET}
-    udp dport 443 dnat ip to ${HTTPS_TARGET}
+    tcp dport 80  dnat to :${HTTP_PORT}
+    tcp dport 443 dnat to :${HTTPS_PORT}
+    udp dport 443 dnat to :${HTTPS_PORT}
   }
 }
 EOF
@@ -60,7 +60,7 @@ case "$cmd" in
   off)    do_off ;;
   *)
     echo "Usage: $0 [status|on|off]"
-    echo "Env: HTTP_TARGET=IP:PORT, HTTPS_TARGET=IP:PORT"
+    echo "Env: HTTP_PORT=9080 HTTPS_PORT=9043"
     exit 1
     ;;
 esac
