@@ -34,6 +34,17 @@ type Config struct {
         ChallengeHTTPListen  string
         ChallengeHTTPSListen string
 
+        // Separate access log for per-request challenge HTTP lines ([challenge_http] ...).
+        // If empty, [challenge_http] continues to go to the main challenges log.
+        ChallengeAccessLogPath string // CHALLENGE_ACCESS_LOG = /var/log/cfm/challenge.access.log
+
+        // Challenge server abuse blocking (based on challenge.access.log behavior)
+        ChallengeAbuseEnabled  bool          // CHALLENGE_ABUSE_ENABLED = 1
+        ChallengeAbuseWindow   time.Duration // CHALLENGE_ABUSE_WINDOW  = 10s
+        ChallengeAbuseBadN     int           // CHALLENGE_ABUSE_BAD_N   = 15
+        ChallengeAbuseBlockTTL time.Duration // CHALLENGE_ABUSE_BLOCK_TTL = 1h
+        ChallengeAbuseCooldown time.Duration // CHALLENGE_ABUSE_COOLDOWN  = 30m
+
     // Challenge emit controls
     ChallengeLog    bool // controls [challenge] logging
     ChallengeNotify bool // controls Alert emissions for challenge actions
@@ -137,6 +148,27 @@ func (c *Config) FillDefaults() {
 	if c.Glob == "" {
 		c.Glob = "*.log"
 	}
+
+        // Default: write per-request challenge access lines to a separate file.
+        // This keeps cfm.challenges.log focused on higher-level [challenge] events.
+        if c.ChallengeAccessLogPath == "" {
+                c.ChallengeAccessLogPath = "/var/log/cfm/challenge.access.log"
+        }
+
+        // Safe defaults (disabled unless enabled explicitly)
+        if c.ChallengeAbuseWindow <= 0 {
+                c.ChallengeAbuseWindow = 10 * time.Second
+        }
+        if c.ChallengeAbuseBadN <= 0 {
+                c.ChallengeAbuseBadN = 15
+        }
+        if c.ChallengeAbuseBlockTTL <= 0 {
+                c.ChallengeAbuseBlockTTL = 1 * time.Hour
+        }
+        if c.ChallengeAbuseCooldown <= 0 {
+                c.ChallengeAbuseCooldown = 30 * time.Minute
+        }
+
 
 	// OpenResty: keep IP ok-state short by default (avoid CGNAT/Tor "whitelisting").
 	// Set to 0 for cookie-only.

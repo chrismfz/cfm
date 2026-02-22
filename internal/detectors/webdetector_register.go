@@ -107,6 +107,22 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             w.chalSrv = srv
 
+            // Challenge abuse blocking knobs
+            if w.cfg.ChallengeAbuseEnabled {
+                srv.SetAbuseConfig(
+                    true,
+                    w.cfg.ChallengeAbuseWindow,
+                    w.cfg.ChallengeAbuseBadN,
+                    w.cfg.ChallengeAbuseBlockTTL,
+                    w.cfg.ChallengeAbuseCooldown,
+                )
+            }
+
+            // Separate access log for [challenge_http] lines
+            if w.cfg.ChallengeAccessLogPath != "" {
+                srv.SetAccessLogPath(w.cfg.ChallengeAccessLogPath)
+            }
+
             // Make cookie + OK TTL match configured cookie life
             if w.cfg.ChallengeCookieLife > 0 {
                 srv.SetCookieLife(w.cfg.ChallengeCookieLife)
@@ -317,6 +333,16 @@ cfg := webdet.Config{
 
         ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
         ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),
+
+        // Separate per-request access log for the challenge server ([challenge_http] lines).
+        ChallengeAccessLogPath: kvStrClean(kv, "CHALLENGE_ACCESS_LOG", "/var/log/cfm/challenge.access.log"),
+
+        // Challenge abuse blocking (only if enabled)
+        ChallengeAbuseEnabled:  kvBool(kv, "CHALLENGE_ABUSE_ENABLED", false),
+        ChallengeAbuseWindow:   kvDur(kv, "CHALLENGE_ABUSE_WINDOW", 10*time.Second),
+        ChallengeAbuseBadN:     kvInt(kv, "CHALLENGE_ABUSE_BAD_N", 15),
+        ChallengeAbuseBlockTTL: kvDur(kv, "CHALLENGE_ABUSE_BLOCK_TTL", 1*time.Hour),
+        ChallengeAbuseCooldown: kvDur(kv, "CHALLENGE_ABUSE_COOLDOWN", 30*time.Minute),
 
        // OpenResty in-path mode (replaces standalone challenge_server)
        OpenRestyMode:  kvBool(kv,     "OPENRESTY_MODE",  false),

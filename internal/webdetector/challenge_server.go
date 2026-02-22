@@ -58,14 +58,91 @@ type ChallengeServer struct {
 	rlFwEnabled   bool
 	rlFwTTLPage   time.Duration
 	rlFwTTLVerify time.Duration
+
+        // Separate access log for per-request challenge HTTP lines ([challenge_http] ...).
+        accessLogPath string
+        accessLog     *challengeAccessLogger
+
+
+        // Abuse blocking (many 4xx/5xx on non-verify paths inside challenge server)
+        abuseEnabled  bool
+        abuseWindow   time.Duration
+        abuseBadN     int
+        abuseBlockTTL time.Duration
+        abuseCooldown time.Duration
+
+        abuseMu   sync.Mutex
+        abuseByIP map[string]*abuseState
+
 }
 
+type abuseState struct {
+        winStart     time.Time
+        badCount     int
+        lastSeen     time.Time
+        cooldownTill time.Time
+}
 
 type statusWriter struct {
     http.ResponseWriter
     status int
     bytes  int
 }
+
+
+// challengeAccessLogger writes [challenge_http] lines to a separate file.
+// It opens lazily and falls back to logging.LogfCHALLENGES on failure.
+type challengeAccessLogger struct {
+        mu   sync.Mutex
+        f    *os.File
+        path string
+}
+
+func newChallengeAccessLogger(path string) *challengeAccessLogger {
+        p := strings.TrimSpace(path)
+        if p == "" {
+                return nil
+        }
+        return &challengeAccessLogger{path: p}
+}
+func (l *challengeAccessLogger) close() {
+        if l == nil {
+                return
+        }
+        l.mu.Lock()
+        defer l.mu.Unlock()
+        if l.f != nil {
+                _ = l.f.Close()
+                l.f = nil
+        }
+}
+
+func (l *challengeAccessLogger) logf(format string, args ...any) {
+        if l == nil || l.path == "" {
+                logging.LogfCHALLENGES(format, args...)
+                return
+        }
+
+        l.mu.Lock()
+        defer l.mu.Unlock()
+
+        if l.f == nil {
+                f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
+                if err != nil {
+                        logging.LogfCHALLENGES("[challenge_http] accesslog open failed: %s: %v", l.path, err)
+                        logging.LogfCHALLENGES(format, args...)
+                        return
+                }
+                l.f = f
+        }
+
+        ts := time.Now().Format("2006-01-02 15:04:05")
+        line := fmt.Sprintf("%s "+format+"\n", append([]any{ts}, args...)...)
+        _, _ = l.f.WriteString(line)
+}
+
+
+
 func (w *statusWriter) WriteHeader(code int) {
     w.status = code
     w.ResponseWriter.WriteHeader(code)
@@ -96,9 +173,19 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
             host := r.Host
             uri := path
             if r.URL.RawQuery != "" { uri += "?" + r.URL.RawQuery }
-            logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
-                ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
-            )
+            if s.accessLog != nil {
+                s.accessLog.logf("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
+                    ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+                )
+            } else {
+                logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
+                    ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+                )
+            }
+
+            // Abuse blocking (many 4xx/5xx on non-verify paths)
+            s.abuseObserve(ip, host, uri, sw.status)
+
         }
     })
 }
@@ -121,6 +208,30 @@ func (s *ChallengeServer) cookieTTL() time.Duration {
 // on the next request without querying the bridge again.
 func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
 
+
+// SetAccessLogPath sets a separate file where [challenge_http] access lines will be written.
+// If empty, access lines will continue to go to the main challenges log.
+func (s *ChallengeServer) SetAccessLogPath(path string) { s.accessLogPath = strings.TrimSpace(path) }
+
+// SetAbuseConfig enables simple abuse blocking:
+// if an IP causes >=badN requests with status>=400 (excluding verify endpoints)
+// within "window", we add a firewall block with TTL "blockTTL", and we won't
+// re-block the same IP until "cooldown" passes.
+func (s *ChallengeServer) SetAbuseConfig(enabled bool, window time.Duration, badN int, blockTTL, cooldown time.Duration) {
+        s.abuseEnabled = enabled
+        if window > 0 {
+                s.abuseWindow = window
+        }
+        if badN > 0 {
+                s.abuseBadN = badN
+        }
+        if blockTTL > 0 {
+                s.abuseBlockTTL = blockTTL
+        }
+        if cooldown > 0 {
+                s.abuseCooldown = cooldown
+        }
+}
 
 
 // Optional interface: only nft backend implements this.
@@ -201,6 +312,14 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
 
 
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
+        if s.accessLog == nil && strings.TrimSpace(s.accessLogPath) != "" {
+                s.accessLog = newChallengeAccessLogger(s.accessLogPath)
+        }
+
+        if s.abuseByIP == nil {
+                s.abuseByIP = make(map[string]*abuseState)
+        }
+
 	mux := http.NewServeMux()
 
 	// Ensure nft NAT redirect rules exist (only if challenge listeners are set)
@@ -701,6 +820,10 @@ func (s *ChallengeServer) Stop(ctx context.Context) error {
 		}
 	}
 
+        if s.accessLog != nil {
+                s.accessLog.close()
+        }
+
 	return firstErr
 }
 
@@ -876,7 +999,7 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 
 	// De-dupe: don't keep re-adding the same block every time we ban in memory.
 	now := time.Now().UTC()
-	ipStr := ip.String()
+	ipStr := strings.TrimSpace(ip.String())
 
 	s.rlMu.Lock()
 	st := s.rlByIP[ipStr]
@@ -926,6 +1049,100 @@ func cleanHost(h string) string {
 		return hh
 	}
 	return h
+}
+
+func isVerifyPath(uri string) bool {
+        // count as "verify" anything that starts with /__cfm_verify
+        // (query string already included in uri variable)
+        return strings.HasPrefix(uri, "/__cfm_verify")
+}
+
+// abuseObserve updates per-IP error counters and blocks via firewall if threshold exceeded.
+func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status int) {
+        if !s.abuseEnabled || s.fw == nil || strings.TrimSpace(ipStr) == "" {
+                return
+        }
+        if status < 400 {
+                return
+        }
+        // Don't count verify endpoint failures (avoid false positives on legit verify flows)
+        if isVerifyPath(uri) {
+                return
+        }
+
+        now := time.Now().UTC()
+        ipStr = strings.TrimSpace(ipStr)
+
+        s.abuseMu.Lock()
+        st := s.abuseByIP[ipStr]
+        if st == nil {
+                st = &abuseState{winStart: now, lastSeen: now}
+                s.abuseByIP[ipStr] = st
+        }
+        st.lastSeen = now
+
+        // cooldown de-dupe
+        if !st.cooldownTill.IsZero() && now.Before(st.cooldownTill) {
+                s.abuseMu.Unlock()
+                return
+        }
+
+        // reset window
+        win := s.abuseWindow
+        if win <= 0 {
+                win = 10 * time.Second
+        }
+        if now.Sub(st.winStart) >= win {
+                st.winStart = now
+                st.badCount = 0
+        }
+
+        st.badCount++
+        badN := s.abuseBadN
+        if badN <= 0 {
+                badN = 15
+        }
+
+        // cheap GC (keep map bounded)
+        if len(s.abuseByIP) > 50000 {
+                for k, v := range s.abuseByIP {
+                        if now.Sub(v.lastSeen) > 30*time.Minute {
+                                delete(s.abuseByIP, k)
+                        }
+                }
+        }
+
+        if st.badCount < badN {
+                s.abuseMu.Unlock()
+                return
+        }
+
+        // trigger block
+        ttl := s.abuseBlockTTL
+        if ttl <= 0 {
+                ttl = 1 * time.Hour
+        }
+        cd := s.abuseCooldown
+        if cd <= 0 {
+                cd = 30 * time.Minute
+        }
+        st.cooldownTill = now.Add(cd)
+        // reset counter after action (so we don't immediately re-trigger after cooldown ends)
+        st.winStart = now
+        st.badCount = 0
+        s.abuseMu.Unlock()
+
+        ip := net.ParseIP(ipStr)
+        if ip == nil {
+                return
+        }
+        comment := "cfm:challenge_abuse"
+        _ = s.fw.AddBlock(ip, comment, &ttl)
+
+        // log to challenges log (high signal)
+        logging.LogfCHALLENGES("[challenge_abuse] ip=%s host=%s bad>=%d window=%s status=%d uri=%s block_ttl=%s cooldown=%s",
+                ipStr, host, badN, win.String(), status, uri, ttl.String(), cd.String(),
+        )
 }
 
 
