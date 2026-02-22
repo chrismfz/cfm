@@ -1,8 +1,3 @@
-# CFM webdetector malicious path substrings (case-insensitive)
-# One entry per line. Matching is substring-based (strings.Contains).
-# Keep entries high-signal. Prefer scoped paths when filenames are generic.
-
-# --- Env / dotfiles ---
 /.env
 /.env.
 /.env.bak
@@ -12,59 +7,150 @@
 /.env.dev
 /.env.example
 /.env.save
-
 /.aws/credentials
+/.env.backup
+/.env.copy
+/.env.orig
+/.env.original
+/.env.staging
+/.env.testing
+/.env.uat
+/.env.swp
+/config.yml
+/config.yaml
+/secrets.yml
+/secrets.yaml
+/.git/config
+/.git/HEAD
+/.gitignore
+/.htpasswd
+/.htaccess.bak
+/web.config
+/web.config.bak
+/database.yml
+/database.yaml
+/storage.yml
+/credentials.json
+/service-account.json
+/gcp-credentials.json
+/firebase-adminsdk.json
 
-# --- Webshell families (classic) ---
-wso.php
-wso2.php
-wso29.php
-ws.php
-wsd.php
-wso1337.php
-r57.php
-c99.php
-b374k.php
-xleet.php
-minishell.php
-shell.php
-cmd.php
+# phpunit RCE
+/vendor/phpunit/phpunit/src/util/php/files.php
 
-# --- Uploaders / file managers ---
-uploader.php
-up.php
-filemanager.php
-wp_filemanager.php
+# ─── WORDPRESS-SPECIFIC PROBES ───────────────────────────────────────────────
+/wp-config.php.bak
+/wp-config.php.old
+/wp-config.php~
+/wp-config.php_bak
+/wp-config.php.save
+/wp-config.bak
+/wp-config.old
+/wp-content/uploads/shell.php
+/wp-content/uploads/cmd.php
+/wp-content/uploads/wso.php
+/wp-content/uploads/c99.php
+/wp-content/uploads/r57.php
+/wp-content/uploads/upload.php
+/wp-content/uploads/up.php
+/wp-content/uploads/bypass.php
+/wp-content/themes/twentytwentyone/index.php
+/wp-content/themes/twentytwenty/index.php
+/wp-content/themes/twentynineteen/index.php
+/wp-admin/css/colors/ectoplasm/about.php
+/wp-admin/css/colors/midnight/about.php
+/wp-admin/css/colors/ocean/about.php
+/wp-admin/css/colors/sunrise/about.php
+/wp-admin/maint/repair.php
+/wp-includes/js/jquery/jquery.php
+/wp-includes/Requests/about.php
+/wp-content/plugins/hellopress/wp_filemanager.php
+/wp-content/plugins/wp_filemanager/wp_filemanager.php
+/wp_filemanager.php
 
-# --- Common probe / dropper names seen in your logs ---
-simple.php
-bs1.php
-repeater.php
-l.php
-adminfusm.php
-dbcthbohhr.php
-
-# --- Hidden webshell stash dirs ---
+# hidden stash
 /.tmb/
 /.well-known/header.php
 
-# --- PHPUnit RCE probe ---
-/vendor/phpunit/phpunit/src/util/php/files.php
+# root-level webshell names (IMPORTANT: keep leading slash to avoid substring hits)
+# ─── NAMED WEBSHELLS (well-known families) ────────────────────────────────────
+/c99shell.php
+/r57shell.php
+/indoxploit.php
+/Indoxploit.php
+/IndoXploit.php
+/locus7shell.php
+/b374k.php
+/priv8.php
+/priv.php
+/vodoo.php
+/voodoo.php
+/PSYcho.php
+/psyco.php
+/psy.php
+/ghost.php
+/g0st.php
+/dark.php
+/darkshell.php
+/ice.php
+/iceshell.php
+/alfa.php
+/alfa2.php
+/alfa-rex.php
+/alfanew.php
+/Alfa.php
+/galex.php
+/NIX.php
+/nix.php
+/symlink.php
+/bypass.php
+/bypass403.php
+/403bypass.php
+/404bypass.php
+/shell404.php
+/cpanel.php
+/cpan.php
+/mailer.php
+/spammer.php
+/mass-mail.php
+/gate.php
+/panel.php
+/cp.php
+/wso.php
+/wso2.php
+/wso29.php
+/ws.php
+/wsd.php
+/r57.php
+/c99.php
+/xleet.php
+/minishell.php
+/shell.php
+/cmd.php
+/uploader.php
+/filemanager.php
 
-# --- WordPress-targeted probes (scoped to reduce false positives) ---
-/wp-content/upgrade/pdf.php
-/wp-content/mu-plugins/admin.php
-/wp-content/item.php
-/wp-content/content.php
+# ─── PHP INFO / RECON PROBES ──────────────────────────────────────────────────
+/phpinfo.php
+/php.php
+/info.php
+/test.php
+/test2.php
+/testing.php
+/eval.php
+/exec.php
+/passthru.php
+/system.php
+/exploit.php
+/hack.php
+/hacker.php
+/base64.php
+/encode.php
+/decode.php
+/crypt.php
 
-/wp-includes/as.php
-/wp-includes/network.php
-/wp-includes/autoload_classmap.php
-/wp-includes/sitemaps/chosen.php
-/wp-includes/simplepie/login.php
-/wp-includes/js/thickbox/about.php
+# common droppers (leading slash!)
+/simple.php
+/bs1.php
+/repeater.php
 
-
-# --- Joomla template probes  ---
-/templates/beez3/
-/templates/beez5/
