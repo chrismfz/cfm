@@ -60,6 +60,50 @@ type ChallengeServer struct {
 	rlFwTTLVerify time.Duration
 }
 
+
+type statusWriter struct {
+    http.ResponseWriter
+    status int
+    bytes  int
+}
+func (w *statusWriter) WriteHeader(code int) {
+    w.status = code
+    w.ResponseWriter.WriteHeader(code)
+}
+func (w *statusWriter) Write(p []byte) (int, error) {
+    if w.status == 0 { w.status = 200 }
+    n, err := w.ResponseWriter.Write(p)
+    w.bytes += n
+    return n, err
+}
+
+func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        sw := &statusWriter{ResponseWriter: w}
+        next.ServeHTTP(sw, r)
+
+        // log only verify + errors to keep noise low
+        path := r.URL.Path
+        if path == "" { path = "/" }
+        if sw.status >= 400 || path == "/__cfm_verify" || path == "/__cfm_verify_old" {
+            ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
+            if ip == "" { ip = strings.TrimSpace(r.Header.Get("X-Real-IP")) }
+            if ip == "" {
+                host, _, _ := net.SplitHostPort(r.RemoteAddr)
+                if host != "" { ip = host } else { ip = r.RemoteAddr }
+            }
+            host := r.Host
+            uri := path
+            if r.URL.RawQuery != "" { uri += "?" + r.URL.RawQuery }
+            logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
+                ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+            )
+        }
+    })
+}
+
+
 // SetCookieLife configures how long the solved cookie should live.
 // If <=0, a safe default is used.
 func (s *ChallengeServer) SetCookieLife(d time.Duration) { s.cookieLife = d }
@@ -513,7 +557,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		s.httpLn = ln
 		s.httpSrv = &http.Server{
 			Addr:              httpAddr,
-			Handler:           mux,
+			//Handler:           mux,
+			Handler:           s.wrapAccessLog(mux),
 			ReadHeaderTimeout: 2 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      20 * time.Second,
@@ -578,7 +623,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		s.httpsSrv = &http.Server{
 			Addr:              httpsAddr,
-			Handler:           mux,
+			//Handler:           mux,
+			Handler:           s.wrapAccessLog(mux),
 			ReadHeaderTimeout: 2 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      20 * time.Second,

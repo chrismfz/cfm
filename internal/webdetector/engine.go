@@ -763,19 +763,19 @@ case 5:
                 if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 {
                         if b.ips4xx == nil { b.ips4xx = make(map[string]int) }
                         b.ips4xx[rec.IP]++
-                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "4xx", TS: rec.TS}
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "4xx", TS: rec.TS}
                 }
                 if (e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 5 {
                         if b.ips5xx == nil { b.ips5xx = make(map[string]int) }
                         b.ips5xx[rec.IP]++
-                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "5xx", TS: rec.TS}
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "5xx", TS: rec.TS}
                 }
 
                 // method ratio
                 if e.cfg.ChallengeIPPostRatioMin > 0 && rec.Method == "post" {
                         if b.ipsPOST == nil { b.ipsPOST = make(map[string]int) }
                         b.ipsPOST[rec.IP]++
-                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "post", TS: rec.TS}
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "post", TS: rec.TS}
                 }
 
                 // empty UA
@@ -783,7 +783,7 @@ case 5:
                         if rec.UA == "" || rec.UA == "-" {
                                 if b.ipsNoUA == nil { b.ipsNoUA = make(map[string]int) }
                                 b.ipsNoUA[rec.IP]++
-                                e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "no_ua", TS: rec.TS}
+                                e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "no_ua", TS: rec.TS}
                         }
                 }
 
@@ -791,7 +791,7 @@ case 5:
                 if e.cfg.ChallengeIPHTTP10Min > 0 && rec.Proto == "http/1.0" {
                         if b.ipsHTTP10 == nil { b.ipsHTTP10 = make(map[string]int) }
                         b.ipsHTTP10[rec.IP]++
-                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Sub: "http/1.0", TS: rec.TS}
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "http/1.0", TS: rec.TS}
                 }
         }
 

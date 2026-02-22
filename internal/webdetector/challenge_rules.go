@@ -19,10 +19,12 @@ type chalRule struct {
 }
 
 type chalCtx struct {
-	Host string
-	URI  string
-	Sub  string // matched substring (rule)
-	TS   float64
+    Host   string
+    URI    string
+    Method string
+    Status int
+    Sub    string // matched substring (rule)
+    TS     float64
 }
 
 
@@ -133,10 +135,12 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
 
 		// store last context so we can include host/uri in alert extra
 		e.chalLast[rec.IP] = chalCtx{
-			Host: rec.Host,
-			URI:  path,
-			Sub:  r.sub,
-			TS:   rec.TS,
+            Host:   rec.Host,
+            URI:    path,
+            Method: rec.Method,
+            Status: rec.Status,
+            Sub:    r.sub,
+            TS:     rec.TS,
 		}
 
 		// count only first matching rule per request (avoid inflation)
@@ -315,6 +319,10 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         if c.uri != "" {
                                                 extra["uri"] = c.uri
                                         }
+
+                                        // NEW: sample method/status if known
+                                        if ctx := lastCtx[c.ip]; ctx.Method != "" { extra["method"] = ctx.Method }
+                                        if ctx := lastCtx[c.ip]; ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
                                         a := core.Alert{
                                                 When:    now,
@@ -497,6 +505,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             }
             if ctx.Host != "" { extra["host"] = ctx.Host }
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
+            if ctx.Method != "" { extra["method"] = ctx.Method }
+            if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
             alet := core.Alert{
                 When:    now,

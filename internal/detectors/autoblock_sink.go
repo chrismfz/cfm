@@ -7,6 +7,7 @@ import (
     "time"
     "fmt"
     "context"
+    "strconv"
 
     core "cfm/internal/detectors/core"
     "cfm/internal/firewall"
@@ -446,6 +447,35 @@ if enforced == "challenge" && s.chalCooldown > 0 {
                 }
             }
         }
+
+
+        // Fill missing method/status/uri/host for challenge logs from first sample line (TSV):
+        // ts ip host method uri proto status bytes rt urt ref ua
+        if (out.Extra["method"] == "" || out.Extra["status"] == "" || out.Extra["uri"] == "" || out.Extra["host"] == "") && len(out.Samples) > 0 {
+            f := strings.SplitN(out.Samples[0], "\t", 12)
+            if len(f) >= 12 {
+                // host
+                if out.Extra["host"] == "" && f[2] != "" && f[2] != "-" {
+                    out.Extra["host"] = f[2]
+                }
+                // method
+                if out.Extra["method"] == "" && f[3] != "" && f[3] != "-" {
+                    out.Extra["method"] = f[3]
+                }
+                // uri
+                if out.Extra["uri"] == "" && f[4] != "" && f[4] != "-" {
+                    out.Extra["uri"] = f[4]
+                }
+                // status
+                if out.Extra["status"] == "" && f[6] != "" && f[6] != "-" {
+                    // keep as string (existing log format)
+                    if _, err := strconv.Atoi(f[6]); err == nil {
+                        out.Extra["status"] = f[6]
+                    }
+                }
+            }
+        }
+
 
         // --- Challenges log file (separate) ---
         if out.Extra["challenge_log"] != "0" {
