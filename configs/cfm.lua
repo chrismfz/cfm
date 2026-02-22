@@ -157,8 +157,17 @@ local function fail_decision(errmsg)
   end
 end
 
+
+
+local function cache_key(ip, host, uri, method, scheme)
+  -- keep key small: hash URI
+  local u = uri or "-"
+  local uh = ngx.md5(u)
+  return "d|" .. ip .. "|" .. host .. "|" .. (method or "-") .. "|" .. (scheme or "-") .. "|" .. uh
+end
+
 local function get_decision(ip, host, uri, method, scheme)
-  local key = "d|" .. ip .. "|" .. host
+  local key = cache_key(ip, host, uri, method, scheme)
 
   if SH then
     local cached = SH:get(key)
@@ -188,12 +197,21 @@ local function get_decision(ip, host, uri, method, scheme)
     return fail_decision("decode_failed")
   end
 
+  -- IMPORTANT: cache only ALLOW decisions (avoid solve→re-challenge loops)
   if SH then
-    SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
+    local ip_action    = obj.ip_action or "allow"
+    local vhost_action = obj.vhost_action or "allow"
+    if ip_action == "allow" and vhost_action == "allow" then
+      SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
+    end
   end
 
   return obj
 end
+
+
+
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Main enforcement
@@ -201,9 +219,28 @@ end
 
 local ip     = real_ip()
 local host   = ngx.var.host or "-"
-local uri    = ngx.var.request_uri or "-"
+local uri = ngx.var.uri or "-"
 local method = ngx.req.get_method() or "-"
 local scheme = ngx.var.scheme or "http"
+
+-- Helper: build origin target from destination IP (dedicated-IP safe with port-only DNAT)
+local function origin_pass_for(scheme_)
+  local dst = ngx.var.server_addr or "127.0.0.1"
+  if scheme_ == "https" then
+    return "https://" .. dst .. ":443"
+  end
+  return "http://" .. dst .. ":80"
+end
+
+
+-- Fast-path: if solved cookie exists, allow immediately (avoids admin loops)
+local ok = ngx.var.cookie_cfm_ok
+if ok and ok ~= "" then
+  ngx.header["X-CFM-Action"] = "allow_cookie"
+  ngx.var.cfm_upstream = "cfm_apache"
+  ngx.var.cfm_pass = origin_pass_for(scheme)
+  return
+end
 
 local d = get_decision(ip, host, uri, method, scheme)
 
@@ -221,14 +258,6 @@ if CFG.debug_headers then
   if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
 
--- Helper: build origin target from destination IP (dedicated-IP safe with port-only DNAT)
-local function origin_pass_for(scheme_)
-  local dst = ngx.var.server_addr or "127.0.0.1"
-  if scheme_ == "https" then
-    return "https://" .. dst .. ":443"
-  end
-  return "http://" .. dst .. ":80"
-end
 
 -- Block wins
 if ip_action == "block" or vhost_action == "block" then

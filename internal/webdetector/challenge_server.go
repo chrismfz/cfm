@@ -86,7 +86,7 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
         // log only verify + errors to keep noise low
         path := r.URL.Path
         if path == "" { path = "/" }
-        if sw.status >= 400 || path == "/__cfm_verify" || path == "/__cfm_verify_old" {
+        if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
             ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
             if ip == "" { ip = strings.TrimSpace(r.Header.Get("X-Real-IP")) }
             if ip == "" {
@@ -432,6 +432,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		// Only GET/HEAD should ever get the challenge HTML.
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// UX fix:
+			// If a user is challenged while doing a POST (wp-admin save, login submit, etc),
+			// returning 405 is confusing. Bounce them to the challenge page using GET.
+			// We intentionally ONLY do this for POST (not OPTIONS) to avoid breaking
+			// preflights or non-browser clients.
+			if r.Method == http.MethodPost {
+				next := r.URL.RequestURI()
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
+				return
+			}
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
