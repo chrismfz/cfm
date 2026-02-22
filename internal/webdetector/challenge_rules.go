@@ -56,6 +56,17 @@ func hostMatchAny(host string, patterns []string) bool {
 
 
 
+func (e *Engine) hostBypassed(host string) bool {
+    if host == "" {
+        return false
+    }
+    if len(e.cfg.ChallengeHostBypass) == 0 {
+        return false
+    }
+    return hostMatchAny(host, e.cfg.ChallengeHostBypass)
+}
+
+
 func compileChalRules(list []string, defCount int) []chalRule {
 	if defCount <= 0 {
 		defCount = 1
@@ -264,6 +275,10 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         if ip == nil {
                                                 continue
                                         }
+
+
+
+
                                         // don't challenge ourselves / private / loopback
                                         if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
                                                 continue
@@ -292,6 +307,15 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         }
 
 
+
+        // Absolute host bypass wins over per-IP challenge.
+        if e.hostBypassed(c.host) {
+            if e.cfg.ChallengeLogSuppressed {
+                logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_PATHS reason=host_bypass", c.ip, c.host)
+            }
+            continue
+        }
+ 
 
                                         samples := e.ipSamples(c.ip, maxSamples)
 
@@ -486,6 +510,15 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
 
             ctx := lastCtx[ipStr]
+
+    // Absolute host bypass wins over per-IP challenge.
+    if e.hostBypassed(ctx.Host) {
+        if e.cfg.ChallengeLogSuppressed {
+            logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=host_bypass", ipStr, ctx.Host, rule)
+        }
+        continue
+    }
+
             samples := e.ipSamples(ipStr, maxSamples)
 
             ttl := e.cfg.ChallengePathsTTL
@@ -553,6 +586,13 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 if pat == "" {
                     continue
                 }
+
+        // Absolute bypass wins over everything.
+        if e.hostBypassed(pat) {
+            e.nginxBridge.ClearVhost(pat)
+            continue
+        }
+
                 // ignore list wins (only meaningful for exact hosts)
                 // If someone puts an exact host in IGNORE, don't push it.
                 if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(pat, e.cfg.ChallengeVHostIgnore) {
@@ -625,6 +665,47 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             if host == "" {
                 continue
             }
+
+
+    // Absolute bypass wins over all vhost-wide challenge actions.
+    if e.hostBypassed(host) {
+        if haveVhostAuto {
+            wasOn := false
+            func() {
+                e.vhostMu.Lock()
+                defer e.vhostMu.Unlock()
+                if e.vhostUnderAttack[host] {
+                    wasOn = true
+                    e.vhostUnderAttack[host] = false
+                    e.vhostLastChange[host] = now
+                }
+            }()
+            if wasOn {
+                if e.cfg.ChallengeLog {
+                    logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=host_bypass", host)
+                }
+                if e.nginxBridge != nil {
+                    e.nginxBridge.ClearVhost(host)
+                }
+                if e.cfg.ChallengeNotify {
+                    a := core.Alert{
+                        When:  now,
+                        Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                        Key:   host,
+                        Count: 0,
+                        Extra: map[string]string{"host": host, "action": "auto_off", "reason": "host_bypass"},
+                    }
+                    select { case out <- a: default: }
+                }
+            }
+        }
+        if e.nginxBridge != nil {
+            e.nginxBridge.ClearVhost(host)
+        }
+        continue
+    }
+
+
             // Ignore list wins for vhost-wide actions
             if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore) {
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).

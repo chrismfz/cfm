@@ -112,6 +112,11 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
     // Example: "api.mybank.gr"
     ChallengeVHostIgnore  []string // CHALLENGE_VHOST_IGNORE
 
+    // Absolute host bypass (wins over *all* challenge actions, including per-IP).
+    // Use sparingly (typically for API/healthcheck hosts that must never be challenged).
+    // Example: "api.mybank.gr, health.example.com, *.internal.example.com"
+    ChallengeHostBypass   []string // CHALLENGE_HOST_BYPASS
+
     // Auto under-attack mode using long-window suspicious scoring.
     ChallengeSuspiciousVHost      bool          // CHALLENGE_SUSPICIOUS_VHOST (1/0)
     ChallengeSuspiciousScoreOn    float64       // CHALLENGE_SUSPICIOUS_VHOST_SCORE_ON

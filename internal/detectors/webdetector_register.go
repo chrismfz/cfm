@@ -430,6 +430,19 @@ if rawIgnoreV != "" {
 }
 
 
+// CHALLENGE_HOST_BYPASS (comma/space separated)
+rawBypass := kvStrClean(kv, "CHALLENGE_HOST_BYPASS", "")
+if rawBypass != "" {
+    for _, h := range strings.FieldsFunc(rawBypass, func(r rune) bool {
+        return r == ',' || r == ':' || r == ' ' || r == '\t'
+    }) {
+        h = strings.ToLower(strings.TrimSpace(h))
+        if h != "" {
+            cfg.ChallengeHostBypass = append(cfg.ChallengeHostBypass, h)
+        }
+    }
+}
+
 
 rawAgents := kvStrClean(kv, "AGENT_LIST", "")
 if rawAgents != "" {
