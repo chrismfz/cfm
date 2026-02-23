@@ -13,6 +13,7 @@ It includes a **unified Web Detector** (nginx / Apache / LiteSpeed / cPanel doml
 - and an optional **Challenge System** (challenge instead of blunt ban) that can run in:
   - **DNAT mode** (nftables redirect → challenge server), or
   - **OpenResty in‑path mode** (no DNAT; OpenResty asks CFM for decisions via unix socket).
+- Our scoring system is already a model: a hand-crafted classifier based on signals we trust. - ML-Ready
 
 More information at: https://infected.gr/category/cfm/
 
