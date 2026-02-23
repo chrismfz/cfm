@@ -45,6 +45,7 @@ import (
         webdet "cfm/internal/webdetector"
 	"cfm/internal/sslcollector"
 	"cfm/internal/vhostmap"
+	"cfm/internal/dnat"
 
 )
 
@@ -378,6 +379,8 @@ func main() {
 case "ssl", "sslcollector", "ssl-collector":
     sslcollector.RunCLI(os.Args[2:])
 
+	case "dnat":
+		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))
 
 
         case "webtop" , "nginx-top" , "httpd-top":
@@ -423,6 +426,8 @@ Usage:
   cfm ssl scan  [--json]
   cfm ssl dump <host> [--json]
   cfm ssl refresh [--json]
+
+  cfm dnat
 
   cfm webtop  <vhost> -- Live stats for specific vhost
 
