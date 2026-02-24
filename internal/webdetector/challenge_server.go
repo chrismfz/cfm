@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
+	"strconv"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
@@ -683,9 +683,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// challengeHTML placeholders are: host, token, powTok, next, difficulty
 		fmt.Fprintf(w, challengeHTML(),
 			htmlEscape(host),
-			htmlEscape(tok),
-			htmlEscape(powTok),
-			htmlEscape(next),
+			strconv.Quote(tok),
+			strconv.Quote(powTok),
+			strconv.Quote(next),
 			cfg.Difficulty,
 		)
 
@@ -1425,9 +1425,9 @@ func challengeHTML() string {
 
 <script>
 (function(){
-  var token = "%s";
-  var powTok = "%s";
-  var next = "%s";
+  var token = %s;
+  var powTok = %s;
+  var next = %s;
   var difficulty = %d;
 
   // WebCrypto (crypto.subtle) requires a secure context in modern browsers.
