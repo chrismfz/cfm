@@ -129,6 +129,11 @@ type nginxVhostClearMsg struct {
 	Host string `json:"host"`
 }
 
+type nginxOKTouchMsg struct {
+    IP     string `json:"ip"`
+    TTLSec int    `json:"ttl_sec"`
+}
+
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 // NewNginxBridge creates a bridge. If cfg.Enabled is false all methods are no-ops.
@@ -469,6 +474,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/ip/clear",   b.handleIPClear)
 	mux.HandleFunc("/nginx/vhost",      b.handleVhostPush)
 	mux.HandleFunc("/nginx/vhost/clear", b.handleVhostClear)
+	mux.HandleFunc("/nginx/ok/touch",   b.handleOKTouch)
 	mux.HandleFunc("/nginx/status",     b.handleStatus)
 
 	srv := &http.Server{
@@ -650,6 +656,50 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 }
+
+
+// handleOKTouch: Lua tells us "this IP is active and has cfm_ok cookie, extend okState".
+// POST /nginx/ok/touch { "ip":"1.2.3.4", "ttl_sec":600 }
+func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
+    if !b.checkToken(r) {
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+
+    // If okState is disabled, no-op (still 200 so Lua doesn't spam logs)
+    if b.cfg.OkIPTTL <= 0 {
+        w.WriteHeader(http.StatusOK)
+        _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "disabled": true})
+        return
+    }
+
+    var msg nginxOKTouchMsg
+    if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+        http.Error(w, "bad json", http.StatusBadRequest)
+        return
+    }
+    ip := strings.TrimSpace(msg.IP)
+    if ip == "" {
+        http.Error(w, "bad fields", http.StatusBadRequest)
+        return
+    }
+
+    ttl := time.Duration(msg.TTLSec) * time.Second
+    if ttl <= 0 {
+        ttl = b.cfg.OkIPTTL
+    }
+
+    now := time.Now()
+    exp := now.Add(ttl)
+
+    b.mu.Lock()
+    b.okState[ip] = exp
+    b.mu.Unlock()
+
+    w.WriteHeader(http.StatusOK)
+    _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ttl_sec": int(ttl.Seconds())})
+}
+
 
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {

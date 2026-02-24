@@ -46,6 +46,12 @@ local CFG = {
 
   -- Log ALL allow decisions too (can be noisy on busy hosts)
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
+
+  -- Sliding OK TTL (cookie + bridge okState)
+  ok_ttl_sec = tonumber(os.getenv("CFM_OK_TTL_SEC") or "600"),
+  -- Rate limit for /nginx/ok/touch per IP
+  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
+
 }
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -62,6 +68,21 @@ local function dbg(msg)
 end
 
 local function esc(s) return ngx.escape_uri(s or "") end
+
+local function append_set_cookie(v)
+  local h = ngx.header["Set-Cookie"]
+  if not h then
+    ngx.header["Set-Cookie"] = v
+    return
+  end
+  if type(h) == "table" then
+    table.insert(h, v)
+    ngx.header["Set-Cookie"] = h
+    return
+  end
+  ngx.header["Set-Cookie"] = { h, v }
+end
+
 
 local function real_ip()
   -- With realip enabled, remote_addr is already the real client.
@@ -148,6 +169,93 @@ local function http_get_unix(path_qs)
 
   return body or "", nil
 end
+
+
+-- Minimal HTTP POST (JSON) over unix socket
+local function http_post_unix(path, json_body)
+  local s, err = ngx.socket.tcp()
+  if not s then return nil, "socket.tcp: " .. (err or "unknown") end
+
+  s:settimeouts(CFG.decision_timeout_ms, CFG.decision_timeout_ms, CFG.decision_timeout_ms)
+
+  local ok, cerr = s:connect("unix:" .. CFG.sock_path)
+  if not ok then
+    s:close()
+    return nil, "connect: " .. (cerr or "unknown")
+  end
+
+  local body = json_body or ""
+  local req =
+    "POST " .. path .. " HTTP/1.1\r\n" ..
+    "Host: localhost\r\n" ..
+    "Connection: close\r\n" ..
+    "Content-Type: application/json\r\n" ..
+    "Content-Length: " .. tostring(#body) .. "\r\n"
+
+  if CFG.token and CFG.token ~= "" then
+    req = req .. CFG.token_header .. ": " .. CFG.token .. "\r\n"
+  end
+
+  req = req .. "\r\n" .. body
+
+  local _, werr = s:send(req)
+  if werr then
+    s:close()
+    return nil, "send: " .. (werr or "unknown")
+  end
+
+  local status_line, rerr = s:receive("*l")
+  if not status_line then
+    s:close()
+    return nil, "recv status: " .. (rerr or "unknown")
+  end
+
+  local code = tonumber(status_line:match("%s(%d%d%d)%s"))
+  if not code then
+    s:close()
+    return nil, "bad status line: " .. status_line
+  end
+
+  -- eat headers
+  while true do
+    local line, herr = s:receive("*l")
+    if not line then
+      s:close()
+      return nil, "recv headers: " .. (herr or "unknown")
+    end
+    if line == "" then break end
+  end
+  local resp = s:receive("*a")
+  s:close()
+
+  if code ~= 200 then
+    return nil, "http " .. tostring(code) .. " body=" .. tostring(resp or "")
+  end
+  return resp or "", nil
+end
+
+local function touch_ok(ip)
+  if not SH then return end
+  local k = "ok_touch|" .. (ip or "-")
+  local now = ngx.now()
+  local last = SH:get(k)
+  if last and (now - last) < CFG.ok_touch_every_sec then
+    return
+  end
+  SH:set(k, now, CFG.ok_touch_every_sec)
+  local payload = cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec })
+  http_post_unix("/nginx/ok/touch", payload)
+end
+
+local function refresh_ok_cookie(cookie_val)
+  if not cookie_val or cookie_val == "" then return end
+  local attrs = "Path=/; Max-Age=" .. tostring(CFG.ok_ttl_sec) .. "; HttpOnly; SameSite=Lax"
+  if ngx.var.scheme == "https" then
+    attrs = attrs .. "; Secure"
+  end
+  append_set_cookie("cfm_ok=" .. cookie_val .. "; " .. attrs)
+end
+
 
 local function fail_decision(errmsg)
   if CFG.fail_open then
@@ -236,6 +344,10 @@ end
 -- Fast-path: if solved cookie exists, allow immediately (avoids admin loops)
 local ok = ngx.var.cookie_cfm_ok
 if ok and ok ~= "" then
+  -- Sliding TTL: keep user OK as long as they are active
+  refresh_ok_cookie(ok)
+  touch_ok(ip)
+
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"
   ngx.var.cfm_pass = origin_pass_for(scheme)
