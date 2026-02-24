@@ -61,6 +61,12 @@ type NginxBridge struct {
 	stats BridgeStats
 }
 
+
+// refreshSkew is the minimum remaining time before we bother to re-push
+// an already-active decision (to avoid log spam / needless socket traffic).
+// We only refresh when an entry is close to expiring.
+const refreshSkew = 30 * time.Second
+
 type bridgeCfg struct {
 	Enabled    bool
 	SockPath   string
@@ -232,12 +238,48 @@ func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
 		ttl = b.cfg.DefaultTTL
 	}
 
-	b.mu.Lock()
-	b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
-	b.mu.Unlock()
+//b.mu.Lock()
+//b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
+//b.mu.Unlock()
+//b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
+//logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
 
-	b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
-	logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+
+    host = normalizeHost(host)
+    if host == "" { return }
+
+    now := time.Now()
+    exp := now.Add(ttl)
+
+    needPush := false
+    logEnter := false
+
+    b.mu.Lock()
+    cur, ok := b.vhState[host]
+    // Only push/log on state transition, or when we're close to expiry.
+    if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
+        b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+        needPush = true
+        logEnter = true
+    } else {
+        // Keep it sticky without spamming: extend locally, push only near expiry.
+        if exp.After(cur.Expires) {
+            b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+        }
+        if cur.Expires.Sub(now) < refreshSkew {
+            needPush = true
+        }
+    }
+    b.mu.Unlock()
+
+    if needPush {
+        b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
+    }
+    if logEnter {
+        logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+    }
+
+
 }
 
 // ClearVhost removes vhost-wide challenge mode.
@@ -247,12 +289,33 @@ func (b *NginxBridge) ClearVhost(host string) {
 		return
 	}
 
+    host = normalizeHost(host)
+    if host == "" { return }
+
+    wasSet := false
+
 	b.mu.Lock()
-	delete(b.vhState, host)
+
+    if _, ok := b.vhState[host]; ok {
+        wasSet = true
+        delete(b.vhState, host)
+    }
 	b.mu.Unlock()
 
-	b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
-	logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+    if wasSet {
+        b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
+        logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+    }
+
+}
+
+func normalizeHost(h string) string {
+    h = strings.TrimSpace(strings.ToLower(h))
+    if h == "" { return "" }
+    if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
+        h = hh
+    }
+    return h
 }
 
 // Status returns a snapshot for debugging / cfm status output.

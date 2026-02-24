@@ -1663,6 +1663,9 @@ detpkg.Start(ctx, detpkg.Options{
 })
 
 
+// DNAT failsafe (web-only): if OpenResty ports die while DNAT is ON, turn DNAT OFF and log it.
+// OFF stays OFF until manual "cfm dnat on".
+dnat.StartFailSafe(ctx, be)
 
 	// Loop
 
