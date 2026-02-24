@@ -292,6 +292,19 @@ var challengeSolvedHook ChallengeSolvedHook
 func SetChallengeSolvedHook(h ChallengeSolvedHook) { challengeSolvedHook = h }
 
 
+// ChallengeAbuseHook lets the detectors layer route challenge-server abuse
+// into the unified sink (API/firewall/notifier), while the challenge server
+// still keeps its own high-signal log line.
+//
+// If unset, ChallengeServer will fall back to direct firewall blocking.
+type ChallengeAbuseHook func(ip, host, uri string, status int, badN int, window, blockTTL, cooldown time.Duration)
+
+var challengeAbuseHook ChallengeAbuseHook
+
+// SetChallengeAbuseHook installs a callback invoked when the challenge server
+// detects abuse (many 4xx/5xx on non-verify paths within a window).
+func SetChallengeAbuseHook(h ChallengeAbuseHook) { challengeAbuseHook = h }
+
 
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
 	return &ChallengeServer{
@@ -1059,7 +1072,7 @@ func isVerifyPath(uri string) bool {
 
 // abuseObserve updates per-IP error counters and blocks via firewall if threshold exceeded.
 func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status int) {
-        if !s.abuseEnabled || s.fw == nil || strings.TrimSpace(ipStr) == "" {
+        if !s.abuseEnabled || strings.TrimSpace(ipStr) == "" {
                 return
         }
         if status < 400 {
@@ -1117,7 +1130,7 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
                 return
         }
 
-        // trigger block
+        // trigger action
         ttl := s.abuseBlockTTL
         if ttl <= 0 {
                 ttl = 1 * time.Hour
@@ -1132,12 +1145,21 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
         st.badCount = 0
         s.abuseMu.Unlock()
 
-        ip := net.ParseIP(ipStr)
-        if ip == nil {
-                return
+        // Route to detectors sink if hook is installed.
+        // This lets the unified sink push to API/Firewall/Notifier.
+        if challengeAbuseHook != nil {
+                challengeAbuseHook(ipStr, host, uri, status, badN, win, ttl, cd)
+        } else {
+                // Backwards-compatible fallback: direct firewall block.
+                if s.fw != nil {
+                        ip := net.ParseIP(ipStr)
+                        if ip == nil {
+                                return
+                        }
+                        comment := "cfm:challenge_abuse"
+                        _ = s.fw.AddBlock(ip, comment, &ttl)
+                }
         }
-        comment := "cfm:challenge_abuse"
-        _ = s.fw.AddBlock(ip, comment, &ttl)
 
         // log to challenges log (high signal)
         logging.LogfCHALLENGES("[challenge_abuse] ip=%s host=%s bad>=%d window=%s status=%d uri=%s block_ttl=%s cooldown=%s",

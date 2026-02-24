@@ -34,6 +34,61 @@ type webdetectorWrapped struct {
     lastEnsureMu sync.Mutex
     lastEnsure   time.Time
 
+    // External alerts coming from background components (e.g. challenge server
+    // abuse self-protection). These are drained into the normal RunOnce(out)
+    // channel so the section sink (API/firewall/notifier + our logs) handles them.
+    extMu  sync.Mutex
+    extQ   chan core.Alert
+    extDrop uint64
+
+}
+
+func (w *webdetectorWrapped) enqueueExternal(a core.Alert) {
+    if w == nil {
+        return
+    }
+    w.extMu.Lock()
+    q := w.extQ
+    w.extMu.Unlock()
+    if q == nil {
+        return
+    }
+    select {
+    case q <- a:
+    default:
+        // bounded queue: drop if overloaded (still log once in a while)
+        w.extMu.Lock()
+        w.extDrop++
+        drops := w.extDrop
+        w.extMu.Unlock()
+        if drops == 1 || drops%1000 == 0 {
+            ip := ""
+            if a.Extra != nil {
+                ip = a.Extra["ip"]
+            }
+            logging.Logf("[webdetector] external alert queue full: dropped=%d (kind=%s ip=%s)", drops, a.Kind, ip)
+        }
+    }
+}
+
+func (w *webdetectorWrapped) drainExternal(out chan<- core.Alert) {
+    if out == nil {
+        return
+    }
+    w.extMu.Lock()
+    q := w.extQ
+    w.extMu.Unlock()
+    if q == nil {
+        return
+    }
+    for {
+        select {
+        case a := <-q:
+            out <- a
+        default:
+            return
+        }
+    }
 }
 
 func (w *webdetectorWrapped) Name() string         { return w.eng.Name() }
@@ -164,7 +219,30 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
             })
 
-
+            // Hook challenge-server abuse into the unified detector sink.
+            // This produces a new alert kind: WEB/CHALLENGE_SERVER_ABUSE
+            webdet.SetChallengeAbuseHook(func(ip, host, uri string, status int, badN int, window, blockTTL, cooldown time.Duration) {
+                now := time.Now()
+                a := core.Alert{
+                    Kind:   "WEB/CHALLENGE_SERVER_ABUSE",
+                    Key:    ip,
+                    When:   now,
+                    Count:  badN,
+                    Samples: []string{fmt.Sprintf("[challenge_abuse] ip=%s host=%s bad>=%d window=%s status=%d uri=%s block_ttl=%s cooldown=%s", ip, host, badN, window.String(), status, uri, blockTTL.String(), cooldown.String())},
+                    Extra: map[string]string{
+                        "ip":        ip,
+                        "host":      host,
+                        "uri":       uri,
+                        "status":    fmt.Sprintf("%d", status),
+                        "badN":      fmt.Sprintf("%d", badN),
+                        "window":    window.String(),
+                        "block_ttl": blockTTL.String(),
+                        "cooldown":  cooldown.String(),
+                        "reason":    "challenge_server_abuse",
+                    },
+                }
+                w.enqueueExternal(a)
+            })
 
             // Start in goroutine so RunOnce never blocks. Also detect if Start()
             // stalls with a small timeout (best-effort watchdog).
@@ -193,7 +271,17 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
         w.ensureChallengeRedirect("tick")
     }
 
+
+    // Flush any external alerts that were queued by background components
+    // (e.g. challenge-server abuse), before we do the ingest pass.
+    w.drainExternal(out)
+
+
     err := w.eng.RunOnce(ctx, out)
+
+    // Drain again after ingest pass (in case abuse triggers during RunOnce()).
+    w.drainExternal(out)
+
 
     // On shutdown (reload), wait for background servers to actually exit so
     // ports are free before the new instance starts.
@@ -206,6 +294,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
     if pctx.Err() != nil {
         w.stopOnce.Do(func() {
             SetNginxBridge(nil) // avoid stale pointer after reload
+            webdet.SetChallengeAbuseHook(nil)
             waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
             defer cancel()
 
@@ -581,7 +670,9 @@ engine := webdet.NewEngine(cfg)
         // IMPORTANT: do NOT start background servers here.
         // Bind them to the manager ctx via webdetectorWrapped.RunOnce(ctx),
         // otherwise reload can leave orphan listeners serving stale stats.
-        return &webdetectorWrapped{eng: engine, cfg: cfg}, nil
+        // Small bounded queue for background-triggered alerts (abuse, etc.).
+        // Delivery is on next RunOnce tick (drained into out channel).
+        return &webdetectorWrapped{eng: engine, cfg: cfg, extQ: make(chan core.Alert, 2048)}, nil
 
 
 	})

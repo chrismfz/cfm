@@ -573,6 +573,17 @@ if enforced == "challenge" && s.chalCooldown > 0 {
 
     case "ttl":
         ttl := s.pol.TTL
+
+        // Optional per-alert override (e.g. challenge server abuse wants its own TTL)
+        if a.Extra != nil {
+            if t := strings.TrimSpace(a.Extra["block_ttl"]); t != "" {
+                if d, err := time.ParseDuration(t); err == nil && d > 0 {
+                    ttl = d
+                }
+            }
+        }
+
+
         if ttl <= 0 { ttl = time.Hour }
         if err := s.fw.AddBlock(ip, comment, &ttl); err == nil {
             out.Extra["blocked"]    = "yes"
