@@ -74,6 +74,11 @@ type ChallengeServer struct {
         abuseMu   sync.Mutex
         abuseByIP map[string]*abuseState
 
+        // Optional global ignore (wired by detectors layer, from [global] IGNORE_IPS/IGNORE_NETS).
+        // If matched, challenge server will "auto-solve" (set cfm_ok + release) and redirect.
+        ignoreFn    func(ipStr string) bool
+        ignoreLog   bool
+
 }
 
 type abuseState struct {
@@ -212,6 +217,14 @@ func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
 // SetAccessLogPath sets a separate file where [challenge_http] access lines will be written.
 // If empty, access lines will continue to go to the main challenges log.
 func (s *ChallengeServer) SetAccessLogPath(path string) { s.accessLogPath = strings.TrimSpace(path) }
+
+// SetIPIgnore wires global ignore into challenge server (from [global] IGNORE_IPS/IGNORE_NETS).
+// shouldIgnore must be fast and side-effect free.
+func (s *ChallengeServer) SetIPIgnore(shouldIgnore func(string) bool, logIgnored bool) {
+        s.ignoreFn = shouldIgnore
+        s.ignoreLog = logIgnored
+}
+
 
 // SetAbuseConfig enables simple abuse blocking:
 // if an IP causes >=badN requests with status>=400 (excluding verify endpoints)
@@ -370,6 +383,19 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+
+                // Global ignore: auto-solve + release (no rate-limit, no pow/token).
+                // This prevents false-positive abuse blocks on trusted/internal networks.
+                if ip := clientIP(r); ip != nil && s.shouldIgnoreIP(ip) {
+                        host := cleanHost(r.Host)
+                        next := r.URL.Query().Get("next")
+                        if next == "" { next = "/" }
+                        if !strings.HasPrefix(next, "/") { next = "/" }
+                        if len(next) > maxNextLen { next = "/" }
+                        s.autoSolveAndRelease(w, r, ip, host, next, "verify")
+                        return
+                }
+
 
 		// Self-protection: reject abusive IPs early (before reading body / verifying).
 		if ip := clientIP(r); ip != nil {
@@ -600,6 +626,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
+                // next (single parse + sanitize; reused below)
+                next := r.URL.Query().Get("next")
+                if next == "" { next = "/" }
+                if !strings.HasPrefix(next, "/") { next = "/" }
+                if len(next) > maxNextLen { next = "/" }
+
+
+                // Global ignore: auto-solve + release (no challenge page, no abuse tracking).
+                if s.shouldIgnoreIP(ip) {
+                        host := cleanHost(r.Host)
+                        s.autoSolveAndRelease(w, r, ip, host, next, "page")
+                        return
+                }
+
 
                 // Self-protection: rate limit challenge page requests per IP.
                 if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindPage); !ok {
@@ -615,16 +655,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 
 		// If already solved (cookie present + token valid), release and redirect.
-		next := r.URL.Query().Get("next")
-		if next == "" {
-			next = "/"
-		}
-		if !strings.HasPrefix(next, "/") {
-			next = "/"
-		}
-		if len(next) > maxNextLen {
-			next = "/"
-		}
+next = r.URL.Query().Get("next")
+if next == "" { next = "/" }
+if !strings.HasPrefix(next, "/") { next = "/" }
+if len(next) > maxNextLen { next = "/" }
 
 		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
 		cookieVal := ""
@@ -1075,6 +1109,13 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
         if !s.abuseEnabled || strings.TrimSpace(ipStr) == "" {
                 return
         }
+
+        // Global ignore: never count / block ignored IPs.
+        if s.ignoreFn != nil && s.ignoreFn(strings.TrimSpace(ipStr)) {
+                return
+        }
+
+
         if status < 400 {
                 return
         }
@@ -1273,6 +1314,75 @@ func clientIP(r *http.Request) net.IP {
     return peer
 
 }
+
+func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
+        if ip == nil || s.ignoreFn == nil {
+                return false
+        }
+        return s.ignoreFn(ip.String())
+}
+
+// autoSolveAndRelease:
+// - removes challenge state (nft set) + adds OK cooldown (if supported)
+// - clears bridge IP (OpenResty mode)
+// - sets cfm_ok cookie
+// - expires cfm_chal cookie (best-effort)
+// - redirects to next
+func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Request, ip net.IP, host, next, reason string) {
+        ipStr := ""
+        if ip != nil {
+                ipStr = ip.String()
+        }
+
+        if s.ignoreLog {
+                logging.LogfCHALLENGES("[challenge_ignore] ip=%s host=%s uri=%s reason=%s", ipStr, host, next, reason)
+        }
+
+        // Release from nft sets (DNAT mode)
+        if s.fw != nil && ip != nil {
+                _ = s.fw.RemoveChallenge(ip)
+                if oker, ok := any(s.fw).(challengeOKer); ok {
+                        ttl := s.cookieTTL()
+                        _ = oker.AddChallengeOK(ip, &ttl)
+                }
+        }
+
+        // OpenResty mode: clear IP from bridge (Lua pass-through)
+        if s.bridge != nil && ipStr != "" {
+                s.bridge.ClearIP(ipStr)
+        }
+
+        // Match secure flag to original scheme (OpenResty terminates TLS)
+        xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+        secure := (r.TLS != nil) || (xfProto == "https")
+
+        // Set solved cookie
+        okVal := randomCookieValue()
+        ttl := s.cookieTTL()
+        http.SetCookie(w, &http.Cookie{
+                Name:     "cfm_ok",
+                Value:    okVal,
+                Path:     "/",
+                MaxAge:   int(ttl.Seconds()),
+                HttpOnly: true,
+                Secure:   secure,
+                SameSite: http.SameSiteLaxMode,
+        })
+
+        // Expire challenge cookie (avoid churn)
+        http.SetCookie(w, &http.Cookie{
+                Name:   "cfm_chal",
+                Value:  "",
+                Path:   "/",
+                MaxAge: -1,
+        })
+
+        w.Header().Set("Cache-Control", "no-store")
+        w.Header().Set("Connection", "close")
+        http.Redirect(w, r, next, http.StatusSeeOther) // 303
+}
+
+
 
 func basicHeaderSanity(w http.ResponseWriter, r *http.Request) bool {
 	// Host sanity (prevents some oddballs; also avoids huge Host headers)

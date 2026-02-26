@@ -27,6 +27,14 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
 
+    // Challenge JSON API
+    mux.HandleFunc("/api/v1/challenge/summary", e.handleChallengeSummary)
+    mux.HandleFunc("/api/v1/challenge/vhosts", e.handleChallengeVhosts)
+    mux.HandleFunc("/api/v1/challenge/vhost",  e.handleChallengeVhost)  // ?host=
+    mux.HandleFunc("/api/v1/challenge/ips",    e.handleChallengeIPs)
+    mux.HandleFunc("/api/v1/challenge/ip",     e.handleChallengeIP)     // ?ip=
+    mux.HandleFunc("/api/v1/challenge/events", e.handleChallengeEvents)
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,

@@ -354,6 +354,9 @@ nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
     lastProgressLogAt time.Time
     parsedSinceLog    int64
 
+    // Challenge API state (vhost/ip/events)
+    chalAPI *ChallengeAPIStore
+
 }
 
 
@@ -381,6 +384,11 @@ func NewEngine(cfg Config) *Engine {
     },
                 ipLastEmit: make(map[string]time.Time),
 	}
+
+    // Challenge API store (ring buffer events + vhost/ip state)
+    e.chalAPI = NewChallengeAPIStore(50000)
+
+
 
 // enable openresty mode//
 if cfg.OpenRestyMode {
@@ -417,6 +425,36 @@ if cfg.OpenRestyMode {
 
 	return e
 }
+
+// ChallengeAPI returns the in-memory store used by the challenge JSON API.
+func (e *Engine) ChallengeAPI() *ChallengeAPIStore {
+    return e.chalAPI
+}
+
+// RecordChallengeSolved updates the store when a challenge is solved.
+func (e *Engine) RecordChallengeSolved(ip, host, uri string, diff int, ms int64) {
+    if e == nil || e.chalAPI == nil {
+        return
+    }
+    e.chalAPI.RecordSolved(ip, host, uri, diff, ms)
+}
+
+// RecordIPChallenge updates the store when we emit a challenge for an IP.
+func (e *Engine) RecordIPChallenge(ip, host, rule, uri, method string, status int, ttl time.Duration) {
+    if e == nil || e.chalAPI == nil {
+        return
+    }
+    e.chalAPI.RecordIPChallenge(ip, host, rule, uri, method, status, ttl)
+}
+
+// RecordVhostAuto records auto_on/auto_off for vhosts (and current metrics).
+func (e *Engine) RecordVhostAuto(host string, active bool, row SuspiciousRow, on, off float64, hold time.Duration) {
+    if e == nil || e.chalAPI == nil {
+        return
+    }
+    e.chalAPI.RecordVhostAuto(host, active, row, on, off, hold)
+}
+
 
 // --- integration with detectors framework ---
 

@@ -81,6 +81,9 @@ func printWebTopHelp() {
         fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
         fmt.Println("  cfm webtop ip [N]               # global IP view (top IPs by score)")
         fmt.Println("  cfm webtop ip <IP>              # drilldown specific IP")
+        fmt.Println("  cfm webtop challenge            # active vhost challenge list")
+        fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
+        fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
 	fmt.Println("  cfm webtop analyze <ip|host>    # offline drilldown from TSV log")
 
 	fmt.Println()
@@ -134,6 +137,13 @@ func RunWebTop(baseURL string, args []string) error {
                 }
             }
             return runLongTop(baseURL, limit)
+
+        case "challenge":
+            // cfm webtop challenge
+            // cfm webtop challenge host <H>
+            // cfm webtop challenge events [N]
+            return runChallengeWebTop(baseURL, args[1:])
+
         }
     }
 
@@ -957,5 +967,107 @@ func runAnalyzeHost(baseURL, host string) error {
     }
     w.Flush()
 
+    return nil
+}
+
+// ---------------- Challenge webtop ----------------
+
+type chalSummaryResp struct {
+    Now string `json:"now"`
+    ActiveVhosts int `json:"active_vhosts"`
+    ActiveIPs int `json:"active_ips"`
+}
+
+type chalVhost struct {
+    Host string `json:"host"`
+    Status string `json:"status"`
+    Mode string `json:"mode"`
+    Since string `json:"since"`
+    Score float64 `json:"score"`
+    UniqIP int `json:"uniq_ip"`
+    RPS float64 `json:"rps"`
+    Reasons []string `json:"reasons"`
+    LastAction string `json:"last_action"`
+}
+
+type chalEvent struct {
+    Ts string `json:"ts"`
+    Type string `json:"type"`
+    Host string `json:"host,omitempty"`
+    IP string `json:"ip,omitempty"`
+    Rule string `json:"rule,omitempty"`
+    Score float64 `json:"score,omitempty"`
+    UniqIP int `json:"uniq_ip,omitempty"`
+    RPS float64 `json:"rps,omitempty"`
+}
+
+func runChallengeWebTop(baseURL string, args []string) error {
+    // subcommands
+    if len(args) > 0 && args[0] == "events" {
+        limit := 50
+        if len(args) > 1 {
+            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                limit = n
+            } else {
+                return fmt.Errorf("invalid events limit: %s", args[1])
+            }
+        }
+        u := fmt.Sprintf("%s/api/v1/challenge/events?limit=%d", strings.TrimRight(baseURL, "/"), limit)
+        resp, err := http.Get(u)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        var ev []chalEvent
+        if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil { return err }
+        for _, e := range ev {
+            fmt.Printf("%s %-18s host=%s ip=%s rule=%s score=%.2f uniq=%d rps=%.2f\n",
+                e.Ts, e.Type, e.Host, e.IP, e.Rule, e.Score, e.UniqIP, e.RPS)
+        }
+        return nil
+    }
+
+    if len(args) > 1 && args[0] == "host" {
+        host := args[1]
+        base := strings.TrimRight(baseURL, "/")
+        u1 := fmt.Sprintf("%s/api/v1/challenge/vhost?host=%s", base, url.QueryEscape(host))
+        u2 := fmt.Sprintf("%s/api/v1/challenge/events?host=%s&limit=50", base, url.QueryEscape(host))
+
+        r1, err := http.Get(u1); if err != nil { return err }
+        defer r1.Body.Close()
+        var vh chalVhost
+        if err := json.NewDecoder(r1.Body).Decode(&vh); err != nil { return err }
+
+        fmt.Printf("VHOST: %s  status=%s mode=%s since=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
+            vh.Host, vh.Status, vh.Mode, vh.Since, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
+        if len(vh.Reasons) > 0 {
+            fmt.Printf("Reasons: %s\n", strings.Join(vh.Reasons, ","))
+        }
+
+        r2, err := http.Get(u2); if err != nil { return err }
+        defer r2.Body.Close()
+        var ev []chalEvent
+        if err := json.NewDecoder(r2.Body).Decode(&ev); err != nil { return err }
+        fmt.Println("Recent events:")
+        for _, e := range ev {
+            fmt.Printf("  %s %-18s ip=%s rule=%s score=%.2f uniq=%d rps=%.2f\n",
+                e.Ts, e.Type, e.IP, e.Rule, e.Score, e.UniqIP, e.RPS)
+        }
+        return nil
+    }
+
+    // default: list active vhosts
+    base := strings.TrimRight(baseURL, "/")
+    u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=200", base)
+    r, err := http.Get(u)
+    if err != nil { return err }
+    defer r.Body.Close()
+    var vhs []chalVhost
+    if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil { return err }
+
+    fmt.Printf("%-35s %-6s %-6s %-5s %-6s %-s\n", "HOST", "MODE", "STAT", "SCORE", "UNIQ", "REASONS")
+    for _, h := range vhs {
+        rs := ""
+        if len(h.Reasons) > 0 { rs = strings.Join(h.Reasons, ",") }
+        fmt.Printf("%-35s %-6s %-6s %5.2f %6d  %s\n", h.Host, h.Mode, h.Status, h.Score, h.UniqIP, rs)
+    }
     return nil
 }

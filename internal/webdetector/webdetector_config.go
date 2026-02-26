@@ -124,6 +124,14 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
     ChallengeSuspiciousMinUniqIP  int           // CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP
     ChallengeSuspiciousHolddown   time.Duration // CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN
 
+	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
+	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
+	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)
+	ChallengeSuspiciousUniqIPOn  int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON
+	ChallengeSuspiciousUniqIPOff int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF
+	ChallengeSuspiciousUniqIPMax int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX (hard cap; optional)
+
+
 
 }
 
@@ -225,6 +233,28 @@ if !c.ChallengeLogExpired {
     }
 
 
+
+	// Defaults for uniqIP-based auto mode (only meaningful when enabled).
+	if c.ChallengeSuspiciousUniqIP {
+		if c.ChallengeSuspiciousUniqIPOn <= 0 {
+			c.ChallengeSuspiciousUniqIPOn = 300
+		}
+		if c.ChallengeSuspiciousUniqIPOff <= 0 {
+			// default: 60% of ON
+			off := int(float64(c.ChallengeSuspiciousUniqIPOn) * 0.60)
+			if off < 1 {
+				off = 1
+			}
+			c.ChallengeSuspiciousUniqIPOff = off
+		}
+		// Max is optional (0 disables)
+		if c.ChallengeSuspiciousUniqIPMax < 0 {
+			c.ChallengeSuspiciousUniqIPMax = 0
+		}
+	}
+
+
+
 // Sensible defaults for the 40x combo detector (window defaults to 120s).
 if c.IP40xComboCount > 0 {
     if c.IP40xComboUniquePaths <= 0 {
@@ -242,3 +272,4 @@ if c.IP40xComboCount > 0 {
 func (c Config) LongHorizon() time.Duration {
 	return time.Duration(c.LongFactor) * c.Window
 }
+

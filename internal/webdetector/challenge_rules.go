@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"strconv"
         "cfm/internal/logging"
 	core "cfm/internal/detectors/core"
 
@@ -356,6 +357,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Samples: samples,
                                                 Extra:   extra,
                                         }
+
+            // record to challenge API store (best-effort)
+e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
 
                                         select {
                                         case out <- a:
@@ -769,6 +773,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             autoActive := false
             var row SuspiciousRow
             if haveVhostAuto && e.longwin != nil {
+                autoWhy := ""
                 r, ok := e.longwin.OneFromCache(longSums, host)
                 if ok {
                     row = r
@@ -781,12 +786,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 minUniq := e.cfg.ChallengeSuspiciousMinUniqIP
                 hold := e.cfg.ChallengeSuspiciousHolddown
 
-
-
-
-
-
-
+				// uniqIP-based auto mode (optional)
+				uniqEn := e.cfg.ChallengeSuspiciousUniqIP
+				uniqOn := e.cfg.ChallengeSuspiciousUniqIPOn
+				uniqOff := e.cfg.ChallengeSuspiciousUniqIPOff
+				uniqMax := e.cfg.ChallengeSuspiciousUniqIPMax
 
 
 
@@ -806,16 +810,22 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     }
 
                     if !cur {
-                        if row.Score >= on && row.UniqueIPs >= minUniq {
+			// 1) hard cap (if set): challenge immediately
+			if uniqEn && uniqMax > 0 && row.UniqueIPs >= uniqMax {
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
+        			autoWhy = "uniqip_max"
 
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
-                                    "[challenge][vhost] action=auto_on host=%s score=%.2f on=%.2f off=%.2f uniqIP=%d rps=%.2f reasons=%s hold=%s",
-                                    host, row.Score, on, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
+				"[challenge][vhost] action=auto_on host=%s reason=%s score=%.2f on=%.2f off=%.2f uniqIP=%d uniq_on=%d uniq_off=%d uniq_max=%d rps=%.2f reasons=%s hold=%s",
+				host, autoWhy, row.Score, on, off, row.UniqueIPs, uniqOn, uniqOff, uniqMax, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
                                 )
                             }
+
+                            // record to challenge API store
+                            e.RecordVhostAuto(host, true, row, on, off, hold)
+
                             if e.cfg.ChallengeNotify {
                                 a := core.Alert{
                                     When:  now,
@@ -825,10 +835,14 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                     Extra: map[string]string{
                                         "host":      host,
                                         "action":    "auto_on",
+					"reason":    autoWhy,
                                         "score":     fmt.Sprintf("%.2f", row.Score),
                                         "score_on":  fmt.Sprintf("%.2f", on),
                                         "score_off": fmt.Sprintf("%.2f", off),
                                         "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+					"uniq_on":   fmt.Sprintf("%d", uniqOn),
+					"uniq_off":  fmt.Sprintf("%d", uniqOff),
+					"uniq_max":  fmt.Sprintf("%d", uniqMax),
                                         "rps":       fmt.Sprintf("%.2f", row.RPS),
                                         "reasons":   strings.Join(row.Reasons, ","),
                                         "holddown":  hold.String(),
@@ -838,11 +852,126 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                             }
                             return true
                         }
+
+
+
+
+
+                        // 2) uniqIP hysteresis ON threshold
+                        if uniqEn && uniqOn > 0 && row.UniqueIPs >= uniqOn {
+                            e.vhostUnderAttack[host] = true
+                            e.vhostLastChange[host] = now
+                            autoWhy = "uniqip_on"
+
+                            if e.cfg.ChallengeLog {
+                                logging.LogfCHALLENGES(
+                                    "[challenge][vhost] action=auto_on host=%s reason=%s score=%.2f on=%.2f off=%.2f uniqIP=%d uniq_on=%d uniq_off=%d uniq_max=%d rps=%.2f reasons=%s hold=%s",
+                                    host, autoWhy, row.Score, on, off, row.UniqueIPs, uniqOn, uniqOff, uniqMax, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
+                                )
+                            }
+
+                            e.RecordVhostAuto(host, true, row, on, off, hold)
+
+                            if e.cfg.ChallengeNotify {
+                                a := core.Alert{
+                                    When:  now,
+                                    Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_ON"),
+                                    Key:   host,
+                                    Count: row.UniqueIPs,
+                                    Extra: map[string]string{
+                                        "host":      host,
+                                        "action":    "auto_on",
+                                        "reason":    autoWhy,
+                                        "score":     fmt.Sprintf("%.2f", row.Score),
+                                        "score_on":  fmt.Sprintf("%.2f", on),
+                                        "score_off": fmt.Sprintf("%.2f", off),
+                                        "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+                                        "uniq_on":   fmt.Sprintf("%d", uniqOn),
+                                        "uniq_off":  fmt.Sprintf("%d", uniqOff),
+                                        "uniq_max":  fmt.Sprintf("%d", uniqMax),
+                                        "rps":       fmt.Sprintf("%.2f", row.RPS),
+                                        "reasons":   strings.Join(row.Reasons, ","),
+                                        "holddown":  hold.String(),
+                                    },
+                                }
+                                select { case out <- a: default: }
+                            }
+                            return true
+                        }
+
+                        // 3) legacy score ON threshold (+ min uniq gate)
+                        if row.Score >= on && row.UniqueIPs >= minUniq {
+                            e.vhostUnderAttack[host] = true
+                            e.vhostLastChange[host] = now
+                            autoWhy = "score_on"
+
+                            if e.cfg.ChallengeLog {
+                                logging.LogfCHALLENGES(
+                                    "[challenge][vhost] action=auto_on host=%s reason=%s score=%.2f on=%.2f off=%.2f uniqIP=%d min_uniq=%d uniq_on=%d uniq_off=%d uniq_max=%d rps=%.2f reasons=%s hold=%s",
+                                    host, autoWhy, row.Score, on, off, row.UniqueIPs, minUniq, uniqOn, uniqOff, uniqMax, row.RPS, strings.Join(row.Reasons, ","), hold.String(),
+                                )
+                            }
+
+                            e.RecordVhostAuto(host, true, row, on, off, hold)
+
+                            if e.cfg.ChallengeNotify {
+                                a := core.Alert{
+                                    When:  now,
+                                    Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_ON"),
+                                    Key:   host,
+                                    Count: row.UniqueIPs,
+                                    Extra: map[string]string{
+                                        "host":      host,
+                                        "action":    "auto_on",
+                                        "reason":    autoWhy,
+                                        "score":     fmt.Sprintf("%.2f", row.Score),
+                                        "score_on":  fmt.Sprintf("%.2f", on),
+                                        "score_off": fmt.Sprintf("%.2f", off),
+                                        "uniqIP":    fmt.Sprintf("%d", row.UniqueIPs),
+                                        "min_uniq":  fmt.Sprintf("%d", minUniq),
+                                        "uniq_on":   fmt.Sprintf("%d", uniqOn),
+                                        "uniq_off":  fmt.Sprintf("%d", uniqOff),
+                                        "uniq_max":  fmt.Sprintf("%d", uniqMax),
+                                        "rps":       fmt.Sprintf("%.2f", row.RPS),
+                                        "reasons":   strings.Join(row.Reasons, ","),
+                                        "holddown":  hold.String(),
+                                    },
+                                }
+                                select { case out <- a: default: }
+                            }
+                            return true
+                        }
+
                         return false
+
+
+
                     }
 
-                    // currently ON: turn OFF when score <= off (and holddown already passed above)
-                    if row.Score <= off {
+
+
+
+
+
+
+
+
+
+
+                    // currently ON: keep ON while uniqIP hard cap exceeded
+                    if uniqEn && uniqMax > 0 && row.UniqueIPs >= uniqMax {
+                        return true
+                    }
+
+                    // currently ON: turn OFF when cooled down
+                    // - legacy: score <= off
+                    // - uniqIP mode: require BOTH score <= off AND uniqIP <= uniqOff
+                    offOK := (row.Score <= off)
+                    if uniqEn && uniqOff > 0 {
+                        offOK = offOK && (row.UniqueIPs <= uniqOff)
+                    }
+
+                    if offOK {
                         e.vhostUnderAttack[host] = false
                         e.vhostLastChange[host] = now
 
@@ -857,6 +986,10 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                 host, row.Score, off, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
                             )
                         }
+
+                        // record to challenge API store
+                        e.RecordVhostAuto(host, false, row, on, off, hold)
+
                         if e.cfg.ChallengeNotify {
                             a := core.Alert{
                                 When:  now,
@@ -912,7 +1045,11 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             if manual {
                 rule = "CHALLENGE_VHOST"
             } else {
-                rule = "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
+                if e.cfg.ChallengeSuspiciousUniqIP && ((e.cfg.ChallengeSuspiciousUniqIPMax > 0 && row.UniqueIPs >= e.cfg.ChallengeSuspiciousUniqIPMax) || (e.cfg.ChallengeSuspiciousUniqIPOn > 0 && row.UniqueIPs >= e.cfg.ChallengeSuspiciousUniqIPOn)) {
+                    rule = "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP"
+                } else {
+                    rule = "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
+                }
             }
 
             for ipStr, reqN := range ha.ips {
@@ -979,4 +1116,10 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
 
 
+}
+
+func atoiSafe(s string) int {
+    if s == "" { return 0 }
+    n, _ := strconv.Atoi(s)
+    return n
 }

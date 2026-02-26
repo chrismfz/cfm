@@ -24,6 +24,9 @@ type webdetectorWrapped struct {
     cfg       webdet.Config
     startOnce sync.Once
 
+    // Global ignore (from [global] IGNORE_IPS/IGNORE_NETS)
+    ipIgnore *IPIgnore
+
     // Track background servers so hot-reload waits for ports to be free.
     srvWG    sync.WaitGroup
     stopOnce sync.Once
@@ -162,6 +165,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
             srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
             w.chalSrv = srv
 
+// Global ignore: [global] IGNORE_IPS / IGNORE_NETS
+if w.ipIgnore != nil {
+    srv.SetIPIgnore(w.ipIgnore.ShouldIgnore, w.ipIgnore.LogIgnoredReports())
+}
+
             // Challenge abuse blocking knobs
             if w.cfg.ChallengeAbuseEnabled {
                 srv.SetAbuseConfig(
@@ -215,7 +223,13 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
                 logging.LogfCHALLENGES(
                     "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d ",
                     ip, host, uri, ms, diff, suffix,
+                    // FIX: include suffix in format, avoid %!(EXTRA string=...)
+                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s",
+                    ip, host, uri, ms, diff, suffix,
                 )
+
+                // Record solve in challenge API store (best-effort)
+                w.eng.RecordChallengeSolved(ip, host, uri, diff, ms)
 
             })
 
@@ -483,6 +497,13 @@ cfg := webdet.Config{
     ChallengeSuspiciousMinUniqIP: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP", 0),
     ChallengeSuspiciousHolddown:  kvDur(kv, "CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN", 0),
 
+// Optional uniqIP-based vhost auto mode
+ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
+ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),
+ChallengeSuspiciousUniqIPOff: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF", 0),
+ChallengeSuspiciousUniqIPMax: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX", 0),
+
+
 }
 
 // If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN
@@ -666,13 +687,19 @@ engine := webdet.NewEngine(cfg)
 			}
 		}
 
+ipIgnore := newIPIgnoreFromGlobal(global)
 
         // IMPORTANT: do NOT start background servers here.
         // Bind them to the manager ctx via webdetectorWrapped.RunOnce(ctx),
         // otherwise reload can leave orphan listeners serving stale stats.
         // Small bounded queue for background-triggered alerts (abuse, etc.).
         // Delivery is on next RunOnce tick (drained into out channel).
-        return &webdetectorWrapped{eng: engine, cfg: cfg, extQ: make(chan core.Alert, 2048)}, nil
+return &webdetectorWrapped{
+    eng: engine,
+    cfg: cfg,
+    ipIgnore: ipIgnore,
+    extQ: make(chan core.Alert, 2048),
+}, nil
 
 
 	})
