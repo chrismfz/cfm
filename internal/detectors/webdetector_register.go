@@ -241,6 +241,36 @@ if w.ipIgnore != nil {
 
             })
 
+            // Hook WAF trigger events (from cfm_waf.lua via POST /nginx/ip with a reason)
+            // into cfm.challenges.log so trigger + solved appear in the same log.
+            // action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
+            if b := w.eng.NginxBridge(); b != nil {
+                b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration) {
+                    suffix := ""
+                    if enr := w.eng.Enricher(); enr != nil {
+                        r := enr.Lookup(ip)
+                        parts := []string{}
+                        if r.ASN > 0 {
+                            if r.ASNName != "" {
+                                parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
+                            } else {
+                                parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
+                            }
+                        }
+                        if r.Country != "" {
+                            parts = append(parts, r.Country)
+                        }
+                        if len(parts) > 0 {
+                            suffix = " - (" + strings.Join(parts, ", ") + ")"
+                        }
+                    }
+                    logging.LogfCHALLENGES(
+                        "[challenge] ip=%s result=%s reason=%s ttl=%s%s",
+                        ip, action+"_triggered", reason, ttl.String(), suffix,
+                    )
+                })
+            }
+
             // Hook challenge-server abuse into the unified detector sink.
             // This produces a new alert kind: WEB/CHALLENGE_SERVER_ABUSE
             webdet.SetChallengeAbuseHook(func(ip, host, uri string, status int, badN int, window, blockTTL, cooldown time.Duration) {
@@ -317,6 +347,9 @@ if w.ipIgnore != nil {
         w.stopOnce.Do(func() {
             SetNginxBridge(nil) // avoid stale pointer after reload
             webdet.SetChallengeAbuseHook(nil)
+            if b := w.eng.NginxBridge(); b != nil {
+                b.SetTriggerHook(nil)
+            }
             waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
             defer cancel()
 

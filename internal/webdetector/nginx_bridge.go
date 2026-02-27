@@ -59,6 +59,13 @@ type NginxBridge struct {
 	okState map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
 
 	stats BridgeStats
+
+	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
+	// IP decision via POST /nginx/ip. The hook receives the IP, action
+	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), and TTL so the caller
+	// can log to cfm.challenges.log with enrichment.
+	// Set via SetTriggerHook. Called without b.mu held.
+	OnTrigger func(ip, action, reason string, ttl time.Duration)
 }
 
 
@@ -218,6 +225,16 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // GetReason returns the stored reason for the active challenge/block on an IP.
 // Returns "" if the IP has no active entry or no reason was recorded.
 // Call this BEFORE ClearIP (e.g. inside a solved hook) to capture the WAF/detector reason.
+// SetTriggerHook registers a callback that fires whenever an external push
+// (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
+// to cfm.challenges.log with enrichment from the webdetector engine.
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration)) {
+	if b == nil {
+		return
+	}
+	b.OnTrigger = fn
+}
+
 func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -592,9 +609,19 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		ttl = b.cfg.DefaultTTL
 	}
 
+	reason := strings.TrimSpace(msg.Reason)
+
 	b.mu.Lock()
-	b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl),Reason:  strings.TrimSpace(msg.Reason),}
+	b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
 	b.mu.Unlock()
+
+	// Fire the trigger hook when a reason is present (i.e. the push came from
+	// cfm_waf.lua or another external caller that knows why it triggered).
+	// Internal ChallengeIP/BlockIP calls from the Go engine don't set a reason
+	// (they log via challenge_rules.go / RecordIPChallenge instead).
+	if reason != "" && b.OnTrigger != nil {
+		b.OnTrigger(msg.IP, msg.Action, reason, ttl)
+	}
 
 	w.WriteHeader(http.StatusOK)
 }
