@@ -78,6 +78,7 @@ type bridgeCfg struct {
 type bridgeIPEntry struct {
 	Action  string    // "challenge" | "block"
 	Expires time.Time
+	Reason  string
 }
 
 type bridgeVhostEntry struct {
@@ -113,6 +114,7 @@ type nginxIPMsg struct {
 	IP     string `json:"ip"`
 	Action string `json:"action"`  // "challenge" | "block"
 	TTLSec int    `json:"ttl_sec"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type nginxIPClearMsg struct {
@@ -213,6 +215,15 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 }
 
 // ClearIP removes any active challenge/block for this IP (e.g. after PoW solved).
+// GetReason returns the stored reason for the active challenge/block on an IP.
+// Returns "" if the IP has no active entry or no reason was recorded.
+// Call this BEFORE ClearIP (e.g. inside a solved hook) to capture the WAF/detector reason.
+func (b *NginxBridge) GetReason(ip string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.ipState[ip].Reason
+}
+
 // Also adds the IP to the solved-ok set so it bypasses vhost-wide challenge
 // for the next 60 minutes — matching the solved cookie TTL.
 func (b *NginxBridge) ClearIP(ip string) {
@@ -582,7 +593,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl)}
+	b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl),Reason:  strings.TrimSpace(msg.Reason),}
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)

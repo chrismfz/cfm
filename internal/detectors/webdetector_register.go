@@ -220,12 +220,20 @@ if w.ipIgnore != nil {
                     }
                 }
 
+                // Look up WAF/detector reason BEFORE bridge.ClearIP() deletes the entry.
+                // The hook is called before ClearIP in challenge_server.go, so this is safe.
+                reason := ""
+                if b := w.eng.NginxBridge(); b != nil {
+                    reason = b.GetReason(ip)
+                }
+                reasonPart := ""
+                if reason != "" {
+                    reasonPart = " reason=" + reason
+                }
+
                 logging.LogfCHALLENGES(
-                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d ",
-                    ip, host, uri, ms, diff, suffix,
-                    // FIX: include suffix in format, avoid %!(EXTRA string=...)
-                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s",
-                    ip, host, uri, ms, diff, suffix,
+                    "[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s%s",
+                    ip, host, uri, ms, diff, reasonPart, suffix,
                 )
 
                 // Record solve in challenge API store (best-effort)

@@ -142,7 +142,9 @@ type bucketSW struct {
     ips5xx   map[string]int
     ipsPOST  map[string]int
     ipsNoUA  map[string]int
-    ipsHTTP10 map[string]int
+    ipsHTTP10   map[string]int
+    ipsMalformed map[string]int              // 400+414+431 per IP
+    ipsUniqUA    map[string]map[uint64]struct{} // UA churn: ip -> set(hash(ua))
 
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
@@ -873,6 +875,22 @@ if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
                         if b.ipsHTTP10 == nil { b.ipsHTTP10 = make(map[string]int) }
                         b.ipsHTTP10[rec.IP]++
                         e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "http/1.0", TS: rec.TS}
+                }
+
+                // malformed request burst: 400 Bad Request + 414 URI Too Long + 431 Headers Too Large
+                if e.cfg.ChallengeIPMalformedMin > 0 &&
+                    (rec.Status == 400 || rec.Status == 414 || rec.Status == 431) {
+                        if b.ipsMalformed == nil { b.ipsMalformed = make(map[string]int) }
+                        b.ipsMalformed[rec.IP]++
+                        e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "malformed", TS: rec.TS}
+                }
+
+                // UA churn: too many distinct User-Agents from the same IP
+                if e.cfg.ChallengeIPUniqUAMin > 0 && rec.UA != "" && rec.UA != "-" {
+                        if b.ipsUniqUA == nil {
+                                b.ipsUniqUA = make(map[string]map[uint64]struct{})
+                        }
+                        addHashToSetWithCap(b.ipsUniqUA, rec.IP, hash64(rec.UA), e.cfg.ChallengeIPUniqUACap)
                 }
         }
 

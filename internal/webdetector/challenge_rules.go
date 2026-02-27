@@ -172,6 +172,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         e.cfg.ChallengeIPErrRatioMin > 0 || e.cfg.ChallengeIPPostRatioMin > 0 ||
         e.cfg.ChallengeIPNoUAMin > 0 || e.cfg.ChallengeIPHTTP10Min > 0
 
+        haveMalformed := e.cfg.ChallengeIPMalformedMin > 0
+        haveUniqUA    := e.cfg.ChallengeIPUniqUAMin > 0
+
 
         haveUniqPathsIP := e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0
         haveUniqHostsIP := e.cfg.ChallengeIPUniqHostsEnabled && e.cfg.ChallengeIPUniqHostsMin > 0
@@ -180,7 +183,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
         haveVhostManual := len(e.cfg.ChallengeVHost) > 0
         haveVhostAuto   := e.cfg.ChallengeSuspiciousVHost
-        if !havePaths && !haveThr && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveVhostManual && !haveVhostAuto { return }
+        if !havePaths && !haveThr && !haveMalformed && !haveUniqUA && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveVhostManual && !haveVhostAuto { return }
 
 	const (
 		topN       = 50
@@ -745,6 +748,165 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
 
 
+
+
+    // ---- 2b) Malformed request burst (400 + 414 + 431) ----
+    // Header/URI fuzzing and WAF-bypass tooling produce these in volume.
+    if haveMalformed {
+        stMalf := make(map[string]int)
+        func() {
+            e.mu.RLock()
+            defer e.mu.RUnlock()
+            for _, hs := range e.hosts {
+                if hs == nil { continue }
+                for i := range hs.buckets {
+                    b := &hs.buckets[i]
+                    for ip, n := range b.ipsMalformed {
+                        stMalf[ip] += n
+                    }
+                }
+            }
+        }()
+
+        for ipStr, cnt := range stMalf {
+            if cnt < e.cfg.ChallengeIPMalformedMin { continue }
+            ip := net.ParseIP(ipStr)
+            if ip == nil { continue }
+            if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { continue }
+
+            skip := func() bool {
+                e.emitMu.Lock()
+                defer e.emitMu.Unlock()
+                last, ok := e.ipLastChalEmit[ipStr]
+                if ok && now.Sub(last) < cooldown { return true }
+                e.ipLastChalEmit[ipStr] = now
+                return false
+            }()
+            if skip { continue }
+
+            ctx := lastCtx[ipStr]
+            if e.hostBypassed(ctx.Host) { continue }
+
+            ttl := e.cfg.ChallengeIPMalformedTTL
+            if ttl <= 0 { ttl = 30 * time.Minute }
+
+            limit := fmt.Sprintf("malformed(%d/%d)", cnt, e.cfg.ChallengeIPMalformedMin)
+            extra := map[string]string{
+                "detector":         "webdetector",
+                "ip":               ipStr,
+                "action":           "challenge",
+                "rule":             "CHALLENGE_MALFORMED",
+                "limit":            limit,
+                "ttl":              ttl.String(),
+                "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+                "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+                "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
+            }
+            if ctx.Host != "" { extra["host"] = ctx.Host }
+            if ctx.URI != ""  { extra["uri"]  = ctx.URI }
+            if ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
+
+            alet := core.Alert{
+                When:    now,
+                Kind:    core.AlertKind("WEB/CHALLENGE"),
+                Key:     ipStr,
+                Count:   cnt,
+                Samples: e.ipSamples(ipStr, maxSamples),
+                Extra:   extra,
+            }
+            e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
+            select { case out <- alet: default: }
+            if e.nginxBridge != nil {
+                e.nginxBridge.ChallengeIP(ipStr, ttl)
+            }
+        }
+    }
+
+
+    // ---- 2c) UA churn (many distinct User-Agent strings from one IP) ----
+    // Real browsers don't rotate UAs. Tooling does, to evade AGENT_LIST filters.
+    if haveUniqUA {
+        type uaAgg struct{ uniq map[uint64]struct{} }
+        agg := make(map[string]*uaAgg)
+
+        func() {
+            e.mu.RLock()
+            defer e.mu.RUnlock()
+            for _, hs := range e.hosts {
+                if hs == nil { continue }
+                for i := range hs.buckets {
+                    b := &hs.buckets[i]
+                    for ip, set := range b.ipsUniqUA {
+                        a := agg[ip]
+                        if a == nil {
+                            a = &uaAgg{uniq: make(map[uint64]struct{}, 8)}
+                            agg[ip] = a
+                        }
+                        if len(a.uniq) < e.cfg.ChallengeIPUniqUAMin {
+                            for h := range set {
+                                a.uniq[h] = struct{}{}
+                                if len(a.uniq) >= e.cfg.ChallengeIPUniqUAMin { break }
+                            }
+                        }
+                    }
+                }
+            }
+        }()
+
+        for ipStr, a := range agg {
+            if len(a.uniq) < e.cfg.ChallengeIPUniqUAMin { continue }
+            ip := net.ParseIP(ipStr)
+            if ip == nil { continue }
+            if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { continue }
+
+            skip := func() bool {
+                e.emitMu.Lock()
+                defer e.emitMu.Unlock()
+                last, ok := e.ipLastChalEmit[ipStr]
+                if ok && now.Sub(last) < 5*time.Second { return true }
+                e.ipLastChalEmit[ipStr] = now
+                return false
+            }()
+            if skip { continue }
+
+            ctx := lastCtx[ipStr]
+            if e.hostBypassed(ctx.Host) { continue }
+
+            ttl := e.cfg.ChallengeIPUniqUATTL
+            if ttl <= 0 { ttl = 20 * time.Minute }
+
+            limit := fmt.Sprintf("uniq_ua(%d/%d)", len(a.uniq), e.cfg.ChallengeIPUniqUAMin)
+            extra := map[string]string{
+                "detector":         "webdetector",
+                "ip":               ipStr,
+                "action":           "challenge",
+                "rule":             "CHALLENGE_UNIQUA",
+                "limit":            limit,
+                "ttl":              ttl.String(),
+                "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+                "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+                "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
+            }
+            if ctx.Host != "" { extra["host"] = ctx.Host }
+            if ctx.URI != ""  { extra["uri"]  = ctx.URI }
+
+            alet := core.Alert{
+                When:    now,
+                Kind:    core.AlertKind("WEB/CHALLENGE"),
+                Key:     ipStr,
+                Count:   len(a.uniq),
+                Samples: e.ipSamples(ipStr, maxSamples),
+                Extra:   extra,
+            }
+            e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
+            select { case out <- alet: default: }
+            if e.nginxBridge != nil {
+                e.nginxBridge.ChallengeIP(ipStr, ttl)
+            }
+        }
+    }
 
 
      // ---- 3) VHOST-wide challenge (manual panic + auto suspicious) ----

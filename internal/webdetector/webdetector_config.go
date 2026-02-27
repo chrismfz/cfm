@@ -102,6 +102,18 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
     ChallengeIPNoUAMin      int     // CHALLENGE_NO_UA_MIN (empty/"-" UA hits)
     ChallengeIPHTTP10Min    int     // CHALLENGE_HTTP10_MIN (proto == http/1.0)
 
+    // Malformed request burst: 400 Bad Request + 414 URI Too Long + 431 Headers Too Large.
+    // High counts indicate header/URI fuzzing or WAF bypass tooling.
+    // Action: challenge (escalate to block via BLOCK config if repeat offender).
+    ChallengeIPMalformedMin int           // CHALLENGE_MALFORMED_MIN (abs count in window)
+    ChallengeIPMalformedTTL time.Duration // CHALLENGE_MALFORMED_TTL
+
+    // UA churn: an IP rotating too many distinct User-Agent strings in the window.
+    // Tooling tries to evade UA-based heuristics by rotating; real browsers don't.
+    ChallengeIPUniqUAMin    int           // CHALLENGE_UNIQUA_MIN
+    ChallengeIPUniqUATTL    time.Duration // CHALLENGE_UNIQUA_TTL
+    ChallengeIPUniqUACap    int           // CHALLENGE_UNIQUA_CAP (memory safety)
+
     // --- VHOST-wide challenge modes ---
 
     // Manual panic mode: challenge every IP that hits these vhosts (or their subdomains).
@@ -327,6 +339,23 @@ if !c.ChallengeLogExpired {
 
 
 
+// Malformed burst defaults (only if enabled)
+if c.ChallengeIPMalformedMin > 0 {
+    if c.ChallengeIPMalformedTTL <= 0 {
+        c.ChallengeIPMalformedTTL = 30 * time.Minute
+    }
+}
+
+// UA churn defaults (only if enabled)
+if c.ChallengeIPUniqUAMin > 0 {
+    if c.ChallengeIPUniqUATTL <= 0 {
+        c.ChallengeIPUniqUATTL = 20 * time.Minute
+    }
+    if c.ChallengeIPUniqUACap <= 0 {
+        c.ChallengeIPUniqUACap = 64
+    }
+}
+
 // Sensible defaults for the 40x combo detector (window defaults to 120s).
 if c.IP40xComboCount > 0 {
     if c.IP40xComboUniquePaths <= 0 {
@@ -344,4 +373,3 @@ if c.IP40xComboCount > 0 {
 func (c Config) LongHorizon() time.Duration {
 	return time.Duration(c.LongFactor) * c.Window
 }
-

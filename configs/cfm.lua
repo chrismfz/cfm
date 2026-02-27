@@ -354,6 +354,96 @@ if ok and ok ~= "" then
   return
 end
 
+-- after cookie fast-path, before get_decision(...) load WAF
+-- after cookie fast-path, before get_decision(...)
+local waf
+do
+  local ok, mod = pcall(require, "cfm_waf")
+  if ok and mod then
+    waf = mod
+  else
+    -- optional: only log in debug to avoid noise
+    if CFG.debug then
+      log_route(ngx.WARN, "waf disabled: require cfm_waf failed: " .. tostring(mod))
+    end
+  end
+end
+
+
+
+if waf and waf.enabled and waf.enabled() then
+  local hit, reason, ttl = waf.check({
+    uri    = uri,
+    args   = ngx.var.args or "",
+    method = method,
+    host   = host,
+    ip     = ip,
+  })
+
+
+
+if hit then
+  local waf_action = action or "challenge"  -- safe default for old callers
+
+  if waf_action == "block" then
+    -- High-confidence rules (traversal, RCE, TRACE, CONNECT, etc.)
+    -- Hard 403 - no challenge page, no cookie dance.
+    ngx.header["X-CFM-Action"] = "block"
+    ngx.var.cfm_upstream = "cfm_block"
+    ngx.var.cfm_pass = ""
+
+    -- Push block to bridge (rate-limited per reason)
+    if waf.should_push and waf.should_push(SH, ip, reason) then
+      local payload = cjson.encode({
+        ip      = ip,
+        action  = "block",
+        ttl_sec = ttl or CFG.block_ttl_sec or 3600,
+        reason  = reason,
+      })
+      local _, perr = http_post_unix("/nginx/ip", payload)
+      if perr and CFG.debug then
+        log_route(ngx.WARN, "waf block push failed: " .. tostring(perr))
+      end
+    end
+
+    log_route(ngx.WARN, "waf_block ip=" .. ip .. " host=" .. host ..
+      " uri=" .. uri .. " reason=" .. tostring(reason) ..
+      " ttl=" .. tostring(ttl or 3600))
+
+    return ngx.exit(CFG.block_code)
+
+  else
+    -- Challenge rules (XSS, SQLi, PROPFIND, cookieless, etc.)
+    ngx.header["X-CFM-Action"] = "challenge"
+    ngx.var.cfm_upstream = "cfm_challenge"
+    ngx.var.cfm_pass = "http://cfm_challenge"
+
+    if waf.should_push and waf.should_push(SH, ip, reason) then
+      local payload = cjson.encode({
+        ip      = ip,
+        action  = "challenge",
+        ttl_sec = ttl or 600,
+        reason  = reason,
+      })
+      local _, perr = http_post_unix("/nginx/ip", payload)
+      if perr and CFG.debug then
+        log_route(ngx.WARN, "waf push failed: " .. tostring(perr))
+      end
+    end
+
+    log_route(ngx.INFO, "waf_challenge ip=" .. ip .. " host=" .. host ..
+      " uri=" .. uri .. " reason=" .. tostring(reason) ..
+      " ttl=" .. tostring(ttl or 600))
+
+    return
+  end
+end
+
+
+-- WAF loading End
+
+
+
 local d = get_decision(ip, host, uri, method, scheme)
 
 local ip_action    = d.ip_action or "allow"
