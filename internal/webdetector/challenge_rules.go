@@ -171,9 +171,16 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIP5xxRPSMin > 0 ||
         e.cfg.ChallengeIPErrRatioMin > 0 || e.cfg.ChallengeIPPostRatioMin > 0 ||
         e.cfg.ChallengeIPNoUAMin > 0 || e.cfg.ChallengeIPHTTP10Min > 0
+
+
+        haveUniqPathsIP := e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0
+        haveUniqHostsIP := e.cfg.ChallengeIPUniqHostsEnabled && e.cfg.ChallengeIPUniqHostsMin > 0
+        haveUniqPathsVhost := e.cfg.ChallengeVhostUniqPathsEnabled && e.cfg.ChallengeVhostUniqPathsMin > 0
+
+
         haveVhostManual := len(e.cfg.ChallengeVHost) > 0
         haveVhostAuto   := e.cfg.ChallengeSuspiciousVHost
-        if !havePaths && !haveThr && !haveVhostManual && !haveVhostAuto { return }
+        if !havePaths && !haveThr && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveVhostManual && !haveVhostAuto { return }
 
 	const (
 		topN       = 50
@@ -188,6 +195,180 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
 
         var lastCtx map[string]chalCtx
+
+
+    // ---- 0) Unique-based per-IP challenges (phase 1: challenge-only) ----
+    if haveUniqPathsIP || haveUniqHostsIP {
+        // aggregate sets across all hosts/buckets in short window
+        // (cap union to "min" so we don't blow memory)
+        type uAgg struct {
+            paths map[uint64]struct{}
+            hosts map[uint64]struct{}
+        }
+        agg := make(map[string]*uAgg)
+
+        func() {
+            e.mu.RLock()
+            defer e.mu.RUnlock()
+
+            for _, hs := range e.hosts {
+                if hs == nil {
+                    continue
+                }
+                for i := range hs.buckets {
+                    b := &hs.buckets[i]
+                    if haveUniqPathsIP && b.ipUniqPaths != nil {
+                        for ip, set := range b.ipUniqPaths {
+                            a := agg[ip]
+                            if a == nil {
+                                a = &uAgg{}
+                                agg[ip] = a
+                            }
+                            if a.paths == nil {
+                                a.paths = make(map[uint64]struct{}, 16)
+                            }
+                            // union with early stop at min
+                            if len(a.paths) < e.cfg.ChallengeIPUniqPathsMin {
+                                for h := range set {
+                                    a.paths[h] = struct{}{}
+                                    if len(a.paths) >= e.cfg.ChallengeIPUniqPathsMin {
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if haveUniqHostsIP && b.ipUniqHosts != nil {
+                        for ip, set := range b.ipUniqHosts {
+                            a := agg[ip]
+                            if a == nil {
+                                a = &uAgg{}
+                                agg[ip] = a
+                            }
+                            if a.hosts == nil {
+                                a.hosts = make(map[uint64]struct{}, 8)
+                            }
+                            if len(a.hosts) < e.cfg.ChallengeIPUniqHostsMin {
+                                for h := range set {
+                                    a.hosts[h] = struct{}{}
+                                    if len(a.hosts) >= e.cfg.ChallengeIPUniqHostsMin {
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // snapshot last ctx too (under same lock)
+            lastCtx = make(map[string]chalCtx, len(e.chalLast))
+            for ip, ctx := range e.chalLast {
+                lastCtx[ip] = ctx
+            }
+        }()
+
+        if len(agg) > 0 {
+            for ipStr, a := range agg {
+                if a == nil {
+                    continue
+                }
+
+                // decide which unique rule triggers first (paths > hosts)
+                rule := ""
+                limit := ""
+                ttl := time.Duration(0)
+
+                if haveUniqPathsIP && a.paths != nil && len(a.paths) >= e.cfg.ChallengeIPUniqPathsMin {
+                    rule = "CHALLENGE_UNIQPATHS_IP"
+                    limit = fmt.Sprintf("uniq_paths(%d/%d)", len(a.paths), e.cfg.ChallengeIPUniqPathsMin)
+                    ttl = e.cfg.ChallengeIPUniqPathsTTL
+                } else if haveUniqHostsIP && a.hosts != nil && len(a.hosts) >= e.cfg.ChallengeIPUniqHostsMin {
+                    rule = "CHALLENGE_UNIQHOSTS_IP"
+                    limit = fmt.Sprintf("uniq_hosts(%d/%d)", len(a.hosts), e.cfg.ChallengeIPUniqHostsMin)
+                    ttl = e.cfg.ChallengeIPUniqHostsTTL
+                }
+
+                if rule == "" {
+                    continue
+                }
+
+                ip := net.ParseIP(ipStr)
+                if ip == nil {
+                    continue
+                }
+                if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+                    continue
+                }
+
+                // burst cooldown (reuse the same map)
+                skip := func() bool {
+                    e.emitMu.Lock()
+                    defer e.emitMu.Unlock()
+                    last, ok := e.ipLastChalEmit[ipStr]
+                    if ok && now.Sub(last) < 5*time.Second {
+                        return true
+                    }
+                    e.ipLastChalEmit[ipStr] = now
+                    return false
+                }()
+                if skip {
+                    continue
+                }
+
+                ctx := lastCtx[ipStr]
+                if e.hostBypassed(ctx.Host) {
+                    if e.cfg.ChallengeLogSuppressed {
+                        logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=host_bypass", ipStr, ctx.Host, rule)
+                    }
+                    continue
+                }
+
+                if ttl <= 0 {
+                    ttl = e.cfg.ChallengePathsTTL
+                    if ttl <= 0 {
+                        ttl = 30 * time.Minute
+                    }
+                }
+
+                samples := e.ipSamples(ipStr, 8)
+                extra := map[string]string{
+                    "detector":         "webdetector",
+                    "ip":               ipStr,
+                    "action":           "challenge",
+                    "rule":             rule,
+                    "limit":            limit,
+                    "ttl":              ttl.String(),
+                    "challenge_log":    boolFlag(e.cfg.ChallengeLog),
+                    "challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+                    "challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+                    "challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
+                }
+                if ctx.Host != "" { extra["host"] = ctx.Host }
+                if ctx.URI != ""  { extra["uri"]  = ctx.URI }
+                if ctx.Method != "" { extra["method"] = ctx.Method }
+                if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
+
+                alet := core.Alert{
+                    When:    now,
+                    Kind:    core.AlertKind("WEB/CHALLENGE"),
+                    Key:     ipStr,
+                    Count:   0,
+                    Samples: samples,
+                    Extra:   extra,
+                }
+
+                e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
+                select { case out <- alet: default: }
+                if e.nginxBridge != nil {
+                    e.nginxBridge.ChallengeIP(ipStr, ttl)
+                }
+            }
+        }
+    }
+
+
+
 
     // ---- 1) CHALLENGE_PATHS (existing behavior) ----
     // Aggregate counts over current short window
@@ -765,6 +946,86 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
                 continue
             }
+
+
+
+
+            // ---- NEW: VHOST unique-paths trigger (bridge mode) ----
+            // If enabled and nginxBridge is active, challenge the whole vhost when
+            // unique paths in short window explode (crawl storm).
+            if haveUniqPathsVhost && e.nginxBridge != nil {
+                // compute unique paths for this vhost over short window (union of b.paths)
+                uniq := 0
+                capN := e.cfg.ChallengeVhostUniqPathsCap
+                if capN <= 0 {
+                    capN = 5000
+                }
+                seen := make(map[string]struct{}, 256)
+                e.mu.RLock()
+                hs := e.hosts[host]
+                if hs != nil {
+                    for i := range hs.buckets {
+                        b := &hs.buckets[i]
+                        for pth := range b.paths {
+                            seen[pth] = struct{}{}
+                            if len(seen) >= capN {
+                                break
+                            }
+                        }
+                        if len(seen) >= capN {
+                            break
+                        }
+                    }
+                }
+                e.mu.RUnlock()
+                uniq = len(seen)
+
+                // hysteresis ON/OFF state to avoid log spam
+                on := e.cfg.ChallengeVhostUniqPathsMin
+                off := e.cfg.ChallengeVhostUniqPathsOff
+                ttl := e.cfg.ChallengeVhostUniqPathsTTL
+                if ttl <= 0 {
+                    ttl = 20 * time.Minute
+                }
+
+                shouldOn := uniq >= on
+                shouldOff := uniq <= off
+
+                var doChallenge bool
+                var doLogOn bool
+                e.vhostMu.Lock()
+                cur := e.vhostUniqPathsActive[host]
+                if !cur && shouldOn {
+                    e.vhostUniqPathsActive[host] = true
+                    e.vhostUniqPathsLastChange[host] = now
+                    doChallenge = true
+                    doLogOn = true
+                } else if cur && shouldOff {
+                    e.vhostUniqPathsActive[host] = false
+                    e.vhostUniqPathsLastChange[host] = now
+                } else if cur {
+                    doChallenge = true // keep refreshing TTL while active
+                }
+                e.vhostMu.Unlock()
+
+                if doChallenge {
+                    e.nginxBridge.ChallengeVhost(host, ttl)
+                    if doLogOn && e.cfg.ChallengeLog {
+                        logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
+                            host, uniq, on, off, ttl.String())
+                    }
+                    // vhost-wide challenge overrides need for per-IP enumeration
+                    continue
+                }
+            }
+
+
+
+
+
+
+
+
 
             // Manual panic applies immediately.
             manual := haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost)

@@ -482,6 +482,28 @@ cfg := webdet.Config{
         ChallengePathsTTL:     kvDur(kv, "CHALLENGE_PATHS_TTL", 30*time.Minute),
 
 
+    // -------------------------------------------------------------------
+    // NEW: Unique-based challenge filters (phase 1: challenge-only)
+    // -------------------------------------------------------------------
+    ChallengeIPUniqPathsEnabled: kvBool(kv, "CHALLENGE_IP_UNIQPATHS_ENABLED", false),
+    ChallengeIPUniqPathsMin:     kvInt(kv,  "CHALLENGE_IP_UNIQPATHS_MIN", 0),
+    ChallengeIPUniqPathsTTL:     kvDur(kv,  "CHALLENGE_IP_UNIQPATHS_TTL", 0),
+    ChallengeIPUniqPathsCap:     kvInt(kv,  "CHALLENGE_IP_UNIQPATHS_CAP", 0),
+
+    ChallengeIPUniqHostsEnabled: kvBool(kv, "CHALLENGE_IP_UNIQHOSTS_ENABLED", false),
+    ChallengeIPUniqHostsMin:     kvInt(kv,  "CHALLENGE_IP_UNIQHOSTS_MIN", 0),
+    ChallengeIPUniqHostsTTL:     kvDur(kv,  "CHALLENGE_IP_UNIQHOSTS_TTL", 0),
+    ChallengeIPUniqHostsCap:     kvInt(kv,  "CHALLENGE_IP_UNIQHOSTS_CAP", 0),
+
+    ChallengeVhostUniqPathsEnabled: kvBool(kv, "CHALLENGE_VHOST_UNIQPATHS_ENABLED", false),
+    ChallengeVhostUniqPathsMin:     kvInt(kv,  "CHALLENGE_VHOST_UNIQPATHS_MIN", 0),
+    ChallengeVhostUniqPathsOff:     kvInt(kv,  "CHALLENGE_VHOST_UNIQPATHS_OFF", 0),
+    ChallengeVhostUniqPathsTTL:     kvDur(kv,  "CHALLENGE_VHOST_UNIQPATHS_TTL", 0),
+    ChallengeVhostUniqPathsCap:     kvInt(kv,  "CHALLENGE_VHOST_UNIQPATHS_CAP", 0),
+
+
+
+
     ChallengeIPRPSMin:       kvFlt(kv, "CHALLENGE_RPS_TOTAL_MIN", 0),
     ChallengeIP4xxRPSMin:    kvFlt(kv, "CHALLENGE_RPS_4XX_MIN", 0),
     ChallengeIP5xxRPSMin:    kvFlt(kv, "CHALLENGE_RPS_5XX_MIN", 0),

@@ -133,6 +133,29 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
 
 
 
+        // -------------------------------------------------------------------
+        // NEW: unique-based challenge filters (phase 1: challenge-only)
+        // -------------------------------------------------------------------
+        // per-IP: many unique paths in short window -> challenge
+        ChallengeIPUniqPathsEnabled bool          // CHALLENGE_IP_UNIQPATHS_ENABLED
+        ChallengeIPUniqPathsMin     int           // CHALLENGE_IP_UNIQPATHS_MIN
+        ChallengeIPUniqPathsTTL     time.Duration // CHALLENGE_IP_UNIQPATHS_TTL
+        ChallengeIPUniqPathsCap     int           // CHALLENGE_IP_UNIQPATHS_CAP (memory safety)
+
+        // per-IP: many unique hosts in short window -> challenge (scanner/vhost enumeration)
+        ChallengeIPUniqHostsEnabled bool          // CHALLENGE_IP_UNIQHOSTS_ENABLED
+        ChallengeIPUniqHostsMin     int           // CHALLENGE_IP_UNIQHOSTS_MIN
+        ChallengeIPUniqHostsTTL     time.Duration // CHALLENGE_IP_UNIQHOSTS_TTL
+        ChallengeIPUniqHostsCap     int           // CHALLENGE_IP_UNIQHOSTS_CAP
+
+        // per-vhost: many unique paths in short window -> challenge vhost (bridge)
+        ChallengeVhostUniqPathsEnabled bool          // CHALLENGE_VHOST_UNIQPATHS_ENABLED
+        ChallengeVhostUniqPathsMin     int           // CHALLENGE_VHOST_UNIQPATHS_MIN
+        ChallengeVhostUniqPathsOff     int           // CHALLENGE_VHOST_UNIQPATHS_OFF (hysteresis)
+        ChallengeVhostUniqPathsTTL     time.Duration // CHALLENGE_VHOST_UNIQPATHS_TTL
+        ChallengeVhostUniqPathsCap     int           // CHALLENGE_VHOST_UNIQPATHS_CAP (early stop)
+
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -252,6 +275,55 @@ if !c.ChallengeLogExpired {
 			c.ChallengeSuspiciousUniqIPMax = 0
 		}
 	}
+
+
+
+
+        // ----------------------------
+        // Defaults for unique-filters (only if enabled)
+        // ----------------------------
+        if c.ChallengeIPUniqPathsEnabled {
+                if c.ChallengeIPUniqPathsMin <= 0 {
+                        c.ChallengeIPUniqPathsMin = 120
+                }
+                if c.ChallengeIPUniqPathsTTL <= 0 {
+                        c.ChallengeIPUniqPathsTTL = 20 * time.Minute
+                }
+                if c.ChallengeIPUniqPathsCap <= 0 {
+                        c.ChallengeIPUniqPathsCap = 512
+                }
+        }
+
+        if c.ChallengeIPUniqHostsEnabled {
+                if c.ChallengeIPUniqHostsMin <= 0 {
+                        c.ChallengeIPUniqHostsMin = 10
+                }
+                if c.ChallengeIPUniqHostsTTL <= 0 {
+                        c.ChallengeIPUniqHostsTTL = 30 * time.Minute
+                }
+                if c.ChallengeIPUniqHostsCap <= 0 {
+                        c.ChallengeIPUniqHostsCap = 128
+                }
+        }
+
+        if c.ChallengeVhostUniqPathsEnabled {
+                if c.ChallengeVhostUniqPathsMin <= 0 {
+                        c.ChallengeVhostUniqPathsMin = 1500
+                }
+                if c.ChallengeVhostUniqPathsOff <= 0 {
+                        off := int(float64(c.ChallengeVhostUniqPathsMin) * 0.60)
+                        if off < 1 {
+                                off = 1
+                        }
+                        c.ChallengeVhostUniqPathsOff = off
+                }
+                if c.ChallengeVhostUniqPathsTTL <= 0 {
+                        c.ChallengeVhostUniqPathsTTL = 20 * time.Minute
+                }
+                if c.ChallengeVhostUniqPathsCap <= 0 {
+                        c.ChallengeVhostUniqPathsCap = 5000
+                }
+        }
 
 
 

@@ -149,6 +149,10 @@ type bucketSW struct {
 	ip40xPaths map[string]map[uint64]struct{}
 
 
+        // NEW: unique signals (memory-safe via hash sets with cap)
+        ipUniqPaths map[string]map[uint64]struct{} // ip -> set(hash(path))
+        ipUniqHosts map[string]map[uint64]struct{} // ip -> set(hash(host))
+
 	uas   map[string]int
 	refs  map[string]int
 	paths map[string]int
@@ -348,6 +352,12 @@ nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
     vhostUnderAttack  map[string]bool
     vhostLastChange   map[string]time.Time
 
+
+    // NEW: vhost uniqpaths state (phase 1) to avoid log spam + hysteresis
+    vhostUniqPathsActive    map[string]bool
+    vhostUniqPathsLastChange map[string]time.Time
+
+
     // --- ingest progress / stall logging (for "silent stops") ---
     progMu            sync.Mutex
     lastParsedAt      time.Time
@@ -409,6 +419,9 @@ if cfg.OpenRestyMode {
 
     e.vhostUnderAttack = make(map[string]bool)
     e.vhostLastChange  = make(map[string]time.Time)
+
+    e.vhostUniqPathsActive = make(map[string]bool)
+    e.vhostUniqPathsLastChange = make(map[string]time.Time)
 
 	// Enrichment is optional.
 	if cfg.UseEnrich {
@@ -794,6 +807,28 @@ case 5:
 		p = p[:i]
 	}
 	b.paths[p]++
+
+
+        // ------------------------------------------------------------
+        // NEW: unique-based challenge signals (phase 1)
+        // ------------------------------------------------------------
+        if rec.IP != "" {
+                // Unique paths per IP (sneaky scraper)
+                if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
+                        if b.ipUniqPaths == nil {
+                                b.ipUniqPaths = make(map[string]map[uint64]struct{})
+                        }
+                        addHashToSetWithCap(b.ipUniqPaths, rec.IP, hash64(p), e.cfg.ChallengeIPUniqPathsCap)
+                }
+
+                // Unique hosts per IP (scanner / vhost enumeration)
+                if e.cfg.ChallengeIPUniqHostsEnabled && e.cfg.ChallengeIPUniqHostsMin > 0 {
+                        if b.ipUniqHosts == nil {
+                                b.ipUniqHosts = make(map[string]map[uint64]struct{})
+                        }
+                        addHashToSetWithCap(b.ipUniqHosts, rec.IP, hash64(host), e.cfg.ChallengeIPUniqHostsCap)
+                }
+        }
 
 
         // Per-IP challenge counters (only allocate maps if a related threshold is enabled)
@@ -2446,6 +2481,27 @@ func hash64(s string) uint64 {
     _, _ = h.Write([]byte(s))
     return h.Sum64()
 }
+
+
+func addHashToSetWithCap(m map[string]map[uint64]struct{}, key string, h uint64, capN int) {
+    if key == "" || h == 0 {
+        return
+    }
+    if capN <= 0 {
+        capN = 512
+    }
+    set := m[key]
+    if set == nil {
+        set = make(map[uint64]struct{}, 8)
+        m[key] = set
+    }
+    // cap reached? stop tracking new uniques (count is already ">= cap")
+    if len(set) >= capN {
+        return
+    }
+    set[h] = struct{}{}
+}
+
 
 func hasAnyPrefix(s string, prefixes []string) bool {
     for _, p := range prefixes {
