@@ -18,6 +18,8 @@ import (
 func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/webdet/top-short", e.handleTopShort)
+	// aliases (compat)
+	mux.HandleFunc("/api/v1/webdet/top", e.handleTopShort)
 	mux.HandleFunc("/api/v1/webdet/suspicious", e.handleSuspicious)
 	mux.HandleFunc("/api/v1/webdet/drilldown", e.handleDrilldown)
 	mux.HandleFunc("/api/v1/webdet/hot-ips", e.handleHotIPs)
@@ -26,6 +28,9 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
         mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
+
+	// summary (new)
+	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
 
     // Challenge JSON API
     mux.HandleFunc("/api/v1/challenge/summary", e.handleChallengeSummary)
@@ -90,6 +95,24 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+
+type webdetSummary struct {
+	Now            time.Time `json:"now"`
+	WindowSec      float64   `json:"window_sec"`
+	LongHorizonSec float64   `json:"long_horizon_sec"`
+}
+
+func (e *Engine) handleWebdetSummary(w http.ResponseWriter, r *http.Request) {
+	resp := webdetSummary{
+		Now:            time.Now(),
+		WindowSec:      e.cfg.Window.Seconds(),
+		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+
 
 // topShortResponse τυλίγει τα rows μαζί με config-based μεταδεδομένα
 // για να μπορεί το CLI να δείχνει short window + long horizon.

@@ -48,7 +48,7 @@ local CFG = {
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
   -- Sliding OK TTL (cookie + bridge okState)
-  ok_ttl_sec = tonumber(os.getenv("CFM_OK_TTL_SEC") or "600"),
+  ok_ttl_sec = tonumber(os.getenv("CFM_OK_TTL_SEC") or "1800"),
   -- Rate limit for /nginx/ok/touch per IP
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 

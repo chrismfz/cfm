@@ -356,6 +356,7 @@ nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
 
     // Challenge API state (vhost/ip/events)
     chalAPI *ChallengeAPIStore
+    chalOnce sync.Once
 
 }
 
