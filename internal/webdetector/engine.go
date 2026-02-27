@@ -814,12 +814,19 @@ case 5:
         // ------------------------------------------------------------
         if rec.IP != "" {
                 // Unique paths per IP (sneaky scraper)
-                if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
-                        if b.ipUniqPaths == nil {
-                                b.ipUniqPaths = make(map[string]map[uint64]struct{})
-                        }
-                        addHashToSetWithCap(b.ipUniqPaths, rec.IP, hash64(p), e.cfg.ChallengeIPUniqPathsCap)
-                }
+
+// Unique paths per IP (sneaky scraper)
+// IMPORTANT: count path-only (no query) and ignore static assets
+// to avoid false positives on WP admin / heavy asset pages.
+if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
+    if !isStaticAssetPath(p) {
+        if b.ipUniqPaths == nil {
+            b.ipUniqPaths = make(map[string]map[uint64]struct{})
+        }
+        addHashToSetWithCap(b.ipUniqPaths, rec.IP, hash64(p), e.cfg.ChallengeIPUniqPathsCap)
+    }
+}
+
 
                 // Unique hosts per IP (scanner / vhost enumeration)
                 if e.cfg.ChallengeIPUniqHostsEnabled && e.cfg.ChallengeIPUniqHostsMin > 0 {
@@ -2514,6 +2521,39 @@ func hasAnyPrefix(s string, prefixes []string) bool {
     }
     return false
 }
+
+
+// isStaticAssetPath returns true for common static asset URLs that should not
+// contribute to "unique paths" counters (prevents WP admin false positives).
+// Input MUST be the normalized path (no query string).
+func isStaticAssetPath(p string) bool {
+    if p == "" || p == "-" {
+        return false
+    }
+    // Extension-based ignore (last path segment only)
+    seg := p
+    if i := strings.LastIndexByte(seg, '/'); i >= 0 && i+1 < len(seg) {
+        seg = seg[i+1:]
+    }
+    // strip any accidental query (defensive)
+    if i := strings.IndexByte(seg, '?'); i >= 0 {
+        seg = seg[:i]
+    }
+    if j := strings.LastIndexByte(seg, '.'); j >= 0 && j+1 < len(seg) {
+        ext := seg[j+1:]
+        switch ext {
+        case "css", "js", "mjs", "map",
+            "png", "jpg", "jpeg", "gif", "webp", "ico", "svg",
+            "woff", "woff2", "ttf", "eot", "otf",
+            "mp4", "webm", "mp3", "wav",
+            "pdf", "txt", "xml", "json":
+            return true
+        }
+    }
+    return false
+}
+
+
 
 func compileMalRules(list []string, def int) []malRule {
     if def <= 0 {

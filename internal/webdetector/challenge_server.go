@@ -189,7 +189,13 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
             }
 
             // Abuse blocking (many 4xx/5xx on non-verify paths)
-            s.abuseObserve(ip, host, uri, sw.status)
+// Abuse blocking (many 4xx/5xx on non-verify paths)
+// IMPORTANT: do NOT feed self-protection 429s into abuseObserve(),
+// otherwise a verify-loop (cookie/domain mismatch) escalates into
+// challenge_abuse firewall blocks.
+if !(sw.status == http.StatusTooManyRequests && sw.Header().Get("Retry-After") != "") {
+    s.abuseObserve(ip, host, uri, sw.status)
+}
 
         }
     })

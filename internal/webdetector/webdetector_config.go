@@ -198,8 +198,8 @@ func (c *Config) FillDefaults() {
         if c.ChallengeAbuseBadN <= 0 {
                 c.ChallengeAbuseBadN = 15
         }
-        if c.ChallengeAbuseBlockTTL <= 0 {
-                c.ChallengeAbuseBlockTTL = 1 * time.Hour
+        if c.ChallengeAbuseBlockTTL < 0 {
+                c.ChallengeAbuseBlockTTL = 8 * time.Hour
         }
         if c.ChallengeAbuseCooldown <= 0 {
                 c.ChallengeAbuseCooldown = 30 * time.Minute
