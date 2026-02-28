@@ -7,10 +7,10 @@ local CFG = {
 
   rule_xss      = true,
   rule_sqli     = true,
-  rule_wp_brute = true,
+  rule_wp_brute = false,
 
   -- New block rules (high-confidence, near-zero FP)
-  rule_traversal       = true,
+  rule_traversal       = false,
   rule_rce             = true,
   rule_exploit_methods = true,
 
@@ -195,22 +195,6 @@ end
 
 local function detect_traversal(uri, args)
   local s = lower(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
-
-  -- Classic traversal sequences
-  if has(s, "../")        then return true end
-  if has(s, "..\\")       then return true end
-
-  -- URL-encoded traversal (various partial encodings)
-  if has(s, "%2e%2e%2f")  then return true end  -- ../
-  if has(s, "%2e%2e/")    then return true end  -- ../ (partial)
-  if has(s, "..%2f")      then return true end  -- ../ (partial)
-  if has(s, "%2e%2e%5c")  then return true end  -- ..\
-  if has(s, "%2e%2e\\")   then return true end  -- ..\ (partial)
-  if has(s, "..%5c")      then return true end  -- ..\ (partial)
-
-  -- Double-encoded traversal (WAF bypass)
-  if has(s, "%252e%252e") then return true end  -- → %2e%2e → ..
-  if has(s, "%252f")      then return true end  -- → %2f   → /  (in traversal context)
 
   -- Null byte injection (always malicious)
   if has(s, "%00")        then return true end
