@@ -245,7 +245,7 @@ if w.ipIgnore != nil {
             // into cfm.challenges.log so trigger + solved appear in the same log.
             // action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
             if b := w.eng.NginxBridge(); b != nil {
-                b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration) {
+                b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string) {
                     suffix := ""
                     if enr := w.eng.Enricher(); enr != nil {
                         r := enr.Lookup(ip)
@@ -264,10 +264,32 @@ if w.ipIgnore != nil {
                             suffix = " - (" + strings.Join(parts, ", ") + ")"
                         }
                     }
+
+
+                    // Optional meta fields from Lua (host/uri/method)
+                    // Keep same format as CHALLENGE_* lines when available.
+                    meta := ""
+                    if host != "" {
+                        meta += " host=" + host
+                    }
+                    if uri != "" {
+                        meta += " uri=" + uri
+                    }
+                    if method != "" {
+                        meta += " method=" + method
+                    }
+
                     logging.LogfCHALLENGES(
-                        "[challenge] ip=%s result=%s reason=%s ttl=%s%s",
-                        ip, action+"_triggered", reason, ttl.String(), suffix,
+                        "[challenge] ip=%s%s result=%s reason=%s ttl=%s%s",
+                        ip,
+                        meta,
+                        action+"_triggered",
+                        reason,
+                        ttl.String(),
+                        suffix,
                     )
+
+
                 })
             }
 

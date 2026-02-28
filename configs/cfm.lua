@@ -312,6 +312,12 @@ if waf and waf.enabled and waf.enabled() then
     waf_action = waf_action or "challenge"  -- safe default
 
 
+    local push_host   = ngx.var.host or host or ""
+    local push_uri    = ngx.var.request_uri or uri or "/"
+    local push_method = ngx.req.get_method() or method or ""
+
+
+
 -- log only dryrun logic --
     if waf_action == "logonly" then
       -- Dry-run audit mode:
@@ -327,6 +333,9 @@ if waf and waf.enabled and waf.enabled() then
           action  = "logonly",
           ttl_sec = ttl or 600,
           reason  = reason,
+          host    = push_host,
+          uri     = push_uri,
+          method  = push_method,
         })
         local _, perr = http_post_unix("/nginx/ip", payload)
         if perr and CFG.debug then
@@ -356,6 +365,9 @@ if waf and waf.enabled and waf.enabled() then
           action  = "block",
           ttl_sec = ttl or 3600,
           reason  = reason,
+          host    = push_host,
+          uri     = push_uri,
+          method  = push_method,
         })
         local _, perr = http_post_unix("/nginx/ip", payload)
         if perr and CFG.debug then
@@ -381,6 +393,9 @@ if waf and waf.enabled and waf.enabled() then
           action  = "challenge",
           ttl_sec = ttl or 600,
           reason  = reason,
+          host    = push_host,
+          uri     = push_uri,
+          method  = push_method,
         })
         local _, perr = http_post_unix("/nginx/ip", payload)
         if perr and CFG.debug then

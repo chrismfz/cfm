@@ -63,9 +63,9 @@ type NginxBridge struct {
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
 	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), and TTL so the caller
-	// can log to cfm.challenges.log with enrichment.
+	// can log to cfm.challenges.log with enrichment. Optional metadata
 	// Set via SetTriggerHook. Called without b.mu held.
-	OnTrigger func(ip, action, reason string, ttl time.Duration)
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string)
 }
 
 
@@ -122,6 +122,10 @@ type nginxIPMsg struct {
 	Action string `json:"action"`  // "challenge" | "block"
 	TTLSec int    `json:"ttl_sec"`
 	Reason string `json:"reason,omitempty"`
+
+	Host   string `json:"host,omitempty"`
+	URI    string `json:"uri,omitempty"`      // prefer request_uri (includes query)
+	Method string `json:"method,omitempty"`
 }
 
 type nginxIPClearMsg struct {
@@ -228,7 +232,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string)) {
 	if b == nil {
 		return
 	}
@@ -611,6 +615,12 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 
 	reason := strings.TrimSpace(msg.Reason)
 
+	// normalize metadata (best-effort)
+	msg.Host = normalizeHost(msg.Host)
+	msg.URI = strings.TrimSpace(msg.URI)
+	msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
+
+
     // logonly is a "dry-run audit" action:
     // - it should be logged (via OnTrigger hook)
     // - but it MUST NOT create an active IP decision in the bridge
@@ -626,7 +636,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// Internal ChallengeIP/BlockIP calls from the Go engine don't set a reason
 	// (they log via challenge_rules.go / RecordIPChallenge instead).
 	if reason != "" && b.OnTrigger != nil {
-		b.OnTrigger(msg.IP, msg.Action, reason, ttl)
+		b.OnTrigger(msg.IP, msg.Action, reason, ttl, msg.Host, msg.URI, msg.Method)
 	}
 
 	w.WriteHeader(http.StatusOK)
