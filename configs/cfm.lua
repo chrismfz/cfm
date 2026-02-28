@@ -263,6 +263,8 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local ip     = real_ip()
+local peer_ip   = ngx.var.realip_remote_addr or ""
+local cf_ip     = ngx.var.http_cf_connecting_ip or ""
 local host   = ngx.var.host   or "-"
 local uri    = ngx.var.uri    or "-"
 local method = ngx.req.get_method() or "-"
@@ -305,6 +307,8 @@ if waf and waf.enabled and waf.enabled() then
     host   = host,
     ip     = ip,
     cookie = ngx.var.http_cookie or "",
+    peer   = peer_ip,
+    cf_ip  = cf_ip,
     shdict = SH,
   })
 
