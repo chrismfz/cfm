@@ -15,6 +15,19 @@ It includes a **unified Web Detector** (nginx / Apache / LiteSpeed / cPanel doml
   - **OpenResty in‑path mode** (no DNAT; OpenResty asks CFM for decisions via unix socket).
 - Our scoring system is already a model: a hand-crafted classifier based on signals we trust. - ML-Ready
 
+
+### CFM is now a unified L3--L7 enforcement platform combining:
+
+-   Firewall
+-   IDS/IPS
+-   Behavioral Web Detection
+-   OWASP‑inspired WAF
+-   Interactive Challenge Engine
+-   TLS-aware smart bridge
+
+
+
+
 More information at: https://infected.gr/category/cfm/
 
 ---
@@ -497,6 +510,177 @@ OPENRESTY_OK_IP_TTL = 15m
 ```
 
 ---
+
+# CFM -- OpenResty In‑Path Mode & Smart Bridge (Enhanced)
+
+CFM's nginx bridge has evolved from a simple decision proxy into a full
+in‑path L7 enforcement layer with:
+
+-   Lua-based WAF inspection (OWASP‑inspired rules)
+-   Behavioral escalation to CFM
+-   Per‑IP and per‑vhost anomaly detection
+-   Challenge orchestration (no DNAT required)
+-   TLS SNI integration via SSLCollector
+-   Micro‑cache compatibility
+
+------------------------------------------------------------------------
+
+# Architecture (In‑Path Mode)
+
+Client\
+↓\
+OpenResty (80/443)\
+→ Lua WAF (cfm_waf.lua)\
+→ CFM Decision Socket (cfm.lua)\
+→ Challenge (if required)\
+→ Proxy to origin
+
+------------------------------------------------------------------------
+
+# Smart Lua WAF Layer
+
+The bridge now performs per-request inspection before proxying.
+
+## What It Detects
+
+### 1) Path Inspection
+
+-   wp-admin probing
+-   xmlrpc abuse
+-   phpmyadmin scans
+-   .env leaks
+-   vendor/config exposure
+-   shell / eval / base64 patterns
+
+### 2) Query Inspection
+
+-   SQLi patterns (union select, sleep(), benchmark())
+-   XSS fragments (
+    ```{=html}
+    <script>
+    ```
+    , javascript:, onerror=)
+-   LFI/RFI attempts (../, file://, http:// injection)
+-   null byte abuse
+-   excessive parameter length
+
+### 3) Header Sanity
+
+-   Missing UA
+-   Suspicious UA
+-   HTTP/1.0 anomalies
+-   Invalid Host header
+-   Malformed content-type
+
+### 4) Immediate Enforcement Options
+
+-   Visibility only
+-   Escalate to CFM (challenge)
+-   Immediate 403 block
+
+------------------------------------------------------------------------
+
+# New Advanced Challenge Rules
+
+## Per-IP Unique Paths
+
+``` ini
+CHALLENGE_IP_UNIQPATHS_ENABLED = 1
+CHALLENGE_IP_UNIQPATHS_MIN = 200
+CHALLENGE_IP_UNIQPATHS_TTL = 20m
+CHALLENGE_IP_UNIQPATHS_CAP = 512
+```
+
+Detects directory scanners enumerating large path sets.
+
+------------------------------------------------------------------------
+
+## Per-IP Unique Hosts (Multi-Vhost Scanners)
+
+``` ini
+CHALLENGE_IP_UNIQHOSTS_ENABLED = 1
+CHALLENGE_IP_UNIQHOSTS_MIN = 10
+CHALLENGE_IP_UNIQHOSTS_TTL = 30m
+CHALLENGE_IP_UNIQHOSTS_CAP = 128
+```
+
+Detects bots scanning many vhosts from a single IP.
+
+------------------------------------------------------------------------
+
+## Per-Vhost Unique Paths (Bridge-Level)
+
+``` ini
+CHALLENGE_VHOST_UNIQPATHS_ENABLED = 1
+CHALLENGE_VHOST_UNIQPATHS_MIN = 1500
+CHALLENGE_VHOST_UNIQPATHS_OFF = 900
+CHALLENGE_VHOST_UNIQPATHS_TTL = 20m
+CHALLENGE_VHOST_UNIQPATHS_CAP = 5000
+```
+
+Triggers automatic "under attack" mode for heavy path spray attacks.
+
+------------------------------------------------------------------------
+
+## Malformed Request Burst
+
+``` ini
+CHALLENGE_MALFORMED_MIN = 15
+CHALLENGE_MALFORMED_TTL = 30m
+```
+
+Counts HTTP 400 / 414 / 431 bursts to detect protocol abuse and fuzzers.
+
+------------------------------------------------------------------------
+
+## UA Churn (User-Agent Rotation)
+
+``` ini
+CHALLENGE_UNIQUA_MIN = 8
+CHALLENGE_UNIQUA_TTL = 20m
+CHALLENGE_UNIQUA_CAP = 64
+```
+
+Detects bots rotating User-Agents to evade scoring.
+
+------------------------------------------------------------------------
+
+# Enforcement Strategy
+
+These new rules complement:
+
+-   Short-window WebDetector scoring
+-   Long-window suspicious scoring
+-   Lua WAF inspection
+-   nftables enforcement (optional)
+-   Challenge cooldown protection
+
+The result is:
+
+Layer 3/4 (nftables)\
+Layer 7 (Lua WAF)\
+Behavioral detection (WebDetector)\
+Interactive mitigation (Challenge System)
+
+------------------------------------------------------------------------
+
+# Recommended Deployment
+
+``` ini
+OPENRESTY_MODE = 1
+OPENRESTY_SOCK = /var/run/cfm/cfm_nginx.sock
+OPENRESTY_TOKEN = cfm
+OPENRESTY_OK_IP_TTL = 15m
+```
+
+In nginx.conf:
+
+    access_by_lua_file /usr/local/openresty/nginx/lua/cfm.lua;
+    ssl_certificate_by_lua_file /usr/local/openresty/nginx/lua/sslcollector.lua;
+
+------------------------------------------------------------------------
+
+
 
 # 🔐 TLS for Challenge Server (sslcollector integration)
 
