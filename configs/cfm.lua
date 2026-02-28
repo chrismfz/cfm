@@ -191,6 +191,40 @@ end
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
+-- Notify webdetector engine about a WAF-terminated request so the per-IP
+-- WAF 403 counter (IP403WAF_COUNT) can escalate to a firewall block.
+-- Fire-and-forget over the same unix socket. No cooldown: we want every hit
+-- counted (the Go engine does the windowed aggregation).
+local function observe_waf(ip, host, uri, method, status, reason)
+  if not ip or ip == "" then return end
+  local payload = cjson.encode({
+    ip     = ip,
+    host   = host   or "",
+    uri    = uri    or "/",
+    method = method or "",
+    status = status or 403,
+    reason = reason or "",
+  })
+  -- best-effort: ignore errors (attack path, must not stall the response)
+  local s = ngx.socket.tcp()
+  if not s then return end
+  s:settimeouts(50, 50, 50)   -- 50 ms hard cap; never block the 403 response
+  local ok = s:connect("unix:" .. CFG.sock_path)
+  if not ok then s:close(); return end
+  local req =
+    "POST /nginx/observe HTTP/1.0\r\n" ..
+    "Host: cfm\r\n" ..
+    "Content-Type: application/json\r\n" ..
+    "Content-Length: " .. tostring(#payload) .. "\r\n" ..
+    (CFG.token ~= "" and (CFG.token_header .. ": " .. CFG.token .. "\r\n") or "") ..
+    "\r\n" .. payload
+  s:send(req)
+  s:close()   -- fire-and-forget; don't read response
+end
+
+
+
+
 local function touch_ok(ip)
   if not SH then return end
   local k = "ok_touch|" .. (ip or "-")
@@ -382,6 +416,10 @@ if waf and waf.enabled and waf.enabled() then
       log_route(ngx.WARN, "waf_block ip=" .. ip .. " host=" .. host ..
         " uri=" .. uri .. " reason=" .. tostring(reason) ..
         " ttl=" .. tostring(ttl or 3600))
+
+      -- Observe every WAF block so the engine's IP403WAF counter can
+      -- escalate to a hard firewall block when threshold is exceeded.
+      observe_waf(ip, host, ngx.var.request_uri or uri, method, 403, reason)
 
       return ngx.exit(CFG.block_code)
 

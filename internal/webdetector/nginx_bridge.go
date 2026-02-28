@@ -23,6 +23,7 @@
 package webdetector
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -66,6 +67,11 @@ type NginxBridge struct {
 	// can log to cfm.challenges.log with enrichment. Optional metadata
 	// Set via SetTriggerHook. Called without b.mu held.
 	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string)
+
+        // OnObserve is called when OpenResty (or others) reports an observed request outcome.
+        // Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
+        // Called without b.mu held.
+        OnObserve func(ip, host, uri, method string, status int, reason string)
 }
 
 
@@ -146,6 +152,21 @@ type nginxOKTouchMsg struct {
     IP     string `json:"ip"`
     TTLSec int    `json:"ttl_sec"`
 }
+
+
+// Observation from OpenResty/WAF: "I returned status X for this request"
+// POST /nginx/observe
+// { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL" }
+type nginxObserveMsg struct {
+    IP     string `json:"ip"`
+    Host   string `json:"host,omitempty"`
+    URI    string `json:"uri,omitempty"`      // request_uri preferred (includes query)
+    Method string `json:"method,omitempty"`
+    Status int    `json:"status"`
+    Reason string `json:"reason,omitempty"`
+}
+
+
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
@@ -238,6 +259,17 @@ func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time
 	}
 	b.OnTrigger = fn
 }
+
+
+// SetObserveHook registers a callback for observation events (WAF 403, etc).
+func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason string)) {
+        if b == nil {
+                return
+        }
+        b.OnObserve = fn
+}
+
+
 
 func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
@@ -507,6 +539,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/vhost",      b.handleVhostPush)
 	mux.HandleFunc("/nginx/vhost/clear", b.handleVhostClear)
 	mux.HandleFunc("/nginx/ok/touch",   b.handleOKTouch)
+        mux.HandleFunc("/nginx/observe",    b.handleObserve)
 	mux.HandleFunc("/nginx/status",     b.handleStatus)
 
 	srv := &http.Server{
@@ -753,6 +786,58 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusOK)
     _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ttl_sec": int(ttl.Seconds())})
 }
+
+
+
+// handleObserve: OpenResty reports an observed request outcome (e.g. WAF returned 403).
+// POST /nginx/observe { "ip":"1.2.3.4", "host":"a.com", "uri":"/x", "method":"get", "status":403, "reason":"PAY_XSS" }
+func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
+    if !b.checkToken(r) {
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+    if r.Method != http.MethodPost {
+        http.Error(w, "method", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Defensive: cap body size (avoid abuse over the socket)
+    r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+    var msg nginxObserveMsg
+    dec := json.NewDecoder(bufio.NewReader(r.Body))
+    if err := dec.Decode(&msg); err != nil {
+        http.Error(w, "bad json", http.StatusBadRequest)
+        return
+    }
+
+    ip := strings.TrimSpace(msg.IP)
+    if ip == "" {
+        http.Error(w, "bad fields", http.StatusBadRequest)
+        return
+    }
+
+    host := normalizeHost(msg.Host)
+    uri := strings.TrimSpace(msg.URI)
+    method := strings.ToLower(strings.TrimSpace(msg.Method))
+    status := msg.Status
+    reason := strings.TrimSpace(msg.Reason)
+
+    // Sanity: allow 100..599
+    if status < 100 || status > 599 {
+        status = 0
+    }
+
+    // Fire hook (do not block bridge). The hook must be fast / non-blocking.
+    if b.OnObserve != nil {
+        b.OnObserve(ip, host, uri, method, status, reason)
+    }
+
+    w.WriteHeader(http.StatusOK)
+    _ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+
 
 
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {

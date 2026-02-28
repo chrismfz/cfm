@@ -133,6 +133,8 @@ type bucketSW struct {
 	ipsMalPath map[string]int
 	ipsMalRule map[string]map[int]int // ip -> ruleIndex -> count
 
+	ips403WAF map[string]int // WAF-origin 403s (from OpenResty cfm_waf.lua via observe)
+
     // Challenge paths counters (for "challenge-only" actions)
     ipsChalPath map[string]int
     ipsChalRule map[string]map[int]int // ip -> ruleIndex -> count
@@ -1751,6 +1753,8 @@ func proposeIPActions(row IPSignals) []IPActionProposal {
             return []IPActionProposal{{Action: "block", Reason: "web_404_flood", Score: row.Score}}
         case strings.HasPrefix(r, "403_flood"):
             return []IPActionProposal{{Action: "block", Reason: "web_403_flood", Score: row.Score}}
+        case strings.HasPrefix(r, "403waf_flood"):
+            return []IPActionProposal{{Action: "block", Reason: "web_403waf_flood", Score: row.Score}}
         case strings.HasPrefix(r, "agent_flood"):
             return []IPActionProposal{{Action: "block", Reason: "web_agent_flood", Score: row.Score}}
         case strings.HasPrefix(r, "malpath_flood"):
@@ -1795,6 +1799,7 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                 req    int
                 vhosts map[string]struct{}
                 c403   int
+                c403WAF int
                 c404   int
                 cAgent int
                 cMal   int
@@ -1835,6 +1840,19 @@ func (e *Engine) IPShort(limit int) []IPSignals {
                                         a.c403 += n
                                 }
                         }
+
+                        if b.ips403WAF != nil {
+                                for ip, n := range b.ips403WAF {
+                                        a := stats[ip]
+                                        if a == nil {
+                                                a = &agg{vhosts: make(map[string]struct{})}
+                                                stats[ip] = a
+                                        }
+                                        a.c403WAF += n
+                                }
+                        }
+
+
                         if b.ips404 != nil {
                                 for ip, n := range b.ips404 {
                                         a := stats[ip]
@@ -1941,6 +1959,12 @@ if b.ip40xPaths != nil {
             hard = true
             reasons = append(reasons, fmt.Sprintf("403_flood(%d/%d)", a.c403, e.cfg.IP403Count))
         }
+
+        if e.cfg.IP403WAFCount > 0 && a.c403WAF >= e.cfg.IP403WAFCount {
+            hard = true
+            reasons = append(reasons, fmt.Sprintf("403waf_flood(%d/%d)", a.c403WAF, e.cfg.IP403WAFCount))
+        }
+
         if e.cfg.AgentCount > 0 && a.cAgent >= e.cfg.AgentCount {
             hard = true
             reasons = append(reasons, fmt.Sprintf("agent_flood(%d/%d)", a.cAgent, e.cfg.AgentCount))
@@ -2310,6 +2334,119 @@ func pathMatchAny(path string, subs []string) bool {
 
 
 
+// InjectObserved injects a synthetically-observed request outcome into the
+// short-window state. Called via OnObserve hook when OpenResty/cfm_waf.lua
+// reports a WAF-terminated request (e.g. 403) that never reached upstream and
+// therefore never appeared in the access log.
+//
+// Thread-safe. Non-blocking.
+func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason string) {
+    if ip == "" {
+        return
+    }
+    // Normalize just like ingest() does
+    if host == "" {
+        host = "_waf"  // sentinel vhost for WAF hits with no host header
+    }
+    host = strings.ToLower(host)
+    if uri == "" {
+        uri = "/"
+    }
+    p := uri
+    if i := strings.IndexByte(p, '?'); i >= 0 {
+        p = p[:i]
+    }
+    method = strings.ToLower(method)
+
+    now := time.Now()
+    rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
+
+    rec := LogRec{
+        TS:     float64(now.UnixNano()) / 1e9,
+        IP:     ip,
+        Host:   host,
+        Method: method,
+        URI:    p,
+        Status: status,
+    }
+
+    e.mu.Lock()
+    defer e.mu.Unlock()
+
+    hs := e.hosts[host]
+    if hs == nil {
+        hs = &hostState{
+            buckets: make([]bucketSW, 0, 8),
+            samples: core.NewSampleRing(e.cfg.SampleLimit),
+        }
+        e.hosts[host] = hs
+    }
+    hs.samples.Add(host, rawLine)
+
+    bDur := e.cfg.Every
+    if bDur <= 0 {
+        bDur = 5 * time.Second
+    }
+    t := tsToTime(rec.TS)
+
+    // prune stale buckets
+    cutoff := t.Add(-e.cfg.Window)
+    i := 0
+    for ; i < len(hs.buckets); i++ {
+        if hs.buckets[i].to.After(cutoff) {
+            break
+        }
+    }
+    if i > 0 {
+        hs.buckets = append([]bucketSW(nil), hs.buckets[i:]...)
+    }
+
+    var b *bucketSW
+    if len(hs.buckets) == 0 {
+        start := t.Truncate(bDur)
+        hs.buckets = append(hs.buckets, newBucketSW(start, bDur))
+        b = &hs.buckets[0]
+    } else {
+        last := &hs.buckets[len(hs.buckets)-1]
+        if !t.Before(last.to) {
+            start := t.Truncate(bDur)
+            hs.buckets = append(hs.buckets, newBucketSW(start, bDur))
+            b = &hs.buckets[len(hs.buckets)-1]
+        } else {
+            b = last
+        }
+    }
+
+    // Count in overall totals (so host appears in snapshots/webtop)
+    b.total++
+    b.c4xx++
+    b.c403++
+
+    if b.ips == nil { b.ips = make(map[string]int) }
+    b.ips[ip]++
+    if b.ipSample == nil { b.ipSample = make(map[string]string) }
+    if _, ok := b.ipSample[ip]; !ok { b.ipSample[ip] = rawLine }
+
+    // WAF-specific 403 counter (separate threshold + kind)
+    if status == 403 && e.cfg.IP403WAFCount > 0 {
+        if b.ips403WAF == nil { b.ips403WAF = make(map[string]int) }
+        b.ips403WAF[ip]++
+    }
+
+    // Also feed into the combined 40x combo counter if enabled
+    if e.cfg.IP40xComboCount > 0 && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
+        if b.ips40x == nil { b.ips40x = make(map[string]int) }
+        b.ips40x[ip]++
+        if e.cfg.IP40xComboUniquePaths > 0 {
+            if b.ip40xPaths == nil { b.ip40xPaths = make(map[string]map[uint64]struct{}) }
+            set := b.ip40xPaths[ip]
+            if set == nil { set = make(map[uint64]struct{}); b.ip40xPaths[ip] = set }
+            set[hash64(p)] = struct{}{}
+        }
+    }
+}
+
+
 
 // emitIPBlocks emits core.Alert for IPs that should be blocked (per IPShort proposals).
 // This is meant to be consumed by the existing autosink blocker pipeline.
@@ -2360,6 +2497,10 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
                         case strings.HasPrefix(r, "403_flood"):
                                 kind = "WEB/403"
                                 class = "403_flood"
+                                limit = r
+                        case strings.HasPrefix(r, "403waf_flood"):
+                                kind = "WEB/403WAF"
+                                class = "403waf_flood"
                                 limit = r
                         case strings.HasPrefix(r, "agent_flood"):
                                 kind = "WEB/BOT"

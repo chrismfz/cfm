@@ -291,6 +291,20 @@ if w.ipIgnore != nil {
 
 
                 })
+
+
+
+                // NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
+                // into the webdetector engine so the existing "403 after X tries"
+                // logic can escalate to firewall blocks normally (no double log parsing).
+                b.SetObserveHook(func(ip, host, uri, method string, status int, reason string) {
+                    // Non-blocking: InjectObserved takes e.mu.Lock but returns fast.
+                    // Called from bridge's HTTP handler goroutine; must not block.
+                    w.eng.InjectObserved(ip, host, uri, method, status, reason)
+                })
+
+
+
             }
 
             // Hook challenge-server abuse into the unified detector sink.
@@ -371,6 +385,7 @@ if w.ipIgnore != nil {
             webdet.SetChallengeAbuseHook(nil)
             if b := w.eng.NginxBridge(); b != nil {
                 b.SetTriggerHook(nil)
+                b.SetObserveHook(nil)
             }
             waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
             defer cancel()
@@ -529,6 +544,7 @@ cfg := webdet.Config{
 
 	IP404Count: kvInt(kv, "IP404_COUNT", 0),
 	IP403Count: kvInt(kv, "IP403_COUNT", 0),
+	IP403WAFCount: kvInt(kv, "IP403WAF_COUNT", 0),
 
 	// 40x combo (403+404) detector
 	IP40xComboCount:       kvInt(kv, "IP40X_COMBO", 0),
