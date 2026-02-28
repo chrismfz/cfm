@@ -83,7 +83,7 @@ type bridgeCfg struct {
 }
 
 type bridgeIPEntry struct {
-	Action  string    // "challenge" | "block"
+	Action  string    // "challenge" | "block"  |  "logonly" 
 	Expires time.Time
 	Reason  string
 }
@@ -600,7 +600,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block") {
+    if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
@@ -611,9 +611,15 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 
 	reason := strings.TrimSpace(msg.Reason)
 
-	b.mu.Lock()
-	b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
-	b.mu.Unlock()
+    // logonly is a "dry-run audit" action:
+    // - it should be logged (via OnTrigger hook)
+    // - but it MUST NOT create an active IP decision in the bridge
+    if msg.Action != "logonly" {
+        b.mu.Lock()
+        b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
+        b.mu.Unlock()
+    }
+
 
 	// Fire the trigger hook when a reason is present (i.e. the push came from
 	// cfm_waf.lua or another external caller that knows why it triggered).

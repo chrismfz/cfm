@@ -14,9 +14,14 @@ local CFG = {
   rule_rce             = true,
   rule_exploit_methods = true,
 
+  -- Dry-run / audit rules (LOGONLY)
+  -- Useful to measure FP rate before enabling challenge/block.
+  rule_logonly_cmd_params = true,
+  rule_logonly_serialize  = true,
+
   -- Cookie-less high-RPS challenge (needs shdict + cookie in ctx)
   rule_cookieless          = true,
-  cookieless_rps_threshold = 12,  -- req/s per IP without Cookie
+  cookieless_rps_threshold = 30,  -- req/s per IP without Cookie
   cookieless_window_sec    = 10,  -- sliding window
 
   default_ttl_sec   = 600,   -- 10m challenge TTL
@@ -175,14 +180,53 @@ local function detect_cookieless_rps(ip, cookie, shdict)
   return cnt >= threshold
 end
 
--- ── Public API ────────────────────────────────────────────────────────────────
+-- ── LOGONLY detectors (audit mode) ───────────────────────────────────────────
+-- Return a subrule tag string (e.g. "CMD_EXEC") or nil.
+
+-- Detect suspicious "command/eval" parameter keys (low FP if key-only).
+-- Examples: ?cmd=, &exec=, &system=, &eval=
+local function detect_cmd_param_key(args)
+  local a = lower(cap(args or "", CFG.max_scan_len))
+  if a == "" then return nil end
+
+  -- key-only matches: look for "?key=" or "&key="
+  if has(a, "?cmd=") or has(a, "&cmd=") then return "CMD_CMD" end
+  if has(a, "?exec=") or has(a, "&exec=") then return "CMD_EXEC" end
+  if has(a, "?system=") or has(a, "&system=") then return "CMD_SYSTEM" end
+  if has(a, "?passthru=") or has(a, "&passthru=") then return "CMD_PASSTHRU" end
+  if has(a, "?shell_exec=") or has(a, "&shell_exec=") then return "CMD_SHELL_EXEC" end
+  if has(a, "?eval=") or has(a, "&eval=") then return "CMD_EVAL" end
+  if has(a, "?assert=") or has(a, "&assert=") then return "CMD_ASSERT" end
+
+  return nil
+end
+
+-- Detect PHP serialized object markers (keep strict → lower FP).
+-- Looks for: O:<n>:"Class" or URL-encoded equivalent.
+local function detect_php_serialize(args)
+  local a = lower(cap(args or "", CFG.max_scan_len))
+  if a == "" then return nil end
+
+  -- plain: o:8:"classname"
+  if has(a, "o:") and has(a, ":\"") then return "SER_O_PLAIN" end
+  if has(a, "c:") and has(a, ":\"") then return "SER_C_PLAIN" end
+
+  -- url-encoded: o%3a8%3a%22classname%22
+  if has(a, "o%3a") and has(a, "%22") then return "SER_O_URL" end
+  if has(a, "c%3a") and has(a, "%22") then return "SER_C_URL" end
+
+  return nil
+end
+
+-- ── Public API ───────────────────────────────────────────────────────────────
 --
 -- Returns: hit(bool), reason(string), ttl_sec(int), action(string)
 --   action = "block"     → 403, do not proxy
 --   action = "challenge" → route to challenge server
+--   action = "logonly"   → log/push to bridge but DO NOT challenge/block
 --
 -- Rule priority (descending):
---   traversal > rce > exploit_method > wp_brute > xss > sqli > cookieless
+--   traversal > rce > exploit_method > wp_brute > xss > sqli > cookieless > logonly
 --
 function _M.check(ctx)
   if not CFG.enabled then
@@ -237,11 +281,27 @@ function _M.check(ctx)
     return true, "WAF_COOKIELESS_RPS", CFG.default_ttl_sec, "challenge"
   end
 
+  -- 8) LOGONLY: cmd/eval parameter keys (audit)
+  if CFG.rule_logonly_cmd_params then
+    local tag = detect_cmd_param_key(args)
+    if tag then
+      return true, "WAF_LOGONLY_CMD_PARAM:" .. tag, CFG.default_ttl_sec, "logonly"
+    end
+  end
+
+  -- 9) LOGONLY: PHP serialize markers (audit)
+  if CFG.rule_logonly_serialize then
+    local tag = detect_php_serialize(args)
+    if tag then
+      return true, "WAF_LOGONLY_SERIALIZE:" .. tag, CFG.default_ttl_sec, "logonly"
+    end
+  end
+
   return false, nil, nil, nil
 end
 
 -- Anti-spam: returns true if we should push to /nginx/ip now.
--- reason is included in the key so block/challenge don't share cooldown.
+-- reason is included in the key so block/challenge/logonly don't share cooldown.
 function _M.should_push(shdict, ip, reason)
   if not shdict or not ip or ip == "" then return true end
   local k  = "wafpush|" .. (reason or "WAF") .. "|" .. ip

@@ -311,6 +311,38 @@ if waf and waf.enabled and waf.enabled() then
   if hit then
     waf_action = waf_action or "challenge"  -- safe default
 
+
+-- log only dryrun logic --
+    if waf_action == "logonly" then
+      -- Dry-run audit mode:
+      -- - Log to cfm.challenges.log (via nginx bridge trigger hook)
+      -- - Do NOT challenge and do NOT block
+      ngx.header["X-CFM-Action"] = "logonly"
+      ngx.var.cfm_upstream = "cfm_apache"
+      ngx.var.cfm_pass = origin_pass_for(scheme)
+
+      if waf.should_push and waf.should_push(SH, ip, reason) then
+        local payload = cjson.encode({
+          ip      = ip,
+          action  = "logonly",
+          ttl_sec = ttl or 600,
+          reason  = reason,
+        })
+        local _, perr = http_post_unix("/nginx/ip", payload)
+        if perr and CFG.debug then
+          log_route(ngx.WARN, "waf logonly push failed: " .. tostring(perr))
+        end
+      end
+
+      log_route(ngx.INFO, "waf_logonly ip=" .. ip .. " host=" .. host ..
+        " uri=" .. uri .. " reason=" .. tostring(reason) ..
+        " ttl=" .. tostring(ttl or 600))
+
+      return
+    end
+
+
+
     if waf_action == "block" then
       -- High-confidence rules: traversal, RCE, TRACE/TRACK/CONNECT.
       -- Hard 403 — no challenge page, no cookie dance.
