@@ -59,8 +59,8 @@ func runMySQLTopDefault(baseURL string) error {
         return "🟢"
     }
 
-    fmt.Printf("[mysqltop] %s  %s  flavor=%s  mode=%s\n",
-        state.Ts.Format("15:04:05"), state.Flavor, state.Flavor, "")
+    fmt.Printf("[mysqltop] %s  flavor=%s  mode=%s\n",
+        state.Ts.Format("15:04:05"), state.Flavor, state.Mode)
     fmt.Printf("\nCONNECTIONS: %d/%d (%.0f%%) %s   Active=%d  Sleep=%d  Locked=%d\n",
         state.TotalConn, state.MaxConn, state.ConnPct,
         riskIcon(state.ConnPct),

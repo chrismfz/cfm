@@ -109,7 +109,10 @@ func NewMySQL(cfg LoginConfig) *MySQL {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 if cfg.DnsTimeout <= 0 { cfg.DnsTimeout = 600 * time.Millisecond }
-if !cfg.StrictEmbeddedConfirm { /* leave as is */ } else { cfg.StrictEmbeddedConfirm = true }
+// StrictEmbeddedConfirm defaults to true.
+// Callers must explicitly set it to false to allow unconfirmed embedded IPs
+// (e.g. hostnames like "200-105-141-150.example.com" without PTR confirmation).
+if !cfg.StrictEmbeddedConfirm { cfg.StrictEmbeddedConfirm = true }
 
 
 	m := &MySQL{cfg: cfg}

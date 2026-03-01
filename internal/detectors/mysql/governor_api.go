@@ -1,9 +1,8 @@
 package mysql
 
 import (
-    "net/http"
     "encoding/json"
-    "time"
+    "net/http"
 )
 
 // RegisterHTTP registers all mysql governor API routes onto an existing mux.
@@ -46,7 +45,7 @@ func (g *Governor) handleTop(w http.ResponseWriter, r *http.Request) {
         "conn_pct": s.ConnPct,
         "total":    s.TotalConn,
         "max":      s.MaxConn,
-        "mode":     g.cfg.Mode,
+        "mode":     s.Mode, // read from state, not cfg — avoids holding two locks
     })
 }
 
@@ -64,7 +63,7 @@ func (g *Governor) handleKills(w http.ResponseWriter, r *http.Request) {
     writeGovernorJSON(w, http.StatusOK, map[string]any{
         "ts":    s.Ts,
         "kills": s.RecentKills,
-        "mode":  g.cfg.Mode,
+        "mode":  s.Mode,
     })
 }
 
@@ -73,15 +72,4 @@ func writeGovernorJSON(w http.ResponseWriter, code int, v any) {
     w.Header().Set("X-Source", "cfm-mysql-governor")
     w.WriteHeader(code)
     _ = json.NewEncoder(w).Encode(v)
-}
-
-// GovernorTopResponse is what cfm mysqltop reads.
-type GovernorTopResponse struct {
-    Ts      time.Time   `json:"ts"`
-    Flavor  string      `json:"flavor"`
-    ConnPct float64     `json:"conn_pct"`
-    Total   int         `json:"total"`
-    Max     int         `json:"max"`
-    Mode    string      `json:"mode"`
-    PerUser []UserStat  `json:"per_user"`
 }

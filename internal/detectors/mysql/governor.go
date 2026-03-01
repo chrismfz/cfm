@@ -81,18 +81,19 @@ type Process struct {
 
 // GovernorState is the snapshot read by the API and CLI.
 type GovernorState struct {
-	Ts         time.Time
-	MaxConn    int
-	TotalConn  int
-	ActiveConn int
-	SleepConn  int
-	LockedConn int
-	ConnPct    float64
-	PerUser    []UserStat
-	Running    []Process   // active + waiting, sorted by time desc
-	LockGraph  []LockGroup // blocker -> waiters
+	Ts          time.Time
+	MaxConn     int
+	TotalConn   int
+	ActiveConn  int
+	SleepConn   int
+	LockedConn  int
+	ConnPct     float64
+	PerUser     []UserStat
+	Running     []Process    // active + waiting, sorted by time desc
+	LockGraph   []LockGroup  // blocker -> waiters
 	RecentKills []KillRecord
-	Flavor     string // "10.11.7-MariaDB" | "8.0.36"
+	Flavor      string // "10.11.7-MariaDB" | "8.0.36"
+	Mode        string // "monitor" | "enforce" — copied from GovernorConfig each poll
 }
 
 // UserStat is per-user connection summary.
@@ -128,8 +129,8 @@ type KillRecord struct {
 
 // Governor is the MySQL monitoring / optional kill engine.
 type Governor struct {
-	cfg   GovernorConfig
-	db    *sql.DB
+	cfg GovernorConfig
+	db  *sql.DB
 
 	mu    sync.RWMutex
 	state GovernorState
@@ -142,8 +143,13 @@ type Governor struct {
 	flavor  string // detected once at startup
 
 	// ring buffer for recent kills (last 100)
-	killRing []KillRecord
+	killRing   []KillRecord
 	killRingMu sync.Mutex
+
+	// pressure notification cooldown — prevents re-alerting every 5s poll tick
+	// during sustained connection pressure. Each severity level has its own timer.
+	lastPressureWarn time.Time
+	lastPressureCrit time.Time
 }
 
 type killEntry struct {
@@ -263,6 +269,9 @@ func (g *Governor) buildState(procs []Process, maxConn int) GovernorState {
 		Ts:      now,
 		MaxConn: maxConn,
 		Flavor:  g.flavor,
+		// Mode is copied into state so the API/CLI can read it without
+		// needing access to the private cfg field.
+		Mode: g.cfg.Mode,
 	}
 
 	userMap := map[string]*UserStat{}
@@ -603,8 +612,23 @@ func (g *Governor) hasOpenTxn(ctx context.Context, pid int64) bool {
 	return n > 0
 }
 
+// pressureNotifyCooldown is the minimum time between two pressure alerts of the
+// same severity.  Without this, every 5s poll during a sustained high-connection
+// event would enqueue a notify — wasteful and noisy.
+const pressureNotifyCooldown = 5 * time.Minute
+
+// checkConnPressure fires notify alerts when connections approach max_connections.
+// Re-alerts at most once per pressureNotifyCooldown per severity level.
 func (g *Governor) checkConnPressure(state GovernorState) {
+	now := time.Now()
+
 	if state.ConnPct >= g.cfg.ConnActPct {
+		if now.Sub(g.lastPressureCrit) < pressureNotifyCooldown {
+			return
+		}
+		g.lastPressureCrit = now
+		g.lastPressureWarn = now // crit supersedes warn; reset both
+
 		top := ""
 		if len(state.PerUser) > 0 {
 			top = fmt.Sprintf("  top user: %s (%d conns)", state.PerUser[0].User, state.PerUser[0].Total)
@@ -616,7 +640,14 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 				state.TotalConn, state.MaxConn, state.ConnPct, top),
 			Severity: "critical",
 		})
-	} else if state.ConnPct >= g.cfg.ConnWarnPct {
+		return
+	}
+
+	if state.ConnPct >= g.cfg.ConnWarnPct {
+		if now.Sub(g.lastPressureWarn) < pressureNotifyCooldown {
+			return
+		}
+		g.lastPressureWarn = now
 		notify.Enqueue(notify.Event{
 			Kind:    "MYSQL/CONN_PRESSURE",
 			Section: "mysql_governor",
