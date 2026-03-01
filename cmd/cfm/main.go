@@ -46,7 +46,7 @@ import (
 	"cfm/internal/sslcollector"
 	"cfm/internal/vhostmap"
 	"cfm/internal/dnat"
-
+	"cfm/internal/detectors/mysql"
 )
 
 var (
@@ -93,7 +93,16 @@ func getBackend() firewall.Backend {
 //   curl http://127.0.0.1:6060/metrics
 //
 
-func startDebug(addr string) {
+// startDebug starts the internal HTTP server that hosts:
+//   - pprof endpoints       (/debug/pprof/)
+//   - manual IP unblock     (/unblock)
+//   - MySQL governor API    (/api/v1/mysql/) — only if gov != nil
+//
+// gov may be nil when MySQL is not installed / credentials not yet configured
+// in that case the governor routes are simply not registered and everything else
+// works normally.
+
+func startDebug(addr string, gov *mysql.Governor) {
     // Resolve cfgDir once (so /unblock’s background job can edit cfm.deny)
     var cfgDir string
     if d, ok := resolveConfigDir(""); ok {
@@ -103,6 +112,7 @@ func startDebug(addr string) {
     // Grab the already-initialized backend (daemon mode)
     be := getBackend()
 mux := http.NewServeMux()
+
 
     // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
         mux.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +230,12 @@ mux := http.NewServeMux()
     mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 
+
+    // MySQL governor API — same port, no new port needed
+    if gov != nil {
+        gov.RegisterHTTP(mux)
+        logging.Logf("[debug] mysql governor API registered on %s/api/v1/mysql/", addr)
+    }
 
 
 // Optional: small banner without requiring logging.Init
@@ -395,6 +411,19 @@ case "ssl", "sslcollector", "ssl-collector":
             }
 
 
+case "mysqltop", "mysql-top" , "mysql" :
+    addr := os.Getenv("CFM_API_ADDR")
+    if addr == "" {
+        addr = "http://127.0.0.1:6060"
+    }
+    if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
+        fmt.Fprintln(os.Stderr, "mysqltop error:", err)
+        os.Exit(1)
+    }
+
+
+
+
 
 
 	default:
@@ -430,6 +459,7 @@ Usage:
   cfm dnat
 
   cfm webtop  <vhost> -- Live stats for specific vhost
+  cfm mysqltop -- MySQL Live stats
 
 Options (overall top):
   --limit N        rows for the main top table (default 10)
@@ -1458,6 +1488,10 @@ ensureDir("/var/log/cfm", 0o700)
 	var mmdbCancel context.CancelFunc
 	// (we create the updater instance inside applyPorts after config is parsed)
 
+	// MySQL governor — created once on first config load, lives for the daemon lifetime.
+	// Declared here so both applyPorts (which registers its HTTP handlers) and the
+	// post-startup goroutine (which calls gov.Run) share the same pointer.
+	var gov *mysql.Governor
 
 	applyPorts := func() {
 		if cfgDir == "" || confW == nil { return }
@@ -1473,14 +1507,80 @@ ensureDir("/var/log/cfm", 0o700)
 		onConfigLoaded(cfg)
 
 
-        // ---- Debug server (start once, with config values) ----
-        // Build addr from config defaults (defaults are applied by SetDefaults)
+        // ---- Debug server + MySQL governor (start once, with config values) ----
+        //
+        // Both are gated by CFM_DEBUG_HTTP_STARTED so they only run on the first
+        // successful config load.  The governor must be created *before* startDebug
+        // so that RegisterHTTP can add the /api/v1/mysql/* routes to the same mux.
+        //
+        // Debug server address comes from [debug] in cfm.conf:
+        //   LISTEN_ADDRESS = 127.0.0.1   (default)
+        //   PORT           = 6060        (default)
         debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
-        // start only once; rely on ListenAndServe returning error if already bound
-        // (we gate with an env flag to avoid accidental multiple starts if applyPorts runs many times)
+
         if os.Getenv("CFM_DEBUG_HTTP_STARTED") == "" {
-            startDebug(debugAddr)
-            // mark as started in-process (no need to export to env; just set process-wide)
+
+            // ---- MySQL governor init ------------------------------------------------
+            // Credentials are discovered automatically in priority order:
+            //   1. Explicit DSN in cfm.conf [mysql_governor] DSN = user:pass@tcp(127.0.0.1:3306)/
+            //   2. /root/.my.cnf           (standard cPanel/server root credential file)
+            //   3. /etc/cfm/mysql_governor.cnf
+            //   4. DirectAdmin /usr/local/directadmin/conf/mysql.conf
+            //
+            // Default mode is "monitor": the governor logs what it *would* kill but
+            // never actually issues KILL.  Change to "enforce" in cfm.conf once you
+            // have reviewed the audit log and are confident in the thresholds.
+            //
+            // If the connection fails (MySQL not running, wrong credentials, etc.) the
+            // governor is silently disabled — the rest of the daemon is unaffected.
+            govCfg := mysql.GovernorConfig{
+                Enabled:   true,
+                Mode:      "monitor",        // safe default: observe only, never kill
+                PollEvery: 5 * time.Second,
+
+                // Connection pressure alerts
+                ConnWarnPct: 70, // warn at 70 % of max_connections
+                ConnActPct:  85, // act  at 85 % of max_connections
+
+                // Lock fan-out kill: if one query blocks >= 10 others for >= 30s,
+                // kill the blocker (in enforce mode).
+                LockFanoutKill: 10,
+                LockFanoutTTL:  30 * time.Second,
+
+                // Sleep reaper: kill idle sleeping connections older than 3 min
+                // when connection pressure is above ConnActPct (enforce mode only).
+                SleepReaper:    true,
+                SleepReaperAge: 180 * time.Second,
+
+                // Kill rate limits — safety net so a misconfigured rule cannot
+                // wipe out an entire application's connections in one sweep.
+                KillPerDBPerWindow: 5,
+                KillTotalPerWindow: 20,
+                KillWindow:         10 * time.Minute,
+
+                // TODO: wire up per-user query_rules from cfm.conf [mysql_governor]
+                // once the config struct has a MySQLGovernor section, e.g.:
+                //   DSN          = cfg.MySQLGovernor.DSN
+                //   QueryRules   = parsedRules
+                //   Mode         = cfg.MySQLGovernor.Mode
+            }
+            if g, err := mysql.NewGovernor(govCfg); err == nil {
+                gov = g
+                // Run the polling loop in its own goroutine.
+                // It exits cleanly when ctx is cancelled (daemon shutdown).
+                go gov.Run(ctx)
+            } else {
+                // Non-fatal: MySQL may not be installed or credentials not yet set up.
+                logging.Logf("[mysql/governor] disabled: %v", err)
+            }
+            // ---- end MySQL governor init --------------------------------------------
+
+            // Start the debug/internal HTTP server.  The governor (or nil) is passed
+            // so its /api/v1/mysql/* handlers are registered on the same mux — no
+            // extra port needed.
+            startDebug(debugAddr, gov)
+
+            // Mark started so subsequent applyPorts ticks skip this block.
             _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
             logging.Logf("[debug] http server on %s", debugAddr)
         }
@@ -2171,4 +2271,3 @@ func httpGetJSON(url string, out any) error {
 
 type loggerAdapter struct{}
 func (loggerAdapter) Logf(f string, a ...any) { logging.Logf(f, a...) }
-
