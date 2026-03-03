@@ -9,38 +9,33 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-//	"time"
 )
 
 // JournalTailer implements LineSource by invoking `journalctl`.
 // It fetches NEW entries since the last known timestamp (Position.TS).
 // Position() reports the most-recent timestamp we observed.
 type JournalTailer struct {
-	// Filter options
-	Unit   string   // e.g. "sshd.service" (preferred)
-	Matches []string // optional journalctl match expressions, e.g. ["_SYSTEMD_UNIT=sshd.service"]
+	Unit    string   // e.g. "sshd.service"
+	Matches []string // optional journalctl match expressions
 
-	// internal
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdout   io.ReadCloser
-	reader   *bufio.Reader
-	lastTS   int64 // seconds since epoch of last seen entry
-	startTS  int64 // requested since
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdout  io.ReadCloser
+	reader  *bufio.Reader
+	lastTS  int64
+	startTS int64
 }
 
-// NewJournalTailer for a single Unit (common case).
 func NewJournalTailer(unit string) *JournalTailer {
 	return &JournalTailer{Unit: unit}
 }
 
-// ApplyResume: use only the timestamp for journald.
 func (j *JournalTailer) ApplyResume(inode, offset uint64, ts int64) {
 	j.lastTS = ts
 }
+
 func (j *JournalTailer) setStartTS(ts int64) { j.startTS = ts }
 
-// Open starts a one-shot journalctl process that prints entries since startTS (or "now").
 func (j *JournalTailer) Open() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -50,25 +45,16 @@ func (j *JournalTailer) Open() error {
 	if j.startTS > 0 {
 		since = j.startTS
 	}
-
-	// IMPORTANT:
-	// journalctl's --since is INCLUSIVE, so using --since=@<lastTS> will replay
-	// any entries that occurred in that same second on the next run.
-	// To avoid duplicates without needing cursors, bump by +1s when resuming.
+	// journalctl --since is inclusive; bump by +1s to avoid replaying the
+	// last seen entry on the next tick.
 	if since > 0 {
-		since = since + 1
+		since++
 	}
-
 	if since <= 1 {
-
-		// first run: start from "now" (no replay)
-		// Use --since=now to avoid historical output.
 		args = append(args, "--since=now")
 	} else {
 		args = append(args, "--since=@"+strconv.FormatInt(since, 10))
 	}
-
-	// Prefer -u <unit> if provided; else use Matches
 	if j.Unit != "" {
 		args = append(args, "-u", j.Unit)
 	}
@@ -83,14 +69,36 @@ func (j *JournalTailer) Open() error {
 	if err != nil {
 		return err
 	}
-	// inherit no stdin/stderr; quiet on errors
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-
 	j.cmd = cmd
 	j.stdout = stdout
 	j.reader = bufio.NewReaderSize(stdout, 256*1024)
+	return nil
+}
+
+// Close is a between-tick no-op for JournalTailer.
+// journalctl is a one-shot process that exits at EOF anyway; the real
+// cleanup happens in Shutdown().
+func (j *JournalTailer) Close() error {
+	return nil
+}
+
+// Shutdown terminates the journalctl process and releases resources.
+func (j *JournalTailer) Shutdown() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.stdout != nil {
+		_ = j.stdout.Close()
+		j.stdout = nil
+	}
+	if j.cmd != nil && j.cmd.Process != nil {
+		_ = j.cmd.Process.Kill()
+		_, _ = j.cmd.Process.Wait()
+		j.cmd = nil
+	}
+	j.reader = nil
 	return nil
 }
 
@@ -102,8 +110,6 @@ func (j *JournalTailer) ReadNext(ctx context.Context) (string, error) {
 		return "", io.EOF
 	}
 
-	// Non-blocking-ish: try one ReadString; if no data, the pipe blocks.
-	// We add a small deadline via context; if canceled, bail out.
 	type res struct {
 		line string
 		err  error
@@ -126,18 +132,14 @@ func (j *JournalTailer) ReadNext(ctx context.Context) (string, error) {
 		}
 		line := strings.TrimRight(out.line, "\r\n")
 		// Format: "<secs>.<usec> <rest>"
-		// Example: "1726612345.123456 HOST PROC[PID]: message"
 		if i := strings.IndexByte(line, ' '); i > 0 {
 			tsStr := line[:i]
 			if dot := strings.IndexByte(tsStr, '.'); dot > 0 {
 				tsStr = tsStr[:dot]
 			}
-			if sec, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
-				if sec > j.lastTS {
-					j.lastTS = sec
-				}
+			if sec, err := strconv.ParseInt(tsStr, 10, 64); err == nil && sec > j.lastTS {
+				j.lastTS = sec
 			}
-			// strip the timestamp; detectors expect original log-ish lines
 			line = line[i+1:]
 		}
 		return line, nil
@@ -150,34 +152,13 @@ func (j *JournalTailer) Position() (offset uint64, inode uint64, ts int64) {
 	return 0, 0, j.lastTS
 }
 
-func (j *JournalTailer) Close() error {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.stdout != nil {
-		_ = j.stdout.Close()
-		j.stdout = nil
-	}
-	if j.cmd != nil && j.cmd.Process != nil {
-		// best-effort terminate
-		_ = j.cmd.Process.Kill()
-		_, _ = j.cmd.Process.Wait()
-		j.cmd = nil
-	}
-	j.reader = nil
-	return nil
-}
-
-// Helper to describe args (debug)
 func (j *JournalTailer) String() string {
-
 	since := "now"
-	// mirror the inclusive-skip logic used in Open()
 	if j.startTS > 0 {
 		since = "@" + strconv.FormatInt(j.startTS+1, 10)
 	} else if j.lastTS > 0 {
 		since = "@" + strconv.FormatInt(j.lastTS+1, 10)
 	}
-
 	filter := j.Unit
 	if filter == "" && len(j.Matches) > 0 {
 		filter = strings.Join(j.Matches, " ")

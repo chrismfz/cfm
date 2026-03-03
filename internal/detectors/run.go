@@ -2,15 +2,15 @@ package detectors
 
 import (
 	"context"
-	"time"
 	"fmt"
+	"time"
+
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 )
 
-
 // ctxParentKey stashes the long-lived manager ctx inside the per-run ctx that
-// may have a watchdog timeout. Some detectors (webdetector) need a ctx that
+// may have a watchdog timeout.  Some detectors (webdetector) need a ctx that
 // outlives a single RunOnce tick for background listeners.
 type ctxParentKey struct{}
 
@@ -26,7 +26,6 @@ func parentCtxFrom(ctx context.Context) context.Context {
 	}
 	return nil
 }
-
 
 type LoggerSink struct{}
 
@@ -63,15 +62,17 @@ func joinLines(ss []string) string {
 }
 
 // runOnceSafeTimed wraps a detector RunOnce with:
-//  - panic recovery (so one bad detector cannot crash the daemon)
-//  - a per-run watchdog timeout (so a stuck tailer / infinite loop can't freeze the scheduler)
+//   - panic recovery (so one bad detector cannot crash the daemon)
+//   - a per-run watchdog timeout (so a stuck tailer / infinite loop can't
+//     freeze the scheduler)
 //
-// NOTE: The detector must respect ctx; otherwise a truly stuck goroutine can't be force-killed.
+// NOTE: the detector must respect ctx cancellation; a truly stuck goroutine
+// that ignores ctx cannot be force-killed here.
 func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- core.Alert, timeout time.Duration) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-	            logging.Logf("[detectors] %s PANIC: %v", d.Name(), r)
-	            err = fmt.Errorf("%s panic: %v", d.Name(), r)
+			logging.Logf("[detectors] %s PANIC: %v", d.Name(), r)
+			err = fmt.Errorf("%s panic: %v", d.Name(), r)
 		}
 	}()
 	if timeout <= 0 {
@@ -80,12 +81,11 @@ func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- c
 	ctxRun, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Embed long-lived ctx into ctxRun (so detectors can opt into it).
+	// Embed long-lived ctx so detectors can opt into it.
 	ctxRun = context.WithValue(ctxRun, ctxParentKey{}, ctx)
 
 	done := make(chan error, 1)
 	go func() {
-		// RunOnce may block; isolate it so the watchdog can trigger.
 		done <- d.RunOnce(ctxRun, out)
 	}()
 
@@ -93,23 +93,22 @@ func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- c
 	case e := <-done:
 		return e
 	case <-ctxRun.Done():
-		// distinguish "caller canceled" vs "watchdog timeout"
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		logging.Logf("[detectors] %s run timeout after %s", d.Name(), timeout)
 		return ctxRun.Err()
 	}
-
 }
 
-// Fixed-delay loop: waits `every` after each successful (or failed) run.
-// This avoids bursts if RunOnce is slower than the period.
+// periodicLoop runs fn on a fixed-delay schedule (waits `every` after each
+// run, whether it succeeded or failed).  This avoids bursts when RunOnce is
+// slower than the period.
 func periodicLoop(ctx context.Context, every time.Duration, fn func() error) error {
 	if every <= 0 {
 		every = 60 * time.Second
 	}
-	timer := time.NewTimer(0) // fire immediately for first run
+	timer := time.NewTimer(0) // fire immediately on first tick
 	defer timer.Stop()
 
 	for {
@@ -118,17 +117,24 @@ func periodicLoop(ctx context.Context, every time.Duration, fn func() error) err
 			return ctx.Err()
 		case <-timer.C:
 			_ = fn()
-			// schedule next iteration relative to *now*
 			timer.Reset(every)
 		}
 	}
 }
 
+// shutdown calls d.Shutdown() if the detector implements core.Shutdowner,
+// then logs the result.  Called once after the periodic loop exits.
+func shutdown(d core.PeriodicDetector) {
+	if s, ok := d.(core.Shutdowner); ok {
+		if err := s.Shutdown(); err != nil {
+			logging.Logf("[detectors][%s] shutdown error: %v", d.Name(), err)
+		}
+	}
+}
+
 func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) error {
-	// webdetector can burst; keep this large to avoid backpressure deadlocks.
 	out := make(chan core.Alert, 1024)
 
-	// publisher
 	pubDone := make(chan struct{})
 	go func() {
 		defer close(pubDone)
@@ -151,7 +157,6 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 	}
 	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
-	// Per-run watchdog: >=30s, <=5m, scaled by schedule.
 	runTimeout := 2 * every
 	if runTimeout < 30*time.Second {
 		runTimeout = 30 * time.Second
@@ -160,8 +165,6 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 		runTimeout = 5 * time.Minute
 	}
 
-
-	// fixed-delay schedule with panic-safe RunOnce
 	err := periodicLoop(ctx, every, func() error {
 		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
 			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
@@ -169,17 +172,19 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 		return nil
 	})
 
-	// shutdown
+	// Drain and close the alert channel before shutting down the source,
+	// so the publisher goroutine has a clean exit.
 	close(out)
 	<-pubDone
+
+	// Close file handles / child processes now that the loop is done.
+	shutdown(d)
 	return err
 }
 
 func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink core.Sink, state *core.State) error {
-	// webdetector can burst; keep this large to avoid backpressure deadlocks.
 	out := make(chan core.Alert, 1024)
 
-	// publisher
 	pubDone := make(chan struct{})
 	go func() {
 		defer close(pubDone)
@@ -202,7 +207,6 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 	}
 	logging.Logf("[detectors][%s] started (every=%s)", d.Name(), every)
 
-	// Per-run watchdog: >=30s, <=5m, scaled by schedule.
 	runTimeout := 2 * every
 	if runTimeout < 30*time.Second {
 		runTimeout = 30 * time.Second
@@ -211,8 +215,6 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 		runTimeout = 5 * time.Minute
 	}
 
-
-	// fixed-delay schedule with position save on successful runs
 	err := periodicLoop(ctx, every, func() error {
 		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
 			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
@@ -220,13 +222,16 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 		}
 		if pa, ok := d.(core.PositionAware); ok && state != nil {
 			state.Put(pa.Name(), pa.Position())
-			_ = state.Save() // no-op in dir-mode; safe to keep
+			_ = state.Save()
 		}
 		return nil
 	})
 
-	// shutdown
+	// Drain and close the alert channel before shutting down the source.
 	close(out)
 	<-pubDone
+
+	// Close file handles / child processes now that the loop is done.
+	shutdown(d)
 	return err
 }

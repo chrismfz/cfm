@@ -92,6 +92,7 @@ type GovernorState struct {
 	Running     []Process    // active + waiting, sorted by time desc
 	LockGraph   []LockGroup  // blocker -> waiters
 	RecentKills []KillRecord
+	PerfDeltas  []UserPerfDelta // per-user CPU/query stats from performance_schema (nil if unavailable)
 	Flavor      string // "10.11.7-MariaDB" | "8.0.36"
 	Mode        string // "monitor" | "enforce" — copied from GovernorConfig each poll
 }
@@ -150,6 +151,27 @@ type Governor struct {
 	// during sustained connection pressure. Each severity level has its own timer.
 	lastPressureWarn time.Time
 	lastPressureCrit time.Time
+
+	// history ring buffer — one entry per poll tick, retained for 24 h.
+	// Used by TopUserHistory() for long-window "busiest user" queries.
+	historySamples []HistorySample
+	historyMu      sync.Mutex
+
+	// performance_schema CPU / query tracking
+	perfSchemaOK  bool                       // set once by probePerfSchema at startup
+	perfHasCPU    bool                       // true on MySQL 8+; false on MariaDB (no SUM_CPU_TIME)
+	perfCPUActive bool                       // true once we see at least one non-zero SUM_CPU_TIME delta
+	perfRetryAt   time.Time                  // next time to re-probe when perfSchemaOK is false
+	lastPerfRaw   map[string]perfRawRow      // cumulative counters from last poll
+	perfDeltas    []UserPerfDelta            // most recent per-poll deltas
+	perfDeltaMu   sync.RWMutex
+
+	// MariaDB userstat — information_schema.USER_STATISTICS
+	// Provides real CPU_TIME on MariaDB where SUM_CPU_TIME is absent.
+	// userstatsOff=true means MariaDB was detected but userstat=OFF (show hint).
+	userstatsOK      bool
+	userstatsOff     bool
+	lastUserstatRaw  map[string]userstatRawRow
 }
 
 type killEntry struct {
@@ -218,6 +240,8 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 	if err := g.detectFlavor(); err != nil {
 		logging.Logf("[mysql/governor] flavor detect failed: %v", err)
 	}
+	ctx := context.Background()
+	g.probePerfSchema(ctx)
 	return g, nil
 }
 
@@ -254,12 +278,19 @@ func (g *Governor) poll(ctx context.Context) {
 	}
 	state.RecentKills = g.recentKills()
 
+	// performance_schema CPU / query deltas (nil if perf_schema unavailable)
+	state.PerfDeltas = g.fetchPerfDeltas(ctx)
+
 	// Notify on connection pressure
 	g.checkConnPressure(state)
 
 	g.mu.Lock()
 	g.state = state
 	g.mu.Unlock()
+
+	// Append to history ring buffer *after* state is published so the
+	// snapshot the API returns and the one stored in history are identical.
+	g.pushHistory(state)
 }
 
 // buildState computes GovernorState from a raw processlist snapshot.

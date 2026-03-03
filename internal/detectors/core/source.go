@@ -10,59 +10,71 @@ import (
 	"time"
 )
 
-// LineSource is a generic, non-blocking line iterator for logs.
-// ReadNext returns (line, nil) when a full line is available,
-// and ("", io.EOF) when the source is caught up.
-// It MUST NOT block waiting for new lines; detectors call it in a loop per RunOnce.
-type LineSource interface {
-	Open() error
-	ReadNext(ctx context.Context) (string, error)
-	Position() (offset uint64, inode uint64, ts int64)
-	Close() error
-}
-
 // FileTailer implements LineSource for plain files with rotation awareness.
+//
+// Key design decisions:
+//
+//  1. The fd is kept open between ticks (Open is a no-op when already open).
+//     This eliminates 3 syscalls (open/fstat/lseek) and one 256 KB buffer
+//     allocation on every single tick for every detector — the dominant source
+//     of heap churn seen in the pprof profile.
+//
+//  2. The bufio.Reader is allocated exactly once and reused forever via
+//     r.Reset(newFile) when rotation forces a real fd swap.  This is why
+//     Shutdown() nils t.f but NOT t.r.
+//
+//  3. All rotation / deletion / truncation safeguards live in ReadNext() and
+//     are completely unaffected by the above — they trigger on the first EOF
+//     after the event, exactly as before.
 type FileTailer struct {
-	Path       string
+	Path string
+
 	mu         sync.Mutex
 	f          *os.File
-	r          *bufio.Reader
+	r          *bufio.Reader // allocated once; reused via r.Reset() on rotation
 	off        int64
 	inode      uint64
 	lastLineTS int64
 
-        // Idle backoff: limit how often we Stat() at EOF (non-blocking).
-        idleStatMinInterval time.Duration
-        lastEOFStat         time.Time
+	// Idle backoff: limit how often we Stat() at EOF to reduce syscalls.
+	idleStatMinInterval time.Duration
+	lastEOFStat         time.Time
 
-        // When the path is missing, retry Stat/Open more aggressively.
-        missingStatMinInterval time.Duration
+	// Faster recovery when the path is missing (rm / rotate gap).
+	missingStatMinInterval time.Duration
 
-	// Optional: resume position (set via ApplyResume)
+	// Resume position — set via ApplyResume before the first Open().
 	LastOffset int64
 	LastInode  uint64
 }
 
-// Optional explicit resume (used by manager after loading state).
+func NewFileTailer(path string) *FileTailer {
+	return &FileTailer{
+		Path:                   path,
+		idleStatMinInterval:    200 * time.Millisecond,
+		missingStatMinInterval: 50 * time.Millisecond,
+	}
+}
 
+// ApplyResume sets the resume position (used by manager after loading state).
 func (t *FileTailer) ApplyResume(inode, offset uint64) {
 	t.LastInode = inode
 	t.LastOffset = int64(offset)
 }
 
-func NewFileTailer(path string) *FileTailer {
-        return &FileTailer{
-                Path:                path,
-                // sensible default: only check rotation at most 5x/sec when idle
-                idleStatMinInterval: 200 * time.Millisecond,
-                // faster recovery when file is missing (rotate gaps / rm+recreate)
-                missingStatMinInterval: 50 * time.Millisecond,
-        }
-}
-
+// Open opens the file and seeks to the correct position.
+//
+// If the fd is already open (t.f != nil) this is a no-op: the fd, read
+// position, and bufio.Reader buffer all remain valid from the previous tick.
+// This is the common case and costs zero syscalls.
 func (t *FileTailer) Open() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Fast path: fd already open from previous tick.  Nothing to do.
+	if t.f != nil {
+		return nil
+	}
 
 	f, err := os.Open(t.Path)
 	if err != nil {
@@ -70,279 +82,266 @@ func (t *FileTailer) Open() error {
 	}
 	st, err := f.Stat()
 	if err != nil {
-        _ = f.Close()
-        return err
+		_ = f.Close()
+		return err
 	}
 	curInode := inodeOf(st)
 
-	// Decide starting offset: resume if valid, else start at end ("now")
-	//off := st.Size() //old method
 	// Decide starting offset.
-	// If we have NO resume info at all => start at end ("now") to avoid replaying old logs.
-	// If we DO have resume info and inode changed (rotate rename+newfile) => start at 0
-	// so we don't miss lines already written to the new file before this tick.
+	//   No resume info at all  → start at end ("now"), avoid replaying old logs.
+	//   Resume known, inode changed (rename+newfile rotation) → start at 0 so we
+	//     don't miss lines written to the new file before this tick.
+	//   Resume known, same inode → seek to saved offset (or 0 if file was truncated).
 	off := st.Size()
-	resumeKnown := (t.LastInode != 0 || t.LastOffset != 0)
+	resumeKnown := t.LastInode != 0 || t.LastOffset != 0
 	if resumeKnown && t.LastInode != curInode {
 		off = 0
 	}
-
 	if t.LastInode == curInode {
 		switch {
 		case t.LastOffset >= 0 && t.LastOffset <= st.Size():
 			off = t.LastOffset
 		case t.LastOffset > st.Size():
-			// file was truncated (e.g., logrotate with truncate)
-			// start from beginning to avoid missing any new lines
-			off = 0
+			off = 0 // truncated
 		}
 	}
 
-
-    if _, err := f.Seek(off, io.SeekStart); err != nil {
-        _ = f.Close()
-        return err
-    }
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		_ = f.Close()
+		return err
+	}
 
 	t.f = f
-	t.r = bufio.NewReaderSize(f, 256*1024)
+	// Allocate the reader buffer exactly once.  Subsequent re-opens after
+	// rotation will call t.r.Reset(newFile) below, reusing this allocation.
+	if t.r == nil {
+		t.r = bufio.NewReaderSize(f, 256*1024)
+	} else {
+		t.r.Reset(f)
+	}
 	t.inode = curInode
 	t.off = off
 	return nil
 }
 
-
-
-
-
-
-
-// safeClose ensures file handles are closed safely
-func safeClose(f *os.File) error {
-    if f == nil {
-        return nil
-    }
-    return f.Close()
-}
-
-// reopenAtEndUnlocked reopens the tailed file at its end after rotation/truncate.
-// Caller must hold t.mu.
-func (t *FileTailer) reopenAtEndUnlocked() error {
-    f, err := os.Open(t.Path)
-    if err != nil {
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-
-    st2, err := f.Stat()
-    if err != nil {
-        _ = safeClose(f)
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-
-    end := st2.Size()
-    if _, err := f.Seek(end, io.SeekStart); err != nil {
-        _ = safeClose(f)
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-
-    _ = safeClose(t.f)
-    t.f = f
-    t.r = bufio.NewReaderSize(f, 256*1024)
-    t.inode = inodeOf(st2)
-    t.off = end
-    t.lastEOFStat = time.Time{}
-    return nil
-}
-
-
-
-
-// reopenAtStartUnlocked reopens the tailed file at offset 0.
-// Caller must hold t.mu.
-func (t *FileTailer) reopenAtStartUnlocked() error {
-    f, err := os.Open(t.Path)
-    if err != nil {
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-    st2, err := f.Stat()
-    if err != nil {
-        _ = safeClose(f)
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-    if _, err := f.Seek(0, io.SeekStart); err != nil {
-        _ = safeClose(f)
-        _ = safeClose(t.f)
-        t.f, t.r = nil, nil
-        return err
-    }
-    _ = safeClose(t.f)
-    t.f = f
-    t.r = bufio.NewReaderSize(f, 256*1024)
-    t.inode = inodeOf(st2)
-    t.off = 0
-    t.lastEOFStat = time.Time{}
-    return nil
-}
-
-
-
-
-
-
-func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-    if t.f == nil {
-        // Try to reopen if the file has reappeared. Rate-limited to keep non-blocking contract.
-        now := time.Now()
-        minInt := t.missingStatMinInterval
-        if minInt <= 0 {
-            minInt = 50 * time.Millisecond
-        }
-        if !t.lastEOFStat.IsZero() && now.Sub(t.lastEOFStat) < minInt {
-            return "", io.EOF
-        }
-        t.lastEOFStat = now
-
-        if _, err := os.Stat(t.Path); err == nil {
-            _ = t.reopenAtStartUnlocked()
-        }
-        return "", io.EOF
-    }
-
-
-       // NOTE: We deliberately avoid Stat() here.
-       // We only Stat on EOF to detect rotation/truncate, which removes a syscall per line.
-	// Attempt one line (non-blocking)
-	line, err := t.r.ReadString('\n')
-	if err != nil {
-
-        // If a single log line is larger than our buffer, ReadString returns
-        // a partial fragment + bufio.ErrBufferFull. If we don't advance offset,
-        // we will hit the same fragment forever and the detector will "freeze".
-        if err == bufio.ErrBufferFull {
-            // Account for the fragment we already consumed
-            if len(line) > 0 {
-                t.off += int64(len(line))
-            }
-
-            // Drain the remainder of this oversized line until we reach '\n'
-            for {
-                frag, e2 := t.r.ReadString('\n')
-                if len(frag) > 0 {
-                    t.off += int64(len(frag))
-                }
-                if e2 == nil {
-                    // finished skipping the long line
-                    t.lastLineTS = time.Now().Unix()
-                    // return empty line; caller will ignore it
-                    return "", nil
-                }
-                if e2 == bufio.ErrBufferFull {
-                    continue
-                }
-                if e2 == io.EOF {
-                    // line still incomplete; keep non-blocking contract
-                    return "", io.EOF
-                }
-                return "", e2
-            }
-        }
-
-
-               if err == io.EOF {
-                       // We are caught up. Optionally check for rotation/truncate,
-                       // but rate-limit this Stat() while idle to reduce syscalls.
-                       now := time.Now()
-                       if t.idleStatMinInterval > 0 && !t.lastEOFStat.IsZero() &&
-                               now.Sub(t.lastEOFStat) < t.idleStatMinInterval {
-                               return "", io.EOF
-                       }
-                       t.lastEOFStat = now
-
-                       // Check for rotation/truncate (non-blocking path).
-
-
-                       // IMPORTANT: stat the PATH, not the FD, so we can detect rename+newfile rotation.
-                       st, serr := os.Stat(t.Path)
-                       if serr != nil {
-
-                               // Path missing/unreadable: close old FD (may point to deleted inode)
-                               // and let the top-of-ReadNext reopen when it reappears.
-                               _ = safeClose(t.f)
-                               t.f, t.r = nil, nil
-                               t.inode = 0
-                               // reset so missing retry uses missingStatMinInterval
-                               t.lastEOFStat = time.Now()
-                               return "", io.EOF
-
-                       }
-
-                       curIn := inodeOf(st)
-                       if curIn != t.inode || t.off > st.Size() {
-                               // After rotate/truncate, read from start to avoid missing lines written
-                               // before this tick (webdetector is non-blocking + closes each run).
-                               _ = t.reopenAtStartUnlocked()
-                       }
-                       return "", io.EOF
-               }
-               return "", err
-
-
-
-	}
-	t.off += int64(len(line))
-	t.lastLineTS = time.Now().Unix()
-	// trim trailing newline
-	if len(line) > 0 && line[len(line)-1] == '\n' {
-		line = line[:len(line)-1]
-	}
-	return line, nil
-}
-
-
-
-
-// SetIdleStatInterval lets callers override how often Stat() is allowed
-// while the tailer is idle (at EOF). Zero disables the rate limit.
-func (t *FileTailer) SetIdleStatInterval(d time.Duration) {
-        t.mu.Lock()
-        defer t.mu.Unlock()
-        t.idleStatMinInterval = d
-        // reset timer so next EOF can check immediately
-        t.lastEOFStat = time.Time{}
-}
-
-
-
-
-func (t *FileTailer) Position() (offset uint64, inode uint64, ts int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return uint64(t.off), t.inode, t.lastLineTS
-}
-
+// Close is a between-tick checkpoint.
+//
+// For a single FileTailer (not inside DirTailer) there is nothing to persist
+// here — position is saved by run.go via state.Put(pa.Position()) after each
+// successful RunOnce.  So this is truly a no-op.
+//
+// Call Shutdown() for real fd cleanup when the detector stops.
 func (t *FileTailer) Close() error {
+	return nil
+}
+
+// Shutdown closes the file handle.  Safe to call multiple times.
+// The bufio.Reader buffer (t.r) is kept alive so that if this tailer is ever
+// reopened (e.g. after a daemon reload), Open() can call r.Reset(newFile)
+// instead of allocating a fresh 256 KB buffer.
+func (t *FileTailer) Shutdown() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.f != nil {
 		err := t.f.Close()
 		t.f = nil
-		t.r = nil
+		// t.r intentionally kept: r.Reset(f) on next Open() reuses the buffer.
 		return err
 	}
 	return nil
+}
+
+// safeClose closes a file handle, tolerating nil.
+func safeClose(f *os.File) error {
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}
+
+// reopenAtEndUnlocked reopens the file at its current end (used after a
+// rotation where we don't want to replay the old file's tail).
+// Caller must hold t.mu.
+func (t *FileTailer) reopenAtEndUnlocked() error {
+	f, err := os.Open(t.Path)
+	if err != nil {
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	st2, err := f.Stat()
+	if err != nil {
+		_ = safeClose(f)
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	end := st2.Size()
+	if _, err := f.Seek(end, io.SeekStart); err != nil {
+		_ = safeClose(f)
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	_ = safeClose(t.f)
+	t.f = f
+	// Reuse the existing reader buffer — just swap the underlying fd.
+	if t.r == nil {
+		t.r = bufio.NewReaderSize(f, 256*1024)
+	} else {
+		t.r.Reset(f)
+	}
+	t.inode = inodeOf(st2)
+	t.off = end
+	t.lastEOFStat = time.Time{}
+	return nil
+}
+
+// reopenAtStartUnlocked reopens the file at offset 0 (used after rotation or
+// truncation where we want to read from the beginning of the new/reset file).
+// Caller must hold t.mu.
+func (t *FileTailer) reopenAtStartUnlocked() error {
+	f, err := os.Open(t.Path)
+	if err != nil {
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	st2, err := f.Stat()
+	if err != nil {
+		_ = safeClose(f)
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = safeClose(f)
+		_ = safeClose(t.f)
+		t.f = nil
+		return err
+	}
+	_ = safeClose(t.f)
+	t.f = f
+	// Reuse the existing reader buffer — just swap the underlying fd.
+	if t.r == nil {
+		t.r = bufio.NewReaderSize(f, 256*1024)
+	} else {
+		t.r.Reset(f)
+	}
+	t.inode = inodeOf(st2)
+	t.off = 0
+	t.lastEOFStat = time.Time{}
+	return nil
+}
+
+func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// ── fd missing (deleted file, or Open() failed) ──────────────────────────
+	if t.f == nil {
+		// Rate-limited re-stat: avoid hammering the VFS while the file is absent.
+		now := time.Now()
+		minInt := t.missingStatMinInterval
+		if minInt <= 0 {
+			minInt = 50 * time.Millisecond
+		}
+		if !t.lastEOFStat.IsZero() && now.Sub(t.lastEOFStat) < minInt {
+			return "", io.EOF
+		}
+		t.lastEOFStat = now
+		if _, err := os.Stat(t.Path); err == nil {
+			_ = t.reopenAtStartUnlocked()
+		}
+		return "", io.EOF
+	}
+
+	// ── fast path: read one line ──────────────────────────────────────────────
+	// We deliberately skip Stat() on every read — it's done only at EOF.
+	line, err := t.r.ReadString('\n')
+	if err == nil {
+		t.off += int64(len(line))
+		t.lastLineTS = time.Now().Unix()
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+		}
+		return line, nil
+	}
+
+	// ── oversized line (> 256 KB buffer) ─────────────────────────────────────
+	// ReadString returns a fragment + bufio.ErrBufferFull.  Without draining,
+	// we'd loop on the same fragment forever and freeze the detector.
+	if err == bufio.ErrBufferFull {
+		if len(line) > 0 {
+			t.off += int64(len(line))
+		}
+		for {
+			frag, e2 := t.r.ReadString('\n')
+			if len(frag) > 0 {
+				t.off += int64(len(frag))
+			}
+			if e2 == nil {
+				t.lastLineTS = time.Now().Unix()
+				return "", nil // oversized line skipped; caller ignores empty
+			}
+			if e2 == bufio.ErrBufferFull {
+				continue
+			}
+			if e2 == io.EOF {
+				return "", io.EOF
+			}
+			return "", e2
+		}
+	}
+
+	// ── EOF: check for rotation / truncation ─────────────────────────────────
+	if err == io.EOF {
+		// Rate-limit the Stat() to keep the non-blocking contract while idle.
+		now := time.Now()
+		if t.idleStatMinInterval > 0 && !t.lastEOFStat.IsZero() &&
+			now.Sub(t.lastEOFStat) < t.idleStatMinInterval {
+			return "", io.EOF
+		}
+		t.lastEOFStat = now
+
+		// Stat the PATH (not the fd) to detect rename+newfile rotation.
+		st, serr := os.Stat(t.Path)
+		if serr != nil {
+			// File deleted (rm -f, rotate+delete).
+			// Close the stale fd; ReadNext will reopen when the file reappears.
+			_ = safeClose(t.f)
+			t.f = nil
+			// t.r intentionally kept — Reset() on next reopen reuses the buffer.
+			t.inode = 0
+			t.lastEOFStat = time.Now()
+			return "", io.EOF
+		}
+
+		curIn := inodeOf(st)
+		if curIn != t.inode || t.off > st.Size() {
+			// Rotation (new inode) or truncation (echo > file, same inode, size shrank).
+			// Read from start so we don't miss lines written to the new/reset file.
+			_ = t.reopenAtStartUnlocked()
+		}
+		return "", io.EOF
+	}
+
+	return "", err
+}
+
+// SetIdleStatInterval overrides how often Stat() is called while the tailer
+// is idle at EOF.  Zero disables rate limiting.
+func (t *FileTailer) SetIdleStatInterval(d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.idleStatMinInterval = d
+	t.lastEOFStat = time.Time{}
+}
+
+func (t *FileTailer) Position() (offset uint64, inode uint64, ts int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return uint64(t.off), t.inode, t.lastLineTS
 }
 
 func inodeOf(fi os.FileInfo) uint64 {

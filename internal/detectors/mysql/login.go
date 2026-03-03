@@ -82,9 +82,6 @@ type MySQL struct {
 	// 2025-01-01 11:50:00 1056978 [Warning] Aborted connection 1056978 to db: 'unconnected' user: 'unauthenticated' host: '188.113.160.108' (This connection closed normally without authentication)
 	reAbortedUnauth *regexp.Regexp
 
-	// noisy-but-irrelevant lines we just ignore (optional)
-	reHostResemble *regexp.Regexp // "has been resolved to the host name ... which resembles IPv4-address itself."
-	reHostNX       *regexp.Regexp // "Host name '...' could not be resolved"
 
 	reIPv4Dash    *regexp.Regexp // 200-105-141-150
 	reIPv4Inside  *regexp.Regexp // 200.105.141.150 μέσα στο hostname
@@ -109,10 +106,7 @@ func NewMySQL(cfg LoginConfig) *MySQL {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 if cfg.DnsTimeout <= 0 { cfg.DnsTimeout = 600 * time.Millisecond }
-// StrictEmbeddedConfirm defaults to true.
-// Callers must explicitly set it to false to allow unconfirmed embedded IPs
-// (e.g. hostnames like "200-105-141-150.example.com" without PTR confirmation).
-if !cfg.StrictEmbeddedConfirm { cfg.StrictEmbeddedConfirm = true }
+if !cfg.StrictEmbeddedConfirm { /* leave as is */ } else { cfg.StrictEmbeddedConfirm = true }
 
 
 	m := &MySQL{cfg: cfg}
@@ -134,15 +128,13 @@ m.reInAddrArpa = regexp.MustCompile(`(?i)\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{
 
 
 	// Denied
-	m.reDenied = regexp.MustCompile(`(?i)\bAccess denied for user '([^']+)'@'([^']+)'(?:\s+\(using password: (YES|NO)\))?`)
+	m.reDenied = regexp.MustCompile(`\bAccess denied for user '([^']+)'@'([^']+)'(?:\s+\(using password: (YES|NO)\))?`)
 
 	// Aborted unauthenticated
-	m.reAbortedUnauth = regexp.MustCompile(`(?i)\bAborted connection \d+ to db: 'unconnected' user: 'unauthenticated' host: '([^']+)'`)
+	m.reAbortedUnauth = regexp.MustCompile(`\bAborted connection \d+ to db: 'unconnected' user: 'unauthenticated' host: '([^']+)'`)
 
 
 	// Noisy informational
-	m.reHostResemble = regexp.MustCompile(`(?i)has been resolved to the host name .* resembles IPv4-address`)
-	m.reHostNX = regexp.MustCompile(`(?i)Host name '.*' could not be resolved`)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -203,68 +195,75 @@ func (m *MySQL) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 
 func (m *MySQL) processLine(s string) {
-	// quick skip
-	if m.reHostResemble.MatchString(s) || m.reHostNX.MatchString(s) {
+	// Fast-path guard: the MySQL error log is high-volume and most lines are
+	// unrelated (InnoDB status, connection housekeeping, etc.).
+	// Check for the two keywords we care about with strings.Contains FIRST —
+	// zero regex cost for the majority of lines.
+	hasDenied  := strings.Contains(s, "Access denied")
+	hasAborted := !hasDenied && strings.Contains(s, "Aborted connection")
+	if !hasDenied && !hasAborted {
 		return
 	}
 
-    if strings.Contains(s, "This connection closed normally without authentication") {
-        return
-    }
+	// Noise filters — cheap string checks, no regex needed.
+	//   "has been resolved to the host name ... resembles IPv4-address"
+	//   "Host name '...' could not be resolved"
+	//   "This connection closed normally without authentication"
+	if strings.Contains(s, "resembles IPv4") ||
+		strings.Contains(s, "could not be resolved") ||
+		strings.Contains(s, "closed normally without authentication") {
+		return
+	}
 
-	// Access denied
-	if md := m.reDenied.FindStringSubmatch(s); md != nil {
-		user := md[1]
-		host := md[2]
+	// Access denied for user 'x'@'host' (using password: YES/NO)
+	if hasDenied {
+		if md := m.reDenied.FindStringSubmatch(s); md != nil {
+			user := md[1]
+			host := md[2]
 
-                // If the MySQL log shows a hostname, resolve it to an IP so the
-                // autoblock sink can act on it.
-		if net.ParseIP(host) == nil && host != "" && host != "localhost" {
-			if ip, _ := m.hostToIPSafe(host); ip != "" {
-				host = ip
+			// If the MySQL log shows a hostname, resolve it to an IP so the
+			// autoblock sink can act on it.
+			if net.ParseIP(host) == nil && host != "" && host != "localhost" {
+				if ip, _ := m.hostToIPSafe(host); ip != "" {
+					host = ip
+				}
+			}
+
+			if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1") {
+				return
+			}
+			if m.cfg.IgnoreCpanel && strings.HasPrefix(user, "Cpanel::MysqlUtils::") {
+				return
+			}
+
+			luser := strings.ToLower(user)
+			now := time.Now()
+
+			m.bump(now, "DENY|ip", host, s)
+			m.bump(now, "DENY|user", luser, s)
+			if strings.EqualFold(user, "root") {
+				m.bump(now, "ROOT|ip", host, s)
 			}
 		}
-
-
-		if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1") {
-			return
-		}
-		if m.cfg.IgnoreCpanel && strings.HasPrefix(user, "Cpanel::MysqlUtils::") {
-			return
-		}
-
-		luser := strings.ToLower(user)
-		now := time.Now()
-
-		// deny per IP
-		m.bump(now, "DENY|ip", host, s)
-		// deny per user
-		m.bump(now, "DENY|user", luser, s)
-		// root per IP (separate threshold; own counter+samples)
-		if strings.EqualFold(user, "root") {
-			m.bump(now, "ROOT|ip", host, s)
-		}
 		return
 	}
 
-	// Aborted unauthenticated: treat as scanning only when remote (not localhost)
-        if ma := m.reAbortedUnauth.FindStringSubmatch(s); ma != nil {
-                host := ma[1]
-                if net.ParseIP(host) == nil && host != "" && host != "localhost" {
-                        if ip, _ := m.hostToIPSafe(host); ip != "" {
-                                host = ip
-                        }
-                }
-                if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
-			return
+	// Aborted connection ... user: 'unauthenticated' — treat as port-scanning
+	if hasAborted {
+		if ma := m.reAbortedUnauth.FindStringSubmatch(s); ma != nil {
+			host := ma[1]
+			if net.ParseIP(host) == nil && host != "" && host != "localhost" {
+				if ip, _ := m.hostToIPSafe(host); ip != "" {
+					host = ip
+				}
+			}
+			if m.cfg.IgnoreLocalhost && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+				return
+			}
+			now := time.Now()
+			m.bump(now, "SCAN|ip", host, s)
 		}
-
-		now := time.Now()
-		m.bump(now, "SCAN|ip", host, s)
-		return
 	}
-
-	// else ignore
 }
 
 
