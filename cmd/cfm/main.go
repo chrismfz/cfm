@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	"time"
 	"strconv"
 	"math"
-//	"log"
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -47,6 +45,9 @@ import (
 	"cfm/internal/vhostmap"
 	"cfm/internal/dnat"
 	"cfm/internal/detectors/mysql"
+
+	"cfm/internal/dyndns"
+	"cfm/internal/filewatch"
 )
 
 var (
@@ -911,43 +912,6 @@ func runAllowList(args []string) {
 // Daemon
 // ----------------------------------------------------------------------------
 
-type fileWatcher struct {
-	path string
-	mod  time.Time
-	sum  [32]byte
-	have bool
-}
-
-func newFileWatcher(path string) *fileWatcher { return &fileWatcher{path: path} }
-
-// Changed returns (data, true) only when the file contents changed since last call.
-// If the file is missing, returns (nil, false) and resets state so reappearance triggers.
-func (w *fileWatcher) Changed() ([]byte, bool) {
-	st, err := os.Stat(w.path)
-	if err != nil {
-		w.have = false
-		return nil, false
-	}
-	if w.have && st.ModTime().Equal(w.mod) {
-		return nil, false
-	}
-	f, err := os.Open(w.path)
-	if err != nil { return nil, false }
-	defer f.Close()
-	b, err := io.ReadAll(f)
-	if err != nil { return nil, false }
-	h := sha256.Sum256(b)
-	if w.have && st.ModTime().Equal(w.mod) && h == w.sum {
-		return nil, false
-	}
-	w.mod, w.sum, w.have = st.ModTime(), h, true
-	return b, true
-}
-
-
-
-
-
 
 func runDaemon(args []string) {
 
@@ -1014,7 +978,7 @@ if err := notify.Init(cfgDir); err != nil {
 
 	// DynDNS manager (whitelist)
 done = step("dyndns:NewDynDNSManager")
-ddm := NewDynDNSManager(be, cfgDir)
+ddm := dyndns.NewManager(be, cfgDir)
 done()
 
 done = step("dyndns:FileChanged")
@@ -1079,13 +1043,13 @@ done()
 
 
 	// Watchers
-	var allowW, denyW, blW, confW, ignW *fileWatcher
+	var allowW, denyW, blW, confW, ignW *filewatch.Watcher
 	if cfgDir != "" {
-		allowW = newFileWatcher(filepath.Join(cfgDir, "cfm.allow"))
-		denyW  = newFileWatcher(filepath.Join(cfgDir, "cfm.deny"))
-		blW    = newFileWatcher(filepath.Join(cfgDir, "cfm.blocklists"))
-		confW  = newFileWatcher(filepath.Join(cfgDir, "cfm.conf"))
-		ignW   = newFileWatcher(filepath.Join(cfgDir, "cfm.ignore"))
+		allowW = filewatch.New(filepath.Join(cfgDir, "cfm.allow"))
+		denyW  = filewatch.New(filepath.Join(cfgDir, "cfm.deny"))
+		blW    = filewatch.New(filepath.Join(cfgDir, "cfm.blocklists"))
+		confW  = filewatch.New(filepath.Join(cfgDir, "cfm.conf"))
+		ignW   = filewatch.New(filepath.Join(cfgDir, "cfm.ignore"))
 	}
 
 	// Track seen allow/block entries to avoid pointless TTL refreshes
@@ -1202,7 +1166,7 @@ loadAll := func() {
 
     if ignChanged && ignW != nil {
         done := step("loadAll:applyIgnoreFile")
-        applyIgnoreFile(ignW.path)
+        applyIgnoreFile(ignW.Path())
         done()
     } else if ignW != nil {
         logging.Logf("[startup] loadAll: skip ignore (unchanged)")
@@ -1511,7 +1475,7 @@ ensureDir("/var/log/cfm", 0o700)
         //
         // Both are gated by CFM_DEBUG_HTTP_STARTED so they only run on the first
         // successful config load.  The governor must be created *before* startDebug
-        // so that RegisterHTTP can add the /api/v1/mysql/* routes to the same mux.
+        // so that RegisterHTTP can add the /api/v1/mysql/ routes to the same mux.
         //
         // Debug server address comes from [debug] in cfm.conf:
         //   LISTEN_ADDRESS = 127.0.0.1   (default)
@@ -1576,7 +1540,7 @@ ensureDir("/var/log/cfm", 0o700)
             // ---- end MySQL governor init --------------------------------------------
 
             // Start the debug/internal HTTP server.  The governor (or nil) is passed
-            // so its /api/v1/mysql/* handlers are registered on the same mux — no
+            // so its /api/v1/mysql/ handlers are registered on the same mux — no
             // extra port needed.
             startDebug(debugAddr, gov)
 
@@ -1741,7 +1705,7 @@ done()
 
 
 
-	if ignW != nil { applyIgnoreFile(ignW.path) }
+	if ignW != nil { applyIgnoreFile(ignW.Path()) }
 	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
