@@ -1,6 +1,9 @@
 package webdetector
 
 import (
+	"cfm/internal/firewall"
+	"cfm/internal/logging"
+	"cfm/internal/sslcollector"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -8,13 +11,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
-	"strconv"
-	"cfm/internal/firewall"
-	"cfm/internal/logging"
-	"cfm/internal/sslcollector"
 
 	"crypto/hmac"
 	"crypto/rand"
@@ -26,8 +26,8 @@ import (
 )
 
 const (
-    verifyPath     = "/__cfm_verify" // new preferred endpoint
-    verifyPathOld  = "/verify"       // legacy (keep during rollout)
+	verifyPath    = "/__cfm_verify" // new preferred endpoint
+	verifyPathOld = "/verify"       // legacy (keep during rollout)
 )
 
 type ChallengeServer struct {
@@ -59,166 +59,170 @@ type ChallengeServer struct {
 	rlFwTTLPage   time.Duration
 	rlFwTTLVerify time.Duration
 
-        // Separate access log for per-request challenge HTTP lines ([challenge_http] ...).
-        accessLogPath string
-        accessLog     *challengeAccessLogger
+	// Separate access log for per-request challenge HTTP lines ([challenge_http] ...).
+	accessLogPath string
+	accessLog     *challengeAccessLogger
 
+	// Abuse blocking (many 4xx/5xx on non-verify paths inside challenge server)
+	abuseEnabled  bool
+	abuseWindow   time.Duration
+	abuseBadN     int
+	abuseBlockTTL time.Duration
+	abuseCooldown time.Duration
 
-        // Abuse blocking (many 4xx/5xx on non-verify paths inside challenge server)
-        abuseEnabled  bool
-        abuseWindow   time.Duration
-        abuseBadN     int
-        abuseBlockTTL time.Duration
-        abuseCooldown time.Duration
+	abuseMu   sync.Mutex
+	abuseByIP map[string]*abuseState
 
-        abuseMu   sync.Mutex
-        abuseByIP map[string]*abuseState
-
-        // Optional global ignore (wired by detectors layer, from [global] IGNORE_IPS/IGNORE_NETS).
-        // If matched, challenge server will "auto-solve" (set cfm_ok + release) and redirect.
-        ignoreFn    func(ipStr string) bool
-        ignoreLog   bool
-
+	// Optional global ignore (wired by detectors layer, from [global] IGNORE_IPS/IGNORE_NETS).
+	// If matched, challenge server will "auto-solve" (set cfm_ok + release) and redirect.
+	ignoreFn  func(ipStr string) bool
+	ignoreLog bool
 }
 
 type abuseState struct {
-        winStart     time.Time
-        badCount     int
-        lastSeen     time.Time
-        cooldownTill time.Time
+	winStart     time.Time
+	badCount     int
+	lastSeen     time.Time
+	cooldownTill time.Time
 }
 
 type statusWriter struct {
-    http.ResponseWriter
-    status int
-    bytes  int
+	http.ResponseWriter
+	status int
+	bytes  int
 }
-
 
 // challengeAccessLogger writes [challenge_http] lines to a separate file.
 // It opens lazily and falls back to logging.LogfCHALLENGES on failure.
 type challengeAccessLogger struct {
-        mu   sync.Mutex
-        f    *os.File
-        path string
+	mu   sync.Mutex
+	f    *os.File
+	path string
 }
 
 func newChallengeAccessLogger(path string) *challengeAccessLogger {
-        p := strings.TrimSpace(path)
-        if p == "" {
-                return nil
-        }
-        return &challengeAccessLogger{path: p}
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return nil
+	}
+	return &challengeAccessLogger{path: p}
 }
 func (l *challengeAccessLogger) close() {
-        if l == nil {
-                return
-        }
-        l.mu.Lock()
-        defer l.mu.Unlock()
-        if l.f != nil {
-                _ = l.f.Close()
-                l.f = nil
-        }
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f != nil {
+		_ = l.f.Close()
+		l.f = nil
+	}
 }
 
 func (l *challengeAccessLogger) logf(format string, args ...any) {
-        if l == nil || l.path == "" {
-                logging.LogfCHALLENGES(format, args...)
-                return
-        }
+	if l == nil || l.path == "" {
+		logging.LogfCHALLENGES(format, args...)
+		return
+	}
 
-        l.mu.Lock()
-        defer l.mu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-        if l.f == nil {
-                f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
-                if err != nil {
-                        logging.LogfCHALLENGES("[challenge_http] accesslog open failed: %s: %v", l.path, err)
-                        logging.LogfCHALLENGES(format, args...)
-                        return
-                }
-                l.f = f
-        }
+	if l.f == nil {
+		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
+		if err != nil {
+			logging.LogfCHALLENGES("[challenge_http] accesslog open failed: %s: %v", l.path, err)
+			logging.LogfCHALLENGES(format, args...)
+			return
+		}
+		l.f = f
+	}
 
-        ts := time.Now().Format("2006-01-02 15:04:05")
-        line := fmt.Sprintf("%s "+format+"\n", append([]any{ts}, args...)...)
-        _, _ = l.f.WriteString(line)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	line := fmt.Sprintf("%s "+format+"\n", append([]any{ts}, args...)...)
+	_, _ = l.f.WriteString(line)
 }
-
-
 
 func (w *statusWriter) WriteHeader(code int) {
-    w.status = code
-    w.ResponseWriter.WriteHeader(code)
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 func (w *statusWriter) Write(p []byte) (int, error) {
-    if w.status == 0 { w.status = 200 }
-    n, err := w.ResponseWriter.Write(p)
-    w.bytes += n
-    return n, err
+	if w.status == 0 {
+		w.status = 200
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += n
+	return n, err
 }
 
 func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        start := time.Now()
-        sw := &statusWriter{ResponseWriter: w}
-        next.ServeHTTP(sw, r)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
 
-        // log only verify + errors to keep noise low
-        path := r.URL.Path
-        if path == "" { path = "/" }
-        if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
-            ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
-            if ip == "" { ip = strings.TrimSpace(r.Header.Get("X-Real-IP")) }
-            if ip == "" {
-                host, _, _ := net.SplitHostPort(r.RemoteAddr)
-                if host != "" { ip = host } else { ip = r.RemoteAddr }
-            }
-            host := r.Host
-            uri := path
-            if r.URL.RawQuery != "" { uri += "?" + r.URL.RawQuery }
-            if s.accessLog != nil {
-                s.accessLog.logf("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
-                    ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
-                )
-            } else {
-                logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
-                    ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
-                )
-            }
+		// log only verify + errors to keep noise low
+		path := r.URL.Path
+		if path == "" {
+			path = "/"
+		}
+		if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
+			ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
+			if ip == "" {
+				ip = strings.TrimSpace(r.Header.Get("X-Real-IP"))
+			}
+			if ip == "" {
+				host, _, _ := net.SplitHostPort(r.RemoteAddr)
+				if host != "" {
+					ip = host
+				} else {
+					ip = r.RemoteAddr
+				}
+			}
+			host := r.Host
+			uri := path
+			if r.URL.RawQuery != "" {
+				uri += "?" + r.URL.RawQuery
+			}
+			if s.accessLog != nil {
+				s.accessLog.logf("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
+					ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+				)
+			} else {
+				logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
+					ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+				)
+			}
 
-            // Abuse blocking (many 4xx/5xx on non-verify paths)
-// Abuse blocking (many 4xx/5xx on non-verify paths)
-// IMPORTANT: do NOT feed self-protection 429s into abuseObserve(),
-// otherwise a verify-loop (cookie/domain mismatch) escalates into
-// challenge_abuse firewall blocks.
-if !(sw.status == http.StatusTooManyRequests && sw.Header().Get("Retry-After") != "") {
-    s.abuseObserve(ip, host, uri, sw.status)
+			// Abuse blocking (many 4xx/5xx on non-verify paths)
+			// Abuse blocking (many 4xx/5xx on non-verify paths)
+			// IMPORTANT: do NOT feed self-protection 429s into abuseObserve(),
+			// otherwise a verify-loop (cookie/domain mismatch) escalates into
+			// challenge_abuse firewall blocks.
+			if !(sw.status == http.StatusTooManyRequests && sw.Header().Get("Retry-After") != "") {
+				s.abuseObserve(ip, host, uri, sw.status)
+			}
+
+		}
+	})
 }
-
-        }
-    })
-}
-
 
 // SetCookieLife configures how long the solved cookie should live.
 // If <=0, a safe default is used.
 func (s *ChallengeServer) SetCookieLife(d time.Duration) { s.cookieLife = d }
 
 func (s *ChallengeServer) cookieTTL() time.Duration {
-    if s.cookieLife > 0 {
-        return s.cookieLife
-    }
-    return 60 * time.Minute
+	if s.cookieLife > 0 {
+		return s.cookieLife
+	}
+	return 60 * time.Minute
 }
-
 
 // SetNginxBridge wires the OpenResty bridge into the challenge server so that
 // a successful PoW solve calls bridge.ClearIP(), letting Lua pass the IP through
 // on the next request without querying the bridge again.
 func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
-
 
 // SetAccessLogPath sets a separate file where [challenge_http] access lines will be written.
 // If empty, access lines will continue to go to the main challenges log.
@@ -227,31 +231,29 @@ func (s *ChallengeServer) SetAccessLogPath(path string) { s.accessLogPath = stri
 // SetIPIgnore wires global ignore into challenge server (from [global] IGNORE_IPS/IGNORE_NETS).
 // shouldIgnore must be fast and side-effect free.
 func (s *ChallengeServer) SetIPIgnore(shouldIgnore func(string) bool, logIgnored bool) {
-        s.ignoreFn = shouldIgnore
-        s.ignoreLog = logIgnored
+	s.ignoreFn = shouldIgnore
+	s.ignoreLog = logIgnored
 }
-
 
 // SetAbuseConfig enables simple abuse blocking:
 // if an IP causes >=badN requests with status>=400 (excluding verify endpoints)
 // within "window", we add a firewall block with TTL "blockTTL", and we won't
 // re-block the same IP until "cooldown" passes.
 func (s *ChallengeServer) SetAbuseConfig(enabled bool, window time.Duration, badN int, blockTTL, cooldown time.Duration) {
-        s.abuseEnabled = enabled
-        if window > 0 {
-                s.abuseWindow = window
-        }
-        if badN > 0 {
-                s.abuseBadN = badN
-        }
-        if blockTTL > 0 {
-                s.abuseBlockTTL = blockTTL
-        }
-        if cooldown > 0 {
-                s.abuseCooldown = cooldown
-        }
+	s.abuseEnabled = enabled
+	if window > 0 {
+		s.abuseWindow = window
+	}
+	if badN > 0 {
+		s.abuseBadN = badN
+	}
+	if blockTTL > 0 {
+		s.abuseBlockTTL = blockTTL
+	}
+	if cooldown > 0 {
+		s.abuseCooldown = cooldown
+	}
 }
-
 
 // Optional interface: only nft backend implements this.
 type challengeRedirector interface {
@@ -296,10 +298,7 @@ const (
 
 	rlGCInterval = 30 * time.Second
 	rlStateTTL   = 10 * time.Minute
-
 )
-
-
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
 // It is optional; if unset, ChallengeServer will log a minimal solved line.
@@ -309,7 +308,6 @@ var challengeSolvedHook ChallengeSolvedHook
 
 // SetChallengeSolvedHook installs a callback invoked after a successful solve.
 func SetChallengeSolvedHook(h ChallengeSolvedHook) { challengeSolvedHook = h }
-
 
 // ChallengeAbuseHook lets the detectors layer route challenge-server abuse
 // into the unified sink (API/firewall/notifier), while the challenge server
@@ -324,33 +322,29 @@ var challengeAbuseHook ChallengeAbuseHook
 // detects abuse (many 4xx/5xx on non-verify paths within a window).
 func SetChallengeAbuseHook(h ChallengeAbuseHook) { challengeAbuseHook = h }
 
-
 func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
 	return &ChallengeServer{
-		ssl:     ssl,
-		fw:      fw,
+		ssl: ssl,
+		fw:  fw,
 
 		rlByIP:   make(map[string]*ipRateState),
 		rlLastGC: time.Now().UTC(),
 
 		// firewall escalation defaults: OFF
-		rlFwEnabled:  false,
-		rlFwTTLPage:  2 * time.Minute,
+		rlFwEnabled:   false,
+		rlFwTTLPage:   2 * time.Minute,
 		rlFwTTLVerify: 10 * time.Minute,
-
-
 	}
 }
 
-
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
-        if s.accessLog == nil && strings.TrimSpace(s.accessLogPath) != "" {
-                s.accessLog = newChallengeAccessLogger(s.accessLogPath)
-        }
+	if s.accessLog == nil && strings.TrimSpace(s.accessLogPath) != "" {
+		s.accessLog = newChallengeAccessLogger(s.accessLogPath)
+	}
 
-        if s.abuseByIP == nil {
-                s.abuseByIP = make(map[string]*abuseState)
-        }
+	if s.abuseByIP == nil {
+		s.abuseByIP = make(map[string]*abuseState)
+	}
 
 	mux := http.NewServeMux()
 
@@ -370,7 +364,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 					"[challenge] nft ensure redirect FAILED http=%s https=%s err=%v",
 					httpAddr, httpsAddr, err,
 				)
-                return fmt.Errorf("EnsureChallengeRedirect: %w", err)
+				return fmt.Errorf("EnsureChallengeRedirect: %w", err)
 			} else {
 				// Optional: one-line confirmation (useful during debugging)
 				logging.LogfCHALLENGES(
@@ -390,18 +384,23 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
-                // Global ignore: auto-solve + release (no rate-limit, no pow/token).
-                // This prevents false-positive abuse blocks on trusted/internal networks.
-                if ip := clientIP(r); ip != nil && s.shouldIgnoreIP(ip) {
-                        host := cleanHost(r.Host)
-                        next := r.URL.Query().Get("next")
-                        if next == "" { next = "/" }
-                        if !strings.HasPrefix(next, "/") { next = "/" }
-                        if len(next) > maxNextLen { next = "/" }
-                        s.autoSolveAndRelease(w, r, ip, host, next, "verify")
-                        return
-                }
-
+		// Global ignore: auto-solve + release (no rate-limit, no pow/token).
+		// This prevents false-positive abuse blocks on trusted/internal networks.
+		if ip := clientIP(r); ip != nil && s.shouldIgnoreIP(ip) {
+			host := cleanHost(r.Host)
+			next := r.URL.Query().Get("next")
+			if next == "" {
+				next = "/"
+			}
+			if !strings.HasPrefix(next, "/") {
+				next = "/"
+			}
+			if len(next) > maxNextLen {
+				next = "/"
+			}
+			s.autoSolveAndRelease(w, r, ip, host, next, "verify")
+			return
+		}
 
 		// Self-protection: reject abusive IPs early (before reading body / verifying).
 		if ip := clientIP(r); ip != nil {
@@ -414,7 +413,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				return
 			}
 		}
-
 
 		// Hard cap body even though we don't use it (abuse / slowloris-ish clients)
 		r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
@@ -441,8 +439,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			http.Error(w, "bad client ip", http.StatusBadRequest)
 			return
 		}
-
-
 
 		ipStr = ip.String()
 		next := r.URL.Query().Get("next")
@@ -499,9 +495,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
-
-        if challengeSolvedHook != nil {
-            challengeSolvedHook(ipStr, host, next, diff, time.Since(verifyStart).Milliseconds())
+		if challengeSolvedHook != nil {
+			challengeSolvedHook(ipStr, host, next, diff, time.Since(verifyStart).Milliseconds())
 		} else {
 			logging.LogfCHALLENGES(
 				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d",
@@ -510,10 +505,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				next,
 				time.Since(verifyStart).Milliseconds(),
 				diff,
-
 			)
 		}
-
 
 		// Release:
 		// 1) remove from nft challenge set (DNAT mode)
@@ -521,7 +514,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			_ = s.fw.RemoveChallenge(ip)
 			// 2) add cooldown OK (prevents immediate re-challenge loop)
 			if oker, ok := any(s.fw).(challengeOKer); ok {
-		                ttl := s.cookieTTL()
+				ttl := s.cookieTTL()
 				_ = oker.AddChallengeOK(ip, &ttl)
 			}
 		}
@@ -532,36 +525,33 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			s.bridge.ClearIP(ipStr)
 		}
 
+		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
+		// Secure should follow the *original* scheme (OpenResty terminates TLS),
+		// so trust X-Forwarded-Proto when present.
+		xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+		secure := (r.TLS != nil) || (xfProto == "https")
 
-        // 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
-        // Secure should follow the *original* scheme (OpenResty terminates TLS),
-        // so trust X-Forwarded-Proto when present.
-        xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-        secure := (r.TLS != nil) || (xfProto == "https")
+		// Random token is enough: unguessable => cannot be forged.
+		// (Lua only checks presence; it doesn't validate, so don't use something guessable.)
+		okVal := randomCookieValue()
+		ttl := s.cookieTTL()
+		http.SetCookie(w, &http.Cookie{
+			Name:     "cfm_ok",
+			Value:    okVal,
+			Path:     "/",
+			MaxAge:   int(ttl.Seconds()),
+			HttpOnly: true,
+			Secure:   secure,
+			SameSite: http.SameSiteLaxMode,
+		})
 
-        // Random token is enough: unguessable => cannot be forged.
-        // (Lua only checks presence; it doesn't validate, so don't use something guessable.)
-        okVal := randomCookieValue()
-        ttl := s.cookieTTL()
-        http.SetCookie(w, &http.Cookie{
-            Name:     "cfm_ok",
-            Value:    okVal,
-            Path:     "/",
-            MaxAge:   int(ttl.Seconds()),
-            HttpOnly: true,
-            Secure:   secure,
-            SameSite: http.SameSiteLaxMode,
-        })
-
-        // Optional: expire the challenge cookie to reduce confusion/churn.
-        http.SetCookie(w, &http.Cookie{
-            Name:   "cfm_chal",
-            Value:  "",
-            Path:   "/",
-            MaxAge: -1,
-        })
-
-
+		// Optional: expire the challenge cookie to reduce confusion/churn.
+		http.SetCookie(w, &http.Cookie{
+			Name:   "cfm_chal",
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+		})
 
 		// Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
 		time.Sleep(500 * time.Millisecond)
@@ -573,12 +563,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Safety: next is already forced to start with "/" above.
 		http.Redirect(w, r, next, http.StatusSeeOther) // 303
 
-		}
+	}
 
 	// New endpoint + legacy alias.
 	mux.HandleFunc(verifyPath, verifyHandler)
 	mux.HandleFunc(verifyPathOld, verifyHandler)
-
 
 	// --- CATCH-ALL: handle any path ---
 	// Important: register after /hello,/healthz,/verify.
@@ -632,39 +621,46 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
-                // next (single parse + sanitize; reused below)
-                next := r.URL.Query().Get("next")
-                if next == "" { next = "/" }
-                if !strings.HasPrefix(next, "/") { next = "/" }
-                if len(next) > maxNextLen { next = "/" }
+		// next (single parse + sanitize; reused below)
+		next := r.URL.Query().Get("next")
+		if next == "" {
+			next = "/"
+		}
+		if !strings.HasPrefix(next, "/") {
+			next = "/"
+		}
+		if len(next) > maxNextLen {
+			next = "/"
+		}
 
+		// Global ignore: auto-solve + release (no challenge page, no abuse tracking).
+		if s.shouldIgnoreIP(ip) {
+			host := cleanHost(r.Host)
+			s.autoSolveAndRelease(w, r, ip, host, next, "page")
+			return
+		}
 
-                // Global ignore: auto-solve + release (no challenge page, no abuse tracking).
-                if s.shouldIgnoreIP(ip) {
-                        host := cleanHost(r.Host)
-                        s.autoSolveAndRelease(w, r, ip, host, next, "page")
-                        return
-                }
-
-
-                // Self-protection: rate limit challenge page requests per IP.
-                if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindPage); !ok {
-                        if bannedNow {
+		// Self-protection: rate limit challenge page requests per IP.
+		if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindPage); !ok {
+			if bannedNow {
 				s.rlLogAbuse(r, ip.String(), rlKindPage, retry)
-                                s.rlFirewallBlock(ip, rlKindPage)
-                        }
-                        s.rlReject(w, retry)
-                        return
-                }
-
-
-
+				s.rlFirewallBlock(ip, rlKindPage)
+			}
+			s.rlReject(w, retry)
+			return
+		}
 
 		// If already solved (cookie present + token valid), release and redirect.
-next = r.URL.Query().Get("next")
-if next == "" { next = "/" }
-if !strings.HasPrefix(next, "/") { next = "/" }
-if len(next) > maxNextLen { next = "/" }
+		next = r.URL.Query().Get("next")
+		if next == "" {
+			next = "/"
+		}
+		if !strings.HasPrefix(next, "/") {
+			next = "/"
+		}
+		if len(next) > maxNextLen {
+			next = "/"
+		}
 
 		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
 		cookieVal := ""
@@ -701,7 +697,6 @@ if len(next) > maxNextLen { next = "/" }
 		cfg := defaultPowConfig()
 		powTok := ""
 
-
 		if cfg.Enabled {
 			nonce16 := make([]byte, 16)
 			if _, err := rand.Read(nonce16); err == nil {
@@ -713,7 +708,6 @@ if len(next) > maxNextLen { next = "/" }
 			}
 
 		}
-
 
 		if cfg.Enabled && powTok == "" {
 			http.Error(w, "pow unavailable", http.StatusInternalServerError)
@@ -739,7 +733,7 @@ if len(next) > maxNextLen { next = "/" }
 		}
 		s.httpLn = ln
 		s.httpSrv = &http.Server{
-			Addr:              httpAddr,
+			Addr: httpAddr,
 			//Handler:           mux,
 			Handler:           s.wrapAccessLog(mux),
 			ReadHeaderTimeout: 2 * time.Second,
@@ -751,9 +745,9 @@ if len(next) > maxNextLen { next = "/" }
 
 		s.httpSrv.SetKeepAlivesEnabled(false)
 
-        s.wg.Add(1)
-        go func() {
-            defer s.wg.Done()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
 			logging.Logf("[challenge] HTTP listening on %s", httpAddr)
 			if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				logging.Logf("[challenge] HTTP serve error: %v", err)
@@ -763,9 +757,9 @@ if len(next) > maxNextLen { next = "/" }
 		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
 		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpAddr); ok {
 			if ln6, err := net.Listen("tcp", v6addr); err == nil {
-                s.wg.Add(1)
-                go func() {
-                    defer s.wg.Done()
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
 					logging.Logf("[challenge] HTTP listening on %s", v6addr)
 					if err := s.httpSrv.Serve(ln6); err != nil && err != http.ErrServerClosed {
 						logging.Logf("[challenge] HTTP serve error (v6): %v", err)
@@ -805,7 +799,7 @@ if len(next) > maxNextLen { next = "/" }
 		}
 
 		s.httpsSrv = &http.Server{
-			Addr:              httpsAddr,
+			Addr: httpsAddr,
 			//Handler:           mux,
 			Handler:           s.wrapAccessLog(mux),
 			ReadHeaderTimeout: 2 * time.Second,
@@ -818,9 +812,9 @@ if len(next) > maxNextLen { next = "/" }
 
 		s.httpsSrv.SetKeepAlivesEnabled(false)
 
-        s.wg.Add(1)
-        go func() {
-            defer s.wg.Done()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
 			logging.Logf("[challenge] HTTPS listening on %s", httpsAddr)
 			if err := s.httpsSrv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
 				logging.Logf("[challenge] HTTPS serve error: %v", err)
@@ -830,9 +824,9 @@ if len(next) > maxNextLen { next = "/" }
 		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
 		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
 			if ln6, err := net.Listen("tcp", v6addr); err == nil {
-                s.wg.Add(1)
-                go func() {
-                    defer s.wg.Done()
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
 					logging.Logf("[challenge] HTTPS listening on %s", v6addr)
 					if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
 						logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
@@ -846,9 +840,9 @@ if len(next) > maxNextLen { next = "/" }
 	}
 
 	// stop on ctx cancel
-    s.wg.Add(1)
-    go func() {
-        defer s.wg.Done()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
 		<-ctx.Done()
 		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -873,9 +867,9 @@ func (s *ChallengeServer) Stop(ctx context.Context) error {
 		}
 	}
 
-        if s.accessLog != nil {
-                s.accessLog.close()
-        }
+	if s.accessLog != nil {
+		s.accessLog.close()
+	}
 
 	return firstErr
 }
@@ -906,14 +900,13 @@ func tlsVersionString(v uint16) string {
 	}
 }
 
-
 // ---------------- self-protection (in-process rate limit) ----------------
 
 type ipRateState struct {
-	winStart time.Time
-	count    int
-	banUntil time.Time
-	lastSeen time.Time
+	winStart       time.Time
+	count          int
+	banUntil       time.Time
+	lastSeen       time.Time
 	fwBlockedUntil time.Time
 }
 
@@ -921,10 +914,6 @@ const (
 	rlKindPage = iota
 	rlKindVerify
 )
-
-
-
-
 
 func (s *ChallengeServer) rlLogAbuse(r *http.Request, ip string, kind int, retry time.Duration) {
 	k := "page"
@@ -956,10 +945,6 @@ func (s *ChallengeServer) rlLogAbuse(r *http.Request, ip string, kind int, retry
 		ip, k, retry, host, path, ua,
 	)
 }
-
-
-
-
 
 // rlAllow returns whether the request should proceed and, if not, how long the
 // client should wait before retrying.
@@ -994,7 +979,7 @@ func (s *ChallengeServer) rlAllow(ip string, kind int) (allowed bool, retry time
 	st.lastSeen = now
 
 	if now.Before(st.banUntil) {
-	return false, st.banUntil.Sub(now), false
+		return false, st.banUntil.Sub(now), false
 	}
 
 	var win time.Duration
@@ -1031,7 +1016,6 @@ func (s *ChallengeServer) rlReject(w http.ResponseWriter, retry time.Duration) {
 	w.Header().Set("Connection", "close")
 	http.Error(w, "rate limited", http.StatusTooManyRequests)
 }
-
 
 // rlFirewallBlock optionally escalates a self-protection ban into a local firewall block.
 // This helps protect CPU by keeping future traffic from reaching userspace at all.
@@ -1070,32 +1054,23 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	_ = s.fw.AddBlock(ip, comment, &ttl)
 }
 
-
-
 // ---------------- helpers ----------------
-
-
-
 
 // Wait blocks until all goroutines started by Start() have exited.
 // Critical for hot-reload to avoid "address already in use" races.
 func (s *ChallengeServer) Wait(ctx context.Context) error {
-    done := make(chan struct{})
-    go func() {
-        s.wg.Wait()
-        close(done)
-    }()
-    select {
-    case <-done:
-        return nil
-    case <-ctx.Done():
-        return ctx.Err()
-    }
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
-
-
-
-
 
 func cleanHost(h string) string {
 	if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
@@ -1105,115 +1080,113 @@ func cleanHost(h string) string {
 }
 
 func isVerifyPath(uri string) bool {
-        // count as "verify" anything that starts with /__cfm_verify
-        // (query string already included in uri variable)
-        return strings.HasPrefix(uri, "/__cfm_verify")
+	// count as "verify" anything that starts with /__cfm_verify
+	// (query string already included in uri variable)
+	return strings.HasPrefix(uri, "/__cfm_verify")
 }
 
 // abuseObserve updates per-IP error counters and blocks via firewall if threshold exceeded.
 func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status int) {
-        if !s.abuseEnabled || strings.TrimSpace(ipStr) == "" {
-                return
-        }
+	if !s.abuseEnabled || strings.TrimSpace(ipStr) == "" {
+		return
+	}
 
-        // Global ignore: never count / block ignored IPs.
-        if s.ignoreFn != nil && s.ignoreFn(strings.TrimSpace(ipStr)) {
-                return
-        }
+	// Global ignore: never count / block ignored IPs.
+	if s.ignoreFn != nil && s.ignoreFn(strings.TrimSpace(ipStr)) {
+		return
+	}
 
+	if status < 400 {
+		return
+	}
+	// Don't count verify endpoint failures (avoid false positives on legit verify flows)
+	if isVerifyPath(uri) {
+		return
+	}
 
-        if status < 400 {
-                return
-        }
-        // Don't count verify endpoint failures (avoid false positives on legit verify flows)
-        if isVerifyPath(uri) {
-                return
-        }
+	now := time.Now().UTC()
+	ipStr = strings.TrimSpace(ipStr)
 
-        now := time.Now().UTC()
-        ipStr = strings.TrimSpace(ipStr)
+	s.abuseMu.Lock()
+	st := s.abuseByIP[ipStr]
+	if st == nil {
+		st = &abuseState{winStart: now, lastSeen: now}
+		s.abuseByIP[ipStr] = st
+	}
+	st.lastSeen = now
 
-        s.abuseMu.Lock()
-        st := s.abuseByIP[ipStr]
-        if st == nil {
-                st = &abuseState{winStart: now, lastSeen: now}
-                s.abuseByIP[ipStr] = st
-        }
-        st.lastSeen = now
+	// cooldown de-dupe
+	if !st.cooldownTill.IsZero() && now.Before(st.cooldownTill) {
+		s.abuseMu.Unlock()
+		return
+	}
 
-        // cooldown de-dupe
-        if !st.cooldownTill.IsZero() && now.Before(st.cooldownTill) {
-                s.abuseMu.Unlock()
-                return
-        }
+	// reset window
+	win := s.abuseWindow
+	if win <= 0 {
+		win = 10 * time.Second
+	}
+	if now.Sub(st.winStart) >= win {
+		st.winStart = now
+		st.badCount = 0
+	}
 
-        // reset window
-        win := s.abuseWindow
-        if win <= 0 {
-                win = 10 * time.Second
-        }
-        if now.Sub(st.winStart) >= win {
-                st.winStart = now
-                st.badCount = 0
-        }
+	st.badCount++
+	badN := s.abuseBadN
+	if badN <= 0 {
+		badN = 15
+	}
 
-        st.badCount++
-        badN := s.abuseBadN
-        if badN <= 0 {
-                badN = 15
-        }
+	// cheap GC (keep map bounded)
+	if len(s.abuseByIP) > 50000 {
+		for k, v := range s.abuseByIP {
+			if now.Sub(v.lastSeen) > 30*time.Minute {
+				delete(s.abuseByIP, k)
+			}
+		}
+	}
 
-        // cheap GC (keep map bounded)
-        if len(s.abuseByIP) > 50000 {
-                for k, v := range s.abuseByIP {
-                        if now.Sub(v.lastSeen) > 30*time.Minute {
-                                delete(s.abuseByIP, k)
-                        }
-                }
-        }
+	if st.badCount < badN {
+		s.abuseMu.Unlock()
+		return
+	}
 
-        if st.badCount < badN {
-                s.abuseMu.Unlock()
-                return
-        }
+	// trigger action
+	ttl := s.abuseBlockTTL
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	cd := s.abuseCooldown
+	if cd <= 0 {
+		cd = 30 * time.Minute
+	}
+	st.cooldownTill = now.Add(cd)
+	// reset counter after action (so we don't immediately re-trigger after cooldown ends)
+	st.winStart = now
+	st.badCount = 0
+	s.abuseMu.Unlock()
 
-        // trigger action
-        ttl := s.abuseBlockTTL
-        if ttl <= 0 {
-                ttl = 1 * time.Hour
-        }
-        cd := s.abuseCooldown
-        if cd <= 0 {
-                cd = 30 * time.Minute
-        }
-        st.cooldownTill = now.Add(cd)
-        // reset counter after action (so we don't immediately re-trigger after cooldown ends)
-        st.winStart = now
-        st.badCount = 0
-        s.abuseMu.Unlock()
+	// Route to detectors sink if hook is installed.
+	// This lets the unified sink push to API/Firewall/Notifier.
+	if challengeAbuseHook != nil {
+		challengeAbuseHook(ipStr, host, uri, status, badN, win, ttl, cd)
+	} else {
+		// Backwards-compatible fallback: direct firewall block.
+		if s.fw != nil {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				return
+			}
+			comment := "cfm:challenge_abuse"
+			_ = s.fw.AddBlock(ip, comment, &ttl)
+		}
+	}
 
-        // Route to detectors sink if hook is installed.
-        // This lets the unified sink push to API/Firewall/Notifier.
-        if challengeAbuseHook != nil {
-                challengeAbuseHook(ipStr, host, uri, status, badN, win, ttl, cd)
-        } else {
-                // Backwards-compatible fallback: direct firewall block.
-                if s.fw != nil {
-                        ip := net.ParseIP(ipStr)
-                        if ip == nil {
-                                return
-                        }
-                        comment := "cfm:challenge_abuse"
-                        _ = s.fw.AddBlock(ip, comment, &ttl)
-                }
-        }
-
-        // log to challenges log (high signal)
-        logging.LogfCHALLENGES("[challenge_abuse] ip=%s host=%s bad>=%d window=%s status=%d uri=%s block_ttl=%s cooldown=%s",
-                ipStr, host, badN, win.String(), status, uri, ttl.String(), cd.String(),
-        )
+	// log to challenges log (high signal)
+	logging.LogfCHALLENGES("[challenge_abuse] ip=%s host=%s bad>=%d window=%s status=%d uri=%s block_ttl=%s cooldown=%s",
+		ipStr, host, badN, win.String(), status, uri, ttl.String(), cd.String(),
+	)
 }
-
 
 // Cloudflare IP ranges (keep in sync with nginx trusted_proxies.conf).
 // Source: https://www.cloudflare.com/ips/
@@ -1221,111 +1194,109 @@ var cloudflareNets []*net.IPNet
 var cloudflareNetsOnce sync.Once
 
 func initCloudflareNets() {
-    cidrs := []string{
-        "173.245.48.0/20",
-        "103.21.244.0/22",
-        "103.22.200.0/22",
-        "103.31.4.0/22",
-        "141.101.64.0/18",
-        "108.162.192.0/18",
-        "190.93.240.0/20",
-        "188.114.96.0/20",
-        "197.234.240.0/22",
-        "198.41.128.0/17",
-        "162.158.0.0/15",
-        "104.16.0.0/13",
-        "104.24.0.0/14",
-        "172.64.0.0/13",
-        "131.0.72.0/22",
-        // IPv6
-        "2400:cb00::/32",
-        "2606:4700::/32",
-        "2803:f800::/32",
-        "2405:b500::/32",
-        "2405:8100::/32",
-        "2a06:98c0::/29",
-        "2c0f:f248::/32",
-    }
-    for _, c := range cidrs {
-        _, n, err := net.ParseCIDR(c)
-        if err == nil && n != nil {
-            cloudflareNets = append(cloudflareNets, n)
-        }
-    }
+	cidrs := []string{
+		"173.245.48.0/20",
+		"103.21.244.0/22",
+		"103.22.200.0/22",
+		"103.31.4.0/22",
+		"141.101.64.0/18",
+		"108.162.192.0/18",
+		"190.93.240.0/20",
+		"188.114.96.0/20",
+		"197.234.240.0/22",
+		"198.41.128.0/17",
+		"162.158.0.0/15",
+		"104.16.0.0/13",
+		"104.24.0.0/14",
+		"172.64.0.0/13",
+		"131.0.72.0/22",
+		// IPv6
+		"2400:cb00::/32",
+		"2606:4700::/32",
+		"2803:f800::/32",
+		"2405:b500::/32",
+		"2405:8100::/32",
+		"2a06:98c0::/29",
+		"2c0f:f248::/32",
+	}
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err == nil && n != nil {
+			cloudflareNets = append(cloudflareNets, n)
+		}
+	}
 }
 
 func isCloudflareIP(ip net.IP) bool {
-    if ip == nil {
-        return false
-    }
-    cloudflareNetsOnce.Do(initCloudflareNets)
-    for _, n := range cloudflareNets {
-        if n.Contains(ip) {
-            return true
-        }
-    }
-    return false
+	if ip == nil {
+		return false
+	}
+	cloudflareNetsOnce.Do(initCloudflareNets)
+	for _, n := range cloudflareNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTrustedProxyPeer(peer net.IP) bool {
-    if peer == nil {
-        return false
-    }
-    if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
-        return true
-    }
-    return isCloudflareIP(peer)
+	if peer == nil {
+		return false
+	}
+	if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
+		return true
+	}
+	return isCloudflareIP(peer)
 }
 
-
-
 func clientIP(r *http.Request) net.IP {
-    host, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err != nil {
-        host = r.RemoteAddr
-    }
-    peer := net.ParseIP(strings.TrimSpace(host))
-    if peer == nil {
-        return nil
-    }
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(strings.TrimSpace(host))
+	if peer == nil {
+		return nil
+	}
 
-    // Trust proxy headers ONLY when the immediate peer is local/trusted
-    // (OpenResty connects from 127.0.0.1 or private addr). In DNAT mode
-    // peer is the real public client -> ignore spoofable headers.
-    if isTrustedProxyPeer(peer) {
-        // 1) Cloudflare real IP (if present)
-        if h := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); h != "" {
-            if ip := net.ParseIP(h); ip != nil {
-                return ip
-            }
-        }
-        // 2) X-Real-IP
-        if h := strings.TrimSpace(r.Header.Get("X-Real-IP")); h != "" {
-            if ip := net.ParseIP(h); ip != nil {
-                return ip
-            }
-        }
-        // 3) X-Forwarded-For: take first
-        if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-            parts := strings.Split(xff, ",")
-            if len(parts) > 0 {
-                first := strings.TrimSpace(parts[0])
-                if ip := net.ParseIP(first); ip != nil {
-                    return ip
-                }
-            }
-        }
-    }
+	// Trust proxy headers ONLY when the immediate peer is local/trusted
+	// (OpenResty connects from 127.0.0.1 or private addr). In DNAT mode
+	// peer is the real public client -> ignore spoofable headers.
+	if isTrustedProxyPeer(peer) {
+		// 1) Cloudflare real IP (if present)
+		if h := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); h != "" {
+			if ip := net.ParseIP(h); ip != nil {
+				return ip
+			}
+		}
+		// 2) X-Real-IP
+		if h := strings.TrimSpace(r.Header.Get("X-Real-IP")); h != "" {
+			if ip := net.ParseIP(h); ip != nil {
+				return ip
+			}
+		}
+		// 3) X-Forwarded-For: take first
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				first := strings.TrimSpace(parts[0])
+				if ip := net.ParseIP(first); ip != nil {
+					return ip
+				}
+			}
+		}
+	}
 
-    return peer
+	return peer
 
 }
 
 func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
-        if ip == nil || s.ignoreFn == nil {
-                return false
-        }
-        return s.ignoreFn(ip.String())
+	if ip == nil || s.ignoreFn == nil {
+		return false
+	}
+	return s.ignoreFn(ip.String())
 }
 
 // autoSolveAndRelease:
@@ -1335,60 +1306,58 @@ func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
 // - expires cfm_chal cookie (best-effort)
 // - redirects to next
 func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Request, ip net.IP, host, next, reason string) {
-        ipStr := ""
-        if ip != nil {
-                ipStr = ip.String()
-        }
+	ipStr := ""
+	if ip != nil {
+		ipStr = ip.String()
+	}
 
-        if s.ignoreLog {
-                logging.LogfCHALLENGES("[challenge_ignore] ip=%s host=%s uri=%s reason=%s", ipStr, host, next, reason)
-        }
+	if s.ignoreLog {
+		logging.LogfCHALLENGES("[challenge_ignore] ip=%s host=%s uri=%s reason=%s", ipStr, host, next, reason)
+	}
 
-        // Release from nft sets (DNAT mode)
-        if s.fw != nil && ip != nil {
-                _ = s.fw.RemoveChallenge(ip)
-                if oker, ok := any(s.fw).(challengeOKer); ok {
-                        ttl := s.cookieTTL()
-                        _ = oker.AddChallengeOK(ip, &ttl)
-                }
-        }
+	// Release from nft sets (DNAT mode)
+	if s.fw != nil && ip != nil {
+		_ = s.fw.RemoveChallenge(ip)
+		if oker, ok := any(s.fw).(challengeOKer); ok {
+			ttl := s.cookieTTL()
+			_ = oker.AddChallengeOK(ip, &ttl)
+		}
+	}
 
-        // OpenResty mode: clear IP from bridge (Lua pass-through)
-        if s.bridge != nil && ipStr != "" {
-                s.bridge.ClearIP(ipStr)
-        }
+	// OpenResty mode: clear IP from bridge (Lua pass-through)
+	if s.bridge != nil && ipStr != "" {
+		s.bridge.ClearIP(ipStr)
+	}
 
-        // Match secure flag to original scheme (OpenResty terminates TLS)
-        xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-        secure := (r.TLS != nil) || (xfProto == "https")
+	// Match secure flag to original scheme (OpenResty terminates TLS)
+	xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	secure := (r.TLS != nil) || (xfProto == "https")
 
-        // Set solved cookie
-        okVal := randomCookieValue()
-        ttl := s.cookieTTL()
-        http.SetCookie(w, &http.Cookie{
-                Name:     "cfm_ok",
-                Value:    okVal,
-                Path:     "/",
-                MaxAge:   int(ttl.Seconds()),
-                HttpOnly: true,
-                Secure:   secure,
-                SameSite: http.SameSiteLaxMode,
-        })
+	// Set solved cookie
+	okVal := randomCookieValue()
+	ttl := s.cookieTTL()
+	http.SetCookie(w, &http.Cookie{
+		Name:     "cfm_ok",
+		Value:    okVal,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
 
-        // Expire challenge cookie (avoid churn)
-        http.SetCookie(w, &http.Cookie{
-                Name:   "cfm_chal",
-                Value:  "",
-                Path:   "/",
-                MaxAge: -1,
-        })
+	// Expire challenge cookie (avoid churn)
+	http.SetCookie(w, &http.Cookie{
+		Name:   "cfm_chal",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
 
-        w.Header().Set("Cache-Control", "no-store")
-        w.Header().Set("Connection", "close")
-        http.Redirect(w, r, next, http.StatusSeeOther) // 303
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "close")
+	http.Redirect(w, r, next, http.StatusSeeOther) // 303
 }
-
-
 
 func basicHeaderSanity(w http.ResponseWriter, r *http.Request) bool {
 	// Host sanity (prevents some oddballs; also avoids huge Host headers)

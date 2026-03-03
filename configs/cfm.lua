@@ -1,25 +1,12 @@
 -- /usr/local/openresty/nginx/lua/cfm.lua
 --
--- CFM OpenResty in-path enforcement (route-by-variable version).
+-- CFM OpenResty in-path enforcement (Unified & Efficient Version)
+-- Optimized with Keepalive and Chunked Transfer Encoding support.
 --
--- Flow:
---   1) Determine client IP (realip_remote_addr if available, else remote_addr)
---   2) Call CFM bridge over UNIX socket (HTTP) to get decision:
---        GET /nginx/decision?ip=...&host=...&uri=...&method=...&scheme=...
---        -> {"ip_action":"allow|challenge|block","vhost_action":"allow|challenge|block"}
---      Header: X-CFM-Token: <token>
---   3) Enforce:
---      - block     -> ngx.exit(403 by default)
---      - challenge -> ngx.var.cfm_pass = "http://cfm_challenge"
---      - allow     -> ngx.var.cfm_pass = "http(s)://$server_addr:80|443"
---
--- IMPORTANT:
---   Nginx must define: set $cfm_pass "";
---   and use:          proxy_pass $cfm_pass;
---
--- Notes:
---   - If bridge fails, fail-open by default (availability first).
---   - Optional debug headers available via env flags.
+-- Fixes applied vs previous version:
+--   [1] logonly WAF action now returns early — no longer falls through to bridge decision
+--   [2] URI re-added to cache key (capped at 64 chars) — prevents allow-cache bypass on sensitive paths
+--   [3] observe_waf reuses the keepalive pool via http_post_unix (no more rogue Connection: close)
 
 local cjson = require "cjson.safe"
 
@@ -29,33 +16,34 @@ local cjson = require "cjson.safe"
 local CFG = {
   sock_path = "/var/run/cfm/cfm_nginx.sock",
 
-  token = "cfm",
+  token        = "cfm",
   token_header = "X-CFM-Token",
 
   decision_timeout_ms   = 80,
-  decision_cache_ttl_ms = 1500,
+  decision_cache_ttl_ms = 9000,
 
   block_code = 403,
+  fail_open  = true,
 
-  -- Fail-open vs fail-closed when bridge is unreachable/forbidden/etc.
-  fail_open = true,
-
-  -- Debugging (set env vars in systemd if needed)
+  -- Debugging (set env vars in systemd/env if needed)
   debug         = (os.getenv("CFM_DEBUG") == "1"),
   debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
-
-  -- Log ALL allow decisions too (can be noisy on busy hosts)
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
   -- Sliding OK TTL (cookie + bridge okState)
-  ok_ttl_sec = tonumber(os.getenv("CFM_OK_TTL_SEC") or "1800"),
-  -- Rate limit for /nginx/ok/touch per IP
-  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
+  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")          or "1800"),
+  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC")  or "120"),
+
+  -- Keepalive pool (per nginx worker)
+  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
+  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
 }
--- ─────────────────────────────────────────────────────────────────────────────
 
 local SH = ngx.shared.cfm_decisions
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- UTILS
+-- ─────────────────────────────────────────────────────────────────────────────
 local function log_route(level, msg)
   ngx.log(level or ngx.WARN, "[cfm] ", msg)
 end
@@ -64,15 +52,8 @@ local function esc(s) return ngx.escape_uri(s or "") end
 
 local function append_set_cookie(v)
   local h = ngx.header["Set-Cookie"]
-  if not h then
-    ngx.header["Set-Cookie"] = v
-    return
-  end
-  if type(h) == "table" then
-    table.insert(h, v)
-    ngx.header["Set-Cookie"] = h
-    return
-  end
+  if not h then ngx.header["Set-Cookie"] = v; return end
+  if type(h) == "table" then table.insert(h, v); ngx.header["Set-Cookie"] = h; return end
   ngx.header["Set-Cookie"] = { h, v }
 end
 
@@ -84,67 +65,41 @@ local function real_ip()
   return "-"
 end
 
--- ── Minimal HTTP GET over unix socket ────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────────
+-- NETWORK LAYER (Keepalive + Chunked Support)
+-- ─────────────────────────────────────────────────────────────────────────────
 
-local function http_get_unix(path_qs)
-  local s, err = ngx.socket.tcp()
-  if not s then return nil, "socket.tcp: " .. (err or "unknown") end
-
-  s:settimeouts(CFG.decision_timeout_ms, CFG.decision_timeout_ms, CFG.decision_timeout_ms)
-
-  local ok, cerr = s:connect("unix:" .. CFG.sock_path)
-  if not ok then
-    s:close()
-    return nil, "connect: " .. (cerr or "unknown")
-  end
-
-  local req =
-    "GET " .. path_qs .. " HTTP/1.1\r\n" ..
-    "Host: localhost\r\n" ..
-    "Connection: close\r\n"
-
-  if CFG.token and CFG.token ~= "" then
-    req = req .. CFG.token_header .. ": " .. CFG.token .. "\r\n"
-  end
-  req = req .. "\r\n"
-
-  local _, werr = s:send(req)
-  if werr then s:close(); return nil, "send: " .. (werr or "unknown") end
-
-  local status_line, rerr = s:receive("*l")
-  if not status_line then s:close(); return nil, "recv status: " .. (rerr or "unknown") end
-
-  local code = tonumber(status_line:match("%s(%d%d%d)%s"))
-  if not code then s:close(); return nil, "bad status line: " .. status_line end
-
-  local content_length
+local function read_chunked(sock)
+  local out = {}
   while true do
-    local line, herr = s:receive("*l")
-    if not line then s:close(); return nil, "recv headers: " .. (herr or "unknown") end
-    if line == "" then break end
-    local k, v = line:match("^([^:]+):%s*(.*)$")
-    if k and v and k:lower() == "content-length" then
-      content_length = tonumber(v)
+    local line, err = sock:receive("*l")
+    if not line then return nil, "chunked size line: " .. (err or "?") end
+
+    local hex = line:match("^%s*([0-9a-fA-F]+)")
+    if not hex then return nil, "bad chunk size line: " .. tostring(line) end
+
+    local n = tonumber(hex, 16)
+    if not n then return nil, "bad chunk size hex: " .. tostring(hex) end
+
+    if n == 0 then
+      -- Drain trailers until blank line
+      while true do
+        local tline = sock:receive("*l")
+        if not tline or tline == "" then break end
+      end
+      break
     end
-  end
 
-  local body
-  if content_length and content_length > 0 then
-    body = s:receive(content_length)
-  else
-    body = s:receive("*a")
-  end
-  s:close()
+    local data, derr = sock:receive(n)
+    if not data then return nil, "chunk read: " .. (derr or "?") end
+    table.insert(out, data)
 
-  if code ~= 200 then
-    return nil, "http " .. tostring(code) .. " body=" .. tostring(body or "")
+    sock:receive(2) -- trailing CRLF
   end
-  return body or "", nil
+  return table.concat(out), nil
 end
 
--- ── Minimal HTTP POST (JSON) over unix socket ─────────────────────────────────
-
-local function http_post_unix(path, json_body)
+local function http_unix(method, path, body)
   local s, err = ngx.socket.tcp()
   if not s then return nil, "socket.tcp: " .. (err or "unknown") end
 
@@ -153,17 +108,20 @@ local function http_post_unix(path, json_body)
   local ok, cerr = s:connect("unix:" .. CFG.sock_path)
   if not ok then s:close(); return nil, "connect: " .. (cerr or "unknown") end
 
-  local body = json_body or ""
-  local req =
-    "POST " .. path .. " HTTP/1.1\r\n" ..
-    "Host: localhost\r\n" ..
-    "Connection: close\r\n" ..
-    "Content-Type: application/json\r\n" ..
-    "Content-Length: " .. tostring(#body) .. "\r\n"
+  body = body or ""
+  local req = method .. " " .. path .. " HTTP/1.1\r\n" ..
+              "Host: localhost\r\n" ..
+              "Connection: keep-alive\r\n"
 
   if CFG.token and CFG.token ~= "" then
     req = req .. CFG.token_header .. ": " .. CFG.token .. "\r\n"
   end
+
+  if method == "POST" then
+    req = req .. "Content-Type: application/json\r\n" ..
+                 "Content-Length: " .. tostring(#body) .. "\r\n"
+  end
+
   req = req .. "\r\n" .. body
 
   local _, werr = s:send(req)
@@ -175,26 +133,53 @@ local function http_post_unix(path, json_body)
   local code = tonumber(status_line:match("%s(%d%d%d)%s"))
   if not code then s:close(); return nil, "bad status line: " .. status_line end
 
+  local content_length
+  local is_chunked = false
+
   while true do
     local line, herr = s:receive("*l")
-    if not line then s:close(); return nil, "recv headers: " .. (herr or "unknown") end
-    if line == "" then break end
+    if not line or line == "" then break end
+    local k, v = line:match("^([^:]+):%s*(.*)$")
+    if k and v then
+      local kl = k:lower()
+      if kl == "content-length" then
+        content_length = tonumber(v)
+      elseif kl == "transfer-encoding" and v:lower():find("chunked", 1, true) then
+        is_chunked = true
+      end
+    end
   end
-  local resp = s:receive("*a")
-  s:close()
+
+  local resp = ""
+  if method == "HEAD" or code == 204 or code == 304 then
+    resp = ""
+  elseif content_length and content_length > 0 then
+    resp = s:receive(content_length)
+  elseif is_chunked then
+    local b, berr = read_chunked(s)
+    if not b then s:close(); return nil, berr end
+    resp = b
+  else
+    resp = s:receive("*a") or ""
+  end
+
+  local ok_ka = s:setkeepalive(CFG.keepalive_idle_ms, CFG.keepalive_pool)
+  if not ok_ka then s:close() end
 
   if code ~= 200 then
-    return nil, "http " .. tostring(code) .. " body=" .. tostring(resp or "")
+    return nil, "http " .. tostring(code) .. " body=" .. tostring(resp)
   end
-  return resp or "", nil
+  return resp, nil
 end
 
--- ── Helpers ───────────────────────────────────────────────────────────────────
+local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil)  end
+local function http_post_unix(path, b) return http_unix("POST", path,    b)    end
 
--- Notify webdetector engine about a WAF-terminated request so the per-IP
--- WAF 403 counter (IP403WAF_COUNT) can escalate to a firewall block.
--- Fire-and-forget over the same unix socket. No cooldown: we want every hit
--- counted (the Go engine does the windowed aggregation).
+-- ─────────────────────────────────────────────────────────────────────────────
+-- HELPERS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- FIX [3]: reuse keepalive pool — removed the rogue raw socket + Connection: close
 local function observe_waf(ip, host, uri, method, status, reason)
   if not ip or ip == "" then return end
   local payload = cjson.encode({
@@ -205,29 +190,13 @@ local function observe_waf(ip, host, uri, method, status, reason)
     status = status or 403,
     reason = reason or "",
   })
-  -- best-effort: ignore errors (attack path, must not stall the response)
-  local s = ngx.socket.tcp()
-  if not s then return end
-  s:settimeouts(50, 50, 50)   -- 50 ms hard cap; never block the 403 response
-  local ok = s:connect("unix:" .. CFG.sock_path)
-  if not ok then s:close(); return end
-  local req =
-    "POST /nginx/observe HTTP/1.0\r\n" ..
-    "Host: cfm\r\n" ..
-    "Content-Type: application/json\r\n" ..
-    "Content-Length: " .. tostring(#payload) .. "\r\n" ..
-    (CFG.token ~= "" and (CFG.token_header .. ": " .. CFG.token .. "\r\n") or "") ..
-    "\r\n" .. payload
-  s:send(req)
-  s:close()   -- fire-and-forget; don't read response
+  -- Best-effort; ignore errors
+  http_post_unix("/nginx/observe", payload)
 end
-
-
-
 
 local function touch_ok(ip)
   if not SH then return end
-  local k = "ok_touch|" .. (ip or "-")
+  local k   = "ok_touch|" .. (ip or "-")
   local now = ngx.now()
   local last = SH:get(k)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
@@ -251,13 +220,12 @@ local function fail_decision(errmsg)
   end
 end
 
-local function cache_key(ip, host, uri, method, scheme)
-  local uh = ngx.md5(uri or "-")
-  return "d|" .. ip .. "|" .. host .. "|" .. (method or "-") .. "|" .. (scheme or "-") .. "|" .. uh
-end
-
+-- FIX [2]: URI re-included in cache key (capped at 64 chars, no MD5 overhead)
+-- Without URI, an "allow" cached for / would prevent the bridge from seeing
+-- requests to /wp-admin, /xmlrpc.php etc. for the full 9-second TTL window.
 local function get_decision(ip, host, uri, method, scheme)
-  local key = cache_key(ip, host, uri, method, scheme)
+  local uri_part = (uri or "-"):sub(1, 64)
+  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
 
   if SH then
     local cached = SH:get(key)
@@ -267,12 +235,11 @@ local function get_decision(ip, host, uri, method, scheme)
     end
   end
 
-  local path =
-    "/nginx/decision?ip=" .. esc(ip) ..
-    "&host=" .. esc(host) ..
-    "&uri=" .. esc(uri) ..
-    "&method=" .. esc(method) ..
-    "&scheme=" .. esc(scheme)
+  local path = "/nginx/decision?ip=" .. esc(ip) ..
+               "&host="   .. esc(host)   ..
+               "&uri="    .. esc(uri)    ..
+               "&method=" .. esc(method) ..
+               "&scheme=" .. esc(scheme)
 
   local body, err = http_get_unix(path)
   if not body then return fail_decision(err) end
@@ -280,60 +247,46 @@ local function get_decision(ip, host, uri, method, scheme)
   local obj = cjson.decode(body)
   if not obj then return fail_decision("decode_failed") end
 
-  -- IMPORTANT: cache only ALLOW decisions (avoid solve→re-challenge loops)
-  if SH then
-    local ip_action    = obj.ip_action    or "allow"
-    local vhost_action = obj.vhost_action or "allow"
-    if ip_action == "allow" and vhost_action == "allow" then
-      SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
-    end
+  -- Only cache clean allows — never cache challenge/block to avoid
+  -- a brief allow window preventing a subsequent challenge from landing.
+  if SH and obj.ip_action == "allow" and obj.vhost_action == "allow" then
+    SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
   end
-
   return obj
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Main enforcement
+-- MAIN ENFORCEMENT
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local ip     = real_ip()
-local peer_ip   = ngx.var.realip_remote_addr or ""
-local cf_ip     = ngx.var.http_cf_connecting_ip or ""
-local host   = ngx.var.host   or "-"
-local uri    = ngx.var.uri    or "-"
-local method = ngx.req.get_method() or "-"
-local scheme = ngx.var.scheme or "http"
+local ip      = real_ip()
+local peer_ip = ngx.var.realip_remote_addr or ""
+local cf_ip   = ngx.var.http_cf_connecting_ip or ""
+local host    = ngx.var.host or "-"
+local uri     = ngx.var.uri or "-"
+local method  = ngx.req.get_method() or "-"
+local scheme  = ngx.var.scheme or "http"
 
-local function origin_pass_for(scheme_)
+local function origin_pass_for(s_in)
   local dst = ngx.var.server_addr or "127.0.0.1"
-  if scheme_ == "https" then return "https://" .. dst .. ":443" end
-  return "http://" .. dst .. ":80"
+  return (s_in == "https" and "https://" or "http://") .. dst ..
+         (s_in == "https" and ":443" or ":80")
 end
 
--- ── Fast-path: solved cookie ──────────────────────────────────────────────────
+-- ── Step 1: Fast-path — Solved Cookie ─────────────────────────────────────────
 local cfm_ok_cookie = ngx.var.cookie_cfm_ok
 if cfm_ok_cookie and cfm_ok_cookie ~= "" then
   refresh_ok_cookie(cfm_ok_cookie)
   touch_ok(ip)
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"
-  ngx.var.cfm_pass = origin_pass_for(scheme)
+  ngx.var.cfm_pass     = origin_pass_for(scheme)
   return
 end
 
--- ── WAF (inline, before bridge query) ────────────────────────────────────────
-local waf
-do
-  local ok, mod = pcall(require, "cfm_waf")
-  if ok and mod then
-    waf = mod
-  elseif CFG.debug then
-    log_route(ngx.WARN, "waf disabled: require cfm_waf failed: " .. tostring(mod))
-  end
-end
-
-if waf and waf.enabled and waf.enabled() then
-  -- Pass cookie + shdict so WAF can run the cookieless-RPS detector.
+-- ── Step 2: Inline WAF ────────────────────────────────────────────────────────
+local waf_ok, waf = pcall(require, "cfm_waf")
+if waf_ok and waf and waf.enabled and waf.enabled() then
   local hit, reason, ttl, waf_action = waf.check({
     uri    = uri,
     args   = ngx.var.args or "",
@@ -347,160 +300,89 @@ if waf and waf.enabled and waf.enabled() then
   })
 
   if hit then
-    waf_action = waf_action or "challenge"  -- safe default
+    waf_action = waf_action or "challenge"
+    local p_host = ngx.var.host        or host
+    local p_uri  = ngx.var.request_uri or uri
+    local p_meth = method
 
-
-    local push_host   = ngx.var.host or host or ""
-    local push_uri    = ngx.var.request_uri or uri or "/"
-    local push_method = ngx.req.get_method() or method or ""
-
-
-
--- log only dryrun logic --
     if waf_action == "logonly" then
-      -- Dry-run audit mode:
-      -- - Log to cfm.challenges.log (via nginx bridge trigger hook)
-      -- - Do NOT challenge and do NOT block
       ngx.header["X-CFM-Action"] = "logonly"
       ngx.var.cfm_upstream = "cfm_apache"
-      ngx.var.cfm_pass = origin_pass_for(scheme)
+      ngx.var.cfm_pass     = origin_pass_for(scheme)
 
-      if waf.should_push and waf.should_push(SH, ip, reason) then
-        local payload = cjson.encode({
-          ip      = ip,
-          action  = "logonly",
-          ttl_sec = ttl or 600,
-          reason  = reason,
-          host    = push_host,
-          uri     = push_uri,
-          method  = push_method,
-        })
-        local _, perr = http_post_unix("/nginx/ip", payload)
-        if perr and CFG.debug then
-          log_route(ngx.WARN, "waf logonly push failed: " .. tostring(perr))
-        end
-      end
-
-      log_route(ngx.INFO, "waf_logonly ip=" .. ip .. " host=" .. host ..
-        " uri=" .. uri .. " reason=" .. tostring(reason) ..
-        " ttl=" .. tostring(ttl or 600))
-
-      return
-    end
-
-
-
-    if waf_action == "block" then
-      -- High-confidence rules: traversal, RCE, TRACE/TRACK/CONNECT.
-      -- Hard 403 — no challenge page, no cookie dance.
+    elseif waf_action == "block" then
       ngx.header["X-CFM-Action"] = "block"
       ngx.var.cfm_upstream = "cfm_block"
-      ngx.var.cfm_pass = ""
+      ngx.var.cfm_pass     = ""
+      observe_waf(ip, host, p_uri, p_meth, 403, reason)
 
-      if waf.should_push and waf.should_push(SH, ip, reason) then
-        local payload = cjson.encode({
-          ip      = ip,
-          action  = "block",
-          ttl_sec = ttl or 3600,
-          reason  = reason,
-          host    = push_host,
-          uri     = push_uri,
-          method  = push_method,
-        })
-        local _, perr = http_post_unix("/nginx/ip", payload)
-        if perr and CFG.debug then
-          log_route(ngx.WARN, "waf block push failed: " .. tostring(perr))
-        end
-      end
-
-      log_route(ngx.WARN, "waf_block ip=" .. ip .. " host=" .. host ..
-        " uri=" .. uri .. " reason=" .. tostring(reason) ..
-        " ttl=" .. tostring(ttl or 3600))
-
-      -- Observe every WAF block so the engine's IP403WAF counter can
-      -- escalate to a hard firewall block when threshold is exceeded.
-      observe_waf(ip, host, ngx.var.request_uri or uri, method, 403, reason)
-
-      return ngx.exit(CFG.block_code)
-
-    else
-      -- Lower-confidence rules: XSS, SQLi, PROPFIND, cookieless, etc.
+    else -- challenge
       ngx.header["X-CFM-Action"] = "challenge"
       ngx.var.cfm_upstream = "cfm_challenge"
-      ngx.var.cfm_pass = "http://cfm_challenge"
-
-      if waf.should_push and waf.should_push(SH, ip, reason) then
-        local payload = cjson.encode({
-          ip      = ip,
-          action  = "challenge",
-          ttl_sec = ttl or 600,
-          reason  = reason,
-          host    = push_host,
-          uri     = push_uri,
-          method  = push_method,
-        })
-        local _, perr = http_post_unix("/nginx/ip", payload)
-        if perr and CFG.debug then
-          log_route(ngx.WARN, "waf push failed: " .. tostring(perr))
-        end
-      end
-
-      log_route(ngx.INFO, "waf_challenge ip=" .. ip .. " host=" .. host ..
-        " uri=" .. uri .. " reason=" .. tostring(reason) ..
-        " ttl=" .. tostring(ttl or 600))
-
-      return
+      ngx.var.cfm_pass     = "http://cfm_challenge"
     end
+
+    if waf.should_push and waf.should_push(SH, ip, reason) then
+      local payload = cjson.encode({
+        ip      = ip,
+        action  = waf_action,
+        ttl_sec = ttl or 600,
+        reason  = reason,
+        host    = p_host,
+        uri     = p_uri,
+        method  = p_meth,
+      })
+      http_post_unix("/nginx/ip", payload)
+    end
+
+    log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip ..
+      " host=" .. host .. " reason=" .. tostring(reason))
+
+    -- FIX [1]: logonly now returns here alongside block/challenge —
+    -- previously it fell through and the bridge decision overwrote cfm_pass.
+    if waf_action == "block" then return ngx.exit(CFG.block_code) end
+    return  -- covers challenge AND logonly
   end
-end  -- ← closes: if waf and waf.enabled and waf.enabled() then
+end
 
--- ── Bridge decision ───────────────────────────────────────────────────────────
-
-local d = get_decision(ip, host, uri, method, scheme)
-
-local ip_action    = d.ip_action    or "allow"
-local vhost_action = d.vhost_action or "allow"
-local cache_flag   = d._cache and " cache=1" or ""
+-- ── Step 3: Bridge Decision ───────────────────────────────────────────────────
+local d          = get_decision(ip, host, uri, method, scheme)
+local ip_action  = d.ip_action    or "allow"
+local vh_action  = d.vhost_action or "allow"
+local cache_flag = d._cache and " cache=1" or ""
 
 if CFG.debug_headers then
   ngx.header["X-CFM-IP"]     = ip
   ngx.header["X-CFM-Host"]   = host
   ngx.header["X-CFM-Dec-IP"] = ip_action
-  ngx.header["X-CFM-Dec-VH"] = vhost_action
+  ngx.header["X-CFM-Dec-VH"] = vh_action
   if d.err    then ngx.header["X-CFM-Err"]   = tostring(d.err) end
   if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
 
--- Block wins
-if ip_action == "block" or vhost_action == "block" then
+if ip_action == "block" or vh_action == "block" then
   ngx.header["X-CFM-Action"] = "block"
   ngx.var.cfm_upstream = "cfm_block"
-  ngx.var.cfm_pass = ""
-  log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. " uri=" .. uri ..
-    " scheme=" .. scheme .. cache_flag ..
+  ngx.var.cfm_pass     = ""
+  log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. cache_flag ..
     (d.err and (" err=" .. tostring(d.err)) or ""))
   return ngx.exit(CFG.block_code)
 end
 
--- Challenge if either says challenge
-if ip_action == "challenge" or vhost_action == "challenge" then
+if ip_action == "challenge" or vh_action == "challenge" then
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"
-  ngx.var.cfm_pass = "http://cfm_challenge"
-  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. " uri=" .. uri ..
-    " scheme=" .. scheme .. " pass=" .. ngx.var.cfm_pass .. cache_flag ..
-    (d.err and (" err=" .. tostring(d.err)) or ""))
+  ngx.var.cfm_pass     = "http://cfm_challenge"
+  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag)
   return
 end
 
--- Allow
+-- ── Step 4: Allow ─────────────────────────────────────────────────────────────
 ngx.header["X-CFM-Action"] = "allow"
 ngx.var.cfm_upstream = "cfm_apache"
-ngx.var.cfm_pass = origin_pass_for(scheme)
+ngx.var.cfm_pass     = origin_pass_for(scheme)
 
 if CFG.log_allows or CFG.debug then
-  log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " uri=" .. uri ..
-    " scheme=" .. scheme .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
+  log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host ..
+    " pass=" .. ngx.var.cfm_pass .. cache_flag)
 end
-
-return

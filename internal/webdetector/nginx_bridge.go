@@ -25,16 +25,16 @@ package webdetector
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/logging"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"cfm/internal/logging"
 )
 
 // ── Config fields (add these to webdetector.Config) ──────────────────────────
@@ -52,7 +52,7 @@ import (
 type NginxBridge struct {
 	cfg    bridgeCfg
 	client *http.Client
-//        started bool
+	//        started bool
 
 	mu      sync.RWMutex
 	ipState map[string]bridgeIPEntry    // ip   → current decision
@@ -68,12 +68,11 @@ type NginxBridge struct {
 	// Set via SetTriggerHook. Called without b.mu held.
 	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string)
 
-        // OnObserve is called when OpenResty (or others) reports an observed request outcome.
-        // Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
-        // Called without b.mu held.
-        OnObserve func(ip, host, uri, method string, status int, reason string)
+	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
+	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
+	// Called without b.mu held.
+	OnObserve func(ip, host, uri, method string, status int, reason string)
 }
-
 
 // refreshSkew is the minimum remaining time before we bother to re-push
 // an already-active decision (to avoid log spam / needless socket traffic).
@@ -89,13 +88,13 @@ type bridgeCfg struct {
 }
 
 type bridgeIPEntry struct {
-	Action  string    // "challenge" | "block"  |  "logonly" 
+	Action  string // "challenge" | "block"  |  "logonly"
 	Expires time.Time
 	Reason  string
 }
 
 type bridgeVhostEntry struct {
-	Action  string    // "challenge"
+	Action  string // "challenge"
 	Expires time.Time
 }
 
@@ -114,23 +113,23 @@ type BridgeStats struct {
 
 // NginxBridgeStatus is what GET /nginx/status returns.
 type NginxBridgeStatus struct {
-	Enabled      bool              `json:"enabled"`
-	SockPath     string            `json:"sock_path"`
-	ActiveIPs    []string          `json:"active_ips"`
-	ActiveVhosts []string          `json:"active_vhosts"`
-	Stats        BridgeStats       `json:"stats"`
+	Enabled      bool        `json:"enabled"`
+	SockPath     string      `json:"sock_path"`
+	ActiveIPs    []string    `json:"active_ips"`
+	ActiveVhosts []string    `json:"active_vhosts"`
+	Stats        BridgeStats `json:"stats"`
 }
 
 // ── Wire types (shared with Lua via JSON) ─────────────────────────────────────
 
 type nginxIPMsg struct {
 	IP     string `json:"ip"`
-	Action string `json:"action"`  // "challenge" | "block"
+	Action string `json:"action"` // "challenge" | "block"
 	TTLSec int    `json:"ttl_sec"`
 	Reason string `json:"reason,omitempty"`
 
 	Host   string `json:"host,omitempty"`
-	URI    string `json:"uri,omitempty"`      // prefer request_uri (includes query)
+	URI    string `json:"uri,omitempty"` // prefer request_uri (includes query)
 	Method string `json:"method,omitempty"`
 }
 
@@ -140,7 +139,7 @@ type nginxIPClearMsg struct {
 
 type nginxVhostMsg struct {
 	Host   string `json:"host"`
-	Action string `json:"action"`  // "challenge"
+	Action string `json:"action"` // "challenge"
 	TTLSec int    `json:"ttl_sec"`
 }
 
@@ -149,24 +148,21 @@ type nginxVhostClearMsg struct {
 }
 
 type nginxOKTouchMsg struct {
-    IP     string `json:"ip"`
-    TTLSec int    `json:"ttl_sec"`
+	IP     string `json:"ip"`
+	TTLSec int    `json:"ttl_sec"`
 }
-
 
 // Observation from OpenResty/WAF: "I returned status X for this request"
 // POST /nginx/observe
 // { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL" }
 type nginxObserveMsg struct {
-    IP     string `json:"ip"`
-    Host   string `json:"host,omitempty"`
-    URI    string `json:"uri,omitempty"`      // request_uri preferred (includes query)
-    Method string `json:"method,omitempty"`
-    Status int    `json:"status"`
-    Reason string `json:"reason,omitempty"`
+	IP     string `json:"ip"`
+	Host   string `json:"host,omitempty"`
+	URI    string `json:"uri,omitempty"` // request_uri preferred (includes query)
+	Method string `json:"method,omitempty"`
+	Status int    `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
-
-
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
@@ -260,16 +256,13 @@ func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time
 	b.OnTrigger = fn
 }
 
-
 // SetObserveHook registers a callback for observation events (WAF 403, etc).
 func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason string)) {
-        if b == nil {
-                return
-        }
-        b.OnObserve = fn
+	if b == nil {
+		return
+	}
+	b.OnObserve = fn
 }
-
-
 
 func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
@@ -307,47 +300,47 @@ func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
 		ttl = b.cfg.DefaultTTL
 	}
 
-//b.mu.Lock()
-//b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
-//b.mu.Unlock()
-//b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
-//logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+	//b.mu.Lock()
+	//b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
+	//b.mu.Unlock()
+	//b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
+	//logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
 
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
 
-    host = normalizeHost(host)
-    if host == "" { return }
+	now := time.Now()
+	exp := now.Add(ttl)
 
-    now := time.Now()
-    exp := now.Add(ttl)
+	needPush := false
+	logEnter := false
 
-    needPush := false
-    logEnter := false
+	b.mu.Lock()
+	cur, ok := b.vhState[host]
+	// Only push/log on state transition, or when we're close to expiry.
+	if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
+		b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+		needPush = true
+		logEnter = true
+	} else {
+		// Keep it sticky without spamming: extend locally, push only near expiry.
+		if exp.After(cur.Expires) {
+			b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+		}
+		if cur.Expires.Sub(now) < refreshSkew {
+			needPush = true
+		}
+	}
+	b.mu.Unlock()
 
-    b.mu.Lock()
-    cur, ok := b.vhState[host]
-    // Only push/log on state transition, or when we're close to expiry.
-    if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
-        b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
-        needPush = true
-        logEnter = true
-    } else {
-        // Keep it sticky without spamming: extend locally, push only near expiry.
-        if exp.After(cur.Expires) {
-            b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
-        }
-        if cur.Expires.Sub(now) < refreshSkew {
-            needPush = true
-        }
-    }
-    b.mu.Unlock()
-
-    if needPush {
-        b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
-    }
-    if logEnter {
-        logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
-    }
-
+	if needPush {
+		b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
+	}
+	if logEnter {
+		logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+	}
 
 }
 
@@ -358,33 +351,37 @@ func (b *NginxBridge) ClearVhost(host string) {
 		return
 	}
 
-    host = normalizeHost(host)
-    if host == "" { return }
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
 
-    wasSet := false
+	wasSet := false
 
 	b.mu.Lock()
 
-    if _, ok := b.vhState[host]; ok {
-        wasSet = true
-        delete(b.vhState, host)
-    }
+	if _, ok := b.vhState[host]; ok {
+		wasSet = true
+		delete(b.vhState, host)
+	}
 	b.mu.Unlock()
 
-    if wasSet {
-        b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
-        logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
-    }
+	if wasSet {
+		b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
+		logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+	}
 
 }
 
 func normalizeHost(h string) string {
-    h = strings.TrimSpace(strings.ToLower(h))
-    if h == "" { return "" }
-    if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
-        h = hh
-    }
-    return h
+	h = strings.TrimSpace(strings.ToLower(h))
+	if h == "" {
+		return ""
+	}
+	if hh, _, err := net.SplitHostPort(h); err == nil && hh != "" {
+		h = hh
+	}
+	return h
 }
 
 // Status returns a snapshot for debugging / cfm status output.
@@ -512,11 +509,11 @@ func (b *NginxBridge) recordErr(msg string) {
 // ServeDecisions starts a unix-socket HTTP server that Lua queries.
 // It serves a simple decision API:
 //
-//   GET /nginx/decision?ip=1.2.3.4&host=example.com
-//   → { "ip_action": "challenge|block|allow", "vhost_action": "challenge|allow" }
+//	GET /nginx/decision?ip=1.2.3.4&host=example.com
+//	→ { "ip_action": "challenge|block|allow", "vhost_action": "challenge|allow" }
 //
-//   GET /nginx/status
-//   → NginxBridgeStatus
+//	GET /nginx/status
+//	→ NginxBridgeStatus
 func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	if !b.cfg.Enabled {
 		return nil
@@ -533,14 +530,14 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	_ = os.Chmod(sockPath, 0o660)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/nginx/decision",   b.handleDecision)
-	mux.HandleFunc("/nginx/ip",         b.handleIPPush)
-	mux.HandleFunc("/nginx/ip/clear",   b.handleIPClear)
-	mux.HandleFunc("/nginx/vhost",      b.handleVhostPush)
+	mux.HandleFunc("/nginx/decision", b.handleDecision)
+	mux.HandleFunc("/nginx/ip", b.handleIPPush)
+	mux.HandleFunc("/nginx/ip/clear", b.handleIPClear)
+	mux.HandleFunc("/nginx/vhost", b.handleVhostPush)
 	mux.HandleFunc("/nginx/vhost/clear", b.handleVhostClear)
-	mux.HandleFunc("/nginx/ok/touch",   b.handleOKTouch)
-        mux.HandleFunc("/nginx/observe",    b.handleObserve)
-	mux.HandleFunc("/nginx/status",     b.handleStatus)
+	mux.HandleFunc("/nginx/ok/touch", b.handleOKTouch)
+	mux.HandleFunc("/nginx/observe", b.handleObserve)
+	mux.HandleFunc("/nginx/status", b.handleStatus)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -572,41 +569,40 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    ip   := strings.TrimSpace(r.URL.Query().Get("ip"))
-    host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
-    if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
-        host = hh
-    }
-	now  := time.Now()
+	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
+		host = hh
+	}
+	now := time.Now()
 
-	ipAction   := "allow"
-	vhAction   := "allow"
+	ipAction := "allow"
+	vhAction := "allow"
 
-    b.mu.RLock()
-    if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
-        ipAction = e.Action
-    }
+	b.mu.RLock()
+	if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
+		ipAction = e.Action
+	}
 
-    // vhost exact match first, else wildcard
-    if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
-        vhAction = h.Action
-    } else if host != "" {
+	// vhost exact match first, else wildcard
+	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
+		vhAction = h.Action
+	} else if host != "" {
 
-       // wildcard match: keys like "*.example.com"
-        for pat, e := range b.vhState {
-            if !e.Expires.After(now) {
-                continue
-            }
-            if len(pat) > 2 && pat[:2] == "*." {
-                suf := pat[1:] // ".example.com"
-                if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
-                    vhAction = e.Action
-                    break
-                }
-            }
-        }
-    }
-
+		// wildcard match: keys like "*.example.com"
+		for pat, e := range b.vhState {
+			if !e.Expires.After(now) {
+				continue
+			}
+			if len(pat) > 2 && pat[:2] == "*." {
+				suf := pat[1:] // ".example.com"
+				if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
+					vhAction = e.Action
+					break
+				}
+			}
+		}
+	}
 
 	// Solved-ok: IP passed PoW recently — bypass vhost-wide challenge.
 	if b.cfg.OkIPTTL > 0 {
@@ -618,8 +614,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"ip_action":   ipAction,   // "allow" | "challenge" | "block"
-		"vhost_action": vhAction,  // "allow" | "challenge"
+		"ip_action":    ipAction, // "allow" | "challenge" | "block"
+		"vhost_action": vhAction, // "allow" | "challenge"
 	})
 }
 
@@ -637,7 +633,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-    if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
+	if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
@@ -653,16 +649,14 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	msg.URI = strings.TrimSpace(msg.URI)
 	msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
 
-
-    // logonly is a "dry-run audit" action:
-    // - it should be logged (via OnTrigger hook)
-    // - but it MUST NOT create an active IP decision in the bridge
-    if msg.Action != "logonly" {
-        b.mu.Lock()
-        b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
-        b.mu.Unlock()
-    }
-
+	// logonly is a "dry-run audit" action:
+	// - it should be logged (via OnTrigger hook)
+	// - but it MUST NOT create an active IP decision in the bridge
+	if msg.Action != "logonly" {
+		b.mu.Lock()
+		b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
+		b.mu.Unlock()
+	}
 
 	// Fire the trigger hook when a reason is present (i.e. the push came from
 	// cfm_waf.lua or another external caller that knows why it triggered).
@@ -705,11 +699,11 @@ func (b *NginxBridge) handleVhostPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-    msg.Host = strings.ToLower(strings.TrimSpace(msg.Host))
-    if hh, _, err := net.SplitHostPort(msg.Host); err == nil && hh != "" {
-        msg.Host = hh
-    }
-    if msg.Host == "" {
+	msg.Host = strings.ToLower(strings.TrimSpace(msg.Host))
+	if hh, _, err := net.SplitHostPort(msg.Host); err == nil && hh != "" {
+		msg.Host = hh
+	}
+	if msg.Host == "" {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
@@ -744,101 +738,95 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-
 // handleOKTouch: Lua tells us "this IP is active and has cfm_ok cookie, extend okState".
 // POST /nginx/ok/touch { "ip":"1.2.3.4", "ttl_sec":600 }
 func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
-    if !b.checkToken(r) {
-        http.Error(w, "forbidden", http.StatusForbidden)
-        return
-    }
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
-    // If okState is disabled, no-op (still 200 so Lua doesn't spam logs)
-    if b.cfg.OkIPTTL <= 0 {
-        w.WriteHeader(http.StatusOK)
-        _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "disabled": true})
-        return
-    }
+	// If okState is disabled, no-op (still 200 so Lua doesn't spam logs)
+	if b.cfg.OkIPTTL <= 0 {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "disabled": true})
+		return
+	}
 
-    var msg nginxOKTouchMsg
-    if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-        http.Error(w, "bad json", http.StatusBadRequest)
-        return
-    }
-    ip := strings.TrimSpace(msg.IP)
-    if ip == "" {
-        http.Error(w, "bad fields", http.StatusBadRequest)
-        return
-    }
+	var msg nginxOKTouchMsg
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	ip := strings.TrimSpace(msg.IP)
+	if ip == "" {
+		http.Error(w, "bad fields", http.StatusBadRequest)
+		return
+	}
 
-    ttl := time.Duration(msg.TTLSec) * time.Second
-    if ttl <= 0 {
-        ttl = b.cfg.OkIPTTL
-    }
+	ttl := time.Duration(msg.TTLSec) * time.Second
+	if ttl <= 0 {
+		ttl = b.cfg.OkIPTTL
+	}
 
-    now := time.Now()
-    exp := now.Add(ttl)
+	now := time.Now()
+	exp := now.Add(ttl)
 
-    b.mu.Lock()
-    b.okState[ip] = exp
-    b.mu.Unlock()
+	b.mu.Lock()
+	b.okState[ip] = exp
+	b.mu.Unlock()
 
-    w.WriteHeader(http.StatusOK)
-    _ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ttl_sec": int(ttl.Seconds())})
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ttl_sec": int(ttl.Seconds())})
 }
-
-
 
 // handleObserve: OpenResty reports an observed request outcome (e.g. WAF returned 403).
 // POST /nginx/observe { "ip":"1.2.3.4", "host":"a.com", "uri":"/x", "method":"get", "status":403, "reason":"PAY_XSS" }
 func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
-    if !b.checkToken(r) {
-        http.Error(w, "forbidden", http.StatusForbidden)
-        return
-    }
-    if r.Method != http.MethodPost {
-        http.Error(w, "method", http.StatusMethodNotAllowed)
-        return
-    }
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
 
-    // Defensive: cap body size (avoid abuse over the socket)
-    r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	// Defensive: cap body size (avoid abuse over the socket)
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
-    var msg nginxObserveMsg
-    dec := json.NewDecoder(bufio.NewReader(r.Body))
-    if err := dec.Decode(&msg); err != nil {
-        http.Error(w, "bad json", http.StatusBadRequest)
-        return
-    }
+	var msg nginxObserveMsg
+	dec := json.NewDecoder(bufio.NewReader(r.Body))
+	if err := dec.Decode(&msg); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
 
-    ip := strings.TrimSpace(msg.IP)
-    if ip == "" {
-        http.Error(w, "bad fields", http.StatusBadRequest)
-        return
-    }
+	ip := strings.TrimSpace(msg.IP)
+	if ip == "" {
+		http.Error(w, "bad fields", http.StatusBadRequest)
+		return
+	}
 
-    host := normalizeHost(msg.Host)
-    uri := strings.TrimSpace(msg.URI)
-    method := strings.ToLower(strings.TrimSpace(msg.Method))
-    status := msg.Status
-    reason := strings.TrimSpace(msg.Reason)
+	host := normalizeHost(msg.Host)
+	uri := strings.TrimSpace(msg.URI)
+	method := strings.ToLower(strings.TrimSpace(msg.Method))
+	status := msg.Status
+	reason := strings.TrimSpace(msg.Reason)
 
-    // Sanity: allow 100..599
-    if status < 100 || status > 599 {
-        status = 0
-    }
+	// Sanity: allow 100..599
+	if status < 100 || status > 599 {
+		status = 0
+	}
 
-    // Fire hook (do not block bridge). The hook must be fast / non-blocking.
-    if b.OnObserve != nil {
-        b.OnObserve(ip, host, uri, method, status, reason)
-    }
+	// Fire hook (do not block bridge). The hook must be fast / non-blocking.
+	if b.OnObserve != nil {
+		b.OnObserve(ip, host, uri, method, status, reason)
+	}
 
-    w.WriteHeader(http.StatusOK)
-    _ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
-
-
-
 
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
