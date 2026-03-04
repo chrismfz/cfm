@@ -1260,23 +1260,8 @@ vmapLc := vhostmap.NewLifecycle()
 defer vmapLc.Stop()
 
 
-onConfigLoaded := func(cfg *cfgpkg.Config) {
-    if cfg == nil {
-        return
-    }
 
 
-// SSL Collector //
-sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock)
-// SSL COLLECTOR END//
-
-
-
-// vhostmap //
-vmapLc.ApplyConfig(ctx, &cfg.VHostMap)
-//vhostmap end//
-
-}
 
 //SMTP NFLOG
 smtpLc := nflog.NewSnoopLifecycle()
@@ -1321,7 +1306,11 @@ govLc := mysql.NewGovernorLifecycle()
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
 			return
 		}
-		onConfigLoaded(cfg)
+
+
+sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock)
+
+vmapLc.ApplyConfig(ctx, &cfg.VHostMap)
 
 
         // ---- Debug server + MySQL governor (start once, with config values) ----
@@ -1980,4 +1969,3 @@ func httpGetJSON(url string, out any) error {
     defer resp.Body.Close()
     return json.NewDecoder(resp.Body).Decode(out)
 }
-
