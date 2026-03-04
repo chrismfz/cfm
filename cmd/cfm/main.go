@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 	"strconv"
-	"math"
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -1216,45 +1215,10 @@ loadAll := func() {
 
 	}
 
-	var (
-		ag           *agentpkg.Runner
-		agStarted    bool
-		lastCfg      *cfgpkg.Config
-		lastAgentKey string // "APIURL|TOKEN"
-	)
 
-	startOrUpdateAgent := func(cfg *cfgpkg.Config) {
-		if cfg == nil || cfg.API.URL == "" || cfg.API.AuthToken == "" {
-			return
-		}
-		key := cfg.API.URL + "|" + cfg.API.AuthToken
-		if key == lastAgentKey && agStarted {
-			return // no-op
-		}
-		ac := agentpkg.Config{
-			BaseURL:  cfg.API.URL,
-			Token:    cfg.API.AuthToken,
-			Version:  Version,
-			Interval: 20 * time.Second,
-		}
-
-
-        if ag == nil {
-            ag = agentpkg.New(ac)
-            ag.SetBackend(be)  // ← δώσε backend
-            ag.SetConfigDir(cfgDir) // ← και config dir (για cfm.deny cleanup)
-            ag.Start()
-            agStarted = true
-        } else {
-            ag.Update(ac)
-            ag.SetBackend(be)
-            ag.SetConfigDir(cfgDir)
-        }
-
-
-		lastAgentKey = key
-	}
-	loadAgent := func() { startOrUpdateAgent(lastCfg) }
+//agent
+agLc := agentpkg.NewLifecycle(Version, be, cfgDir)
+defer agLc.Stop()
 
 	// cfm.conf loader/applier (single place)
         ctx, cancel := context.WithCancel(context.Background())
@@ -1288,12 +1252,12 @@ webdet.SetSSLCollector(sslcol)
 logging.Logf("[sslcollector] started")
 
 // --- sslcollector sock server lifecycle (driven by config reload) ---
-var sslSockCancel context.CancelFunc
-var sslSockCfgKey string
+sslSockLc := sslcollector.NewSockLifecycle(sslcol)
+defer sslSockLc.Stop()
 
 // vhostmap
-var vhostMapCancel context.CancelFunc
-var vhostMapCfgKey string
+vmapLc := vhostmap.NewLifecycle()
+defer vmapLc.Stop()
 
 
 onConfigLoaded := func(cfg *cfgpkg.Config) {
@@ -1301,133 +1265,22 @@ onConfigLoaded := func(cfg *cfgpkg.Config) {
         return
     }
 
-    // Normalize defaults (config.SetDefaults should do this too, but be defensive)
-    sp := cfg.SSLCollectorSock.SockPath
-    if sp == "" {
-        sp = "/var/run/sslcollector.sock"
-    }
-    ttl := cfg.SSLCollectorSock.PEMTTL
-    if ttl <= 0 {
-        ttl = 10 * time.Minute
-    }
-    max := cfg.SSLCollectorSock.PEMMax
-    if max <= 0 {
-        max = 50000
-    }
 
-    enabled := cfg.SSLCollectorSock.Enabled
-    token := cfg.SSLCollectorSock.Token
+// SSL Collector //
+sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock)
+// SSL COLLECTOR END//
 
-    // Key used to detect changes that require restart
-    key := fmt.Sprintf("%t|%s|%s|%s|%d", enabled, sp, token, ttl.String(), max)
-
-    // Disable -> stop if running
-    if !enabled {
-        if sslSockCancel != nil {
-            sslSockCancel()
-            sslSockCancel = nil
-            sslSockCfgKey = ""
-            logging.Logf("[sslcollector] sock server stopped (disabled)")
-        }
-        return
-    }
-
-    // No change -> do nothing
-    if key == sslSockCfgKey && sslSockCancel != nil {
-        return
-    }
-
-    // Change -> restart
-    if sslSockCancel != nil {
-        sslSockCancel()
-        sslSockCancel = nil
-    }
-
-    c, cancel := context.WithCancel(ctx)
-    sslSockCancel = cancel
-    sslSockCfgKey = key
-
-    go func(sockPath string) {
-        err := sslcollector.ServeSock(c, sslcol, sslcollector.SockServerConfig{
-            Enabled:  true,
-            SockPath: sockPath,
-            Token:    token,
-            PEMTTL:   ttl,
-            PEMMax:   max,
-        })
-        if err != nil && c.Err() == nil {
-            logging.Logf("[sslcollector] sock server stopped: %v", err)
-        }
-    }(sp)
-
-    logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
-
-
-////// SSL COLLECTOR END////
 
 
 // vhostmap //
-
-// --- vhostmap lifecycle (driven by config reload) ---
-{
-    vm := cfg.VHostMap
-
-    // defaults
-    if vm.TTL <= 0 {
-        vm.TTL = 10 * time.Minute
-    }
-    if vm.VarName == "" {
-        vm.VarName = "origin_http_ip"
-    }
-    if vm.ReloadCmd == "" {
-        vm.ReloadCmd = "systemctl reload openresty"
-    }
-
-    enabled := vm.Enable
-    key := fmt.Sprintf("%t|%s|%s|%s|%s|%s|%s",
-        enabled, vm.WritePath, vm.TTL.String(), vm.VarName, vm.Source, vm.DefaultIP, vm.ReloadCmd)
-
-    if !enabled {
-        if vhostMapCancel != nil {
-            vhostMapCancel()
-            vhostMapCancel = nil
-            vhostMapCfgKey = ""
-            logging.Logf("[vhostmap] stopped (disabled)")
-        }
-    } else {
-        if vm.WritePath == "" {
-            logging.Logf("[vhostmap] enabled but VHOST_MAP_WRITE is empty (skipping)")
-        } else if key != vhostMapCfgKey || vhostMapCancel == nil {
-            if vhostMapCancel != nil {
-                vhostMapCancel()
-                vhostMapCancel = nil
-            }
-            c, cancel := context.WithCancel(ctx)
-            vhostMapCancel = cancel
-            vhostMapCfgKey = key
-
-            go func(local cfgpkg.Config, vmCfg cfgpkg.VHostMapConfig) {
-                _ = vhostmap.Run(c, vhostmap.Config{
-                    Enable:    true,
-                    WritePath: vmCfg.WritePath,
-                    TTL:       vmCfg.TTL,
-                    VarName:   vmCfg.VarName,
-                    Source:    vmCfg.Source,
-                    DefaultIP: vmCfg.DefaultIP,
-                    ReloadCmd: vmCfg.ReloadCmd,
-                }, loggerAdapter{})
-            }(*cfg, vm)
-
-            logging.Logf("[vhostmap] started write=%s ttl=%s var=%s", vm.WritePath, vm.TTL, vm.VarName)
-        }
-    }
-}
-
+vmapLc.ApplyConfig(ctx, &cfg.VHostMap)
 //vhostmap end//
 
 }
 
-	var smtpSnoopStarted bool
+//SMTP NFLOG
+smtpLc := nflog.NewSnoopLifecycle()
+// SMTP
 
     // Ensure base data dir exists very early
     ensureDir := func(path string, mode os.FileMode) {
@@ -1448,14 +1301,15 @@ ensureDir("/var/log/cfm", 0o700)
 
 
 	// MaxMind updater lifecycle
-	var mmdbStarted bool
-	var mmdbCancel context.CancelFunc
+mmdbLc := mmdb.NewLifecycle()
+defer mmdbLc.Stop()
+
 	// (we create the updater instance inside applyPorts after config is parsed)
 
 	// MySQL governor — created once on first config load, lives for the daemon lifetime.
 	// Declared here so both applyPorts (which registers its HTTP handlers) and the
 	// post-startup goroutine (which calls gov.Run) share the same pointer.
-	var gov *mysql.Governor
+govLc := mysql.NewGovernorLifecycle()
 
 	applyPorts := func() {
 		if cfgDir == "" || confW == nil { return }
@@ -1467,7 +1321,6 @@ ensureDir("/var/log/cfm", 0o700)
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
 			return
 		}
-		lastCfg = cfg
 		onConfigLoaded(cfg)
 
 
@@ -1480,109 +1333,26 @@ ensureDir("/var/log/cfm", 0o700)
         // Debug server address comes from [debug] in cfm.conf:
         //   LISTEN_ADDRESS = 127.0.0.1   (default)
         //   PORT           = 6060        (default)
-        debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
 
-        if os.Getenv("CFM_DEBUG_HTTP_STARTED") == "" {
 
-            // ---- MySQL governor init ------------------------------------------------
-            // Credentials are discovered automatically in priority order:
-            //   1. Explicit DSN in cfm.conf [mysql_governor] DSN = user:pass@tcp(127.0.0.1:3306)/
-            //   2. /root/.my.cnf           (standard cPanel/server root credential file)
-            //   3. /etc/cfm/mysql_governor.cnf
-            //   4. DirectAdmin /usr/local/directadmin/conf/mysql.conf
-            //
-            // Default mode is "monitor": the governor logs what it *would* kill but
-            // never actually issues KILL.  Change to "enforce" in cfm.conf once you
-            // have reviewed the audit log and are confident in the thresholds.
-            //
-            // If the connection fails (MySQL not running, wrong credentials, etc.) the
-            // governor is silently disabled — the rest of the daemon is unaffected.
-            govCfg := mysql.GovernorConfig{
-                Enabled:   true,
-                Mode:      "monitor",        // safe default: observe only, never kill
-                PollEvery: 5 * time.Second,
-
-                // Connection pressure alerts
-                ConnWarnPct: 70, // warn at 70 % of max_connections
-                ConnActPct:  85, // act  at 85 % of max_connections
-
-                // Lock fan-out kill: if one query blocks >= 10 others for >= 30s,
-                // kill the blocker (in enforce mode).
-                LockFanoutKill: 10,
-                LockFanoutTTL:  30 * time.Second,
-
-                // Sleep reaper: kill idle sleeping connections older than 3 min
-                // when connection pressure is above ConnActPct (enforce mode only).
-                SleepReaper:    true,
-                SleepReaperAge: 180 * time.Second,
-
-                // Kill rate limits — safety net so a misconfigured rule cannot
-                // wipe out an entire application's connections in one sweep.
-                KillPerDBPerWindow: 5,
-                KillTotalPerWindow: 20,
-                KillWindow:         10 * time.Minute,
-
-                // TODO: wire up per-user query_rules from cfm.conf [mysql_governor]
-                // once the config struct has a MySQLGovernor section, e.g.:
-                //   DSN          = cfg.MySQLGovernor.DSN
-                //   QueryRules   = parsedRules
-                //   Mode         = cfg.MySQLGovernor.Mode
-            }
-            if g, err := mysql.NewGovernor(govCfg); err == nil {
-                gov = g
-                // Run the polling loop in its own goroutine.
-                // It exits cleanly when ctx is cancelled (daemon shutdown).
-                go gov.Run(ctx)
-            } else {
-                // Non-fatal: MySQL may not be installed or credentials not yet set up.
-                logging.Logf("[mysql/governor] disabled: %v", err)
-            }
-            // ---- end MySQL governor init --------------------------------------------
-
-            // Start the debug/internal HTTP server.  The governor (or nil) is passed
-            // so its /api/v1/mysql/ handlers are registered on the same mux — no
-            // extra port needed.
-            startDebug(debugAddr, gov)
-
-            // Mark started so subsequent applyPorts ticks skip this block.
-            _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
-            logging.Logf("[debug] http server on %s", debugAddr)
-        }
+debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+if os.Getenv("CFM_DEBUG_HTTP_STARTED") == "" {
+    govCfg, ok := detpkg.GetPendingGovernorConfig()
+    var cfgPtr *mysql.GovernorConfig
+    if ok {
+        cfgPtr = &govCfg
+    }
+    gov := govLc.StartOnce(ctx, cfgPtr)
+    startDebug(debugAddr, gov)
+    _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
+    logging.Logf("[debug] http server on %s", debugAddr)
+}
 
 
 
-        // Ensure MaxMind dir exists after config defaults/overrides
-        if cfg.MaxMind.Dir == "" {
-            cfg.MaxMind.Dir = "/var/lib/cfm/maxmind"
-        }
-        ensureDir(cfg.MaxMind.Dir, 0o755)
+        // MaxMind
+mmdbLc.ApplyConfig(ctx, &cfg.MaxMind)
 
-
-		// ---- MaxMind updater start/stop based on config ----
-		if cfg.MaxMind.Enabled && !mmdbStarted {
-			upd := mmdb.New(mmdb.Config{
-				Enabled:         cfg.MaxMind.Enabled,
-				AccountID:       cfg.MaxMind.AccountID,
-				LicenseKey:      cfg.MaxMind.LicenseKey,
-				Editions:        cfg.MaxMind.Editions,
-				Dir:             cfg.MaxMind.Dir,
-				CheckEvery:      cfg.MaxMind.CheckEvery,
-				MinAgeBetweenDL: cfg.MaxMind.MinAgeBetweenDL,
-				HTTPTimeout:     cfg.MaxMind.HTTPTimeout,
-				Permalinks:      cfg.MaxMind.Permalinks,
-			})
-			var c context.Context
-			c, mmdbCancel = context.WithCancel(ctx)
-			go func() {
-				if err := upd.Run(c, func(f string, a ...any) { logging.Logf(f, a...) }); err != nil && c.Err() == nil {
-					logging.Logf("[maxmind] updater stopped: %v", err)
-				}
-			}()
-			mmdbStarted = true
-			logging.Logf("[maxmind] updater started (editions=%v dir=%s every=%s min_age=%s)", cfg.MaxMind.Editions, cfg.MaxMind.Dir, cfg.MaxMind.CheckEvery, cfg.MaxMind.MinAgeBetweenDL)
-		} else if !cfg.MaxMind.Enabled && mmdbStarted {
-			mmdbCancel(); mmdbStarted = false; logging.Logf("[maxmind] updater stopped (disabled)")
-		}
 
 
 		// Defaults BEFORE summary
@@ -1649,30 +1419,8 @@ if nb, ok2 := be.(*nft.Backend); ok2 {
     }
 
 
-// Start SMTP NFLOG snooper once (only if enabled + using NFLOG group)
-if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG > 0 && !smtpSnoopStarted {
-    grpInt := cfg.SMTPBlock.LogNFLOG
-    if grpInt < 0 || grpInt > int(math.MaxUint16) {
-        logging.Logf("[smtpblock] invalid NFLOG group %d (must be 0..65535) — skipping snooper", grpInt)
-    } else {
-        grp := uint16(grpInt)
-        go func(grp uint16, enrich bool) {
-            err := nflog.Start(ctx, nflog.SnoopConfig{
-                Group:  grp,
-                Enrich: enrich,
-                Queue:  1024,
-            })
-            if err != nil {
-                logging.Logf("[smtpblock] nflog start error: %v", err)
-            } else {
-                logging.Logf("[smtpblock] nflog reader started (group=%d, enrich=%v)", grp, enrich)
-            }
-        }(grp, cfg.SMTPBlock.LogEnrich)
-        smtpSnoopStarted = true
-    }
-}
-
-
+// SMTP NFLOG
+smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
 
 	}
 
@@ -1686,7 +1434,8 @@ if cfg.SMTPBlock.Enabled && cfg.SMTPBlock.LogEnabled && cfg.SMTPBlock.LogNFLOG >
 
 
 		// agent
-		startOrUpdateAgent(cfg)
+agLc.ApplyConfig(cfg)
+
 	}
 
 	// Initial load
@@ -1738,7 +1487,6 @@ dnat.StartFailSafe(ctx, be)
         reloadBlocklists() // only if cfm.blocklists changed
         loadAll()          // only if cfm.allow/cfm.deny changed
         applyPorts()       // only if cfm.conf changed
-        loadAgent()
 
         // periodic maintenance
         if nb, ok := be.(*nft.Backend); ok {
@@ -2233,5 +1981,3 @@ func httpGetJSON(url string, out any) error {
     return json.NewDecoder(resp.Body).Decode(out)
 }
 
-type loggerAdapter struct{}
-func (loggerAdapter) Logf(f string, a ...any) { logging.Logf(f, a...) }

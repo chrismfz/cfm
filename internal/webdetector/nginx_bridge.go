@@ -58,7 +58,7 @@ type NginxBridge struct {
 	ipState map[string]bridgeIPEntry    // ip   → current decision
 	vhState map[string]bridgeVhostEntry // host → current decision
 	okState map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
-
+	bypassFunc func(string) bool // set once at startup; no lock needed (written before serving starts)
 	stats BridgeStats
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
@@ -164,6 +164,39 @@ type nginxObserveMsg struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: SetBypassFunc wires a predicate that permanently allows an IP regardless
+// of any ipState / vhState entry.  Use for IGNORE_IPS / IGNORE_NETS.
+// Must be called before ServeDecisions() starts.
+func (b *NginxBridge) SetBypassFunc(fn func(string) bool) {
+    if b == nil {
+        return
+    }
+    b.bypassFunc = fn
+}
+
+// BypassIPTemp extends okState for one IP so that vhost-wide challenge is
+// bypassed for at least ttl.  Used for ASN/UA chalExclude in vhost mode.
+// Does NOT push to Lua (okState is checked in-process in handleDecision).
+func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
+    if b == nil || !b.cfg.Enabled {
+        return
+    }
+    if ttl <= 0 {
+        ttl = b.cfg.DefaultTTL
+    }
+    exp := time.Now().Add(ttl)
+    b.mu.Lock()
+    cur, ok := b.okState[ip]
+    if !ok || exp.After(cur) {
+        b.okState[ip] = exp
+    }
+    b.mu.Unlock()
+}
+
+
+
+
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 // NewNginxBridge creates a bridge. If cfg.Enabled is false all methods are no-ops.
@@ -215,6 +248,12 @@ func (b *NginxBridge) ChallengeIP(ip string, ttl time.Duration) {
 	if !b.cfg.Enabled {
 		return
 	}
+    // ── NEW: honour static bypass (IGNORE_IPS / IGNORE_NETS) ──────────────────
+    if b.bypassFunc != nil && b.bypassFunc(ip) {
+        return
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
 	}
@@ -231,6 +270,11 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 	if !b.cfg.Enabled {
 		return
 	}
+
+    if b.bypassFunc != nil && b.bypassFunc(ip) {
+        return
+    }
+
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
 	}
@@ -576,6 +620,18 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 
+    // ── NEW: static bypass — always allow, ignores ipState/vhState entirely ──
+    if b.bypassFunc != nil && b.bypassFunc(ip) {
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]string{
+            "ip_action":    "allow",
+            "vhost_action": "allow",
+        })
+        return
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+
 	ipAction := "allow"
 	vhAction := "allow"
 
@@ -608,6 +664,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if b.cfg.OkIPTTL > 0 {
 		if exp, ok := b.okState[ip]; ok && exp.After(now) {
 			vhAction = "allow"
+			ipAction  = "allow"   // for IP bypass
 		}
 	}
 	b.mu.RUnlock()
