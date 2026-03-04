@@ -143,6 +143,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
                 // expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
                 SetNginxBridge(b)
 
+		 // ── NEW: wire bypass so handleDecision respects IGNORE_IPS/IGNORE_NETS ──
+                    if w.ipIgnore != nil {
+                        b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
+                    }
+                    // ─────────────────────────────────────────────────
 
                 go b.RunExpireLoop(pctx)
                 w.srvWG.Add(1)
@@ -749,8 +754,18 @@ if cfg.ChallengePathsEnabled && cfg.ChallengePathsFile != "" {
 
 
 if cfg.Mode == "dir" { cfg.Mode = "folder" }
+
+// Build ipIgnore FIRST — it's needed both by the engine (bypass predicate)
+// and by the wrapped struct (challenge server + bridge wiring in startOnce).
+ipIgnore := newIPIgnoreFromGlobal(global)
+
 engine := webdet.NewEngine(cfg)
 
+// Wire IGNORE_IPS / IGNORE_NETS to engine immediately (before RunOnce).
+// The bridge gets it inside startOnce.Do once OpenResty mode starts.
+if ipIgnore != nil {
+    engine.SetBypassFunc(ipIgnore.ShouldIgnore)
+}
 
 
 		// MODE=file: attach tailer if file exists
@@ -788,8 +803,6 @@ engine := webdet.NewEngine(cfg)
 			}
 		}
 
-ipIgnore := newIPIgnoreFromGlobal(global)
-
         // IMPORTANT: do NOT start background servers here.
         // Bind them to the manager ctx via webdetectorWrapped.RunOnce(ctx),
         // otherwise reload can leave orphan listeners serving stale stats.
@@ -804,4 +817,21 @@ return &webdetectorWrapped{
 
 
 	})
+}
+
+
+// SetBypassFunc forwards to the engine and to the bridge (if already created).
+// Called from manager.go via interface assertion.
+func (w *webdetectorWrapped) SetBypassFunc(fn func(string) bool) {
+    w.eng.SetBypassFunc(fn)
+    // Bridge may not exist yet (OpenResty disabled), but if it does, wire it too.
+    if b := w.eng.NginxBridge(); b != nil {
+        b.SetBypassFunc(fn)
+    }
+}
+
+// SetChalExcludeFunc forwards to the engine.
+// Called from manager.go via interface assertion.
+func (w *webdetectorWrapped) SetChalExcludeFunc(fn func(string, string, string, string, string, string) (string, bool)) {
+    w.eng.SetChalExcludeFunc(fn)
 }

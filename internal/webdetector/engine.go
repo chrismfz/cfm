@@ -330,6 +330,16 @@ type Engine struct {
     chalRules []chalRule
 nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
 
+// bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
+// Set once at startup via SetBypassFunc (no lock needed).
+bypassFunc func(string) bool
+
+// chalExcludeFunc: covers ASN/UA/PTR challenge-exclude rules.
+// Signature mirrors ChallengeExclude.Match but returns only (action, matched).
+// Set once at startup via SetChalExcludeFunc (no lock needed).
+chalExcludeFunc func(ip, host, ua, asn, ptr, rule string) (string, bool)
+
+
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
@@ -2739,3 +2749,41 @@ func compileMalRules(list []string, def int) []malRule {
     }
     return rules
 }
+
+// SetBypassFunc wires an IP-level predicate (IGNORE_IPS / IGNORE_NETS).
+// Must be called before RunOnce.
+func (e *Engine) SetBypassFunc(fn func(string) bool) {
+    e.bypassFunc = fn
+}
+
+// SetChalExcludeFunc wires the challenge-exclude callback (ASN/UA/PTR rules).
+// The function receives enriched asn/ptr (engine does the lookup) and returns
+// (action, matched).  Must be called before RunOnce.
+func (e *Engine) SetChalExcludeFunc(fn func(ip, host, ua, asn, ptr, rule string) (string, bool)) {
+    e.chalExcludeFunc = fn
+}
+
+// isBypassed reports whether ip is in the global IGNORE_IPS / IGNORE_NETS list.
+func (e *Engine) isBypassed(ip string) bool {
+    return e.bypassFunc != nil && e.bypassFunc(ip)
+}
+
+// isExcluded runs the challenge-exclude rules for ip.
+// It resolves ASN / PTR via the engine's enricher if available.
+// ua is best-effort (callers pass "" when unknown; ua=* rules still match).
+func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
+    if e.chalExcludeFunc == nil {
+        return false
+    }
+    asn, ptr := "", ""
+    if e.enr != nil {
+        r := e.enr.Lookup(ip)
+        if r.ASN > 0 {
+            asn = fmt.Sprintf("AS%d", r.ASN)
+        }
+        ptr = r.PTR
+    }
+    _, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
+    return matched
+}
+

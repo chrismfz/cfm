@@ -315,6 +315,37 @@ if ig != nil {
             }
         }
 
+        // ── NEW: wire IGNORE_IPS/IGNORE_NETS bypass ──────────────────────────
+        // (belt over the register-level wiring; also covers hot-reload)
+        if ig != nil {
+            type bypassSetter interface {
+                SetBypassFunc(func(string) bool)
+            }
+            if bs, ok := det.(bypassSetter); ok {
+                bs.SetBypassFunc(ig.ShouldIgnore)
+            }
+        }
+
+        // ── NEW: wire challenge-exclude func (ASN / UA / PTR rules) ──────────
+        if chalExclude != nil {
+            type chalExcludeSetter interface {
+                SetChalExcludeFunc(func(string, string, string, string, string, string) (string, bool))
+            }
+            if ces, ok := det.(chalExcludeSetter); ok {
+                ce  := chalExclude // capture for closure
+                enrC := enr        // capture for closure (may be nil)
+                ces.SetChalExcludeFunc(func(ip, host, ua, asn, ptr, rule string) (string, bool) {
+                    // Engine already does its own enrichment lookup inside isExcluded().
+                    // This func only forwards to Match(); the asn/ptr passed here are
+                    // from the engine's own lookup, so we don't double-lookup.
+                    _ = enrC // suppress unused warning; kept for potential future use
+                    act, _, matched := ce.Match(ip, host, ua, asn, ptr, rule)
+                    return act, matched
+                })
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
 
 
 if pa, ok := det.(core.PositionAware); ok && m.state != nil {

@@ -682,6 +682,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Render challenge page (JS calls /verify with token)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		// Prevent search engines from indexing the challenge page or following its links.
+		// X-Robots-Tag is the authoritative signal; the meta tag below is belt-and-suspenders.
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		host := cleanHost(r.Host)
 
 		// token binds to IP+UA+cookie
@@ -1488,6 +1491,7 @@ func challengeHTML() string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
   <title>Just a moment…</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0b1020;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center}
