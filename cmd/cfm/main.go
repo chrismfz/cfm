@@ -942,7 +942,7 @@ step := func(name string) func() {
 
 //Start Debug//
 //startDebug()
-// Debug server will be started after we parse cfm.conf in applyPorts (respects LISTEN_ADDRESS/PORT)
+// Debug server will be started after we parse cfm.conf in onCFMConfChanged (respects LISTEN_ADDRESS/PORT)
 //End Debug//
 
 
@@ -1261,235 +1261,164 @@ defer vmapLc.Stop()
 
 
 
-
-
-//SMTP NFLOG
+// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 smtpLc := nflog.NewSnoopLifecycle()
-// SMTP
 
-    // Ensure base data dir exists very early
-    ensureDir := func(path string, mode os.FileMode) {
-        if err := os.MkdirAll(path, mode); err != nil {
-            logging.Logf("[init] failed to create %s: %v", path, err)
-            return
-        }
-        // Honor desired perms even if umask interfered
-        if err := os.Chmod(path, mode); err != nil {
-            logging.Logf("[init] failed to chmod %s to %o: %v", path, mode, err)
-        }
-    }
+// Ensure base data dirs exist with correct permissions
+for _, d := range []struct{ path string; mode os.FileMode }{
+    {"/var/lib/cfm", 0o701},
+    {"/var/lib/cfm/sslcollector", 0o701},
+    {"/var/log/cfm", 0o700},
+} {
+    _ = os.MkdirAll(d.path, d.mode)
+    _ = os.Chmod(d.path, d.mode)
+}
 
+	// ── Lifecycle managers ──────────────────────────────────────────────────────
+	mmdbLc := mmdb.NewLifecycle()
+	defer mmdbLc.Stop()
 
-ensureDir("/var/lib/cfm", 0o701)
-ensureDir("/var/lib/cfm/sslcollector", 0o701)
-ensureDir("/var/log/cfm", 0o700)
+	govLc := mysql.NewGovernorLifecycle()
 
+	// ── applySystemConfig ────────────────────────────────────────────────────────
+	// Stateless: logging init, sysctl tweaks, SMTP owner resolution.
+	applySystemConfig := func(cfg *cfgpkg.Config) {
+		cfg.SystemTweaks.SetDefaults()
+		logging.Init(&cfg.Logging)
+		for _, ln := range cfg.Summary() {
+			logging.Logf("[config] %s", ln)
+		}
+		resolveSMTPAllowOwners(cfg)
+		if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
+			fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
+		}
+	}
 
-	// MaxMind updater lifecycle
-mmdbLc := mmdb.NewLifecycle()
-defer mmdbLc.Stop()
+	// ── applyDebugServer ─────────────────────────────────────────────────────────
+	// Start-once: MySQL governor + debug HTTP server.
+	applyDebugServer := func(cfg *cfgpkg.Config) {
+		if os.Getenv("CFM_DEBUG_HTTP_STARTED") != "" {
+			return
+		}
+		debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+		govCfg, ok := detpkg.GetPendingGovernorConfig()
+		var cfgPtr *mysql.GovernorConfig
+		if ok {
+			cfgPtr = &govCfg
+		}
+		gov := govLc.StartOnce(ctx, cfgPtr)
+		startDebug(debugAddr, gov)
+		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
+		logging.Logf("[debug] http server on %s", debugAddr)
+	}
 
-	// (we create the updater instance inside applyPorts after config is parsed)
+	// ── applyNFTRules ────────────────────────────────────────────────────────────
+	// Stateless: flood rules, ports policy, SMTP block, reporter, NFLOG snooper.
+	applyNFTRules := func(cfg *cfgpkg.Config) {
+		nb, ok := be.(*nft.Backend)
+		if !ok {
+			return
+		}
+		logging.Logf("[daemon] === Begin ApplyFloodRules ===")
+		if err := nb.ApplyFloodRules(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
+		}
+		logging.Logf("[daemon] === End ApplyFloodRules ===")
 
-	// MySQL governor — created once on first config load, lives for the daemon lifetime.
-	// Declared here so both applyPorts (which registers its HTTP handlers) and the
-	// post-startup goroutine (which calls gov.Run) share the same pointer.
-govLc := mysql.NewGovernorLifecycle()
+		logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
+		if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+			fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
+		}
+		logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
-	applyPorts := func() {
-		if cfgDir == "" || confW == nil { return }
+		if cfg.SMTPBlock.Enabled {
+			if err := nb.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
+				fmt.Fprintln(os.Stderr, "smtpblock apply error:", err)
+			} else {
+				logging.Logf("[smtpblock] applied (mode=%s, ports=%v, allow_local=%v, nflog=%d)",
+					map[bool]string{false: "block", true: "redirect"}[cfg.SMTPBlock.Redirect],
+					cfg.SMTPBlock.Ports, cfg.SMTPBlock.AllowLocal, cfg.SMTPBlock.LogNFLOG,
+				)
+			}
+		}
+		logging.Logf("[daemon] === Finished all nft applies ===")
+
+		if cfg.API.URL != "" && cfg.API.AuthToken != "" {
+			nb.SetReporter(&agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken})
+		}
+		smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
+	}
+
+	// ── onCFMConfChanged ─────────────────────────────────────────────────────────
+	// Parses cfm.conf once when it changes, distributes to all subsystems.
+	onCFMConfChanged := func() {
+		if cfgDir == "" || confW == nil {
+			return
+		}
 		b, ok := confW.Changed()
-		if !ok { return }
-
+		if !ok {
+			return
+		}
 		cfg, err := loadConfigWithAPIOverride(cfgDir, b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
 			return
 		}
 
-
-sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock)
-
-vmapLc.ApplyConfig(ctx, &cfg.VHostMap)
-
-
-        // ---- Debug server + MySQL governor (start once, with config values) ----
-        //
-        // Both are gated by CFM_DEBUG_HTTP_STARTED so they only run on the first
-        // successful config load.  The governor must be created *before* startDebug
-        // so that RegisterHTTP can add the /api/v1/mysql/ routes to the same mux.
-        //
-        // Debug server address comes from [debug] in cfm.conf:
-        //   LISTEN_ADDRESS = 127.0.0.1   (default)
-        //   PORT           = 6060        (default)
-
-
-debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
-if os.Getenv("CFM_DEBUG_HTTP_STARTED") == "" {
-    govCfg, ok := detpkg.GetPendingGovernorConfig()
-    var cfgPtr *mysql.GovernorConfig
-    if ok {
-        cfgPtr = &govCfg
-    }
-    gov := govLc.StartOnce(ctx, cfgPtr)
-    startDebug(debugAddr, gov)
-    _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
-    logging.Logf("[debug] http server on %s", debugAddr)
-}
-
-
-
-        // MaxMind
-mmdbLc.ApplyConfig(ctx, &cfg.MaxMind)
-
-
-
-		// Defaults BEFORE summary
-		cfg.SystemTweaks.SetDefaults()
-
-		// logger + summary
-		logging.Init(&cfg.Logging)
-		for _, ln := range cfg.Summary() {
-			logging.Logf("[config] %s", ln)
-		}
-
-		// --- SMTPBlock: resolve names -> IDs, then apply nft rules, then (optionally) start NFLOG snooper
-		resolveSMTPAllowOwners(cfg)
-
-
-		// sysctl tweaks
-		if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
-			fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
-		}
-
-
-
-
-
-
-		// nft rules
-
-if nb, ok2 := be.(*nft.Backend); ok2 {
-
-    logging.Logf("[daemon] === Begin ApplyFloodRules ===")
-    if err := nb.ApplyFloodRules(cfg); err != nil {
-        fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
-    }
-    logging.Logf("[daemon] === End ApplyFloodRules ===")
-
-
-
-
-    logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
-    if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
-        fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
-    }
-    logging.Logf("[daemon] === End ApplyPortsPolicy ===")
-
-
-    // Apply SMTPBlock rules (if enabled)
-    if cfg.SMTPBlock.Enabled {
-        if err := nb.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
-            fmt.Fprintln(os.Stderr, "smtpblock apply error:", err)
-        } else {
-            logging.Logf("[smtpblock] applied (mode=%s, ports=%v, allow_local=%v, nflog=%d)",
-                map[bool]string{false:"block", true:"redirect"}[cfg.SMTPBlock.Redirect],
-                cfg.SMTPBlock.Ports, cfg.SMTPBlock.AllowLocal, cfg.SMTPBlock.LogNFLOG,
-            )
-        }
-    }
-
-    logging.Logf("[daemon] === Finished all nft applies ===")
-
-
-  if cfg.API.URL != "" && cfg.API.AuthToken != "" {
-        api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
-        nb.SetReporter(api) // από εδώ και πέρα τα autoblocks θα κάνουν ReportBlock
-    }
-
-
-// SMTP NFLOG
-smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
-
+		applySystemConfig(cfg)                             // logging, sysctl, SMTP owners
+		mmdbLc.ApplyConfig(ctx, &cfg.MaxMind)             // MaxMind updater
+		sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock) // SSL collector socket
+		vmapLc.ApplyConfig(ctx, &cfg.VHostMap)            // VHost map
+		agLc.ApplyConfig(cfg)                             // API agent
+		applyDebugServer(cfg)                             // MySQL governor + debug HTTP (start-once)
+		applyNFTRules(cfg)                                // nft: flood, ports, smtp, reporter, nflog
 	}
 
+	// ── Initial load ─────────────────────────────────────────────────────────────
+	done = step("initial:loadAll")
+	loadAll()
+	done()
 
+	done = step("initial:onCFMConfChanged")
+	onCFMConfChanged()
+	done()
 
-
-
-
-
-
-
-
-		// agent
-agLc.ApplyConfig(cfg)
-
-	}
-
-	// Initial load
-
-done = step("initial:loadAll")
-loadAll()
-done()
-
-done = step("initial:applyPorts")
-applyPorts()
-done()
-
-done = step("initial:reloadBlocklists(queue)")
-reloadBlocklists()
-done()
-
-
+	done = step("initial:reloadBlocklists")
+	reloadBlocklists()
+	done()
 
 	if ignW != nil { applyIgnoreFile(ignW.Path()) }
 	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
+	detpkg.SetFW(be)
+	detpkg.Start(ctx, detpkg.Options{
+		CfgPath: filepath.Join(cfgDir, "detectors.conf"),
+		Sink:    detpkg.OutcomeLoggerSink{},
+		FW:      be,
+	})
 
+	// DNAT failsafe: if OpenResty ports die while DNAT is ON, turn it OFF.
+	dnat.StartFailSafe(ctx, be)
 
-// detectors logic
-// wherever you start detectors (e.g., runDaemon)
+	// ── Main tick loop ───────────────────────────────────────────────────────────
+	t := time.NewTicker(*interval)
+	defer t.Stop()
+	for range t.C {
+		reloadBlocklists()  // only if cfm.blocklists changed
+		loadAll()           // only if cfm.allow / cfm.deny / cfm.ignore changed
+		onCFMConfChanged()  // only if cfm.conf changed
 
-// detectors logic
-//detpkg.Start(context.Background(), detpkg.Options{
-detpkg.SetFW(be)
-
-detpkg.Start(ctx, detpkg.Options{
-    CfgPath: filepath.Join(cfgDir, "detectors.conf"), // use the actual filename
-    Sink:    detpkg.OutcomeLoggerSink{},              // prints final "Blocked:" outcome
-    FW:      be,                                      // reuse the backend created above
-
-
-})
-
-
-// DNAT failsafe (web-only): if OpenResty ports die while DNAT is ON, turn DNAT OFF and log it.
-// OFF stays OFF until manual "cfm dnat on".
-dnat.StartFailSafe(ctx, be)
-
-	// Loop
-
-    t := time.NewTicker(*interval); defer t.Stop()
-    for range t.C {
-        reloadBlocklists() // only if cfm.blocklists changed
-        loadAll()          // only if cfm.allow/cfm.deny changed
-        applyPorts()       // only if cfm.conf changed
-
-        // periodic maintenance
-        if nb, ok := be.(*nft.Backend); ok {
-            nb.DumpFloodCounters()
-            nb.LoadPortScanner()
-        }
-        if ddm.FileChanged() {
-            _ = ddm.LoadOnce(context.Background())
-        } else {
-            ddm.Tick(context.Background(), time.Now())
-        }
-    }
-
-
+		if nb, ok := be.(*nft.Backend); ok {
+			nb.DumpFloodCounters()
+			nb.LoadPortScanner()
+		}
+		if ddm.FileChanged() {
+			_ = ddm.LoadOnce(context.Background())
+		} else {
+			ddm.Tick(context.Background(), time.Now())
+		}
+	}
 }
 
 
