@@ -49,6 +49,7 @@ func (l *GovernorLifecycle) StartOnce(ctx context.Context, cfg *GovernorConfig) 
 	if err != nil {
 		// Non-fatal: MySQL may not be installed or credentials not yet set up.
 		logging.Logf("[mysql/governor] disabled: %v", err)
+		logging.LogfMYSQLGOVERNOR("[mysql/governor] disabled: %v", err)
 		return nil
 	}
 

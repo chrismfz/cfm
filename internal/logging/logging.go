@@ -17,6 +17,7 @@ var (
     detectorLogFile *os.File
     smtpLogFile *os.File
     challengesLogFile *os.File
+    mysqlLogFile      *os.File   // mysql enforcer
     once sync.Once
     cfg  *config.LoggingConfig
 
@@ -98,6 +99,26 @@ if challengesPath != "" {
     }
 }
 
+
+
+// MYSQL GOVERNOR log
+mysqlPath := cfg.MYSQLFile
+if mysqlPath == "" && cfg.File != "" {
+    base := cfg.File
+    ext  := filepath.Ext(base)
+    if ext == "" {
+        mysqlPath = base + ".mysql"
+    } else {
+        mysqlPath = strings.TrimSuffix(base, ext) + ".mysql" + ext
+    }
+}
+if mysqlPath != "" {
+    if f, err := os.OpenFile(mysqlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+        mysqlLogFile = f
+    } else {
+        fmt.Printf("failed to open mysql log file %s: %v\n", mysqlPath, err)
+    }
+}
 
 
         // DETECTOR log
@@ -206,3 +227,25 @@ func LogfSMTP(format string, args ...interface{}) {
     if smtpLogFile != nil { _, _ = smtpLogFile.WriteString(line) }
     if cfg == nil || cfg.SMTPStdout { fmt.Print(line) }
 }
+
+
+
+// LogfMYSQLGOVERNOR writes governor events (starts, kills, notifies,
+// sleep reaps, connection pressure, rate-limit hits) to cfm.mysql.log.
+// Falls back to the main log if the dedicated file was not opened.
+func LogfMYSQLGOVERNOR(format string, args ...interface{}) {
+    ts   := time.Now().Format("2006-01-02 15:04:05")
+    msg  := fmt.Sprintf(format, args...)
+    line := fmt.Sprintf("%s %s\n", ts, msg)
+
+    if cfg == nil || cfg.MYSQLStdout {
+        fmt.Print(line)
+    }
+    if mysqlLogFile != nil {
+        _, _ = mysqlLogFile.WriteString(line)
+    } else if logFile != nil { // fallback: main log
+        _, _ = logFile.WriteString(line)
+    }
+}
+
+

@@ -238,7 +238,7 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 
 	g := &Governor{cfg: cfg, db: db}
 	if err := g.detectFlavor(); err != nil {
-		logging.Logf("[mysql/governor] flavor detect failed: %v", err)
+		logging.LogfMYSQLGOVERNOR("[mysql/governor] flavor detect failed: %v", err)
 	}
 	ctx := context.Background()
 	g.probePerfSchema(ctx)
@@ -247,7 +247,7 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 
 // Run is the main polling loop. Blocks until ctx is cancelled.
 func (g *Governor) Run(ctx context.Context) {
-	logging.Logf("[mysql/governor] started mode=%s poll=%s flavor=%s",
+	logging.LogfMYSQLGOVERNOR("[mysql/governor] started mode=%s poll=%s flavor=%s",
 		g.cfg.Mode, g.cfg.PollEvery, g.flavor)
 	t := time.NewTicker(g.cfg.PollEvery)
 	defer t.Stop()
@@ -264,7 +264,7 @@ func (g *Governor) Run(ctx context.Context) {
 func (g *Governor) poll(ctx context.Context) {
 	procs, err := g.fetchProcesslist(ctx)
 	if err != nil {
-		logging.Logf("[mysql/governor] processlist error: %v", err)
+		logging.LogfMYSQLGOVERNOR("[mysql/governor] processlist error: %v", err)
 		return
 	}
 
@@ -426,7 +426,7 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 
 		// Kill actions — check rate limits first
 		if !g.killAllowed(p.DB) {
-			logging.Logf("[mysql/governor] kill rate limited: user=%s db=%s pid=%d", p.User, p.DB, p.ID)
+			logging.LogfMYSQLGOVERNOR("[mysql/governor] kill rate limited: user=%s db=%s pid=%d", p.User, p.DB, p.ID)
 			continue
 		}
 
@@ -472,7 +472,7 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 			Unblocked: unblocked,
 		}
 
-		logging.Logf("[mysql/governor] %s pid=%d user=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
+		logging.LogfMYSQLGOVERNOR("[mysql/governor] %s pid=%d user=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
 			kr.Action, kr.PID, kr.User, kr.DB, p.TimeSec, kr.Reason, kr.Unblocked, kr.Result)
 
 		notify.Enqueue(notify.Event{
@@ -529,7 +529,7 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 				Result:  result,
 			}
 			kills = append(kills, kr)
-			logging.Logf("[mysql/governor] sleep reap pid=%d user=%s db=%s idle=%ds result=%s",
+			logging.LogfMYSQLGOVERNOR("[mysql/governor] sleep reap pid=%d user=%s db=%s idle=%ds result=%s",
 				p.ID, p.User, p.DB, p.TimeSec, result)
 		}
 	}
@@ -595,7 +595,7 @@ func (g *Governor) detectFlavor() error {
 		return err
 	}
 	g.flavor = v
-	logging.Logf("[mysql/governor] connected, version=%s", v)
+	logging.LogfMYSQLGOVERNOR("[mysql/governor] connected, version=%s", v)
 	return nil
 }
 

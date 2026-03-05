@@ -162,6 +162,10 @@ type LoggingConfig struct {
 
     SMTPStdout bool   // SMTP_LOG_STDOUT
     SMTPFile   string // SMTP_LOG_FILE
+
+    MYSQLStdout bool   // MYSQL_LOG_STDOUT
+    MYSQLFile   string // MYSQL_LOG_FILE
+
 }
 
 
@@ -305,6 +309,8 @@ c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
 	if c.SMTPBlock.LogEnabled && c.Logging.SMTPFile == "" {
 		c.Logging.SMTPFile = "/var/log/cfm.smtp.log"
 	}
+
+
 
 
 // Hardening
@@ -545,6 +551,10 @@ case "UDP_OUT":
 		case "SMTP_LOG_ENRICH":
 			cfg.SMTPBlock.LogEnrich = parseBool(val)
 
+
+
+
+
 		// --- Debug / HTTP listen ---
 		case "LISTEN_ADDRESS":
 			cfg.Debug.ListenAddress = val
@@ -615,6 +625,13 @@ case "VHOST_MAP_DEFAULT_IP":
     cfg.VHostMap.DefaultIP = val
 case "VHOST_MAP_RELOAD_CMD":
     cfg.VHostMap.ReloadCmd = val
+
+
+
+case "MYSQL_LOG_STDOUT":
+    cfg.Logging.MYSQLStdout = parseBool(val)
+case "MYSQL_LOG_FILE":
+    cfg.Logging.MYSQLFile = val
 
 
 // Hardening
