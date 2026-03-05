@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# ensure config dir
+[ -d /etc/cfm ] || mkdir -p /etc/cfm
+
+# systemd reload/enable/start
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable cfm.service || true
+    systemctl restart cfm.service || true
+fi
+
+exit 0
