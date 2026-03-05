@@ -104,7 +104,14 @@ if err != nil {
 
     m.state = st
 }
-	go m.loop(parent)
+
+        // IMPORTANT:
+        // Do an initial synchronous load so config-only sections (like [mysql_governor])
+        // can populate "pending configs" before Start() returns and the daemon consumes them.
+        m.maybeReload(parent)
+
+        go m.loop(parent)
+
 }
 
 
@@ -118,7 +125,6 @@ func (m *manager) loop(parent context.Context) {
 	t := time.NewTicker(2500 * time.Millisecond)
 
 	defer t.Stop()
-	m.maybeReload(parent) // first run
 	for {
 		select {
 		case <-parent.Done():
@@ -166,6 +172,17 @@ func (m *manager) maybeReload(parent context.Context) {
 	// Debounce: require the new signature to remain stable for debounceDur
 	// before we actually reload (prevents flapping / transient states).
 	now := time.Now()
+
+        // On first-ever load (nothing running yet), do NOT debounce.
+        // We want config to be available immediately for consumers in main().
+        if !m.running {
+                // Pretend we already waited long enough.
+                m.pendingSig = sig
+                m.pendingSince = now.Add(-debounceDur)
+                m.hasPending = true
+        }
+
+
 	if !m.hasPending || m.pendingSig != sig {
 		m.pendingSig = sig
 		m.pendingSince = now
@@ -301,8 +318,14 @@ if ig != nil {
 		}
 
 		det, err := fac(secName, kv, secs.Global) // det: core.PeriodicDetector
-		if err != nil || det == nil {
+		// Some section types are config-only (no goroutine needed) and intentionally
+		// return (nil, nil). Treat that as a successful no-op, not an init failure.
+		if err != nil {
 			logging.Logf("[detectors] failed to init %s: %v", secName, err)
+			continue
+		}
+		if det == nil {
+			logging.Logf("[detectors] %s: no detector instance (config-only) — skipping", secName)
 			continue
 		}
 

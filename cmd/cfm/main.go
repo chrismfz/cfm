@@ -729,6 +729,11 @@ defer agLc.Stop()
         defer cancel()
 
 
+
+        // NOTE: detectors should be started early so config-only sections (like mysql_governor)
+        // can populate pending configs before applyDebugServer() tries to consume them.
+
+
 // --- SSL collector (start once; used later by webdetector TLS proxy) ---
 sslcol := sslcollector.New(sslcollector.Config{
     Enabled:        true,
@@ -883,6 +888,17 @@ for _, d := range []struct{ path string; mode os.FileMode }{
 	loadAll()
 	done()
 
+        // Start detectors BEFORE first onCFMConfChanged(), so applyDebugServer() can
+        // see mysql_governor pending config.
+        detpkg.SetFW(be)
+        detpkg.Start(ctx, detpkg.Options{
+                CfgPath: filepath.Join(cfgDir, "detectors.conf"),
+                Sink:    detpkg.OutcomeLoggerSink{},
+                FW:      be,
+        })
+
+
+
 	done = step("initial:onCFMConfChanged")
 	onCFMConfChanged()
 	done()
@@ -895,12 +911,6 @@ for _, d := range []struct{ path string; mode os.FileMode }{
 	if os.Getenv("CFM_DEBUG") == "1" { fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n") }
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
-	detpkg.SetFW(be)
-	detpkg.Start(ctx, detpkg.Options{
-		CfgPath: filepath.Join(cfgDir, "detectors.conf"),
-		Sink:    detpkg.OutcomeLoggerSink{},
-		FW:      be,
-	})
 
 	// DNAT failsafe: if OpenResty ports die while DNAT is ON, turn it OFF.
 	dnat.StartFailSafe(ctx, be)
