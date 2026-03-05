@@ -5,16 +5,32 @@
 // Two complementary mechanisms:
 //
 //   reap_sleep   — on every poll: if a user has more connections than their cap,
-//                  kill the oldest sleeping ones (InnoDB open-tx guard applies).
-//                  Requires only PROCESS privilege (already needed for KILL).
+//                  kill the oldest sleeping ones (by idle time) until back under
+//                  the limit. InnoDB open-transaction guard always applied.
+//                  Requires only PROCESS privilege.
 //
 //   alter_user   — issue ALTER USER … WITH MAX_USER_CONNECTIONS N so MariaDB
 //                  refuses new connections beyond the cap at the protocol level.
-//                  Automatically reversed when the user drops back under limit.
-//                  Requires CREATE USER privilege added to cfm_governor.
-//                  Falls through to reap_sleep for existing sleeping connections.
+//                  Also falls through to reap_sleep to clean up existing sleepers.
+//                  Reversed automatically when the user drops back under limit.
+//                  Requires GRANT CREATE USER ON *.* TO 'cfm_governor'@'localhost'.
 //
-// notify        — alert only, no kill. Use as a first-stage early-warning rule.
+//   notify       — alert only, no kill. Use as an early-warning first stage.
+//
+// Persistence safety — ALTER USER writes to mysql.user and survives MySQL
+// restarts.  Two mechanisms keep caps from getting permanently stuck:
+//
+//   auditAlterUserOnStartup  — runs once in NewGovernor. Queries mysql.user for
+//                              any non-zero MAX_USER_CONNECTIONS that match our
+//                              alter_user rules and resets them to 0.  Handles
+//                              cfm crash / restart / update scenarios.
+//
+//   cleanupStaleAlterCaps    — runs every alterAuditInterval (15 min) from poll().
+//                              Reverses caps for users that have dropped under
+//                              their limit or have zero connections at all (site
+//                              offline, account suspended). Handles the edge case
+//                              where a user vanishes from the processlist entirely
+//                              so enforceConnRules never sees them.
 //
 // Notify cooldown: a per-user notify is suppressed for connNotifyCooldown after
 // the last fire, so a persistently-over-limit user does not flood the log.
@@ -53,6 +69,11 @@ type ConnRule struct {
 // connNotifyCooldown suppresses repeated notify-only alerts for the same user.
 const connNotifyCooldown = 10 * time.Minute
 
+// alterAuditInterval controls how often cleanupStaleAlterCaps runs from poll().
+const alterAuditInterval = 15 * time.Minute
+
+// ── enforceConnRules ─────────────────────────────────────────────────────────
+
 // enforceConnRules is called from poll() after buildState().
 // It checks every user against the CONN_RULES list and acts on violations.
 func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, procs []Process) []KillRecord {
@@ -60,7 +81,7 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 		return nil
 	}
 
-	// Build per-user sorted sleeper list (oldest idle first — we kill those first).
+	// Build per-user sorted sleeper list (oldest idle first — kill those first).
 	type sleeper struct {
 		pid  int64
 		idle int64
@@ -86,14 +107,14 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 
 		rule, matched := g.matchConnRule(us.User, state)
 		if !matched {
-			// No matching rule — if we previously applied alter_user, reverse it.
+			// No matching rule — reverse any previously applied ALTER USER cap.
 			g.maybeRestoreAlterUser(ctx, us.User)
 			continue
 		}
 
 		excess := us.Total - rule.Max
 		if excess <= 0 {
-			// User is under or at limit. Reverse any previously applied ALTER USER.
+			// User is at or under limit — reverse any previously applied ALTER USER.
 			if rule.Action == ConnActionAlterUser {
 				g.maybeRestoreAlterUser(ctx, us.User)
 			}
@@ -106,7 +127,6 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 		switch rule.Action {
 
 		case ConnActionNotify:
-			// Rate-limited to avoid flooding the log every 5s poll.
 			if g.connNotifyAllowed(us.User) {
 				logging.LogfMYSQLGOVERNOR("[mysql/conn_limit] NOTIFY %s", reason)
 				notify.Enqueue(notify.Event{
@@ -118,7 +138,8 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 			}
 
 		case ConnActionAlterUser:
-			// Step 1: apply ALTER USER so MariaDB blocks new connections.
+			// Step 1: apply ALTER USER so MariaDB blocks new connections at the
+			// protocol level. applyAlterUser is idempotent — skips if already set.
 			logging.LogfMYSQLGOVERNOR("[mysql/conn_limit] ALTER_USER %s", reason)
 			notify.Enqueue(notify.Event{
 				Kind:     "MYSQL/CONN_LIMIT",
@@ -204,7 +225,7 @@ func (g *Governor) matchConnRule(user string, state GovernorState) (ConnRule, bo
 		if !matchUser(r.UserPattern, user) {
 			continue
 		}
-		// Dynamic trigger: skip if global connection pressure hasn't reached threshold.
+		// Dynamic trigger: skip if global connection pressure is below threshold.
 		if r.ConnPct > 0 && state.ConnPct < r.ConnPct {
 			continue
 		}
@@ -216,7 +237,8 @@ func (g *Governor) matchConnRule(user string, state GovernorState) (ConnRule, bo
 // ── ALTER USER helpers ────────────────────────────────────────────────────────
 
 // applyAlterUser sets MAX_USER_CONNECTIONS on the user (both @localhost and @%)
-// so MariaDB refuses new connections beyond the cap. Skips if already applied.
+// so MariaDB refuses new connections beyond the cap. Idempotent — skips if the
+// same limit is already recorded in alterUserLimits.
 func (g *Governor) applyAlterUser(ctx context.Context, user string, max int) {
 	g.alterUserMu.Lock()
 	defer g.alterUserMu.Unlock()
@@ -225,12 +247,12 @@ func (g *Governor) applyAlterUser(ctx context.Context, user string, max int) {
 		g.alterUserLimits = map[string]int{}
 	}
 	if g.alterUserLimits[user] == max {
-		return // already applied at this limit, no-op
+		return // already applied at this cap, no-op
 	}
 
 	applied := false
 	// cPanel creates users as 'user'@'%'; DirectAdmin as 'user'@'localhost'.
-	// We try both and ignore "user does not exist" errors silently.
+	// We try both and silently ignore "user does not exist" errors.
 	for _, host := range []string{"%", "localhost"} {
 		sql := fmt.Sprintf(
 			"ALTER USER '%s'@'%s' WITH MAX_USER_CONNECTIONS %d",
@@ -247,8 +269,10 @@ func (g *Governor) applyAlterUser(ctx context.Context, user string, max int) {
 	}
 }
 
-// maybeRestoreAlterUser removes a previously applied connection cap.
-// Called when a user drops back under their limit or no longer matches a rule.
+// maybeRestoreAlterUser removes a previously applied connection cap by setting
+// MAX_USER_CONNECTIONS back to 0 (unlimited).
+// Called when a user drops back under their limit or no longer matches any rule.
+// Acquires alterUserMu — callers must NOT hold it.
 func (g *Governor) maybeRestoreAlterUser(ctx context.Context, user string) {
 	g.alterUserMu.Lock()
 	defer g.alterUserMu.Unlock()
@@ -270,10 +294,151 @@ func (g *Governor) maybeRestoreAlterUser(ctx context.Context, user string) {
 	g.alterUserLimits[user] = 0
 }
 
-// ── Notify cooldown for conn rules ───────────────────────────────────────────
+// ── Startup audit ─────────────────────────────────────────────────────────────
 
-// connNotifyAllowed returns true if enough time has passed since the last
-// notify for this user. Updates the last-notify timestamp on true.
+// auditAlterUserOnStartup queries mysql.user for any accounts that currently
+// have a non-zero MAX_USER_CONNECTIONS and match one of our alter_user rules.
+// These are caps left behind by a previous cfm run (crash, restart, update).
+// We reset them to 0 so the governor starts from a clean slate rather than
+// enforcing with state it has no memory of.
+//
+// Only resets accounts that match an alter_user rule in the current config —
+// accounts a DBA capped manually are left untouched.
+//
+// Called once from NewGovernor, before the poll loop starts.
+func (g *Governor) auditAlterUserOnStartup(ctx context.Context) {
+	// Quick-exit: no alter_user rules configured — nothing to clean up.
+	hasAlterRule := false
+	for _, r := range g.cfg.ConnRules {
+		if r.Action == ConnActionAlterUser {
+			hasAlterRule = true
+			break
+		}
+	}
+	if !hasAlterRule {
+		return
+	}
+
+	rows, err := g.db.QueryContext(ctx,
+		`SELECT User, Host FROM mysql.user WHERE MAX_USER_CONNECTIONS > 0`)
+	if err != nil {
+		// Not fatal — the governor still starts. Worst case: a stale cap persists
+		// until cleanupStaleAlterCaps catches it on the first 15-minute sweep.
+		logging.LogfMYSQLGOVERNOR(
+			"[mysql/conn_limit] startup audit: could not read mysql.user: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type account struct{ user, host string }
+	var stale []account
+
+	for rows.Next() {
+		var u, h string
+		if err := rows.Scan(&u, &h); err != nil {
+			continue
+		}
+		// Only reset accounts that match one of our alter_user patterns.
+		for _, r := range g.cfg.ConnRules {
+			if r.Action == ConnActionAlterUser && matchUser(r.UserPattern, u) {
+				stale = append(stale, account{u, h})
+				break
+			}
+		}
+	}
+	if rows.Err() != nil {
+		logging.LogfMYSQLGOVERNOR(
+			"[mysql/conn_limit] startup audit: row scan error: %v", rows.Err())
+		return
+	}
+
+	if len(stale) == 0 {
+		logging.LogfMYSQLGOVERNOR(
+			"[mysql/conn_limit] startup audit: no stale alter_user caps found")
+		return
+	}
+
+	logging.LogfMYSQLGOVERNOR(
+		"[mysql/conn_limit] startup audit: found %d stale cap(s) — resetting", len(stale))
+
+	g.alterUserMu.Lock()
+	defer g.alterUserMu.Unlock()
+
+	if g.alterUserLimits == nil {
+		g.alterUserLimits = map[string]int{}
+	}
+
+	for _, a := range stale {
+		sql := fmt.Sprintf(
+			"ALTER USER '%s'@'%s' WITH MAX_USER_CONNECTIONS 0",
+			strings.ReplaceAll(a.user, "'", "''"), a.host)
+		if _, err := g.db.ExecContext(ctx, sql); err != nil {
+			logging.LogfMYSQLGOVERNOR(
+				"[mysql/conn_limit] startup audit: failed to reset %s@%s: %v",
+				a.user, a.host, err)
+		} else {
+			logging.LogfMYSQLGOVERNOR(
+				"[mysql/conn_limit] startup audit: reset stale cap for %s@%s",
+				a.user, a.host)
+			g.alterUserLimits[a.user] = 0
+		}
+	}
+}
+
+// ── Periodic stale-cap cleanup ────────────────────────────────────────────────
+
+// cleanupStaleAlterCaps reverses ALTER USER caps for users that are currently
+// under their cap or have zero connections.
+//
+// maybeRestoreAlterUser handles the normal "user drops under limit" path inside
+// enforceConnRules on every poll. This function handles the edge case where the
+// user disappears from the processlist entirely — they won't appear in
+// state.PerUser, so enforceConnRules never visits them and maybeRestoreAlterUser
+// is never called for them.
+//
+// Called from poll() every alterAuditInterval (15 minutes).
+// Acquires alterUserMu internally — callers must NOT hold it.
+func (g *Governor) cleanupStaleAlterCaps(ctx context.Context, state GovernorState) {
+	g.alterUserMu.Lock()
+	defer g.alterUserMu.Unlock()
+
+	if len(g.alterUserLimits) == 0 {
+		return
+	}
+
+	// Quick lookup of current total connections per user from the processlist snap.
+	active := make(map[string]int, len(state.PerUser))
+	for _, u := range state.PerUser {
+		active[u.User] = u.Total
+	}
+
+	for user, cap := range g.alterUserLimits {
+		if cap == 0 {
+			continue // already cleared
+		}
+
+		conns := active[user] // 0 if user has no connections at all
+
+		if conns < cap {
+			// User is under their cap (or offline). Reverse the ALTER USER.
+			for _, host := range []string{"%", "localhost"} {
+				sql := fmt.Sprintf(
+					"ALTER USER '%s'@'%s' WITH MAX_USER_CONNECTIONS 0",
+					strings.ReplaceAll(user, "'", "''"), host)
+				g.db.ExecContext(ctx, sql) //nolint:errcheck — best-effort, logged below
+			}
+			g.alterUserLimits[user] = 0
+			logging.LogfMYSQLGOVERNOR(
+				"[mysql/conn_limit] periodic cleanup: restored %s (was capped at %d, now %d conns)",
+				user, cap, conns)
+		}
+	}
+}
+
+// ── Notify cooldown ───────────────────────────────────────────────────────────
+
+// connNotifyAllowed returns true if enough time has elapsed since the last
+// notify for this user. Updates the timestamp when returning true.
 func (g *Governor) connNotifyAllowed(user string) bool {
 	g.connNotifyMu.Lock()
 	defer g.connNotifyMu.Unlock()
@@ -287,4 +452,3 @@ func (g *Governor) connNotifyAllowed(user string) bool {
 	g.connNotifyLast[user] = time.Now()
 	return true
 }
-

@@ -48,7 +48,6 @@ type GovernorConfig struct {
 	// Per-user connection-limit rules (CONN_RULES in detectors.conf).
 	// Evaluated on every poll tick; independent of QueryRules.
 	ConnRules []ConnRule
-
 }
 
 // RuleAction is the ordered severity of a rule outcome.
@@ -94,12 +93,12 @@ type GovernorState struct {
 	LockedConn  int
 	ConnPct     float64
 	PerUser     []UserStat
-	Running     []Process    // active + waiting, sorted by time desc
-	LockGraph   []LockGroup  // blocker -> waiters
+	Running     []Process       // active + waiting, sorted by time desc
+	LockGraph   []LockGroup     // blocker -> waiters
 	RecentKills []KillRecord
 	PerfDeltas  []UserPerfDelta // per-user CPU/query stats from performance_schema (nil if unavailable)
-	Flavor      string // "10.11.7-MariaDB" | "8.0.36"
-	Mode        string // "monitor" | "enforce" — copied from GovernorConfig each poll
+	Flavor      string          // "10.11.7-MariaDB" | "8.0.36"
+	Mode        string          // "monitor" | "enforce" — copied from GovernorConfig each poll
 }
 
 // UserStat is per-user connection summary.
@@ -163,32 +162,38 @@ type Governor struct {
 	historyMu      sync.Mutex
 
 	// performance_schema CPU / query tracking
-	perfSchemaOK  bool                       // set once by probePerfSchema at startup
-	perfHasCPU    bool                       // true on MySQL 8+; false on MariaDB (no SUM_CPU_TIME)
-	perfCPUActive bool                       // true once we see at least one non-zero SUM_CPU_TIME delta
-	perfRetryAt   time.Time                  // next time to re-probe when perfSchemaOK is false
-	lastPerfRaw   map[string]perfRawRow      // cumulative counters from last poll
-	perfDeltas    []UserPerfDelta            // most recent per-poll deltas
+	perfSchemaOK  bool                  // set once by probePerfSchema at startup
+	perfHasCPU    bool                  // true on MySQL 8+; false on MariaDB (no SUM_CPU_TIME)
+	perfCPUActive bool                  // true once we see at least one non-zero SUM_CPU_TIME delta
+	perfRetryAt   time.Time             // next time to re-probe when perfSchemaOK is false
+	lastPerfRaw   map[string]perfRawRow // cumulative counters from last poll
+	perfDeltas    []UserPerfDelta       // most recent per-poll deltas
 	perfDeltaMu   sync.RWMutex
 
 	// MariaDB userstat — information_schema.USER_STATISTICS
 	// Provides real CPU_TIME on MariaDB where SUM_CPU_TIME is absent.
 	// userstatsOff=true means MariaDB was detected but userstat=OFF (show hint).
-	userstatsOK      bool
-	userstatsOff     bool
-	lastUserstatRaw  map[string]userstatRawRow
+	userstatsOK     bool
+	userstatsOff    bool
+	lastUserstatRaw map[string]userstatRawRow
 
 	// Per-user connection-limit enforcement state.
 	// alterUserLimits tracks which users have an active ALTER USER cap
 	// so we can avoid redundant ALTER calls and can reverse on recovery.
+	// This map is the in-memory mirror of what we have written to mysql.user.
+	// On startup, auditAlterUserOnStartup() reconciles it against the real DB.
 	alterUserLimits map[string]int
 	alterUserMu     sync.Mutex
+
+	// lastAlterAudit tracks when cleanupStaleAlterCaps last ran its periodic
+	// sweep so poll() can gate it to every alterAuditInterval (15 minutes).
+	// Zero value means "never run" — will fire on the first eligible tick.
+	lastAlterAudit time.Time
 
 	// connNotifyLast rate-limits CONN_LIMIT notify events (one per user per
 	// connNotifyCooldown) so a persistently-over-limit user doesn't flood the log.
 	connNotifyLast map[string]time.Time
 	connNotifyMu   sync.Mutex
-
 }
 
 type killEntry struct {
@@ -257,8 +262,14 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 	if err := g.detectFlavor(); err != nil {
 		logging.LogfMYSQLGOVERNOR("[mysql/governor] flavor detect failed: %v", err)
 	}
+
 	ctx := context.Background()
 	g.probePerfSchema(ctx)
+
+	// Clean up any ALTER USER caps left behind by a previous cfm run.
+	// Runs before the poll loop starts so we never enforce with stale state.
+	g.auditAlterUserOnStartup(ctx)
+
 	return g, nil
 }
 
@@ -288,9 +299,11 @@ func (g *Governor) poll(ctx context.Context) {
 	maxConn := g.cachedMaxConn(ctx)
 	state := g.buildState(procs, maxConn)
 
-	// Evaluate rules and act
+	// Evaluate per-query rules and act.
 	kills := g.evaluate(ctx, state, procs)
-	connKills := g.enforceConnRules(ctx, state, procs)   // ← NEW
+
+	// Evaluate per-user connection-limit rules (independent pass).
+	connKills := g.enforceConnRules(ctx, state, procs)
 	kills = append(kills, connKills...)
 
 	if len(kills) > 0 {
@@ -298,7 +311,13 @@ func (g *Governor) poll(ctx context.Context) {
 	}
 	state.RecentKills = g.recentKills()
 
-
+	// Periodic sweep: reverse ALTER USER caps for users that have dropped under
+	// their limit or vanished from the processlist entirely (site offline, account
+	// suspended). Cheap SQL — no need to run on every 5s poll tick.
+	if time.Since(g.lastAlterAudit) > alterAuditInterval {
+		g.lastAlterAudit = time.Now()
+		g.cleanupStaleAlterCaps(ctx, state)
+	}
 
 	// performance_schema CPU / query deltas (nil if perf_schema unavailable)
 	state.PerfDeltas = g.fetchPerfDeltas(ctx)
@@ -436,10 +455,11 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 
 		if action == ActionNotify {
 			notify.Enqueue(notify.Event{
-				Kind:     "MYSQL/GOVERNOR",
-				Section:  "mysql_governor",
-				SrcIP:    "",
-				Reason:   fmt.Sprintf("long query user=%s db=%s time=%ds state=%s", p.User, p.DB, p.TimeSec, p.State),
+				Kind:    "MYSQL/GOVERNOR",
+				Section: "mysql_governor",
+				SrcIP:   "",
+				Reason: fmt.Sprintf("long query user=%s db=%s time=%ds state=%s",
+					p.User, p.DB, p.TimeSec, p.State),
 				Severity: "warn",
 				Samples:  []string{truncate(p.Info, 200)},
 			})
@@ -448,7 +468,8 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 
 		// Kill actions — check rate limits first
 		if !g.killAllowed(p.DB) {
-			logging.LogfMYSQLGOVERNOR("[mysql/governor] kill rate limited: user=%s db=%s pid=%d", p.User, p.DB, p.ID)
+			logging.LogfMYSQLGOVERNOR("[mysql/governor] kill rate limited: user=%s db=%s pid=%d",
+				p.User, p.DB, p.ID)
 			continue
 		}
 
@@ -494,7 +515,8 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 			Unblocked: unblocked,
 		}
 
-		logging.LogfMYSQLGOVERNOR("[mysql/governor] %s pid=%d user=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
+		logging.LogfMYSQLGOVERNOR(
+			"[mysql/governor] %s pid=%d user=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
 			kr.Action, kr.PID, kr.User, kr.DB, p.TimeSec, kr.Reason, kr.Unblocked, kr.Result)
 
 		notify.Enqueue(notify.Event{
@@ -551,7 +573,8 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 				Result:  result,
 			}
 			kills = append(kills, kr)
-			logging.LogfMYSQLGOVERNOR("[mysql/governor] sleep reap pid=%d user=%s db=%s idle=%ds result=%s",
+			logging.LogfMYSQLGOVERNOR(
+				"[mysql/governor] sleep reap pid=%d user=%s db=%s idle=%ds result=%s",
 				p.ID, p.User, p.DB, p.TimeSec, result)
 		}
 	}
@@ -684,7 +707,8 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 
 		top := ""
 		if len(state.PerUser) > 0 {
-			top = fmt.Sprintf("  top user: %s (%d conns)", state.PerUser[0].User, state.PerUser[0].Total)
+			top = fmt.Sprintf("  top user: %s (%d conns)",
+				state.PerUser[0].User, state.PerUser[0].Total)
 		}
 		notify.Enqueue(notify.Event{
 			Kind:    "MYSQL/CONN_PRESSURE",
@@ -799,28 +823,26 @@ func isExempt(user string, exempts []string) bool {
 	return false
 }
 
-
 func matchUser(pattern, user string) bool {
-    if pattern == "*" {
-        return true
-    }
-    // *suffix* — contains match
-    if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
-        inner := pattern[1 : len(pattern)-1]
-        return inner != "" && strings.Contains(user, inner)
-    }
-    // prefix* — user must start with prefix
-    if strings.HasSuffix(pattern, "*") {
-        return strings.HasPrefix(user, pattern[:len(pattern)-1])
-    }
-    // *suffix — user must end with suffix
-    if strings.HasPrefix(pattern, "*") {
-        return strings.HasSuffix(user, pattern[1:])
-    }
-    // exact match
-    return pattern == user
+	if pattern == "*" {
+		return true
+	}
+	// *contains* — substring match
+	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+		inner := pattern[1 : len(pattern)-1]
+		return inner != "" && strings.Contains(user, inner)
+	}
+	// prefix* — user must start with prefix
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(user, pattern[:len(pattern)-1])
+	}
+	// *suffix — user must end with suffix
+	if strings.HasPrefix(pattern, "*") {
+		return strings.HasSuffix(user, pattern[1:])
+	}
+	// exact match
+	return pattern == user
 }
-
 
 func actionName(a RuleAction) string {
 	switch a {
