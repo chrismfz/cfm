@@ -44,6 +44,11 @@ type GovernorConfig struct {
 	KillPerDBPerWindow int           // default 5
 	KillTotalPerWindow int           // default 20
 	KillWindow         time.Duration // default 10m
+
+	// Per-user connection-limit rules (CONN_RULES in detectors.conf).
+	// Evaluated on every poll tick; independent of QueryRules.
+	ConnRules []ConnRule
+
 }
 
 // RuleAction is the ordered severity of a rule outcome.
@@ -172,6 +177,18 @@ type Governor struct {
 	userstatsOK      bool
 	userstatsOff     bool
 	lastUserstatRaw  map[string]userstatRawRow
+
+	// Per-user connection-limit enforcement state.
+	// alterUserLimits tracks which users have an active ALTER USER cap
+	// so we can avoid redundant ALTER calls and can reverse on recovery.
+	alterUserLimits map[string]int
+	alterUserMu     sync.Mutex
+
+	// connNotifyLast rate-limits CONN_LIMIT notify events (one per user per
+	// connNotifyCooldown) so a persistently-over-limit user doesn't flood the log.
+	connNotifyLast map[string]time.Time
+	connNotifyMu   sync.Mutex
+
 }
 
 type killEntry struct {
@@ -273,10 +290,15 @@ func (g *Governor) poll(ctx context.Context) {
 
 	// Evaluate rules and act
 	kills := g.evaluate(ctx, state, procs)
+	connKills := g.enforceConnRules(ctx, state, procs)   // ← NEW
+	kills = append(kills, connKills...)
+
 	if len(kills) > 0 {
 		g.appendKills(kills)
 	}
 	state.RecentKills = g.recentKills()
+
+
 
 	// performance_schema CPU / query deltas (nil if perf_schema unavailable)
 	state.PerfDeltas = g.fetchPerfDeltas(ctx)
