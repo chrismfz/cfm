@@ -10,10 +10,8 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 	"strconv"
@@ -25,9 +23,6 @@ import (
 	agentpkg "cfm/internal/agent"
 	"cfm/internal/sysctl"
 	status "cfm/internal/status"
-	ipquery "cfm/internal/ipquery"
-	"cfm/internal/unblock"
-	"cfm/internal/reporting"
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
 
@@ -47,6 +42,8 @@ import (
 
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
+	"cfm/internal/cli"
+	"cfm/internal/unblock"
 )
 
 var (
@@ -60,10 +57,16 @@ var (
 
 
 func getBackend() firewall.Backend {
-	if _, ok := lookPath("nft"); ok {
+	if _, ok := cli.LookPath("nft"); ok {
 		return nft.New()
 	}
 	return nil
+}
+
+// cfgDir resolves the active config directory for one-shot CLI commands.
+func cfgDir() string {
+	d, _ := cli.ResolveConfigDir("")
+	return d
 }
 
 
@@ -105,7 +108,7 @@ func getBackend() firewall.Backend {
 func startDebug(addr string, gov *mysql.Governor) {
     // Resolve cfgDir once (so /unblock’s background job can edit cfm.deny)
     var cfgDir string
-    if d, ok := resolveConfigDir(""); ok {
+    if d, ok := cli.ResolveConfigDir(""); ok {
         cfgDir = d
     }
 
@@ -280,71 +283,6 @@ func requireRoot() {
 }
 
 
-//CUSTOM CONFIG CODE//
-// loadConfigWithAPIOverride parses cfm.conf, then (if present) parses cfm.api.conf
-// and overwrites only API fields when set.  If cfm.api.conf exists, it ensures
-// safe permissions (0600) since it may contain credentials.
-func loadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config, error) {
-    cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(baseBytes))
-    if err != nil {
-        return nil, err
-    }
-
-    if cfgDir == "" {
-        return cfg, nil
-    }
-
-    apiPath := filepath.Clean(filepath.Join(cfgDir, "cfm.api.conf"))
-
-    info, err := os.Stat(apiPath)
-    if err != nil {
-        // file missing or unreadable → return base config
-        return cfg, nil
-    }
-
-    // tighten permissions if too open (group/other readable)
-    if info.Mode().Perm()&0o077 != 0 {
-        if chErr := os.Chmod(apiPath, 0o600); chErr != nil {
-            fmt.Fprintf(os.Stderr, "warning: could not chmod 600 %s: %v\n", apiPath, chErr)
-        }
-    }
-
-    b, err := os.ReadFile(apiPath)
-    if err != nil || len(b) == 0 {
-        return cfg, nil
-    }
-
-    if api, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil {
-        // Only override API fields when present in the override file.
-        if s := strings.TrimSpace(api.API.URL); s != "" {
-            cfg.API.URL = s
-        }
-        if s := strings.TrimSpace(api.API.AuthToken); s != "" {
-            cfg.API.AuthToken = s
-        }
-
-        // Merge boolean flags (allow enabling but not forcing off)
-        if api.API.AutoBlockSend {
-            cfg.API.AutoBlockSend = true
-        }
-        if api.API.ManualBlockSend {
-            cfg.API.ManualBlockSend = true
-        }
-        if api.API.UnblockSend {
-            cfg.API.UnblockSend = true
-        }
-        if api.API.DetectorsSend {
-            cfg.API.DetectorsSend = true
-        }
-    }
-
-    return cfg, nil
-}
-
-
-
-
-
 
 func main() {
     requireRoot()
@@ -366,31 +304,31 @@ func main() {
 	case "-v", "--version", "version":
 		fmt.Printf("cfm v%s (built %s)\n", Version, BuildTime)
 	case "test":
-		runTest()
+		cli.RunTest()
 	case "block":
-		runBlock(os.Args[2:])
+		os.Exit(cli.RunBlock(os.Args[2:], getBackend(), cfgDir()))
 	case "unblock":
-		runUnblock(os.Args[2:])
+		os.Exit(cli.RunUnblock(os.Args[2:], getBackend(), cfgDir()))
 	case "list":
-		runList(os.Args[2:])
+		os.Exit(cli.RunList(os.Args[2:], getBackend()))
 	case "allow":
-		runAllow(os.Args[2:])
+		os.Exit(cli.RunAllow(os.Args[2:], getBackend(), cfgDir()))
 	case "unallow":
-		runUnallow(os.Args[2:])
+		os.Exit(cli.RunUnallow(os.Args[2:], getBackend(), cfgDir()))
 	case "allow-list":
-		runAllowList(os.Args[2:])
+		os.Exit(cli.RunAllowList(os.Args[2:], getBackend()))
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "flush":
-		runFlush(os.Args[2:])
+		os.Exit(cli.RunFlush(os.Args[2:], getBackend()))
 	case "which", "search":
-		runWhich(os.Args[2:])
+		os.Exit(cli.RunWhich(os.Args[2:], getBackend(), cfgDir()))
 	case "status":
 		status.Run(os.Args[1:])
 	case "reset":
-		runReset(os.Args[2:])
+		os.Exit(cli.RunReset(os.Args[2:], getBackend()))
 	case "disable":
-		runDisable(os.Args[2:])
+		os.Exit(cli.RunDisable(os.Args[2:], getBackend()))
 
 case "ssl", "sslcollector", "ssl-collector":
     sslcollector.RunCLI(os.Args[2:])
@@ -474,440 +412,6 @@ Description:
 }
 
 // ----------------------------------------------------------------------------
-// test / env detection
-// ----------------------------------------------------------------------------
-
-func runTest() {
-	fmt.Println("== cfm test ==")
-	type check struct{ name string; fn func() (string, bool) }
-	checks := []check{
-		{"nft (binary)", func() (string, bool) { return hasBinary("nft") }},
-		{"iptables (binary)", func() (string, bool) { return hasBinary("iptables") }},
-		{"ip6tables (binary)", func() (string, bool) { return hasBinary("ip6tables") }},
-		{"ipset (binary)", func() (string, bool) { return hasBinary("ipset") }},
-		{"kernel module: nf_tables", func() (string, bool) { return hasModule("nf_tables") }},
-		{"kernel module: ip_tables", func() (string, bool) { return hasModule("ip_tables") }},
-		{"kernel module: xt_owner", func() (string, bool) { return hasModule("xt_owner") }},
-	}
-	for _, c := range checks {
-		msg, ok := c.fn(); status := "OK"
-		if !ok { status = "MISSING" }
-		fmt.Printf(" - %-28s : %-7s %s\n", c.name, status, msg)
-	}
-	fmt.Printf("\nDetected backend preference: %s\n", detectBackend())
-}
-
-func detectBackend() string {
-	if _, ok := lookPath("nft"); ok { return "nftables" }
-	if _, ok := lookPath("iptables"); ok { return "iptables" }
-	return "none"
-}
-
-// ----------------------------------------------------------------------------
-// block / allow commands
-// ----------------------------------------------------------------------------
-
-func runBlock(args []string) {
-    fs := flag.NewFlagSet("block", flag.ExitOnError)
-    // reason done
-    reasonFlag := fs.String("r", "", "reason/comment")
-    ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
-    flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true, "-r": true})
-    _ = fs.Parse(flagArgs)
-
-    // IP
-    if len(posArgs) == 0 && len(fs.Args()) > 0 {
-        posArgs = append(posArgs, fs.Args()[0])
-        if len(fs.Args()) > 1 { posArgs = append(posArgs, fs.Args()[1:]...) }
-    }
-    if len(posArgs) == 0 {
-        fmt.Fprintln(os.Stderr, "usage: cfm block <IP|CIDR> [-r REASON] [--ttl 1h] | cfm block <IP|CIDR> <REASON...>")
-        os.Exit(2)
-    }
-
-    target := strings.TrimSpace(posArgs[0])
-    ip := net.ParseIP(target)
-    var isCIDR bool
-    var cidrNet string
-    if ip == nil {
-        if strings.ContainsRune(target, '/') {
-            if _, nw, err := net.ParseCIDR(target); err == nil {
-                // canonicalize: use network IP/mask
-                nw.IP = nw.IP.Mask(nw.Mask)
-                cidrNet = nw.String()
-                isCIDR = true
-            } else {
-                fmt.Fprintln(os.Stderr, "invalid CIDR")
-                os.Exit(2)
-            }
-        } else {
-            fmt.Fprintln(os.Stderr, "invalid IP")
-            os.Exit(2)
-        }
-    }
-
-    // Reason: είτε από -r, είτε από τα υπόλοιπα positionals
-    rsn := strings.TrimSpace(*reasonFlag)
-    if rsn == "" && len(posArgs) > 1 {
-        rsn = strings.TrimSpace(strings.Join(posArgs[1:], " "))
-    }
-    if rsn == "" { rsn = "manual block" }
-
-    // TTL
-    var dur *time.Duration
-    if *ttlFlag != "" {
-        if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 {
-            dur = &d
-        } else {
-            fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)")
-            os.Exit(2)
-        }
-    }
-
-    // Firewall apply
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    // Fast path: table is already there in normal operation
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil {
-            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-            os.Exit(1)
-        }
-    }
-    if isCIDR {
-        if err := be.AddBlockNet(cidrNet, dur); err != nil {
-            fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1)
-        }
-    } else {
-        if err := be.AddBlock(ip, rsn, dur); err != nil {
-            fmt.Fprintln(os.Stderr, "block error:", err); os.Exit(1)
-        }
-    }
-
-    // cfm.deny (μόνο σε permanent)
-    if cfgDir, ok := resolveConfigDir(""); ok {
-        if dur == nil || (dur != nil && *dur <= 0) {
-            // Γράφουμε σχόλιο μετά το IP — οι helpers σου αγνοούν ό,τι είναι μετά από κενό/# όταν κάνουν remove/search
-            var line string
-            if isCIDR { line = cidrNet } else { line = ip.String() }
-            if rsn != "" { line += "  # " + rsn }
-            if err := appendUniqueLine(cfgDir, "cfm.deny", line); err != nil {
-                fmt.Fprintln(os.Stderr, "warn: could not update cfm.deny:", err)
-            }
-        }
-    }
-
-    // API report
-    if cfgDir, ok := resolveConfigDir(""); ok {
-        cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
-	if b, err := os.ReadFile(cfgPath); err == nil {
-            //if cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b)); err == nil && cfg.API.ManualBlockSend {
-		//use new custom conf if exists
-		if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil && cfg.API.ManualBlockSend {
-                if cfg.API.URL != "" && cfg.API.AuthToken != "" {
-                    api := &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
-                    // Στέλνουμε comment = reason, description = reason
-                    // derive mode/ttl from --ttl
-                    mode, ttlSec := "permanent", 0
-                    if dur != nil && *dur > 0 {
-                        mode, ttlSec = "ttl", int(dur.Seconds())
-                    }
-               // Προσοχή: αν το API δεν δέχεται CIDR, στείλ’ το μόνο για host IP.
-                    if !isCIDR {
-                        if err := api.ReportBlock(ip.String(), rsn, "manual-cli", mode, ttlSec); err != nil {
-                            fmt.Printf("✔ blocked %s (API report failed: %v)\n", target, err)
-                            return
-                        }
-                        fmt.Printf("✔ blocked %s (also sent to API)\n", target)
-                        return
-                    }
-                    // CIDR: skip API report για να μη σπάσει
-                    fmt.Printf("✔ blocked %s (API report skipped for CIDR)\n", cidrNet)
-                    return
-
-                }
-            }
-        }
-    }
-
-    if isCIDR {
-        fmt.Printf("✔ blocked %s\n", cidrNet)
-    } else {
-        fmt.Printf("✔ blocked %s\n", ip.String())
-    }
-
-}
-
-
-//global unblock//
-func runUnblock(args []string) {
-    if len(args) < 1 {
-        fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>")
-        os.Exit(2)
-    }
-    ip := net.ParseIP(args[0])
-    if ip == nil {
-        fmt.Fprintln(os.Stderr, "invalid IP")
-        os.Exit(2)
-    }
-
-    be := getBackend()
-    if be == nil {
-        fmt.Fprintln(os.Stderr, "no firewall backend available")
-        os.Exit(1)
-    }
-
-    // Only ensure on a truly fresh box; otherwise skip the expensive bootstrapping.
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil {
-            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-            os.Exit(1)
-        }
-    }
-
-    cfgDir, _ := resolveConfigDir("")
-
-
-
-    var reporter reporting.Reporter
-    var sendAPI bool
-    if cfgDir != "" {
-        cfgPath := filepath.Clean(filepath.Join(cfgDir, "cfm.conf"))
-	if b, err := os.ReadFile(cfgPath); err == nil {
-            if cfg, err := loadConfigWithAPIOverride(cfgDir, b); err == nil &&
-                cfg.API.UnblockSend &&
-                cfg.API.URL != "" &&
-                cfg.API.AuthToken != "" {
-                reporter = &agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken}
-                sendAPI = true
-            }
-        }
-    }
-
-    ttl := 1 * time.Hour
-    res, err := unblock.Do(context.Background(), ip, unblock.Options{
-        BE:            be,
-        ConfigDir:     cfgDir,
-        TempWhitelist: true,
-        AllowTTL:      &ttl,
-        Reporter:      reporter,
-        ReportWhy:     "cli",
-        SendAPI:       sendAPI,
-    })
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "unblock error:", err)
-        os.Exit(1)
-    }
-
-    // --- εκτύπωση report ---
-    suffix := ipquery.EnrichSuffix(cfgDir, ip.String())
-    fmt.Printf("Unblock report for %s%s\n", ip, suffix)
-    for _, s := range res.Steps {
-        feeds := ""
-        if len(s.Feeds) > 0 {
-            feeds = " [feeds: " + strings.Join(s.Feeds, ",") + "]"
-        }
-        extra := s.Detail
-        if s.Err != "" {
-            extra = "ERR: " + s.Err + " " + extra
-        }
-        dur := ""
-        if s.Dur > 0 {
-            dur = fmt.Sprintf(" (%.2fs)", s.Dur.Seconds())
-        }
-        fmt.Printf(" - %-9s via %-10s %s%s%s\n",
-            s.Action, s.Source, strings.TrimSpace(extra), feeds, dur)
-
-    }
-    if res.Whitelisted {
-        fmt.Println("✔ applied local whitelist override (due to feeds)")
-    }
-}
-
-
-
-
-
-
-func runAllow(args []string) {
-	fs := flag.NewFlagSet("allow", flag.ExitOnError)
-	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
-	flagArgs, posArgs := splitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
-	_ = fs.Parse(flagArgs)
-	// Πάρε το 1ο positional (ή από fs.Args() αν δεν πέρασαν με flag-split)
-	target := ""
-	if len(posArgs) > 0 {
-		target = strings.TrimSpace(posArgs[0])
-	}
-	if target == "" {
-		rem := fs.Args()
-		if len(rem) > 0 {
-			target = strings.TrimSpace(rem[0])
-		}
-	}
-	if target == "" {
-		fmt.Fprintln(os.Stderr, "usage: cfm allow <IP|CIDR> [--ttl 1h]")
-		os.Exit(2)
-	}
-	// IP ή CIDR;
-	var (
-		ip      = net.ParseIP(target)
-		isCIDR  bool
-		cidrNet string
-	)
-	if ip == nil {
-		if strings.ContainsRune(target, '/') {
-			if _, nw, err := net.ParseCIDR(target); err == nil {
-				nw.IP = nw.IP.Mask(nw.Mask) // canonicalize
-				cidrNet = nw.String()
-				isCIDR  = true
-			} else {
-				fmt.Fprintln(os.Stderr, "invalid CIDR")
-				os.Exit(2)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "invalid IP")
-			os.Exit(2)
-		}
-	}
-	// TTL
-	var dur *time.Duration
-	if *ttlFlag != "" {
-		if d, err := time.ParseDuration(*ttlFlag); err == nil && d > 0 {
-			dur = &d
-		} else {
-			fmt.Fprintln(os.Stderr, "invalid --ttl (examples: 90s, 5m, 1h)")
-			os.Exit(2)
-		}
-	}
-	// Firewall apply
-
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    // Fast path: table is already there in normal operation
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil {
-            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-            os.Exit(1)
-        }
-    }
-
-	if isCIDR {
-		if err := be.AddAllowNet(cidrNet, dur); err != nil {
-			fmt.Fprintln(os.Stderr, "allow error:", err)
-			os.Exit(1)
-		}
-	} else {
-		if err := be.AddAllow(ip, dur); err != nil {
-			fmt.Fprintln(os.Stderr, "allow error:", err)
-			os.Exit(1)
-		}
-	}
-	// cfm.allow — μόνο για permanent (να μην αποθηκεύουμε TTL που θα λήξουν)
-
-    if cfgDir, ok := resolveConfigDir(""); ok {
-        if dur == nil || (dur != nil && *dur <= 0) {
-            var line string
-            if isCIDR {
-                line = cidrNet // canonical μορφή στο αρχείο
-            } else {
-                line = ip.String()
-            }
-			if err := appendUniqueLine(cfgDir, "cfm.allow", line); err != nil {
-				fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err)
-			}
-		}
-	}
-	if isCIDR {
-		fmt.Printf("✔ allowed %s\n", cidrNet)
-	} else {
-		fmt.Printf("✔ allowed %s\n", ip.String())
-	}
-}
-
-
-
-
-func runUnallow(args []string) {
-    if len(args) < 1 {
-        fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP|CIDR>")
-        os.Exit(2)
-    }
-    raw := strings.TrimSpace(args[0])
-
-    // Κανονικοποίηση IP/CIDR (χρησιμοποιεί τη normalizeTarget που ήδη έχεις)
-    isCIDR, ipStr, cidrStr, err := normalizeTarget(raw)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "invalid IP/CIDR")
-        os.Exit(2)
-    }
-
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-    // Fast path: table is already there in normal operation
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil {
-            fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
-            os.Exit(1)
-        }
-    }
-
-    if isCIDR {
-        if err := be.RemoveAllowNet(cidrStr); err != nil {
-            fmt.Fprintln(os.Stderr, "unallow error:", err)
-            os.Exit(1)
-        }
-    } else {
-        if err := be.RemoveAllow(net.ParseIP(ipStr)); err != nil {
-            fmt.Fprintln(os.Stderr, "unallow error:", err)
-            os.Exit(1)
-        }
-    }
-
-    // Καθάρισε από το cfm.allow (exact first-token match, canonicalized)
-    if cfgDir, ok := resolveConfigDir(""); ok {
-        if err := removeIPFromFile(cfgDir, "cfm.allow", raw); err != nil {
-            // optional προειδοποίηση, δεν είναι fatal
-            fmt.Fprintln(os.Stderr, "warn: could not update cfm.allow:", err)
-        }
-    }
-
-    if isCIDR {
-        fmt.Printf("✔ unallowed %s\n", cidrStr)
-    } else {
-        fmt.Printf("✔ unallowed %s\n", ipStr)
-    }
-}
-
-
-
-
-func runAllowList(args []string) {
-	fs := flag.NewFlagSet("allow-list", flag.ExitOnError)
-	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-
-    // read-only; only bootstrap when table is missing
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-    }
-	entries, err := be.ListAllows(); if err != nil { fmt.Fprintln(os.Stderr, "list error:", err); os.Exit(1) }
-	if *asJSON {
-		type out struct{ IP string `json:"ip"`; Expires *time.Time `json:"expires,omitempty"` }
-		data := make([]out, 0, len(entries))
-		for _, e := range entries { data = append(data, out{IP: e.IP.String(), Expires: e.Expires}) }
-		b, _ := json.MarshalIndent(data, "", "  "); fmt.Println(string(b)); return
-	}
-	if len(entries) == 0 { fmt.Println("(no allowed IPs)"); return }
-	sort.Slice(entries, func(i, j int) bool { return entries[i].IP.String() < entries[j].IP.String() })
-	fmt.Printf("%-40s %-20s\n", "IP", "Expires")
-	for _, e := range entries { exp := "-"; if e.Expires != nil { exp = e.Expires.Format(time.RFC3339) }; fmt.Printf("%-40s %-20s\n", e.IP.String(), exp) }
-}
-
-
-
-
-
-
-// ----------------------------------------------------------------------------
 // Daemon
 // ----------------------------------------------------------------------------
 
@@ -931,9 +435,9 @@ step := func(name string) func() {
 	cfgFlag := fs.String("c", "", "config directory (contains cfm.allow / cfm.deny)")
 	_ = fs.Parse(args)
 
-	cfgDir, _ := resolveConfigDir(*cfgFlag)
+	cfgDir, _ := cli.ResolveConfigDir(*cfgFlag)
 	if cfgDir != "" {
-		writeConfigState(cfgDir)
+		cli.WriteConfigState(cfgDir)
 		logging.Logf("CFM Starting")
 		logging.Logf("→ using config dir: %s", cfgDir)
 	} else {
@@ -1359,7 +863,7 @@ for _, d := range []struct{ path string; mode os.FileMode }{
 		if !ok {
 			return
 		}
-		cfg, err := loadConfigWithAPIOverride(cfgDir, b)
+		cfg, err := cli.LoadConfigWithAPIOverride(cfgDir, b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
 			return
@@ -1421,132 +925,7 @@ for _, d := range []struct{ path string; mode os.FileMode }{
 	}
 }
 
-
-// ----------------------------------------------------------------------------
-// helpers shared by commands
-// ----------------------------------------------------------------------------
-
-
-
-
-func hasBinary(name string) (string, bool) { if p, ok := lookPath(name); ok { return p, true }; return "not found in PATH", false }
-func lookPath(name string) (string, bool) { p, err := exec.LookPath(name); return p, err == nil }
-
-func hasModule(mod string) (string, bool) {
-	if f, err := os.Open("/proc/modules"); err == nil {
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() { line := sc.Text(); if strings.HasPrefix(line, mod+" ") { return "present in /proc/modules", true } }
-	}
-	if _, err := exec.LookPath("modprobe"); err == nil {
-		out, _ := exec.Command("modprobe", "-n", "-v", mod).CombinedOutput()
-		txt := strings.TrimSpace(string(out))
-		if txt != "" { return "modprobe reports: " + short(txt, 120), true }
-	}
-	return "not loaded (and modprobe check inconclusive)", false
-}
-
-func short(s string, n int) string { if len(s) <= n { return s }; return s[:n] + "..." }
-
-// list blocked --------------------------------------------------------------
-
-func runList(args []string) {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-
-    // read-only; only bootstrap when table is missing
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-    }
-
-	entries, err := be.ListBlocks(); if err != nil { fmt.Fprintln(os.Stderr, "list error:", err); os.Exit(1) }
-	if *asJSON {
-		type out struct{ IP string `json:"ip"`; Expires *time.Time `json:"expires,omitempty"`; Comment string `json:"comment,omitempty"` }
-		data := make([]out, 0, len(entries))
-		for _, e := range entries { data = append(data, out{IP: e.IP.String(), Expires: e.Expires, Comment: e.Comment}) }
-		b, _ := json.MarshalIndent(data, "", "  "); fmt.Println(string(b)); return
-	}
-	if len(entries) == 0 { fmt.Println("(no blocked IPs)"); return }
-	sort.Slice(entries, func(i, j int) bool { return entries[i].IP.String() < entries[j].IP.String() })
-	fmt.Printf("%-40s %-20s %s\n", "IP", "Expires", "Comment")
-	for _, e := range entries { exp := "-"; if e.Expires != nil { exp = e.Expires.Format(time.RFC3339) }; fmt.Printf("%-40s %-20s %s\n", e.IP.String(), exp, e.Comment) }
-}
-
-// flush --------------------------------------------------------------------
-
-func runFlush(args []string) {
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-
-    // mutate existing sets; only ensure when table is missing
-    if !nft.TableExistsCFM() {
-        if err := be.EnsureBase(); err != nil { fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1) }
-    }
-        sets := []string{"block_v4", "block_v6"}
-        for _, setName := range sets {
-                out, err := exec.Command("nft", "-n", "flush", "set", "inet", "cfm", setName).CombinedOutput()
-
-		if err != nil { fmt.Fprintf(os.Stderr, "flush error: %s: %v\n", string(out), err); os.Exit(1) }
-	}
-	fmt.Println("✔ flushed all blocked/allowed IPs")
-}
-
-// flags/positionals ---------------------------------------------------------
-
-func splitFlagsAndPositionals(args []string, valueFlags map[string]bool) (flagArgs []string, posArgs []string) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "-") {
-			name := a
-			if idx := strings.Index(a, "="); idx != -1 { flagArgs = append(flagArgs, a); continue }
-			flagArgs = append(flagArgs, a)
-			if valueFlags[name] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") { flagArgs = append(flagArgs, args[i+1]); i++ }
-			continue
-		}
-		posArgs = append(posArgs, a)
-	}
-	return
-}
-
 // --- config helpers --------------------------------------------------------
-
-const cfmStatePath = "/run/cfm/config.path" // daemon writes here the active config dir
-
-func writeConfigState(dir string) { _ = os.MkdirAll(filepath.Dir(cfmStatePath), 0750); _ = os.WriteFile(cfmStatePath, []byte(dir), 0600) }
-
-func readConfigState() (string, bool) {
-	b, err := os.ReadFile(cfmStatePath); if err != nil { return "", false }
-	s := strings.TrimSpace(string(b)); if s == "" { return "", false }
-	return s, true
-}
-
-func resolveConfigDir(explicit string) (string, bool) {
-	if explicit != "" { if dirExists(explicit) { return explicit, true }; return "", false }
-	if env := strings.TrimSpace(os.Getenv("CFM_CONFIG_DIR")); env != "" { if dirExists(env) { return env, true } }
-	if s, ok := readConfigState(); ok && dirExists(s) { return s, true }
-	if dirExists("/etc/cfm") { return "/etc/cfm", true }
-	if d, ok := nearestConfigsDir(); ok { return d, true }
-	return "", false
-}
-
-func dirExists(p string) bool { fi, err := os.Stat(p); return err == nil && fi.IsDir() }
-
-// finds the nearest ancestor containing a "configs" dir (handy in dev repo)
-func nearestConfigsDir() (string, bool) {
-	cwd, err := os.Getwd(); if err != nil { return "", false }
-	d := cwd
-	for {
-		cand := filepath.Join(d, "configs")
-		if dirExists(cand) { return cand, true }
-		parent := filepath.Dir(d)
-		if parent == d { break }
-		d = parent
-	}
-	return "", false
-}
-
-func ensureDir(p string) error { return os.MkdirAll(p, 0750) }
 
 // Resolve SMTP allow-list owners (usernames/groups) into numeric IDs in-place.
 func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
@@ -1582,46 +961,6 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 	cfg.SMTPBlock.AllowGIDs = cfg.SMTPBlock.AllowGIDs[:0]
 	for id := range seenGID { cfg.SMTPBlock.AllowGIDs = append(cfg.SMTPBlock.AllowGIDs, id) }
 }
-
-func appendUniqueLine(dir, base, line string) error {
-        if err := ensureDir(dir); err != nil { return err }
-        fp := filepath.Clean(filepath.Join(dir, base))
-	if b, err := os.ReadFile(fp); err == nil {
-		sc := bufio.NewScanner(bytes.NewReader(b))
-		for sc.Scan() { if strings.TrimSpace(sc.Text()) == strings.TrimSpace(line) { return nil } }
-	}
-        // #nosec G304 - fp is a constant filename under a trusted dir
-        f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); if err != nil { return err }
-	defer f.Close()
-	_, err = fmt.Fprintln(f, line)
-	return err
-}
-
-
- func removeIPFromFile(dir, filename, target string) error {
-     isCIDR, ipStr, cidrStr, err := normalizeTarget(target)
-     if err != nil { return err }
-     want := ipStr
-     if isCIDR { want = cidrStr }
-
-     path := filepath.Clean(filepath.Join(dir, filename))
-     b, err := os.ReadFile(path) // #nosec G304 - constant filename under trusted dir
-     var out []string
-     sc := bufio.NewScanner(bytes.NewReader(b))
-     for sc.Scan() {
-         raw := sc.Text()
-         line := strings.TrimSpace(raw)
-         if line == "" || strings.HasPrefix(line, "#") { out = append(out, raw); continue }
-         head := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-         fields := strings.Fields(head); if len(fields) == 0 { out = append(out, raw); continue }
-         // drop exact IP or canonical CIDR
-         if fields[0] == want { continue }
-         out = append(out, raw)
-     }
-     // keep ending newline
-     return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0600)
- }
-
 
 // entries parsing -----------------------------------------------------------
 
@@ -1677,224 +1016,4 @@ func readEntriesFromFile(path string) ([]fileEntry, error) {
 func durationFromEntryNow(e fileEntry, now time.Time) *time.Duration {
 	if e.Until != nil { rem := e.Until.Sub(now); if rem > 0 { return &rem }; return nil }
 	return e.TTL
-}
-
-
-// ----------------------------------------------------------------------------
-// which command (read-only query)
-// ----------------------------------------------------------------------------
-func runWhich(args []string) {
-    fs := flag.NewFlagSet("which", flag.ExitOnError)
-    asJSON := fs.Bool("json", false, "output JSON")
-    _ = fs.Parse(args)
-    if fs.NArg() < 1 {
-        fmt.Fprintln(os.Stderr, "usage: cfm which <IP> [--json]")
-        os.Exit(2)
-    }
-
-    arg := fs.Arg(0)
-    be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
- // read-only: only ensure on a fresh box
- if !nft.TableExistsCFM() {
-     if err := be.EnsureBase(); err != nil {
-         fmt.Fprintln(os.Stderr, "EnsureBase error:", err); os.Exit(1)
-     }
- }
-    hitsFast, err := fastWhich(be, arg)
-    if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
-
-
-    cfgDir, _ := resolveConfigDir("")
-    suffix := ipquery.EnrichSuffix(cfgDir, arg)
-
-    if *asJSON {
-        b, _ := json.MarshalIndent(hitsFast, "", "  ")
-        fmt.Println(string(b))
-        return
-    }
-    if len(hitsFast) == 0 {
-        fmt.Println("(no matches)")
-        return
-    }
-    fmt.Printf("Matches for %s%s:\n", arg, suffix)
-
-    for _, h := range hitsFast {
-        feed := ""
-        if h.Feed != "" { feed = fmt.Sprintf(" (feed: %s)", h.Feed) }
-        fmt.Printf(" - %s via %s %s in set %s%s\n", h.Action, h.Via, h.Match, h.Set, feed)
-    }
-
-}
-
-
-
-// reset/disable -------------------------------------------------------------
-
-func runReset(args []string) {
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if nb, ok := be.(*nft.Backend); ok { if err := nb.ResetTable(); err != nil { fmt.Fprintln(os.Stderr, "reset error:", err); os.Exit(1) }; fmt.Println("✔ reset: flushed table inet cfm (rules & sets emptied)"); return }
-	fmt.Fprintln(os.Stderr, "reset: unsupported backend"); os.Exit(1)
-}
-
-func runDisable(args []string) {
-	be := getBackend(); if be == nil { fmt.Fprintln(os.Stderr, "no firewall backend available"); os.Exit(1) }
-	if nb, ok := be.(*nft.Backend); ok { if err := nb.DropEverything(); err != nil { fmt.Fprintln(os.Stderr, "disable error:", err); os.Exit(1) }; fmt.Println("✔ disable: deleted table inet cfm (firewall off)"); return }
-	fmt.Fprintln(os.Stderr, "disable: unsupported backend"); os.Exit(1)
-}
-
-
-// normalizeTarget canonicalizes an input target to either an IP string or a CIDR string.
-// Returns: isCIDR, ipStr, cidrStr, error
-func normalizeTarget(s string) (bool, string, string, error) {
-    s = strings.TrimSpace(s)
-    if s == "" {
-        return false, "", "", fmt.Errorf("empty target")
-    }
-    if ip := net.ParseIP(s); ip != nil {
-        return false, ip.String(), "", nil
-    }
-    if strings.ContainsRune(s, '/') {
-        if _, nw, err := net.ParseCIDR(s); err == nil {
-            nw.IP = nw.IP.Mask(nw.Mask)
-            return true, "", nw.String(), nil
-        }
-        return false, "", "", fmt.Errorf("invalid CIDR")
-    }
-    return false, "", "", fmt.Errorf("invalid IP or CIDR")
-}
-
-
-
-
-// listSetNamesByPrefixes returns set names that start with any of the given prefixes,
-// using a single 'nft -t list table inet cfm' (no elements printed).
-func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
-	out, err := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
-	if err != nil { return nil, fmt.Errorf("nft list table: %v: %s", err, string(out)) }
-
-	var names []string
-	pfx := make([]string, 0, len(prefixes))
-	for _, p := range prefixes {
-		p = strings.TrimSpace(p)
-		if p != "" { pfx = append(pfx, p) }
-	}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if !strings.HasPrefix(line, "set ") { continue }
-		fields := strings.Fields(line)
-		if len(fields) < 2 { continue }
-		name := fields[1]
-		for _, p := range pfx {
-			if strings.HasPrefix(name, p) { names = append(names, name); break }
-		}
-	}
-	return names, nil
-}
-
-
-// fastWhich returns hits by probing membership (no full dumps).
-type whichHit struct {
-	Action string // "ALLOW"/"BLOCK"
-	Via    string // "manual"/"feed"
-	Set    string // set name
-	Match  string // exact ip or cidr
-	Feed   string // optional feed key, if set name encodes it
-}
-
-func fastWhich(be firewall.Backend, ipStr string) ([]whichHit, error) {
-	nb, ok := be.(*nft.Backend)
-	if !ok {
-		return nil, fmt.Errorf("nft backend required")
-	}
-
-	var hits []whichHit
-
-	// -------- manual sets (hosts + nets) --------
-	manualHostSets := []string{"allow_v4", "block_v4", "allow_v6", "block_v6"}
-	manualNetSets  := []string{"allow_v4_nets", "block_v4_nets", "allow_v6_nets", "block_v6_nets"}
-
-	// hosts membership (if arg is an IP)
-	if ip := net.ParseIP(ipStr); ip != nil {
-		ipNorm := ip.String()
-		for _, s := range manualHostSets {
-			ok, _ := nb.HasElem(s, ipNorm)
-			if ok {
-				act := "ALLOW"
-				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
-				hits = append(hits, whichHit{Action: act, Via: "manual", Set: s, Match: ipNorm})
-			}
-		}
-	}
-
-	// nets membership (if arg is a CIDR)
-	if _, nw, err := net.ParseCIDR(ipStr); err == nil && nw != nil {
-		cidr := nw.String()
-		for _, s := range manualNetSets {
-			ok, _ := nb.HasElem(s, cidr)
-			if ok {
-				act := "ALLOW"
-				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
-				hits = append(hits, whichHit{Action: act, Via: "manual", Set: s, Match: cidr})
-			}
-		}
-	}
-
-	// -------- feed sets (discover once, terse; then HasElem) --------
-	feedSets, _ := listSetNamesByPrefixes(
-		"allow_ext_v4_hosts_", "allow_ext_v6_hosts_", "allow_ext_v4_nets_", "allow_ext_v6_nets_",
-		"block_ext_v4_hosts_", "block_ext_v6_hosts_", "block_ext_v4_nets_", "block_ext_v6_nets_",
-	)
-
-	// feed hosts
-	if ip := net.ParseIP(ipStr); ip != nil {
-		ipNorm := ip.String()
-		for _, s := range feedSets {
-			if !strings.Contains(s, "_hosts_") { continue }
-			ok, _ := nb.HasElem(s, ipNorm)
-			if ok {
-				act := "ALLOW"
-				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
-				hits = append(hits, whichHit{
-					Action: act, Via: "feed", Set: s, Match: ipNorm, Feed: feedKeyFromSet(s),
-				})
-			}
-		}
-	}
-
-	// feed nets
-	if _, nw, err := net.ParseCIDR(ipStr); err == nil && nw != nil {
-		cidr := nw.String()
-		for _, s := range feedSets {
-			if !strings.Contains(s, "_nets_") { continue }
-			ok, _ := nb.HasElem(s, cidr)
-			if ok {
-				act := "ALLOW"
-				if strings.HasPrefix(s, "block_") { act = "BLOCK" }
-				hits = append(hits, whichHit{
-					Action: act, Via: "feed", Set: s, Match: cidr, Feed: feedKeyFromSet(s),
-				})
-			}
-		}
-	}
-
-	return hits, nil
-}
-
-// feedKeyFromSet extracts the feed name from a set like "block_ext_v4_hosts_myblock".
-func feedKeyFromSet(setName string) string {
-	if i := strings.LastIndex(setName, "_"); i > 0 && i < len(setName)-1 {
-		return setName[i+1:]
-	}
-	return ""
-}
-
-
-
-
-func urlQueryEscape(s string) string { return strings.ReplaceAll(s, " ", "%20") }
-func httpGetJSON(url string, out any) error {
-    resp, err := http.Get(url); if err != nil { return err }
-    defer resp.Body.Close()
-    return json.NewDecoder(resp.Body).Decode(out)
 }
