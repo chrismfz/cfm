@@ -1,2 +1,0 @@
-opm get ledgetech/lua-resty-http
-opm get spacewander/lua-resty-string
