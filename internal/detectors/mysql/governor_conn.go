@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"cfm/internal/logging"
@@ -289,6 +288,3 @@ func (g *Governor) connNotifyAllowed(user string) bool {
 	return true
 }
 
-// connNotifyMu and connNotifyLast are defined on Governor in governor.go (see additions below).
-// They are declared here for documentation; the actual fields live in the struct.
-var _ sync.Mutex // ensure sync is imported

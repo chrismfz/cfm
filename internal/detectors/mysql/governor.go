@@ -799,15 +799,28 @@ func isExempt(user string, exempts []string) bool {
 	return false
 }
 
+
 func matchUser(pattern, user string) bool {
-	if pattern == "*" {
-		return true
-	}
-	if strings.HasSuffix(pattern, "*") {
-		return strings.HasPrefix(user, pattern[:len(pattern)-1])
-	}
-	return pattern == user
+    if pattern == "*" {
+        return true
+    }
+    // *suffix* — contains match
+    if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+        inner := pattern[1 : len(pattern)-1]
+        return inner != "" && strings.Contains(user, inner)
+    }
+    // prefix* — user must start with prefix
+    if strings.HasSuffix(pattern, "*") {
+        return strings.HasPrefix(user, pattern[:len(pattern)-1])
+    }
+    // *suffix — user must end with suffix
+    if strings.HasPrefix(pattern, "*") {
+        return strings.HasSuffix(user, pattern[1:])
+    }
+    // exact match
+    return pattern == user
 }
+
 
 func actionName(a RuleAction) string {
 	switch a {
