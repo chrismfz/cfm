@@ -688,43 +688,34 @@ func RunLiveTop(baseURL string, limit int) error {
 	// ── state ─────────────────────────────────────────────────────────────────
 
 	var (
-		rows      []ShortRow // latest fetched rows (already sorted)
-		cursor    int        // selected row index (0-based into rows)
-		sortIdx   int        // index into sortKeys
-		lastErr   error
-		tickN     int
+		rows       []ShortRow        // latest fetched rows (already sorted)
+		challenged map[string]string // host → "manual"|"auto" for active challenges
+		cursor     int               // selected row index (0-based into rows)
+		sortIdx    int               // index into sortKeys
+		lastErr    error
+		tickN      int
 	)
 
-	// colour helpers for inline markup
-	colorForErr := func(v float64) string {
-		switch {
-		case v >= 30:
-			return "red"
-		case v >= 10:
-			return "yellow"
-		default:
-			return "green"
+	// fetchChallenged fetches the full active challenge list once per tick.
+	fetchChallenged := func() map[string]string {
+		u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=500", baseURL)
+		r, err := http.Get(u)
+		if err != nil {
+			return nil
 		}
-	}
-	colorForBot := func(v float64) string {
-		switch {
-		case v >= 60:
-			return "red"
-		case v >= 25:
-			return "yellow"
-		default:
-			return "cyan"
+		defer r.Body.Close()
+		var vhs []struct {
+			Host string `json:"host"`
+			Mode string `json:"mode"`
 		}
-	}
-	colorForScore := func(v float64) string {
-		switch {
-		case v >= 0.7:
-			return "red"
-		case v >= 0.4:
-			return "yellow"
-		default:
-			return "green"
+		if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
+			return nil
 		}
+		m := make(map[string]string, len(vhs))
+		for _, v := range vhs {
+			m[v.Host] = v.Mode
+		}
+		return m
 	}
 
 	// fetchAndSort fetches top-short and sorts by current sort key.
@@ -754,35 +745,46 @@ func RunLiveTop(baseURL string, limit int) error {
 		if cursor < 0 {
 			cursor = 0
 		}
+		// refresh challenge state in same tick
+		challenged = fetchChallenged()
 	}
 
 	// buildTableRows renders the rows slice into table widget rows.
 	buildTableRows := func() {
 		colW := W - 2
-		// dynamic host column width (rest goes to metrics)
-		metricsW := 85 // fixed metrics portion width
+		metricsW := 86 // fixed metrics portion width (added 1 for chal col)
 		hostW := colW - metricsW
 		if hostW < 15 {
 			hostW = 15
 		}
 
-		// header row
 		hdr := []string{
 			padRight(" VHOST", hostW),
-			"  RPS ", " 2xx  ", " 4xx  ", " 5xx  ",
+			" CH ", "  RPS ", " 2xx  ", " 4xx  ", " 5xx  ",
 			" err% ", " bot% ", "  rt  ", "score ", " uniq ",
 		}
 		tableRows := [][]string{hdr}
 
 		for i, row := range rows {
+			chalMode := challenged[row.Host] // "" if not challenged
+
 			host := row.Host
-			if len(host) > hostW-1 {
-				host = host[:hostW-3] + ".."
+			maxHost := hostW - 1
+			if len(host) > maxHost {
+				host = host[:maxHost-2] + ".."
 			}
 			host = padRight(" "+host, hostW)
 
+			chalCell := "    "
+			if chalMode == "manual" {
+				chalCell = " 🔒M"
+			} else if chalMode == "auto" {
+				chalCell = " 🔒A"
+			}
+
 			tableRows = append(tableRows, []string{
 				host,
+				chalCell,
 				fmt.Sprintf("%6.2f", row.RPS),
 				fmt.Sprintf("%6.2f", row.R2xx),
 				fmt.Sprintf("%6.2f", row.R4xx),
@@ -794,20 +796,24 @@ func RunLiveTop(baseURL string, limit int) error {
 				fmt.Sprintf("%5d ", row.UniqueIPs),
 			})
 
-			// colour the selected row differently
-			style := ui.NewStyle(ui.ColorWhite)
-			if i+1 == cursor+1 { // +1 for header offset
+			// Row colour: selected > challenged > high-threat > normal
+			var style ui.Style
+			if i+1 == cursor+1 { // +1 for header
 				style = ui.NewStyle(ui.ColorBlack, ui.ColorCyan, ui.ModifierBold)
+			} else if chalMode != "" {
+				// challenged rows stand out in yellow
+				style = ui.NewStyle(ui.ColorYellow)
+			} else if row.ErrRatio >= 0.3 || row.Score >= 0.7 {
+				style = ui.NewStyle(ui.ColorRed)
+			} else if row.ErrRatio >= 0.1 || row.Score >= 0.4 {
+				style = ui.NewStyle(ui.ColorYellow)
 			} else {
-				// dim rows with high err or bot red
-				_ = colorForErr(row.ErrRatio * 100)
-				_ = colorForBot(row.BotRatio * 100)
-				_ = colorForScore(row.Score)
+				style = ui.NewStyle(ui.ColorWhite)
 			}
 			table.RowStyles[i+1] = style
 		}
 		table.RowStyles[0] = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
-		table.ColumnWidths = []int{hostW, 7, 7, 7, 7, 7, 7, 7, 7, 7}
+		table.ColumnWidths = []int{hostW, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7}
 		table.Rows = tableRows
 	}
 
@@ -820,21 +826,36 @@ func RunLiveTop(baseURL string, limit int) error {
 			statusStr = fmt.Sprintf("✖ %s", lastErr)
 		}
 		selectedHost := "-"
+		selectedChal := ""
 		if len(rows) > 0 && cursor < len(rows) {
 			selectedHost = rows[cursor].Host
+			selectedChal = challenged[selectedHost]
+		}
+
+		chalBadge := ""
+		switch selectedChal {
+		case "manual":
+			chalBadge = "  [🔒 CHALLENGED manual](fg:red,mod:bold)"
+		case "auto":
+			chalBadge = "  [🔒 CHALLENGED auto](fg:yellow,mod:bold)"
 		}
 
 		header.Text = fmt.Sprintf(
-			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  selected:[%s](fg:cyan,mod:bold)  "+
-				"tick:[%d](fg:white)  [%s](fg:white)",
-			statusStr, sortKey, selectedHost, tickN, ts,
+			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  selected:[%s](fg:cyan,mod:bold)%s  tick:[%d](fg:white)  [%s](fg:white)",
+			statusStr, sortKey, selectedHost, chalBadge, tickN, ts,
 		)
 
 		buildTableRows()
 
+		chalHint := "[c] challenge"
+		if selectedChal == "manual" {
+			chalHint = "[c] remove challenge"
+		} else if selectedChal == "auto" {
+			chalHint = "[c] add manual challenge"
+		}
 		statusBar.Text = fmt.Sprintf(
-			" [↑↓] navigate  [Enter] drill  [c] toggle challenge (30m)  [s] sort (%s)  [q] quit  │  top %d by %s",
-			sortKey, limit, sortKey,
+			" [↑↓] navigate  [Enter] drill  [%s]  [s] sort (%s)  [q] quit  │  top %d  🔒=challenged",
+			chalHint, sortKey, limit,
 		)
 
 		ui.Clear()
@@ -842,17 +863,19 @@ func RunLiveTop(baseURL string, limit int) error {
 	}
 
 	// chalToggleSelected adds/removes a 30m manual challenge on the selected vhost.
+	// Uses the already-fetched challenged map — no extra HTTP call needed.
 	chalToggleSelected := func() {
 		if len(rows) == 0 || cursor >= len(rows) {
 			return
 		}
 		h := rows[cursor].Host
-		// Check current status first
-		active, _, _ := fetchChallengeStatus(baseURL, h)
-		if active {
+		mode := challenged[h] // "" | "manual" | "auto"
+		if mode == "manual" {
+			// remove the manual challenge
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(h))
 			_, _ = http.Post(u, "application/json", nil)
 		} else {
+			// add 30m manual challenge (even if auto is active — adds manual on top)
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(h))
 			_, _ = http.Post(u, "application/json", nil)
 		}
