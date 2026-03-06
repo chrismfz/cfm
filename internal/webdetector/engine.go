@@ -327,8 +327,9 @@ type Engine struct {
 	adapter LogFormatAdapter
 	malRules []malRule
 
-    chalRules []chalRule
-nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
+        chalRules []chalRule
+	nginxBridge *NginxBridge  // nil if OpenRestyMode disabled
+	manualChal manualChalState
 
 // bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
 // Set once at startup via SetBypassFunc (no lock needed).
@@ -412,7 +413,8 @@ func NewEngine(cfg Config) *Engine {
 
     // Challenge API store (ring buffer events + vhost/ip state)
     e.chalAPI = NewChallengeAPIStore(50000)
-
+    // manual from api webtop challenge add//
+    e.manualChal.init()
 
 
 // enable openresty mode//

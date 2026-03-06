@@ -81,15 +81,16 @@ func printWebTopHelp() {
         fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
         fmt.Println("  cfm webtop ip [N]               # global IP view (top IPs by score)")
         fmt.Println("  cfm webtop ip <IP>              # drilldown specific IP")
-        fmt.Println("  cfm webtop challenge            # active vhost challenge list")
-        fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
-        fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
 	fmt.Println("  cfm webtop analyze <ip|host>    # offline drilldown from TSV log")
 	fmt.Println("  cfm webtop live            # scrollable live vhost picker")
 	fmt.Println("  cfm webtop live <vhost>        # live terminal dashboard")
 	fmt.Println("  cfm webtop live [N]        # picker showing top N vhosts")
-
-
+        fmt.Println("  cfm webtop challenge            # active vhost challenge list")
+        fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
+        fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
+	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m]  # manually challenge a vhost")
+	fmt.Println("  cfm webtop challenge remove <H>           # remove manual challenge")
+	fmt.Println("  cfm webtop challenge status <H>           # check challenge status")
 
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
@@ -1025,6 +1026,20 @@ type chalEvent struct {
 }
 
 func runChallengeWebTop(baseURL string, args []string) error {
+
+    // subcommands
+    if len(args) > 0 && args[0] == "add" {
+        return runChallengeAdd(baseURL, args[1:])      //
+    }                                                  //
+                                                       //
+    if len(args) > 0 && (args[0] == "remove" || args[0] == "rm" || args[0] == "del") {  //
+        return runChallengeRemove(baseURL, args[1:])   //
+    }                                                  //
+                                                       //
+    if len(args) > 0 && args[0] == "status" {         //
+        return runChallengeStatus(baseURL, args[1:])   //
+    }                                                  //
+
     // subcommands
     if len(args) > 0 && args[0] == "events" {
         limit := 50
@@ -1093,4 +1108,113 @@ func runChallengeWebTop(baseURL string, args []string) error {
         fmt.Printf("%-35s %-6s %-6s %5.2f %6d  %s\n", h.Host, h.Mode, h.Status, h.Score, h.UniqIP, rs)
     }
     return nil
+}
+
+// runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual]
+func runChallengeAdd(baseURL string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text]")
+	}
+
+	host   := args[0]
+	ttlStr := "30m"
+	reason := "manual"
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--ttl", "-t":
+			if i+1 >= len(args) { return fmt.Errorf("--ttl requires a value") }
+			ttlStr = args[i+1]; i++
+		case "--reason", "-r":
+			if i+1 >= len(args) { return fmt.Errorf("--reason requires a value") }
+			reason = args[i+1]; i++
+		default:
+			if strings.HasPrefix(args[i], "--ttl=") {
+				ttlStr = strings.TrimPrefix(args[i], "--ttl=")
+			} else if strings.HasPrefix(args[i], "--reason=") {
+				reason = strings.TrimPrefix(args[i], "--reason=")
+			}
+		}
+	}
+
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s",
+		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason))
+	resp, err := http.Post(u, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	if errMsg, ok := result["error"].(string); ok {
+		return fmt.Errorf("challenge add error: %s", errMsg)
+	}
+
+	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s\n",
+		result["host"], result["ttl"], result["expires_at"], result["reason"])
+	return nil
+}
+
+// runChallengeRemove handles: cfm webtop challenge remove <vhost>
+func runChallengeRemove(baseURL string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cfm webtop challenge remove <vhost>")
+	}
+	host := args[0]
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s",
+		baseURL, url.QueryEscape(host))
+	resp, err := http.Post(u, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if errMsg, ok := result["error"].(string); ok {
+		return fmt.Errorf("challenge remove error: %s", errMsg)
+	}
+	fmt.Printf("✓ Challenge removed for %s\n", host)
+	return nil
+}
+
+// runChallengeStatus handles: cfm webtop challenge status <vhost>
+func runChallengeStatus(baseURL string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cfm webtop challenge status <vhost>")
+	}
+	host := args[0]
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s",
+		baseURL, url.QueryEscape(host))
+	resp, err := http.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+
+	manualActive, _ := result["manual_active"].(bool)
+	autoActive, _   := result["auto_active"].(bool)
+	expiresAt, _    := result["expires_at"].(string)
+	reason, _       := result["reason"].(string)
+	autoSince, _    := result["auto_since"].(string)
+
+	fmt.Printf("host: %s\n", host)
+	if manualActive {
+		fmt.Printf("  manual:  ACTIVE  expires=%s  reason=%s\n", expiresAt, reason)
+	} else {
+		fmt.Println("  manual:  inactive")
+	}
+	if autoActive {
+		fmt.Printf("  auto:    ACTIVE  since=%s\n", autoSince)
+	} else {
+		fmt.Println("  auto:    inactive")
+	}
+	return nil
 }

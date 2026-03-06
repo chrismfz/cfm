@@ -71,6 +71,11 @@ type liveSnapshot struct {
 
 	// reasons
 	Reasons []string
+
+	// challenge state
+	ChallengeActive bool
+	ChallengeMode   string // "manual" | "auto" | ""
+	ChallengeExpiry string // formatted expiry for manual
 }
 
 // ── fetchers ─────────────────────────────────────────────────────────────────
@@ -135,7 +140,41 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 		snap.Reasons = detail.ShortReasons
 	}
 
+	// 3) challenge status
+	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry = fetchChallengeStatus(baseURL, host)
+
 	return snap, nil
+}
+
+// fetchChallengeStatus checks /challenge/vhost/status for the given host.
+func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string) {
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s", baseURL, url.QueryEscape(host))
+	r, err := http.Get(u)
+	if err != nil {
+		return
+	}
+	defer r.Body.Close()
+	var result map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		return
+	}
+	manualActive, _ := result["manual_active"].(bool)
+	autoActive, _   := result["auto_active"].(bool)
+	expiresAt, _    := result["expires_at"].(string)
+	if manualActive {
+		active = true
+		mode   = "manual"
+		// trim to HH:MM:SS if it's a full timestamp
+		if len(expiresAt) > 19 {
+			expiry = expiresAt[11:19]
+		} else {
+			expiry = expiresAt
+		}
+	} else if autoActive {
+		active = true
+		mode   = "auto"
+	}
+	return
 }
 
 // ── layout helpers ───────────────────────────────────────────────────────────
@@ -430,11 +469,25 @@ func RunLiveDrilldown(baseURL, host string) error {
 		if lastErr != nil {
 			statusStr = "✖ API ERROR"
 		}
+
+		// challenge badge
+		chalBadge := ""
+		if snap.ChallengeActive {
+			switch snap.ChallengeMode {
+			case "manual":
+				chalBadge = fmt.Sprintf("  [🔒 CHALLENGE manual expires=%s](fg:red,mod:bold)", snap.ChallengeExpiry)
+			case "auto":
+				chalBadge = "  [🔒 CHALLENGE auto](fg:yellow,mod:bold)"
+			default:
+				chalBadge = "  [🔒 CHALLENGE](fg:yellow,mod:bold)"
+			}
+		}
+
 		title.Text = fmt.Sprintf(
-			" [%s](fg:green) [%s](fg:white,mod:bold)   "+
+			" [%s](fg:green) [%s](fg:white,mod:bold)%s   "+
 				"score:[%s](fg:yellow)  err:[%.1f%%](fg:red)  rt:[%.3fs](fg:cyan)  "+
 				"uniqIP:[%d](fg:white)  bot:[%.0f%%](fg:magenta)  reasons:[%s](fg:yellow)",
-			statusStr, host,
+			statusStr, host, chalBadge,
 			scoreStr,
 			snap.Err, snap.RT,
 			snap.UniqueIPs, snap.Bot,
@@ -490,13 +543,32 @@ func RunLiveDrilldown(baseURL, host string) error {
 
 		// status bar
 		ts := time.Now().Format("15:04:05")
+		chalHint := "[c] challenge"
+		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
+			chalHint = "[c] remove challenge"
+		}
 		statusBar.Text = fmt.Sprintf(
-			" [q] quit  [r] force refresh  │  %s  │  tick #%d  │  RPS: %.2f  │  press [h] for help",
-			ts, tick, snap.RPS,
+			" [q] quit  [r] refresh  [%s]  │  %s  │  tick #%d  │  RPS: %.2f",
+			chalHint, ts, tick, snap.RPS,
 		)
 
 		ui.Clear()
 		ui.Render(title, rpsChart, botChart, errGauge, scoreGauge, rtGroup, ipTable, pathsTable, statusBar)
+	}
+
+	// chalToggle adds or removes a manual 30m challenge for this vhost.
+	chalToggle := func(snap liveSnapshot) {
+		var err error
+		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
+			// remove it
+			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(host))
+			_, err = http.Post(u, "application/json", nil)
+		} else {
+			// add 30m manual challenge
+			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(host))
+			_, err = http.Post(u, "application/json", nil)
+		}
+		_ = err
 	}
 
 	// ── initial fetch ─────────────────────────────────────────────────────────
@@ -527,6 +599,11 @@ func RunLiveDrilldown(baseURL, host string) error {
 			switch e.ID {
 			case "q", "Q", "<C-c>":
 				return nil
+			case "c", "C":
+				chalToggle(snap)
+				// re-fetch immediately so the badge updates
+				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
+				renderAll(snap, fetchErr, tickN)
 			case "r", "R":
 				// force refresh
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
@@ -756,12 +833,29 @@ func RunLiveTop(baseURL string, limit int) error {
 		buildTableRows()
 
 		statusBar.Text = fmt.Sprintf(
-			" [↑↓] navigate  [Enter] drill into vhost  [s] cycle sort (%s)  [q] quit  │  showing top %d by %s",
+			" [↑↓] navigate  [Enter] drill  [c] toggle challenge (30m)  [s] sort (%s)  [q] quit  │  top %d by %s",
 			sortKey, limit, sortKey,
 		)
 
 		ui.Clear()
 		ui.Render(header, table, statusBar)
+	}
+
+	// chalToggleSelected adds/removes a 30m manual challenge on the selected vhost.
+	chalToggleSelected := func() {
+		if len(rows) == 0 || cursor >= len(rows) {
+			return
+		}
+		h := rows[cursor].Host
+		// Check current status first
+		active, _, _ := fetchChallengeStatus(baseURL, h)
+		if active {
+			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(h))
+			_, _ = http.Post(u, "application/json", nil)
+		} else {
+			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(h))
+			_, _ = http.Post(u, "application/json", nil)
+		}
 	}
 
 	// ── initial load ──────────────────────────────────────────────────────────
@@ -781,6 +875,11 @@ func RunLiveTop(baseURL string, limit int) error {
 			switch e.ID {
 			case "q", "Q", "<C-c>":
 				return nil
+
+			case "c", "C":
+				chalToggleSelected()
+				fetchAndSort()
+				renderAll()
 
 			case "<Up>", "k":
 				if cursor > 0 {

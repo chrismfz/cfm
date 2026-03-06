@@ -1218,7 +1218,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
 
             // Manual panic applies immediately.
-            manual := haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost)
+manual := (haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost)) ||
+func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
 
             // Auto suspicious: long-window score with hysteresis + holddown.
             autoActive := false

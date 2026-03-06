@@ -121,6 +121,43 @@ func (s *ChallengeAPIStore) RecordVhostAuto(host string, active bool, row Suspic
     })
 }
 
+
+func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time.Duration, reason string) {
+    now := time.Now()
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    st, ok := s.vhosts[host]
+    if !ok {
+        st = &ChallengeVhostState{Host: host}
+        s.vhosts[host] = st
+    }
+    st.Mode = "manual"
+    if active {
+        st.Status    = "active"
+        st.LastAction = "manual_on"
+        if st.Since.IsZero() { st.Since = now }
+        if ttl > 0 { st.ExpiresAt = now.Add(ttl) }
+    } else {
+        st.Status    = "inactive"
+        st.LastAction = "manual_off"
+        st.Since     = now
+        st.ExpiresAt = time.Time{}
+    }
+    st.LastChanged = now
+    if len(st.Reasons) == 0 || st.Reasons[0] != reason {
+        st.Reasons = []string{reason}
+    }
+
+    s.addEvent(ChallengeEvent{
+        Ts:   now,
+        Type: st.LastAction,
+        Host: host,
+        Rule: reason,
+    })
+}
+
+
 func (s *ChallengeAPIStore) RecordIPChallenge(ip, host, rule, uri, method string, status int, ttl time.Duration) {
     now := time.Now()
     s.mu.Lock()
