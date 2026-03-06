@@ -12,6 +12,8 @@ import (
 	"cfm/internal/logging"
 )
 
+var mysqlState, _ = core.LoadState("")
+
 var (
 	pendingGovCfg   mysql.GovernorConfig
 	pendingGovReady bool
@@ -24,10 +26,99 @@ func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
 }
 
 func init() {
+	// -------------------------------------------------------------------------
+	// [mysql] — brute-force / login detector
+	// -------------------------------------------------------------------------
+	Register("mysql", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+		if !kvBool(kv, "ENABLED", true) {
+			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
+			return nil, nil
+		}
+
+		defEvery := kvDur(global, "DEFAULT_EVERY", 2*time.Second)
+		defWindow := kvDur(global, "DEFAULT_WINDOW", 10*time.Minute)
+		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
+
+		rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
+		var dirs []string
+		if rawDirs != "" {
+			fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
+				return r == ',' || r == ':' || r == ' ' || r == '\t'
+			})
+			for _, f := range fields {
+				if f != "" {
+					dirs = append(dirs, f)
+				}
+			}
+		}
+
+		useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+		usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
+
+		logPath := kvStrClean(kv, "LOG_PATH", "auto")
+		if logPath == "auto" {
+			if auto := mysql.ResolveForAuto(); auto != "" {
+				logPath = auto
+			}
+		}
+
+		cfg := mysql.LoginConfig{
+			Mode:        "file",
+			LogPath:     logPath,
+			Every:       kvDur(kv, "EVERY", defEvery),
+			Window:      kvDur(kv, "WINDOW", defWindow),
+			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 12),
+
+			DeniedPerIP:   kvInt(kv, "DENIED_IP", 10),
+			DeniedPerUser: kvInt(kv, "DENIED_USER", 10),
+			RootPerIP:     kvInt(kv, "ROOT_IP", 3),
+			ScanPerIP:     kvInt(kv, "SCAN_IP", 20),
+
+			UseEnrich:       useEnrich,
+			UsePTR:          usePTR,
+			EnrichDirs:      dirs,
+			IgnoreLocalhost: kvBool(kv, "IGNORE_LOCALHOST", true),
+			IgnoreCpanel:    kvBool(kv, "IGNORE_CPANEL_UTIL", true),
+		}
+
+		d := mysql.NewMySQL(cfg)
+		d.SetName(section)
+
+		src := core.NewFileTailer(cfg.LogPath)
+		d.SetSource(src)
+
+		if mysqlState != nil {
+			// key := core.FileStateKey(section, cfg.LogPath)
+			// d.SetState(mysqlState, key)
+		}
+
+		logMySQLGovf(
+			"[detectors] start %s (every=%s window=%s cooldown=%s log=%s limits: ip=%d user=%d root=%d scan=%d enrich=%t ptr=%t dirs=%v)",
+			section,
+			cfg.Every,
+			cfg.Window,
+			cfg.Cooldown,
+			cfg.LogPath,
+			cfg.DeniedPerIP,
+			cfg.DeniedPerUser,
+			cfg.RootPerIP,
+			cfg.ScanPerIP,
+			cfg.UseEnrich,
+			cfg.UsePTR,
+			cfg.EnrichDirs,
+		)
+
+		return d, nil
+	})
+
+	// -------------------------------------------------------------------------
+	// [mysql_governor] — processlist monitor + query/conn rules
+	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		if !kvBool(kv, "ENABLED", true) {
 			pendingGovReady = false
-			logging.Logf("[detectors] %s disabled in detectors.conf", section)
+			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
 			return nil, nil
 		}
 
@@ -43,10 +134,32 @@ func init() {
 		}
 
 		// ── QUERY_RULES multiline block ──────────────────────────────────────
-		queryRules := parseQueryRules(kvLines(kv, "QUERY_RULES"))
+		rawQueryLines := kvLines(kv, "QUERY_RULES")
+		queryRules := parseQueryRules(rawQueryLines)
 
 		// ── CONN_RULES multiline block ───────────────────────────────────────
-		connRules := parseConnRules(kvLines(kv, "CONN_RULES"))
+		rawConnLines := kvLines(kv, "CONN_RULES")
+		connRules := parseConnRules(rawConnLines)
+
+		logMySQLGovf("[detectors] %s raw QUERY_RULES lines=%d raw CONN_RULES lines=%d",
+			section, len(rawQueryLines), len(rawConnLines))
+
+		for i, line := range rawQueryLines {
+			logMySQLGovf("[detectors] %s QUERY_RULES raw[%d]=%q", section, i, line)
+		}
+		for i, line := range rawConnLines {
+			logMySQLGovf("[detectors] %s CONN_RULES raw[%d]=%q", section, i, line)
+		}
+
+		for i, r := range queryRules {
+			logMySQLGovf("[detectors] %s query_rule[%d]: user=%q max=%s action=%s lock_fanout=%d conn_pct=%.0f",
+				section, i, r.UserPattern, r.MaxTime, queryActionName(r.Action), r.LockFanout, r.ConnPct)
+		}
+
+		for i, r := range connRules {
+			logMySQLGovf("[detectors] %s conn_rule[%d]: user=%q max=%d action=%s conn_pct=%.0f",
+				section, i, r.UserPattern, r.Max, connActionName(r.Action), r.ConnPct)
+		}
 
 		// ── Build GovernorConfig ─────────────────────────────────────────────
 		pendingGovCfg = mysql.GovernorConfig{
@@ -75,9 +188,8 @@ func init() {
 		}
 		pendingGovReady = true
 
-		logging.Logf(
-			"[detectors] %s loaded mode=%s poll=%s fanout_kill=%d sleep_reaper=%t"+
-				" query_rules=%d conn_rules=%d exempt=%v",
+		logMySQLGovf(
+			"[detectors] %s loaded mode=%s poll=%s fanout_kill=%d sleep_reaper=%t query_rules=%d conn_rules=%d exempt=%v",
 			section,
 			pendingGovCfg.Mode,
 			pendingGovCfg.PollEvery,
@@ -88,7 +200,7 @@ func init() {
 			pendingGovCfg.SleepReaperExempt,
 		)
 
-		return nil, nil // no goroutine; main.go starts the governor
+		return nil, nil // config-only; main.go starts the governor
 	})
 }
 
@@ -98,19 +210,13 @@ func init() {
 //
 // Each non-empty line has the format:
 //
-//	<user_pattern> : <max_runtime> : <action> [: condition ...]
-//
-//	user_pattern  — exact name, prefix* wildcard, or * for everyone
-//	max_runtime   — duration (30s, 5m, 1h) or 0 to ignore the user entirely
-//	action        — notify | kill_query | kill_connection | ignore
-//	condition     — lock_fanout=N   (only if blocking >= N others)
-//	                conn_pct=N      (only if global conn >= N%)
+//   <user_pattern> : <max_runtime> : <action> [: condition ...]
 func parseQueryRules(lines []string) []mysql.QueryRule {
 	var rules []mysql.QueryRule
 	for _, line := range lines {
 		parts := splitColon(line)
 		if len(parts) < 3 {
-			logging.Logf("[detectors/mysql] QUERY_RULES: skipping malformed line %q", line)
+			logMySQLGovf("[detectors/mysql] QUERY_RULES: skipping malformed line %q", line)
 			continue
 		}
 
@@ -118,14 +224,13 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 		maxTimeStr := strings.TrimSpace(parts[1])
 		actionStr := strings.ToLower(strings.TrimSpace(parts[2]))
 
-		// max_runtime: "0" means ignore, otherwise parse duration
 		var maxTime time.Duration
 		if maxTimeStr == "0" {
 			maxTime = 0
 		} else {
 			d, err := time.ParseDuration(maxTimeStr)
 			if err != nil {
-				logging.Logf("[detectors/mysql] QUERY_RULES: bad duration %q in %q", maxTimeStr, line)
+				logMySQLGovf("[detectors/mysql] QUERY_RULES: bad duration %q in %q", maxTimeStr, line)
 				continue
 			}
 			maxTime = d
@@ -133,7 +238,7 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 
 		action, ok := parseQueryAction(actionStr)
 		if !ok {
-			logging.Logf("[detectors/mysql] QUERY_RULES: unknown action %q in %q", actionStr, line)
+			logMySQLGovf("[detectors/mysql] QUERY_RULES: unknown action %q in %q", actionStr, line)
 			continue
 		}
 
@@ -143,7 +248,6 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 			Action:      action,
 		}
 
-		// Optional conditions (4th field onward)
 		for _, raw := range parts[3:] {
 			cond := strings.TrimSpace(raw)
 			switch {
@@ -159,7 +263,7 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 				}
 			default:
 				if cond != "" {
-					logging.Logf("[detectors/mysql] QUERY_RULES: unknown condition %q in %q", cond, line)
+					logMySQLGovf("[detectors/mysql] QUERY_RULES: unknown condition %q in %q", cond, line)
 				}
 			}
 		}
@@ -175,19 +279,13 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 //
 // Each non-empty line has the format:
 //
-//	<user_pattern> : max=N : <action> [: condition]
-//
-//	user_pattern  — exact name, prefix* wildcard, or * for everyone
-//	max=N         — connection cap (total connections including sleeping)
-//	action        — notify | reap_sleep | alter_user
-//	condition     — conn_pct=N  (only enforce when global conn >= N%)
-//	                             omit for always-active (static) cap
+//   <user_pattern> : max=N : <action> [: condition]
 func parseConnRules(lines []string) []mysql.ConnRule {
 	var rules []mysql.ConnRule
 	for _, line := range lines {
 		parts := splitColon(line)
 		if len(parts) < 3 {
-			logging.Logf("[detectors/mysql] CONN_RULES: skipping malformed line %q", line)
+			logMySQLGovf("[detectors/mysql] CONN_RULES: skipping malformed line %q", line)
 			continue
 		}
 
@@ -196,18 +294,19 @@ func parseConnRules(lines []string) []mysql.ConnRule {
 		actionStr := strings.ToLower(strings.TrimSpace(parts[2]))
 
 		if !strings.HasPrefix(maxStr, "max=") {
-			logging.Logf("[detectors/mysql] CONN_RULES: expected max=N, got %q in %q", maxStr, line)
+			logMySQLGovf("[detectors/mysql] CONN_RULES: expected max=N, got %q in %q", maxStr, line)
 			continue
 		}
+
 		max, err := strconv.Atoi(strings.TrimPrefix(maxStr, "max="))
 		if err != nil || max <= 0 {
-			logging.Logf("[detectors/mysql] CONN_RULES: invalid max value in %q", line)
+			logMySQLGovf("[detectors/mysql] CONN_RULES: invalid max value in %q", line)
 			continue
 		}
 
 		action, ok := parseConnAction(actionStr)
 		if !ok {
-			logging.Logf("[detectors/mysql] CONN_RULES: unknown action %q in %q", actionStr, line)
+			logMySQLGovf("[detectors/mysql] CONN_RULES: unknown action %q in %q", actionStr, line)
 			continue
 		}
 
@@ -217,7 +316,6 @@ func parseConnRules(lines []string) []mysql.ConnRule {
 			Action:      action,
 		}
 
-		// Optional condition (4th field)
 		for _, raw := range parts[3:] {
 			cond := strings.TrimSpace(raw)
 			if strings.HasPrefix(cond, "conn_pct=") {
@@ -235,8 +333,6 @@ func parseConnRules(lines []string) []mysql.ConnRule {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// splitColon splits on ":" but NOT on "::" (URL schemes etc.) and trims
-// whitespace from each field.
 func splitColon(s string) []string {
 	raw := strings.Split(s, ":")
 	var out []string
@@ -272,10 +368,50 @@ func parseConnAction(s string) (mysql.ConnRuleAction, bool) {
 	return mysql.ConnActionNotify, false
 }
 
-// fmtRules summarises rules for the startup log line (avoid printing every rule).
 func fmtRules(n int, kind string) string {
 	if n == 0 {
 		return fmt.Sprintf("no %s", kind)
 	}
 	return fmt.Sprintf("%d %s", n, kind)
+}
+
+func connActionName(a mysql.ConnRuleAction) string {
+	switch a {
+	case mysql.ConnActionNotify:
+		return "notify"
+	case mysql.ConnActionReapSleep:
+		return "reap_sleep"
+	case mysql.ConnActionAlterUser:
+		return "alter_user"
+	default:
+		return "unknown"
+	}
+}
+
+func queryActionName(a mysql.RuleAction) string {
+	switch a {
+	case mysql.ActionIgnore:
+		return "ignore"
+	case mysql.ActionNotify:
+		return "notify"
+	case mysql.ActionKillQuery:
+		return "kill_query"
+	case mysql.ActionKillConnection:
+		return "kill_connection"
+	default:
+		return "unknown"
+	}
+}
+
+
+
+
+func logMySQLGovf(format string, args ...any) {
+	logging.Logf(format, args...)
+	logging.LogfMYSQLGOVERNOR(format, args...)
+}
+
+func logMySQLDetf(format string, args ...any) {
+	logging.Logf(format, args...)
+	logging.LogfMYSQLGOVERNOR(format, args...)
 }

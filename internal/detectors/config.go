@@ -1,9 +1,10 @@
 // internal/detectors/config.go
-// CHANGE: add multiline continuation support to readSections.
+//
+// Multiline continuation support for readSections.
 //
 // A line that:
-//   • does not start with [  (not a section header)
-//   • does not contain =     (not a key=value pair)
+//   • does not start with [     (not a section header)
+//   • is not a real key=value   (candidate before "=" must be a plain identifier)
 //   • is not blank / comment
 // ...is treated as a continuation of the previous key's value.
 // Each continuation line is appended with \n so callers can split on \n.
@@ -12,10 +13,21 @@
 //
 //   QUERY_RULES =
 //       mathemat_db : 30s : notify
+//       mathemat_db : 60s : kill_query : lock_fanout=5   ← contains "=" but NOT a key
 //       mathemat_db : 90s : kill_query
+//
+//   CONN_RULES =
+//       nixpal_stress   : max=10  : reap_sleep            ← contains "=" but NOT a key
+//       mathemat_db     : max=80  : alter_user
+//       *               : max=25  : reap_sleep : conn_pct=70
 //
 // The KV map will contain QUERY_RULES → "\nmathematt_db : 30s : notify\n..."
 // Use kvLines(kv, "QUERY_RULES") to get []string of non-empty rule lines.
+//
+// Key=value detection uses isConfigKey() which accepts only letters, digits and
+// underscores.  Rule lines like "nixpal_stress : max=10 : reap_sleep" have a
+// candidate "nixpal_stress : max" (contains spaces and colon) which fails the
+// check, so they correctly fall through to continuation handling.
 
 package detectors
 
@@ -53,20 +65,22 @@ func readSections(path string) (Sections, []byte, error) {
 	cur := "global"
 	s.ByName[cur] = make(KV)
 
-	var lastKey string // track previous key for continuation lines
+	var lastKey string
 
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		raw := sc.Text()
 		line := strings.TrimSpace(raw)
 
-		// blank or comment → reset continuation context
+		// Blank lines and comments do NOT reset lastKey.
+		// This allows multiline blocks (QUERY_RULES, CONN_RULES) to contain
+		// blank spacer lines and ; comments between rule entries without
+		// breaking the continuation.
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			lastKey = ""
 			continue
 		}
 
-		// [section] header
+		// [section] header — always resets continuation context.
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			cur = strings.TrimSpace(line[1 : len(line)-1])
 			if _, ok := s.ByName[cur]; !ok {
@@ -74,24 +88,37 @@ func readSections(path string) (Sections, []byte, error) {
 			}
 			typ, _ := splitTypeInstance(cur)
 			s.ByType[typ] = append(s.ByType[typ], cur)
-			lastKey = "" // new section resets context
+			lastKey = ""
 			continue
 		}
 
-		// key = value
+		// Real key=value pair — only when the text before "=" is a plain
+		// identifier (letters, digits, underscores).
+		//
+		// Rule lines such as:
+		//   nixpal_stress : max=10 : reap_sleep
+		//   mathemat_db   : 60s   : kill_query : lock_fanout=5
+		//   *             : max=25 : reap_sleep : conn_pct=70
+		// all contain "=" but their candidate ("nixpal_stress : max",
+		// "mathemat_db   : 60s   : kill_query : lock_fanout", etc.) contains
+		// spaces, colons or wildcards — isConfigKey rejects them so they fall
+		// through to continuation handling below.
 		if i := strings.Index(line, "="); i > 0 {
-			k := strings.ToUpper(strings.TrimSpace(line[:i]))
-			v := strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
-			s.ByName[cur][k] = v
-			lastKey = k
-			if cur == "global" {
-				s.Global = s.ByName[cur]
+			candidate := strings.TrimSpace(line[:i])
+			if isConfigKey(candidate) {
+				k := strings.ToUpper(candidate)
+				v := strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
+				s.ByName[cur][k] = v
+				lastKey = k
+				if cur == "global" {
+					s.Global = s.ByName[cur]
+				}
+				continue
 			}
-			continue
+			// Has "=" but not a real key → fall through to continuation.
 		}
 
-		// No = sign and not a header → continuation of the previous key.
-		// Only treat as continuation if we have a lastKey in the current section.
+		// Continuation line — append to the current multiline key.
 		if lastKey != "" {
 			existing := s.ByName[cur][lastKey]
 			s.ByName[cur][lastKey] = existing + "\n" + line
@@ -99,13 +126,33 @@ func readSections(path string) (Sections, []byte, error) {
 				s.Global = s.ByName[cur]
 			}
 		}
-		// (If lastKey == "" and no = sign: unknown syntax, silently skip.)
+		// If lastKey == "" and line has no "=" and is not a header:
+		// unknown syntax — silently skip.
 	}
 	return s, b, nil
 }
 
+// isConfigKey returns true if s is a valid bare config identifier —
+// only ASCII letters, digits and underscores are allowed.
+//
+// This is what distinguishes a real key like CONN_WARN_PCT from the
+// left-hand side of a rule line like "nixpal_stress : max" (which
+// contains spaces and a colon).
+func isConfigKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // kvLines splits a multiline KV value (joined with \n) into individual
-// non-empty, comment-stripped lines. Use for QUERY_RULES / CONN_RULES blocks.
+// non-empty, comment-stripped lines.  Use for QUERY_RULES / CONN_RULES blocks.
 func kvLines(kv KV, key string) []string {
 	raw, ok := kv[strings.ToUpper(key)]
 	if !ok || raw == "" {
