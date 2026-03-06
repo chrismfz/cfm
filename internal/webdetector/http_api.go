@@ -39,10 +39,9 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
     mux.HandleFunc("/api/v1/challenge/ips",    e.handleChallengeIPs)
     mux.HandleFunc("/api/v1/challenge/ip",     e.handleChallengeIP)     // ?ip=
     mux.HandleFunc("/api/v1/challenge/events", e.handleChallengeEvents)
-
-     mux.HandleFunc("/api/v1/challenge/vhost/add",    e.handleChallengeVhostAdd)
-     mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
-     mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
+    mux.HandleFunc("/api/v1/challenge/vhost/add",    e.handleChallengeVhostAdd)
+    mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
+    mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
 
 	srv := &http.Server{
 		Addr:              addr,

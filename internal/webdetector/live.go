@@ -7,6 +7,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -223,29 +225,47 @@ func botColor(pct float64) ui.Color {
 }
 
 // fillIPTable updates an existing table widget in-place with enriched IPs.
-func fillIPTable(t *widgets.Table, ips []map[string]string) {
-	header := []string{"#", "IP", "Reqs", "PTR / ASN", "CC", "Score"}
+// tableW is the actual pixel/char width of the table (used for dynamic columns).
+// ipCursor is the 0-based selected row (-1 = none).
+func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor int) {
+	// Dynamic column layout:
+	//   # (3) | IP (16) | Reqs (6) | PTR (flex) | ASN (flex) | CC (4) | Score (6)
+	// borders + separators ≈ 10 chars overhead
+	fixed := 3 + 16 + 6 + 4 + 6 + 10
+	flex := tableW - fixed
+	if flex < 20 {
+		flex = 20
+	}
+	// Split flex 45% PTR, 55% ASN
+	ptrW := flex * 45 / 100
+	asnW := flex - ptrW
+	if ptrW < 10 {
+		ptrW = 10
+	}
+	if asnW < 10 {
+		asnW = 10
+	}
+
+	header := []string{"#", "IP", "Reqs", "PTR", "ASN", "CC", "Score"}
 	rows := [][]string{header}
 
-	limit := len(ips)
-	if limit > 14 {
-		limit = 14
-	}
-	for i, row := range ips[:limit] {
+	// Use all available rows (dynamic – set by caller's limit)
+	for i, row := range ips {
 		ip := row["ip"]
 		count := row["count"]
 		ptr := row["ptr"]
 		asn := row["asn"]
 		asnNm := row["asn_name"]
 		cc := row["country"]
-		score := row["score"] // may be empty
+		score := row["score"]
 
-		// Build a combined PTR / ASN column
-		ptrPart := ptr
-		if len(ptrPart) > 22 {
-			ptrPart = ptrPart[:20] + ".."
+		// PTR: trim to column width
+		if len(ptr) > ptrW {
+			ptr = ptr[:ptrW-2] + ".."
 		}
-		asPart := strings.TrimSpace(func() string {
+
+		// ASN: "AS12345 OVH SAS" style, trim to column width
+		asFull := strings.TrimSpace(func() string {
 			if asn == "" {
 				return asnNm
 			}
@@ -257,17 +277,8 @@ func fillIPTable(t *widgets.Table, ips []map[string]string) {
 			}
 			return asn
 		}())
-		if len(asPart) > 22 {
-			asPart = asPart[:20] + ".."
-		}
-		combined := ptrPart
-		if combined == "" {
-			combined = asPart
-		} else if asPart != "" {
-			combined = ptrPart + " / " + asPart
-		}
-		if len(combined) > 38 {
-			combined = combined[:36] + ".."
+		if len(asFull) > asnW {
+			asFull = asFull[:asnW-2] + ".."
 		}
 
 		scoreStr := score
@@ -279,31 +290,45 @@ func fillIPTable(t *widgets.Table, ips []map[string]string) {
 			fmt.Sprintf("%2d", i+1),
 			ip,
 			count,
-			combined,
+			ptr,
+			asFull,
 			cc,
 			scoreStr,
 		})
 	}
+
 	// Pad so the table height stays stable
-	for len(rows) < 10 {
-		rows = append(rows, []string{"", "", "", "", "", ""})
+	for len(rows) < 6 {
+		rows = append(rows, []string{"", "", "", "", "", "", ""})
 	}
+
 	t.Rows = rows
+	t.ColumnWidths = []int{3, 16, 6, ptrW, asnW, 4, 6}
+
+	// Styles: header = black-on-cyan, selected = black-on-white (bright), others default
+	t.RowStyles = map[int]ui.Style{
+		0: ui.NewStyle(ui.ColorBlack, ui.ColorCyan),
+	}
+	if ipCursor >= 0 && ipCursor+1 < len(rows) {
+		t.RowStyles[ipCursor+1] = ui.NewStyle(ui.ColorBlack, ui.ColorWhite, ui.ModifierBold)
+	}
 }
 
 // fillPathsTable updates a paths table widget in-place.
-func fillPathsTable(t *widgets.Table, paths []TopKV) {
+// tableW is the actual char width of this table widget.
+func fillPathsTable(t *widgets.Table, paths []TopKV, tableW int) {
+	pathW := tableW - 3 - 6 - 8 // subtract #, Hits, borders
+	if pathW < 20 {
+		pathW = 20
+	}
+
 	header := []string{"#", "Path", "Hits"}
 	rows := [][]string{header}
 
-	limit := len(paths)
-	if limit > 14 {
-		limit = 14
-	}
-	for i, p := range paths[:limit] {
+	for i, p := range paths {
 		path := p.Key
-		if len(path) > 48 {
-			path = path[:46] + ".."
+		if len(path) > pathW {
+			path = path[:pathW-2] + ".."
 		}
 		rows = append(rows, []string{
 			fmt.Sprintf("%2d", i+1),
@@ -311,10 +336,33 @@ func fillPathsTable(t *widgets.Table, paths []TopKV) {
 			fmt.Sprintf("%d", p.Count),
 		})
 	}
-	for len(rows) < 10 {
+	for len(rows) < 6 {
 		rows = append(rows, []string{"", "", ""})
 	}
 	t.Rows = rows
+	t.ColumnWidths = []int{3, pathW, 6}
+}
+
+// blockIPLive blocks an IP by calling the cfm binary (same process, root).
+// Returns a brief status string for the UI.
+func blockIPLive(ip string) string {
+	if ip == "" {
+		return "no IP selected"
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cfm"
+	}
+	cmd := exec.Command(exe, "block", ip)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("block %s FAILED: %v", ip, err)
+	}
+	msg := strings.TrimSpace(string(out))
+	if len(msg) > 60 {
+		msg = msg[:58] + ".."
+	}
+	return "✔ blocked " + ip + "  " + msg
 }
 
 // ── main entry point ─────────────────────────────────────────────────────────
@@ -391,13 +439,11 @@ func RunLiveDrilldown(baseURL, host string) error {
 
 	// IP table (persistent – rect set once in doLayout, rows updated in-place)
 	ipTable := widgets.NewTable()
-	ipTable.Title = " ◉ Top IPs — enriched "
+	ipTable.Title = " ◉ Top IPs — ↑↓ navigate  b=block "
 	ipTable.RowSeparator = false
 	ipTable.FillRow = true
 	ipTable.BorderStyle = ui.NewStyle(ui.ColorCyan)
-	ipTable.RowStyles = map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorCyan)}
-	ipTable.ColumnWidths = []int{3, 16, 5, 40, 4, 5}
-	fillIPTable(ipTable, nil)
+	fillIPTable(ipTable, nil, 60, -1)
 
 	// Paths table (persistent)
 	pathsTable := widgets.NewTable()
@@ -406,16 +452,23 @@ func RunLiveDrilldown(baseURL, host string) error {
 	pathsTable.FillRow = true
 	pathsTable.BorderStyle = ui.NewStyle(ui.ColorYellow)
 	pathsTable.RowStyles = map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow)}
-	pathsTable.ColumnWidths = []int{3, 50, 6}
-	fillPathsTable(pathsTable, nil)
+	fillPathsTable(pathsTable, nil, 40)
 
 	// Status bar
 	statusBar := widgets.NewParagraph()
 	statusBar.Border = false
 	statusBar.TextStyle = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
 
+	// IP cursor state
+	ipCursor := -1 // -1 = none selected
+	lastBlockMsg := ""
+
 	// ── layout ───────────────────────────────────────────────────────────────
 
+	var (
+		ipTableW  int // actual char width of IP table (for dynamic columns)
+		ipLimit   int // how many IPs fit in the table
+	)
 	var doLayout func()
 
 	doLayout = func() {
@@ -454,6 +507,25 @@ func RunLiveDrilldown(baseURL, host string) error {
 
 		ys := yTable + tableH
 		statusBar.SetRect(0, ys, W, ys+statusH)
+
+		// track widths for dynamic columns
+		ipTableW = ipSplit - 2 // subtract border
+		pathTableW := W - ipSplit - 2
+		_ = pathTableW
+
+		// how many IP rows fit (minus 1 header, 1 padding)
+		ipLimit = tableH - 2
+		if ipLimit < 5 {
+			ipLimit = 5
+		}
+		if ipLimit > 40 {
+			ipLimit = 40
+		}
+
+		// clamp cursor
+		if ipCursor >= ipLimit {
+			ipCursor = ipLimit - 1
+		}
 	}
 
 	doLayout()
@@ -535,11 +607,16 @@ func RunLiveDrilldown(baseURL, host string) error {
 		rtGroup.Title = fmt.Sprintf(" ⏱ Response Time  cur=[%.0fms](fg:magenta)  max=[%.0fms](fg:red) ",
 			snap.RT*1000, maxRT)
 
-		// IP table — update rows in-place, rect stays from doLayout
-		fillIPTable(ipTable, snap.EnrichedIPs)
+		// IP table — dynamic columns + cursor highlight
+		ipSlice := snap.EnrichedIPs
+		if len(ipSlice) > ipLimit {
+			ipSlice = ipSlice[:ipLimit]
+		}
+		fillIPTable(ipTable, ipSlice, ipTableW, ipCursor)
 
-		// Paths table — update rows in-place
-		fillPathsTable(pathsTable, snap.TopPaths)
+		// Paths table — dynamic path column width
+		pathTableW := W - (W*6/10) - 2
+		fillPathsTable(pathsTable, snap.TopPaths, pathTableW)
 
 		// status bar
 		ts := time.Now().Format("15:04:05")
@@ -547,9 +624,17 @@ func RunLiveDrilldown(baseURL, host string) error {
 		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
 			chalHint = "[c] remove challenge"
 		}
+		ipHint := "[↑↓] navigate IPs  [b] block"
+		if ipCursor >= 0 && ipCursor < len(snap.EnrichedIPs) {
+			ipHint = fmt.Sprintf("[↑↓] IP#%d: %s  [b] block", ipCursor+1, snap.EnrichedIPs[ipCursor]["ip"])
+		}
+		blockLine := ""
+		if lastBlockMsg != "" {
+			blockLine = "  │  " + lastBlockMsg
+		}
 		statusBar.Text = fmt.Sprintf(
-			" [q] quit  [r] refresh  [%s]  │  %s  │  tick #%d  │  RPS: %.2f",
-			chalHint, ts, tick, snap.RPS,
+			" [q] quit  [r] refresh  [%s]  │  %s  │  %s%s  │  tick #%d",
+			chalHint, ipHint, ts, blockLine, tick,
 		)
 
 		ui.Clear()
@@ -603,6 +688,33 @@ func RunLiveDrilldown(baseURL, host string) error {
 				chalToggle(snap)
 				// re-fetch immediately so the badge updates
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
+				renderAll(snap, fetchErr, tickN)
+			case "<Up>", "k":
+				if ipCursor < 0 {
+					ipCursor = 0
+				} else if ipCursor > 0 {
+					ipCursor--
+				}
+				renderAll(snap, fetchErr, tickN)
+			case "<Down>", "j":
+				maxIdx := len(snap.EnrichedIPs) - 1
+				if maxIdx > ipLimit-1 {
+					maxIdx = ipLimit - 1
+				}
+				if ipCursor < maxIdx {
+					ipCursor++
+				} else if ipCursor < 0 {
+					ipCursor = 0
+				}
+				renderAll(snap, fetchErr, tickN)
+			case "b", "B":
+				// Block the selected IP
+				if ipCursor >= 0 && ipCursor < len(snap.EnrichedIPs) {
+					ip := snap.EnrichedIPs[ipCursor]["ip"]
+					lastBlockMsg = blockIPLive(ip)
+				} else {
+					lastBlockMsg = "select an IP first (↑↓)"
+				}
 				renderAll(snap, fetchErr, tickN)
 			case "r", "R":
 				// force refresh
@@ -670,18 +782,49 @@ func RunLiveTop(baseURL string, limit int) error {
 	table.FillRow = true
 	table.BorderStyle = ui.NewStyle(ui.ColorWhite)
 
+	// Global IP panel (bottom-right, always visible)
+	ipPanel := widgets.NewTable()
+	ipPanel.Title = " ◉ Global Top IPs — ↑↓/j/k navigate  b=block "
+	ipPanel.RowSeparator = false
+	ipPanel.FillRow = true
+	ipPanel.BorderStyle = ui.NewStyle(ui.ColorCyan)
+	fillIPTable(ipPanel, nil, 60, -1)
+
 	statusBar := widgets.NewParagraph()
 	statusBar.Border = false
 	statusBar.TextStyle = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
 
 	// ── layout ───────────────────────────────────────────────────────────────
 
+	var (
+		ipPanelW   int
+		ipPanelLimit int
+	)
+
 	var doLayout func()
 	doLayout = func() {
 		W, H = ui.TerminalDimensions()
+		// split: top 60% vhosts, bottom 40% IPs
+		splitY := H * 60 / 100
+		if splitY < 8 {
+			splitY = 8
+		}
+		if H-splitY < 8 {
+			splitY = H - 8
+		}
 		header.SetRect(0, 0, W, 3)
-		table.SetRect(0, 3, W, H-3)
+		table.SetRect(0, 3, W, splitY)
+		ipPanel.SetRect(0, splitY, W, H-3)
 		statusBar.SetRect(0, H-3, W, H)
+
+		ipPanelW = W - 2
+		ipPanelLimit = (H - 3 - splitY) - 2
+		if ipPanelLimit < 5 {
+			ipPanelLimit = 5
+		}
+		if ipPanelLimit > 40 {
+			ipPanelLimit = 40
+		}
 	}
 	doLayout()
 
@@ -690,11 +833,15 @@ func RunLiveTop(baseURL string, limit int) error {
 	var (
 		rows       []ShortRow        // latest fetched rows (already sorted)
 		challenged map[string]string // host → "manual"|"auto" for active challenges
-		cursor     int               // selected row index (0-based into rows)
+		globalIPs  []map[string]string // global top IPs (from hot-ips endpoint)
+		ipCursor   int               // 0-based cursor into globalIPs (-1=none)
+		lastBlockMsg string
+		cursor     int               // selected vhost row index
 		sortIdx    int               // index into sortKeys
 		lastErr    error
 		tickN      int
 	)
+	ipCursor = -1
 
 	// fetchChallenged fetches the full active challenge list once per tick.
 	fetchChallenged := func() map[string]string {
@@ -716,6 +863,41 @@ func RunLiveTop(baseURL string, limit int) error {
 			m[v.Host] = v.Mode
 		}
 		return m
+	}
+
+	// fetchGlobalIPs fetches the global hot-IPs list (cross-vhost).
+	fetchGlobalIPs := func() []map[string]string {
+		u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=50", baseURL)
+		r, err := http.Get(u)
+		if err != nil {
+			return nil
+		}
+		defer r.Body.Close()
+		// hot-ips returns []HotIPRow
+		var rows []struct {
+			IP      string `json:"ip"`
+			Req     int    `json:"req"`
+			Vhosts  int    `json:"vhosts"`
+			PTR     string `json:"ptr"`
+			ASN     string `json:"asn"`
+			ASNName string `json:"asn_name"`
+			Country string `json:"country"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
+			return nil
+		}
+		out := make([]map[string]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, map[string]string{
+				"ip":       r.IP,
+				"count":    fmt.Sprintf("%d", r.Req),
+				"ptr":      r.PTR,
+				"asn":      r.ASN,
+				"asn_name": r.ASNName,
+				"country":  r.Country,
+			})
+		}
+		return out
 	}
 
 	// fetchAndSort fetches top-short and sorts by current sort key.
@@ -745,8 +927,13 @@ func RunLiveTop(baseURL string, limit int) error {
 		if cursor < 0 {
 			cursor = 0
 		}
-		// refresh challenge state in same tick
+		// refresh challenge state + global IPs in same tick
 		challenged = fetchChallenged()
+		globalIPs = fetchGlobalIPs()
+		// clamp ipCursor
+		if ipCursor >= len(globalIPs) {
+			ipCursor = len(globalIPs) - 1
+		}
 	}
 
 	// buildTableRows renders the rows slice into table widget rows.
@@ -841,25 +1028,40 @@ func RunLiveTop(baseURL string, limit int) error {
 		}
 
 		header.Text = fmt.Sprintf(
-			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  selected:[%s](fg:cyan,mod:bold)%s  tick:[%d](fg:white)  [%s](fg:white)",
+			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  vhost:[%s](fg:cyan,mod:bold)%s  tick:[%d](fg:white)  [%s](fg:white)",
 			statusStr, sortKey, selectedHost, chalBadge, tickN, ts,
 		)
 
 		buildTableRows()
 
+		// Global IP panel
+		ipSlice := globalIPs
+		if len(ipSlice) > ipPanelLimit {
+			ipSlice = ipSlice[:ipPanelLimit]
+		}
+		fillIPTable(ipPanel, ipSlice, ipPanelW, ipCursor)
+
 		chalHint := "[c] challenge"
 		if selectedChal == "manual" {
 			chalHint = "[c] remove challenge"
 		} else if selectedChal == "auto" {
-			chalHint = "[c] add manual challenge"
+			chalHint = "[c] add manual"
+		}
+		ipHint := "[j/k] navigate IPs  [b] block"
+		if ipCursor >= 0 && ipCursor < len(globalIPs) {
+			ipHint = fmt.Sprintf("[j/k] IP#%d: %s  [b] block", ipCursor+1, globalIPs[ipCursor]["ip"])
+		}
+		blockLine := ""
+		if lastBlockMsg != "" {
+			blockLine = "  │  " + lastBlockMsg
 		}
 		statusBar.Text = fmt.Sprintf(
-			" [↑↓] navigate  [Enter] drill  [%s]  [s] sort (%s)  [q] quit  │  top %d  🔒=challenged",
-			chalHint, sortKey, limit,
+			" [↑↓] vhosts  [Enter] drill  [%s]  [s] sort(%s)  │  %s%s  [q] quit",
+			chalHint, sortKey, ipHint, blockLine,
 		)
 
 		ui.Clear()
-		ui.Render(header, table, statusBar)
+		ui.Render(header, table, ipPanel, statusBar)
 	}
 
 	// chalToggleSelected adds/removes a 30m manual challenge on the selected vhost.
@@ -904,13 +1106,14 @@ func RunLiveTop(baseURL string, limit int) error {
 				fetchAndSort()
 				renderAll()
 
-			case "<Up>", "k":
+			// ── VHOST navigation (↑↓) ──────────────────────────────────────────
+			case "<Up>":
 				if cursor > 0 {
 					cursor--
 				}
 				renderAll()
 
-			case "<Down>", "j":
+			case "<Down>":
 				if cursor < len(rows)-1 {
 					cursor++
 				}
@@ -923,6 +1126,37 @@ func RunLiveTop(baseURL string, limit int) error {
 			case "<End>":
 				if len(rows) > 0 {
 					cursor = len(rows) - 1
+				}
+				renderAll()
+
+			// ── IP panel navigation (j/k) ───────────────────────────────────────
+			case "k":
+				if ipCursor <= 0 {
+					ipCursor = 0
+				} else {
+					ipCursor--
+				}
+				renderAll()
+
+			case "j":
+				maxIP := len(globalIPs) - 1
+				if maxIP > ipPanelLimit-1 {
+					maxIP = ipPanelLimit - 1
+				}
+				if ipCursor < maxIP {
+					ipCursor++
+				} else if ipCursor < 0 {
+					ipCursor = 0
+				}
+				renderAll()
+
+			// ── Block selected IP ───────────────────────────────────────────────
+			case "b", "B":
+				if ipCursor >= 0 && ipCursor < len(globalIPs) {
+					ip := globalIPs[ipCursor]["ip"]
+					lastBlockMsg = blockIPLive(ip)
+				} else {
+					lastBlockMsg = "select an IP first (j/k to navigate IP panel)"
 				}
 				renderAll()
 
