@@ -2,17 +2,19 @@
 package detectors
 
 import (
-	"os"
-	"strings"
-	"time"
 	"bufio"
 	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"time"
+
+	"cfm/internal/apiserver"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
-
-	"fmt"
 )
 
 
@@ -111,18 +113,17 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
         }
 
 
-        // API server (ctx-bound)
-        if w.cfg.APIListen != "" {
 
-            w.srvWG.Add(1)
-            go func() {
-                defer w.srvWG.Done()
-                if err := w.eng.ServeHTTPWithContext(pctx, w.cfg.APIListen); err != nil {
-                    logging.Logf("[webdetector] API server exited: %v", err)
-                }
-            }()
+		// Register webdetector + challenge routes onto the shared apiserver.
+		apiserver.Register(func(m *http.ServeMux) {
+			w.eng.RegisterHTTP(m)
+		})
+		logging.Logf("[webdetector] routes registered on shared apiserver")
 
-        }
+
+		if strings.TrimSpace(w.cfg.APIListen) != "" {
+			logging.Logf("[webdetector] API_LISTEN is deprecated and ignored; using shared apiserver")
+		}
 
 
         // NginxBridge decision socket — same lifecycle as API server
@@ -515,7 +516,8 @@ cfg := webdet.Config{
 	LongFactor: kvInt(kv, "LONG_FACTOR", 10),
 	MinScore:   kvFlt(kv, "MIN_SCORE", 0.60),
 
-	APIListen: kvStrClean(kv, "API_LISTEN", "127.0.0.1:9070"),
+// Deprecated: webdetector routes are now served by the shared apiserver.
+APIListen: kvStrClean(kv, "API_LISTEN", ""),
 
         ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
         ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),

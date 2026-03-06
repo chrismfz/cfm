@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/user"
@@ -26,10 +24,9 @@ import (
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/notify"
 
-	//Debugging profiler for CPU usage
-	"net/http"
-	"net/http/pprof"
-	//Debugging End
+// api server for debug and api endpoints //
+"cfm/internal/apiserver"
+
 	nflog "cfm/internal/nflog"
 
 	mmdb "cfm/internal/maxmindupdater"
@@ -43,7 +40,6 @@ import (
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
 	"cfm/internal/cli"
-	"cfm/internal/unblock"
 )
 
 var (
@@ -69,205 +65,6 @@ func cfgDir() string {
 	return d
 }
 
-
-
-// ----------------------------------------------------------------------------
-// Debugger - Start in runDaemon
-// ----------------------------------------------------------------------------
-// startDebug launches a local pprof/metrics server on given address (e.g. "127.0.0.1:6060")
-//
-// Access only from localhost unless you change the bind address.
-// Safe to leave running permanently; overhead is near zero until endpoints hit.
-//
-// Example usage when daemon is running:
-//
-//   # 60-second CPU profile → load in go tool pprof
-//   curl -o /tmp/cfm.cpu http://127.0.0.1:6060/debug/pprof/profile?seconds=60
-//   go tool pprof /usr/bin/cfm /tmp/cfm.cpu
-//
-//   # Goroutine dump (text)
-//   curl http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
-//
-//   # Heap profile
-//   curl -o /tmp/cfm.heap http://127.0.0.1:6060/debug/pprof/heap
-//   go tool pprof /usr/bin/cfm /tmp/cfm.heap
-//
-//   # Metrics (if promhttp enabled)
-//   curl http://127.0.0.1:6060/metrics
-//
-
-// startDebug starts the internal HTTP server that hosts:
-//   - pprof endpoints       (/debug/pprof/)
-//   - manual IP unblock     (/unblock)
-//   - MySQL governor API    (/api/v1/mysql/) — only if gov != nil
-//
-// gov may be nil when MySQL is not installed / credentials not yet configured
-// in that case the governor routes are simply not registered and everything else
-// works normally.
-
-func startDebug(addr string, gov *mysql.Governor) {
-    // Resolve cfgDir once (so /unblock’s background job can edit cfm.deny)
-    var cfgDir string
-    if d, ok := cli.ResolveConfigDir(""); ok {
-        cfgDir = d
-    }
-
-    // Grab the already-initialized backend (daemon mode)
-    be := getBackend()
-mux := http.NewServeMux()
-
-
-    // /unblock: fast local unblock + immediate response, then background cleanup (CSF/Fail2Ban/Imunify)
-        mux.HandleFunc("/unblock", func(w http.ResponseWriter, r *http.Request) {
-        start := time.Now()
-        w.Header().Set("Content-Type", "application/json")
-
-        // ---- Parse IP from query, form, JSON, or raw body ----
-        ipStr := strings.TrimSpace(r.URL.Query().Get("ip"))
-        if ipStr == "" && r.Method == http.MethodPost {
-            ct := strings.ToLower(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
-            switch {
-            case ct == "application/json":
-                var tmp struct{ IP string `json:"ip"` }
-                _ = json.NewDecoder(r.Body).Decode(&tmp)
-                ipStr = strings.TrimSpace(tmp.IP)
-            case ct == "application/x-www-form-urlencoded" || strings.HasPrefix(ct, "multipart/form-data"):
-                if err := r.ParseForm(); err == nil {
-                    ipStr = strings.TrimSpace(r.Form.Get("ip"))
-                    if ipStr == "" && len(r.Form) == 1 {
-                        // Allow bare payload: -d "1.2.3.4"
-                        for k := range r.Form { ipStr = strings.TrimSpace(k); break }
-                    }
-                }
-            default:
-                // text/plain or unknown: support "IP" or "IP # comment"
-                b, _ := io.ReadAll(r.Body)
-                s := strings.TrimSpace(string(b))
-                if i := strings.IndexAny(s, " \t#"); i > 0 { s = strings.TrimSpace(s[:i]) }
-                ipStr = s
-            }
-        }
-
-        ip := net.ParseIP(ipStr)
-        if ip == nil {
-            w.WriteHeader(http.StatusBadRequest)
-            _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid or missing ip"})
-            return
-        }
-        if be == nil {
-            w.WriteHeader(http.StatusServiceUnavailable)
-            _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no firewall backend"})
-            return
-        }
-
-        // ---- FAST local path: detect + remove from nft
-        wasBlocked := false
-        if entries, err := be.ListBlocks(); err == nil {
-            for _, e := range entries {
-                if e.IP.Equal(ip) { wasBlocked = true; break }
-            }
-        }
-        _ = be.RemoveBlock(ip) // idempotent; fine if not present
-
-        // (A) capture requester once (for logs later)
-        requester := func() string {
-            if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-                parts := strings.Split(xf, ",")
-                return strings.TrimSpace(parts[0])
-            }
-            host, _, err := net.SplitHostPort(r.RemoteAddr)
-            if err != nil { return r.RemoteAddr }
-            return host
-        }()
-
-        // ---- Immediate response
-        _ = json.NewEncoder(w).Encode(map[string]any{
-            "ok":          true,
-            "ip":          ip.String(),
-            "was_blocked": wasBlocked,
-            "duration_ms": time.Since(start).Milliseconds(),
-            "bg_cleanup":  true,
-        })
-
-        // ---- Fire-and-forget: CSF / Fail2Ban / Imunify (and logs) ----
-        go func(ip net.IP, requester string) {
-            bgStart := time.Now()
-            ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-            defer cancel()
-
-            // Re-run local removals idempotently + cfm.deny cleanup + csf/fail2ban/imunify + feed detection
-            res, _ := unblock.Do(ctx, ip, unblock.Options{
-                BE:            be,
-                ConfigDir:     cfgDir,
-                TempWhitelist: true,     // add allow if feed-blocked (override); set to false if you don’t want this
-                AllowTTL:      nil,      // e.g. &ttl := 24*time.Hour
-                Reporter:      nil,      // no API chatter from this endpoint
-                ReportWhy:     "debug-endpoint",
-                SendAPI:       false,
-                Fail2BanUnban: true,
-                // RemoveFromFeeds: true, // enable if you also want to delete from block_ext_* host sets (not recommended)
-            })
-
-            // (B) Summarize to api.log (single summary + per-step)
-            elapsed := time.Since(bgStart)
-            logging.LogfAPI("[unblock] requester=%s ip=%s took=%s was_blocked=%t from_feeds=%s whitelisted=%t steps=%d",
-                requester, ip.String(), elapsed, res.WasBlocked, strings.Join(res.FromFeeds, ","), res.Whitelisted, len(res.Steps))
-
-            for _, s := range res.Steps {
-                detail := s.Detail
-                if len(detail) > 200 { detail = detail[:200] + "…" }
-                logging.LogfAPI("[unblock.step] ip=%s src=%s action=%s dur=%s feeds=%v err=%q detail=%q",
-                    ip.String(), s.Source, s.Action, s.Dur, s.Feeds, s.Err, detail)
-            }
-        }(ip, requester)
-    })
-
-
-
-
-// pprof endpoints — registered on our private mux only
-    mux.HandleFunc("/debug/pprof/", pprof.Index)
-    mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-    mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-    mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-    mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-
-
-
-    // MySQL governor API — same port, no new port needed
-    if gov != nil {
-        gov.RegisterHTTP(mux)
-        logging.Logf("[debug] mysql governor API registered on %s/api/v1/mysql/", addr)
-    }
-
-
-// Optional: small banner without requiring logging.Init
-go func(a string) {
-    time.Sleep(50 * time.Millisecond)
-
-    srv := &http.Server{
-        Addr:              a,
-        Handler:           mux,
-        ReadHeaderTimeout: 2 * time.Second,
-        ReadTimeout:       5 * time.Second,
-        WriteTimeout:      10 * time.Second,
-        IdleTimeout:       60 * time.Second,
-        MaxHeaderBytes:    1 << 20, // 1MB
-    }
-
-    // Start server
-    if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-        // log if you want: logging.Logf("debug HTTP: %v", err)
-    }
-}(addr)
-
-
-}
-
-
-
-
-
 // ----------------------------------------------------------------------------
 // CLI entrypoint
 // ----------------------------------------------------------------------------
@@ -281,6 +78,39 @@ func requireRoot() {
         os.Exit(1)
     }
 }
+
+
+// Base URL helper for API Address and loader //
+func apiBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("CFM_API_ADDR")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+
+	dir, _ := cli.ResolveConfigDir("")
+	if dir == "" {
+		return "http://127.0.0.1:6060"
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
+	if err != nil {
+		return "http://127.0.0.1:6060"
+	}
+
+	cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
+	if err != nil || cfg == nil {
+		return "http://127.0.0.1:6060"
+	}
+
+	host := strings.TrimSpace(cfg.Debug.ListenAddress)
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+
+	return fmt.Sprintf("http://%s:%d", host, cfg.Debug.Port)
+}
+
+
 
 
 
@@ -337,28 +167,20 @@ case "ssl", "sslcollector", "ssl-collector":
 		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))
 
 
-        case "webtop" , "nginx-top" , "httpd-top":
-            // Default to the same address as API_LISTEN
-            addr := os.Getenv("CFM_WEBDETECTOR_ADDR")
-            if addr == "" {
-                addr = "http://127.0.0.1:9070"
-            }
-            if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
-                fmt.Fprintln(os.Stderr, "webtop error:", err)
-                os.Exit(1)
-            }
 
+case "webtop", "nginx-top", "httpd-top":
+	addr := apiBaseURL()
+	if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
+		fmt.Fprintln(os.Stderr, "webtop error:", err)
+		os.Exit(1)
+	}
 
-case "mysqltop", "mysql-top" , "mysql" :
-    addr := os.Getenv("CFM_API_ADDR")
-    if addr == "" {
-        addr = "http://127.0.0.1:6060"
-    }
-    if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
-        fmt.Fprintln(os.Stderr, "mysqltop error:", err)
-        os.Exit(1)
-    }
-
+case "mysqltop", "mysql-top", "mysql":
+	addr := apiBaseURL()
+	if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
+		fmt.Fprintln(os.Stderr, "mysqltop error:", err)
+		os.Exit(1)
+	}
 
 
 
@@ -444,10 +266,6 @@ step := func(name string) func() {
 		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
-//Start Debug//
-//startDebug()
-// Debug server will be started after we parse cfm.conf in onCFMConfChanged (respects LISTEN_ADDRESS/PORT)
-//End Debug//
 
 
 	// Backend
@@ -803,23 +621,29 @@ for _, d := range []struct{ path string; mode os.FileMode }{
 		}
 	}
 
-	// ── applyDebugServer ─────────────────────────────────────────────────────────
-	// Start-once: MySQL governor + debug HTTP server.
-	applyDebugServer := func(cfg *cfgpkg.Config) {
-		if os.Getenv("CFM_DEBUG_HTTP_STARTED") != "" {
-			return
-		}
-		debugAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
-		govCfg, ok := detpkg.GetPendingGovernorConfig()
-		var cfgPtr *mysql.GovernorConfig
-		if ok {
-			cfgPtr = &govCfg
-		}
-		gov := govLc.StartOnce(ctx, cfgPtr)
-		startDebug(debugAddr, gov)
-		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
-		logging.Logf("[debug] http server on %s", debugAddr)
-	}
+// ── applyDebugServer ─────────────────────────────────────────────────────────
+// ── NEW applyDebugServer ─────────────────────────────────────────────────────
+
+applyDebugServer := func(cfg *cfgpkg.Config) {
+    if os.Getenv("CFM_DEBUG_HTTP_STARTED") != "" {
+        return
+    }
+
+    // Start the MySQL governor (unchanged logic — was already here).
+    govCfg, ok := detpkg.GetPendingGovernorConfig()
+    var cfgPtr *mysql.GovernorConfig
+    if ok {
+        cfgPtr = &govCfg
+    }
+    gov := govLc.StartOnce(ctx, cfgPtr)
+
+    // Start the unified internal HTTP server.
+    // Registers pprof, /unblock, and mysql governor routes internally.
+    go apiserver.Start(ctx, cfg, be, cfgDir, gov)
+
+    _ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
+    logging.Logf("[apiserver] http server on %s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+}
 
 	// ── applyNFTRules ────────────────────────────────────────────────────────────
 	// Stateless: flood rules, ports policy, SMTP block, reporter, NFLOG snooper.

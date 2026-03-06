@@ -133,6 +133,10 @@ func RunWebTop(baseURL string, args []string) error {
             }
             return runIPTop(baseURL, limit)
 
+case "text":
+	return runTopSummary(baseURL)
+
+
         case "long":
             limit := 20
             if len(args) > 1 {
@@ -151,7 +155,7 @@ func RunWebTop(baseURL string, args []string) error {
             // cfm webtop live <vhost>  → direct drilldown
             // cfm webtop live [N]      → picker with custom limit
             if len(args) == 1 {
-                return RunLiveTop(baseURL, 20)
+                return RunLiveTop(baseURL, 30)
             }
             // second arg: a number means limit, anything else is a vhost
             if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
@@ -317,18 +321,22 @@ return fmt.Errorf("unexpected arg: %s", a)
 		return runTopDrilldown(baseURL, host)
 	}
 
-	// No host => summary/top mode
-	if inTop {
-		return runTopSummaryExt(baseURL, limit, sortKey)
-	}
-	// plain "cfm webtop"
-	return runTopSummary(baseURL)
+// No host => summary/top mode
+if inTop {
+	return runTopSummaryExt(baseURL, limit, sortKey)
+}
+
+// plain "cfm webtop" -> live picker
+return RunLiveTop(baseURL, 30)
+
 }
 
 // legacy simple summary (no limit/sort) – now just a wrapper
 func runTopSummary(baseURL string) error {
 	return runTopSummaryExt(baseURL, 0, "")
 }
+
+
 
 // new extended summary with limit/sort
 func runTopSummaryExt(baseURL string, limit int, sortKey string) error {

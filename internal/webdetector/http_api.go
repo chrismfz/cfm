@@ -13,35 +13,44 @@ import (
 
 )
 
-// ServeHTTPWithContext starts a small HTTP server for webdetector API.
-// When ctx is canceled, the server is gracefully shut down.
-func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
-	mux := http.NewServeMux()
+
+// RegisterHTTP wires all webdetector + challenge endpoints onto the provided mux.
+func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
+	if mux == nil {
+		return
+	}
+
 	mux.HandleFunc("/api/v1/webdet/top-short", e.handleTopShort)
 	// aliases (compat)
 	mux.HandleFunc("/api/v1/webdet/top", e.handleTopShort)
 	mux.HandleFunc("/api/v1/webdet/suspicious", e.handleSuspicious)
 	mux.HandleFunc("/api/v1/webdet/drilldown", e.handleDrilldown)
 	mux.HandleFunc("/api/v1/webdet/hot-ips", e.handleHotIPs)
-        mux.HandleFunc("/api/v1/webdet/long-top", e.handleLongTop)
-        mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
-        mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
+	mux.HandleFunc("/api/v1/webdet/long-top", e.handleLongTop)
+	mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
+	mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
-
-	// summary (new)
 	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
 
-    // Challenge JSON API
-    mux.HandleFunc("/api/v1/challenge/summary", e.handleChallengeSummary)
-    mux.HandleFunc("/api/v1/challenge/vhosts", e.handleChallengeVhosts)
-    mux.HandleFunc("/api/v1/challenge/vhost",  e.handleChallengeVhost)  // ?host=
-    mux.HandleFunc("/api/v1/challenge/ips",    e.handleChallengeIPs)
-    mux.HandleFunc("/api/v1/challenge/ip",     e.handleChallengeIP)     // ?ip=
-    mux.HandleFunc("/api/v1/challenge/events", e.handleChallengeEvents)
-    mux.HandleFunc("/api/v1/challenge/vhost/add",    e.handleChallengeVhostAdd)
-    mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
-    mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
+	// Challenge JSON API
+	mux.HandleFunc("/api/v1/challenge/summary", e.handleChallengeSummary)
+	mux.HandleFunc("/api/v1/challenge/vhosts", e.handleChallengeVhosts)
+	mux.HandleFunc("/api/v1/challenge/vhost", e.handleChallengeVhost) // ?host=
+	mux.HandleFunc("/api/v1/challenge/ips", e.handleChallengeIPs)
+	mux.HandleFunc("/api/v1/challenge/ip", e.handleChallengeIP) // ?ip=
+	mux.HandleFunc("/api/v1/challenge/events", e.handleChallengeEvents)
+	mux.HandleFunc("/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd)
+	mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
+	mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
+}
+
+
+// ServeHTTPWithContext starts a small standalone HTTP server for webdetector API.
+// Prefer RegisterHTTP when running under the shared apiserver.
+func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
+	mux := http.NewServeMux()
+	e.RegisterHTTP(mux)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -49,34 +58,33 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-    // Shutdown on ctx cancel.
-    go func() {
-        <-ctx.Done()
-        ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-        defer cancel()
-        _ = srv.Shutdown(ctx2)
-    }()
-
+	// Shutdown on ctx cancel.
+	go func() {
+		<-ctx.Done()
+		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx2)
+	}()
 
 	// If addr looks like "unix:/path", listen on unix socket instead.
 	if len(addr) > 5 && addr[:5] == "unix:" {
 		path := addr[5:]
-	        _ = os.Remove(path)
+		_ = os.Remove(path)
 		l, err := net.Listen("unix", path)
 		if err != nil {
 			logging.Logf("[webdetector] HTTP listen (unix %s) failed: %v", path, err)
 			return err
 		}
-        defer func() {
-            _ = l.Close()
-            _ = os.Remove(path)
-        }()
+		defer func() {
+			_ = l.Close()
+			_ = os.Remove(path)
+		}()
 		logging.Logf("[webdetector] HTTP API listening on unix:%s", path)
-        if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
-            logging.Logf("[webdetector] HTTP server error: %v", err)
-            return err
-        }
-        return nil
+		if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
+			logging.Logf("[webdetector] HTTP server error: %v", err)
+			return err
+		}
+		return nil
 	}
 
 	logging.Logf("[webdetector] HTTP API listening on %s", addr)
@@ -84,8 +92,9 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 		logging.Logf("[webdetector] HTTP server error: %v", err)
 		return err
 	}
-    return nil
+	return nil
 }
+
 
 // ServeHTTP starts the webdetector API server without a cancelable context.
 // Prefer ServeHTTPWithContext when running under a manager that supports reload.

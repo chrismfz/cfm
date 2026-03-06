@@ -1,7 +1,7 @@
+// internal/webdetector/live.go
 package webdetector
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -15,6 +15,8 @@ import (
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
 )
+
+// ── ring buffer helpers ──────────────────────────────────────────────────────
 
 const ringSize = 120 // 2 minutes of history at 1s poll
 
@@ -44,7 +46,10 @@ func (r *ringBuf) slice(n int) []float64 {
 	return out
 }
 
+// ── snapshot types ───────────────────────────────────────────────────────────
+
 type liveSnapshot struct {
+	// from top-short row
 	RPS  float64
 	R2xx float64
 	R3xx float64
@@ -53,24 +58,34 @@ type liveSnapshot struct {
 	Err  float64 // 0-100 %
 	Bot  float64 // 0-100 %
 
+	// from drilldown
 	RT        float64
 	Score     float64
 	UniqueIPs int
-	BotPct    float64
+	BotPct    float64 // 0-100 (from HostDetail.BotPct)
 	HumanPct  float64
 
+	// enriched IPs
 	EnrichedIPs []map[string]string
-	TopPaths    []TopKV
-	Reasons     []string
 
+	// top paths
+	TopPaths []TopKV
+
+	// reasons
+	Reasons []string
+
+	// challenge state
 	ChallengeActive bool
 	ChallengeMode   string // "manual" | "auto" | ""
-	ChallengeExpiry string
+	ChallengeExpiry string // formatted expiry for manual
 }
+
+// ── fetchers ─────────────────────────────────────────────────────────────────
 
 func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	var snap liveSnapshot
 
+	// 1) top-short → find our row for RPS breakdown
 	u1 := baseURL + "/api/v1/webdet/top-short"
 	r1, err := http.Get(u1)
 	if err != nil {
@@ -84,24 +99,25 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	}
 	for _, row := range topResp.Rows {
 		if strings.EqualFold(row.Host, host) {
-			snap.RPS = row.RPS
-			snap.R2xx = row.R2xx
-			snap.R3xx = row.R3xx
-			snap.R4xx = row.R4xx
-			snap.R5xx = row.R5xx
-			snap.Err = row.ErrRatio * 100
-			snap.Bot = row.BotRatio * 100
-			snap.Score = row.Score
-			snap.Reasons = row.Reasons
-			snap.UniqueIPs = row.UniqueIPs
+			snap.RPS      = row.RPS
+			snap.R2xx     = row.R2xx
+			snap.R3xx     = row.R3xx
+			snap.R4xx     = row.R4xx
+			snap.R5xx     = row.R5xx
+			snap.Err      = row.ErrRatio * 100
+			snap.Bot      = row.BotRatio * 100
+			snap.Score    = row.Score
+			snap.Reasons  = row.Reasons
+			snap.UniqueIPs = row.UniqueIPs // ← real count from bucket maps, not capped
 			break
 		}
 	}
 
+	// 2) drilldown → enriched IPs, rt, paths  (?top=25 lifts the default cap of 10)
 	u2 := baseURL + "/api/v1/webdet/drilldown?host=" + url.QueryEscape(host) + "&top=25"
 	r2, err := http.Get(u2)
 	if err != nil {
-		return snap, nil
+		return snap, nil // partial ok – use what we have
 	}
 	defer r2.Body.Close()
 
@@ -113,8 +129,9 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	if b, ok := raw["short"]; ok {
 		_ = json.Unmarshal(b, &detail)
 	}
-	snap.RT = detail.ProcAvgSec
-	snap.BotPct = detail.BotPct
+	snap.RT       = detail.ProcAvgSec
+	// snap.UniqueIPs already set from top-short row above (accurate, uncapped)
+	snap.BotPct   = detail.BotPct
 	snap.HumanPct = math.Max(0, 100-detail.BotPct)
 	snap.EnrichedIPs = detail.EnrichedTopIPs
 	snap.TopPaths = detail.TopPaths
@@ -125,11 +142,13 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 		snap.Reasons = detail.ShortReasons
 	}
 
+	// 3) challenge status
 	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry = fetchChallengeStatus(baseURL, host)
 
 	return snap, nil
 }
 
+// fetchChallengeStatus checks /challenge/vhost/status for the given host.
 func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string) {
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s", baseURL, url.QueryEscape(host))
 	r, err := http.Get(u)
@@ -137,18 +156,17 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry strin
 		return
 	}
 	defer r.Body.Close()
-
 	var result map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
 		return
 	}
 	manualActive, _ := result["manual_active"].(bool)
-	autoActive, _ := result["auto_active"].(bool)
-	expiresAt, _ := result["expires_at"].(string)
-
+	autoActive, _   := result["auto_active"].(bool)
+	expiresAt, _    := result["expires_at"].(string)
 	if manualActive {
 		active = true
-		mode = "manual"
+		mode   = "manual"
+		// trim to HH:MM:SS if it's a full timestamp
 		if len(expiresAt) > 19 {
 			expiry = expiresAt[11:19]
 		} else {
@@ -156,10 +174,12 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry strin
 		}
 	} else if autoActive {
 		active = true
-		mode = "auto"
+		mode   = "auto"
 	}
 	return
 }
+
+// ── layout helpers ───────────────────────────────────────────────────────────
 
 func clamp(v, lo, hi float64) float64 {
 	if v < lo {
@@ -193,36 +213,43 @@ func errColor(pct float64) ui.Color {
 	}
 }
 
+func botColor(pct float64) ui.Color {
+	switch {
+	case pct >= 60:
+		return ui.ColorRed
+	case pct >= 25:
+		return ui.ColorYellow
+	default:
+		return ui.ColorCyan
+	}
+}
+
+// fillIPTable updates an existing table widget in-place with enriched IPs.
+// tableW is the actual pixel/char width of the table (used for dynamic columns).
+// ipCursor is the 0-based selected row (-1 = none).
 func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor int) {
-	// Better width budget:
-	// # | IP | Reqs | PTR | ASN | CC | Score
-	const (
-		numW   = 3
-		ipW    = 16
-		reqW   = 6
-		ccW    = 6
-		scoreW = 5
-	)
-	const overhead = 10
-
-	fixed := numW + ipW + reqW + ccW + scoreW + overhead
+	// Dynamic column layout:
+	//   # (3) | IP (16) | Reqs (6) | PTR (flex) | ASN (flex) | CC (4) | Score (6)
+	// borders + separators ≈ 10 chars overhead
+	fixed := 3 + 16 + 6 + 4 + 6 + 10
 	flex := tableW - fixed
-	if flex < 28 {
-		flex = 28
+	if flex < 20 {
+		flex = 20
 	}
-
-	ptrW := flex * 42 / 100
+	// Split flex 45% PTR, 55% ASN
+	ptrW := flex * 45 / 100
 	asnW := flex - ptrW
-	if ptrW < 12 {
-		ptrW = 12
+	if ptrW < 10 {
+		ptrW = 10
 	}
-	if asnW < 16 {
-		asnW = 16
+	if asnW < 10 {
+		asnW = 10
 	}
 
 	header := []string{"#", "IP", "Reqs", "PTR", "ASN", "CC", "Score"}
 	rows := [][]string{header}
 
+	// Use all available rows (dynamic – set by caller's limit)
 	for i, row := range ips {
 		ip := row["ip"]
 		count := row["count"]
@@ -232,10 +259,12 @@ func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor
 		cc := row["country"]
 		score := row["score"]
 
+		// PTR: trim to column width
 		if len(ptr) > ptrW {
 			ptr = ptr[:ptrW-2] + ".."
 		}
 
+		// ASN: "AS12345 OVH SAS" style, trim to column width
 		asFull := strings.TrimSpace(func() string {
 			if asn == "" {
 				return asnNm
@@ -252,16 +281,9 @@ func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor
 			asFull = asFull[:asnW-2] + ".."
 		}
 
-		if len(cc) > ccW {
-			cc = cc[:ccW-2] + ".."
-		}
-
 		scoreStr := score
 		if scoreStr == "" {
 			scoreStr = "-"
-		}
-		if len(scoreStr) > scoreW {
-			scoreStr = scoreStr[:scoreW]
 		}
 
 		rows = append(rows, []string{
@@ -275,12 +297,15 @@ func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor
 		})
 	}
 
+	// Pad so the table height stays stable
 	for len(rows) < 6 {
 		rows = append(rows, []string{"", "", "", "", "", "", ""})
 	}
 
 	t.Rows = rows
-	t.ColumnWidths = []int{numW, ipW, reqW, ptrW, asnW, ccW, scoreW}
+	t.ColumnWidths = []int{3, 16, 6, ptrW, asnW, 4, 6}
+
+	// Styles: header = black-on-cyan, selected = black-on-white (bright), others default
 	t.RowStyles = map[int]ui.Style{
 		0: ui.NewStyle(ui.ColorBlack, ui.ColorCyan),
 	}
@@ -289,8 +314,10 @@ func fillIPTable(t *widgets.Table, ips []map[string]string, tableW int, ipCursor
 	}
 }
 
+// fillPathsTable updates a paths table widget in-place.
+// tableW is the actual char width of this table widget.
 func fillPathsTable(t *widgets.Table, paths []TopKV, tableW int) {
-	pathW := tableW - 3 - 6 - 8
+	pathW := tableW - 3 - 6 - 8 // subtract #, Hits, borders
 	if pathW < 20 {
 		pathW = 20
 	}
@@ -316,6 +343,8 @@ func fillPathsTable(t *widgets.Table, paths []TopKV, tableW int) {
 	t.ColumnWidths = []int{3, pathW, 6}
 }
 
+// blockIPLive blocks an IP by calling the cfm binary (same process, root).
+// Returns a brief status string for the UI.
 func blockIPLive(ip string) string {
 	if ip == "" {
 		return "no IP selected"
@@ -336,30 +365,38 @@ func blockIPLive(ip string) string {
 	return "✔ blocked " + ip + "  " + msg
 }
 
+// ── main entry point ─────────────────────────────────────────────────────────
+
+// RunLiveDrilldown is `cfm webtop live <vhost>`.
 func RunLiveDrilldown(baseURL, host string) error {
 	if err := ui.Init(); err != nil {
 		return fmt.Errorf("termui init: %w", err)
 	}
 	defer ui.Close()
 
+	// ring buffers
 	var (
-		rbRPS ringBuf
-		rb2xx ringBuf
-		rb3xx ringBuf
-		rb4xx ringBuf
-		rb5xx ringBuf
-		rbErr ringBuf
-		rbBot ringBuf
-		rbHum ringBuf
-		rbRT  ringBuf
+		rbRPS  ringBuf
+		rb2xx  ringBuf
+		rb3xx  ringBuf
+		rb4xx  ringBuf
+		rb5xx  ringBuf
+		rbErr  ringBuf
+		rbBot  ringBuf
+		rbHum  ringBuf
+		rbRT   ringBuf
 	)
 
 	W, H := ui.TerminalDimensions()
 
+	// ── widgets ──────────────────────────────────────────────────────────────
+
+	// Title / header
 	title := widgets.NewParagraph()
 	title.Border = true
 	title.BorderStyle = ui.NewStyle(ui.ColorCyan)
 
+	// RPS line chart (2xx / 4xx / 5xx)
 	rpsChart := widgets.NewPlot()
 	rpsChart.Title = " ◈ Traffic RPS  [cyan=2xx  yellow=4xx  red=5xx] "
 	rpsChart.Data = [][]float64{
@@ -371,6 +408,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 	rpsChart.DrawDirection = widgets.DrawLeft
 	rpsChart.AxesColor = ui.ColorWhite
 
+	// Bot vs Human line chart
 	botChart := widgets.NewPlot()
 	botChart.Title = " 🤖 Bot%  [red=bot  cyan=human] "
 	botChart.Data = [][]float64{
@@ -381,21 +419,25 @@ func RunLiveDrilldown(baseURL, host string) error {
 	botChart.DrawDirection = widgets.DrawLeft
 	botChart.AxesColor = ui.ColorWhite
 
+	// Err% gauge
 	errGauge := widgets.NewGauge()
 	errGauge.Title = " ✖ Error Rate "
 	errGauge.BarColor = ui.ColorRed
 	errGauge.LabelStyle = ui.NewStyle(ui.ColorWhite)
 
+	// RT sparkline
 	rtSpark := widgets.NewSparkline()
 	rtSpark.LineColor = ui.ColorMagenta
 	rtSpark.Data = make([]float64, 60)
 	rtGroup := widgets.NewSparklineGroup(rtSpark)
 	rtGroup.Title = " ⏱ Response Time (ms) "
 
+	// Score gauge
 	scoreGauge := widgets.NewGauge()
 	scoreGauge.Title = " ⚠ Threat Score "
 	scoreGauge.BarColor = ui.ColorYellow
 
+	// IP table (persistent – rect set once in doLayout, rows updated in-place)
 	ipTable := widgets.NewTable()
 	ipTable.Title = " ◉ Top IPs — ↑↓ navigate  b=block "
 	ipTable.RowSeparator = false
@@ -403,6 +445,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 	ipTable.BorderStyle = ui.NewStyle(ui.ColorCyan)
 	fillIPTable(ipTable, nil, 60, -1)
 
+	// Paths table (persistent)
 	pathsTable := widgets.NewTable()
 	pathsTable.Title = " ◎ Top Paths "
 	pathsTable.RowSeparator = false
@@ -411,27 +454,31 @@ func RunLiveDrilldown(baseURL, host string) error {
 	pathsTable.RowStyles = map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow)}
 	fillPathsTable(pathsTable, nil, 40)
 
+	// Status bar
 	statusBar := widgets.NewParagraph()
 	statusBar.Border = false
 	statusBar.TextStyle = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
 
-	ipCursor := -1
+	// IP cursor state
+	ipCursor := -1 // -1 = none selected
 	lastBlockMsg := ""
 
+	// ── layout ───────────────────────────────────────────────────────────────
+
 	var (
-		ipTableW int
-		ipLimit  int
+		ipTableW  int // actual char width of IP table (for dynamic columns)
+		ipLimit   int // how many IPs fit in the table
 	)
 	var doLayout func()
 
 	doLayout = func() {
 		W, H = ui.TerminalDimensions()
 
-		titleH := 3
-		chartH := H / 3
-		gaugeH := 3
+		titleH  := 3
+		chartH  := H / 3
+		gaugeH  := 3
 		statusH := 3
-		tableH := H - titleH - chartH - gaugeH*2 - statusH
+		tableH  := H - titleH - chartH - gaugeH*2 - statusH
 		if tableH < 8 {
 			tableH = 8
 		}
@@ -453,6 +500,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 		rtGroup.SetRect(0, y3, W, y3+gaugeH)
 
 		yTable := y3 + gaugeH
+		// left 60% → IPs, right 40% → paths
 		ipSplit := W * 6 / 10
 		ipTable.SetRect(0, yTable, ipSplit, yTable+tableH)
 		pathsTable.SetRect(ipSplit, yTable, W, yTable+tableH)
@@ -460,8 +508,12 @@ func RunLiveDrilldown(baseURL, host string) error {
 		ys := yTable + tableH
 		statusBar.SetRect(0, ys, W, ys+statusH)
 
-		ipTableW = ipSplit - 2
+		// track widths for dynamic columns
+		ipTableW = ipSplit - 2 // subtract border
+		pathTableW := W - ipSplit - 2
+		_ = pathTableW
 
+		// how many IP rows fit (minus 1 header, 1 padding)
 		ipLimit = tableH - 2
 		if ipLimit < 5 {
 			ipLimit = 5
@@ -470,6 +522,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 			ipLimit = 40
 		}
 
+		// clamp cursor
 		if ipCursor >= ipLimit {
 			ipCursor = ipLimit - 1
 		}
@@ -478,6 +531,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 	doLayout()
 
 	renderAll := func(snap liveSnapshot, lastErr error, tick int) {
+		// title
 		scoreStr := fmt.Sprintf("%.2f", snap.Score)
 		reasons := "-"
 		if len(snap.Reasons) > 0 {
@@ -488,6 +542,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 			statusStr = "✖ API ERROR"
 		}
 
+		// challenge badge
 		chalBadge := ""
 		if snap.ChallengeActive {
 			switch snap.ChallengeMode {
@@ -501,10 +556,17 @@ func RunLiveDrilldown(baseURL, host string) error {
 		}
 
 		title.Text = fmt.Sprintf(
-			" [%s](fg:green) [%s](fg:white,mod:bold)%s   score:[%s](fg:yellow)  err:[%.1f%%](fg:red)  rt:[%.3fs](fg:cyan)  uniqIP:[%d](fg:white)  bot:[%.0f%%](fg:magenta)  reasons:[%s](fg:yellow)",
-			statusStr, host, chalBadge, scoreStr, snap.Err, snap.RT, snap.UniqueIPs, snap.Bot, reasons,
+			" [%s](fg:green) [%s](fg:white,mod:bold)%s   "+
+				"score:[%s](fg:yellow)  err:[%.1f%%](fg:red)  rt:[%.3fs](fg:cyan)  "+
+				"uniqIP:[%d](fg:white)  bot:[%.0f%%](fg:magenta)  reasons:[%s](fg:yellow)",
+			statusStr, host, chalBadge,
+			scoreStr,
+			snap.Err, snap.RT,
+			snap.UniqueIPs, snap.Bot,
+			reasons,
 		)
 
+		// RPS chart - use ring slices
 		chartW := (W / 2) - 4
 		if chartW < 10 {
 			chartW = 10
@@ -515,19 +577,23 @@ func RunLiveDrilldown(baseURL, host string) error {
 		_ = rbRPS
 		_ = rb3xx
 
+		// Bot chart
 		botChart.Data[0] = rbBot.slice(chartW)
 		botChart.Data[1] = rbHum.slice(chartW)
 
+		// Err gauge (0-100)
 		ep := int(clamp(snap.Err, 0, 100))
 		errGauge.Percent = ep
 		errGauge.Label = fmt.Sprintf("%.1f%%", snap.Err)
 		errGauge.BarColor = errColor(snap.Err)
 
+		// Score gauge (0-100)
 		sp := int(clamp(snap.Score*100, 0, 100))
 		scoreGauge.Percent = sp
 		scoreGauge.Label = fmt.Sprintf("%.2f", snap.Score)
 		scoreGauge.BarColor = scoreColor(snap.Score)
 
+		// RT sparkline (convert to ms)
 		rtSpark.Data = make([]float64, len(rbRT.slice(W-4)))
 		for i, v := range rbRT.slice(W - 4) {
 			rtSpark.Data[i] = v * 1000
@@ -538,17 +604,21 @@ func RunLiveDrilldown(baseURL, host string) error {
 				maxRT = v
 			}
 		}
-		rtGroup.Title = fmt.Sprintf(" ⏱ Response Time  cur=[%.0fms](fg:magenta)  max=[%.0fms](fg:red) ", snap.RT*1000, maxRT)
+		rtGroup.Title = fmt.Sprintf(" ⏱ Response Time  cur=[%.0fms](fg:magenta)  max=[%.0fms](fg:red) ",
+			snap.RT*1000, maxRT)
 
+		// IP table — dynamic columns + cursor highlight
 		ipSlice := snap.EnrichedIPs
 		if len(ipSlice) > ipLimit {
 			ipSlice = ipSlice[:ipLimit]
 		}
 		fillIPTable(ipTable, ipSlice, ipTableW, ipCursor)
 
+		// Paths table — dynamic path column width
 		pathTableW := W - (W*6/10) - 2
 		fillPathsTable(pathsTable, snap.TopPaths, pathTableW)
 
+		// status bar
 		ts := time.Now().Format("15:04:05")
 		chalHint := "[c] challenge"
 		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
@@ -571,15 +641,22 @@ func RunLiveDrilldown(baseURL, host string) error {
 		ui.Render(title, rpsChart, botChart, errGauge, scoreGauge, rtGroup, ipTable, pathsTable, statusBar)
 	}
 
+	// chalToggle adds or removes a manual 30m challenge for this vhost.
 	chalToggle := func(snap liveSnapshot) {
+		var err error
 		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
+			// remove it
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(host))
-			_, _ = http.Post(u, "application/json", nil)
+			_, err = http.Post(u, "application/json", nil)
 		} else {
+			// add 30m manual challenge
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(host))
-			_, _ = http.Post(u, "application/json", nil)
+			_, err = http.Post(u, "application/json", nil)
 		}
+		_ = err
 	}
+
+	// ── initial fetch ─────────────────────────────────────────────────────────
 
 	snap, fetchErr := fetchLiveSnapshot(baseURL, host)
 	rbRPS.push(snap.RPS)
@@ -592,6 +669,8 @@ func RunLiveDrilldown(baseURL, host string) error {
 	rbHum.push(clamp(100-snap.Bot, 0, 100))
 	rbRT.push(snap.RT)
 	renderAll(snap, fetchErr, 0)
+
+	// ── event loop ────────────────────────────────────────────────────────────
 
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
@@ -607,6 +686,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 				return nil
 			case "c", "C":
 				chalToggle(snap)
+				// re-fetch immediately so the badge updates
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
 				renderAll(snap, fetchErr, tickN)
 			case "<Up>", "k":
@@ -628,6 +708,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 				}
 				renderAll(snap, fetchErr, tickN)
 			case "b", "B":
+				// Block the selected IP
 				if ipCursor >= 0 && ipCursor < len(snap.EnrichedIPs) {
 					ip := snap.EnrichedIPs[ipCursor]["ip"]
 					lastBlockMsg = blockIPLive(ip)
@@ -636,6 +717,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 				}
 				renderAll(snap, fetchErr, tickN)
 			case "r", "R":
+				// force refresh
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
 				rbRPS.push(snap.RPS)
 				rb2xx.push(snap.R2xx)
@@ -652,6 +734,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 				ui.Clear()
 				renderAll(snap, fetchErr, tickN)
 			}
+
 		case <-tick.C:
 			tickN++
 			snap, fetchErr = fetchLiveSnapshot(baseURL, host)
@@ -669,11 +752,16 @@ func RunLiveDrilldown(baseURL, host string) error {
 	}
 }
 
+// ── live top ─────────────────────────────────────────────────────────────────
+
+// sortKeys is the ordered list of sort modes the user can cycle through.
 var sortKeys = []string{"rps", "uniq", "err", "bot", "score", "4xx", "5xx", "rt"}
 
+// RunLiveTop is `cfm webtop live` – a scrollable live vhost picker.
+// Press ↑/↓ to move, Enter to drill into a vhost, s to cycle sort, q to quit.
 func RunLiveTop(baseURL string, limit int) error {
 	if limit <= 0 {
-		limit = 25
+		limit = 30
 	}
 	if err := ui.Init(); err != nil {
 		return fmt.Errorf("termui init: %w", err)
@@ -682,36 +770,41 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	W, H := ui.TerminalDimensions()
 
+	// ── widgets ──────────────────────────────────────────────────────────────
+
 	header := widgets.NewParagraph()
 	header.Border = true
 	header.BorderStyle = ui.NewStyle(ui.ColorCyan)
 
 	table := widgets.NewTable()
-	table.Title = " ◈ Live Top Vhosts — ↑↓ navigate  Enter=vhost  s=sort  x=bottom  q=quit "
+	table.Title = " ◈ Live Top Vhosts — ↑↓ navigate  Enter=drill  s=sort  q=quit "
 	table.RowSeparator = false
 	table.FillRow = true
 	table.BorderStyle = ui.NewStyle(ui.ColorWhite)
 
-	bottomPanel := widgets.NewTable()
-	bottomPanel.Title = " ◉ Global Top IPs — j/k navigate  l=drill  b=block  x=toggle "
-	bottomPanel.RowSeparator = false
-	bottomPanel.FillRow = true
-	bottomPanel.BorderStyle = ui.NewStyle(ui.ColorCyan)
-	fillIPTable(bottomPanel, nil, 60, -1)
+	// Global IP panel (bottom-right, always visible)
+	ipPanel := widgets.NewTable()
+	ipPanel.Title = " ◉ Global Top IPs — ↑↓/j/k navigate  b=block "
+	ipPanel.RowSeparator = false
+	ipPanel.FillRow = true
+	ipPanel.BorderStyle = ui.NewStyle(ui.ColorCyan)
+	fillIPTable(ipPanel, nil, 60, -1)
 
 	statusBar := widgets.NewParagraph()
 	statusBar.Border = false
 	statusBar.TextStyle = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
 
+	// ── layout ───────────────────────────────────────────────────────────────
+
 	var (
-		bottomPanelW   int
-		bottomPanelLim int
+		ipPanelW   int
+		ipPanelLimit int
 	)
 
 	var doLayout func()
 	doLayout = func() {
 		W, H = ui.TerminalDimensions()
-
+		// split: top 60% vhosts, bottom 40% IPs
 		splitY := H * 60 / 100
 		if splitY < 8 {
 			splitY = 8
@@ -719,40 +812,38 @@ func RunLiveTop(baseURL string, limit int) error {
 		if H-splitY < 8 {
 			splitY = H - 8
 		}
-
 		header.SetRect(0, 0, W, 3)
 		table.SetRect(0, 3, W, splitY)
-		bottomPanel.SetRect(0, splitY, W, H-4)
-		statusBar.SetRect(0, H-4, W, H)
+		ipPanel.SetRect(0, splitY, W, H-3)
+		statusBar.SetRect(0, H-3, W, H)
 
-		bottomPanelW = W - 2
-		bottomPanelLim = (H - 4 - splitY) - 2
-		if bottomPanelLim < 5 {
-			bottomPanelLim = 5
+		ipPanelW = W - 2
+		ipPanelLimit = (H - 3 - splitY) - 2
+		if ipPanelLimit < 5 {
+			ipPanelLimit = 5
 		}
-		if bottomPanelLim > 20 {
-			bottomPanelLim = 20
+		if ipPanelLimit > 40 {
+			ipPanelLimit = 40
 		}
 	}
 	doLayout()
 
+	// ── state ─────────────────────────────────────────────────────────────────
+
 	var (
-		rows         []ShortRow
-		challenged   map[string]string
-		globalIPs    []map[string]string
-		suspicious   []SuspiciousRow
-		suspMap      map[string]SuspiciousRow
-		bottomMode   string
-		ipCursor     int
+		rows       []ShortRow        // latest fetched rows (already sorted)
+		challenged map[string]string // host → "manual"|"auto" for active challenges
+		globalIPs  []map[string]string // global top IPs (from hot-ips endpoint)
+		ipCursor   int               // 0-based cursor into globalIPs (-1=none)
 		lastBlockMsg string
-		cursor       int
-		sortIdx      int
-		lastErr      error
-		tickN        int
+		cursor     int               // selected vhost row index
+		sortIdx    int               // index into sortKeys
+		lastErr    error
+		tickN      int
 	)
 	ipCursor = -1
-	bottomMode = "ips"
 
+	// fetchChallenged fetches the full active challenge list once per tick.
 	fetchChallenged := func() map[string]string {
 		u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=500", baseURL)
 		r, err := http.Get(u)
@@ -760,7 +851,6 @@ func RunLiveTop(baseURL string, limit int) error {
 			return nil
 		}
 		defer r.Body.Close()
-
 		var vhs []struct {
 			Host string `json:"host"`
 			Mode string `json:"mode"`
@@ -775,6 +865,7 @@ func RunLiveTop(baseURL string, limit int) error {
 		return m
 	}
 
+	// fetchGlobalIPs fetches the global hot-IPs list (cross-vhost).
 	fetchGlobalIPs := func() []map[string]string {
 		u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=50", baseURL)
 		r, err := http.Get(u)
@@ -782,7 +873,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			return nil
 		}
 		defer r.Body.Close()
-
+		// hot-ips returns []HotIPRow
 		var rows []struct {
 			IP      string `json:"ip"`
 			Req     int    `json:"req"`
@@ -795,7 +886,6 @@ func RunLiveTop(baseURL string, limit int) error {
 		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
 			return nil
 		}
-
 		out := make([]map[string]string, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, map[string]string{
@@ -810,26 +900,7 @@ func RunLiveTop(baseURL string, limit int) error {
 		return out
 	}
 
-	fetchSuspicious := func() ([]SuspiciousRow, map[string]SuspiciousRow) {
-		u := fmt.Sprintf("%s/api/v1/webdet/suspicious", baseURL)
-		r, err := http.Get(u)
-		if err != nil {
-			return nil, nil
-		}
-		defer r.Body.Close()
-
-		var rows []SuspiciousRow
-		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
-			return nil, nil
-		}
-
-		m := make(map[string]SuspiciousRow, len(rows))
-		for _, s := range rows {
-			m[strings.ToLower(s.Host)] = s
-		}
-		return rows, m
-	}
-
+	// fetchAndSort fetches top-short and sorts by current sort key.
 	fetchAndSort := func() {
 		u := fmt.Sprintf("%s/api/v1/webdet/top-short", baseURL)
 		r, err := http.Get(u)
@@ -838,39 +909,37 @@ func RunLiveTop(baseURL string, limit int) error {
 			return
 		}
 		defer r.Body.Close()
-
 		var resp topShortCLIResponse
 		if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
 			lastErr = err
 			return
 		}
 		lastErr = nil
-
 		sortShortRows(resp.Rows, sortKeys[sortIdx])
 		if limit > 0 && len(resp.Rows) > limit {
 			resp.Rows = resp.Rows[:limit]
 		}
 		rows = resp.Rows
-
+		// keep cursor in bounds
 		if cursor >= len(rows) {
 			cursor = len(rows) - 1
 		}
 		if cursor < 0 {
 			cursor = 0
 		}
-
+		// refresh challenge state + global IPs in same tick
 		challenged = fetchChallenged()
 		globalIPs = fetchGlobalIPs()
-		suspicious, suspMap = fetchSuspicious()
-
+		// clamp ipCursor
 		if ipCursor >= len(globalIPs) {
 			ipCursor = len(globalIPs) - 1
 		}
 	}
 
+	// buildTableRows renders the rows slice into table widget rows.
 	buildTableRows := func() {
 		colW := W - 2
-		metricsW := 92
+		metricsW := 86 // fixed metrics portion width (added 1 for chal col)
 		hostW := colW - metricsW
 		if hostW < 15 {
 			hostW = 15
@@ -878,23 +947,13 @@ func RunLiveTop(baseURL string, limit int) error {
 
 		hdr := []string{
 			padRight(" VHOST", hostW),
-			" CH ",
-			"SUP ",
-			"  RPS ",
-			" 2xx  ",
-			" 4xx  ",
-			" 5xx  ",
-			" err% ",
-			" bot% ",
-			"  rt  ",
-			"score ",
-			" uniq ",
+			" CH ", "  RPS ", " 2xx  ", " 4xx  ", " 5xx  ",
+			" err% ", " bot% ", "  rt  ", "score ", " uniq ",
 		}
 		tableRows := [][]string{hdr}
-		table.RowStyles = map[int]ui.Style{}
 
 		for i, row := range rows {
-			chalMode := challenged[row.Host]
+			chalMode := challenged[row.Host] // "" if not challenged
 
 			host := row.Host
 			maxHost := hostW - 1
@@ -910,22 +969,9 @@ func RunLiveTop(baseURL string, limit int) error {
 				chalCell = " 🔒A"
 			}
 
-			suspCell := "   "
-			if s, ok := suspMap[strings.ToLower(row.Host)]; ok {
-				switch {
-				case s.Score >= 0.70:
-					suspCell = " !!"
-				case s.Score >= 0.40:
-					suspCell = "  !"
-				default:
-					suspCell = "  ?"
-				}
-			}
-
 			tableRows = append(tableRows, []string{
 				host,
 				chalCell,
-				suspCell,
 				fmt.Sprintf("%6.2f", row.RPS),
 				fmt.Sprintf("%6.2f", row.R2xx),
 				fmt.Sprintf("%6.2f", row.R4xx),
@@ -937,10 +983,12 @@ func RunLiveTop(baseURL string, limit int) error {
 				fmt.Sprintf("%5d ", row.UniqueIPs),
 			})
 
+			// Row colour: selected > challenged > high-threat > normal
 			var style ui.Style
-			if i+1 == cursor+1 {
+			if i+1 == cursor+1 { // +1 for header
 				style = ui.NewStyle(ui.ColorBlack, ui.ColorCyan, ui.ModifierBold)
 			} else if chalMode != "" {
+				// challenged rows stand out in yellow
 				style = ui.NewStyle(ui.ColorYellow)
 			} else if row.ErrRatio >= 0.3 || row.Score >= 0.7 {
 				style = ui.NewStyle(ui.ColorRed)
@@ -951,80 +999,12 @@ func RunLiveTop(baseURL string, limit int) error {
 			}
 			table.RowStyles[i+1] = style
 		}
-
 		table.RowStyles[0] = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
-		table.ColumnWidths = []int{hostW, 5, 4, 7, 7, 7, 7, 7, 7, 7, 7, 7}
+		table.ColumnWidths = []int{hostW, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7}
 		table.Rows = tableRows
 	}
 
-	buildSuspiciousPanel := func() {
-		panelW := W - 2
-		hostW := 28
-		scoreW := 6
-		errW := 6
-		botW := 6
-		uniqW := 6
-		reasonW := panelW - hostW - scoreW - errW - botW - uniqW - 12
-		if reasonW < 18 {
-			reasonW = 18
-		}
-
-		rows2 := [][]string{
-			{"HOST", "SCORE", "ERR%", "BOT%", "UNIQ", "REASONS"},
-		}
-
-		maxRows := bottomPanelLim
-		for i, s := range suspicious {
-			if i >= maxRows {
-				break
-			}
-
-			host := s.Host
-			if len(host) > hostW {
-				host = host[:hostW-2] + ".."
-			}
-
-			rs := joinReasons(s.Reasons)
-			if len(rs) > reasonW {
-				rs = rs[:reasonW-2] + ".."
-			}
-
-			rows2 = append(rows2, []string{
-				host,
-				fmt.Sprintf("%.2f", s.Score),
-				fmt.Sprintf("%.1f", s.ErrRatio*100),
-				fmt.Sprintf("%.1f", s.BotRatio*100),
-				fmt.Sprintf("%d", s.UniqueIPs),
-				rs,
-			})
-		}
-
-		for len(rows2) < maxRows+1 {
-			rows2 = append(rows2, []string{"", "", "", "", "", ""})
-		}
-
-		bottomPanel.Title = " ⚠ Suspicious Vhosts — x=toggle "
-		bottomPanel.Rows = rows2
-		bottomPanel.ColumnWidths = []int{hostW, scoreW, errW, botW, uniqW, reasonW}
-		bottomPanel.RowStyles = map[int]ui.Style{
-			0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow),
-		}
-
-		for i := 1; i < len(rows2); i++ {
-			if i-1 < len(suspicious) {
-				s := suspicious[i-1]
-				switch {
-				case s.Score >= 0.70 || s.ErrRatio >= 0.50:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorRed)
-				case s.Score >= 0.40 || s.ErrRatio >= 0.20:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorYellow)
-				default:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorWhite)
-				}
-			}
-		}
-	}
-
+	// renderAll redraws everything.
 	renderAll := func() {
 		ts := time.Now().Format("15:04:05")
 		sortKey := sortKeys[sortIdx]
@@ -1032,7 +1012,6 @@ func RunLiveTop(baseURL string, limit int) error {
 		if lastErr != nil {
 			statusStr = fmt.Sprintf("✖ %s", lastErr)
 		}
-
 		selectedHost := "-"
 		selectedChal := ""
 		if len(rows) > 0 && cursor < len(rows) {
@@ -1049,22 +1028,18 @@ func RunLiveTop(baseURL string, limit int) error {
 		}
 
 		header.Text = fmt.Sprintf(
-			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  bottom:[%s](fg:cyan)  vhost:[%s](fg:cyan,mod:bold)%s  tick:[%d](fg:white)  [%s](fg:white)",
-			statusStr, sortKey, bottomMode, selectedHost, chalBadge, tickN, ts,
+			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  vhost:[%s](fg:cyan,mod:bold)%s  tick:[%d](fg:white)  [%s](fg:white)",
+			statusStr, sortKey, selectedHost, chalBadge, tickN, ts,
 		)
 
 		buildTableRows()
 
-		if bottomMode == "susp" {
-			buildSuspiciousPanel()
-		} else {
-			bottomPanel.Title = " ◉ Global Top IPs — j/k navigate  l=drill  b=block  x=toggle "
-			ipSlice := globalIPs
-			if len(ipSlice) > bottomPanelLim {
-				ipSlice = ipSlice[:bottomPanelLim]
-			}
-			fillIPTable(bottomPanel, ipSlice, bottomPanelW, ipCursor)
+		// Global IP panel
+		ipSlice := globalIPs
+		if len(ipSlice) > ipPanelLimit {
+			ipSlice = ipSlice[:ipPanelLimit]
 		}
+		fillIPTable(ipPanel, ipSlice, ipPanelW, ipCursor)
 
 		chalHint := "[c] challenge"
 		if selectedChal == "manual" {
@@ -1072,47 +1047,48 @@ func RunLiveTop(baseURL string, limit int) error {
 		} else if selectedChal == "auto" {
 			chalHint = "[c] add manual"
 		}
-
-		ipHint := "[j/k] navigate IPs  [l] drill  [b] block"
-		if bottomMode == "ips" && ipCursor >= 0 && ipCursor < len(globalIPs) {
-			ipHint = fmt.Sprintf("[j/k] IP#%d: %s  [l] drill  [b] block", ipCursor+1, globalIPs[ipCursor]["ip"])
+		ipHint := "[j/k] navigate IPs  [b] block"
+		if ipCursor >= 0 && ipCursor < len(globalIPs) {
+			ipHint = fmt.Sprintf("[j/k] IP#%d: %s  [b] block", ipCursor+1, globalIPs[ipCursor]["ip"])
 		}
-		if bottomMode == "susp" {
-			ipHint = "[x] switch to IPs"
-		}
-
 		blockLine := ""
 		if lastBlockMsg != "" {
 			blockLine = "  │  " + lastBlockMsg
 		}
-
-		legend := "[cyan]=selected  [yellow]=warn/challenged  [red]=high-risk  SUP: !=suspect  !!=strong"
 		statusBar.Text = fmt.Sprintf(
-			" [↑↓] vhosts  [Enter] drill  [%s]  [s] sort(%s)  [x] bottom(%s)  │  %s%s  [q] quit\n %s",
-			chalHint, sortKey, bottomMode, ipHint, blockLine, legend,
+			" [↑↓] vhosts  [Enter] drill  [%s]  [s] sort(%s)  │  %s%s  [q] quit",
+			chalHint, sortKey, ipHint, blockLine,
 		)
 
 		ui.Clear()
-		ui.Render(header, table, bottomPanel, statusBar)
+		ui.Render(header, table, ipPanel, statusBar)
 	}
 
+	// chalToggleSelected adds/removes a 30m manual challenge on the selected vhost.
+	// Uses the already-fetched challenged map — no extra HTTP call needed.
 	chalToggleSelected := func() {
 		if len(rows) == 0 || cursor >= len(rows) {
 			return
 		}
 		h := rows[cursor].Host
-		mode := challenged[h]
+		mode := challenged[h] // "" | "manual" | "auto"
 		if mode == "manual" {
+			// remove the manual challenge
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(h))
 			_, _ = http.Post(u, "application/json", nil)
 		} else {
+			// add 30m manual challenge (even if auto is active — adds manual on top)
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(h))
 			_, _ = http.Post(u, "application/json", nil)
 		}
 	}
 
+	// ── initial load ──────────────────────────────────────────────────────────
+
 	fetchAndSort()
 	renderAll()
+
+	// ── event loop ────────────────────────────────────────────────────────────
 
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
@@ -1130,6 +1106,7 @@ func RunLiveTop(baseURL string, limit int) error {
 				fetchAndSort()
 				renderAll()
 
+			// ── VHOST navigation (↑↓) ──────────────────────────────────────────
 			case "<Up>":
 				if cursor > 0 {
 					cursor--
@@ -1152,10 +1129,8 @@ func RunLiveTop(baseURL string, limit int) error {
 				}
 				renderAll()
 
+			// ── IP panel navigation (j/k) ───────────────────────────────────────
 			case "k":
-				if bottomMode != "ips" {
-					continue
-				}
 				if ipCursor <= 0 {
 					ipCursor = 0
 				} else {
@@ -1164,12 +1139,9 @@ func RunLiveTop(baseURL string, limit int) error {
 				renderAll()
 
 			case "j":
-				if bottomMode != "ips" {
-					continue
-				}
 				maxIP := len(globalIPs) - 1
-				if maxIP > bottomPanelLim-1 {
-					maxIP = bottomPanelLim - 1
+				if maxIP > ipPanelLimit-1 {
+					maxIP = ipPanelLimit - 1
 				}
 				if ipCursor < maxIP {
 					ipCursor++
@@ -1178,12 +1150,8 @@ func RunLiveTop(baseURL string, limit int) error {
 				}
 				renderAll()
 
+			// ── Block selected IP ───────────────────────────────────────────────
 			case "b", "B":
-				if bottomMode != "ips" {
-					lastBlockMsg = "switch bottom panel to IPs first (x)"
-					renderAll()
-					continue
-				}
 				if ipCursor >= 0 && ipCursor < len(globalIPs) {
 					ip := globalIPs[ipCursor]["ip"]
 					lastBlockMsg = blockIPLive(ip)
@@ -1192,54 +1160,20 @@ func RunLiveTop(baseURL string, limit int) error {
 				}
 				renderAll()
 
-			case "l", "L":
-				if bottomMode != "ips" {
-					lastBlockMsg = "switch bottom panel to IPs first (x)"
-					renderAll()
-					continue
-				}
-				if ipCursor < 0 || ipCursor >= len(globalIPs) {
-					lastBlockMsg = "select an IP first (j/k to navigate IP panel)"
-					renderAll()
-					continue
-				}
-
-				ip := globalIPs[ipCursor]["ip"]
-
-				ui.Close()
-				err := runIPDrilldown(baseURL, ip)
-
-				fmt.Println()
-				fmt.Print("Press Enter to return to webtop...")
-				_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
-
-				if initErr := ui.Init(); initErr != nil {
-					return initErr
-				}
-				W, H = ui.TerminalDimensions()
-				doLayout()
-
-				if err != nil {
-					lastErr = err
-				}
-				fetchAndSort()
-				renderAll()
-
 			case "<Enter>":
 				if len(rows) == 0 || cursor >= len(rows) {
 					continue
 				}
 				selectedHost := rows[cursor].Host
-
+				// Tear down the top view, launch drilldown, then come back.
 				ui.Close()
 				err := RunLiveDrilldown(baseURL, selectedHost)
-
+				// Re-init for the top view after returning.
 				if initErr := ui.Init(); initErr != nil {
 					return initErr
 				}
 				W, H = ui.TerminalDimensions()
 				doLayout()
-
 				if err != nil {
 					lastErr = err
 				}
@@ -1249,14 +1183,6 @@ func RunLiveTop(baseURL string, limit int) error {
 			case "s", "S":
 				sortIdx = (sortIdx + 1) % len(sortKeys)
 				fetchAndSort()
-				renderAll()
-
-			case "x", "X":
-				if bottomMode == "ips" {
-					bottomMode = "susp"
-				} else {
-					bottomMode = "ips"
-				}
 				renderAll()
 
 			case "<Resize>":
@@ -1272,6 +1198,7 @@ func RunLiveTop(baseURL string, limit int) error {
 	}
 }
 
+// padRight pads or truncates s to exactly n runes.
 func padRight(s string, n int) string {
 	r := []rune(s)
 	if len(r) >= n {

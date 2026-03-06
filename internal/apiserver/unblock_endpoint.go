@@ -1,0 +1,173 @@
+// internal/apiserver/unblock_endpoint.go
+//
+// RegisterUnblock wires the /unblock endpoint onto the provided mux.
+//
+// The handler is a direct lift from the original startDebug() in cmd/cfm/main.go
+// with zero behavioural changes:
+//
+//   - Accepts GET ?ip=1.2.3.4  or  POST with JSON / form / plain-text body
+//   - Immediately removes the IP from nft and replies with JSON
+//   - Fires a background goroutine for CSF / Fail2Ban / Imunify cleanup
+//     (via unblock.Do) and writes the full step log to api.log
+package apiserver
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"cfm/internal/firewall"
+	"cfm/internal/logging"
+	"cfm/internal/unblock"
+)
+
+// RegisterUnblock adds the /unblock route to the provided mux.
+func RegisterUnblock(m *http.ServeMux, be firewall.Backend, cfgDir string) {
+	if m == nil {
+		return
+	}
+	m.HandleFunc("/unblock", makeUnblockHandler(be, cfgDir))
+}
+
+// makeUnblockHandler returns the http.HandlerFunc for /unblock.
+// Separated from RegisterUnblock so it can be unit-tested independently.
+func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		w.Header().Set("Content-Type", "application/json")
+
+		// ── 1. Parse target IP ────────────────────────────────────────────
+		ipStr := strings.TrimSpace(r.URL.Query().Get("ip"))
+
+		if ipStr == "" && r.Method == http.MethodPost {
+			ct := strings.ToLower(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
+			switch {
+
+			case ct == "application/json":
+				var tmp struct {
+					IP string `json:"ip"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&tmp)
+				ipStr = strings.TrimSpace(tmp.IP)
+
+			case ct == "application/x-www-form-urlencoded" ||
+				strings.HasPrefix(ct, "multipart/form-data"):
+				if err := r.ParseForm(); err == nil {
+					ipStr = strings.TrimSpace(r.Form.Get("ip"))
+					if ipStr == "" && len(r.Form) == 1 {
+						// Support bare payload: curl -d "1.2.3.4" /unblock
+						for k := range r.Form {
+							ipStr = strings.TrimSpace(k)
+							break
+						}
+					}
+				}
+
+			default:
+				// text/plain or unknown: accept "1.2.3.4" or "1.2.3.4 # comment"
+				b, _ := io.ReadAll(r.Body)
+				s := strings.TrimSpace(string(b))
+				if i := strings.IndexAny(s, " \t#"); i > 0 {
+					s = strings.TrimSpace(s[:i])
+				}
+				ipStr = s
+			}
+		}
+
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": "invalid or missing ip",
+			})
+			return
+		}
+
+		if be == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": "no firewall backend",
+			})
+			return
+		}
+
+		// ── 2. Fast local path: remove from nft immediately ───────────────
+		wasBlocked := false
+		if entries, err := be.ListBlocks(); err == nil {
+			for _, e := range entries {
+				if e.IP.Equal(ip) {
+					wasBlocked = true
+					break
+				}
+			}
+		}
+		_ = be.RemoveBlock(ip) // idempotent
+
+		// ── 3. Capture requester identity for the audit log ───────────────
+		requester := func() string {
+			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+				parts := strings.Split(xf, ",")
+				return strings.TrimSpace(parts[0])
+			}
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				return r.RemoteAddr
+			}
+			return host
+		}()
+
+		// ── 4. Immediate JSON response ─────────────────────────────────────
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":          true,
+			"ip":          ip.String(),
+			"was_blocked": wasBlocked,
+			"duration_ms": time.Since(start).Milliseconds(),
+			"bg_cleanup":  true,
+		})
+
+		// ── 5. Fire-and-forget cleanup ─────────────────────────────────────
+		go func(ip net.IP, requester string) {
+			bgStart := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			ttl := 24 * time.Hour
+			res, _ := unblock.Do(ctx, ip, unblock.Options{
+				BE:             be,
+				ConfigDir:      cfgDir,
+				TempWhitelist:  true,
+				AllowTTL:       &ttl,
+				Reporter:       nil,
+				ReportWhy:      "debug-endpoint",
+				SendAPI:        false,
+				Fail2BanUnban:  true,
+				// RemoveFromFeeds: true,
+			})
+
+			elapsed := time.Since(bgStart)
+			logging.LogfAPI(
+				"[unblock] requester=%s ip=%s took=%s was_blocked=%t from_feeds=%s whitelisted=%t steps=%d",
+				requester, ip.String(), elapsed,
+				res.WasBlocked, strings.Join(res.FromFeeds, ","),
+				res.Whitelisted, len(res.Steps),
+			)
+
+			for _, s := range res.Steps {
+				detail := s.Detail
+				if len(detail) > 200 {
+					detail = detail[:200] + "…"
+				}
+				logging.LogfAPI(
+					"[unblock.step] ip=%s src=%s action=%s dur=%s feeds=%v err=%q detail=%q",
+					ip.String(), s.Source, s.Action, s.Dur, s.Feeds, s.Err, detail,
+				)
+			}
+		}(ip, requester)
+	}
+}
