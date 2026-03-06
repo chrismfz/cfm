@@ -85,7 +85,10 @@ func printWebTopHelp() {
         fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
         fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
 	fmt.Println("  cfm webtop analyze <ip|host>    # offline drilldown from TSV log")
+	fmt.Println("  cfm webtop live            # scrollable live vhost picker")
 	fmt.Println("  cfm webtop live <vhost>        # live terminal dashboard")
+	fmt.Println("  cfm webtop live [N]        # picker showing top N vhosts")
+
 
 
 	fmt.Println()
@@ -140,11 +143,22 @@ func RunWebTop(baseURL string, args []string) error {
             }
             return runLongTop(baseURL, limit)
 
-case "live":
-    if len(args) < 2 {
-        return fmt.Errorf("usage: cfm webtop live <vhost>")
-    }
-    return RunLiveDrilldown(baseURL, args[1])
+
+
+        case "live":
+            // cfm webtop live          → scrollable top picker
+            // cfm webtop live <vhost>  → direct drilldown
+            // cfm webtop live [N]      → picker with custom limit
+            if len(args) == 1 {
+                return RunLiveTop(baseURL, 20)
+            }
+            // second arg: a number means limit, anything else is a vhost
+            if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+                return RunLiveTop(baseURL, n)
+            }
+            return RunLiveDrilldown(baseURL, args[1])
+
+
 
 
         case "challenge":

@@ -562,3 +562,294 @@ func RunLiveDrilldown(baseURL, host string) error {
 		}
 	}
 }
+
+// ── live top ─────────────────────────────────────────────────────────────────
+
+// sortKeys is the ordered list of sort modes the user can cycle through.
+var sortKeys = []string{"rps", "err", "bot", "score", "4xx", "5xx", "rt"}
+
+// RunLiveTop is `cfm webtop live` – a scrollable live vhost picker.
+// Press ↑/↓ to move, Enter to drill into a vhost, s to cycle sort, q to quit.
+func RunLiveTop(baseURL string, limit int) error {
+	if limit <= 0 {
+		limit = 20
+	}
+	if err := ui.Init(); err != nil {
+		return fmt.Errorf("termui init: %w", err)
+	}
+	defer ui.Close()
+
+	W, H := ui.TerminalDimensions()
+
+	// ── widgets ──────────────────────────────────────────────────────────────
+
+	header := widgets.NewParagraph()
+	header.Border = true
+	header.BorderStyle = ui.NewStyle(ui.ColorCyan)
+
+	table := widgets.NewTable()
+	table.Title = " ◈ Live Top Vhosts — ↑↓ navigate  Enter=drill  s=sort  q=quit "
+	table.RowSeparator = false
+	table.FillRow = true
+	table.BorderStyle = ui.NewStyle(ui.ColorWhite)
+
+	statusBar := widgets.NewParagraph()
+	statusBar.Border = false
+	statusBar.TextStyle = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
+
+	// ── layout ───────────────────────────────────────────────────────────────
+
+	var doLayout func()
+	doLayout = func() {
+		W, H = ui.TerminalDimensions()
+		header.SetRect(0, 0, W, 3)
+		table.SetRect(0, 3, W, H-3)
+		statusBar.SetRect(0, H-3, W, H)
+	}
+	doLayout()
+
+	// ── state ─────────────────────────────────────────────────────────────────
+
+	var (
+		rows      []ShortRow // latest fetched rows (already sorted)
+		cursor    int        // selected row index (0-based into rows)
+		sortIdx   int        // index into sortKeys
+		lastErr   error
+		tickN     int
+	)
+
+	// colour helpers for inline markup
+	colorForErr := func(v float64) string {
+		switch {
+		case v >= 30:
+			return "red"
+		case v >= 10:
+			return "yellow"
+		default:
+			return "green"
+		}
+	}
+	colorForBot := func(v float64) string {
+		switch {
+		case v >= 60:
+			return "red"
+		case v >= 25:
+			return "yellow"
+		default:
+			return "cyan"
+		}
+	}
+	colorForScore := func(v float64) string {
+		switch {
+		case v >= 0.7:
+			return "red"
+		case v >= 0.4:
+			return "yellow"
+		default:
+			return "green"
+		}
+	}
+
+	// fetchAndSort fetches top-short and sorts by current sort key.
+	fetchAndSort := func() {
+		u := fmt.Sprintf("%s/api/v1/webdet/top-short", baseURL)
+		r, err := http.Get(u)
+		if err != nil {
+			lastErr = err
+			return
+		}
+		defer r.Body.Close()
+		var resp topShortCLIResponse
+		if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+			lastErr = err
+			return
+		}
+		lastErr = nil
+		sortShortRows(resp.Rows, sortKeys[sortIdx])
+		if limit > 0 && len(resp.Rows) > limit {
+			resp.Rows = resp.Rows[:limit]
+		}
+		rows = resp.Rows
+		// keep cursor in bounds
+		if cursor >= len(rows) {
+			cursor = len(rows) - 1
+		}
+		if cursor < 0 {
+			cursor = 0
+		}
+	}
+
+	// buildTableRows renders the rows slice into table widget rows.
+	buildTableRows := func() {
+		colW := W - 2
+		// dynamic host column width (rest goes to metrics)
+		metricsW := 85 // fixed metrics portion width
+		hostW := colW - metricsW
+		if hostW < 15 {
+			hostW = 15
+		}
+
+		// header row
+		hdr := []string{
+			padRight(" VHOST", hostW),
+			"  RPS ", " 2xx  ", " 4xx  ", " 5xx  ",
+			" err% ", " bot% ", "  rt  ", "score ", " uniq ",
+		}
+		tableRows := [][]string{hdr}
+
+		for i, row := range rows {
+			host := row.Host
+			if len(host) > hostW-1 {
+				host = host[:hostW-3] + ".."
+			}
+			host = padRight(" "+host, hostW)
+
+			tableRows = append(tableRows, []string{
+				host,
+				fmt.Sprintf("%6.2f", row.RPS),
+				fmt.Sprintf("%6.2f", row.R2xx),
+				fmt.Sprintf("%6.2f", row.R4xx),
+				fmt.Sprintf("%6.2f", row.R5xx),
+				fmt.Sprintf("%5.1f%%", row.ErrRatio*100),
+				fmt.Sprintf("%5.1f%%", row.BotRatio*100),
+				fmt.Sprintf("%5.0fms", row.ProcAvgSec*1000),
+				fmt.Sprintf("%5.2f ", row.Score),
+				fmt.Sprintf("%5d ", row.UniqueIPs),
+			})
+
+			// colour the selected row differently
+			style := ui.NewStyle(ui.ColorWhite)
+			if i+1 == cursor+1 { // +1 for header offset
+				style = ui.NewStyle(ui.ColorBlack, ui.ColorCyan, ui.ModifierBold)
+			} else {
+				// dim rows with high err or bot red
+				_ = colorForErr(row.ErrRatio * 100)
+				_ = colorForBot(row.BotRatio * 100)
+				_ = colorForScore(row.Score)
+			}
+			table.RowStyles[i+1] = style
+		}
+		table.RowStyles[0] = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
+		table.ColumnWidths = []int{hostW, 7, 7, 7, 7, 7, 7, 7, 7, 7}
+		table.Rows = tableRows
+	}
+
+	// renderAll redraws everything.
+	renderAll := func() {
+		ts := time.Now().Format("15:04:05")
+		sortKey := sortKeys[sortIdx]
+		statusStr := "● LIVE"
+		if lastErr != nil {
+			statusStr = fmt.Sprintf("✖ %s", lastErr)
+		}
+		selectedHost := "-"
+		if len(rows) > 0 && cursor < len(rows) {
+			selectedHost = rows[cursor].Host
+		}
+
+		header.Text = fmt.Sprintf(
+			" [%s](fg:green)  sort:[%s](fg:yellow,mod:bold)  selected:[%s](fg:cyan,mod:bold)  "+
+				"tick:[%d](fg:white)  [%s](fg:white)",
+			statusStr, sortKey, selectedHost, tickN, ts,
+		)
+
+		buildTableRows()
+
+		statusBar.Text = fmt.Sprintf(
+			" [↑↓] navigate  [Enter] drill into vhost  [s] cycle sort (%s)  [q] quit  │  showing top %d by %s",
+			sortKey, limit, sortKey,
+		)
+
+		ui.Clear()
+		ui.Render(header, table, statusBar)
+	}
+
+	// ── initial load ──────────────────────────────────────────────────────────
+
+	fetchAndSort()
+	renderAll()
+
+	// ── event loop ────────────────────────────────────────────────────────────
+
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	uiEvents := ui.PollEvents()
+
+	for {
+		select {
+		case e := <-uiEvents:
+			switch e.ID {
+			case "q", "Q", "<C-c>":
+				return nil
+
+			case "<Up>", "k":
+				if cursor > 0 {
+					cursor--
+				}
+				renderAll()
+
+			case "<Down>", "j":
+				if cursor < len(rows)-1 {
+					cursor++
+				}
+				renderAll()
+
+			case "<Home>":
+				cursor = 0
+				renderAll()
+
+			case "<End>":
+				if len(rows) > 0 {
+					cursor = len(rows) - 1
+				}
+				renderAll()
+
+			case "<Enter>":
+				if len(rows) == 0 || cursor >= len(rows) {
+					continue
+				}
+				selectedHost := rows[cursor].Host
+				// Tear down the top view, launch drilldown, then come back.
+				ui.Close()
+				err := RunLiveDrilldown(baseURL, selectedHost)
+				// Re-init for the top view after returning.
+				if initErr := ui.Init(); initErr != nil {
+					return initErr
+				}
+				W, H = ui.TerminalDimensions()
+				doLayout()
+				if err != nil {
+					lastErr = err
+				}
+				fetchAndSort()
+				renderAll()
+
+			case "s", "S":
+				sortIdx = (sortIdx + 1) % len(sortKeys)
+				fetchAndSort()
+				renderAll()
+
+			case "<Resize>":
+				doLayout()
+				renderAll()
+			}
+
+		case <-tick.C:
+			tickN++
+			fetchAndSort()
+			renderAll()
+		}
+	}
+}
+
+// padRight pads or truncates s to exactly n runes.
+func padRight(s string, n int) string {
+	r := []rune(s)
+	if len(r) >= n {
+		return string(r[:n])
+	}
+	for len(r) < n {
+		r = append(r, ' ')
+	}
+	return string(r)
+}
