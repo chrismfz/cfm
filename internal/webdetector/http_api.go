@@ -212,14 +212,25 @@ func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
 }
 
 
+// internal/webdetector/http_api.go
+// Replace the handleDrilldown function with this version that honours ?top=N
+
 func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
 	}
-	d := e.HostDetail(host, 10)
-	// Attach long-window summary as a nested field for convenience.
+
+	// ?top=N lets callers (e.g. the live dashboard) request more than the default 10
+	topN := 10
+	if v := r.URL.Query().Get("top"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			topN = n
+		}
+	}
+
+	d := e.HostDetail(host, topN)
 	if lr, ok := e.longwin.One(host); ok {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"short": d,
@@ -231,7 +242,6 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 		"short": d,
 	})
 }
-
 
 
 

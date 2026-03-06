@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/florianl/go-nflog/v2 v2.2.0
+	github.com/gizak/termui/v3 v3.1.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/mdlayher/netlink v1.9.0
 	github.com/miekg/dns v1.1.72
@@ -13,8 +14,12 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/mattn/go-runewidth v0.0.20 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
+	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
+	github.com/nsf/termbox-go v1.1.1 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
