@@ -166,6 +166,9 @@ type LoggingConfig struct {
     MYSQLStdout bool   // MYSQL_LOG_STDOUT
     MYSQLFile   string // MYSQL_LOG_FILE
 
+WAFStdout bool   // WAF_LOG_STDOUT
+WAFFile   string // WAF_LOG_FILE
+
 }
 
 
@@ -424,6 +427,8 @@ case "DETECTORS_SEND_TO_API":
 		case "LOG_FILE":
 			cfg.Logging.File = val
 
+
+
 // NEW:
 case "API_LOG_STDOUT":
     cfg.Logging.APIStdout = parseBool(val)
@@ -626,7 +631,10 @@ case "VHOST_MAP_DEFAULT_IP":
 case "VHOST_MAP_RELOAD_CMD":
     cfg.VHostMap.ReloadCmd = val
 
-
+case "WAF_LOG_STDOUT":
+    cfg.Logging.WAFStdout = parseBool(val)
+case "WAF_LOG_FILE":
+    cfg.Logging.WAFFile = val
 
 case "MYSQL_LOG_STDOUT":
     cfg.Logging.MYSQLStdout = parseBool(val)

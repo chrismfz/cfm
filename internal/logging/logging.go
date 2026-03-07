@@ -1,251 +1,262 @@
-// internal/logging/logging.go
 package logging
 
 import (
-    "cfm/internal/config"
-    "fmt"
-    "os"
-    "path/filepath"
-    "strings"
-    "sync"
-    "time"
+	"cfm/internal/config"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 )
 
 var (
-    logFile    *os.File
-    apiLogFile *os.File
-    detectorLogFile *os.File
-    smtpLogFile *os.File
-    challengesLogFile *os.File
-    mysqlLogFile      *os.File   // mysql enforcer
-    once sync.Once
-    cfg  *config.LoggingConfig
-
+	logFile           *os.File
+	apiLogFile        *os.File
+	detectorLogFile   *os.File
+	smtpLogFile       *os.File
+	challengesLogFile *os.File
+	wafLogFile        *os.File
+	mysqlLogFile      *os.File // mysql enforcer
+	once              sync.Once
+	cfg               *config.LoggingConfig
 )
 
 var debugEnabled = os.Getenv("CFM_DEBUG") == "1"
-func DebugEnabled() bool { return debugEnabled }
 
+func DebugEnabled() bool { return debugEnabled }
 
 // Init πρέπει να καλεστεί από main με την config
 func Init(c *config.LoggingConfig) {
-    cfg = c
-    once.Do(func() {
-        // κύριο log
-        if cfg.File != "" {
-            if f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-                logFile = f
-            } else {
-                fmt.Printf("failed to open log file %s: %v\n", cfg.File, err)
-            }
-        }
+	cfg = c
+	once.Do(func() {
+		// κύριο log
+		if cfg.File != "" {
+			if f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				logFile = f
+			} else {
+				fmt.Printf("failed to open log file %s: %v\n", cfg.File, err)
+			}
+		}
 
-        // API log
-        apiPath := cfg.APIFile
-        if apiPath == "" && cfg.File != "" {
-            base := cfg.File
-            ext := filepath.Ext(base)
-            if ext == "" {
-                apiPath = base + ".api"
-            } else {
-                apiPath = strings.TrimSuffix(base, ext) + ".api" + ext
-            }
-        }
-        if apiPath != "" {
-            if f, err := os.OpenFile(apiPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-                apiLogFile = f
-            } else {
-                fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
-            }
-        }
+		// API log
+		apiPath := cfg.APIFile
+		if apiPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				apiPath = base + ".api"
+			} else {
+				apiPath = strings.TrimSuffix(base, ext) + ".api" + ext
+			}
+		}
+		if apiPath != "" {
+			if f, err := os.OpenFile(apiPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				apiLogFile = f
+			} else {
+				fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
+			}
+		}
 
+		// SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
+		smtpPath := cfg.SMTPFile
+		if smtpPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				smtpPath = base + ".smtp"
+			} else {
+				smtpPath = strings.TrimSuffix(base, ext) + ".smtp" + ext
+			}
+		}
+		if smtpPath != "" {
+			if f, err := os.OpenFile(smtpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				smtpLogFile = f
+			} else {
+				fmt.Printf("failed to open smtp log file %s: %v\n", smtpPath, err)
+			}
+		}
 
-        // SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
-        smtpPath := cfg.SMTPFile
-        if smtpPath == "" && cfg.File != "" {
-            base := cfg.File
-            ext := filepath.Ext(base)
-            if ext == "" {
-                smtpPath = base + ".smtp"
-            } else {
-                smtpPath = strings.TrimSuffix(base, ext) + ".smtp" + ext
-            }
-        }
-        if smtpPath != "" {
-            if f, err := os.OpenFile(smtpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-                smtpLogFile = f
-            } else {
-                fmt.Printf("failed to open smtp log file %s: %v\n", smtpPath, err)
-            }
-        }
+		// CHALLENGES log
+		challengesPath := cfg.CHALLENGESFile
+		if challengesPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				challengesPath = base + ".challenges"
+			} else {
+				challengesPath = strings.TrimSuffix(base, ext) + ".challenges" + ext
+			}
+		}
+		if challengesPath != "" {
+			if f, err := os.OpenFile(challengesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				challengesLogFile = f
+			} else {
+				fmt.Printf("failed to open challenges log file %s: %v\n", challengesPath, err)
+			}
+		}
 
-
-// CHALLENGES log
-challengesPath := cfg.CHALLENGESFile
-if challengesPath == "" && cfg.File != "" {
-    base := cfg.File
-    ext := filepath.Ext(base)
-    if ext == "" {
-        challengesPath = base + ".challenges"
-    } else {
-        challengesPath = strings.TrimSuffix(base, ext) + ".challenges" + ext
-    }
+		// WAF log
+wafPath := cfg.WAFFile
+if wafPath == "" && cfg.File != "" {
+	base := cfg.File
+	ext := filepath.Ext(base)
+	if ext == "" {
+		wafPath = base + ".waf"
+	} else {
+		wafPath = strings.TrimSuffix(base, ext) + ".waf" + ext
+	}
 }
-if challengesPath != "" {
-    if f, err := os.OpenFile(challengesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-        challengesLogFile = f
-    } else {
-        fmt.Printf("failed to open challenges log file %s: %v\n", challengesPath, err)
-    }
+if wafPath == "" {
+	wafPath = "/var/log/cfm/cfm.waf.log"
 }
-
-
-
-// MYSQL GOVERNOR log
-mysqlPath := cfg.MYSQLFile
-if mysqlPath == "" && cfg.File != "" {
-    base := cfg.File
-    ext  := filepath.Ext(base)
-    if ext == "" {
-        mysqlPath = base + ".mysql"
-    } else {
-        mysqlPath = strings.TrimSuffix(base, ext) + ".mysql" + ext
-    }
-}
-if mysqlPath != "" {
-    if f, err := os.OpenFile(mysqlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-        mysqlLogFile = f
-    } else {
-        fmt.Printf("failed to open mysql log file %s: %v\n", mysqlPath, err)
-    }
+if f, err := os.OpenFile(wafPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+	wafLogFile = f
+} else {
+	fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
 }
 
 
-        // DETECTOR log
-        detectorPath := cfg.DETECTORFile
-        if detectorPath == "" && cfg.File != "" {
-            base := cfg.File
-            ext := filepath.Ext(base)
-            if ext == "" {
-                detectorPath = base + ".detector"
-            } else {
-                detectorPath = strings.TrimSuffix(base, ext) + ".detector" + ext
-            }
-        }
-        if detectorPath != "" {
-            if f, err := os.OpenFile(detectorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-                detectorLogFile = f
-            } else {
-                fmt.Printf("failed to open detector log file %s: %v\n", detectorPath, err)
-            }
-        }
-    })
+		// MYSQL GOVERNOR log
+		mysqlPath := cfg.MYSQLFile
+		if mysqlPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				mysqlPath = base + ".mysql"
+			} else {
+				mysqlPath = strings.TrimSuffix(base, ext) + ".mysql" + ext
+			}
+		}
+		if mysqlPath != "" {
+			if f, err := os.OpenFile(mysqlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				mysqlLogFile = f
+			} else {
+				fmt.Printf("failed to open mysql log file %s: %v\n", mysqlPath, err)
+			}
+		}
 
+		// DETECTOR log
+		detectorPath := cfg.DETECTORFile
+		if detectorPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				detectorPath = base + ".detector"
+			} else {
+				detectorPath = strings.TrimSuffix(base, ext) + ".detector" + ext
+			}
+		}
+		if detectorPath != "" {
+			if f, err := os.OpenFile(detectorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				detectorLogFile = f
+			} else {
+				fmt.Printf("failed to open detector log file %s: %v\n", detectorPath, err)
+			}
+		}
+	})
 }
-
-
-
-
-
 
 func Logf(format string, args ...interface{}) {
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    msg := fmt.Sprintf(format, args...)
-    line := fmt.Sprintf("%s %s\n", ts, msg)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-    if cfg == nil || cfg.Stdout {
-        fmt.Print(line)
-    }
-    if logFile != nil {
-        _, _ = logFile.WriteString(line)
-    }
+	if cfg == nil || cfg.Stdout {
+		fmt.Print(line)
+	}
+	if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
 }
 
 // NEW: ξεχωριστό κανάλι για API logs
 func LogfAPI(format string, args ...interface{}) {
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    msg := fmt.Sprintf(format, args...)
-    line := fmt.Sprintf("%s %s\n", ts, msg)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-    if cfg == nil || cfg.APIStdout {
-        fmt.Print(line)
-    }
-    if apiLogFile != nil {
-        _, _ = apiLogFile.WriteString(line)
-    } else if logFile != nil { // fallback: αν δεν άνοιξε API log, γράψε στο κύριο
-        _, _ = logFile.WriteString(line)
-    }
+	if cfg == nil || cfg.APIStdout {
+		fmt.Print(line)
+	}
+	if apiLogFile != nil {
+		_, _ = apiLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
 }
-
-
-
 
 // NEW: ξεχωριστό κανάλι για Detector Logs
 func LogfDETECTOR(format string, args ...interface{}) {
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    msg := fmt.Sprintf(format, args...)
-    line := fmt.Sprintf("%s %s\n", ts, msg)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-    if cfg == nil || cfg.DETECTORStdout {
-        fmt.Print(line)
-    }
-    if detectorLogFile != nil {
-        _, _ = detectorLogFile.WriteString(line)
-    } else if logFile != nil { // fallback: αν δεν άνοιξε API log, γράψε στο κύριο
-        _, _ = logFile.WriteString(line)
-    }
+	if cfg == nil || cfg.DETECTORStdout {
+		fmt.Print(line)
+	}
+	if detectorLogFile != nil {
+		_, _ = detectorLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
 }
 
-
-
-
-
-// NEW: ξεχωριστό κανάλι για Challenges Logs (web challenges, captcha/js challenge, etc.)
+// NEW: ξεχωριστό κανάλι για Challenges Logs
 func LogfCHALLENGES(format string, args ...interface{}) {
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    msg := fmt.Sprintf(format, args...)
-    line := fmt.Sprintf("%s %s\n", ts, msg)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-    if cfg == nil || cfg.CHALLENGESStdout {
-        fmt.Print(line)
-    }
-    if challengesLogFile != nil {
-        _, _ = challengesLogFile.WriteString(line)
-    } else if logFile != nil { // fallback
-        _, _ = logFile.WriteString(line)
-    }
+	if cfg == nil || cfg.CHALLENGESStdout {
+		fmt.Print(line)
+	}
+	if challengesLogFile != nil {
+		_, _ = challengesLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
 }
 
+// NEW: ξεχωριστό κανάλι για WAF Logs
+func LogfWAF(format string, args ...interface{}) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-
-
-
+	if cfg == nil || cfg.WAFStdout {
+		fmt.Print(line)
+	}
+	if wafLogFile != nil {
+		_, _ = wafLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
+}
 
 func LogfSMTP(format string, args ...interface{}) {
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    line := fmt.Sprintf("%s %s\n", ts, fmt.Sprintf(format, args...))
-    if smtpLogFile != nil { _, _ = smtpLogFile.WriteString(line) }
-    if cfg == nil || cfg.SMTPStdout { fmt.Print(line) }
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	line := fmt.Sprintf("%s %s\n", ts, fmt.Sprintf(format, args...))
+	if smtpLogFile != nil {
+		_, _ = smtpLogFile.WriteString(line)
+	}
+	if cfg == nil || cfg.SMTPStdout {
+		fmt.Print(line)
+	}
 }
 
-
-
-// LogfMYSQLGOVERNOR writes governor events (starts, kills, notifies,
-// sleep reaps, connection pressure, rate-limit hits) to cfm.mysql.log.
-// Falls back to the main log if the dedicated file was not opened.
+// LogfMYSQLGOVERNOR writes governor events to cfm.mysql.log.
 func LogfMYSQLGOVERNOR(format string, args ...interface{}) {
-    ts   := time.Now().Format("2006-01-02 15:04:05")
-    msg  := fmt.Sprintf(format, args...)
-    line := fmt.Sprintf("%s %s\n", ts, msg)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
 
-    if cfg == nil || cfg.MYSQLStdout {
-        fmt.Print(line)
-    }
-    if mysqlLogFile != nil {
-        _, _ = mysqlLogFile.WriteString(line)
-    } else if logFile != nil { // fallback: main log
-        _, _ = logFile.WriteString(line)
-    }
+	if cfg == nil || cfg.MYSQLStdout {
+		fmt.Print(line)
+	}
+	if mysqlLogFile != nil {
+		_, _ = mysqlLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
 }
-
-
