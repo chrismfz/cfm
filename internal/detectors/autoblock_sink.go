@@ -479,20 +479,41 @@ if enforced == "challenge" && s.chalCooldown > 0 {
 
         // --- Challenges log file (separate) ---
         if out.Extra["challenge_log"] != "0" {
-            logging.LogfCHALLENGES(
-                "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s%s",
-                ipStr,
-                firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
-                out.Extra["host"],
-                out.Extra["uri"],
-                out.Extra["method"],
-                out.Extra["status"],
-                ttl.String(),
-                out.Extra["enforced"],
-                out.Extra["challenge_fails"],
-                out.Extra["escalated"],
-                enrSuffix,
-            )
+
+            if out.Extra["rule"] == "CHALLENGE_SUBNET" {
+                logging.LogfCHALLENGES(
+                    "[challenge] ip=%s rule=%s host=%s subnet=%s subnet_ips=%s subnet_reqs=%s subnet_uniqpaths=%s subnet_uniqhosts=%s ttl=%s enforced=%s fails=%s escalated=%s%s",
+                    ipStr,
+                    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                    out.Extra["host"],
+                    out.Extra["subnet"],
+                    out.Extra["subnet_ips"],
+                    out.Extra["subnet_reqs"],
+                    out.Extra["subnet_uniqpaths"],
+                    out.Extra["subnet_uniqhosts"],
+                    ttl.String(),
+                    out.Extra["enforced"],
+                    out.Extra["challenge_fails"],
+                    out.Extra["escalated"],
+                    enrSuffix,
+                )
+            } else {
+                logging.LogfCHALLENGES(
+                    "[challenge] ip=%s rule=%s host=%s uri=%s method=%s status=%s ttl=%s enforced=%s fails=%s escalated=%s%s",
+                    ipStr,
+                    firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"),
+                    out.Extra["host"],
+                    out.Extra["uri"],
+                    out.Extra["method"],
+                    out.Extra["status"],
+                    ttl.String(),
+                    out.Extra["enforced"],
+                    out.Extra["challenge_fails"],
+                    out.Extra["escalated"],
+                    enrSuffix,
+                )
+            }
+
         }
 
         // --- Notify (same notify system) ---

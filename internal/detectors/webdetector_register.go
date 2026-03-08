@@ -612,6 +612,17 @@ ChallengeSuspiciousUniqIPOff: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF",
 ChallengeSuspiciousUniqIPMax: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX", 0),
 
 
+
+        ChallengeSubnetEnabled:     kvBool(kv, "CHALLENGE_SUBNET_ENABLED", false),
+        ChallengeSubnetPrefixV4:    kvInt(kv, "CHALLENGE_SUBNET_PREFIX_V4", 24),
+        ChallengeSubnetMinIPs:      kvInt(kv, "CHALLENGE_SUBNET_MIN_IPS", 4),
+        ChallengeSubnetMinReq:      kvInt(kv, "CHALLENGE_SUBNET_MIN_REQ", 25),
+        ChallengeSubnetMinUniqPath: kvInt(kv, "CHALLENGE_SUBNET_MIN_UNIQPATH", 20),
+        ChallengeSubnetMinUniqHost: kvInt(kv, "CHALLENGE_SUBNET_MIN_UNIQHOST", 1),
+        ChallengeSubnetTTL:         kvDur(kv, "CHALLENGE_SUBNET_TTL", 30*time.Minute),
+        ChallengeSubnetCap:         kvInt(kv, "CHALLENGE_SUBNET_CAP", 2048),
+        ChallengeSubnetSameHost:    kvBool(kv, "CHALLENGE_SUBNET_SAME_HOST", true),
+
 }
 
 // If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN

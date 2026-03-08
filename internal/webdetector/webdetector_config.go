@@ -172,6 +172,19 @@ ChallengePathsTTL     time.Duration // CHALLENGE_PATHS_TTL (optional)
         ChallengeVhostUniqPathsCap     int           // CHALLENGE_VHOST_UNIQPATHS_CAP (early stop)
 
 
+
+	// Subnet-based challenge mode (behavioral, low-and-slow rotators)
+	ChallengeSubnetEnabled     bool          // CHALLENGE_SUBNET_ENABLED
+	ChallengeSubnetPrefixV4    int           // CHALLENGE_SUBNET_PREFIX_V4 (default 24)
+	ChallengeSubnetMinIPs      int           // CHALLENGE_SUBNET_MIN_IPS
+	ChallengeSubnetMinReq      int           // CHALLENGE_SUBNET_MIN_REQ
+	ChallengeSubnetMinUniqPath int           // CHALLENGE_SUBNET_MIN_UNIQPATH
+	ChallengeSubnetMinUniqHost int           // CHALLENGE_SUBNET_MIN_UNIQHOST
+	ChallengeSubnetTTL         time.Duration // CHALLENGE_SUBNET_TTL
+	ChallengeSubnetCap         int           // CHALLENGE_SUBNET_CAP
+	ChallengeSubnetSameHost    bool          // CHALLENGE_SUBNET_SAME_HOST
+
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -341,6 +354,32 @@ if !c.ChallengeLogExpired {
                 }
         }
 
+
+
+
+	if c.ChallengeSubnetEnabled {
+		if c.ChallengeSubnetPrefixV4 <= 0 {
+			c.ChallengeSubnetPrefixV4 = 24
+		}
+		if c.ChallengeSubnetMinIPs <= 0 {
+			c.ChallengeSubnetMinIPs = 4
+		}
+		if c.ChallengeSubnetMinReq <= 0 {
+			c.ChallengeSubnetMinReq = 25
+		}
+		if c.ChallengeSubnetMinUniqPath <= 0 {
+			c.ChallengeSubnetMinUniqPath = 20
+		}
+		if c.ChallengeSubnetMinUniqHost <= 0 {
+			c.ChallengeSubnetMinUniqHost = 1
+		}
+		if c.ChallengeSubnetTTL <= 0 {
+			c.ChallengeSubnetTTL = 30 * time.Minute
+		}
+		if c.ChallengeSubnetCap <= 0 {
+			c.ChallengeSubnetCap = 2048
+		}
+	}
 
 
 // Malformed burst defaults (only if enabled)

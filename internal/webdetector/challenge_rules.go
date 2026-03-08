@@ -179,11 +179,12 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         haveUniqPathsIP := e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0
         haveUniqHostsIP := e.cfg.ChallengeIPUniqHostsEnabled && e.cfg.ChallengeIPUniqHostsMin > 0
         haveUniqPathsVhost := e.cfg.ChallengeVhostUniqPathsEnabled && e.cfg.ChallengeVhostUniqPathsMin > 0
+        haveSubnet := e.cfg.ChallengeSubnetEnabled
 
 
         haveVhostManual := len(e.cfg.ChallengeVHost) > 0
         haveVhostAuto   := e.cfg.ChallengeSuspiciousVHost
-        if !havePaths && !haveThr && !haveMalformed && !haveUniqUA && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveVhostManual && !haveVhostAuto { return }
+        if !havePaths && !haveThr && !haveMalformed && !haveUniqUA && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveSubnet && !haveVhostManual && !haveVhostAuto { return }
 
 	const (
 		topN       = 50
@@ -1589,12 +1590,237 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                select { case out <- a: default: }
             }
         }
+
+
+
     }
 
 
 
+ // ---- subnet-based behavioral challenges ----
+    if e.cfg.ChallengeSubnetEnabled {
+        e.emitSubnetChallenges(now, out)
+    }
+
 
 }
+
+
+
+
+func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
+	if out == nil || !e.cfg.ChallengeSubnetEnabled {
+		return
+	}
+
+	type sAgg struct {
+		reqs     int
+		ips      map[string]struct{}
+		paths    map[uint64]struct{}
+		hosts    map[uint64]struct{}
+		hostReqs map[string]int
+	}
+
+	agg := make(map[string]*sAgg)
+
+	e.mu.RLock()
+	for _, hs := range e.hosts {
+		if hs == nil {
+			continue
+		}
+		for i := range hs.buckets {
+			b := &hs.buckets[i]
+
+			for sub, n := range b.subnetReqs {
+				a := agg[sub]
+				if a == nil {
+					a = &sAgg{}
+					agg[sub] = a
+				}
+				a.reqs += n
+			}
+
+			for sub, set := range b.subnetIPs {
+				a := agg[sub]
+				if a == nil {
+					a = &sAgg{}
+					agg[sub] = a
+				}
+				if a.ips == nil {
+					a.ips = make(map[string]struct{}, 8)
+				}
+				if len(a.ips) < e.cfg.ChallengeSubnetCap {
+					for ip := range set {
+						a.ips[ip] = struct{}{}
+						if len(a.ips) >= e.cfg.ChallengeSubnetCap {
+							break
+						}
+					}
+				}
+			}
+
+			for sub, set := range b.subnetUniqPaths {
+				a := agg[sub]
+				if a == nil {
+					a = &sAgg{}
+					agg[sub] = a
+				}
+				if a.paths == nil {
+					a.paths = make(map[uint64]struct{}, 16)
+				}
+				if len(a.paths) < e.cfg.ChallengeSubnetCap {
+					for h := range set {
+						a.paths[h] = struct{}{}
+						if len(a.paths) >= e.cfg.ChallengeSubnetCap {
+							break
+						}
+					}
+				}
+			}
+
+			for sub, set := range b.subnetUniqHosts {
+				a := agg[sub]
+				if a == nil {
+					a = &sAgg{}
+					agg[sub] = a
+				}
+				if a.hosts == nil {
+					a.hosts = make(map[uint64]struct{}, 4)
+				}
+				if len(a.hosts) < e.cfg.ChallengeSubnetCap {
+					for h := range set {
+						a.hosts[h] = struct{}{}
+						if len(a.hosts) >= e.cfg.ChallengeSubnetCap {
+							break
+						}
+					}
+				}
+			}
+
+			for sub, hm := range b.subnetHostReqs {
+				a := agg[sub]
+				if a == nil {
+					a = &sAgg{}
+					agg[sub] = a
+				}
+				if a.hostReqs == nil {
+					a.hostReqs = make(map[string]int, 4)
+				}
+				for host, n := range hm {
+					a.hostReqs[host] += n
+				}
+			}
+		}
+	}
+	e.mu.RUnlock()
+
+	const cooldown = 10 * time.Second
+
+	for sub, a := range agg {
+		if a == nil {
+			continue
+		}
+
+		ipN := len(a.ips)
+		pathN := len(a.paths)
+		hostN := len(a.hosts)
+
+		if ipN < e.cfg.ChallengeSubnetMinIPs {
+			continue
+		}
+		if a.reqs < e.cfg.ChallengeSubnetMinReq {
+			continue
+		}
+		if pathN < e.cfg.ChallengeSubnetMinUniqPath {
+			continue
+		}
+		if hostN < e.cfg.ChallengeSubnetMinUniqHost {
+			continue
+		}
+
+		targetHost := ""
+		if e.cfg.ChallengeSubnetSameHost {
+			bestN := 0
+			for h, n := range a.hostReqs {
+				if n > bestN {
+					bestN = n
+					targetHost = h
+				}
+			}
+			if targetHost == "" {
+				continue
+			}
+		}
+
+	if targetHost != "" && e.hostBypassed(targetHost) {
+			continue
+		}
+
+		e.emitMu.Lock()
+		last, ok := e.subnetLastChalEmit[sub]
+		if ok && now.Sub(last) < cooldown {
+			e.emitMu.Unlock()
+			continue
+		}
+		e.subnetLastChalEmit[sub] = now
+		e.emitMu.Unlock()
+
+		ttl := e.cfg.ChallengeSubnetTTL
+		if ttl <= 0 {
+			ttl = 30 * time.Minute
+		}
+
+		rule := "CHALLENGE_SUBNET"
+
+		for ip := range a.ips {
+			if e.isBypassed(ip) || e.isExcluded(ip, targetHost, "", rule) {
+				if e.cfg.ChallengeLogSuppressed {
+					logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ip, targetHost, rule)
+				}
+				continue
+			}
+
+			samples := e.ipSamples(ip, 8)
+
+			extra := map[string]string{
+				"detector":         "webdetector",
+				"ip":               ip,
+				"action":           "challenge",
+				"rule":             rule,
+				"ttl":              ttl.String(),
+				"subnet":           sub,
+				"subnet_ips":       strconv.Itoa(ipN),
+				"subnet_reqs":      strconv.Itoa(a.reqs),
+				"subnet_uniqpaths": strconv.Itoa(pathN),
+				"subnet_uniqhosts": strconv.Itoa(hostN),
+				"challenge_log":    boolFlag(e.cfg.ChallengeLog),
+				"challenge_notify": boolFlag(e.cfg.ChallengeNotify),
+				"challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
+				"challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
+			}
+			if targetHost != "" {
+				extra["host"] = targetHost
+			}
+
+			e.RecordIPChallenge(ip, targetHost, rule, "", "", 0, ttl)
+
+			select {
+			case out <- core.Alert{
+				When:    now,
+				Kind:    core.AlertKind("WEB/CHALLENGE"),
+				Key:     ip,
+				Count:   a.reqs,
+				Samples: samples,
+				Extra:   extra,
+			}:
+			default:
+			}
+		}
+	}
+}
+
+
+
 
 func atoiSafe(s string) int {
     if s == "" { return 0 }

@@ -160,6 +160,15 @@ type bucketSW struct {
 	uas   map[string]int
 	refs  map[string]int
 	paths map[string]int
+
+
+	// subnet behavioral aggregation (IPv4 /24 etc)
+	subnetReqs      map[string]int                 // subnet -> req count
+	subnetIPs       map[string]map[string]struct{} // subnet -> distinct IPs
+	subnetUniqPaths map[string]map[uint64]struct{} // subnet -> uniq paths
+	subnetUniqHosts map[string]map[uint64]struct{} // subnet -> uniq hosts
+	subnetHostReqs  map[string]map[string]int      // subnet -> host -> req count
+
 }
 
 type hostState struct {
@@ -358,6 +367,9 @@ chalExcludeFunc func(ip, host, ua, asn, ptr, rule string) (string, bool)
     // Challenge emit cooldown separate from blocks
     ipLastChalEmit map[string]time.Time
 
+    // Subnet challenge emit cooldown
+    subnetLastChalEmit map[string]time.Time
+
     // last context for an IP that matched a challenge rule (host/uri/pattern)
     chalLast map[string]chalCtx
 
@@ -431,6 +443,7 @@ if cfg.OpenRestyMode {
     }
 
     e.ipLastChalEmit = make(map[string]time.Time)
+    e.subnetLastChalEmit = make(map[string]time.Time)
     e.chalLast = make(map[string]chalCtx)
 
     e.vhostUnderAttack = make(map[string]bool)
@@ -455,6 +468,45 @@ if cfg.OpenRestyMode {
 
 	return e
 }
+
+func subnetKeyV4(ip string, prefix int) string {
+	if ip == "" {
+		return ""
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ""
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return ""
+	}
+	if prefix <= 0 || prefix > 32 {
+		prefix = 24
+	}
+	mask := net.CIDRMask(prefix, 32)
+	netIP := v4.Mask(mask)
+	return fmt.Sprintf("%s/%d", netIP.String(), prefix)
+}
+
+func addStringToSetWithCap(m map[string]map[string]struct{}, key, val string, capN int) {
+	if key == "" || val == "" {
+		return
+	}
+	if capN <= 0 {
+		capN = 1024
+	}
+	set := m[key]
+	if set == nil {
+		set = make(map[string]struct{}, 8)
+		m[key] = set
+	}
+	if len(set) >= capN {
+		return
+	}
+	set[val] = struct{}{}
+}
+
 
 // ChallengeAPI returns the in-memory store used by the challenge JSON API.
 func (e *Engine) ChallengeAPI() *ChallengeAPIStore {
@@ -852,6 +904,53 @@ if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
                         addHashToSetWithCap(b.ipUniqHosts, rec.IP, hash64(host), e.cfg.ChallengeIPUniqHostsCap)
                 }
         }
+
+
+
+        // ------------------------------------------------------------
+        // NEW: subnet-based challenge signals
+        // ------------------------------------------------------------
+        if e.cfg.ChallengeSubnetEnabled && rec.IP != "" {
+                sub := subnetKeyV4(rec.IP, e.cfg.ChallengeSubnetPrefixV4)
+                if sub != "" {
+                        if b.subnetReqs == nil {
+                                b.subnetReqs = make(map[string]int)
+                        }
+                        b.subnetReqs[sub]++
+
+                        if b.subnetIPs == nil {
+                                b.subnetIPs = make(map[string]map[string]struct{})
+                        }
+                        addStringToSetWithCap(b.subnetIPs, sub, rec.IP, e.cfg.ChallengeSubnetCap)
+
+                        if !isStaticAssetPath(p) {
+                                if b.subnetUniqPaths == nil {
+                                        b.subnetUniqPaths = make(map[string]map[uint64]struct{})
+                                }
+                                addHashToSetWithCap(b.subnetUniqPaths, sub, hash64(p), e.cfg.ChallengeSubnetCap)
+                        }
+
+                        if host != "" {
+                                if b.subnetUniqHosts == nil {
+                                        b.subnetUniqHosts = make(map[string]map[uint64]struct{})
+                                }
+                                addHashToSetWithCap(b.subnetUniqHosts, sub, hash64(host), e.cfg.ChallengeSubnetCap)
+
+                                if b.subnetHostReqs == nil {
+                                        b.subnetHostReqs = make(map[string]map[string]int)
+                                }
+                                hm := b.subnetHostReqs[sub]
+                                if hm == nil {
+                                        hm = make(map[string]int)
+                                        b.subnetHostReqs[sub] = hm
+                                }
+                                hm[host]++
+                        }
+                }
+        }
+
+
+
 
 
         // Per-IP challenge counters (only allocate maps if a related threshold is enabled)
@@ -2788,4 +2887,5 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
     _, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
     return matched
 }
+
 
