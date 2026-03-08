@@ -239,18 +239,12 @@ local function detect_cmd_payload(args)
   local a = lower(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-
-  -- FP guard: skip "data:*;base64," blobs (common in image tools / embeds)
-  -- Examples:
-  --   data:image/png;base64,iVBORw0KGgo...
-  --   data:application/octet-stream;base64,AAAB...
+  -- FP guard: skip data:*;base64 blobs
   if has(a, "data:") and has(a, ";base64,") then
     return nil
   end
 
-  -- FP guard: if args contain a very long base64-ish segment, skip payload checks.
-  -- Rationale: scanners rarely send huge base64 blobs; legit apps sometimes do.
-  -- Heuristic: look for "base64," then >=256 chars afterwards.
+  -- FP guard: long base64-ish segment
   do
     local p = string.find(a, "base64,", 1, true)
     if p then
@@ -261,54 +255,88 @@ local function detect_cmd_payload(args)
     end
   end
 
-  -- FP guard: large single parameter values (e.g., JWT, signed blobs).
-  -- If any value looks very long (>=512) and mostly URL-safe/base64 chars, skip.
-  -- This is intentionally conservative; adjust thresholds if needed.
+  -- FP guard: large single parameter values (JWTs, signatures, blobs)
   do
     for val in string.gmatch(a, "=([^&]+)") do
       if #val >= 512 then
-        -- If it has very few "weird" chars, it's probably an encoded blob.
-        -- We avoid heavy scanning on it.
         return nil
       end
     end
   end
 
+  -- FP guard: common ecommerce filter syntax
+  -- Example:
+  -- filters=price[19_23]|megethos[688-109]|product_cat[511-89]
+  do
+    if begins(a, "filters=") then
+      local v = string.sub(a, 9)
+      if v ~= "" and
+         string.match(v, "^[a-z0-9_%-%[%]%|]+$") and
+         not has(v, "||") and
+         not has(v, "%7c%7c") and
+         not has(v, "`") and
+         not has(v, "%60") and
+         not has(v, ";wget") and
+         not has(v, ";curl") and
+         not has(v, ";bash") and
+         not has(v, ";sh ") and
+         not has(v, "$(") and
+         not has(v, "%24%28") then
+        return nil
+      end
+    end
+  end
 
-  -- Very common command separators / execution forms
--- Very common command separators / execution forms (LOW FP)
--- Important: do NOT trigger on a bare ';' (would FP on "&amp;")
-local function has_semi_cmd(s)
-  -- decoded form
-  if has(s, ";wget") or has(s, ";curl") or has(s, ";bash") or has(s, ";sh ") then return true end
-  -- url-encoded ';' (%3b or %3B)
-  if has(s, "%3bwget") or has(s, "%3bcurl") or has(s, "%3bbash") or has(s, "%3bsh%20") then return true end
-  if has(s, "%3Bwget") or has(s, "%3Bcurl") or has(s, "%3Bbash") or has(s, "%3Bsh%20") then return true end
-  return false
-end
+  -- FP guard: duplicate query separator like &&page=2 or &&p=2
+  if string.match(a, "[%?&][^=]+=[^&]*&&[a-z0-9_%-]+=") then
+    return nil
+  end
 
-if has_semi_cmd(a) then
-  return "PAY_SEMI_CMD"
-end
+  -- FP guard: app/widget values using || as delimiter
+  -- Example:
+  -- main_opt_id=main-content-style33||widget_1
+  if string.match(a, "[%?&][a-z0-9_%-]+=([a-z0-9_%-]+%|%|[a-z0-9_%-]+)") then
+    return nil
+  end
+  if string.match(a, "[%?&][a-z0-9_%-]+=([a-z0-9_%-]+||[a-z0-9_%-]+)") then
+    return nil
+  end
 
-  if has(a, "%7c") or has(a, "|") then return "PAY_PIPE" end  -- '|'
-  if has(a, "%26%26") or has(a, "&&") then return "PAY_ANDAND" end
-  if has(a, "%7c%7c") or has(a, "||") then return "PAY_OROR" end
+  -- FP guard: known Jetpack xmlrpc token pattern
+  if has(a, "/xmlrpc.php?for=jetpack&token=") then
+    return nil
+  end
 
-  -- Backticks / command substitution
-  if has(a, "%60") or has(a, "`") then return "PAY_BACKTICK" end
-  if has(a, "$(") or has(a, "%24%28") then return "PAY_DOLLAR_PAREN" end
+  local function has_semi_cmd(s)
+    if has(s, ";wget") or has(s, ";curl") or has(s, ";bash") or has(s, ";sh ") then return true end
+    if has(s, "%3bwget") or has(s, "%3bcurl") or has(s, "%3bbash") or has(s, "%3bsh%20") then return true end
+    if has(s, "%3bwget") or has(s, "%3bcurl") or has(s, "%3bbash") or has(s, "%3bsh+") then return true end
+    if has(s, "%3Bwget") or has(s, "%3Bcurl") or has(s, "%3Bbash") or has(s, "%3Bsh%20") then return true end
+    if has(s, "%3Bwget") or has(s, "%3Bcurl") or has(s, "%3Bbash") or has(s, "%3Bsh+") then return true end
+    return false
+  end
 
-  -- Common dangerous helpers (combined with separators usually)
-  if has(a, "wget") then return "PAY_WGET" end
-  if has(a, "curl") then return "PAY_CURL" end
-  if has(a, "bash") then return "PAY_BASH" end
-  if has(a, "sh") and (has(a, "|sh") or has(a, "sh%20-c") or has(a, "sh+-c")) then
-    return "PAY_SH"
+  if has_semi_cmd(a) then
+    return "PAY_SEMI_CMD"
+  end
+
+  -- Single pipe only in shell-ish context
+  if has(a, "|wget") or has(a, "%7cwget") then return "PAY_PIPE_WGET" end
+  if has(a, "|curl") or has(a, "%7ccurl") then return "PAY_PIPE_CURL" end
+  if has(a, "|bash") or has(a, "%7cbash") then return "PAY_PIPE_BASH" end
+  if has(a, "|sh ") or has(a, "%7csh%20") or has(a, "%7csh+") then return "PAY_PIPE_SH" end
+
+  -- Backticks are still high-confidence enough
+  if has(a, "%60") or has(a, "`") then
+    return "PAY_BACKTICK"
   end
 
   return nil
 end
+
+
+
+
 
 -- A10 (Exceptional conditions): debug toggles / stacktrace probes.
 -- Keep LOGONLY: some dev/staging sites legitimately use these.

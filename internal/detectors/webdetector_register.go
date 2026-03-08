@@ -285,8 +285,8 @@ if w.ipIgnore != nil {
                         meta += " method=" + method
                     }
 
-                    logging.LogfCHALLENGES(
-                        "[challenge] ip=%s%s result=%s reason=%s ttl=%s%s",
+                    logging.LogfWAF(
+                        "[waf_engine] ip=%s%s result=%s reason=%s ttl=%s%s",
                         ip,
                         meta,
                         action+"_triggered",
