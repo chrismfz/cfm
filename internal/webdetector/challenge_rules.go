@@ -1609,19 +1609,20 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
 
 
 func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
+
 	if out == nil || !e.cfg.ChallengeSubnetEnabled {
 		return
 	}
 
 	type sAgg struct {
-		reqs     int
-		ips      map[string]struct{}
-		paths    map[uint64]struct{}
-		hosts    map[uint64]struct{}
-		hostReqs map[string]int
+		sub   string
+		host  string
+		reqs  int
+		ips   map[string]struct{}
+		paths map[uint64]struct{}
 	}
 
-	agg := make(map[string]*sAgg)
+	agg := make(map[string]*sAgg) // key = subnet|host
 
 	e.mu.RLock()
 	for _, hs := range e.hosts {
@@ -1631,83 +1632,94 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		for i := range hs.buckets {
 			b := &hs.buckets[i]
 
-			for sub, n := range b.subnetReqs {
-				a := agg[sub]
-				if a == nil {
-					a = &sAgg{}
-					agg[sub] = a
+			for sub, hm := range b.subnetHostReqs {
+				for host, n := range hm {
+					host = strings.ToLower(strings.TrimSpace(host))
+					if sub == "" || host == "" {
+						continue
+					}
+					key := sub + "|" + host
+					a := agg[key]
+					if a == nil {
+						a = &sAgg{
+							sub:  sub,
+							host: host,
+						}
+						agg[key] = a
+					}
+					a.reqs += n
 				}
-				a.reqs += n
 			}
 
 			for sub, set := range b.subnetIPs {
-				a := agg[sub]
-				if a == nil {
-					a = &sAgg{}
-					agg[sub] = a
+				if len(set) == 0 {
+					continue
 				}
-				if a.ips == nil {
-					a.ips = make(map[string]struct{}, 8)
-				}
-				if len(a.ips) < e.cfg.ChallengeSubnetCap {
-					for ip := range set {
-						a.ips[ip] = struct{}{}
-						if len(a.ips) >= e.cfg.ChallengeSubnetCap {
-							break
+				hm := b.subnetHostReqs[sub]
+				for host, n := range hm {
+					if n <= 0 {
+						continue
+					}
+					host = strings.ToLower(strings.TrimSpace(host))
+					if host == "" {
+						continue
+					}
+					key := sub + "|" + host
+					a := agg[key]
+					if a == nil {
+						a = &sAgg{
+							sub:  sub,
+							host: host,
+						}
+						agg[key] = a
+					}
+					if a.ips == nil {
+						a.ips = make(map[string]struct{}, 8)
+					}
+					if len(a.ips) < e.cfg.ChallengeSubnetCap {
+						for ip := range set {
+							a.ips[ip] = struct{}{}
+							if len(a.ips) >= e.cfg.ChallengeSubnetCap {
+								break
+							}
 						}
 					}
 				}
 			}
 
 			for sub, set := range b.subnetUniqPaths {
-				a := agg[sub]
-				if a == nil {
-					a = &sAgg{}
-					agg[sub] = a
+				if len(set) == 0 {
+					continue
 				}
-				if a.paths == nil {
-					a.paths = make(map[uint64]struct{}, 16)
-				}
-				if len(a.paths) < e.cfg.ChallengeSubnetCap {
-					for h := range set {
-						a.paths[h] = struct{}{}
-						if len(a.paths) >= e.cfg.ChallengeSubnetCap {
-							break
-						}
-					}
-				}
-			}
-
-			for sub, set := range b.subnetUniqHosts {
-				a := agg[sub]
-				if a == nil {
-					a = &sAgg{}
-					agg[sub] = a
-				}
-				if a.hosts == nil {
-					a.hosts = make(map[uint64]struct{}, 4)
-				}
-				if len(a.hosts) < e.cfg.ChallengeSubnetCap {
-					for h := range set {
-						a.hosts[h] = struct{}{}
-						if len(a.hosts) >= e.cfg.ChallengeSubnetCap {
-							break
-						}
-					}
-				}
-			}
-
-			for sub, hm := range b.subnetHostReqs {
-				a := agg[sub]
-				if a == nil {
-					a = &sAgg{}
-					agg[sub] = a
-				}
-				if a.hostReqs == nil {
-					a.hostReqs = make(map[string]int, 4)
-				}
+				hm := b.subnetHostReqs[sub]
 				for host, n := range hm {
-					a.hostReqs[host] += n
+					if n <= 0 {
+						continue
+					}
+					host = strings.ToLower(strings.TrimSpace(host))
+					if host == "" {
+						continue
+					}
+					key := sub + "|" + host
+					a := agg[key]
+					if a == nil {
+						a = &sAgg{
+							sub:  sub,
+							host: host,
+						}
+						agg[key] = a
+					}
+					if a.paths == nil {
+						a.paths = make(map[uint64]struct{}, 16)
+					}
+					if len(a.paths) < e.cfg.ChallengeSubnetCap {
+						for h := range set {
+							a.paths[h] = struct{}{}
+							if len(a.paths) >= e.cfg.ChallengeSubnetCap {
+								break
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1716,14 +1728,13 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 
 	const cooldown = 10 * time.Second
 
-	for sub, a := range agg {
-		if a == nil {
+	for pairKey, a := range agg {
+		if a == nil || a.host == "" {
 			continue
 		}
 
 		ipN := len(a.ips)
 		pathN := len(a.paths)
-		hostN := len(a.hosts)
 
 		if ipN < e.cfg.ChallengeSubnetMinIPs {
 			continue
@@ -1734,35 +1745,17 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		if pathN < e.cfg.ChallengeSubnetMinUniqPath {
 			continue
 		}
-		if hostN < e.cfg.ChallengeSubnetMinUniqHost {
-			continue
-		}
-
-		targetHost := ""
-		if e.cfg.ChallengeSubnetSameHost {
-			bestN := 0
-			for h, n := range a.hostReqs {
-				if n > bestN {
-					bestN = n
-					targetHost = h
-				}
-			}
-			if targetHost == "" {
-				continue
-			}
-		}
-
-	if targetHost != "" && e.hostBypassed(targetHost) {
+		if e.hostBypassed(a.host) {
 			continue
 		}
 
 		e.emitMu.Lock()
-		last, ok := e.subnetLastChalEmit[sub]
+		last, ok := e.subnetLastChalEmit[pairKey]
 		if ok && now.Sub(last) < cooldown {
 			e.emitMu.Unlock()
 			continue
 		}
-		e.subnetLastChalEmit[sub] = now
+		e.subnetLastChalEmit[pairKey] = now
 		e.emitMu.Unlock()
 
 		ttl := e.cfg.ChallengeSubnetTTL
@@ -1773,9 +1766,9 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		rule := "CHALLENGE_SUBNET"
 
 		for ip := range a.ips {
-			if e.isBypassed(ip) || e.isExcluded(ip, targetHost, "", rule) {
+			if e.isBypassed(ip) || e.isExcluded(ip, a.host, "", rule) {
 				if e.cfg.ChallengeLogSuppressed {
-					logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ip, targetHost, rule)
+					logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ip, a.host, rule)
 				}
 				continue
 			}
@@ -1788,21 +1781,19 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				"action":           "challenge",
 				"rule":             rule,
 				"ttl":              ttl.String(),
-				"subnet":           sub,
+				"host":             a.host,
+				"subnet":           a.sub,
 				"subnet_ips":       strconv.Itoa(ipN),
 				"subnet_reqs":      strconv.Itoa(a.reqs),
 				"subnet_uniqpaths": strconv.Itoa(pathN),
-				"subnet_uniqhosts": strconv.Itoa(hostN),
+				"subnet_uniqhosts": "1",
 				"challenge_log":    boolFlag(e.cfg.ChallengeLog),
 				"challenge_notify": boolFlag(e.cfg.ChallengeNotify),
 				"challenge_log_suppressed": boolFlag(e.cfg.ChallengeLogSuppressed),
 				"challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
 			}
-			if targetHost != "" {
-				extra["host"] = targetHost
-			}
 
-			e.RecordIPChallenge(ip, targetHost, rule, "", "", 0, ttl)
+			e.RecordIPChallenge(ip, a.host, rule, "", "", 0, ttl)
 
 			select {
 			case out <- core.Alert{
@@ -1817,6 +1808,7 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 			}
 		}
 	}
+
 }
 
 
