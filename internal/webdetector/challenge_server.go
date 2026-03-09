@@ -1509,7 +1509,7 @@ func challengeHTML() string {
     <div class="h">Checking your browser…</div>
     <div class="p">We’re verifying your request before accessing <code>%s</code>.</div>
     <div class="spinner"></div>
-    <div class="muted">This should take less than a second. If you’re stuck, enable JavaScript & cookies.</div>
+    <div class="muted">This should take a few seconds. If you’re stuck, enable JavaScript & cookies.</div>
   </div>
 
 <script>

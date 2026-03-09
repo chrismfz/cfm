@@ -52,14 +52,14 @@ import (
 type NginxBridge struct {
 	cfg    bridgeCfg
 	client *http.Client
-	//        started bool
+	// started bool
 
-	mu      sync.RWMutex
-	ipState map[string]bridgeIPEntry    // ip   → current decision
-	vhState map[string]bridgeVhostEntry // host → current decision
-	okState map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
-	bypassFunc func(string) bool // set once at startup; no lock needed (written before serving starts)
-	stats BridgeStats
+	mu         sync.RWMutex
+	ipState    map[string]bridgeIPEntry    // ip   → current decision
+	vhState    map[string]bridgeVhostEntry // host → current decision
+	okState    map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
+	bypassFunc func(string) bool           // set once at startup; no lock needed (written before serving starts)
+	stats      BridgeStats
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
@@ -88,7 +88,7 @@ type bridgeCfg struct {
 }
 
 type bridgeIPEntry struct {
-	Action  string // "challenge" | "block"  |  "logonly"
+	Action  string // "challenge" | "block" | "logonly"
 	Expires time.Time
 	Reason  string
 }
@@ -166,36 +166,34 @@ type nginxObserveMsg struct {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: SetBypassFunc wires a predicate that permanently allows an IP regardless
-// of any ipState / vhState entry.  Use for IGNORE_IPS / IGNORE_NETS.
+// of any ipState / vhState entry. Use for IGNORE_IPS / IGNORE_NETS.
 // Must be called before ServeDecisions() starts.
 func (b *NginxBridge) SetBypassFunc(fn func(string) bool) {
-    if b == nil {
-        return
-    }
-    b.bypassFunc = fn
+	if b == nil {
+		return
+	}
+	b.bypassFunc = fn
 }
 
 // BypassIPTemp extends okState for one IP so that vhost-wide challenge is
-// bypassed for at least ttl.  Used for ASN/UA chalExclude in vhost mode.
+// bypassed for at least ttl. Used for ASN/UA chalExclude in vhost mode.
 // Does NOT push to Lua (okState is checked in-process in handleDecision).
 func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
-    if b == nil || !b.cfg.Enabled {
-        return
-    }
-    if ttl <= 0 {
-        ttl = b.cfg.DefaultTTL
-    }
-    exp := time.Now().Add(ttl)
-    b.mu.Lock()
-    cur, ok := b.okState[ip]
-    if !ok || exp.After(cur) {
-        b.okState[ip] = exp
-    }
-    b.mu.Unlock()
+	if b == nil || !b.cfg.Enabled {
+		return
+	}
+	if ttl <= 0 {
+		ttl = b.cfg.DefaultTTL
+	}
+	exp := time.Now().Add(ttl)
+
+	b.mu.Lock()
+	cur, ok := b.okState[ip]
+	if !ok || exp.After(cur) {
+		b.okState[ip] = exp
+	}
+	b.mu.Unlock()
 }
-
-
-
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
@@ -248,11 +246,11 @@ func (b *NginxBridge) ChallengeIP(ip string, ttl time.Duration) {
 	if !b.cfg.Enabled {
 		return
 	}
-    // ── NEW: honour static bypass (IGNORE_IPS / IGNORE_NETS) ──────────────────
-    if b.bypassFunc != nil && b.bypassFunc(ip) {
-        return
-    }
-    // ─────────────────────────────────────────────────────────────────────────
+	// ── NEW: honour static bypass (IGNORE_IPS / IGNORE_NETS) ──────────────────
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		return
+	}
+	// ──────────────────────────────────────────────────────────────────────────
 
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
@@ -271,9 +269,9 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 		return
 	}
 
-    if b.bypassFunc != nil && b.bypassFunc(ip) {
-        return
-    }
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		return
+	}
 
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
@@ -333,6 +331,37 @@ func (b *NginxBridge) ClearIP(ip string) {
 	b.post("/nginx/ip/clear", nginxIPClearMsg{IP: ip})
 }
 
+// vhostVariantsForBridge returns the exact host variants we want to mirror
+// into the OpenResty bridge.
+//
+// Rules:
+//   - bare apex host:       example.com     -> [example.com, www.example.com]
+//   - already-www host:     www.example.com -> [www.example.com]
+//   - wildcard host:        *.example.com   -> [*.example.com]
+//   - empty/invalid host:   -> nil
+//
+// We intentionally do NOT expand to *.example.com because that would also
+// catch api.example.com, cdn.example.com, etc.
+func vhostVariantsForBridge(host string) []string {
+	host = normalizeHost(host)
+	if host == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(host, "*.") {
+		return []string{host}
+	}
+
+	if strings.HasPrefix(host, "www.") {
+		return []string{host}
+	}
+
+	return []string{
+		host,
+		"www." + host,
+	}
+}
+
 // ChallengeVhost puts an entire vhost into challenge mode.
 // Every request to that vhost will be challenged regardless of IP.
 // Called when CHALLENGE_VHOST fires or CHALLENGE_SUSPICIOUS_VHOST_SCORE turns on.
@@ -344,48 +373,47 @@ func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
 		ttl = b.cfg.DefaultTTL
 	}
 
-	//b.mu.Lock()
-	//b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
-	//b.mu.Unlock()
-	//b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
-	//logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
-
-	host = normalizeHost(host)
-	if host == "" {
+	hosts := vhostVariantsForBridge(host)
+	if len(hosts) == 0 {
 		return
 	}
 
 	now := time.Now()
 	exp := now.Add(ttl)
 
-	needPush := false
-	logEnter := false
+	for _, host := range hosts {
+		needPush := false
+		logEnter := false
 
-	b.mu.Lock()
-	cur, ok := b.vhState[host]
-	// Only push/log on state transition, or when we're close to expiry.
-	if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
-		b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
-		needPush = true
-		logEnter = true
-	} else {
-		// Keep it sticky without spamming: extend locally, push only near expiry.
-		if exp.After(cur.Expires) {
+		b.mu.Lock()
+		cur, ok := b.vhState[host]
+		// Only push/log on state transition, or when we're close to expiry.
+		if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
 			b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
-		}
-		if cur.Expires.Sub(now) < refreshSkew {
 			needPush = true
+			logEnter = true
+		} else {
+			// Keep it sticky without spamming: extend locally, push only near expiry.
+			if exp.After(cur.Expires) {
+				b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+			}
+			if cur.Expires.Sub(now) < refreshSkew {
+				needPush = true
+			}
+		}
+		b.mu.Unlock()
+
+		if needPush {
+			b.post("/nginx/vhost", nginxVhostMsg{
+				Host:   host,
+				Action: "challenge",
+				TTLSec: int(ttl.Seconds()),
+			})
+		}
+		if logEnter {
+			logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
 		}
 	}
-	b.mu.Unlock()
-
-	if needPush {
-		b.post("/nginx/vhost", nginxVhostMsg{Host: host, Action: "challenge", TTLSec: int(ttl.Seconds())})
-	}
-	if logEnter {
-		logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
-	}
-
 }
 
 // ClearVhost removes vhost-wide challenge mode.
@@ -395,26 +423,26 @@ func (b *NginxBridge) ClearVhost(host string) {
 		return
 	}
 
-	host = normalizeHost(host)
-	if host == "" {
+	hosts := vhostVariantsForBridge(host)
+	if len(hosts) == 0 {
 		return
 	}
 
-	wasSet := false
+	for _, host := range hosts {
+		wasSet := false
 
-	b.mu.Lock()
+		b.mu.Lock()
+		if _, ok := b.vhState[host]; ok {
+			wasSet = true
+			delete(b.vhState, host)
+		}
+		b.mu.Unlock()
 
-	if _, ok := b.vhState[host]; ok {
-		wasSet = true
-		delete(b.vhState, host)
+		if wasSet {
+			b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
+			logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+		}
 	}
-	b.mu.Unlock()
-
-	if wasSet {
-		b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
-		logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
-	}
-
 }
 
 func normalizeHost(h string) string {
@@ -473,6 +501,7 @@ func (b *NginxBridge) RunExpireLoop(ctx context.Context) {
 	}
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -620,17 +649,16 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 
-    // ── NEW: static bypass — always allow, ignores ipState/vhState entirely ──
-    if b.bypassFunc != nil && b.bypassFunc(ip) {
-        w.Header().Set("Content-Type", "application/json")
-        _ = json.NewEncoder(w).Encode(map[string]string{
-            "ip_action":    "allow",
-            "vhost_action": "allow",
-        })
-        return
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
+	// ── NEW: static bypass — always allow, ignores ipState/vhState entirely ──
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"ip_action":    "allow",
+			"vhost_action": "allow",
+		})
+		return
+	}
+	// ──────────────────────────────────────────────────────────────────────────
 
 	ipAction := "allow"
 	vhAction := "allow"
@@ -644,7 +672,6 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
 		vhAction = h.Action
 	} else if host != "" {
-
 		// wildcard match: keys like "*.example.com"
 		for pat, e := range b.vhState {
 			if !e.Expires.After(now) {
@@ -664,7 +691,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if b.cfg.OkIPTTL > 0 {
 		if exp, ok := b.okState[ip]; ok && exp.After(now) {
 			vhAction = "allow"
-			ipAction  = "allow"   // for IP bypass
+			ipAction = "allow"
 		}
 	}
 	b.mu.RUnlock()
@@ -694,6 +721,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
+
 	ttl := time.Duration(msg.TTLSec) * time.Second
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
@@ -711,7 +739,11 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// - but it MUST NOT create an active IP decision in the bridge
 	if msg.Action != "logonly" {
 		b.mu.Lock()
-		b.ipState[msg.IP] = bridgeIPEntry{Action: msg.Action, Expires: time.Now().Add(ttl), Reason: reason}
+		b.ipState[msg.IP] = bridgeIPEntry{
+			Action:  msg.Action,
+			Expires: time.Now().Add(ttl),
+			Reason:  reason,
+		}
 		b.mu.Unlock()
 	}
 
@@ -764,6 +796,7 @@ func (b *NginxBridge) handleVhostPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
+
 	ttl := time.Duration(msg.TTLSec) * time.Second
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
