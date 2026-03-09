@@ -10,16 +10,27 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"golang.org/x/term"
 )
 
 // RunMySQLTop is the CLI entrypoint for `cfm mysqltop`.
 // baseURL matches the debug server: "http://127.0.0.1:6060"
 func RunMySQLTop(baseURL string, args []string) error {
 	if len(args) == 0 {
-		return runMySQLTopDefault(baseURL)
+		if !isTTY() {
+			return runMySQLTopDefault(baseURL)
+		}
+		return runMySQLLive(baseURL)
 	}
 
 	switch args[0] {
+	case "text":
+		return runMySQLTopDefault(baseURL)
+	case "live":
+		if !isTTY() {
+			return runMySQLTopDefault(baseURL)
+		}
+		return runMySQLLive(baseURL)
 	case "top":
 		n := 20
 		if len(args) > 1 {
@@ -58,9 +69,22 @@ func RunMySQLTop(baseURL string, args []string) error {
 	return fmt.Errorf("unknown subcommand: %s", args[0])
 }
 
+
+func isTTY() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// runMySQLLive starts the termui live dashboard.
+func runMySQLLive(baseURL string) error {
+	return mysqlLiveUI(baseURL)
+}
+
+
 func printMySQLTopHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm mysqltop                        # full summary (live)")
+	fmt.Println("  cfm mysqltop                        # live UI (falls back to text if not a TTY)")
+	fmt.Println("  cfm mysqltop text                   # full summary (text)")
+	fmt.Println("  cfm mysqltop live                   # force live UI")
 	fmt.Println("  cfm mysqltop top [N]                # top N users by connections (live)")
 	fmt.Println("  cfm mysqltop locks                  # lock graph (blockers + waiters)")
 	fmt.Println("  cfm mysqltop kills                  # recent governor kills")

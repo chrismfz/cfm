@@ -9,6 +9,7 @@ require (
 	github.com/mdlayher/netlink v1.9.0
 	github.com/miekg/dns v1.1.72
 	github.com/oschwald/geoip2-golang v1.13.0
+	golang.org/x/term v0.40.0
 	golang.org/x/text v0.34.0
 )
 
