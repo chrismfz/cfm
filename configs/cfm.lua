@@ -7,6 +7,7 @@
 --   [1] logonly WAF action now returns early — no longer falls through to bridge decision
 --   [2] URI re-added to cache key (capped at 64 chars) — prevents allow-cache bypass on sensitive paths
 --   [3] observe_waf reuses the keepalive pool via http_post_unix (no more rogue Connection: close)
+--   [4] WAF caller now passes headers and a narrow request body (XML-RPC POST only)
 
 local cjson = require "cjson.safe"
 
@@ -31,12 +32,15 @@ local CFG = {
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
   -- Sliding OK TTL (cookie + bridge okState)
-  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")          or "1800"),
-  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC")  or "120"),
+  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "1800"),
+  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
   -- Keepalive pool (per nginx worker)
   keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
   keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
+
+  -- Narrow body read for inline WAF (only where needed)
+  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "4096"),
 }
 
 local SH = ngx.shared.cfm_decisions
@@ -63,6 +67,53 @@ local function real_ip()
   local cf = ngx.var.http_cf_connecting_ip
   if cf and cf ~= "" then return cf end
   return "-"
+end
+
+local function lower(s)
+  if not s then return "" end
+  return string.lower(s)
+end
+
+local function has(s, pat)
+  if not s or s == "" then return false end
+  return string.find(s, pat, 1, true) ~= nil
+end
+
+-- Read request body only when really needed by inline WAF.
+-- Currently used for POST /xmlrpc.php to detect system.multicall.
+local function get_req_body_for_waf(uri, method, max_len)
+  uri = lower(uri or "")
+  method = lower(method or "")
+
+  if method ~= "post" then
+    return ""
+  end
+
+  if not has(uri, "/xmlrpc.php") then
+    return ""
+  end
+
+  ngx.req.read_body()
+
+  local data = ngx.req.get_body_data()
+  if data and data ~= "" then
+    if #data > max_len then
+      return string.sub(data, 1, max_len)
+    end
+    return data
+  end
+
+  local body_file = ngx.req.get_body_file()
+  if body_file and body_file ~= "" then
+    local f = io.open(body_file, "rb")
+    if f then
+      local chunk = f:read(max_len) or ""
+      f:close()
+      return chunk
+    end
+  end
+
+  return ""
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -172,8 +223,8 @@ local function http_unix(method, path, body)
   return resp, nil
 end
 
-local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil)  end
-local function http_post_unix(path, b) return http_unix("POST", path,    b)    end
+local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil) end
+local function http_post_unix(path, b) return http_unix("POST", path,    b)   end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HELPERS
@@ -287,16 +338,21 @@ end
 -- ── Step 2: Inline WAF ────────────────────────────────────────────────────────
 local waf_ok, waf = pcall(require, "cfm_waf")
 if waf_ok and waf and waf.enabled and waf.enabled() then
+  local req_headers = ngx.req.get_headers()
+  local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
+
   local hit, reason, ttl, waf_action = waf.check({
-    uri    = uri,
-    args   = ngx.var.args or "",
-    method = method,
-    host   = host,
-    ip     = ip,
-    cookie = ngx.var.http_cookie or "",
-    peer   = peer_ip,
-    cf_ip  = cf_ip,
-    shdict = SH,
+    uri     = uri,
+    args    = ngx.var.args or "",
+    method  = method,
+    host    = host,
+    ip      = ip,
+    cookie  = ngx.var.http_cookie or "",
+    peer    = peer_ip,
+    cf_ip   = cf_ip,
+    shdict  = SH,
+    headers = req_headers,
+    body    = req_body,
   })
 
   if hit then
@@ -338,10 +394,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip ..
       " host=" .. host .. " reason=" .. tostring(reason))
 
-    -- FIX [1]: logonly now returns here alongside block/challenge —
-    -- previously it fell through and the bridge decision overwrote cfm_pass.
-    if waf_action == "block" then return ngx.exit(CFG.block_code) end
-    return  -- covers challenge AND logonly
+    if waf_action == "block" then
+      return ngx.exit(CFG.block_code)
+    end
+    return
   end
 end
 

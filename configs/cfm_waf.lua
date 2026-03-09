@@ -27,6 +27,12 @@ local CFG = {
   auth_burst_threshold      = 8,   -- hits per window to trigger
   auth_ttl_sec              = 600, -- challenge TTL when triggered
 
+  -- Extra lightweight WP / XML-RPC helpers
+  rule_auth_wp_checks         = true,
+  auth_wp_login_head_ttl_sec  = 600,
+  auth_wp_login_noua_ttl_sec  = 600,
+  auth_xmlrpc_multicall_ttl_sec = 1800,
+
   -- A05: Injection (payload markers) - LOGONLY first (FP-prone)
   -- This looks for shell separators / backticks / $() etc in query args.
   rule_logonly_cmd_payload  = true,
@@ -34,9 +40,6 @@ local CFG = {
   -- A10: Exceptional conditions / debug toggles - LOGONLY
   -- e.g. XDEBUG_SESSION_START, debug=1, stacktrace=1, etc.
   rule_logonly_debug_toggles = true,
-
-
-
 
   default_ttl_sec   = 600,   -- 10m challenge TTL
   block_ttl_sec     = 3600,  -- 1h block TTL for high-confidence rules
@@ -73,7 +76,6 @@ local function cap(s, n)
   return string.sub(s, 1, n)
 end
 
--- Helpers: begins-with and contains-any (plain find)
 local function begins(s, prefix)
   if not s or not prefix then return false end
   return string.sub(s, 1, #prefix) == prefix
@@ -94,11 +96,9 @@ local function detect_sqli(uri, args)
   if has(s, "union select")    or has(s, "union%20select")            then return true end
   if has(s, "information_schema")                                      then return true end
   if has(s, " or 1=1")         or has(s, " or%201=1")                 then return true end
-  if has(s, "' or '1'='1")    or has(s, "%27%20or%20%271%27%3d%271") then return true end
+  if has(s, "' or '1'='1")     or has(s, "%27%20or%20%271%27%3d%271") then return true end
   return false
 end
-
-
 
 -- ── AUTH burst challenge (A07) ───────────────────────────────────────────────
 --
@@ -181,6 +181,54 @@ local function detect_auth_burst(ip, uri, method, shdict)
   return nil
 end
 
+-- Extra lightweight WP/XML-RPC brute helpers.
+-- Return subrule tag string or nil.
+
+local function detect_wp_login_probe(uri, method, headers)
+  uri = lower(uri or "")
+  method = lower(method or "get")
+  headers = headers or {}
+
+  if not has(uri, "/wp-login.php") then
+    return nil
+  end
+
+  local ua  = lower(headers["user-agent"] or headers["User-Agent"] or "")
+  local ref = lower(headers["referer"] or headers["Referer"] or "")
+
+  -- HEAD against wp-login is very rarely legitimate.
+  if method == "head" then
+    return "AUTH_WP_LOGIN_HEAD"
+  end
+
+  -- POST login attempt with no UA and no Referer is highly suspicious.
+  if method == "post" and ua == "" and ref == "" then
+    return "AUTH_WP_LOGIN_NO_UA_REF"
+  end
+
+  return nil
+end
+
+local function detect_xmlrpc_probe(uri, method, body)
+  uri = lower(uri or "")
+  method = lower(method or "get")
+  body = lower(cap(body or "", CFG.max_scan_len))
+
+  if not has(uri, "/xmlrpc.php") then
+    return nil
+  end
+
+  if method ~= "post" then
+    return nil
+  end
+
+  -- Very common brute/amplification pattern.
+  if has(body, "system.multicall") then
+    return "AUTH_WP_XMLRPC_MULTICALL"
+  end
+
+  return nil
+end
 
 -- ── BLOCK detectors (extremely high confidence, near-zero FP) ────────────────
 
@@ -188,7 +236,7 @@ local function detect_traversal(uri, args)
   local s = lower(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
 
   -- Null byte injection (always malicious)
-  if has(s, "%00")        then return true end
+  if has(s, "%00") then return true end
 
   return false
 end
@@ -197,17 +245,17 @@ local function detect_rce(uri, args)
   local s = lower(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
 
   -- Log4Shell (still heavily probed)
-  if has(s, "${jndi:")    then return true end
-  if has(s, "${j{n{d{i") then return true end  -- obfuscated variant
-  if has(s, "$%7bjndi")  then return true end  -- URL-encoded {
+  if has(s, "${jndi:")   then return true end
+  if has(s, "${j{n{d{i") then return true end
+  if has(s, "$%7bjndi")  then return true end
 
   -- Shell injection markers in query string
-  if has(s, ";wget ")     then return true end
-  if has(s, ";curl ")     then return true end
-  if has(s, "|bash")      then return true end
-  if has(s, "|sh ")       then return true end
-  if has(s, "`wget")      then return true end
-  if has(s, "`curl")      then return true end
+  if has(s, ";wget ") then return true end
+  if has(s, ";curl ") then return true end
+  if has(s, "|bash")  then return true end
+  if has(s, "|sh ")   then return true end
+  if has(s, "`wget")  then return true end
+  if has(s, "`curl")  then return true end
 
   -- Base64 payload delivery combined with exec keywords
   if has(s, "base64,") and (has(s, "eval") or has(s, "exec") or has(s, "system")) then
@@ -220,11 +268,9 @@ end
 -- Returns "block", "challenge", or nil.
 local function detect_exploit_method(method)
   method = lower(method or "")
-  -- Cross-Site Tracing + proxy abuse → always block
-  if method == "trace"    then return "block"     end
-  if method == "track"    then return "block"     end
-  if method == "connect"  then return "block"     end
-  -- WebDAV probing → challenge (WebDAV may be legitimately enabled)
+  if method == "trace"   then return "block"     end
+  if method == "track"   then return "block"     end
+  if method == "connect" then return "block"     end
   if method == "propfind" then return "challenge" end
   if method == "search"   then return "challenge" end
   return nil
@@ -233,8 +279,6 @@ end
 -- ── LOGONLY detectors (audit mode) ───────────────────────────────────────────
 -- Return a subrule tag string (e.g. "PAY_SEMI") or nil.
 
--- A05 (Injection): suspicious shell-ish payload markers in query args.
--- NOTE: FP can happen with legit content/search queries; keep LOGONLY first.
 local function detect_cmd_payload(args)
   local a = lower(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -265,8 +309,6 @@ local function detect_cmd_payload(args)
   end
 
   -- FP guard: common ecommerce filter syntax
-  -- Example:
-  -- filters=price[19_23]|megethos[688-109]|product_cat[511-89]
   do
     if begins(a, "filters=") then
       local v = string.sub(a, 9)
@@ -293,8 +335,6 @@ local function detect_cmd_payload(args)
   end
 
   -- FP guard: app/widget values using || as delimiter
-  -- Example:
-  -- main_opt_id=main-content-style33||widget_1
   if string.match(a, "[%?&][a-z0-9_%-]+=([a-z0-9_%-]+%|%|[a-z0-9_%-]+)") then
     return nil
   end
@@ -324,9 +364,9 @@ local function detect_cmd_payload(args)
   if has(a, "|wget") or has(a, "%7cwget") then return "PAY_PIPE_WGET" end
   if has(a, "|curl") or has(a, "%7ccurl") then return "PAY_PIPE_CURL" end
   if has(a, "|bash") or has(a, "%7cbash") then return "PAY_PIPE_BASH" end
-  if has(a, "|sh ") or has(a, "%7csh%20") or has(a, "%7csh+") then return "PAY_PIPE_SH" end
+  if has(a, "|sh ")  or has(a, "%7csh%20") or has(a, "%7csh+") then return "PAY_PIPE_SH" end
 
-  -- Backticks are still high-confidence enough
+  -- Backticks are still useful to audit
   if has(a, "%60") or has(a, "`") then
     return "PAY_BACKTICK"
   end
@@ -334,33 +374,21 @@ local function detect_cmd_payload(args)
   return nil
 end
 
-
-
-
-
 -- A10 (Exceptional conditions): debug toggles / stacktrace probes.
 -- Keep LOGONLY: some dev/staging sites legitimately use these.
 local function detect_debug_toggles(args)
   local a = lower(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  -- PHP/Xdebug probes
   if has(a, "xdebug_session_start=") then return "DBG_XDEBUG" end
   if has(a, "xdebug=") then return "DBG_XDEBUG_KEY" end
 
-  -- Generic debug toggles
   if has(a, "debug=true") or has(a, "debug=1") then return "DBG_DEBUG" end
   if has(a, "trace=1") or has(a, "trace=true") then return "DBG_TRACE" end
   if has(a, "stacktrace=1") or has(a, "stacktrace=true") then return "DBG_STACKTRACE" end
 
   return nil
 end
-
-
-
-
--- ── LOGONLY detectors (audit mode) ───────────────────────────────────────────
--- Return a subrule tag string (e.g. "CMD_EXEC") or nil.
 
 -- Detect suspicious "command/eval" parameter keys (low FP if key-only).
 -- Note: nginx $args does NOT include the leading '?', so we match:
@@ -370,14 +398,11 @@ local function detect_cmd_param_key(args)
   if a == "" then return nil end
 
   local function key(k)
-    -- key at the very beginning: "k="
     if string.sub(a, 1, #k + 1) == (k .. "=") then return true end
-    -- key later in the query string: "&k="
     if has(a, "&" .. k .. "=") then return true end
     return false
   end
 
-  -- (Recommend: remove cmd, keep high-signal only)
   if key("exec")       then return "CMD_EXEC" end
   if key("system")     then return "CMD_SYSTEM" end
   if key("passthru")   then return "CMD_PASSTHRU" end
@@ -388,18 +413,14 @@ local function detect_cmd_param_key(args)
   return nil
 end
 
-
 -- Detect PHP serialized object markers (keep strict → lower FP).
--- Looks for: O:<n>:"Class" or URL-encoded equivalent.
 local function detect_php_serialize(args)
   local a = lower(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  -- plain: o:8:"classname"
   if has(a, "o:") and has(a, ":\"") then return "SER_O_PLAIN" end
   if has(a, "c:") and has(a, ":\"") then return "SER_C_PLAIN" end
 
-  -- url-encoded: o%3a8%3a%22classname%22
   if has(a, "o%3a") and has(a, "%22") then return "SER_O_URL" end
   if has(a, "c%3a") and has(a, "%22") then return "SER_C_URL" end
 
@@ -413,20 +434,19 @@ end
 --   action = "challenge" → route to challenge server
 --   action = "logonly"   → log/push to bridge but DO NOT challenge/block
 --
--- Rule priority (descending):
---   traversal > rce > exploit_method >  xss > sqli >  > logonly
---
 function _M.check(ctx)
   if not CFG.enabled then
     return false, nil, nil, nil
   end
 
   ctx = ctx or {}
-  local uri    = ctx.uri    or ""
-  local args   = ctx.args   or ""
-  local method = ctx.method or "GET"
-  local ip     = ctx.ip     or ""
-  local shdict = ctx.shdict
+  local uri     = ctx.uri     or ""
+  local args    = ctx.args    or ""
+  local method  = ctx.method  or "GET"
+  local ip      = ctx.ip      or ""
+  local shdict  = ctx.shdict
+  local headers = ctx.headers or {}
+  local body    = ctx.body    or ""
 
   -- 1) Path traversal / null byte / double-encoded → BLOCK
   if CFG.rule_traversal and detect_traversal(uri, args) then
@@ -448,7 +468,6 @@ function _M.check(ctx)
     end
   end
 
-
   -- 5) XSS → CHALLENGE
   if CFG.rule_xss and detect_xss(uri, args) then
     return true, "WAF_XSS", CFG.default_ttl_sec, "challenge"
@@ -459,24 +478,35 @@ function _M.check(ctx)
     return true, "WAF_SQLI", CFG.default_ttl_sec, "challenge"
   end
 
-
-  -- 7.5) Auth burst challenge (A07): brute bursts on login endpoints
+  -- 7.5) Auth brute / burst challenge (A07): login endpoints
   if CFG.rule_auth_burst_challenge then
     local peer = ctx.peer or ""
 
     -- Failsafe: if the "client ip" equals the proxy peer ip, real_ip probably
-    -- isn't applied and we'd count per Cloudflare POP. Skip to avoid POP-wide challenge.
+    -- isn't applied and we'd count per proxy / POP. Skip to avoid wide challenge.
     if peer ~= "" and ip ~= "" and ip == peer then
       -- skip
     else
+      if CFG.rule_auth_wp_checks then
+        local wptag = detect_wp_login_probe(uri, method, headers)
+        if wptag == "AUTH_WP_LOGIN_HEAD" then
+          return true, "WAF_AUTH_BURST:" .. wptag, (CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec), "challenge"
+        elseif wptag == "AUTH_WP_LOGIN_NO_UA_REF" then
+          return true, "WAF_AUTH_BURST:" .. wptag, (CFG.auth_wp_login_noua_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec), "challenge"
+        end
+
+        local xtag = detect_xmlrpc_probe(uri, method, body)
+        if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
+          return true, "WAF_AUTH_BURST:" .. xtag, (CFG.auth_xmlrpc_multicall_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec), "challenge"
+        end
+      end
+
       local tag = detect_auth_burst(ip, uri, method, shdict)
       if tag then
         return true, "WAF_AUTH_BURST:" .. tag, (CFG.auth_ttl_sec or CFG.default_ttl_sec), "challenge"
       end
     end
   end
-
-
 
   -- 8) LOGONLY: cmd/eval parameter keys (audit)
   if CFG.rule_logonly_cmd_params then
@@ -501,8 +531,6 @@ function _M.check(ctx)
       return true, "WAF_LOGONLY_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, "logonly"
     end
   end
-
-
 
   -- 9) LOGONLY: PHP serialize markers (audit)
   if CFG.rule_logonly_serialize then
