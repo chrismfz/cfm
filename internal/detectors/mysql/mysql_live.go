@@ -45,6 +45,51 @@ func fetchLiveJSON(url string, v any) error {
 }
 
 // --------------------------------------------------------------------------
+// UI-local ring buffer
+// --------------------------------------------------------------------------
+
+const trendLen = 150 // ~5 min at 2 s ticks
+
+type uiRing struct {
+	buf  [trendLen]float64
+	head int
+	size int
+}
+
+func (r *uiRing) push(v float64) {
+	r.buf[r.head] = v
+	r.head = (r.head + 1) % trendLen
+	if r.size < trendLen {
+		r.size++
+	}
+}
+
+// slice returns the last n values in chronological order.
+// Always returns >=2 elements so termui Plot never panics.
+func (r *uiRing) slice(n int) []float64 {
+	if n > r.size {
+		n = r.size
+	}
+	if n < 2 {
+		return []float64{0, 0}
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		idx := (r.head - n + i + trendLen) % trendLen
+		out[i] = r.buf[idx]
+	}
+	return out
+}
+
+// --------------------------------------------------------------------------
+// liveTreeLabel — plain string satisfying fmt.Stringer for TreeNode.Value
+// --------------------------------------------------------------------------
+
+type liveTreeLabel string
+
+func (l liveTreeLabel) String() string { return string(l) }
+
+// --------------------------------------------------------------------------
 // Main live UI
 // --------------------------------------------------------------------------
 
@@ -54,7 +99,10 @@ func mysqlLiveUI(baseURL string) error {
 	}
 	defer ui.Close()
 
-	// ---- widgets ----
+	// -----------------------------------------------------------------------
+	// Widgets
+	// -----------------------------------------------------------------------
+
 	header := widgets.NewParagraph()
 	header.Border = false
 	header.PaddingTop = 0
@@ -65,11 +113,19 @@ func mysqlLiveUI(baseURL string) error {
 	helpBar.PaddingTop = 0
 	helpBar.PaddingBottom = 0
 
+	// ---- View A: classic tables ----
+
 	connTable := widgets.NewTable()
 	connTable.Title = " MySQL Connections "
 	connTable.RowSeparator = false
 	connTable.FillRow = true
 	connTable.BorderStyle = ui.NewStyle(ui.ColorCyan)
+
+	queryTable := widgets.NewTable()
+	queryTable.Title = " Running Queries "
+	queryTable.RowSeparator = false
+	queryTable.FillRow = true
+	queryTable.BorderStyle = ui.NewStyle(ui.ColorMagenta)
 
 	cpuTable := widgets.NewTable()
 	cpuTable.Title = " CPU / Queries "
@@ -83,76 +139,175 @@ func mysqlLiveUI(baseURL string) error {
 	histTable.FillRow = true
 	histTable.BorderStyle = ui.NewStyle(ui.ColorGreen)
 
-	// ---- layout state ----
-	var W, H int
+	// ---- View B: charts ----
 
-	const headerH = 1 // rows for the header paragraph (single status line)
-	const helpH = 1   // row for the help/keybind bar
+	connGauge := widgets.NewGauge()
+	connGauge.Title = " Connection Pressure "
+	connGauge.BarColor = ui.ColorGreen
+	connGauge.BorderStyle = ui.NewStyle(ui.ColorWhite)
+	connGauge.LabelStyle = ui.NewStyle(ui.ColorWhite, ui.ColorClear, ui.ModifierBold)
+
+	// Trend plot: total conns (cyan) + active conns (yellow)
+	trendPlot := widgets.NewPlot()
+	trendPlot.Title = " Conn Trend  [cyan=total  yellow=active] "
+	trendPlot.Data = [][]float64{{0, 0}, {0, 0}}
+	trendPlot.LineColors = []ui.Color{ui.ColorCyan, ui.ColorYellow}
+	trendPlot.DrawDirection = widgets.DrawLeft
+	trendPlot.AxesColor = ui.ColorWhite
+	trendPlot.HorizontalScale = 1
+
+	// QPS plot
+	qpsPlot := widgets.NewPlot()
+	qpsPlot.Title = " Queries / poll "
+	qpsPlot.Data = [][]float64{{0, 0}}
+	qpsPlot.LineColors = []ui.Color{ui.ColorCyan}
+	qpsPlot.DrawDirection = widgets.DrawLeft
+	qpsPlot.AxesColor = ui.ColorWhite
+	qpsPlot.HorizontalScale = 1
+
+	// Avg latency plot
+	latPlot := widgets.NewPlot()
+	latPlot.Title = " Avg Latency ms "
+	latPlot.Data = [][]float64{{0, 0}}
+	latPlot.LineColors = []ui.Color{ui.ColorYellow}
+	latPlot.DrawDirection = widgets.DrawLeft
+	latPlot.AxesColor = ui.ColorWhite
+	latPlot.HorizontalScale = 1
+
+	// Lock tree (replaces qps+lat when locks are active, in both views)
+	lockTree := widgets.NewTree()
+	lockTree.Title = " Lock Graph "
+	lockTree.TextStyle = ui.NewStyle(ui.ColorWhite)
+	lockTree.SelectedRowStyle = ui.NewStyle(ui.ColorBlack, ui.ColorRed)
+	lockTree.WrapText = false
+
+	// -----------------------------------------------------------------------
+	// Layout
+	// -----------------------------------------------------------------------
+
+	var W, H int
+	var plotPts int // data points that fit in a chart panel
+
+	const headerH = 1
+	const helpH   = 1
+	const gaugeH  = 3
+	const chrome  = headerH + helpH // rows consumed by header+help in both views
+
+	chartView := false // false = View A (tables), true = View B (charts)
 
 	doLayout := func() {
 		W, H = ui.TerminalDimensions()
 
-		// connections table gets ~48% of the usable height
-		connH := (H - headerH - helpH) * 48 / 100
-		if connH < 8 {
-			connH = 8
+		usable := H - chrome // rows available below header+help
+
+		// ---- View A layout ------------------------------------------------
+		// gauge (full width, gaugeH rows)
+		// Top half of remaining: connTable (left 38%) | queryTable (right 62%)
+		// Bottom half:           cpuTable  (left 38%) | histTable  (right 62%)
+		aTableY0 := chrome + gaugeH
+		aUsable  := usable - gaugeH
+		topH     := aUsable / 2
+		if topH < 6 {
+			topH = 6
+		}
+		aTopY1 := aTableY0 + topH
+
+		aCol0W := W * 38 / 100
+		if aCol0W < 28 {
+			aCol0W = 28
 		}
 
-		bottomY := headerH + helpH + connH
-		bottomH := H - bottomY
-		if bottomH < 5 {
-			bottomH = 5
+		connGauge.SetRect(0, chrome, W, chrome+gaugeH)
+		connTable.SetRect(0, aTableY0, aCol0W, aTopY1)
+		queryTable.SetRect(aCol0W, aTableY0, W, aTopY1)
+		cpuTable.SetRect(0, aTopY1, aCol0W, H)
+		histTable.SetRect(aCol0W, aTopY1, W, H)
+
+		// ---- View B layout ------------------------------------------------
+		// Row 0-chrome:  header + help (shared)
+		// Row chrome:    gauge (gaugeH rows, full width) — same widget, same rect
+		// Row chrome+gaugeH … H: trendPlot (left 50%) | right panel (50%)
+		//    right panel = qpsPlot (top 55%) + latPlot (bottom 45%)
+		//                  OR lockTree (full right) when locks active
+		bChartY0 := chrome + gaugeH
+		bChartH  := H - bChartY0
+		if bChartH < 6 {
+			bChartH = 6
+		}
+		bMidX := W / 2
+
+		qpsH := bChartH * 55 / 100
+		if qpsH < 4 {
+			qpsH = 4
 		}
 
-		cpuW := W / 2
+		plotPts = bMidX - 4
+		if plotPts < 10 {
+			plotPts = 10
+		}
+		if plotPts > trendLen {
+			plotPts = trendLen
+		}
 
+		trendPlot.SetRect(0, bChartY0, bMidX, H)
+		qpsPlot.SetRect(bMidX, bChartY0, W, bChartY0+qpsH)
+		latPlot.SetRect(bMidX, bChartY0+qpsH, W, H)
+		lockTree.SetRect(bMidX, bChartY0, W, H)
+
+		// header/help always full width
 		header.SetRect(0, 0, W, headerH)
-		helpBar.SetRect(0, headerH, W, headerH+helpH)
-		connTable.SetRect(0, headerH+helpH, W, bottomY)
-		cpuTable.SetRect(0, bottomY, cpuW, H)
-		histTable.SetRect(cpuW, bottomY, W, H)
+		helpBar.SetRect(0, headerH, W, chrome)
 	}
 	doLayout()
 
-	// ---- runtime state ----
-	selected := 0
-	paused   := false
-	lastErr := ""
+	// -----------------------------------------------------------------------
+	// Ring buffers
+	// -----------------------------------------------------------------------
+
+	var rbTotal, rbActive, rbQPS, rbLat uiRing
+
+	// -----------------------------------------------------------------------
+	// Runtime state
+	// -----------------------------------------------------------------------
+
+	selected   := 0
+	paused     := false
+	lastErr    := ""
 	lastUpdate := time.Time{}
 
 	var state GovernorState
-	var cpu liveCPUResp
-	var hist liveHistoryResp
+	var cpu   liveCPUResp
+	var hist  liveHistoryResp
 
-	// ---- column-width helper (dynamic based on terminal width) ----
+	// -----------------------------------------------------------------------
+	// Column-width helper
+	// -----------------------------------------------------------------------
+
 	userColW := func() int {
 		switch {
 		case W >= 200:
-			return 32
+			return 28
 		case W >= 160:
-			return 26
-		case W >= 120:
 			return 22
-		default:
+		case W >= 120:
 			return 18
+		default:
+			return 14
 		}
 	}
 
-	// ---------- connection table fill ----------
+	// -----------------------------------------------------------------------
+	// Build functions — View A
+	// -----------------------------------------------------------------------
+
 	buildConnRows := func() {
 		uw := userColW()
-		header := []string{"USER", "TOT", "ACT", "SLP", "LCK", "MAX_IDLE", "RISK"}
-		rows := [][]string{header}
-		styles := map[int]ui.Style{
-			0: ui.NewStyle(ui.ColorBlack, ui.ColorCyan),
-		}
-
+		rows := [][]string{{"USER", "TOT", "ACT", "SLP", "LCK", "MAX_IDLE", "RISK"}}
+		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorCyan)}
 		for i, u := range state.PerUser {
 			name := truncStr(u.User, uw)
-			sel := i == selected
-
-			risk, rowStyle := liveRiskRow(u, sel)
-			if sel {
+			risk, rowStyle := liveRiskRow(u)
+			if i == selected {
 				name = "▶ " + name
 				rowStyle = ui.NewStyle(ui.ColorBlack, ui.ColorCyan, ui.ModifierBold)
 			}
@@ -169,29 +324,59 @@ func mysqlLiveUI(baseURL string) error {
 		}
 		connTable.Rows = rows
 		connTable.RowStyles = styles
-		connTable.ColumnWidths = []int{uw + 2, 5, 5, 5, 5, 9, 10}
+		connTable.ColumnWidths = []int{uw + 2, 5, 5, 5, 5, 9, 8}
 	}
 
-	// ---------- CPU table fill ----------
-	buildCPURows := func() {
-		uw := userColW() - 4 // CPU panel is half-width, shorten usernames
-		header := []string{"USER", "CPU_S", "WAIT%", "QRYS", "AVG_MS", "LOAD"}
-		rows := [][]string{header}
-		styles := map[int]ui.Style{
-			0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow),
-		}
+	buildQueryRows := func() {
+		aCol0W := W * 38 / 100
+		if aCol0W < 28 { aCol0W = 28 }
+		panelW := W - aCol0W - 2
+		const pidW, userW, dbW, timeW, stateW, sep = 8, 16, 14, 6, 18, 6
+		queryW := panelW - pidW - userW - dbW - timeW - stateW - sep
+		if queryW < 20 { queryW = 20 }
 
-		if !cpu.PerfSchemaOK {
-			rows = append(rows, []string{"(perf_schema OFF)", "", "", "", "", ""})
-		} else if len(cpu.Users) == 0 {
-			rows = append(rows, []string{"(no data)", "", "", "", "", ""})
-		} else {
-			byUser := make(map[string]UserPerfDelta, len(cpu.Users))
-			for _, u := range cpu.Users {
-				byUser[u.User] = u
+		rows := [][]string{{"PID", "USER", "DB", "TIME", "STATE", "QUERY"}}
+		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorMagenta)}
+		procs := state.Running
+		if len(procs) > 12 { procs = procs[:12] }
+		if len(procs) == 0 {
+			rows = append(rows, []string{"(none)", "", "", "", "", ""})
+		}
+		for i, p := range procs {
+			q := truncStr(strings.TrimSpace(p.Info), queryW)
+			if q == "" { q = "-" }
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", p.ID),
+				truncStr(p.User, userW),
+				truncStr(p.DB, dbW),
+				formatAge(p.TimeSec),
+				truncStr(p.State, stateW),
+				q,
+			})
+			if isLockState(p.State) {
+				styles[i+1] = ui.NewStyle(ui.ColorRed)
+			} else if p.TimeSec >= 10 {
+				styles[i+1] = ui.NewStyle(ui.ColorYellow)
 			}
-			ordered := orderedUsersFromStateOrCPU(&state, cpu.Users)
-			for i, user := range ordered {
+		}
+		queryTable.Rows = rows
+		queryTable.RowStyles = styles
+		queryTable.ColumnWidths = []int{pidW, userW, dbW, timeW, stateW, queryW}
+	}
+
+	buildCPURows := func() {
+		uw := userColW() - 2
+		rows := [][]string{{"USER", "CPU_S", "WAIT%", "QRYS", "AVG_MS", "LOAD"}}
+		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow)}
+		switch {
+		case !cpu.PerfSchemaOK:
+			rows = append(rows, []string{"(perf_schema OFF)", "", "", "", "", ""})
+		case len(cpu.Users) == 0:
+			rows = append(rows, []string{"(no data yet)", "", "", "", "", ""})
+		default:
+			byUser := make(map[string]UserPerfDelta, len(cpu.Users))
+			for _, u := range cpu.Users { byUser[u.User] = u }
+			for i, user := range orderedUsersFromStateOrCPU(&state, cpu.Users) {
 				u := byUser[user]
 				name := truncStr(user, uw)
 				if i == selected {
@@ -213,21 +398,12 @@ func mysqlLiveUI(baseURL string) error {
 		cpuTable.ColumnWidths = []int{uw + 2, 7, 7, 6, 7, 12}
 	}
 
-	// ---------- history table fill ----------
 	buildHistRows := func() {
-		uw := userColW() - 4
-		header := []string{"USER", "PEAK", "AVG", "P_ACT", "A_ACT", "P_LCK", "SAT"}
-		rows := [][]string{header}
-		styles := map[int]ui.Style{
-			0: ui.NewStyle(ui.ColorBlack, ui.ColorGreen),
-		}
-
+		uw := userColW() - 2
+		rows := [][]string{{"USER", "PEAK", "AVG", "P_ACT", "A_ACT", "P_LCK", "SAT"}}
+		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorGreen)}
 		byUser := make(map[string]UserHistoryStat, len(hist.Users))
-		for _, u := range hist.Users {
-			byUser[u.User] = u
-		}
-
-		// order by current connection list first, then any remaining history users
+		for _, u := range hist.Users { byUser[u.User] = u }
 		seen := map[string]bool{}
 		var ordered []string
 		for _, u := range state.PerUser {
@@ -237,11 +413,8 @@ func mysqlLiveUI(baseURL string) error {
 			}
 		}
 		for _, u := range hist.Users {
-			if !seen[u.User] {
-				ordered = append(ordered, u.User)
-			}
+			if !seen[u.User] { ordered = append(ordered, u.User) }
 		}
-
 		for i, user := range ordered {
 			u := byUser[user]
 			name := truncStr(user, uw)
@@ -261,7 +434,6 @@ func mysqlLiveUI(baseURL string) error {
 				histBar(u.PeakConns, hist.Users),
 			})
 		}
-
 		if len(rows) == 1 {
 			rows = append(rows, []string{"(no data)", "", "", "", "", "", ""})
 		}
@@ -270,46 +442,178 @@ func mysqlLiveUI(baseURL string) error {
 		histTable.ColumnWidths = []int{uw + 2, 5, 5, 6, 6, 6, 12}
 	}
 
-	// ---------- header text — plain text, no termui markup ----------
-	// Termui markup inside Paragraph is fragile when substituted values
-	// contain brackets or percent signs; plain text is always safe.
-	buildHeader := func() {
-		risk := connRisk(state.ConnPct)
-		sat := saturationText(state, &hist)
-		ts := ""
-		if !lastUpdate.IsZero() {
-			ts = "  updated=" + lastUpdate.Format("15:04:05")
-		}
-		errSuffix := ""
-		if lastErr != "" {
-			errSuffix = "  err=" + truncStr(lastErr, 50)
-		}
-		header.Text = fmt.Sprintf(
-			" LIVE mysql%s  flavor=%s  mode=%s  conn=%d/%d (%.0f%% %s)  active=%d sleep=%d locked=%d  %s%s%s",
-			func() string {
-				if paused { return " [PAUSED]" }
-				return ""
-			}(),
-			state.Flavor, state.Mode,
-			state.TotalConn, state.MaxConn, state.ConnPct, risk,
+	// -----------------------------------------------------------------------
+	// Build functions — View B
+	// -----------------------------------------------------------------------
+
+	buildGauge := func() {
+		pct := int(state.ConnPct)
+		if pct < 0 { pct = 0 }
+		if pct > 100 { pct = 100 }
+		connGauge.Percent = pct
+		connGauge.Label = fmt.Sprintf(
+			"%d / %d  (%.0f%%)   active=%d   sleep=%d   locked=%d",
+			state.TotalConn, state.MaxConn, state.ConnPct,
 			state.ActiveConn, state.SleepConn, state.LockedConn,
-			sat, ts, errSuffix,
+		)
+		switch {
+		case state.ConnPct >= 85:
+			connGauge.BarColor = ui.ColorRed
+		case state.ConnPct >= 70:
+			connGauge.BarColor = ui.ColorYellow
+		default:
+			connGauge.BarColor = ui.ColorGreen
+		}
+	}
+
+	buildTrendPlot := func() {
+		trendPlot.Data = [][]float64{
+			rbTotal.slice(plotPts),
+			rbActive.slice(plotPts),
+		}
+	}
+
+	buildQPSPlots := func() {
+		qpsPlot.Data = [][]float64{rbQPS.slice(plotPts)}
+		latPlot.Data  = [][]float64{rbLat.slice(plotPts)}
+	}
+
+	buildLockTree := func() {
+		if len(state.LockGraph) == 0 {
+			lockTree.SetNodes([]*widgets.TreeNode{
+				{Value: liveTreeLabel("  (no locks)")},
+			})
+			return
+		}
+		roots := make([]*widgets.TreeNode, 0, len(state.LockGraph))
+		for _, g := range state.LockGraph {
+			node := &widgets.TreeNode{
+				Value: liveTreeLabel(fmt.Sprintf(
+					"⚡ pid=%-7d  %-16s  db=%-12s  %s  %s",
+					g.Blocker.ID, g.Blocker.User, g.Blocker.DB,
+					formatAge(g.Blocker.TimeSec),
+					truncStr(g.Blocker.Info, 55),
+				)),
+			}
+			for _, w := range g.Waiters {
+				node.Nodes = append(node.Nodes, &widgets.TreeNode{
+					Value: liveTreeLabel(fmt.Sprintf(
+						"  🔒 pid=%-7d  %-16s  %s  %s",
+						w.ID, w.User,
+						formatAge(w.TimeSec),
+						truncStr(w.Info, 45),
+					)),
+				})
+			}
+			roots = append(roots, node)
+		}
+		lockTree.SetNodes(roots)
+		lockTree.ExpandAll()
+	}
+
+	// -----------------------------------------------------------------------
+	// Shared header + help bar
+	// -----------------------------------------------------------------------
+
+	buildHeader := func() {
+		pausedTag := ""
+		if paused { pausedTag = "  [PAUSED]" }
+		errSuffix := ""
+		if lastErr != "" { errSuffix = "  err=" + truncStr(lastErr, 55) }
+		ts := ""
+		if !lastUpdate.IsZero() { ts = "  updated=" + lastUpdate.Format("15:04:05") }
+
+		viewTag := "tables"
+		if chartView { viewTag = "charts" }
+
+		header.Text = fmt.Sprintf(
+			" LIVE mysql%s  flavor=%s  mode=%s  view=%s%s%s",
+			pausedTag, state.Flavor, state.Mode, viewTag, ts, errSuffix,
 		)
 	}
 
-	// ---------- full render (no ui.Clear — avoid unnecessary full wipes) ----------
-	render := func() {
-		buildHeader()
-		buildConnRows()
-		buildCPURows()
-		buildHistRows()
-		helpBar.Text = " [q](fg:yellow) quit  [↑↓/j/k](fg:yellow) nav  [s](fg:yellow) pause/resume  [r](fg:yellow) refresh  " +
-			"│ conn=[cyan](fg:cyan) ▲sel  risk: [dim](fg:white) ok  [yellow](fg:yellow) stale/busy  [red](fg:red) locked"
-		ui.Clear()
-		ui.Render(header, helpBar, connTable, cpuTable, histTable)
+	buildHelp := func() {
+		pauseHint := ""
+		if paused { pauseHint = "  [PAUSED — s/r to resume]" }
+		if chartView {
+			helpBar.Text = fmt.Sprintf(
+				" q quit  x tables  s pause  r refresh%s"+
+					"  │  left: conn trend  right: qps+lat  (lock tree when locks active)",
+				pauseHint,
+			)
+		} else {
+			helpBar.Text = fmt.Sprintf(
+				" q quit  x charts  ↑↓/j/k nav  s pause  r refresh%s"+
+					"  │  top: connections+queries  bottom: cpu+history",
+				pauseHint,
+			)
+		}
 	}
 
-	// ---------- data fetch ----------
+	// -----------------------------------------------------------------------
+	// Ring-buffer sample push (every fetch)
+	// -----------------------------------------------------------------------
+
+	pushSamples := func() {
+		rbTotal.push(float64(state.TotalConn))
+		rbActive.push(float64(state.ActiveConn))
+		var totalQ int64
+		var totalW float64
+		for _, u := range cpu.Users {
+			totalQ += u.QueryCount
+			totalW += float64(u.QueryCount) * u.AvgQueryMsec
+		}
+		rbQPS.push(float64(totalQ))
+		if totalQ > 0 {
+			rbLat.push(totalW / float64(totalQ))
+		} else {
+			rbLat.push(0)
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Render — picks the right drawable set based on chartView
+	// -----------------------------------------------------------------------
+
+	render := func() {
+		buildHeader()
+		buildHelp()
+
+		var drawable []ui.Drawable
+		drawable = append(drawable, header, helpBar)
+
+		if chartView {
+			// View B — gauge + trend plot + qps/lat or lock tree
+			buildGauge()
+			buildTrendPlot()
+			buildQPSPlots()
+			buildLockTree()
+
+			drawable = append(drawable, connGauge, trendPlot)
+			if len(state.LockGraph) > 0 {
+				lockTree.Title = fmt.Sprintf(" Lock Graph (%d blocker(s)) ", len(state.LockGraph))
+				drawable = append(drawable, lockTree)
+			} else {
+				drawable = append(drawable, qpsPlot, latPlot)
+			}
+		} else {
+			// View A — gauge + four tables
+			buildGauge()
+			buildConnRows()
+			buildQueryRows()
+			buildCPURows()
+			buildHistRows()
+			drawable = append(drawable, connGauge, connTable, queryTable, cpuTable, histTable)
+		}
+
+		ui.Clear()
+		ui.Render(drawable...)
+	}
+
+	// -----------------------------------------------------------------------
+	// Fetch
+	// -----------------------------------------------------------------------
+
 	refreshAll := func() {
 		lastErr = ""
 		if err := fetchLiveJSON(strings.TrimRight(baseURL, "/")+"/api/v1/mysql/state", &state); err != nil {
@@ -325,6 +629,7 @@ func mysqlLiveUI(baseURL string) error {
 				selected = len(state.PerUser) - 1
 			}
 		}
+		pushSamples()
 		lastUpdate = time.Now()
 		render()
 	}
@@ -342,14 +647,19 @@ func mysqlLiveUI(baseURL string) error {
 			case "q", "<C-c>":
 				return nil
 
+			case "x", "X":
+				chartView = !chartView
+				doLayout() // recalculate rects for the new view
+				render()
+
 			case "j", "<Down>":
-				if selected < len(state.PerUser)-1 {
+				if !chartView && selected < len(state.PerUser)-1 {
 					selected++
 				}
 				render()
 
 			case "k", "<Up>":
-				if selected > 0 {
+				if !chartView && selected > 0 {
 					selected--
 				}
 				render()
@@ -379,7 +689,6 @@ func mysqlLiveUI(baseURL string) error {
 // Risk helpers
 // --------------------------------------------------------------------------
 
-// connRisk returns a small text indicator for overall connection pressure.
 func connRisk(pct float64) string {
 	switch {
 	case pct >= 85:
@@ -391,10 +700,7 @@ func connRisk(pct float64) string {
 	}
 }
 
-// liveRiskRow returns a short risk label and a termui row style for the
-// connections table. The sel flag is handled by the caller (selected row
-// always gets the highlight style regardless).
-func liveRiskRow(u UserStat, sel bool) (label string, style ui.Style) {
+func liveRiskRow(u UserStat) (label string, style ui.Style) {
 	switch {
 	case u.Locked > 0:
 		return "LOCKED", ui.NewStyle(ui.ColorRed, ui.ColorClear, ui.ModifierBold)
@@ -408,7 +714,7 @@ func liveRiskRow(u UserStat, sel bool) (label string, style ui.Style) {
 }
 
 // --------------------------------------------------------------------------
-// Header display helpers
+// Display helpers
 // --------------------------------------------------------------------------
 
 func saturationText(state GovernorState, hist *liveHistoryResp) string {
@@ -425,12 +731,8 @@ func saturationText(state GovernorState, hist *liveHistoryResp) string {
 func percentBar(pct float64) string {
 	const maxBar = 10
 	n := int((pct / 100.0) * maxBar)
-	if n < 0 {
-		n = 0
-	}
-	if n > maxBar {
-		n = maxBar
-	}
+	if n < 0 { n = 0 }
+	if n > maxBar { n = maxBar }
 	return "[" + strings.Repeat("█", n) + strings.Repeat("░", maxBar-n) + "]"
 }
 
@@ -441,12 +743,8 @@ func histBar(peak int, all []UserHistoryStat) string {
 	}
 	top := all[0].PeakConns
 	n := int(float64(peak) / float64(top) * maxBar)
-	if n < 0 {
-		n = 0
-	}
-	if n > maxBar {
-		n = maxBar
-	}
+	if n < 0 { n = 0 }
+	if n > maxBar { n = maxBar }
 	return "[" + strings.Repeat("█", n) + strings.Repeat("░", maxBar-n) + "]"
 }
 
@@ -464,9 +762,7 @@ func orderedUsersFromStateOrCPU(state *GovernorState, cpu []UserPerfDelta) []str
 		}
 	}
 	for _, u := range cpu {
-		if !seen[u.User] {
-			out = append(out, u.User)
-		}
+		if !seen[u.User] { out = append(out, u.User) }
 	}
 	return out
 }
@@ -475,23 +771,16 @@ func orderedUsersFromStateOrCPU(state *GovernorState, cpu []UserPerfDelta) []str
 // String utilities
 // --------------------------------------------------------------------------
 
-// truncStr truncates s to at most n runes, appending ".." if it was cut.
 func truncStr(s string, n int) string {
 	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	if n <= 2 {
-		return string(r[:n])
-	}
+	if len(r) <= n { return s }
+	if n <= 2 { return string(r[:n]) }
 	return string(r[:n-2]) + ".."
 }
 
 // intMax returns the larger of a and b.
 // Named intMax to avoid conflicting with the Go 1.21+ builtin max.
 func intMax(a, b int) int {
-	if a > b {
-		return a
-	}
+	if a > b { return a }
 	return b
 }
