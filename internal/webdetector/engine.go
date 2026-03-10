@@ -557,6 +557,30 @@ func (e *Engine) Name() string {
 }
 
 
+// sourceLabel returns the real ingest source for logs/debug messages.
+// In file mode we show LogPath, in folder mode we show LogDir (+ glob).
+func (e *Engine) sourceLabel() string {
+    mode := strings.ToLower(strings.TrimSpace(e.cfg.Mode))
+    switch mode {
+    case "folder":
+        dir := strings.TrimSpace(e.cfg.LogDir)
+        if dir == "" {
+            dir = "(unset)"
+        }
+        glob := strings.TrimSpace(e.cfg.Glob)
+        if glob != "" {
+            return fmt.Sprintf("%s (glob=%s recursive=%v)", dir, glob, e.cfg.Recursive)
+        }
+        return fmt.Sprintf("%s (recursive=%v)", dir, e.cfg.Recursive)
+    default:
+        p := strings.TrimSpace(e.cfg.LogPath)
+        if p == "" {
+            p = "(unset)"
+        }
+        return p
+    }
+}
+
 func (e *Engine) ApplyPosition(p core.Position) {
 	if ft, ok := e.src.(*core.FileTailer); ok {
 		ft.ApplyResume(p.Inode, p.Offset)
@@ -590,7 +614,8 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	if err := e.src.Open(); err != nil {
 		// This can happen during log rotation/atomic writes. We keep the periodic
 		// loop alive, but log enough context to diagnose "stuck" behavior.
-		logging.Logf("[webdetector] tail open failed: %v (mode=%s log=%q)", err, e.cfg.Mode, e.cfg.LogPath)
+		logging.Logf("[webdetector] tail open failed: %v (mode=%s source=%q)",
+			err, e.cfg.Mode, e.sourceLabel())
 		return fmt.Errorf("webdetector: tail open failed: %w", err)
 
 	}
@@ -604,8 +629,8 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		if err != nil {
 			off, ino, ts := e.src.Position()
-			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s log=%q)",
-				err, off, ino, ts, e.cfg.Mode, e.cfg.LogPath)
+			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s source=%q)",
+				err, off, ino, ts, e.cfg.Mode, e.sourceLabel())
 			return fmt.Errorf("webdetector: tail read failed: %w", err)
 		}
 		//chris//
@@ -677,28 +702,28 @@ func (e *Engine) logIngestHeartbeat(now time.Time) {
 
     // If we never parsed anything, treat as stall-ish but explicit.
     if e.lastParsedAt.IsZero() {
-        logging.Logf("[webdetector][stall] no parsed lines yet (horizon=%s mode=%s log=%q)",
-            horizon, e.cfg.Mode, e.cfg.LogPath)
+        logging.Logf("[webdetector][stall] no parsed lines yet (horizon=%s mode=%s source=%q)",
+            horizon, e.cfg.Mode, e.sourceLabel())
         e.parsedSinceLog = 0
         return
     }
 
     idle := now.Sub(e.lastParsedAt)
     if idle >= horizon {
-        logging.Logf("[webdetector][stall] no parsed lines for %s (last=%s horizon=%s mode=%s log=%q)",
-            idle.Truncate(time.Second), e.lastParsedAt.UTC().Format(time.RFC3339), horizon, e.cfg.Mode, e.cfg.LogPath)
+        logging.Logf("[webdetector][stall] no parsed lines for %s (last=%s horizon=%s mode=%s source=%q)",
+            idle.Truncate(time.Second), e.lastParsedAt.UTC().Format(time.RFC3339), horizon, e.cfg.Mode, e.sourceLabel())
         e.parsedSinceLog = 0
         return
     }
 
     // normal progress log
-    logging.Logf("[webdetector][progress] parsed=%d last=%s idle=%s horizon=%s mode=%s log=%q",
+    logging.Logf("[webdetector][progress] parsed=%d last=%s idle=%s horizon=%s mode=%s source=%q",
         e.parsedSinceLog,
         e.lastParsedAt.UTC().Format(time.RFC3339),
         idle.Truncate(time.Second),
         horizon,
         e.cfg.Mode,
-        e.cfg.LogPath,
+        e.sourceLabel(),
     )
     e.parsedSinceLog = 0
 }
