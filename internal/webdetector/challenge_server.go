@@ -318,6 +318,20 @@ type ChallengeAbuseHook func(ip, host, uri string, status int, badN int, window,
 
 var challengeAbuseHook ChallengeAbuseHook
 
+var (
+	challengeTokenMu       sync.RWMutex
+	challengeTokenOverride string
+	challengeTokenWarnOnce sync.Once
+)
+
+// SetChallengeToken configures the token secret from detectors.conf
+// ([webdetector] CHALLENGE_TOKEN).
+func SetChallengeToken(token string) {
+	challengeTokenMu.Lock()
+	challengeTokenOverride = strings.TrimSpace(token)
+	challengeTokenMu.Unlock()
+}
+
 // SetChallengeAbuseHook installs a callback invoked when the challenge server
 // detects abuse (many 4xx/5xx on non-verify paths within a window).
 func SetChallengeAbuseHook(h ChallengeAbuseHook) { challengeAbuseHook = h }
@@ -1426,14 +1440,26 @@ func isWeirdUA(ua string) bool {
 }
 
 func secretKey() []byte {
-	// Set once in service env for stability across restarts:
+	// Preferred source: service env for stability across restarts:
 	//   CFM_CHALLENGE_SECRET="random-long-string"
-	s := strings.TrimSpace(os.Getenv("CFM_CHALLENGE_SECRET"))
-	if s == "" {
-		// fallback (works but not persistent across deployments)
-		s = "cfm-default-secret-change-me"
+	if s := strings.TrimSpace(os.Getenv("CFM_CHALLENGE_SECRET")); s != "" {
+		return []byte(s)
 	}
-	return []byte(s)
+
+	// Fallback source: detectors.conf [webdetector] CHALLENGE_TOKEN.
+	challengeTokenMu.RLock()
+	tok := challengeTokenOverride
+	challengeTokenMu.RUnlock()
+	if tok != "" {
+		return []byte(tok)
+	}
+
+	challengeTokenWarnOnce.Do(func() {
+		logging.LogfCHALLENGES("[challenge] WARNING: missing CHALLENGE_TOKEN (detectors.conf) and CFM_CHALLENGE_SECRET (env); using insecure default token")
+	})
+
+	// Legacy default fallback (kept for compatibility if neither source is configured).
+	return []byte("cfm-default-secret-change-me")
 }
 
 func issueToken(ip, ua, cookieVal string) string {
