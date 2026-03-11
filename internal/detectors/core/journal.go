@@ -82,24 +82,33 @@ func (j *JournalTailer) Open() error {
 // journalctl is a one-shot process that exits at EOF anyway; the real
 // cleanup happens in Shutdown().
 func (j *JournalTailer) Close() error {
-	return nil
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.cleanupLocked(false)
 }
 
 // Shutdown terminates the journalctl process and releases resources.
 func (j *JournalTailer) Shutdown() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.cleanupLocked(true)
+}
+
+func (j *JournalTailer) cleanupLocked(kill bool) error {
 	if j.stdout != nil {
 		_ = j.stdout.Close()
 		j.stdout = nil
 	}
-	if j.cmd != nil && j.cmd.Process != nil {
-		_ = j.cmd.Process.Kill()
-		_, _ = j.cmd.Process.Wait()
+	var waitErr error
+	if j.cmd != nil {
+		if kill && j.cmd.Process != nil {
+			_ = j.cmd.Process.Kill()
+		}
+		waitErr = j.cmd.Wait()
 		j.cmd = nil
 	}
 	j.reader = nil
-	return nil
+	return waitErr
 }
 
 func (j *JournalTailer) ReadNext(ctx context.Context) (string, error) {
