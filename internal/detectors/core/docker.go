@@ -83,24 +83,33 @@ func (d *DockerTailer) Open() error {
 // Close is a between-tick no-op for DockerTailer.
 // docker logs is a one-shot process; real cleanup happens in Shutdown().
 func (d *DockerTailer) Close() error {
-	return nil
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cleanupLocked(false)
 }
 
 // Shutdown terminates the docker logs process and releases resources.
 func (d *DockerTailer) Shutdown() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.cleanupLocked(true)
+}
+
+func (d *DockerTailer) cleanupLocked(kill bool) error {
 	if d.stdout != nil {
 		_ = d.stdout.Close()
 		d.stdout = nil
 	}
-	if d.cmd != nil && d.cmd.Process != nil {
-		_ = d.cmd.Process.Kill()
-		_, _ = d.cmd.Process.Wait()
+	var waitErr error
+	if d.cmd != nil {
+		if kill && d.cmd.Process != nil {
+			_ = d.cmd.Process.Kill()
+		}
+		waitErr = d.cmd.Wait()
 		d.cmd = nil
 	}
 	d.reader = nil
-	return nil
+	return waitErr
 }
 
 func (d *DockerTailer) ReadNext(ctx context.Context) (string, error) {
