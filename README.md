@@ -250,6 +250,8 @@ LOG_PATH = /var/log/nginx/access_cfm_tsv.log
 # Folder mode (cPanel domlogs):
 # MODE    = folder
 # LOG_DIR = /usr/local/apache/domlogs
+# GLOB    = *
+# START_AT_END = 1   ; 1=tail only new lines (default), 0=replay existing lines once
 ```
 
 ### Web Abuse Hard-Block Triggers
@@ -834,4 +836,3 @@ SMTP_LOG_FILE   = /var/log/cfm/cfm.smtp.log
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.
 - The `alter_user` action in `CONN_RULES` requires `GRANT CREATE USER`. This is a powerful privilege — scope it to `'cfm_governor'@'localhost'` only and use a strong password.
 - Always run the governor in `monitor` mode for at least one week before switching to `enforce` on a production server.
-
