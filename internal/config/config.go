@@ -2,55 +2,54 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
-	"encoding/json"
 )
 
 // Config is flat-by-category: one struct per logical area.
 type Config struct {
-	API        APIConfig
-	Logging    LoggingConfig
-	NFT        NFTConfig
-	Ports      PortsConfig
-	Connlimit  ConnlimitConfig
-	PortFlood  PortFloodConfig
-	PacketRate PacketRateConfig
-	Throttle   ThrottleConfig
-	Portscan   PortscanConfig
-	SystemTweaks SystemTweaksConfig
-	Hardening  HardeningConfig
-	SMTPBlock SMTPBlockConfig
-	MaxMind  MaxMindConfig
-	Debug     DebugConfig
+	API              APIConfig
+	Logging          LoggingConfig
+	NFT              NFTConfig
+	Ports            PortsConfig
+	Connlimit        ConnlimitConfig
+	PortFlood        PortFloodConfig
+	PacketRate       PacketRateConfig
+	Throttle         ThrottleConfig
+	Portscan         PortscanConfig
+	SystemTweaks     SystemTweaksConfig
+	Hardening        HardeningConfig
+	SMTPBlock        SMTPBlockConfig
+	MaxMind          MaxMindConfig
+	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
-	VHostMap VHostMapConfig
+	VHostMap         VHostMapConfig
 }
 
 // --- Categories ---
 
 type VHostMapConfig struct {
-    Enable    bool          // VHOST_MAP_ENABLE
-    WritePath string        // VHOST_MAP_WRITE
-    TTL       time.Duration // VHOST_MAP_TTL (default 10m)
-    VarName   string        // VHOST_MAP_VAR (default origin_http_ip)
-    Source    string        // VHOST_MAP_SOURCE (optional)
-    DefaultIP string        // VHOST_MAP_DEFAULT_IP (optional override)
-    ReloadCmd string        // VHOST_MAP_RELOAD_CMD (default systemctl reload openresty)
+	Enable    bool          // VHOST_MAP_ENABLE
+	WritePath string        // VHOST_MAP_WRITE
+	TTL       time.Duration // VHOST_MAP_TTL (default 10m)
+	VarName   string        // VHOST_MAP_VAR (default origin_http_ip)
+	Source    string        // VHOST_MAP_SOURCE (optional)
+	DefaultIP string        // VHOST_MAP_DEFAULT_IP (optional override)
+	ReloadCmd string        // VHOST_MAP_RELOAD_CMD (default systemctl reload openresty)
 }
-
 
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
 type SSLCollectorSockConfig struct {
-    Enabled  bool          // SSLCOLLECTOR_SOCK_ENABLE
-    SockPath string        // SSLCOLLECTOR_SOCK_PATH
-    Token    string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
-    PEMTTL   time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
-    PEMMax   int           // SSLCOLLECTOR_SOCK_PEM_MAX (default 50000)
+	Enabled  bool          // SSLCOLLECTOR_SOCK_ENABLE
+	SockPath string        // SSLCOLLECTOR_SOCK_PATH
+	Token    string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
+	PEMTTL   time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
+	PEMMax   int           // SSLCOLLECTOR_SOCK_PEM_MAX (default 50000)
 }
 
 // DebugConfig — controls the internal debug/metrics HTTP server
@@ -78,32 +77,28 @@ type SMTPBlockConfig struct {
 	LogEnrich  bool   // SMTP_LOG_ENRICH (use enrich on DST IP in our consumer)
 }
 
-
 // MaxMindConfig — updater and DB locations for GeoLite/GeoIP2
 type MaxMindConfig struct {
-	Enabled         bool              // MAXMIND_ENABLED
-	AccountID       string            // MAXMIND_ACCOUNT_ID
-	LicenseKey      string            // MAXMIND_LICENSE_KEY
-	Editions        []string          // MAXMIND_EDITIONS (comma-separated), e.g. GeoLite2-ASN,GeoLite2-City
-	Dir             string            // MAXMIND_DIR (default: /var/lib/cfm/maxmind)
-	CheckEvery      time.Duration     // MAXMIND_CHECK_EVERY (default: 24h)
-	MinAgeBetweenDL time.Duration     // MAXMIND_MIN_AGE (default: 72h)
-	HTTPTimeout     time.Duration     // MAXMIND_HTTP_TIMEOUT (default: 30s)
+	Enabled         bool          // MAXMIND_ENABLED
+	AccountID       string        // MAXMIND_ACCOUNT_ID
+	LicenseKey      string        // MAXMIND_LICENSE_KEY
+	Editions        []string      // MAXMIND_EDITIONS (comma-separated), e.g. GeoLite2-ASN,GeoLite2-City
+	Dir             string        // MAXMIND_DIR (default: /var/lib/cfm/maxmind)
+	CheckEvery      time.Duration // MAXMIND_CHECK_EVERY (default: 24h)
+	MinAgeBetweenDL time.Duration // MAXMIND_MIN_AGE (default: 72h)
+	HTTPTimeout     time.Duration // MAXMIND_HTTP_TIMEOUT (default: 30s)
 	// Optional: override permalinks per edition
 	// {"GeoLite2-ASN":"https://download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz", ...}
-	Permalinks      map[string]string // MAXMIND_PERMALINKS_JSON (edition->url)
+	Permalinks map[string]string // MAXMIND_PERMALINKS_JSON (edition->url)
 }
-
-
 
 type HardeningConfig struct {
-    BlockBadTCPFlags bool // BLOCK_BAD_TCP_FLAGS
-    NewRate          int  // NEW_RATE (per-IP ct state new / sec; 0=off)
-    NewBurst         int  // NEW_BURST (packets)
-    ICMPRate         int  // ICMP_RATE_LIMIT (per-IP echo-request / sec; 0=off)
-    ICMPBurst        int  // ICMP_RATE_BURST
+	BlockBadTCPFlags bool // BLOCK_BAD_TCP_FLAGS
+	NewRate          int  // NEW_RATE (per-IP ct state new / sec; 0=off)
+	NewBurst         int  // NEW_BURST (packets)
+	ICMPRate         int  // ICMP_RATE_LIMIT (per-IP echo-request / sec; 0=off)
+	ICMPBurst        int  // ICMP_RATE_BURST
 }
-
 
 type SystemTweaksConfig struct {
 	Enable  bool // SYS_TWEAKS_ENABLE
@@ -127,53 +122,48 @@ type SystemTweaksConfig struct {
 	AcceptRedirects bool // SYS_ACCEPT_REDIRECTS
 	SendRedirects   bool // SYS_SEND_REDIRECTS
 
-        // DNAT-to-loopback support (needed for challenge DNAT -> 127.0.0.1)
-        RouteLocalnet     bool   // SYS_ROUTE_LOCALNET (0/1)
-        RouteLocalnetIF   string // SYS_ROUTE_LOCALNET_IF (e.g. eth0) optional
-IPv6AcceptRedirects bool // SYS_IPV6_ACCEPT_REDIRECTS
-IPv6SendRedirects   bool // SYS_IPV6_SEND_REDIRECTS
-IPv6Disable         bool // SYS_IPV6_DISABLE (0/1) optional hard kill switch if you ever want it
+	// DNAT-to-loopback support (needed for challenge DNAT -> 127.0.0.1)
+	RouteLocalnet       bool   // SYS_ROUTE_LOCALNET (0/1)
+	RouteLocalnetIF     string // SYS_ROUTE_LOCALNET_IF (e.g. eth0) optional
+	IPv6AcceptRedirects bool   // SYS_IPV6_ACCEPT_REDIRECTS
+	IPv6SendRedirects   bool   // SYS_IPV6_SEND_REDIRECTS
+	IPv6Disable         bool   // SYS_IPV6_DISABLE (0/1) optional hard kill switch if you ever want it
 
 }
 
-
 type APIConfig struct {
-	URL       string
-	AuthToken string
-	AutoBlockSend     bool // AUTOBLOCK_SEND_TO_API
-	ManualBlockSend   bool // MANUAL_BLOCK_SEND_TO_API
-	UnblockSend       bool // UNBLOCK_SEND_TO_API
-	DetectorsSend     bool // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
+	URL             string
+	AuthToken       string
+	AutoBlockSend   bool // AUTOBLOCK_SEND_TO_API
+	ManualBlockSend bool // MANUAL_BLOCK_SEND_TO_API
+	UnblockSend     bool // UNBLOCK_SEND_TO_API
+	DetectorsSend   bool // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
 }
 
 type LoggingConfig struct {
-    Stdout bool   // LOG_STDOUT
-    File   string // LOG_FILE
+	Stdout bool   // LOG_STDOUT
+	File   string // LOG_FILE
 
-    APIStdout bool   // API_LOG_STDOUT
-    APIFile   string // API_LOG_FILE
+	APIStdout bool   // API_LOG_STDOUT
+	APIFile   string // API_LOG_FILE
 
-    DETECTORStdout bool // DETECTOR_LOG_STDOUT
-    DETECTORFile   string // DETECTOR_LOG_FILE
+	DETECTORStdout bool   // DETECTOR_LOG_STDOUT
+	DETECTORFile   string // DETECTOR_LOG_FILE
 
-    // NEW: web challenges log sink
-    CHALLENGESStdout bool   // CHALLENGES_LOG_STDOUT
-    CHALLENGESFile   string // CHALLENGES_LOG_FILE
+	// NEW: web challenges log sink
+	CHALLENGESStdout bool   // CHALLENGES_LOG_STDOUT
+	CHALLENGESFile   string // CHALLENGES_LOG_FILE
 
-    SMTPStdout bool   // SMTP_LOG_STDOUT
-    SMTPFile   string // SMTP_LOG_FILE
+	SMTPStdout bool   // SMTP_LOG_STDOUT
+	SMTPFile   string // SMTP_LOG_FILE
 
-    MYSQLStdout bool   // MYSQL_LOG_STDOUT
-    MYSQLFile   string // MYSQL_LOG_FILE
+	MYSQLStdout bool   // MYSQL_LOG_STDOUT
+	MYSQLFile   string // MYSQL_LOG_FILE
 
-WAFStdout bool   // WAF_LOG_STDOUT
-WAFFile   string // WAF_LOG_FILE
+	WAFStdout bool   // WAF_LOG_STDOUT
+	WAFFile   string // WAF_LOG_FILE
 
 }
-
-
-
-
 
 type NFTConfig struct {
 	InputPriority int // clamped -300..+300
@@ -199,14 +189,14 @@ type PacketRateConfig struct {
 }
 
 type ThrottleConfig struct {
-	Enabled    bool
-	WindowSec  int
-	Hits       int
-	Mode       string   // "permanent" | "ttl"
-	TTLSeconds int
-	Sources    []string // e.g. ["syn","portflood","pps"]
-	SetTTL     int      // seconds for nft set timeout (tracking)
-	CooldownSec int     // seconds to suppress repeat autoblocks per IP
+	Enabled     bool
+	WindowSec   int
+	Hits        int
+	Mode        string // "permanent" | "ttl"
+	TTLSeconds  int
+	Sources     []string // e.g. ["syn","portflood","pps"]
+	SetTTL      int      // seconds for nft set timeout (tracking)
+	CooldownSec int      // seconds to suppress repeat autoblocks per IP
 }
 
 type PortscanConfig struct {
@@ -214,8 +204,8 @@ type PortscanConfig struct {
 	Interval   int    // seconds between scans/rotations; 0 disables if Enabled not set explicitly
 	Mode       string // "temporary" | "permanent" | "alert"
 	TTLSeconds int
-	Limit      int    // distinct ports threshold
-	Diversity  int    // >=1 persistent port presence
+	Limit      int // distinct ports threshold
+	Diversity  int // >=1 persistent port presence
 	TrackTCP   bool
 	TrackUDP   bool
 	OnlyPorts  []PortRange // optional filters (ranges)
@@ -239,24 +229,30 @@ type PortFloodRule struct {
 	Packets   int // max packets in window
 }
 
-
-
-
-
 // SetDefaults populates sane defaults where zero values are ambiguous.
 func (c *Config) SetDefaults() {
 	// NFT
 	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
 	// PacketRate
-	if c.PacketRate.Mode == "" { c.PacketRate.Mode = "syn" }
-	if c.PacketRate.Burst < 0 { c.PacketRate.Burst = 0 }
-	if c.PacketRate.Rate < 0 { c.PacketRate.Rate = 0 }
+	if c.PacketRate.Mode == "" {
+		c.PacketRate.Mode = "syn"
+	}
+	if c.PacketRate.Burst < 0 {
+		c.PacketRate.Burst = 0
+	}
+	if c.PacketRate.Rate < 0 {
+		c.PacketRate.Rate = 0
+	}
 	// Throttle
-	if c.Throttle.WindowSec == 0 { c.Throttle.WindowSec = 120 }
-	if c.Throttle.Hits == 0 { c.Throttle.Hits = 3 }
-	if c.Throttle.Mode == "" { c.Throttle.Mode = "permanent" }
-
-
+	if c.Throttle.WindowSec == 0 {
+		c.Throttle.WindowSec = 120
+	}
+	if c.Throttle.Hits == 0 {
+		c.Throttle.Hits = 3
+	}
+	if c.Throttle.Mode == "" {
+		c.Throttle.Mode = "permanent"
+	}
 
 	// --- MaxMind defaults ---
 	if c.MaxMind.Dir == "" {
@@ -273,30 +269,43 @@ func (c *Config) SetDefaults() {
 	}
 	// Editions: no hard default; user may choose ASN or City or both
 
-
-
-
-
-c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
- switch c.Throttle.Mode {
- case "permanent", "ttl", "dryrun", "alert":
-     // ok
- default:
-     c.Throttle.Mode = "permanent"
- }
-	if c.Throttle.TTLSeconds == 0 { c.Throttle.TTLSeconds = 24 * 3600 }
-	if c.Throttle.SetTTL == 0 { c.Throttle.SetTTL = 60 }
+	c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
+	switch c.Throttle.Mode {
+	case "permanent", "ttl", "dryrun", "alert":
+		// ok
+	default:
+		c.Throttle.Mode = "permanent"
+	}
+	if c.Throttle.TTLSeconds == 0 {
+		c.Throttle.TTLSeconds = 24 * 3600
+	}
+	if c.Throttle.SetTTL == 0 {
+		c.Throttle.SetTTL = 60
+	}
 	// Cooldown: avoid duplicate autoblocks/logs/notifications for the same IP
-	if c.Throttle.CooldownSec == 0 { c.Throttle.CooldownSec = 180 }
+	if c.Throttle.CooldownSec == 0 {
+		c.Throttle.CooldownSec = 180
+	}
 	// Portscan
-	if c.Portscan.Interval == 0 { c.Portscan.Interval = 60 }
-	if c.Portscan.Mode == "" { c.Portscan.Mode = "ttl" }
-	if c.Portscan.TTLSeconds == 0 { c.Portscan.TTLSeconds = 3600 }
-	if c.Portscan.Limit == 0 { c.Portscan.Limit = 10 }
-	if c.Portscan.Diversity == 0 { c.Portscan.Diversity = 1 }
+	if c.Portscan.Interval == 0 {
+		c.Portscan.Interval = 60
+	}
+	if c.Portscan.Mode == "" {
+		c.Portscan.Mode = "ttl"
+	}
+	if c.Portscan.TTLSeconds == 0 {
+		c.Portscan.TTLSeconds = 3600
+	}
+	if c.Portscan.Limit == 0 {
+		c.Portscan.Limit = 10
+	}
+	if c.Portscan.Diversity == 0 {
+		c.Portscan.Diversity = 1
+	}
 	// If PS_ENABLED not set explicitly, infer from interval>0
-	if !c.Portscan.Enabled && c.Portscan.Interval > 0 { c.Portscan.Enabled = true }
-
+	if !c.Portscan.Enabled && c.Portscan.Interval > 0 {
+		c.Portscan.Enabled = true
+	}
 
 	// SMTPBlock defaults
 	if len(c.SMTPBlock.Ports) == 0 {
@@ -313,29 +322,32 @@ c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
 		c.Logging.SMTPFile = "/var/log/cfm.smtp.log"
 	}
 
+	// Hardening
+	if c.Hardening.NewRate < 0 {
+		c.Hardening.NewRate = 0
+	}
+	if c.Hardening.NewBurst < 0 {
+		c.Hardening.NewBurst = 0
+	}
+	if c.Hardening.ICMPRate < 0 {
+		c.Hardening.ICMPRate = 0
+	}
+	if c.Hardening.ICMPBurst < 0 {
+		c.Hardening.ICMPBurst = 0
+	}
 
-
-
-// Hardening
-if c.Hardening.NewRate < 0 { c.Hardening.NewRate = 0 }
-if c.Hardening.NewBurst < 0 { c.Hardening.NewBurst = 0 }
-if c.Hardening.ICMPRate < 0 { c.Hardening.ICMPRate = 0 }
-if c.Hardening.ICMPBurst < 0 { c.Hardening.ICMPBurst = 0 }
-
-    // SSLCollector unix socket defaults
-    if c.SSLCollectorSock.SockPath == "" {
-        c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
-    }
-    if c.SSLCollectorSock.PEMTTL <= 0 {
-        c.SSLCollectorSock.PEMTTL = 10 * time.Minute
-    }
-    if c.SSLCollectorSock.PEMMax <= 0 {
-        c.SSLCollectorSock.PEMMax = 50000
-    }
-
+	// SSLCollector unix socket defaults
+	if c.SSLCollectorSock.SockPath == "" {
+		c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
+	}
+	if c.SSLCollectorSock.PEMTTL <= 0 {
+		c.SSLCollectorSock.PEMTTL = 10 * time.Minute
+	}
+	if c.SSLCollectorSock.PEMMax <= 0 {
+		c.SSLCollectorSock.PEMMax = 50000
+	}
 
 }
-
 
 // Validate clamps, normalizes and ensures cross-field coherence.
 func (c *Config) Validate() error {
@@ -358,14 +370,16 @@ func (c *Config) Validate() error {
 	if len(c.SMTPBlock.Ports) > 0 {
 		out := make([]uint16, 0, len(c.SMTPBlock.Ports))
 		for _, p := range c.SMTPBlock.Ports {
-			if p <= 0 { continue }
-			if p > 65535 { p = 65535 }
+			if p <= 0 {
+				continue
+			}
+			if p > 65535 {
+				p = 65535
+			}
 			out = append(out, uint16(p))
 		}
 		c.SMTPBlock.Ports = out
 	}
-
-
 
 	// MaxMind sanity
 	if c.MaxMind.CheckEvery < 0 || c.MaxMind.MinAgeBetweenDL < 0 || c.MaxMind.HTTPTimeout < 0 {
@@ -376,11 +390,12 @@ func (c *Config) Validate() error {
 		eds := make([]string, 0, len(c.MaxMind.Editions))
 		for _, e := range c.MaxMind.Editions {
 			e = strings.TrimSpace(e)
-			if e != "" { eds = append(eds, e) }
+			if e != "" {
+				eds = append(eds, e)
+			}
 		}
 		c.MaxMind.Editions = eds
 	}
-
 
 	return nil
 }
@@ -413,62 +428,55 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "AUTH_TOKEN", "TOKEN":
 			cfg.API.AuthToken = val
 
-case "AUTOBLOCK_SEND_TO_API":
-    cfg.API.AutoBlockSend = parseBool(val)
-case "MANUAL_BLOCK_SEND_TO_API":
-    cfg.API.ManualBlockSend = parseBool(val)
-case "UNBLOCK_SEND_TO_API":
-    cfg.API.UnblockSend = parseBool(val)
-case "DETECTORS_SEND_TO_API":
-    cfg.API.DetectorsSend = parseBool(val)
+		case "AUTOBLOCK_SEND_TO_API":
+			cfg.API.AutoBlockSend = parseBool(val)
+		case "MANUAL_BLOCK_SEND_TO_API":
+			cfg.API.ManualBlockSend = parseBool(val)
+		case "UNBLOCK_SEND_TO_API":
+			cfg.API.UnblockSend = parseBool(val)
+		case "DETECTORS_SEND_TO_API":
+			cfg.API.DetectorsSend = parseBool(val)
 		// Logging
 		case "LOG_STDOUT":
 			cfg.Logging.Stdout = parseBool(val)
 		case "LOG_FILE":
 			cfg.Logging.File = val
 
+		// NEW:
+		case "API_LOG_STDOUT":
+			cfg.Logging.APIStdout = parseBool(val)
+		case "API_LOG_FILE":
+			cfg.Logging.APIFile = val
 
+		case "DETECTOR_LOG_STDOUT":
+			cfg.Logging.DETECTORStdout = parseBool(val)
+		case "DETECTOR_LOG_FILE":
+			cfg.Logging.DETECTORFile = val
 
-// NEW:
-case "API_LOG_STDOUT":
-    cfg.Logging.APIStdout = parseBool(val)
-case "API_LOG_FILE":
-    cfg.Logging.APIFile = val
+		case "CHALLENGES_LOG_STDOUT":
+			cfg.Logging.CHALLENGESStdout = parseBool(val)
+		case "CHALLENGES_LOG_FILE":
+			cfg.Logging.CHALLENGESFile = val
 
-
-case "DETECTOR_LOG_STDOUT":
-    cfg.Logging.DETECTORStdout = parseBool(val)
-case "DETECTOR_LOG_FILE":
-    cfg.Logging.DETECTORFile = val
-
-
-case "CHALLENGES_LOG_STDOUT":
-    cfg.Logging.CHALLENGESStdout = parseBool(val)
-case "CHALLENGES_LOG_FILE":
-    cfg.Logging.CHALLENGESFile = val
-
-
-// SMTP log sink (file/stdout) — CSF-like flat keys
-case "SMTP_LOG_STDOUT":
-    cfg.Logging.SMTPStdout = parseBool(val)
-case "SMTP_LOG_FILE":
-    cfg.Logging.SMTPFile = val
+		// SMTP log sink (file/stdout) — CSF-like flat keys
+		case "SMTP_LOG_STDOUT":
+			cfg.Logging.SMTPStdout = parseBool(val)
+		case "SMTP_LOG_FILE":
+			cfg.Logging.SMTPFile = val
 
 		// NFT
 		case "NFT_INPUT_PRIORITY":
 			cfg.NFT.InputPriority = clamp(parseInt(val), -300, 300)
 
-
-// Ports
-case "TCP_IN":
-    cfg.Ports.TCPIn = append(cfg.Ports.TCPIn, parsePorts(val)...)
-case "TCP_OUT":
-    cfg.Ports.TCPOut = append(cfg.Ports.TCPOut, parsePorts(val)...)
-case "UDP_IN":
-    cfg.Ports.UDPIn = append(cfg.Ports.UDPIn, parsePorts(val)...)
-case "UDP_OUT":
-    cfg.Ports.UDPOut = append(cfg.Ports.UDPOut, parsePorts(val)...)
-
+		// Ports
+		case "TCP_IN":
+			cfg.Ports.TCPIn = append(cfg.Ports.TCPIn, parsePorts(val)...)
+		case "TCP_OUT":
+			cfg.Ports.TCPOut = append(cfg.Ports.TCPOut, parsePorts(val)...)
+		case "UDP_IN":
+			cfg.Ports.UDPIn = append(cfg.Ports.UDPIn, parsePorts(val)...)
+		case "UDP_OUT":
+			cfg.Ports.UDPOut = append(cfg.Ports.UDPOut, parsePorts(val)...)
 
 		// Connlimit & PortFlood
 		case "CONNLIMIT":
@@ -476,7 +484,6 @@ case "UDP_OUT":
 
 		case "PORTFLOOD":
 			cfg.PortFlood.Rules = append(cfg.PortFlood.Rules, parsePortFlood(val)...)
-
 
 		// PacketRate
 		case "PKT_RATE":
@@ -536,7 +543,9 @@ case "UDP_OUT":
 		case "SMTP_REDIRECT":
 			cfg.SMTPBlock.Redirect = parseBool(val)
 		case "SMTP_REDIRECT_PORT":
-			if n := parseInt(val); n > 0 && n <= 65535 { cfg.SMTPBlock.RedirectPort = uint16(n) }
+			if n := parseInt(val); n > 0 && n <= 65535 {
+				cfg.SMTPBlock.RedirectPort = uint16(n)
+			}
 		case "SMTP_ALLOWUSER":
 			cfg.SMTPBlock.AllowUsers = append(cfg.SMTPBlock.AllowUsers, splitCSV(val)...)
 		case "SMTP_ALLOWGROUP":
@@ -555,10 +564,6 @@ case "UDP_OUT":
 			cfg.SMTPBlock.LogNFLOG = parseInt(val)
 		case "SMTP_LOG_ENRICH":
 			cfg.SMTPBlock.LogEnrich = parseBool(val)
-
-
-
-
 
 		// --- Debug / HTTP listen ---
 		case "LISTEN_ADDRESS":
@@ -598,63 +603,58 @@ case "UDP_OUT":
 				cfg.MaxMind.Permalinks = m
 			}
 
+		// SSLCollector unix socket (OpenResty ssl_certificate_by_lua)
+		case "SSLCOLLECTOR_SOCK_ENABLE":
+			cfg.SSLCollectorSock.Enabled = parseBool(val)
+		case "SSLCOLLECTOR_SOCK_PATH":
+			cfg.SSLCollectorSock.SockPath = val
+		case "SSLCOLLECTOR_SOCK_TOKEN":
+			cfg.SSLCollectorSock.Token = val
+		case "SSLCOLLECTOR_SOCK_PEM_TTL":
+			if d := parseDuration(val); d > 0 {
+				cfg.SSLCollectorSock.PEMTTL = d
+			}
+		case "SSLCOLLECTOR_SOCK_PEM_MAX":
+			cfg.SSLCollectorSock.PEMMax = parseInt(val)
 
+		case "VHOST_MAP_ENABLE":
+			cfg.VHostMap.Enable = parseBool(val)
+		case "VHOST_MAP_WRITE":
+			cfg.VHostMap.WritePath = val
+		case "VHOST_MAP_TTL":
+			if d, err := time.ParseDuration(val); err == nil {
+				cfg.VHostMap.TTL = d
+			}
+		case "VHOST_MAP_VAR":
+			cfg.VHostMap.VarName = val
+		case "VHOST_MAP_SOURCE":
+			cfg.VHostMap.Source = val
+		case "VHOST_MAP_DEFAULT_IP":
+			cfg.VHostMap.DefaultIP = val
+		case "VHOST_MAP_RELOAD_CMD":
+			cfg.VHostMap.ReloadCmd = val
 
+		case "WAF_LOG_STDOUT":
+			cfg.Logging.WAFStdout = parseBool(val)
+		case "WAF_LOG_FILE":
+			cfg.Logging.WAFFile = val
 
-    // SSLCollector unix socket (OpenResty ssl_certificate_by_lua)
-    case "SSLCOLLECTOR_SOCK_ENABLE":
-        cfg.SSLCollectorSock.Enabled = parseBool(val)
-    case "SSLCOLLECTOR_SOCK_PATH":
-        cfg.SSLCollectorSock.SockPath = val
-    case "SSLCOLLECTOR_SOCK_TOKEN":
-        cfg.SSLCollectorSock.Token = val
-    case "SSLCOLLECTOR_SOCK_PEM_TTL":
-        if d := parseDuration(val); d > 0 {
-            cfg.SSLCollectorSock.PEMTTL = d
-        }
-    case "SSLCOLLECTOR_SOCK_PEM_MAX":
-        cfg.SSLCollectorSock.PEMMax = parseInt(val)
+		case "MYSQL_LOG_STDOUT":
+			cfg.Logging.MYSQLStdout = parseBool(val)
+		case "MYSQL_LOG_FILE":
+			cfg.Logging.MYSQLFile = val
 
-
-case "VHOST_MAP_ENABLE":
-    cfg.VHostMap.Enable = parseBool(val)
-case "VHOST_MAP_WRITE":
-    cfg.VHostMap.WritePath = val
-case "VHOST_MAP_TTL":
-    if d, err := time.ParseDuration(val); err == nil { cfg.VHostMap.TTL = d }
-case "VHOST_MAP_VAR":
-    cfg.VHostMap.VarName = val
-case "VHOST_MAP_SOURCE":
-    cfg.VHostMap.Source = val
-case "VHOST_MAP_DEFAULT_IP":
-    cfg.VHostMap.DefaultIP = val
-case "VHOST_MAP_RELOAD_CMD":
-    cfg.VHostMap.ReloadCmd = val
-
-case "WAF_LOG_STDOUT":
-    cfg.Logging.WAFStdout = parseBool(val)
-case "WAF_LOG_FILE":
-    cfg.Logging.WAFFile = val
-
-case "MYSQL_LOG_STDOUT":
-    cfg.Logging.MYSQLStdout = parseBool(val)
-case "MYSQL_LOG_FILE":
-    cfg.Logging.MYSQLFile = val
-
-
-// Hardening
-case "BLOCK_BAD_TCP_FLAGS":
-    cfg.Hardening.BlockBadTCPFlags = parseBool(val)
-case "NEW_RATE":
-    cfg.Hardening.NewRate = parseInt(val)
-case "NEW_BURST":
-    cfg.Hardening.NewBurst = parseInt(val)
-case "ICMP_RATE_LIMIT":
-    cfg.Hardening.ICMPRate = parseInt(val)
-case "ICMP_RATE_BURST":
-    cfg.Hardening.ICMPBurst = parseInt(val)
-
-
+		// Hardening
+		case "BLOCK_BAD_TCP_FLAGS":
+			cfg.Hardening.BlockBadTCPFlags = parseBool(val)
+		case "NEW_RATE":
+			cfg.Hardening.NewRate = parseInt(val)
+		case "NEW_BURST":
+			cfg.Hardening.NewBurst = parseInt(val)
+		case "ICMP_RATE_LIMIT":
+			cfg.Hardening.ICMPRate = parseInt(val)
+		case "ICMP_RATE_BURST":
+			cfg.Hardening.ICMPBurst = parseInt(val)
 
 		// System / Kernel Tweaks
 		case "SYS_TWEAKS_ENABLE":
@@ -662,40 +662,38 @@ case "ICMP_RATE_BURST":
 		case "SYS_TWEAKS_PERSIST":
 			cfg.SystemTweaks.Persist = parseBool(val)
 
-case "SYS_CT_PER_GB":
-	cfg.SystemTweaks.CTPerGB = parseInt(val)
-case "SYS_CT_MIN":
-	cfg.SystemTweaks.CTMin = parseInt(val)
-case "SYS_CT_MAX":
-	cfg.SystemTweaks.CTMax = parseInt(val)
+		case "SYS_CT_PER_GB":
+			cfg.SystemTweaks.CTPerGB = parseInt(val)
+		case "SYS_CT_MIN":
+			cfg.SystemTweaks.CTMin = parseInt(val)
+		case "SYS_CT_MAX":
+			cfg.SystemTweaks.CTMax = parseInt(val)
 
-case "SYS_TCP_LOOSE_STRICT":
-	cfg.SystemTweaks.TCPLooseStrict = parseBool(val)
-case "SYS_TCP_SYN_RETRIES":
-	cfg.SystemTweaks.TCPSynRetries = parseInt(val)
-case "SYS_TCP_SYNACK_RETRIES":
-	cfg.SystemTweaks.TCPSynAckRetries = parseInt(val)
-case "SYS_TCP_FIN_TIMEOUT":
-	cfg.SystemTweaks.TCPFinTimeout = parseInt(val)
-case "SYS_CT_TIMEWAIT":
-	cfg.SystemTweaks.CTTimeWait = parseInt(val)
-case "SYS_CT_FINWAIT":
-	cfg.SystemTweaks.CTFinWait = parseInt(val)
-case "SYS_CT_CLOSEWAIT":
-	cfg.SystemTweaks.CTCloseWait = parseInt(val)
+		case "SYS_TCP_LOOSE_STRICT":
+			cfg.SystemTweaks.TCPLooseStrict = parseBool(val)
+		case "SYS_TCP_SYN_RETRIES":
+			cfg.SystemTweaks.TCPSynRetries = parseInt(val)
+		case "SYS_TCP_SYNACK_RETRIES":
+			cfg.SystemTweaks.TCPSynAckRetries = parseInt(val)
+		case "SYS_TCP_FIN_TIMEOUT":
+			cfg.SystemTweaks.TCPFinTimeout = parseInt(val)
+		case "SYS_CT_TIMEWAIT":
+			cfg.SystemTweaks.CTTimeWait = parseInt(val)
+		case "SYS_CT_FINWAIT":
+			cfg.SystemTweaks.CTFinWait = parseInt(val)
+		case "SYS_CT_CLOSEWAIT":
+			cfg.SystemTweaks.CTCloseWait = parseInt(val)
 
-case "SYS_RP_FILTER":
-	cfg.SystemTweaks.RPFilter = parseInt(val)
-case "SYS_ACCEPT_REDIRECTS":
-	cfg.SystemTweaks.AcceptRedirects = parseBool(val)
-case "SYS_SEND_REDIRECTS":
-	cfg.SystemTweaks.SendRedirects = parseBool(val)
-case "SYS_ROUTE_LOCALNET":
-        cfg.SystemTweaks.RouteLocalnet = parseBool(val)
-case "SYS_ROUTE_LOCALNET_IF":
-        cfg.SystemTweaks.RouteLocalnetIF = val
-
-
+		case "SYS_RP_FILTER":
+			cfg.SystemTweaks.RPFilter = parseInt(val)
+		case "SYS_ACCEPT_REDIRECTS":
+			cfg.SystemTweaks.AcceptRedirects = parseBool(val)
+		case "SYS_SEND_REDIRECTS":
+			cfg.SystemTweaks.SendRedirects = parseBool(val)
+		case "SYS_ROUTE_LOCALNET":
+			cfg.SystemTweaks.RouteLocalnet = parseBool(val)
+		case "SYS_ROUTE_LOCALNET_IF":
+			cfg.SystemTweaks.RouteLocalnetIF = val
 
 		default:
 			// Unknown key: ignore (forward-compat) or return error if you prefer
@@ -710,6 +708,30 @@ case "SYS_ROUTE_LOCALNET_IF":
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// IsKnownKey reports whether key is currently recognized by cfm.conf parser.
+func IsKnownKey(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	switch key {
+	case "API_URL", "AUTH_TOKEN", "TOKEN", "AUTOBLOCK_SEND_TO_API", "MANUAL_BLOCK_SEND_TO_API", "UNBLOCK_SEND_TO_API", "DETECTORS_SEND_TO_API",
+		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
+		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
+		"NFT_INPUT_PRIORITY", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
+		"THROTTLE_ENABLED", "THROTTLE_WINDOW", "THROTTLE_HITS", "THROTTLE_MODE", "THROTTLE_TTL", "THROTTLE_SOURCES", "THROTTLE_SET_TTL", "THROTTLE_COOLDOWN",
+		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
+		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
+		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
+		"LISTEN_ADDRESS", "PORT",
+		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
+		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
+		"VHOST_MAP_ENABLE", "VHOST_MAP_WRITE", "VHOST_MAP_TTL", "VHOST_MAP_VAR", "VHOST_MAP_SOURCE", "VHOST_MAP_DEFAULT_IP", "VHOST_MAP_RELOAD_CMD",
+		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",
+		"SYS_TWEAKS_ENABLE", "SYS_TWEAKS_PERSIST", "SYS_CT_PER_GB", "SYS_CT_MIN", "SYS_CT_MAX", "SYS_TCP_LOOSE_STRICT", "SYS_TCP_SYN_RETRIES", "SYS_TCP_SYNACK_RETRIES", "SYS_TCP_FIN_TIMEOUT", "SYS_CT_TIMEWAIT", "SYS_CT_FINWAIT", "SYS_CT_CLOSEWAIT", "SYS_RP_FILTER", "SYS_ACCEPT_REDIRECTS", "SYS_SEND_REDIRECTS", "SYS_ROUTE_LOCALNET", "SYS_ROUTE_LOCALNET_IF":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Helpers (parsing & small utils) ---
@@ -797,33 +819,41 @@ func parseIntCSV(s string) []int {
 	return out
 }
 
-
 // parseUint16CSV: "25,465,587"
 // Parses as unsigned 16-bit directly to avoid int→uint16 narrowing.
 // Skips zero (keeps your original <=0 skip) and invalid/out-of-range values.
 func parseUint16CSV(s string) []uint16 {
-    if strings.TrimSpace(s) == "" { return nil }
-    parts := strings.Split(s, ",")
-    out := make([]uint16, 0, len(parts))
-    for _, p := range parts {
-        p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
-        if p == "" { continue }
-        v, err := strconv.ParseUint(p, 10, 16) // only accept values that fit in 16 bits
-        if err != nil || v == 0 { continue }
-        out = append(out, uint16(v))
-    }
-    return out
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]uint16, 0, len(parts))
+	for _, p := range parts {
+		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		if p == "" {
+			continue
+		}
+		v, err := strconv.ParseUint(p, 10, 16) // only accept values that fit in 16 bits
+		if err != nil || v == 0 {
+			continue
+		}
+		out = append(out, uint16(v))
+	}
+	return out
 }
-
 
 // parseUint32CSV: "0,1001,1002"
 func parseUint32CSV(s string) []uint32 {
-	if strings.TrimSpace(s) == "" { return nil }
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
 	parts := strings.Split(s, ",")
 	out := make([]uint32, 0, len(parts))
 	for _, p := range parts {
 		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
-		if p == "" { continue }
+		if p == "" {
+			continue
+		}
 		if v, err := strconv.ParseUint(p, 10, 32); err == nil {
 			out = append(out, uint32(v))
 		}
@@ -832,51 +862,65 @@ func parseUint32CSV(s string) []uint32 {
 }
 
 // parsePorts understands formats like:
-//   "22"            -> 22-22
-//   "80-90" or "80:90" -> 80-90
-//   "80;tcp, 53;udp" -> ignored here (proto handled elsewhere) — this function only parses numeric ranges
+//
+//	"22"            -> 22-22
+//	"80-90" or "80:90" -> 80-90
+//	"80;tcp, 53;udp" -> ignored here (proto handled elsewhere) — this function only parses numeric ranges
+//
 // If the value is a composite list like "22,80-90", it returns both entries.
 // replace parsePorts with a 0..65535-friendly version
 func parsePorts(s string) []PortRange {
-    clamp16 := func(x int) int {
-        if x < 0 { return 0 }
-        if x > 65535 { return 65535 }
-        return x
-    }
-    var out []PortRange
-    for _, token := range strings.Split(s, ",") {
-        token = strings.TrimSpace(token)
-        if token == "" { continue }
-        if i := strings.IndexByte(token, ';'); i >= 0 { token = token[:i] } // drop proto part
+	clamp16 := func(x int) int {
+		if x < 0 {
+			return 0
+		}
+		if x > 65535 {
+			return 65535
+		}
+		return x
+	}
+	var out []PortRange
+	for _, token := range strings.Split(s, ",") {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if i := strings.IndexByte(token, ';'); i >= 0 {
+			token = token[:i]
+		} // drop proto part
 
-        sep := "-"
-        if strings.Contains(token, ":") && !strings.Contains(token, "-") { sep = ":" }
+		sep := "-"
+		if strings.Contains(token, ":") && !strings.Contains(token, "-") {
+			sep = ":"
+		}
 
-        if strings.Contains(token, sep) {
-            ab := strings.SplitN(token, sep, 2)
-            if len(ab) == 2 {
-                a := clamp16(parseInt(strings.TrimSpace(ab[0])))
-                b := clamp16(parseInt(strings.TrimSpace(ab[1])))
-                // now allow 0..65535
-                if a > b { a, b = b, a }
-                out = append(out, PortRange{From: a, To: b})
-            }
-        } else {
-            p := clamp16(parseInt(token))
-            out = append(out, PortRange{From: p, To: p})
-        }
-    }
-    return out
+		if strings.Contains(token, sep) {
+			ab := strings.SplitN(token, sep, 2)
+			if len(ab) == 2 {
+				a := clamp16(parseInt(strings.TrimSpace(ab[0])))
+				b := clamp16(parseInt(strings.TrimSpace(ab[1])))
+				// now allow 0..65535
+				if a > b {
+					a, b = b, a
+				}
+				out = append(out, PortRange{From: a, To: b})
+			}
+		} else {
+			p := clamp16(parseInt(token))
+			out = append(out, PortRange{From: p, To: p})
+		}
+	}
+	return out
 }
-
-
 
 // parseConnlimit parses rules like: "80;100" (legacy TCP-only) or "80;tcp;60"
 func parseConnlimit(s string) []ConnlimitRule {
 	var out []ConnlimitRule
 	for _, token := range strings.Split(s, ",") {
 		t := strings.TrimSpace(token)
-		if t == "" { continue }
+		if t == "" {
+			continue
+		}
 		fields := strings.Split(t, ";")
 		// Support both: port;limit  (TCP-only, legacy)  and port;proto;limit
 		if len(fields) == 2 {
@@ -940,68 +984,66 @@ func clamp(v, lo, hi int) int {
 // κόβει inline σχόλια που ξεκινούν μετά από κενό: " # ..." ή " // ..."
 // (δεν πειράζει "http://..." γιατί απαιτούμε προηγούμενο space)
 func stripInlineComment(s string) string {
-    cut := func(txt, token string) string {
-        for {
-            i := strings.Index(txt, token)
-            if i < 0 { return txt }
-            if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
-                return strings.TrimSpace(txt[:i])
-            }
-            // βρες επόμενο
-            j := strings.Index(txt[i+len(token):], token)
-            if j < 0 { return txt }
-            txt = txt[:i+len(token)+j] + txt[i+len(token)+j:]
-        }
-    }
-    // πρώτα " #", μετά " //"
-    s = cut(s, " #")
-    s = cut(s, " //")
-    return strings.TrimSpace(s)
+	cut := func(txt, token string) string {
+		for {
+			i := strings.Index(txt, token)
+			if i < 0 {
+				return txt
+			}
+			if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
+				return strings.TrimSpace(txt[:i])
+			}
+			// βρες επόμενο
+			j := strings.Index(txt[i+len(token):], token)
+			if j < 0 {
+				return txt
+			}
+			txt = txt[:i+len(token)+j] + txt[i+len(token)+j:]
+		}
+	}
+	// πρώτα " #", μετά " //"
+	s = cut(s, " #")
+	s = cut(s, " //")
+	return strings.TrimSpace(s)
 }
-
-
-
 
 func (c *SystemTweaksConfig) SetDefaults() {
-        if c.CTPerGB == 0 {
-                c.CTPerGB = 12288
-        }
-        if c.CTMin == 0 {
-                c.CTMin = 262144
-        }
-        if c.CTMax == 0 {
-                c.CTMax = 16777216
-        }
-        if c.TCPSynRetries == 0 {
-                c.TCPSynRetries = 3
-        }
-        if c.TCPSynAckRetries == 0 {
-                c.TCPSynAckRetries = 3
-        }
-        if c.TCPFinTimeout == 0 {
-                c.TCPFinTimeout = 20
-        }
-        if c.CTTimeWait == 0 {
-                c.CTTimeWait = 30
-        }
-        if c.CTFinWait == 0 {
-                c.CTFinWait = 45
-        }
-        if c.CTCloseWait == 0 {
-                c.CTCloseWait = 60
-        }
-        // RPFilter default = 1
-        if c.RPFilter == 0 {
-                c.RPFilter = 1
-        }
-        // RouteLocalnet default: ON (safe + required for DNAT->127.0.0.1 patterns)
-        // Only applied when SYS_TWEAKS_ENABLE=1.
-        c.RouteLocalnet = true
-
-
+	if c.CTPerGB == 0 {
+		c.CTPerGB = 12288
+	}
+	if c.CTMin == 0 {
+		c.CTMin = 262144
+	}
+	if c.CTMax == 0 {
+		c.CTMax = 16777216
+	}
+	if c.TCPSynRetries == 0 {
+		c.TCPSynRetries = 3
+	}
+	if c.TCPSynAckRetries == 0 {
+		c.TCPSynAckRetries = 3
+	}
+	if c.TCPFinTimeout == 0 {
+		c.TCPFinTimeout = 20
+	}
+	if c.CTTimeWait == 0 {
+		c.CTTimeWait = 30
+	}
+	if c.CTFinWait == 0 {
+		c.CTFinWait = 45
+	}
+	if c.CTCloseWait == 0 {
+		c.CTCloseWait = 60
+	}
+	// RPFilter default = 1
+	if c.RPFilter == 0 {
+		c.RPFilter = 1
+	}
+	// RouteLocalnet default: ON (safe + required for DNAT->127.0.0.1 patterns)
+	// Only applied when SYS_TWEAKS_ENABLE=1.
+	c.RouteLocalnet = true
 
 }
-
 
 // parseDuration parses Go-style durations like "24h", "30s", "168h".
 // Returns 0 on error (caller decides on defaulting).
@@ -1024,4 +1066,3 @@ func parseStringMapJSON(s string) map[string]string {
 	}
 	return m
 }
-

@@ -1,21 +1,21 @@
 package detectors
 
 import (
-	"sync"
-	"strings"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/firewall"
-	"time"
+	webdet "cfm/internal/webdetector"
+	"sort"
 	"strconv"
-        webdet "cfm/internal/webdetector"
+	"strings"
+	"sync"
+	"time"
 )
 
 type Options struct {
-    CfgPath string
-    Sink    core.Sink
-    FW      firewall.Backend
+	CfgPath string
+	Sink    core.Sink
+	FW      firewall.Backend
 }
-
 
 var fwBackend firewall.Backend
 
@@ -23,12 +23,11 @@ func SetFW(be firewall.Backend) { // unexported is fine, same package
 	fwBackend = be
 }
 
-
 // nginxBridge is used in OpenResty mode to enforce web challenges without nft DNAT sets.
 var nginxBridge *webdet.NginxBridge
 
 func SetNginxBridge(b *webdet.NginxBridge) {
-    nginxBridge = b
+	nginxBridge = b
 }
 
 type Factory func(sectionName string, kv KV, global KV) (core.PeriodicDetector, error)
@@ -51,18 +50,25 @@ func getFactory(typ string) (Factory, bool) {
 	return f, ok
 }
 
+// RegisteredTypes returns a stable sorted list of registered detector section types.
+func RegisteredTypes() []string {
+	regMu.RLock()
+	defer regMu.RUnlock()
+	out := make([]string, 0, len(registry))
+	for k := range registry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
-
-
-
-
-
-//Parsing Config Helper - remove comments//
+// Parsing Config Helper - remove comments//
 // stripInlineComment removes trailing inline comments outside quotes.
 // Delimiters:
-//   ;            → always a comment (outside quotes)
-//   #            → always a comment (outside quotes)
-//   //           → comment only if not part of "://", and starts at BOL or after whitespace
+//
+//	;            → always a comment (outside quotes)
+//	#            → always a comment (outside quotes)
+//	//           → comment only if not part of "://", and starts at BOL or after whitespace
 //
 // Notes:
 // - This is safe for file paths and service names.
@@ -135,48 +141,57 @@ func kvStrClean(kv KV, key, def string) string {
 	return val
 }
 
-
-
-
 // other Config helpers
 func kvBool(kv KV, key string, def bool) bool {
-        v, ok := kv[strings.ToUpper(key)]
-        if !ok { return def }
-        switch strings.ToLower(v) {
-        case "1","true","yes","on": return true
-        case "0","false","no","off": return false
-        }
-        return def
+	v, ok := kv[strings.ToUpper(key)]
+	if !ok {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 func kvInt(kv KV, key string, def int) int {
-        v, ok := kv[strings.ToUpper(key)]
-        if !ok { return def }
-        if n, err := strconv.Atoi(v); err == nil { return n }
-        return def
+	v, ok := kv[strings.ToUpper(key)]
+	if !ok {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return n
+	}
+	return def
 }
 func kvDur(kv KV, key string, def time.Duration) time.Duration {
-        v, ok := kv[strings.ToUpper(key)]
-        if !ok || v == "" { return def }
-        if d, err := time.ParseDuration(v); err == nil { return d }
-        return def
+	v, ok := kv[strings.ToUpper(key)]
+	if !ok || v == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	return def
 }
 func kvStr(kv KV, key, def string) string {
-        v, ok := kv[strings.ToUpper(key)]
-        if !ok || v == "" { return def }
-        return v
+	v, ok := kv[strings.ToUpper(key)]
+	if !ok || v == "" {
+		return def
+	}
+	return v
 }
-
-
 
 // kvFlt returns a float64 config value, with comment/quote stripping (via kvStrClean).
 func kvFlt(kv KV, key string, def float64) float64 {
-    s := kvStrClean(kv, key, "")
-    if s == "" {
-        return def
-    }
-    v, err := strconv.ParseFloat(s, 64)
-    if err != nil {
-        return def
-    }
-    return v
+	s := kvStrClean(kv, key, "")
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return def
+	}
+	return v
 }
