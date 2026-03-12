@@ -47,6 +47,28 @@ type webdetectorWrapped struct {
 	extDrop uint64
 }
 
+var (
+	webdetRoutesOnce sync.Once
+	webdetRoutesMu   sync.RWMutex
+	webdetRoutesH    http.Handler = http.NotFoundHandler()
+)
+
+func setWebdetRoutesHandler(h http.Handler) {
+	if h == nil {
+		h = http.NotFoundHandler()
+	}
+	webdetRoutesMu.Lock()
+	webdetRoutesH = h
+	webdetRoutesMu.Unlock()
+}
+
+func webdetRoutesProxy(w http.ResponseWriter, r *http.Request) {
+	webdetRoutesMu.RLock()
+	h := webdetRoutesH
+	webdetRoutesMu.RUnlock()
+	h.ServeHTTP(w, r)
+}
+
 func (w *webdetectorWrapped) enqueueExternal(a core.Alert) {
 	if w == nil {
 		return
@@ -111,11 +133,21 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			pctx = ctx
 		}
 
-		// Register webdetector + challenge routes onto the shared apiserver.
-		apiserver.Register(func(m *http.ServeMux) {
-			w.eng.RegisterHTTP(m)
+		// Build per-engine mux and hot-swap it behind a stable proxy route.
+		// This avoids duplicate ServeMux registrations on detector reload while
+		// still exposing the newest engine state through the shared apiserver.
+		localMux := http.NewServeMux()
+		w.eng.RegisterHTTP(localMux)
+		setWebdetRoutesHandler(localMux)
+
+		webdetRoutesOnce.Do(func() {
+			apiserver.Register(func(m *http.ServeMux) {
+				m.HandleFunc("/api/v1/webdet/", webdetRoutesProxy)
+				m.HandleFunc("/api/v1/challenge/", webdetRoutesProxy)
+			})
+			logging.Logf("[webdetector] routes registered on shared apiserver")
 		})
-		logging.Logf("[webdetector] routes registered on shared apiserver")
+		logging.Logf("[webdetector] routes handler updated")
 
 		if strings.TrimSpace(w.cfg.APIListen) != "" {
 			logging.Logf("[webdetector] API_LISTEN is deprecated and ignored; using shared apiserver")
