@@ -30,6 +30,9 @@ type DirTailer struct {
 	Dir       string
 	Recursive bool
 	Glob      string // basename glob, e.g. "*.log"
+	// StartAtEnd controls first-open behavior per discovered file when no
+	// resume state exists. true starts at EOF, false replays from BOF.
+	StartAtEnd bool
 
 	mu       sync.Mutex
 	opened   bool
@@ -51,12 +54,13 @@ func NewDirTailer(dir string, recursive bool, glob string) *DirTailer {
 		glob = "*.log"
 	}
 	return &DirTailer{
-		Dir:       dir,
-		Recursive: recursive,
-		Glob:      glob,
-		tailers:   make(map[string]*FileTailer),
-		lastPos:   make(map[string]Position),
-		ScanEvery: 30 * time.Second,
+		Dir:        dir,
+		Recursive:  recursive,
+		Glob:       glob,
+		StartAtEnd: true,
+		tailers:    make(map[string]*FileTailer),
+		lastPos:    make(map[string]Position),
+		ScanEvery:  30 * time.Second,
 	}
 }
 
@@ -190,6 +194,7 @@ func (d *DirTailer) ReadNext(ctx context.Context) (string, error) {
 					t.ApplyResume(pos.Inode, pos.Offset)
 				}
 			}
+			t.StartAtEnd = d.StartAtEnd
 			if pos, ok := lastPosCopy[p]; ok {
 				t.ApplyResume(pos.Inode, pos.Offset)
 			}
@@ -264,6 +269,7 @@ func (d *DirTailer) ReadNext(ctx context.Context) (string, error) {
 // Caller must hold d.mu.
 func (d *DirTailer) newTailerLocked(p string) *FileTailer {
 	t := NewFileTailer(p)
+	t.StartAtEnd = d.StartAtEnd
 	if d.st != nil && d.detName != "" {
 		if pos, ok := d.st.Get(FileStateKey(d.detName, p)); ok {
 			t.ApplyResume(pos.Inode, pos.Offset)

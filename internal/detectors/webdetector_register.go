@@ -484,6 +484,7 @@ func init() {
 			LogDir:      kvStrClean(kv, "LOG_DIR", ""),
 			Recursive:   kvBool(kv, "RECURSIVE", false),
 			Glob:        kvStrClean(kv, "GLOB", "*.log"),
+			StartAtEnd:  kvBool(kv, "START_AT_END", true),
 			Every:       kvDur(kv, "EVERY", defEvery),
 			Window:      kvDur(kv, "WINDOW", defWindow),
 			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
@@ -752,6 +753,7 @@ func init() {
 			if st, err := os.Stat(path); err == nil && !st.IsDir() {
 				logging.Logf("[webdetector] using log: %s", path)
 				src := core.NewFileTailer(path)
+				src.StartAtEnd = cfg.StartAtEnd
 				engine.SetSource(src)
 				if stt, _ := core.LoadState(""); stt != nil {
 					key := core.FileStateKey(section, path)
@@ -770,6 +772,7 @@ func init() {
 			} else if st, err := os.Stat(dir); err == nil && st.IsDir() {
 				logging.Logf("[webdetector] using log dir: %s (recursive=%v glob=%s)", dir, cfg.Recursive, cfg.Glob)
 				src := core.NewDirTailer(dir, cfg.Recursive, cfg.Glob)
+				src.StartAtEnd = cfg.StartAtEnd
 				if stt, _ := core.LoadState(""); stt != nil {
 					// persist per-file offsets: key = FileStateKey(section, fullpath)
 					src.SetState(stt, section)
