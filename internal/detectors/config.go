@@ -132,6 +132,17 @@ func readSections(path string) (Sections, []byte, error) {
 	return s, b, nil
 }
 
+// ReadSectionsFile exposes detectors.conf parsing for CLI diagnostics.
+func ReadSectionsFile(path string) (Sections, error) {
+	s, _, err := readSections(path)
+	return s, err
+}
+
+// SplitTypeInstance splits section name into type + optional instance name.
+func SplitTypeInstance(section string) (typ, inst string) {
+	return splitTypeInstance(section)
+}
+
 // isConfigKey returns true if s is a valid bare config identifier —
 // only ASCII letters, digits and underscores are allowed.
 //
