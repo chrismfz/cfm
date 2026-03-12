@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,28 @@ type webdetectorWrapped struct {
 	extMu   sync.Mutex
 	extQ    chan core.Alert
 	extDrop uint64
+}
+
+var (
+	webdetRoutesOnce sync.Once
+	webdetRoutesMu   sync.RWMutex
+	webdetRoutesH    http.Handler = http.NotFoundHandler()
+)
+
+func setWebdetRoutesHandler(h http.Handler) {
+	if h == nil {
+		h = http.NotFoundHandler()
+	}
+	webdetRoutesMu.Lock()
+	webdetRoutesH = h
+	webdetRoutesMu.Unlock()
+}
+
+func webdetRoutesProxy(w http.ResponseWriter, r *http.Request) {
+	webdetRoutesMu.RLock()
+	h := webdetRoutesH
+	webdetRoutesMu.RUnlock()
+	h.ServeHTTP(w, r)
 }
 
 func (w *webdetectorWrapped) enqueueExternal(a core.Alert) {
@@ -110,11 +133,21 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			pctx = ctx
 		}
 
-		// Register webdetector + challenge routes onto the shared apiserver.
-		apiserver.Register(func(m *http.ServeMux) {
-			w.eng.RegisterHTTP(m)
+		// Build per-engine mux and hot-swap it behind a stable proxy route.
+		// This avoids duplicate ServeMux registrations on detector reload while
+		// still exposing the newest engine state through the shared apiserver.
+		localMux := http.NewServeMux()
+		w.eng.RegisterHTTP(localMux)
+		setWebdetRoutesHandler(localMux)
+
+		webdetRoutesOnce.Do(func() {
+			apiserver.Register(func(m *http.ServeMux) {
+				m.HandleFunc("/api/v1/webdet/", webdetRoutesProxy)
+				m.HandleFunc("/api/v1/challenge/", webdetRoutesProxy)
+			})
+			logging.Logf("[webdetector] routes registered on shared apiserver")
 		})
-		logging.Logf("[webdetector] routes registered on shared apiserver")
+		logging.Logf("[webdetector] routes handler updated")
 
 		if strings.TrimSpace(w.cfg.APIListen) != "" {
 			logging.Logf("[webdetector] API_LISTEN is deprecated and ignored; using shared apiserver")
@@ -404,6 +437,61 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 }
 
+type folderScanStats struct {
+	DirsSeen      int
+	FilesSeen     int
+	MatchedFiles  int
+	StateHits     int
+	SampleMatched []string
+}
+
+func scanFolderSourceForDebug(dir, glob string, recursive bool, st *core.State, section string) folderScanStats {
+	stats := folderScanStats{}
+	if strings.TrimSpace(glob) == "" {
+		glob = "*.log"
+	}
+
+	_ = filepath.WalkDir(dir, func(path string, de os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if de.IsDir() {
+			stats.DirsSeen++
+			if !recursive && path != dir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		stats.FilesSeen++
+
+		base := filepath.Base(path)
+		lb := strings.ToLower(base)
+		if strings.HasSuffix(lb, ".gz") || strings.HasSuffix(lb, ".bz2") || strings.HasSuffix(lb, ".xz") ||
+			strings.HasSuffix(lb, ".zst") || strings.HasSuffix(lb, ".zip") {
+			return nil
+		}
+		if ok, _ := filepath.Match(glob, base); !ok {
+			return nil
+		}
+		if info, e := os.Stat(path); e != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+
+		stats.MatchedFiles++
+		if len(stats.SampleMatched) < 8 {
+			stats.SampleMatched = append(stats.SampleMatched, path)
+		}
+		if st != nil {
+			if _, ok := st.Get(core.FileStateKey(section, path)); ok {
+				stats.StateHits++
+			}
+		}
+		return nil
+	})
+
+	return stats
+}
+
 // ensureChallengeRedirect runs EnsureChallengeRedirect at most once per minute.
 // This is intentionally cheap and self-healing.
 func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
@@ -484,6 +572,7 @@ func init() {
 			LogDir:      kvStrClean(kv, "LOG_DIR", ""),
 			Recursive:   kvBool(kv, "RECURSIVE", false),
 			Glob:        kvStrClean(kv, "GLOB", "*.log"),
+			StartAtEnd:  kvBool(kv, "START_AT_END", true),
 			Every:       kvDur(kv, "EVERY", defEvery),
 			Window:      kvDur(kv, "WINDOW", defWindow),
 			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
@@ -752,6 +841,7 @@ func init() {
 			if st, err := os.Stat(path); err == nil && !st.IsDir() {
 				logging.Logf("[webdetector] using log: %s", path)
 				src := core.NewFileTailer(path)
+				src.StartAtEnd = cfg.StartAtEnd
 				engine.SetSource(src)
 				if stt, _ := core.LoadState(""); stt != nil {
 					key := core.FileStateKey(section, path)
@@ -770,9 +860,18 @@ func init() {
 			} else if st, err := os.Stat(dir); err == nil && st.IsDir() {
 				logging.Logf("[webdetector] using log dir: %s (recursive=%v glob=%s)", dir, cfg.Recursive, cfg.Glob)
 				src := core.NewDirTailer(dir, cfg.Recursive, cfg.Glob)
+				src.StartAtEnd = cfg.StartAtEnd
+
+				var stt *core.State
 				if stt, _ := core.LoadState(""); stt != nil {
 					// persist per-file offsets: key = FileStateKey(section, fullpath)
 					src.SetState(stt, section)
+				}
+				stats := scanFolderSourceForDebug(dir, cfg.Glob, cfg.Recursive, stt, section)
+				logging.Logf("[webdetector][debug] folder scan: dirs=%d files=%d matched=%d state_hits=%d start_at_end=%v",
+					stats.DirsSeen, stats.FilesSeen, stats.MatchedFiles, stats.StateHits, cfg.StartAtEnd)
+				if len(stats.SampleMatched) > 0 {
+					logging.Logf("[webdetector][debug] folder scan sample matched: %s", strings.Join(stats.SampleMatched, ", "))
 				}
 				engine.SetSource(src)
 			} else {

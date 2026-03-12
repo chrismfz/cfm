@@ -28,6 +28,10 @@ import (
 //     after the event, exactly as before.
 type FileTailer struct {
 	Path string
+	// StartAtEnd controls first-open behavior when there is no resume state.
+	// true  -> start tailing from EOF (default)
+	// false -> start reading from BOF (replay existing file contents)
+	StartAtEnd bool
 
 	mu         sync.Mutex
 	f          *os.File
@@ -51,6 +55,7 @@ type FileTailer struct {
 func NewFileTailer(path string) *FileTailer {
 	return &FileTailer{
 		Path:                   path,
+		StartAtEnd:             true,
 		idleStatMinInterval:    200 * time.Millisecond,
 		missingStatMinInterval: 50 * time.Millisecond,
 	}
@@ -92,7 +97,10 @@ func (t *FileTailer) Open() error {
 	//   Resume known, inode changed (rename+newfile rotation) → start at 0 so we
 	//     don't miss lines written to the new file before this tick.
 	//   Resume known, same inode → seek to saved offset (or 0 if file was truncated).
-	off := st.Size()
+	off := int64(0)
+	if t.StartAtEnd {
+		off = st.Size()
+	}
 	resumeKnown := t.LastInode != 0 || t.LastOffset != 0
 	if resumeKnown && t.LastInode != curInode {
 		off = 0
