@@ -41,6 +41,7 @@ local CFG = {
   rule_php_wrappers    = "logonly",    -- php:// phar:// data:// zip:// expect:// glob://
   rule_ip_host         = "logonly",    -- Host header is bare IPv4/IPv6 literal
   rule_ctrl_chars      = "logonly",    -- suspicious ASCII control chars in args/body
+  rule_php_webshell_body = "logonly",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
   rule_b64_injection   = "logonly",    -- POST-body base64 decode heuristic scanner
 
   -- Auth / brute / XML-RPC
@@ -79,6 +80,10 @@ local CFG = {
   block_ttl_sec     = 3600,
   push_cooldown_sec = 60,
   max_scan_len      = 2048,
+
+  -- Raw PHP webshell body scanner tuning
+  php_webshell_max_scan_len = 2048,
+  php_webshell_min_score    = 5,
 }
 
 -- Optional user overrides from cfm_waf_config.lua
@@ -317,6 +322,111 @@ local function detect_ctrl_chars(args, body)
     return true
   end
   return false
+end
+
+-- True when Content-Type likely carries textual payloads that are worth scanning.
+local function is_textual_body_content_type(content_type)
+  local ct = lower(content_type or "")
+  if ct == "" then return true end -- missing type is common; keep covered
+
+  if has(ct, "application/x-www-form-urlencoded") then return true end
+  if has(ct, "multipart/form-data")              then return true end
+  if has(ct, "application/json")                 then return true end
+  if has(ct, "application/xml")                  then return true end
+  if has(ct, "text/")                            then return true end
+
+  return false
+end
+
+-- Scored raw-PHP webshell detector for POST bodies.
+-- Goal: catch strong snippets like:
+--   <?php system($_GET['cmd']); ?>
+--   <?php @eval($_POST['x']); ?>
+--   <?php passthru($_REQUEST['c']); ?>
+-- while avoiding single-token false positives.
+local function detect_php_webshell_body(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = headers["content-type"] or headers["Content-Type"] or ""
+  if not is_textual_body_content_type(ct) then
+    return nil
+  end
+
+  -- Normalize and keep scan bounded.
+  local s = normalize(cap(body, tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len))
+  if s == "" then return nil end
+  -- Only convert + to space for form-encoded payloads.
+  if has(ct, "application/x-www-form-urlencoded") then
+    s = s:gsub("%+", " ") -- + is literal here, not a Lua pattern quantifier
+  end
+
+  -- Cheap prefilter: skip unless at least one strong PHP-shell token exists.
+  if not (has(s, "<?") or has(s, "$_") or has(s, "eval") or has(s, "system")
+          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")) then
+    return nil
+  end
+
+  local score = 0
+
+  -- PHP opening tags.
+  if has(s, "<?php") or has(s, "<?=") then
+    score = score + 2
+  end
+
+  -- Superglobals commonly used in webshell snippets.
+  if has(s, "$_get") or has(s, "$_post") or has(s, "$_request")
+     or has(s, "$_cookie") or has(s, "$_server") then
+    score = score + 2
+  end
+
+  local function has_php_callable(name)
+    -- Match either normal callable form: name(...)
+    -- or silenced form: @name(...)
+    if s:find("%f[%a_]" .. name .. "%s*%(") then return true end
+    if s:find("@%s*" .. name .. "%s*%(") then return true end
+    return false
+  end
+
+  -- Dangerous callable functions.
+  if has_php_callable("eval") then score = score + 3 end
+  if has_php_callable("assert") then score = score + 3 end
+  if has_php_callable("system") then score = score + 3 end
+  if has_php_callable("exec") then score = score + 3 end
+  if has_php_callable("passthru") then score = score + 3 end
+  if has_php_callable("shell_exec") then score = score + 3 end
+  if has_php_callable("popen") then score = score + 3 end
+  if has_php_callable("proc_open") then score = score + 3 end
+
+  -- Common statement shape bonus.
+  if has(s, ";") and (has(s, "?>") or has(s, "<?php") or has(s, "<?=")) then
+    score = score + 1
+  end
+
+  local min_score = tonumber(CFG.php_webshell_min_score) or 5
+  if score < min_score then
+    return nil
+  end
+
+  -- Return granular tags for triage.
+  if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
+  if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
+  if s:find("<?php.-@?passthru%s*%(") and s:find("%$_request") then return "RAW_PASSTHRU_REQUEST" end
+
+  if has_php_callable("eval")       then return "RAW_EVAL" end
+  if has_php_callable("assert")     then return "RAW_ASSERT" end
+  if has_php_callable("system")     then return "RAW_SYSTEM" end
+  if has_php_callable("exec")       then return "RAW_EXEC" end
+  if has_php_callable("passthru")   then return "RAW_PASSTHRU" end
+  if has_php_callable("shell_exec") then return "RAW_SHELL_EXEC" end
+  if has_php_callable("popen")      then return "RAW_POPEN" end
+  if has_php_callable("proc_open")  then return "RAW_PROC_OPEN" end
+
+  if has(s, "$_get") or has(s, "$_post") or has(s, "$_request") then
+    return "RAW_SUPERGLOBAL"
+  end
+
+  return "RAW_SCORING_HIT"
 end
 
 -- Base64 body heuristic scanner.
@@ -759,7 +869,19 @@ function _M.check(ctx)
     end
   end
 
-  -- 7) XSS
+  -- 7) Raw PHP webshell body (scored)
+  do
+    local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_php_webshell_body(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- 8) XSS
   do
     local mode = rule_mode(CFG.rule_xss, "challenge")
     if mode ~= "disabled" and detect_xss(uri, args) then
@@ -768,7 +890,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 8) SQLi
+  -- 9) SQLi
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" and detect_sqli(uri, args) then
@@ -777,7 +899,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 9) WP-specific auth checks
+  -- 10) WP-specific auth checks
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
@@ -792,7 +914,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 10) XML-RPC strong body signatures
+  -- 11) XML-RPC strong body signatures
   do
     local xtag = detect_xmlrpc_probe(uri, method, body)
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
@@ -810,7 +932,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 11) Generic XML-RPC POST burst
+  -- 12) Generic XML-RPC POST burst
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
@@ -822,7 +944,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 12) Generic auth endpoint burst
+  -- 13) Generic auth endpoint burst
   do
     local mode = rule_mode(CFG.rule_auth_burst, "challenge")
     if mode ~= "disabled" then
@@ -839,7 +961,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 13) Suspicious command parameter keys
+  -- 14) Suspicious command parameter keys
   do
     local mode = rule_mode(CFG.rule_cmd_params, "logonly")
     if mode ~= "disabled" then
@@ -850,7 +972,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 14) Suspicious payload markers
+  -- 15) Suspicious payload markers
   do
     local mode = rule_mode(CFG.rule_cmd_payload, "logonly")
     if mode ~= "disabled" then
@@ -861,7 +983,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 15) Debug toggles
+  -- 16) Debug toggles
   do
     local mode = rule_mode(CFG.rule_debug_toggles, "logonly")
     if mode ~= "disabled" then
@@ -872,7 +994,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 16) PHP serialize markers
+  -- 17) PHP serialize markers
   do
     local mode = rule_mode(CFG.rule_serialize, "logonly")
     if mode ~= "disabled" then
@@ -883,7 +1005,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 17) Base64 POST body scanner
+  -- 18) Base64 POST body scanner
   do
     local mode = rule_mode(CFG.rule_b64_injection, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then

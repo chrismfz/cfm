@@ -314,6 +314,22 @@ The included `openresty-example.conf` Lua block implements:
 - Real-time cfm decision socket query
 - Optional cache via `shared_dict`
 
+`configs/cfm_waf.lua` also includes staged payload detectors with per-rule modes
+(`disabled|logonly|challenge|block`). Two body-focused rules are designed to be
+deployed conservatively:
+
+- `rule_b64_injection` (default `logonly`): scans base64-looking POST values,
+  decodes them, then checks decoded content for webshell / XSS / SQLi markers.
+- `rule_php_webshell_body` (default `logonly`): scored raw-PHP body detector
+  for snippets such as `<?php system($_GET['cmd']); ?>`,
+  `<?php @eval($_POST['x']); ?>`, and `<?php passthru($_REQUEST['c']); ?>`.
+  It only evaluates textual body types and requires multiple signals
+  (PHP tag + dangerous callable + superglobal/statement shape) to reduce false positives.
+
+Recommended rollout: keep both in `logonly`, review emitted
+`WAF_B64_INJECT:*` and `WAF_PHP_WEBSHELL_BODY:*` tags for your traffic, then
+promote to `challenge` or `block` once clean.
+
 ### Advanced Challenge Rules
 
 The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA, and per-ASN matching with TTL-based actions (`challenge`, `block`, `allow`). Rules are evaluated in priority order and can reference enrichment data (ASN, PTR, country).
