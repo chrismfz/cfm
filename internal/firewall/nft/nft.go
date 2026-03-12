@@ -469,10 +469,31 @@ func (b *Backend) EnsureBase() error {
 
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
+	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
+	// large installations. Cache the input chain snapshot once and keep it updated
+	// as we add/insert rules during this EnsureBase run.
+	inputChainRaw, _ := exec.Command("nft", "list", "chain", family, tableName, "input").CombinedOutput()
+	normalizeRule := func(s string) string {
+		s = strings.ReplaceAll(s, "\r", "")
+		s = strings.ReplaceAll(s, "\t", " ")
+		return " " + strings.Join(strings.Fields(s), " ") + " "
+	}
+	inputChainNorm := normalizeRule(string(inputChainRaw))
+	ruleInInput := func(expr string) bool {
+		return strings.Contains(inputChainNorm, normalizeRule(expr))
+	}
+	recordRuleInInput := func(expr string) {
+		inputChainNorm += normalizeRule(expr)
+	}
+
 	addRule := func(expr string) error {
-		if !b.ruleExists("input", expr) {
-			return b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr))
+		if ruleInInput(expr) {
+			return nil
 		}
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr)); err != nil {
+			return err
+		}
+		recordRuleInInput(expr)
 		return nil
 	}
 
@@ -480,8 +501,11 @@ func (b *Backend) EnsureBase() error {
 
 	// helper stays the same
 	addEarly := func(expr string) {
-		if !b.ruleExists("input", expr) {
-			_ = b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))
+		if ruleInInput(expr) {
+			return
+		}
+		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err == nil {
+			recordRuleInInput(expr)
 		}
 	}
 
@@ -624,10 +648,11 @@ func (b *Backend) EnsureBase() error {
 	}
 
 	// 6) jump flood στο τέλος του base layer
-	if !b.ruleExists("input", "jump flood") {
+	if !ruleInInput("jump flood") {
 		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
 			return err
 		}
+		recordRuleInInput("jump flood")
 	}
 
 	//moved to ports.go
@@ -2110,4 +2135,3 @@ func (b *Backend) RemoveChallenge(ip net.IP) error {
 	}
 	return nil
 }
-
