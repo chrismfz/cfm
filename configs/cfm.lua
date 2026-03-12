@@ -80,16 +80,109 @@ local function has(s, pat)
 end
 
 -- Read request body only when really needed by inline WAF.
--- Currently used for POST /xmlrpc.php to detect system.multicall.
-local function get_req_body_for_waf(uri, method, max_len)
+-- Decide whether a POST destination is risky enough to justify body inspection.
+-- Goal:
+--   1) cover common CMS/admin/plugin/theme exploit paths
+--   2) stay generic across apps
+--   3) avoid needing endless one-off endpoint additions
+local function waf_should_read_body(uri, method)
   uri = lower(uri or "")
   method = lower(method or "")
 
   if method ~= "post" then
-    return ""
+    return false
   end
 
-  if not has(uri, "/xmlrpc.php") then
+  -- Root-level high-risk filenames / endpoints
+  if has(uri, "/xmlrpc.php")        then return true end
+  if has(uri, "/wp-login.php")      then return true end
+  if has(uri, "/admin-ajax.php")    then return true end
+  if has(uri, "/ajax")              then return true end
+  if has(uri, "/api/")              then return true end
+  if has(uri, "/graphql")           then return true end
+  if has(uri, "/rest/")             then return true end
+
+  -- WordPress / WooCommerce
+  if has(uri, "/wp-admin/")                 then return true end
+  if has(uri, "/wp-content/plugins/")       then return true end
+  if has(uri, "/wp-content/themes/")        then return true end
+  if has(uri, "/wp-content/uploads/")       then return true end
+  if has(uri, "/wp-includes/")              then return true end
+  if has(uri, "/wc-api/")                   then return true end
+  if has(uri, "/wc-ajax=")                  then return true end
+  if has(uri, "wc-ajax=")                   then return true end
+
+  -- Joomla
+  if has(uri, "/administrator/")  then return true end
+  if has(uri, "/components/")     then return true end
+  if has(uri, "/modules/")        then return true end
+  if has(uri, "/plugins/")        then return true end
+  if has(uri, "/templates/")      then return true end
+  if has(uri, "/media/")          then return true end
+
+  -- Drupal
+  if has(uri, "/user/login")      then return true end
+  if has(uri, "/admin/")          then return true end
+  if has(uri, "/sites/default/")  then return true end
+  if has(uri, "/modules/")        then return true end
+  if has(uri, "/themes/")         then return true end
+
+  -- PrestaShop
+  if has(uri, "/admin")                   then return true end
+  if has(uri, "/modules/")                then return true end
+  if has(uri, "/themes/")                 then return true end
+  if has(uri, "/upload/")                 then return true end
+  if has(uri, "/filemanager/")            then return true end
+  if has(uri, "/ajax-tab.php")            then return true end
+  if has(uri, "/webservice/")             then return true end
+
+  -- OpenCart
+  if has(uri, "/admin/")                  then return true end
+  if has(uri, "/catalog/")                then return true end
+  if has(uri, "/system/")                 then return true end
+  if has(uri, "/extension/")              then return true end
+  if has(uri, "/index.php?route=")        then return true end
+
+  -- CS-Cart
+  if has(uri, "/admin.php")               then return true end
+  if has(uri, "/backend/")                then return true end
+  if has(uri, "/api/")                    then return true end
+  if has(uri, "/addons/")                 then return true end
+  if has(uri, "/var/themes_repository/")  then return true end
+
+  -- Generic admin / installer / uploader / importer / tool paths
+  if has(uri, "/admin")       then return true end
+  if has(uri, "/administrator") then return true end
+  if has(uri, "/login")       then return true end
+  if has(uri, "/auth")        then return true end
+  if has(uri, "/upload")      then return true end
+  if has(uri, "/uploads")     then return true end
+  if has(uri, "/import")      then return true end
+  if has(uri, "/export")      then return true end
+  if has(uri, "/restore")     then return true end
+  if has(uri, "/backup")      then return true end
+  if has(uri, "/install")     then return true end
+  if has(uri, "/installer")   then return true end
+  if has(uri, "/setup")       then return true end
+  if has(uri, "/update")      then return true end
+  if has(uri, "/upgrade")     then return true end
+  if has(uri, "/filemanager") then return true end
+  if has(uri, "/connector")   then return true end
+  if has(uri, "/shell")       then return true end
+  if has(uri, "/cmd")         then return true end
+
+  -- Suspicious script extensions in risky places
+  if uri:match("%.php[%?/].*") then return true end
+  if uri:match("%.phtml[%?/].*") then return true end
+  if uri:match("%.php$") then return true end
+  if uri:match("%.phtml$") then return true end
+
+  return false
+end
+
+-- Read request body only when justified by destination risk.
+local function get_req_body_for_waf(uri, method, max_len)
+  if not waf_should_read_body(uri, method) then
     return ""
   end
 
@@ -115,6 +208,8 @@ local function get_req_body_for_waf(uri, method, max_len)
 
   return ""
 end
+
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- NETWORK LAYER (Keepalive + Chunked Support)
