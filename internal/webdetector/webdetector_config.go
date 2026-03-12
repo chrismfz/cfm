@@ -12,6 +12,9 @@ type Config struct {
 	LogDir    string // folder mode: directory root
 	Recursive bool   // folder mode: recurse into subfolders (cpanel domlogs)
 	Glob      string // folder mode: glob match for filenames, e.g. "*.log" (optional)
+	// StartAtEnd controls first-open behavior when no resume state exists.
+	// true tails from EOF; false replays existing lines from BOF.
+	StartAtEnd bool
 
 	Every       time.Duration // detector tick interval
 	Window      time.Duration // short-window horizon (sliding)
@@ -211,7 +214,6 @@ func (c *Config) FillDefaults() {
 	if c.Glob == "" {
 		c.Glob = "*.log"
 	}
-
 	// Default: write per-request challenge access lines to a separate file.
 	// This keeps cfm.challenges.log focused on higher-level [challenge] events.
 	if c.ChallengeAccessLogPath == "" {
