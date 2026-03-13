@@ -3,14 +3,14 @@ package ipquery
 
 import (
 	"bytes"
+	enrichpkg "cfm/internal/enrich"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
-	"strings"
-	enrichpkg "cfm/internal/enrich"
 	"path/filepath"
+	"strings"
 )
 
 type Hit struct {
@@ -24,6 +24,16 @@ type Hit struct {
 }
 
 type setDesc struct{ name, family, kind, action, feed string }
+
+func classifyActionFromName(name string) string {
+	if strings.HasPrefix(name, "allow_") {
+		return "ALLOW"
+	}
+	if strings.HasPrefix(name, "block_") {
+		return "BLOCK"
+	}
+	return "MATCH"
+}
 
 // Find τρέχει δυναμικά nft list table/set και επιστρέφει τα hits για IP ή CIDR.
 func Find(arg string) ([]Hit, error) {
@@ -108,66 +118,87 @@ func extractCfmSets(tableJSON []byte, ip net.IP) []setDesc {
 }
 
 func classifySetName(name string) setDesc {
-    // --- manual hosts ---
-    if name == "allow_v4" {
-        return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
-    }
-    if name == "allow_v6" {
-        return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
-    }
-    if name == "block_v4" {
-        return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
-    }
-    if name == "block_v6" {
-        return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
-    }
+	// --- manual hosts ---
+	if name == "allow_v4" {
+		return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
+	}
+	if name == "allow_v6" {
+		return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
+	}
+	if name == "block_v4" {
+		return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
+	}
+	if name == "block_v6" {
+		return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
+	}
 
-    // --- manual nets ---
-    if name == "allow_v4_nets" {
-        return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
-    }
-    if name == "allow_v6_nets" {
-        return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
-    }
-    if name == "block_v4_nets" {
-        return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
-    }
-    if name == "block_v6_nets" {
-        return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
-    }
+	// --- manual nets ---
+	if name == "allow_v4_nets" {
+		return setDesc{name: name, family: "v4", kind: "manual", action: "ALLOW"}
+	}
+	if name == "allow_v6_nets" {
+		return setDesc{name: name, family: "v6", kind: "manual", action: "ALLOW"}
+	}
+	if name == "block_v4_nets" {
+		return setDesc{name: name, family: "v4", kind: "manual", action: "BLOCK"}
+	}
+	if name == "block_v6_nets" {
+		return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
+	}
 
-    // --- dynamic hosts ---
-    if name == "allow_dyn_v4" {
-        return setDesc{name: name, family: "v4", kind: "hosts", action: "ALLOW"}
-    }
-    if name == "allow_dyn_v6" {
-        return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"}
-    }
+	// --- dynamic hosts ---
+	if name == "allow_dyn_v4" {
+		return setDesc{name: name, family: "v4", kind: "hosts", action: "ALLOW"}
+	}
+	if name == "allow_dyn_v6" {
+		return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"}
+	}
 
-    // --- external feeds (hosts or nets) ---
-    parts := strings.Split(name, "_")
-    if (len(parts) == 4 || len(parts) >= 5) &&
-        (parts[0] == "allow" || parts[0] == "block") &&
-        parts[1] == "ext" &&
-        (parts[2] == "v4" || parts[2] == "v6") &&
-        (parts[3] == "hosts" || parts[3] == "nets") {
-        feed := ""
-        if len(parts) >= 5 {
-            feed = strings.Join(parts[4:], "_")
-        }
-        return setDesc{
-            name:   name,
-            family: parts[2],
-            kind:   parts[3],
-            action: strings.ToUpper(parts[0]),
-            feed:   feed,
-        }
-    }
+	// --- challenge sets ---
+	if name == "challenge_v4" {
+		return setDesc{name: name, family: "v4", kind: "hosts", action: "MATCH"}
+	}
+	if name == "challenge_v6" {
+		return setDesc{name: name, family: "v6", kind: "hosts", action: "MATCH"}
+	}
 
-    // unknown set
-    return setDesc{}
+	// --- generic cfm sets (ignore/self/debug/throttle/etc.) ---
+	if strings.HasSuffix(name, "_v4") {
+		return setDesc{name: name, family: "v4", kind: "hosts", action: classifyActionFromName(name)}
+	}
+	if strings.HasSuffix(name, "_v6") {
+		return setDesc{name: name, family: "v6", kind: "hosts", action: classifyActionFromName(name)}
+	}
+	if strings.HasSuffix(name, "_v4_nets") {
+		return setDesc{name: name, family: "v4", kind: "nets", action: classifyActionFromName(name)}
+	}
+	if strings.HasSuffix(name, "_v6_nets") {
+		return setDesc{name: name, family: "v6", kind: "nets", action: classifyActionFromName(name)}
+	}
+
+	// --- external feeds (hosts or nets) ---
+	parts := strings.Split(name, "_")
+	if (len(parts) == 4 || len(parts) >= 5) &&
+		(parts[0] == "allow" || parts[0] == "block") &&
+		parts[1] == "ext" &&
+		(parts[2] == "v4" || parts[2] == "v6") &&
+		(parts[3] == "hosts" || parts[3] == "nets") {
+		feed := ""
+		if len(parts) >= 5 {
+			feed = strings.Join(parts[4:], "_")
+		}
+		return setDesc{
+			name:   name,
+			family: parts[2],
+			kind:   parts[3],
+			action: strings.ToUpper(parts[0]),
+			feed:   feed,
+		}
+	}
+
+	// unknown set
+	return setDesc{}
 }
-
 
 func netsOverlap(a, b *net.IPNet) bool {
 	if (a.IP.To4() != nil) != (b.IP.To4() != nil) {
@@ -212,7 +243,7 @@ func querySetForCIDR(so []byte, q *net.IPNet, s setDesc) []Hit {
 							hits = append(hits, Hit{
 								Set: s.name, Action: s.action, Scope: "cidr",
 								Match: fmt.Sprintf("%s/%d", ip.String(), plen),
-								Feed: s.feed, Family: s.family, Via: "cidr",
+								Feed:  s.feed, Family: s.family, Via: "cidr",
 							})
 						}
 					}
@@ -334,47 +365,53 @@ func querySetForIP(raw []byte, ip net.IP, sd setDesc) []Hit {
 	return hits
 }
 
-
-
-
-
-
-
-
-
 func preferExisting(paths ...string) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, p := range paths {
-		if p == "" { continue }
+		if p == "" {
+			continue
+		}
 		abs := p
 		if !filepath.IsAbs(abs) {
-			if a, err := filepath.Abs(abs); err == nil { abs = a }
+			if a, err := filepath.Abs(abs); err == nil {
+				abs = a
+			}
 		}
-		if _, ok := seen[abs]; ok { continue }
+		if _, ok := seen[abs]; ok {
+			continue
+		}
 		seen[abs] = struct{}{}
 		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
 			out = append(out, abs)
 		}
 	}
-	if len(out) == 0 { return paths }
+	if len(out) == 0 {
+		return paths
+	}
 	return out
 }
 
 // EnrichSuffix: προσπαθεί cfgDir (π.χ. ./configs), μετά /etc/cfm, /usr/share/GeoIP, /var/lib/GeoIP, ΚΑΙ /usr/share/cfm.
 func EnrichSuffix(cfgDir, ipStr string) string {
 	ip := net.ParseIP(ipStr)
-	if ip == nil { return "" }
+	if ip == nil {
+		return ""
+	}
 
-	paths := preferExisting(cfgDir, "/etc/cfm", "/var/lib/cfm/maxmind" )
+	paths := preferExisting(cfgDir, "/etc/cfm", "/var/lib/cfm/maxmind")
 	enr, err := enrichpkg.New(paths...)
-	if err != nil || enr == nil { return "" }
+	if err != nil || enr == nil {
+		return ""
+	}
 	defer enr.Close()
 
 	info := enr.Lookup(ip.String())
 
 	var parts []string
-	if s := strings.TrimSpace(info.PTR); s != "" { parts = append(parts, s) }
+	if s := strings.TrimSpace(info.PTR); s != "" {
+		parts = append(parts, s)
+	}
 	if info.ASN > 0 || strings.TrimSpace(info.ASNName) != "" {
 		if info.ASN > 0 && strings.TrimSpace(info.ASNName) != "" {
 			parts = append(parts, fmt.Sprintf("AS%d %s", info.ASN, strings.TrimSpace(info.ASNName)))
@@ -385,7 +422,11 @@ func EnrichSuffix(cfgDir, ipStr string) string {
 		}
 	}
 	loc := strings.TrimSpace(strings.Trim(strings.Join([]string{strings.TrimSpace(info.City), strings.TrimSpace(info.Country)}, ", "), ", "))
-	if loc != "" { parts = append(parts, loc) }
-	if len(parts) == 0 { return "" }
+	if loc != "" {
+		parts = append(parts, loc)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
 	return " — " + strings.Join(parts, " | ")
 }
