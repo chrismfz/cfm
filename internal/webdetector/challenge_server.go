@@ -602,10 +602,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			// UX fix:
 			// If a user is challenged while doing a POST (wp-admin save, login submit, etc),
 			// returning 405 is confusing. Bounce them to the challenge page using GET.
+			// NOTE: this intentionally does not replay POST payloads; browser returns to
+			// `next` as GET after verify. See CHALLENGE_POST_REPLAY_ACTIONS.md for
+			// recommended ways to add resumable/replay behavior.
 			// We intentionally ONLY do this for POST (not OPTIONS) to avoid breaking
 			// preflights or non-browser clients.
 			if r.Method == http.MethodPost {
 				next := r.URL.RequestURI()
+				logging.LogfCHALLENGES("[challenge] post-intercept host=%s uri=%s ctype=%q clen=%d note=no_replay", cleanHost(r.Host), next, strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength)
 				w.Header().Set("Cache-Control", "no-store")
 				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
 				return
