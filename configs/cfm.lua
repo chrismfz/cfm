@@ -683,20 +683,23 @@ end
 -- captured above before any header-based override. For a local PHP curl call
 -- this will be 127.0.0.1 or ::1. For an external request via Cloudflare this
 -- will be a Cloudflare edge IP.
+-- ── Step 0a: Local-origin hard bypass ────────────────────────────────────────
 do
   local p      = peer_ip
   local has_cf = cf_ip ~= ""
+  local srv    = ngx.var.server_addr or ""
 
+  -- Case 1: direct connection (no Cloudflare in path)
+  -- peer_ip is the raw TCP source — loopback or RFC-1918 = internal request.
   if not has_cf and p ~= "" then
-    -- Strip IPv6 brackets if present
     if p:sub(1, 1) == "[" then p = p:sub(2, -2) end
-
-    local srv = ngx.var.server_addr or ""
-
+    local b2 = tonumber(p:match("^172%.(%d+)%."))
     local is_local = (p == "127.0.0.1")
                   or (p == "::1")
-                  or (p == srv)   -- self-request via own public IP
-
+                  or (p == srv)
+                  or (p:sub(1, 8) == "192.168.")
+                  or (p:sub(1, 3) == "10.")
+                  or (b2 and b2 >= 16 and b2 <= 31)
     if is_local then
       ngx.var.cfm_upstream = "cfm_apache"
       ngx.var.cfm_pass     = origin_pass_for(scheme)
@@ -707,7 +710,24 @@ do
       return
     end
   end
+
+  -- Case 2: self-request routed via Cloudflare
+  -- wp-cron (and similar) on a CF-proxied domain resolve their own hostname
+  -- to a CF edge IP, so the request goes: server → CF → back to server.
+  -- CF-Connecting-IP is set by Cloudflare to the actual TCP source it saw
+  -- (the server's own public IP) — this header cannot be forged by clients.
+  -- If the resolved real IP equals our own server_addr, it is a self-request.
+  if has_cf and srv ~= "" and ip == srv then
+    ngx.var.cfm_upstream = "cfm_apache"
+    ngx.var.cfm_pass     = origin_pass_for(scheme)
+    if CFG.debug then
+      log_route(ngx.INFO, "local_bypass_via_cf ip=" .. ip ..
+        " srv=" .. srv .. " host=" .. host .. " uri=" .. uri)
+    end
+    return
+  end
 end
+
 
 
 -- ── POST resume: attempt to replay a previously stashed POST ─────────────────
