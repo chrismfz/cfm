@@ -59,11 +59,11 @@ local CFG = {
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
-  rule_cmd_payload_semi_cmd  = "logonly",         -- PAY_SEMI_CMD
-  rule_cmd_payload_pipe_wget = "logonly",         -- PAY_PIPE_WGET
-  rule_cmd_payload_pipe_curl = "logonly",         -- PAY_PIPE_CURL
-  rule_cmd_payload_pipe_bash = "logonly",         -- PAY_PIPE_BASH
-  rule_cmd_payload_pipe_sh   = "logonly",         -- PAY_PIPE_SH
+  rule_cmd_payload_semi_cmd  = nil,         -- PAY_SEMI_CMD
+  rule_cmd_payload_pipe_wget = nil,         -- PAY_PIPE_WGET
+  rule_cmd_payload_pipe_curl = nil,         -- PAY_PIPE_CURL
+  rule_cmd_payload_pipe_bash = nil,         -- PAY_PIPE_BASH
+  rule_cmd_payload_pipe_sh   = nil,         -- PAY_PIPE_SH
   rule_cmd_payload_backtick  = "logonly",   -- PAY_BACKTICK
 
   -- ── Research additions – all logonly for initial FP observation ────────────
@@ -989,12 +989,17 @@ local function detect_content_type_anomaly(headers)
   end
 
   if has(ctl, "boundary") then
-    -- Multiple boundary= declarations
-    local _, n = ctl:gsub("boundary", "boundary")
+    -- Count boundary= *declarations*, not bare substring occurrences.
+    -- Browser-generated boundary strings (e.g. ----WebKitFormBoundaryXxx,
+    -- ---------------------------1234567890) contain the word "boundary"
+    -- inside the value itself, so counting the raw word gives n=2 on every
+    -- normal file upload.  Counting "boundary=" is safe and correct.
+    local _, n = ctl:gsub("boundary%s*=", "boundary=")
     if n > 1 then return "CT_MULTI_BOUNDARY" end
-    -- Boundary value must be alphanumeric + safe separators only
+    -- Boundary value: allow leading dashes (RFC 2046 permits up to 70 chars
+    -- of printable ASCII; browsers use long dash prefixes by convention).
     local bval = ctl:match("boundary%s*=%s*([^%s;,]+)")
-    if bval and not bval:match("^[0-9A-Za-z%-%_%.]+$") then
+    if bval and not bval:match("^%-*[0-9A-Za-z%-%_%.]+$") then
       return "CT_BAD_BOUNDARY"
     end
   end
