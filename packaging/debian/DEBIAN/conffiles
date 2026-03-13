@@ -2,6 +2,6 @@
 /etc/cfm/detectors.conf
 /etc/cfm/notify.conf
 /etc/cfm/cfm.blocklists
-/etc/cfm/cfm.block
+/etc/cfm/cfm.deny
 /etc/cfm/cfm.allow
 /etc/cfm/cfm.dyndns
