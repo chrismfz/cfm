@@ -8,6 +8,9 @@
 --   [2] URI re-added to cache key (capped at 64 chars) — prevents allow-cache bypass on sensitive paths
 --   [3] observe_waf reuses the keepalive pool via http_post_unix (no more rogue Connection: close)
 --   [4] WAF caller now passes headers and a narrow request body (XML-RPC POST only)
+--   [5] waf_should_read_body: added /wp-json/, /_ignition/, /cgi-bin/, timthumb.php,
+--       upload+PHP URI combos, /wp-signup.php, /wp-activate.php; removed /export /restore /backup
+--   [6] get_req_body_for_waf: ngx.ctx.waf_body caching — read_body() called at most once per request
 
 local cjson = require "cjson.safe"
 
@@ -96,11 +99,16 @@ local function waf_should_read_body(uri, method)
   -- Root-level high-risk filenames / endpoints
   if has(uri, "/xmlrpc.php")        then return true end
   if has(uri, "/wp-login.php")      then return true end
+  if has(uri, "/wp-signup.php")     then return true end
+  if has(uri, "/wp-activate.php")   then return true end
   if has(uri, "/admin-ajax.php")    then return true end
   if has(uri, "/ajax")              then return true end
   if has(uri, "/api/")              then return true end
   if has(uri, "/graphql")           then return true end
   if has(uri, "/rest/")             then return true end
+
+  -- WordPress REST API (primary REST attack surface — must be covered)
+  if has(uri, "/wp-json/")          then return true end
 
   -- WordPress / WooCommerce
   if has(uri, "/wp-admin/")                 then return true end
@@ -151,49 +159,66 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/var/themes_repository/")  then return true end
 
   -- Generic admin / installer / uploader / importer / tool paths
-  if has(uri, "/admin")       then return true end
+  if has(uri, "/admin")        then return true end
   if has(uri, "/administrator") then return true end
-  if has(uri, "/login")       then return true end
-  if has(uri, "/auth")        then return true end
-  if has(uri, "/upload")      then return true end
-  if has(uri, "/uploads")     then return true end
-  if has(uri, "/import")      then return true end
-  if has(uri, "/export")      then return true end
-  if has(uri, "/restore")     then return true end
-  if has(uri, "/backup")      then return true end
-  if has(uri, "/install")     then return true end
-  if has(uri, "/installer")   then return true end
-  if has(uri, "/setup")       then return true end
-  if has(uri, "/update")      then return true end
-  if has(uri, "/upgrade")     then return true end
-  if has(uri, "/filemanager") then return true end
-  if has(uri, "/connector")   then return true end
-  if has(uri, "/shell")       then return true end
-  if has(uri, "/cmd")         then return true end
+  if has(uri, "/login")        then return true end
+  if has(uri, "/auth")         then return true end
+  if has(uri, "/upload")       then return true end
+  if has(uri, "/uploads")      then return true end
+  if has(uri, "/import")       then return true end
+  if has(uri, "/install")      then return true end
+  if has(uri, "/installer")    then return true end
+  if has(uri, "/setup")        then return true end
+  if has(uri, "/update")       then return true end
+  if has(uri, "/upgrade")      then return true end
+  if has(uri, "/filemanager")  then return true end
+  if has(uri, "/connector")    then return true end
+  if has(uri, "/shell")        then return true end
+  if has(uri, "/cmd")          then return true end
 
-  -- Suspicious script extensions in risky places
+  -- CGI / legacy script paths
+  if has(uri, "/cgi-bin/")     then return true end
+
+  -- Laravel debug endpoint (CVE-2021-3129 and related Ignition RCE)
+  if has(uri, "/_ignition/")   then return true end
+
+  -- Classic WordPress TimThumb RCE target
+  if has(uri, "timthumb.php")  then return true end
+
+  -- PHP/script files uploaded to media directories (shell-in-image vector)
+  if uri:match("/upload[s]?/.*%.php") then return true end
+  if uri:match("/files/.*%.php")      then return true end
+
+  -- Any PHP/PHTML file POST (broad but necessary for upload detection)
   if uri:match("%.php[%?/].*") then return true end
   if uri:match("%.phtml[%?/].*") then return true end
-  if uri:match("%.php$") then return true end
-  if uri:match("%.phtml$") then return true end
+  if uri:match("%.php$")       then return true end
+  if uri:match("%.phtml$")     then return true end
 
   return false
 end
 
 -- Read request body only when justified by destination risk.
+-- Result is cached in ngx.ctx.waf_body so that if this function is ever
+-- called more than once per request (e.g. during future refactors) the
+-- kernel-side read_body() syscall and file-open only happen once.
 local function get_req_body_for_waf(uri, method, max_len)
   if not waf_should_read_body(uri, method) then
     return ""
+  end
+
+  -- Return cached result if already read this request
+  if ngx.ctx.waf_body ~= nil then
+    return ngx.ctx.waf_body
   end
 
   ngx.req.read_body()
 
   local data = ngx.req.get_body_data()
   if data and data ~= "" then
-    if #data > max_len then
-      return string.sub(data, 1, max_len)
-    end
-    return data
+    local result = (#data > max_len) and string.sub(data, 1, max_len) or data
+    ngx.ctx.waf_body = result
+    return result
   end
 
   local body_file = ngx.req.get_body_file()
@@ -202,10 +227,12 @@ local function get_req_body_for_waf(uri, method, max_len)
     if f then
       local chunk = f:read(max_len) or ""
       f:close()
+      ngx.ctx.waf_body = chunk
       return chunk
     end
   end
 
+  ngx.ctx.waf_body = ""
   return ""
 end
 

@@ -30,50 +30,93 @@ local CFG = {
   --   "challenge" -> send to challenge server
   --   "block"     -> return 403 immediately
 
-  -- Core request-side protections
+  -- ── Core request-side protections ─────────────────────────────────────────
   rule_traversal       = "disabled",   -- ../, null bytes, basic traversal markers
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
-  rule_sqli            = "challenge",  -- cheap SQLi signatures
+  rule_sqli            = "challenge",  -- cheap SQLi signatures (+ SQL comment bypass)
 
-  -- Safer rollout / audit-first rules
-  rule_php_wrappers    = "logonly",    -- php:// phar:// data:// zip:// expect:// glob://
-  rule_ip_host         = "logonly",    -- Host header is bare IPv4/IPv6 literal
-  rule_ctrl_chars      = "logonly",    -- suspicious ASCII control chars in args/body
+  -- ── Safer rollout / audit-first rules ─────────────────────────────────────
+  rule_php_wrappers      = "logonly",  -- php:// phar:// data:// zip:// expect:// glob://
+  rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
+  rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
   rule_php_webshell_body = "logonly",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_b64_injection   = "logonly",    -- POST-body base64 decode heuristic scanner
+  rule_b64_injection     = "logonly",  -- POST-body base64 decode heuristic scanner
 
-  -- Auth / brute / XML-RPC
+  -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
   rule_auth_burst         = "challenge", -- generic login endpoint burst
   rule_auth_wp_checks     = "challenge", -- HEAD wp-login, no UA+Referer POST wp-login
   rule_xmlrpc_multicall   = "challenge", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "challenge", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
 
-  -- Audit-only payload rules
+  -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "logonly",   -- suspicious parameter keys like exec= system=
-  rule_cmd_payload      = "logonly",   -- payload-y separators/tokens in args
+  rule_cmd_payload      = "logonly",   -- fallback/default mode for payload-y separators/tokens in args
   rule_debug_toggles    = "logonly",   -- xdebug, trace, debug, stacktrace
   rule_serialize        = "logonly",   -- PHP serialized object markers
 
+  -- Per-tag override modes for cmd payloads.
+  -- Empty/nil means: fall back to rule_cmd_payload.
+  rule_cmd_payload_semi_cmd  = "logonly",         -- PAY_SEMI_CMD
+  rule_cmd_payload_pipe_wget = "logonly",         -- PAY_PIPE_WGET
+  rule_cmd_payload_pipe_curl = "logonly",         -- PAY_PIPE_CURL
+  rule_cmd_payload_pipe_bash = "logonly",         -- PAY_PIPE_BASH
+  rule_cmd_payload_pipe_sh   = "logonly",         -- PAY_PIPE_SH
+  rule_cmd_payload_backtick  = "logonly",   -- PAY_BACKTICK
+
+  -- ── Research additions – all logonly for initial FP observation ────────────
+  -- Sources: uusec-waf (BSD), ZhongKui (Apache2), anti_ddos_challenge (MIT),
+  --          nginx_waf (MIT).  Promote individually after watching logs.
+
+  -- [top-6]  Header vulnerability bundle
+  rule_bad_ua           = "logonly",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
+  rule_shellshock       = "logonly",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
+  rule_header_vulns     = "logonly",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
+                                      -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
+
+  -- [top-7]  Content-Type validation
+  rule_content_type_anomaly = "logonly",  -- non-standard charset bypass; malformed multipart boundary
+
+  -- [top-8]  Proxy header integrity
+  rule_proxy_header_sqli = "logonly",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
+
+  -- [top-9]  SSRF + JS prototype pollution
+  rule_ssrf             = "logonly",  -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
+  rule_js_proto         = "logonly",  -- JS __proto__ / constructor.prototype pollution
+
+  -- [top-10] XXE + CRLF + HTTP request smuggling
+  rule_xxe              = "logonly",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
+  rule_crlf_injection   = "logonly",  -- CRLF / HTTP response-splitting in args or body
+  rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
+
+  -- [top-4]  Upload controls
+  rule_upload_filename  = "logonly",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
+  rule_upload_content   = "logonly",  -- webshell bytes / PHP tags inside uploaded file content
+
+  -- [top-5]  PHP double-extension URI
+  rule_php_double_ext   = "logonly",  -- .php. double-extension in URI (shell.php.jpg)
+
+  -- ── Tuning ────────────────────────────────────────────────────────────────
+
   -- Generic auth burst tuning
-  auth_window_sec       = 20,
-  auth_burst_threshold  = 8,
-  auth_ttl_sec          = 600,
+  auth_window_sec      = 20,
+  auth_burst_threshold = 8,
+  auth_ttl_sec         = 600,
 
   -- WP login helper tuning
-  auth_wp_login_head_ttl_sec    = 600,
-  auth_wp_login_noua_ttl_sec    = 600,
+  auth_wp_login_head_ttl_sec = 600,
+  auth_wp_login_noua_ttl_sec = 600,
 
   -- XML-RPC direct body signatures
   auth_xmlrpc_multicall_ttl_sec = 1800,
   auth_xmlrpc_pingback_ttl_sec  = 1800,
 
   -- Generic XML-RPC POST burst tuning
-  xmlrpc_post_window_sec        = 60,
-  xmlrpc_post_threshold         = 6,
-  xmlrpc_post_ttl_sec           = 1800,
+  xmlrpc_post_window_sec = 60,
+  xmlrpc_post_threshold  = 6,
+  xmlrpc_post_ttl_sec    = 1800,
 
   -- Generic defaults
   default_ttl_sec   = 600,
@@ -114,10 +157,31 @@ local function rule_mode(v, default_mode)
   return "disabled"
 end
 
--- Return ttl and action for a rule mode.
--- logonly/challenge/block use ttl; disabled is handled earlier.
 local function mode_ttl_action(mode, ttl)
   return ttl, mode
+end
+
+local function cmd_payload_mode(tag)
+  local override = nil
+
+  if tag == "PAY_SEMI_CMD" then
+    override = CFG.rule_cmd_payload_semi_cmd
+  elseif tag == "PAY_PIPE_WGET" then
+    override = CFG.rule_cmd_payload_pipe_wget
+  elseif tag == "PAY_PIPE_CURL" then
+    override = CFG.rule_cmd_payload_pipe_curl
+  elseif tag == "PAY_PIPE_BASH" then
+    override = CFG.rule_cmd_payload_pipe_bash
+  elseif tag == "PAY_PIPE_SH" then
+    override = CFG.rule_cmd_payload_pipe_sh
+  elseif tag == "PAY_BACKTICK" then
+    override = CFG.rule_cmd_payload_backtick
+  end
+
+  if override == nil then
+    return rule_mode(CFG.rule_cmd_payload, "logonly")
+  end
+  return rule_mode(override, rule_mode(CFG.rule_cmd_payload, "logonly"))
 end
 
 function _M.enabled()
@@ -128,45 +192,33 @@ end
 -- GENERIC STRING HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Plain substring search; avoids regex cost for simple tokens.
 local function has(s, pat)
   if not s or s == "" then return false end
   return string.find(s, pat, 1, true) ~= nil
 end
 
--- Lowercase safely.
 local function lower(s)
   if not s then return "" end
   return string.lower(s)
 end
 
--- Cap large strings to keep scanning cheap.
 local function cap(s, n)
   if not s then return "" end
   if #s <= n then return s end
   return string.sub(s, 1, n)
 end
 
--- Prefix test.
 local function begins(s, prefix)
   if not s or not prefix then return false end
   return string.sub(s, 1, #prefix) == prefix
 end
 
--- Single URL decode pass.
--- Used by normalize() to collapse encoded payloads.
 local function url_decode_once(s)
   return (s:gsub("%%(%x%x)", function(h)
     return string.char(tonumber(h, 16))
   end))
 end
 
--- Normalize input before matching:
---   1) cap length earlier in callers
---   2) decode %xx twice
---   3) lowercase
---
--- Two decode passes help close basic double-encoding bypasses.
 local function normalize(s)
   if not s or s == "" then return "" end
   s = url_decode_once(s)
@@ -174,7 +226,14 @@ local function normalize(s)
   return string.lower(s)
 end
 
--- Normalize URI+args together for detectors that scan the request line area.
+-- Strip SQL inline comments before SQLi scanning.
+-- Catches keyword-splitting bypasses like UN/**/ION SE/**/LECT.
+-- Applied only in the SQLi path; not in normalize() to avoid
+-- altering the scan surface for other checks.
+local function strip_sql_comments(s)
+  return (s:gsub("/%*.-%*/", ""):gsub("%-%-[^\n]*", ""))
+end
+
 local function scan_str(uri, args)
   return normalize(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
 end
@@ -183,24 +242,15 @@ end
 -- HOST HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Strip optional port from Host while preserving IPv6 correctly.
--- Supports:
---   example.com
---   example.com:443
---   1.2.3.4
---   1.2.3.4:443
---   [2001:db8::1]
---   [2001:db8::1]:443
---   bare 2001:db8::1
 local function strip_host_port(host)
   if not host or host == "" then return "" end
   host = host:gsub("^%s+", ""):gsub("%s+$", "")
 
-  -- Bracketed IPv6 with optional port
-  local b = host:match("^%[([^%]]+)%](?::%d+)?$")
+  -- Bracketed IPv6 with or without port
+  local b = host:match("^%[([^%]]+)%]:%d+$") or host:match("^%[([^%]]+)%]$")
   if b then return b end
 
-  -- Hostname/IPv4 with :port
+  -- Hostname / IPv4 with :port
   if host:match("^[^:]+:%d+$") then
     return host:match("^([^:]+):%d+$") or host
   end
@@ -209,7 +259,6 @@ local function strip_host_port(host)
   return host
 end
 
--- Strict-ish IPv4 literal check.
 local function is_ipv4_literal(h)
   local a, b, c, d = h:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
   if not a then return false end
@@ -218,8 +267,6 @@ local function is_ipv4_literal(h)
   return a <= 255 and b <= 255 and c <= 255 and d <= 255
 end
 
--- Simple IPv6 literal check.
--- Good enough for "bare IP in Host" detection.
 local function is_ipv6_literal(h)
   if not h or h == "" then return false end
   if not h:find(":", 1, true) then return false end
@@ -231,8 +278,6 @@ end
 -- BLOCK-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Detect obvious traversal / null-byte usage.
--- Kept conservative because traversal can be noisy if over-broad.
 local function detect_traversal(uri, args)
   local s = scan_str(uri, args)
 
@@ -242,17 +287,13 @@ local function detect_traversal(uri, args)
   return false
 end
 
--- Detect strong RCE-like indicators.
--- These are meant to stay high-confidence.
 local function detect_rce(uri, args)
   local s = scan_str(uri, args)
 
-  -- Log4Shell / JNDI style probes
   if has(s, "${jndi:")   then return true end
   if has(s, "${j{n{d{i") then return true end
   if has(s, "$%7bjndi")  then return true end
 
-  -- Obvious shell-ish separators / payloads
   if has(s, ";wget ") then return true end
   if has(s, ";curl ") then return true end
   if has(s, "|bash")  then return true end
@@ -260,7 +301,6 @@ local function detect_rce(uri, args)
   if has(s, "`wget")  then return true end
   if has(s, "`curl")  then return true end
 
-  -- Encoded payload-delivery + exec-ish markers
   if has(s, "base64,") and (has(s, "eval") or has(s, "exec") or has(s, "system")) then
     return true
   end
@@ -268,8 +308,6 @@ local function detect_rce(uri, args)
   return false
 end
 
--- Detect dangerous / unusual HTTP methods.
--- Some are block-worthy; others are challenge-worthy.
 local function detect_exploit_method(method)
   method = lower(method or "")
 
@@ -284,11 +322,9 @@ local function detect_exploit_method(method)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- LOGONLY-CLASS SAFER ROLLOUT DETECTORS
+-- LOGONLY-CLASS SAFER ROLLOUT DETECTORS (existing)
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Detect dangerous PHP stream wrappers in args/body.
--- Safer to start as logonly because body scanning can surprise.
 local function detect_php_wrappers(args, body)
   local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
@@ -303,8 +339,6 @@ local function detect_php_wrappers(args, body)
   return nil
 end
 
--- Detect bare IP literals in Host header.
--- Often suspicious for direct-IP probing, host-header abuse, or bypass attempts.
 local function detect_ip_host(host)
   local h = strip_host_port(host)
   if h == "" then return false end
@@ -316,34 +350,56 @@ end
 -- Detect suspicious ASCII control characters.
 -- Excludes TAB/LF/CR by only matching:
 --   0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F
-local function detect_ctrl_chars(args, body)
-  local s = (args or "") .. (body or "")
-  if s:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
+--
+-- Safer rollout:
+--   * always inspect args
+--   * inspect body only for textual payloads
+--   * skip multipart/form-data bodies (binary uploads are noisy by design)
+local function detect_ctrl_chars(args, body, headers)
+  local a = args or ""
+  if a ~= "" and a:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
     return true
   end
+
+  if not body or body == "" then
+    return false
+  end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+
+  if has(ct, "multipart/form-data") then
+    return false
+  end
+
+  if ct ~= ""
+     and not has(ct, "application/x-www-form-urlencoded")
+     and not has(ct, "application/json")
+     and not has(ct, "application/xml")
+     and not has(ct, "text/") then
+    return false
+  end
+
+  if body:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
+    return true
+  end
+
   return false
 end
 
--- True when Content-Type likely carries textual payloads that are worth scanning.
 local function is_textual_body_content_type(content_type)
   local ct = lower(content_type or "")
-  if ct == "" then return true end -- missing type is common; keep covered
+  if ct == "" then return true end
 
+  if has(ct, "multipart/form-data")              then return false end
   if has(ct, "application/x-www-form-urlencoded") then return true end
-  if has(ct, "multipart/form-data")              then return true end
-  if has(ct, "application/json")                 then return true end
-  if has(ct, "application/xml")                  then return true end
-  if has(ct, "text/")                            then return true end
+  if has(ct, "application/json")                  then return true end
+  if has(ct, "application/xml")                   then return true end
+  if has(ct, "text/")                             then return true end
 
   return false
 end
 
--- Scored raw-PHP webshell detector for POST bodies.
--- Goal: catch strong snippets like:
---   <?php system($_GET['cmd']); ?>
---   <?php @eval($_POST['x']); ?>
---   <?php passthru($_REQUEST['c']); ?>
--- while avoiding single-token false positives.
 local function detect_php_webshell_body(body, headers)
   if not body or body == "" then return nil end
 
@@ -353,15 +409,13 @@ local function detect_php_webshell_body(body, headers)
     return nil
   end
 
-  -- Normalize and keep scan bounded.
   local s = normalize(cap(body, tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len))
   if s == "" then return nil end
-  -- Only convert + to space for form-encoded payloads.
+
   if has(ct, "application/x-www-form-urlencoded") then
-    s = s:gsub("%+", " ") -- + is literal here, not a Lua pattern quantifier
+    s = s:gsub("%+", " ")
   end
 
-  -- Cheap prefilter: skip unless at least one strong PHP-shell token exists.
   if not (has(s, "<?") or has(s, "$_") or has(s, "eval") or has(s, "system")
           or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")) then
     return nil
@@ -369,26 +423,21 @@ local function detect_php_webshell_body(body, headers)
 
   local score = 0
 
-  -- PHP opening tags.
   if has(s, "<?php") or has(s, "<?=") then
     score = score + 2
   end
 
-  -- Superglobals commonly used in webshell snippets.
   if has(s, "$_get") or has(s, "$_post") or has(s, "$_request")
      or has(s, "$_cookie") or has(s, "$_server") then
     score = score + 2
   end
 
   local function has_php_callable(name)
-    -- Match either normal callable form: name(...)
-    -- or silenced form: @name(...)
     if s:find("%f[%a_]" .. name .. "%s*%(") then return true end
     if s:find("@%s*" .. name .. "%s*%(") then return true end
     return false
   end
 
-  -- Dangerous callable functions.
   if has_php_callable("eval") then score = score + 3 end
   if has_php_callable("assert") then score = score + 3 end
   if has_php_callable("system") then score = score + 3 end
@@ -398,7 +447,6 @@ local function detect_php_webshell_body(body, headers)
   if has_php_callable("popen") then score = score + 3 end
   if has_php_callable("proc_open") then score = score + 3 end
 
-  -- Common statement shape bonus.
   if has(s, ";") and (has(s, "?>") or has(s, "<?php") or has(s, "<?=")) then
     score = score + 1
   end
@@ -408,7 +456,6 @@ local function detect_php_webshell_body(body, headers)
     return nil
   end
 
-  -- Return granular tags for triage.
   if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
   if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
   if s:find("<?php.-@?passthru%s*%(") and s:find("%$_request") then return "RAW_PASSTHRU_REQUEST" end
@@ -429,10 +476,6 @@ local function detect_php_webshell_body(body, headers)
   return "RAW_SCORING_HIT"
 end
 
--- Base64 body heuristic scanner.
--- Intentionally conservative and logonly-first.
--- Looks for large-ish base64 values, decodes them, then scans decoded text
--- for webshell/XSS/SQLi-ish indicators.
 local function detect_b64_injection(body)
   if not body or body == "" then return nil end
 
@@ -442,7 +485,6 @@ local function detect_b64_injection(body)
       if decoded and #decoded >= 12 then
         local d = string.lower(decoded)
 
-        -- PHP / upload / shell-ish indicators
         if has(d, "$_get") or has(d, "$_post") or has(d, "$_cookie")
           or has(d, "$_server") or has(d, "$_session")
           or has(d, "$globals") or has(d, "http_raw_post_data") then
@@ -462,18 +504,15 @@ local function detect_b64_injection(body)
         if has(d, "curl_exec(")          then return "B64_CURL_EXEC" end
         if has(d, "file_get_contents(")  then return "B64_FILEGET" end
 
-        -- PHP / HTML markers
         if has(d, "<?php") or has(d, "<?=") then return "B64_PHP_TAG" end
         if has(d, "<script") then return "B64_XSS_SCRIPT" end
         if has(d, "<iframe") then return "B64_XSS_IFRAME" end
         if has(d, "<object") then return "B64_XSS_OBJECT" end
 
-        -- Serialized object-ish markers
         if d:match('%bo%:%d+%:"') or d:match('%bc%:%d+%:"') then
           return "B64_OBJ_INJECT"
         end
 
-        -- SQL-ish markers
         if has(d, "union select")       then return "B64_SQLI_UNION" end
         if has(d, "insert into")        then return "B64_SQLI_INSERT" end
         if has(d, "information_schema") then return "B64_SQLI_SCHEMA" end
@@ -488,7 +527,6 @@ end
 -- CHALLENGE-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Cheap reflected-XSS style detector.
 local function detect_xss(uri, args)
   local s = scan_str(uri, args)
 
@@ -500,14 +538,19 @@ local function detect_xss(uri, args)
   return false
 end
 
--- Cheap SQLi detector.
 local function detect_sqli(uri, args)
-  local s = scan_str(uri, args)
+  -- Use comment-stripped version to catch UN/**/ION SE/**/LECT bypass patterns.
+  -- Double URL-decode is already applied by normalize() / scan_str().
+  local s  = scan_str(uri, args)
+  local sc = strip_sql_comments(s)
 
-  if has(s, "union select") or has(s, "union%20select") then return true end
-  if has(s, "information_schema") then return true end
-  if has(s, " or 1=1") or has(s, " or%201=1") then return true end
-  if has(s, "' or '1'='1") or has(s, "%27%20or%20%271%27%3d%271") then return true end
+  if has(sc, "union select")        then return true end
+  if has(sc, "union%20select")      then return true end
+  if has(sc, "information_schema")  then return true end
+  if has(sc, " or 1=1")             then return true end
+  if has(sc, " or%201=1")           then return true end
+  if has(sc, "' or '1'='1")        then return true end
+  if has(sc, "%27%20or%20%271%27%3d%271") then return true end
 
   return false
 end
@@ -516,7 +559,6 @@ end
 -- AUTH / BRUTE / XML-RPC HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Classify a request into a known auth endpoint family.
 local function auth_endpoint_tag(uri, method)
   uri = lower(uri or "")
   method = lower(method or "get")
@@ -539,7 +581,6 @@ local function auth_endpoint_tag(uri, method)
   return nil
 end
 
--- Generic auth burst counter by IP + auth endpoint family.
 local function detect_auth_burst(ip, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
@@ -571,7 +612,6 @@ local function detect_auth_burst(ip, uri, method, shdict)
   return nil
 end
 
--- Detect especially suspicious wp-login probes.
 local function detect_wp_login_probe(uri, method, headers)
   uri = lower(uri or "")
   method = lower(method or "get")
@@ -593,7 +633,6 @@ local function detect_wp_login_probe(uri, method, headers)
   return nil
 end
 
--- Detect strong XML-RPC body signatures.
 local function detect_xmlrpc_probe(uri, method, body)
   uri = lower(uri or "")
   method = lower(method or "get")
@@ -613,8 +652,6 @@ local function detect_xmlrpc_probe(uri, method, body)
   return nil
 end
 
--- Detect generic repeated POST /xmlrpc.php bursts.
--- Useful even when body does not contain strong known methods.
 local function detect_xmlrpc_post_burst(ip, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
@@ -654,8 +691,6 @@ end
 -- AUDIT-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Detect suspicious parameter keys.
--- Key-only matching keeps FP lower than scanning arbitrary values.
 local function detect_cmd_param_key(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -676,18 +711,16 @@ local function detect_cmd_param_key(args)
   return nil
 end
 
--- Detect shell-ish payload markers in args.
--- Heavily guarded because this area is FP-prone.
 local function detect_cmd_payload(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  -- Skip obvious data:base64 blobs
+  local ignore_backtick_only = false
+
   if has(a, "data:") and has(a, ";base64,") then
     return nil
   end
 
-  -- Skip long base64-ish segments
   do
     local p = string.find(a, "base64,", 1, true)
     if p then
@@ -696,14 +729,12 @@ local function detect_cmd_payload(args)
     end
   end
 
-  -- Skip huge values (JWT/signature/blob style)
   do
     for val in string.gmatch(a, "=([^&]+)") do
       if #val >= 512 then return nil end
     end
   end
 
-  -- Skip common ecommerce filters syntax
   do
     if begins(a, "filters=") then
       local v = string.sub(a, 9)
@@ -717,31 +748,58 @@ local function detect_cmd_payload(args)
     end
   end
 
-  -- Skip duplicate query separators like &&page=2
   if string.match(a, "[%?&][^=]+=[^&]*&&[a-z0-9_%-]+=") then
     return nil
   end
 
-  -- Skip app/widget || delimiters
   if string.match(a, "[%?&][a-z0-9_%-]+=([a-z0-9_%-]+%|%|[a-z0-9_%-]+)") then
     return nil
   end
 
-  -- Skip known Jetpack pattern
   if has(a, "/xmlrpc.php?for=jetpack&token=") then
     return nil
   end
 
-  -- Skip known tracking params / opaque marketing blobs
   if has(a, "fbclid=") or has(a, "ttclid=") or has(a, "gclid=")
      or has(a, "msclkid=") or has(a, "__bpgid=") then
     return nil
   end
 
+  -- Search/autocomplete suppression:
+  -- do not return nil for the whole request, only suppress final PAY_BACKTICK
+  -- if the suspicious bit is limited to a search-like free-text field.
+  do
+    for key, val in a:gmatch("([a-z0-9_%-]+)=([^&]+)") do
+      if key == "q" or key == "s" or key == "term" or key == "search" or key == "query" then
+        local cleaned = val:gsub("%%60", ""):gsub("`", "")
+        if cleaned ~= val then
+          if not has(cleaned, ";wget")
+             and not has(cleaned, ";curl")
+             and not has(cleaned, ";bash")
+             and not has(cleaned, ";sh ")
+             and not has(cleaned, "%3bwget")
+             and not has(cleaned, "%3bcurl")
+             and not has(cleaned, "%3bbash")
+             and not has(cleaned, "%3bsh%20")
+             and not has(cleaned, "|wget")
+             and not has(cleaned, "|curl")
+             and not has(cleaned, "|bash")
+             and not has(cleaned, "|sh ")
+             and not has(cleaned, "%7cwget")
+             and not has(cleaned, "%7ccurl")
+             and not has(cleaned, "%7cbash")
+             and not has(cleaned, "%7csh%20")
+             and not has(cleaned, "%7csh+") then
+            ignore_backtick_only = true
+          end
+        end
+      end
+    end
+  end
+
   local function has_semi_cmd(s)
     if has(s, ";wget") or has(s, ";curl") or has(s, ";bash") or has(s, ";sh ") then return true end
     if has(s, "%3bwget") or has(s, "%3bcurl") or has(s, "%3bbash") or has(s, "%3bsh%20") then return true end
-    if has(s, "%3Bwget") or has(s, "%3Bcurl") or has(s, "%3Bbash") or has(s, "%3Bsh%20") then return true end
     return false
   end
 
@@ -752,12 +810,13 @@ local function detect_cmd_payload(args)
   if has(a, "|bash") or has(a, "%7cbash") then return "PAY_PIPE_BASH" end
   if has(a, "|sh ")  or has(a, "%7csh%20") or has(a, "%7csh+") then return "PAY_PIPE_SH" end
 
-  if has(a, "%60") or has(a, "`") then return "PAY_BACKTICK" end
+  if not ignore_backtick_only and (has(a, "%60") or has(a, "`")) then
+    return "PAY_BACKTICK"
+  end
 
   return nil
 end
 
--- Detect developer/debug toggles in args.
 local function detect_debug_toggles(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -771,7 +830,6 @@ local function detect_debug_toggles(args)
   return nil
 end
 
--- Detect PHP serialized object markers.
 local function detect_php_serialize(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -780,6 +838,458 @@ local function detect_php_serialize(args)
   if has(a, "c:") and has(a, ":\"") then return "SER_C_PLAIN" end
   if has(a, "o%3a") and has(a, "%22") then return "SER_O_URL" end
   if has(a, "c%3a") and has(a, "%22") then return "SER_C_URL" end
+
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – HEADER / PROTOCOL CHECKS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-6a] Empty or known-bad scanner User-Agent.
+-- Sources: uusec scanner-detection (plugin), anti_ddos_challenge.lua UA list.
+-- Notes:
+--   * Empty UA catches most headless/scripted HTTP clients.
+--   * Bare "curl" or "python" are intentionally NOT blocked (too many legit
+--     uses on shared hosting); "curl/" (with version) from CLI is blocked
+--     because browsers never send it.
+--   * Slowloris scanner self-identifies via Referer.
+local function detect_bad_ua(headers)
+  headers = headers or {}
+  local ua  = headers["user-agent"] or headers["User-Agent"] or ""
+  local ual = lower(ua)
+
+  -- Empty / whitespace-only UA
+  if ua == "" or ual:match("^%s*$") then return "UA_EMPTY" end
+
+  -- Known security scanner / exploit tool UAs
+  if has(ual, "sqlmap")    then return "UA_SQLMAP" end
+  if has(ual, "nikto")     then return "UA_NIKTO" end
+  if has(ual, "nessus")    then return "UA_NESSUS" end
+  if has(ual, "masscan")   then return "UA_MASSCAN" end
+  if has(ual, "zgrab")     then return "UA_ZGRAB" end
+  if has(ual, "nuclei")    then return "UA_NUCLEI" end
+  if has(ual, "dirbuster") then return "UA_DIRBUSTER" end
+  if has(ual, "gobuster")  then return "UA_GOBUSTER" end
+  if has(ual, "wfuzz")     then return "UA_WFUZZ" end
+  if has(ual, "awvs")      then return "UA_AWVS" end
+  if has(ual, "appscan")   then return "UA_APPSCAN" end
+
+  -- Generic HTTP library UAs common in automated attacks
+  if has(ual, "libwww-perl")     then return "UA_LIBWWW" end
+  if has(ual, "python-requests") then return "UA_PY_REQUESTS" end
+  if has(ual, "winhttp")         then return "UA_WINHTTP" end
+  if has(ual, "httrack")         then return "UA_HTTRACK" end
+
+  -- Slowloris scanner fingerprint in Referer header
+  local ref = lower(headers["referer"] or headers["Referer"] or "")
+  if has(ref, "code.google.com/p/slowhttptest") then return "REF_SLOWLORIS" end
+
+  return nil
+end
+
+-- [top-6b] Shellshock CVE-2014-6271 / CVE-2014-7169.
+-- Source: uusec shellshock-vulnerability.lua.
+-- Pattern: () { in any header value or URI.
+-- Checks URL-decoded copy of each header to catch %28%29+%7b variants.
+local function detect_shellshock(headers, uri)
+  local pat = "%(%)%s*{"
+
+  headers = headers or {}
+  for hname, hval in pairs(headers) do
+    if type(hval) == "string" then
+      local decoded = url_decode_once(hval)
+      if decoded:find(pat) then
+        return "SHELLSHOCK_HDR:" .. tostring(hname):sub(1, 32)
+      end
+    end
+  end
+
+  local u = url_decode_once(uri or "")
+  if u:find(pat) then return "SHELLSHOCK_URI" end
+
+  return nil
+end
+
+-- [top-6c] Header presence vulnerability checks.
+-- Sources: uusec header-vulnerability.lua + cve-2025-24813.lua.
+--   * Proxy:     – httpoxy: CGI/FastCGI sees HTTP_PROXY env var, can redirect outbound traffic.
+--   * Lock-Token: / If: – CVE-2017-7269: IIS 6.0 WebDAV ScStoragePathFromUrl overflow.
+--   * PUT /…/session + Content-Range – CVE-2025-24813: Tomcat partial PUT RCE (March 2025).
+-- All are pure header presence checks – zero FP on normal browser traffic.
+local function detect_header_vulns(headers, uri, method)
+  headers = headers or {}
+
+  if headers["proxy"] or headers["Proxy"] then
+    return "HEADER_HTTPOXY"
+  end
+
+  if headers["lock-token"] or headers["Lock-Token"] then
+    return "HEADER_LOCK_TOKEN"
+  end
+
+  if headers["if"] or headers["If"] then
+    return "HEADER_IF_WEBDAV"
+  end
+
+  -- CVE-2025-24813: PUT request to a path ending in /session with Content-Range
+  if lower(method or "") == "put" then
+    local u = lower(uri or "")
+    if u:match("/session$")
+       and (headers["content-range"] or headers["Content-Range"]) then
+      return "CVE_2025_24813"
+    end
+  end
+
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – CONTENT-TYPE / PROTOCOL ANOMALY CHECKS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-7] Content-Type header anomaly detection.
+-- Sources: uusec abnormal-character-encoding-requests.lua +
+--          uusec boundary-exception-interception.lua.
+--
+-- Charset bypass: attackers set Content-Type: application/x-www-form-urlencoded;
+--   charset=IBM037 (or IBM500, cp875 etc.) so the WAF can't decode the payload
+--   while the backend still processes it using its own charset logic.
+--   Only allow the small set of charsets that nginx/PHP legitimately uses.
+--
+-- Boundary bypass: PHP's non-RFC-compliant multipart boundary parsing can be
+--   exploited by sending a malformed boundary= value to confuse content scanners.
+local function detect_content_type_anomaly(headers)
+  headers = headers or {}
+  local ct = headers["content-type"] or headers["Content-Type"] or ""
+  if ct == "" then return nil end
+
+  -- Non-string Content-Type indicates header injection
+  if type(ct) ~= "string" then return "CT_NON_STRING" end
+
+  local ctl = lower(ct)
+
+  if has(ctl, "charset") then
+    local charset_val = ctl:match("charset%s*=%s*([%w%-]+)")
+    if charset_val then
+      local safe_charsets = {
+        ["utf-8"]=true, ["utf8"]=true,
+        ["gbk"]=true, ["gb2312"]=true, ["gb18030"]=true,
+        ["iso-8859-1"]=true, ["iso-8859-15"]=true,
+        ["windows-1252"]=true, ["latin1"]=true,
+        ["us-ascii"]=true, ["ascii"]=true,
+      }
+      if not safe_charsets[charset_val] then
+        return "CT_CHARSET_BYPASS:" .. charset_val:sub(1, 32)
+      end
+    end
+    -- Multiple charset= declarations in one Content-Type
+    local _, n = ctl:gsub("charset", "charset")
+    if n > 1 then return "CT_MULTI_CHARSET" end
+  end
+
+  if has(ctl, "boundary") then
+    -- Multiple boundary= declarations
+    local _, n = ctl:gsub("boundary", "boundary")
+    if n > 1 then return "CT_MULTI_BOUNDARY" end
+    -- Boundary value must be alphanumeric + safe separators only
+    local bval = ctl:match("boundary%s*=%s*([^%s;,]+)")
+    if bval and not bval:match("^[0-9A-Za-z%-%_%.]+$") then
+      return "CT_BAD_BOUNDARY"
+    end
+  end
+
+  return nil
+end
+
+-- [top-8] Single-quote SQLi / non-string values in proxy IP headers.
+-- Source: uusec proxy-header-sql-injection.lua.
+-- Why: some apps log or query-build using XFF/X-Real-IP without sanitization.
+-- A non-string (table) value = multiple headers sent = header injection attempt.
+local function detect_proxy_header_sqli(headers)
+  headers = headers or {}
+  local suspects = {
+    ["x-forwarded-for"] = headers["x-forwarded-for"] or headers["X-Forwarded-For"],
+    ["x-real-ip"]       = headers["x-real-ip"]       or headers["X-Real-IP"],
+    ["client-ip"]       = headers["client-ip"]        or headers["Client-IP"],
+    ["x-client-ip"]     = headers["x-client-ip"]      or headers["X-Client-IP"],
+  }
+  for hname, hval in pairs(suspects) do
+    if hval ~= nil then
+      if type(hval) ~= "string" then
+        return "PROXY_HDR_INJECT:" .. hname
+      end
+      if has(hval, "'") then
+        return "PROXY_HDR_SQLI:" .. hname
+      end
+    end
+  end
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – URI CHECKS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-5 / php-security] PHP double-extension URI.
+-- Source: uusec php-security-rule-set.lua.
+-- Pattern: .php. or .phtml. in URI catches shell.php.jpg type uploads that
+-- execute as PHP on misconfigured servers (AddHandler / FilesMatch directives).
+local function detect_php_double_ext(uri)
+  local u = lower(uri or "")
+  if u:match("%.php%d?%.") then return "PHP_DOUBLE_EXT" end
+  if u:match("%.phtml%.")  then return "PHTML_DOUBLE_EXT" end
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – ARGS / BODY INJECTION CHECKS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-9a] SSRF via dangerous protocol schemes and IP obfuscation.
+-- Source: uusec universal-attack.lua (protocol list + IP obfuscation patterns).
+-- Notes:
+--   * Only flag schemes that are never legitimate in form parameter values.
+--     http:// and https:// are intentionally excluded (redirect/callback params).
+--   * IP obfuscation checks are narrow to avoid FP: octal, hex, and decimal
+--     longform IPs inside :// scheme context only.
+local function detect_ssrf_proto(args, body)
+  local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  if s == "" then return nil end
+
+  if has(s, "file://")   then return "SSRF_FILE" end
+  if has(s, "gopher://") then return "SSRF_GOPHER" end
+  if has(s, "dict://")   then return "SSRF_DICT" end
+  if has(s, "ldap://")   then return "SSRF_LDAP" end
+  if has(s, "ldaps://")  then return "SSRF_LDAPS" end
+  if has(s, "tftp://")   then return "SSRF_TFTP" end
+  -- sftp:// and ftp:// in param values are suspicious but occur in some
+  -- legitimate file-picker integrations; tag them differently for easier triage
+  if has(s, "sftp://")   then return "SSRF_SFTP" end
+  if has(s, "ftp://")    then return "SSRF_FTP" end
+
+  -- Octal IPv4 notation: 0177.0.0.1 = 127.0.0.1
+  if s:match("0%d+%.0%d+%.") then return "SSRF_OCTAL_IP" end
+  -- Hex IPv4: 0x7f000001
+  if s:match("0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%f[^0-9a-f]") then
+    return "SSRF_HEX_IP"
+  end
+  -- Decimal longform IP inside a URL: ://2130706433 (= 127.0.0.1)
+  if s:match("://[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]%f[^0-9]") then
+    return "SSRF_DWORD_IP"
+  end
+
+  return nil
+end
+
+-- [top-9b] JavaScript prototype pollution.
+-- Source: uusec universal-attack.lua.
+-- __proto__ and constructor.prototype in JSON bodies or args are the two
+-- canonical pollution vectors in Node.js/JS backend frameworks.
+local function detect_js_proto(args, body)
+  local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  if s == "" then return nil end
+
+  if has(s, "__proto__") then return "JS_PROTO_PROTO" end
+  if has(s, "constructor") and (has(s, ".prototype") or has(s, "[prototype")) then
+    return "JS_PROTO_CONSTRUCTOR"
+  end
+
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – BODY CHECKS
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-10a] XXE – XML External Entity injection.
+-- Source: uusec xxe-attack.lua.
+-- Only scans XML / form-encoded / text bodies.  Checks for SYSTEM or PUBLIC
+-- entity declarations which are the canonical XXE primitives.
+local function detect_xxe(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+
+  -- Skip clearly non-XML binary / JSON bodies to limit false positives
+  if ct ~= ""
+     and not has(ct, "xml")
+     and not has(ct, "text/")
+     and not has(ct, "application/x-www-form-urlencoded") then
+    return nil
+  end
+
+  local bl = lower(cap(body, CFG.max_scan_len))
+
+  if (has(bl, "<!doctype") or has(bl, "<!entity")) and has(bl, "system") then
+    return "XXE_SYSTEM"
+  end
+  if has(bl, "<!entity") and has(bl, "public") then
+    return "XXE_PUBLIC"
+  end
+
+  return nil
+end
+
+-- [top-10b] CRLF / HTTP response-splitting injection.
+-- Source: uusec http-response-splitting.lua.
+-- Checks for CR or LF followed by a header name in args and body.
+-- Also checks for URL-encoded %0d%0a sequences.
+local function detect_crlf_injection(args, body)
+  local s = cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len)
+  if s == "" then return nil end
+
+  -- Raw CR/LF followed by a header keyword
+  if s:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
+  if s:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
+  if s:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
+  if s:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
+
+  -- URL-encoded CRLF sequences
+  local sl = lower(s)
+  if has(sl, "%0d%0a") or has(sl, "%0a") then
+    local decoded = sl
+      :gsub("%%0d%%0a", "\r\n")
+      :gsub("%%0d",     "\r")
+      :gsub("%%0a",     "\n")
+    if decoded:find("[\r\n]%W*content%-type%s*:")   or
+       decoded:find("[\r\n]%W*set%-cookie%s*:")     or
+       decoded:find("[\r\n]%W*location%s*:")        then
+      return "CRLF_URL_ENCODED"
+    end
+  end
+
+  return nil
+end
+
+-- [top-10c] HTTP request smuggling – verb embedded in args / body.
+-- Source: uusec http-request-smuggling.lua.
+-- Attackers embed a second HTTP request line inside a parameter value to inject
+-- a request past a frontend proxy.  Matches: VERB<space>PATH<space>HTTP/N
+local function detect_http_smuggling(args, body)
+  local function smug_check(s)
+    if not s or s == "" then return nil end
+    -- Use plain string find for speed first, then confirm with pattern
+    if not (has(s, " http/") or has(s, "%20http/") or has(s, "+http/")) then
+      return nil
+    end
+    local sl = lower(s)
+    local verb = sl:match(
+      "(get|post|head|put|delete|options|patch|connect|trace|track|"
+      .. "propfind|proppatch|mkcol|copy|move|lock|unlock)"
+      .. "%s+[^%s]+%s+http/%d"
+    )
+    if verb then return "SMUG_" .. string.upper(verb) end
+    return nil
+  end
+
+  local t = smug_check(args)
+  if t then return t end
+  t = smug_check(body)
+  if t then return t end
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESEARCH ADDITIONS – UPLOAD CHECKS (multipart body)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [top-4a] Webshell extension in multipart upload filename.
+-- Source: uusec upload-file-name-filtering.lua (extended).
+-- Key shared-hosting additions: user.ini (per-dir PHP config override),
+-- php.ini, .htaccess, .env – all can reconfigure execution without needing
+-- a direct .php upload.
+-- Checks quoted, single-quoted, and unquoted Content-Disposition filenames.
+local function detect_upload_filename(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+  if not has(ct, "multipart/form-data") then return nil end
+
+  local function bad_fname(fname)
+    fname = lower(fname or "")
+    -- HTML entity decode (basic)
+    fname = fname:gsub("&#(%d+);", function(n)
+      local c = tonumber(n)
+      if c and c < 128 then return string.char(c) end
+      return ""
+    end)
+
+    -- Special full-name matches (shared hosting critical paths)
+    if has(fname, "user.ini")   then return "user.ini" end
+    if has(fname, "php.ini")    then return "php.ini" end
+    if has(fname, ".htaccess")  then return ".htaccess" end
+    if has(fname, ".htpasswd")  then return ".htpasswd" end
+    if has(fname, ".env")       then return ".env" end
+    if has(fname, "web.config") then return "web.config" end
+
+    -- Extension checks: match anywhere in filename to catch double-extensions
+    if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
+    if fname:match("%.phtml")   then return "phtml" end
+    if fname:match("%.phar")    then return "phar" end
+    if fname:match("%.asp[x]?") then return "asp" end
+    if fname:match("%.asa[x]?") then return "asa" end
+    if fname:match("%.asmx")    then return "asmx" end
+    if fname:match("%.ascx")    then return "ascx" end
+    if fname:match("%.jsp[x]?") then return "jsp" end
+    if fname:match("%.cer[^t]") or fname:match("%.cer$") then return "cer" end
+    if fname:match("%.cdx")     then return "cdx" end
+    if fname:match("%.war$")    then return "war" end
+    if fname:match("%.class$")  then return "class" end
+    if fname:match("%.exe$")    then return "exe" end
+    if fname:match("%.sh$")     then return "sh" end
+    if fname:match("%.cgi$")    then return "cgi" end
+    if fname:match("%.pl$")     then return "pl" end
+
+    return nil
+  end
+
+  -- Match double-quoted, single-quoted, and unquoted filename= values
+  for fname in body:gmatch('[Ff]ilename%s*=%s*"([^"]+)"') do
+    local hit = bad_fname(fname)
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
+  end
+  for fname in body:gmatch("[Ff]ilename%s*=%s*'([^']+)'") do
+    local hit = bad_fname(fname)
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
+  end
+  for fname in body:gmatch("[Ff]ilename%s*=%s*([^%s;\"'][^%s;\"']*)") do
+    local hit = bad_fname(fname)
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
+  end
+
+  return nil
+end
+
+-- [top-4b] Webshell / malicious content in uploaded file bytes.
+-- Sources: uusec upload-file-content-filtering.lua + imagemagick-vulnerability.lua.
+-- Scans the raw multipart body for PHP tags, JSP tags, and ImageMagick MVG
+-- injection patterns.  Only fires on multipart/form-data.
+-- Note: detect_php_webshell_body already covers direct PHP POSTs; this rule
+-- adds coverage for files disguised with a different Content-Type / extension.
+local function detect_upload_content(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+  if not has(ct, "multipart/form-data") then return nil end
+
+  local b = lower(cap(body, CFG.max_scan_len))
+
+  if has(b, "<?php") or has(b, "<?=") then return "UPLOAD_PHP_TAG" end
+  if has(b, "<jsp:")                   then return "UPLOAD_JSP_TAG" end
+
+  -- PHP superglobals inside file content = almost certainly a webshell
+  if has(b, "$_get")    or has(b, "$_post")   or has(b, "$_request")
+     or has(b, "$_files") or has(b, "$_server") or has(b, "$_cookie") then
+    return "UPLOAD_PHP_SUPERGLOBAL"
+  end
+
+  -- ImageMagick MVG / SVG command injection (ImageTragick)
+  if has(b, "push graphic-context") then return "UPLOAD_IMAGEMAGICK_MVG" end
+  if b:find("<image%s") and has(b, "url%(") then return "UPLOAD_IMAGEMAGICK_URL" end
 
   return nil
 end
@@ -802,7 +1312,55 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
 
-  -- 1) Traversal
+  -- ── 1) Bad User-Agent ─────────────────────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_bad_ua, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_bad_ua(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_BAD_UA:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 2) Header vulnerabilities (httpoxy / CVE-2017-7269 / CVE-2025-24813) ─
+  do
+    local mode = rule_mode(CFG.rule_header_vulns, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_header_vulns(headers, uri, method)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_HEADER_VULN:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 3) Proxy header SQLi / injection ─────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_proxy_header_sqli, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_proxy_header_sqli(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_PROXY_HDR:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 4) Content-Type anomaly (charset bypass / malformed boundary) ─────────
+  do
+    local mode = rule_mode(CFG.rule_content_type_anomaly, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_content_type_anomaly(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_CT_ANOMALY:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 5) Traversal ──────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_traversal, "block")
     if mode ~= "disabled" and detect_traversal(uri, args) then
@@ -812,7 +1370,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 2) RCE
+  -- ── 6) RCE ────────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_rce, "block")
     if mode ~= "disabled" and detect_rce(uri, args) then
@@ -822,7 +1380,19 @@ function _M.check(ctx)
     end
   end
 
-  -- 3) Exploit methods
+  -- ── 7) Shellshock (CVE-2014-6271) ────────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_shellshock, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_shellshock(headers, uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_SHELLSHOCK:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 8) Exploit methods ────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_exploit_methods, "challenge")
     if mode ~= "disabled" then
@@ -839,7 +1409,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 4) PHP wrappers
+  -- ── 9) PHP wrappers ───────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_wrappers, "logonly")
     if mode ~= "disabled" then
@@ -851,7 +1421,19 @@ function _M.check(ctx)
     end
   end
 
-  -- 5) Bare IP Host
+  -- ── 10) PHP double-extension in URI ──────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_double_ext, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_php_double_ext(uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_PHP_DOUBLE_EXT:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 11) Bare IP Host ──────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_ip_host, "logonly")
     if mode ~= "disabled" and detect_ip_host(headers["Host"] or headers["host"] or "") then
@@ -860,16 +1442,40 @@ function _M.check(ctx)
     end
   end
 
-  -- 6) Control chars
+  -- ── 12) Control chars ─────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_ctrl_chars, "logonly")
-    if mode ~= "disabled" and detect_ctrl_chars(args, body) then
+    if mode ~= "disabled" and detect_ctrl_chars(args, body, headers) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       return true, "WAF_CTRL_CHARS", ttl, mode
     end
   end
 
-  -- 7) Raw PHP webshell body (scored)
+  -- ── 13) SSRF protocol schemes + IP obfuscation ───────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_ssrf, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_ssrf_proto(args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_SSRF:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 14) JS prototype pollution ────────────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_js_proto, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_js_proto(args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_JS_PROTO:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 15) Raw PHP webshell body (scored) ───────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
@@ -881,7 +1487,31 @@ function _M.check(ctx)
     end
   end
 
-  -- 8) XSS
+  -- ── 16) Upload filename extension blacklist ───────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_upload_filename, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_upload_filename(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_UPLOAD_FNAME:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 17) Upload content / webshell byte scan ───────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_upload_content, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_upload_content(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_UPLOAD_CONTENT:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 18) XSS ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xss, "challenge")
     if mode ~= "disabled" and detect_xss(uri, args) then
@@ -890,7 +1520,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 9) SQLi
+  -- ── 19) SQLi (+ SQL comment bypass) ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" and detect_sqli(uri, args) then
@@ -899,7 +1529,43 @@ function _M.check(ctx)
     end
   end
 
-  -- 10) WP-specific auth checks
+  -- ── 20) XXE ───────────────────────────────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_xxe, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_xxe(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_XXE:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 21) CRLF / HTTP response splitting ───────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_crlf_injection, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_crlf_injection(args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_CRLF:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 22) HTTP request smuggling ────────────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_http_smuggling, "logonly")
+    if mode ~= "disabled" then
+      local tag = detect_http_smuggling(args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_HTTP_SMUGGLING:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 23) WP-specific auth checks ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
@@ -914,7 +1580,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 11) XML-RPC strong body signatures
+  -- ── 24) XML-RPC strong body signatures ───────────────────────────────────
   do
     local xtag = detect_xmlrpc_probe(uri, method, body)
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
@@ -932,7 +1598,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 12) Generic XML-RPC POST burst
+  -- ── 25) Generic XML-RPC POST burst ───────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
@@ -944,13 +1610,12 @@ function _M.check(ctx)
     end
   end
 
-  -- 13) Generic auth endpoint burst
+  -- ── 26) Generic auth endpoint burst ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_auth_burst, "challenge")
     if mode ~= "disabled" then
       local peer = ctx.peer or ""
 
-      -- Fail-safe: do not count bursts if real client IP appears to still be proxy peer
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = detect_auth_burst(ip, uri, method, shdict)
         if tag then
@@ -961,7 +1626,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 14) Suspicious command parameter keys
+  -- ── 27) Suspicious command parameter keys ─────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_cmd_params, "logonly")
     if mode ~= "disabled" then
@@ -972,18 +1637,19 @@ function _M.check(ctx)
     end
   end
 
-  -- 15) Suspicious payload markers
+  -- ── 28) Suspicious payload markers ───────────────────────────────────────
   do
-    local mode = rule_mode(CFG.rule_cmd_payload, "logonly")
-    if mode ~= "disabled" then
-      local tag = detect_cmd_payload(args)
-      if tag then
-        return true, "WAF_CMD_PAYLOAD:" .. tag, CFG.default_ttl_sec, mode
+    local tag = detect_cmd_payload(args)
+    if tag then
+      local mode = cmd_payload_mode(tag)
+      if mode ~= "disabled" then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_CMD_PAYLOAD:" .. tag, ttl, mode
       end
     end
   end
 
-  -- 16) Debug toggles
+  -- ── 29) Debug toggles ─────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_debug_toggles, "logonly")
     if mode ~= "disabled" then
@@ -994,7 +1660,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 17) PHP serialize markers
+  -- ── 30) PHP serialize markers ─────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_serialize, "logonly")
     if mode ~= "disabled" then
@@ -1005,7 +1671,7 @@ function _M.check(ctx)
     end
   end
 
-  -- 18) Base64 POST body scanner
+  -- ── 31) Base64 POST body scanner ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_b64_injection, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
@@ -1020,8 +1686,6 @@ function _M.check(ctx)
   return false, nil, nil, nil
 end
 
--- Decide whether we should push this WAF event to /nginx/ip now.
--- Uses a small per-IP+reason cooldown to avoid bridge spam.
 function _M.should_push(shdict, ip, reason)
   if not shdict or not ip or ip == "" then return true end
   local k  = "wafpush|" .. (reason or "WAF") .. "|" .. ip
