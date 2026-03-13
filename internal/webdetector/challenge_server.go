@@ -609,7 +609,23 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			// preflights or non-browser clients.
 			if r.Method == http.MethodPost {
 				next := r.URL.RequestURI()
-				logging.LogfCHALLENGES("[challenge] post-intercept host=%s uri=%s ctype=%q clen=%d note=no_replay", cleanHost(r.Host), next, strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength)
+				//logging.LogfCHALLENGES("[challenge] post-intercept host=%s uri=%s ctype=%q clen=%d note=no_replay", cleanHost(r.Host), next, strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength)
+postIP := clientIP(r)
+postIPStr := "-"
+if postIP != nil {
+    postIPStr = postIP.String()
+}
+postAction, postReason := "", ""
+if s.bridge != nil {
+    postAction, postReason = s.bridge.GetIPDecision(postIPStr)
+}
+if postReason == "" {
+    postReason = postAction // fallback: at least log "challenge"/"block" if no reason string
+}
+logging.LogfCHALLENGES("[challenge] post-intercept ip=%s host=%s uri=%s ctype=%q clen=%d reason=%s note=no_replay",
+    postIPStr, cleanHost(r.Host), next,
+    strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength,
+    postReason)
 				w.Header().Set("Cache-Control", "no-store")
 				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
 				return

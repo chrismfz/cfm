@@ -974,3 +974,20 @@ func (b *NginxBridge) checkToken(r *http.Request) bool {
 	}
 	return r.Header.Get("X-CFM-Token") == b.cfg.Token
 }
+
+
+// GetIPDecision returns the current action and reason for an IP from the
+// in-process state. Used by the challenge server for post-intercept logging.
+// Returns ("", "") if the IP has no active entry.
+func (b *NginxBridge) GetIPDecision(ip string) (action, reason string) {
+    if b == nil {
+        return "", ""
+    }
+    b.mu.RLock()
+    e, ok := b.ipState[ip]
+    b.mu.RUnlock()
+    if !ok || time.Now().After(e.Expires) {
+        return "", ""
+    }
+    return e.Action, e.Reason
+}
