@@ -446,6 +446,31 @@ local function origin_pass_for(s_in)
          (s_in == "https" and ":443" or ":80")
 end
 
+-- ── Step 0: cPanel / webmail hard bypass ─────────────────────────────────────
+-- These management interfaces must never be challenged or blocked.
+-- Covers:  cpanel.*, webmail.*, whm.*, mail.* subdomains
+--          /cpanel, /webmail, /whm path-prefix redirects
+do
+  local h     = lower(host)
+  local u     = lower(uri)
+  local pfx   = h:match("^([^%.]+)%.")     -- first label of the hostname
+  local skip  = (pfx == "cpanel" or pfx == "webmail" or
+                 pfx == "whm"    or pfx == "mail")
+             or (u:sub(1, 7) == "/cpanel")
+             or (u:sub(1, 8) == "/webmail")
+             or (u:sub(1, 4) == "/whm")
+
+  if skip then
+    ngx.var.cfm_upstream = "cfm_apache"
+    ngx.var.cfm_pass     = origin_pass_for(scheme)
+    if CFG.debug then
+      log_route(ngx.INFO, "cpanel_bypass host=" .. host .. " uri=" .. uri)
+    end
+    return
+  end
+end
+
+
 -- ── Step 1: Fast-path — Solved Cookie ─────────────────────────────────────────
 local cfm_ok_cookie = ngx.var.cookie_cfm_ok
 if cfm_ok_cookie and cfm_ok_cookie ~= "" then

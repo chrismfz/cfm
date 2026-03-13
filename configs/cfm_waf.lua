@@ -127,6 +127,27 @@ local CFG = {
   -- Raw PHP webshell body scanner tuning
   php_webshell_max_scan_len = 2048,
   php_webshell_min_score    = 5,
+
+  -- Bad UA scorer tuning
+  -- Signals and their point values (all accumulate):
+  --   +2  empty / whitespace-only UA
+  --   +2  generic HTTP library UA (python-requests, libwww-perl, winhttp, httrack)
+  --   +1  HEAD method (scanners probe existence before fetching)
+  --   +1  no Accept header (real browsers always send one)
+  --   +1  no Referer on a non-root, non-asset URI
+  --   +4  URI targets a sensitive file  (.env, .git/, wp-config.php, ...)
+  --   +3  URI targets a credential / backup artifact (passwords.txt, *.sql, ...)
+  --   instant  known scanner tool UA (sqlmap, nikto, masscan, ...) bypasses scoring
+  --
+  -- Threshold examples at default of 4:
+  --   empty UA hitting a normal page        = 2  -> pass  (legit bots / your C++ agents)
+  --   empty UA + HEAD + no Accept           = 4  -> trigger
+  --   empty UA + .git/HEAD URI              = 6  -> trigger
+  --   python-requests on any article page   = 2  -> pass  (scrapers, uptime monitors)
+  --   python-requests + HEAD + no Accept    = 4  -> trigger
+  --   any UA  + /backup/db.sql              = 3  -> pass  (score alone insufficient)
+  --   empty UA + /backup/db.sql             = 5  -> trigger
+  bad_ua_min_score = 4,
 }
 
 -- Optional user overrides from cfm_waf_config.lua
@@ -846,46 +867,119 @@ end
 -- RESEARCH ADDITIONS – HEADER / PROTOCOL CHECKS
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- [top-6a] Empty or known-bad scanner User-Agent.
+-- [top-6a] Bad UA scorer.
 -- Sources: uusec scanner-detection (plugin), anti_ddos_challenge.lua UA list.
--- Notes:
---   * Empty UA catches most headless/scripted HTTP clients.
---   * Bare "curl" or "python" are intentionally NOT blocked (too many legit
---     uses on shared hosting); "curl/" (with version) from CLI is blocked
---     because browsers never send it.
---   * Slowloris scanner self-identifies via Referer.
-local function detect_bad_ua(headers)
+--
+-- Returns: score (int), composite_tag (string) or 0, nil if nothing fires.
+--
+-- Two tiers:
+--   INSTANT  - known scanner tool UAs fire regardless of score.
+--              These have zero legitimate use on shared hosting.
+--   SCORED   - weak signals that are innocent alone but suspicious in combination.
+--              Each signal adds points; caller checks against CFG.bad_ua_min_score.
+--
+-- Scored signals and weights:
+--   UA presence:  empty/whitespace=+2, generic HTTP lib=+2
+--   Method:       HEAD=+1   (scanners probe existence cheaply)
+--   Headers:      no Accept=+1, no Referer on non-root URI=+1
+--   URI target:   sensitive file (.env/.git/wp-config)=+4,
+--                 credential/backup artifact (*.sql, passwords.txt)=+3
+local function detect_bad_ua_scored(headers, uri, method)
   headers = headers or {}
   local ua  = headers["user-agent"] or headers["User-Agent"] or ""
   local ual = lower(ua)
 
-  -- Empty / whitespace-only UA
-  if ua == "" or ual:match("^%s*$") then return "UA_EMPTY" end
-
-  -- Known security scanner / exploit tool UAs
-  if has(ual, "sqlmap")    then return "UA_SQLMAP" end
-  if has(ual, "nikto")     then return "UA_NIKTO" end
-  if has(ual, "nessus")    then return "UA_NESSUS" end
-  if has(ual, "masscan")   then return "UA_MASSCAN" end
-  if has(ual, "zgrab")     then return "UA_ZGRAB" end
-  if has(ual, "nuclei")    then return "UA_NUCLEI" end
-  if has(ual, "dirbuster") then return "UA_DIRBUSTER" end
-  if has(ual, "gobuster")  then return "UA_GOBUSTER" end
-  if has(ual, "wfuzz")     then return "UA_WFUZZ" end
-  if has(ual, "awvs")      then return "UA_AWVS" end
-  if has(ual, "appscan")   then return "UA_APPSCAN" end
-
-  -- Generic HTTP library UAs common in automated attacks
-  if has(ual, "libwww-perl")     then return "UA_LIBWWW" end
-  if has(ual, "python-requests") then return "UA_PY_REQUESTS" end
-  if has(ual, "winhttp")         then return "UA_WINHTTP" end
-  if has(ual, "httrack")         then return "UA_HTTRACK" end
-
-  -- Slowloris scanner fingerprint in Referer header
+  -- INSTANT: named scanner / exploit tools - bypass scoring
+  -- Slowloris self-identifies via Referer
   local ref = lower(headers["referer"] or headers["Referer"] or "")
-  if has(ref, "code.google.com/p/slowhttptest") then return "REF_SLOWLORIS" end
+  if has(ref, "code.google.com/p/slowhttptest") then return 99, "REF_SLOWLORIS" end
 
-  return nil
+  if has(ual, "sqlmap")    then return 99, "UA_SQLMAP" end
+  if has(ual, "nikto")     then return 99, "UA_NIKTO" end
+  if has(ual, "nessus")    then return 99, "UA_NESSUS" end
+  if has(ual, "masscan")   then return 99, "UA_MASSCAN" end
+  if has(ual, "zgrab")     then return 99, "UA_ZGRAB" end
+  if has(ual, "nuclei")    then return 99, "UA_NUCLEI" end
+  if has(ual, "dirbuster") then return 99, "UA_DIRBUSTER" end
+  if has(ual, "gobuster")  then return 99, "UA_GOBUSTER" end
+  if has(ual, "wfuzz")     then return 99, "UA_WFUZZ" end
+  if has(ual, "awvs")      then return 99, "UA_AWVS" end
+  if has(ual, "appscan")   then return 99, "UA_APPSCAN" end
+
+  -- SCORED: accumulate weak signals
+  local score = 0
+  local tags  = {}
+
+  -- Signal 1: UA quality (+2 for empty or known generic lib)
+  if ua == "" or ual:match("^%s*$") then
+    score = score + 2; tags[#tags+1] = "UA_EMPTY"
+  elseif has(ual, "python-requests") then
+    score = score + 2; tags[#tags+1] = "UA_PY_REQUESTS"
+  elseif has(ual, "libwww-perl") then
+    score = score + 2; tags[#tags+1] = "UA_LIBWWW"
+  elseif has(ual, "winhttp") then
+    score = score + 2; tags[#tags+1] = "UA_WINHTTP"
+  elseif has(ual, "httrack") then
+    score = score + 2; tags[#tags+1] = "UA_HTTRACK"
+  end
+
+  -- If UA is perfectly fine, no further scoring needed
+  if score == 0 then return 0, nil end
+
+  -- Signal 2: HEAD method (+1) - cheap existence probe used by scanners
+  local m = lower(method or "")
+  if m == "head" then
+    score = score + 1; tags[#tags+1] = "HEAD"
+  end
+
+  -- Signal 3: no Accept header (+1) - every real browser always sends one
+  local accept = headers["accept"] or headers["Accept"] or ""
+  if accept == "" then
+    score = score + 1; tags[#tags+1] = "NO_ACCEPT"
+  end
+
+  -- Signal 4: no Referer on a non-trivial URI (+1)
+  -- Skip scoring on root, common entry points, and static assets
+  local ul = lower(uri or "")
+  local is_entry = (ul == "/" or ul == ""
+    or ul:match("%.css$") or ul:match("%.js$")  or ul:match("%.ico$")
+    or ul:match("%.png$") or ul:match("%.jpg$") or ul:match("%.gif$")
+    or ul:match("%.svg$") or ul:match("%.woff"))
+  if not is_entry and ref == "" then
+    score = score + 1; tags[#tags+1] = "NO_REFERER"
+  end
+
+  -- Signal 5: URI targets a high-value sensitive file (+4)
+  local ul_sensitive = false
+  if has(ul, "/.git/")             then ul_sensitive = true; tags[#tags+1] = "URI_GIT" end
+  if has(ul, "/.env")              then ul_sensitive = true; tags[#tags+1] = "URI_ENV" end
+  if has(ul, "/wp-config.php")     then ul_sensitive = true; tags[#tags+1] = "URI_WPCONFIG" end
+  if has(ul, "/.htaccess")         then ul_sensitive = true; tags[#tags+1] = "URI_HTACCESS" end
+  if has(ul, "/.htpasswd")         then ul_sensitive = true; tags[#tags+1] = "URI_HTPASSWD" end
+  if has(ul, "/config.php")        then ul_sensitive = true; tags[#tags+1] = "URI_CONFIG_PHP" end
+  if has(ul, "/configuration.php") then ul_sensitive = true; tags[#tags+1] = "URI_JOOMLA_CFG" end
+  if has(ul, "/settings.php")      then ul_sensitive = true; tags[#tags+1] = "URI_SETTINGS_PHP" end
+  if ul_sensitive then score = score + 4 end
+
+  -- Signal 6: URI targets a credential / backup artifact (+3)
+  -- Archives only scored when inside a backup-like path to avoid
+  -- flagging legitimate CDN or media ZIP downloads.
+  local ul_backup = false
+  if ul:match("%.sql$") or ul:match("%.sql%.gz$") or ul:match("%.sql%.zip$") then
+    ul_backup = true; tags[#tags+1] = "URI_SQL_DUMP"
+  end
+  if ul:match("password") or ul:match("credential") or ul:match("passwd") then
+    ul_backup = true; tags[#tags+1] = "URI_CRED_FILE"
+  end
+  local in_backup_path = has(ul, "/backup") or has(ul, "/bak/") or has(ul, "/old/")
+                      or has(ul, "/restore") or has(ul, "/archive")
+  if in_backup_path and (ul:match("%.zip$") or ul:match("%.tar$") or ul:match("%.gz$")
+                      or ul:match("%.rar$") or ul:match("%.tgz$")) then
+    ul_backup = true; tags[#tags+1] = "URI_BACKUP_ARCHIVE"
+  end
+  if ul_backup then score = score + 3 end
+
+  return score, table.concat(tags, "+")
 end
 
 -- [top-6b] Shellshock CVE-2014-6271 / CVE-2014-7169.
@@ -1317,14 +1411,15 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
 
-  -- ── 1) Bad User-Agent ─────────────────────────────────────────────────────
+  -- ── 1) Bad User-Agent (scored) ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_bad_ua, "logonly")
     if mode ~= "disabled" then
-      local tag = detect_bad_ua(headers)
-      if tag then
+      local score, tag = detect_bad_ua_scored(headers, uri, method)
+      local threshold = tonumber(CFG.bad_ua_min_score) or 4
+      if score >= threshold then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_BAD_UA:" .. tag, ttl, mode
+        return true, "WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode
       end
     end
   end

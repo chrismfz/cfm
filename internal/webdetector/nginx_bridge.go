@@ -58,7 +58,8 @@ type NginxBridge struct {
 	ipState    map[string]bridgeIPEntry    // ip   → current decision
 	vhState    map[string]bridgeVhostEntry // host → current decision
 	okState    map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
-	bypassFunc func(string) bool           // set once at startup; no lock needed (written before serving starts)
+	bypassFunc     func(string) bool // set once at startup; no lock needed (written before serving starts)
+	hostBypassFunc func(string) bool // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats      BridgeStats
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
@@ -173,6 +174,17 @@ func (b *NginxBridge) SetBypassFunc(fn func(string) bool) {
 		return
 	}
 	b.bypassFunc = fn
+}
+
+// SetHostBypassFunc wires a host predicate that permanently allows any host
+// that matches, regardless of any vhState / ipState entry.
+// Designed for CHALLENGE_HOST_BYPASS (e.g. cpanel.*, webmail.*, whm.*).
+// Must be called before ServeDecisions() starts.
+func (b *NginxBridge) SetHostBypassFunc(fn func(string) bool) {
+	if b == nil {
+		return
+	}
+	b.hostBypassFunc = fn
 }
 
 // BypassIPTemp extends okState for one IP so that vhost-wide challenge is
@@ -651,6 +663,17 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	// ── NEW: static bypass — always allow, ignores ipState/vhState entirely ──
 	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"ip_action":    "allow",
+			"vhost_action": "allow",
+		})
+		return
+	}
+	// ── NEW: host-level static bypass (CHALLENGE_HOST_BYPASS) ─────────────────
+	// Wins over all ipState / vhState entries — cPanel/webmail/WHM must never
+	// be challenged regardless of what the IP is doing on other vhosts.
+	if b.hostBypassFunc != nil && b.hostBypassFunc(host) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"ip_action":    "allow",
