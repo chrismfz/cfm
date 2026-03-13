@@ -688,27 +688,27 @@ do
   local has_cf = cf_ip ~= ""
 
   if not has_cf and p ~= "" then
-    -- Strip IPv6 zone/brackets if present (e.g. "[::1]" -> "::1")
+    -- Strip IPv6 brackets if present
     if p:sub(1, 1) == "[" then p = p:sub(2, -2) end
 
-    -- RFC-1918 / loopback check without an external library.
-    local b2     = tonumber(p:match("^172%.(%d+)%."))
+    local srv = ngx.var.server_addr or ""
+
     local is_local = (p == "127.0.0.1")
                   or (p == "::1")
-                  or (p:sub(1, 8) == "192.168.")
-                  or (p:sub(1, 3) == "10.")
-                  or (b2 and b2 >= 16 and b2 <= 31)
+                  or (p == srv)   -- self-request via own public IP
 
     if is_local then
       ngx.var.cfm_upstream = "cfm_apache"
       ngx.var.cfm_pass     = origin_pass_for(scheme)
       if CFG.debug then
-        log_route(ngx.INFO, "local_bypass peer=" .. peer_ip .. " host=" .. host .. " uri=" .. uri)
+        log_route(ngx.INFO, "local_bypass peer=" .. peer_ip ..
+          " srv=" .. srv .. " host=" .. host .. " uri=" .. uri)
       end
       return
     end
   end
 end
+
 
 -- ── POST resume: attempt to replay a previously stashed POST ─────────────────
 -- Must run BEFORE the solved-cookie fast-path (Step 1) so that replayed
