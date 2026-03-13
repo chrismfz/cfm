@@ -97,6 +97,7 @@ type bridgeIPEntry struct {
 type bridgeVhostEntry struct {
 	Action  string // "challenge"
 	Expires time.Time
+	Reason  string
 }
 
 // BridgeStats is exported for cfm status / JSON API.
@@ -142,6 +143,7 @@ type nginxVhostMsg struct {
 	Host   string `json:"host"`
 	Action string `json:"action"` // "challenge"
 	TTLSec int    `json:"ttl_sec"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type nginxVhostClearMsg struct {
@@ -378,6 +380,12 @@ func vhostVariantsForBridge(host string) []string {
 // Every request to that vhost will be challenged regardless of IP.
 // Called when CHALLENGE_VHOST fires or CHALLENGE_SUSPICIOUS_VHOST_SCORE turns on.
 func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
+	b.ChallengeVhostWithReason(host, ttl, "")
+}
+
+// ChallengeVhostWithReason puts an entire vhost into challenge mode and
+// records/logs the source reason when available.
+func (b *NginxBridge) ChallengeVhostWithReason(host string, ttl time.Duration, reason string) {
 	if !b.cfg.Enabled {
 		return
 	}
@@ -392,22 +400,27 @@ func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
 
 	now := time.Now()
 	exp := now.Add(ttl)
+	reason = strings.TrimSpace(reason)
 
 	for _, host := range hosts {
 		needPush := false
 		logEnter := false
+		entryReason := reason
 
 		b.mu.Lock()
 		cur, ok := b.vhState[host]
 		// Only push/log on state transition, or when we're close to expiry.
 		if !ok || cur.Action != "challenge" || cur.Expires.Before(now) {
-			b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+			b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp, Reason: entryReason}
 			needPush = true
 			logEnter = true
 		} else {
 			// Keep it sticky without spamming: extend locally, push only near expiry.
 			if exp.After(cur.Expires) {
-				b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp}
+				if entryReason == "" {
+					entryReason = cur.Reason
+				}
+				b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: exp, Reason: entryReason}
 			}
 			if cur.Expires.Sub(now) < refreshSkew {
 				needPush = true
@@ -420,10 +433,15 @@ func (b *NginxBridge) ChallengeVhost(host string, ttl time.Duration) {
 				Host:   host,
 				Action: "challenge",
 				TTLSec: int(ttl.Seconds()),
+				Reason: entryReason,
 			})
 		}
 		if logEnter {
-			logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+			if entryReason != "" {
+				logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s reason=%s", host, ttl, entryReason)
+			} else {
+				logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
+			}
 		}
 	}
 }
@@ -826,7 +844,7 @@ func (b *NginxBridge) handleVhostPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	b.vhState[msg.Host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
+	b.vhState[msg.Host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(ttl), Reason: strings.TrimSpace(msg.Reason)}
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)

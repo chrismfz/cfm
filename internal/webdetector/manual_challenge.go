@@ -114,7 +114,7 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason str
 
 	// NginxBridge: push immediately so OpenResty reacts without waiting for a tick.
 	if e.nginxBridge != nil {
-		e.nginxBridge.ChallengeVhost(host, ttl)
+		e.nginxBridge.ChallengeVhostWithReason(host, ttl, reason)
 	}
 
 	// Record in ChalAPI store.

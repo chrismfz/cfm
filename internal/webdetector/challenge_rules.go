@@ -966,7 +966,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                     e.nginxBridge.ClearVhost(pat)
                     continue
                 }
-                e.nginxBridge.ChallengeVhost(pat, vttl)
+                e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "manual")
             }
         }
 
@@ -1200,7 +1200,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                             }
                         }
                     }
-                    e.nginxBridge.ChallengeVhost(host, ttl)
+                    e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
                             host, uniq, on, off, ttl.String())
@@ -1504,7 +1504,11 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                     }
                 }
 
-                e.nginxBridge.ChallengeVhost(host, vttl)
+                vReason := "manual"
+                if !manual {
+                    vReason = "suspicious_vhost"
+                }
+                e.nginxBridge.ChallengeVhostWithReason(host, vttl, vReason)
                 continue
             }
 
