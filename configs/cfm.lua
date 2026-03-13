@@ -44,6 +44,11 @@ local CFG = {
 
   -- Narrow body read for inline WAF (only where needed)
   waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "4096"),
+
+  -- Bounded challenged-POST resume (OpenResty-side hold/replay)
+  post_resume_enable     = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
+  post_resume_max_len    = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
+  post_resume_ttl_sec    = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
 }
 
 local SH = ngx.shared.cfm_decisions
@@ -56,6 +61,12 @@ local function log_route(level, msg)
 end
 
 local function esc(s) return ngx.escape_uri(s or "") end
+
+local function with_query_arg(u, k, v)
+  u = tostring(u or "/")
+  local sep = u:find("?", 1, true) and "&" or "?"
+  return u .. sep .. tostring(k or "") .. "=" .. esc(v or "")
+end
 
 local function append_set_cookie(v)
   local h = ngx.header["Set-Cookie"]
@@ -236,6 +247,101 @@ local function get_req_body_for_waf(uri, method, max_len)
   return ""
 end
 
+local function ct_allows_resume(ct)
+  ct = lower(ct or "")
+  if ct == "" then return false end
+  if has(ct, "application/x-www-form-urlencoded") then return true end
+  if has(ct, "application/json") then return true end
+  if has(ct, "text/plain") then return true end
+  return false
+end
+
+local function build_resume_token()
+  local raw = table.concat({
+    ngx.var.request_id or "",
+    tostring(ngx.worker.pid()),
+    tostring(ngx.now()),
+  }, "|")
+  return ngx.md5(raw)
+end
+
+local function store_post_resume(ip, host, uri, method)
+  if not CFG.post_resume_enable or not SH then return nil, "disabled" end
+  if lower(method or "") ~= "post" then return nil, "not_post" end
+
+  local ctype = ngx.var.content_type or ""
+  if not ct_allows_resume(ctype) then return nil, "ctype_not_allowed" end
+
+  local clen = tonumber(ngx.var.content_length or "0") or 0
+  if clen <= 0 or clen > CFG.post_resume_max_len then
+    return nil, "size_limit"
+  end
+
+  ngx.req.read_body()
+  local body = ngx.req.get_body_data()
+  if not body then
+    return nil, "no_body_data"
+  end
+  if #body == 0 or #body > CFG.post_resume_max_len then
+    return nil, "body_size"
+  end
+
+  local token = build_resume_token()
+  local payload = cjson.encode({
+    ip = ip,
+    host = host,
+    uri = uri,
+    method = "POST",
+    ctype = ctype,
+    body_b64 = ngx.encode_base64(body),
+    ts = ngx.time(),
+  })
+  SH:set("pr|" .. token, payload, CFG.post_resume_ttl_sec)
+  return token, nil
+end
+
+local function try_apply_post_resume(ip, host)
+  if not CFG.post_resume_enable or not SH then return false end
+  if lower(ngx.req.get_method() or "") ~= "get" then return false end
+
+  local args = ngx.req.get_uri_args()
+  local tok = args and args["cfm_rt"]
+  if type(tok) == "table" then tok = tok[1] end
+  tok = tostring(tok or "")
+  if tok == "" then return false end
+
+  local raw = SH:get("pr|" .. tok)
+  SH:delete("pr|" .. tok)
+  if not raw then return false end
+
+  local obj = cjson.decode(raw)
+  if not obj then return false end
+  if tostring(obj.ip or "") ~= tostring(ip or "") then return false end
+  if tostring(obj.host or "") ~= tostring(host or "") then return false end
+
+  local body = ngx.decode_base64(obj.body_b64 or "")
+  if not body or #body == 0 or #body > CFG.post_resume_max_len then return false end
+
+  ngx.req.set_method(ngx.HTTP_POST)
+  ngx.req.set_header("Content-Type", obj.ctype or "application/x-www-form-urlencoded")
+  ngx.req.set_body_data(body)
+
+  local target_uri = obj.uri or "/"
+  local qidx = target_uri:find("?", 1, true)
+  if qidx then
+    local p = target_uri:sub(1, qidx - 1)
+    local q = target_uri:sub(qidx + 1)
+    ngx.req.set_uri(p, false)
+    ngx.req.set_uri_args(q)
+  else
+    ngx.req.set_uri(target_uri, false)
+    ngx.req.set_uri_args(nil)
+  end
+
+  ngx.ctx.cfm_resumed_post = true
+  log_route(ngx.INFO, "post_resume_applied ip=" .. tostring(ip) .. " host=" .. tostring(host) .. " uri=" .. tostring(target_uri))
+  return true
+end
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -470,10 +576,16 @@ do
   end
 end
 
+-- Attempt one-time replay of previously challenged POST (bounded/allowlisted).
+-- Must run before solved-cookie fast path so resumed requests still pass through
+-- WAF + bridge checks instead of bypassing inspection.
+try_apply_post_resume(ip, host)
+method = ngx.req.get_method() or method
+uri    = ngx.var.uri or uri
 
 -- ── Step 1: Fast-path — Solved Cookie ─────────────────────────────────────────
 local cfm_ok_cookie = ngx.var.cookie_cfm_ok
-if cfm_ok_cookie and cfm_ok_cookie ~= "" then
+if cfm_ok_cookie and cfm_ok_cookie ~= "" and not ngx.ctx.cfm_resumed_post then
   refresh_ok_cookie(cfm_ok_cookie)
   touch_ok(ip)
   ngx.header["X-CFM-Action"] = "allow_cookie"
@@ -520,9 +632,28 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       observe_waf(ip, host, p_uri, p_meth, 403, reason)
 
     else -- challenge
+      if ngx.ctx.cfm_resumed_post then
+        ngx.header["X-CFM-Action"] = "block_replayed"
+        ngx.var.cfm_upstream = "cfm_block"
+        ngx.var.cfm_pass     = ""
+        observe_waf(ip, host, p_uri, p_meth, 403, "REPLAYED_POST_RECHALLENGED")
+        log_route(ngx.WARN, "replayed_post_rechallenged_block ip=" .. ip .. " host=" .. host .. " uri=" .. tostring(p_uri))
+        return ngx.exit(CFG.block_code)
+      end
+
+      local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)
+      if rtok then
+        ngx.header["X-CFM-Action"] = "challenge_resume"
+        ngx.header["Cache-Control"] = "no-store"
+        return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+      end
+
       ngx.header["X-CFM-Action"] = "challenge"
       ngx.var.cfm_upstream = "cfm_challenge"
       ngx.var.cfm_pass     = "http://cfm_challenge"
+      if CFG.debug then
+        log_route(ngx.INFO, "post_resume_skip reason=" .. tostring(rerr or "unknown") .. " method=" .. tostring(method) .. " uri=" .. tostring(uri))
+      end
     end
 
     if waf.should_push and waf.should_push(SH, ip, reason) then
@@ -573,10 +704,25 @@ if ip_action == "block" or vh_action == "block" then
 end
 
 if ip_action == "challenge" or vh_action == "challenge" then
+  if ngx.ctx.cfm_resumed_post then
+    ngx.header["X-CFM-Action"] = "block_replayed"
+    ngx.var.cfm_upstream = "cfm_block"
+    ngx.var.cfm_pass     = ""
+    log_route(ngx.WARN, "replayed_post_rechallenged_block ip=" .. ip .. " host=" .. host .. cache_flag)
+    return ngx.exit(CFG.block_code)
+  end
+
+  local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)
+  if rtok then
+    ngx.header["X-CFM-Action"] = "challenge_resume"
+    ngx.header["Cache-Control"] = "no-store"
+    return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+  end
+
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"
   ngx.var.cfm_pass     = "http://cfm_challenge"
-  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag)
+  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag .. (rerr and (" resume_skip=" .. tostring(rerr)) or ""))
   return
 end
 
