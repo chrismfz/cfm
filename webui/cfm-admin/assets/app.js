@@ -7,6 +7,7 @@
         loading: false,
         autoRefresh: true,
         topShort: [],
+        topShortLimit: 20,
         suspicious: [],
         suspiciousHosts: {},
         challengeStatus: {},
@@ -170,8 +171,10 @@
       async refreshAll() {
         this.loading = true;
         try {
+          const topLimit = Math.max(1, Math.min(500, Number(this.topShortLimit) || 20));
+          this.topShortLimit = topLimit;
           const [topShort, suspicious] = await Promise.all([
-            this.fetchJSON('v1/webdet/top-short?limit=50'),
+            this.fetchJSON(`v1/webdet/top-short?limit=${topLimit}`),
             this.fetchJSON('v1/webdet/suspicious?limit=20'),
           ]);
           this.topShort = this.extractRows(topShort, 'rows');
