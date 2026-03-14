@@ -383,7 +383,7 @@ local function is_known_binaryish_telemetry_uri(uri)
   -- WordPress Optimization Detective web-vitals endpoint.
   -- This endpoint can legitimately carry compressed/packed metric payloads.
   if u:match("^/wp%-json/optimization%-detective/")
-     and has(u, "/url%-metrics:store") then
+     and has(u, "/url-metrics:store") then
     return true
   end
 
@@ -849,7 +849,24 @@ local function detect_cmd_payload(args)
   if has(a, "|bash") or has(a, "%7cbash") then return "PAY_PIPE_BASH" end
   if has(a, "|sh ")  or has(a, "%7csh%20") or has(a, "%7csh+") then return "PAY_PIPE_SH" end
 
-  if not ignore_backtick_only and (has(a, "%60") or has(a, "`")) then
+  local function has_backtick_cmd(s)
+    -- Require an actual backtick command-substitution shape to avoid
+    -- flagging accidental trailing backticks in business app query params.
+    local inner = s:match("`([^`]+)`")
+    if not inner then return false end
+
+    if inner:match("^%s*(wget|curl|bash|sh|nc|ncat|perl|python|php|ruby|lua|id|uname|whoami|cat|ls|ping)%f[^%a]") then
+      return true
+    end
+
+    if inner:find(";", 1, true) or inner:find("|", 1, true) or inner:find("&&", 1, true) then
+      return true
+    end
+
+    return false
+  end
+
+  if not ignore_backtick_only and has_backtick_cmd(a) then
     return "PAY_BACKTICK"
   end
 
