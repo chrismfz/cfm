@@ -28,6 +28,12 @@
         drilldown: null,
         activeHost: '',
         actionMsg: '',
+        challengeExcludes: [],
+        wafExcludes: [],
+        challengeExcludeValue: '',
+        challengeExcludeType: 'host',
+        wafExcludeValue: '',
+        wafExcludeType: 'host',
         timer: null,
       };
     },
@@ -335,6 +341,45 @@
         this.activeIP = ip;
         this.ipDrilldown = await this.fetchJSONSafe(`v1/webdet/ip-drilldown?ip=${encodeURIComponent(ip)}`, { ip, error: 'failed to load ip drilldown' });
       },
+
+      async refreshExcludeLists() {
+        const [challengeExcludes, wafExcludes] = await Promise.all([
+          this.fetchJSONSafe('v1/challenge/exclude/list', []),
+          this.fetchJSONSafe('v1/waf/exclude/list', []),
+        ]);
+        this.challengeExcludes = this.extractRows(challengeExcludes, 'rows');
+        this.wafExcludes = this.extractRows(wafExcludes, 'rows');
+      },
+      async addExclude(scope) {
+        const isChallenge = scope === 'challenge';
+        const value = (isChallenge ? this.challengeExcludeValue : this.wafExcludeValue).trim();
+        const type = isChallenge ? this.challengeExcludeType : this.wafExcludeType;
+        if (!value) {
+          this.actionMsg = `Provide a value for ${scope} exclude.`;
+          return;
+        }
+        try {
+          await this.postJSON(`v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`, {});
+          this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}`;
+          if (isChallenge) this.challengeExcludeValue = '';
+          else this.wafExcludeValue = '';
+          await this.refreshExcludeLists();
+        } catch (err) {
+          this.actionMsg = `${scope.toUpperCase()} exclude add failed: ${err}`;
+          console.error('[cfm-admin] exclude add failed', scope, err);
+        }
+      },
+      async removeExclude(scope, entry) {
+        if (!entry?.value || !entry?.type) return;
+        try {
+          await this.postJSON(`v1/${scope}/exclude/remove?type=${encodeURIComponent(entry.type)}&value=${encodeURIComponent(entry.value)}`, {});
+          this.actionMsg = `${scope.toUpperCase()} exclude removed: ${entry.type}=${entry.value}`;
+          await this.refreshExcludeLists();
+        } catch (err) {
+          this.actionMsg = `${scope.toUpperCase()} exclude remove failed: ${err}`;
+          console.error('[cfm-admin] exclude remove failed', scope, err);
+        }
+      },
       async runAnalyze(mode = this.analyzeMode) {
         const target = String(this.analyzeTarget || '').trim();
         if (!target) {
@@ -383,6 +428,7 @@
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
           await this.refreshChallengeStatuses();
+          await this.refreshExcludeLists();
 
           if (!this.activeHost && this.topShort[0]?.host) {
             await this.loadHost(this.topShort[0].host, false);
