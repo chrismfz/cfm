@@ -376,7 +376,25 @@ end
 --   * always inspect args
 --   * inspect body only for textual payloads
 --   * skip multipart/form-data bodies (binary uploads are noisy by design)
-local function detect_ctrl_chars(args, body, headers)
+local function is_known_binaryish_telemetry_uri(uri)
+  local u = lower(uri or "")
+  if u == "" then return false end
+
+  -- WordPress Optimization Detective web-vitals endpoint.
+  -- This endpoint can legitimately carry compressed/packed metric payloads.
+  if u:match("^/wp%-json/optimization%-detective/")
+     and has(u, "/url%-metrics:store") then
+    return true
+  end
+
+  return false
+end
+
+local function detect_ctrl_chars(args, body, headers, uri)
+  if is_known_binaryish_telemetry_uri(uri) then
+    return false
+  end
+
   local a = args or ""
   if a ~= "" and a:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
     return true
@@ -909,6 +927,8 @@ local function detect_bad_ua_scored(headers, uri, method)
   -- SCORED: accumulate weak signals
   local score = 0
   local tags  = {}
+  local ul = lower(uri or "")
+  local m = lower(method or "")
 
   -- Signal 1: UA quality (+2 for empty or known generic lib)
   if ua == "" or ual:match("^%s*$") then
@@ -927,57 +947,84 @@ local function detect_bad_ua_scored(headers, uri, method)
   if score == 0 then return 0, nil end
 
   -- Signal 2: HEAD method (+1) - cheap existence probe used by scanners
-  local m = lower(method or "")
   if m == "head" then
     score = score + 1; tags[#tags+1] = "HEAD"
   end
 
-  -- Signal 3: no Accept header (+1) - every real browser always sends one
-  local accept = headers["accept"] or headers["Accept"] or ""
-  if accept == "" then
-    score = score + 1; tags[#tags+1] = "NO_ACCEPT"
-  end
+  -- Pre-compute URI risk class used by header-quality scoring.
+  local uri_sensitive = false
+  local uri_backup = false
 
-  -- Signal 4: no Referer on a non-trivial URI (+1)
-  -- Skip scoring on root, common entry points, and static assets
-  local ul = lower(uri or "")
-  local is_entry = (ul == "/" or ul == ""
-    or ul:match("%.css$") or ul:match("%.js$")  or ul:match("%.ico$")
-    or ul:match("%.png$") or ul:match("%.jpg$") or ul:match("%.gif$")
-    or ul:match("%.svg$") or ul:match("%.woff"))
-  if not is_entry and ref == "" then
-    score = score + 1; tags[#tags+1] = "NO_REFERER"
-  end
+  if has(ul, "/.git/")             then uri_sensitive = true end
+  if has(ul, "/.env")              then uri_sensitive = true end
+  if has(ul, "/wp-config.php")     then uri_sensitive = true end
+  if has(ul, "/.htaccess")         then uri_sensitive = true end
+  if has(ul, "/.htpasswd")         then uri_sensitive = true end
+  if has(ul, "/config.php")        then uri_sensitive = true end
+  if has(ul, "/configuration.php") then uri_sensitive = true end
+  if has(ul, "/settings.php")      then uri_sensitive = true end
 
-  -- Signal 5: URI targets a high-value sensitive file (+4)
-  local ul_sensitive = false
-  if has(ul, "/.git/")             then ul_sensitive = true; tags[#tags+1] = "URI_GIT" end
-  if has(ul, "/.env")              then ul_sensitive = true; tags[#tags+1] = "URI_ENV" end
-  if has(ul, "/wp-config.php")     then ul_sensitive = true; tags[#tags+1] = "URI_WPCONFIG" end
-  if has(ul, "/.htaccess")         then ul_sensitive = true; tags[#tags+1] = "URI_HTACCESS" end
-  if has(ul, "/.htpasswd")         then ul_sensitive = true; tags[#tags+1] = "URI_HTPASSWD" end
-  if has(ul, "/config.php")        then ul_sensitive = true; tags[#tags+1] = "URI_CONFIG_PHP" end
-  if has(ul, "/configuration.php") then ul_sensitive = true; tags[#tags+1] = "URI_JOOMLA_CFG" end
-  if has(ul, "/settings.php")      then ul_sensitive = true; tags[#tags+1] = "URI_SETTINGS_PHP" end
-  if ul_sensitive then score = score + 4 end
-
-  -- Signal 6: URI targets a credential / backup artifact (+3)
-  -- Archives only scored when inside a backup-like path to avoid
-  -- flagging legitimate CDN or media ZIP downloads.
-  local ul_backup = false
   if ul:match("%.sql$") or ul:match("%.sql%.gz$") or ul:match("%.sql%.zip$") then
-    ul_backup = true; tags[#tags+1] = "URI_SQL_DUMP"
+    uri_backup = true
   end
   if ul:match("password") or ul:match("credential") or ul:match("passwd") then
-    ul_backup = true; tags[#tags+1] = "URI_CRED_FILE"
+    uri_backup = true
   end
   local in_backup_path = has(ul, "/backup") or has(ul, "/bak/") or has(ul, "/old/")
                       or has(ul, "/restore") or has(ul, "/archive")
   if in_backup_path and (ul:match("%.zip$") or ul:match("%.tar$") or ul:match("%.gz$")
                       or ul:match("%.rar$") or ul:match("%.tgz$")) then
-    ul_backup = true; tags[#tags+1] = "URI_BACKUP_ARCHIVE"
+    uri_backup = true
   end
-  if ul_backup then score = score + 3 end
+
+  local strict_header_scoring = (m ~= "get" and m ~= "head") or uri_sensitive or uri_backup
+
+  -- Signal 3: no Accept header (+1)
+  -- Applied only on higher-risk request context to avoid FP on benign crawlers.
+  local accept = headers["accept"] or headers["Accept"] or ""
+  if accept == "" and strict_header_scoring then
+    score = score + 1; tags[#tags+1] = "NO_ACCEPT"
+  end
+
+  -- Signal 4: no Referer on a non-trivial URI (+1)
+  -- Skip scoring on root, common entry points, and static assets
+  local is_entry = (ul == "/" or ul == ""
+    or ul:match("%.css$") or ul:match("%.js$")  or ul:match("%.ico$")
+    or ul:match("%.png$") or ul:match("%.jpg$") or ul:match("%.gif$")
+    or ul:match("%.svg$") or ul:match("%.woff"))
+  if strict_header_scoring and not is_entry and ref == "" then
+    score = score + 1; tags[#tags+1] = "NO_REFERER"
+  end
+
+  -- Signal 5: URI targets a high-value sensitive file (+4)
+  if uri_sensitive then
+    if has(ul, "/.git/")             then tags[#tags+1] = "URI_GIT" end
+    if has(ul, "/.env")              then tags[#tags+1] = "URI_ENV" end
+    if has(ul, "/wp-config.php")     then tags[#tags+1] = "URI_WPCONFIG" end
+    if has(ul, "/.htaccess")         then tags[#tags+1] = "URI_HTACCESS" end
+    if has(ul, "/.htpasswd")         then tags[#tags+1] = "URI_HTPASSWD" end
+    if has(ul, "/config.php")        then tags[#tags+1] = "URI_CONFIG_PHP" end
+    if has(ul, "/configuration.php") then tags[#tags+1] = "URI_JOOMLA_CFG" end
+    if has(ul, "/settings.php")      then tags[#tags+1] = "URI_SETTINGS_PHP" end
+    score = score + 4
+  end
+
+  -- Signal 6: URI targets a credential / backup artifact (+3)
+  -- Archives only scored when inside a backup-like path to avoid
+  -- flagging legitimate CDN or media ZIP downloads.
+  if uri_backup then
+    if ul:match("%.sql$") or ul:match("%.sql%.gz$") or ul:match("%.sql%.zip$") then
+      tags[#tags+1] = "URI_SQL_DUMP"
+    end
+    if ul:match("password") or ul:match("credential") or ul:match("passwd") then
+      tags[#tags+1] = "URI_CRED_FILE"
+    end
+    if in_backup_path and (ul:match("%.zip$") or ul:match("%.tar$") or ul:match("%.gz$")
+                        or ul:match("%.rar$") or ul:match("%.tgz$")) then
+      tags[#tags+1] = "URI_BACKUP_ARCHIVE"
+    end
+    score = score + 3
+  end
 
   return score, table.concat(tags, "+")
 end
@@ -1168,9 +1215,12 @@ local function detect_ssrf_proto(args, body)
   if has(s, "ftp://")    then return "SSRF_FTP" end
 
   -- Octal IPv4 notation: 0177.0.0.1 = 127.0.0.1
-  if s:match("0%d+%.0%d+%.") then return "SSRF_OCTAL_IP" end
+  -- Restrict to URL-host context (://) to avoid ad/tracking token false positives.
+  if s:match("://0[0-7]+%.0[0-7]+%.0[0-7]+%.0[0-7]+") then
+    return "SSRF_OCTAL_IP"
+  end
   -- Hex IPv4: 0x7f000001
-  if s:match("0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%f[^0-9a-f]") then
+  if s:match("://0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%f[^0-9a-f]") then
     return "SSRF_HEX_IP"
   end
   -- Decimal longform IP inside a URL: ://2130706433 (= 127.0.0.1)
@@ -1545,7 +1595,7 @@ function _M.check(ctx)
   -- ── 12) Control chars ─────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_ctrl_chars, "logonly")
-    if mode ~= "disabled" and detect_ctrl_chars(args, body, headers) then
+    if mode ~= "disabled" and detect_ctrl_chars(args, body, headers, uri) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       return true, "WAF_CTRL_CHARS", ttl, mode
     end
