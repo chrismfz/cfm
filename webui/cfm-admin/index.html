@@ -94,7 +94,7 @@
       </section>
 
       <section class="card">
-        <h2>Suspicious vhosts</h2>
+        <h2>Suspicious + challenged vhosts</h2>
         <div class="table-wrap">
           <table>
             <thead>
@@ -118,7 +118,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in suspicious" :key="row.host" class="clickable" @click="loadHost(row.host)">
+              <tr v-for="row in suspiciousAndChallenged" :key="row.host" class="clickable" @click="loadHost(row.host)">
                 <td>{{ row.host || '-' }}</td>
                 <td>{{ num(row.score) }}</td>
                 <td class="truncate" :title="reasonText(row)">{{ reasonText(row) }}</td>
@@ -134,14 +134,101 @@
                 <td>{{ num(row.ua_diversity) }}</td>
                 <td>{{ num(row.path_diversity) }}</td>
                 <td>{{ pct(row.post_ratio) }}</td>
-                <td class="actions-cell"><button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button></td>
+                <td class="actions-cell">
+                  <span class="pill warn" v-if="row.fromSuspicious">suspicious</span>
+                  <span class="pill danger" v-if="challengeState(row.host)">challenged</span>
+                  <span class="pill" v-if="challengeModeLabel(row.host)">{{ challengeModeLabel(row.host) }}</span>
+                  <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                  <button class="btn-quiet" @click.stop="manualChallenge(row.host)">Manual challenge</button>
+                  <button class="btn-quiet" @click.stop="manualUnchallenge(row.host)">Manual unchallenge</button>
+                </td>
               </tr>
-              <tr v-if="!suspicious.length"><td colspan="16" class="muted">No suspicious hosts.</td></tr>
+              <tr v-if="!suspiciousAndChallenged.length"><td colspan="16" class="muted">No suspicious/challenged hosts.</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
+      <section class="card">
+        <h2>Long window top</h2>
+        <div class="toolbar">
+          <label for="long-top-limit">Top</label>
+          <input
+            id="long-top-limit"
+            class="input"
+            type="number"
+            min="1"
+            max="500"
+            step="1"
+            v-model.number="longTopLimit"
+            @change="refreshAll"
+          />
+          <span class="muted">hosts</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Host</th><th>Score</th><th>Reasons</th><th>RPS</th><th>err%</th><th>bot%</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in longTop" :key="row.host" class="clickable" @click="loadHost(row.host)">
+                <td>{{ row.host || '-' }}</td>
+                <td>{{ num(row.score) }}</td>
+                <td class="truncate" :title="reasonText(row)">{{ reasonText(row) }}</td>
+                <td>{{ num(row.rps) }}</td>
+                <td>{{ pct(row.err_ratio) }}</td>
+                <td>{{ pct(row.bot_ratio) }}</td>
+                <td class="actions-cell">
+                  <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                </td>
+              </tr>
+              <tr v-if="!longTop.length"><td colspan="7" class="muted">No long-window rows.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Global Top IPs</h2>
+        <div class="toolbar">
+          <label for="ip-short-limit">Top</label>
+          <input
+            id="ip-short-limit"
+            class="input"
+            type="number"
+            min="1"
+            max="500"
+            step="1"
+            v-model.number="ipShortLimit"
+            @change="refreshAll"
+          />
+          <span class="muted">IPs</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in ipShort" :key="row.ip" class="clickable" @click="loadIP(row.ip)">
+                <td><code>{{ row.ip }}</code></td>
+                <td>{{ row.req }}</td>
+                <td>{{ row.vhosts }}</td>
+                <td>{{ num(row.rps) }}</td>
+                <td>{{ num(row.score) }}</td>
+                <td>{{ row.country || '-' }}</td>
+                <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
+                <td class="actions-cell">
+                  <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)">Challenge</button>
+                  <button class="btn-danger" @click.stop="blockIP(row.ip)">Block 1h</button>
+                  <button class="btn-quiet" @click.stop="analyzeIP(row.ip)">Analyze</button>
+                </td>
+              </tr>
+              <tr v-if="!ipShort.length"><td colspan="8" class="muted">No IP rows.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
       <section class="card wide" id="drilldown-card">
         <h2>Vhost drilldown</h2>
         <p class="muted" v-if="activeHost">Drilldown for: <strong>{{ activeHost }}</strong></p>
@@ -208,79 +295,6 @@
           <pre>{{ rawDrilldownPretty }}</pre>
         </details>
         <pre v-else>Select a host to load drilldown details.</pre>
-      </section>
-
-      <section class="card">
-        <h2>Long window top</h2>
-        <div class="toolbar">
-          <label for="long-top-limit">Top</label>
-          <input
-            id="long-top-limit"
-            class="input"
-            type="number"
-            min="1"
-            max="500"
-            step="1"
-            v-model.number="longTopLimit"
-            @change="refreshAll"
-          />
-          <span class="muted">hosts</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Host</th><th>Score</th><th>Reasons</th><th>RPS</th><th>err%</th><th>bot%</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in longTop" :key="row.host" class="clickable" @click="loadHost(row.host)">
-                <td>{{ row.host || '-' }}</td>
-                <td>{{ num(row.score) }}</td>
-                <td class="truncate" :title="reasonText(row)">{{ reasonText(row) }}</td>
-                <td>{{ num(row.rps) }}</td>
-                <td>{{ pct(row.err_ratio) }}</td>
-                <td>{{ pct(row.bot_ratio) }}</td>
-              </tr>
-              <tr v-if="!longTop.length"><td colspan="6" class="muted">No long-window rows.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Global Top IPs</h2>
-        <div class="toolbar">
-          <label for="ip-short-limit">Top</label>
-          <input
-            id="ip-short-limit"
-            class="input"
-            type="number"
-            min="1"
-            max="500"
-            step="1"
-            v-model.number="ipShortLimit"
-            @change="refreshAll"
-          />
-          <span class="muted">IPs</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in ipShort" :key="row.ip" class="clickable" @click="loadIP(row.ip)">
-                <td><code>{{ row.ip }}</code></td>
-                <td>{{ row.req }}</td>
-                <td>{{ row.vhosts }}</td>
-                <td>{{ num(row.rps) }}</td>
-                <td>{{ num(row.score) }}</td>
-                <td>{{ row.country || '-' }}</td>
-                <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
-              </tr>
-              <tr v-if="!ipShort.length"><td colspan="7" class="muted">No IP rows.</td></tr>
-            </tbody>
-          </table>
-        </div>
       </section>
 
       <section class="card wide">
