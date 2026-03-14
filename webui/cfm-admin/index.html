@@ -229,6 +229,64 @@
           </table>
         </div>
       </section>
+
+      <section class="card wide">
+        <h2>Dynamic excludes (Challenge / WAF)</h2>
+        <p class="muted">Manage runtime excludes that are persisted on the server and reused by CLI/API.</p>
+        <div class="exclude-grid">
+          <section class="mini-card">
+            <h3>Challenge excludes</h3>
+            <div class="toolbar">
+              <select class="input" v-model="challengeExcludeType">
+                <option value="host">host</option>
+                <option value="path">path</option>
+              </select>
+              <input class="input input-wide" type="text" v-model.trim="challengeExcludeValue" placeholder="example.com or /healthz" />
+              <button class="btn-quiet" @click="addExclude('challenge')">Add</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Type</th><th>Value</th><th>Created</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in challengeExcludes" :key="`ch-${row.type}-${row.value}`">
+                    <td>{{ row.type }}</td>
+                    <td><code>{{ row.value }}</code></td>
+                    <td>{{ row.created_at || '-' }}</td>
+                    <td><button class="btn-quiet" @click="removeExclude('challenge', row)">Remove</button></td>
+                  </tr>
+                  <tr v-if="!challengeExcludes.length"><td colspan="4" class="muted">No challenge excludes.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="mini-card">
+            <h3>WAF excludes</h3>
+            <div class="toolbar">
+              <select class="input" v-model="wafExcludeType">
+                <option value="host">host</option>
+                <option value="path">path</option>
+              </select>
+              <input class="input input-wide" type="text" v-model.trim="wafExcludeValue" placeholder="example.com or /api/callback" />
+              <button class="btn-quiet" @click="addExclude('waf')">Add</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Type</th><th>Value</th><th>Created</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in wafExcludes" :key="`waf-${row.type}-${row.value}`">
+                    <td>{{ row.type }}</td>
+                    <td><code>{{ row.value }}</code></td>
+                    <td>{{ row.created_at || '-' }}</td>
+                    <td><button class="btn-quiet" @click="removeExclude('waf', row)">Remove</button></td>
+                  </tr>
+                  <tr v-if="!wafExcludes.length"><td colspan="4" class="muted">No WAF excludes.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
       <section class="card wide" id="drilldown-card">
         <h2>Vhost drilldown</h2>
         <p class="muted" v-if="activeHost">Drilldown for: <strong>{{ activeHost }}</strong></p>

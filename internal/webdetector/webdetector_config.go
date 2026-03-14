@@ -186,6 +186,10 @@ type Config struct {
 	ChallengeSubnetCap         int           // CHALLENGE_SUBNET_CAP
 	ChallengeSubnetSameHost    bool          // CHALLENGE_SUBNET_SAME_HOST
 
+	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
+	ChallengeExcludeStorePath string // CHALLENGE_EXCLUDE_STORE_PATH
+	WAFExcludeStorePath       string // WAF_EXCLUDE_STORE_PATH
+
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -210,6 +214,12 @@ func (c *Config) FillDefaults() {
 	}
 	if c.APIListen == "" {
 		c.APIListen = "127.0.0.1:9070"
+	}
+	if c.ChallengeExcludeStorePath == "" {
+		c.ChallengeExcludeStorePath = "/var/lib/cfm/webdetector_challenge_excludes.json"
+	}
+	if c.WAFExcludeStorePath == "" {
+		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
 	}
 	if c.Glob == "" {
 		c.Glob = "*.log"
