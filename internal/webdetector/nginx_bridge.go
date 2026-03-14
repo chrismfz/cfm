@@ -54,13 +54,13 @@ type NginxBridge struct {
 	client *http.Client
 	// started bool
 
-	mu         sync.RWMutex
-	ipState    map[string]bridgeIPEntry    // ip   → current decision
-	vhState    map[string]bridgeVhostEntry // host → current decision
-	okState    map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
-	bypassFunc     func(string) bool // set once at startup; no lock needed (written before serving starts)
-	hostBypassFunc func(string) bool // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
-	stats      BridgeStats
+	mu             sync.RWMutex
+	ipState        map[string]bridgeIPEntry    // ip   → current decision
+	vhState        map[string]bridgeVhostEntry // host → current decision
+	okState        map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
+	bypassFunc     func(string) bool           // set once at startup; no lock needed (written before serving starts)
+	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
+	stats          BridgeStats
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
@@ -73,6 +73,10 @@ type NginxBridge struct {
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
 	// Called without b.mu held.
 	OnObserve func(ip, host, uri, method string, status int, reason string)
+
+	// IsWAFExcluded is queried by Lua via /nginx/waf/excluded for per-request
+	// pre-WAF bypass checks based on dynamic exclude rules.
+	IsWAFExcluded func(host, uri string) bool
 }
 
 // refreshSkew is the minimum remaining time before we bother to re-push
@@ -640,6 +644,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/vhost/clear", b.handleVhostClear)
 	mux.HandleFunc("/nginx/ok/touch", b.handleOKTouch)
 	mux.HandleFunc("/nginx/observe", b.handleObserve)
+	mux.HandleFunc("/nginx/waf/excluded", b.handleWAFExcluded)
 	mux.HandleFunc("/nginx/status", b.handleStatus)
 
 	srv := &http.Server{
@@ -959,6 +964,25 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
+func (b *NginxBridge) handleWAFExcluded(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	host := normalizeHost(r.URL.Query().Get("host"))
+	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
+	excluded := false
+	if b.IsWAFExcluded != nil {
+		excluded = b.IsWAFExcluded(host, uri)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"excluded": excluded})
+}
+
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -975,19 +999,18 @@ func (b *NginxBridge) checkToken(r *http.Request) bool {
 	return r.Header.Get("X-CFM-Token") == b.cfg.Token
 }
 
-
 // GetIPDecision returns the current action and reason for an IP from the
 // in-process state. Used by the challenge server for post-intercept logging.
 // Returns ("", "") if the IP has no active entry.
 func (b *NginxBridge) GetIPDecision(ip string) (action, reason string) {
-    if b == nil {
-        return "", ""
-    }
-    b.mu.RLock()
-    e, ok := b.ipState[ip]
-    b.mu.RUnlock()
-    if !ok || time.Now().After(e.Expires) {
-        return "", ""
-    }
-    return e.Action, e.Reason
+	if b == nil {
+		return "", ""
+	}
+	b.mu.RLock()
+	e, ok := b.ipState[ip]
+	b.mu.RUnlock()
+	if !ok || time.Now().After(e.Expires) {
+		return "", ""
+	}
+	return e.Action, e.Reason
 }

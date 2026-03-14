@@ -118,6 +118,28 @@ func (s *excludeStore) MatchHost(host string) bool {
 	return false
 }
 
+func (s *excludeStore) MatchPath(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.entries {
+		if e.Type != "path" {
+			continue
+		}
+		ok, err := filepath.Match(e.Value, path)
+		if err == nil && ok {
+			return true
+		}
+		if !strings.ContainsAny(e.Value, "*?") && strings.Contains(path, e.Value) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *excludeStore) load() {
 	if s == nil || s.path == "" {
 		return
@@ -163,12 +185,15 @@ func (s *excludeStore) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	return os.Chmod(s.path, 0o600)
 }
