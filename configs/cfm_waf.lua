@@ -852,15 +852,15 @@ local function detect_cmd_payload(args)
   local function has_backtick_cmd(s)
     -- Require an actual backtick command-substitution shape to avoid
     -- flagging accidental trailing backticks in business app query params.
-    local inner = s:match("`([^`]+)`")
-    if not inner then return false end
+    -- Scan all backtick pairs so one benign pair cannot hide a later malicious one.
+    for inner in s:gmatch("`([^`]+)`") do
+      if inner:match("^%s*(wget|curl|bash|sh|nc|ncat|perl|python|php|ruby|lua|id|uname|whoami|cat|ls|ping)%f[^%a]") then
+        return true
+      end
 
-    if inner:match("^%s*(wget|curl|bash|sh|nc|ncat|perl|python|php|ruby|lua|id|uname|whoami|cat|ls|ping)%f[^%a]") then
-      return true
-    end
-
-    if inner:find(";", 1, true) or inner:find("|", 1, true) or inner:find("&&", 1, true) then
-      return true
+      if inner:find(";", 1, true) or inner:find("|", 1, true) or inner:find("&&", 1, true) then
+        return true
+      end
     end
 
     return false
