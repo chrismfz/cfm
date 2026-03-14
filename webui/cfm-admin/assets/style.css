@@ -87,11 +87,13 @@ table {
 }
 th, td { padding: .45rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 tr.clickable:hover { background: #19253a; cursor: pointer; }
-.actions-cell { white-space: nowrap; }
+.actions-cell { white-space: normal; display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
 .muted { color: var(--muted); }
 .pill {
   display: inline-block;
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: rgba(38, 52, 73, .2);
   border-radius: 999px;
   padding: .1rem .45rem;
   font-size: .75rem;

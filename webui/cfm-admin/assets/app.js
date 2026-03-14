@@ -10,6 +10,7 @@
         topShort: [],
         topShortLimit: 20,
         suspicious: [],
+        activeChallengeVhosts: [],
         longTop: [],
         longTopLimit: 20,
         ipShort: [],
@@ -102,6 +103,47 @@
         if (!this.analyzeResult) return '';
         return JSON.stringify(this.analyzeResult, null, 2);
       },
+      suspiciousAndChallenged() {
+        const byHost = {};
+
+        for (const row of this.suspicious) {
+          if (!row?.host) continue;
+          byHost[row.host] = {
+            ...row,
+            source: 'suspicious',
+            fromSuspicious: true,
+            fromChallenge: false,
+          };
+        }
+
+        for (const row of this.activeChallengeVhosts) {
+          const host = row?.host;
+          if (!host) continue;
+          const existing = byHost[host] || { host };
+          const mergedReasons = [
+            ...(Array.isArray(existing.reasons) ? existing.reasons : []),
+            ...(Array.isArray(row.reasons) ? row.reasons : []),
+          ];
+          byHost[host] = {
+            ...existing,
+            score: existing.score ?? row.score,
+            rps: existing.rps ?? row.rps,
+            unique_ips: existing.unique_ips ?? row.uniq_ip,
+            reasons: mergedReasons.length ? Array.from(new Set(mergedReasons)) : existing.reasons,
+            challenge_mode: row.mode,
+            fromSuspicious: Boolean(existing.fromSuspicious),
+            fromChallenge: true,
+            source: existing.fromSuspicious ? 'both' : 'challenged',
+          };
+        }
+
+        return Object.values(byHost).sort((a, b) => {
+          const aCh = this.challengeState(a.host) ? 1 : 0;
+          const bCh = this.challengeState(b.host) ? 1 : 0;
+          if (bCh !== aCh) return bCh - aCh;
+          return (Number(b.score) || 0) - (Number(a.score) || 0);
+        });
+      },
     },
     methods: {
       extractRows(payload, key = 'rows') {
@@ -187,8 +229,19 @@
         const s = this.challengeStatus[host] || {};
         return Boolean(s.manual_active || s.auto_active);
       },
+      challengeModeLabel(host) {
+        const s = this.challengeStatus[host] || {};
+        if (s.manual_active && s.auto_active) return 'manual+auto';
+        if (s.manual_active) return 'manual';
+        if (s.auto_active) return 'auto';
+        return '';
+      },
       async refreshChallengeStatuses() {
-        const hosts = this.topShort.slice(0, 25).map((r) => r.host).filter(Boolean);
+        const hosts = Array.from(new Set([
+          ...this.topShort.slice(0, 30).map((r) => r.host),
+          ...this.suspicious.slice(0, 100).map((r) => r.host),
+          ...this.activeChallengeVhosts.slice(0, 200).map((r) => r.host),
+        ].filter(Boolean)));
         const next = {};
         await Promise.all(
           hosts.map(async (host) => {
@@ -215,6 +268,52 @@
         } catch (err) {
           this.actionMsg = `Challenge action failed for ${host}: ${err}`;
           console.error('[cfm-admin] challenge action failed', err);
+        }
+      },
+      async manualChallenge(host) {
+        if (!host) return;
+        try {
+          await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui-manual' });
+          this.actionMsg = `Manual challenge enabled for ${host}`;
+          this.challengeStatus[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
+          await this.refreshAll();
+        } catch (err) {
+          this.actionMsg = `Manual challenge failed for ${host}: ${err}`;
+          console.error('[cfm-admin] manual challenge failed', err);
+        }
+      },
+      async manualUnchallenge(host) {
+        if (!host) return;
+        try {
+          await this.postJSON('v1/challenge/vhost/remove', { host });
+          this.actionMsg = `Manual challenge removed for ${host}`;
+          this.challengeStatus[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
+          await this.refreshAll();
+        } catch (err) {
+          this.actionMsg = `Manual unchallenge failed for ${host}: ${err}`;
+          console.error('[cfm-admin] manual unchallenge failed', err);
+        }
+      },
+      async analyzeIP(ip) {
+        if (!ip) return;
+        this.analyzeTarget = ip;
+        this.analyzeMode = 'ip';
+        await this.runAnalyze('ip');
+      },
+      async challengeIPTopHost(ip) {
+        if (!ip) return;
+        try {
+          const details = await this.fetchJSON(`v1/webdet/ip-drilldown?ip=${encodeURIComponent(ip)}`);
+          const topHost = Array.isArray(details?.hosts) ? details.hosts[0]?.key : '';
+          if (!topHost) {
+            this.actionMsg = `No host found for IP ${ip} to challenge`;
+            return;
+          }
+          await this.manualChallenge(topHost);
+          this.actionMsg = `Manual challenge enabled for top host ${topHost} (IP ${ip})`;
+        } catch (err) {
+          this.actionMsg = `Challenge failed for IP ${ip}: ${err}`;
+          console.error('[cfm-admin] challenge from IP failed', err);
         }
       },
       async blockIP(ip) {
@@ -268,18 +367,20 @@
           this.longTopLimit = longLimit;
           this.ipShortLimit = ipLimit;
           this.hotIPsLimit = hotLimit;
-          const [topShort, suspicious, longTop, ipShort, hotIPs] = await Promise.all([
+          const [topShort, suspicious, longTop, ipShort, hotIPs, activeChallengeVhosts] = await Promise.all([
             this.fetchJSONSafe(`v1/webdet/top-short?limit=${topLimit}`, { rows: [] }),
             this.fetchJSONSafe(`v1/webdet/suspicious?limit=${longLimit}`, { rows: [] }),
             this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] }),
             this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] }),
             this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, []),
+            this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
           ]);
           this.topShort = this.extractRows(topShort, 'rows');
           this.suspicious = this.extractRows(suspicious, 'rows');
           this.longTop = this.extractRows(longTop, 'rows');
           this.ipShort = this.extractRows(ipShort, 'short');
           this.hotIPs = this.extractRows(hotIPs, 'rows');
+          this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
           await this.refreshChallengeStatuses();
 
