@@ -104,7 +104,7 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
 **live configs** under `/etc/cfm/`.
 
 ```text
-configs/
+  configs/
   cfm.conf                  # main daemon config (ports policy, nft, sysctl, maxmind, api, logs)
   detectors.conf            # detectors + thresholds + per-section BLOCK policies
   notify.conf               # notifier channels + dedupe + per-detector routing
@@ -112,6 +112,7 @@ configs/
   cfm.allow / cfm.deny      # static allow/deny lists (IP/CIDR/host)
   cfm.ignore                # IPs that must never be blocked (global ignore list)
   cfm.dyndns                # hostnames resolved periodically and added to allow
+  cfm-admin.htpasswd        # optional OpenResty /cfm-admin BasicAuth file (shipped empty)
   httpd-cfm.conf            # Apache LogFormat for WebDetector TSV
   nginx-cfm.conf            # nginx log_format for WebDetector TSV
   cfm-modsec.conf           # ModSecurity integration (file uploads → cfm-scan.sh)
@@ -119,6 +120,9 @@ configs/
   trusted_proxies.conf      # real_ip / trusted proxy include for Cloudflare/LB setups
   openresty-example*.conf   # full OpenResty "in-path WAF/challenge" examples (+ optional cache)
   webdetector_*.txt         # webdetector path lists: challenge_paths, malpaths, exclude, etc.
+  
+  webui/cfm-admin/          # starter Vue-based /cfm-admin dashboard (WebTop MVP)
+  docs/cfm-admin-webtop.md  # deployment/auth notes for /cfm-admin
 packaging/
   debian/DEBIAN/*           # postinst/prerm/postrm, conffiles, etc.
   rpm/SPECS/cfm.spec
