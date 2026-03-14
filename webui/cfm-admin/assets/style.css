@@ -75,6 +75,8 @@ button:disabled { opacity: .65; cursor: default; }
   border-radius: 8px;
   padding: .35rem .5rem;
 }
+.input-small { width: 68px; }
+.input-wide { width: 260px; max-width: 100%; }
 .card.wide { grid-column: 1 / -1; }
 .placeholder { min-height: 120px; opacity: .9; }
 .table-wrap { overflow: auto; }
@@ -115,7 +117,10 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
 .drill-grid {
   display: grid;
   gap: .8rem;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: minmax(260px, 1fr) minmax(460px, 2fr);
+  grid-template-areas:
+    "metrics ips"
+    "paths agents";
   margin-bottom: .7rem;
 }
 .mini-card {
@@ -131,6 +136,27 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
 .mini-table th, .mini-table td {
   padding: .35rem .4rem;
   font-size: .84rem;
+}
+.metrics-card { grid-area: metrics; }
+.ips-card { grid-area: ips; }
+.path-card { grid-area: paths; }
+.agent-card { grid-area: agents; }
+.compact-table th,
+.compact-table td {
+  font-size: .78rem;
+  padding: .28rem .35rem;
+}
+.long-score {
+  margin-top: .5rem;
+  border-top: 1px solid var(--border);
+  padding-top: .45rem;
+  font-size: .8rem;
+}
+.truncate {
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .raw-json summary {
   cursor: pointer;
@@ -148,4 +174,13 @@ pre {
 }
 @media (max-width: 1000px) {
   .layout { grid-template-columns: 1fr; }
+  .drill-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "metrics"
+      "ips"
+      "paths"
+      "agents";
+  }
+  .truncate { max-width: 180px; }
 }
