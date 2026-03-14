@@ -6,6 +6,7 @@
   --muted: #9fb0c3;
   --accent: #4da3ff;
   --border: #263449;
+  --danger: #d9516f;
 }
 * { box-sizing: border-box; }
 body {
@@ -25,9 +26,10 @@ body {
   top: 0;
   backdrop-filter: blur(8px);
   background: rgba(11,16,32,.9);
+  z-index: 20;
 }
 .topbar h1 { margin: 0; font-size: 1.2rem; }
-.meta { display: flex; gap: .8rem; align-items: center; }
+.meta { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 button {
   background: var(--accent);
   color: white;
@@ -37,6 +39,16 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: .65; cursor: default; }
+.btn-quiet {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+.btn-danger {
+  background: #5b1f2b;
+  border: 1px solid #9a3b4f;
+  color: #ffd9e0;
+}
 .layout {
   display: grid;
   gap: 1rem;
@@ -57,12 +69,60 @@ table {
   border-collapse: collapse;
   font-size: .9rem;
 }
-th, td { padding: .45rem; border-bottom: 1px solid var(--border); text-align: left; }
+th, td { padding: .45rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 tr.clickable:hover { background: #19253a; cursor: pointer; }
+.actions-cell { white-space: nowrap; }
 .muted { color: var(--muted); }
+.pill {
+  display: inline-block;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: .1rem .45rem;
+  font-size: .75rem;
+  margin-right: .3rem;
+}
+.pill.warn {
+  color: #ffd27c;
+  border-color: #91651f;
+  background: rgba(170, 115, 22, .15);
+}
+.pill.danger {
+  color: #ffc9d3;
+  border-color: #8f3b4d;
+  background: rgba(217, 81, 111, .15);
+}
 .list { margin: 0; padding: 0; list-style: none; display: grid; gap: .55rem; }
 .list li { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .list button { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+.statusline {
+  margin: 0 0 .6rem;
+  color: #8dd0ff;
+}
+.drill-grid {
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  margin-bottom: .7rem;
+}
+.mini-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0a1426;
+  padding: .6rem;
+}
+.mini-card h3 {
+  margin: 0 0 .5rem;
+  font-size: .95rem;
+}
+.mini-table th, .mini-table td {
+  padding: .35rem .4rem;
+  font-size: .84rem;
+}
+.raw-json summary {
+  cursor: pointer;
+  color: #a7cbef;
+  margin-bottom: .4rem;
+}
 pre {
   margin: 0;
   max-height: 320px;

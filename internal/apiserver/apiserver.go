@@ -38,10 +38,10 @@ import (
 	"sync"
 	"time"
 
-	cfgpkg  "cfm/internal/config"
+	cfgpkg "cfm/internal/config"
+	mysqlpkg "cfm/internal/detectors/mysql"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
-	mysqlpkg "cfm/internal/detectors/mysql"
 )
 
 // ── package-level mux (shared with Phase 2 callers via Mux()) ────────────────
@@ -73,7 +73,6 @@ func Register(fn func(*http.ServeMux)) {
 	}
 	pending = append(pending, fn)
 }
-
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
@@ -118,6 +117,9 @@ func Start(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backend, cfgDir 
 	// CSF / Fail2Ban / Imunify cleanup (fire-and-forget, 20 s timeout).
 	// Full handler logic lives in unblock.go.
 	RegisterUnblock(m, be, cfgDir)
+	// ── /api/v1/firewall/block ──────────────────────────────────────────────
+	// Manual IP block endpoint used by admin UI quick actions.
+	RegisterBlock(m, be)
 
 	// ── MySQL governor (/api/v1/mysql/) ─────────────────────────────────────
 	// Governor already implements RegisterHTTP(mux) — just plug it in.
