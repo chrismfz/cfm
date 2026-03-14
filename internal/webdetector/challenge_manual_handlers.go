@@ -8,6 +8,8 @@ package webdetector
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -21,7 +23,7 @@ type chalVhostAddRequest struct {
 
 type chalVhostAddResponse struct {
 	Host      string    `json:"host"`
-	Status    string    `json:"status"`    // "active"
+	Status    string    `json:"status"` // "active"
 	ExpiresAt time.Time `json:"expires_at"`
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
@@ -31,19 +33,29 @@ type chalVhostAddResponse struct {
 // Body: { "host": "example.gr", "ttl": "30m", "reason": "manual" }
 // Also accepts query params: ?host=example.gr&ttl=30m&reason=manual
 func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request) {
-	var req chalVhostAddRequest
+	req := chalVhostAddRequest{
+		Host:   r.URL.Query().Get("host"),
+		TTL:    r.URL.Query().Get("ttl"),
+		Reason: r.URL.Query().Get("reason"),
+	}
 
 	// Accept both JSON body and query params.
 	ct := r.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var bodyReq chalVhostAddRequest
+		if err := json.NewDecoder(r.Body).Decode(&bodyReq); err != nil && !errors.Is(err, io.EOF) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}
-	} else {
-		req.Host   = r.URL.Query().Get("host")
-		req.TTL    = r.URL.Query().Get("ttl")
-		req.Reason = r.URL.Query().Get("reason")
+		if bodyReq.Host != "" {
+			req.Host = bodyReq.Host
+		}
+		if bodyReq.TTL != "" {
+			req.TTL = bodyReq.TTL
+		}
+		if bodyReq.Reason != "" {
+			req.Reason = bodyReq.Reason
+		}
 	}
 
 	req.Host = strings.TrimSpace(strings.ToLower(req.Host))
