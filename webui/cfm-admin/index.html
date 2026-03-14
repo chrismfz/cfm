@@ -14,7 +14,11 @@
       <h1>CFM Admin</h1>
       <div class="meta">
         <span>WebTop MVP</span>
-        <button @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
+        <span class="muted">Auto-refresh: <strong>{{ autoRefresh ? 'ON' : 'OFF' }}</strong></span>
+        <button class="btn-quiet" @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
+        <button class="btn-quiet" v-if="autoRefresh" @click="stopAutoRefresh">Stop</button>
+        <button class="btn-quiet" v-else @click="startAutoRefresh">Start</button>
+        <button class="btn-quiet" @click="logout" title="Basic-Auth logout is browser-dependent">Logout</button>
       </div>
     </header>
 
@@ -33,19 +37,28 @@
                 <th>5xx</th>
                 <th>Unique IPs</th>
                 <th>Score</th>
+                <th>Flags</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in topShort" :key="row.host" @click="loadHost(row.host)" class="clickable">
                 <td>{{ row.host || '-' }}</td>
                 <td>{{ num(row.rps) }}</td>
-                <td>{{ num(row.s2xx) }}</td>
-                <td>{{ num(row.s4xx) }}</td>
-                <td>{{ num(row.s5xx) }}</td>
+                <td>{{ num(row.rps_2xx) }}</td>
+                <td>{{ num(row.rps_4xx) }}</td>
+                <td>{{ num(row.rps_5xx) }}</td>
                 <td>{{ num(row.unique_ips) }}</td>
                 <td>{{ num(row.score) }}</td>
+                <td>
+                  <span class="pill warn" v-if="suspiciousHosts[row.host]">suspicious</span>
+                  <span class="pill danger" v-if="challengeState(row.host)">challenged</span>
+                </td>
+                <td class="actions-cell">
+                  <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                </td>
               </tr>
-              <tr v-if="!topShort.length"><td colspan="7" class="muted">No data yet.</td></tr>
+              <tr v-if="!topShort.length"><td colspan="9" class="muted">No data yet.</td></tr>
             </tbody>
           </table>
         </div>
@@ -57,6 +70,7 @@
           <li v-for="row in suspicious" :key="row.host">
             <button @click="loadHost(row.host)">{{ row.host }}</button>
             <span>score={{ num(row.score) }} • rps={{ num(row.rps) }}</span>
+            <button class="btn-quiet" @click="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
           </li>
           <li v-if="!suspicious.length" class="muted">No suspicious hosts.</li>
         </ul>
@@ -65,11 +79,74 @@
       <section class="card wide">
         <h2>Vhost drilldown</h2>
         <p class="muted">Click any host above to inspect.</p>
-        <pre>{{ drilldownPretty }}</pre>
+        <p v-if="actionMsg" class="statusline">{{ actionMsg }}</p>
+
+        <div class="drill-grid" v-if="shortDetail">
+          <section class="mini-card">
+            <h3>Key metrics</h3>
+            <table class="mini-table">
+              <tbody>
+                <tr v-for="m in keyMetrics" :key="m.label">
+                  <td>{{ m.label }}</td>
+                  <td>{{ m.value }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="mini-card" v-if="longDetail">
+            <h3>Long-window score</h3>
+            <p>Score: <strong>{{ num(longDetail.score) }}</strong></p>
+            <p class="muted" v-if="longReasons.length">Reasons: {{ longReasons.join(', ') }}</p>
+          </section>
+
+          <section class="mini-card" v-if="topIPs.length">
+            <h3>Top IPs</h3>
+            <table class="mini-table">
+              <thead><tr><th>IP</th><th>Count</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr v-for="ipRow in topIPs.slice(0, 8)" :key="ipRow.key">
+                  <td><code>{{ ipRow.key }}</code></td>
+                  <td>{{ ipRow.count }}</td>
+                  <td><button class="btn-danger" @click="blockIP(ipRow.key)">Block 1h</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="mini-card" v-if="topPaths.length">
+            <h3>Top paths</h3>
+            <table class="mini-table">
+              <thead><tr><th>Path</th><th>Count</th></tr></thead>
+              <tbody>
+                <tr v-for="p in topPaths.slice(0, 8)" :key="p.key"><td><code>{{ p.key }}</code></td><td>{{ p.count }}</td></tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="mini-card" v-if="topAgents.length">
+            <h3>Top user-agents</h3>
+            <table class="mini-table">
+              <thead><tr><th>User-Agent</th><th>Count</th></tr></thead>
+              <tbody>
+                <tr v-for="a in topAgents.slice(0, 8)" :key="a.key"><td>{{ a.key }}</td><td>{{ a.count }}</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
+
+        <details class="raw-json" v-if="shortDetail">
+          <summary>Raw JSON (for debugging)</summary>
+          <pre>{{ rawDrilldownPretty }}</pre>
+        </details>
+        <pre v-else>Select a host to load drilldown details.</pre>
       </section>
 
+      <section class="card">
+        <h3>Challenge controls</h3>
+        <p>Use per-row actions to toggle host challenge state (similar to terminal <code>c</code> action).</p>
+      </section>
       <section class="card placeholder"><h3>MySQL (placeholder)</h3><p>Coming next: governor state/processlist/cards.</p></section>
-      <section class="card placeholder"><h3>Challenge (placeholder)</h3><p>Coming next: vhost challenge actions and events.</p></section>
       <section class="card placeholder"><h3>System status (placeholder)</h3><p>Coming next: traffic/load and detector health.</p></section>
     </main>
   </div>
