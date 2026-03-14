@@ -48,8 +48,10 @@ func runWafWebTop(baseURL string, args []string) error {
 		return runWafStatus(baseURL, args[1:])
 	case "profiles", "list-profiles":
 		return runWafProfiles(baseURL)
+	case "exclude":
+		return runWAFExclude(baseURL, args[1:])
 	default:
-		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles]", args[0])
+		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|exclude]", args[0])
 	}
 }
 
@@ -97,9 +99,9 @@ func runWafSet(baseURL string, args []string) error {
 		return fmt.Errorf("usage: cfm webtop waf set <host> <profile> [--ttl 1h]\nprofiles: normal | attack | strict | off")
 	}
 
-	host    := args[0]
+	host := args[0]
 	profile := args[1]
-	ttl     := "1h"
+	ttl := "1h"
 
 	for i := 2; i < len(args); i++ {
 		switch args[i] {
