@@ -26,6 +26,20 @@
       <section class="card">
         <h2>WebTop (short window)</h2>
         <p class="muted">Data source: <code>/api/v1/webdet/top-short</code> proxied via <code>/cfm-admin/api/</code>.</p>
+        <div class="toolbar">
+          <label for="top-short-limit">Top</label>
+          <input
+            id="top-short-limit"
+            class="input"
+            type="number"
+            min="1"
+            max="500"
+            step="1"
+            v-model.number="topShortLimit"
+            @change="refreshAll"
+          />
+          <span class="muted">vhosts (default 20)</span>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
