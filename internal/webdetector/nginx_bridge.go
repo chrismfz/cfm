@@ -77,6 +77,12 @@ type NginxBridge struct {
 	// IsWAFExcluded is queried by Lua via /nginx/waf/excluded for per-request
 	// pre-WAF bypass checks based on dynamic exclude rules.
 	IsWAFExcluded func(host, uri string) bool
+
+	// HasWAFExcludes reports whether any dynamic WAF exclude rules exist.
+	HasWAFExcludes func() bool
+
+	// ListWAFExcludes returns current dynamic WAF exclude entries.
+	ListWAFExcludes func() []excludeEntry
 }
 
 // refreshSkew is the minimum remaining time before we bother to re-push
@@ -645,6 +651,8 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/ok/touch", b.handleOKTouch)
 	mux.HandleFunc("/nginx/observe", b.handleObserve)
 	mux.HandleFunc("/nginx/waf/excluded", b.handleWAFExcluded)
+	mux.HandleFunc("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta)
+	mux.HandleFunc("/nginx/waf/excludes", b.handleWAFExcludes)
 	mux.HandleFunc("/nginx/status", b.handleStatus)
 
 	srv := &http.Server{
@@ -981,6 +989,49 @@ func (b *NginxBridge) handleWAFExcluded(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"excluded": excluded})
+}
+
+func (b *NginxBridge) handleWAFExcludedMeta(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	hasAny := false
+	if b.HasWAFExcludes != nil {
+		hasAny = b.HasWAFExcludes()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"has_any": hasAny})
+}
+
+func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	type item struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	items := make([]item, 0)
+	if b.ListWAFExcludes != nil {
+		for _, e := range b.ListWAFExcludes() {
+			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
+				continue
+			}
+			items = append(items, item{Type: e.Type, Value: e.Value})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
 }
 
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {

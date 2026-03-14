@@ -420,6 +420,8 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.OpenRestyMode {
 		e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
+		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
+		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
 	}
 	// Compile MALPATH rules. Supports "N:substring" override syntax.
 	e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
@@ -2907,4 +2909,11 @@ func (e *Engine) isWAFExcluded(host, path string) bool {
 		return true
 	}
 	return false
+}
+
+func (e *Engine) WAFExcludeHasAny() bool {
+	if e == nil || e.wafExcludes == nil {
+		return false
+	}
+	return len(e.wafExcludes.List()) > 0
 }

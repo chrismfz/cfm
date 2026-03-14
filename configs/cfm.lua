@@ -30,6 +30,8 @@ local CFG = {
   decision_timeout_ms   = 80,
   decision_cache_ttl_ms = 9000,
   waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
+  waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
+  waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
 
   block_code = 403,
   fail_open  = true,
@@ -623,35 +625,116 @@ local function get_decision(ip, host, uri, method, scheme)
   return obj
 end
 
--- Query bridge for dynamic WAF exclude decision for this host+uri.
--- Used as pre-WAF bypass so excluded host/path skips inline WAF actions.
-local function waf_is_excluded(host, uri)
-  host = lower(host or "")
-  uri  = tostring(uri or "/")
+-- Refresh dynamic WAF exclude snapshot from bridge into shared dict.
+-- Snapshot keys:
+--   wxhosts -> JSON array of host patterns
+--   wxpaths -> JSON array of path patterns
+--   wxsnap_ts -> last refresh epoch seconds
+local function refresh_waf_excludes_if_needed()
+  if not SH then return end
 
-  local key = "wx|" .. host .. "|" .. uri:sub(1, 96)
-  if SH then
-    local v = SH:get(key)
-    if v == "1" then return true end
-    if v == "0" then return false end
+  local now = ngx.now()
+  local last = tonumber(SH:get("wxsnap_ts") or "0") or 0
+  if (now - last) < CFG.waf_excl_refresh_sec then
+    return
   end
 
-  local path = "/nginx/waf/excluded?host=" .. esc(host) .. "&uri=" .. esc(uri)
-  local body, err = http_get_unix(path)
+  -- single-worker refresher lock for a short time
+  if not SH:add("wxsnap_lock", "1", 1) then
+    return
+  end
+
+  local body, err = http_get_unix("/nginx/waf/excludes")
   if not body then
     if CFG.debug then
-      log_route(ngx.INFO, "waf_excluded_check_fail host=" .. host .. " uri=" .. uri .. " err=" .. tostring(err))
+      log_route(ngx.INFO, "waf_excludes_snapshot_fail err=" .. tostring(err))
     end
-    if SH then SH:set(key, "0", math.max(1, CFG.waf_excl_cache_ttl_ms / 1000)) end
-    return false
+    SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+    SH:delete("wxsnap_lock")
+    return
   end
 
-  local obj = cjson.decode(body)
-  local excluded = obj and obj.excluded == true
-  if SH then
-    SH:set(key, excluded and "1" or "0", math.max(1, CFG.waf_excl_cache_ttl_ms / 1000))
+  local obj = cjson.decode(body) or {}
+  local entries = obj.entries or {}
+  local hosts, paths = {}, {}
+  for _, e in ipairs(entries) do
+    local t = lower(e.type or "")
+    local v = lower(tostring(e.value or ""))
+    if v ~= "" then
+      if t == "host" then
+        hosts[#hosts+1] = v
+      elseif t == "path" then
+        paths[#paths+1] = v
+      end
+    end
   end
-  return excluded
+
+  SH:set("wxhosts", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxpaths", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+  SH:delete("wxsnap_lock")
+end
+
+local wx_local_ts = 0
+local wx_local_hosts = {}
+local wx_local_paths = {}
+
+local function glob_to_lua_pattern(glob)
+  local p = tostring(glob or "")
+  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%])", "%%%1")
+  p = p:gsub("%%%*", ".*")
+  p = p:gsub("%%%?", ".")
+  return "^" .. p .. "$"
+end
+
+local function matches_rule(value, rule)
+  value = lower(tostring(value or ""))
+  rule  = lower(tostring(rule or ""))
+  if value == "" or rule == "" then return false end
+
+  if rule:find("*", 1, true) or rule:find("?", 1, true) then
+    local ok, res = pcall(function()
+      return value:match(glob_to_lua_pattern(rule)) ~= nil
+    end)
+    return ok and res or false
+  end
+  return value:find(rule, 1, true) ~= nil
+end
+
+local function load_waf_excludes_local_cache()
+  if not SH then
+    wx_local_ts = 0
+    wx_local_hosts = {}
+    wx_local_paths = {}
+    return
+  end
+  local ts = tonumber(SH:get("wxsnap_ts") or "0") or 0
+  if ts == wx_local_ts then
+    return
+  end
+  wx_local_ts = ts
+
+  local hosts_raw = SH:get("wxhosts") or "[]"
+  local paths_raw = SH:get("wxpaths") or "[]"
+  wx_local_hosts = cjson.decode(hosts_raw) or {}
+  wx_local_paths = cjson.decode(paths_raw) or {}
+end
+
+-- Query dynamic WAF excludes from shared snapshot and check host+uri.
+local function waf_is_excluded(host, uri)
+  refresh_waf_excludes_if_needed()
+  load_waf_excludes_local_cache()
+
+  host = lower(host or "")
+  uri  = lower(tostring(uri or "/"))
+
+  for _, r in ipairs(wx_local_hosts) do
+    if matches_rule(host, r) then return true end
+  end
+  for _, r in ipairs(wx_local_paths) do
+    if matches_rule(uri, r) then return true end
+  end
+  return false
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
