@@ -146,7 +146,19 @@ type ipShortResponse struct {
 
 
 func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
-    rows := e.TopShort(0)
+    // honour optional ?limit=N; keep backward compatibility with ?top=N
+    limit := 0
+    if v := r.URL.Query().Get("limit"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            limit = n
+        }
+    } else if v := r.URL.Query().Get("top"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            limit = n
+        }
+    }
+
+    rows := e.TopShort(limit)
 
     resp := topShortResponse{
         WindowSec:      e.cfg.Window.Seconds(),
