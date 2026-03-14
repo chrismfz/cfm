@@ -29,6 +29,7 @@ local CFG = {
 
   decision_timeout_ms   = 80,
   decision_cache_ttl_ms = 9000,
+  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
 
   block_code = 403,
   fail_open  = true,
@@ -622,6 +623,37 @@ local function get_decision(ip, host, uri, method, scheme)
   return obj
 end
 
+-- Query bridge for dynamic WAF exclude decision for this host+uri.
+-- Used as pre-WAF bypass so excluded host/path skips inline WAF actions.
+local function waf_is_excluded(host, uri)
+  host = lower(host or "")
+  uri  = tostring(uri or "/")
+
+  local key = "wx|" .. host .. "|" .. uri:sub(1, 96)
+  if SH then
+    local v = SH:get(key)
+    if v == "1" then return true end
+    if v == "0" then return false end
+  end
+
+  local path = "/nginx/waf/excluded?host=" .. esc(host) .. "&uri=" .. esc(uri)
+  local body, err = http_get_unix(path)
+  if not body then
+    if CFG.debug then
+      log_route(ngx.INFO, "waf_excluded_check_fail host=" .. host .. " uri=" .. uri .. " err=" .. tostring(err))
+    end
+    if SH then SH:set(key, "0", math.max(1, CFG.waf_excl_cache_ttl_ms / 1000)) end
+    return false
+  end
+
+  local obj = cjson.decode(body)
+  local excluded = obj and obj.excluded == true
+  if SH then
+    SH:set(key, excluded and "1" or "0", math.max(1, CFG.waf_excl_cache_ttl_ms / 1000))
+  end
+  return excluded
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- MAIN ENFORCEMENT
 -- Request variables captured once here; method and uri are re-read after
@@ -756,8 +788,13 @@ end
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
 local waf_ok, waf = pcall(require, "cfm_waf")
 if waf_ok and waf and waf.enabled and waf.enabled() then
-  local req_headers = ngx.req.get_headers()
-  local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
+  if waf_is_excluded(host, uri) then
+    if CFG.debug_headers then
+      ngx.header["X-CFM-WAF-Excluded"] = "1"
+    end
+  else
+    local req_headers = ngx.req.get_headers()
+    local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
 
   local hit, reason, ttl, waf_action = waf.check({
     uri     = uri,
@@ -846,6 +883,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
 
     if waf_action == "block" then return ngx.exit(CFG.block_code) end
     return
+  end
   end
 end
 

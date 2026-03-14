@@ -144,6 +144,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			apiserver.Register(func(m *http.ServeMux) {
 				m.HandleFunc("/api/v1/webdet/", webdetRoutesProxy)
 				m.HandleFunc("/api/v1/challenge/", webdetRoutesProxy)
+				m.HandleFunc("/api/v1/waf/", webdetRoutesProxy)
 			})
 			logging.Logf("[webdetector] routes registered on shared apiserver")
 		})
@@ -686,6 +687,9 @@ func init() {
 			ChallengeSubnetTTL:         kvDur(kv, "CHALLENGE_SUBNET_TTL", 30*time.Minute),
 			ChallengeSubnetCap:         kvInt(kv, "CHALLENGE_SUBNET_CAP", 2048),
 			ChallengeSubnetSameHost:    kvBool(kv, "CHALLENGE_SUBNET_SAME_HOST", true),
+
+			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
+			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
 		}
 
 		// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN

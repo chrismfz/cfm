@@ -2,17 +2,15 @@
 package webdetector
 
 import (
+	"cfm/internal/logging"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
-	"time"
-	"strconv"
-	"cfm/internal/logging"
 	"os"
-	"context"
-
+	"strconv"
+	"time"
 )
-
 
 // RegisterHTTP wires all webdetector + challenge endpoints onto the provided mux.
 func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
@@ -43,8 +41,13 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd)
 	mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
 	mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
+	mux.HandleFunc("/api/v1/challenge/exclude/list", e.handleChallengeExcludeList)
+	mux.HandleFunc("/api/v1/challenge/exclude/add", e.handleChallengeExcludeAdd)
+	mux.HandleFunc("/api/v1/challenge/exclude/remove", e.handleChallengeExcludeRemove)
+	mux.HandleFunc("/api/v1/waf/exclude/list", e.handleWAFExcludeList)
+	mux.HandleFunc("/api/v1/waf/exclude/add", e.handleWAFExcludeAdd)
+	mux.HandleFunc("/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove)
 }
-
 
 // ServeHTTPWithContext starts a small standalone HTTP server for webdetector API.
 // Prefer RegisterHTTP when running under the shared apiserver.
@@ -95,11 +98,10 @@ func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
 	return nil
 }
 
-
 // ServeHTTP starts the webdetector API server without a cancelable context.
 // Prefer ServeHTTPWithContext when running under a manager that supports reload.
 func (e *Engine) ServeHTTP(addr string) {
-    _ = e.ServeHTTPWithContext(context.Background(), addr)
+	_ = e.ServeHTTPWithContext(context.Background(), addr)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
@@ -107,7 +109,6 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
 
 type webdetSummary struct {
 	Now            time.Time `json:"now"`
@@ -124,117 +125,106 @@ func (e *Engine) handleWebdetSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-
-
 // topShortResponse τυλίγει τα rows μαζί με config-based μεταδεδομένα
 // για να μπορεί το CLI να δείχνει short window + long horizon.
 type topShortResponse struct {
-    WindowSec      float64    `json:"window_sec"`
-    LongHorizonSec float64    `json:"long_horizon_sec"`
-    Rows           []ShortRow `json:"rows"`
-
+	WindowSec      float64    `json:"window_sec"`
+	LongHorizonSec float64    `json:"long_horizon_sec"`
+	Rows           []ShortRow `json:"rows"`
 }
 
 // ipShortResponse: IP-level short window (δεν έχει long horizon ακόμη).
 
 type ipShortResponse struct {
-    WindowSec      float64     `json:"window_sec"`
-    LongHorizonSec float64     `json:"long_horizon_sec"`
-    Short          []IPSignals `json:"short"`
-    Long           []IPSignals `json:"long,omitempty"`
+	WindowSec      float64     `json:"window_sec"`
+	LongHorizonSec float64     `json:"long_horizon_sec"`
+	Short          []IPSignals `json:"short"`
+	Long           []IPSignals `json:"long,omitempty"`
 }
-
 
 func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
-    // honour optional ?limit=N; keep backward compatibility with ?top=N
-    limit := 0
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    } else if v := r.URL.Query().Get("top"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
+	// honour optional ?limit=N; keep backward compatibility with ?top=N
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	} else if v := r.URL.Query().Get("top"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 
-    rows := e.TopShort(limit)
+	rows := e.TopShort(limit)
 
-    resp := topShortResponse{
-        WindowSec:      e.cfg.Window.Seconds(),
-        LongHorizonSec: e.cfg.LongHorizon().Seconds(),
-        Rows:           rows,
-    }
+	resp := topShortResponse{
+		WindowSec:      e.cfg.Window.Seconds(),
+		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+		Rows:           rows,
+	}
 
-
-
-    writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
-
 
 // handleIPShort: επιστρέφει IPSignals από το short window με optional ?limit=
 func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
-    limit := 0
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 
-rowsShort := e.IPShort(limit)
-rowsLong  := e.IPLong(limit)
+	rowsShort := e.IPShort(limit)
+	rowsLong := e.IPLong(limit)
 
-resp := ipShortResponse{
-    WindowSec:      e.cfg.Window.Seconds(),
-    LongHorizonSec: e.cfg.LongHorizon().Seconds(),
-    Short:          rowsShort,
-    Long:           rowsLong,
+	resp := ipShortResponse{
+		WindowSec:      e.cfg.Window.Seconds(),
+		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+		Short:          rowsShort,
+		Long:           rowsLong,
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
-
-    writeJSON(w, http.StatusOK, resp)
-}
-
-
 
 // handleDrilldown, handleSuspicious κτλ μένουν όπως ήταν.
-
 
 func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	minScore := e.cfg.MinScore
-    if minScore <= 0 {
-        minScore = 0.50
-    }
+	if minScore <= 0 {
+		minScore = 0.50
+	}
 	rows := e.longwin.SuspiciousTop(limit, minScore)
 	writeJSON(w, http.StatusOK, rows)
 }
 
 // longTopResponse: scored long-window rows χωρίς minScore threshold.
 type longTopResponse struct {
-        LongHorizonSec float64        `json:"long_horizon_sec"`
-        Rows           []SuspiciousRow `json:"rows"`
+	LongHorizonSec float64         `json:"long_horizon_sec"`
+	Rows           []SuspiciousRow `json:"rows"`
 }
 
 // handleLongTop επιστρέφει ΟΛΑ τα hosts από το long window, scored,
 // ταξινομημένα by score desc, χωρίς minScore filter.
 func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
-        // optional ?limit=N (default 50)
-        limit := 50
-        if v := r.URL.Query().Get("limit"); v != "" {
-                if n, err := strconv.Atoi(v); err == nil && n > 0 {
-                        limit = n
-                }
-        }
+	// optional ?limit=N (default 50)
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 
-        rows := e.longwin.SuspiciousTop(limit, 0) // minScore=0 → όλα με score
+	rows := e.longwin.SuspiciousTop(limit, 0) // minScore=0 → όλα με score
 
-        resp := longTopResponse{
-                LongHorizonSec: e.cfg.LongHorizon().Seconds(),
-                Rows:           rows,
-        }
-        writeJSON(w, http.StatusOK, resp)
+	resp := longTopResponse{
+		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
+		Rows:           rows,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
-
 
 // internal/webdetector/http_api.go
 // Replace the handleDrilldown function with this version that honours ?top=N
@@ -267,81 +257,77 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
-
-
 func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
-    // προαιρετικό ?limit=N
-    limit := 20
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
+	// προαιρετικό ?limit=N
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 
-    rows := e.HotIPs(limit)
-    writeJSON(w, http.StatusOK, rows)
+	rows := e.HotIPs(limit)
+	writeJSON(w, http.StatusOK, rows)
 }
-
 
 // handleIPDrilldown: short-window drilldown per IP.
 func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
-    ip := r.URL.Query().Get("ip")
-    if ip == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
-        return
-    }
+	ip := r.URL.Query().Get("ip")
+	if ip == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
+		return
+	}
 
-    d := e.IPDetail(ip)
-    writeJSON(w, http.StatusOK, d)
+	d := e.IPDetail(ip)
+	writeJSON(w, http.StatusOK, d)
 }
 
 // handleAnalyzeIP: offline log scan για μία IP.
 func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
-    ip := r.URL.Query().Get("ip")
-    if ip == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
-        return
-    }
+	ip := r.URL.Query().Get("ip")
+	if ip == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
+		return
+	}
 
-    // προαιρετικό ?max_lines=N (debug / safety)
-    var maxLines int64
-    if v := r.URL.Query().Get("max_lines"); v != "" {
-        if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-            maxLines = n
-        }
-    }
+	// προαιρετικό ?max_lines=N (debug / safety)
+	var maxLines int64
+	if v := r.URL.Query().Get("max_lines"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxLines = n
+		}
+	}
 
-    res, err := e.AnalyzeIP(ip, maxLines)
-    if err != nil {
-        writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-        return
-    }
+	res, err := e.AnalyzeIP(ip, maxLines)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
-    writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, res)
 }
 
 // handleAnalyzeHost: offline log scan για ένα vhost.
 func (e *Engine) handleAnalyzeHost(w http.ResponseWriter, r *http.Request) {
-    host := r.URL.Query().Get("host")
-    if host == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
-        return
-    }
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
 
-    // προαιρετικό ?max_lines=N (debug / safety)
-    var maxLines int64
-    if v := r.URL.Query().Get("max_lines"); v != "" {
-        if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-            maxLines = n
-        }
-    }
+	// προαιρετικό ?max_lines=N (debug / safety)
+	var maxLines int64
+	if v := r.URL.Query().Get("max_lines"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxLines = n
+		}
+	}
 
-    res, err := e.AnalyzeHost(host, maxLines)
-    if err != nil {
-        writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-        return
-    }
+	res, err := e.AnalyzeHost(host, maxLines)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
-    writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, res)
 }
