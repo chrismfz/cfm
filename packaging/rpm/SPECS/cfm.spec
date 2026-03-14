@@ -54,11 +54,15 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.blocklists
 %config(noreplace) /etc/cfm/cfm.ignore
 %config(noreplace) /etc/cfm/cfm.dyndns
+%config(noreplace) /etc/cfm/cfm-admin.htpasswd
 
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/cfm
 %dir %{_datadir}/cfm/configs
+%dir %{_datadir}/cfm/html
 %{_datadir}/cfm/configs/*
+%{_datadir}/cfm/html/*
+%{_datadir}/cfm/html/assets/*
 
 
 %post

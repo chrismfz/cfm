@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
+  <script src="/cfm-admin/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="topbar">
+      <h1>CFM Admin</h1>
+      <div class="meta">
+        <span>WebTop MVP</span>
+        <button @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card">
+        <h2>WebTop (short window)</h2>
+        <p class="muted">Data source: <code>/api/v1/webdet/top-short</code> proxied via <code>/cfm-admin/api/</code>.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Host</th>
+                <th>RPS</th>
+                <th>2xx</th>
+                <th>4xx</th>
+                <th>5xx</th>
+                <th>Unique IPs</th>
+                <th>Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in topShort" :key="row.host" @click="loadHost(row.host)" class="clickable">
+                <td>{{ row.host || '-' }}</td>
+                <td>{{ num(row.rps) }}</td>
+                <td>{{ num(row.s2xx) }}</td>
+                <td>{{ num(row.s4xx) }}</td>
+                <td>{{ num(row.s5xx) }}</td>
+                <td>{{ num(row.unique_ips) }}</td>
+                <td>{{ num(row.score) }}</td>
+              </tr>
+              <tr v-if="!topShort.length"><td colspan="7" class="muted">No data yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Suspicious vhosts</h2>
+        <ul class="list">
+          <li v-for="row in suspicious" :key="row.host">
+            <button @click="loadHost(row.host)">{{ row.host }}</button>
+            <span>score={{ num(row.score) }} • rps={{ num(row.rps) }}</span>
+          </li>
+          <li v-if="!suspicious.length" class="muted">No suspicious hosts.</li>
+        </ul>
+      </section>
+
+      <section class="card wide">
+        <h2>Vhost drilldown</h2>
+        <p class="muted">Click any host above to inspect.</p>
+        <pre>{{ drilldownPretty }}</pre>
+      </section>
+
+      <section class="card placeholder"><h3>MySQL (placeholder)</h3><p>Coming next: governor state/processlist/cards.</p></section>
+      <section class="card placeholder"><h3>Challenge (placeholder)</h3><p>Coming next: vhost challenge actions and events.</p></section>
+      <section class="card placeholder"><h3>System status (placeholder)</h3><p>Coming next: traffic/load and detector health.</p></section>
+    </main>
+  </div>
+</body>
+</html>

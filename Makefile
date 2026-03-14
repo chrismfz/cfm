@@ -26,6 +26,7 @@ override PKGROOT := build/pkgroot
 override OUTDIR  := build/deb
 BIN := bin/cfm
 CONFIG_DIR := configs
+WEBUI_DIR := webui/cfm-admin
 DEB_SRC := packaging/debian/DEBIAN
 
 
@@ -149,6 +150,7 @@ deb: build
 		"$(PKGROOT)/usr/bin" \
 		"$(PKGROOT)/lib/systemd/system" \
 		"$(PKGROOT)/usr/share/cfm/configs" \
+		"$(PKGROOT)/usr/share/cfm/html" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
 
@@ -167,6 +169,7 @@ deb: build
 	@install -m0640 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
 	@install -m0640 "$(CONFIG_DIR)/cfm.ignore" "$(PKGROOT)/etc/cfm/cfm.ignore"
 	@install -m0640 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
+	@install -m0640 "$(CONFIG_DIR)/cfm-admin.htpasswd" "$(PKGROOT)/etc/cfm/cfm-admin.htpasswd"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_malpaths.txt"      "$(PKGROOT)/etc/cfm/webdetector_malpaths.txt"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_challenge_paths.txt"      "$(PKGROOT)/etc/cfm/webdetector_challenge_paths.txt"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_challenge_exclude.txt"      "$(PKGROOT)/etc/cfm/webdetector_challenge_exclude.txt"
@@ -174,6 +177,7 @@ deb: build
 
 
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@rsync -a --delete "$(WEBUI_DIR)/" "$(PKGROOT)/usr/share/cfm/html/"
 	# executables
 	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
@@ -200,6 +204,7 @@ stage-pkgroot: build
 	@[ -f $(PKGROOT)/etc/cfm/cfm.blocklists ] || cp -f $(CONFIG_DIR)/cfm.blocklists $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.ignore ] || cp -f $(CONFIG_DIR)/cfm.ignore $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.dyndns ]     || cp -f $(CONFIG_DIR)/cfm.dyndns     $(PKGROOT)/etc/cfm/
+	@[ -f $(PKGROOT)/etc/cfm/cfm-admin.htpasswd ] || cp -f $(CONFIG_DIR)/cfm-admin.htpasswd $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_malpaths.txt ]       || cp -f $(CONFIG_DIR)/webdetector_malpaths.txt       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_challenge_paths.txt ]       || cp -f $(CONFIG_DIR)/webdetector_challenge_paths.txt       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_challenge_exclude.txt ]       || cp -f $(CONFIG_DIR)/webdetector_challenge_exclude.txt       $(PKGROOT)/etc/cfm/
@@ -208,6 +213,8 @@ stage-pkgroot: build
 	# === ship ALL example configs ===
 	@mkdir -p $(PKGROOT)/usr/share/cfm/configs
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@mkdir -p $(PKGROOT)/usr/share/cfm/html
+	@rsync -a --delete "$(WEBUI_DIR)/" "$(PKGROOT)/usr/share/cfm/html/"
 
 	# systemd unit (RPM-friendly path)
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
@@ -307,5 +314,3 @@ release: deb rpm
 	echo "📣 Publishing release..."; \
 	$(GH) release edit "$(TAG)" --repo "$$REPO" --draft=false ; \
 	echo "✅ Release $(TAG) published."
-
-

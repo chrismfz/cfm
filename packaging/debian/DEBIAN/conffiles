@@ -5,3 +5,4 @@
 /etc/cfm/cfm.deny
 /etc/cfm/cfm.allow
 /etc/cfm/cfm.dyndns
+/etc/cfm/cfm-admin.htpasswd
