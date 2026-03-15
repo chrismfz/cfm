@@ -41,6 +41,7 @@
         historySummary: null,
         historyStats: null,
         historyBusy: false,
+        pageMode: 'overview',
       };
     },
     computed: {
@@ -115,6 +116,21 @@
         if (!this.analyzeResult) return '';
         return JSON.stringify(this.analyzeResult, null, 2);
       },
+
+      isOverviewPage() {
+        return this.pageMode === 'overview';
+      },
+      isVhostPage() {
+        return this.pageMode === 'vhost';
+      },
+      isForensicsPage() {
+        return this.pageMode === 'forensics';
+      },
+      pageTitle() {
+        if (this.isVhostPage) return 'WebDetector / vhost live';
+        if (this.isForensicsPage) return 'WebDetector / forensics';
+        return 'WebDetector / overview';
+      },
       suspiciousAndChallenged() {
         const byHost = {};
 
@@ -158,6 +174,16 @@
       },
     },
     methods: {
+
+      shouldShow(section) {
+        const groups = {
+          overview: new Set(['webtop', 'suspicious', 'longtop', 'globalips', 'excludes', 'vhost']),
+          vhost: new Set(['webtop', 'vhost']),
+          forensics: new Set(['history', 'ipdrilldown', 'analyze', 'excludes']),
+        };
+        const active = groups[this.pageMode] || groups.overview;
+        return active.has(section);
+      },
       extractRows(payload, key = 'rows') {
         if (Array.isArray(payload)) return payload;
         if (payload && Array.isArray(payload[key])) return payload[key];
@@ -493,14 +519,15 @@
           this.longTopLimit = longLimit;
           this.ipShortLimit = ipLimit;
           this.hotIPsLimit = hotLimit;
-          const [topShort, suspicious, longTop, ipShort, hotIPs, activeChallengeVhosts] = await Promise.all([
+          const tasks = [
             this.fetchJSONSafe(`v1/webdet/top-short?limit=${topLimit}`, { rows: [] }),
-            this.fetchJSONSafe(`v1/webdet/suspicious?limit=${longLimit}`, { rows: [] }),
-            this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] }),
-            this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] }),
-            this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, []),
+            this.shouldShow('suspicious') ? this.fetchJSONSafe(`v1/webdet/suspicious?limit=${longLimit}`, { rows: [] }) : Promise.resolve({ rows: [] }),
+            this.shouldShow('longtop') ? this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] }) : Promise.resolve({ rows: [] }),
+            this.shouldShow('globalips') || this.shouldShow('ipdrilldown') ? this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] }) : Promise.resolve({ short: [] }),
+            this.shouldShow('webtop') ? this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, []) : Promise.resolve([]),
             this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
-          ]);
+          ];
+          const [topShort, suspicious, longTop, ipShort, hotIPs, activeChallengeVhosts] = await Promise.all(tasks);
           this.topShort = this.extractRows(topShort, 'rows');
           this.suspicious = this.extractRows(suspicious, 'rows');
           this.longTop = this.extractRows(longTop, 'rows');
@@ -509,13 +536,13 @@
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
           await this.refreshChallengeStatuses();
-          await this.refreshExcludeLists();
-          await this.refreshHistory();
+          if (this.shouldShow('excludes')) await this.refreshExcludeLists();
+          if (this.shouldShow('history')) await this.refreshHistory();
 
-          if (!this.activeHost && this.topShort[0]?.host) {
+          if (this.shouldShow('vhost') && !this.activeHost && this.topShort[0]?.host) {
             await this.loadHost(this.topShort[0].host, false);
           }
-          if (!this.activeIP && this.ipShort[0]?.ip) {
+          if (this.shouldShow('ipdrilldown') && !this.activeIP && this.ipShort[0]?.ip) {
             await this.loadIP(this.ipShort[0].ip);
           }
         } catch (err) {
@@ -543,8 +570,17 @@
       },
     },
     mounted() {
+      const path = (window.location.pathname || '').replace(/\/+$/, '/');
+      if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
+      else if (path.includes('/webdetector/vhost/')) this.pageMode = 'vhost';
+      else this.pageMode = 'overview';
+
       this.refreshAll();
-      this.startAutoRefresh();
+      if (this.isForensicsPage) {
+        this.stopAutoRefresh();
+      } else {
+        this.startAutoRefresh();
+      }
     },
     beforeUnmount() {
       if (this.timer) clearInterval(this.timer);
