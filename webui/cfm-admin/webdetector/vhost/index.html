@@ -363,6 +363,51 @@
         <p class="muted" v-else>Click any host above to inspect.</p>
         <p v-if="actionMsg" class="statusline">{{ actionMsg }}</p>
 
+        <section class="mini-card live-headline" v-if="shortDetail">
+          <div class="headline-row">
+            <span class="pill danger" v-if="challengeState(activeHost)">CHALLENGE {{ liveKPI.challengeMode || 'manual' }}</span>
+            <span>score:<strong>{{ num(liveKPI.score) }}</strong></span>
+            <span>err:<strong>{{ num(liveKPI.errPct) }}%</strong></span>
+            <span>rt:<strong>{{ num(liveKPI.rtMs) }}ms</strong></span>
+            <span>uniqIP:<strong>{{ num(liveKPI.uniqIP) }}</strong></span>
+            <span>bot:<strong>{{ num(liveKPI.botPct) }}%</strong></span>
+            <span class="muted" v-if="liveKPI.reasons.length">reasons:{{ liveKPI.reasons.join(', ') }}</span>
+          </div>
+        </section>
+
+        <div class="live-chart-grid" v-if="activeVhostSeries.length > 1">
+          <section class="mini-card">
+            <h3>Traffic RPS (2xx / 4xx / 5xx)</h3>
+            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
+              <polyline v-for="s in rpsSeriesChart.series" :key="s.key" :class="s.cls" :points="s.points"></polyline>
+            </svg>
+          </section>
+          <section class="mini-card">
+            <h3>Bot %</h3>
+            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
+              <polyline class="line-cyan" :points="botSeriesChart.points"></polyline>
+            </svg>
+          </section>
+          <section class="mini-card">
+            <h3>Error rate %</h3>
+            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
+              <polyline class="line-yellow" :points="errSeriesChart.points"></polyline>
+            </svg>
+          </section>
+          <section class="mini-card">
+            <h3>Threat score</h3>
+            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
+              <polyline class="line-lime" :points="scoreSeriesChart.points"></polyline>
+            </svg>
+          </section>
+          <section class="mini-card">
+            <h3>Response time (ms)</h3>
+            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
+              <polyline class="line-magenta" :points="rtSeriesChart.points"></polyline>
+            </svg>
+          </section>
+        </div>
+
         <div class="drill-grid" v-if="shortDetail">
           <section class="mini-card metrics-card">
             <h3>Key metrics</h3>
@@ -381,11 +426,11 @@
           </section>
 
           <section class="mini-card ips-card" v-if="topIPRows.length">
-            <h3>Top IPs</h3>
+            <h3>Top IPs ({{ vhostTopIPLimit }})</h3>
             <table class="mini-table">
               <thead><tr><th>IP</th><th>Count</th><th>CC</th><th>ASN</th><th>Company</th><th>Action</th></tr></thead>
               <tbody>
-                <tr v-for="ipRow in topIPRows.slice(0, 12)" :key="ipRow.key">
+                <tr v-for="ipRow in topIPRows.slice(0, vhostTopIPLimit)" :key="ipRow.key">
                   <td><code>{{ ipRow.key }}</code></td>
                   <td>{{ ipRow.count }}</td>
                   <td>{{ ipRow.country }}</td>
@@ -401,11 +446,11 @@
           </section>
 
           <section class="mini-card path-card" v-if="topPaths.length">
-            <h3>Top paths</h3>
+            <h3>Top paths ({{ vhostTopPathLimit }})</h3>
             <table class="mini-table">
               <thead><tr><th>Path</th><th>Count</th></tr></thead>
               <tbody>
-                <tr v-for="p in topPaths.slice(0, 8)" :key="p.key"><td><code>{{ p.key }}</code></td><td>{{ p.count }}</td></tr>
+                <tr v-for="p in topPaths.slice(0, vhostTopPathLimit)" :key="p.key"><td><code>{{ p.key }}</code></td><td>{{ p.count }}</td></tr>
               </tbody>
             </table>
           </section>

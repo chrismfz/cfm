@@ -42,6 +42,11 @@
         historyBusy: false,
         pageMode: 'overview',
         vhostFocusHost: '',
+        vhostSeriesByHost: {},
+        vhostSeriesMaxPoints: 120,
+        vhostTopIPLimit: 25,
+        vhostTopPathLimit: 25,
+        drilldownTopN: 50,
       };
     },
     computed: {
@@ -80,6 +85,29 @@
       topAgents() {
         return Array.isArray(this.shortDetail?.top_agents) ? this.shortDetail.top_agents : [];
       },
+      activeTopShortRow() {
+        if (!this.activeHost || !Array.isArray(this.topShort)) return null;
+        return this.topShort.find((row) => row?.host === this.activeHost) || null;
+      },
+      activeVhostSeries() {
+        const host = String(this.activeHost || '').trim();
+        return this.vhostSeriesByHost[host] || [];
+      },
+      liveKPI() {
+        const row = this.activeTopShortRow || {};
+        const short = this.shortDetail || {};
+        const errPct = Number.isFinite(Number(row.err_ratio)) ? Number(row.err_ratio) * 100 : Number(short.err_ratio || 0) * 100;
+        const botPct = Number.isFinite(Number(row.bot_ratio)) ? Number(row.bot_ratio) * 100 : Number(short.bot_ratio || 0) * 100;
+        return {
+          challengeMode: this.challengeModeLabel(this.activeHost),
+          score: Number(row.score ?? short.short_score ?? 0),
+          errPct,
+          botPct,
+          rtMs: Number(short.proc_avg_sec || 0) * 1000,
+          uniqIP: Number(row.unique_ips ?? short.unique_ips ?? 0),
+          reasons: Array.isArray(row.reasons) ? row.reasons : [],
+        };
+      },
       keyMetrics() {
         if (!this.shortDetail) return [];
         const s = this.shortDetail;
@@ -115,6 +143,52 @@
       rawAnalyzePretty() {
         if (!this.analyzeResult) return '';
         return JSON.stringify(this.analyzeResult, null, 2);
+      },
+      rpsSeriesChart() {
+        const rows = this.activeVhostSeries;
+        const keys = ['r2xx', 'r4xx', 'r5xx'];
+        const maxY = Math.max(1, ...rows.flatMap((r) => keys.map((k) => Number(r[k] || 0))));
+        return {
+          maxY,
+          series: [
+            { key: 'r2xx', cls: 'line-cyan', points: this.sparkPoints(rows.map((r) => Number(r.r2xx || 0)), maxY) },
+            { key: 'r4xx', cls: 'line-yellow', points: this.sparkPoints(rows.map((r) => Number(r.r4xx || 0)), maxY) },
+            { key: 'r5xx', cls: 'line-red', points: this.sparkPoints(rows.map((r) => Number(r.r5xx || 0)), maxY) },
+          ],
+        };
+      },
+      botSeriesChart() {
+        const values = this.activeVhostSeries.map((r) => Number(r.bot || 0));
+        return {
+          maxY: 100,
+          points: this.sparkPoints(values, 100),
+          last: values.length ? values[values.length - 1] : 0,
+        };
+      },
+      errSeriesChart() {
+        const values = this.activeVhostSeries.map((r) => Number(r.err || 0));
+        return {
+          maxY: 100,
+          points: this.sparkPoints(values, 100),
+          last: values.length ? values[values.length - 1] : 0,
+        };
+      },
+      scoreSeriesChart() {
+        const values = this.activeVhostSeries.map((r) => Number(r.score || 0));
+        return {
+          maxY: 1,
+          points: this.sparkPoints(values, 1),
+          last: values.length ? values[values.length - 1] : 0,
+        };
+      },
+      rtSeriesChart() {
+        const values = this.activeVhostSeries.map((r) => Number(r.rt || 0));
+        const maxY = Math.max(100, ...values);
+        return {
+          maxY,
+          points: this.sparkPoints(values, maxY),
+          last: values.length ? values[values.length - 1] : 0,
+        };
       },
 
       isOverviewPage() {
@@ -246,6 +320,45 @@
       pct(v) {
         if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
         return `${(Number(v) * 100).toFixed(1).replace(/\.0$/, '')}%`;
+      },
+      sparkPoints(values, maxY = 1) {
+        const width = 520;
+        const height = 140;
+        if (!Array.isArray(values) || values.length < 2) return '';
+        const safeMax = Math.max(0.0001, Number(maxY) || 1);
+        return values.map((raw, idx) => {
+          const x = (idx / (values.length - 1)) * width;
+          const y = height - (Math.max(0, Number(raw) || 0) / safeMax) * height;
+          return `${x.toFixed(2)},${Math.min(height, Math.max(0, y)).toFixed(2)}`;
+        }).join(' ');
+      },
+      ensureHostSeries(host) {
+        if (!host) return;
+        if (!this.vhostSeriesByHost[host]) this.vhostSeriesByHost[host] = [];
+      },
+      pushHostSeriesPoint(host) {
+        if (!host) return;
+        this.ensureHostSeries(host);
+        const row = this.activeTopShortRow || {};
+        const short = this.shortDetail || {};
+        const err = Number.isFinite(Number(row.err_ratio)) ? Number(row.err_ratio) * 100 : Number(short.err_ratio || 0) * 100;
+        const bot = Number.isFinite(Number(row.bot_ratio)) ? Number(row.bot_ratio) * 100 : Number(short.bot_ratio || 0) * 100;
+        const rt = Number(short.proc_avg_sec || 0) * 1000;
+        const point = {
+          at: Date.now(),
+          r2xx: Number(row.rps_2xx || 0),
+          r4xx: Number(row.rps_4xx || 0),
+          r5xx: Number(row.rps_5xx || 0),
+          err,
+          bot,
+          score: Number(row.score ?? short.short_score ?? 0),
+          rt,
+        };
+        const list = this.vhostSeriesByHost[host];
+        list.push(point);
+        if (list.length > this.vhostSeriesMaxPoints) {
+          list.splice(0, list.length - this.vhostSeriesMaxPoints);
+        }
       },
       reasonText(row) {
         if (Array.isArray(row?.reasons)) return row.reasons.join(', ');
@@ -578,6 +691,7 @@
                 this.syncVhostQuery(vhostTarget);
               }
               await this.loadHost(vhostTarget, false);
+              this.pushHostSeriesPoint(vhostTarget);
             }
           }
           if (this.shouldShow('ipdrilldown') && !this.activeIP && this.ipShort[0]?.ip) {
@@ -597,8 +711,9 @@
       async loadHost(host, shouldScroll = true) {
         if (!host) return;
         this.activeHost = host;
+        this.ensureHostSeries(host);
         try {
-          this.drilldown = await this.fetchJSON(`v1/webdet/drilldown?host=${encodeURIComponent(host)}`);
+          this.drilldown = await this.fetchJSON(`v1/webdet/drilldown?host=${encodeURIComponent(host)}&top=${this.drilldownTopN}`);
           if (shouldScroll) this.scrollToDrilldown();
         } catch (err) {
           console.error('[cfm-admin] drilldown failed', err);
