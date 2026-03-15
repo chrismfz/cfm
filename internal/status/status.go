@@ -2,21 +2,21 @@ package status
 
 import (
 	"bufio"
+	"bytes"
+	"cfm/internal/detectors/health"
+	"cfm/internal/enrich"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"bytes"
-	"regexp"
 	"time"
-	"io"
-	"cfm/internal/enrich"
-	"cfm/internal/detectors/health"
 )
 
 const topN = 10 // δεν διαβάζουμε από config
@@ -37,7 +37,10 @@ type ServiceInfo struct {
 	Active    string `json:"active,omitempty"`  // active/inactive/failed/unknown
 }
 
-type nftCounter struct{ Name string; Packets int }
+type nftCounter struct {
+	Name    string
+	Packets int
+}
 
 // ---------------------------------------------------------------------------
 // Challenge status (nft + journal)
@@ -61,8 +64,8 @@ type ChallengeStatus struct {
 	TotalChallenged int `json:"total_challenged,omitempty"`
 	TotalSolved     int `json:"total_solved,omitempty"`
 
-	TopIPs  []HitCount  `json:"top_ips,omitempty"`
-	TopASNs []HitCount  `json:"top_asns,omitempty"`
+	TopIPs  []HitCount `json:"top_ips,omitempty"`
+	TopASNs []HitCount `json:"top_asns,omitempty"`
 }
 
 type HitCount struct {
@@ -70,60 +73,103 @@ type HitCount struct {
 	Count int    `json:"count"`
 }
 
-
 func getDaemonInfo() DaemonInfo {
 	if _, err := exec.LookPath("pgrep"); err == nil {
 		out, _ := exec.Command("pgrep", "-fa", "cfm daemon").CombinedOutput()
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		var pids []int; var cmds []string
+		var pids []int
+		var cmds []string
 		for _, ln := range lines {
 			ln = strings.TrimSpace(ln)
-			if ln == "" { continue }
+			if ln == "" {
+				continue
+			}
 			parts := strings.Fields(ln)
-			if len(parts) < 2 { continue }
+			if len(parts) < 2 {
+				continue
+			}
 			pid, _ := strconv.Atoi(parts[0])
 			cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
-			if !strings.Contains(cmd, "cfm") || !strings.Contains(cmd, "daemon") { continue }
-			pids = append(pids, pid); cmds = append(cmds, cmd)
+			if !strings.Contains(cmd, "cfm") || !strings.Contains(cmd, "daemon") {
+				continue
+			}
+			pids = append(pids, pid)
+			cmds = append(cmds, cmd)
 		}
 		return DaemonInfo{Running: len(pids) > 0, PIDs: pids, Cmdlines: cmds}
 	}
 	// fallback με ps
 	out, _ := exec.Command("ps", "ax", "-o", "pid=,cmd=").CombinedOutput()
-	var pids []int; var cmds []string
+	var pids []int
+	var cmds []string
 	for _, ln := range strings.Split(string(out), "\n") {
-		ln = strings.TrimSpace(ln); if ln == "" { continue }
-		parts := strings.Fields(ln); if len(parts) < 2 { continue }
-		pid, _ := strconv.Atoi(parts[0]); cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
-		if strings.Contains(cmd, "cfm") && strings.Contains(cmd, "daemon") { pids = append(pids, pid); cmds = append(cmds, cmd) }
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		parts := strings.Fields(ln)
+		if len(parts) < 2 {
+			continue
+		}
+		pid, _ := strconv.Atoi(parts[0])
+		cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
+		if strings.Contains(cmd, "cfm") && strings.Contains(cmd, "daemon") {
+			pids = append(pids, pid)
+			cmds = append(cmds, cmd)
+		}
 	}
 	return DaemonInfo{Running: len(pids) > 0, PIDs: pids, Cmdlines: cmds}
 }
 
-func trim1(b []byte) string { return strings.TrimSpace(string(b)) }
+func trim1(b []byte) string         { return strings.TrimSpace(string(b)) }
 func must(b []byte, _ error) []byte { return b }
 
 func getServiceInfo() ServiceInfo {
 	si := ServiceInfo{}
-	if _, err := exec.LookPath("systemctl"); err != nil { return si } // όχι systemd
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return si
+	} // όχι systemd
 	// Installed?
 	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", "cfm.service").CombinedOutput()
-	if bytes.Contains(loadOut, []byte("LoadState=loaded")) { si.Installed = true }
+	if bytes.Contains(loadOut, []byte("LoadState=loaded")) {
+		si.Installed = true
+	}
 	// Enabled?
 	en := trim1(must(exec.Command("systemctl", "is-enabled", "cfm.service").CombinedOutput()))
-	if en == "" { en = "unknown" }; si.Enabled = en
+	if en == "" {
+		en = "unknown"
+	}
+	si.Enabled = en
 	// Active?
 	ac := trim1(must(exec.Command("systemctl", "is-active", "cfm.service").CombinedOutput()))
-	if ac == "" { ac = "unknown" }; si.Active = ac
+	if ac == "" {
+		ac = "unknown"
+	}
+	si.Active = ac
 	return si
 }
 
 func serviceHuman(si ServiceInfo) string {
-	if !si.Installed { return "Service is not installed" }
+	if !si.Installed {
+		return "Service is not installed"
+	}
 	en := si.Enabled
-	switch en { case "enabled","disabled","static","indirect": default: en = "unknown" }
+	switch en {
+	case "enabled", "disabled", "static", "indirect":
+	default:
+		en = "unknown"
+	}
 	var act string
-	switch si.Active { case "active": act="started"; case "inactive": act="stopped"; case "failed": act="failed"; default: act="unknown" }
+	switch si.Active {
+	case "active":
+		act = "started"
+	case "inactive":
+		act = "stopped"
+	case "failed":
+		act = "failed"
+	default:
+		act = "unknown"
+	}
 	return fmt.Sprintf("Service is %s and %s", en, act)
 }
 
@@ -133,11 +179,10 @@ func shOut(cmd string) string {
 }
 
 var (
-    reAckOnly = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == ack|ack / syn,ack)`)
-    reSynAck  = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == \(syn\|ack\)|syn,ack / syn,ack)`)
-    reNoSyn   = regexp.MustCompile(`tcp flags (?:& syn == 0|! syn)`)
+	reAckOnly = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == ack|ack / syn,ack)`)
+	reSynAck  = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == \(syn\|ack\)|syn,ack / syn,ack)`)
+	reNoSyn   = regexp.MustCompile(`tcp flags (?:& syn == 0|! syn)`)
 )
-
 
 func Run(args []string) {
 
@@ -149,22 +194,35 @@ func Run(args []string) {
 		}
 	}()
 
-
-
-
-
-
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
+	showTimings := fs.Bool("timings", false, "print per-section timings")
+	noTTL := fs.Bool("no-ttl", false, "skip TTL summary (faster)")
 	_ = fs.Parse(args)
+	timing := make(map[string]int64)
+	printTimings := func() {
+		if !*showTimings {
+			return
+		}
+		fmt.Println("\nTiming (ms):")
+		keys := make([]string, 0, len(timing))
+		for k := range timing {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-22s %d\n", k+":", timing[k])
+		}
+	}
 
 	// Daemon/Service state
 	di := getDaemonInfo()
 	si := getServiceInfo()
 
-
 	// 1) Table/sets summary (ίδιο output με το παλιό runStatus)
+	t0 := time.Now()
 	st := readTableSummary()
+	timing["table_summary_ms"] = time.Since(t0).Milliseconds()
 	st.Daemon = di
 	st.Service = si
 
@@ -175,116 +233,117 @@ func Run(args []string) {
 	}
 
 	hdrLeft := "CFM daemon not running"
-	if di.Running && len(di.PIDs) > 0 { hdrLeft = fmt.Sprintf("CFM daemon running (PID:%d)", di.PIDs[0]) }
+	if di.Running && len(di.PIDs) > 0 {
+		hdrLeft = fmt.Sprintf("CFM daemon running (PID:%d)", di.PIDs[0])
+	}
 	fmt.Printf("-%s | %s-\n", hdrLeft, serviceHuman(si))
 
 	printSummary(st)
 
-
 	// --- Challenge section (nft + journal) ---
+	t0 = time.Now()
 	printChallengeStatus(st, en)
+	timing["challenge_ms"] = time.Since(t0).Milliseconds()
 
+	// --- TTL summary (manual hosts + nets) ---
+	if st.TablePresent && !*noTTL {
+		t0 = time.Now()
+		// BLOCK v4
+		b4hTTL, b4hTot := countTTLInSet("block_v4")
+		b4nTTL, b4nTot := countTTLInSet("block_v4_nets")
+		// BLOCK v6
+		b6hTTL, b6hTot := countTTLInSet("block_v6")
+		b6nTTL, b6nTot := countTTLInSet("block_v6_nets")
+		// ALLOW v4
+		a4hTTL, a4hTot := countTTLInSet("allow_v4")
+		a4nTTL, a4nTot := countTTLInSet("allow_v4_nets")
+		// ALLOW v6
+		a6hTTL, a6hTot := countTTLInSet("allow_v6")
+		a6nTTL, a6nTot := countTTLInSet("allow_v6_nets")
 
-    // --- TTL summary (manual hosts + nets) ---
-    if st.TablePresent {
-        // BLOCK v4
-        b4hTTL, b4hTot := countTTLInSet("block_v4")
-        b4nTTL, b4nTot := countTTLInSet("block_v4_nets")
-        // BLOCK v6
-        b6hTTL, b6hTot := countTTLInSet("block_v6")
-        b6nTTL, b6nTot := countTTLInSet("block_v6_nets")
-        // ALLOW v4
-        a4hTTL, a4hTot := countTTLInSet("allow_v4")
-        a4nTTL, a4nTot := countTTLInSet("allow_v4_nets")
-        // ALLOW v6
-        a6hTTL, a6hTot := countTTLInSet("allow_v6")
-        a6nTTL, a6nTot := countTTLInSet("allow_v6_nets")
+		fmt.Println("TTL summary:")
+		fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4hTTL+b4nTTL, b4hTot+b4nTot)
+		fmt.Printf("  BLOCK v6: %d/%d with TTL\n", b6hTTL+b6nTTL, b6hTot+b6nTot)
+		if (a4hTot + a4nTot + a6hTot + a6nTot) > 0 {
+			fmt.Printf("  ALLOW v4: %d/%d with TTL\n", a4hTTL+a4nTTL, a4hTot+a4nTot)
+			fmt.Printf("  ALLOW v6: %d/%d with TTL\n", a6hTTL+a6nTTL, a6hTot+a6nTot)
+		}
+		timing["ttl_summary_ms"] = time.Since(t0).Milliseconds()
+	}
 
-        fmt.Println("TTL summary:")
-        fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4hTTL+b4nTTL, b4hTot+b4nTot)
-        fmt.Printf("  BLOCK v6: %d/%d with TTL\n", b6hTTL+b6nTTL, b6hTot+b6nTot)
-        if (a4hTot+a4nTot+a6hTot+a6nTot) > 0 {
-            fmt.Printf("  ALLOW v4: %d/%d with TTL\n", a4hTTL+a4nTTL, a4hTot+a4nTot)
-            fmt.Printf("  ALLOW v6: %d/%d with TTL\n", a6hTTL+a6nTTL, a6hTot+a6nTot)
-        }
-    }
+	// --- Health snapshot (works even if daemon is not running) ---
+	t0 = time.Now()
+	hs := health.SnapshotNow()
+	timing["health_ms"] = time.Since(t0).Milliseconds()
+	fmt.Printf("\n ====================================================================== \n")
+	fmt.Printf("\nHealth:\n")
+	fmt.Printf("  Hostname: %s\n", hs.Host)
+	fmt.Printf("  CPU load: %.2f (1m)\n", hs.Load1)
+	fmt.Printf("  RAM: %.1f%%\n", hs.RamUsedPct)
+	fmt.Printf("  Disk /: %.1f%%\n", hs.DiskRootPct)
+	fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
+		hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
 
+	if hs.Mdadm != "" && hs.Mdadm != "NO RAID" {
+		fmt.Printf("  RAID: %s\n", hs.Mdadm)
+	}
 
+	// Compact SMART summary
+	if len(hs.Smart) > 0 {
+		total, fails := 0, 0
+		temps := make([]string, 0, 3)
+		for dev, info := range hs.Smart {
+			total++
+			h := strings.ToUpper(info.Health)
+			if strings.Contains(h, "FAIL") || strings.Contains(h, "CRIT") {
+				fails++
+			}
+			if info.TempC != "" && len(temps) < 3 {
+				temps = append(temps, fmt.Sprintf("%s=%sC", dev, info.TempC))
+			}
+		}
+		if fails > 0 {
+			fmt.Printf("  SMART: FAIL=%d/%d", fails, total)
+		} else {
+			fmt.Printf("  SMART: PASS (%d)", total)
+		}
+		if len(temps) > 0 {
+			fmt.Printf(" | temps: %s", strings.Join(temps, ", "))
+		}
+		fmt.Println()
+	}
+	fmt.Printf("\n ====================================================================== \n")
 
-
-
-
-
-
-// --- Health snapshot (works even if daemon is not running) ---
-hs := health.SnapshotNow()
-fmt.Printf("\n ====================================================================== \n")
-fmt.Printf("\nHealth:\n")
-fmt.Printf("  Hostname: %s\n", hs.Host)
-fmt.Printf("  CPU load: %.2f (1m)\n", hs.Load1)
-fmt.Printf("  RAM: %.1f%%\n", hs.RamUsedPct)
-fmt.Printf("  Disk /: %.1f%%\n", hs.DiskRootPct)
-fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
-    hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
-
-if hs.Mdadm != "" && hs.Mdadm != "NO RAID" {
-    fmt.Printf("  RAID: %s\n", hs.Mdadm)
-}
-
-// Compact SMART summary
-if len(hs.Smart) > 0 {
-    total, fails := 0, 0
-    temps := make([]string, 0, 3)
-    for dev, info := range hs.Smart {
-        total++
-        h := strings.ToUpper(info.Health)
-        if strings.Contains(h, "FAIL") || strings.Contains(h, "CRIT") {
-            fails++
-        }
-        if info.TempC != "" && len(temps) < 3 {
-            temps = append(temps, fmt.Sprintf("%s=%sC", dev, info.TempC))
-        }
-    }
-    if fails > 0 {
-        fmt.Printf("  SMART: FAIL=%d/%d", fails, total)
-    } else {
-        fmt.Printf("  SMART: PASS (%d)", total)
-    }
-    if len(temps) > 0 {
-        fmt.Printf(" | temps: %s", strings.Join(temps, ", "))
-    }
-    fmt.Println()
-}
-fmt.Printf("\n ====================================================================== \n")
-
-// --- NEW: Conntrack usage ---
+	// --- NEW: Conntrack usage ---
+	t0 = time.Now()
 	if ct, mx, err := readConntrackUsage(); err == nil && mx > 0 {
 		p := float64(ct) * 100 / float64(mx)
 		fmt.Printf("Conntrack: %d / %d (%.0f%%)\n", ct, mx, p)
 	}
+	timing["conntrack_usage_ms"] = time.Since(t0).Milliseconds()
 
+	// --- Conntrack + locals + TCP_IN ports (needed for TopN) ---
+	t0 = time.Now()
+	entries, err := readConntrack()
+	if err != nil {
+		printTimings()
+		return
+	}
+	locals := localIPs()
+	tcpIn := readTCPInPorts()
+	timing["conntrack_scan_ms"] = time.Since(t0).Milliseconds()
 
-// --- Conntrack + locals + TCP_IN ports (needed for TopN) ---
-entries, err := readConntrack()
-if err != nil {
-    return
-}
-locals := localIPs()
-tcpIn  := readTCPInPorts()
+	// 2) Top N από conntrack (inbound προς TCP_IN)
+	//    - Χρησιμοποίησε τα entries/locals/tcpIn που ήδη υπολογίστηκαν πριν το printRecent
+	if len(tcpIn) == 0 {
+		// καμία πολιτική TCP_IN φορτωμένη — δεν δείχνουμε Top N
+		printTimings()
+		return
+	}
 
-
-    // 2) Top N από conntrack (inbound προς TCP_IN)
-    //    - Χρησιμοποίησε τα entries/locals/tcpIn που ήδη υπολογίστηκαν πριν το printRecent
-    if len(tcpIn) == 0 {
-        // καμία πολιτική TCP_IN φορτωμένη — δεν δείχνουμε Top N
-        return
-    }
-
-
+	t0 = time.Now()
 	total, byState, topPorts, topIPs := topNStats(entries, tcpIn, locals, topN)
-
-
-
+	timing["topn_aggregate_ms"] = time.Since(t0).Milliseconds()
 
 	fmt.Printf("\nConnections: total=%d", total)
 	if len(byState) > 0 {
@@ -308,77 +367,72 @@ tcpIn  := readTCPInPorts()
 		}
 	}
 
+	if len(topIPs) > 0 {
+		t0 = time.Now()
+		fmt.Println("Top remote IPs (active inbound conns):")
+		for _, h := range topIPs {
+			// --- extras: states & ports ---
+			states := stateBreakdownByIP(entries, tcpIn, locals, h.IP)
+			ports := portBreakdownByIP(entries, tcpIn, locals, h.IP)
 
-if len(topIPs) > 0 {
-    fmt.Println("Top remote IPs (active inbound conns):")
-    for _, h := range topIPs {
-        // --- extras: states & ports ---
-        states := stateBreakdownByIP(entries, tcpIn, locals, h.IP)
-        ports  := portBreakdownByIP(entries, tcpIn, locals, h.IP)
+			var extras []string
+			if est := states["ESTABLISHED"]; est > 0 {
+				extras = append(extras, fmt.Sprintf("EST:%d", est))
+			}
+			if syn := states["SYN_SENT"]; syn > 0 {
+				extras = append(extras, fmt.Sprintf("SYN:%d", syn))
+			}
+			if tw := states["TIME_WAIT"]; tw > 0 {
+				extras = append(extras, fmt.Sprintf("TW:%d", tw))
+			}
+			// top port μόνο (όπως το παράδειγμά σου "Port: 443")
+			if len(ports) > 0 {
+				topPort, topCnt := 0, 0
+				for p, c := range ports {
+					if c > topCnt {
+						topPort, topCnt = p, c
+					}
+				}
+				// αν θέλεις μόνο το port χωρίς "=count", βάλε fmt.Sprintf("Port:%d", topPort)
+				extras = append(extras, fmt.Sprintf("Port:%d", topPort))
+			}
+			extraStr := ""
+			if len(extras) > 0 {
+				extraStr = " - " + strings.Join(extras, ", ")
+			}
 
-        var extras []string
-        if est := states["ESTABLISHED"]; est > 0 {
-            extras = append(extras, fmt.Sprintf("EST:%d", est))
-        }
-        if syn := states["SYN_SENT"]; syn > 0 {
-            extras = append(extras, fmt.Sprintf("SYN:%d", syn))
-        }
-        if tw := states["TIME_WAIT"]; tw > 0 {
-            extras = append(extras, fmt.Sprintf("TW:%d", tw))
-        }
-        // top port μόνο (όπως το παράδειγμά σου "Port: 443")
-        if len(ports) > 0 {
-            topPort, topCnt := 0, 0
-            for p, c := range ports {
-                if c > topCnt {
-                    topPort, topCnt = p, c
-                }
-            }
-            // αν θέλεις μόνο το port χωρίς "=count", βάλε fmt.Sprintf("Port:%d", topPort)
-            extras = append(extras, fmt.Sprintf("Port:%d", topPort))
-        }
-        extraStr := ""
-        if len(extras) > 0 {
-            extraStr = " - " + strings.Join(extras, ", ")
-        }
+			// --- enrich meta όπως πριν ---
+			meta := ""
+			if en != nil {
+				r := en.Lookup(h.IP)
+				metaParts := make([]string, 0, 3)
+				if r.ASNName != "" {
+					metaParts = append(metaParts, r.ASNName)
+				} else if r.ASN != 0 {
+					metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
+				}
+				if r.Country != "" {
+					if r.City != "" {
+						metaParts = append(metaParts, r.Country+" / "+r.City)
+					} else {
+						metaParts = append(metaParts, r.Country)
+					}
+				}
+				if r.PTR != "" {
+					metaParts = append(metaParts, r.PTR)
+				}
+				if len(metaParts) > 0 {
+					meta = " - [" + strings.Join(metaParts, " | ") + "]"
+				}
+			}
 
-        // --- enrich meta όπως πριν ---
-        meta := ""
-        if en != nil {
-            r := en.Lookup(h.IP)
-            metaParts := make([]string, 0, 3)
-            if r.ASNName != "" {
-                metaParts = append(metaParts, r.ASNName)
-            } else if r.ASN != 0 {
-                metaParts = append(metaParts, "AS"+strconv.Itoa(int(r.ASN)))
-            }
-            if r.Country != "" {
-                if r.City != "" {
-                    metaParts = append(metaParts, r.Country+" / "+r.City)
-                } else {
-                    metaParts = append(metaParts, r.Country)
-                }
-            }
-            if r.PTR != "" {
-                metaParts = append(metaParts, r.PTR)
-            }
-            if len(metaParts) > 0 {
-                meta = " - [" + strings.Join(metaParts, " | ") + "]"
-            }
-        }
+			// Μικραίνω το padding της IP για να χωρέσουν όλα σε μία γραμμή
+			fmt.Printf("  %-17s %6d%s%s\n", h.IP, h.Count, extraStr, meta)
+		}
+		timing["topn_enrich_print_ms"] = time.Since(t0).Milliseconds()
+	}
 
-        // Μικραίνω το padding της IP για να χωρέσουν όλα σε μία γραμμή
-        fmt.Printf("  %-17s %6d%s%s\n", h.IP, h.Count, extraStr, meta)
-    }
-}
-
-
-
-
-
-
-
-
+	printTimings()
 
 }
 
@@ -401,14 +455,13 @@ type statusOut struct {
 	RulesPresent bool        `json:"rules_present"`
 	Sets         []statusRow `json:"sets"`
 	Totals       struct {
-		Allow struct{ Hosts, Prefixes, Entries int } `json:"allow"`
-		Block struct{ Hosts, Prefixes, Entries int } `json:"block"`
-		Overall int                                   `json:"overall"`
+		Allow   struct{ Hosts, Prefixes, Entries int } `json:"allow"`
+		Block   struct{ Hosts, Prefixes, Entries int } `json:"block"`
+		Overall int                                    `json:"overall"`
 	} `json:"totals"`
 
 	Daemon  DaemonInfo  `json:"daemon"`
 	Service ServiceInfo `json:"service"`
-
 }
 
 func readTableSummary() statusOut {
@@ -423,7 +476,7 @@ func readTableSummary() statusOut {
 
 	var parsed struct {
 		Nftables []struct {
-			Set  *struct {
+			Set *struct {
 				Family string        `json:"family"`
 				Name   string        `json:"name"`
 				Table  string        `json:"table"`
@@ -769,164 +822,177 @@ func toInt(x any) int {
 	case float64:
 		return int(t)
 	case string:
-		i, _ := strconv.Atoi(t); return i
+		i, _ := strconv.Atoi(t)
+		return i
 	default:
 		return 0
 	}
 }
 func addPortRange(out map[int]struct{}, from, to int) {
-	if from <= 0 || to <= 0 || to < from { return }
+	if from <= 0 || to <= 0 || to < from {
+		return
+	}
 	// ασφάλεια: αν το range είναι τεράστιο, κόφ’το (status CLI είναι lightweight)
 	if to-from > 5000 { // adjust αν θέλεις
 		to = from + 5000
 	}
-	if to > 65535 { to = 65535 }
+	if to > 65535 {
+		to = 65535
+	}
 	for p := from; p <= to; p++ {
 		out[p] = struct{}{}
 	}
 }
 
-
 // --- Conntrack usage (count/max) ---
 func readIntFile(path string) (int, error) {
 	b, err := os.ReadFile(path)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	s := strings.TrimSpace(string(b))
 	return strconv.Atoi(s)
 }
 func readConntrackUsage() (count, max int, err error) {
 	count, err = readIntFile("/proc/sys/net/netfilter/nf_conntrack_count")
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	max, err = readIntFile("/proc/sys/net/netfilter/nf_conntrack_max")
 	return
 }
 
-
-
-
 // helper to read counters from nft JSON
 func readNftCounters() (map[string]int, error) {
-    out := map[string]int{}
-    b, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", "cfm").CombinedOutput()
-    if err != nil { return out, err }
-    var root map[string]any
-    if err := json.Unmarshal(b, &root); err != nil { return out, err }
-    arr, _ := root["nftables"].([]any)
-    for _, it := range arr {
-        m, _ := it.(map[string]any)
-        c, ok := m["counter"].(map[string]any)
-        if !ok { continue }
-        name, _ := c["name"].(string)
-        pkts := 0
-        if pk, ok := c["packets"].(float64); ok { pkts = int(pk) }
-        if name != "" { out[name] = pkts }
-    }
-    return out, nil
+	out := map[string]int{}
+	b, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", "cfm").CombinedOutput()
+	if err != nil {
+		return out, err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		return out, err
+	}
+	arr, _ := root["nftables"].([]any)
+	for _, it := range arr {
+		m, _ := it.(map[string]any)
+		c, ok := m["counter"].(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := c["name"].(string)
+		pkts := 0
+		if pk, ok := c["packets"].(float64); ok {
+			pkts = int(pk)
+		}
+		if name != "" {
+			out[name] = pkts
+		}
+	}
+	return out, nil
 }
-
-
-
 
 // helper list count elements with  "expires/timeout"
 func countTTLInSet(set string) (withTTL, total int) {
-    s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
+	s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
 
-    for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem matches IP or CIDR
-        addr := strings.Trim(m[1], ",}")
-        valid := false
-        if strings.Contains(addr, "/") {
-            if _, _, err := net.ParseCIDR(addr); err == nil { valid = true }
-        } else {
-            if net.ParseIP(addr) != nil { valid = true }
-        }
-        if !valid { continue }
+	for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem matches IP or CIDR
+		addr := strings.Trim(m[1], ",}")
+		valid := false
+		if strings.Contains(addr, "/") {
+			if _, _, err := net.ParseCIDR(addr); err == nil {
+				valid = true
+			}
+		} else {
+			if net.ParseIP(addr) != nil {
+				valid = true
+			}
+		}
+		if !valid {
+			continue
+		}
 
-        total++
-        if len(m) > 2 && strings.Trim(m[2], ",}") != "" {
-            withTTL++
-        }
-    }
-    return
+		total++
+		if len(m) > 2 && strings.Trim(m[2], ",}") != "" {
+			withTTL++
+		}
+	}
+	return
 }
-
 
 // Parse "nft list set inet cfm <set>" and return up to max IPs with TTL if present.
 type recentHit struct {
-    IP      string
-    Expires string // e.g. "59m31s" (empty if not parsed)
+	IP      string
+	Expires string // e.g. "59m31s" (empty if not parsed)
 }
 
 var (
-    // NEW: match IP **or CIDR** (v4/v6) plus optional expires/timeout
-    reElem = regexp.MustCompile(
-        `(?P<addr>(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?|` +
-        `[0-9a-fA-F:]+(?:/\d{1,3})?)` +
-        `(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`,
-    )
-
+	// NEW: match IP **or CIDR** (v4/v6) plus optional expires/timeout
+	reElem = regexp.MustCompile(
+		`(?P<addr>(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?|` +
+			`[0-9a-fA-F:]+(?:/\d{1,3})?)` +
+			`(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`,
+	)
 )
 
 func listSetElemsDetailed(set string, max int) []recentHit {
-    s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
-    out := make([]recentHit, 0, max)
-    for _, m := range reElem.FindAllStringSubmatch(s, -1) {
-        ip := strings.Trim(m[1], ",}")
-        // keep only host IPs here (recent hits list is per-IP)
-        if net.ParseIP(strings.TrimSuffix(ip, "/32")) == nil || strings.Contains(ip, "/") {
-            continue
-        }
-        ttl := ""
-        if len(m) > 2 {
-            ttl = strings.Trim(m[2], ",}")
-        }
-        out = append(out, recentHit{IP: ip, Expires: ttl})
-        if len(out) >= max {
-            break
-        }
-    }
-    return out
+	s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
+	out := make([]recentHit, 0, max)
+	for _, m := range reElem.FindAllStringSubmatch(s, -1) {
+		ip := strings.Trim(m[1], ",}")
+		// keep only host IPs here (recent hits list is per-IP)
+		if net.ParseIP(strings.TrimSuffix(ip, "/32")) == nil || strings.Contains(ip, "/") {
+			continue
+		}
+		ttl := ""
+		if len(m) > 2 {
+			ttl = strings.Trim(m[2], ",}")
+		}
+		out = append(out, recentHit{IP: ip, Expires: ttl})
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
 }
-
 
 //helpers for IP status conntrack
 
-//helpers for IP status conntrack (inbound προς local + μόνο TCP_IN ports)
+// helpers for IP status conntrack (inbound προς local + μόνο TCP_IN ports)
 func stateBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}, ip string) map[string]int {
-    m := map[string]int{}
-    for _, e := range entries {
-        if e.Src != ip {
-            continue
-        }
-        // ίδια λογική με topNStats: inbound προς local & dport ∈ TCP_IN
-        if _, inbound := locals[e.Dst]; !inbound {
-            continue
-        }
-        if _, isServer := tcpIn[e.Dport]; !isServer {
-            continue
-        }
-        m[e.State]++
-    }
-    return m
+	m := map[string]int{}
+	for _, e := range entries {
+		if e.Src != ip {
+			continue
+		}
+		// ίδια λογική με topNStats: inbound προς local & dport ∈ TCP_IN
+		if _, inbound := locals[e.Dst]; !inbound {
+			continue
+		}
+		if _, isServer := tcpIn[e.Dport]; !isServer {
+			continue
+		}
+		m[e.State]++
+	}
+	return m
 }
 
 func portBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[string]struct{}, ip string) map[int]int {
-    m := map[int]int{}
-    for _, e := range entries {
-        if e.Src != ip {
-            continue
-        }
-        if _, inbound := locals[e.Dst]; !inbound {
-            continue
-        }
-        if _, isServer := tcpIn[e.Dport]; !isServer {
-            continue
-        }
-        m[e.Dport]++
-    }
-    return m
+	m := map[int]int{}
+	for _, e := range entries {
+		if e.Src != ip {
+			continue
+		}
+		if _, inbound := locals[e.Dst]; !inbound {
+			continue
+		}
+		if _, isServer := tcpIn[e.Dport]; !isServer {
+			continue
+		}
+		m[e.Dport]++
+	}
+	return m
 }
-
-
 
 //////////////CHALLENGE//////////////
 // ---------------------------------------------------------------------------
@@ -1077,7 +1143,6 @@ func readChallengeJournalStats(since string, en *enrich.Enricher) (challenged, s
 	// Try journald first (if service logs go there)
 	lines := journalChallengeLines(since)
 
-
 	ipCounts := map[string]int{}
 	asnCounts := map[string]int{}
 
@@ -1159,7 +1224,6 @@ func readChallengeJournalStats(since string, en *enrich.Enricher) (challenged, s
 	return
 }
 
-
 func journalChallengeLines(since string) []string {
 	if _, err := exec.LookPath("journalctl"); err != nil {
 		return nil
@@ -1232,8 +1296,6 @@ func fileChallengeLinesSince(since string) []string {
 	return nil
 }
 
-
-
 func topHitCounts(m map[string]int, n int) []HitCount {
 	if len(m) == 0 {
 		return nil
@@ -1253,4 +1315,3 @@ func topHitCounts(m map[string]int, n int) []HitCount {
 	}
 	return out
 }
-
