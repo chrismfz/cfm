@@ -335,7 +335,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     }
                 }
 
-                samples := e.ipSamples(ipStr, 8)
                 extra := map[string]string{
                     "detector":         "webdetector",
                     "ip":               ipStr,
@@ -358,7 +357,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Kind:    core.AlertKind("WEB/CHALLENGE"),
                     Key:     ipStr,
                     Count:   0,
-                    Samples: samples,
                     Extra:   extra,
                 }
 
@@ -370,6 +368,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     continue
                 }
                 e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
+                alet.Samples = e.ipSamples(ipStr, 8)
                 select { case out <- alet: default: }
             }
         }
@@ -507,8 +506,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         }
  
 
-                                        samples := e.ipSamples(c.ip, maxSamples)
-
                                         ttl := e.cfg.ChallengePathsTTL
                                         if ttl <= 0 {
                                                 ttl = 30 * time.Minute
@@ -543,7 +540,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Kind:    core.AlertKind("WEB/CHALLENGE"),
                                                 Key:     c.ip,
                                                 Count:   c.count,
-                                                Samples: samples,
                                                 Extra:   extra,
                                         }
 
@@ -558,6 +554,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                                             continue
                                         }
 
+                                        a.Samples = e.ipSamples(c.ip, maxSamples)
                                         select {
                                         case out <- a:
                                         default:
@@ -716,8 +713,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         continue
     }
 
-            samples := e.ipSamples(ipStr, maxSamples)
-
             ttl := e.cfg.ChallengePathsTTL
             if ttl <= 0 { ttl = 30 * time.Minute }
 
@@ -743,7 +738,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
                 Key:     ipStr,
                 Count:   a.total,
-                Samples: samples,
                 Extra:   extra,
             }
             e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
@@ -754,6 +748,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 continue
             }
+            alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
         }
     }
@@ -824,7 +819,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
                 Key:     ipStr,
                 Count:   cnt,
-                Samples: e.ipSamples(ipStr, maxSamples),
                 Extra:   extra,
             }
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
@@ -835,6 +829,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 continue
             }
+            alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
         }
     }
@@ -913,7 +908,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
                 Key:     ipStr,
                 Count:   len(a.uniq),
-                Samples: e.ipSamples(ipStr, maxSamples),
                 Extra:   extra,
             }
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
@@ -924,6 +918,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 continue
             }
+            alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
         }
     }
@@ -1549,7 +1544,6 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                 e.ipLastChalEmit[ipStr] = now
                 e.emitMu.Unlock()
 
-                samples := e.ipSamples(ipStr, maxSamples)
                 ttl := e.cfg.ChallengePathsTTL
                 if ttl <= 0 {
                     ttl = 30 * time.Minute
@@ -1579,7 +1573,6 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                     Kind:    core.AlertKind("WEB/CHALLENGE"),
                     Key:     ipStr,
                     Count:   reqN,
-                    Samples: samples,
                     Extra:   extra,
                 }
 
@@ -1591,6 +1584,7 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                    }
                    continue
                }
+               a.Samples = e.ipSamples(ipStr, maxSamples)
                select { case out <- a: default: }
             }
         }
@@ -1618,15 +1612,22 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		return
 	}
 
-	type sAgg struct {
-		sub   string
-		host  string
-		reqs  int
+	type pairAgg struct {
+		sub  string
+		host string
+		reqs int
+	}
+	type subnetAgg struct {
 		ips   map[string]struct{}
 		paths map[uint64]struct{}
 	}
 
-	agg := make(map[string]*sAgg) // key = subnet|host
+	pairs := make(map[string]*pairAgg)
+	subnets := make(map[string]*subnetAgg)
+	capN := e.cfg.ChallengeSubnetCap
+	if capN <= 0 {
+		capN = 1
+	}
 
 	e.mu.RLock()
 	for _, hs := range e.hosts {
@@ -1635,95 +1636,60 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		}
 		for i := range hs.buckets {
 			b := &hs.buckets[i]
-
 			for sub, hm := range b.subnetHostReqs {
+				if sub == "" || len(hm) == 0 {
+					continue
+				}
+
+				ips := b.subnetIPs[sub]
+				paths := b.subnetUniqPaths[sub]
+
+				sa := subnets[sub]
+				if sa == nil {
+					sa = &subnetAgg{}
+					if len(ips) > 0 {
+						sa.ips = make(map[string]struct{}, minInt(capN, len(ips)))
+					}
+					if len(paths) > 0 {
+						sa.paths = make(map[uint64]struct{}, minInt(capN, len(paths)))
+					}
+					subnets[sub] = sa
+				}
+
+				if len(sa.ips) < capN {
+					if sa.ips == nil {
+						sa.ips = make(map[string]struct{}, minInt(capN, len(ips)))
+					}
+					for ip := range ips {
+						sa.ips[ip] = struct{}{}
+						if len(sa.ips) >= capN {
+							break
+						}
+					}
+				}
+				if len(sa.paths) < capN {
+					if sa.paths == nil {
+						sa.paths = make(map[uint64]struct{}, minInt(capN, len(paths)))
+					}
+					for h := range paths {
+						sa.paths[h] = struct{}{}
+						if len(sa.paths) >= capN {
+							break
+						}
+					}
+				}
+
 				for host, n := range hm {
-					host = strings.ToLower(strings.TrimSpace(host))
-					if sub == "" || host == "" {
+					if n <= 0 || host == "" {
 						continue
 					}
 					key := sub + "|" + host
-					a := agg[key]
+					a := pairs[key]
 					if a == nil {
-						a = &sAgg{
-							sub:  sub,
-							host: host,
-						}
-						agg[key] = a
+						a = &pairAgg{sub: sub, host: host}
+						pairs[key] = a
 					}
 					a.reqs += n
-				}
-			}
-
-			for sub, set := range b.subnetIPs {
-				if len(set) == 0 {
-					continue
-				}
-				hm := b.subnetHostReqs[sub]
-				for host, n := range hm {
-					if n <= 0 {
-						continue
-					}
-					host = strings.ToLower(strings.TrimSpace(host))
-					if host == "" {
-						continue
-					}
-					key := sub + "|" + host
-					a := agg[key]
-					if a == nil {
-						a = &sAgg{
-							sub:  sub,
-							host: host,
-						}
-						agg[key] = a
-					}
-					if a.ips == nil {
-						a.ips = make(map[string]struct{}, 8)
-					}
-					if len(a.ips) < e.cfg.ChallengeSubnetCap {
-						for ip := range set {
-							a.ips[ip] = struct{}{}
-							if len(a.ips) >= e.cfg.ChallengeSubnetCap {
-								break
-							}
-						}
-					}
-				}
-			}
-
-			for sub, set := range b.subnetUniqPaths {
-				if len(set) == 0 {
-					continue
-				}
-				hm := b.subnetHostReqs[sub]
-				for host, n := range hm {
-					if n <= 0 {
-						continue
-					}
-					host = strings.ToLower(strings.TrimSpace(host))
-					if host == "" {
-						continue
-					}
-					key := sub + "|" + host
-					a := agg[key]
-					if a == nil {
-						a = &sAgg{
-							sub:  sub,
-							host: host,
-						}
-						agg[key] = a
-					}
-					if a.paths == nil {
-						a.paths = make(map[uint64]struct{}, 16)
-					}
-					if len(a.paths) < e.cfg.ChallengeSubnetCap {
-						for h := range set {
-							a.paths[h] = struct{}{}
-							if len(a.paths) >= e.cfg.ChallengeSubnetCap {
-								break
-							}
-						}
-					}
 				}
 			}
 		}
@@ -1732,13 +1698,17 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 
 	const cooldown = 10 * time.Second
 
-	for pairKey, a := range agg {
+	for pairKey, a := range pairs {
 		if a == nil || a.host == "" {
 			continue
 		}
 
-		ipN := len(a.ips)
-		pathN := len(a.paths)
+		sa := subnets[a.sub]
+		if sa == nil {
+			continue
+		}
+		ipN := len(sa.ips)
+		pathN := len(sa.paths)
 
 		if ipN < e.cfg.ChallengeSubnetMinIPs {
 			continue
@@ -1769,7 +1739,7 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 
 		rule := "CHALLENGE_SUBNET"
 
-		for ip := range a.ips {
+		for ip := range sa.ips {
 			if e.isBypassed(ip) || e.isExcluded(ip, a.host, "", rule) {
 				if e.cfg.ChallengeLogSuppressed {
 					logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ip, a.host, rule)
@@ -1812,7 +1782,13 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 			}
 		}
 	}
+}
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 

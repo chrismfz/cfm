@@ -2,75 +2,82 @@ package nft
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
-	"os"
-//	"net"
-//	"encoding/json"
-	"path/filepath"
+	//	"net"
+	//	"encoding/json"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
+	"path/filepath"
 )
-
 
 // Keep the last time we successfully autoblocked (and/or notified) a given IP
 var (
-    thV4Hits = map[string][]time.Time{}
-    thV6Hits = map[string][]time.Time{}
+	thV4Hits = map[string][]time.Time{}
+	thV6Hits = map[string][]time.Time{}
 
-    lastThrottleReason = map[string]string{} // ip -> reason
+	lastThrottleReason = map[string]string{} // ip -> reason
 
-    // NEW: last successful autoblock per IP (v4/v6 share the key as a string)
-    lastAutoBlockAt = map[string]time.Time{}
-    lastIgnoredAt   = map[string]time.Time{}
+	// NEW: last successful autoblock per IP (v4/v6 share the key as a string)
+	lastAutoBlockAt = map[string]time.Time{}
+	lastIgnoredAt   = map[string]time.Time{}
 )
-
-
 
 // -----------------------------------------------------------------------------
 // Flood rules application
 // -----------------------------------------------------------------------------
 
 func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
-    b.cfg = c // απλό replace
+	b.cfg = c // απλό replace
 
-    // 1) Ensure βάσης (πίνακας/αλυσίδες/sets + refreshSelfSets μέσα στο EnsureBase)
-    if !b.tableExists() {
-        if err := b.EnsureBase(); err != nil { return err }
-    } else {
-        // καλό είναι να ανανεώνεις τα self sets ανά tick αν αλλάζουν IPs
-        // π.χ. b.refreshSelfSets() εδώ, αν δεν το καλείς ήδη μέσα στο EnsureBase
-    }
+	// 1) Ensure βάσης (πίνακας/αλυσίδες/sets + refreshSelfSets μέσα στο EnsureBase)
+	if !b.tableExists() {
+		if err := b.EnsureBase(); err != nil {
+			return err
+		}
+	} else {
+		// καλό είναι να ανανεώνεις τα self sets ανά tick αν αλλάζουν IPs
+		// π.χ. b.refreshSelfSets() εδώ, αν δεν το καλείς ήδη μέσα στο EnsureBase
+	}
 
-    // 2) Καθαρό flood και early self-bypass (να μη γράφουν counters)
-    _ = b.nftExpr("flush chain inet cfm flood;")
-    _ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
-    _ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
+	// 2) Καθαρό flood και early self-bypass (να μη γράφουν counters)
+	_ = b.nftExpr("flush chain inet cfm flood;")
+	_ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
+	_ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
 
+	// 3) Συνέχισε με τα υπόλοιπα
+	b.ensureThrottleSets()
 
-    // 3) Συνέχισε με τα υπόλοιπα
-    b.ensureThrottleSets()
+	if err := b.ApplyHardeningRules(c); err != nil {
+		return err
+	} // badflags/newrate/icmp κ.λπ. :contentReference[oaicite:0]{index=0}
 
-    if err := b.ApplyHardeningRules(c); err != nil { return err }  // badflags/newrate/icmp κ.λπ. :contentReference[oaicite:0]{index=0}
+	// PacketRate (pps/syn per-IP)
+	if c.PacketRate.Rate > 0 {
+		burst := c.PacketRate.Burst
+		if burst <= 0 {
+			burst = c.PacketRate.Rate * 2
+		}
+		if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
+			return err
+		}
+	}
 
-    // PacketRate (pps/syn per-IP)
-    if c.PacketRate.Rate > 0 {
-        burst := c.PacketRate.Burst
-        if burst <= 0 { burst = c.PacketRate.Rate * 2 }
-        if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil { return err }
-    }
-
-    if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil { return err }
-    if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil { return err }
-    return nil
+	if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
+		return err
+	}
+	if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
+		return err
+	}
+	return nil
 }
-
-
 
 // ensureThrottleSets creates (idempotently) the dynamic sets that hold throttled IPs.
 func (b *Backend) ensureThrottleSets() {
@@ -87,69 +94,67 @@ func (b *Backend) ensureThrottleSets() {
 }
 
 // -----------------------------------------------------------------------------
-// Connlimit 
+// Connlimit
 // -----------------------------------------------------------------------------
-
-
 
 func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
 
-        const meterSize = 65535
-        for _, r := range rules {
-                cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
-                b.ensureCounter(cname)
+	const meterSize = 65535
+	for _, r := range rules {
+		cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
+		b.ensureCounter(cname)
 
-                switch strings.ToLower(r.Proto) {
-                case "tcp":
-                        // IPv4 per-IP concurrent NEW connections on tcp dport
-                        expr4 := fmt.Sprintf(
-                                "add rule inet cfm flood ip protocol tcp ct state new tcp dport %d "+
-                                "meter cl_%d_tcp_v4 size %d { ip saddr ct count over %d } "+
-                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
-                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-                        )
-                        if err := b.nftExpr(expr4); err != nil {
-                                return fmt.Errorf("connlimit per-ip v4 tcp rule failed: %w", err)
-                        }
-                        // IPv6
-                        expr6 := fmt.Sprintf(
-                                "add rule inet cfm flood ip6 nexthdr tcp ct state new tcp dport %d "+
-                                "meter cl_%d_tcp_v6 size %d { ip6 saddr ct count over %d } "+
-                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
-                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-                        )
-                        if err := b.nftExpr(expr6); err != nil {
-                                return fmt.Errorf("connlimit per-ip v6 tcp rule failed: %w", err)
-                        }
+		switch strings.ToLower(r.Proto) {
+		case "tcp":
+			// IPv4 per-IP concurrent NEW connections on tcp dport
+			expr4 := fmt.Sprintf(
+				"add rule inet cfm flood ip protocol tcp ct state new tcp dport %d "+
+					"meter cl_%d_tcp_v4 size %d { ip saddr ct count over %d } "+
+					"counter name %q drop comment \"connlimit-ip %d;%d\";",
+				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+			)
+			if err := b.nftExpr(expr4); err != nil {
+				return fmt.Errorf("connlimit per-ip v4 tcp rule failed: %w", err)
+			}
+			// IPv6
+			expr6 := fmt.Sprintf(
+				"add rule inet cfm flood ip6 nexthdr tcp ct state new tcp dport %d "+
+					"meter cl_%d_tcp_v6 size %d { ip6 saddr ct count over %d } "+
+					"counter name %q drop comment \"connlimit-ip %d;%d\";",
+				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+			)
+			if err := b.nftExpr(expr6); err != nil {
+				return fmt.Errorf("connlimit per-ip v6 tcp rule failed: %w", err)
+			}
 
-                case "udp":
-                        // IPv4 (UDP: counts conntrack entries per-IP; μικρότερη διάρκεια)
-                        expr4 := fmt.Sprintf(
-                                "add rule inet cfm flood ip protocol udp ct state new udp dport %d "+
-                                "meter cl_%d_udp_v4 size %d { ip saddr ct count over %d } "+
-                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
-                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-                        )
-                        if err := b.nftExpr(expr4); err != nil {
-                                return fmt.Errorf("connlimit per-ip v4 udp rule failed: %w", err)
-                        }
-                        // IPv6
-                        expr6 := fmt.Sprintf(
-                                "add rule inet cfm flood ip6 nexthdr udp ct state new udp dport %d "+
-                                "meter cl_%d_udp_v6 size %d { ip6 saddr ct count over %d } "+
-                                "counter name %q drop comment \"connlimit-ip %d;%d\";",
-                                r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-                        )
-                        if err := b.nftExpr(expr6); err != nil {
-                                return fmt.Errorf("connlimit per-ip v6 udp rule failed: %w", err)
-                        }
+		case "udp":
+			// IPv4 (UDP: counts conntrack entries per-IP; μικρότερη διάρκεια)
+			expr4 := fmt.Sprintf(
+				"add rule inet cfm flood ip protocol udp ct state new udp dport %d "+
+					"meter cl_%d_udp_v4 size %d { ip saddr ct count over %d } "+
+					"counter name %q drop comment \"connlimit-ip %d;%d\";",
+				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+			)
+			if err := b.nftExpr(expr4); err != nil {
+				return fmt.Errorf("connlimit per-ip v4 udp rule failed: %w", err)
+			}
+			// IPv6
+			expr6 := fmt.Sprintf(
+				"add rule inet cfm flood ip6 nexthdr udp ct state new udp dport %d "+
+					"meter cl_%d_udp_v6 size %d { ip6 saddr ct count over %d } "+
+					"counter name %q drop comment \"connlimit-ip %d;%d\";",
+				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
+			)
+			if err := b.nftExpr(expr6); err != nil {
+				return fmt.Errorf("connlimit per-ip v6 udp rule failed: %w", err)
+			}
 
-                default:
-                        return fmt.Errorf("unknown proto %q in CONNLIMIT", r.Proto)
-                }
-        }
-        return nil
- }
+		default:
+			return fmt.Errorf("unknown proto %q in CONNLIMIT", r.Proto)
+		}
+	}
+	return nil
+}
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -158,36 +163,35 @@ func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
 
 // listSetsWithPrefix: φτιάχνει τα ονόματα από το in-memory registry· κανένα nft call.
 func (b *Backend) listSetsWithPrefix(prefix string) []string {
-    var out []string
+	var out []string
 
-    // per-feed sets (allow/block, v4/v6, hosts/nets)
-    if strings.HasPrefix(prefix, "allow_ext_") || strings.HasPrefix(prefix, "block_ext_") {
-        for k := range b.feedKeys {
-            cand := []string{
-                "allow_ext_v4_hosts_" + k, "allow_ext_v4_nets_" + k,
-                "allow_ext_v6_hosts_" + k, "allow_ext_v6_nets_" + k,
-                "block_ext_v4_hosts_" + k, "block_ext_v4_nets_" + k,
-                "block_ext_v6_hosts_" + k, "block_ext_v6_nets_" + k,
-            }
-            for _, name := range cand {
-                if strings.HasPrefix(name, prefix) {
-                    out = append(out, name)
-                }
-            }
-        }
-    }
+	// per-feed sets (allow/block, v4/v6, hosts/nets)
+	if strings.HasPrefix(prefix, "allow_ext_") || strings.HasPrefix(prefix, "block_ext_") {
+		for k := range b.feedKeys {
+			cand := []string{
+				"allow_ext_v4_hosts_" + k, "allow_ext_v4_nets_" + k,
+				"allow_ext_v6_hosts_" + k, "allow_ext_v6_nets_" + k,
+				"block_ext_v4_hosts_" + k, "block_ext_v4_nets_" + k,
+				"block_ext_v6_hosts_" + k, "block_ext_v6_nets_" + k,
+			}
+			for _, name := range cand {
+				if strings.HasPrefix(name, prefix) {
+					out = append(out, name)
+				}
+			}
+		}
+	}
 
-    // throttling per-port registries (ήδη τα γεμίζεις στην ApplyPortFlood/ApplyConnlimit)
-    if strings.HasPrefix(prefix, "th_pf_") {
-        out = append(out, b.pfSets...)
-    }
-    if strings.HasPrefix(prefix, "th_connlimit_") {
-        out = append(out, b.clSets...)
-    }
+	// throttling per-port registries (ήδη τα γεμίζεις στην ApplyPortFlood/ApplyConnlimit)
+	if strings.HasPrefix(prefix, "th_pf_") {
+		out = append(out, b.pfSets...)
+	}
+	if strings.HasPrefix(prefix, "th_connlimit_") {
+		out = append(out, b.clSets...)
+	}
 
-    return out
+	return out
 }
-
 
 // mapRate converts (max per intervalSeconds) into nft syntax <num>/<unit> with unit in {second,minute,hour,day}.
 func mapRate(max, intervalSeconds int) (int, string) {
@@ -238,9 +242,8 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 		num, unit := mapRate(r.Packets, r.WindowSec)
 		ttl := b.cfg.Throttle.SetTTL
 
-b.registerPfSet(setV4)
-b.registerPfSet(setV6)
-
+		b.registerPfSet(setV4)
+		b.registerPfSet(setV6)
 
 		switch proto {
 		case "tcp":
@@ -298,18 +301,34 @@ b.registerPfSet(setV6)
 	return nil
 }
 
-
-
-
-
 // -----------------------------------------------------------------------------
 // Debug/telemetry
 // -----------------------------------------------------------------------------
 // DumpFloodCounters logs flood-related counters with delta since last tick.
 // Ελαφριά: δεν κάνει ποτέ "list table", μόνο "list counters".
 func (b *Backend) DumpFloodCounters() {
+	b.floodDumpMu.Lock()
+	if b.floodDumpRunning {
+		b.floodDumpMu.Unlock()
+		return
+	}
+	b.floodDumpRunning = true
+	b.floodDumpMu.Unlock()
+
+	go func() {
+		defer func() {
+			b.floodDumpMu.Lock()
+			b.floodDumpRunning = false
+			b.floodDumpMu.Unlock()
+		}()
+		b.dumpFloodCountersOnce()
+	}()
+}
+
+func (b *Backend) dumpFloodCountersOnce() {
 	// Πάρε όλους τους counters του table (χωρίς sets/elements).
-	out, err := b.runCmdOutput("list counters table inet cfm")
+	// Use a generous timeout so nft gets enough time under load, without stalling the daemon tick path.
+	out, err := b.runCmdOutputWithTimeout("list counters table inet cfm", 30*time.Second)
 	if err != nil {
 		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
 		_ = b.EnsureBase()
@@ -319,11 +338,11 @@ func (b *Backend) DumpFloodCounters() {
 
 	// Γρήγορο φίλτρο: counters που μας ενδιαφέρουν 1) ονομαστικά, 2) με prefixes
 	wantedExact := map[string]struct{}{
-		"badflags_drop":     {},
-		"newrate_v4":        {},
-		"newrate_v6":        {},
-		"icmp_v4":           {},
-		"icmp_v6":           {},
+		"badflags_drop": {},
+		"newrate_v4":    {},
+		"newrate_v6":    {},
+		"icmp_v4":       {},
+		"icmp_v6":       {},
 	}
 	hasWantedPrefix := func(name string) bool {
 		return strings.HasPrefix(name, "connlimit_") ||
@@ -375,15 +394,15 @@ func (b *Backend) DumpFloodCounters() {
 			if len(f) >= 2 {
 				if pkts64, err := strconv.ParseUint(f[1], 10, 64); err == nil {
 
-       pkts := pkts64
-       prev := b.last[cur] // 0 αν δεν υπάρχει
-       if pkts > prev {
-           delta := pkts - prev
-           logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
-               cur, pkts, delta, reasonForName(cur))
-       }
-       // reset (pkts < prev) το χειρίζεσαι ήδη “σιωπηλά” ενημερώνοντας την τιμή
-       b.last[cur] = pkts
+					pkts := pkts64
+					prev := b.last[cur] // 0 αν δεν υπάρχει
+					if pkts > prev {
+						delta := pkts - prev
+						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
+							cur, pkts, delta, reasonForName(cur))
+					}
+					// reset (pkts < prev) το χειρίζεσαι ήδη “σιωπηλά” ενημερώνοντας την τιμή
+					b.last[cur] = pkts
 
 				}
 			}
@@ -396,230 +415,218 @@ func (b *Backend) DumpFloodCounters() {
 	}
 }
 
-
-
-
-
 func reasonForName(name string) string {
-    switch {
-    case strings.HasPrefix(name, "synrate"):
-        return "SYN flood"
-    case strings.HasPrefix(name, "ppsrate"):
-        return "Packet flood (pps)"
-    case strings.HasPrefix(name, "portflood_"):
-        return "Port flood"
-    case strings.HasPrefix(name, "connlimit_"):
-        return "Connection limit"
-    case strings.HasPrefix(name, "th_syn"):
-        return "SYN flood"
-    case strings.HasPrefix(name, "th_pps"):
-        return "Packet flood (pps)"
-    case strings.HasPrefix(name, "th_pf_tcp"):
-        return "TCP port flood"
-    case strings.HasPrefix(name, "th_pf_udp"):
-        return "UDP port flood"
-    case strings.HasPrefix(name, "throttled"):
-        return "General throttle"
-    case strings.HasPrefix(name, "block_v4"), strings.HasPrefix(name, "block_v6"):
-        return "Auto-block"
+	switch {
+	case strings.HasPrefix(name, "synrate"):
+		return "SYN flood"
+	case strings.HasPrefix(name, "ppsrate"):
+		return "Packet flood (pps)"
+	case strings.HasPrefix(name, "portflood_"):
+		return "Port flood"
+	case strings.HasPrefix(name, "connlimit_"):
+		return "Connection limit"
+	case strings.HasPrefix(name, "th_syn"):
+		return "SYN flood"
+	case strings.HasPrefix(name, "th_pps"):
+		return "Packet flood (pps)"
+	case strings.HasPrefix(name, "th_pf_tcp"):
+		return "TCP port flood"
+	case strings.HasPrefix(name, "th_pf_udp"):
+		return "UDP port flood"
+	case strings.HasPrefix(name, "throttled"):
+		return "General throttle"
+	case strings.HasPrefix(name, "block_v4"), strings.HasPrefix(name, "block_v6"):
+		return "Auto-block"
 
+	case strings.HasPrefix(name, "th_connlimit_"):
+		// th_connlimit_<port>_<proto>_(v4|v6) → reason = "connlimit_<port>_<proto>"
+		x := strings.TrimPrefix(name, "th_connlimit_")
+		x = strings.TrimSuffix(x, "_v4")
+		x = strings.TrimSuffix(x, "_v6")
+		return "connlimit_" + x
 
-case strings.HasPrefix(name, "th_connlimit_"):
-	// th_connlimit_<port>_<proto>_(v4|v6) → reason = "connlimit_<port>_<proto>"
-	x := strings.TrimPrefix(name, "th_connlimit_")
-	x = strings.TrimSuffix(x, "_v4")
-	x = strings.TrimSuffix(x, "_v6")
-	return "connlimit_" + x
+	case strings.HasPrefix(name, "th_pf_"):
+		// th_pf_<port>_<proto>_(v4|v6)  ή παλιό generic th_pf_tcp_v4
+		x := strings.TrimPrefix(name, "th_pf_") // π.χ. "65535_tcp_v4" ή "tcp_v4"
+		// Αν ξεκινάει με ψηφίο, είναι per-port
+		if len(x) > 0 && x[0] >= '0' && x[0] <= '9' {
+			// μορφή: "<port>_<proto>_v4|v6"
+			parts := strings.Split(x, "_")
+			if len(parts) >= 2 {
+				return "portflood_" + parts[0] + "_" + parts[1]
+			}
+		}
+		// fallback για τα generic:
+		if strings.Contains(x, "_udp_") {
+			return "UDP port flood"
+		}
+		return "TCP port flood"
 
-case strings.HasPrefix(name, "th_pf_"):
-    // th_pf_<port>_<proto>_(v4|v6)  ή παλιό generic th_pf_tcp_v4
-    x := strings.TrimPrefix(name, "th_pf_")      // π.χ. "65535_tcp_v4" ή "tcp_v4"
-    // Αν ξεκινάει με ψηφίο, είναι per-port
-    if len(x) > 0 && x[0] >= '0' && x[0] <= '9' {
-        // μορφή: "<port>_<proto>_v4|v6"
-        parts := strings.Split(x, "_")
-        if len(parts) >= 2 {
-            return "portflood_" + parts[0] + "_" + parts[1]
-        }
-    }
-    // fallback για τα generic:
-    if strings.Contains(x, "_udp_") {
-        return "UDP port flood"
-    }
-    return "TCP port flood"
+	case name == "badflags_drop":
+		return "Bad TCP flags"
+	case name == "newrate_v4", name == "newrate_v6":
+		return "Global NEW-rate"
+	case name == "icmp_v4", name == "icmp_v6":
+		return "ICMP echo limit"
+	case strings.HasPrefix(name, "th_new_"):
+		return "NEW-rate"
+	case strings.HasPrefix(name, "th_icmp_"):
+		return "ICMP echo limit"
 
-
-case name == "badflags_drop":
-    return "Bad TCP flags"
-case name == "newrate_v4", name == "newrate_v6":
-    return "Global NEW-rate"
-case name == "icmp_v4", name == "icmp_v6":
-    return "ICMP echo limit"
-case strings.HasPrefix(name, "th_new_"):
-    return "NEW-rate"
-case strings.HasPrefix(name, "th_icmp_"):
-    return "ICMP echo limit"
-
-
-
-
-    default:
-        return "unknown"
-    }
+	default:
+		return "unknown"
+	}
 }
-
-
-
-
-
-
-
-
 
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6),
 // χωρίς full table dump. Διαβάζει ΜΟΝΟ τα στοχευμένα throttling sets.
 func (b *Backend) DumpThrottledIPs() {
-    // --- helpers ---
+	// --- helpers ---
 
-    // Στοχευμένο dump ενός set σε []string IPs (αγνοεί self IPs).
-    dumpSet := func(set string) []string {
-        if set == "" || !b.setExists(set) {
-            return nil
-        }
-        out, err := b.runCmdOutput("list set inet cfm " + set)
-        if err != nil {
-            return nil
-        }
-        i := strings.Index(out, "elements = {")
-        if i < 0 {
-            return nil
-        }
-        rest := out[i+len("elements = {"):]
-        j := strings.Index(rest, "}")
-        if j < 0 {
-            return nil
-        }
-        elems := strings.Split(strings.TrimSpace(rest[:j]), ",")
-        ips := make([]string, 0, len(elems))
-        for _, t := range elems {
-            t = strings.TrimSpace(t)
-            if t == "" {
-                continue
-            }
-            // Κόψε οτιδήποτε μετά το IP (π.χ. "timeout 60s")
-            if k := strings.IndexByte(t, ' '); k >= 0 {
-                t = t[:k]
-            }
-            if t == "" || b.isSelfIPString(t) {
-                continue
-            }
-            ips = append(ips, t)
-        }
-        return ips
-    }
+	// Στοχευμένο dump ενός set σε []string IPs (αγνοεί self IPs).
+	dumpSet := func(set string) []string {
+		if set == "" || !b.setExists(set) {
+			return nil
+		}
+		out, err := b.runCmdOutput("list set inet cfm " + set)
+		if err != nil {
+			return nil
+		}
+		i := strings.Index(out, "elements = {")
+		if i < 0 {
+			return nil
+		}
+		rest := out[i+len("elements = {"):]
+		j := strings.Index(rest, "}")
+		if j < 0 {
+			return nil
+		}
+		elems := strings.Split(strings.TrimSpace(rest[:j]), ",")
+		ips := make([]string, 0, len(elems))
+		for _, t := range elems {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
+			}
+			// Κόψε οτιδήποτε μετά το IP (π.χ. "timeout 60s")
+			if k := strings.IndexByte(t, ' '); k >= 0 {
+				t = t[:k]
+			}
+			if t == "" || b.isSelfIPString(t) {
+				continue
+			}
+			ips = append(ips, t)
+		}
+		return ips
+	}
 
+	// Attach reason + unify (v4/v6) for autoblock.
+	//    uniq4 := map[string]struct{}{}
+	//    uniq6 := map[string]struct{}{}
+	uniq4 := map[string]struct{}{}
+	uniq6 := map[string]struct{}{}
 
-    // Attach reason + unify (v4/v6) for autoblock.
-//    uniq4 := map[string]struct{}{}
-//    uniq6 := map[string]struct{}{}
-    uniq4 := map[string]struct{}{}
-    uniq6 := map[string]struct{}{}
+	record := func(setName string) {
+		ips := dumpSet(setName)
+		if len(ips) == 0 {
+			return
+		}
+		rsn := reasonForName(setName)
+		for _, ip := range ips {
+			// Prefer first/specific reason; avoid overwriting useful text with generic catch-alls
+			if prev, ok := lastThrottleReason[ip]; !ok || prev == "" || strings.HasPrefix(prev, "General throttle") || prev == "Auto-block" || prev == "unknown" {
+				lastThrottleReason[ip] = rsn
+			}
 
-    record := func(setName string) {
-        ips := dumpSet(setName)
-        if len(ips) == 0 { return }
-        rsn := reasonForName(setName)
-        for _, ip := range ips {
-            // Prefer first/specific reason; avoid overwriting useful text with generic catch-alls
-            if prev, ok := lastThrottleReason[ip]; !ok || prev == "" || strings.HasPrefix(prev, "General throttle") || prev == "Auto-block" || prev == "unknown" {
-                lastThrottleReason[ip] = rsn
-            }
+			if parseIPFam(ip) == 4 {
+				uniq4[ip] = struct{}{}
+			} else if parseIPFam(ip) == 6 {
+				uniq6[ip] = struct{}{}
+			}
 
-            if parseIPFam(ip) == 4 {
-                uniq4[ip] = struct{}{}
-            } else if parseIPFam(ip) == 6 {
-                uniq6[ip] = struct{}{}
-            }
+		}
+	}
 
-        }
-    }
+	// Πηγές (THROTTLE_SOURCES ή cfg.Throttle.Sources)
+	enabled := map[string]bool{}
+	var srcs []string
+	if b.cfg != nil && len(b.cfg.Throttle.Sources) > 0 {
+		srcs = b.cfg.Throttle.Sources
+	} else {
+		env := strings.TrimSpace(os.Getenv("THROTTLE_SOURCES"))
+		if env == "" {
+			env = "syn,portflood,pps,new,icmp,ack" // default
+		}
+		for _, t := range strings.Split(env, ",") {
+			srcs = append(srcs, t)
+		}
+	}
+	for _, t := range srcs {
+		k := strings.ToLower(strings.TrimSpace(t))
+		if k != "" {
+			enabled[k] = true
+		}
+	}
 
+	if enabled["syn"] {
+		record("th_syn_v4")
+		record("th_syn_v6")
+	}
+	if enabled["pps"] {
+		record("th_pps_v4")
+		record("th_pps_v6")
+	}
+	if enabled["new"] {
+		record("th_new_v4")
+		record("th_new_v6")
+	}
+	if enabled["icmp"] {
+		record("th_icmp_v4")
+		record("th_icmp_v6")
+	}
 
-    // Πηγές (THROTTLE_SOURCES ή cfg.Throttle.Sources)
-    enabled := map[string]bool{}
-    var srcs []string
-    if b.cfg != nil && len(b.cfg.Throttle.Sources) > 0 {
-        srcs = b.cfg.Throttle.Sources
-    } else {
-        env := strings.TrimSpace(os.Getenv("THROTTLE_SOURCES"))
-        if env == "" {
-            env = "syn,portflood,pps,new,icmp,ack" // default
-        }
-        for _, t := range strings.Split(env, ",") {
-            srcs = append(srcs, t)
-        }
-    }
-    for _, t := range srcs {
-        k := strings.ToLower(strings.TrimSpace(t))
-        if k != "" {
-            enabled[k] = true
-        }
-    }
+	// --- per-port PortFlood / Connlimit sets, ΜΟΝΟ στοχευμένα ---
+	// Προτεραιότητα: registries (αν τα έχεις υλοποιήσει). Αλλιώς ελαφρύ JSON metadata scan.
 
+	// 1) PortFlood
 
-    if enabled["syn"]  { record("th_syn_v4");  record("th_syn_v6") }
-    if enabled["pps"]  { record("th_pps_v4");  record("th_pps_v6") }
-    if enabled["new"]  { record("th_new_v4");  record("th_new_v6") }
-    if enabled["icmp"] { record("th_icmp_v4"); record("th_icmp_v6") }
+	// --- per-port PortFlood / Connlimit sets, ΜΟΝΟ μέσω registry ---
 
+	if enabled["portflood"] {
+		if len(b.pfSets) == 0 {
+			// προαιρετικό debug για να ξέρεις γιατί δεν βλέπεις dumps:
+			// logging.Debugf("[throttle] no registered PortFlood sets yet")
+		}
+		for _, s := range b.pfSets {
+			record(s)
+		}
 
-    // --- per-port PortFlood / Connlimit sets, ΜΟΝΟ στοχευμένα ---
-    // Προτεραιότητα: registries (αν τα έχεις υλοποιήσει). Αλλιώς ελαφρύ JSON metadata scan.
+	}
 
-    // 1) PortFlood
+	// conn limit
+	if enabled["connlimit"] {
+		if len(b.clSets) == 0 {
+			// logging.Debugf("[throttle] no registered Connlimit sets yet")
+		}
+		for _, s := range b.clSets {
+			record(s)
+		}
 
-// --- per-port PortFlood / Connlimit sets, ΜΟΝΟ μέσω registry ---
+	}
 
-if enabled["portflood"] {
-    if len(b.pfSets) == 0 {
-        // προαιρετικό debug για να ξέρεις γιατί δεν βλέπεις dumps:
-        // logging.Debugf("[throttle] no registered PortFlood sets yet")
-    }
-	for _, s := range b.pfSets { record(s) }
+	// --- autoblock από τις ενεργές πηγές ---
+	if b.cfg != nil && b.cfg.Throttle.Enabled {
+		var v4, v6 []string
+		for ip := range uniq4 {
+			v4 = append(v4, ip)
+		}
+		for ip := range uniq6 {
+			v6 = append(v6, ip)
+		}
+		b.autoBlockEval(v4, v6, b.cfg.Throttle)
+	}
 
 }
-
-// conn limit
-if enabled["connlimit"] {
-    if len(b.clSets) == 0 {
-        // logging.Debugf("[throttle] no registered Connlimit sets yet")
-    }
-	for _, s := range b.clSets { record(s) }
-
-}
-
-
-    // --- autoblock από τις ενεργές πηγές ---
-    if b.cfg != nil && b.cfg.Throttle.Enabled {
-        var v4, v6 []string
-        for ip := range uniq4 { v4 = append(v4, ip) }
-        for ip := range uniq6 { v6 = append(v6, ip) }
-        b.autoBlockEval(v4, v6, b.cfg.Throttle)
-    }
-
-
-
-
-
-}
-
-
-
-
-
-
-
-
 
 // ensureCounter creates the named counter if it doesn't already exist (idempotent).
 func (b *Backend) ensureCounter(name string) {
@@ -646,16 +653,27 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 	return string(out), nil
 }
 
+// runCmdOutputWithTimeout executes an nft command and returns its combined output.
+// It protects long-running debug/telemetry calls from blocking the daemon tick loop.
+func (b *Backend) runCmdOutputWithTimeout(cmd string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "sh", "-lc", "nft "+cmd).CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("nft timed out after %s", timeout)
+		}
+		return "", fmt.Errorf("nft failed: %v (out=%s)", err, out)
+	}
+	return string(out), nil
+}
+
 // -----------------------------------------------------------------------------
 // Per-IP rate-limits (PKT): meters with overflow-only matching
 // -----------------------------------------------------------------------------
 
 // applyPerIPRateLimit installs per-IP packet/SYN rate limiting using nft "meter".
-
-
-
-
-
 
 func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
@@ -715,7 +733,6 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 	return nil
 }
 
-
 // -----------------------------------------------------------------------------
 // Simple autoblock (throttling hits -> block)
 // -----------------------------------------------------------------------------
@@ -723,31 +740,26 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 // Auto-block policy (simple): if an IP is throttled >= THRESHOLD times within WINDOW,
 // add it to block_v4/v6. MODE can be "permanent" (no TTL) or "ttl" (temporary).
 
-
-
-
-
 func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
-    now := time.Now()
-    window := time.Duration(tc.WindowSec) * time.Second
-    for _, ip := range v4 {
-        thV4Hits[ip] = append(thV4Hits[ip], now)
-        thV4Hits[ip] = pruneOld(thV4Hits[ip], now.Add(-window))
-        if len(thV4Hits[ip]) >= tc.Hits {
-            _ = b.addToBlockSet("v4", ip, tc)
-            delete(thV4Hits, ip)
-        }
-    }
-    for _, ip := range v6 {
-        thV6Hits[ip] = append(thV6Hits[ip], now)
-        thV6Hits[ip] = pruneOld(thV6Hits[ip], now.Add(-window))
-        if len(thV6Hits[ip]) >= tc.Hits {
-            _ = b.addToBlockSet("v6", ip, tc)
-            delete(thV6Hits, ip)
-        }
-    }
+	now := time.Now()
+	window := time.Duration(tc.WindowSec) * time.Second
+	for _, ip := range v4 {
+		thV4Hits[ip] = append(thV4Hits[ip], now)
+		thV4Hits[ip] = pruneOld(thV4Hits[ip], now.Add(-window))
+		if len(thV4Hits[ip]) >= tc.Hits {
+			_ = b.addToBlockSet("v4", ip, tc)
+			delete(thV4Hits, ip)
+		}
+	}
+	for _, ip := range v6 {
+		thV6Hits[ip] = append(thV6Hits[ip], now)
+		thV6Hits[ip] = pruneOld(thV6Hits[ip], now.Add(-window))
+		if len(thV6Hits[ip]) >= tc.Hits {
+			_ = b.addToBlockSet("v6", ip, tc)
+			delete(thV6Hits, ip)
+		}
+	}
 }
-
 
 func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 	var out []time.Time
@@ -759,194 +771,184 @@ func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 	return out
 }
 
-
-
-
-
-
-
-
-
-
 // nft_rules.go
 func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error {
-    reason := lastThrottleReason[ip]
-    if reason == "" { reason = "Auto-block" }
+	reason := lastThrottleReason[ip]
+	if reason == "" {
+		reason = "Auto-block"
+	}
 
-    // local debounce for repeated "ignored" logs/notifies
-    const ignoreNotifyCooldown = 90 * time.Second
-    if lastIgnoredAt == nil { lastIgnoredAt = map[string]time.Time{} }
+	// local debounce for repeated "ignored" logs/notifies
+	const ignoreNotifyCooldown = 90 * time.Second
+	if lastIgnoredAt == nil {
+		lastIgnoredAt = map[string]time.Time{}
+	}
 
+	// --- NEW: skip if IP is ignored or allowed ---
+	if skip, why := b.shouldSkipAutoBlock(ip); skip {
+		extraLabel := b.enrichLabel(ip)
+		logIP := ip + extraLabel
+		ignReason := why
+		if ignReason == "" {
+			ignReason = "matched allow/ignore policy"
+		}
 
-    // --- NEW: skip if IP is ignored or allowed ---
-    if skip, why := b.shouldSkipAutoBlock(ip); skip {
-        extraLabel := b.enrichLabel(ip)
-        logIP := ip + extraLabel
-        ignReason := why
-        if ignReason == "" { ignReason = "matched allow/ignore policy" }
+		// Debounce loudness
+		t := lastIgnoredAt[ip]
+		if time.Since(t) >= ignoreNotifyCooldown {
+			logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
+			// Do NOT report to API for ignored events (no external noise)
+			note := reason
+			if ignReason != "" {
+				note += " | " + ignReason
+			}
+			b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
+			lastIgnoredAt[ip] = time.Now()
+		}
+		return nil
+	}
 
-        // Debounce loudness
-        t := lastIgnoredAt[ip]
-        if time.Since(t) >= ignoreNotifyCooldown {
-            logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
-            // Do NOT report to API for ignored events (no external noise)
-            note := reason
-            if ignReason != "" { note += " | " + ignReason }
-            b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
-            lastIgnoredAt[ip] = time.Now()
-        }
-        return nil
-    }
+	// NEW: cooldown gate (applies to both v4/v6)
+	if tc.CooldownSec > 0 {
+		if t, ok := lastAutoBlockAt[ip]; ok {
+			if time.Since(t) < time.Duration(tc.CooldownSec)*time.Second {
+				// Within cooldown → skip quietly (no log, no notify)
+				return nil
+			}
+		}
+	}
 
+	extraLabel := b.enrichLabel(ip)
+	logIP := ip + extraLabel
+	cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
+	cleanExtra = strings.TrimLeft(cleanExtra, "–— ")
+	comment := reason
+	if cleanExtra != "" {
+		comment += " | " + cleanExtra
+	}
 
-    // NEW: cooldown gate (applies to both v4/v6)
-    if tc.CooldownSec > 0 {
-        if t, ok := lastAutoBlockAt[ip]; ok {
-            if time.Since(t) < time.Duration(tc.CooldownSec)*time.Second {
-                // Within cooldown → skip quietly (no log, no notify)
-                return nil
-            }
-        }
-    }
+	switch tc.Mode {
+	case "alert", "dryrun":
+		// unchanged: only log
+		if fam == "v4" {
+			logging.Logf("[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+				logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
+			return nil
+		}
+		logging.Logf("[dryrun] v6 %s -> would block_v6 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
+			logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
+		return nil
 
-    extraLabel := b.enrichLabel(ip)
-    logIP := ip + extraLabel
-    cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
-    cleanExtra = strings.TrimLeft(cleanExtra, "–— ")
-    comment := reason
-    if cleanExtra != "" { comment += " | " + cleanExtra }
+	case "ttl":
+		ttl := tc.TTLSeconds
+		if ttl <= 0 {
+			ttl = 3600
+		}
 
-    switch tc.Mode {
-    case "alert", "dryrun":
-        // unchanged: only log
-        if fam == "v4" {
-            logging.Logf("[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
-                logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
-            return nil
-        }
-        logging.Logf("[dryrun] v6 %s -> would block_v6 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
-            logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
-        return nil
+		// TRY insert first; only log+notify on success
+		if fam == "v4" {
+			err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
+			if err != nil {
+				// ignore duplicates to avoid spam
+				if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+					return nil
+				}
+				return err
+			}
+			logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
+				logIP, ttl, tc.Hits, tc.WindowSec, reason)
+			lastAutoBlockAt[ip] = time.Now()
 
-    case "ttl":
-        ttl := tc.TTLSeconds
-        if ttl <= 0 { ttl = 3600 }
+			_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 
-        // TRY insert first; only log+notify on success
-	if fam == "v4" {
-            err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
-            if err != nil {
-                // ignore duplicates to avoid spam
-                if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-                    return nil
-                }
-                return err
-            }
-            logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
-                logIP, ttl, tc.Hits, tc.WindowSec, reason)
-            lastAutoBlockAt[ip] = time.Now()
+			b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
+			return nil
+		}
 
-	_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
+		if err != nil {
+			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+				return nil
+			}
+			return err
+		}
 
-            b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
-            return nil
-        }
+		logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
+			logIP, ttl, tc.Hits, tc.WindowSec, reason)
+		lastAutoBlockAt[ip] = time.Now()
 
-        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
-        if err != nil {
-            if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-                return nil
-            }
-            return err
-        }
+		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 
-        logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
-            logIP, ttl, tc.Hits, tc.WindowSec, reason)
-        lastAutoBlockAt[ip] = time.Now()
+		b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
+		return nil
 
-_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
+	default: // "permanent"
+		if fam == "v4" {
 
-	b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
-        return nil
+			err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
+			if err != nil {
+				if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+					return nil
+				}
+				return err
+			}
 
-    default: // "permanent"
-        if fam == "v4" {
+			logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
+				logIP, tc.Hits, tc.WindowSec, reason)
+			lastAutoBlockAt[ip] = time.Now()
+			_ = b.appendToDenyFile(ip, comment)
+			//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+			//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+			//            }
+			_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
 
-            err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
-            if err != nil {
-                if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-                    return nil
-                }
-                return err
-            }
+			b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
+			return nil
+		}
 
-            logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
-                logIP, tc.Hits, tc.WindowSec, reason)
-            lastAutoBlockAt[ip] = time.Now()
-            _ = b.appendToDenyFile(ip, comment)
-//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-//            }
- _ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
+		if err != nil {
+			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+				return nil
+			}
+			return err
+		}
 
-            b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
-            return nil
-        }
+		logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+			logIP, tc.Hits, tc.WindowSec, reason)
+		lastAutoBlockAt[ip] = time.Now()
+		_ = b.appendToDenyFile(ip, comment)
+		//	if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
+		//	    _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
+		//	}
+		_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
 
-        err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
-        if err != nil {
-            if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-                return nil
-            }
-            return err
-        }
-
-        logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
-            logIP, tc.Hits, tc.WindowSec, reason)
-        lastAutoBlockAt[ip] = time.Now()
-        _ = b.appendToDenyFile(ip, comment)
-//        if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-//            _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-//        }
-_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-
-
-        b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
-        return nil
-    }
+		b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
+		return nil
+	}
 }
-
-
-
-
-
-
-
-
-
-
 
 func (b *Backend) appendToDenyFile(ip, reason string) error {
-    if strings.TrimSpace(b.cfgDir) == "" {
-        // ο daemon τρέχει χωρίς persistence — σεβόμαστε την επιλογή
-        return nil
-    }
-    if err := os.MkdirAll(b.cfgDir, 0750); err != nil { return err }
-    fp := filepath.Join(b.cfgDir, "cfm.deny")
+	if strings.TrimSpace(b.cfgDir) == "" {
+		// ο daemon τρέχει χωρίς persistence — σεβόμαστε την επιλογή
+		return nil
+	}
+	if err := os.MkdirAll(b.cfgDir, 0750); err != nil {
+		return err
+	}
+	fp := filepath.Join(b.cfgDir, "cfm.deny")
 
-    f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-    if err != nil { return err }
-    defer f.Close()
+	f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-    ts := time.Now().Format("2006-01-02 15:04:05")
-    line := fmt.Sprintf("%s # autoblock: %s at %s\n", ip, reason, ts)
-    _, err = f.WriteString(line)
-    return err
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	line := fmt.Sprintf("%s # autoblock: %s at %s\n", ip, reason, ts)
+	_, err = f.WriteString(line)
+	return err
 }
-
-
-
-
 
 // -----------------------------------------------------------------------------
 // Port-scan tracking: harvest ps_pairs_* sets and reuse autoblock
@@ -963,8 +965,8 @@ func (b *Backend) ensurePortscanSets() {
 }
 
 // dumpPortscanPairs διαβάζει τα ps_pairs_* και επιστρέφει:
-//  - tcp: map[ip] -> set(distinct dports)
-//  - udp: map[ip] -> set(distinct dports)
+//   - tcp: map[ip] -> set(distinct dports)
+//   - udp: map[ip] -> set(distinct dports)
 func (b *Backend) dumpPortscanPairs() (map[string]map[int]struct{}, map[string]map[int]struct{}) {
 	parse := func(set string) map[string]map[int]struct{} {
 		m := map[string]map[int]struct{}{}
@@ -1064,10 +1066,6 @@ func (b *Backend) dumpPortscanPairs() (map[string]map[int]struct{}, map[string]m
 
 	return tcp, udp
 }
-
-
-
-
 
 // LoadPortScanner: καλείται σε κάθε tick.
 // - ensure base & sets
@@ -1169,72 +1167,63 @@ func (b *Backend) LoadPortScanner() {
 		}
 	}
 
+	{
+		keep4 := make([]string, 0, len(v4))
+		for _, s := range v4 {
+			if !b.isSelfIPString(s) {
+				keep4 = append(keep4, s)
+			} else {
+				delete(lastThrottleReason, s) // μην αφήνεις stale reason
+			}
+		}
+		v4 = keep4
 
+		keep6 := make([]string, 0, len(v6))
+		for _, s := range v6 {
+			if !b.isSelfIPString(s) {
+				keep6 = append(keep6, s)
+			} else {
+				delete(lastThrottleReason, s)
+			}
+		}
+		v6 = keep6
+	}
 
-{
-    keep4 := make([]string, 0, len(v4))
-    for _, s := range v4 {
-        if !b.isSelfIPString(s) {
-            keep4 = append(keep4, s)
-        } else {
-            delete(lastThrottleReason, s) // μην αφήνεις stale reason
-        }
-    }
-    v4 = keep4
+	// ... αφού έχεις υπολογίσει τα v4, v6 και έχεις φτιάξει τα lastThrottleReason[..]
+	// και έχεις γεμίσει το tc (threshold config) με limit/interval κλπ.
 
-    keep6 := make([]string, 0, len(v6))
-    for _, s := range v6 {
-        if !b.isSelfIPString(s) {
-            keep6 = append(keep6, s)
-        } else {
-            delete(lastThrottleReason, s)
-        }
-    }
-    v6 = keep6
-}
+	mode := strings.ToLower(ps.Mode)
 
+	// ALERT / LOG-ONLY / TEST: μόνο log, καθόλου block.
+	if mode == "alert" || mode == "log" || mode == "test" {
+		for _, ip := range v4 {
+			enrich := b.enrichLabel(ip) // optional: αν έχεις τον enricher
+			reason := lastThrottleReason[ip]
+			logging.Logf("[portscan] possible port scan v4 %s%s %s", ip, enrich, reason)
+		}
+		for _, ip := range v6 {
+			enrich := b.enrichLabel(ip)
+			reason := lastThrottleReason[ip]
+			logging.Logf("[portscan] possible port scan v6 %s%s %s", ip, enrich, reason)
+		}
+		return // τερματίζουμε εδώ — ΔΕΝ γίνεται block
+	}
 
+	// TTL/PERMANENT: κάνε block
+	switch mode {
+	case "ttl", "temporary":
+		tc.Mode = "ttl"
+		tc.TTLSeconds = ps.TTLSeconds
+	default:
+		tc.Mode = "permanent"
+	}
 
-// ... αφού έχεις υπολογίσει τα v4, v6 και έχεις φτιάξει τα lastThrottleReason[..]
-// και έχεις γεμίσει το tc (threshold config) με limit/interval κλπ.
-
-mode := strings.ToLower(ps.Mode)
-
-// ALERT / LOG-ONLY / TEST: μόνο log, καθόλου block.
-if mode == "alert" || mode == "log" || mode == "test" {
-    for _, ip := range v4 {
-        enrich := b.enrichLabel(ip) // optional: αν έχεις τον enricher
-        reason := lastThrottleReason[ip]
-        logging.Logf("[portscan] possible port scan v4 %s%s %s", ip, enrich, reason)
-    }
-    for _, ip := range v6 {
-        enrich := b.enrichLabel(ip)
-        reason := lastThrottleReason[ip]
-        logging.Logf("[portscan] possible port scan v6 %s%s %s", ip, enrich, reason)
-    }
-    return // τερματίζουμε εδώ — ΔΕΝ γίνεται block
-}
-
-// TTL/PERMANENT: κάνε block
-switch mode {
-case "ttl", "temporary":
-    tc.Mode = "ttl"
-    tc.TTLSeconds = ps.TTLSeconds
-default:
-    tc.Mode = "permanent"
-}
-
-// μόνο αν υπάρχουν hits προχώρα σε block
-if len(v4) > 0 || len(v6) > 0 {
-    b.autoBlockEval(v4, v6, tc)
-}
-
-
-
+	// μόνο αν υπάρχουν hits προχώρα σε block
+	if len(v4) > 0 || len(v6) > 0 {
+		b.autoBlockEval(v4, v6, tc)
+	}
 
 }
-
-
 
 // parseIPFam: μικρός helper που γυρίζει 4|6 ή 0 αν δεν είναι IP
 func parseIPFam(ip string) int {
@@ -1246,8 +1235,6 @@ func parseIPFam(ip string) int {
 	}
 	return 0
 }
-
-
 
 // enrichLabel επιστρέφει " — PTR | ASNNAME | City, Country" ή "" αν δεν υπάρχει enricher.
 func (b *Backend) enrichLabel(ip string) string {
@@ -1279,68 +1266,69 @@ func (b *Backend) enrichLabel(ip string) string {
 	return "  —  " + strings.Join(parts, " | ")
 }
 
-
-
 // notify package helper
 
 func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, hits, window int) {
-    ev := notify.Event{
-//        Kind:     "autoblock",
-	Kind:	  reason,
-        SrcIP:    ip,
-        Reason:   reason,
-        TTL:      time.Duration(ttlSeconds) * time.Second,
-        Count:    hits,
-        Section:  "autoblock",
-        When:     time.Now(),
-        Severity: "warning",
-        Extra: map[string]string{
-            "family": fam,
-            "mode":   mode,                  // "ttl" | "permanent"
-            "window": fmt.Sprintf("%ds", window),
-        },
-    }
+	ev := notify.Event{
+		//        Kind:     "autoblock",
+		Kind:     reason,
+		SrcIP:    ip,
+		Reason:   reason,
+		TTL:      time.Duration(ttlSeconds) * time.Second,
+		Count:    hits,
+		Section:  "autoblock",
+		When:     time.Now(),
+		Severity: "warning",
+		Extra: map[string]string{
+			"family": fam,
+			"mode":   mode, // "ttl" | "permanent"
+			"window": fmt.Sprintf("%ds", window),
+		},
+	}
 
-    if b.enr != nil {
-        r := b.enr.Lookup(ip)
-        ev.PTR = r.PTR
-        if r.ASN > 0 {
-            if r.ASNName != "" {
-                ev.ASN = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
-            } else {
-                ev.ASN = fmt.Sprintf("AS%d", r.ASN)
-            }
-        }
-        if r.City != "" && r.Country != "" {
-            ev.Country = r.City + ", " + r.Country
-        } else {
-            ev.Country = r.Country
-        }
-    }
-    notify.Enqueue(ev) // non-blocking
+	if b.enr != nil {
+		r := b.enr.Lookup(ip)
+		ev.PTR = r.PTR
+		if r.ASN > 0 {
+			if r.ASNName != "" {
+				ev.ASN = fmt.Sprintf("AS%d %s", r.ASN, r.ASNName)
+			} else {
+				ev.ASN = fmt.Sprintf("AS%d", r.ASN)
+			}
+		}
+		if r.City != "" && r.Country != "" {
+			ev.Country = r.City + ", " + r.Country
+		} else {
+			ev.Country = r.Country
+		}
+	}
+	notify.Enqueue(ev) // non-blocking
 }
-
 
 // shouldSkipAutoBlock returns (true, reason) if ip is in ignore_* OR any allow_* union.
 func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
 	f := parseIPFam(ip)
-	if f == 0 { return false, "" }
+	if f == 0 {
+		return false, ""
+	}
 
-    // manual + dyn allow/ignore first (fast paths)
-    var hostSets, netSets []string
-    if f == 6 {
-        hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6"}
-        netSets  = []string{"ignore_v6_nets", "allow_v6_nets"}
-    } else {
-        hostSets = []string{"ignore_v4", "allow_v4", "allow_dyn_v4"}
-        netSets  = []string{"ignore_v4_nets", "allow_v4_nets"}
-    }
+	// manual + dyn allow/ignore first (fast paths)
+	var hostSets, netSets []string
+	if f == 6 {
+		hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6"}
+		netSets = []string{"ignore_v6_nets", "allow_v6_nets"}
+	} else {
+		hostSets = []string{"ignore_v4", "allow_v4", "allow_dyn_v4"}
+		netSets = []string{"ignore_v4_nets", "allow_v4_nets"}
+	}
 
 	// direct host membership (fast)
 	for _, s := range hostSets {
 		ok, _ := b.HasElem(s, ip)
 		if ok {
-			if strings.HasPrefix(s, "ignore_") { return true, "in ignore list" }
+			if strings.HasPrefix(s, "ignore_") {
+				return true, "in ignore list"
+			}
 			return true, "already allowed"
 		}
 	}
@@ -1348,24 +1336,27 @@ func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
 	for _, s := range netSets {
 		ok, _ := b.HasElem(s, ip) // with interval sets, lookup by /32 or bare IP matches containment
 		if ok {
-			if strings.HasPrefix(s, "ignore_") { return true, "in ignore CIDR" }
+			if strings.HasPrefix(s, "ignore_") {
+				return true, "in ignore CIDR"
+			}
 			return true, "allowed by CIDR"
 		}
 	}
 
-
-
-    // per-feed external ALLOW sets (cached discovery)
-    extHosts, extNets := b.getExtAllowSets(f)
-    for _, s := range extHosts {
-        ok, _ := b.HasElem(s, ip)
-        if ok { return true, "already allowed (feed)" }
-    }
-    for _, s := range extNets {
-        ok, _ := b.HasElem(s, ip)
-        if ok { return true, "allowed by CIDR (feed)" }
-    }
-
+	// per-feed external ALLOW sets (cached discovery)
+	extHosts, extNets := b.getExtAllowSets(f)
+	for _, s := range extHosts {
+		ok, _ := b.HasElem(s, ip)
+		if ok {
+			return true, "already allowed (feed)"
+		}
+	}
+	for _, s := range extNets {
+		ok, _ := b.HasElem(s, ip)
+		if ok {
+			return true, "allowed by CIDR (feed)"
+		}
+	}
 
 	return false, ""
 }

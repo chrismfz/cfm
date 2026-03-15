@@ -115,6 +115,9 @@ type Backend struct {
 	extAllowV4Nets  []string
 	extAllowV6Hosts []string
 	extAllowV6Nets  []string
+
+	floodDumpMu      sync.Mutex
+	floodDumpRunning bool
 }
 
 // GetEnricher returns the enrichment engine (if enabled).
