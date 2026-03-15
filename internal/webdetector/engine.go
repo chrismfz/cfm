@@ -767,7 +767,7 @@ func (e *Engine) logIngestHeartbeat(now time.Time) {
 
 // ingest updates per-host buckets with one log record.
 func (e *Engine) ingest(rec LogRec, rawLine string) {
-	host := rec.Host
+	host := strings.ToLower(strings.TrimSpace(rec.Host))
 	if host == "" {
 		return
 	}
