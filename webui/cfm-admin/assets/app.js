@@ -34,6 +34,7 @@
         wafExcludeValue: '',
         wafExcludeType: 'host',
         timer: null,
+        refreshInProgress: false,
         historyHost: '',
         historyIP: '',
         historyEvents: [],
@@ -447,7 +448,9 @@
             await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui' });
             this.actionMsg = `Challenge enabled for ${host}`;
           }
-          await this.refreshAll();
+          // Only re-fetch challenge state — no need to reload all 6 endpoints
+          const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
+          this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
         } catch (err) {
           this.actionMsg = `Challenge action failed for ${host}: ${err}`;
           console.error('[cfm-admin] challenge action failed', err);
@@ -458,7 +461,8 @@
         try {
           await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui-manual' });
           this.actionMsg = `Manual challenge enabled for ${host}`;
-          await this.refreshAll();
+          const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
+          this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
         } catch (err) {
           this.actionMsg = `Manual challenge failed for ${host}: ${err}`;
           console.error('[cfm-admin] manual challenge failed', err);
@@ -469,7 +473,8 @@
         try {
           await this.postJSON('v1/challenge/vhost/remove', { host });
           this.actionMsg = `Manual challenge removed for ${host}`;
-          await this.refreshAll();
+          const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
+          this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
         } catch (err) {
           this.actionMsg = `Manual unchallenge failed for ${host}: ${err}`;
           console.error('[cfm-admin] manual unchallenge failed', err);
@@ -580,6 +585,12 @@
       },
 
 
+      formatTs(tsUnix) {
+        if (!tsUnix) return '-';
+        const d = new Date(Number(tsUnix) * 1000);
+        if (isNaN(d.getTime())) return String(tsUnix);
+        return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      },
       formatBytes(bytes) {
         const n = Number(bytes || 0);
         if (!Number.isFinite(n) || n <= 0) return '0 B';
@@ -652,6 +663,8 @@
       },
 
       async refreshAll() {
+        if (this.refreshInProgress) return;
+        this.refreshInProgress = true;
         this.loading = true;
         try {
           const topLimit = Math.max(1, Math.min(500, Number(this.topShortLimit) || 20));
@@ -681,18 +694,17 @@
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
           if (this.shouldShow('history')) await this.refreshHistory();
 
-          if (this.shouldShow('vhost')) {
-            const vhostTarget = this.isVhostPage
-              ? (String(this.vhostFocusHost || '').trim() || String(this.activeHost || '').trim() || this.topShort[0]?.host)
-              : (!this.activeHost ? this.topShort[0]?.host : this.activeHost);
+          if (this.shouldShow('vhost') && this.isVhostPage) {
+            const vhostTarget = String(this.vhostFocusHost || '').trim() || String(this.activeHost || '').trim() || this.topShort[0]?.host;
             if (vhostTarget) {
-              if (this.isVhostPage) {
-                this.vhostFocusHost = vhostTarget;
-                this.syncVhostQuery(vhostTarget);
-              }
+              this.vhostFocusHost = vhostTarget;
+              this.syncVhostQuery(vhostTarget);
               await this.loadHost(vhostTarget, false);
               this.pushHostSeriesPoint(vhostTarget);
             }
+          } else if (this.shouldShow('vhost') && this.activeHost) {
+            // overview: push series point for whichever host is open, but don't re-fetch drilldown
+            this.pushHostSeriesPoint(this.activeHost);
           }
           if (this.shouldShow('ipdrilldown') && !this.activeIP && this.ipShort[0]?.ip) {
             await this.loadIP(this.ipShort[0].ip);
@@ -702,6 +714,7 @@
           this.actionMsg = `Refresh failed: ${err}`;
         } finally {
           this.loading = false;
+          this.refreshInProgress = false;
         }
       },
       scrollToDrilldown() {

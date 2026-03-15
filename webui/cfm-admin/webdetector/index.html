@@ -107,12 +107,26 @@
           </table>
         </div>
         <details class="raw-json" v-if="hotIPs.length">
-          <summary>Hot IPs endpoint rows ({{ hotIPs.length }})</summary>
-          <pre>{{ JSON.stringify(hotIPs, null, 2) }}</pre>
+          <summary>► Hot IPs endpoint rows ({{ hotIPs.length }})</summary>
+          <div class="table-wrap">
+            <table class="mini-table compact-table">
+              <thead><tr><th>IP</th><th>Req</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th></tr></thead>
+              <tbody>
+                <tr v-for="r in hotIPs" :key="r.ip">
+                  <td><code>{{ r.ip }}</code></td>
+                  <td>{{ r.req }}</td>
+                  <td>{{ num(r.rps) }}</td>
+                  <td>{{ num(r.score) }}</td>
+                  <td>{{ r.country || '-' }}</td>
+                  <td class="truncate" :title="r.asn_name">{{ r.asn ? `AS${String(r.asn).replace(/^AS/i,'')}` : '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </details>
       </section>
 
-      <section class="card" v-if="shouldShow('suspicious')">
+      <section class="card wide" v-if="shouldShow('suspicious')">
         <h2>Suspicious + challenged vhosts</h2>
         <div class="table-wrap">
           <table>
@@ -122,17 +136,12 @@
                 <th>Score</th>
                 <th>Reasons</th>
                 <th>RPS</th>
-                <th>3xx</th>
-                <th>4xx</th>
-                <th>5xx</th>
                 <th>uniqIP</th>
                 <th>err%</th>
-                <th>auth401%</th>
-                <th>hotIPs</th>
                 <th>bot%</th>
                 <th>ua_div</th>
                 <th>path_div</th>
-                <th>post%</th>
+                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -142,29 +151,24 @@
                 <td>{{ num(row.score) }}</td>
                 <td class="truncate" :title="reasonText(row)">{{ reasonText(row) }}</td>
                 <td>{{ num(row.rps) }}</td>
-                <td>{{ num(row.rps_3xx) }}</td>
-                <td>{{ num(row.rps_4xx) }}</td>
-                <td>{{ num(row.rps_5xx) }}</td>
                 <td>{{ num(row.unique_ips) }}</td>
                 <td>{{ pct(row.err_ratio) }}</td>
-                <td>{{ pct(row.auth401_ratio) }}</td>
-                <td>{{ num(row.hot_ips) }}</td>
                 <td>{{ pct(row.bot_ratio) }}</td>
                 <td>{{ num(row.ua_diversity) }}</td>
                 <td>{{ num(row.path_diversity) }}</td>
-                <td>{{ pct(row.post_ratio) }}</td>
-                <td class="actions-cell">
+                <td style="white-space: nowrap;">
                   <span class="pill warn" v-if="row.fromSuspicious">suspicious</span>
                   <span class="pill danger" v-if="challengeState(row.host)">challenged</span>
                   <span class="pill" v-if="challengeModeLabel(row.host)">{{ challengeModeLabel(row.host) }}</span>
-                  <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
-                  <button class="btn-quiet" @click.stop="openVhostLive(row.host)">Live</button>
-                  <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
-                  <button class="btn-quiet" @click.stop="manualChallenge(row.host)">Manual challenge</button>
-                  <button class="btn-quiet" @click.stop="manualUnchallenge(row.host)">Manual unchallenge</button>
+                </td>
+                <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                  <button class="btn-quiet btn-sm" @click.stop="manualChallenge(row.host)" v-if="!challengeState(row.host)" title="Enable manual challenge (persists across auto-refresh)">Manual</button>
+                  <button class="btn-quiet btn-sm" @click.stop="openVhostLive(row.host)">Live</button>
+                  <button class="btn-quiet btn-sm" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
-              <tr v-if="!suspiciousAndChallenged.length"><td colspan="16" class="muted">No suspicious/challenged hosts.</td></tr>
+              <tr v-if="!suspiciousAndChallenged.length"><td colspan="11" class="muted">No suspicious/challenged hosts.</td></tr>
             </tbody>
           </table>
         </div>
@@ -288,7 +292,7 @@
             </thead>
             <tbody>
               <tr v-for="row in historyEvents" :key="`h-${row.id}-${row.ts_unix}`">
-                <td>{{ row.ts_unix }}</td>
+                <td>{{ formatTs(row.ts_unix) }}</td>
                 <td><code>{{ row.event_type }}</code></td>
                 <td>{{ row.host || '-' }}</td>
                 <td><code>{{ row.ip || '-' }}</code></td>

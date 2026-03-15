@@ -60,6 +60,11 @@ button:disabled { opacity: .65; cursor: default; }
   border: 1px solid var(--border);
   color: var(--fg);
 }
+.btn-sm {
+  padding: .22rem .5rem;
+  font-size: .78rem;
+  border-radius: 6px;
+}
 .btn-danger {
   background: #5b1f2b;
   border: 1px solid #9a3b4f;
