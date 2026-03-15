@@ -3,6 +3,13 @@
 This document describes the shipped starter UI under `/usr/share/cfm/html/` and
 how to expose it via OpenResty using `/cfm-admin/`.
 
+The UI is now split into pages:
+
+- `/cfm-admin/` — lightweight landing/status placeholder + module menu
+- `/cfm-admin/webdetector/` — WebDetector overview (live)
+- `/cfm-admin/webdetector/vhost/` — WebDetector vhost-focused live view
+- `/cfm-admin/webdetector/forensics/` — WebDetector investigation view (history/IP/analyze)
+
 ## What gets installed
 
 - Static UI files: `/usr/share/cfm/html/`
@@ -87,6 +94,12 @@ The helper emits Apache-compatible `{SHA}` hashes.
 ## Access
 
 - `https://YOUR-HOST/cfm-admin/`
+- `https://YOUR-HOST/cfm-admin/webdetector/`
+
+> The config now also redirects `/cfm-admin/webdetector` (no trailing slash) to
+> `/cfm-admin/webdetector/` and serves nested subpages (e.g. `/vhost/`,
+> `/forensics/`) via `try_files $uri $uri/index.html /index.html` so directory
+> URLs resolve directly to their nested `index.html`.
 
 ## Notes
 
