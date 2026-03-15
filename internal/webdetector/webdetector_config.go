@@ -186,6 +186,12 @@ type Config struct {
 	ChallengeSubnetCap         int           // CHALLENGE_SUBNET_CAP
 	ChallengeSubnetSameHost    bool          // CHALLENGE_SUBNET_SAME_HOST
 
+	// Historical store (SQLite)
+	HistoryEnabled       bool          // HISTORY_ENABLED
+	HistoryDBPath        string        // HISTORY_DB_PATH
+	HistoryRetentionDays int           // HISTORY_RETENTION_DAYS
+	HistoryPruneEvery    time.Duration // HISTORY_PRUNE_EVERY
+
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
 	ChallengeExcludeStorePath string // CHALLENGE_EXCLUDE_STORE_PATH
 	WAFExcludeStorePath       string // WAF_EXCLUDE_STORE_PATH
@@ -220,6 +226,15 @@ func (c *Config) FillDefaults() {
 	}
 	if c.WAFExcludeStorePath == "" {
 		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
+	}
+	if c.HistoryDBPath == "" {
+		c.HistoryDBPath = "/var/lib/cfm/webdetector-history.db"
+	}
+	if c.HistoryPruneEvery <= 0 {
+		c.HistoryPruneEvery = time.Hour
+	}
+	if c.HistoryRetentionDays < 0 {
+		c.HistoryRetentionDays = 0
 	}
 	if c.Glob == "" {
 		c.Glob = "*.log"

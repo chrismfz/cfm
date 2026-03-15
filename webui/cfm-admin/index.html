@@ -51,6 +51,7 @@
           />
           <span class="muted">vhosts (default 20)</span>
         </div>
+        
         <div class="table-wrap">
           <table>
             <thead>
@@ -81,6 +82,7 @@
                 </td>
                 <td class="actions-cell">
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                  <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
               <tr v-if="!topShort.length"><td colspan="9" class="muted">No data yet.</td></tr>
@@ -139,6 +141,7 @@
                   <span class="pill danger" v-if="challengeState(row.host)">challenged</span>
                   <span class="pill" v-if="challengeModeLabel(row.host)">{{ challengeModeLabel(row.host) }}</span>
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                  <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
                   <button class="btn-quiet" @click.stop="manualChallenge(row.host)">Manual challenge</button>
                   <button class="btn-quiet" @click.stop="manualUnchallenge(row.host)">Manual unchallenge</button>
                 </td>
@@ -180,6 +183,7 @@
                 <td>{{ pct(row.bot_ratio) }}</td>
                 <td class="actions-cell">
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
+                  <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
               <tr v-if="!longTop.length"><td colspan="7" class="muted">No long-window rows.</td></tr>
@@ -222,9 +226,56 @@
                   <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)">Challenge</button>
                   <button class="btn-danger" @click.stop="blockIP(row.ip)">Block 1h</button>
                   <button class="btn-quiet" @click.stop="analyzeIP(row.ip)">Analyze</button>
+                  <button class="btn-quiet" @click.stop="historyForIP(row.ip)">History</button>
                 </td>
               </tr>
               <tr v-if="!ipShort.length"><td colspan="8" class="muted">No IP rows.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+
+      <section class="card wide" id="history-card">
+        <h2>Webdetector history (last 24h)</h2>
+        <div class="toolbar">
+          <label>Host</label>
+          <input class="input input-wide" type="text" v-model.trim="historyHost" placeholder="example.com" />
+          <label>IP</label>
+          <input class="input" type="text" v-model.trim="historyIP" placeholder="1.2.3.4" />
+          <button class="btn-quiet" @click="refreshHistory">Load history</button>
+          <button class="btn-quiet" :disabled="historyBusy" @click="pruneHistory(30)">Prune 30d</button>
+          <button class="btn-danger" :disabled="historyBusy" @click="truncateHistory">Truncate</button>
+        </div>
+        <div class="muted" v-if="historySummary">
+          total={{ historySummary.total_events || 0 }} |
+          issued={{ historySummary.challenge_issued || 0 }} |
+          solved={{ historySummary.challenge_solved || 0 }} |
+          unsolved_expired={{ historySummary.challenge_expired_unsolved || 0 }} |
+          block_triggers={{ historySummary.block_triggers || 0 }} |
+          waf={{ historySummary.waf_observed || 0 }}
+        </div>
+        <div class="muted" v-if="historyStats">
+          db={{ historyStats.path || '-' }} |
+          events={{ historyStats.events || 0 }} |
+          hosts={{ historyStats.unique_hosts || 0 }} |
+          ips={{ historyStats.unique_ips || 0 }} |
+          size={{ formatBytes(historyStats.size_bytes) }}
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>TS</th><th>Type</th><th>Host</th><th>IP</th><th>Reason</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in historyEvents" :key="`h-${row.id}-${row.ts_unix}`">
+                <td>{{ row.ts_unix }}</td>
+                <td><code>{{ row.event_type }}</code></td>
+                <td>{{ row.host || '-' }}</td>
+                <td><code>{{ row.ip || '-' }}</code></td>
+                <td class="truncate" :title="row.reason || '-'">{{ row.reason || '-' }}</td>
+              </tr>
+              <tr v-if="!historyEvents.length"><td colspan="5" class="muted">No history rows yet.</td></tr>
             </tbody>
           </table>
         </div>
@@ -321,7 +372,10 @@
                   <td>{{ ipRow.country }}</td>
                   <td>{{ ipRow.asn }}</td>
                   <td class="truncate" :title="ipRow.company">{{ ipRow.company }}</td>
-                  <td><button class="btn-danger" @click="blockIP(ipRow.key)">Block 1h</button></td>
+                  <td>
+                    <button class="btn-danger" @click="blockIP(ipRow.key)">Block 1h</button>
+                    <button class="btn-quiet" @click="historyForIP(ipRow.key)">History</button>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -360,12 +414,12 @@
         <p class="muted" v-if="activeIP">Drilldown for IP: <strong>{{ activeIP }}</strong></p>
         <div class="table-wrap" v-if="ipDrilldown && Array.isArray(ipDrilldown.hosts)">
           <table>
-            <thead><tr><th>Host</th><th>Req</th></tr></thead>
+            <thead><tr><th>Host</th><th>Req</th><th>Action</th></tr></thead>
             <tbody>
               <tr v-for="h in ipDrilldown.hosts.slice(0, 20)" :key="h.key" class="clickable" @click="loadHost(h.key)">
-                <td>{{ h.key }}</td><td>{{ h.count }}</td>
+                <td>{{ h.key }}</td><td>{{ h.count }}</td><td><button class="btn-quiet" @click.stop="historyForHost(h.key)">History</button></td>
               </tr>
-              <tr v-if="!ipDrilldown.hosts.length"><td colspan="2" class="muted">No host rows for this IP.</td></tr>
+              <tr v-if="!ipDrilldown.hosts.length"><td colspan="3" class="muted">No host rows for this IP.</td></tr>
             </tbody>
           </table>
         </div>
