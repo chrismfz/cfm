@@ -12,18 +12,22 @@ import (
 )
 
 func runHistoryWebTop(baseURL string, args []string) error {
+	rest := []string{}
+	if len(args) > 1 {
+		rest = args[1:]
+	}
 	if len(args) == 0 || args[0] == "events" {
-		return runHistoryEvents(baseURL, args[1:])
+		return runHistoryEvents(baseURL, rest)
 	}
 	switch args[0] {
 	case "summary":
-		return runHistorySummary(baseURL, args[1:])
+		return runHistorySummary(baseURL, rest)
 	case "outcomes":
-		return runHistoryOutcomes(baseURL, args[1:])
+		return runHistoryOutcomes(baseURL, rest)
 	case "prune":
-		return runHistoryPrune(baseURL, args[1:])
+		return runHistoryPrune(baseURL, rest)
 	case "truncate":
-		return runHistoryTruncate(baseURL, args[1:])
+		return runHistoryTruncate(baseURL, rest)
 	default:
 		return fmt.Errorf("usage: cfm webtop history [events|summary|outcomes|prune|truncate]")
 	}
