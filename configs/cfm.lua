@@ -681,7 +681,8 @@ local wx_local_paths = {}
 
 local function glob_to_lua_pattern(glob)
   local p = tostring(glob or "")
-  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%])", "%%%1")
+  -- Escape Lua magic chars first, including glob wildcards.
+  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
   p = p:gsub("%%%*", ".*")
   p = p:gsub("%%%?", ".")
   return "^" .. p .. "$"
