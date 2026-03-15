@@ -1860,4 +1860,17 @@ function _M.should_push(shdict, ip, reason)
   return ok == true
 end
 
+
+-- This exposes the full CFG table (rule modes + tuning values) to cfm_stats.lua
+-- without copying data or adding any runtime overhead to the hot path.
+ 
+function _M.get_config()
+  -- Return a shallow copy so callers cannot mutate the live CFG table.
+  local snap = {}
+  for k, v in pairs(CFG) do
+    snap[k] = v
+  end
+  return snap
+end
+
 return _M
