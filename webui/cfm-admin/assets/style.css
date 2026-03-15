@@ -256,3 +256,22 @@ pre {
   .live-chart-grid { grid-template-columns: 1fr; }
   .truncate { max-width: 180px; }
 }
+
+.kpi-grid {
+  display: grid;
+  gap: .6rem;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+}
+.progress {
+  margin-top: .35rem;
+  height: 8px;
+  background: #0f1d33;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #2ec9d7, #4da3ff);
+}

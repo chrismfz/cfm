@@ -121,6 +121,9 @@ func Start(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backend, cfgDir 
 	// Manual IP block endpoint used by admin UI quick actions.
 	RegisterBlock(m, be)
 
+	// ── /api/v1/system/* ────────────────────────────────────────────────────
+	RegisterSystemStatus(m)
+
 	// ── MySQL governor (/api/v1/mysql/) ─────────────────────────────────────
 	// Governor already implements RegisterHTTP(mux) — just plug it in.
 	// Skipped entirely when MySQL is not configured.
