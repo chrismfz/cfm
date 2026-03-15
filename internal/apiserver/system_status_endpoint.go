@@ -7,8 +7,18 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type cmdCacheEntry struct {
+	mu         sync.Mutex
+	output     []byte
+	durationMS int64
+	expiresAt  time.Time
+}
+
+var cmdCache sync.Map
 
 // RegisterSystemStatus wires read-only system/status style helpers for web UI.
 func RegisterSystemStatus(m *http.ServeMux) {
@@ -39,9 +49,9 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	start := time.Now()
-	out, err := exec.Command("cfm", args...).CombinedOutput()
-	ms := time.Since(start).Milliseconds()
+	cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 10*time.Second)
+	cacheKey := "system_status:" + strings.Join(args, " ")
+	out, ms, err := runCachedCommand(cacheKey, cacheTTL, "cfm", args...)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -68,9 +78,8 @@ func handleSystemDNAT(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
 		return
 	}
-	start := time.Now()
-	out, err := exec.Command("cfm", "dnat").CombinedOutput()
-	ms := time.Since(start).Milliseconds()
+	cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 5*time.Second)
+	out, ms, err := runCachedCommand("system_dnat", cacheTTL, "cfm", "dnat")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(out)})
@@ -86,9 +95,8 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
 		return
 	}
-	start := time.Now()
-	out, err := exec.Command("cfm", "ssl", "stats", "--json").CombinedOutput()
-	ms := time.Since(start).Milliseconds()
+	cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 10*time.Second)
+	out, ms, err := runCachedCommand("system_ssl_stats", cacheTTL, "cfm", "ssl", "stats", "--json")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(out)})
@@ -129,4 +137,55 @@ func parseTimingBlock(out string) map[string]int64 {
 func isTrue(v string) bool {
 	s := strings.TrimSpace(strings.ToLower(v))
 	return s == "1" || s == "true" || s == "yes" || s == "on"
+}
+
+func parseCacheTTL(raw string, fallback time.Duration) time.Duration {
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < time.Second {
+		return time.Second
+	}
+	if d > time.Minute {
+		return time.Minute
+	}
+	return d
+}
+
+func runCachedCommand(key string, ttl time.Duration, name string, args ...string) ([]byte, int64, error) {
+	if ttl <= 0 {
+		start := time.Now()
+		out, err := exec.Command(name, args...).CombinedOutput()
+		return out, time.Since(start).Milliseconds(), err
+	}
+	now := time.Now()
+	raw, _ := cmdCache.LoadOrStore(key, &cmdCacheEntry{})
+	entry := raw.(*cmdCacheEntry)
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if now.Before(entry.expiresAt) && entry.output != nil {
+		return append([]byte(nil), entry.output...), entry.durationMS, nil
+	}
+
+	start := time.Now()
+	out, err := exec.Command(name, args...).CombinedOutput()
+	ms := time.Since(start).Milliseconds()
+	if err != nil {
+		return out, ms, err
+	}
+
+	entry.output = append([]byte(nil), out...)
+	entry.durationMS = ms
+	entry.expiresAt = time.Now().Add(ttl)
+
+	return append([]byte(nil), out...), ms, nil
 }
