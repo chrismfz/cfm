@@ -24,7 +24,6 @@
         analyzeResult: null,
         analyzeLoading: false,
         suspiciousHosts: {},
-        challengeStatus: {},
         drilldown: null,
         activeHost: '',
         actionMsg: '',
@@ -132,7 +131,23 @@
         if (this.isForensicsPage) return 'WebDetector / forensics';
         return 'WebDetector / overview';
       },
+      activeChallengeByHost() {
+        const byHost = {};
+        const rows = Array.isArray(this.activeChallengeVhosts) ? this.activeChallengeVhosts : [];
+        for (const row of rows) {
+          const host = row?.host;
+          if (!host) continue;
+          const mode = String(row.mode || '').toLowerCase();
+          byHost[host] = {
+            manual_active: mode === 'manual' || mode === 'manual+auto',
+            auto_active: mode === 'auto' || mode === 'manual+auto',
+            mode,
+          };
+        }
+        return byHost;
+      },
       suspiciousAndChallenged() {
+
         const byHost = {};
 
         for (const row of this.suspicious) {
@@ -299,33 +314,15 @@
         window.location.href = '/cfm-admin/?logout=1';
       },
       challengeState(host) {
-        const s = this.challengeStatus[host] || {};
+        const s = this.activeChallengeByHost[host] || {};
         return Boolean(s.manual_active || s.auto_active);
       },
       challengeModeLabel(host) {
-        const s = this.challengeStatus[host] || {};
+        const s = this.activeChallengeByHost[host] || {};
         if (s.manual_active && s.auto_active) return 'manual+auto';
         if (s.manual_active) return 'manual';
         if (s.auto_active) return 'auto';
         return '';
-      },
-      async refreshChallengeStatuses() {
-        const hosts = Array.from(new Set([
-          ...this.topShort.slice(0, 30).map((r) => r.host),
-          ...this.suspicious.slice(0, 100).map((r) => r.host),
-          ...this.activeChallengeVhosts.slice(0, 200).map((r) => r.host),
-        ].filter(Boolean)));
-        const next = {};
-        await Promise.all(
-          hosts.map(async (host) => {
-            try {
-              next[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
-            } catch (_) {
-              next[host] = { manual_active: false, auto_active: false };
-            }
-          }),
-        );
-        this.challengeStatus = next;
       },
       async toggleChallenge(host) {
         if (!host) return;
@@ -337,7 +334,7 @@
             await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui' });
             this.actionMsg = `Challenge enabled for ${host}`;
           }
-          this.challengeStatus[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
+          await this.refreshAll();
         } catch (err) {
           this.actionMsg = `Challenge action failed for ${host}: ${err}`;
           console.error('[cfm-admin] challenge action failed', err);
@@ -348,7 +345,6 @@
         try {
           await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui-manual' });
           this.actionMsg = `Manual challenge enabled for ${host}`;
-          this.challengeStatus[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
           await this.refreshAll();
         } catch (err) {
           this.actionMsg = `Manual challenge failed for ${host}: ${err}`;
@@ -360,7 +356,6 @@
         try {
           await this.postJSON('v1/challenge/vhost/remove', { host });
           this.actionMsg = `Manual challenge removed for ${host}`;
-          this.challengeStatus[host] = await this.fetchJSON(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`);
           await this.refreshAll();
         } catch (err) {
           this.actionMsg = `Manual unchallenge failed for ${host}: ${err}`;
@@ -570,7 +565,6 @@
           this.hotIPs = this.extractRows(hotIPs, 'rows');
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
-          await this.refreshChallengeStatuses();
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
           if (this.shouldShow('history')) await this.refreshHistory();
 

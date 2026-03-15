@@ -28,7 +28,7 @@ It also includes placeholders for MySQL, Challenge, and System panels.
 The WebTop table now also shows lightweight runtime flags per host:
 
 - `suspicious` (from `/api/v1/webdet/suspicious`)
-- `challenged` (from `/api/v1/challenge/vhost/status`)
+- `challenged` (from `/api/v1/challenge/vhosts?status=active&mode=all`)
 
 And provides actions directly in the UI:
 
@@ -42,6 +42,9 @@ paths, user-agents) and keeps raw JSON under a collapsible **Raw JSON** section
 for debugging.
 
 Top-right controls include:
+
+- The UI avoids per-host `/challenge/vhost/status` fan-out polling; challenge state is
+  derived from active-vhosts list endpoint to reduce API/worker load.
 
 - **Refresh now** (manual refresh)
 - **Stop / Start** (pause/resume 5s polling)
