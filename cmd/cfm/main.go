@@ -200,7 +200,7 @@ Usage:
   cfm which <IP> [--json]   -- search <IP>
 	  cfm asn <AS12345> [--json] -- list announced prefixes for ASN
 	  cfm htpasswd <username> [password] -- print username:{SHA}... for OpenResty auth_basic_user_file
-	  cfm status [--json] [--timings] [--no-ttl]
+	  cfm status [--json] [--timings] [--no-ttl] [--cache-ttl 5s]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
 

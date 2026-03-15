@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -198,6 +199,7 @@ func Run(args []string) {
 	asJSON := fs.Bool("json", false, "output JSON")
 	showTimings := fs.Bool("timings", false, "print per-section timings")
 	noTTL := fs.Bool("no-ttl", false, "skip TTL summary (faster)")
+	cacheTTL := fs.Duration("cache-ttl", 0, "cache table/sets summary for duration (example: 5s)")
 	_ = fs.Parse(args)
 	timing := make(map[string]int64)
 	printTimings := func() {
@@ -221,8 +223,19 @@ func Run(args []string) {
 
 	// 1) Table/sets summary (ίδιο output με το παλιό runStatus)
 	t0 := time.Now()
-	st := readTableSummary()
+	st, fromCache := readCachedTableSummary(*cacheTTL)
+	if !fromCache {
+		st = readTableSummary()
+		if *cacheTTL > 0 {
+			writeCachedTableSummary(st)
+		}
+	}
 	timing["table_summary_ms"] = time.Since(t0).Milliseconds()
+	if fromCache {
+		timing["table_summary_cache_hit"] = 1
+	} else {
+		timing["table_summary_cache_hit"] = 0
+	}
 	st.Daemon = di
 	st.Service = si
 
@@ -462,6 +475,48 @@ type statusOut struct {
 
 	Daemon  DaemonInfo  `json:"daemon"`
 	Service ServiceInfo `json:"service"`
+}
+
+type statusCacheFile struct {
+	CreatedAt int64     `json:"created_at"`
+	Summary   statusOut `json:"summary"`
+}
+
+func statusCachePath() string {
+	base := "/run/cfm"
+	if st, err := os.Stat(base); err != nil || !st.IsDir() {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "cfm_status_table_summary.json")
+}
+
+func readCachedTableSummary(ttl time.Duration) (statusOut, bool) {
+	if ttl <= 0 {
+		return statusOut{}, false
+	}
+	b, err := os.ReadFile(statusCachePath())
+	if err != nil {
+		return statusOut{}, false
+	}
+	var c statusCacheFile
+	if err := json.Unmarshal(b, &c); err != nil {
+		return statusOut{}, false
+	}
+	if c.CreatedAt <= 0 {
+		return statusOut{}, false
+	}
+	if time.Since(time.Unix(c.CreatedAt, 0)) > ttl {
+		return statusOut{}, false
+	}
+	return c.Summary, true
+}
+
+func writeCachedTableSummary(st statusOut) {
+	payload, err := json.Marshal(statusCacheFile{CreatedAt: time.Now().Unix(), Summary: st})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(statusCachePath(), payload, 0o600)
 }
 
 func readTableSummary() statusOut {
