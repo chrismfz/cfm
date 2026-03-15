@@ -70,8 +70,8 @@ const (
 var reIP = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
 
 const (
-	ptrCacheHitTTL  = 10 * time.Minute
-	ptrCacheMissTTL = 2 * time.Minute
+	ptrCacheHitTTL  = 30 * time.Minute
+	ptrCacheMissTTL = 5 * time.Minute
 )
 
 type ptrCacheEntry struct {
