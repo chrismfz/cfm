@@ -3,6 +3,14 @@
 This document describes the shipped starter UI under `/usr/share/cfm/html/` and
 how to expose it via OpenResty using `/cfm-admin/`.
 
+The UI is now split into pages:
+
+- `/cfm-admin/` — lightweight landing/status placeholder + module menu
+- `/cfm-admin/webdetector/` — WebDetector overview (live)
+- `/cfm-admin/webdetector/vhost/` — WebDetector vhost-focused live view
+  - vhost page accepts `?host=example.com` for direct live focus
+- `/cfm-admin/webdetector/forensics/` — WebDetector investigation view (history/IP/analyze)
+
 ## What gets installed
 
 - Static UI files: `/usr/share/cfm/html/`
@@ -20,10 +28,11 @@ It also includes placeholders for MySQL, Challenge, and System panels.
 The WebTop table now also shows lightweight runtime flags per host:
 
 - `suspicious` (from `/api/v1/webdet/suspicious`)
-- `challenged` (from `/api/v1/challenge/vhost/status`)
+- `challenged` (from `/api/v1/challenge/vhosts?status=active&mode=all`)
 
 And provides actions directly in the UI:
 
+- **Live** a vhost (opens `/cfm-admin/webdetector/vhost/?host=<vhost>` in new tab)
 - **Challenge / Unchallenge** a vhost (calls `/api/v1/challenge/vhost/add|remove`)
 - **Block 1h** for top drilldown IPs (calls `/api/v1/firewall/block`)
 
@@ -33,6 +42,9 @@ paths, user-agents) and keeps raw JSON under a collapsible **Raw JSON** section
 for debugging.
 
 Top-right controls include:
+
+- The UI avoids per-host `/challenge/vhost/status` fan-out polling; challenge state is
+  derived from active-vhosts list endpoint to reduce API/worker load.
 
 - **Refresh now** (manual refresh)
 - **Stop / Start** (pause/resume 5s polling)
@@ -87,6 +99,12 @@ The helper emits Apache-compatible `{SHA}` hashes.
 ## Access
 
 - `https://YOUR-HOST/cfm-admin/`
+- `https://YOUR-HOST/cfm-admin/webdetector/`
+
+> The config now also redirects `/cfm-admin/webdetector` (no trailing slash) to
+> `/cfm-admin/webdetector/` and serves nested subpages (e.g. `/vhost/`,
+> `/forensics/`) via `try_files $uri $uri/index.html /index.html` so directory
+> URLs resolve directly to their nested `index.html`.
 
 ## Notes
 
