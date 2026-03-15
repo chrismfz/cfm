@@ -690,6 +690,10 @@ func init() {
 
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
+			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
+			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", "/var/lib/cfm/webdetector-history.db"),
+			HistoryRetentionDays:      kvInt(kv, "HISTORY_RETENTION_DAYS", 30),
+			HistoryPruneEvery:         kvDur(kv, "HISTORY_PRUNE_EVERY", time.Hour),
 		}
 
 		// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN

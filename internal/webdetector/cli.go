@@ -96,6 +96,9 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop waf exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
+	fmt.Println("  cfm webtop history prune [days]")
+	fmt.Println("  cfm webtop history truncate --yes")
 
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
@@ -170,6 +173,8 @@ func RunWebTop(baseURL string, args []string) error {
 			return runChallengeWebTop(baseURL, args[1:])
 		case "waf":
 			return runWafWebTop(baseURL, args[1:])
+		case "history":
+			return runHistoryWebTop(baseURL, args[1:])
 
 		}
 	}

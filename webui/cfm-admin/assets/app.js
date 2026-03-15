@@ -35,6 +35,12 @@
         wafExcludeValue: '',
         wafExcludeType: 'host',
         timer: null,
+        historyHost: '',
+        historyIP: '',
+        historyEvents: [],
+        historySummary: null,
+        historyStats: null,
+        historyBusy: false,
       };
     },
     computed: {
@@ -364,6 +370,7 @@
           if (isChallenge) this.challengeExcludeValue = '';
           else this.wafExcludeValue = '';
           await this.refreshExcludeLists();
+          await this.refreshHistory();
         } catch (err) {
           this.actionMsg = `${scope.toUpperCase()} exclude add failed: ${err}`;
           console.error('[cfm-admin] exclude add failed', scope, err);
@@ -375,6 +382,7 @@
           await this.postJSON(`v1/${scope}/exclude/remove?type=${encodeURIComponent(entry.type)}&value=${encodeURIComponent(entry.value)}`, {});
           this.actionMsg = `${scope.toUpperCase()} exclude removed: ${entry.type}=${entry.value}`;
           await this.refreshExcludeLists();
+          await this.refreshHistory();
         } catch (err) {
           this.actionMsg = `${scope.toUpperCase()} exclude remove failed: ${err}`;
           console.error('[cfm-admin] exclude remove failed', scope, err);
@@ -401,6 +409,79 @@
           this.analyzeLoading = false;
         }
       },
+
+
+      formatBytes(bytes) {
+        const n = Number(bytes || 0);
+        if (!Number.isFinite(n) || n <= 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let v = n;
+        let i = 0;
+        while (v >= 1024 && i < units.length - 1) {
+          v /= 1024;
+          i += 1;
+        }
+        return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+      },
+      async historyForHost(host) {
+        if (!host) return;
+        this.historyHost = host;
+        this.historyIP = '';
+        await this.refreshHistory();
+        const el = document.getElementById('history-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
+      async historyForIP(ip) {
+        if (!ip) return;
+        this.historyIP = ip;
+        if (!this.historyHost) this.historyHost = this.activeHost || '';
+        await this.refreshHistory();
+        const el = document.getElementById('history-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
+      async pruneHistory(days = 30) {
+        this.historyBusy = true;
+        try {
+          await this.postJSON(`v1/webdet/history/prune?days=${encodeURIComponent(days)}`, {});
+          this.actionMsg = `History pruned (older than ${days} days)`;
+          await this.refreshHistory();
+        } catch (err) {
+          this.actionMsg = `History prune failed: ${err}`;
+        } finally {
+          this.historyBusy = false;
+        }
+      },
+      async truncateHistory() {
+        if (!window.confirm('Delete all webdetector history? This cannot be undone.')) return;
+        this.historyBusy = true;
+        try {
+          await this.postJSON('v1/webdet/history/truncate?confirm=yes', {});
+          this.actionMsg = 'History truncated';
+          await this.refreshHistory();
+        } catch (err) {
+          this.actionMsg = `History truncate failed: ${err}`;
+        } finally {
+          this.historyBusy = false;
+        }
+      },
+
+      async refreshHistory() {
+        const host = String(this.historyHost || '').trim();
+        const ip = String(this.historyIP || '').trim();
+        const q = [];
+        if (host) q.push(`host=${encodeURIComponent(host)}`);
+        if (ip) q.push(`ip=${encodeURIComponent(ip)}`);
+        const qs = q.length ? `&${q.join('&')}` : '';
+        const [events, summary, stats] = await Promise.all([
+          this.fetchJSONSafe(`v1/webdet/history/events?limit=50${qs}`, { rows: [] }),
+          this.fetchJSONSafe(`v1/webdet/history/summary?hours=24${qs}`, null),
+          this.fetchJSONSafe('v1/webdet/history/stats', null),
+        ]);
+        this.historyEvents = this.extractRows(events, 'rows');
+        this.historySummary = summary;
+        this.historyStats = stats;
+      },
+
       async refreshAll() {
         this.loading = true;
         try {
@@ -429,6 +510,7 @@
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
           await this.refreshChallengeStatuses();
           await this.refreshExcludeLists();
+          await this.refreshHistory();
 
           if (!this.activeHost && this.topShort[0]?.host) {
             await this.loadHost(this.topShort[0].host, false);
