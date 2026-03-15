@@ -96,6 +96,10 @@ The helper emits Apache-compatible `{SHA}` hashes.
 - `https://YOUR-HOST/cfm-admin/`
 - `https://YOUR-HOST/cfm-admin/webdetector/`
 
+> The config now also redirects `/cfm-admin/webdetector` (no trailing slash) to
+> `/cfm-admin/webdetector/` and serves nested subpages (e.g. `/vhost/`,
+> `/forensics/`) via `try_files $uri $uri/ /index.html`.
+
 ## Notes
 
 - Keep the CFM debug API local/trusted only.
