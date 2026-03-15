@@ -32,6 +32,13 @@ local function fmt_nginx_version(v)
   return string.format("%d.%d.%d", major, minor, patch)
 end
 
+local function ngx_num_var(name)
+  local v = ngx.var[name]
+  if not v or v == "" then return nil end
+  local n = tonumber(v)
+  return n
+end
+
 -- ── nginx / worker ────────────────────────────────────────────────────────────
 
 local function nginx_worker_info()
@@ -46,6 +53,17 @@ local function nginx_worker_info()
       id      = ngx.worker.id(),
       count   = ngx.worker.count(),
       exiting = ngx.worker.exiting(),
+    },
+    -- Exposed by ngx_http_stub_status_module when compiled.
+    -- May be nil if the module/vars are unavailable.
+    connections = {
+      active    = ngx_num_var("connections_active"),
+      reading   = ngx_num_var("connections_reading"),
+      writing   = ngx_num_var("connections_writing"),
+      waiting   = ngx_num_var("connections_waiting"),
+      accepted  = ngx_num_var("connections_accepted"),
+      handled   = ngx_num_var("connections_handled"),
+      requests  = ngx_num_var("connections_requests"),
     },
   }
 end

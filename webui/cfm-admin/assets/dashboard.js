@@ -170,6 +170,7 @@
     const waf  = d.waf       || {};
     const ng   = d.nginx     || {};
     const wk   = ng.worker   || {};
+    const conn = ng.connections || {};
     const bk   = dec.key_breakdown || {};
     const wx   = dec.waf_excludes  || {};
 
@@ -302,9 +303,41 @@
         </div>
       </div>`;
 
+    // ── Section: nginx connection counters (stub_status vars) ───────────────
+    const hasConn = [
+      conn.active,
+      conn.reading,
+      conn.writing,
+      conn.waiting,
+      conn.accepted,
+      conn.handled,
+      conn.requests,
+    ].some(v => Number.isFinite(Number(v)));
+
+    const connSection = hasConn ? `
+      <div style="grid-column:1/-1">
+        <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .45rem">
+          nginx connections
+        </div>
+        <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+          ${miniCard('active', escapeHTML(String(conn.active ?? '-')), '', null)}
+          ${miniCard('reading', escapeHTML(String(conn.reading ?? '-')), '', null)}
+          ${miniCard('writing', escapeHTML(String(conn.writing ?? '-')), '', null)}
+          ${miniCard('waiting', escapeHTML(String(conn.waiting ?? '-')), '', null)}
+          ${miniCard('accepted (total)', escapeHTML(String(conn.accepted ?? '-')), '', null)}
+          ${miniCard('handled (total)', escapeHTML(String(conn.handled ?? '-')), '', null)}
+          ${miniCard('requests (total)', escapeHTML(String(conn.requests ?? '-')), '', null)}
+        </div>
+      </div>` : `
+      <div style="grid-column:1/-1">
+        <div class="muted" style="font-size:.78rem;margin-top:.4rem">
+          nginx connection counters unavailable (stub_status variables not exposed by this build)
+        </div>
+      </div>`;
+
     el.nginxStatsGrid.innerHTML =
       dictSection + sslHealthSection + decSection +
-      (wafExclSection || '') + wafRulesSection + nginxSection;
+      (wafExclSection || '') + wafRulesSection + connSection + nginxSection;
   }
 
   // Shared-dict capacity card with usage bar
