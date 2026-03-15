@@ -98,10 +98,8 @@ The helper emits Apache-compatible `{SHA}` hashes.
 
 > The config now also redirects `/cfm-admin/webdetector` (no trailing slash) to
 > `/cfm-admin/webdetector/` and serves nested subpages (e.g. `/vhost/`,
-> `/forensics/`) via `try_files $uri $uri/ /index.html`.
->
-> Legacy root paths like `/webdetector/` are also redirected to
-> `/cfm-admin/webdetector/` to handle stale bookmarks/cached links.
+> `/forensics/`) via `try_files $uri $uri/index.html /index.html` so directory
+> URLs resolve directly to their nested `index.html`.
 
 ## Notes
 
