@@ -121,6 +121,7 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason str
 	if e.chalAPI != nil {
 		e.chalAPI.RecordVhostManual(host, true, ttl, reason)
 	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second)})
 }
 
 // ClearManualChallengeVhost removes the runtime manual challenge for host.
@@ -141,6 +142,7 @@ func (e *Engine) ClearManualChallengeVhost(host string) {
 	if e.chalAPI != nil {
 		e.chalAPI.RecordVhostManual(host, false, 0, "manual_off")
 	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_off", Host: host, Mode: "manual", Reason: "manual_off"})
 }
 
 // IsManualChallengeActive returns whether host has an active (non-expired)

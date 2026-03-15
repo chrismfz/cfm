@@ -379,11 +379,13 @@ type Engine struct {
 	parsedSinceLog    int64
 
 	// Challenge API state (vhost/ip/events)
-	chalAPI  *ChallengeAPIStore
-	chalOnce sync.Once
+	chalAPI         *ChallengeAPIStore
+	chalOnce        sync.Once
+	chalExpiredSeen map[string]time.Time
 
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
+	history           *HistoryStore
 }
 
 type malRule struct {
@@ -411,6 +413,7 @@ func NewEngine(cfg Config) *Engine {
 
 	// Challenge API store (ring buffer events + vhost/ip state)
 	e.chalAPI = NewChallengeAPIStore(50000)
+	e.chalExpiredSeen = make(map[string]time.Time)
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
 	// manual from api webtop challenge add//
@@ -440,6 +443,15 @@ func NewEngine(cfg Config) *Engine {
 
 	e.vhostUniqPathsActive = make(map[string]bool)
 	e.vhostUniqPathsLastChange = make(map[string]time.Time)
+
+	if cfg.HistoryEnabled {
+		if hs, err := NewHistoryStore(cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery); err != nil {
+			logging.Logf("[webdetector][history] disabled (init failed): %v", err)
+		} else {
+			e.history = hs
+			logging.Logf("[webdetector][history] enabled db=%s retention_days=%d prune_every=%s", cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery)
+		}
+	}
 
 	// Enrichment is optional.
 	if cfg.UseEnrich {
@@ -507,6 +519,7 @@ func (e *Engine) RecordChallengeSolved(ip, host, uri string, diff int, ms int64)
 		return
 	}
 	e.chalAPI.RecordSolved(ip, host, uri, diff, ms)
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: host, IP: ip, Payload: map[string]interface{}{"uri": uri, "diff": diff, "ms": ms}})
 }
 
 // RecordIPChallenge updates the store when we emit a challenge for an IP.
@@ -515,6 +528,7 @@ func (e *Engine) RecordIPChallenge(ip, host, rule, uri, method string, status in
 		return
 	}
 	e.chalAPI.RecordIPChallenge(ip, host, rule, uri, method, status, ttl)
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_issued", Host: host, IP: ip, Reason: rule, TTLSec: int(ttl / time.Second), Status: status, Payload: map[string]interface{}{"uri": uri, "method": method, "expires_at": time.Now().Add(ttl).Unix()}})
 }
 
 // RecordVhostAuto records auto_on/auto_off for vhosts (and current metrics).
@@ -523,6 +537,45 @@ func (e *Engine) RecordVhostAuto(host string, active bool, row SuspiciousRow, on
 		return
 	}
 	e.chalAPI.RecordVhostAuto(host, active, row, on, off, hold)
+	typ := "challenge_vhost_auto_off"
+	if active {
+		typ = "challenge_vhost_auto_on"
+	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: typ, Host: host, Mode: "auto", Score: row.Score, UniqIP: row.UniqueIPs, RPS: row.RPS, Reason: strings.Join(row.Reasons, ",")})
+}
+
+func (e *Engine) appendHistory(ev HistoryEvent) {
+	if e == nil || e.history == nil {
+		return
+	}
+	e.history.Append(ev)
+}
+
+func (e *Engine) expireOldChallenges() {
+	if e == nil || e.history == nil || e.chalAPI == nil {
+		return
+	}
+	now := time.Now()
+	for _, st := range e.chalAPI.ListIPs("", "challenge", 2000) {
+		if st.ExpiresAt.IsZero() || st.ExpiresAt.After(now) {
+			continue
+		}
+		key := st.IP + "|" + cleanHost(st.Host)
+		if ts, ok := e.chalExpiredSeen[key]; ok && ts.Equal(st.ExpiresAt) {
+			continue
+		}
+		e.chalExpiredSeen[key] = st.ExpiresAt
+		e.history.Append(HistoryEvent{
+			TsUnix: now.Unix(),
+			Type:   "challenge_expired_unsolved",
+			Host:   st.Host,
+			IP:     st.IP,
+			Reason: st.Rule,
+			Payload: map[string]interface{}{
+				"expires_at": st.ExpiresAt.Unix(),
+			},
+		})
+	}
 }
 
 // --- integration with detectors framework ---
@@ -651,6 +704,7 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 	// Emit block-worthy IP alerts (picked up by autosink blocker).
 	e.emitIPBlocks(now, out)
+	e.expireOldChallenges()
 
 	// save pos
 	if e.state != nil && e.stateKey != "" {
@@ -2435,6 +2489,7 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 
 	now := time.Now()
 	rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
+	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: map[string]interface{}{"uri": uri, "method": method}})
 
 	rec := LogRec{
 		TS:     float64(now.UnixNano()) / 1e9,
@@ -2644,8 +2699,12 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			return false
 		}()
 		if skip {
+			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "suppressed_by_cooldown", "req": row.Req, "vhosts": row.Vhosts}})
 			continue
 		}
+
+		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "block", "req": row.Req, "vhosts": row.Vhosts}})
+		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "suspicious_snapshot", IP: row.IP, Reason: strings.Join(row.Reasons, ","), Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"req": row.Req, "vhosts": row.Vhosts}})
 
 		samples := e.ipSamples(row.IP, maxSamples)
 
