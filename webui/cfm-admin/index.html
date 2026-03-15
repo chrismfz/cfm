@@ -3,41 +3,67 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CFM Admin</title>
+  <title>CFM Admin Dashboard</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:," />
+  <script src="/cfm-admin/assets/dashboard.js" defer></script>
 </head>
 <body>
   <div id="app" class="landing-shell">
     <header class="topbar">
-      <h1>CFM Admin</h1>
+      <h1>CFM Admin Dashboard</h1>
       <nav class="top-nav">
+        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector overview</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/vhost/">WebDetector vhost live</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/forensics/">WebDetector forensics</a>
       </nav>
+      <div class="meta">
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+      </div>
     </header>
+    <noscript><p class="statusline" style="padding:0 1rem;">JavaScript is required for live dashboard data.</p></noscript>
 
     <main class="layout">
       <section class="card wide">
-        <h2>Status landing page</h2>
-        <p class="muted">This is intentionally lightweight so future modules (MySQL Governor, mail, health, etc.) can be added cleanly.</p>
-        <ul>
-          <li>Use the top menu to open a focused module page.</li>
-          <li>Suggested global checks: <code>cfm status</code>, load average, service health, and detector state.</li>
-          <li>Current active module: <strong>WebDetector</strong>.</li>
-        </ul>
+        <h2>Quick controls</h2>
+        <div class="toolbar">
+          <input id="targetIP" class="input input-wide" type="text" placeholder="IP address" />
+          <input id="ttl" class="input" type="text" placeholder="TTL (e.g. 1h)" value="1h" />
+          <input id="reason" class="input input-wide" type="text" placeholder="reason" value="webui manual block" />
+          <button id="blockBtn">Block</button>
+          <button id="unblockBtn" class="btn-quiet">Unblock</button>
+        </div>
+        <p id="actionMsg" class="statusline" style="display:none"></p>
+      </section>
+
+      <section class="card">
+        <h2>Health quick stats</h2>
+        <div id="healthGrid" class="kpi-grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>Timing profile (ms)</h2>
+        <div id="timingList" class="list"></div>
+        <p id="timingEmpty" class="muted">No timing data yet.</p>
       </section>
 
       <section class="card wide">
-        <h2>Planned modules</h2>
-        <div class="chips">
-          <span class="pill">webdetector</span>
-          <span class="pill">mysql_governor</span>
-          <span class="pill">mail detectors</span>
-          <span class="pill">system health</span>
-        </div>
+        <h2>Status output</h2>
+        <pre id="statusText">Loading...</pre>
+      </section>
+
+      <section class="card">
+        <h2>DNAT status</h2>
+        <pre id="dnatText">Loading...</pre>
+      </section>
+
+      <section class="card">
+        <h2>SSL stats</h2>
+        <pre id="sslText">Loading...</pre>
       </section>
     </main>
   </div>
+
 </body>
 </html>

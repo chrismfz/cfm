@@ -151,7 +151,7 @@ func main() {
 	case "htpasswd":
 		os.Exit(cli.RunHtpasswd(os.Args[2:]))
 	case "status":
-		status.Run(os.Args[1:])
+		status.Run(os.Args[2:])
 	case "reset":
 		os.Exit(cli.RunReset(os.Args[2:], getBackend()))
 	case "disable":
@@ -200,7 +200,7 @@ Usage:
   cfm which <IP> [--json]   -- search <IP>
 	  cfm asn <AS12345> [--json] -- list announced prefixes for ASN
 	  cfm htpasswd <username> [password] -- print username:{SHA}... for OpenResty auth_basic_user_file
-	  cfm status [--json]
+	  cfm status [--json] [--timings] [--no-ttl] [--cache-ttl 5s]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
 
