@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 // GovernorConfig mirrors the [mysql_governor] section in cfm.conf.
@@ -54,11 +54,11 @@ type GovernorConfig struct {
 type RuleAction int
 
 const (
-	ActionNone            RuleAction = iota
-	ActionIgnore                     // hard stop — never kill this user
-	ActionNotify                     // send alert only
-	ActionKillQuery                  // KILL QUERY id (statement dies, connection lives)
-	ActionKillConnection             // KILL id (connection dies)
+	ActionNone           RuleAction = iota
+	ActionIgnore                    // hard stop — never kill this user
+	ActionNotify                    // send alert only
+	ActionKillQuery                 // KILL QUERY id (statement dies, connection lives)
+	ActionKillConnection            // KILL id (connection dies)
 )
 
 // QueryRule describes one entry in the query_rules list.
@@ -93,8 +93,8 @@ type GovernorState struct {
 	LockedConn  int
 	ConnPct     float64
 	PerUser     []UserStat
-	Running     []Process       // active + waiting, sorted by time desc
-	LockGraph   []LockGroup     // blocker -> waiters
+	Running     []Process   // active + waiting, sorted by time desc
+	LockGraph   []LockGroup // blocker -> waiters
 	RecentKills []KillRecord
 	PerfDeltas  []UserPerfDelta // per-user CPU/query stats from performance_schema (nil if unavailable)
 	Flavor      string          // "10.11.7-MariaDB" | "8.0.36"
@@ -169,6 +169,8 @@ type Governor struct {
 	lastPerfRaw   map[string]perfRawRow // cumulative counters from last poll
 	perfDeltas    []UserPerfDelta       // most recent per-poll deltas
 	perfDeltaMu   sync.RWMutex
+	perfPollEvery time.Duration // cadence for perf/userstat queries (slower than main poll)
+	lastPerfPoll  time.Time
 
 	// MariaDB userstat — information_schema.USER_STATISTICS
 	// Provides real CPU_TIME on MariaDB where SUM_CPU_TIME is absent.
@@ -216,6 +218,12 @@ var alwaysExemptUsers = map[string]bool{
 	"event_scheduler":   true,
 }
 
+const (
+	perfFetchMinInterval = 15 * time.Second
+	perfFetchMaxInterval = 60 * time.Second
+	perfQueryTimeout     = 3 * time.Second
+)
+
 // NewGovernor initialises the governor and verifies the DB connection.
 func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 	// Apply defaults
@@ -259,6 +267,13 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	g := &Governor{cfg: cfg, db: db}
+	g.perfPollEvery = cfg.PollEvery * 3
+	if g.perfPollEvery < perfFetchMinInterval {
+		g.perfPollEvery = perfFetchMinInterval
+	}
+	if g.perfPollEvery > perfFetchMaxInterval {
+		g.perfPollEvery = perfFetchMaxInterval
+	}
 	if err := g.detectFlavor(); err != nil {
 		logging.LogfMYSQLGOVERNOR("[mysql/governor] flavor detect failed: %v", err)
 	}
@@ -319,8 +334,16 @@ func (g *Governor) poll(ctx context.Context) {
 		g.cleanupStaleAlterCaps(ctx, state)
 	}
 
-	// performance_schema CPU / query deltas (nil if perf_schema unavailable)
-	state.PerfDeltas = g.fetchPerfDeltas(ctx)
+	// performance_schema / userstat queries are intentionally slower than the
+	// main 5s poll loop to reduce DB/syscall pressure on busy MySQL/MariaDB hosts.
+	if time.Since(g.lastPerfPoll) >= g.perfPollEvery {
+		ctxPerf, cancel := context.WithTimeout(ctx, perfQueryTimeout)
+		state.PerfDeltas = g.fetchPerfDeltas(ctxPerf)
+		cancel()
+		g.lastPerfPoll = time.Now()
+	} else {
+		state.PerfDeltas = g.PerfDeltas()
+	}
 
 	// Notify on connection pressure
 	g.checkConnPressure(state)
