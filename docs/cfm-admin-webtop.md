@@ -8,6 +8,7 @@ The UI is now split into pages:
 - `/cfm-admin/` — lightweight landing/status placeholder + module menu
 - `/cfm-admin/webdetector/` — WebDetector overview (live)
 - `/cfm-admin/webdetector/vhost/` — WebDetector vhost-focused live view
+  - vhost page accepts `?host=example.com` for direct live focus
 - `/cfm-admin/webdetector/forensics/` — WebDetector investigation view (history/IP/analyze)
 
 ## What gets installed
@@ -31,6 +32,7 @@ The WebTop table now also shows lightweight runtime flags per host:
 
 And provides actions directly in the UI:
 
+- **Live** a vhost (opens `/cfm-admin/webdetector/vhost/?host=<vhost>` in new tab)
 - **Challenge / Unchallenge** a vhost (calls `/api/v1/challenge/vhost/add|remove`)
 - **Block 1h** for top drilldown IPs (calls `/api/v1/firewall/block`)
 
