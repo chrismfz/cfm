@@ -1,4 +1,7 @@
 (() => {
+  const appRoot = document.getElementById('app');
+  appRoot?.removeAttribute('v-cloak');
+
   const el = {
     autoState: document.getElementById('autoState'),
     refreshBtn: document.getElementById('refreshBtn'),
@@ -248,12 +251,21 @@
 
   async function refresh() {
     showMsg('');
-    try {
-      await Promise.all([loadLive(), loadSummary(), loadEvents()]);
-    } catch (err) {
-      console.error('[cfm-admin governor] refresh failed', err);
-      showMsg(`Error: ${err?.message || err}`);
-    }
+    const checks = await Promise.allSettled([loadLive(), loadSummary(), loadEvents()]);
+    const failed = checks
+      .map((res, idx) => ({
+        res,
+        label: idx === 0 ? 'live' : idx === 1 ? 'summary' : 'events',
+      }))
+      .filter((x) => x.res.status === 'rejected');
+
+    if (!failed.length) return;
+
+    failed.forEach((x) => {
+      console.error(`[cfm-admin governor] refresh failed (${x.label})`, x.res.reason);
+    });
+    const msg = failed.map((x) => `${x.label}: ${x.res.reason?.message || x.res.reason || 'failed'}`).join(' | ');
+    showMsg(`Partial refresh error: ${msg}`);
   }
 
   function startAuto() {
