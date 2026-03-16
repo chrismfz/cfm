@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Admin · MySQL Governor</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="/cfm-admin/assets/governor.js" defer></script>
 </head>
 <body>
@@ -29,9 +30,7 @@
       <section class="card wide">
         <h2>Connection pressure</h2>
         <div id="kpiRow" class="chips"></div>
-        <svg id="connSpark" class="spark" viewBox="0 0 800 140" preserveAspectRatio="none">
-          <polyline id="connSparkLine" class="line-yellow" points="" />
-        </svg>
+        <div id="connSpark" class="spark"></div>
       </section>
 
       <section class="card">
@@ -61,10 +60,7 @@
       <section class="card wide">
         <h2>CPU / queries</h2>
         <div class="chips" id="cpuMeta"></div>
-        <svg id="cpuSpark" class="spark" viewBox="0 0 800 140" preserveAspectRatio="none">
-          <polyline id="cpuSparkLine" class="line-cyan" points="" />
-          <polyline id="qrySparkLine" class="line-magenta" points="" />
-        </svg>
+        <div id="cpuSpark" class="spark"></div>
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
             <thead>

@@ -187,7 +187,7 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
 
 .spark {
   width: 100%;
-  height: 140px;
+  height: 280px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #081122;
