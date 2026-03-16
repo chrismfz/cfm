@@ -76,7 +76,7 @@ button:disabled { opacity: .65; cursor: default; }
   gap: 1rem;
   grid-template-columns: repeat(2, minmax(280px, 1fr));
   padding: 1rem;
-  align-items: start;
+  align-items: stretch;
 }
 .card {
   background: var(--card);

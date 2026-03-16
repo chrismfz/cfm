@@ -618,21 +618,40 @@
         }
         return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
       },
+      jumpToHistory() {
+        const el = document.getElementById('history-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
+      openHistoryPage(host = '', ip = '') {
+        const url = new URL('/cfm-admin/webdetector/forensics/', window.location.origin);
+        const h = String(host || '').trim();
+        const i = String(ip || '').trim();
+        if (h) url.searchParams.set('host', h);
+        if (i) url.searchParams.set('ip', i);
+        url.hash = 'history-card';
+        window.location.href = `${url.pathname}${url.search}${url.hash}`;
+      },
       async historyForHost(host) {
         if (!host) return;
         this.historyHost = host;
         this.historyIP = '';
+        if (!this.shouldShow('history')) {
+          this.openHistoryPage(host, '');
+          return;
+        }
         await this.refreshHistory();
-        const el = document.getElementById('history-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        this.jumpToHistory();
       },
       async historyForIP(ip) {
         if (!ip) return;
         this.historyIP = ip;
         if (!this.historyHost) this.historyHost = this.activeHost || '';
+        if (!this.shouldShow('history')) {
+          this.openHistoryPage(this.historyHost, ip);
+          return;
+        }
         await this.refreshHistory();
-        const el = document.getElementById('history-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        this.jumpToHistory();
       },
       async pruneHistory(days = 30) {
         this.historyBusy = true;
@@ -756,7 +775,9 @@
       else if (path.includes('/webdetector/vhost/')) this.pageMode = 'vhost';
       else this.pageMode = 'overview';
 
-      const qHost = new URL(window.location.href).searchParams.get('host');
+      const currentURL = new URL(window.location.href);
+      const qHost = currentURL.searchParams.get('host');
+      const qIP = currentURL.searchParams.get('ip');
       if (this.isVhostPage && qHost) {
         this.vhostFocusHost = qHost.trim();
         this.activeHost = this.vhostFocusHost;
@@ -764,12 +785,19 @@
       if (this.isForensicsPage && qHost) {
         this.historyHost = qHost.trim();
       }
+      if (this.isForensicsPage && qIP) {
+        this.historyIP = qIP.trim();
+      }
 
       this.refreshAll();
       if (this.isForensicsPage) {
         this.stopAutoRefresh();
       } else {
         this.startAutoRefresh();
+      }
+
+      if (this.isForensicsPage && currentURL.hash === '#history-card') {
+        setTimeout(() => this.jumpToHistory(), 120);
       }
     },
     beforeUnmount() {
