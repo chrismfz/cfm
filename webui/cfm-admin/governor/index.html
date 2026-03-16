@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin · MySQL Governor</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="/cfm-admin/assets/governor.js" defer></script>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="topbar">
+      <h1>CFM Admin</h1>
+      <nav class="top-nav">
+        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector overview</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/vhost/">Vhost live</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/forensics/">Forensics</a>
+        <a class="btn-quiet" href="/cfm-admin/governor/">MySQL governor</a>
+      </nav>
+      <div class="meta">
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet">Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Connection pressure</h2>
+        <div id="kpiRow" class="chips"></div>
+        <svg id="connSpark" class="spark" viewBox="0 0 800 140" preserveAspectRatio="none">
+          <polyline id="connSparkLine" class="line-yellow" points="" />
+        </svg>
+      </section>
+
+      <section class="card">
+        <h2>Per-user connections</h2>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr><th>User</th><th>Total</th><th>Active</th><th>Sleep</th><th>Locked</th><th>Max idle</th><th>Risk</th></tr>
+            </thead>
+            <tbody id="connUsersBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Running queries</h2>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr><th>PID</th><th>User</th><th>DB</th><th>Time</th><th>State</th><th>Query</th></tr>
+            </thead>
+            <tbody id="runningBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>CPU / queries</h2>
+        <div class="chips" id="cpuMeta"></div>
+        <svg id="cpuSpark" class="spark" viewBox="0 0 800 140" preserveAspectRatio="none">
+          <polyline id="cpuSparkLine" class="line-cyan" points="" />
+          <polyline id="qrySparkLine" class="line-magenta" points="" />
+        </svg>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>User</th><th>CPU_SEC</th><th>WAIT%</th><th>Qrys</th><th>AVG_MS</th><th>RowsR</th><th>RowsS</th><th>Load</th></tr>
+            </thead>
+            <tbody id="cpuBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>History (1h)</h2>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>User</th><th>Peak</th><th>Avg</th><th>P.Active</th><th>A.Active</th><th>P.Lock</th><th>Samples</th><th>Activity</th></tr>
+            </thead>
+            <tbody id="histBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Durable history summary</h2>
+        <div class="toolbar">
+          <label>Hours</label>
+          <input id="summaryHours" class="input" type="number" min="1" max="720" value="24" />
+          <button id="loadSummaryBtn" class="btn-quiet">Load summary</button>
+        </div>
+        <pre id="summaryText">Loading...</pre>
+      </section>
+
+      <section class="card wide" id="events-card">
+        <h2>Durable history events</h2>
+        <div class="toolbar">
+          <label>User</label>
+          <input id="filterUser" class="input" type="text" placeholder="db_user" />
+          <label>DB</label>
+          <input id="filterDB" class="input" type="text" placeholder="database" />
+          <label>Type</label>
+          <input id="filterType" class="input" type="text" placeholder="kill_action" />
+          <label>Limit</label>
+          <input id="filterLimit" class="input" type="number" min="1" max="2000" value="100" />
+          <button id="loadEventsBtn" class="btn-quiet">Load events</button>
+        </div>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>TS</th>
+                <th>TYPE</th>
+                <th>USER</th>
+                <th>DB</th>
+                <th>ACTION</th>
+                <th>RESULT</th>
+                <th>PID</th>
+                <th>RUNTIME(ms)</th>
+                <th>REASON</th>
+              </tr>
+            </thead>
+            <tbody id="eventsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Retention controls</h2>
+        <div class="toolbar">
+          <label>Prune days</label>
+          <input id="pruneDays" class="input" type="number" min="1" max="3650" value="30" />
+          <button id="pruneBtn" class="btn-quiet">Prune</button>
+          <button id="truncateBtn" class="btn-danger">Truncate history</button>
+        </div>
+        <p id="actionMsg" class="statusline" style="display:none"></p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
