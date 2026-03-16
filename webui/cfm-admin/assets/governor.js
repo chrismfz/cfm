@@ -17,6 +17,9 @@
     runningBody: document.getElementById('runningBody'),
     cpuBody: document.getElementById('cpuBody'),
     histBody: document.getElementById('histBody'),
+    locksBody: document.getElementById('locksBody'),
+    killsBody: document.getElementById('killsBody'),
+    psBody: document.getElementById('psBody'),
 
     loadEventsBtn: document.getElementById('loadEventsBtn'),
     loadSummaryBtn: document.getElementById('loadSummaryBtn'),
@@ -56,6 +59,23 @@
 
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function openHistoryFilter(user = '', dbName = '') {
+    if (el.filterUser) el.filterUser.value = user || '';
+    if (el.filterDB) el.filterDB.value = dbName || '';
+    const card = document.getElementById('events-card');
+    card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    loadEvents().catch((err) => showMsg(`Error: ${err?.message || err}`));
+  }
+
+
+  function runtimeSeconds(row) {
+    const sec = Number(row.runtime_sec ?? row.RuntimeSec);
+    if (Number.isFinite(sec) && sec >= 0) return sec.toFixed(0);
+    const ns = Number(row.runtime ?? row.Runtime);
+    if (Number.isFinite(ns) && ns >= 0) return (ns / 1e9).toFixed(0);
+    return '-';
   }
 
   function riskLabel(row) {
@@ -169,7 +189,8 @@
         <td>${esc(u.locked)}</td>
         <td>${esc(u.max_idle_sec || '-')}</td>
         <td>${riskLabel(u)}</td>
-      </tr>`).join('') : '<tr><td colspan="7" class="muted">No users.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}" data-db="">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="8" class="muted">No users.</td></tr>';
 
     el.runningBody.innerHTML = running.length ? running.slice(0, 120).map((r) => `
       <tr>
@@ -179,10 +200,18 @@
         <td>${esc(r.time_sec)}s</td>
         <td>${esc(r.state)}</td>
         <td class="truncate" title="${esc(r.info)}">${esc(r.info)}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="muted">No running queries.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="7" class="muted">No running queries.</td></tr>';
 
     pushSeries(st.connPctSeries, conn.pct || 0);
     el.connSparkLine.setAttribute('points', pointsFromSeries(st.connPctSeries));
+
+    el.connUsersBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
+    el.runningBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
   }
 
   function renderCPU(payload) {
@@ -207,12 +236,16 @@
         <td>${esc(u.rows_read || 0)}</td>
         <td>${esc(u.rows_sent || 0)}</td>
         <td><code>${cpuBar(Number(u.cpu_sec) || 0)}</code></td>
-      </tr>`).join('') : '<tr><td colspan="8" class="muted">No CPU/query activity.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="9" class="muted">No CPU/query activity.</td></tr>';
 
     pushSeries(st.cpuSeries, totalCPU);
     pushSeries(st.qrySeries, totalQry);
     el.cpuSparkLine.setAttribute('points', pointsFromSeries(st.cpuSeries));
     el.qrySparkLine.setAttribute('points', pointsFromSeries(st.qrySeries));
+    el.cpuBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
   }
 
   function renderHist(payload) {
@@ -227,7 +260,75 @@
         <td>${esc(u.peak_locked || 0)}</td>
         <td>${esc(u.samples || 0)}</td>
         <td><code>${histBar(Number(u.peak_conns) || 0)}</code></td>
-      </tr>`).join('') : '<tr><td colspan="8" class="muted">No history yet.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="9" class="muted">No history yet.</td></tr>';
+    el.histBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
+  }
+
+  function renderLocks(payload) {
+    const rows = Array.isArray(payload?.lock_graph) ? payload.lock_graph : [];
+    if (!rows.length) {
+      el.locksBody.innerHTML = '<tr><td colspan="5" class="muted">No locks.</td></tr>';
+      return;
+    }
+    el.locksBody.innerHTML = rows.map((g) => {
+      const b = g.blocker || g.Blocker || {};
+      const waiters = Array.isArray(g.waiters) ? g.waiters : (Array.isArray(g.Waiters) ? g.Waiters : []);
+      return `<tr>
+        <td>${esc(b.id ?? b.ID ?? 0)}</td>
+        <td>${esc(b.user ?? b.User ?? '')}</td>
+        <td>${esc(b.db ?? b.DB ?? '')}</td>
+        <td>${esc(b.state ?? b.State ?? '')}</td>
+        <td>${esc(waiters.length)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderKills(payload) {
+    const rows = Array.isArray(payload?.kills) ? payload.kills : [];
+    if (!rows.length) {
+      el.killsBody.innerHTML = '<tr><td colspan="9" class="muted">No kills recorded.</td></tr>';
+      return;
+    }
+    el.killsBody.innerHTML = rows.slice(0, 120).map((r) => `
+      <tr>
+        <td>${esc(r.ts || r.Ts || '')}</td>
+        <td>${esc(r.action || r.Action || '')}</td>
+        <td>${esc(r.user || r.User || '')}</td>
+        <td>${esc(r.db || r.DB || '')}</td>
+        <td>${esc(r.pid || r.PID || 0)}</td>
+        <td>${esc(runtimeSeconds(r))}</td>
+        <td>${esc(r.result || r.Result || '')}</td>
+        <td class="truncate" title="${esc(r.reason || r.Reason || '')}">${esc(r.reason || r.Reason || '')}</td>
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user || r.User || '')}" data-db="${esc(r.db || r.DB || '')}">History</button></td>
+      </tr>`).join('');
+    el.killsBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
+  }
+
+  function renderPS(payload) {
+    const rows = Array.isArray(payload?.running) ? payload.running : [];
+    if (!rows.length) {
+      el.psBody.innerHTML = '<tr><td colspan="8" class="muted">No processlist rows.</td></tr>';
+      return;
+    }
+    el.psBody.innerHTML = rows.slice(0, 200).map((r) => `
+      <tr>
+        <td>${esc(r.id ?? r.ID ?? 0)}</td>
+        <td>${esc(r.user ?? r.User ?? '')}</td>
+        <td>${esc(r.db ?? r.DB ?? '')}</td>
+        <td>${esc(r.command ?? r.Command ?? '')}</td>
+        <td>${esc(r.time_sec ?? r.TimeSec ?? 0)}s</td>
+        <td>${esc(r.state ?? r.State ?? '')}</td>
+        <td class="truncate" title="${esc(r.info ?? r.Info ?? '')}">${esc(r.info ?? r.Info ?? '')}</td>
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user ?? r.User ?? '')}" data-db="${esc(r.db ?? r.DB ?? '')}">History</button></td>
+      </tr>`).join('');
+    el.psBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
   }
 
   function renderEvents(rows) {
@@ -265,6 +366,17 @@
     el.summaryText.textContent = JSON.stringify(s, null, 2);
   }
 
+  async function loadOps() {
+    const [locks, kills, ps] = await Promise.all([
+      api('/v1/mysql/locks'),
+      api('/v1/mysql/kills'),
+      api('/v1/mysql/processlist'),
+    ]);
+    renderLocks(locks);
+    renderKills(kills);
+    renderPS(ps);
+  }
+
   async function loadLive() {
     const [state, cpu, hist] = await Promise.all([
       api('/v1/mysql/state'),
@@ -294,11 +406,11 @@
 
   async function refresh() {
     showMsg('');
-    const checks = await Promise.allSettled([loadLive(), loadSummary(), loadEvents()]);
+    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
     const failed = checks
       .map((res, idx) => ({
         res,
-        label: idx === 0 ? 'live' : idx === 1 ? 'summary' : 'events',
+        label: idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events',
       }))
       .filter((x) => x.res.status === 'rejected');
 
