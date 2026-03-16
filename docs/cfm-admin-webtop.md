@@ -10,6 +10,7 @@ The UI is now split into pages:
 - `/cfm-admin/webdetector/vhost/` — WebDetector vhost-focused live view
   - vhost page accepts `?host=example.com` for direct live focus
 - `/cfm-admin/webdetector/forensics/` — WebDetector investigation view (history/IP/analyze)
+- `/cfm-admin/governor/` — MySQL governor history, summary, prune/truncate
 
 ## What gets installed
 
@@ -60,6 +61,7 @@ Top-right controls include:
 
 - `location ^~ /cfm-admin/` (serves static files)
 - `location ^~ /cfm-admin/api/` (proxies to `127.0.0.1:6060`)
+- redirects for nested modules (e.g. `/cfm-admin/webdetector` and `/cfm-admin/governor`)
 - `auth_basic` on both locations using `/etc/cfm/cfm-admin.htpasswd`
 
 ## Create credentials
@@ -100,6 +102,7 @@ The helper emits Apache-compatible `{SHA}` hashes.
 
 - `https://YOUR-HOST/cfm-admin/`
 - `https://YOUR-HOST/cfm-admin/webdetector/`
+- `https://YOUR-HOST/cfm-admin/governor/`
 
 > The config now also redirects `/cfm-admin/webdetector` (no trailing slash) to
 > `/cfm-admin/webdetector/` and serves nested subpages (e.g. `/vhost/`,

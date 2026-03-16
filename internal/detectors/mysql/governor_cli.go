@@ -4,13 +4,14 @@ package mysql
 import (
 	"encoding/json"
 	"fmt"
+	"golang.org/x/term"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
-	"golang.org/x/term"
 )
 
 // RunMySQLTop is the CLI entrypoint for `cfm mysqltop`.
@@ -46,6 +47,18 @@ func RunMySQLTop(baseURL string, args []string) error {
 	case "ps", "processlist":
 		return runMySQLProcesslist(baseURL)
 	case "history":
+		if len(args) > 1 {
+			switch args[1] {
+			case "events":
+				return runMySQLHistoryEvents(baseURL, args[2:])
+			case "summary":
+				return runMySQLHistorySummary(baseURL, args[2:])
+			case "prune":
+				return runMySQLHistoryPrune(baseURL, args[2:])
+			case "truncate":
+				return runMySQLHistoryTruncate(baseURL, args[2:])
+			}
+		}
 		// cfm mysqltop history [window] [topN]
 		// window: 1h (default), 30m, 6h, 24h
 		// topN:   20 (default)
@@ -69,7 +82,6 @@ func RunMySQLTop(baseURL string, args []string) error {
 	return fmt.Errorf("unknown subcommand: %s", args[0])
 }
 
-
 func isTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
@@ -78,7 +90,6 @@ func isTTY() bool {
 func runMySQLLive(baseURL string) error {
 	return mysqlLiveUI(baseURL)
 }
-
 
 func printMySQLTopHelp() {
 	fmt.Println("Usage:")
@@ -90,6 +101,10 @@ func printMySQLTopHelp() {
 	fmt.Println("  cfm mysqltop kills                  # recent governor kills")
 	fmt.Println("  cfm mysqltop ps                     # full processlist (running + waiting)")
 	fmt.Println("  cfm mysqltop history [window] [N]   # busiest N users over window (e.g. 1h, 6h, 24h)")
+	fmt.Println("  cfm mysqltop history events [--user U] [--db DB] [--limit N]")
+	fmt.Println("  cfm mysqltop history summary [--hours H]")
+	fmt.Println("  cfm mysqltop history prune [days]")
+	fmt.Println("  cfm mysqltop history truncate --yes")
 	fmt.Println("  cfm mysqltop cpu                    # per-user CPU + query stats")
 	fmt.Println("                                      #   MySQL 8+: uses performance_schema SUM_CPU_TIME")
 	fmt.Println("                                      #   MariaDB:  uses information_schema.USER_STATISTICS (userstat=ON)")
@@ -415,8 +430,8 @@ func runMySQLCPU(baseURL string) error {
 
 	// ---- Choose display mode ----------------------------------------------
 	// showCPU: we actually have non-zero CPU data to display
-	showCPU  := r.PerfCPUActive                  // Path A active, or Path B active
-	showRows := r.UserstatOK                      // Path B: rows columns available
+	showCPU := r.PerfCPUActive // Path A active, or Path B active
+	showRows := r.UserstatOK   // Path B: rows columns available
 
 	// Header line (only if we haven't already printed a hint above)
 	switch {
@@ -522,6 +537,139 @@ func fetchGovernorJSON(baseURL, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func postGovernorJSON(baseURL, path string, out any) error {
+	target := strings.TrimRight(baseURL, "/") + path
+	u, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("mysqltop: POST %s failed: HTTP %d", u.String(), resp.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func runMySQLHistoryEvents(baseURL string, args []string) error {
+	user := ""
+	db := ""
+	limit := 100
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--user" && i+1 < len(args):
+			user = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--user="):
+			user = strings.TrimPrefix(args[i], "--user=")
+		case args[i] == "--db" && i+1 < len(args):
+			db = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--db="):
+			db = strings.TrimPrefix(args[i], "--db=")
+		case args[i] == "--limit" && i+1 < len(args):
+			if n, err := strconv.Atoi(args[i+1]); err == nil {
+				limit = n
+			}
+			i++
+		case strings.HasPrefix(args[i], "--limit="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "--limit=")); err == nil {
+				limit = n
+			}
+		}
+	}
+
+	type respT struct {
+		Rows []GovernorHistoryEvent `json:"rows"`
+	}
+	var r respT
+	path := fmt.Sprintf("/api/v1/mysql/history/events?limit=%d", limit)
+	if user != "" {
+		path += "&user=" + url.QueryEscape(user)
+	}
+	if db != "" {
+		path += "&db=" + url.QueryEscape(db)
+	}
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TS\tTYPE\tUSER\tDB\tACTION\tRESULT\tREASON")
+	for _, ev := range r.Rows {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			ev.TsUnix, ev.EventType, ev.User, ev.DB, ev.Action, ev.Result, truncate(ev.Reason, 80))
+	}
+	return w.Flush()
+}
+
+func runMySQLHistorySummary(baseURL string, args []string) error {
+	hours := 24
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--hours" && i+1 < len(args):
+			if n, err := strconv.Atoi(args[i+1]); err == nil {
+				hours = n
+			}
+			i++
+		case strings.HasPrefix(args[i], "--hours="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "--hours=")); err == nil {
+				hours = n
+			}
+		}
+	}
+	var s GovernorHistorySummary
+	if err := fetchGovernorJSON(baseURL, fmt.Sprintf("/api/v1/mysql/history/summary?hours=%d", hours), &s); err != nil {
+		return err
+	}
+	fmt.Printf("mysql governor history summary (%dh): total=%d kill_query=%d kill_connection=%d sleep_reap=%d conn_warn=%d conn_critical=%d\n",
+		hours, s.TotalEvents, s.KillQuery, s.KillConnection, s.SleepReap, s.ConnPressureWarn, s.ConnPressureCrit)
+	return nil
+}
+
+func runMySQLHistoryPrune(baseURL string, args []string) error {
+	days := 30
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			days = n
+		}
+	}
+	var out map[string]any
+	if err := postGovernorJSON(baseURL, fmt.Sprintf("/api/v1/mysql/history/prune?days=%d", days), &out); err != nil {
+		return err
+	}
+	fmt.Printf("mysql history pruned days=%d rows_deleted=%v\n", days, out["rows_deleted"])
+	return nil
+}
+
+func runMySQLHistoryTruncate(baseURL string, args []string) error {
+	confirm := false
+	for _, a := range args {
+		if a == "--yes" {
+			confirm = true
+		}
+	}
+	if !confirm {
+		return fmt.Errorf("refusing to truncate without --yes")
+	}
+	var out map[string]any
+	if err := postGovernorJSON(baseURL, "/api/v1/mysql/history/truncate?confirm=yes", &out); err != nil {
+		return err
+	}
+	fmt.Printf("mysql history truncated rows_deleted=%v\n", out["rows_deleted"])
+	return nil
 }
 
 func formatAge(secs int64) string {
