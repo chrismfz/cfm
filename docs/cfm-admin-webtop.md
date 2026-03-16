@@ -110,3 +110,10 @@ The helper emits Apache-compatible `{SHA}` hashes.
 
 - Keep the CFM debug API local/trusted only.
 - This starter uses polling every 5s for live WebTop updates.
+
+## API debug command reference
+
+For copy/paste `curl` examples against local API (`127.0.0.1:6060`) and `/cfm-admin/api` proxy paths, see:
+
+- `docs/webui-api-curl-recipes.md`
+- `docs/webui-api-sample-responses.md` (redacted success + error payloads)

@@ -281,10 +281,25 @@
         if (!h) return '/cfm-admin/webdetector/vhost/';
         return `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(h)}`;
       },
+      forensicsURL(host) {
+        const h = String(host || '').trim();
+        if (!h) return '/cfm-admin/webdetector/forensics/';
+        return `/cfm-admin/webdetector/forensics/?host=${encodeURIComponent(h)}`;
+      },
       openVhostLive(host, newTab = true) {
         const h = String(host || '').trim();
         if (!h) return;
         const url = this.vhostLiveURL(h);
+        if (newTab) {
+          window.open(url, '_blank', 'noopener');
+        } else {
+          window.location.href = url;
+        }
+      },
+      openForensics(host, newTab = true) {
+        const h = String(host || '').trim();
+        if (!h) return;
+        const url = this.forensicsURL(h);
         if (newTab) {
           window.open(url, '_blank', 'noopener');
         } else {
@@ -745,6 +760,9 @@
       if (this.isVhostPage && qHost) {
         this.vhostFocusHost = qHost.trim();
         this.activeHost = this.vhostFocusHost;
+      }
+      if (this.isForensicsPage && qHost) {
+        this.historyHost = qHost.trim();
       }
 
       this.refreshAll();
