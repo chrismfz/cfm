@@ -8,9 +8,8 @@
     toggleAutoBtn: document.getElementById('toggleAutoBtn'),
 
     kpiRow: document.getElementById('kpiRow'),
-    connSparkLine: document.getElementById('connSparkLine'),
-    cpuSparkLine: document.getElementById('cpuSparkLine'),
-    qrySparkLine: document.getElementById('qrySparkLine'),
+    connSpark: document.getElementById('connSpark'),
+    cpuSpark: document.getElementById('cpuSpark'),
     cpuMeta: document.getElementById('cpuMeta'),
 
     connUsersBody: document.getElementById('connUsersBody'),
@@ -44,7 +43,9 @@
   const st = {
     auto: true,
     timer: null,
+    connLabels: [],
     connPctSeries: [],
+    cpuLabels: [],
     cpuSeries: [],
     qrySeries: [],
     maxPoints: 80,
@@ -117,16 +118,43 @@
     if (arr.length > st.maxPoints) arr.splice(0, arr.length - st.maxPoints);
   }
 
-  function pointsFromSeries(series) {
-    if (!series.length) return '';
-    const w = 800;
-    const h = 140;
-    const max = Math.max(1, ...series);
-    return series.map((v, i) => {
-      const x = series.length === 1 ? 0 : (i / (series.length - 1)) * w;
-      const y = h - (v / max) * (h - 6) - 3;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
+  function pushSeriesPoint(labels, series, label, value) {
+    pushSeries(labels, label);
+    pushSeries(series, value);
+  }
+
+  function safeChartLabel(label) {
+    return label && label !== '-' ? String(label) : new Date().toLocaleTimeString();
+  }
+
+  function initCharts() {
+    if (!window.echarts) return;
+    st.connChart = echarts.init(el.connSpark);
+    st.cpuChart = echarts.init(el.cpuSpark);
+
+    st.connChart.setOption({
+      backgroundColor: 'transparent',
+      animation: true,
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      grid: { left: 45, right: 20, top: 20, bottom: 30 },
+      xAxis: { type: 'category', boundaryGap: false, data: [] },
+      yAxis: { type: 'value', name: 'Conn %' },
+      series: [{ name: 'Connection pressure', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#f1d64a', width: 2 }, data: [] }],
+    });
+
+    st.cpuChart.setOption({
+      backgroundColor: 'transparent',
+      animation: true,
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      legend: { top: 0, right: 10, textStyle: { color: '#dbe7f7' }, data: ['CPU', 'Queries'] },
+      grid: { left: 50, right: 50, top: 35, bottom: 30 },
+      xAxis: { type: 'category', boundaryGap: false, data: [] },
+      yAxis: [{ type: 'value', name: 'CPU sec' }, { type: 'value', name: 'Queries' }],
+      series: [
+        { name: 'CPU', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#2ec9d7', width: 2 }, data: [] },
+        { name: 'Queries', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 1, lineStyle: { color: '#db62e6', width: 2 }, data: [] },
+      ],
+    });
   }
 
 
@@ -209,8 +237,11 @@
         <td><button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
       </tr>`).join('') : '<tr><td colspan="7" class="muted">No running queries.</td></tr>';
 
-    pushSeries(st.connPctSeries, conn.pct || 0);
-    el.connSparkLine.setAttribute('points', pointsFromSeries(st.connPctSeries));
+    pushSeriesPoint(st.connLabels, st.connPctSeries, safeChartLabel(state?.ts), conn.pct || 0);
+    st.connChart?.setOption({
+      xAxis: { data: st.connLabels },
+      series: [{ data: st.connPctSeries }],
+    });
 
     el.connUsersBody.querySelectorAll('button[data-user]').forEach((btn) => {
       btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
@@ -245,10 +276,12 @@
         <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
       </tr>`).join('') : '<tr><td colspan="9" class="muted">No CPU/query activity.</td></tr>';
 
-    pushSeries(st.cpuSeries, totalCPU);
+    pushSeriesPoint(st.cpuLabels, st.cpuSeries, new Date().toLocaleTimeString(), totalCPU);
     pushSeries(st.qrySeries, totalQry);
-    el.cpuSparkLine.setAttribute('points', pointsFromSeries(st.cpuSeries));
-    el.qrySparkLine.setAttribute('points', pointsFromSeries(st.qrySeries));
+    st.cpuChart?.setOption({
+      xAxis: { data: st.cpuLabels },
+      series: [{ data: st.cpuSeries }, { data: st.qrySeries }],
+    });
     el.cpuBody.querySelectorAll('button[data-user]').forEach((btn) => {
       btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
     });
@@ -488,6 +521,16 @@
   el.loadSummaryBtn?.addEventListener('click', () => loadSummary().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.pruneBtn?.addEventListener('click', () => prune().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.truncateBtn?.addEventListener('click', () => truncate().catch((err) => showMsg(`Error: ${err?.message || err}`)));
+
+  if (window.echarts) {
+    initCharts();
+    window.addEventListener('resize', () => {
+      st.connChart?.resize();
+      st.cpuChart?.resize();
+    });
+  } else {
+    showMsg('ECharts is unavailable; chart rendering disabled.');
+  }
 
   startAuto();
   refresh();
