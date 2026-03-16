@@ -50,7 +50,7 @@
           <span class="muted" v-if="activeHost">Current: <strong>{{ activeHost }}</strong></span>
         </div>
       </section>
-      <section class="card" v-if="shouldShow('webtop')">
+      <section class="card card-tall" v-if="shouldShow('webtop')">
         <h2>WebTop (short window)</h2>
         <p class="muted">Data source: <code>/api/v1/webdet/top-short</code> proxied via <code>/cfm-admin/api/</code>.</p>
         <div class="toolbar">
@@ -68,7 +68,7 @@
           <span class="muted">vhosts (default 20)</span>
         </div>
         
-        <div class="table-wrap">
+        <div class="table-wrap stable-table-wrap">
           <table>
             <thead>
               <tr>
@@ -99,6 +99,7 @@
                 <td class="actions-cell">
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
                   <button class="btn-quiet" @click.stop="openVhostLive(row.host)">Live</button>
+                  <button class="btn-quiet" @click.stop="openForensics(row.host)">Forensics</button>
                   <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
@@ -126,9 +127,52 @@
         </details>
       </section>
 
+      <section class="card card-tall" v-if="shouldShow('globalips')">
+        <h2>Global Top IPs</h2>
+        <div class="toolbar">
+          <label for="ip-short-limit">Top</label>
+          <input
+            id="ip-short-limit"
+            class="input"
+            type="number"
+            min="1"
+            max="500"
+            step="1"
+            v-model.number="ipShortLimit"
+            @change="refreshAll"
+          />
+          <span class="muted">IPs</span>
+        </div>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in ipShort" :key="row.ip" class="clickable" @click="loadIP(row.ip)">
+                <td><code>{{ row.ip }}</code></td>
+                <td>{{ row.req }}</td>
+                <td>{{ row.vhosts }}</td>
+                <td>{{ num(row.rps) }}</td>
+                <td>{{ num(row.score) }}</td>
+                <td>{{ row.country || '-' }}</td>
+                <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
+                <td class="actions-cell">
+                  <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)">Challenge</button>
+                  <button class="btn-danger" @click.stop="blockIP(row.ip)">Block 1h</button>
+                  <button class="btn-quiet" @click.stop="analyzeIP(row.ip)">Analyze</button>
+                  <button class="btn-quiet" @click.stop="historyForIP(row.ip)">History</button>
+                </td>
+              </tr>
+              <tr v-if="!ipShort.length"><td colspan="8" class="muted">No IP rows.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card wide" v-if="shouldShow('suspicious')">
         <h2>Suspicious + challenged vhosts</h2>
-        <div class="table-wrap">
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
             <thead>
               <tr>
@@ -165,6 +209,7 @@
                   <button class="btn-quiet btn-sm" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
                   <button class="btn-quiet btn-sm" @click.stop="manualChallenge(row.host)" v-if="!challengeState(row.host)" title="Enable manual challenge (persists across auto-refresh)">Manual</button>
                   <button class="btn-quiet btn-sm" @click.stop="openVhostLive(row.host)">Live</button>
+                  <button class="btn-quiet btn-sm" @click.stop="openForensics(row.host)">Forensics</button>
                   <button class="btn-quiet btn-sm" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
@@ -190,7 +235,7 @@
           />
           <span class="muted">hosts</span>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap stable-table-wrap">
           <table>
             <thead>
               <tr><th>Host</th><th>Score</th><th>Reasons</th><th>RPS</th><th>err%</th><th>bot%</th><th>Actions</th></tr>
@@ -206,6 +251,7 @@
                 <td class="actions-cell">
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
                   <button class="btn-quiet" @click.stop="openVhostLive(row.host)">Live</button>
+                  <button class="btn-quiet" @click.stop="openForensics(row.host)">Forensics</button>
                   <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
                 </td>
               </tr>
@@ -214,50 +260,6 @@
           </table>
         </div>
       </section>
-
-      <section class="card" v-if="shouldShow('globalips')">
-        <h2>Global Top IPs</h2>
-        <div class="toolbar">
-          <label for="ip-short-limit">Top</label>
-          <input
-            id="ip-short-limit"
-            class="input"
-            type="number"
-            min="1"
-            max="500"
-            step="1"
-            v-model.number="ipShortLimit"
-            @change="refreshAll"
-          />
-          <span class="muted">IPs</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th><th>Actions</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in ipShort" :key="row.ip" class="clickable" @click="loadIP(row.ip)">
-                <td><code>{{ row.ip }}</code></td>
-                <td>{{ row.req }}</td>
-                <td>{{ row.vhosts }}</td>
-                <td>{{ num(row.rps) }}</td>
-                <td>{{ num(row.score) }}</td>
-                <td>{{ row.country || '-' }}</td>
-                <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
-                <td class="actions-cell">
-                  <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)">Challenge</button>
-                  <button class="btn-danger" @click.stop="blockIP(row.ip)">Block 1h</button>
-                  <button class="btn-quiet" @click.stop="analyzeIP(row.ip)">Analyze</button>
-                  <button class="btn-quiet" @click.stop="historyForIP(row.ip)">History</button>
-                </td>
-              </tr>
-              <tr v-if="!ipShort.length"><td colspan="8" class="muted">No IP rows.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
 
       <section class="card wide" id="history-card" v-if="shouldShow('history')">
         <h2>Webdetector history (last 24h)</h2>
@@ -365,6 +367,9 @@
         <h2>Vhost drilldown</h2>
         <p class="muted" v-if="activeHost">Drilldown for: <strong>{{ activeHost }}</strong></p>
         <p class="muted" v-else>Click any host above to inspect.</p>
+        <div class="toolbar" v-if="activeHost">
+          <button class="btn-quiet" @click="openForensics(activeHost)">Open in Forensics tab</button>
+        </div>
         <p v-if="actionMsg" class="statusline">{{ actionMsg }}</p>
 
         <div class="drill-grid" v-if="shortDetail">
