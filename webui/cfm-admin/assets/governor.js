@@ -118,13 +118,25 @@
     if (arr.length > st.maxPoints) arr.splice(0, arr.length - st.maxPoints);
   }
 
+  function pushSeriesLabel(labels, label) {
+    labels.push(label);
+    if (labels.length > st.maxPoints) labels.splice(0, labels.length - st.maxPoints);
+  }
+
   function pushSeriesPoint(labels, series, label, value) {
-    pushSeries(labels, label);
+    pushSeriesLabel(labels, label);
     pushSeries(series, value);
   }
 
   function safeChartLabel(label) {
-    return label && label !== '-' ? String(label) : new Date().toLocaleTimeString();
+    const raw = (label ?? '').toString().trim();
+    if (!raw || raw === '-') return new Date().toLocaleTimeString();
+
+    const iso = new Date(raw);
+    if (!Number.isNaN(iso.getTime())) return iso.toLocaleTimeString();
+
+    const match = raw.match(/(\d{2}:\d{2}:\d{2})/);
+    return match ? match[1] : raw;
   }
 
   function initCharts() {
@@ -276,7 +288,7 @@
         <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
       </tr>`).join('') : '<tr><td colspan="9" class="muted">No CPU/query activity.</td></tr>';
 
-    pushSeriesPoint(st.cpuLabels, st.cpuSeries, new Date().toLocaleTimeString(), totalCPU);
+    pushSeriesPoint(st.cpuLabels, st.cpuSeries, safeChartLabel(payload?.ts), totalCPU);
     pushSeries(st.qrySeries, totalQry);
     st.cpuChart?.setOption({
       xAxis: { data: st.cpuLabels },
