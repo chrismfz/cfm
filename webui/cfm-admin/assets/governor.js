@@ -1,4 +1,7 @@
 (() => {
+  const appRoot = document.getElementById('app');
+  appRoot?.removeAttribute('v-cloak');
+
   const el = {
     autoState: document.getElementById('autoState'),
     refreshBtn: document.getElementById('refreshBtn'),
@@ -14,6 +17,9 @@
     runningBody: document.getElementById('runningBody'),
     cpuBody: document.getElementById('cpuBody'),
     histBody: document.getElementById('histBody'),
+    locksBody: document.getElementById('locksBody'),
+    killsBody: document.getElementById('killsBody'),
+    psBody: document.getElementById('psBody'),
 
     loadEventsBtn: document.getElementById('loadEventsBtn'),
     loadSummaryBtn: document.getElementById('loadSummaryBtn'),
@@ -26,6 +32,11 @@
     summaryHours: document.getElementById('summaryHours'),
     summaryText: document.getElementById('summaryText'),
     eventsBody: document.getElementById('eventsBody'),
+    lastEventsN: document.getElementById('lastEventsN'),
+    topUsersN: document.getElementById('topUsersN'),
+    applyEventViewsBtn: document.getElementById('applyEventViewsBtn'),
+    lastEventsBody: document.getElementById('lastEventsBody'),
+    topUsersBody: document.getElementById('topUsersBody'),
     pruneDays: document.getElementById('pruneDays'),
     actionMsg: document.getElementById('actionMsg'),
   };
@@ -37,6 +48,7 @@
     cpuSeries: [],
     qrySeries: [],
     maxPoints: 80,
+    eventRows: [],
   };
 
   function showMsg(msg) {
@@ -53,6 +65,23 @@
 
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function openHistoryFilter(user = '', dbName = '') {
+    if (el.filterUser) el.filterUser.value = user || '';
+    if (el.filterDB) el.filterDB.value = dbName || '';
+    const card = document.getElementById('events-card');
+    card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    loadEvents().catch((err) => showMsg(`Error: ${err?.message || err}`));
+  }
+
+
+  function runtimeSeconds(row) {
+    const sec = Number(row.runtime_sec ?? row.RuntimeSec);
+    if (Number.isFinite(sec) && sec >= 0) return sec.toFixed(0);
+    const ns = Number(row.runtime ?? row.Runtime);
+    if (Number.isFinite(ns) && ns >= 0) return (ns / 1e9).toFixed(0);
+    return '-';
   }
 
   function riskLabel(row) {
@@ -100,6 +129,49 @@
     }).join(' ');
   }
 
+
+  function normalizeState(raw) {
+    if (!raw || typeof raw !== 'object') {
+      return { conn: {}, per_user: [], running: [], mode: '-', flavor: '-', ts: '-' };
+    }
+    if (raw.conn && (Array.isArray(raw.per_user) || Array.isArray(raw.running))) {
+      return raw;
+    }
+    const conn = {
+      total: Number(raw.TotalConn ?? raw.total ?? 0),
+      max: Number(raw.MaxConn ?? raw.max ?? 0),
+      active: Number(raw.ActiveConn ?? raw.active ?? 0),
+      sleeping: Number(raw.SleepConn ?? raw.sleeping ?? 0),
+      locked: Number(raw.LockedConn ?? raw.locked ?? 0),
+      pct: Number(raw.ConnPct ?? raw.conn_pct ?? 0),
+    };
+    const perUserRaw = Array.isArray(raw.PerUser) ? raw.PerUser : (Array.isArray(raw.per_user) ? raw.per_user : []);
+    const runningRaw = Array.isArray(raw.Running) ? raw.Running : (Array.isArray(raw.running) ? raw.running : []);
+
+    return {
+      ts: raw.ts || raw.Ts || '-',
+      mode: raw.mode || raw.Mode || '-',
+      flavor: raw.flavor || raw.Flavor || '-',
+      conn,
+      per_user: perUserRaw.map((u) => ({
+        user: u.user ?? u.User ?? '',
+        total: Number(u.total ?? u.Total ?? 0),
+        active: Number(u.active ?? u.Active ?? 0),
+        sleeping: Number(u.sleeping ?? u.Sleeping ?? 0),
+        locked: Number(u.locked ?? u.Locked ?? 0),
+        max_idle_sec: Number(u.max_idle_sec ?? u.MaxSleepSec ?? 0),
+      })),
+      running: runningRaw.map((r) => ({
+        id: Number(r.id ?? r.ID ?? 0),
+        user: r.user ?? r.User ?? '',
+        db: r.db ?? r.DB ?? '',
+        time_sec: Number(r.time_sec ?? r.TimeSec ?? 0),
+        state: r.state ?? r.State ?? '',
+        info: r.info ?? r.Info ?? '',
+      })),
+    };
+  }
+
   function renderConnection(state) {
     const conn = state?.conn || {};
     const users = Array.isArray(state?.per_user) ? state.per_user : [];
@@ -123,7 +195,8 @@
         <td>${esc(u.locked)}</td>
         <td>${esc(u.max_idle_sec || '-')}</td>
         <td>${riskLabel(u)}</td>
-      </tr>`).join('') : '<tr><td colspan="7" class="muted">No users.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}" data-db="">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="8" class="muted">No users.</td></tr>';
 
     el.runningBody.innerHTML = running.length ? running.slice(0, 120).map((r) => `
       <tr>
@@ -133,10 +206,18 @@
         <td>${esc(r.time_sec)}s</td>
         <td>${esc(r.state)}</td>
         <td class="truncate" title="${esc(r.info)}">${esc(r.info)}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="muted">No running queries.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="7" class="muted">No running queries.</td></tr>';
 
     pushSeries(st.connPctSeries, conn.pct || 0);
     el.connSparkLine.setAttribute('points', pointsFromSeries(st.connPctSeries));
+
+    el.connUsersBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
+    el.runningBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
   }
 
   function renderCPU(payload) {
@@ -161,12 +242,16 @@
         <td>${esc(u.rows_read || 0)}</td>
         <td>${esc(u.rows_sent || 0)}</td>
         <td><code>${cpuBar(Number(u.cpu_sec) || 0)}</code></td>
-      </tr>`).join('') : '<tr><td colspan="8" class="muted">No CPU/query activity.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="9" class="muted">No CPU/query activity.</td></tr>';
 
     pushSeries(st.cpuSeries, totalCPU);
     pushSeries(st.qrySeries, totalQry);
     el.cpuSparkLine.setAttribute('points', pointsFromSeries(st.cpuSeries));
     el.qrySparkLine.setAttribute('points', pointsFromSeries(st.qrySeries));
+    el.cpuBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
   }
 
   function renderHist(payload) {
@@ -181,14 +266,111 @@
         <td>${esc(u.peak_locked || 0)}</td>
         <td>${esc(u.samples || 0)}</td>
         <td><code>${histBar(Number(u.peak_conns) || 0)}</code></td>
-      </tr>`).join('') : '<tr><td colspan="8" class="muted">No history yet.</td></tr>';
+        <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}">History</button></td>
+      </tr>`).join('') : '<tr><td colspan="9" class="muted">No history yet.</td></tr>';
+    el.histBody.querySelectorAll('button[data-user]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
+    });
+  }
+
+  function renderLocks(payload) {
+    const rows = Array.isArray(payload?.lock_graph) ? payload.lock_graph : [];
+    if (!rows.length) {
+      el.locksBody.innerHTML = '<tr><td colspan="5" class="muted">No locks.</td></tr>';
+      return;
+    }
+    el.locksBody.innerHTML = rows.map((g) => {
+      const b = g.blocker || g.Blocker || {};
+      const waiters = Array.isArray(g.waiters) ? g.waiters : (Array.isArray(g.Waiters) ? g.Waiters : []);
+      return `<tr>
+        <td>${esc(b.id ?? b.ID ?? 0)}</td>
+        <td>${esc(b.user ?? b.User ?? '')}</td>
+        <td>${esc(b.db ?? b.DB ?? '')}</td>
+        <td>${esc(b.state ?? b.State ?? '')}</td>
+        <td>${esc(waiters.length)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderKills(payload) {
+    const rows = Array.isArray(payload?.kills) ? payload.kills : [];
+    if (!rows.length) {
+      el.killsBody.innerHTML = '<tr><td colspan="9" class="muted">No kills recorded.</td></tr>';
+      return;
+    }
+    el.killsBody.innerHTML = rows.slice(0, 120).map((r) => `
+      <tr>
+        <td>${esc(r.ts || r.Ts || '')}</td>
+        <td>${esc(r.action || r.Action || '')}</td>
+        <td>${esc(r.user || r.User || '')}</td>
+        <td>${esc(r.db || r.DB || '')}</td>
+        <td>${esc(r.pid || r.PID || 0)}</td>
+        <td>${esc(runtimeSeconds(r))}</td>
+        <td>${esc(r.result || r.Result || '')}</td>
+        <td class="truncate" title="${esc(r.reason || r.Reason || '')}">${esc(r.reason || r.Reason || '')}</td>
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user || r.User || '')}" data-db="${esc(r.db || r.DB || '')}">History</button></td>
+      </tr>`).join('');
+    el.killsBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
+  }
+
+  function renderPS(payload) {
+    const rows = Array.isArray(payload?.running) ? payload.running : [];
+    if (!rows.length) {
+      el.psBody.innerHTML = '<tr><td colspan="8" class="muted">No processlist rows.</td></tr>';
+      return;
+    }
+    el.psBody.innerHTML = rows.slice(0, 200).map((r) => `
+      <tr>
+        <td>${esc(r.id ?? r.ID ?? 0)}</td>
+        <td>${esc(r.user ?? r.User ?? '')}</td>
+        <td>${esc(r.db ?? r.DB ?? '')}</td>
+        <td>${esc(r.command ?? r.Command ?? '')}</td>
+        <td>${esc(r.time_sec ?? r.TimeSec ?? 0)}s</td>
+        <td>${esc(r.state ?? r.State ?? '')}</td>
+        <td class="truncate" title="${esc(r.info ?? r.Info ?? '')}">${esc(r.info ?? r.Info ?? '')}</td>
+        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user ?? r.User ?? '')}" data-db="${esc(r.db ?? r.DB ?? '')}">History</button></td>
+      </tr>`).join('');
+    el.psBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
+      btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
+    });
+  }
+
+  function renderEventViews(rows) {
+    const allRows = Array.isArray(rows) ? rows : [];
+    const lastN = Math.max(1, Math.min(500, Number(el.lastEventsN?.value) || 10));
+    const topN = Math.max(1, Math.min(100, Number(el.topUsersN?.value) || 10));
+
+    const lastRows = allRows.slice(0, lastN);
+    el.lastEventsBody.innerHTML = lastRows.length ? lastRows.map((r) => `
+      <tr>
+        <td>${esc(r.ts_unix)}</td>
+        <td>${esc(r.event_type)}</td>
+        <td>${esc(r.user || '-')}</td>
+        <td>${esc(r.db || '-')}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="muted">No events.</td></tr>';
+
+    const counts = new Map();
+    allRows.forEach((r) => {
+      const user = String(r?.user || '').trim() || '(unknown)';
+      counts.set(user, (counts.get(user) || 0) + 1);
+    });
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN);
+    el.topUsersBody.innerHTML = ranked.length ? ranked.map(([user, n]) => {
+      const share = allRows.length ? ((n / allRows.length) * 100).toFixed(1) : '0.0';
+      return `<tr><td>${esc(user)}</td><td>${esc(n)}</td><td>${esc(share)}%</td></tr>`;
+    }).join('') : '<tr><td colspan="3" class="muted">No users.</td></tr>';
   }
 
   function renderEvents(rows) {
     if (!Array.isArray(rows) || !rows.length) {
+      st.eventRows = [];
       el.eventsBody.innerHTML = '<tr><td colspan="9" class="muted">No events found.</td></tr>';
+      renderEventViews([]);
       return;
     }
+    st.eventRows = rows;
     el.eventsBody.innerHTML = rows.map((r) => `
       <tr>
         <td>${esc(r.ts_unix)}</td>
@@ -201,6 +383,7 @@
         <td>${esc(r.runtime_ms)}</td>
         <td title="${esc(r.reason)}" class="truncate">${esc(r.reason)}</td>
       </tr>`).join('');
+    renderEventViews(rows);
   }
 
   async function loadEvents() {
@@ -219,13 +402,24 @@
     el.summaryText.textContent = JSON.stringify(s, null, 2);
   }
 
+  async function loadOps() {
+    const [locks, kills, ps] = await Promise.all([
+      api('/v1/mysql/locks'),
+      api('/v1/mysql/kills'),
+      api('/v1/mysql/processlist'),
+    ]);
+    renderLocks(locks);
+    renderKills(kills);
+    renderPS(ps);
+  }
+
   async function loadLive() {
     const [state, cpu, hist] = await Promise.all([
       api('/v1/mysql/state'),
       api('/v1/mysql/cpu'),
       api('/v1/mysql/history?window=1h&top=40'),
     ]);
-    renderConnection(state);
+    renderConnection(normalizeState(state));
     renderCPU(cpu);
     renderHist(hist);
   }
@@ -248,12 +442,21 @@
 
   async function refresh() {
     showMsg('');
-    try {
-      await Promise.all([loadLive(), loadSummary(), loadEvents()]);
-    } catch (err) {
-      console.error('[cfm-admin governor] refresh failed', err);
-      showMsg(`Error: ${err?.message || err}`);
-    }
+    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
+    const failed = checks
+      .map((res, idx) => ({
+        res,
+        label: idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events',
+      }))
+      .filter((x) => x.res.status === 'rejected');
+
+    if (!failed.length) return;
+
+    failed.forEach((x) => {
+      console.error(`[cfm-admin governor] refresh failed (${x.label})`, x.res.reason);
+    });
+    const msg = failed.map((x) => `${x.label}: ${x.res.reason?.message || x.res.reason || 'failed'}`).join(' | ');
+    showMsg(`Partial refresh error: ${msg}`);
   }
 
   function startAuto() {
@@ -279,6 +482,9 @@
   el.refreshBtn?.addEventListener('click', refresh);
   el.toggleAutoBtn?.addEventListener('click', toggleAuto);
   el.loadEventsBtn?.addEventListener('click', () => loadEvents().catch((err) => showMsg(`Error: ${err?.message || err}`)));
+  el.applyEventViewsBtn?.addEventListener('click', () => renderEventViews(st.eventRows));
+  el.lastEventsN?.addEventListener('change', () => renderEventViews(st.eventRows));
+  el.topUsersN?.addEventListener('change', () => renderEventViews(st.eventRows));
   el.loadSummaryBtn?.addEventListener('click', () => loadSummary().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.pruneBtn?.addEventListener('click', () => prune().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.truncateBtn?.addEventListener('click', () => truncate().catch((err) => showMsg(`Error: ${err?.message || err}`)));

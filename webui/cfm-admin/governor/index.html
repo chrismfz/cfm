@@ -39,7 +39,7 @@
         <div class="table-wrap stable-table-wrap">
           <table>
             <thead>
-              <tr><th>User</th><th>Total</th><th>Active</th><th>Sleep</th><th>Locked</th><th>Max idle</th><th>Risk</th></tr>
+              <tr><th>User</th><th>Total</th><th>Active</th><th>Sleep</th><th>Locked</th><th>Max idle</th><th>Risk</th><th>History</th></tr>
             </thead>
             <tbody id="connUsersBody"></tbody>
           </table>
@@ -51,7 +51,7 @@
         <div class="table-wrap stable-table-wrap">
           <table>
             <thead>
-              <tr><th>PID</th><th>User</th><th>DB</th><th>Time</th><th>State</th><th>Query</th></tr>
+              <tr><th>PID</th><th>User</th><th>DB</th><th>Time</th><th>State</th><th>Query</th><th>History</th></tr>
             </thead>
             <tbody id="runningBody"></tbody>
           </table>
@@ -68,7 +68,7 @@
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
             <thead>
-              <tr><th>User</th><th>CPU_SEC</th><th>WAIT%</th><th>Qrys</th><th>AVG_MS</th><th>RowsR</th><th>RowsS</th><th>Load</th></tr>
+              <tr><th>User</th><th>CPU_SEC</th><th>WAIT%</th><th>Qrys</th><th>AVG_MS</th><th>RowsR</th><th>RowsS</th><th>Load</th><th>History</th></tr>
             </thead>
             <tbody id="cpuBody"></tbody>
           </table>
@@ -80,9 +80,46 @@
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
             <thead>
-              <tr><th>User</th><th>Peak</th><th>Avg</th><th>P.Active</th><th>A.Active</th><th>P.Lock</th><th>Samples</th><th>Activity</th></tr>
+              <tr><th>User</th><th>Peak</th><th>Avg</th><th>P.Active</th><th>A.Active</th><th>P.Lock</th><th>Samples</th><th>Activity</th><th>History</th></tr>
             </thead>
             <tbody id="histBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+
+      <section class="card wide">
+        <h2>Lock graph</h2>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>Blocker PID</th><th>Blocker User</th><th>Blocker DB</th><th>Blocker State</th><th>Waiters</th></tr>
+            </thead>
+            <tbody id="locksBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Recent kills</h2>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>TS</th><th>ACTION</th><th>USER</th><th>DB</th><th>PID</th><th>RUNTIME(s)</th><th>RESULT</th><th>REASON</th><th>History</th></tr>
+            </thead>
+            <tbody id="killsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Processlist (full)</h2>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>PID</th><th>User</th><th>DB</th><th>Command</th><th>Time</th><th>State</th><th>Query</th><th>History</th></tr>
+            </thead>
+            <tbody id="psBody"></tbody>
           </table>
         </div>
       </section>
@@ -127,6 +164,37 @@
             </thead>
             <tbody id="eventsBody"></tbody>
           </table>
+        </div>
+        <div class="toolbar" style="margin-top:.75rem">
+          <label>Last N</label>
+          <input id="lastEventsN" class="input" type="number" min="1" max="500" value="10" />
+          <label>Top users</label>
+          <input id="topUsersN" class="input" type="number" min="1" max="100" value="10" />
+          <button id="applyEventViewsBtn" class="btn-quiet">Apply views</button>
+        </div>
+        <div class="live-chart-grid" style="margin-top:.5rem">
+          <section class="mini-card">
+            <h3>Last N events</h3>
+            <div class="table-wrap stable-table-wrap wide-table-wrap">
+              <table class="mini-table compact-table">
+                <thead>
+                  <tr><th>TS</th><th>TYPE</th><th>USER</th><th>DB</th></tr>
+                </thead>
+                <tbody id="lastEventsBody"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="mini-card">
+            <h3>Top users by events</h3>
+            <div class="table-wrap stable-table-wrap wide-table-wrap">
+              <table class="mini-table compact-table">
+                <thead>
+                  <tr><th>User</th><th>Events</th><th>Share</th></tr>
+                </thead>
+                <tbody id="topUsersBody"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </section>
 
