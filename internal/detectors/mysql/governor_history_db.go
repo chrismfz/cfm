@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const historyRetentionDaysDefault = 30
+const (
+	historyRetentionDaysDefault = 30
+	historyTableName            = "mysql.cfm_mysql_governor_history"
+)
 
 type GovernorHistoryEvent struct {
 	ID        int64          `json:"id"`
@@ -43,8 +46,8 @@ func (g *Governor) ensureHistoryTable(ctx context.Context) error {
 	if g == nil || g.db == nil {
 		return nil
 	}
-	_, err := g.db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS cfm_mysql_governor_history (
+	_, err := g.db.ExecContext(ctx, fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   ts_unix BIGINT NOT NULL,
   event_type VARCHAR(64) NOT NULL,
@@ -65,7 +68,7 @@ CREATE TABLE IF NOT EXISTS cfm_mysql_governor_history (
   KEY idx_cfm_mysql_gov_hist_type_ts (event_type, ts_unix),
   KEY idx_cfm_mysql_gov_hist_user_ts (user_name, ts_unix),
   KEY idx_cfm_mysql_gov_hist_db_ts (db_name, ts_unix)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, historyTableName))
 	return err
 }
 
@@ -84,10 +87,11 @@ func (g *Governor) appendHistoryEvent(ev GovernorHistoryEvent) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = g.db.ExecContext(ctx, `
-INSERT INTO cfm_mysql_governor_history
+	_, _ = g.db.ExecContext(ctx, fmt.Sprintf(`
+INSERT INTO %s
 (ts_unix, event_type, user_name, db_name, action, reason, result, pid, runtime_ms, unblocked, conn_pct, total_conn, max_conn, payload_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		historyTableName),
 		ev.TsUnix, ev.EventType, ev.User, ev.DB, ev.Action, ev.Reason, ev.Result,
 		ev.PID, ev.RuntimeMs, ev.Unblocked, ev.ConnPct, ev.TotalConn, ev.MaxConn, payloadText)
 }
@@ -99,8 +103,8 @@ func (g *Governor) QueryHistoryEvents(user, dbName, eventType string, limit int)
 	if limit <= 0 || limit > 2000 {
 		limit = 200
 	}
-	q := `SELECT id, ts_unix, event_type, user_name, db_name, action, reason, result, pid, runtime_ms, unblocked, conn_pct, total_conn, max_conn, payload_json
-FROM cfm_mysql_governor_history WHERE 1=1`
+	q := fmt.Sprintf(`SELECT id, ts_unix, event_type, user_name, db_name, action, reason, result, pid, runtime_ms, unblocked, conn_pct, total_conn, max_conn, payload_json
+FROM %s WHERE 1=1`, historyTableName)
 	args := make([]any, 0, 4)
 	if user != "" {
 		q += " AND user_name = ?"
@@ -156,11 +160,11 @@ func (g *Governor) SummarizeHistory(hours int) (GovernorHistorySummary, error) {
 	res.FromUnix = from.Unix()
 	res.ToUnix = to.Unix()
 
-	rows, err := g.db.Query(`
+	rows, err := g.db.Query(fmt.Sprintf(`
 SELECT event_type, action, COUNT(*)
-FROM cfm_mysql_governor_history
+FROM %s
 WHERE ts_unix BETWEEN ? AND ?
-GROUP BY event_type, action`, res.FromUnix, res.ToUnix)
+GROUP BY event_type, action`, historyTableName), res.FromUnix, res.ToUnix)
 	if err != nil {
 		return res, err
 	}
@@ -196,7 +200,7 @@ func (g *Governor) PruneHistory(days int) (int64, error) {
 		days = historyRetentionDaysDefault
 	}
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
-	res, err := g.db.Exec(`DELETE FROM cfm_mysql_governor_history WHERE ts_unix < ?`, cutoff)
+	res, err := g.db.Exec(fmt.Sprintf("DELETE FROM %s WHERE ts_unix < ?", historyTableName), cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -208,7 +212,7 @@ func (g *Governor) TruncateHistory() (int64, error) {
 	if g == nil || g.db == nil {
 		return 0, nil
 	}
-	res, err := g.db.Exec(`DELETE FROM cfm_mysql_governor_history`)
+	res, err := g.db.Exec(fmt.Sprintf("DELETE FROM %s", historyTableName))
 	if err != nil {
 		return 0, err
 	}
