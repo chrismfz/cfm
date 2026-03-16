@@ -539,6 +539,31 @@ func fetchGovernorJSON(baseURL, path string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func postGovernorJSON(baseURL, path string, out any) error {
+	target := strings.TrimRight(baseURL, "/") + path
+	u, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("mysqltop: POST %s failed: HTTP %d", u.String(), resp.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 func runMySQLHistoryEvents(baseURL string, args []string) error {
 	user := ""
 	db := ""
@@ -621,14 +646,10 @@ func runMySQLHistoryPrune(baseURL string, args []string) error {
 			days = n
 		}
 	}
-	url := fmt.Sprintf("%s/api/v1/mysql/history/prune?days=%d", strings.TrimRight(baseURL, "/"), days)
-	resp, err := http.Post(url, "application/json", nil)
-	if err != nil {
+	var out map[string]any
+	if err := postGovernorJSON(baseURL, fmt.Sprintf("/api/v1/mysql/history/prune?days=%d", days), &out); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
 	fmt.Printf("mysql history pruned days=%d rows_deleted=%v\n", days, out["rows_deleted"])
 	return nil
 }
@@ -643,14 +664,10 @@ func runMySQLHistoryTruncate(baseURL string, args []string) error {
 	if !confirm {
 		return fmt.Errorf("refusing to truncate without --yes")
 	}
-	url := fmt.Sprintf("%s/api/v1/mysql/history/truncate?confirm=yes", strings.TrimRight(baseURL, "/"))
-	resp, err := http.Post(url, "application/json", nil)
-	if err != nil {
+	var out map[string]any
+	if err := postGovernorJSON(baseURL, "/api/v1/mysql/history/truncate?confirm=yes", &out); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
 	fmt.Printf("mysql history truncated rows_deleted=%v\n", out["rows_deleted"])
 	return nil
 }

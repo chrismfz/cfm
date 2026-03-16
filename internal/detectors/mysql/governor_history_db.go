@@ -122,7 +122,11 @@ FROM cfm_mysql_governor_history WHERE 1=1`
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]GovernorHistoryEvent, 0, limit)
+	capHint := limit
+	if capHint > 256 {
+		capHint = 256
+	}
+	out := make([]GovernorHistoryEvent, 0, capHint)
 	for rows.Next() {
 		var ev GovernorHistoryEvent
 		var payload sql.NullString
