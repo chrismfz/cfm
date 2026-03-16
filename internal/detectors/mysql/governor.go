@@ -267,6 +267,10 @@ func NewGovernor(cfg GovernorConfig) (*Governor, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	g := &Governor{cfg: cfg, db: db}
+	ctxInit, cancelInit := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = g.ensureHistoryTable(ctxInit)
+	cancelInit()
+	g.autoPruneHistory()
 	g.perfPollEvery = cfg.PollEvery * 3
 	if g.perfPollEvery < perfFetchMinInterval {
 		g.perfPollEvery = perfFetchMinInterval
@@ -740,6 +744,15 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 				state.TotalConn, state.MaxConn, state.ConnPct, top),
 			Severity: "critical",
 		})
+		g.appendHistoryEvent(GovernorHistoryEvent{
+			TsUnix:    now.Unix(),
+			EventType: "conn_pressure",
+			Action:    "critical",
+			Reason:    fmt.Sprintf("CRITICAL %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+			ConnPct:   state.ConnPct,
+			TotalConn: state.TotalConn,
+			MaxConn:   state.MaxConn,
+		})
 		return
 	}
 
@@ -754,6 +767,15 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 			Reason: fmt.Sprintf("WARNING %d/%d (%.0f%%)",
 				state.TotalConn, state.MaxConn, state.ConnPct),
 			Severity: "warn",
+		})
+		g.appendHistoryEvent(GovernorHistoryEvent{
+			TsUnix:    now.Unix(),
+			EventType: "conn_pressure",
+			Action:    "warn",
+			Reason:    fmt.Sprintf("WARNING %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+			ConnPct:   state.ConnPct,
+			TotalConn: state.TotalConn,
+			MaxConn:   state.MaxConn,
 		})
 	}
 }
@@ -802,6 +824,24 @@ func (g *Governor) appendKills(kr []KillRecord) {
 	g.killRing = append(kr, g.killRing...)
 	if len(g.killRing) > 100 {
 		g.killRing = g.killRing[:100]
+	}
+	for _, k := range kr {
+		g.appendHistoryEvent(GovernorHistoryEvent{
+			TsUnix:    k.Ts.Unix(),
+			EventType: "kill_action",
+			User:      k.User,
+			DB:        k.DB,
+			Action:    k.Action,
+			Reason:    k.Reason,
+			Result:    k.Result,
+			PID:       k.PID,
+			RuntimeMs: k.Runtime.Milliseconds(),
+			Unblocked: k.Unblocked,
+			Payload: map[string]any{
+				"state": k.State,
+				"query": k.Query,
+			},
+		})
 	}
 }
 
