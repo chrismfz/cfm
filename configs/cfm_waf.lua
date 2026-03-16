@@ -672,6 +672,58 @@ local function detect_wp_login_probe(uri, method, headers)
   return nil
 end
 
+-- Narrow carve-out for known-legit WordPress XML-RPC traffic.
+-- Goal: avoid challenging Jetpack while keeping generic XML-RPC protection.
+local function is_known_legit_xmlrpc(uri, args, headers, body)
+  uri = lower(uri or "")
+  args = normalize(cap(args or "", CFG.max_scan_len))
+  body = normalize(cap(body or "", CFG.max_scan_len))
+  headers = headers or {}
+
+  if not has(uri, "/xmlrpc.php") then
+    return false
+  end
+
+  local ua = lower(headers["user-agent"] or headers["User-Agent"] or "")
+
+  -- Jetpack commonly identifies itself via query/body markers.
+  if has(args, "for=jetpack") then
+    return true
+  end
+  if has(body, "jetpack") then
+    return true
+  end
+  if has(ua, "jetpack") or has(ua, "wordpress.com") then
+    return true
+  end
+
+  return false
+end
+
+-- API-style endpoints should not be judged by browser-only heuristics
+-- like Referer/Accept quality. Keep UA quality scoring, but suppress
+-- browser-behavior penalties on narrow machine endpoints only.
+local function is_machine_style_endpoint(uri)
+  local u = lower(uri or "")
+  if u == "" then return false end
+
+  -- Magento token endpoints
+  if has(u, "/rest/v1/integration/admin/token") then return true end
+  if has(u, "/rest/v1/integration/customer/token") then return true end
+
+  -- Generic machine endpoints: token / webhook / callback / oauth
+  if has(u, "/webhook")  then return true end
+  if has(u, "/callback") then return true end
+  if has(u, "/oauth")    then return true end
+  if has(u, "/rest/v1/integration/admin/token") then return true end
+  if has(u, "/rest/v1/integration/customer/token") then return true end
+  if has(u, "/callback") then return true end
+  if has(u, "/auth/token") then return true end
+
+  return false
+end
+
+
 local function detect_xmlrpc_probe(uri, method, body)
   uri = lower(uri or "")
   method = lower(method or "get")
@@ -679,6 +731,10 @@ local function detect_xmlrpc_probe(uri, method, body)
 
   if not has(uri, "/xmlrpc.php") then return nil end
   if method ~= "post" then return nil end
+
+  if is_known_legit_xmlrpc(uri, "", nil, body) then
+    return nil
+  end
 
   if has(body, "system.multicall") then
     return "AUTH_WP_XMLRPC_MULTICALL"
@@ -691,13 +747,17 @@ local function detect_xmlrpc_probe(uri, method, body)
   return nil
 end
 
-local function detect_xmlrpc_post_burst(ip, uri, method, shdict)
+local function detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
   if not shdict or not ip or ip == "" then return nil end
 
   uri = lower(uri or "")
   method = lower(method or "get")
 
   if method ~= "post" then return nil end
+  if is_known_legit_xmlrpc(uri, args, headers, body) then
+    return nil
+  end
+
   if not has(uri, "/xmlrpc.php") then return nil end
 
   local now = ngx.now()
@@ -946,6 +1006,8 @@ local function detect_bad_ua_scored(headers, uri, method)
   local tags  = {}
   local ul = lower(uri or "")
   local m = lower(method or "")
+  local machine_style = is_machine_style_endpoint(ul)
+  local ref = lower(headers["referer"] or headers["Referer"] or "")
 
   -- Signal 1: UA quality (+2 for empty or known generic lib)
   if ua == "" or ual:match("^%s*$") then
@@ -981,10 +1043,40 @@ local function detect_bad_ua_scored(headers, uri, method)
   if has(ul, "/configuration.php") then uri_sensitive = true end
   if has(ul, "/settings.php")      then uri_sensitive = true end
 
+  -- Exclude ordinary password/account/reset routes from credential-artifact scoring.
+  local is_normal_password_route = false
+  if has(ul, "/my-account/lost-password") then is_normal_password_route = true end
+  if has(ul, "/lost-password")            then is_normal_password_route = true end
+  if has(ul, "/reset-password")           then is_normal_password_route = true end
+  if has(ul, "/wp-login.php?action=lostpassword") then is_normal_password_route = true end
+
+  local cred_artifact = false
+
   if ul:match("%.sql$") or ul:match("%.sql%.gz$") or ul:match("%.sql%.zip$") then
     uri_backup = true
   end
-  if ul:match("password") or ul:match("credential") or ul:match("passwd") then
+
+  -- Match filename/artifact style targets, not every app route containing "password".
+  if not is_normal_password_route then
+    if ul == "passwd" or has(ul, "/passwd") then
+      cred_artifact = true
+    end
+    if ul:match("passwords?%.txt$") or has(ul, "/passwords.txt") or has(ul, "/password.txt") then
+      cred_artifact = true
+    end
+    if ul:match("credentials?%.txt$") or has(ul, "/credential.txt") or has(ul, "/credentials.txt") then
+      cred_artifact = true
+    end
+    if ul:match("credentials?%.json$") or has(ul, "/credential.json") or has(ul, "/credentials.json") then
+      cred_artifact = true
+    end
+    if ul:match("secrets?%.env$") or has(ul, "/secret.env") or has(ul, "/secrets.env") then
+      cred_artifact = true
+    end
+  end
+
+
+  if cred_artifact then
     uri_backup = true
   end
   local in_backup_path = has(ul, "/backup") or has(ul, "/bak/") or has(ul, "/old/")
@@ -998,18 +1090,23 @@ local function detect_bad_ua_scored(headers, uri, method)
 
   -- Signal 3: no Accept header (+1)
   -- Applied only on higher-risk request context to avoid FP on benign crawlers.
+  -- Suppress for machine-style endpoints where browser header expectations do not apply.
   local accept = headers["accept"] or headers["Accept"] or ""
-  if accept == "" and strict_header_scoring then
+  if accept == "" and strict_header_scoring and not machine_style then
     score = score + 1; tags[#tags+1] = "NO_ACCEPT"
   end
 
   -- Signal 4: no Referer on a non-trivial URI (+1)
   -- Skip scoring on root, common entry points, and static assets
+  -- Suppress for machine-style endpoints where Referer is often absent by design.
   local is_entry = (ul == "/" or ul == ""
+    or ul:match("%.map$")
+    or ul:match("%.json$")
+    or ul:match("%.xml$")
     or ul:match("%.css$") or ul:match("%.js$")  or ul:match("%.ico$")
     or ul:match("%.png$") or ul:match("%.jpg$") or ul:match("%.gif$")
     or ul:match("%.svg$") or ul:match("%.woff"))
-  if strict_header_scoring and not is_entry and ref == "" then
+  if strict_header_scoring and not machine_style and not is_entry and ref == "" then
     score = score + 1; tags[#tags+1] = "NO_REFERER"
   end
 
@@ -1033,7 +1130,7 @@ local function detect_bad_ua_scored(headers, uri, method)
     if ul:match("%.sql$") or ul:match("%.sql%.gz$") or ul:match("%.sql%.zip$") then
       tags[#tags+1] = "URI_SQL_DUMP"
     end
-    if ul:match("password") or ul:match("credential") or ul:match("passwd") then
+    if cred_artifact then
       tags[#tags+1] = "URI_CRED_FILE"
     end
     if in_backup_path and (ul:match("%.zip$") or ul:match("%.tar$") or ul:match("%.gz$")
@@ -1747,9 +1844,14 @@ function _M.check(ctx)
     end
   end
 
+
   -- ── 24) XML-RPC strong body signatures ───────────────────────────────────
   do
-    local xtag = detect_xmlrpc_probe(uri, method, body)
+    local xtag = nil
+    if not is_known_legit_xmlrpc(uri, args, headers, body) then
+      xtag = detect_xmlrpc_probe(uri, method, body)
+    end
+
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
       local mode = rule_mode(CFG.rule_xmlrpc_multicall, "challenge")
       if mode ~= "disabled" then
@@ -1765,11 +1867,12 @@ function _M.check(ctx)
     end
   end
 
+
   -- ── 25) Generic XML-RPC POST burst ───────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
-      local tag = detect_xmlrpc_post_burst(ip, uri, method, shdict)
+      local tag = detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
@@ -1784,12 +1887,17 @@ function _M.check(ctx)
       local peer = ctx.peer or ""
 
       if not (peer ~= "" and ip ~= "" and ip == peer) then
-        local tag = detect_auth_burst(ip, uri, method, shdict)
+        local tag = nil
+        if not is_known_legit_xmlrpc(uri, args, headers, body) then
+          tag = detect_auth_burst(ip, uri, method, shdict)
+        end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
           return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
         end
       end
+
+
     end
   end
 
