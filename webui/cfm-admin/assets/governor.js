@@ -1,4 +1,7 @@
 (() => {
+  const appRoot = document.getElementById('app');
+  appRoot?.removeAttribute('v-cloak');
+
   const el = {
     autoState: document.getElementById('autoState'),
     refreshBtn: document.getElementById('refreshBtn'),
@@ -98,6 +101,49 @@
       const y = h - (v / max) * (h - 6) - 3;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     }).join(' ');
+  }
+
+
+  function normalizeState(raw) {
+    if (!raw || typeof raw !== 'object') {
+      return { conn: {}, per_user: [], running: [], mode: '-', flavor: '-', ts: '-' };
+    }
+    if (raw.conn && (Array.isArray(raw.per_user) || Array.isArray(raw.running))) {
+      return raw;
+    }
+    const conn = {
+      total: Number(raw.TotalConn ?? raw.total ?? 0),
+      max: Number(raw.MaxConn ?? raw.max ?? 0),
+      active: Number(raw.ActiveConn ?? raw.active ?? 0),
+      sleeping: Number(raw.SleepConn ?? raw.sleeping ?? 0),
+      locked: Number(raw.LockedConn ?? raw.locked ?? 0),
+      pct: Number(raw.ConnPct ?? raw.conn_pct ?? 0),
+    };
+    const perUserRaw = Array.isArray(raw.PerUser) ? raw.PerUser : (Array.isArray(raw.per_user) ? raw.per_user : []);
+    const runningRaw = Array.isArray(raw.Running) ? raw.Running : (Array.isArray(raw.running) ? raw.running : []);
+
+    return {
+      ts: raw.ts || raw.Ts || '-',
+      mode: raw.mode || raw.Mode || '-',
+      flavor: raw.flavor || raw.Flavor || '-',
+      conn,
+      per_user: perUserRaw.map((u) => ({
+        user: u.user ?? u.User ?? '',
+        total: Number(u.total ?? u.Total ?? 0),
+        active: Number(u.active ?? u.Active ?? 0),
+        sleeping: Number(u.sleeping ?? u.Sleeping ?? 0),
+        locked: Number(u.locked ?? u.Locked ?? 0),
+        max_idle_sec: Number(u.max_idle_sec ?? u.MaxSleepSec ?? 0),
+      })),
+      running: runningRaw.map((r) => ({
+        id: Number(r.id ?? r.ID ?? 0),
+        user: r.user ?? r.User ?? '',
+        db: r.db ?? r.DB ?? '',
+        time_sec: Number(r.time_sec ?? r.TimeSec ?? 0),
+        state: r.state ?? r.State ?? '',
+        info: r.info ?? r.Info ?? '',
+      })),
+    };
   }
 
   function renderConnection(state) {
@@ -225,7 +271,7 @@
       api('/v1/mysql/cpu'),
       api('/v1/mysql/history?window=1h&top=40'),
     ]);
-    renderConnection(state);
+    renderConnection(normalizeState(state));
     renderCPU(cpu);
     renderHist(hist);
   }
@@ -248,12 +294,21 @@
 
   async function refresh() {
     showMsg('');
-    try {
-      await Promise.all([loadLive(), loadSummary(), loadEvents()]);
-    } catch (err) {
-      console.error('[cfm-admin governor] refresh failed', err);
-      showMsg(`Error: ${err?.message || err}`);
-    }
+    const checks = await Promise.allSettled([loadLive(), loadSummary(), loadEvents()]);
+    const failed = checks
+      .map((res, idx) => ({
+        res,
+        label: idx === 0 ? 'live' : idx === 1 ? 'summary' : 'events',
+      }))
+      .filter((x) => x.res.status === 'rejected');
+
+    if (!failed.length) return;
+
+    failed.forEach((x) => {
+      console.error(`[cfm-admin governor] refresh failed (${x.label})`, x.res.reason);
+    });
+    const msg = failed.map((x) => `${x.label}: ${x.res.reason?.message || x.res.reason || 'failed'}`).join(' | ');
+    showMsg(`Partial refresh error: ${msg}`);
   }
 
   function startAuto() {
