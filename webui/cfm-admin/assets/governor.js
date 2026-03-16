@@ -32,6 +32,11 @@
     summaryHours: document.getElementById('summaryHours'),
     summaryText: document.getElementById('summaryText'),
     eventsBody: document.getElementById('eventsBody'),
+    lastEventsN: document.getElementById('lastEventsN'),
+    topUsersN: document.getElementById('topUsersN'),
+    applyEventViewsBtn: document.getElementById('applyEventViewsBtn'),
+    lastEventsBody: document.getElementById('lastEventsBody'),
+    topUsersBody: document.getElementById('topUsersBody'),
     pruneDays: document.getElementById('pruneDays'),
     actionMsg: document.getElementById('actionMsg'),
   };
@@ -43,6 +48,7 @@
     cpuSeries: [],
     qrySeries: [],
     maxPoints: 80,
+    eventRows: [],
   };
 
   function showMsg(msg) {
@@ -331,11 +337,40 @@
     });
   }
 
+  function renderEventViews(rows) {
+    const allRows = Array.isArray(rows) ? rows : [];
+    const lastN = Math.max(1, Math.min(500, Number(el.lastEventsN?.value) || 10));
+    const topN = Math.max(1, Math.min(100, Number(el.topUsersN?.value) || 10));
+
+    const lastRows = allRows.slice(0, lastN);
+    el.lastEventsBody.innerHTML = lastRows.length ? lastRows.map((r) => `
+      <tr>
+        <td>${esc(r.ts_unix)}</td>
+        <td>${esc(r.event_type)}</td>
+        <td>${esc(r.user || '-')}</td>
+        <td>${esc(r.db || '-')}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="muted">No events.</td></tr>';
+
+    const counts = new Map();
+    allRows.forEach((r) => {
+      const user = String(r?.user || '').trim() || '(unknown)';
+      counts.set(user, (counts.get(user) || 0) + 1);
+    });
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN);
+    el.topUsersBody.innerHTML = ranked.length ? ranked.map(([user, n]) => {
+      const share = allRows.length ? ((n / allRows.length) * 100).toFixed(1) : '0.0';
+      return `<tr><td>${esc(user)}</td><td>${esc(n)}</td><td>${esc(share)}%</td></tr>`;
+    }).join('') : '<tr><td colspan="3" class="muted">No users.</td></tr>';
+  }
+
   function renderEvents(rows) {
     if (!Array.isArray(rows) || !rows.length) {
+      st.eventRows = [];
       el.eventsBody.innerHTML = '<tr><td colspan="9" class="muted">No events found.</td></tr>';
+      renderEventViews([]);
       return;
     }
+    st.eventRows = rows;
     el.eventsBody.innerHTML = rows.map((r) => `
       <tr>
         <td>${esc(r.ts_unix)}</td>
@@ -348,6 +383,7 @@
         <td>${esc(r.runtime_ms)}</td>
         <td title="${esc(r.reason)}" class="truncate">${esc(r.reason)}</td>
       </tr>`).join('');
+    renderEventViews(rows);
   }
 
   async function loadEvents() {
@@ -446,6 +482,9 @@
   el.refreshBtn?.addEventListener('click', refresh);
   el.toggleAutoBtn?.addEventListener('click', toggleAuto);
   el.loadEventsBtn?.addEventListener('click', () => loadEvents().catch((err) => showMsg(`Error: ${err?.message || err}`)));
+  el.applyEventViewsBtn?.addEventListener('click', () => renderEventViews(st.eventRows));
+  el.lastEventsN?.addEventListener('change', () => renderEventViews(st.eventRows));
+  el.topUsersN?.addEventListener('change', () => renderEventViews(st.eventRows));
   el.loadSummaryBtn?.addEventListener('click', () => loadSummary().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.pruneBtn?.addEventListener('click', () => prune().catch((err) => showMsg(`Error: ${err?.message || err}`)));
   el.truncateBtn?.addEventListener('click', () => truncate().catch((err) => showMsg(`Error: ${err?.message || err}`)));

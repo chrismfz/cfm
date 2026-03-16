@@ -165,6 +165,37 @@
             <tbody id="eventsBody"></tbody>
           </table>
         </div>
+        <div class="toolbar" style="margin-top:.75rem">
+          <label>Last N</label>
+          <input id="lastEventsN" class="input" type="number" min="1" max="500" value="10" />
+          <label>Top users</label>
+          <input id="topUsersN" class="input" type="number" min="1" max="100" value="10" />
+          <button id="applyEventViewsBtn" class="btn-quiet">Apply views</button>
+        </div>
+        <div class="live-chart-grid" style="margin-top:.5rem">
+          <section class="mini-card">
+            <h3>Last N events</h3>
+            <div class="table-wrap stable-table-wrap wide-table-wrap">
+              <table class="mini-table compact-table">
+                <thead>
+                  <tr><th>TS</th><th>TYPE</th><th>USER</th><th>DB</th></tr>
+                </thead>
+                <tbody id="lastEventsBody"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="mini-card">
+            <h3>Top users by events</h3>
+            <div class="table-wrap stable-table-wrap wide-table-wrap">
+              <table class="mini-table compact-table">
+                <thead>
+                  <tr><th>User</th><th>Events</th><th>Share</th></tr>
+                </thead>
+                <tbody id="topUsersBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
       </section>
 
       <section class="card wide">
