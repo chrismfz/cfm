@@ -711,14 +711,23 @@ local function is_machine_style_endpoint(uri)
   if has(u, "/rest/v1/integration/admin/token") then return true end
   if has(u, "/rest/v1/integration/customer/token") then return true end
 
-  -- Generic machine endpoints: token / webhook / callback / oauth
-  if has(u, "/webhook")  then return true end
-  if has(u, "/callback") then return true end
-  if has(u, "/oauth")    then return true end
-  if has(u, "/rest/v1/integration/admin/token") then return true end
-  if has(u, "/rest/v1/integration/customer/token") then return true end
-  if has(u, "/callback") then return true end
+  -- WooCommerce / WP API
+  if has(u, "/wp-json/wc/") then return true end
+  if has(u, "/wp-json/wc-") then return true end
+  if has(u, "/wp-json/wc_") then return true end
+
+  -- Known app-to-app/payment style routes seen in logs
+  if has(u, "/shop-api/") then return true end
+  if has(u, "/transaction-payment-created") then return true end
+  if has(u, "/payments_methods_endpoint") then return true end
+
+  -- Generic machine endpoints
+  if has(u, "/webhook")    then return true end
+  if has(u, "/callback")   then return true end
+  if has(u, "/oauth")      then return true end
   if has(u, "/auth/token") then return true end
+  if has(u, "/api")    then return true end
+
 
   return false
 end
