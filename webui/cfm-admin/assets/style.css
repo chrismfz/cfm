@@ -193,6 +193,15 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
   background: #081122;
 }
 
+.echart-box {
+  overflow: hidden;
+}
+
+.echart-box canvas {
+  border-radius: 8px;
+}
+
+
 .spark polyline {
   fill: none;
   stroke-width: 1.7;

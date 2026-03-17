@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -29,6 +30,15 @@ type wafTopValue struct {
 	Count int    `json:"count"`
 }
 
+type wafTopIPValue struct {
+	Key     string `json:"key"`
+	Count   int    `json:"count"`
+	PTR     string `json:"ptr,omitempty"`
+	Country string `json:"country,omitempty"`
+	ASN     uint   `json:"asn,omitempty"`
+	ASNName string `json:"asn_name,omitempty"`
+}
+
 type wafEngineSummary struct {
 	FromUnix      int64            `json:"from_unix"`
 	ToUnix        int64            `json:"to_unix"`
@@ -40,7 +50,7 @@ type wafEngineSummary struct {
 	TopRules      []wafTopValue    `json:"top_rules"`
 	TopRuleBases  []wafTopValue    `json:"top_rule_bases"`
 	TopHosts      []wafTopValue    `json:"top_hosts"`
-	TopIPs        []wafTopValue    `json:"top_ips"`
+	TopIPs        []wafTopIPValue  `json:"top_ips"`
 	Rows          []wafEngineEvent `json:"rows"`
 }
 
@@ -198,10 +208,48 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.TopRules = toSortedTop(ruleCount, topN)
 	res.TopRuleBases = toSortedTop(ruleBaseCount, topN)
 	res.TopHosts = toSortedTop(hostCount, topN)
-	res.TopIPs = toSortedTop(ipCount, topN)
+	res.TopIPs = toSortedTopIPs(ipCount, topN, enrichEnabled, e)
 	res.Rows = rows
 
 	writeJSON(w, http.StatusOK, res)
+}
+
+
+func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wafTopIPValue {
+	out := make([]wafTopIPValue, 0, len(m))
+	for k, v := range m {
+		ip := strings.TrimSpace(k)
+		if ip == "" {
+			continue
+		}
+		row := wafTopIPValue{Key: ip, Count: v}
+		if enrichEnabled && e != nil && e.enr != nil && net.ParseIP(ip) != nil {
+			geo := e.enr.Lookup(ip)
+			if geo.PTR != "" {
+				row.PTR = geo.PTR
+			}
+			if geo.Country != "" {
+				row.Country = geo.Country
+			}
+			if geo.ASN != 0 {
+				row.ASN = geo.ASN
+			}
+			if geo.ASNName != "" {
+				row.ASNName = geo.ASNName
+			}
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count == out[j].Count {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].Count > out[j].Count
+	})
+	if n <= 0 || len(out) <= n {
+		return out
+	}
+	return out[:n]
 }
 
 func toSortedTop(m map[string]int, n int) []wafTopValue {

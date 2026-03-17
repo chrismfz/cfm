@@ -344,7 +344,12 @@
             <div>
               <h3>Top source IPs</h3>
               <ul>
-                <li v-for="row in (wafSummary.top_ips || [])" :key="`ip-${row.key}`"><code>{{ row.key }}</code> — {{ row.count }}</li>
+                <li v-for="row in (wafSummary.top_ips || [])" :key="`ip-${row.key}`">
+                  <div><code>{{ row.key }}</code> — {{ row.count }}</div>
+                  <div class="muted" v-if="row.ptr || row.country || row.asn || row.asn_name">
+                    {{ row.ptr || '-' }} | {{ row.country || '-' }}{{ row.asn ? (' | AS' + row.asn) : '' }}{{ row.asn_name ? (' ' + row.asn_name) : '' }}
+                  </div>
+                </li>
               </ul>
             </div>
           </div>

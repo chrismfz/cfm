@@ -186,7 +186,7 @@ type Config struct {
 	ChallengeSubnetCap         int           // CHALLENGE_SUBNET_CAP
 	ChallengeSubnetSameHost    bool          // CHALLENGE_SUBNET_SAME_HOST
 
-	// Historical store (SQLite)
+	// Historical store (SQLite file; old JSONL file at same path is removed and recreated as SQLite)
 	HistoryEnabled       bool          // HISTORY_ENABLED
 	HistoryDBPath        string        // HISTORY_DB_PATH
 	HistoryRetentionDays int           // HISTORY_RETENTION_DAYS
@@ -429,3 +429,4 @@ func (c *Config) FillDefaults() {
 func (c Config) LongHorizon() time.Duration {
 	return time.Duration(c.LongFactor) * c.Window
 }
+

@@ -52,8 +52,17 @@
         vhostTopIPLimit: 25,
         vhostTopPathLimit: 25,
         drilldownTopN: 50,
+        vhostCharts: {
+          rps: null,
+          bot: null,
+          err: null,
+          score: null,
+          rt: null,
+        },
+        resizeHandler: null,
       };
     },
+
     computed: {
       shortDetail() {
         if (!this.drilldown) return null;
@@ -149,52 +158,6 @@
         if (!this.analyzeResult) return '';
         return JSON.stringify(this.analyzeResult, null, 2);
       },
-      rpsSeriesChart() {
-        const rows = this.activeVhostSeries;
-        const keys = ['r2xx', 'r4xx', 'r5xx'];
-        const maxY = Math.max(1, ...rows.flatMap((r) => keys.map((k) => Number(r[k] || 0))));
-        return {
-          maxY,
-          series: [
-            { key: 'r2xx', cls: 'line-cyan', points: this.sparkPoints(rows.map((r) => Number(r.r2xx || 0)), maxY) },
-            { key: 'r4xx', cls: 'line-yellow', points: this.sparkPoints(rows.map((r) => Number(r.r4xx || 0)), maxY) },
-            { key: 'r5xx', cls: 'line-red', points: this.sparkPoints(rows.map((r) => Number(r.r5xx || 0)), maxY) },
-          ],
-        };
-      },
-      botSeriesChart() {
-        const values = this.activeVhostSeries.map((r) => Number(r.bot || 0));
-        return {
-          maxY: 100,
-          points: this.sparkPoints(values, 100),
-          last: values.length ? values[values.length - 1] : 0,
-        };
-      },
-      errSeriesChart() {
-        const values = this.activeVhostSeries.map((r) => Number(r.err || 0));
-        return {
-          maxY: 100,
-          points: this.sparkPoints(values, 100),
-          last: values.length ? values[values.length - 1] : 0,
-        };
-      },
-      scoreSeriesChart() {
-        const values = this.activeVhostSeries.map((r) => Number(r.score || 0));
-        return {
-          maxY: 1,
-          points: this.sparkPoints(values, 1),
-          last: values.length ? values[values.length - 1] : 0,
-        };
-      },
-      rtSeriesChart() {
-        const values = this.activeVhostSeries.map((r) => Number(r.rt || 0));
-        const maxY = Math.max(100, ...values);
-        return {
-          maxY,
-          points: this.sparkPoints(values, maxY),
-          last: values.length ? values[values.length - 1] : 0,
-        };
-      },
 
       isOverviewPage() {
         return this.pageMode === 'overview';
@@ -230,7 +193,6 @@
         return byHost;
       },
       suspiciousAndChallenged() {
-
         const byHost = {};
 
         for (const row of this.suspicious) {
@@ -272,7 +234,183 @@
         });
       },
     },
+
     methods: {
+      chartTextColor() {
+        return '#dbe7f7';
+      },
+      chartAxisColor() {
+        return '#7f93ad';
+      },
+      chartSplitColor() {
+        return 'rgba(159,176,195,0.18)';
+      },
+      vhostChartTimes() {
+        return this.activeVhostSeries.map((p) => {
+          const d = new Date(Number(p.at || 0));
+          return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
+        });
+      },
+      baseLineOption({ yName = '', min = null, max = null } = {}) {
+        return {
+          backgroundColor: 'transparent',
+          animation: true,
+          tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+          },
+          grid: { left: 52, right: 18, top: 34, bottom: 28 },
+          xAxis: {
+            type: 'category',
+            boundaryGap: false,
+            data: this.vhostChartTimes(),
+            axisLine: { lineStyle: { color: this.chartAxisColor() } },
+            axisLabel: { color: this.chartAxisColor(), hideOverlap: true },
+          },
+          yAxis: {
+            type: 'value',
+            name: yName,
+            min,
+            max,
+            axisLine: { lineStyle: { color: this.chartAxisColor() } },
+            axisLabel: { color: this.chartAxisColor() },
+            splitLine: { lineStyle: { color: this.chartSplitColor() } },
+            nameTextStyle: { color: this.chartAxisColor() },
+          },
+        };
+      },
+      ensureVhostCharts() {
+        if (!window.echarts) return;
+
+        const initOne = (key, elId) => {
+          const el = document.getElementById(elId);
+          if (!el) return null;
+          if (this.vhostCharts[key]) return this.vhostCharts[key];
+          this.vhostCharts[key] = window.echarts.init(el);
+          return this.vhostCharts[key];
+        };
+
+        initOne('rps', 'vhost-rps-chart');
+        initOne('bot', 'vhost-bot-chart');
+        initOne('err', 'vhost-err-chart');
+        initOne('score', 'vhost-score-chart');
+        initOne('rt', 'vhost-rt-chart');
+      },
+      disposeVhostCharts() {
+        for (const key of Object.keys(this.vhostCharts || {})) {
+          if (this.vhostCharts[key]) {
+            this.vhostCharts[key].dispose();
+            this.vhostCharts[key] = null;
+          }
+        }
+      },
+      resizeVhostCharts() {
+        for (const key of Object.keys(this.vhostCharts || {})) {
+          this.vhostCharts[key]?.resize();
+        }
+      },
+      renderVhostCharts() {
+        if (!window.echarts || !Array.isArray(this.activeVhostSeries) || this.activeVhostSeries.length < 2) {
+          return;
+        }
+
+        this.ensureVhostCharts();
+
+        const times = this.vhostChartTimes();
+        const rows = this.activeVhostSeries;
+
+        const r2xx = rows.map((r) => Number(r.r2xx || 0));
+        const r4xx = rows.map((r) => Number(r.r4xx || 0));
+        const r5xx = rows.map((r) => Number(r.r5xx || 0));
+        const bot = rows.map((r) => Number(r.bot || 0));
+        const err = rows.map((r) => Number(r.err || 0));
+        const score = rows.map((r) => Number(r.score || 0));
+        const rt = rows.map((r) => Number(r.rt || 0));
+
+        const commonXAxis = {
+          type: 'category',
+          boundaryGap: false,
+          data: times,
+          axisLine: { lineStyle: { color: this.chartAxisColor() } },
+          axisLabel: { color: this.chartAxisColor(), hideOverlap: true },
+        };
+
+        this.vhostCharts.rps?.setOption({
+          ...this.baseLineOption({ yName: 'RPS', min: 0 }),
+          xAxis: commonXAxis,
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+            data: ['2xx', '4xx', '5xx'],
+          },
+          series: [
+            { name: '2xx', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#2ec9d7', width: 2 }, data: r2xx },
+            { name: '4xx', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#f1d64a', width: 2 }, data: r4xx },
+            { name: '5xx', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#db6178', width: 2 }, data: r5xx },
+          ],
+        }, true);
+
+        this.vhostCharts.bot?.setOption({
+          ...this.baseLineOption({ yName: '%', min: 0, max: 100 }),
+          xAxis: commonXAxis,
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+            data: ['Bot %'],
+          },
+          series: [
+            { name: 'Bot %', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#2ec9d7', width: 2 }, data: bot },
+          ],
+        }, true);
+
+        this.vhostCharts.err?.setOption({
+          ...this.baseLineOption({ yName: '%', min: 0, max: 100 }),
+          xAxis: commonXAxis,
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+            data: ['Error %'],
+          },
+          series: [
+            { name: 'Error %', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#f1d64a', width: 2 }, data: err },
+          ],
+        }, true);
+
+        this.vhostCharts.score?.setOption({
+          ...this.baseLineOption({ yName: 'Score', min: 0, max: 1 }),
+          xAxis: commonXAxis,
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+            data: ['Threat score'],
+          },
+          series: [
+            { name: 'Threat score', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#87d45b', width: 2 }, data: score },
+          ],
+        }, true);
+
+        this.vhostCharts.rt?.setOption({
+          ...this.baseLineOption({ yName: 'ms', min: 0 }),
+          xAxis: commonXAxis,
+          legend: {
+            top: 6,
+            right: 10,
+            textStyle: { color: this.chartTextColor() },
+            data: ['Response ms'],
+          },
+          series: [
+            { name: 'Response ms', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#db62e6', width: 2 }, data: rt },
+          ],
+        }, true);
+
+        this.$nextTick(() => this.resizeVhostCharts());
+      },
 
       shouldShow(section) {
         const groups = {
@@ -299,21 +437,15 @@
         const h = String(host || '').trim();
         if (!h) return;
         const url = this.vhostLiveURL(h);
-        if (newTab) {
-          window.open(url, '_blank', 'noopener');
-        } else {
-          window.location.href = url;
-        }
+        if (newTab) window.open(url, '_blank', 'noopener');
+        else window.location.href = url;
       },
       openForensics(host, newTab = true) {
         const h = String(host || '').trim();
         if (!h) return;
         const url = this.forensicsURL(h);
-        if (newTab) {
-          window.open(url, '_blank', 'noopener');
-        } else {
-          window.location.href = url;
-        }
+        if (newTab) window.open(url, '_blank', 'noopener');
+        else window.location.href = url;
       },
       syncVhostQuery(host) {
         if (!this.isVhostPage) return;
@@ -353,17 +485,6 @@
         if (Number.isNaN(d.getTime())) return '-';
         return d.toISOString().replace('T', ' ').slice(0, 19);
       },
-      sparkPoints(values, maxY = 1) {
-        const width = 520;
-        const height = 140;
-        if (!Array.isArray(values) || values.length < 2) return '';
-        const safeMax = Math.max(0.0001, Number(maxY) || 1);
-        return values.map((raw, idx) => {
-          const x = (idx / (values.length - 1)) * width;
-          const y = height - (Math.max(0, Number(raw) || 0) / safeMax) * height;
-          return `${x.toFixed(2)},${Math.min(height, Math.max(0, y)).toFixed(2)}`;
-        }).join(' ');
-      },
       ensureHostSeries(host) {
         if (!host) return;
         if (!this.vhostSeriesByHost[host]) this.vhostSeriesByHost[host] = [];
@@ -376,6 +497,7 @@
         const err = Number.isFinite(Number(row.err_ratio)) ? Number(row.err_ratio) * 100 : Number(short.err_ratio || 0) * 100;
         const bot = Number.isFinite(Number(row.bot_ratio)) ? Number(row.bot_ratio) * 100 : Number(short.bot_ratio || 0) * 100;
         const rt = Number(short.proc_avg_sec || 0) * 1000;
+
         const point = {
           at: Date.now(),
           r2xx: Number(row.rps_2xx || 0),
@@ -386,6 +508,7 @@
           score: Number(row.score ?? short.short_score ?? 0),
           rt,
         };
+
         const list = this.vhostSeriesByHost[host];
         list.push(point);
         if (list.length > this.vhostSeriesMaxPoints) {
@@ -454,7 +577,6 @@
             cache: 'no-store',
           });
         } catch (_) {
-          // best-effort only
         }
         window.location.href = '/cfm-admin/?logout=1';
       },
@@ -479,7 +601,6 @@
             await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui' });
             this.actionMsg = `Challenge enabled for ${host}`;
           }
-          // Only re-fetch challenge state — no need to reload all 6 endpoints
           const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
           this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
         } catch (err) {
@@ -615,7 +736,6 @@
         }
       },
 
-
       formatTs(tsUnix) {
         if (!tsUnix) return '-';
         const d = new Date(Number(tsUnix) * 1000);
@@ -695,7 +815,6 @@
         }
       },
 
-
       async refreshWAFEngine() {
         if (!this.shouldShow('wafengine')) return;
         const hours = Math.max(1, Math.min(24 * 30, Number(this.wafHours) || 24));
@@ -704,7 +823,7 @@
         this.wafHours = hours;
         this.wafEventLimit = limit;
         this.wafTopN = top;
-        this.wafSummary = await this.fetchJSONSafe(`v1/waf/engine/summary?hours=${hours}&limit=${limit}&top=${top}`, null);
+        this.wafSummary = await this.fetchJSONSafe(`v1/waf/engine/summary?hours=${hours}&limit=${limit}&top=${top}&enrich=1`, null);
       },
 
       async refreshHistory() {
@@ -728,24 +847,39 @@
         if (this.refreshInProgress) return;
         this.refreshInProgress = true;
         this.loading = true;
+
         try {
           const topLimit = Math.max(1, Math.min(500, Number(this.topShortLimit) || 20));
           const longLimit = Math.max(1, Math.min(500, Number(this.longTopLimit) || 20));
           const ipLimit = Math.max(1, Math.min(500, Number(this.ipShortLimit) || 20));
           const hotLimit = Math.max(1, Math.min(500, Number(this.hotIPsLimit) || 20));
+
           this.topShortLimit = topLimit;
           this.longTopLimit = longLimit;
           this.ipShortLimit = ipLimit;
           this.hotIPsLimit = hotLimit;
+
           const tasks = [
-            (this.shouldShow('webtop') || this.shouldShow('vhost')) ? this.fetchJSONSafe(`v1/webdet/top-short?limit=${topLimit}`, { rows: [] }) : Promise.resolve({ rows: [] }),
-            this.shouldShow('suspicious') ? this.fetchJSONSafe(`v1/webdet/suspicious?limit=${longLimit}`, { rows: [] }) : Promise.resolve({ rows: [] }),
-            this.shouldShow('longtop') ? this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] }) : Promise.resolve({ rows: [] }),
-            this.shouldShow('globalips') || this.shouldShow('ipdrilldown') ? this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] }) : Promise.resolve({ short: [] }),
-            this.shouldShow('webtop') ? this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, []) : Promise.resolve([]),
+            (this.shouldShow('webtop') || this.shouldShow('vhost'))
+              ? this.fetchJSONSafe(`v1/webdet/top-short?limit=${topLimit}`, { rows: [] })
+              : Promise.resolve({ rows: [] }),
+            this.shouldShow('suspicious')
+              ? this.fetchJSONSafe(`v1/webdet/suspicious?limit=${longLimit}`, { rows: [] })
+              : Promise.resolve({ rows: [] }),
+            this.shouldShow('longtop')
+              ? this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] })
+              : Promise.resolve({ rows: [] }),
+            (this.shouldShow('globalips') || this.shouldShow('ipdrilldown'))
+              ? this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] })
+              : Promise.resolve({ short: [] }),
+            this.shouldShow('webtop')
+              ? this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, [])
+              : Promise.resolve([]),
             this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
           ];
+
           const [topShort, suspicious, longTop, ipShort, hotIPs, activeChallengeVhosts] = await Promise.all(tasks);
+
           this.topShort = this.extractRows(topShort, 'rows');
           this.suspicious = this.extractRows(suspicious, 'rows');
           this.longTop = this.extractRows(longTop, 'rows');
@@ -753,22 +887,31 @@
           this.hotIPs = this.extractRows(hotIPs, 'rows');
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
+
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
           if (this.shouldShow('history')) await this.refreshHistory();
           if (this.shouldShow('wafengine')) await this.refreshWAFEngine();
 
           if (this.shouldShow('vhost') && this.isVhostPage) {
-            const vhostTarget = String(this.vhostFocusHost || '').trim() || String(this.activeHost || '').trim() || this.topShort[0]?.host;
+            const vhostTarget =
+              String(this.vhostFocusHost || '').trim() ||
+              String(this.activeHost || '').trim() ||
+              this.topShort[0]?.host;
+
             if (vhostTarget) {
               this.vhostFocusHost = vhostTarget;
               this.syncVhostQuery(vhostTarget);
               await this.loadHost(vhostTarget, false);
               this.pushHostSeriesPoint(vhostTarget);
+              await this.$nextTick();
+              this.renderVhostCharts();
             }
           } else if (this.shouldShow('vhost') && this.activeHost) {
-            // overview: push series point for whichever host is open, but don't re-fetch drilldown
             this.pushHostSeriesPoint(this.activeHost);
+            await this.$nextTick();
+            this.renderVhostCharts();
           }
+
           if (this.shouldShow('ipdrilldown') && !this.activeIP && this.ipShort[0]?.ip) {
             await this.loadIP(this.ipShort[0].ip);
           }
@@ -780,6 +923,7 @@
           this.refreshInProgress = false;
         }
       },
+
       scrollToDrilldown() {
         const el = document.getElementById('drilldown-card');
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -788,8 +932,11 @@
         if (!host) return;
         this.activeHost = host;
         this.ensureHostSeries(host);
+
         try {
           this.drilldown = await this.fetchJSON(`v1/webdet/drilldown?host=${encodeURIComponent(host)}&top=${this.drilldownTopN}`);
+          await this.$nextTick();
+          this.renderVhostCharts();
           if (shouldScroll) this.scrollToDrilldown();
         } catch (err) {
           console.error('[cfm-admin] drilldown failed', err);
@@ -798,8 +945,10 @@
         }
       },
     },
+
     mounted() {
       const path = (window.location.pathname || '').replace(/\/+$/, '/');
+
       if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
       else if (path.includes('/webdetector/vhost/')) this.pageMode = 'vhost';
       else if (path.includes('/webdetector/waf/')) this.pageMode = 'waf';
@@ -808,6 +957,7 @@
       const currentURL = new URL(window.location.href);
       const qHost = currentURL.searchParams.get('host');
       const qIP = currentURL.searchParams.get('ip');
+
       if (this.isVhostPage && qHost) {
         this.vhostFocusHost = qHost.trim();
         this.activeHost = this.vhostFocusHost;
@@ -819,7 +969,12 @@
         this.historyIP = qIP.trim();
       }
 
+      this.resizeHandler = () => this.resizeVhostCharts();
+      window.addEventListener('resize', this.resizeHandler);
+
       this.refreshAll();
+      this.$nextTick(() => this.resizeVhostCharts());
+
       if (this.isForensicsPage) {
         this.stopAutoRefresh();
       } else {
@@ -830,8 +985,11 @@
         setTimeout(() => this.jumpToHistory(), 120);
       }
     },
+
     beforeUnmount() {
       if (this.timer) clearInterval(this.timer);
+      if (this.resizeHandler) window.removeEventListener('resize', this.resizeHandler);
+      this.disposeVhostCharts();
     },
   }).mount('#app');
 })();

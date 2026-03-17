@@ -449,7 +449,7 @@ func NewEngine(cfg Config) *Engine {
 			logging.Logf("[webdetector][history] disabled (init failed): %v", err)
 		} else {
 			e.history = hs
-			logging.Logf("[webdetector][history] enabled db=%s retention_days=%d prune_every=%s", cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery)
+			logging.Logf("[webdetector][history] enabled sqlite db=%s retention_days=%d prune_every=%s", cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery)
 		}
 	}
 
@@ -3007,3 +3007,4 @@ func (e *Engine) WAFExcludeHasAny() bool {
 	}
 	return len(e.wafExcludes.List()) > 0
 }
+

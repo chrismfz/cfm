@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Admin</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
   <script src="/cfm-admin/assets/app.js" defer></script>
 </head>
@@ -382,33 +383,23 @@
         <div class="live-chart-grid" v-if="activeVhostSeries.length > 1">
           <section class="mini-card">
             <h3>Traffic RPS (2xx / 4xx / 5xx)</h3>
-            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
-              <polyline v-for="s in rpsSeriesChart.series" :key="s.key" :class="s.cls" :points="s.points"></polyline>
-            </svg>
+            <div id="vhost-rps-chart" class="spark echart-box"></div>
           </section>
           <section class="mini-card">
             <h3>Bot %</h3>
-            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
-              <polyline class="line-cyan" :points="botSeriesChart.points"></polyline>
-            </svg>
+            <div id="vhost-bot-chart" class="spark echart-box"></div>
           </section>
           <section class="mini-card">
             <h3>Error rate %</h3>
-            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
-              <polyline class="line-yellow" :points="errSeriesChart.points"></polyline>
-            </svg>
+            <div id="vhost-err-chart" class="spark echart-box"></div>
           </section>
           <section class="mini-card">
             <h3>Threat score</h3>
-            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
-              <polyline class="line-lime" :points="scoreSeriesChart.points"></polyline>
-            </svg>
+            <div id="vhost-score-chart" class="spark echart-box"></div>
           </section>
           <section class="mini-card">
             <h3>Response time (ms)</h3>
-            <svg class="spark" viewBox="0 0 520 140" preserveAspectRatio="none">
-              <polyline class="line-magenta" :points="rtSeriesChart.points"></polyline>
-            </svg>
+            <div id="vhost-rt-chart" class="spark echart-box"></div>
           </section>
         </div>
 
