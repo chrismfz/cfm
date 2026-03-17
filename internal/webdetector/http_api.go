@@ -55,6 +55,7 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/waf/exclude/list", e.handleWAFExcludeList)
 	mux.HandleFunc("/api/v1/waf/exclude/add", e.handleWAFExcludeAdd)
 	mux.HandleFunc("/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove)
+	mux.HandleFunc("/api/v1/waf/engine/summary", e.handleWAFEngineSummary)
 }
 
 // ServeHTTPWithContext starts a small standalone HTTP server for webdetector API.

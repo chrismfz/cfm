@@ -322,6 +322,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						ttl.String(),
 						suffix,
 					)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl)
 
 				})
 
