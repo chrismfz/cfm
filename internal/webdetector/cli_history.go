@@ -98,7 +98,11 @@ func runHistoryEvents(baseURL string, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "TS\tTYPE\tHOST\tIP\tREASON")
 	for _, ev := range payload.Rows {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", ev.TsUnix, ev.Type, ev.Host, ev.IP, ev.Reason)
+		ts := strconv.FormatInt(ev.TsUnix, 10)
+		if strings.TrimSpace(ev.TsUTC) != "" {
+			ts = ev.TsUTC
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ts, ev.Type, ev.Host, ev.IP, ev.Reason)
 	}
 	return w.Flush()
 }

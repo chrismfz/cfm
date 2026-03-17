@@ -1,5 +1,16 @@
 package webdetector
 
+/*
+#cgo LDFLAGS: -lsqlite3
+#include <sqlite3.h>
+#include <stdlib.h>
+
+static int bind_text(sqlite3_stmt* stmt, int idx, const char* val) {
+	return sqlite3_bind_text(stmt, idx, val, -1, SQLITE_TRANSIENT);
+}
+*/
+import "C"
+
 import (
 	"bufio"
 	"encoding/json"
@@ -9,11 +20,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 type HistoryEvent struct {
 	ID      int64                  `json:"id"`
 	TsUnix  int64                  `json:"ts_unix"`
+	TsUTC   string                 `json:"ts_utc,omitempty"`
 	Type    string                 `json:"event_type"`
 	Host    string                 `json:"host,omitempty"`
 	IP      string                 `json:"ip,omitempty"`
@@ -54,16 +67,16 @@ type HistorySummary struct {
 type HistoryStore struct {
 	mu sync.Mutex
 
+	db            *C.sqlite3
 	path          string
 	retentionDays int
 	pruneEvery    time.Duration
 	lastPrune     time.Time
-	nextID        int64
 }
 
 func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (*HistoryStore, error) {
 	if strings.TrimSpace(path) == "" {
-		path = "/var/lib/cfm/webdetector-history.jsonl"
+		path = "/var/lib/cfm/webdetector-history.db"
 	}
 	if pruneEvery <= 0 {
 		pruneEvery = time.Hour
@@ -71,56 +84,268 @@ func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	s := &HistoryStore{path: path, retentionDays: retentionDays, pruneEvery: pruneEvery}
-	_ = s.bootstrapID()
+	if err := migrateJSONLIfNeeded(path); err != nil {
+		return nil, err
+	}
+	db, err := openSQLite(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &HistoryStore{db: db, path: path, retentionDays: retentionDays, pruneEvery: pruneEvery}
+	if err := s.initSchema(); err != nil {
+		_ = closeSQLite(db)
+		return nil, err
+	}
 	return s, nil
 }
 
-func (s *HistoryStore) bootstrapID() error {
-	f, err := os.Open(s.path)
+func openSQLite(path string) (*C.sqlite3, error) {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	var db *C.sqlite3
+	rc := C.sqlite3_open_v2(cpath, &db, C.SQLITE_OPEN_READWRITE|C.SQLITE_OPEN_CREATE|C.SQLITE_OPEN_FULLMUTEX, nil)
+	if rc != C.SQLITE_OK {
+		err := sqliteErr(db, rc)
+		_ = closeSQLite(db)
+		return nil, err
+	}
+	return db, nil
+}
+
+func closeSQLite(db *C.sqlite3) error {
+	if db == nil {
+		return nil
+	}
+	rc := C.sqlite3_close_v2(db)
+	if rc != C.SQLITE_OK {
+		return sqliteErr(db, rc)
+	}
+	return nil
+}
+
+func sqliteErr(db *C.sqlite3, rc C.int) error {
+	if db == nil {
+		return fmt.Errorf("sqlite error rc=%d", int(rc))
+	}
+	msg := C.sqlite3_errmsg(db)
+	return fmt.Errorf("sqlite error rc=%d: %s", int(rc), C.GoString(msg))
+}
+
+func execSQL(db *C.sqlite3, q string) error {
+	cq := C.CString(q)
+	defer C.free(unsafe.Pointer(cq))
+	var errMsg *C.char
+	rc := C.sqlite3_exec(db, cq, nil, nil, &errMsg)
+	if rc != C.SQLITE_OK {
+		if errMsg != nil {
+			msg := C.GoString(errMsg)
+			C.sqlite3_free(unsafe.Pointer(errMsg))
+			return fmt.Errorf("sqlite exec: %s", msg)
+		}
+		return sqliteErr(db, rc)
+	}
+	return nil
+}
+
+func prepareSQL(db *C.sqlite3, q string) (*C.sqlite3_stmt, error) {
+	cq := C.CString(q)
+	defer C.free(unsafe.Pointer(cq))
+	var stmt *C.sqlite3_stmt
+	rc := C.sqlite3_prepare_v2(db, cq, -1, &stmt, nil)
+	if rc != C.SQLITE_OK {
+		return nil, sqliteErr(db, rc)
+	}
+	return stmt, nil
+}
+
+func initHistorySchema(db *C.sqlite3) error {
+	queries := []string{
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA busy_timeout=5000;`,
+		`CREATE TABLE IF NOT EXISTS history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts_unix INTEGER NOT NULL,
+			event_type TEXT NOT NULL,
+			host TEXT,
+			ip TEXT,
+			mode TEXT,
+			reason TEXT,
+			score REAL,
+			uniq_ip INTEGER,
+			rps REAL,
+			status_code INTEGER,
+			ttl_sec INTEGER,
+			payload_json TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts_unix);`,
+		`CREATE INDEX IF NOT EXISTS idx_history_event_type ON history(event_type);`,
+		`CREATE INDEX IF NOT EXISTS idx_history_host ON history(host);`,
+		`CREATE INDEX IF NOT EXISTS idx_history_ip ON history(ip);`,
+		`CREATE INDEX IF NOT EXISTS idx_history_reason ON history(reason);`,
+	}
+	for _, q := range queries {
+		if err := execSQL(db, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateJSONLIfNeeded(path string) error {
+	fi, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	defer f.Close()
-	scan := bufio.NewScanner(f)
-	var last int64
+	if fi.Size() == 0 {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	header := make([]byte, 16)
+	n, _ := f.Read(header)
+	_ = f.Close()
+	if n >= 16 && string(header) == "SQLite format 3\x00" {
+		return nil
+	}
+
+	tmpDB := path + ".migrating"
+	_ = os.Remove(tmpDB)
+	db, err := openSQLite(tmpDB)
+	if err != nil {
+		return err
+	}
+	defer closeSQLite(db)
+	if err := initHistorySchema(db); err != nil {
+		return err
+	}
+	if err := execSQL(db, "BEGIN"); err != nil {
+		return err
+	}
+	stmt, err := prepareSQL(db, `INSERT INTO history
+		(ts_unix,event_type,host,ip,mode,reason,score,uniq_ip,rps,status_code,ttl_sec,payload_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		_ = execSQL(db, "ROLLBACK")
+		return err
+	}
+	defer C.sqlite3_finalize(stmt)
+	old, err := os.Open(path)
+	if err != nil {
+		_ = execSQL(db, "ROLLBACK")
+		return err
+	}
+	defer old.Close()
+	scan := bufio.NewScanner(old)
+	buf := make([]byte, 0, 1024*1024)
+	scan.Buffer(buf, 16*1024*1024)
 	for scan.Scan() {
 		var ev HistoryEvent
-		if err := json.Unmarshal(scan.Bytes(), &ev); err == nil && ev.ID > last {
-			last = ev.ID
+		if err := json.Unmarshal(scan.Bytes(), &ev); err != nil {
+			continue
 		}
+		if err := bindInsert(stmt, ev); err != nil {
+			_ = execSQL(db, "ROLLBACK")
+			return err
+		}
+		rc := C.sqlite3_step(stmt)
+		if rc != C.SQLITE_DONE {
+			_ = execSQL(db, "ROLLBACK")
+			return sqliteErr(db, rc)
+		}
+		C.sqlite3_reset(stmt)
+		C.sqlite3_clear_bindings(stmt)
 	}
-	s.nextID = last
+	if err := scan.Err(); err != nil {
+		_ = execSQL(db, "ROLLBACK")
+		return err
+	}
+	if err := execSQL(db, "COMMIT"); err != nil {
+		return err
+	}
+	backup := path + ".jsonl.bak"
+	_ = os.Remove(backup)
+	if err := os.Rename(path, backup); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpDB, path); err != nil {
+		_ = os.Rename(backup, path)
+		return err
+	}
 	return nil
 }
 
-func (s *HistoryStore) Close() {}
+func (s *HistoryStore) initSchema() error { return initHistorySchema(s.db) }
+
+func (s *HistoryStore) Close() {
+	if s != nil {
+		_ = closeSQLite(s.db)
+	}
+}
+
+func bindInsert(stmt *C.sqlite3_stmt, ev HistoryEvent) error {
+	if ev.TsUnix <= 0 {
+		ev.TsUnix = time.Now().Unix()
+	}
+	payloadJSON := ""
+	if len(ev.Payload) > 0 {
+		if b, err := json.Marshal(ev.Payload); err == nil {
+			payloadJSON = string(b)
+		}
+	}
+	vals := []string{strings.TrimSpace(ev.Type), cleanHost(ev.Host), strings.TrimSpace(ev.IP), strings.TrimSpace(ev.Mode), strings.TrimSpace(ev.Reason), payloadJSON}
+	if rc := C.sqlite3_bind_int64(stmt, 1, C.sqlite3_int64(ev.TsUnix)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind ts_unix failed")
+	}
+	for i, v := range vals {
+		cv := C.CString(v)
+		rc := C.bind_text(stmt, C.int(i+2), cv)
+		C.free(unsafe.Pointer(cv))
+		if rc != C.SQLITE_OK {
+			return fmt.Errorf("bind text failed at %d", i+2)
+		}
+	}
+	if rc := C.sqlite3_bind_double(stmt, 7, C.double(ev.Score)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind score failed")
+	}
+	if rc := C.sqlite3_bind_int(stmt, 8, C.int(ev.UniqIP)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind uniq_ip failed")
+	}
+	if rc := C.sqlite3_bind_double(stmt, 9, C.double(ev.RPS)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind rps failed")
+	}
+	if rc := C.sqlite3_bind_int(stmt, 10, C.int(ev.Status)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind status failed")
+	}
+	if rc := C.sqlite3_bind_int(stmt, 11, C.int(ev.TTLSec)); rc != C.SQLITE_OK {
+		return fmt.Errorf("bind ttl failed")
+	}
+	return nil
+}
 
 func (s *HistoryStore) Append(ev HistoryEvent) {
-	if s == nil || strings.TrimSpace(ev.Type) == "" {
+	if s == nil || s.db == nil || strings.TrimSpace(ev.Type) == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ev.TsUnix <= 0 {
-		ev.TsUnix = time.Now().Unix()
-	}
-	s.nextID++
-	ev.ID = s.nextID
-	ev.Host = cleanHost(ev.Host)
-	b, err := json.Marshal(ev)
+	stmt, err := prepareSQL(s.db, `INSERT INTO history
+		(ts_unix,event_type,host,ip,mode,reason,score,uniq_ip,rps,status_code,ttl_sec,payload_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
+	defer C.sqlite3_finalize(stmt)
+	if err := bindInsert(stmt, ev); err != nil {
 		return
 	}
-	_, _ = f.Write(append(b, '\n'))
-	_ = f.Close()
+	if rc := C.sqlite3_step(stmt); rc != C.SQLITE_DONE {
+		return
+	}
 	s.pruneIfNeededLocked(time.Now())
 }
 
@@ -136,40 +361,45 @@ func (s *HistoryStore) pruneIfNeededLocked(now time.Time) {
 }
 
 func (s *HistoryStore) readAllLocked() ([]HistoryEvent, error) {
-	f, err := os.Open(s.path)
+	stmt, err := prepareSQL(s.db, `SELECT id, ts_unix, datetime(ts_unix,'unixepoch') AS ts_utc, event_type, host, ip, mode, reason, score, uniq_ip, rps, status_code, ttl_sec, payload_json FROM history ORDER BY id`)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	defer f.Close()
-	scan := bufio.NewScanner(f)
+	defer C.sqlite3_finalize(stmt)
 	out := make([]HistoryEvent, 0, 1024)
-	for scan.Scan() {
-		var ev HistoryEvent
-		if err := json.Unmarshal(scan.Bytes(), &ev); err == nil {
-			out = append(out, ev)
+	for {
+		rc := C.sqlite3_step(stmt)
+		if rc == C.SQLITE_DONE {
+			break
 		}
+		if rc != C.SQLITE_ROW {
+			return nil, sqliteErr(s.db, rc)
+		}
+		ev := HistoryEvent{
+			ID:     int64(C.sqlite3_column_int64(stmt, 0)),
+			TsUnix: int64(C.sqlite3_column_int64(stmt, 1)),
+			TsUTC:  colText(stmt, 2),
+			Type:   colText(stmt, 3),
+			Host:   colText(stmt, 4),
+			IP:     colText(stmt, 5),
+			Mode:   colText(stmt, 6),
+			Reason: colText(stmt, 7),
+			Score:  float64(C.sqlite3_column_double(stmt, 8)),
+			UniqIP: int(C.sqlite3_column_int(stmt, 9)),
+			RPS:    float64(C.sqlite3_column_double(stmt, 10)),
+			Status: int(C.sqlite3_column_int(stmt, 11)),
+			TTLSec: int(C.sqlite3_column_int(stmt, 12)),
+		}
+		if p := colText(stmt, 13); strings.TrimSpace(p) != "" {
+			_ = json.Unmarshal([]byte(p), &ev.Payload)
+		}
+		out = append(out, ev)
 	}
 	return out, nil
 }
 
-func matchEv(ev HistoryEvent, host, ip, typ string) bool {
-	if host != "" && cleanHost(ev.Host) != host {
-		return false
-	}
-	if ip != "" && strings.TrimSpace(ev.IP) != ip {
-		return false
-	}
-	if typ != "" && strings.TrimSpace(ev.Type) != typ {
-		return false
-	}
-	return true
-}
-
 func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEvent, error) {
-	if s == nil {
+	if s == nil || s.db == nil {
 		return nil, nil
 	}
 	if limit <= 0 || limit > 2000 {
@@ -180,27 +410,84 @@ func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEv
 	typ = strings.TrimSpace(typ)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	all, err := s.readAllLocked()
+
+	where := []string{"1=1"}
+	args := []string{}
+	if host != "" {
+		where = append(where, "host=?")
+		args = append(args, host)
+	}
+	if ip != "" {
+		where = append(where, "ip=?")
+		args = append(args, ip)
+	}
+	if typ != "" {
+		where = append(where, "event_type=?")
+		args = append(args, typ)
+	}
+	q := fmt.Sprintf(`SELECT id, ts_unix, datetime(ts_unix,'unixepoch') AS ts_utc, event_type, host, ip, mode, reason, score, uniq_ip, rps, status_code, ttl_sec, payload_json
+		FROM history WHERE %s ORDER BY id DESC LIMIT ?`, strings.Join(where, " AND "))
+	stmt, err := prepareSQL(s.db, q)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]HistoryEvent, 0, limit)
-	for i := len(all) - 1; i >= 0; i-- {
-		ev := all[i]
-		if !matchEv(ev, host, ip, typ) {
-			continue
+	defer C.sqlite3_finalize(stmt)
+	idx := 1
+	for _, a := range args {
+		ca := C.CString(a)
+		rc := C.bind_text(stmt, C.int(idx), ca)
+		C.free(unsafe.Pointer(ca))
+		if rc != C.SQLITE_OK {
+			return nil, sqliteErr(s.db, rc)
 		}
-		out = append(out, ev)
-		if len(out) >= limit {
+		idx++
+	}
+	if rc := C.sqlite3_bind_int(stmt, C.int(idx), C.int(limit)); rc != C.SQLITE_OK {
+		return nil, sqliteErr(s.db, rc)
+	}
+	out := make([]HistoryEvent, 0, limit)
+	for {
+		rc := C.sqlite3_step(stmt)
+		if rc == C.SQLITE_DONE {
 			break
 		}
+		if rc != C.SQLITE_ROW {
+			return nil, sqliteErr(s.db, rc)
+		}
+		ev := HistoryEvent{
+			ID:     int64(C.sqlite3_column_int64(stmt, 0)),
+			TsUnix: int64(C.sqlite3_column_int64(stmt, 1)),
+			TsUTC:  colText(stmt, 2),
+			Type:   colText(stmt, 3),
+			Host:   colText(stmt, 4),
+			IP:     colText(stmt, 5),
+			Mode:   colText(stmt, 6),
+			Reason: colText(stmt, 7),
+			Score:  float64(C.sqlite3_column_double(stmt, 8)),
+			UniqIP: int(C.sqlite3_column_int(stmt, 9)),
+			RPS:    float64(C.sqlite3_column_double(stmt, 10)),
+			Status: int(C.sqlite3_column_int(stmt, 11)),
+			TTLSec: int(C.sqlite3_column_int(stmt, 12)),
+		}
+		if p := colText(stmt, 13); strings.TrimSpace(p) != "" {
+			_ = json.Unmarshal([]byte(p), &ev.Payload)
+		}
+		out = append(out, ev)
 	}
 	return out, nil
 }
 
+func colText(stmt *C.sqlite3_stmt, col C.int) string {
+	ptr := C.sqlite3_column_text(stmt, col)
+	if ptr == nil {
+		return ""
+	}
+	return C.GoString((*C.char)(unsafe.Pointer(ptr)))
+}
+
 func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, error) {
 	res := HistorySummary{}
-	if s == nil {
+	if s == nil || s.db == nil {
 		return res, nil
 	}
 	if hours <= 0 {
@@ -214,93 +501,84 @@ func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, er
 	ip = strings.TrimSpace(ip)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	all, err := s.readAllLocked()
+	where := []string{"ts_unix BETWEEN ? AND ?"}
+	args := []string{}
+	if host != "" {
+		where = append(where, "host=?")
+		args = append(args, host)
+	}
+	if ip != "" {
+		where = append(where, "ip=?")
+		args = append(args, ip)
+	}
+	q := fmt.Sprintf(`SELECT
+		COUNT(*),
+		SUM(CASE WHEN event_type='challenge_issued' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='challenge_solved' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='challenge_expired_unsolved' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='challenge_escalated_block' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='block_trigger' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='waf_observe' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN event_type='suspicious_snapshot' THEN 1 ELSE 0 END)
+		FROM history WHERE %s`, strings.Join(where, " AND "))
+	stmt, err := prepareSQL(s.db, q)
 	if err != nil {
 		return res, err
 	}
-	for _, ev := range all {
-		if ev.TsUnix < res.FromUnix || ev.TsUnix > res.ToUnix {
-			continue
-		}
-		if !matchEv(ev, host, ip, "") {
-			continue
-		}
-		res.TotalEvents++
-		switch ev.Type {
-		case "challenge_issued":
-			res.ChallengeIssued++
-		case "challenge_solved":
-			res.ChallengeSolved++
-		case "challenge_expired_unsolved":
-			res.ChallengeExpiredUnsolved++
-		case "challenge_escalated_block":
-			res.ChallengeEscalated++
-		case "block_trigger":
-			res.BlockTriggers++
-		case "waf_observe":
-			res.WAFObserved++
-		case "suspicious_snapshot":
-			res.Suspicious++
-		}
+	defer C.sqlite3_finalize(stmt)
+	if rc := C.sqlite3_bind_int64(stmt, 1, C.sqlite3_int64(res.FromUnix)); rc != C.SQLITE_OK {
+		return res, sqliteErr(s.db, rc)
 	}
+	if rc := C.sqlite3_bind_int64(stmt, 2, C.sqlite3_int64(res.ToUnix)); rc != C.SQLITE_OK {
+		return res, sqliteErr(s.db, rc)
+	}
+	idx := 3
+	for _, a := range args {
+		ca := C.CString(a)
+		rc := C.bind_text(stmt, C.int(idx), ca)
+		C.free(unsafe.Pointer(ca))
+		if rc != C.SQLITE_OK {
+			return res, sqliteErr(s.db, rc)
+		}
+		idx++
+	}
+	if rc := C.sqlite3_step(stmt); rc != C.SQLITE_ROW {
+		if rc == C.SQLITE_DONE {
+			return res, nil
+		}
+		return res, sqliteErr(s.db, rc)
+	}
+	res.TotalEvents = int(C.sqlite3_column_int(stmt, 0))
+	res.ChallengeIssued = int(C.sqlite3_column_int(stmt, 1))
+	res.ChallengeSolved = int(C.sqlite3_column_int(stmt, 2))
+	res.ChallengeExpiredUnsolved = int(C.sqlite3_column_int(stmt, 3))
+	res.ChallengeEscalated = int(C.sqlite3_column_int(stmt, 4))
+	res.BlockTriggers = int(C.sqlite3_column_int(stmt, 5))
+	res.WAFObserved = int(C.sqlite3_column_int(stmt, 6))
+	res.Suspicious = int(C.sqlite3_column_int(stmt, 7))
 	return res, nil
 }
 
 func (s *HistoryStore) pruneLocked(days int) (int64, error) {
-	all, err := s.readAllLocked()
-	if err != nil {
-		return 0, err
-	}
 	cut := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
-	keep := make([]HistoryEvent, 0, len(all))
-	var removed int64
-	for _, ev := range all {
-		if ev.TsUnix < cut {
-			removed++
-			continue
-		}
-		keep = append(keep, ev)
-	}
-	if err := s.rewriteLocked(keep); err != nil {
+	stmt, err := prepareSQL(s.db, `DELETE FROM history WHERE ts_unix < ?`)
+	if err != nil {
 		return 0, err
 	}
-	return removed, nil
-}
-
-func (s *HistoryStore) rewriteLocked(events []HistoryEvent) error {
-	tmp := s.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
+	defer C.sqlite3_finalize(stmt)
+	if rc := C.sqlite3_bind_int64(stmt, 1, C.sqlite3_int64(cut)); rc != C.SQLITE_OK {
+		return 0, sqliteErr(s.db, rc)
 	}
-	for _, ev := range events {
-		b, err := json.Marshal(ev)
-		if err != nil {
-			continue
-		}
-		if _, err := f.Write(append(b, '\n')); err != nil {
-			_ = f.Close()
-			return err
-		}
+	if rc := C.sqlite3_step(stmt); rc != C.SQLITE_DONE {
+		return 0, sqliteErr(s.db, rc)
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return err
-	}
-	var maxID int64
-	for _, ev := range events {
-		if ev.ID > maxID {
-			maxID = ev.ID
-		}
-	}
-	s.nextID = maxID
-	return nil
+	n := int64(C.sqlite3_changes(s.db))
+	_ = execSQL(s.db, `PRAGMA wal_checkpoint(TRUNCATE);`)
+	return n, nil
 }
 
 func (s *HistoryStore) Prune(days int) (int64, error) {
-	if s == nil || days <= 0 {
+	if s == nil || s.db == nil || days <= 0 {
 		return 0, nil
 	}
 	s.mu.Lock()
@@ -309,47 +587,39 @@ func (s *HistoryStore) Prune(days int) (int64, error) {
 }
 
 func (s *HistoryStore) Truncate() (int64, error) {
-	if s == nil {
+	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	all, err := s.readAllLocked()
-	if err != nil {
+	if err := execSQL(s.db, `DELETE FROM history`); err != nil {
 		return 0, err
 	}
-	removed := int64(len(all))
-	if err := s.rewriteLocked(nil); err != nil {
-		return 0, err
-	}
-	return removed, nil
+	n := int64(C.sqlite3_changes(s.db))
+	_ = execSQL(s.db, `VACUUM`)
+	_ = execSQL(s.db, `PRAGMA wal_checkpoint(TRUNCATE);`)
+	return n, nil
 }
 
 func (s *HistoryStore) Stats() (HistoryStats, error) {
 	st := HistoryStats{}
-	if s == nil {
+	if s == nil || s.db == nil {
 		return st, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	all, err := s.readAllLocked()
+	st.Path = s.path
+	stmt, err := prepareSQL(s.db, `SELECT COUNT(*), COUNT(DISTINCT host), COUNT(DISTINCT ip) FROM history`)
 	if err != nil {
 		return st, err
 	}
-	st.Path = s.path
-	st.Events = len(all)
-	hosts := map[string]struct{}{}
-	ips := map[string]struct{}{}
-	for _, ev := range all {
-		if h := cleanHost(ev.Host); h != "" {
-			hosts[h] = struct{}{}
-		}
-		if ip := strings.TrimSpace(ev.IP); ip != "" {
-			ips[ip] = struct{}{}
-		}
+	defer C.sqlite3_finalize(stmt)
+	if rc := C.sqlite3_step(stmt); rc != C.SQLITE_ROW {
+		return st, sqliteErr(s.db, rc)
 	}
-	st.UniqueHosts = len(hosts)
-	st.UniqueIPs = len(ips)
+	st.Events = int(C.sqlite3_column_int(stmt, 0))
+	st.UniqueHosts = int(C.sqlite3_column_int(stmt, 1))
+	st.UniqueIPs = int(C.sqlite3_column_int(stmt, 2))
 	if fi, err := os.Stat(s.path); err == nil {
 		st.SizeBytes = fi.Size()
 	}

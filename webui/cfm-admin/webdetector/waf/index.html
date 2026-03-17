@@ -290,7 +290,7 @@
             </thead>
             <tbody>
               <tr v-for="row in historyEvents" :key="`h-${row.id}-${row.ts_unix}`">
-                <td>{{ row.ts_unix }}</td>
+                <td>{{ row.ts_utc || row.ts_unix }}</td>
                 <td><code>{{ row.event_type }}</code></td>
                 <td>{{ row.host || '-' }}</td>
                 <td><code>{{ row.ip || '-' }}</code></td>
