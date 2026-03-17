@@ -8,6 +8,7 @@
 //   cfm webtop waf set <host> <profile> [--ttl 1h]   # activate profile
 //   cfm webtop waf clear <host>                       # back to defaults
 //   cfm webtop waf profiles                           # show available profiles
+//   cfm webtop waf engine [--hours 24 --limit 20 --top 10]  # WAF engine stats/events
 //
 // Profiles:  normal | attack | strict | off
 //
@@ -30,6 +31,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,9 +52,171 @@ func runWafWebTop(baseURL string, args []string) error {
 		return runWafProfiles(baseURL)
 	case "exclude":
 		return runWAFExclude(baseURL, args[1:])
+	case "engine", "summary", "stats":
+		return runWAFEngineSummary(baseURL, args[1:])
 	default:
-		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|exclude]", args[0])
+		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|engine|exclude]", args[0])
 	}
+}
+
+type wafEngineSummaryCLI struct {
+	FromUnix      int64 `json:"from_unix"`
+	ToUnix        int64 `json:"to_unix"`
+	Hours         int   `json:"hours"`
+	TotalEvents   int   `json:"total_events"`
+	UniqueHosts   int   `json:"unique_hosts"`
+	UniqueIPs     int   `json:"unique_ips"`
+	BlockedEvents int   `json:"blocked_events"`
+	TopRules      []struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	} `json:"top_rules"`
+	TopRuleBases []struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	} `json:"top_rule_bases"`
+	TopHosts []struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	} `json:"top_hosts"`
+	TopIPs []struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	} `json:"top_ips"`
+	Rows []struct {
+		TsUnix  int64  `json:"ts_unix"`
+		Host    string `json:"host"`
+		IP      string `json:"ip"`
+		URI     string `json:"uri"`
+		Method  string `json:"method"`
+		Status  int    `json:"status"`
+		Reason  string `json:"reason"`
+		Country string `json:"country"`
+		ASN     uint   `json:"asn"`
+	} `json:"rows"`
+}
+
+func runWAFEngineSummary(baseURL string, args []string) error {
+	hours := 24
+	limit := 20
+	top := 10
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--hours" || a == "-h":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--hours requires a value")
+			}
+			i++
+			v, err := strconv.Atoi(args[i])
+			if err != nil {
+				return fmt.Errorf("invalid --hours: %s", args[i])
+			}
+			hours = v
+		case strings.HasPrefix(a, "--hours="):
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "--hours="))
+			if err != nil {
+				return fmt.Errorf("invalid --hours: %s", a)
+			}
+			hours = v
+		case a == "--limit" || a == "-n":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--limit requires a value")
+			}
+			i++
+			v, err := strconv.Atoi(args[i])
+			if err != nil {
+				return fmt.Errorf("invalid --limit: %s", args[i])
+			}
+			limit = v
+		case strings.HasPrefix(a, "--limit="):
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return fmt.Errorf("invalid --limit: %s", a)
+			}
+			limit = v
+		case a == "--top":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--top requires a value")
+			}
+			i++
+			v, err := strconv.Atoi(args[i])
+			if err != nil {
+				return fmt.Errorf("invalid --top: %s", args[i])
+			}
+			top = v
+		case strings.HasPrefix(a, "--top="):
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "--top="))
+			if err != nil {
+				return fmt.Errorf("invalid --top: %s", a)
+			}
+			top = v
+		default:
+			return fmt.Errorf("usage: cfm webtop waf engine [--hours 24] [--limit 20] [--top 10]")
+		}
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if top <= 0 {
+		top = 10
+	}
+	u := fmt.Sprintf("%s/api/v1/waf/engine/summary?hours=%d&limit=%d&top=%d", strings.TrimRight(baseURL, "/"), hours, limit, top)
+	resp, err := http.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("waf engine summary HTTP %d", resp.StatusCode)
+	}
+	var out wafEngineSummaryCLI
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	fmt.Printf("WAF engine summary (%dh): total=%d blocked=%d unique_hosts=%d unique_ips=%d\n", out.Hours, out.TotalEvents, out.BlockedEvents, out.UniqueHosts, out.UniqueIPs)
+	printTop := func(title string, rows []struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	}) {
+		if len(rows) == 0 {
+			return
+		}
+		fmt.Println(title)
+		for i, row := range rows {
+			fmt.Printf("  %2d) %-45s %d\n", i+1, row.Key, row.Count)
+		}
+	}
+	printTop("Top rule families:", out.TopRuleBases)
+	printTop("Top rules:", out.TopRules)
+	printTop("Top hosts:", out.TopHosts)
+	printTop("Top IPs:", out.TopIPs)
+	if len(out.Rows) == 0 {
+		fmt.Println("No WAF events in selected window.")
+		return nil
+	}
+	fmt.Println("Recent WAF events:")
+	fmt.Printf("%-19s %-28s %-15s %-6s %-4s %-28s %s\n", "TIME", "HOST", "IP", "METHOD", "ST", "RULE", "URI")
+	for _, row := range out.Rows {
+		ts := time.Unix(row.TsUnix, 0).Format("2006-01-02 15:04:05")
+		host := row.Host
+		if host == "" {
+			host = "-"
+		}
+		uri := row.URI
+		if len(uri) > 90 {
+			uri = uri[:87] + "..."
+		}
+		rule := row.Reason
+		if len(rule) > 28 {
+			rule = rule[:25] + "..."
+		}
+		fmt.Printf("%-19s %-28s %-15s %-6s %-4d %-28s %s\n", ts, host, row.IP, row.Method, row.Status, rule, uri)
+	}
+	return nil
 }
 
 // ── cfm webtop waf  ───────────────────────────────────────────────────────────

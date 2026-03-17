@@ -282,8 +282,13 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			if b := w.eng.NginxBridge(); b != nil {
 				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string) {
 					suffix := ""
+					var asn uint
+					var asnName, country string
 					if enr := w.eng.Enricher(); enr != nil {
 						r := enr.Lookup(ip)
+						asn = r.ASN
+						asnName = r.ASNName
+						country = r.Country
 						parts := []string{}
 						if r.ASN > 0 {
 							if r.ASNName != "" {
@@ -322,6 +327,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						ttl.String(),
 						suffix,
 					)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country)
 
 				})
 

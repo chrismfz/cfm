@@ -551,6 +551,37 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 	e.history.Append(ev)
 }
 
+// RecordWAFTrigger persists a WAF trigger event emitted by OpenResty/Lua bridge
+// so UI/CLI analytics can include logonly/challenge/block triggers from cfm.waf.log.
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country string) {
+	if e == nil {
+		return
+	}
+	host = cleanHost(host)
+	method = strings.ToLower(strings.TrimSpace(method))
+	action = strings.ToLower(strings.TrimSpace(action))
+	if action == "" {
+		action = "triggered"
+	}
+	e.appendHistory(HistoryEvent{
+		TsUnix: time.Now().Unix(),
+		Type:   "waf_trigger",
+		Host:   host,
+		IP:     strings.TrimSpace(ip),
+		Reason: strings.TrimSpace(reason),
+		Mode:   action,
+		TTLSec: int(ttl / time.Second),
+		Payload: map[string]interface{}{
+			"uri":      uri,
+			"method":   method,
+			"action":   action,
+			"asn":      asn,
+			"asn_name": strings.TrimSpace(asnName),
+			"country":  strings.TrimSpace(country),
+		},
+	})
+}
+
 func (e *Engine) expireOldChallenges() {
 	if e == nil || e.history == nil || e.chalAPI == nil {
 		return
