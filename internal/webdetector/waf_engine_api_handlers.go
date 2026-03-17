@@ -80,11 +80,18 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.ToUnix = to.Unix()
 	res.Hours = hours
 
-	all, err := e.history.QueryEvents("", "", "waf_observe", 2000)
+	observed, err := e.history.QueryEvents("", "", "waf_observe", 2000)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	triggers, err := e.history.QueryEvents("", "", "waf_trigger", 2000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	all := append(observed, triggers...)
+	sort.Slice(all, func(i, j int) bool { return all[i].TsUnix > all[j].TsUnix })
 
 	hosts := map[string]struct{}{}
 	ips := map[string]struct{}{}
@@ -108,8 +115,11 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			rule = "WAF_UNKNOWN"
 			ruleBase = "WAF_UNKNOWN"
 		}
-		method, _ := ev.Payload["method"].(string)
-		uri, _ := ev.Payload["uri"].(string)
+		var method, uri string
+		if ev.Payload != nil {
+			method, _ = ev.Payload["method"].(string)
+			uri, _ = ev.Payload["uri"].(string)
+		}
 		row := wafEngineEvent{
 			TsUnix:   ev.TsUnix,
 			Host:     ev.Host,
@@ -122,8 +132,16 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			RuleBase: ruleBase,
 			Result:   "observed",
 		}
-		if ev.Status == http.StatusForbidden {
+		if ev.Type == "waf_trigger" {
+			if mode := strings.TrimSpace(ev.Mode); mode != "" {
+				row.Result = mode + "_triggered"
+			} else {
+				row.Result = "triggered"
+			}
+		} else if ev.Status == http.StatusForbidden {
 			row.Result = "blocked"
+		}
+		if ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block") {
 			res.BlockedEvents++
 		}
 		if info, ok := enrichCache[row.IP]; ok {

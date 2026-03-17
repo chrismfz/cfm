@@ -93,6 +93,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge exclude list")
 	fmt.Println("  cfm webtop challenge exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop waf engine [--hours 24 --limit 20 --top 10]")
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop waf exclude remove <host|path> [--type host|path]")
