@@ -73,6 +73,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	if topN > 100 {
 		topN = 100
 	}
+	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
 
 	to := time.Now()
 	from := to.Add(-time.Duration(hours) * time.Hour)
@@ -80,17 +81,13 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.ToUnix = to.Unix()
 	res.Hours = hours
 
-	observed, err := e.history.QueryEvents("", "", "waf_observe", 2000)
+	e.history.mu.Lock()
+	all, err := e.history.readAllLocked()
+	e.history.mu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	triggers, err := e.history.QueryEvents("", "", "waf_trigger", 2000)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	all := append(observed, triggers...)
 	sort.Slice(all, func(i, j int) bool { return all[i].TsUnix > all[j].TsUnix })
 
 	hosts := map[string]struct{}{}
@@ -104,6 +101,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 
 	for _, ev := range all {
 		if ev.TsUnix < res.FromUnix || ev.TsUnix > res.ToUnix {
+			continue
+		}
+		if ev.Type != "waf_observe" && ev.Type != "waf_trigger" {
 			continue
 		}
 		rule := strings.TrimSpace(ev.Reason)
@@ -144,16 +144,36 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		if ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block") {
 			res.BlockedEvents++
 		}
-		if info, ok := enrichCache[row.IP]; ok {
-			row.Country = info.Country
-			row.ASN = info.ASN
-			row.ASNName = info.ASNName
-		} else if row.IP != "" && e.enr != nil {
-			r := e.enr.Lookup(row.IP)
-			row.Country = r.Country
-			row.ASN = r.ASN
-			row.ASNName = r.ASNName
-			enrichCache[row.IP] = wafEngineEvent{Country: row.Country, ASN: row.ASN, ASNName: row.ASNName}
+		if ev.Payload != nil {
+			if c, ok := ev.Payload["country"].(string); ok && strings.TrimSpace(c) != "" {
+				row.Country = c
+			}
+			if n, ok := ev.Payload["asn_name"].(string); ok && strings.TrimSpace(n) != "" {
+				row.ASNName = n
+			}
+			if av, ok := ev.Payload["asn"]; ok {
+				switch v := av.(type) {
+				case float64:
+					row.ASN = uint(v)
+				case int:
+					row.ASN = uint(v)
+				case uint:
+					row.ASN = v
+				}
+			}
+		}
+		if enrichEnabled && (row.Country == "" || row.ASN == 0 || row.ASNName == "") {
+			if info, ok := enrichCache[row.IP]; ok {
+				row.Country = info.Country
+				row.ASN = info.ASN
+				row.ASNName = info.ASNName
+			} else if row.IP != "" && e.enr != nil {
+				r := e.enr.Lookup(row.IP)
+				row.Country = r.Country
+				row.ASN = r.ASN
+				row.ASNName = r.ASNName
+				enrichCache[row.IP] = wafEngineEvent{Country: row.Country, ASN: row.ASN, ASNName: row.ASNName}
+			}
 		}
 
 		res.TotalEvents++
