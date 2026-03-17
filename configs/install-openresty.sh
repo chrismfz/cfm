@@ -260,7 +260,6 @@ detect_cert_dir() {
     fi
 }
 
-
 create_default_certs_if_missing() {
     local cert_dir
     local cert_file
@@ -287,8 +286,6 @@ create_default_certs_if_missing() {
     log "Created: $cert_file and $key_file"
 }
 
-
-
 ensure_lua_dir() {
     local lua_dir="/usr/local/openresty/nginx/lua"
 
@@ -299,6 +296,23 @@ ensure_lua_dir() {
 
     mkdir -p "$lua_dir"
     log "Created Lua directory: $lua_dir"
+}
+
+ensure_cache_dirs() {
+    local dirs=(
+        /var/cache/nginx/cfm_static
+        /var/cache/nginx/cfm_micro
+    )
+    local d
+
+    for d in "${dirs[@]}"; do
+        if [ -d "$d" ]; then
+            log "Cache directory already present: $d"
+        else
+            mkdir -p "$d"
+            log "Created cache directory: $d"
+        fi
+    done
 }
 
 backup_and_copy_file() {
@@ -346,7 +360,6 @@ deploy_cfm_files() {
                          "/etc/logrotate.d/logrotate-cfm"
 }
 
-
 main() {
     need_root
     detect_os
@@ -365,6 +378,7 @@ main() {
     install_opm_packages
     create_default_certs_if_missing
     ensure_lua_dir
+    ensure_cache_dirs
     deploy_cfm_files
     log "Done"
 }
