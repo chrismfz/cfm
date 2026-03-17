@@ -4,7 +4,7 @@ package webdetector
 import "time"
 
 // Config is the full configuration for the webdetector engine.
-// It is built from [webdetector] in cfm.conf by the detector register.
+// It is built from [webdetector] in detectors.conf by the detector register.
 type Config struct {
 	// Log ingestion
 	Mode      string // "file" | "folder"
