@@ -302,6 +302,73 @@
         </div>
       </section>
 
+
+      <section class="card wide" v-if="shouldShow('wafengine')">
+        <h2>WAF engine analytics</h2>
+        <p class="muted">Structured WAF observations from history storage (no raw log parsing in browser).</p>
+        <div class="toolbar">
+          <label>Window (hours)</label>
+          <input class="input input-small" type="number" min="1" max="720" step="1" v-model.number="wafHours" @change="refreshWAFEngine" />
+          <label>Recent events</label>
+          <input class="input input-small" type="number" min="1" max="2000" step="1" v-model.number="wafEventLimit" @change="refreshWAFEngine" />
+          <label>Top N</label>
+          <input class="input input-small" type="number" min="1" max="100" step="1" v-model.number="wafTopN" @change="refreshWAFEngine" />
+          <button class="btn-quiet" @click="refreshWAFEngine">Refresh WAF</button>
+        </div>
+        <div v-if="wafSummary">
+          <p class="muted">
+            total={{ wafSummary.total_events || 0 }}, blocked={{ wafSummary.blocked_events || 0 }},
+            unique hosts={{ wafSummary.unique_hosts || 0 }}, unique IPs={{ wafSummary.unique_ips || 0 }}.
+          </p>
+          <div class="grid two">
+            <div>
+              <h3>Top rule families</h3>
+              <ul>
+                <li v-for="row in (wafSummary.top_rule_bases || [])" :key="`rb-${row.key}`">{{ row.key }} — {{ row.count }}</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Top exact rules</h3>
+              <ul>
+                <li v-for="row in (wafSummary.top_rules || [])" :key="`r-${row.key}`">{{ row.key }} — {{ row.count }}</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Top attacked hosts</h3>
+              <ul>
+                <li v-for="row in (wafSummary.top_hosts || [])" :key="`h-${row.key}`">{{ row.key }} — {{ row.count }}</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Top source IPs</h3>
+              <ul>
+                <li v-for="row in (wafSummary.top_ips || [])" :key="`ip-${row.key}`"><code>{{ row.key }}</code> — {{ row.count }}</li>
+              </ul>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Time</th><th>Host</th><th>IP</th><th>Method</th><th>URI</th><th>Status</th><th>Rule</th><th>CC/ASN</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, idx) in (wafSummary.rows || [])" :key="`${row.ts_unix}-${row.ip}-${idx}`">
+                  <td>{{ fmtTs(row.ts_unix) }}</td>
+                  <td>{{ row.host || '-' }}</td>
+                  <td><code>{{ row.ip }}</code></td>
+                  <td>{{ row.method || '-' }}</td>
+                  <td class="truncate" :title="row.uri">{{ row.uri || '-' }}</td>
+                  <td>{{ row.status || '-' }}</td>
+                  <td class="truncate" :title="row.reason">{{ row.reason || '-' }}</td>
+                  <td class="truncate" :title="row.asn_name">{{ row.country || '-' }} {{ row.asn ? ('AS' + row.asn) : '' }}</td>
+                </tr>
+                <tr v-if="!(wafSummary.rows || []).length"><td colspan="8" class="muted">No WAF events in selected window.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section class="card wide" v-if="shouldShow('excludes')">
         <h2>Dynamic excludes (Challenge / WAF)</h2>
         <p class="muted">Manage runtime excludes that are persisted on the server and reused by CLI/API.</p>

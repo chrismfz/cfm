@@ -41,6 +41,10 @@
         historySummary: null,
         historyStats: null,
         historyBusy: false,
+        wafHours: 24,
+        wafEventLimit: 200,
+        wafTopN: 10,
+        wafSummary: null,
         pageMode: 'overview',
         vhostFocusHost: '',
         vhostSeriesByHost: {},
@@ -201,9 +205,13 @@
       isForensicsPage() {
         return this.pageMode === 'forensics';
       },
+      isWAFPage() {
+        return this.pageMode === 'waf';
+      },
       pageTitle() {
         if (this.isVhostPage) return 'WebDetector / vhost live';
         if (this.isForensicsPage) return 'WebDetector / forensics';
+        if (this.isWAFPage) return 'WebDetector / WAF engine';
         return 'WebDetector / overview';
       },
       activeChallengeByHost() {
@@ -271,6 +279,7 @@
           overview: new Set(['webtop', 'suspicious', 'longtop', 'globalips', 'excludes', 'vhost']),
           vhost: new Set(['vhost']),
           forensics: new Set(['history', 'ipdrilldown', 'analyze', 'excludes']),
+          waf: new Set(['wafengine', 'excludes']),
         };
         const active = groups[this.pageMode] || groups.overview;
         return active.has(section);
@@ -336,6 +345,13 @@
       pct(v) {
         if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
         return `${(Number(v) * 100).toFixed(1).replace(/\.0$/, '')}%`;
+      },
+      fmtTs(unix) {
+        const v = Number(unix || 0);
+        if (!v) return '-';
+        const d = new Date(v * 1000);
+        if (Number.isNaN(d.getTime())) return '-';
+        return d.toISOString().replace('T', ' ').slice(0, 19);
       },
       sparkPoints(values, maxY = 1) {
         const width = 520;
@@ -679,6 +695,18 @@
         }
       },
 
+
+      async refreshWAFEngine() {
+        if (!this.shouldShow('wafengine')) return;
+        const hours = Math.max(1, Math.min(24 * 30, Number(this.wafHours) || 24));
+        const limit = Math.max(1, Math.min(2000, Number(this.wafEventLimit) || 200));
+        const top = Math.max(1, Math.min(100, Number(this.wafTopN) || 10));
+        this.wafHours = hours;
+        this.wafEventLimit = limit;
+        this.wafTopN = top;
+        this.wafSummary = await this.fetchJSONSafe(`v1/waf/engine/summary?hours=${hours}&limit=${limit}&top=${top}`, null);
+      },
+
       async refreshHistory() {
         const host = String(this.historyHost || '').trim();
         const ip = String(this.historyIP || '').trim();
@@ -727,6 +755,7 @@
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
           if (this.shouldShow('history')) await this.refreshHistory();
+          if (this.shouldShow('wafengine')) await this.refreshWAFEngine();
 
           if (this.shouldShow('vhost') && this.isVhostPage) {
             const vhostTarget = String(this.vhostFocusHost || '').trim() || String(this.activeHost || '').trim() || this.topShort[0]?.host;
@@ -773,6 +802,7 @@
       const path = (window.location.pathname || '').replace(/\/+$/, '/');
       if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
       else if (path.includes('/webdetector/vhost/')) this.pageMode = 'vhost';
+      else if (path.includes('/webdetector/waf/')) this.pageMode = 'waf';
       else this.pageMode = 'overview';
 
       const currentURL = new URL(window.location.href);
@@ -782,10 +812,10 @@
         this.vhostFocusHost = qHost.trim();
         this.activeHost = this.vhostFocusHost;
       }
-      if (this.isForensicsPage && qHost) {
+      if ((this.isForensicsPage || this.isWAFPage) && qHost) {
         this.historyHost = qHost.trim();
       }
-      if (this.isForensicsPage && qIP) {
+      if ((this.isForensicsPage || this.isWAFPage) && qIP) {
         this.historyIP = qIP.trim();
       }
 
