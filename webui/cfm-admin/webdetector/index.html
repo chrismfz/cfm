@@ -287,7 +287,9 @@
           events={{ historyStats.events || 0 }} |
           hosts={{ historyStats.unique_hosts || 0 }} |
           ips={{ historyStats.unique_ips || 0 }} |
-          size={{ formatBytes(historyStats.size_bytes) }}
+          size={{ formatBytes(historyStats.size_bytes) }} |
+          retention_days={{ historyStats.retention_days }} |
+          prune_every_sec={{ historyStats.prune_every_sec }}
         </div>
         <div class="table-wrap">
           <table>

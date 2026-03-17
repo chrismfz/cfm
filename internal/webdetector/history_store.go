@@ -41,11 +41,13 @@ type HistoryEvent struct {
 }
 
 type HistoryStats struct {
-	Path        string `json:"path"`
-	Events      int    `json:"events"`
-	UniqueHosts int    `json:"unique_hosts"`
-	UniqueIPs   int    `json:"unique_ips"`
-	SizeBytes   int64  `json:"size_bytes"`
+	Path          string `json:"path"`
+	Events        int    `json:"events"`
+	UniqueHosts   int    `json:"unique_hosts"`
+	UniqueIPs     int    `json:"unique_ips"`
+	SizeBytes     int64  `json:"size_bytes"`
+	RetentionDays int    `json:"retention_days"`
+	PruneEverySec int64  `json:"prune_every_sec"`
 }
 
 type HistorySummary struct {
@@ -609,6 +611,8 @@ func (s *HistoryStore) Stats() (HistoryStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st.Path = s.path
+	st.RetentionDays = s.retentionDays
+	st.PruneEverySec = int64(s.pruneEvery / time.Second)
 	stmt, err := prepareSQL(s.db, `SELECT COUNT(*), COUNT(DISTINCT host), COUNT(DISTINCT ip) FROM history`)
 	if err != nil {
 		return st, err
