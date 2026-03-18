@@ -95,8 +95,6 @@ local CFG = {
   rule_upload_filename  = "logonly",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content   = "logonly",  -- webshell bytes / PHP tags inside uploaded file content
 
-  -- [top-5]  PHP double-extension URI
-  rule_php_double_ext   = "logonly",  -- .php. double-extension in URI (shell.php.jpg)
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -604,8 +602,26 @@ local function auth_endpoint_tag(uri, method)
 
   if has(uri, "/wp-login.php") then return "AUTH_WP_LOGIN" end
   if has(uri, "/xmlrpc.php")   then return "AUTH_WP_XMLRPC" end
-  if has(uri, "/administrator/index.php") then return "AUTH_JOOMLA_ADMIN" end
   if has(uri, "/user/login") then return "AUTH_DRUPAL_LOGIN" end
+
+
+if has(uri, "/administrator/index.php") then
+  -- Treat Joomla admin as auth only for real login-ish flows,
+  -- not every authenticated backend/template/ajax request.
+  if method == "post" then
+    return "AUTH_JOOMLA_ADMIN"
+  end
+
+  if has(uri, "option=com_login") then
+    return "AUTH_JOOMLA_ADMIN"
+  end
+
+  if has(uri, "view=login") then
+    return "AUTH_JOOMLA_ADMIN"
+  end
+end
+
+
 
   if has(uri, "/admin") and (has(uri, "login") or has(uri, "auth")) then
     return "AUTH_MAGENTO_ADMIN"
@@ -837,7 +853,6 @@ local function detect_cmd_param_key(args)
   end
 
   if key("exec")       then return "CMD_EXEC" end
-  if key("system")     then return "CMD_SYSTEM" end
   if key("passthru")   then return "CMD_PASSTHRU" end
   if key("shell_exec") then return "CMD_SHELL_EXEC" end
   if key("eval")       then return "CMD_EVAL" end
@@ -1323,20 +1338,6 @@ local function detect_proxy_header_sqli(headers)
   return nil
 end
 
--- ─────────────────────────────────────────────────────────────────────────────
--- RESEARCH ADDITIONS – URI CHECKS
--- ─────────────────────────────────────────────────────────────────────────────
-
--- [top-5 / php-security] PHP double-extension URI.
--- Source: uusec php-security-rule-set.lua.
--- Pattern: .php. or .phtml. in URI catches shell.php.jpg type uploads that
--- execute as PHP on misconfigured servers (AddHandler / FilesMatch directives).
-local function detect_php_double_ext(uri)
-  local u = lower(uri or "")
-  if u:match("%.php%d?%.") then return "PHP_DOUBLE_EXT" end
-  if u:match("%.phtml%.")  then return "PHTML_DOUBLE_EXT" end
-  return nil
-end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RESEARCH ADDITIONS – ARGS / BODY INJECTION CHECKS
@@ -1722,16 +1723,8 @@ function _M.check(ctx)
   end
 
   -- ── 10) PHP double-extension in URI ──────────────────────────────────────
-  do
-    local mode = rule_mode(CFG.rule_php_double_ext, "logonly")
-    if mode ~= "disabled" then
-      local tag = detect_php_double_ext(uri)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_PHP_DOUBLE_EXT:" .. tag, ttl, mode
-      end
-    end
-  end
+
+-- removed --
 
   -- ── 11) Bare IP Host ──────────────────────────────────────────────────────
   do
