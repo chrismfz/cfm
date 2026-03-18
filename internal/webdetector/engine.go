@@ -1069,24 +1069,25 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		}
 
 		// empty UA
-		if e.cfg.ChallengeIPNoUAMin > 0 {
-			if rec.UA == "" || rec.UA == "-" {
-				if b.ipsNoUA == nil {
-					b.ipsNoUA = make(map[string]int)
-				}
-				b.ipsNoUA[rec.IP]++
-				e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "no_ua", TS: rec.TS}
+if e.cfg.ChallengeIPNoUAMin > 0 {
+	if rec.UA == "" || rec.UA == "-" {
+		if !isMachineStyleEndpointGo(p) {
+			if b.ipsNoUA == nil {
+				b.ipsNoUA = make(map[string]int)
+			}
+			b.ipsNoUA[rec.IP]++
+			e.chalLast[rec.IP] = chalCtx{
+				Host:   rec.Host,
+				URI:    p,
+				Method: rec.Method,
+				Status: rec.Status,
+				Sub:    "no_ua",
+				TS:     rec.TS,
 			}
 		}
+	}
+}
 
-		// http/1.0
-		if e.cfg.ChallengeIPHTTP10Min > 0 && rec.Proto == "http/1.0" {
-			if b.ipsHTTP10 == nil {
-				b.ipsHTTP10 = make(map[string]int)
-			}
-			b.ipsHTTP10[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "http/1.0", TS: rec.TS}
-		}
 
 		// malformed request burst: 400 Bad Request + 414 URI Too Long + 431 Headers Too Large
 		if e.cfg.ChallengeIPMalformedMin > 0 &&

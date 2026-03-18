@@ -12,6 +12,9 @@ import (
 
     "cfm/internal/reporting"
     "cfm/internal/logging"
+
+    "bytes"
+    "context"
 )
 
 type APIClient struct {
@@ -145,4 +148,51 @@ func (c *APIClient) ConfirmUnblock(id int, ip string, success bool) error {
         return fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
     }
     return nil
+}
+
+
+
+type HeartbeatRequest struct {
+	DNATEnabled *bool `json:"dnat_enabled,omitempty"`
+}
+
+func (c *APIClient) SendHeartbeat(ctx context.Context, version, userAgent string, dnatEnabled *bool) error {
+	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/heartbeat"
+
+	body, err := json.Marshal(HeartbeatRequest{
+		DNATEnabled: dnatEnabled,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal heartbeat: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Token", c.Token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	if version != "" {
+		req.Header.Set("X-Agent-Version", version)
+	}
+	if userAgent != "" {
+		req.Header.Set("agent", userAgent)
+		req.Header.Set("version", version)
+	}
+
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
+	}
+
+	return nil
 }

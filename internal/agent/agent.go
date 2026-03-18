@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"bytes"
+//	"bytes"
 	"context"
 	"crypto/tls"
 	"net/http"
@@ -12,6 +12,7 @@ import (
 
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+"cfm/internal/dnat"
 )
 
 type Config struct {
@@ -100,23 +101,6 @@ func (r *Runner) loop() {
 	}
 }
 
-func (r *Runner) doHeartbeat(ctx context.Context) {
-	cfg := r.cur()
-	if cfg.BaseURL == "" || cfg.Token == "" { return }
-	url := cfg.BaseURL + "/api/agent/heartbeat"
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(nil))
-	req.Header.Set("Token", cfg.Token)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Version", cfg.Version)
-	if cfg.UserAgent != "" {
-		req.Header.Set("agent", cfg.UserAgent)
-		req.Header.Set("version", cfg.Version)
-	}
-	resp, err := r.client.Do(req)
-	if err != nil { return }
-	_ = resp.Body.Close()
-}
 
 func (r *Runner) cur() Config { return r.cfg.Load().(Config) }
 
@@ -127,4 +111,32 @@ func normalize(c Config) Config {
 		c.BaseURL = "https://" + c.BaseURL
 	}
 	return c
+}
+
+
+func (r *Runner) doHeartbeat(ctx context.Context) {
+	cfg := r.cur()
+	if cfg.BaseURL == "" || cfg.Token == "" {
+		return
+	}
+
+	api := &APIClient{
+		BaseURL: cfg.BaseURL,
+		Token:   cfg.Token,
+		HTTP:    r.client,
+	}
+
+	var dnatEnabled *bool
+	if r.backend != nil {
+		on, err := dnat.Status(r.backend)
+		if err != nil {
+			logging.LogfAPI("[agent] heartbeat dnat status check failed: %v", err)
+		} else {
+			dnatEnabled = &on
+		}
+	}
+
+	if err := api.SendHeartbeat(ctx, cfg.Version, cfg.UserAgent, dnatEnabled); err != nil {
+		logging.LogfAPI("[agent] heartbeat failed: %v", err)
+	}
 }

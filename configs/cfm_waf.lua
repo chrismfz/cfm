@@ -728,6 +728,33 @@ local function is_machine_style_endpoint(uri)
   if has(u, "/auth/token") then return true end
   if has(u, "/api")    then return true end
 
+  if has(u, "/auth/realms/") 			then return true end
+  if has(u, "/realms/") 			then return true end
+  if has(u, "/protocol/openid-connect/") 	then return true end
+  if has(u, "/.well-known/openid-configuration") then return true end
+  if has(u, "/.well-known/jwks.json")		then return true end
+  if has(u, "/sso/") 				then return true end
+  if has(u, "/stripe/webhook") 			then return true end
+  if has(u, "/paypal/ipn") 			then return true end
+  if has(u, "/adyen/") 				then return true end
+  if has(u, "/checkout/webhook") 		then return true end
+  if has(u, "/payment/callback")		then return true end
+  if has(u, "/github/webhook") 			then return true end
+  if has(u, "/gitlab/webhook") 			then return true end
+  if has(u, "/bitbucket-hook") 			then return true end
+  if has(u, "/slack/webhook") 			then return true end
+  if has(u, "/telegram/webhook") 		then return true end
+  if has(u, "/rest/") 				then return true end
+  if has(u, "/graphql") 			then return true end
+  if has(u, "/wp-json/") 			then return true end
+  if has(u, "/wc-api/") 			then return true end
+  if has(u, "/?wc-api=") 			then return true end
+  if has(u, "/mobile-api/")			then return true end
+  if has(u, "/client-api/")			then return true end
+  if has(u, "/public-api/")			then return true end
+  if has(u, "/upload")				then return true end
+  if has(u, "/queue")				then return true end
+  if has(u, "/jobs")				then return true end
 
   return false
 end

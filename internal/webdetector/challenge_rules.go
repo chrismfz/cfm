@@ -56,6 +56,63 @@ func hostMatchAny(host string, patterns []string) bool {
 }
 
 
+func isMachineStyleEndpointGo(uri string) bool {
+	u := strings.ToLower(strings.TrimSpace(uri))
+	if u == "" {
+		return false
+	}
+
+	// Magento token endpoints
+	if strings.Contains(u, "/rest/v1/integration/admin/token") { return true}
+	if strings.Contains(u, "/rest/v1/integration/customer/token") {return true}
+	// WooCommerce / WP API
+	if strings.Contains(u, "/wp-json/wc/") {return true}
+	if strings.Contains(u, "/wp-json/wc-") {return true}
+	if strings.Contains(u, "/wp-json/wc_") {return true}
+
+	// Known app-to-app/payment style routes
+	if strings.Contains(u, "/shop-api/") {return true}
+	if strings.Contains(u, "/transaction-payment-created") {return true}
+	if strings.Contains(u, "/payments_methods_endpoint") {return true}
+	// Generic machine endpoints
+	if strings.Contains(u, "/webhook") {return true}
+	if strings.Contains(u, "/callback") {return true}
+	if strings.Contains(u, "/oauth") {return true}
+	if strings.Contains(u, "/auth/token") {return true}
+	if strings.Contains(u, "/api") {return true}
+	if strings.Contains(u, "/auth/realms/") { return true }       // Keycloak
+	if strings.Contains(u, "/realms/") { return true }
+	if strings.Contains(u, "/protocol/openid-connect/") { return true }
+	if strings.Contains(u, "/.well-known/openid-configuration") { return true }
+	if strings.Contains(u, "/.well-known/jwks.json") { return true }
+	if strings.Contains(u, "/sso/") { return true }
+	if strings.Contains(u, "/stripe/webhook") { return true }
+	if strings.Contains(u, "/paypal/ipn") { return true }
+	if strings.Contains(u, "/adyen/") { return true }
+	if strings.Contains(u, "/checkout/webhook") { return true }
+	if strings.Contains(u, "/payment/callback") { return true }
+	if strings.Contains(u, "/github/webhook") { return true }
+	if strings.Contains(u, "/gitlab/webhook") { return true }
+	if strings.Contains(u, "/bitbucket-hook") { return true }
+	if strings.Contains(u, "/slack/webhook") { return true }
+	if strings.Contains(u, "/telegram/webhook") { return true }
+	if strings.Contains(u, "/rest/") { return true }              // BUT consider scoping tighter
+	if strings.Contains(u, "/graphql") { return true }
+	if strings.Contains(u, "/wp-json/") { return true }           // broader but common
+	if strings.Contains(u, "/wc-api/") { return true }            // legacy Woo
+	if strings.Contains(u, "/?wc-api=") { return true }           // PayPal/Stripe callbacks
+	if strings.Contains(u, "/mobile-api/") { return true }
+	if strings.Contains(u, "/client-api/") { return true }
+	if strings.Contains(u, "/public-api/") { return true }
+	if strings.Contains(u, "/upload") { return true }
+	if strings.Contains(u, "/queue") { return true }
+	if strings.Contains(u, "/jobs") { return true }
+
+
+	return false
+}
+
+
 
 func (e *Engine) hostBypassed(host string) bool {
     if host == "" {
