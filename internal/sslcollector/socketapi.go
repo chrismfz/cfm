@@ -262,6 +262,34 @@ func (s *sockServer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *sockServer) handleDump(w http.ResponseWriter, r *http.Request) {
+	if !s.authOK(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+	host = strings.TrimSuffix(host, ".")
+	if !validHost(host) {
+		http.Error(w, "bad host", http.StatusBadRequest)
+		return
+	}
+
+	e := s.col.EntryForHost(host)
+	if e == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(e)
+}
+
+
 // ServeSock starts an HTTP API on a unix socket for OpenResty.
 // It stops when ctx is canceled.
 func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error {
@@ -296,6 +324,7 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	mux.HandleFunc("/stats", s.handleStats)
 	mux.HandleFunc("/dumpall", s.handleDumpAll)
 	mux.HandleFunc("/refresh", s.handleRefresh)
+	mux.HandleFunc("/dump", s.handleDump)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -316,3 +345,6 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	}
 	return nil
 }
+
+
+

@@ -2926,16 +2926,17 @@ func (e *Engine) isBypassed(ip string) bool {
 	return e.bypassFunc != nil && e.bypassFunc(ip)
 }
 
+
 // isExcluded runs the challenge-exclude rules for ip.
 // It resolves ASN / PTR via the engine's enricher if available.
 // ua is best-effort (callers pass "" when unknown; ua=* rules still match).
 func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	if e.challengeExcludes != nil && e.challengeExcludes.MatchHost(host) {
-		logging.Logf("[challenge][debug] exclude_store_match ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
+		//logging.Logf("[challenge][debug] exclude_store_match ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return true
 	}
 	if e.chalExcludeFunc == nil {
-		logging.Logf("[challenge][debug] exclude_no_func ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
+		//logging.Logf("[challenge][debug] exclude_no_func ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return false
 	}
 	asn, ptr := "", ""
@@ -2946,11 +2947,11 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 		}
 		ptr = r.PTR
 	}
-	action, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
-	logging.Logf("[challenge][debug] isExcluded ip=%s host=%s ua=%q rule=%s asn=%q ptr=%q action=%q matched=%v",
-		ip, host, ua, rule, asn, ptr, action, matched)
+	_, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
+	//logging.Logf("[challenge][debug] isExcluded ip=%s host=%s ua=%q rule=%s asn=%q ptr=%q matched=%v", ip, host, ua, rule, asn, ptr, matched)
 	return matched
 }
+
 
 
 func (e *Engine) ChallengeExcludeAdd(typ, value string) bool {

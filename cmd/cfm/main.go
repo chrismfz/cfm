@@ -40,6 +40,7 @@ import (
 	"cfm/internal/cli"
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
+	"cfm/internal/clam"
 )
 
 var (
@@ -177,6 +178,12 @@ func main() {
 			os.Exit(1)
 		}
 
+
+	case "clam", "clamd", "clamav":
+		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
+
+
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
@@ -214,6 +221,10 @@ Usage:
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm mysqltop -- MySQL Live stats
 
+  cfm clam ping
+  cfm clam version
+  cfm clam scan <file-or-dir>
+
 Options (overall top):
   --limit N        rows for the main top table (default 10)
   --smin F         suspicious score threshold (default 0.60)
@@ -223,7 +234,7 @@ Options (overall top):
 
 Description:
   local nftables manager (block/allow with optional TTL),
-  plus -NOT SO SIMPLE NOW- simple (lol) list/unlist/flush. `)
+   `)
 }
 
 // ----------------------------------------------------------------------------
@@ -618,6 +629,9 @@ func runDaemon(args []string) {
 	// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 	smtpLc := nflog.NewSnoopLifecycle()
 
+
+
+
 	// Ensure base data dirs exist with correct permissions
 	for _, d := range []struct {
 		path string
@@ -637,11 +651,52 @@ func runDaemon(args []string) {
 
 	govLc := mysql.NewGovernorLifecycle()
 
+
+	var clamMgr *clam.Manager
+	defer func() {
+		if clamMgr != nil {
+			clamMgr.Stop()
+		}
+	}()
+
+
+
 	// ── applySystemConfig ────────────────────────────────────────────────────────
 	// Stateless: logging init, sysctl tweaks, SMTP owner resolution.
 	applySystemConfig := func(cfg *cfgpkg.Config) {
 		cfg.SystemTweaks.SetDefaults()
 		logging.Init(&cfg.Logging)
+
+
+		clam.SetLogger(logging.LogfCLAM)
+
+		if clamMgr != nil {
+			clamMgr.Stop()
+			clamMgr = nil
+		}
+
+		if cfg.Clam.Enabled {
+			clamMgr = clam.NewManager(clam.Config{
+				Enabled:    cfg.Clam.Enabled,
+				Network:    cfg.Clam.Network,
+				Address:    cfg.Clam.Address,
+				Timeout:    cfg.Clam.Timeout,
+				MaxWorkers: cfg.Clam.MaxWorkers,
+				QueueSize:  cfg.Clam.QueueSize,
+			})
+			clamMgr.Start()
+
+			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d",
+				cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
+				cfg.Clam.MaxWorkers, cfg.Clam.QueueSize)
+		} else {
+			logging.LogfCLAM("[clam] disabled")
+		}
+
+
+
+
+
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)
 		}

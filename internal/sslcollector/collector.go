@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 type Collector struct {
@@ -37,7 +39,7 @@ func New(cfg Config) *Collector {
 		cfg.StatEvery = 60 * time.Second
 	}
 	if cfg.DiscoveryEvery <= 0 {
-		cfg.DiscoveryEvery = 6 * time.Hour
+		cfg.DiscoveryEvery = 15 * time.Minute
 	}
 	if cfg.NegativeTTL <= 0 {
 		cfg.NegativeTTL = 30 * time.Second
@@ -115,6 +117,15 @@ func (c *Collector) GetCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, 
 	return cc2.cert, nil
 }
 
+func expandGlob(pattern string) []string {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	return matches
+}
+
+
 func (c *Collector) Run(ctx context.Context) error {
 	if !c.cfg.Enabled {
 		return nil
@@ -122,6 +133,30 @@ func (c *Collector) Run(ctx context.Context) error {
 
 	// initial refresh
 	_ = c.Refresh(ctx)
+
+	// START WATCHER (NEW)
+	roots := []string{
+		"/etc/letsencrypt",
+		"/var/cpanel/ssl",
+		"/usr/local/directadmin",
+		"/etc/ssl",
+	}
+
+// targeted home scanning
+roots = append(roots, expandGlob("/home/*/ssl")...)
+roots = append(roots, expandGlob("/home/*/certs")...)
+roots = append(roots, expandGlob("/home/*/letsencrypt")...)
+roots = append(roots, expandGlob("/home/*/domains")...)
+
+
+	w, err := NewWatcher(c, 2*time.Second)
+	if err == nil {
+		_ = w.Start(ctx, roots)
+	} else {
+		logging.Logf("[sslcollector] watcher disabled: %v", err)
+	}
+
+
 
 	statTicker := time.NewTicker(c.cfg.StatEvery)
 	defer statTicker.Stop()

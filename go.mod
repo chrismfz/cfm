@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/florianl/go-nflog/v2 v2.3.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gizak/termui/v3 v3.1.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/mdlayher/netlink v1.9.1-0.20260312172110-2a932c0fc1ae

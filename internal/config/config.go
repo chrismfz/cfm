@@ -29,6 +29,7 @@ type Config struct {
 	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
 	VHostMap         VHostMapConfig
+	Clam             ClamConfig
 }
 
 // --- Categories ---
@@ -50,6 +51,15 @@ type SSLCollectorSockConfig struct {
 	Token    string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
 	PEMTTL   time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
 	PEMMax   int           // SSLCOLLECTOR_SOCK_PEM_MAX (default 50000)
+}
+
+type ClamConfig struct {
+	Enabled bool          // CLAMD_ENABLED
+	Network string        // CLAMD_NETWORK (unix|tcp)
+	Address string        // CLAMD_SOCKET or 127.0.0.1:3310
+	Timeout time.Duration // CLAMD_TIMEOUT
+	MaxWorkers int
+	QueueSize  int
 }
 
 // DebugConfig — controls the internal debug/metrics HTTP server
@@ -163,6 +173,9 @@ type LoggingConfig struct {
 	WAFStdout bool   // WAF_LOG_STDOUT
 	WAFFile   string // WAF_LOG_FILE
 
+	CLAMStdout bool   // CLAM_LOG_STDOUT
+	CLAMFile   string // CLAM_LOG_FILE
+
 }
 
 type NFTConfig struct {
@@ -253,6 +266,22 @@ func (c *Config) SetDefaults() {
 	if c.Throttle.Mode == "" {
 		c.Throttle.Mode = "permanent"
 	}
+
+
+	if c.Clam.Network == "" {
+		c.Clam.Network = "unix"
+	}
+	if c.Clam.Timeout <= 0 {
+		c.Clam.Timeout = 10 * time.Second
+	}
+
+	if c.Clam.MaxWorkers <= 0 {
+		c.Clam.MaxWorkers = 2
+	}
+	if c.Clam.QueueSize <= 0 {
+		c.Clam.QueueSize = 256
+	}
+
 
 	// --- MaxMind defaults ---
 	if c.MaxMind.Dir == "" {
@@ -644,6 +673,32 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "MYSQL_LOG_FILE":
 			cfg.Logging.MYSQLFile = val
 
+
+
+//CLAMAV
+		case "CLAM_LOG_STDOUT":
+			cfg.Logging.CLAMStdout = parseBool(val)
+		case "CLAM_LOG_FILE":
+			cfg.Logging.CLAMFile = val
+
+		case "CLAMD_ENABLED":
+			cfg.Clam.Enabled = parseBool(val)
+		case "CLAMD_NETWORK":
+			cfg.Clam.Network = strings.ToLower(strings.TrimSpace(val))
+		case "CLAMD_SOCKET", "CLAMD_ADDRESS":
+			cfg.Clam.Address = val
+		case "CLAMD_TIMEOUT":
+			if d, err := time.ParseDuration(strings.TrimSpace(val)); err == nil {
+				cfg.Clam.Timeout = d
+			}
+
+		case "CLAMD_MAX_WORKERS":
+			cfg.Clam.MaxWorkers = parseInt(val)
+		case "CLAMD_QUEUE_SIZE":
+			cfg.Clam.QueueSize = parseInt(val)
+
+
+
 		// Hardening
 		case "BLOCK_BAD_TCP_FLAGS":
 			cfg.Hardening.BlockBadTCPFlags = parseBool(val)
@@ -727,6 +782,8 @@ func IsKnownKey(key string) bool {
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
 		"VHOST_MAP_ENABLE", "VHOST_MAP_WRITE", "VHOST_MAP_TTL", "VHOST_MAP_VAR", "VHOST_MAP_SOURCE", "VHOST_MAP_DEFAULT_IP", "VHOST_MAP_RELOAD_CMD",
 		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",
+		"CLAM_LOG_STDOUT", "CLAM_LOG_FILE",
+		"CLAMD_ENABLED", "CLAMD_NETWORK", "CLAMD_SOCKET", "CLAMD_ADDRESS", "CLAMD_TIMEOUT", "CLAMD_MAX_WORKERS", "CLAMD_QUEUE_SIZE",
 		"SYS_TWEAKS_ENABLE", "SYS_TWEAKS_PERSIST", "SYS_CT_PER_GB", "SYS_CT_MIN", "SYS_CT_MAX", "SYS_TCP_LOOSE_STRICT", "SYS_TCP_SYN_RETRIES", "SYS_TCP_SYNACK_RETRIES", "SYS_TCP_FIN_TIMEOUT", "SYS_CT_TIMEWAIT", "SYS_CT_FINWAIT", "SYS_CT_CLOSEWAIT", "SYS_RP_FILTER", "SYS_ACCEPT_REDIRECTS", "SYS_SEND_REDIRECTS", "SYS_ROUTE_LOCALNET", "SYS_ROUTE_LOCALNET_IF":
 		return true
 	default:

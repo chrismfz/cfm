@@ -20,6 +20,7 @@ var (
 	mysqlLogFile      *os.File // mysql enforcer
 	once              sync.Once
 	cfg               *config.LoggingConfig
+	clamLogFile       *os.File
 )
 
 var debugEnabled = os.Getenv("CFM_DEBUG") == "1"
@@ -57,6 +58,30 @@ func Init(c *config.LoggingConfig) {
 				fmt.Printf("failed to open api log file %s: %v\n", apiPath, err)
 			}
 		}
+
+
+	// CLAM log
+	clamPath := cfg.CLAMFile
+	if clamPath == "" && cfg.File != "" {
+		base := cfg.File
+		ext := filepath.Ext(base)
+		if ext == "" {
+			clamPath = base + ".clam"
+		} else {
+			clamPath = strings.TrimSuffix(base, ext) + ".clam" + ext
+		}
+	}
+	if clamPath == "" {
+		clamPath = "/var/log/cfm/cfm.clam.log"
+	}
+	if f, err := os.OpenFile(clamPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+		clamLogFile = f
+	} else {
+		fmt.Printf("failed to open clam log file %s: %v\n", clamPath, err)
+	}
+
+
+
 
 		// SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
 		smtpPath := cfg.SMTPFile
@@ -115,6 +140,11 @@ if f, err := os.OpenFile(wafPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); er
 } else {
 	fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
 }
+
+
+
+
+
 
 
 		// MYSQL GOVERNOR log
@@ -256,6 +286,24 @@ func LogfMYSQLGOVERNOR(format string, args ...interface{}) {
 	}
 	if mysqlLogFile != nil {
 		_, _ = mysqlLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
+}
+
+
+
+// CLAM LOGGING
+func LogfCLAM(format string, args ...interface{}) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
+
+	if cfg == nil || cfg.CLAMStdout {
+		fmt.Print(line)
+	}
+	if clamLogFile != nil {
+		_, _ = clamLogFile.WriteString(line)
 	} else if logFile != nil {
 		_, _ = logFile.WriteString(line)
 	}
