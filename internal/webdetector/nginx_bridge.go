@@ -26,6 +26,7 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/logging"
+	"cfm/internal/clam"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"io"
+	"path/filepath"
 )
 
 // ── Config fields (add these to webdetector.Config) ──────────────────────────
@@ -83,6 +86,11 @@ type NginxBridge struct {
 
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
+
+	// Clam
+	clamMgr      clam.Enqueuer
+	clamPending  string
+	clamInfected string
 }
 
 // refreshSkew is the minimum remaining time before we bother to re-push
@@ -218,6 +226,126 @@ func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
 	}
 	b.mu.Unlock()
 }
+
+// Clam Manager
+func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir string) {
+    if b == nil {
+        return
+    }
+    b.clamMgr = m
+    b.clamPending = pendingDir
+    b.clamInfected = infectedDir
+    if pendingDir != "" {
+        _ = os.MkdirAll(pendingDir, 0o700)
+    }
+    if infectedDir != "" {
+        _ = os.MkdirAll(infectedDir, 0o700)
+    }
+}
+
+type nginxUploadMsg struct {
+    IP           string `json:"ip"`
+    Host         string `json:"host,omitempty"`
+    URI          string `json:"uri,omitempty"`
+    Method       string `json:"method,omitempty"`
+    Filename     string `json:"filename,omitempty"`
+    BodyFile     string `json:"body_file"`
+    Reason       string `json:"reason,omitempty"`
+    AlreadyCopied bool  `json:"already_copied,omitempty"`
+}
+
+func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
+    if !b.checkToken(r) {
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+    if r.Method != http.MethodPost {
+        http.Error(w, "method", http.StatusMethodNotAllowed)
+        return
+    }
+    r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
+
+    var msg nginxUploadMsg
+    if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+        http.Error(w, "bad json", http.StatusBadRequest)
+        return
+    }
+
+    ip       := strings.TrimSpace(msg.IP)
+    host     := normalizeHost(msg.Host)
+    uri      := strings.TrimSpace(msg.URI)
+    bodyFile := strings.TrimSpace(msg.BodyFile)
+    reason   := strings.TrimSpace(msg.Reason)
+    filename := strings.TrimSpace(msg.Filename)
+
+    // Always log receipt
+    logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
+        ip, host, uri, filename, reason)
+
+    if bodyFile == "" || b.clamMgr == nil || !b.clamMgr.Enabled() {
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+
+    fi, err := os.Stat(bodyFile)
+    if err != nil || fi.IsDir() || fi.Size() == 0 {
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+
+    var scanPath string
+
+    if msg.AlreadyCopied {
+        // Lua wrote the temp file (small upload, body was in memory)
+        scanPath = bodyFile
+    } else {
+        // Large upload — nginx spool, we must copy before handler returns
+        dst := filepath.Join(b.clamPending,
+            fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), ip))
+        if err := copyFile(bodyFile, dst); err != nil {
+            logging.LogfCLAM("[upload] copy_failed src=%q err=%v", bodyFile, err)
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+        scanPath = dst
+    }
+
+    label := "UPLOAD"
+    if reason != ""  { label += ":" + reason }
+    if filename != "" { label += ":" + filename }
+
+    b.clamMgr.Enqueue(clam.Job{
+        Path:        scanPath,
+        IP:          ip,
+        Host:        host,
+        URI:         uri,
+        Reason:      label,
+        TempCopy:    true,
+        InfectedDir: b.clamInfected,
+    })
+
+    w.WriteHeader(http.StatusOK)
+}
+
+func copyFile(src, dst string) error {
+    in, err := os.Open(src)
+    if err != nil {
+        return err
+    }
+    defer in.Close()
+    out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+    if err != nil {
+        return err
+    }
+    _, err = io.Copy(out, in)
+    cerr := out.Close()
+    if err != nil {
+        _ = os.Remove(dst)
+        return err
+    }
+    return cerr
+}
+
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
@@ -654,6 +782,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta)
 	mux.HandleFunc("/nginx/waf/excludes", b.handleWAFExcludes)
 	mux.HandleFunc("/nginx/status", b.handleStatus)
+	mux.HandleFunc("/nginx/upload", b.handleUpload)
 
 	srv := &http.Server{
 		Handler:           mux,

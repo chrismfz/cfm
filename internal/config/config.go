@@ -60,6 +60,8 @@ type ClamConfig struct {
 	Timeout time.Duration // CLAMD_TIMEOUT
 	MaxWorkers int
 	QueueSize  int
+	PendingDir  string  // CLAMD_PENDING_DIR  default /var/lib/cfm/scanner/pending
+	InfectedDir string  // CLAMD_INFECTED_DIR default /var/lib/cfm/scanner/infected
 }
 
 // DebugConfig — controls the internal debug/metrics HTTP server
@@ -281,6 +283,9 @@ func (c *Config) SetDefaults() {
 	if c.Clam.QueueSize <= 0 {
 		c.Clam.QueueSize = 256
 	}
+
+c.Clam.PendingDir  = "/var/lib/cfm/scanner/pending"
+c.Clam.InfectedDir = "/var/lib/cfm/scanner/infected"
 
 
 	// --- MaxMind defaults ---
@@ -697,6 +702,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "CLAMD_QUEUE_SIZE":
 			cfg.Clam.QueueSize = parseInt(val)
 
+case "CLAMD_PENDING_DIR":
+    cfg.Clam.PendingDir = v
+case "CLAMD_INFECTED_DIR":
+    cfg.Clam.InfectedDir = v
 
 
 		// Hardening

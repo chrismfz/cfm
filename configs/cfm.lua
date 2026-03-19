@@ -18,6 +18,7 @@
 
 local cjson = require "cjson.safe"
 
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +64,12 @@ local CFG = {
   post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
   post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
 }
+
+
+-- cfm_clamav is optional: if the file is missing cfm continues normally
+local clamav_ok, clamav = pcall(require, "cfm_clamav")
+if clamav_ok then clamav.init({ token = CFG.token, sock_path = CFG.sock_path  }) end
+
 
 -- Shared dict used for both bridge decision cache (d|...) and POST resume stash (pr|...).
 local SH = ngx.shared.cfm_decisions
@@ -894,6 +901,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     body    = req_body,
   })
 
+
+ -- Async ClamAV scan for multipart uploads. Passes WAF reason if one fired.
+  if clamav_ok then clamav.notify(ip, hit and reason or nil) end
+
+
   if hit then
     waf_action = waf_action or "challenge"
     local p_host = ngx.var.host        or host
@@ -970,6 +982,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
   end
   end
 end
+
+
+-- ClamAV notify for paths where WAF was not loaded/enabled
+if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
+
 
 -- ── Step 3: Bridge Decision ───────────────────────────────────────────────────
 local d          = get_decision(ip, host, uri, method, scheme)

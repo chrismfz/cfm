@@ -38,6 +38,8 @@ type Job struct {
 	Host   string
 	URI    string
 	Reason string
+	TempCopy    bool   // worker must handle file after scan
+	InfectedDir string // where to move infected evidence
 }
 
 type Manager struct {
@@ -47,6 +49,12 @@ type Manager struct {
 	stopCh  chan struct{}
 	started bool
 }
+
+type Enqueuer interface {
+    Enqueue(Job) bool
+    Enabled() bool
+}
+
 
 var logf = func(format string, args ...interface{}) {}
 
@@ -262,6 +270,10 @@ func (m *Manager) Enqueue(job Job) bool {
 	}
 }
 
+func (m *Manager) Enabled() bool {
+    return m != nil && m.started && m.client.Enabled()
+}
+
 func (m *Manager) worker(id int) {
 	for {
 		select {
@@ -276,52 +288,84 @@ func (m *Manager) worker(id int) {
 	}
 }
 
+
+
 func (m *Manager) process(job Job) {
-	fi, err := os.Stat(job.Path)
-	if err != nil {
-		logf("[clam] result=error path=%s err=%q ip=%s host=%s uri=%s reason=%s",
-			job.Path, err, job.IP, job.Host, job.URI, job.Reason)
-		return
-	}
+    fi, err := os.Stat(job.Path)
+    if err != nil {
+        logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+            job.IP, job.Host, job.URI, job.Reason, err)
+        if job.TempCopy {
+            _ = os.Remove(job.Path)
+        }
+        return
+    }
 
-	if fi.IsDir() {
-		results, err := m.client.ScanPath(job.Path)
-		if err != nil {
-			logf("[clam] result=error path=%s err=%q ip=%s host=%s uri=%s reason=%s",
-				job.Path, err, job.IP, job.Host, job.URI, job.Reason)
-			return
-		}
-		for i := range results {
-			logResult(job, &results[i])
-		}
-		return
-	}
+    if fi.IsDir() {
+        // dir scans don't use TempCopy — nothing to clean up
+        results, err := m.client.ScanPath(job.Path)
+        if err != nil {
+            logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+                job.IP, job.Host, job.URI, job.Reason, err)
+            return
+        }
+        for i := range results {
+            logResult(job, &results[i])
+        }
+        return
+    }
 
-	r, err := m.client.ScanFile(job.Path)
-	if err != nil {
-		logf("[clam] result=error path=%s err=%q ip=%s host=%s uri=%s reason=%s",
-			job.Path, err, job.IP, job.Host, job.URI, job.Reason)
-		return
-	}
-	logResult(job, r)
+    r, err := m.client.ScanFile(job.Path)
+    if err != nil {
+        logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+            job.IP, job.Host, job.URI, job.Reason, err)
+        if job.TempCopy {
+            _ = os.Remove(job.Path)
+        }
+        return
+    }
+
+    logResult(job, r)
+
+    if job.TempCopy {
+        if r.Infected {
+            // Move to infected dir for manual inspection, don't delete.
+            dest := job.Path // fallback if rename fails
+            if job.InfectedDir != "" {
+                _ = os.MkdirAll(job.InfectedDir, 0o700)
+                candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
+                if rerr := os.Rename(job.Path, candidate); rerr == nil {
+                    dest = candidate
+                }
+            }
+            logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",
+                dest, job.IP, job.Host, r.Signature)
+        } else {
+            _ = os.Remove(job.Path)
+        }
+    }
 }
 
 func logResult(job Job, r *Result) {
-	if r == nil {
-		return
-	}
-	switch {
-	case r.Infected:
-		logf("[clam] result=infected path=%s sig=%q ip=%s host=%s uri=%s reason=%s raw=%q",
-			r.Path, r.Signature, job.IP, job.Host, job.URI, job.Reason, r.Raw)
-	case strings.HasSuffix(r.Raw, " OK"):
-		logf("[clam] result=clean path=%s ip=%s host=%s uri=%s reason=%s raw=%q",
-			r.Path, job.IP, job.Host, job.URI, job.Reason, r.Raw)
-	default:
-		logf("[clam] result=error path=%s ip=%s host=%s uri=%s reason=%s raw=%q",
-			r.Path, job.IP, job.Host, job.URI, job.Reason, r.Raw)
-	}
+    if r == nil {
+        return
+    }
+    switch {
+    case r.Infected:
+        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=INFECTED sig=%q",
+            job.IP, job.Host, job.URI, job.Reason, r.Signature)
+    case strings.HasSuffix(r.Raw, " OK"):
+        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=clean",
+            job.IP, job.Host, job.URI, job.Reason)
+    default:
+        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=error raw=%q",
+            job.IP, job.Host, job.URI, job.Reason, r.Raw)
+    }
 }
+
+
+
+
 
 func parseScanResponse(path, resp string) *Result {
 	r := &Result{
