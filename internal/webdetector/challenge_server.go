@@ -119,6 +119,17 @@ func (l *challengeAccessLogger) close() {
 	}
 }
 
+func truncateForLog(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
 func (l *challengeAccessLogger) logf(format string, args ...any) {
 	if l == nil || l.path == "" {
 		logging.LogfCHALLENGES(format, args...)
@@ -598,6 +609,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// Only GET/HEAD should ever get the challenge HTML.
+
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			// UX fix:
 			// If a user is challenged while doing a POST (wp-admin save, login submit, etc),
@@ -607,29 +619,40 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			// recommended ways to add resumable/replay behavior.
 			// We intentionally ONLY do this for POST (not OPTIONS) to avoid breaking
 			// preflights or non-browser clients.
-			if r.Method == http.MethodPost {
-				next := r.URL.RequestURI()
-				//logging.LogfCHALLENGES("[challenge] post-intercept host=%s uri=%s ctype=%q clen=%d note=no_replay", cleanHost(r.Host), next, strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength)
-postIP := clientIP(r)
-postIPStr := "-"
-if postIP != nil {
-    postIPStr = postIP.String()
+
+if r.Method == http.MethodPost {
+	next := r.URL.RequestURI()
+
+	postIP := clientIP(r)
+	postIPStr := "-"
+	if postIP != nil {
+		postIPStr = postIP.String()
+	}
+
+	postAction, postReason := "", ""
+	if s.bridge != nil {
+		postAction, postReason = s.bridge.GetIPDecision(postIPStr)
+	}
+	if postReason == "" {
+		postReason = postAction // fallback
+	}
+
+	logHost := truncateForLog(cleanHost(r.Host), 120)
+	logPath := truncateForLog(r.URL.Path, 120)
+	logURI := truncateForLog(next, 220)
+	logCType := truncateForLog(strings.TrimSpace(r.Header.Get("Content-Type")), 80)
+
+	logging.LogfCHALLENGES("[challenge] post-intercept ip=%s host=%s path=%s uri=%s uri_len=%d ctype=%q clen=%d reason=%s note=no_replay",
+		postIPStr, logHost, logPath, logURI, len(next), logCType, r.ContentLength, postReason,
+	)
+
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
+	return
 }
-postAction, postReason := "", ""
-if s.bridge != nil {
-    postAction, postReason = s.bridge.GetIPDecision(postIPStr)
-}
-if postReason == "" {
-    postReason = postAction // fallback: at least log "challenge"/"block" if no reason string
-}
-logging.LogfCHALLENGES("[challenge] post-intercept ip=%s host=%s uri=%s ctype=%q clen=%d reason=%s note=no_replay",
-    postIPStr, cleanHost(r.Host), next,
-    strings.TrimSpace(r.Header.Get("Content-Type")), r.ContentLength,
-    postReason)
-				w.Header().Set("Cache-Control", "no-store")
-				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
-				return
-			}
+
+
+
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}

@@ -49,3 +49,6 @@ asn=as32934; ua=meta*; action=skip
 #    but you never want them to trigger (or be affected by) "challenge everyone on vhost".
 #    Example (replace ASxxxx with the partner ASN you trust):
 #asn=asXXXX; action=skip_vhost_only
+# skroutz
+asn=as202042; ua=*; action=skip
+

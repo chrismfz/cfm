@@ -246,12 +246,28 @@ if ig != nil {
             chalExclude = ce
             if chalExclude != nil {
                 logging.Logf("[detectors] challenge exclude enabled: file=%q", p)
+                // Best-effort visibility: print parsed rules.
+                for i, r := range chalExclude.rules {
+			logging.Logf("[detectors] challenge exclude rule[%d]: host=%q ua=%q asn=%q ptr=%q verify_fcrdns=%t action=%q",
+                        i,
+                        strings.TrimSpace(r.host),
+                        strings.TrimSpace(r.ua),
+                        strings.TrimSpace(r.asn),
+                        strings.TrimSpace(r.ptr),
+                        r.verifyFcrdns,
+                        strings.TrimSpace(r.action),
+                    )
+                }
+                logging.Logf("[detectors] challenge exclude loaded: %d rules", len(chalExclude.rules))
+
             } else {
                 logging.Logf("[detectors] challenge exclude enabled but no valid rules: file=%q", p)
             }
         } else {
             logging.Logf("[detectors] challenge exclude disabled (failed to load %q): %v", p, err)
         }
+    } else {
+        logging.Logf("[detectors] challenge exclude disabled: CHALLENGE_EXCLUDE is off")
     }
 
 
@@ -349,25 +365,6 @@ if ig != nil {
             }
         }
 
-        // ── NEW: wire challenge-exclude func (ASN / UA / PTR rules) ──────────
-        if chalExclude != nil {
-            type chalExcludeSetter interface {
-                SetChalExcludeFunc(func(string, string, string, string, string, string) (string, bool))
-            }
-            if ces, ok := det.(chalExcludeSetter); ok {
-                ce  := chalExclude // capture for closure
-                enrC := enr        // capture for closure (may be nil)
-                ces.SetChalExcludeFunc(func(ip, host, ua, asn, ptr, rule string) (string, bool) {
-                    // Engine already does its own enrichment lookup inside isExcluded().
-                    // This func only forwards to Match(); the asn/ptr passed here are
-                    // from the engine's own lookup, so we don't double-lookup.
-                    _ = enrC // suppress unused warning; kept for potential future use
-                    act, _, matched := ce.Match(ip, host, ua, asn, ptr, rule)
-                    return act, matched
-                })
-            }
-        }
-        // ─────────────────────────────────────────────────────────────────────
 
 
 
@@ -376,6 +373,7 @@ if pa, ok := det.(core.PositionAware); ok && m.state != nil {
 		pa.ApplyPosition(p)
 	}
 }
+
 
 
 		// Pretty print known config for exim_queues (baby steps)
@@ -454,6 +452,29 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
                 secExclude = nil
             }
         }
+
+
+        // Wire challenge-exclude func using the EFFECTIVE per-section exclude config.
+        // This lets [webdetector] CHALLENGE_EXCLUDE=1 work even when [global] leaves it off.
+        type chalExcludeSetter interface {
+            SetChalExcludeFunc(func(string, string, string, string, string, string) (string, bool))
+        }
+        if ces, ok := det.(chalExcludeSetter); ok {
+            if secExclude != nil {
+                ce := secExclude // capture effective section/global rules
+                ces.SetChalExcludeFunc(func(ip, host, ua, asn, ptr, rule string) (string, bool) {
+                    act, _, matched := ce.Match(ip, host, ua, asn, ptr, rule)
+                    return act, matched
+                })
+                logging.Logf("[detectors][%s] challenge exclude matcher wired (effective rules active)", secName)
+            } else {
+                // Explicitly clear matcher when section disables excludes or no rules loaded.
+                ces.SetChalExcludeFunc(nil)
+                logging.Logf("[detectors][%s] challenge exclude matcher not wired (effective rules inactive)", secName)
+            }
+        }
+
+
 
         secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude)
         m.wg.Add(1)

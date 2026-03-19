@@ -1049,14 +1049,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 				b.ips4xx = make(map[string]int)
 			}
 			b.ips4xx[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "4xx", TS: rec.TS}
+			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "4xx", TS: rec.TS}
 		}
 		if (e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 5 {
 			if b.ips5xx == nil {
 				b.ips5xx = make(map[string]int)
 			}
 			b.ips5xx[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "5xx", TS: rec.TS}
+			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "5xx", TS: rec.TS}
 		}
 
 		// method ratio
@@ -1065,7 +1065,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 				b.ipsPOST = make(map[string]int)
 			}
 			b.ipsPOST[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "post", TS: rec.TS}
+			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "post", TS: rec.TS}
 		}
 
 		// empty UA
@@ -1080,6 +1080,7 @@ if e.cfg.ChallengeIPNoUAMin > 0 {
 				Host:   rec.Host,
 				URI:    p,
 				Method: rec.Method,
+				UA:     rec.UA,
 				Status: rec.Status,
 				Sub:    "no_ua",
 				TS:     rec.TS,
@@ -1096,7 +1097,7 @@ if e.cfg.ChallengeIPNoUAMin > 0 {
 				b.ipsMalformed = make(map[string]int)
 			}
 			b.ipsMalformed[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, Sub: "malformed", TS: rec.TS}
+			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "malformed", TS: rec.TS}
 		}
 
 		// UA churn: too many distinct User-Agents from the same IP
@@ -2930,9 +2931,11 @@ func (e *Engine) isBypassed(ip string) bool {
 // ua is best-effort (callers pass "" when unknown; ua=* rules still match).
 func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	if e.challengeExcludes != nil && e.challengeExcludes.MatchHost(host) {
+		logging.Logf("[challenge][debug] exclude_store_match ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return true
 	}
 	if e.chalExcludeFunc == nil {
+		logging.Logf("[challenge][debug] exclude_no_func ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return false
 	}
 	asn, ptr := "", ""
@@ -2943,9 +2946,12 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 		}
 		ptr = r.PTR
 	}
-	_, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
+	action, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
+	logging.Logf("[challenge][debug] isExcluded ip=%s host=%s ua=%q rule=%s asn=%q ptr=%q action=%q matched=%v",
+		ip, host, ua, rule, asn, ptr, action, matched)
 	return matched
 }
+
 
 func (e *Engine) ChallengeExcludeAdd(typ, value string) bool {
 	if e == nil || e.challengeExcludes == nil {

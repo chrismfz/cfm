@@ -24,6 +24,7 @@ type chalCtx struct {
     URI    string
     Method string
     Status int
+    UA     string
     Sub    string // matched substring (rule)
     TS     float64
 }
@@ -210,6 +211,7 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
             Status: rec.Status,
             Sub:    r.sub,
             TS:     rec.TS,
+            UA:     rec.UA,
 		}
 
 		// count only first matching rule per request (avoid inflation)
@@ -418,7 +420,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 }
 
                 // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-                if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, "", rule) {
+            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
                     if e.cfg.ChallengeLogSuppressed {
                         logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ipStr, ctx.Host, rule)
                     }
@@ -604,7 +606,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
 
                                         // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-                                        if e.isBypassed(c.ip) || e.isExcluded(c.ip, c.host, "", "CHALLENGE_PATHS") {
+                                        if e.isBypassed(c.ip) || e.isExcluded(c.ip, c.host, ctx.UA, "CHALLENGE_PATHS") {
                                             if e.cfg.ChallengeLogSuppressed {
                                                 logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_PATHS reason=bypass_or_exclude", c.ip, c.host)
                                             }
@@ -799,7 +801,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, "", rule) {
+                if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
                 if e.cfg.ChallengeLogSuppressed {
                     logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ipStr, ctx.Host, rule)
                 }
@@ -880,7 +882,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, "", "CHALLENGE_MALFORMED") {
+            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_MALFORMED") {
                 if e.cfg.ChallengeLogSuppressed {
                     logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_MALFORMED reason=bypass_or_exclude", ipStr, ctx.Host)
                 }
@@ -969,7 +971,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, "", "CHALLENGE_UNIQUA") {
+            if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_UNIQUA") {
                 if e.cfg.ChallengeLogSuppressed {
                     logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_UNIQUA reason=bypass_or_exclude", ipStr, ctx.Host)
                 }
@@ -1242,16 +1244,24 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 e.vhostMu.Unlock()
 
-                if doChallenge {
-                    // Protect bypass/excluded IPs from the vhost-wide challenge.
-                    if ha := short[host]; ha != nil {
-                        bypTTL := ttl + 2*time.Minute
-                        for ipStr := range ha.ips {
-                            if e.isBypassed(ipStr) || e.isExcluded(ipStr, host, "", "CHALLENGE_VHOST_UNIQPATHS") {
-                                e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
-                            }
-                        }
-                    }
+if doChallenge {
+    // Protect bypass/excluded IPs from the vhost-wide challenge.
+    if ha := short[host]; ha != nil {
+        bypTTL := ttl + 2*time.Minute
+        for ipStr := range ha.ips {
+            byp := e.isBypassed(ipStr)
+            exc := e.isExcluded(ipStr, host, "", "CHALLENGE_VHOST_UNIQPATHS")
+
+//            logging.Logf("[challenge][debug] uniqpaths_bypass_check host=%s ip=%s rule=%s bypass=%v excluded=%v",
+  //              host, ipStr, "CHALLENGE_VHOST_UNIQPATHS", byp, exc)
+
+            if byp || exc {
+//                logging.Logf("[challenge][debug] uniqpaths_bypass_apply host=%s ip=%s ttl=%s",
+//                    host, ipStr, bypTTL)
+                e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
+            }
+        }
+    }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
@@ -1545,16 +1555,25 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                     exRule = "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
                 }
 
-                // Walk IPs seen for this vhost in the short window.
-                // BypassIPTemp writes into okState (checked in handleDecision before vhState).
-                if ha := short[host]; ha != nil {
-                    bypTTL := vttl + 2*time.Minute // slightly longer than vhost TTL
-                    for ipStr := range ha.ips {
-                        if e.isBypassed(ipStr) || e.isExcluded(ipStr, host, "", exRule) {
-                            e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
-                        }
-                    }
-                }
+// Walk IPs seen for this vhost in the short window.
+// BypassIPTemp writes into okState (checked in handleDecision before vhState).
+if ha := short[host]; ha != nil {
+    bypTTL := vttl + 2*time.Minute // slightly longer than vhost TTL
+    for ipStr := range ha.ips {
+        byp := e.isBypassed(ipStr)
+        exc := e.isExcluded(ipStr, host, "", exRule)
+
+//        logging.Logf("[challenge][debug] vhost_bypass_check host=%s ip=%s rule=%s bypass=%v excluded=%v",
+//            host, ipStr, exRule, byp, exc)
+
+        if byp || exc {
+//            logging.Logf("[challenge][debug] vhost_bypass_apply host=%s ip=%s ttl=%s",
+//                host, ipStr, bypTTL)
+            e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
+        }
+    }
+}
+
 
                 vReason := "manual"
                 if !manual {
