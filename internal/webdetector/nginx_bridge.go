@@ -254,6 +254,10 @@ type nginxUploadMsg struct {
     AlreadyCopied bool  `json:"already_copied,omitempty"`
 }
 
+
+
+
+
 func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
     if !b.checkToken(r) {
         http.Error(w, "forbidden", http.StatusForbidden)
@@ -271,14 +275,13 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    ip       := strings.TrimSpace(msg.IP)
-    host     := normalizeHost(msg.Host)
-    uri      := strings.TrimSpace(msg.URI)
+    ip := strings.TrimSpace(msg.IP)
+    host := normalizeHost(msg.Host)
+    uri := strings.TrimSpace(msg.URI)
     bodyFile := strings.TrimSpace(msg.BodyFile)
-    reason   := strings.TrimSpace(msg.Reason)
+    reason := strings.TrimSpace(msg.Reason)
     filename := strings.TrimSpace(msg.Filename)
 
-    // Always log receipt
     logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
         ip, host, uri, filename, reason)
 
@@ -296,12 +299,13 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
     var scanPath string
 
     if msg.AlreadyCopied {
-        // Lua wrote the temp file (small upload, body was in memory)
         scanPath = bodyFile
     } else {
-        // Large upload — nginx spool, we must copy before handler returns
-        dst := filepath.Join(b.clamPending,
-            fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), ip))
+
+safeIP := strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(ip)
+dst := filepath.Join(b.clamPending,
+    fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
+
         if err := copyFile(bodyFile, dst); err != nil {
             logging.LogfCLAM("[upload] copy_failed src=%q err=%v", bodyFile, err)
             w.WriteHeader(http.StatusOK)
@@ -311,10 +315,14 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
     }
 
     label := "UPLOAD"
-    if reason != ""  { label += ":" + reason }
-    if filename != "" { label += ":" + filename }
+    if reason != "" {
+        label += ":" + reason
+    }
+    if filename != "" {
+        label += ":" + filename
+    }
 
-    b.clamMgr.Enqueue(clam.Job{
+    ok := b.clamMgr.Enqueue(clam.Job{
         Path:        scanPath,
         IP:          ip,
         Host:        host,
@@ -324,8 +332,21 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
         InfectedDir: b.clamInfected,
     })
 
+    if !ok && scanPath != "" {
+        _ = os.Remove(scanPath)
+        logging.LogfCLAM("[upload] enqueue dropped path=%s ip=%s host=%s", scanPath, ip, host)
+    }
+
     w.WriteHeader(http.StatusOK)
 }
+
+
+
+
+
+
+
+
 
 func copyFile(src, dst string) error {
     in, err := os.Open(src)

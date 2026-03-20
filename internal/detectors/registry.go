@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"cfm/internal/clam"
 )
 
 type Options struct {
@@ -29,6 +30,13 @@ var nginxBridge *webdet.NginxBridge
 func SetNginxBridge(b *webdet.NginxBridge) {
 	nginxBridge = b
 }
+
+var clamMgr clam.Enqueuer
+
+func SetClamManager(m clam.Enqueuer) {
+	clamMgr = m
+}
+
 
 type Factory func(sectionName string, kv KV, global KV) (core.PeriodicDetector, error)
 

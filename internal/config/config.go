@@ -284,8 +284,12 @@ func (c *Config) SetDefaults() {
 		c.Clam.QueueSize = 256
 	}
 
-c.Clam.PendingDir  = "/var/lib/cfm/scanner/pending"
-c.Clam.InfectedDir = "/var/lib/cfm/scanner/infected"
+if c.Clam.PendingDir == "" {
+	c.Clam.PendingDir = "/var/lib/cfm/scanner/pending"
+}
+if c.Clam.InfectedDir == "" {
+	c.Clam.InfectedDir = "/var/lib/cfm/scanner/infected"
+}
 
 
 	// --- MaxMind defaults ---
@@ -703,9 +707,9 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Clam.QueueSize = parseInt(val)
 
 case "CLAMD_PENDING_DIR":
-    cfg.Clam.PendingDir = v
+    cfg.Clam.PendingDir = val
 case "CLAMD_INFECTED_DIR":
-    cfg.Clam.InfectedDir = v
+    cfg.Clam.InfectedDir = val
 
 
 		// Hardening

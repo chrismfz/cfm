@@ -19,6 +19,8 @@ type Config struct {
 	Timeout    time.Duration
 	MaxWorkers int
 	QueueSize  int
+	PendingDir  string
+	InfectedDir string
 }
 
 type Client struct {
@@ -53,6 +55,8 @@ type Manager struct {
 type Enqueuer interface {
     Enqueue(Job) bool
     Enabled() bool
+    PendingDir() string
+    InfectedDir() string
 }
 
 
@@ -273,6 +277,23 @@ func (m *Manager) Enqueue(job Job) bool {
 func (m *Manager) Enabled() bool {
     return m != nil && m.started && m.client.Enabled()
 }
+
+
+func (m *Manager) PendingDir() string {
+	if m == nil {
+		return ""
+	}
+	return m.cfg.PendingDir
+}
+
+func (m *Manager) InfectedDir() string {
+	if m == nil {
+		return ""
+	}
+	return m.cfg.InfectedDir
+}
+
+
 
 func (m *Manager) worker(id int) {
 	for {

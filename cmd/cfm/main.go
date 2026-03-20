@@ -639,6 +639,9 @@ func runDaemon(args []string) {
 	}{
 		{"/var/lib/cfm", 0o701},
 		{"/var/lib/cfm/sslcollector", 0o701},
+		{"/var/lib/cfm/scanner", 0o700},
+		{"/var/lib/cfm/scanner/pending", 0o700},
+		{"/var/lib/cfm/scanner/infected", 0o700},
 		{"/var/log/cfm", 0o700},
 	} {
 		_ = os.MkdirAll(d.path, d.mode)
@@ -673,25 +676,49 @@ func runDaemon(args []string) {
 		if clamMgr != nil {
 			clamMgr.Stop()
 			clamMgr = nil
+			detpkg.SetClamManager(nil)
 		}
 
-		if cfg.Clam.Enabled {
-			clamMgr = clam.NewManager(clam.Config{
-				Enabled:    cfg.Clam.Enabled,
-				Network:    cfg.Clam.Network,
-				Address:    cfg.Clam.Address,
-				Timeout:    cfg.Clam.Timeout,
-				MaxWorkers: cfg.Clam.MaxWorkers,
-				QueueSize:  cfg.Clam.QueueSize,
-			})
-			clamMgr.Start()
 
-			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d",
-				cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
-				cfg.Clam.MaxWorkers, cfg.Clam.QueueSize)
-		} else {
-			logging.LogfCLAM("[clam] disabled")
-		}
+if cfg.Clam.Enabled {
+	clamMgr = clam.NewManager(clam.Config{
+		Enabled:     cfg.Clam.Enabled,
+		Network:     cfg.Clam.Network,
+		Address:     cfg.Clam.Address,
+		Timeout:     cfg.Clam.Timeout,
+		MaxWorkers:  cfg.Clam.MaxWorkers,
+		QueueSize:   cfg.Clam.QueueSize,
+		PendingDir:  cfg.Clam.PendingDir,
+		InfectedDir: cfg.Clam.InfectedDir,
+	})
+	clamMgr.Start()
+	detpkg.SetClamManager(clamMgr)
+
+	if cfg.Clam.PendingDir != "" {
+		go func(dir string) {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					sweepPendingDir(dir, 10*time.Minute)
+				}
+			}
+		}(cfg.Clam.PendingDir)
+	}
+
+	logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s",
+		cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
+		cfg.Clam.MaxWorkers, cfg.Clam.QueueSize,
+		cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
+} else {
+	detpkg.SetClamManager(nil)
+	logging.LogfCLAM("[clam] disabled")
+}
+
+
 
 
 
@@ -897,6 +924,34 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 		cfg.SMTPBlock.AllowGIDs = append(cfg.SMTPBlock.AllowGIDs, id)
 	}
 }
+
+
+func sweepPendingDir(dir string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasPrefix(e.Name(), "upload_") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		logging.LogfCLAM("[clam] sweep removed stale temp path=%s age=%s",
+			path, time.Since(info.ModTime()).Round(time.Second))
+		_ = os.Remove(path)
+	}
+}
+
+
+
 
 // entries parsing -----------------------------------------------------------
 

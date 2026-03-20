@@ -16,6 +16,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
+//	"cfm/internal/clam"
 )
 
 // webdetectorWrapped ensures that background servers (API + challenge)
@@ -176,6 +177,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
 				}
 				// ─────────────────────────────────────────────────
+				if clamMgr != nil {
+					b.SetClamManager(clamMgr, clamMgr.PendingDir(), clamMgr.InfectedDir())
+					logging.LogfCLAM("[clam] upload scanning wired to bridge")
+				}
 
 				go b.RunExpireLoop(pctx)
 				w.srvWG.Add(1)

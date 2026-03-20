@@ -53,12 +53,13 @@ end
 
 local function write_temp(body_data, ip)
     local tmppath = string.format(
-        "%s/upload_%d_%s",
+        "%s/upload_%d_%s_%s",
         CFG.pending_dir,
         math.floor(ngx.now() * 1000),
-        ip:gsub("[^%w]", "_")
+        ip:gsub("[^%w]", "_"),
         (ngx.var.request_id or "x"):sub(1, 8)
     )
+
     local f, err = io.open(tmppath, "wb")
     if not f then
         ngx.log(ngx.WARN, "[cfm_clamav] cannot write temp: ", err)
@@ -75,6 +76,13 @@ local function extract_filename()
             or ngx.ctx.waf_body:match("[Ff]ilename%s*=%s*'([^']+)'")
     if fn then return fn:sub(1, 128) end
     return ""
+end
+
+local function has_file_part()
+    if not ngx.ctx.waf_body or ngx.ctx.waf_body == "" then
+        return false
+    end
+    return ngx.ctx.waf_body:find('[Ff]ilename%s*=') ~= nil
 end
 
 local function send_to_bridge(payload, scan_path, already_copied)
@@ -132,10 +140,16 @@ function _M.notify(ip, waf_tag)
         if is_excluded(host, uri) then return end
 
         local ct = (ngx.var.content_type or ""):lower()
-        if not ct:find("multipart/form%-data", 1, true) then return end
+        if not ct:find("multipart/form-data", 1, true) then return end
 
         if not ngx.ctx.waf_body then
             ngx.req.read_body()
+        end
+
+        -- ClamAV lane: only real multipart file uploads.
+        -- Generic FormData/admin-ajax requests without filename= stay in WAF lane only.
+        if not has_file_part() then
+            return
         end
 
         local scan_path, already_copied
