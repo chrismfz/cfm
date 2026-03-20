@@ -1,0 +1,9 @@
+Package: cfm
+Version: 2026.03.20-224402-1
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: systemd, ca-certificates
+Maintainer: Christos Panagiotakis <chris@nixpal.com>
+Description: CFM daemon and CLI
+ A small firewall/blackhole manager (daemon + CLI).
