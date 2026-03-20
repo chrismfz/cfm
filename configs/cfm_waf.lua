@@ -259,6 +259,20 @@ local function has_long_b64_blob(s, min_len)
   return false, 0
 end
 
+-- is_known_legit_php_upload_endpoint helper
+local function is_known_legit_php_upload_endpoint(uri)
+  local u = lower(uri or "")
+  if u == "" then return false end
+
+  -- Code Snippets plugin REST API import/parse flow
+  if u:match("^/wp%-json/code%-snippets/") then
+    return true
+  end
+
+  return false
+end
+
+
 -- Scored obfuscation detector shared by detect_script_obfuscation and
 -- detect_upload_obfuscation.  s must already be lowercased + capped by caller.
 -- Returns a tag string on a hit, nil otherwise.
@@ -1101,11 +1115,43 @@ local function detect_debug_toggles(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  if has(a, "xdebug_session_start=") then return "DBG_XDEBUG" end
-  if has(a, "xdebug=") then return "DBG_XDEBUG_KEY" end
-  if has(a, "debug=true") or has(a, "debug=1") then return "DBG_DEBUG" end
-  if has(a, "trace=1") or has(a, "trace=true") then return "DBG_TRACE" end
-  if has(a, "stacktrace=1") or has(a, "stacktrace=true") then return "DBG_STACKTRACE" end
+  local function arg_has_key(keys, values)
+    for key, val in a:gmatch("([^&=?]+)=([^&]*)") do
+      for _, wantk in ipairs(keys) do
+        if key == wantk then
+          if not values then
+            return true
+          end
+          for _, wantv in ipairs(values) do
+            if val == wantv then
+              return true
+            end
+          end
+        end
+      end
+    end
+    return false
+  end
+
+  if arg_has_key({"xdebug_session_start"}) then
+    return "DBG_XDEBUG"
+  end
+
+  if arg_has_key({"xdebug"}) then
+    return "DBG_XDEBUG_KEY"
+  end
+
+  if arg_has_key({"debug"}, {"1", "true"}) then
+    return "DBG_DEBUG"
+  end
+
+  if arg_has_key({"trace"}, {"1", "true"}) then
+    return "DBG_TRACE"
+  end
+
+  if arg_has_key({"stacktrace"}, {"1", "true"}) then
+    return "DBG_STACKTRACE"
+  end
 
   return nil
 end
@@ -1959,7 +2005,10 @@ function _M.check(ctx)
   -- ── 18) Upload content / webshell byte scan ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_content, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled"
+       and lower(method) == "post"
+       and body ~= ""
+       and not is_known_legit_php_upload_endpoint(uri) then
       local tag = detect_upload_content(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
