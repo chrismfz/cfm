@@ -589,6 +589,20 @@ func runDaemon(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+// periodic clam bridge retry
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = detpkg.TryWireClamBridge()
+			}
+		}
+	}()
+
 	// NOTE: detectors should be started early so config-only sections (like mysql_governor)
 	// can populate pending configs before applyDebugServer() tries to consume them.
 
@@ -677,6 +691,7 @@ func runDaemon(args []string) {
 			clamMgr.Stop()
 			clamMgr = nil
 			detpkg.SetClamManager(nil)
+			detpkg.ResetClamBridgeWireState()
 		}
 
 
@@ -691,8 +706,14 @@ if cfg.Clam.Enabled {
 		PendingDir:  cfg.Clam.PendingDir,
 		InfectedDir: cfg.Clam.InfectedDir,
 	})
+	if nb, ok := be.(*nft.Backend); ok {
+		if enr := nb.GetEnricher(); enr != nil {
+			clamMgr.SetEnricher(enr)
+		}
+	}
 	clamMgr.Start()
 	detpkg.SetClamManager(clamMgr)
+	_ = detpkg.TryWireClamBridge()
 
 	if cfg.Clam.PendingDir != "" {
 		go func(dir string) {
@@ -715,6 +736,7 @@ if cfg.Clam.Enabled {
 		cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
 } else {
 	detpkg.SetClamManager(nil)
+	detpkg.ResetClamBridgeWireState()
 	logging.LogfCLAM("[clam] disabled")
 }
 

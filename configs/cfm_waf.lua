@@ -92,8 +92,10 @@ local CFG = {
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
-  rule_upload_filename  = "logonly",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
-  rule_upload_content   = "logonly",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_upload_filename    = "logonly",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
+  rule_upload_content     = "logonly",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_script_obfuscation = "logonly",  -- raw POST-body PHP/JS obfuscation scorer
+  rule_upload_obfuscation = "logonly",  -- multipart uploaded file content obfuscation scorer
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
@@ -125,6 +127,13 @@ local CFG = {
   -- Raw PHP webshell body scanner tuning
   php_webshell_max_scan_len = 2048,
   php_webshell_min_score    = 5,
+
+  -- Obfuscation scorers (script body + upload file content)
+  script_obfuscation_max_scan_len = 8192,
+  script_obfuscation_min_score    = 6,
+
+  upload_obfuscation_max_scan_len = 8192,
+  upload_obfuscation_min_score    = 6,
 
   -- Bad UA scorer tuning
   -- Signals and their point values (all accumulate):
@@ -225,6 +234,110 @@ local function cap(s, n)
   if not s then return "" end
   if #s <= n then return s end
   return string.sub(s, 1, n)
+end
+
+-- Count plain-string occurrences of pat inside s (no Lua pattern magic).
+local function count_occurs(s, pat)
+  local n, start = 0, 1
+  while true do
+    local i = s:find(pat, start, true)
+    if not i then break end
+    n = n + 1
+    start = i + #pat
+  end
+  return n
+end
+
+-- Returns true if s contains a contiguous base64-looking blob >= min_len chars.
+local function has_long_b64_blob(s, min_len)
+  min_len = min_len or 180
+  for blob in s:gmatch("[A-Za-z0-9+/=]+") do
+    if #blob >= min_len and blob:match("^[A-Za-z0-9+/]+=*$") then
+      return true, #blob
+    end
+  end
+  return false, 0
+end
+
+-- Scored obfuscation detector shared by detect_script_obfuscation and
+-- detect_upload_obfuscation.  s must already be lowercased + capped by caller.
+-- Returns a tag string on a hit, nil otherwise.
+local function score_obfuscation_blob(s, min_score)
+  if not s or s == "" then return nil end
+
+  local score, tags = 0, {}
+
+  -- Long base64 blob
+  local longb64, bloblen = has_long_b64_blob(s, 180)
+  if longb64 then
+    score = score + 2
+    tags[#tags+1] = "LONG_B64"
+    if bloblen >= 600 then
+      score = score + 1
+      tags[#tags+1] = "B64_600"
+    end
+  end
+
+  -- PHP-side decode helpers
+  if has(s, "base64_decode(") then
+    score = score + 2; tags[#tags+1] = "BASE64_DECODE"
+  end
+  if has(s, "gzinflate(") or has(s, "gzuncompress(") then
+    score = score + 2; tags[#tags+1] = "GZ"
+  end
+  if has(s, "str_rot13(") then
+    score = score + 1; tags[#tags+1] = "ROT13"
+  end
+
+  -- PHP eval-in-regex (deprecated /e modifier)
+  if has(s, "preg_replace") and has(s, "/e") then
+    score = score + 3; tags[#tags+1] = "PREG_EVAL"
+  end
+
+  -- chr() storm (obfuscated string construction)
+  local chrn = count_occurs(s, "chr(")
+  if chrn >= 6 then
+    score = score + 2; tags[#tags+1] = "CHR_STORM"
+  end
+
+  -- JS-side decode helpers
+  if has(s, "atob(") then
+    score = score + 2; tags[#tags+1] = "ATOB"
+  end
+  if has(s, "new function(") then
+    score = score + 3; tags[#tags+1] = "NEW_FUNCTION"
+  end
+  if has(s, "string.fromcharcode(") then
+    score = score + 2; tags[#tags+1] = "FROMCHARCODE"
+  end
+  if has(s, "textdecoder") then
+    score = score + 1; tags[#tags+1] = "TEXTDECODER"
+  end
+  if has(s, "uint8array(") then
+    score = score + 1; tags[#tags+1] = "UINT8ARRAY"
+  end
+
+  -- XOR decode loop: charCodeAt present + bare XOR operator (e.g. r[i]^k, x^76)
+  -- Match on operator shape, not variable name, to survive renaming.
+  if has(s, "charcodeat(") and s:match("[%w%)%]]%^[%w%(]") then
+    score = score + 3; tags[#tags+1] = "XOR_LOOP"
+  end
+
+  -- eval() – high weight, present in almost all execution-stage payloads
+  if has(s, "eval(") then
+    score = score + 3; tags[#tags+1] = "EVAL"
+  end
+
+  -- Hex escape storm: \x41\x42 style encoding (different obfuscation family)
+  local hex_escapes = count_occurs(s, "\\x")
+  if hex_escapes >= 8 then
+    score = score + 2; tags[#tags+1] = "HEX_STORM"
+  end
+
+  if score >= (min_score or 6) then
+    return "OBFUSCATED:" .. table.concat(tags, "+") .. ":score=" .. score
+  end
+  return nil
 end
 
 local function begins(s, prefix)
@@ -1594,6 +1707,45 @@ local function detect_upload_content(body, headers)
   return nil
 end
 
+-- [top-4c] Obfuscation scorer for raw POST bodies (forms, JSON, text, XML).
+-- Catches JS/PHP payload delivery that bypasses detect_b64_injection by using
+-- client-side decode (atob+XOR+new Function) instead of PHP-side base64_decode.
+-- Multipart uploads are intentionally excluded here; they are covered by the
+-- dedicated detect_upload_obfuscation below to keep log tags distinct.
+local function detect_script_obfuscation(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+
+  -- Only scan textual / structured body types; skip multipart (handled separately)
+  if ct ~= ""
+     and not has(ct, "application/x-www-form-urlencoded")
+     and not has(ct, "application/json")
+     and not has(ct, "text/")
+     and not has(ct, "application/xml") then
+    return nil
+  end
+
+  local s = lower(cap(body, tonumber(CFG.script_obfuscation_max_scan_len) or 8192))
+  return score_obfuscation_blob(s, tonumber(CFG.script_obfuscation_min_score) or 6)
+end
+
+-- [top-4d] Obfuscation scorer for multipart uploaded file content.
+-- Catches obfuscated payloads (e.g. base64+XOR+new Function bundles) uploaded
+-- inside plugin/archive slots.  Complements detect_upload_content's byte-exact
+-- checks with a scored heuristic path.
+local function detect_upload_obfuscation(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+  if not has(ct, "multipart/form-data") then return nil end
+
+  local s = lower(cap(body, tonumber(CFG.upload_obfuscation_max_scan_len) or 8192))
+  return score_obfuscation_blob(s, tonumber(CFG.upload_obfuscation_min_score) or 6)
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- MAIN CHECK
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -1780,7 +1932,19 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 16) Upload filename extension blacklist ───────────────────────────────
+  -- ── 16) Script / JS obfuscation scorer (raw POST body) ───────────────────
+  do
+    local mode = rule_mode(CFG.rule_script_obfuscation, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_script_obfuscation(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_SCRIPT_OBFUSCATION:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 17) Upload filename extension blacklist ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_filename, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
@@ -1792,7 +1956,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 17) Upload content / webshell byte scan ───────────────────────────────
+  -- ── 18) Upload content / webshell byte scan ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_content, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
@@ -1804,7 +1968,19 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 18) XSS ───────────────────────────────────────────────────────────────
+  -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
+  do
+    local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
+    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+      local tag = detect_upload_obfuscation(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_UPLOAD_OBFUSCATION:" .. tag, ttl, mode
+      end
+    end
+  end
+
+  -- ── 20) XSS ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xss, "challenge")
     if mode ~= "disabled" and detect_xss(uri, args) then
@@ -1813,7 +1989,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 19) SQLi (+ SQL comment bypass) ──────────────────────────────────────
+  -- ── 21) SQLi (+ SQL comment bypass) ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" and detect_sqli(uri, args) then
@@ -1822,7 +1998,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 20) XXE ───────────────────────────────────────────────────────────────
+  -- ── 22) XXE ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xxe, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
@@ -1834,7 +2010,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 21) CRLF / HTTP response splitting ───────────────────────────────────
+  -- ── 23) CRLF / HTTP response splitting ───────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_crlf_injection, "logonly")
     if mode ~= "disabled" then
@@ -1846,7 +2022,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 22) HTTP request smuggling ────────────────────────────────────────────
+  -- ── 24) HTTP request smuggling ────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_http_smuggling, "logonly")
     if mode ~= "disabled" then
@@ -1858,7 +2034,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 23) WP-specific auth checks ──────────────────────────────────────────
+  -- ── 25) WP-specific auth checks ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
@@ -1874,7 +2050,7 @@ function _M.check(ctx)
   end
 
 
-  -- ── 24) XML-RPC strong body signatures ───────────────────────────────────
+  -- ── 26) XML-RPC strong body signatures ───────────────────────────────────
   do
     local xtag = nil
     if not is_known_legit_xmlrpc(uri, args, headers, body) then
@@ -1897,7 +2073,7 @@ function _M.check(ctx)
   end
 
 
-  -- ── 25) Generic XML-RPC POST burst ───────────────────────────────────────
+  -- ── 27) Generic XML-RPC POST burst ───────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
@@ -1909,7 +2085,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 26) Generic auth endpoint burst ──────────────────────────────────────
+  -- ── 28) Generic auth endpoint burst ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_auth_burst, "challenge")
     if mode ~= "disabled" then
@@ -1930,7 +2106,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 27) Suspicious command parameter keys ─────────────────────────────────
+  -- ── 29) Suspicious command parameter keys ─────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_cmd_params, "logonly")
     if mode ~= "disabled" then
@@ -1941,7 +2117,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 28) Suspicious payload markers ───────────────────────────────────────
+  -- ── 30) Suspicious payload markers ───────────────────────────────────────
   do
     local tag = detect_cmd_payload(args)
     if tag then
@@ -1953,7 +2129,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 29) Debug toggles ─────────────────────────────────────────────────────
+  -- ── 31) Debug toggles ─────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_debug_toggles, "logonly")
     if mode ~= "disabled" then
@@ -1964,7 +2140,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 30) PHP serialize markers ─────────────────────────────────────────────
+  -- ── 32) PHP serialize markers ─────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_serialize, "logonly")
     if mode ~= "disabled" then
@@ -1975,7 +2151,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 31) Base64 POST body scanner ──────────────────────────────────────────
+  -- ── 33) Base64 POST body scanner ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_b64_injection, "logonly")
     if mode ~= "disabled" and lower(method) == "post" and body ~= "" then

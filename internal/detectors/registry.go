@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 	"cfm/internal/clam"
+	"cfm/internal/logging"
 )
 
 type Options struct {
@@ -35,6 +36,30 @@ var clamMgr clam.Enqueuer
 
 func SetClamManager(m clam.Enqueuer) {
 	clamMgr = m
+}
+
+
+var clamBridgeWired bool
+
+func ResetClamBridgeWireState() {
+	clamBridgeWired = false
+}
+
+// TryWireClamBridge re-applies clam -> nginx bridge binding.
+// Safe to call repeatedly.
+func TryWireClamBridge() bool {
+	if nginxBridge == nil || clamMgr == nil || !clamMgr.Enabled() {
+		clamBridgeWired = false
+		return false
+	}
+
+	nginxBridge.SetClamManager(clamMgr, clamMgr.PendingDir(), clamMgr.InfectedDir())
+
+	if !clamBridgeWired {
+		logging.LogfCLAM("[clam] upload scanning wired to bridge")
+	}
+	clamBridgeWired = true
+	return true
 }
 
 

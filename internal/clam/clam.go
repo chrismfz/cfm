@@ -10,15 +10,18 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"cfm/internal/enrich"
+	"cfm/internal/notify"
 )
 
 type Config struct {
-	Enabled    bool
-	Network    string
-	Address    string
-	Timeout    time.Duration
-	MaxWorkers int
-	QueueSize  int
+	Enabled     bool
+	Network     string
+	Address     string
+	Timeout     time.Duration
+	MaxWorkers  int
+	QueueSize   int
 	PendingDir  string
 	InfectedDir string
 }
@@ -35,11 +38,12 @@ type Result struct {
 }
 
 type Job struct {
-	Path   string
-	IP     string
-	Host   string
-	URI    string
-	Reason string
+	Path        string
+	IP          string
+	Host        string
+	URI         string
+	FileName    string
+	Reason      string
 	TempCopy    bool   // worker must handle file after scan
 	InfectedDir string // where to move infected evidence
 }
@@ -47,18 +51,18 @@ type Job struct {
 type Manager struct {
 	cfg     Config
 	client  *Client
+	enr     *enrich.Enricher
 	jobs    chan Job
 	stopCh  chan struct{}
 	started bool
 }
 
 type Enqueuer interface {
-    Enqueue(Job) bool
-    Enabled() bool
-    PendingDir() string
-    InfectedDir() string
+	Enqueue(Job) bool
+	Enabled() bool
+	PendingDir() string
+	InfectedDir() string
 }
-
 
 var logf = func(format string, args ...interface{}) {}
 
@@ -275,9 +279,8 @@ func (m *Manager) Enqueue(job Job) bool {
 }
 
 func (m *Manager) Enabled() bool {
-    return m != nil && m.started && m.client.Enabled()
+	return m != nil && m.started && m.client.Enabled()
 }
-
 
 func (m *Manager) PendingDir() string {
 	if m == nil {
@@ -293,7 +296,12 @@ func (m *Manager) InfectedDir() string {
 	return m.cfg.InfectedDir
 }
 
-
+func (m *Manager) SetEnricher(e *enrich.Enricher) {
+	if m == nil {
+		return
+	}
+	m.enr = e
+}
 
 func (m *Manager) worker(id int) {
 	for {
@@ -304,89 +312,228 @@ func (m *Manager) worker(id int) {
 			if !ok {
 				return
 			}
-			m.process(job)
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logf("[clam_worker] panic worker=%d path=%s ip=%s host=%s uri=%s err=%v",
+							id, job.Path, job.IP, job.Host, job.URI, rec)
+					}
+				}()
+				m.process(job)
+			}()
 		}
 	}
 }
 
-
-
 func (m *Manager) process(job Job) {
-    fi, err := os.Stat(job.Path)
-    if err != nil {
-        logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
-            job.IP, job.Host, job.URI, job.Reason, err)
-        if job.TempCopy {
-            _ = os.Remove(job.Path)
-        }
-        return
-    }
+	fi, err := os.Stat(job.Path)
+	if err != nil {
+		logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+			job.IP, job.Host, job.URI, job.Reason, err)
+		if job.TempCopy {
+			_ = os.Remove(job.Path)
+		}
+		return
+	}
 
-    if fi.IsDir() {
-        // dir scans don't use TempCopy — nothing to clean up
-        results, err := m.client.ScanPath(job.Path)
-        if err != nil {
-            logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
-                job.IP, job.Host, job.URI, job.Reason, err)
-            return
-        }
-        for i := range results {
-            logResult(job, &results[i])
-        }
-        return
-    }
+	if fi.IsDir() {
+		results, err := m.client.ScanPath(job.Path)
+		if err != nil {
+			logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+				job.IP, job.Host, job.URI, job.Reason, err)
+			return
+		}
+		for i := range results {
+			logResult(job, &results[i])
+		}
+		return
+	}
 
-    r, err := m.client.ScanFile(job.Path)
-    if err != nil {
-        logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
-            job.IP, job.Host, job.URI, job.Reason, err)
-        if job.TempCopy {
-            _ = os.Remove(job.Path)
-        }
-        return
-    }
+	r, err := m.client.ScanFile(job.Path)
+	if err != nil {
+		logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
+			job.IP, job.Host, job.URI, job.Reason, err)
+		if job.TempCopy {
+			_ = os.Remove(job.Path)
+		}
+		return
+	}
 
-    logResult(job, r)
+	// Always log result first.
+	logResult(job, r)
 
-    if job.TempCopy {
-        if r.Infected {
-            // Move to infected dir for manual inspection, don't delete.
-            dest := job.Path // fallback if rename fails
-            if job.InfectedDir != "" {
-                _ = os.MkdirAll(job.InfectedDir, 0o700)
-                candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
-                if rerr := os.Rename(job.Path, candidate); rerr == nil {
-                    dest = candidate
-                }
-            }
-            logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",
-                dest, job.IP, job.Host, r.Signature)
-        } else {
-            _ = os.Remove(job.Path)
-        }
-    }
+	// Best-effort notify for test mode.
+	m.safeNotifyUpload(job, r)
+
+	if !job.TempCopy {
+		return
+	}
+
+	if r.Infected {
+		dest := job.Path // fallback if rename fails
+		if job.InfectedDir != "" {
+			_ = os.MkdirAll(job.InfectedDir, 0o700)
+			candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
+			if rerr := os.Rename(job.Path, candidate); rerr == nil {
+				dest = candidate
+			}
+		}
+		logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",
+			dest, job.IP, job.Host, r.Signature)
+
+		m.safeNotifyInfected(job, r, dest)
+		return
+	}
+
+	_ = os.Remove(job.Path)
+}
+
+func (m *Manager) safeNotifyUpload(job Job, r *Result) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logf("[clam_notify] panic kind=CLAM/UPLOAD ip=%s host=%s uri=%s err=%v",
+				job.IP, job.Host, job.URI, rec)
+		}
+	}()
+	m.notifyUpload(job, r)
+}
+
+func (m *Manager) safeNotifyInfected(job Job, r *Result, evidencePath string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logf("[clam_notify] panic kind=CLAM/INFECTED ip=%s host=%s uri=%s err=%v",
+				job.IP, job.Host, job.URI, rec)
+		}
+	}()
+	m.notifyInfected(job, r, evidencePath)
+}
+
+func (m *Manager) notifyUpload(job Job, r *Result) {
+	if m == nil || r == nil {
+		return
+	}
+
+	asnText, countryText, ptr := m.enrichIP(job.IP)
+
+	filename := strings.TrimSpace(job.FileName)
+	if filename == "" {
+		filename = filepath.Base(job.Path)
+	}
+
+	result := "clean"
+	severity := "info"
+	if r.Infected {
+		result = "infected"
+		severity = "critical"
+	}
+
+	notify.Enqueue(notify.Event{
+		Host:     job.Host,
+		Kind:     "CLAM/UPLOAD",
+		SrcIP:    job.IP,
+		ASN:      asnText,
+		Country:  countryText,
+		PTR:      ptr,
+		Reason:   "UPLOAD",
+		When:     time.Now(),
+		Section:  "clam",
+		Severity: severity,
+		Samples: []string{
+			"uri=" + job.URI,
+			"host=" + job.Host,
+			"file=" + filename,
+			"result=" + result,
+		},
+		Extra: map[string]string{
+			"uri":      job.URI,
+			"filename": filename,
+			"result":   result,
+			"key":      job.IP,
+		},
+	})
+}
+
+func (m *Manager) notifyInfected(job Job, r *Result, evidencePath string) {
+	if m == nil || r == nil || !r.Infected {
+		return
+	}
+
+	asnText, countryText, ptr := m.enrichIP(job.IP)
+
+	filename := strings.TrimSpace(job.FileName)
+	if filename == "" {
+		filename = filepath.Base(job.Path)
+	}
+
+	notify.Enqueue(notify.Event{
+		Host:     job.Host,
+		Kind:     "CLAM/INFECTED",
+		SrcIP:    job.IP,
+		ASN:      asnText,
+		Country:  countryText,
+		PTR:      ptr,
+		Reason:   r.Signature,
+		When:     time.Now(),
+		Section:  "clam",
+		Severity: "critical",
+		Samples: []string{
+			"uri=" + job.URI,
+			"host=" + job.Host,
+			"file=" + filename,
+			"sig=" + r.Signature,
+			"evidence=" + evidencePath,
+		},
+		Extra: map[string]string{
+			"uri":      job.URI,
+			"filename": filename,
+			"sig":      r.Signature,
+			"evidence": evidencePath,
+			"key":      job.IP,
+		},
+	})
+}
+
+func (m *Manager) enrichIP(ip string) (asnText, countryText, ptr string) {
+	if m == nil || m.enr == nil || strings.TrimSpace(ip) == "" {
+		return "", "", ""
+	}
+
+	er := m.enr.Lookup(ip)
+	if er.ASN > 0 {
+		if er.ASNName != "" {
+			asnText = fmt.Sprintf("AS%d %s", er.ASN, er.ASNName)
+		} else {
+			asnText = fmt.Sprintf("AS%d", er.ASN)
+		}
+	}
+
+	switch {
+	case er.City != "" && er.Country != "":
+		countryText = er.City + ", " + er.Country
+	case er.Country != "":
+		countryText = er.Country
+	}
+
+	ptr = er.PTR
+	return asnText, countryText, ptr
 }
 
 func logResult(job Job, r *Result) {
-    if r == nil {
-        return
-    }
-    switch {
-    case r.Infected:
-        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=INFECTED sig=%q",
-            job.IP, job.Host, job.URI, job.Reason, r.Signature)
-    case strings.HasSuffix(r.Raw, " OK"):
-        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=clean",
-            job.IP, job.Host, job.URI, job.Reason)
-    default:
-        logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=error raw=%q",
-            job.IP, job.Host, job.URI, job.Reason, r.Raw)
-    }
+	if r == nil {
+		return
+	}
+	switch {
+	case r.Infected:
+		logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=INFECTED sig=%q",
+			job.IP, job.Host, job.URI, job.Reason, r.Signature)
+	case strings.HasSuffix(r.Raw, " OK"):
+		logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=clean",
+			job.IP, job.Host, job.URI, job.Reason)
+	default:
+		logf("[clam_scan] ip=%s host=%s uri=%s reason=%s result=error raw=%q",
+			job.IP, job.Host, job.URI, job.Reason, r.Raw)
+	}
 }
-
-
-
-
 
 func parseScanResponse(path, resp string) *Result {
 	r := &Result{

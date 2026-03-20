@@ -51,7 +51,7 @@ local CFG = {
   keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
 
   -- Narrow body read for inline WAF (only where needed)
-  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "4096"),
+  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "8192"),
 
   -- POST resume: stash challenged POST bodies so they can be replayed after solve.
   -- Enabled by default. Only covers allowlisted content types (form, JSON, text).

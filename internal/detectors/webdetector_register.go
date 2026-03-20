@@ -170,6 +170,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			if b := w.eng.NginxBridge(); b != nil {
 
 				// expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
+				ResetClamBridgeWireState()
 				SetNginxBridge(b)
 
 				// ── NEW: wire bypass so handleDecision respects IGNORE_IPS/IGNORE_NETS ──
@@ -177,10 +178,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
 				}
 				// ─────────────────────────────────────────────────
-				if clamMgr != nil {
-					b.SetClamManager(clamMgr, clamMgr.PendingDir(), clamMgr.InfectedDir())
-					logging.LogfCLAM("[clam] upload scanning wired to bridge")
-				}
+				_ = TryWireClamBridge()
 
 				go b.RunExpireLoop(pctx)
 				w.srvWG.Add(1)
