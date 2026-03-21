@@ -93,6 +93,7 @@ type GovernorState struct {
 	LockedConn  int
 	ConnPct     float64
 	PerUser     []UserStat
+	Processes   []Process
 	Running     []Process   // active + waiting, sorted by time desc
 	LockGraph   []LockGroup // blocker -> waiters
 	RecentKills []KillRecord
@@ -122,6 +123,7 @@ type KillRecord struct {
 	Ts        time.Time
 	PID       int64
 	User      string
+	Host      string
 	DB        string
 	Runtime   time.Duration
 	State     string
@@ -373,6 +375,11 @@ func (g *Governor) buildState(procs []Process, maxConn int) GovernorState {
 		Mode: g.cfg.Mode,
 	}
 
+	if len(procs) > 0 {
+		s.Processes = make([]Process, len(procs))
+		copy(s.Processes, procs)
+	}
+
 	userMap := map[string]*UserStat{}
 	ensureUser := func(u string) *UserStat {
 		if _, ok := userMap[u]; !ok {
@@ -532,6 +539,7 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 			Ts:        time.Now(),
 			PID:       p.ID,
 			User:      p.User,
+			Host:      p.Host,
 			DB:        p.DB,
 			Runtime:   time.Duration(p.TimeSec) * time.Second,
 			State:     p.State,
@@ -543,16 +551,21 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 		}
 
 		logging.LogfMYSQLGOVERNOR(
-			"[mysql/governor] %s pid=%d user=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
-			kr.Action, kr.PID, kr.User, kr.DB, p.TimeSec, kr.Reason, kr.Unblocked, kr.Result)
+			"[mysql/governor] %s pid=%d user=%s host=%s db=%s runtime=%ds reason=%q unblocked=%d result=%s",
+			kr.Action, kr.PID, kr.User, kr.Host, kr.DB, p.TimeSec, kr.Reason, kr.Unblocked, kr.Result)
 
 		notify.Enqueue(notify.Event{
 			Kind:    "MYSQL/GOVERNOR",
 			Section: "mysql_governor",
-			Reason: fmt.Sprintf("%s pid=%d user=%s db=%s runtime=%ds unblocked=%d",
-				kr.Action, kr.PID, kr.User, kr.DB, p.TimeSec, kr.Unblocked),
+			Reason: fmt.Sprintf("%s pid=%d user=%s host=%s db=%s runtime=%ds unblocked=%d",
+				kr.Action, kr.PID, kr.User, kr.Host, kr.DB, p.TimeSec, kr.Unblocked),
 			Severity: "critical",
-			Samples:  []string{kr.Query, "reason: " + kr.Reason, "result: " + kr.Result},
+			Samples:  []string{
+				"state: " + kr.State,
+				"query: " + kr.Query,
+				"reason: " + kr.Reason,
+				"result: " + kr.Result,
+			},
 		})
 
 		kills = append(kills, kr)
@@ -744,15 +757,18 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 				state.TotalConn, state.MaxConn, state.ConnPct, top),
 			Severity: "critical",
 		})
-		g.appendHistoryEvent(GovernorHistoryEvent{
-			TsUnix:    now.Unix(),
-			EventType: "conn_pressure",
-			Action:    "critical",
-			Reason:    fmt.Sprintf("CRITICAL %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
-			ConnPct:   state.ConnPct,
-			TotalConn: state.TotalConn,
-			MaxConn:   state.MaxConn,
-		})
+
+g.appendHistoryEvent(GovernorHistoryEvent{
+    TsUnix:    now.Unix(),
+    EventType: "conn_pressure",
+    Action:    "critical",
+    Reason:    fmt.Sprintf("CRITICAL %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+    ConnPct:   state.ConnPct,
+    TotalConn: state.TotalConn,
+    MaxConn:   state.MaxConn,
+    Payload:   g.buildSnapshot(state, state.Processes),
+})
+
 		return
 	}
 
@@ -768,15 +784,19 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 				state.TotalConn, state.MaxConn, state.ConnPct),
 			Severity: "warn",
 		})
-		g.appendHistoryEvent(GovernorHistoryEvent{
-			TsUnix:    now.Unix(),
-			EventType: "conn_pressure",
-			Action:    "warn",
-			Reason:    fmt.Sprintf("WARNING %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
-			ConnPct:   state.ConnPct,
-			TotalConn: state.TotalConn,
-			MaxConn:   state.MaxConn,
-		})
+
+g.appendHistoryEvent(GovernorHistoryEvent{
+    TsUnix:    now.Unix(),
+    EventType: "conn_pressure",
+    Action:    "warn",
+    Reason:    fmt.Sprintf("WARNING %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+    ConnPct:   state.ConnPct,
+    TotalConn: state.TotalConn,
+    MaxConn:   state.MaxConn,
+    Payload:   g.buildSnapshot(state, state.Processes),
+})
+
+
 	}
 }
 
@@ -837,10 +857,7 @@ func (g *Governor) appendKills(kr []KillRecord) {
 			PID:       k.PID,
 			RuntimeMs: k.Runtime.Milliseconds(),
 			Unblocked: k.Unblocked,
-			Payload: map[string]any{
-				"state": k.State,
-				"query": k.Query,
-			},
+			Payload: g.buildSnapshot(g.State(), nil),
 		})
 	}
 }
@@ -935,4 +952,34 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func (g *Governor) buildSnapshot(state GovernorState, procs []Process) map[string]any {
+    if len(procs) == 0 {
+        procs = state.Processes
+    }
+
+    topQueries := 20
+    if len(procs) < topQueries {
+        topQueries = len(procs)
+    }
+
+    topUsers := 10
+    if len(state.PerUser) < topUsers {
+        topUsers = len(state.PerUser)
+    }
+
+    return map[string]any{
+        "conn": map[string]any{
+            "total":  state.TotalConn,
+            "max":    state.MaxConn,
+            "pct":    state.ConnPct,
+            "active": state.ActiveConn,
+            "sleep":  state.SleepConn,
+            "locked": state.LockedConn,
+        },
+        "top_users":   state.PerUser[:topUsers],
+        "top_queries": procs[:topQueries],
+        "locks":       state.LockGraph,
+    }
 }

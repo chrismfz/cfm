@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -93,11 +94,30 @@ func (l liveTreeLabel) String() string { return string(l) }
 // Main live UI
 // --------------------------------------------------------------------------
 
-func mysqlLiveUI(baseURL string) error {
+func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 	if err := ui.Init(); err != nil {
 		return err
 	}
 	defer ui.Close()
+
+        liveURL := func(path string) string {
+                q := url.Values{}
+                if filterUser != "" {
+                        q.Set("user", filterUser)
+                }
+                if filterDB != "" {
+                        q.Set("db", filterDB)
+                }
+
+                full := strings.TrimRight(baseURL, "/") + path
+                if enc := q.Encode(); enc != "" {
+                        if strings.Contains(full, "?") {
+                                return full + "&" + enc
+                        }
+                        return full + "?" + enc
+                }
+                return full
+        }
 
 	// -----------------------------------------------------------------------
 	// Widgets
@@ -532,23 +552,31 @@ func mysqlLiveUI(baseURL string) error {
 		)
 	}
 
-	buildHelp := func() {
-		pauseHint := ""
-		if paused { pauseHint = "  [PAUSED — s/r to resume]" }
-		if chartView {
-			helpBar.Text = fmt.Sprintf(
-				" q quit  x tables  s pause  r refresh%s"+
-					"  │  left: conn trend  right: qps+lat  (lock tree when locks active)",
-				pauseHint,
-			)
-		} else {
-			helpBar.Text = fmt.Sprintf(
-				" q quit  x charts  ↑↓/j/k nav  s pause  r refresh%s"+
-					"  │  top: connections+queries  bottom: cpu+history",
-				pauseHint,
-			)
-		}
-	}
+
+        buildHelp := func() {
+                pauseHint := ""
+                if paused {
+                        pauseHint = "  [PAUSED — s/r to resume]"
+                }
+
+                scope := "all"
+                if filterUser != "" || filterDB != "" {
+                        scope = fmt.Sprintf("user=%q db=%q", filterUser, filterDB)
+                }
+
+                if chartView {
+                        helpBar.Text = fmt.Sprintf(
+                                " q quit  x tables  s pause  r refresh%s  │  scope: %s  │  left: conn trend  right: qps+lat  (lock tree when locks active)",
+                                pauseHint, scope,
+                        )
+                } else {
+                        helpBar.Text = fmt.Sprintf(
+                                " q quit x charts ↑/↓ nav s pause r refresh%s | scope: %s",
+                                pauseHint, scope,
+                        )
+                }
+        }
+
 
 	// -----------------------------------------------------------------------
 	// Ring-buffer sample push (every fetch)
@@ -614,25 +642,26 @@ func mysqlLiveUI(baseURL string) error {
 	// Fetch
 	// -----------------------------------------------------------------------
 
-	refreshAll := func() {
-		lastErr = ""
-		if err := fetchLiveJSON(strings.TrimRight(baseURL, "/")+"/api/v1/mysql/state", &state); err != nil {
-			lastErr = err.Error()
-		} else {
-			if err2 := fetchLiveJSON(strings.TrimRight(baseURL, "/")+"/api/v1/mysql/cpu", &cpu); err2 != nil {
-				lastErr = "cpu:" + err2.Error()
-			}
-			if err3 := fetchLiveJSON(strings.TrimRight(baseURL, "/")+"/api/v1/mysql/history?window=1h&top=50", &hist); err3 != nil && lastErr == "" {
-				lastErr = "hist:" + err3.Error()
-			}
-			if selected >= len(state.PerUser) && len(state.PerUser) > 0 {
-				selected = len(state.PerUser) - 1
-			}
-		}
-		pushSamples()
-		lastUpdate = time.Now()
-		render()
-	}
+        refreshAll := func() {
+                lastErr = ""
+                if err := fetchLiveJSON(liveURL("/api/v1/mysql/state"), &state); err != nil {
+                        lastErr = err.Error()
+                } else {
+                        if err2 := fetchLiveJSON(liveURL("/api/v1/mysql/cpu"), &cpu); err2 != nil {
+                                lastErr = "cpu:" + err2.Error()
+                        }
+                        if err3 := fetchLiveJSON(liveURL("/api/v1/mysql/history?window=1h&top=50"), &hist); err3 != nil && lastErr == "" {
+                                lastErr = "hist:" + err3.Error()
+                        }
+                        if selected >= len(state.PerUser) && len(state.PerUser) > 0 {
+                                selected = len(state.PerUser) - 1
+                        }
+                }
+                pushSamples()
+                lastUpdate = time.Now()
+                render()
+        }
+
 
 	refreshAll()
 

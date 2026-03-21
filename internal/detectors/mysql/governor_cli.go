@@ -2,6 +2,7 @@
 package mysql
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"golang.org/x/term"
@@ -21,17 +22,19 @@ func RunMySQLTop(baseURL string, args []string) error {
 		if !isTTY() {
 			return runMySQLTopDefault(baseURL)
 		}
-		return runMySQLLive(baseURL)
+		return runMySQLLive(baseURL, nil)
 	}
 
 	switch args[0] {
 	case "text":
 		return runMySQLTopDefault(baseURL)
+
+
 	case "live":
 		if !isTTY() {
 			return runMySQLTopDefault(baseURL)
 		}
-		return runMySQLLive(baseURL)
+		return runMySQLLive(baseURL, args[1:])
 	case "top":
 		n := 20
 		if len(args) > 1 {
@@ -43,38 +46,56 @@ func RunMySQLTop(baseURL string, args []string) error {
 	case "locks":
 		return runMySQLTopLocks(baseURL)
 	case "kills":
-		return runMySQLTopKills(baseURL)
+		return runMySQLTopKills(baseURL, args[1:])
+	case "watch":
+		return runMySQLWatch(baseURL, args[1:])
 	case "ps", "processlist":
-		return runMySQLProcesslist(baseURL)
-	case "history":
-		if len(args) > 1 {
-			switch args[1] {
-			case "events":
-				return runMySQLHistoryEvents(baseURL, args[2:])
-			case "summary":
-				return runMySQLHistorySummary(baseURL, args[2:])
-			case "prune":
-				return runMySQLHistoryPrune(baseURL, args[2:])
-			case "truncate":
-				return runMySQLHistoryTruncate(baseURL, args[2:])
-			}
-		}
-		// cfm mysqltop history [window] [topN]
-		// window: 1h (default), 30m, 6h, 24h
-		// topN:   20 (default)
-		window := "1h"
-		topN := 20
-		if len(args) > 1 {
-			window = args[1]
-		}
-		if len(args) > 2 {
-			if n, err := strconv.Atoi(args[2]); err == nil && n > 0 {
-				topN = n
-			}
-		}
-		return runMySQLHistory(baseURL, window, topN)
+		return runMySQLProcesslist(baseURL, args[1:])
 	case "cpu":
 		return runMySQLCPU(baseURL)
+
+case "history":
+    if len(args) > 1 {
+        switch args[1] {
+        case "events":
+            return runMySQLHistoryEvents(baseURL, args[2:])
+        case "summary":
+            return runMySQLHistorySummary(baseURL, args[2:])
+        case "prune":
+            return runMySQLHistoryPrune(baseURL, args[2:])
+        case "truncate":
+            return runMySQLHistoryTruncate(baseURL, args[2:])
+	case "timeline":
+	    return runMySQLHistoryTimeline(baseURL, args[2:])
+
+        }
+    }
+
+    // defaults
+    window := "1h"
+    topN := 20
+
+    // detect positional args safely
+    pos := []string{}
+    for _, a := range args[1:] {
+        if strings.HasPrefix(a, "-") {
+            break
+        }
+        pos = append(pos, a)
+    }
+
+    if len(pos) >= 1 {
+        window = pos[0]
+    }
+    if len(pos) >= 2 {
+        if n, err := strconv.Atoi(pos[1]); err == nil && n > 0 {
+            topN = n
+        }
+    }
+
+    return runMySQLHistory(baseURL, window, topN, args[1:])
+
+
 	case "help", "-h", "--help":
 		printMySQLTopHelp()
 		return nil
@@ -87,8 +108,9 @@ func isTTY() bool {
 }
 
 // runMySQLLive starts the termui live dashboard.
-func runMySQLLive(baseURL string) error {
-	return mysqlLiveUI(baseURL)
+func runMySQLLive(baseURL string, args []string) error {
+	user, db, _, _ := parseMySQLFilters(args)
+	return mysqlLiveUI(baseURL, user, db)
 }
 
 func printMySQLTopHelp() {
@@ -100,11 +122,13 @@ func printMySQLTopHelp() {
 	fmt.Println("  cfm mysqltop locks                  # lock graph (blockers + waiters)")
 	fmt.Println("  cfm mysqltop kills                  # recent governor kills")
 	fmt.Println("  cfm mysqltop ps                     # full processlist (running + waiting)")
-	fmt.Println("  cfm mysqltop history [window] [N]   # busiest N users over window (e.g. 1h, 6h, 24h)")
+	fmt.Println("  cfm mysqltop watch --user U [--db DB] [--interval 5s] [--log /path/file.jsonl]")
+	fmt.Println("  cfm mysqltop history [window] [N] [--user U]   # busiest N users over window")
 	fmt.Println("  cfm mysqltop history events [--user U] [--db DB] [--limit N]")
 	fmt.Println("  cfm mysqltop history summary [--hours H]")
 	fmt.Println("  cfm mysqltop history prune [days]")
 	fmt.Println("  cfm mysqltop history truncate --yes")
+        fmt.Println("  cfm mysqltop history timeline --user U ")
 	fmt.Println("  cfm mysqltop cpu                    # per-user CPU + query stats")
 	fmt.Println("                                      #   MySQL 8+: uses performance_schema SUM_CPU_TIME")
 	fmt.Println("                                      #   MariaDB:  uses information_schema.USER_STATISTICS (userstat=ON)")
@@ -271,14 +295,16 @@ func runMySQLTopLocks(baseURL string) error {
 	return nil
 }
 
-func runMySQLTopKills(baseURL string) error {
+func runMySQLTopKills(baseURL string, args []string) error {
 	type killsResp struct {
 		Ts    time.Time    `json:"ts"`
 		Mode  string       `json:"mode"`
 		Kills []KillRecord `json:"kills"`
 	}
 	var r killsResp
-	if err := fetchGovernorJSON(baseURL, "/api/v1/mysql/kills", &r); err != nil {
+	user, db, _, _ := parseMySQLFilters(args)
+	path := buildMySQLPath("/api/v1/mysql/kills", user, db)
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
 		return err
 	}
 	fmt.Printf("[mysqltop kills] %s  mode=%s\n", r.Ts.Format("15:04:05"), r.Mode)
@@ -287,11 +313,11 @@ func runMySQLTopKills(baseURL string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TIME\tACTION\tPID\tUSER\tDB\tRUNTIME\tUNBLOCKED\tRESULT\tREASON")
+	fmt.Fprintln(w, "TIME\tACTION\tPID\tUSER\tHOST\tDB\tRUNTIME\tUNBLOCKED\tRESULT\tREASON")
 	for _, k := range r.Kills {
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			k.Ts.Format("15:04:05"), k.Action,
-			k.PID, k.User, k.DB,
+			k.PID, k.User, k.Host, k.DB,
 			k.Runtime.Round(time.Second),
 			k.Unblocked, k.Result,
 			truncate(k.Reason, 60))
@@ -300,9 +326,11 @@ func runMySQLTopKills(baseURL string) error {
 	return nil
 }
 
-func runMySQLProcesslist(baseURL string) error {
+func runMySQLProcesslist(baseURL string, args []string) error {
 	var r map[string]any
-	if err := fetchGovernorJSON(baseURL, "/api/v1/mysql/processlist", &r); err != nil {
+	user, db, _, _ := parseMySQLFilters(args)
+	path := buildMySQLPath("/api/v1/mysql/processlist", user, db)
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
 		return err
 	}
 	b, _ := json.MarshalIndent(r, "", "  ")
@@ -314,7 +342,7 @@ func runMySQLProcesslist(baseURL string) error {
 //
 //	cfm mysqltop history [window] [N]
 //	cfm mysqltop history 6h 10
-func runMySQLHistory(baseURL, window string, topN int) error {
+func runMySQLHistory(baseURL, window string, topN int, args []string) error {
 	type histResp struct {
 		Ts          time.Time         `json:"ts"`
 		Window      string            `json:"window"`
@@ -322,7 +350,11 @@ func runMySQLHistory(baseURL, window string, topN int) error {
 		Users       []UserHistoryStat `json:"users"`
 	}
 	var r histResp
-	path := fmt.Sprintf("/api/v1/mysql/history?window=%s&top=%d", window, topN)
+	user, _, _, _ := parseMySQLFilters(args)
+	path := fmt.Sprintf("/api/v1/mysql/history?window=%s&top=%d", url.QueryEscape(window), topN)
+	if user != "" {
+		path += "&user=" + url.QueryEscape(user)
+	}
 	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
 		return err
 	}
@@ -473,6 +505,110 @@ func runMySQLCPU(baseURL string) error {
 	w.Flush()
 	return nil
 }
+
+func parseMySQLFilters(args []string) (user, db string, interval time.Duration, logPath string) {
+	interval = 5 * time.Second
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--user" && i+1 < len(args):
+			user = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--user="):
+			user = strings.TrimPrefix(args[i], "--user=")
+		case args[i] == "--db" && i+1 < len(args):
+			db = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--db="):
+			db = strings.TrimPrefix(args[i], "--db=")
+		case args[i] == "--interval" && i+1 < len(args):
+			if d, err := time.ParseDuration(args[i+1]); err == nil && d > 0 {
+				interval = d
+			}
+			i++
+		case strings.HasPrefix(args[i], "--interval="):
+			if d, err := time.ParseDuration(strings.TrimPrefix(args[i], "--interval=")); err == nil && d > 0 {
+				interval = d
+			}
+		case args[i] == "--log" && i+1 < len(args):
+			logPath = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--log="):
+			logPath = strings.TrimPrefix(args[i], "--log=")
+		}
+	}
+	return
+}
+
+func buildMySQLPath(path, user, db string) string {
+	q := url.Values{}
+	if user != "" {
+		q.Set("user", user)
+	}
+	if db != "" {
+		q.Set("db", db)
+	}
+	if enc := q.Encode(); enc != "" {
+		return path + "?" + enc
+	}
+	return path
+}
+
+func runMySQLWatch(baseURL string, args []string) error {
+	user, db, interval, logPath := parseMySQLFilters(args)
+	if user == "" && db == "" {
+		return fmt.Errorf("watch requires at least --user or --db")
+	}
+
+	type watchSnapshot struct {
+		Ts   time.Time       `json:"ts"`
+		Proc map[string]any  `json:"processlist"`
+		Kill map[string]any  `json:"kills"`
+	}
+
+	var f *os.File
+	var err error
+	if logPath != "" {
+		f, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+	}
+
+	fmt.Printf("[mysqltop watch] user=%q db=%q interval=%s log=%q\n", user, db, interval, logPath)
+	tk := time.NewTicker(interval)
+	defer tk.Stop()
+
+	for {
+		var proc map[string]any
+		var kills map[string]any
+
+		if err := fetchGovernorJSON(baseURL, buildMySQLPath("/api/v1/mysql/processlist", user, db), &proc); err != nil {
+			return err
+		}
+		if err := fetchGovernorJSON(baseURL, buildMySQLPath("/api/v1/mysql/kills", user, db), &kills); err != nil {
+			return err
+		}
+
+		snap := watchSnapshot{
+			Ts:   time.Now(),
+			Proc: proc,
+			Kill: kills,
+		}
+
+		b, _ := json.Marshal(snap)
+		fmt.Println(string(b))
+
+		if f != nil {
+			bw := bufio.NewWriter(f)
+			_, _ = bw.Write(append(b, '\n'))
+			_ = bw.Flush()
+		}
+
+		<-tk.C
+	}
+}
+
 
 // waitPct returns a formatted wait percentage string: (busy-cpu)/busy*100.
 // Shows "-" when busy is zero (user had no activity this window).
@@ -684,4 +820,44 @@ func formatAge(secs int64) string {
 		return fmt.Sprintf("%.0fm", d.Minutes())
 	}
 	return fmt.Sprintf("%.1fh", d.Hours())
+}
+
+
+
+func runMySQLHistoryTimeline(baseURL string, args []string) error {
+    user := ""
+    for i := 0; i < len(args); i++ {
+        if args[i] == "--user" && i+1 < len(args) {
+            user = args[i+1]
+            i++
+        }
+    }
+
+    path := "/api/v1/mysql/history/timeline"
+    if user != "" {
+        path += "?user=" + url.QueryEscape(user)
+    }
+
+    var r struct {
+        Rows []GovernorHistoryEvent `json:"rows"`
+    }
+
+    if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+        return err
+    }
+
+    for _, ev := range r.Rows {
+        fmt.Printf("%d %s %s %s\n",
+            ev.TsUnix,
+            ev.EventType,
+            ev.User,
+            ev.Reason,
+        )
+
+        if ev.Payload != nil {
+            fmt.Println("  snapshot available")
+        }
+    }
+
+    return nil
 }

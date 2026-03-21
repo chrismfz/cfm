@@ -83,13 +83,16 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 
 	// Build per-user sorted sleeper list (oldest idle first — kill those first).
 	type sleeper struct {
-		pid  int64
+		proc Process
 		idle int64
 	}
 	userSleepers := map[string][]sleeper{}
 	for _, p := range procs {
 		if p.Command == "Sleep" && !alwaysExemptUsers[p.User] {
-			userSleepers[p.User] = append(userSleepers[p.User], sleeper{p.ID, p.TimeSec})
+			userSleepers[p.User] = append(userSleepers[p.User], sleeper{
+				proc: p,
+				idle: p.TimeSec,
+			})
 		}
 	}
 	for u := range userSleepers {
@@ -152,22 +155,24 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 			}
 			// Step 2: also reap existing sleepers above the cap (fallthrough).
 			fallthrough
-
 		case ConnActionReapSleep:
 			sleepers := userSleepers[us.User]
 			reaped := 0
+
 			for _, s := range sleepers {
 				if reaped >= excess {
 					break
 				}
+
 				// Never kill a sleeping connection with an open InnoDB transaction.
-				if g.hasOpenTxn(ctx, s.pid) {
+				if g.hasOpenTxn(ctx, s.proc.ID) {
 					continue
 				}
-				if !g.killAllowed(us.User) {
+
+				if !g.killAllowed(s.proc.DB) {
 					logging.LogfMYSQLGOVERNOR(
 						"[mysql/conn_limit] rate-limited, skipping reap user=%s pid=%d",
-						us.User, s.pid)
+						us.User, s.proc.ID)
 					break
 				}
 
@@ -176,32 +181,53 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 
 				if g.cfg.Mode == "enforce" {
 					actionLabel = "KILL CONNECTION"
-					if _, err := g.db.ExecContext(ctx,
-						fmt.Sprintf("KILL %d", s.pid)); err != nil {
+					if _, err := g.db.ExecContext(ctx, fmt.Sprintf("KILL %d", s.proc.ID)); err != nil {
 						result = err.Error()
 					} else {
 						result = "OK"
-						g.recordKill(us.User)
-						reaped++
+						g.recordKill(s.proc.DB)
 					}
 				}
 
 				kr := KillRecord{
-					Ts:      time.Now(),
-					PID:     s.pid,
-					User:    us.User,
-					Runtime: time.Duration(s.idle) * time.Second,
-					State:   "Sleep",
-					Action:  actionLabel,
-					Reason: fmt.Sprintf("conn_limit: excess=%d max=%d total=%d",
-						excess, rule.Max, us.Total),
-					Result: result,
+					Ts:        time.Now(),
+					PID:       s.proc.ID,
+					User:      us.User,
+					Host:      s.proc.Host,
+					DB:        s.proc.DB,
+					Runtime:   time.Duration(s.proc.TimeSec) * time.Second,
+					State:     s.proc.State,
+					Query:     truncate(strings.TrimSpace(s.proc.Info), 300),
+					Action:    actionLabel,
+					Reason:    fmt.Sprintf("conn_limit: excess=%d max=%d total=%d idle=%ds",
+						excess, rule.Max, us.Total, s.proc.TimeSec),
+					Result:    result,
+					Unblocked: 0,
 				}
+
 				kills = append(kills, kr)
+				reaped++
 
 				logging.LogfMYSQLGOVERNOR(
-					"[mysql/conn_limit] %s pid=%d user=%s idle=%ds excess=%d result=%s",
-					actionLabel, s.pid, us.User, s.idle, excess, result)
+					"[mysql/conn_limit] %s pid=%d user=%s host=%s db=%s total=%d max=%d excess=%d idle=%ds state=%q query=%q result=%s",
+					kr.Action, kr.PID, kr.User, kr.Host, kr.DB,
+					us.Total, rule.Max, excess, s.proc.TimeSec,
+					kr.State, truncate(kr.Query, 120), kr.Result)
+			}
+
+			// Save ONE forensic snapshot for this conn-limit batch, not one per PID.
+			if reaped > 0 {
+				g.appendHistoryEvent(GovernorHistoryEvent{
+					TsUnix:    time.Now().Unix(),
+					EventType: "conn_limit",
+					User:      us.User,
+					Action:    "reap_sleep",
+					Reason:    fmt.Sprintf("conn_limit snapshot user=%s total=%d max=%d reaped=%d", us.User, us.Total, rule.Max, reaped),
+					ConnPct:   state.ConnPct,
+					TotalConn: state.TotalConn,
+					MaxConn:   state.MaxConn,
+					Payload:   g.buildSnapshot(state, procs),
+				})
 			}
 
 			if rule.Action == ConnActionReapSleep && g.connNotifyAllowed(us.User) {
@@ -212,6 +238,12 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 					Severity: "warn",
 				})
 			}
+
+
+
+
+
+
 		}
 	}
 
