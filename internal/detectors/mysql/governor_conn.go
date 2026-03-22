@@ -226,7 +226,7 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 					ConnPct:   state.ConnPct,
 					TotalConn: state.TotalConn,
 					MaxConn:   state.MaxConn,
-					Payload:   g.buildSnapshot(state, procs),
+					Payload:   g.buildSnapshotForUser(state, us.User, ""),
 				})
 			}
 

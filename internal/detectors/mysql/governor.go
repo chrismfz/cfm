@@ -328,7 +328,7 @@ func (g *Governor) poll(ctx context.Context) {
 	kills = append(kills, connKills...)
 
 	if len(kills) > 0 {
-		g.appendKills(kills)
+		g.appendKills(state, kills)
 	}
 	state.RecentKills = g.recentKills()
 
@@ -838,7 +838,7 @@ func (g *Governor) recordKill(db string) {
 	g.killMu.Unlock()
 }
 
-func (g *Governor) appendKills(kr []KillRecord) {
+func (g *Governor) appendKills(state GovernorState, kr []KillRecord) {
 	g.killRingMu.Lock()
 	defer g.killRingMu.Unlock()
 	g.killRing = append(kr, g.killRing...)
@@ -857,7 +857,7 @@ func (g *Governor) appendKills(kr []KillRecord) {
 			PID:       k.PID,
 			RuntimeMs: k.Runtime.Milliseconds(),
 			Unblocked: k.Unblocked,
-			Payload: g.buildSnapshot(g.State(), nil),
+			Payload:   g.buildSnapshotForUser(state, k.User, k.DB),
 		})
 	}
 }
@@ -982,4 +982,135 @@ func (g *Governor) buildSnapshot(state GovernorState, procs []Process) map[strin
         "top_queries": procs[:topQueries],
         "locks":       state.LockGraph,
     }
+}
+
+
+
+func normalizeHostPort(host string) string {
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		return host[:i]
+	}
+	return host
+}
+
+func queryFingerprint(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+	q = strings.Join(strings.Fields(q), " ")
+	if len(q) > 160 {
+		q = q[:160] + "…"
+	}
+	return q
+}
+
+func (g *Governor) buildSnapshotForUser(state GovernorState, user, db string) map[string]any {
+	procs := state.Processes
+	filtered := make([]Process, 0, len(procs))
+	for _, p := range procs {
+		if user != "" && p.User != user {
+			continue
+		}
+		if db != "" && p.DB != db {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	hostCounts := map[string]int{}
+	commandCounts := map[string]int{}
+	stateCounts := map[string]int{}
+	fpCounts := map[string]int{}
+
+	for _, p := range filtered {
+		hostCounts[normalizeHostPort(p.Host)]++
+		commandCounts[p.Command]++
+		if strings.TrimSpace(p.State) != "" {
+			stateCounts[p.State]++
+		}
+		if fp := queryFingerprint(p.Info); fp != "" {
+			fpCounts[fp]++
+		}
+	}
+
+	type kv struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	toTopList := func(m map[string]int, limit int) []kv {
+		out := make([]kv, 0, len(m))
+		for k, v := range m {
+			out = append(out, kv{Name: k, Count: v})
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Count == out[j].Count {
+				return out[i].Name < out[j].Name
+			}
+			return out[i].Count > out[j].Count
+		})
+		if len(out) > limit {
+			out = out[:limit]
+		}
+		return out
+	}
+
+	locks := make([]LockGroup, 0, len(state.LockGraph))
+	for _, lg := range state.LockGraph {
+		if user != "" && lg.Blocker.User != user {
+			matched := false
+			for _, w := range lg.Waiters {
+				if w.User == user && (db == "" || w.DB == db) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if db != "" && lg.Blocker.DB != db {
+			matched := false
+			for _, w := range lg.Waiters {
+				if w.DB == db && (user == "" || w.User == user) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		locks = append(locks, lg)
+	}
+
+	topUsers := 10
+	if len(state.PerUser) < topUsers {
+		topUsers = len(state.PerUser)
+	}
+	topProcs := 50
+	if len(filtered) < topProcs {
+		topProcs = len(filtered)
+	}
+
+	return map[string]any{
+		"conn": map[string]any{
+			"total":  state.TotalConn,
+			"max":    state.MaxConn,
+			"pct":    state.ConnPct,
+			"active": state.ActiveConn,
+			"sleep":  state.SleepConn,
+			"locked": state.LockedConn,
+		},
+		"user":            user,
+		"db":              db,
+		"top_users":       state.PerUser[:topUsers],
+		"process_count":   len(filtered),
+		"processes":       filtered[:topProcs],
+		"hosts":           toTopList(hostCounts, 10),
+		"commands":        toTopList(commandCounts, 10),
+		"states":          toTopList(stateCounts, 10),
+		"query_patterns":  toTopList(fpCounts, 10),
+		"locks":           locks,
+	}
 }

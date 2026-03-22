@@ -128,7 +128,7 @@ func printMySQLTopHelp() {
 	fmt.Println("  cfm mysqltop history summary [--hours H]")
 	fmt.Println("  cfm mysqltop history prune [days]")
 	fmt.Println("  cfm mysqltop history truncate --yes")
-        fmt.Println("  cfm mysqltop history timeline --user U ")
+	fmt.Println("  cfm mysqltop history timeline --user U [--full]")
 	fmt.Println("  cfm mysqltop cpu                    # per-user CPU + query stats")
 	fmt.Println("                                      #   MySQL 8+: uses performance_schema SUM_CPU_TIME")
 	fmt.Println("                                      #   MariaDB:  uses information_schema.USER_STATISTICS (userstat=ON)")
@@ -825,39 +825,74 @@ func formatAge(secs int64) string {
 
 
 func runMySQLHistoryTimeline(baseURL string, args []string) error {
-    user := ""
-    for i := 0; i < len(args); i++ {
-        if args[i] == "--user" && i+1 < len(args) {
-            user = args[i+1]
-            i++
-        }
-    }
+	user := ""
+	full := false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--user" && i+1 < len(args):
+			user = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--user="):
+			user = strings.TrimPrefix(args[i], "--user=")
+		case args[i] == "--full":
+			full = true
+		}
+	}
 
-    path := "/api/v1/mysql/history/timeline"
-    if user != "" {
-        path += "?user=" + url.QueryEscape(user)
-    }
+	path := "/api/v1/mysql/history/timeline"
+	if user != "" {
+		path += "?user=" + url.QueryEscape(user)
+	}
 
-    var r struct {
-        Rows []GovernorHistoryEvent `json:"rows"`
-    }
+	var r struct {
+		Rows []GovernorHistoryEvent `json:"rows"`
+	}
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+		return err
+	}
 
-    if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
-        return err
-    }
+	for _, ev := range r.Rows {
+		fmt.Printf("%d %s %s %s\n", ev.TsUnix, ev.EventType, ev.User, ev.Reason)
+		if ev.Payload == nil {
+			continue
+		}
 
-    for _, ev := range r.Rows {
-        fmt.Printf("%d %s %s %s\n",
-            ev.TsUnix,
-            ev.EventType,
-            ev.User,
-            ev.Reason,
-        )
-
-        if ev.Payload != nil {
-            fmt.Println("  snapshot available")
-        }
-    }
-
-    return nil
+		if conn, ok := ev.Payload["conn"].(map[string]any); ok {
+			fmt.Printf("  conn: total=%v max=%v pct=%v active=%v sleep=%v locked=%v\n",
+				conn["total"], conn["max"], conn["pct"], conn["active"], conn["sleep"], conn["locked"])
+		}
+		if hosts, ok := ev.Payload["hosts"].([]any); ok && len(hosts) > 0 {
+			fmt.Println("  hosts:")
+			for i, h := range hosts {
+				if i >= 5 {
+					break
+				}
+				fmt.Printf("    %v\n", h)
+			}
+		}
+		if cmds, ok := ev.Payload["commands"].([]any); ok && len(cmds) > 0 {
+			fmt.Println("  commands:")
+			for i, c := range cmds {
+				if i >= 5 {
+					break
+				}
+				fmt.Printf("    %v\n", c)
+			}
+		}
+		if qps, ok := ev.Payload["query_patterns"].([]any); ok && len(qps) > 0 {
+			fmt.Println("  query_patterns:")
+			for i, q := range qps {
+				if i >= 5 {
+					break
+				}
+				fmt.Printf("    %v\n", q)
+			}
+		}
+		if full {
+			b, _ := json.MarshalIndent(ev.Payload, "  ", "  ")
+			fmt.Println("  payload:")
+			fmt.Println(string(b))
+		}
+	}
+	return nil
 }
