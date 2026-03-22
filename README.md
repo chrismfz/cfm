@@ -1,4 +1,19 @@
 # CFM – Configurable Firewall Manager
+<p align="center">
+  High-performance L3–L7 firewall, WAF & challenge engine for modern hosting stacks
+</p>
+
+<p align="center">
+  <img src="docs/cfm_webui.PNG" width="900">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-native-blue">
+  <img src="https://img.shields.io/badge/nftables-native-green">
+  <img src="https://img.shields.io/badge/WAF-integrated-red">
+  <img src="https://img.shields.io/badge/Challenge-engine-purple">
+</p>
+
 
 CFM is a modern Go-based firewall + detection + mitigation daemon.  
 It combines nftables policy enforcement, log-driven detectors, enrichment, notifications,
