@@ -15,10 +15,11 @@
 </p>
 
 
-CFM is a modern Go-based firewall + detection + mitigation daemon.  
+CFM is a modern Go-based firewall + detection + mitigation daemon.
 It combines nftables policy enforcement, log-driven detectors, enrichment, notifications,
 and an HTTP challenge engine that can be enforced either via nftables redirect/DNAT or directly
-in OpenResty in-path mode through a decision socket.
+in OpenResty in-path mode through a decision socket. 
+Openresty works as an Edge Interceptor filtering all traffic.
 
 > More information: https://infected.gr/category/cfm/
 
@@ -83,6 +84,8 @@ backend and no iptables dependency.
 | L7 | Behavioral Web Detection, OWASP-inspired WAF, Interactive Challenge Engine |
 | MySQL | Processlist governor, runaway query kill, connection-limit enforcement |
 | Support | Enrichment (PTR / ASN / Country), TLS-aware smart bridge, notifications |
+
+![WAF Reports](docs/waf_reports.png)
 
 **What makes it unique:**
 - Single Go binary, low footprint
@@ -236,6 +239,14 @@ The Web Detector ingests access logs and maintains:
 
 It supports both **visibility** (who is doing what, on which vhost) and **action** (challenge/mitigate abusive IPs or under-attack vhosts).
 
+### 📊 Live Views
+
+![WHM Live](docs/whm_live.png)
+![WebTop Index](docs/webtop_termui_index.PNG)
+![WebTop Vhost](docs/webtop_termui_vhost.PNG)
+
+
+
 ### Ingestion Modes
 
 **File mode** — single TSV log. Best for nginx/Apache custom log formats you control.
@@ -247,32 +258,6 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 
 Supports recursion + glob filtering.
 
-### Log Line Format (TSV)
-
-```
-ts  ip  host  method  uri  proto  status  bytes  rt  urt  ref  ua
-```
-
-- `host` — the vhost
-- `rt` — request time in seconds
-- UA/referrer are normalized for aggregation
-
-Format helpers are available under `/usr/share/cfm/` (nginx/Apache samples).
-
-### Configuration Examples
-
-```ini
-[webdetector]
-ENABLED  = 1
-MODE     = file
-LOG_PATH = /var/log/nginx/access_cfm_tsv.log
-
-# Folder mode (cPanel domlogs):
-# MODE    = folder
-# LOG_DIR = /usr/local/apache/domlogs
-# GLOB    = *
-# START_AT_END = 1   ; 1=tail only new lines (default), 0=replay existing lines once
-```
 
 ### Web Abuse Hard-Block Triggers
 
@@ -295,6 +280,12 @@ The long-window scorer combines: RPS, error ratio, 4xx/5xx rates, unique path di
 
 The Challenge System intercepts HTTP(S) traffic and presents a browser-solvable challenge (JS proof-of-work / cookie check) before forwarding requests to the origin.
 
+### 🚨 Challenge Pages
+
+![Challenge Desktop](docs/challenge_pc.png)
+![Challenge Mobile](docs/challenge_mobile.jpg)
+
+
 ### DNAT Mode
 
 ```
@@ -316,7 +307,7 @@ Configured via `CHALLENGE_HTTP_LISTEN` / `CHALLENGE_HTTPS_LISTEN`. Keep listener
 
 ---
 
-## 8. OpenResty In-Path Mode
+## 8. OpenResty In-Path Mode - CFM Edge Interceptor mode
 
 ### Architecture
 
@@ -325,6 +316,12 @@ Client → OpenResty (cfm decision socket) → (challenge/block/pass) → upstre
 ```
 
 No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`). The Lua layer queries it per-request.
+
+### 🌐 Per-Vhost Control
+
+![cPanel Vhost](docs/cpanel_vhost.png)
+![Vhost Web](docs/vhost_web.png)
+
 
 ### Smart Lua WAF Layer
 
@@ -375,6 +372,11 @@ The companion `sslcollector.lua` handles Lua-side cert loading with shared_dict 
 The MySQL Governor is a processlist monitor and enforcement engine that runs inside cfm. It polls `information_schema.PROCESSLIST` every few seconds and can: notify on slow queries, kill runaway queries, enforce per-user connection caps, reap idle sleeping connections, and track per-user CPU usage.
 
 It operates entirely through a standard MySQL connection — no agent, no plugin, no kernel module required.
+
+### 🧠 Visual Overview
+
+![Governor Web](docs/governor_web.png)
+![MySQL CLI](docs/mysql_top_termui.PNG)
 
 ### Overview
 
@@ -491,32 +493,9 @@ QUERY_RULES =
 - `kill_connection` — issues `KILL id`. The connection is dropped entirely. Use for connection-leak users.
 - `ignore` — hard exemption. Used with `max_runtime=0` to protect long-running cron/import jobs.
 
-**Example ladder for a phpBB tenant:**
-```ini
-QUERY_RULES =
-    *_cron      : 0    : ignore        ; never touch internal cron jobs
-    mathemat_db : 50s  : notify        ; warn early
-    mathemat_db : 60s  : kill_query   : lock_fanout=5   ; kill if already blocking
-    mathemat_db : 90s  : kill_query                     ; kill unconditionally
-    mediains_*  : 20m  : notify
-    mediains_*  : 30m  : kill_query
-    *_mage*     : 5m   : notify
-    *_mage*     : 15m  : kill_query   : lock_fanout=3
-    *_mage*     : 30m  : kill_query
-    *_wp*       : 30s  : notify
-    *_wp*       : 60s  : kill_query
-    *           : 5m   : notify
-    *           : 15m  : kill_query
-```
 
 ### Connection Limit Rules — CONN_RULES
 
-`CONN_RULES` is a separate multiline block evaluated per-user against total connection counts each poll tick. Independent from `QUERY_RULES` — both run on every poll.
-
-```ini
-CONN_RULES =
-    <user_pattern> : max=N : <action> [: conn_pct=N]
-```
 
 | Field | Values |
 |---|---|
@@ -599,6 +578,11 @@ CPU data is visible via `cfm mysqltop cpu` and the `/api/v1/mysql/cpu` endpoint.
 
 ### CLI Reference — cfm mysqltop
 
+### 🖥️ Terminal UI
+
+![WebTop CLI](docs/webtop_termui_index.PNG)
+
+
 ```bash
 cfm mysqltop                        # live summary: connections, per-user table, lock graph, recent kills
 cfm mysqltop top [N]                # top N users by connection count (live)
@@ -638,57 +622,6 @@ The governor registers on the cfm debug server (`LISTEN_ADDRESS:PORT`, default `
 | `GET /api/v1/mysql/history?window=1h&top=20` | Historical per-user aggregates |
 | `GET /api/v1/mysql/cpu` | Per-user CPU/query deltas + perf_schema status flags |
 
-### Full detectors.conf Example
-
-```ini
-[mysql_governor]
-ENABLED    = 1
-MODE       = monitor        ; start here — switch to enforce after validating rules
-POLL_EVERY = 5s
-
-; ── Connection pressure ────────────────────────────────────────────────────
-CONN_WARN_PCT = 70
-CONN_ACT_PCT  = 85
-
-; ── Lock fan-out kill ──────────────────────────────────────────────────────
-LOCK_FANOUT_KILL = 20
-LOCK_FANOUT_TTL  = 60s
-
-; ── Per-query runtime rules ────────────────────────────────────────────────
-QUERY_RULES =
-    *_cron          : 0     : ignore
-    *_import        : 0     : ignore
-    mathemat_db     : 50s   : notify
-    mathemat_db     : 60s   : kill_query   : lock_fanout=5
-    mathemat_db     : 90s   : kill_query
-    mediains_*      : 20m   : notify
-    mediains_*      : 30m   : kill_query
-    *_mage*         : 5m    : notify
-    *_mage*         : 15m   : kill_query   : lock_fanout=3
-    *_mage*         : 30m   : kill_query
-    *_wp*           : 30s   : notify
-    *_wp*           : 60s   : kill_query
-    *               : 5m    : notify
-    *               : 15m   : kill_query
-
-; ── Per-user connection limits ─────────────────────────────────────────────
-CONN_RULES =
-    mathemat_db     : max=80  : alter_user
-    mediains_*      : max=40  : reap_sleep
-    *_mage*         : max=60  : notify
-    *_wp*           : max=30  : notify
-    *               : max=25  : reap_sleep : conn_pct=70
-
-; ── Sleep reaper ───────────────────────────────────────────────────────────
-SLEEP_REAPER        = 1
-SLEEP_REAPER_AGE    = 180s
-SLEEP_REAPER_EXEMPT = proxysql_monitor, root
-
-; ── Kill rate limits ───────────────────────────────────────────────────────
-KILL_PER_DB_PER_WINDOW = 8
-KILL_TOTAL_PER_WINDOW  = 30
-KILL_WINDOW            = 10m
-```
 
 ---
 
@@ -728,143 +661,11 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `GET /api/v1/webdet/analyze-ip?ip=<ip>` | Analyze IP (forensics) |
 | `GET /api/v1/webdet/analyze-host?host=<vhost>` | Analyze vhost (forensics) |
 
----
 
-## 13. Appendix: cfm.conf Snippets
-
-Representative snippets showing typical real-world setups.
-
-### nftables Hook Ordering
-```ini
-NFT_INPUT_PRIORITY = -50
-```
-
-### Logging
-```ini
-LOG_STDOUT = "1"
-LOG_FILE   = "/var/log/cfm/cfm.log"
-
-API_LOG_STDOUT = "0"
-API_LOG_FILE   = "/var/log/cfm/cfm.api.log"
-
-DETECTOR_LOG_STDOUT = "0"
-DETECTOR_LOG_FILE   = "/var/log/cfm/cfm.detector.log"
-
-CHALLENGES_LOG_STDOUT = 0
-CHALLENGES_LOG_FILE   = /var/log/cfm/cfm.challenges.log
-
-MYSQL_LOG_STDOUT = 0
-MYSQL_LOG_FILE   = /var/log/cfm/cfm.mysql.log
-```
-
-### Debug Server (pprof + debug endpoints)
-```ini
-LISTEN_ADDRESS = "0.0.0.0"
-PORT = 6060
-```
-
-### MaxMind Updater
-```ini
-MAXMIND_ENABLED      = 1
-MAXMIND_ACCOUNT_ID   = 000000
-MAXMIND_LICENSE_KEY  = maxmind_key
-MAXMIND_EDITIONS     = GeoLite2-ASN,GeoLite2-City
-MAXMIND_DIR          = /var/lib/cfm/maxmind
-MAXMIND_CHECK_EVERY  = 24h
-MAXMIND_MIN_AGE      = 72h
-MAXMIND_HTTP_TIMEOUT = 30s
-```
-
-### ConnLimit (examples)
-```ini
-CONNLIMIT = "80;150,443;200"
-CONNLIMIT = "25;60,465;60,587;60"
-CONNLIMIT = "143;90,993;100"
-CONNLIMIT = "110;100,995;100"
-CONNLIMIT = "21;90,990;90"
-CONNLIMIT = "22;50,3306;50,53;80,65535;80"
-```
-
-### PortFlood (examples)
-```ini
-PORTFLOOD = "80;tcp;60;160,443;tcp;60;220"
-PORTFLOOD = "25;tcp;60;80,465;tcp;60;80,587;tcp;60;80"
-PORTFLOOD = "143;tcp;60;90,993;tcp;60;90"
-PORTFLOOD = "110;tcp;60;90,995;tcp;60;90"
-PORTFLOOD = "21;tcp;60;90,990;tcp;60;90"
-PORTFLOOD = "3306;tcp;60;50,53;udp;60;100,53;tcp;60;100,65535;tcp;60;100"
-```
-
-### Packet Rate Limiting (kernel-only)
-```ini
-PKT_RATE  = "100"
-PKT_BURST = "200"
-PKT_MODE  = "syn"
-```
-
-### Autoblock from Throttling
-```ini
-THROTTLE_ENABLED  = "1"
-THROTTLE_WINDOW   = "60"
-THROTTLE_HITS     = "3"
-THROTTLE_MODE     = "permanent"
-THROTTLE_TTL      = "86400"
-THROTTLE_SOURCES  = "syn,portflood,pps,new,icmp,connlimit"
-THROTTLE_SET_TTL  = "60"
-THROTTLE_COOLDOWN = "180"
-```
-
-### Portscan Tracking (CSF-like)
-```ini
-PS_INTERVAL   = "30"
-PS_LIMIT      = "10"
-PS_DIVERSITY  = "1"
-PS_TRACK_TCP  = "1"
-PS_TRACK_UDP  = "1"
-PS_MODE       = "permanent"
-PS_TTL        = "3600"
-PS_ONLY_PORTS = "0:40000"
-```
-
-### System Tweaks (sysctl Hardening)
-```ini
-SYS_TWEAKS_ENABLE  = "1"
-SYS_TWEAKS_PERSIST = "1"
-
-SYS_CT_PER_GB = "12288"
-SYS_CT_MIN    = "262144"
-SYS_CT_MAX    = "16777216"
-
-SYS_TCP_LOOSE_STRICT   = "1"
-SYS_TCP_SYN_RETRIES    = "3"
-SYS_TCP_SYNACK_RETRIES = "3"
-SYS_TCP_FIN_TIMEOUT    = "20"
-
-SYS_RP_FILTER        = "1"
-SYS_ACCEPT_REDIRECTS = "0"
-SYS_SEND_REDIRECTS   = "0"
-```
-
-### SMTP Block (CSF-like)
-```ini
-SMTP_BLOCK      = 0
-SMTP_PORTS      = 25,465,587
-SMTP_ALLOWLOCAL = 1
-SMTP_ALLOWUSER  = exim,mailman
-SMTP_ALLOWGROUP = mail,mailman
-
-SMTP_LOG        = 1
-SMTP_LOG_LIMIT  = 5/second
-SMTP_LOG_BURST  = 20
-SMTP_LOG_ENRICH = 1
-
-SMTP_LOG_STDOUT = 0
-SMTP_LOG_FILE   = /var/log/cfm/cfm.smtp.log
-```
 
 ---
 
-## 14. Security Notes
+## 13. Security Notes
 
 - In **DNAT mode**, keep the challenge listeners local-only (`127.0.0.1`). Do not expose them directly to the internet.
 - In **OpenResty mode**, treat the unix socket as sensitive — enforce tight file permissions and always use the token.
