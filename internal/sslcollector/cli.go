@@ -3,30 +3,33 @@ package sslcollector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"os"
-	"time"
-	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
-
+	"time"
 )
 
-func RunCLI(args []string) {
+func RunCLI(args []string, defaultSockPath, defaultToken string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: cfm ssl <stats|scan|dump|refresh> [args] [--json]")
 		os.Exit(2)
 	}
 
+	if strings.TrimSpace(defaultSockPath) == "" {
+		defaultSockPath = "/var/run/sslcollector.sock"
+	}
+
 	sub := args[0]
 	fs := flag.NewFlagSet("ssl "+sub, flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
-	sockPath := fs.String("sock", "/var/run/sslcollector.sock", "sslcollector unix socket path")
-	token := fs.String("token", "", "sslcollector socket token")
+	sockPath := fs.String("sock", defaultSockPath, "sslcollector unix socket path")
+	token := fs.String("token", defaultToken, "sslcollector socket token")
 	noDaemonRefresh := fs.Bool("no-daemon-refresh", false, "do not trigger daemon refresh before command")
 	cacheDir := fs.String("cache-dir", "/var/lib/cfm/sslcollector", "cache dir (metadata only)")
 	_ = fs.Parse(args[1:])
@@ -41,7 +44,6 @@ func RunCLI(args []string) {
 	})
 
 	ctx := context.Background()
-
 
 	type dumpView struct {
 		Found       bool     `json:"found"`
@@ -130,8 +132,6 @@ func RunCLI(args []string) {
 		}
 	}
 
-
-
 	switch sub {
 	case "scan", "refresh":
 		bestEffortDaemonRefresh()
@@ -141,26 +141,18 @@ func RunCLI(args []string) {
 		}
 		st := col.Stats()
 		if *asJSON {
-			out := map[string]any{
-				"disk": st,
-			}
+			out := map[string]any{"disk": st}
 			b, _ := json.MarshalIndent(out, "", "  ")
 			fmt.Println(string(b))
 			return
 		}
-
 		if sub == "refresh" {
 			fmt.Println("daemon: refresh attempted (best-effort)")
 		}
-
-
 		fmt.Printf("ssl: pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v\n",
 			st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
 
 	case "stats":
-		bestEffortDaemonRefresh()
-
-
 		bestEffortDaemonRefresh()
 		_ = col.Refresh(ctx)
 		st := col.Stats()
@@ -233,7 +225,6 @@ func RunCLI(args []string) {
 			return
 		}
 
-
 		fmt.Printf("host: %s\nstatus: %s\n\n", host, out.Status)
 
 		fmt.Println("disk:")
@@ -257,7 +248,6 @@ func RunCLI(args []string) {
 				fmt.Printf("  error: %s\n", out.Daemon.Error)
 			}
 		}
-
 
 	default:
 		fmt.Fprintln(os.Stderr, "unknown ssl subcommand:", sub)

@@ -109,6 +109,32 @@ func apiBaseURL() string {
 	return fmt.Sprintf("http://%s:%d", host, cfg.Debug.Port)
 }
 
+func sslSockDefaults() (string, string) {
+	dir := cfgDir()
+	if dir == "" {
+		return "/var/run/sslcollector.sock", ""
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
+	if err != nil {
+		return "/var/run/sslcollector.sock", ""
+	}
+
+	cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
+	if err != nil || cfg == nil {
+		return "/var/run/sslcollector.sock", ""
+	}
+
+	sock := strings.TrimSpace(cfg.SSLCollectorSock.SockPath)
+	if sock == "" {
+		sock = "/var/run/sslcollector.sock"
+	}
+
+	return sock, cfg.SSLCollectorSock.Token
+}
+
+
+
 func main() {
 	requireRoot()
 
@@ -159,7 +185,8 @@ func main() {
 		os.Exit(cli.RunDisable(os.Args[2:], getBackend()))
 
 	case "ssl", "sslcollector", "ssl-collector":
-		sslcollector.RunCLI(os.Args[2:])
+        sock, token := sslSockDefaults()
+        sslcollector.RunCLI(os.Args[2:], sock, token)
 
 	case "dnat":
 		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))

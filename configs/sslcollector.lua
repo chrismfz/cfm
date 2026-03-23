@@ -290,7 +290,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Core ingestion
 -- ---------------------------------------------------------------------------
-
 local function ingest_dumpall(data, src)
   local ver = data.version or data.Version or ""
   if ver ~= "" then
@@ -300,9 +299,15 @@ local function ingest_dumpall(data, src)
     dict:set("meta:generated_at", tostring(data.generated_at), 86400)
   end
 
+  local exact_list = data.exact or data.Exact or {}
+  local wild_list  = data.wild  or data.Wild  or {}
+
+  local reported_exact = #exact_list
+  local reported_wild  = #wild_list
+
   local okN, failN = 0, 0
 
-  for _, it in ipairs(data.exact or data.Exact or {}) do
+  for _, it in ipairs(exact_list) do
     local host     = normalize_name(it.host or it.Host)
     local cert_pem = it.cert_pem or it.cert or it.CertPEM
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
@@ -317,10 +322,13 @@ local function ingest_dumpall(data, src)
       end
     else
       failN = failN + 1
+      ngx.log(ngx.WARN, "[sslcollector] skip exact host=",
+        tostring(host ~= "" and host or (it.host or it.Host or "?")),
+        " reason=missing_host_or_pem")
     end
   end
 
-  for _, it in ipairs(data.wild or data.Wild or {}) do
+  for _, it in ipairs(wild_list) do
     local suf      = normalize_name(it.suffix or it.Suffix)
     local cert_pem = it.cert_pem or it.cert or it.CertPEM
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
@@ -335,17 +343,36 @@ local function ingest_dumpall(data, src)
       end
     else
       failN = failN + 1
+      ngx.log(ngx.WARN, "[sslcollector] skip wild suffix=",
+        tostring(suf ~= "" and suf or (it.suffix or it.Suffix or "?")),
+        " reason=missing_suffix_or_pem")
     end
   end
 
   if okN > 0 then
-    dict:set("meta:ready",            "1",        86400)
+    dict:set("meta:ready",            "1",         86400)
     dict:set("meta:last_dumpall_at",   ngx.time(), 0)
     dict:set("meta:last_dumpall_src",  src or "?", 86400)
   end
 
-  ngx.log(ngx.NOTICE, "[sslcollector] ingest src=", (src or "?"),
-    " ok=", okN, " fail=", failN, " ver=", (ver ~= "" and ver or "-"))
+  local cached_exact, cached_wild = 0, 0
+  local keys = dict:get_keys(10000)
+  for _, k in ipairs(keys) do
+    if k:sub(1, 10) == "e:pemcert:" then
+      cached_exact = cached_exact + 1
+    elseif k:sub(1, 10) == "w:pemcert:" then
+      cached_wild = cached_wild + 1
+    end
+  end
+
+  ngx.log(ngx.WARN, "[sslcollector] ingest src=", (src or "?"),
+    " reported_exact=", reported_exact,
+    " reported_wild=", reported_wild,
+    " cached_exact=", cached_exact,
+    " cached_wild=", cached_wild,
+    " ok=", okN,
+    " fail=", failN,
+    " ver=", (ver ~= "" and ver or "-"))
 
   return okN, failN
 end
@@ -353,7 +380,7 @@ end
 local function load_from_snapshot()
   local body = read_snapshot()
   if not body then
-    ngx.log(ngx.NOTICE, "[sslcollector] no snapshot on disk (first boot?)")
+    ngx.log(ngx.WARN, "[sslcollector] no snapshot on disk (first boot?)")
     return
   end
 

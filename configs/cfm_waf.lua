@@ -71,9 +71,9 @@ local CFG = {
   --          nginx_waf (MIT).  Promote individually after watching logs.
 
   -- [top-6]  Header vulnerability bundle
-  rule_bad_ua           = "logonly",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
-  rule_shellshock       = "logonly",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
-  rule_header_vulns     = "logonly",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
+  rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
+  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
+  rule_header_vulns     = "challenge",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
 
   -- [top-7]  Content-Type validation
@@ -1210,6 +1210,23 @@ local function detect_bad_ua_scored(headers, uri, method)
   if has(ual, "wfuzz")     then return 99, "UA_WFUZZ" end
   if has(ual, "awvs")      then return 99, "UA_AWVS" end
   if has(ual, "appscan")   then return 99, "UA_APPSCAN" end
+
+  -- Fake / impossible legacy browser families seen in bot traffic.
+  -- Start as challenge via rule_bad_ua = "challenge".
+  if ual:match("msie%s+[1-8]%.") then
+    return 99, "UA_FAKE_LEGACY_MSIE"
+  end
+
+  if has(ual, "windows 95")
+     or has(ual, "windows 98")
+     or has(ual, "win 9x 4.90")
+     or has(ual, "windows ce") then
+    return 99, "UA_FAKE_LEGACY_WINDOWS"
+  end
+
+  if ual:match("trident/[1-4]%.") then
+    return 99, "UA_FAKE_LEGACY_TRIDENT"
+  end
 
   -- SCORED: accumulate weak signals
   local score = 0
