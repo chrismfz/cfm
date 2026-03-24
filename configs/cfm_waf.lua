@@ -52,7 +52,7 @@ local CFG = {
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
-  rule_cmd_params       = "logonly",   -- suspicious parameter keys like exec= system=
+  rule_cmd_params       = "challenge",   -- suspicious parameter keys like exec= system=
   rule_cmd_payload      = "logonly",   -- fallback/default mode for payload-y separators/tokens in args
   rule_debug_toggles    = "logonly",   -- xdebug, trace, debug, stacktrace
   rule_serialize        = "logonly",   -- PHP serialized object markers
@@ -92,10 +92,10 @@ local CFG = {
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
-  rule_upload_filename    = "logonly",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
-  rule_upload_content     = "logonly",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_script_obfuscation = "logonly",  -- raw POST-body PHP/JS obfuscation scorer
-  rule_upload_obfuscation = "logonly",  -- multipart uploaded file content obfuscation scorer
+  rule_upload_filename    = "challenge",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
+  rule_upload_content     = "challenge",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
+  rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────

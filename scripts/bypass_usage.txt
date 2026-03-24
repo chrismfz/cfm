@@ -1,0 +1,1 @@
+python3 build_bypass_list.py challenge_waf_bypass.conf   --google-all   --txt-url https://tools.koalityengine.com/ip.txt   --asn AS202042   --union-only

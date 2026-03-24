@@ -3,19 +3,11 @@
 -- CFM shared-dict introspection module.
 -- Called exclusively by the /cfm-admin/lua-stats endpoint.
 -- No I/O, no yields, no side effects — read-only snapshots only.
---
--- Sources:
---   ngx.shared.cfm_decisions  (cfm.lua + cfm_waf.lua)
---   ngx.shared.sslcache       (sslcollector.lua)
---   ngx.config / ngx.worker   (nginx built-ins)
---   cfm_waf module             (rule config, requires _M.get_config export)
 
 local cjson = require "cjson.safe"
 local math  = math
 
 local _M = {}
-
--- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function age_s(ts)
   if not ts or ts == 0 then return nil end
@@ -39,7 +31,12 @@ local function ngx_num_var(name)
   return n
 end
 
--- ── nginx / worker ────────────────────────────────────────────────────────────
+local function pct(part, total)
+  part = tonumber(part) or 0
+  total = tonumber(total) or 0
+  if total <= 0 then return 0 end
+  return math.floor((part / total) * 1000) / 10
+end
 
 local function nginx_worker_info()
   local nv = ngx.config.nginx_version
@@ -54,8 +51,6 @@ local function nginx_worker_info()
       count   = ngx.worker.count(),
       exiting = ngx.worker.exiting(),
     },
-    -- Exposed by ngx_http_stub_status_module when compiled.
-    -- May be nil if the module/vars are unavailable.
     connections = {
       active    = ngx_num_var("connections_active"),
       reading   = ngx_num_var("connections_reading"),
@@ -68,26 +63,6 @@ local function nginx_worker_info()
   }
 end
 
--- ── sslcache ──────────────────────────────────────────────────────────────────
---
--- Key schema (from sslcollector.lua):
---   e:pemcert:<hostname>  exact cert PEM  (TTL 0 = never expire)
---   e:pemkey:<hostname>   exact key PEM
---   w:pemcert:<suffix>    wildcard cert PEM
---   w:pemkey:<suffix>     wildcard key PEM
---   meta:ready            "1" once certs loaded
---   meta:version          last upstream version string
---   meta:generated_at     upstream generation ts
---   meta:last_dumpall_at  unix ts of last successful ingest
---   meta:last_dumpall_src "dumpall" | "snapshot"
---   meta:last_dumpall_attempt_at  unix ts of last do_dumpall() attempt
---   meta:snapshot_written_at      unix ts of last disk snapshot write
---   meta:last_stats_at    unix ts of last successful /stats poll
---   meta:poll_interval    current backoff seconds (doubles on /stats failure)
---   meta:last_error       last error message string
---   meta:last_error_at    unix ts of last error
---   lock:dumpall          transient lock key (present only during active ingest)
-
 local function sslcache_stats(d)
   if not d then return { error = "dict_not_found" } end
 
@@ -95,8 +70,6 @@ local function sslcache_stats(d)
   local free = d:free_space()
   local used = cap - free
 
-  -- Enumerate keys (values are NOT fetched — only key strings, so this is cheap
-  -- even for large cert blobs). Cap at 8000 to stay safe on very large deployments.
   local all_keys = d:get_keys(8000)
   local total    = #all_keys
   local capped   = (total >= 8000)
@@ -110,63 +83,41 @@ local function sslcache_stats(d)
     elseif k:sub(1, 5) == "meta:" then meta_count = meta_count + 1
     elseif k == "lock:dumpall"    then lock_count  = lock_count  + 1
     end
-    -- e:pemkey: / w:pemkey: are skipped to avoid double-counting
   end
 
   local function g(k) return d:get(k) end
 
-  local last_dumpall_ts    = tonumber(g("meta:last_dumpall_at"))
-  local last_attempt_ts    = tonumber(g("meta:last_dumpall_attempt_at"))
-  local snapshot_ts        = tonumber(g("meta:snapshot_written_at"))
-  local last_stats_ts      = tonumber(g("meta:last_stats_at"))
-  local last_error_ts      = tonumber(g("meta:last_error_at"))
-  local poll_sec           = tonumber(g("meta:poll_interval"))
+  local last_dumpall_ts = tonumber(g("meta:last_dumpall_at"))
+  local last_attempt_ts = tonumber(g("meta:last_dumpall_attempt_at"))
+  local snapshot_ts     = tonumber(g("meta:snapshot_written_at"))
+  local last_stats_ts   = tonumber(g("meta:last_stats_at"))
+  local last_error_ts   = tonumber(g("meta:last_error_at"))
+  local poll_sec        = tonumber(g("meta:poll_interval"))
 
   return {
-    -- Memory
-    capacity_bytes = cap,
-    free_bytes     = free,
-    used_bytes     = used,
-    used_pct       = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
-
-    -- Key breakdown (by prefix)
-    total_keys   = total,
-    keys_capped  = capped,
-    exact_hosts  = exact_hosts,   -- unique exact-match hostnames
-    wild_hosts   = wild_hosts,    -- unique wildcard suffixes
-    meta_count   = meta_count,
-    ingest_lock  = (lock_count > 0),  -- true if a worker is actively ingesting right now
-
-    -- sslcollector health (all meta:* keys)
-    ready                 = g("meta:ready"),
-    version               = g("meta:version"),
-    generated_at          = g("meta:generated_at"),
-    last_dumpall_src      = g("meta:last_dumpall_src"),
-    poll_interval_s       = poll_sec,
-
-    -- Ages in seconds (nil = never happened)
-    last_dumpall_age_s    = age_s(last_dumpall_ts),
-    last_attempt_age_s    = age_s(last_attempt_ts),
-    snapshot_age_s        = age_s(snapshot_ts),
-    last_stats_age_s      = age_s(last_stats_ts),
-
-    -- Last error
-    last_error            = g("meta:last_error"),
-    last_error_age_s      = age_s(last_error_ts),
+    capacity_bytes    = cap,
+    free_bytes        = free,
+    used_bytes        = used,
+    used_pct          = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
+    total_keys        = total,
+    keys_capped       = capped,
+    exact_hosts       = exact_hosts,
+    wild_hosts        = wild_hosts,
+    meta_count        = meta_count,
+    ingest_lock       = (lock_count > 0),
+    ready             = g("meta:ready"),
+    version           = g("meta:version"),
+    generated_at      = g("meta:generated_at"),
+    last_dumpall_src  = g("meta:last_dumpall_src"),
+    poll_interval_s   = poll_sec,
+    last_dumpall_age_s = age_s(last_dumpall_ts),
+    last_attempt_age_s = age_s(last_attempt_ts),
+    snapshot_age_s     = age_s(snapshot_ts),
+    last_stats_age_s   = age_s(last_stats_ts),
+    last_error         = g("meta:last_error"),
+    last_error_age_s   = age_s(last_error_ts),
   }
 end
-
--- ── cfm_decisions ─────────────────────────────────────────────────────────────
---
--- Key schema (from cfm.lua + cfm_waf.lua):
---   d|<ip>|<host>|<method>|<scheme>|<uri_part>  bridge decision cache (allow-only)
---   pr|<md5token>                                POST resume stash (90s TTL)
---   ok_touch|<ip>                                ok-touch rate-limit token (120s TTL)
---   wafpush|<reason>|<ip>                        WAF push cooldown (60s TTL)
---   wxhosts                                      WAF exclude host patterns (JSON array)
---   wxpaths                                      WAF exclude path patterns (JSON array)
---   wxsnap_ts                                    WAF exclude last-refresh timestamp
---   wxsnap_lock                                  transient refresh lock (1s TTL)
 
 local function decisions_stats(d)
   if not d then return { error = "dict_not_found" } end
@@ -175,8 +126,6 @@ local function decisions_stats(d)
   local free = d:free_space()
   local used = cap - free
 
-  -- Safe to enumerate all keys: 64MB with short string keys (IPs, tokens) =
-  -- at most tens of thousands. Cap at 25000.
   local all_keys = d:get_keys(25000)
   local total    = #all_keys
   local capped   = (total >= 25000)
@@ -200,32 +149,26 @@ local function decisions_stats(d)
     end
   end
 
-  -- WAF exclude lists (stored as JSON arrays in the dict)
-  local wx_ts_raw   = d:get("wxsnap_ts")
-  local wx_ts       = tonumber(wx_ts_raw or "0") or 0
-  local wx_hosts    = cjson.decode(d:get("wxhosts") or "[]") or {}
-  local wx_paths    = cjson.decode(d:get("wxpaths") or "[]") or {}
+  local wx_ts_raw = d:get("wxsnap_ts")
+  local wx_ts     = tonumber(wx_ts_raw or "0") or 0
+  local wx_hosts  = cjson.decode(d:get("wxhosts") or "[]") or {}
+  local wx_paths  = cjson.decode(d:get("wxpaths") or "[]") or {}
 
   return {
-    -- Memory
     capacity_bytes = cap,
     free_bytes     = free,
     used_bytes     = used,
     used_pct       = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
     total_keys     = total,
     keys_capped    = capped,
-
-    -- Key breakdown by type
     key_breakdown = {
-      decisions     = cnt_decision,   -- cached bridge allow-decisions
-      post_resumes  = cnt_resume,     -- pending POST resume stash entries
-      ok_touches    = cnt_ok_touch,   -- active solved-IP rate-limit tokens
-      waf_push_cool = cnt_waf_push,   -- WAF push cooldown entries (≈ recent WAF hits)
-      waf_excl_meta = cnt_waf_excl,   -- WAF exclude snapshot meta keys
+      decisions     = cnt_decision,
+      post_resumes  = cnt_resume,
+      ok_touches    = cnt_ok_touch,
+      waf_push_cool = cnt_waf_push,
+      waf_excl_meta = cnt_waf_excl,
       other         = cnt_other,
     },
-
-    -- WAF exclude snapshot (pulled directly from dict, no Go call needed)
     waf_excludes = {
       refresh_age_s = wx_ts > 0 and math.floor(ngx.time() - wx_ts) or nil,
       host_rules    = wx_hosts,
@@ -233,17 +176,6 @@ local function decisions_stats(d)
     },
   }
 end
-
--- ── WAF config ────────────────────────────────────────────────────────────────
---
--- Requires adding to cfm_waf.lua (before `return _M`):
---   function _M.get_config()
---     local s = {}
---     for k, v in pairs(CFG) do s[k] = v end
---     return s
---   end
---
--- Without that export, returns a minimal fallback (enabled flag only).
 
 local function waf_config()
   local ok, waf = pcall(require, "cfm_waf")
@@ -253,7 +185,6 @@ local function waf_config()
 
   if waf.get_config then
     local cfg = waf.get_config()
-    -- Split out rule modes vs numeric tuning for cleaner UI rendering
     local rules, tuning = {}, {}
     for k, v in pairs(cfg) do
       if k:sub(1, 5) == "rule_" then
@@ -269,14 +200,97 @@ local function waf_config()
     }
   end
 
-  -- Fallback if get_config not yet added to cfm_waf.lua
   return {
     enabled = waf.enabled and waf.enabled() or false,
     note    = "Add _M.get_config() to cfm_waf.lua to expose rule modes here",
   }
 end
 
--- ── Public API ────────────────────────────────────────────────────────────────
+local function cache_zone_stats(d, zone)
+  local function g(k)
+    return tonumber(d:get("cache:zone:" .. zone .. ":" .. k) or 0) or 0
+  end
+
+  local total       = g("total")
+  local hit         = g("status:HIT")
+  local miss        = g("status:MISS")
+  local bypass      = g("status:BYPASS")
+  local expired     = g("status:EXPIRED")
+  local stale       = g("status:STALE")
+  local updating    = g("status:UPDATING")
+  local revalidated = g("status:REVALIDATED")
+
+  local cacheable_total = hit + miss + expired + stale + updating + revalidated
+
+  return {
+    total              = total,
+    hit                = hit,
+    miss               = miss,
+    bypass             = bypass,
+    expired            = expired,
+    stale              = stale,
+    updating           = updating,
+    revalidated        = revalidated,
+    cacheable_total    = cacheable_total,
+    hit_pct            = pct(hit, cacheable_total),
+    miss_pct           = pct(miss, cacheable_total),
+    bypass_pct         = pct(bypass, total),
+    stale_pct          = pct(stale, cacheable_total),
+    revalidated_pct    = pct(revalidated, cacheable_total),
+  }
+end
+
+local function cache_stats(d)
+  if not d then return { error = "dict_not_found" } end
+
+  local cap  = d:capacity()
+  local free = d:free_space()
+  local used = cap - free
+
+  local total_all = tonumber(d:get("cache:total") or 0) or 0
+  local last_seen_ts = tonumber(d:get("cache:last_seen_ts") or 0) or 0
+
+  return {
+    capacity_bytes   = cap,
+    free_bytes       = free,
+    used_bytes       = used,
+    used_pct         = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
+    total            = total_all,
+    last_seen_age_s  = age_s(last_seen_ts),
+    zones = {
+      cfm_static = cache_zone_stats(d, "cfm_static"),
+      cfm_micro  = cache_zone_stats(d, "cfm_micro"),
+    },
+  }
+end
+
+local function throttle_stats(d)
+  if not d then return { error = "dict_not_found" } end
+
+  local function g(k)
+    return tonumber(d:get(k) or 0) or 0
+  end
+
+  local total     = g("throttle:meta:total")
+  local throttled = g("throttle:meta:throttled")
+  local rejected  = g("throttle:meta:rejected")
+  local delayed   = g("throttle:meta:delayed")
+  local http429   = g("throttle:meta:http_429")
+
+  return {
+    meta = {
+      total         = total,
+      throttled     = throttled,
+      rejected      = rejected,
+      delayed       = delayed,
+      http_429      = http429,
+      throttled_pct = total > 0 and math.floor(throttled / total * 1000) / 10 or 0,
+      rejected_pct  = total > 0 and math.floor(rejected / total * 1000) / 10 or 0,
+      delayed_pct   = total > 0 and math.floor(delayed / total * 1000) / 10 or 0,
+      http_429_pct  = total > 0 and math.floor(http429 / total * 1000) / 10 or 0,
+    }
+  }
+end
 
 function _M.stats()
   return {
@@ -284,8 +298,11 @@ function _M.stats()
     nginx     = nginx_worker_info(),
     sslcache  = sslcache_stats(ngx.shared.sslcache),
     decisions = decisions_stats(ngx.shared.cfm_decisions),
+    cache     = cache_stats(ngx.shared.cfm_cache_stats),
+    throttle  = throttle_stats(ngx.shared.cfm_cache_stats),
     waf       = waf_config(),
   }
 end
+
 
 return _M

@@ -759,6 +759,7 @@ local uri     = ngx.var.uri    or "-"
 local method  = ngx.req.get_method() or "-"
 local scheme  = ngx.var.scheme or "http"
 
+
 -- Build the proxy target URL for the origin server.
 -- Uses $server_addr (the IP the request arrived on) so that per-site dedicated
 -- IPs are honoured correctly — no hardcoded 127.0.0.1.
@@ -767,6 +768,21 @@ local function origin_pass_for(s_in)
   return (s_in == "https" and "https://" or "http://") .. dst ..
          (s_in == "https" and ":443" or ":80")
 end
+
+
+-- ── Step 0: Static IP/CIDR bypass ───────────────────────────────────────────
+do
+  if ngx.var.cfm_bypass_ip == "1" then
+    ngx.var.cfm_upstream = "cfm_apache"
+    ngx.var.cfm_pass     = origin_pass_for(scheme)
+    if CFG.debug then
+      log_route(ngx.INFO, "static_bypass ip=" .. ip ..
+        " host=" .. host .. " uri=" .. uri)
+    end
+    return
+  end
+end
+
 
 -- ── Step 0: cPanel / webmail hard bypass ─────────────────────────────────────
 -- These management interfaces must never be challenged or blocked.
