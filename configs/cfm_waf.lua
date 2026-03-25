@@ -1213,7 +1213,7 @@ local function detect_bad_ua_scored(headers, uri, method)
 
   -- Fake / impossible legacy browser families seen in bot traffic.
   -- Start as challenge via rule_bad_ua = "challenge".
-  if ual:match("msie%s+[1-8]%.") then
+  if ual:match("msie%s+[1-8]%.") and not ual:match("trident/[5-9]%.") then
     return 99, "UA_FAKE_LEGACY_MSIE"
   end
 

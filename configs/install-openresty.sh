@@ -367,6 +367,29 @@ deploy_cfm_files() {
                          "/etc/logrotate.d/logrotate-cfm"
 }
 
+deploy_nginx_conf() {
+    local src="/usr/share/cfm/configs/openresty-cache.conf"
+    local dst="/usr/local/openresty/nginx/conf/nginx.conf"
+    local prefix="/usr/local/openresty/nginx"
+
+    if [ ! -f "$src" ]; then
+        warn "nginx conf source not found, skipping: $src"
+        return 0
+    fi
+
+    log "Testing nginx config: $src"
+    if openresty -t -p "$prefix" -c "$src" >/dev/null 2>&1; then
+        log "Config test passed"
+        backup_and_copy_file "$src" "$dst"
+        log "nginx.conf deployed successfully"
+    else
+        warn "Config test FAILED — nginx.conf NOT deployed. Output:"
+        openresty -t -p "$prefix" -c "$src" >&2 || true
+    fi
+}
+
+
+
 main() {
     need_root
     detect_os
@@ -387,6 +410,7 @@ main() {
     ensure_lua_dir
     ensure_cache_dirs
     deploy_cfm_files
+    deploy_nginx_conf
     log "Done"
 }
 
