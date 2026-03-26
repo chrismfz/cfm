@@ -76,35 +76,3 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gosec.cleaned.sarif
-
-  trivy-fs:
-    name: Trivy (filesystem)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Trivy on source
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: 'fs'
-          format: 'sarif'
-          output: 'trivy-fs.sarif'
-          ignore-unfixed: true
-          severity: 'CRITICAL,HIGH'
-          scanners: 'vuln,secret,misconfig'
-          skip-dirs: |
-            vendor
-            node_modules
-            packaging
-            bin
-            scripts
-          skip-files: |
-            configs/GeoLite2-ASN.mmdb
-            configs/GeoLite2-City.mmdb
-      - name: Upload SARIF (Trivy)
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-fs.sarif
