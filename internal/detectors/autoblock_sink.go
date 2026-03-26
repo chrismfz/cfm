@@ -33,6 +33,8 @@ type sectionSink struct {
 	chalCooldown time.Duration
 
 	chalExclude *ChallengeExclude
+	leniency    *leniencyPolicy    // optional [section.leniency] override
+
 }
 
 type challengeState struct {
@@ -45,20 +47,22 @@ type challengeState struct {
 	SuppLastURI  string
 }
 
-func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration, chalExclude *ChallengeExclude) core.Sink {
-	return &sectionSink{
-		section:      section,
-		pol:          pol,
-		inner:        inner,
-		fw:           fw,
-		last:         make(map[string]time.Time),
-		enr:          enr,
-		ignore:       ig,
-		chalState:    make(map[string]challengeState),
-		chalCooldown: chalCooldown,
-		chalExclude:  chalExclude,
-	}
+func newSectionSink(section string, pol blockPolicy, inner core.Sink, fw firewall.Backend, enr *enrich.Enricher, ig *IPIgnore, chalCooldown time.Duration, chalExclude *ChallengeExclude, leniency *leniencyPolicy) core.Sink {
+    return &sectionSink{
+        section: section,
+        pol:     pol,
+        inner:   inner,
+        fw:      fw,
+        last:    make(map[string]time.Time),
+        enr:     enr,
+        ignore:  ig,
+        chalState: make(map[string]challengeState),
+        chalCooldown: chalCooldown,
+        chalExclude: chalExclude,
+        leniency:    leniency,
+    }
 }
+
 
 const (
 	defaultChallengeTTL        = 30 * time.Minute
@@ -577,51 +581,65 @@ func (s *sectionSink) Publish(a core.Alert) {
 		}
 		return
 	}
-	// --- end CHALLENGE branch ---
 
-	// Cooldown check (do NOT stamp yet; stamp only after a real block)
-	if s.pol.Cooldown > 0 {
 
-		skip := func() bool {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if last, ok := s.last[ipStr]; ok && time.Since(last) < s.pol.Cooldown {
-				return true
-			}
-			return false
-		}()
-		if skip {
-			if s.inner != nil {
-				s.inner.Publish(out)
-			}
-			return
-		}
-	}
 
-	// Comment for firewall
-	comment := string(a.Kind)
-	if s.section != "" {
-		comment += " | " + s.section
-	}
-	if a.Key != "" && a.Key != ipStr {
-		comment += " | " + a.Key
-	}
 
-	var blockOK bool
-	switch s.pol.Mode {
-	case "dryrun":
-		out.Extra["blocked"] = "dryrun"
-		out.Extra["block_mode"] = "dryrun"
-
-	case "permanent":
-		if err := s.fw.AddBlock(ip, comment, nil); err == nil {
-			out.Extra["blocked"] = "yes"
-			out.Extra["block_mode"] = "permanent"
-			blockOK = true
-		}
-
-	case "ttl":
-		ttl := s.pol.TTL
+    // --- Leniency override: softer treatment for known-good origins ---
+    effectivePol := s.pol
+    sendToAPI    := true
+ 
+    if s.leniency != nil && ipStr != "" && s.enr != nil {
+        if matched, reason := s.leniency.matchesIP(ipStr, s.enr); matched {
+            effectivePol = s.leniency.Pol
+            sendToAPI    = s.leniency.SendToAPI
+            out.Extra["leniency"]        = "yes"
+            out.Extra["leniency_reason"] = reason
+            logLeniencyMatch(s.section, ipStr, reason, s.leniency)
+        }
+    }
+ 
+    // Cooldown check (do NOT stamp yet; stamp only after a real block)
+    if effectivePol.Cooldown > 0 {
+ 
+        skip := func() bool {
+            s.mu.Lock()
+            defer s.mu.Unlock()
+            if last, ok := s.last[ipStr]; ok && time.Since(last) < effectivePol.Cooldown {
+                return true
+            }
+            return false
+        }()
+        if skip {
+            if s.inner != nil { s.inner.Publish(out) }
+            return
+        }
+    }
+ 
+    // Comment for firewall
+    comment := string(a.Kind)
+    if s.section != "" {
+        comment += " | " + s.section
+    }
+    if a.Key != "" && a.Key != ipStr {
+        comment += " | " + a.Key
+    }
+ 
+    var blockOK bool
+    switch effectivePol.Mode {
+    case "dryrun":
+        out.Extra["blocked"]    = "dryrun"
+        out.Extra["block_mode"] = "dryrun"
+ 
+    case "permanent":
+        if err := s.fw.AddBlock(ip, comment, nil); err == nil {
+            out.Extra["blocked"]    = "yes"
+            out.Extra["block_mode"] = "permanent"
+            blockOK = true
+        }
+ 
+    case "ttl":
+        ttl := effectivePol.TTL
 
 		// Optional per-alert override (e.g. challenge server abuse wants its own TTL)
 		if a.Extra != nil {
@@ -644,11 +662,11 @@ func (s *sectionSink) Publish(a core.Alert) {
 	}
 
 	// If we truly blocked and a cooldown is set, stamp it now (after success)
-	if blockOK && s.pol.Cooldown > 0 {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.last[ipStr] = time.Now()
-	}
+    if blockOK && effectivePol.Cooldown > 0 {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        s.last[ipStr] = time.Now()
+    }
 
 	// --- emit notify once if a real block happened ---
 	if out.Extra["blocked"] == "yes" {
@@ -685,11 +703,21 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 		notify.Enqueue(ev)
 
-		// Also report to API via firewall backend policy
-		if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
-			logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
-				ipStr, err, out.Extra["block_mode"], ttlSec)
-		}
+
+        // Report to API (unless leniency says no)
+        if sendToAPI {
+            if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
+                logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
+                    ipStr, err, out.Extra["block_mode"], ttlSec)
+            }
+        } else {
+            out.Extra["send_to_api"] = "no"
+            if logging.DebugEnabled() {
+                logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
+            }
+        }
+
+
 	}
 	// --- end notify ---
 

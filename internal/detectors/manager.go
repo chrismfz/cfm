@@ -302,7 +302,11 @@ if ig != nil {
 		if secName == "global" {
 			continue
 		}
+		if strings.HasSuffix(secName, ".leniency") {
+			continue
+		}
 		if kvBool(kv, "ENABLED", true) {
+ 
 			enabled = append(enabled, secName)
 		} else {
 			disabled = append(disabled, secName)
@@ -322,11 +326,15 @@ if ig != nil {
 		if secName == "global" {
 			continue
 		}
+		if strings.HasSuffix(secName, ".leniency") {
+			continue
+		}
 		if !kvBool(kv, "ENABLED", true) {
 			continue
 		}
-
+ 
 		typ, _ := splitTypeInstance(secName)
+
 		fac, ok := getFactory(typ)
 		if !ok {
 			logging.Logf("[detectors] unknown section type: %s (section %q) — skipping", typ, secName)
@@ -476,7 +484,21 @@ logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s thresh
 
 
 
-        secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude)
+        // --- Leniency: optional [section.leniency] companion ---
+        var leniency *leniencyPolicy
+        if lenKV, ok := secs.ByName[secName+".leniency"]; ok {
+            leniency = parseLeniencyPolicy(lenKV)
+            if leniency != nil {
+                mode := leniency.Pol.Mode
+                if mode == "ttl" { mode = leniency.Pol.TTL.String() }
+                logging.Logf("[detectors] %s: leniency enabled countries=%v asns=%v block=%s cooldown=%s send_to_api=%t",
+                    secName, leniency.Countries, leniency.ASNs,
+                    mode, leniency.Pol.Cooldown, leniency.SendToAPI)
+            }
+        }
+ 
+        secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude, leniency)
+
         m.wg.Add(1)
         go func() {
             defer m.wg.Done()
