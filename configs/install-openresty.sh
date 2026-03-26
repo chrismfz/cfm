@@ -368,7 +368,7 @@ deploy_cfm_files() {
 }
 
 deploy_nginx_conf() {
-    local src="/usr/share/cfm/configs/openresty-cache.conf"
+    local src="/usr/share/cfm/configs/openresty.conf"
     local dst="/usr/local/openresty/nginx/conf/nginx.conf"
     local prefix="/usr/local/openresty/nginx"
 
