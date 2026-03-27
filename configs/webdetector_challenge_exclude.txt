@@ -29,20 +29,20 @@
 #   - Keep these rules strict. "any" mode is rarely recommended.
 # -----------------------------------------------------------------------------
 
-# 1) Googlebot (STRICT, recommended):
-#    Requires UA hint + PTR suffix + forward-confirmed rDNS.
+# 1) Googlebot
+#    Requires PTR suffix + forward-confirmed rDNS.
 #    This blocks fake "Googlebot" UAs from random IPs.
-ua=*googlebot*; ptr=*.googlebot.com; verify_fcrdns=1; action=skip
-ua=*googlebot*; ptr=*.google.com;    verify_fcrdns=1; action=skip
+ua=*; ptr=*.googlebot.com; verify_fcrdns=1; action=skip
+ua=*; ptr=*.google.com;    verify_fcrdns=1; action=skip
 
-# 2) Bingbot (STRICT, recommended):
+# 2) Bingbot
 #    Same verification idea as Googlebot.
-ua=*bingbot*; ptr=*.search.msn.com; verify_fcrdns=1; action=skip
+ua=*; ptr=*.search.msn.com; verify_fcrdns=1; action=skip
 
 # 3) Meta/Facebook crawler (SEMI-STRICT example):
 #    ASN + UA combo. Safer than UA-only, but not as strong as FCrDNS.
 #    Adjust UA pattern to what you actually see in logs (meta*, facebook*, etc).
-asn=as32934; ua=meta*; action=skip
+asn=as32934; ua=*; action=skip
 
 # 4) Only suppress vhost-wide panic/auto rules for a trusted ASN:
 #    Useful for partners/monitors where you still want per-IP/path rules to work,
@@ -51,4 +51,6 @@ asn=as32934; ua=meta*; action=skip
 #asn=asXXXX; action=skip_vhost_only
 # skroutz
 asn=as202042; ua=*; action=skip
+# apple
+asn=as714; ua=*; action=skip
 

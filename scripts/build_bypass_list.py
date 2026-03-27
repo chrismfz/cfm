@@ -2,15 +2,10 @@
 """
 Build an nginx/OpenResty geo include file for static challenge/WAF bypasses.
 
-Supported sources:
-- Official Google crawler JSON feeds
-- Plain-text IP/CIDR lists (one item per line)
-- RIPEstat announced-prefixes lookups for ASNs
-- Arbitrary JSON feeds containing prefixes in common shapes
+Just run it:   python3 build_bypass_list.py
+Or override:   python3 build_bypass_list.py /custom/path.conf
 
-Output format:
-    203.0.113.10/32 1;
-    2001:db8::/32 1;
+All sources are defined in SOURCES below — edit the list to add/remove.
 """
 
 from __future__ import annotations
@@ -26,7 +21,35 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 TIMEOUT = 30
-UA = "cfm-bypass-builder/2.0"
+UA = "cfm-bypass-builder/3.0"
+DEFAULT_OUTPUT = "challenge_waf_bypass.conf"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SOURCES — edit this list to add/remove bypass sources.
+#
+# Types:
+#   google-all          All official Google crawler JSON feeds
+#   google:<feed>       One Google feed (common-crawlers, special-crawlers,
+#                       user-triggered-fetchers, user-triggered-fetchers-google,
+#                       user-triggered-agents)
+#   bing-all            All official Bing crawler JSON feeds
+#   txt:<url>           Plain-text file with one IP/CIDR per line
+#   json:<url>          JSON feed scanned recursively for prefix-like keys
+#   asn:<number>        ASN expanded via RIPEstat announced-prefixes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SOURCES = [
+    "google-all",
+    "bing-all",
+    "txt:https://tools.koalityengine.com/ip.txt",
+    "asn:AS202042",
+    "json:https://duckduckgo.com/duckduckbot.json",
+    "json:https://openai.com/gptbot.json",
+    "json:https://openai.com/searchbot.json",
+    "txt:https://www.quic.cloud/ips?ln",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
 
 GOOGLE_FEEDS = {
     "common-crawlers": "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
@@ -34,6 +57,10 @@ GOOGLE_FEEDS = {
     "user-triggered-fetchers": "https://developers.google.com/static/crawling/ipranges/user-triggered-fetchers.json",
     "user-triggered-fetchers-google": "https://developers.google.com/static/crawling/ipranges/user-triggered-fetchers-google.json",
     "user-triggered-agents": "https://developers.google.com/static/crawling/ipranges/user-triggered-agents.json",
+}
+
+BING_FEEDS = {
+    "bingbot": "https://www.bing.com/toolbox/bingbot.json",
 }
 
 
@@ -46,48 +73,20 @@ class SourceResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
-class FetchError(RuntimeError):
-    pass
-
-
 def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
 
-def fetch_bytes(url: str, timeout: int) -> bytes:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
-def fetch_text(url: str, timeout: int) -> str:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "text/plain, application/json;q=0.9, */*;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+def fetch_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/plain, */*;q=0.8"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read().decode(charset, errors="replace")
 
 
-def fetch_json(url: str, timeout: int) -> Any:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "application/json, */*;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+def fetch_json(url: str) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, */*;q=0.8"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return json.loads(resp.read().decode(charset))
 
@@ -96,42 +95,27 @@ def normalize_prefix(value: str) -> str | None:
     raw = (value or "").strip()
     if not raw:
         return None
-
-    # Strip inline comments for txt sources.
     for sep in ("#", ";"):
         if sep in raw:
             raw = raw.split(sep, 1)[0].strip()
     if not raw:
         return None
-
     try:
         if "/" in raw:
-            net = ipaddress.ip_network(raw, strict=False)
-            return str(net)
+            return str(ipaddress.ip_network(raw, strict=False))
         ip = ipaddress.ip_address(raw)
-        if ip.version == 4:
-            return f"{ip}/32"
-        return f"{ip}/128"
+        return f"{ip}/32" if ip.version == 4 else f"{ip}/128"
     except ValueError:
         return None
 
 
-KNOWN_PREFIX_KEYS = {
-    "ipv4prefix",
-    "ipv6prefix",
-    "prefix",
-    "cidr",
-    "network",
-    "netblock",
-    "range",
-}
+KNOWN_PREFIX_KEYS = {"ipv4prefix", "ipv6prefix", "prefix", "cidr", "network", "netblock", "range"}
 
 
 def walk_for_prefixes(obj: Any) -> Iterable[str]:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            kl = str(k).lower()
-            if kl in KNOWN_PREFIX_KEYS and isinstance(v, str):
+            if str(k).lower() in KNOWN_PREFIX_KEYS and isinstance(v, str):
                 yield v
             else:
                 yield from walk_for_prefixes(v)
@@ -142,132 +126,11 @@ def walk_for_prefixes(obj: Any) -> Iterable[str]:
 
 def collect_prefixes(values: Iterable[str]) -> set[str]:
     out: set[str] = set()
-    for value in values:
-        norm = normalize_prefix(value)
+    for v in values:
+        norm = normalize_prefix(v)
         if norm:
             out.add(norm)
     return out
-
-
-def load_google_sources(enabled: list[str], timeout: int) -> list[SourceResult]:
-    results: list[SourceResult] = []
-    for name in enabled:
-        url = GOOGLE_FEEDS[name]
-        doc = fetch_json(url, timeout)
-        prefixes = collect_prefixes(walk_for_prefixes(doc.get("prefixes", [])))
-        results.append(
-            SourceResult(
-                name=name,
-                kind="google-json",
-                origin=url,
-                prefixes=prefixes,
-                meta={"creationTime": doc.get("creationTime", "unknown")},
-            )
-        )
-    return results
-
-
-def load_txt_source(url: str, timeout: int, index: int) -> SourceResult:
-    text = fetch_text(url, timeout)
-    prefixes = collect_prefixes(text.splitlines())
-    return SourceResult(
-        name=f"txt-{index}",
-        kind="txt",
-        origin=url,
-        prefixes=prefixes,
-    )
-
-
-def load_json_source(url: str, timeout: int, index: int) -> SourceResult:
-    doc = fetch_json(url, timeout)
-    prefixes = collect_prefixes(walk_for_prefixes(doc))
-    return SourceResult(
-        name=f"json-{index}",
-        kind="json",
-        origin=url,
-        prefixes=prefixes,
-    )
-
-
-def ripe_announced_prefixes_url(asn: str, sourceapp: str | None, ignore_limit: bool) -> str:
-    resource = asn.upper()
-    if not resource.startswith("AS"):
-        resource = f"AS{resource}"
-    params = {"resource": resource}
-    if sourceapp:
-        params["sourceapp"] = sourceapp
-    if ignore_limit:
-        params["data_overload_limit"] = "ignore"
-    return "https://stat.ripe.net/data/announced-prefixes/data.json?" + urllib.parse.urlencode(params)
-
-
-def load_asn_source(asn: str, timeout: int, index: int, sourceapp: str | None, ignore_limit: bool) -> SourceResult:
-    url = ripe_announced_prefixes_url(asn, sourceapp, ignore_limit)
-    doc = fetch_json(url, timeout)
-    data = doc.get("data", {})
-    prefixes_raw: list[str] = []
-    for item in data.get("prefixes", []):
-        if isinstance(item, dict):
-            pfx = item.get("prefix")
-            if isinstance(pfx, str):
-                prefixes_raw.append(pfx)
-        elif isinstance(item, str):
-            prefixes_raw.append(item)
-    prefixes = collect_prefixes(prefixes_raw)
-    return SourceResult(
-        name=f"asn-{index}-{asn.upper().removeprefix('AS')}",
-        kind="ripe-announced-prefixes",
-        origin=url,
-        prefixes=prefixes,
-        meta={
-            "queried_asn": asn.upper() if asn.upper().startswith("AS") else f"AS{asn}",
-            "query_time_utc": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-
-def render_output(results: list[SourceResult], output: str, union_only: bool) -> None:
-    union: set[str] = set()
-    for res in results:
-        union.update(res.prefixes)
-
-    lines: list[str] = []
-    lines.append("# Auto-generated nginx/OpenResty geo include for $cfm_bypass_ip")
-    lines.append(f"# Generated at: {datetime.now(timezone.utc).isoformat()}")
-    lines.append("# Format: <cidr> 1;")
-    lines.append("#")
-    lines.append("# Example:")
-    lines.append("#   geo $cfm_bypass_ip {")
-    lines.append("#       default 0;")
-    lines.append(f"#       include {output};")
-    lines.append("#   }")
-    lines.append("#")
-    for res in results:
-        lines.append(f"# source: {res.name}")
-        lines.append(f"#   kind: {res.kind}")
-        lines.append(f"#   origin: {res.origin}")
-        lines.append(f"#   prefixes: {len(res.prefixes)}")
-        for k, v in sorted(res.meta.items()):
-            lines.append(f"#   {k}: {v}")
-    lines.append("")
-
-    if union_only:
-        for prefix in sorted(union, key=sort_key):
-            lines.append(f"{prefix} 1;")
-    else:
-        for res in results:
-            lines.append(f"# --- {res.name} ---")
-            for prefix in sorted(res.prefixes, key=sort_key):
-                lines.append(f"{prefix} 1;")
-            lines.append("")
-        lines.append("# --- union (deduplicated, commented reference) ---")
-        for prefix in sorted(union, key=sort_key):
-            lines.append(f"# {prefix}")
-
-    with open(output, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines).rstrip() + "\n")
-
-    print(f"Wrote {output} with {len(union)} unique prefixes from {len(results)} source(s)")
 
 
 def sort_key(prefix: str) -> tuple[int, int, int, str]:
@@ -275,75 +138,132 @@ def sort_key(prefix: str) -> tuple[int, int, int, str]:
     return (net.version, int(net.network_address), net.prefixlen, prefix)
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build challenge_waf_bypass.conf from JSON/TXT/ASN sources")
-    p.add_argument("output", nargs="?", default="challenge_waf_bypass.conf", help="Output file path")
-    p.add_argument("--timeout", type=int, default=TIMEOUT, help="HTTP timeout in seconds")
-    p.add_argument("--union-only", action="store_true", help="Write only the deduplicated union, no per-source sections")
+# ── Source loaders ───────────────────────────────────────────────────────────
 
-    p.add_argument("--google-all", action="store_true", help="Include all official Google crawler JSON feeds")
-    p.add_argument(
-        "--google-feed",
-        action="append",
-        choices=sorted(GOOGLE_FEEDS.keys()),
-        default=[],
-        help="Include a specific Google feed; can be repeated",
-    )
+def load_json_feed(name: str, kind: str, url: str) -> SourceResult:
+    doc = fetch_json(url)
+    prefixes = collect_prefixes(walk_for_prefixes(doc.get("prefixes", doc)))
+    return SourceResult(name=name, kind=kind, origin=url, prefixes=prefixes,
+                        meta={"creationTime": doc.get("creationTime", "unknown")})
 
-    p.add_argument("--txt-url", action="append", default=[], help="Plain-text URL with one IP/CIDR per line; can be repeated")
-    p.add_argument("--json-url", action="append", default=[], help="Extra JSON URL to recursively scan for prefix-like keys; can be repeated")
-    p.add_argument("--asn", action="append", default=[], help="ASN to expand via RIPEstat announced-prefixes, e.g. AS15169 or 15169; can be repeated")
-    p.add_argument("--ripe-sourceapp", default="cfm-bypass-builder", help="RIPEstat sourceapp identifier")
-    p.add_argument("--no-ripe-ignore-overload", action="store_true", help="Do not send data_overload_limit=ignore to RIPEstat")
-    return p.parse_args()
 
+def load_txt(name: str, url: str) -> SourceResult:
+    text = fetch_text(url)
+    return SourceResult(name=name, kind="txt", origin=url,
+                        prefixes=collect_prefixes(text.splitlines()))
+
+
+def load_asn(name: str, asn: str) -> SourceResult:
+    resource = asn.upper() if asn.upper().startswith("AS") else f"AS{asn}"
+    params = {"resource": resource, "data_overload_limit": "ignore", "sourceapp": "cfm-bypass-builder"}
+    url = "https://stat.ripe.net/data/announced-prefixes/data.json?" + urllib.parse.urlencode(params)
+    doc = fetch_json(url)
+    raw: list[str] = []
+    for item in doc.get("data", {}).get("prefixes", []):
+        if isinstance(item, dict) and isinstance(item.get("prefix"), str):
+            raw.append(item["prefix"])
+        elif isinstance(item, str):
+            raw.append(item)
+    return SourceResult(name=name, kind="ripe-asn", origin=url, prefixes=collect_prefixes(raw),
+                        meta={"asn": resource, "query_time": datetime.now(timezone.utc).isoformat()})
+
+
+# ── Dispatcher ───────────────────────────────────────────────────────────────
+
+def load_source(spec: str) -> list[SourceResult]:
+    """Parse a SOURCES entry and return one or more SourceResults."""
+    if spec == "google-all":
+        return [load_json_feed(f"google-{n}", "google-json", u) for n, u in GOOGLE_FEEDS.items()]
+    if spec.startswith("google:"):
+        feed = spec[7:]
+        if feed not in GOOGLE_FEEDS:
+            raise ValueError(f"unknown google feed: {feed}")
+        return [load_json_feed(f"google-{feed}", "google-json", GOOGLE_FEEDS[feed])]
+    if spec == "bing-all":
+        return [load_json_feed(f"bing-{n}", "bing-json", u) for n, u in BING_FEEDS.items()]
+    if spec.startswith("bing:"):
+        feed = spec[5:]
+        if feed not in BING_FEEDS:
+            raise ValueError(f"unknown bing feed: {feed}")
+        return [load_json_feed(f"bing-{feed}", "bing-json", BING_FEEDS[feed])]
+    if spec.startswith("txt:"):
+        url = spec[4:]
+        name = url.rsplit("/", 1)[-1].split("?")[0].split(".")[0] or "txt"
+        return [load_txt(f"txt-{name}", url)]
+    if spec.startswith("json:"):
+        url = spec[5:]
+        name = url.rsplit("/", 1)[-1].split("?")[0].split(".")[0] or "json"
+        return [load_json_feed(f"json-{name}", "json", url)]
+    if spec.startswith("asn:"):
+        asn = spec[4:].strip()
+        canonical = asn.upper().removeprefix("AS")
+        return [load_asn(f"asn-{canonical}", asn)]
+    raise ValueError(f"unknown source spec: {spec}")
+
+
+# ── Output ───────────────────────────────────────────────────────────────────
+
+def render_output(results: list[SourceResult], output: str) -> None:
+    union: set[str] = set()
+    for res in results:
+        union.update(res.prefixes)
+
+    lines: list[str] = [
+        "# Auto-generated nginx/OpenResty geo include for $cfm_bypass_ip",
+        f"# Generated at: {datetime.now(timezone.utc).isoformat()}",
+        "# Format: <cidr> 1;",
+        "#",
+        "#   geo $cfm_bypass_ip {",
+        "#       default 0;",
+        f"#       include {output};",
+        "#   }",
+        "#",
+    ]
+    for res in results:
+        lines.append(f"# source: {res.name}  ({res.kind}, {len(res.prefixes)} prefixes)")
+        lines.append(f"#   {res.origin}")
+        for k, v in sorted(res.meta.items()):
+            lines.append(f"#   {k}: {v}")
+    lines.append("")
+
+    for prefix in sorted(union, key=sort_key):
+        lines.append(f"{prefix} 1;")
+
+    with open(output, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines).rstrip() + "\n")
+
+    print(f"Wrote {output} with {len(union)} unique prefixes from {len(results)} source(s)")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    args = parse_args()
+    p = argparse.ArgumentParser(description="Build challenge_waf_bypass.conf")
+    p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT, help="Output file path")
+    args = p.parse_args()
 
-    requested_results: list[SourceResult] = []
+    results: list[SourceResult] = []
+    errors: list[str] = []
 
-    google_enabled = list(dict.fromkeys(args.google_feed))
-    if args.google_all:
-        google_enabled = list(GOOGLE_FEEDS.keys())
-    elif not google_enabled and not args.txt_url and not args.json_url and not args.asn:
-        # Good default: preserve prior behavior.
-        google_enabled = list(GOOGLE_FEEDS.keys())
+    for spec in SOURCES:
+        try:
+            results.extend(load_source(spec))
+        except Exception as exc:
+            errors.append(f"{spec}: {exc}")
+            eprint(f"ERROR [{spec}]: {exc}")
 
-    try:
-        if google_enabled:
-            requested_results.extend(load_google_sources(google_enabled, args.timeout))
-
-        for i, url in enumerate(args.txt_url, start=1):
-            requested_results.append(load_txt_source(url, args.timeout, i))
-
-        for i, url in enumerate(args.json_url, start=1):
-            requested_results.append(load_json_source(url, args.timeout, i))
-
-        for i, asn in enumerate(args.asn, start=1):
-            requested_results.append(
-                load_asn_source(
-                    asn=asn,
-                    timeout=args.timeout,
-                    index=i,
-                    sourceapp=args.ripe_sourceapp,
-                    ignore_limit=not args.no_ripe_ignore_overload,
-                )
-            )
-    except Exception as exc:
-        eprint(f"ERROR: {exc}")
+    if not results:
+        eprint("ERROR: no sources produced results")
         return 1
 
-    if not requested_results:
-        eprint("ERROR: no sources selected")
-        return 1
-
-    empty = [r.name for r in requested_results if not r.prefixes]
+    empty = [r.name for r in results if not r.prefixes]
     if empty:
-        eprint("WARNING: these sources produced zero prefixes:", ", ".join(empty))
+        eprint("WARNING: zero prefixes from:", ", ".join(empty))
+    if errors:
+        eprint(f"WARNING: {len(errors)} source(s) failed, continuing with {len(results)} that succeeded")
 
-    render_output(requested_results, args.output, args.union_only)
-    return 0
+    render_output(results, args.output)
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
