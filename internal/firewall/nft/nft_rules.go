@@ -701,14 +701,6 @@ func (b *Backend) ensureCounter(name string) {
 
 // ---- nft compat helpers ----
 
-// runCmd executes a single nft command preserving quotes via `sh -lc`.
-func (b *Backend) runCmd(cmd string) error {
-	out, err := exec.Command("sh", "-lc", "nft "+cmd).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("nft failed: %v (out=%s)", err, out)
-	}
-	return nil
-}
 
 // runCmdOutput executes an nft command and returns its combined output.
 func (b *Backend) runCmdOutput(cmd string) (string, error) {
@@ -1090,7 +1082,7 @@ func (b *Backend) dumpPortscanPairs() (map[string]map[int]struct{}, map[string]m
 			return m
 		}
 
-		out, err := b.runCmdOutput("list set inet cfm " + set)
+		out, err := b.runCmdOutputWithTimeout("list set inet cfm "+set, 10*time.Second)
 		if err != nil {
 			return m
 		}

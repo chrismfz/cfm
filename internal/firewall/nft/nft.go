@@ -1312,7 +1312,9 @@ func (b *Backend) nftAddElementArgv(set, ip, ttl string) (string, error) {
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft argv] cmd:", "nft", strings.Join(args, " "))
 	}
-	out, err := exec.Command("nft", args...).CombinedOutput()
+   ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft argv] rc:", err)
 		if len(out) > 0 {
@@ -1802,8 +1804,10 @@ func (b *Backend) isSelfIPString(s string) bool {
 
 // HasElem returns true if elem is in setName without dumping the set.
 func (b *Backend) HasElem(setName, elem string) (bool, error) {
-	args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
-	out, err := exec.Command("nft", args...).CombinedOutput()
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
+    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
 	if err == nil {
 		return true, nil // found
 	}
