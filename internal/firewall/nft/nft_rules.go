@@ -28,14 +28,79 @@ var (
 	// NEW: last successful autoblock per IP (v4/v6 share the key as a string)
 	lastAutoBlockAt = map[string]time.Time{}
 	lastIgnoredAt   = map[string]time.Time{}
+	autoBlockEvalCount int
+
 )
+
+// floodCfgHash returns a cheap hash of all flood-relevant config fields.
+// If the hash is identical to the previous tick we skip the full rebuild.
+func floodCfgHash(c *cfgpkg.Config) uint64 {
+	if c == nil {
+		return 0
+	}
+	// fnv-style: combine all fields that, if changed, require a flood rebuild.
+	h := fnv64(0,
+		uint64(c.PacketRate.Rate),
+		uint64(c.PacketRate.Burst),
+		hashStr(c.PacketRate.Mode),
+		boolU64(c.Hardening.BlockBadTCPFlags),
+		uint64(c.Hardening.NewRate),
+		uint64(c.Hardening.ICMPRate),
+		uint64(len(c.Connlimit.Rules)),
+		uint64(len(c.PortFlood.Rules)),
+		uint64(c.NFT.InputPriority),
+	)
+	// stir in per-rule details so a rule change is detected
+	for _, r := range c.Connlimit.Rules {
+		h = fnv64(h, uint64(r.Port), uint64(r.Limit), hashStr(r.Proto))
+	}
+	for _, r := range c.PortFlood.Rules {
+		h = fnv64(h, uint64(r.Port), uint64(r.Packets), uint64(r.WindowSec), hashStr(r.Proto))
+	}
+	return h
+}
+
+func fnv64(h uint64, vals ...uint64) uint64 {
+	const prime = 1099511628211
+	if h == 0 {
+		h = 14695981039346656037
+	}
+	for _, v := range vals {
+		h ^= v
+		h *= prime
+	}
+	return h
+}
+
+func hashStr(s string) uint64 {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+func boolU64(b bool) uint64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 
 // -----------------------------------------------------------------------------
 // Flood rules application
 // -----------------------------------------------------------------------------
 
 func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
-	b.cfg = c // απλό replace
+	b.cfg = c
+
+	h := floodCfgHash(c)
+	if h != 0 && h == b.lastFloodHash && b.tableExists() {
+		return nil
+	}
+	b.lastFloodHash = h
 
 	// 1) Ensure βάσης (πίνακας/αλυσίδες/sets + refreshSelfSets μέσα στο EnsureBase)
 	if !b.tableExists() {
@@ -305,7 +370,7 @@ func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 // Debug/telemetry
 // -----------------------------------------------------------------------------
 // DumpFloodCounters logs flood-related counters with delta since last tick.
-// Ελαφριά: δεν κάνει ποτέ "list table", μόνο "list counters".
+
 func (b *Backend) DumpFloodCounters() {
 	b.floodDumpMu.Lock()
 	if b.floodDumpRunning {
@@ -325,6 +390,7 @@ func (b *Backend) DumpFloodCounters() {
 	}()
 }
 
+
 func (b *Backend) dumpFloodCountersOnce() {
 	// Πάρε όλους τους counters του table (χωρίς sets/elements).
 	// Use a generous timeout so nft gets enough time under load, without stalling the daemon tick path.
@@ -332,7 +398,7 @@ func (b *Backend) dumpFloodCountersOnce() {
 	if err != nil {
 		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
 		_ = b.EnsureBase()
-		fmt.Println("[flood] cannot list counters:", err)
+                logging.Logf("[flood] cannot list counters: %v", err)
 		return
 	}
 
@@ -488,7 +554,7 @@ func (b *Backend) DumpThrottledIPs() {
 		if set == "" || !b.setExists(set) {
 			return nil
 		}
-		out, err := b.runCmdOutput("list set inet cfm " + set)
+		out, err := b.runCmdOutputWithTimeout("list set inet cfm "+set, 10*time.Second)
 		if err != nil {
 			return nil
 		}
@@ -741,6 +807,12 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 // add it to block_v4/v6. MODE can be "permanent" (no TTL) or "ttl" (temporary).
 
 func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
+	// Issue 3: periodic cleanup — every 500 calls (~2.8h at 20s ticks)
+	autoBlockEvalCount++
+	if autoBlockEvalCount%500 == 0 {
+		pruneHitMaps(time.Duration(tc.WindowSec) * time.Second)
+	}
+
 	now := time.Now()
 	window := time.Duration(tc.WindowSec) * time.Second
 	for _, ip := range v4 {
@@ -769,6 +841,50 @@ func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 		}
 	}
 	return out
+}
+
+// pruneHitMaps removes stale entries from all package-level IP maps.
+// Called periodically from autoBlockEval to prevent unbounded growth on
+// servers that see thousands of unique attacking IPs per day.
+func pruneHitMaps(window time.Duration) {
+	cutoff := time.Now().Add(-window)
+	deadline := time.Now().Add(-24 * time.Hour)
+
+	for ip, ts := range thV4Hits {
+		pruned := pruneOld(ts, cutoff)
+		if len(pruned) == 0 {
+			delete(thV4Hits, ip)
+		} else {
+			thV4Hits[ip] = pruned
+		}
+	}
+	for ip, ts := range thV6Hits {
+		pruned := pruneOld(ts, cutoff)
+		if len(pruned) == 0 {
+			delete(thV6Hits, ip)
+		} else {
+			thV6Hits[ip] = pruned
+		}
+	}
+	// Remove reason entries for IPs no longer being tracked
+	for ip := range lastThrottleReason {
+		_, in4 := thV4Hits[ip]
+		_, in6 := thV6Hits[ip]
+		if !in4 && !in6 {
+			delete(lastThrottleReason, ip)
+		}
+	}
+	// Remove timing entries older than 24h
+	for ip, t := range lastAutoBlockAt {
+		if t.Before(deadline) {
+			delete(lastAutoBlockAt, ip)
+		}
+	}
+	for ip, t := range lastIgnoredAt {
+		if t.Before(deadline) {
+			delete(lastIgnoredAt, ip)
+		}
+	}
 }
 
 // nft_rules.go

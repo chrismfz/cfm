@@ -16,12 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
+	"context"
 	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/reporting"
-
+	"cfm/internal/logging"
 	"bufio"
 	"sync"
 )
@@ -118,6 +118,15 @@ type Backend struct {
 
 	floodDumpMu      sync.Mutex
 	floodDumpRunning bool
+	lastFloodHash uint64
+
+	apiCacheMu      sync.Mutex
+	apiCacheHost    string
+	apiCacheV4      []string
+	apiCacheV6      []string
+	apiCacheResolvedAt time.Time
+
+
 }
 
 // GetEnricher returns the enrichment engine (if enabled).
@@ -323,16 +332,24 @@ func (b *Backend) EnsureBase() error {
 	if !b.chainExists("input") {
 		needCreate = true
 	} else {
-		out, _ := exec.Command("nft", "list", "chain", family, tableName, "input").CombinedOutput()
+
+		ctx5, cancel5 := context.WithTimeout(context.Background(), 5*time.Second)
+		out, _ := exec.CommandContext(ctx5, "nft", "list", "chain", family, tableName, "input").CombinedOutput()
+		cancel5()
 		s := string(out)
 		want := fmt.Sprintf("priority %d", prio)
 		same := strings.Contains(s, want) || (prio == 0 && strings.Contains(s, "priority filter"))
 		if !same {
-			_ = b.nftCmd(fmt.Sprintf("flush chain %s %s input", family, tableName))
-			_ = b.nftCmd(fmt.Sprintf("delete chain %s %s input", family, tableName))
-			needCreate = true
+			// Do NOT silently destroy the input chain on a priority
+			// mismatch — that leaves the server unprotected during recreate.
+			// Log the discrepancy and leave the existing chain intact.
+			// To migrate the priority deliberately, run: cfm reset && cfm daemon
+			logging.Logf("[nft] WARNING: input chain priority mismatch (want %d). "+
+				"Run 'cfm reset' to apply the new priority. Keeping existing chain.", prio)
+			// needCreate stays false — we proceed with the existing chain as-is.
 		}
 	}
+
 	if needCreate {
 		if err := b.nftCmd(fmt.Sprintf(
 			`add chain %s %s input { type filter hook input priority %d; policy accept; }`,
@@ -668,6 +685,8 @@ func (b *Backend) EnsureBase() error {
 // No-op if URL is empty, invalid, or resolution fails. Best-effort.
 // Notes: We don’t add these sets to the global “ALLOW” early rules, so the API doesn’t get blanket access to other services.
 // Only the debug port rules (below) will consult these sets.
+const apiDNSCacheTTL = 5 * time.Minute
+
 func (b *Backend) refreshAPISets() {
 	if b.cfg == nil || strings.TrimSpace(b.cfg.API.URL) == "" {
 		_ = b.nftExpr("flush set inet cfm " + debugAPIV4 + ";")
@@ -675,7 +694,6 @@ func (b *Backend) refreshAPISets() {
 		return
 	}
 	u := strings.TrimSpace(b.cfg.API.URL)
-	// Accept raw host or full URL
 	host := u
 	if strings.Contains(u, "://") {
 		if parsed, err := url.Parse(u); err == nil && parsed != nil {
@@ -686,18 +704,45 @@ func (b *Backend) refreshAPISets() {
 	if host == "" {
 		return
 	}
-	ips, err := net.LookupIP(host)
-	if err != nil || len(ips) == 0 {
+
+	// Issue 5: only re-resolve DNS every 5 minutes, or when the host changes.
+	b.apiCacheMu.Lock()
+	cacheValid := host == b.apiCacheHost &&
+		time.Since(b.apiCacheResolvedAt) < apiDNSCacheTTL
+	v4s := b.apiCacheV4
+	v6s := b.apiCacheV6
+	b.apiCacheMu.Unlock()
+
+	if !cacheValid {
+		ips, err := net.LookupIP(host)
+		if err != nil || len(ips) == 0 {
+			// Keep stale cache on transient DNS failure — don't flush the sets.
+			return
+		}
+		var newV4, newV6 []string
+		for _, ip := range ips {
+			if v := ip.To4(); v != nil {
+				newV4 = append(newV4, v.String())
+			} else {
+				newV6 = append(newV6, ip.String())
+			}
+		}
+		b.apiCacheMu.Lock()
+		b.apiCacheHost = host
+		b.apiCacheV4 = newV4
+		b.apiCacheV6 = newV6
+		b.apiCacheResolvedAt = time.Now()
+		v4s = newV4
+		v6s = newV6
+		b.apiCacheMu.Unlock()
+	}
+
+	// Only rewrite the sets when we have a fresh resolve (cacheValid == false)
+	// or on first call. Avoids redundant nft writes every 20s tick.
+	if cacheValid {
 		return
 	}
-	var v4s, v6s []string
-	for _, ip := range ips {
-		if v := ip.To4(); v != nil {
-			v4s = append(v4s, v.String())
-		} else {
-			v6s = append(v6s, ip.String())
-		}
-	}
+
 	_ = b.nftExpr("flush set inet cfm " + debugAPIV4 + ";")
 	_ = b.nftExpr("flush set inet cfm " + debugAPIV6 + ";")
 	for _, ip := range v4s {
@@ -707,6 +752,7 @@ func (b *Backend) refreshAPISets() {
 		_ = b.nftExpr("add element inet cfm " + debugAPIV6 + " { " + ip + " };")
 	}
 }
+
 
 // -------- block (manual) --------
 
@@ -1174,15 +1220,10 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 
 // -------- shell helpers --------
 
-//func (b *Backend) tableExists() bool {
-//	_, err := exec.Command("nft", "list", "table", family, tableName).CombinedOutput()
-//	return err == nil
-//}
-
-// list tables, ΟΧΙ list table inet cfm
 func (b *Backend) tableExists() bool {
-	// προτιμώ απλό text για μέγιστη συμβατότητα
-	out, err := exec.Command("sh", "-lc", "nft list tables 2>/dev/null").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "list", "tables").Output()
 	if err != nil {
 		return false
 	}
@@ -1194,18 +1235,24 @@ func (b *Backend) tableExists() bool {
 	return false
 }
 
+
 func TableExistsCFM() bool {
 	var b Backend
 	return b.tableExists()
 }
 
 func (b *Backend) chainExists(chain string) bool {
-	_, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := exec.CommandContext(ctx, "nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	return err == nil
 }
 
+
 func (b *Backend) ruleExists(chain, needle string) bool {
-	out, err := exec.Command("nft", "list", "chain", family, tableName, chain).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	if err != nil {
 		return false
 	}
@@ -1225,9 +1272,12 @@ func (b *Backend) ruleExists(chain, needle string) bool {
 
 // -t terse - don't print the contents ffs//
 func (b *Backend) setExists(name string) bool {
-	_, err := exec.Command("nft", "-t", "list", "set", family, tableName, name).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := exec.CommandContext(ctx, "nft", "-t", "list", "set", family, tableName, name).CombinedOutput()
 	return err == nil
 }
+
 func (b *Backend) nftCmd(expr string) error {
 	_, err := b.nftOut(expr)
 	return err
