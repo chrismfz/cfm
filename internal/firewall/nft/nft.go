@@ -2138,3 +2138,58 @@ func (b *Backend) RemoveChallenge(ip net.IP) error {
 	}
 	return nil
 }
+
+
+
+// RemoveBlockBatch removes multiple IPs from their respective sets in a single
+// nft process invocation. Falls back to sequential on partial failure.
+func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
+    if len(ips) == 0 {
+        return nil
+    }
+
+    // Group by set
+    v4 := make([]string, 0)
+    v6 := make([]string, 0)
+    for _, ip := range ips {
+        if ip.To4() != nil {
+            v4 = append(v4, ip.String())
+        } else {
+            v6 = append(v6, ip.String())
+        }
+    }
+
+    // Try atomic batch first: one delete per set with all IPs in { }
+    // This is one nft process, one kernel transaction.
+    // Fails if ANY element is missing — in that case fall back to sequential.
+    var sb strings.Builder
+    if len(v4) > 0 {
+        fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
+            family, tableName, setV4, strings.Join(v4, ", "))
+    }
+    if len(v6) > 0 {
+        fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
+            family, tableName, setV6, strings.Join(v6, ", "))
+    }
+
+    cmd := exec.Command("nft", "-f", "-")
+    cmd.Stdin = strings.NewReader(sb.String())
+    out, err := cmd.CombinedOutput()
+    if err == nil {
+        return nil // all done in one shot
+    }
+
+    // Batch failed (likely some IPs not in set) — fall back to sequential.
+    // Still just ONE goroutine, ONE ip at a time: no fork storm.
+    s := string(out)
+    if strings.Contains(s, "No such file or directory") ||
+        strings.Contains(s, "Could not delete element") ||
+        strings.Contains(s, "Element not found") {
+        for _, ip := range ips {
+            _ = b.RemoveBlock(ip) // already ignores "not found"
+        }
+        return nil
+    }
+
+    return fmt.Errorf("nft batch delete failed: %v: %s", err, s)
+}

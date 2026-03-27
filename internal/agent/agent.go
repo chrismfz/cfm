@@ -12,7 +12,8 @@ import (
 
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
-"cfm/internal/dnat"
+	"cfm/internal/dnat"
+	"net"
 )
 
 type Config struct {
@@ -56,7 +57,16 @@ func (r *Runner) SetBackend(b firewall.Backend) { r.backend = b }
 func (r *Runner) SetConfigDir(dir string)       { r.cfgDir = dir }
 
 
+
+var unblockMu sync.Mutex
+
 func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
+    if !unblockMu.TryLock() {
+        logging.LogfAPI("[unblock] previous run still in progress, skipping tick")
+        return
+    }
+    defer unblockMu.Unlock()
+
     cfg := r.cur()
     if cfg.BaseURL == "" || cfg.Token == "" { return }
 
@@ -66,16 +76,29 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
         logging.LogfAPI("[unblock] fetch pending failed: %v", err)
         return
     }
+    if len(reqs) == 0 { return }
 
-if len(reqs) == 0 { return }
-for _, it := range reqs {
-    logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
-    go api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+    // batch-remove all IPs from nft in ONE process call
+    ips := make([]net.IP, 0, len(reqs))
+    for _, it := range reqs {
+        if ip := net.ParseIP(it.IP); ip != nil {
+            ips = append(ips, ip)
+        }
+    }
+    if be, ok := r.backend.(interface{ RemoveBlockBatch([]net.IP) error }); ok {
+        if err := be.RemoveBlockBatch(ips); err != nil {
+            logging.LogfAPI("[unblock] batch nft remove error: %v", err)
+        }
+    }
+
+    // confirm each sequentially (API calls, not nft)
+    for _, it := range reqs {
+        logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
+        api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+    }
 }
 
 
-
-}
 
 func (r *Runner) loop() {
 	defer r.wg.Done()

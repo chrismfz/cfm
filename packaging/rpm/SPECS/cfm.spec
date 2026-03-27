@@ -1,6 +1,6 @@
 Name:           cfm
 Version:        2026.03.27
-Release:        1.101919%{?dist}
+Release:        1.132247%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
