@@ -47,6 +47,8 @@ SOURCES = [
     "json:https://openai.com/gptbot.json",
     "json:https://openai.com/searchbot.json",
     "txt:https://www.quic.cloud/ips?ln",
+    "json:https://developer.skroutz.gr/ip_ranges.json",
+
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
