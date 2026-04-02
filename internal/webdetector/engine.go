@@ -378,6 +378,9 @@ type Engine struct {
 	lastProgressLogAt time.Time
 	parsedSinceLog    int64
 
+	// --- periodic pruning of unbounded emit/cooldown maps ---
+	lastEmitPrune time.Time
+
 	// Challenge API state (vhost/ip/events)
 	chalAPI         *ChallengeAPIStore
 	chalOnce        sync.Once
@@ -721,6 +724,19 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// (Without this, snapshots can look "stuck" until traffic resumes.)
 	now = time.Now()
 	e.pruneShort(now)
+
+   // Prune unbounded emit/cooldown maps periodically.
+    // Rate-limited to once per long-horizon interval to keep cost negligible.
+    horizon := e.cfg.LongHorizon()
+    if horizon <= 0 {
+        horizon = 20 * time.Minute
+    }
+    if e.lastEmitPrune.IsZero() || now.Sub(e.lastEmitPrune) >= horizon {
+        e.pruneEmitMaps(now)
+        e.lastEmitPrune = now
+    }
+
+
 
 	// Feed long-window approx once per short-window horizon.
 	if e.lastFeed.IsZero() || now.Sub(e.lastFeed) >= e.cfg.Window {
@@ -1216,6 +1232,95 @@ func (e *Engine) pruneShort(now time.Time) {
 		}
 	}
 }
+
+// pruneEmitMaps removes stale entries from all per-IP and per-subnet cooldown
+// maps that would otherwise grow indefinitely on servers under sustained attack.
+//
+// Called from RunOnce at most once per long-horizon interval (~20 min default).
+// The cutoff is 2× the long horizon — conservative enough to avoid evicting
+// entries that are still within an active cooldown window.
+func (e *Engine) pruneEmitMaps(now time.Time) {
+    horizon := e.cfg.LongHorizon()
+    if horizon <= 0 {
+        horizon = 20 * time.Minute
+    }
+    cutoff := now.Add(-2 * horizon)
+    longCutoff := now.Add(-horizon)
+
+    // --- ipLastEmit, ipLastChalEmit, subnetLastChalEmit (under emitMu) ---
+    e.emitMu.Lock()
+    for ip, t := range e.ipLastEmit {
+        if t.Before(cutoff) {
+            delete(e.ipLastEmit, ip)
+        }
+    }
+    if e.ipLastChalEmit != nil {
+        for ip, t := range e.ipLastChalEmit {
+            if t.Before(cutoff) {
+                delete(e.ipLastChalEmit, ip)
+            }
+        }
+    }
+    if e.subnetLastChalEmit != nil {
+        for subnet, t := range e.subnetLastChalEmit {
+            if t.Before(cutoff) {
+                delete(e.subnetLastChalEmit, subnet)
+            }
+        }
+    }
+    e.emitMu.Unlock()
+
+    // --- chalLast (under e.mu write lock) ---
+    // chalCtx holds the last matched host/uri/pattern per IP.
+    // Safe to evict once the IP hasn't triggered a challenge in one long horizon.
+    e.mu.Lock()
+    if e.chalLast != nil {
+        // chalCtx doesn't carry a timestamp, so we use ipLastChalEmit as proxy.
+        // If no emit exists (already pruned above), the ctx is also stale.
+        e.emitMu.Lock()
+        for ip := range e.chalLast {
+            if _, active := e.ipLastChalEmit[ip]; !active {
+                delete(e.chalLast, ip)
+            }
+        }
+        e.emitMu.Unlock()
+    }
+    e.mu.Unlock()
+
+    // --- ipLong.stats (under ipLong.mu) ---
+    // IPs that haven't appeared in the short window for a full long horizon
+    // will have alpha≈1 on next update anyway — safe to evict early.
+    if e.ipLong != nil {
+        e.ipLong.mu.Lock()
+        if e.ipLong.stats != nil && !e.ipLong.lastUpdate.IsZero() {
+            for ip := range e.ipLong.stats {
+                // Evict if we'd never see this IP in a fresh updateIPLong call,
+                // i.e. it's not in any current short-window bucket.
+                // Simple proxy: evict if not in ipLastEmit and not in ipLastChalEmit.
+                e.emitMu.Lock()
+                _, inEmit := e.ipLastEmit[ip]
+                _, inChal := e.ipLastChalEmit[ip]
+                e.emitMu.Unlock()
+                if !inEmit && !inChal {
+                    delete(e.ipLong.stats, ip)
+                }
+            }
+        }
+        e.ipLong.mu.Unlock()
+    }
+
+    // --- chalExpiredSeen (direct field, under emitMu for safety) ---
+    e.emitMu.Lock()
+    if e.chalExpiredSeen != nil {
+        for key, t := range e.chalExpiredSeen {
+            if t.Before(longCutoff) {
+                delete(e.chalExpiredSeen, key)
+            }
+        }
+    }
+    e.emitMu.Unlock()
+}
+
 
 // snapshotMiniLocked builds MiniMetrics per host from current short-window buckets.
 // Προϋποθέτει ότι ο caller κρατά ήδη e.mu.RLock ή Lock.
