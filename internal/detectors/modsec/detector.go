@@ -160,6 +160,11 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for k := range d.pending {
 		delete(d.pending, k)
 	}
+	// Clear metas too — like pending, it's per-tick scratch state.
+	// Without this, sub-threshold IPs accumulate forever.
+	for k := range d.metas {
+		delete(d.metas, k)
+	}
 	if d.src == nil {
 		return nil
 	}

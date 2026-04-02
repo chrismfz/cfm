@@ -38,6 +38,11 @@ func (s *SlidingCounter) Add(key string, now time.Time) int {
 	if s.budget > 0 && len(arr) > s.budget {
 		arr = arr[len(arr)-s.budget:]
 	}
+
+	if len(arr) == 0 {
+		delete(s.m, key)
+		return 0
+	}
 	s.m[key] = arr
 	return len(arr)
 }
@@ -53,6 +58,10 @@ func (s *SlidingCounter) Count(key string, now time.Time) int {
 	}
 	if i > 0 {
 		arr = arr[i:]
+		if len(arr) == 0 {
+			delete(s.m, key)
+			return 0
+		}
 		s.m[key] = arr
 	}
 	return len(arr)
@@ -67,6 +76,7 @@ type AlertGate struct {
 	cooldown  time.Duration
 	lastHit   map[string]time.Time
 	lastCount map[string]int
+	callN     int // for self-pruning
 }
 
 func NewAlertGate(cooldown time.Duration) *AlertGate {
@@ -83,6 +93,19 @@ func (g *AlertGate) Allow(key string, now time.Time, count, limit int) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Self-prune every 2000 calls: remove entries older than 2× cooldown.
+	// Keeps the maps bounded without requiring callers to manage cleanup.
+	g.callN++
+	if g.callN%2000 == 0 {
+		cutoff := now.Add(-2 * g.cooldown)
+		for k, t := range g.lastHit {
+			if t.Before(cutoff) {
+				delete(g.lastHit, k)
+				delete(g.lastCount, k)
+			}
+		}
+	}
 
 	if lh, ok := g.lastHit[key]; ok && now.Sub(lh) < g.cooldown {
 		return false
