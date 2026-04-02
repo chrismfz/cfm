@@ -54,9 +54,10 @@ type Step struct {
 type Result struct {
     IP           net.IP
     Steps        []Step
-    FromFeeds    []string // feeds που “πιάνουν” την IP
-    WasBlocked   bool     // εντοπίστηκε σε nft/cfm.deny/κλπ.
-    Whitelisted  bool     // μπήκε allow override
+    FromFeeds    []string
+    WasBlocked   bool
+    Whitelisted  bool
+    mu           sync.Mutex // protects Steps during concurrent goroutine appends
 }
 
 type Options struct {
@@ -209,9 +210,10 @@ func runCmd(ctx context.Context, r *Result, src Source, name string, args ...str
     } else {
         step.Detail = strings.TrimSpace(string(out))
     }
+    r.mu.Lock()
     r.Steps = append(r.Steps, step)
+    r.mu.Unlock()
 }
-
 
 
 
@@ -288,7 +290,9 @@ func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
 // listSetNamesByPrefixes parses a single "nft -t -n list table inet cfm" output
 // and returns set names that start with any of the provided prefixes.
 func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
-    out, err := exec.Command("nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
+    ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+    defer cancel()
+    out, err := exec.CommandContext(ctx, "nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
     if err != nil {
         return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
     }

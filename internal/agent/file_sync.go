@@ -66,14 +66,39 @@ if len(tracked) == 0 {
         if local := sha1File(u.TargetPath); strings.EqualFold(local, u.Hash) {
             continue
         }
-        if err := os.MkdirAll(filepath.Dir(u.TargetPath), 0750); err != nil {
-            logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(u.TargetPath), err)
+
+        // Validate path is under a known-safe directory before writing.
+        // Prevents an API compromise from writing to arbitrary system paths.
+        cleanPath := filepath.Clean(u.TargetPath)
+        allowedPrefixes := []string{
+            "/etc/cfm/",
+            "/usr/local/openresty/nginx/conf/",
+            "/usr/local/openresty/nginx/lua/",
+	    "/etc/mail/spamassassin/",
+
+        }
+        pathAllowed := false
+        for _, pfx := range allowedPrefixes {
+            if strings.HasPrefix(cleanPath, pfx) {
+                pathAllowed = true
+                break
+            }
+        }
+        if !pathAllowed {
+            logging.LogfAPI("[files] REJECTED write to disallowed path: %s", u.TargetPath)
             continue
         }
-        if err := atomicWrite(u.TargetPath, []byte(u.Content), 0600); err != nil {
-            logging.LogfAPI("[files] write %s: %v", u.TargetPath, err)
+
+        if err := os.MkdirAll(filepath.Dir(cleanPath), 0750); err != nil {
+            logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(cleanPath), err)
             continue
         }
+        if err := atomicWrite(cleanPath, []byte(u.Content), 0600); err != nil {
+            logging.LogfAPI("[files] write %s: %v", cleanPath, err)
+            continue
+        }
+
+
         logging.LogfAPI("[files] updated %s", u.TargetPath)
         if u.PostUpdateCommand != nil && *u.PostUpdateCommand != "" {
             if _, ok := dedup[*u.PostUpdateCommand]; !ok {

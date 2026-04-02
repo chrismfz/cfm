@@ -23,12 +23,15 @@ func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {
     if len(paths) == 0 { return nil, nil }
     u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/get-updates"
     body, _ := json.Marshal(FileUpdatesRequest{Files: paths})
-    req, _ := http.NewRequest("POST", u, bytes.NewReader(body))
+
+    req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+    if err != nil { return nil, fmt.Errorf("get updates build request: %w", err) }
     req.Header.Set("Token", c.Token)
     req.Header.Set("Accept", "application/json")
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
     resp, err := c.http().Do(req)
+
     if err != nil { return nil, err }
     defer resp.Body.Close()
     if resp.StatusCode >= 300 { return nil, fmt.Errorf("http %d", resp.StatusCode) }
@@ -41,12 +44,15 @@ func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {
 
 func (c *APIClient) ListTrackedFiles() (map[string]string, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/list-files"
-	req, _ := http.NewRequest("GET", u, nil)
-	req.Header.Set("Token", c.Token)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
 
-	resp, err := c.http().Do(req)
+    req, err := http.NewRequest("GET", u, nil)
+    if err != nil { return nil, fmt.Errorf("list tracked files build request: %w", err) }
+    req.Header.Set("Token", c.Token)
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+
+    resp, err := c.http().Do(req)
+
 	if err != nil { return nil, err }
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)

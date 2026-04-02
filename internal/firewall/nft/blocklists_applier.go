@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-//	"time"
+	"time"
 
 	"cfm/internal/blocklists"
 )
@@ -288,10 +288,11 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 
 
 func (b *Backend) DeleteSetIfExists(name string) error {
-	// nft delete set inet cfm <name> (ignore error if missing)
-	args := []string{"delete", "set", family, tableName, name}
-	if out, err := exec.Command("nft", args...).CombinedOutput(); err != nil {
-		_ = out // ignore; it's fine if it wasn't there
-	}
-	return nil
+    ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+    defer cancel()
+    args := []string{"delete", "set", family, tableName, name}
+    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+    _ = out
+    _ = err // ignore; it's fine if the set wasn't there
+    return nil
 }

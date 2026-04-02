@@ -39,7 +39,7 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
      }
  }
 
-    ttl := 1 * time.Hour // TODO: ρυθμιζόμενο από config αν θέλεις
+    ttl := 4 * time.Hour // covers max feed sync interval
     res, err := unblock.Do(ctx, ip, unblock.Options{
         BE:             be,
         ConfigDir:      cfgDir,
