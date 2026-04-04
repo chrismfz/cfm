@@ -121,7 +121,7 @@ func Start(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backend, cfgDir 
 	// Manual IP block endpoint used by admin UI quick actions.
 	RegisterBlock(m, be)
 
-	// ── /api/v1/system/* ────────────────────────────────────────────────────
+	// ── /api/v1/system/ ────────────────────────────────────────────────────
 	RegisterSystemStatus(m)
 
 	// ── MySQL governor (/api/v1/mysql/) ─────────────────────────────────────
@@ -133,15 +133,27 @@ func Start(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backend, cfgDir 
 	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	// ── Token store + middleware ─────────────────────────────────────────────
+	store := NewTokenStore()
+	store.StartPurger(ctx)
+
+	// Register scoped token issuance endpoint (protected by middleware below).
+	RegisterTokenEndpoint(m, store)
+
+	// Wrap the mux: loopback bypass → admin token → scoped token → 401.
+	authedHandler := TokenMiddleware(cfg.API.AuthToken, store)(m)
+
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           m,
+		Handler:           authedHandler,
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB
 	}
+
 
 	// Graceful shutdown when the daemon context is cancelled (reload / stop).
 	go func() {

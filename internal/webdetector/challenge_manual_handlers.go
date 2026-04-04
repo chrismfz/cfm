@@ -1,8 +1,4 @@
 // internal/webdetector/challenge_manual_handlers.go
-//
-// Add these two handlers to http_api.go mux:
-//   mux.HandleFunc("/api/v1/challenge/vhost/add",    e.handleChallengeVhostAdd)
-//   mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
 
 package webdetector
 
@@ -64,6 +60,12 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Scope check: scoped tokens may only challenge their own vhosts.
+	if !vhostAllowed(req.Host, vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+
 	ttl := 30 * time.Minute
 	if req.TTL != "" {
 		if d, err := time.ParseDuration(req.TTL); err == nil && d > 0 {
@@ -101,9 +103,16 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		host = body.Host
 	}
+
 	host = strings.TrimSpace(strings.ToLower(host))
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+
+	// Scope check: scoped tokens may only remove challenge for their own vhosts.
+	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 
