@@ -570,15 +570,12 @@
       },
       async logout() {
         this.stopAutoRefresh();
-        this.actionMsg = 'Attempting Basic-Auth logout (browser-dependent)...';
-        try {
-          await fetch('/cfm-admin/api/v1/webdet/summary', {
-            headers: { Authorization: `Basic ${btoa('logout:logout')}` },
-            cache: 'no-store',
-          });
-        } catch (_) {
-        }
-        window.location.href = '/cfm-admin/?logout=1';
+        await fetch('/cfm-admin/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+          redirect: 'manual',
+        }).catch(() => {});
+        window.location.href = '/cfm-admin/login';
       },
       challengeState(host) {
         const s = this.activeChallengeByHost[host] || {};
