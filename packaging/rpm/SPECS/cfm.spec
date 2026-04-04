@@ -1,6 +1,6 @@
 Name:           cfm
 Version:        2026.04.04
-Release:        1.184751%{?dist}
+Release:        1.202212%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        MIT
 URL:            https://nixpal.com
@@ -59,10 +59,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/cfm
 %dir %{_datadir}/cfm/configs
-%dir %{_datadir}/cfm/html
 %{_datadir}/cfm/configs/*
-%{_datadir}/cfm/html/*
-%{_datadir}/cfm/html/assets/*
 
 
 %post

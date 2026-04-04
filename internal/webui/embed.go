@@ -1,36 +1,47 @@
 // internal/webui/embed.go
 //
 // Embeds the cfm-admin static UI files into the binary.
-//
-// Files are copied into internal/webui/static/ by `make ui` before build:
-//   make ui && make build
+// Files live in internal/webui/static/ (committed directly, no build step).
 //
 // Serving strategy:
 //   - Files that exist in the embedded FS are served directly.
-//   - Assets under /assets/ get long-lived cache headers (filenames are stable).
-//   - Everything else falls back to index.html (SPA navigation via HTML5 history).
+//   - Directories trigger index.html lookup (e.g. /webdetector/ → webdetector/index.html).
+//   - Unknown paths fall back to root index.html (SPA navigation).
+//   - /assets/ files get immutable cache headers.
 //
 // Prefix handling:
-//   The UI uses hardcoded /cfm-admin/... paths throughout (API calls, navigation,
-//   asset references). Two scenarios work without any JS/HTML changes:
+//   The UI uses hardcoded /cfm-admin/... paths throughout.
 //
-//   OpenResty proxy (/cfm-admin/ → Go /):
-//     OpenResty rewrites /cfm-admin/foo → /foo before forwarding. Go just serves /foo.
-//
-//   Direct port (:6061 → /cfm-admin/...):
-//     Go's /cfm-admin/ handler strips the prefix and re-dispatches on the same mux.
-//     /cfm-admin/api/v1/... → strips → /api/v1/... → API handler ✓
-//     /cfm-admin/assets/app.js → strips → /assets/app.js → this handler ✓
-//     /cfm-admin/login → strips → /login → login handler ✓
+//   OpenResty proxy:  /cfm-admin/foo → OpenResty rewrites → /foo → Go serves directly.
+//   Direct port 6061: /cfm-admin/foo → Go's /cfm-admin/ handler strips → /foo → re-dispatch.
 
 package webui
 
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 )
+
+// Register MIME types explicitly — Go's FileServer relies on the OS MIME
+// database which may map .js/.css to text/plain on minimal Linux installs,
+// causing browsers to block them with nosniff.
+func init() {
+	mime.AddExtensionType(".js",    "application/javascript; charset=utf-8")
+	mime.AddExtensionType(".mjs",   "application/javascript; charset=utf-8")
+	mime.AddExtensionType(".css",   "text/css; charset=utf-8")
+	mime.AddExtensionType(".html",  "text/html; charset=utf-8")
+	mime.AddExtensionType(".json",  "application/json")
+	mime.AddExtensionType(".svg",   "image/svg+xml")
+	mime.AddExtensionType(".ico",   "image/x-icon")
+	mime.AddExtensionType(".woff2", "font/woff2")
+	mime.AddExtensionType(".woff",  "font/woff")
+	mime.AddExtensionType(".ttf",   "font/ttf")
+	mime.AddExtensionType(".png",   "image/png")
+	mime.AddExtensionType(".webp",  "image/webp")
+}
 
 //go:embed all:static
 var staticFS embed.FS
@@ -39,7 +50,7 @@ var staticFS embed.FS
 func FS() fs.FS {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		panic("webui: static/ not embedded — run `make ui` before `make build`")
+		panic("webui: static/ not embedded — files must be in internal/webui/static/")
 	}
 	return sub
 }
@@ -51,23 +62,36 @@ func Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(static))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check whether the requested file actually exists.
-		cleanPath := strings.TrimPrefix(r.URL.Path, "/")
+		path := r.URL.Path
+		cleanPath := strings.TrimPrefix(path, "/")
+
 		if cleanPath != "" {
-			if f, err := static.Open(cleanPath); err == nil {
+			f, err := static.Open(cleanPath)
+			if err == nil {
+				info, statErr := f.Stat()
 				f.Close()
-				// Vite/static assets with stable names → cache forever.
-				if strings.HasPrefix(r.URL.Path, "/assets/") {
-					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-				} else {
+
+				if statErr == nil && info.IsDir() {
+					// Directory — let FileServer handle it (serves index.html inside).
 					w.Header().Set("Cache-Control", "no-store")
+					fileServer.ServeHTTP(w, r)
+					return
 				}
-				fileServer.ServeHTTP(w, r)
-				return
+
+				if statErr == nil && !info.IsDir() {
+					// Real file — serve it.
+					if strings.HasPrefix(path, "/assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					} else {
+						w.Header().Set("Cache-Control", "no-store")
+					}
+					fileServer.ServeHTTP(w, r)
+					return
+				}
 			}
 		}
 
-		// File not found → serve index.html for SPA client-side routing.
+		// Path not found → root index.html (SPA client-side routing).
 		w.Header().Set("Cache-Control", "no-store")
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/"

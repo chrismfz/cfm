@@ -26,7 +26,6 @@ override PKGROOT := build/pkgroot
 override OUTDIR  := build/deb
 BIN := bin/cfm
 CONFIG_DIR := configs
-WEBUI_DIR := webui/cfm-admin
 DEB_SRC := packaging/debian/DEBIAN
 
 
@@ -150,7 +149,6 @@ deb: build
 		"$(PKGROOT)/usr/bin" \
 		"$(PKGROOT)/lib/systemd/system" \
 		"$(PKGROOT)/usr/share/cfm/configs" \
-		"$(PKGROOT)/usr/share/cfm/html" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
 
@@ -177,7 +175,6 @@ deb: build
 
 
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
-	@rsync -a --delete "$(WEBUI_DIR)/" "$(PKGROOT)/usr/share/cfm/html/"
 	# executables
 	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
@@ -213,8 +210,6 @@ stage-pkgroot: build
 	# === ship ALL example configs ===
 	@mkdir -p $(PKGROOT)/usr/share/cfm/configs
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
-	@mkdir -p $(PKGROOT)/usr/share/cfm/html
-	@rsync -a --delete "$(WEBUI_DIR)/" "$(PKGROOT)/usr/share/cfm/html/"
 
 	# systemd unit (RPM-friendly path)
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
