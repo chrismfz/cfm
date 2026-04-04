@@ -187,11 +187,12 @@ func Start(
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
 	//   mux → TokenMiddleware → LoadAndSave
-	var handler http.Handler
-	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
-	if authMgr != nil {
-		handler = authMgr.LoadAndSave(handler)
-	}
+var handler http.Handler
+handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
+if authMgr != nil {
+    handler = authMgr.LoadAndSave(handler)
+}
+handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	httpAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
