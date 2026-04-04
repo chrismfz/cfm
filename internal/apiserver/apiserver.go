@@ -171,6 +171,7 @@ func Start(
 			IdleTimeout:  30 * time.Minute,
 			CookieName:   cookieName,
 			SecureCookie: cfg.Debug.SecureCookie,
+		        SameSite:     http.SameSiteLaxMode,  // ← add this
 		})
 		if err != nil {
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
