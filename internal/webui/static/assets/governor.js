@@ -1,4 +1,15 @@
 (() => {
+  // Scoped token — injected by panel plugins via ?token=<value>.
+  const _scopedToken = (() => {
+    const u = new URL(window.location.href);
+    const t = u.searchParams.get('token');
+    if (t) {
+      u.searchParams.delete('token');
+      window.history.replaceState({}, '', u.toString());
+    }
+    return t || '';
+  })();
+ 
   const appRoot = document.getElementById('app');
   appRoot?.removeAttribute('v-cloak');
 
@@ -58,6 +69,10 @@
   }
 
   async function api(path, opts = {}) {
+    if (_scopedToken) {
+      opts = { ...opts };
+      opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${_scopedToken}` };
+    }
     const res = await fetch(`/cfm-admin/api${path}`, opts);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);

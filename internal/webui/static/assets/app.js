@@ -1,6 +1,19 @@
 (() => {
   const { createApp } = window.Vue;
 
+  // Scoped token — injected by panel plugins via ?token=<value>.
+  // Extracted once at load, stripped from the URL so it never leaks
+  // in Referer headers or browser history.
+  const _scopedToken = (() => {
+    const u = new URL(window.location.href);
+    const t = u.searchParams.get('token');
+    if (t) {
+      u.searchParams.delete('token');
+      window.history.replaceState({}, '', u.toString());
+    }
+    return t || '';
+  })();
+
   createApp({
     data() {
       return {
@@ -520,9 +533,11 @@
         return row?.reasons || row?.reason || '-';
       },
       async fetchJSON(path) {
+        const headers = { Accept: 'application/json' };
+        if (_scopedToken) headers['Authorization'] = `Bearer ${_scopedToken}`;
         const res = await fetch(`/cfm-admin/api/${path}`, {
           credentials: 'same-origin',
-          headers: { Accept: 'application/json' },
+          headers,
         });
         if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
         return res.json();
@@ -536,13 +551,15 @@
         }
       },
       async postJSON(path, body) {
+        const headers = {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        };
+        if (_scopedToken) headers['Authorization'] = `Bearer ${_scopedToken}`;
         const res = await fetch(`/cfm-admin/api/${path}`, {
           method: 'POST',
           credentials: 'same-origin',
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-          },
+          headers,
           body: JSON.stringify(body),
         });
         const data = await res.json().catch(() => ({}));

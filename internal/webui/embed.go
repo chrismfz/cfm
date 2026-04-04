@@ -7,7 +7,7 @@
 //   - Files that exist in the embedded FS are served directly.
 //   - Directories trigger index.html lookup (e.g. /webdetector/ → webdetector/index.html).
 //   - Unknown paths fall back to root index.html (SPA navigation).
-//   - /assets/ files get immutable cache headers.
+//   - All responses use no-store (stable filenames, management UI — always fresh).
 //
 // Prefix handling:
 //   The UI uses hardcoded /cfm-admin/... paths throughout.
@@ -62,29 +62,18 @@ func Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(static))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		cleanPath := strings.TrimPrefix(path, "/")
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/")
 
 		if cleanPath != "" {
 			f, err := static.Open(cleanPath)
 			if err == nil {
-				info, statErr := f.Stat()
+				_, statErr := f.Stat()
 				f.Close()
 
-				if statErr == nil && info.IsDir() {
-					// Directory — let FileServer handle it (serves index.html inside).
+				if statErr == nil {
+					// File or directory exists — serve it directly.
+					// FileServer handles directories by looking for index.html inside.
 					w.Header().Set("Cache-Control", "no-store")
-					fileServer.ServeHTTP(w, r)
-					return
-				}
-
-				if statErr == nil && !info.IsDir() {
-					// Real file — serve it.
-					if strings.HasPrefix(path, "/assets/") {
-						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-					} else {
-						w.Header().Set("Cache-Control", "no-store")
-					}
 					fileServer.ServeHTTP(w, r)
 					return
 				}
