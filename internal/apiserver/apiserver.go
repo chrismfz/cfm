@@ -168,7 +168,7 @@ func Start(
 		authMgr, err = goauth.New(goauth.Config{
 			DBPath:       cfg.Debug.AuthDBPath,
 			SessionTTL:   sessionTTL,
-			IdleTimeout:  30 * time.Minute,
+			//IdleTimeout:  30 * time.Minute,
 			CookieName:   cookieName,
 			SecureCookie: cfg.Debug.SecureCookie,
 		        SameSite:     http.SameSiteLaxMode,  // ← add this
