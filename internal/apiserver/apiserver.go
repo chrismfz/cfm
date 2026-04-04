@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"strings"
 
 	"github.com/chrismfz/goauth"
 
@@ -42,6 +43,8 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	sslpkg   "cfm/internal/sslcollector"
+	webui "cfm/internal/webui"
+
 )
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
@@ -106,6 +109,31 @@ func Start(
 
 	// ── Public auth routes (login / logout / 2FA stub) ───────────────────────
 	RegisterLoginRoutes(m)
+
+	// ── Embedded static UI ────────────────────────────────────────────────────
+	// Serves the embedded HTML/JS/CSS at /.
+	// Registered first — API routes below take priority via longest-prefix matching.
+	m.Handle("/", webui.Handler())
+
+	// /cfm-admin/ prefix rewriter — strips the prefix and re-dispatches on the
+	// same mux. Enables direct port access (:6061) when HTML/JS use hardcoded
+	// /cfm-admin/... paths, without any JS/HTML changes.
+	//
+	//   /cfm-admin/api/v1/...  → strips → /api/v1/...  → API handler
+	//   /cfm-admin/assets/...  → strips → /assets/...  → webui.Handler
+	//   /cfm-admin/login       → strips → /login        → login handler
+	//
+	m.HandleFunc("/cfm-admin/", func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/cfm-admin")
+		if r2.URL.Path == "" || r2.URL.Path[0] != '/' {
+			r2.URL.Path = "/" + r2.URL.Path
+		}
+		if r2.URL.RawPath != "" {
+			r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/cfm-admin")
+		}
+		m.ServeHTTP(w, r2)
+	})
 
 	// ── Firewall action endpoints ─────────────────────────────────────────────
 	RegisterUnblock(m, be, cfgDir)
