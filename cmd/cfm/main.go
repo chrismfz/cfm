@@ -136,6 +136,16 @@ func sslSockDefaults() (string, string) {
 
 
 func main() {
+
+	// cfm auth — short-circuits before config load or server start.
+	// The daemon does not need to be running.
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runAuthCLI()
+		return
+	}
+
+
 	requireRoot()
 
 	if BuildTime == "" {
@@ -800,7 +810,7 @@ if cfg.Clam.Enabled {
 
 		// Start the unified internal HTTP server.
 		// Registers pprof, /unblock, and mysql governor routes internally.
-		go apiserver.Start(ctx, cfg, be, cfgDir, gov)
+		go apiserver.Start(ctx, cfg, be, cfgDir, gov, sslcol)
 
 		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
 		logging.Logf("[apiserver] http server on %s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)

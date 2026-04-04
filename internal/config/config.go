@@ -66,9 +66,16 @@ type ClamConfig struct {
 
 // DebugConfig — controls the internal debug/metrics HTTP server
 type DebugConfig struct {
-	ListenAddress string // LISTEN_ADDRESS
-	Port          int    // PORT
+	ListenAddress string        // LISTEN_ADDRESS
+	Port          int           // PORT
+	TLSPort       int           // TLS_PORT (0 = disabled)
+	TLSAddress    string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
+	AuthDBPath    string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
+	SessionTTL    time.Duration // AUTH_SESSION_TTL (default 8h)
+	SecureCookie  bool          // AUTH_SECURE_COOKIE
+	CookieName    string        // AUTH_COOKIE_NAME (default cfm-sid)
 }
+
 
 // SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
 type SMTPBlockConfig struct {
@@ -611,6 +618,24 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 				cfg.Debug.Port = n
 			}
 			// if invalid, keep zero; defaults will fill
+	case "TLS_PORT":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.Debug.TLSPort = n
+		}
+	case "TLS_LISTEN_ADDRESS":
+		cfg.Debug.TLSAddress = val
+	case "AUTH_DB_PATH":
+		cfg.Debug.AuthDBPath = val
+	case "AUTH_SESSION_TTL":
+		if d, err := time.ParseDuration(val); err == nil {
+			cfg.Debug.SessionTTL = d
+		}
+	case "AUTH_SECURE_COOKIE":
+		cfg.Debug.SecureCookie = val == "1" || strings.EqualFold(val, "true")
+	case "AUTH_COOKIE_NAME":
+		cfg.Debug.CookieName = val
+
+
 
 		// --- MaxMind (GeoLite/GeoIP2 updater) ---
 		case "MAXMIND_ENABLED":
