@@ -164,7 +164,7 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := e.TopShort(limit)
+	rows := applyShortFilter(e.TopShort(limit), parseVhostFilter(r))
 
 	resp := topShortResponse{
 		WindowSec:      e.cfg.Window.Seconds(),
@@ -205,9 +205,10 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	if minScore <= 0 {
 		minScore = 0.50
 	}
-	rows := e.longwin.SuspiciousTop(limit, minScore)
+	rows := applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r))
 	writeJSON(w, http.StatusOK, rows)
 }
+
 
 // longTopResponse: scored long-window rows χωρίς minScore threshold.
 type longTopResponse struct {
@@ -226,8 +227,7 @@ func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := e.longwin.SuspiciousTop(limit, 0) // minScore=0 → όλα με score
-
+	rows := applySuspiciousFilter(e.longwin.SuspiciousTop(limit, 0), parseVhostFilter(r))
 	resp := longTopResponse{
 		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
 		Rows:           rows,
@@ -242,6 +242,11 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+
+	if !vhostAllowed(host, parseVhostFilter(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 
