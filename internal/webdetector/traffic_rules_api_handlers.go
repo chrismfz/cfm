@@ -116,7 +116,7 @@ func (e *Engine) handleWebdetRulesRemove(w http.ResponseWriter, r *http.Request)
 }
 
 func (e *Engine) handleWebdetRulesSimulate(w http.ResponseWriter, r *http.Request) {
-	if e == nil || e.trafficRules == nil {
+	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "traffic rules store unavailable"})
 		return
 	}
@@ -133,6 +133,6 @@ func (e *Engine) handleWebdetRulesSimulate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
 	}
-	res := e.trafficRules.Simulate(req)
+	res := e.TrafficRuleSimulate(req)
 	writeJSON(w, http.StatusOK, res)
 }

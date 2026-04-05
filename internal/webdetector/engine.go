@@ -430,6 +430,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
+		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	}
 	// Compile MALPATH rules. Supports "N:substring" override syntax.
 	e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
@@ -3149,4 +3150,16 @@ func (e *Engine) TrafficRuleList() []TrafficRule {
 		return nil
 	}
 	return e.trafficRules.List()
+}
+
+func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalResult {
+	if e == nil || e.trafficRules == nil {
+		return TrafficRuleEvalResult{Matched: false}
+	}
+	if strings.TrimSpace(in.Country) == "" && strings.TrimSpace(in.IP) != "" && e.enr != nil {
+		if geo := e.enr.Lookup(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" {
+			in.Country = geo.Country
+		}
+	}
+	return e.trafficRules.Simulate(in)
 }
