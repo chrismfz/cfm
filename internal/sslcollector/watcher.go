@@ -18,10 +18,13 @@ import (
 type Watcher struct {
 	col *Collector
 
-	mu      sync.Mutex
-	timer   *time.Timer
-	delay   time.Duration
-	running bool
+	mu        sync.Mutex
+	timer     *time.Timer
+	delay     time.Duration
+	running   bool
+	lastExact int
+	lastWild  int
+	haveLast  bool
 
 	fs *fsnotify.Watcher
 }
@@ -114,8 +117,17 @@ func (w *Watcher) trigger(reason string) {
 		}
 
 		st := w.col.Stats()
-		logging.Logf("[sslcollector] watcher refresh ok reason=%s exact=%d wild=%d files=%d",
-			reason, st.ExactHosts, st.WildcardZones, st.KnownFiles)
+		w.mu.Lock()
+		changed := !w.haveLast || st.ExactHosts != w.lastExact || st.WildcardZones != w.lastWild
+		w.lastExact = st.ExactHosts
+		w.lastWild = st.WildcardZones
+		w.haveLast = true
+		w.mu.Unlock()
+
+		if changed {
+			logging.Logf("[sslcollector] watcher refresh changed reason=%s exact=%d wild=%d files=%d",
+				reason, st.ExactHosts, st.WildcardZones, st.KnownFiles)
+		}
 	})
 }
 
@@ -134,7 +146,11 @@ func (w *Watcher) isRelevant(ev fsnotify.Event) bool {
 	}
 
 	// positive matches
-	if strings.Contains(name, "cert") ||
+	if strings.Contains(name, ".cert") ||
+		strings.Contains(name, "cert") ||
+		strings.Contains(name, ".crt") ||
+		strings.Contains(name, ".cer") ||
+		strings.Contains(name, ".key") ||
 		strings.Contains(name, "key") ||
 		strings.Contains(name, "pem") ||
 		strings.Contains(name, "privkey") ||
@@ -142,8 +158,8 @@ func (w *Watcher) isRelevant(ev fsnotify.Event) bool {
 		return true
 	}
 
-	// fallback: directory changes (important!)
-	return true
+	// Ignore unrelated file churn (locks, caches, journals, wp-content noise, etc).
+	return false
 }
 
 func (w *Watcher) addRecursive(root string) error {

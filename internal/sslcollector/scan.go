@@ -46,7 +46,7 @@ func (c *Collector) Refresh(ctx context.Context) error {
 			if strings.HasPrefix(n, "*.") {
 				suf := normalizeHost(strings.TrimPrefix(n, "*."))
 				if suf != "" {
-					if old, ok := nextWild[suf]; !ok || prefer(e.Source, old.Source) {
+					if old, ok := nextWild[suf]; !ok || betterEntry(e, old, now) {
 						nextWild[suf] = e
 					}
 				}
@@ -55,7 +55,7 @@ func (c *Collector) Refresh(ctx context.Context) error {
 
 			host := normalizeHost(n)
 			if host != "" {
-				if old, ok := nextExact[host]; !ok || prefer(e.Source, old.Source) {
+				if old, ok := nextExact[host]; !ok || betterEntry(e, old, now) {
 					nextExact[host] = e
 				}
 			}
@@ -107,7 +107,9 @@ func buildEntry(p Pair, now time.Time) (*Entry, error) {
 		CertPath:    p.CertPath,
 		KeyPath:     p.KeyPath,
 		ChainPath:   p.ChainPath,
+		NotBefore:   cert.NotBefore,
 		NotAfter:    cert.NotAfter,
+		SelfSigned:  isSelfSigned(cert),
 		Fingerprint: hex.EncodeToString(fp[:]),
 		LastSeen:    now,
 	}
@@ -137,6 +139,63 @@ func uniqNamesKeepWild(in []string) []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+func certValidityRank(e *Entry, now time.Time) int {
+	if now.Before(e.NotBefore) {
+		return 1 // not yet valid
+	}
+	if now.After(e.NotAfter) {
+		return 0 // expired
+	}
+	return 2 // currently valid
+}
+
+func betterEntry(a, b *Entry, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	if b == nil {
+		return true
+	}
+
+	// 1) Prefer certs that are valid now over not-yet-valid over expired.
+	va, vb := certValidityRank(a, now), certValidityRank(b, now)
+	if va != vb {
+		return va > vb
+	}
+
+	// 2) Prefer non-self-signed over self-signed.
+	if a.SelfSigned != b.SelfSigned {
+		return !a.SelfSigned
+	}
+
+	// 3) Preserve source preference as primary policy.
+	if prefer(a.Source, b.Source) != prefer(b.Source, a.Source) {
+		return prefer(a.Source, b.Source)
+	}
+
+	// 4) Prefer longer remaining/newer expiry.
+	if !a.NotAfter.Equal(b.NotAfter) {
+		return a.NotAfter.After(b.NotAfter)
+	}
+
+	// 5) deterministic tie-breaker to avoid map-order surprises.
+	if a.CertPath != b.CertPath {
+		return a.CertPath < b.CertPath
+	}
+	return a.KeyPath < b.KeyPath
+}
+
+func isSelfSigned(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	// Fast check first, then cryptographic self-signature verification.
+	if cert.Issuer.String() != cert.Subject.String() {
+		return false
+	}
+	return cert.CheckSignatureFrom(cert) == nil
 }
 
 func prefer(a, b Source) bool {

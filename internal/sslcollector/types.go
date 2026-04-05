@@ -24,7 +24,9 @@ type Entry struct {
 	KeyPath   string
 	ChainPath string // optional
 
+	NotBefore   time.Time
 	NotAfter    time.Time
+	SelfSigned  bool
 	Fingerprint string // sha256 of leaf cert raw
 
 	// file change tracking
@@ -37,11 +39,11 @@ type Entry struct {
 
 	// runtime-only negative cache
 	lastErr       atomic.Value // string
-	negativeUntil atomic.Int64  // unix seconds
+	negativeUntil atomic.Int64 // unix seconds
 }
 
 type cachedCert struct {
-	cert     *tls.Certificate
+	cert      *tls.Certificate
 	certMTime time.Time
 	keyMTime  time.Time
 	fp        string
