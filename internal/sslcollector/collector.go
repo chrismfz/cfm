@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -18,17 +19,17 @@ type Collector struct {
 
 	// host index
 	mu         sync.RWMutex
-	exact      map[string]*Entry          // host -> entry
-	wildSuffix map[string]*Entry          // suffix ("example.com") -> entry for "*.example.com"
+	exact      map[string]*Entry // host -> entry
+	wildSuffix map[string]*Entry // suffix ("example.com") -> entry for "*.example.com"
 
 	// known files + memo sigs (for cheap stat loop)
 	filesMu    sync.RWMutex
-	knownFiles map[string]struct{}        // set of cert/key paths
-	fileMemo   map[string]fileSig         // path -> last stat signature
+	knownFiles map[string]struct{} // set of cert/key paths
+	fileMemo   map[string]fileSig  // path -> last stat signature
 
 	// tls cache
 	cacheMu   sync.Mutex
-	certCache map[string]cachedCert       // normalized host -> cached cert
+	certCache map[string]cachedCert // normalized host -> cached cert
 }
 
 func New(cfg Config) *Collector {
@@ -125,6 +126,23 @@ func expandGlob(pattern string) []string {
 	return matches
 }
 
+var homeMountRe = regexp.MustCompile(`^home[0-9]*$`)
+
+func expandHomeUserDirs(subdir string) []string {
+	mounts, err := os.ReadDir("/")
+	if err != nil {
+		return nil
+	}
+
+	out := []string{}
+	for _, m := range mounts {
+		if !m.IsDir() || !homeMountRe.MatchString(m.Name()) {
+			continue
+		}
+		out = append(out, expandGlob(filepath.Join("/", m.Name(), "*", subdir))...)
+	}
+	return out
+}
 
 func (c *Collector) Run(ctx context.Context) error {
 	if !c.cfg.Enabled {
@@ -142,12 +160,10 @@ func (c *Collector) Run(ctx context.Context) error {
 		"/etc/ssl",
 	}
 
-// targeted home scanning
-roots = append(roots, expandGlob("/home/*/ssl")...)
-roots = append(roots, expandGlob("/home/*/certs")...)
-roots = append(roots, expandGlob("/home/*/letsencrypt")...)
-roots = append(roots, expandGlob("/home/*/domains")...)
-
+	// targeted home scanning
+	roots = append(roots, expandHomeUserDirs("ssl")...)
+	roots = append(roots, expandHomeUserDirs("certs")...)
+	roots = append(roots, expandHomeUserDirs("letsencrypt")...)
 
 	w, err := NewWatcher(c, 2*time.Second)
 	if err == nil {
@@ -155,8 +171,6 @@ roots = append(roots, expandGlob("/home/*/domains")...)
 	} else {
 		logging.Logf("[sslcollector] watcher disabled: %v", err)
 	}
-
-
 
 	statTicker := time.NewTicker(c.cfg.StatEvery)
 	defer statTicker.Stop()
@@ -266,7 +280,6 @@ func absClean(p string) string {
 	ap, _ := filepath.Abs(p)
 	return filepath.Clean(ap)
 }
-
 
 // EntryForHost returns the best matching entry for host (exact or wildcard).
 func (c *Collector) EntryForHost(host string) *Entry {
