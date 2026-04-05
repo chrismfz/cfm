@@ -54,28 +54,28 @@ type SSLCollectorSockConfig struct {
 }
 
 type ClamConfig struct {
-	Enabled bool          // CLAMD_ENABLED
-	Network string        // CLAMD_NETWORK (unix|tcp)
-	Address string        // CLAMD_SOCKET or 127.0.0.1:3310
-	Timeout time.Duration // CLAMD_TIMEOUT
-	MaxWorkers int
-	QueueSize  int
-	PendingDir  string  // CLAMD_PENDING_DIR  default /var/lib/cfm/scanner/pending
-	InfectedDir string  // CLAMD_INFECTED_DIR default /var/lib/cfm/scanner/infected
+	Enabled     bool          // CLAMD_ENABLED
+	Network     string        // CLAMD_NETWORK (unix|tcp)
+	Address     string        // CLAMD_SOCKET or 127.0.0.1:3310
+	Timeout     time.Duration // CLAMD_TIMEOUT
+	MaxWorkers  int
+	QueueSize   int
+	PendingDir  string // CLAMD_PENDING_DIR  default /var/lib/cfm/scanner/pending
+	InfectedDir string // CLAMD_INFECTED_DIR default /var/lib/cfm/scanner/infected
 }
 
 // DebugConfig — controls the internal debug/metrics HTTP server
 type DebugConfig struct {
-	ListenAddress string        // LISTEN_ADDRESS
-	Port          int           // PORT
-	TLSPort       int           // TLS_PORT (0 = disabled)
-	TLSAddress    string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
-	AuthDBPath    string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
-	SessionTTL    time.Duration // AUTH_SESSION_TTL (default 8h)
-	SecureCookie  bool          // AUTH_SECURE_COOKIE
-	CookieName    string        // AUTH_COOKIE_NAME (default cfm-sid)
+	ListenAddress     string        // LISTEN_ADDRESS
+	Port              int           // PORT
+	TLSPort           int           // TLS_PORT (0 = disabled)
+	TLSAddress        string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
+	AuthDBPath        string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
+	AuthSessionDBPath string        // AUTH_SESSION_DB_PATH (optional; separate DB for sessions)
+	SessionTTL        time.Duration // AUTH_SESSION_TTL (default 8h)
+	SecureCookie      bool          // AUTH_SECURE_COOKIE
+	CookieName        string        // AUTH_COOKIE_NAME (default cfm-sid)
 }
-
 
 // SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
 type SMTPBlockConfig struct {
@@ -276,7 +276,6 @@ func (c *Config) SetDefaults() {
 		c.Throttle.Mode = "permanent"
 	}
 
-
 	if c.Clam.Network == "" {
 		c.Clam.Network = "unix"
 	}
@@ -291,13 +290,12 @@ func (c *Config) SetDefaults() {
 		c.Clam.QueueSize = 256
 	}
 
-if c.Clam.PendingDir == "" {
-	c.Clam.PendingDir = "/var/lib/cfm/scanner/pending"
-}
-if c.Clam.InfectedDir == "" {
-	c.Clam.InfectedDir = "/var/lib/cfm/scanner/infected"
-}
-
+	if c.Clam.PendingDir == "" {
+		c.Clam.PendingDir = "/var/lib/cfm/scanner/pending"
+	}
+	if c.Clam.InfectedDir == "" {
+		c.Clam.InfectedDir = "/var/lib/cfm/scanner/infected"
+	}
 
 	// --- MaxMind defaults ---
 	if c.MaxMind.Dir == "" {
@@ -618,24 +616,24 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 				cfg.Debug.Port = n
 			}
 			// if invalid, keep zero; defaults will fill
-	case "TLS_PORT":
-		if n, err := strconv.Atoi(val); err == nil {
-			cfg.Debug.TLSPort = n
-		}
-	case "TLS_LISTEN_ADDRESS":
-		cfg.Debug.TLSAddress = val
-	case "AUTH_DB_PATH":
-		cfg.Debug.AuthDBPath = val
-	case "AUTH_SESSION_TTL":
-		if d, err := time.ParseDuration(val); err == nil {
-			cfg.Debug.SessionTTL = d
-		}
-	case "AUTH_SECURE_COOKIE":
-		cfg.Debug.SecureCookie = val == "1" || strings.EqualFold(val, "true")
-	case "AUTH_COOKIE_NAME":
-		cfg.Debug.CookieName = val
-
-
+		case "TLS_PORT":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.Debug.TLSPort = n
+			}
+		case "TLS_LISTEN_ADDRESS":
+			cfg.Debug.TLSAddress = val
+		case "AUTH_DB_PATH":
+			cfg.Debug.AuthDBPath = val
+		case "AUTH_SESSION_DB_PATH":
+			cfg.Debug.AuthSessionDBPath = val
+		case "AUTH_SESSION_TTL":
+			if d, err := time.ParseDuration(val); err == nil {
+				cfg.Debug.SessionTTL = d
+			}
+		case "AUTH_SECURE_COOKIE":
+			cfg.Debug.SecureCookie = val == "1" || strings.EqualFold(val, "true")
+		case "AUTH_COOKIE_NAME":
+			cfg.Debug.CookieName = val
 
 		// --- MaxMind (GeoLite/GeoIP2 updater) ---
 		case "MAXMIND_ENABLED":
@@ -707,9 +705,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "MYSQL_LOG_FILE":
 			cfg.Logging.MYSQLFile = val
 
-
-
-//CLAMAV
+			//CLAMAV
 		case "CLAM_LOG_STDOUT":
 			cfg.Logging.CLAMStdout = parseBool(val)
 		case "CLAM_LOG_FILE":
@@ -731,11 +727,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "CLAMD_QUEUE_SIZE":
 			cfg.Clam.QueueSize = parseInt(val)
 
-case "CLAMD_PENDING_DIR":
-    cfg.Clam.PendingDir = val
-case "CLAMD_INFECTED_DIR":
-    cfg.Clam.InfectedDir = val
-
+		case "CLAMD_PENDING_DIR":
+			cfg.Clam.PendingDir = val
+		case "CLAMD_INFECTED_DIR":
+			cfg.Clam.InfectedDir = val
 
 		// Hardening
 		case "BLOCK_BAD_TCP_FLAGS":
@@ -815,7 +810,8 @@ func IsKnownKey(key string) bool {
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
-		"LISTEN_ADDRESS", "PORT",
+		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
+		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
 		"VHOST_MAP_ENABLE", "VHOST_MAP_WRITE", "VHOST_MAP_TTL", "VHOST_MAP_VAR", "VHOST_MAP_SOURCE", "VHOST_MAP_DEFAULT_IP", "VHOST_MAP_RELOAD_CMD",
