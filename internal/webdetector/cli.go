@@ -97,6 +97,12 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop waf exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop rules list")
+	fmt.Println("  cfm webtop rules get <id>")
+	fmt.Println("  cfm webtop rules add --file rule.json")
+	fmt.Println("  cfm webtop rules update <id> --file rule.json")
+	fmt.Println("  cfm webtop rules remove <id>")
+	fmt.Println("  cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
 	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
 	fmt.Println("  cfm webtop history prune [days]")
 	fmt.Println("  cfm webtop history truncate --yes")
@@ -174,6 +180,8 @@ func RunWebTop(baseURL string, args []string) error {
 			return runChallengeWebTop(baseURL, args[1:])
 		case "waf":
 			return runWafWebTop(baseURL, args[1:])
+		case "rules":
+			return runRulesWebTop(baseURL, args[1:])
 		case "history":
 			return runHistoryWebTop(baseURL, args[1:])
 

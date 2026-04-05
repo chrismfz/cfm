@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "priority": 200,
+  "scope": {
+    "vhosts": ["shop.example.com"]
+  },
+  "match": {
+    "country_in": ["CN", "RU"]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "Example country block (start disabled and verify first)"
+}

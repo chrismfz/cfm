@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "priority": 100,
+  "scope": {
+    "vhosts": ["example.com", "*.example.com"]
+  },
+  "match": {
+    "ua_any": ["*facebookexternalhit*", "*meta-externalagent*"],
+    "methods": ["GET"]
+  },
+  "action": {
+    "type": "throttle",
+    "profile": "soft_bot"
+  },
+  "note": "Meta crawler soft throttle"
+}
