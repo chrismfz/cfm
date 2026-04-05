@@ -187,8 +187,13 @@ func Start(
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
 			SetAuth(authMgr)
-			logging.Logf("[apiserver] goauth session store: %s ttl=%s cookie=%s secure=%v",
-				cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			if cfg.Debug.AuthSessionDBPath != "" {
+				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			} else {
+				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			}
 		}
 	} else {
 		logging.Logf("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")

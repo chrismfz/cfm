@@ -11,6 +11,7 @@ package apiserver
 import (
 	"net/http"
 
+	"cfm/internal/logging"
 	"github.com/chrismfz/goauth"
 )
 
@@ -27,5 +28,13 @@ func SetAuth(m *goauth.Manager) {
 // sessionAllowed returns true if the request carries a valid goauth session.
 // Always returns false when Auth is nil (token-only mode).
 func sessionAllowed(r *http.Request) bool {
-	return Auth != nil && Auth.IsAuthenticated(r)
+	if Auth == nil {
+		return false
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			logging.LogfAPI("[apiserver] session check panic recovered: %v", p)
+		}
+	}()
+	return Auth.IsAuthenticated(r)
 }
