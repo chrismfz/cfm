@@ -158,6 +158,9 @@ func Start(
 	startAuthAutoblock(ctx, cfg, be)
 
 	// ── goauth session store ──────────────────────────────────────────────────
+	// Reset package auth first so a failed reload does not leave a stale manager
+	// that would panic when used without LoadAndSave middleware.
+	SetAuth(nil)
 	var authMgr *goauth.Manager
 	if cfg.Debug.AuthDBPath != "" {
 		sessionTTL := cfg.Debug.SessionTTL
@@ -184,6 +187,7 @@ func Start(
 		}
 		authMgr, err := newGoAuth(authCfg)
 		if err != nil {
+			SetAuth(nil)
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
 			SetAuth(authMgr)
@@ -196,6 +200,7 @@ func Start(
 			}
 		}
 	} else {
+		SetAuth(nil)
 		logging.Logf("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")
 	}
 
@@ -204,8 +209,8 @@ func Start(
 	//   mux → TokenMiddleware → LoadAndSave
 	var handler http.Handler
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
-	if authMgr != nil {
-		handler = authMgr.LoadAndSave(handler)
+	if Auth != nil {
+		handler = Auth.LoadAndSave(handler)
 	}
 	handler = RequestLogMiddleware(handler)
 
