@@ -32,19 +32,18 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
-	"strings"
 
 	"github.com/chrismfz/goauth"
 
-	cfgpkg   "cfm/internal/config"
+	cfgpkg "cfm/internal/config"
 	mysqlpkg "cfm/internal/detectors/mysql"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
-	sslpkg   "cfm/internal/sslcollector"
+	sslpkg "cfm/internal/sslcollector"
 	webui "cfm/internal/webui"
-
 )
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
@@ -80,11 +79,12 @@ func Register(fn func(*http.ServeMux)) {
 // Blocks until ctx is cancelled, then shuts down both servers gracefully.
 //
 // Parameters:
-//   cfg    — active config (LISTEN_ADDRESS, PORT, TLS_PORT, AUTH_DB_PATH, …)
-//   be     — nft backend; may be nil (/unblock returns 503)
-//   cfgDir — config dir; used by /unblock to edit cfm.deny
-//   gov    — MySQL governor; nil = mysql routes not registered
-//   ssl    — SSLCollector; nil = TLS port not started even if TLS_PORT > 0
+//
+//	cfg    — active config (LISTEN_ADDRESS, PORT, TLS_PORT, AUTH_DB_PATH, …)
+//	be     — nft backend; may be nil (/unblock returns 503)
+//	cfgDir — config dir; used by /unblock to edit cfm.deny
+//	gov    — MySQL governor; nil = mysql routes not registered
+//	ssl    — SSLCollector; nil = TLS port not started even if TLS_PORT > 0
 func Start(
 	ctx context.Context,
 	cfg *cfgpkg.Config,
@@ -153,6 +153,9 @@ func Start(
 	store.StartPurger(ctx)
 	RegisterTokenEndpoint(m, store)
 
+	// ── goauth → autoblock bridge (FAIL/RATELIMIT tail) ──────────────────────
+	startAuthAutoblock(ctx, cfg, be)
+
 	// ── goauth session store ──────────────────────────────────────────────────
 	var authMgr *goauth.Manager
 	if cfg.Debug.AuthDBPath != "" {
@@ -166,12 +169,12 @@ func Start(
 		}
 		var err error
 		authMgr, err = goauth.New(goauth.Config{
-			DBPath:       cfg.Debug.AuthDBPath,
-			SessionTTL:   sessionTTL,
+			DBPath:     cfg.Debug.AuthDBPath,
+			SessionTTL: sessionTTL,
 			//IdleTimeout:  30 * time.Minute,
 			CookieName:   cookieName,
 			SecureCookie: cfg.Debug.SecureCookie,
-		        SameSite:     http.SameSiteLaxMode,  // ← add this
+			SameSite:     http.SameSiteLaxMode, // ← add this
 		})
 		if err != nil {
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
@@ -187,12 +190,12 @@ func Start(
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
 	//   mux → TokenMiddleware → LoadAndSave
-var handler http.Handler
-handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
-if authMgr != nil {
-    handler = authMgr.LoadAndSave(handler)
-}
-handler = RequestLogMiddleware(handler)
+	var handler http.Handler
+	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
+	if authMgr != nil {
+		handler = authMgr.LoadAndSave(handler)
+	}
+	handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	httpAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
