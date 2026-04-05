@@ -56,10 +56,10 @@
               <tr v-for="row in vhostControlsFiltered" :key="row.host">
                 <td><code>{{ row.host }}</code></td>
                 <td>
-                  <button :class="row.challenge_enabled ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading">{{ row.challenge_enabled ? 'ON / ENABLED' : 'OFF / DISABLED' }}</button>
+                  <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
                 </td>
                 <td>
-                  <button :class="row.waf_enabled ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading">{{ row.waf_enabled ? 'ON / ENABLED' : 'OFF / DISABLED' }}</button>
+                  <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
                 </td>
               </tr>
               <tr v-if="!vhostControlsFiltered.length"><td colspan="3" class="muted">No vhosts matched current scope/filter.</td></tr>

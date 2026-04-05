@@ -740,6 +740,33 @@
           console.error('[cfm-admin] exclude remove failed', scope, err);
         }
       },
+      vhostControlEnabled(row, kind) {
+        const key = kind === 'challenge' ? 'challenge_enabled' : 'waf_enabled';
+        return Boolean(row?.[key]);
+      },
+      vhostControlToggleable(row, kind) {
+        const key = kind === 'challenge' ? 'challenge_toggleable' : 'waf_toggleable';
+        return Boolean(row?.[key]);
+      },
+      vhostControlMatchedExclude(row, kind) {
+        const key = kind === 'challenge' ? 'challenge_matched_exclude' : 'waf_matched_exclude';
+        return String(row?.[key] || '').trim();
+      },
+      vhostControlButtonLabel(row, kind) {
+        const enabled = this.vhostControlEnabled(row, kind);
+        if (enabled) return 'ON / ENABLED';
+        const toggleable = this.vhostControlToggleable(row, kind);
+        return toggleable ? 'OFF / DISABLED' : 'OFF / MATCHED BY PATTERN';
+      },
+      vhostControlButtonTitle(row, kind) {
+        const enabled = this.vhostControlEnabled(row, kind);
+        if (enabled) return '';
+        const matched = this.vhostControlMatchedExclude(row, kind);
+        const toggleable = this.vhostControlToggleable(row, kind);
+        if (!matched) return '';
+        if (toggleable) return `Excluded by host rule: ${matched}`;
+        return `Excluded by non-exact host rule: ${matched}. Remove/edit that rule in Dynamic excludes first.`;
+      },
       async refreshVhostControls() {
         if (!this.shouldShow('controls')) return;
         const url = new URL(window.location.href);
@@ -751,8 +778,13 @@
       async toggleVhostProtection(row, kind) {
         const host = String(row?.host || '').trim();
         if (!host) return;
-        const enabledKey = kind === 'challenge' ? 'challenge_enabled' : 'waf_enabled';
-        const currentlyEnabled = Boolean(row[enabledKey]);
+        const currentlyEnabled = this.vhostControlEnabled(row, kind);
+        const toggleable = this.vhostControlToggleable(row, kind);
+        if (!toggleable) {
+          const matched = this.vhostControlMatchedExclude(row, kind);
+          this.actionMsg = `${kind.toUpperCase()} for ${host} is disabled by non-exact exclude (${matched || 'pattern'}). Remove/edit it in Dynamic excludes first.`;
+          return;
+        }
         try {
           if (currentlyEnabled) {
             await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});

@@ -4,14 +4,19 @@ import (
 	"bufio"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
 type webdetVhostControlRow struct {
-	Host             string `json:"host"`
-	ChallengeEnabled bool   `json:"challenge_enabled"`
-	WAFEnabled       bool   `json:"waf_enabled"`
+	Host                    string `json:"host"`
+	ChallengeEnabled        bool   `json:"challenge_enabled"`
+	WAFEnabled              bool   `json:"waf_enabled"`
+	ChallengeToggleable     bool   `json:"challenge_toggleable"`
+	WAFToggleable           bool   `json:"waf_toggleable"`
+	ChallengeMatchedExclude string `json:"challenge_matched_exclude,omitempty"`
+	WAFMatchedExclude       string `json:"waf_matched_exclude,omitempty"`
 }
 
 type webdetVhostControlResponse struct {
@@ -22,25 +27,19 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	filter := parseVhostFilterWithAliases(r)
 	hosts := e.collectKnownVhosts()
 
-	challengeExcluded := map[string]bool{}
-	for _, row := range e.ChallengeExcludeList() {
-		if strings.EqualFold(strings.TrimSpace(row.Type), "host") {
-			h := normalizeControlHost(row.Value)
-			if h != "" {
-				challengeExcluded[h] = true
-				hosts[h] = struct{}{}
-			}
+	challengeEntries := hostExcludeValues(e.ChallengeExcludeList())
+	for _, val := range challengeEntries {
+		h := normalizeControlHost(val)
+		if h != "" {
+			hosts[h] = struct{}{}
 		}
 	}
 
-	wafExcluded := map[string]bool{}
-	for _, row := range e.WAFExcludeList() {
-		if strings.EqualFold(strings.TrimSpace(row.Type), "host") {
-			h := normalizeControlHost(row.Value)
-			if h != "" {
-				wafExcluded[h] = true
-				hosts[h] = struct{}{}
-			}
+	wafEntries := hostExcludeValues(e.WAFExcludeList())
+	for _, val := range wafEntries {
+		h := normalizeControlHost(val)
+		if h != "" {
+			hosts[h] = struct{}{}
 		}
 	}
 
@@ -54,14 +53,51 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]webdetVhostControlRow, 0, len(list))
 	for _, host := range list {
+		challengeMatched, challengeValue, challengeExact := matchHostExclude(challengeEntries, host)
+		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
+
 		rows = append(rows, webdetVhostControlRow{
-			Host:             host,
-			ChallengeEnabled: !challengeExcluded[host],
-			WAFEnabled:       !wafExcluded[host],
+			Host:                    host,
+			ChallengeEnabled:        !challengeMatched,
+			WAFEnabled:              !wafMatched,
+			ChallengeToggleable:     !challengeMatched || challengeExact,
+			WAFToggleable:           !wafMatched || wafExact,
+			ChallengeMatchedExclude: challengeValue,
+			WAFMatchedExclude:       wafValue,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, webdetVhostControlResponse{Rows: rows})
+}
+
+func hostExcludeValues(entries []excludeEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, row := range entries {
+		if strings.EqualFold(strings.TrimSpace(row.Type), "host") {
+			v := normalizeControlHost(row.Value)
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+func matchHostExclude(excludes []string, host string) (matched bool, matchedValue string, exact bool) {
+	host = normalizeControlHost(host)
+	if host == "" {
+		return false, "", false
+	}
+	for _, ex := range excludes {
+		ok, err := filepath.Match(ex, host)
+		if err == nil && ok {
+			return true, ex, ex == host
+		}
+		if !strings.ContainsAny(ex, "*?") && strings.Contains(host, ex) {
+			return true, ex, ex == host
+		}
+	}
+	return false, "", false
 }
 
 func parseVhostFilterWithAliases(r *http.Request) map[string]struct{} {
@@ -99,10 +135,11 @@ func normalizeControlHost(v string) string {
 func (e *Engine) collectKnownVhosts() map[string]struct{} {
 	hosts := map[string]struct{}{}
 
-	for _, path := range []string{"/etc/userdatadomains", "/etc/userdomains"} {
-		for host := range readHostsFromColonFile(path) {
-			hosts[host] = struct{}{}
-		}
+	for host := range readHostsFromUserDataDomains() {
+		hosts[host] = struct{}{}
+	}
+	for host := range readHostsFromUserDomains() {
+		hosts[host] = struct{}{}
 	}
 
 	for _, row := range e.TopShort(5000) {
@@ -124,9 +161,35 @@ func (e *Engine) collectKnownVhosts() map[string]struct{} {
 	return hosts
 }
 
-func readHostsFromColonFile(path string) map[string]struct{} {
+func readHostsFromUserDataDomains() map[string]struct{} {
 	out := map[string]struct{}{}
-	f, err := os.Open(path)
+	f, err := os.Open("/etc/userdatadomains")
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		left, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		h := normalizeControlHost(left)
+		if h != "" {
+			out[h] = struct{}{}
+		}
+	}
+	return out
+}
+
+func readHostsFromUserDomains() map[string]struct{} {
+	out := map[string]struct{}{}
+	f, err := os.Open("/etc/userdomains")
 	if err != nil {
 		return out
 	}
