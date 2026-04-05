@@ -102,6 +102,12 @@ type NginxBridge struct {
 // We only refresh when an entry is close to expiring.
 const refreshSkew = 30 * time.Second
 
+var nginxUploadAllowedDirs = []string{
+	"/tmp",
+	"/var/tmp",
+	"/usr/local/openresty/nginx/client_body_temp",
+}
+
 type bridgeCfg struct {
 	Enabled    bool
 	SockPath   string
@@ -290,28 +296,37 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fi, err := os.Stat(bodyFile)
+	srcPath, ok := validateUploadSourcePath(bodyFile, msg.AlreadyCopied, b.clamPending)
+	if !ok {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	fi, err := os.Stat(srcPath)
 	if err != nil || fi.IsDir() || fi.Size() == 0 {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	var scanPath string
+	var tempOwned bool
 
 	if msg.AlreadyCopied {
-		scanPath = bodyFile
+		scanPath = srcPath
+		tempOwned = true
 	} else {
 
-		safeIP := strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(ip)
+		safeIP := sanitizeForFilename(ip)
 		dst := filepath.Join(b.clamPending,
 			fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
 
-		if err := copyFile(bodyFile, dst); err != nil {
-			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", bodyFile, err)
+		if err := copyFile(srcPath, dst); err != nil {
+			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", srcPath, err)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		scanPath = dst
+		tempOwned = true
 	}
 
 	label := "UPLOAD"
@@ -322,7 +337,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		label += ":" + filename
 	}
 
-	ok := b.clamMgr.Enqueue(clam.Job{
+	enqueued := b.clamMgr.Enqueue(clam.Job{
 		Path:        scanPath,
 		IP:          ip,
 		Host:        host,
@@ -333,7 +348,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		InfectedDir: b.clamInfected,
 	})
 
-	if !ok && scanPath != "" {
+	if !enqueued && tempOwned && scanPath != "" {
 		_ = os.Remove(scanPath)
 		logging.LogfCLAM("[upload] enqueue dropped path=%s ip=%s host=%s", scanPath, ip, host)
 	}
@@ -358,6 +373,72 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return cerr
+}
+
+func sanitizeForFilename(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending string) (string, bool) {
+	bodyFile = strings.TrimSpace(bodyFile)
+	if bodyFile == "" || !filepath.IsAbs(bodyFile) {
+		return "", false
+	}
+	srcPath, err := filepath.Abs(filepath.Clean(bodyFile))
+	if err != nil {
+		return "", false
+	}
+	if alreadyCopied {
+		return validatePathWithinDir(srcPath, clamPending)
+	}
+	for _, base := range nginxUploadAllowedDirs {
+		if p, ok := validatePathWithinDir(srcPath, base); ok {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+func validatePathWithinDir(path, base string) (string, bool) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "", false
+	}
+	safeBase, err := filepath.Abs(filepath.Clean(base))
+	if err != nil {
+		return "", false
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", false
+	}
+	if pathAbs == safeBase {
+		return "", false
+	}
+	prefix := safeBase + string(os.PathSeparator)
+	if !strings.HasPrefix(pathAbs, prefix) {
+		return "", false
+	}
+	return pathAbs, true
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────

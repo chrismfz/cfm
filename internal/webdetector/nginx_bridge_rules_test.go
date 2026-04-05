@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,5 +46,23 @@ func TestNginxBridgeDecisionIncludesRuleAction(t *testing.T) {
 	}
 	if payload["rule_id"] != "r_test" {
 		t.Fatalf("missing rule id: %+v", payload)
+	}
+}
+
+func TestValidateUploadSourcePath(t *testing.T) {
+	pending := filepath.Join(t.TempDir(), "pending")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatalf("mkdir pending: %v", err)
+	}
+	src := filepath.Join(pending, "upload.bin")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	if _, ok := validateUploadSourcePath("../etc/passwd", true, pending); ok {
+		t.Fatalf("expected relative traversal path to be rejected")
+	}
+	if _, ok := validateUploadSourcePath(src, true, pending); !ok {
+		t.Fatalf("expected alreadyCopied source inside pending dir to be accepted")
 	}
 }
