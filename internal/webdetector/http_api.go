@@ -30,6 +30,7 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
 	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
+	mux.HandleFunc("/api/v1/webdet/vhosts", e.handleWebdetVhosts)
 
 	// History API
 	mux.HandleFunc("/api/v1/webdet/history/events", e.handleHistoryEvents)
@@ -208,7 +209,6 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	rows := applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r))
 	writeJSON(w, http.StatusOK, rows)
 }
-
 
 // longTopResponse: scored long-window rows χωρίς minScore threshold.
 type longTopResponse struct {

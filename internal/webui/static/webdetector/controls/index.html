@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
+  <script src="/cfm-admin/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="topbar">
+      <h1>CFM Admin</h1>
+      <nav class="top-nav">
+        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector overview</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/vhost/">Vhost live</a>
+        <a class="btn-quiet" href="/cfm-admin/governor/">MySQL governor</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/forensics/">Forensics</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/waf/">WAF engine</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/controls/">Vhost controls</a>
+      </nav>
+      <div class="meta">
+        <span class="muted">Auto-refresh: <strong>{{ autoRefresh ? 'ON' : 'OFF' }}</strong></span>
+        <label for="refresh-interval" class="muted">Every</label>
+        <input id="refresh-interval" class="input input-small" type="number" min="1" max="300" step="1" v-model.number="refreshIntervalSec" @change="applyRefreshInterval" />
+        <span class="muted">sec</span>
+        <button class="btn-quiet" @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
+        <button class="btn-quiet" v-if="autoRefresh" @click="stopAutoRefresh">Stop</button>
+        <button class="btn-quiet" v-else @click="startAutoRefresh">Start</button>
+        <button class="btn-quiet" @click="logout">Logout</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>{{ pageTitle }}</h2>
+        <p class="muted">Central toggle page for per-vhost WAF and Challenge controls. Supports <code>?vhost=a.com,b.com</code>.</p>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('controls')">
+        <h2>Per-vhost controls</h2>
+        <div class="toolbar">
+          <label for="controls-search">Search</label>
+          <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" />
+          <span class="muted">{{ vhostControlsFiltered.length }} / {{ vhostControls.length }} shown</span>
+        </div>
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Vhost</th><th>Challenge</th><th>WAF</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in vhostControlsFiltered" :key="row.host">
+                <td><code>{{ row.host }}</code></td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
+                </td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
+                </td>
+              </tr>
+              <tr v-if="!vhostControlsFiltered.length"><td colspan="3" class="muted">No vhosts matched current scope/filter.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

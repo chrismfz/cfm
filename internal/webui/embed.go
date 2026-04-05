@@ -9,6 +9,7 @@
 //   /webdetector/vhost/      → static/webdetector/vhost/index.html
 //   /webdetector/forensics/  → static/webdetector/forensics/index.html
 //   /webdetector/waf/        → static/webdetector/waf/index.html
+//   /webdetector/controls/   → static/webdetector/controls/index.html
 //   /governor/               → static/governor/index.html
 //   /assets/                → static/assets/  (JS, CSS)
 //   unknown path             → static/index.html  (fallback)
