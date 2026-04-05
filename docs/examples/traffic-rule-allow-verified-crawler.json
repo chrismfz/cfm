@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "priority": 10,
+  "scope": {
+    "vhosts": ["example.com", "*.example.com"]
+  },
+  "match": {
+    "ua_any": ["*googlebot*", "*bingbot*"],
+    "methods": ["GET", "HEAD"]
+  },
+  "action": {
+    "type": "allow"
+  },
+  "note": "Allow verified crawler traffic; pair with ASN/PTR validation policy"
+}

@@ -639,6 +639,14 @@ cfm webtop ip 50                 # global IP view
 cfm webtop ip 1.2.3.4            # drilldown a specific IP
 
 cfm webtop analyze <ip|host>     # offline drilldown from TSV (debug/forensics)
+
+# Traffic rules (Step 2 API/CLI management)
+cfm webtop rules list
+cfm webtop rules get <rule-id>
+cfm webtop rules add --file docs/examples/traffic-rule-throttle-meta.json
+cfm webtop rules update <rule-id> --file docs/examples/traffic-rule-challenge-login.json
+cfm webtop rules remove <rule-id>
+cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --path / --method GET --country US
 ```
 
 **Sort keys:** `rps`, `2xx`, `3xx`, `4xx`, `5xx`, `uniq`, `err`, `rt`, `bot`, `ua_div`, `score`
@@ -660,6 +668,41 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `GET /api/v1/webdet/ip-drilldown?ip=<ip>` | IP drilldown |
 | `GET /api/v1/webdet/analyze-ip?ip=<ip>` | Analyze IP (forensics) |
 | `GET /api/v1/webdet/analyze-host?host=<vhost>` | Analyze vhost (forensics) |
+| `GET /api/v1/webdet/rules` | List traffic rules |
+| `GET /api/v1/webdet/rules/get?id=<id>` | Get single traffic rule |
+| `POST /api/v1/webdet/rules/add` | Add traffic rule (JSON body) |
+| `POST /api/v1/webdet/rules/update?id=<id>` | Update traffic rule (JSON body) |
+| `POST /api/v1/webdet/rules/remove?id=<id>` | Remove traffic rule |
+| `POST /api/v1/webdet/rules/simulate` | Simulate matching for a request shape |
+
+
+### Traffic Rules JSON examples
+
+See ready-to-use files under `docs/examples/`:
+
+- `traffic-rule-allow-verified-crawler.json`
+- `traffic-rule-block-country.json`
+- `traffic-rule-challenge-login.json`
+- `traffic-rule-throttle-meta.json`
+
+Quick API examples:
+
+```bash
+# add rule
+curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/add \
+  -H 'Content-Type: application/json' \
+  --data-binary @docs/examples/traffic-rule-throttle-meta.json | jq
+
+# list rules
+curl -sS http://127.0.0.1:9070/api/v1/webdet/rules | jq
+
+# simulate rule match (non-enforcing)
+curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
+  -H 'Content-Type: application/json' \
+  -d '{"host":"example.com","ua":"facebookexternalhit/1.1","path":"/","method":"GET","country":"US"}' | jq
+```
+
+> Note: Step 2 manages rules via API/CLI and supports simulation. Enforcement wiring into request path is handled in later steps.
 
 
 
