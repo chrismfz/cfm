@@ -59,6 +59,8 @@
         wafTopN: 10,
         wafSummary: null,
         pageMode: 'overview',
+        vhostControls: [],
+        controlsSearch: '',
         vhostFocusHost: '',
         vhostSeriesByHost: {},
         vhostSeriesMaxPoints: 120,
@@ -184,11 +186,20 @@
       isWAFPage() {
         return this.pageMode === 'waf';
       },
+      isControlsPage() {
+        return this.pageMode === 'controls';
+      },
       pageTitle() {
         if (this.isVhostPage) return 'WebDetector / vhost live';
         if (this.isForensicsPage) return 'WebDetector / forensics';
         if (this.isWAFPage) return 'WebDetector / WAF engine';
+        if (this.isControlsPage) return 'WebDetector / vhost controls';
         return 'WebDetector / overview';
+      },
+      vhostControlsFiltered() {
+        const q = String(this.controlsSearch || '').trim().toLowerCase();
+        if (!q) return this.vhostControls;
+        return this.vhostControls.filter((row) => String(row?.host || '').toLowerCase().includes(q));
       },
       activeChallengeByHost() {
         const byHost = {};
@@ -431,6 +442,7 @@
           vhost: new Set(['vhost']),
           forensics: new Set(['history', 'ipdrilldown', 'analyze', 'excludes']),
           waf: new Set(['wafengine', 'excludes']),
+          controls: new Set(['controls']),
         };
         const active = groups[this.pageMode] || groups.overview;
         return active.has(section);
@@ -728,6 +740,33 @@
           console.error('[cfm-admin] exclude remove failed', scope, err);
         }
       },
+      async refreshVhostControls() {
+        if (!this.shouldShow('controls')) return;
+        const url = new URL(window.location.href);
+        const scoped = (url.searchParams.get('vhost') || url.searchParams.get('vhosts') || '').trim();
+        const qs = scoped ? `?vhost=${encodeURIComponent(scoped)}` : '';
+        const payload = await this.fetchJSONSafe(`v1/webdet/vhosts${qs}`, { rows: [] });
+        this.vhostControls = this.extractRows(payload, 'rows');
+      },
+      async toggleVhostProtection(row, kind) {
+        const host = String(row?.host || '').trim();
+        if (!host) return;
+        const enabledKey = kind === 'challenge' ? 'challenge_enabled' : 'waf_enabled';
+        const currentlyEnabled = Boolean(row[enabledKey]);
+        try {
+          if (currentlyEnabled) {
+            await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});
+            this.actionMsg = `${kind.toUpperCase()} disabled for ${host}`;
+          } else {
+            await this.postJSON(`v1/${kind}/exclude/remove?type=host&value=${encodeURIComponent(host)}`, {});
+            this.actionMsg = `${kind.toUpperCase()} enabled for ${host}`;
+          }
+          await this.refreshVhostControls();
+        } catch (err) {
+          this.actionMsg = `${kind.toUpperCase()} toggle failed for ${host}: ${err}`;
+          console.error('[cfm-admin] vhost controls toggle failed', kind, host, err);
+        }
+      },
       async runAnalyze(mode = this.analyzeMode) {
         const target = String(this.analyzeTarget || '').trim();
         if (!target) {
@@ -905,6 +944,7 @@
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
           if (this.shouldShow('history')) await this.refreshHistory();
           if (this.shouldShow('wafengine')) await this.refreshWAFEngine();
+          if (this.shouldShow('controls')) await this.refreshVhostControls();
 
           if (this.shouldShow('vhost') && this.isVhostPage) {
             const vhostTarget =
@@ -966,6 +1006,7 @@
       if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
       else if (path.includes('/webdetector/vhost/')) this.pageMode = 'vhost';
       else if (path.includes('/webdetector/waf/')) this.pageMode = 'waf';
+      else if (path.includes('/webdetector/controls/')) this.pageMode = 'controls';
       else this.pageMode = 'overview';
 
       const currentURL = new URL(window.location.href);
