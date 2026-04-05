@@ -3,7 +3,14 @@
 package nft
 
 import (
+	"bufio"
 	"bytes"
+	cfgpkg "cfm/internal/config"
+	enrichpkg "cfm/internal/enrich"
+	"cfm/internal/firewall"
+	"cfm/internal/logging"
+	"cfm/internal/reporting"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,15 +22,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
-	"context"
-	cfgpkg "cfm/internal/config"
-	enrichpkg "cfm/internal/enrich"
-	"cfm/internal/firewall"
-	"cfm/internal/reporting"
-	"cfm/internal/logging"
-	"bufio"
 	"sync"
+	"time"
 )
 
 const (
@@ -95,9 +95,9 @@ type Backend struct {
 	// into the same cfm.challenges.log stream.
 	challengeLogf func(format string, args ...any)
 
-    // When false (OpenResty mode), do NOT create challenge_v4/challenge_v6 sets.
-    // Also remove them if they already exist.
-    challengeDNATEnabled bool
+	// When false (OpenResty mode), do NOT create challenge_v4/challenge_v6 sets.
+	// Also remove them if they already exist.
+	challengeDNATEnabled bool
 
 	pfSets   []string            // th_pf_<port>_<proto>_v4/v6
 	clSets   []string            // th_connlimit_<port>_<proto>_v4/v6
@@ -116,17 +116,20 @@ type Backend struct {
 	extAllowV6Hosts []string
 	extAllowV6Nets  []string
 
+	selfIPsMu    sync.RWMutex
+	selfIPs      map[string]struct{}
+	selfInitOnce sync.Once
+
 	floodDumpMu      sync.Mutex
 	floodDumpRunning bool
-	lastFloodHash uint64
+	lastFloodHash    uint64
+	lastFloodRebuild time.Time
 
-	apiCacheMu      sync.Mutex
-	apiCacheHost    string
-	apiCacheV4      []string
-	apiCacheV6      []string
+	apiCacheMu         sync.Mutex
+	apiCacheHost       string
+	apiCacheV4         []string
+	apiCacheV6         []string
 	apiCacheResolvedAt time.Time
-
-
 }
 
 // GetEnricher returns the enrichment engine (if enabled).
@@ -152,36 +155,41 @@ func (b *Backend) chlogf(format string, args ...any) {
 
 func New() *Backend {
 	return &Backend{
-		last:     make(map[string]uint64),
-		feedKeys: make(map[string]struct{}),
-		extAllow: make(map[string]extFeedData),
-		extBlock: make(map[string]extFeedData),
-	        challengeDNATEnabled: true,
+		last:                 make(map[string]uint64),
+		feedKeys:             make(map[string]struct{}),
+		extAllow:             make(map[string]extFeedData),
+		extBlock:             make(map[string]extFeedData),
+		selfIPs:              make(map[string]struct{}),
+		challengeDNATEnabled: true,
 	}
 }
 
 func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
-    if b == nil { return }
-    b.challengeDNATEnabled = enabled
-    if !enabled {
-        _ = b.CleanupChallengeDNAT()
-    }
+	if b == nil {
+		return
+	}
+	b.challengeDNATEnabled = enabled
+	if !enabled {
+		_ = b.CleanupChallengeDNAT()
+	}
 }
 
 func (b *Backend) CleanupChallengeDNAT() error {
-    if b == nil { return nil }
-    if b.setExists(challengeV4) {
-        _ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV4))
-        _ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV4))
-    }
-    if b.setExists(challengeV6) {
-        _ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV6))
-        _ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV6))
-    }
-    if b.chainExists("challenge_guard") {
-        _ = b.nftCmd(fmt.Sprintf(`flush chain %s %s challenge_guard`, family, tableName))
-    }
-    return nil
+	if b == nil {
+		return nil
+	}
+	if b.setExists(challengeV4) {
+		_ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV4))
+		_ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV4))
+	}
+	if b.setExists(challengeV6) {
+		_ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV6))
+		_ = b.nftCmd(fmt.Sprintf(`delete set %s %s %s`, family, tableName, challengeV6))
+	}
+	if b.chainExists("challenge_guard") {
+		_ = b.nftCmd(fmt.Sprintf(`flush chain %s %s challenge_guard`, family, tableName))
+	}
+	return nil
 }
 
 // ReportBlock decides (based on config + source) whether to notify the API and then calls reporter.
@@ -479,14 +487,17 @@ func (b *Backend) EnsureBase() error {
 	_ = b.ensureSetWithFlags("throttled_v6", "ipv6_addr", "timeout")
 
 	// Challenge sets (source IPs that should be redirected to challenge ports)
-    // Challenge sets (dynamic DNAT mode only)
-    if b.challengeDNATEnabled {
-        if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil { return err }
-        if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil { return err }
-    } else {
-        _ = b.CleanupChallengeDNAT()
-    }
-
+	// Challenge sets (dynamic DNAT mode only)
+	if b.challengeDNATEnabled {
+		if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil {
+			return err
+		}
+		if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil {
+			return err
+		}
+	} else {
+		_ = b.CleanupChallengeDNAT()
+	}
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
@@ -752,7 +763,6 @@ func (b *Backend) refreshAPISets() {
 		_ = b.nftExpr("add element inet cfm " + debugAPIV6 + " { " + ip + " };")
 	}
 }
-
 
 // -------- block (manual) --------
 
@@ -1235,7 +1245,6 @@ func (b *Backend) tableExists() bool {
 	return false
 }
 
-
 func TableExistsCFM() bool {
 	var b Backend
 	return b.tableExists()
@@ -1247,7 +1256,6 @@ func (b *Backend) chainExists(chain string) bool {
 	_, err := exec.CommandContext(ctx, "nft", "list", "chain", family, tableName, chain).CombinedOutput()
 	return err == nil
 }
-
 
 func (b *Backend) ruleExists(chain, needle string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1312,9 +1320,9 @@ func (b *Backend) nftAddElementArgv(set, ip, ttl string) (string, error) {
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft argv] cmd:", "nft", strings.Join(args, " "))
 	}
-   ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft argv] rc:", err)
 		if len(out) > 0 {
@@ -1770,44 +1778,44 @@ func (b *Backend) refreshSelfSets() {
 		}
 	}
 	// batch add
+	cached := make(map[string]struct{}, len(v4s)+len(v6s))
 	for _, ip := range v4s {
 		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", ip))
+		cached[ip] = struct{}{}
 	}
 	for _, ip := range v6s {
 		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", ip))
+		cached[ip] = struct{}{}
 	}
+	b.selfIPsMu.Lock()
+	b.selfIPs = cached
+	b.selfIPsMu.Unlock()
 }
 
 // isSelfIPString: true αν είναι loopback ή υπάρχει στα self_v4/self_v6
 func (b *Backend) isSelfIPString(s string) bool {
+	b.selfInitOnce.Do(func() {
+		b.refreshSelfSets()
+	})
 	ip := net.ParseIP(strings.TrimSpace(s))
 	if ip == nil {
 		return false
 	}
-	if ip.IsLoopback() {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 		return true
 	}
-	// γρήγορος έλεγχος: κοιτάμε το text των sets (αρκετό για skip)
-	if ip.To4() != nil {
-		out4, _ := b.runCmdOutput("list set inet cfm self_v4")
-		if strings.Contains(out4, ip.String()) {
-			return true
-		}
-	} else {
-		out6, _ := b.runCmdOutput("list set inet cfm self_v6")
-		if strings.Contains(out6, ip.String()) {
-			return true
-		}
-	}
-	return false
+	b.selfIPsMu.RLock()
+	_, ok := b.selfIPs[ip.String()]
+	b.selfIPsMu.RUnlock()
+	return ok
 }
 
 // HasElem returns true if elem is in setName without dumping the set.
 func (b *Backend) HasElem(setName, elem string) (bool, error) {
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
-    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
+	out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
 	if err == nil {
 		return true, nil // found
 	}
@@ -1861,16 +1869,24 @@ func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
 
 // refreshExtAllowCache reloads per-feed allow set names with a small TTL.
 func (b *Backend) refreshExtAllowCache() {
-	b.extMu.Lock()
-	defer b.extMu.Unlock()
+	b.extMu.RLock()
 	if time.Since(b.extAllowCacheAt) < 300*time.Second {
+		b.extMu.RUnlock()
 		return
 	}
+	b.extMu.RUnlock()
+
 	// discover per-feed allow sets
 	v4h, _ := b.listSetsByPrefixes("allow_ext_v4_hosts_")
 	v4n, _ := b.listSetsByPrefixes("allow_ext_v4_nets_")
 	v6h, _ := b.listSetsByPrefixes("allow_ext_v6_hosts_")
 	v6n, _ := b.listSetsByPrefixes("allow_ext_v6_nets_")
+
+	b.extMu.Lock()
+	defer b.extMu.Unlock()
+	if time.Since(b.extAllowCacheAt) < 300*time.Second {
+		return
+	}
 	b.extAllowV4Hosts = v4h
 	b.extAllowV4Nets = v4n
 	b.extAllowV6Hosts = v6h
@@ -1898,10 +1914,10 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		return nil
 	}
 
-    if !b.challengeDNATEnabled {
-        _ = b.CleanupChallengeDNAT()
-        return nil
-    }
+	if !b.challengeDNATEnabled {
+		_ = b.CleanupChallengeDNAT()
+		return nil
+	}
 
 	// Ensure base exists (chains/sets)
 	if err := b.EnsureBase(); err != nil {
@@ -1916,7 +1932,6 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 	if err := b.ensureSet(challengeV6, "ipv6_addr"); err != nil {
 		return err
 	}
-
 
 	hasComment := func(chain, label string) bool {
 		// Match by comment only so formatting differences can't cause duplicates.
@@ -2067,14 +2082,14 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		if err := addGuardRule("guard_v4_http_connlimit",
 			fmt.Sprintf(
 				`ip saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_http_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
+					`meter chal_cl_http_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
 				challengeV4, httpPort, chalConnLimit)); err != nil {
 			return err
 		}
 		if err := addGuardRule("guard_v6_http_connlimit",
 			fmt.Sprintf(
 				`ip6 saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_http_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
+					`meter chal_cl_http_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
 				challengeV6, httpPort, chalConnLimit)); err != nil {
 			return err
 		}
@@ -2083,14 +2098,14 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 		if err := addGuardRule("guard_v4_https_connlimit",
 			fmt.Sprintf(
 				`ip saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_https_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
+					`meter chal_cl_https_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
 				challengeV4, httpsPort, chalConnLimit)); err != nil {
 			return err
 		}
 		if err := addGuardRule("guard_v6_https_connlimit",
 			fmt.Sprintf(
 				`ip6 saddr @%s tcp dport %d ct state new `+
-                                       `meter chal_cl_https_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
+					`meter chal_cl_https_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
 				challengeV6, httpsPort, chalConnLimit)); err != nil {
 			return err
 		}
@@ -2193,57 +2208,55 @@ func (b *Backend) RemoveChallenge(ip net.IP) error {
 	return nil
 }
 
-
-
 // RemoveBlockBatch removes multiple IPs from their respective sets in a single
 // nft process invocation. Falls back to sequential on partial failure.
 func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
-    if len(ips) == 0 {
-        return nil
-    }
+	if len(ips) == 0 {
+		return nil
+	}
 
-    // Group by set
-    v4 := make([]string, 0)
-    v6 := make([]string, 0)
-    for _, ip := range ips {
-        if ip.To4() != nil {
-            v4 = append(v4, ip.String())
-        } else {
-            v6 = append(v6, ip.String())
-        }
-    }
+	// Group by set
+	v4 := make([]string, 0)
+	v6 := make([]string, 0)
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			v4 = append(v4, ip.String())
+		} else {
+			v6 = append(v6, ip.String())
+		}
+	}
 
-    // Try atomic batch first: one delete per set with all IPs in { }
-    // This is one nft process, one kernel transaction.
-    // Fails if ANY element is missing — in that case fall back to sequential.
-    var sb strings.Builder
-    if len(v4) > 0 {
-        fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
-            family, tableName, setV4, strings.Join(v4, ", "))
-    }
-    if len(v6) > 0 {
-        fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
-            family, tableName, setV6, strings.Join(v6, ", "))
-    }
+	// Try atomic batch first: one delete per set with all IPs in { }
+	// This is one nft process, one kernel transaction.
+	// Fails if ANY element is missing — in that case fall back to sequential.
+	var sb strings.Builder
+	if len(v4) > 0 {
+		fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
+			family, tableName, setV4, strings.Join(v4, ", "))
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&sb, "delete element %s %s %s { %s };\n",
+			family, tableName, setV6, strings.Join(v6, ", "))
+	}
 
-    cmd := exec.Command("nft", "-f", "-")
-    cmd.Stdin = strings.NewReader(sb.String())
-    out, err := cmd.CombinedOutput()
-    if err == nil {
-        return nil // all done in one shot
-    }
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(sb.String())
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil // all done in one shot
+	}
 
-    // Batch failed (likely some IPs not in set) — fall back to sequential.
-    // Still just ONE goroutine, ONE ip at a time: no fork storm.
-    s := string(out)
-    if strings.Contains(s, "No such file or directory") ||
-        strings.Contains(s, "Could not delete element") ||
-        strings.Contains(s, "Element not found") {
-        for _, ip := range ips {
-            _ = b.RemoveBlock(ip) // already ignores "not found"
-        }
-        return nil
-    }
+	// Batch failed (likely some IPs not in set) — fall back to sequential.
+	// Still just ONE goroutine, ONE ip at a time: no fork storm.
+	s := string(out)
+	if strings.Contains(s, "No such file or directory") ||
+		strings.Contains(s, "Could not delete element") ||
+		strings.Contains(s, "Element not found") {
+		for _, ip := range ips {
+			_ = b.RemoveBlock(ip) // already ignores "not found"
+		}
+		return nil
+	}
 
-    return fmt.Errorf("nft batch delete failed: %v: %s", err, s)
+	return fmt.Errorf("nft batch delete failed: %v: %s", err, s)
 }
