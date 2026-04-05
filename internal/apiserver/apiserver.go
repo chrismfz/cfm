@@ -182,7 +182,7 @@ func Start(
 				logging.Logf("[apiserver] AUTH_SESSION_DB_PATH is set but current goauth version does not support SessionDBPath")
 			}
 		}
-		authMgr, err := newGoAuthWithRetry(authCfg)
+		authMgr, err := newGoAuth(authCfg)
 		if err != nil {
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
@@ -296,29 +296,19 @@ func setOptionalGoauthStringField(cfg *goauth.Config, fieldName, value string) b
 	return true
 }
 
-func newGoAuthWithRetry(cfg goauth.Config) (*goauth.Manager, error) {
-	const attempts = 20
-	const sleep = 250 * time.Millisecond
-
-	var lastErr error
-	for i := 1; i <= attempts; i++ {
-		mgr, err := goauth.New(cfg)
-		if err == nil {
-			if i > 1 {
-				logging.Logf("[apiserver] goauth init succeeded after retry %d/%d", i, attempts)
-			}
-			return mgr, nil
-		}
-		lastErr = err
-		if !isGoAuthSQLiteBusy(err) {
-			return nil, err
-		}
-		if i < attempts {
-			logging.Logf("[apiserver] goauth init busy (%d/%d): %v; retrying in %s", i, attempts, err, sleep)
-			time.Sleep(sleep)
-		}
+func newGoAuth(cfg goauth.Config) (*goauth.Manager, error) {
+	// NOTE:
+	// Current pinned goauth version (v0.0.0-20260404230222-598d5f52a7aa)
+	// can return init errors after opening the DB without closing it.
+	//
+	// Retrying goauth.New() in-process would accumulate leaked handles and
+	// worsen SQLITE_BUSY lock contention. Keep initialization single-attempt
+	// until goauth guarantees cleanup on failed New().
+	mgr, err := goauth.New(cfg)
+	if err != nil && isGoAuthSQLiteBusy(err) {
+		logging.Logf("[apiserver] goauth init hit SQLITE_BUSY; restart service to retry cleanly: %v", err)
 	}
-	return nil, fmt.Errorf("goauth: retries exhausted after %d attempts: %w", attempts, lastErr)
+	return mgr, err
 }
 
 func isGoAuthSQLiteBusy(err error) bool {
