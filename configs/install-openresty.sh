@@ -349,6 +349,7 @@ deploy_cfm_files() {
     mkdir -p /etc/logrotate.d
 
     backup_and_copy_file "/usr/share/cfm/configs/cfm.lua"            "$lua_dir/cfm.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_clamav.lua"        "$lua_dir/cfm_clamav.lua"

@@ -25,19 +25,19 @@ package webdetector
 import (
 	"bufio"
 	"bytes"
-	"cfm/internal/logging"
 	"cfm/internal/clam"
+	"cfm/internal/logging"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-	"io"
-	"path/filepath"
 )
 
 // ── Config fields (add these to webdetector.Config) ──────────────────────────
@@ -86,6 +86,10 @@ type NginxBridge struct {
 
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
+
+	// RuleDecision evaluates dynamic traffic rules for the current request
+	// shape (host/ip/ua/path/method/country) and returns the matched action.
+	RuleDecision func(TrafficRuleEvalInput) TrafficRuleEvalResult
 
 	// Clam
 	clamMgr      clam.Enqueuer
@@ -229,145 +233,132 @@ func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
 
 // Clam Manager
 func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir string) {
-    if b == nil {
-        return
-    }
-    b.clamMgr = m
-    b.clamPending = pendingDir
-    b.clamInfected = infectedDir
-    if pendingDir != "" {
-        _ = os.MkdirAll(pendingDir, 0o700)
-    }
-    if infectedDir != "" {
-        _ = os.MkdirAll(infectedDir, 0o700)
-    }
+	if b == nil {
+		return
+	}
+	b.clamMgr = m
+	b.clamPending = pendingDir
+	b.clamInfected = infectedDir
+	if pendingDir != "" {
+		_ = os.MkdirAll(pendingDir, 0o700)
+	}
+	if infectedDir != "" {
+		_ = os.MkdirAll(infectedDir, 0o700)
+	}
 }
 
 type nginxUploadMsg struct {
-    IP           string `json:"ip"`
-    Host         string `json:"host,omitempty"`
-    URI          string `json:"uri,omitempty"`
-    Method       string `json:"method,omitempty"`
-    Filename     string `json:"filename,omitempty"`
-    BodyFile     string `json:"body_file"`
-    Reason       string `json:"reason,omitempty"`
-    AlreadyCopied bool  `json:"already_copied,omitempty"`
+	IP            string `json:"ip"`
+	Host          string `json:"host,omitempty"`
+	URI           string `json:"uri,omitempty"`
+	Method        string `json:"method,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	BodyFile      string `json:"body_file"`
+	Reason        string `json:"reason,omitempty"`
+	AlreadyCopied bool   `json:"already_copied,omitempty"`
 }
-
-
-
-
 
 func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
-    if !b.checkToken(r) {
-        http.Error(w, "forbidden", http.StatusForbidden)
-        return
-    }
-    if r.Method != http.MethodPost {
-        http.Error(w, "method", http.StatusMethodNotAllowed)
-        return
-    }
-    r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
 
-    var msg nginxUploadMsg
-    if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-        http.Error(w, "bad json", http.StatusBadRequest)
-        return
-    }
+	var msg nginxUploadMsg
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
 
-    ip := strings.TrimSpace(msg.IP)
-    host := normalizeHost(msg.Host)
-    uri := strings.TrimSpace(msg.URI)
-    bodyFile := strings.TrimSpace(msg.BodyFile)
-    reason := strings.TrimSpace(msg.Reason)
-    filename := strings.TrimSpace(msg.Filename)
+	ip := strings.TrimSpace(msg.IP)
+	host := normalizeHost(msg.Host)
+	uri := strings.TrimSpace(msg.URI)
+	bodyFile := strings.TrimSpace(msg.BodyFile)
+	reason := strings.TrimSpace(msg.Reason)
+	filename := strings.TrimSpace(msg.Filename)
 
-    logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
-        ip, host, uri, filename, reason)
+	logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
+		ip, host, uri, filename, reason)
 
-    if bodyFile == "" || b.clamMgr == nil || !b.clamMgr.Enabled() {
-        w.WriteHeader(http.StatusOK)
-        return
-    }
+	if bodyFile == "" || b.clamMgr == nil || !b.clamMgr.Enabled() {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    fi, err := os.Stat(bodyFile)
-    if err != nil || fi.IsDir() || fi.Size() == 0 {
-        w.WriteHeader(http.StatusOK)
-        return
-    }
+	fi, err := os.Stat(bodyFile)
+	if err != nil || fi.IsDir() || fi.Size() == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    var scanPath string
+	var scanPath string
 
-    if msg.AlreadyCopied {
-        scanPath = bodyFile
-    } else {
+	if msg.AlreadyCopied {
+		scanPath = bodyFile
+	} else {
 
-safeIP := strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(ip)
-dst := filepath.Join(b.clamPending,
-    fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
+		safeIP := strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(ip)
+		dst := filepath.Join(b.clamPending,
+			fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
 
-        if err := copyFile(bodyFile, dst); err != nil {
-            logging.LogfCLAM("[upload] copy_failed src=%q err=%v", bodyFile, err)
-            w.WriteHeader(http.StatusOK)
-            return
-        }
-        scanPath = dst
-    }
+		if err := copyFile(bodyFile, dst); err != nil {
+			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", bodyFile, err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		scanPath = dst
+	}
 
-    label := "UPLOAD"
-    if reason != "" {
-        label += ":" + reason
-    }
-    if filename != "" {
-        label += ":" + filename
-    }
+	label := "UPLOAD"
+	if reason != "" {
+		label += ":" + reason
+	}
+	if filename != "" {
+		label += ":" + filename
+	}
 
-    ok := b.clamMgr.Enqueue(clam.Job{
-        Path:        scanPath,
-        IP:          ip,
-        Host:        host,
-        URI:         uri,
-        FileName:    filename,
-        Reason:      label,
-        TempCopy:    true,
-        InfectedDir: b.clamInfected,
-    })
+	ok := b.clamMgr.Enqueue(clam.Job{
+		Path:        scanPath,
+		IP:          ip,
+		Host:        host,
+		URI:         uri,
+		FileName:    filename,
+		Reason:      label,
+		TempCopy:    true,
+		InfectedDir: b.clamInfected,
+	})
 
-    if !ok && scanPath != "" {
-        _ = os.Remove(scanPath)
-        logging.LogfCLAM("[upload] enqueue dropped path=%s ip=%s host=%s", scanPath, ip, host)
-    }
+	if !ok && scanPath != "" {
+		_ = os.Remove(scanPath)
+		logging.LogfCLAM("[upload] enqueue dropped path=%s ip=%s host=%s", scanPath, ip, host)
+	}
 
-    w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusOK)
 }
-
-
-
-
-
-
-
-
 
 func copyFile(src, dst string) error {
-    in, err := os.Open(src)
-    if err != nil {
-        return err
-    }
-    defer in.Close()
-    out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-    if err != nil {
-        return err
-    }
-    _, err = io.Copy(out, in)
-    cerr := out.Close()
-    if err != nil {
-        _ = os.Remove(dst)
-        return err
-    }
-    return cerr
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	cerr := out.Close()
+	if err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return cerr
 }
-
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
@@ -838,6 +829,9 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
+	method := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method")))
+	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
 		host = hh
 	}
@@ -901,11 +895,29 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	b.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	resp := map[string]any{
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
 		"vhost_action": vhAction, // "allow" | "challenge"
-	})
+	}
+	if b.RuleDecision != nil {
+		rr := b.RuleDecision(TrafficRuleEvalInput{
+			Host:   host,
+			IP:     ip,
+			UA:     ua,
+			Path:   uri,
+			Method: method,
+		})
+		if rr.Matched {
+			resp["rule_action"] = rr.Action
+			resp["rule_id"] = rr.Rule.ID
+			if rr.Profile != "" {
+				resp["throttle_profile"] = rr.Profile
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleIPPush: cfm (or external tool) pushes a new IP decision.

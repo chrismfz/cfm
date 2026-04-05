@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "priority": 120,
+  "scope": {
+    "vhosts": ["example.com"]
+  },
+  "match": {
+    "path_any": ["/wp-login.php", "/xmlrpc.php"],
+    "methods": ["POST"]
+  },
+  "action": {
+    "type": "challenge"
+  },
+  "note": "Challenge sensitive login endpoints"
+}

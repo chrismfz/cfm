@@ -70,6 +70,11 @@ local CFG = {
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
 if clamav_ok then clamav.init({ token = CFG.token, sock_path = CFG.sock_path  }) end
 
+local rules_ok, rules = pcall(require, "cfm_rules")
+if rules_ok and rules and rules.init then
+  rules.init(CFG)
+end
+
 
 -- Shared dict used for both bridge decision cache (d|...) and POST resume stash (pr|...).
 local SH = ngx.shared.cfm_decisions
@@ -602,7 +607,7 @@ end
 -- a cached allow for "/" from masking a challenge on /wp-admin or /xmlrpc.php
 -- within the same 9-second TTL window.
 -- Challenges and blocks are never cached — they must always reach the bridge.
-local function get_decision(ip, host, uri, method, scheme)
+local function get_decision(ip, host, uri, method, scheme, ua)
   local uri_part = (uri or "-"):sub(1, 64)
   local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
 
@@ -618,7 +623,8 @@ local function get_decision(ip, host, uri, method, scheme)
                "&host="   .. esc(host)   ..
                "&uri="    .. esc(uri)    ..
                "&method=" .. esc(method) ..
-               "&scheme=" .. esc(scheme)
+               "&scheme=" .. esc(scheme) ..
+               "&ua="     .. esc(ua or "")
 
   local body, err = http_get_unix(path)
   if not body then return fail_decision(err) end
@@ -1005,9 +1011,12 @@ if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 
 
 -- ── Step 3: Bridge Decision ───────────────────────────────────────────────────
-local d          = get_decision(ip, host, uri, method, scheme)
+local d          = get_decision(ip, host, uri, method, scheme, ngx.var.http_user_agent or "")
 local ip_action  = d.ip_action    or "allow"
 local vh_action  = d.vhost_action or "allow"
+local rule_action = d.rule_action or "allow"
+local rule_id = d.rule_id or ""
+local throttle_profile = d.throttle_profile or ""
 local cache_flag = d._cache and " cache=1" or ""
 
 if CFG.debug_headers then
@@ -1015,6 +1024,9 @@ if CFG.debug_headers then
   ngx.header["X-CFM-Host"]   = host
   ngx.header["X-CFM-Dec-IP"] = ip_action
   ngx.header["X-CFM-Dec-VH"] = vh_action
+  ngx.header["X-CFM-Dec-Rule"] = rule_action
+  if rule_id ~= "" then ngx.header["X-CFM-Rule-ID"] = rule_id end
+  if throttle_profile ~= "" then ngx.header["X-CFM-Throttle"] = throttle_profile end
   if d.err    then ngx.header["X-CFM-Err"]   = tostring(d.err) end
   if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
@@ -1056,6 +1068,26 @@ if ip_action == "challenge" or vh_action == "challenge" then
   log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag ..
     (rerr and (" resume_skip=" .. tostring(rerr)) or ""))
   return
+end
+
+if rules_ok and rules and rules.apply then
+  local r = rules.apply(d, {
+    ip = ip,
+    host = host,
+    uri = uri,
+    method = method,
+    profile = throttle_profile,
+  })
+  if r and r.action == "throttle" then
+    ngx.header["X-CFM-Action"] = "throttle"
+    if r.retry_after and tonumber(r.retry_after) then
+      ngx.header["Retry-After"] = tostring(math.max(1, math.floor(tonumber(r.retry_after))))
+    end
+    log_route(ngx.WARN, "throttle ip=" .. ip .. " host=" .. host ..
+      (rule_id ~= "" and (" rule_id=" .. tostring(rule_id)) or "") ..
+      (throttle_profile ~= "" and (" profile=" .. tostring(throttle_profile)) or "") .. cache_flag)
+    return ngx.exit(429)
+  end
 end
 
 -- ── Step 4: Allow ─────────────────────────────────────────────────────────────
