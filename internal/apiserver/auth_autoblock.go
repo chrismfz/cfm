@@ -39,6 +39,10 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 	_, _ = db.Exec(`PRAGMA busy_timeout = 3000`)
 
 	var lastID int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM auth_log`).Scan(&lastID); err != nil {
+		logging.Logf("[apiserver][auth-autoblock] cursor init failed: %v", err)
+		lastID = 0
+	}
 	failTSByIP := map[string][]int64{}
 	lastBlock := map[string]time.Time{}
 	ticker := time.NewTicker(authAutoblockPollEvery)
