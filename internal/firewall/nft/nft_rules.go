@@ -26,10 +26,9 @@ var (
 	lastThrottleReason = map[string]string{} // ip -> reason
 
 	// NEW: last successful autoblock per IP (v4/v6 share the key as a string)
-	lastAutoBlockAt = map[string]time.Time{}
-	lastIgnoredAt   = map[string]time.Time{}
+	lastAutoBlockAt    = map[string]time.Time{}
+	lastIgnoredAt      = map[string]time.Time{}
 	autoBlockEvalCount int
-
 )
 
 // floodCfgHash returns a cheap hash of all flood-relevant config fields.
@@ -88,7 +87,6 @@ func boolU64(b bool) uint64 {
 	return 0
 }
 
-
 // -----------------------------------------------------------------------------
 // Flood rules application
 // -----------------------------------------------------------------------------
@@ -96,9 +94,12 @@ func boolU64(b bool) uint64 {
 func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	b.cfg = c
 
+	const meterRefreshInterval = 15 * time.Minute
 	h := floodCfgHash(c)
 	if h != 0 && h == b.lastFloodHash && b.tableExists() {
-		return nil
+		if !b.lastFloodRebuild.IsZero() && time.Since(b.lastFloodRebuild) < meterRefreshInterval {
+			return nil
+		}
 	}
 	b.lastFloodHash = h
 
@@ -141,6 +142,7 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
 		return err
 	}
+	b.lastFloodRebuild = time.Now()
 	return nil
 }
 
@@ -390,7 +392,6 @@ func (b *Backend) DumpFloodCounters() {
 	}()
 }
 
-
 func (b *Backend) dumpFloodCountersOnce() {
 	// Πάρε όλους τους counters του table (χωρίς sets/elements).
 	// Use a generous timeout so nft gets enough time under load, without stalling the daemon tick path.
@@ -398,7 +399,7 @@ func (b *Backend) dumpFloodCountersOnce() {
 	if err != nil {
 		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
 		_ = b.EnsureBase()
-                logging.Logf("[flood] cannot list counters: %v", err)
+		logging.Logf("[flood] cannot list counters: %v", err)
 		return
 	}
 
@@ -700,7 +701,6 @@ func (b *Backend) ensureCounter(name string) {
 }
 
 // ---- nft compat helpers ----
-
 
 // runCmdOutput executes an nft command and returns its combined output.
 func (b *Backend) runCmdOutput(cmd string) (string, error) {
