@@ -388,6 +388,7 @@ type Engine struct {
 
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
+	trafficRules      *trafficRuleStore
 	history           *HistoryStore
 }
 
@@ -419,6 +420,7 @@ func NewEngine(cfg Config) *Engine {
 	e.chalExpiredSeen = make(map[string]time.Time)
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
+	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	// manual from api webtop challenge add//
 	e.manualChal.init()
 
@@ -725,18 +727,16 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	now = time.Now()
 	e.pruneShort(now)
 
-   // Prune unbounded emit/cooldown maps periodically.
-    // Rate-limited to once per long-horizon interval to keep cost negligible.
-    horizon := e.cfg.LongHorizon()
-    if horizon <= 0 {
-        horizon = 20 * time.Minute
-    }
-    if e.lastEmitPrune.IsZero() || now.Sub(e.lastEmitPrune) >= horizon {
-        e.pruneEmitMaps(now)
-        e.lastEmitPrune = now
-    }
-
-
+	// Prune unbounded emit/cooldown maps periodically.
+	// Rate-limited to once per long-horizon interval to keep cost negligible.
+	horizon := e.cfg.LongHorizon()
+	if horizon <= 0 {
+		horizon = 20 * time.Minute
+	}
+	if e.lastEmitPrune.IsZero() || now.Sub(e.lastEmitPrune) >= horizon {
+		e.pruneEmitMaps(now)
+		e.lastEmitPrune = now
+	}
 
 	// Feed long-window approx once per short-window horizon.
 	if e.lastFeed.IsZero() || now.Sub(e.lastFeed) >= e.cfg.Window {
@@ -1085,26 +1085,25 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		}
 
 		// empty UA
-if e.cfg.ChallengeIPNoUAMin > 0 {
-	if rec.UA == "" || rec.UA == "-" {
-		if !isMachineStyleEndpointGo(p) {
-			if b.ipsNoUA == nil {
-				b.ipsNoUA = make(map[string]int)
-			}
-			b.ipsNoUA[rec.IP]++
-			e.chalLast[rec.IP] = chalCtx{
-				Host:   rec.Host,
-				URI:    p,
-				Method: rec.Method,
-				UA:     rec.UA,
-				Status: rec.Status,
-				Sub:    "no_ua",
-				TS:     rec.TS,
+		if e.cfg.ChallengeIPNoUAMin > 0 {
+			if rec.UA == "" || rec.UA == "-" {
+				if !isMachineStyleEndpointGo(p) {
+					if b.ipsNoUA == nil {
+						b.ipsNoUA = make(map[string]int)
+					}
+					b.ipsNoUA[rec.IP]++
+					e.chalLast[rec.IP] = chalCtx{
+						Host:   rec.Host,
+						URI:    p,
+						Method: rec.Method,
+						UA:     rec.UA,
+						Status: rec.Status,
+						Sub:    "no_ua",
+						TS:     rec.TS,
+					}
+				}
 			}
 		}
-	}
-}
-
 
 		// malformed request burst: 400 Bad Request + 414 URI Too Long + 431 Headers Too Large
 		if e.cfg.ChallengeIPMalformedMin > 0 &&
@@ -1240,87 +1239,86 @@ func (e *Engine) pruneShort(now time.Time) {
 // The cutoff is 2× the long horizon — conservative enough to avoid evicting
 // entries that are still within an active cooldown window.
 func (e *Engine) pruneEmitMaps(now time.Time) {
-    horizon := e.cfg.LongHorizon()
-    if horizon <= 0 {
-        horizon = 20 * time.Minute
-    }
-    cutoff := now.Add(-2 * horizon)
-    longCutoff := now.Add(-horizon)
+	horizon := e.cfg.LongHorizon()
+	if horizon <= 0 {
+		horizon = 20 * time.Minute
+	}
+	cutoff := now.Add(-2 * horizon)
+	longCutoff := now.Add(-horizon)
 
-    // --- ipLastEmit, ipLastChalEmit, subnetLastChalEmit (under emitMu) ---
-    e.emitMu.Lock()
-    for ip, t := range e.ipLastEmit {
-        if t.Before(cutoff) {
-            delete(e.ipLastEmit, ip)
-        }
-    }
-    if e.ipLastChalEmit != nil {
-        for ip, t := range e.ipLastChalEmit {
-            if t.Before(cutoff) {
-                delete(e.ipLastChalEmit, ip)
-            }
-        }
-    }
-    if e.subnetLastChalEmit != nil {
-        for subnet, t := range e.subnetLastChalEmit {
-            if t.Before(cutoff) {
-                delete(e.subnetLastChalEmit, subnet)
-            }
-        }
-    }
-    e.emitMu.Unlock()
+	// --- ipLastEmit, ipLastChalEmit, subnetLastChalEmit (under emitMu) ---
+	e.emitMu.Lock()
+	for ip, t := range e.ipLastEmit {
+		if t.Before(cutoff) {
+			delete(e.ipLastEmit, ip)
+		}
+	}
+	if e.ipLastChalEmit != nil {
+		for ip, t := range e.ipLastChalEmit {
+			if t.Before(cutoff) {
+				delete(e.ipLastChalEmit, ip)
+			}
+		}
+	}
+	if e.subnetLastChalEmit != nil {
+		for subnet, t := range e.subnetLastChalEmit {
+			if t.Before(cutoff) {
+				delete(e.subnetLastChalEmit, subnet)
+			}
+		}
+	}
+	e.emitMu.Unlock()
 
-    // --- chalLast (under e.mu write lock) ---
-    // chalCtx holds the last matched host/uri/pattern per IP.
-    // Safe to evict once the IP hasn't triggered a challenge in one long horizon.
-    e.mu.Lock()
-    if e.chalLast != nil {
-        // chalCtx doesn't carry a timestamp, so we use ipLastChalEmit as proxy.
-        // If no emit exists (already pruned above), the ctx is also stale.
-        e.emitMu.Lock()
-        for ip := range e.chalLast {
-            if _, active := e.ipLastChalEmit[ip]; !active {
-                delete(e.chalLast, ip)
-            }
-        }
-        e.emitMu.Unlock()
-    }
-    e.mu.Unlock()
+	// --- chalLast (under e.mu write lock) ---
+	// chalCtx holds the last matched host/uri/pattern per IP.
+	// Safe to evict once the IP hasn't triggered a challenge in one long horizon.
+	e.mu.Lock()
+	if e.chalLast != nil {
+		// chalCtx doesn't carry a timestamp, so we use ipLastChalEmit as proxy.
+		// If no emit exists (already pruned above), the ctx is also stale.
+		e.emitMu.Lock()
+		for ip := range e.chalLast {
+			if _, active := e.ipLastChalEmit[ip]; !active {
+				delete(e.chalLast, ip)
+			}
+		}
+		e.emitMu.Unlock()
+	}
+	e.mu.Unlock()
 
-    // --- ipLong.stats (under ipLong.mu) ---
-    // IPs that haven't appeared in the short window for a full long horizon
-    // will have alpha≈1 on next update anyway — safe to evict early.
-    if e.ipLong != nil {
-        e.ipLong.mu.Lock()
-        if e.ipLong.stats != nil && !e.ipLong.lastUpdate.IsZero() {
-            for ip := range e.ipLong.stats {
-                // Evict if we'd never see this IP in a fresh updateIPLong call,
-                // i.e. it's not in any current short-window bucket.
-                // Simple proxy: evict if not in ipLastEmit and not in ipLastChalEmit.
-                e.emitMu.Lock()
-                _, inEmit := e.ipLastEmit[ip]
-                _, inChal := e.ipLastChalEmit[ip]
-                e.emitMu.Unlock()
-                if !inEmit && !inChal {
-                    delete(e.ipLong.stats, ip)
-                }
-            }
-        }
-        e.ipLong.mu.Unlock()
-    }
+	// --- ipLong.stats (under ipLong.mu) ---
+	// IPs that haven't appeared in the short window for a full long horizon
+	// will have alpha≈1 on next update anyway — safe to evict early.
+	if e.ipLong != nil {
+		e.ipLong.mu.Lock()
+		if e.ipLong.stats != nil && !e.ipLong.lastUpdate.IsZero() {
+			for ip := range e.ipLong.stats {
+				// Evict if we'd never see this IP in a fresh updateIPLong call,
+				// i.e. it's not in any current short-window bucket.
+				// Simple proxy: evict if not in ipLastEmit and not in ipLastChalEmit.
+				e.emitMu.Lock()
+				_, inEmit := e.ipLastEmit[ip]
+				_, inChal := e.ipLastChalEmit[ip]
+				e.emitMu.Unlock()
+				if !inEmit && !inChal {
+					delete(e.ipLong.stats, ip)
+				}
+			}
+		}
+		e.ipLong.mu.Unlock()
+	}
 
-    // --- chalExpiredSeen (direct field, under emitMu for safety) ---
-    e.emitMu.Lock()
-    if e.chalExpiredSeen != nil {
-        for key, t := range e.chalExpiredSeen {
-            if t.Before(longCutoff) {
-                delete(e.chalExpiredSeen, key)
-            }
-        }
-    }
-    e.emitMu.Unlock()
+	// --- chalExpiredSeen (direct field, under emitMu for safety) ---
+	e.emitMu.Lock()
+	if e.chalExpiredSeen != nil {
+		for key, t := range e.chalExpiredSeen {
+			if t.Before(longCutoff) {
+				delete(e.chalExpiredSeen, key)
+			}
+		}
+	}
+	e.emitMu.Unlock()
 }
-
 
 // snapshotMiniLocked builds MiniMetrics per host from current short-window buckets.
 // Προϋποθέτει ότι ο caller κρατά ήδη e.mu.RLock ή Lock.
@@ -3031,7 +3029,6 @@ func (e *Engine) isBypassed(ip string) bool {
 	return e.bypassFunc != nil && e.bypassFunc(ip)
 }
 
-
 // isExcluded runs the challenge-exclude rules for ip.
 // It resolves ASN / PTR via the engine's enricher if available.
 // ua is best-effort (callers pass "" when unknown; ua=* rules still match).
@@ -3056,8 +3053,6 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	//logging.Logf("[challenge][debug] isExcluded ip=%s host=%s ua=%q rule=%s asn=%q ptr=%q matched=%v", ip, host, ua, rule, asn, ptr, matched)
 	return matched
 }
-
-
 
 func (e *Engine) ChallengeExcludeAdd(typ, value string) bool {
 	if e == nil || e.challengeExcludes == nil {
@@ -3121,3 +3116,37 @@ func (e *Engine) WAFExcludeHasAny() bool {
 	return len(e.wafExcludes.List()) > 0
 }
 
+func (e *Engine) TrafficRuleAdd(rule TrafficRule) (TrafficRule, error) {
+	if e == nil || e.trafficRules == nil {
+		return TrafficRule{}, fmt.Errorf("traffic rules store unavailable")
+	}
+	return e.trafficRules.Add(rule)
+}
+
+func (e *Engine) TrafficRuleUpdate(id string, rule TrafficRule) (TrafficRule, error) {
+	if e == nil || e.trafficRules == nil {
+		return TrafficRule{}, fmt.Errorf("traffic rules store unavailable")
+	}
+	return e.trafficRules.Update(id, rule)
+}
+
+func (e *Engine) TrafficRuleRemove(id string) bool {
+	if e == nil || e.trafficRules == nil {
+		return false
+	}
+	return e.trafficRules.Remove(id)
+}
+
+func (e *Engine) TrafficRuleGet(id string) (TrafficRule, bool) {
+	if e == nil || e.trafficRules == nil {
+		return TrafficRule{}, false
+	}
+	return e.trafficRules.Get(id)
+}
+
+func (e *Engine) TrafficRuleList() []TrafficRule {
+	if e == nil || e.trafficRules == nil {
+		return nil
+	}
+	return e.trafficRules.List()
+}
