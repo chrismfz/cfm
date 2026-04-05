@@ -1,0 +1,8 @@
+# One substring per line (case-insensitive).
+# If a request path contains any of these, we challenge the IP.
+# Examples:
+# phpinfo.php
+# /wp-admin
+# /wp-login.php
+# /admin
+# /xmlrpc.php

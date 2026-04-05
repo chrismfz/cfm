@@ -3,7 +3,7 @@ module cfm
 go 1.25.0
 
 require (
-	github.com/chrismfz/goauth v0.0.0-20260404230222-598d5f52a7aa
+	github.com/chrismfz/goauth v0.0.0-20260405103244-24a4a73d5fbb
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gizak/termui/v3 v3.1.0
