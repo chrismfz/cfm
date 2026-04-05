@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -167,21 +168,32 @@ func Start(
 		if cookieName == "" {
 			cookieName = "cfm-sid"
 		}
-		var err error
-		authMgr, err = goauth.New(goauth.Config{
-			DBPath:     cfg.Debug.AuthDBPath,
-			SessionTTL: sessionTTL,
-			//IdleTimeout:  30 * time.Minute,
+		authCfg := goauth.Config{
+			DBPath:       cfg.Debug.AuthDBPath,
+			SessionTTL:   sessionTTL,
 			CookieName:   cookieName,
 			SecureCookie: cfg.Debug.SecureCookie,
-			SameSite:     http.SameSiteLaxMode, // ← add this
-		})
+			SameSite:     http.SameSiteLaxMode,
+		}
+		if cfg.Debug.AuthSessionDBPath != "" {
+			if ok := setOptionalGoauthStringField(&authCfg, "SessionDBPath", cfg.Debug.AuthSessionDBPath); ok {
+				logging.Logf("[apiserver] goauth session DB path: %s", cfg.Debug.AuthSessionDBPath)
+			} else {
+				logging.Logf("[apiserver] AUTH_SESSION_DB_PATH is set but current goauth version does not support SessionDBPath")
+			}
+		}
+		authMgr, err := newGoAuth(authCfg)
 		if err != nil {
 			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
 			SetAuth(authMgr)
-			logging.Logf("[apiserver] goauth session store: %s ttl=%s cookie=%s secure=%v",
-				cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			if cfg.Debug.AuthSessionDBPath != "" {
+				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			} else {
+				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+			}
 		}
 	} else {
 		logging.Logf("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")
@@ -272,4 +284,39 @@ func Start(
 	if authMgr != nil {
 		authMgr.Close()
 	}
+}
+
+func setOptionalGoauthStringField(cfg *goauth.Config, fieldName, value string) bool {
+	v := reflect.ValueOf(cfg).Elem()
+	f := v.FieldByName(fieldName)
+	if !f.IsValid() || !f.CanSet() || f.Kind() != reflect.String {
+		return false
+	}
+	f.SetString(value)
+	return true
+}
+
+func newGoAuth(cfg goauth.Config) (*goauth.Manager, error) {
+	// NOTE:
+	// Current pinned goauth version (v0.0.0-20260404230222-598d5f52a7aa)
+	// can return init errors after opening the DB without closing it.
+	//
+	// Retrying goauth.New() in-process would accumulate leaked handles and
+	// worsen SQLITE_BUSY lock contention. Keep initialization single-attempt
+	// until goauth guarantees cleanup on failed New().
+	mgr, err := goauth.New(cfg)
+	if err != nil && isGoAuthSQLiteBusy(err) {
+		logging.Logf("[apiserver] goauth init hit SQLITE_BUSY; restart service to retry cleanly: %v", err)
+	}
+	return mgr, err
+}
+
+func isGoAuthSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "sqlite_busy") ||
+		strings.Contains(s, "(261)")
 }
