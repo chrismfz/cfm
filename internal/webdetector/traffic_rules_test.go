@@ -73,3 +73,41 @@ func TestTrafficRuleValidation(t *testing.T) {
 		t.Fatalf("expected error for unsupported action")
 	}
 }
+
+func TestTrafficRuleSimulate_FirstMatchByPriority(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+
+	_, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 200,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{UAAny: []string{"*facebookexternalhit*"}},
+		Action:   TrafficRuleAction{Type: TrafficActionThrottle, Profile: "soft_bot"},
+	})
+	if err != nil {
+		t.Fatalf("add throttle rule: %v", err)
+	}
+	_, err = s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 50,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{PathAny: []string{"/wp-login.php"}, Methods: []string{"POST"}},
+		Action:   TrafficRuleAction{Type: TrafficActionChallenge},
+	})
+	if err != nil {
+		t.Fatalf("add challenge rule: %v", err)
+	}
+
+	got := s.Simulate(TrafficRuleEvalInput{
+		Host:   "example.com",
+		UA:     "facebookexternalhit/1.1",
+		Path:   "/wp-login.php",
+		Method: "POST",
+	})
+	if !got.Matched {
+		t.Fatalf("expected rule match")
+	}
+	if got.Action != TrafficActionChallenge {
+		t.Fatalf("expected challenge action due to higher priority, got %s", got.Action)
+	}
+}

@@ -58,6 +58,22 @@ type TrafficRule struct {
 	UpdatedAt time.Time         `json:"updated_at"`
 }
 
+type TrafficRuleEvalInput struct {
+	Host    string `json:"host"`
+	IP      string `json:"ip,omitempty"`
+	UA      string `json:"ua,omitempty"`
+	Path    string `json:"path,omitempty"`
+	Method  string `json:"method,omitempty"`
+	Country string `json:"country,omitempty"`
+}
+
+type TrafficRuleEvalResult struct {
+	Matched bool        `json:"matched"`
+	Rule    TrafficRule `json:"rule,omitempty"`
+	Action  string      `json:"action,omitempty"`
+	Profile string      `json:"profile,omitempty"`
+}
+
 type trafficRuleStore struct {
 	mu    sync.RWMutex
 	path  string
@@ -159,6 +175,50 @@ func (s *trafficRuleStore) List() []TrafficRule {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResult {
+	host := normalizeControlHost(in.Host)
+	path := strings.TrimSpace(in.Path)
+	if path != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	ua := strings.ToLower(strings.TrimSpace(in.UA))
+	method := strings.ToUpper(strings.TrimSpace(in.Method))
+	country := strings.ToUpper(strings.TrimSpace(in.Country))
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows := make([]TrafficRule, 0, len(s.rules))
+	for _, r := range s.rules {
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Priority != rows[j].Priority {
+			return rows[i].Priority < rows[j].Priority
+		}
+		return rows[i].ID < rows[j].ID
+	})
+
+	for _, r := range rows {
+		if !r.Enabled {
+			continue
+		}
+		if !ruleHostMatch(r.Scope.Vhosts, host) {
+			continue
+		}
+		if !ruleMatchFilters(r.Match, country, ua, path, method) {
+			continue
+		}
+		return TrafficRuleEvalResult{
+			Matched: true,
+			Rule:    r,
+			Action:  r.Action.Type,
+			Profile: r.Action.Profile,
+		}
+	}
+	return TrafficRuleEvalResult{Matched: false}
 }
 
 func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) {
@@ -324,6 +384,138 @@ func normalizeMethods(in []string, max int) ([]string, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+func ruleHostMatch(vhosts []string, host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, pat := range vhosts {
+		pat = normalizeControlHost(pat)
+		if pat == "" {
+			continue
+		}
+		if ok, err := filepath.Match(pat, host); err == nil && ok {
+			return true
+		}
+		if strings.HasPrefix(pat, "*.") {
+			suf := strings.TrimPrefix(pat, "*")
+			if strings.HasSuffix(host, suf) && len(host) > len(suf) {
+				return true
+			}
+		}
+		if !strings.ContainsAny(pat, "*?") && host == pat {
+			return true
+		}
+	}
+	return false
+}
+
+func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method string) bool {
+	if len(m.CountryIn) > 0 {
+		ok := false
+		for _, cc := range m.CountryIn {
+			if country == cc {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(m.Methods) > 0 {
+		ok := false
+		for _, meth := range m.Methods {
+			if method == meth {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(m.UAAny) > 0 {
+		ok := false
+		for _, pat := range m.UAAny {
+			p := strings.ToLower(strings.TrimSpace(pat))
+			if p == "" {
+				continue
+			}
+			if wildcardMatch(p, ua) {
+				ok = true
+				break
+			}
+			if !strings.ContainsAny(p, "*?") && strings.Contains(ua, p) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(m.PathAny) > 0 {
+		ok := false
+		for _, pat := range m.PathAny {
+			p := strings.TrimSpace(pat)
+			if p == "" {
+				continue
+			}
+			if wildcardMatch(p, path) {
+				ok = true
+				break
+			}
+			if !strings.ContainsAny(p, "*?") && strings.HasPrefix(path, p) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// wildcardMatch matches pattern with '*' and '?' against s.
+// Unlike filepath.Match, '*' can match '/' too (needed for UA/path matching).
+func wildcardMatch(pattern, s string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	if pattern == "*" {
+		return true
+	}
+
+	pi, si := 0, 0
+	starIdx, match := -1, 0
+	for si < len(s) {
+		if pi < len(pattern) && (pattern[pi] == '?' || pattern[pi] == s[si]) {
+			pi++
+			si++
+			continue
+		}
+		if pi < len(pattern) && pattern[pi] == '*' {
+			starIdx = pi
+			match = si
+			pi++
+			continue
+		}
+		if starIdx != -1 {
+			pi = starIdx + 1
+			match++
+			si = match
+			continue
+		}
+		return false
+	}
+	for pi < len(pattern) && pattern[pi] == '*' {
+		pi++
+	}
+	return pi == len(pattern)
 }
 
 func (s *trafficRuleStore) load() {
