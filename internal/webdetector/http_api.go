@@ -31,6 +31,12 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
 	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
 	mux.HandleFunc("/api/v1/webdet/vhosts", e.handleWebdetVhosts)
+	mux.HandleFunc("/api/v1/webdet/rules", e.handleWebdetRulesList)
+	mux.HandleFunc("/api/v1/webdet/rules/get", e.handleWebdetRulesGet)
+	mux.HandleFunc("/api/v1/webdet/rules/add", e.handleWebdetRulesAdd)
+	mux.HandleFunc("/api/v1/webdet/rules/update", e.handleWebdetRulesUpdate)
+	mux.HandleFunc("/api/v1/webdet/rules/remove", e.handleWebdetRulesRemove)
+	mux.HandleFunc("/api/v1/webdet/rules/simulate", e.handleWebdetRulesSimulate)
 
 	// History API
 	mux.HandleFunc("/api/v1/webdet/history/events", e.handleHistoryEvents)

@@ -61,6 +61,35 @@
         pageMode: 'overview',
         vhostControls: [],
         controlsSearch: '',
+        rules: [],
+        rulesSearch: '',
+        ruleEditID: '',
+        ruleForm: {
+          enabled: true,
+          priority: 100,
+          vhosts: '',
+          countries: '',
+          uas: '',
+          paths: '',
+          methods: '',
+          actionType: 'throttle',
+          throttleProfile: 'soft_bot',
+          note: '',
+        },
+        presets: [
+          { key: 'meta_throttle', label: 'Preset: Meta throttle', hint: 'Throttle known Meta crawlers softly.' },
+          { key: 'challenge_login', label: 'Preset: Challenge login', hint: 'Challenge repeated login endpoint abuse.' },
+          { key: 'block_country', label: 'Preset: Block countries (disabled)', hint: 'Start disabled and validate first.' },
+        ],
+        simulateForm: {
+          host: '',
+          ip: '',
+          ua: '',
+          path: '/',
+          method: 'GET',
+          country: '',
+        },
+        simulateResult: null,
         vhostFocusHost: '',
         vhostSeriesByHost: {},
         vhostSeriesMaxPoints: 120,
@@ -200,6 +229,18 @@
         const q = String(this.controlsSearch || '').trim().toLowerCase();
         if (!q) return this.vhostControls;
         return this.vhostControls.filter((row) => String(row?.host || '').toLowerCase().includes(q));
+      },
+      rulesFiltered() {
+        const q = String(this.rulesSearch || '').trim().toLowerCase();
+        if (!q) return this.rules;
+        return this.rules.filter((row) => {
+          const hostStr = Array.isArray(row?.scope?.vhosts) ? row.scope.vhosts.join(',') : '';
+          const note = String(row?.note || '');
+          return String(row?.id || '').toLowerCase().includes(q)
+            || hostStr.toLowerCase().includes(q)
+            || note.toLowerCase().includes(q)
+            || String(row?.action?.type || '').toLowerCase().includes(q);
+        });
       },
       activeChallengeByHost() {
         const byHost = {};
@@ -799,6 +840,187 @@
           console.error('[cfm-admin] vhost controls toggle failed', kind, host, err);
         }
       },
+      csvSplit(v) {
+        return String(v || '')
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean);
+      },
+      buildRulePayload() {
+        const f = this.ruleForm || {};
+        const actionType = String(f.actionType || '').trim();
+        const payload = {
+          enabled: Boolean(f.enabled),
+          priority: Number(f.priority || 100),
+          scope: { vhosts: this.csvSplit(f.vhosts) },
+          match: {
+            country_in: this.csvSplit(f.countries).map((x) => x.toUpperCase()),
+            ua_any: this.csvSplit(f.uas),
+            path_any: this.csvSplit(f.paths),
+            methods: this.csvSplit(f.methods).map((x) => x.toUpperCase()),
+          },
+          action: {
+            type: actionType,
+            profile: actionType === 'throttle' ? String(f.throttleProfile || '').trim() : '',
+          },
+          note: String(f.note || '').trim(),
+        };
+        if (!payload.scope.vhosts.length) throw new Error('At least one vhost is required.');
+        if (!payload.action.type) throw new Error('Action is required.');
+        if (payload.action.type === 'throttle' && !payload.action.profile) throw new Error('Throttle profile is required.');
+        return payload;
+      },
+      resetRuleForm() {
+        this.ruleEditID = '';
+        this.ruleForm = {
+          enabled: true,
+          priority: 100,
+          vhosts: '',
+          countries: '',
+          uas: '',
+          paths: '',
+          methods: '',
+          actionType: 'throttle',
+          throttleProfile: 'soft_bot',
+          note: '',
+        };
+      },
+      loadRuleIntoForm(row) {
+        if (!row) return;
+        this.ruleEditID = String(row.id || '');
+        this.ruleForm = {
+          enabled: Boolean(row.enabled),
+          priority: Number(row.priority || 100),
+          vhosts: Array.isArray(row?.scope?.vhosts) ? row.scope.vhosts.join(', ') : '',
+          countries: Array.isArray(row?.match?.country_in) ? row.match.country_in.join(', ') : '',
+          uas: Array.isArray(row?.match?.ua_any) ? row.match.ua_any.join(', ') : '',
+          paths: Array.isArray(row?.match?.path_any) ? row.match.path_any.join(', ') : '',
+          methods: Array.isArray(row?.match?.methods) ? row.match.methods.join(', ') : '',
+          actionType: String(row?.action?.type || 'throttle'),
+          throttleProfile: String(row?.action?.profile || 'soft_bot'),
+          note: String(row?.note || ''),
+        };
+      },
+      ruleMatchSummary(row) {
+        const m = row?.match || {};
+        const parts = [];
+        if (Array.isArray(m.country_in) && m.country_in.length) parts.push(`country=${m.country_in.join(',')}`);
+        if (Array.isArray(m.methods) && m.methods.length) parts.push(`method=${m.methods.join(',')}`);
+        if (Array.isArray(m.ua_any) && m.ua_any.length) parts.push(`ua×${m.ua_any.length}`);
+        if (Array.isArray(m.path_any) && m.path_any.length) parts.push(`path×${m.path_any.length}`);
+        return parts.length ? parts.join(' | ') : '(no filters)';
+      },
+      async refreshRules() {
+        if (!this.shouldShow('controls')) return;
+        const payload = await this.fetchJSONSafe('v1/webdet/rules', { rows: [] });
+        this.rules = this.extractRows(payload, 'rows');
+      },
+      async saveRule() {
+        let payload;
+        try {
+          payload = this.buildRulePayload();
+        } catch (err) {
+          this.actionMsg = `Rule validation failed: ${err}`;
+          return;
+        }
+        try {
+          if (this.ruleEditID) {
+            await this.postJSON(`v1/webdet/rules/update?id=${encodeURIComponent(this.ruleEditID)}`, payload);
+            this.actionMsg = `Rule updated: ${this.ruleEditID}`;
+          } else {
+            const out = await this.postJSON('v1/webdet/rules/add', payload);
+            this.actionMsg = `Rule added: ${out?.rule?.id || '(new)'}`;
+          }
+          await this.refreshRules();
+          this.resetRuleForm();
+        } catch (err) {
+          this.actionMsg = `Rule save failed: ${err}`;
+          console.error('[cfm-admin] rule save failed', err);
+        }
+      },
+      async removeRule(row) {
+        const id = String(row?.id || '').trim();
+        if (!id) return;
+        try {
+          await this.postJSON(`v1/webdet/rules/remove?id=${encodeURIComponent(id)}`, {});
+          this.actionMsg = `Rule removed: ${id}`;
+          await this.refreshRules();
+          if (this.ruleEditID === id) this.resetRuleForm();
+        } catch (err) {
+          this.actionMsg = `Rule remove failed: ${err}`;
+          console.error('[cfm-admin] rule remove failed', err);
+        }
+      },
+      applyPreset(presetKey) {
+        const host = String(this.vhostFocusHost || this.activeHost || '').trim();
+        const baseHost = host || 'example.com';
+        if (presetKey === 'meta_throttle') {
+          this.ruleEditID = '';
+          this.ruleForm = {
+            enabled: true,
+            priority: 100,
+            vhosts: baseHost,
+            countries: '',
+            uas: '*facebookexternalhit*, *meta-externalagent*',
+            paths: '',
+            methods: 'GET',
+            actionType: 'throttle',
+            throttleProfile: 'soft_bot',
+            note: 'Preset: Meta crawler soft throttle',
+          };
+        } else if (presetKey === 'challenge_login') {
+          this.ruleEditID = '';
+          this.ruleForm = {
+            enabled: true,
+            priority: 120,
+            vhosts: baseHost,
+            countries: '',
+            uas: '',
+            paths: '/wp-login.php, /xmlrpc.php',
+            methods: 'POST',
+            actionType: 'challenge',
+            throttleProfile: 'soft_bot',
+            note: 'Preset: challenge sensitive login endpoints',
+          };
+        } else if (presetKey === 'block_country') {
+          this.ruleEditID = '';
+          this.ruleForm = {
+            enabled: false,
+            priority: 200,
+            vhosts: baseHost,
+            countries: 'CN, RU',
+            uas: '',
+            paths: '',
+            methods: '',
+            actionType: 'block',
+            throttleProfile: 'soft_bot',
+            note: 'Preset: country block (disabled by default)',
+          };
+        }
+      },
+      async runRuleSimulation() {
+        const req = {
+          host: String(this.simulateForm.host || '').trim(),
+          ip: String(this.simulateForm.ip || '').trim(),
+          ua: String(this.simulateForm.ua || '').trim(),
+          path: String(this.simulateForm.path || '/').trim(),
+          method: String(this.simulateForm.method || 'GET').trim().toUpperCase(),
+          country: String(this.simulateForm.country || '').trim().toUpperCase(),
+        };
+        if (!req.host) {
+          this.actionMsg = 'Simulation host is required.';
+          return;
+        }
+        try {
+          this.simulateResult = await this.postJSON('v1/webdet/rules/simulate', req);
+          this.actionMsg = this.simulateResult?.matched
+            ? `Simulation matched rule ${this.simulateResult?.rule?.id || ''}`
+            : 'Simulation: no matching rule.';
+        } catch (err) {
+          this.actionMsg = `Simulation failed: ${err}`;
+          console.error('[cfm-admin] rule simulation failed', err);
+        }
+      },
       async runAnalyze(mode = this.analyzeMode) {
         const target = String(this.analyzeTarget || '').trim();
         if (!target) {
@@ -977,6 +1199,7 @@
           if (this.shouldShow('history')) await this.refreshHistory();
           if (this.shouldShow('wafengine')) await this.refreshWAFEngine();
           if (this.shouldShow('controls')) await this.refreshVhostControls();
+          if (this.shouldShow('controls')) await this.refreshRules();
 
           if (this.shouldShow('vhost') && this.isVhostPage) {
             const vhostTarget =

@@ -195,6 +195,7 @@ type Config struct {
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
 	ChallengeExcludeStorePath string // CHALLENGE_EXCLUDE_STORE_PATH
 	WAFExcludeStorePath       string // WAF_EXCLUDE_STORE_PATH
+	TrafficRulesStorePath     string // TRAFFIC_RULES_STORE_PATH
 
 }
 
@@ -226,6 +227,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.WAFExcludeStorePath == "" {
 		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
+	}
+	if c.TrafficRulesStorePath == "" {
+		c.TrafficRulesStorePath = "/var/lib/cfm/webdetector_traffic_rules.json"
 	}
 	if c.HistoryDBPath == "" {
 		c.HistoryDBPath = "/var/lib/cfm/webdetector-history.db"
@@ -429,4 +433,3 @@ func (c *Config) FillDefaults() {
 func (c Config) LongHorizon() time.Duration {
 	return time.Duration(c.LongFactor) * c.Window
 }
-
