@@ -1037,7 +1037,7 @@ if CFG.debug_headers then
   if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
 
-if ip_action == "block" or vh_action == "block" then
+if ip_action == "block" or vh_action == "block" or rule_action == "block" then
   ngx.header["X-CFM-Action"] = "block"
   ngx.var.cfm_upstream = "cfm_block"
   ngx.var.cfm_pass     = ""
@@ -1046,7 +1046,7 @@ if ip_action == "block" or vh_action == "block" then
   return ngx.exit(CFG.block_code)
 end
 
-if ip_action == "challenge" or vh_action == "challenge" then
+if ip_action == "challenge" or vh_action == "challenge" or rule_action == "challenge" then
   -- Same re-challenge guard as in the WAF path above.
   if ngx.ctx.cfm_resumed_post then
     ngx.header["X-CFM-Action"] = "block_replayed"

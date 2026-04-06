@@ -2,8 +2,8 @@
 -- Dynamic traffic-rules action executor for cfm.lua.
 --
 -- Current scope:
---   - apply throttle actions from bridge decision payload
---   - leave allow/challenge/block behavior to existing cfm.lua flow
+--   - normalize passthrough rule actions from bridge decision payload
+--   - apply throttle side-effects when rule_action == "throttle"
 
 local _M = {}
 
@@ -93,12 +93,15 @@ local function throttle_hit(profileName, host, ip)
 end
 
 -- apply executes rule action side effects and returns normalized result:
---   { action = "allow" | "throttle", retry_after = number }
+--   { action = "allow" | "challenge" | "block" | "throttle", retry_after = number }
 function _M.apply(decision, ctx)
   decision = decision or {}
   ctx = ctx or {}
 
   local action = tostring(decision.rule_action or "allow")
+  if action == "allow" or action == "challenge" or action == "block" then
+    return { action = action }
+  end
   if action ~= "throttle" then
     return { action = "allow" }
   end
