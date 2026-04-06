@@ -616,9 +616,12 @@ local function refresh_snapshot_if_needed()
 
   local now = ngx.now()
   local last_hb = tonumber(SH:get("snap_hb_ts") or "0") or 0
-  local last_fail = tonumber(SH:get("snap_fail_ts") or "0") or 0
-  local last_attempt = math.max(last_hb, last_fail)
-  if (now - last_attempt) < CFG.snapshot_refresh_sec then
+  local fail_until = tonumber(SH:get("snap_fail_until") or "0") or 0
+  if now < fail_until then
+    return
+  end
+
+  if (now - last_hb) < CFG.snapshot_refresh_sec then
     return
   end
 
@@ -626,49 +629,62 @@ local function refresh_snapshot_if_needed()
     return
   end
 
-  local body, err = http_get_unix("/nginx/snapshot")
-  if not body then
+  local function mark_snapshot_refresh_failure(reason)
     if CFG.debug then
-      log_route(ngx.INFO, "snapshot_refresh_fail err=" .. tostring(err))
+      log_route(ngx.INFO, "snapshot_refresh_fail reason=" .. tostring(reason or "unknown"))
     end
     SH:incr("snap_fail_count", 1, 0)
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+    SH:set("snap_fail_until", now + CFG.snapshot_refresh_sec, math.max(1, CFG.snapshot_refresh_sec * 2))
     SH:delete("snap_lock")
+  end
+
+  local body, err = http_get_unix("/nginx/snapshot")
+  if not body then
+    mark_snapshot_refresh_failure("http:" .. tostring(err))
     return
   end
 
   local obj = cjson.decode(body)
   if not obj then
-    if CFG.debug then
-      log_route(ngx.INFO, "snapshot_refresh_decode_fail")
-    end
-    SH:incr("snap_fail_count", 1, 0)
-    SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
-    SH:delete("snap_lock")
+    mark_snapshot_refresh_failure("decode")
     return
   end
 
   local new_ver = tostring(obj.version or "")
   if new_ver == "" then
-    SH:incr("snap_fail_count", 1, 0)
-    SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
-    SH:delete("snap_lock")
+    mark_snapshot_refresh_failure("empty_version")
     return
   end
 
   local cur_ver = tostring(SH:get("snap_ver") or "")
   if new_ver ~= cur_ver then
-    SH:set("snap_ips", cjson.encode(obj.ips or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-    SH:set("snap_vhosts", cjson.encode(obj.vhosts or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-    SH:set("snap_rules", cjson.encode(obj.rules or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-    SH:set("snap_waf_excludes", cjson.encode(obj.waf_excludes or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-    SH:set("snap_ver", new_ver, math.max(2, CFG.snapshot_refresh_sec * 2))
-    SH:set("snap_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
+    local snap_ttl = math.max(2, CFG.snapshot_refresh_sec * 2)
+    local encoded_ips = cjson.encode(obj.ips or {})
+    local encoded_vhosts = cjson.encode(obj.vhosts or {})
+    local encoded_rules = cjson.encode(obj.rules or {})
+    local encoded_waf_excludes = cjson.encode(obj.waf_excludes or {})
+    if not encoded_ips or not encoded_vhosts or not encoded_rules or not encoded_waf_excludes then
+      mark_snapshot_refresh_failure("encode")
+      return
+    end
+
+    local ok_ips = SH:set("snap_ips", encoded_ips, snap_ttl)
+    local ok_vhosts = SH:set("snap_vhosts", encoded_vhosts, snap_ttl)
+    local ok_rules = SH:set("snap_rules", encoded_rules, snap_ttl)
+    local ok_waf = SH:set("snap_waf_excludes", encoded_waf_excludes, snap_ttl)
+    local ok_ver = SH:set("snap_ver", new_ver, snap_ttl)
+    if not (ok_ips and ok_vhosts and ok_rules and ok_waf and ok_ver) then
+      mark_snapshot_refresh_failure("store")
+      return
+    end
+    SH:set("snap_ts", now, snap_ttl)
   else
     SH:set("snap_ver", new_ver, math.max(2, CFG.snapshot_refresh_sec * 2))
   end
   SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:delete("snap_fail_ts")
+  SH:delete("snap_fail_until")
   SH:delete("snap_lock")
 end
 
@@ -700,11 +716,13 @@ local function load_snapshot_local_cache()
   if not SH then return end
 
   if SH:get("snap_fail_ts") and snap_local_ver ~= "" then
+    local stale_age = math.max(0, ngx.now() - snap_local_ts)
     if CFG.debug then
-      log_route(ngx.INFO, "snapshot_serving_stale ver=" .. snap_local_ver)
+      log_route(ngx.INFO, "snapshot_serving_stale marker=stale_snapshot ver=" .. snap_local_ver .. " age_sec=" .. tostring(math.floor(stale_age)))
     end
     if CFG.debug_headers then
       ngx.header["X-CFM-Snapshot-Stale"] = "1"
+      ngx.header["X-CFM-Snapshot-Stale-Age"] = tostring(math.floor(stale_age))
     end
   end
 
