@@ -632,7 +632,13 @@ local function get_decision(ip, host, uri, method, scheme, ua)
   local obj = cjson.decode(body)
   if not obj then return fail_decision("decode_failed") end
 
-  if SH and obj.ip_action == "allow" and obj.vhost_action == "allow" then
+  -- Cache only fully-allow decisions.
+  -- Any rule_action override (block/challenge/throttle/...) must bypass cache
+  -- so requests continue to hit the bridge and enforce rule outcomes.
+  if SH and
+     obj.ip_action == "allow" and
+     obj.vhost_action == "allow" and
+     (obj.rule_action == nil or obj.rule_action == "allow") then
     SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
   end
   return obj
