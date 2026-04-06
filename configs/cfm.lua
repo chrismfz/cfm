@@ -614,8 +614,10 @@ local function refresh_snapshot_if_needed()
   if not SH then return end
 
   local now = ngx.now()
-  local last = tonumber(SH:get("snap_ts") or "0") or 0
-  if (now - last) < CFG.snapshot_refresh_sec then
+  local last_good = tonumber(SH:get("snap_ts") or "0") or 0
+  local last_fail = tonumber(SH:get("snap_fail_ts") or "0") or 0
+  local last_attempt = math.max(last_good, last_fail)
+  if (now - last_attempt) < CFG.snapshot_refresh_sec then
     return
   end
 
@@ -628,17 +630,27 @@ local function refresh_snapshot_if_needed()
     if CFG.debug then
       log_route(ngx.INFO, "snapshot_refresh_fail err=" .. tostring(err))
     end
-    SH:set("snap_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+    SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
   end
 
-  local obj = cjson.decode(body) or {}
+  local obj = cjson.decode(body)
+  if not obj then
+    if CFG.debug then
+      log_route(ngx.INFO, "snapshot_refresh_decode_fail")
+    end
+    SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+    SH:delete("snap_lock")
+    return
+  end
+
   SH:set("snap_ips", cjson.encode(obj.ips or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:set("snap_vhosts", cjson.encode(obj.vhosts or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:set("snap_rules", cjson.encode(obj.rules or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:set("snap_waf_excludes", cjson.encode(obj.waf_excludes or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:set("snap_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+  SH:delete("snap_fail_ts")
   SH:delete("snap_lock")
 end
 
@@ -667,25 +679,28 @@ end
 
 local function load_snapshot_local_cache()
   refresh_snapshot_if_needed()
-  if not SH then
-    snap_local_ts = 0
-    snap_local_ips = {}
-    snap_local_vhosts = {}
-    snap_local_rules = {}
-    snap_local_waf_hosts = {}
-    snap_local_waf_paths = {}
-    return
-  end
-  local ts = tonumber(SH:get("snap_ts") or "0") or 0
-  if ts == snap_local_ts then
-    return
-  end
-  snap_local_ts = ts
+  if not SH then return end
 
-  local ip_rows = cjson.decode(SH:get("snap_ips") or "[]") or {}
-  local vh_rows = cjson.decode(SH:get("snap_vhosts") or "[]") or {}
-  local rules_rows = cjson.decode(SH:get("snap_rules") or "[]") or {}
-  local waf_rows = cjson.decode(SH:get("snap_waf_excludes") or "[]") or {}
+  local ts = tonumber(SH:get("snap_ts") or "0") or 0
+  if ts <= 0 or ts == snap_local_ts then
+    return
+  end
+
+  local snap_ips_raw = SH:get("snap_ips")
+  local snap_vhosts_raw = SH:get("snap_vhosts")
+  local snap_rules_raw = SH:get("snap_rules")
+  local snap_waf_raw = SH:get("snap_waf_excludes")
+  if not snap_ips_raw or not snap_vhosts_raw or not snap_rules_raw or not snap_waf_raw then
+    return
+  end
+
+  local ip_rows = cjson.decode(snap_ips_raw)
+  local vh_rows = cjson.decode(snap_vhosts_raw)
+  local rules_rows = cjson.decode(snap_rules_raw)
+  local waf_rows = cjson.decode(snap_waf_raw)
+  if type(ip_rows) ~= "table" or type(vh_rows) ~= "table" or type(rules_rows) ~= "table" or type(waf_rows) ~= "table" then
+    return
+  end
 
   local ip_map = {}
   for _, row in ipairs(ip_rows) do
@@ -711,6 +726,7 @@ local function load_snapshot_local_cache()
       end
     end
   end
+  snap_local_ts = ts
   snap_local_waf_hosts = hosts
   snap_local_waf_paths = paths
 end
