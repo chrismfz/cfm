@@ -37,7 +37,27 @@ local CFG = {
   token        = "cfm",
   token_header = "X-CFM-Token",
 
-  decision_timeout_ms   = env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+  -- Bridge socket timeout policy:
+  --   connect timeout is intentionally tighter than read timeout.
+  -- Legacy CFM_DECISION_TIMEOUT_MS is still honored as fallback.
+  decision_connect_timeout_ms = env_num(
+    "CFM_DECISION_CONNECT_TIMEOUT_MS",
+    env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+    1,
+    60000
+  ),
+  decision_send_timeout_ms = env_num(
+    "CFM_DECISION_SEND_TIMEOUT_MS",
+    env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+    1,
+    60000
+  ),
+  decision_read_timeout_ms = env_num(
+    "CFM_DECISION_READ_TIMEOUT_MS",
+    env_num("CFM_DECISION_TIMEOUT_MS", 300, 1, 60000),
+    1,
+    60000
+  ),
   snapshot_refresh_sec  = env_num("CFM_SNAPSHOT_REFRESH_SEC", 5, 1, 300),
 
   block_code = 403,
@@ -91,6 +111,17 @@ local SH = ngx.shared.cfm_decisions
 
 local function log_route(level, msg)
   ngx.log(level or ngx.WARN, "[cfm] ", msg)
+end
+
+local function incr_metric(name)
+  if not SH or not name or name == "" then return end
+  SH:incr(name, 1, 0)
+end
+
+local function is_timeout_err(err)
+  if not err then return false end
+  if err == "timeout" then return true end
+  return tostring(err):find("timed out", 1, true) ~= nil
 end
 
 -- URI-encode a value for use in query strings or redirect targets.
@@ -448,7 +479,10 @@ local function read_chunked(sock)
   local out = {}
   while true do
     local line, err = sock:receive("*l")
-    if not line then return nil, "chunked size line: " .. (err or "?") end
+    if not line then
+      if is_timeout_err(err) then incr_metric("bridge_timeout_read") end
+      return nil, "chunked size line: " .. (err or "?")
+    end
 
     local hex = line:match("^%s*([0-9a-fA-F]+)")
     if not hex then return nil, "bad chunk size line: " .. tostring(line) end
@@ -466,7 +500,10 @@ local function read_chunked(sock)
     end
 
     local data, derr = sock:receive(n)
-    if not data then return nil, "chunk read: " .. (derr or "?") end
+    if not data then
+      if is_timeout_err(derr) then incr_metric("bridge_timeout_read") end
+      return nil, "chunk read: " .. (derr or "?")
+    end
     table.insert(out, data)
     sock:receive(2) -- trailing CRLF after each chunk
   end
@@ -475,15 +512,25 @@ end
 
 -- Low-level HTTP/1.1 request over the cfm unix socket.
 -- Uses a per-worker keepalive pool to avoid a connect() syscall on every
--- request (critical for the 80ms decision timeout).
+-- request (critical for low-latency bridge decisions).
 local function http_unix(method, path, body)
   local s, err = ngx.socket.tcp()
   if not s then return nil, "socket.tcp: " .. (err or "unknown") end
 
-  s:settimeouts(CFG.decision_timeout_ms, CFG.decision_timeout_ms, CFG.decision_timeout_ms)
+  s:settimeouts(
+    CFG.decision_connect_timeout_ms,
+    CFG.decision_send_timeout_ms,
+    CFG.decision_read_timeout_ms
+  )
 
   local ok, cerr = s:connect("unix:" .. CFG.sock_path)
-  if not ok then s:close(); return nil, "connect: " .. (cerr or "unknown") end
+  if not ok then
+    s:close()
+    if is_timeout_err(cerr) then
+      incr_metric("bridge_timeout_connect")
+    end
+    return nil, "connect: " .. (cerr or "unknown")
+  end
 
   body = body or ""
   local req = method .. " " .. path .. " HTTP/1.1\r\n" ..
@@ -502,10 +549,22 @@ local function http_unix(method, path, body)
   req = req .. "\r\n" .. body
 
   local _, werr = s:send(req)
-  if werr then s:close(); return nil, "send: " .. (werr or "unknown") end
+  if werr then
+    s:close()
+    if is_timeout_err(werr) then
+      incr_metric("bridge_timeout_send")
+    end
+    return nil, "send: " .. (werr or "unknown")
+  end
 
   local status_line, rerr = s:receive("*l")
-  if not status_line then s:close(); return nil, "recv status: " .. (rerr or "unknown") end
+  if not status_line then
+    s:close()
+    if is_timeout_err(rerr) then
+      incr_metric("bridge_timeout_read")
+    end
+    return nil, "recv status: " .. (rerr or "unknown")
+  end
 
   local code = tonumber(status_line:match("%s(%d%d%d)%s"))
   if not code then s:close(); return nil, "bad status line: " .. status_line end
@@ -514,7 +573,12 @@ local function http_unix(method, path, body)
   local is_chunked = false
 
   while true do
-    local line, _ = s:receive("*l")
+    local line, herr = s:receive("*l")
+    if not line then
+      if is_timeout_err(herr) then incr_metric("bridge_timeout_read") end
+      s:close()
+      return nil, "recv header: " .. (herr or "unknown")
+    end
     if not line or line == "" then break end
     local k, v = line:match("^([^:]+):%s*(.*)$")
     if k and v then
@@ -531,13 +595,25 @@ local function http_unix(method, path, body)
   if method == "HEAD" or code == 204 or code == 304 then
     resp = ""
   elseif content_length and content_length > 0 then
-    resp = s:receive(content_length)
+    local b, berr = s:receive(content_length)
+    if not b then
+      if is_timeout_err(berr) then incr_metric("bridge_timeout_read") end
+      s:close()
+      return nil, "recv body: " .. (berr or "unknown")
+    end
+    resp = b
   elseif is_chunked then
     local b, berr = read_chunked(s)
     if not b then s:close(); return nil, berr end
     resp = b
   else
-    resp = s:receive("*a") or ""
+    local b, berr = s:receive("*a")
+    if not b then
+      if is_timeout_err(berr) then incr_metric("bridge_timeout_read") end
+      s:close()
+      return nil, "recv body: " .. (berr or "unknown")
+    end
+    resp = b or ""
   end
 
   local ok_ka = s:setkeepalive(CFG.keepalive_idle_ms, CFG.keepalive_pool)
@@ -551,6 +627,25 @@ end
 
 local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil) end
 local function http_post_unix(path, b) return http_unix("POST", path,    b)   end
+
+-- Fire-and-forget bridge POST. The timer callback runs off-request so best-effort
+-- telemetry calls do not add latency to user traffic.
+local function post_unix_async(path, payload)
+  local ok, terr = ngx.timer.at(0, function(premature, p, b)
+    if premature then return end
+    local _, err = http_post_unix(p, b)
+    if err and CFG.debug then
+      log_route(ngx.INFO, "bridge_async_post_fail path=" .. tostring(p) .. " err=" .. tostring(err))
+    end
+  end, path, payload)
+
+  if not ok then
+    incr_metric("bridge_async_schedule_fail")
+    if CFG.debug then
+      log_route(ngx.INFO, "bridge_async_schedule_fail path=" .. tostring(path) .. " err=" .. tostring(terr))
+    end
+  end
+end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HELPERS
@@ -570,7 +665,7 @@ local function observe_waf(ip, host, uri, method, status, reason)
     status = status or 403,
     reason = reason or "",
   })
-  http_post_unix("/nginx/observe", payload) -- best-effort; errors ignored
+  post_unix_async("/nginx/observe", payload) -- best-effort; async
 end
 
 -- Extend the Go bridge's okState TTL for a solved IP, rate-limited to at most
@@ -583,7 +678,7 @@ local function touch_ok(ip)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
   SH:set(k, now, CFG.ok_touch_every_sec)
   local payload = cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec })
-  http_post_unix("/nginx/ok/touch", payload)
+  post_unix_async("/nginx/ok/touch", payload)
 end
 
 -- Slide the cfm_ok cookie TTL forward on every request so an active browser
