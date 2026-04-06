@@ -702,7 +702,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
   -d '{"host":"example.com","ua":"facebookexternalhit/1.1","path":"/","method":"GET","country":"US"}' | jq
 ```
 
-> Note: Step 2 manages rules via API/CLI and supports simulation. Enforcement wiring into request path is handled in later steps.
+> Note: Rule simulation is exposed through API/CLI. In the OpenResty Lua request path, `rule_action` is enforced for `allow`, `challenge`, `block`, and `throttle` (with `throttle_profile` for throttles).
 
 
 

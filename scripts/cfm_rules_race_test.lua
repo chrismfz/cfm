@@ -88,7 +88,20 @@ do
   end
 end
 
--- Test 2: concurrent same-IP requests must not double-consume a single token.
+-- Test 2: non-throttle actions are normalized passthrough.
+do
+  local allow = rules.apply({ rule_action = "allow" }, { host = "example.com", ip = "1.1.1.1" })
+  local challenge = rules.apply({ rule_action = "challenge" }, { host = "example.com", ip = "1.1.1.1" })
+  local block = rules.apply({ rule_action = "block" }, { host = "example.com", ip = "1.1.1.1" })
+  local unknown = rules.apply({ rule_action = "drop" }, { host = "example.com", ip = "1.1.1.1" })
+
+  assert_eq(allow.action, "allow", "allow passthrough")
+  assert_eq(challenge.action, "challenge", "challenge passthrough")
+  assert_eq(block.action, "block", "block passthrough")
+  assert_eq(unknown.action, "allow", "unsupported actions fail open to allow")
+end
+
+-- Test 3: concurrent same-IP requests must not double-consume a single token.
 do
   local k = "tr|hard_bot|example.org|5.6.7.8"
   dict:set(k, "1:" .. tostring(now), 30)
