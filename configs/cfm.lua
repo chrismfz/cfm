@@ -93,6 +93,14 @@ local CFG = {
   -- Narrow body read for inline WAF (only where needed)
   waf_body_max_len = env_num("CFM_WAF_BODY_MAX_LEN", 8192, 0, 1048576),
 
+  -- Non-critical bridge events are queued in shared dict and flushed by timer.
+  event_flush_interval_sec = env_num("CFM_EVENT_FLUSH_INTERVAL_SEC", 1, 0.5, 2),
+  event_queue_max_depth    = env_num("CFM_EVENT_QUEUE_MAX_DEPTH", 2048, 64, 20000),
+  event_batch_size         = env_num("CFM_EVENT_BATCH_SIZE", 64, 1, 500),
+  event_retry_budget       = env_num("CFM_EVENT_RETRY_BUDGET", 1, 0, 5),
+  event_drop_policy        = string.lower(os.getenv("CFM_EVENT_DROP_POLICY") or "oldest"), -- oldest|newest
+  events_batch_endpoint    = os.getenv("CFM_EVENTS_BATCH_ENDPOINT") or "/nginx/events/batch",
+
   -- POST resume: stash challenged POST bodies so they can be replayed after solve.
   -- Enabled by default. Only covers allowlisted content types (form, JSON, text).
   -- Multipart / file uploads are intentionally excluded (size + complexity).
@@ -642,23 +650,161 @@ end
 local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil) end
 local function http_post_unix(path, b) return http_unix("POST", path,    b)   end
 
--- Fire-and-forget bridge POST. The timer callback runs off-request so best-effort
--- telemetry calls do not add latency to user traffic.
-local function post_unix_async(path, payload)
-  local ok, terr = ngx.timer.at(0, function(premature, p, b)
-    if premature then return end
-    local _, err = http_post_unix(p, b)
-    if err and CFG.debug then
-      log_route(ngx.INFO, "bridge_async_post_fail path=" .. tostring(p) .. " err=" .. tostring(err))
-    end
-  end, path, payload)
+local event_flusher_started = false
 
+local function queue_depth(head, tail)
+  if not head or not tail or tail < head then return 0 end
+  return (tail - head + 1)
+end
+
+local function event_q_key(seq)
+  return "evtq|" .. tostring(seq or 0)
+end
+
+local function enqueue_bridge_event(path, payload)
+  if not SH then
+    incr_metric("event_queue_unavailable")
+    return nil, "shared_dict_unavailable"
+  end
+
+  local seq, seq_err = SH:incr("evtq_seq", 1, 0)
+  if not seq then
+    incr_metric("event_queue_seq_fail")
+    return nil, "seq:" .. tostring(seq_err or "unknown")
+  end
+
+  local head = tonumber(SH:get("evtq_head") or "0") or 0
+  local tail = tonumber(SH:get("evtq_tail") or "0") or 0
+  if head <= 0 or tail < head then
+    head = seq
+    tail = seq - 1
+    SH:set("evtq_head", head)
+    SH:set("evtq_tail", tail)
+  end
+
+  if queue_depth(head, tail) >= CFG.event_queue_max_depth then
+    if CFG.event_drop_policy == "newest" then
+      incr_metric("event_queue_drop_newest")
+      incr_metric("event_queue_dropped_total")
+      SH:incr("event_queue_dropped_total", 1, 0)
+      return nil, "queue_full_drop_newest"
+    end
+    SH:delete(event_q_key(head))
+    head = head + 1
+    SH:set("evtq_head", head)
+    incr_metric("event_queue_drop_oldest")
+    incr_metric("event_queue_dropped_total")
+    SH:incr("event_queue_dropped_total", 1, 0)
+  end
+
+  local rec = cjson.encode({
+    p = path or "",
+    b = payload or "",
+    t = ngx.now(),
+  })
+  local ok, set_err = SH:set(event_q_key(seq), rec)
   if not ok then
-    incr_metric("bridge_async_schedule_fail")
-    if CFG.debug then
-      log_route(ngx.INFO, "bridge_async_schedule_fail path=" .. tostring(path) .. " err=" .. tostring(terr))
+    incr_metric("event_queue_set_fail")
+    return nil, "set:" .. tostring(set_err or "unknown")
+  end
+  SH:set("evtq_tail", seq)
+  incr_metric("event_queue_enqueued")
+  return true, nil
+end
+
+local function flush_bridge_events_once()
+  if not SH then return end
+
+  local lock_ok = SH:add("evtq_flush_lock", true, math.max(0.2, CFG.event_flush_interval_sec * 0.9))
+  if not lock_ok then return end
+
+  local head = tonumber(SH:get("evtq_head") or "0") or 0
+  local tail = tonumber(SH:get("evtq_tail") or "0") or 0
+  if head <= 0 or tail < head then return end
+
+  local max_seq = math.min(tail, head + CFG.event_batch_size - 1)
+  local seqs, events = {}, {}
+  for seq = head, max_seq do
+    local raw = SH:get(event_q_key(seq))
+    seqs[#seqs + 1] = seq
+    if raw and raw ~= "" then
+      local ev = cjson.decode(raw)
+      if ev and ev.p then
+        events[#events + 1] = ev
+      end
     end
   end
+  if #seqs == 0 then return end
+
+  local sent = false
+  if #events > 0 then
+    local batch_payload = cjson.encode({ events = events })
+    for _ = 0, CFG.event_retry_budget do
+      local _, berr = http_post_unix(CFG.events_batch_endpoint, batch_payload)
+      if not berr then
+        sent = true
+        break
+      end
+    end
+  else
+    sent = true
+  end
+
+  if not sent and #events > 0 then
+    sent = true
+    for _, ev in ipairs(events) do
+      local ok_item = false
+      for _ = 0, CFG.event_retry_budget do
+        local _, ierr = http_post_unix(ev.p, ev.b)
+        if not ierr then
+          ok_item = true
+          break
+        end
+      end
+      if not ok_item then
+        sent = false
+        break
+      end
+    end
+  end
+
+  if not sent then
+    incr_metric("event_queue_flush_fail")
+    return
+  end
+
+  for _, seq in ipairs(seqs) do
+    SH:delete(event_q_key(seq))
+  end
+  SH:set("evtq_head", max_seq + 1)
+  incr_metric("event_queue_flushed_batches")
+  SH:incr("event_queue_flushed_events", #seqs, 0)
+end
+
+local function schedule_event_flusher(delay)
+  local ok, terr = ngx.timer.at(delay or CFG.event_flush_interval_sec, function(premature)
+    if premature then return end
+    local ok_run, run_err = pcall(flush_bridge_events_once)
+    if not ok_run then
+      incr_metric("event_queue_flush_panic")
+      if CFG.debug then
+        log_route(ngx.WARN, "event_queue_flush_panic err=" .. tostring(run_err))
+      end
+    end
+    schedule_event_flusher(CFG.event_flush_interval_sec)
+  end)
+  if not ok then
+    incr_metric("event_queue_schedule_fail")
+    if CFG.debug then
+      log_route(ngx.WARN, "event_queue_schedule_fail err=" .. tostring(terr))
+    end
+  end
+end
+
+local function ensure_event_flusher_started()
+  if event_flusher_started then return end
+  event_flusher_started = true
+  schedule_event_flusher(0.05)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -679,7 +825,8 @@ local function observe_waf(ip, host, uri, method, status, reason)
     status = status or 403,
     reason = reason or "",
   })
-  post_unix_async("/nginx/observe", payload) -- best-effort; async
+  local _, qerr = enqueue_bridge_event("/nginx/observe", payload)
+  if qerr then incr_metric("event_queue_drop_observe") end
 end
 
 -- Extend the Go bridge's okState TTL for a solved IP, rate-limited to at most
@@ -692,7 +839,8 @@ local function touch_ok(ip)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
   SH:set(k, now, CFG.ok_touch_every_sec)
   local payload = cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec })
-  post_unix_async("/nginx/ok/touch", payload)
+  local _, qerr = enqueue_bridge_event("/nginx/ok/touch", payload)
+  if qerr then incr_metric("event_queue_drop_ok_touch") end
 end
 
 -- Slide the cfm_ok cookie TTL forward on every request so an active browser
@@ -1071,6 +1219,9 @@ local uri     = ngx.var.uri    or "-"
 local method  = ngx.req.get_method() or "-"
 local scheme  = ngx.var.scheme or "http"
 
+-- Non-blocking telemetry/event flusher is worker-local and lazily started.
+ensure_event_flusher_started()
+
 
 -- Build the proxy target URL for the origin server.
 -- Uses $server_addr (the IP the request arrived on) so that per-site dedicated
@@ -1302,7 +1453,8 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         uri     = p_uri,
         method  = p_meth,
       })
-      http_post_unix("/nginx/ip", payload)
+      local _, qerr = enqueue_bridge_event("/nginx/ip", payload)
+      if qerr then incr_metric("event_queue_drop_ip_push") end
     end
 
     log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip ..
