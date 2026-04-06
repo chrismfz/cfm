@@ -601,6 +601,7 @@ end
 
 -- Local snapshot cache (worker-local views backed by shared-dict payload).
 local snap_local_ts = 0
+local snap_local_ver = ""
 local snap_local_ips = {}     -- [ip] = "challenge"|"block"
 local snap_local_vhosts = {}  -- array { {host=pattern, action=...}, ... }
 local snap_local_rules = {}   -- ordered TrafficRule rows (Go-sorted)
@@ -608,15 +609,15 @@ local snap_local_waf_hosts = {}
 local snap_local_waf_paths = {}
 
 -- Refresh local enforcement snapshot from bridge:
---   GET /nginx/snapshot -> { ips:[...], vhosts:[...], rules:[...], ts_unix:N }
+--   GET /nginx/snapshot -> { ips:[...], vhosts:[...], rules:[...], version:"...", ts_unix:N }
 -- One worker refreshes at a time; all workers consume from shared dict.
 local function refresh_snapshot_if_needed()
   if not SH then return end
 
   local now = ngx.now()
-  local last_good = tonumber(SH:get("snap_ts") or "0") or 0
+  local last_hb = tonumber(SH:get("snap_hb_ts") or "0") or 0
   local last_fail = tonumber(SH:get("snap_fail_ts") or "0") or 0
-  local last_attempt = math.max(last_good, last_fail)
+  local last_attempt = math.max(last_hb, last_fail)
   if (now - last_attempt) < CFG.snapshot_refresh_sec then
     return
   end
@@ -630,6 +631,8 @@ local function refresh_snapshot_if_needed()
     if CFG.debug then
       log_route(ngx.INFO, "snapshot_refresh_fail err=" .. tostring(err))
     end
+    SH:incr("snap_fail_count", 1, 0)
+    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
@@ -640,16 +643,34 @@ local function refresh_snapshot_if_needed()
     if CFG.debug then
       log_route(ngx.INFO, "snapshot_refresh_decode_fail")
     end
+    SH:incr("snap_fail_count", 1, 0)
+    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
   end
 
-  SH:set("snap_ips", cjson.encode(obj.ips or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-  SH:set("snap_vhosts", cjson.encode(obj.vhosts or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-  SH:set("snap_rules", cjson.encode(obj.rules or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-  SH:set("snap_waf_excludes", cjson.encode(obj.waf_excludes or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
-  SH:set("snap_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+  local new_ver = tostring(obj.version or "")
+  if new_ver == "" then
+    SH:incr("snap_fail_count", 1, 0)
+    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+    SH:delete("snap_lock")
+    return
+  end
+
+  local cur_ver = tostring(SH:get("snap_ver") or "")
+  if new_ver ~= cur_ver then
+    SH:set("snap_ips", cjson.encode(obj.ips or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_vhosts", cjson.encode(obj.vhosts or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_rules", cjson.encode(obj.rules or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_waf_excludes", cjson.encode(obj.waf_excludes or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_ver", new_ver, math.max(2, CFG.snapshot_refresh_sec * 2))
+    SH:set("snap_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
+  else
+    SH:set("snap_ver", new_ver, math.max(2, CFG.snapshot_refresh_sec * 2))
+  end
+  SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:delete("snap_fail_ts")
   SH:delete("snap_lock")
 end
@@ -681,8 +702,8 @@ local function load_snapshot_local_cache()
   refresh_snapshot_if_needed()
   if not SH then return end
 
-  local ts = tonumber(SH:get("snap_ts") or "0") or 0
-  if ts <= 0 or ts == snap_local_ts then
+  local ver = tostring(SH:get("snap_ver") or "")
+  if ver == "" or ver == snap_local_ver then
     return
   end
 
@@ -726,7 +747,8 @@ local function load_snapshot_local_cache()
       end
     end
   end
-  snap_local_ts = ts
+  snap_local_ver = ver
+  snap_local_ts = tonumber(SH:get("snap_ts") or "0") or ngx.now()
   snap_local_waf_hosts = hosts
   snap_local_waf_paths = paths
 end
