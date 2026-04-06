@@ -58,7 +58,21 @@ local CFG = {
     1,
     60000
   ),
-  snapshot_refresh_sec  = env_num("CFM_SNAPSHOT_REFRESH_SEC", 5, 1, 300),
+  snapshot_refresh_sec  = env_num("CFM_SNAPSHOT_REFRESH_SEC", 15, 1, 300),
+  snapshot_jitter_max_sec = env_num("CFM_SNAPSHOT_JITTER_MAX_SEC", 2, 0, 10),
+  snapshot_lock_ttl_sec = env_num(
+    "CFM_SNAPSHOT_LOCK_TTL_SEC",
+    math.max(3, math.ceil((
+      env_num("CFM_DECISION_CONNECT_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000), 1, 60000) +
+      env_num("CFM_DECISION_SEND_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000), 1, 60000) +
+      env_num("CFM_DECISION_READ_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 300, 1, 60000), 1, 60000)
+    ) / 1000) + 2),
+    1,
+    300
+  ),
+  snapshot_age_warn_sec = env_num("CFM_SNAPSHOT_AGE_WARN_SEC", 45, 5, 600),
+  snapshot_stale_failover_sec = env_num("CFM_SNAPSHOT_STALE_FAILOVER_SEC", 120, 10, 3600),
+  snapshot_policy_delay_warn_sec = env_num("CFM_SNAPSHOT_POLICY_DELAY_WARN_SEC", 30, 1, 600),
 
   block_code = 403,
   fail_open  = true,
@@ -694,6 +708,10 @@ local function fail_action()
   return CFG.fail_open and "allow" or "block"
 end
 
+local function fail_policy_label()
+  return CFG.fail_open and "fail_open_allow" or "fail_closed_block"
+end
+
 -- Local snapshot cache (worker-local views backed by shared-dict payload).
 local snap_local_ts = 0
 local snap_local_ver = ""
@@ -702,6 +720,39 @@ local snap_local_vhosts = {}  -- array { {host=pattern, action=...}, ... }
 local snap_local_rules = {}   -- ordered TrafficRule rows (Go-sorted)
 local snap_local_waf_hosts = {}
 local snap_local_waf_paths = {}
+local snap_refresh_jitter_sec = -1
+
+local function worker_refresh_jitter_sec(now)
+  if CFG.snapshot_jitter_max_sec <= 0 then return 0 end
+  if snap_refresh_jitter_sec >= 0 then return snap_refresh_jitter_sec end
+  local wid = 0
+  if ngx.worker and ngx.worker.id then
+    wid = tonumber(ngx.worker.id() or 0) or 0
+  end
+  local seed = math.floor((now or ngx.now()) * 1000) + (wid * 131)
+  local span_ms = math.floor(CFG.snapshot_jitter_max_sec * 1000)
+  if span_ms <= 0 then
+    snap_refresh_jitter_sec = 0
+  else
+    snap_refresh_jitter_sec = (seed % (span_ms + 1)) / 1000
+  end
+  return snap_refresh_jitter_sec
+end
+
+local function maybe_warn_snapshot_age(age_sec, reason)
+  if not SH then return end
+  SH:set("snap_age_sec", age_sec)
+  if age_sec <= CFG.snapshot_age_warn_sec then return end
+  local now = ngx.now()
+  local last_warn = tonumber(SH:get("snap_age_warn_ts") or "0") or 0
+  if (now - last_warn) < 10 then return end
+  SH:set("snap_age_warn_ts", now, 30)
+  log_route(ngx.WARN,
+    "snapshot_age_high age_sec=" .. tostring(math.floor(age_sec)) ..
+    " threshold_sec=" .. tostring(CFG.snapshot_age_warn_sec) ..
+    " reason=" .. tostring(reason or "unknown") ..
+    " policy=" .. fail_policy_label())
+end
 
 -- Refresh local enforcement snapshot from bridge:
 --   GET /nginx/snapshot -> { ips:[...], vhosts:[...], rules:[...], version:"...", ts_unix:N }
@@ -716,11 +767,12 @@ local function refresh_snapshot_if_needed()
     return
   end
 
-  if (now - last_hb) < CFG.snapshot_refresh_sec then
+  local jitter_sec = worker_refresh_jitter_sec(now)
+  if (now - last_hb) < (CFG.snapshot_refresh_sec + jitter_sec) then
     return
   end
 
-  if not SH:add("snap_lock", "1", 1) then
+  if not SH:add("snap_lock", "1", CFG.snapshot_lock_ttl_sec) then
     return
   end
 
@@ -731,6 +783,7 @@ local function refresh_snapshot_if_needed()
     SH:incr("snap_fail_count", 1, 0)
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:set("snap_fail_until", now + CFG.snapshot_refresh_sec, math.max(1, CFG.snapshot_refresh_sec * 2))
+    maybe_warn_snapshot_age(math.max(0, now - (tonumber(SH:get("snap_ts") or "0") or 0)), "refresh_fail")
     SH:delete("snap_lock")
   end
 
@@ -777,6 +830,19 @@ local function refresh_snapshot_if_needed()
   else
     SH:set("snap_ver", new_ver, math.max(2, CFG.snapshot_refresh_sec * 2))
   end
+  local cp_ts = tonumber(obj.ts_unix or "0") or 0
+  if cp_ts > 0 then
+    local policy_delay_sec = math.max(0, now - cp_ts)
+    SH:set("snap_policy_delay_sec", policy_delay_sec)
+    if policy_delay_sec > CFG.snapshot_policy_delay_warn_sec then
+      log_route(ngx.WARN,
+        "snapshot_policy_delay_high delay_sec=" .. tostring(math.floor(policy_delay_sec)) ..
+        " threshold_sec=" .. tostring(CFG.snapshot_policy_delay_warn_sec) ..
+        " version=" .. tostring(new_ver))
+    end
+  end
+  local snap_age = math.max(0, now - (tonumber(SH:get("snap_ts") or "0") or now))
+  SH:set("snap_age_sec", snap_age)
   SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
   SH:delete("snap_fail_ts")
   SH:delete("snap_fail_until")
@@ -812,6 +878,7 @@ local function load_snapshot_local_cache()
 
   if SH:get("snap_fail_ts") and snap_local_ver ~= "" then
     local stale_age = math.max(0, ngx.now() - snap_local_ts)
+    maybe_warn_snapshot_age(stale_age, "refresh_fail")
     if CFG.debug then
       log_route(ngx.INFO, "snapshot_serving_stale marker=stale_snapshot ver=" .. snap_local_ver .. " age_sec=" .. tostring(math.floor(stale_age)))
     end
@@ -1268,9 +1335,33 @@ local snap_flag = (snap_local_ts > 0) and " snap=1" or " snap=0"
 
 if snap_local_ts == 0 then
   local fallback = fail_action()
+  local now = ngx.now()
+  local last = tonumber(SH and SH:get("snap_policy_log_ts") or "0") or 0
+  if SH and (now - last) > 10 then
+    SH:set("snap_policy_log_ts", now, 30)
+    log_route(ngx.WARN, "snapshot_missing policy=" .. fail_policy_label() .. " action=" .. fallback)
+  end
   ip_action = fallback
   vh_action = fallback
   rule_action = fallback
+elseif SH and SH:get("snap_fail_ts") then
+  local stale_age = math.max(0, ngx.now() - snap_local_ts)
+  if stale_age > CFG.snapshot_stale_failover_sec then
+    local fallback = fail_action()
+    local now = ngx.now()
+    local last = tonumber(SH:get("snap_policy_log_ts") or "0") or 0
+    if (now - last) > 10 then
+      SH:set("snap_policy_log_ts", now, 30)
+      log_route(ngx.WARN,
+        "snapshot_stale_failover age_sec=" .. tostring(math.floor(stale_age)) ..
+        " threshold_sec=" .. tostring(CFG.snapshot_stale_failover_sec) ..
+        " policy=" .. fail_policy_label() ..
+        " action=" .. fallback)
+    end
+    ip_action = fallback
+    vh_action = fallback
+    rule_action = fallback
+  end
 end
 
 if CFG.debug_headers then
