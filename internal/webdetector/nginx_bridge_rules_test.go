@@ -137,3 +137,62 @@ func TestValidateUploadSourcePath(t *testing.T) {
 		t.Fatalf("expected alreadyCopied source inside pending dir to be accepted")
 	}
 }
+
+func TestNginxBridgeDecisionReevaluatesUADependentRules(t *testing.T) {
+	store := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	_, err := store.Add(TrafficRule{
+		ID:       "ua_challenge",
+		Enabled:  true,
+		Priority: 200,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match: TrafficRuleMatch{
+			Methods: []string{"GET"},
+			PathAny: []string{"/"},
+			UAAny:   []string{"*BadBot*"},
+		},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	})
+	if err != nil {
+		t.Fatalf("add ua challenge rule: %v", err)
+	}
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = store.Simulate
+
+	base := "/nginx/decision?ip=1.2.3.4&host=example.com&uri=%2F&method=GET&ua="
+
+	allowReq := httptest.NewRequest(http.MethodGet, base+"GoodBrowser", nil)
+	allowReq.Header.Set("X-CFM-Token", "tok")
+	allowRR := httptest.NewRecorder()
+	b.handleDecision(allowRR, allowReq)
+	if allowRR.Code != http.StatusOK {
+		t.Fatalf("good ua status=%d body=%s", allowRR.Code, allowRR.Body.String())
+	}
+
+	var allowPayload map[string]any
+	if err := json.Unmarshal(allowRR.Body.Bytes(), &allowPayload); err != nil {
+		t.Fatalf("decode good ua payload: %v", err)
+	}
+	if got, ok := allowPayload["rule_action"]; ok {
+		t.Fatalf("expected no rule_action for good ua (no rule match), got=%v payload=%+v", got, allowPayload)
+	}
+
+	challengeReq := httptest.NewRequest(http.MethodGet, base+"VeryBadBot/1.0", nil)
+	challengeReq.Header.Set("X-CFM-Token", "tok")
+	challengeRR := httptest.NewRecorder()
+	b.handleDecision(challengeRR, challengeReq)
+	if challengeRR.Code != http.StatusOK {
+		t.Fatalf("bad ua status=%d body=%s", challengeRR.Code, challengeRR.Body.String())
+	}
+
+	var challengePayload map[string]any
+	if err := json.Unmarshal(challengeRR.Body.Bytes(), &challengePayload); err != nil {
+		t.Fatalf("decode bad ua payload: %v", err)
+	}
+	if got := challengePayload["rule_action"]; got != TrafficActionChallenge {
+		t.Fatalf("expected challenge for bad ua, got=%v payload=%+v", got, challengePayload)
+	}
+	if got := challengePayload["rule_id"]; got != "ua_challenge" {
+		t.Fatalf("expected ua_challenge rule id, got=%v payload=%+v", got, challengePayload)
+	}
+}

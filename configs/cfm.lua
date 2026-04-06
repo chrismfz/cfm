@@ -609,7 +609,10 @@ end
 -- Challenges and blocks are never cached — they must always reach the bridge.
 local function get_decision(ip, host, uri, method, scheme, ua)
   local uri_part = (uri or "-"):sub(1, 64)
-  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
+  -- Include a bounded UA fragment so a cached allow from one User-Agent cannot
+  -- bypass UA-targeted rule actions for another User-Agent on the same route.
+  local ua_part = (ua or ""):sub(1, 32)
+  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part .. "|" .. ua_part
 
   if SH then
     local cached = SH:get(key)
