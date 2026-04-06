@@ -38,23 +38,25 @@ local CFG = {
   token_header = "X-CFM-Token",
 
   -- Bridge socket timeout policy:
-  --   connect timeout is intentionally tighter than read timeout.
-  -- Legacy CFM_DECISION_TIMEOUT_MS is still honored as fallback.
-  decision_connect_timeout_ms = env_num(
-    "CFM_DECISION_CONNECT_TIMEOUT_MS",
-    env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+  --   connect timeout is intentionally tighter than send/read timeout.
+  -- New env names:
+  --   CFM_BRIDGE_CONNECT_TIMEOUT_MS, CFM_BRIDGE_SEND_TIMEOUT_MS, CFM_BRIDGE_READ_TIMEOUT_MS
+  -- Legacy CFM_DECISION_* and CFM_DECISION_TIMEOUT_MS are still honored as fallback.
+  bridge_connect_timeout_ms = env_num(
+    "CFM_BRIDGE_CONNECT_TIMEOUT_MS",
+    env_num("CFM_DECISION_CONNECT_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 75, 1, 60000), 1, 60000),
     1,
     60000
   ),
-  decision_send_timeout_ms = env_num(
-    "CFM_DECISION_SEND_TIMEOUT_MS",
-    env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+  bridge_send_timeout_ms = env_num(
+    "CFM_BRIDGE_SEND_TIMEOUT_MS",
+    env_num("CFM_DECISION_SEND_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 100, 1, 60000), 1, 60000),
     1,
     60000
   ),
-  decision_read_timeout_ms = env_num(
-    "CFM_DECISION_READ_TIMEOUT_MS",
-    env_num("CFM_DECISION_TIMEOUT_MS", 300, 1, 60000),
+  bridge_read_timeout_ms = env_num(
+    "CFM_BRIDGE_READ_TIMEOUT_MS",
+    env_num("CFM_DECISION_READ_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 350, 1, 60000), 1, 60000),
     1,
     60000
   ),
@@ -63,9 +65,9 @@ local CFG = {
   snapshot_lock_ttl_sec = env_num(
     "CFM_SNAPSHOT_LOCK_TTL_SEC",
     math.max(3, math.ceil((
-      env_num("CFM_DECISION_CONNECT_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000), 1, 60000) +
-      env_num("CFM_DECISION_SEND_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000), 1, 60000) +
-      env_num("CFM_DECISION_READ_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 300, 1, 60000), 1, 60000)
+      env_num("CFM_BRIDGE_CONNECT_TIMEOUT_MS", env_num("CFM_DECISION_CONNECT_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 75, 1, 60000), 1, 60000), 1, 60000) +
+      env_num("CFM_BRIDGE_SEND_TIMEOUT_MS", env_num("CFM_DECISION_SEND_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 100, 1, 60000), 1, 60000), 1, 60000) +
+      env_num("CFM_BRIDGE_READ_TIMEOUT_MS", env_num("CFM_DECISION_READ_TIMEOUT_MS", env_num("CFM_DECISION_TIMEOUT_MS", 350, 1, 60000), 1, 60000), 1, 60000)
     ) / 1000) + 2),
     1,
     300
@@ -100,6 +102,10 @@ local CFG = {
   event_retry_budget       = env_num("CFM_EVENT_RETRY_BUDGET", 1, 0, 5),
   event_drop_policy        = string.lower(os.getenv("CFM_EVENT_DROP_POLICY") or "oldest"), -- oldest|newest
   events_batch_endpoint    = os.getenv("CFM_EVENTS_BATCH_ENDPOINT") or "/nginx/events/batch",
+  breaker_window_sec       = env_num("CFM_BRIDGE_BREAKER_WINDOW_SEC", 15, 1, 300),
+  breaker_min_samples      = env_num("CFM_BRIDGE_BREAKER_MIN_SAMPLES", 20, 1, 100000),
+  breaker_error_rate_pct   = env_num("CFM_BRIDGE_BREAKER_ERROR_RATE_PCT", 60, 1, 100),
+  breaker_open_sec         = env_num("CFM_BRIDGE_BREAKER_OPEN_SEC", 8, 1, 120),
 
   -- POST resume: stash challenged POST bodies so they can be replayed after solve.
   -- Enabled by default. Only covers allowlisted content types (form, JSON, text).
@@ -144,6 +150,41 @@ local function is_timeout_err(err)
   if not err then return false end
   if err == "timeout" then return true end
   return tostring(err):find("timed out", 1, true) ~= nil
+end
+
+local function optional_bridge_breaker_is_open()
+  if not SH then return false end
+  local until_ts = tonumber(SH:get("bridge_breaker_optional_until") or "0") or 0
+  local open_now = until_ts > ngx.now()
+  SH:set("bridge_breaker_optional_open", open_now and 1 or 0, math.max(1, CFG.breaker_open_sec))
+  if open_now then
+    incr_metric("bridge_breaker_optional_open")
+  end
+  return open_now
+end
+
+local function optional_bridge_breaker_record(ok)
+  if not SH then return end
+  local ttl = math.max(CFG.breaker_window_sec, CFG.breaker_open_sec) + 2
+  local total = SH:incr("bridge_breaker_optional_total", 1, 0, ttl)
+  if not total then return end
+  local errors = SH:incr("bridge_breaker_optional_errors", ok and 0 or 1, 0, ttl) or 0
+  if total < CFG.breaker_min_samples then return end
+
+  local error_rate_pct = (errors / math.max(1, total)) * 100.0
+  if error_rate_pct >= CFG.breaker_error_rate_pct then
+    local until_ts = ngx.now() + CFG.breaker_open_sec
+    SH:set("bridge_breaker_optional_until", until_ts, math.max(1, CFG.breaker_open_sec))
+    SH:set("bridge_breaker_optional_open", 1, math.max(1, CFG.breaker_open_sec))
+    incr_metric("bridge_breaker_optional_opened")
+    if CFG.debug then
+      log_route(ngx.WARN, "bridge_breaker_optional_opened error_rate_pct=" ..
+        tostring(math.floor(error_rate_pct)) ..
+        " total=" .. tostring(total) ..
+        " errors=" .. tostring(errors) ..
+        " open_sec=" .. tostring(CFG.breaker_open_sec))
+    end
+  end
 end
 
 -- URI-encode a value for use in query strings or redirect targets.
@@ -535,14 +576,20 @@ end
 -- Low-level HTTP/1.1 request over the cfm unix socket.
 -- Uses a per-worker keepalive pool to avoid a connect() syscall on every
 -- request (critical for low-latency bridge decisions).
-local function http_unix(method, path, body)
+local function http_unix(method, path, body, opts)
+  opts = opts or {}
+  if opts.optional and optional_bridge_breaker_is_open() then
+    incr_metric("bridge_breaker_optional_skipped")
+    return nil, "breaker_open"
+  end
+
   local s, err = ngx.socket.tcp()
   if not s then return nil, "socket.tcp: " .. (err or "unknown") end
 
   s:settimeouts(
-    CFG.decision_connect_timeout_ms,
-    CFG.decision_send_timeout_ms,
-    CFG.decision_read_timeout_ms
+    opts.connect_timeout_ms or CFG.bridge_connect_timeout_ms,
+    opts.send_timeout_ms or CFG.bridge_send_timeout_ms,
+    opts.read_timeout_ms or CFG.bridge_read_timeout_ms
   )
 
   local ok, cerr = s:connect("unix:" .. CFG.sock_path)
@@ -551,6 +598,7 @@ local function http_unix(method, path, body)
     if is_timeout_err(cerr) then
       incr_metric("bridge_timeout_connect")
     end
+    if opts.optional then optional_bridge_breaker_record(false) end
     return nil, "connect: " .. (cerr or "unknown")
   end
 
@@ -576,6 +624,7 @@ local function http_unix(method, path, body)
     if is_timeout_err(werr) then
       incr_metric("bridge_timeout_send")
     end
+    if opts.optional then optional_bridge_breaker_record(false) end
     return nil, "send: " .. (werr or "unknown")
   end
 
@@ -585,11 +634,16 @@ local function http_unix(method, path, body)
     if is_timeout_err(rerr) then
       incr_metric("bridge_timeout_read")
     end
+    if opts.optional then optional_bridge_breaker_record(false) end
     return nil, "recv status: " .. (rerr or "unknown")
   end
 
   local code = tonumber(status_line:match("%s(%d%d%d)%s"))
-  if not code then s:close(); return nil, "bad status line: " .. status_line end
+  if not code then
+    s:close()
+    if opts.optional then optional_bridge_breaker_record(false) end
+    return nil, "bad status line: " .. status_line
+  end
 
   local content_length
   local is_chunked = false
@@ -599,6 +653,7 @@ local function http_unix(method, path, body)
     if not line then
       if is_timeout_err(herr) then incr_metric("bridge_timeout_read") end
       s:close()
+      if opts.optional then optional_bridge_breaker_record(false) end
       return nil, "recv header: " .. (herr or "unknown")
     end
     if not line or line == "" then break end
@@ -621,18 +676,24 @@ local function http_unix(method, path, body)
     if not b then
       if is_timeout_err(berr) then incr_metric("bridge_timeout_read") end
       s:close()
+      if opts.optional then optional_bridge_breaker_record(false) end
       return nil, "recv body: " .. (berr or "unknown")
     end
     resp = b
   elseif is_chunked then
     local b, berr = read_chunked(s)
-    if not b then s:close(); return nil, berr end
+    if not b then
+      s:close()
+      if opts.optional then optional_bridge_breaker_record(false) end
+      return nil, berr
+    end
     resp = b
   else
     local b, berr = s:receive("*a")
     if not b then
       if is_timeout_err(berr) then incr_metric("bridge_timeout_read") end
       s:close()
+      if opts.optional then optional_bridge_breaker_record(false) end
       return nil, "recv body: " .. (berr or "unknown")
     end
     resp = b or ""
@@ -642,13 +703,20 @@ local function http_unix(method, path, body)
   if not ok_ka then s:close() end
 
   if code ~= 200 then
+    if opts.optional then optional_bridge_breaker_record(false) end
     return nil, "http " .. tostring(code) .. " body=" .. tostring(resp)
   end
+  if opts.optional then optional_bridge_breaker_record(true) end
   return resp, nil
 end
 
-local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil) end
-local function http_post_unix(path, b) return http_unix("POST", path,    b)   end
+local function http_get_snapshot_unix(path_qs)
+  return http_unix("GET", path_qs, nil, { optional = false })
+end
+
+local function http_post_optional_unix(path, b)
+  return http_unix("POST", path, b, { optional = true })
+end
 
 local event_flusher_started = false
 
@@ -740,7 +808,7 @@ local function flush_bridge_events_once()
   if #events > 0 then
     local batch_payload = cjson.encode({ events = events })
     for _ = 0, CFG.event_retry_budget do
-      local _, berr = http_post_unix(CFG.events_batch_endpoint, batch_payload)
+      local _, berr = http_post_optional_unix(CFG.events_batch_endpoint, batch_payload)
       if not berr then
         sent = true
         break
@@ -755,7 +823,7 @@ local function flush_bridge_events_once()
     for _, ev in ipairs(events) do
       local ok_item = false
       for _ = 0, CFG.event_retry_budget do
-        local _, ierr = http_post_unix(ev.p, ev.b)
+        local _, ierr = http_post_optional_unix(ev.p, ev.b)
         if not ierr then
           ok_item = true
           break
@@ -935,7 +1003,7 @@ local function refresh_snapshot_if_needed()
     SH:delete("snap_lock")
   end
 
-  local body, err = http_get_unix("/nginx/snapshot")
+  local body, err = http_get_snapshot_unix("/nginx/snapshot")
   if not body then
     mark_snapshot_refresh_failure("http:" .. tostring(err))
     return
