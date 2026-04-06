@@ -93,8 +93,13 @@ func matchHostExclude(excludes []string, host string) (matched bool, matchedValu
 		if err == nil && ok {
 			return true, ex, ex == host
 		}
-		if !strings.ContainsAny(ex, "*?") && strings.Contains(host, ex) {
-			return true, ex, ex == host
+		if !strings.ContainsAny(ex, "*?") {
+			if host == ex {
+				return true, ex, true
+			}
+			if strings.HasSuffix(host, "."+ex) {
+				return true, ex, false
+			}
 		}
 	}
 	return false, "", false
