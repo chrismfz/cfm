@@ -82,7 +82,7 @@ if rules_ok and rules and rules.init then
 end
 
 
--- Shared dict used for both bridge decision cache (d|...) and POST resume stash (pr|...).
+-- Shared dict used for local control-plane snapshot + POST resume stash.
 local SH = ngx.shared.cfm_decisions
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -1165,7 +1165,10 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
 end
 
 if rules_ok and rules and rules.apply then
-  local r = rules.apply(d, {
+  local r = rules.apply({
+    rule_action = rule_action,
+    throttle_profile = throttle_profile,
+  }, {
     ip = ip,
     host = host,
     uri = uri,
