@@ -130,29 +130,47 @@ local function decisions_stats(d)
   local total    = #all_keys
   local capped   = (total >= 25000)
 
-  local cnt_decision  = 0
+  local cnt_snap_ips  = 0
+  local cnt_snap_vhosts = 0
+  local cnt_snap_rules = 0
+  local cnt_snap_waf_excludes = 0
+  local cnt_snap_ts = 0
+  local cnt_snap_lock = 0
   local cnt_resume    = 0
   local cnt_ok_touch  = 0
   local cnt_waf_push  = 0
-  local cnt_waf_excl  = 0
   local cnt_other     = 0
 
   for _, k in ipairs(all_keys) do
-    if     k:sub(1, 2) == "d|"        then cnt_decision  = cnt_decision  + 1
+    if     k == "snap_ips"            then cnt_snap_ips  = cnt_snap_ips + 1
+    elseif k == "snap_vhosts"         then cnt_snap_vhosts = cnt_snap_vhosts + 1
+    elseif k == "snap_rules"          then cnt_snap_rules = cnt_snap_rules + 1
+    elseif k == "snap_waf_excludes"   then cnt_snap_waf_excludes = cnt_snap_waf_excludes + 1
+    elseif k == "snap_ts"             then cnt_snap_ts = cnt_snap_ts + 1
+    elseif k == "snap_lock"           then cnt_snap_lock = cnt_snap_lock + 1
     elseif k:sub(1, 3) == "pr|"       then cnt_resume    = cnt_resume    + 1
     elseif k:sub(1, 9) == "ok_touch|" then cnt_ok_touch  = cnt_ok_touch  + 1
     elseif k:sub(1, 8) == "wafpush|"  then cnt_waf_push  = cnt_waf_push  + 1
-    elseif k == "wxhosts" or k == "wxpaths"
-        or k == "wxsnap_ts" or k == "wxsnap_lock"
-                                       then cnt_waf_excl  = cnt_waf_excl  + 1
     else                                    cnt_other     = cnt_other     + 1
     end
   end
 
-  local wx_ts_raw = d:get("wxsnap_ts")
-  local wx_ts     = tonumber(wx_ts_raw or "0") or 0
-  local wx_hosts  = cjson.decode(d:get("wxhosts") or "[]") or {}
-  local wx_paths  = cjson.decode(d:get("wxpaths") or "[]") or {}
+  local snap_ts = tonumber(d:get("snap_ts") or "0") or 0
+  local snap_waf_excludes = cjson.decode(d:get("snap_waf_excludes") or "[]") or {}
+  local wx_hosts, wx_paths = {}, {}
+  if type(snap_waf_excludes) == "table" then
+    for _, e in ipairs(snap_waf_excludes) do
+      local t = tostring(e.type or ""):lower()
+      local v = tostring(e.value or ""):lower()
+      if v ~= "" then
+        if t == "host" then
+          wx_hosts[#wx_hosts + 1] = v
+        elseif t == "path" then
+          wx_paths[#wx_paths + 1] = v
+        end
+      end
+    end
+  end
 
   return {
     capacity_bytes = cap,
@@ -162,15 +180,19 @@ local function decisions_stats(d)
     total_keys     = total,
     keys_capped    = capped,
     key_breakdown = {
-      decisions     = cnt_decision,
-      post_resumes  = cnt_resume,
-      ok_touches    = cnt_ok_touch,
-      waf_push_cool = cnt_waf_push,
-      waf_excl_meta = cnt_waf_excl,
-      other         = cnt_other,
+      snapshot_ips            = cnt_snap_ips,
+      snapshot_vhosts         = cnt_snap_vhosts,
+      snapshot_rules          = cnt_snap_rules,
+      snapshot_waf_excludes   = cnt_snap_waf_excludes,
+      snapshot_ts             = cnt_snap_ts,
+      snapshot_lock           = cnt_snap_lock,
+      post_resume_entries     = cnt_resume,
+      solved_ip_touch_entries = cnt_ok_touch,
+      waf_push_cooldowns      = cnt_waf_push,
+      other                   = cnt_other,
     },
     waf_excludes = {
-      refresh_age_s = wx_ts > 0 and math.floor(ngx.time() - wx_ts) or nil,
+      refresh_age_s = snap_ts > 0 and math.floor(ngx.time() - snap_ts) or nil,
       host_rules    = wx_hosts,
       path_rules    = wx_paths,
     },
