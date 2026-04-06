@@ -14,6 +14,7 @@ local math = math
 local string = string
 
 local SH = nil
+local SH_MISSING_LOGGED = false
 
 local PROFILES = {
   soft_bot = { rate = 2.0, burst = 20 },
@@ -23,6 +24,10 @@ local PROFILES = {
 
 function _M.init(_cfg)
   SH = ngx.shared.cfm_decisions
+  if not SH and not SH_MISSING_LOGGED then
+    ngx.log(ngx.ERR, "[cfm_rules] ngx.shared.cfm_decisions is nil; throttling is disabled")
+    SH_MISSING_LOGGED = true
+  end
 end
 
 local function profile_for(name)
@@ -32,7 +37,10 @@ local function profile_for(name)
 end
 
 local function throttle_hit(profileName, host, ip)
-  if not SH then return false, 0 end
+  if not SH then
+    -- Intentional degraded mode: fail open and allow requests when cfm_decisions SHM is unavailable.
+    return false, 0
+  end
 
   local p = profile_for(profileName)
   local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" .. tostring(host or "-") .. "|" .. tostring(ip or "-")
