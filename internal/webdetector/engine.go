@@ -431,6 +431,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
+		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
 	}
 	// Compile MALPATH rules. Supports "N:substring" override syntax.
 	e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)

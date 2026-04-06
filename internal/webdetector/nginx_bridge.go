@@ -91,6 +91,10 @@ type NginxBridge struct {
 	// shape (host/ip/ua/path/method/country) and returns the matched action.
 	RuleDecision func(TrafficRuleEvalInput) TrafficRuleEvalResult
 
+	// ListTrafficRules returns normalized, ordered traffic rules used for
+	// local snapshot enforcement in OpenResty Lua.
+	ListTrafficRules func() []TrafficRule
+
 	// Clam
 	clamMgr      clam.Enqueuer
 	clamPending  string
@@ -148,6 +152,25 @@ type NginxBridgeStatus struct {
 	ActiveIPs    []string    `json:"active_ips"`
 	ActiveVhosts []string    `json:"active_vhosts"`
 	Stats        BridgeStats `json:"stats"`
+}
+
+// Snapshot payload for Lua local enforcement.
+type nginxSnapshotResp struct {
+	IPs         []nginxSnapshotIP    `json:"ips"`
+	Vhosts      []nginxSnapshotVhost `json:"vhosts"`
+	Rules       []TrafficRule        `json:"rules"`
+	WAFExcludes []excludeEntry       `json:"waf_excludes"`
+	TSUnix      int64                `json:"ts_unix"`
+}
+
+type nginxSnapshotIP struct {
+	IP     string `json:"ip"`
+	Action string `json:"action"`
+}
+
+type nginxSnapshotVhost struct {
+	Host   string `json:"host"`
+	Action string `json:"action"`
 }
 
 // ── Wire types (shared with Lua via JSON) ─────────────────────────────────────
@@ -875,6 +898,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.handleWAFExcluded)
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta)
 	mux.HandleFunc("/nginx/waf/excludes", b.handleWAFExcludes)
+	mux.HandleFunc("/nginx/snapshot", b.handleSnapshot)
 	mux.HandleFunc("/nginx/status", b.handleStatus)
 	mux.HandleFunc("/nginx/upload", b.handleUpload)
 
@@ -1285,6 +1309,57 @@ func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(b.Status())
+}
+
+// handleSnapshot returns active ip/vhost actions and ordered traffic rules for
+// local Lua-side enforcement. Intended for periodic refresh (not per-request).
+func (b *NginxBridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	now := time.Now()
+	resp := nginxSnapshotResp{
+		IPs:         make([]nginxSnapshotIP, 0),
+		Vhosts:      make([]nginxSnapshotVhost, 0),
+		Rules:       make([]TrafficRule, 0),
+		WAFExcludes: make([]excludeEntry, 0),
+		TSUnix:      now.Unix(),
+	}
+
+	b.mu.RLock()
+	for ip, e := range b.ipState {
+		if e.Expires.After(now) {
+			resp.IPs = append(resp.IPs, nginxSnapshotIP{
+				IP:     ip,
+				Action: e.Action,
+			})
+		}
+	}
+	for h, e := range b.vhState {
+		if e.Expires.After(now) {
+			resp.Vhosts = append(resp.Vhosts, nginxSnapshotVhost{
+				Host:   h,
+				Action: e.Action,
+			})
+		}
+	}
+	b.mu.RUnlock()
+
+	if b.ListTrafficRules != nil {
+		resp.Rules = b.ListTrafficRules()
+	}
+	if b.ListWAFExcludes != nil {
+		resp.WAFExcludes = b.ListWAFExcludes()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (b *NginxBridge) checkToken(r *http.Request) bool {
