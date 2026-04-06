@@ -39,9 +39,10 @@ local CFG = {
 
   decision_timeout_ms   = env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
   decision_cache_ttl_ms = env_num("CFM_DECISION_TTL_MS", 9000, 0, 3600000),
-  -- Safety-first default is disabled (0). Set >0 to enable temporary bridge
-  -- outage bypass while fail_open is active.
-  bridge_outage_bypass_sec = env_num("CFM_BRIDGE_OUTAGE_BYPASS_SEC", 0, 0, 60),
+  -- Safety-first default is enabled (3s): when bridge timeouts/connect errors
+  -- are detected, fail_open traffic skips bridge lookups briefly instead of
+  -- stalling every request on socket retries.
+  bridge_outage_bypass_sec = env_num("CFM_BRIDGE_OUTAGE_BYPASS_SEC", 3, 0, 60),
   waf_excl_cache_ttl_ms = env_num("CFM_WAF_EXCL_CACHE_TTL_MS", 5000, 0, 600000),
   waf_excl_meta_ttl_sec = env_num("CFM_WAF_EXCL_META_TTL_SEC", 15, 1, 600),
   waf_excl_refresh_sec  = env_num("CFM_WAF_EXCL_REFRESH_SEC", 10, 1, 600),
@@ -623,6 +624,27 @@ local function mark_bridge_outage()
   SH:set("bridge_down_until", ngx.now() + sec, sec)
 end
 
+-- Keep a short failure streak counter so we can trip outage bypass when the
+-- bridge is consistently unhealthy without waiting for a hard outage.
+local function mark_bridge_failure()
+  if not SH or not CFG.fail_open then return end
+  local n, err = SH:incr("bridge_fail_streak", 1, 0, 5)
+  if not n then
+    if CFG.debug then
+      log_route(ngx.INFO, "bridge_fail_streak_incr_err=" .. tostring(err))
+    end
+    return
+  end
+  if n >= 3 then
+    mark_bridge_outage()
+  end
+end
+
+local function clear_bridge_failure()
+  if not SH then return end
+  SH:delete("bridge_fail_streak")
+end
+
 -- Query the Go bridge for a per-IP + per-vhost decision, with a short-lived
 -- shared-dict cache for clean allows.
 -- FIX [2]: URI is included in the cache key (capped at 64 chars) to prevent
@@ -662,13 +684,20 @@ local function get_decision(ip, host, uri, method, scheme, ua)
   if not body then
     if err and (err:find("timed out", 1, true) or err:find("connect:", 1, true)) then
       mark_bridge_outage()
+      mark_bridge_failure()
+    else
+      mark_bridge_failure()
     end
     return fail_decision(err)
   end
 
   local obj = cjson.decode(body)
-  if not obj then return fail_decision("decode_failed") end
+  if not obj then
+    mark_bridge_failure()
+    return fail_decision("decode_failed")
+  end
 
+  clear_bridge_failure()
   if SH then SH:delete("bridge_down_until") end
 
   -- Cache only fully-allow decisions.
