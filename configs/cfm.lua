@@ -18,6 +18,15 @@
 
 local cjson = require "cjson.safe"
 
+local function env_num(name, default, minv, maxv)
+  local raw = os.getenv(name)
+  local n = tonumber(raw or "")
+  if not n then n = default end
+  if minv and n < minv then n = minv end
+  if maxv and n > maxv then n = maxv end
+  return n
+end
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -28,11 +37,14 @@ local CFG = {
   token        = "cfm",
   token_header = "X-CFM-Token",
 
-  decision_timeout_ms   = 80,
-  decision_cache_ttl_ms = 9000,
-  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
-  waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
-  waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
+  decision_timeout_ms   = env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
+  decision_cache_ttl_ms = env_num("CFM_DECISION_TTL_MS", 9000, 0, 3600000),
+  -- Safety-first default is disabled (0). Set >0 to enable temporary bridge
+  -- outage bypass while fail_open is active.
+  bridge_outage_bypass_sec = env_num("CFM_BRIDGE_OUTAGE_BYPASS_SEC", 0, 0, 60),
+  waf_excl_cache_ttl_ms = env_num("CFM_WAF_EXCL_CACHE_TTL_MS", 5000, 0, 600000),
+  waf_excl_meta_ttl_sec = env_num("CFM_WAF_EXCL_META_TTL_SEC", 15, 1, 600),
+  waf_excl_refresh_sec  = env_num("CFM_WAF_EXCL_REFRESH_SEC", 10, 1, 600),
 
   block_code = 403,
   fail_open  = true,
@@ -43,15 +55,15 @@ local CFG = {
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
   -- Sliding OK TTL (cookie + bridge okState)
-  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "1800"),
-  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
+  ok_ttl_sec         = env_num("CFM_OK_TTL_SEC", 1800, 1, 604800),
+  ok_touch_every_sec = env_num("CFM_OK_TOUCH_EVERY_SEC", 120, 1, 3600),
 
   -- Keepalive pool (per nginx worker)
-  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
-  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
+  keepalive_idle_ms = env_num("CFM_BRIDGE_KA_IDLE_MS", 15000, 1, 600000),
+  keepalive_pool    = env_num("CFM_BRIDGE_KA_POOL", 128, 1, 8192),
 
   -- Narrow body read for inline WAF (only where needed)
-  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "8192"),
+  waf_body_max_len = env_num("CFM_WAF_BODY_MAX_LEN", 8192, 0, 1048576),
 
   -- POST resume: stash challenged POST bodies so they can be replayed after solve.
   -- Enabled by default. Only covers allowlisted content types (form, JSON, text).
@@ -61,8 +73,8 @@ local CFG = {
   --   CFM_POST_RESUME_MAX_LEN = N    max body bytes to stash (default 64KB)
   --   CFM_POST_RESUME_TTL_SEC = N    seconds stash entry lives (default 90)
   post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
-  post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
-  post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
+  post_resume_max_len = env_num("CFM_POST_RESUME_MAX_LEN", 65536, 0, 10485760),
+  post_resume_ttl_sec = env_num("CFM_POST_RESUME_TTL_SEC", 90, 1, 3600),
 }
 
 
@@ -601,6 +613,16 @@ local function fail_decision(errmsg)
   end
 end
 
+-- When bridge timeouts start happening, avoid re-hitting the unix socket on
+-- every single request for a short cooldown period. This preserves fail-open
+-- behavior while preventing queue pileups and latency spikes.
+local function mark_bridge_outage()
+  if not SH or not CFG.fail_open then return end
+  local sec = CFG.bridge_outage_bypass_sec
+  if not sec or sec <= 0 then return end
+  SH:set("bridge_down_until", ngx.now() + sec, sec)
+end
+
 -- Query the Go bridge for a per-IP + per-vhost decision, with a short-lived
 -- shared-dict cache for clean allows.
 -- FIX [2]: URI is included in the cache key (capped at 64 chars) to prevent
@@ -615,6 +637,13 @@ local function get_decision(ip, host, uri, method, scheme, ua)
   local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part .. "|" .. ua_part
 
   if SH then
+    if CFG.fail_open then
+      local down_until = tonumber(SH:get("bridge_down_until") or "0") or 0
+      if down_until > ngx.now() then
+        return fail_decision("bridge_outage_bypass")
+      end
+    end
+
     local cached = SH:get(key)
     if cached then
       local obj = cjson.decode(cached)
@@ -630,10 +659,17 @@ local function get_decision(ip, host, uri, method, scheme, ua)
                "&ua="     .. esc(ua or "")
 
   local body, err = http_get_unix(path)
-  if not body then return fail_decision(err) end
+  if not body then
+    if err and (err:find("timed out", 1, true) or err:find("connect:", 1, true)) then
+      mark_bridge_outage()
+    end
+    return fail_decision(err)
+  end
 
   local obj = cjson.decode(body)
   if not obj then return fail_decision("decode_failed") end
+
+  if SH then SH:delete("bridge_down_until") end
 
   -- Cache only fully-allow decisions.
   -- Any rule_action override (block/challenge/throttle/...) must bypass cache
