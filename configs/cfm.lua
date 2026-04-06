@@ -632,7 +632,6 @@ local function refresh_snapshot_if_needed()
       log_route(ngx.INFO, "snapshot_refresh_fail err=" .. tostring(err))
     end
     SH:incr("snap_fail_count", 1, 0)
-    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
@@ -644,7 +643,6 @@ local function refresh_snapshot_if_needed()
       log_route(ngx.INFO, "snapshot_refresh_decode_fail")
     end
     SH:incr("snap_fail_count", 1, 0)
-    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
@@ -653,7 +651,6 @@ local function refresh_snapshot_if_needed()
   local new_ver = tostring(obj.version or "")
   if new_ver == "" then
     SH:incr("snap_fail_count", 1, 0)
-    SH:set("snap_hb_ts", now, math.max(2, CFG.snapshot_refresh_sec * 2))
     SH:set("snap_fail_ts", now, math.max(1, CFG.snapshot_refresh_sec))
     SH:delete("snap_lock")
     return
@@ -701,6 +698,15 @@ end
 local function load_snapshot_local_cache()
   refresh_snapshot_if_needed()
   if not SH then return end
+
+  if SH:get("snap_fail_ts") and snap_local_ver ~= "" then
+    if CFG.debug then
+      log_route(ngx.INFO, "snapshot_serving_stale ver=" .. snap_local_ver)
+    end
+    if CFG.debug_headers then
+      ngx.header["X-CFM-Snapshot-Stale"] = "1"
+    end
+  end
 
   local ver = tostring(SH:get("snap_ver") or "")
   if ver == "" or ver == snap_local_ver then
