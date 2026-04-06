@@ -28,6 +28,8 @@ import (
 	"cfm/internal/clam"
 	"cfm/internal/logging"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -160,6 +163,7 @@ type nginxSnapshotResp struct {
 	Vhosts      []nginxSnapshotVhost `json:"vhosts"`
 	Rules       []TrafficRule        `json:"rules"`
 	WAFExcludes []excludeEntry       `json:"waf_excludes"`
+	Version     string               `json:"version"`
 	TSUnix      int64                `json:"ts_unix"`
 }
 
@@ -171,6 +175,24 @@ type nginxSnapshotIP struct {
 type nginxSnapshotVhost struct {
 	Host   string `json:"host"`
 	Action string `json:"action"`
+}
+
+func snapshotVersion(ips []nginxSnapshotIP, vhosts []nginxSnapshotVhost, rules []TrafficRule, wafExcludes []excludeEntry) string {
+	h := sha256.New()
+	enc := json.NewEncoder(h)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(struct {
+		IPs         []nginxSnapshotIP    `json:"ips"`
+		Vhosts      []nginxSnapshotVhost `json:"vhosts"`
+		Rules       []TrafficRule        `json:"rules"`
+		WAFExcludes []excludeEntry       `json:"waf_excludes"`
+	}{
+		IPs:         ips,
+		Vhosts:      vhosts,
+		Rules:       rules,
+		WAFExcludes: wafExcludes,
+	})
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ── Wire types (shared with Lua via JSON) ─────────────────────────────────────
@@ -1357,6 +1379,25 @@ func (b *NginxBridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	if b.ListWAFExcludes != nil {
 		resp.WAFExcludes = b.ListWAFExcludes()
 	}
+	sort.Slice(resp.IPs, func(i, j int) bool {
+		if resp.IPs[i].IP != resp.IPs[j].IP {
+			return resp.IPs[i].IP < resp.IPs[j].IP
+		}
+		return resp.IPs[i].Action < resp.IPs[j].Action
+	})
+	sort.Slice(resp.Vhosts, func(i, j int) bool {
+		if resp.Vhosts[i].Host != resp.Vhosts[j].Host {
+			return resp.Vhosts[i].Host < resp.Vhosts[j].Host
+		}
+		return resp.Vhosts[i].Action < resp.Vhosts[j].Action
+	})
+	sort.Slice(resp.WAFExcludes, func(i, j int) bool {
+		if resp.WAFExcludes[i].Type != resp.WAFExcludes[j].Type {
+			return resp.WAFExcludes[i].Type < resp.WAFExcludes[j].Type
+		}
+		return resp.WAFExcludes[i].Value < resp.WAFExcludes[j].Value
+	})
+	resp.Version = snapshotVersion(resp.IPs, resp.Vhosts, resp.Rules, resp.WAFExcludes)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
