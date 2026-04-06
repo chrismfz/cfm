@@ -11,7 +11,7 @@ local ngx = ngx
 local tonumber = tonumber
 local tostring = tostring
 local math = math
-local os = os
+local string = string
 
 local SH = nil
 
@@ -36,14 +36,33 @@ local function throttle_hit(profileName, host, ip)
 
   local p = profile_for(profileName)
   local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" .. tostring(host or "-") .. "|" .. tostring(ip or "-")
+  local lock_key = key .. ":lock"
   local now = ngx.now()
 
-  local tokens = tonumber(SH:get(key .. ":tok"))
-  local last = tonumber(SH:get(key .. ":ts"))
+  local locked = false
+  for _ = 1, 10 do
+    if SH:add(lock_key, true, 0.05) then
+      locked = true
+      break
+    end
+    ngx.sleep(0.001)
+  end
+  if not locked then
+    return true, 0.05
+  end
+
+  local state = SH:get(key)
+  local tokens, last
+  if state then
+    local t, ts = string.match(tostring(state), "^([^:]+):([^:]+)$")
+    tokens = tonumber(t)
+    last = tonumber(ts)
+  end
 
   if not tokens then
-    tokens = p.burst
-    last = now
+    -- rollout compatibility with old split keys
+    tokens = tonumber(SH:get(key .. ":tok")) or p.burst
+    last = tonumber(SH:get(key .. ":ts")) or now
   end
 
   local elapsed = math.max(0, now - (last or now))
@@ -59,8 +78,8 @@ local function throttle_hit(profileName, host, ip)
   end
 
   local ttl = math.max(2, math.floor((p.burst / p.rate) * 2))
-  SH:set(key .. ":tok", tokens, ttl)
-  SH:set(key .. ":ts", now, ttl)
+  SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
+  SH:delete(lock_key)
 
   return (not allow), retry_after
 end
