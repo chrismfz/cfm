@@ -61,6 +61,8 @@
         pageMode: 'overview',
         vhostControls: [],
         controlsSearch: '',
+        controlsSortKey: 'host',
+        controlsSortDir: 'asc',
         rules: [],
         rulesSearch: '',
         ruleEditID: '',
@@ -227,8 +229,26 @@
       },
       vhostControlsFiltered() {
         const q = String(this.controlsSearch || '').trim().toLowerCase();
-        if (!q) return this.vhostControls;
-        return this.vhostControls.filter((row) => String(row?.host || '').toLowerCase().includes(q));
+        const filtered = !q
+          ? this.vhostControls.slice()
+          : this.vhostControls.filter((row) => String(row?.host || '').toLowerCase().includes(q));
+        const key = String(this.controlsSortKey || 'host');
+        const dir = this.controlsSortDir === 'desc' ? -1 : 1;
+        const boolOrder = (v) => (v ? 1 : 0);
+        filtered.sort((a, b) => {
+          if (key === 'challenge') {
+            const cmp = boolOrder(Boolean(a?.challenge_enabled)) - boolOrder(Boolean(b?.challenge_enabled));
+            if (cmp !== 0) return cmp * dir;
+          } else if (key === 'waf') {
+            const cmp = boolOrder(Boolean(a?.waf_enabled)) - boolOrder(Boolean(b?.waf_enabled));
+            if (cmp !== 0) return cmp * dir;
+          } else {
+            const cmpHost = String(a?.host || '').localeCompare(String(b?.host || ''), undefined, { sensitivity: 'base' });
+            if (cmpHost !== 0) return cmpHost * dir;
+          }
+          return String(a?.host || '').localeCompare(String(b?.host || ''), undefined, { sensitivity: 'base' });
+        });
+        return filtered;
       },
       rulesFiltered() {
         const q = String(this.rulesSearch || '').trim().toLowerCase();
@@ -807,6 +827,20 @@
         if (!matched) return '';
         if (toggleable) return `Excluded by host rule: ${matched}`;
         return `Excluded by non-exact host rule: ${matched}. Remove/edit that rule in Dynamic excludes first.`;
+      },
+      setControlsSort(nextKey) {
+        const key = String(nextKey || '').trim().toLowerCase();
+        if (!key) return;
+        if (this.controlsSortKey === key) {
+          this.controlsSortDir = this.controlsSortDir === 'asc' ? 'desc' : 'asc';
+          return;
+        }
+        this.controlsSortKey = key;
+        this.controlsSortDir = 'asc';
+      },
+      controlsSortArrow(key) {
+        if (this.controlsSortKey !== key) return '';
+        return this.controlsSortDir === 'asc' ? '↑' : '↓';
       },
       async refreshVhostControls() {
         if (!this.shouldShow('controls')) return;

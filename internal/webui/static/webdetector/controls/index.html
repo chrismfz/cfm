@@ -40,35 +40,6 @@
       </section>
 
       <section class="card wide" v-if="shouldShow('controls')">
-        <h2>Per-vhost controls</h2>
-        <div class="toolbar">
-          <label for="controls-search">Search</label>
-          <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" />
-          <span class="muted">{{ vhostControlsFiltered.length }} / {{ vhostControls.length }} shown</span>
-        </div>
-        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Vhost</th><th>Challenge</th><th>WAF</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in vhostControlsFiltered" :key="row.host">
-                <td><code>{{ row.host }}</code></td>
-                <td>
-                  <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
-                </td>
-                <td>
-                  <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
-                </td>
-              </tr>
-              <tr v-if="!vhostControlsFiltered.length"><td colspan="3" class="muted">No vhosts matched current scope/filter.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card wide" v-if="shouldShow('controls')">
         <h2>Traffic Rules (Cloudflare-style)</h2>
         <p class="muted">
           Build clear per-vhost rules for <code>allow</code>, <code>block</code>, <code>challenge</code>, and <code>throttle</code>.
@@ -204,7 +175,41 @@
           </table>
         </div>
       </section>
+
+      <section class="card wide" v-if="shouldShow('controls')">
+        <h2>Per-vhost controls</h2>
+        <div class="toolbar">
+          <label for="controls-search">Search</label>
+          <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" />
+          <span class="muted">{{ vhostControlsFiltered.length }} / {{ vhostControls.length }} shown</span>
+        </div>
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('host')">Vhost {{ controlsSortArrow('host') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('challenge')">Challenge {{ controlsSortArrow('challenge') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('waf')">WAF {{ controlsSortArrow('waf') }}</button></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in vhostControlsFiltered" :key="row.host">
+                <td><code>{{ row.host }}</code></td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
+                </td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
+                </td>
+              </tr>
+              <tr v-if="!vhostControlsFiltered.length"><td colspan="3" class="muted">No vhosts matched current scope/filter.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
+
   </div>
 </body>
 </html>
