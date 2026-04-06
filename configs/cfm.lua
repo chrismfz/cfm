@@ -38,14 +38,7 @@ local CFG = {
   token_header = "X-CFM-Token",
 
   decision_timeout_ms   = env_num("CFM_DECISION_TIMEOUT_MS", 80, 1, 60000),
-  decision_cache_ttl_ms = env_num("CFM_DECISION_TTL_MS", 9000, 0, 3600000),
-  -- Safety-first default is enabled (3s): when bridge timeouts/connect errors
-  -- are detected, fail_open traffic skips bridge lookups briefly instead of
-  -- stalling every request on socket retries.
-  bridge_outage_bypass_sec = env_num("CFM_BRIDGE_OUTAGE_BYPASS_SEC", 3, 0, 60),
-  waf_excl_cache_ttl_ms = env_num("CFM_WAF_EXCL_CACHE_TTL_MS", 5000, 0, 600000),
-  waf_excl_meta_ttl_sec = env_num("CFM_WAF_EXCL_META_TTL_SEC", 15, 1, 600),
-  waf_excl_refresh_sec  = env_num("CFM_WAF_EXCL_REFRESH_SEC", 10, 1, 600),
+  snapshot_refresh_sec  = env_num("CFM_SNAPSHOT_REFRESH_SEC", 5, 1, 300),
 
   block_code = 403,
   fail_open  = true,
@@ -89,7 +82,7 @@ if rules_ok and rules and rules.init then
 end
 
 
--- Shared dict used for both bridge decision cache (d|...) and POST resume stash (pr|...).
+-- Shared dict used for local control-plane snapshot + POST resume stash.
 local SH = ngx.shared.cfm_decisions
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -602,169 +595,52 @@ local function refresh_ok_cookie(cookie_val)
   append_set_cookie("cfm_ok=" .. cookie_val .. "; " .. attrs)
 end
 
--- Return a safe allow decision when the bridge is unreachable.
--- fail_open = true (default): pass traffic through so a bridge restart does
---   not take the site down.
--- fail_open = false: block everything until the bridge recovers (high-security).
-local function fail_decision(errmsg)
-  if CFG.fail_open then
-    return { ip_action = "allow", vhost_action = "allow", err = errmsg }
-  else
-    return { ip_action = "block", vhost_action = "block", err = errmsg }
-  end
+local function fail_action()
+  return CFG.fail_open and "allow" or "block"
 end
 
--- When bridge timeouts start happening, avoid re-hitting the unix socket on
--- every single request for a short cooldown period. This preserves fail-open
--- behavior while preventing queue pileups and latency spikes.
-local function mark_bridge_outage()
-  if not SH or not CFG.fail_open then return end
-  local sec = CFG.bridge_outage_bypass_sec
-  if not sec or sec <= 0 then return end
-  SH:set("bridge_down_until", ngx.now() + sec, sec)
-end
+-- Local snapshot cache (worker-local views backed by shared-dict payload).
+local snap_local_ts = 0
+local snap_local_ips = {}     -- [ip] = "challenge"|"block"
+local snap_local_vhosts = {}  -- array { {host=pattern, action=...}, ... }
+local snap_local_rules = {}   -- ordered TrafficRule rows (Go-sorted)
+local snap_local_waf_hosts = {}
+local snap_local_waf_paths = {}
 
--- Keep a short failure streak counter so we can trip outage bypass when the
--- bridge is consistently unhealthy without waiting for a hard outage.
-local function mark_bridge_failure()
-  if not SH or not CFG.fail_open then return end
-  local n, err = SH:incr("bridge_fail_streak", 1, 0, 5)
-  if not n then
-    if CFG.debug then
-      log_route(ngx.INFO, "bridge_fail_streak_incr_err=" .. tostring(err))
-    end
-    return
-  end
-  if n >= 3 then
-    mark_bridge_outage()
-  end
-end
-
-local function clear_bridge_failure()
-  if not SH then return end
-  SH:delete("bridge_fail_streak")
-end
-
--- Query the Go bridge for a per-IP + per-vhost decision, with a short-lived
--- shared-dict cache for clean allows.
--- FIX [2]: URI is included in the cache key (capped at 64 chars) to prevent
--- a cached allow for "/" from masking a challenge on /wp-admin or /xmlrpc.php
--- within the same 9-second TTL window.
--- Challenges and blocks are never cached — they must always reach the bridge.
-local function get_decision(ip, host, uri, method, scheme, ua)
-  local uri_part = (uri or "-"):sub(1, 64)
-  -- Include a bounded UA fragment so a cached allow from one User-Agent cannot
-  -- bypass UA-targeted rule actions for another User-Agent on the same route.
-  local ua_part = (ua or ""):sub(1, 32)
-  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part .. "|" .. ua_part
-
-  if SH then
-    if CFG.fail_open then
-      local down_until = tonumber(SH:get("bridge_down_until") or "0") or 0
-      if down_until > ngx.now() then
-        return fail_decision("bridge_outage_bypass")
-      end
-    end
-
-    local cached = SH:get(key)
-    if cached then
-      local obj = cjson.decode(cached)
-      if obj then obj._cache = true; return obj end
-    end
-  end
-
-  local path = "/nginx/decision?ip=" .. esc(ip)   ..
-               "&host="   .. esc(host)   ..
-               "&uri="    .. esc(uri)    ..
-               "&method=" .. esc(method) ..
-               "&scheme=" .. esc(scheme) ..
-               "&ua="     .. esc(ua or "")
-
-  local body, err = http_get_unix(path)
-  if not body then
-    if err and (err:find("timed out", 1, true) or err:find("connect:", 1, true)) then
-      mark_bridge_outage()
-      mark_bridge_failure()
-    else
-      mark_bridge_failure()
-    end
-    return fail_decision(err)
-  end
-
-  local obj = cjson.decode(body)
-  if not obj then
-    mark_bridge_failure()
-    return fail_decision("decode_failed")
-  end
-
-  clear_bridge_failure()
-  if SH then SH:delete("bridge_down_until") end
-
-  -- Cache only fully-allow decisions.
-  -- Any rule_action override (block/challenge/throttle/...) must bypass cache
-  -- so requests continue to hit the bridge and enforce rule outcomes.
-  if SH and
-     obj.ip_action == "allow" and
-     obj.vhost_action == "allow" and
-     (obj.rule_action == nil or obj.rule_action == "allow") then
-    SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
-  end
-  return obj
-end
-
--- Refresh dynamic WAF exclude snapshot from bridge into shared dict.
--- Snapshot keys:
---   wxhosts -> JSON array of host patterns
---   wxpaths -> JSON array of path patterns
---   wxsnap_ts -> last refresh epoch seconds
-local function refresh_waf_excludes_if_needed()
+-- Refresh local enforcement snapshot from bridge:
+--   GET /nginx/snapshot -> { ips:[...], vhosts:[...], rules:[...], ts_unix:N }
+-- One worker refreshes at a time; all workers consume from shared dict.
+local function refresh_snapshot_if_needed()
   if not SH then return end
 
   local now = ngx.now()
-  local last = tonumber(SH:get("wxsnap_ts") or "0") or 0
-  if (now - last) < CFG.waf_excl_refresh_sec then
+  local last = tonumber(SH:get("snap_ts") or "0") or 0
+  if (now - last) < CFG.snapshot_refresh_sec then
     return
   end
 
-  -- single-worker refresher lock for a short time
-  if not SH:add("wxsnap_lock", "1", 1) then
+  if not SH:add("snap_lock", "1", 1) then
     return
   end
 
-  local body, err = http_get_unix("/nginx/waf/excludes")
+  local body, err = http_get_unix("/nginx/snapshot")
   if not body then
     if CFG.debug then
-      log_route(ngx.INFO, "waf_excludes_snapshot_fail err=" .. tostring(err))
+      log_route(ngx.INFO, "snapshot_refresh_fail err=" .. tostring(err))
     end
-    SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-    SH:delete("wxsnap_lock")
+    SH:set("snap_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+    SH:delete("snap_lock")
     return
   end
 
   local obj = cjson.decode(body) or {}
-  local entries = obj.entries or {}
-  local hosts, paths = {}, {}
-  for _, e in ipairs(entries) do
-    local t = lower(e.type or "")
-    local v = lower(tostring(e.value or ""))
-    if v ~= "" then
-      if t == "host" then
-        hosts[#hosts+1] = v
-      elseif t == "path" then
-        paths[#paths+1] = v
-      end
-    end
-  end
-
-  SH:set("wxhosts", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxpaths", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-  SH:delete("wxsnap_lock")
+  SH:set("snap_ips", cjson.encode(obj.ips or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+  SH:set("snap_vhosts", cjson.encode(obj.vhosts or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+  SH:set("snap_rules", cjson.encode(obj.rules or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+  SH:set("snap_waf_excludes", cjson.encode(obj.waf_excludes or {}), math.max(2, CFG.snapshot_refresh_sec * 2))
+  SH:set("snap_ts", now, math.max(1, CFG.snapshot_refresh_sec))
+  SH:delete("snap_lock")
 end
-
-local wx_local_ts = 0
-local wx_local_hosts = {}
-local wx_local_paths = {}
 
 local function glob_to_lua_pattern(glob)
   local p = tostring(glob or "")
@@ -789,40 +665,172 @@ local function matches_rule(value, rule)
   return value:find(rule, 1, true) ~= nil
 end
 
-local function load_waf_excludes_local_cache()
+local function load_snapshot_local_cache()
+  refresh_snapshot_if_needed()
   if not SH then
-    wx_local_ts = 0
-    wx_local_hosts = {}
-    wx_local_paths = {}
+    snap_local_ts = 0
+    snap_local_ips = {}
+    snap_local_vhosts = {}
+    snap_local_rules = {}
+    snap_local_waf_hosts = {}
+    snap_local_waf_paths = {}
     return
   end
-  local ts = tonumber(SH:get("wxsnap_ts") or "0") or 0
-  if ts == wx_local_ts then
+  local ts = tonumber(SH:get("snap_ts") or "0") or 0
+  if ts == snap_local_ts then
     return
   end
-  wx_local_ts = ts
+  snap_local_ts = ts
 
-  local hosts_raw = SH:get("wxhosts") or "[]"
-  local paths_raw = SH:get("wxpaths") or "[]"
-  wx_local_hosts = cjson.decode(hosts_raw) or {}
-  wx_local_paths = cjson.decode(paths_raw) or {}
+  local ip_rows = cjson.decode(SH:get("snap_ips") or "[]") or {}
+  local vh_rows = cjson.decode(SH:get("snap_vhosts") or "[]") or {}
+  local rules_rows = cjson.decode(SH:get("snap_rules") or "[]") or {}
+  local waf_rows = cjson.decode(SH:get("snap_waf_excludes") or "[]") or {}
+
+  local ip_map = {}
+  for _, row in ipairs(ip_rows) do
+    local rip = tostring(row.ip or "")
+    local act = tostring(row.action or "")
+    if rip ~= "" and (act == "challenge" or act == "block") then
+      ip_map[rip] = act
+    end
+  end
+  snap_local_ips = ip_map
+  snap_local_vhosts = vh_rows
+  snap_local_rules = rules_rows
+
+  local hosts, paths = {}, {}
+  for _, e in ipairs(waf_rows) do
+    local t = lower(e.type or "")
+    local v = lower(tostring(e.value or ""))
+    if v ~= "" then
+      if t == "host" then
+        hosts[#hosts + 1] = v
+      elseif t == "path" then
+        paths[#paths + 1] = v
+      end
+    end
+  end
+  snap_local_waf_hosts = hosts
+  snap_local_waf_paths = paths
 end
 
--- Query dynamic WAF excludes from shared snapshot and check host+uri.
 local function waf_is_excluded(host, uri)
-  refresh_waf_excludes_if_needed()
-  load_waf_excludes_local_cache()
-
   host = lower(host or "")
   uri  = lower(tostring(uri or "/"))
-
-  for _, r in ipairs(wx_local_hosts) do
+  for _, r in ipairs(snap_local_waf_hosts) do
     if matches_rule(host, r) then return true end
   end
-  for _, r in ipairs(wx_local_paths) do
+  for _, r in ipairs(snap_local_waf_paths) do
     if matches_rule(uri, r) then return true end
   end
   return false
+end
+
+local function wildcard_match(pattern, s)
+  pattern = tostring(pattern or "")
+  s = tostring(s or "")
+  if pattern == "" or s == "" then return false end
+  if pattern == "*" then return true end
+  local lua_pat = glob_to_lua_pattern(pattern)
+  local ok, res = pcall(function() return s:match(lua_pat) ~= nil end)
+  return ok and res or false
+end
+
+local function host_matches(pattern, host)
+  pattern = lower(tostring(pattern or ""))
+  host = lower(tostring(host or ""))
+  if pattern == "" or host == "" then return false end
+  if wildcard_match(pattern, host) then return true end
+  if pattern:sub(1, 2) == "*." then
+    local suf = pattern:sub(2) -- ".example.com"
+    return #host > #suf and host:sub(-#suf) == suf
+  end
+  return host == pattern
+end
+
+local function vhost_action_for(host)
+  host = lower(tostring(host or ""))
+  if host == "" then return "allow" end
+  for _, row in ipairs(snap_local_vhosts) do
+    local pat = tostring(row.host or "")
+    if host_matches(pat, host) then
+      local act = tostring(row.action or "")
+      if act == "challenge" or act == "block" then
+        return act
+      end
+    end
+  end
+  return "allow"
+end
+
+local function list_contains(list, value)
+  if type(list) ~= "table" then return false end
+  for _, v in ipairs(list) do
+    if tostring(v) == tostring(value) then return true end
+  end
+  return false
+end
+
+local function rule_match_filters(rule, country, ua, path, method)
+  local m = rule and rule.match or {}
+  if type(m.country_in) == "table" and #m.country_in > 0 and not list_contains(m.country_in, country) then
+    return false
+  end
+  if type(m.methods) == "table" and #m.methods > 0 and not list_contains(m.methods, method) then
+    return false
+  end
+  if type(m.ua_any) == "table" and #m.ua_any > 0 then
+    local ok = false
+    for _, pat in ipairs(m.ua_any) do
+      local p = lower(tostring(pat or ""))
+      if p ~= "" then
+        if wildcard_match(p, ua) or (not has(p, "*") and not has(p, "?") and has(ua, p)) then
+          ok = true
+          break
+        end
+      end
+    end
+    if not ok then return false end
+  end
+  if type(m.path_any) == "table" and #m.path_any > 0 then
+    local ok = false
+    for _, pat in ipairs(m.path_any) do
+      local p = tostring(pat or "")
+      if p ~= "" then
+        if wildcard_match(p, path) or (not has(p, "*") and not has(p, "?") and path:sub(1, #p) == p) then
+          ok = true
+          break
+        end
+      end
+    end
+    if not ok then return false end
+  end
+  return true
+end
+
+local function local_rule_decision(host, ip, ua, path, method, country)
+  for _, rule in ipairs(snap_local_rules) do
+    if rule and rule.enabled then
+      local scope = rule.scope or {}
+      local vhosts = scope.vhosts or {}
+      local matched_host = false
+      for _, pat in ipairs(vhosts) do
+        if host_matches(pat, host) then matched_host = true; break end
+      end
+      if matched_host and rule_match_filters(rule, country, ua, path, method) then
+        local action = tostring((rule.action and rule.action.type) or "allow")
+        local profile = tostring((rule.action and rule.action.profile) or "")
+        return {
+          matched = true,
+          action = action,
+          profile = profile,
+          id = tostring(rule.id or ""),
+        }
+      end
+    end
+  end
+  return { matched = false, action = "allow", profile = "", id = "" }
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -972,6 +980,9 @@ if cfm_ok_cookie and cfm_ok_cookie ~= "" and not ngx.ctx.cfm_resumed_post then
   return
 end
 
+-- Refresh local control-plane snapshot once before WAF and rule decisions.
+load_snapshot_local_cache()
+
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
 local waf_ok, waf = pcall(require, "cfm_waf")
 if waf_ok and waf and waf.enabled and waf.enabled() then
@@ -1084,14 +1095,26 @@ end
 if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 
 
--- ── Step 3: Bridge Decision ───────────────────────────────────────────────────
-local d          = get_decision(ip, host, uri, method, scheme, ngx.var.http_user_agent or "")
-local ip_action  = d.ip_action    or "allow"
-local vh_action  = d.vhost_action or "allow"
-local rule_action = d.rule_action or "allow"
-local rule_id = d.rule_id or ""
-local throttle_profile = d.throttle_profile or ""
-local cache_flag = d._cache and " cache=1" or ""
+-- ── Step 3: Local Snapshot Decision (no per-request bridge RPC) ──────────────
+local ua_l = lower(ngx.var.http_user_agent or "")
+local path_for_rule = tostring(ngx.var.request_uri or uri or "/")
+local country = tostring(ngx.var.http_cf_ipcountry or "")
+country = string.upper(country)
+
+local ip_action = snap_local_ips[ip] or "allow"
+local vh_action = vhost_action_for(host)
+local rr = local_rule_decision(host, ip, ua_l, path_for_rule, string.upper(method or ""), country)
+local rule_action = rr.action or "allow"
+local rule_id = rr.id or ""
+local throttle_profile = rr.profile or ""
+local snap_flag = (snap_local_ts > 0) and " snap=1" or " snap=0"
+
+if snap_local_ts == 0 then
+  local fallback = fail_action()
+  ip_action = fallback
+  vh_action = fallback
+  rule_action = fallback
+end
 
 if CFG.debug_headers then
   ngx.header["X-CFM-IP"]     = ip
@@ -1099,18 +1122,16 @@ if CFG.debug_headers then
   ngx.header["X-CFM-Dec-IP"] = ip_action
   ngx.header["X-CFM-Dec-VH"] = vh_action
   ngx.header["X-CFM-Dec-Rule"] = rule_action
+  ngx.header["X-CFM-Snapshot"] = snap_local_ts > 0 and "1" or "0"
   if rule_id ~= "" then ngx.header["X-CFM-Rule-ID"] = rule_id end
   if throttle_profile ~= "" then ngx.header["X-CFM-Throttle"] = throttle_profile end
-  if d.err    then ngx.header["X-CFM-Err"]   = tostring(d.err) end
-  if d._cache then ngx.header["X-CFM-Cache"] = "1" end
 end
 
 if ip_action == "block" or vh_action == "block" or rule_action == "block" then
   ngx.header["X-CFM-Action"] = "block"
   ngx.var.cfm_upstream = "cfm_block"
   ngx.var.cfm_pass     = ""
-  log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. cache_flag ..
-    (d.err and (" err=" .. tostring(d.err)) or ""))
+  log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. snap_flag)
   return ngx.exit(CFG.block_code)
 end
 
@@ -1120,8 +1141,7 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
     ngx.header["X-CFM-Action"] = "block_replayed"
     ngx.var.cfm_upstream = "cfm_block"
     ngx.var.cfm_pass     = ""
-    log_route(ngx.WARN, "replayed_post_rechallenged_block ip=" .. ip ..
-      " host=" .. host .. cache_flag)
+    log_route(ngx.WARN, "replayed_post_rechallenged_block ip=" .. ip .. " host=" .. host .. snap_flag)
     return ngx.exit(CFG.block_code)
   end
 
@@ -1139,13 +1159,16 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"
   ngx.var.cfm_pass     = "http://cfm_challenge"
-  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag ..
+  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. snap_flag ..
     (rerr and (" resume_skip=" .. tostring(rerr)) or ""))
   return
 end
 
 if rules_ok and rules and rules.apply then
-  local r = rules.apply(d, {
+  local r = rules.apply({
+    rule_action = rule_action,
+    throttle_profile = throttle_profile,
+  }, {
     ip = ip,
     host = host,
     uri = uri,
@@ -1159,7 +1182,7 @@ if rules_ok and rules and rules.apply then
     end
     log_route(ngx.WARN, "throttle ip=" .. ip .. " host=" .. host ..
       (rule_id ~= "" and (" rule_id=" .. tostring(rule_id)) or "") ..
-      (throttle_profile ~= "" and (" profile=" .. tostring(throttle_profile)) or "") .. cache_flag)
+      (throttle_profile ~= "" and (" profile=" .. tostring(throttle_profile)) or "") .. snap_flag)
     return ngx.exit(429)
   end
 end
@@ -1171,5 +1194,5 @@ ngx.var.cfm_pass     = origin_pass_for(scheme)
 
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host ..
-    " pass=" .. ngx.var.cfm_pass .. cache_flag)
+    " pass=" .. ngx.var.cfm_pass .. snap_flag)
 end
