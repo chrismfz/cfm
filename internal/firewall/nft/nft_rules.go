@@ -703,8 +703,10 @@ func (b *Backend) ensureCounter(name string) {
 // ---- nft compat helpers ----
 
 // runCmdOutput executes an nft command and returns its combined output.
+// Calls nft directly (no shell wrapper) to avoid spawning two processes.
 func (b *Backend) runCmdOutput(cmd string) (string, error) {
-	out, err := exec.Command("sh", "-lc", "nft "+cmd).CombinedOutput()
+	args := strings.Fields("nft " + cmd)
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("nft failed: %v (out=%s)", err, out)
 	}
@@ -713,11 +715,14 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 
 // runCmdOutputWithTimeout executes an nft command and returns its combined output.
 // It protects long-running debug/telemetry calls from blocking the daemon tick loop.
+// Calls nft directly (no shell wrapper) — eliminates the redundant sh -lc process
+// that was doubling the OS thread consumption per call.
 func (b *Backend) runCmdOutputWithTimeout(cmd string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "sh", "-lc", "nft "+cmd).CombinedOutput()
+	args := strings.Fields("nft " + cmd)
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("nft timed out after %s", timeout)
@@ -1176,11 +1181,34 @@ func (b *Backend) dumpPortscanPairs() (map[string]map[int]struct{}, map[string]m
 }
 
 // LoadPortScanner: καλείται σε κάθε tick.
+// Non-blocking: launches work in a goroutine with an overlap guard.
+// If the previous tick's port-scanner dump is still running, the new call
+// is skipped — preventing process stacking that starves the nginx bridge socket.
+func (b *Backend) LoadPortScanner() {
+	b.portScanMu.Lock()
+	if b.portScanRunning {
+		b.portScanMu.Unlock()
+		return
+	}
+	b.portScanRunning = true
+	b.portScanMu.Unlock()
+
+	go func() {
+		defer func() {
+			b.portScanMu.Lock()
+			b.portScanRunning = false
+			b.portScanMu.Unlock()
+		}()
+		b.loadPortScannerOnce()
+	}()
+}
+
+// loadPortScannerOnce does the actual work:
 // - ensure base & sets
 // - αν Portscan disabled -> return
 // - harvest ps_pairs_*, μετρά distinct dports ανά IP
 // - φτιάχνει reason και καλεί autoBlockEval() με reuse του throttle tc
-func (b *Backend) LoadPortScanner() {
+func (b *Backend) loadPortScannerOnce() {
 	// σιγουρέψου ότι υπάρχει η βάση
 	if !b.tableExists() {
 		if err := b.EnsureBase(); err != nil {

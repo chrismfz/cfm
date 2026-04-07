@@ -125,6 +125,9 @@ type Backend struct {
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
 
+	portScanMu      sync.Mutex
+	portScanRunning bool
+
 	apiCacheMu         sync.Mutex
 	apiCacheHost       string
 	apiCacheV4         []string

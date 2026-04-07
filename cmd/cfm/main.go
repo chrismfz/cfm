@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -295,6 +296,21 @@ func runDaemon(args []string) {
 	_ = fs.Parse(args)
 
 	cfgDir, _ := cli.ResolveConfigDir(*cfgFlag)
+
+	// ── GOMAXPROCS floor ─────────────────────────────────────────────────────────
+	// The cfm daemon runs blocking exec.Command calls (nft list set, nft list
+	// counter, ps, etc.) that pin Go OS threads. If GOMAXPROCS equals the CPU
+	// count (the default), a burst of shell-outs can starve the nginx bridge
+	// socket HTTP server goroutines — Lua times out and sites go down.
+	// Ensure at least 8 threads so the HTTP server always has scheduling capacity.
+	{
+		const minProcs = 8
+		if cur := runtime.GOMAXPROCS(0); cur < minProcs {
+			runtime.GOMAXPROCS(minProcs)
+			logging.Logf("[daemon] GOMAXPROCS raised %d → %d (floor for shell-out safety)", cur, minProcs)
+		}
+	}
+
 	if cfgDir != "" {
 		cli.WriteConfigState(cfgDir)
 		logging.Logf("CFM Starting")
@@ -920,6 +936,10 @@ if cfg.Clam.Enabled {
 		onCFMConfChanged() // only if cfm.conf changed
 
 		if nb, ok := be.(*nft.Backend); ok {
+			// DumpFloodCounters and LoadPortScanner are internally non-blocking:
+			// each launches its own goroutine with an overlap guard (if a previous
+			// tick's work is still running, the new call is a no-op). No wrapper
+			// goroutine needed here — they return immediately.
 			nb.DumpFloodCounters()
 			nb.LoadPortScanner()
 		}

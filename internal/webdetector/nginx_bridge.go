@@ -923,6 +923,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/snapshot", b.handleSnapshot)
 	mux.HandleFunc("/nginx/status", b.handleStatus)
 	mux.HandleFunc("/nginx/upload", b.handleUpload)
+	mux.HandleFunc("/nginx/events/batch", b.handleEventsBatch)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -959,6 +960,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
 	method := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method")))
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
+	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
 		host = hh
 	}
@@ -1028,11 +1030,12 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.RuleDecision != nil {
 		rr := b.RuleDecision(TrafficRuleEvalInput{
-			Host:   host,
-			IP:     ip,
-			UA:     ua,
-			Path:   uri,
-			Method: method,
+			Host:    host,
+			IP:      ip,
+			UA:      ua,
+			Path:    uri,
+			Method:  method,
+			Country: country,
 		})
 		if rr.Matched {
 			resp["rule_action"] = rr.Action
@@ -1260,6 +1263,150 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// handleEventsBatch receives queued Lua events in a single HTTP call.
+//
+// Lua's event flusher accumulates non-critical bridge events (observe, ok/touch,
+// ip push) in a shared dict queue and flushes them as a JSON batch every
+// CFM_EVENT_FLUSH_INTERVAL_SEC (default 1s). This handler processes all events
+// in-process without N individual socket round-trips.
+//
+// Wire format:
+//
+//	POST /nginx/events/batch
+//	{
+//	  "events": [
+//	    { "p": "/nginx/observe",  "b": "{\"ip\":\"1.2.3.4\",...}", "t": 1712345678.123 },
+//	    { "p": "/nginx/ok/touch", "b": "{\"ip\":\"5.6.7.8\",\"ttl_sec\":1800}", "t": ... },
+//	    ...
+//	  ]
+//	}
+func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Generous cap: 64 events × ~512 bytes ≈ 32KB typical; allow up to 256KB.
+	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
+
+	var batch struct {
+		Events []struct {
+			P string  `json:"p"` // original path: "/nginx/observe", "/nginx/ok/touch", "/nginx/ip"
+			B string  `json:"b"` // original JSON payload (pre-encoded by Lua)
+			T float64 `json:"t"` // enqueue timestamp (informational only)
+		} `json:"events"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+
+	processed := 0
+	now := time.Now()
+
+	for _, ev := range batch.Events {
+		path := strings.TrimSpace(ev.P)
+		body := ev.B
+		if path == "" || body == "" {
+			continue
+		}
+
+		switch path {
+
+		case "/nginx/observe":
+			var msg nginxObserveMsg
+			if err := json.Unmarshal([]byte(body), &msg); err != nil {
+				continue
+			}
+			ip := strings.TrimSpace(msg.IP)
+			if ip == "" {
+				continue
+			}
+			host := normalizeHost(msg.Host)
+			uri := strings.TrimSpace(msg.URI)
+			method := strings.ToLower(strings.TrimSpace(msg.Method))
+			status := msg.Status
+			if status < 100 || status > 599 {
+				status = 0
+			}
+			reason := strings.TrimSpace(msg.Reason)
+			if b.OnObserve != nil {
+				b.OnObserve(ip, host, uri, method, status, reason)
+			}
+			processed++
+
+		case "/nginx/ok/touch":
+			if b.cfg.OkIPTTL <= 0 {
+				processed++ // disabled; no-op but count as processed
+				continue
+			}
+			var msg nginxOKTouchMsg
+			if err := json.Unmarshal([]byte(body), &msg); err != nil {
+				continue
+			}
+			ip := strings.TrimSpace(msg.IP)
+			if ip == "" {
+				continue
+			}
+			ttl := time.Duration(msg.TTLSec) * time.Second
+			if ttl <= 0 {
+				ttl = b.cfg.OkIPTTL
+			}
+			exp := now.Add(ttl)
+			b.mu.Lock()
+			b.okState[ip] = exp
+			b.mu.Unlock()
+			processed++
+
+		case "/nginx/ip":
+			var msg nginxIPMsg
+			if err := json.Unmarshal([]byte(body), &msg); err != nil {
+				continue
+			}
+			if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
+				continue
+			}
+			ttl := time.Duration(msg.TTLSec) * time.Second
+			if ttl <= 0 {
+				ttl = b.cfg.DefaultTTL
+			}
+			reason := strings.TrimSpace(msg.Reason)
+			msg.Host = normalizeHost(msg.Host)
+			msg.URI = strings.TrimSpace(msg.URI)
+			msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
+
+			if msg.Action != "logonly" {
+				b.mu.Lock()
+				b.ipState[msg.IP] = bridgeIPEntry{
+					Action:  msg.Action,
+					Expires: now.Add(ttl),
+					Reason:  reason,
+				}
+				b.mu.Unlock()
+			}
+			if reason != "" && b.OnTrigger != nil {
+				b.OnTrigger(msg.IP, msg.Action, reason, ttl, msg.Host, msg.URI, msg.Method)
+			}
+			processed++
+
+		default:
+			// Unknown event path — skip silently for forward compatibility.
+			continue
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"processed": processed,
+		"total":     len(batch.Events),
+	})
 }
 
 func (b *NginxBridge) handleWAFExcluded(w http.ResponseWriter, r *http.Request) {
