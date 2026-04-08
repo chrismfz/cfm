@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"strings"
 )
 
 // RegisterHTTP wires all webdetector + challenge endpoints onto the provided mux.
@@ -184,25 +185,27 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 
 // handleIPShort: επιστρέφει IPSignals από το short window με optional ?limit=
 func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
 	limit := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
-
 	rowsShort := e.IPShort(limit)
 	rowsLong := e.IPLong(limit)
-
 	resp := ipShortResponse{
 		WindowSec:      e.cfg.Window.Seconds(),
 		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
 		Short:          rowsShort,
 		Long:           rowsLong,
 	}
-
 	writeJSON(w, http.StatusOK, resp)
 }
+
 
 // handleDrilldown, handleSuspicious κτλ μένουν όπως ήταν.
 
@@ -278,52 +281,58 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
-	// προαιρετικό ?limit=N
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
 	limit := 20
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
-
 	rows := e.HotIPs(limit)
 	writeJSON(w, http.StatusOK, rows)
 }
 
+
 // handleIPDrilldown: short-window drilldown per IP.
 func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
 	ip := r.URL.Query().Get("ip")
 	if ip == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
 		return
 	}
-
 	d := e.IPDetail(ip)
 	writeJSON(w, http.StatusOK, d)
 }
 
 // handleAnalyzeIP: offline log scan για μία IP.
 func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
 	ip := r.URL.Query().Get("ip")
 	if ip == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
 		return
 	}
-
-	// προαιρετικό ?max_lines=N (debug / safety)
 	var maxLines int64
 	if v := r.URL.Query().Get("max_lines"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			maxLines = n
 		}
 	}
-
 	res, err := e.AnalyzeIP(ip, maxLines)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -334,20 +343,21 @@ func (e *Engine) handleAnalyzeHost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
 	}
-
-	// προαιρετικό ?max_lines=N (debug / safety)
+	// Guard 2: scoped tokens may only analyze their own vhosts.
+	if !vhostAllowed(strings.ToLower(host), vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
 	var maxLines int64
 	if v := r.URL.Query().Get("max_lines"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			maxLines = n
 		}
 	}
-
 	res, err := e.AnalyzeHost(host, maxLines)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
 	writeJSON(w, http.StatusOK, res)
 }

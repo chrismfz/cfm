@@ -207,9 +207,6 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 	})
 
 	for _, r := range rows {
-		if !r.Enabled {
-			continue
-		}
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
