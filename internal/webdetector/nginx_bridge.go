@@ -102,7 +102,13 @@ type NginxBridge struct {
 	clamMgr      clam.Enqueuer
 	clamPending  string
 	clamInfected string
+
+	//enricher maxmind
+	enr interface{ Lookup(string) enrich.Result } // optional enricher for country fallback
+
 }
+
+func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }
 
 // refreshSkew is the minimum remaining time before we bother to re-push
 // an already-active decision (to avoid log spam / needless socket traffic).
@@ -961,6 +967,12 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	method := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method")))
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
+
+if country == "" && ip != "" && b.enr != nil {
+    if geo := b.enr.Lookup(ip); geo.Country != "" {
+        country = strings.ToUpper(strings.ToUpper(geo.Country))
+    }
+}
 	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
 		host = hh
 	}

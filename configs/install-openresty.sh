@@ -235,6 +235,7 @@ install_opm_packages() {
     local pkgs=(
         ledgetech/lua-resty-http
         openresty/lua-resty-string
+	anjia0532/lua-resty-maxminddb
     )
     local pkg
 

@@ -448,6 +448,29 @@ local function waf_is_excluded(host, uri)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- GEO LOOKUP (lazy, per-worker singleton)
+-- ─────────────────────────────────────────────────────────────────────────────
+local mmdb_ok, mmdb = pcall(require, "resty.maxminddb")
+local _geo_db      = nil
+local _geo_db_err  = false  -- true = already tried and failed, don't retry
+
+local GEO_DB_PATH = os.getenv("CFM_GEO_DB") or "/var/lib/cfm/maxmind/GeoLite2-City.mmdb"
+
+local function geo_country(ip_str)
+  if not mmdb_ok or _geo_db_err then return "" end
+  if not _geo_db then
+    local db, err = mmdb.new()
+    if not db then _geo_db_err = true; return "" end
+    local ok, err2 = db:open(GEO_DB_PATH)
+    if not ok then _geo_db_err = true; return "" end
+    _geo_db = db
+  end
+  local res, err = _geo_db:lookup(ip_str)
+  if not res then return "" end
+  return (res.country and res.country.iso_code) or ""
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MAIN ENFORCEMENT
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -585,7 +608,7 @@ if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
 local ua_raw  = ngx.var.http_user_agent or ""
-local country = string.upper(ngx.var.http_cf_ipcountry or "")
+local country = geo_country(ip)
 local d       = get_decision(ip, host, uri, method, scheme, ua_raw, country)
 
 local ip_action        = d.ip_action        or "allow"
