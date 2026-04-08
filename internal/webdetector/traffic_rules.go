@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,9 @@ type TrafficRuleMatch struct {
 	UAAny     []string `json:"ua_any,omitempty"`
 	PathAny   []string `json:"path_any,omitempty"`
 	Methods   []string `json:"methods,omitempty"`
+	// Query-string guards (both optional, evaluated only when set)
+	HasQS    bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
+	QSNotRx  string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
 }
 
 type TrafficRuleAction struct {
@@ -65,6 +69,7 @@ type TrafficRuleEvalInput struct {
 	Path    string `json:"path,omitempty"`
 	Method  string `json:"method,omitempty"`
 	Country string `json:"country,omitempty"`
+	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
 }
 
 type TrafficRuleEvalResult struct {
@@ -208,7 +213,7 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
-		if !ruleMatchFilters(r.Match, country, ua, path, method) {
+		if !ruleMatchFilters(r.Match, country, ua, path, method, in.QueryString) {
 			continue
 		}
 		return TrafficRuleEvalResult{
@@ -294,6 +299,13 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 		return TrafficRule{}, fmt.Errorf("methods: %w", err)
 	}
 	r.Match.Methods = methods
+
+if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
+    if _, err := regexp.Compile("(?i)" + rx); err != nil {
+        return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+    }
+    r.Match.QSNotRx = rx
+}
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
@@ -411,7 +423,10 @@ func ruleHostMatch(vhosts []string, host string) bool {
 	return false
 }
 
-func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method string) bool {
+
+
+
+func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) bool {
 	if len(m.CountryIn) > 0 {
 		ok := false
 		for _, cc := range m.CountryIn {
@@ -476,8 +491,23 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method string) bool
 			return false
 		}
 	}
+	// QS guards — evaluated last, after UA/path have already narrowed the candidate set
+	if m.HasQS && qs == "" {
+		return false
+	}
+	if m.QSNotRx != "" && qs != "" {
+		if ok, _ := regexp.MatchString("(?i)"+m.QSNotRx, qs); ok {
+			return false
+		}
+	}
 	return true
 }
+
+
+
+
+
+
 
 // wildcardMatch matches pattern with '*' and '?' against s.
 // Unlike filepath.Match, '*' can match '/' too (needed for UA/path matching).

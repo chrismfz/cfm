@@ -965,6 +965,12 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
 	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
+// split path from query string — Lua sends request_uri which includes "?qs"
+var qs string
+if idx := strings.IndexByte(uri, '?'); idx >= 0 {
+    qs = uri[idx+1:]
+    uri = uri[:idx]
+}
 	method := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method")))
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
@@ -1050,6 +1056,7 @@ if country == "" && ip != "" && b.enr != nil {
 			Path:    uri,
 			Method:  method,
 			Country: country,
+			QueryString: qs,
 		})
 		if rr.Matched {
 			resp["rule_action"] = rr.Action

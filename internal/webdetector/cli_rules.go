@@ -232,10 +232,16 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 			i++
 		case strings.HasPrefix(a, "--country="):
 			in.Country = strings.ToUpper(strings.TrimPrefix(a, "--country="))
+case a == "--qs" && next != "":
+    in.QueryString = next
+    i++
+case strings.HasPrefix(a, "--qs="):
+    in.QueryString = strings.TrimPrefix(a, "--qs=")
+
 		}
 	}
 	if strings.TrimSpace(in.Host) == "" {
-		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
+		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US] [--qs 'key=value']")
 	}
 	return in, nil
 }

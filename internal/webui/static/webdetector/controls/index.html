@@ -90,6 +90,14 @@
               <label title="URL path wildcard patterns">Path patterns</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
             </div>
+
+            <div class="toolbar">
+              <label><input type="checkbox" v-model="ruleForm.hasQS" title="Only match when the request has a query string" /> Has QS</label>
+              <label title="Pass-through (skip rule) when query string matches — regex, case-insensitive. Only evaluated when Has QS is checked.">QS pass-through</label>
+              <input class="input input-wide" type="text" v-model.trim="ruleForm.qsNotRx"
+                placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
+            </div>
+
             <div class="toolbar">
               <label>Note</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
@@ -123,6 +131,13 @@
               <label>UA</label>
               <input class="input input-wide" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
             </div>
+
+            <div class="toolbar">
+              <label title="Raw query string without leading '?' — used to test has_qs / qs_not_rx rules">QS</label>
+              <input class="input input-wide" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
+            </div>
+
+
             <div class="toolbar">
               <button class="btn-quiet" @click="runRuleSimulation">Run simulation</button>
             </div>
