@@ -970,10 +970,11 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 
 if country == "" && ip != "" && b.enr != nil {
-    if geo := b.enr.Lookup(ip); geo.Country != "" {
-        country = strings.ToUpper(strings.ToUpper(geo.Country))
+    if geo := b.enr.Lookup(ip); geo.CountryISO != "" {
+        country = geo.CountryISO  // "GR" not "Greece"
     }
 }
+
 	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
 		host = hh
 	}

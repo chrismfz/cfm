@@ -22,6 +22,7 @@ type Result struct {
 	ASN     uint
 	ASNName string
 	Country string
+	CountryISO string  // ISO-2 "GR" (rule matching)
 	City    string
 	ts      time.Time
 }
@@ -150,18 +151,19 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	}
 
 	// Country/City
-	if localCity != nil {
-		if rec, err := localCity.City(ip); err == nil && rec != nil {
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
-		}
-	}
+if localCity != nil {
+    if rec, err := localCity.City(ip); err == nil && rec != nil {
+        r.CountryISO = rec.Country.IsoCode  // ← add this line
+        if name, ok := rec.Country.Names["en"]; ok && name != "" {
+            r.Country = name
+        } else {
+            r.Country = rec.Country.IsoCode
+        }
+        if c, ok := rec.City.Names["en"]; ok {
+            r.City = c
+        }
+    }
+}
 
 	// store in cache
 	e.mu.Lock()

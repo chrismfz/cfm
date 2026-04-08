@@ -451,18 +451,27 @@ end
 -- GEO LOOKUP (lazy, per-worker singleton)
 -- ─────────────────────────────────────────────────────────────────────────────
 local mmdb_ok, mmdb = pcall(require, "resty.maxminddb")
-local _geo_db      = nil
-local _geo_db_err  = false  -- true = already tried and failed, don't retry
+-- Guard: module loaded but API doesn't match what we expect
+if mmdb_ok and (type(mmdb) ~= "table" or type(mmdb.new) ~= "function") then
+    ngx.log(ngx.WARN, "[cfm] lua-resty-maxminddb loaded but missing .new — geo disabled")
+    mmdb_ok = false
+end
+
+local _geo_db     = nil
+local _geo_db_err = false
 
 local GEO_DB_PATH = os.getenv("CFM_GEO_DB") or "/var/lib/cfm/maxmind/GeoLite2-City.mmdb"
 
 local function geo_country(ip_str)
   if not mmdb_ok or _geo_db_err then return "" end
   if not _geo_db then
-    local db, err = mmdb.new()
-    if not db then _geo_db_err = true; return "" end
-    local ok, err2 = db:open(GEO_DB_PATH)
-    if not ok then _geo_db_err = true; return "" end
+    -- .new() takes the path directly — no separate :open() call
+    local db, err = mmdb.new(GEO_DB_PATH)
+    if not db then
+      ngx.log(ngx.WARN, "[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
+      _geo_db_err = true
+      return ""
+    end
     _geo_db = db
   end
   local res, err = _geo_db:lookup(ip_str)
