@@ -474,6 +474,13 @@ func NewEngine(cfg Config) *Engine {
 		}
 	}
 
+
+   // Wire enricher into bridge for country fallback in handleDecision. ← ADD THIS
+    if e.nginxBridge != nil && e.enr != nil {
+        e.nginxBridge.SetEnricher(e.enr)
+    }
+
+
 	return e
 }
 

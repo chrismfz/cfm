@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"cfm/internal/clam"
 	"cfm/internal/logging"
+	"cfm/internal/enrich"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
