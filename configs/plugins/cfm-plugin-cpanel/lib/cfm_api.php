@@ -1,52 +1,130 @@
 <?php
+// cfm_api.php — CFM API client for the cPanel plugin.
+// Reads AUTH_TOKEN, PORT, TLS_PORT from /etc/cfm/cfm.conf.
 
-function cfm_api_base_url(): string
+function cfm_parse_conf(string $path = '/etc/cfm/cfm.conf'): array
 {
-    foreach (['CFM_API_BASE_URL', 'API_BASE_URL'] as $key) {
-        $v = getenv($key);
-        if (is_string($v) && trim($v) !== '') {
-            return rtrim(trim($v), '/');
+    $cfg = [];
+    if (!is_readable($path)) return $cfg;
+    $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (!is_array($lines)) return $cfg;
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#' || $line[0] === ';') continue;
+        if (strpos($line, '=') === false) continue;
+        [$k, $v] = explode('=', $line, 2);
+        $k = trim($k);
+        $v = trim(trim($v), '"\'');
+        // strip inline comments
+        foreach ([' #', ' //', ' ;'] as $marker) {
+            if (($pos = strpos($v, $marker)) !== false) {
+                $v = trim(substr($v, 0, $pos));
+            }
         }
+        if ($k !== '') $cfg[$k] = $v;
+    }
+    return $cfg;
+}
+
+function cfm_conf(): array
+{
+    static $cfg = null;
+    if ($cfg === null) $cfg = cfm_parse_conf();
+    return $cfg;
+}
+
+// Local API base URL — always loopback, used for server-side calls (token issuance).
+function cfm_local_base_url(): string
+{
+    $cfg = cfm_conf();
+    $port = (int)($cfg['PORT'] ?? 6060);
+    if ($port <= 0) $port = 6060;
+    return 'http://127.0.0.1:' . $port;
+}
+
+// Admin bearer token from cfm.conf.
+function cfm_admin_token(): string
+{
+    $cfg = cfm_conf();
+    return trim($cfg['AUTH_TOKEN'] ?? '');
+}
+
+// Browser-facing base URL for the iframe.
+// Priority: CPANEL_PLUGIN_BASE_URL override → TLS_PORT → PORT → bare hostname.
+function cfm_iframe_base_url(): string
+{
+    $cfg = cfm_conf();
+
+    // Explicit override — admin escape hatch for unusual setups.
+    $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
+    if ($override !== '') return rtrim($override, '/');
+
+    // Derive hostname from the HTTP request (strip any port cPanel appends).
+    $httpHost = preg_replace('/:\d+$/', '', (string)(getenv('HTTP_HOST') ?: ''));
+    if ($httpHost === '') {
+        $httpHost = trim((string)shell_exec('hostname -f 2>/dev/null'));
+    }
+    if ($httpHost === '') {
+        $httpHost = (string)gethostname();
     }
 
-    return 'http://127.0.0.1:6060';
+    $tlsPort = (int)($cfg['TLS_PORT'] ?? 0);
+
+    if ($tlsPort > 0) {
+        // Direct TLS port — bypasses OpenResty, hits Go directly.
+        return 'https://' . $httpHost . ':' . $tlsPort;
+    }
+
+    // No TLS_PORT → assume OpenResty is in front on standard 443.
+    // /cfm-admin/ is already handled by the OpenResty location block.
+    return 'https://' . $httpHost;
 }
 
-function cfm_api_token(): string
+// Issue a scoped token for the given vhosts via the local API.
+// Returns the token string.
+function cfm_issue_scoped_token(array $vhosts, string $label = '', string $ttl = '4h'): string
 {
-    return '';
+    if (empty($vhosts)) {
+        throw new RuntimeException('No vhosts to scope token to');
+    }
+
+    $result = cfm_api_request('/api/v1/auth/token', 'POST', [
+        'vhosts' => array_values(array_unique($vhosts)),
+        'role'   => 'viewer',
+        'ttl'    => $ttl,
+        'label'  => $label,
+    ]);
+
+    $token = $result['token'] ?? '';
+    if ($token === '') {
+        throw new RuntimeException('CFM returned no token — check AUTH_TOKEN in cfm.conf');
+    }
+    return $token;
 }
 
+// Generic CFM API call (server-side, loopback).
 function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null): array
 {
-    $url = rtrim(cfm_api_base_url(), '/') . $path;
-    $ch = curl_init($url);
+    $url = rtrim(cfm_local_base_url(), '/') . $path;
+    $ch  = curl_init($url);
+    if ($ch === false) throw new RuntimeException('curl_init failed');
 
-    if ($ch === false) {
-        throw new RuntimeException('Failed to initialize curl');
-    }
+    $headers = ['Accept: application/json'];
+    $tok = cfm_admin_token();
+    if ($tok !== '') $headers[] = 'Authorization: Bearer ' . $tok;
 
-    $headers = [
-        'Accept: application/json',
-    ];
-
-    $token = cfm_api_token();
-    if ($token !== '') {
-        $headers[] = 'Authorization: Bearer ' . $token;
-    }
-
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch, CURLOPT_FAILONERROR, false);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT        => 10,
+        CURLOPT_CUSTOMREQUEST  => $method,
+        CURLOPT_FAILONERROR    => false,
+        CURLOPT_HTTPHEADER     => $headers,
+    ]);
 
     if ($payload !== null) {
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
-        if ($json === false) {
-            throw new RuntimeException('Failed to encode request payload');
-        }
+        if ($json === false) throw new RuntimeException('json_encode failed');
         $headers[] = 'Content-Type: application/json';
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $json);
@@ -58,40 +136,13 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
         curl_close($ch);
         throw new RuntimeException('CFM API request failed: ' . $err);
     }
-
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     $decoded = json_decode($body, true);
-    if (!is_array($decoded)) {
-        $decoded = ['raw' => $body];
-    }
-
+    if (!is_array($decoded)) $decoded = ['raw' => $body];
     if ($code >= 400) {
-        $msg = $decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code);
-        throw new RuntimeException('CFM API error: ' . $msg);
+        throw new RuntimeException($decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code));
     }
-
     return $decoded;
-}
-
-function cfm_list_excludes(string $kind): array
-{
-    if (!in_array($kind, ['challenge', 'waf'], true)) {
-        throw new InvalidArgumentException('Invalid exclude kind');
-    }
-
-    return cfm_api_request('/api/v1/' . $kind . '/exclude/list', 'GET');
-}
-
-function cfm_add_exclude(string $kind, string $type, string $value): array
-{
-    $qs = http_build_query(['type' => $type, 'value' => $value]);
-    return cfm_api_request('/api/v1/' . $kind . '/exclude/add?' . $qs, 'POST');
-}
-
-function cfm_remove_exclude(string $kind, string $type, string $value): array
-{
-    $qs = http_build_query(['type' => $type, 'value' => $value]);
-    return cfm_api_request('/api/v1/' . $kind . '/exclude/remove?' . $qs, 'POST');
 }

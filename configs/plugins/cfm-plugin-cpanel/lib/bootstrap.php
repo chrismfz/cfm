@@ -1,98 +1,69 @@
 <?php
-
 require_once __DIR__ . '/cfm_api.php';
 require_once __DIR__ . '/domain_provider.php';
-require_once __DIR__ . '/actions.php';
 
-function cgi_send_headers(string $contentType = 'text/html; charset=utf-8', array $extraHeaders = []): void
+function cgi_send_headers(string $contentType = 'text/html; charset=utf-8', array $extra = []): void
 {
     echo "Content-Type: {$contentType}\r\n";
-    foreach ($extraHeaders as $line) {
-        echo $line . "\r\n";
-    }
+    foreach ($extra as $h) echo $h . "\r\n";
     echo "\r\n";
 }
 
 function cfm_bootstrap(string $mode): void
 {
     if (!in_array($mode, ['whm', 'cpanel'], true)) {
-        cgi_send_headers('text/html; charset=utf-8');
-        echo 'Invalid mode';
+        cgi_send_headers();
+        echo '<p>Invalid mode</p>';
         exit;
     }
 
-    $extraHeaders = [];
-
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        session_name('CFMEXCLUDES');
-
-        $sid = $_COOKIE['CFMEXCLUDES'] ?? '';
-        if ($sid !== '' && preg_match('/^[a-zA-Z0-9,-]{1,128}$/', $sid)) {
-            session_id($sid);
-        }
-
-        session_start();
-
-        if ($sid === '' || $sid !== session_id()) {
-            $cookieParams = session_get_cookie_params();
-            $extraHeaders[] = sprintf(
-                'Set-Cookie: CFMEXCLUDES=%s; Path=%s; HttpOnly; SameSite=Lax',
-                session_id(),
-                $cookieParams['path'] ?: '/'
-            );
-        }
+    // WHM / root — redirect straight to the full admin UI.
+    // Root has goauth session auth; no scoped token needed.
+    if ($mode === 'whm') {
+        $adminUrl = cfm_iframe_base_url() . '/cfm-admin/';
+        cgi_send_headers();
+        echo '<!doctype html><html><head><meta charset=utf-8>'
+            . '<meta http-equiv="refresh" content="0;url=' . htmlspecialchars($adminUrl, ENT_QUOTES, 'UTF-8') . '">'
+            . '<title>CFM Admin</title></head><body>'
+            . '<p>Redirecting to <a href="' . htmlspecialchars($adminUrl, ENT_QUOTES, 'UTF-8') . '">CFM Admin</a>…</p>'
+            . '</body></html>';
+        exit;
     }
 
-    handle_asset_request($mode, $extraHeaders);
-    handle_ajax_action($mode, $extraHeaders);
+    // cPanel mode — issue a scoped token for the user's domains.
+    $currentUser = get_current_cpanel_user();
+    $domains     = [];
+    $error       = '';
+    $token       = '';
+    $pageTitle   = 'CFM Security';
 
-    try {
-        if ($mode === 'whm') {
-            $rows = get_all_user_domains();
-            $currentUser = '';
-            $pageTitle = 'CFM - WHM';
+    if ($currentUser === '') {
+        $error = 'Could not determine cPanel username.';
+    } else {
+        $domains = get_domains_for_user($currentUser);
+        if (empty($domains)) {
+            $error = 'No domains found for user "' . $currentUser . '".';
         } else {
-            $currentUser = get_current_cpanel_user();
-            $rows = [];
-
-            if ($currentUser !== '') {
-                $domains = get_domains_for_user($currentUser);
-                if (empty($domains)) {
-                    foreach (get_all_user_domains() as $row) {
-                        if (normalize_cpanel_user((string)($row['user'] ?? '')) === $currentUser) {
-                            $d = normalize_host((string)($row['domain'] ?? ''));
-                            if ($d !== '') {
-                                $domains[] = $d;
-                            }
-                        }
-                    }
-                    $domains = finalize_domains($domains);
-                }
-
-                foreach ($domains as $domain) {
-                    $domain = normalize_host((string)$domain);
-                    if ($domain !== '') {
-                        $rows[] = ['user' => $currentUser, 'domain' => $domain];
-                    }
-                }
+            try {
+                $label = 'cpanel:' . $currentUser;
+                $token = cfm_issue_scoped_token($domains, $label, '4h');
+            } catch (Throwable $e) {
+                $error = $e->getMessage();
             }
-
-            $pageTitle = 'CFM Dashboard';
         }
-
-        $challengeSet = build_exact_host_set(cfm_list_excludes('challenge'));
-        $wafSet       = build_exact_host_set(cfm_list_excludes('waf'));
-$csrfToken    = session_token($mode);
-        $modeName     = $mode;
-
-        cgi_send_headers('text/html; charset=utf-8', $extraHeaders);
-    } catch (Throwable $e) {
-        cgi_send_headers('text/html; charset=utf-8', $extraHeaders);
-        echo '<h2>CFM Excludes</h2>';
-        echo '<pre>' . h($e->getMessage()) . '</pre>';
-        exit;
     }
 
+    $iframeBase   = cfm_iframe_base_url();
+    $iframeUrl    = $iframeBase . '/cfm-admin/webdetector/controls/';
+
+    // Compute postMessage target origin (scheme + host + optional port).
+    $parsed       = parse_url($iframeBase);
+    $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
+    if (!empty($parsed['port'])) {
+        $iframeOrigin .= ':' . $parsed['port'];
+    }
+
+    cgi_send_headers();
     include __DIR__ . '/../templates/index.php';
     exit;
 }

@@ -2,6 +2,10 @@
 set -euo pipefail
 
 echo "[+] Installing CFM plugin"
+echo "    Requires: AUTH_TOKEN set in /etc/cfm/cfm.conf"
+echo "    Optional: CPANEL_PLUGIN_BASE_URL = https://hostname:port (if not via OpenResty)"
+echo ""
+
 
 WHM_CGI_DIR="/usr/local/cpanel/whostmgr/docroot/cgi"
 CPANEL_CGI_DIR="/usr/local/cpanel/base/3rdparty"
@@ -36,8 +40,6 @@ install -m 0644 lib/actions.php         "$BASE_LIB_DIR/lib/actions.php"
 
 # Template
 install -m 0644 templates/index.php "$BASE_LIB_DIR/templates/index.php"
-install -m 0644 lib/assets/style.css "$BASE_LIB_DIR/lib/assets/style.css"
-install -m 0644 lib/assets/app.js "$BASE_LIB_DIR/lib/assets/app.js"
 
 # WHM icon
 install -m 0644 lib/cfm.png "$WHM_ICON_DIR/cfm.png"

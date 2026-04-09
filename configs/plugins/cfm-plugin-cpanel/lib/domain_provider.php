@@ -89,6 +89,222 @@ function finalize_domains(array $domains): array
     return $out;
 }
 
+
+// ── MySQL database and user discovery ────────────────────────────────────────
+//
+// cPanel MySQL users and databases follow the naming convention:
+//   DB user:  cpaneluser_username   (max 16 chars total on MySQL 5.x)
+//   DB name:  cpaneluser_dbname
+//
+// Discovery priority:
+//   1. UAPI Mysql::list_databases / Mysql::list_users  (most accurate)
+//   2. Parse /var/cpanel/databases/users.yaml          (fast, file-based fallback)
+//   3. Prefix scan of /var/lib/mysql/ dirs             (last resort)
+
+function get_db_users_for_user(string $user): array
+{
+    $user = normalize_cpanel_user($user);
+    if ($user === '') return [];
+
+    // Method 1: UAPI
+    $via_uapi = _db_users_via_uapi($user);
+    if (!empty($via_uapi)) return $via_uapi;
+
+    // Method 2: yaml file
+    $via_yaml = _db_users_via_yaml($user);
+    if (!empty($via_yaml)) return $via_yaml;
+
+    // Method 3: prefix fallback
+    return _db_users_via_prefix($user);
+}
+
+function get_databases_for_user(string $user): array
+{
+    $user = normalize_cpanel_user($user);
+    if ($user === '') return [];
+
+    // Method 1: UAPI
+    $via_uapi = _databases_via_uapi($user);
+    if (!empty($via_uapi)) return $via_uapi;
+
+    // Method 2: yaml file
+    $via_yaml = _databases_via_yaml($user);
+    if (!empty($via_yaml)) return $via_yaml;
+
+    // Method 3: prefix fallback from /var/lib/mysql
+    return _databases_via_prefix($user);
+}
+
+// Returns both in one call to avoid double UAPI round-trips.
+function get_db_info_for_user(string $user): array
+{
+    $user = normalize_cpanel_user($user);
+    if ($user === '') return ['users' => [], 'databases' => []];
+
+    // Try UAPI once for both
+    $uapi = _db_info_via_uapi($user);
+    if (!empty($uapi['users']) || !empty($uapi['databases'])) return $uapi;
+
+    // Yaml fallback
+    $yaml_users = _db_users_via_yaml($user);
+    $yaml_dbs   = _databases_via_yaml($user);
+    if (!empty($yaml_users) || !empty($yaml_dbs)) {
+        return ['users' => $yaml_users, 'databases' => $yaml_dbs];
+    }
+
+    // Prefix fallback
+    return [
+        'users'     => _db_users_via_prefix($user),
+        'databases' => _databases_via_prefix($user),
+    ];
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+function _db_info_via_uapi(string $user): array
+{
+    $users = _db_users_via_uapi($user);
+    $dbs   = _databases_via_uapi($user);
+    return ['users' => $users, 'databases' => $dbs];
+}
+
+function _db_users_via_uapi(string $user): array
+{
+    $cmd = '/usr/local/cpanel/bin/uapi --user=' . escapeshellarg($user)
+         . ' Mysql list_users --output=json 2>/dev/null';
+    $raw = shell_exec($cmd);
+    if (!is_string($raw) || trim($raw) === '') return [];
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) return [];
+
+    $items = $decoded['result']['data'] ?? [];
+    if (!is_array($items)) return [];
+
+    $out = [];
+    foreach ($items as $item) {
+        // UAPI returns either a string or array with 'user' key depending on version
+        $u = is_string($item) ? $item : (string)($item['user'] ?? '');
+        $u = trim($u);
+        if ($u !== '') $out[] = $u;
+    }
+    sort($out, SORT_NATURAL | SORT_FLAG_CASE);
+    return $out;
+}
+
+function _databases_via_uapi(string $user): array
+{
+    $cmd = '/usr/local/cpanel/bin/uapi --user=' . escapeshellarg($user)
+         . ' Mysql list_databases --output=json 2>/dev/null';
+    $raw = shell_exec($cmd);
+    if (!is_string($raw) || trim($raw) === '') return [];
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) return [];
+
+    $items = $decoded['result']['data'] ?? [];
+    if (!is_array($items)) return [];
+
+    $out = [];
+    foreach ($items as $item) {
+        $db = is_string($item) ? $item : (string)($item['database'] ?? '');
+        $db = trim($db);
+        if ($db !== '') $out[] = $db;
+    }
+    sort($out, SORT_NATURAL | SORT_FLAG_CASE);
+    return $out;
+}
+
+function _db_users_via_yaml(string $user): array
+{
+    // /var/cpanel/databases/users.yaml maps cpanel user → list of mysql users
+    $file = '/var/cpanel/databases/users.yaml';
+    return _parse_cpanel_db_yaml($file, $user, 'users');
+}
+
+function _databases_via_yaml(string $user): array
+{
+    // /var/cpanel/databases/dbindex.yaml maps cpanel user → list of db names
+    $file = '/var/cpanel/databases/dbindex.yaml';
+    return _parse_cpanel_db_yaml($file, $user, 'databases');
+}
+
+function _parse_cpanel_db_yaml(string $file, string $cpanelUser, string $kind): array
+{
+    if (!is_readable($file)) return [];
+
+    $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (!is_array($lines)) return [];
+
+    // Minimal YAML parser — cPanel's yaml files use a simple structure:
+    //   username:
+    //     - item1
+    //     - item2
+    // We don't load a full YAML library to avoid dependencies.
+
+    $out         = [];
+    $inUser      = false;
+    $userIndent  = 0;
+
+    foreach ($lines as $line) {
+        if (trim($line) === '' || trim($line)[0] === '#') continue;
+
+        $trimmed = ltrim($line);
+        $indent  = strlen($line) - strlen($trimmed);
+
+        // Top-level key: "username:"
+        if ($indent === 0) {
+            $key = rtrim($trimmed, ':');
+            $inUser = (normalize_cpanel_user($key) === $cpanelUser);
+            $userIndent = 0;
+            continue;
+        }
+
+        if (!$inUser) continue;
+
+        // List item under this user: "  - value"
+        if (strpos($trimmed, '- ') === 0) {
+            $val = trim(substr($trimmed, 2));
+            // Strip YAML quotes if present
+            $val = trim($val, '"\'');
+            if ($val !== '') $out[] = $val;
+        }
+    }
+
+    sort($out, SORT_NATURAL | SORT_FLAG_CASE);
+    return $out;
+}
+
+function _db_users_via_prefix(string $user): array
+{
+    // MySQL users created by cPanel are prefixed with the cpanel username + '_'
+    // We can't enumerate them without a DB connection, so return empty here.
+    // The governor will need direct MySQL access for this fallback anyway.
+    return [];
+}
+
+function _databases_via_prefix(string $user): array
+{
+    $prefix = $user . '_';
+    $base   = '/var/lib/mysql';
+    $out    = [];
+
+    if (!is_dir($base)) return [];
+
+    foreach (glob($base . '/' . $prefix . '*') ?: [] as $path) {
+        if (!is_dir($path)) continue;
+        $db = basename($path);
+        // Skip system dirs that happen to match
+        if (in_array($db, ['information_schema', 'mysql', 'performance_schema', 'sys'], true)) continue;
+        $out[] = $db;
+    }
+
+    sort($out, SORT_NATURAL | SORT_FLAG_CASE);
+    return $out;
+}
+
+
+
 function get_all_cpanel_users(): array
 {
     $users = [];
