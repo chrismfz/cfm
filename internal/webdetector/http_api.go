@@ -44,6 +44,10 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/webdet/history/summary", e.handleHistorySummary)
 	mux.HandleFunc("/api/v1/webdet/history/stats", e.handleHistoryStats)
 	mux.HandleFunc("/api/v1/webdet/history/challenge-outcomes", e.handleHistoryChallengeOutcomes)
+
+	mux.HandleFunc("/api/v1/webdet/history/waf-by-rule", e.handleHistoryWAFByRule)
+	mux.HandleFunc("/api/v1/webdet/history/vhost-overview", e.handleHistoryVhostOverview)
+
 	mux.HandleFunc("/api/v1/webdet/history/prune", e.handleHistoryPrune)
 	mux.HandleFunc("/api/v1/webdet/history/truncate", e.handleHistoryTruncate)
 

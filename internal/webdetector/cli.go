@@ -108,6 +108,9 @@ func printWebTopHelp() {
 
         fmt.Println("  cfm webtop history prune [days]")
         fmt.Println("  cfm webtop history truncate --yes")
+        fmt.Println("  cfm webtop history waf-by-rule [--host H] [--hours 24]")
+        fmt.Println("  cfm webtop history overview --host H [--hours 24]")
+
         fmt.Println("  cfm webtop tokens                               # list scoped tokens")
         fmt.Println("  cfm webtop tokens create --vhosts a.com --label name [--ttl 8760h]")
         fmt.Println("  cfm webtop tokens revoke <id>")

@@ -57,6 +57,29 @@ type HistorySummary struct {
 	Suspicious    int `json:"suspicious"`
 }
 
+// WAFRuleHit is a single row from WAFByRule — one WAF rule and its hit count.
+type WAFRuleHit struct {
+	Rule  string `json:"rule"`
+	Count int    `json:"count"`
+}
+
+// VhostOverview is the combined per-vhost security summary for the
+// "Security Overview" panel tab.
+type VhostOverview struct {
+	Host         string       `json:"host"`
+	Hours        int          `json:"hours"`
+	FromUnix     int64        `json:"from_unix"`
+	ToUnix       int64        `json:"to_unix"`
+	// Challenge stats
+	ChallengeIssued int     `json:"challenge_issued"`
+	ChallengeSolved int     `json:"challenge_solved"`
+	SolveRatePct    float64 `json:"solve_rate_pct"`
+	// WAF stats
+	WAFHits    int          `json:"waf_hits"`
+	TopWAFRule string       `json:"top_waf_rule,omitempty"`
+	WAFByRule  []WAFRuleHit `json:"waf_by_rule"`
+}
+
 type HistoryStore struct {
 	mu sync.Mutex
 
@@ -223,6 +246,8 @@ func (s *HistoryStore) pruneIfNeededLocked(now time.Time) {
 	}
 }
 
+// readAllLocked returns all events ordered by ts desc.
+// Caller must hold s.mu before calling.
 func (s *HistoryStore) readAllLocked() ([]HistoryEvent, error) {
 	rows, err := s.db.Query(`
 SELECT id, ts_unix, event_type, host, ip, mode, reason, score, uniq_ip, rps, status_code, ttl_sec, payload_json
@@ -329,6 +354,97 @@ GROUP BY event_type`, args...)
 	return r, rows.Err()
 }
 
+// WAFByRule returns WAF hit counts grouped by rule name (stored in the reason
+// column) for the given host and time window.
+// host="" returns the global breakdown (admin view).
+func (s *HistoryStore) WAFByRule(host string, hours int) ([]WAFRuleHit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if hours <= 0 {
+		hours = 24
+	}
+	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+
+	clauses := []string{
+		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
+		"ts_unix >= ?",
+		"reason IS NOT NULL",
+		"reason != ''",
+	}
+	args := []interface{}{from}
+	if host != "" {
+		clauses = append(clauses, "host = ?")
+		args = append(args, host)
+	}
+
+	rows, err := s.db.Query(`
+SELECT reason, COUNT(*) as cnt
+FROM history_events
+WHERE `+strings.Join(clauses, " AND ")+`
+GROUP BY reason
+ORDER BY cnt DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []WAFRuleHit
+	for rows.Next() {
+		var h WAFRuleHit
+		if err := rows.Scan(&h.Rule, &h.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	if out == nil {
+		out = []WAFRuleHit{}
+	}
+	return out, rows.Err()
+}
+
+// VhostOverviewQuery returns the combined security overview for a single vhost.
+// Combines Summarize + WAFByRule in one DB-locked pass to avoid double locking.
+func (s *HistoryStore) VhostOverviewQuery(host string, hours int) (VhostOverview, error) {
+	if hours <= 0 {
+		hours = 24
+	}
+	to := time.Now().Unix()
+	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+
+	ov := VhostOverview{
+		Host:     host,
+		Hours:    hours,
+		FromUnix: from,
+		ToUnix:   to,
+	}
+
+	// Summary counts — reuse Summarize (acquires its own lock).
+	sum, err := s.Summarize(host, "", hours)
+	if err != nil {
+		return ov, err
+	}
+	ov.ChallengeIssued = sum.ChallengeIssued
+	ov.ChallengeSolved = sum.ChallengeSolved
+	if sum.ChallengeIssued > 0 {
+		ov.SolveRatePct = float64(sum.ChallengeSolved) / float64(sum.ChallengeIssued) * 100
+	}
+
+	// WAF breakdown — reuse WAFByRule (acquires its own lock).
+	wafRows, err := s.WAFByRule(host, hours)
+	if err != nil {
+		return ov, err
+	}
+	ov.WAFByRule = wafRows
+	for _, r := range wafRows {
+		ov.WAFHits += r.Count
+	}
+	if len(wafRows) > 0 {
+		ov.TopWAFRule = wafRows[0].Rule
+	}
+
+	return ov, nil
+}
+
 func (s *HistoryStore) pruneLocked(days int) (int64, error) {
 	if days <= 0 {
 		days = s.retentionDays
@@ -339,7 +455,7 @@ func (s *HistoryStore) pruneLocked(days int) (int64, error) {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`) // best-effort
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	_, _ = s.db.Exec(`VACUUM`)
 	return n, nil
 }
@@ -391,7 +507,11 @@ func (s *HistoryStore) Stats() (HistoryStats, error) {
 		sz += shmInfo.Size()
 	}
 
-	return HistoryStats{Path: s.path, Events: events, UniqueHosts: uniqueHosts, UniqueIPs: uniqueIPs, SizeBytes: sz, RetentionDays: s.retentionDays, PruneEverySec: int64(s.pruneEvery.Seconds())}, nil
+	return HistoryStats{
+		Path: s.path, Events: events, UniqueHosts: uniqueHosts,
+		UniqueIPs: uniqueIPs, SizeBytes: sz, RetentionDays: s.retentionDays,
+		PruneEverySec: int64(s.pruneEvery.Seconds()),
+	}, nil
 }
 
 func (s *HistoryStore) String() string {
@@ -419,4 +539,3 @@ func scanHistoryRows(rows *sql.Rows) ([]HistoryEvent, error) {
 	}
 	return out, rows.Err()
 }
-

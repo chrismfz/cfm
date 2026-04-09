@@ -28,8 +28,13 @@ func runHistoryWebTop(baseURL string, args []string) error {
 		return runHistoryPrune(baseURL, rest)
 	case "truncate":
 		return runHistoryTruncate(baseURL, rest)
+	case "waf-by-rule", "waf":
+		return runHistoryWAFByRule(baseURL, rest)
+	case "overview", "vhost-overview":
+		return runHistoryVhostOverview(baseURL, rest)
 	default:
-		return fmt.Errorf("usage: cfm webtop history [events|summary|outcomes|prune|truncate]")
+		return fmt.Errorf("usage: cfm webtop history [events|summary|outcomes|waf-by-rule|overview|prune|truncate]")
+
 	}
 }
 
@@ -202,3 +207,90 @@ func runHistoryTruncate(baseURL string, args []string) error {
 	fmt.Printf("history truncated rows_deleted=%v\n", out["rows_deleted"])
 	return nil
 }
+
+
+func runHistoryWAFByRule(baseURL string, args []string) error {
+	host, _, _, hours := parseHistoryFilters(args)
+	u, _ := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/webdet/history/waf-by-rule")
+	q := u.Query()
+	if host != "" {
+		q.Set("host", host)
+	}
+	q.Set("hours", strconv.Itoa(hours))
+	u.RawQuery = q.Encode()
+	resp, err := clihttp.Get(u.String())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Host  string       `json:"host"`
+		Hours int          `json:"hours"`
+		Rules []WAFRuleHit `json:"rules"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+
+	scope := "global"
+	if payload.Host != "" {
+		scope = payload.Host
+	}
+	fmt.Printf("WAF rule hits (%dh) — %s\n", payload.Hours, scope)
+	if len(payload.Rules) == 0 {
+		fmt.Println("  (no WAF events in this window)")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "RULE\tHITS")
+	for _, r := range payload.Rules {
+		fmt.Fprintf(w, "%s\t%d\n", r.Rule, r.Count)
+	}
+	return w.Flush()
+}
+
+func runHistoryVhostOverview(baseURL string, args []string) error {
+	host, _, _, hours := parseHistoryFilters(args)
+	u, _ := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/webdet/history/vhost-overview")
+	q := u.Query()
+	if host != "" {
+		q.Set("host", host)
+	}
+	q.Set("hours", strconv.Itoa(hours))
+	u.RawQuery = q.Encode()
+	resp, err := clihttp.Get(u.String())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var ov VhostOverview
+	if err := json.NewDecoder(resp.Body).Decode(&ov); err != nil {
+		return err
+	}
+
+	scope := "global"
+	if ov.Host != "" {
+		scope = ov.Host
+	}
+	fmt.Printf("Security overview (%dh) — %s\n", ov.Hours, scope)
+	fmt.Printf("  Challenges issued : %d\n", ov.ChallengeIssued)
+	fmt.Printf("  Challenges solved : %d (%.2f%%)\n", ov.ChallengeSolved, ov.SolveRatePct)
+	fmt.Printf("  WAF hits          : %d\n", ov.WAFHits)
+	if ov.TopWAFRule != "" {
+		fmt.Printf("  Top WAF rule      : %s\n", ov.TopWAFRule)
+	}
+	if len(ov.WAFByRule) > 0 {
+		fmt.Println()
+		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "  RULE\tHITS")
+		for _, r := range ov.WAFByRule {
+			fmt.Fprintf(w, "  %s\t%d\n", r.Rule, r.Count)
+		}
+		_ = w.Flush()
+	}
+	return nil
+}
+

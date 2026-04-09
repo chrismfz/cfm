@@ -6,14 +6,41 @@ import (
 	"strings"
 )
 
+// scopeCheckHost enforces that scoped tokens can only query their own vhosts.
+// For admin requests (nil scope) it is a no-op.
+// Returns false and writes the error response if the check fails.
+func scopeCheckHost(w http.ResponseWriter, r *http.Request, host string) bool {
+	if IsAdminRequest(r) {
+		return true
+	}
+	// Scoped token: host is required.
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "host parameter required for scoped tokens",
+		})
+		return false
+	}
+	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "host not in token scope",
+		})
+		return false
+	}
+	return true
+}
+
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, []HistoryEvent{})
 		return
 	}
 	q := r.URL.Query()
+	host := q.Get("host")
+	if !scopeCheckHost(w, r, host) {
+		return
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	rows, err := e.history.QueryEvents(q.Get("host"), q.Get("ip"), q.Get("type"), limit)
+	rows, err := e.history.QueryEvents(host, q.Get("ip"), q.Get("type"), limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -27,8 +54,12 @@ func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	host := q.Get("host")
+	if !scopeCheckHost(w, r, host) {
+		return
+	}
 	hours, _ := strconv.Atoi(q.Get("hours"))
-	res, err := e.history.Summarize(q.Get("host"), q.Get("ip"), hours)
+	res, err := e.history.Summarize(host, q.Get("ip"), hours)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -42,16 +73,20 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 		return
 	}
 	q := r.URL.Query()
+	host := q.Get("host")
+	if !scopeCheckHost(w, r, host) {
+		return
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 {
 		limit = 200
 	}
-	issued, err := e.history.QueryEvents(q.Get("host"), q.Get("ip"), "challenge_issued", limit*4)
+	issued, err := e.history.QueryEvents(host, q.Get("ip"), "challenge_issued", limit*4)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	solvedRows, _ := e.history.QueryEvents(q.Get("host"), q.Get("ip"), "challenge_solved", limit*4)
+	solvedRows, _ := e.history.QueryEvents(host, q.Get("ip"), "challenge_solved", limit*4)
 	solvedSet := make(map[string]struct{}, len(solvedRows))
 	for _, ev := range solvedRows {
 		k := strings.TrimSpace(ev.IP) + "|" + cleanHost(ev.Host)
@@ -75,9 +110,69 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]interface{}{"solved": solved, "unsolved": unsolved})
 }
 
+// handleHistoryWAFByRule serves:
+//
+//	GET /api/v1/webdet/history/waf-by-rule?host=X&hours=24
+//
+// Admin: ?host= optional — omit for global breakdown across all vhosts.
+// Scoped token: ?host= required and must be in token scope.
+func (e *Engine) handleHistoryWAFByRule(w http.ResponseWriter, r *http.Request) {
+	if e == nil || e.history == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": []WAFRuleHit{}})
+		return
+	}
+	q := r.URL.Query()
+	host := q.Get("host")
+	if !scopeCheckHost(w, r, host) {
+		return
+	}
+	hours, _ := strconv.Atoi(q.Get("hours"))
+	rules, err := e.history.WAFByRule(host, hours)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"host":  host,
+		"hours": func() int { if hours <= 0 { return 24 }; return hours }(),
+		"rules": rules,
+	})
+}
+
+// handleHistoryVhostOverview serves:
+//
+//	GET /api/v1/webdet/history/vhost-overview?host=X&hours=24
+//
+// Returns the combined Security Overview card data:
+// challenge issued/solved/rate + WAF hits + top rule + per-rule breakdown.
+// Admin: ?host= optional.
+// Scoped token: ?host= required and must be in token scope.
+func (e *Engine) handleHistoryVhostOverview(w http.ResponseWriter, r *http.Request) {
+	if e == nil || e.history == nil {
+		writeJSON(w, http.StatusOK, VhostOverview{})
+		return
+	}
+	q := r.URL.Query()
+	host := q.Get("host")
+	if !scopeCheckHost(w, r, host) {
+		return
+	}
+	hours, _ := strconv.Atoi(q.Get("hours"))
+	ov, err := e.history.VhostOverviewQuery(host, hours)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, ov)
+}
+
 func (e *Engine) handleHistoryPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !IsAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
 		return
 	}
 	if e == nil || e.history == nil {
@@ -103,6 +198,10 @@ func (e *Engine) handleHistoryTruncate(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("confirm") != "yes" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing confirm=yes"})
+		return
+	}
+	if !IsAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
 		return
 	}
 	if e == nil || e.history == nil {
