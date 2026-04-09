@@ -52,7 +52,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 				var tmp struct {
 					IP string `json:"ip"`
 				}
-				_ = json.NewDecoder(r.Body).Decode(&tmp)
+				_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&tmp)
 				ipStr = strings.TrimSpace(tmp.IP)
 
 			case ct == "application/x-www-form-urlencoded" ||
@@ -70,7 +70,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 
 			default:
 				// text/plain or unknown: accept "1.2.3.4" or "1.2.3.4 # comment"
-				b, _ := io.ReadAll(r.Body)
+				b, _ := io.ReadAll(io.LimitReader(r.Body, 256))
 				s := strings.TrimSpace(string(b))
 				if i := strings.IndexAny(s, " \t#"); i > 0 {
 					s = strings.TrimSpace(s[:i])

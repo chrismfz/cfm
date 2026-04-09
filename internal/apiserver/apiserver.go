@@ -45,6 +45,7 @@ import (
 	"cfm/internal/logging"
 	sslpkg "cfm/internal/sslcollector"
 	webui "cfm/internal/webui"
+	webdet "cfm/internal/webdetector"
 )
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
@@ -145,8 +146,13 @@ func Start(
 
 	// ── MySQL governor ────────────────────────────────────────────────────────
 	if gov != nil {
-		gov.RegisterHTTP(m)
-		logging.Logf("[apiserver] mysql governor routes registered")
+		// MySQL governor routes expose full DB processlist, kill history,
+		// CPU stats and lock graphs. These are admin-only — scoped tokens
+		// (cPanel/DA plugins) must never reach them.
+		govMux := http.NewServeMux()
+		gov.RegisterHTTP(govMux)
+		m.Handle("/api/v1/mysql/", adminOnlyHandler(govMux))
+		logging.Logf("[apiserver] mysql governor routes registered (admin-only)")
 	}
 
 	// ── Scoped token issuance ─────────────────────────────────────────────────
@@ -324,4 +330,20 @@ func isGoAuthSQLiteBusy(err error) bool {
 	return strings.Contains(s, "database is locked") ||
 		strings.Contains(s, "sqlite_busy") ||
 		strings.Contains(s, "(261)")
+}
+
+
+// adminOnlyHandler wraps h and returns 403 for any scoped token.
+// Admin tokens and the loopback bypass both produce a nil scope and pass through.
+// Used to protect routes that are inherently global and meaningless to
+// per-vhost cPanel/DA tokens (MySQL governor, system status, etc.).
+func adminOnlyHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{}); v != nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"admin token required"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

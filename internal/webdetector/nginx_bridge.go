@@ -1212,7 +1212,7 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var msg nginxOKTouchMsg
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&msg); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}

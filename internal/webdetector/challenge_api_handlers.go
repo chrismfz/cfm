@@ -1,100 +1,147 @@
+// internal/webdetector/challenge_api_handlers.go
 package webdetector
 
 import (
-    "net/http"
-    "strconv"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
+// handleChallengeSummary returns global challenge counts.
+// Guard 3: global data — admin/loopback only.
 func (e *Engine) handleChallengeSummary(w http.ResponseWriter, r *http.Request) {
-    if e == nil || e.chalAPI == nil {
-        writeJSON(w, http.StatusOK, ChallengeSummary{})
-        return
-    }
-    writeJSON(w, http.StatusOK, e.chalAPI.Summary())
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusOK, ChallengeSummary{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.chalAPI.Summary())
 }
 
+// handleChallengeVhosts lists all currently challenged vhosts.
+// Guard 3: lists cross-tenant vhost data — admin/loopback only.
 func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
-    status := r.URL.Query().Get("status") // active|inactive|all
-    mode := r.URL.Query().Get("mode")     // auto|manual|all
-    limit := 200
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
-    if e == nil || e.chalAPI == nil {
-        writeJSON(w, http.StatusOK, []ChallengeVhostState{})
-        return
-    }
-    writeJSON(w, http.StatusOK, e.chalAPI.ListVhosts(status, mode, limit))
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
+	status := r.URL.Query().Get("status")
+	mode := r.URL.Query().Get("mode")
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusOK, []ChallengeVhostState{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.chalAPI.ListVhosts(status, mode, limit))
 }
 
+// handleChallengeVhost returns the challenge state for a single vhost.
+// Guard 2: scoped tokens may only query their own vhosts.
 func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
-    host := r.URL.Query().Get("host")
-    if host == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
-        return
-    }
-    if e == nil || e.chalAPI == nil {
-        writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-        return
-    }
-    v, ok := e.chalAPI.GetVhost(host)
-    if !ok {
-        writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-        return
-    }
-    writeJSON(w, http.StatusOK, v)
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	if !vhostAllowed(strings.ToLower(host), vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	v, ok := e.chalAPI.GetVhost(host)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
+// handleChallengeIPs lists all challenged IPs across the server.
+// Guard 3: IP data is inherently cross-tenant — admin/loopback only.
 func (e *Engine) handleChallengeIPs(w http.ResponseWriter, r *http.Request) {
-    host := r.URL.Query().Get("host")
-    state := r.URL.Query().Get("state") // challenge|block|ok|all
-    limit := 500
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
-    if e == nil || e.chalAPI == nil {
-       writeJSON(w, http.StatusOK, []ChallengeIPState{})
-        return
-    }
-    writeJSON(w, http.StatusOK, e.chalAPI.ListIPs(host, state, limit))
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
+	host := r.URL.Query().Get("host")
+	state := r.URL.Query().Get("state")
+	limit := 500
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusOK, []ChallengeIPState{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.chalAPI.ListIPs(host, state, limit))
 }
 
+// handleChallengeIP returns the challenge state for a single IP.
+// Guard 3: IPs are global — admin/loopback only.
 func (e *Engine) handleChallengeIP(w http.ResponseWriter, r *http.Request) {
-    ip := r.URL.Query().Get("ip")
-    if ip == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
-        return
-    }
-    if e == nil || e.chalAPI == nil {
-        writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-        return
-    }
-    v, ok := e.chalAPI.GetIP(ip)
-    if !ok {
-        writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-        return
-    }
-    writeJSON(w, http.StatusOK, v)
+	if vhostScopeFromContext(r.Context()) != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
+	ip := r.URL.Query().Get("ip")
+	if ip == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ip"})
+		return
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	v, ok := e.chalAPI.GetIP(ip)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
+// handleChallengeEvents returns recent challenge events.
+// Scoped tokens must supply ?host= and it must be within their allowlist.
+// Without a host param a scoped token gets 403 — unfiltered events span all tenants.
 func (e *Engine) handleChallengeEvents(w http.ResponseWriter, r *http.Request) {
-    host := r.URL.Query().Get("host")
-    ip := r.URL.Query().Get("ip")
-    rule := r.URL.Query().Get("rule")
-    typ := r.URL.Query().Get("type")
-    limit := 200
-    if v := r.URL.Query().Get("limit"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            limit = n
-        }
-    }
-    if e == nil || e.chalAPI == nil {
-        writeJSON(w, http.StatusOK, []ChallengeEvent{})
-        return
-    }
-    writeJSON(w, http.StatusOK, e.chalAPI.Events(host, ip, rule, typ, limit))
+	host := r.URL.Query().Get("host")
+	scope := vhostScopeFromContext(r.Context())
+	if scope != nil {
+		// Scoped token: host is mandatory, and must be in allowlist.
+		if host == "" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host param required for scoped tokens"})
+			return
+		}
+		if !vhostAllowed(strings.ToLower(host), scope) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+			return
+		}
+	}
+	ip := r.URL.Query().Get("ip")
+	rule := r.URL.Query().Get("rule")
+	typ := r.URL.Query().Get("type")
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if e == nil || e.chalAPI == nil {
+		writeJSON(w, http.StatusOK, []ChallengeEvent{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.chalAPI.Events(host, ip, rule, typ, limit))
 }

@@ -1,15 +1,39 @@
 (() => {
-  // Scoped token — injected by panel plugins via ?token=<value>.
-  const _scopedToken = (() => {
+
+  // Scoped token — two injection methods, in priority order:
+  //
+  // Method A (preferred): postMessage from the plugin parent page.
+  //   Token never appears in the URL or nginx access logs.
+  //   Plugin JS: iframe.contentWindow.postMessage({cfmToken:'<token>'}, '*')
+  //   Must be sent after iframe 'load' event fires.
+  //
+  // Method B (fallback): ?token=<value> URL parameter.
+  //   Works for simple setups but token appears in nginx access logs.
+  //   Still cleared from the address bar via history.replaceState.
+  //
+  let _scopedToken = '';
+ 
+  // Method B: read URL param immediately so legacy setups keep working.
+  (function () {
     const u = new URL(window.location.href);
     const t = u.searchParams.get('token');
     if (t) {
       u.searchParams.delete('token');
       window.history.replaceState({}, '', u.toString());
+      _scopedToken = t;
     }
-    return t || '';
   })();
  
+  // Method A: postMessage listener.
+  // Validates token format (64 lowercase hex chars) before accepting.
+  // Self-removes after the first valid token is received.
+  window.addEventListener('message', function cfmTokenMsg(evt) {
+    const tok = evt && evt.data && evt.data.cfmToken;
+    if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
+    _scopedToken = tok;
+    window.removeEventListener('message', cfmTokenMsg);
+  });
+
   const appRoot = document.getElementById('app');
   appRoot?.removeAttribute('v-cloak');
 

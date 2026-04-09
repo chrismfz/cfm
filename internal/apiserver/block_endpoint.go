@@ -39,7 +39,7 @@ func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
 		}
 
 		var req firewallBlockRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid json"})
 			return

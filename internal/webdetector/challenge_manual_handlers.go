@@ -39,7 +39,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	ct := r.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
 		var bodyReq chalVhostAddRequest
-		if err := json.NewDecoder(r.Body).Decode(&bodyReq); err != nil && !errors.Is(err, io.EOF) {
+if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&bodyReq); err != nil && !errors.Is(err, io.EOF) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}
@@ -100,7 +100,7 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 		var body struct {
 			Host string `json:"host"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
 		host = body.Host
 	}
 

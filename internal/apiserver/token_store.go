@@ -172,7 +172,7 @@ func RegisterTokenEndpoint(m *http.ServeMux, store *TokenStore) {
 		}
 
 		var req tokenIssueRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 			return
