@@ -1866,12 +1866,3 @@ func minInt(a, b int) int {
 	}
 	return b
 }
-
-
-
-
-func atoiSafe(s string) int {
-    if s == "" { return 0 }
-    n, _ := strconv.Atoi(s)
-    return n
-}
