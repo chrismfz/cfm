@@ -702,7 +702,6 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 	defer e.src.Close()
 
-	now := time.Now()
 	for {
 		line, err := e.src.ReadNext(ctx)
 		if err == io.EOF {
@@ -732,7 +731,7 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 	// Ensure buckets age out even when there are no new log lines.
 	// (Without this, snapshots can look "stuck" until traffic resumes.)
-	now = time.Now()
+	now := time.Now()
 	e.pruneShort(now)
 
 	// Prune unbounded emit/cooldown maps periodically.
