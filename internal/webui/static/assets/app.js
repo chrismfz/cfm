@@ -78,12 +78,22 @@
         wafHours: 24,
         wafEventLimit: 200,
         wafTopN: 10,
-        wafSummary: null,
+       wafSummary: null,
+        // Token management
+        isAdmin: false,
+        tokens: [],
+        tokenForm: { vhosts: '', label: '', ttl: '8760h', role: 'viewer' },
+        tokenCreateMsg: '',
+        // Per-vhost Security Overview
+        vhostOverview: null,
+        vhostOverviewHost: '',
+        vhostOverviewHours: 24,
         pageMode: 'overview',
         vhostControls: [],
         controlsSearch: '',
         controlsSortKey: 'host',
         controlsSortDir: 'asc',
+        vhostControlsLimit: 50,
         rules: [],
         rulesSearch: '',
         ruleEditID: '',
@@ -145,6 +155,7 @@
     },
 
     computed: {
+      isScoped() { return !this.isAdmin; },
       shortDetail() {
         if (!this.drilldown) return null;
         return this.drilldown.short || this.drilldown;
@@ -283,7 +294,8 @@
           }
           return String(a?.host || '').localeCompare(String(b?.host || ''), undefined, { sensitivity: 'base' });
         });
-        return filtered;
+        const lim = Number(this.vhostControlsLimit) || 50;
+        return lim > 0 ? filtered.slice(0, lim) : filtered;
       },
       rulesFiltered() {
         const q = String(this.rulesSearch || '').trim().toLowerCase();
@@ -538,7 +550,7 @@
           vhost: new Set(['vhost']),
           forensics: new Set(['history', 'ipdrilldown', 'analyze', 'excludes']),
           waf: new Set(['wafengine', 'excludes']),
-          controls: new Set(['controls']),
+          controls: new Set(['controls', 'tokens', 'vhost_overview']),
         };
         const active = groups[this.pageMode] || groups.overview;
         return active.has(section);
@@ -1363,6 +1375,8 @@
           if (this.shouldShow('wafengine')) await this.refreshWAFEngine();
           if (this.shouldShow('controls')) await this.refreshVhostControls();
           if (this.shouldShow('controls')) await this.refreshRules();
+          if (this.shouldShow('tokens')) await this.refreshTokens();
+          if (this.shouldShow('vhost_overview') && this.vhostOverviewHost) await this.refreshVhostOverview();
 
           if (this.shouldShow('vhost') && this.isVhostPage) {
             const vhostTarget =
@@ -1400,6 +1414,63 @@
         const el = document.getElementById('drilldown-card');
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       },
+      // ── Token management ──────────────────────────────────────────────────
+      async checkAdminStatus() {
+        try {
+          const me = await this.fetchJSONSafe('v1/tokens/me', {});
+          this.isAdmin = !me.scoped;
+        } catch (_) {
+          this.isAdmin = false;
+        }
+      },
+
+      async refreshTokens() {
+        if (!this.isAdmin) return;
+        try {
+          const rows = await this.fetchJSONSafe('v1/tokens/list', []);
+          this.tokens = Array.isArray(rows) ? rows : [];
+        } catch (_) { this.tokens = []; }
+      },
+
+      async createScopedToken() {
+        this.tokenCreateMsg = '';
+        const vhosts = this.tokenForm.vhosts.split(',').map(v => v.trim()).filter(Boolean);
+        if (!vhosts.length) { this.tokenCreateMsg = 'Vhosts required.'; return; }
+        try {
+          const res = await this.postJSON('v1/auth/token', {
+            vhosts,
+            label: this.tokenForm.label,
+            ttl: this.tokenForm.ttl || '8760h',
+            role: this.tokenForm.role || 'viewer',
+          });
+          if (res.error) { this.tokenCreateMsg = res.error; return; }
+          this.tokenCreateMsg = `✓ Created: ${res.id}  Token: ${res.token}`;
+          await this.refreshTokens();
+        } catch (err) { this.tokenCreateMsg = String(err); }
+      },
+
+      async revokeToken(id) {
+        if (!confirm(`Revoke token ${id}?`)) return;
+        try {
+          const res = await this.postJSON('v1/tokens/revoke', { id });
+          if (res.error) { this.tokenCreateMsg = res.error; return; }
+          this.tokenCreateMsg = `✓ Revoked ${id}`;
+          await this.refreshTokens();
+        } catch (err) { this.tokenCreateMsg = String(err); }
+      },
+
+      // ── Security Overview ─────────────────────────────────────────────────
+      async refreshVhostOverview() {
+        const host = String(this.vhostOverviewHost || '').trim();
+        if (!host) { this.vhostOverview = null; return; }
+        try {
+          this.vhostOverview = await this.fetchJSONSafe(
+            `v1/webdet/history/vhost-overview?host=${encodeURIComponent(host)}&hours=${this.vhostOverviewHours}`,
+            null
+          );
+        } catch (_) { this.vhostOverview = null; }
+      },
+
       async loadHost(host, shouldScroll = true) {
         if (!host) return;
         this.activeHost = host;
@@ -1445,6 +1516,7 @@
       this.resizeHandler = () => this.resizeVhostCharts();
       window.addEventListener('resize', this.resizeHandler);
 
+      if (this.isControlsPage) this.checkAdminStatus();
       this.refreshAll();
       this.$nextTick(() => this.resizeVhostCharts());
 

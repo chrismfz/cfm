@@ -14,12 +14,12 @@
       <h1>CFM Admin</h1>
       <nav class="top-nav">
         <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector overview</a>
+        <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/vhost/">Vhost live</a>
-        <a class="btn-quiet" href="/cfm-admin/governor/">MySQL governor</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/forensics/">Forensics</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/waf/">WAF engine</a>
         <a class="btn-quiet" href="/cfm-admin/webdetector/controls/">Vhost controls</a>
+        <a class="btn-quiet" href="/cfm-admin/governor/">MySQL governor</a>
       </nav>
       <div class="meta">
         <span class="muted">Auto-refresh: <strong>{{ autoRefresh ? 'ON' : 'OFF' }}</strong></span>
@@ -36,14 +36,15 @@
     <main class="layout">
       <section class="card wide">
         <h2>{{ pageTitle }}</h2>
-        <p class="muted">Central toggle page for per-vhost WAF and Challenge controls. Supports <code>?vhost=a.com,b.com</code>.</p>
+        <p class="muted">Per-vhost WAF and challenge controls, traffic rules, and security overview. Supports <code>?vhost=a.com,b.com</code>.</p>
       </section>
 
+      <!-- 1. Traffic Rules -->
       <section class="card wide" v-if="shouldShow('controls')">
         <h2>Traffic Rules (Cloudflare-style)</h2>
         <p class="muted">
-          Build clear per-vhost rules for <code>allow</code>, <code>block</code>, <code>challenge</code>, and <code>throttle</code>.
-          Tip: start in safe mode with disabled rules or presets, then test with simulation before enabling.
+          Build per-vhost rules for <code>allow</code>, <code>block</code>, <code>challenge</code>, and <code>throttle</code>.
+          Start with disabled rules or presets, then test with simulation before enabling.
         </p>
 
         <div class="toolbar">
@@ -62,42 +63,40 @@
             <h3>{{ ruleEditID ? 'Edit rule' : 'Create rule' }}</h3>
             <div class="toolbar">
               <label class="muted"><input type="checkbox" v-model="ruleForm.enabled" /> Enabled</label>
-              <label for="rule-priority" title="Lower number runs first. First matching rule wins.">Priority</label>
+              <label for="rule-priority" title="Lower number runs first.">Priority</label>
               <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
-              <select class="input" v-model="ruleForm.actionType" title="Action executed when rule filters match.">
+              <select class="input" v-model="ruleForm.actionType" title="Action when rule matches.">
                 <option value="allow">allow</option>
                 <option value="block">block</option>
                 <option value="challenge">challenge</option>
                 <option value="throttle">throttle</option>
               </select>
-              <input v-if="ruleForm.actionType === 'throttle'" class="input input-wide" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="Throttle profile (soft_bot)" title="Throttle profile sent to OpenResty executor." />
+              <input v-if="ruleForm.actionType === 'throttle'" class="input input-wide" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="Throttle profile (soft_bot)" />
             </div>
             <div class="toolbar">
-              <label title="Comma-separated host patterns (exact or *.domain.tld)">Vhosts</label>
+              <label>Vhosts</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" />
             </div>
             <div class="toolbar">
-              <label title="ISO2 country codes, comma-separated">Countries</label>
+              <label>Countries</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.countries" placeholder="US, CA" />
-              <label title="HTTP methods, comma-separated">Methods</label>
+              <label>Methods</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.methods" placeholder="GET, POST" />
             </div>
             <div class="toolbar">
-              <label title="User-Agent wildcard patterns (* and ?)">UA patterns</label>
+              <label>UA patterns</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
             </div>
             <div class="toolbar">
-              <label title="URL path wildcard patterns">Path patterns</label>
+              <label>Path patterns</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
             </div>
-
             <div class="toolbar">
-              <label><input type="checkbox" v-model="ruleForm.hasQS" title="Only match when the request has a query string" /> Has QS</label>
-              <label title="Pass-through (skip rule) when query string matches — regex, case-insensitive. Only evaluated when Has QS is checked.">QS pass-through</label>
+              <label><input type="checkbox" v-model="ruleForm.hasQS" title="Only match when request has a query string" /> Has QS</label>
+              <label>QS pass-through</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.qsNotRx"
                 placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
             </div>
-
             <div class="toolbar">
               <label>Note</label>
               <input class="input input-wide" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
@@ -110,7 +109,7 @@
 
           <section class="mini-card">
             <h3>Rule simulation</h3>
-            <p class="muted">Test request shape before enforcement. This does not execute block/challenge/throttle.</p>
+            <p class="muted">Test request shape before enforcement.</p>
             <div class="toolbar">
               <label>Host</label>
               <input class="input input-wide" type="text" v-model.trim="simulateForm.host" placeholder="example.com" />
@@ -131,19 +130,16 @@
               <label>UA</label>
               <input class="input input-wide" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
             </div>
-
             <div class="toolbar">
-              <label title="Raw query string without leading '?' — used to test has_qs / qs_not_rx rules">QS</label>
+              <label>QS</label>
               <input class="input input-wide" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
             </div>
-
-
             <div class="toolbar">
               <button class="btn-quiet" @click="runRuleSimulation">Run simulation</button>
             </div>
             <p v-if="simulateResult" class="muted">
               matched={{ simulateResult.matched ? 'yes' : 'no' }}
-              <span v-if="simulateResult.matched">|
+              <span v-if="simulateResult.matched"> |
                 action={{ simulateResult.action || '-' }} |
                 rule={{ simulateResult.rule?.id || '-' }} |
                 profile={{ simulateResult.profile || '-' }}
@@ -156,14 +152,7 @@
           <table>
             <thead>
               <tr>
-                <th>ID</th>
-                <th>Enabled</th>
-                <th>Priority</th>
-                <th>Action</th>
-                <th>Vhosts</th>
-                <th>Filters</th>
-                <th>Note</th>
-                <th>Actions</th>
+                <th>ID</th><th>Enabled</th><th>Priority</th><th>Action</th><th>Vhosts</th><th>Filters</th><th>Note</th><th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -191,12 +180,136 @@
         </div>
       </section>
 
+      <!-- 2. Security Overview -->
+      <section class="card wide" v-if="shouldShow('vhost_overview')">
+        <h2>Security Overview</h2>
+        <p class="muted">Per-vhost challenge and WAF hit summary from history DB.</p>
+        <div class="toolbar">
+          <label>Vhost</label>
+          <input class="input input-wide" type="text" v-model.trim="vhostOverviewHost" placeholder="example.com" />
+          <label>Hours</label>
+          <input class="input input-small" type="number" min="1" max="720" step="1" v-model.number="vhostOverviewHours" />
+          <button class="btn-quiet" @click="refreshVhostOverview">Load</button>
+        </div>
+
+        <div v-if="vhostOverview">
+          <div class="kpi-grid" style="margin-bottom:.8rem">
+            <section class="mini-card">
+              <h3>Challenges issued</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ vhostOverview.challenge_issued || 0 }}</div>
+            </section>
+            <section class="mini-card">
+              <h3>Challenges solved</h3>
+              <div style="font-size:1.6rem;font-weight:700">
+                {{ vhostOverview.challenge_solved || 0 }}
+                <span class="muted" style="font-size:.9rem">({{ (vhostOverview.solve_rate_pct || 0).toFixed(2) }}%)</span>
+              </div>
+            </section>
+            <section class="mini-card">
+              <h3>WAF hits</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ vhostOverview.waf_hits || 0 }}</div>
+              <div class="muted" v-if="vhostOverview.top_waf_rule" style="font-size:.8rem;margin-top:.3rem">
+                Top: {{ vhostOverview.top_waf_rule }}
+              </div>
+            </section>
+            <section class="mini-card">
+              <h3>Window</h3>
+              <div style="font-size:1.1rem">{{ vhostOverview.hours || 24 }}h · {{ vhostOverview.host }}</div>
+            </section>
+          </div>
+          <div v-if="(vhostOverview.waf_by_rule || []).length">
+            <h3 style="margin:.4rem 0">WAF rule breakdown</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Rule</th><th>Hits</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in vhostOverview.waf_by_rule" :key="r.rule">
+                    <td><code>{{ r.rule }}</code></td>
+                    <td>{{ r.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p class="muted" v-else>No WAF events in this window.</p>
+        </div>
+        <p class="muted" v-else>Enter a vhost and click Load.</p>
+      </section>
+
+      <!-- 3. Token Management — admin only -->
+      <section class="card wide" v-if="shouldShow('tokens') && isAdmin">
+        <h2>Scoped token management</h2>
+        <p class="muted">Issue tokens scoped to specific vhosts for panel plugins (cPanel, DirectAdmin, etc.). Tokens persist across restarts.</p>
+
+        <div class="exclude-grid" style="margin-bottom:1rem">
+          <section class="mini-card">
+            <h3>Create token</h3>
+            <div class="toolbar">
+              <label>Vhosts</label>
+              <input class="input input-wide" type="text" v-model.trim="tokenForm.vhosts" placeholder="example.com, other.com" />
+            </div>
+            <div class="toolbar">
+              <label>Label</label>
+              <input class="input input-wide" type="text" v-model.trim="tokenForm.label" placeholder="cpanel-user-foo" />
+              <label>TTL</label>
+              <input class="input input-small" type="text" v-model.trim="tokenForm.ttl" placeholder="8760h" />
+            </div>
+            <div class="toolbar">
+              <label>Role</label>
+              <select class="input" v-model="tokenForm.role">
+                <option value="viewer">viewer</option>
+                <option value="admin">admin</option>
+              </select>
+              <button class="btn-quiet" @click="createScopedToken">Create token</button>
+            </div>
+            <p class="statusline" v-if="tokenCreateMsg" style="word-break:break-all;margin-top:.5rem">{{ tokenCreateMsg }}</p>
+          </section>
+          <section class="mini-card">
+            <h3>Notes</h3>
+            <p class="muted" style="font-size:.85rem">
+              Scoped tokens can only access their assigned vhosts. Token value is shown only once at creation — copy it immediately.
+              Stored in <code>/var/lib/cfm/tokens.json</code>.
+            </p>
+          </section>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Label</th><th>Role</th><th>Vhosts</th><th>Expires</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in tokens" :key="row.id">
+                <td><code>{{ row.id }}</code></td>
+                <td>{{ row.label || '(unlabelled)' }}</td>
+                <td><span class="pill">{{ row.role }}</span></td>
+                <td><code>{{ (row.vhosts || []).join(', ') }}</code></td>
+                <td :class="row.expired ? 'pill danger' : ''">
+                  {{ row.expires_at ? new Date(row.expires_at).toLocaleString() : '-' }}
+                  <span v-if="row.expired"> EXPIRED</span>
+                </td>
+                <td><button class="btn-danger btn-sm" @click="revokeToken(row.id)">Revoke</button></td>
+              </tr>
+              <tr v-if="!tokens.length"><td colspan="6" class="muted">No scoped tokens issued.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 4. Per-vhost controls — at bottom, with limit dropdown -->
       <section class="card wide" v-if="shouldShow('controls')">
         <h2>Per-vhost controls</h2>
         <div class="toolbar">
           <label for="controls-search">Search</label>
           <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" />
-          <span class="muted">{{ vhostControlsFiltered.length }} / {{ vhostControls.length }} shown</span>
+          <label>Show</label>
+          <select class="input" v-model.number="vhostControlsLimit">
+            <option :value="50">50</option>
+            <option :value="100">100</option>
+            <option :value="200">200</option>
+            <option :value="0">All</option>
+          </select>
+          <span class="muted">{{ vhostControlsFiltered.length }} / {{ vhostControls.length }} vhosts</span>
         </div>
         <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
         <div class="table-wrap">
@@ -223,6 +336,7 @@
           </table>
         </div>
       </section>
+
     </main>
   </div>
 </body>

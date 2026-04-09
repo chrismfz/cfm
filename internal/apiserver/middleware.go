@@ -18,12 +18,28 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
+	"net"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 )
 
 // isPublicPath returns true if the request path requires no auth.
+// cfmBase returns the path prefix injected by a trusted local proxy (e.g. OpenResty
+// running on the same host). Only honoured when the direct peer is loopback so it
+// cannot be spoofed from the internet.
+func cfmBase(r *http.Request) string {
+        host, _, _ := net.SplitHostPort(r.RemoteAddr)
+        ip := net.ParseIP(host)
+        if ip == nil || !ip.IsLoopback() {
+                return ""
+        }
+        b := strings.TrimRight(r.Header.Get("X-CFM-Base"), "/")
+        if b == "" || !strings.HasPrefix(b, "/") {
+                return ""
+        }
+        return b
+}
+
 func isPublicPath(r *http.Request) bool {
 	for _, p := range []string{"/login", "/logout"} {
 		if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
@@ -74,12 +90,15 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 
 			// ── 4. No token — redirect browsers, 401 API clients ──────────
-			if strings.Contains(r.Header.Get("Accept"), "text/html") {
-				http.Redirect(w, r,
-					"/login?next="+url.QueryEscape(r.URL.RequestURI()),
-					http.StatusSeeOther)
-				return
-			}
+                    		if strings.Contains(r.Header.Get("Accept"), "text/html") {
+                                base := cfmBase(r)
+                                next := base + r.URL.RequestURI()
+                                http.Redirect(w, r,
+                                        base+"/login?next="+url.QueryEscape(next),
+                                        http.StatusSeeOther)
+                                return
+                        }
+
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 			http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
