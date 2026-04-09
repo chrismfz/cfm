@@ -42,6 +42,7 @@ import (
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
 	"cfm/internal/clam"
+	"cfm/internal/clihttp"
 )
 
 var (
@@ -109,6 +110,25 @@ func apiBaseURL() string {
 
 	return fmt.Sprintf("http://%s:%d", host, cfg.Debug.Port)
 }
+
+// apiAuthToken reads AUTH_TOKEN from cfm.conf for use by CLI commands.
+// Returns empty string if config cannot be read or token is not set.
+func apiAuthToken() string {
+        dir, _ := cli.ResolveConfigDir("")
+        if dir == "" {
+                return ""
+        }
+        b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
+        if err != nil {
+                return ""
+        }
+        cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
+        if err != nil || cfg == nil {
+                return ""
+        }
+        return strings.TrimSpace(cfg.API.AuthToken)
+}
+
 
 func sslSockDefaults() (string, string) {
 	dir := cfgDir()
@@ -202,15 +222,17 @@ func main() {
 	case "dnat":
 		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))
 
-	case "webtop", "nginx-top", "httpd-top":
-		addr := apiBaseURL()
-		if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
+  case "webtop", "nginx-top", "httpd-top":
+      addr := apiBaseURL()
+      clihttp.SetToken(apiAuthToken())
+      if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "webtop error:", err)
 			os.Exit(1)
 		}
 
 	case "mysqltop", "mysql-top", "mysql":
 		addr := apiBaseURL()
+	      clihttp.SetToken(apiAuthToken())
 		if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "mysqltop error:", err)
 			os.Exit(1)

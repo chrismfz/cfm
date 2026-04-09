@@ -3,7 +3,7 @@ package webdetector
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"strings"
 )
@@ -25,7 +25,7 @@ func runWAFExclude(baseURL string, args []string) error {
 func runGenericExclude(baseURL, prefix string, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		u := fmt.Sprintf("%s/api/v1/%s/exclude/list", strings.TrimRight(baseURL, "/"), prefix)
-		resp, err := http.Get(u)
+		resp, err := clihttp.Get(u)
 		if err != nil {
 			return err
 		}
@@ -74,7 +74,7 @@ func runGenericExclude(baseURL, prefix string, args []string) error {
 		url.QueryEscape(typ),
 		url.QueryEscape(value),
 	)
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}

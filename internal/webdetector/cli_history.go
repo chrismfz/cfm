@@ -3,7 +3,7 @@ package webdetector
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"strconv"
@@ -84,7 +84,7 @@ func runHistoryEvents(baseURL string, args []string) error {
 	}
 	q.Set("limit", strconv.Itoa(limit))
 	u.RawQuery = q.Encode()
-	resp, err := http.Get(u.String())
+	resp, err := clihttp.Get(u.String())
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func runHistorySummary(baseURL string, args []string) error {
 	}
 	q.Set("hours", strconv.Itoa(hours))
 	u.RawQuery = q.Encode()
-	resp, err := http.Get(u.String())
+	resp, err := clihttp.Get(u.String())
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func runHistoryOutcomes(baseURL string, args []string) error {
 	}
 	q.Set("limit", strconv.Itoa(limit))
 	u.RawQuery = q.Encode()
-	resp, err := http.Get(u.String())
+	resp, err := clihttp.Get(u.String())
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func runHistoryPrune(baseURL string, args []string) error {
 		}
 	}
 	u := fmt.Sprintf("%s/api/v1/webdet/history/prune?days=%d", strings.TrimRight(baseURL, "/"), days)
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func runHistoryTruncate(baseURL string, args []string) error {
 		return fmt.Errorf("refusing to truncate without --yes")
 	}
 	u := fmt.Sprintf("%s/api/v1/webdet/history/truncate?confirm=yes", strings.TrimRight(baseURL, "/"))
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}

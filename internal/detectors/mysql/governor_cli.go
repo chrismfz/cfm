@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"golang.org/x/term"
 	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"strconv"
@@ -667,7 +668,7 @@ func queryBar(count int64, all []UserPerfDelta) string {
 
 func fetchGovernorJSON(baseURL, path string, out any) error {
 	url := strings.TrimRight(baseURL, "/") + path
-	resp, err := http.Get(url)
+	resp, err := clihttp.Get(url)
 	if err != nil {
 		return fmt.Errorf("mysqltop: cannot reach %s: %w\n(is cfm daemon running?)", url, err)
 	}
@@ -686,7 +687,7 @@ func postGovernorJSON(baseURL, path string, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clihttp.Do(req)
 	if err != nil {
 		return err
 	}

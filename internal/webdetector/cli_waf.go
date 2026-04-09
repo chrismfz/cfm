@@ -29,7 +29,7 @@ package webdetector
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"strconv"
 	"strings"
@@ -165,7 +165,7 @@ func runWAFEngineSummary(baseURL string, args []string) error {
 		top = 10
 	}
 	u := fmt.Sprintf("%s/api/v1/waf/engine/summary?hours=%d&limit=%d&top=%d", strings.TrimRight(baseURL, "/"), hours, limit, top)
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -223,7 +223,7 @@ func runWAFEngineSummary(baseURL string, args []string) error {
 
 func runWafList(baseURL string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/waf/vhosts"
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -288,7 +288,7 @@ func runWafSet(baseURL string, args []string) error {
 		url.QueryEscape(profile),
 		url.QueryEscape(ttl),
 	)
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func runWafClear(baseURL string, args []string) error {
 		strings.TrimRight(baseURL, "/"),
 		url.QueryEscape(host),
 	)
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -344,7 +344,7 @@ func runWafStatus(baseURL string, args []string) error {
 		strings.TrimRight(baseURL, "/"),
 		url.QueryEscape(host),
 	)
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -378,7 +378,7 @@ func runWafStatus(baseURL string, args []string) error {
 
 func runWafProfiles(baseURL string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/waf/profiles"
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -451,7 +451,7 @@ func wafCycleNext(baseURL, host, currentProfile string) error {
 		// Clear: back to defaults
 		u := fmt.Sprintf("%s/api/v1/waf/vhost/clear?host=%s",
 			strings.TrimRight(baseURL, "/"), url.QueryEscape(host))
-		_, err := http.Post(u, "application/json", nil)
+		_, err := clihttp.Post(u, "application/json", nil)
 		return err
 	}
 
@@ -460,7 +460,7 @@ func wafCycleNext(baseURL, host, currentProfile string) error {
 		url.QueryEscape(host),
 		url.QueryEscape(next),
 	)
-	_, err := http.Post(u, "application/json", nil)
+	_, err := clihttp.Post(u, "application/json", nil)
 	return err
 }
 
@@ -468,7 +468,7 @@ func wafCycleNext(baseURL, host, currentProfile string) error {
 func fetchWafProfile(baseURL, host string) string {
 	u := fmt.Sprintf("%s/api/v1/waf/vhost/status?host=%s",
 		strings.TrimRight(baseURL, "/"), url.QueryEscape(host))
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return ""
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"strconv"
@@ -84,7 +85,7 @@ func doJSON(method, rawURL string, reqBody any, out any) error {
 	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clihttp.Do(req)
 	if err != nil {
 		return err
 	}

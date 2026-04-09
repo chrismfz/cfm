@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"sort"
@@ -351,7 +352,7 @@ func runTopSummary(baseURL string) error {
 // new extended summary with limit/sort
 func runTopSummaryExt(baseURL string, limit int, sortKey string) error {
 	topURL := baseURL + "/api/v1/webdet/top-short"
-	resp, err := http.Get(topURL)
+	resp, err := clihttp.Get(topURL)
 	if err != nil {
 		return err
 	}
@@ -390,7 +391,7 @@ func runTopSummaryExt(baseURL string, limit int, sortKey string) error {
 
 func runIPTop(baseURL string, limit int) error {
 	u := fmt.Sprintf("%s/api/v1/webdet/ip-short?limit=%d", baseURL, limit)
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -505,7 +506,7 @@ func runIPTop(baseURL string, limit int) error {
 
 func runTopDrilldown(baseURL, host string) error {
 	u := baseURL + "/api/v1/webdet/drilldown?host=" + url.QueryEscape(host)
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -710,7 +711,7 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 
 	// Suspicious block (long window), same as before
 	susURL := baseURL + "/api/v1/webdet/suspicious"
-	resp2, err := http.Get(susURL)
+	resp2, err := clihttp.Get(susURL)
 	if err != nil {
 		return err
 	}
@@ -754,7 +755,7 @@ func printWebShort(baseURL string, rows []ShortRow, payload topShortCLIResponse)
 // runIPDrilldown καλεί /ip-drilldown και τυπώνει per-IP σύνοψη.
 func runIPDrilldown(baseURL, ip string) error {
 	u := fmt.Sprintf("%s/api/v1/webdet/ip-drilldown?ip=%s", baseURL, url.QueryEscape(ip))
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -823,7 +824,7 @@ func runIPDrilldown(baseURL, ip string) error {
 // runLongTop καλεί /long-top και τυπώνει long-window scored rows.
 func runLongTop(baseURL string, limit int) error {
 	u := fmt.Sprintf("%s/api/v1/webdet/long-top?limit=%d", baseURL, limit)
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -867,7 +868,7 @@ func runLongTop(baseURL string, limit int) error {
 // runAnalyzeIP καλεί το /analyze-ip (offline log scan) και τυπώνει vhost breakdown.
 func runAnalyzeIP(baseURL, ip string) error {
 	u := fmt.Sprintf("%s/api/v1/webdet/analyze-ip?ip=%s", baseURL, url.QueryEscape(ip))
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -910,7 +911,7 @@ func runAnalyzeIP(baseURL, ip string) error {
 // runAnalyzeHost καλεί το /analyze-host (offline log scan) και τυπώνει IP breakdown.
 func runAnalyzeHost(baseURL, host string) error {
 	u := fmt.Sprintf("%s/api/v1/webdet/analyze-host?host=%s", baseURL, url.QueryEscape(host))
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -1051,7 +1052,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			}
 		}
 		u := fmt.Sprintf("%s/api/v1/challenge/events?limit=%d", strings.TrimRight(baseURL, "/"), limit)
-		resp, err := http.Get(u)
+		resp, err := clihttp.Get(u)
 		if err != nil {
 			return err
 		}
@@ -1073,7 +1074,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		u1 := fmt.Sprintf("%s/api/v1/challenge/vhost?host=%s", base, url.QueryEscape(host))
 		u2 := fmt.Sprintf("%s/api/v1/challenge/events?host=%s&limit=50", base, url.QueryEscape(host))
 
-		r1, err := http.Get(u1)
+		r1, err := clihttp.Get(u1)
 		if err != nil {
 			return err
 		}
@@ -1089,7 +1090,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			fmt.Printf("Reasons: %s\n", strings.Join(vh.Reasons, ","))
 		}
 
-		r2, err := http.Get(u2)
+		r2, err := clihttp.Get(u2)
 		if err != nil {
 			return err
 		}
@@ -1109,7 +1110,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	// default: list active vhosts
 	base := strings.TrimRight(baseURL, "/")
 	u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=200", base)
-	r, err := http.Get(u)
+	r, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
@@ -1165,7 +1166,7 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s",
 		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason))
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -1193,7 +1194,7 @@ func runChallengeRemove(baseURL string, args []string) error {
 	host := args[0]
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s",
 		baseURL, url.QueryEscape(host))
-	resp, err := http.Post(u, "application/json", nil)
+	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -1216,7 +1217,7 @@ func runChallengeStatus(baseURL string, args []string) error {
 	host := args[0]
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s",
 		baseURL, url.QueryEscape(host))
-	resp, err := http.Get(u)
+	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
 	}
