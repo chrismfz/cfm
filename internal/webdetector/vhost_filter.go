@@ -12,10 +12,9 @@
 // their scope by passing a broader ?vhosts= query param.
 //
 // Priority:
-//   1. Scoped token in context  (set by apiserver middleware)
-//   2. ?vhosts= query param     (used when admin token or loopback bypass)
-//   3. nil                      (no filter — full results)
-
+//  1. Scoped token in context  (set by apiserver middleware)
+//  2. ?vhosts= query param     (used when admin token or loopback bypass)
+//  3. nil                      (no filter — full results)
 package webdetector
 
 import (
@@ -40,11 +39,9 @@ func vhostScopeFromContext(ctx context.Context) map[string]struct{} {
 // Context scope (set by middleware) always wins over the query param.
 // Returns nil when there is no restriction (admin / loopback / no param).
 func parseVhostFilter(r *http.Request) map[string]struct{} {
-	// Scoped token in context takes priority — cannot be overridden by caller.
 	if scope := vhostScopeFromContext(r.Context()); scope != nil {
 		return scope
 	}
-	// Admin token or loopback bypass: honour optional ?vhosts= query param.
 	raw := strings.TrimSpace(r.URL.Query().Get("vhosts"))
 	if raw == "" {
 		return nil
@@ -98,4 +95,15 @@ func applySuspiciousFilter(rows []SuspiciousRow, filter map[string]struct{}) []S
 		}
 	}
 	return rows[:n]
+}
+
+// IsAdminRequest returns true when the request was authenticated with admin-level
+// credentials — admin bearer token, goauth session, or loopback bypass.
+// Returns false for scoped panel tokens (which have a non-nil vhost restriction
+// injected into the context by the middleware).
+//
+// Use this to gate endpoints that scoped token users must not access,
+// such as token management (list/revoke), WAF rule override management, etc.
+func IsAdminRequest(r *http.Request) bool {
+	return vhostScopeFromContext(r.Context()) == nil
 }

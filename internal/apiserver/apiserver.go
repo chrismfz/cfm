@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -156,9 +157,18 @@ func Start(
 	}
 
 	// ── Scoped token issuance ─────────────────────────────────────────────────
-	store := NewTokenStore()
-	store.StartPurger(ctx)
-	RegisterTokenEndpoint(m, store)
+       store := NewTokenStore()
+        tokensPath := filepath.Join("/var/lib/cfm", "tokens.json")
+        if cfg.Debug.AuthDBPath != "" {
+                tokensPath = filepath.Join(filepath.Dir(cfg.Debug.AuthDBPath), "tokens.json")
+        }
+        if err := store.Load(tokensPath); err != nil {
+                logging.Logf("[apiserver] token store load: %v", err)
+        }
+
+        store.StartPurger(ctx)
+        RegisterTokenEndpoint(m, store)
+        RegisterTokenManagementEndpoints(m, store)
 
 	// ── goauth → autoblock bridge (FAIL/RATELIMIT tail) ──────────────────────
 	startAuthAutoblock(ctx, cfg, be)

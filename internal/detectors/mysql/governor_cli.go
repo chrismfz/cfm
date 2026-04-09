@@ -55,6 +55,13 @@ func RunMySQLTop(baseURL string, args []string) error {
 	case "cpu":
 		return runMySQLCPU(baseURL)
 
+	case "user-summary", "usersummary":
+		return runMySQLUserSummary(baseURL, args[1:])
+	case "user-kills", "userkills":
+		return runMySQLUserKills(baseURL, args[1:])
+	case "user-history", "userhistory":
+		return runMySQLUserHistory(baseURL, args[1:])
+
 case "history":
     if len(args) > 1 {
         switch args[1] {
@@ -116,24 +123,34 @@ func runMySQLLive(baseURL string, args []string) error {
 
 func printMySQLTopHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm mysqltop                        # live UI (falls back to text if not a TTY)")
-	fmt.Println("  cfm mysqltop text                   # full summary (text)")
-	fmt.Println("  cfm mysqltop live                   # force live UI")
-	fmt.Println("  cfm mysqltop top [N]                # top N users by connections (live)")
-	fmt.Println("  cfm mysqltop locks                  # lock graph (blockers + waiters)")
-	fmt.Println("  cfm mysqltop kills                  # recent governor kills")
-	fmt.Println("  cfm mysqltop ps                     # full processlist (running + waiting)")
-	fmt.Println("  cfm mysqltop watch --user U [--db DB] [--interval 5s] [--log /path/file.jsonl]")
-	fmt.Println("  cfm mysqltop history [window] [N] [--user U]   # busiest N users over window")
-	fmt.Println("  cfm mysqltop history events [--user U] [--db DB] [--limit N]")
-	fmt.Println("  cfm mysqltop history summary [--hours H]")
-	fmt.Println("  cfm mysqltop history prune [days]")
-	fmt.Println("  cfm mysqltop history truncate --yes")
-	fmt.Println("  cfm mysqltop history timeline --user U [--full]")
-	fmt.Println("  cfm mysqltop cpu                    # per-user CPU + query stats")
-	fmt.Println("                                      #   MySQL 8+: uses performance_schema SUM_CPU_TIME")
-	fmt.Println("                                      #   MariaDB:  uses information_schema.USER_STATISTICS (userstat=ON)")
-	fmt.Println("                                      #   Shows how to enable CPU tracking if not yet active")
+	fmt.Println("  cfm mysqltop                              # live UI (falls back to text if not a TTY)")
+	fmt.Println("  cfm mysqltop text                         # full summary (text)")
+	fmt.Println("  cfm mysqltop live                         # force live UI")
+	fmt.Println("  cfm mysqltop top [N]                      # top N users by connections")
+	fmt.Println("  cfm mysqltop locks                        # lock graph (blockers + waiters)")
+	fmt.Println("  cfm mysqltop kills                        # recent governor kills")
+	fmt.Println("  cfm mysqltop ps                           # full processlist (running + waiting)")
+	fmt.Println("  cfm mysqltop history [window] [N]         # busiest N users over window (1h, 6h, 24h)")
+	fmt.Println("  cfm mysqltop cpu                          # per-user CPU + query stats")
+	fmt.Println()
+	fmt.Println("Per-user / per-db filtered views (plugin-ready):")
+	fmt.Println("  cfm mysqltop user-summary --user=chris*")
+	fmt.Println("  cfm mysqltop user-summary --user=chris_wp,chris_shop")
+	fmt.Println("  cfm mysqltop user-summary --db=chris_wp")
+	fmt.Println("  cfm mysqltop user-summary --user=chris* --db=chris_db  # OR semantics")
+	fmt.Println()
+	fmt.Println("  cfm mysqltop user-kills   --user=chris_wp")
+	fmt.Println("  cfm mysqltop user-kills   --db=chris_wp,chris_shop")
+	fmt.Println()
+	fmt.Println("  cfm mysqltop user-history --user=chris*")
+	fmt.Println("  cfm mysqltop user-history --user=chris_wp --window=6h --top=5")
+	fmt.Println()
+	fmt.Println("  Flags accepted by all user-* subcommands:")
+	fmt.Println("    --user=<pattern>[,<pattern>...]   MySQL username(s); * wildcard OK")
+	fmt.Println("    --db=<pattern>[,<pattern>...]     Database name(s);  * wildcard OK")
+	fmt.Println("  user-history also accepts:")
+	fmt.Println("    --window=<duration>               1h (default), 30m, 6h, 24h")
+	fmt.Println("    --top=<N>                         limit results (default: all matches)")
 }
 
 func runMySQLTopDefault(baseURL string) error {
@@ -896,4 +913,302 @@ func runMySQLHistoryTimeline(baseURL string, args []string) error {
 		}
 	}
 	return nil
+}
+
+
+
+
+
+
+
+// runMySQLUserSummary implements `cfm mysqltop user-summary --user=X [--db=Y]`.
+//
+// Calls GET /api/v1/mysql/user-summary and renders a human-readable table
+// identical in style to the existing `cfm mysqltop text` output, but scoped
+// to the requested users / databases.
+func runMySQLUserSummary(baseURL string, args []string) error {
+	users, dbs, window, _, err := parseUserDBFlags(args)
+	if err != nil {
+		return err
+	}
+	_ = window // not used by user-summary
+ 
+	if len(users) == 0 && len(dbs) == 0 {
+		return fmt.Errorf("user-summary: at least one --user= or --db= flag is required\n" +
+			"  example: cfm mysqltop user-summary --user=chris*")
+	}
+ 
+	path := buildUserFilterPath("/api/v1/mysql/user-summary", users, dbs)
+ 
+	type summaryResp struct {
+		Ts      time.Time   `json:"ts"`
+		Flavor  string      `json:"flavor"`
+		Mode    string      `json:"mode"`
+		Filter  map[string]any `json:"filter"`
+		PerUser []UserStat  `json:"per_user"`
+		Conn    struct {
+			Total    int     `json:"total"`
+			Active   int     `json:"active"`
+			Sleeping int     `json:"sleeping"`
+			Locked   int     `json:"locked"`
+		} `json:"conn"`
+		Running []Process       `json:"running"`
+		PerfDeltas []UserPerfDelta `json:"perf_deltas"`
+	}
+ 
+	var r summaryResp
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+		return err
+	}
+ 
+	fmt.Printf("[mysqltop user-summary] %s  flavor=%s  mode=%s\n",
+		r.Ts.Format("15:04:05"), r.Flavor, r.Mode)
+	fmt.Printf("filter: users=%v  dbs=%v\n", users, dbs)
+ 
+	if len(r.PerUser) == 0 {
+		fmt.Println("  (no matching connections)")
+		return nil
+	}
+ 
+	fmt.Printf("\nCONNECTIONS (filtered): total=%d  active=%d  sleep=%d  locked=%d\n",
+		r.Conn.Total, r.Conn.Active, r.Conn.Sleeping, r.Conn.Locked)
+ 
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "USER\tCONNS\tACTIVE\tSLEEP\tLOCKED\tMAX_IDLE\tRISK")
+	for _, u := range r.PerUser {
+		risk := "🟢 ok"
+		if u.Locked > 0 {
+			risk = "🔴 LOCKED"
+		} else if u.MaxSleepSec > 300 {
+			risk = "🟡 STALE"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+			u.User, u.Total, u.Active, u.Sleeping, u.Locked,
+			formatAge(u.MaxSleepSec), risk)
+	}
+	w.Flush()
+ 
+	if len(r.Running) > 0 {
+		fmt.Printf("\nRUNNING QUERIES (%d)  [query text hidden — use admin endpoints]\n", len(r.Running))
+		w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w2, "PID\tUSER\tDB\tCOMMAND\tTIME\tSTATE")
+		for _, p := range r.Running {
+			fmt.Fprintf(w2, "%d\t%s\t%s\t%s\t%ds\t%s\n",
+				p.ID, p.User, p.DB, p.Command, p.TimeSec, p.State)
+		}
+		w2.Flush()
+	}
+ 
+	if len(r.PerfDeltas) > 0 {
+		fmt.Println("\nCPU / QUERY DELTAS (last poll)")
+		w3 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w3, "USER\tCPU_SEC\tQUERIES\tAVG_MS")
+		for _, d := range r.PerfDeltas {
+			fmt.Fprintf(w3, "%s\t%.4f\t%d\t%.2f\n",
+				d.User, d.CPUSec, d.QueryCount, d.AvgQueryMsec)
+		}
+		w3.Flush()
+	}
+ 
+	return nil
+}
+ 
+// runMySQLUserKills implements `cfm mysqltop user-kills --user=X [--db=Y]`.
+//
+// Calls GET /api/v1/mysql/user-kills and renders the filtered kill ring.
+func runMySQLUserKills(baseURL string, args []string) error {
+	users, dbs, _, _, err := parseUserDBFlags(args)
+	if err != nil {
+		return err
+	}
+ 
+	if len(users) == 0 && len(dbs) == 0 {
+		return fmt.Errorf("user-kills: at least one --user= or --db= flag is required\n" +
+			"  example: cfm mysqltop user-kills --user=chris_wp")
+	}
+ 
+	path := buildUserFilterPath("/api/v1/mysql/user-kills", users, dbs)
+ 
+	type killsResp struct {
+		Ts     time.Time    `json:"ts"`
+		Mode   string       `json:"mode"`
+		Filter map[string]any `json:"filter"`
+		Kills  []KillRecord `json:"kills"`
+	}
+ 
+	var r killsResp
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+		return err
+	}
+ 
+	fmt.Printf("[mysqltop user-kills] %s  mode=%s\n", r.Ts.Format("15:04:05"), r.Mode)
+	fmt.Printf("filter: users=%v  dbs=%v\n", users, dbs)
+ 
+	if len(r.Kills) == 0 {
+		fmt.Println("  (no kills matching filter)")
+		return nil
+	}
+ 
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TIME\tACTION\tPID\tUSER\tDB\tRUNTIME\tUNBLOCKED\tRESULT\tREASON")
+	for _, k := range r.Kills {
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			k.Ts.Format("15:04:05"), k.Action,
+			k.PID, k.User, k.DB,
+			k.Runtime.Round(time.Second),
+			k.Unblocked, k.Result,
+			truncate(k.Reason, 60))
+	}
+	w.Flush()
+	return nil
+}
+ 
+// runMySQLUserHistory implements `cfm mysqltop user-history --user=X [--window=6h] [--top=N]`.
+//
+// Calls GET /api/v1/mysql/user-history and renders filtered long-window stats.
+func runMySQLUserHistory(baseURL string, args []string) error {
+	users, dbs, window, topN, err := parseUserDBFlags(args)
+	if err != nil {
+		return err
+	}
+ 
+	if len(users) == 0 && len(dbs) == 0 {
+		return fmt.Errorf("user-history: at least one --user= or --db= flag is required\n" +
+			"  example: cfm mysqltop user-history --user=chris*")
+	}
+ 
+	path := buildUserFilterPath("/api/v1/mysql/user-history", users, dbs)
+	path += fmt.Sprintf("&window=%s&top=%d", window, topN)
+ 
+	type histResp struct {
+		Ts          time.Time         `json:"ts"`
+		Window      string            `json:"window"`
+		SampleCount int               `json:"sample_count"`
+		Filter      map[string]any    `json:"filter"`
+		Users       []UserHistoryStat `json:"users"`
+	}
+ 
+	var r histResp
+	if err := fetchGovernorJSON(baseURL, path, &r); err != nil {
+		return err
+	}
+ 
+	fmt.Printf("[mysqltop user-history] %s  window=%s  samples=%d\n",
+		r.Ts.Format("15:04:05"), r.Window, r.SampleCount)
+	fmt.Printf("filter: users=%v  dbs=%v\n", users, dbs)
+ 
+	if len(r.Users) == 0 {
+		fmt.Println("  (no history matching filter)")
+		return nil
+	}
+ 
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "USER\tPEAK_CONNS\tAVG_CONNS\tPEAK_ACTIVE\tAVG_ACTIVE\tPEAK_LOCKED\tSAMPLES")
+	for _, u := range r.Users {
+		lockedFlag := ""
+		if u.PeakLocked > 0 {
+			lockedFlag = " 🔒"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%.1f\t%d\t%.1f\t%d%s\t%d\n",
+			u.User,
+			u.PeakConns, u.AvgConns,
+			u.PeakActive, u.AvgActive,
+			u.PeakLocked, lockedFlag,
+			u.Samples)
+	}
+	w.Flush()
+	return nil
+}
+ 
+// ── shared flag / URL helpers ─────────────────────────────────────────────────
+ 
+// parseUserDBFlags parses --user=, --db=, --window=, --top= from a CLI args slice.
+//
+// Supports both --flag=value and --flag value (space-separated) forms.
+// --user and --db each accept comma-separated lists, e.g. --user=a,b,c.
+// Unknown flags are ignored so future flags don't break existing scripts.
+//
+// Returns (users, dbs, window, topN, err).
+// window defaults to "1h"; topN defaults to 0 (all).
+func parseUserDBFlags(args []string) (users, dbs []string, window string, topN int, err error) {
+	window = "1h"
+	topN = 0
+ 
+	splitCSV := func(s string) []string {
+		var out []string
+		for _, part := range strings.Split(s, ",") {
+			if v := strings.TrimSpace(part); v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+ 
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+ 
+		// --flag=value form
+		if strings.HasPrefix(a, "--") {
+			a = a[2:] // strip leading --
+			if idx := strings.IndexByte(a, '='); idx >= 0 {
+				key, val := a[:idx], a[idx+1:]
+				switch key {
+				case "user":
+					users = append(users, splitCSV(val)...)
+				case "db":
+					dbs = append(dbs, splitCSV(val)...)
+				case "window":
+					window = strings.TrimSpace(val)
+				case "top":
+					if n, e := strconv.Atoi(strings.TrimSpace(val)); e == nil && n >= 0 {
+						topN = n
+					}
+				}
+				continue
+			}
+			// --flag value form (next arg is the value)
+			key := a
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				val := args[i+1]
+				i++
+				switch key {
+				case "user":
+					users = append(users, splitCSV(val)...)
+				case "db":
+					dbs = append(dbs, splitCSV(val)...)
+				case "window":
+					window = strings.TrimSpace(val)
+				case "top":
+					if n, e := strconv.Atoi(strings.TrimSpace(val)); e == nil && n >= 0 {
+						topN = n
+					}
+				}
+			}
+		}
+	}
+ 
+	return users, dbs, window, topN, nil
+}
+ 
+// buildUserFilterPath constructs the API path with ?user= and ?db= query params.
+// Uses repeated params (?user=a&user=b) rather than comma-separated so the
+// server's parseMultiParam handles both forms identically.
+func buildUserFilterPath(base string, users, dbs []string) string {
+	var sb strings.Builder
+	sb.WriteString(base)
+	sep := "?"
+	for _, u := range users {
+		sb.WriteString(sep)
+		sb.WriteString("user=")
+		sb.WriteString(u)
+		sep = "&"
+	}
+	for _, d := range dbs {
+		sb.WriteString(sep)
+		sb.WriteString("db=")
+		sb.WriteString(d)
+		sep = "&"
+	}
+	return sb.String()
 }

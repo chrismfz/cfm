@@ -105,8 +105,13 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop rules remove <id>")
 	fmt.Println("  cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
 	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
-	fmt.Println("  cfm webtop history prune [days]")
-	fmt.Println("  cfm webtop history truncate --yes")
+
+        fmt.Println("  cfm webtop history prune [days]")
+        fmt.Println("  cfm webtop history truncate --yes")
+        fmt.Println("  cfm webtop tokens                               # list scoped tokens")
+        fmt.Println("  cfm webtop tokens create --vhosts a.com --label name [--ttl 8760h]")
+        fmt.Println("  cfm webtop tokens revoke <id>")
+        fmt.Println("  cfm webtop tokens me                            # calling token's scope")
 
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
@@ -185,8 +190,14 @@ func RunWebTop(baseURL string, args []string) error {
 			return runRulesWebTop(baseURL, args[1:])
 		case "history":
 			return runHistoryWebTop(baseURL, args[1:])
+		case "tokens":
+                        return runTokensWebTop(baseURL, args[1:])
+
 
 		}
+
+
+
 	}
 
 	// Ειδικό mode: IP (aliases: ip, ips)
