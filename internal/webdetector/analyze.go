@@ -352,7 +352,7 @@ func hostFromPath(path string) string {
     for _, suf := range []string{".gz", ".bz2", ".xz", ".zst", ".zip"} {
         if strings.HasSuffix(lb, suf) {
             base = strings.TrimSuffix(base, suf)
-            lb = strings.ToLower(base)
+            lb = strings.TrimSuffix(lb, suf)
             break
         }
     }
@@ -361,12 +361,16 @@ func hostFromPath(path string) string {
     //    example.com_access_log
     //    example.com_error_log
     //    (sometimes rotated as ..._log-YYYYMMDD[.gz] but .gz ignored above)
-    base = strings.TrimSuffix(base, "_access_log")
-    base = strings.TrimSuffix(base, "_error_log")
+    if strings.HasSuffix(lb, "_access_log") {
+        base = strings.TrimSuffix(base, "_access_log")
+    } else if strings.HasSuffix(lb, "_error_log") {
+        base = strings.TrimSuffix(base, "_error_log")
+    }
 
     // Also handle Virtualmin date suffix if you ever scan rotated non-gz:
     //    example.com_access_log-20260111
     base = stripDashDateSuffix(base)
+    lb = strings.ToLower(base)
 
     // 2) DirectAdmin / custom naming you use:
     //    thikishop.gr.log
@@ -374,7 +378,6 @@ func hostFromPath(path string) string {
     //    thikishop.gr.bytes(.N)
     //    thikishop.gr.access (if used)
     // Order matters: strip longer suffixes first.
-    lb = strings.ToLower(base)
     if strings.HasSuffix(lb, ".error.log") {
         base = base[:len(base)-len(".error.log")]
     } else if strings.HasSuffix(lb, ".bytes.log") {
