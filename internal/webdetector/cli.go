@@ -994,12 +994,6 @@ func runAnalyzeHost(baseURL, host string) error {
 
 // ---------------- Challenge webtop ----------------
 
-type chalSummaryResp struct {
-	Now          string `json:"now"`
-	ActiveVhosts int    `json:"active_vhosts"`
-	ActiveIPs    int    `json:"active_ips"`
-}
-
 type chalVhost struct {
 	Host       string   `json:"host"`
 	Status     string   `json:"status"`

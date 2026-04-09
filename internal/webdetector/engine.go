@@ -383,7 +383,6 @@ type Engine struct {
 
 	// Challenge API state (vhost/ip/events)
 	chalAPI         *ChallengeAPIStore
-	chalOnce        sync.Once
 	chalExpiredSeen map[string]time.Time
 
 	challengeExcludes *excludeStore
@@ -2583,22 +2582,6 @@ func uaMatchAny(ua string, subs []string) bool {
 	u := strings.ToLower(ua)
 	for _, s := range subs {
 		if s != "" && strings.Contains(u, s) {
-			return true
-		}
-	}
-	return false
-}
-
-func pathMatchAny(path string, subs []string) bool {
-	p := strings.ToLower(path)
-	for _, s := range subs {
-		s = strings.TrimSpace(strings.ToLower(s))
-		if s == "" {
-			continue
-		}
-		// If config entry doesn't start with '/', allow matching filenames too.
-		// This makes "wso.php" match "/wp-content/uploads/wso.php".
-		if strings.Contains(p, s) {
 			return true
 		}
 	}
