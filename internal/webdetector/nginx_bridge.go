@@ -26,8 +26,8 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/clam"
-	"cfm/internal/logging"
 	"cfm/internal/enrich"
+	"cfm/internal/logging"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -67,7 +67,7 @@ type NginxBridge struct {
 	okState        map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
 	bypassFunc     func(string) bool           // set once at startup; no lock needed (written before serving starts)
 	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
-	stats          BridgeStats
+	stats          bridgeStatsState
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
@@ -142,10 +142,17 @@ type bridgeVhostEntry struct {
 	Reason  string
 }
 
-// BridgeStats is exported for cfm status / JSON API.
-type BridgeStats struct {
+type bridgeStatsState struct {
 	mu sync.Mutex
 
+	pushes     int64
+	errors     int64
+	lastError  string
+	lastPushAt time.Time
+}
+
+// BridgeStats is exported for cfm status / JSON API.
+type BridgeStats struct {
 	Pushes     int64     `json:"pushes"`
 	Errors     int64     `json:"errors"`
 	LastError  string    `json:"last_error,omitempty"`
@@ -792,11 +799,7 @@ func (b *NginxBridge) Status() NginxBridgeStatus {
 	}
 	b.mu.RUnlock()
 
-	b.stats.mu.Lock()
-	st := b.stats
-	st.ActiveIPs = len(ips)
-	st.ActiveVhosts = len(vhs)
-	b.stats.mu.Unlock()
+	st := b.snapshotBridgeStats(len(ips), len(vhs))
 
 	return NginxBridgeStatus{
 		Enabled:      true,
@@ -804,6 +807,20 @@ func (b *NginxBridge) Status() NginxBridgeStatus {
 		ActiveIPs:    ips,
 		ActiveVhosts: vhs,
 		Stats:        st,
+	}
+}
+
+func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeStats {
+	b.stats.mu.Lock()
+	defer b.stats.mu.Unlock()
+
+	return BridgeStats{
+		Pushes:       b.stats.pushes,
+		Errors:       b.stats.errors,
+		LastError:    b.stats.lastError,
+		LastPushAt:   b.stats.lastPushAt,
+		ActiveIPs:    activeIPs,
+		ActiveVhosts: activeVhosts,
 	}
 }
 
@@ -875,16 +892,16 @@ func (b *NginxBridge) post(path string, payload interface{}) {
 	}
 
 	b.stats.mu.Lock()
-	b.stats.Pushes++
-	b.stats.LastPushAt = time.Now()
+	b.stats.pushes++
+	b.stats.lastPushAt = time.Now()
 	b.stats.mu.Unlock()
 }
 
 func (b *NginxBridge) recordErr(msg string) {
 	logging.Logf("[nginx_bridge] WARN: %s", msg)
 	b.stats.mu.Lock()
-	b.stats.Errors++
-	b.stats.LastError = msg
+	b.stats.errors++
+	b.stats.lastError = msg
 	b.stats.mu.Unlock()
 }
 
@@ -965,21 +982,21 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
 	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
-// split path from query string — Lua sends request_uri which includes "?qs"
-var qs string
-if idx := strings.IndexByte(uri, '?'); idx >= 0 {
-    qs = uri[idx+1:]
-    uri = uri[:idx]
-}
+	// split path from query string — Lua sends request_uri which includes "?qs"
+	var qs string
+	if idx := strings.IndexByte(uri, '?'); idx >= 0 {
+		qs = uri[idx+1:]
+		uri = uri[:idx]
+	}
 	method := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method")))
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 
-if country == "" && ip != "" && b.enr != nil {
-    if geo := b.enr.Lookup(ip); geo.CountryISO != "" {
-        country = geo.CountryISO  // "GR" not "Greece"
-    }
-}
+	if country == "" && ip != "" && b.enr != nil {
+		if geo := b.enr.Lookup(ip); geo.CountryISO != "" {
+			country = geo.CountryISO // "GR" not "Greece"
+		}
+	}
 
 	if hh, _, err := net.SplitHostPort(host); err == nil && hh != "" {
 		host = hh
@@ -1050,12 +1067,12 @@ if country == "" && ip != "" && b.enr != nil {
 	}
 	if b.RuleDecision != nil {
 		rr := b.RuleDecision(TrafficRuleEvalInput{
-			Host:    host,
-			IP:      ip,
-			UA:      ua,
-			Path:    uri,
-			Method:  method,
-			Country: country,
+			Host:        host,
+			IP:          ip,
+			UA:          ua,
+			Path:        uri,
+			Method:      method,
+			Country:     country,
 			QueryString: qs,
 		})
 		if rr.Matched {
