@@ -4,20 +4,17 @@
 //
 // Auth order per request:
 //  1. Public path (/login, /logout, /login/verify) → pass through
-//  2. Direct loopback with no real XFF             → bypass (CLI on server)
-//  3. Valid goauth session cookie                  → allow
-//  4. Authorization: Bearer / X-CFM-Token / Token  → validate admin or scoped token
-//  5. Browser request (Accept: text/html)          → redirect to /login
-//  6. Everything else                              → 401
+//  2. Valid goauth session cookie                  → allow
+//  3. Authorization: Bearer / X-CFM-Token / Token  → validate admin or scoped token
+//  4. Browser request (Accept: text/html)          → redirect to /login
+//  5. Everything else                              → 401 / 403
 //
-// When AUTH_TOKEN is empty the middleware is a no-op (backwards compat).
 
 package apiserver
 
 import (
 	"context"
 	"crypto/subtle"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,19 +50,13 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 2. Loopback bypass (CLI, local curl, Laravel same-server) ─
-			if isLoopbackDirect(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// ── 3. Valid goauth session ────────────────────────────────────
+			// ── 2. Valid goauth session ────────────────────────────────────
 			if sessionAllowed(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// ── 4. Bearer / X-CFM-Token / Token header ────────────────────
+			// ── 3. Bearer / X-CFM-Token / Token header ────────────────────
 			tok := extractToken(r)
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
@@ -82,7 +73,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 5. No token — redirect browsers, 401 API clients ──────────
+			// ── 4. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				http.Redirect(w, r,
 					"/login?next="+url.QueryEscape(r.URL.RequestURI()),
@@ -96,25 +87,6 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 	}
 }
 
-// isLoopbackDirect returns true when the TCP connection is directly from loopback
-// and not proxied (no real X-Forwarded-For set by nginx).
-func isLoopbackDirect(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return false
-	}
-	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xff == "" {
-		return true
-	}
-	first := strings.TrimSpace(strings.Split(xff, ",")[0])
-	fwdIP := net.ParseIP(first)
-	return fwdIP != nil && fwdIP.IsLoopback()
-}
 
 func tokenMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
