@@ -59,8 +59,13 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/cpanel/user-info" {
 		return false
 	}
-	// Require actor assertion header so this bypass is narrow.
-	if strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) == "" {
+	// Require actor assertion so this bypass is narrow.
+	hasActorAssertion := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) != ""
+	hasBearer := false
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") && strings.TrimSpace(auth[7:]) != "" {
+		hasBearer = true
+	}
+	if !hasActorAssertion && !hasBearer {
 		return false
 	}
 	return true

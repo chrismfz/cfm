@@ -105,6 +105,11 @@ var pluginAssertionReplayCache sync.Map // nonce -> expUnix
 func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
 	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
 	if raw == "" {
+		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") {
+			raw = strings.TrimSpace(auth[7:])
+		}
+	}
+	if raw == "" {
 		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_missing"
 	}
 	secret := strings.TrimSpace(os.Getenv("CFM_CPANEL_ASSERTION_SECRET"))

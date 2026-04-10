@@ -242,14 +242,22 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
 function cfm_actor_assertion(): string
 {
     foreach ([
+        'HTTP_AUTHORIZATION',
+        'REDIRECT_HTTP_AUTHORIZATION',
         'HTTP_X_CFM_ACTOR_ASSERTION',
         'X_CFM_ACTOR_ASSERTION',
+        'HTTP_X_CPANEL_ACTOR_ASSERTION',
+        'X_CPANEL_ACTOR_ASSERTION',
         'CPANEL_ACTOR_ASSERTION',
         'CFM_ACTOR_ASSERTION',
     ] as $k) {
         $v = $_SERVER[$k] ?? getenv($k);
         if (is_string($v) && trim($v) !== '') {
-            return trim($v);
+            $v = trim($v);
+            if (stripos($v, 'Bearer ') === 0) {
+                $v = trim(substr($v, 7));
+            }
+            if ($v !== '') return $v;
         }
     }
     return '';
@@ -282,6 +290,12 @@ function cfm_get_user_info(string $user): array
             $headers[] = 'X-CFM-Actor-Assertion: ' . $assertion;
         } else {
             $hints[] = 'Actor assertion missing from cPanel request context';
+            return [
+                'ok'        => false,
+                'error'     => 'authorization required',
+                'http_code' => 401,
+                'hints'     => array_values(array_unique($hints)),
+            ];
         }
         cfm_debug_log('user_info_request', [
             'user' => $user,
