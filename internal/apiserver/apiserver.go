@@ -58,6 +58,9 @@ var (
 	mu        sync.Mutex
 	sharedMux *http.ServeMux
 	pending   []func(*http.ServeMux)
+
+	cpanelUserDataDomainsPath = "/etc/userdatadomains"
+	cpanelUserDomainsPath     = "/etc/userdomains"
 )
 
 // Mux returns the shared mux after Start() has initialised it.
@@ -383,11 +386,6 @@ func adminOnlyHandler(next http.Handler) http.Handler {
 // defaults from scoped token vhost ownership mapping.
 func scopedMySQLFilterHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hasExplicitUserFilter(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
 		if len(scope) == 0 {
 			// Admin token / authenticated UI session: keep existing handler
@@ -397,6 +395,16 @@ func scopedMySQLFilterHandler(next http.Handler) http.Handler {
 		}
 
 		users := deriveScopedMySQLUsers(r)
+		if hasExplicitUserFilter(r) {
+			if !requestedMySQLUsersWithinAllowed(r, users) {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"requested user filter is outside token scope"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		if len(users) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"user filter required; pass ?user= or use a scoped token with mapped domains"}`, http.StatusBadRequest)
@@ -446,6 +454,62 @@ func deriveScopedMySQLUsers(r *http.Request) []string {
 	return out
 }
 
+func requestedMySQLUsersWithinAllowed(r *http.Request, allowed []string) bool {
+	requested := requestedMySQLUsers(r)
+	if len(requested) == 0 {
+		return true
+	}
+	for _, req := range requested {
+		if !mysqlPatternWithinAllowed(req, allowed) {
+			return false
+		}
+	}
+	return true
+}
+
+func requestedMySQLUsers(r *http.Request) []string {
+	var out []string
+	for _, raw := range r.URL.Query()["user"] {
+		for _, part := range strings.Split(raw, ",") {
+			v := strings.ToLower(strings.TrimSpace(part))
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+func mysqlPatternWithinAllowed(requested string, allowed []string) bool {
+	reqPrefix, reqWildcard := mysqlPatternPrefix(requested)
+	for _, allow := range allowed {
+		allowPrefix, allowWildcard := mysqlPatternPrefix(strings.ToLower(strings.TrimSpace(allow)))
+		if allowWildcard {
+			if reqWildcard {
+				if strings.HasPrefix(reqPrefix, allowPrefix) {
+					return true
+				}
+				continue
+			}
+			if strings.HasPrefix(requested, allowPrefix) {
+				return true
+			}
+			continue
+		}
+		if !reqWildcard && requested == allowPrefix {
+			return true
+		}
+	}
+	return false
+}
+
+func mysqlPatternPrefix(s string) (prefix string, wildcard bool) {
+	if strings.Count(s, "*") == 1 && strings.HasSuffix(s, "*") {
+		return strings.TrimSuffix(s, "*"), true
+	}
+	return s, false
+}
+
 func cpanelOwnersForHosts(hosts []string) []string {
 	if len(hosts) == 0 {
 		return nil
@@ -471,7 +535,7 @@ func cpanelOwnersForHosts(hosts []string) []string {
 }
 
 func collectCpanelOwnersFromUserDataDomains(hostSet, owners map[string]struct{}) {
-	f, err := os.Open("/etc/userdatadomains")
+	f, err := os.Open(cpanelUserDataDomainsPath)
 	if err != nil {
 		return
 	}
@@ -480,7 +544,7 @@ func collectCpanelOwnersFromUserDataDomains(hostSet, owners map[string]struct{})
 }
 
 func collectCpanelOwnersFromUserDomains(hostSet, owners map[string]struct{}) {
-	f, err := os.Open("/etc/userdomains")
+	f, err := os.Open(cpanelUserDomainsPath)
 	if err != nil {
 		return
 	}
