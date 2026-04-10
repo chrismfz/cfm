@@ -452,8 +452,8 @@ func cpanelOwnersForHosts(hosts []string) []string {
 		}
 	}
 	owners := map[string]struct{}{}
-	collectCpanelOwners("/etc/userdatadomains", hostSet, owners, true)
-	collectCpanelOwners("/etc/userdomains", hostSet, owners, false)
+	collectCpanelOwnersFromUserDataDomains(hostSet, owners)
+	collectCpanelOwnersFromUserDomains(hostSet, owners)
 	if len(owners) == 0 {
 		return nil
 	}
@@ -465,13 +465,25 @@ func cpanelOwnersForHosts(hosts []string) []string {
 	return out
 }
 
-func collectCpanelOwners(path string, hostSet, owners map[string]struct{}, userDataDomains bool) {
-	f, err := os.Open(path)
+func collectCpanelOwnersFromUserDataDomains(hostSet, owners map[string]struct{}) {
+	f, err := os.Open("/etc/userdatadomains")
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	collectCpanelOwners(f, hostSet, owners, true)
+}
 
+func collectCpanelOwnersFromUserDomains(hostSet, owners map[string]struct{}) {
+	f, err := os.Open("/etc/userdomains")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	collectCpanelOwners(f, hostSet, owners, false)
+}
+
+func collectCpanelOwners(f *os.File, hostSet, owners map[string]struct{}, userDataDomains bool) {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
