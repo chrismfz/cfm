@@ -208,9 +208,29 @@ function cfm_socket_auth_path(): string
     return '/var/run/cfm-auth.sock';
 }
 
+function cfm_admin_token(): string
+{
+    $cfg = cfm_conf();
+    return trim((string)($cfg['AUTH_TOKEN'] ?? $cfg['TOKEN'] ?? ''));
+}
+
 function cfm_issue_actor_assertion(string $user): array
 {
     $sock = cfm_socket_auth_path();
+    $confPath = '/etc/cfm/cfm.conf';
+    $confReadable = is_readable($confPath);
+    $cfg = cfm_conf();
+    $authTokenKeyExists = array_key_exists('AUTH_TOKEN', $cfg) || array_key_exists('TOKEN', $cfg);
+    $adminToken = cfm_admin_token();
+    $adminTokenMissing = ($adminToken === '');
+    if ($adminTokenMissing) {
+        cfm_debug_log('auth_token_missing_in_plugin_runtime', [
+            'conf_path' => $confPath,
+            'conf_readable' => $confReadable,
+            'auth_token_key_exists' => $authTokenKeyExists,
+        ]);
+    }
+
     $nonce = bin2hex(random_bytes(12));
     $ts = time();
     $source = 'env_upper';
@@ -298,11 +318,19 @@ function cfm_issue_actor_assertion(string $user): array
         'source' => $source,
         'sock' => $sock,
         'http_status' => $status,
+        'admin_token_missing_in_plugin_runtime' => $adminTokenMissing,
+        'conf_readable' => $confReadable,
+        'auth_token_key_exists' => $authTokenKeyExists,
     ]);
+    $uiError = trim((string)($decoded['error'] ?? ''));
+    if ($adminTokenMissing) {
+        $uiError = 'Scoped token mint unavailable: plugin cannot access daemon admin token.';
+    }
+    if ($uiError === '') $uiError = 'authorization required';
     return [
         'ok' => false,
         'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
-        'error' => trim((string)($decoded['error'] ?? 'authorization required')),
+        'error' => $uiError,
     ];
 }
 
