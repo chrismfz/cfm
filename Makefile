@@ -54,7 +54,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport
 
 # -------------------------------
 # Help
@@ -72,6 +72,10 @@ help: ## Show this help message
 setup: ## First-time setup after git clone
 	go mod tidy
 	@echo "✅ Setup complete."
+
+
+check-cli-transport: ## Verify CLI runtime HTTP transport consistency (clihttp)
+	@./scripts/check_cli_transport.sh
 
 update: ## Update all dependencies
 	@echo "🔍 Checking for module updates..."

@@ -31,6 +31,8 @@ jobs:
           cache: true
       - run: go version
       - run: go mod tidy
+      - name: Enforce CLI transport guardrail
+        run: ./scripts/check_cli_transport.sh
       - run: go build ./...
       - run: go test -race -v ./...
 
