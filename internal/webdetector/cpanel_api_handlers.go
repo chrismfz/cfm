@@ -10,7 +10,9 @@ package webdetector
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -47,8 +49,15 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Tokenless cPanel-plugin flow: session proof is mandatory and self-scoped.
 	if hasSessionProofHeaders {
-		sessionUser, ok := validateCpanelSessionUser(r)
+		sessionUser, ok, reason := validateCpanelSessionUser(r)
 		if !ok {
+			if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{
+					"error": "authorization required",
+					"debug": reason,
+				})
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization required"})
 			return
 		}
@@ -76,48 +85,102 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-func validateCpanelSessionUser(r *http.Request) (string, bool) {
+func validateCpanelSessionUser(r *http.Request) (string, bool, string) {
 	if r == nil {
-		return "", false
+		return "", false, "nil request"
 	}
 
 	claimed := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Cpanel-User")))
 	secTok := strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token"))
 	cookie := strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie"))
 	if claimed == "" || secTok == "" || cookie == "" {
-		return "", false
+		return "", false, "missing one or more required session-proof headers"
 	}
 	if !cpanelSecurityTokenRE.MatchString(secTok) {
-		return "", false
+		return "", false, "invalid cpanel security token format"
 	}
 
-	url := "http://127.0.0.1:2082" + secTok + "/execute/Variables/get_user_information"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	b, probe, err := cpanelProbeUserInfo(secTok, cookie)
 	if err != nil {
-		return "", false
-	}
-	req.Header.Set("Cookie", cookie)
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{
-		Timeout: 3 * time.Second,
+		return "", false, err.Error()
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", false
-	}
-
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	user := extractCpanelUserFromJSON(b)
 	if user == "" {
-		return "", false
+		return "", false, "cpanel execute response did not contain a valid user field (" + probe + ")"
 	}
-	return user, user == claimed
+	if user != claimed {
+		return user, false, "session user mismatch: claimed=" + claimed + " resolved=" + user + " (" + probe + ")"
+	}
+	return user, true, ""
+}
+
+func cpanelProbeUserInfo(secTok, cookie string) ([]byte, string, error) {
+	path := secTok + "/execute/Variables/get_user_information"
+	targets := []struct {
+		url    string
+		client *http.Client
+	}{
+		{
+			url: "http://127.0.0.1:2082" + path,
+			client: &http.Client{
+				Timeout: 3 * time.Second,
+			},
+		},
+		{
+			url: "https://127.0.0.1:2083" + path,
+			client: &http.Client{
+				Timeout: 3 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local cPanel service probe
+				},
+			},
+		},
+	}
+
+	lastErr := ""
+	for _, t := range targets {
+		req, err := http.NewRequest(http.MethodGet, t.url, nil)
+		if err != nil {
+			lastErr = "failed to build cpanel execute request: " + err.Error()
+			continue
+		}
+		req.Header.Set("Cookie", cookie)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			lastErr = "cpanel execute request failed for " + t.url + ": " + err.Error()
+			continue
+		}
+
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return b, t.url, nil
+		}
+
+		lastErr = fmt.Sprintf("cpanel execute status=%d url=%s body=%s", resp.StatusCode, t.url, compactPreview(b, 240))
+	}
+
+	if lastErr == "" {
+		lastErr = "cpanel execute probe failed for unknown reason"
+	}
+	return nil, "", fmt.Errorf("%s", lastErr)
+}
+
+func compactPreview(b []byte, max int) string {
+	s := strings.TrimSpace(strings.Join(strings.Fields(string(b)), " "))
+	if max <= 0 {
+		max = 240
+	}
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	if s == "" {
+		return "<empty>"
+	}
+	return s
 }
 
 func extractCpanelUserFromJSON(data []byte) string {
