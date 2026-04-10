@@ -129,15 +129,15 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 
 			// ── 2. Bearer / X-CFM-Token / Token header ────────────────────
-			tok := extractToken(r)
+			tok, tokenHeaderSupplied := extractToken(r)
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
-					logging.Logf("[apiserver] auth_source=admin_token")
+					logging.Logf("[apiserver] auth_source=token_admin")
 					next.ServeHTTP(w, r)
 					return
 				}
 				if st, ok := store.Lookup(tok); ok {
-					logging.Logf("[apiserver] auth_source=scoped_token")
+					logging.Logf("[apiserver] auth_source=token_scoped")
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
@@ -148,7 +148,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 
 			// ── 3. Valid goauth session (fallback when no token header) ───
-			if sessionAllowed(r) {
+			if !tokenHeaderSupplied && sessionAllowed(r) {
 				logging.Logf("[apiserver] auth_source=session_cookie")
 				next.ServeHTTP(w, r)
 				return
@@ -178,15 +178,15 @@ func tokenMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func extractToken(r *http.Request) string {
+func extractToken(r *http.Request) (string, bool) {
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimSpace(auth[7:])
+		return strings.TrimSpace(auth[7:]), true
 	}
-	if t := strings.TrimSpace(r.Header.Get("X-CFM-Token")); t != "" {
-		return t
+	if _, ok := r.Header["X-CFM-Token"]; ok {
+		return strings.TrimSpace(r.Header.Get("X-CFM-Token")), true
 	}
-	if t := strings.TrimSpace(r.Header.Get("Token")); t != "" {
-		return t
+	if _, ok := r.Header["Token"]; ok {
+		return strings.TrimSpace(r.Header.Get("Token")), true
 	}
-	return ""
+	return "", false
 }
