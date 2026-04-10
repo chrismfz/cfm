@@ -81,6 +81,9 @@
        wafSummary: null,
         // Token management
         isAdmin: false,
+        tokenRole: 'viewer',
+        allowedVhosts: [],
+        meLoaded: false,
         tokens: [],
         tokenForm: { vhosts: '', label: '', ttl: '8760h', role: 'viewer' },
         tokenCreateMsg: '',
@@ -156,6 +159,8 @@
 
     computed: {
       isScoped() { return !this.isAdmin; },
+      canWrite() { return this.isAdmin || this.tokenRole !== 'viewer'; },
+      hasScopedVhosts() { return this.isScoped && this.allowedVhosts.length > 0; },
       shortDetail() {
         if (!this.drilldown) return null;
         return this.drilldown.short || this.drilldown;
@@ -545,6 +550,10 @@
       },
 
       shouldShow(section) {
+        if (this.isScoped) {
+          const hiddenForScoped = new Set(['globalips', 'tokens']);
+          if (hiddenForScoped.has(section)) return false;
+        }
         const groups = {
           overview: new Set(['webtop', 'suspicious', 'longtop', 'globalips', 'excludes', 'vhost']),
           vhost: new Set(['vhost']),
@@ -589,7 +598,8 @@
         window.history.replaceState({}, '', url.toString());
       },
       async applyVhostFocus() {
-        const host = String(this.vhostFocusHost || '').trim();
+        let host = String(this.vhostFocusHost || '').trim();
+        if (this.hasScopedVhosts && !this.allowedVhosts.includes(host.toLowerCase())) host = this.allowedVhosts[0] || '';
         if (!host) {
           this.actionMsg = 'Provide a vhost to open live view.';
           return;
@@ -671,6 +681,12 @@
         }
       },
       async postJSON(path, body) {
+        if (!this.canWrite) {
+          const writePrefixes = ['v1/challenge/', 'v1/firewall/', 'v1/webdet/rules/', 'v1/tokens/revoke', 'v1/auth/token', 'v1/webdet/history/prune', 'v1/webdet/history/truncate', 'v1/waf/exclude/', 'v1/challenge/exclude/', 'v1/webdet/vhost-controls/'];
+          if (writePrefixes.some((prefix) => String(path).startsWith(prefix))) {
+            throw new Error('read-only scoped viewer token');
+          }
+        }
         const headers = {
           Accept: 'application/json',
           'Content-Type': 'application/json',
@@ -1368,6 +1384,14 @@
           this.ipShort = this.extractRows(ipShort, 'short');
           this.hotIPs = this.extractRows(hotIPs, 'rows');
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
+          if (this.hasScopedVhosts) {
+            const allow = new Set(this.allowedVhosts);
+            const byHost = (row) => allow.has(String(row?.host || '').toLowerCase());
+            this.topShort = this.topShort.filter(byHost);
+            this.suspicious = this.suspicious.filter(byHost);
+            this.longTop = this.longTop.filter(byHost);
+            this.activeChallengeVhosts = this.activeChallengeVhosts.filter(byHost);
+          }
           this.suspiciousHosts = Object.fromEntries(this.suspicious.map((row) => [row.host, true]));
 
           if (this.shouldShow('excludes')) await this.refreshExcludeLists();
@@ -1415,13 +1439,44 @@
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       },
       // ── Token management ──────────────────────────────────────────────────
-      async checkAdminStatus() {
-        try {
-          const me = await this.fetchJSONSafe('v1/tokens/me', {});
-          this.isAdmin = !me.scoped;
-        } catch (_) {
-          this.isAdmin = false;
+      applyScopedChrome() {
+        const nav = document.querySelector('.top-nav');
+        if (nav) {
+          nav.querySelectorAll('a[href]').forEach((a) => {
+            const href = a.getAttribute('href') || '';
+            if (!this.isScoped) {
+              a.style.display = '';
+              return;
+            }
+            const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
+            a.style.display = adminOnly ? 'none' : '';
+          });
         }
+        const meta = document.querySelector('.topbar .meta');
+        if (meta && !meta.querySelector('.scoped-badge')) {
+          const badge = document.createElement('span');
+          badge.className = 'pill scoped-badge';
+          meta.prepend(badge);
+        }
+        const badge = document.querySelector('.scoped-badge');
+        if (badge) badge.textContent = this.isScoped ? 'Scoped view' : 'Global view';
+      },
+
+      async checkAdminStatus() {
+        const me = await this.fetchJSONSafe('v1/tokens/me', {});
+        this.isAdmin = !me?.scoped;
+        this.tokenRole = String(me?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
+        this.allowedVhosts = Array.isArray(me?.vhosts) ? me.vhosts.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean) : [];
+        if (this.hasScopedVhosts) {
+          const firstHost = this.allowedVhosts[0];
+          if (!this.vhostFocusHost) this.vhostFocusHost = firstHost;
+          if (!this.vhostOverviewHost) this.vhostOverviewHost = firstHost;
+          if (!this.historyHost) this.historyHost = firstHost;
+          this.ruleForm.vhosts = this.allowedVhosts.join(', ');
+          if (!this.simulateForm.host) this.simulateForm.host = firstHost;
+        }
+        this.meLoaded = true;
+        this.applyScopedChrome();
       },
 
       async refreshTokens() {
@@ -1472,6 +1527,7 @@
       },
 
       async loadHost(host, shouldScroll = true) {
+        if (this.hasScopedVhosts && !this.allowedVhosts.includes(String(host || '').trim().toLowerCase())) return;
         if (!host) return;
         this.activeHost = host;
         this.ensureHostSeries(host);
@@ -1516,8 +1572,7 @@
       this.resizeHandler = () => this.resizeVhostCharts();
       window.addEventListener('resize', this.resizeHandler);
 
-      if (this.isControlsPage) this.checkAdminStatus();
-      this.refreshAll();
+      this.checkAdminStatus().finally(() => this.refreshAll());
       this.$nextTick(() => this.resizeVhostCharts());
 
       if (this.isForensicsPage) {
