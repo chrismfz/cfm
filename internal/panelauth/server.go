@@ -98,7 +98,7 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		secret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
 	}
 	if secret == "" {
-		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "token_invalid_signature"})
+		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "secret_missing"})
 		return
 	}
 	assertion, err := signAssertion(userName, req.Nonce, []byte(secret), time.Now().UTC())
@@ -125,7 +125,7 @@ func validateCpanelRequest(req issueReq, now time.Time) (string, string) {
 	}
 	cpsess := strings.TrimSpace(req.CPSess)
 	if !cpsessRE.MatchString(cpsess) {
-		return "", "token_invalid_signature"
+		return "", "token_malformed"
 	}
 	if req.TS == 0 || req.Nonce == "" {
 		return "", "token_missing"
@@ -147,7 +147,7 @@ func validateCpanelRequest(req issueReq, now time.Time) (string, string) {
 	})
 	sid := strings.TrimPrefix(cpsess, "/cpsess")
 	if !validateSessionFile(userName, sid, cpsess) {
-		return "", "token_invalid_signature"
+		return "", "session_not_found"
 	}
 	return userName, ""
 }
