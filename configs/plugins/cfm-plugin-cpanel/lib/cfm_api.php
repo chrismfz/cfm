@@ -303,7 +303,9 @@ function cfm_issue_actor_assertion(string $user): array
         }
         cfm_debug_log('auth_socket_assertion_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
         cfm_debug_log('auth_socket_scoped_token_mint_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
-        return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken];
+        $userInfo = $decoded['user_info'] ?? null;
+        if (!is_array($userInfo)) $userInfo = null;
+        return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken, 'user_info' => $userInfo];
     }
     cfm_debug_log('auth_socket_assertion_issue_failed', [
         'user' => $user,
@@ -374,20 +376,55 @@ function cfm_get_user_info(string $user): array
                 'hints'     => array_values(array_unique($hints)),
             ];
         }
-        $assertion = trim((string)$issued['assertion']);
-        $headers = ['X-CFM-Actor-Assertion: ' . $assertion];
+        $mintedUserInfo = $issued['user_info'] ?? null;
+        if (!is_array($mintedUserInfo)) $mintedUserInfo = null;
+        $usedMintedUserInfo = $mintedUserInfo !== null;
+
         cfm_debug_log('user_info_request', [
             'user' => $user,
             'local_base' => $localBase,
-            'assertion_present' => $assertion !== '',
+            'call_graph' => 'cfm_get_user_info -> cfm_issue_actor_assertion -> auth_socket_scoped_token_mint_ok' . ($usedMintedUserInfo ? '' : ' -> /api/v1/cpanel/user-info'),
+            'assertion_present' => trim((string)($issued['assertion'] ?? '')) !== '',
             'scoped_token_present' => trim((string)($issued['scoped_token'] ?? '')) !== '',
-            'auth_header_count' => count($headers),
-            'auth_headers' => array_map(static function ($h) {
-                $p = strpos($h, ':');
-                return $p === false ? $h : substr($h, 0, $p);
-            }, $headers),
+            'auth_header_count' => 0,
+            'auth_headers' => [],
+            'used_minted_user_info' => $usedMintedUserInfo,
+            'assertion_nonce_reused' => false,
         ]);
-        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
+
+        if ($usedMintedUserInfo) {
+            $data = $mintedUserInfo;
+        } else {
+            $freshIssued = cfm_issue_actor_assertion($user);
+            if (!($freshIssued['ok'] ?? false)) {
+                $reason = trim((string)($freshIssued['reason'] ?? 'auth_failed'));
+                $error = trim((string)($freshIssued['error'] ?? 'authorization required'));
+                return [
+                    'ok'        => false,
+                    'error'     => $error,
+                    'http_code' => 401,
+                    'reason'    => $reason,
+                    'hints'     => array_values(array_unique($hints)),
+                ];
+            }
+            $assertion = trim((string)$freshIssued['assertion']);
+            $headers = ['X-CFM-Actor-Assertion: ' . $assertion];
+            cfm_debug_log('user_info_request_fallback', [
+                'user' => $user,
+                'local_base' => $localBase,
+                'call_graph' => 'cfm_get_user_info -> cfm_issue_actor_assertion (mint scoped token) -> cfm_issue_actor_assertion (fresh) -> /api/v1/cpanel/user-info',
+                'assertion_present' => $assertion !== '',
+                'scoped_token_present' => trim((string)($freshIssued['scoped_token'] ?? '')) !== '',
+                'auth_header_count' => count($headers),
+                'auth_headers' => array_map(static function ($h) {
+                    $p = strpos($h, ':');
+                    return $p === false ? $h : substr($h, 0, $p);
+                }, $headers),
+                'used_minted_user_info' => false,
+                'assertion_nonce_reused' => false,
+            ]);
+            $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
+        }
         return [
             'ok'        => true,
             'data'      => $data,
