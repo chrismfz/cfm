@@ -142,7 +142,10 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     $decoded = json_decode($body, true);
     if (!is_array($decoded)) $decoded = ['raw' => $body];
     if ($code >= 400) {
-        throw new RuntimeException($decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code));
+        throw new RuntimeException(
+            $decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code),
+            $code
+        );
     }
     return $decoded;
 }
@@ -151,11 +154,56 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
 // CFM runs as root and has full access to cPanel metadata files.
 function cfm_get_user_info(string $user): array
 {
-    if ($user === '') return [];
+    if ($user === '') {
+        return [
+            'ok'        => false,
+            'error'     => 'Missing cPanel username',
+            'http_code' => 400,
+            'hints'     => [],
+        ];
+    }
+
+    $hints = [];
+    if (cfm_admin_token() === '') {
+        $hints[] = 'Admin token missing in /etc/cfm/cfm.conf';
+    }
+
+    $localBase = cfm_local_base_url();
+    $iframeBase = cfm_iframe_base_url();
+    if ($iframeBase !== '' && strpos($iframeBase, '127.0.0.1') !== false) {
+        $hints[] = 'Base URL may be loopback-only; verify CPANEL_PLUGIN_BASE_URL/TLS_PORT for browser access';
+    }
+
     try {
-        return cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+        return [
+            'ok'        => true,
+            'data'      => $data,
+            'http_code' => 200,
+            'hints'     => $hints,
+        ];
     } catch (Throwable $e) {
-        error_log('[cfm] user-info failed: ' . $e->getMessage());
-        return [];
+        $errorMessage = trim((string)$e->getMessage());
+        $httpCode = (int)$e->getCode();
+        if ($httpCode < 0 || $httpCode > 599) $httpCode = 0;
+
+        $lowerMessage = strtolower($errorMessage);
+        if (strpos($lowerMessage, 'timed out') !== false || strpos($lowerMessage, 'timeout') !== false) {
+            $hints[] = 'CFM API timeout; verify local service health and firewall rules';
+        }
+        if ($httpCode === 401 || $httpCode === 403) {
+            $hints[] = 'Authentication rejected; verify AUTH_TOKEN alignment between plugin and daemon';
+        }
+        if (strpos($lowerMessage, 'failed to connect') !== false || strpos($lowerMessage, 'couldn\'t connect') !== false) {
+            $hints[] = 'CFM API may be unreachable at ' . $localBase;
+        }
+
+        error_log('[cfm] user-info failed: ' . $errorMessage . ' (http=' . $httpCode . ')');
+        return [
+            'ok'        => false,
+            'error'     => $errorMessage !== '' ? $errorMessage : 'CFM API request failed',
+            'http_code' => $httpCode,
+            'hints'     => array_values(array_unique($hints)),
+        ];
     }
 }
