@@ -202,3 +202,28 @@ func TestMonitoring_LongTop_ScopedFilters(t *testing.T) {
 		t.Fatalf("scoped long-top: expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestMonitoring_ScopedHostVhostInjectionRejected(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "top-short vhosts", path: "/api/v1/webdet/top-short?vhosts=other.com"},
+		{name: "suspicious vhosts", path: "/api/v1/webdet/suspicious?vhosts=other.com"},
+		{name: "long-top vhosts", path: "/api/v1/webdet/long-top?vhosts=other.com"},
+		{name: "drilldown host", path: "/api/v1/webdet/drilldown?host=other.com"},
+		{name: "analyze-host host", path: "/api/v1/webdet/analyze-host?host=other.com"},
+		{name: "vhosts vhost", path: "/api/v1/webdet/vhosts?vhost=other.com"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := get(mux, scopedCtx("mysite.com"), tc.path)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for scoped injection, got %d body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}

@@ -24,6 +24,11 @@ type webdetVhostControlResponse struct {
 }
 
 func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "vhosts", "vhost"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "vhost not in scope"})
+		return
+	}
+
 	filter := parseVhostFilterWithAliases(r)
 	hosts := e.collectKnownVhosts()
 
@@ -110,25 +115,23 @@ func parseVhostFilterWithAliases(r *http.Request) map[string]struct{} {
 		return scope
 	}
 
-	raw := strings.TrimSpace(r.URL.Query().Get("vhosts"))
-	if raw == "" {
-		raw = strings.TrimSpace(r.URL.Query().Get("vhost"))
-	}
-	if raw == "" {
-		return nil
-	}
-
-	m := make(map[string]struct{})
-	for _, part := range strings.Split(raw, ",") {
-		h := normalizeControlHost(part)
-		if h != "" {
-			m[h] = struct{}{}
-		}
-	}
+	m := parseQueryVhostSet(r, "vhosts", "vhost")
 	if len(m) == 0 {
 		return nil
 	}
-	return m
+
+	normalized := make(map[string]struct{}, len(m))
+	for host := range m {
+		h := normalizeControlHost(host)
+		if h != "" {
+			normalized[h] = struct{}{}
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+
+	return normalized
 }
 
 func normalizeControlHost(v string) string {

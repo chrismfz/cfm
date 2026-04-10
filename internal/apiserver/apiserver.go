@@ -395,12 +395,24 @@ func scopedMySQLFilterHandler(next http.Handler) http.Handler {
 		}
 
 		users := deriveScopedMySQLUsers(r)
+		dbs := deriveScopedMySQLDatabases(r)
 		if hasExplicitUserFilter(r) {
 			if !requestedMySQLUsersWithinAllowed(r, users) {
 				w.Header().Set("Content-Type", "application/json")
 				http.Error(w, `{"error":"requested user filter is outside token scope"}`, http.StatusForbidden)
 				return
 			}
+		}
+
+		if hasExplicitDBFilter(r) {
+			if !requestedMySQLDBsWithinAllowed(r, dbs) {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"requested db filter is outside token scope"}`, http.StatusForbidden)
+				return
+			}
+		}
+
+		if hasExplicitUserFilter(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -433,6 +445,31 @@ func hasExplicitUserFilter(r *http.Request) bool {
 }
 
 func deriveScopedMySQLUsers(r *http.Request) []string {
+	owners := deriveScopedMySQLOwners(r)
+	if len(owners) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(owners)*2)
+	for _, owner := range owners {
+		out = append(out, owner, owner+"_*")
+	}
+	return out
+}
+
+func deriveScopedMySQLDatabases(r *http.Request) []string {
+	owners := deriveScopedMySQLOwners(r)
+	if len(owners) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(owners)*2)
+	for _, owner := range owners {
+		out = append(out, owner, owner+"_*")
+	}
+	return out
+}
+
+func deriveScopedMySQLOwners(r *http.Request) []string {
 	scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
 	if len(scope) == 0 {
 		return nil
@@ -446,12 +483,7 @@ func deriveScopedMySQLUsers(r *http.Request) []string {
 	if len(owners) == 0 {
 		return nil
 	}
-
-	out := make([]string, 0, len(owners)*2)
-	for _, owner := range owners {
-		out = append(out, owner, owner+"_*")
-	}
-	return out
+	return owners
 }
 
 func requestedMySQLUsersWithinAllowed(r *http.Request, allowed []string) bool {
@@ -467,9 +499,41 @@ func requestedMySQLUsersWithinAllowed(r *http.Request, allowed []string) bool {
 	return true
 }
 
+func hasExplicitDBFilter(r *http.Request) bool {
+	for _, raw := range r.URL.Query()["db"] {
+		for _, part := range strings.Split(raw, ",") {
+			if strings.TrimSpace(part) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func requestedMySQLDBsWithinAllowed(r *http.Request, allowed []string) bool {
+	requested := requestedMySQLDBs(r)
+	if len(requested) == 0 {
+		return true
+	}
+	for _, req := range requested {
+		if !mysqlPatternWithinAllowed(req, allowed) {
+			return false
+		}
+	}
+	return true
+}
+
 func requestedMySQLUsers(r *http.Request) []string {
+	return requestedMySQLParamValues(r, "user")
+}
+
+func requestedMySQLDBs(r *http.Request) []string {
+	return requestedMySQLParamValues(r, "db")
+}
+
+func requestedMySQLParamValues(r *http.Request, key string) []string {
 	var out []string
-	for _, raw := range r.URL.Query()["user"] {
+	for _, raw := range r.URL.Query()[key] {
 		for _, part := range strings.Split(raw, ",") {
 			v := strings.ToLower(strings.TrimSpace(part))
 			if v != "" {

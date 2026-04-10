@@ -169,6 +169,11 @@ type ipShortResponse struct {
 }
 
 func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "vhosts"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "vhosts not in scope"})
+		return
+	}
+
 	// honour optional ?limit=N; keep backward compatibility with ?top=N
 	limit := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -218,6 +223,11 @@ func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
 // handleDrilldown, handleSuspicious κτλ μένουν όπως ήταν.
 
 func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "vhosts"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "vhosts not in scope"})
+		return
+	}
+
 	limit := 50
 	minScore := e.cfg.MinScore
 	if minScore <= 0 {
@@ -236,6 +246,11 @@ type longTopResponse struct {
 // handleLongTop επιστρέφει ΟΛΑ τα hosts από το long window, scored,
 // ταξινομημένα by score desc, χωρίς minScore filter.
 func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "vhosts"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "vhosts not in scope"})
+		return
+	}
+
 	// optional ?limit=N (default 50)
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -256,6 +271,11 @@ func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
 // Replace the handleDrilldown function with this version that honours ?top=N
 
 func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "host"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
@@ -345,6 +365,11 @@ func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
 
 // handleAnalyzeHost: offline log scan για ένα vhost.
 func (e *Engine) handleAnalyzeHost(w http.ResponseWriter, r *http.Request) {
+	if err := validateScopedVhostQuery(r, "host"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})

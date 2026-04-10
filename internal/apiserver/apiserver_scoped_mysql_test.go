@@ -76,6 +76,58 @@ func TestScopedMySQLFilterHandler_ScopedNoUserInjectsDerivedDefaults(t *testing.
 	}
 }
 
+func TestScopedMySQLFilterHandler_ScopedDBInjectionRejected(t *testing.T) {
+	writeScopedMySQLOwnerFixture(t)
+
+	nextCalled := false
+	h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := newScopedMySQLRequest(t, "/api/v1/mysql/user-summary?db=otherdb")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for out-of-scope db filter, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if nextCalled {
+		t.Fatalf("expected next handler to not be called")
+	}
+}
+
+func TestScopedMySQLFilterHandler_EndpointFamilyInjectionRejected(t *testing.T) {
+	writeScopedMySQLOwnerFixture(t)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "summary-user", path: "/api/v1/mysql/user-summary?user=otheracct"},
+		{name: "summary-db", path: "/api/v1/mysql/user-summary?db=otherdb"},
+		{name: "kills-user", path: "/api/v1/mysql/user-kills?user=otheracct"},
+		{name: "kills-db", path: "/api/v1/mysql/user-kills?db=otherdb"},
+		{name: "history-user", path: "/api/v1/mysql/user-history?user=otheracct"},
+		{name: "history-db", path: "/api/v1/mysql/user-history?db=otherdb"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := newScopedMySQLRequest(t, tc.path)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for scoped injection, got %d body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 func writeScopedMySQLOwnerFixture(t *testing.T) {
 	t.Helper()
 	tmp := t.TempDir()
