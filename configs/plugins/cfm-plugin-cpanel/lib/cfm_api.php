@@ -108,35 +108,70 @@ function cfm_local_base_url(): string
     return 'http://127.0.0.1:' . $port;
 }
 
+function cfm_request_host(): string
+{
+    $rawHost = trim((string)(getenv('HTTP_HOST') ?: ''));
+    if ($rawHost === '') return '';
+    if (strpos($rawHost, ':') !== false) {
+        $rawHost = preg_replace('/:\d+$/', '', $rawHost);
+    }
+    return strtolower(trim((string)$rawHost, '[]'));
+}
+
+function cfm_canonical_host(array $cfg): string
+{
+    foreach (['CPANEL_PLUGIN_CANONICAL_HOST', 'PLUGIN_CANONICAL_HOST', 'CANONICAL_HOST', 'HOSTNAME'] as $key) {
+        $value = strtolower(trim((string)($cfg[$key] ?? '')));
+        if ($value !== '') return trim($value, '[]');
+    }
+
+    $apiUrl = trim((string)($cfg['API_URL'] ?? ''));
+    if ($apiUrl !== '') {
+        $host = parse_url($apiUrl, PHP_URL_HOST);
+        if (is_string($host) && $host !== '') return strtolower(trim($host, '[]'));
+    }
+
+    $host = trim((string)shell_exec('hostname -f 2>/dev/null'));
+    if ($host === '') $host = (string)gethostname();
+    return strtolower(trim($host, '[]'));
+}
+
 // Browser-facing base URL for the iframe.
-// Priority: CPANEL_PLUGIN_BASE_URL override → TLS_PORT → PORT → bare hostname.
+// Priority: CPANEL_PLUGIN_BASE_URL override → canonical host + TLS_PORT (on mismatch) → request host.
 function cfm_iframe_base_url(): string
 {
     $cfg = cfm_conf();
 
-    // Explicit override — admin escape hatch for unusual setups.
+    // Explicit override — deterministic/admin-controlled endpoint.
     $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
     if ($override !== '') return rtrim($override, '/');
 
-    // Derive hostname from the HTTP request (strip any port cPanel appends).
-    $httpHost = preg_replace('/:\d+$/', '', (string)(getenv('HTTP_HOST') ?: ''));
-    if ($httpHost === '') {
-        $httpHost = trim((string)shell_exec('hostname -f 2>/dev/null'));
-    }
-    if ($httpHost === '') {
-        $httpHost = (string)gethostname();
-    }
+    $requestHost   = cfm_request_host();
+    $canonicalHost = cfm_canonical_host($cfg);
+    $tlsPort       = (int)($cfg['TLS_PORT'] ?? 0);
 
-    $tlsPort = (int)($cfg['TLS_PORT'] ?? 0);
+    $hostMismatch = ($requestHost !== '' && $canonicalHost !== '' && strcasecmp($requestHost, $canonicalHost) !== 0);
+    $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
+
+    if ($hostMismatch && $tlsPort > 0) {
+        // Mixed-hostname access detected (e.g., account domain in cPanel frame).
+        // Bypass OpenResty path proxy and target the canonical TLS listener directly.
+        cfm_debug_log('iframe_base_url_host_mismatch_tls_fallback', [
+            'http_host'      => $requestHost,
+            'canonical_host' => $canonicalHost,
+            'tls_port'       => $tlsPort,
+        ]);
+        return 'https://' . $canonicalHost . ':' . $tlsPort;
+    }
 
     if ($tlsPort > 0) {
         // Direct TLS port — bypasses OpenResty, hits Go directly.
-        return 'https://' . $httpHost . ':' . $tlsPort;
+        return 'https://' . $effectiveHost . ':' . $tlsPort;
     }
 
     // No TLS_PORT → assume OpenResty is in front on standard 443.
     // /cfm-admin/ is already handled by the OpenResty location block.
-    return 'https://' . $httpHost;
+    return 'https://' . $effectiveHost;
 }
 
 // Generic CFM API call (server-side, loopback).
