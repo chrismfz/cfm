@@ -10,7 +10,6 @@ package webdetector
 
 import (
 	"bufio"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -80,11 +79,11 @@ func validateCpanelSessionUser(r *http.Request) (string, bool) {
 	if claimed == "" || secTok == "" || cookie == "" {
 		return "", false
 	}
-	if !strings.HasPrefix(secTok, "/cpsess") {
+	if !cpanelSecurityTokenRE.MatchString(secTok) {
 		return "", false
 	}
 
-	url := "https://127.0.0.1:2083" + secTok + "/execute/Variables/get_user_information"
+	url := "http://127.0.0.1:2082" + secTok + "/execute/Variables/get_user_information"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", false
@@ -94,9 +93,6 @@ func validateCpanelSessionUser(r *http.Request) (string, bool) {
 
 	client := &http.Client{
 		Timeout: 3 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local cPaneld cert
-		},
 	}
 
 	resp, err := client.Do(req)
@@ -178,6 +174,7 @@ func cpanelUserExists(user string) bool {
 
 // isValidCpanelUsername rejects anything that isn't a safe cPanel username.
 var cpanelUsernameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,15}$`)
+var cpanelSecurityTokenRE = regexp.MustCompile(`^/cpsess[0-9A-Za-z]{8,128}$`)
 
 func isValidCpanelUsername(user string) bool {
 	return cpanelUsernameRE.MatchString(user)
