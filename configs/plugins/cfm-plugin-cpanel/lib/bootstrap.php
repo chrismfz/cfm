@@ -50,13 +50,52 @@ function cfm_bootstrap(string $mode): void
         $error = 'Could not determine cPanel username.';
     } else {
         // Ask CFM (running as root) for the user's domains and DB info.
-        $userInfo = cfm_get_user_info($currentUser);
-        $domains  = $userInfo['domains'] ?? [];
+        $userInfoResult = cfm_get_user_info($currentUser);
 
-        if (empty($domains)) {
-            $error = 'No domains found for user "' . $currentUser . '". '
-                   . 'Ensure CFM is running and AUTH_TOKEN is set in /etc/cfm/cfm.conf.';
+        if (!($userInfoResult['ok'] ?? false)) {
+            $httpCode = (int)($userInfoResult['http_code'] ?? 0);
+            $apiError = trim((string)($userInfoResult['error'] ?? ''));
+            $hints    = $userInfoResult['hints'] ?? [];
+            if (!is_array($hints)) $hints = [];
+
+            if ($httpCode === 401 || $httpCode === 403) {
+                $error = 'CFM API auth failed.';
+            } else {
+                $error = 'CFM API unreachable.';
+            }
+
+            $diagHints = [];
+            foreach ($hints as $hint) {
+                if (is_string($hint) && trim($hint) !== '') {
+                    $diagHints[] = trim($hint);
+                }
+            }
+
+            if ($apiError !== '') {
+                $lowerError = strtolower($apiError);
+                if (strpos($lowerError, 'timed out') !== false || strpos($lowerError, 'timeout') !== false) {
+                    $diagHints[] = 'Request timed out before CFM API responded';
+                }
+                if (strpos($lowerError, 'failed to connect') !== false || strpos($lowerError, 'couldn\'t connect') !== false) {
+                    $diagHints[] = 'Service may not be listening on configured local API port';
+                }
+            }
+
+            if (!empty($diagHints)) {
+                $error .= ' Hints: ' . implode('; ', array_values(array_unique($diagHints))) . '.';
+            }
         } else {
+            $userInfo = $userInfoResult['data'] ?? [];
+            if (!is_array($userInfo)) $userInfo = [];
+            $domains  = $userInfo['domains'] ?? [];
+            if (!is_array($domains)) $domains = [];
+
+            if (empty($domains)) {
+                $error = 'No domains found for user "' . $currentUser . '".';
+            }
+        }
+
+        if ($error === '' && !empty($domains)) {
             try {
                 $token = cfm_issue_scoped_token($domains, 'cpanel:' . $currentUser, '4h');
             } catch (Throwable $e) {
