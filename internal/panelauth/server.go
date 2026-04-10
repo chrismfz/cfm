@@ -130,6 +130,11 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		writeIssue(w, http.StatusInternalServerError, issueResp{Error: "internal error", Reason: "issue_failed"})
 		return
 	}
+	if logging.DebugEnabled() && len(debugMeta) > 0 {
+		if matchedFile, _ := debugMeta["matched_file"].(string); matchedFile != "" {
+			logging.Logf("[panel-auth] issue debug panel=%s user=%s matched_file=%q", strings.TrimSpace(req.Panel), userName, matchedFile)
+		}
+	}
 	logging.Logf("[panel-auth] issue ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
 	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion})
 }
@@ -175,7 +180,7 @@ func validateCpanelRequest(req issueReq, now time.Time) (string, string, map[str
 	if !ok {
 		return "", "session_not_found", debug
 	}
-	return userName, "", nil
+	return userName, "", debug
 }
 
 func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
@@ -188,15 +193,27 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		"scan_limit":            maxSessionFiles,
 		"scanned_file_count":    0,
 		"match_reason":          "no_match",
+		"files_enumerated":      0,
+		"files_read_ok":         0,
+		"files_parse_json":      0,
+		"files_parse_kv":        0,
+		"token_matches":         0,
+		"final_category":        "no_user_files",
 	}
 	_ = sid // sid comes from cpsess and is intentionally not used for content-based matching.
 	pathEntries := make([]map[string]any, 0, maxSessionFiles)
+	filesReadOK := 0
+	filesParseJSON := 0
+	filesParseKV := 0
+	tokenMatches := 0
+	parseErrors := 0
 	if !isSafeSessionComponent(userName) {
 		debug["invalid_component"] = true
 		debug["paths"] = pathEntries
 		return false, debug
 	}
 	paths, totalCandidates := buildSessionCandidatePaths(userName, sessionLookupDirs, maxSessionFiles)
+	debug["files_enumerated"] = totalCandidates
 	debug["candidate_path_count"] = totalCandidates
 	debug["scan_truncated"] = totalCandidates > len(paths)
 	anyCandidateExists := totalCandidates > 0
@@ -216,15 +233,26 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		}
 		entry["exists"] = true
 		anyCandidateExists = true
+		filesReadOK++
 		rowUser, token, parseMode, parseErr := parseSessionRecord(b)
 		if parseErr != nil {
+			parseErrors++
 			entry["parse_error"] = parseErr.Error()
 			pathEntries = append(pathEntries, entry)
 			continue
 		}
+		switch parseMode {
+		case "json":
+			filesParseJSON++
+		case "kv":
+			filesParseKV++
+		}
 		entry["parse_mode"] = parseMode
 		rowUserMatched := rowUser == "" || strings.EqualFold(rowUser, userName)
 		tokenMatched := token == cpsess
+		if tokenMatched {
+			tokenMatches++
+		}
 		entry["row_user"] = rowUser
 		entry["row_user_matched"] = rowUserMatched
 		entry["cp_security_token_matched"] = tokenMatched
@@ -235,13 +263,57 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 			debug["scanned_file_count"] = len(pathEntries)
 			debug["match_reason"] = "matched_by_content"
 			debug["parse_mode"] = parseMode
+			debug["files_read_ok"] = filesReadOK
+			debug["files_parse_json"] = filesParseJSON
+			debug["files_parse_kv"] = filesParseKV
+			debug["token_matches"] = tokenMatches
+			debug["final_category"] = "token_found_user_match"
+			debug["matched_file"] = sanitizeSessionFilename(p)
 			return true, debug
 		}
 	}
 	debug["paths"] = pathEntries
 	debug["any_candidate_exists"] = anyCandidateExists
 	debug["scanned_file_count"] = len(pathEntries)
+	debug["files_read_ok"] = filesReadOK
+	debug["files_parse_json"] = filesParseJSON
+	debug["files_parse_kv"] = filesParseKV
+	debug["token_matches"] = tokenMatches
+	switch {
+	case totalCandidates == 0:
+		debug["final_category"] = "no_user_files"
+	case filesReadOK > 0 && filesReadOK == parseErrors:
+		debug["final_category"] = "parse_errors_only"
+	case tokenMatches > 0:
+		debug["final_category"] = "token_found_user_mismatch"
+	default:
+		debug["final_category"] = "user_files_present_no_token_match"
+	}
 	return false, debug
+}
+
+func sanitizeSessionFilename(path string) string {
+	base := filepath.Base(strings.TrimSpace(path))
+	if base == "." || base == "/" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(base))
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-', r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 func loadSessionLookupDirs() []string {
