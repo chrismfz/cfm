@@ -367,6 +367,8 @@ function cfm_get_user_info(string $user): array
                 $hints[] = 'CFM daemon assertion secret is not configured';
             } elseif ($reason === 'token_malformed') {
                 $hints[] = 'Invalid cPanel session token format from request context';
+            } elseif ($reason === 'token_replay') {
+                $hints[] = 'Actor assertion nonce replay detected; ensure each API call uses a fresh assertion or avoid duplicate actor-auth calls.';
             }
             return [
                 'ok'        => false,
