@@ -33,6 +33,72 @@ function cfm_conf(): array
     return $cfg;
 }
 
+function cfm_debug_enabled(): bool
+{
+    static $enabled = null;
+    if ($enabled !== null) return $enabled;
+
+    $on  = ['1', 'true', 'yes', 'on'];
+    $off = ['0', 'false', 'no', 'off'];
+
+    // Runtime trigger (no config file access required):
+    // ?cfm_debug=0 to disable, ?cfm_debug=1 to re-enable.
+    $queryToggle = strtolower(trim((string)($_GET['cfm_debug'] ?? '')));
+    if ($queryToggle !== '') {
+        if (in_array($queryToggle, $off, true)) {
+            @setcookie('CFM_PLUGIN_DEBUG', '0', time() + 86400, '/');
+            $enabled = false;
+            return $enabled;
+        }
+        if (in_array($queryToggle, $on, true)) {
+            @setcookie('CFM_PLUGIN_DEBUG', '1', time() + 86400, '/');
+            $enabled = true;
+            return $enabled;
+        }
+    }
+
+    // Cookie override for operators during live debugging.
+    $cookieToggle = strtolower(trim((string)($_COOKIE['CFM_PLUGIN_DEBUG'] ?? '')));
+    if (in_array($cookieToggle, $off, true)) {
+        $enabled = false;
+        return $enabled;
+    }
+    if (in_array($cookieToggle, $on, true)) {
+        $enabled = true;
+        return $enabled;
+    }
+
+    // Backward-compatible config/env toggles if readable.
+    $cfg = cfm_conf();
+    foreach (['CPANEL_PLUGIN_DEBUG', 'CFM_PLUGIN_DEBUG', 'DEBUG'] as $k) {
+        $v = strtolower(trim((string)($cfg[$k] ?? getenv($k) ?? '')));
+        if (in_array($v, $off, true)) {
+            $enabled = false;
+            return $enabled;
+        }
+        if (in_array($v, $on, true)) {
+            $enabled = true;
+            return $enabled;
+        }
+    }
+
+    // Default on while investigating auth failures.
+    $enabled = true;
+    return $enabled;
+}
+
+function cfm_debug_log(string $message, array $context = []): void
+{
+    if (!cfm_debug_enabled()) return;
+    if (!empty($context)) {
+        $safe = json_encode($context, JSON_UNESCAPED_SLASHES);
+        if (!is_string($safe)) $safe = '{}';
+        error_log('[cfm][debug] ' . $message . ' ' . $safe);
+        return;
+    }
+    error_log('[cfm][debug] ' . $message);
+}
+
 // Local API base URL — always loopback, used for server-side calls (token issuance).
 function cfm_local_base_url(): string
 {
@@ -143,12 +209,23 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     }
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
+    cfm_debug_log('api_request', [
+        'method'         => strtoupper($method),
+        'path'           => $path,
+        'url'            => $url,
+        'http_code'      => $code,
+        'admin_auth'     => $tok !== '',
+        'extra_headers'  => count($extraHeaders),
+        'payload_present'=> $payload !== null,
+    ]);
 
     $decoded = json_decode($body, true);
     if (!is_array($decoded)) $decoded = ['raw' => $body];
     if ($code >= 400) {
+        $bodyPreview = trim(substr(preg_replace('/\s+/', ' ', (string)$body), 0, 300));
         throw new RuntimeException(
-            $decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code),
+            ($decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $code)) .
+            ($bodyPreview !== '' ? ('; response=' . $bodyPreview) : ''),
             $code
         );
     }
@@ -221,6 +298,16 @@ function cfm_get_user_info(string $user): array
         if (cfm_admin_token() === '') {
             $headers = cfm_cpanel_session_headers($user);
         }
+        cfm_debug_log('user_info_request', [
+            'user' => $user,
+            'local_base' => $localBase,
+            'admin_token_present' => cfm_admin_token() !== '',
+            'session_header_count' => count($headers),
+            'session_headers' => array_map(static function ($h) {
+                $p = strpos($h, ':');
+                return $p === false ? $h : substr($h, 0, $p);
+            }, $headers),
+        ]);
         $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
         return [
             'ok'        => true,

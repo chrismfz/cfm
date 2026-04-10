@@ -4,6 +4,8 @@ set -euo pipefail
 echo "[+] Installing CFM plugin"
 echo "    Requires: AUTH_TOKEN set in /etc/cfm/cfm.conf"
 echo "    Optional: CPANEL_PLUGIN_BASE_URL = https://hostname:port (if not via OpenResty)"
+echo "    Plugin auth diagnostics default to ON (see /usr/local/cpanel/logs/error_log)"
+echo "    Toggle via URL: ?cfm_debug=0 (off) or ?cfm_debug=1 (on), or CFM_PLUGIN_DEBUG/CPANEL_PLUGIN_DEBUG in cfm.conf"
 echo ""
 
 
