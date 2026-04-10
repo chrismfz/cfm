@@ -115,16 +115,25 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: reason})
 		return
 	}
-	secret := strings.TrimSpace(os.Getenv("CFM_CPANEL_ASSERTION_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
+	secret, derr := DerivePluginAssertionKey()
+	if derr != nil {
+		logging.Logf("[panel-auth] derived assertion key unavailable reason=%v", derr)
 	}
-	if secret == "" {
+	if len(secret) == 0 {
+		legacySecret := strings.TrimSpace(os.Getenv("CFM_CPANEL_ASSERTION_SECRET"))
+		if legacySecret == "" {
+			legacySecret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
+		}
+		if legacySecret != "" {
+			secret = []byte(legacySecret)
+		}
+	}
+	if len(secret) == 0 {
 		logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=secret_missing", strings.TrimSpace(req.Panel), userName)
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "secret_missing"})
 		return
 	}
-	assertion, err := signAssertion(userName, req.Nonce, []byte(secret), time.Now().UTC())
+	assertion, err := signAssertion(userName, req.Nonce, secret, time.Now().UTC())
 	if err != nil {
 		logging.Logf("[panel-auth] issue failed panel=%s user=%s reason=issue_failed err=%v", strings.TrimSpace(req.Panel), userName, err)
 		writeIssue(w, http.StatusInternalServerError, issueResp{Error: "internal error", Reason: "issue_failed"})

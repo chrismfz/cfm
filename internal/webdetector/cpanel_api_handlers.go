@@ -10,6 +10,7 @@ package webdetector
 
 import (
 	"bufio"
+	"cfm/internal/panelauth"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -112,14 +113,11 @@ func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
 	if raw == "" {
 		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_missing"
 	}
-	secret := strings.TrimSpace(os.Getenv("CFM_CPANEL_ASSERTION_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
+	secret, err := panelauth.DerivePluginAssertionKey()
+	if err != nil {
+		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), err.Error()
 	}
-	if secret == "" {
-		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_invalid_signature"
-	}
-	claims, reason := verifyPluginAssertion(raw, []byte(secret), time.Now().UTC())
+	claims, reason := verifyPluginAssertion(raw, secret, time.Now().UTC())
 	if reason != "" {
 		switch reason {
 		case "token_expired":
