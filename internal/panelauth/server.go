@@ -29,6 +29,8 @@ const (
 var (
 	cpsessRE               = regexp.MustCompile(`^/cpsess[0-9A-Za-z]{8,128}$`)
 	safeSessionComponentRE = regexp.MustCompile(`^[a-z0-9._-]+$`)
+	defaultSessionDirs     = []string{"/var/cpanel/sessions/cache", "/var/cpanel/sessions/raw"}
+	sessionLookupDirs      = loadSessionLookupDirs()
 )
 
 type issueReq struct {
@@ -51,6 +53,7 @@ func Serve(ctx context.Context, sockPath string) error {
 	if strings.TrimSpace(sockPath) == "" {
 		sockPath = defaultSockPath
 	}
+	logging.Logf("[panel-auth] session lookup dirs=%s", strings.Join(sessionLookupDirs, ","))
 	_ = os.Remove(sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -175,18 +178,21 @@ func validateCpanelRequest(req issueReq, now time.Time) (string, string, map[str
 
 func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 	debug := map[string]any{
-		"paths": []map[string]any{},
+		"paths":                 []map[string]any{},
+		"probed_dirs":           append([]string(nil), sessionLookupDirs...),
+		"any_candidate_exists":  false,
+		"candidate_path_count":  0,
+		"configured_dirs_count": len(sessionLookupDirs),
 	}
-	pathEntries := make([]map[string]any, 0, 2)
+	pathEntries := make([]map[string]any, 0, len(sessionLookupDirs))
 	if !isSafeSessionComponent(userName) || !isSafeSessionComponent(sid) {
 		debug["invalid_component"] = true
 		debug["paths"] = pathEntries
 		return false, debug
 	}
-	paths := []string{
-		filepath.Join("/var/cpanel/sessions/cache", userName+":"+sid),
-		filepath.Join("/var/cpanel/sessions/raw", userName+":"+sid),
-	}
+	paths := buildSessionCandidatePaths(userName, sid, sessionLookupDirs)
+	debug["candidate_path_count"] = len(paths)
+	anyCandidateExists := false
 	for _, p := range paths {
 		entry := map[string]any{
 			"path": p,
@@ -195,10 +201,14 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		if err != nil {
 			entry["read_error"] = err.Error()
 			entry["exists"] = !errors.Is(err, os.ErrNotExist)
+			if entry["exists"] == true {
+				anyCandidateExists = true
+			}
 			pathEntries = append(pathEntries, entry)
 			continue
 		}
 		entry["exists"] = true
+		anyCandidateExists = true
 		var row struct {
 			User            string `json:"user"`
 			CPSecurityToken string `json:"cp_security_token"`
@@ -217,11 +227,67 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		pathEntries = append(pathEntries, entry)
 		if rowUserMatched && tokenMatched {
 			debug["paths"] = pathEntries
+			debug["any_candidate_exists"] = anyCandidateExists
 			return true, debug
 		}
 	}
 	debug["paths"] = pathEntries
+	debug["any_candidate_exists"] = anyCandidateExists
 	return false, debug
+}
+
+func loadSessionLookupDirs() []string {
+	// Config from environment or env-pointed file (for distro-specific overrides).
+	// If nothing valid is configured, keep legacy defaults.
+	parts := splitSessionDirList(os.Getenv("CFM_CPANEL_SESSION_DIRS"))
+	if len(parts) == 0 {
+		parts = splitSessionDirList(os.Getenv("CPANEL_SESSION_DIRS"))
+	}
+	if len(parts) == 0 {
+		if filePath := strings.TrimSpace(os.Getenv("CFM_CPANEL_SESSION_DIRS_FILE")); filePath != "" {
+			if b, err := os.ReadFile(filePath); err == nil {
+				parts = splitSessionDirList(string(b))
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return append([]string(nil), defaultSessionDirs...)
+	}
+	return parts
+}
+
+func splitSessionDirList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	}) {
+		dir := strings.TrimSpace(part)
+		if dir == "" {
+			continue
+		}
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	return out
+}
+
+func buildSessionCandidatePaths(userName, sid string, baseDirs []string) []string {
+	paths := make([]string, 0, len(baseDirs))
+	for _, dir := range baseDirs {
+		paths = append(paths, filepath.Join(dir, userName+":"+sid))
+	}
+	return paths
 }
 
 func processIdentity() (int, int, int, int, string, string) {
