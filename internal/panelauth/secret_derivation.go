@@ -45,15 +45,23 @@ func loadAuthTokenFromRuntimeConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	cfg, err := loadConfigFromPath(cfgPath)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cfg.API.AuthToken), nil
+}
+
+func loadConfigFromPath(cfgPath string) (*cfgpkg.Config, error) {
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return "", fmt.Errorf("auth_token_unavailable: %w", err)
+		return nil, fmt.Errorf("auth_token_unavailable: %w", err)
 	}
 	cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
 	if err != nil {
-		return "", fmt.Errorf("auth_token_parse_error: %w", err)
+		return nil, fmt.Errorf("auth_token_parse_error: %w", err)
 	}
-	return strings.TrimSpace(cfg.API.AuthToken), nil
+	return cfg, nil
 }
 
 func resolveRuntimeCFMConfPath() (string, error) {

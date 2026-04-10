@@ -1,12 +1,15 @@
 package panelauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -44,9 +47,10 @@ type issueReq struct {
 }
 
 type issueResp struct {
-	Assertion string `json:"assertion,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Assertion   string `json:"assertion,omitempty"`
+	ScopedToken string `json:"scoped_token,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 var replay sync.Map
@@ -112,6 +116,7 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 				strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason, cpsessMasked, req.TS, len(strings.TrimSpace(req.Nonce)),
 				uid, euid, gid, egid, procUser, procGroup)
 		}
+		logging.Logf("[panel-auth] assertion_issue_failed panel=%s user=%s reason=%s", strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason)
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: reason})
 		return
 	}
@@ -130,12 +135,14 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(secret) == 0 {
 		logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=secret_missing", strings.TrimSpace(req.Panel), userName)
+		logging.Logf("[panel-auth] assertion_issue_failed panel=%s user=%s reason=secret_missing", strings.TrimSpace(req.Panel), userName)
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "secret_missing"})
 		return
 	}
 	assertion, err := signAssertion(userName, req.Nonce, secret, time.Now().UTC())
 	if err != nil {
 		logging.Logf("[panel-auth] issue failed panel=%s user=%s reason=issue_failed err=%v", strings.TrimSpace(req.Panel), userName, err)
+		logging.Logf("[panel-auth] assertion_issue_failed panel=%s user=%s reason=issue_failed", strings.TrimSpace(req.Panel), userName)
 		writeIssue(w, http.StatusInternalServerError, issueResp{Error: "internal error", Reason: "issue_failed"})
 		return
 	}
@@ -145,7 +152,164 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logging.Logf("[panel-auth] issue ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
-	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion})
+	logging.Logf("[panel-auth] assertion_issue_ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
+
+	scopedToken, err := mintScopedViewerToken(userName, assertion)
+	if err != nil {
+		logging.Logf("[panel-auth] scoped_token_mint_failed panel=%s user=%s err=%v", strings.TrimSpace(req.Panel), userName, err)
+		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "scoped_token_issue_failed"})
+		return
+	}
+	logging.Logf("[panel-auth] scoped_token_mint_ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
+	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion, ScopedToken: scopedToken})
+}
+
+func mintScopedViewerToken(userName, assertion string) (string, error) {
+	baseURL, authToken, err := loadRuntimeAPIAuthConfig()
+	if err != nil {
+		return "", err
+	}
+	domains, err := fetchUserDomains(baseURL, userName, assertion)
+	if err != nil {
+		return "", err
+	}
+	if len(domains) == 0 {
+		return "", errors.New("no_domains_for_user")
+	}
+	payload := map[string]any{
+		"vhosts": domains,
+		"role":   "viewer",
+		"ttl":    "4h",
+		"label":  "cpanel:" + userName,
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := postJSON(baseURL+"/api/v1/auth/token", payload, map[string]string{
+		"Authorization": "Bearer " + authToken,
+	}, &out); err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(out.Token)
+	if token == "" {
+		return "", errors.New("scoped_token_missing")
+	}
+	return token, nil
+}
+
+func fetchUserDomains(baseURL, userName, assertion string) ([]string, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/cpanel/user-info?user=%s", strings.TrimRight(baseURL, "/"), userName)
+	var out struct {
+		Domains []string `json:"domains"`
+	}
+	if err := getJSON(endpoint, map[string]string{
+		"X-CFM-Actor-Assertion": assertion,
+	}, &out); err != nil {
+		return nil, err
+	}
+	clean := make([]string, 0, len(out.Domains))
+	seen := map[string]struct{}{}
+	for _, d := range out.Domains {
+		v := strings.ToLower(strings.TrimSpace(d))
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		clean = append(clean, v)
+	}
+	sort.Strings(clean)
+	return clean, nil
+}
+
+func loadRuntimeAPIAuthConfig() (string, string, error) {
+	cfgPath, err := resolveRuntimeCFMConfPath()
+	if err != nil {
+		return "", "", err
+	}
+	cfg, err := loadConfigFromPath(cfgPath)
+	if err != nil {
+		return "", "", err
+	}
+	authToken := strings.TrimSpace(cfg.API.AuthToken)
+	if authToken == "" {
+		return "", "", errAuthTokenMissing
+	}
+	port := cfg.Debug.Port
+	if port <= 0 {
+		port = 6060
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port), authToken, nil
+}
+
+func getJSON(url string, headers map[string]string, out any) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeJSONResponse(resp, out)
+}
+
+func postJSON(url string, payload any, headers map[string]string, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeJSONResponse(resp, out)
+}
+
+func decodeJSONResponse(resp *http.Response, out any) error {
+	if resp == nil {
+		return errors.New("nil_response")
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(b))
+		if len(msg) > 240 {
+			msg = msg[:240]
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("http_status_%d", resp.StatusCode)
+		}
+		return fmt.Errorf("http_%d:%s", resp.StatusCode, msg)
+	}
+	if out == nil || len(b) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return err
+	}
+	return nil
 }
 
 func writeIssue(w http.ResponseWriter, code int, resp issueResp) {

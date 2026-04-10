@@ -1,6 +1,6 @@
 <?php
 // cfm_api.php — CFM API client for the cPanel plugin.
-// Reads AUTH_TOKEN, PORT, TLS_PORT from /etc/cfm/cfm.conf.
+// Reads PORT, TLS_PORT from /etc/cfm/cfm.conf.
 
 function cfm_parse_conf(string $path = '/etc/cfm/cfm.conf'): array
 {
@@ -108,13 +108,6 @@ function cfm_local_base_url(): string
     return 'http://127.0.0.1:' . $port;
 }
 
-// Admin bearer token from cfm.conf.
-function cfm_admin_token(): string
-{
-    $cfg = cfm_conf();
-    return trim($cfg['AUTH_TOKEN'] ?? '');
-}
-
 // Browser-facing base URL for the iframe.
 // Priority: CPANEL_PLUGIN_BASE_URL override → TLS_PORT → PORT → bare hostname.
 function cfm_iframe_base_url(): string
@@ -146,41 +139,14 @@ function cfm_iframe_base_url(): string
     return 'https://' . $httpHost;
 }
 
-// Issue a scoped token for the given vhosts via the local API.
-// Returns the token string.
-function cfm_issue_scoped_token(array $vhosts, string $label = '', string $ttl = '4h'): string
-{
-    if (empty($vhosts)) {
-        throw new RuntimeException('No vhosts to scope token to');
-    }
-
-    $result = cfm_api_request('/api/v1/auth/token', 'POST', [
-        'vhosts' => array_values(array_unique($vhosts)),
-        'role'   => 'viewer',
-        'ttl'    => $ttl,
-        'label'  => $label,
-    ]);
-
-    $token = $result['token'] ?? '';
-    if ($token === '') {
-        throw new RuntimeException('CFM returned no token — check AUTH_TOKEN in cfm.conf');
-    }
-    return $token;
-}
-
 // Generic CFM API call (server-side, loopback).
-function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = [], bool $includeAdminToken = true): array
+function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = []): array
 {
     $url = rtrim(cfm_local_base_url(), '/') . $path;
     $ch  = curl_init($url);
     if ($ch === false) throw new RuntimeException('curl_init failed');
 
     $headers = ['Accept: application/json'];
-    $tok = '';
-    if ($includeAdminToken) {
-        $tok = cfm_admin_token();
-        if ($tok !== '') $headers[] = 'Authorization: Bearer ' . $tok;
-    }
     foreach ($extraHeaders as $h) {
         if (is_string($h) && trim($h) !== '') {
             $headers[] = trim($h);
@@ -220,7 +186,6 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
         'path'           => $path,
         'url'            => $url,
         'http_code'      => $code,
-        'admin_auth'     => $tok !== '',
         'extra_headers'  => count($extraHeaders),
         'payload_present'=> $payload !== null,
     ]);
@@ -262,7 +227,8 @@ function cfm_issue_actor_assertion(string $user): array
         }
     }
     if ($secTok === '') {
-        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'token_missing', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_assertion_issue_failed', ['user' => $user, 'reason' => 'token_missing', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_scoped_token_mint_failed', ['user' => $user, 'reason' => 'assertion_issue_failed', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'token_missing', 'error' => 'Missing cPanel security token'];
     }
 
@@ -280,7 +246,8 @@ function cfm_issue_actor_assertion(string $user): array
 
     $fp = @stream_socket_client('unix://' . $sock, $errno, $errstr, 1.5);
     if (!is_resource($fp)) {
-        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'socket_connect_failed', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_assertion_issue_failed', ['user' => $user, 'reason' => 'socket_connect_failed', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_scoped_token_mint_failed', ['user' => $user, 'reason' => 'assertion_issue_failed', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'socket_connect_failed', 'error' => 'Auth socket unavailable (' . $sock . ')'];
     }
     stream_set_timeout($fp, 2);
@@ -294,7 +261,8 @@ function cfm_issue_actor_assertion(string $user): array
     $raw = stream_get_contents($fp);
     fclose($fp);
     if (!is_string($raw) || $raw === '') {
-        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'socket_empty_response', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_assertion_issue_failed', ['user' => $user, 'reason' => 'socket_empty_response', 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_scoped_token_mint_failed', ['user' => $user, 'reason' => 'assertion_issue_failed', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'socket_empty_response', 'error' => 'Empty auth socket response'];
     }
     $parts = preg_split("/\r\n\r\n/", $raw, 2);
@@ -308,10 +276,23 @@ function cfm_issue_actor_assertion(string $user): array
     if (!is_array($decoded)) $decoded = [];
     $assertion = trim((string)($decoded['assertion'] ?? ''));
     if ($status >= 200 && $status < 300 && $assertion !== '') {
-        cfm_debug_log('auth_socket_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
-        return ['ok' => true, 'assertion' => $assertion];
+        $scopedToken = trim((string)($decoded['scoped_token'] ?? ''));
+        if ($scopedToken === '') {
+            cfm_debug_log('auth_socket_scoped_token_mint_failed', ['user' => $user, 'source' => $source, 'sock' => $sock, 'reason' => 'scoped_token_missing']);
+            return ['ok' => false, 'reason' => 'scoped_token_missing', 'error' => 'No scoped token returned from auth service'];
+        }
+        cfm_debug_log('auth_socket_assertion_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_scoped_token_mint_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
+        return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken];
     }
-    cfm_debug_log('auth_socket_issue_failed', [
+    cfm_debug_log('auth_socket_assertion_issue_failed', [
+        'user' => $user,
+        'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
+        'source' => $source,
+        'sock' => $sock,
+        'http_status' => $status,
+    ]);
+    cfm_debug_log('auth_socket_scoped_token_mint_failed', [
         'user' => $user,
         'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
         'source' => $source,
@@ -371,16 +352,18 @@ function cfm_get_user_info(string $user): array
             'user' => $user,
             'local_base' => $localBase,
             'assertion_present' => $assertion !== '',
+            'scoped_token_present' => trim((string)($issued['scoped_token'] ?? '')) !== '',
             'auth_header_count' => count($headers),
             'auth_headers' => array_map(static function ($h) {
                 $p = strpos($h, ':');
                 return $p === false ? $h : substr($h, 0, $p);
             }, $headers),
         ]);
-        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers, false);
+        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
         return [
             'ok'        => true,
             'data'      => $data,
+            'scoped_token' => trim((string)($issued['scoped_token'] ?? '')),
             'http_code' => 200,
             'reason'    => '',
             'hints'     => $hints,
