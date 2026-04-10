@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 const (
 	defaultSockPath = "/var/run/cfm-auth.sock"
 	expectedAud     = "cfm-plugin-cpanel"
+	maxSessionFiles = 64
 )
 
 var (
@@ -183,16 +185,21 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		"any_candidate_exists":  false,
 		"candidate_path_count":  0,
 		"configured_dirs_count": len(sessionLookupDirs),
+		"scan_limit":            maxSessionFiles,
+		"scanned_file_count":    0,
+		"match_reason":          "no_match",
 	}
-	pathEntries := make([]map[string]any, 0, len(sessionLookupDirs))
-	if !isSafeSessionComponent(userName) || !isSafeSessionComponent(sid) {
+	_ = sid // sid comes from cpsess and is intentionally not used for content-based matching.
+	pathEntries := make([]map[string]any, 0, maxSessionFiles)
+	if !isSafeSessionComponent(userName) {
 		debug["invalid_component"] = true
 		debug["paths"] = pathEntries
 		return false, debug
 	}
-	paths := buildSessionCandidatePaths(userName, sid, sessionLookupDirs)
-	debug["candidate_path_count"] = len(paths)
-	anyCandidateExists := false
+	paths, totalCandidates := buildSessionCandidatePaths(userName, sessionLookupDirs, maxSessionFiles)
+	debug["candidate_path_count"] = totalCandidates
+	debug["scan_truncated"] = totalCandidates > len(paths)
+	anyCandidateExists := totalCandidates > 0
 	for _, p := range paths {
 		entry := map[string]any{
 			"path": p,
@@ -209,18 +216,15 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		}
 		entry["exists"] = true
 		anyCandidateExists = true
-		var row struct {
-			User            string `json:"user"`
-			CPSecurityToken string `json:"cp_security_token"`
-		}
-		if err := json.Unmarshal(b, &row); err != nil {
-			entry["json_unmarshal_error"] = err.Error()
+		rowUser, token, parseMode, parseErr := parseSessionRecord(b)
+		if parseErr != nil {
+			entry["parse_error"] = parseErr.Error()
 			pathEntries = append(pathEntries, entry)
 			continue
 		}
-		rowUser := strings.TrimSpace(row.User)
-		rowUserMatched := strings.EqualFold(rowUser, userName)
-		tokenMatched := strings.TrimSpace(row.CPSecurityToken) == cpsess
+		entry["parse_mode"] = parseMode
+		rowUserMatched := rowUser == "" || strings.EqualFold(rowUser, userName)
+		tokenMatched := token == cpsess
 		entry["row_user"] = rowUser
 		entry["row_user_matched"] = rowUserMatched
 		entry["cp_security_token_matched"] = tokenMatched
@@ -228,11 +232,15 @@ func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
 		if rowUserMatched && tokenMatched {
 			debug["paths"] = pathEntries
 			debug["any_candidate_exists"] = anyCandidateExists
+			debug["scanned_file_count"] = len(pathEntries)
+			debug["match_reason"] = "matched_by_content"
+			debug["parse_mode"] = parseMode
 			return true, debug
 		}
 	}
 	debug["paths"] = pathEntries
 	debug["any_candidate_exists"] = anyCandidateExists
+	debug["scanned_file_count"] = len(pathEntries)
 	return false, debug
 }
 
@@ -282,12 +290,81 @@ func splitSessionDirList(raw string) []string {
 	return out
 }
 
-func buildSessionCandidatePaths(userName, sid string, baseDirs []string) []string {
-	paths := make([]string, 0, len(baseDirs))
-	for _, dir := range baseDirs {
-		paths = append(paths, filepath.Join(dir, userName+":"+sid))
+func buildSessionCandidatePaths(userName string, baseDirs []string, maxFiles int) ([]string, int) {
+	type candidate struct {
+		path    string
+		modTime time.Time
 	}
-	return paths
+	candidates := make([]candidate, 0, maxFiles)
+	totalCandidates := 0
+	for _, dir := range baseDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), userName+":") {
+				continue
+			}
+			totalCandidates++
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				path:    filepath.Join(dir, entry.Name()),
+				modTime: info.ModTime(),
+			})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	if maxFiles > 0 && len(candidates) > maxFiles {
+		candidates = candidates[:maxFiles]
+	}
+	paths := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		paths = append(paths, c.path)
+	}
+	return paths, totalCandidates
+}
+
+func parseSessionRecord(raw []byte) (string, string, string, error) {
+	var row struct {
+		User            string `json:"user"`
+		CPSecurityToken string `json:"cp_security_token"`
+	}
+	if err := json.Unmarshal(raw, &row); err == nil {
+		return strings.TrimSpace(row.User), strings.TrimSpace(row.CPSecurityToken), "json", nil
+	}
+
+	var (
+		userName string
+		token    string
+	)
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "user":
+			userName = value
+		case "cp_security_token":
+			token = value
+		}
+	}
+	if userName == "" && token == "" {
+		return "", "", "", errors.New("unsupported session format")
+	}
+	return userName, token, "kv", nil
 }
 
 func processIdentity() (int, int, int, int, string, string) {
