@@ -27,13 +27,16 @@
 package apiserver
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,8 +48,8 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	sslpkg "cfm/internal/sslcollector"
-	webui "cfm/internal/webui"
 	webdet "cfm/internal/webdetector"
+	webui "cfm/internal/webui"
 )
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
@@ -147,28 +150,41 @@ func Start(
 
 	// ── MySQL governor ────────────────────────────────────────────────────────
 	if gov != nil {
-		// MySQL governor routes expose full DB processlist, kill history,
-		// CPU stats and lock graphs. These are admin-only — scoped tokens
-		// (cPanel/DA plugins) must never reach them.
-		govMux := http.NewServeMux()
-		gov.RegisterHTTP(govMux)
-		m.Handle("/api/v1/mysql/", adminOnlyHandler(govMux))
-		logging.Logf("[apiserver] mysql governor routes registered (admin-only)")
+		// Global MySQL governor routes stay strictly admin-only.
+		mysqlAdminMux := http.NewServeMux()
+		gov.RegisterHTTPAdmin(mysqlAdminMux)
+		m.Handle("/api/v1/mysql/state", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/processlist", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/top", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/locks", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/kills", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/cpu", adminOnlyHandler(mysqlAdminMux))
+
+		// Filtered MySQL routes may be used by scoped tokens, but must always
+		// carry an effective user filter (explicit or safely derived).
+		mysqlScopedMux := http.NewServeMux()
+		gov.RegisterHTTPScoped(mysqlScopedMux)
+		m.Handle("/api/v1/mysql/user-summary", scopedMySQLFilterHandler(mysqlScopedMux))
+		m.Handle("/api/v1/mysql/user-kills", scopedMySQLFilterHandler(mysqlScopedMux))
+		m.Handle("/api/v1/mysql/user-history", scopedMySQLFilterHandler(mysqlScopedMux))
+
+		logging.Logf("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
 	}
 
 	// ── Scoped token issuance ─────────────────────────────────────────────────
-       store := NewTokenStore()
-        tokensPath := filepath.Join("/var/lib/cfm", "tokens.json")
-        if cfg.Debug.AuthDBPath != "" {
-                tokensPath = filepath.Join(filepath.Dir(cfg.Debug.AuthDBPath), "tokens.json")
-        }
-        if err := store.Load(tokensPath); err != nil {
-                logging.Logf("[apiserver] token store load: %v", err)
-        }
+	store := NewTokenStore()
+	tokensPath := filepath.Join("/var/lib/cfm", "tokens.json")
+	if cfg.Debug.AuthDBPath != "" {
+		tokensPath = filepath.Join(filepath.Dir(cfg.Debug.AuthDBPath), "tokens.json")
+	}
+	if err := store.Load(tokensPath); err != nil {
+		logging.Logf("[apiserver] token store load: %v", err)
+	}
 
-        store.StartPurger(ctx)
-        RegisterTokenEndpoint(m, store)
-        RegisterTokenManagementEndpoints(m, store)
+	store.StartPurger(ctx)
+	RegisterTokenEndpoint(m, store)
+	RegisterTokenManagementEndpoints(m, store)
 
 	// ── goauth → autoblock bridge (FAIL/RATELIMIT tail) ──────────────────────
 	startAuthAutoblock(ctx, cfg, be)
@@ -342,7 +358,6 @@ func isGoAuthSQLiteBusy(err error) bool {
 		strings.Contains(s, "(261)")
 }
 
-
 // adminOnlyHandler wraps h and returns 403 for any scoped token.
 // Admin tokens and the loopback bypass both produce a nil scope and pass through.
 // Used to protect routes that are inherently global and meaningless to
@@ -356,4 +371,147 @@ func adminOnlyHandler(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// scopedMySQLFilterHandler ensures filtered MySQL endpoints never execute
+// unbounded for scoped-token callers. If ?user= is missing, it derives safe
+// defaults from scoped token vhost ownership mapping.
+func scopedMySQLFilterHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hasExplicitUserFilter(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
+		if len(scope) == 0 {
+			// Admin token / authenticated UI session: keep existing handler
+			// semantics (user= or db= validation remains in governor handlers).
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		users := deriveScopedMySQLUsers(r)
+		if len(users) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"user filter required; pass ?user= or use a scoped token with mapped domains"}`, http.StatusBadRequest)
+			return
+		}
+
+		r2 := r.Clone(r.Context())
+		q := r.URL.Query()
+		for _, u := range users {
+			q.Add("user", u)
+		}
+		r2.URL.RawQuery = q.Encode()
+		next.ServeHTTP(w, r2)
+	})
+}
+
+func hasExplicitUserFilter(r *http.Request) bool {
+	for _, raw := range r.URL.Query()["user"] {
+		for _, part := range strings.Split(raw, ",") {
+			if strings.TrimSpace(part) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func deriveScopedMySQLUsers(r *http.Request) []string {
+	scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
+	if len(scope) == 0 {
+		return nil
+	}
+
+	hosts := make([]string, 0, len(scope))
+	for host := range scope {
+		hosts = append(hosts, strings.ToLower(strings.TrimSpace(host)))
+	}
+	owners := cpanelOwnersForHosts(hosts)
+	if len(owners) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(owners)*2)
+	for _, owner := range owners {
+		out = append(out, owner, owner+"_*")
+	}
+	return out
+}
+
+func cpanelOwnersForHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	hostSet := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		if h != "" {
+			hostSet[h] = struct{}{}
+		}
+	}
+	owners := map[string]struct{}{}
+	collectCpanelOwnersFromUserDataDomains(hostSet, owners)
+	collectCpanelOwnersFromUserDomains(hostSet, owners)
+	if len(owners) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(owners))
+	for owner := range owners {
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func collectCpanelOwnersFromUserDataDomains(hostSet, owners map[string]struct{}) {
+	f, err := os.Open("/etc/userdatadomains")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	collectCpanelOwners(f, hostSet, owners, true)
+}
+
+func collectCpanelOwnersFromUserDomains(hostSet, owners map[string]struct{}) {
+	f, err := os.Open("/etc/userdomains")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	collectCpanelOwners(f, hostSet, owners, false)
+}
+
+func collectCpanelOwners(f *os.File, hostSet, owners map[string]struct{}, userDataDomains bool) {
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 || colon+1 >= len(line) {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSpace(line[:colon]))
+		if _, ok := hostSet[host]; !ok {
+			continue
+		}
+		rest := strings.TrimSpace(line[colon+1:])
+		var owner string
+		if userDataDomains {
+			parts := strings.SplitN(rest, "==", 2)
+			if len(parts) == 0 {
+				continue
+			}
+			owner = strings.ToLower(strings.TrimSpace(parts[0]))
+		} else {
+			owner = strings.ToLower(strings.TrimSpace(rest))
+		}
+		if owner == "" {
+			continue
+		}
+		owners[owner] = struct{}{}
+	}
 }
