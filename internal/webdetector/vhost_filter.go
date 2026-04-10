@@ -19,6 +19,7 @@ package webdetector
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -42,17 +43,42 @@ func parseVhostFilter(r *http.Request) map[string]struct{} {
 	if scope := vhostScopeFromContext(r.Context()); scope != nil {
 		return scope
 	}
-	raw := strings.TrimSpace(r.URL.Query().Get("vhosts"))
-	if raw == "" {
+	return parseQueryVhostSet(r, "vhosts")
+}
+
+// validateScopedVhostQuery ensures scoped callers only request in-scope values
+// in the given host/vhost query params. Returns nil for admin callers.
+func validateScopedVhostQuery(r *http.Request, keys ...string) error {
+	scope := vhostScopeFromContext(r.Context())
+	if scope == nil {
 		return nil
 	}
-	parts := strings.Split(raw, ",")
-	m := make(map[string]struct{}, len(parts))
-	for _, p := range parts {
-		p = strings.ToLower(strings.TrimSpace(p))
-		if p != "" {
-			m[p] = struct{}{}
+	requested := parseQueryVhostSet(r, keys...)
+	if len(requested) == 0 {
+		return nil
+	}
+	for host := range requested {
+		if !vhostAllowed(host, scope) {
+			return fmt.Errorf("requested vhost %q is outside token scope", host)
 		}
+	}
+	return nil
+}
+
+func parseQueryVhostSet(r *http.Request, keys ...string) map[string]struct{} {
+	m := map[string]struct{}{}
+	for _, key := range keys {
+		for _, raw := range r.URL.Query()[key] {
+			for _, part := range strings.Split(raw, ",") {
+				h := strings.ToLower(strings.TrimSpace(part))
+				if h != "" {
+					m[h] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(m) == 0 {
+		return nil
 	}
 	return m
 }

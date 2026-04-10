@@ -253,6 +253,54 @@ func TestRulesScope_Add(t *testing.T) {
 	}
 }
 
+func TestRulesScope_EndpointFamilyInjectionRejected(t *testing.T) {
+	e, mux := newTestEngine(t)
+	rule := mustAddRule(t, e, "mysite.com", TrafficActionBlock)
+
+	updateReq := TrafficRule{
+		Enabled: true, Priority: 100,
+		Scope:  TrafficRuleScope{Vhosts: []string{"other.com"}},
+		Match:  TrafficRuleMatch{UAAny: []string{"*bot*"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}
+	updateBody, _ := json.Marshal(updateReq)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{
+			name:   "add",
+			method: http.MethodPost,
+			path:   "/api/v1/webdet/rules/add",
+			body:   []byte(`{"enabled":true,"priority":10,"scope":{"vhosts":["other.com"]},"match":{"ua_any":["*"]},"action":{"type":"block"}}`),
+		},
+		{
+			name:   "update",
+			method: http.MethodPost,
+			path:   "/api/v1/webdet/rules/update?id=" + rule.ID,
+			body:   updateBody,
+		},
+		{
+			name:   "simulate",
+			method: http.MethodPost,
+			path:   "/api/v1/webdet/rules/simulate",
+			body:   []byte(`{"host":"other.com","ua":"bot","path":"/","method":"GET"}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := doRequest(mux, scopedCtx("mysite.com"), tc.method, tc.path, tc.body)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for scoped injection, got %d body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 // TestRulesScope_Update verifies cross-tenant update protection.
 func TestRulesScope_Update(t *testing.T) {
 	e, mux := newTestEngine(t)
