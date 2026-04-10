@@ -183,6 +183,9 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
             $headers[] = trim($h);
         }
     }
+    if (cfm_debug_enabled()) {
+        $headers[] = 'X-CFM-Debug: 1';
+    }
 
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
