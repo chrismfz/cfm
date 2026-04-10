@@ -4,21 +4,23 @@
 //
 // Admin-only endpoint used by the cPanel plugin (bootstrap.php) to
 // discover the domains and DB users belonging to a cPanel account.
-// Called server-side from the plugin via loopback curl with AUTH_TOKEN.
+// Called server-side from the plugin via loopback curl with an actor assertion.
 // Runs as root inside cfm so it can read all cPanel metadata files.
 package webdetector
 
 import (
 	"bufio"
-	"crypto/tls"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,28 +38,33 @@ func (e *Engine) RegisterCpanelHTTP(mux *http.ServeMux) {
 }
 
 func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
-	user := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("user")))
-	if user == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user parameter required"})
-		return
-	}
-
-	authStatus, authErr, authDebug := authorizePluginCaller(r, user)
+	tokenUser, authStatus, authErr, authDebug := authorizePluginAssertion(r)
 	if authErr != nil {
-		if authDebug != "" && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
-			writeJSON(w, authStatus, map[string]string{
-				"error": authErr.Error(),
-				"debug": authDebug,
-			})
+		if authDebug != "" && cfmDebugEnabledForRequest(r) {
+			writeJSON(w, authStatus, map[string]string{"error": authErr.Error(), "debug": authDebug})
 			return
 		}
 		writeJSON(w, authStatus, map[string]string{"error": authErr.Error()})
 		return
 	}
 
+	requestedUser := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("user")))
+	if requestedUser != "" && requestedUser != tokenUser {
+		if cfmDebugEnabledForRequest(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "actor mismatch",
+				"debug": "actor_mismatch",
+			})
+			return
+		}
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "actor mismatch"})
+		return
+	}
+	user := tokenUser
+
 	info, dataStatus, dataErr, dataDebug := loadUserMetadata(user)
 	if dataErr != nil {
-		if dataDebug != "" && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
+		if dataDebug != "" && cfmDebugEnabledForRequest(r) {
 			writeJSON(w, dataStatus, map[string]string{
 				"error": dataErr.Error(),
 				"debug": dataDebug,
@@ -69,32 +76,6 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, info)
-}
-
-func authorizePluginCaller(r *http.Request, requestedUser string) (int, error, string) {
-	hasSessionProofHeaders :=
-		strings.TrimSpace(r.Header.Get("X-Cpanel-User")) != "" ||
-			strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token")) != "" ||
-			strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie")) != ""
-
-	// Tokenless cPanel-plugin flow: session proof is mandatory and self-scoped.
-	if hasSessionProofHeaders {
-		sessionUser, ok, reason := validateCpanelSessionUser(r)
-		if !ok {
-			return http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "auth-phase: " + reason
-		}
-		if sessionUser != requestedUser {
-			return http.StatusForbidden, fmt.Errorf("%s", "session user mismatch"), "auth-phase: claimed plugin user does not match requested user"
-		}
-		return http.StatusOK, nil, ""
-	}
-
-	// No session-proof headers and not admin-authenticated:
-	// deny scoped/unauthenticated callers.
-	if !IsAdminRequest(r) {
-		return http.StatusForbidden, fmt.Errorf("%s", "admin token required"), "auth-phase: no admin token and no plugin session-proof headers"
-	}
-	return http.StatusOK, nil, ""
 }
 
 func loadUserMetadata(user string) (cpanelUserInfo, int, error, string) {
@@ -111,167 +92,132 @@ func loadUserMetadata(user string) (cpanelUserInfo, int, error, string) {
 	return info, http.StatusOK, nil, ""
 }
 
-func validateCpanelSessionUser(r *http.Request) (string, bool, string) {
-	if r == nil {
-		return "", false, "nil request"
-	}
+type pluginActorClaims struct {
+	Sub   string      `json:"sub"`
+	Aud   interface{} `json:"aud"`
+	Iat   int64       `json:"iat"`
+	Exp   int64       `json:"exp"`
+	Nonce string      `json:"nonce"`
+}
 
-	claimed := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Cpanel-User")))
-	secTok := strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token"))
-	cookie := strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie"))
-	if claimed == "" || secTok == "" || cookie == "" {
-		return "", false, "missing one or more required session-proof headers"
-	}
-	if !cpanelSecurityTokenRE.MatchString(secTok) {
-		return "", false, "invalid cpanel security token format"
-	}
+var pluginAssertionReplayCache sync.Map // nonce -> expUnix
 
-	b, probe, err := cpanelProbeUserInfo(secTok, cookie)
+func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
+	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
+	if raw == "" {
+		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_missing"
+	}
+	secret := strings.TrimSpace(os.Getenv("CFM_CPANEL_ASSERTION_SECRET"))
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
+	}
+	if secret == "" {
+		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_invalid_signature"
+	}
+	claims, reason := verifyPluginAssertion(raw, []byte(secret), time.Now().UTC())
+	if reason != "" {
+		switch reason {
+		case "token_expired":
+			return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), reason
+		case "token_replay":
+			return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), reason
+		case "actor_mismatch":
+			return "", http.StatusForbidden, fmt.Errorf("%s", "actor mismatch"), reason
+		default:
+			return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_invalid_signature"
+		}
+	}
+	return claims.Sub, http.StatusOK, nil, ""
+}
+
+func verifyPluginAssertion(raw string, secret []byte, now time.Time) (pluginActorClaims, string) {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return pluginActorClaims{}, "token_invalid_signature"
+	}
+	payloadMAC := []byte(parts[0] + "." + parts[1])
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return "", false, err.Error()
+		return pluginActorClaims{}, "token_invalid_signature"
 	}
-
-	user := extractCpanelUserFromJSON(b)
-	if user == "" {
-		return "", false, "cpanel execute response did not contain a valid user field (" + probe + ")"
+	m := hmac.New(sha256.New, secret)
+	m.Write(payloadMAC)
+	if !hmac.Equal(sig, m.Sum(nil)) {
+		return pluginActorClaims{}, "token_invalid_signature"
 	}
-	if user != claimed {
-		return user, false, "session user mismatch: claimed=" + claimed + " resolved=" + user + " (" + probe + ")"
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return pluginActorClaims{}, "token_invalid_signature"
 	}
-	return user, true, ""
+	var claims pluginActorClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return pluginActorClaims{}, "token_invalid_signature"
+	}
+	claims.Sub = strings.ToLower(strings.TrimSpace(claims.Sub))
+	if !isValidCpanelUsername(claims.Sub) {
+		return pluginActorClaims{}, "actor_mismatch"
+	}
+	if !pluginAssertionAudienceOK(claims.Aud) {
+		return pluginActorClaims{}, "token_invalid_signature"
+	}
+	if claims.Iat <= 0 || claims.Exp <= 0 || claims.Exp <= claims.Iat {
+		return pluginActorClaims{}, "token_invalid_signature"
+	}
+	nowUnix := now.Unix()
+	if nowUnix < claims.Iat-30 || nowUnix >= claims.Exp {
+		return pluginActorClaims{}, "token_expired"
+	}
+	if claims.Nonce == "" || len(claims.Nonce) > 160 {
+		return pluginActorClaims{}, "token_invalid_signature"
+	}
+	if isReplayNonce(claims.Nonce, claims.Exp, nowUnix) {
+		return pluginActorClaims{}, "token_replay"
+	}
+	return claims, ""
 }
 
-func cpanelProbeUserInfo(secTok, cookie string) ([]byte, string, error) {
-	path := secTok + "/execute/Variables/get_user_information"
-	targets := []struct {
-		url    string
-		client *http.Client
-	}{
-		{
-			url: "http://127.0.0.1:2082" + path,
-			client: &http.Client{
-				Timeout: 3 * time.Second,
-			},
-		},
-		{
-			url: "https://127.0.0.1:2083" + path,
-			client: &http.Client{
-				Timeout: 3 * time.Second,
-				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local cPanel service probe
-				},
-			},
-		},
-	}
-
-	lastErr := ""
-	attempts := make([]string, 0, len(targets))
-	for _, t := range targets {
-		req, err := http.NewRequest(http.MethodGet, t.url, nil)
-		if err != nil {
-			lastErr = "failed to build cpanel execute request: " + err.Error()
-			attempts = append(attempts, fmt.Sprintf("%s build_error=%s", t.url, err.Error()))
-			continue
-		}
-		req.Header.Set("Cookie", cookie)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := t.client.Do(req)
-		if err != nil {
-			lastErr = "cpanel execute request failed for " + t.url + ": " + err.Error()
-			attempts = append(attempts, fmt.Sprintf("%s request_error=%s", t.url, err.Error()))
-			continue
-		}
-
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			user := extractCpanelUserFromJSON(b)
-			if user != "" {
-				attempts = append(attempts, fmt.Sprintf("%s status=%d parse=user:%s", t.url, resp.StatusCode, user))
-				return b, t.url, nil
-			}
-			lastErr = fmt.Sprintf("cpanel execute returned non-semantic success status=%d url=%s body=%s", resp.StatusCode, t.url, compactPreview(b, 240))
-			attempts = append(attempts, fmt.Sprintf("%s status=%d parse=invalid_or_missing_user body=%s", t.url, resp.StatusCode, compactPreview(b, 120)))
-			continue
-		}
-
-		lastErr = fmt.Sprintf("cpanel execute status=%d url=%s body=%s", resp.StatusCode, t.url, compactPreview(b, 240))
-		attempts = append(attempts, fmt.Sprintf("%s status=%d parse=skipped_non_2xx", t.url, resp.StatusCode))
-	}
-
-	if lastErr == "" {
-		lastErr = "cpanel execute probe failed for unknown reason"
-	}
-	if len(attempts) > 0 {
-		return nil, "", fmt.Errorf("%s; attempts=[%s]", lastErr, strings.Join(attempts, " | "))
-	}
-	return nil, "", fmt.Errorf("%s", lastErr)
-}
-
-func compactPreview(b []byte, max int) string {
-	s := strings.TrimSpace(strings.Join(strings.Fields(string(b)), " "))
-	if max <= 0 {
-		max = 240
-	}
-	if len(s) > max {
-		return s[:max] + "..."
-	}
-	if s == "" {
-		return "<empty>"
-	}
-	return s
-}
-
-func extractCpanelUserFromJSON(data []byte) string {
-	var v interface{}
-	if err := json.Unmarshal(data, &v); err != nil {
-		return ""
-	}
-	user := strings.ToLower(strings.TrimSpace(findFirstUserField(v)))
-	if isValidCpanelUsername(user) {
-		return user
-	}
-	return ""
-}
-
-func findFirstUserField(v interface{}) string {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		// Prefer obvious user keys first.
-		for _, k := range []string{"user", "cpanel_user", "username"} {
-			if raw, ok := t[k]; ok {
-				if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
-					return s
-				}
-			}
-		}
-		// Then recurse into common containers.
-		for _, k := range []string{"data", "result", "metadata"} {
-			if raw, ok := t[k]; ok {
-				if s := findFirstUserField(raw); s != "" {
-					return s
-				}
-			}
-		}
-		// Finally recurse all keys as last resort.
-		for _, raw := range t {
-			if s := findFirstUserField(raw); s != "" {
-				return s
-			}
-		}
-	case []interface{}:
-		for _, item := range t {
-			if s := findFirstUserField(item); s != "" {
-				return s
-			}
-		}
+func pluginAssertionAudienceOK(aud interface{}) bool {
+	const expected = "cfm-plugin-cpanel"
+	switch t := aud.(type) {
 	case string:
-		if isValidCpanelUsername(strings.ToLower(strings.TrimSpace(t))) {
-			return t
+		return strings.TrimSpace(t) == expected
+	case []interface{}:
+		for _, v := range t {
+			s, ok := v.(string)
+			if ok && strings.TrimSpace(s) == expected {
+				return true
+			}
 		}
 	}
-	return ""
+	return false
+}
+
+func isReplayNonce(nonce string, expUnix, nowUnix int64) bool {
+	pluginAssertionReplayCache.Range(func(k, v interface{}) bool {
+		key, okK := k.(string)
+		exp, okV := v.(int64)
+		if !okK || !okV || exp <= nowUnix {
+			pluginAssertionReplayCache.Delete(key)
+		}
+		return true
+	})
+	if _, exists := pluginAssertionReplayCache.LoadOrStore(nonce, expUnix); exists {
+		return true
+	}
+	return false
+}
+
+func cfmDebugEnabledForRequest(r *http.Request) bool {
+	if r == nil {
+		return true
+	}
+	raw := strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug")))
+	switch raw {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 // cpanelUserExists checks /var/cpanel/users/<user> exists.
@@ -285,7 +231,6 @@ func cpanelUserExists(user string) bool {
 
 // isValidCpanelUsername rejects anything that isn't a safe cPanel username.
 var cpanelUsernameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,15}$`)
-var cpanelSecurityTokenRE = regexp.MustCompile(`^/cpsess[0-9A-Za-z]{8,128}$`)
 
 func isValidCpanelUsername(user string) bool {
 	return cpanelUsernameRE.MatchString(user)

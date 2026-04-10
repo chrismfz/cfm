@@ -169,15 +169,18 @@ function cfm_issue_scoped_token(array $vhosts, string $label = '', string $ttl =
 }
 
 // Generic CFM API call (server-side, loopback).
-function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = []): array
+function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = [], bool $includeAdminToken = true): array
 {
     $url = rtrim(cfm_local_base_url(), '/') . $path;
     $ch  = curl_init($url);
     if ($ch === false) throw new RuntimeException('curl_init failed');
 
     $headers = ['Accept: application/json'];
-    $tok = cfm_admin_token();
-    if ($tok !== '') $headers[] = 'Authorization: Bearer ' . $tok;
+    $tok = '';
+    if ($includeAdminToken) {
+        $tok = cfm_admin_token();
+        if ($tok !== '') $headers[] = 'Authorization: Bearer ' . $tok;
+    }
     foreach ($extraHeaders as $h) {
         if (is_string($h) && trim($h) !== '') {
             $headers[] = trim($h);
@@ -235,41 +238,21 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     return $decoded;
 }
 
-// Build optional cPanel session-proof headers for tokenless plugin calls.
-function cfm_cpanel_session_headers(string $user): array
+// Pull cPanel actor assertion from environment/server variables.
+function cfm_actor_assertion(): string
 {
-    $headers = [];
-    $user = strtolower(trim($user));
-    if ($user !== '') {
-        $headers[] = 'X-Cpanel-User: ' . $user;
-    }
-
-    $sec = '';
-    foreach (['CP_SECURITY_TOKEN', 'cp_security_token'] as $k) {
+    foreach ([
+        'HTTP_X_CFM_ACTOR_ASSERTION',
+        'X_CFM_ACTOR_ASSERTION',
+        'CPANEL_ACTOR_ASSERTION',
+        'CFM_ACTOR_ASSERTION',
+    ] as $k) {
         $v = $_SERVER[$k] ?? getenv($k);
         if (is_string($v) && trim($v) !== '') {
-            $sec = trim($v);
-            break;
+            return trim($v);
         }
     }
-    if ($sec === '') {
-        $reqUri = (string)($_SERVER['REQUEST_URI'] ?? getenv('REQUEST_URI') ?? '');
-        if (preg_match('~(/cpsess[0-9A-Za-z]+)/~', $reqUri, $m)) {
-            $sec = $m[1];
-        }
-    }
-    $sec = trim((string)$sec);
-    if ($sec !== '') {
-        $headers[] = 'X-Cpanel-Security-Token: ' . $sec;
-    }
-
-    $cookie = (string)($_SERVER['HTTP_COOKIE'] ?? getenv('HTTP_COOKIE') ?? '');
-    $cookie = trim((string)$cookie);
-    if ($cookie !== '') {
-        $headers[] = 'X-Cpanel-Session-Cookie: ' . $cookie;
-    }
-
-    return $headers;
+    return '';
 }
 
 // Get user info (domains, db_users, databases) from CFM's local API.
@@ -286,10 +269,6 @@ function cfm_get_user_info(string $user): array
     }
 
     $hints = [];
-    if (cfm_admin_token() === '') {
-        $hints[] = 'Admin token missing in /etc/cfm/cfm.conf';
-    }
-
     $localBase = cfm_local_base_url();
     $iframeBase = cfm_iframe_base_url();
     if ($iframeBase !== '' && strpos($iframeBase, '127.0.0.1') !== false) {
@@ -297,21 +276,24 @@ function cfm_get_user_info(string $user): array
     }
 
     try {
+        $assertion = cfm_actor_assertion();
         $headers = [];
-        if (cfm_admin_token() === '') {
-            $headers = cfm_cpanel_session_headers($user);
+        if ($assertion !== '') {
+            $headers[] = 'X-CFM-Actor-Assertion: ' . $assertion;
+        } else {
+            $hints[] = 'Actor assertion missing from cPanel request context';
         }
         cfm_debug_log('user_info_request', [
             'user' => $user,
             'local_base' => $localBase,
-            'admin_token_present' => cfm_admin_token() !== '',
-            'session_header_count' => count($headers),
-            'session_headers' => array_map(static function ($h) {
+            'assertion_present' => $assertion !== '',
+            'auth_header_count' => count($headers),
+            'auth_headers' => array_map(static function ($h) {
                 $p = strpos($h, ':');
                 return $p === false ? $h : substr($h, 0, $p);
             }, $headers),
         ]);
-        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
+        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers, false);
         return [
             'ok'        => true,
             'data'      => $data,
@@ -328,7 +310,7 @@ function cfm_get_user_info(string $user): array
             $hints[] = 'CFM API timeout; verify local service health and firewall rules';
         }
         if ($httpCode === 401 || $httpCode === 403) {
-            $hints[] = 'Authentication rejected; verify AUTH_TOKEN alignment between plugin and daemon';
+            $hints[] = 'Authentication rejected; verify actor assertion flow and shared assertion secret';
         }
         if (strpos($lowerMessage, 'failed to connect') !== false || strpos($lowerMessage, 'couldn\'t connect') !== false) {
             $hints[] = 'CFM API may be unreachable at ' . $localBase;
