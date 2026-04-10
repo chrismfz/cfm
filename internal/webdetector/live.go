@@ -2,10 +2,10 @@ package webdetector
 
 import (
 	"bufio"
+	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -72,7 +72,7 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	var snap liveSnapshot
 
 	u1 := baseURL + "/api/v1/webdet/top-short"
-	r1, err := http.Get(u1)
+	r1, err := clihttp.Get(u1)
 	if err != nil {
 		return snap, err
 	}
@@ -99,7 +99,7 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	}
 
 	u2 := baseURL + "/api/v1/webdet/drilldown?host=" + url.QueryEscape(host) + "&top=25"
-	r2, err := http.Get(u2)
+	r2, err := clihttp.Get(u2)
 	if err != nil {
 		return snap, nil
 	}
@@ -132,7 +132,7 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 
 func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string) {
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s", baseURL, url.QueryEscape(host))
-	r, err := http.Get(u)
+	r, err := clihttp.Get(u)
 	if err != nil {
 		return
 	}
@@ -546,7 +546,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 		}
 		fillIPTable(ipTable, ipSlice, ipTableW, ipCursor)
 
-		pathTableW := W - (W*6/10) - 2
+		pathTableW := W - (W * 6 / 10) - 2
 		fillPathsTable(pathsTable, snap.TopPaths, pathTableW)
 
 		ts := time.Now().Format("15:04:05")
@@ -574,10 +574,10 @@ func RunLiveDrilldown(baseURL, host string) error {
 	chalToggle := func(snap liveSnapshot) {
 		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(host))
-			_, _ = http.Post(u, "application/json", nil)
+			_, _ = clihttp.Post(u, "application/json", nil)
 		} else {
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(host))
-			_, _ = http.Post(u, "application/json", nil)
+			_, _ = clihttp.Post(u, "application/json", nil)
 		}
 	}
 
@@ -755,7 +755,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	fetchChallenged := func() map[string]string {
 		u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=500", baseURL)
-		r, err := http.Get(u)
+		r, err := clihttp.Get(u)
 		if err != nil {
 			return nil
 		}
@@ -777,7 +777,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	fetchGlobalIPs := func() []map[string]string {
 		u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=50", baseURL)
-		r, err := http.Get(u)
+		r, err := clihttp.Get(u)
 		if err != nil {
 			return nil
 		}
@@ -812,7 +812,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	fetchSuspicious := func() ([]SuspiciousRow, map[string]SuspiciousRow) {
 		u := fmt.Sprintf("%s/api/v1/webdet/suspicious", baseURL)
-		r, err := http.Get(u)
+		r, err := clihttp.Get(u)
 		if err != nil {
 			return nil, nil
 		}
@@ -832,7 +832,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	fetchAndSort := func() {
 		u := fmt.Sprintf("%s/api/v1/webdet/top-short", baseURL)
-		r, err := http.Get(u)
+		r, err := clihttp.Get(u)
 		if err != nil {
 			lastErr = err
 			return
@@ -1104,10 +1104,10 @@ func RunLiveTop(baseURL string, limit int) error {
 		mode := challenged[h]
 		if mode == "manual" {
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(h))
-			_, _ = http.Post(u, "application/json", nil)
+			_, _ = clihttp.Post(u, "application/json", nil)
 		} else {
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_manual", baseURL, url.QueryEscape(h))
-			_, _ = http.Post(u, "application/json", nil)
+			_, _ = clihttp.Post(u, "application/json", nil)
 		}
 	}
 

@@ -1,9 +1,9 @@
 package mysql
 
 import (
+	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -34,7 +34,7 @@ type liveHistoryResp struct {
 }
 
 func fetchLiveJSON(url string, v any) error {
-	resp, err := http.Get(url)
+	resp, err := clihttp.Get(url)
 	if err != nil {
 		return err
 	}
@@ -100,24 +100,24 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 	}
 	defer ui.Close()
 
-        liveURL := func(path string) string {
-                q := url.Values{}
-                if filterUser != "" {
-                        q.Set("user", filterUser)
-                }
-                if filterDB != "" {
-                        q.Set("db", filterDB)
-                }
+	liveURL := func(path string) string {
+		q := url.Values{}
+		if filterUser != "" {
+			q.Set("user", filterUser)
+		}
+		if filterDB != "" {
+			q.Set("db", filterDB)
+		}
 
-                full := strings.TrimRight(baseURL, "/") + path
-                if enc := q.Encode(); enc != "" {
-                        if strings.Contains(full, "?") {
-                                return full + "&" + enc
-                        }
-                        return full + "?" + enc
-                }
-                return full
-        }
+		full := strings.TrimRight(baseURL, "/") + path
+		if enc := q.Encode(); enc != "" {
+			if strings.Contains(full, "?") {
+				return full + "&" + enc
+			}
+			return full + "?" + enc
+		}
+		return full
+	}
 
 	// -----------------------------------------------------------------------
 	// Widgets
@@ -209,9 +209,9 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 	var plotPts int // data points that fit in a chart panel
 
 	const headerH = 1
-	const helpH   = 1
-	const gaugeH  = 3
-	const chrome  = headerH + helpH // rows consumed by header+help in both views
+	const helpH = 1
+	const gaugeH = 3
+	const chrome = headerH + helpH // rows consumed by header+help in both views
 
 	chartView := false // false = View A (tables), true = View B (charts)
 
@@ -225,8 +225,8 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 		// Top half of remaining: connTable (left 38%) | queryTable (right 62%)
 		// Bottom half:           cpuTable  (left 38%) | histTable  (right 62%)
 		aTableY0 := chrome + gaugeH
-		aUsable  := usable - gaugeH
-		topH     := aUsable / 2
+		aUsable := usable - gaugeH
+		topH := aUsable / 2
 		if topH < 6 {
 			topH = 6
 		}
@@ -250,7 +250,7 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 		//    right panel = qpsPlot (top 55%) + latPlot (bottom 45%)
 		//                  OR lockTree (full right) when locks active
 		bChartY0 := chrome + gaugeH
-		bChartH  := H - bChartY0
+		bChartH := H - bChartY0
 		if bChartH < 6 {
 			bChartH = 6
 		}
@@ -290,14 +290,14 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 	// Runtime state
 	// -----------------------------------------------------------------------
 
-	selected   := 0
-	paused     := false
-	lastErr    := ""
+	selected := 0
+	paused := false
+	lastErr := ""
 	lastUpdate := time.Time{}
 
 	var state GovernorState
-	var cpu   liveCPUResp
-	var hist  liveHistoryResp
+	var cpu liveCPUResp
+	var hist liveHistoryResp
 
 	// -----------------------------------------------------------------------
 	// Column-width helper
@@ -349,22 +349,30 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 
 	buildQueryRows := func() {
 		aCol0W := W * 38 / 100
-		if aCol0W < 28 { aCol0W = 28 }
+		if aCol0W < 28 {
+			aCol0W = 28
+		}
 		panelW := W - aCol0W - 2
 		const pidW, userW, dbW, timeW, stateW, sep = 8, 16, 14, 6, 18, 6
 		queryW := panelW - pidW - userW - dbW - timeW - stateW - sep
-		if queryW < 20 { queryW = 20 }
+		if queryW < 20 {
+			queryW = 20
+		}
 
 		rows := [][]string{{"PID", "USER", "DB", "TIME", "STATE", "QUERY"}}
 		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorMagenta)}
 		procs := state.Running
-		if len(procs) > 12 { procs = procs[:12] }
+		if len(procs) > 12 {
+			procs = procs[:12]
+		}
 		if len(procs) == 0 {
 			rows = append(rows, []string{"(none)", "", "", "", "", ""})
 		}
 		for i, p := range procs {
 			q := truncStr(strings.TrimSpace(p.Info), queryW)
-			if q == "" { q = "-" }
+			if q == "" {
+				q = "-"
+			}
 			rows = append(rows, []string{
 				fmt.Sprintf("%d", p.ID),
 				truncStr(p.User, userW),
@@ -395,7 +403,9 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 			rows = append(rows, []string{"(no data yet)", "", "", "", "", ""})
 		default:
 			byUser := make(map[string]UserPerfDelta, len(cpu.Users))
-			for _, u := range cpu.Users { byUser[u.User] = u }
+			for _, u := range cpu.Users {
+				byUser[u.User] = u
+			}
 			for i, user := range orderedUsersFromStateOrCPU(&state, cpu.Users) {
 				u := byUser[user]
 				name := truncStr(user, uw)
@@ -423,7 +433,9 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 		rows := [][]string{{"USER", "PEAK", "AVG", "P_ACT", "A_ACT", "P_LCK", "SAT"}}
 		styles := map[int]ui.Style{0: ui.NewStyle(ui.ColorBlack, ui.ColorGreen)}
 		byUser := make(map[string]UserHistoryStat, len(hist.Users))
-		for _, u := range hist.Users { byUser[u.User] = u }
+		for _, u := range hist.Users {
+			byUser[u.User] = u
+		}
 		seen := map[string]bool{}
 		var ordered []string
 		for _, u := range state.PerUser {
@@ -433,7 +445,9 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 			}
 		}
 		for _, u := range hist.Users {
-			if !seen[u.User] { ordered = append(ordered, u.User) }
+			if !seen[u.User] {
+				ordered = append(ordered, u.User)
+			}
 		}
 		for i, user := range ordered {
 			u := byUser[user]
@@ -468,8 +482,12 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 
 	buildGauge := func() {
 		pct := int(state.ConnPct)
-		if pct < 0 { pct = 0 }
-		if pct > 100 { pct = 100 }
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
 		connGauge.Percent = pct
 		connGauge.Label = fmt.Sprintf(
 			"%d / %d  (%.0f%%)   active=%d   sleep=%d   locked=%d",
@@ -495,7 +513,7 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 
 	buildQPSPlots := func() {
 		qpsPlot.Data = [][]float64{rbQPS.slice(plotPts)}
-		latPlot.Data  = [][]float64{rbLat.slice(plotPts)}
+		latPlot.Data = [][]float64{rbLat.slice(plotPts)}
 	}
 
 	buildLockTree := func() {
@@ -537,14 +555,22 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 
 	buildHeader := func() {
 		pausedTag := ""
-		if paused { pausedTag = "  [PAUSED]" }
+		if paused {
+			pausedTag = "  [PAUSED]"
+		}
 		errSuffix := ""
-		if lastErr != "" { errSuffix = "  err=" + truncStr(lastErr, 55) }
+		if lastErr != "" {
+			errSuffix = "  err=" + truncStr(lastErr, 55)
+		}
 		ts := ""
-		if !lastUpdate.IsZero() { ts = "  updated=" + lastUpdate.Format("15:04:05") }
+		if !lastUpdate.IsZero() {
+			ts = "  updated=" + lastUpdate.Format("15:04:05")
+		}
 
 		viewTag := "tables"
-		if chartView { viewTag = "charts" }
+		if chartView {
+			viewTag = "charts"
+		}
 
 		header.Text = fmt.Sprintf(
 			" LIVE mysql%s  flavor=%s  mode=%s  view=%s%s%s",
@@ -552,31 +578,29 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 		)
 	}
 
+	buildHelp := func() {
+		pauseHint := ""
+		if paused {
+			pauseHint = "  [PAUSED — s/r to resume]"
+		}
 
-        buildHelp := func() {
-                pauseHint := ""
-                if paused {
-                        pauseHint = "  [PAUSED — s/r to resume]"
-                }
+		scope := "all"
+		if filterUser != "" || filterDB != "" {
+			scope = fmt.Sprintf("user=%q db=%q", filterUser, filterDB)
+		}
 
-                scope := "all"
-                if filterUser != "" || filterDB != "" {
-                        scope = fmt.Sprintf("user=%q db=%q", filterUser, filterDB)
-                }
-
-                if chartView {
-                        helpBar.Text = fmt.Sprintf(
-                                " q quit  x tables  s pause  r refresh%s  │  scope: %s  │  left: conn trend  right: qps+lat  (lock tree when locks active)",
-                                pauseHint, scope,
-                        )
-                } else {
-                        helpBar.Text = fmt.Sprintf(
-                                " q quit x charts ↑/↓ nav s pause r refresh%s | scope: %s",
-                                pauseHint, scope,
-                        )
-                }
-        }
-
+		if chartView {
+			helpBar.Text = fmt.Sprintf(
+				" q quit  x tables  s pause  r refresh%s  │  scope: %s  │  left: conn trend  right: qps+lat  (lock tree when locks active)",
+				pauseHint, scope,
+			)
+		} else {
+			helpBar.Text = fmt.Sprintf(
+				" q quit x charts ↑/↓ nav s pause r refresh%s | scope: %s",
+				pauseHint, scope,
+			)
+		}
+	}
 
 	// -----------------------------------------------------------------------
 	// Ring-buffer sample push (every fetch)
@@ -642,26 +666,25 @@ func mysqlLiveUI(baseURL, filterUser, filterDB string) error {
 	// Fetch
 	// -----------------------------------------------------------------------
 
-        refreshAll := func() {
-                lastErr = ""
-                if err := fetchLiveJSON(liveURL("/api/v1/mysql/state"), &state); err != nil {
-                        lastErr = err.Error()
-                } else {
-                        if err2 := fetchLiveJSON(liveURL("/api/v1/mysql/cpu"), &cpu); err2 != nil {
-                                lastErr = "cpu:" + err2.Error()
-                        }
-                        if err3 := fetchLiveJSON(liveURL("/api/v1/mysql/history?window=1h&top=50"), &hist); err3 != nil && lastErr == "" {
-                                lastErr = "hist:" + err3.Error()
-                        }
-                        if selected >= len(state.PerUser) && len(state.PerUser) > 0 {
-                                selected = len(state.PerUser) - 1
-                        }
-                }
-                pushSamples()
-                lastUpdate = time.Now()
-                render()
-        }
-
+	refreshAll := func() {
+		lastErr = ""
+		if err := fetchLiveJSON(liveURL("/api/v1/mysql/state"), &state); err != nil {
+			lastErr = err.Error()
+		} else {
+			if err2 := fetchLiveJSON(liveURL("/api/v1/mysql/cpu"), &cpu); err2 != nil {
+				lastErr = "cpu:" + err2.Error()
+			}
+			if err3 := fetchLiveJSON(liveURL("/api/v1/mysql/history?window=1h&top=50"), &hist); err3 != nil && lastErr == "" {
+				lastErr = "hist:" + err3.Error()
+			}
+			if selected >= len(state.PerUser) && len(state.PerUser) > 0 {
+				selected = len(state.PerUser) - 1
+			}
+		}
+		pushSamples()
+		lastUpdate = time.Now()
+		render()
+	}
 
 	refreshAll()
 
@@ -760,8 +783,12 @@ func saturationText(state GovernorState, hist *liveHistoryResp) string {
 func percentBar(pct float64) string {
 	const maxBar = 10
 	n := int((pct / 100.0) * maxBar)
-	if n < 0 { n = 0 }
-	if n > maxBar { n = maxBar }
+	if n < 0 {
+		n = 0
+	}
+	if n > maxBar {
+		n = maxBar
+	}
 	return "[" + strings.Repeat("█", n) + strings.Repeat("░", maxBar-n) + "]"
 }
 
@@ -772,8 +799,12 @@ func histBar(peak int, all []UserHistoryStat) string {
 	}
 	top := all[0].PeakConns
 	n := int(float64(peak) / float64(top) * maxBar)
-	if n < 0 { n = 0 }
-	if n > maxBar { n = maxBar }
+	if n < 0 {
+		n = 0
+	}
+	if n > maxBar {
+		n = maxBar
+	}
 	return "[" + strings.Repeat("█", n) + strings.Repeat("░", maxBar-n) + "]"
 }
 
@@ -791,7 +822,9 @@ func orderedUsersFromStateOrCPU(state *GovernorState, cpu []UserPerfDelta) []str
 		}
 	}
 	for _, u := range cpu {
-		if !seen[u.User] { out = append(out, u.User) }
+		if !seen[u.User] {
+			out = append(out, u.User)
+		}
 	}
 	return out
 }
@@ -802,14 +835,20 @@ func orderedUsersFromStateOrCPU(state *GovernorState, cpu []UserPerfDelta) []str
 
 func truncStr(s string, n int) string {
 	r := []rune(s)
-	if len(r) <= n { return s }
-	if n <= 2 { return string(r[:n]) }
+	if len(r) <= n {
+		return s
+	}
+	if n <= 2 {
+		return string(r[:n])
+	}
 	return string(r[:n-2]) + ".."
 }
 
 // intMax returns the larger of a and b.
 // Named intMax to avoid conflicting with the Go 1.21+ builtin max.
 func intMax(a, b int) int {
-	if a > b { return a }
+	if a > b {
+		return a
+	}
 	return b
 }
