@@ -2,9 +2,12 @@
 set -euo pipefail
 
 echo "[+] Installing CFM plugin"
-echo "    Requires: AUTH_TOKEN set in /etc/cfm/cfm.conf"
+echo "    Requires: local auth broker socket /var/run/cfm-auth.sock (or CPANEL_PLUGIN_AUTH_SOCK override)"
+echo "    cPanel plugin asks broker for short-lived actor assertion; admin AUTH_TOKEN remains admin-only"
 echo "    Optional: CPANEL_PLUGIN_BASE_URL = https://hostname:port (if not via OpenResty)"
-echo "    Plugin auth diagnostics default to ON (see /usr/local/cpanel/logs/error_log)"
+echo "    Plugin/daemon auth diagnostics default to ON for rollout"
+echo "      - cPanel plugin logs: /usr/local/cpanel/logs/error_log"
+echo "      - cfm daemon/API logs: configured API/daemon log targets from /etc/cfm/cfm.conf"
 echo "    Toggle via URL: ?cfm_debug=0 (off) or ?cfm_debug=1 (on), or CFM_PLUGIN_DEBUG/CPANEL_PLUGIN_DEBUG in cfm.conf"
 echo ""
 

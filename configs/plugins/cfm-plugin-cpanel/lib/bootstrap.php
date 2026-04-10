@@ -57,6 +57,7 @@ function cfm_bootstrap(string $mode): void
         if (!($userInfoResult['ok'] ?? false)) {
             $httpCode = (int)($userInfoResult['http_code'] ?? 0);
             $apiError = trim((string)($userInfoResult['error'] ?? ''));
+            $apiReason = trim((string)($userInfoResult['reason'] ?? ''));
             $hints    = $userInfoResult['hints'] ?? [];
             if (!is_array($hints)) $hints = [];
 
@@ -85,6 +86,9 @@ function cfm_bootstrap(string $mode): void
 
             if (!empty($diagHints)) {
                 $error .= ' Hints: ' . implode('; ', array_values(array_unique($diagHints))) . '.';
+            }
+            if ($apiReason !== '' && cfm_debug_enabled()) {
+                $error .= ' Reason: ' . $apiReason . '.';
             }
         } else {
             $userInfo = $userInfoResult['data'] ?? [];
