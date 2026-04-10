@@ -25,20 +25,53 @@ import (
 )
 
 // isPublicPath returns true if the request path requires no auth.
-// cfmBase returns the path prefix injected by a trusted local proxy (e.g. OpenResty
-// running on the same host). Only honoured when the direct peer is loopback so it
-// cannot be spoofed from the internet.
+// cfmBase returns the path prefix used by the UI when generating redirects.
+//
+// Priority:
+//   1) X-Forwarded-Prefix (trusted only from loopback peer)
+//   2) X-CFM-Base (trusted only from loopback peer)
+//   3) request path prefix (/cfm-admin) for direct :6061 access
 func cfmBase(r *http.Request) string {
+	if b := trustedProxyBase(r); b != "" {
+		return b
+	}
+	if strings.HasPrefix(r.URL.Path, "/cfm-admin/") || r.URL.Path == "/cfm-admin" {
+		return "/cfm-admin"
+	}
+	return ""
+}
+
+func trustedProxyBase(r *http.Request) string {
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		return ""
 	}
-	b := strings.TrimRight(r.Header.Get("X-CFM-Base"), "/")
-	if b == "" || !strings.HasPrefix(b, "/") {
+	for _, raw := range []string{
+		r.Header.Get("X-Forwarded-Prefix"),
+		r.Header.Get("X-CFM-Base"),
+	} {
+		if b := normalizePathPrefix(raw); b != "" {
+			return b
+		}
+	}
+	return ""
+}
+
+func normalizePathPrefix(raw string) string {
+	if raw == "" {
 		return ""
 	}
-	return b
+	// Some proxies send a comma-separated list; first hop is what we need.
+	p := strings.TrimSpace(strings.Split(raw, ",")[0])
+	if p == "" || !strings.HasPrefix(p, "/") {
+		return ""
+	}
+	p = "/" + strings.Trim(strings.TrimSpace(p), "/")
+	if p == "/" {
+		return ""
+	}
+	return p
 }
 
 func isPublicPath(r *http.Request) bool {
@@ -114,7 +147,10 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 4. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				base := cfmBase(r)
-				next := base + r.URL.RequestURI()
+				next := r.URL.RequestURI()
+				if base != "" && !strings.HasPrefix(next, base+"/") && next != base {
+					next = base + next
+				}
 				http.Redirect(w, r,
 					base+"/login?next="+url.QueryEscape(next),
 					http.StatusSeeOther)

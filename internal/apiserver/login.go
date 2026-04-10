@@ -18,7 +18,9 @@
 package apiserver
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -69,6 +71,7 @@ const loginHTML = `<!DOCTYPE html>
   <button id="btn" onclick="go()">Sign in</button>
 </div>
 <script>
+const basePath=__BASE_PATH__;
 const next=new URLSearchParams(location.search).get('next')||'/';
 function showErr(m){const e=document.getElementById('err');e.textContent=m;e.classList.add('on')}
 async function go(){
@@ -76,13 +79,13 @@ async function go(){
   btn.disabled=true;btn.textContent='Signing in…';
   document.getElementById('err').classList.remove('on');
   try{
-    const r=await fetch('/login',{method:'POST',
+    const r=await fetch(basePath+'/login',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:document.getElementById('u').value,
                            password:document.getElementById('p').value})});
     if(r.ok){
       const d=await r.json().catch(()=>({}));
-      if(d.requires_2fa){location.href='/login/verify?next='+encodeURIComponent(next);return}
+      if(d.requires_2fa){location.href=basePath+'/login/verify?next='+encodeURIComponent(next);return}
       location.href=next;return;
     }
     const d=await r.json().catch(()=>({}));
@@ -109,7 +112,7 @@ const verifyHTML = `<!DOCTYPE html>
 <div class="card">
   <div class="logo"><h1>⬡ CFM</h1><p>Two-Factor Authentication</p></div>
   <p class="note">2FA is not yet configured on this server.</p>
-  <p class="note"><a href="/logout">Return to login</a></p>
+  <p class="note"><a href="__LOGOUT_PATH__">Return to login</a></p>
 </div>
 </body>
 </html>`
@@ -133,7 +136,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(loginHTML))
+		base := cfmBase(r)
+		page := strings.ReplaceAll(loginHTML, "__BASE_PATH__", strconv.Quote(base))
+		_, _ = w.Write([]byte(page))
 
 	case http.MethodPost:
 		if Auth == nil {
@@ -153,7 +158,8 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if Auth != nil {
 		Auth.Destroy(r) // destroys session, writes nothing to response
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	base := cfmBase(r)
+	http.Redirect(w, r, fmt.Sprintf("%s/login", base), http.StatusSeeOther)
 }
 
 func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +169,9 @@ func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(verifyHTML))
+		base := cfmBase(r)
+		page := strings.ReplaceAll(verifyHTML, "__LOGOUT_PATH__", fmt.Sprintf("%s/logout", base))
+		_, _ = w.Write([]byte(page))
 	case http.MethodPost:
 		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, `{"error":"2FA not yet configured"}`, http.StatusNotImplemented)
