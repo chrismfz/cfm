@@ -49,8 +49,15 @@ type issueReq struct {
 type issueResp struct {
 	Assertion   string `json:"assertion,omitempty"`
 	ScopedToken string `json:"scoped_token,omitempty"`
+	UserInfo    any    `json:"user_info,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	Error       string `json:"error,omitempty"`
+}
+
+type cpanelUserInfo struct {
+	Domains   []string `json:"domains"`
+	DBUsers   []string `json:"db_users"`
+	Databases []string `json:"databases"`
 }
 
 var replay sync.Map
@@ -154,30 +161,30 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 	logging.Logf("[panel-auth] issue ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
 	logging.Logf("[panel-auth] assertion_issue_ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
 
-	scopedToken, err := mintScopedViewerToken(userName, assertion)
+	userInfo, scopedToken, err := mintScopedViewerToken(userName, assertion)
 	if err != nil {
 		logging.Logf("[panel-auth] scoped_token_mint_failed panel=%s user=%s err=%v", strings.TrimSpace(req.Panel), userName, err)
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "scoped_token_issue_failed"})
 		return
 	}
 	logging.Logf("[panel-auth] scoped_token_mint_ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
-	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion, ScopedToken: scopedToken})
+	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion, ScopedToken: scopedToken, UserInfo: userInfo})
 }
 
-func mintScopedViewerToken(userName, assertion string) (string, error) {
+func mintScopedViewerToken(userName, assertion string) (cpanelUserInfo, string, error) {
 	baseURL, authToken, err := loadRuntimeAPIAuthConfig()
 	if err != nil {
-		return "", err
+		return cpanelUserInfo{}, "", err
 	}
-	domains, err := fetchUserDomains(baseURL, userName, assertion)
+	userInfo, err := fetchUserInfo(baseURL, userName, assertion)
 	if err != nil {
-		return "", err
+		return cpanelUserInfo{}, "", err
 	}
-	if len(domains) == 0 {
-		return "", errors.New("no_domains_for_user")
+	if len(userInfo.Domains) == 0 {
+		return cpanelUserInfo{}, "", errors.New("no_domains_for_user")
 	}
 	payload := map[string]any{
-		"vhosts": domains,
+		"vhosts": userInfo.Domains,
 		"role":   "viewer",
 		"ttl":    "4h",
 		"label":  "cpanel:" + userName,
@@ -188,24 +195,22 @@ func mintScopedViewerToken(userName, assertion string) (string, error) {
 	if err := postJSON(baseURL+"/api/v1/auth/token", payload, map[string]string{
 		"Authorization": "Bearer " + authToken,
 	}, &out); err != nil {
-		return "", err
+		return cpanelUserInfo{}, "", err
 	}
 	token := strings.TrimSpace(out.Token)
 	if token == "" {
-		return "", errors.New("scoped_token_missing")
+		return cpanelUserInfo{}, "", errors.New("scoped_token_missing")
 	}
-	return token, nil
+	return userInfo, token, nil
 }
 
-func fetchUserDomains(baseURL, userName, assertion string) ([]string, error) {
+func fetchUserInfo(baseURL, userName, assertion string) (cpanelUserInfo, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/cpanel/user-info?user=%s", strings.TrimRight(baseURL, "/"), userName)
-	var out struct {
-		Domains []string `json:"domains"`
-	}
+	var out cpanelUserInfo
 	if err := getJSON(endpoint, map[string]string{
 		"X-CFM-Actor-Assertion": assertion,
 	}, &out); err != nil {
-		return nil, err
+		return cpanelUserInfo{}, err
 	}
 	clean := make([]string, 0, len(out.Domains))
 	seen := map[string]struct{}{}
@@ -221,7 +226,8 @@ func fetchUserDomains(baseURL, userName, assertion string) ([]string, error) {
 		clean = append(clean, v)
 	}
 	sort.Strings(clean)
-	return clean, nil
+	out.Domains = clean
+	return out, nil
 }
 
 func loadRuntimeAPIAuthConfig() (string, string, error) {
