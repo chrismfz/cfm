@@ -22,6 +22,11 @@ import (
 //	  /api/v1/mysql/locks        — lock graph
 //	  /api/v1/mysql/kills        — recent kill ring
 //	  /api/v1/mysql/history      — long-window per-user history
+//	  /api/v1/mysql/history/events    — durable event rows (sqlite/mysql history table)
+//	  /api/v1/mysql/history/summary   — aggregate history counters
+//	  /api/v1/mysql/history/prune     — retention pruning
+//	  /api/v1/mysql/history/truncate  — delete all durable history
+//	  /api/v1/mysql/history/timeline  — timeline-style event stream
 //	  /api/v1/mysql/cpu          — per-user CPU / query deltas
 //
 //	Scoped-token ready (Guard 3 for now, demote to Guard 2 when plugin auth lands):
@@ -42,6 +47,11 @@ func (g *Governor) RegisterHTTPAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mysql/locks", g.handleLocks)
 	mux.HandleFunc("/api/v1/mysql/kills", g.handleKills)
 	mux.HandleFunc("/api/v1/mysql/history", g.handleHistory)
+	mux.HandleFunc("/api/v1/mysql/history/events", g.handleHistoryEvents)
+	mux.HandleFunc("/api/v1/mysql/history/summary", g.handleHistorySummary)
+	mux.HandleFunc("/api/v1/mysql/history/prune", g.handleHistoryPrune)
+	mux.HandleFunc("/api/v1/mysql/history/truncate", g.handleHistoryTruncate)
+	mux.HandleFunc("/api/v1/mysql/history/timeline", g.handleHistoryTimeline)
 	mux.HandleFunc("/api/v1/mysql/cpu", g.handleCPU)
 }
 
@@ -175,6 +185,80 @@ func (g *Governor) handleCPU(w http.ResponseWriter, r *http.Request) {
 		"userstat_off":    g.userstatsOff,
 		"users":           deltas,
 	})
+}
+
+func (g *Governor) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rows, err := g.QueryHistoryEvents(
+		r.URL.Query().Get("user"),
+		r.URL.Query().Get("db"),
+		r.URL.Query().Get("type"),
+		limit,
+	)
+	if err != nil {
+		writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeGovernorJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
+func (g *Governor) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
+	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
+	res, err := g.SummarizeHistory(hours)
+	if err != nil {
+		writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeGovernorJSON(w, http.StatusOK, res)
+}
+
+func (g *Governor) handleHistoryPrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeGovernorJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	n, err := g.PruneHistory(days)
+	if err != nil {
+		writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if days <= 0 {
+		days = historyRetentionDaysDefault
+	}
+	writeGovernorJSON(w, http.StatusOK, map[string]any{"rows_deleted": n, "days": days})
+}
+
+func (g *Governor) handleHistoryTruncate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeGovernorJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if r.URL.Query().Get("confirm") != "yes" {
+		writeGovernorJSON(w, http.StatusBadRequest, map[string]string{"error": "missing confirm=yes"})
+		return
+	}
+	n, err := g.TruncateHistory()
+	if err != nil {
+		writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeGovernorJSON(w, http.StatusOK, map[string]any{"rows_deleted": n})
+}
+
+func (g *Governor) handleHistoryTimeline(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rows, err := g.QueryHistoryEvents(
+		r.URL.Query().Get("user"),
+		r.URL.Query().Get("db"),
+		r.URL.Query().Get("type"),
+		limit,
+	)
+	if err != nil {
+		writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeGovernorJSON(w, http.StatusOK, map[string]any{"rows": rows})
 }
 
 // ── per-user / per-db filtered handlers ──────────────────────────────────────
