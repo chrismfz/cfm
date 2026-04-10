@@ -29,6 +29,12 @@ import (
 //	  /api/v1/mysql/user-kills    — filtered kill history
 //	  /api/v1/mysql/user-history  — filtered long-window history
 func (g *Governor) RegisterHTTP(mux *http.ServeMux) {
+	g.RegisterHTTPAdmin(mux)
+	g.RegisterHTTPScoped(mux)
+}
+
+// RegisterHTTPAdmin registers global/admin-only MySQL governor routes.
+func (g *Governor) RegisterHTTPAdmin(mux *http.ServeMux) {
 	// ── existing admin endpoints ─────────────────────────────────────────────
 	mux.HandleFunc("/api/v1/mysql/state", g.handleState)
 	mux.HandleFunc("/api/v1/mysql/processlist", g.handleProcesslist)
@@ -37,7 +43,11 @@ func (g *Governor) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mysql/kills", g.handleKills)
 	mux.HandleFunc("/api/v1/mysql/history", g.handleHistory)
 	mux.HandleFunc("/api/v1/mysql/cpu", g.handleCPU)
+}
 
+// RegisterHTTPScoped registers user/db-filtered MySQL governor routes that can
+// be safely exposed to scoped tokens when query constraints are enforced.
+func (g *Governor) RegisterHTTPScoped(mux *http.ServeMux) {
 	// ── per-user/per-db filtered endpoints ──────────────────────────────────
 	// These are designed to be safe for scoped (per-cPanel-user) tokens once
 	// the plugin auth layer lands (Step 3 of auth hardening).
@@ -416,9 +426,9 @@ func userDBMatch(user, db string, users, dbs []string) bool {
 // use where the end-user should see counts and timings, not raw SQL.
 func filterGovernorState(s GovernorState, users, dbs []string) GovernorState {
 	out := GovernorState{
-		Ts:     s.Ts,
-		Flavor: s.Flavor,
-		Mode:   s.Mode,
+		Ts:      s.Ts,
+		Flavor:  s.Flavor,
+		Mode:    s.Mode,
 		MaxConn: s.MaxConn, // server-global, keep for context
 	}
 
