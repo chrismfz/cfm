@@ -350,22 +350,46 @@ func runWafStatus(baseURL string, args []string) error {
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Host      string    `json:"host"`
-		Profile   string    `json:"profile"`
-		Active    bool      `json:"active"`
-		ExpiresAt time.Time `json:"expires_at"`
+	var wire struct {
+		Host      string          `json:"host"`
+		Profile   string          `json:"profile"`
+		Active    bool            `json:"active"`
+		ExpiresAt json.RawMessage `json:"expires_at"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
 		return err
 	}
 
-	fmt.Printf("host: %s\n", result.Host)
-	if result.Active {
-		remaining := time.Until(result.ExpiresAt).Round(time.Second)
+	var expiresAt time.Time
+	if len(wire.ExpiresAt) > 0 && string(wire.ExpiresAt) != "null" {
+		// First form: RFC3339 string.
+		var expiryRFC3339 string
+		if err := json.Unmarshal(wire.ExpiresAt, &expiryRFC3339); err == nil {
+			if t, parseErr := time.Parse(time.RFC3339, expiryRFC3339); parseErr == nil {
+				expiresAt = t
+			} else {
+				return fmt.Errorf("invalid expires_at value %q: %w", expiryRFC3339, parseErr)
+			}
+		} else {
+			// Second form: unix seconds (JSON number).
+			var expiryUnix int64
+			if unixErr := json.Unmarshal(wire.ExpiresAt, &expiryUnix); unixErr != nil {
+				return fmt.Errorf("invalid expires_at format %s", strings.TrimSpace(string(wire.ExpiresAt)))
+			}
+			expiresAt = time.Unix(expiryUnix, 0)
+		}
+	}
+
+	fmt.Printf("host: %s\n", wire.Host)
+	if wire.Active {
+		if expiresAt.IsZero() {
+			fmt.Printf("  WAF profile: [%s]  active\n", wire.Profile)
+			return nil
+		}
+		remaining := time.Until(expiresAt).Round(time.Second)
 		fmt.Printf("  WAF profile: [%s]  active  expires=%s  (in %s)\n",
-			result.Profile,
-			result.ExpiresAt.Format("2006-01-02 15:04:05"),
+			wire.Profile,
+			expiresAt.Format("2006-01-02 15:04:05"),
 			remaining,
 		)
 	} else {
