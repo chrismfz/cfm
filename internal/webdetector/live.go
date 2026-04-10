@@ -77,6 +77,9 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 		return snap, err
 	}
 	defer r1.Body.Close()
+	if r1.StatusCode < 200 || r1.StatusCode >= 300 {
+		return snap, fmt.Errorf("http %s", r1.Status)
+	}
 
 	var topResp topShortCLIResponse
 	if err := json.NewDecoder(r1.Body).Decode(&topResp); err != nil {
@@ -101,13 +104,16 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	u2 := baseURL + "/api/v1/webdet/drilldown?host=" + url.QueryEscape(host) + "&top=25"
 	r2, err := clihttp.Get(u2)
 	if err != nil {
-		return snap, nil
+		return snap, err
 	}
 	defer r2.Body.Close()
+	if r2.StatusCode < 200 || r2.StatusCode >= 300 {
+		return snap, fmt.Errorf("http %s", r2.Status)
+	}
 
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r2.Body).Decode(&raw); err != nil {
-		return snap, nil
+		return snap, err
 	}
 	var detail HostDetail
 	if b, ok := raw["short"]; ok {
@@ -125,21 +131,29 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 		snap.Reasons = detail.ShortReasons
 	}
 
-	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry = fetchChallengeStatus(baseURL, host)
+	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry, err = fetchChallengeStatus(baseURL, host)
+	if err != nil {
+		return snap, err
+	}
 
 	return snap, nil
 }
 
-func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string) {
+func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string, err error) {
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s", baseURL, url.QueryEscape(host))
 	r, err := clihttp.Get(u)
 	if err != nil {
 		return
 	}
 	defer r.Body.Close()
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		err = fmt.Errorf("http %s", r.Status)
+		return
+	}
 
 	var result map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+	if decodeErr := json.NewDecoder(r.Body).Decode(&result); decodeErr != nil {
+		err = decodeErr
 		return
 	}
 	manualActive, _ := result["manual_active"].(bool)
@@ -485,7 +499,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 		}
 		statusStr := "● LIVE"
 		if lastErr != nil {
-			statusStr = "✖ API ERROR"
+			statusStr = fmt.Sprintf("✖ %s", lastErr)
 		}
 
 		chalBadge := ""
@@ -753,35 +767,41 @@ func RunLiveTop(baseURL string, limit int) error {
 	ipCursor = -1
 	bottomMode = "ips"
 
-	fetchChallenged := func() map[string]string {
+	fetchChallenged := func() (map[string]string, error) {
 		u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=500", baseURL)
 		r, err := clihttp.Get(u)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		defer r.Body.Close()
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			return nil, fmt.Errorf("http %s", r.Status)
+		}
 
 		var vhs []struct {
 			Host string `json:"host"`
 			Mode string `json:"mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
-			return nil
+			return nil, err
 		}
 		m := make(map[string]string, len(vhs))
 		for _, v := range vhs {
 			m[v.Host] = v.Mode
 		}
-		return m
+		return m, nil
 	}
 
-	fetchGlobalIPs := func() []map[string]string {
+	fetchGlobalIPs := func() ([]map[string]string, error) {
 		u := fmt.Sprintf("%s/api/v1/webdet/hot-ips?limit=50", baseURL)
 		r, err := clihttp.Get(u)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		defer r.Body.Close()
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			return nil, fmt.Errorf("http %s", r.Status)
+		}
 
 		var rows []struct {
 			IP      string `json:"ip"`
@@ -793,7 +813,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			Country string `json:"country"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
-			return nil
+			return nil, err
 		}
 
 		out := make([]map[string]string, 0, len(rows))
@@ -807,27 +827,30 @@ func RunLiveTop(baseURL string, limit int) error {
 				"country":  r.Country,
 			})
 		}
-		return out
+		return out, nil
 	}
 
-	fetchSuspicious := func() ([]SuspiciousRow, map[string]SuspiciousRow) {
+	fetchSuspicious := func() ([]SuspiciousRow, map[string]SuspiciousRow, error) {
 		u := fmt.Sprintf("%s/api/v1/webdet/suspicious", baseURL)
 		r, err := clihttp.Get(u)
 		if err != nil {
-			return nil, nil
+			return nil, nil, err
 		}
 		defer r.Body.Close()
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			return nil, nil, fmt.Errorf("http %s", r.Status)
+		}
 
 		var rows []SuspiciousRow
 		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
-			return nil, nil
+			return nil, nil, err
 		}
 
 		m := make(map[string]SuspiciousRow, len(rows))
 		for _, s := range rows {
 			m[strings.ToLower(s.Host)] = s
 		}
-		return rows, m
+		return rows, m, nil
 	}
 
 	fetchAndSort := func() {
@@ -838,6 +861,10 @@ func RunLiveTop(baseURL string, limit int) error {
 			return
 		}
 		defer r.Body.Close()
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			lastErr = fmt.Errorf("http %s", r.Status)
+			return
+		}
 
 		var resp topShortCLIResponse
 		if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
@@ -859,9 +886,18 @@ func RunLiveTop(baseURL string, limit int) error {
 			cursor = 0
 		}
 
-		challenged = fetchChallenged()
-		globalIPs = fetchGlobalIPs()
-		suspicious, suspMap = fetchSuspicious()
+		challenged, err = fetchChallenged()
+		if err != nil {
+			lastErr = fmt.Errorf("challenge vhosts: %w", err)
+		}
+		globalIPs, err = fetchGlobalIPs()
+		if err != nil {
+			lastErr = fmt.Errorf("hot ips: %w", err)
+		}
+		suspicious, suspMap, err = fetchSuspicious()
+		if err != nil {
+			lastErr = fmt.Errorf("suspicious: %w", err)
+		}
 
 		if ipCursor >= len(globalIPs) {
 			ipCursor = len(globalIPs) - 1
