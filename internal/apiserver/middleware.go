@@ -15,10 +15,11 @@ package apiserver
 import (
 	"context"
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"net"
+
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 )
@@ -28,16 +29,16 @@ import (
 // running on the same host). Only honoured when the direct peer is loopback so it
 // cannot be spoofed from the internet.
 func cfmBase(r *http.Request) string {
-        host, _, _ := net.SplitHostPort(r.RemoteAddr)
-        ip := net.ParseIP(host)
-        if ip == nil || !ip.IsLoopback() {
-                return ""
-        }
-        b := strings.TrimRight(r.Header.Get("X-CFM-Base"), "/")
-        if b == "" || !strings.HasPrefix(b, "/") {
-                return ""
-        }
-        return b
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return ""
+	}
+	b := strings.TrimRight(r.Header.Get("X-CFM-Base"), "/")
+	if b == "" || !strings.HasPrefix(b, "/") {
+		return ""
+	}
+	return b
 }
 
 func isPublicPath(r *http.Request) bool {
@@ -49,23 +50,17 @@ func isPublicPath(r *http.Request) bool {
 	return false
 }
 
-// cPanel plugin session-auth bootstrap route: allow request through auth
-// middleware and let the endpoint perform strict user/session validation.
-func isCpanelSessionBootstrapPath(r *http.Request) bool {
+// cPanel plugin actor-assertion route: allow request through auth middleware
+// and let the endpoint perform strict assertion validation.
+func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}
 	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/cpanel/user-info" {
 		return false
 	}
-	// Require the proof headers to be present so this bypass is narrow.
-	if strings.TrimSpace(r.Header.Get("X-Cpanel-User")) == "" {
-		return false
-	}
-	if strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token")) == "" {
-		return false
-	}
-	if strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie")) == "" {
+	// Require actor assertion header so this bypass is narrow.
+	if strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) == "" {
 		return false
 	}
 	return true
@@ -83,7 +78,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 			// ── 1. Public paths ────────────────────────────────────────────
-			if isPublicPath(r) || isCpanelSessionBootstrapPath(r) {
+			if isPublicPath(r) || isCpanelPluginSelfServicePath(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -112,14 +107,14 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 
 			// ── 4. No token — redirect browsers, 401 API clients ──────────
-                    		if strings.Contains(r.Header.Get("Accept"), "text/html") {
-                                base := cfmBase(r)
-                                next := base + r.URL.RequestURI()
-                                http.Redirect(w, r,
-                                        base+"/login?next="+url.QueryEscape(next),
-                                        http.StatusSeeOther)
-                                return
-                        }
+			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				base := cfmBase(r)
+				next := base + r.URL.RequestURI()
+				http.Redirect(w, r,
+					base+"/login?next="+url.QueryEscape(next),
+					http.StatusSeeOther)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
@@ -127,7 +122,6 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 		})
 	}
 }
-
 
 func tokenMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
