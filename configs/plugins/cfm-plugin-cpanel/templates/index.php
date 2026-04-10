@@ -62,8 +62,9 @@ iframe {
   <strong>CFM is not available</strong>
   <?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?><br>
   <small>
-    Ensure the CFM service is running and <code>AUTH_TOKEN</code> is set in
-    <code>/etc/cfm/cfm.conf</code>. If the UI is on a non-standard port, set
+    Ensure the CFM service is running and the plugin forwards a valid actor assertion.
+    Set <code>CPANEL_PLUGIN_ASSERTION_SECRET</code> (or <code>CFM_CPANEL_ASSERTION_SECRET</code> env)
+    for the daemon. If the UI is on a non-standard port, set
     <code>CPANEL_PLUGIN_BASE_URL = https://hostname:port</code> in cfm.conf.
   </small>
 </div>
