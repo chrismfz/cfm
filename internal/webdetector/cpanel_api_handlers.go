@@ -42,6 +42,36 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	authStatus, authErr, authDebug := authorizePluginCaller(r, user)
+	if authErr != nil {
+		if authDebug != "" && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
+			writeJSON(w, authStatus, map[string]string{
+				"error": authErr.Error(),
+				"debug": authDebug,
+			})
+			return
+		}
+		writeJSON(w, authStatus, map[string]string{"error": authErr.Error()})
+		return
+	}
+
+	info, dataStatus, dataErr, dataDebug := loadUserMetadata(user)
+	if dataErr != nil {
+		if dataDebug != "" && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
+			writeJSON(w, dataStatus, map[string]string{
+				"error": dataErr.Error(),
+				"debug": dataDebug,
+			})
+			return
+		}
+		writeJSON(w, dataStatus, map[string]string{"error": dataErr.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, info)
+}
+
+func authorizePluginCaller(r *http.Request, requestedUser string) (int, error, string) {
 	hasSessionProofHeaders :=
 		strings.TrimSpace(r.Header.Get("X-Cpanel-User")) != "" ||
 			strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token")) != "" ||
@@ -51,38 +81,34 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 	if hasSessionProofHeaders {
 		sessionUser, ok, reason := validateCpanelSessionUser(r)
 		if !ok {
-			if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CFM-Debug")), "1") {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{
-					"error": "authorization required",
-					"debug": reason,
-				})
-				return
-			}
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization required"})
-			return
+			return http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "auth-phase: " + reason
 		}
-		if sessionUser != user {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "session user mismatch"})
-			return
+		if sessionUser != requestedUser {
+			return http.StatusForbidden, fmt.Errorf("%s", "session user mismatch"), "auth-phase: claimed plugin user does not match requested user"
 		}
-	} else if !IsAdminRequest(r) {
-		// No session-proof headers and not admin-authenticated:
-		// deny scoped/unauthenticated callers.
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
-		return
+		return http.StatusOK, nil, ""
 	}
 
+	// No session-proof headers and not admin-authenticated:
+	// deny scoped/unauthenticated callers.
+	if !IsAdminRequest(r) {
+		return http.StatusForbidden, fmt.Errorf("%s", "admin token required"), "auth-phase: no admin token and no plugin session-proof headers"
+	}
+	return http.StatusOK, nil, ""
+}
+
+func loadUserMetadata(user string) (cpanelUserInfo, int, error, string) {
 	// Validate: must be a real cPanel user (file exists under /var/cpanel/users/).
 	if !cpanelUserExists(user) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
-		return
+		return cpanelUserInfo{}, http.StatusNotFound, fmt.Errorf("%s", "user not found"), "data-phase: cpanel user metadata file does not exist"
 	}
 
 	info := cpanelUserInfo{User: user}
+	// Metadata phase intentionally reads from filesystem only:
+	// /etc/userdatadomains, /etc/userdomains, /var/cpanel/userdata/<user>, /var/cpanel/databases/<user>.json.
 	info.Domains = cpanelDomainsForUser(user)
 	info.DBUsers, info.Databases = cpanelDBInfoForUser(user)
-
-	writeJSON(w, http.StatusOK, info)
+	return info, http.StatusOK, nil, ""
 }
 
 func validateCpanelSessionUser(r *http.Request) (string, bool, string) {
