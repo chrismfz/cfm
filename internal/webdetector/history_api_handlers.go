@@ -133,8 +133,13 @@ func (e *Engine) handleHistoryWAFByRule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"host":  host,
-		"hours": func() int { if hours <= 0 { return 24 }; return hours }(),
+		"host": host,
+		"hours": func() int {
+			if hours <= 0 {
+				return 24
+			}
+			return hours
+		}(),
 		"rules": rules,
 	})
 }
@@ -217,6 +222,10 @@ func (e *Engine) handleHistoryTruncate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHistoryStats(w http.ResponseWriter, r *http.Request) {
+	if !IsAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, HistoryStats{})
 		return

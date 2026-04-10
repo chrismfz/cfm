@@ -39,7 +39,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	ct := r.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
 		var bodyReq chalVhostAddRequest
-if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&bodyReq); err != nil && !errors.Is(err, io.EOF) {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&bodyReq); err != nil && !errors.Is(err, io.EOF) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}
@@ -130,6 +130,10 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	host := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("host")))
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 

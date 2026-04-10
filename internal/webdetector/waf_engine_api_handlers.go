@@ -55,6 +55,10 @@ type wafEngineSummary struct {
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
+	if !IsAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+		return
+	}
 	res := wafEngineSummary{}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, res)
@@ -213,7 +217,6 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 
 	writeJSON(w, http.StatusOK, res)
 }
-
 
 func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wafTopIPValue {
 	out := make([]wafTopIPValue, 0, len(m))
