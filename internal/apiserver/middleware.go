@@ -4,8 +4,8 @@
 //
 // Auth order per request:
 //  1. Public path (/login, /logout, /login/verify) → pass through
-//  2. Valid goauth session cookie                  → allow
-//  3. Authorization: Bearer / X-CFM-Token / Token  → validate admin or scoped token
+//  2. Authorization: Bearer / X-CFM-Token / Token  → validate admin or scoped token
+//  3. Valid goauth session cookie                  → allow (only if no token header)
 //  4. Browser request (Accept: text/html)          → redirect to /login
 //  5. Everything else                              → 401 / 403
 //
@@ -128,26 +128,29 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 2. Valid goauth session ────────────────────────────────────
-			if sessionAllowed(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// ── 3. Bearer / X-CFM-Token / Token header ────────────────────
+			// ── 2. Bearer / X-CFM-Token / Token header ────────────────────
 			tok := extractToken(r)
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
+					logging.Logf("[apiserver] auth_source=admin_token")
 					next.ServeHTTP(w, r)
 					return
 				}
 				if st, ok := store.Lookup(tok); ok {
+					logging.Logf("[apiserver] auth_source=scoped_token")
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
+				return
+			}
+
+			// ── 3. Valid goauth session (fallback when no token header) ───
+			if sessionAllowed(r) {
+				logging.Logf("[apiserver] auth_source=session_cookie")
+				next.ServeHTTP(w, r)
 				return
 			}
 
