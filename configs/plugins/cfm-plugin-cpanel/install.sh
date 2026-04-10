@@ -2,9 +2,12 @@
 set -euo pipefail
 
 echo "[+] Installing CFM plugin"
-echo "    Requires: AUTH_TOKEN set in /etc/cfm/cfm.conf"
+echo "    Requires: CPANEL_PLUGIN_ASSERTION_SECRET (or CFM_CPANEL_ASSERTION_SECRET env) shared with cfm daemon"
+echo "    Admin AUTH_TOKEN remains for admin-only endpoints (not plugin self-service user-info)"
 echo "    Optional: CPANEL_PLUGIN_BASE_URL = https://hostname:port (if not via OpenResty)"
-echo "    Plugin auth diagnostics default to ON (see /usr/local/cpanel/logs/error_log)"
+echo "    Plugin/daemon auth diagnostics default to ON for rollout"
+echo "      - cPanel plugin logs: /usr/local/cpanel/logs/error_log"
+echo "      - cfm daemon/API logs: configured API/daemon log targets from /etc/cfm/cfm.conf"
 echo "    Toggle via URL: ?cfm_debug=0 (off) or ?cfm_debug=1 (on), or CFM_PLUGIN_DEBUG/CPANEL_PLUGIN_DEBUG in cfm.conf"
 echo ""
 
