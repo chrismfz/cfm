@@ -383,6 +383,14 @@ func scopedMySQLFilterHandler(next http.Handler) http.Handler {
 			return
 		}
 
+		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
+		if len(scope) == 0 {
+			// Admin token / authenticated UI session: keep existing handler
+			// semantics (user= or db= validation remains in governor handlers).
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		users := deriveScopedMySQLUsers(r)
 		if len(users) == 0 {
 			w.Header().Set("Content-Type", "application/json")
@@ -414,7 +422,6 @@ func hasExplicitUserFilter(r *http.Request) bool {
 func deriveScopedMySQLUsers(r *http.Request) []string {
 	scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
 	if len(scope) == 0 {
-		// Admin/session requests have no scoped mapping to derive from.
 		return nil
 	}
 
