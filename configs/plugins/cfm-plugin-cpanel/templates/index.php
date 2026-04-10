@@ -1,3 +1,4 @@
+<!-- Authoritative metadata source: /api/v1/cpanel/user-info -->
 <!doctype html>
 <html lang="en">
 <head>
