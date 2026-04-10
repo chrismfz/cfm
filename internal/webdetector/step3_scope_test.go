@@ -145,6 +145,25 @@ func TestChallenge_Events_ScopeCheck(t *testing.T) {
 	}
 }
 
+func TestChallenge_VhostStatus_ScopeCheck(t *testing.T) {
+	_, mux := newStep3Engine(t)
+
+	rr := get(mux, adminCtx(), "/api/v1/challenge/vhost/status?host=mysite.com")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin status: expected 200, got %d", rr.Code)
+	}
+
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/challenge/vhost/status?host=mysite.com")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped own status: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/challenge/vhost/status?host=other.com")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped other status: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // ── Challenge excludes (Guard 3 — global operation) ───────────
 
 func TestChallengeExclude_AdminOnly(t *testing.T) {
@@ -203,5 +222,29 @@ func TestWAFExclude_AdminOnly(t *testing.T) {
 		"/api/v1/waf/exclude/add?type=path&value=/healthz", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin waf exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHistoryStats_AdminOnly(t *testing.T) {
+	_, mux := newStep3Engine(t)
+	rr := get(mux, adminCtx(), "/api/v1/webdet/history/stats")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin history stats: expected 200, got %d", rr.Code)
+	}
+	rr = get(mux, scopedCtx("example.com"), "/api/v1/webdet/history/stats")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped history stats: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestWAFEngineSummary_AdminOnly(t *testing.T) {
+	_, mux := newStep3Engine(t)
+	rr := get(mux, adminCtx(), "/api/v1/waf/engine/summary")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin waf summary: expected 200, got %d", rr.Code)
+	}
+	rr = get(mux, scopedCtx("example.com"), "/api/v1/waf/engine/summary")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped waf summary: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }

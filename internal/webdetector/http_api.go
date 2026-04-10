@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 )
 
 // RegisterHTTP wires all webdetector + challenge endpoints onto the provided mux.
@@ -139,6 +139,10 @@ type webdetSummary struct {
 }
 
 func (e *Engine) handleWebdetSummary(w http.ResponseWriter, r *http.Request) {
+	if !IsAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
+	}
 	resp := webdetSummary{
 		Now:            time.Now(),
 		WindowSec:      e.cfg.Window.Seconds(),
@@ -190,7 +194,7 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 
 // handleIPShort: επιστρέφει IPSignals από το short window με optional ?limit=
 func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -210,7 +214,6 @@ func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
-
 
 // handleDrilldown, handleSuspicious κτλ μένουν όπως ήταν.
 
@@ -286,7 +289,7 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -300,10 +303,9 @@ func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
-
 // handleIPDrilldown: short-window drilldown per IP.
 func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -318,7 +320,7 @@ func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
 
 // handleAnalyzeIP: offline log scan για μία IP.
 func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}

@@ -10,7 +10,7 @@ import (
 // handleChallengeSummary returns global challenge counts.
 // Guard 3: global data — admin/loopback only.
 func (e *Engine) handleChallengeSummary(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -24,7 +24,7 @@ func (e *Engine) handleChallengeSummary(w http.ResponseWriter, r *http.Request) 
 // handleChallengeVhosts lists all currently challenged vhosts.
 // Guard 3: lists cross-tenant vhost data — admin/loopback only.
 func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -70,7 +70,7 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 // handleChallengeIPs lists all challenged IPs across the server.
 // Guard 3: IP data is inherently cross-tenant — admin/loopback only.
 func (e *Engine) handleChallengeIPs(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}
@@ -92,7 +92,7 @@ func (e *Engine) handleChallengeIPs(w http.ResponseWriter, r *http.Request) {
 // handleChallengeIP returns the challenge state for a single IP.
 // Guard 3: IPs are global — admin/loopback only.
 func (e *Engine) handleChallengeIP(w http.ResponseWriter, r *http.Request) {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return
 	}

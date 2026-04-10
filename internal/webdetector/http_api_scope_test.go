@@ -54,6 +54,20 @@ func TestMonitoring_HotIPs_ScopedBlocked(t *testing.T) {
 	}
 }
 
+func TestMonitoring_Summary_AdminOnly(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+
+	rr := get(mux, adminCtx(), "/api/v1/webdet/summary")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin summary: expected 200, got %d", rr.Code)
+	}
+
+	rr = get(mux, scopedCtx("example.com"), "/api/v1/webdet/summary")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped summary: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestMonitoring_IPShort_ScopedBlocked(t *testing.T) {
 	_, mux := newMonitoringTestEngine(t)
 

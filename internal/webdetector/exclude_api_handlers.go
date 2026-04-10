@@ -20,7 +20,7 @@ import (
 // adminRequired returns true and writes 403 when the request carries a scoped
 // token. Inline helper used by every handler in this file.
 func adminRequired(w http.ResponseWriter, r *http.Request) bool {
-	if vhostScopeFromContext(r.Context()) != nil {
+	if !IsAdminRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
 		return true
 	}
