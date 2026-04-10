@@ -49,6 +49,28 @@ func isPublicPath(r *http.Request) bool {
 	return false
 }
 
+// cPanel plugin session-auth bootstrap route: allow request through auth
+// middleware and let the endpoint perform strict user/session validation.
+func isCpanelSessionBootstrapPath(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/cpanel/user-info" {
+		return false
+	}
+	// Require the proof headers to be present so this bypass is narrow.
+	if strings.TrimSpace(r.Header.Get("X-Cpanel-User")) == "" {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token")) == "" {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie")) == "" {
+		return false
+	}
+	return true
+}
+
 // TokenMiddleware enforces auth on all non-public routes.
 // If adminToken is empty the middleware is disabled (backwards compat).
 func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) http.Handler {
@@ -61,7 +83,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 			// ── 1. Public paths ────────────────────────────────────────────
-			if isPublicPath(r) {
+			if isPublicPath(r) || isCpanelSessionBootstrapPath(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

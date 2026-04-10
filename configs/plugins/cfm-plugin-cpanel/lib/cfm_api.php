@@ -164,14 +164,27 @@ function cfm_cpanel_session_headers(string $user): array
         $headers[] = 'X-Cpanel-User: ' . $user;
     }
 
-    $sec = (string)(getenv('CP_SECURITY_TOKEN') ?: getenv('cp_security_token') ?: '');
-    $sec = trim($sec);
+    $sec = '';
+    foreach (['CP_SECURITY_TOKEN', 'cp_security_token'] as $k) {
+        $v = $_SERVER[$k] ?? getenv($k);
+        if (is_string($v) && trim($v) !== '') {
+            $sec = trim($v);
+            break;
+        }
+    }
+    if ($sec === '') {
+        $reqUri = (string)($_SERVER['REQUEST_URI'] ?? getenv('REQUEST_URI') ?? '');
+        if (preg_match('~(/cpsess[0-9A-Za-z]+)/~', $reqUri, $m)) {
+            $sec = $m[1];
+        }
+    }
+    $sec = trim((string)$sec);
     if ($sec !== '') {
         $headers[] = 'X-Cpanel-Security-Token: ' . $sec;
     }
 
-    $cookie = (string)(getenv('HTTP_COOKIE') ?: '');
-    $cookie = trim($cookie);
+    $cookie = (string)($_SERVER['HTTP_COOKIE'] ?? getenv('HTTP_COOKIE') ?? '');
+    $cookie = trim((string)$cookie);
     if ($cookie !== '') {
         $headers[] = 'X-Cpanel-Session-Cookie: ' . $cookie;
     }

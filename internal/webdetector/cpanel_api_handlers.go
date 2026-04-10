@@ -40,10 +40,13 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prefer existing admin-token path (CLI/curl compatibility).
-	// If request is not admin-authenticated, allow cPanel session-proof auth
-	// and enforce self-only access.
-	if !IsAdminRequest(r) {
+	hasSessionProofHeaders :=
+		strings.TrimSpace(r.Header.Get("X-Cpanel-User")) != "" ||
+			strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token")) != "" ||
+			strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie")) != ""
+
+	// Tokenless cPanel-plugin flow: session proof is mandatory and self-scoped.
+	if hasSessionProofHeaders {
 		sessionUser, ok := validateCpanelSessionUser(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization required"})
@@ -53,6 +56,11 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "session user mismatch"})
 			return
 		}
+	} else if !IsAdminRequest(r) {
+		// No session-proof headers and not admin-authenticated:
+		// deny scoped/unauthenticated callers.
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+		return
 	}
 
 	// Validate: must be a real cPanel user (file exists under /var/cpanel/users/).
