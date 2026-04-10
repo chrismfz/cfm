@@ -88,14 +88,25 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		writeIssue(w, http.StatusBadRequest, issueResp{Error: "bad request", Reason: "bad_json"})
 		return
 	}
-	userName, reason := validateCpanelRequest(req, time.Now().UTC())
+	userName, reason, debugMeta := validateCpanelRequest(req, time.Now().UTC())
 	if reason != "" {
-		cpsessPrefix := strings.TrimSpace(req.CPSess)
-		if len(cpsessPrefix) > 18 {
-			cpsessPrefix = cpsessPrefix[:18] + "..."
+		uid, euid, gid, egid, procUser, procGroup := processIdentity()
+		cpsessMasked := maskCPSess(strings.TrimSpace(req.CPSess))
+		if reason == "session_not_found" {
+			debugJSON := "{}"
+			if len(debugMeta) > 0 {
+				if b, err := json.Marshal(debugMeta); err == nil {
+					debugJSON = string(b)
+				}
+			}
+			logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=%s cpsess=%q ts=%d nonce_len=%d uid=%d euid=%d gid=%d egid=%d proc_user=%q proc_group=%q session_debug=%s",
+				strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason, cpsessMasked, req.TS, len(strings.TrimSpace(req.Nonce)),
+				uid, euid, gid, egid, procUser, procGroup, debugJSON)
+		} else {
+			logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=%s cpsess=%q ts=%d nonce_len=%d uid=%d euid=%d gid=%d egid=%d proc_user=%q proc_group=%q",
+				strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason, cpsessMasked, req.TS, len(strings.TrimSpace(req.Nonce)),
+				uid, euid, gid, egid, procUser, procGroup)
 		}
-		logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=%s cpsess_prefix=%q ts=%d nonce_len=%d",
-			strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason, cpsessPrefix, req.TS, len(strings.TrimSpace(req.Nonce)))
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: reason})
 		return
 	}
@@ -124,27 +135,27 @@ func writeIssue(w http.ResponseWriter, code int, resp issueResp) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func validateCpanelRequest(req issueReq, now time.Time) (string, string) {
+func validateCpanelRequest(req issueReq, now time.Time) (string, string, map[string]any) {
 	if !strings.EqualFold(strings.TrimSpace(req.Panel), "cpanel") {
-		return "", "panel_unsupported"
+		return "", "panel_unsupported", nil
 	}
 	userName := strings.ToLower(strings.TrimSpace(req.User))
 	if userName == "" {
-		return "", "token_missing"
+		return "", "token_missing", nil
 	}
 	cpsess := strings.TrimSpace(req.CPSess)
 	if !cpsessRE.MatchString(cpsess) {
-		return "", "token_malformed"
+		return "", "token_malformed", nil
 	}
 	if req.TS == 0 || req.Nonce == "" {
-		return "", "token_missing"
+		return "", "token_missing", nil
 	}
 	nowUnix := now.Unix()
 	if req.TS < nowUnix-15 || req.TS > nowUnix+15 {
-		return "", "token_expired"
+		return "", "token_expired", nil
 	}
 	if _, exists := replay.LoadOrStore(req.Nonce, nowUnix+60); exists {
-		return "", "token_replay"
+		return "", "token_replay", nil
 	}
 	replay.Range(func(k, v interface{}) bool {
 		ks, okK := k.(string)
@@ -155,37 +166,94 @@ func validateCpanelRequest(req issueReq, now time.Time) (string, string) {
 		return true
 	})
 	sid := strings.TrimPrefix(cpsess, "/cpsess")
-	if !validateSessionFile(userName, sid, cpsess) {
-		return "", "session_not_found"
+	ok, debug := validateSessionFile(userName, sid, cpsess)
+	if !ok {
+		return "", "session_not_found", debug
 	}
-	return userName, ""
+	return userName, "", nil
 }
 
-func validateSessionFile(userName, sid, cpsess string) bool {
+func validateSessionFile(userName, sid, cpsess string) (bool, map[string]any) {
+	debug := map[string]any{
+		"paths": []map[string]any{},
+	}
+	pathEntries := make([]map[string]any, 0, 2)
 	if !isSafeSessionComponent(userName) || !isSafeSessionComponent(sid) {
-		return false
+		debug["invalid_component"] = true
+		debug["paths"] = pathEntries
+		return false, debug
 	}
 	paths := []string{
 		filepath.Join("/var/cpanel/sessions/cache", userName+":"+sid),
 		filepath.Join("/var/cpanel/sessions/raw", userName+":"+sid),
 	}
 	for _, p := range paths {
+		entry := map[string]any{
+			"path": p,
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
+			entry["read_error"] = err.Error()
+			entry["exists"] = !errors.Is(err, os.ErrNotExist)
+			pathEntries = append(pathEntries, entry)
 			continue
 		}
+		entry["exists"] = true
 		var row struct {
 			User            string `json:"user"`
 			CPSecurityToken string `json:"cp_security_token"`
 		}
 		if err := json.Unmarshal(b, &row); err != nil {
+			entry["json_unmarshal_error"] = err.Error()
+			pathEntries = append(pathEntries, entry)
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(row.User), userName) && strings.TrimSpace(row.CPSecurityToken) == cpsess {
-			return true
+		rowUser := strings.TrimSpace(row.User)
+		rowUserMatched := strings.EqualFold(rowUser, userName)
+		tokenMatched := strings.TrimSpace(row.CPSecurityToken) == cpsess
+		entry["row_user"] = rowUser
+		entry["row_user_matched"] = rowUserMatched
+		entry["cp_security_token_matched"] = tokenMatched
+		pathEntries = append(pathEntries, entry)
+		if rowUserMatched && tokenMatched {
+			debug["paths"] = pathEntries
+			return true, debug
 		}
 	}
-	return false
+	debug["paths"] = pathEntries
+	return false, debug
+}
+
+func processIdentity() (int, int, int, int, string, string) {
+	uid := os.Getuid()
+	euid := os.Geteuid()
+	gid := os.Getgid()
+	egid := os.Getegid()
+	procUser := "unknown"
+	procGroup := "unknown"
+	if u, err := user.Current(); err == nil {
+		if strings.TrimSpace(u.Username) != "" {
+			procUser = strings.TrimSpace(u.Username)
+		}
+		if grp, err := user.LookupGroupId(u.Gid); err == nil && strings.TrimSpace(grp.Name) != "" {
+			procGroup = strings.TrimSpace(grp.Name)
+		} else if strings.TrimSpace(u.Gid) != "" {
+			procGroup = strings.TrimSpace(u.Gid)
+		}
+	}
+	return uid, euid, gid, egid, procUser, procGroup
+}
+
+func maskCPSess(cpsess string) string {
+	clean := strings.TrimSpace(cpsess)
+	n := len(clean)
+	if n == 0 {
+		return "len=0"
+	}
+	if n <= 12 {
+		return "len=" + strconv.Itoa(n)
+	}
+	return clean[:8] + "..." + clean[n-4:] + " (len=" + strconv.Itoa(n) + ")"
 }
 
 func isSafeSessionComponent(v string) bool {
