@@ -250,6 +250,12 @@ function cfm_issue_actor_assertion(string $user): array
     $ts = time();
     $secTok = trim((string)($_SERVER['CP_SECURITY_TOKEN'] ?? $_SERVER['cp_security_token'] ?? getenv('CP_SECURITY_TOKEN') ?? ''));
     if ($secTok === '') {
+        $uri = (string)($_SERVER['REQUEST_URI'] ?? getenv('REQUEST_URI') ?? '');
+        if (preg_match('~(/cpsess[0-9A-Za-z]{8,128})/~', $uri, $m)) {
+            $secTok = trim((string)$m[1]);
+        }
+    }
+    if ($secTok === '') {
         return ['ok' => false, 'reason' => 'token_missing', 'error' => 'Missing cPanel security token'];
     }
 
