@@ -151,11 +151,36 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
 // CFM runs as root and has full access to cPanel metadata files.
 function cfm_get_user_info(string $user): array
 {
-    if ($user === '') return [];
+    if ($user === '') {
+        return ['domains' => [], 'db_users' => [], 'databases' => []];
+    }
+
+    $empty = ['domains' => [], 'db_users' => [], 'databases' => []];
+
     try {
-        return cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+        $result = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+        if (!is_array($result)) return $empty;
+
+        // Authoritative source: trust only the server-side endpoint payload
+        // and do not attempt any cPanel-side filesystem/UAPI discovery.
+        $normalize = static function ($value): array {
+            if (!is_array($value)) return [];
+            $out = [];
+            foreach ($value as $item) {
+                if (!is_scalar($item)) continue;
+                $v = trim((string)$item);
+                if ($v !== '') $out[] = $v;
+            }
+            return array_values(array_unique($out));
+        };
+
+        return [
+            'domains'   => $normalize($result['domains'] ?? []),
+            'db_users'  => $normalize($result['db_users'] ?? []),
+            'databases' => $normalize($result['databases'] ?? []),
+        ];
     } catch (Throwable $e) {
         error_log('[cfm] user-info failed: ' . $e->getMessage());
-        return [];
+        return $empty;
     }
 }

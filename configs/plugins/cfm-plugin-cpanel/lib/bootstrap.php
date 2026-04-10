@@ -42,6 +42,8 @@ function cfm_bootstrap(string $mode): void
     // cPanel mode.
     $currentUser = get_current_cpanel_user();
     $domains     = [];
+    $dbUsers     = [];
+    $databases   = [];
     $error       = '';
     $token       = '';
     $pageTitle   = 'CFM Security';
@@ -49,9 +51,12 @@ function cfm_bootstrap(string $mode): void
     if ($currentUser === '') {
         $error = 'Could not determine cPanel username.';
     } else {
-        // Ask CFM (running as root) for the user's domains and DB info.
+        // Ask CFM (running as root) for authoritative domains/DB metadata.
+        // No cPanel-side filesystem/UAPI fallbacks are permitted here.
         $userInfo = cfm_get_user_info($currentUser);
         $domains  = $userInfo['domains'] ?? [];
+        $dbUsers  = $userInfo['db_users'] ?? [];
+        $databases = $userInfo['databases'] ?? [];
 
         if (empty($domains)) {
             $error = 'No domains found for user "' . $currentUser . '". '
