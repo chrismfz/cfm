@@ -42,6 +42,8 @@ function cfm_bootstrap(string $mode): void
     // cPanel mode.
     $currentUser = get_current_cpanel_user();
     $domains     = [];
+    $dbUsers     = [];
+    $databases   = [];
     $error       = '';
     $token       = '';
     $pageTitle   = 'CFM Security';
@@ -87,8 +89,17 @@ function cfm_bootstrap(string $mode): void
         } else {
             $userInfo = $userInfoResult['data'] ?? [];
             if (!is_array($userInfo)) $userInfo = [];
-            $domains  = $userInfo['domains'] ?? [];
+
+            // Authoritative plugin metadata source:
+            // /api/v1/cpanel/user-info (via cfm_get_user_info). Do not add
+            // filesystem/UAPI fallbacks in plugin runtime.
+            $domains   = $userInfo['domains'] ?? [];
+            $dbUsers   = $userInfo['db_users'] ?? [];
+            $databases = $userInfo['databases'] ?? [];
+
             if (!is_array($domains)) $domains = [];
+            if (!is_array($dbUsers)) $dbUsers = [];
+            if (!is_array($databases)) $databases = [];
 
             if (empty($domains)) {
                 $error = 'No domains found for user "' . $currentUser . '".';

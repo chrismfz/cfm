@@ -37,8 +37,10 @@ install -m 0644 lib/bootstrap.php       "$BASE_LIB_DIR/lib/bootstrap.php"
 install -m 0644 lib/cfm_api.php         "$BASE_LIB_DIR/lib/cfm_api.php"
 
 
-# Template
+# Canonical cPanel UI template (authoritative runtime UI)
 install -m 0644 templates/index.php "$BASE_LIB_DIR/templates/index.php"
+# Remove legacy UI file if present from older installs (not used at runtime).
+rm -f "$BASE_LIB_DIR/lib/index.php"
 
 # WHM icon
 install -m 0644 lib/cfm.png "$WHM_ICON_DIR/cfm.png"
