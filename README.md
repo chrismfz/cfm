@@ -596,10 +596,7 @@ cfm mysqltop cpu                    # per-user CPU-seconds and query counts
 cfm mysqltop help                   # usage summary
 ```
 
-> **Compatibility note (2026-04-10):**
-> `cfm mysqltop history events|summary|prune|truncate|timeline` are removed in this release.
-> Matching `/api/v1/mysql/history/*` admin routes are intentionally not served.
-> Use `cfm mysqltop history [window] [N]` or `cfm mysqltop user-history` instead.
+
 
 **`cfm mysqltop` (default view) shows:**
 - Server flavor + mode (monitor/enforce)

@@ -159,6 +159,11 @@ func Start(
 		m.Handle("/api/v1/mysql/locks", adminOnlyHandler(mysqlAdminMux))
 		m.Handle("/api/v1/mysql/kills", adminOnlyHandler(mysqlAdminMux))
 		m.Handle("/api/v1/mysql/history", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history/events", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history/summary", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history/prune", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history/truncate", adminOnlyHandler(mysqlAdminMux))
+		m.Handle("/api/v1/mysql/history/timeline", adminOnlyHandler(mysqlAdminMux))
 		m.Handle("/api/v1/mysql/cpu", adminOnlyHandler(mysqlAdminMux))
 
 		// Filtered MySQL routes may be used by scoped tokens, but must always
