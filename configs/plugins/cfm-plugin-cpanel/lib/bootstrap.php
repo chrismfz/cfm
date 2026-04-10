@@ -111,10 +111,9 @@ function cfm_bootstrap(string $mode): void
         }
 
         if ($error === '' && !empty($domains)) {
-            try {
-                $token = cfm_issue_scoped_token($domains, 'cpanel:' . $currentUser, '4h');
-            } catch (Throwable $e) {
-                $error = $e->getMessage();
+            $token = trim((string)($userInfoResult['scoped_token'] ?? ''));
+            if ($token === '') {
+                $error = 'CFM auth did not return a scoped token.';
             }
         }
     }
