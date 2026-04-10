@@ -41,6 +41,12 @@ func (g *Governor) RegisterHTTP(mux *http.ServeMux) {
 // RegisterHTTPAdmin registers global/admin-only MySQL governor routes.
 func (g *Governor) RegisterHTTPAdmin(mux *http.ServeMux) {
 	// ── existing admin endpoints ─────────────────────────────────────────────
+	//
+	// Compatibility note (2026-04): advanced history admin routes
+	// (/history/events, /history/summary, /history/prune, /history/truncate,
+	// /history/timeline) are intentionally not registered in this release.
+	// CLI subcommands targeting those routes are deprecated to avoid dead-path
+	// calls against newer daemons.
 	mux.HandleFunc("/api/v1/mysql/state", g.handleState)
 	mux.HandleFunc("/api/v1/mysql/processlist", g.handleProcesslist)
 	mux.HandleFunc("/api/v1/mysql/top", g.handleTop)

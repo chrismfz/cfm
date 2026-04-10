@@ -596,10 +596,7 @@ cfm mysqltop cpu                    # per-user CPU-seconds and query counts
 cfm mysqltop help                   # usage summary
 ```
 
-> **Compatibility note (2026-04-10):**
-> Durable MySQL history admin endpoints are available again:
-> `/api/v1/mysql/history/events`, `/summary`, `/prune`, `/truncate`, `/timeline`.
-> Matching `cfm mysqltop history` subcommands are supported for CLI and Web UI workflows.
+
 
 **`cfm mysqltop` (default view) shows:**
 - Server flavor + mode (monitor/enforce)
