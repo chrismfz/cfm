@@ -139,10 +139,12 @@ func cpanelProbeUserInfo(secTok, cookie string) ([]byte, string, error) {
 	}
 
 	lastErr := ""
+	attempts := make([]string, 0, len(targets))
 	for _, t := range targets {
 		req, err := http.NewRequest(http.MethodGet, t.url, nil)
 		if err != nil {
 			lastErr = "failed to build cpanel execute request: " + err.Error()
+			attempts = append(attempts, fmt.Sprintf("%s build_error=%s", t.url, err.Error()))
 			continue
 		}
 		req.Header.Set("Cookie", cookie)
@@ -151,20 +153,32 @@ func cpanelProbeUserInfo(secTok, cookie string) ([]byte, string, error) {
 		resp, err := t.client.Do(req)
 		if err != nil {
 			lastErr = "cpanel execute request failed for " + t.url + ": " + err.Error()
+			attempts = append(attempts, fmt.Sprintf("%s request_error=%s", t.url, err.Error()))
 			continue
 		}
 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return b, t.url, nil
+			user := extractCpanelUserFromJSON(b)
+			if user != "" {
+				attempts = append(attempts, fmt.Sprintf("%s status=%d parse=user:%s", t.url, resp.StatusCode, user))
+				return b, t.url, nil
+			}
+			lastErr = fmt.Sprintf("cpanel execute returned non-semantic success status=%d url=%s body=%s", resp.StatusCode, t.url, compactPreview(b, 240))
+			attempts = append(attempts, fmt.Sprintf("%s status=%d parse=invalid_or_missing_user body=%s", t.url, resp.StatusCode, compactPreview(b, 120)))
+			continue
 		}
 
 		lastErr = fmt.Sprintf("cpanel execute status=%d url=%s body=%s", resp.StatusCode, t.url, compactPreview(b, 240))
+		attempts = append(attempts, fmt.Sprintf("%s status=%d parse=skipped_non_2xx", t.url, resp.StatusCode))
 	}
 
 	if lastErr == "" {
 		lastErr = "cpanel execute probe failed for unknown reason"
+	}
+	if len(attempts) > 0 {
+		return nil, "", fmt.Errorf("%s; attempts=[%s]", lastErr, strings.Join(attempts, " | "))
 	}
 	return nil, "", fmt.Errorf("%s", lastErr)
 }
