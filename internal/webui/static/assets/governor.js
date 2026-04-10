@@ -103,6 +103,40 @@
     return data;
   }
 
+
+
+  async function loadViewerContext() {
+    const headers = {};
+    if (_scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
+    let me = { scoped: false, role: 'admin' };
+    try {
+      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
+      if (res.ok) me = await res.json();
+    } catch (_) {}
+
+    const scoped = Boolean(me && me.scoped);
+    const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
+
+    const nav = document.querySelector('.top-nav');
+    if (nav && scoped) {
+      nav.querySelectorAll('a[href]').forEach((a) => {
+        const href = a.getAttribute('href') || '';
+        const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
+        if (adminOnly) a.style.display = 'none';
+      });
+    }
+
+    const meta = document.querySelector('.topbar .meta');
+    if (meta && !meta.querySelector('.scoped-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'pill scoped-badge';
+      badge.textContent = scoped ? 'Scoped view' : 'Global view';
+      meta.prepend(badge);
+    }
+
+    return { scoped, canWrite, role: String(me.role || '') };
+  }
+
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
@@ -583,6 +617,11 @@
     showMsg('ECharts is unavailable; chart rendering disabled.');
   }
 
-  startAuto();
-  refresh();
+  loadViewerContext().then((ctx) => {
+    if (!ctx.canWrite) {
+      [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
+    }
+    startAuto();
+    refresh();
+  });
 })();

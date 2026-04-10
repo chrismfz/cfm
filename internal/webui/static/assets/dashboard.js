@@ -79,6 +79,40 @@ const el = {
     return data;
   }
 
+
+
+  async function loadViewerContext() {
+    const headers = {};
+    if (_scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
+    let me = { scoped: false, role: 'admin' };
+    try {
+      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
+      if (res.ok) me = await res.json();
+    } catch (_) {}
+
+    const scoped = Boolean(me && me.scoped);
+    const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
+
+    const nav = document.querySelector('.top-nav');
+    if (nav && scoped) {
+      nav.querySelectorAll('a[href]').forEach((a) => {
+        const href = a.getAttribute('href') || '';
+        const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
+        if (adminOnly) a.style.display = 'none';
+      });
+    }
+
+    const meta = document.querySelector('.topbar .meta');
+    if (meta && !meta.querySelector('.scoped-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'pill scoped-badge';
+      badge.textContent = scoped ? 'Scoped view' : 'Global view';
+      meta.prepend(badge);
+    }
+
+    return { scoped, canWrite, role: String(me.role || '') };
+  }
+
   async function fetchLuaStats() {
     const res = await fetch('/cfm-admin/lua-stats');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -620,5 +654,11 @@ async function refreshLuaStats() {
   el.blockBtn.addEventListener('click', blockIP);
   el.unblockBtn.addEventListener('click', unblockIP);
 
-  refreshAll();
+  loadViewerContext().then((ctx) => {
+    if (!ctx.canWrite) {
+      if (el.blockBtn) el.blockBtn.style.display = 'none';
+      if (el.unblockBtn) el.unblockBtn.style.display = 'none';
+    }
+    refreshAll();
+  });
 })();
