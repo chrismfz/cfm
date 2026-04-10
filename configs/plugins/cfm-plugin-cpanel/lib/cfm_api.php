@@ -103,7 +103,7 @@ function cfm_issue_scoped_token(array $vhosts, string $label = '', string $ttl =
 }
 
 // Generic CFM API call (server-side, loopback).
-function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null): array
+function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = []): array
 {
     $url = rtrim(cfm_local_base_url(), '/') . $path;
     $ch  = curl_init($url);
@@ -112,6 +112,11 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     $headers = ['Accept: application/json'];
     $tok = cfm_admin_token();
     if ($tok !== '') $headers[] = 'Authorization: Bearer ' . $tok;
+    foreach ($extraHeaders as $h) {
+        if (is_string($h) && trim($h) !== '') {
+            $headers[] = trim($h);
+        }
+    }
 
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -150,6 +155,30 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     return $decoded;
 }
 
+// Build optional cPanel session-proof headers for tokenless plugin calls.
+function cfm_cpanel_session_headers(string $user): array
+{
+    $headers = [];
+    $user = strtolower(trim($user));
+    if ($user !== '') {
+        $headers[] = 'X-Cpanel-User: ' . $user;
+    }
+
+    $sec = (string)(getenv('CP_SECURITY_TOKEN') ?: getenv('cp_security_token') ?: '');
+    $sec = trim($sec);
+    if ($sec !== '') {
+        $headers[] = 'X-Cpanel-Security-Token: ' . $sec;
+    }
+
+    $cookie = (string)(getenv('HTTP_COOKIE') ?: '');
+    $cookie = trim($cookie);
+    if ($cookie !== '') {
+        $headers[] = 'X-Cpanel-Session-Cookie: ' . $cookie;
+    }
+
+    return $headers;
+}
+
 // Get user info (domains, db_users, databases) from CFM's local API.
 // CFM runs as root and has full access to cPanel metadata files.
 function cfm_get_user_info(string $user): array
@@ -175,7 +204,11 @@ function cfm_get_user_info(string $user): array
     }
 
     try {
-        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+        $headers = [];
+        if (cfm_admin_token() === '') {
+            $headers = cfm_cpanel_session_headers($user);
+        }
+        $data = cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET', null, $headers);
         return [
             'ok'        => true,
             'data'      => $data,

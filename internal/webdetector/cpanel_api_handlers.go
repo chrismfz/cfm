@@ -11,11 +11,13 @@ package webdetector
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type cpanelUserInfo struct {
@@ -32,16 +34,25 @@ func (e *Engine) RegisterCpanelHTTP(mux *http.ServeMux) {
 }
 
 func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
-	// Admin-only — scoped tokens must not access this.
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
-		return
-	}
-
 	user := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("user")))
 	if user == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user parameter required"})
 		return
+	}
+
+	// Prefer existing admin-token path (CLI/curl compatibility).
+	// If request is not admin-authenticated, allow cPanel session-proof auth
+	// and enforce self-only access.
+	if !IsAdminRequest(r) {
+		sessionUser, ok := validateCpanelSessionUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization required"})
+			return
+		}
+		if sessionUser != user {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "session user mismatch"})
+			return
+		}
 	}
 
 	// Validate: must be a real cPanel user (file exists under /var/cpanel/users/).
@@ -57,6 +68,101 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+func validateCpanelSessionUser(r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+
+	claimed := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Cpanel-User")))
+	secTok := strings.TrimSpace(r.Header.Get("X-Cpanel-Security-Token"))
+	cookie := strings.TrimSpace(r.Header.Get("X-Cpanel-Session-Cookie"))
+	if claimed == "" || secTok == "" || cookie == "" {
+		return "", false
+	}
+	if !cpanelSecurityTokenRE.MatchString(secTok) {
+		return "", false
+	}
+
+	url := "http://127.0.0.1:2082" + secTok + "/execute/Variables/get_user_information"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false
+	}
+
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	user := extractCpanelUserFromJSON(b)
+	if user == "" {
+		return "", false
+	}
+	return user, user == claimed
+}
+
+func extractCpanelUserFromJSON(data []byte) string {
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ""
+	}
+	user := strings.ToLower(strings.TrimSpace(findFirstUserField(v)))
+	if isValidCpanelUsername(user) {
+		return user
+	}
+	return ""
+}
+
+func findFirstUserField(v interface{}) string {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		// Prefer obvious user keys first.
+		for _, k := range []string{"user", "cpanel_user", "username"} {
+			if raw, ok := t[k]; ok {
+				if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+					return s
+				}
+			}
+		}
+		// Then recurse into common containers.
+		for _, k := range []string{"data", "result", "metadata"} {
+			if raw, ok := t[k]; ok {
+				if s := findFirstUserField(raw); s != "" {
+					return s
+				}
+			}
+		}
+		// Finally recurse all keys as last resort.
+		for _, raw := range t {
+			if s := findFirstUserField(raw); s != "" {
+				return s
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if s := findFirstUserField(item); s != "" {
+				return s
+			}
+		}
+	case string:
+		if isValidCpanelUsername(strings.ToLower(strings.TrimSpace(t))) {
+			return t
+		}
+	}
+	return ""
+}
+
 // cpanelUserExists checks /var/cpanel/users/<user> exists.
 func cpanelUserExists(user string) bool {
 	if !isValidCpanelUsername(user) {
@@ -68,6 +174,7 @@ func cpanelUserExists(user string) bool {
 
 // isValidCpanelUsername rejects anything that isn't a safe cPanel username.
 var cpanelUsernameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,15}$`)
+var cpanelSecurityTokenRE = regexp.MustCompile(`^/cpsess[0-9A-Za-z]{8,128}$`)
 
 func isValidCpanelUsername(user string) bool {
 	return cpanelUsernameRE.MatchString(user)
