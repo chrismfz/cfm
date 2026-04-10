@@ -146,3 +146,16 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     }
     return $decoded;
 }
+
+// Get user info (domains, db_users, databases) from CFM's local API.
+// CFM runs as root and has full access to cPanel metadata files.
+function cfm_get_user_info(string $user): array
+{
+    if ($user === '') return [];
+    try {
+        return cfm_api_request('/api/v1/cpanel/user-info?' . http_build_query(['user' => $user]), 'GET');
+    } catch (Throwable $e) {
+        error_log('[cfm] user-info failed: ' . $e->getMessage());
+        return [];
+    }
+}

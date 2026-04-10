@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 echo "[+] Installing CFM plugin"
@@ -35,8 +35,7 @@ install -m 0755 lib/cfm_cpanel.cgi "$CPANEL_CGI_DIR/cfm_cpanel.cgi"
 # Shared PHP library
 install -m 0644 lib/bootstrap.php       "$BASE_LIB_DIR/lib/bootstrap.php"
 install -m 0644 lib/cfm_api.php         "$BASE_LIB_DIR/lib/cfm_api.php"
-install -m 0644 lib/domain_provider.php "$BASE_LIB_DIR/lib/domain_provider.php"
-install -m 0644 lib/actions.php         "$BASE_LIB_DIR/lib/actions.php"
+
 
 # Template
 install -m 0644 templates/index.php "$BASE_LIB_DIR/templates/index.php"

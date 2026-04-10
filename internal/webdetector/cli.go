@@ -116,6 +116,9 @@ func printWebTopHelp() {
         fmt.Println("  cfm webtop tokens revoke <id>")
         fmt.Println("  cfm webtop tokens me                            # calling token's scope")
 
+        fmt.Println("  cfm webtop user-info <username>                 # user info from panel")
+
+
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
 	fmt.Println("------------")
@@ -158,6 +161,8 @@ func RunWebTop(baseURL string, args []string) error {
 		case "text":
 			return runTopSummary(baseURL)
 
+
+
 		case "long":
 			limit := 20
 			if len(args) > 1 {
@@ -195,6 +200,14 @@ func RunWebTop(baseURL string, args []string) error {
 			return runHistoryWebTop(baseURL, args[1:])
 		case "tokens":
                         return runTokensWebTop(baseURL, args[1:])
+
+		case "user-info":
+                        if len(args) < 2 {
+                                return fmt.Errorf("usage: cfm webtop user-info <cpanel-username>")
+                        }
+                        RunCpanelUserInfo(args[1])
+                        return nil
+
 
 
 		}

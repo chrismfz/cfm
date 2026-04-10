@@ -1,12 +1,22 @@
 <?php
 require_once __DIR__ . '/cfm_api.php';
-require_once __DIR__ . '/domain_provider.php';
 
 function cgi_send_headers(string $contentType = 'text/html; charset=utf-8', array $extra = []): void
 {
     echo "Content-Type: {$contentType}\r\n";
     foreach ($extra as $h) echo $h . "\r\n";
     echo "\r\n";
+}
+
+function get_current_cpanel_user(): string
+{
+    foreach (['REMOTE_USER', 'CPANEL_USER', 'REMOTE_LOGNAME', 'USER'] as $key) {
+        $v = $_SERVER[$key] ?? getenv($key);
+        if (is_string($v) && trim($v) !== '') {
+            return strtolower(trim(preg_replace('/\s+/', '', $v)));
+        }
+    }
+    return '';
 }
 
 function cfm_bootstrap(string $mode): void
@@ -18,7 +28,6 @@ function cfm_bootstrap(string $mode): void
     }
 
     // WHM / root — redirect straight to the full admin UI.
-    // Root has goauth session auth; no scoped token needed.
     if ($mode === 'whm') {
         $adminUrl = cfm_iframe_base_url() . '/cfm-admin/';
         cgi_send_headers();
@@ -30,7 +39,7 @@ function cfm_bootstrap(string $mode): void
         exit;
     }
 
-    // cPanel mode — issue a scoped token for the user's domains.
+    // cPanel mode.
     $currentUser = get_current_cpanel_user();
     $domains     = [];
     $error       = '';
@@ -40,13 +49,16 @@ function cfm_bootstrap(string $mode): void
     if ($currentUser === '') {
         $error = 'Could not determine cPanel username.';
     } else {
-        $domains = get_domains_for_user($currentUser);
+        // Ask CFM (running as root) for the user's domains and DB info.
+        $userInfo = cfm_get_user_info($currentUser);
+        $domains  = $userInfo['domains'] ?? [];
+
         if (empty($domains)) {
-            $error = 'No domains found for user "' . $currentUser . '".';
+            $error = 'No domains found for user "' . $currentUser . '". '
+                   . 'Ensure CFM is running and AUTH_TOKEN is set in /etc/cfm/cfm.conf.';
         } else {
             try {
-                $label = 'cpanel:' . $currentUser;
-                $token = cfm_issue_scoped_token($domains, $label, '4h');
+                $token = cfm_issue_scoped_token($domains, 'cpanel:' . $currentUser, '4h');
             } catch (Throwable $e) {
                 $error = $e->getMessage();
             }
@@ -55,8 +67,6 @@ function cfm_bootstrap(string $mode): void
 
     $iframeBase   = cfm_iframe_base_url();
     $iframeUrl    = $iframeBase . '/cfm-admin/webdetector/controls/';
-
-    // Compute postMessage target origin (scheme + host + optional port).
     $parsed       = parse_url($iframeBase);
     $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
     if (!empty($parsed['port'])) {
