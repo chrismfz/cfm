@@ -75,7 +75,7 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			return
 		}
 		// Scoped token: look up to return its full metadata (still no token value).
-		tok := extractToken(r)
+		tok, _ := extractToken(r)
 		st, ok := store.Lookup(tok)
 		if !ok {
 			apiJSONError(w, "token not found", http.StatusUnauthorized)
