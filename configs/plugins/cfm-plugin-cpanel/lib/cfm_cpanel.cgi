@@ -2,7 +2,18 @@
 <?php
 
 parse_str((string)getenv('QUERY_STRING'), $_GET);
-$_SERVER['REQUEST_METHOD'] = (string)getenv('REQUEST_METHOD');
+foreach ([
+    'REQUEST_METHOD',
+    'REQUEST_URI',
+    'QUERY_STRING',
+    'REMOTE_USER',
+    'CPANEL_USER',
+    'CP_SECURITY_TOKEN',
+    'cp_security_token',
+    'HTTP_COOKIE',
+] as $k) {
+    $_SERVER[$k] = (string)getenv($k);
+}
 foreach (explode(';', (string)getenv('HTTP_COOKIE')) as $pair) {
     $pair = trim($pair);
     if (($eq = strpos($pair, '=')) !== false) {
