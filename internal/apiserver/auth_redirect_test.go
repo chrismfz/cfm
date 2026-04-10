@@ -76,3 +76,23 @@ func TestHandleLoginAndLogoutUseDetectedBasePath(t *testing.T) {
 	}
 }
 
+func TestTokenMiddlewareAllowsPrefixedLoginPath(t *testing.T) {
+	called := false
+	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host:6061/cfm-admin/login", nil)
+	req.RemoteAddr = "198.51.100.5:443"
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("expected prefixed login request to pass through middleware")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}

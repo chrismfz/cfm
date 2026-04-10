@@ -75,8 +75,15 @@ func normalizePathPrefix(raw string) string {
 }
 
 func isPublicPath(r *http.Request) bool {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/cfm-admin/") {
+		path = strings.TrimPrefix(path, "/cfm-admin")
+		if path == "" || path[0] != '/' {
+			path = "/" + path
+		}
+	}
 	for _, p := range []string{"/login", "/logout"} {
-		if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
+		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}

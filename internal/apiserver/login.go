@@ -18,7 +18,9 @@
 package apiserver
 
 import (
+	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -137,7 +139,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		base := cfmBase(r)
-		page := strings.ReplaceAll(loginHTML, "__BASE_PATH__", strconv.Quote(base))
+		baseJSON, err := json.Marshal(base)
+		if err != nil {
+			baseJSON = []byte(`""`)
+		}
+		page := strings.ReplaceAll(loginHTML, "__BASE_PATH__", string(baseJSON))
 		_, _ = w.Write([]byte(page))
 
 	case http.MethodPost:
@@ -170,7 +176,8 @@ func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		base := cfmBase(r)
-		page := strings.ReplaceAll(verifyHTML, "__LOGOUT_PATH__", fmt.Sprintf("%s/logout", base))
+		logoutPath := html.EscapeString(fmt.Sprintf("%s/logout", base))
+		page := strings.ReplaceAll(verifyHTML, "__LOGOUT_PATH__", logoutPath)
 		_, _ = w.Write([]byte(page))
 	case http.MethodPost:
 		w.Header().Set("Content-Type", "application/json")
