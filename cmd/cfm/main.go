@@ -11,6 +11,7 @@ import (
 	"cfm/internal/firewall/nft"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
+	"cfm/internal/panelauth"
 	status "cfm/internal/status"
 	"cfm/internal/sysctl"
 	"context"
@@ -18,9 +19,9 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -38,11 +39,11 @@ import (
 	"cfm/internal/vhostmap"
 	webdet "cfm/internal/webdetector"
 
+	"cfm/internal/clam"
 	"cfm/internal/cli"
+	"cfm/internal/clihttp"
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
-	"cfm/internal/clam"
-	"cfm/internal/clihttp"
 )
 
 var (
@@ -114,21 +115,20 @@ func apiBaseURL() string {
 // apiAuthToken reads AUTH_TOKEN from cfm.conf for use by CLI commands.
 // Returns empty string if config cannot be read or token is not set.
 func apiAuthToken() string {
-        dir, _ := cli.ResolveConfigDir("")
-        if dir == "" {
-                return ""
-        }
-        b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
-        if err != nil {
-                return ""
-        }
-        cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
-        if err != nil || cfg == nil {
-                return ""
-        }
-        return strings.TrimSpace(cfg.API.AuthToken)
+	dir, _ := cli.ResolveConfigDir("")
+	if dir == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
+	if err != nil {
+		return ""
+	}
+	cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.API.AuthToken)
 }
-
 
 func sslSockDefaults() (string, string) {
 	dir := cfgDir()
@@ -154,8 +154,6 @@ func sslSockDefaults() (string, string) {
 	return sock, cfg.SSLCollectorSock.Token
 }
 
-
-
 func main() {
 
 	// cfm auth — short-circuits before config load or server start.
@@ -165,7 +163,6 @@ func main() {
 		runAuthCLI()
 		return
 	}
-
 
 	requireRoot()
 
@@ -216,33 +213,30 @@ func main() {
 		os.Exit(cli.RunDisable(os.Args[2:], getBackend()))
 
 	case "ssl", "sslcollector", "ssl-collector":
-        sock, token := sslSockDefaults()
-        sslcollector.RunCLI(os.Args[2:], sock, token)
+		sock, token := sslSockDefaults()
+		sslcollector.RunCLI(os.Args[2:], sock, token)
 
 	case "dnat":
 		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))
 
-  case "webtop", "nginx-top", "httpd-top":
-      addr := apiBaseURL()
-      clihttp.SetToken(apiAuthToken())
-      if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
+	case "webtop", "nginx-top", "httpd-top":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := webdet.RunWebTop(addr, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "webtop error:", err)
 			os.Exit(1)
 		}
 
 	case "mysqltop", "mysql-top", "mysql":
 		addr := apiBaseURL()
-	      clihttp.SetToken(apiAuthToken())
+		clihttp.SetToken(apiAuthToken())
 		if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "mysqltop error:", err)
 			os.Exit(1)
 		}
 
-
 	case "clam", "clamd", "clamav":
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
-
-
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
@@ -664,7 +658,7 @@ func runDaemon(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-// periodic clam bridge retry
+	// periodic clam bridge retry
 	go func() {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
@@ -711,15 +705,18 @@ func runDaemon(args []string) {
 	sslSockLc := sslcollector.NewSockLifecycle(sslcol)
 	defer sslSockLc.Stop()
 
+	go func() {
+		if err := panelauth.Serve(ctx, "/var/run/cfm-auth.sock"); err != nil && ctx.Err() == nil {
+			logging.Logf("[panel-auth] stopped: %v", err)
+		}
+	}()
+
 	// vhostmap
 	vmapLc := vhostmap.NewLifecycle()
 	defer vmapLc.Stop()
 
 	// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 	smtpLc := nflog.NewSnoopLifecycle()
-
-
-
 
 	// Ensure base data dirs exist with correct permissions
 	for _, d := range []struct {
@@ -743,7 +740,6 @@ func runDaemon(args []string) {
 
 	govLc := mysql.NewGovernorLifecycle()
 
-
 	var clamMgr *clam.Manager
 	defer func() {
 		if clamMgr != nil {
@@ -751,14 +747,11 @@ func runDaemon(args []string) {
 		}
 	}()
 
-
-
 	// ── applySystemConfig ────────────────────────────────────────────────────────
 	// Stateless: logging init, sysctl tweaks, SMTP owner resolution.
 	applySystemConfig := func(cfg *cfgpkg.Config) {
 		cfg.SystemTweaks.SetDefaults()
 		logging.Init(&cfg.Logging)
-
 
 		clam.SetLogger(logging.LogfCLAM)
 
@@ -769,57 +762,50 @@ func runDaemon(args []string) {
 			detpkg.ResetClamBridgeWireState()
 		}
 
-
-if cfg.Clam.Enabled {
-	clamMgr = clam.NewManager(clam.Config{
-		Enabled:     cfg.Clam.Enabled,
-		Network:     cfg.Clam.Network,
-		Address:     cfg.Clam.Address,
-		Timeout:     cfg.Clam.Timeout,
-		MaxWorkers:  cfg.Clam.MaxWorkers,
-		QueueSize:   cfg.Clam.QueueSize,
-		PendingDir:  cfg.Clam.PendingDir,
-		InfectedDir: cfg.Clam.InfectedDir,
-	})
-	if nb, ok := be.(*nft.Backend); ok {
-		if enr := nb.GetEnricher(); enr != nil {
-			clamMgr.SetEnricher(enr)
-		}
-	}
-	clamMgr.Start()
-	detpkg.SetClamManager(clamMgr)
-	_ = detpkg.TryWireClamBridge()
-
-	if cfg.Clam.PendingDir != "" {
-		go func(dir string) {
-			t := time.NewTicker(5 * time.Minute)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					sweepPendingDir(dir, 10*time.Minute)
+		if cfg.Clam.Enabled {
+			clamMgr = clam.NewManager(clam.Config{
+				Enabled:     cfg.Clam.Enabled,
+				Network:     cfg.Clam.Network,
+				Address:     cfg.Clam.Address,
+				Timeout:     cfg.Clam.Timeout,
+				MaxWorkers:  cfg.Clam.MaxWorkers,
+				QueueSize:   cfg.Clam.QueueSize,
+				PendingDir:  cfg.Clam.PendingDir,
+				InfectedDir: cfg.Clam.InfectedDir,
+			})
+			if nb, ok := be.(*nft.Backend); ok {
+				if enr := nb.GetEnricher(); enr != nil {
+					clamMgr.SetEnricher(enr)
 				}
 			}
-		}(cfg.Clam.PendingDir)
-	}
+			clamMgr.Start()
+			detpkg.SetClamManager(clamMgr)
+			_ = detpkg.TryWireClamBridge()
 
-	logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s",
-		cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
-		cfg.Clam.MaxWorkers, cfg.Clam.QueueSize,
-		cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
-} else {
-	detpkg.SetClamManager(nil)
-	detpkg.ResetClamBridgeWireState()
-	logging.LogfCLAM("[clam] disabled")
-}
+			if cfg.Clam.PendingDir != "" {
+				go func(dir string) {
+					t := time.NewTicker(5 * time.Minute)
+					defer t.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+							sweepPendingDir(dir, 10*time.Minute)
+						}
+					}
+				}(cfg.Clam.PendingDir)
+			}
 
-
-
-
-
-
+			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s",
+				cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
+				cfg.Clam.MaxWorkers, cfg.Clam.QueueSize,
+				cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
+		} else {
+			detpkg.SetClamManager(nil)
+			detpkg.ResetClamBridgeWireState()
+			logging.LogfCLAM("[clam] disabled")
+		}
 
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)
@@ -1026,7 +1012,6 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 	}
 }
 
-
 func sweepPendingDir(dir string, maxAge time.Duration) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1050,9 +1035,6 @@ func sweepPendingDir(dir string, maxAge time.Duration) {
 		_ = os.Remove(path)
 	}
 }
-
-
-
 
 // entries parsing -----------------------------------------------------------
 

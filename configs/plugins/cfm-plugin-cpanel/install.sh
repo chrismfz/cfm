@@ -2,8 +2,8 @@
 set -euo pipefail
 
 echo "[+] Installing CFM plugin"
-echo "    Requires: CPANEL_PLUGIN_ASSERTION_SECRET (or CFM_CPANEL_ASSERTION_SECRET env) shared with cfm daemon"
-echo "    Admin AUTH_TOKEN remains for admin-only endpoints (not plugin self-service user-info)"
+echo "    Requires: local auth broker socket /var/run/cfm-auth.sock"
+echo "    cPanel plugin asks broker for short-lived actor assertion; admin AUTH_TOKEN remains admin-only"
 echo "    Optional: CPANEL_PLUGIN_BASE_URL = https://hostname:port (if not via OpenResty)"
 echo "    Plugin/daemon auth diagnostics default to ON for rollout"
 echo "      - cPanel plugin logs: /usr/local/cpanel/logs/error_log"

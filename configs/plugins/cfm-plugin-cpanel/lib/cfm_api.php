@@ -238,29 +238,68 @@ function cfm_api_request(string $path, string $method = 'GET', ?array $payload =
     return $decoded;
 }
 
-// Pull cPanel actor assertion from environment/server variables.
-function cfm_actor_assertion(): string
+function cfm_socket_auth_path(): string
 {
-    foreach ([
-        'HTTP_AUTHORIZATION',
-        'REDIRECT_HTTP_AUTHORIZATION',
-        'HTTP_X_CFM_ACTOR_ASSERTION',
-        'X_CFM_ACTOR_ASSERTION',
-        'HTTP_X_CPANEL_ACTOR_ASSERTION',
-        'X_CPANEL_ACTOR_ASSERTION',
-        'CPANEL_ACTOR_ASSERTION',
-        'CFM_ACTOR_ASSERTION',
-    ] as $k) {
-        $v = $_SERVER[$k] ?? getenv($k);
-        if (is_string($v) && trim($v) !== '') {
-            $v = trim($v);
-            if (stripos($v, 'Bearer ') === 0) {
-                $v = trim(substr($v, 7));
-            }
-            if ($v !== '') return $v;
-        }
+    return '/var/run/cfm-auth.sock';
+}
+
+function cfm_issue_actor_assertion(string $user): array
+{
+    $sock = cfm_socket_auth_path();
+    $nonce = bin2hex(random_bytes(12));
+    $ts = time();
+    $secTok = trim((string)($_SERVER['CP_SECURITY_TOKEN'] ?? $_SERVER['cp_security_token'] ?? getenv('CP_SECURITY_TOKEN') ?? ''));
+    if ($secTok === '') {
+        return ['ok' => false, 'reason' => 'token_missing', 'error' => 'Missing cPanel security token'];
     }
-    return '';
+
+    $req = [
+        'panel' => 'cpanel',
+        'user' => strtolower(trim($user)),
+        'cpsess' => $secTok,
+        'ts' => $ts,
+        'nonce' => $nonce,
+    ];
+    $json = json_encode($req, JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        return ['ok' => false, 'reason' => 'bad_json', 'error' => 'Failed to encode auth request'];
+    }
+
+    $fp = @stream_socket_client('unix://' . $sock, $errno, $errstr, 1.5);
+    if (!is_resource($fp)) {
+        return ['ok' => false, 'reason' => 'socket_connect_failed', 'error' => 'Auth socket unavailable (' . $sock . ')'];
+    }
+    stream_set_timeout($fp, 2);
+    $http = "POST /auth/issue HTTP/1.1\r\n" .
+        "Host: localhost\r\n" .
+        "Content-Type: application/json\r\n" .
+        "Content-Length: " . strlen($json) . "\r\n" .
+        "Connection: close\r\n\r\n" .
+        $json;
+    fwrite($fp, $http);
+    $raw = stream_get_contents($fp);
+    fclose($fp);
+    if (!is_string($raw) || $raw === '') {
+        return ['ok' => false, 'reason' => 'socket_empty_response', 'error' => 'Empty auth socket response'];
+    }
+    $parts = preg_split("/\r\n\r\n/", $raw, 2);
+    $body = is_array($parts) && isset($parts[1]) ? $parts[1] : '';
+    $statusLine = is_array($parts) && isset($parts[0]) ? strtok($parts[0], "\r\n") : '';
+    $status = 0;
+    if (is_string($statusLine) && preg_match('/\s(\d{3})\s/', $statusLine, $m)) {
+        $status = (int)$m[1];
+    }
+    $decoded = json_decode((string)$body, true);
+    if (!is_array($decoded)) $decoded = [];
+    $assertion = trim((string)($decoded['assertion'] ?? ''));
+    if ($status >= 200 && $status < 300 && $assertion !== '') {
+        return ['ok' => true, 'assertion' => $assertion];
+    }
+    return [
+        'ok' => false,
+        'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
+        'error' => trim((string)($decoded['error'] ?? 'authorization required')),
+    ];
 }
 
 // Get user info (domains, db_users, databases) from CFM's local API.
@@ -284,19 +323,21 @@ function cfm_get_user_info(string $user): array
     }
 
     try {
-        $assertion = cfm_actor_assertion();
-        $headers = [];
-        if ($assertion !== '') {
-            $headers[] = 'X-CFM-Actor-Assertion: ' . $assertion;
-        } else {
-            $hints[] = 'Actor assertion missing from cPanel request context';
+        $issued = cfm_issue_actor_assertion($user);
+        if (!($issued['ok'] ?? false)) {
+            $reason = trim((string)($issued['reason'] ?? 'auth_failed'));
+            $error = trim((string)($issued['error'] ?? 'authorization required'));
+            cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => $reason]);
             return [
                 'ok'        => false,
-                'error'     => 'authorization required',
+                'error'     => $error,
                 'http_code' => 401,
+                'reason'    => $reason,
                 'hints'     => array_values(array_unique($hints)),
             ];
         }
+        $assertion = trim((string)$issued['assertion']);
+        $headers = ['X-CFM-Actor-Assertion: ' . $assertion];
         cfm_debug_log('user_info_request', [
             'user' => $user,
             'local_base' => $localBase,
@@ -312,6 +353,7 @@ function cfm_get_user_info(string $user): array
             'ok'        => true,
             'data'      => $data,
             'http_code' => 200,
+            'reason'    => '',
             'hints'     => $hints,
         ];
     } catch (Throwable $e) {
