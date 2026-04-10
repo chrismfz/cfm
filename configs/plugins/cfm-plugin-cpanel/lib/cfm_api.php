@@ -248,14 +248,21 @@ function cfm_issue_actor_assertion(string $user): array
     $sock = cfm_socket_auth_path();
     $nonce = bin2hex(random_bytes(12));
     $ts = time();
-    $secTok = trim((string)($_SERVER['CP_SECURITY_TOKEN'] ?? $_SERVER['cp_security_token'] ?? getenv('CP_SECURITY_TOKEN') ?? ''));
+    $source = 'env_upper';
+    $secTok = trim((string)($_SERVER['CP_SECURITY_TOKEN'] ?? getenv('CP_SECURITY_TOKEN') ?? ''));
     if ($secTok === '') {
+        $source = 'env_lower';
+        $secTok = trim((string)($_SERVER['cp_security_token'] ?? getenv('cp_security_token') ?? ''));
+    }
+    if ($secTok === '') {
+        $source = 'request_uri';
         $uri = (string)($_SERVER['REQUEST_URI'] ?? getenv('REQUEST_URI') ?? '');
         if (preg_match('~(/cpsess[0-9A-Za-z]{8,128})/~', $uri, $m)) {
             $secTok = trim((string)$m[1]);
         }
     }
     if ($secTok === '') {
+        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'token_missing', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'token_missing', 'error' => 'Missing cPanel security token'];
     }
 
@@ -273,6 +280,7 @@ function cfm_issue_actor_assertion(string $user): array
 
     $fp = @stream_socket_client('unix://' . $sock, $errno, $errstr, 1.5);
     if (!is_resource($fp)) {
+        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'socket_connect_failed', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'socket_connect_failed', 'error' => 'Auth socket unavailable (' . $sock . ')'];
     }
     stream_set_timeout($fp, 2);
@@ -286,6 +294,7 @@ function cfm_issue_actor_assertion(string $user): array
     $raw = stream_get_contents($fp);
     fclose($fp);
     if (!is_string($raw) || $raw === '') {
+        cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => 'socket_empty_response', 'source' => $source, 'sock' => $sock]);
         return ['ok' => false, 'reason' => 'socket_empty_response', 'error' => 'Empty auth socket response'];
     }
     $parts = preg_split("/\r\n\r\n/", $raw, 2);
@@ -299,8 +308,16 @@ function cfm_issue_actor_assertion(string $user): array
     if (!is_array($decoded)) $decoded = [];
     $assertion = trim((string)($decoded['assertion'] ?? ''));
     if ($status >= 200 && $status < 300 && $assertion !== '') {
+        cfm_debug_log('auth_socket_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
         return ['ok' => true, 'assertion' => $assertion];
     }
+    cfm_debug_log('auth_socket_issue_failed', [
+        'user' => $user,
+        'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
+        'source' => $source,
+        'sock' => $sock,
+        'http_status' => $status,
+    ]);
     return [
         'ok' => false,
         'reason' => trim((string)($decoded['reason'] ?? 'auth_failed')),
@@ -333,7 +350,13 @@ function cfm_get_user_info(string $user): array
         if (!($issued['ok'] ?? false)) {
             $reason = trim((string)($issued['reason'] ?? 'auth_failed'));
             $error = trim((string)($issued['error'] ?? 'authorization required'));
-            cfm_debug_log('auth_socket_issue_failed', ['user' => $user, 'reason' => $reason]);
+            if ($reason === 'session_not_found') {
+                $hints[] = 'cPanel session not found or expired; open CFM from cPanel again to refresh session context';
+            } elseif ($reason === 'secret_missing') {
+                $hints[] = 'CFM daemon assertion secret is not configured';
+            } elseif ($reason === 'token_malformed') {
+                $hints[] = 'Invalid cPanel session token format from request context';
+            }
             return [
                 'ok'        => false,
                 'error'     => $error,

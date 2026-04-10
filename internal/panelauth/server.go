@@ -90,6 +90,12 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	userName, reason := validateCpanelRequest(req, time.Now().UTC())
 	if reason != "" {
+		cpsessPrefix := strings.TrimSpace(req.CPSess)
+		if len(cpsessPrefix) > 18 {
+			cpsessPrefix = cpsessPrefix[:18] + "..."
+		}
+		logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=%s cpsess_prefix=%q ts=%d nonce_len=%d",
+			strings.TrimSpace(req.Panel), strings.TrimSpace(req.User), reason, cpsessPrefix, req.TS, len(strings.TrimSpace(req.Nonce)))
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: reason})
 		return
 	}
@@ -98,14 +104,17 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		secret = strings.TrimSpace(os.Getenv("CPANEL_PLUGIN_ASSERTION_SECRET"))
 	}
 	if secret == "" {
+		logging.Logf("[panel-auth] issue denied panel=%s user=%s reason=secret_missing", strings.TrimSpace(req.Panel), userName)
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "secret_missing"})
 		return
 	}
 	assertion, err := signAssertion(userName, req.Nonce, []byte(secret), time.Now().UTC())
 	if err != nil {
+		logging.Logf("[panel-auth] issue failed panel=%s user=%s reason=issue_failed err=%v", strings.TrimSpace(req.Panel), userName, err)
 		writeIssue(w, http.StatusInternalServerError, issueResp{Error: "internal error", Reason: "issue_failed"})
 		return
 	}
+	logging.Logf("[panel-auth] issue ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
 	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion})
 }
 
