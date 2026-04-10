@@ -2,11 +2,11 @@
 package webdetector
 
 import (
+	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"sort"
@@ -106,18 +106,17 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
 	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
 
-        fmt.Println("  cfm webtop history prune [days]")
-        fmt.Println("  cfm webtop history truncate --yes")
-        fmt.Println("  cfm webtop history waf-by-rule [--host H] [--hours 24]")
-        fmt.Println("  cfm webtop history overview --host H [--hours 24]")
+	fmt.Println("  cfm webtop history prune [days]")
+	fmt.Println("  cfm webtop history truncate --yes")
+	fmt.Println("  cfm webtop history waf-by-rule [--host H] [--hours 24]")
+	fmt.Println("  cfm webtop history overview --host H [--hours 24]")
 
-        fmt.Println("  cfm webtop tokens                               # list scoped tokens")
-        fmt.Println("  cfm webtop tokens create --vhosts a.com --label name [--ttl 8760h]")
-        fmt.Println("  cfm webtop tokens revoke <id>")
-        fmt.Println("  cfm webtop tokens me                            # calling token's scope")
+	fmt.Println("  cfm webtop tokens                               # list scoped tokens")
+	fmt.Println("  cfm webtop tokens create --vhosts a.com --label name [--ttl 8760h]")
+	fmt.Println("  cfm webtop tokens revoke <id>")
+	fmt.Println("  cfm webtop tokens me                            # calling token's scope")
 
-        fmt.Println("  cfm webtop user-info <username>                 # user info from panel")
-
+	fmt.Println("  cfm webtop user-info <username>                 # user info from panel")
 
 	fmt.Println()
 	fmt.Println("Sort keys: rps, 2xx, 3xx, 4xx, 5xx, uniq, err, rt, bot, ua_div, score")
@@ -159,9 +158,17 @@ func RunWebTop(baseURL string, args []string) error {
 			return runIPTop(baseURL, limit)
 
 		case "text":
-			return runTopSummary(baseURL)
-
-
+			limit, sortKey, host, inTop, err := parseWebTopTopArgs(args[1:])
+			if err != nil {
+				return err
+			}
+			if host != "" {
+				return fmt.Errorf("cannot combine text mode with a vhost name")
+			}
+			if !inTop {
+				return runTopSummary(baseURL)
+			}
+			return runTopSummaryExt(baseURL, limit, sortKey)
 
 		case "long":
 			limit := 20
@@ -199,20 +206,16 @@ func RunWebTop(baseURL string, args []string) error {
 		case "history":
 			return runHistoryWebTop(baseURL, args[1:])
 		case "tokens":
-                        return runTokensWebTop(baseURL, args[1:])
+			return runTokensWebTop(baseURL, args[1:])
 
 		case "user-info":
-                        if len(args) < 2 {
-                                return fmt.Errorf("usage: cfm webtop user-info <cpanel-username>")
-                        }
-                        RunCpanelUserInfo(args[1])
-                        return nil
-
-
+			if len(args) < 2 {
+				return fmt.Errorf("usage: cfm webtop user-info <cpanel-username>")
+			}
+			RunCpanelUserInfo(args[1])
+			return nil
 
 		}
-
-
 
 	}
 
@@ -244,14 +247,26 @@ func RunWebTop(baseURL string, args []string) error {
 		}
 	}
 
-	// Parsing:
-	var (
-		limit   int
-		sortKey string
-		host    string
-		inTop   bool
-	)
+	limit, sortKey, host, inTop, err := parseWebTopTopArgs(args)
+	if err != nil {
+		return err
+	}
 
+	if host != "" {
+		return runTopDrilldown(baseURL, host)
+	}
+
+	// No host => summary/top mode
+	if inTop {
+		return runTopSummaryExt(baseURL, limit, sortKey)
+	}
+
+	// plain "cfm webtop" -> live picker
+	return RunLiveTop(baseURL, 30)
+
+}
+
+func parseWebTopTopArgs(args []string) (limit int, sortKey, host string, inTop bool, err error) {
 	i := 0
 	for i < len(args) {
 		a := args[i]
@@ -260,7 +275,7 @@ func RunWebTop(baseURL string, args []string) error {
 		if a == "top" {
 			inTop = true
 			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil {
+				if n, convErr := strconv.Atoi(args[i+1]); convErr == nil {
 					limit = n
 					i += 2
 					continue
@@ -272,9 +287,9 @@ func RunWebTop(baseURL string, args []string) error {
 
 		if strings.HasPrefix(a, "top=") {
 			inTop = true
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "top="))
-			if err != nil {
-				return fmt.Errorf("invalid top= value")
+			n, convErr := strconv.Atoi(strings.TrimPrefix(a, "top="))
+			if convErr != nil {
+				return 0, "", "", false, fmt.Errorf("invalid top= value")
 			}
 			limit = n
 			i++
@@ -284,11 +299,11 @@ func RunWebTop(baseURL string, args []string) error {
 		// --limit / -n
 		if a == "--limit" || a == "-n" {
 			if i+1 >= len(args) {
-				return fmt.Errorf("%s needs a number", a)
+				return 0, "", "", false, fmt.Errorf("%s needs a number", a)
 			}
-			n, err := strconv.Atoi(args[i+1])
-			if err != nil || n <= 0 {
-				return fmt.Errorf("invalid limit")
+			n, convErr := strconv.Atoi(args[i+1])
+			if convErr != nil || n <= 0 {
+				return 0, "", "", false, fmt.Errorf("invalid limit")
 			}
 			limit = n
 			inTop = true
@@ -296,9 +311,9 @@ func RunWebTop(baseURL string, args []string) error {
 			continue
 		}
 		if strings.HasPrefix(a, "--limit=") {
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
-			if err != nil {
-				return fmt.Errorf("invalid --limit=")
+			n, convErr := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if convErr != nil {
+				return 0, "", "", false, fmt.Errorf("invalid --limit=")
 			}
 			limit = n
 			inTop = true
@@ -309,7 +324,7 @@ func RunWebTop(baseURL string, args []string) error {
 		// sort
 		if a == "--sort" {
 			if i+1 >= len(args) {
-				return fmt.Errorf("--sort needs a key")
+				return 0, "", "", false, fmt.Errorf("--sort needs a key")
 			}
 			sortKey = args[i+1]
 			inTop = true
@@ -343,13 +358,12 @@ func RunWebTop(baseURL string, args []string) error {
 			continue
 		}
 
-		return fmt.Errorf("unexpected arg: %s", a)
-
+		return 0, "", "", false, fmt.Errorf("unexpected arg: %s", a)
 	}
 
 	// host mode cannot mix with top mode
 	if host != "" && inTop {
-		return fmt.Errorf("cannot combine top/limit/sort with a vhost name")
+		return 0, "", "", false, fmt.Errorf("cannot combine top/limit/sort with a vhost name")
 	}
 
 	// default top N when user typed "top" with no number
@@ -357,18 +371,7 @@ func RunWebTop(baseURL string, args []string) error {
 		limit = 20
 	}
 
-	if host != "" {
-		return runTopDrilldown(baseURL, host)
-	}
-
-	// No host => summary/top mode
-	if inTop {
-		return runTopSummaryExt(baseURL, limit, sortKey)
-	}
-
-	// plain "cfm webtop" -> live picker
-	return RunLiveTop(baseURL, 30)
-
+	return limit, sortKey, host, inTop, nil
 }
 
 // legacy simple summary (no limit/sort) – now just a wrapper
