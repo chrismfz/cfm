@@ -92,6 +92,7 @@
        wafSummary: null,
         // Token management
         isAdmin: false,
+        isScopedMode: false,
         tokenRole: 'viewer',
         allowedVhosts: [],
         meLoaded: false,
@@ -165,11 +166,12 @@
           rt: null,
         },
         resizeHandler: null,
+        scopedSkipInfoLogged: false,
       };
     },
 
     computed: {
-      isScoped() { return !this.isAdmin; },
+      isScoped() { return this.isScopedMode; },
       canWrite() { return this.isAdmin || this.tokenRole !== 'viewer'; },
       hasScopedVhosts() { return this.isScoped && this.allowedVhosts.length > 0; },
       shortDetail() {
@@ -562,7 +564,7 @@
 
       shouldShow(section) {
         if (this.isScoped) {
-          const hiddenForScoped = new Set(['globalips', 'tokens']);
+          const hiddenForScoped = new Set(['globalips', 'tokens', 'excludes']);
           if (hiddenForScoped.has(section)) return false;
         }
         const groups = {
@@ -574,6 +576,13 @@
         };
         const active = groups[this.pageMode] || groups.overview;
         return active.has(section);
+      },
+      logScopedAdminSkipsOnce(paths) {
+        if (!this.isScoped || this.scopedSkipInfoLogged) return;
+        const list = Array.isArray(paths) ? paths.filter(Boolean) : [];
+        if (!list.length) return;
+        console.info('[cfm-admin] scoped mode: skipped admin/global endpoints:', list.join(', '));
+        this.scopedSkipInfoLogged = true;
       },
 
       vhostLiveURL(host) {
@@ -836,6 +845,12 @@
       },
 
       async refreshExcludeLists() {
+        if (this.isScoped) {
+          this.challengeExcludes = [];
+          this.wafExcludes = [];
+          this.logScopedAdminSkipsOnce(['v1/challenge/exclude/list', 'v1/waf/exclude/list']);
+          return;
+        }
         const [challengeExcludes, wafExcludes] = await Promise.all([
           this.fetchJSONSafe('v1/challenge/exclude/list', []),
           this.fetchJSONSafe('v1/waf/exclude/list', []),
@@ -1368,6 +1383,13 @@
           this.ipShortLimit = ipLimit;
           this.hotIPsLimit = hotLimit;
 
+          const skipAdminEndpoints = [];
+          if (this.isScoped) {
+            if (this.shouldShow('globalips') || this.shouldShow('ipdrilldown')) skipAdminEndpoints.push('v1/webdet/ip-short');
+            if (this.shouldShow('webtop')) skipAdminEndpoints.push('v1/webdet/hot-ips');
+            skipAdminEndpoints.push('v1/challenge/vhosts?status=active&mode=all&limit=500');
+          }
+
           const tasks = [
             (this.shouldShow('webtop') || this.shouldShow('vhost'))
               ? this.fetchJSONSafe(`v1/webdet/top-short?limit=${topLimit}`, { rows: [] })
@@ -1378,13 +1400,15 @@
             this.shouldShow('longtop')
               ? this.fetchJSONSafe(`v1/webdet/long-top?limit=${longLimit}`, { rows: [] })
               : Promise.resolve({ rows: [] }),
-            (this.shouldShow('globalips') || this.shouldShow('ipdrilldown'))
+            !this.isScoped && (this.shouldShow('globalips') || this.shouldShow('ipdrilldown'))
               ? this.fetchJSONSafe(`v1/webdet/ip-short?limit=${ipLimit}`, { short: [] })
               : Promise.resolve({ short: [] }),
-            this.shouldShow('webtop')
+            !this.isScoped && this.shouldShow('webtop')
               ? this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, [])
               : Promise.resolve([]),
-            this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
+            this.isScoped
+              ? Promise.resolve([])
+              : this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
           ];
 
           const [topShort, suspicious, longTop, ipShort, hotIPs, activeChallengeVhosts] = await Promise.all(tasks);
@@ -1395,6 +1419,7 @@
           this.ipShort = this.extractRows(ipShort, 'short');
           this.hotIPs = this.extractRows(hotIPs, 'rows');
           this.activeChallengeVhosts = this.extractRows(activeChallengeVhosts, 'rows');
+          this.logScopedAdminSkipsOnce(skipAdminEndpoints);
           if (this.hasScopedVhosts) {
             const allow = new Set(this.allowedVhosts);
             const byHost = (row) => allow.has(String(row?.host || '').toLowerCase());
@@ -1475,7 +1500,8 @@
 
       async checkAdminStatus() {
         const me = await this.fetchJSONSafe('v1/tokens/me', {});
-        this.isAdmin = !me?.scoped;
+        this.isScopedMode = Boolean(me?.scoped);
+        this.isAdmin = !this.isScopedMode;
         this.tokenRole = String(me?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
         this.allowedVhosts = Array.isArray(me?.vhosts) ? me.vhosts.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean) : [];
         if (this.hasScopedVhosts) {
