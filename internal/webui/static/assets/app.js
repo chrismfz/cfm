@@ -14,6 +14,22 @@
   //
   let _scopedToken = '';
   const _tokenWaiters = [];
+  let _lateTokenReinitialized = false;
+  let _lateTokenReinitPending = false;
+  let _appVm = null;
+
+  function triggerLateTokenReinit() {
+    if (_lateTokenReinitialized) return;
+    _lateTokenReinitialized = true;
+    if (_appVm && typeof _appVm.onLateScopedToken === 'function') {
+      _appVm.onLateScopedToken().catch((err) => {
+        console.error('[cfm-webui] late token re-init failed', err);
+      });
+      return;
+    }
+    _lateTokenReinitPending = true;
+  }
+
   function _notifyTokenReady() {
     while (_tokenWaiters.length) {
       const resolve = _tokenWaiters.shift();
@@ -55,9 +71,11 @@
   window.addEventListener('message', function cfmTokenMsg(evt) {
     const tok = evt && evt.data && evt.data.cfmToken;
     if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
+    const hadToken = Boolean(_scopedToken);
     console.debug('[cfm-webui] Method A token received via postMessage; setting scoped token and ACKing parent.');
     _scopedToken = tok;
     _notifyTokenReady();
+    if (!hadToken) triggerLateTokenReinit();
     try {
       if (window.parent && window.parent !== window) {
         window.parent.postMessage({ cfmTokenAck: true, path: 'postMessage' }, evt.origin || '*');
@@ -1525,23 +1543,18 @@
 
       async checkAdminStatus() {
         const hadTokenAtStart = Boolean(_scopedToken);
-        let res = await fetch('/cfm-admin/api/v1/tokens/me', {
+        const fetchMe = (token) => fetch('/cfm-admin/api/v1/tokens/me', {
           credentials: 'same-origin',
           headers: {
             Accept: 'application/json',
-            ...(_scopedToken ? { Authorization: `Bearer ${_scopedToken}` } : {}),
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
         });
-        if (res.status === 401 && !hadTokenAtStart) {
+        let res = await fetchMe(_scopedToken);
+        if (!hadTokenAtStart) {
           await waitForScopedToken(1500);
           if (_scopedToken) {
-            res = await fetch('/cfm-admin/api/v1/tokens/me', {
-              credentials: 'same-origin',
-              headers: {
-                Accept: 'application/json',
-                Authorization: `Bearer ${_scopedToken}`,
-              },
-            });
+            res = await fetchMe(_scopedToken);
           }
         }
         if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
@@ -1565,6 +1578,16 @@
         if (!this.modeChangeLogged && prevMode !== newMode) {
           console.info('[cfm-webui] mode_changed', { from: prevMode, to: newMode });
           this.modeChangeLogged = true;
+        }
+      },
+
+      async onLateScopedToken() {
+        const prevMode = this.isScopedMode ? 'scoped' : 'global';
+        await this.checkAdminStatus();
+        this.applyScopedChrome();
+        const newMode = this.isScopedMode ? 'scoped' : 'global';
+        if (prevMode !== newMode) {
+          await this.refreshAll();
         }
       },
 
@@ -1635,6 +1658,13 @@
     },
 
     mounted() {
+      _appVm = this;
+      if (_lateTokenReinitPending && typeof this.onLateScopedToken === 'function') {
+        _lateTokenReinitPending = false;
+        this.onLateScopedToken().catch((err) => {
+          console.error('[cfm-webui] late token re-init failed', err);
+        });
+      }
       const path = (window.location.pathname || '').replace(/\/+$/, '/');
 
       if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
@@ -1685,6 +1715,7 @@
     },
 
     beforeUnmount() {
+      if (_appVm === this) _appVm = null;
       if (this.timer) clearInterval(this.timer);
       if (this.resizeHandler) window.removeEventListener('resize', this.resizeHandler);
       this.disposeVhostCharts();
