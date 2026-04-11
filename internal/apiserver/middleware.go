@@ -20,13 +20,30 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"strings"
+	"time"
 
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 )
 
 var sessionAllowedRequest = sessionAllowed
+
+var (
+	embedBootstrapAuthLogMu   sync.Mutex
+	embedBootstrapAuthLastLog time.Time
+)
+
+func shouldLogEmbedBootstrapAuth(now time.Time) bool {
+	embedBootstrapAuthLogMu.Lock()
+	defer embedBootstrapAuthLogMu.Unlock()
+	if !embedBootstrapAuthLastLog.IsZero() && now.Sub(embedBootstrapAuthLastLog) < 15*time.Second {
+		return false
+	}
+	embedBootstrapAuthLastLog = now
+	return true
+}
 
 // isPublicPath returns true if the request path requires no auth.
 // cfmBase returns the path prefix used by the UI when generating redirects.
@@ -180,14 +197,16 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
-			if !tokenHeaderSupplied {
-				if ctx, ok := embedScopedContextFromCookie(r, store); ok {
-					logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie")
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
+				// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
+				if !tokenHeaderSupplied {
+					if ctx, ok := embedScopedContextFromCookie(r, store); ok {
+						if shouldLogEmbedBootstrapAuth(time.Now()) {
+							logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie (sampled_every=15s)")
+						}
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
 				}
-			}
 
 			// ── 4. Embedded requests require token or embed bootstrap cookie ─
 			if embedded {
