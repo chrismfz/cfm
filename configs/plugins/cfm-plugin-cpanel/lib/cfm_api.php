@@ -249,6 +249,14 @@ function cfm_admin_token(): string
     return trim((string)($cfg['AUTH_TOKEN'] ?? $cfg['TOKEN'] ?? ''));
 }
 
+function cfm_should_log_auth_token_missing_once(): bool
+{
+    static $alreadyLogged = false;
+    if ($alreadyLogged) return false;
+    $alreadyLogged = true;
+    return true;
+}
+
 function cfm_issue_actor_assertion(string $user): array
 {
     $sock = cfm_socket_auth_path();
@@ -258,8 +266,12 @@ function cfm_issue_actor_assertion(string $user): array
     $authTokenKeyExists = array_key_exists('AUTH_TOKEN', $cfg) || array_key_exists('TOKEN', $cfg);
     $adminToken = cfm_admin_token();
     $adminTokenMissing = ($adminToken === '');
-    if ($adminTokenMissing) {
+    if ($adminTokenMissing && cfm_should_log_auth_token_missing_once()) {
+        // In jailed cPanel plugin runtime, /etc/cfm/cfm.conf (and AUTH_TOKEN inside it)
+        // may be intentionally unreadable. This is expected and non-fatal because the
+        // plugin prefers the unix-socket auth flow and scoped-token mint path.
         cfm_debug_log('auth_token_missing_in_plugin_runtime', [
+            'note' => 'non-fatal in jailed plugin runtime; socket auth path preferred',
             'conf_path' => $confPath,
             'conf_readable' => $confReadable,
             'auth_token_key_exists' => $authTokenKeyExists,
@@ -338,6 +350,14 @@ function cfm_issue_actor_assertion(string $user): array
         }
         cfm_debug_log('auth_socket_assertion_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
         cfm_debug_log('auth_socket_scoped_token_mint_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
+        if ($adminTokenMissing) {
+            cfm_debug_log('auth_socket_scoped_token_mint_ok_after_admin_token_missing', [
+                'user' => $user,
+                'source' => $source,
+                'sock' => $sock,
+                'note' => 'socket scoped token mint succeeded; missing /etc/cfm/cfm.conf AUTH_TOKEN did not block authentication',
+            ]);
+        }
         $userInfo = $decoded['user_info'] ?? null;
         if (!is_array($userInfo)) $userInfo = null;
         return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken, 'user_info' => $userInfo];
