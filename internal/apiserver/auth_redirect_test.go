@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func withSessionAllowedStub(t *testing.T, allow bool) {
+	t.Helper()
+	orig := sessionAllowedRequest
+	sessionAllowedRequest = func(_ *http.Request) bool { return allow }
+	t.Cleanup(func() { sessionAllowedRequest = orig })
+}
+
 func TestTokenMiddlewareRedirectDirectTLSKeepsCfmAdminPrefix(t *testing.T) {
 	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -91,6 +98,55 @@ func TestTokenMiddlewareAllowsPrefixedLoginPath(t *testing.T) {
 
 	if !called {
 		t.Fatalf("expected prefixed login request to pass through middleware")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}
+
+func TestTokenMiddlewareEmbeddedRequestRejectsSessionFallback(t *testing.T) {
+	withSessionAllowedStub(t, true)
+
+	called := false
+	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req.Header.Set("X-CFM-Embedded", "cpanel")
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if called {
+		t.Fatalf("embedded request should not reach handler via session fallback")
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d got %d", http.StatusUnauthorized, rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "" {
+		t.Fatalf("expected no redirect for embedded request, got Location=%q", loc)
+	}
+}
+
+func TestTokenMiddlewareStandaloneRequestAllowsSessionFallback(t *testing.T) {
+	withSessionAllowedStub(t, true)
+
+	called := false
+	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("standalone request should be allowed via session fallback")
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
