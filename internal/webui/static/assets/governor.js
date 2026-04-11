@@ -12,6 +12,10 @@
   //   Still cleared from the address bar via history.replaceState.
   //
   let _scopedToken = '';
+  const TOKEN_BOOT_WAIT_MS = 1200;
+  let _tokenWaitResolved = false;
+  let _tokenWaitResolve = null;
+  let _lateTokenReinitialized = false;
  
   // Method B: read URL param immediately so legacy setups keep working.
   (function () {
@@ -23,6 +27,20 @@
       _scopedToken = t;
     }
   })();
+
+  function resolveTokenWait(reason) {
+    if (_tokenWaitResolved || !_tokenWaitResolve) return;
+    _tokenWaitResolved = true;
+    _tokenWaitResolve(reason);
+  }
+
+  function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
+    if (_scopedToken) return Promise.resolve('url');
+    return new Promise((resolve) => {
+      _tokenWaitResolve = resolve;
+      window.setTimeout(() => resolveTokenWait('timeout'), timeoutMs);
+    });
+  }
  
   // Method A: postMessage listener.
   // Validates token format (64 lowercase hex chars) before accepting.
@@ -30,8 +48,19 @@
   window.addEventListener('message', function cfmTokenMsg(evt) {
     const tok = evt && evt.data && evt.data.cfmToken;
     if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
+    const hadToken = Boolean(_scopedToken);
     _scopedToken = tok;
     window.removeEventListener('message', cfmTokenMsg);
+    if (!_tokenWaitResolved) {
+      resolveTokenWait('postmessage');
+      return;
+    }
+    if (!hadToken && !_lateTokenReinitialized) {
+      _lateTokenReinitialized = true;
+      onLateScopedToken().catch((err) => {
+        console.error('[cfm-admin governor] late token re-init failed', err);
+      });
+    }
   });
 
   const appRoot = document.getElementById('app');
@@ -709,12 +738,40 @@
     if (el.filterType) el.filterType.disabled = true;
   }
 
-  loadViewerContext().then((ctx) => {
+  function applyViewerContext(ctx) {
     setScopedUI(ctx.scoped);
     if (!ctx.canWrite) {
       [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
     }
+  }
+
+  function configurePollingMode() {
+    if (st.auto) startAuto();
+  }
+
+  async function onLateScopedToken() {
+    const ctx = await loadViewerContext();
+    applyViewerContext(ctx);
+    configurePollingMode();
+    await refresh();
+    console.info('[cfm-admin governor] startup mode', {
+      token_present_at_boot: false,
+      scoped_me: ctx.scoped,
+      mode_selected: ctx.scoped ? 'scoped' : 'global',
+    });
+  }
+
+  (async function boot() {
+    await waitForScopedTokenOrTimeout();
+    const tokenPresentAtBoot = Boolean(_scopedToken);
+    const ctx = await loadViewerContext();
+    applyViewerContext(ctx);
     startAuto();
     refresh();
-  });
+    console.info('[cfm-admin governor] startup mode', {
+      token_present_at_boot: tokenPresentAtBoot,
+      scoped_me: ctx.scoped,
+      mode_selected: ctx.scoped ? 'scoped' : 'global',
+    });
+  })();
 })();
