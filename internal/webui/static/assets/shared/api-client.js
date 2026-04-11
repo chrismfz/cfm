@@ -57,7 +57,8 @@
       const runFetch = async () => {
         const headers = { ...(reqOpts.headers || {}) };
         const token = String(resolvedGetToken() || '').trim();
-        if (token) headers.Authorization = `Bearer ${token}`;
+        const authz = window.CFMSharedConstants?.buildBearerHeader?.(token) || (token ? `Bearer ${token}` : '');
+        if (authz) headers.Authorization = authz;
         const res = await fetch(`${resolvedBase}${normalizedPath}`, { ...reqOpts, headers });
         const data = await parseResponseJSON(res);
         if (!res.ok || data?.ok === false) {
@@ -88,5 +89,4 @@
   }
 
   window.CFMApiClient = { createApiClient };
-  window.createApiClient = createApiClient;
 })();

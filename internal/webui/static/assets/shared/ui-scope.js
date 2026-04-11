@@ -9,7 +9,7 @@
     return null;
   }
 
-  function applyScopedBadge({ selector, scopedLabel = 'Scoped view', globalLabel = 'Global view' } = {}) {
+  function applyScopedBadge({ selector, scopedLabel, globalLabel } = {}) {
     const container = resolveElement(selector);
     if (!container) return null;
 
@@ -20,9 +20,13 @@
       container.prepend(badge);
     }
 
-    badge.textContent = scopedLabel;
-    badge.dataset.scopedLabel = scopedLabel;
-    badge.dataset.globalLabel = globalLabel;
+    const labels = window.CFMSharedConstants?.SCOPE_LABELS || {};
+    const resolvedScopedLabel = scopedLabel || labels.scoped || '';
+    const resolvedGlobalLabel = globalLabel || labels.global || '';
+
+    badge.textContent = resolvedScopedLabel;
+    badge.dataset.scopedLabel = resolvedScopedLabel;
+    badge.dataset.globalLabel = resolvedGlobalLabel;
     return badge;
   }
 

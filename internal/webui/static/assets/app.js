@@ -1447,11 +1447,7 @@
       },
       // ── Token management ──────────────────────────────────────────────────
       applyScopedChrome() {
-        controller.applyScopedChrome({
-          scoped: this.isScoped,
-          scopedLabel: 'Scoped view',
-          globalLabel: 'Global view',
-        });
+        controller.applyScopedChrome({ scoped: this.isScoped });
       },
 
       async checkAdminStatus() {

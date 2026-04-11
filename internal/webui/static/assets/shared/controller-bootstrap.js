@@ -3,25 +3,10 @@
     return href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
   }
 
-  function createFallbackAuthContext() {
-    return {
-      getToken: () => '',
-      waitForToken: async () => '',
-      onAuthContextChanged: () => () => {},
-      loadMe: async ({ preferScopedToken = true } = {}) => {
-        const headers = { Accept: 'application/json' };
-        if (preferScopedToken && window.CFMAuthContext?.getToken?.()) {
-          headers.Authorization = `Bearer ${window.CFMAuthContext.getToken()}`;
-        }
-        const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
-        if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
-        return res.json();
-      },
-    };
-  }
-
   function initSharedController({ onModeChanged, onDeferredScopedToken } = {}) {
-    const authCtx = window.CFMAuthContext || createFallbackAuthContext();
+    const authCtx = window.CFMAuthContext;
+    if (!authCtx) throw new Error('CFMAuthContext is required before initializing controllers');
+
     let scopedToken = authCtx.getToken();
     const transitionTracker = window.CFMAuthMode?.createDeferredScopedTransitionTracker?.();
 
@@ -41,7 +26,8 @@
       }
     });
 
-    const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+    const createApiClient = window.CFMApiClient?.createApiClient;
+    if (typeof createApiClient !== 'function') throw new Error('CFMApiClient.createApiClient is required before initializing controllers');
 
     return {
       authCtx,
@@ -67,13 +53,17 @@
         navSelector = '.top-nav',
         adminOnlyMatcher = defaultAdminOnlyMatcher,
         badgeSelector = '.topbar .meta',
-        scopedLabel = 'Scoped view',
-        globalLabel = 'Global view',
+        scopedLabel,
+        globalLabel,
       } = {}) => {
+        const labels = window.CFMSharedConstants?.SCOPE_LABELS || {};
+        const resolvedScopedLabel = scopedLabel || labels.scoped;
+        const resolvedGlobalLabel = globalLabel || labels.global;
+
         const uiScope = window.CFMUiScope || {};
         uiScope.applyScopedNavFiltering?.({ navSelector, scoped, adminOnlyMatcher });
-        const badge = uiScope.applyScopedBadge?.({ selector: badgeSelector, scopedLabel, globalLabel });
-        if (badge) badge.textContent = scoped ? scopedLabel : globalLabel;
+        const badge = uiScope.applyScopedBadge?.({ selector: badgeSelector, scopedLabel: resolvedScopedLabel, globalLabel: resolvedGlobalLabel });
+        if (badge) badge.textContent = scoped ? resolvedScopedLabel : resolvedGlobalLabel;
         return badge;
       },
     };

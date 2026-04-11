@@ -136,7 +136,6 @@
     controller.applyScopedChrome({
       scoped: isScopedMode,
       scopedLabel: 'Scoped MySQL view',
-      globalLabel: 'Global view',
     });
 
     return { isScopedMode, canWrite, role: auth.role };
