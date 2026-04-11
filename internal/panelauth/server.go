@@ -2,6 +2,7 @@ package panelauth
 
 import (
 	"bytes"
+	cfgpkg "cfm/internal/config"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -39,16 +41,18 @@ var (
 )
 
 type issueReq struct {
-	Panel  string `json:"panel"`
-	User   string `json:"user"`
-	CPSess string `json:"cpsess"`
-	TS     int64  `json:"ts"`
-	Nonce  string `json:"nonce"`
+	Panel       string `json:"panel"`
+	User        string `json:"user"`
+	CPSess      string `json:"cpsess"`
+	TS          int64  `json:"ts"`
+	Nonce       string `json:"nonce"`
+	RequestHost string `json:"request_host,omitempty"`
 }
 
 type issueResp struct {
 	Assertion   string `json:"assertion,omitempty"`
 	ScopedToken string `json:"scoped_token,omitempty"`
+	UIBaseURL   string `json:"ui_base_url,omitempty"`
 	UserInfo    any    `json:"user_info,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	Error       string `json:"error,omitempty"`
@@ -167,8 +171,74 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 		writeIssue(w, http.StatusUnauthorized, issueResp{Error: "authorization required", Reason: "scoped_token_issue_failed"})
 		return
 	}
+	uiBaseURL := computePluginUIBaseURL(strings.TrimSpace(req.RequestHost))
 	logging.Logf("[panel-auth] scoped_token_mint_ok panel=%s user=%s", strings.TrimSpace(req.Panel), userName)
-	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion, ScopedToken: scopedToken, UserInfo: userInfo})
+	writeIssue(w, http.StatusOK, issueResp{Assertion: assertion, ScopedToken: scopedToken, UIBaseURL: uiBaseURL, UserInfo: userInfo})
+}
+
+func computePluginUIBaseURL(requestHost string) string {
+	cfgPath, err := resolveRuntimeCFMConfPath()
+	if err != nil {
+		return ""
+	}
+	cfg, err := loadConfigFromPath(cfgPath)
+	if err != nil {
+		return ""
+	}
+	tlsPort := cfg.Debug.TLSPort
+	if tlsPort <= 0 {
+		return ""
+	}
+	host := sanitizeHost(requestHost)
+	canonicalHost := sanitizeHost(canonicalHostFromConfig(cfg))
+	if host == "" {
+		host = canonicalHost
+	}
+	if host == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://%s:%d", host, tlsPort)
+}
+
+func canonicalHostFromConfig(cfg *cfgpkg.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	// Prefer explicit plugin/runtime host knobs when present.
+	for _, key := range []string{
+		"CPANEL_PLUGIN_CANONICAL_HOST",
+		"PLUGIN_CANONICAL_HOST",
+		"CANONICAL_HOST",
+		"HOSTNAME",
+	} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	if parsed, err := url.Parse(strings.TrimSpace(cfg.API.URL)); err == nil {
+		if h := strings.TrimSpace(parsed.Hostname()); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
+func sanitizeHost(v string) string {
+	host := strings.ToLower(strings.TrimSpace(v))
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") {
+		if parsed, _, err := net.SplitHostPort(host); err == nil {
+			host = parsed
+		}
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || strings.Contains(host, "/") || strings.ContainsAny(host, " \t\r\n") {
+		return ""
+	}
+	return host
 }
 
 func mintScopedViewerToken(userName, assertion string) (cpanelUserInfo, string, error) {

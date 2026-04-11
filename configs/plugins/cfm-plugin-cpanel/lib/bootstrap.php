@@ -47,6 +47,7 @@ function cfm_bootstrap(string $mode): void
     $error       = '';
     $token       = '';
     $pageTitle   = 'CFM Security';
+    $socketUIBase = '';
 
     if ($currentUser === '') {
         $error = 'Could not determine cPanel username.';
@@ -116,13 +117,14 @@ function cfm_bootstrap(string $mode): void
 
         if ($error === '' && !empty($domains)) {
             $token = trim((string)($userInfoResult['scoped_token'] ?? ''));
+            $socketUIBase = trim((string)($userInfoResult['ui_base_url'] ?? ''));
             if ($token === '') {
                 $error = 'CFM auth did not return a scoped token.';
             }
         }
     }
 
-    $iframeBase   = cfm_iframe_base_url();
+    $iframeBase   = cfm_iframe_base_url($socketUIBase);
     $iframeUrl    = $iframeBase . '/cfm-admin/webdetector/controls/';
     $parsed       = parse_url($iframeBase);
     $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
