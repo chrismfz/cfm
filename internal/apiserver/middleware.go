@@ -3,11 +3,13 @@
 // Bearer token middleware for the cfm apiserver.
 //
 // Auth order per request:
-//  1. Public path (/login, /logout, /login/verify) → pass through
-//  2. Authorization: Bearer / X-CFM-Token / Token  → validate admin or scoped token
-//  3. Valid goauth session cookie                  → allow (only if no token header)
-//  4. Browser request (Accept: text/html)          → redirect to /login
-//  5. Everything else                              → 401 / 403
+//  1. Public path (/login, /logout, /api/v1/embed/bootstrap) → pass through
+//  2. Authorization: Bearer / X-CFM-Token / Token            → validate admin or scoped token
+//  3. Scoped bootstrap cookie (cfm-embed-scope; /cfm-admin)  → allow scoped embedded/admin UI request
+//  4. Embedded request without valid token/cookie             → 401 (no session fallback)
+//  5. Valid goauth session cookie                             → allow (only if no token header, non-embedded)
+//  6. Browser request (Accept: text/html)                     → redirect to /login
+//  7. Everything else                                         → 401 / 403
 //
 
 package apiserver
@@ -178,14 +180,6 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			if embedded {
-				logging.Logf("[apiserver] auth_reject=missing_scoped_embedded")
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
-				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
-				return
-			}
-
 			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(r, store); ok {
@@ -195,14 +189,23 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				}
 			}
 
-			// ── 4. Valid goauth session (fallback when no token header) ───
+			// ── 4. Embedded requests require token or embed bootstrap cookie ─
+			if embedded {
+				logging.Logf("[apiserver] auth_reject=missing_scoped_embedded")
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
+				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
+				return
+			}
+
+			// ── 5. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				logging.Logf("[apiserver] auth_source=session_cookie")
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// ── 5. No token — redirect browsers, 401 API clients ──────────
+			// ── 6. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				base := cfmBase(r)
 				next := r.URL.RequestURI()
