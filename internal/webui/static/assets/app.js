@@ -13,6 +13,27 @@
   //   Still cleared from the address bar via history.replaceState.
   //
   let _scopedToken = '';
+  const _tokenWaiters = [];
+  function _notifyTokenReady() {
+    while (_tokenWaiters.length) {
+      const resolve = _tokenWaiters.shift();
+      try { resolve(_scopedToken); } catch (_) {}
+    }
+  }
+  function waitForScopedToken(timeoutMs = 1200) {
+    if (_scopedToken) return Promise.resolve(_scopedToken);
+    return new Promise((resolve) => {
+      const done = (token = '') => resolve(token || '');
+      _tokenWaiters.push(done);
+      if (timeoutMs > 0) {
+        setTimeout(() => {
+          const idx = _tokenWaiters.indexOf(done);
+          if (idx >= 0) _tokenWaiters.splice(idx, 1);
+          done('');
+        }, timeoutMs);
+      }
+    });
+  }
  
   // Method B: read URL param immediately so legacy setups keep working.
   (function () {
@@ -24,6 +45,7 @@
       window.history.replaceState({}, '', u.toString());
       console.debug('[cfm-webui] Method B token removed from URL via history.replaceState cleanup.');
       _scopedToken = t;
+      _notifyTokenReady();
     }
   })();
  
@@ -35,6 +57,7 @@
     if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
     console.debug('[cfm-webui] Method A token received via postMessage; setting scoped token and ACKing parent.');
     _scopedToken = tok;
+    _notifyTokenReady();
     try {
       if (window.parent && window.parent !== window) {
         window.parent.postMessage({ cfmTokenAck: true, path: 'postMessage' }, evt.origin || '*');
@@ -167,6 +190,8 @@
         },
         resizeHandler: null,
         scopedSkipInfoLogged: false,
+        tokenBootLogged: false,
+        modeChangeLogged: false,
       };
     },
 
@@ -1499,7 +1524,29 @@
       },
 
       async checkAdminStatus() {
-        const me = await this.fetchJSONSafe('v1/tokens/me', {});
+        const hadTokenAtStart = Boolean(_scopedToken);
+        let res = await fetch('/cfm-admin/api/v1/tokens/me', {
+          credentials: 'same-origin',
+          headers: {
+            Accept: 'application/json',
+            ...(_scopedToken ? { Authorization: `Bearer ${_scopedToken}` } : {}),
+          },
+        });
+        if (res.status === 401 && !hadTokenAtStart) {
+          await waitForScopedToken(1500);
+          if (_scopedToken) {
+            res = await fetch('/cfm-admin/api/v1/tokens/me', {
+              credentials: 'same-origin',
+              headers: {
+                Accept: 'application/json',
+                Authorization: `Bearer ${_scopedToken}`,
+              },
+            });
+          }
+        }
+        if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
+        const me = await res.json();
+        const prevMode = this.isScopedMode ? 'scoped' : 'global';
         this.isScopedMode = Boolean(me?.scoped);
         this.isAdmin = !this.isScopedMode;
         this.tokenRole = String(me?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
@@ -1514,6 +1561,11 @@
         }
         this.meLoaded = true;
         this.applyScopedChrome();
+        const newMode = this.isScopedMode ? 'scoped' : 'global';
+        if (!this.modeChangeLogged && prevMode !== newMode) {
+          console.info('[cfm-webui] mode_changed', { from: prevMode, to: newMode });
+          this.modeChangeLogged = true;
+        }
       },
 
       async refreshTokens() {
@@ -1609,7 +1661,16 @@
       this.resizeHandler = () => this.resizeVhostCharts();
       window.addEventListener('resize', this.resizeHandler);
 
-      this.checkAdminStatus().finally(() => this.refreshAll());
+      if (!this.tokenBootLogged) {
+        console.info('[cfm-webui] token_present_at_boot', { present: Boolean(_scopedToken) });
+        this.tokenBootLogged = true;
+      }
+      const firstCheckDelayMs = 120;
+      setTimeout(() => {
+        this.checkAdminStatus()
+          .catch((err) => console.warn('[cfm-webui] checkAdminStatus failed', err))
+          .finally(() => this.refreshAll());
+      }, firstCheckDelayMs);
       this.$nextTick(() => this.resizeVhostCharts());
 
       if (this.isForensicsPage) {
