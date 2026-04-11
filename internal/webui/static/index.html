@@ -6,12 +6,14 @@
   <title>CFM Admin Dashboard</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
   <link rel="icon" href="data:," />
-  <script src="/cfm-admin/assets/shared/auth-context.js" defer></script>
-  <script src="/cfm-admin/assets/shared/auth-mode.js" defer></script>
-  <script src="/cfm-admin/assets/shared/api-client.js" defer></script>
-  <script src="/cfm-admin/assets/shared/controller-bootstrap.js" defer></script>
-  <script src="/cfm-admin/assets/shared/ui-scope.js" defer></script>
-  <script src="/cfm-admin/assets/dashboard.js" defer></script>
+  <script type="module">
+    import "./assets/shared/auth-context.js";
+    import "./assets/shared/auth-mode.js";
+    import "./assets/shared/api-client.js";
+    import "./assets/shared/controller-bootstrap.js";
+    import "./assets/shared/ui-scope.js";
+    import "./assets/dashboard.js";
+  </script>
 </head>
 <body>
   <div id="app" class="landing-shell" v-cloak>
