@@ -85,6 +85,12 @@ iframe {
   var state = 'loaded';
   var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
+  var loadSeq = 0;
+  var latestAckSeq = 0;
+  var currentLoadSeq = 0;
+  var explicitNavigationSeq = 0;
+  var ackSucceededInLifecycle = false;
+  var ackTimersBySeq = Object.create(null);
   var pluginContext = (function detectPluginContext() {
     var reasons = [];
     var path = window.location.pathname || '';
@@ -120,13 +126,25 @@ iframe {
     }
   }
 
-  function sendTokenViaPostMessage(reason) {
+  function markExplicitNavigation(reason) {
+    explicitNavigationSeq = loadSeq + 1;
+    console.debug('[cfm-plugin] explicit navigation armed (reason=%s, nextLoadSeq=%d)', reason, explicitNavigationSeq);
+  }
+
+  function clearAckTimer(seq, clearReason) {
+    if (!ackTimersBySeq[seq]) return;
+    window.clearTimeout(ackTimersBySeq[seq]);
+    delete ackTimersBySeq[seq];
+    console.debug('[cfm-plugin] cleared ACK timer (%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', clearReason, currentLoadSeq, latestAckSeq, seq);
+  }
+
+  function sendTokenViaPostMessage(reason, seq) {
     try {
       state = 'token_posted';
-      console.debug('[cfm-plugin] posting scoped token to iframe (%s)', reason);
-      frame.contentWindow.postMessage({ cfmToken: token }, origin);
+      console.debug('[cfm-plugin] posting scoped token to iframe (%s, loadSeq=%d)', reason, seq);
+      frame.contentWindow.postMessage({ cfmToken: token, loadSeq: seq }, origin);
     } catch (e) {
-      console.error('[cfm-plugin] postMessage failed:', e);
+      console.error('[cfm-plugin] postMessage failed (loadSeq=%d):', seq, e);
     }
   }
 
@@ -142,37 +160,71 @@ iframe {
     if (evt.origin !== origin) return;
     var data = evt && evt.data ? evt.data : {};
     if (data.cfmTokenAck === true) {
-      state = 'acked';
-      console.debug('[cfm-plugin] iframe ACK received via postMessage (%s)', data.path || 'unknown path');
+      var ackSeq = Number(data.ackSeq || data.loadSeq || currentLoadSeq || 0);
+      if (!ackSeq || ackSeq < 0) ackSeq = currentLoadSeq;
+      latestAckSeq = Math.max(latestAckSeq, ackSeq);
+      ackSucceededInLifecycle = true;
+      clearAckTimer(ackSeq, 'ack_received');
+      if (ackSeq === currentLoadSeq) state = 'acked';
+      console.debug('[cfm-plugin] iframe ACK received via postMessage (%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%s)', data.path || 'unknown path', currentLoadSeq, ackSeq, 'none');
     }
   });
 
+  markExplicitNavigation('initial iframe src');
+
   frame.addEventListener('load', function () {
     if (fallbackAttempted && state === 'fallback_attempted') return;
+
+    loadSeq += 1;
+    currentLoadSeq = loadSeq;
+    var timeoutSeq = currentLoadSeq;
+    var explicitNavForThisLoad = timeoutSeq <= explicitNavigationSeq;
+
     state = 'loaded';
-    sendTokenViaPostMessage('iframe load');
-    window.setTimeout(function () {
-      if (state === 'acked' || state === 'fallback_attempted') return;
+    clearAckTimer(timeoutSeq, 'load_restart');
+    sendTokenViaPostMessage('iframe load', timeoutSeq);
+
+    ackTimersBySeq[timeoutSeq] = window.setTimeout(function () {
+      delete ackTimersBySeq[timeoutSeq];
+      if (timeoutSeq !== currentLoadSeq) {
+        console.debug('[cfm-plugin] ignoring stale ACK timeout (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
+        return;
+      }
+      if (state === 'acked' || state === 'fallback_attempted') {
+        console.debug('[cfm-plugin] ACK timeout ignored due to state=%s (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', state, currentLoadSeq, latestAckSeq, timeoutSeq);
+        return;
+      }
       state = 'timeout';
       console.warn(
-        '[cfm-plugin] no iframe ACK after %dms (state=%s, frameUrl=%s, frameOrigin=%s, expectedOrigin=%s)',
+        '[cfm-plugin] no iframe ACK after %dms (state=%s, frameUrl=%s, frameOrigin=%s, expectedOrigin=%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%d)',
         ackTimeoutMs,
         state,
         frame.src || 'unknown',
         getFrameOriginForLog(),
-        origin
+        origin,
+        currentLoadSeq,
+        latestAckSeq,
+        timeoutSeq
       );
+
+      if (ackSucceededInLifecycle && !explicitNavForThisLoad) {
+        console.info('[cfm-plugin] skipping fallback reload because ACK already succeeded in this lifecycle (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
+        return;
+      }
       if (!isPluginContext) {
-        console.error('[cfm-plugin] fallback reload is disabled outside plugin context; no reload attempted');
+        console.error('[cfm-plugin] fallback reload is disabled outside plugin context; no reload attempted (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
         return;
       }
       if (fallbackAttempted) return;
       fallbackAttempted = true;
       state = 'fallback_attempted';
+      markExplicitNavigation('fallback_reload');
       var fallbackUrl = buildFallbackUrl(frame.src, token);
-      console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter', ackTimeoutMs);
+      console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', ackTimeoutMs, currentLoadSeq, latestAckSeq, timeoutSeq);
       frame.src = fallbackUrl;
     }, ackTimeoutMs);
+
+    console.debug('[cfm-plugin] armed ACK timeout (loadSeq=%d, ackSeq=%d, timeoutSeq=%d, explicitNav=%s)', currentLoadSeq, latestAckSeq, timeoutSeq, explicitNavForThisLoad);
   });
 
   // cPanel plugin compatibility path only: append ?token=... when fallback reload is needed.
