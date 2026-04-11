@@ -6,7 +6,7 @@
       });
     },
   });
-  const TOKEN_BOOT_WAIT_MS = 1200;
+  const TOKEN_BOOT_WAIT_MS = 2500;
 
   function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
     const scopedToken = controller.getToken();

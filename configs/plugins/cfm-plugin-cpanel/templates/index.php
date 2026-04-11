@@ -79,9 +79,10 @@ iframe {
 ></iframe>
 <script>
 (function () {
-  var token  = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
-  var origin = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
-  var frame  = document.getElementById('cfm-frame');
+  var token   = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
+  var origin  = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
+  var appUrl  = <?= json_encode($iframeBase . $iframeNext, JSON_UNESCAPED_SLASHES) ?>;
+  var frame   = document.getElementById('cfm-frame');
   var expectedParentOriginParam = 'cfmExpectedOrigin'; // canonical transport for expected parent origin
   var state = 'loaded';
   var fallbackAttempted = false;
@@ -116,14 +117,14 @@ iframe {
     pluginContextReason
   );
 
-  function buildFallbackUrl(rawUrl, scopedToken) {
+  function buildFallbackUrl(scopedToken) {
     try {
-      var url = new URL(rawUrl, window.location.href);
+      var url = new URL(appUrl, window.location.href);
       url.searchParams.set('token', scopedToken);
       return url.toString();
     } catch (e) {
       console.error('[cfm-plugin] could not build fallback iframe URL:', e);
-      return rawUrl;
+      return appUrl;
     }
   }
 
@@ -197,8 +198,6 @@ iframe {
   markExplicitNavigation('initial iframe src');
 
   frame.addEventListener('load', function () {
-    if (fallbackAttempted && state === 'fallback_attempted') return;
-
     loadSeq += 1;
     currentLoadSeq = loadSeq;
     var timeoutSeq = currentLoadSeq;
@@ -207,6 +206,11 @@ iframe {
     state = 'loaded';
     clearAckTimer(timeoutSeq, 'load_restart');
     sendTokenViaPostMessage('iframe load', timeoutSeq);
+
+    if (fallbackAttempted) {
+      console.debug('[cfm-plugin] fallback already attempted; skipping ACK timer (loadSeq=%d)', timeoutSeq);
+      return;
+    }
 
     ackTimersBySeq[timeoutSeq] = window.setTimeout(function () {
       delete ackTimersBySeq[timeoutSeq];
@@ -243,7 +247,7 @@ iframe {
       fallbackAttempted = true;
       state = 'fallback_attempted';
       markExplicitNavigation('fallback_reload');
-      var fallbackUrl = buildFallbackUrl(frame.src, token);
+      var fallbackUrl = buildFallbackUrl(token);
       console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', ackTimeoutMs, currentLoadSeq, latestAckSeq, timeoutSeq);
       frame.src = fallbackUrl;
     }, ackTimeoutMs);

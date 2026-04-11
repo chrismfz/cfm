@@ -104,6 +104,9 @@
       const tok = evt.data && evt.data.cfmToken;
       if (!setToken(tok, 'postMessage', { origin: evt.origin })) return;
       try {
+        window.dispatchEvent(new CustomEvent('cfm:token_ready', { detail: state.token }));
+      } catch (_) {}
+      try {
         if (expectParent) {
           const seq = Number(evt?.data?.loadSeq || 0);
           const ackPayload = { cfmTokenAck: true, path: 'postMessage', ackSeq: seq || 0, loadSeq: seq || 0 };
@@ -154,6 +157,9 @@
 
   const bootstrapURL = parseLocationURL();
   const tokenAcceptedFromURL = readTokenFromURL(bootstrapURL);
+  if (tokenAcceptedFromURL) {
+    try { window.dispatchEvent(new CustomEvent('cfm:token_ready', { detail: state.token })); } catch (_) {}
+  }
   const expectedParentOrigin = getExpectedOriginFromQuery(bootstrapURL);
   initPostMessageListener(expectedParentOrigin);
   cleanupBootstrapQueryParams(
