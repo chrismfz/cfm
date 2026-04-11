@@ -97,6 +97,10 @@ function cfm_bootstrap(string $mode): void
             // Authoritative plugin metadata source:
             // /api/v1/cpanel/user-info (via cfm_get_user_info). Do not add
             // filesystem/UAPI fallbacks in plugin runtime.
+            // Troubleshooting note: in jailed plugin runtime, debug logs may show
+            // auth_token_missing_in_plugin_runtime when /etc/cfm/cfm.conf is not
+            // readable. This is expected/non-fatal as long as socket scoped-token
+            // mint logs success immediately afterward.
             $domains   = $userInfo['domains'] ?? [];
             $dbUsers   = $userInfo['db_users'] ?? [];
             $databases = $userInfo['databases'] ?? [];
