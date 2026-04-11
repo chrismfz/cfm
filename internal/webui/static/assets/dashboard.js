@@ -52,6 +52,7 @@ const el = {
   }
 
   const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+  const uiScope = window.CFMUiScope || {};
   const api = createApiClient({
     basePath: '/cfm-admin/api',
     getToken: () => _scopedToken,
@@ -71,22 +72,17 @@ const el = {
     const scoped = Boolean(me && me.scoped);
     const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
 
-    const nav = document.querySelector('.top-nav');
-    if (nav && scoped) {
-      nav.querySelectorAll('a[href]').forEach((a) => {
-        const href = a.getAttribute('href') || '';
-        const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
-        if (adminOnly) a.style.display = 'none';
-      });
-    }
-
-    const meta = document.querySelector('.topbar .meta');
-    if (meta && !meta.querySelector('.scoped-badge')) {
-      const badge = document.createElement('span');
-      badge.className = 'pill scoped-badge';
-      badge.textContent = scoped ? 'Scoped view' : 'Global view';
-      meta.prepend(badge);
-    }
+    uiScope.applyScopedNavFiltering?.({
+      navSelector: '.top-nav',
+      scoped,
+      adminOnlyMatcher: (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/'),
+    });
+    const badge = uiScope.applyScopedBadge?.({
+      selector: '.topbar .meta',
+      scopedLabel: 'Scoped view',
+      globalLabel: 'Global view',
+    });
+    if (badge) badge.textContent = scoped ? 'Scoped view' : 'Global view';
 
     return { scoped, canWrite, role: String(me.role || '') };
   }
