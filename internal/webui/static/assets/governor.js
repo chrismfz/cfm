@@ -1,72 +1,39 @@
 (() => {
 
-  // Scoped token — two injection methods, in priority order:
-  //
-  // Method A (preferred): postMessage from the plugin parent page.
-  //   Token never appears in the URL or nginx access logs.
-  //   Plugin JS: iframe.contentWindow.postMessage({cfmToken:'<token>'}, '*')
-  //   Must be sent after iframe 'load' event fires.
-  //
-  // Method B (fallback): ?token=<value> URL parameter.
-  //   Works for simple setups but token appears in nginx access logs.
-  //   Still cleared from the address bar via history.replaceState.
-  //
-  let _scopedToken = '';
+  const _authCtx = window.CFMAuthContext || {
+    getToken: () => '',
+    waitForToken: async () => '',
+    onAuthContextChanged: () => () => {},
+    loadMe: async ({ preferScopedToken = true } = {}) => {
+      const headers = { Accept: 'application/json' };
+      if (preferScopedToken && _scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
+      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
+      if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
+      return res.json();
+    },
+  };
+  let _scopedToken = _authCtx.getToken();
   const TOKEN_BOOT_WAIT_MS = 1200;
-  let _tokenWaitResolved = false;
-  let _tokenWaitResolve = null;
   let _lateTokenReinitialized = false;
- 
-  // Method B: read URL param immediately so legacy setups keep working.
-  (function () {
-    const u = new URL(window.location.href);
-    const t = u.searchParams.get('token');
-    if (t) {
-      u.searchParams.delete('token');
-      window.history.replaceState({}, '', u.toString());
-      _scopedToken = t;
-    }
-  })();
-
-  function resolveTokenWait(reason) {
-    if (_tokenWaitResolved || !_tokenWaitResolve) return;
-    _tokenWaitResolved = true;
-    _tokenWaitResolve(reason);
-  }
 
   function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
     if (_scopedToken) return Promise.resolve('present');
-    if (_tokenWaitResolved) {
-      return new Promise((resolve) => {
-        window.setTimeout(() => resolve('timeout'), timeoutMs);
-      });
-    }
-    return new Promise((resolve) => {
-      _tokenWaitResolve = resolve;
-      window.setTimeout(() => resolveTokenWait('timeout'), timeoutMs);
+    return _authCtx.waitForToken(timeoutMs).then((tok) => {
+      _scopedToken = _authCtx.getToken();
+      return tok ? 'postmessage' : 'timeout';
     });
   }
- 
-  // Method A: postMessage listener.
-  // Validates token format (64 lowercase hex chars) before accepting.
-  // Self-removes after the first valid token is received.
-  window.addEventListener('message', function cfmTokenMsg(evt) {
-    const tok = evt && evt.data && evt.data.cfmToken;
-    if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
-    const hadToken = Boolean(_scopedToken);
-    _scopedToken = tok;
-    window.removeEventListener('message', cfmTokenMsg);
-    if (!_tokenWaitResolved) {
-      resolveTokenWait('postmessage');
-      return;
-    }
-    if (!hadToken && !_lateTokenReinitialized) {
+
+  _authCtx.onAuthContextChanged((evt) => {
+    _scopedToken = _authCtx.getToken();
+    if (evt && evt.modeChanged && !_lateTokenReinitialized) {
       _lateTokenReinitialized = true;
       onLateScopedToken().catch((err) => {
         console.error('[cfm-admin governor] late token re-init failed', err);
       });
     }
   });
+
 
   const appRoot = document.getElementById('app');
   appRoot?.removeAttribute('v-cloak');
@@ -179,21 +146,12 @@
     if (shouldWait && !_scopedToken) {
       await waitForScopedTokenOrTimeout(waitMs);
     }
-    const headers = {};
-    if (_scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
 
     let me = null;
     try {
-      const res = await fetch('/api/v1/tokens/me', { credentials: 'same-origin', headers });
-      if (res.ok) me = await res.json();
+      me = await _authCtx.loadMe({ preferScopedToken: true });
+      _scopedToken = _authCtx.getToken();
     } catch (_) {}
-
-    if (!me && !_scopedToken) {
-      try {
-        const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin' });
-        if (res.ok) me = await res.json();
-      } catch (_) {}
-    }
 
     return {
       scoped: Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped)),

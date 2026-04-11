@@ -1,49 +1,20 @@
 (() => {
   const { createApp } = window.Vue;
 
-  // Scoped token — two injection methods, in priority order:
-  //
-  // Method A (preferred): postMessage from the plugin parent page.
-  //   Token never appears in the URL or nginx access logs.
-  //   Plugin JS: iframe.contentWindow.postMessage({cfmToken:'<token>'}, '*')
-  //   Must be sent after iframe 'load' event fires.
-  //
-  // Method B (fallback): ?token=<value> URL parameter.
-  //   Works for simple setups but token appears in nginx access logs.
-  //   Still cleared from the address bar via history.replaceState.
-  //
-  let _scopedToken = '';
-  const _tokenWaiters = [];
+  const _authCtx = window.CFMAuthContext || {
+    getToken: () => '',
+    waitForToken: async () => '',
+    onAuthContextChanged: () => () => {},
+    loadMe: async () => {
+      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+      if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
+      return res.json();
+    },
+  };
+  let _scopedToken = _authCtx.getToken();
   let _lateTokenReinitialized = false;
   let _lateTokenReinitPending = false;
   let _appVm = null;
-  const _tokenAllowedOrigins = (() => {
-    const allowed = new Set();
-    const addOrigin = (value) => {
-      if (typeof value !== 'string') return;
-      const trimmed = value.trim();
-      if (!trimmed) return;
-      try {
-        allowed.add(new URL(trimmed, window.location.origin).origin);
-      } catch (_) {}
-    };
-    addOrigin(window.location.origin);
-    addOrigin(window.__CFM_EXPECTED_ORIGIN__);
-    addOrigin(window.__CFM_TOKEN_EXPECTED_ORIGIN__);
-    addOrigin(window.CFM_EXPECTED_ORIGIN);
-    const htmlExpected = document.documentElement && document.documentElement.dataset
-      ? document.documentElement.dataset.cfmExpectedOrigin
-      : '';
-    const bodyExpected = document.body && document.body.dataset
-      ? document.body.dataset.cfmExpectedOrigin
-      : '';
-    const metaExpected = document.querySelector('meta[name="cfm-expected-origin"]')?.getAttribute('content') || '';
-    addOrigin(htmlExpected);
-    addOrigin(bodyExpected);
-    addOrigin(metaExpected);
-    return allowed;
-  })();
-  const _tokenExpectParentSource = window.parent && window.parent !== window;
 
   function triggerLateTokenReinit() {
     if (_lateTokenReinitialized) return;
@@ -57,64 +28,17 @@
     _lateTokenReinitPending = true;
   }
 
-  function _notifyTokenReady() {
-    while (_tokenWaiters.length) {
-      const resolve = _tokenWaiters.shift();
-      try { resolve(_scopedToken); } catch (_) {}
-    }
-  }
   function waitForScopedToken(timeoutMs = 1200) {
-    if (_scopedToken) return Promise.resolve(_scopedToken);
-    return new Promise((resolve) => {
-      const done = (token = '') => resolve(token || '');
-      _tokenWaiters.push(done);
-      if (timeoutMs > 0) {
-        setTimeout(() => {
-          const idx = _tokenWaiters.indexOf(done);
-          if (idx >= 0) _tokenWaiters.splice(idx, 1);
-          done('');
-        }, timeoutMs);
-      }
-    });
+    return _authCtx.waitForToken(timeoutMs);
   }
- 
-  // Method B: read URL param immediately so legacy setups keep working.
-  (function () {
-    const u = new URL(window.location.href);
-    const t = u.searchParams.get('token');
-    if (t) {
-      console.debug('[cfm-webui] Method B token received from URL query; applying compatibility fallback path.');
-      u.searchParams.delete('token');
-      window.history.replaceState({}, '', u.toString());
-      console.debug('[cfm-webui] Method B token removed from URL via history.replaceState cleanup.');
-      _scopedToken = t;
-      _notifyTokenReady();
+
+  _authCtx.onAuthContextChanged((evt) => {
+    _scopedToken = _authCtx.getToken();
+    if (evt && evt.modeChanged) {
+      triggerLateTokenReinit();
     }
-  })();
- 
-  // Method A: postMessage listener.
-  // Validates token format (64 lowercase hex chars) before accepting.
-  // Self-removes after the first valid token is received.
-  window.addEventListener('message', function cfmTokenMsg(evt) {
-    if (!evt || typeof evt.origin !== 'string' || !_tokenAllowedOrigins.has(evt.origin)) return;
-    if (_tokenExpectParentSource && evt.source !== window.parent) return;
-    const tok = evt && evt.data && evt.data.cfmToken;
-    if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
-    const hadToken = Boolean(_scopedToken);
-    console.debug('[cfm-webui] Method A token received via postMessage; setting scoped token and ACKing parent.');
-    _scopedToken = tok;
-    _notifyTokenReady();
-    if (!hadToken) triggerLateTokenReinit();
-    try {
-      if (_tokenExpectParentSource) {
-        window.parent.postMessage({ cfmTokenAck: true, path: 'postMessage' }, evt.origin || '*');
-      }
-      console.debug('[cfm-webui] postMessage ACK sent to parent.');
-    } catch (err) {
-      console.error('[cfm-webui] failed to send postMessage ACK to parent:', err);
-    }
-    window.removeEventListener('message', cfmTokenMsg);
   });
+
 
   createApp({
     data() {
@@ -1572,22 +1496,11 @@
 
       async checkAdminStatus() {
         const hadTokenAtStart = Boolean(_scopedToken);
-        const fetchMe = (token) => fetch('/cfm-admin/api/v1/tokens/me', {
-          credentials: 'same-origin',
-          headers: {
-            Accept: 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-        });
-        let res = await fetchMe(_scopedToken);
         if (!hadTokenAtStart) {
           await waitForScopedToken(1500);
-          if (_scopedToken) {
-            res = await fetchMe(_scopedToken);
-          }
+          _scopedToken = _authCtx.getToken();
         }
-        if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
-        const me = await res.json();
+        const me = await _authCtx.loadMe({ preferScopedToken: true });
         const prevMode = this.isScopedMode ? 'scoped' : 'global';
         this.isScopedMode = Boolean(me?.scoped);
         this.isAdmin = !this.isScopedMode;
