@@ -82,10 +82,14 @@ iframe {
   var token  = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
   var origin = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
   var frame  = document.getElementById('cfm-frame');
-  var acked = false;
-  var fallbackReloaded = false;
+  var state = 'loaded';
+  var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
+  var isPluginContext = window.location.pathname.indexOf('/frontend/') !== -1 ||
+    window.location.pathname.indexOf('/cpanelplugin/') !== -1;
   if (!token || !frame) return;
+
+  console.debug('[cfm-plugin] startup context: isPluginContext=%s', isPluginContext);
 
   function buildFallbackUrl(rawUrl, scopedToken) {
     try {
@@ -100,6 +104,7 @@ iframe {
 
   function sendTokenViaPostMessage(reason) {
     try {
+      state = 'token_posted';
       console.debug('[cfm-plugin] posting scoped token to iframe (%s)', reason);
       frame.contentWindow.postMessage({ cfmToken: token }, origin);
     } catch (e) {
@@ -107,20 +112,45 @@ iframe {
     }
   }
 
+  function getFrameOriginForLog() {
+    try {
+      return frame.contentWindow && frame.contentWindow.location ? frame.contentWindow.location.origin : 'unavailable';
+    } catch (e) {
+      return 'cross-origin-unavailable';
+    }
+  }
+
   window.addEventListener('message', function (evt) {
     if (evt.origin !== origin) return;
     var data = evt && evt.data ? evt.data : {};
     if (data.cfmTokenAck === true) {
-      acked = true;
+      state = 'acked';
       console.debug('[cfm-plugin] iframe ACK received via postMessage (%s)', data.path || 'unknown path');
     }
   });
 
   frame.addEventListener('load', function () {
+    if (fallbackAttempted && state === 'fallback_attempted') return;
+    state = 'loaded';
     sendTokenViaPostMessage('iframe load');
     window.setTimeout(function () {
-      if (acked || fallbackReloaded) return;
-      fallbackReloaded = true;
+      if (state === 'acked' || state === 'fallback_attempted') return;
+      state = 'timeout';
+      console.warn(
+        '[cfm-plugin] no iframe ACK after %dms (state=%s, frameUrl=%s, frameOrigin=%s, expectedOrigin=%s)',
+        ackTimeoutMs,
+        state,
+        frame.src || 'unknown',
+        getFrameOriginForLog(),
+        origin
+      );
+      if (!isPluginContext) {
+        console.error('[cfm-plugin] fallback reload is disabled outside plugin context; no reload attempted');
+        return;
+      }
+      if (fallbackAttempted) return;
+      fallbackAttempted = true;
+      state = 'fallback_attempted';
       var fallbackUrl = buildFallbackUrl(frame.src, token);
       console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter', ackTimeoutMs);
       frame.src = fallbackUrl;
@@ -128,12 +158,12 @@ iframe {
   });
 
   // cPanel plugin compatibility path only: append ?token=... when fallback reload is needed.
-  if (window.location.pathname.indexOf('/frontend/') !== -1 || window.location.pathname.indexOf('/cpanelplugin/') !== -1) {
+  if (isPluginContext) {
     console.debug('[cfm-plugin] cPanel plugin context detected; URL token fallback is enabled for compatibility only');
   } else {
     // Safety: if template is ever reused outside plugin context, avoid accidental fallback URL transport.
     buildFallbackUrl = function (rawUrl) {
-      console.debug('[cfm-plugin] non-plugin context; URL token fallback disabled');
+      console.debug('[cfm-plugin] URL token fallback disabled outside plugin context');
       return rawUrl;
     };
   }
