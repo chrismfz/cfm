@@ -82,15 +82,67 @@ iframe {
   var token  = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
   var origin = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
   var frame  = document.getElementById('cfm-frame');
+  var acked = false;
+  var fallbackReloaded = false;
+  var ackTimeoutMs = 1200;
   if (!token || !frame) return;
-  frame.addEventListener('load', function () {
+
+  function buildFallbackUrl(rawUrl, scopedToken) {
     try {
+      var url = new URL(rawUrl, window.location.href);
+      url.searchParams.set('token', scopedToken);
+      return url.toString();
+    } catch (e) {
+      console.error('[cfm-plugin] could not build fallback iframe URL:', e);
+      return rawUrl;
+    }
+  }
+
+  function sendTokenViaPostMessage(reason) {
+    try {
+      console.debug('[cfm-plugin] posting scoped token to iframe (%s)', reason);
       frame.contentWindow.postMessage({ cfmToken: token }, origin);
     } catch (e) {
       console.error('[cfm-plugin] postMessage failed:', e);
     }
+  }
+
+  window.addEventListener('message', function (evt) {
+    if (evt.origin !== origin) return;
+    var data = evt && evt.data ? evt.data : {};
+    if (data.cfmTokenAck === true) {
+      acked = true;
+      console.debug('[cfm-plugin] iframe ACK received via postMessage (%s)', data.path || 'unknown path');
+    }
   });
+
+  frame.addEventListener('load', function () {
+    sendTokenViaPostMessage('iframe load');
+    window.setTimeout(function () {
+      if (acked || fallbackReloaded) return;
+      fallbackReloaded = true;
+      var fallbackUrl = buildFallbackUrl(frame.src, token);
+      console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter', ackTimeoutMs);
+      frame.src = fallbackUrl;
+    }, ackTimeoutMs);
+  });
+
+  // cPanel plugin compatibility path only: append ?token=... when fallback reload is needed.
+  if (window.location.pathname.indexOf('/frontend/') !== -1 || window.location.pathname.indexOf('/cpanelplugin/') !== -1) {
+    console.debug('[cfm-plugin] cPanel plugin context detected; URL token fallback is enabled for compatibility only');
+  } else {
+    // Safety: if template is ever reused outside plugin context, avoid accidental fallback URL transport.
+    buildFallbackUrl = function (rawUrl) {
+      console.debug('[cfm-plugin] non-plugin context; URL token fallback disabled');
+      return rawUrl;
+    };
+  }
 })();
+</script>
+
+<script>
+// Compatibility warning: URL token transport is fallback-only and should remain disabled
+// unless iframe postMessage delivery is unreliable in the hosting environment.
 </script>
 
 <?php endif; ?>
