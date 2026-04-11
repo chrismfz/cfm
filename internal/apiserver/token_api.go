@@ -60,6 +60,7 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 
 	// ── GET /api/v1/tokens/me ─────────────────────────────────────────────────
 	m.HandleFunc("/api/v1/tokens/me", func(w http.ResponseWriter, r *http.Request) {
+		setAuthIdentityNoCacheHeaders(w)
 		if r.Method != http.MethodGet {
 			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -98,6 +99,13 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			"scoped":     true,
 		})
 	})
+}
+
+func setAuthIdentityNoCacheHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Vary", "Authorization, Cookie")
 }
 
 // apiJSONError writes a JSON error response. Named to avoid collision with
