@@ -193,6 +193,7 @@ func Start(
 	store.StartPurger(ctx)
 	RegisterTokenEndpoint(m, store)
 	RegisterTokenManagementEndpoints(m, store)
+	RegisterEmbedBootstrapEndpoint(m, store)
 
 	// ── goauth → autoblock bridge (FAIL/RATELIMIT tail) ──────────────────────
 	startAuthAutoblock(ctx, cfg, be)

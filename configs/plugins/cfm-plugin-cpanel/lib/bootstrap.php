@@ -125,7 +125,9 @@ function cfm_bootstrap(string $mode): void
     }
 
     $iframeBase   = cfm_iframe_base_url($socketUIBase);
-    $iframeUrl    = $iframeBase . '/cfm-admin/webdetector/controls/';
+    $iframeNext   = '/cfm-admin/webdetector/controls/';
+    $iframeUrl    = $iframeBase . '/api/v1/embed/bootstrap?token=' . rawurlencode($token)
+        . '&next=' . rawurlencode($iframeNext);
     $parsed       = parse_url($iframeBase);
     $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
     if (!empty($parsed['port'])) {
