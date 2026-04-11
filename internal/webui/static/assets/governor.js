@@ -114,6 +114,7 @@
   const st = {
     auto: true,
     timer: null,
+    refreshFn: null,
     connLabels: [],
     connPctSeries: [],
     cpuLabels: [],
@@ -121,7 +122,7 @@
     qrySeries: [],
     maxPoints: 80,
     eventRows: [],
-    scoped: false,
+    isScopedMode: false,
   };
 
   function showMsg(msg) {
@@ -160,11 +161,11 @@
       if (res.ok) me = await res.json();
     } catch (_) {}
 
-    const scoped = Boolean(me && me.scoped);
-    const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
+    const isScopedMode = Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
+    const canWrite = !isScopedMode || String(me.role || '').toLowerCase() !== 'viewer';
 
     const nav = document.querySelector('.top-nav');
-    if (nav && scoped) {
+    if (nav && isScopedMode) {
       nav.querySelectorAll('a[href]').forEach((a) => {
         const href = a.getAttribute('href') || '';
         const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
@@ -176,11 +177,11 @@
     if (meta && !meta.querySelector('.scoped-badge')) {
       const badge = document.createElement('span');
       badge.className = 'pill scoped-badge';
-      badge.textContent = scoped ? 'Scoped MySQL view' : 'Global view';
+      badge.textContent = isScopedMode ? 'Scoped MySQL view' : 'Global view';
       meta.prepend(badge);
     }
 
-    return { scoped, canWrite, role: String(me.role || '') };
+    return { isScopedMode, canWrite, role: String(me.role || '') };
   }
 
   function esc(v) {
@@ -188,7 +189,7 @@
   }
 
   function openHistoryFilter(user = '', dbName = '') {
-    if (st.scoped) return;
+    if (st.isScopedMode) return;
     if (el.filterUser) el.filterUser.value = user || '';
     if (el.filterDB) el.filterDB.value = dbName || '';
     const card = document.getElementById('events-card');
@@ -556,8 +557,8 @@
     q.set('limit', String(Number(el.filterLimit.value) || 100));
     if (el.filterUser.value.trim()) q.set('user', el.filterUser.value.trim());
     if (el.filterDB.value.trim()) q.set('db', el.filterDB.value.trim());
-    if (!st.scoped && el.filterType.value.trim()) q.set('type', el.filterType.value.trim());
-    if (st.scoped) {
+    if (!st.isScopedMode && el.filterType.value.trim()) q.set('type', el.filterType.value.trim());
+    if (st.isScopedMode) {
       const payload = await scopedApi(`/v1/mysql/user-history?${q.toString()}`);
       renderEvents((payload.users || []).map((u) => ({
         ts_unix: payload.ts || '-',
@@ -578,7 +579,7 @@
 
   async function loadSummary() {
     const hours = Math.max(1, Number(el.summaryHours.value) || 24);
-    if (st.scoped) {
+    if (st.isScopedMode) {
       const q = new URLSearchParams();
       q.set('window', `${hours}h`);
       if (el.filterUser.value.trim()) q.set('user', el.filterUser.value.trim());
@@ -599,7 +600,7 @@
   }
 
   async function loadOps() {
-    if (st.scoped) {
+    if (st.isScopedMode) {
       const q = new URLSearchParams();
       if (el.filterUser?.value.trim()) q.set('user', el.filterUser.value.trim());
       if (el.filterDB?.value.trim()) q.set('db', el.filterDB.value.trim());
@@ -619,7 +620,7 @@
   }
 
   async function loadLive() {
-    if (st.scoped) {
+    if (st.isScopedMode) {
       const q = new URLSearchParams();
       if (el.filterUser?.value.trim()) q.set('user', el.filterUser.value.trim());
       if (el.filterDB?.value.trim()) q.set('db', el.filterDB.value.trim());
@@ -646,7 +647,7 @@
   }
 
   async function prune() {
-    if (st.scoped) return;
+    if (st.isScopedMode) return;
     const days = Math.max(1, Number(el.pruneDays.value) || 30);
     const out = await api(`/v1/mysql/history/prune?days=${days}`, { method: 'POST' });
     showMsg(`Pruned days=${days}, rows_deleted=${out.rows_deleted ?? 0}`);
@@ -655,7 +656,7 @@
   }
 
   async function truncate() {
-    if (st.scoped) return;
+    if (st.isScopedMode) return;
     if (!window.confirm('Delete all MySQL governor history rows?')) return;
     const out = await api('/v1/mysql/history/truncate?confirm=yes', { method: 'POST' });
     showMsg(`History truncated, rows_deleted=${out.rows_deleted ?? 0}`);
@@ -663,17 +664,13 @@
     await loadSummary();
   }
 
-  async function refresh() {
+  async function refreshScopedMode() {
     showMsg('');
-    const checks = await Promise.allSettled(st.scoped
-      ? [loadLive(), loadOps(), loadSummary(), loadEvents()]
-      : [loadLive(), loadOps(), loadSummary(), loadEvents()]);
+    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
     const failed = checks
       .map((res, idx) => ({
         res,
-        label: st.scoped
-          ? (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events')
-          : (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
+        label: (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
       }))
       .filter((x) => x.res.status === 'rejected');
 
@@ -686,12 +683,37 @@
     showMsg(`Partial refresh error: ${msg}`);
   }
 
+  async function refreshAdminMode() {
+    showMsg('');
+    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
+    const failed = checks
+      .map((res, idx) => ({
+        res,
+        label: (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
+      }))
+      .filter((x) => x.res.status === 'rejected');
+
+    if (!failed.length) return;
+
+    failed.forEach((x) => {
+      console.error(`[cfm-admin governor] refresh failed (${x.label})`, x.res.reason);
+    });
+    const msg = failed.map((x) => `${x.label}: ${x.res.reason?.message || x.res.reason || 'failed'}`).join(' | ');
+    showMsg(`Partial refresh error: ${msg}`);
+  }
+
+  function refresh() {
+    const fn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
+    return fn();
+  }
+
   function startAuto() {
     st.auto = true;
     el.autoState.textContent = 'ON';
     el.toggleAutoBtn.textContent = 'Stop';
     clearInterval(st.timer);
-    st.timer = setInterval(() => refresh(), 5000);
+    const refreshFn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
+    st.timer = setInterval(() => refreshFn(), 5000);
   }
 
   function stopAuto() {
@@ -726,26 +748,46 @@
     showMsg('ECharts is unavailable; chart rendering disabled.');
   }
 
+  function setPanelScopedState(panel, scoped, note) {
+    if (!panel) return;
+    panel.style.opacity = scoped ? '0.5' : '';
+    panel.style.filter = scoped ? 'grayscale(0.35)' : '';
+    panel.style.pointerEvents = scoped ? 'none' : '';
+    panel.dataset.scopedDisabled = scoped ? '1' : '0';
+    let help = panel.querySelector('.scoped-panel-note');
+    if (scoped) {
+      if (!help) {
+        help = document.createElement('p');
+        help.className = 'muted scoped-panel-note';
+        panel.prepend(help);
+      }
+      help.textContent = note || 'Unavailable in scoped mode.';
+    } else if (help) {
+      help.remove();
+    }
+  }
+
   function setScopedUI(scoped) {
-    st.scoped = scoped;
+    st.isScopedMode = scoped;
     if (el.viewModeTitle) {
       el.viewModeTitle.textContent = scoped ? 'Scoped MySQL view · Connection pressure' : 'Connection pressure';
     }
-    if (!scoped) return;
-    [el.cpuCard, el.locksCard, el.psCard, el.retentionCard].forEach((node) => {
-      if (node) node.style.display = 'none';
-    });
-    if (el.filterType) el.filterType.disabled = true;
+    setPanelScopedState(el.cpuCard, scoped, 'Global CPU/query telemetry is only available in global admin mode.');
+    setPanelScopedState(el.locksCard, scoped, 'Global lock graph is only available in global admin mode.');
+    setPanelScopedState(el.psCard, scoped, 'Global processlist is only available in global admin mode.');
+    setPanelScopedState(el.retentionCard, scoped, 'Retention controls require global admin mode.');
+    if (el.filterType) el.filterType.disabled = scoped;
   }
 
   function applyViewerContext(ctx) {
-    setScopedUI(ctx.scoped);
+    setScopedUI(ctx.isScopedMode);
     if (!ctx.canWrite) {
       [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
     }
   }
 
   function configurePollingMode() {
+    st.refreshFn = st.isScopedMode ? refreshScopedMode : refreshAdminMode;
     if (st.auto) startAuto();
   }
 
@@ -756,8 +798,8 @@
     await refresh();
     console.info('[cfm-admin governor] startup mode', {
       token_present_at_boot: false,
-      scoped_me: ctx.scoped,
-      mode_selected: ctx.scoped ? 'scoped' : 'global',
+      scoped_me: ctx.isScopedMode,
+      mode_selected: ctx.isScopedMode ? 'scoped' : 'global',
     });
   }
 
@@ -766,12 +808,12 @@
     const tokenPresentAtBoot = Boolean(_scopedToken);
     const ctx = await loadViewerContext();
     applyViewerContext(ctx);
-    startAuto();
-    refresh();
+    configurePollingMode();
+    await refresh();
     console.info('[cfm-admin governor] startup mode', {
       token_present_at_boot: tokenPresentAtBoot,
-      scoped_me: ctx.scoped,
-      mode_selected: ctx.scoped ? 'scoped' : 'global',
+      scoped_me: ctx.isScopedMode,
+      mode_selected: ctx.isScopedMode ? 'scoped' : 'global',
     });
   })();
 })();
