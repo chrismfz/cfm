@@ -19,8 +19,10 @@
     const u = new URL(window.location.href);
     const t = u.searchParams.get('token');
     if (t) {
+      console.debug('[cfm-webui] Method B token received from URL query; applying compatibility fallback path.');
       u.searchParams.delete('token');
       window.history.replaceState({}, '', u.toString());
+      console.debug('[cfm-webui] Method B token removed from URL via history.replaceState cleanup.');
       _scopedToken = t;
     }
   })();
@@ -31,7 +33,16 @@
   window.addEventListener('message', function cfmTokenMsg(evt) {
     const tok = evt && evt.data && evt.data.cfmToken;
     if (typeof tok !== 'string' || !/^[0-9a-f]{64}$/.test(tok)) return;
+    console.debug('[cfm-webui] Method A token received via postMessage; setting scoped token and ACKing parent.');
     _scopedToken = tok;
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ cfmTokenAck: true, path: 'postMessage' }, evt.origin || '*');
+      }
+      console.debug('[cfm-webui] postMessage ACK sent to parent.');
+    } catch (err) {
+      console.error('[cfm-webui] failed to send postMessage ACK to parent:', err);
+    }
     window.removeEventListener('message', cfmTokenMsg);
   });
 
