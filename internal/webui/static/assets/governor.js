@@ -116,27 +116,20 @@
     el.actionMsg.textContent = msg || '';
   }
 
-  async function api(path, opts = {}) {
-    if (st.isScopedMode && ADMIN_ONLY_API_PATHS.has(path.split('?')[0])) {
-      throw new Error(`Scoped mode blocks admin endpoint: ${path}`);
-    }
-    return apiWithBase('/cfm-admin/api', path, opts);
-  }
-
-  async function scopedApi(path, opts = {}) {
-    return apiWithBase('/api', path, opts);
-  }
-
-  async function apiWithBase(base, path, opts = {}) {
-    if (_scopedToken) {
-      opts = { ...opts };
-      opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${_scopedToken}` };
-    }
-    const res = await fetch(`${base}${path}`, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    return data;
-  }
+  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+  const api = createApiClient({
+    basePath: '/cfm-admin/api',
+    getToken: () => _scopedToken,
+    isScoped: () => st.isScopedMode,
+    adminOnlyPaths: ADMIN_ONLY_API_PATHS,
+    retryAuthRace: true,
+  });
+  const scopedApi = createApiClient({
+    basePath: '/api',
+    getToken: () => _scopedToken,
+    isScoped: () => false,
+    retryAuthRace: true,
+  });
 
 
 

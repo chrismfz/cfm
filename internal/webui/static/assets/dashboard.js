@@ -51,16 +51,13 @@ const el = {
     el.actionMsg.textContent = msg || '';
   }
 
-  async function api(path, opts = {}) {
-    if (_scopedToken) {
-      opts = { ...opts };
-      opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${_scopedToken}` };
-    }
-    const res = await fetch(`/cfm-admin/api${path}`, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-    return data;
-  }
+  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+  const api = createApiClient({
+    basePath: '/cfm-admin/api',
+    getToken: () => _scopedToken,
+    isScoped: () => false,
+    retryAuthRace: true,
+  });
 
 
 

@@ -40,6 +40,20 @@
   });
 
 
+  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+  let _adminApiClient = null;
+  function getAdminApiClient() {
+    if (!_adminApiClient) {
+      _adminApiClient = createApiClient({
+        basePath: '/cfm-admin/api',
+        getToken: () => _scopedToken,
+        isScoped: () => Boolean(_appVm && _appVm.isScopedMode),
+        retryAuthRace: true,
+      });
+    }
+    return _adminApiClient;
+  }
+
   createApp({
     data() {
       return {
@@ -679,14 +693,9 @@
         return row?.reasons || row?.reason || '-';
       },
       async fetchJSON(path) {
-        const headers = { Accept: 'application/json' };
-        if (_scopedToken) headers['Authorization'] = `Bearer ${_scopedToken}`;
-        const res = await fetch(`/cfm-admin/api/${path}`, {
-          credentials: 'same-origin',
-          headers,
+        return getAdminApiClient()(path, {
+          headers: { Accept: 'application/json' },
         });
-        if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
-        return res.json();
       },
       async fetchJSONSafe(path, fallback) {
         try {
@@ -703,20 +712,14 @@
             throw new Error('read-only scoped viewer token');
           }
         }
-        const headers = {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        };
-        if (_scopedToken) headers['Authorization'] = `Bearer ${_scopedToken}`;
-        const res = await fetch(`/cfm-admin/api/${path}`, {
+        return getAdminApiClient()(path, {
           method: 'POST',
-          credentials: 'same-origin',
-          headers,
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify(body),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `${path} -> HTTP ${res.status}`);
-        return data;
       },
       startAutoRefresh() {
         if (this.timer) clearInterval(this.timer);
