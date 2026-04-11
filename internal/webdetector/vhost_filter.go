@@ -29,6 +29,17 @@ import (
 // can set it without an import cycle.
 type CtxScopeKey struct{}
 
+// CtxDBScopeKey is the context key used by the apiserver middleware to inject
+// optional database-level scope for scoped tokens.
+type CtxDBScopeKey struct{}
+
+// ScopedDBScope carries explicit db-level allowlists attached to a scoped token.
+// Nil maps mean "not explicitly set".
+type ScopedDBScope struct {
+	Users     map[string]struct{}
+	Databases map[string]struct{}
+}
+
 // vhostScopeFromContext returns the scoped vhost set injected by the middleware,
 // or nil if no scope is set (admin token or loopback bypass).
 func vhostScopeFromContext(ctx context.Context) map[string]struct{} {

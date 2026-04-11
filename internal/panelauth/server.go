@@ -254,10 +254,12 @@ func mintScopedViewerToken(userName, assertion string) (cpanelUserInfo, string, 
 		return cpanelUserInfo{}, "", errors.New("no_domains_for_user")
 	}
 	payload := map[string]any{
-		"vhosts": userInfo.Domains,
-		"role":   "viewer",
-		"ttl":    "4h",
-		"label":  "cpanel:" + userName,
+		"vhosts":    userInfo.Domains,
+		"db_users":  userInfo.DBUsers,
+		"databases": userInfo.Databases,
+		"role":      "viewer",
+		"ttl":       "4h",
+		"label":     "cpanel:" + userName,
 	}
 	var out struct {
 		Token string `json:"token"`
@@ -297,7 +299,30 @@ func fetchUserInfo(baseURL, userName, assertion string) (cpanelUserInfo, error) 
 	}
 	sort.Strings(clean)
 	out.Domains = clean
+	out.DBUsers = sanitizeLowerList(out.DBUsers)
+	out.Databases = sanitizeLowerList(out.Databases)
 	return out, nil
+}
+
+func sanitizeLowerList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		v := strings.ToLower(strings.TrimSpace(raw))
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func loadRuntimeAPIAuthConfig() (string, string, error) {

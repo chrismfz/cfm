@@ -11,7 +11,7 @@ import (
 
 func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 	store := NewTokenStore()
-	st := store.Issue([]string{"example.com"}, "viewer", "embed", time.Hour)
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 
 	mux := http.NewServeMux()
 	RegisterEmbedBootstrapEndpoint(mux, store)
@@ -28,7 +28,7 @@ func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 
 func TestEmbedBootstrapSetsCookieAndRedirects(t *testing.T) {
 	store := NewTokenStore()
-	st := store.Issue([]string{"example.com"}, "viewer", "embed", time.Hour)
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 
 	mux := http.NewServeMux()
 	RegisterEmbedBootstrapEndpoint(mux, store)
@@ -67,7 +67,7 @@ func TestEmbedBootstrapSetsCookieAndRedirects(t *testing.T) {
 
 func TestTokenMiddlewareAllowsScopedBootstrapCookieForCfmAdminHTML(t *testing.T) {
 	store := NewTokenStore()
-	st := store.Issue([]string{"example.com"}, "viewer", "embed", time.Hour)
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 
 	called := false
 	h := TokenMiddleware("admin-secret", store)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
