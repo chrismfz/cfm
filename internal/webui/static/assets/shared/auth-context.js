@@ -98,8 +98,10 @@
     const waitMs = Number(opts.waitForTokenMs) > 0 ? Number(opts.waitForTokenMs) : 0;
     if (waitMs > 0 && !state.token) await waitForToken(waitMs);
     const headers = { Accept: 'application/json' };
-    if (preferScopedToken && state.token) headers.Authorization = `Bearer ${state.token}`;
-    const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
+    const authz = window.CFMSharedConstants?.buildBearerHeader?.(state.token);
+    if (preferScopedToken && authz) headers.Authorization = authz;
+    const mePath = window.CFMSharedConstants?.TOKENS_ME_PATH;
+    const res = await fetch(mePath, { credentials: 'same-origin', headers });
     if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
     return res.json();
   }

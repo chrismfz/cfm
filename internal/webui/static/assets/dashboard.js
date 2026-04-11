@@ -61,11 +61,7 @@ const el = {
     const scoped = Boolean(me && me.scoped);
     const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
 
-    controller.applyScopedChrome({
-      scoped,
-      scopedLabel: 'Scoped view',
-      globalLabel: 'Global view',
-    });
+    controller.applyScopedChrome({ scoped });
 
     return { scoped, canWrite, role: String(me.role || '') };
   }
