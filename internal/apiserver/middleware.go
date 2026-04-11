@@ -30,9 +30,9 @@ var sessionAllowedRequest = sessionAllowed
 // cfmBase returns the path prefix used by the UI when generating redirects.
 //
 // Priority:
-//   1) X-Forwarded-Prefix (trusted only from loopback peer)
-//   2) X-CFM-Base (trusted only from loopback peer)
-//   3) request path prefix (/cfm-admin) for direct :6061 access
+//  1. X-Forwarded-Prefix (trusted only from loopback peer)
+//  2. X-CFM-Base (trusted only from loopback peer)
+//  3. request path prefix (/cfm-admin) for direct :6061 access
 func cfmBase(r *http.Request) string {
 	if b := trustedProxyBase(r); b != "" {
 		return b
@@ -84,7 +84,7 @@ func isPublicPath(r *http.Request) bool {
 			path = "/" + path
 		}
 	}
-	for _, p := range []string{"/login", "/logout"} {
+	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap"} {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
@@ -182,14 +182,23 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 3. Valid goauth session (fallback when no token header) ───
+			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
+			if !tokenHeaderSupplied {
+				if ctx, ok := embedScopedContextFromCookie(r, store); ok {
+					logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie")
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+
+			// ── 4. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				logging.Logf("[apiserver] auth_source=session_cookie")
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// ── 4. No token — redirect browsers, 401 API clients ──────────
+			// ── 5. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				base := cfmBase(r)
 				next := r.URL.RequestURI()
