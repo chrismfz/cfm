@@ -137,14 +137,31 @@ function cfm_canonical_host(array $cfg): string
 }
 
 // Browser-facing base URL for the iframe.
-// Priority: CPANEL_PLUGIN_BASE_URL override → canonical host + TLS_PORT (on mismatch) → request host.
-function cfm_iframe_base_url(): string
+// Priority: CPANEL_PLUGIN_BASE_URL override -> socket-provided UI base -> legacy config fallback.
+function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
 {
     $cfg = cfm_conf();
 
     // Explicit override — deterministic/admin-controlled endpoint.
     $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
-    if ($override !== '') return rtrim($override, '/');
+    if ($override !== '') {
+        $selected = rtrim($override, '/');
+        cfm_debug_log('iframe_base_url_selected', [
+            'ui_base_source' => 'override',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
+
+    $socketBase = trim($socketUiBaseUrl);
+    if ($socketBase !== '') {
+        $selected = rtrim($socketBase, '/');
+        cfm_debug_log('iframe_base_url_selected', [
+            'ui_base_source' => 'socket',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
 
     $requestHost   = cfm_request_host();
     $canonicalHost = cfm_canonical_host($cfg);
@@ -161,17 +178,32 @@ function cfm_iframe_base_url(): string
             'canonical_host' => $canonicalHost,
             'tls_port'       => $tlsPort,
         ]);
-        return 'https://' . $canonicalHost . ':' . $tlsPort;
+        $selected = 'https://' . $canonicalHost . ':' . $tlsPort;
+        cfm_debug_log('iframe_base_url_selected', [
+            'ui_base_source' => 'legacy_fallback',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
     }
 
     if ($tlsPort > 0) {
         // Direct TLS port — bypasses OpenResty, hits Go directly.
-        return 'https://' . $effectiveHost . ':' . $tlsPort;
+        $selected = 'https://' . $effectiveHost . ':' . $tlsPort;
+        cfm_debug_log('iframe_base_url_selected', [
+            'ui_base_source' => 'legacy_fallback',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
     }
 
     // No TLS_PORT → assume OpenResty is in front on standard 443.
     // /cfm-admin/ is already handled by the OpenResty location block.
-    return 'https://' . $effectiveHost;
+    $selected = 'https://' . $effectiveHost;
+    cfm_debug_log('iframe_base_url_selected', [
+        'ui_base_source' => 'legacy_fallback',
+        'ui_base_url' => $selected,
+    ]);
+    return $selected;
 }
 
 // Generic CFM API call (server-side, loopback).
@@ -305,6 +337,7 @@ function cfm_issue_actor_assertion(string $user): array
         'cpsess' => $secTok,
         'ts' => $ts,
         'nonce' => $nonce,
+        'request_host' => cfm_request_host(),
     ];
     $json = json_encode($req, JSON_UNESCAPED_SLASHES);
     if (!is_string($json)) {
@@ -344,12 +377,19 @@ function cfm_issue_actor_assertion(string $user): array
     $assertion = trim((string)($decoded['assertion'] ?? ''));
     if ($status >= 200 && $status < 300 && $assertion !== '') {
         $scopedToken = trim((string)($decoded['scoped_token'] ?? ''));
+        $uiBaseUrl = rtrim(trim((string)($decoded['ui_base_url'] ?? '')), '/');
         if ($scopedToken === '') {
             cfm_debug_log('auth_socket_scoped_token_mint_failed', ['user' => $user, 'source' => $source, 'sock' => $sock, 'reason' => 'scoped_token_missing']);
             return ['ok' => false, 'reason' => 'scoped_token_missing', 'error' => 'No scoped token returned from auth service'];
         }
         cfm_debug_log('auth_socket_assertion_issue_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
-        cfm_debug_log('auth_socket_scoped_token_mint_ok', ['user' => $user, 'source' => $source, 'sock' => $sock]);
+        cfm_debug_log('auth_socket_scoped_token_mint_ok', [
+            'user' => $user,
+            'source' => $source,
+            'sock' => $sock,
+            'ui_base_source' => $uiBaseUrl !== '' ? 'socket' : 'missing',
+            'ui_base_url' => $uiBaseUrl,
+        ]);
         if ($adminTokenMissing) {
             cfm_debug_log('auth_socket_scoped_token_mint_ok_after_admin_token_missing', [
                 'user' => $user,
@@ -360,7 +400,7 @@ function cfm_issue_actor_assertion(string $user): array
         }
         $userInfo = $decoded['user_info'] ?? null;
         if (!is_array($userInfo)) $userInfo = null;
-        return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken, 'user_info' => $userInfo];
+        return ['ok' => true, 'assertion' => $assertion, 'scoped_token' => $scopedToken, 'user_info' => $userInfo, 'ui_base_url' => $uiBaseUrl];
     }
     cfm_debug_log('auth_socket_assertion_issue_failed', [
         'user' => $user,
@@ -406,10 +446,6 @@ function cfm_get_user_info(string $user): array
 
     $hints = [];
     $localBase = cfm_local_base_url();
-    $iframeBase = cfm_iframe_base_url();
-    if ($iframeBase !== '' && strpos($iframeBase, '127.0.0.1') !== false) {
-        $hints[] = 'Base URL may be loopback-only; verify CPANEL_PLUGIN_BASE_URL/TLS_PORT for browser access';
-    }
 
     try {
         $issued = cfm_issue_actor_assertion($user);
@@ -432,6 +468,10 @@ function cfm_get_user_info(string $user): array
                 'reason'    => $reason,
                 'hints'     => array_values(array_unique($hints)),
             ];
+        }
+        $iframeBase = cfm_iframe_base_url((string)($issued['ui_base_url'] ?? ''));
+        if ($iframeBase !== '' && strpos($iframeBase, '127.0.0.1') !== false) {
+            $hints[] = 'Base URL may be loopback-only; verify CPANEL_PLUGIN_BASE_URL/TLS_PORT for browser access';
         }
         $mintedUserInfo = $issued['user_info'] ?? null;
         if (!is_array($mintedUserInfo)) $mintedUserInfo = null;
@@ -486,6 +526,7 @@ function cfm_get_user_info(string $user): array
             'ok'        => true,
             'data'      => $data,
             'scoped_token' => trim((string)($issued['scoped_token'] ?? '')),
+            'ui_base_url' => trim((string)($issued['ui_base_url'] ?? '')),
             'http_code' => 200,
             'reason'    => '',
             'hints'     => $hints,
