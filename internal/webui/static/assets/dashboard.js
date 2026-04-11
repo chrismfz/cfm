@@ -59,20 +59,21 @@ const el = {
       controller.refreshToken();
     } catch (_) {}
 
-    const latestToken = controller.getToken();
+    let latestToken = controller.refreshToken();
+    const isIdentityScoped = Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
     const computedInitialMode = window.CFMAuthMode?.computeInitialScopeMode?.({
       identity: me,
       token: latestToken,
     }) || 'global';
 
-    if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !Boolean(me && me.scoped)) {
+    if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !isIdentityScoped) {
       try {
         me = await controller.loadMe({ preferScopedToken: true, waitForTokenMs: 0 });
-        controller.refreshToken();
+        latestToken = controller.refreshToken();
       } catch (_) {}
     }
 
-    const scoped = Boolean(me && me.scoped);
+    const scoped = Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
     const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
 
     controller.applyScopedChrome({ scoped });

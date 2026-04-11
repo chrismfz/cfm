@@ -1459,12 +1459,13 @@
         const tokenBeforeLoadMe = controller.getToken();
         const me = await controller.loadMe({ preferScopedToken: true });
         let latestToken = controller.refreshToken();
+        const isIdentityScoped = Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
         const computedInitialMode = window.CFMAuthMode?.computeInitialScopeMode?.({
           identity: me,
           token: latestToken,
         }) || 'global';
         let resolvedMe = me;
-        if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !Boolean(me?.scoped)) {
+        if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !isIdentityScoped) {
           resolvedMe = await controller.loadMe({ preferScopedToken: true, waitForTokenMs: 0 });
           latestToken = controller.refreshToken();
         }
