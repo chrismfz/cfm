@@ -51,19 +51,39 @@ const el = {
 
 
 
-  async function loadViewerContext() {
+  async function loadViewerContext(opts = {}) {
+    const tokenBeforeLoadMe = controller.getToken();
     let me = { scoped: false, role: 'admin' };
     try {
       me = await controller.loadMe({ preferScopedToken: true });
       controller.refreshToken();
     } catch (_) {}
 
+    const latestToken = controller.getToken();
+    const computedInitialMode = window.CFMAuthMode?.computeInitialScopeMode?.({
+      identity: me,
+      token: latestToken,
+    }) || 'global';
+
+    if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !Boolean(me && me.scoped)) {
+      try {
+        me = await controller.loadMe({ preferScopedToken: true, waitForTokenMs: 0 });
+        controller.refreshToken();
+      } catch (_) {}
+    }
+
     const scoped = Boolean(me && me.scoped);
     const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
 
     controller.applyScopedChrome({ scoped });
 
-    return { scoped, canWrite, role: String(me.role || '') };
+    return {
+      scoped,
+      canWrite,
+      role: String(me.role || ''),
+      tokenBeforeLoadMe,
+      tokenAfterLoadMe: latestToken,
+    };
   }
 
   async function onLateScopedToken() {
@@ -619,7 +639,7 @@ async function refreshLuaStats() {
   el.blockBtn.addEventListener('click', blockIP);
   el.unblockBtn.addEventListener('click', unblockIP);
 
-  loadViewerContext().then((ctx) => {
+  loadViewerContext({ resolveInitialMode: true }).then((ctx) => {
     state.scoped = ctx.scoped;
     controller.noteInitialModeResolved({ isScopedMode: ctx.scoped });
     if (!ctx.canWrite) {
