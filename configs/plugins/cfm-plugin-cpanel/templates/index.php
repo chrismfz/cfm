@@ -173,9 +173,14 @@ iframe {
       console.warn('[cfm-plugin] rejected iframe message origin=%s allowlist=%o', evt.origin, [origin]);
       return;
     }
-    console.debug('[cfm-plugin] accepted iframe message origin=%s', evt.origin);
     var data = evt && evt.data ? evt.data : {};
+    var payloadShape = Object.prototype.toString.call(data);
+    if (data && typeof data === 'object') {
+      var keys = Object.keys(data).slice(0, 6);
+      payloadShape = 'object keys=' + (keys.length ? keys.join(',') : 'none');
+    }
     if (data.cfmTokenAck === true) {
+      console.debug('[cfm-plugin] accepted iframe ACK origin=%s', evt.origin);
       var ackSeq = Number(data.ackSeq || data.loadSeq || currentLoadSeq || 0);
       if (!ackSeq || ackSeq < 0) ackSeq = currentLoadSeq;
       latestAckSeq = Math.max(latestAckSeq, ackSeq);
@@ -183,7 +188,9 @@ iframe {
       clearAckTimer(ackSeq, 'ack_received');
       if (ackSeq === currentLoadSeq) state = 'acked';
       console.debug('[cfm-plugin] iframe ACK received via postMessage (%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%s)', data.path || 'unknown path', currentLoadSeq, ackSeq, 'none');
+      return;
     }
+    console.debug('[cfm-plugin] accepted non-ACK iframe message origin=%s (shape=%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%s)', evt.origin, payloadShape, currentLoadSeq, latestAckSeq, 'active');
   });
 
   frame.src = injectExpectedParentOrigin(frame.getAttribute('src') || frame.src || '');

@@ -92,3 +92,31 @@ func TestTokenMiddlewareAllowsScopedBootstrapCookieForCfmAdminHTML(t *testing.T)
 		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
 	}
 }
+
+func TestTokenMiddlewareAllowsEmbeddedScopedBootstrapCookieForCfmAdminPath(t *testing.T) {
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	called := false
+	h := TokenMiddleware("admin-secret", store)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
+		if scope == nil {
+			t.Fatalf("expected scoped context from bootstrap cookie")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/cfm-admin/webdetector/controls/", nil)
+	req.Header.Set("X-CFM-Embedded", "cpanel")
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: encodeEmbedCookie(st.Token, time.Now().Add(time.Minute))})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("expected handler to be reached")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}
