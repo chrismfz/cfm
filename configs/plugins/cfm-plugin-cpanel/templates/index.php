@@ -82,6 +82,7 @@ iframe {
   var token  = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
   var origin = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
   var frame  = document.getElementById('cfm-frame');
+  var expectedParentOriginParam = 'cfmExpectedOrigin';
   var state = 'loaded';
   var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
@@ -131,6 +132,17 @@ iframe {
     console.debug('[cfm-plugin] explicit navigation armed (reason=%s, nextLoadSeq=%d)', reason, explicitNavigationSeq);
   }
 
+  function injectExpectedParentOrigin(rawUrl) {
+    try {
+      var url = new URL(rawUrl, window.location.href);
+      url.searchParams.set(expectedParentOriginParam, window.location.origin);
+      return url.toString();
+    } catch (e) {
+      console.error('[cfm-plugin] could not inject expected parent origin into iframe URL:', e);
+      return rawUrl;
+    }
+  }
+
   function clearAckTimer(seq, clearReason) {
     if (!ackTimersBySeq[seq]) return;
     window.clearTimeout(ackTimersBySeq[seq]);
@@ -170,6 +182,7 @@ iframe {
     }
   });
 
+  frame.src = injectExpectedParentOrigin(frame.getAttribute('src') || frame.src || '');
   markExplicitNavigation('initial iframe src');
 
   frame.addEventListener('load', function () {

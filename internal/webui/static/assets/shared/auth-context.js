@@ -11,16 +11,33 @@
     try { return new URL(trimmed, window.location.origin).origin; } catch (_) { return ''; }
   }
 
+  function getInjectedExpectedOrigin() {
+    const fromGlobal =
+      window.__CFM_EXPECTED_ORIGIN__ ||
+      window.__CFM_TOKEN_EXPECTED_ORIGIN__ ||
+      window.CFM_EXPECTED_ORIGIN;
+    const fromDataset =
+      document.documentElement?.dataset?.cfmExpectedOrigin ||
+      document.body?.dataset?.cfmExpectedOrigin;
+    const fromMeta = document.querySelector('meta[name="cfm-expected-origin"]')?.getAttribute('content');
+    let fromQuery = '';
+    try {
+      fromQuery = new URL(window.location.href).searchParams.get('cfmExpectedOrigin') || '';
+    } catch (_) {}
+    return (
+      parseOrigin(fromGlobal) ||
+      parseOrigin(fromDataset) ||
+      parseOrigin(fromMeta) ||
+      parseOrigin(fromQuery)
+    );
+  }
+
   function getAllowedOrigins() {
     const allowed = new Set();
     const add = (v) => { const o = parseOrigin(v); if (o) allowed.add(o); };
+    const injectedExpectedOrigin = getInjectedExpectedOrigin();
+    if (injectedExpectedOrigin) add(injectedExpectedOrigin);
     add(window.location.origin);
-    add(window.__CFM_EXPECTED_ORIGIN__);
-    add(window.__CFM_TOKEN_EXPECTED_ORIGIN__);
-    add(window.CFM_EXPECTED_ORIGIN);
-    add(document.documentElement?.dataset?.cfmExpectedOrigin);
-    add(document.body?.dataset?.cfmExpectedOrigin);
-    add(document.querySelector('meta[name="cfm-expected-origin"]')?.getAttribute('content'));
     return allowed;
   }
 
@@ -64,11 +81,28 @@
   }
 
   function initPostMessageListener() {
+    const injectedExpectedOrigin = getInjectedExpectedOrigin();
     const allowedOrigins = getAllowedOrigins();
     const expectParent = window.parent && window.parent !== window;
     window.addEventListener('message', function onTokenMsg(evt) {
       if (!evt || typeof evt.origin !== 'string') return;
-      if (!allowedOrigins.has(evt.origin)) return;
+      const expectedOrigin = injectedExpectedOrigin || window.location.origin;
+      if (injectedExpectedOrigin && evt.origin !== injectedExpectedOrigin) {
+        console.warn(
+          '[cfm-auth] rejecting postMessage: origin mismatch (received=%s expected=%s)',
+          evt.origin,
+          expectedOrigin
+        );
+        return;
+      }
+      if (!allowedOrigins.has(evt.origin)) {
+        console.warn(
+          '[cfm-auth] rejecting postMessage: origin mismatch (received=%s expected=%s)',
+          evt.origin,
+          expectedOrigin
+        );
+        return;
+      }
       if (expectParent && evt.source !== window.parent) return;
       const tok = evt.data && evt.data.cfmToken;
       if (!setToken(tok, 'postMessage', { origin: evt.origin })) return;
