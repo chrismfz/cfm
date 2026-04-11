@@ -1,17 +1,8 @@
 (() => {
   const { createApp } = window.Vue;
-
-  const _authCtx = window.CFMAuthContext || {
-    getToken: () => '',
-    waitForToken: async () => '',
-    onAuthContextChanged: () => () => {},
-    loadMe: async () => {
-      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
-      if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
-      return res.json();
-    },
-  };
-  let _scopedToken = _authCtx.getToken();
+  const controller = window.CFMControllerBootstrap.initSharedController({
+    onModeChanged: () => triggerLateTokenReinit(),
+  });
   let _lateTokenReinitialized = false;
   let _lateTokenReinitPending = false;
   let _appVm = null;
@@ -29,27 +20,14 @@
   }
 
   function waitForScopedToken(timeoutMs = 1200) {
-    return _authCtx.waitForToken(timeoutMs);
+    return controller.waitForToken(timeoutMs);
   }
-
-  _authCtx.onAuthContextChanged((evt) => {
-    _scopedToken = _authCtx.getToken();
-    if (evt && evt.modeChanged) {
-      triggerLateTokenReinit();
-    }
-  });
-
-
-  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
-  const uiScope = window.CFMUiScope || {};
   let _adminApiClient = null;
   function getAdminApiClient() {
     if (!_adminApiClient) {
-      _adminApiClient = createApiClient({
+      _adminApiClient = controller.createApiClient({
         basePath: '/cfm-admin/api',
-        getToken: () => _scopedToken,
         isScoped: () => Boolean(_appVm && _appVm.isScopedMode),
-        retryAuthRace: true,
       });
     }
     return _adminApiClient;
@@ -1476,26 +1454,20 @@
       },
       // ── Token management ──────────────────────────────────────────────────
       applyScopedChrome() {
-        uiScope.applyScopedNavFiltering?.({
-          navSelector: '.top-nav',
+        controller.applyScopedChrome({
           scoped: this.isScoped,
-          adminOnlyMatcher: (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/'),
-        });
-        const badge = uiScope.applyScopedBadge?.({
-          selector: '.topbar .meta',
           scopedLabel: 'Scoped view',
           globalLabel: 'Global view',
         });
-        if (badge) badge.textContent = this.isScoped ? 'Scoped view' : 'Global view';
       },
 
       async checkAdminStatus() {
-        const hadTokenAtStart = Boolean(_scopedToken);
+        const hadTokenAtStart = Boolean(controller.getToken());
         if (!hadTokenAtStart) {
           await waitForScopedToken(1500);
-          _scopedToken = _authCtx.getToken();
+          controller.refreshToken();
         }
-        const me = await _authCtx.loadMe({ preferScopedToken: true });
+        const me = await controller.loadMe({ preferScopedToken: true });
         const prevMode = this.isScopedMode ? 'scoped' : 'global';
         this.isScopedMode = Boolean(me?.scoped);
         this.isAdmin = !this.isScopedMode;
@@ -1629,7 +1601,7 @@
       window.addEventListener('resize', this.resizeHandler);
 
       if (!this.tokenBootLogged) {
-        console.info('[cfm-webui] token_present_at_boot', { present: Boolean(_scopedToken) });
+        console.info('[cfm-webui] token_present_at_boot', { present: Boolean(controller.getToken()) });
         this.tokenBootLogged = true;
       }
       const firstCheckDelayMs = 120;

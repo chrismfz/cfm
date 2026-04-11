@@ -1,38 +1,24 @@
 (() => {
-
-  const _authCtx = window.CFMAuthContext || {
-    getToken: () => '',
-    waitForToken: async () => '',
-    onAuthContextChanged: () => () => {},
-    loadMe: async ({ preferScopedToken = true } = {}) => {
-      const headers = { Accept: 'application/json' };
-      if (preferScopedToken && _scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
-      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
-      if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
-      return res.json();
-    },
-  };
-  let _scopedToken = _authCtx.getToken();
-  const TOKEN_BOOT_WAIT_MS = 1200;
-  let _lateTokenReinitialized = false;
-
-  function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
-    if (_scopedToken) return Promise.resolve('present');
-    return _authCtx.waitForToken(timeoutMs).then((tok) => {
-      _scopedToken = _authCtx.getToken();
-      return tok ? 'postmessage' : 'timeout';
-    });
-  }
-
-  _authCtx.onAuthContextChanged((evt) => {
-    _scopedToken = _authCtx.getToken();
-    if (evt && evt.modeChanged && !_lateTokenReinitialized) {
+  const controller = window.CFMControllerBootstrap.initSharedController({
+    onModeChanged: () => {
+      if (_lateTokenReinitialized) return;
       _lateTokenReinitialized = true;
       onLateScopedToken().catch((err) => {
         console.error('[cfm-admin governor] late token re-init failed', err);
       });
-    }
+    },
   });
+  const TOKEN_BOOT_WAIT_MS = 1200;
+  let _lateTokenReinitialized = false;
+
+  function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
+    const scopedToken = controller.getToken();
+    if (scopedToken) return Promise.resolve('present');
+    return controller.waitForToken(timeoutMs).then((tok) => {
+      controller.refreshToken();
+      return tok ? 'postmessage' : 'timeout';
+    });
+  }
 
 
   const appRoot = document.getElementById('app');
@@ -116,20 +102,14 @@
     el.actionMsg.textContent = msg || '';
   }
 
-  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
-  const uiScope = window.CFMUiScope || {};
-  const api = createApiClient({
+  const api = controller.createApiClient({
     basePath: '/cfm-admin/api',
-    getToken: () => _scopedToken,
     isScoped: () => st.isScopedMode,
     adminOnlyPaths: ADMIN_ONLY_API_PATHS,
-    retryAuthRace: true,
   });
-  const scopedApi = createApiClient({
+  const scopedApi = controller.createApiClient({
     basePath: '/api',
-    getToken: () => _scopedToken,
     isScoped: () => false,
-    retryAuthRace: true,
   });
 
 
@@ -137,14 +117,14 @@
   async function ensureAuthContext(opts = {}) {
     const shouldWait = Boolean(opts.waitForToken);
     const waitMs = Number(opts.waitMs) > 0 ? Number(opts.waitMs) : 350;
-    if (shouldWait && !_scopedToken) {
+    if (shouldWait && !controller.getToken()) {
       await waitForScopedTokenOrTimeout(waitMs);
     }
 
     let me = null;
     try {
-      me = await _authCtx.loadMe({ preferScopedToken: true });
-      _scopedToken = _authCtx.getToken();
+      me = await controller.loadMe({ preferScopedToken: true });
+      controller.refreshToken();
     } catch (_) {}
 
     return {
@@ -158,17 +138,11 @@
     const isScopedMode = auth.scoped;
     const canWrite = !isScopedMode || String(auth.role || '').toLowerCase() !== 'viewer';
 
-    uiScope.applyScopedNavFiltering?.({
-      navSelector: '.top-nav',
+    controller.applyScopedChrome({
       scoped: isScopedMode,
-      adminOnlyMatcher: (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/'),
-    });
-    const badge = uiScope.applyScopedBadge?.({
-      selector: '.topbar .meta',
       scopedLabel: 'Scoped MySQL view',
       globalLabel: 'Global view',
     });
-    if (badge) badge.textContent = isScopedMode ? 'Scoped MySQL view' : 'Global view';
 
     return { isScopedMode, canWrite, role: auth.role };
   }
@@ -869,7 +843,7 @@
   }
 
   (async function boot() {
-    const tokenPresentAtBoot = Boolean(_scopedToken);
+    const tokenPresentAtBoot = Boolean(controller.getToken());
     st.tokenMissingAtBoot = !tokenPresentAtBoot;
     const ctx = await loadViewerContext({ waitForToken: true, waitMs: TOKEN_BOOT_WAIT_MS });
     st.authRecheckCyclesRemaining = (!ctx.isScopedMode && st.tokenMissingAtBoot) ? 2 : 0;

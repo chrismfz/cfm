@@ -1,19 +1,5 @@
 (() => {
-  const _authCtx = window.CFMAuthContext || {
-    getToken: () => '',
-    onAuthContextChanged: () => () => {},
-    loadMe: async ({ preferScopedToken = true } = {}) => {
-      const headers = { Accept: 'application/json' };
-      if (preferScopedToken && _scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
-      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
-      if (!res.ok) throw new Error(`v1/tokens/me -> HTTP ${res.status}`);
-      return res.json();
-    },
-  };
-  let _scopedToken = _authCtx.getToken();
-  _authCtx.onAuthContextChanged(() => {
-    _scopedToken = _authCtx.getToken();
-  });
+  const controller = window.CFMControllerBootstrap.initSharedController();
 
 
   const state = {
@@ -51,13 +37,9 @@ const el = {
     el.actionMsg.textContent = msg || '';
   }
 
-  const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
-  const uiScope = window.CFMUiScope || {};
-  const api = createApiClient({
+  const api = controller.createApiClient({
     basePath: '/cfm-admin/api',
-    getToken: () => _scopedToken,
     isScoped: () => false,
-    retryAuthRace: true,
   });
 
 
@@ -65,24 +47,18 @@ const el = {
   async function loadViewerContext() {
     let me = { scoped: false, role: 'admin' };
     try {
-      me = await _authCtx.loadMe({ preferScopedToken: true });
-      _scopedToken = _authCtx.getToken();
+      me = await controller.loadMe({ preferScopedToken: true });
+      controller.refreshToken();
     } catch (_) {}
 
     const scoped = Boolean(me && me.scoped);
     const canWrite = !scoped || String(me.role || '').toLowerCase() !== 'viewer';
 
-    uiScope.applyScopedNavFiltering?.({
-      navSelector: '.top-nav',
+    controller.applyScopedChrome({
       scoped,
-      adminOnlyMatcher: (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/'),
-    });
-    const badge = uiScope.applyScopedBadge?.({
-      selector: '.topbar .meta',
       scopedLabel: 'Scoped view',
       globalLabel: 'Global view',
     });
-    if (badge) badge.textContent = scoped ? 'Scoped view' : 'Global view';
 
     return { scoped, canWrite, role: String(me.role || '') };
   }
