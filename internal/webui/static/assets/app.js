@@ -149,6 +149,9 @@
         scopedSkipInfoLogged: false,
         tokenBootLogged: false,
         modeChangeLogged: false,
+        authReady: false,
+        authFailed: false,
+        authUnknown: true,
       };
     },
 
@@ -1339,6 +1342,7 @@
       },
 
       async refreshAll() {
+        if (this.authUnknown || this.authFailed) return;
         if (this.refreshInProgress) return;
         this.refreshInProgress = true;
         this.loading = true;
@@ -1449,6 +1453,18 @@
       applyScopedChrome() {
         controller.applyScopedChrome({ scoped: this.isScoped });
       },
+      setAuthState(nextState) {
+        this.authReady = nextState === 'ready';
+        this.authFailed = nextState === 'failed';
+        this.authUnknown = nextState !== 'ready' && nextState !== 'failed';
+      },
+      isHttpStatusError(err, statusCode) {
+        const msg = String(err?.message || err || '');
+        return Number(err?.status) === statusCode || msg.includes(`HTTP ${statusCode}`) || msg.includes(`status ${statusCode}`);
+      },
+      isAuthStatusError(err) {
+        return this.isHttpStatusError(err, 401) || this.isHttpStatusError(err, 403);
+      },
 
       async checkAdminStatus(opts = {}) {
         const hadTokenAtStart = Boolean(controller.getToken());
@@ -1498,7 +1514,8 @@
 
       async onLateScopedToken() {
         const result = await this.checkAdminStatus();
-        if (result?.modeChanged) {
+        this.setAuthState('ready');
+        if (result?.modeChanged || this.topShort.length === 0) {
           await this.refreshAll();
         }
       },
@@ -1603,29 +1620,39 @@
       }
       const firstCheckDelayMs = 120;
       setTimeout(() => {
-        let initialCheckFailed = false;
+        this.setAuthState('unknown');
         this.checkAdminStatus({ resolveInitialMode: true })
-          .catch((err) => {
-            initialCheckFailed = true;
+          .then(async () => {
+            this.setAuthState('ready');
+            controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
+            await this.refreshAll();
+          })
+          .catch(async (err) => {
             console.warn('[cfm-webui] checkAdminStatus failed', err);
+            if (this.isAuthStatusError(err)) {
+              try {
+                await waitForScopedToken(10000);
+                if (controller.refreshToken()) {
+                  await this.checkAdminStatus({ resolveInitialMode: true });
+                  this.setAuthState('ready');
+                  controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
+                  await this.refreshAll();
+                  return;
+                }
+              } catch (retryErr) {
+                console.warn('[cfm-webui] deferred checkAdminStatus retry failed', retryErr);
+              }
+              this.setAuthState('failed');
+              controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
+              return;
+            }
             const fallbackScoped = Boolean(controller.getToken());
             this.isScopedMode = fallbackScoped;
             this.isAdmin = !fallbackScoped;
             this.applyScopedChrome();
-          })
-          .finally(() => {
+            this.setAuthState('ready');
             controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
-            this.refreshAll();
-            if (!initialCheckFailed || controller.getToken()) return;
-            waitForScopedToken(10000)
-              .then(async () => {
-                if (!controller.refreshToken()) return;
-                const result = await this.checkAdminStatus({ resolveInitialMode: true });
-                if (result?.modeChanged) {
-                  await this.refreshAll();
-                }
-              })
-              .catch((err) => console.warn('[cfm-webui] late checkAdminStatus retry failed', err));
+            await this.refreshAll();
           });
       }, firstCheckDelayMs);
       this.$nextTick(() => this.resizeVhostCharts());

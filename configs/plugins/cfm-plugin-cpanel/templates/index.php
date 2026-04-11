@@ -82,7 +82,7 @@ iframe {
   var token  = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
   var origin = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
   var frame  = document.getElementById('cfm-frame');
-  var expectedParentOriginParam = 'cfmExpectedOrigin';
+  var expectedParentOriginParam = 'cfmExpectedOrigin'; // canonical transport for expected parent origin
   var state = 'loaded';
   var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
@@ -169,7 +169,11 @@ iframe {
   }
 
   window.addEventListener('message', function (evt) {
-    if (evt.origin !== origin) return;
+    if (evt.origin !== origin) {
+      console.warn('[cfm-plugin] rejected iframe message origin=%s allowlist=%o', evt.origin, [origin]);
+      return;
+    }
+    console.debug('[cfm-plugin] accepted iframe message origin=%s', evt.origin);
     var data = evt && evt.data ? evt.data : {};
     if (data.cfmTokenAck === true) {
       var ackSeq = Number(data.ackSeq || data.loadSeq || currentLoadSeq || 0);
