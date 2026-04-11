@@ -1,0 +1,59 @@
+# =============================================================================
+# CFM Combined Logrotate Configuration
+# Covers: Web server access logs (nginx/apache2/httpd), CFM app logs, OpenResty
+#
+# Uses copytruncate throughout:
+#   - No postrotate signals needed (no pid file path assumptions)
+#   - Works across Debian, Ubuntu, CentOS/RHEL, DirectAdmin, cPanel, OpenResty
+#   - Safe for any process that holds the log file open
+#   - Tiny theoretical data loss window (microseconds) is acceptable for access logs
+#
+# missingok ensures no errors if a path doesn't exist on a given server
+# =============================================================================
+
+# --- Web server CFM access logs (nginx / apache2 / httpd) ---
+/var/log/nginx/access_cfm_combined.log
+/var/log/apache2/access_cfm_tsv.log
+/var/log/httpd/access_cfm_tsv.log {
+    daily
+    size 250M
+    rotate 10
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# --- CFM application logs ---
+/var/log/cfm/cfm.api.log
+/var/log/cfm/cfm.challenges.log
+/var/log/cfm/cfm.detector.log
+/var/log/cfm/cfm-error.log
+/var/log/cfm/cfm.log
+/var/log/cfm/cfm-service.log
+/var/log/cfm/cfm.smtp.log
+/var/log/cfm/challenge.access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# --- OpenResty nginx logs ---
+/usr/local/openresty/nginx/logs/access.log
+/usr/local/openresty/nginx/logs/access.cfm.log
+/usr/local/openresty/nginx/logs/throttle.log
+/usr/local/openresty/nginx/logs/access_cfm_tsv.log
+/usr/local/openresty/nginx/logs/error.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
