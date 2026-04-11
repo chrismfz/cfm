@@ -24,6 +24,8 @@ import (
 	webdet "cfm/internal/webdetector"
 )
 
+var sessionAllowedRequest = sessionAllowed
+
 // isPublicPath returns true if the request path requires no auth.
 // cfmBase returns the path prefix used by the UI when generating redirects.
 //
@@ -90,6 +92,23 @@ func isPublicPath(r *http.Request) bool {
 	return false
 }
 
+func isCpanelEmbeddedRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	for _, h := range []string{"X-CFM-Embedded", "X-CPanel-Embedded"} {
+		v := strings.ToLower(strings.TrimSpace(r.Header.Get(h)))
+		switch v {
+		case "1", "true", "cpanel", "embedded":
+			return true
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/cpanel/") {
+		return true
+	}
+	return false
+}
+
 // cPanel plugin actor-assertion route: allow request through auth middleware
 // and let the endpoint perform strict assertion validation.
 func isCpanelPluginSelfServicePath(r *http.Request) bool {
@@ -121,6 +140,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			embedded := isCpanelEmbeddedRequest(r)
 
 			// ── 1. Public paths ────────────────────────────────────────────
 			if isPublicPath(r) || isCpanelPluginSelfServicePath(r) {
@@ -137,18 +157,33 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					return
 				}
 				if st, ok := store.Lookup(tok); ok {
-					logging.Logf("[apiserver] auth_source=token_scoped")
+					if embedded {
+						logging.Logf("[apiserver] auth_source=token_scoped_embedded")
+					} else {
+						logging.Logf("[apiserver] auth_source=token_scoped")
+					}
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
+				}
+				if embedded {
+					logging.Logf("[apiserver] auth_reject=invalid_scoped_embedded")
 				}
 				w.Header().Set("Content-Type", "application/json")
 				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
 				return
 			}
 
+			if embedded {
+				logging.Logf("[apiserver] auth_reject=missing_scoped_embedded")
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
+				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
+				return
+			}
+
 			// ── 3. Valid goauth session (fallback when no token header) ───
-			if !tokenHeaderSupplied && sessionAllowed(r) {
+			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				logging.Logf("[apiserver] auth_source=session_cookie")
 				next.ServeHTTP(w, r)
 				return
