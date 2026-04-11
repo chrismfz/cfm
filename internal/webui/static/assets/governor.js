@@ -1,15 +1,12 @@
 (() => {
   const controller = window.CFMControllerBootstrap.initSharedController({
-    onModeChanged: () => {
-      if (_lateTokenReinitialized) return;
-      _lateTokenReinitialized = true;
+    onDeferredScopedToken: () => {
       onLateScopedToken().catch((err) => {
         console.error('[cfm-admin governor] late token re-init failed', err);
       });
     },
   });
   const TOKEN_BOOT_WAIT_MS = 1200;
-  let _lateTokenReinitialized = false;
 
   function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
     const scopedToken = controller.getToken();
@@ -81,8 +78,6 @@
     maxPoints: 80,
     eventRows: [],
     isScopedMode: false,
-    tokenMissingAtBoot: false,
-    authRecheckCyclesRemaining: 0,
   };
   const ADMIN_ONLY_API_PATHS = new Set([
     '/v1/mysql/state',
@@ -706,7 +701,6 @@
 
   function refresh() {
     return (async () => {
-      await maybeRefreshAuthContext();
       const fn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
       return fn();
     })();
@@ -807,30 +801,10 @@
     console.info(`[cfm-admin governor] mode_changed ${from}->${to}`);
   }
 
-  async function maybeRefreshAuthContext() {
-    if (st.isScopedMode) return false;
-    if (!st.tokenMissingAtBoot || st.authRecheckCyclesRemaining <= 0) return false;
-    st.authRecheckCyclesRemaining -= 1;
-    const auth = await ensureAuthContext({ waitForToken: true, waitMs: 350 });
-    if (!auth.scoped) return false;
-
-    logModeTransition('global', 'scoped');
-    applyViewerContext({
-      isScopedMode: true,
-      canWrite: String(auth.role || '').toLowerCase() !== 'viewer',
-      role: auth.role || '',
-    });
-    st.refreshFn = refreshScopedMode;
-    if (st.auto) {
-      clearInterval(st.timer);
-      startAuto();
-    }
-    return true;
-  }
-
   async function onLateScopedToken() {
     const wasScoped = st.isScopedMode;
     const ctx = await loadViewerContext();
+    if (wasScoped === ctx.isScopedMode) return;
     applyViewerContext(ctx);
     configurePollingMode();
     logModeTransition(wasScoped ? 'scoped' : 'global', ctx.isScopedMode ? 'scoped' : 'global');
@@ -844,9 +818,8 @@
 
   (async function boot() {
     const tokenPresentAtBoot = Boolean(controller.getToken());
-    st.tokenMissingAtBoot = !tokenPresentAtBoot;
     const ctx = await loadViewerContext({ waitForToken: true, waitMs: TOKEN_BOOT_WAIT_MS });
-    st.authRecheckCyclesRemaining = (!ctx.isScopedMode && st.tokenMissingAtBoot) ? 2 : 0;
+    controller.noteInitialModeResolved({ isScopedMode: ctx.isScopedMode });
     applyViewerContext(ctx);
     configurePollingMode();
     await refresh();
