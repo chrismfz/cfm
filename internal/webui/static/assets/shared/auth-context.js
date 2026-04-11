@@ -2,6 +2,7 @@
   if (window.CFMAuthContext) return;
 
   const TOKEN_RE = /^[0-9a-f]{64}$/;
+  const EXPECTED_PARENT_ORIGIN_PARAM = 'cfmExpectedOrigin';
   const state = { token: '', source: 'none', changes: new Set(), waiters: [] };
 
   function parseOrigin(value) {
@@ -11,32 +12,19 @@
     try { return new URL(trimmed, window.location.origin).origin; } catch (_) { return ''; }
   }
 
-  function getInjectedExpectedOrigin() {
-    const fromGlobal =
-      window.__CFM_EXPECTED_ORIGIN__ ||
-      window.__CFM_TOKEN_EXPECTED_ORIGIN__ ||
-      window.CFM_EXPECTED_ORIGIN;
-    const fromDataset =
-      document.documentElement?.dataset?.cfmExpectedOrigin ||
-      document.body?.dataset?.cfmExpectedOrigin;
-    const fromMeta = document.querySelector('meta[name="cfm-expected-origin"]')?.getAttribute('content');
-    let fromQuery = '';
-    try {
-      fromQuery = new URL(window.location.href).searchParams.get('cfmExpectedOrigin') || '';
-    } catch (_) {}
-    return (
-      parseOrigin(fromGlobal) ||
-      parseOrigin(fromDataset) ||
-      parseOrigin(fromMeta) ||
-      parseOrigin(fromQuery)
-    );
+  function parseLocationURL() {
+    try { return new URL(window.location.href); } catch (_) { return null; }
   }
 
-  function getAllowedOrigins() {
+  function getExpectedOriginFromQuery(parsedURL) {
+    if (!parsedURL || !parsedURL.searchParams) return '';
+    return parseOrigin(parsedURL.searchParams.get(EXPECTED_PARENT_ORIGIN_PARAM) || '');
+  }
+
+  function getAllowedOrigins(expectedParentOrigin) {
     const allowed = new Set();
     const add = (v) => { const o = parseOrigin(v); if (o) allowed.add(o); };
-    const injectedExpectedOrigin = getInjectedExpectedOrigin();
-    if (injectedExpectedOrigin) add(injectedExpectedOrigin);
+    if (expectedParentOrigin) add(expectedParentOrigin);
     add(window.location.origin);
     return allowed;
   }
@@ -68,46 +56,60 @@
     return true;
   }
 
-  function readTokenFromURL() {
-    try {
-      const u = new URL(window.location.href);
-      const t = (u.searchParams.get('token') || '').trim();
-      if (!TOKEN_RE.test(t)) return;
-      if (setToken(t, 'url')) {
-        u.searchParams.delete('token');
-        window.history.replaceState({}, '', u.toString());
-      }
-    } catch (_) {}
+  function readTokenFromURL(parsedURL) {
+    if (!parsedURL || !parsedURL.searchParams) return false;
+    const t = (parsedURL.searchParams.get('token') || '').trim();
+    if (!TOKEN_RE.test(t)) return false;
+    return setToken(t, 'url');
   }
 
-  function initPostMessageListener() {
-    const injectedExpectedOrigin = getInjectedExpectedOrigin();
-    const allowedOrigins = getAllowedOrigins();
+  function cleanupBootstrapQueryParams(parsedURL, keys = []) {
+    if (!parsedURL || !parsedURL.searchParams || !Array.isArray(keys) || !keys.length) return;
+    let dirty = false;
+    keys.forEach((k) => {
+      if (parsedURL.searchParams.has(k)) {
+        parsedURL.searchParams.delete(k);
+        dirty = true;
+      }
+    });
+    if (!dirty) return;
+    try { window.history.replaceState({}, '', parsedURL.toString()); } catch (_) {}
+  }
+
+  function initPostMessageListener(expectedParentOrigin) {
+    const allowedOrigins = getAllowedOrigins(expectedParentOrigin);
     const expectParent = window.parent && window.parent !== window;
     window.addEventListener('message', function onTokenMsg(evt) {
       if (!evt || typeof evt.origin !== 'string') return;
-      const expectedOrigin = injectedExpectedOrigin || window.location.origin;
-      if (injectedExpectedOrigin && evt.origin !== injectedExpectedOrigin) {
+      const expectedOrigin = expectedParentOrigin || window.location.origin;
+      const allowlist = Array.from(allowedOrigins.values());
+      if (expectedParentOrigin && evt.origin !== expectedParentOrigin) {
         console.warn(
-          '[cfm-auth] rejecting postMessage: origin mismatch (received=%s expected=%s)',
+          '[cfm-auth] rejecting postMessage origin (received=%s allowlist=%o)',
           evt.origin,
-          expectedOrigin
+          allowlist
         );
         return;
       }
       if (!allowedOrigins.has(evt.origin)) {
         console.warn(
-          '[cfm-auth] rejecting postMessage: origin mismatch (received=%s expected=%s)',
+          '[cfm-auth] rejecting postMessage origin (received=%s allowlist=%o)',
           evt.origin,
-          expectedOrigin
+          allowlist
         );
         return;
       }
       if (expectParent && evt.source !== window.parent) return;
+      console.debug('[cfm-auth] accepted postMessage origin=%s expected=%s', evt.origin, expectedOrigin);
       const tok = evt.data && evt.data.cfmToken;
       if (!setToken(tok, 'postMessage', { origin: evt.origin })) return;
       try {
-        if (expectParent) window.parent.postMessage({ cfmTokenAck: true, path: 'postMessage' }, evt.origin);
+        if (expectParent) {
+          const seq = Number(evt?.data?.loadSeq || 0);
+          const ackPayload = { cfmTokenAck: true, path: 'postMessage', ackSeq: seq || 0, loadSeq: seq || 0 };
+          window.parent.postMessage(ackPayload, evt.origin);
+          console.debug('[cfm-auth] ACK sent origin=%s ackSeq=%d loadSeq=%d', evt.origin, ackPayload.ackSeq, ackPayload.loadSeq);
+        }
       } catch (_) {}
     });
   }
@@ -150,8 +152,17 @@
     return window.location.pathname === '/cfm-admin' || window.location.pathname.startsWith('/cfm-admin/');
   }
 
-  readTokenFromURL();
-  initPostMessageListener();
+  const bootstrapURL = parseLocationURL();
+  const tokenAcceptedFromURL = readTokenFromURL(bootstrapURL);
+  const expectedParentOrigin = getExpectedOriginFromQuery(bootstrapURL);
+  initPostMessageListener(expectedParentOrigin);
+  cleanupBootstrapQueryParams(
+    bootstrapURL,
+    [
+      ...(tokenAcceptedFromURL ? ['token'] : []),
+      EXPECTED_PARENT_ORIGIN_PARAM,
+    ]
+  );
 
   window.CFMAuthContext = {
     getToken: () => state.token,
