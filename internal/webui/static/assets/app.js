@@ -1602,10 +1602,30 @@
       }
       const firstCheckDelayMs = 120;
       setTimeout(() => {
+        let initialCheckFailed = false;
         this.checkAdminStatus({ resolveInitialMode: true })
-          .then(() => controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode }))
-          .catch((err) => console.warn('[cfm-webui] checkAdminStatus failed', err))
-          .finally(() => this.refreshAll());
+          .catch((err) => {
+            initialCheckFailed = true;
+            console.warn('[cfm-webui] checkAdminStatus failed', err);
+            const fallbackScoped = Boolean(controller.getToken());
+            this.isScopedMode = fallbackScoped;
+            this.isAdmin = !fallbackScoped;
+            this.applyScopedChrome();
+          })
+          .finally(() => {
+            controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
+            this.refreshAll();
+            if (!initialCheckFailed || controller.getToken()) return;
+            waitForScopedToken(10000)
+              .then(async () => {
+                if (!controller.refreshToken()) return;
+                const result = await this.checkAdminStatus({ resolveInitialMode: true });
+                if (result?.modeChanged) {
+                  await this.refreshAll();
+                }
+              })
+              .catch((err) => console.warn('[cfm-webui] late checkAdminStatus retry failed', err));
+          });
       }, firstCheckDelayMs);
       this.$nextTick(() => this.resizeVhostCharts());
 
