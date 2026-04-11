@@ -2,9 +2,9 @@
 //
 // Admin endpoints for scoped token management.
 //
-//   GET  /api/v1/tokens/list    — list all tokens (admin only, no token values)
-//   POST /api/v1/tokens/revoke  — revoke by id (admin only)
-//   GET  /api/v1/tokens/me      — calling token's own scope info (any valid token)
+//	GET  /api/v1/tokens/list    — list all tokens (admin only, no token values)
+//	POST /api/v1/tokens/revoke  — revoke by id (admin only)
+//	GET  /api/v1/tokens/me      — calling token's own scope info (any valid token)
 //
 // All three are mounted by RegisterTokenManagementEndpoints(), called from
 // apiserver.go alongside RegisterTokenEndpoint().
@@ -85,11 +85,15 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 		for v := range st.Vhosts {
 			vhosts = append(vhosts, v)
 		}
+		dbUsers := sortedScopeKeys(st.DBUsers)
+		databases := sortedScopeKeys(st.Databases)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":         st.ID,
 			"label":      st.Label,
 			"role":       st.Role,
 			"vhosts":     vhosts,
+			"db_users":   dbUsers,
+			"databases":  databases,
 			"expires_at": st.Expiry,
 			"scoped":     true,
 		})

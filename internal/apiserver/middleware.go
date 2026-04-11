@@ -163,6 +163,10 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 						logging.Logf("[apiserver] auth_source=token_scoped")
 					}
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
+					ctx = context.WithValue(ctx, webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
+						Users:     st.DBUsers,
+						Databases: st.Databases,
+					})
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}

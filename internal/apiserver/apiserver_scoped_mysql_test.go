@@ -76,6 +76,53 @@ func TestScopedMySQLFilterHandler_ScopedNoUserInjectsDerivedDefaults(t *testing.
 	}
 }
 
+func TestScopedMySQLFilterHandler_UsesExplicitDBUserScopeWhenPresent(t *testing.T) {
+	writeScopedMySQLOwnerFixture(t)
+
+	var gotUsers []string
+	h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUsers = r.URL.Query()["user"]
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := newScopedMySQLRequestWithDBScope(t, "/api/v1/mysql/user-summary", map[string]struct{}{
+		"explicit_user": {},
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 with explicit db user scope, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	want := []string{"explicit_user"}
+	if !reflect.DeepEqual(gotUsers, want) {
+		t.Fatalf("unexpected injected users: got=%v want=%v", gotUsers, want)
+	}
+}
+
+func TestScopedMySQLFilterHandler_UsesExplicitDatabaseScopeWhenPresent(t *testing.T) {
+	writeScopedMySQLOwnerFixture(t)
+
+	nextCalled := false
+	h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := newScopedMySQLRequestWithDatabaseScope(t, "/api/v1/mysql/user-summary?db=explicit_db", map[string]struct{}{
+		"explicit_db": {},
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for in-scope explicit db filter, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Fatalf("expected next handler to be called")
+	}
+}
+
 func TestScopedMySQLFilterHandler_ScopedDBInjectionRejected(t *testing.T) {
 	writeScopedMySQLOwnerFixture(t)
 
@@ -155,5 +202,23 @@ func newScopedMySQLRequest(t *testing.T, rawURL string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
 	scope := map[string]struct{}{"mysite.com": {}}
 	ctx := context.WithValue(req.Context(), webdet.CtxScopeKey{}, scope)
+	return req.WithContext(ctx)
+}
+
+func newScopedMySQLRequestWithDBScope(t *testing.T, rawURL string, users map[string]struct{}) *http.Request {
+	t.Helper()
+	req := newScopedMySQLRequest(t, rawURL)
+	ctx := context.WithValue(req.Context(), webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
+		Users: users,
+	})
+	return req.WithContext(ctx)
+}
+
+func newScopedMySQLRequestWithDatabaseScope(t *testing.T, rawURL string, databases map[string]struct{}) *http.Request {
+	t.Helper()
+	req := newScopedMySQLRequest(t, rawURL)
+	ctx := context.WithValue(req.Context(), webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
+		Databases: databases,
+	})
 	return req.WithContext(ctx)
 }

@@ -75,6 +75,10 @@ func embedScopedContextFromCookie(r *http.Request, store *TokenStore) (context.C
 		return nil, false
 	}
 	ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
+	ctx = context.WithValue(ctx, webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
+		Users:     st.DBUsers,
+		Databases: st.Databases,
+	})
 	return ctx, true
 }
 

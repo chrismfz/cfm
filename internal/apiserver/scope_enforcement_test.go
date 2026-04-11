@@ -46,7 +46,7 @@ func doAuthReq(h http.Handler, method, path, token string, body []byte, withCook
 
 func TestScopedToken_CannotReadGlobalLists(t *testing.T) {
 	store, h := newScopeTestServer(t)
-	scoped := store.Issue([]string{"mysite.com"}, "viewer", "scoped", time.Hour)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
 
 	rr := doAuthReq(h, http.MethodGet, "/api/v1/webdet/ip-short", scoped.Token, nil, false)
 	if rr.Code != http.StatusForbidden {
@@ -56,7 +56,7 @@ func TestScopedToken_CannotReadGlobalLists(t *testing.T) {
 
 func TestScopedToken_CannotMutateOutOfScopeVhost(t *testing.T) {
 	store, h := newScopeTestServer(t)
-	scoped := store.Issue([]string{"mysite.com"}, "viewer", "scoped", time.Hour)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
 
 	body := []byte(`{"host":"other.com","ttl":"30m","reason":"manual"}`)
 	rr := doAuthReq(h, http.MethodPost, "/api/v1/challenge/vhost/add", scoped.Token, body, false)
@@ -67,8 +67,8 @@ func TestScopedToken_CannotMutateOutOfScopeVhost(t *testing.T) {
 
 func TestScopedToken_CannotListOrRevokeOtherUsersTokens(t *testing.T) {
 	store, h := newScopeTestServer(t)
-	scoped := store.Issue([]string{"mysite.com"}, "viewer", "scoped", time.Hour)
-	other := store.Issue([]string{"other.com"}, "viewer", "other", time.Hour)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
+	other := store.Issue([]string{"other.com"}, nil, nil, "viewer", "other", time.Hour)
 
 	rr := doAuthReq(h, http.MethodGet, "/api/v1/tokens/list", scoped.Token, nil, false)
 	if rr.Code != http.StatusForbidden {
@@ -84,7 +84,7 @@ func TestScopedToken_CannotListOrRevokeOtherUsersTokens(t *testing.T) {
 
 func TestScopedToken_BeatsCookieWhenBothPresent(t *testing.T) {
 	store, h := newScopeTestServer(t)
-	scoped := store.Issue([]string{"mysite.com"}, "viewer", "scoped", time.Hour)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
 
 	rr := doAuthReq(h, http.MethodGet, "/api/v1/webdet/ip-short", scoped.Token, nil, true)
 	if rr.Code != http.StatusForbidden {

@@ -446,6 +446,9 @@ func hasExplicitUserFilter(r *http.Request) bool {
 }
 
 func deriveScopedMySQLUsers(r *http.Request) []string {
+	if dbScope := scopedDBScopeFromRequest(r); dbScope != nil && len(dbScope.Users) > 0 {
+		return sortedScopeKeys(dbScope.Users)
+	}
 	owners := deriveScopedMySQLOwners(r)
 	if len(owners) == 0 {
 		return nil
@@ -459,6 +462,9 @@ func deriveScopedMySQLUsers(r *http.Request) []string {
 }
 
 func deriveScopedMySQLDatabases(r *http.Request) []string {
+	if dbScope := scopedDBScopeFromRequest(r); dbScope != nil && len(dbScope.Databases) > 0 {
+		return sortedScopeKeys(dbScope.Databases)
+	}
 	owners := deriveScopedMySQLOwners(r)
 	if len(owners) == 0 {
 		return nil
@@ -485,6 +491,17 @@ func deriveScopedMySQLOwners(r *http.Request) []string {
 		return nil
 	}
 	return owners
+}
+
+func scopedDBScopeFromRequest(r *http.Request) *webdet.ScopedDBScope {
+	if r == nil {
+		return nil
+	}
+	scope, _ := r.Context().Value(webdet.CtxDBScopeKey{}).(webdet.ScopedDBScope)
+	if len(scope.Users) == 0 && len(scope.Databases) == 0 {
+		return nil
+	}
+	return &scope
 }
 
 func requestedMySQLUsersWithinAllowed(r *http.Request, allowed []string) bool {

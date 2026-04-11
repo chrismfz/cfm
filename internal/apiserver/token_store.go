@@ -37,6 +37,8 @@ type ScopedToken struct {
 	Token     string              // the secret value sent in Authorization: Bearer
 	Label     string              // human-readable name, e.g. "cpanel-user-foo"
 	Vhosts    map[string]struct{} // allowed vhosts (lowercase); nil = unrestricted
+	DBUsers   map[string]struct{} // allowed db users (lowercase); nil = owner-derived fallback
+	Databases map[string]struct{} // allowed databases (lowercase); nil = owner-derived fallback
 	Role      string              // "viewer" | "admin"
 	CreatedAt time.Time
 	Expiry    time.Time
@@ -71,7 +73,7 @@ func newTokenID() string {
 // role:   "viewer" | "admin" (defaults to "viewer").
 // label:  human-readable name for display in token list.
 // ttl:    must be positive; max 8760h (1 year).
-func (s *TokenStore) Issue(vhosts []string, role, label string, ttl time.Duration) *ScopedToken {
+func (s *TokenStore) Issue(vhosts, dbUsers, databases []string, role, label string, ttl time.Duration) *ScopedToken {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		logging.Logf("[token_store] rand.Read failed: %v", err)
@@ -88,6 +90,8 @@ func (s *TokenStore) Issue(vhosts []string, role, label string, ttl time.Duratio
 			}
 		}
 	}
+	dbUserSet := sanitizeScopeList(dbUsers)
+	databaseSet := sanitizeScopeList(databases)
 	if role == "" {
 		role = "viewer"
 	}
@@ -100,6 +104,8 @@ func (s *TokenStore) Issue(vhosts []string, role, label string, ttl time.Duratio
 		Token:     tok,
 		Label:     label,
 		Vhosts:    vhostSet,
+		DBUsers:   dbUserSet,
+		Databases: databaseSet,
 		Role:      role,
 		CreatedAt: time.Now().UTC(),
 		Expiry:    time.Now().Add(ttl),
@@ -110,8 +116,8 @@ func (s *TokenStore) Issue(vhosts []string, role, label string, ttl time.Duratio
 	s.byID[st.ID] = st
 	s.mu.Unlock()
 
-	logging.Logf("[token_store] issued id=%s label=%q role=%s vhosts=%d ttl=%s expires=%s",
-		st.ID, label, role, len(vhostSet), ttl, st.Expiry.Format(time.RFC3339))
+	logging.Logf("[token_store] issued id=%s label=%q role=%s vhosts=%d db_users=%d databases=%d ttl=%s expires=%s",
+		st.ID, label, role, len(vhostSet), len(dbUserSet), len(databaseSet), ttl, st.Expiry.Format(time.RFC3339))
 
 	_ = s.save()
 	return st
@@ -153,6 +159,8 @@ type TokenInfo struct {
 	ID        string    `json:"id"`
 	Label     string    `json:"label"`
 	Vhosts    []string  `json:"vhosts"`
+	DBUsers   []string  `json:"db_users,omitempty"`
+	Databases []string  `json:"databases,omitempty"`
 	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -173,10 +181,14 @@ func (s *TokenStore) List() []TokenInfo {
 			vhosts = append(vhosts, v)
 		}
 		sort.Strings(vhosts)
+		dbUsers := sortedScopeKeys(st.DBUsers)
+		databases := sortedScopeKeys(st.Databases)
 		out = append(out, TokenInfo{
 			ID:        st.ID,
 			Label:     st.Label,
 			Vhosts:    vhosts,
+			DBUsers:   dbUsers,
+			Databases: databases,
 			Role:      st.Role,
 			CreatedAt: st.CreatedAt,
 			ExpiresAt: st.Expiry,
@@ -231,6 +243,8 @@ type persistedToken struct {
 	Token     string    `json:"token"`
 	Label     string    `json:"label"`
 	Vhosts    []string  `json:"vhosts"`
+	DBUsers   []string  `json:"db_users,omitempty"`
+	Databases []string  `json:"databases,omitempty"`
 	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 	Expiry    time.Time `json:"expiry"`
@@ -256,11 +270,15 @@ func (s *TokenStore) save() error {
 			vhosts = append(vhosts, v)
 		}
 		sort.Strings(vhosts)
+		dbUsers := sortedScopeKeys(st.DBUsers)
+		databases := sortedScopeKeys(st.Databases)
 		rows = append(rows, persistedToken{
 			ID:        st.ID,
 			Token:     st.Token,
 			Label:     st.Label,
 			Vhosts:    vhosts,
+			DBUsers:   dbUsers,
+			Databases: databases,
 			Role:      st.Role,
 			CreatedAt: st.CreatedAt,
 			Expiry:    st.Expiry,
@@ -310,11 +328,15 @@ func (s *TokenStore) Load(path string) error {
 		for _, v := range row.Vhosts {
 			vhostSet[v] = struct{}{}
 		}
+		dbUserSet := sanitizeScopeList(row.DBUsers)
+		databaseSet := sanitizeScopeList(row.Databases)
 		st := &ScopedToken{
 			ID:        row.ID,
 			Token:     row.Token,
 			Label:     row.Label,
 			Vhosts:    vhostSet,
+			DBUsers:   dbUserSet,
+			Databases: databaseSet,
 			Role:      row.Role,
 			CreatedAt: row.CreatedAt,
 			Expiry:    row.Expiry,
@@ -331,10 +353,12 @@ func (s *TokenStore) Load(path string) error {
 // ── Issue endpoint (POST /api/v1/auth/token) ──────────────────────────────────
 
 type tokenIssueRequest struct {
-	Vhosts []string `json:"vhosts"`
-	Role   string   `json:"role"`
-	TTL    string   `json:"ttl"`   // Go duration string, e.g. "2h", "8760h"
-	Label  string   `json:"label"` // human-readable name
+	Vhosts    []string `json:"vhosts"`
+	DBUsers   []string `json:"db_users"`
+	Databases []string `json:"databases"`
+	Role      string   `json:"role"`
+	TTL       string   `json:"ttl"`   // Go duration string, e.g. "2h", "8760h"
+	Label     string   `json:"label"` // human-readable name
 }
 
 type tokenIssueResponse struct {
@@ -343,6 +367,8 @@ type tokenIssueResponse struct {
 	Label     string    `json:"label"`
 	Role      string    `json:"role"`
 	Vhosts    []string  `json:"vhosts"`
+	DBUsers   []string  `json:"db_users,omitempty"`
+	Databases []string  `json:"databases,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -384,12 +410,14 @@ func RegisterTokenEndpoint(m *http.ServeMux, store *TokenStore) {
 			http.Error(w, `{"error":"vhosts is required"}`, http.StatusBadRequest)
 			return
 		}
-		st := store.Issue(req.Vhosts, req.Role, req.Label, ttl)
+		st := store.Issue(req.Vhosts, req.DBUsers, req.Databases, req.Role, req.Label, ttl)
 		vhostList := make([]string, 0, len(st.Vhosts))
 		for v := range st.Vhosts {
 			vhostList = append(vhostList, v)
 		}
 		sort.Strings(vhostList)
+		dbUsers := sortedScopeKeys(st.DBUsers)
+		databases := sortedScopeKeys(st.Databases)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(tokenIssueResponse{
 			ID:        st.ID,
@@ -397,7 +425,39 @@ func RegisterTokenEndpoint(m *http.ServeMux, store *TokenStore) {
 			Label:     st.Label,
 			Role:      st.Role,
 			Vhosts:    vhostList,
+			DBUsers:   dbUsers,
+			Databases: databases,
 			ExpiresAt: st.Expiry,
 		})
 	})
+}
+
+func sanitizeScopeList(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		v := strings.ToLower(strings.TrimSpace(item))
+		if v == "" {
+			continue
+		}
+		out[v] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sortedScopeKeys(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

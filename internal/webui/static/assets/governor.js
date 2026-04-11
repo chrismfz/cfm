@@ -126,7 +126,8 @@
     if (_scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
     let me = { scoped: false, role: 'admin' };
     try {
-      const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin', headers });
+      const meEndpoint = _scopedToken ? '/api/v1/tokens/me' : '/cfm-admin/api/v1/tokens/me';
+      const res = await fetch(meEndpoint, { credentials: 'same-origin', headers });
       if (res.ok) me = await res.json();
     } catch (_) {}
 
