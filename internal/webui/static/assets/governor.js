@@ -116,15 +116,31 @@
       await waitForScopedTokenOrTimeout(waitMs);
     }
 
+    const tokenBeforeLoadMe = controller.getToken();
     let me = null;
     try {
       me = await controller.loadMe({ preferScopedToken: true });
       controller.refreshToken();
     } catch (_) {}
 
+    const latestToken = controller.getToken();
+    const computedInitialMode = window.CFMAuthMode?.computeInitialScopeMode?.({
+      identity: me,
+      token: latestToken,
+    }) || 'global';
+
+    if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !Boolean(me && me.scoped)) {
+      try {
+        me = await controller.loadMe({ preferScopedToken: true, waitForTokenMs: 0 });
+        controller.refreshToken();
+      } catch (_) {}
+    }
+
     return {
       scoped: Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped)),
       role: String((me && me.role) || 'admin'),
+      tokenBeforeLoadMe,
+      tokenAfterLoadMe: latestToken,
     };
   }
 
@@ -817,9 +833,9 @@
 
   (async function boot() {
     const tokenPresentAtBoot = Boolean(controller.getToken());
-    const ctx = await loadViewerContext({ waitForToken: true, waitMs: TOKEN_BOOT_WAIT_MS });
-    controller.noteInitialModeResolved({ isScopedMode: ctx.isScopedMode });
+    const ctx = await loadViewerContext({ waitForToken: true, waitMs: TOKEN_BOOT_WAIT_MS, resolveInitialMode: true });
     applyViewerContext(ctx);
+    controller.noteInitialModeResolved({ isScopedMode: ctx.isScopedMode });
     configurePollingMode();
     await refresh();
     console.info('[cfm-admin governor] startup mode', {

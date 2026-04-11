@@ -1450,18 +1450,29 @@
         controller.applyScopedChrome({ scoped: this.isScoped });
       },
 
-      async checkAdminStatus() {
+      async checkAdminStatus(opts = {}) {
         const hadTokenAtStart = Boolean(controller.getToken());
         if (!hadTokenAtStart) {
           await waitForScopedToken(1500);
           controller.refreshToken();
         }
+        const tokenBeforeLoadMe = controller.getToken();
         const me = await controller.loadMe({ preferScopedToken: true });
+        let latestToken = controller.refreshToken();
+        const computedInitialMode = window.CFMAuthMode?.computeInitialScopeMode?.({
+          identity: me,
+          token: latestToken,
+        }) || 'global';
+        let resolvedMe = me;
+        if (opts.resolveInitialMode && computedInitialMode === 'scoped' && !Boolean(me?.scoped)) {
+          resolvedMe = await controller.loadMe({ preferScopedToken: true, waitForTokenMs: 0 });
+          latestToken = controller.refreshToken();
+        }
         const prevMode = this.isScopedMode ? 'scoped' : 'global';
-        this.isScopedMode = Boolean(me?.scoped);
+        this.isScopedMode = Boolean(resolvedMe?.scoped);
         this.isAdmin = !this.isScopedMode;
-        this.tokenRole = String(me?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
-        this.allowedVhosts = Array.isArray(me?.vhosts) ? me.vhosts.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean) : [];
+        this.tokenRole = String(resolvedMe?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
+        this.allowedVhosts = Array.isArray(resolvedMe?.vhosts) ? resolvedMe.vhosts.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean) : [];
         if (this.hasScopedVhosts) {
           const firstHost = this.allowedVhosts[0];
           if (!this.vhostFocusHost) this.vhostFocusHost = firstHost;
@@ -1477,7 +1488,11 @@
           console.info('[cfm-webui] mode_changed', { from: prevMode, to: newMode });
           this.modeChangeLogged = true;
         }
-        return { modeChanged: prevMode !== newMode };
+        return {
+          modeChanged: prevMode !== newMode,
+          tokenBeforeLoadMe,
+          tokenAfterLoadMe: latestToken,
+        };
       },
 
       async onLateScopedToken() {
@@ -1587,7 +1602,7 @@
       }
       const firstCheckDelayMs = 120;
       setTimeout(() => {
-        this.checkAdminStatus()
+        this.checkAdminStatus({ resolveInitialMode: true })
           .then(() => controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode }))
           .catch((err) => console.warn('[cfm-webui] checkAdminStatus failed', err))
           .finally(() => this.refreshAll());
