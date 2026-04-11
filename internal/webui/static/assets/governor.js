@@ -35,7 +35,12 @@
   }
 
   function waitForScopedTokenOrTimeout(timeoutMs = TOKEN_BOOT_WAIT_MS) {
-    if (_scopedToken) return Promise.resolve('url');
+    if (_scopedToken) return Promise.resolve('present');
+    if (_tokenWaitResolved) {
+      return new Promise((resolve) => {
+        window.setTimeout(() => resolve('timeout'), timeoutMs);
+      });
+    }
     return new Promise((resolve) => {
       _tokenWaitResolve = resolve;
       window.setTimeout(() => resolveTokenWait('timeout'), timeoutMs);
@@ -123,6 +128,8 @@
     maxPoints: 80,
     eventRows: [],
     isScopedMode: false,
+    tokenMissingAtBoot: false,
+    authRecheckCyclesRemaining: 0,
   };
 
   function showMsg(msg) {
@@ -151,18 +158,38 @@
 
 
 
-  async function loadViewerContext() {
+  async function ensureAuthContext(opts = {}) {
+    const shouldWait = Boolean(opts.waitForToken);
+    const waitMs = Number(opts.waitMs) > 0 ? Number(opts.waitMs) : 350;
+    if (shouldWait && !_scopedToken) {
+      await waitForScopedTokenOrTimeout(waitMs);
+    }
     const headers = {};
     if (_scopedToken) headers.Authorization = `Bearer ${_scopedToken}`;
-    let me = { scoped: false, role: 'admin' };
+
+    let me = null;
     try {
-      const meEndpoint = _scopedToken ? '/api/v1/tokens/me' : '/cfm-admin/api/v1/tokens/me';
-      const res = await fetch(meEndpoint, { credentials: 'same-origin', headers });
+      const res = await fetch('/api/v1/tokens/me', { credentials: 'same-origin', headers });
       if (res.ok) me = await res.json();
     } catch (_) {}
 
-    const isScopedMode = Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
-    const canWrite = !isScopedMode || String(me.role || '').toLowerCase() !== 'viewer';
+    if (!me && !_scopedToken) {
+      try {
+        const res = await fetch('/cfm-admin/api/v1/tokens/me', { credentials: 'same-origin' });
+        if (res.ok) me = await res.json();
+      } catch (_) {}
+    }
+
+    return {
+      scoped: Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped)),
+      role: String((me && me.role) || 'admin'),
+    };
+  }
+
+  async function loadViewerContext(opts = {}) {
+    const auth = await ensureAuthContext(opts);
+    const isScopedMode = auth.scoped;
+    const canWrite = !isScopedMode || String(auth.role || '').toLowerCase() !== 'viewer';
 
     const nav = document.querySelector('.top-nav');
     if (nav && isScopedMode) {
@@ -174,14 +201,17 @@
     }
 
     const meta = document.querySelector('.topbar .meta');
-    if (meta && !meta.querySelector('.scoped-badge')) {
-      const badge = document.createElement('span');
-      badge.className = 'pill scoped-badge';
+    if (meta) {
+      let badge = meta.querySelector('.scoped-badge');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'pill scoped-badge';
+        meta.prepend(badge);
+      }
       badge.textContent = isScopedMode ? 'Scoped MySQL view' : 'Global view';
-      meta.prepend(badge);
     }
 
-    return { isScopedMode, canWrite, role: String(me.role || '') };
+    return { isScopedMode, canWrite, role: auth.role };
   }
 
   function esc(v) {
@@ -703,8 +733,11 @@
   }
 
   function refresh() {
-    const fn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
-    return fn();
+    return (async () => {
+      await maybeRefreshAuthContext();
+      const fn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
+      return fn();
+    })();
   }
 
   function startAuto() {
@@ -712,8 +745,11 @@
     el.autoState.textContent = 'ON';
     el.toggleAutoBtn.textContent = 'Stop';
     clearInterval(st.timer);
-    const refreshFn = st.refreshFn || (st.isScopedMode ? refreshScopedMode : refreshAdminMode);
-    st.timer = setInterval(() => refreshFn(), 5000);
+    st.timer = setInterval(() => {
+      refresh().catch((err) => {
+        console.error('[cfm-admin governor] auto refresh failed', err);
+      });
+    }, 5000);
   }
 
   function stopAuto() {
@@ -791,10 +827,38 @@
     if (st.auto) startAuto();
   }
 
+  function logModeTransition(from, to) {
+    if (from === to) return;
+    console.info(`[cfm-admin governor] mode_changed ${from}->${to}`);
+  }
+
+  async function maybeRefreshAuthContext() {
+    if (st.isScopedMode) return false;
+    if (!st.tokenMissingAtBoot || st.authRecheckCyclesRemaining <= 0) return false;
+    st.authRecheckCyclesRemaining -= 1;
+    const auth = await ensureAuthContext({ waitForToken: true, waitMs: 350 });
+    if (!auth.scoped) return false;
+
+    logModeTransition('global', 'scoped');
+    applyViewerContext({
+      isScopedMode: true,
+      canWrite: String(auth.role || '').toLowerCase() !== 'viewer',
+      role: auth.role || '',
+    });
+    st.refreshFn = refreshScopedMode;
+    if (st.auto) {
+      clearInterval(st.timer);
+      startAuto();
+    }
+    return true;
+  }
+
   async function onLateScopedToken() {
+    const wasScoped = st.isScopedMode;
     const ctx = await loadViewerContext();
     applyViewerContext(ctx);
     configurePollingMode();
+    logModeTransition(wasScoped ? 'scoped' : 'global', ctx.isScopedMode ? 'scoped' : 'global');
     await refresh();
     console.info('[cfm-admin governor] startup mode', {
       token_present_at_boot: false,
@@ -804,9 +868,10 @@
   }
 
   (async function boot() {
-    await waitForScopedTokenOrTimeout();
     const tokenPresentAtBoot = Boolean(_scopedToken);
-    const ctx = await loadViewerContext();
+    st.tokenMissingAtBoot = !tokenPresentAtBoot;
+    const ctx = await loadViewerContext({ waitForToken: true, waitMs: TOKEN_BOOT_WAIT_MS });
+    st.authRecheckCyclesRemaining = (!ctx.isScopedMode && st.tokenMissingAtBoot) ? 2 : 0;
     applyViewerContext(ctx);
     configurePollingMode();
     await refresh();
