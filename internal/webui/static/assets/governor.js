@@ -73,6 +73,13 @@
     topUsersBody: document.getElementById('topUsersBody'),
     pruneDays: document.getElementById('pruneDays'),
     actionMsg: document.getElementById('actionMsg'),
+    viewModeTitle: document.getElementById('viewModeTitle'),
+    cpuCard: document.getElementById('cpuCard'),
+    locksCard: document.getElementById('locksCard'),
+    psCard: document.getElementById('psCard'),
+    summaryCard: document.getElementById('summaryCard'),
+    eventsCard: document.getElementById('events-card'),
+    retentionCard: document.getElementById('retentionCard'),
   };
 
   const st = {
@@ -85,6 +92,7 @@
     qrySeries: [],
     maxPoints: 80,
     eventRows: [],
+    scoped: false,
   };
 
   function showMsg(msg) {
@@ -130,7 +138,7 @@
     if (meta && !meta.querySelector('.scoped-badge')) {
       const badge = document.createElement('span');
       badge.className = 'pill scoped-badge';
-      badge.textContent = scoped ? 'Scoped view' : 'Global view';
+      badge.textContent = scoped ? 'Scoped MySQL view' : 'Global view';
       meta.prepend(badge);
     }
 
@@ -142,6 +150,7 @@
   }
 
   function openHistoryFilter(user = '', dbName = '') {
+    if (st.scoped) return;
     if (el.filterUser) el.filterUser.value = user || '';
     if (el.filterDB) el.filterDB.value = dbName || '';
     const card = document.getElementById('events-card');
@@ -510,17 +519,24 @@
     if (el.filterUser.value.trim()) q.set('user', el.filterUser.value.trim());
     if (el.filterDB.value.trim()) q.set('db', el.filterDB.value.trim());
     if (el.filterType.value.trim()) q.set('type', el.filterType.value.trim());
+    if (st.scoped) return;
     const payload = await api(`/v1/mysql/history/events?${q.toString()}`);
     renderEvents(payload.rows || []);
   }
 
   async function loadSummary() {
+    if (st.scoped) return;
     const hours = Math.max(1, Number(el.summaryHours.value) || 24);
     const s = await api(`/v1/mysql/history/summary?hours=${hours}`);
     el.summaryText.textContent = JSON.stringify(s, null, 2);
   }
 
   async function loadOps() {
+    if (st.scoped) {
+      const kills = await api('/v1/mysql/user-kills');
+      renderKills(kills);
+      return;
+    }
     const [locks, kills, ps] = await Promise.all([
       api('/v1/mysql/locks'),
       api('/v1/mysql/kills'),
@@ -532,6 +548,15 @@
   }
 
   async function loadLive() {
+    if (st.scoped) {
+      const [summary, hist] = await Promise.all([
+        api('/v1/mysql/user-summary'),
+        api('/v1/mysql/user-history?window=1h&top=40'),
+      ]);
+      renderConnection(normalizeState(summary));
+      renderHist(hist);
+      return;
+    }
     const [state, cpu, hist] = await Promise.all([
       api('/v1/mysql/state'),
       api('/v1/mysql/cpu'),
@@ -543,6 +568,7 @@
   }
 
   async function prune() {
+    if (st.scoped) return;
     const days = Math.max(1, Number(el.pruneDays.value) || 30);
     const out = await api(`/v1/mysql/history/prune?days=${days}`, { method: 'POST' });
     showMsg(`Pruned days=${days}, rows_deleted=${out.rows_deleted ?? 0}`);
@@ -551,6 +577,7 @@
   }
 
   async function truncate() {
+    if (st.scoped) return;
     if (!window.confirm('Delete all MySQL governor history rows?')) return;
     const out = await api('/v1/mysql/history/truncate?confirm=yes', { method: 'POST' });
     showMsg(`History truncated, rows_deleted=${out.rows_deleted ?? 0}`);
@@ -560,11 +587,15 @@
 
   async function refresh() {
     showMsg('');
-    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
+    const checks = await Promise.allSettled(st.scoped
+      ? [loadLive(), loadOps()]
+      : [loadLive(), loadOps(), loadSummary(), loadEvents()]);
     const failed = checks
       .map((res, idx) => ({
         res,
-        label: idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events',
+        label: st.scoped
+          ? (idx === 0 ? 'live' : 'ops')
+          : (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
       }))
       .filter((x) => x.res.status === 'rejected');
 
@@ -617,7 +648,19 @@
     showMsg('ECharts is unavailable; chart rendering disabled.');
   }
 
+  function setScopedUI(scoped) {
+    st.scoped = scoped;
+    if (el.viewModeTitle) {
+      el.viewModeTitle.textContent = scoped ? 'Scoped MySQL view · Connection pressure' : 'Connection pressure';
+    }
+    if (!scoped) return;
+    [el.cpuCard, el.locksCard, el.psCard, el.summaryCard, el.eventsCard, el.retentionCard].forEach((node) => {
+      if (node) node.style.display = 'none';
+    });
+  }
+
   loadViewerContext().then((ctx) => {
+    setScopedUI(ctx.scoped);
     if (!ctx.canWrite) {
       [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
     }

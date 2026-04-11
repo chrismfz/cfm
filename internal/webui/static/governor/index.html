@@ -30,7 +30,7 @@
 
     <main class="layout">
       <section class="card wide">
-        <h2>Connection pressure</h2>
+        <h2 id="viewModeTitle">Connection pressure</h2>
         <div id="kpiRow" class="chips"></div>
         <div id="connSpark" class="spark"></div>
       </section>
@@ -59,7 +59,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="cpuCard">
         <h2>CPU / queries</h2>
         <div class="chips" id="cpuMeta"></div>
         <div id="cpuSpark" class="spark"></div>
@@ -73,7 +73,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="histCard">
         <h2>History (1h)</h2>
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
@@ -86,7 +86,7 @@
       </section>
 
 
-      <section class="card wide">
+      <section class="card wide" id="locksCard">
         <h2>Lock graph</h2>
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
@@ -98,7 +98,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="killsCard">
         <h2>Recent kills</h2>
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
@@ -110,7 +110,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="psCard">
         <h2>Processlist (full)</h2>
         <div class="table-wrap stable-table-wrap wide-table-wrap">
           <table>
@@ -122,7 +122,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="summaryCard">
         <h2>Durable history summary</h2>
         <div class="toolbar">
           <label>Hours</label>
@@ -196,7 +196,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" id="retentionCard">
         <h2>Retention controls</h2>
         <div class="toolbar">
           <label>Prune days</label>
