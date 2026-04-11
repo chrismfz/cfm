@@ -101,11 +101,19 @@
   }
 
   async function api(path, opts = {}) {
+    return apiWithBase('/cfm-admin/api', path, opts);
+  }
+
+  async function scopedApi(path, opts = {}) {
+    return apiWithBase('/api', path, opts);
+  }
+
+  async function apiWithBase(base, path, opts = {}) {
     if (_scopedToken) {
       opts = { ...opts };
       opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${_scopedToken}` };
     }
-    const res = await fetch(`/cfm-admin/api${path}`, opts);
+    const res = await fetch(`${base}${path}`, opts);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
@@ -518,22 +526,55 @@
     q.set('limit', String(Number(el.filterLimit.value) || 100));
     if (el.filterUser.value.trim()) q.set('user', el.filterUser.value.trim());
     if (el.filterDB.value.trim()) q.set('db', el.filterDB.value.trim());
-    if (el.filterType.value.trim()) q.set('type', el.filterType.value.trim());
-    if (st.scoped) return;
+    if (!st.scoped && el.filterType.value.trim()) q.set('type', el.filterType.value.trim());
+    if (st.scoped) {
+      const payload = await scopedApi(`/v1/mysql/user-history?${q.toString()}`);
+      renderEvents((payload.users || []).map((u) => ({
+        ts_unix: payload.ts || '-',
+        event_type: 'user_history',
+        user: u.user || '-',
+        db: '-',
+        action: 'aggregate',
+        result: `samples=${u.samples || 0}`,
+        pid: '-',
+        runtime_ms: '-',
+        reason: `peak=${u.peak_conns || 0}, avg=${(Number(u.avg_conns) || 0).toFixed(1)}, peak_active=${u.peak_active || 0}`,
+      })));
+      return;
+    }
     const payload = await api(`/v1/mysql/history/events?${q.toString()}`);
     renderEvents(payload.rows || []);
   }
 
   async function loadSummary() {
-    if (st.scoped) return;
     const hours = Math.max(1, Number(el.summaryHours.value) || 24);
+    if (st.scoped) {
+      const q = new URLSearchParams();
+      q.set('window', `${hours}h`);
+      if (el.filterUser.value.trim()) q.set('user', el.filterUser.value.trim());
+      if (el.filterDB.value.trim()) q.set('db', el.filterDB.value.trim());
+      const s = await scopedApi(`/v1/mysql/user-history?${q.toString()}`);
+      el.summaryText.textContent = JSON.stringify({
+        mode: 'scoped',
+        ts: s.ts,
+        window: s.window,
+        sample_count: s.sample_count,
+        total_users: Array.isArray(s.users) ? s.users.length : 0,
+        users: s.users || [],
+      }, null, 2);
+      return;
+    }
     const s = await api(`/v1/mysql/history/summary?hours=${hours}`);
     el.summaryText.textContent = JSON.stringify(s, null, 2);
   }
 
   async function loadOps() {
     if (st.scoped) {
-      const kills = await api('/v1/mysql/user-kills');
+      const q = new URLSearchParams();
+      if (el.filterUser?.value.trim()) q.set('user', el.filterUser.value.trim());
+      if (el.filterDB?.value.trim()) q.set('db', el.filterDB.value.trim());
+      const suffix = q.toString() ? `?${q.toString()}` : '';
+      const kills = await scopedApi(`/v1/mysql/user-kills${suffix}`);
       renderKills(kills);
       return;
     }
@@ -549,9 +590,16 @@
 
   async function loadLive() {
     if (st.scoped) {
+      const q = new URLSearchParams();
+      if (el.filterUser?.value.trim()) q.set('user', el.filterUser.value.trim());
+      if (el.filterDB?.value.trim()) q.set('db', el.filterDB.value.trim());
+      const suffix = q.toString() ? `?${q.toString()}` : '';
+      const histQ = new URLSearchParams(q.toString());
+      histQ.set('window', '1h');
+      histQ.set('top', '40');
       const [summary, hist] = await Promise.all([
-        api('/v1/mysql/user-summary'),
-        api('/v1/mysql/user-history?window=1h&top=40'),
+        scopedApi(`/v1/mysql/user-summary${suffix}`),
+        scopedApi(`/v1/mysql/user-history?${histQ.toString()}`),
       ]);
       renderConnection(normalizeState(summary));
       renderHist(hist);
@@ -588,13 +636,13 @@
   async function refresh() {
     showMsg('');
     const checks = await Promise.allSettled(st.scoped
-      ? [loadLive(), loadOps()]
+      ? [loadLive(), loadOps(), loadSummary(), loadEvents()]
       : [loadLive(), loadOps(), loadSummary(), loadEvents()]);
     const failed = checks
       .map((res, idx) => ({
         res,
         label: st.scoped
-          ? (idx === 0 ? 'live' : 'ops')
+          ? (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events')
           : (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
       }))
       .filter((x) => x.res.status === 'rejected');
@@ -654,9 +702,10 @@
       el.viewModeTitle.textContent = scoped ? 'Scoped MySQL view · Connection pressure' : 'Connection pressure';
     }
     if (!scoped) return;
-    [el.cpuCard, el.locksCard, el.psCard, el.summaryCard, el.eventsCard, el.retentionCard].forEach((node) => {
+    [el.cpuCard, el.locksCard, el.psCard, el.retentionCard].forEach((node) => {
       if (node) node.style.display = 'none';
     });
+    if (el.filterType) el.filterType.disabled = true;
   }
 
   loadViewerContext().then((ctx) => {
