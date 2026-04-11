@@ -1465,6 +1465,17 @@
       isAuthStatusError(err) {
         return this.isHttpStatusError(err, 401) || this.isHttpStatusError(err, 403);
       },
+      async waitForCookieScopedIdentity(maxMs = 3200) {
+        const deadline = Date.now() + Math.max(0, Number(maxMs) || 0);
+        while (Date.now() < deadline) {
+          try {
+            await controller.loadMe({ preferScopedToken: false, waitForTokenMs: 0 });
+            return true;
+          } catch (_) {}
+          await new Promise((resolve) => setTimeout(resolve, 320));
+        }
+        return false;
+      },
 
       async checkAdminStatus(opts = {}) {
         const hadTokenAtStart = Boolean(controller.getToken());
@@ -1618,7 +1629,7 @@
         console.info('[cfm-webui] token_present_at_boot', { present: Boolean(controller.getToken()) });
         this.tokenBootLogged = true;
       }
-      const firstCheckDelayMs = 120;
+      const firstCheckDelayMs = 260;
       setTimeout(() => {
         this.setAuthState('unknown');
         this.checkAdminStatus({ resolveInitialMode: true })
@@ -1633,6 +1644,14 @@
               try {
                 await waitForScopedToken(10000);
                 if (controller.refreshToken()) {
+                  await this.checkAdminStatus({ resolveInitialMode: true });
+                  this.setAuthState('ready');
+                  controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
+                  await this.refreshAll();
+                  return;
+                }
+                const cookieIdentityReady = await this.waitForCookieScopedIdentity(3200);
+                if (cookieIdentityReady) {
                   await this.checkAdminStatus({ resolveInitialMode: true });
                   this.setAuthState('ready');
                   controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
