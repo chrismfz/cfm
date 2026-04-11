@@ -85,11 +85,29 @@ iframe {
   var state = 'loaded';
   var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
-  var isPluginContext = window.location.pathname.indexOf('/frontend/') !== -1 ||
-    window.location.pathname.indexOf('/cpanelplugin/') !== -1;
+  var pluginContext = (function detectPluginContext() {
+    var reasons = [];
+    var path = window.location.pathname || '';
+    var cpanelCgiPathRe = /^\/cpsess[^/]+\/3rdparty\/cfm_cpanel\.cgi(?:\/|$)/;
+    if (cpanelCgiPathRe.test(path)) reasons.push('cgi_path');
+    if (typeof window.CPANEL !== 'undefined') reasons.push('global_cpanel');
+    if (typeof window.CPANEL_THEME !== 'undefined') reasons.push('global_cpanel_theme');
+    if (typeof window.LOCALE !== 'undefined') reasons.push('global_locale');
+    return {
+      isPluginContext: reasons.length > 0,
+      reasonCode: reasons.length ? reasons.join('+') : 'no_stable_indicators'
+    };
+  })();
+  var isPluginContext = pluginContext.isPluginContext;
+  var pluginContextReason = pluginContext.reasonCode;
   if (!token || !frame) return;
 
-  console.debug('[cfm-plugin] startup context: isPluginContext=%s', isPluginContext);
+  console.info(
+    '[cfm-plugin] startup context: isPluginContext=%s url=%s reason=%s',
+    isPluginContext,
+    window.location.href,
+    pluginContextReason
+  );
 
   function buildFallbackUrl(rawUrl, scopedToken) {
     try {
@@ -160,12 +178,6 @@ iframe {
   // cPanel plugin compatibility path only: append ?token=... when fallback reload is needed.
   if (isPluginContext) {
     console.debug('[cfm-plugin] cPanel plugin context detected; URL token fallback is enabled for compatibility only');
-  } else {
-    // Safety: if template is ever reused outside plugin context, avoid accidental fallback URL transport.
-    buildFallbackUrl = function (rawUrl) {
-      console.debug('[cfm-plugin] URL token fallback disabled outside plugin context');
-      return rawUrl;
-    };
   }
 })();
 </script>
