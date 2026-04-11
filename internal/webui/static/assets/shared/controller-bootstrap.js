@@ -20,12 +20,26 @@
     };
   }
 
-  function initSharedController({ onModeChanged } = {}) {
+  function initSharedController({ onModeChanged, onDeferredScopedToken } = {}) {
     const authCtx = window.CFMAuthContext || createFallbackAuthContext();
     let scopedToken = authCtx.getToken();
+    let initialModeResolved = false;
+    let initialScopedMode = false;
+    let initialTokenPresent = Boolean(scopedToken);
+    let deferredScopedTokenHandled = false;
+
+    function maybeHandleDeferredScopedToken(evt) {
+      if (!evt?.modeChanged) return;
+      if (!initialModeResolved || initialScopedMode || initialTokenPresent) return;
+      const hasTokenNow = Boolean(authCtx.getToken());
+      if (!hasTokenNow || deferredScopedTokenHandled) return;
+      deferredScopedTokenHandled = true;
+      if (typeof onDeferredScopedToken === 'function') onDeferredScopedToken(evt);
+    }
 
     authCtx.onAuthContextChanged((evt) => {
       scopedToken = authCtx.getToken();
+      maybeHandleDeferredScopedToken(evt);
       if (evt && evt.modeChanged && typeof onModeChanged === 'function') {
         onModeChanged(evt);
       }
@@ -42,6 +56,11 @@
       },
       waitForToken: (timeoutMs = 1200) => authCtx.waitForToken(timeoutMs),
       loadMe: (opts = {}) => authCtx.loadMe(opts),
+      noteInitialModeResolved: ({ isScopedMode = false } = {}) => {
+        initialModeResolved = true;
+        initialScopedMode = Boolean(isScopedMode);
+        initialTokenPresent = Boolean(scopedToken);
+      },
       createApiClient: ({ basePath, isScoped, adminOnlyPaths, retryAuthRace = true } = {}) => createApiClient({
         basePath,
         getToken: () => scopedToken,

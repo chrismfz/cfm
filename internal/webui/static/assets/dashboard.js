@@ -1,11 +1,18 @@
 (() => {
-  const controller = window.CFMControllerBootstrap.initSharedController();
+  const controller = window.CFMControllerBootstrap.initSharedController({
+    onDeferredScopedToken: () => {
+      onLateScopedToken().catch((err) => {
+        console.error('[cfm-admin dashboard] late token re-init failed', err);
+      });
+    },
+  });
 
 
   const state = {
     loading: false,
     health: {},
     lua: null,
+    scoped: false,
   };
 
 const el = {
@@ -61,6 +68,18 @@ const el = {
     });
 
     return { scoped, canWrite, role: String(me.role || '') };
+  }
+
+  async function onLateScopedToken() {
+    const prevScoped = Boolean(state.scoped);
+    const ctx = await loadViewerContext();
+    state.scoped = ctx.scoped;
+    if (prevScoped === ctx.scoped) return;
+    if (!ctx.canWrite) {
+      if (el.blockBtn) el.blockBtn.style.display = 'none';
+      if (el.unblockBtn) el.unblockBtn.style.display = 'none';
+    }
+    await refreshAll();
   }
 
   async function fetchLuaStats() {
@@ -605,6 +624,8 @@ async function refreshLuaStats() {
   el.unblockBtn.addEventListener('click', unblockIP);
 
   loadViewerContext().then((ctx) => {
+    state.scoped = ctx.scoped;
+    controller.noteInitialModeResolved({ isScopedMode: ctx.scoped });
     if (!ctx.canWrite) {
       if (el.blockBtn) el.blockBtn.style.display = 'none';
       if (el.unblockBtn) el.unblockBtn.style.display = 'none';

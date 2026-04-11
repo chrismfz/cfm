@@ -1,22 +1,15 @@
 (() => {
   const { createApp } = window.Vue;
   const controller = window.CFMControllerBootstrap.initSharedController({
-    onModeChanged: () => triggerLateTokenReinit(),
+    onDeferredScopedToken: () => triggerLateTokenReinit(),
   });
-  let _lateTokenReinitialized = false;
-  let _lateTokenReinitPending = false;
   let _appVm = null;
 
   function triggerLateTokenReinit() {
-    if (_lateTokenReinitialized) return;
-    _lateTokenReinitialized = true;
-    if (_appVm && typeof _appVm.onLateScopedToken === 'function') {
-      _appVm.onLateScopedToken().catch((err) => {
+    if (!_appVm || typeof _appVm.onLateScopedToken !== 'function') return;
+    _appVm.onLateScopedToken().catch((err) => {
         console.error('[cfm-webui] late token re-init failed', err);
-      });
-      return;
-    }
-    _lateTokenReinitPending = true;
+    });
   }
 
   function waitForScopedToken(timeoutMs = 1200) {
@@ -1488,14 +1481,12 @@
           console.info('[cfm-webui] mode_changed', { from: prevMode, to: newMode });
           this.modeChangeLogged = true;
         }
+        return { modeChanged: prevMode !== newMode };
       },
 
       async onLateScopedToken() {
-        const prevMode = this.isScopedMode ? 'scoped' : 'global';
-        await this.checkAdminStatus();
-        this.applyScopedChrome();
-        const newMode = this.isScopedMode ? 'scoped' : 'global';
-        if (prevMode !== newMode) {
+        const result = await this.checkAdminStatus();
+        if (result?.modeChanged) {
           await this.refreshAll();
         }
       },
@@ -1568,12 +1559,6 @@
 
     mounted() {
       _appVm = this;
-      if (_lateTokenReinitPending && typeof this.onLateScopedToken === 'function') {
-        _lateTokenReinitPending = false;
-        this.onLateScopedToken().catch((err) => {
-          console.error('[cfm-webui] late token re-init failed', err);
-        });
-      }
       const path = (window.location.pathname || '').replace(/\/+$/, '/');
 
       if (path.includes('/webdetector/forensics/')) this.pageMode = 'forensics';
@@ -1607,6 +1592,7 @@
       const firstCheckDelayMs = 120;
       setTimeout(() => {
         this.checkAdminStatus()
+          .then(() => controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode }))
           .catch((err) => console.warn('[cfm-webui] checkAdminStatus failed', err))
           .finally(() => this.refreshAll());
       }, firstCheckDelayMs);
