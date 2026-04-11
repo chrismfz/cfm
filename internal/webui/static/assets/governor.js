@@ -131,6 +131,18 @@
     tokenMissingAtBoot: false,
     authRecheckCyclesRemaining: 0,
   };
+  const ADMIN_ONLY_API_PATHS = new Set([
+    '/v1/mysql/state',
+    '/v1/mysql/cpu',
+    '/v1/mysql/history',
+    '/v1/mysql/locks',
+    '/v1/mysql/kills',
+    '/v1/mysql/processlist',
+    '/v1/mysql/history/events',
+    '/v1/mysql/history/summary',
+    '/v1/mysql/history/prune',
+    '/v1/mysql/history/truncate',
+  ]);
 
   function showMsg(msg) {
     el.actionMsg.style.display = msg ? '' : 'none';
@@ -138,6 +150,9 @@
   }
 
   async function api(path, opts = {}) {
+    if (st.isScopedMode && ADMIN_ONLY_API_PATHS.has(path.split('?')[0])) {
+      throw new Error(`Scoped mode blocks admin endpoint: ${path}`);
+    }
     return apiWithBase('/cfm-admin/api', path, opts);
   }
 
@@ -696,11 +711,50 @@
 
   async function refreshScopedMode() {
     showMsg('');
-    const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
+    const q = new URLSearchParams();
+    if (el.filterUser?.value.trim()) q.set('user', el.filterUser.value.trim());
+    if (el.filterDB?.value.trim()) q.set('db', el.filterDB.value.trim());
+    const summarySuffix = q.toString() ? `?${q.toString()}` : '';
+    const historyQ = new URLSearchParams(q.toString());
+    historyQ.set('window', '1h');
+    historyQ.set('top', '40');
+    const checks = await Promise.allSettled([
+      scopedApi(`/v1/mysql/user-summary${summarySuffix}`),
+      scopedApi(`/v1/mysql/user-history?${historyQ.toString()}`),
+      scopedApi(`/v1/mysql/user-kills${summarySuffix}`),
+    ]);
+    if (checks[0].status === 'fulfilled') {
+      renderConnection(normalizeState(checks[0].value));
+    }
+    if (checks[1].status === 'fulfilled') {
+      renderHist(checks[1].value);
+      el.summaryText.textContent = JSON.stringify({
+        mode: 'scoped',
+        ts: checks[1].value.ts,
+        window: checks[1].value.window,
+        sample_count: checks[1].value.sample_count,
+        total_users: Array.isArray(checks[1].value.users) ? checks[1].value.users.length : 0,
+        users: checks[1].value.users || [],
+      }, null, 2);
+      renderEvents((checks[1].value.users || []).map((u) => ({
+        ts_unix: checks[1].value.ts || '-',
+        event_type: 'user_history',
+        user: u.user || '-',
+        db: '-',
+        action: 'aggregate',
+        result: `samples=${u.samples || 0}`,
+        pid: '-',
+        runtime_ms: '-',
+        reason: `peak=${u.peak_conns || 0}, avg=${(Number(u.avg_conns) || 0).toFixed(1)}, peak_active=${u.peak_active || 0}`,
+      })));
+    }
+    if (checks[2].status === 'fulfilled') {
+      renderKills(checks[2].value);
+    }
     const failed = checks
       .map((res, idx) => ({
         res,
-        label: (idx === 0 ? 'live' : idx === 1 ? 'ops' : idx === 2 ? 'summary' : 'events'),
+        label: (idx === 0 ? 'user-summary' : idx === 1 ? 'user-history' : 'user-kills'),
       }))
       .filter((x) => x.res.status === 'rejected');
 
@@ -808,10 +862,13 @@
     if (el.viewModeTitle) {
       el.viewModeTitle.textContent = scoped ? 'Scoped MySQL view · Connection pressure' : 'Connection pressure';
     }
-    setPanelScopedState(el.cpuCard, scoped, 'Global CPU/query telemetry is only available in global admin mode.');
-    setPanelScopedState(el.locksCard, scoped, 'Global lock graph is only available in global admin mode.');
-    setPanelScopedState(el.psCard, scoped, 'Global processlist is only available in global admin mode.');
-    setPanelScopedState(el.retentionCard, scoped, 'Retention controls require global admin mode.');
+    setPanelScopedState(el.cpuCard, false, '');
+    setPanelScopedState(el.locksCard, false, '');
+    setPanelScopedState(el.psCard, false, '');
+    setPanelScopedState(el.retentionCard, false, '');
+    [el.cpuCard, el.locksCard, el.psCard, el.retentionCard].forEach((card) => {
+      if (card) card.style.display = scoped ? 'none' : '';
+    });
     if (el.filterType) el.filterType.disabled = scoped;
   }
 
