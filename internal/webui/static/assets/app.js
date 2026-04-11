@@ -41,6 +41,7 @@
 
 
   const createApiClient = window.CFMApiClient?.createApiClient || window.createApiClient;
+  const uiScope = window.CFMUiScope || {};
   let _adminApiClient = null;
   function getAdminApiClient() {
     if (!_adminApiClient) {
@@ -1475,25 +1476,16 @@
       },
       // ── Token management ──────────────────────────────────────────────────
       applyScopedChrome() {
-        const nav = document.querySelector('.top-nav');
-        if (nav) {
-          nav.querySelectorAll('a[href]').forEach((a) => {
-            const href = a.getAttribute('href') || '';
-            if (!this.isScoped) {
-              a.style.display = '';
-              return;
-            }
-            const adminOnly = href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
-            a.style.display = adminOnly ? 'none' : '';
-          });
-        }
-        const meta = document.querySelector('.topbar .meta');
-        if (meta && !meta.querySelector('.scoped-badge')) {
-          const badge = document.createElement('span');
-          badge.className = 'pill scoped-badge';
-          meta.prepend(badge);
-        }
-        const badge = document.querySelector('.scoped-badge');
+        uiScope.applyScopedNavFiltering?.({
+          navSelector: '.top-nav',
+          scoped: this.isScoped,
+          adminOnlyMatcher: (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/'),
+        });
+        const badge = uiScope.applyScopedBadge?.({
+          selector: '.topbar .meta',
+          scopedLabel: 'Scoped view',
+          globalLabel: 'Global view',
+        });
         if (badge) badge.textContent = this.isScoped ? 'Scoped view' : 'Global view';
       },
 
