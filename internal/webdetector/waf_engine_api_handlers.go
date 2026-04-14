@@ -55,8 +55,7 @@ type wafEngineSummary struct {
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	res := wafEngineSummary{}

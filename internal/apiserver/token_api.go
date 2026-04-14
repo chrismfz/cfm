@@ -25,8 +25,7 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !webdet.IsAdminRequest(r) {
-			apiJSONError(w, "admin access required", http.StatusForbidden)
+		if !webdet.RequireAdmin(w, r) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -39,8 +38,7 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !webdet.IsAdminRequest(r) {
-			apiJSONError(w, "admin access required", http.StatusForbidden)
+		if !webdet.RequireAdmin(w, r) {
 			return
 		}
 		var req struct {
@@ -63,6 +61,9 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 		setAuthIdentityNoCacheHeaders(w)
 		if r.Method != http.MethodGet {
 			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !webdet.RequireScopedOrAdmin(w, r) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

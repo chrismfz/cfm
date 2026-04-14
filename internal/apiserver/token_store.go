@@ -381,9 +381,7 @@ func RegisterTokenEndpoint(m *http.ServeMux, store *TokenStore) {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 			return
 		}
-		if !webdet.IsAdminRequest(r) {
-			w.Header().Set("Content-Type", "application/json")
-			http.Error(w, `{"error":"admin access required"}`, http.StatusForbidden)
+		if !webdet.RequireAdmin(w, r) {
 			return
 		}
 		var req tokenIssueRequest

@@ -30,6 +30,9 @@ func scopeCheckHost(w http.ResponseWriter, r *http.Request, host string) bool {
 }
 
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, []HistoryEvent{})
 		return
@@ -49,6 +52,9 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, HistorySummary{})
 		return
@@ -68,6 +74,9 @@ func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, map[string][]HistoryEvent{"solved": {}, "unsolved": {}})
 		return
@@ -117,6 +126,9 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 // Admin: ?host= optional — omit for global breakdown across all vhosts.
 // Scoped token: ?host= required and must be in token scope.
 func (e *Engine) handleHistoryWAFByRule(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": []WAFRuleHit{}})
 		return
@@ -153,6 +165,9 @@ func (e *Engine) handleHistoryWAFByRule(w http.ResponseWriter, r *http.Request) 
 // Admin: ?host= optional.
 // Scoped token: ?host= required and must be in token scope.
 func (e *Engine) handleHistoryVhostOverview(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
 	if e == nil || e.history == nil {
 		writeJSON(w, http.StatusOK, VhostOverview{})
 		return
@@ -176,8 +191,7 @@ func (e *Engine) handleHistoryPrune(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	if e == nil || e.history == nil {
@@ -205,8 +219,7 @@ func (e *Engine) handleHistoryTruncate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing confirm=yes"})
 		return
 	}
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	if e == nil || e.history == nil {
@@ -222,8 +235,7 @@ func (e *Engine) handleHistoryTruncate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHistoryStats(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	if e == nil || e.history == nil {
