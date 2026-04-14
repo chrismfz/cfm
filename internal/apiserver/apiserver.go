@@ -30,6 +30,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -102,6 +103,11 @@ func Start(
 	gov *mysqlpkg.Governor,
 	ssl *sslpkg.Collector,
 ) {
+	if err := validateStartupConfig(cfg); err != nil {
+		logging.Logf("[apiserver] fatal startup config error: %v", err)
+		return
+	}
+
 	m := http.NewServeMux()
 
 	// Publish mux and apply any deferred registrations.
@@ -330,6 +336,26 @@ func Start(
 	if authMgr != nil {
 		authMgr.Close()
 	}
+}
+
+func validateStartupConfig(cfg *cfgpkg.Config) error {
+	if cfg == nil {
+		return errors.New("nil config")
+	}
+	if !isAPIServerEnabled(cfg) {
+		return nil
+	}
+	if strings.TrimSpace(cfg.API.AuthToken) == "" {
+		return errors.New("AUTH_TOKEN is required when API server is enabled; set AUTH_TOKEN in cfm.conf before startup")
+	}
+	return nil
+}
+
+func isAPIServerEnabled(cfg *cfgpkg.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Debug.Port > 0 || cfg.Debug.TLSPort > 0
 }
 
 func setOptionalGoauthStringField(cfg *goauth.Config, fieldName, value string) bool {
