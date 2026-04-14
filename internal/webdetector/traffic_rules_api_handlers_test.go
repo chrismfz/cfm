@@ -20,11 +20,18 @@ func scopedCtx(vhosts ...string) context.Context {
 	for _, v := range vhosts {
 		m[v] = struct{}{}
 	}
-	return context.WithValue(context.Background(), CtxScopeKey{}, m)
+	ctx := context.WithValue(context.Background(), CtxScopeKey{}, m)
+	ctx = context.WithValue(ctx, CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleScoped)
+	return ctx
 }
 
-// adminCtx returns a plain background context — no scope → admin / loopback.
-func adminCtx() context.Context { return context.Background() }
+// adminCtx returns a context marked as authenticated admin.
+func adminCtx() context.Context {
+	ctx := context.WithValue(context.Background(), CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleAdmin)
+	return ctx
+}
 
 // mustAddRule adds a rule through the store directly (bypasses HTTP) and
 // returns the normalised rule with its generated ID.

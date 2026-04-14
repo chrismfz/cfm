@@ -8,6 +8,7 @@ package webdetector
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -168,6 +169,7 @@ func TestChallenge_VhostStatus_ScopeCheck(t *testing.T) {
 
 func TestChallengeExclude_AdminOnly(t *testing.T) {
 	_, mux := newStep3Engine(t)
+	hostValue := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".example.com")
 
 	// List
 	rr := get(mux, adminCtx(), "/api/v1/challenge/exclude/list")
@@ -181,21 +183,21 @@ func TestChallengeExclude_AdminOnly(t *testing.T) {
 
 	// Add
 	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=host&value=example.com", nil)
+		"/api/v1/challenge/exclude/add?type=host&value="+hostValue, nil)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped exclude add: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	// Admin add works
 	rr = doRequest(mux, adminCtx(), http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=host&value=example.com", nil)
+		"/api/v1/challenge/exclude/add?type=host&value="+hostValue, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	// Remove
 	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
-		"/api/v1/challenge/exclude/remove?type=host&value=example.com", nil)
+		"/api/v1/challenge/exclude/remove?type=host&value="+hostValue, nil)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped exclude remove: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -205,6 +207,7 @@ func TestChallengeExclude_AdminOnly(t *testing.T) {
 
 func TestWAFExclude_AdminOnly(t *testing.T) {
 	_, mux := newStep3Engine(t)
+	pathValue := "/" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 
 	rr := get(mux, scopedCtx("example.com"), "/api/v1/waf/exclude/list")
 	if rr.Code != http.StatusForbidden {
@@ -212,14 +215,14 @@ func TestWAFExclude_AdminOnly(t *testing.T) {
 	}
 
 	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
-		"/api/v1/waf/exclude/add?type=path&value=/admin", nil)
+		"/api/v1/waf/exclude/add?type=path&value="+pathValue, nil)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped waf exclude add: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	// Admin can add global WAF path exclude
 	rr = doRequest(mux, adminCtx(), http.MethodPost,
-		"/api/v1/waf/exclude/add?type=path&value=/healthz", nil)
+		"/api/v1/waf/exclude/add?type=path&value="+pathValue, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin waf exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}

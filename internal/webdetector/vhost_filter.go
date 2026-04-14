@@ -33,6 +33,17 @@ type CtxScopeKey struct{}
 // optional database-level scope for scoped tokens.
 type CtxDBScopeKey struct{}
 
+// CtxAuthnKey is set to true by auth middleware after successful authentication.
+type CtxAuthnKey struct{}
+
+// CtxRoleKey is set by auth middleware with the authenticated request role.
+type CtxRoleKey struct{}
+
+const (
+	CtxRoleAdmin  = "admin"
+	CtxRoleScoped = "scoped"
+)
+
 // ScopedDBScope carries explicit db-level allowlists attached to a scoped token.
 // Nil maps mean "not explicitly set".
 type ScopedDBScope struct {
@@ -134,13 +145,19 @@ func applySuspiciousFilter(rows []SuspiciousRow, filter map[string]struct{}) []S
 	return rows[:n]
 }
 
-// IsAdminRequest returns true when the request was authenticated with admin-level
-// credentials — admin bearer token, goauth session, or loopback bypass.
-// Returns false for scoped panel tokens (which have a non-nil vhost restriction
-// injected into the context by the middleware).
+// IsAdminRequest returns true only when middleware explicitly marked the request
+// as authenticated and assigned the admin role.
 //
-// Use this to gate endpoints that scoped token users must not access,
-// such as token management (list/revoke), WAF rule override management, etc.
+// Unauthenticated requests and middleware-misconfigured requests are always
+// treated as non-admin to fail closed.
 func IsAdminRequest(r *http.Request) bool {
-	return vhostScopeFromContext(r.Context()) == nil
+	if r == nil {
+		return false
+	}
+	authn, _ := r.Context().Value(CtxAuthnKey{}).(bool)
+	if !authn {
+		return false
+	}
+	role, _ := r.Context().Value(CtxRoleKey{}).(string)
+	return role == CtxRoleAdmin
 }
