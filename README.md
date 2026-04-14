@@ -162,7 +162,8 @@ internal/
 - Throttle-to-autoblock glue: `THROTTLE_*`
 - Portscan tracking: `PS_*`
 - MaxMind updater: `MAXMIND_*`
-- Optional API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
+- API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
+  - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.
 - Debug server: `LISTEN_ADDRESS`, `PORT`
 - MySQL governor log: `MYSQL_LOG_STDOUT`, `MYSQL_LOG_FILE`
 
