@@ -112,18 +112,20 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	l.cancel = cancel
 	l.cfgKey = key
 
-	go func(sockPath string) {
+	gid := cfmGroupID()
+	go func(sockPath string, gid int) {
 		err := ServeSock(c, l.col, SockServerConfig{
 			Enabled:  true,
 			SockPath: sockPath,
 			Token:    cfg.Token,
+			SockGID:  gid,
 			PEMTTL:   ttl,
 			PEMMax:   max,
 		})
 		if err != nil && c.Err() == nil {
 			logging.Logf("[sslcollector] sock server stopped: %v", err)
 		}
-	}(sp)
+	}(sp, gid)
 
 	logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
 }
