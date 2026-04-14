@@ -111,6 +111,17 @@ func isPublicPath(r *http.Request) bool {
 	return false
 }
 
+func isRequiredHealthPath(r *http.Request) bool {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/cfm-admin/") {
+		path = strings.TrimPrefix(path, "/cfm-admin")
+		if path == "" || path[0] != '/' {
+			path = "/" + path
+		}
+	}
+	return path == "/api/v1/system/status"
+}
+
 func isCpanelEmbeddedRequest(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
@@ -150,11 +161,19 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 }
 
 // TokenMiddleware enforces auth on all non-public routes.
-// If adminToken is empty the middleware is disabled (backwards compat).
 func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) http.Handler {
 	if adminToken == "" {
-		logging.Logf("[apiserver] AUTH_TOKEN not set — token middleware disabled")
-		return func(next http.Handler) http.Handler { return next }
+		logging.Logf("[apiserver] auth_reject=server_misconfigured_missing_auth_token")
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if isRequiredHealthPath(r) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"server misconfigured: AUTH_TOKEN missing"}`, http.StatusServiceUnavailable)
+			})
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
