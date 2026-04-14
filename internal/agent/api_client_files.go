@@ -1,59 +1,72 @@
 package agent
 
 import (
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "net/http"
-    "strings"
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"strings"
 )
 
 type FileUpdatesRequest struct {
-    Files []string `json:"files"`
+	Files []string `json:"files"`
 }
 type ConfigUpdate struct {
-    TargetPath        string  `json:"target_path"`
-    Content           string  `json:"content"`
-    Hash              string  `json:"hash"`
-    PostUpdateCommand *string `json:"post_update_command"`
+	TargetPath string `json:"target_path"`
+	Content    string `json:"content"`
+	Hash       string `json:"hash"`
 }
 
 func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {
-    if len(paths) == 0 { return nil, nil }
-    u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/get-updates"
-    body, _ := json.Marshal(FileUpdatesRequest{Files: paths})
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/get-updates"
+	body, _ := json.Marshal(FileUpdatesRequest{Files: paths})
 
-    req, err := http.NewRequest("POST", u, bytes.NewReader(body))
-    if err != nil { return nil, fmt.Errorf("get updates build request: %w", err) }
-    req.Header.Set("Token", c.Token)
-    req.Header.Set("Accept", "application/json")
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
-    resp, err := c.http().Do(req)
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("get updates build request: %w", err)
+	}
+	req.Header.Set("Token", c.Token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+	resp, err := c.http().Do(req)
 
-    if err != nil { return nil, err }
-    defer resp.Body.Close()
-    if resp.StatusCode >= 300 { return nil, fmt.Errorf("http %d", resp.StatusCode) }
-    var out struct{ Configs []ConfigUpdate `json:"configs"` }
-    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil { return nil, err }
-    return out.Configs, nil
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	var out struct {
+		Configs []ConfigUpdate `json:"configs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Configs, nil
 }
-
-
 
 func (c *APIClient) ListTrackedFiles() (map[string]string, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/list-files"
 
-    req, err := http.NewRequest("GET", u, nil)
-    if err != nil { return nil, fmt.Errorf("list tracked files build request: %w", err) }
-    req.Header.Set("Token", c.Token)
-    req.Header.Set("Accept", "application/json")
-    req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list tracked files build request: %w", err)
+	}
+	req.Header.Set("Token", c.Token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
 
-    resp, err := c.http().Do(req)
+	resp, err := c.http().Do(req)
 
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
@@ -75,10 +88,10 @@ func (c *APIClient) ListTrackedFiles() (map[string]string, error) {
 
 	// 2) Fallback: array of objects
 	type fileObj struct {
-		Path       string  `json:"path"`
-		TargetPath string  `json:"target_path"`
-		Hash       string  `json:"hash"`
-		SHA1       string  `json:"sha1"`
+		Path       string `json:"path"`
+		TargetPath string `json:"target_path"`
+		Hash       string `json:"hash"`
+		SHA1       string `json:"sha1"`
 	}
 	var r2 struct {
 		Tracked []fileObj `json:"tracked_files"`
@@ -87,9 +100,13 @@ func (c *APIClient) ListTrackedFiles() (map[string]string, error) {
 		out := make(map[string]string, len(r2.Tracked))
 		for _, it := range r2.Tracked {
 			p := it.Path
-			if p == "" { p = it.TargetPath }
+			if p == "" {
+				p = it.TargetPath
+			}
 			h := it.Hash
-			if h == "" { h = it.SHA1 }
+			if h == "" {
+				h = it.SHA1
+			}
 			if p != "" && h != "" {
 				out[p] = h
 			}
