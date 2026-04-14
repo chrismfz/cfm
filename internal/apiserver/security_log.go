@@ -3,6 +3,7 @@ package apiserver
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"cfm/internal/logging"
 )
@@ -40,6 +41,19 @@ func APISecurityAnomalyMiddleware(next http.Handler) http.Handler {
 		for _, ev := range globalAPIAbuseSignalClassifier.Evaluate(r, rec.status, reason) {
 			logging.LogfAPI("[apiserver] event=%s src_ip=%s signal=%s count=%d scope=%s method=%s path=%q status=%d ua=%q",
 				ev.Name, srcIP, ev.Signal, ev.Count, ev.Scope, r.Method, r.URL.Path, rec.status, ua)
+			publishAPIAnomalyEvent(APIAnomalyEvent{
+				When:      time.Now(),
+				Source:    "apiserver",
+				Reason:    ev.Name,
+				Signal:    ev.Signal,
+				Scope:     ev.Scope,
+				Count:     ev.Count,
+				SrcIP:     srcIP,
+				Method:    r.Method,
+				Path:      r.URL.Path,
+				Status:    rec.status,
+				UserAgent: ua,
+			})
 		}
 	})
 }
