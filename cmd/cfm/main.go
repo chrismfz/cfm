@@ -702,7 +702,7 @@ func runDaemon(args []string) {
 	logging.Logf("[sslcollector] started")
 
 	// --- sslcollector sock server lifecycle (driven by config reload) ---
-	sslSockLc := sslcollector.NewSockLifecycle(sslcol)
+	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
 	defer sslSockLc.Stop()
 
 	go func() {
