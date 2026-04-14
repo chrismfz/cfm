@@ -113,6 +113,9 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	l.cfgKey = key
 
 	gid := cfmGroupID()
+	if gid == 0 {
+		logging.Logf("[sslcollector] WARNING: 'cfm' OS group not found — socket will be root:root 0660 and OpenResty workers will not be able to connect. Run install-openresty.sh to create the cfm user/group.")
+	}
 	go func(sockPath string, gid int) {
 		err := ServeSock(c, l.col, SockServerConfig{
 			Enabled:  true,
