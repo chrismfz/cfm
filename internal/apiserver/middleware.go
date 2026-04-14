@@ -28,6 +28,16 @@ import (
 	webdet "cfm/internal/webdetector"
 )
 
+type apiAnomalyReasonSetter interface {
+	SetAPIAnomalyReason(reason string)
+}
+
+func setAPIAnomalyReason(w http.ResponseWriter, reason string) {
+	if s, ok := w.(apiAnomalyReasonSetter); ok {
+		s.SetAPIAnomalyReason(reason)
+	}
+}
+
 var sessionAllowedRequest = sessionAllowed
 
 var (
@@ -188,6 +198,10 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 2. Bearer / X-CFM-Token / Token header ────────────────────
 			tok, tokenHeaderSupplied := extractToken(r)
+			if suspicious, detail := suspiciousAuthHeader(r); suspicious {
+				logging.LogfAPI("[apiserver] event=api_anomaly src_ip=%s reason=suspicious_auth_header count=1 method=%s path=%q status=0 detail=%q ua=%q",
+					realIPFromRequest(r), r.Method, r.URL.Path, detail, strings.TrimSpace(r.UserAgent()))
+			}
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
 					logging.Logf("[apiserver] auth_source=token_admin")
@@ -216,6 +230,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					logging.Logf("[apiserver] auth_reject=invalid_scoped_embedded")
 				}
 				w.Header().Set("Content-Type", "application/json")
+				setAPIAnomalyReason(w, "token_invalid")
 				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
 				return
 			}
@@ -236,6 +251,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				logging.Logf("[apiserver] auth_reject=missing_scoped_embedded")
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
+				setAPIAnomalyReason(w, "auth_missing")
 				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 				return
 			}
@@ -251,6 +267,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 6. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				setAPIAnomalyReason(w, "auth_missing")
 				base := cfmBase(r)
 				next := r.URL.RequestURI()
 				if base != "" && !strings.HasPrefix(next, base+"/") && next != base {
@@ -264,6 +281,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
+			setAPIAnomalyReason(w, "auth_missing")
 			http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 		})
 	}
@@ -284,4 +302,34 @@ func extractToken(r *http.Request) (string, bool) {
 		return strings.TrimSpace(r.Header.Get("Token")), true
 	}
 	return "", false
+}
+
+func suspiciousAuthHeader(r *http.Request) (bool, string) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	hasXCFM := len(r.Header["X-CFM-Token"]) > 0
+	hasToken := len(r.Header["Token"]) > 0
+	if auth != "" && (hasXCFM || hasToken) {
+		return true, "multiple_auth_schemes"
+	}
+	if auth == "" {
+		if hasXCFM && hasToken {
+			return true, "multiple_token_headers"
+		}
+		return false, ""
+	}
+	parts := strings.Fields(auth)
+	if len(parts) == 0 {
+		return true, "authorization_header_empty"
+	}
+	scheme := strings.ToLower(parts[0])
+	if scheme == "bearer" {
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+			return true, "malformed_bearer"
+		}
+		return false, ""
+	}
+	if strings.Contains(strings.ToLower(auth), "bearer ") {
+		return true, "multiple_auth_schemes"
+	}
+	return false, ""
 }

@@ -259,6 +259,7 @@ func Start(
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 	}
+	handler = APISecurityAnomalyMiddleware(handler)
 	handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
