@@ -139,8 +139,7 @@ type webdetSummary struct {
 }
 
 func (e *Engine) handleWebdetSummary(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	resp := webdetSummary{
@@ -199,8 +198,7 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 
 // handleIPShort: επιστρέφει IPSignals από το short window με optional ?limit=
 func (e *Engine) handleIPShort(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	limit := 0
@@ -309,8 +307,7 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	limit := 20
@@ -325,8 +322,7 @@ func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {
 
 // handleIPDrilldown: short-window drilldown per IP.
 func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	ip := r.URL.Query().Get("ip")
@@ -340,8 +336,7 @@ func (e *Engine) handleIPDrilldown(w http.ResponseWriter, r *http.Request) {
 
 // handleAnalyzeIP: offline log scan για μία IP.
 func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+	if !RequireAdmin(w, r) {
 		return
 	}
 	ip := r.URL.Query().Get("ip")

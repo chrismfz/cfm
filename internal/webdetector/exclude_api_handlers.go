@@ -17,16 +17,6 @@ import (
 	"strings"
 )
 
-// adminRequired returns true and writes 403 when the request carries a scoped
-// token. Inline helper used by every handler in this file.
-func adminRequired(w http.ResponseWriter, r *http.Request) bool {
-	if !IsAdminRequest(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
-		return true
-	}
-	return false
-}
-
 func readExcludeParams(r *http.Request) (string, string) {
 	typ := strings.TrimSpace(r.URL.Query().Get("type"))
 	if typ == "" {
@@ -38,7 +28,7 @@ func readExcludeParams(r *http.Request) (string, string) {
 
 // GET /api/v1/challenge/exclude/list
 func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	if e == nil {
@@ -50,7 +40,7 @@ func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Reque
 
 // POST /api/v1/challenge/exclude/add?type=host&value=example.com
 func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
@@ -67,7 +57,7 @@ func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Reques
 
 // POST /api/v1/challenge/exclude/remove?type=host&value=example.com
 func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
@@ -84,7 +74,7 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 
 // GET /api/v1/waf/exclude/list
 func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	if e == nil {
@@ -96,7 +86,7 @@ func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/waf/exclude/add?type=host&value=example.com
 func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
@@ -113,7 +103,7 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/waf/exclude/remove?type=host&value=example.com
 func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) {
-	if adminRequired(w, r) {
+	if !RequireAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
