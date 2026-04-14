@@ -133,7 +133,6 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
   cfm-admin.htpasswd        # optional OpenResty /cfm-admin BasicAuth file (shipped empty)
   httpd-cfm.conf            # Apache LogFormat for WebDetector TSV
   nginx-cfm.conf            # nginx log_format for WebDetector TSV
-  cfm-modsec.conf           # ModSecurity integration (file uploads → cfm-scan.sh)
   sslcollector.lua          # OpenResty Lua helper for dynamic cert loading (via unix socket)
   trusted_proxies.conf      # real_ip / trusted proxy include for Cloudflare/LB setups
   openresty-example*.conf   # full OpenResty "in-path WAF/challenge" examples (+ optional cache)
@@ -196,8 +195,6 @@ Hostnames periodically resolved and kept in the allow set (e.g. dynamic office I
 ### Web log format snippets (`httpd-cfm.conf`, `nginx-cfm.conf`)
 Ensures WebDetector sees a consistent TSV schema across stacks.
 
-### ModSecurity integration (`cfm-modsec.conf` + `scripts/cfm-scan.sh`)
-Wires ModSecurity file upload temp paths into `cfm-scan.sh` (local scanner hook).
 
 ---
 
