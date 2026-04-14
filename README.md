@@ -171,8 +171,15 @@ internal/
 - `[global]` defaults: `DEFAULT_EVERY`, `DEFAULT_TIMEOUT`, `DEFAULT_COOLDOWN`
 - Global ignores: `IGNORE_IPS`, `IGNORE_NETS`, `LOG_IGNORED`
 - Per-detector sections: `[ssh_auth]`, `[mysql]`, `[mysql_governor]`, `[ftpd]`, `[cpanel]`, `[exim_*]`, `[dovecot_*]`, `[postfix_*]`, `[modsec]`, `[health]`, `[webdetector]`
+- API anomaly detector section: `[api_abuse]` (apiserver-origin anomalies with staged observe/challenge/block mitigation)
 - Webdetector history knobs live in `[webdetector]` here (not in `cfm.conf`): `HISTORY_ENABLED`, `HISTORY_DB_PATH`, `HISTORY_RETENTION_DAYS`, `HISTORY_PRUNE_EVERY`
 - Per-section block policy: `BLOCK = no|dryrun|permanent|<duration>` + `BLOCK_COOLDOWN`
+
+#### API abuse rollout guidance
+- Start with detect-only by setting `[api_abuse]` `BLOCK = no` and tuning `STAGE1_THRESHOLD` from production logs.
+- Enable gradual mitigation next: keep stage 1 as observe, set `STAGE2_THRESHOLD` + `STAGE2_CHALLENGE_TTL` for temporary challenge responses.
+- Enable stage 3 only after baseline tuning: set `BLOCK = <short ttl>` (or `BLOCK=dryrun` first), then tune `STAGE3_THRESHOLD` and `BLOCK_COOLDOWN`.
+- Use `ALLOW_IPS`, `ALLOW_NETS`, `ALLOW_UA_CONTAINS`, and `PATH_EXCEPTIONS` to exempt known monitors, proxies, and expected probe-like paths.
 
 ### `notify.conf` — Notifier
 - Global on/off + JSONL audit log
