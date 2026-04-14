@@ -152,3 +152,49 @@ func TestTokenMiddlewareStandaloneRequestAllowsSessionFallback(t *testing.T) {
 		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
 	}
 }
+
+func TestTokenMiddlewareMissingAdminTokenRejectsPrivilegedRoutes(t *testing.T) {
+	withSessionAllowedStub(t, true)
+
+	called := false
+	h := TokenMiddleware("", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/tokens/list", nil)
+	req.Header.Set("Accept", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if called {
+		t.Fatalf("expected privileged route to be blocked when AUTH_TOKEN is missing")
+	}
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d got %d", http.StatusServiceUnavailable, rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `server misconfigured: AUTH_TOKEN missing`) {
+		t.Fatalf("expected clear misconfiguration error, got body=%q", rr.Body.String())
+	}
+}
+
+func TestTokenMiddlewareMissingAdminTokenAllowsSystemStatus(t *testing.T) {
+	called := false
+	h := TokenMiddleware("", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("expected system status route to remain available when AUTH_TOKEN is missing")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}
