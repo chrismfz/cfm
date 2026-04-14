@@ -76,6 +76,14 @@ func TestTokenMiddlewareAllowsScopedBootstrapCookieForCfmAdminHTML(t *testing.T)
 		if scope == nil {
 			t.Fatalf("expected scoped context from bootstrap cookie")
 		}
+		authn, _ := r.Context().Value(webdet.CtxAuthnKey{}).(bool)
+		if !authn {
+			t.Fatalf("expected authenticated context marker")
+		}
+		role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
+		if role != webdet.CtxRoleScoped {
+			t.Fatalf("expected scoped role marker, got %q", role)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -103,6 +111,14 @@ func TestTokenMiddlewareAllowsEmbeddedScopedBootstrapCookieForCfmAdminPath(t *te
 		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
 		if scope == nil {
 			t.Fatalf("expected scoped context from bootstrap cookie")
+		}
+		authn, _ := r.Context().Value(webdet.CtxAuthnKey{}).(bool)
+		if !authn {
+			t.Fatalf("expected authenticated context marker")
+		}
+		role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
+		if role != webdet.CtxRoleScoped {
+			t.Fatalf("expected scoped role marker, got %q", role)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

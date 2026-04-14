@@ -20,8 +20,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"cfm/internal/logging"
@@ -191,7 +191,9 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
 					logging.Logf("[apiserver] auth_source=token_admin")
-					next.ServeHTTP(w, r)
+					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
+					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
 				if st, ok := store.Lookup(tok); ok {
@@ -205,6 +207,8 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 						Users:     st.DBUsers,
 						Databases: st.Databases,
 					})
+					ctx = context.WithValue(ctx, webdet.CtxAuthnKey{}, true)
+					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -216,16 +220,16 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-				// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
-				if !tokenHeaderSupplied {
-					if ctx, ok := embedScopedContextFromCookie(r, store); ok {
-						if shouldLogEmbedBootstrapAuth(time.Now()) {
-							logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie (sampled_every=15s)")
-						}
-						next.ServeHTTP(w, r.WithContext(ctx))
-						return
+			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
+			if !tokenHeaderSupplied {
+				if ctx, ok := embedScopedContextFromCookie(r, store); ok {
+					if shouldLogEmbedBootstrapAuth(time.Now()) {
+						logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie (sampled_every=15s)")
 					}
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
 				}
+			}
 
 			// ── 4. Embedded requests require token or embed bootstrap cookie ─
 			if embedded {
@@ -239,7 +243,9 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 5. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				logging.Logf("[apiserver] auth_source=session_cookie")
-				next.ServeHTTP(w, r)
+				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
+				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

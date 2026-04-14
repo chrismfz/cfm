@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	webdet "cfm/internal/webdetector"
 )
 
 func withSessionAllowedStub(t *testing.T, allow bool) {
@@ -135,8 +137,16 @@ func TestTokenMiddlewareStandaloneRequestAllowsSessionFallback(t *testing.T) {
 	withSessionAllowedStub(t, true)
 
 	called := false
-	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
+		authn, _ := r.Context().Value(webdet.CtxAuthnKey{}).(bool)
+		if !authn {
+			t.Fatalf("expected authenticated context marker")
+		}
+		role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
+		if role != webdet.CtxRoleAdmin {
+			t.Fatalf("expected admin role marker, got %q", role)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -147,6 +157,34 @@ func TestTokenMiddlewareStandaloneRequestAllowsSessionFallback(t *testing.T) {
 
 	if !called {
 		t.Fatalf("standalone request should be allowed via session fallback")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}
+
+func TestTokenMiddlewareAdminTokenSetsAdminAuthMarkers(t *testing.T) {
+	called := false
+	h := TokenMiddleware("secret", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		authn, _ := r.Context().Value(webdet.CtxAuthnKey{}).(bool)
+		if !authn {
+			t.Fatalf("expected authenticated context marker")
+		}
+		role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
+		if role != webdet.CtxRoleAdmin {
+			t.Fatalf("expected admin role marker, got %q", role)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("expected handler to be reached")
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)

@@ -21,6 +21,8 @@ func TestWAFEngineSummaryIncludesTriggerEvents(t *testing.T) {
 	e := &Engine{history: hs}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?hours=24&limit=20&top=10", nil)
+	ctx := adminCtx()
+	req = req.WithContext(ctx)
 	e.handleWAFEngineSummary(rr, req)
 
 	if rr.Code != http.StatusOK {

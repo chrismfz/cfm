@@ -367,13 +367,13 @@ func isGoAuthSQLiteBusy(err error) bool {
 		strings.Contains(s, "(261)")
 }
 
-// adminOnlyHandler wraps h and returns 403 for any scoped token.
-// Admin tokens and the loopback bypass both produce a nil scope and pass through.
+// adminOnlyHandler wraps h and returns 403 unless middleware explicitly marked
+// the request as admin-authenticated.
 // Used to protect routes that are inherently global and meaningless to
 // per-vhost cPanel/DA tokens (MySQL governor, system status, etc.).
 func adminOnlyHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{}); v != nil {
+		if !webdet.IsAdminRequest(r) {
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"admin token required"}`, http.StatusForbidden)
 			return
