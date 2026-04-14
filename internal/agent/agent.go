@@ -1,7 +1,7 @@
 package agent
 
 import (
-//	"bytes"
+	//	"bytes"
 	"context"
 	"crypto/tls"
 	"net/http"
@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cfm/internal/dnat"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
-	"cfm/internal/dnat"
 	"net"
 )
 
@@ -26,11 +26,11 @@ type Config struct {
 }
 
 type Runner struct {
-	client *http.Client
-	cfg    atomic.Value // holds Config
-	stop   chan struct{}
-	wg     sync.WaitGroup
-	once   sync.Once
+	client  *http.Client
+	cfg     atomic.Value // holds Config
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	once    sync.Once
 	backend firewall.Backend
 	cfgDir  string
 }
@@ -50,55 +50,63 @@ func New(cfg Config) *Runner {
 }
 
 func (r *Runner) Start() { r.once.Do(func() { r.wg.Add(1); go r.loop() }) }
-func (r *Runner) Stop()  { select { case <-r.stop: default: close(r.stop) }; r.wg.Wait() }
+func (r *Runner) Stop() {
+	select {
+	case <-r.stop:
+	default:
+		close(r.stop)
+	}
+	r.wg.Wait()
+}
 func (r *Runner) Update(cfg Config) { r.cfg.Store(normalize(cfg)) }
+
 // Setters so main can wire dependencies without exporting fields
 func (r *Runner) SetBackend(b firewall.Backend) { r.backend = b }
 func (r *Runner) SetConfigDir(dir string)       { r.cfgDir = dir }
 
-
-
 var unblockMu sync.Mutex
 
 func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
-    if !unblockMu.TryLock() {
-        logging.LogfAPI("[unblock] previous run still in progress, skipping tick")
-        return
-    }
-    defer unblockMu.Unlock()
+	if !unblockMu.TryLock() {
+		logging.LogfAPI("[unblock] previous run still in progress, skipping tick")
+		return
+	}
+	defer unblockMu.Unlock()
 
-    cfg := r.cur()
-    if cfg.BaseURL == "" || cfg.Token == "" { return }
+	cfg := r.cur()
+	if cfg.BaseURL == "" || cfg.Token == "" {
+		return
+	}
 
-    api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
-    reqs, err := api.FetchPendingUnblocks()
-    if err != nil {
-        logging.LogfAPI("[unblock] fetch pending failed: %v", err)
-        return
-    }
-    if len(reqs) == 0 { return }
+	api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
+	reqs, err := api.FetchPendingUnblocks()
+	if err != nil {
+		logging.LogfAPI("[unblock] fetch pending failed: %v", err)
+		return
+	}
+	if len(reqs) == 0 {
+		return
+	}
 
-    // batch-remove all IPs from nft in ONE process call
-    ips := make([]net.IP, 0, len(reqs))
-    for _, it := range reqs {
-        if ip := net.ParseIP(it.IP); ip != nil {
-            ips = append(ips, ip)
-        }
-    }
-    if be, ok := r.backend.(interface{ RemoveBlockBatch([]net.IP) error }); ok {
-        if err := be.RemoveBlockBatch(ips); err != nil {
-            logging.LogfAPI("[unblock] batch nft remove error: %v", err)
-        }
-    }
+	// batch-remove all IPs from nft in ONE process call
+	ips := make([]net.IP, 0, len(reqs))
+	for _, it := range reqs {
+		if ip := net.ParseIP(it.IP); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	if be, ok := r.backend.(interface{ RemoveBlockBatch([]net.IP) error }); ok {
+		if err := be.RemoveBlockBatch(ips); err != nil {
+			logging.LogfAPI("[unblock] batch nft remove error: %v", err)
+		}
+	}
 
-    // confirm each sequentially (API calls, not nft)
-    for _, it := range reqs {
-        logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
-        api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
-    }
+	// confirm each sequentially (API calls, not nft)
+	for _, it := range reqs {
+		logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
+		api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+	}
 }
-
-
 
 func (r *Runner) loop() {
 	defer r.wg.Done()
@@ -115,27 +123,27 @@ func (r *Runner) loop() {
 		case <-t.C:
 			r.doHeartbeat(context.Background())
 			r.fetchPendingUnblocks(context.Background())
-			r.pollExecutions(context.Background())
 			r.syncConfigs(context.Background())
 
-			// μελλοντικά: r.pollExecutions(), r.fetchPendingUnblocks(), r.syncConfigs()...
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)
 	}
 }
 
-
 func (r *Runner) cur() Config { return r.cfg.Load().(Config) }
 
 func normalize(c Config) Config {
-	if c.Interval <= 0 { c.Interval = 30 * time.Second }
-	if c.UserAgent == "" { c.UserAgent = "cfm" }
+	if c.Interval <= 0 {
+		c.Interval = 30 * time.Second
+	}
+	if c.UserAgent == "" {
+		c.UserAgent = "cfm"
+	}
 	if c.BaseURL != "" && !strings.HasPrefix(c.BaseURL, "http://") && !strings.HasPrefix(c.BaseURL, "https://") {
 		c.BaseURL = "https://" + c.BaseURL
 	}
 	return c
 }
-
 
 func (r *Runner) doHeartbeat(ctx context.Context) {
 	cfg := r.cur()
