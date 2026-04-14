@@ -62,7 +62,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	}
 	luaPath := cfg.LuaTokenPath
 	if luaPath == "" {
-		luaPath = "/usr/local/openresty/nginx/conf/cfm_token.lua"
+		luaPath = "/usr/local/openresty/nginx/lua/cfm_token.lua"
 	}
 
 	// Validate or rotate the token before anything else.

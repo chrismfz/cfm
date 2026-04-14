@@ -34,7 +34,7 @@ local SOCKS = {
 -- Token is written by CFM at startup/reload to this path (root:cfm 0640).
 -- The file returns a single string: return "deadbeef..."
 -- Override path via SSLCOLLECTOR_LUA_TOKEN_PATH in cfm.conf.
-local _TOKEN_FILE = "/usr/local/openresty/nginx/conf/cfm_token.lua"
+local _TOKEN_FILE = "/usr/local/openresty/nginx/lua/cfm_token.lua"
 local TOKEN
 do
   local chunk, load_err = loadfile(_TOKEN_FILE)
