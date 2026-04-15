@@ -25,6 +25,16 @@ local json = require "cjson.safe"
 
 local dict = ngx.shared.sslcache
 
+-- Worker-local cert store.
+-- Keys: "e:<host>" (exact) or "w:<suffix>" (wildcard)
+-- Values: { cert = "<PEM>", key = "<PEM>" }
+--
+-- Intentionally NOT stored in ngx.shared dict: shared dicts are accessible to
+-- any Lua code in the same OpenResty process via dict:get_keys() + dict:get().
+-- A worker-local table is only reachable by code that holds a reference to this
+-- module — significantly smaller attack surface for key material enumeration.
+local _store = {}
+
 -- Socket(s) + token
 local SOCKS = {
   "/var/run/sslcollector.sock",
@@ -58,10 +68,6 @@ end
 -- Resets to POLL_SECS_MIN on any successful /stats response.
 local POLL_SECS_MIN = 300   -- 5m  base (healthy)
 local POLL_SECS_MAX = 1200  -- 20m ceiling (sustained failures)
-
--- TTL for shared dict cert entries.
--- 0 = never expire. Freshness is maintained by explicit updates from do_dumpall().
-local DUMP_TTL = 0
 
 -- Lock TTL for do_dumpall(). High enough to cover large payloads + latency.
 local LOCK_TTL = 180  -- 3m
@@ -178,7 +184,7 @@ end
 -- Shared dict: cert pair storage
 -- ---------------------------------------------------------------------------
 
-local function store_pair(prefix, name, cert_pem, key_pem, ttl)
+local function store_pair(prefix, name, cert_pem, key_pem)
   if not name or name == "" then
     return false, "empty name"
   end
@@ -189,16 +195,7 @@ local function store_pair(prefix, name, cert_pem, key_pem, ttl)
     return false, "empty key_pem"
   end
 
-  local ok1, e1 = dict:set(prefix .. "pemcert:" .. name, cert_pem, ttl)
-  if not ok1 then
-    return false, "dict:set cert: " .. (e1 or "?")
-  end
-
-  local ok2, e2 = dict:set(prefix .. "pemkey:" .. name, key_pem, ttl)
-  if not ok2 then
-    return false, "dict:set key: " .. (e2 or "?")
-  end
-
+  _store[prefix .. name] = { cert = cert_pem, key = key_pem }
   return true
 end
 
@@ -339,7 +336,7 @@ local function ingest_dumpall(data, src)
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
 
     if host ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("e:", host, cert_pem, key_pem, DUMP_TTL)
+      local ok, e = store_pair("e:", host, cert_pem, key_pem)
       if ok then
         okN = okN + 1
       else
@@ -360,7 +357,7 @@ local function ingest_dumpall(data, src)
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
 
     if suf ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("w:", suf, cert_pem, key_pem, DUMP_TTL)
+      local ok, e = store_pair("w:", suf, cert_pem, key_pem)
       if ok then
         okN = okN + 1
       else
@@ -382,11 +379,10 @@ local function ingest_dumpall(data, src)
   end
 
   local cached_exact, cached_wild = 0, 0
-  local keys = dict:get_keys(10000)
-  for _, k in ipairs(keys) do
-    if k:sub(1, 10) == "e:pemcert:" then
+  for k in pairs(_store) do
+    if k:sub(1, 2) == "e:" then
       cached_exact = cached_exact + 1
-    elseif k:sub(1, 10) == "w:pemcert:" then
+    elseif k:sub(1, 2) == "w:" then
       cached_wild = cached_wild + 1
     end
   end
@@ -621,35 +617,33 @@ function M.set_cert()
   sni = normalize_name(sni)
 
   -- 1) Exact match
-  local cert_pem = dict:get("e:pemcert:" .. sni)
-  local key_pem  = dict:get("e:pemkey:"  .. sni)
+  local entry = _store["e:" .. sni]
 
   -- 2) Wildcard: longest-suffix match
   --    foo.bar.example.com -> bar.example.com -> example.com
-  if not cert_pem or not key_pem then
+  if not entry then
     local tmp = sni
     while true do
       local dot = string.find(tmp, "%.")
       if not dot then break end
       tmp = string.sub(tmp, dot + 1)
-      cert_pem = dict:get("w:pemcert:" .. tmp)
-      key_pem  = dict:get("w:pemkey:"  .. tmp)
-      if cert_pem and key_pem then break end
+      entry = _store["w:" .. tmp]
+      if entry then break end
     end
   end
 
-  if not cert_pem or not key_pem then
+  if not entry then
     ngx.log(ngx.WARN, "[sslcollector] cache miss sni=", sni, " -> nginx fallback cert")
     return
   end
 
-  local cert_der, cerr = ssl.parse_pem_cert(cert_pem)
+  local cert_der, cerr = ssl.parse_pem_cert(entry.cert)
   if not cert_der then
     ngx.log(ngx.ERR, "[sslcollector] parse cert failed sni=", sni, " err=", (cerr or "?"))
     return
   end
 
-  local key_der, kerr = ssl.parse_pem_priv_key(key_pem)
+  local key_der, kerr = ssl.parse_pem_priv_key(entry.key)
   if not key_der then
     ngx.log(ngx.ERR, "[sslcollector] parse key failed sni=", sni, " err=", (kerr or "?"))
     return
@@ -668,6 +662,20 @@ function M.set_cert()
     ngx.log(ngx.ERR, "[sslcollector] ssl.set_priv_key failed sni=", sni, " err=", (err2 or "?"))
     return
   end
+end
+
+-- Returns exact-host and wildcard counts from the worker-local store.
+-- Used by cfm_stats.lua since cert keys are no longer in the shared dict.
+function M.cert_counts()
+  local exact, wild = 0, 0
+  for k in pairs(_store) do
+    if k:sub(1, 2) == "e:" then
+      exact = exact + 1
+    elseif k:sub(1, 2) == "w:" then
+      wild = wild + 1
+    end
+  end
+  return exact, wild
 end
 
 return M

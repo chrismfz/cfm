@@ -483,6 +483,11 @@ func validatePathWithinDir(path, base string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// Resolve symlinks on the base so the prefix check is against the real dir.
+	if real, rerr := filepath.EvalSymlinks(safeBase); rerr == nil {
+		safeBase = real
+	}
+
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", false
@@ -491,14 +496,21 @@ func validatePathWithinDir(path, base string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if pathAbs == safeBase {
+	// Resolve symlinks on the target path. A symlink inside the allowed dir
+	// that points outside it will produce a realPath outside the prefix and
+	// be rejected. If the path doesn't exist (or can't be resolved) reject it.
+	realPath, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		return "", false
+	}
+	if realPath == safeBase {
 		return "", false
 	}
 	prefix := safeBase + string(os.PathSeparator)
-	if !strings.HasPrefix(pathAbs, prefix) {
+	if !strings.HasPrefix(realPath, prefix) {
 		return "", false
 	}
-	return pathAbs, true
+	return realPath, true
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────
