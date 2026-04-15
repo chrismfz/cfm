@@ -450,6 +450,30 @@ deploy_nginx_conf() {
     fi
 }
 
+check_lua_token_files() {
+    local token_files=(
+        "/usr/local/openresty/nginx/lua/cfm_token.lua"
+        "/usr/local/openresty/nginx/lua/cfm_bridge_token.lua"
+    )
+    local token_file
+    local ready_count=0
+    local missing_count=0
+
+    for token_file in "${token_files[@]}"; do
+        if [ -f "$token_file" ]; then
+            chown root:cfm "$token_file"
+            chmod 0640 "$token_file"
+            ready_count=$((ready_count + 1))
+            log "Token file permissions ready (root:cfm 0640): $token_file"
+        else
+            missing_count=$((missing_count + 1))
+            warn "Token file missing: $token_file (run cfm daemon first to generate it)"
+        fi
+    done
+
+    log "Token file readiness: ready=$ready_count missing=$missing_count expected=2"
+}
+
 
 
 main() {
@@ -475,6 +499,7 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     deploy_nginx_conf
+    check_lua_token_files
     log "Done"
 }
 
