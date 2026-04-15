@@ -45,7 +45,7 @@ local CFG = {
   token        = _bridge_token,
   token_header = "X-CFM-Token",
 
-  decision_timeout_ms   = 80,
+  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "80"),
   decision_cache_ttl_ms = 12000,
   waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
@@ -392,7 +392,12 @@ local function get_decision(ip, host, uri, method, scheme, ua, country)
                "&country=" .. esc(country or "")
 
   local body, err = http_get_unix(path)
-  if not body then return fail_decision(err) end
+  if not body then
+    log_route(ngx.WARN, "decision_rpc_err err=" .. tostring(err) ..
+      " ip=" .. ip .. " host=" .. host .. " uri=" .. (uri or "-") ..
+      " method=" .. (method or "-"))
+    return fail_decision(err)
+  end
   local obj = cjson.decode(body)
   if not obj then return fail_decision("decode_failed") end
 
