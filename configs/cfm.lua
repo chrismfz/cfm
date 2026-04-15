@@ -330,8 +330,24 @@ local function http_unix(method, path, body)
   return resp, nil
 end
 
-local function http_get_unix(path_qs)  return http_unix("GET",  path_qs, nil) end
-local function http_post_unix(path, b) return http_unix("POST", path,    b)   end
+local function rpc_call(kind, method, path, body, req_ctx)
+  local resp, err = http_unix(method, path, body)
+  if err then
+    req_ctx = req_ctx or {}
+    local ctx_ip = req_ctx.ip or real_ip()
+    local ctx_host = req_ctx.host or (ngx.var.host or "-")
+    local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
+    local ctx_method = req_ctx.method or (ngx.req.get_method() or "-")
+    log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
+      " path=" .. tostring(path or "-") ..
+      " err=" .. tostring(err) ..
+      " ip=" .. tostring(ctx_ip or "-") ..
+      " host=" .. tostring(ctx_host or "-") ..
+      " uri=" .. tostring(ctx_uri or "-") ..
+      " method=" .. tostring(ctx_method or "-"))
+  end
+  return resp, err
+end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HELPERS
@@ -339,10 +355,10 @@ local function http_post_unix(path, b) return http_unix("POST", path,    b)   en
 
 local function observe_waf(ip, host, uri, method, status, reason)
   if not ip or ip == "" then return end
-  http_post_unix("/nginx/observe", cjson.encode({
+  rpc_call("observe", "POST", "/nginx/observe", cjson.encode({
     ip = ip, host = host or "", uri = uri or "/",
     method = method or "", status = status or 403, reason = reason or "",
-  }))
+  }), { ip = ip, host = host, uri = uri, method = method })
 end
 
 local function touch_ok(ip)
@@ -352,7 +368,9 @@ local function touch_ok(ip)
   local last = SH:get(k)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
   SH:set(k, now, CFG.ok_touch_every_sec)
-  http_post_unix("/nginx/ok/touch", cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec }))
+  rpc_call("ok_touch", "POST", "/nginx/ok/touch",
+    cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec }),
+    { ip = ip })
 end
 
 local function refresh_ok_cookie(cookie_val)
@@ -391,11 +409,10 @@ local function get_decision(ip, host, uri, method, scheme, ua, country)
                "&ua="      .. esc(ua or "")      ..
                "&country=" .. esc(country or "")
 
-  local body, err = http_get_unix(path)
+  local body, err = rpc_call("decision", "GET", path, nil, {
+    ip = ip, host = host, uri = uri, method = method,
+  })
   if not body then
-    log_route(ngx.WARN, "decision_rpc_err err=" .. tostring(err) ..
-      " ip=" .. ip .. " host=" .. host .. " uri=" .. (uri or "-") ..
-      " method=" .. (method or "-"))
     return fail_decision(err)
   end
   local obj = cjson.decode(body)
@@ -416,7 +433,7 @@ local function refresh_waf_excludes_if_needed()
   local last = tonumber(SH:get("wxsnap_ts") or "0") or 0
   if (now - last) < CFG.waf_excl_refresh_sec then return end
   if not SH:add("wxsnap_lock", "1", 1) then return end
-  local body, _ = http_get_unix("/nginx/waf/excludes")
+  local body, _ = rpc_call("waf_excludes", "GET", "/nginx/waf/excludes")
   if not body then
     SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
     SH:delete("wxsnap_lock"); return
@@ -691,10 +708,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       end
 
       if waf.should_push and waf.should_push(SH, ip, reason) then
-        http_post_unix("/nginx/ip", cjson.encode({
+        rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode({
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
           reason = reason, host = p_host, uri = p_uri, method = p_meth,
-        }))
+        }), { ip = ip, host = p_host, uri = p_uri, method = p_meth })
       end
       log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host .. " reason=" .. tostring(reason))
       if waf_action == "block" then return ngx.exit(CFG.block_code) end
