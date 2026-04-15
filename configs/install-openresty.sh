@@ -64,6 +64,9 @@ install_prereqs_debian() {
     dpkg -s ca-certificates >/dev/null 2>&1 || pkgs+=(ca-certificates)
     dpkg -s lsb-release >/dev/null 2>&1 || pkgs+=(lsb-release)
     dpkg -s openssl >/dev/null 2>&1 || pkgs+=(openssl)
+    # lua-resty-maxminddb uses ffi.load('libmaxminddb') which needs the
+    # unversioned .so symlink provided by the -dev package, not the runtime lib
+    dpkg -s libmaxminddb-dev >/dev/null 2>&1 || pkgs+=(libmaxminddb-dev)
 
     if [ "${#pkgs[@]}" -gt 0 ]; then
         log "Installing Debian prerequisites: ${pkgs[*]}"
@@ -78,6 +81,9 @@ install_prereqs_el() {
     rpm -q wget >/dev/null 2>&1 || pkgs+=(wget)
     rpm -q ca-certificates >/dev/null 2>&1 || pkgs+=(ca-certificates)
     rpm -q openssl >/dev/null 2>&1 || pkgs+=(openssl)
+    # lua-resty-maxminddb uses ffi.load('libmaxminddb') which needs the
+    # unversioned .so symlink provided by the -devel package, not the runtime lib
+    rpm -q libmaxminddb-devel >/dev/null 2>&1 || pkgs+=(libmaxminddb-devel)
 
     if [ "${#pkgs[@]}" -gt 0 ]; then
         log "Installing EL prerequisites: ${pkgs[*]}"
@@ -331,28 +337,23 @@ ensure_lua_dir() {
 
 ensure_nginx_temp_dirs() {
     # nginx worker processes (running as cfm) write temp files for buffered
-    # request bodies and proxy responses.  The master (root) creates the dirs
-    # on first start, but workers need group-write access.
+    # request bodies and proxy responses.  openresty.conf points these to
+    # /var/lib/cfm/nginx/ so the cfm user owns them outright.
     #
     # Dirs covered:
     #   client_body_temp  — proxy_request_buffering on  (request body spill)
     #   proxy_temp        — proxy_buffering on           (response body spill)
-    #   fastcgi/uwsgi/scgi_temp — not used currently but included for safety
-    local prefix="/usr/local/openresty/nginx"
     local dirs=(
-        "$prefix/client_body_temp"
-        "$prefix/proxy_temp"
-        "$prefix/fastcgi_temp"
-        "$prefix/uwsgi_temp"
-        "$prefix/scgi_temp"
+        /var/lib/cfm/nginx/client_body_temp
+        /var/lib/cfm/nginx/proxy_temp
     )
     local d
 
     for d in "${dirs[@]}"; do
         mkdir -p "$d"
-        chown root:cfm "$d"
-        chmod 0770 "$d"
-        log "nginx temp dir ready (root:cfm 0770): $d"
+        chown cfm:cfm "$d"
+        chmod 0700 "$d"
+        log "nginx temp dir ready (cfm:cfm 0700): $d"
     done
 }
 
