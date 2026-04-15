@@ -9,6 +9,7 @@ Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
 Requires(pre): shadow-utils
+Requires: libmaxminddb-devel
 
 %description
 cfm: local nftables manager (block/allow with optional TTL), plus simple list/unlist/flush.
@@ -87,6 +88,14 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
+# nginx temp dirs — must be owned by the cfm worker user
+# (default OpenResty paths are root-owned; workers running as cfm can't write them)
+for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
+    mkdir -p "$d"
+    chown cfm:cfm "$d"
+    chmod 700 "$d"
+done
+
 # Ensure correct SELinux context in case older versions used /lib path
 [ -f /lib/systemd/system/cfm.service ] && \
   chcon -h system_u:object_r:systemd_unit_file_t:s0 /lib/systemd/system/cfm.service || true

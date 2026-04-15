@@ -27,6 +27,14 @@ fi
 # ensure config dir
 [ -d /etc/cfm ] || mkdir -p /etc/cfm
 
+# nginx temp dirs — must be owned by the cfm worker user
+# (default OpenResty paths are root-owned; workers running as cfm can't write them)
+for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
+    mkdir -p "$d"
+    chown cfm:cfm "$d"
+    chmod 700 "$d"
+done
+
 # systemd reload/enable/start
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

@@ -45,7 +45,7 @@ local CFG = {
   token        = _bridge_token,
   token_header = "X-CFM-Token",
 
-  decision_timeout_ms   = 80,
+  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "80"),
   decision_cache_ttl_ms = 12000,
   waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
@@ -392,7 +392,12 @@ local function get_decision(ip, host, uri, method, scheme, ua, country)
                "&country=" .. esc(country or "")
 
   local body, err = http_get_unix(path)
-  if not body then return fail_decision(err) end
+  if not body then
+    log_route(ngx.WARN, "decision_rpc_err err=" .. tostring(err) ..
+      " ip=" .. ip .. " host=" .. host .. " uri=" .. (uri or "-") ..
+      " method=" .. (method or "-"))
+    return fail_decision(err)
+  end
   local obj = cjson.decode(body)
   if not obj then return fail_decision("decode_failed") end
 
@@ -507,7 +512,13 @@ local function geo_country(ip_str)
 
   if _geo_api_mode == "init_lookup" then
     if not _geo_init_done then
-      local ok, err = mmdb.init(GEO_DB_PATH)
+      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
+      local call_ok, ok, err = pcall(mmdb.init, GEO_DB_PATH)
+      if not call_ok then
+        geo_warn_once("[cfm] geo_country: mmdb init error: ", tostring(ok), " — geo disabled")
+        _geo_api_mode = "disabled"
+        return ""
+      end
       if not ok then
         geo_warn_once("[cfm] geo_country: mmdb init failed: ", tostring(err), " path=", GEO_DB_PATH)
         _geo_api_mode = "disabled"
@@ -515,9 +526,11 @@ local function geo_country(ip_str)
       end
       _geo_init_done = true
     end
-    local res, err = mmdb.lookup(ip_str)
-    if not res then
-      if err then
+    local call_ok, res, err = pcall(mmdb.lookup, ip_str)
+    if not call_ok or not res then
+      if not call_ok and res then
+        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
+      elseif err then
         geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
       end
       return ""
@@ -527,8 +540,13 @@ local function geo_country(ip_str)
 
   if _geo_api_mode == "new_object" then
     if not _geo_db then
-      -- .new() takes the path directly — no separate :open() call
-      local db, err = mmdb.new(GEO_DB_PATH)
+      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
+      local call_ok, db, err = pcall(mmdb.new, GEO_DB_PATH)
+      if not call_ok then
+        geo_warn_once("[cfm] geo_country: mmdb new error: ", tostring(db), " — geo disabled")
+        _geo_api_mode = "disabled"
+        return ""
+      end
       if not db then
         geo_warn_once("[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
         _geo_api_mode = "disabled"
@@ -536,9 +554,11 @@ local function geo_country(ip_str)
       end
       _geo_db = db
     end
-    local res, err = _geo_db:lookup(ip_str)
-    if not res then
-      if err then
+    local call_ok, res, err = pcall(_geo_db.lookup, _geo_db, ip_str)
+    if not call_ok or not res then
+      if not call_ok and res then
+        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
+      elseif err then
         geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
       end
       return ""

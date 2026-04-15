@@ -3,7 +3,7 @@ Version: 2025.08.31-1
 Section: admin
 Priority: optional
 Architecture: amd64
-Depends: systemd, ca-certificates
+Depends: systemd, ca-certificates, libmaxminddb-dev
 Maintainer: Christos Panagiotakis <chris@nixpal.com>
 Description: CFM daemon and CLI
  A small firewall/blackhole manager (daemon + CLI).
