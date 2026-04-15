@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"cfm/internal/logging"
 )
 
 // badTokens matches well-known placeholder values that must not be used in
@@ -139,12 +141,25 @@ func WriteLuaToken(luaPath, token string, cfmGID int) error {
 	if err := os.WriteFile(tmp, []byte(content), 0640); err != nil { // #nosec G306
 		return fmt.Errorf("sslcollector: write lua token tmp: %w", err)
 	}
+	if err := os.Chmod(tmp, 0640); err != nil {
+		logging.Logf("[sslcollector] WARNING: failed chmod on tmp lua token %s: %v", tmp, err)
+	}
 	if cfmGID > 0 {
-		_ = os.Chown(tmp, 0, cfmGID)
+		if err := os.Chown(tmp, 0, cfmGID); err != nil {
+			logging.Logf("[sslcollector] WARNING: failed chown on tmp lua token %s to root:%d: %v", tmp, cfmGID, err)
+		}
 	}
 	if err := os.Rename(tmp, luaPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("sslcollector: rename lua token: %w", err)
+	}
+	if err := os.Chmod(luaPath, 0640); err != nil {
+		logging.Logf("[sslcollector] WARNING: failed chmod on final lua token %s: %v", luaPath, err)
+	}
+	if cfmGID > 0 {
+		if err := os.Chown(luaPath, 0, cfmGID); err != nil {
+			logging.Logf("[sslcollector] WARNING: failed chown on final lua token %s to root:%d: %v", luaPath, cfmGID, err)
+		}
 	}
 	return nil
 }
