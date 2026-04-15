@@ -741,6 +741,10 @@ func runDaemon(args []string) {
 	}
 	if cfmGID > 0 {
 		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		// Chown the snapshot file if it already exists (e.g. written as root:root
+		// before the cfm group was in place). Without this, OpenResty (cfm user)
+		// cannot read the snapshot on startup until it successfully writes a new one.
+		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
 	}
 
 	// ── Lifecycle managers ──────────────────────────────────────────────────────
