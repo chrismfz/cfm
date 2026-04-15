@@ -43,6 +43,8 @@ var sessionAllowedRequest = sessionAllowed
 var (
 	embedBootstrapAuthLogMu   sync.Mutex
 	embedBootstrapAuthLastLog time.Time
+	sessionCookieAuthLogMu    sync.Mutex
+	sessionCookieAuthLastLog  time.Time
 )
 
 func shouldLogEmbedBootstrapAuth(now time.Time) bool {
@@ -52,6 +54,16 @@ func shouldLogEmbedBootstrapAuth(now time.Time) bool {
 		return false
 	}
 	embedBootstrapAuthLastLog = now
+	return true
+}
+
+func shouldLogSessionCookieAuth(now time.Time) bool {
+	sessionCookieAuthLogMu.Lock()
+	defer sessionCookieAuthLogMu.Unlock()
+	if !sessionCookieAuthLastLog.IsZero() && now.Sub(sessionCookieAuthLastLog) < 60*time.Second {
+		return false
+	}
+	sessionCookieAuthLastLog = now
 	return true
 }
 
@@ -258,7 +270,9 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 5. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
-				logging.Logf("[apiserver] auth_source=session_cookie")
+				if shouldLogSessionCookieAuth(time.Now()) {
+					logging.Logf("[apiserver] auth_source=session_cookie (sampled_every=60s)")
+				}
 				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 				next.ServeHTTP(w, r.WithContext(ctx))
