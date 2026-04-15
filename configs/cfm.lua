@@ -507,7 +507,13 @@ local function geo_country(ip_str)
 
   if _geo_api_mode == "init_lookup" then
     if not _geo_init_done then
-      local ok, err = mmdb.init(GEO_DB_PATH)
+      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
+      local call_ok, ok, err = pcall(mmdb.init, GEO_DB_PATH)
+      if not call_ok then
+        geo_warn_once("[cfm] geo_country: mmdb init error: ", tostring(ok), " — geo disabled")
+        _geo_api_mode = "disabled"
+        return ""
+      end
       if not ok then
         geo_warn_once("[cfm] geo_country: mmdb init failed: ", tostring(err), " path=", GEO_DB_PATH)
         _geo_api_mode = "disabled"
@@ -515,9 +521,11 @@ local function geo_country(ip_str)
       end
       _geo_init_done = true
     end
-    local res, err = mmdb.lookup(ip_str)
-    if not res then
-      if err then
+    local call_ok, res, err = pcall(mmdb.lookup, ip_str)
+    if not call_ok or not res then
+      if not call_ok and res then
+        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
+      elseif err then
         geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
       end
       return ""
@@ -527,8 +535,13 @@ local function geo_country(ip_str)
 
   if _geo_api_mode == "new_object" then
     if not _geo_db then
-      -- .new() takes the path directly — no separate :open() call
-      local db, err = mmdb.new(GEO_DB_PATH)
+      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
+      local call_ok, db, err = pcall(mmdb.new, GEO_DB_PATH)
+      if not call_ok then
+        geo_warn_once("[cfm] geo_country: mmdb new error: ", tostring(db), " — geo disabled")
+        _geo_api_mode = "disabled"
+        return ""
+      end
       if not db then
         geo_warn_once("[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
         _geo_api_mode = "disabled"
@@ -536,9 +549,11 @@ local function geo_country(ip_str)
       end
       _geo_db = db
     end
-    local res, err = _geo_db:lookup(ip_str)
-    if not res then
-      if err then
+    local call_ok, res, err = pcall(_geo_db.lookup, _geo_db, ip_str)
+    if not call_ok or not res then
+      if not call_ok and res then
+        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
+      elseif err then
         geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
       end
       return ""
