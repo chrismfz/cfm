@@ -36,7 +36,6 @@ import (
 	"cfm/internal/detectors/mysql"
 	"cfm/internal/dnat"
 	"cfm/internal/sslcollector"
-	"cfm/internal/vhostmap"
 	webdet "cfm/internal/webdetector"
 
 	"cfm/internal/clam"
@@ -711,10 +710,6 @@ func runDaemon(args []string) {
 		}
 	}()
 
-	// vhostmap
-	vmapLc := vhostmap.NewLifecycle()
-	defer vmapLc.Stop()
-
 	// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 	smtpLc := nflog.NewSnoopLifecycle()
 
@@ -921,7 +916,6 @@ func runDaemon(args []string) {
 		applySystemConfig(cfg)                            // logging, sysctl, SMTP owners
 		mmdbLc.ApplyConfig(ctx, &cfg.MaxMind)             // MaxMind updater
 		sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock) // SSL collector socket
-		vmapLc.ApplyConfig(ctx, &cfg.VHostMap)            // VHost map
 		agLc.ApplyConfig(cfg)                             // API agent
 		applyDebugServer(cfg)                             // MySQL governor + debug HTTP (start-once)
 		applyNFTRules(cfg)                                // nft: flood, ports, smtp, reporter, nflog

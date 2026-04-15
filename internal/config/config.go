@@ -28,21 +28,10 @@ type Config struct {
 	MaxMind          MaxMindConfig
 	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
-	VHostMap         VHostMapConfig
 	Clam             ClamConfig
 }
 
 // --- Categories ---
-
-type VHostMapConfig struct {
-	Enable    bool          // VHOST_MAP_ENABLE
-	WritePath string        // VHOST_MAP_WRITE
-	TTL       time.Duration // VHOST_MAP_TTL (default 10m)
-	VarName   string        // VHOST_MAP_VAR (default origin_http_ip)
-	Source    string        // VHOST_MAP_SOURCE (optional)
-	DefaultIP string        // VHOST_MAP_DEFAULT_IP (optional override)
-	ReloadCmd string        // VHOST_MAP_RELOAD_CMD (default systemctl reload openresty)
-}
 
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
 type SSLCollectorSockConfig struct {
@@ -684,23 +673,6 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "SSLCOLLECTOR_SOCK_PEM_MAX":
 			cfg.SSLCollectorSock.PEMMax = parseInt(val)
 
-		case "VHOST_MAP_ENABLE":
-			cfg.VHostMap.Enable = parseBool(val)
-		case "VHOST_MAP_WRITE":
-			cfg.VHostMap.WritePath = val
-		case "VHOST_MAP_TTL":
-			if d, err := time.ParseDuration(val); err == nil {
-				cfg.VHostMap.TTL = d
-			}
-		case "VHOST_MAP_VAR":
-			cfg.VHostMap.VarName = val
-		case "VHOST_MAP_SOURCE":
-			cfg.VHostMap.Source = val
-		case "VHOST_MAP_DEFAULT_IP":
-			cfg.VHostMap.DefaultIP = val
-		case "VHOST_MAP_RELOAD_CMD":
-			cfg.VHostMap.ReloadCmd = val
-
 		case "WAF_LOG_STDOUT":
 			cfg.Logging.WAFStdout = parseBool(val)
 		case "WAF_LOG_FILE":
@@ -820,7 +792,6 @@ func IsKnownKey(key string) bool {
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
-		"VHOST_MAP_ENABLE", "VHOST_MAP_WRITE", "VHOST_MAP_TTL", "VHOST_MAP_VAR", "VHOST_MAP_SOURCE", "VHOST_MAP_DEFAULT_IP", "VHOST_MAP_RELOAD_CMD",
 		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",
 		"CLAM_LOG_STDOUT", "CLAM_LOG_FILE",
 		"CLAMD_ENABLED", "CLAMD_NETWORK", "CLAMD_SOCKET", "CLAMD_ADDRESS", "CLAMD_TIMEOUT", "CLAMD_MAX_WORKERS", "CLAMD_QUEUE_SIZE",
