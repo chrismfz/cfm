@@ -23,7 +23,6 @@ const el = {
   ttl:               document.getElementById('ttl'),
   reason:            document.getElementById('reason'),
   actionMsg:         document.getElementById('actionMsg'),
-  statusText:        document.getElementById('statusText'),
   dnatText:          document.getElementById('dnatText'),
   sslText:           document.getElementById('sslText'),
   healthGrid:        document.getElementById('healthGrid'),
@@ -585,13 +584,11 @@ async function refreshLuaStats() {
     setLoading(true);
     showMsg('');
     try {
-      const [status, dnat, ssl] = await Promise.all([
-        api('/v1/system/status?cache_ttl=10s'),
+      const [dnat, ssl] = await Promise.all([
         api('/v1/system/dnat'),
         api('/v1/system/ssl/stats'),
       ]);
-      el.statusText.textContent = status.output || '(empty)';
-      state.health = parseHealth(el.statusText.textContent);
+      state.health = {};
       renderHealth();
       renderNginxOverview();
       renderCacheOverview();

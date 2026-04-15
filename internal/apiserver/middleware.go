@@ -133,15 +133,8 @@ func isPublicPath(r *http.Request) bool {
 	return false
 }
 
-func isRequiredHealthPath(r *http.Request) bool {
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/cfm-admin/") {
-		path = strings.TrimPrefix(path, "/cfm-admin")
-		if path == "" || path[0] != '/' {
-			path = "/" + path
-		}
-	}
-	return path == "/api/v1/system/status"
+func isRequiredHealthPath(_ *http.Request) bool {
+	return false
 }
 
 func isCpanelEmbeddedRequest(r *http.Request) bool {
