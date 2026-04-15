@@ -8,9 +8,33 @@ BuildArch:      x86_64
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
+Requires(pre): shadow-utils
 
 %description
 cfm: local nftables manager (block/allow with optional TTL), plus simple list/unlist/flush.
+
+%pre
+# ---------------------------------------------------------------------------
+# cfm system user and group
+#
+# The cfm group is used by OpenResty (SSLCollector unix socket, cfm_token.lua).
+# The cfm user is the identity OpenResty workers run under.
+# getent guards make the calls idempotent across installs and upgrades.
+# ---------------------------------------------------------------------------
+if ! getent group cfm >/dev/null 2>&1; then
+    groupadd --system cfm
+fi
+
+if ! getent passwd cfm >/dev/null 2>&1; then
+    useradd \
+        --system \
+        --gid cfm \
+        --no-create-home \
+        --home-dir /var/lib/cfm \
+        --shell /sbin/nologin \
+        -c "CFM service account" \
+        cfm
+fi
 
 %prep
 # nothing
