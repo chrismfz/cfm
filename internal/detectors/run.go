@@ -3,6 +3,7 @@ package detectors
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -61,43 +62,82 @@ func joinLines(ss []string) string {
 	return out
 }
 
-// runOnceSafeTimed wraps a detector RunOnce with:
-//   - panic recovery (so one bad detector cannot crash the daemon)
-//   - a per-run watchdog timeout (so a stuck tailer / infinite loop can't
-//     freeze the scheduler)
+type runOnceTask struct {
+	done     chan error
+	cancel   context.CancelFunc
+	deadline time.Time
+	timeout  time.Duration
+	timedOut bool
+}
+
+// runOnceSafeTimed starts a detector RunOnce in its own goroutine and returns
+// a handle that can be polled without allowing overlapping runs.
 //
-// NOTE: the detector must respect ctx cancellation; a truly stuck goroutine
-// that ignores ctx cannot be force-killed here.
-func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- core.Alert, timeout time.Duration) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			logging.Logf("[detectors] %s PANIC: %v", d.Name(), r)
-			err = fmt.Errorf("%s panic: %v", d.Name(), r)
-		}
-	}()
+// The goroutine has its own panic recovery so panics are converted to errors
+// and reported via task.done instead of crashing the process.
+func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- core.Alert, timeout time.Duration, active *sync.WaitGroup) *runOnceTask {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	ctxRun, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	// Embed long-lived ctx so detectors can opt into it.
 	ctxRun = context.WithValue(ctxRun, ctxParentKey{}, ctx)
 
 	done := make(chan error, 1)
+	active.Add(1)
 	go func() {
+		defer active.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Logf("[detectors] %s PANIC: %v", d.Name(), r)
+				done <- fmt.Errorf("%s panic: %v", d.Name(), r)
+			}
+		}()
 		done <- d.RunOnce(ctxRun, out)
 	}()
 
+	return &runOnceTask{
+		done:     done,
+		cancel:   cancel,
+		deadline: time.Now().Add(timeout),
+		timeout:  timeout,
+	}
+}
+
+// pollRunOnce checks whether a run has finished. If it exceeded its watchdog
+// timeout, we cancel its context once and keep waiting for the goroutine to
+// actually exit before allowing another run.
+func pollRunOnce(now time.Time, d core.PeriodicDetector, task *runOnceTask) (bool, error) {
 	select {
-	case e := <-done:
-		return e
-	case <-ctxRun.Done():
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		logging.Logf("[detectors] %s run timeout after %s", d.Name(), timeout)
-		return ctxRun.Err()
+	case err := <-task.done:
+		task.cancel()
+		return true, err
+	default:
+	}
+
+	if !task.timedOut && !now.Before(task.deadline) {
+		task.timedOut = true
+		task.cancel()
+		logging.Logf("[detectors] %s run timeout after %s", d.Name(), task.timeout)
+	}
+	return false, nil
+}
+
+func waitGroupTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -133,8 +173,11 @@ func shutdown(d core.PeriodicDetector) {
 }
 
 func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) error {
+	// Ownership rule: producers own writes to out; therefore out must only be
+	// closed after all RunOnce producer goroutines have exited.
 	out := make(chan core.Alert, 1024)
 
+	pubStop := make(chan struct{})
 	pubDone := make(chan struct{})
 	go func() {
 		defer close(pubDone)
@@ -145,7 +188,7 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 					return
 				}
 				sink.Publish(a)
-			case <-ctx.Done():
+			case <-pubStop:
 				return
 			}
 		}
@@ -165,26 +208,57 @@ func RunPeriodic(ctx context.Context, d core.PeriodicDetector, sink core.Sink) e
 		runTimeout = 5 * time.Minute
 	}
 
+	var active sync.WaitGroup
+	var current *runOnceTask
+
 	err := periodicLoop(ctx, every, func() error {
-		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
-			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
+		if current != nil {
+			done, runErr := pollRunOnce(time.Now(), d, current)
+			if !done {
+				return nil
+			}
+			current = nil
+			if runErr != nil && runErr != context.Canceled {
+				logging.Logf("[detectors] %s run error: %v", d.Name(), runErr)
+			}
 		}
+
+		current = runOnceSafeTimed(ctx, d, out, runTimeout, &active)
 		return nil
 	})
 
-	// Drain and close the alert channel before shutting down the source,
-	// so the publisher goroutine has a clean exit.
-	close(out)
-	<-pubDone
+	if current != nil {
+		current.cancel()
+	}
 
 	// Close file handles / child processes now that the loop is done.
 	shutdown(d)
+
+	shutdownWait := runTimeout
+	if shutdownWait < 5*time.Second {
+		shutdownWait = 5 * time.Second
+	}
+	if shutdownWait > 30*time.Second {
+		shutdownWait = 30 * time.Second
+	}
+	if waitGroupTimeout(&active, shutdownWait) {
+		close(out)
+		<-pubDone
+	} else {
+		logging.Logf("[detectors][%s] shutdown wait exceeded %s; leaving out open to avoid send-on-closed panic", d.Name(), shutdownWait)
+		close(pubStop)
+		<-pubDone
+	}
+
 	return err
 }
 
 func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink core.Sink, state *core.State) error {
+	// Ownership rule: producers own writes to out; therefore out must only be
+	// closed after all RunOnce producer goroutines have exited.
 	out := make(chan core.Alert, 1024)
 
+	pubStop := make(chan struct{})
 	pubDone := make(chan struct{})
 	go func() {
 		defer close(pubDone)
@@ -195,7 +269,7 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 					return
 				}
 				sink.Publish(a)
-			case <-ctx.Done():
+			case <-pubStop:
 				return
 			}
 		}
@@ -215,23 +289,53 @@ func RunPeriodicWithState(ctx context.Context, d core.PeriodicDetector, sink cor
 		runTimeout = 5 * time.Minute
 	}
 
+	var active sync.WaitGroup
+	var current *runOnceTask
+
 	err := periodicLoop(ctx, every, func() error {
-		if err := runOnceSafeTimed(ctx, d, out, runTimeout); err != nil && err != context.Canceled {
-			logging.Logf("[detectors] %s run error: %v", d.Name(), err)
+		if current != nil {
+			done, runErr := pollRunOnce(time.Now(), d, current)
+			if !done {
+				return nil
+			}
+			current = nil
+			if runErr != nil && runErr != context.Canceled {
+				logging.Logf("[detectors] %s run error: %v", d.Name(), runErr)
+				return nil
+			}
+			if pa, ok := d.(core.PositionAware); ok && state != nil {
+				state.Put(pa.Name(), pa.Position())
+				_ = state.Save()
+			}
 			return nil
 		}
-		if pa, ok := d.(core.PositionAware); ok && state != nil {
-			state.Put(pa.Name(), pa.Position())
-			_ = state.Save()
-		}
+
+		current = runOnceSafeTimed(ctx, d, out, runTimeout, &active)
 		return nil
 	})
 
-	// Drain and close the alert channel before shutting down the source.
-	close(out)
-	<-pubDone
+	if current != nil {
+		current.cancel()
+	}
 
 	// Close file handles / child processes now that the loop is done.
 	shutdown(d)
+
+	shutdownWait := runTimeout
+	if shutdownWait < 5*time.Second {
+		shutdownWait = 5 * time.Second
+	}
+	if shutdownWait > 30*time.Second {
+		shutdownWait = 30 * time.Second
+	}
+	if waitGroupTimeout(&active, shutdownWait) {
+		close(out)
+		<-pubDone
+	} else {
+		logging.Logf("[detectors][%s] shutdown wait exceeded %s; leaving out open to avoid send-on-closed panic", d.Name(), shutdownWait)
+		close(pubStop)
+		<-pubDone
+	}
+
 	return err
 }
