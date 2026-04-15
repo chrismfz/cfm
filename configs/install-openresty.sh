@@ -329,6 +329,33 @@ ensure_lua_dir() {
     log "Created Lua directory: $lua_dir"
 }
 
+ensure_nginx_temp_dirs() {
+    # nginx worker processes (running as cfm) write temp files for buffered
+    # request bodies and proxy responses.  The master (root) creates the dirs
+    # on first start, but workers need group-write access.
+    #
+    # Dirs covered:
+    #   client_body_temp  — proxy_request_buffering on  (request body spill)
+    #   proxy_temp        — proxy_buffering on           (response body spill)
+    #   fastcgi/uwsgi/scgi_temp — not used currently but included for safety
+    local prefix="/usr/local/openresty/nginx"
+    local dirs=(
+        "$prefix/client_body_temp"
+        "$prefix/proxy_temp"
+        "$prefix/fastcgi_temp"
+        "$prefix/uwsgi_temp"
+        "$prefix/scgi_temp"
+    )
+    local d
+
+    for d in "${dirs[@]}"; do
+        mkdir -p "$d"
+        chown root:cfm "$d"
+        chmod 0770 "$d"
+        log "nginx temp dir ready (root:cfm 0770): $d"
+    done
+}
+
 ensure_cache_dirs() {
     local dirs=(
         /var/cache/nginx/cfm_static
@@ -444,6 +471,7 @@ main() {
     ensure_cfm_account
     create_default_certs_if_missing
     ensure_lua_dir
+    ensure_nginx_temp_dirs
     ensure_cache_dirs
     deploy_cfm_files
     deploy_nginx_conf
