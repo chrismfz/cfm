@@ -114,6 +114,21 @@ dnf install https://repo.nixpal.com/el/nixpal.rpm
 dnf install cfm
 ```
 
+Both packages create the `cfm` system user and group automatically during installation.
+
+### Manual install (from source)
+
+If you build from source and install without the package manager, create the system account first:
+
+```bash
+groupadd --system cfm
+useradd --system --gid cfm --no-create-home \
+        --home-dir /var/lib/cfm --shell /sbin/nologin \
+        --comment "CFM service account" cfm
+```
+
+The `cfm` group is required for the SSLCollector unix socket and token file to be readable by OpenResty workers. The cfm daemon logs a warning at startup if the group is missing and the socket server is enabled.
+
 ---
 
 ## 3. Repository Layout
@@ -363,12 +378,17 @@ The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA
 SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, DirectAdmin layouts) and exposes them via a unix socket for dynamic loading in OpenResty (`ssl_certificate_by_lua*`).
 
 ```ini
-SSLCOLLECTOR_SOCK_ENABLE = 1
-SSLCOLLECTOR_SOCK_PATH   = /run/cfm/sslcollector.sock
-SSLCOLLECTOR_SOCK_TOKEN  = your_token_here
+SSLCOLLECTOR_SOCK_ENABLE  = 1
+SSLCOLLECTOR_SOCK_PATH    = /var/run/sslcollector.sock
+SSLCOLLECTOR_SOCK_TOKEN   = your_token_here       # auto-generated if weak or missing
+SSLCOLLECTOR_LUA_TOKEN_PATH = /usr/local/openresty/nginx/lua/cfm_token.lua  # default
 ```
 
-The companion `sslcollector.lua` handles Lua-side cert loading with shared_dict caching and lock-based deduplication.
+**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `cfm_token.lua` (owned `root:cfm 0640`) for OpenResty to read. You never need to copy the token manually into Lua.
+
+**Socket permissions** — the socket is created as `root:cfm 0660`. OpenResty workers must run as the `cfm` user (set `user cfm;` in `nginx.conf`) to connect. The `cfm` user and group are created by the package installer; see [Manual install](#manual-install-from-source) if you are building from source.
+
+The companion `sslcollector.lua` populates an `ngx.shared.sslcache` dict in the background (via `/dumpall` + `/stats` polling) and serves TLS certificates to `ssl_certificate_by_lua*` handlers with zero per-connection I/O.
 
 ---
 

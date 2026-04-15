@@ -29,8 +29,10 @@ func NewSockLifecycle(col *Collector, cfgPath string) *SockLifecycle {
 	return &SockLifecycle{col: col, cfgPath: cfgPath}
 }
 
-// cfmGroupID returns the numeric GID of the "cfm" OS group, or 0 if not found.
-func cfmGroupID() int {
+// CfmGroupID returns the numeric GID of the "cfm" OS group, or 0 if not found.
+// Returns 0 without error when the group does not exist; callers that receive 0
+// should skip chown and log a warning rather than treating it as fatal.
+func CfmGroupID() int {
 	g, err := user.LookupGroup("cfm")
 	if err != nil {
 		return 0
@@ -79,7 +81,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 			// Write (or refresh) cfm_token.lua whenever the token is confirmed good.
 			// WriteLuaToken is atomic (write-tmp + rename) so partial writes cannot
 			// leave the Lua file in a broken state.
-			if werr := WriteLuaToken(luaPath, tok, cfmGroupID()); werr != nil {
+			if werr := WriteLuaToken(luaPath, tok, CfmGroupID()); werr != nil {
 				logging.Logf("[sslcollector] failed to write lua token: %v", werr)
 			}
 		}
@@ -112,18 +114,23 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	l.cancel = cancel
 	l.cfgKey = key
 
-	go func(sockPath string) {
+	gid := CfmGroupID()
+	if gid == 0 {
+		logging.Logf("[sslcollector] WARNING: 'cfm' OS group not found — socket will be root:root 0660 and OpenResty workers will not be able to connect. Run install-openresty.sh to create the cfm user/group.")
+	}
+	go func(sockPath string, gid int) {
 		err := ServeSock(c, l.col, SockServerConfig{
 			Enabled:  true,
 			SockPath: sockPath,
 			Token:    cfg.Token,
+			SockGID:  gid,
 			PEMTTL:   ttl,
 			PEMMax:   max,
 		})
 		if err != nil && c.Err() == nil {
 			logging.Logf("[sslcollector] sock server stopped: %v", err)
 		}
-	}(sp)
+	}(sp, gid)
 
 	logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
 }

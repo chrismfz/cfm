@@ -287,6 +287,36 @@ create_default_certs_if_missing() {
     log "Created: $cert_file and $key_file"
 }
 
+ensure_cfm_account() {
+    # Create the cfm group and system user if they do not already exist.
+    #
+    # The cfm group is used to grant OpenResty read access to the SSLCollector
+    # unix socket (root:cfm 0660) and cfm_token.lua (root:cfm 0640) without
+    # giving it broader privileges.  The cfm system user owns the OpenResty
+    # worker processes; it has no home directory and no login shell.
+
+    if ! getent group cfm >/dev/null 2>&1; then
+        log "Creating group: cfm"
+        groupadd --system cfm
+    else
+        log "Group already present: cfm"
+    fi
+
+    if ! getent passwd cfm >/dev/null 2>&1; then
+        log "Creating system user: cfm"
+        useradd \
+            --system \
+            --gid cfm \
+            --no-create-home \
+            --home-dir /var/lib/cfm \
+            --shell /sbin/nologin \
+            --comment "CFM service account" \
+            cfm
+    else
+        log "User already present: cfm"
+    fi
+}
+
 ensure_lua_dir() {
     local lua_dir="/usr/local/openresty/nginx/lua"
 
@@ -408,6 +438,7 @@ main() {
 
     install_openresty_packages
     install_opm_packages
+    ensure_cfm_account
     create_default_certs_if_missing
     ensure_lua_dir
     ensure_cache_dirs

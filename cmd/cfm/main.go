@@ -718,13 +718,19 @@ func runDaemon(args []string) {
 	// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 	smtpLc := nflog.NewSnoopLifecycle()
 
-	// Ensure base data dirs exist with correct permissions
+	// Ensure base data dirs exist with correct permissions.
+	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty worker
+	// (running as the cfm user) can write the cert snapshot there.
+	// cfmGID is 0 when the cfm group does not exist yet (install-openresty.sh
+	// not yet run); os.Chown with GID 0 is a no-op — permissions stay root:root
+	// and the daemon logs a warning when the socket server starts.
+	cfmGID := sslcollector.CfmGroupID()
 	for _, d := range []struct {
 		path string
 		mode os.FileMode
 	}{
 		{"/var/lib/cfm", 0o701},
-		{"/var/lib/cfm/sslcollector", 0o701},
+		{"/var/lib/cfm/sslcollector", 0o770},
 		{"/var/lib/cfm/scanner", 0o700},
 		{"/var/lib/cfm/scanner/pending", 0o700},
 		{"/var/lib/cfm/scanner/infected", 0o700},
@@ -732,6 +738,9 @@ func runDaemon(args []string) {
 	} {
 		_ = os.MkdirAll(d.path, d.mode)
 		_ = os.Chmod(d.path, d.mode)
+	}
+	if cfmGID > 0 {
+		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
 	}
 
 	// ── Lifecycle managers ──────────────────────────────────────────────────────

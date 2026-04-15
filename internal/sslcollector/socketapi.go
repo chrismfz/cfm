@@ -15,11 +15,12 @@ import (
 )
 
 type SockServerConfig struct {
-	Enabled bool
+	Enabled  bool
 	SockPath string
-	Token string        // optional, header: X-SSLCollector-Token
-	PEMTTL time.Duration
-	PEMMax int
+	Token    string        // required; empty disables auth (start is refused)
+	SockGID  int           // if > 0, socket is chowned to root:SockGID after creation
+	PEMTTL   time.Duration
+	PEMMax   int
 }
 
 type pemCacheItem struct {
@@ -47,9 +48,6 @@ type sockServer struct {
 }
 
 func (s *sockServer) authOK(r *http.Request) bool {
-	if s.cfg.Token == "" {
-		return true
-	}
 	g := r.Header.Get("X-SSLCollector-Token")
 	if len(g) != len(s.cfg.Token) {
 		return false
@@ -76,6 +74,10 @@ func validHost(h string) bool {
 func (s *sockServer) handleCert(w http.ResponseWriter, r *http.Request) {
 	if !s.authOK(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
@@ -244,6 +246,10 @@ func (s *sockServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	st := s.col.Stats()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(st)
@@ -292,9 +298,15 @@ func (s *sockServer) handleDump(w http.ResponseWriter, r *http.Request) {
 
 // ServeSock starts an HTTP API on a unix socket for OpenResty.
 // It stops when ctx is canceled.
+//
+// ServeSock refuses to start if cfg.Token is empty; every endpoint requires
+// the X-SSLCollector-Token header to match the configured token.
 func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error {
 	if !cfg.Enabled {
 		return nil
+	}
+	if cfg.Token == "" {
+		return errors.New("sslcollector: refusing to start socket server with empty token")
 	}
 	if cfg.SockPath == "" {
 		cfg.SockPath = "/var/run/sslcollector.sock"
@@ -311,7 +323,10 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(cfg.SockPath, 0660) // give group access (nginx/openresty group)
+	_ = os.Chmod(cfg.SockPath, 0660)
+	if cfg.SockGID > 0 {
+		_ = os.Chown(cfg.SockPath, 0, cfg.SockGID)
+	}
 
 	s := &sockServer{
 		col: col,
@@ -329,8 +344,8 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout:       3 * time.Second,
-		WriteTimeout:      3 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      30 * time.Second, // /dumpall can serialize thousands of certs
 		IdleTimeout:       10 * time.Second,
 	}
 

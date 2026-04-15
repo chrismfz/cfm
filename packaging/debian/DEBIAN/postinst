@@ -1,6 +1,29 @@
 #!/bin/sh
 set -e
 
+# ---------------------------------------------------------------------------
+# cfm system user and group
+#
+# The cfm group is used by OpenResty (SSLCollector unix socket, cfm_token.lua).
+# The cfm user is the identity OpenResty workers run under.
+# Both are created here so they exist before the daemon starts on first install
+# and are preserved on upgrade (getent guards make the calls idempotent).
+# ---------------------------------------------------------------------------
+if ! getent group cfm >/dev/null 2>&1; then
+    groupadd --system cfm
+fi
+
+if ! getent passwd cfm >/dev/null 2>&1; then
+    useradd \
+        --system \
+        --gid cfm \
+        --no-create-home \
+        --home-dir /var/lib/cfm \
+        --shell /sbin/nologin \
+        --comment "CFM service account" \
+        cfm
+fi
+
 # ensure config dir
 [ -d /etc/cfm ] || mkdir -p /etc/cfm
 
