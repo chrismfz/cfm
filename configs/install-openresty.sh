@@ -337,12 +337,15 @@ ensure_cache_dirs() {
     local d
 
     for d in "${dirs[@]}"; do
-        if [ -d "$d" ]; then
-            log "Cache directory already present: $d"
-        else
+        if [ ! -d "$d" ]; then
             mkdir -p "$d"
             log "Created cache directory: $d"
+        else
+            log "Cache directory already present: $d"
         fi
+        # root:cfm 0770 — OpenResty workers (cfm group) can write cache files.
+        chown root:cfm "$d"
+        chmod 0770 "$d"
     done
 }
 

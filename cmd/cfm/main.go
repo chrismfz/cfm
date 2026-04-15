@@ -735,6 +735,9 @@ func runDaemon(args []string) {
 		{"/var/lib/cfm/scanner/pending", 0o700},
 		{"/var/lib/cfm/scanner/infected", 0o700},
 		{"/var/log/cfm", 0o700},
+		// /var/run is tmpfs on systemd systems — recreate on every daemon start.
+		// Without this the bridge socket (OPENRESTY_SOCK) creation fails on boot.
+		{"/var/run/cfm", 0o755},
 	} {
 		_ = os.MkdirAll(d.path, d.mode)
 		_ = os.Chmod(d.path, d.mode)
@@ -745,6 +748,15 @@ func runDaemon(args []string) {
 		// before the cfm group was in place). Without this, OpenResty (cfm user)
 		// cannot read the snapshot on startup until it successfully writes a new one.
 		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
+		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm group) can write.
+		for _, d := range []string{
+			"/var/cache/nginx/cfm_static",
+			"/var/cache/nginx/cfm_micro",
+		} {
+			_ = os.MkdirAll(d, 0o770)
+			_ = os.Chmod(d, 0o770)
+			_ = os.Chown(d, 0, cfmGID)
+		}
 	}
 
 	// ── Lifecycle managers ──────────────────────────────────────────────────────
