@@ -8,7 +8,7 @@ import (
 
 // GovernorLifecycle owns the start-once lifecycle of the MySQL Governor.
 //
-// Unlike the other lifecycle managers (MaxMind, VHostMap, SSLCollector) the
+// Unlike other lifecycle managers (e.g. MaxMind, SSLCollector) the
 // governor is never restarted on config change — it shares the debug server
 // mux which is also start-once. Call StartOnce on every daemon tick; after
 // the first successful call it becomes a no-op and returns the same Governor.
