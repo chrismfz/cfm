@@ -28,6 +28,7 @@ import (
 	"cfm/internal/clam"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/sslcollector"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -930,8 +931,11 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("nginx_bridge listen %s: %w", sockPath, err)
 	}
-	// allow www-data (OpenResty) to connect
+	// root:cfm 0660 — allows OpenResty workers (cfm group) to connect.
 	_ = os.Chmod(sockPath, 0o660)
+	if gid := sslcollector.CfmGroupID(); gid > 0 {
+		_ = os.Chown(sockPath, 0, gid)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/nginx/decision", b.handleDecision)
@@ -1589,8 +1593,10 @@ func (b *NginxBridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *NginxBridge) checkToken(r *http.Request) bool {
+	// Fail-closed: an empty token means misconfigured — reject all requests
+	// rather than leaving the socket unauthenticated.
 	if b.cfg.Token == "" {
-		return true
+		return false
 	}
 	return r.Header.Get("X-CFM-Token") == b.cfg.Token
 }

@@ -13,6 +13,7 @@ import (
 	"cfm/internal/logging"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
+	"cfm/internal/sslcollector"
 
 )
 
@@ -284,6 +285,42 @@ if ig != nil {
 		logging.Logf("[detectors] reloading config")
 	}
 	m.stopAll()
+
+	// ── Token auto-generation for [webdetector] ───────────────────────────────
+	// CHALLENGE_TOKEN signs browser challenge HMACs.  OPENRESTY_TOKEN authenticates
+	// Lua→Go socket calls.  Both are rotated to a 48-hex-char random value if
+	// absent, too short (<32 chars), or a known placeholder.  The new value is
+	// written back to detectors.conf and into the in-memory KV so the detector
+	// starts with the correct token on the very first load.
+	if wdKV, ok := secs.ByName["webdetector"]; ok {
+		cfgPath := m.opts.CfgPath // absolute path to detectors.conf
+
+		// F2: CHALLENGE_TOKEN
+		chalTok := kvStrClean(wdKV, "CHALLENGE_TOKEN", "")
+		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "CHALLENGE_TOKEN", chalTok); err != nil {
+			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
+		} else if newTok != chalTok {
+			logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
+			wdKV["CHALLENGE_TOKEN"] = newTok
+		}
+
+		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
+		bridgeTok := kvStrClean(wdKV, "OPENRESTY_TOKEN", "")
+		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
+			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
+		} else if newTok != bridgeTok {
+			logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
+			wdKV["OPENRESTY_TOKEN"] = newTok
+			cfmGID := sslcollector.CfmGroupID()
+			luaPath := "/usr/local/openresty/nginx/lua/cfm_bridge_token.lua"
+			if err := sslcollector.WriteLuaToken(luaPath, newTok, cfmGID); err != nil {
+				logging.Logf("[detectors] cfm_bridge_token.lua write failed: %v", err)
+			} else {
+				logging.Logf("[detectors] cfm_bridge_token.lua written (%s)", luaPath)
+			}
+		}
+	}
+	// ─────────────────────────────────────────────────────────────────────────
 
 	ctx, cancel := context.WithCancel(parent)
 
