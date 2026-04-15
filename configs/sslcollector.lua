@@ -107,8 +107,18 @@ local SNAP_TMP  = SNAP_DIR .. "/dump.json.tmp"
 -- Worker-local state
 -- ---------------------------------------------------------------------------
 
-local poll_interval = POLL_SECS_MIN  -- per-worker mutable backoff level
-local snap_dir_ok   = false          -- ensures os.execute runs once per worker
+local poll_interval       = POLL_SECS_MIN  -- per-worker mutable backoff level
+local snap_dir_ok         = false          -- ensures os.execute runs once per worker
+-- Per-worker version and freshness tracking.
+-- Must NOT use the shared dict for version comparison: when storage was
+-- shared, one worker's fetch covered all workers so version-dedup was
+-- correct. With worker-local _store, each worker must independently detect
+-- version changes and fetch for itself. Using the shared dict's meta:version
+-- would cause workers whose do_dumpall() was blocked (lock held) to see the
+-- version already updated and never retry — leaving their _store stale until
+-- the hourly force-refresh.
+local _worker_version     = ""   -- last version this worker successfully ingested
+local _worker_last_dumpall = 0   -- unix time of last successful ingest for this worker
 
 local M = {}
 
@@ -376,6 +386,11 @@ local function ingest_dumpall(data, src)
     dict:set("meta:ready",            "1",         86400)
     dict:set("meta:last_dumpall_at",   ngx.time(), 0)
     dict:set("meta:last_dumpall_src",  src or "?", 86400)
+    -- Advance this worker's view of its version and freshness timestamp.
+    -- Doing it here (inside ingest) covers all paths: version-triggered
+    -- dumpall, force-refresh, and snapshot load on startup.
+    if ver ~= "" then _worker_version = ver end
+    _worker_last_dumpall = ngx.time()
   end
 
   local cached_exact, cached_wild = 0, 0
@@ -482,55 +497,54 @@ end
 -- Age-based force refresh with throttle
 -- ---------------------------------------------------------------------------
 
--- [FIX-A] FORCE_DUMPALL_MIN_RETRY prevents this from firing on every poll tick
--- during a sustained outage. The throttle key (meta:last_dumpall_attempt_at) is
--- shared across workers, so parallel workers don't pile up on /dumpall either.
+-- Freshness check uses _worker_last_dumpall (worker-local) so each worker
+-- independently detects its own stale store. The throttle key
+-- (meta:last_dumpall_attempt_at) remains shared to prevent all workers from
+-- hammering the socket simultaneously during a sustained outage.
 --
 -- Decision matrix per poll tick:
---   last_dumpall_at absent                  -> force (startup do_dumpall failed)
---   age(last_dumpall_at) <= FORCE_AFTER     -> no-op (cache is fresh)
---   age(last_attempt_at) < MIN_RETRY        -> skip  (too soon, already retrying)
---   age(last_dumpall_at) > FORCE_AFTER
---     AND age(last_attempt_at) >= MIN_RETRY -> force
+--   _worker_last_dumpall == 0               -> force (this worker never ingested)
+--   age(_worker_last_dumpall) <= FORCE_AFTER -> no-op (this worker's store is fresh)
+--   age(last_attempt_at) < MIN_RETRY        -> skip  (cross-worker throttle)
+--   age(_worker_last_dumpall) > FORCE_AFTER
+--     AND throttle clear                    -> force
 local function maybe_force_dumpall()
   if not FORCE_DUMPALL_AFTER or FORCE_DUMPALL_AFTER <= 0 then
     return
   end
 
-  local last_success = dict:get("meta:last_dumpall_at")
-
-  if not last_success then
-    -- Startup do_dumpall() failed; respect throttle before retrying
+  if _worker_last_dumpall == 0 then
+    -- This worker has never successfully ingested (startup blocked or failed).
     local last_attempt = dict:get("meta:last_dumpall_attempt_at") or 0
     local since_attempt = ngx.time() - last_attempt
     if last_attempt > 0 and since_attempt < FORCE_DUMPALL_MIN_RETRY then
       ngx.log(ngx.INFO,
-        "[sslcollector] no dumpall record yet; next retry in ",
+        "[sslcollector] worker has no dumpall yet; next retry in ",
         FORCE_DUMPALL_MIN_RETRY - since_attempt, "s")
       return
     end
-    ngx.log(ngx.WARN, "[sslcollector] no dumpall record, forcing now")
+    ngx.log(ngx.WARN, "[sslcollector] worker has no dumpall record, forcing now")
     do_dumpall()
     return
   end
 
-  local age = ngx.time() - last_success
+  local age = ngx.time() - _worker_last_dumpall
   if age <= FORCE_DUMPALL_AFTER then
-    return  -- cache is fresh enough
+    return  -- this worker's store is fresh enough
   end
 
-  -- Cache is stale; check throttle before attempting
+  -- This worker's store is stale; check cross-worker throttle before hitting socket
   local last_attempt = dict:get("meta:last_dumpall_attempt_at") or 0
   local since_attempt = ngx.time() - last_attempt
   if last_attempt > 0 and since_attempt < FORCE_DUMPALL_MIN_RETRY then
     ngx.log(ngx.INFO,
-      "[sslcollector] dumpall stale (", age, "s) but throttled; next in ",
+      "[sslcollector] worker store stale (", age, "s) but cross-worker throttle active; next in ",
       FORCE_DUMPALL_MIN_RETRY - since_attempt, "s")
     return
   end
 
   ngx.log(ngx.WARN,
-    "[sslcollector] last dumpall ", age, "s ago (limit ", FORCE_DUMPALL_AFTER, "s), forcing")
+    "[sslcollector] worker store ", age, "s old (limit ", FORCE_DUMPALL_AFTER, "s), forcing refresh")
   do_dumpall()
 end
 
@@ -553,12 +567,20 @@ local function poll_stats(premature)
     if st then
       local newv = st.Version or st.version or ""
       if newv ~= "" then
-        local cur = dict:get("meta:version") or ""
-        if newv ~= cur then
+        -- Compare against _worker_version, not the shared dict. Each worker
+        -- must independently detect version changes and fetch for itself.
+        -- If do_dumpall() is blocked by lock, _worker_version won't advance
+        -- (ingest_dumpall never ran), so the next poll tick will see the
+        -- mismatch again and retry — giving each worker eventual consistency
+        -- within one poll interval rather than waiting for the force-refresh.
+        if newv ~= _worker_version then
           ngx.log(ngx.NOTICE,
-            "[sslcollector] version change ", cur, " -> ", newv, " (triggering refresh)")
+            "[sslcollector] worker version change ", _worker_version, " -> ", newv,
+            " (triggering worker refresh)")
           do_dumpall()
-          dict:set("meta:version", newv, 86400)  -- belt-and-suspenders
+          -- Always update the shared monitoring key regardless of whether
+          -- do_dumpall() was blocked — other workers and cfm_stats read it.
+          dict:set("meta:version", newv, 86400)
         end
       end
     end
