@@ -259,7 +259,15 @@ end
 
 local function ensure_snap_dir()
   if snap_dir_ok then return end
-  os.execute("mkdir -p " .. SNAP_DIR)
+  -- Directory is created and owned by the cfm daemon at startup (root:cfm 0770).
+  -- Verify it exists; log and abort if missing rather than trying to create it
+  -- from inside an nginx worker (which may lack the necessary permissions).
+  local ok = os.execute("test -d " .. SNAP_DIR)
+  if not ok then
+    ngx.log(ngx.ERR, "[sslcollector] snapshot dir missing: ", SNAP_DIR,
+      " — ensure cfm daemon has started at least once")
+    return
+  end
   snap_dir_ok = true
 end
 
@@ -287,8 +295,9 @@ local function write_snapshot(body, parsed_data)
     return false, "rename: " .. (ren_err or "?")
   end
 
--- best-effort tighten permissions (snapshot contains private keys)
-os.execute("chmod 0750 " .. SNAP_DIR .. " >/dev/null 2>&1")
+-- best-effort tighten permissions on the snapshot file (contains private keys).
+-- Directory permissions are managed by the cfm daemon (root:cfm 0770) — do
+-- not chmod the directory here or it will fight the daemon setting.
 os.execute("chmod 0640 " .. SNAP_FILE .. " >/dev/null 2>&1")
 
   dict:set("meta:snapshot_written_at", ngx.time(), 0)

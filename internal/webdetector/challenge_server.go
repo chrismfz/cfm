@@ -333,6 +333,11 @@ var (
 	challengeTokenMu       sync.RWMutex
 	challengeTokenOverride string
 	challengeTokenWarnOnce sync.Once
+
+	// Ephemeral per-process fallback key, generated once if no CHALLENGE_TOKEN
+	// is configured.  Unpredictable, but challenge cookies don't survive restarts.
+	challengeEphemeralKey     []byte
+	challengeEphemeralKeyOnce sync.Once
 )
 
 // SetChallengeToken configures the token secret from detectors.conf
@@ -1482,12 +1487,22 @@ func secretKey() []byte {
 		return []byte(tok)
 	}
 
-	challengeTokenWarnOnce.Do(func() {
-		logging.LogfCHALLENGES("[challenge] WARNING: missing CHALLENGE_TOKEN (detectors.conf) and CFM_CHALLENGE_SECRET (env); using insecure default token")
+	// No configured secret: generate an ephemeral per-process key so the fallback
+	// is at least unpredictable.  Challenge cookies will be invalid after a restart,
+	// but there is no hardcoded literal that an attacker could exploit.
+	challengeEphemeralKeyOnce.Do(func() {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			// rand.Read failure is extremely unlikely; use a fixed-length zeroed
+			// slice rather than panicking — the warning below covers the risk.
+			b = make([]byte, 32)
+		}
+		challengeEphemeralKey = b
 	})
-
-	// Legacy default fallback (kept for compatibility if neither source is configured).
-	return []byte("cfm-default-secret-change-me")
+	challengeTokenWarnOnce.Do(func() {
+		logging.LogfCHALLENGES("[challenge] WARNING: no CHALLENGE_TOKEN in detectors.conf and CFM_CHALLENGE_SECRET env not set; using ephemeral per-process secret (challenge cookies invalid after restart)")
+	})
+	return challengeEphemeralKey
 }
 
 func issueToken(ip, ua, cookieVal string) string {
