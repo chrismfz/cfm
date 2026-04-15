@@ -25,6 +25,16 @@ local json = require "cjson.safe"
 
 local dict = ngx.shared.sslcache
 
+-- Worker-local cert store.
+-- Keys: "e:<host>" (exact) or "w:<suffix>" (wildcard)
+-- Values: { cert = "<PEM>", key = "<PEM>" }
+--
+-- Intentionally NOT stored in ngx.shared dict: shared dicts are accessible to
+-- any Lua code in the same OpenResty process via dict:get_keys() + dict:get().
+-- A worker-local table is only reachable by code that holds a reference to this
+-- module — significantly smaller attack surface for key material enumeration.
+local _store = {}
+
 -- Socket(s) + token
 local SOCKS = {
   "/var/run/sslcollector.sock",
@@ -58,10 +68,6 @@ end
 -- Resets to POLL_SECS_MIN on any successful /stats response.
 local POLL_SECS_MIN = 300   -- 5m  base (healthy)
 local POLL_SECS_MAX = 1200  -- 20m ceiling (sustained failures)
-
--- TTL for shared dict cert entries.
--- 0 = never expire. Freshness is maintained by explicit updates from do_dumpall().
-local DUMP_TTL = 0
 
 -- Lock TTL for do_dumpall(). High enough to cover large payloads + latency.
 local LOCK_TTL = 180  -- 3m
@@ -101,8 +107,18 @@ local SNAP_TMP  = SNAP_DIR .. "/dump.json.tmp"
 -- Worker-local state
 -- ---------------------------------------------------------------------------
 
-local poll_interval = POLL_SECS_MIN  -- per-worker mutable backoff level
-local snap_dir_ok   = false          -- ensures os.execute runs once per worker
+local poll_interval       = POLL_SECS_MIN  -- per-worker mutable backoff level
+local snap_dir_ok         = false          -- ensures os.execute runs once per worker
+-- Per-worker version and freshness tracking.
+-- Must NOT use the shared dict for version comparison: when storage was
+-- shared, one worker's fetch covered all workers so version-dedup was
+-- correct. With worker-local _store, each worker must independently detect
+-- version changes and fetch for itself. Using the shared dict's meta:version
+-- would cause workers whose do_dumpall() was blocked (lock held) to see the
+-- version already updated and never retry — leaving their _store stale until
+-- the hourly force-refresh.
+local _worker_version     = ""   -- last version this worker successfully ingested
+local _worker_last_dumpall = 0   -- unix time of last successful ingest for this worker
 
 local M = {}
 
@@ -178,7 +194,7 @@ end
 -- Shared dict: cert pair storage
 -- ---------------------------------------------------------------------------
 
-local function store_pair(prefix, name, cert_pem, key_pem, ttl)
+local function store_pair(prefix, name, cert_pem, key_pem)
   if not name or name == "" then
     return false, "empty name"
   end
@@ -189,16 +205,7 @@ local function store_pair(prefix, name, cert_pem, key_pem, ttl)
     return false, "empty key_pem"
   end
 
-  local ok1, e1 = dict:set(prefix .. "pemcert:" .. name, cert_pem, ttl)
-  if not ok1 then
-    return false, "dict:set cert: " .. (e1 or "?")
-  end
-
-  local ok2, e2 = dict:set(prefix .. "pemkey:" .. name, key_pem, ttl)
-  if not ok2 then
-    return false, "dict:set key: " .. (e2 or "?")
-  end
-
+  _store[prefix .. name] = { cert = cert_pem, key = key_pem }
   return true
 end
 
@@ -339,7 +346,7 @@ local function ingest_dumpall(data, src)
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
 
     if host ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("e:", host, cert_pem, key_pem, DUMP_TTL)
+      local ok, e = store_pair("e:", host, cert_pem, key_pem)
       if ok then
         okN = okN + 1
       else
@@ -360,7 +367,7 @@ local function ingest_dumpall(data, src)
     local key_pem  = it.key_pem  or it.key  or it.KeyPEM
 
     if suf ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("w:", suf, cert_pem, key_pem, DUMP_TTL)
+      local ok, e = store_pair("w:", suf, cert_pem, key_pem)
       if ok then
         okN = okN + 1
       else
@@ -379,14 +386,18 @@ local function ingest_dumpall(data, src)
     dict:set("meta:ready",            "1",         86400)
     dict:set("meta:last_dumpall_at",   ngx.time(), 0)
     dict:set("meta:last_dumpall_src",  src or "?", 86400)
+    -- Advance this worker's view of its version and freshness timestamp.
+    -- Doing it here (inside ingest) covers all paths: version-triggered
+    -- dumpall, force-refresh, and snapshot load on startup.
+    if ver ~= "" then _worker_version = ver end
+    _worker_last_dumpall = ngx.time()
   end
 
   local cached_exact, cached_wild = 0, 0
-  local keys = dict:get_keys(10000)
-  for _, k in ipairs(keys) do
-    if k:sub(1, 10) == "e:pemcert:" then
+  for k in pairs(_store) do
+    if k:sub(1, 2) == "e:" then
       cached_exact = cached_exact + 1
-    elseif k:sub(1, 10) == "w:pemcert:" then
+    elseif k:sub(1, 2) == "w:" then
       cached_wild = cached_wild + 1
     end
   end
@@ -486,55 +497,54 @@ end
 -- Age-based force refresh with throttle
 -- ---------------------------------------------------------------------------
 
--- [FIX-A] FORCE_DUMPALL_MIN_RETRY prevents this from firing on every poll tick
--- during a sustained outage. The throttle key (meta:last_dumpall_attempt_at) is
--- shared across workers, so parallel workers don't pile up on /dumpall either.
+-- Freshness check uses _worker_last_dumpall (worker-local) so each worker
+-- independently detects its own stale store. The throttle key
+-- (meta:last_dumpall_attempt_at) remains shared to prevent all workers from
+-- hammering the socket simultaneously during a sustained outage.
 --
 -- Decision matrix per poll tick:
---   last_dumpall_at absent                  -> force (startup do_dumpall failed)
---   age(last_dumpall_at) <= FORCE_AFTER     -> no-op (cache is fresh)
---   age(last_attempt_at) < MIN_RETRY        -> skip  (too soon, already retrying)
---   age(last_dumpall_at) > FORCE_AFTER
---     AND age(last_attempt_at) >= MIN_RETRY -> force
+--   _worker_last_dumpall == 0               -> force (this worker never ingested)
+--   age(_worker_last_dumpall) <= FORCE_AFTER -> no-op (this worker's store is fresh)
+--   age(last_attempt_at) < MIN_RETRY        -> skip  (cross-worker throttle)
+--   age(_worker_last_dumpall) > FORCE_AFTER
+--     AND throttle clear                    -> force
 local function maybe_force_dumpall()
   if not FORCE_DUMPALL_AFTER or FORCE_DUMPALL_AFTER <= 0 then
     return
   end
 
-  local last_success = dict:get("meta:last_dumpall_at")
-
-  if not last_success then
-    -- Startup do_dumpall() failed; respect throttle before retrying
+  if _worker_last_dumpall == 0 then
+    -- This worker has never successfully ingested (startup blocked or failed).
     local last_attempt = dict:get("meta:last_dumpall_attempt_at") or 0
     local since_attempt = ngx.time() - last_attempt
     if last_attempt > 0 and since_attempt < FORCE_DUMPALL_MIN_RETRY then
       ngx.log(ngx.INFO,
-        "[sslcollector] no dumpall record yet; next retry in ",
+        "[sslcollector] worker has no dumpall yet; next retry in ",
         FORCE_DUMPALL_MIN_RETRY - since_attempt, "s")
       return
     end
-    ngx.log(ngx.WARN, "[sslcollector] no dumpall record, forcing now")
+    ngx.log(ngx.WARN, "[sslcollector] worker has no dumpall record, forcing now")
     do_dumpall()
     return
   end
 
-  local age = ngx.time() - last_success
+  local age = ngx.time() - _worker_last_dumpall
   if age <= FORCE_DUMPALL_AFTER then
-    return  -- cache is fresh enough
+    return  -- this worker's store is fresh enough
   end
 
-  -- Cache is stale; check throttle before attempting
+  -- This worker's store is stale; check cross-worker throttle before hitting socket
   local last_attempt = dict:get("meta:last_dumpall_attempt_at") or 0
   local since_attempt = ngx.time() - last_attempt
   if last_attempt > 0 and since_attempt < FORCE_DUMPALL_MIN_RETRY then
     ngx.log(ngx.INFO,
-      "[sslcollector] dumpall stale (", age, "s) but throttled; next in ",
+      "[sslcollector] worker store stale (", age, "s) but cross-worker throttle active; next in ",
       FORCE_DUMPALL_MIN_RETRY - since_attempt, "s")
     return
   end
 
   ngx.log(ngx.WARN,
-    "[sslcollector] last dumpall ", age, "s ago (limit ", FORCE_DUMPALL_AFTER, "s), forcing")
+    "[sslcollector] worker store ", age, "s old (limit ", FORCE_DUMPALL_AFTER, "s), forcing refresh")
   do_dumpall()
 end
 
@@ -557,12 +567,20 @@ local function poll_stats(premature)
     if st then
       local newv = st.Version or st.version or ""
       if newv ~= "" then
-        local cur = dict:get("meta:version") or ""
-        if newv ~= cur then
+        -- Compare against _worker_version, not the shared dict. Each worker
+        -- must independently detect version changes and fetch for itself.
+        -- If do_dumpall() is blocked by lock, _worker_version won't advance
+        -- (ingest_dumpall never ran), so the next poll tick will see the
+        -- mismatch again and retry — giving each worker eventual consistency
+        -- within one poll interval rather than waiting for the force-refresh.
+        if newv ~= _worker_version then
           ngx.log(ngx.NOTICE,
-            "[sslcollector] version change ", cur, " -> ", newv, " (triggering refresh)")
+            "[sslcollector] worker version change ", _worker_version, " -> ", newv,
+            " (triggering worker refresh)")
           do_dumpall()
-          dict:set("meta:version", newv, 86400)  -- belt-and-suspenders
+          -- Always update the shared monitoring key regardless of whether
+          -- do_dumpall() was blocked — other workers and cfm_stats read it.
+          dict:set("meta:version", newv, 86400)
         end
       end
     end
@@ -621,35 +639,33 @@ function M.set_cert()
   sni = normalize_name(sni)
 
   -- 1) Exact match
-  local cert_pem = dict:get("e:pemcert:" .. sni)
-  local key_pem  = dict:get("e:pemkey:"  .. sni)
+  local entry = _store["e:" .. sni]
 
   -- 2) Wildcard: longest-suffix match
   --    foo.bar.example.com -> bar.example.com -> example.com
-  if not cert_pem or not key_pem then
+  if not entry then
     local tmp = sni
     while true do
       local dot = string.find(tmp, "%.")
       if not dot then break end
       tmp = string.sub(tmp, dot + 1)
-      cert_pem = dict:get("w:pemcert:" .. tmp)
-      key_pem  = dict:get("w:pemkey:"  .. tmp)
-      if cert_pem and key_pem then break end
+      entry = _store["w:" .. tmp]
+      if entry then break end
     end
   end
 
-  if not cert_pem or not key_pem then
+  if not entry then
     ngx.log(ngx.WARN, "[sslcollector] cache miss sni=", sni, " -> nginx fallback cert")
     return
   end
 
-  local cert_der, cerr = ssl.parse_pem_cert(cert_pem)
+  local cert_der, cerr = ssl.parse_pem_cert(entry.cert)
   if not cert_der then
     ngx.log(ngx.ERR, "[sslcollector] parse cert failed sni=", sni, " err=", (cerr or "?"))
     return
   end
 
-  local key_der, kerr = ssl.parse_pem_priv_key(key_pem)
+  local key_der, kerr = ssl.parse_pem_priv_key(entry.key)
   if not key_der then
     ngx.log(ngx.ERR, "[sslcollector] parse key failed sni=", sni, " err=", (kerr or "?"))
     return
@@ -668,6 +684,20 @@ function M.set_cert()
     ngx.log(ngx.ERR, "[sslcollector] ssl.set_priv_key failed sni=", sni, " err=", (err2 or "?"))
     return
   end
+end
+
+-- Returns exact-host and wildcard counts from the worker-local store.
+-- Used by cfm_stats.lua since cert keys are no longer in the shared dict.
+function M.cert_counts()
+  local exact, wild = 0, 0
+  for k in pairs(_store) do
+    if k:sub(1, 2) == "e:" then
+      exact = exact + 1
+    elseif k:sub(1, 2) == "w:" then
+      wild = wild + 1
+    end
+  end
+  return exact, wild
 end
 
 return M
