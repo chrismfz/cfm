@@ -210,6 +210,15 @@ Hostnames periodically resolved and kept in the allow set (e.g. dynamic office I
 ### Web log format snippets (`httpd-cfm.conf`, `nginx-cfm.conf`)
 Ensures WebDetector sees a consistent TSV schema across stacks.
 
+### Malformed request logging (OpenResty)
+- In `configs/openresty.conf`, malformed/empty request traffic is routed to
+  `access.bad_request.log` (not the main `access.log` cfm format).
+- The `cfm_bad_request` log format uses escaped output (`escape=json`) so
+  control bytes are rendered safely for storage and parsing.
+- When investigating these lines, prefer byte-aware viewers/parsers that
+  preserve escaped sequences (for example: `jq -Rr .`, `python -m json.tool`,
+  or SIEM/raw viewers that do not auto-unescape).
+
 
 ---
 
