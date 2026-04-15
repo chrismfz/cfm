@@ -251,6 +251,10 @@ end
 -- Returns true if s contains a contiguous base64-looking blob >= min_len chars.
 local function has_long_b64_blob(s, min_len)
   min_len = min_len or 180
+  -- Cheap length guard: if the whole string is shorter than the minimum blob
+  -- size, no blob can possibly exist.  Avoids the gmatch loop entirely for
+  -- most short args/bodies.
+  if not s or #s < min_len then return false, 0 end
   for blob in s:gmatch("[A-Za-z0-9+/=]+") do
     if #blob >= min_len and blob:match("^[A-Za-z0-9+/]+=*$") then
       return true, #blob
@@ -424,8 +428,8 @@ end
 -- BLOCK-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function detect_traversal(uri, args)
-  local s = scan_str(uri, args)
+local function detect_traversal(uri, args, _s)
+  local s = _s or scan_str(uri, args)
 
   if has(s, "%00") or has(s, "\x00") then return true end
   if has(s, "../") or has(s, "..\\") then return true end
@@ -433,8 +437,8 @@ local function detect_traversal(uri, args)
   return false
 end
 
-local function detect_rce(uri, args)
-  local s = scan_str(uri, args)
+local function detect_rce(uri, args, _s)
+  local s = _s or scan_str(uri, args)
 
   if has(s, "${jndi:")   then return true end
   if has(s, "${j{n{d{i") then return true end
@@ -471,8 +475,8 @@ end
 -- LOGONLY-CLASS SAFER ROLLOUT DETECTORS (existing)
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function detect_php_wrappers(args, body)
-  local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+local function detect_php_wrappers(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "php://")    then return "WRAP_PHP" end
@@ -642,6 +646,11 @@ end
 
 local function detect_b64_injection(body)
   if not body or body == "" then return nil end
+  -- A base64 candidate must be at least 24 chars long; the body must be at least
+  -- 25 bytes (the '=' plus 24 chars).  Skip the gmatch loop entirely for short bodies
+  -- and bodies that contain no '=' assignment-style separator.
+  if #body < 25 then return nil end
+  if not body:find("=", 1, true) then return nil end
 
   for candidate in body:gmatch("=([A-Za-z0-9+/]+=*)") do
     if #candidate >= 24 then
@@ -691,8 +700,8 @@ end
 -- CHALLENGE-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function detect_xss(uri, args)
-  local s = scan_str(uri, args)
+local function detect_xss(uri, args, _s)
+  local s = _s or scan_str(uri, args)
 
   if has(s, "<script")      or has(s, "%3cscript") then return true end
   if has(s, "javascript:")                         then return true end
@@ -702,10 +711,10 @@ local function detect_xss(uri, args)
   return false
 end
 
-local function detect_sqli(uri, args)
+local function detect_sqli(uri, args, _s)
   -- Use comment-stripped version to catch UN/**/ION SE/**/LECT bypass patterns.
   -- Double URL-decode is already applied by normalize() / scan_str().
-  local s  = scan_str(uri, args)
+  local s  = _s or scan_str(uri, args)
   local sc = strip_sql_comments(s)
 
   if has(sc, "union select")        then return true end
@@ -1045,7 +1054,9 @@ local function detect_cmd_payload(args)
   -- Search/autocomplete suppression:
   -- do not return nil for the whole request, only suppress final PAY_BACKTICK
   -- if the suspicious bit is limited to a search-like free-text field.
-  do
+  -- Only enter this path when backtick characters are actually present —
+  -- the gmatch loop is otherwise dead work on every non-backtick request.
+  if a:find("`", 1, true) or a:find("%%60", 1, true) then
     for key, val in a:gmatch("([a-z0-9_%-]+)=([^&]+)") do
       if key == "q" or key == "s" or key == "term" or key == "search" or key == "query" then
         local cleaned = val:gsub("%%60", ""):gsub("`", "")
@@ -1233,8 +1244,6 @@ local function detect_bad_ua_scored(headers, uri, method)
   local tags  = {}
   local ul = lower(uri or "")
   local m = lower(method or "")
-  local machine_style = is_machine_style_endpoint(ul)
-  local ref = lower(headers["referer"] or headers["Referer"] or "")
 
   -- Signal 1: UA quality (+2 for empty or known generic lib)
   if ua == "" or ual:match("^%s*$") then
@@ -1249,8 +1258,13 @@ local function detect_bad_ua_scored(headers, uri, method)
     score = score + 2; tags[#tags+1] = "UA_HTTRACK"
   end
 
-  -- If UA is perfectly fine, no further scoring needed
+  -- If UA is perfectly fine, no further scoring needed.
+  -- machine_style (40+ has() calls) and ref are only needed when UA is suspicious,
+  -- so defer them to after this early-exit to avoid wasting CPU on normal requests.
   if score == 0 then return 0, nil end
+
+  local machine_style = is_machine_style_endpoint(ul)
+  local ref = lower(headers["referer"] or headers["Referer"] or "")
 
   -- Signal 2: HEAD method (+1) - cheap existence probe used by scanners
   if m == "head" then
@@ -1380,9 +1394,14 @@ local function detect_shellshock(headers, uri)
   headers = headers or {}
   for hname, hval in pairs(headers) do
     if type(hval) == "string" then
-      local decoded = url_decode_once(hval)
-      if decoded:find(pat) then
-        return "SHELLSHOCK_HDR:" .. tostring(hname):sub(1, 32)
+      -- Plain precheck before the allocating url_decode_once() call.
+      -- Shellshock is "() {"; URL-encoded form starts with %28%29.
+      -- Nearly all headers pass neither, so the decode is almost never reached.
+      if hval:find("() {", 1, true) or hval:find("%28%29", 1, true) then
+        local decoded = url_decode_once(hval)
+        if decoded:find(pat) then
+          return "SHELLSHOCK_HDR:" .. tostring(hname):sub(1, 32)
+        end
       end
     end
   end
@@ -1526,8 +1545,8 @@ end
 --     http:// and https:// are intentionally excluded (redirect/callback params).
 --   * IP obfuscation checks are narrow to avoid FP: octal, hex, and decimal
 --     longform IPs inside :// scheme context only.
-local function detect_ssrf_proto(args, body)
-  local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+local function detect_ssrf_proto(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "file://")   then return "SSRF_FILE" end
@@ -1562,8 +1581,8 @@ end
 -- Source: uusec universal-attack.lua.
 -- __proto__ and constructor.prototype in JSON bodies or args are the two
 -- canonical pollution vectors in Node.js/JS backend frameworks.
-local function detect_js_proto(args, body)
-  local s = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+local function detect_js_proto(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "__proto__") then return "JS_PROTO_PROTO" end
@@ -1827,6 +1846,24 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
 
+  -- Pre-computed normalized scan strings, lazily initialised on first use.
+  -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
+  -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
+  -- Without this, each rule independently calls normalize()+url_decode twice.
+  local _scan_ua, _norm_ab
+
+  local function get_scan_ua()
+    if not _scan_ua then _scan_ua = scan_str(uri, args) end
+    return _scan_ua
+  end
+
+  local function get_norm_ab()
+    if not _norm_ab then
+      _norm_ab = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+    end
+    return _norm_ab
+  end
+
   -- ── 1) Bad User-Agent (scored) ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_bad_ua, "logonly")
@@ -1879,7 +1916,7 @@ function _M.check(ctx)
   -- ── 5) Traversal ──────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_traversal, "block")
-    if mode ~= "disabled" and detect_traversal(uri, args) then
+    if mode ~= "disabled" and detect_traversal(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       return true, "WAF_TRAVERSAL", ttl, mode
@@ -1889,7 +1926,7 @@ function _M.check(ctx)
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and detect_rce(uri, args) then
+    if mode ~= "disabled" and detect_rce(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       return true, "WAF_RCE", ttl, mode
@@ -1929,7 +1966,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_php_wrappers, "logonly")
     if mode ~= "disabled" then
-      local tag = detect_php_wrappers(args, body)
+      local tag = detect_php_wrappers(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_PHP_WRAPPER:" .. tag, ttl, mode
@@ -1963,7 +2000,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_ssrf, "logonly")
     if mode ~= "disabled" then
-      local tag = detect_ssrf_proto(args, body)
+      local tag = detect_ssrf_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_SSRF:" .. tag, ttl, mode
@@ -1975,7 +2012,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_js_proto, "logonly")
     if mode ~= "disabled" then
-      local tag = detect_js_proto(args, body)
+      local tag = detect_js_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_JS_PROTO:" .. tag, ttl, mode
@@ -2049,7 +2086,7 @@ function _M.check(ctx)
   -- ── 20) XSS ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xss, "challenge")
-    if mode ~= "disabled" and detect_xss(uri, args) then
+    if mode ~= "disabled" and detect_xss(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       return true, "WAF_XSS", ttl, mode
     end
@@ -2058,7 +2095,7 @@ function _M.check(ctx)
   -- ── 21) SQLi (+ SQL comment bypass) ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
-    if mode ~= "disabled" and detect_sqli(uri, args) then
+    if mode ~= "disabled" and detect_sqli(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       return true, "WAF_SQLI", ttl, mode
     end

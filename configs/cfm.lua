@@ -78,6 +78,11 @@ if clamav_ok then clamav.init({ token = CFG.token, sock_path = CFG.sock_path }) 
 local rules_ok, rules = pcall(require, "cfm_rules")
 if rules_ok and rules and rules.init then rules.init(CFG) end
 
+-- WAF module loaded once at worker init, not on every request.
+-- pcall here behaves identically to the previous per-request pcall:
+-- a load failure sets waf_ok=false and disables inline WAF checks.
+local waf_ok, waf = pcall(require, "cfm_waf")
+
 local SH = ngx.shared.cfm_decisions
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -587,6 +592,28 @@ local function geo_country(ip_str)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- GEO CACHE  (shared-dict layer over the per-worker mmdb lookup)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- geo_country() performs a MaxMind DB lookup on every call.  Cache the result
+-- per source IP in cfm_decisions with a 5-minute TTL.  This eliminates repeated
+-- lookups for the same IP across concurrent requests and across the 12-second
+-- decision-cache window, which is especially important at high concurrency.
+-- SH:get returns nil for a missing key; "" is a valid cached value meaning
+-- "no country found", so we use nil as the cache-miss sentinel.
+local function geo_country_cached(ip_str)
+  if not SH or not ip_str or ip_str == "" or ip_str == "-" then
+    return geo_country(ip_str)
+  end
+  local k      = "geo|" .. ip_str
+  local cached = SH:get(k)
+  if cached ~= nil then return cached end
+  local cc = geo_country(ip_str) or ""
+  SH:set(k, cc, 300)   -- 5-minute TTL
+  return cc
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MAIN ENFORCEMENT
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -663,7 +690,6 @@ if cfm_ok_cookie and cfm_ok_cookie ~= "" and not ngx.ctx.cfm_resumed_post then
 end
 
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
-local waf_ok, waf = pcall(require, "cfm_waf")
 if waf_ok and waf and waf.enabled and waf.enabled() then
   if waf_is_excluded(host, uri) then
     if CFG.debug_headers then ngx.header["X-CFM-WAF-Excluded"] = "1" end
@@ -724,7 +750,7 @@ if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
 local ua_raw  = ngx.var.http_user_agent or ""
-local country = geo_country(ip)
+local country = geo_country_cached(ip)
 local d       = get_decision(ip, host, uri, method, scheme, ua_raw, country)
 
 local ip_action        = d.ip_action        or "allow"
