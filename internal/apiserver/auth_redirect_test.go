@@ -115,7 +115,7 @@ func TestTokenMiddlewareEmbeddedRequestRejectsSessionFallback(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/dnat", nil)
 	req.Header.Set("X-CFM-Embedded", "cpanel")
 	req.Header.Set("Accept", "text/html")
 	rr := httptest.NewRecorder()
@@ -150,7 +150,7 @@ func TestTokenMiddlewareStandaloneRequestAllowsSessionFallback(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/dnat", nil)
 	rr := httptest.NewRecorder()
 
 	h.ServeHTTP(rr, req)
@@ -178,7 +178,7 @@ func TestTokenMiddlewareAdminTokenSetsAdminAuthMarkers(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/dnat", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -217,22 +217,22 @@ func TestTokenMiddlewareMissingAdminTokenRejectsPrivilegedRoutes(t *testing.T) {
 	}
 }
 
-func TestTokenMiddlewareMissingAdminTokenAllowsSystemStatus(t *testing.T) {
+func TestTokenMiddlewareMissingAdminTokenBlocksSystemDNAT(t *testing.T) {
 	called := false
 	h := TokenMiddleware("", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/dnat", nil)
 	rr := httptest.NewRecorder()
 
 	h.ServeHTTP(rr, req)
 
-	if !called {
-		t.Fatalf("expected system status route to remain available when AUTH_TOKEN is missing")
+	if called {
+		t.Fatalf("expected system dnat route to be blocked when AUTH_TOKEN is missing")
 	}
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d got %d", http.StatusServiceUnavailable, rr.Code)
 	}
 }
