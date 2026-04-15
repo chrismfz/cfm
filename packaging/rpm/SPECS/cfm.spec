@@ -9,6 +9,7 @@ Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
 Requires(pre): shadow-utils
+Requires: libmaxminddb-devel
 
 %description
 cfm: local nftables manager (block/allow with optional TTL), plus simple list/unlist/flush.
