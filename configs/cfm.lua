@@ -472,32 +472,81 @@ end
 -- GEO LOOKUP (lazy, per-worker singleton)
 -- ─────────────────────────────────────────────────────────────────────────────
 local mmdb_ok, mmdb = pcall(require, "resty.maxminddb")
--- Guard: module loaded but API doesn't match what we expect
-if mmdb_ok and (type(mmdb) ~= "table" or type(mmdb.new) ~= "function") then
-    ngx.log(ngx.WARN, "[cfm] lua-resty-maxminddb loaded but missing .new — geo disabled")
-    mmdb_ok = false
-end
-
 local _geo_db     = nil
-local _geo_db_err = false
+local _geo_api_mode = "disabled"
+local _geo_init_done = false
+local _geo_warned = false
 
 local GEO_DB_PATH = os.getenv("CFM_GEO_DB") or "/var/lib/cfm/maxmind/GeoLite2-City.mmdb"
 
+if mmdb_ok and type(mmdb) == "table" then
+  if type(mmdb.init) == "function" and type(mmdb.lookup) == "function" then
+    _geo_api_mode = "init_lookup"
+  elseif type(mmdb.new) == "function" then
+    _geo_api_mode = "new_object"
+  else
+    _geo_api_mode = "disabled"
+  end
+end
+
+local function geo_warn_once(...)
+  if _geo_warned then return end
+  _geo_warned = true
+  ngx.log(ngx.WARN, ...)
+end
+
 local function geo_country(ip_str)
-  if not mmdb_ok or _geo_db_err then return "" end
-  if not _geo_db then
-    -- .new() takes the path directly — no separate :open() call
-    local db, err = mmdb.new(GEO_DB_PATH)
-    if not db then
-      ngx.log(ngx.WARN, "[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
-      _geo_db_err = true
+  if _geo_api_mode == "disabled" then
+    if not mmdb_ok then
+      geo_warn_once("[cfm] lua-resty-maxminddb unavailable: ", tostring(mmdb), " — geo disabled")
+    else
+      geo_warn_once("[cfm] lua-resty-maxminddb loaded but unsupported API — geo disabled")
+    end
+    return ""
+  end
+
+  if _geo_api_mode == "init_lookup" then
+    if not _geo_init_done then
+      local ok, err = mmdb.init(GEO_DB_PATH)
+      if not ok then
+        geo_warn_once("[cfm] geo_country: mmdb init failed: ", tostring(err), " path=", GEO_DB_PATH)
+        _geo_api_mode = "disabled"
+        return ""
+      end
+      _geo_init_done = true
+    end
+    local res, err = mmdb.lookup(ip_str)
+    if not res then
+      if err then
+        geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
+      end
       return ""
     end
-    _geo_db = db
+    return (res.country and res.country.iso_code) or ""
   end
-  local res, err = _geo_db:lookup(ip_str)
-  if not res then return "" end
-  return (res.country and res.country.iso_code) or ""
+
+  if _geo_api_mode == "new_object" then
+    if not _geo_db then
+      -- .new() takes the path directly — no separate :open() call
+      local db, err = mmdb.new(GEO_DB_PATH)
+      if not db then
+        geo_warn_once("[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
+        _geo_api_mode = "disabled"
+        return ""
+      end
+      _geo_db = db
+    end
+    local res, err = _geo_db:lookup(ip_str)
+    if not res then
+      if err then
+        geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
+      end
+      return ""
+    end
+    return (res.country and res.country.iso_code) or ""
+  end
+
+  return ""
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
