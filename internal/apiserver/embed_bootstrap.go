@@ -1,19 +1,26 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 )
@@ -22,6 +29,13 @@ const (
 	embedBootstrapCookieName = "cfm-embed-scope"
 	embedBootstrapTTL        = 90 * time.Second
 	embedExchangeCodeTTL     = 45 * time.Second
+	embedCookieHKDFInfo      = "cfm-apiserver-embed-bootstrap-cookie-v1"
+	embedCookieHKDFSalt      = "cfm-apiserver-embed-bootstrap-cookie-salt-v1"
+)
+
+var (
+	embedLegacyCookieCutoff       = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	embedCookieSigningKeyProvider = deriveEmbedCookieSigningKey
 )
 
 type embedExchangeRecord struct {
@@ -143,7 +157,12 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 			return
 		}
 
-		value := encodeEmbedCookie(st.Token, time.Now().Add(embedBootstrapTTL))
+		value, err := encodeEmbedCookie(r, st.ID, time.Now().Add(embedBootstrapTTL))
+		if err != nil {
+			logging.Logf("[apiserver] embed bootstrap signing key unavailable: %v", err)
+			apiJSONError(w, "failed to create embed bootstrap cookie", http.StatusInternalServerError)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     embedBootstrapCookieName,
 			Value:    value,
@@ -170,11 +189,19 @@ func embedScopedContextFromCookie(r *http.Request, store *TokenStore) (context.C
 	if err != nil || strings.TrimSpace(c.Value) == "" {
 		return nil, false
 	}
-	ok, tok := decodeEmbedCookie(c.Value)
+	ok, cookieRef, legacy := decodeEmbedCookie(r, c.Value)
 	if !ok {
 		return nil, false
 	}
-	st, exists := store.Lookup(tok)
+	var (
+		st     *ScopedToken
+		exists bool
+	)
+	if legacy {
+		st, exists = store.Lookup(cookieRef)
+	} else {
+		st, exists = store.LookupByID(cookieRef)
+	}
 	if !exists {
 		return nil, false
 	}
@@ -206,26 +233,189 @@ func normalizeEmbedNext(raw string) (string, error) {
 	return u.RequestURI(), nil
 }
 
-func encodeEmbedCookie(token string, expiry time.Time) string {
-	payload := fmt.Sprintf("%d:%s", expiry.Unix(), token)
-	return base64.RawURLEncoding.EncodeToString([]byte(payload))
+func encodeEmbedCookie(r *http.Request, tokenRef string, expiry time.Time) (string, error) {
+	if strings.TrimSpace(tokenRef) == "" {
+		return "", errors.New("token reference is required")
+	}
+	unsigned := buildEmbedCookiePayload(r, tokenRef, expiry)
+	key, err := embedCookieSigningKeyProvider()
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(unsigned))
+	sig := mac.Sum(nil)
+	return "v1." +
+		base64.RawURLEncoding.EncodeToString([]byte(unsigned)) + "." +
+		base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func decodeEmbedCookie(v string) (bool, string) {
+func decodeEmbedCookie(r *http.Request, v string) (bool, string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false, "", false
+	}
+	if strings.HasPrefix(v, "v1.") {
+		return decodeSignedEmbedCookie(r, v)
+	}
+	if time.Now().After(embedLegacyCookieCutoff) {
+		return false, "", false
+	}
 	buf, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(v))
 	if err != nil {
-		return false, ""
+		return false, "", false
 	}
 	parts := strings.SplitN(string(buf), ":", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
-		return false, ""
+		return false, "", false
 	}
 	expUnix, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
 	if err != nil {
-		return false, ""
+		return false, "", false
 	}
 	if time.Now().After(time.Unix(expUnix, 0)) {
-		return false, ""
+		return false, "", false
 	}
-	return true, parts[1]
+	logging.Logf("[apiserver] accepted legacy unsigned embed cookie; migration deadline=%s", embedLegacyCookieCutoff.Format(time.RFC3339))
+	return true, parts[1], true
+}
+
+func decodeSignedEmbedCookie(r *http.Request, v string) (bool, string, bool) {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return false, "", false
+	}
+	unsignedRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(unsignedRaw) == 0 {
+		return false, "", false
+	}
+	sigRaw, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(sigRaw) == 0 {
+		return false, "", false
+	}
+	key, err := embedCookieSigningKeyProvider()
+	if err != nil {
+		return false, "", false
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(unsignedRaw)
+	if !hmac.Equal(mac.Sum(nil), sigRaw) {
+		return false, "", false
+	}
+	claims, err := url.ParseQuery(string(unsignedRaw))
+	if err != nil {
+		return false, "", false
+	}
+	tokenRef := strings.TrimSpace(claims.Get("ref"))
+	if tokenRef == "" {
+		return false, "", false
+	}
+	expUnix, err := strconv.ParseInt(strings.TrimSpace(claims.Get("exp")), 10, 64)
+	if err != nil || time.Now().After(time.Unix(expUnix, 0)) {
+		return false, "", false
+	}
+	if pfx := strings.TrimSpace(claims.Get("pfx")); pfx != "" && r != nil && !strings.HasPrefix(r.URL.Path, pfx) {
+		return false, "", false
+	}
+	if hostClaim := strings.TrimSpace(claims.Get("hst")); hostClaim != "" && r != nil {
+		if canonicalRequestHost(r.Host) != strings.ToLower(hostClaim) {
+			return false, "", false
+		}
+	}
+	if uaHash := strings.TrimSpace(claims.Get("uah")); uaHash != "" && r != nil {
+		if uaHash != hashUserAgent(r.UserAgent()) {
+			return false, "", false
+		}
+	}
+	return true, tokenRef, false
+}
+
+func buildEmbedCookiePayload(r *http.Request, tokenRef string, expiry time.Time) string {
+	claims := []string{
+		"ref=" + url.QueryEscape(strings.TrimSpace(tokenRef)),
+		"exp=" + strconv.FormatInt(expiry.Unix(), 10),
+		"pfx=" + url.QueryEscape("/cfm-admin/"),
+	}
+	if r != nil {
+		if host := canonicalRequestHost(r.Host); host != "" {
+			claims = append(claims, "hst="+url.QueryEscape(host))
+		}
+		if ua := hashUserAgent(r.UserAgent()); ua != "" {
+			claims = append(claims, "uah="+url.QueryEscape(ua))
+		}
+	}
+	return strings.Join(claims, "&")
+}
+
+func hashUserAgent(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(userAgent))
+	return hex.EncodeToString(sum[:16])
+}
+
+func canonicalRequestHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return ""
+	}
+	if h, _, found := strings.Cut(host, ":"); found && h != "" {
+		return h
+	}
+	return host
+}
+
+func deriveEmbedCookieSigningKey() ([]byte, error) {
+	authToken, err := loadAuthTokenFromRuntimeConfig()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(authToken) == "" {
+		return nil, errors.New("auth token missing")
+	}
+	key, err := hkdf.Key(sha256.New, []byte(authToken), []byte(embedCookieHKDFSalt), embedCookieHKDFInfo, 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive embed cookie key: %w", err)
+	}
+	return key, nil
+}
+
+func loadAuthTokenFromRuntimeConfig() (string, error) {
+	cfgPath, err := resolveRuntimeCFMConfPath()
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cfg.API.AuthToken), nil
+}
+
+func resolveRuntimeCFMConfPath() (string, error) {
+	if envDir := strings.TrimSpace(os.Getenv("CFM_CONFIG_DIR")); envDir != "" {
+		path := filepath.Join(envDir, "cfm.conf")
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	if b, err := os.ReadFile("/run/cfm/config.path"); err == nil {
+		if dir := strings.TrimSpace(string(b)); dir != "" {
+			path := filepath.Join(dir, "cfm.conf")
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+	}
+	const fallbackPath = "/etc/cfm/cfm.conf"
+	if _, err := os.Stat(fallbackPath); err == nil {
+		return fallbackPath, nil
+	}
+	return "", errors.New("auth token config not found")
 }
