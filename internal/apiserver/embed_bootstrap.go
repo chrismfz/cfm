@@ -241,9 +241,47 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 			MaxAge:   int(embedBootstrapTTL.Seconds()),
 		})
 
+		redirectTarget := appendExpectedParentOrigin(nextPath, r.URL.Query().Get("cfmExpectedOrigin"))
 		logging.Logf("[apiserver] embed bootstrap ok token_id=%s label=%q role=%s next=%s", st.ID, st.Label, st.Role, nextPath)
-		http.Redirect(w, r, nextPath, http.StatusSeeOther)
+		http.Redirect(w, r, redirectTarget, http.StatusSeeOther)
 	})
+}
+
+// appendExpectedParentOrigin preserves the parent-origin hint across the
+// bootstrap redirect so the iframe's auth-context.js can build a postMessage
+// allowlist containing the parent frame's origin. The value is validated and
+// normalized to an http(s) origin; anything else is dropped silently.
+func appendExpectedParentOrigin(nextPath, rawExpectedOrigin string) string {
+	origin := sanitizeExpectedParentOrigin(rawExpectedOrigin)
+	if origin == "" {
+		return nextPath
+	}
+	u, err := url.Parse(nextPath)
+	if err != nil {
+		return nextPath
+	}
+	q := u.Query()
+	q.Set("cfmExpectedOrigin", origin)
+	u.RawQuery = q.Encode()
+	return u.RequestURI()
+}
+
+func sanitizeExpectedParentOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return ""
+	}
+	origin := strings.ToLower(u.Scheme) + "://" + u.Host
+	return origin
 }
 
 func allowEmbedRate(action, srcIP, tokenID string, now time.Time, window time.Duration, burst int) bool {

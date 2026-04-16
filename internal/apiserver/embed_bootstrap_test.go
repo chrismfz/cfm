@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -103,6 +104,80 @@ func TestEmbedBootstrapValidConsumeSetsCookieAndRedirects(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected %q cookie", embedBootstrapCookieName)
+	}
+}
+
+func TestEmbedBootstrapForwardsExpectedParentOrigin(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_150, 0).UTC())
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	target := "/api/v1/embed/bootstrap?code=" + code +
+		"&next=%2Fcfm-admin%2Fwebdetector%2Fcontrols%2F" +
+		"&cfmExpectedOrigin=https%3A%2F%2Fparent.example%3A2083"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected %d got %d", http.StatusSeeOther, rr.Code)
+	}
+	got := rr.Header().Get("Location")
+	if !strings.Contains(got, "cfmExpectedOrigin=https%3A%2F%2Fparent.example%3A2083") {
+		t.Fatalf("expected Location to carry cfmExpectedOrigin, got %q", got)
+	}
+	if !strings.HasPrefix(got, "/cfm-admin/webdetector/controls/?") {
+		t.Fatalf("expected redirect to stay on next path, got %q", got)
+	}
+}
+
+func TestEmbedBootstrapDropsInvalidExpectedParentOrigin(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_160, 0).UTC())
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	cases := []string{
+		"",
+		"javascript:alert(1)",
+		"parent.example",
+		"ftp://parent.example",
+		"https://",
+	}
+
+	for _, raw := range cases {
+		embedBootstrapRateLimiter.reset()
+		code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+		if err != nil {
+			t.Fatalf("mint: %v", err)
+		}
+
+		mux := http.NewServeMux()
+		RegisterEmbedBootstrapEndpoint(mux, store)
+		h := TokenMiddleware("admin-secret", store)(mux)
+
+		target := "/api/v1/embed/bootstrap?code=" + code +
+			"&next=%2Fcfm-admin%2Fwebdetector%2Fcontrols%2F" +
+			"&cfmExpectedOrigin=" + url.QueryEscape(raw)
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusSeeOther {
+			t.Fatalf("case %q: expected %d got %d", raw, http.StatusSeeOther, rr.Code)
+		}
+		if got := rr.Header().Get("Location"); got != "/cfm-admin/webdetector/controls/" {
+			t.Fatalf("case %q: expected unchanged redirect, got %q", raw, got)
+		}
 	}
 }
 
