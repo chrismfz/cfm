@@ -46,6 +46,7 @@ function cfm_bootstrap(string $mode): void
     $databases   = [];
     $error       = '';
     $token       = '';
+    $code        = '';
     $pageTitle   = 'CFM Security';
     $socketUIBase = '';
 
@@ -126,7 +127,21 @@ function cfm_bootstrap(string $mode): void
 
     $iframeBase   = cfm_iframe_base_url($socketUIBase);
     $iframeNext   = '/cfm-admin/webdetector/controls/';
-    $iframeUrl    = $iframeBase . '/api/v1/embed/bootstrap?token=' . rawurlencode($token)
+    if ($error === '' && $token !== '') {
+        try {
+            $codeResp = cfm_api_request('/api/v1/embed/code?next=' . rawurlencode($iframeNext), 'GET', null, [
+                'Authorization: Bearer ' . $token,
+            ]);
+            $code = trim((string)($codeResp['code'] ?? ''));
+            if ($code === '') {
+                $error = 'CFM embed handshake did not return an exchange code.';
+            }
+        } catch (Throwable $e) {
+            $error = 'CFM embed handshake failed: ' . trim($e->getMessage());
+        }
+    }
+
+    $iframeUrl    = $iframeBase . '/api/v1/embed/bootstrap?code=' . rawurlencode($code)
         . '&next=' . rawurlencode($iframeNext);
     $parsed       = parse_url($iframeBase);
     $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');

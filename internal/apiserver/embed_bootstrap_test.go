@@ -13,11 +13,16 @@ func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
 	mux := http.NewServeMux()
 	RegisterEmbedBootstrapEndpoint(mux, store)
 	h := TokenMiddleware("admin-secret", store)(mux)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?token="+st.Token+"&next=https://evil.example/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=https://evil.example/", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -26,15 +31,19 @@ func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 	}
 }
 
-func TestEmbedBootstrapSetsCookieAndRedirects(t *testing.T) {
+func TestEmbedBootstrapValidConsumeSetsCookieAndRedirects(t *testing.T) {
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	RegisterEmbedBootstrapEndpoint(mux, store)
 	h := TokenMiddleware("admin-secret", store)(mux)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?token="+st.Token+"&next=/cfm-admin/webdetector/controls/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/webdetector/controls/", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -62,6 +71,73 @@ func TestEmbedBootstrapSetsCookieAndRedirects(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected %q cookie", embedBootstrapCookieName)
+	}
+}
+
+func TestEmbedBootstrapRejectsReplayCode(t *testing.T) {
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/webdetector/controls/", nil)
+	firstRR := httptest.NewRecorder()
+	h.ServeHTTP(firstRR, firstReq)
+	if firstRR.Code != http.StatusSeeOther {
+		t.Fatalf("expected first consume %d got %d", http.StatusSeeOther, firstRR.Code)
+	}
+
+	replayReq := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/webdetector/controls/", nil)
+	replayRR := httptest.NewRecorder()
+	h.ServeHTTP(replayRR, replayReq)
+	if replayRR.Code != http.StatusUnauthorized {
+		t.Fatalf("expected replay %d got %d", http.StatusUnauthorized, replayRR.Code)
+	}
+}
+
+func TestEmbedBootstrapRejectsExpiredCode(t *testing.T) {
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", -1*time.Second)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/webdetector/controls/", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d got %d", http.StatusUnauthorized, rr.Code)
+	}
+}
+
+func TestEmbedBootstrapRejectsWrongPathForCode(t *testing.T) {
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d got %d", http.StatusUnauthorized, rr.Code)
 	}
 }
 
