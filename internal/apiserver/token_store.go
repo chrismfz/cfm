@@ -138,6 +138,21 @@ func (s *TokenStore) Lookup(tok string) (*ScopedToken, bool) {
 	return st, true
 }
 
+// LookupByID returns the ScopedToken for the given token ID.
+// Returns false if unknown or expired.
+func (s *TokenStore) LookupByID(id string) (*ScopedToken, bool) {
+	s.mu.RLock()
+	st, ok := s.byID[id]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(st.Expiry) {
+		return nil, false
+	}
+	return st, true
+}
+
 // Revoke removes a token by ID. Returns false if not found.
 func (s *TokenStore) Revoke(id string) bool {
 	s.mu.Lock()
