@@ -24,8 +24,22 @@ func useTestEmbedCookieSigningKey(t *testing.T) {
 	})
 }
 
+func useTestEmbedClock(t *testing.T, start time.Time) *time.Time {
+	t.Helper()
+	now := start
+	prev := embedBootstrapNow
+	embedBootstrapNow = func() time.Time { return now }
+	embedBootstrapRateLimiter.reset()
+	t.Cleanup(func() {
+		embedBootstrapNow = prev
+		embedBootstrapRateLimiter.reset()
+	})
+	return &now
+}
+
 func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_000, 0).UTC())
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 
@@ -49,6 +63,7 @@ func TestEmbedBootstrapRejectsInvalidNext(t *testing.T) {
 
 func TestEmbedBootstrapValidConsumeSetsCookieAndRedirects(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_100, 0).UTC())
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
@@ -93,6 +108,7 @@ func TestEmbedBootstrapValidConsumeSetsCookieAndRedirects(t *testing.T) {
 
 func TestEmbedBootstrapRejectsReplayCode(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_200, 0).UTC())
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
@@ -121,6 +137,7 @@ func TestEmbedBootstrapRejectsReplayCode(t *testing.T) {
 
 func TestEmbedBootstrapRejectsExpiredCode(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_300, 0).UTC())
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", -1*time.Second)
@@ -142,6 +159,7 @@ func TestEmbedBootstrapRejectsExpiredCode(t *testing.T) {
 
 func TestEmbedBootstrapRejectsWrongPathForCode(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
+	useTestEmbedClock(t, time.Unix(1_700_000_400, 0).UTC())
 	store := NewTokenStore()
 	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
 	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
@@ -158,6 +176,44 @@ func TestEmbedBootstrapRejectsWrongPathForCode(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected %d got %d", http.StatusUnauthorized, rr.Code)
+	}
+}
+
+func TestEmbedCodeRateLimitBurstAndRecovery(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	now := useTestEmbedClock(t, time.Unix(1_700_001_000, 0).UTC())
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+
+	makeReq := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/embed/code?next=/cfm-admin/webdetector/controls/", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Forwarded-For", "203.0.113.5")
+		req.Header.Set("Authorization", "Bearer "+st.Token)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	for i := 0; i < embedCodeRLBurst; i++ {
+		rr := makeReq()
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d expected 200, got %d body=%s", i+1, rr.Code, rr.Body.String())
+		}
+	}
+
+	reject := makeReq()
+	if reject.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected burst rejection 429, got %d", reject.Code)
+	}
+
+	*now = now.Add(embedCodeRLWindow + time.Second)
+	recovered := makeReq()
+	if recovered.Code != http.StatusOK {
+		t.Fatalf("expected recovery to 200, got %d body=%s", recovered.Code, recovered.Body.String())
 	}
 }
 

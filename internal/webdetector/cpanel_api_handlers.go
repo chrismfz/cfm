@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -23,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 type cpanelUserInfo struct {
@@ -39,8 +42,27 @@ func (e *Engine) RegisterCpanelHTTP(mux *http.ServeMux) {
 }
 
 func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
+	now := cpanelAuthNow()
+	srcIP := cpanelClientIP(r)
+	userHint := assertionSubjectHint(r)
+	if denied, remaining := pluginAuthFailTracker.checkDeny(srcIP, userHint, now); denied {
+		emitCpanelAPIAuthEvent(r, srcIP, userHint, "cpanel_plugin_auth_temporarily_denied", http.StatusTooManyRequests,
+			fmt.Sprintf("user=%s deny_remaining=%s", userHint, remaining.Round(time.Second)))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "temporarily denied"})
+		return
+	}
+
 	tokenUser, authStatus, authErr, authDebug := authorizePluginAssertion(r)
 	if authErr != nil {
+		userForCounter := userHint
+		if tokenUser != "" {
+			userForCounter = tokenUser
+		}
+		if shouldTrackCpanelAuthFailure(authDebug) {
+			pluginAuthFailTracker.recordFailure(srcIP, userForCounter, now)
+			emitCpanelAPIAuthEvent(r, srcIP, userForCounter, "cpanel_plugin_auth_failure", authStatus,
+				fmt.Sprintf("reason=%s user=%s", authDebug, userForCounter))
+		}
 		if authDebug != "" && cfmDebugEnabledForRequest(r) {
 			writeJSON(w, authStatus, map[string]string{"error": authErr.Error(), "debug": authDebug})
 			return
@@ -51,6 +73,9 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 
 	requestedUser := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("user")))
 	if requestedUser != "" && requestedUser != tokenUser {
+		pluginAuthFailTracker.recordFailure(srcIP, requestedUser, now)
+		emitCpanelAPIAuthEvent(r, srcIP, requestedUser, "cpanel_plugin_auth_failure", http.StatusForbidden,
+			"reason=actor_mismatch user="+requestedUser)
 		if cfmDebugEnabledForRequest(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "actor mismatch",
@@ -62,6 +87,7 @@ func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := tokenUser
+	pluginAuthFailTracker.clearSuccess(srcIP, user)
 
 	info, dataStatus, dataErr, dataDebug := loadUserMetadata(user)
 	if dataErr != nil {
@@ -102,6 +128,28 @@ type pluginActorClaims struct {
 }
 
 var pluginAssertionReplayCache sync.Map // nonce -> expUnix
+var cpanelAuthNow = time.Now
+
+const (
+	cpanelAuthFailureWindow = 30 * time.Second
+	cpanelAuthFailureBurst  = 3
+	cpanelAuthDenyTTL       = 45 * time.Second
+)
+
+type cpanelAuthFailState struct {
+	windowStart time.Time
+	attempts    int
+	denyUntil   time.Time
+	lastSeen    time.Time
+}
+
+type cpanelAuthFailTracker struct {
+	mu       sync.Mutex
+	byIP     map[string]cpanelAuthFailState
+	byIPUser map[string]cpanelAuthFailState
+}
+
+var pluginAuthFailTracker cpanelAuthFailTracker
 
 func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
 	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
@@ -131,6 +179,172 @@ func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
 		}
 	}
 	return claims.Sub, http.StatusOK, nil, ""
+}
+
+func (t *cpanelAuthFailTracker) checkDeny(ip, user string, now time.Time) (bool, time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.byIP == nil {
+		t.byIP = make(map[string]cpanelAuthFailState)
+	}
+	if t.byIPUser == nil {
+		t.byIPUser = make(map[string]cpanelAuthFailState)
+	}
+	ip = strings.TrimSpace(ip)
+	user = strings.TrimSpace(strings.ToLower(user))
+	remaining := time.Duration(0)
+	if st, ok := t.byIP[ip]; ok && now.Before(st.denyUntil) {
+		remaining = st.denyUntil.Sub(now)
+	}
+	if user != "" {
+		if st, ok := t.byIPUser[ip+"|"+user]; ok && now.Before(st.denyUntil) && st.denyUntil.Sub(now) > remaining {
+			remaining = st.denyUntil.Sub(now)
+		}
+	}
+	if remaining <= 0 {
+		return false, 0
+	}
+	return true, remaining
+}
+
+func (t *cpanelAuthFailTracker) recordFailure(ip, user string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.byIP == nil {
+		t.byIP = make(map[string]cpanelAuthFailState)
+	}
+	if t.byIPUser == nil {
+		t.byIPUser = make(map[string]cpanelAuthFailState)
+	}
+	t.byIP[ip] = bumpFailState(t.byIP[ip], now)
+	user = strings.TrimSpace(strings.ToLower(user))
+	if user != "" {
+		key := ip + "|" + user
+		t.byIPUser[key] = bumpFailState(t.byIPUser[key], now)
+	}
+	// Opportunistic prune.
+	if len(t.byIP) > 4096 {
+		for k, st := range t.byIP {
+			if now.Sub(st.lastSeen) > 4*cpanelAuthFailureWindow && now.After(st.denyUntil) {
+				delete(t.byIP, k)
+			}
+		}
+	}
+	if len(t.byIPUser) > 8192 {
+		for k, st := range t.byIPUser {
+			if now.Sub(st.lastSeen) > 4*cpanelAuthFailureWindow && now.After(st.denyUntil) {
+				delete(t.byIPUser, k)
+			}
+		}
+	}
+}
+
+func (t *cpanelAuthFailTracker) clearSuccess(ip, user string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.byIP != nil {
+		delete(t.byIP, ip)
+	}
+	if t.byIPUser != nil && strings.TrimSpace(user) != "" {
+		delete(t.byIPUser, ip+"|"+strings.TrimSpace(strings.ToLower(user)))
+	}
+}
+
+func (t *cpanelAuthFailTracker) reset() {
+	t.mu.Lock()
+	t.byIP = nil
+	t.byIPUser = nil
+	t.mu.Unlock()
+}
+
+func bumpFailState(st cpanelAuthFailState, now time.Time) cpanelAuthFailState {
+	st.lastSeen = now
+	if st.windowStart.IsZero() || now.Sub(st.windowStart) >= cpanelAuthFailureWindow {
+		st.windowStart = now
+		st.attempts = 0
+	}
+	st.attempts++
+	if st.attempts >= cpanelAuthFailureBurst {
+		st.denyUntil = now.Add(cpanelAuthDenyTTL)
+	}
+	return st
+}
+
+func shouldTrackCpanelAuthFailure(reason string) bool {
+	switch reason {
+	case "token_invalid_signature", "token_replay", "actor_mismatch":
+		return true
+	default:
+		return false
+	}
+}
+
+func cpanelClientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		xff := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+		if xff != "" {
+			return xff
+		}
+	}
+	return host
+}
+
+func assertionSubjectHint(r *http.Request) string {
+	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
+	if raw == "" {
+		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") {
+			raw = strings.TrimSpace(auth[7:])
+		}
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims pluginActorClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(claims.Sub))
+}
+
+func emitCpanelAPIAuthEvent(r *http.Request, srcIP, user, signal string, status int, detail string) {
+	ua := ""
+	method := ""
+	path := "/api/v1/cpanel/user-info"
+	if r != nil {
+		ua = strings.TrimSpace(r.UserAgent())
+		method = r.Method
+		if r.URL != nil && r.URL.Path != "" {
+			path = r.URL.Path
+		}
+	}
+	logging.LogfAPI("[apiserver] event=api_anomaly src_ip=%s signal=%s count=1 scope=api method=%s path=%q status=%d ua=%q detail=%q",
+		srcIP, signal, method, path, status, ua, detail)
+	publishAPIAnomalyEvent(APIAnomalyEvent{
+		When:      cpanelAuthNow(),
+		Source:    "webdetector",
+		Reason:    "api_anomaly",
+		Signal:    signal,
+		Scope:     "api",
+		Count:     1,
+		SrcIP:     srcIP,
+		Method:    method,
+		Path:      path,
+		Status:    status,
+		UserAgent: ua,
+	})
 }
 
 func verifyPluginAssertion(raw string, secret []byte, now time.Time) (pluginActorClaims, string) {
