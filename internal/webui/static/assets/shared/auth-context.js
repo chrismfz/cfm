@@ -3,6 +3,7 @@
 
   const TOKEN_RE = /^[0-9a-f]{64}$/;
   const EXPECTED_PARENT_ORIGIN_PARAM = 'cfmExpectedOrigin';
+  const EXPECTED_PARENT_ORIGIN_STORAGE_KEY = 'cfm:expectedParentOrigin';
   const URL_TOKEN_COMPAT_FLAG = 'enableLegacyUrlTokenTransport';
   const state = { token: '', source: 'none', changes: new Set(), waiters: [] };
 
@@ -20,6 +21,20 @@
   function getExpectedOriginFromQuery(parsedURL) {
     if (!parsedURL || !parsedURL.searchParams) return '';
     return parseOrigin(parsedURL.searchParams.get(EXPECTED_PARENT_ORIGIN_PARAM) || '');
+  }
+
+  function readStoredExpectedParentOrigin() {
+    try {
+      const raw = window.sessionStorage.getItem(EXPECTED_PARENT_ORIGIN_STORAGE_KEY) || '';
+      return parseOrigin(raw);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function storeExpectedParentOrigin(origin) {
+    if (!origin) return;
+    try { window.sessionStorage.setItem(EXPECTED_PARENT_ORIGIN_STORAGE_KEY, origin); } catch (_) {}
   }
 
   function getAllowedOrigins(expectedParentOrigin) {
@@ -167,7 +182,9 @@
   if (tokenAcceptedFromURL) {
     try { window.dispatchEvent(new CustomEvent('cfm:token_ready', { detail: state.token })); } catch (_) {}
   }
-  const expectedParentOrigin = getExpectedOriginFromQuery(bootstrapURL);
+  const expectedParentOriginFromURL = getExpectedOriginFromQuery(bootstrapURL);
+  if (expectedParentOriginFromURL) storeExpectedParentOrigin(expectedParentOriginFromURL);
+  const expectedParentOrigin = expectedParentOriginFromURL || readStoredExpectedParentOrigin();
   initPostMessageListener(expectedParentOrigin);
   cleanupBootstrapQueryParams(
     bootstrapURL,
