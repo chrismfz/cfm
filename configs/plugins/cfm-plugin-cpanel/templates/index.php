@@ -39,6 +39,19 @@ body {
 }
 .err strong { display: block; margin-bottom: .35rem; }
 .err small { color: #9fb0c3; font-size: .82rem; }
+.warn-banner {
+  display: none;
+  margin: .75rem 1rem;
+  padding: .7rem .95rem;
+  background: #3a2b10;
+  border: 1px solid #946c1e;
+  border-radius: 8px;
+  color: #ffe3a6;
+  font-size: .85rem;
+  line-height: 1.45;
+  flex-shrink: 0;
+}
+.warn-banner strong { color: #ffd27a; }
 iframe {
   flex: 1;
   border: none;
@@ -72,6 +85,10 @@ iframe {
   <strong>CFM Security</strong>
   <span class="domains"><?= htmlspecialchars(implode('  ·  ', $domains), ENT_QUOTES, 'UTF-8') ?></span>
 </div>
+<div id="cfm-ack-warning" class="warn-banner" role="alert" aria-live="polite">
+  <strong>Secure session handshake delayed.</strong>
+  We could not confirm token delivery to the embedded app. Refresh this page if loading stalls, and contact your administrator if the issue continues.
+</div>
 <iframe
   id="cfm-frame"
   src="<?= htmlspecialchars($iframeUrl, ENT_QUOTES, 'UTF-8') ?>"
@@ -81,11 +98,10 @@ iframe {
 (function () {
   var token   = <?= json_encode($token, JSON_UNESCAPED_SLASHES) ?>;
   var origin  = <?= json_encode($iframeOrigin, JSON_UNESCAPED_SLASHES) ?>;
-  var appUrl  = <?= json_encode($iframeBase . $iframeNext, JSON_UNESCAPED_SLASHES) ?>;
   var frame   = document.getElementById('cfm-frame');
+  var ackWarningBanner = document.getElementById('cfm-ack-warning');
   var expectedParentOriginParam = 'cfmExpectedOrigin'; // canonical transport for expected parent origin
   var state = 'loaded';
-  var fallbackAttempted = false;
   var ackTimeoutMs = 1200;
   var loadSeq = 0;
   var latestAckSeq = 0;
@@ -117,17 +133,6 @@ iframe {
     pluginContextReason
   );
 
-  function buildFallbackUrl(scopedToken) {
-    try {
-      var url = new URL(appUrl, window.location.href);
-      url.searchParams.set('token', scopedToken);
-      return url.toString();
-    } catch (e) {
-      console.error('[cfm-plugin] could not build fallback iframe URL:', e);
-      return appUrl;
-    }
-  }
-
   function markExplicitNavigation(reason) {
     explicitNavigationSeq = loadSeq + 1;
     console.debug('[cfm-plugin] explicit navigation armed (reason=%s, nextLoadSeq=%d)', reason, explicitNavigationSeq);
@@ -154,6 +159,7 @@ iframe {
   function sendTokenViaPostMessage(reason, seq) {
     try {
       state = 'token_posted';
+      if (ackWarningBanner) ackWarningBanner.style.display = 'none';
       console.debug('[cfm-plugin] posting scoped token to iframe (%s, loadSeq=%d)', reason, seq);
       frame.contentWindow.postMessage({ cfmToken: token, loadSeq: seq }, origin);
     } catch (e) {
@@ -186,6 +192,7 @@ iframe {
       if (!ackSeq || ackSeq < 0) ackSeq = currentLoadSeq;
       latestAckSeq = Math.max(latestAckSeq, ackSeq);
       ackSucceededInLifecycle = true;
+      if (ackWarningBanner) ackWarningBanner.style.display = 'none';
       clearAckTimer(ackSeq, 'ack_received');
       if (ackSeq === currentLoadSeq) state = 'acked';
       console.debug('[cfm-plugin] iframe ACK received via postMessage (%s, loadSeq=%d, ackSeq=%d, timeoutSeq=%s)', data.path || 'unknown path', currentLoadSeq, ackSeq, 'none');
@@ -207,18 +214,13 @@ iframe {
     clearAckTimer(timeoutSeq, 'load_restart');
     sendTokenViaPostMessage('iframe load', timeoutSeq);
 
-    if (fallbackAttempted) {
-      console.debug('[cfm-plugin] fallback already attempted; skipping ACK timer (loadSeq=%d)', timeoutSeq);
-      return;
-    }
-
     ackTimersBySeq[timeoutSeq] = window.setTimeout(function () {
       delete ackTimersBySeq[timeoutSeq];
       if (timeoutSeq !== currentLoadSeq) {
         console.debug('[cfm-plugin] ignoring stale ACK timeout (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
         return;
       }
-      if (state === 'acked' || state === 'fallback_attempted') {
+      if (state === 'acked') {
         console.debug('[cfm-plugin] ACK timeout ignored due to state=%s (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', state, currentLoadSeq, latestAckSeq, timeoutSeq);
         return;
       }
@@ -236,35 +238,22 @@ iframe {
       );
 
       if (ackSucceededInLifecycle && !explicitNavForThisLoad) {
-        console.info('[cfm-plugin] skipping fallback reload because ACK already succeeded in this lifecycle (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
+        console.info('[cfm-plugin] ignoring delayed ACK timeout because ACK already succeeded in this lifecycle (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
         return;
       }
-      if (!isPluginContext) {
-        console.error('[cfm-plugin] fallback reload is disabled outside plugin context; no reload attempted (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
-        return;
-      }
-      if (fallbackAttempted) return;
-      fallbackAttempted = true;
-      state = 'fallback_attempted';
-      markExplicitNavigation('fallback_reload');
-      var fallbackUrl = buildFallbackUrl(token);
-      console.warn('[cfm-plugin] no iframe ACK after %dms, forcing one fallback reload with token query parameter (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', ackTimeoutMs, currentLoadSeq, latestAckSeq, timeoutSeq);
-      frame.src = fallbackUrl;
+      if (ackWarningBanner) ackWarningBanner.style.display = 'block';
+      console.warn('[cfm-plugin] URL token fallback is disabled; showing user-visible warning banner (loadSeq=%d, ackSeq=%d, timeoutSeq=%d)', currentLoadSeq, latestAckSeq, timeoutSeq);
     }, ackTimeoutMs);
 
     console.debug('[cfm-plugin] armed ACK timeout (loadSeq=%d, ackSeq=%d, timeoutSeq=%d, explicitNav=%s)', currentLoadSeq, latestAckSeq, timeoutSeq, explicitNavForThisLoad);
   });
 
-  // cPanel plugin compatibility path only: append ?token=... when fallback reload is needed.
-  if (isPluginContext) {
-    console.debug('[cfm-plugin] cPanel plugin context detected; URL token fallback is enabled for compatibility only');
-  }
+  console.debug('[cfm-plugin] URL token fallback transport is disabled; postMessage ACK is required');
 })();
 </script>
 
 <script>
-// Compatibility warning: URL token transport is fallback-only and should remain disabled
-// unless iframe postMessage delivery is unreliable in the hosting environment.
+// URL token transport is disabled and unsupported in production.
 </script>
 
 <?php endif; ?>
