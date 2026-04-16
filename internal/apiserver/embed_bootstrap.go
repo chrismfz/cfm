@@ -2,13 +2,16 @@ package apiserver
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cfm/internal/logging"
@@ -18,22 +21,123 @@ import (
 const (
 	embedBootstrapCookieName = "cfm-embed-scope"
 	embedBootstrapTTL        = 90 * time.Second
+	embedExchangeCodeTTL     = 45 * time.Second
 )
 
+type embedExchangeRecord struct {
+	token    string
+	nextPath string
+	expires  time.Time
+}
+
+type embedExchangeStore struct {
+	codes sync.Map // code -> embedExchangeRecord
+}
+
+func (s *embedExchangeStore) Mint(token, nextPath string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(token) == "" {
+		return "", errors.New("token is required")
+	}
+	if strings.TrimSpace(nextPath) == "" {
+		return "", errors.New("next is required")
+	}
+	if ttl == 0 {
+		ttl = embedExchangeCodeTTL
+	}
+	buf := make([]byte, 20)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	code := hex.EncodeToString(buf)
+	s.codes.Store(code, embedExchangeRecord{
+		token:    token,
+		nextPath: nextPath,
+		expires:  time.Now().Add(ttl),
+	})
+	return code, nil
+}
+
+func (s *embedExchangeStore) Consume(code, nextPath string) (string, bool) {
+	if strings.TrimSpace(code) == "" {
+		return "", false
+	}
+	v, ok := s.codes.LoadAndDelete(code)
+	if !ok {
+		return "", false
+	}
+	rec, ok := v.(embedExchangeRecord)
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(rec.expires) {
+		return "", false
+	}
+	if nextPath != rec.nextPath {
+		return "", false
+	}
+	return rec.token, true
+}
+
+func (s *embedExchangeStore) PurgeExpired(now time.Time) int {
+	purged := 0
+	s.codes.Range(func(k, v any) bool {
+		rec, ok := v.(embedExchangeRecord)
+		if !ok || now.After(rec.expires) {
+			s.codes.Delete(k)
+			purged++
+		}
+		return true
+	})
+	return purged
+}
+
+var defaultEmbedExchangeStore embedExchangeStore
+
 func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
+	m.HandleFunc("/api/v1/embed/code", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		tok, _ := extractToken(r)
+		st, ok := store.Lookup(tok)
+		if !ok {
+			apiJSONError(w, "invalid or expired token", http.StatusUnauthorized)
+			return
+		}
+		nextPath, err := normalizeEmbedNext(r.URL.Query().Get("next"))
+		if err != nil {
+			apiJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		code, err := defaultEmbedExchangeStore.Mint(st.Token, nextPath, embedExchangeCodeTTL)
+		if err != nil {
+			apiJSONError(w, "failed to mint embed code", http.StatusInternalServerError)
+			return
+		}
+		_ = defaultEmbedExchangeStore.PurgeExpired(time.Now())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"code":%q,"expires_in":%d}`, code, int(embedExchangeCodeTTL.Seconds()))
+	})
+
 	m.HandleFunc("/api/v1/embed/bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		tok := strings.TrimSpace(r.URL.Query().Get("token"))
+		code := strings.TrimSpace(r.URL.Query().Get("code"))
 		nextPath, err := normalizeEmbedNext(r.URL.Query().Get("next"))
 		if err != nil {
 			apiJSONError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		st, ok := store.Lookup(tok)
+		token, ok := defaultEmbedExchangeStore.Consume(code, nextPath)
+		if !ok {
+			apiJSONError(w, "invalid, expired, or already used code", http.StatusUnauthorized)
+			return
+		}
+		st, ok := store.Lookup(token)
 		if !ok {
 			apiJSONError(w, "invalid or expired token", http.StatusUnauthorized)
 			return
