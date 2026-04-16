@@ -15,6 +15,19 @@ import (
 	"cfm/internal/panelauth"
 )
 
+func useTestCpanelAuthClock(t *testing.T, start time.Time) *time.Time {
+	t.Helper()
+	now := start
+	prev := cpanelAuthNow
+	cpanelAuthNow = func() time.Time { return now }
+	pluginAuthFailTracker.reset()
+	t.Cleanup(func() {
+		cpanelAuthNow = prev
+		pluginAuthFailTracker.reset()
+	})
+	return &now
+}
+
 func TestAuthorizePluginAssertionAcceptsDerivedKey(t *testing.T) {
 	dir := t.TempDir()
 	writeCFMConf(t, dir, "AUTH_TOKEN=shared-secret\n")
@@ -56,6 +69,49 @@ func TestAuthorizePluginAssertionRejectsMismatchedAuthToken(t *testing.T) {
 	}
 	if reason != "token_invalid_signature" {
 		t.Fatalf("expected token_invalid_signature, got %q", reason)
+	}
+}
+
+func TestCpanelUserInfoAuthFailureLimiterBurstAndRecovery(t *testing.T) {
+	now := useTestCpanelAuthClock(t, time.Unix(1_700_010_000, 0).UTC())
+	dir := t.TempDir()
+	writeCFMConf(t, dir, "AUTH_TOKEN=shared-secret\n")
+	setConfigDir(t, dir)
+	e := &Engine{}
+
+	call := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cpanel/user-info?user=alice", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Forwarded-For", "198.51.100.77")
+		req.Header.Set("X-CFM-Actor-Assertion", "invalid.token.signature")
+		rr := httptest.NewRecorder()
+		e.handleCpanelUserInfo(rr, req)
+		return rr
+	}
+
+	// Under threshold: normal auth failures still return 401.
+	for i := 0; i < cpanelAuthFailureBurst-1; i++ {
+		rr := call()
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d", i+1, rr.Code)
+		}
+	}
+
+	// Threshold-hit request is still auth failure; deny applies on subsequent attempts.
+	hit := call()
+	if hit.Code != http.StatusUnauthorized {
+		t.Fatalf("threshold attempt expected 401, got %d", hit.Code)
+	}
+
+	denied := call()
+	if denied.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected denied status 429 after burst, got %d", denied.Code)
+	}
+
+	*now = now.Add(cpanelAuthDenyTTL + time.Second)
+	recovered := call()
+	if recovered.Code != http.StatusUnauthorized {
+		t.Fatalf("expected recovery to 401 after deny window, got %d", recovered.Code)
 	}
 }
 

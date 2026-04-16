@@ -7,6 +7,7 @@ import (
 	"cfm/internal/apiserver"
 	"cfm/internal/detectors/apiabuse"
 	core "cfm/internal/detectors/core"
+	"cfm/internal/webdetector"
 )
 
 func init() {
@@ -29,6 +30,9 @@ func init() {
 		d := apiabuse.New(cfg)
 		d.SetName(section)
 		apiserver.SubscribeAPIAnomalyEvents(func(ev apiserver.APIAnomalyEvent) {
+			d.Enqueue(ev.InputEvent())
+		})
+		webdetector.SubscribeAPIAnomalyEvents(func(ev webdetector.APIAnomalyEvent) {
 			d.Enqueue(ev.InputEvent())
 		})
 		return d, nil

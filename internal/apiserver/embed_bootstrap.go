@@ -29,6 +29,10 @@ const (
 	embedBootstrapCookieName = "cfm-embed-scope"
 	embedBootstrapTTL        = 90 * time.Second
 	embedExchangeCodeTTL     = 45 * time.Second
+	embedCodeRLWindow        = 8 * time.Second
+	embedCodeRLBurst         = 4
+	embedBootstrapRLWindow   = 8 * time.Second
+	embedBootstrapRLBurst    = 3
 	embedCookieHKDFInfo      = "cfm-apiserver-embed-bootstrap-cookie-v1"
 	embedCookieHKDFSalt      = "cfm-apiserver-embed-bootstrap-cookie-salt-v1"
 )
@@ -36,7 +40,55 @@ const (
 var (
 	embedLegacyCookieCutoff       = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 	embedCookieSigningKeyProvider = deriveEmbedCookieSigningKey
+	embedBootstrapNow             = time.Now
 )
+
+type embedRateState struct {
+	windowStart time.Time
+	count       int
+	lastSeen    time.Time
+}
+
+type embedRateLimiter struct {
+	mu sync.Mutex
+	m  map[string]embedRateState
+}
+
+func (l *embedRateLimiter) allow(key string, now time.Time, window time.Duration, burst int) bool {
+	if strings.TrimSpace(key) == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = make(map[string]embedRateState)
+	}
+	st := l.m[key]
+	st.lastSeen = now
+	if st.windowStart.IsZero() || now.Sub(st.windowStart) >= window {
+		st.windowStart = now
+		st.count = 0
+	}
+	st.count++
+	l.m[key] = st
+	// Opportunistic prune to keep memory bounded.
+	if len(l.m) > 4096 {
+		for k, v := range l.m {
+			if now.Sub(v.lastSeen) > 3*window {
+				delete(l.m, k)
+			}
+		}
+	}
+	return st.count <= burst
+}
+
+func (l *embedRateLimiter) reset() {
+	l.mu.Lock()
+	l.m = nil
+	l.mu.Unlock()
+}
+
+var embedBootstrapRateLimiter embedRateLimiter
 
 type embedExchangeRecord struct {
 	token    string
@@ -119,6 +171,14 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 			apiJSONError(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+		now := embedBootstrapNow()
+		srcIP := realIPFromRequest(r)
+		if !allowEmbedRate("embed_code", srcIP, st.ID, now, embedCodeRLWindow, embedCodeRLBurst) {
+			logEmbedRateLimitEvent(r, "embed_code", srcIP, st.ID, embedCodeRLWindow, embedCodeRLBurst)
+			w.Header().Set("Retry-After", strconv.Itoa(int(embedCodeRLWindow.Seconds())))
+			apiJSONError(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 		nextPath, err := normalizeEmbedNext(r.URL.Query().Get("next"))
 		if err != nil {
 			apiJSONError(w, err.Error(), http.StatusBadRequest)
@@ -156,8 +216,16 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 			apiJSONError(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+		now := embedBootstrapNow()
+		srcIP := realIPFromRequest(r)
+		if !allowEmbedRate("embed_bootstrap", srcIP, st.ID, now, embedBootstrapRLWindow, embedBootstrapRLBurst) {
+			logEmbedRateLimitEvent(r, "embed_bootstrap", srcIP, st.ID, embedBootstrapRLWindow, embedBootstrapRLBurst)
+			w.Header().Set("Retry-After", strconv.Itoa(int(embedBootstrapRLWindow.Seconds())))
+			apiJSONError(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 
-		value, err := encodeEmbedCookie(r, st.ID, time.Now().Add(embedBootstrapTTL))
+		value, err := encodeEmbedCookie(r, st.ID, now.Add(embedBootstrapTTL))
 		if err != nil {
 			logging.Logf("[apiserver] embed bootstrap signing key unavailable: %v", err)
 			apiJSONError(w, "failed to create embed bootstrap cookie", http.StatusInternalServerError)
@@ -175,6 +243,41 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 
 		logging.Logf("[apiserver] embed bootstrap ok token_id=%s label=%q role=%s next=%s", st.ID, st.Label, st.Role, nextPath)
 		http.Redirect(w, r, nextPath, http.StatusSeeOther)
+	})
+}
+
+func allowEmbedRate(action, srcIP, tokenID string, now time.Time, window time.Duration, burst int) bool {
+	ipKey := fmt.Sprintf("%s:ip:%s", action, strings.TrimSpace(srcIP))
+	tokenKey := fmt.Sprintf("%s:token:%s", action, strings.TrimSpace(tokenID))
+	return embedBootstrapRateLimiter.allow(ipKey, now, window, burst) &&
+		embedBootstrapRateLimiter.allow(tokenKey, now, window, burst)
+}
+
+func logEmbedRateLimitEvent(r *http.Request, action, srcIP, tokenID string, window time.Duration, burst int) {
+	method := ""
+	path := ""
+	ua := ""
+	if r != nil {
+		method = r.Method
+		if r.URL != nil {
+			path = r.URL.Path
+		}
+		ua = strings.TrimSpace(r.UserAgent())
+	}
+	logging.LogfAPI("[apiserver] event=api_anomaly src_ip=%s signal=embed_bootstrap_rate_limited count=1 scope=api method=%s path=%q status=%d ua=%q detail=%q",
+		srcIP, method, path, http.StatusTooManyRequests, ua, fmt.Sprintf("action=%s token_id=%s window=%s burst=%d", action, tokenID, window, burst))
+	publishAPIAnomalyEvent(APIAnomalyEvent{
+		When:      embedBootstrapNow(),
+		Source:    "apiserver",
+		Reason:    "api_anomaly",
+		Signal:    "embed_bootstrap_rate_limited",
+		Scope:     "api",
+		Count:     1,
+		SrcIP:     srcIP,
+		Method:    method,
+		Path:      path,
+		Status:    http.StatusTooManyRequests,
+		UserAgent: ua,
 	})
 }
 
