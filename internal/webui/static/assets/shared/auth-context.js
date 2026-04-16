@@ -3,6 +3,7 @@
 
   const TOKEN_RE = /^[0-9a-f]{64}$/;
   const EXPECTED_PARENT_ORIGIN_PARAM = 'cfmExpectedOrigin';
+  const URL_TOKEN_COMPAT_FLAG = 'enableLegacyUrlTokenTransport';
   const state = { token: '', source: 'none', changes: new Set(), waiters: [] };
 
   function parseOrigin(value) {
@@ -58,8 +59,14 @@
 
   function readTokenFromURL(parsedURL) {
     if (!parsedURL || !parsedURL.searchParams) return false;
+    const compatFlag = window.CFMFeatureFlags?.[URL_TOKEN_COMPAT_FLAG] === true;
+    if (!compatFlag) return false;
     const t = (parsedURL.searchParams.get('token') || '').trim();
     if (!TOKEN_RE.test(t)) return false;
+    console.warn(
+      '[cfm-auth] DEPRECATED: URL token transport is enabled via feature flag "%s". This mode is unsupported in production.',
+      URL_TOKEN_COMPAT_FLAG
+    );
     return setToken(t, 'url');
   }
 
