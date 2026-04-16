@@ -353,7 +353,21 @@ func embedScopedContextFromCookie(r *http.Request, store *TokenStore) (context.C
 	})
 	ctx = context.WithValue(ctx, webdet.CtxAuthnKey{}, true)
 	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
+	ctx = context.WithValue(ctx, embedCookieTokenIDKey{}, st.ID)
 	return ctx, true
+}
+
+// embedCookieTokenIDKey is the context key used by the bootstrap-cookie auth
+// path to expose the underlying scoped token ID to handlers that need to look
+// up token metadata without a bearer header (notably /api/v1/tokens/me).
+type embedCookieTokenIDKey struct{}
+
+func scopedTokenIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(embedCookieTokenIDKey{}).(string)
+	return id
 }
 
 func normalizeEmbedNext(raw string) (string, error) {
