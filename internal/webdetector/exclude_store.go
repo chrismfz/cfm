@@ -11,9 +11,10 @@ import (
 )
 
 type excludeEntry struct {
-	Type      string    `json:"type"` // host | path
-	Value     string    `json:"value"`
-	CreatedAt time.Time `json:"created_at"`
+	Type       string    `json:"type"` // host | path
+	Value      string    `json:"value"`
+	ScopeHosts []string  `json:"scope_hosts,omitempty"` // nil/empty => admin-global
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type excludeStore struct {
@@ -46,32 +47,72 @@ func (s *excludeStore) normalize(t, v string) (string, string, bool) {
 	return t, v, true
 }
 
-func (s *excludeStore) key(t, v string) string { return t + ":" + v }
+func (s *excludeStore) key(t, v string, scopeHosts []string) string {
+	scope := strings.Join(scopeHosts, ",")
+	return t + ":" + v + "|" + scope
+}
 
-func (s *excludeStore) Add(t, v string) bool {
+func normalizeScopeHosts(scopeHosts []string) []string {
+	if len(scopeHosts) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(scopeHosts))
+	out := make([]string, 0, len(scopeHosts))
+	for _, h := range scopeHosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if _, exists := set[h]; exists {
+			continue
+		}
+		set[h] = struct{}{}
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+func scopeMapToHosts(scope map[string]struct{}) []string {
+	if len(scope) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(scope))
+	for h := range scope {
+		out = append(out, h)
+	}
+	return normalizeScopeHosts(out)
+}
+
+func (s *excludeStore) Add(t, v string, scope map[string]struct{}) bool {
 	t, v, ok := s.normalize(t, v)
 	if !ok {
 		return false
 	}
+	scopeHosts := scopeMapToHosts(scope)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := s.key(t, v)
+	k := s.key(t, v, scopeHosts)
 	if _, exists := s.entries[k]; exists {
 		return false
 	}
-	s.entries[k] = excludeEntry{Type: t, Value: v, CreatedAt: time.Now()}
+	s.entries[k] = excludeEntry{Type: t, Value: v, ScopeHosts: scopeHosts, CreatedAt: time.Now()}
 	_ = s.saveLocked()
 	return true
 }
 
-func (s *excludeStore) Remove(t, v string) bool {
+func (s *excludeStore) Remove(t, v string, scope map[string]struct{}) bool {
 	t, v, ok := s.normalize(t, v)
 	if !ok {
 		return false
 	}
+	scopeHosts := scopeMapToHosts(scope)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := s.key(t, v)
+	k := s.key(t, v, scopeHosts)
 	if _, exists := s.entries[k]; !exists {
 		return false
 	}
@@ -91,9 +132,28 @@ func (s *excludeStore) List() []excludeEntry {
 		if out[i].Type != out[j].Type {
 			return out[i].Type < out[j].Type
 		}
+		if strings.Join(out[i].ScopeHosts, ",") != strings.Join(out[j].ScopeHosts, ",") {
+			return strings.Join(out[i].ScopeHosts, ",") < strings.Join(out[j].ScopeHosts, ",")
+		}
 		return out[i].Value < out[j].Value
 	})
 	return out
+}
+
+func hostInScope(host string, scopeHosts []string) bool {
+	if len(scopeHosts) == 0 {
+		return true
+	}
+	for _, scopeHost := range scopeHosts {
+		ok, err := filepath.Match(scopeHost, host)
+		if err == nil && ok {
+			return true
+		}
+		if !strings.ContainsAny(scopeHost, "*?") && strings.EqualFold(scopeHost, host) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *excludeStore) MatchHost(host string) bool {
@@ -107,6 +167,9 @@ func (s *excludeStore) MatchHost(host string) bool {
 		if e.Type != "host" {
 			continue
 		}
+		if !hostInScope(host, e.ScopeHosts) {
+			continue
+		}
 		ok, err := filepath.Match(e.Value, host)
 		if err == nil && ok {
 			return true
@@ -118,15 +181,19 @@ func (s *excludeStore) MatchHost(host string) bool {
 	return false
 }
 
-func (s *excludeStore) MatchPath(path string) bool {
+func (s *excludeStore) MatchPath(host, path string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
-	if path == "" {
+	if host == "" || path == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, e := range s.entries {
 		if e.Type != "path" {
+			continue
+		}
+		if !hostInScope(host, e.ScopeHosts) {
 			continue
 		}
 		ok, err := filepath.Match(e.Value, path)
@@ -163,7 +230,8 @@ func (s *excludeStore) load() {
 			e.CreatedAt = time.Now()
 		}
 		e.Type, e.Value = t, v
-		s.entries[s.key(t, v)] = e
+		e.ScopeHosts = normalizeScopeHosts(e.ScopeHosts)
+		s.entries[s.key(t, v, e.ScopeHosts)] = e
 	}
 }
 

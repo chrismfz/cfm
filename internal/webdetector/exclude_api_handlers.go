@@ -88,6 +88,7 @@ func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	typ, value := readExcludeParams(r)
+	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
@@ -96,7 +97,7 @@ func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.ChallengeExcludeAdd(typ, value); !ok {
+	if ok := e.ChallengeExcludeAdd(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
 	}
@@ -109,6 +110,7 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 		return
 	}
 	typ, value := readExcludeParams(r)
+	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
@@ -117,7 +119,7 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.ChallengeExcludeRemove(typ, value); !ok {
+	if ok := e.ChallengeExcludeRemove(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
 	}
@@ -142,6 +144,7 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	typ, value := readExcludeParams(r)
+	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
@@ -150,7 +153,7 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.WAFExcludeAdd(typ, value); !ok {
+	if ok := e.WAFExcludeAdd(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
 	}
@@ -163,6 +166,7 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	typ, value := readExcludeParams(r)
+	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
@@ -171,7 +175,7 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.WAFExcludeRemove(typ, value); !ok {
+	if ok := e.WAFExcludeRemove(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
 	}

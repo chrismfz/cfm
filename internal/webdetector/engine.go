@@ -473,12 +473,10 @@ func NewEngine(cfg Config) *Engine {
 		}
 	}
 
-
-   // Wire enricher into bridge for country fallback in handleDecision. ← ADD THIS
-    if e.nginxBridge != nil && e.enr != nil {
-        e.nginxBridge.SetEnricher(e.enr)
-    }
-
+	// Wire enricher into bridge for country fallback in handleDecision. ← ADD THIS
+	if e.nginxBridge != nil && e.enr != nil {
+		e.nginxBridge.SetEnricher(e.enr)
+	}
 
 	return e
 }
@@ -3045,18 +3043,18 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	return matched
 }
 
-func (e *Engine) ChallengeExcludeAdd(typ, value string) bool {
+func (e *Engine) ChallengeExcludeAdd(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.challengeExcludes == nil {
 		return false
 	}
-	return e.challengeExcludes.Add(typ, value)
+	return e.challengeExcludes.Add(typ, value, scope)
 }
 
-func (e *Engine) ChallengeExcludeRemove(typ, value string) bool {
+func (e *Engine) ChallengeExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.challengeExcludes == nil {
 		return false
 	}
-	return e.challengeExcludes.Remove(typ, value)
+	return e.challengeExcludes.Remove(typ, value, scope)
 }
 
 func (e *Engine) ChallengeExcludeList() []excludeEntry {
@@ -3066,18 +3064,18 @@ func (e *Engine) ChallengeExcludeList() []excludeEntry {
 	return e.challengeExcludes.List()
 }
 
-func (e *Engine) WAFExcludeAdd(typ, value string) bool {
+func (e *Engine) WAFExcludeAdd(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.Add(typ, value)
+	return e.wafExcludes.Add(typ, value, scope)
 }
 
-func (e *Engine) WAFExcludeRemove(typ, value string) bool {
+func (e *Engine) WAFExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.Remove(typ, value)
+	return e.wafExcludes.Remove(typ, value, scope)
 }
 
 func (e *Engine) WAFExcludeList() []excludeEntry {
@@ -3094,7 +3092,7 @@ func (e *Engine) isWAFExcluded(host, path string) bool {
 	if e.wafExcludes.MatchHost(host) {
 		return true
 	}
-	if e.wafExcludes.MatchPath(path) {
+	if e.wafExcludes.MatchPath(host, path) {
 		return true
 	}
 	return false
