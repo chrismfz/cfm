@@ -6,14 +6,17 @@
 // A "host" exclude suppresses challenge/WAF for that hostname across all requests;
 // a "path" exclude suppresses it for a URL path across all vhosts.
 //
-// Because of this global scope, all endpoints (list, add, remove) are Guard 3:
-// admin token or loopback bypass required. Scoped cPanel/DA tokens cannot
-// manipulate global excludes.
+// Scope model:
+//   - list endpoints: admin + scoped tokens can read.
+//   - add/remove endpoints:
+//       * admin: unrestricted global management.
+//       * scoped: host excludes only, and value must stay within token scope.
 
 package webdetector
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 )
 
@@ -26,9 +29,50 @@ func readExcludeParams(r *http.Request) (string, string) {
 	return typ, value
 }
 
+func containsWildcard(s string) bool {
+	return strings.ContainsAny(s, "*?")
+}
+
+func scopedExcludeHostAllowed(value string, scope map[string]struct{}) bool {
+	v := normalizeControlHost(value)
+	if v == "" {
+		return false
+	}
+	vWildcard := containsWildcard(v)
+
+	for allowed := range scope {
+		a := normalizeControlHost(allowed)
+		if a == "" {
+			continue
+		}
+		aWildcard := containsWildcard(a)
+		if v == a {
+			return true
+		}
+		// Exact host exclude may target a host matched by scoped wildcard entries.
+		if !vWildcard && aWildcard {
+			if ok, err := filepath.Match(a, v); err == nil && ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validateScopedExcludeWrite(r *http.Request, typ, value string) bool {
+	scope := vhostScopeFromContext(r.Context())
+	if scope == nil {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(typ), "host") {
+		return false
+	}
+	return scopedExcludeHostAllowed(value, scope)
+}
+
 // GET /api/v1/challenge/exclude/list
 func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	if e == nil {
@@ -40,10 +84,14 @@ func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Reque
 
 // POST /api/v1/challenge/exclude/add?type=host&value=example.com
 func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
 	if strings.TrimSpace(value) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
@@ -57,10 +105,14 @@ func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Reques
 
 // POST /api/v1/challenge/exclude/remove?type=host&value=example.com
 func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
 	if strings.TrimSpace(value) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
@@ -74,7 +126,7 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 
 // GET /api/v1/waf/exclude/list
 func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	if e == nil {
@@ -86,10 +138,14 @@ func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/waf/exclude/add?type=host&value=example.com
 func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
 	if strings.TrimSpace(value) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
@@ -103,10 +159,14 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/waf/exclude/remove?type=host&value=example.com
 func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
 	if strings.TrimSpace(value) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return

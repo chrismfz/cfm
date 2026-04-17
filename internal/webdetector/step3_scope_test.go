@@ -167,66 +167,114 @@ func TestChallenge_VhostStatus_ScopeCheck(t *testing.T) {
 	}
 }
 
-// ── Challenge excludes (Guard 3 — global operation) ───────────
+// ── Challenge excludes (scoped list + scoped-write guard) ──────
 
-func TestChallengeExclude_AdminOnly(t *testing.T) {
+func TestChallengeExclude_ScopedAndAdmin(t *testing.T) {
 	_, mux := newStep3Engine(t)
-	hostValue := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".example.com")
+	inScopeHost := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".example.com")
+	outOfScopeHost := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".other.com")
+	scoped := scopedCtx(inScopeHost)
 
 	// List
 	rr := get(mux, adminCtx(), "/api/v1/challenge/exclude/list")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin exclude list: expected 200, got %d", rr.Code)
 	}
-	rr = get(mux, scopedCtx("example.com"), "/api/v1/challenge/exclude/list")
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped exclude list: expected 403, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	// Add
-	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=host&value="+hostValue, nil)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped exclude add: expected 403, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	// Admin add works
-	rr = doRequest(mux, adminCtx(), http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=host&value="+hostValue, nil)
+	rr = get(mux, scoped, "/api/v1/challenge/exclude/list")
 	if rr.Code != http.StatusOK {
-		t.Fatalf("admin exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("scoped exclude list: expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	// Remove
-	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
-		"/api/v1/challenge/exclude/remove?type=host&value="+hostValue, nil)
+	// Scoped add in-scope host works.
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/challenge/exclude/add?type=host&value="+inScopeHost, nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("scoped exclude add in-scope: should not be 403, got body=%s", rr.Body.String())
+	}
+
+	// Scoped add out-of-scope host is denied with explicit message.
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/challenge/exclude/add?type=host&value="+outOfScopeHost, nil)
 	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped exclude remove: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("scoped exclude add out-of-scope: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "exclude value outside token scope") {
+		t.Fatalf("scoped exclude add out-of-scope: expected explicit error, got body=%s", rr.Body.String())
+	}
+
+	// Scoped remove in-scope host works.
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/challenge/exclude/remove?type=host&value="+inScopeHost, nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("scoped exclude remove in-scope: should not be 403, got body=%s", rr.Body.String())
+	}
+
+	// Scoped path excludes are denied.
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/challenge/exclude/add?type=path&value=/global", nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped exclude add path: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "exclude value outside token scope") {
+		t.Fatalf("scoped exclude add path: expected explicit error, got body=%s", rr.Body.String())
+	}
+
+	// Admin remains unrestricted.
+	rr = doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/challenge/exclude/add?type=host&value="+outOfScopeHost, nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin exclude add out-of-scope host: should not be 403, got body=%s", rr.Body.String())
+	}
+	rr = doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/challenge/exclude/add?type=path&value=/global", nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin exclude add path: should not be 403, got body=%s", rr.Body.String())
 	}
 }
 
-// ── WAF excludes (Guard 3 — global operation) ─────────────────
+// ── WAF excludes (scoped list + scoped-write guard) ───────────
 
-func TestWAFExclude_AdminOnly(t *testing.T) {
+func TestWAFExclude_ScopedAndAdmin(t *testing.T) {
 	_, mux := newStep3Engine(t)
-	pathValue := "/" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+	inScopeHost := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".example.com")
+	outOfScopeHost := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-") + ".other.com")
+	pathValue := "/" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")+".path")
+	scoped := scopedCtx(inScopeHost)
 
-	rr := get(mux, scopedCtx("example.com"), "/api/v1/waf/exclude/list")
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped waf exclude list: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	rr := get(mux, scoped, "/api/v1/waf/exclude/list")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped waf exclude list: expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	rr = doRequest(mux, scopedCtx("example.com"), http.MethodPost,
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/waf/exclude/add?type=host&value="+inScopeHost, nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("scoped waf exclude add in-scope host: should not be 403, got body=%s", rr.Body.String())
+	}
+
+	rr = doRequest(mux, scoped, http.MethodPost,
 		"/api/v1/waf/exclude/add?type=path&value="+pathValue, nil)
 	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped waf exclude add: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("scoped waf exclude add path: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "exclude value outside token scope") {
+		t.Fatalf("scoped waf exclude add path: expected explicit error, got body=%s", rr.Body.String())
+	}
+
+	rr = doRequest(mux, scoped, http.MethodPost,
+		"/api/v1/waf/exclude/add?type=host&value="+outOfScopeHost, nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped waf exclude add out-of-scope host: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "exclude value outside token scope") {
+		t.Fatalf("scoped waf exclude add out-of-scope host: expected explicit error, got body=%s", rr.Body.String())
 	}
 
 	// Admin can add global WAF path exclude
 	rr = doRequest(mux, adminCtx(), http.MethodPost,
 		"/api/v1/waf/exclude/add?type=path&value="+pathValue, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("admin waf exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin waf exclude add: should not be 403, got body=%s", rr.Body.String())
 	}
 }
 
