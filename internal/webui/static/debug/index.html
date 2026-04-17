@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Debug Console</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script type="module" src="/cfm-admin/assets/debug.js"></script>
 </head>
 <body>
@@ -23,7 +24,13 @@
     <main class="layout">
       <section class="card wide">
         <h2>Live telemetry snapshot</h2>
-        <pre id="livePayload">Loading...</pre>
+        <div id="liveKpiCards" class="chips"></div>
+        <h3>Live detector table</h3>
+        <div id="liveDetectorTable" class="table-wrap">Loading...</div>
+        <details class="raw-json">
+          <summary>Raw JSON (for regression/debug)</summary>
+          <pre id="livePayload">Loading...</pre>
+        </details>
       </section>
 
       <section class="card">
@@ -48,7 +55,22 @@
           <button id="exportJSONBtn" class="btn-quiet">Export JSON</button>
           <button id="exportTextBtn" class="btn-quiet">Export text</button>
         </div>
-        <pre id="capturePayload">No capture loaded.</pre>
+        <div id="captureKpiCards" class="chips"></div>
+        <div class="toolbar">
+          <label for="captureDetectorSelect">Detector</label>
+          <select id="captureDetectorSelect" class="input input-wide"></select>
+        </div>
+        <div class="live-chart-grid">
+          <div id="captureAvgMsChart" class="spark echart-box"></div>
+          <div id="captureRunsChart" class="spark echart-box"></div>
+          <div id="captureWebdetectorChart" class="spark echart-box"></div>
+        </div>
+        <h3>Capture snapshot detector table</h3>
+        <div id="captureDetectorTable" class="table-wrap">No capture loaded.</div>
+        <details class="raw-json">
+          <summary>Raw JSON (for regression/debug)</summary>
+          <pre id="capturePayload">No capture loaded.</pre>
+        </details>
       </section>
     </main>
   </div>
