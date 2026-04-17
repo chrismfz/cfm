@@ -262,6 +262,7 @@ func Start(
 		SetAuth(nil)
 		logging.Logf("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")
 	}
+	registerMeSecurityRoutes(m)
 
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
