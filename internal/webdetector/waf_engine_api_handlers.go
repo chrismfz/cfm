@@ -55,7 +55,7 @@ type wafEngineSummary struct {
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
-	if !RequireAdmin(w, r) {
+	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	res := wafEngineSummary{}
@@ -102,6 +102,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].TsUnix > all[j].TsUnix })
+	scope := vhostScopeFromContext(r.Context())
 
 	hosts := map[string]struct{}{}
 	ips := map[string]struct{}{}
@@ -117,6 +118,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		if ev.Type != "waf_observe" && ev.Type != "waf_trigger" {
+			continue
+		}
+		if !vhostAllowed(ev.Host, scope) {
 			continue
 		}
 		rule := strings.TrimSpace(ev.Reason)

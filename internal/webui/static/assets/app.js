@@ -549,7 +549,7 @@
 
       shouldShow(section) {
         if (this.isScoped) {
-          const hiddenForScoped = new Set(['globalips', 'tokens', 'excludes', 'wafengine']);
+          const hiddenForScoped = new Set(['globalips', 'tokens', 'excludes']);
           if (hiddenForScoped.has(section)) return false;
         }
         const groups = {
