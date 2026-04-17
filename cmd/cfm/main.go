@@ -158,7 +158,6 @@ func main() {
 	// cfm auth — short-circuits before config load or server start.
 	// The daemon does not need to be running.
 	if len(os.Args) > 1 && os.Args[1] == "auth" {
-		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runAuthCLI()
 		return
 	}
