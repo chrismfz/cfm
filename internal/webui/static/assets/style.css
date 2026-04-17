@@ -90,6 +90,16 @@ button:disabled { opacity: .65; cursor: default; }
   gap: .5rem;
   margin-bottom: .7rem;
 }
+.toolbar.wrap {
+  flex-wrap: wrap;
+}
+.toolbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  color: var(--muted);
+  font-size: .86rem;
+}
 .input {
   width: 84px;
   background: #0a1426;
@@ -141,6 +151,29 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
   color: #ffc9d3;
   border-color: #8f3b4d;
   background: rgba(217, 81, 111, .15);
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: .6rem;
+  margin-bottom: .7rem;
+}
+.summary-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0a1426;
+  padding: .6rem;
+}
+.summary-card h4 {
+  margin: 0 0 .35rem;
+  font-size: .82rem;
+  color: var(--muted);
+}
+.summary-card .value {
+  font-size: .95rem;
+}
+.compact-table tr.pinned-row {
+  background: rgba(77, 163, 255, .12);
 }
 .list { margin: 0; padding: 0; list-style: none; display: grid; gap: .55rem; }
 .list li { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
