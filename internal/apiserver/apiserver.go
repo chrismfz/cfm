@@ -15,8 +15,9 @@
 //
 // Auth stack (outermost → innermost):
 //   Auth.LoadAndSave()   — loads/saves goauth session on every request
-//   TokenMiddleware()    — loopback bypass | session | Bearer/Token/X-CFM-Token
-//   mux                 — routes
+//   IPAllowMiddleware() — source allowlist gate
+//   TokenMiddleware()   — loopback bypass | session | Bearer/Token/X-CFM-Token
+//   mux                — routes
 //
 // Two listeners:
 //   HTTP  :6060  (PORT / LISTEN_ADDRESS)            — always started
@@ -258,9 +259,10 @@ func Start(
 
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
-	//   mux → TokenMiddleware → LoadAndSave
+	//   mux → TokenMiddleware → IPAllowMiddleware → LoadAndSave
 	var handler http.Handler
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
+	handler = IPAllowMiddleware(cfg, cfgDir)(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 	}
