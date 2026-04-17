@@ -43,6 +43,8 @@ type TrafficRuleMatch struct {
 	// Query-string guards (both optional, evaluated only when set)
 	HasQS    bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
 	QSNotRx  string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
+
+	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule
 }
 
 type TrafficRuleAction struct {
@@ -298,10 +300,12 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	r.Match.Methods = methods
 
 if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
-    if _, err := regexp.Compile("(?i)" + rx); err != nil {
-        return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
-    }
-    r.Match.QSNotRx = rx
+	compiled, err := regexp.Compile("(?i)" + rx)
+	if err != nil {
+		return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+	}
+	r.Match.QSNotRx = rx
+	r.Match.qsNotRxCompiled = compiled
 }
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
@@ -492,8 +496,8 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 	if m.HasQS && qs == "" {
 		return false
 	}
-	if m.QSNotRx != "" && qs != "" {
-		if ok, _ := regexp.MatchString("(?i)"+m.QSNotRx, qs); ok {
+	if m.qsNotRxCompiled != nil && qs != "" {
+		if m.qsNotRxCompiled.MatchString(qs) {
 			return false
 		}
 	}
