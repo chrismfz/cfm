@@ -230,6 +230,24 @@ func TestChallengeExclude_ScopedAndAdmin(t *testing.T) {
 	if rr.Code == http.StatusForbidden {
 		t.Fatalf("admin exclude add path: should not be 403, got body=%s", rr.Body.String())
 	}
+
+	// Scoped list must only include in-scope host excludes.
+	rr = get(mux, scoped, "/api/v1/challenge/exclude/list")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped exclude list after writes: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var scopedRows []excludeEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &scopedRows); err != nil {
+		t.Fatalf("scoped exclude list decode: %v body=%s", err, rr.Body.String())
+	}
+	for _, row := range scopedRows {
+		if row.Type != "host" {
+			t.Fatalf("scoped exclude list must hide non-host excludes, got type=%q value=%q", row.Type, row.Value)
+		}
+		if !strings.EqualFold(row.Value, inScopeHost) {
+			t.Fatalf("scoped exclude list leaked out-of-scope entry: got value=%q expected=%q", row.Value, inScopeHost)
+		}
+	}
 }
 
 // ── WAF excludes (scoped list + scoped-write guard) ───────────
@@ -275,6 +293,24 @@ func TestWAFExclude_ScopedAndAdmin(t *testing.T) {
 		"/api/v1/waf/exclude/add?type=path&value="+pathValue, nil)
 	if rr.Code == http.StatusForbidden {
 		t.Fatalf("admin waf exclude add: should not be 403, got body=%s", rr.Body.String())
+	}
+
+	// Scoped list must only include in-scope host excludes.
+	rr = get(mux, scoped, "/api/v1/waf/exclude/list")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped waf exclude list after writes: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var scopedRows []excludeEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &scopedRows); err != nil {
+		t.Fatalf("scoped waf exclude list decode: %v body=%s", err, rr.Body.String())
+	}
+	for _, row := range scopedRows {
+		if row.Type != "host" {
+			t.Fatalf("scoped waf exclude list must hide non-host excludes, got type=%q value=%q", row.Type, row.Value)
+		}
+		if !strings.EqualFold(row.Value, inScopeHost) {
+			t.Fatalf("scoped waf exclude list leaked out-of-scope entry: got value=%q expected=%q", row.Value, inScopeHost)
+		}
 	}
 }
 
