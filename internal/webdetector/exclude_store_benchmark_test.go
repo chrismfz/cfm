@@ -7,45 +7,77 @@ import (
 	"testing"
 )
 
-func BenchmarkExcludeStoreMatchWAFManyWildcards(b *testing.B) {
-	store := newExcludeStore(filepath.Join(b.TempDir(), "excludes.json"))
-	for i := 0; i < 1000; i++ {
-		host := fmt.Sprintf("tenant-%04d.example.com", i)
-		rule := fmt.Sprintf("/wp-admin/%04d/*", i)
-		if !store.Add("path", rule, map[string]struct{}{host: {}}) {
-			b.Fatalf("add failed for %s %s", host, rule)
-		}
+func BenchmarkExcludeStoreMatchWAF(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("rules_%d", n), func(b *testing.B) {
+			store := newExcludeStore(filepath.Join(b.TempDir(), "excludes.json"))
+			for i := 0; i < n; i++ {
+				hostRule := fmt.Sprintf("tenant-%04d-*.example.com", i)
+				pathRule := fmt.Sprintf("/wp-admin/%04d/*/index.?hp", i)
+				if !store.Add("path", pathRule, map[string]struct{}{hostRule: {}}) {
+					b.Fatalf("add failed for %s %s", hostRule, pathRule)
+				}
+			}
+
+			host := fmt.Sprintf("tenant-%04d-api.example.com", n-1)
+			path := fmt.Sprintf("/wp-admin/%04d/a/index.php", n-1)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if !store.MatchWAF(host, path) {
+					b.Fatal("expected match")
+				}
+			}
+		})
 	}
+}
 
-	host := "tenant-0999.example.com"
-	path := "/wp-admin/0999/index.php"
+func BenchmarkExcludeStoreMatchChallenge(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("rules_%d", n), func(b *testing.B) {
+			store := newExcludeStore(filepath.Join(b.TempDir(), "challenge_excludes.json"))
+			for i := 0; i < n; i++ {
+				rule := fmt.Sprintf("*tenant-%04d*.example.com", i)
+				if !store.Add("host", rule, nil) {
+					b.Fatalf("add failed for %s", rule)
+				}
+			}
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if !store.MatchWAF(host, path) {
-			b.Fatal("expected match")
-		}
+			host := fmt.Sprintf("edge-tenant-%04d-app.example.com", n-1)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if !store.MatchChallenge(host) {
+					b.Fatal("expected match")
+				}
+			}
+		})
 	}
 }
 
 func BenchmarkLegacyExcludeLoopMatchWAFManyWildcards(b *testing.B) {
-	entries := make([]excludeEntry, 0, 1000)
-	for i := 0; i < 1000; i++ {
-		host := fmt.Sprintf("tenant-%04d.example.com", i)
-		rule := fmt.Sprintf("/wp-admin/%04d/*", i)
-		entries = append(entries, excludeEntry{Type: "path", Value: rule, ScopeHosts: []string{host}})
-	}
+	for _, n := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("rules_%d", n), func(b *testing.B) {
+			entries := make([]excludeEntry, 0, n)
+			for i := 0; i < n; i++ {
+				host := fmt.Sprintf("tenant-%04d-*.example.com", i)
+				rule := fmt.Sprintf("/wp-admin/%04d/*/index.?hp", i)
+				entries = append(entries, excludeEntry{Type: "path", Value: rule, ScopeHosts: []string{host}})
+			}
 
-	host := "tenant-0999.example.com"
-	path := "/wp-admin/0999/index.php"
+			host := fmt.Sprintf("tenant-%04d-api.example.com", n-1)
+			path := fmt.Sprintf("/wp-admin/%04d/a/index.php", n-1)
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if !legacyMatchWAF(entries, host, path) {
-			b.Fatal("expected match")
-		}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if !legacyMatchWAF(entries, host, path) {
+					b.Fatal("expected match")
+				}
+			}
+		})
 	}
 }
 

@@ -43,6 +43,8 @@ type compiledValueMatcher struct {
 	wild          *regexp.Regexp
 }
 
+var hostScopeMatcherCache sync.Map // key(string) -> compiledScopeMatcher
+
 func newExcludeStore(path string) *excludeStore {
 	s := &excludeStore{
 		path:    strings.TrimSpace(path),
@@ -163,7 +165,18 @@ func (s *excludeStore) List() []excludeEntry {
 }
 
 func hostInScope(host string, scopeHosts []string) bool {
-	return compileScopeMatcher(scopeHosts).Match(host)
+	start, profEnabled := globalExcludeProfiler.start()
+	defer globalExcludeProfiler.end("host_in_scope", start, profEnabled)
+	if len(scopeHosts) == 0 {
+		return true
+	}
+	key := strings.Join(scopeHosts, "\x00")
+	if cached, ok := hostScopeMatcherCache.Load(key); ok {
+		return cached.(compiledScopeMatcher).Match(host)
+	}
+	compiled := compileScopeMatcher(scopeHosts)
+	hostScopeMatcherCache.Store(key, compiled)
+	return compiled.Match(host)
 }
 
 func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
@@ -223,6 +236,8 @@ func (m compiledValueMatcher) Match(value string) bool {
 }
 
 func (s *excludeStore) MatchChallenge(host string) bool {
+	start, profEnabled := globalExcludeProfiler.start()
+	defer globalExcludeProfiler.end("match_challenge", start, profEnabled)
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
 		return false
@@ -241,6 +256,8 @@ func (s *excludeStore) MatchChallenge(host string) bool {
 }
 
 func (s *excludeStore) MatchWAF(host, path string) bool {
+	start, profEnabled := globalExcludeProfiler.start()
+	defer globalExcludeProfiler.end("match_waf", start, profEnabled)
 	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
 	if host == "" || path == "" {
