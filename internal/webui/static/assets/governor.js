@@ -104,7 +104,7 @@
     adminOnlyPaths: ADMIN_ONLY_API_PATHS,
   });
   const scopedApi = controller.createApiClient({
-    basePath: '/api',
+    basePath: '/cfm-admin/api',
     isScoped: () => false,
   });
 
