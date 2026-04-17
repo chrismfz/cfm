@@ -36,9 +36,9 @@ const defaultAuthDB = "/var/lib/cfm/auth.db"
 func runAuthCLI() {
 	var dbPath string
 
-	root := &cobra.Command{
-		Use:          "cfm auth",
-		Short:        "Manage cfm web UI users and sessions",
+	authRoot := &cobra.Command{
+		Use:   "auth",
+		Short: "Manage cfm web UI users and sessions",
 		Long: `Manage users, sessions, and auth audit logs for the cfm-admin web UI.
 
 Use this command when running cfm-admin behind a proxy or in direct-access mode.
@@ -61,9 +61,10 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 
   # use a non-default auth database
   cfm auth --db /tmp/auth.db user list`,
-		SilenceUsage: true,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&dbPath, "db", defaultAuthDB, "Auth database path")
+	authRoot.PersistentFlags().StringVar(&dbPath, "db", defaultAuthDB, "Auth database path")
 
 	userCmd := &cobra.Command{Use: "user", Short: "Manage user accounts"}
 	userCmd.AddCommand(
@@ -88,7 +89,16 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 		authCmdLogPurge(&dbPath),
 	)
 
-	root.AddCommand(userCmd, sessionCmd, logCmd)
+	authRoot.AddCommand(userCmd, sessionCmd, logCmd)
+
+	root := &cobra.Command{
+		Use:           "cfm",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.AddCommand(authRoot)
+	root.SetArgs(os.Args[1:])
+
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
