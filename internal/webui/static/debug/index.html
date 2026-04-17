@@ -56,6 +56,21 @@
           <button id="exportTextBtn" class="btn-quiet">Export text</button>
         </div>
         <div id="captureKpiCards" class="chips"></div>
+        <div id="captureSummary" class="summary-grid"></div>
+        <div class="toolbar wrap">
+          <input id="detectorFilterInput" class="input input-wide" type="text" placeholder="filter detector name" />
+          <label class="toolbar-toggle">
+            <input id="nonZeroOnlyToggle" type="checkbox" />
+            show non-zero failures/timeouts only
+          </label>
+          <label for="topNSelect">Top-N by avg latency</label>
+          <select id="topNSelect" class="input">
+            <option value="0">All</option>
+            <option value="5">Top 5</option>
+            <option value="10">Top 10</option>
+            <option value="20">Top 20</option>
+          </select>
+        </div>
         <div class="toolbar">
           <label for="captureDetectorSelect">Detector</label>
           <select id="captureDetectorSelect" class="input input-wide"></select>
