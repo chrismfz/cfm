@@ -39,6 +39,28 @@ func runAuthCLI() {
 	root := &cobra.Command{
 		Use:          "cfm auth",
 		Short:        "Manage cfm web UI users and sessions",
+		Long: `Manage users, sessions, and auth audit logs for the cfm-admin web UI.
+
+Use this command when running cfm-admin behind a proxy or in direct-access mode.
+It lets you bootstrap and maintain local auth state without starting the web UI.`,
+		Example: `  # first-run: create an admin user
+  cfm auth user add -u admin -r admin
+
+  # verify users
+  cfm auth user list
+
+  # reset an admin password
+  cfm auth user passwd -u admin
+
+  # inspect and purge sessions
+  cfm auth session list
+  cfm auth session purge
+
+  # review auth audit log
+  cfm auth log tail -n 50
+
+  # use a non-default auth database
+  cfm auth --db /tmp/auth.db user list`,
 		SilenceUsage: true,
 	}
 	root.PersistentFlags().StringVar(&dbPath, "db", defaultAuthDB, "Auth database path")
