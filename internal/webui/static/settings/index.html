@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin · Security Settings</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:," />
+  <script type="module">
+    import "../assets/shared/constants.js";
+    import "../assets/shared/auth-context.js";
+    import "../assets/shared/auth-mode.js";
+    import "../assets/shared/api-client.js";
+    import "../assets/shared/controller-bootstrap.js";
+    import "../assets/shared/ui-scope.js";
+    import "../assets/settings.js";
+  </script>
+</head>
+<body>
+  <div id="settingsApp" class="landing-shell" v-cloak>
+    <header class="topbar">
+      <h1>Account Security Settings</h1>
+      <nav class="top-nav">
+        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
+        <a class="btn-quiet" href="/cfm-admin/settings/">Settings</a>
+        <a class="btn-quiet" href="/cfm-admin/logout">Logout</a>
+      </nav>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Change password</h2>
+        <p class="muted">Use a strong, unique passphrase. Minimum 12 characters.</p>
+        <div class="toolbar wrap">
+          <input id="currentPassword" class="input input-wide" type="password" autocomplete="current-password" placeholder="Current password" />
+          <input id="newPassword" class="input input-wide" type="password" autocomplete="new-password" placeholder="New password" />
+          <button id="changePasswordBtn">Update password</button>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>TOTP authenticator enrollment</h2>
+        <div class="toolbar wrap">
+          <button id="startTotpBtn">Start enrollment</button>
+          <input id="totpCode" class="input" maxlength="6" inputmode="numeric" placeholder="6-digit code" />
+          <button id="confirmTotpBtn" class="btn-quiet">Confirm enrollment</button>
+        </div>
+        <p class="muted">Enrollment QR is shown once per enrollment start.</p>
+        <div id="totpQRSurface" class="table-wrap" aria-live="polite"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>Recovery codes</h2>
+        <p class="statusline" style="display:block; border-color:#f59e0b; color:#f59e0b;">
+          Warning: Recovery codes are shown one time. Copy or download them immediately.
+        </p>
+        <div class="toolbar wrap">
+          <input id="reauthPassword" class="input input-wide" type="password" autocomplete="current-password" placeholder="Confirm password to regenerate" />
+          <button id="regenRecoveryBtn">Regenerate recovery codes</button>
+        </div>
+        <pre id="recoveryCodes" class="muted">No new recovery codes generated in this session.</pre>
+      </section>
+
+      <section class="card wide">
+        <h2>Status</h2>
+        <p id="settingsStatus" class="statusline" style="display:block"></p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
