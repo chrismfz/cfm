@@ -1,20 +1,23 @@
 package apiserver
 
 import (
-	"bufio"
+	"context"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"cfm/internal/allowlist"
 	cfgpkg "cfm/internal/config"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 )
 
-var ipAllowLookupIP = net.LookupIP
+var ipAllowLookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
 
 // IPAllowMiddleware enforces source IP allowlisting for the API server.
 //
@@ -40,8 +43,8 @@ func IPAllowMiddleware(cfg *cfgpkg.Config, cfgDir string) func(http.Handler) htt
 				return
 			}
 
-			allowedIPs, allowedNets := loadAllowedSources(cfgDir, apiURL)
-			if ipAllowed(clientIP, allowedIPs, allowedNets) {
+			snapshot := loadAllowedSources(r.Context(), cfgDir, apiURL)
+			if ipAllowed(clientIP, snapshot.ExactIPs, snapshot.CIDRNets) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -109,74 +112,26 @@ func ipAllowed(ip net.IP, ipSet map[string]struct{}, nets []*net.IPNet) bool {
 	return false
 }
 
-func loadAllowedSources(cfgDir, apiURL string) (map[string]struct{}, []*net.IPNet) {
-	ips := make(map[string]struct{})
-	var nets []*net.IPNet
-
-	addIP := func(ip net.IP) {
-		if ip == nil {
-			return
-		}
-		if v4 := ip.To4(); v4 != nil {
-			ips[v4.String()] = struct{}{}
-			return
-		}
-		ips[ip.String()] = struct{}{}
+func loadAllowedSources(ctx context.Context, cfgDir, apiURL string) allowlist.Snapshot {
+	opts := allowlist.SnapshotOptions{
+		ResolverTimeout: 2 * time.Second,
+		LookupHost:      ipAllowLookupIP,
 	}
-
-	addToken := func(token string, resolveHost bool) {
-		token = strings.TrimSpace(token)
-		if token == "" {
-			return
-		}
-		if ip := net.ParseIP(token); ip != nil {
-			addIP(ip)
-			return
-		}
-		if strings.Contains(token, "/") {
-			if _, nw, err := net.ParseCIDR(token); err == nil {
-				nets = append(nets, nw)
-			}
-			return
-		}
-		if resolveHost {
-			for _, ip := range resolveHostIPs(token) {
-				addIP(ip)
-			}
-		}
-	}
-
-	parseListFile := func(path string, resolveHost bool) {
-		f, err := os.Open(path) // #nosec G304 -- cfgDir-controlled local config file
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			head := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-			fields := strings.Fields(head)
-			if len(fields) == 0 {
-				continue
-			}
-			addToken(fields[0], resolveHost)
-		}
-	}
-
 	if cfgDir != "" {
-		parseListFile(filepath.Join(cfgDir, "cfm.allow"), true)
-		parseListFile(filepath.Join(cfgDir, "cfm.dyndns"), true)
+		opts.Sources = append(opts.Sources,
+			allowlist.SnapshotSource{Path: filepath.Join(cfgDir, "cfm.allow"), ResolveHostnames: true},
+			allowlist.SnapshotSource{Path: filepath.Join(cfgDir, "cfm.dyndns"), ResolveHostnames: true},
+		)
 	}
-
 	if host := apiURLHost(apiURL); host != "" {
-		addToken(host, true)
+		opts.ExtraTokens = append(opts.ExtraTokens, host)
 	}
-
-	return ips, nets
+	snapshot, err := allowlist.BuildSnapshot(ctx, opts)
+	if err != nil {
+		logging.LogfAPI("[apiserver] allowlist snapshot load failed: %v", err)
+		return allowlist.Snapshot{ExactIPs: map[string]struct{}{}}
+	}
+	return snapshot
 }
 
 func apiURLHost(raw string) string {
@@ -193,16 +148,4 @@ func apiURLHost(raw string) string {
 		return strings.TrimSpace(h)
 	}
 	return raw
-}
-
-func resolveHostIPs(host string) []net.IP {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return nil
-	}
-	ips, err := ipAllowLookupIP(host)
-	if err != nil {
-		return nil
-	}
-	return ips
 }
