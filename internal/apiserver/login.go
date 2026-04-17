@@ -1,19 +1,16 @@
 // internal/apiserver/login.go
 //
-// Login, logout, and 2FA stub route handlers for the cfm admin UI.
+// Login, logout, and MFA route handlers for the cfm admin UI.
 //
 // Routes registered (all public — no auth guard):
-//   GET  /login          → login form HTML
-//   POST /login          → goauth credential check → session → redirect
-//   GET  /logout         → destroy session → redirect /login
-//   POST /logout         → same
-//   GET  /login/verify   → 2FA stub (wired when goauth adds TOTP)
-//   POST /login/verify   → 2FA stub
-//
-// The login form POSTs JSON via fetch(). On success goauth sets the session
-// cookie and the JS redirects to ?next= (default /). On failure the error
-// is shown inline. If the server ever returns requires_2fa:true the JS
-// redirects to /login/verify (future TOTP flow).
+//   GET  /login                   → login form HTML
+//   POST /login                   → goauth credential check → session → redirect/JSON
+//   GET  /logout                  → destroy session → redirect /login
+//   POST /logout                  → same
+//   GET  /login/verify            → MFA verification form HTML
+//   POST /login/verify            → goauth MFA verify handler
+//   POST /login/webauthn/begin    → optional passkey begin
+//   POST /login/webauthn/finish   → optional passkey finish
 
 package apiserver
 
@@ -21,7 +18,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -86,7 +87,7 @@ async function go(){
                            password:document.getElementById('p').value})});
     if(r.ok){
       const d=await r.json().catch(()=>({}));
-      if(d.requires_2fa){location.href=basePath+'/login/verify?next='+encodeURIComponent(next);return}
+      if(d.requires_2fa||d.mfa_required){location.href=basePath+'/login/verify?next='+encodeURIComponent(next);return}
       location.href=next;return;
     }
     const d=await r.json().catch(()=>({}));
@@ -99,8 +100,6 @@ document.addEventListener('keydown',e=>{if(e.key==='Enter')go()});
 </body>
 </html>`
 
-// verifyHTML is a stub for the 2FA verification page.
-// Will be replaced with a real TOTP form when goauth adds TOTP support.
 const verifyHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -112,24 +111,59 @@ const verifyHTML = `<!DOCTYPE html>
 <body>
 <div class="card">
   <div class="logo"><h1>⬡ CFM</h1><p>Two-Factor Authentication</p></div>
-  <p class="note">2FA is not yet configured on this server.</p>
-  <p class="note"><a href="__LOGOUT_PATH__">Return to login</a></p>
+  <div class="err" id="err"></div>
+  <label for="method">Method</label>
+  <select id="method" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-family:inherit;font-size:.9rem;padding:.5rem .75rem;margin-bottom:1rem;outline:none;">
+    <option value="totp">Authenticator app (TOTP)</option>
+    <option value="recovery_code">Recovery code</option>
+  </select>
+  <label for="code">Code</label>
+  <input type="text" id="code" autocomplete="one-time-code" autofocus>
+  <button id="btn" onclick="verify()">Verify</button>
+  <p class="note" style="margin-top:1rem"><a href="__LOGOUT_PATH__">Sign out</a></p>
 </div>
+<script>
+const basePath=__BASE_PATH__;
+const next=__NEXT__;
+function showErr(m){const e=document.getElementById('err');e.textContent=m;e.classList.add('on')}
+async function verify(){
+  const btn=document.getElementById('btn');
+  btn.disabled=true;btn.textContent='Verifying…';
+  document.getElementById('err').classList.remove('on');
+  try{
+    const r=await fetch(basePath+'/login/verify',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({method:document.getElementById('method').value,code:document.getElementById('code').value})});
+    if(r.ok){location.href=next;return}
+    const d=await r.json().catch(()=>({}));
+    showErr(d.error||'Invalid verification code.');
+  }catch(e){showErr('Connection error.');}
+  btn.disabled=false;btn.textContent='Verify';
+}
+document.addEventListener('keydown',e=>{if(e.key==='Enter')verify()});
+</script>
 </body>
 </html>`
+
+var (
+	authLoginHandler = func() http.HandlerFunc {
+		if Auth == nil {
+			return nil
+		}
+		return Auth.LoginHandler()
+	}
+	authLoginMFAVerifyHandler = func() http.HandlerFunc { return authHandlerByName("LoginMFAVerifyHandler") }
+	authLoginWebAuthnBegin    = func() http.HandlerFunc { return authHandlerByName("LoginWebAuthnBeginHandler") }
+	authLoginWebAuthnFinish   = func() http.HandlerFunc { return authHandlerByName("LoginWebAuthnFinishHandler") }
+)
 
 // RegisterLoginRoutes adds all public auth routes to the mux.
 // Must be called before any auth middleware wraps the mux.
 func RegisterLoginRoutes(m *http.ServeMux) {
-	// GET /login → login form
-	// POST /login → goauth credential handler
 	m.HandleFunc("/login", handleLogin)
-
-	// GET+POST /logout → destroy session
 	m.HandleFunc("/logout", handleLogout)
-
-	// GET+POST /login/verify → 2FA stub
 	m.HandleFunc("/login/verify", handleLoginVerify)
+	m.HandleFunc("/login/webauthn/begin", handleLoginWebAuthnBegin)
+	m.HandleFunc("/login/webauthn/finish", handleLoginWebAuthnFinish)
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -146,15 +180,23 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(page))
 
 	case http.MethodPost:
-		if Auth == nil {
+		h := authLoginHandler()
+		if h == nil {
 			http.Error(w, `{"error":"auth not configured"}`, http.StatusServiceUnavailable)
 			return
 		}
-		// goauth.LoginHandler() reads JSON body, validates credentials,
-		// creates session, returns JSON {username, roles} on success.
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		Auth.LoginHandler()(rec, r)
-		recordLoginAttemptResult(r, rec.status)
+
+		rec := httptest.NewRecorder()
+		h(rec, r)
+		recordLoginAttemptResult(r, rec.Code)
+
+		if isBrowser(r) && isMFARequiredResponse(rec.Body.Bytes()) {
+			base := cfmBase(r)
+			next := loginRedirectNext(r, base)
+			http.Redirect(w, r, fmt.Sprintf("%s/login/verify?next=%s", base, url.QueryEscape(next)), http.StatusSeeOther)
+			return
+		}
+		copyRecorderResponse(w, rec)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -163,29 +205,132 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if Auth != nil {
-		Auth.Destroy(r) // destroys session, writes nothing to response
+		Auth.Destroy(r)
 	}
 	base := cfmBase(r)
 	http.Redirect(w, r, fmt.Sprintf("%s/login", base), http.StatusSeeOther)
 }
 
 func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
-	// Stub: render 2FA page for GET, return not-implemented for POST.
-	// Will be replaced with real TOTP handling when goauth adds support.
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		base := cfmBase(r)
 		logoutPath := html.EscapeString(fmt.Sprintf("%s/logout", base))
+		nextJSON, err := json.Marshal(loginRedirectNext(r, base))
+		if err != nil {
+			nextJSON = []byte(`"/"`)
+		}
 		page := strings.ReplaceAll(verifyHTML, "__LOGOUT_PATH__", logoutPath)
+		page = strings.ReplaceAll(page, "__BASE_PATH__", string(mustJSON(base)))
+		page = strings.ReplaceAll(page, "__NEXT__", string(nextJSON))
 		_, _ = w.Write([]byte(page))
 	case http.MethodPost:
-		w.Header().Set("Content-Type", "application/json")
-		http.Error(w, `{"error":"2FA not yet configured"}`, http.StatusNotImplemented)
+		h := authLoginMFAVerifyHandler()
+		if h == nil {
+			http.Error(w, `{"error":"mfa verify not supported"}`, http.StatusNotFound)
+			return
+		}
+		h(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func handleLoginWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
+	h := authLoginWebAuthnBegin()
+	if h == nil {
+		http.NotFound(w, r)
+		return
+	}
+	h(w, r)
+}
+
+func handleLoginWebAuthnFinish(w http.ResponseWriter, r *http.Request) {
+	h := authLoginWebAuthnFinish()
+	if h == nil {
+		http.NotFound(w, r)
+		return
+	}
+	h(w, r)
+}
+
+func authHandlerByName(name string) http.HandlerFunc {
+	if Auth == nil {
+		return nil
+	}
+	method := reflect.ValueOf(Auth).MethodByName(name)
+	if !method.IsValid() {
+		return nil
+	}
+	vals := method.Call(nil)
+	if len(vals) != 1 {
+		return nil
+	}
+	h, _ := vals[0].Interface().(http.HandlerFunc)
+	return h
+}
+
+func copyRecorderResponse(dst http.ResponseWriter, src *httptest.ResponseRecorder) {
+	for k, vv := range src.Header() {
+		for _, v := range vv {
+			dst.Header().Add(k, v)
+		}
+	}
+	dst.WriteHeader(src.Code)
+	_, _ = io.Copy(dst, src.Body)
+}
+
+func isMFARequiredResponse(body []byte) bool {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	if b, ok := payload["mfa_required"].(bool); ok && b {
+		return true
+	}
+	if b, ok := payload["requires_2fa"].(bool); ok && b {
+		return true
+	}
+	if mfaRaw, ok := payload["mfa"].(map[string]any); ok {
+		if b, ok := mfaRaw["required"].(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+func loginRedirectNext(r *http.Request, base string) string {
+	next := strings.TrimSpace(r.URL.Query().Get("next"))
+	if next == "" {
+		if ref, err := url.Parse(r.Referer()); err == nil {
+			next = strings.TrimSpace(ref.Query().Get("next"))
+		}
+	}
+	if next == "" {
+		if base == "" {
+			return "/"
+		}
+		return base + "/"
+	}
+	if !strings.HasPrefix(next, "/") {
+		if base == "" {
+			return "/"
+		}
+		return base + "/"
+	}
+	// Prevent redirect loops back into auth routes.
+	if u, err := url.Parse(next); err == nil {
+		p := u.Path
+		if p == "/login" || p == "/login/verify" || strings.HasSuffix(p, "/login") || strings.HasSuffix(p, "/login/verify") {
+			if base == "" {
+				return "/"
+			}
+			return base + "/"
+		}
+	}
+	return next
 }
 
 // isBrowser returns true if the request looks like a browser (not an API client).
