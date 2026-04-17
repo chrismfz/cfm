@@ -386,7 +386,7 @@ func TestDecodeEmbedCookieRejectsTamperedSignature(t *testing.T) {
 		t.Fatalf("unexpected cookie format: %q", cookieValue)
 	}
 	parts[1] = "tampered"
-	ok, _, _ := decodeEmbedCookie(req, strings.Join(parts, "."))
+	ok, _, _, _ := decodeEmbedCookie(req, strings.Join(parts, "."))
 	if ok {
 		t.Fatalf("expected tampered cookie to be rejected")
 	}
@@ -397,7 +397,7 @@ func TestDecodeEmbedCookieLegacyCutoff(t *testing.T) {
 	embedLegacyCookieCutoff = time.Now().Add(-time.Minute)
 	t.Cleanup(func() { embedLegacyCookieCutoff = prev })
 	raw := base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10) + ":legacytoken"))
-	ok, _, _ := decodeEmbedCookie(nil, raw)
+	ok, _, _, _ := decodeEmbedCookie(nil, raw)
 	if ok {
 		t.Fatalf("expected legacy cookie after cutoff to be rejected")
 	}
@@ -426,5 +426,128 @@ func TestEmbedBootstrapFailsWhenSigningKeyUnavailable(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("expected %d got %d", http.StatusInternalServerError, rr.Code)
+	}
+}
+
+// findEmbedSetCookie returns the Set-Cookie header for the embed bootstrap
+// cookie, or "" if none was issued on this response.
+func findEmbedSetCookie(h http.Header) string {
+	for _, v := range h.Values("Set-Cookie") {
+		if strings.HasPrefix(v, embedBootstrapCookieName+"=") {
+			return v
+		}
+	}
+	return ""
+}
+
+func TestEmbedCookieRollingRenewalNearExpiry(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	// Issue a cookie with only 30s of lifetime left (< 300s threshold).
+	req := httptest.NewRequest(http.MethodGet, "https://host/cfm-admin/webdetector/controls/", nil)
+	cookieValue, err := encodeEmbedCookie(req, st.ID, time.Now().Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("encode cookie: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: cookieValue})
+
+	rr := httptest.NewRecorder()
+	ctx, ok := embedScopedContextFromCookie(rr, req, store)
+	if !ok || ctx == nil {
+		t.Fatalf("expected cookie to authenticate")
+	}
+	setCookie := findEmbedSetCookie(rr.Header())
+	if setCookie == "" {
+		t.Fatalf("expected rolling renewal Set-Cookie header, got none")
+	}
+	if !strings.Contains(setCookie, "Path=/cfm-admin/") {
+		t.Fatalf("renewed cookie missing Path attribute: %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "HttpOnly") {
+		t.Fatalf("renewed cookie missing HttpOnly: %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "Secure") {
+		t.Fatalf("renewed cookie missing Secure: %q", setCookie)
+	}
+}
+
+func TestEmbedCookieRollingRenewalSkippedWhenFresh(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	// Fresh cookie: full TTL remaining, well above renew threshold.
+	req := httptest.NewRequest(http.MethodGet, "https://host/cfm-admin/webdetector/controls/", nil)
+	cookieValue, err := encodeEmbedCookie(req, st.ID, time.Now().Add(embedBootstrapTTL))
+	if err != nil {
+		t.Fatalf("encode cookie: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: cookieValue})
+
+	rr := httptest.NewRecorder()
+	_, ok := embedScopedContextFromCookie(rr, req, store)
+	if !ok {
+		t.Fatalf("expected fresh cookie to authenticate")
+	}
+	if got := findEmbedSetCookie(rr.Header()); got != "" {
+		t.Fatalf("did not expect renewal Set-Cookie on fresh cookie, got %q", got)
+	}
+}
+
+func TestEmbedCookieRollingRenewalSkippedForLegacyCookie(t *testing.T) {
+	// Legacy unsigned cookies must not be re-issued; they should phase out at
+	// embedLegacyCookieCutoff.
+	useTestEmbedCookieSigningKey(t)
+	prevCutoff := embedLegacyCookieCutoff
+	embedLegacyCookieCutoff = time.Now().Add(time.Hour)
+	t.Cleanup(func() { embedLegacyCookieCutoff = prevCutoff })
+
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	raw := base64.RawURLEncoding.EncodeToString([]byte(
+		strconv.FormatInt(time.Now().Add(30*time.Second).Unix(), 10) + ":" + st.Token,
+	))
+	req := httptest.NewRequest(http.MethodGet, "https://host/cfm-admin/webdetector/controls/", nil)
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: raw})
+
+	rr := httptest.NewRecorder()
+	_, ok := embedScopedContextFromCookie(rr, req, store)
+	if !ok {
+		t.Fatalf("expected legacy cookie to authenticate before cutoff")
+	}
+	if got := findEmbedSetCookie(rr.Header()); got != "" {
+		t.Fatalf("did not expect renewal Set-Cookie for legacy cookie, got %q", got)
+	}
+}
+
+func TestEmbedBootstrapTTLMatchesCookieMaxAge(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+	code, err := defaultEmbedExchangeStore.Mint(st.Token, "/cfm-admin/webdetector/controls/", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterEmbedBootstrapEndpoint(mux, store)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/embed/bootstrap?code="+code+"&next=/cfm-admin/webdetector/controls/", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected %d got %d body=%s", http.StatusSeeOther, rr.Code, rr.Body.String())
+	}
+	setCookie := findEmbedSetCookie(rr.Header())
+	if setCookie == "" {
+		t.Fatalf("expected Set-Cookie on bootstrap response")
+	}
+	wantMaxAge := "Max-Age=" + strconv.Itoa(int(embedBootstrapTTL.Seconds()))
+	if !strings.Contains(setCookie, wantMaxAge) {
+		t.Fatalf("expected Set-Cookie to contain %q, got %q", wantMaxAge, setCookie)
 	}
 }

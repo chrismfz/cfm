@@ -242,7 +242,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
 			if !tokenHeaderSupplied {
-				if ctx, ok := embedScopedContextFromCookie(r, store); ok {
+				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
 					if shouldLogEmbedBootstrapAuth(time.Now()) {
 						logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie (sampled_every=15s)")
 					}

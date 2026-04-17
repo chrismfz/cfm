@@ -77,8 +77,21 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			return
 		}
 		// Scoped token: look up to return its full metadata (still no token value).
-		tok, _ := extractToken(r)
-		st, ok := store.Lookup(tok)
+		// Prefer bearer/header token when present; otherwise fall back to the
+		// scoped token ID populated into the request context by the embed
+		// bootstrap cookie auth path.
+		var (
+			st *ScopedToken
+			ok bool
+		)
+		if tok, havetok := extractToken(r); havetok && tok != "" {
+			st, ok = store.Lookup(tok)
+		}
+		if !ok {
+			if id := scopedTokenIDFromContext(r.Context()); id != "" {
+				st, ok = store.LookupByID(id)
+			}
+		}
 		if !ok {
 			apiJSONError(w, "token not found", http.StatusUnauthorized)
 			return
