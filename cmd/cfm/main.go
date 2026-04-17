@@ -255,12 +255,13 @@ Usage:
   cfm allow <IP> [--ttl 1h]
   cfm unallow <IP>
   cfm allow-list [--json]
+  cfm auth ... -- authentication/user-session management for cfm-admin UI (OpenResty proxy and direct UI ports like 6060/6061 /cfm-admin)
   cfm daemon [--interval 20s]
   cfm flush
   cfm which <IP> [--json]   -- search <IP>
-	  cfm asn <AS12345> [--json] -- list announced prefixes for ASN
-	  cfm htpasswd <username> [password] -- print username:{SHA}... for OpenResty auth_basic_user_file
-	  cfm status [--json] [--timings] [--no-ttl] [--cache-ttl 5s]
+  cfm asn <AS12345> [--json] -- list announced prefixes for ASN
+  cfm htpasswd <username> [password] -- legacy quick helper: generate OpenResty/htpasswd-compatible bcrypt ($2y$) entry
+  cfm status [--json] [--timings] [--no-ttl] [--cache-ttl 5s]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
 
