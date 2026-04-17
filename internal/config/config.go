@@ -56,15 +56,21 @@ type ClamConfig struct {
 
 // DebugConfig — controls the internal debug/metrics HTTP server
 type DebugConfig struct {
-	ListenAddress     string        // LISTEN_ADDRESS
-	Port              int           // PORT
-	TLSPort           int           // TLS_PORT (0 = disabled)
-	TLSAddress        string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
-	AuthDBPath        string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
-	AuthSessionDBPath string        // AUTH_SESSION_DB_PATH (optional; separate DB for sessions)
-	SessionTTL        time.Duration // AUTH_SESSION_TTL (default 8h)
-	SecureCookie      bool          // AUTH_SECURE_COOKIE
-	CookieName        string        // AUTH_COOKIE_NAME (default cfm-sid)
+	ListenAddress              string        // LISTEN_ADDRESS
+	Port                       int           // PORT
+	TLSPort                    int           // TLS_PORT (0 = disabled)
+	TLSAddress                 string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
+	AuthDBPath                 string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
+	AuthSessionDBPath          string        // AUTH_SESSION_DB_PATH (optional; separate DB for sessions)
+	SessionTTL                 time.Duration // AUTH_SESSION_TTL (default 8h)
+	SecureCookie               bool          // AUTH_SECURE_COOKIE
+	CookieName                 string        // AUTH_COOKIE_NAME (default cfm-sid)
+	DebugCaptureEnabled        bool          // DEBUG_CAPTURE_ENABLED
+	DebugCaptureDir            string        // DEBUG_CAPTURE_DIR
+	DebugCaptureCooldown       time.Duration // DEBUG_CAPTURE_COOLDOWN
+	DebugCaptureMaxDuration    time.Duration // DEBUG_CAPTURE_MAX_DURATION
+	DebugCaptureRetentionCount int           // DEBUG_CAPTURE_RETENTION_COUNT
+	DebugCaptureRetentionAge   time.Duration // DEBUG_CAPTURE_RETENTION_AGE
 }
 
 // SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
@@ -383,6 +389,23 @@ func (c *Config) SetDefaults() {
 		c.SSLCollectorSock.PEMMax = 50000
 	}
 
+	c.Debug.DebugCaptureEnabled = true
+	if c.Debug.DebugCaptureDir == "" {
+		c.Debug.DebugCaptureDir = "/var/lib/cfm/debug-captures"
+	}
+	if c.Debug.DebugCaptureCooldown <= 0 {
+		c.Debug.DebugCaptureCooldown = 30 * time.Second
+	}
+	if c.Debug.DebugCaptureMaxDuration <= 0 {
+		c.Debug.DebugCaptureMaxDuration = 60 * time.Second
+	}
+	if c.Debug.DebugCaptureRetentionCount <= 0 {
+		c.Debug.DebugCaptureRetentionCount = 32
+	}
+	if c.Debug.DebugCaptureRetentionAge <= 0 {
+		c.Debug.DebugCaptureRetentionAge = 24 * time.Hour
+	}
+
 }
 
 // Validate clamps, normalizes and ensures cross-field coherence.
@@ -627,6 +650,26 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Debug.SecureCookie = val == "1" || strings.EqualFold(val, "true")
 		case "AUTH_COOKIE_NAME":
 			cfg.Debug.CookieName = val
+		case "DEBUG_CAPTURE_ENABLED":
+			cfg.Debug.DebugCaptureEnabled = parseBool(val)
+		case "DEBUG_CAPTURE_DIR":
+			cfg.Debug.DebugCaptureDir = val
+		case "DEBUG_CAPTURE_COOLDOWN":
+			if d := parseDuration(val); d > 0 {
+				cfg.Debug.DebugCaptureCooldown = d
+			}
+		case "DEBUG_CAPTURE_MAX_DURATION":
+			if d := parseDuration(val); d > 0 {
+				cfg.Debug.DebugCaptureMaxDuration = d
+			}
+		case "DEBUG_CAPTURE_RETENTION_COUNT":
+			if n := parseInt(val); n > 0 {
+				cfg.Debug.DebugCaptureRetentionCount = n
+			}
+		case "DEBUG_CAPTURE_RETENTION_AGE":
+			if d := parseDuration(val); d > 0 {
+				cfg.Debug.DebugCaptureRetentionAge = d
+			}
 
 		// --- MaxMind (GeoLite/GeoIP2 updater) ---
 		case "MAXMIND_ENABLED":
@@ -790,6 +833,7 @@ func IsKnownKey(key string) bool {
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
+		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
 		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
 		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",

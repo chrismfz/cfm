@@ -18,6 +18,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/telemetry"
 )
 
 // LogRec is one TSV log line parsed.
@@ -678,6 +679,11 @@ func (e *Engine) Position() core.Position {
 // feeds the long-window ring. It does NOT currently emit Alerts (L7 autotune),
 // only maintains data for webtop/HTTP API.
 func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
+	runStart := time.Now()
+	var runErr error
+	defer func() {
+		telemetry.RecordWebdetRunOnce(time.Since(runStart), runErr != nil && runErr != context.Canceled)
+	}()
 
 	if e.src == nil {
 		return nil
@@ -695,7 +701,8 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// loop alive, but log enough context to diagnose "stuck" behavior.
 		logging.Logf("[webdetector] tail open failed: %v (mode=%s source=%q)",
 			err, e.cfg.Mode, e.sourceLabel())
-		return fmt.Errorf("webdetector: tail open failed: %w", err)
+		runErr = fmt.Errorf("webdetector: tail open failed: %w", err)
+		return runErr
 
 	}
 	defer e.src.Close()
@@ -709,14 +716,17 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			off, ino, ts := e.src.Position()
 			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s source=%q)",
 				err, off, ino, ts, e.cfg.Mode, e.sourceLabel())
-			return fmt.Errorf("webdetector: tail read failed: %w", err)
+			runErr = fmt.Errorf("webdetector: tail read failed: %w", err)
+			return runErr
 		}
 		//chris//
 		//rec, ok := parseTSV(line)
 		rec, ok := e.adapter.Parse(line)
 		if !ok {
+			telemetry.RecordWebdetParseFailure()
 			continue
 		}
+		telemetry.RecordWebdetLineParsed()
 
 		// progress marker: we successfully parsed a record
 		e.progMu.Lock()
@@ -724,7 +734,9 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		e.parsedSinceLog++
 		e.progMu.Unlock()
 
+		ingestStart := time.Now()
 		e.ingest(rec, line)
+		telemetry.RecordWebdetIngestDuration(time.Since(ingestStart))
 	}
 
 	// Ensure buckets age out even when there are no new log lines.

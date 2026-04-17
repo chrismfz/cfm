@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Debug Console</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/debug.js"></script>
+</head>
+<body>
+  <div class="landing-shell">
+    <header class="topbar">
+      <h1>CFM Admin / Debug</h1>
+      <nav class="top-nav">
+        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
+        <a class="btn-quiet" href="/cfm-admin/debug/">Debug</a>
+      </nav>
+      <div class="meta">
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Live telemetry snapshot</h2>
+        <pre id="livePayload">Loading...</pre>
+      </section>
+
+      <section class="card">
+        <h2>Capture controls</h2>
+        <div class="toolbar">
+          <label for="durationSec">Duration</label>
+          <select id="durationSec" class="input">
+            <option value="20">20s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
+          <button id="startCaptureBtn">Start capture</button>
+        </div>
+        <p id="captureMsg" class="statusline"></p>
+      </section>
+
+      <section class="card wide">
+        <h2>Capture status</h2>
+        <div class="toolbar">
+          <input id="captureID" class="input input-wide" type="text" placeholder="capture id" />
+          <button id="loadCaptureBtn" class="btn-quiet">Load capture</button>
+          <button id="exportJSONBtn" class="btn-quiet">Export JSON</button>
+          <button id="exportTextBtn" class="btn-quiet">Export text</button>
+        </div>
+        <pre id="capturePayload">No capture loaded.</pre>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

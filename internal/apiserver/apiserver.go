@@ -109,6 +109,7 @@ func Start(
 		return
 	}
 
+	configureDebugCaptureFromConfig(cfg)
 	m := http.NewServeMux()
 
 	// Publish mux and apply any deferred registrations.
@@ -157,6 +158,9 @@ func Start(
 
 	// ── System status ─────────────────────────────────────────────────────────
 	RegisterSystemStatus(m)
+
+	// ── Debug API (admin-only) ───────────────────────────────────────────────
+	RegisterDebugEndpoints(m)
 
 	// ── MySQL governor ────────────────────────────────────────────────────────
 	if gov != nil {
