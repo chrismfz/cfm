@@ -17,6 +17,7 @@ package webdetector
 import (
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -70,6 +71,33 @@ func validateScopedExcludeWrite(r *http.Request, typ, value string) bool {
 	return scopedExcludeHostAllowed(value, scope)
 }
 
+func filterExcludeListForScope(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
+	if len(entries) == 0 || scope == nil {
+		return entries
+	}
+	out := make([]excludeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.EqualFold(strings.TrimSpace(entry.Type), "host") {
+			// Scoped users can only manage host excludes; hide global/path entries.
+			continue
+		}
+		if !scopedExcludeHostAllowed(entry.Value, scope) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		if strings.Join(out[i].ScopeHosts, ",") != strings.Join(out[j].ScopeHosts, ",") {
+			return strings.Join(out[i].ScopeHosts, ",") < strings.Join(out[j].ScopeHosts, ",")
+		}
+		return out[i].Value < out[j].Value
+	})
+	return out
+}
+
 // GET /api/v1/challenge/exclude/list
 func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
@@ -79,7 +107,8 @@ func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, []excludeEntry{})
 		return
 	}
-	writeJSON(w, http.StatusOK, e.ChallengeExcludeList())
+	scope := vhostScopeFromContext(r.Context())
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ChallengeExcludeList(), scope))
 }
 
 // POST /api/v1/challenge/exclude/add?type=host&value=example.com
@@ -135,7 +164,8 @@ func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []excludeEntry{})
 		return
 	}
-	writeJSON(w, http.StatusOK, e.WAFExcludeList())
+	scope := vhostScopeFromContext(r.Context())
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.WAFExcludeList(), scope))
 }
 
 // POST /api/v1/waf/exclude/add?type=host&value=example.com
