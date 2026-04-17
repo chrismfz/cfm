@@ -156,7 +156,18 @@ func hostInScope(host string, scopeHosts []string) bool {
 	return false
 }
 
-func (s *excludeStore) MatchHost(host string) bool {
+func matchExcludeValue(value, rule string) bool {
+	ok, err := filepath.Match(rule, value)
+	if err == nil && ok {
+		return true
+	}
+	if !strings.ContainsAny(rule, "*?") && strings.Contains(value, rule) {
+		return true
+	}
+	return false
+}
+
+func (s *excludeStore) MatchChallenge(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
 		return false
@@ -170,17 +181,45 @@ func (s *excludeStore) MatchHost(host string) bool {
 		if !hostInScope(host, e.ScopeHosts) {
 			continue
 		}
-		ok, err := filepath.Match(e.Value, host)
-		if err == nil && ok {
-			return true
-		}
-		if !strings.ContainsAny(e.Value, "*?") && strings.Contains(host, e.Value) {
+		if matchExcludeValue(host, e.Value) {
 			return true
 		}
 	}
 	return false
 }
 
+func (s *excludeStore) MatchWAF(host, path string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	path = strings.ToLower(strings.TrimSpace(path))
+	if host == "" || path == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.entries {
+		if !hostInScope(host, e.ScopeHosts) {
+			continue
+		}
+		switch e.Type {
+		case "host":
+			if matchExcludeValue(host, e.Value) {
+				return true
+			}
+		case "path":
+			if matchExcludeValue(path, e.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// MatchHost is retained for backwards compatibility with existing call-sites.
+func (s *excludeStore) MatchHost(host string) bool {
+	return s.MatchChallenge(host)
+}
+
+// MatchPath is retained for backwards compatibility with existing call-sites.
 func (s *excludeStore) MatchPath(host, path string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
@@ -196,11 +235,7 @@ func (s *excludeStore) MatchPath(host, path string) bool {
 		if !hostInScope(host, e.ScopeHosts) {
 			continue
 		}
-		ok, err := filepath.Match(e.Value, path)
-		if err == nil && ok {
-			return true
-		}
-		if !strings.ContainsAny(e.Value, "*?") && strings.Contains(path, e.Value) {
+		if matchExcludeValue(path, e.Value) {
 			return true
 		}
 	}

@@ -10,6 +10,37 @@ import (
 	"time"
 )
 
+func TestNginxBridgeWAFExcludesIncludesScopeHosts(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.ListWAFExcludes = func() []excludeEntry {
+		return []excludeEntry{
+			{Type: "host", Value: "tenant-a.example.com", ScopeHosts: []string{"tenant-a.example.com"}},
+			{Type: "path", Value: "/wp-admin/*"},
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/nginx/waf/excludes", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleWAFExcludes(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload struct {
+		Entries []excludeEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(payload.Entries))
+	}
+	if got := payload.Entries[0].ScopeHosts; len(got) != 1 || got[0] != "tenant-a.example.com" {
+		t.Fatalf("expected scoped entry to preserve scope_hosts, got=%v", got)
+	}
+}
+
 func TestNginxBridgeDecisionIncludesRuleAction(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 	b.RuleDecision = func(in TrafficRuleEvalInput) TrafficRuleEvalResult {

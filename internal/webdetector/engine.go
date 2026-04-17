@@ -3022,7 +3022,7 @@ func (e *Engine) isBypassed(ip string) bool {
 // It resolves ASN / PTR via the engine's enricher if available.
 // ua is best-effort (callers pass "" when unknown; ua=* rules still match).
 func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
-	if e.challengeExcludes != nil && e.challengeExcludes.MatchHost(host) {
+	if e.challengeExcludes != nil && e.challengeExcludes.MatchChallenge(host) {
 		//logging.Logf("[challenge][debug] exclude_store_match ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return true
 	}
@@ -3089,13 +3089,7 @@ func (e *Engine) isWAFExcluded(host, path string) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	if e.wafExcludes.MatchHost(host) {
-		return true
-	}
-	if e.wafExcludes.MatchPath(host, path) {
-		return true
-	}
-	return false
+	return e.wafExcludes.MatchWAF(host, path)
 }
 
 func (e *Engine) WAFExcludeHasAny() bool {

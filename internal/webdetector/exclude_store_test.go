@@ -12,10 +12,10 @@ func TestExcludeStore_ScopedHostMatch(t *testing.T) {
 	if ok := s.Add("host", "app.example.com", scope); !ok {
 		t.Fatalf("expected scoped add to succeed")
 	}
-	if !s.MatchHost("app.example.com") {
+	if !s.MatchChallenge("app.example.com") {
 		t.Fatalf("expected host to match scoped entry")
 	}
-	if s.MatchHost("other.example.com") {
+	if s.MatchChallenge("other.example.com") {
 		t.Fatalf("did not expect host outside scope to match")
 	}
 }
@@ -26,10 +26,10 @@ func TestExcludeStore_ScopedPathMatchRequiresHostInScope(t *testing.T) {
 	if ok := s.Add("path", "/wp-admin/*", scope); !ok {
 		t.Fatalf("expected scoped path add to succeed")
 	}
-	if !s.MatchPath("www.example.com", "/wp-admin/setup") {
+	if !s.MatchWAF("www.example.com", "/wp-admin/setup") {
 		t.Fatalf("expected in-scope host/path to match")
 	}
-	if s.MatchPath("other.example.com", "/wp-admin/setup") {
+	if s.MatchWAF("other.example.com", "/wp-admin/setup") {
 		t.Fatalf("did not expect path match for out-of-scope host")
 	}
 }
@@ -41,7 +41,27 @@ func TestExcludeStore_LoadLegacyEntriesAsGlobal(t *testing.T) {
 		t.Fatalf("write legacy file: %v", err)
 	}
 	s := newExcludeStore(p)
-	if !s.MatchPath("any.example.com", "/legacy") {
+	if !s.MatchWAF("any.example.com", "/legacy") {
 		t.Fatalf("expected legacy entry without scope to be treated global")
+	}
+}
+
+func TestExcludeStore_MatchWAFChecksHostAndPathRulesWithScope(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	scope := map[string]struct{}{"tenant-a.example.com": {}}
+	if ok := s.Add("path", "/wp-admin/*", scope); !ok {
+		t.Fatalf("expected scoped path add to succeed")
+	}
+	if ok := s.Add("host", "tenant-a.example.com", scope); !ok {
+		t.Fatalf("expected scoped host add to succeed")
+	}
+	if !s.MatchWAF("tenant-a.example.com", "/wp-admin/index.php") {
+		t.Fatalf("expected in-scope host+path to match")
+	}
+	if s.MatchWAF("tenant-b.example.com", "/wp-admin/index.php") {
+		t.Fatalf("expected out-of-scope tenant path to not match")
+	}
+	if s.MatchWAF("tenant-b.example.com", "/") {
+		t.Fatalf("expected out-of-scope tenant host to not match")
 	}
 }
