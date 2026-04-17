@@ -178,6 +178,8 @@ internal/
 - MaxMind updater: `MAXMIND_*`
 - API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
   - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.
+  - API ports must stay firewalled by default (`PORT` usually `6060` plaintext and `TLS_PORT` usually `6061`) and should only be reachable from localhost or explicitly allowed sources (for example entries resolved from `cfm.allow` / `cfm.dyndns`).
+  - When `API_URL` is configured, its destination IP is auto-added to the allow set so API callbacks still work with strict firewalling.
 - Debug server: `LISTEN_ADDRESS`, `PORT`
 - MySQL governor log: `MYSQL_LOG_STDOUT`, `MYSQL_LOG_FILE`
 
@@ -750,5 +752,8 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 - In **OpenResty mode**, treat the unix socket as sensitive — enforce tight file permissions and always use the token.
 - When using OpenResty `ssl_certificate_by_lua*`, cache aggressively (shared_dict + lock) and use tight timeouts.
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.
+- Keep API ports blocked by default in your host/network firewall (`6060` and `6061` in typical deployments). Only permit localhost or IPs present in allow lists (`cfm.allow`, `cfm.dyndns`, and trusted management ranges).
+- If `API_URL` is set, CFM auto-allows that endpoint IP so outbound/inbound API sync can function without opening API ports broadly.
+- `AUTH_TOKEN`-protected API access should be treated as local/trusted-only: token auth is expected to work from localhost and allowed IPs (including the resolved `API_URL` IP), not from arbitrary internet sources.
 - The `alter_user` action in `CONN_RULES` requires `GRANT CREATE USER`. This is a powerful privilege — scope it to `'cfm_governor'@'localhost'` only and use a strong password.
 - Always run the governor in `monitor` mode for at least one week before switching to `enforce` on a production server.
