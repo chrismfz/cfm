@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -259,6 +260,7 @@ func Start(
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 	}
+	handler = PprofWriteTimeoutMiddleware(handler)
 	handler = APISecurityAnomalyMiddleware(handler)
 	handler = RequestLogMiddleware(handler)
 
@@ -392,6 +394,57 @@ func isGoAuthSQLiteBusy(err error) bool {
 	return strings.Contains(s, "database is locked") ||
 		strings.Contains(s, "sqlite_busy") ||
 		strings.Contains(s, "(261)")
+}
+
+const (
+	pprofMinWriteTimeout          = 60 * time.Second
+	pprofRequestedSafetyMargin    = 15 * time.Second
+	pprofRequestedSecondsDefault  = 30
+	pprofRequestedSecondsMaxLimit = 300
+)
+
+// PprofWriteTimeoutMiddleware relaxes write deadlines for pprof handlers so
+// CPU/trace captures are not cut short by the global API write timeout.
+func PprofWriteTimeoutMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timeout, ok := pprofRequestTimeout(r)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			logging.Logf("[apiserver] pprof write deadline extension failed for %s: %v", r.URL.Path, err)
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func pprofRequestTimeout(r *http.Request) (time.Duration, bool) {
+	if !strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
+		return 0, false
+	}
+
+	if r.URL.Path == "/debug/pprof/profile" || r.URL.Path == "/debug/pprof/trace" {
+		seconds := parsePprofRequestedSeconds(r.URL.Query().Get("seconds"))
+		return time.Duration(seconds)*time.Second + pprofRequestedSafetyMargin, true
+	}
+
+	return pprofMinWriteTimeout, true
+}
+
+func parsePprofRequestedSeconds(raw string) int {
+	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || seconds <= 0 {
+		return pprofRequestedSecondsDefault
+	}
+	if seconds > pprofRequestedSecondsMaxLimit {
+		return pprofRequestedSecondsMaxLimit
+	}
+	return seconds
 }
 
 // adminOnlyHandler wraps h and returns 403 unless middleware explicitly marked
