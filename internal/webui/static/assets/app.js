@@ -1340,6 +1340,31 @@
         this.historySummary = summary;
         this.historyStats = stats;
       },
+      async fetchScopedActiveChallengeVhosts() {
+        if (!this.hasScopedVhosts) return [];
+        const checks = this.allowedVhosts.map(async (host) => {
+          const status = await this.fetchJSONSafe(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`, null);
+          if (!status || typeof status !== 'object') return null;
+          const manualActive = Boolean(status.manual_active);
+          const autoActive = Boolean(status.auto_active);
+          if (!manualActive && !autoActive) return null;
+          let mode = '';
+          if (manualActive && autoActive) mode = 'manual+auto';
+          else if (manualActive) mode = 'manual';
+          else if (autoActive) mode = 'auto';
+          return {
+            host: String(status.host || host),
+            mode,
+            manual_active: manualActive,
+            auto_active: autoActive,
+            reason: status.reason,
+            expires_at: status.expires_at,
+            auto_since: status.auto_since,
+          };
+        });
+        const rows = await Promise.all(checks);
+        return rows.filter(Boolean);
+      },
 
       async refreshAll() {
         if (this.authUnknown || this.authFailed) return;
@@ -1362,7 +1387,6 @@
           if (this.isScoped) {
             if (this.shouldShow('globalips') || this.shouldShow('ipdrilldown')) skipAdminEndpoints.push('v1/webdet/ip-short');
             if (this.shouldShow('webtop')) skipAdminEndpoints.push('v1/webdet/hot-ips');
-            skipAdminEndpoints.push('v1/challenge/vhosts?status=active&mode=all&limit=500');
           }
 
           const tasks = [
@@ -1382,7 +1406,7 @@
               ? this.fetchJSONSafe(`v1/webdet/hot-ips?limit=${hotLimit}`, [])
               : Promise.resolve([]),
             this.isScoped
-              ? Promise.resolve([])
+              ? this.fetchScopedActiveChallengeVhosts()
               : this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []),
           ];
 
