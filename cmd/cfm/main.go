@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	agentpkg "cfm/internal/agent"
+	"cfm/internal/allowlist"
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	detpkg "cfm/internal/detectors"
@@ -17,7 +17,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -440,7 +439,7 @@ func runDaemon(args []string) {
 
 	applyFile := func(filePath string, isAllow bool) {
 		now := time.Now()
-		entries, err := readEntriesFromFile(filePath)
+		entries, _, err := allowlist.ReadEntriesFromFile(context.Background(), filePath, allowlist.ReadOptions{ResolveHostnames: isAllow, ResolverTimeout: 2 * time.Second})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "read config error:", err)
 			return
@@ -454,7 +453,7 @@ func runDaemon(args []string) {
 			}
 			// διαφοροποίηση key για IP vs CIDR
 			key := ""
-			if e.CIDR != "" {
+			if e.Kind == allowlist.KindCIDR {
 				key = "cidr|" + e.CIDR
 			} else {
 				key = "ip|" + e.IP.String()
@@ -468,9 +467,9 @@ func runDaemon(args []string) {
 					continue
 				}
 			}
-			dur := durationFromEntryNow(e, now)
+			dur := allowlist.DurationFromEntryNow(e, now)
 			if isAllow {
-				if e.CIDR != "" {
+				if e.Kind == allowlist.KindCIDR {
 					if err := be.AddAllowNet(e.CIDR, dur); err != nil {
 						fmt.Fprintln(os.Stderr, "allow apply error:", err)
 						continue
@@ -484,7 +483,7 @@ func runDaemon(args []string) {
 				seenAllow[key] = spec
 			} else {
 
-				if e.CIDR != "" {
+				if e.Kind == allowlist.KindCIDR {
 					if err := be.AddBlockNet(e.CIDR, dur); err != nil {
 						fmt.Fprintln(os.Stderr, "block apply error:", err)
 						continue
@@ -503,7 +502,7 @@ func runDaemon(args []string) {
 	//ignore feature //
 	applyIgnoreFile := func(filePath string) {
 		now := time.Now()
-		entries, err := readEntriesFromFile(filePath)
+		entries, _, err := allowlist.ReadEntriesFromFile(context.Background(), filePath, allowlist.ReadOptions{ResolverTimeout: 2 * time.Second})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "read ignore error:", err)
 			return
@@ -516,7 +515,7 @@ func runDaemon(args []string) {
 				spec = "ttl=" + e.TTL.String()
 			}
 			key := ""
-			if e.CIDR != "" {
+			if e.Kind == allowlist.KindCIDR {
 				key = "cidr|" + e.CIDR
 			} else {
 				key = "ip|" + e.IP.String()
@@ -524,8 +523,8 @@ func runDaemon(args []string) {
 			if prev, ok := seenIgnore[key]; ok && prev == spec {
 				continue
 			}
-			dur := durationFromEntryNow(e, now)
-			if e.CIDR != "" {
+			dur := allowlist.DurationFromEntryNow(e, now)
+			if e.Kind == allowlist.KindCIDR {
 				if err := be.AddIgnoreNet(e.CIDR, dur); err != nil {
 					fmt.Fprintln(os.Stderr, "ignore apply error:", err)
 					continue
@@ -1053,79 +1052,4 @@ func sweepPendingDir(dir string, maxAge time.Duration) {
 			path, time.Since(info.ModTime()).Round(time.Second))
 		_ = os.Remove(path)
 	}
-}
-
-// entries parsing -----------------------------------------------------------
-
-type fileEntry struct {
-	IP    net.IP // single ip
-	CIDR  string // subnet
-	TTL   *time.Duration
-	Until *time.Time
-}
-
-func readEntriesFromFile(path string) ([]fileEntry, error) {
-	path = filepath.Clean(path)
-	b, err := os.ReadFile(path) // #nosec G304 - callers pass constant filenames from a trusted config dir
-
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []fileEntry
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-
-		raw := strings.TrimSpace(sc.Text())
-		if raw == "" || strings.HasPrefix(raw, "#") {
-			continue
-		}
-		// κόψε inline σχόλια: "value ... # comment"
-		head := strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
-		fields := strings.Fields(head)
-		if len(fields) == 0 {
-			continue
-		}
-
-		tok := fields[0]
-		var ttl *time.Duration
-		var until *time.Time
-		for _, f := range fields[1:] {
-			if strings.HasPrefix(f, "ttl=") {
-				if d, err := time.ParseDuration(strings.TrimPrefix(f, "ttl=")); err == nil && d > 0 {
-					ttl = &d
-				}
-			} else if strings.HasPrefix(f, "until=") {
-				if t, err := time.Parse(time.RFC3339, strings.TrimPrefix(f, "until=")); err == nil {
-					until = &t
-				}
-			}
-		}
-		// IP ή CIDR;
-		if strings.ContainsRune(tok, '/') {
-			if _, nw, err := net.ParseCIDR(tok); err == nil {
-				nw.IP = nw.IP.Mask(nw.Mask) // canonicalize
-				out = append(out, fileEntry{CIDR: nw.String(), TTL: ttl, Until: until})
-			}
-			continue
-		}
-		if ip := net.ParseIP(tok); ip != nil {
-			out = append(out, fileEntry{IP: ip, TTL: ttl, Until: until})
-		}
-
-	}
-	return out, nil
-}
-
-func durationFromEntryNow(e fileEntry, now time.Time) *time.Duration {
-	if e.Until != nil {
-		rem := e.Until.Sub(now)
-		if rem > 0 {
-			return &rem
-		}
-		return nil
-	}
-	return e.TTL
 }

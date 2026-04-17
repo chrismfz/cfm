@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,7 @@ func TestIPAllowMiddleware_AllowsFromConfigFilesAndAPIURL(t *testing.T) {
 	}
 
 	oldLookup := ipAllowLookupIP
-	ipAllowLookupIP = func(host string) ([]net.IP, error) {
+	ipAllowLookupIP = func(_ context.Context, host string) ([]net.IP, error) {
 		switch host {
 		case "allow.example":
 			return []net.IP{net.ParseIP("203.0.113.7")}, nil
