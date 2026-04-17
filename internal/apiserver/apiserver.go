@@ -15,7 +15,6 @@
 //
 // Auth stack (outermost → innermost):
 //   Auth.LoadAndSave()   — loads/saves goauth session on every request
-//   IPAllowMiddleware() — source allowlist gate
 //   TokenMiddleware()   — loopback bypass | session | Bearer/Token/X-CFM-Token
 //   mux                — routes
 //
@@ -111,6 +110,13 @@ func Start(
 	}
 
 	configureDebugCaptureFromConfig(cfg)
+
+	SetPreAuthLoginChallengeEnforcer(func(ip net.IP, ttl time.Duration, _ string) error {
+		if be == nil {
+			return fmt.Errorf("firewall backend unavailable")
+		}
+		return be.AddChallenge(ip, &ttl)
+	}, 5*time.Minute)
 	m := http.NewServeMux()
 
 	// Publish mux and apply any deferred registrations.
@@ -259,10 +265,9 @@ func Start(
 
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
-	//   mux → TokenMiddleware → IPAllowMiddleware → LoadAndSave
+	//   mux → TokenMiddleware → LoadAndSave
 	var handler http.Handler
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
-	handler = IPAllowMiddleware(cfg, cfgDir)(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 	}
