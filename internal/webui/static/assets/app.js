@@ -75,6 +75,8 @@
         isScopedMode: false,
         tokenRole: 'viewer',
         allowedVhosts: [],
+        scopedExcludeManagementAllowed: true,
+        scopedPathExcludeAllowed: false,
         meLoaded: false,
         tokens: [],
         tokenForm: { vhosts: '', label: '', ttl: '8760h', role: 'viewer' },
@@ -549,7 +551,8 @@
 
       shouldShow(section) {
         if (this.isScoped) {
-          const hiddenForScoped = new Set(['globalips', 'tokens', 'excludes']);
+          const hiddenForScoped = new Set(['globalips', 'tokens']);
+          if (!this.scopedExcludeManagementAllowed) hiddenForScoped.add('excludes');
           if (hiddenForScoped.has(section)) return false;
         }
         const groups = {
@@ -682,7 +685,7 @@
       },
       async postJSON(path, body) {
         if (!this.canWrite) {
-          const writePrefixes = ['v1/challenge/', 'v1/firewall/', 'v1/webdet/rules/', 'v1/tokens/revoke', 'v1/auth/token', 'v1/webdet/history/prune', 'v1/webdet/history/truncate', 'v1/waf/exclude/', 'v1/challenge/exclude/', 'v1/webdet/vhost-controls/'];
+          const writePrefixes = ['v1/challenge/', 'v1/firewall/', 'v1/webdet/rules/', 'v1/tokens/revoke', 'v1/auth/token', 'v1/webdet/history/prune', 'v1/webdet/history/truncate', 'v1/webdet/vhost-controls/'];
           if (writePrefixes.some((prefix) => String(path).startsWith(prefix))) {
             throw new Error('read-only scoped viewer token');
           }
@@ -819,18 +822,79 @@
       },
 
       async refreshExcludeLists() {
-        if (this.isScoped) {
-          this.challengeExcludes = [];
-          this.wafExcludes = [];
-          this.logScopedAdminSkipsOnce(['v1/challenge/exclude/list', 'v1/waf/exclude/list']);
-          return;
-        }
         const [challengeExcludes, wafExcludes] = await Promise.all([
           this.fetchJSONSafe('v1/challenge/exclude/list', []),
           this.fetchJSONSafe('v1/waf/exclude/list', []),
         ]);
         this.challengeExcludes = this.extractRows(challengeExcludes, 'rows');
         this.wafExcludes = this.extractRows(wafExcludes, 'rows');
+      },
+      isScopedPathExcludeAllowedFromIdentity(me = {}) {
+        const direct = me?.allow_scoped_path_excludes ?? me?.allowScopedPathExcludes ?? me?.scoped_path_excludes_allowed ?? me?.scopedPathExcludesAllowed;
+        if (typeof direct === 'boolean') return direct;
+        const perms = me?.permissions || me?.caps || me?.capabilities;
+        if (perms && typeof perms === 'object') {
+          const nested = perms.allow_scoped_path_excludes ?? perms.allowScopedPathExcludes ?? perms.scoped_path_excludes_allowed ?? perms.scopedPathExcludesAllowed;
+          if (typeof nested === 'boolean') return nested;
+        }
+        return false;
+      },
+      isScopedExcludeManagementAllowedFromIdentity(me = {}) {
+        const direct = me?.allow_scoped_exclude_management ?? me?.allowScopedExcludeManagement ?? me?.scoped_exclude_management_allowed ?? me?.scopedExcludeManagementAllowed;
+        if (typeof direct === 'boolean') return direct;
+        const perms = me?.permissions || me?.caps || me?.capabilities;
+        if (perms && typeof perms === 'object') {
+          const nested = perms.allow_scoped_exclude_management ?? perms.allowScopedExcludeManagement ?? perms.scoped_exclude_management_allowed ?? perms.scopedExcludeManagementAllowed;
+          if (typeof nested === 'boolean') return nested;
+        }
+        return true;
+      },
+      formatApiError(err) {
+        const parts = [];
+        const apiErr = err?.data?.error || err?.data?.message || err?.message;
+        if (apiErr) parts.push(String(apiErr));
+        if (Number(err?.status) > 0) parts.push(`HTTP ${Number(err.status)}`);
+        return parts.length ? parts.join(' · ') : String(err || 'unknown error');
+      },
+      wildcardMatch(pattern, value) {
+        const rx = new RegExp(`^${String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
+        return rx.test(String(value || ''));
+      },
+      isHostAllowedByScope(host) {
+        if (!this.hasScopedVhosts) return true;
+        const target = String(host || '').trim().toLowerCase();
+        if (!target) return false;
+        return this.allowedVhosts.some((allowed) => {
+          const scoped = String(allowed || '').trim().toLowerCase();
+          if (!scoped) return false;
+          if (scoped.includes('*') || scoped.includes('?')) return this.wildcardMatch(scoped, target);
+          return scoped === target;
+        });
+      },
+      enforceScopedExcludeControls() {
+        if (!this.isScoped) {
+          document.querySelectorAll('select option[value="path"]').forEach((opt) => {
+            opt.hidden = false;
+            opt.disabled = false;
+          });
+          return;
+        }
+        const firstAllowed = this.allowedVhosts[0] || '';
+        if (!this.scopedPathExcludeAllowed) {
+          if (this.challengeExcludeType === 'path') this.challengeExcludeType = 'host';
+          if (this.wafExcludeType === 'path') this.wafExcludeType = 'host';
+        }
+        if (firstAllowed && this.challengeExcludeType === 'host' && !String(this.challengeExcludeValue || '').trim()) {
+          this.challengeExcludeValue = firstAllowed;
+        }
+        if (firstAllowed && this.wafExcludeType === 'host' && !String(this.wafExcludeValue || '').trim()) {
+          this.wafExcludeValue = firstAllowed;
+        }
+        const hidePath = !this.scopedPathExcludeAllowed;
+        document.querySelectorAll('select option[value="path"]').forEach((opt) => {
+          opt.hidden = hidePath;
+          opt.disabled = hidePath;
+        });
       },
       async addExclude(scope) {
         const isChallenge = scope === 'challenge';
@@ -840,6 +904,16 @@
           this.actionMsg = `Provide a value for ${scope} exclude.`;
           return;
         }
+        if (this.isScoped) {
+          if (!this.scopedPathExcludeAllowed && type === 'path') {
+            this.actionMsg = `${scope.toUpperCase()} exclude add failed: scoped tokens are limited to type=host.`;
+            return;
+          }
+          if (type === 'host' && !this.isHostAllowedByScope(value)) {
+            this.actionMsg = `${scope.toUpperCase()} exclude add failed: host is outside token scope (${this.allowedVhosts.join(', ') || 'none'}).`;
+            return;
+          }
+        }
         try {
           await this.postJSON(`v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`, {});
           this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}`;
@@ -848,19 +922,23 @@
           await this.refreshExcludeLists();
           await this.refreshHistory();
         } catch (err) {
-          this.actionMsg = `${scope.toUpperCase()} exclude add failed: ${err}`;
+          this.actionMsg = `${scope.toUpperCase()} exclude add failed: ${this.formatApiError(err)}`;
           console.error('[cfm-admin] exclude add failed', scope, err);
         }
       },
       async removeExclude(scope, entry) {
         if (!entry?.value || !entry?.type) return;
+        if (this.isScoped && entry.type === 'host' && !this.isHostAllowedByScope(entry.value)) {
+          this.actionMsg = `${scope.toUpperCase()} exclude remove failed: host is outside token scope (${this.allowedVhosts.join(', ') || 'none'}).`;
+          return;
+        }
         try {
           await this.postJSON(`v1/${scope}/exclude/remove?type=${encodeURIComponent(entry.type)}&value=${encodeURIComponent(entry.value)}`, {});
           this.actionMsg = `${scope.toUpperCase()} exclude removed: ${entry.type}=${entry.value}`;
           await this.refreshExcludeLists();
           await this.refreshHistory();
         } catch (err) {
-          this.actionMsg = `${scope.toUpperCase()} exclude remove failed: ${err}`;
+          this.actionMsg = `${scope.toUpperCase()} exclude remove failed: ${this.formatApiError(err)}`;
           console.error('[cfm-admin] exclude remove failed', scope, err);
         }
       },
@@ -1525,6 +1603,8 @@
         this.isAdmin = !this.isScopedMode;
         this.tokenRole = String(resolvedMe?.role || (this.isAdmin ? 'admin' : 'viewer')).toLowerCase();
         this.allowedVhosts = Array.isArray(resolvedMe?.vhosts) ? resolvedMe.vhosts.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean) : [];
+        this.scopedExcludeManagementAllowed = !this.isScopedMode || this.isScopedExcludeManagementAllowedFromIdentity(resolvedMe);
+        this.scopedPathExcludeAllowed = !this.isScopedMode || this.isScopedPathExcludeAllowedFromIdentity(resolvedMe);
         if (this.hasScopedVhosts) {
           const firstHost = this.allowedVhosts[0];
           if (!this.vhostFocusHost) this.vhostFocusHost = firstHost;
@@ -1533,6 +1613,7 @@
           this.ruleForm.vhosts = this.allowedVhosts.join(', ');
           if (!this.simulateForm.host) this.simulateForm.host = firstHost;
         }
+        this.enforceScopedExcludeControls();
         this.meLoaded = true;
         this.applyScopedChrome();
         const newMode = this.isScopedMode ? 'scoped' : 'global';
@@ -1618,6 +1699,23 @@
           this.drilldown = { error: String(err), host };
           if (shouldScroll) this.scrollToDrilldown();
         }
+      },
+    },
+    watch: {
+      isScopedMode() {
+        this.enforceScopedExcludeControls();
+      },
+      scopedPathExcludeAllowed() {
+        this.enforceScopedExcludeControls();
+      },
+      challengeExcludeType() {
+        this.enforceScopedExcludeControls();
+      },
+      wafExcludeType() {
+        this.enforceScopedExcludeControls();
+      },
+      allowedVhosts() {
+        this.enforceScopedExcludeControls();
       },
     },
 
