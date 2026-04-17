@@ -1,6 +1,7 @@
 (() => {
   function defaultAdminOnlyMatcher(href) {
-    return href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
+    const path = String(href || '').split(/[?#]/, 1)[0];
+    return path === '/cfm-admin' || path === '/cfm-admin/';
   }
 
   function initSharedController({ onModeChanged, onDeferredScopedToken } = {}) {

@@ -35,7 +35,10 @@
     if (!nav) return null;
     const matcher = typeof adminOnlyMatcher === 'function'
       ? adminOnlyMatcher
-      : (href) => href === '/cfm-admin/' || href.includes('/webdetector/controls/') || href.includes('/governor/');
+      : (href) => {
+          const path = String(href || '').split(/[?#]/, 1)[0];
+          return path === '/cfm-admin' || path === '/cfm-admin/';
+        };
 
     nav.querySelectorAll('a[href]').forEach((anchor) => {
       const href = anchor.getAttribute('href') || '';
