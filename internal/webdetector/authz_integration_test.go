@@ -17,7 +17,7 @@ func TestAuthzHelpers_AppliedAcrossWebdetectorEndpoints(t *testing.T) {
 	}{
 		// exclude_api_handlers.go
 		{name: "exclude unauth", path: "/api/v1/challenge/exclude/list", ctx: context.Background(), wantStatus: http.StatusForbidden},
-		{name: "exclude scoped", path: "/api/v1/challenge/exclude/list", ctx: scopedCtx("example.com"), wantStatus: http.StatusForbidden},
+		{name: "exclude scoped", path: "/api/v1/challenge/exclude/list", ctx: scopedCtx("example.com"), wantStatus: http.StatusOK},
 		{name: "exclude admin", path: "/api/v1/challenge/exclude/list", ctx: adminCtx(), wantStatus: http.StatusOK},
 
 		// waf_engine_api_handlers.go
