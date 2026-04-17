@@ -1508,17 +1508,13 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	type item struct {
-		Type  string `json:"type"`
-		Value string `json:"value"`
-	}
-	items := make([]item, 0)
+	items := make([]excludeEntry, 0)
 	if b.ListWAFExcludes != nil {
 		for _, e := range b.ListWAFExcludes() {
 			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
 				continue
 			}
-			items = append(items, item{Type: e.Type, Value: e.Value})
+			items = append(items, e)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

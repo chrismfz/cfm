@@ -278,6 +278,37 @@ func TestWAFExclude_ScopedAndAdmin(t *testing.T) {
 	}
 }
 
+func TestScopedExcludes_DoNotSuppressOtherTenantRuntime(t *testing.T) {
+	e, _ := newStep3Engine(t)
+	tenantA := "tenant-a.example.com"
+	tenantB := "tenant-b.example.com"
+	tenantAScope := map[string]struct{}{tenantA: {}}
+
+	if ok := e.ChallengeExcludeAdd("host", tenantA, tenantAScope); !ok {
+		t.Fatalf("challenge scoped exclude add failed")
+	}
+	if ok := e.WAFExcludeAdd("host", tenantA, tenantAScope); !ok {
+		t.Fatalf("waf scoped host exclude add failed")
+	}
+	if ok := e.WAFExcludeAdd("path", "/wp-admin/*", tenantAScope); !ok {
+		t.Fatalf("waf scoped path exclude add failed")
+	}
+
+	if !e.isExcluded("1.2.3.4", tenantA, "", "rule") {
+		t.Fatalf("expected tenant A challenge exclude to match own host")
+	}
+	if e.isExcluded("1.2.3.4", tenantB, "", "rule") {
+		t.Fatalf("tenant A challenge exclude must not match tenant B host")
+	}
+
+	if !e.isWAFExcluded(tenantA, "/wp-admin/index.php") {
+		t.Fatalf("expected tenant A waf exclude to match own host/path")
+	}
+	if e.isWAFExcluded(tenantB, "/wp-admin/index.php") {
+		t.Fatalf("tenant A waf exclude must not match tenant B host")
+	}
+}
+
 func TestHistoryStats_AdminOnly(t *testing.T) {
 	_, mux := newStep3Engine(t)
 	rr := get(mux, adminCtx(), "/api/v1/webdet/history/stats")
