@@ -141,7 +141,7 @@ function cfm_bootstrap(string $mode): void
         }
     }
 
-    $iframeUrl    = $iframeBase . '/api/v1/embed/bootstrap?code=' . rawurlencode($code)
+    $iframeUrl    = $iframeBase . '/cfm-admin/api/v1/embed/bootstrap?code=' . rawurlencode($code)
         . '&next=' . rawurlencode($iframeNext);
     $parsed       = parse_url($iframeBase);
     $iframeOrigin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
