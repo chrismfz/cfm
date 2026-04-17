@@ -152,7 +152,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		// goauth.LoginHandler() reads JSON body, validates credentials,
 		// creates session, returns JSON {username, roles} on success.
-		Auth.LoginHandler()(w, r)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		Auth.LoginHandler()(rec, r)
+		recordLoginAttemptResult(r, rec.status)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

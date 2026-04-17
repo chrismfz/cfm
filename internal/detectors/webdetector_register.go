@@ -16,7 +16,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
-//	"cfm/internal/clam"
+	// "cfm/internal/clam"
 )
 
 // webdetectorWrapped ensures that background servers (API + challenge)
@@ -133,6 +133,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		if pctx == nil {
 			pctx = ctx
 		}
+
+		apiserver.SetPreAuthLoginChallengeEnabled(w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "")
 
 		// Build per-engine mux and hot-swap it behind a stable proxy route.
 		// This avoids duplicate ServeMux registrations on detector reload while

@@ -111,6 +111,13 @@ func Start(
 	}
 
 	configureDebugCaptureFromConfig(cfg)
+
+	SetPreAuthLoginChallengeEnforcer(func(ip net.IP, ttl time.Duration, _ string) error {
+		if be == nil {
+			return fmt.Errorf("firewall backend unavailable")
+		}
+		return be.AddChallenge(ip, &ttl)
+	}, 5*time.Minute)
 	m := http.NewServeMux()
 
 	// Publish mux and apply any deferred registrations.
