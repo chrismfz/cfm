@@ -284,13 +284,15 @@
     const connRaw = (raw.conn && typeof raw.conn === 'object')
       ? raw.conn
       : ((raw.Conn && typeof raw.Conn === 'object') ? raw.Conn : raw);
+    const rawPct = connRaw.ConnPct ?? connRaw.conn_pct;
+    const parsedPct = Number(rawPct);
     const conn = {
       total: Number(connRaw.TotalConn ?? connRaw.total ?? 0),
       max: Number(connRaw.MaxConn ?? connRaw.max ?? 0),
       active: Number(connRaw.ActiveConn ?? connRaw.active ?? 0),
       sleeping: Number(connRaw.SleepConn ?? connRaw.sleeping ?? 0),
       locked: Number(connRaw.LockedConn ?? connRaw.locked ?? 0),
-      pct: Number(connRaw.ConnPct ?? connRaw.conn_pct ?? 0),
+      pct: (rawPct === null || typeof rawPct === 'undefined' || Number.isNaN(parsedPct)) ? null : parsedPct,
     };
     const perUserRaw = Array.isArray(raw.PerUser) ? raw.PerUser : (Array.isArray(raw.per_user) ? raw.per_user : []);
     const runningRaw = Array.isArray(raw.Running) ? raw.Running : (Array.isArray(raw.running) ? raw.running : []);
@@ -323,12 +325,40 @@
     const conn = state?.conn || {};
     const users = Array.isArray(state?.per_user) ? state.per_user : [];
     const running = Array.isArray(state?.running) ? state.running : [];
+    const hasPct = Number.isFinite(conn.pct);
+    const scopedUsesPct = !st.isScopedMode || hasPct;
+    let chartValue = hasPct ? Number(conn.pct) : null;
+    let chartAxisLabel = 'Conn %';
+    let chartSeriesLabel = 'Connection pressure (%)';
+
+    if (st.isScopedMode && !hasPct) {
+      const fallbackTotal = Number(conn.total);
+      const fallbackActive = Number(conn.active);
+      if (Number.isFinite(fallbackTotal)) {
+        chartValue = fallbackTotal;
+        chartAxisLabel = 'Connections';
+        chartSeriesLabel = 'Scoped connections (total)';
+      } else if (Number.isFinite(fallbackActive)) {
+        chartValue = fallbackActive;
+        chartAxisLabel = 'Active connections';
+        chartSeriesLabel = 'Scoped active connections';
+      } else {
+        chartValue = 0;
+        chartAxisLabel = 'Connections';
+        chartSeriesLabel = 'Scoped connections';
+      }
+    }
+
+    const connPill = hasPct
+      ? `conn=${esc(conn.total || 0)}/${esc(conn.max || 0)} (${esc(conn.pct.toFixed(0))}%)`
+      : `conn=${esc(conn.total || 0)}/${esc(conn.max || 0)}`;
 
     el.kpiRow.innerHTML = `
       <span class="pill">${esc(state?.ts || '-')}</span>
       <span class="pill">mode=${esc(state?.mode || '-')}</span>
       <span class="pill">flavor=${esc(state?.flavor || '-')}</span>
-      <span class="pill">conn=${esc(conn.total || 0)}/${esc(conn.max || 0)} (${esc((conn.pct || 0).toFixed(0))}%)</span>
+      <span class="pill">${connPill}</span>
+      ${hasPct ? '' : '<span class="pill">conn_pct=n/a</span>'}
       <span class="pill">active=${esc(conn.active || 0)}</span>
       <span class="pill">sleep=${esc(conn.sleeping || 0)}</span>
       <span class="pill">locked=${esc(conn.locked || 0)}</span>`;
@@ -356,11 +386,22 @@
         <td><button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
       </tr>`).join('') : '<tr><td colspan="7" class="muted">No running queries.</td></tr>';
 
-    pushSeriesPoint(st.connLabels, st.connPctSeries, safeChartLabel(state?.ts), conn.pct || 0);
+    pushSeriesPoint(st.connLabels, st.connPctSeries, safeChartLabel(state?.ts), chartValue);
     st.connChart?.setOption({
       xAxis: { data: st.connLabels },
-      series: [{ data: st.connPctSeries }],
+      yAxis: { name: chartAxisLabel },
+      series: [{ name: chartSeriesLabel, data: st.connPctSeries }],
     });
+
+    if (el.viewModeTitle) {
+      if (st.isScopedMode && !scopedUsesPct) {
+        el.viewModeTitle.textContent = `Scoped MySQL view · ${chartSeriesLabel}`;
+      } else if (st.isScopedMode) {
+        el.viewModeTitle.textContent = 'Scoped MySQL view · Connection pressure (%)';
+      } else {
+        el.viewModeTitle.textContent = 'Connection pressure (%)';
+      }
+    }
 
     el.connUsersBody.querySelectorAll('button[data-user]').forEach((btn) => {
       btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', ''));
