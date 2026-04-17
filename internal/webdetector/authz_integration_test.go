@@ -22,7 +22,7 @@ func TestAuthzHelpers_AppliedAcrossWebdetectorEndpoints(t *testing.T) {
 
 		// waf_engine_api_handlers.go
 		{name: "waf summary unauth", path: "/api/v1/waf/engine/summary", ctx: context.Background(), wantStatus: http.StatusForbidden},
-		{name: "waf summary scoped", path: "/api/v1/waf/engine/summary", ctx: scopedCtx("example.com"), wantStatus: http.StatusForbidden},
+		{name: "waf summary scoped", path: "/api/v1/waf/engine/summary", ctx: scopedCtx("example.com"), wantStatus: http.StatusOK},
 		{name: "waf summary admin", path: "/api/v1/waf/engine/summary", ctx: adminCtx(), wantStatus: http.StatusOK},
 
 		// challenge_api_handlers.go

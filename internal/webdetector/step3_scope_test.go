@@ -6,10 +6,12 @@
 package webdetector
 
 import (
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newStep3Engine(t *testing.T) (*Engine, *http.ServeMux) {
@@ -240,14 +242,34 @@ func TestHistoryStats_AdminOnly(t *testing.T) {
 	}
 }
 
-func TestWAFEngineSummary_AdminOnly(t *testing.T) {
-	_, mux := newStep3Engine(t)
+func TestWAFEngineSummary_ScopeFiltered(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	hs, err := NewHistoryStore(filepath.Join(t.TempDir(), "history.jsonl"), 30, time.Hour)
+	if err != nil {
+		t.Fatalf("new history store: %v", err)
+	}
+	e.history = hs
+	now := time.Now().Unix()
+	e.history.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "mysite.com", IP: "1.1.1.1", Reason: "WAF_SQLI"})
+	e.history.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "other.com", IP: "2.2.2.2", Reason: "WAF_SQLI"})
+
 	rr := get(mux, adminCtx(), "/api/v1/waf/engine/summary")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin waf summary: expected 200, got %d", rr.Code)
 	}
-	rr = get(mux, scopedCtx("example.com"), "/api/v1/waf/engine/summary")
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped waf summary: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/waf/engine/summary")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped waf summary: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var out wafEngineSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("scoped waf summary unmarshal: %v", err)
+	}
+	if out.TotalEvents != 1 {
+		t.Fatalf("scoped waf summary total_events: expected 1, got %d", out.TotalEvents)
+	}
+	if len(out.Rows) != 1 || out.Rows[0].Host != "mysite.com" {
+		t.Fatalf("scoped waf summary rows: expected only mysite.com row, got %+v", out.Rows)
 	}
 }
