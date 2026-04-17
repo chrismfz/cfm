@@ -78,6 +78,7 @@
     maxPoints: 80,
     eventRows: [],
     isScopedMode: false,
+    identityConfirmedAdmin: false,
   };
   const ADMIN_ONLY_API_PATHS = new Set([
     '/v1/mysql/state',
@@ -138,10 +139,11 @@
     }
 
     return {
-      scoped: Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped)),
-      role: String((me && me.role) || 'admin'),
+      scoped: computedInitialMode === 'scoped' || Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped)),
+      role: me && typeof me.role !== 'undefined' && me.role !== null ? String(me.role) : '',
       tokenBeforeLoadMe,
       tokenAfterLoadMe: latestToken,
+      hasIdentity: Boolean(me),
     };
   }
 
@@ -149,13 +151,23 @@
     const auth = await ensureAuthContext(opts);
     const isScopedMode = auth.scoped;
     const canWrite = !isScopedMode || String(auth.role || '').toLowerCase() !== 'viewer';
+    const roleNormalized = String(auth.role || '').toLowerCase();
+    const tokenPresent = Boolean(String(auth.tokenAfterLoadMe || auth.tokenBeforeLoadMe || '').trim());
+    const isAdminConfirmed = !isScopedMode && auth.hasIdentity && roleNormalized === 'admin';
+    const adminGuardActive = tokenPresent && !isScopedMode && !isAdminConfirmed;
 
     controller.applyScopedChrome({
       scoped: isScopedMode,
       scopedLabel: 'Scoped MySQL view',
     });
 
-    return { isScopedMode, canWrite, role: auth.role };
+    return {
+      isScopedMode,
+      canWrite,
+      role: auth.role,
+      isAdminConfirmed,
+      adminGuardActive,
+    };
   }
 
   function esc(v) {
@@ -697,6 +709,10 @@
   }
 
   async function refreshAdminMode() {
+    if (st.identityConfirmedAdmin !== true && controller.getToken()) {
+      console.info('[cfm-admin governor] admin refresh suppressed: identity role unresolved with token');
+      return refreshScopedMode();
+    }
     showMsg('');
     const checks = await Promise.allSettled([loadLive(), loadOps(), loadSummary(), loadEvents()]);
     const failed = checks
@@ -802,13 +818,15 @@
 
   function applyViewerContext(ctx) {
     setScopedUI(ctx.isScopedMode);
+    st.identityConfirmedAdmin = Boolean(ctx.isAdminConfirmed);
     if (!ctx.canWrite) {
       [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
     }
   }
 
   function configurePollingMode() {
-    st.refreshFn = st.isScopedMode ? refreshScopedMode : refreshAdminMode;
+    const shouldUseScopedRefresh = st.isScopedMode || !st.identityConfirmedAdmin;
+    st.refreshFn = shouldUseScopedRefresh ? refreshScopedMode : refreshAdminMode;
     if (st.auto) startAuto();
   }
 
