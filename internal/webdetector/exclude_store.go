@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -18,9 +19,28 @@ type excludeEntry struct {
 }
 
 type excludeStore struct {
-	mu      sync.RWMutex
-	path    string
-	entries map[string]excludeEntry // key = type:value
+	mu               sync.RWMutex
+	path             string
+	entries          map[string]excludeEntry // key = type:value
+	challengeEntries []compiledExcludeEntry
+	wafEntries       []compiledExcludeEntry
+	pathEntries      []compiledExcludeEntry
+}
+
+type compiledExcludeEntry struct {
+	Type  string
+	Scope compiledScopeMatcher
+	Value compiledValueMatcher
+}
+
+type compiledScopeMatcher struct {
+	exact map[string]struct{}
+	wild  []*regexp.Regexp
+}
+
+type compiledValueMatcher struct {
+	exactContains string
+	wild          *regexp.Regexp
 }
 
 func newExcludeStore(path string) *excludeStore {
@@ -100,6 +120,7 @@ func (s *excludeStore) Add(t, v string, scope map[string]struct{}) bool {
 		return false
 	}
 	s.entries[k] = excludeEntry{Type: t, Value: v, ScopeHosts: scopeHosts, CreatedAt: time.Now()}
+	s.rebuildCompiledLocked()
 	_ = s.saveLocked()
 	return true
 }
@@ -117,6 +138,7 @@ func (s *excludeStore) Remove(t, v string, scope map[string]struct{}) bool {
 		return false
 	}
 	delete(s.entries, k)
+	s.rebuildCompiledLocked()
 	_ = s.saveLocked()
 	return true
 }
@@ -141,15 +163,38 @@ func (s *excludeStore) List() []excludeEntry {
 }
 
 func hostInScope(host string, scopeHosts []string) bool {
+	return compileScopeMatcher(scopeHosts).Match(host)
+}
+
+func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	if len(scopeHosts) == 0 {
-		return true
+		return compiledScopeMatcher{}
+	}
+	m := compiledScopeMatcher{
+		exact: make(map[string]struct{}),
+		wild:  make([]*regexp.Regexp, 0),
 	}
 	for _, scopeHost := range scopeHosts {
-		ok, err := filepath.Match(scopeHost, host)
-		if err == nil && ok {
-			return true
+		if strings.ContainsAny(scopeHost, "*?[]") {
+			if re := compileGlob(scopeHost); re != nil {
+				m.wild = append(m.wild, re)
+			}
+			continue
 		}
-		if !strings.ContainsAny(scopeHost, "*?") && strings.EqualFold(scopeHost, host) {
+		m.exact[scopeHost] = struct{}{}
+	}
+	return m
+}
+
+func (m compiledScopeMatcher) Match(host string) bool {
+	if len(m.exact) == 0 && len(m.wild) == 0 {
+		return true
+	}
+	if _, ok := m.exact[host]; ok {
+		return true
+	}
+	for _, re := range m.wild {
+		if re.MatchString(host) {
 			return true
 		}
 	}
@@ -157,11 +202,21 @@ func hostInScope(host string, scopeHosts []string) bool {
 }
 
 func matchExcludeValue(value, rule string) bool {
-	ok, err := filepath.Match(rule, value)
-	if err == nil && ok {
+	return compileValueMatcher(rule).Match(value)
+}
+
+func compileValueMatcher(rule string) compiledValueMatcher {
+	if strings.ContainsAny(rule, "*?[]") {
+		return compiledValueMatcher{wild: compileGlob(rule)}
+	}
+	return compiledValueMatcher{exactContains: rule}
+}
+
+func (m compiledValueMatcher) Match(value string) bool {
+	if m.wild != nil && m.wild.MatchString(value) {
 		return true
 	}
-	if !strings.ContainsAny(rule, "*?") && strings.Contains(value, rule) {
+	if m.exactContains != "" && strings.Contains(value, m.exactContains) {
 		return true
 	}
 	return false
@@ -174,14 +229,11 @@ func (s *excludeStore) MatchChallenge(host string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if e.Type != "host" {
+	for _, e := range s.challengeEntries {
+		if !e.Scope.Match(host) {
 			continue
 		}
-		if !hostInScope(host, e.ScopeHosts) {
-			continue
-		}
-		if matchExcludeValue(host, e.Value) {
+		if e.Value.Match(host) {
 			return true
 		}
 	}
@@ -196,17 +248,17 @@ func (s *excludeStore) MatchWAF(host, path string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if !hostInScope(host, e.ScopeHosts) {
+	for _, e := range s.wafEntries {
+		if !e.Scope.Match(host) {
 			continue
 		}
 		switch e.Type {
 		case "host":
-			if matchExcludeValue(host, e.Value) {
+			if e.Value.Match(host) {
 				return true
 			}
 		case "path":
-			if matchExcludeValue(path, e.Value) {
+			if e.Value.Match(path) {
 				return true
 			}
 		}
@@ -228,14 +280,11 @@ func (s *excludeStore) MatchPath(host, path string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if e.Type != "path" {
+	for _, e := range s.pathEntries {
+		if !e.Scope.Match(host) {
 			continue
 		}
-		if !hostInScope(host, e.ScopeHosts) {
-			continue
-		}
-		if matchExcludeValue(path, e.Value) {
+		if e.Value.Match(path) {
 			return true
 		}
 	}
@@ -268,6 +317,102 @@ func (s *excludeStore) load() {
 		e.ScopeHosts = normalizeScopeHosts(e.ScopeHosts)
 		s.entries[s.key(t, v, e.ScopeHosts)] = e
 	}
+	s.rebuildCompiledLocked()
+}
+
+func (s *excludeStore) rebuildCompiledLocked() {
+	challenge := make([]compiledExcludeEntry, 0, len(s.entries))
+	waf := make([]compiledExcludeEntry, 0, len(s.entries))
+	pathEntries := make([]compiledExcludeEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		compiled := compiledExcludeEntry{
+			Type:  e.Type,
+			Scope: compileScopeMatcher(e.ScopeHosts),
+			Value: compileValueMatcher(e.Value),
+		}
+		switch e.Type {
+		case "host":
+			challenge = append(challenge, compiled)
+			waf = append(waf, compiled)
+		case "path":
+			pathEntries = append(pathEntries, compiled)
+			waf = append(waf, compiled)
+		}
+	}
+	s.challengeEntries = challenge
+	s.wafEntries = waf
+	s.pathEntries = pathEntries
+}
+
+func compileGlob(pattern string) *regexp.Regexp {
+	reStr, ok := globToRegex(pattern)
+	if !ok {
+		return nil
+	}
+	re, err := regexp.Compile(reStr)
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
+func globToRegex(pattern string) (string, bool) {
+	var b strings.Builder
+	b.WriteString("^")
+	inClass := false
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if inClass {
+			switch c {
+			case ']':
+				inClass = false
+				b.WriteByte(']')
+			case '\\':
+				if i+1 >= len(pattern) {
+					return "", false
+				}
+				i++
+				b.WriteString(regexp.QuoteMeta(string(pattern[i])))
+			default:
+				if c == '^' {
+					b.WriteString(`\\^`)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+			continue
+		}
+		switch c {
+		case '*':
+			b.WriteString(`[^/]*`)
+		case '?':
+			b.WriteString(`[^/]`)
+		case '[':
+			inClass = true
+			b.WriteByte('[')
+			if i+1 < len(pattern) && (pattern[i+1] == '!' || pattern[i+1] == '^') {
+				i++
+				b.WriteByte('^')
+			}
+			if i+1 < len(pattern) && pattern[i+1] == ']' {
+				i++
+				b.WriteString(`\\]`)
+			}
+		case '\\':
+			if i+1 >= len(pattern) {
+				return "", false
+			}
+			i++
+			b.WriteString(regexp.QuoteMeta(string(pattern[i])))
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	if inClass {
+		return "", false
+	}
+	b.WriteString("$")
+	return b.String(), true
 }
 
 func (s *excludeStore) saveLocked() error {
