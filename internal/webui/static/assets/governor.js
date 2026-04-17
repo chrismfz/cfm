@@ -281,16 +281,16 @@
     if (!raw || typeof raw !== 'object') {
       return { conn: {}, per_user: [], running: [], mode: '-', flavor: '-', ts: '-' };
     }
-    if (raw.conn && (Array.isArray(raw.per_user) || Array.isArray(raw.running))) {
-      return raw;
-    }
+    const connRaw = (raw.conn && typeof raw.conn === 'object')
+      ? raw.conn
+      : ((raw.Conn && typeof raw.Conn === 'object') ? raw.Conn : raw);
     const conn = {
-      total: Number(raw.TotalConn ?? raw.total ?? 0),
-      max: Number(raw.MaxConn ?? raw.max ?? 0),
-      active: Number(raw.ActiveConn ?? raw.active ?? 0),
-      sleeping: Number(raw.SleepConn ?? raw.sleeping ?? 0),
-      locked: Number(raw.LockedConn ?? raw.locked ?? 0),
-      pct: Number(raw.ConnPct ?? raw.conn_pct ?? 0),
+      total: Number(connRaw.TotalConn ?? connRaw.total ?? 0),
+      max: Number(connRaw.MaxConn ?? connRaw.max ?? 0),
+      active: Number(connRaw.ActiveConn ?? connRaw.active ?? 0),
+      sleeping: Number(connRaw.SleepConn ?? connRaw.sleeping ?? 0),
+      locked: Number(connRaw.LockedConn ?? connRaw.locked ?? 0),
+      pct: Number(connRaw.ConnPct ?? connRaw.conn_pct ?? 0),
     };
     const perUserRaw = Array.isArray(raw.PerUser) ? raw.PerUser : (Array.isArray(raw.per_user) ? raw.per_user : []);
     const runningRaw = Array.isArray(raw.Running) ? raw.Running : (Array.isArray(raw.running) ? raw.running : []);
