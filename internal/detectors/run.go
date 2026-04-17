@@ -8,6 +8,7 @@ import (
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
+	"cfm/internal/telemetry"
 )
 
 // ctxParentKey stashes the long-lived manager ctx inside the per-run ctx that
@@ -94,7 +95,10 @@ func runOnceSafeTimed(ctx context.Context, d core.PeriodicDetector, out chan<- c
 				done <- fmt.Errorf("%s panic: %v", d.Name(), r)
 			}
 		}()
-		done <- d.RunOnce(ctxRun, out)
+		start := time.Now()
+		err := d.RunOnce(ctxRun, out)
+		telemetry.RecordDetectorRun(d.Name(), time.Since(start), err != nil && err != context.Canceled)
+		done <- err
 	}()
 
 	return &runOnceTask{
@@ -120,6 +124,7 @@ func pollRunOnce(now time.Time, d core.PeriodicDetector, task *runOnceTask) (boo
 		task.timedOut = true
 		task.cancel()
 		logging.Logf("[detectors] %s run timeout after %s", d.Name(), task.timeout)
+		telemetry.RecordDetectorTimeout(d.Name())
 	}
 	return false, nil
 }
