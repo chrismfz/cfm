@@ -125,9 +125,75 @@ test('startTotpEnrollment still supports legacy qr_svg-only payloads', async () 
   assert.equal(started.qr_svg, '<svg>legacy</svg>');
 });
 
+test('startTotpEnrollment supports otpauth_uri-only payloads', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Test?secret=URI_ONLY' }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const started = await startTotpEnrollment();
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Test?secret=URI_ONLY');
+});
+
+test('startTotpEnrollment supports otpauth_url alias payloads', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return { ok: true, status: 200, json: async () => ({ otpauth_url: 'otpauth://totp/Test?secret=URL_ALIAS' }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const started = await startTotpEnrollment();
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Test?secret=URL_ALIAS');
+});
+
+test('startTotpEnrollment supports nested data payloads', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { otpauth_url: 'otpauth://totp/Test?secret=NESTED' } }),
+      };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const started = await startTotpEnrollment();
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Test?secret=NESTED');
+});
+
 test('unauthorized API responses bubble as errors', async () => {
   global.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) });
   await assert.rejects(() => startTotpEnrollment(), /unauthorized/);
+});
+
+test('startTotpEnrollment logs payload keys when expected enrollment fields are missing', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok', data: { message: 'started' } }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const originalWarn = console.warn;
+  const warnCalls = [];
+  console.warn = (...args) => warnCalls.push(args);
+
+  try {
+    await assert.rejects(() => startTotpEnrollment(), /Enrollment payload missing expected fields/);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnCalls.length, 1);
+  assert.equal(warnCalls[0][0], '[TOTP enroll/start] Enrollment payload missing expected fields');
+  assert.deepEqual(warnCalls[0][1], {
+    payloadKeys: ['status', 'data'],
+    nestedDataKeys: ['message'],
+  });
 });
 
 function createSettingsDOM() {

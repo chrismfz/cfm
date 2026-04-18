@@ -48,12 +48,31 @@
 
   async function startTotpEnrollment() {
     const payload = await requestJSON('/cfm-admin/mfa/totp/enroll/start', { body: {} });
-    const hasOtpauthURI = typeof payload?.otpauth_uri === 'string' && payload.otpauth_uri.trim() !== '';
-    const hasQRSVG = typeof payload?.qr_svg === 'string' && payload.qr_svg.trim() !== '';
-    if (!hasOtpauthURI && !hasQRSVG) {
-      throw new Error('Enrollment start succeeded but both otpauth_uri and QR payload were missing.');
+    const nested = payload && typeof payload.data === 'object' ? payload.data : {};
+
+    const readFirstNonEmpty = (...values) => {
+      for (const value of values) {
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
+      return '';
+    };
+
+    const otpauthURI = readFirstNonEmpty(payload?.otpauth_uri, payload?.otpauth_url, nested?.otpauth_uri, nested?.otpauth_url);
+    const qrPayload = readFirstNonEmpty(payload?.qr_svg, payload?.qr, payload?.qr_data_url, nested?.qr_svg, nested?.qr, nested?.qr_data_url);
+
+    if (!otpauthURI && !qrPayload) {
+      const payloadKeys = Object.keys(payload || {});
+      const nestedDataKeys = Object.keys(nested || {});
+      console.warn('[TOTP enroll/start] Enrollment payload missing expected fields', { payloadKeys, nestedDataKeys });
+      throw new Error('Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields).');
     }
-    return payload;
+
+    return {
+      ...(payload || {}),
+      otpauth_uri: otpauthURI || payload?.otpauth_uri || '',
+      qr_svg: qrPayload || payload?.qr_svg || '',
+      qr: qrPayload || payload?.qr || '',
+    };
   }
 
   async function confirmTotpEnrollment({ code }) {
@@ -102,8 +121,21 @@
         const qrSVG = typeof result?.qr_svg === 'string' ? result.qr_svg.trim() : '';
         const otpauthURI = typeof result?.otpauth_uri === 'string' ? result.otpauth_uri.trim() : '';
 
-        if (qrSVG) {
+        if (qrSVG.startsWith('<svg')) {
           totpQRSurface.innerHTML = qrSVG;
+        } else if (qrSVG.startsWith('data:image/')) {
+          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" />`;
+        } else if (qrSVG) {
+          const escapedQR = qrSVG
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+          totpQRSurface.innerHTML = `
+            <p style="margin-bottom:0.5rem;">Scan is unavailable. Use this QR payload manually:</p>
+            <pre style="white-space:pre-wrap;word-break:break-all;">${escapedQR}</pre>
+          `;
         } else if (otpauthURI) {
           const escapedURI = otpauthURI
             .replace(/&/g, '&amp;')
