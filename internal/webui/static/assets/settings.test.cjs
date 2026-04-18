@@ -37,13 +37,13 @@ test('start/confirm/regenerate mfa happy path', async () => {
   const calls = [];
   global.fetch = async (url) => {
     calls.push(url);
-    if (url.endsWith('/start')) {
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
       return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Example?secret=ABC123' }) };
     }
-    if (url.endsWith('/confirm')) {
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/confirm') {
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     }
-    if (url.endsWith('/regenerate')) {
+    if (url === '/cfm-admin/me/security/recovery-codes/regenerate') {
       return { ok: true, status: 200, json: async () => ({ codes: ['A1-B2-C3'] }) };
     }
     throw new Error(`unexpected url ${url}`);
@@ -59,8 +59,50 @@ test('start/confirm/regenerate mfa happy path', async () => {
   assert.deepEqual(getRecoveryCodes(regenerated), ['A1-B2-C3']);
 
   assert.deepEqual(calls, [
+    '/cfm-admin/me/security/mfa/totp/enroll/start',
+    '/cfm-admin/me/security/mfa/totp/enroll/confirm',
+    '/cfm-admin/me/security/recovery-codes/regenerate',
+  ]);
+});
+
+test('totp/recovery endpoints fall back to legacy cfm routes when new routes are unavailable', async () => {
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(url);
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    }
+    if (url === '/cfm-admin/mfa/totp/enroll/start') {
+      return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Legacy?secret=START' }) };
+    }
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/confirm') {
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    }
+    if (url === '/cfm-admin/mfa/totp/enroll/confirm') {
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    if (url === '/cfm-admin/me/security/recovery-codes/regenerate') {
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    }
+    if (url === '/cfm-admin/mfa/recovery/regenerate') {
+      return { ok: true, status: 200, json: async () => ({ codes: ['LEGACY-CODE'] }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const started = await startTotpEnrollment();
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Legacy?secret=START');
+  const confirmed = await confirmTotpEnrollment({ code: '123456' });
+  assert.equal(confirmed.ok, true);
+  const regenerated = await regenerateRecoveryCodes({ password: 'current-password' });
+  assert.deepEqual(getRecoveryCodes(regenerated), ['LEGACY-CODE']);
+
+  assert.deepEqual(calls, [
+    '/cfm-admin/me/security/mfa/totp/enroll/start',
     '/cfm-admin/mfa/totp/enroll/start',
+    '/cfm-admin/me/security/mfa/totp/enroll/confirm',
     '/cfm-admin/mfa/totp/enroll/confirm',
+    '/cfm-admin/me/security/recovery-codes/regenerate',
     '/cfm-admin/mfa/recovery/regenerate',
   ]);
 });
@@ -191,9 +233,41 @@ test('startTotpEnrollment logs payload keys when expected enrollment fields are 
   assert.equal(warnCalls.length, 1);
   assert.equal(warnCalls[0][0], '[TOTP enroll/start] Enrollment payload missing expected fields');
   assert.deepEqual(warnCalls[0][1], {
+    endpoint: '/cfm-admin/me/security/mfa/totp/enroll/start',
     payloadKeys: ['status', 'data'],
     nestedDataKeys: ['message'],
   });
+});
+
+test('startTotpEnrollment surfaces non-JSON success responses with endpoint context', async () => {
+  global.fetch = async (url) => {
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error('invalid json');
+        },
+        text: async () => '<html>route mismatch</html>',
+      };
+    }
+    if (url === '/cfm-admin/mfa/totp/enroll/start') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error('invalid json');
+        },
+        text: async () => '<html>route mismatch legacy</html>',
+      };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  await assert.rejects(
+    () => startTotpEnrollment(),
+    /Security endpoint returned non-JSON payload \(HTTP 200, path=\/cfm-admin\/mfa\/totp\/enroll\/start, body=<html>route mismatch legacy<\/html>\)\./
+  );
 });
 
 function createSettingsDOM() {

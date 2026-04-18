@@ -1,4 +1,10 @@
 (() => {
+  const ROUTES = {
+    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start', '/cfm-admin/mfa/totp/enroll/start'],
+    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm', '/cfm-admin/mfa/totp/enroll/confirm'],
+    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate', '/cfm-admin/mfa/recovery/regenerate'],
+  };
+
   function normalizeCode(raw) {
     return String(raw || '').replace(/\D+/g, '').slice(0, 6);
   }
@@ -23,7 +29,28 @@
       const error = await parseAPIError(res, 'Security request failed');
       throw new Error(error);
     }
-    return res.json().catch(() => ({}));
+    try {
+      return await res.json();
+    } catch (_) {
+      const rawText = typeof res.text === 'function' ? await res.text().catch(() => '') : '';
+      const snippet = String(rawText || '').trim().slice(0, 200);
+      throw new Error(
+        `Security endpoint returned non-JSON payload (HTTP ${res.status}, path=${path}${snippet ? `, body=${snippet}` : ''}).`
+      );
+    }
+  }
+
+  async function requestJSONWithFallback(paths, options = {}) {
+    let lastErr;
+    for (const path of paths) {
+      try {
+        const payload = await requestJSON(path, options);
+        return { payload, endpoint: path };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('Security request failed');
   }
 
   async function updatePassword({ currentPassword, newPassword }) {
@@ -47,7 +74,7 @@
   }
 
   async function startTotpEnrollment() {
-    const payload = await requestJSON('/cfm-admin/mfa/totp/enroll/start', { body: {} });
+    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body: {} });
     const nested = payload && typeof payload.data === 'object' ? payload.data : {};
 
     const readFirstNonEmpty = (...values) => {
@@ -63,8 +90,10 @@
     if (!otpauthURI && !qrPayload) {
       const payloadKeys = Object.keys(payload || {});
       const nestedDataKeys = Object.keys(nested || {});
-      console.warn('[TOTP enroll/start] Enrollment payload missing expected fields', { payloadKeys, nestedDataKeys });
-      throw new Error('Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields).');
+      console.warn('[TOTP enroll/start] Enrollment payload missing expected fields', { endpoint, payloadKeys, nestedDataKeys });
+      throw new Error(
+        `Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields; endpoint=${endpoint}; keys=${payloadKeys.join(',') || 'none'}; nested=${nestedDataKeys.join(',') || 'none'}).`
+      );
     }
 
     return {
@@ -78,13 +107,15 @@
   async function confirmTotpEnrollment({ code }) {
     const normalized = normalizeCode(code);
     if (normalized.length !== 6) throw new Error('Enter a valid 6-digit authenticator code.');
-    return requestJSON('/cfm-admin/mfa/totp/enroll/confirm', { body: { code: normalized } });
+    const { payload } = await requestJSONWithFallback(ROUTES.totpEnrollConfirm, { body: { code: normalized } });
+    return payload;
   }
 
   async function regenerateRecoveryCodes({ password }) {
     const trimmed = String(password || '').trim();
     if (!trimmed) throw new Error('Re-authentication password is required to regenerate recovery codes.');
-    return requestJSON('/cfm-admin/mfa/recovery/regenerate', { body: { password: trimmed } });
+    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: trimmed } });
+    return payload;
   }
 
   function getRecoveryCodes(payload) {
