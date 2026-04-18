@@ -1,4 +1,10 @@
 (() => {
+  const ROUTES = {
+    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start', '/cfm-admin/mfa/totp/enroll/start'],
+    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm', '/cfm-admin/mfa/totp/enroll/confirm'],
+    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate', '/cfm-admin/mfa/recovery/regenerate'],
+  };
+
   function normalizeCode(raw) {
     return String(raw || '').replace(/\D+/g, '').slice(0, 6);
   }
@@ -23,7 +29,28 @@
       const error = await parseAPIError(res, 'Security request failed');
       throw new Error(error);
     }
-    return res.json().catch(() => ({}));
+    try {
+      return await res.json();
+    } catch (_) {
+      const rawText = typeof res.text === 'function' ? await res.text().catch(() => '') : '';
+      const snippet = String(rawText || '').trim().slice(0, 200);
+      throw new Error(
+        `Security endpoint returned non-JSON payload (HTTP ${res.status}, path=${path}${snippet ? `, body=${snippet}` : ''}).`
+      );
+    }
+  }
+
+  async function requestJSONWithFallback(paths, options = {}) {
+    let lastErr;
+    for (const path of paths) {
+      try {
+        const payload = await requestJSON(path, options);
+        return { payload, endpoint: path };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('Security request failed');
   }
 
   async function updatePassword({ currentPassword, newPassword }) {
@@ -47,25 +74,48 @@
   }
 
   async function startTotpEnrollment() {
-    const payload = await requestJSON('/cfm-admin/mfa/totp/enroll/start', { body: {} });
-    const hasOtpauthURI = typeof payload?.otpauth_uri === 'string' && payload.otpauth_uri.trim() !== '';
-    const hasQRSVG = typeof payload?.qr_svg === 'string' && payload.qr_svg.trim() !== '';
-    if (!hasOtpauthURI && !hasQRSVG) {
-      throw new Error('Enrollment start succeeded but both otpauth_uri and QR payload were missing.');
+    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body: {} });
+    const nested = payload && typeof payload.data === 'object' ? payload.data : {};
+
+    const readFirstNonEmpty = (...values) => {
+      for (const value of values) {
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
+      return '';
+    };
+
+    const otpauthURI = readFirstNonEmpty(payload?.otpauth_uri, payload?.otpauth_url, nested?.otpauth_uri, nested?.otpauth_url);
+    const qrPayload = readFirstNonEmpty(payload?.qr_svg, payload?.qr, payload?.qr_data_url, nested?.qr_svg, nested?.qr, nested?.qr_data_url);
+
+    if (!otpauthURI && !qrPayload) {
+      const payloadKeys = Object.keys(payload || {});
+      const nestedDataKeys = Object.keys(nested || {});
+      console.warn('[TOTP enroll/start] Enrollment payload missing expected fields', { endpoint, payloadKeys, nestedDataKeys });
+      throw new Error(
+        `Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields; endpoint=${endpoint}; keys=${payloadKeys.join(',') || 'none'}; nested=${nestedDataKeys.join(',') || 'none'}).`
+      );
     }
-    return payload;
+
+    return {
+      ...(payload || {}),
+      otpauth_uri: otpauthURI || payload?.otpauth_uri || '',
+      qr_svg: qrPayload || payload?.qr_svg || '',
+      qr: qrPayload || payload?.qr || '',
+    };
   }
 
   async function confirmTotpEnrollment({ code }) {
     const normalized = normalizeCode(code);
     if (normalized.length !== 6) throw new Error('Enter a valid 6-digit authenticator code.');
-    return requestJSON('/cfm-admin/mfa/totp/enroll/confirm', { body: { code: normalized } });
+    const { payload } = await requestJSONWithFallback(ROUTES.totpEnrollConfirm, { body: { code: normalized } });
+    return payload;
   }
 
   async function regenerateRecoveryCodes({ password }) {
     const trimmed = String(password || '').trim();
     if (!trimmed) throw new Error('Re-authentication password is required to regenerate recovery codes.');
-    return requestJSON('/cfm-admin/mfa/recovery/regenerate', { body: { password: trimmed } });
+    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: trimmed } });
+    return payload;
   }
 
   function getRecoveryCodes(payload) {
@@ -102,8 +152,21 @@
         const qrSVG = typeof result?.qr_svg === 'string' ? result.qr_svg.trim() : '';
         const otpauthURI = typeof result?.otpauth_uri === 'string' ? result.otpauth_uri.trim() : '';
 
-        if (qrSVG) {
+        if (qrSVG.startsWith('<svg')) {
           totpQRSurface.innerHTML = qrSVG;
+        } else if (qrSVG.startsWith('data:image/')) {
+          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" />`;
+        } else if (qrSVG) {
+          const escapedQR = qrSVG
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+          totpQRSurface.innerHTML = `
+            <p style="margin-bottom:0.5rem;">Scan is unavailable. Use this QR payload manually:</p>
+            <pre style="white-space:pre-wrap;word-break:break-all;">${escapedQR}</pre>
+          `;
         } else if (otpauthURI) {
           const escapedURI = otpauthURI
             .replace(/&/g, '&amp;')
@@ -111,8 +174,17 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+          const qrImageURL = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(
+            otpauthURI
+          )}`;
           totpQRSurface.innerHTML = `
-            <p style="margin-bottom:0.5rem;">Scan is unavailable. Use this enrollment URI manually:</p>
+            <p style="margin-bottom:0.5rem;">QR generated from enrollment URI (fallback mode):</p>
+            <img
+              alt="Generated TOTP enrollment QR code"
+              src="${qrImageURL}"
+              style="display:block;max-width:220px;border:1px solid rgba(255,255,255,0.15);border-radius:0.5rem;margin-bottom:0.75rem;"
+            />
+            <p style="margin-bottom:0.5rem;">If image loading is blocked, use this enrollment URI manually:</p>
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedURI}</pre>
           `;
         }
