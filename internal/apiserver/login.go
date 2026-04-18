@@ -74,6 +74,7 @@ const loginHTML = `<!DOCTYPE html>
 </div>
 <script>
 const basePath=__BASE_PATH__;
+const mfaVerifyEnabled=__MFA_VERIFY_ENABLED__;
 const next=new URLSearchParams(location.search).get('next')||'/';
 function showErr(m){const e=document.getElementById('err');e.textContent=m;e.classList.add('on')}
 async function go(){
@@ -87,7 +88,7 @@ async function go(){
                            password:document.getElementById('p').value})});
     if(r.ok){
       const d=await r.json().catch(()=>({}));
-      if(d.requires_2fa||d.mfa_required){location.href=basePath+'/login/verify?next='+encodeURIComponent(next);return}
+      if((d.requires_2fa||d.mfa_required) && mfaVerifyEnabled){location.href=basePath+'/login/verify?next='+encodeURIComponent(next);return}
       location.href=next;return;
     }
     const d=await r.json().catch(()=>({}));
@@ -177,6 +178,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			baseJSON = []byte(`""`)
 		}
 		page := strings.ReplaceAll(loginHTML, "__BASE_PATH__", string(baseJSON))
+		page = strings.ReplaceAll(page, "__MFA_VERIFY_ENABLED__", string(mustJSON(mfaLoginVerifyEnabled())))
 		_, _ = w.Write([]byte(page))
 
 	case http.MethodPost:
@@ -190,7 +192,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		h(rec, r)
 		recordLoginAttemptResult(r, rec.Code)
 
-		if isBrowser(r) && isMFARequiredResponse(rec.Body.Bytes()) {
+		if isBrowser(r) && mfaLoginVerifyEnabled() && isMFARequiredResponse(rec.Body.Bytes()) {
 			base := cfmBase(r)
 			next := loginRedirectNext(r, base)
 			http.Redirect(w, r, fmt.Sprintf("%s/login/verify?next=%s", base, url.QueryEscape(next)), http.StatusSeeOther)
@@ -214,6 +216,10 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !mfaLoginVerifyEnabled() {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		base := cfmBase(r)
@@ -227,6 +233,10 @@ func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 		page = strings.ReplaceAll(page, "__NEXT__", string(nextJSON))
 		_, _ = w.Write([]byte(page))
 	case http.MethodPost:
+		if !mfaLoginVerifyEnabled() {
+			http.Error(w, `{"error":"mfa verify disabled by rollout"}`, http.StatusNotFound)
+			return
+		}
 		h := authLoginMFAVerifyHandler()
 		if h == nil {
 			http.Error(w, `{"error":"mfa verify not supported"}`, http.StatusNotFound)
