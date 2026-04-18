@@ -56,6 +56,11 @@ button:disabled { opacity: .65; cursor: default; }
   border: 1px solid var(--border);
   color: var(--fg);
 }
+.btn-nav-active {
+  border-color: var(--accent);
+  color: #d8ecff;
+  background: rgba(77, 163, 255, .14);
+}
 .btn-sm {
   padding: .22rem .5rem;
   font-size: .78rem;

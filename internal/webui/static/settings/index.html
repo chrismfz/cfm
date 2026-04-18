@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CFM Admin · Security Settings</title>
+  <title>CFM Admin · User Settings</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
   <link rel="icon" href="data:," />
   <script type="module">
     import "../assets/shared/constants.js";
@@ -19,12 +20,8 @@
 <body>
   <div id="settingsApp" class="landing-shell">
     <header class="topbar">
-      <h1>Account Security Settings</h1>
-      <nav class="top-nav">
-        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
-        <a class="btn-quiet" href="/cfm-admin/settings/">Settings</a>
-        <a class="btn-quiet" href="/cfm-admin/logout">Logout</a>
-      </nav>
+      <h1>User Settings</h1>
+            <nav class="top-nav" data-shared-nav></nav>
     </header>
 
     <main class="layout">
