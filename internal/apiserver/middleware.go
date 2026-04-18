@@ -177,10 +177,16 @@ func isEmbedShellBootstrapRequest(r *http.Request) bool {
 	if strings.HasPrefix(path, "/api/") || path == "/login" || strings.HasPrefix(path, "/login/") || path == "/logout" {
 		return false
 	}
-	if strings.TrimSpace(r.URL.Query().Get("cfmExpectedOrigin")) == "" {
-		return false
+	// Primary signal on first load (from embed bootstrap redirect).
+	if strings.TrimSpace(r.URL.Query().Get("cfmExpectedOrigin")) != "" {
+		return strings.Contains(r.Header.Get("Accept"), "text/html")
 	}
-	return strings.Contains(r.Header.Get("Accept"), "text/html")
+	// Subsequent in-iframe navigations often drop query params; keep allowing
+	// HTML shell routes when browser explicitly marks iframe destination.
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")), "iframe") {
+		return strings.Contains(r.Header.Get("Accept"), "text/html")
+	}
+	return false
 }
 
 // cPanel plugin actor-assertion route: allow request through auth middleware
