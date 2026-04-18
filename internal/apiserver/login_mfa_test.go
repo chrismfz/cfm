@@ -20,6 +20,13 @@ func stubAuthHandlers(t *testing.T, login func() http.HandlerFunc, verify func()
 	})
 }
 
+func withMFALoginVerifyEnabled(t *testing.T, enabled bool) {
+	t.Helper()
+	orig := activeMFARolloutPolicy
+	activeMFARolloutPolicy.loginVerifyEnabled = enabled
+	t.Cleanup(func() { activeMFARolloutPolicy = orig })
+}
+
 func TestHandleLoginPostPasswordOnlySuccess(t *testing.T) {
 	stubAuthHandlers(t,
 		func() http.HandlerFunc {
@@ -47,6 +54,7 @@ func TestHandleLoginPostPasswordOnlySuccess(t *testing.T) {
 }
 
 func TestHandleLoginPostMFARequiredBrowserRedirectsToVerify(t *testing.T) {
+	withMFALoginVerifyEnabled(t, true)
 	stubAuthHandlers(t,
 		func() http.HandlerFunc {
 			return func(w http.ResponseWriter, _ *http.Request) {
@@ -74,7 +82,35 @@ func TestHandleLoginPostMFARequiredBrowserRedirectsToVerify(t *testing.T) {
 	}
 }
 
+func TestHandleLoginPostMFARequiredBrowserNoRedirectWhenVerifyRolloutDisabled(t *testing.T) {
+	withMFALoginVerifyEnabled(t, false)
+	stubAuthHandlers(t,
+		func() http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"mfa_required":true}`))
+			}
+		},
+		nil,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "https://host/login", strings.NewReader(`{"username":"alice","password":"pw"}`))
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+
+	handleLogin(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d body=%s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Location"); got != "" {
+		t.Fatalf("unexpected redirect location: %q", got)
+	}
+}
+
 func TestHandleLoginVerifyPostValidMFACodeSuccess(t *testing.T) {
+	withMFALoginVerifyEnabled(t, true)
 	stubAuthHandlers(t,
 		nil,
 		func() http.HandlerFunc {
@@ -103,6 +139,7 @@ func TestHandleLoginVerifyPostValidMFACodeSuccess(t *testing.T) {
 }
 
 func TestHandleLoginVerifyPostInvalidMFACodeFailure(t *testing.T) {
+	withMFALoginVerifyEnabled(t, true)
 	stubAuthHandlers(t,
 		nil,
 		func() http.HandlerFunc {
@@ -122,5 +159,23 @@ func TestHandleLoginVerifyPostInvalidMFACodeFailure(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `invalid mfa code`) {
 		t.Fatalf("expected invalid mfa response, got %q", rr.Body.String())
+	}
+}
+
+func TestHandleLoginVerifyDisabledByRollout(t *testing.T) {
+	withMFALoginVerifyEnabled(t, false)
+
+	getReq := httptest.NewRequest(http.MethodGet, "https://host/login/verify", nil)
+	getRR := httptest.NewRecorder()
+	handleLoginVerify(getRR, getReq)
+	if getRR.Code != http.StatusNotFound {
+		t.Fatalf("expected GET 404, got %d", getRR.Code)
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "https://host/login/verify", strings.NewReader(`{"method":"totp","code":"123456"}`))
+	postRR := httptest.NewRecorder()
+	handleLoginVerify(postRR, postReq)
+	if postRR.Code != http.StatusNotFound {
+		t.Fatalf("expected POST 404, got %d", postRR.Code)
 	}
 }

@@ -110,6 +110,7 @@ func Start(
 	}
 
 	configureDebugCaptureFromConfig(cfg)
+	setMFARolloutPolicyFromConfig(cfg)
 
 	SetPreAuthLoginChallengeEnforcer(func(ip net.IP, ttl time.Duration, _ string) error {
 		if be == nil {
@@ -268,7 +269,8 @@ func Start(
 	// Innermost → outermost:
 	//   mux → TokenMiddleware → LoadAndSave
 	var handler http.Handler
-	handler = TokenMiddleware(cfg.API.AuthToken, store)(m)
+	handler = MFARolloutMiddleware(m)
+	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 	}

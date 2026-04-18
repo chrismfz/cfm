@@ -62,6 +62,9 @@ type DebugConfig struct {
 	TLSAddress                 string        // TLS_LISTEN_ADDRESS (default = ListenAddress)
 	AuthDBPath                 string        // AUTH_DB_PATH (default /var/lib/cfm/auth.db)
 	AuthSessionDBPath          string        // AUTH_SESSION_DB_PATH (optional; separate DB for sessions)
+	AuthMFALoginVerifyEnabled  bool          // AUTH_MFA_LOGIN_VERIFY_ENABLED (default true)
+	AuthMFATOTPEnrollEnabled   bool          // AUTH_MFA_TOTP_ENROLL_ENABLED (default false)
+	AuthMFATOTPPilotUsers      []string      // AUTH_MFA_TOTP_PILOT_USERS (comma-separated usernames)
 	SessionTTL                 time.Duration // AUTH_SESSION_TTL (default 8h)
 	SecureCookie               bool          // AUTH_SECURE_COOKIE
 	CookieName                 string        // AUTH_COOKIE_NAME (default cfm-sid)
@@ -464,6 +467,7 @@ func (c *Config) Validate() error {
 func ParseCFMConf(r io.Reader) (*Config, error) {
 	s := bufio.NewScanner(r)
 	cfg := &Config{}
+	cfg.Debug.AuthMFALoginVerifyEnabled = true
 	lineNo := 0
 	for s.Scan() {
 		lineNo++
@@ -642,6 +646,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Debug.AuthDBPath = val
 		case "AUTH_SESSION_DB_PATH":
 			cfg.Debug.AuthSessionDBPath = val
+		case "AUTH_MFA_LOGIN_VERIFY_ENABLED":
+			cfg.Debug.AuthMFALoginVerifyEnabled = parseBool(val)
+		case "AUTH_MFA_TOTP_ENROLL_ENABLED":
+			cfg.Debug.AuthMFATOTPEnrollEnabled = parseBool(val)
+		case "AUTH_MFA_TOTP_PILOT_USERS":
+			cfg.Debug.AuthMFATOTPPilotUsers = append(cfg.Debug.AuthMFATOTPPilotUsers, splitCSV(val)...)
 		case "AUTH_SESSION_TTL":
 			if d, err := time.ParseDuration(val); err == nil {
 				cfg.Debug.SessionTTL = d
@@ -832,7 +842,7 @@ func IsKnownKey(key string) bool {
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
-		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
+		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
 		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX",
