@@ -148,6 +148,18 @@ function cfm_bootstrap(string $mode): void
     if (!empty($parsed['port'])) {
         $iframeOrigin .= ':' . $parsed['port'];
     }
+    cfm_debug_log('embed_iframe_bootstrap_context', [
+        'mode' => $mode,
+        'iframe_base' => $iframeBase,
+        'iframe_origin' => $iframeOrigin,
+        'iframe_url_host' => (string)($parsed['host'] ?? ''),
+        'iframe_url_port' => (int)($parsed['port'] ?? 443),
+        'token_present' => $token !== '',
+        'token_len' => strlen($token),
+        'token_hex64' => (bool)preg_match('/^[0-9a-f]{64}$/', $token),
+        'code_present' => $code !== '',
+        'code_len' => strlen($code),
+    ]);
 
     cgi_send_headers();
     include __DIR__ . '/../templates/index.php';
