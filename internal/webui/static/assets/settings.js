@@ -68,6 +68,12 @@
     return requestJSON('/cfm-admin/mfa/recovery/regenerate', { body: { password: trimmed } });
   }
 
+  function getRecoveryCodes(payload) {
+    if (Array.isArray(payload?.codes)) return payload.codes;
+    if (Array.isArray(payload?.recovery_codes)) return payload.recovery_codes;
+    return [];
+  }
+
   function mountSettingsPage() {
     const status = document.getElementById('settingsStatus');
     const totpQRSurface = document.getElementById('totpQRSurface');
@@ -131,7 +137,7 @@
       const password = document.getElementById('reauthPassword')?.value || '';
       try {
         const result = await regenerateRecoveryCodes({ password });
-        const codes = Array.isArray(result?.recovery_codes) ? result.recovery_codes : [];
+        const codes = getRecoveryCodes(result);
         recoveryCodesEl.textContent = codes.length ? codes.join('\n') : 'No recovery codes returned.';
         showStatus('Recovery codes regenerated. Copy or download them now.');
       } catch (err) {
@@ -146,6 +152,8 @@
     startTotpEnrollment,
     confirmTotpEnrollment,
     regenerateRecoveryCodes,
+    getRecoveryCodes,
+    mountSettingsPage,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
