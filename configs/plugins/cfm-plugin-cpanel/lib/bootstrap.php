@@ -29,7 +29,7 @@ function cfm_bootstrap(string $mode): void
 
     // WHM / root — redirect straight to the full admin UI.
     if ($mode === 'whm') {
-        $adminUrl = cfm_iframe_base_url() . '/cfm-admin/';
+        $adminUrl = cfm_whm_base_url() . '/cfm-admin/';
         cgi_send_headers();
         echo '<!doctype html><html><head><meta charset=utf-8>'
             . '<meta http-equiv="refresh" content="0;url=' . htmlspecialchars($adminUrl, ENT_QUOTES, 'UTF-8') . '">'
