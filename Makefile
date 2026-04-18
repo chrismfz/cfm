@@ -26,6 +26,8 @@ override PKGROOT := build/pkgroot
 override OUTDIR  := build/deb
 BIN := bin/cfm
 CONFIG_DIR := configs
+SCRIPTS_DIR := scripts
+PLUGINS_DIR := plugins
 DEB_SRC := packaging/debian/DEBIAN
 
 
@@ -153,6 +155,8 @@ deb: build
 		"$(PKGROOT)/usr/bin" \
 		"$(PKGROOT)/lib/systemd/system" \
 		"$(PKGROOT)/usr/share/cfm/configs" \
+		"$(PKGROOT)/usr/share/cfm/scripts" \
+		"$(PKGROOT)/usr/share/cfm/plugins" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
 
@@ -179,6 +183,8 @@ deb: build
 
 
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
+	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 	# executables
 	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
@@ -214,6 +220,10 @@ stage-pkgroot: build
 	# === ship ALL example configs ===
 	@mkdir -p $(PKGROOT)/usr/share/cfm/configs
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@mkdir -p $(PKGROOT)/usr/share/cfm/scripts
+	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
+	@mkdir -p $(PKGROOT)/usr/share/cfm/plugins
+	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 
 	# systemd unit (RPM-friendly path)
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
