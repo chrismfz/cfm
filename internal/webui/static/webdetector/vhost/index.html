@@ -40,7 +40,6 @@
         <button class="btn-quiet" @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
         <button class="btn-quiet" v-if="autoRefresh" @click="stopAutoRefresh">Stop</button>
         <button class="btn-quiet" v-else @click="startAutoRefresh">Start</button>
-        <button class="btn-quiet" @click="logout" title="Basic-Auth logout is browser-dependent">Logout</button>
       </div>
     </header>
 
