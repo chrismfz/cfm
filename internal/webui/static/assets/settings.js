@@ -61,11 +61,10 @@
     const qrPayload = readFirstNonEmpty(payload?.qr_svg, payload?.qr, payload?.qr_data_url, nested?.qr_svg, nested?.qr, nested?.qr_data_url);
 
     if (!otpauthURI && !qrPayload) {
-      const message = 'Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields).';
-      if (globalThis?.CFM_DEBUG) {
-        console.debug('TOTP enrollment payload keys:', Object.keys(payload || {}), 'nested data keys:', Object.keys(nested || {}));
-      }
-      throw new Error(message);
+      const payloadKeys = Object.keys(payload || {});
+      const nestedDataKeys = Object.keys(nested || {});
+      console.warn('[TOTP enroll/start] Enrollment payload missing expected fields', { payloadKeys, nestedDataKeys });
+      throw new Error('Enrollment start succeeded, but enrollment payload missing expected fields (Enrollment payload missing expected fields).');
     }
 
     return {

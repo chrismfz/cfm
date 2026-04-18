@@ -170,6 +170,32 @@ test('unauthorized API responses bubble as errors', async () => {
   await assert.rejects(() => startTotpEnrollment(), /unauthorized/);
 });
 
+test('startTotpEnrollment logs payload keys when expected enrollment fields are missing', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok', data: { message: 'started' } }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const originalWarn = console.warn;
+  const warnCalls = [];
+  console.warn = (...args) => warnCalls.push(args);
+
+  try {
+    await assert.rejects(() => startTotpEnrollment(), /Enrollment payload missing expected fields/);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnCalls.length, 1);
+  assert.equal(warnCalls[0][0], '[TOTP enroll/start] Enrollment payload missing expected fields');
+  assert.deepEqual(warnCalls[0][1], {
+    payloadKeys: ['status', 'data'],
+    nestedDataKeys: ['message'],
+  });
+});
+
 function createSettingsDOM() {
   const createElement = () => {
     const handlers = {};
