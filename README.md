@@ -180,6 +180,18 @@ internal/
   - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.
   - API ports must stay firewalled by default (`PORT` usually `6060` plaintext and `TLS_PORT` usually `6061`) and should only be reachable from localhost or explicitly allowed sources (for example entries resolved from `cfm.allow` / `cfm.dyndns`).
   - When `API_URL` is configured, its destination IP is auto-added to the allow set so API callbacks still work with strict firewalling.
+- Web-auth defaults (from `configs/cfm.conf` template):
+  ```ini
+  AUTH_DB_PATH = "/var/lib/cfm/auth.db"
+  AUTH_SESSION_DB_PATH = "/var/lib/cfm/auth-sessions.db"
+  AUTH_MFA_ENCRYPTION_KEY = ""
+  AUTH_MFA_LOGIN_VERIFY_ENABLED = true
+  AUTH_MFA_TOTP_ENROLL_ENABLED = false
+  AUTH_MFA_TOTP_PILOT_USERS = ""
+  AUTH_SESSION_TTL = "8h"
+  AUTH_SECURE_COOKIE = 0
+  AUTH_COOKIE_NAME = "cfm-sid"
+  ```
 - Debug server: `LISTEN_ADDRESS`, `PORT`
 - MySQL governor log: `MYSQL_LOG_STDOUT`, `MYSQL_LOG_FILE`
 

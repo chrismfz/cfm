@@ -12,7 +12,8 @@ This runbook stages MFA in phases so existing API/automation auth remains stable
 
 1. Keep global gate off initially: `AUTH_MFA_TOTP_ENROLL_ENABLED=false`.
 2. Define pilot users:
-   - `AUTH_MFA_TOTP_PILOT_USERS=alice,bob`
+   - `AUTH_MFA_TOTP_PILOT_USERS=""` (default: no pilot users)
+   - `AUTH_MFA_TOTP_PILOT_USERS=alice,bob` (comma-separated usernames; pilot-only behavior applies when global enrollment remains disabled)
 3. Enable enrollment gate:
    - `AUTH_MFA_TOTP_ENROLL_ENABLED=true`
 4. Confirm only pilot users can access:
