@@ -110,7 +110,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	ruleBaseCount := map[string]int{}
 	hostCount := map[string]int{}
 	ipCount := map[string]int{}
-	rows := make([]wafEngineEvent, 0, limit)
+	rows := make([]wafEngineEvent, 0, limit) // limit is clamped to a maximum of 2000 above before this allocation.
 	enrichCache := map[string]wafEngineEvent{}
 
 	for _, ev := range all {
