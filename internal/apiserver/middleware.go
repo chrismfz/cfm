@@ -125,7 +125,7 @@ func isPublicPath(r *http.Request) bool {
 			path = "/" + path
 		}
 	}
-	if strings.HasPrefix(path, "/assets/") {
+	if isPublicAssetPath(r, path) {
 		return true
 	}
 	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap"} {
@@ -134,6 +134,38 @@ func isPublicPath(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func isPublicAssetPath(r *http.Request, normalizedPath string) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	path := strings.TrimSpace(normalizedPath)
+	if !strings.HasPrefix(path, "/assets/") {
+		return false
+	}
+	if strings.Contains(path, "..") {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".css"),
+		strings.HasSuffix(path, ".map"),
+		strings.HasSuffix(path, ".png"),
+		strings.HasSuffix(path, ".jpg"),
+		strings.HasSuffix(path, ".jpeg"),
+		strings.HasSuffix(path, ".svg"),
+		strings.HasSuffix(path, ".ico"),
+		strings.HasSuffix(path, ".woff"),
+		strings.HasSuffix(path, ".woff2"),
+		strings.HasSuffix(path, ".ttf"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isRequiredHealthPath(_ *http.Request) bool {
