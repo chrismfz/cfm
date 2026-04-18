@@ -85,6 +85,10 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %dir %{_datadir}/cfm
 %dir %{_datadir}/cfm/configs
 %{_datadir}/cfm/configs/*
+%dir %{_datadir}/cfm/scripts
+%{_datadir}/cfm/scripts/*
+%dir %{_datadir}/cfm/plugins
+%{_datadir}/cfm/plugins/*
 
 
 %post
