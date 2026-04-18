@@ -174,16 +174,12 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
     if ($socketBase !== '') {
         $parsedSocket = parse_url($socketBase);
         $socketPort = (int)($parsedSocket['port'] ?? 0);
-        $legacyPorts = array_filter([
-            (int)($cfg['PORT'] ?? 6060),
-            (int)($cfg['TLS_PORT'] ?? 0),
-        ], static fn(int $p): bool => $p > 0);
-
-        if ($socketPort > 0 && in_array($socketPort, $legacyPorts, true)) {
-            cfm_debug_log('iframe_base_url_socket_ignored_legacy_port', [
+        // In OpenResty path-proxy mode we should stay on standard HTTPS origin.
+        // Ignore socket-advertised non-standard ports (e.g. legacy :6061).
+        if ($socketPort > 0 && $socketPort !== 443 && $socketPort !== 80) {
+            cfm_debug_log('iframe_base_url_socket_ignored_nonstandard_port', [
                 'socket_ui_base_url' => $socketBase,
                 'socket_port' => $socketPort,
-                'legacy_ports' => array_values($legacyPorts),
             ]);
         } else {
             $selected = rtrim($socketBase, '/');
@@ -217,40 +213,6 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
     }
 
     // /cfm-admin/ is handled by OpenResty location proxy on standard HTTPS.
-    $selected = 'https://' . $effectiveHost;
-    cfm_debug_log('whm_base_url_selected', [
-        'ui_base_source' => $requestHost !== '' ? 'whm_request_host' : 'canonical_https',
-        'ui_base_url' => $selected,
-        'request_host' => $requestHost,
-        'canonical_host' => $canonicalHost,
-    ]);
-    return $selected;
-}
-
-// WHM-facing base URL for root/admin entrypoint redirects.
-// Prefer canonical server hostname so WHM launches the plugin on the server
-// hostname instead of an account domain/frame host.
-function cfm_whm_base_url(string $socketUiBaseUrl = ''): string
-{
-    $cfg = cfm_conf();
-
-    // Preserve explicit admin override behavior.
-    $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
-    if ($override !== '') {
-        $selected = rtrim($override, '/');
-        cfm_debug_log('whm_base_url_selected', [
-            'ui_base_source' => 'override',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
-    }
-
-    // In WHM, prefer the hostname used to open WHM itself.
-    // This avoids stale socket metadata (e.g. old :6061 direct listeners).
-    $requestHost = cfm_forwarded_or_request_host();
-    $canonicalHost = cfm_canonical_host($cfg);
-    $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
-
     $selected = 'https://' . $effectiveHost;
     cfm_debug_log('whm_base_url_selected', [
         'ui_base_source' => $requestHost !== '' ? 'whm_request_host' : 'canonical_https',
