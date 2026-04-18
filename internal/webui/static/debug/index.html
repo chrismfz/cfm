@@ -12,12 +12,24 @@
 <body>
   <div class="landing-shell">
     <header class="topbar">
-      <h1>CFM Admin / Debug</h1>
-            <nav class="top-nav" data-shared-nav></nav>
+      <h1>CFM Admin</h1>
+      <nav class="top-nav" data-shared-nav></nav>
       <div class="meta">
         <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <label for="durationSec" class="muted">Capture</label>
+        <select id="durationSec" class="input input-small">
+          <option value="20">20s</option>
+          <option value="30">30s</option>
+          <option value="60">60s</option>
+        </select>
+        <button id="startCaptureBtn" class="btn-quiet">Start capture</button>
+        <input id="captureID" class="input" type="text" placeholder="capture id" />
+        <button id="loadCaptureBtn" class="btn-quiet">Load</button>
+        <button id="exportJSONBtn" class="btn-quiet">Export JSON</button>
+        <button id="exportTextBtn" class="btn-quiet">Export text</button>
       </div>
     </header>
+    <p id="captureMsg" class="statusline"></p>
 
     <main class="layout">
       <section class="card wide">
@@ -31,28 +43,8 @@
         </details>
       </section>
 
-      <section class="card">
-        <h2>Capture controls</h2>
-        <div class="toolbar">
-          <label for="durationSec">Duration</label>
-          <select id="durationSec" class="input">
-            <option value="20">20s</option>
-            <option value="30">30s</option>
-            <option value="60">60s</option>
-          </select>
-          <button id="startCaptureBtn">Start capture</button>
-        </div>
-        <p id="captureMsg" class="statusline"></p>
-      </section>
-
       <section class="card wide">
         <h2>Capture status</h2>
-        <div class="toolbar">
-          <input id="captureID" class="input input-wide" type="text" placeholder="capture id" />
-          <button id="loadCaptureBtn" class="btn-quiet">Load capture</button>
-          <button id="exportJSONBtn" class="btn-quiet">Export JSON</button>
-          <button id="exportTextBtn" class="btn-quiet">Export text</button>
-        </div>
         <div id="captureKpiCards" class="chips"></div>
         <div id="captureSummary" class="summary-grid"></div>
         <div class="toolbar wrap">
