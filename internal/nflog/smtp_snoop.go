@@ -4,6 +4,7 @@ package nflog
 import (
 	"context"
 	"encoding/binary"
+	"math"
 	"net"
 	"time"
 
@@ -218,8 +219,15 @@ func parseTCP(p []byte) (ipver int, src, dst net.IP, sport, dport uint16) {
 
 // FromConfig converts SMTPBlockConfig into SnoopConfig.
 func FromConfig(c *config.SMTPBlockConfig) SnoopConfig {
+	group := c.LogNFLOG
+	// Bound the int->uint16 conversion locally so this constructor does not
+	// depend on external callers to pre-validate ranges.
+	if group < 0 || group > int(math.MaxUint16) {
+		group = 0
+	}
+
 	return SnoopConfig{
-		Group:  uint16(c.LogNFLOG),
+		Group:  uint16(group),
 		Enrich: c.LogEnrich,
 	}
 }
