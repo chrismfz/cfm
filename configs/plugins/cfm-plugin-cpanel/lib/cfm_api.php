@@ -198,18 +198,12 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
     $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
 
     if ($hostMismatch) {
-        // Mixed-hostname access detected (e.g., account domain in cPanel frame).
-        // Keep traffic on OpenResty /cfm-admin path, but force canonical host.
-        cfm_debug_log('iframe_base_url_host_mismatch_canonical_fallback', [
+        // In cPanel plugin context, prefer the host currently serving cPanel.
+        // This keeps iframe and parent same-site, avoiding third-party cookie issues.
+        cfm_debug_log('iframe_base_url_host_mismatch_request_host_preferred', [
             'http_host'      => $requestHost,
             'canonical_host' => $canonicalHost,
         ]);
-        $selected = 'https://' . $canonicalHost;
-        cfm_debug_log('iframe_base_url_selected', [
-            'ui_base_source' => 'legacy_fallback',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
     }
 
     // /cfm-admin/ is handled by OpenResty location proxy on standard HTTPS.
