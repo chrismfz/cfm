@@ -37,7 +37,14 @@
       ? adminOnlyMatcher
       : (href) => {
           const path = String(href || '').split(/[?#]/, 1)[0];
-          return path === '/cfm-admin' || path === '/cfm-admin/';
+          return (
+            path === '/cfm-admin' ||
+            path === '/cfm-admin/' ||
+            path === '/cfm-admin/settings' ||
+            path === '/cfm-admin/settings/' ||
+            path === '/cfm-admin/debug' ||
+            path === '/cfm-admin/debug/'
+          );
         };
 
     nav.querySelectorAll('a[href]').forEach((anchor) => {
