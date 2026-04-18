@@ -155,6 +155,27 @@ test('mountSettingsPage displays returned recovery codes from legacy payload fie
   assert.equal(elements.recoveryCodes.textContent, 'LEGACY-1\nLEGACY-2');
 });
 
+test('mountSettingsPage generates fallback QR image when only otpauth_uri is returned', async () => {
+  const elements = createSettingsDOM();
+
+  global.document = {
+    getElementById: (id) => elements[id] || null,
+  };
+
+  global.fetch = async (url) => {
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
+      return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Test?secret=ONLY_URI' }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  mountSettingsPage();
+  await elements.startTotpBtn.handlers.click();
+
+  assert.match(elements.totpQRSurface.innerHTML, /api\.qrserver\.com\/v1\/create-qr-code/);
+  assert.match(elements.totpQRSurface.innerHTML, /otpauth:\/\/totp\/Test\?secret=ONLY_URI/);
+});
+
 test('startTotpEnrollment still supports legacy qr_svg-only payloads', async () => {
   global.fetch = async (url) => {
     if (url.endsWith('/start')) {

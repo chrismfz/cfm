@@ -174,8 +174,17 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+          const qrImageURL = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(
+            otpauthURI
+          )}`;
           totpQRSurface.innerHTML = `
-            <p style="margin-bottom:0.5rem;">Scan is unavailable. Use this enrollment URI manually:</p>
+            <p style="margin-bottom:0.5rem;">QR generated from enrollment URI (fallback mode):</p>
+            <img
+              alt="Generated TOTP enrollment QR code"
+              src="${qrImageURL}"
+              style="display:block;max-width:220px;border:1px solid rgba(255,255,255,0.15);border-radius:0.5rem;margin-bottom:0.75rem;"
+            />
+            <p style="margin-bottom:0.5rem;">If image loading is blocked, use this enrollment URI manually:</p>
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedURI}</pre>
           `;
         }
