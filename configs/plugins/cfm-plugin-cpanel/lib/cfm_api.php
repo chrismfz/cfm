@@ -118,6 +118,23 @@ function cfm_request_host(): string
     return strtolower(trim((string)$rawHost, '[]'));
 }
 
+function cfm_forwarded_or_request_host(): string
+{
+    $rawForwarded = trim((string)(getenv('HTTP_X_FORWARDED_HOST') ?: ''));
+    if ($rawForwarded !== '') {
+        // X-Forwarded-Host may contain a comma-separated chain.
+        $first = trim((string)explode(',', $rawForwarded, 2)[0]);
+        if ($first !== '') {
+            if (strpos($first, ':') !== false) {
+                $first = preg_replace('/:\d+$/', '', $first);
+            }
+            $first = strtolower(trim((string)$first, '[]'));
+            if ($first !== '') return $first;
+        }
+    }
+    return cfm_request_host();
+}
+
 function cfm_canonical_host(array $cfg): string
 {
     foreach (['CPANEL_PLUGIN_CANONICAL_HOST', 'PLUGIN_CANONICAL_HOST', 'CANONICAL_HOST', 'HOSTNAME'] as $key) {
@@ -224,33 +241,18 @@ function cfm_whm_base_url(string $socketUiBaseUrl = ''): string
         return $selected;
     }
 
-    // Preserve socket-provided authority when present.
-    $socketBase = trim($socketUiBaseUrl);
-    if ($socketBase !== '') {
-        $selected = rtrim($socketBase, '/');
-        cfm_debug_log('whm_base_url_selected', [
-            'ui_base_source' => 'socket',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
-    }
-
+    // In WHM, prefer the hostname used to open WHM itself.
+    // This avoids stale socket metadata (e.g. old :6061 direct listeners).
+    $requestHost = cfm_forwarded_or_request_host();
     $canonicalHost = cfm_canonical_host($cfg);
-    $tlsPort       = (int)($cfg['TLS_PORT'] ?? 0);
+    $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
 
-    if ($tlsPort > 0) {
-        $selected = 'https://' . $canonicalHost . ':' . $tlsPort;
-        cfm_debug_log('whm_base_url_selected', [
-            'ui_base_source' => 'canonical_tls_port',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
-    }
-
-    $selected = 'https://' . $canonicalHost;
+    $selected = 'https://' . $effectiveHost;
     cfm_debug_log('whm_base_url_selected', [
-        'ui_base_source' => 'canonical_https',
+        'ui_base_source' => $requestHost !== '' ? 'whm_request_host' : 'canonical_https',
         'ui_base_url' => $selected,
+        'request_host' => $requestHost,
+        'canonical_host' => $canonicalHost,
     ]);
     return $selected;
 }
