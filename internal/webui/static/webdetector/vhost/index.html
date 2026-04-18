@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Admin</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
   <script type="module">
@@ -21,15 +22,7 @@
   <div id="app" v-cloak>
     <header class="topbar">
       <h1>CFM Admin</h1>
-      <nav class="top-nav">
-        <a class="btn-quiet" href="/cfm-admin/">Dashboard</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/">WebDetector</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/vhost/">Vhost live</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/forensics/">Forensics</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/waf/">WAF engine</a>
-        <a class="btn-quiet" href="/cfm-admin/webdetector/controls/">Vhost controls</a>
-        <a class="btn-quiet" href="/cfm-admin/governor/">MySQL governor</a>
-      </nav>
+            <nav class="top-nav" data-shared-nav></nav>
       <div class="meta">
         <span class="muted">Auto-refresh: <strong>{{ autoRefresh ? 'ON' : 'OFF' }}</strong></span>
         <label for="refresh-interval" class="muted">Every</label>
