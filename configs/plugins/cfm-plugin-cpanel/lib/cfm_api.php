@@ -110,12 +110,29 @@ function cfm_local_base_url(): string
 
 function cfm_request_host(): string
 {
-    $rawHost = trim((string)(getenv('HTTP_HOST') ?: ''));
+    $rawHost = trim((string)(getenv('HTTP_HOST') ?: ($_SERVER['HTTP_HOST'] ?? '')));
     if ($rawHost === '') return '';
     if (strpos($rawHost, ':') !== false) {
         $rawHost = preg_replace('/:\d+$/', '', $rawHost);
     }
     return strtolower(trim((string)$rawHost, '[]'));
+}
+
+function cfm_forwarded_or_request_host(): string
+{
+    $rawForwarded = trim((string)(getenv('HTTP_X_FORWARDED_HOST') ?: ($_SERVER['HTTP_X_FORWARDED_HOST'] ?? '')));
+    if ($rawForwarded !== '') {
+        // X-Forwarded-Host may contain a comma-separated chain.
+        $first = trim((string)explode(',', $rawForwarded, 2)[0]);
+        if ($first !== '') {
+            if (strpos($first, ':') !== false) {
+                $first = preg_replace('/:\d+$/', '', $first);
+            }
+            $first = strtolower(trim((string)$first, '[]'));
+            if ($first !== '') return $first;
+        }
+    }
+    return cfm_request_host();
 }
 
 function cfm_canonical_host(array $cfg): string
@@ -155,30 +172,43 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
 
     $socketBase = trim($socketUiBaseUrl);
     if ($socketBase !== '') {
-        $selected = rtrim($socketBase, '/');
-        cfm_debug_log('iframe_base_url_selected', [
-            'ui_base_source' => 'socket',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
+        $parsedSocket = parse_url($socketBase);
+        $socketPort = (int)($parsedSocket['port'] ?? 0);
+        $legacyPorts = array_filter([
+            (int)($cfg['PORT'] ?? 6060),
+            (int)($cfg['TLS_PORT'] ?? 0),
+        ], static fn(int $p): bool => $p > 0);
+
+        if ($socketPort > 0 && in_array($socketPort, $legacyPorts, true)) {
+            cfm_debug_log('iframe_base_url_socket_ignored_legacy_port', [
+                'socket_ui_base_url' => $socketBase,
+                'socket_port' => $socketPort,
+                'legacy_ports' => array_values($legacyPorts),
+            ]);
+        } else {
+            $selected = rtrim($socketBase, '/');
+            cfm_debug_log('iframe_base_url_selected', [
+                'ui_base_source' => 'socket',
+                'ui_base_url' => $selected,
+            ]);
+            return $selected;
+        }
     }
 
     $requestHost   = cfm_request_host();
     $canonicalHost = cfm_canonical_host($cfg);
-    $tlsPort       = (int)($cfg['TLS_PORT'] ?? 0);
 
     $hostMismatch = ($requestHost !== '' && $canonicalHost !== '' && strcasecmp($requestHost, $canonicalHost) !== 0);
     $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
 
-    if ($hostMismatch && $tlsPort > 0) {
+    if ($hostMismatch) {
         // Mixed-hostname access detected (e.g., account domain in cPanel frame).
-        // Bypass OpenResty path proxy and target the canonical TLS listener directly.
-        cfm_debug_log('iframe_base_url_host_mismatch_tls_fallback', [
+        // Keep traffic on OpenResty /cfm-admin path, but force canonical host.
+        cfm_debug_log('iframe_base_url_host_mismatch_canonical_fallback', [
             'http_host'      => $requestHost,
             'canonical_host' => $canonicalHost,
-            'tls_port'       => $tlsPort,
         ]);
-        $selected = 'https://' . $canonicalHost . ':' . $tlsPort;
+        $selected = 'https://' . $canonicalHost;
         cfm_debug_log('iframe_base_url_selected', [
             'ui_base_source' => 'legacy_fallback',
             'ui_base_url' => $selected,
@@ -186,22 +216,45 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
         return $selected;
     }
 
-    if ($tlsPort > 0) {
-        // Direct TLS port — bypasses OpenResty, hits Go directly.
-        $selected = 'https://' . $effectiveHost . ':' . $tlsPort;
-        cfm_debug_log('iframe_base_url_selected', [
-            'ui_base_source' => 'legacy_fallback',
-            'ui_base_url' => $selected,
-        ]);
-        return $selected;
-    }
-
-    // No TLS_PORT → assume OpenResty is in front on standard 443.
-    // /cfm-admin/ is already handled by the OpenResty location block.
+    // /cfm-admin/ is handled by OpenResty location proxy on standard HTTPS.
     $selected = 'https://' . $effectiveHost;
     cfm_debug_log('iframe_base_url_selected', [
         'ui_base_source' => 'legacy_fallback',
         'ui_base_url' => $selected,
+    ]);
+    return $selected;
+}
+
+// WHM-facing base URL for root/admin entrypoint redirects.
+// Prefer canonical server hostname so WHM launches the plugin on the server
+// hostname instead of an account domain/frame host.
+function cfm_whm_base_url(string $socketUiBaseUrl = ''): string
+{
+    $cfg = cfm_conf();
+
+    // Preserve explicit admin override behavior.
+    $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
+    if ($override !== '') {
+        $selected = rtrim($override, '/');
+        cfm_debug_log('whm_base_url_selected', [
+            'ui_base_source' => 'override',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
+
+    // In WHM, prefer the hostname used to open WHM itself.
+    // This avoids stale socket metadata (e.g. old :6061 direct listeners).
+    $requestHost = cfm_forwarded_or_request_host();
+    $canonicalHost = cfm_canonical_host($cfg);
+    $effectiveHost = $requestHost !== '' ? $requestHost : $canonicalHost;
+
+    $selected = 'https://' . $effectiveHost;
+    cfm_debug_log('whm_base_url_selected', [
+        'ui_base_source' => $requestHost !== '' ? 'whm_request_host' : 'canonical_https',
+        'ui_base_url' => $selected,
+        'request_host' => $requestHost,
+        'canonical_host' => $canonicalHost,
     ]);
     return $selected;
 }
