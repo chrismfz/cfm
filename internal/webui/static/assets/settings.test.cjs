@@ -36,7 +36,7 @@ test('start/confirm/regenerate mfa happy path', async () => {
   global.fetch = async (url) => {
     calls.push(url);
     if (url.endsWith('/start')) {
-      return { ok: true, status: 200, json: async () => ({ qr_svg: '<svg>qr</svg>' }) };
+      return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Example?secret=ABC123' }) };
     }
     if (url.endsWith('/confirm')) {
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
@@ -48,7 +48,7 @@ test('start/confirm/regenerate mfa happy path', async () => {
   };
 
   const started = await startTotpEnrollment();
-  assert.equal(started.qr_svg, '<svg>qr</svg>');
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Example?secret=ABC123');
 
   const confirmed = await confirmTotpEnrollment({ code: '12-34 56' });
   assert.equal(confirmed.ok, true);
@@ -61,6 +61,20 @@ test('start/confirm/regenerate mfa happy path', async () => {
     '/cfm-admin/mfa/totp/enroll/confirm',
     '/cfm-admin/mfa/recovery/regenerate',
   ]);
+});
+
+
+
+test('startTotpEnrollment still supports legacy qr_svg-only payloads', async () => {
+  global.fetch = async (url) => {
+    if (url.endsWith('/start')) {
+      return { ok: true, status: 200, json: async () => ({ qr_svg: '<svg>legacy</svg>' }) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const started = await startTotpEnrollment();
+  assert.equal(started.qr_svg, '<svg>legacy</svg>');
 });
 
 test('unauthorized API responses bubble as errors', async () => {

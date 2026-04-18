@@ -48,8 +48,10 @@
 
   async function startTotpEnrollment() {
     const payload = await requestJSON('/cfm-admin/mfa/totp/enroll/start', { body: {} });
-    if (!payload || typeof payload.qr_svg !== 'string' || payload.qr_svg.trim() === '') {
-      throw new Error('Enrollment start succeeded but QR payload was missing.');
+    const hasOtpauthURI = typeof payload?.otpauth_uri === 'string' && payload.otpauth_uri.trim() !== '';
+    const hasQRSVG = typeof payload?.qr_svg === 'string' && payload.qr_svg.trim() !== '';
+    if (!hasOtpauthURI && !hasQRSVG) {
+      throw new Error('Enrollment start succeeded but both otpauth_uri and QR payload were missing.');
     }
     return payload;
   }
@@ -91,7 +93,24 @@
     document.getElementById('startTotpBtn')?.addEventListener('click', async () => {
       try {
         const result = await startTotpEnrollment();
-        totpQRSurface.innerHTML = result.qr_svg;
+        const qrSVG = typeof result?.qr_svg === 'string' ? result.qr_svg.trim() : '';
+        const otpauthURI = typeof result?.otpauth_uri === 'string' ? result.otpauth_uri.trim() : '';
+
+        if (qrSVG) {
+          totpQRSurface.innerHTML = qrSVG;
+        } else if (otpauthURI) {
+          const escapedURI = otpauthURI
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+          totpQRSurface.innerHTML = `
+            <p style="margin-bottom:0.5rem;">Scan is unavailable. Use this enrollment URI manually:</p>
+            <pre style="white-space:pre-wrap;word-break:break-all;">${escapedURI}</pre>
+          `;
+        }
+
         showStatus('TOTP enrollment started. Scan the QR and confirm with your 6-digit code.');
       } catch (err) {
         showStatus(err.message || 'Failed to start TOTP enrollment.', false);
