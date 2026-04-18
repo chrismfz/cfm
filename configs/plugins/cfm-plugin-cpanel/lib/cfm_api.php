@@ -206,6 +206,55 @@ function cfm_iframe_base_url(string $socketUiBaseUrl = ''): string
     return $selected;
 }
 
+// WHM-facing base URL for root/admin entrypoint redirects.
+// Prefer canonical server hostname so WHM launches the plugin on the server
+// hostname instead of an account domain/frame host.
+function cfm_whm_base_url(string $socketUiBaseUrl = ''): string
+{
+    $cfg = cfm_conf();
+
+    // Preserve explicit admin override behavior.
+    $override = trim($cfg['CPANEL_PLUGIN_BASE_URL'] ?? '');
+    if ($override !== '') {
+        $selected = rtrim($override, '/');
+        cfm_debug_log('whm_base_url_selected', [
+            'ui_base_source' => 'override',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
+
+    // Preserve socket-provided authority when present.
+    $socketBase = trim($socketUiBaseUrl);
+    if ($socketBase !== '') {
+        $selected = rtrim($socketBase, '/');
+        cfm_debug_log('whm_base_url_selected', [
+            'ui_base_source' => 'socket',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
+
+    $canonicalHost = cfm_canonical_host($cfg);
+    $tlsPort       = (int)($cfg['TLS_PORT'] ?? 0);
+
+    if ($tlsPort > 0) {
+        $selected = 'https://' . $canonicalHost . ':' . $tlsPort;
+        cfm_debug_log('whm_base_url_selected', [
+            'ui_base_source' => 'canonical_tls_port',
+            'ui_base_url' => $selected,
+        ]);
+        return $selected;
+    }
+
+    $selected = 'https://' . $canonicalHost;
+    cfm_debug_log('whm_base_url_selected', [
+        'ui_base_source' => 'canonical_https',
+        'ui_base_url' => $selected,
+    ]);
+    return $selected;
+}
+
 // Generic CFM API call (server-side, loopback).
 function cfm_api_request(string $path, string $method = 'GET', ?array $payload = null, array $extraHeaders = []): array
 {
