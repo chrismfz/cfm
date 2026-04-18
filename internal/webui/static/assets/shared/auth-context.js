@@ -62,7 +62,11 @@
   }
 
   function setToken(token, source, meta = {}) {
-    if (typeof token !== 'string' || !TOKEN_RE.test(token)) return false;
+    if (typeof token !== 'string' || !TOKEN_RE.test(token)) {
+      const len = typeof token === 'string' ? token.length : -1;
+      console.warn('[cfm-auth] rejected token payload from %s (len=%d, hex64=%s)', source, len, typeof token === 'string' ? String(TOKEN_RE.test(token)) : 'false');
+      return false;
+    }
     const prevToken = state.token;
     if (prevToken === token) return true;
     state.token = token;
@@ -124,7 +128,10 @@
       if (expectParent && evt.source !== window.parent) return;
       console.debug('[cfm-auth] accepted postMessage origin=%s expected=%s', evt.origin, expectedOrigin);
       const tok = evt.data && evt.data.cfmToken;
-      if (!setToken(tok, 'postMessage', { origin: evt.origin })) return;
+      if (!setToken(tok, 'postMessage', { origin: evt.origin })) {
+        console.warn('[cfm-auth] postMessage token rejected; ACK not sent');
+        return;
+      }
       try {
         window.dispatchEvent(new CustomEvent('cfm:token_ready', { detail: state.token }));
       } catch (_) {}
