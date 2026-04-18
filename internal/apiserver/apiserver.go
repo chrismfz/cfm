@@ -29,7 +29,10 @@ package apiserver
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -63,6 +66,7 @@ var (
 
 	cpanelUserDataDomainsPath = "/etc/userdatadomains"
 	cpanelUserDomainsPath     = "/etc/userdomains"
+	mfaKeyStatePath           = "/var/lib/cfm/auth-mfa.key"
 )
 
 // Mux returns the shared mux after Start() has initialised it.
@@ -232,11 +236,13 @@ func Start(
 			cookieName = "cfm-sid"
 		}
 		authCfg := goauth.Config{
-			DBPath:       cfg.Debug.AuthDBPath,
-			SessionTTL:   sessionTTL,
-			CookieName:   cookieName,
-			SecureCookie: cfg.Debug.SecureCookie,
-			SameSite:     http.SameSiteLaxMode,
+			DBPath:           cfg.Debug.AuthDBPath,
+			SessionTTL:       sessionTTL,
+			CookieName:       cookieName,
+			SecureCookie:     cfg.Debug.SecureCookie,
+			SameSite:         http.SameSiteLaxMode,
+			MFAEncryptionKey: resolveMFAEncryptionKey(cfg),
+			MFAIssuer:        "cfm-admin",
 		}
 		if cfg.Debug.AuthSessionDBPath != "" {
 			if ok := setOptionalGoauthStringField(&authCfg, "SessionDBPath", cfg.Debug.AuthSessionDBPath); ok {
@@ -353,6 +359,62 @@ func Start(
 	if authMgr != nil {
 		authMgr.Close()
 	}
+}
+
+func resolveMFAEncryptionKey(cfg *cfgpkg.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if key := strings.TrimSpace(cfg.Debug.AuthMFAEncryptionKey); key != "" {
+		return key
+	}
+	token := strings.TrimSpace(cfg.API.AuthToken)
+	if token == "" {
+		key, err := loadOrCreateMFAEncryptionKey(mfaKeyStatePath)
+		if err != nil {
+			logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY missing and fallback key generation failed: %v", err)
+			return ""
+		}
+		logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY and AUTH_TOKEN not set; using persisted MFA key at %s", mfaKeyStatePath)
+		return key
+	}
+	sum := sha256.Sum256([]byte("cfm/goauth/mfa/v1:" + token))
+	derived := base64.RawStdEncoding.EncodeToString(sum[:]) // 32-byte key when decoded
+	logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY not set; deriving MFA key from AUTH_TOKEN")
+	return derived
+}
+
+func loadOrCreateMFAEncryptionKey(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if raw, err := os.ReadFile(path); err == nil {
+		key := strings.TrimSpace(string(raw))
+		if key != "" {
+			return key, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	key := base64.RawStdEncoding.EncodeToString(buf)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(key+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return key, nil
 }
 
 func validateStartupConfig(cfg *cfgpkg.Config) error {

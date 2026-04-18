@@ -73,6 +73,9 @@ func TestHandleLoginAndLogoutUseDetectedBasePath(t *testing.T) {
 	if !strings.Contains(body, `basePath+'/login/verify?next='`) {
 		t.Fatalf("2FA redirect should use basePath")
 	}
+	if !strings.Contains(body, `const defaultNext=(basePath&&basePath!=='/')?(basePath+'/'):'/';`) {
+		t.Fatalf("login page should default next to basePath root")
+	}
 
 	// Logout should redirect back to prefixed login.
 	logoutReq := httptest.NewRequest(http.MethodGet, "https://host/logout", nil)

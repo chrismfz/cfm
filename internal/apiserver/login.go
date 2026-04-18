@@ -75,7 +75,8 @@ const loginHTML = `<!DOCTYPE html>
 <script>
 const basePath=__BASE_PATH__;
 const mfaVerifyEnabled=__MFA_VERIFY_ENABLED__;
-const next=new URLSearchParams(location.search).get('next')||'/';
+const defaultNext=(basePath&&basePath!=='/')?(basePath+'/'):'/';
+const next=new URLSearchParams(location.search).get('next')||defaultNext;
 function showErr(m){const e=document.getElementById('err');e.textContent=m;e.classList.add('on')}
 async function go(){
   const btn=document.getElementById('btn');
