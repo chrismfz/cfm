@@ -134,7 +134,12 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			pctx = ctx
 		}
 
-		apiserver.SetPreAuthLoginChallengeEnabled(w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "")
+		preAuthChallengeConfigured := w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != ""
+		preAuthChallengeEnabled := preAuthChallengeConfigured && !w.cfg.OpenRestyMode
+		apiserver.SetPreAuthLoginChallengeEnabled(preAuthChallengeEnabled)
+		if preAuthChallengeConfigured && w.cfg.OpenRestyMode {
+			logging.Logf("[apiserver] pre-auth login challenge disabled in OpenResty mode (nft challenge sets unavailable)")
+		}
 
 		// Build per-engine mux and hot-swap it behind a stable proxy route.
 		// This avoids duplicate ServeMux registrations on detector reload while
