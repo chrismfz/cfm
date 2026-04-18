@@ -19,8 +19,8 @@ body {
 #app.landing-shell[v-cloak] { display: block; }
 .topbar {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: .75rem;
   padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -35,18 +35,13 @@ body {
   display: flex;
   gap: .5rem;
   flex-wrap: wrap;
-  margin-left: 1rem;
-}
-.landing-shell .topbar {
-  justify-content: flex-start;
-  gap: .75rem;
 }
 .chips {
   display: flex;
   flex-wrap: wrap;
   gap: .5rem;
 }
-.meta { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.meta { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-left: auto; justify-content: flex-end; }
 button {
   background: var(--accent);
   color: white;
