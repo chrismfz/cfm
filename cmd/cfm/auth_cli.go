@@ -20,6 +20,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -89,7 +90,14 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 		authCmdLogPurge(&dbPath),
 	)
 
-	authRoot.AddCommand(userCmd, sessionCmd, logCmd)
+	mfaCmd := &cobra.Command{Use: "mfa", Short: "Manage MFA for users"}
+	mfaCmd.AddCommand(
+		authCmdMFAReset(&dbPath),
+		authCmdMFARecoveryRegenerate(&dbPath),
+		authCmdMFAStatus(&dbPath),
+	)
+
+	authRoot.AddCommand(userCmd, sessionCmd, logCmd, mfaCmd)
 
 	root := &cobra.Command{
 		Use:           "cfm",
@@ -109,6 +117,9 @@ func authOpen(dbPath *string) (*goauth.Manager, error) {
 		DBPath:       *dbPath,
 		SessionTTL:   8 * time.Hour,
 		SecureCookie: false, // irrelevant for CLI
+		// CLI must be able to run MFA admin operations without external env wiring.
+		MFAEncryptionKey: "cfm-auth-cli-mfa-key-32-bytes!!!",
+		MFAIssuer:        "cfm-admin",
 	})
 }
 
@@ -456,4 +467,153 @@ func authCmdLogPurge(dbPath *string) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&days, "days", 90, "Delete entries older than N days")
 	return cmd
+}
+
+func authCmdMFAReset(dbPath *string) *cobra.Command {
+	var username string
+	var audit authAuditFlags
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Reset all MFA factors and challenges for a user",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := audit.contextFor(username)
+			if err != nil {
+				return err
+			}
+			m, err := authOpen(dbPath)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.AdminResetMFA(ctx); err != nil {
+				return err
+			}
+			fmt.Printf("✓ MFA reset for %q\n", username)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&username, "username", "u", "", "Username (required)")
+	_ = cmd.MarkFlagRequired("username")
+	audit.bind(cmd)
+	return cmd
+}
+
+func authCmdMFARecoveryRegenerate(dbPath *string) *cobra.Command {
+	var username string
+	var count int
+	var audit authAuditFlags
+	cmd := &cobra.Command{
+		Use:   "recovery-regenerate",
+		Short: "Regenerate MFA recovery codes for a user",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := audit.contextFor(username)
+			if err != nil {
+				return err
+			}
+			if count < 5 {
+				return fmt.Errorf("--count must be at least 5")
+			}
+			m, err := authOpen(dbPath)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			codes, err := m.AdminRotateRecoveryCodes(ctx, count)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("✓ Recovery codes regenerated for %q (%d code(s))\n", username, len(codes))
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&username, "username", "u", "", "Username (required)")
+	cmd.Flags().IntVar(&count, "count", goauth.DefaultRecoveryCodeCount, "Number of recovery codes to generate (minimum 5)")
+	_ = cmd.MarkFlagRequired("username")
+	audit.bind(cmd)
+	return cmd
+}
+
+func authCmdMFAStatus(dbPath *string) *cobra.Command {
+	var username string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show MFA status for a user",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m, err := authOpen(dbPath)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			u, err := m.Users.GetByUsername(username)
+			if err != nil {
+				return err
+			}
+			recovery, err := m.Users.CountRecoveryCodes(username)
+			if err != nil {
+				return err
+			}
+			verified := "no"
+			if u.TOTPVerifiedAt != nil {
+				verified = u.TOTPVerifiedAt.UTC().Format("2006-01-02 15:04:05")
+			}
+			fmt.Printf("user=%s mfa_enabled=%t mfa_type=%s recovery_codes=%d totp_verified_at=%s\n",
+				u.Username, u.MFAEnabled, u.MFAType, recovery, verified)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&username, "username", "u", "", "Username (required)")
+	_ = cmd.MarkFlagRequired("username")
+	return cmd
+}
+
+type authAuditFlags struct {
+	actor      string
+	sourceIP   string
+	sourceHost string
+	reason     string
+	ticket     string
+}
+
+func (a *authAuditFlags) bind(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&a.actor, "actor", "", "Audit actor (required, minimum 3 chars)")
+	cmd.Flags().StringVar(&a.sourceIP, "source-ip", "", "Audit source IP (required)")
+	cmd.Flags().StringVar(&a.sourceHost, "source-host", "", "Audit source host (required, minimum 3 chars)")
+	cmd.Flags().StringVar(&a.reason, "reason", "", "Audit reason (required, minimum 8 chars)")
+	cmd.Flags().StringVar(&a.ticket, "ticket", "", "Audit ticket/change reference (required, minimum 3 chars)")
+	_ = cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("source-ip")
+	_ = cmd.MarkFlagRequired("source-host")
+	_ = cmd.MarkFlagRequired("reason")
+	_ = cmd.MarkFlagRequired("ticket")
+}
+
+func (a *authAuditFlags) contextFor(target string) (goauth.AdminAuditContext, error) {
+	actor := strings.TrimSpace(a.actor)
+	ip := strings.TrimSpace(a.sourceIP)
+	host := strings.TrimSpace(a.sourceHost)
+	reason := strings.TrimSpace(a.reason)
+	ticket := strings.TrimSpace(a.ticket)
+	if len(actor) < 3 {
+		return goauth.AdminAuditContext{}, fmt.Errorf("--actor must be at least 3 characters")
+	}
+	if parsed := net.ParseIP(ip); parsed == nil {
+		return goauth.AdminAuditContext{}, fmt.Errorf("--source-ip must be a valid IP address")
+	}
+	if len(host) < 3 {
+		return goauth.AdminAuditContext{}, fmt.Errorf("--source-host must be at least 3 characters")
+	}
+	if len(reason) < 8 {
+		return goauth.AdminAuditContext{}, fmt.Errorf("--reason must be at least 8 characters")
+	}
+	if len(ticket) < 3 {
+		return goauth.AdminAuditContext{}, fmt.Errorf("--ticket must be at least 3 characters")
+	}
+	return goauth.AdminAuditContext{
+		Actor:  actor,
+		Target: strings.TrimSpace(target),
+		IP:     ip,
+		Host:   host,
+		Reason: reason,
+		Ticket: ticket,
+	}, nil
 }
