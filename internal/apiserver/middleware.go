@@ -125,6 +125,9 @@ func isPublicPath(r *http.Request) bool {
 			path = "/" + path
 		}
 	}
+	if strings.HasPrefix(path, "/assets/") {
+		return true
+	}
 	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap"} {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
