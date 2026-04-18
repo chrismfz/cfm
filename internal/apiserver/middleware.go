@@ -125,12 +125,47 @@ func isPublicPath(r *http.Request) bool {
 			path = "/" + path
 		}
 	}
+	if isPublicAssetPath(r, path) {
+		return true
+	}
 	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap"} {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func isPublicAssetPath(r *http.Request, normalizedPath string) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	path := strings.TrimSpace(normalizedPath)
+	if !strings.HasPrefix(path, "/assets/") {
+		return false
+	}
+	if strings.Contains(path, "..") {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".css"),
+		strings.HasSuffix(path, ".map"),
+		strings.HasSuffix(path, ".png"),
+		strings.HasSuffix(path, ".jpg"),
+		strings.HasSuffix(path, ".jpeg"),
+		strings.HasSuffix(path, ".svg"),
+		strings.HasSuffix(path, ".ico"),
+		strings.HasSuffix(path, ".woff"),
+		strings.HasSuffix(path, ".woff2"),
+		strings.HasSuffix(path, ".ttf"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isRequiredHealthPath(_ *http.Request) bool {
@@ -150,6 +185,38 @@ func isCpanelEmbeddedRequest(r *http.Request) bool {
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/cpanel/") {
 		return true
+	}
+	return false
+}
+
+// isEmbedShellBootstrapRequest identifies unauthenticated iframe bootstrap page
+// loads where we can safely serve the static HTML shell and let postMessage
+// bearer token auth handle subsequent API calls.
+func isEmbedShellBootstrapRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		return false
+	}
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/cfm-admin/") {
+		path = strings.TrimPrefix(path, "/cfm-admin")
+		if path == "" || path[0] != '/' {
+			path = "/" + path
+		}
+	}
+	if strings.HasPrefix(path, "/api/") || path == "/login" || strings.HasPrefix(path, "/login/") || path == "/logout" {
+		return false
+	}
+	// Primary signal on first load (from embed bootstrap redirect).
+	if strings.TrimSpace(r.URL.Query().Get("cfmExpectedOrigin")) != "" {
+		return strings.Contains(r.Header.Get("Accept"), "text/html")
+	}
+	// Subsequent in-iframe navigations often drop query params; keep allowing
+	// HTML shell routes when browser explicitly marks iframe destination.
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")), "iframe") {
+		return strings.Contains(r.Header.Get("Accept"), "text/html")
 	}
 	return false
 }
@@ -278,6 +345,11 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 6. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				if isEmbedShellBootstrapRequest(r) {
+					logging.Logf("[apiserver] auth_source=embed_shell_bootstrap")
+					next.ServeHTTP(w, r)
+					return
+				}
 				setAPIAnomalyReason(w, "auth_missing")
 				base := cfmBase(r)
 				next := r.URL.RequestURI()
