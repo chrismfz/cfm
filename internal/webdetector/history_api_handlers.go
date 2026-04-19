@@ -90,12 +90,21 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 	if limit <= 0 {
 		limit = 200
 	}
-	issued, err := e.history.QueryEvents(host, q.Get("ip"), "challenge_issued", limit*4)
+	const maxChallengeOutcomeLimit = 500
+	if limit > maxChallengeOutcomeLimit {
+		limit = maxChallengeOutcomeLimit
+	}
+	queryLimit := limit * 4
+	maxQueryLimit := maxChallengeOutcomeLimit * 4
+	if queryLimit > maxQueryLimit {
+		queryLimit = maxQueryLimit
+	}
+	issued, err := e.history.QueryEvents(host, q.Get("ip"), "challenge_issued", queryLimit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	solvedRows, _ := e.history.QueryEvents(host, q.Get("ip"), "challenge_solved", limit*4)
+	solvedRows, _ := e.history.QueryEvents(host, q.Get("ip"), "challenge_solved", queryLimit)
 	solvedSet := make(map[string]struct{}, len(solvedRows))
 	for _, ev := range solvedRows {
 		k := strings.TrimSpace(ev.IP) + "|" + cleanHost(ev.Host)
