@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 )
 
 // ---- sorting helpers ----
@@ -98,6 +99,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop waf exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop source               # show active log ingest source (socket/file)")
 	fmt.Println("  cfm webtop rules list")
 	fmt.Println("  cfm webtop rules get <id>")
 	fmt.Println("  cfm webtop rules add --file rule.json")
@@ -207,6 +209,9 @@ func RunWebTop(baseURL string, args []string) error {
 			return runHistoryWebTop(baseURL, args[1:])
 		case "tokens":
 			return runTokensWebTop(baseURL, args[1:])
+
+		case "source":
+			return runIngestSource(baseURL)
 
 		case "user-info":
 			if len(args) < 2 {
@@ -1267,5 +1272,81 @@ func runChallengeStatus(baseURL string, args []string) error {
 	} else {
 		fmt.Println("  auto:    inactive")
 	}
+	return nil
+}
+
+// ingestSourceCLIResponse mirrors the JSON served by /api/v1/webdet/ingest-source.
+type ingestSourceCLIResponse struct {
+	Active           string `json:"active"`
+	SockPath         string `json:"sock_path"`
+	SockListening    bool   `json:"sock_listening"`
+	LastReceivedUnix int64  `json:"last_received_unix"`
+	LogFile          string `json:"log_file"`
+	FileActive       bool   `json:"file_active"`
+}
+
+func humanRelSince(ts int64) string {
+	if ts <= 0 {
+		return "never"
+	}
+	d := time.Since(time.Unix(ts, 0))
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// runIngestSource renders the arbiter view for `cfm webtop source`. It reads
+// the same atomic state used by the pipeline, so what you see is what is
+// actually feeding the engine right now.
+func runIngestSource(baseURL string) error {
+	u := baseURL + "/api/v1/webdet/ingest-source"
+	resp, err := clihttp.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ingest-source: HTTP %d", resp.StatusCode)
+	}
+
+	var r ingestSourceCLIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return err
+	}
+
+	sockStatus := "not listening"
+	if r.SockListening {
+		sockStatus = "listening"
+	}
+
+	logFile := r.LogFile
+	if logFile == "" {
+		logFile = "not configured"
+	}
+
+	fileActive := "no"
+	if r.FileActive {
+		fileActive = "yes"
+	}
+
+	fmt.Println("Log Ingest Source")
+	fmt.Println("-----------------")
+	fmt.Printf("Active source : %s\n", r.Active)
+	fmt.Printf("Socket path   : %s\n", r.SockPath)
+	fmt.Printf("Socket status : %s\n", sockStatus)
+	fmt.Printf("Last received : %s\n", humanRelSince(r.LastReceivedUnix))
+	fmt.Printf("Log file      : %s\n", logFile)
+	fmt.Printf("File active   : %s\n", fileActive)
 	return nil
 }

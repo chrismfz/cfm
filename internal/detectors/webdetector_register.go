@@ -163,6 +163,19 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			logging.Logf("[webdetector] API_LISTEN is deprecated and ignored; using shared apiserver")
 		}
 
+		// Log ingest Unix socket (preferred source for OpenResty/Angie via
+		// log_by_lua_block). Runs unconditionally — if nothing connects, the
+		// arbiter transparently falls back to the file tailer. Zero config.
+		if sock := w.eng.IngestSocketRef(); sock != nil {
+			w.srvWG.Add(1)
+			go func() {
+				defer w.srvWG.Done()
+				if err := sock.Serve(pctx, w.eng); err != nil {
+					logging.Logf("[webdetector] ingest socket exited: %v", err)
+				}
+			}()
+		}
+
 		// NginxBridge decision socket — same lifecycle as API server
 		if w.cfg.OpenRestyMode {
 
@@ -853,6 +866,12 @@ func init() {
 		ipIgnore := newIPIgnoreFromGlobal(global)
 
 		engine := webdet.NewEngine(cfg)
+
+		// Wire the Unix ingest socket (log_by_lua_block path). Attached
+		// unconditionally — the arbiter in Engine.RunOnce picks between
+		// socket and file based purely on whether lines are arriving,
+		// without any config change.
+		engine.SetIngestSocket(webdet.NewIngestSocket())
 
 		// Wire IGNORE_IPS / IGNORE_NETS to engine immediately (before RunOnce).
 		// The bridge gets it inside startOnce.Do once OpenResty mode starts.
