@@ -724,6 +724,7 @@ func runDaemon(args []string) {
 		mode os.FileMode
 	}{
 		{"/var/lib/cfm", 0o701},
+		{"/var/lib/cfm/lua", 0o750},
 		{"/var/lib/cfm/sslcollector", 0o770},
 		{"/var/lib/cfm/scanner", 0o700},
 		{"/var/lib/cfm/scanner/pending", 0o700},
@@ -737,6 +738,7 @@ func runDaemon(args []string) {
 		_ = os.Chmod(d.path, d.mode)
 	}
 	if cfmGID > 0 {
+		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
 		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
 		// Chown the snapshot file if it already exists (e.g. written as root:root
 		// before the cfm group was in place). Without this, OpenResty (cfm user)
