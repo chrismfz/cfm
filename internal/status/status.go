@@ -3,6 +3,7 @@ package status
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/detectors"
 	"cfm/internal/detectors/health"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
@@ -480,7 +481,7 @@ func printBridgeInterceptorStatus() {
 		"/usr/local/openresty/nginx/lua/cfm_token.lua",
 		"/etc/angie/lua/cfm_token.lua",
 	})
-	bridgeToken := readLuaToken("/var/lib/cfm/lua/cfm_bridge_token.lua")
+	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
 	bridgeRuntime := probeBridgeRuntime(bridgeCfg, bridgeToken)
 	orBridge := readLuaToken("/usr/local/openresty/nginx/lua/cfm_bridge_token.lua")
 	angieBridge := readLuaToken("/etc/angie/lua/cfm_bridge_token.lua")
@@ -501,9 +502,10 @@ func printBridgeInterceptorStatus() {
 	fmt.Printf("  %-24s %s\n", "cfm_token:", tokenHealth(cfmToken))
 	fmt.Printf("  %-24s %s\n", "bridge_token:", tokenHealth(bridgeToken))
 	fmt.Printf("  %-24s %s\n", "bridge socket auth:", bridgeRuntime.summary())
-	fmt.Printf("  %-24s socket=%s token_src=%s mode=%s\n",
+	fmt.Printf("  %-24s socket=%s source=%s token_src=%s mode=%s\n",
 		"",
-		bridgeCfg.SocketPath,
+		bridgeCfg.DisplaySocketPath,
+		bridgeCfg.SocketSource,
 		bridgeRuntime.TokenPath,
 		bridgeRuntime.ModeText,
 	)
@@ -719,6 +721,13 @@ var (
 	badTokenRe  = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 )
 
+var (
+	canonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+	bridgeSocketProbe        = probeNginxBridgeSocket
+	socketStat               = os.Stat
+	detectorsConfigPath      = "/etc/cfm/detectors.conf"
+)
+
 func readLuaToken(path string) luaTokenProbe {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -786,8 +795,10 @@ func tokenDiagnosticLine(canonical, local luaTokenProbe) string {
 }
 
 type bridgeRuntimeConfig struct {
-	Enabled    bool
-	SocketPath string
+	Enabled           bool
+	SocketPath        string
+	DisplaySocketPath string
+	SocketSource      string
 }
 
 type bridgeRuntimeProbe struct {
@@ -806,27 +817,73 @@ func (p bridgeRuntimeProbe) summary() string {
 }
 
 func resolveBridgeRuntimeConfig() bridgeRuntimeConfig {
+	const (
+		defaultSockPath = "/var/run/cfm/cfm_nginx.sock"
+		legacySockPath  = "/var/run/cfm_nginx.sock"
+	)
 	cfg := bridgeRuntimeConfig{
-		Enabled:    false,
-		SocketPath: "/var/run/cfm_nginx.sock",
+		Enabled:      false,
+		SocketPath:   defaultSockPath,
+		SocketSource: "fallback",
 	}
 
-	kv := readSimpleKVConfig(resolveRuntimeCFMConfigPath())
+	kv := readDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
 	if v, ok := kv["OPENRESTY_MODE"]; ok {
 		cfg.Enabled = parseBoolLoose(v)
 	}
 	if v, ok := kv["OPENRESTY_SOCK"]; ok {
 		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
 			cfg.SocketPath = clean
+			cfg.SocketSource = "config"
 		}
 	}
+	if cfg.SocketSource == "fallback" {
+		if !pathExists(cfg.SocketPath) && pathExists(legacySockPath) {
+			cfg.SocketPath = legacySockPath
+		}
+	}
+	cfg.DisplaySocketPath = normalizeRunPathForDisplay(cfg.SocketPath)
 	return cfg
+}
+
+func resolveDetectorsConfigPath() string {
+	return detectorsConfigPath
+}
+
+func readDetectorSectionKV(path, section string) map[string]string {
+	out := map[string]string{}
+	sections, err := detectors.ReadSectionsFile(path)
+	if err != nil {
+		return out
+	}
+	if kv, ok := sections.ByName[section]; ok {
+		for k, v := range kv {
+			out[strings.ToUpper(strings.TrimSpace(k))] = v
+		}
+	}
+	return out
+}
+
+func pathExists(path string) bool {
+	_, err := socketStat(path)
+	return err == nil
+}
+
+func normalizeRunPathForDisplay(path string) string {
+	trim := strings.TrimSpace(path)
+	if trim == "/run" || strings.HasPrefix(trim, "/run/") {
+		return "/var" + trim
+	}
+	if trim == "/var/run" || strings.HasPrefix(trim, "/var/run/") {
+		return trim
+	}
+	return trim
 }
 
 func probeBridgeRuntime(cfg bridgeRuntimeConfig, bridgeToken luaTokenProbe) bridgeRuntimeProbe {
 	out := bridgeRuntimeProbe{
 		Status:    "DISABLED",
-		TokenPath: "/var/lib/cfm/lua/cfm_bridge_token.lua",
+		TokenPath: canonicalBridgeTokenPath,
 		ModeText:  "disabled",
 	}
 	if cfg.Enabled {
@@ -846,7 +903,7 @@ func probeBridgeRuntime(cfg bridgeRuntimeConfig, bridgeToken luaTokenProbe) brid
 		return out
 	}
 
-	st, err := os.Stat(cfg.SocketPath)
+	st, err := socketStat(cfg.SocketPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return bridgeRuntimeProbe{
@@ -872,7 +929,7 @@ func probeBridgeRuntime(cfg bridgeRuntimeConfig, bridgeToken luaTokenProbe) brid
 		}
 	}
 
-	httpStatus, bodySnippet, err := probeNginxBridgeSocket(cfg.SocketPath, bridgeToken.Token)
+	httpStatus, bodySnippet, err := bridgeSocketProbe(cfg.SocketPath, bridgeToken.Token)
 	if err != nil {
 		return bridgeRuntimeProbe{
 			Status:    "CONNECT_FAIL",
