@@ -130,6 +130,7 @@ FROM %s WHERE 1=1`, historyTableName)
 	if capHint > 256 {
 		capHint = 256
 	}
+	// capHint is intentionally capped at a maximum of 256.
 	out := make([]GovernorHistoryEvent, 0, capHint)
 	for rows.Next() {
 		var ev GovernorHistoryEvent
