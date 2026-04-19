@@ -312,11 +312,18 @@ if ig != nil {
 			logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
 			wdKV["OPENRESTY_TOKEN"] = newTok
 			cfmGID := sslcollector.CfmGroupID()
-			luaPath := "/usr/local/openresty/nginx/lua/cfm_bridge_token.lua"
-			if err := sslcollector.WriteLuaToken(luaPath, newTok, cfmGID); err != nil {
-				logging.Logf("[detectors] cfm_bridge_token.lua write failed: %v", err)
-			} else {
-				logging.Logf("[detectors] cfm_bridge_token.lua written (%s)", luaPath)
+			for _, res := range sslcollector.WriteLuaTokenToExistingParents(newTok, cfmGID,
+				"/usr/local/openresty/nginx/lua/cfm_bridge_token.lua",
+				"/etc/angie/lua/cfm_bridge_token.lua",
+			) {
+				switch {
+				case res.Skipped:
+					logging.Logf("[detectors] cfm_bridge_token.lua skipped path=%s (parent directory missing)", res.Path)
+				case res.Err != nil:
+					logging.Logf("[detectors] cfm_bridge_token.lua write failed path=%s err=%v", res.Path, res.Err)
+				case res.Written:
+					logging.Logf("[detectors] cfm_bridge_token.lua written path=%s", res.Path)
+				}
 			}
 		}
 	}
@@ -612,4 +619,3 @@ func parseBlockPolicy(kv KV) blockPolicy {
     }
     return p
 }
-

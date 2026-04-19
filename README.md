@@ -370,6 +370,19 @@ No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`) — the env var n
 historical and is read identically by Lua whether the front-end is OpenResty or Angie.
 The Lua layer queries it per-request.
 
+### Webdetector bridge token file (`OPENRESTY_TOKEN`)
+
+When `[webdetector] OPENRESTY_TOKEN` is weak/missing and gets rotated, CFM writes
+`cfm_bridge_token.lua` to all known in-path Lua layouts whose parent directory
+already exists:
+
+- `/usr/local/openresty/nginx/lua/cfm_bridge_token.lua`
+- `/etc/angie/lua/cfm_bridge_token.lua`
+
+This dual-path refresh keeps OpenResty↔Angie migrations safe: whichever stack is
+currently installed keeps receiving the latest bridge token without manual copy
+steps or requiring both directory trees to exist.
+
 ### OpenResty vs Angie — choosing a backend
 
 Both backends run the **same CFM Lua files** (`cfm.lua`, `cfm_waf.lua`, `cfm_rules.lua`,

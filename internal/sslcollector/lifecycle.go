@@ -80,38 +80,39 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 			if cfg.LuaTokenPath != "" {
 				candidates = append(candidates, cfg.LuaTokenPath)
 			}
-			candidates = append(candidates,
+			gid := CfmGroupID()
+
+			writtenCount := 0
+			attemptedCount := 0
+			if cfg.LuaTokenPath != "" {
+				attemptedCount++
+				if werr := WriteLuaTokenWithMkdir(cfg.LuaTokenPath, tok, gid); werr != nil {
+					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", cfg.LuaTokenPath, werr)
+				} else {
+					writtenCount++
+					logging.Logf("[sslcollector] wrote lua token path=%s", cfg.LuaTokenPath)
+				}
+			}
+
+			for _, res := range WriteLuaTokenToExistingParents(tok, gid,
 				"/usr/local/openresty/nginx/lua/cfm_token.lua",
 				"/etc/angie/lua/cfm_token.lua",
-			)
-
-			seen := make(map[string]struct{}, len(candidates))
-			deduped := make([]string, 0, len(candidates))
-			for _, p := range candidates {
-				if p == "" {
-					continue
-				}
-				if _, ok := seen[p]; ok {
-					continue
-				}
-				seen[p] = struct{}{}
-				deduped = append(deduped, p)
-			}
-
-			attemptedCount := 0
-			writtenCount := 0
-			gid := CfmGroupID()
-			for _, p := range deduped {
+			) {
 				attemptedCount++
-				allowMkdir := cfg.LuaTokenPath != "" && p == cfg.LuaTokenPath
-				if werr := writeLuaToken(p, tok, gid, allowMkdir); werr != nil {
-					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", p, werr)
+				if res.Skipped {
+					logging.Logf("[sslcollector] skipped lua token path=%s (parent directory missing)", res.Path)
 					continue
 				}
-				writtenCount++
-				logging.Logf("[sslcollector] wrote lua token path=%s", p)
+				if res.Err != nil {
+					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", res.Path, res.Err)
+					continue
+				}
+				if res.Written {
+					writtenCount++
+					logging.Logf("[sslcollector] wrote lua token path=%s", res.Path)
+				}
 			}
-			logging.Logf("[sslcollector] lua token refresh summary: wrote=%d attempted=%d candidates=%d", writtenCount, attemptedCount, len(deduped))
+			logging.Logf("[sslcollector] lua token refresh summary: wrote=%d attempted=%d", writtenCount, attemptedCount)
 			if attemptedCount == 0 {
 				logging.Logf("[sslcollector] WARNING: SSL collector token file was not refreshed anywhere (no writable lua token target directories found)")
 			}
