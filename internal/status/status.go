@@ -483,8 +483,6 @@ func printBridgeInterceptorStatus() {
 	})
 	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
 	bridgeRuntime := probeBridgeRuntime(bridgeCfg, bridgeToken)
-	orBridge := readLuaToken("/usr/local/openresty/nginx/lua/cfm_bridge_token.lua")
-	angieBridge := readLuaToken("/etc/angie/lua/cfm_bridge_token.lua")
 
 	fmt.Printf("  %-24s %s\n", "DNAT:", dnatState)
 	fmt.Printf("  %-24s %s\n", "OpenResty:", serviceTriple(openrestySvc))
@@ -509,8 +507,6 @@ func printBridgeInterceptorStatus() {
 		bridgeRuntime.TokenPath,
 		bridgeRuntime.ModeText,
 	)
-	fmt.Printf("  %-24s %s\n", "openresty token file:", tokenDiagnosticLine(bridgeToken, orBridge))
-	fmt.Printf("  %-24s %s\n", "angie token file:", tokenDiagnosticLine(bridgeToken, angieBridge))
 	if sockProbe.StatsSummary != "" {
 		fmt.Printf("  %-24s %s\n", "sslcollector stats:", sockProbe.StatsSummary)
 	} else {
