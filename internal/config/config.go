@@ -38,7 +38,7 @@ type SSLCollectorSockConfig struct {
 	Enabled      bool          // SSLCOLLECTOR_SOCK_ENABLE
 	SockPath     string        // SSLCOLLECTOR_SOCK_PATH
 	Token        string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
-	LuaTokenPath string        // SSLCOLLECTOR_LUA_TOKEN_PATH (default /usr/local/openresty/nginx/conf/cfm_token.lua)
+	LuaTokenPath string        // SSLCOLLECTOR_LUA_TOKEN_PATH (default /var/lib/cfm/lua/cfm_token.lua)
 	PEMTTL       time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
 	PEMMax       int           // SSLCOLLECTOR_SOCK_PEM_MAX (default 50000)
 }
@@ -384,7 +384,7 @@ func (c *Config) SetDefaults() {
 		c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
 	}
 	if c.SSLCollectorSock.LuaTokenPath == "" {
-		c.SSLCollectorSock.LuaTokenPath = "/usr/local/openresty/nginx/lua/cfm_token.lua"
+		c.SSLCollectorSock.LuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
 	}
 	if c.SSLCollectorSock.PEMTTL <= 0 {
 		c.SSLCollectorSock.PEMTTL = 10 * time.Minute

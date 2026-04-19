@@ -11,6 +11,8 @@ import (
 	"cfm/internal/logging"
 )
 
+const sharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
+
 // SockLifecycle owns the start/stop/restart state of the SSLCollector
 // unix socket server. Create once with NewSockLifecycle (passing the shared
 // Collector), then call ApplyConfig on every daemon tick after config is
@@ -47,7 +49,7 @@ func CfmGroupID() int {
 // On every call where the socket is enabled, the token is validated and a new
 // one is auto-generated if the existing value is absent or a known placeholder.
 // The new token is patched into cfm.conf (l.cfgPath) and written to
-// cfg.LuaTokenPath so OpenResty can read it without embedding it in Lua source.
+// /var/lib/cfm/lua/cfm_token.lua so both OpenResty and Angie can read it.
 func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollectorSockConfig) {
 	// apply defaults
 	sp := cfg.SockPath
@@ -76,45 +78,15 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 			// Write (or refresh) cfm_token.lua whenever the token is confirmed good.
 			// WriteLuaToken is atomic (write-tmp + rename) so partial writes cannot
 			// leave the Lua file in a broken state.
-			var candidates []string
-			if cfg.LuaTokenPath != "" {
-				candidates = append(candidates, cfg.LuaTokenPath)
-			}
 			gid := CfmGroupID()
 
-			writtenCount := 0
-			attemptedCount := 0
-			if cfg.LuaTokenPath != "" {
-				attemptedCount++
-				if werr := WriteLuaTokenWithMkdir(cfg.LuaTokenPath, tok, gid); werr != nil {
-					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", cfg.LuaTokenPath, werr)
-				} else {
-					writtenCount++
-					logging.Logf("[sslcollector] wrote lua token path=%s", cfg.LuaTokenPath)
-				}
+			if cfg.LuaTokenPath != "" && cfg.LuaTokenPath != sharedLuaTokenPath {
+				logging.Logf("[sslcollector] ignoring SSLCOLLECTOR_LUA_TOKEN_PATH=%s; using fixed shared path=%s", cfg.LuaTokenPath, sharedLuaTokenPath)
 			}
-
-			for _, res := range WriteLuaTokenToExistingParents(tok, gid,
-				"/usr/local/openresty/nginx/lua/cfm_token.lua",
-				"/etc/angie/lua/cfm_token.lua",
-			) {
-				attemptedCount++
-				if res.Skipped {
-					logging.Logf("[sslcollector] skipped lua token path=%s (parent directory missing)", res.Path)
-					continue
-				}
-				if res.Err != nil {
-					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", res.Path, res.Err)
-					continue
-				}
-				if res.Written {
-					writtenCount++
-					logging.Logf("[sslcollector] wrote lua token path=%s", res.Path)
-				}
-			}
-			logging.Logf("[sslcollector] lua token refresh summary: wrote=%d attempted=%d", writtenCount, attemptedCount)
-			if attemptedCount == 0 {
-				logging.Logf("[sslcollector] WARNING: SSL collector token file was not refreshed anywhere (no writable lua token target directories found)")
+			if werr := WriteLuaTokenWithMkdir(sharedLuaTokenPath, tok, gid); werr != nil {
+				logging.Logf("[sslcollector] failed to write lua token path=%s: %v", sharedLuaTokenPath, werr)
+			} else {
+				logging.Logf("[sslcollector] wrote lua token path=%s", sharedLuaTokenPath)
 			}
 		}
 	}
