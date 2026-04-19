@@ -41,16 +41,17 @@ local SOCKS = {
   -- "/var/run/sslcollector2.sock",  -- optional secondary for HA
 }
 
--- Token is written by CFM at startup/reload to this path (root:cfm 0640).
+-- Token is written by CFM at startup/reload (root:cfm 0640) and loaded from
+-- a single canonical path to prevent stale legacy copies from being used.
 -- The file returns a single string: return "deadbeef..."
--- Override path via SSLCOLLECTOR_LUA_TOKEN_PATH in cfm.conf.
-local _TOKEN_FILE = "/usr/local/openresty/nginx/lua/cfm_token.lua"
+local _TOKEN_FILE = "/var/lib/cfm/lua/cfm_token.lua"
 local TOKEN
 do
   local chunk, load_err = loadfile(_TOKEN_FILE)
   if not chunk then
     ngx.log(ngx.ERR, "[sslcollector] cannot load token file ", _TOKEN_FILE, ": ", tostring(load_err))
-    error("[sslcollector] missing token file — cfm may not have started yet")
+    error("[sslcollector] missing token file — cfm may not have started yet; path: "
+          .. _TOKEN_FILE .. "; details: load: " .. tostring(load_err))
   end
   local ok, val = pcall(chunk)
   if not ok or type(val) ~= "string" or #val < 32 then
