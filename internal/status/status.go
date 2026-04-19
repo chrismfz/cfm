@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/detectors/health"
+	"cfm/internal/dnat"
 	"cfm/internal/enrich"
+	"cfm/internal/firewall/nft"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -445,8 +447,150 @@ func Run(args []string) {
 		timing["topn_enrich_print_ms"] = time.Since(t0).Milliseconds()
 	}
 
+	// --- Bridge / Interceptor (best-effort diagnostics) ---
+	t0 = time.Now()
+	printBridgeInterceptorStatus()
+	timing["bridge_interceptor_ms"] = time.Since(t0).Milliseconds()
+
 	printTimings()
 
+}
+
+type bridgeServiceProbe struct {
+	Installed bool
+	Enabled   string
+	Active    string
+}
+
+func printBridgeInterceptorStatus() {
+	fmt.Println("\n---- Bridge / Interceptor ----")
+
+	dnatState := "OFF"
+	if on, err := dnat.Status(nft.New()); err == nil && on {
+		dnatState = "ON"
+	}
+
+	openrestySvc := probeUnit("openresty.service")
+	angieSvc := probeUnit("angie.service")
+
+	sockState := socketStatus("/var/run/sslcollector.sock")
+
+	cfmToken := readLuaToken("/var/lib/cfm/lua/cfm_token.lua")
+	bridgeToken := readLuaToken("/var/lib/cfm/lua/cfm_bridge_token.lua")
+
+	orBridge := readLuaToken("/usr/local/openresty/nginx/lua/cfm_bridge_token.lua")
+	angieBridge := readLuaToken("/etc/angie/lua/cfm_bridge_token.lua")
+
+	fmt.Printf("  %-24s %s\n", "DNAT:", dnatState)
+	fmt.Printf("  %-24s %s\n", "OpenResty:", serviceTriple(openrestySvc))
+	fmt.Printf("  %-24s %s\n", "Angie:", serviceTriple(angieSvc))
+	fmt.Printf("  %-24s %s\n", "sslcollector.sock:", sockState)
+	fmt.Printf("  %-24s %s\n", "cfm_token:", tokenHealth(cfmToken))
+	fmt.Printf("  %-24s %s\n", "bridge_token:", tokenHealth(bridgeToken))
+	fmt.Printf("  %-24s %s\n", "openresty bridge link:", tokenLinkHealth(bridgeToken, orBridge))
+	fmt.Printf("  %-24s %s\n", "angie bridge link:", tokenLinkHealth(bridgeToken, angieBridge))
+}
+
+func probeUnit(unit string) bridgeServiceProbe {
+	out := bridgeServiceProbe{Enabled: "unknown", Active: "unknown"}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return out
+	}
+	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", unit).CombinedOutput()
+	out.Installed = bytes.Contains(loadOut, []byte("LoadState=loaded"))
+
+	en := trim1(must(exec.Command("systemctl", "is-enabled", unit).CombinedOutput()))
+	if en != "" {
+		out.Enabled = en
+	}
+	ac := trim1(must(exec.Command("systemctl", "is-active", unit).CombinedOutput()))
+	if ac != "" {
+		out.Active = ac
+	}
+	return out
+}
+
+func serviceTriple(s bridgeServiceProbe) string {
+	installed := "not-installed"
+	if s.Installed {
+		installed = "installed"
+	}
+	return fmt.Sprintf("%s/%s/%s", installed, s.Enabled, s.Active)
+}
+
+func socketStatus(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "MISSING"
+		}
+		return "PERM"
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return "PERM"
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "PERM"
+	}
+	_ = f.Close()
+	return "OK"
+}
+
+type luaTokenProbe struct {
+	Token   string
+	Present bool
+	Valid   bool
+}
+
+var (
+	luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+["']([^"']+)["']\s*$`)
+	badTokenRe  = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
+)
+
+func readLuaToken(path string) luaTokenProbe {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return luaTokenProbe{}
+	}
+	m := luaReturnRe.FindSubmatch(b)
+	if len(m) < 2 {
+		return luaTokenProbe{Present: true}
+	}
+	tok := strings.TrimSpace(string(m[1]))
+	return luaTokenProbe{
+		Token:   tok,
+		Present: true,
+		Valid:   isStrongToken(tok),
+	}
+}
+
+func isStrongToken(tok string) bool {
+	t := strings.TrimSpace(tok)
+	return len(t) >= 32 && !badTokenRe.MatchString(t)
+}
+
+func tokenHealth(t luaTokenProbe) string {
+	if !t.Present {
+		return "MISSING"
+	}
+	if !t.Valid {
+		return "INVALID"
+	}
+	return "OK"
+}
+
+func tokenLinkHealth(shared, local luaTokenProbe) string {
+	if !local.Present {
+		return "MISSING"
+	}
+	if !shared.Valid || !local.Valid {
+		return "MISMATCH"
+	}
+	if shared.Token == local.Token {
+		return "OK"
+	}
+	return "MISMATCH"
 }
 
 // ---------------------------------------------------------------------------
