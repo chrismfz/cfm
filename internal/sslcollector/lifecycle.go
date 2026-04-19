@@ -3,9 +3,7 @@ package sslcollector
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -104,19 +102,9 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 			writtenCount := 0
 			gid := CfmGroupID()
 			for _, p := range deduped {
-				parent := filepath.Dir(p)
-				st, statErr := os.Stat(parent)
-				if statErr != nil || !st.IsDir() {
-					if statErr != nil {
-						logging.Logf("[sslcollector] skipped lua token write path=%s parent=%s (parent check failed: %v)", p, parent, statErr)
-					} else {
-						logging.Logf("[sslcollector] skipped lua token write path=%s parent=%s (not a directory)", p, parent)
-					}
-					continue
-				}
-
 				attemptedCount++
-				if werr := WriteLuaToken(p, tok, gid); werr != nil {
+				allowMkdir := cfg.LuaTokenPath != "" && p == cfg.LuaTokenPath
+				if werr := writeLuaToken(p, tok, gid, allowMkdir); werr != nil {
 					logging.Logf("[sslcollector] failed to write lua token path=%s: %v", p, werr)
 					continue
 				}
