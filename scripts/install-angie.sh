@@ -2,17 +2,21 @@
 #
 # install-angie.sh — TESTBED installer for CFM on Angie (nginx fork)
 #
-# WARNING: Experimental. Installs Angie + angie-module-lua. Does NOT touch
-# an existing OpenResty install, and does NOT auto-deploy nginx.conf — the
-# OpenResty config needs manual adaptation for Angie (see print_next_steps).
+# Installs Angie + angie-module-lua, runs CFM-specific pre-flight checks,
+# and (if configs/angie.conf is shipped in /usr/share/cfm/configs/) auto-
+# deploys it with `angie -t` validation.
+#
+# DOES NOT touch an existing OpenResty install. Both can be present side by
+# side; only one may be running at a time (they fight for :9080 / :9043).
 #
 # Layout (differs from OpenResty):
 #   Angie configs: /etc/angie/
 #   CFM lua:       /etc/angie/lua/
 #   Extra resty:   /etc/angie/lualib/         (lua-resty-maxminddb here)
 #   Dyn modules:   /usr/lib/angie/modules/
-#   Logs:          /var/log/angie/
-#   Caches:        /var/cache/angie/
+#   Logs:          /var/log/angie/            (chowned to cfm:cfm)
+#   Caches:        /var/cache/angie/          (chowned to cfm:cfm)
+#   Temp dirs:     /var/lib/cfm/nginx/*       (created & owned by cfm:cfm)
 #   Binary:        /usr/sbin/angie
 #
 # This script mirrors the structure of install-openresty.sh for side-by-side
@@ -267,6 +271,65 @@ install_extra_resty() {
     rm -rf "$tmp"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CFM pre-flight checks (angie.conf uses "user cfm;")
+# ─────────────────────────────────────────────────────────────────────────────
+
+ensure_cfm_user_exists() {
+    if id -u cfm >/dev/null 2>&1; then
+        log "cfm user exists"
+        return 0
+    fi
+    warn "cfm user does NOT exist — angie.conf uses 'user cfm;' and will fail."
+    warn "The cfm user is normally created by the CFM RPM/DEB postinst."
+    warn "If CFM is installed, check: getent passwd cfm"
+    warn "If not, install CFM first, OR edit angie.conf to use a different user."
+}
+
+ensure_cfm_temp_dirs() {
+    # angie.conf sets:
+    #   client_body_temp_path /var/lib/cfm/nginx/client_body_temp;
+    #   proxy_temp_path       /var/lib/cfm/nginx/proxy_temp;
+    # Workers run as cfm — these must exist and be cfm:cfm-owned.
+    local dirs=(
+        /var/lib/cfm/nginx/client_body_temp
+        /var/lib/cfm/nginx/proxy_temp
+    )
+    local d
+
+    for d in "${dirs[@]}"; do
+        if [ -d "$d" ]; then
+            log "CFM temp dir already present: $d"
+        else
+            mkdir -p "$d"
+            log "Created CFM temp dir: $d"
+        fi
+        # Always (re)chown — safe no-op if already cfm:cfm.
+        if id -u cfm >/dev/null 2>&1; then
+            chown -R cfm:cfm "$d"
+        fi
+    done
+}
+
+ensure_log_dir_ownership() {
+    # Angie's package creates /var/log/angie/ as angie:angie. Since workers
+    # run as cfm, pre-existing log files owned by angie cannot be appended
+    # to. Chown the whole dir recursively.
+    local log_dir="/var/log/angie"
+
+    if [ ! -d "$log_dir" ]; then
+        log "Creating $log_dir"
+        mkdir -p "$log_dir"
+    fi
+
+    if id -u cfm >/dev/null 2>&1; then
+        chown -R cfm:cfm "$log_dir"
+        log "Ensured $log_dir is owned by cfm:cfm"
+    else
+        warn "cfm user missing — skipping chown of $log_dir"
+    fi
+}
+
 detect_cert_dir() {
     if [ -d "/etc/angie" ]; then
         printf '%s\n' "/etc/angie/selfsigned"
@@ -311,6 +374,7 @@ ensure_lua_dir() {
 }
 
 ensure_cache_dirs() {
+    # Cache dirs owned by cfm (the angie worker user per angie.conf), not angie.
     local dirs=(
         /var/cache/angie/cfm_static
         /var/cache/angie/cfm_micro
@@ -322,9 +386,11 @@ ensure_cache_dirs() {
             log "Cache directory already present: $d"
         else
             mkdir -p "$d"
-            # angie user is created by the package; fail-soft if not yet present
-            chown -R angie:angie "$d" 2>/dev/null || true
             log "Created cache directory: $d"
+        fi
+        # Chown to cfm (worker user) so proxy cache writes succeed.
+        if id -u cfm >/dev/null 2>&1; then
+            chown -R cfm:cfm "$d"
         fi
     done
 }
@@ -377,55 +443,95 @@ deploy_cfm_files() {
                          "/etc/logrotate.d/logrotate-cfm"
 }
 
+deploy_angie_conf() {
+    # Mirrors install-openresty.sh's deploy_nginx_conf:
+    # validate with `angie -t` against the staged config before swapping.
+    local src="/usr/share/cfm/configs/angie.conf"
+    local dst="/etc/angie/angie.conf"
+    local prefix="/etc/angie"
+
+    if [ ! -f "$src" ]; then
+        warn "angie.conf source not found, skipping: $src"
+        warn "(Ship configs/angie.conf in the CFM package to enable auto-deploy.)"
+        return 0
+    fi
+
+    if ! command_exists angie; then
+        warn "angie binary not found in PATH — skipping config test/deploy"
+        return 0
+    fi
+
+    log "Testing angie config: $src"
+    if angie -t -p "$prefix" -c "$src" >/dev/null 2>&1; then
+        log "Config test passed"
+        backup_and_copy_file "$src" "$dst"
+        log "angie.conf deployed successfully"
+    else
+        warn "Config test FAILED — angie.conf NOT deployed. Output:"
+        angie -t -p "$prefix" -c "$src" >&2 || true
+        warn "Fix the errors above, then re-run this script or copy manually:"
+        warn "  cp $src $dst && angie -t && systemctl restart angie"
+    fi
+}
+
 print_next_steps() {
-    cat <<'EOF'
+    local deployed=0
+    if [ -f /etc/angie/angie.conf ] && grep -q "CFM testbed" /etc/angie/angie.conf 2>/dev/null; then
+        deployed=1
+    fi
+
+    cat <<EOF
 
 ===========================================================================
-  TESTBED INSTALL COMPLETE — Angie is installed but NOT YET SERVING CFM
+  TESTBED INSTALL COMPLETE
 ===========================================================================
 
-This script intentionally did NOT overwrite /etc/angie/angie.conf, because
-configs/openresty.conf needs manual adaptation for Angie. Key items:
+Pre-flight status:
+  cfm user present:         $(id -u cfm >/dev/null 2>&1 && echo yes || echo "NO — angie will fail to start")
+  Temp dirs (cfm:cfm):      /var/lib/cfm/nginx/{client_body_temp,proxy_temp}
+  Log dir (cfm:cfm):        /var/log/angie/
+  Cache dirs (cfm:cfm):     /var/cache/angie/cfm_{static,micro}
+  Self-signed fallback:     /etc/angie/selfsigned/{fullchain,privkey}.pem
+  CFM lua deployed:         /etc/angie/lua/
+  Extra resty (maxminddb):  /etc/angie/lualib/resty/
+  angie.conf deployed:      $([ $deployed -eq 1 ] && echo yes || echo "NO — see below")
 
-  1. load_module directives (top-level, before the `events` block):
-       load_module modules/ndk_http_module.so;
-       load_module modules/ngx_http_lua_module.so;
+EOF
 
-     NOTE: Angie's angie-module-lua package may auto-load these via a
-     drop-in under /etc/angie/module.d/ (or similar). Check before adding
-     manually — double-loading is an error.
+    if [ $deployed -eq 1 ]; then
+        cat <<'EOF'
+READY TO TEST — bring up Angie in place of OpenResty:
 
-  2. Path substitutions in your adapted config:
-       /usr/local/openresty/nginx/conf  ->  /etc/angie
-       /usr/local/openresty/nginx/lua   ->  /etc/angie/lua
-       /usr/local/openresty/nginx/logs  ->  /var/log/angie
-       /var/cache/nginx                 ->  /var/cache/angie
+    systemctl stop openresty      # release :9080 and :9043
+    systemctl start angie
+    systemctl status angie
+    tail -f /var/log/angie/error.log
 
-  3. lua_package_path (in the http {} block) must cover both dirs:
-       lua_package_path '/etc/angie/lua/?.lua;/etc/angie/lualib/?.lua;;';
+Smoke tests:
+    curl -sk http://127.0.0.1:9080/__ssl_debug
+    curl -vk https://virgo.myip.gr/ 2>&1 | head
+    tail -f /var/log/angie/access.cfm.log
 
-  4. ssl_certificate paths for the fallback self-signed:
-       /etc/angie/selfsigned/fullchain.pem
-       /etc/angie/selfsigned/privkey.pem
+ROLLBACK:
+    systemctl stop angie && systemctl start openresty
 
-  5. nftables DNAT targets stay :9080 / :9043 (unchanged).
+EOF
+    else
+        cat <<'EOF'
+MANUAL DEPLOY — configs/angie.conf was not found in the CFM package.
 
-SUGGESTED FLOW:
-    cp /usr/share/cfm/configs/openresty.conf /etc/angie/angie.conf.cfm
-    # edit /etc/angie/angie.conf.cfm per notes above
-    angie -t -c /etc/angie/angie.conf.cfm
-    # once clean:
+Stage and validate:
+    cp <your>/angie.conf  /etc/angie/angie.conf.cfm
+    angie -t -p /etc/angie -c /etc/angie/angie.conf.cfm
+
+If clean:
     mv /etc/angie/angie.conf     /etc/angie/angie.conf.dist
     mv /etc/angie/angie.conf.cfm /etc/angie/angie.conf
-    systemctl restart angie
-
-WHILE TESTING: OpenResty is untouched. If this box currently has OpenResty
-listening on :9080 / :9043 you MUST stop it before starting Angie, or they
-will fight over the port:
     systemctl stop openresty
     systemctl start angie
 
 EOF
+    fi
 }
 
 main() {
@@ -435,6 +541,7 @@ main() {
     log "Detected OS family: $OS_FAMILY (${OS_ID:-unknown} ${OS_VERSION_ID:-unknown})"
     log "*** TESTBED INSTALLER — experimental. Does not touch OpenResty. ***"
 
+    # 1. Install packages
     if [ "$OS_FAMILY" = "debian" ]; then
         install_prereqs_debian
         setup_angie_repo_debian
@@ -442,13 +549,24 @@ main() {
         install_prereqs_el
         setup_angie_repo_el
     fi
-
     install_angie_packages
     install_extra_resty
+
+    # 2. CFM-specific pre-flight (user, temp dirs, log dir ownership)
+    ensure_cfm_user_exists
+    ensure_cfm_temp_dirs
+    ensure_log_dir_ownership
+
+    # 3. Angie-specific setup
     create_default_certs_if_missing
     ensure_lua_dir
     ensure_cache_dirs
     deploy_cfm_files
+
+    # 4. Auto-deploy angie.conf if shipped (with `angie -t` validation)
+    deploy_angie_conf
+
+    # 5. Next-steps report
     print_next_steps
     log "Done"
 }
