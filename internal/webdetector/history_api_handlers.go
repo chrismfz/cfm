@@ -86,15 +86,16 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 	if !scopeCheckHost(w, r, host) {
 		return
 	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 {
-		limit = 200
+	rawLimit, _ := strconv.Atoi(q.Get("limit"))
+	if rawLimit <= 0 {
+		rawLimit = 200
 	}
 	const maxChallengeOutcomeLimit = 500
-	if limit > maxChallengeOutcomeLimit {
-		limit = maxChallengeOutcomeLimit
+	boundedLimit := rawLimit
+	if boundedLimit > maxChallengeOutcomeLimit {
+		boundedLimit = maxChallengeOutcomeLimit
 	}
-	queryLimit := limit * 4
+	queryLimit := boundedLimit * 4
 	maxQueryLimit := maxChallengeOutcomeLimit * 4
 	if queryLimit > maxQueryLimit {
 		queryLimit = maxQueryLimit
@@ -110,18 +111,18 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 		k := strings.TrimSpace(ev.IP) + "|" + cleanHost(ev.Host)
 		solvedSet[k] = struct{}{}
 	}
-	solved := make([]HistoryEvent, 0, limit)
-	unsolved := make([]HistoryEvent, 0, limit)
+	solved := make([]HistoryEvent, 0, boundedLimit)
+	unsolved := make([]HistoryEvent, 0, boundedLimit)
 	for _, ev := range issued {
 		k := strings.TrimSpace(ev.IP) + "|" + cleanHost(ev.Host)
 		if _, ok := solvedSet[k]; ok {
-			if len(solved) < limit {
+			if len(solved) < boundedLimit {
 				solved = append(solved, ev)
 			}
-		} else if len(unsolved) < limit {
+		} else if len(unsolved) < boundedLimit {
 			unsolved = append(unsolved, ev)
 		}
-		if len(solved) >= limit && len(unsolved) >= limit {
+		if len(solved) >= boundedLimit && len(unsolved) >= boundedLimit {
 			break
 		}
 	}
