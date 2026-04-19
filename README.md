@@ -18,8 +18,13 @@
 CFM is a modern Go-based firewall + detection + mitigation daemon.
 It combines nftables policy enforcement, log-driven detectors, enrichment, notifications,
 and an HTTP challenge engine that can be enforced either via nftables redirect/DNAT or directly
-in OpenResty in-path mode through a decision socket. 
-Openresty works as an Edge Interceptor filtering all traffic.
+in-path through a decision socket read from an edge proxy.
+
+The in-path edge proxy can be either **OpenResty** (the original/default) or **Angie**
+(an nginx fork by former nginx core developers, supported as of CFM 1.0+). Either one
+works as an Edge Interceptor filtering all traffic; the CFM daemon, Lua decision files,
+and sslcollector socket are identical for both. See [Section 8](#8-in-path-mode-openresty--angie)
+for the trade-offs and how to choose.
 
 > More information: https://infected.gr/category/cfm/
 
@@ -46,8 +51,9 @@ Openresty works as an Edge Interceptor filtering all traffic.
    - [DNAT Mode](#dnat-mode)
    - [Challenge Triggers](#challenge-triggers)
    - [Challenge Abuse Protection](#challenge-abuse-protection)
-8. [OpenResty In-Path Mode](#8-openresty-in-path-mode)
+8. [In-Path Mode (OpenResty / Angie)](#8-in-path-mode-openresty--angie)
    - [Architecture](#architecture)
+   - [OpenResty vs Angie — choosing a backend](#openresty-vs-angie--choosing-a-backend)
    - [Smart Lua WAF Layer](#smart-lua-waf-layer)
    - [Advanced Challenge Rules](#advanced-challenge-rules)
 9. [SSLCollector](#9-sslcollector)
@@ -127,7 +133,7 @@ useradd --system --gid cfm --no-create-home \
         --comment "CFM service account" cfm
 ```
 
-The `cfm` group is required for the SSLCollector unix socket and token file to be readable by OpenResty workers. The cfm daemon logs a warning at startup if the group is missing and the socket server is enabled.
+The `cfm` group is required for the SSLCollector unix socket and token file to be readable by OpenResty/Angie workers. The cfm daemon logs a warning at startup if the group is missing and the socket server is enabled.
 
 ---
 
@@ -145,12 +151,13 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
   cfm.allow / cfm.deny      # static allow/deny lists (IP/CIDR/host)
   cfm.ignore                # IPs that must never be blocked (global ignore list)
   cfm.dyndns                # hostnames resolved periodically and added to allow
-  cfm-admin.htpasswd        # optional OpenResty /cfm-admin BasicAuth file (shipped empty)
+  cfm-admin.htpasswd        # optional /cfm-admin BasicAuth file (shipped empty)
   httpd-cfm.conf            # Apache LogFormat for WebDetector TSV
   nginx-cfm.conf            # nginx log_format for WebDetector TSV
-  sslcollector.lua          # OpenResty Lua helper for dynamic cert loading (via unix socket)
+  sslcollector.lua          # Lua helper for dynamic cert loading (OpenResty/Angie, via unix socket)
   trusted_proxies.conf      # real_ip / trusted proxy include for Cloudflare/LB setups
-  openresty-example*.conf   # full OpenResty "in-path WAF/challenge" examples (+ optional cache)
+  openresty.conf            # full OpenResty "in-path WAF/challenge" config
+  angie.conf                # Angie equivalent of openresty.conf (for boxes where Angie is used instead)
   webdetector_*.txt         # webdetector path lists: challenge_paths, malpaths, exclude, etc.
   
   webui/cfm-admin/          # starter Vue-based /cfm-admin dashboard (WebTop MVP)
@@ -162,7 +169,7 @@ internal/
   detectors/                # ssh/mysql/ftp/exim/dovecot/cpanel/webdetector/modsec/health/postfix...
   notify/                   # notifier engine (sendmail/smtp/slack), dedupe, templates
   firewall/nft/             # nftables backend + hardening + ports policy
-  sslcollector/             # cert discovery + socket API for OpenResty
+  sslcollector/             # cert discovery + socket API for OpenResty/Angie
 ```
 
 ---
@@ -224,9 +231,10 @@ Hostnames periodically resolved and kept in the allow set (e.g. dynamic office I
 ### Web log format snippets (`httpd-cfm.conf`, `nginx-cfm.conf`)
 Ensures WebDetector sees a consistent TSV schema across stacks.
 
-### Malformed request logging (OpenResty)
-- In `configs/openresty.conf`, malformed/empty request traffic is routed to
-  `access.bad_request.log` (not the main `access.log` cfm format).
+### Malformed request logging (OpenResty / Angie)
+- In `configs/openresty.conf` and `configs/angie.conf`, malformed/empty request
+  traffic is routed to `access.bad_request.log` (not the main `access.log` cfm
+  format).
 - The `cfm_bad_request` log format uses escaped output (`escape=json`) so
   control bytes are rendered safely for storage and parsing.
 - When investigating these lines, prefer byte-aware viewers/parsers that
@@ -350,15 +358,91 @@ Configured via `CHALLENGE_HTTP_LISTEN` / `CHALLENGE_HTTPS_LISTEN`. Keep listener
 
 ---
 
-## 8. OpenResty In-Path Mode - CFM Edge Interceptor mode
+## 8. In-Path Mode (OpenResty / Angie) — CFM Edge Interceptor mode
 
 ### Architecture
 
 ```
-Client → OpenResty (cfm decision socket) → (challenge/block/pass) → upstream
+Client → OpenResty or Angie (cfm decision socket) → (challenge/block/pass) → upstream
 ```
 
-No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`). The Lua layer queries it per-request.
+No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`) — the env var name is
+historical and is read identically by Lua whether the front-end is OpenResty or Angie.
+The Lua layer queries it per-request.
+
+### OpenResty vs Angie — choosing a backend
+
+Both backends run the **same CFM Lua files** (`cfm.lua`, `cfm_waf.lua`, `cfm_rules.lua`,
+`cfm_stats.lua`, `sslcollector.lua`) and talk to the same CFM daemon over the same
+unix socket. The choice is about the web server shell around that Lua, not about CFM
+functionality.
+
+**OpenResty** — the original and default:
+- Mature, widely deployed, well-known debugging surface.
+- Ships a bundled nginx + LuaJIT + curated resty libraries as one package.
+- Install: `bash scripts/install-openresty.sh`.
+- Trade-off: OpenResty rebases nginx on its own cadence and ports patches manually,
+  so point-release updates and new-distro packages (EL10, Debian 13) tend to lag
+  mainline nginx by several versions / several months.
+
+**Angie** — a newer nginx fork by former nginx core developers, supported as of CFM 1.0+:
+- Tracks nginx mainline on a quarterly release cadence. When a CVE drops on nginx,
+  Angie's fix window is typically days to a few weeks, not months.
+- First-class packages for EL8/9/**10**, Debian 11/12/**13**, AlmaLinux, Rocky,
+  CentOS, Oracle Linux, and Fedora — CloudLinux works via the AlmaLinux repo
+  (full ABI compat).
+- `angie-module-lua` is a single dynamic module package that bundles LuaJIT 2.1
+  plus the resty libraries CFM needs (`lua-resty-core`, `lua-resty-http`,
+  `lua-resty-lrucache`, etc.). Only `lua-resty-maxminddb` is fetched separately
+  by the install script.
+- Features Angie adds over stock nginx / OpenResty that are relevant to a shared
+  hosting edge proxy:
+  - **Bidirectional HTTP/3 (QUIC)** — supported both client-side (termination) and
+    upstream-side. OpenResty and free nginx support HTTP/3 client-side only.
+    For CFM the practical benefit is client-side HTTP/3 termination, which both
+    stacks handle via `listen 9043 quic reuseport; http3 on;` — the config is
+    identical, but Angie's implementation is tracking nginx 1.29.x.
+  - **Built-in ACME** for Let's Encrypt with HTTP/DNS/ALPN challenges — no
+    certbot/acme.sh scripts rewriting configs underneath you. (Not used by CFM
+    today; listed because it may be useful for self-hosted CFM panel certs.)
+  - **RESTful JSON status API** and **Prometheus metrics export** — cleaner than
+    scraping `stub_status`.
+- Install: `bash scripts/install-angie.sh`. Script is self-contained; it does not
+  touch an existing OpenResty install. Both can be present at the same time, but
+  only one may be running (port collision on `:9080` / `:9043`).
+
+**Which should you pick?**
+- If you have an existing working OpenResty deployment, there is **no urgency** to
+  switch. OpenResty continues to be supported.
+- If you are deploying on EL10 or Debian 13 today, pick Angie — OpenResty packages
+  for these distros may not be available yet.
+- If you want predictable quarterly updates and faster CVE response, pick Angie.
+- If you want the most conservative, widely-deployed option, stay on OpenResty.
+
+Configs ship in `configs/openresty.conf` and `configs/angie.conf` respectively.
+They are functionally equivalent (same maps, same log formats, same decision flow,
+same `/cfm-admin/` surface) — the differences are path translations
+(`/usr/local/openresty/...` → `/etc/angie/...`), explicit `load_module` directives
+for Angie (OpenResty bundles them), and the `user cfm;` requirement being explicit
+in both.
+
+**Install scripts.** Both backends ship a self-contained installer under `scripts/`.
+The two scripts follow the same structure on purpose so they are easy to diff, but
+they differ in a few practical places:
+
+| | `install-openresty.sh` | `install-angie.sh` |
+|---|---|---|
+| Adds distro repo | OpenResty official (openresty.org) | Angie official (angie.software) |
+| Core packages | `openresty`, `openresty-openssl3`, `openresty-opm` | `angie`, `angie-module-lua` (pulls `angie-module-ndk`) |
+| Extra resty libs | Fetched at install time via `opm get` (`lua-resty-http`, `lua-resty-string`, `lua-resty-maxminddb`) | Bundled in `angie-module-lua` except `lua-resty-maxminddb`, which the script `git clone`s into `/etc/angie/lualib/resty/` |
+| Self-signed fallback cert | `/usr/local/openresty/nginx/conf/selfsigned/` | `/etc/angie/selfsigned/` |
+| Temp / cache dir chown | Inherited from OpenResty package (usually fine) | Explicit chown of `/var/lib/cfm/nginx/*`, `/var/log/angie/`, `/var/cache/angie/*` to `cfm:cfm` (since the Angie package creates log dirs as `angie:angie` by default) |
+| Config validation before deploy | `openresty -t -p <prefix> -c <src>` before copy | `angie -t -p /etc/angie -c <src>` before copy |
+| Idempotent (safe to re-run) | Yes | Yes |
+| Touches the other backend | No | No — both can coexist on disk, only one may run at a time (port collision on `:9080`/`:9043`) |
+
+Either script is one command to bring a host online; neither interferes with an
+existing install of the other.
 
 ### 🌐 Per-Vhost Control
 
@@ -368,7 +452,7 @@ No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`). The Lua layer qu
 
 ### Smart Lua WAF Layer
 
-The included `openresty-example.conf` Lua block implements:
+The shipped `openresty.conf` / `angie.conf` Lua block implements:
 - IP block set lookup (cfm nft sets)
 - Challenge cookie validation
 - Real-time cfm decision socket query
@@ -398,18 +482,19 @@ The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA
 
 ## 9. SSLCollector
 
-SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, DirectAdmin layouts) and exposes them via a unix socket for dynamic loading in OpenResty (`ssl_certificate_by_lua*`).
+SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, DirectAdmin layouts) and exposes them via a unix socket for dynamic loading in OpenResty or Angie (`ssl_certificate_by_lua*`).
 
 ```ini
 SSLCOLLECTOR_SOCK_ENABLE  = 1
 SSLCOLLECTOR_SOCK_PATH    = /var/run/sslcollector.sock
 SSLCOLLECTOR_SOCK_TOKEN   = your_token_here       # auto-generated if weak or missing
-SSLCOLLECTOR_LUA_TOKEN_PATH = /usr/local/openresty/nginx/lua/cfm_token.lua  # default
+# Default for OpenResty; set to /etc/angie/lua/cfm_token.lua when using Angie
+SSLCOLLECTOR_LUA_TOKEN_PATH = /usr/local/openresty/nginx/lua/cfm_token.lua
 ```
 
-**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `cfm_token.lua` (owned `root:cfm 0640`) for OpenResty to read. You never need to copy the token manually into Lua.
+**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `cfm_token.lua` (owned `root:cfm 0640`) for the edge proxy (OpenResty or Angie) to read. You never need to copy the token manually into Lua.
 
-**Socket permissions** — the socket is created as `root:cfm 0660`. OpenResty workers must run as the `cfm` user (set `user cfm;` in `nginx.conf`) to connect. The `cfm` user and group are created by the package installer; see [Manual install](#manual-install-from-source) if you are building from source.
+**Socket permissions** — the socket is created as `root:cfm 0660`. The edge proxy's worker processes must run as the `cfm` user (set `user cfm;` in `nginx.conf` / `angie.conf`) to connect. The `cfm` user and group are created by the package installer; see [Manual install](#manual-install-from-source) if you are building from source.
 
 The companion `sslcollector.lua` populates an `ngx.shared.sslcache` dict in the background (via `/dumpall` + `/stats` polling) and serves TLS certificates to `ssl_certificate_by_lua*` handlers with zero per-connection I/O.
 
@@ -752,7 +837,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
   -d '{"host":"example.com","ua":"facebookexternalhit/1.1","path":"/","method":"GET","country":"US"}' | jq
 ```
 
-> Note: Rule simulation is exposed through API/CLI. In the OpenResty Lua request path, `rule_action` is enforced for `allow`, `challenge`, `block`, and `throttle` (with `throttle_profile` for throttles).
+> Note: Rule simulation is exposed through API/CLI. In the Lua request path (OpenResty or Angie), `rule_action` is enforced for `allow`, `challenge`, `block`, and `throttle` (with `throttle_profile` for throttles).
 
 
 
@@ -761,8 +846,8 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 ## 13. Security Notes
 
 - In **DNAT mode**, keep the challenge listeners local-only (`127.0.0.1`). Do not expose them directly to the internet.
-- In **OpenResty mode**, treat the unix socket as sensitive — enforce tight file permissions and always use the token.
-- When using OpenResty `ssl_certificate_by_lua*`, cache aggressively (shared_dict + lock) and use tight timeouts.
+- In **in-path mode** (OpenResty or Angie), treat the unix socket as sensitive — enforce tight file permissions and always use the token.
+- When using `ssl_certificate_by_lua*` (OpenResty or Angie), cache aggressively (shared_dict + lock) and use tight timeouts.
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.
 - Keep API ports blocked by default in your host/network firewall (`6060` and `6061` in typical deployments). Only permit localhost or IPs present in allow lists (`cfm.allow`, `cfm.dyndns`, and trusted management ranges).
 - If `API_URL` is set, CFM auto-allows that endpoint IP so outbound/inbound API sync can function without opening API ports broadly.
