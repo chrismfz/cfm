@@ -127,24 +127,24 @@ func getDaemonInfo() DaemonInfo {
 func trim1(b []byte) string         { return strings.TrimSpace(string(b)) }
 func must(b []byte, _ error) []byte { return b }
 
-func getServiceInfo() ServiceInfo {
+func getUnitServiceInfo(unit string) ServiceInfo {
 	si := ServiceInfo{}
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return si
 	} // όχι systemd
 	// Installed?
-	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", "cfm.service").CombinedOutput()
+	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", unit).CombinedOutput()
 	if bytes.Contains(loadOut, []byte("LoadState=loaded")) {
 		si.Installed = true
 	}
 	// Enabled?
-	en := trim1(must(exec.Command("systemctl", "is-enabled", "cfm.service").CombinedOutput()))
+	en := trim1(must(exec.Command("systemctl", "is-enabled", unit).CombinedOutput()))
 	if en == "" {
 		en = "unknown"
 	}
 	si.Enabled = en
 	// Active?
-	ac := trim1(must(exec.Command("systemctl", "is-active", "cfm.service").CombinedOutput()))
+	ac := trim1(must(exec.Command("systemctl", "is-active", unit).CombinedOutput()))
 	if ac == "" {
 		ac = "unknown"
 	}
@@ -221,7 +221,7 @@ func Run(args []string) {
 
 	// Daemon/Service state
 	di := getDaemonInfo()
-	si := getServiceInfo()
+	si := getUnitServiceInfo("cfm.service")
 
 	// 1) Table/sets summary (ίδιο output με το παλιό runStatus)
 	t0 := time.Now()
@@ -456,12 +456,6 @@ func Run(args []string) {
 
 }
 
-type bridgeServiceProbe struct {
-	Installed bool
-	Enabled   string
-	Active    string
-}
-
 func printBridgeInterceptorStatus() {
 	fmt.Println("\n---- Bridge / Interceptor ----")
 
@@ -470,8 +464,8 @@ func printBridgeInterceptorStatus() {
 		dnatState = "ON"
 	}
 
-	openrestySvc := probeUnit("openresty.service")
-	angieSvc := probeUnit("angie.service")
+	openrestySvc := getUnitServiceInfo("openresty.service")
+	angieSvc := getUnitServiceInfo("angie.service")
 
 	sockState := socketStatus("/var/run/sslcollector.sock")
 
@@ -491,26 +485,7 @@ func printBridgeInterceptorStatus() {
 	fmt.Printf("  %-24s %s\n", "angie bridge link:", tokenLinkHealth(bridgeToken, angieBridge))
 }
 
-func probeUnit(unit string) bridgeServiceProbe {
-	out := bridgeServiceProbe{Enabled: "unknown", Active: "unknown"}
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return out
-	}
-	loadOut, _ := exec.Command("systemctl", "show", "-p", "LoadState", unit).CombinedOutput()
-	out.Installed = bytes.Contains(loadOut, []byte("LoadState=loaded"))
-
-	en := trim1(must(exec.Command("systemctl", "is-enabled", unit).CombinedOutput()))
-	if en != "" {
-		out.Enabled = en
-	}
-	ac := trim1(must(exec.Command("systemctl", "is-active", unit).CombinedOutput()))
-	if ac != "" {
-		out.Active = ac
-	}
-	return out
-}
-
-func serviceTriple(s bridgeServiceProbe) string {
+func serviceTriple(s ServiceInfo) string {
 	installed := "not-installed"
 	if s.Installed {
 		installed = "installed"
