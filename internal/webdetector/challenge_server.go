@@ -779,12 +779,14 @@ if r.Method == http.MethodPost {
 			return
 		}
 
-		// challengeHTML placeholders are: host, token, powTok, next, difficulty
+		// challengeHTML placeholders are: host, token, powTok, next, difficulty.
+		// host is HTML-escaped; token/powTok/next are emitted as quoted JS string
+		// literals; and next is normalized above ("/" prefix + max length cap).
 		fmt.Fprintf(w, challengeHTML(),
 			htmlEscape(host),
-			strconv.Quote(tok),
-			strconv.Quote(powTok),
-			strconv.Quote(next),
+			jsStringLiteral(tok),
+			jsStringLiteral(powTok),
+			jsStringLiteral(next),
 			cfg.Difficulty,
 		)
 
@@ -949,6 +951,9 @@ func htmlEscape(s string) string {
 	)
 	return r.Replace(s)
 }
+
+// jsStringLiteral returns a properly quoted/escaped JavaScript string literal.
+func jsStringLiteral(s string) string { return strconv.Quote(s) }
 
 // ---------------- self-protection (in-process rate limit) ----------------
 
