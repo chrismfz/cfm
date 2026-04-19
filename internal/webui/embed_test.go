@@ -17,7 +17,7 @@ func TestHandlerServesSettingsPage(t *testing.T) {
 		t.Fatalf("expected 200 got %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Account Security Settings") {
-		t.Fatalf("expected settings page content, got body=%q", body)
+	if !strings.Contains(body, `id="settingsApp"`) {
+		t.Fatalf("expected settings app marker, got body=%q", body)
 	}
 }
