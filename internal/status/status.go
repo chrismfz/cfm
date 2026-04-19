@@ -7,18 +7,22 @@ import (
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall/nft"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -467,9 +471,13 @@ func printBridgeInterceptorStatus() {
 	openrestySvc := getUnitServiceInfo("openresty.service")
 	angieSvc := getUnitServiceInfo("angie.service")
 
-	sockState := socketStatus("/var/run/sslcollector.sock")
+	sockProbe := probeSSLCollector("/var/run/sslcollector.sock")
 
-	cfmToken := readLuaToken("/var/lib/cfm/lua/cfm_token.lua")
+	cfmToken := resolveLuaToken([]string{
+		"/var/lib/cfm/lua/cfm_token.lua",
+		"/usr/local/openresty/nginx/lua/cfm_token.lua",
+		"/etc/angie/lua/cfm_token.lua",
+	})
 	bridgeToken := readLuaToken("/var/lib/cfm/lua/cfm_bridge_token.lua")
 
 	orBridge := readLuaToken("/usr/local/openresty/nginx/lua/cfm_bridge_token.lua")
@@ -478,11 +486,25 @@ func printBridgeInterceptorStatus() {
 	fmt.Printf("  %-24s %s\n", "DNAT:", dnatState)
 	fmt.Printf("  %-24s %s\n", "OpenResty:", serviceTriple(openrestySvc))
 	fmt.Printf("  %-24s %s\n", "Angie:", serviceTriple(angieSvc))
-	fmt.Printf("  %-24s %s\n", "sslcollector.sock:", sockState)
+	fmt.Printf("  %-24s %s\n", "sslcollector.sock:", sockProbe.Category)
+	fmt.Printf("  %-24s path=%s uid=%s gid=%s mode=%s probe=%s%s\n",
+		"",
+		sockProbe.Path,
+		sockProbe.UID,
+		sockProbe.GID,
+		sockProbe.Mode,
+		sockProbe.Category,
+		sockProbe.ErrorText,
+	)
 	fmt.Printf("  %-24s %s\n", "cfm_token:", tokenHealth(cfmToken))
 	fmt.Printf("  %-24s %s\n", "bridge_token:", tokenHealth(bridgeToken))
 	fmt.Printf("  %-24s %s\n", "openresty bridge link:", tokenLinkHealth(bridgeToken, orBridge))
 	fmt.Printf("  %-24s %s\n", "angie bridge link:", tokenLinkHealth(bridgeToken, angieBridge))
+	if sockProbe.StatsSummary != "" {
+		fmt.Printf("  %-24s %s\n", "sslcollector stats:", sockProbe.StatsSummary)
+	} else {
+		fmt.Printf("  %-24s %s\n", "sslcollector stats:", "unavailable")
+	}
 }
 
 func serviceTriple(s ServiceInfo) string {
@@ -493,23 +515,188 @@ func serviceTriple(s ServiceInfo) string {
 	return fmt.Sprintf("%s/%s/%s", installed, s.Enabled, s.Active)
 }
 
-func socketStatus(path string) string {
+type sslCollectorProbe struct {
+	Path         string
+	UID          string
+	GID          string
+	Mode         string
+	Category     string
+	ErrorText    string
+	StatsSummary string
+}
+
+func probeSSLCollector(path string) sslCollectorProbe {
+	out := sslCollectorProbe{
+		Path:     path,
+		UID:      "-",
+		GID:      "-",
+		Mode:     "-",
+		Category: "MISSING",
+	}
+
 	st, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "MISSING"
+			return out
 		}
-		return "PERM"
+		out.Category = "INVALID"
+		out.ErrorText = ": " + shortErr(err)
+		return out
 	}
+
+	mode := st.Mode().Perm()
+	out.Mode = fmt.Sprintf("0%03o", mode)
 	if st.Mode()&os.ModeSocket == 0 {
-		return "PERM"
+		out.Category = "INVALID"
+		out.ErrorText = ": not a unix socket"
+		return out
 	}
-	f, err := os.Open(path)
+
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		out.Category = "INVALID"
+		out.ErrorText = ": stat metadata unavailable"
+		return out
+	}
+	out.UID = uidText(stat.Uid)
+	out.GID = gidText(stat.Gid)
+
+	if !socketPermsOK(stat, mode) {
+		out.Category = "FS_PERM_WARN"
+		out.ErrorText = ": expected root:cfm 0660"
+		return out
+	}
+
+	tok := resolveLuaToken([]string{
+		"/var/lib/cfm/lua/cfm_token.lua",
+		"/usr/local/openresty/nginx/lua/cfm_token.lua",
+		"/etc/angie/lua/cfm_token.lua",
+	})
+	if !tok.Valid {
+		out.Category = "AUTH_FAIL"
+		out.ErrorText = ": token missing/invalid"
+		return out
+	}
+
+	probe, stats, probeErr := probeSSLCollectorHTTP(path, tok.Token)
+	out.Category = probe
+	if probeErr != "" {
+		out.ErrorText = ": " + probeErr
+	}
+	out.StatsSummary = stats
+	return out
+}
+
+func probeSSLCollectorHTTP(path, token string) (category, statsSummary, errText string) {
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", path)
+		},
+		DisableKeepAlives: true,
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{
+		Timeout:   3 * time.Second,
+		Transport: tr,
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://unix/stats", nil)
+	req.Header.Set("X-SSLCollector-Token", token)
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return "PERM"
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "connection refused") || strings.Contains(msg, "timeout") {
+			return "CONNECT_FAIL", "", shortErr(err)
+		}
+		return "CONNECT_FAIL", "", shortErr(err)
 	}
-	_ = f.Close()
-	return "OK"
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "AUTH_FAIL", "", fmt.Sprintf("http %d", resp.StatusCode)
+	case http.StatusOK:
+	default:
+		return "CONNECT_FAIL", "", fmt.Sprintf("http %d", resp.StatusCode)
+	}
+
+	var st struct {
+		UniquePairs   int            `json:"UniquePairs"`
+		ExactHosts    int            `json:"ExactHosts"`
+		WildcardZones int            `json:"WildcardZones"`
+		KnownFiles    int            `json:"KnownFiles"`
+		BySource      map[string]int `json:"BySource"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
+		return "OK", "unavailable", shortErr(err)
+	}
+
+	statsSummary = fmt.Sprintf(
+		"pairs=%d exact_hosts=%d wildcards=%d files=%d sources=%s",
+		st.UniquePairs,
+		st.ExactHosts,
+		st.WildcardZones,
+		st.KnownFiles,
+		compactSourceMap(st.BySource),
+	)
+	return "OK", statsSummary, ""
+}
+
+func compactSourceMap(m map[string]int) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, m[k]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func socketPermsOK(st *syscall.Stat_t, mode os.FileMode) bool {
+	cfm, err := user.LookupGroup("cfm")
+	if err != nil {
+		return st.Uid == 0 && st.Gid == 0 && mode == 0o660
+	}
+	cfmGID, err := strconv.ParseUint(cfm.Gid, 10, 32)
+	if err != nil {
+		return st.Uid == 0 && mode == 0o660
+	}
+	return st.Uid == 0 && st.Gid == uint32(cfmGID) && mode == 0o660
+}
+
+func uidText(uid uint32) string {
+	s := strconv.FormatUint(uint64(uid), 10)
+	if u, err := user.LookupId(s); err == nil && u.Username != "" {
+		return fmt.Sprintf("%s(%s)", u.Username, s)
+	}
+	return s
+}
+
+func gidText(gid uint32) string {
+	s := strconv.FormatUint(uint64(gid), 10)
+	if g, err := user.LookupGroupId(s); err == nil && g.Name != "" {
+		return fmt.Sprintf("%s(%s)", g.Name, s)
+	}
+	return s
+}
+
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if len(msg) > 120 {
+		return msg[:120] + "..."
+	}
+	return msg
 }
 
 type luaTokenProbe struct {
@@ -538,6 +725,16 @@ func readLuaToken(path string) luaTokenProbe {
 		Present: true,
 		Valid:   isStrongToken(tok),
 	}
+}
+
+func resolveLuaToken(paths []string) luaTokenProbe {
+	for _, p := range paths {
+		t := readLuaToken(p)
+		if t.Present {
+			return t
+		}
+	}
+	return luaTokenProbe{}
 }
 
 func isStrongToken(tok string) bool {
