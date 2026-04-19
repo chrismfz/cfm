@@ -9,6 +9,7 @@ import (
 	"cfm/internal/firewall/nft"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -470,6 +471,7 @@ func printBridgeInterceptorStatus() {
 
 	openrestySvc := getUnitServiceInfo("openresty.service")
 	angieSvc := getUnitServiceInfo("angie.service")
+	bridgeCfg := resolveBridgeRuntimeConfig()
 
 	sockProbe := probeSSLCollector("/var/run/sslcollector.sock")
 
@@ -479,7 +481,7 @@ func printBridgeInterceptorStatus() {
 		"/etc/angie/lua/cfm_token.lua",
 	})
 	bridgeToken := readLuaToken("/var/lib/cfm/lua/cfm_bridge_token.lua")
-
+	bridgeRuntime := probeBridgeRuntime(bridgeCfg, bridgeToken)
 	orBridge := readLuaToken("/usr/local/openresty/nginx/lua/cfm_bridge_token.lua")
 	angieBridge := readLuaToken("/etc/angie/lua/cfm_bridge_token.lua")
 
@@ -498,8 +500,15 @@ func printBridgeInterceptorStatus() {
 	)
 	fmt.Printf("  %-24s %s\n", "cfm_token:", tokenHealth(cfmToken))
 	fmt.Printf("  %-24s %s\n", "bridge_token:", tokenHealth(bridgeToken))
-	fmt.Printf("  %-24s %s\n", "openresty bridge link:", tokenLinkHealth(bridgeToken, orBridge))
-	fmt.Printf("  %-24s %s\n", "angie bridge link:", tokenLinkHealth(bridgeToken, angieBridge))
+	fmt.Printf("  %-24s %s\n", "bridge socket auth:", bridgeRuntime.summary())
+	fmt.Printf("  %-24s socket=%s token_src=%s mode=%s\n",
+		"",
+		bridgeCfg.SocketPath,
+		bridgeRuntime.TokenPath,
+		bridgeRuntime.ModeText,
+	)
+	fmt.Printf("  %-24s %s\n", "openresty token file:", tokenDiagnosticLine(bridgeToken, orBridge))
+	fmt.Printf("  %-24s %s\n", "angie token file:", tokenDiagnosticLine(bridgeToken, angieBridge))
 	if sockProbe.StatsSummary != "" {
 		fmt.Printf("  %-24s %s\n", "sslcollector stats:", sockProbe.StatsSummary)
 	} else {
@@ -763,6 +772,282 @@ func tokenLinkHealth(shared, local luaTokenProbe) string {
 		return "OK"
 	}
 	return "MISMATCH"
+}
+
+func tokenDiagnosticLine(canonical, local luaTokenProbe) string {
+	if !local.Present {
+		return "missing"
+	}
+	match := "mismatch"
+	if canonical.Valid && local.Valid && canonical.Token == local.Token {
+		match = "match"
+	}
+	return fmt.Sprintf("present=%t valid=%t canonical_%s", local.Present, local.Valid, match)
+}
+
+type bridgeRuntimeConfig struct {
+	Enabled    bool
+	SocketPath string
+}
+
+type bridgeRuntimeProbe struct {
+	Status     string
+	Details    string
+	TokenPath  string
+	ModeText   string
+	HTTPStatus int
+}
+
+func (p bridgeRuntimeProbe) summary() string {
+	if strings.TrimSpace(p.Details) == "" {
+		return p.Status
+	}
+	return p.Status + " (" + p.Details + ")"
+}
+
+func resolveBridgeRuntimeConfig() bridgeRuntimeConfig {
+	cfg := bridgeRuntimeConfig{
+		Enabled:    false,
+		SocketPath: "/var/run/cfm_nginx.sock",
+	}
+
+	kv := readSimpleKVConfig(resolveRuntimeCFMConfigPath())
+	if v, ok := kv["OPENRESTY_MODE"]; ok {
+		cfg.Enabled = parseBoolLoose(v)
+	}
+	if v, ok := kv["OPENRESTY_SOCK"]; ok {
+		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+			cfg.SocketPath = clean
+		}
+	}
+	return cfg
+}
+
+func probeBridgeRuntime(cfg bridgeRuntimeConfig, bridgeToken luaTokenProbe) bridgeRuntimeProbe {
+	out := bridgeRuntimeProbe{
+		Status:    "DISABLED",
+		TokenPath: "/var/lib/cfm/lua/cfm_bridge_token.lua",
+		ModeText:  "disabled",
+	}
+	if cfg.Enabled {
+		out.ModeText = "enabled"
+	} else {
+		return out
+	}
+
+	out.Status = "TOKEN_MISSING"
+	if !bridgeToken.Present {
+		out.Details = "canonical bridge token not found"
+		return out
+	}
+	out.Status = "TOKEN_INVALID"
+	if !bridgeToken.Valid {
+		out.Details = "canonical bridge token failed policy"
+		return out
+	}
+
+	st, err := os.Stat(cfg.SocketPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return bridgeRuntimeProbe{
+				Status:    "MISSING",
+				Details:   "socket path missing",
+				TokenPath: out.TokenPath,
+				ModeText:  out.ModeText,
+			}
+		}
+		return bridgeRuntimeProbe{
+			Status:    "CONNECT_FAIL",
+			Details:   shortErr(err),
+			TokenPath: out.TokenPath,
+			ModeText:  out.ModeText,
+		}
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return bridgeRuntimeProbe{
+			Status:    "MISSING",
+			Details:   "path exists but is not unix socket",
+			TokenPath: out.TokenPath,
+			ModeText:  out.ModeText,
+		}
+	}
+
+	httpStatus, bodySnippet, err := probeNginxBridgeSocket(cfg.SocketPath, bridgeToken.Token)
+	if err != nil {
+		return bridgeRuntimeProbe{
+			Status:    "CONNECT_FAIL",
+			Details:   shortErr(err),
+			TokenPath: out.TokenPath,
+			ModeText:  out.ModeText,
+		}
+	}
+	switch httpStatus {
+	case http.StatusOK:
+		if bodySnippet != "" {
+			return bridgeRuntimeProbe{
+				Status:     "OK",
+				Details:    bodySnippet,
+				TokenPath:  out.TokenPath,
+				ModeText:   out.ModeText,
+				HTTPStatus: httpStatus,
+			}
+		}
+		return bridgeRuntimeProbe{
+			Status:     "OK",
+			TokenPath:  out.TokenPath,
+			ModeText:   out.ModeText,
+			HTTPStatus: httpStatus,
+		}
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return bridgeRuntimeProbe{
+			Status:     "AUTH_FAIL",
+			Details:    fmt.Sprintf("http %d", httpStatus),
+			TokenPath:  out.TokenPath,
+			ModeText:   out.ModeText,
+			HTTPStatus: httpStatus,
+		}
+	default:
+		return bridgeRuntimeProbe{
+			Status:     "CONNECT_FAIL",
+			Details:    fmt.Sprintf("http %d", httpStatus),
+			TokenPath:  out.TokenPath,
+			ModeText:   out.ModeText,
+			HTTPStatus: httpStatus,
+		}
+	}
+}
+
+func probeNginxBridgeSocket(sockPath, token string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	dialer := &net.Dialer{Timeout: 1500 * time.Millisecond}
+	tr := &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", sockPath)
+		},
+		DisableKeepAlives: true,
+	}
+	defer tr.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   2 * time.Second,
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/nginx/status", nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("X-CFM-Token", token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(b))
+		if msg != "" {
+			return resp.StatusCode, shortErr(errors.New(msg)), nil
+		}
+		return resp.StatusCode, "", nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return resp.StatusCode, "invalid json", nil
+	}
+	if len(payload) == 0 {
+		return resp.StatusCode, "empty json", nil
+	}
+	return resp.StatusCode, "json ok", nil
+}
+
+func resolveRuntimeCFMConfigPath() string {
+	if b, err := os.ReadFile("/run/cfm/config.path"); err == nil {
+		dir := strings.TrimSpace(string(b))
+		if dir != "" {
+			return filepath.Join(dir, "cfm.conf")
+		}
+	}
+	return "/etc/cfm/cfm.conf"
+}
+
+func readSimpleKVConfig(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		i := strings.Index(line, "=")
+		if i <= 0 {
+			continue
+		}
+		k := strings.ToUpper(strings.TrimSpace(line[:i]))
+		v := strings.TrimSpace(line[i+1:])
+		if k == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func parseBoolLoose(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(stripInlineComment(v))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func stripInlineComment(s string) string {
+	inQuote := false
+	var q rune
+	prevNonSpace := -1
+
+	for i, c := range s {
+		if c == '\'' || c == '"' {
+			if !inQuote {
+				inQuote = true
+				q = c
+			} else if q == c {
+				inQuote = false
+			}
+			if c != ' ' && c != '\t' {
+				prevNonSpace = i
+			}
+			continue
+		}
+		if inQuote {
+			if c != ' ' && c != '\t' {
+				prevNonSpace = i
+			}
+			continue
+		}
+		if c == ';' || c == '#' {
+			return strings.TrimSpace(s[:i])
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			if prevNonSpace >= 0 && s[prevNonSpace] == ':' {
+				// probably URL
+			} else if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
+				return strings.TrimSpace(s[:i])
+			}
+		}
+		if c != ' ' && c != '\t' {
+			prevNonSpace = i
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // ---------------------------------------------------------------------------
