@@ -283,9 +283,11 @@ func (m *manager) maybeReload(parent context.Context) {
 		bridgeTok := kvStrClean(wdKV, "OPENRESTY_TOKEN", "")
 		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
 			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
-		} else if newTok != bridgeTok {
-			logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			wdKV["OPENRESTY_TOKEN"] = newTok
+		} else {
+			if newTok != bridgeTok {
+				logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
+				wdKV["OPENRESTY_TOKEN"] = newTok
+			}
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
