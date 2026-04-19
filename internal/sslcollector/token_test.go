@@ -71,3 +71,46 @@ func TestWriteLuaTokenFinalModeAndOwnershipUnchangedBehavior(t *testing.T) {
 		t.Fatalf("gid mismatch: got %d want current gid %d", st.Gid, os.Getgid())
 	}
 }
+
+func TestWriteLuaTokenToExistingParents(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	existingDir := filepath.Join(root, "openresty", "lua")
+	missingDir := filepath.Join(root, "angie", "lua")
+	if err := os.MkdirAll(existingDir, 0o755); err != nil {
+		t.Fatalf("mkdir existing: %v", err)
+	}
+
+	existingPath := filepath.Join(existingDir, "cfm_bridge_token.lua")
+	missingPath := filepath.Join(missingDir, "cfm_bridge_token.lua")
+	results := WriteLuaTokenToExistingParents("tok-bridge", 0, existingPath, missingPath, existingPath)
+	if len(results) != 2 {
+		t.Fatalf("results len mismatch: got %d want 2", len(results))
+	}
+
+	var existing LuaTokenWriteResult
+	var missing LuaTokenWriteResult
+	for _, res := range results {
+		if res.Path == existingPath {
+			existing = res
+		}
+		if res.Path == missingPath {
+			missing = res
+		}
+	}
+	if !existing.Written || existing.Err != nil || existing.Skipped {
+		t.Fatalf("expected existing path to be written, got %#v", existing)
+	}
+	if !missing.Skipped || missing.Err != nil || missing.Written {
+		t.Fatalf("expected missing path to be skipped, got %#v", missing)
+	}
+
+	data, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatalf("read existing path: %v", err)
+	}
+	if !strings.Contains(string(data), `return "tok-bridge"`) {
+		t.Fatalf("unexpected token content: %q", string(data))
+	}
+}

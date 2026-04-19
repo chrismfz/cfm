@@ -135,6 +135,61 @@ func WriteLuaTokenWithMkdir(luaPath, token string, cfmGID int) error {
 	return writeLuaToken(luaPath, token, cfmGID, true)
 }
 
+// LuaTokenWriteResult describes the outcome of attempting to write a token file
+// at a candidate path.
+type LuaTokenWriteResult struct {
+	Path    string
+	Written bool
+	Skipped bool
+	Err     error
+}
+
+// WriteLuaTokenToExistingParents writes a Lua token module to each candidate
+// path whose parent directory already exists. Missing parent directories are
+// skipped so mixed OpenResty/Angie migrations can refresh whichever layout is
+// present on disk without creating extra trees.
+func WriteLuaTokenToExistingParents(token string, cfmGID int, candidates ...string) []LuaTokenWriteResult {
+	seen := make(map[string]struct{}, len(candidates))
+	results := make([]LuaTokenWriteResult, 0, len(candidates))
+	for _, p := range candidates {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+
+		res := LuaTokenWriteResult{Path: p}
+		dir := filepath.Dir(p)
+		st, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				res.Skipped = true
+				results = append(results, res)
+				continue
+			}
+			res.Err = fmt.Errorf("sslcollector: stat parent directory %q for lua token target %q: %w", dir, p, err)
+			results = append(results, res)
+			continue
+		}
+		if !st.IsDir() {
+			res.Err = fmt.Errorf("sslcollector: parent path %q for lua token target %q is not a directory", dir, p)
+			results = append(results, res)
+			continue
+		}
+		if err := writeLuaToken(p, token, cfmGID, false); err != nil {
+			res.Err = err
+			results = append(results, res)
+			continue
+		}
+		res.Written = true
+		results = append(results, res)
+	}
+	return results
+}
+
 func writeLuaToken(luaPath, token string, cfmGID int, mkdirParent bool) error {
 	if !filepath.IsAbs(luaPath) {
 		return fmt.Errorf("sslcollector: luaPath must be absolute, got %q", luaPath)
