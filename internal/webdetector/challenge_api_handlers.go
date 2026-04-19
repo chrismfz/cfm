@@ -135,12 +135,13 @@ func (e *Engine) handleChallengeEvents(w http.ResponseWriter, r *http.Request) {
 	ip := r.URL.Query().Get("ip")
 	rule := r.URL.Query().Get("rule")
 	typ := r.URL.Query().Get("type")
-	limit := 200
+	limit := challengeEventsDefaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
+	limit = clampChallengeEventsLimit(limit)
 	if e == nil || e.chalAPI == nil {
 		writeJSON(w, http.StatusOK, []ChallengeEvent{})
 		return
