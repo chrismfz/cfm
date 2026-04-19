@@ -373,15 +373,12 @@ The Lua layer queries it per-request.
 ### Webdetector bridge token file (`OPENRESTY_TOKEN`)
 
 When `[webdetector] OPENRESTY_TOKEN` is weak/missing and gets rotated, CFM writes
-`cfm_bridge_token.lua` to all known in-path Lua layouts whose parent directory
-already exists:
+the bridge module to one fixed shared path:
 
-- `/usr/local/openresty/nginx/lua/cfm_bridge_token.lua`
-- `/etc/angie/lua/cfm_bridge_token.lua`
+- `/var/lib/cfm/lua/cfm_bridge_token.lua`
 
-This dual-path refresh keeps OpenResty↔Angie migrations safe: whichever stack is
-currently installed keeps receiving the latest bridge token without manual copy
-steps or requiring both directory trees to exist.
+Both OpenResty and Angie include `/var/lib/cfm/lua/?.lua` in `lua_package_path`,
+so no per-stack token copy is needed during migrations.
 
 ### OpenResty vs Angie — choosing a backend
 
@@ -501,11 +498,11 @@ SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, Dire
 SSLCOLLECTOR_SOCK_ENABLE  = 1
 SSLCOLLECTOR_SOCK_PATH    = /var/run/sslcollector.sock
 SSLCOLLECTOR_SOCK_TOKEN   = your_token_here       # auto-generated if weak or missing
-# Default for OpenResty; set to /etc/angie/lua/cfm_token.lua when using Angie
-SSLCOLLECTOR_LUA_TOKEN_PATH = /usr/local/openresty/nginx/lua/cfm_token.lua
+# Token module is always written to /var/lib/cfm/lua/cfm_token.lua
+SSLCOLLECTOR_LUA_TOKEN_PATH = /var/lib/cfm/lua/cfm_token.lua
 ```
 
-**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `cfm_token.lua` (owned `root:cfm 0640`) for the edge proxy (OpenResty or Angie) to read. You never need to copy the token manually into Lua.
+**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `/var/lib/cfm/lua/cfm_token.lua` (owned `root:cfm 0640`) for the edge proxy (OpenResty or Angie) to read. You never need to copy the token manually into Lua.
 
 **Socket permissions** — the socket is created as `root:cfm 0660`. The edge proxy's worker processes must run as the `cfm` user (set `user cfm;` in `nginx.conf` / `angie.conf`) to connect. The `cfm` user and group are created by the package installer; see [Manual install](#manual-install-from-source) if you are building from source.
 
