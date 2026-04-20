@@ -40,6 +40,33 @@ func setAPIAnomalyReason(w http.ResponseWriter, reason string) {
 
 var sessionAllowedRequest = sessionAllowed
 
+type authnMechanism string
+
+const (
+	authnMechanismUnknown     authnMechanism = ""
+	authnMechanismSession     authnMechanism = "session_cookie"
+	authnMechanismTokenAdmin  authnMechanism = "token_admin"
+	authnMechanismTokenScoped authnMechanism = "token_scoped"
+	authnMechanismEmbedCookie authnMechanism = "embed_bootstrap_cookie"
+)
+
+type authnMechanismCtxKey struct{}
+
+func withAuthnMechanism(ctx context.Context, mech authnMechanism) context.Context {
+	if mech == authnMechanismUnknown {
+		return ctx
+	}
+	return context.WithValue(ctx, authnMechanismCtxKey{}, mech)
+}
+
+func authnMechanismFromContext(ctx context.Context) authnMechanism {
+	if ctx == nil {
+		return authnMechanismUnknown
+	}
+	v, _ := ctx.Value(authnMechanismCtxKey{}).(authnMechanism)
+	return v
+}
+
 var (
 	embedBootstrapAuthLogMu   sync.Mutex
 	embedBootstrapAuthLastLog time.Time
@@ -284,6 +311,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+					ctx = withAuthnMechanism(ctx, authnMechanismTokenAdmin)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -302,6 +330,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					})
 					ctx = context.WithValue(ctx, webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
+					ctx = withAuthnMechanism(ctx, authnMechanismTokenScoped)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -317,6 +346,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
+					ctx = withAuthnMechanism(ctx, authnMechanismEmbedCookie)
 					if shouldLogEmbedBootstrapAuth(time.Now()) {
 						logging.LogfAPI("[apiserver] auth_source=embed_bootstrap_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=15s)",
 							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
@@ -344,6 +374,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				}
 				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+				ctx = withAuthnMechanism(ctx, authnMechanismSession)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

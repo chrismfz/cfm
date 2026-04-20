@@ -276,6 +276,7 @@ func Start(
 	//   mux → TokenMiddleware → LoadAndSave
 	var handler http.Handler
 	handler = MFARolloutMiddleware(m)
+	handler = CSRFMiddleware(handler)
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
