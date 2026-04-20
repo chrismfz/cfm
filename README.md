@@ -300,6 +300,8 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 
 ### Ingestion Modes
 
+**Socket mode** — Unix stream socket at `/run/cfm/ingest.sock` (root:cfm 0660, parent dir root:cfm 0750). Used automatically when OpenResty/Angie is installed via `scripts/install-openresty.sh` / `scripts/install-angie.sh`: a `log_by_lua_block` sender (`configs/log-cfm.lua`) pushes every request as a TSV line, so webdetector does not have to tail a file on disk. Requires no config — presence of socket traffic is self-advertising.
+
 **File mode** — single TSV log. Best for nginx/Apache custom log formats you control.
 
 **Folder mode** — directory tailing. Best for hosting layouts:
@@ -308,6 +310,18 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 - Any "one file per vhost" layout
 
 Supports recursion + glob filtering.
+
+#### Automatic source arbiter
+
+When both a socket sender and a file/folder source are configured, webdetector prefers the socket: if any line arrived on `/run/cfm/ingest.sock` within the last 30 seconds, the file tailer's output is suppressed (the tailer keeps running to track position, but its lines are dropped). If the socket goes quiet for longer than that — CFM restart, OpenResty down, Lua module missing — the file tailer resumes feeding the pipeline with no manual switch. A single INFO line is logged on each transition.
+
+Inspect the current decision:
+
+```
+cfm webtop source
+```
+
+Also exposed over the admin HTTP API at `/api/v1/webdet/ingest-source` (returns JSON: active source, socket path, last-received timestamp, configured log file).
 
 
 ### Web Abuse Hard-Block Triggers

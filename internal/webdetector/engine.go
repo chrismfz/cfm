@@ -390,6 +390,13 @@ type Engine struct {
 	wafExcludes       *excludeStore
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
+
+	// Log ingest arbiter state (see ingest_socket.go).
+	// ingestSock is set via SetIngestSocket after NewEngine; nil when the
+	// socket listener is disabled (e.g. in tests).
+	ingestSock    *IngestSocket
+	activeSrcMu   sync.Mutex
+	activeSrcName string
 }
 
 type malRule struct {
@@ -733,6 +740,16 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		e.lastParsedAt = time.Now()
 		e.parsedSinceLog++
 		e.progMu.Unlock()
+
+		// Source arbiter: if the Unix ingest socket has been active within
+		// SocketActiveWindow, socket lines are authoritative — we keep the
+		// file tailer running (so its position stays current and it can
+		// take over instantly on silence) but suppress its output to avoid
+		// double-counting.
+		if e.ingestSock != nil && e.ingestSock.Active(time.Now()) {
+			continue
+		}
+		e.noteActiveSource("file")
 
 		ingestStart := time.Now()
 		e.ingest(rec, line)
