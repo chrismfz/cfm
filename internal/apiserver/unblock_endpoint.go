@@ -5,7 +5,7 @@
 // The handler is a direct lift from the original startDebug() in cmd/cfm/main.go
 // with zero behavioural changes:
 //
-//   - Accepts GET ?ip=1.2.3.4  or  POST with JSON / form / plain-text body
+//   - Accepts POST with query (?ip=1.2.3.4), JSON, form, or plain-text body
 //   - Immediately removes the IP from nft and replies with JSON
 //   - Fires a background goroutine for CSF / Fail2Ban / Imunify cleanup
 //     (via unblock.Do) and writes the full step log to api.log
@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
-        "cfm/internal/firewall/nft"
+	"cfm/internal/firewall/nft"
 	"cfm/internal/logging"
 	"cfm/internal/unblock"
 )
@@ -41,10 +41,19 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		start := time.Now()
 		w.Header().Set("Content-Type", "application/json")
 
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": "method not allowed",
+			})
+			return
+		}
+
 		// ── 1. Parse target IP ────────────────────────────────────────────
 		ipStr := strings.TrimSpace(r.URL.Query().Get("ip"))
 
-		if ipStr == "" && r.Method == http.MethodPost {
+		if ipStr == "" {
 			ct := strings.ToLower(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
 			switch {
 
@@ -99,17 +108,16 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		}
 
 		// ── 2. Fast local path: remove from nft immediately ───────────────
-	        // Point-lookup instead of full set dump — O(1) vs O(n)
-	        wasBlocked := false
-	        if nb, ok := be.(*nft.Backend); ok {
-	            if found, _ := nb.HasElem("block_v4", ip.String()); found {
-	                wasBlocked = true
-	            } else if found, _ := nb.HasElem("block_v6", ip.String()); found {
-	                wasBlocked = true
-	            }
-	        }
-	        _ = be.RemoveBlock(ip) // idempotent
-
+		// Point-lookup instead of full set dump — O(1) vs O(n)
+		wasBlocked := false
+		if nb, ok := be.(*nft.Backend); ok {
+			if found, _ := nb.HasElem("block_v4", ip.String()); found {
+				wasBlocked = true
+			} else if found, _ := nb.HasElem("block_v6", ip.String()); found {
+				wasBlocked = true
+			}
+		}
+		_ = be.RemoveBlock(ip) // idempotent
 
 		// ── 3. Capture requester identity for the audit log ───────────────
 		requester := func() string {
@@ -141,14 +149,14 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 
 			ttl := 24 * time.Hour
 			res, _ := unblock.Do(ctx, ip, unblock.Options{
-				BE:             be,
-				ConfigDir:      cfgDir,
-				TempWhitelist:  true,
-				AllowTTL:       &ttl,
-				Reporter:       nil,
-				ReportWhy:      "debug-endpoint",
-				SendAPI:        false,
-				Fail2BanUnban:  true,
+				BE:            be,
+				ConfigDir:     cfgDir,
+				TempWhitelist: true,
+				AllowTTL:      &ttl,
+				Reporter:      nil,
+				ReportWhy:     "debug-endpoint",
+				SendAPI:       false,
+				Fail2BanUnban: true,
 				// RemoveFromFeeds: true,
 			})
 
