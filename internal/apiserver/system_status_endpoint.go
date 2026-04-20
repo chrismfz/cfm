@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	webdet "cfm/internal/webdetector"
 )
 
 type cmdCacheEntry struct {
@@ -29,6 +31,9 @@ func RegisterSystemStatus(m *http.ServeMux) {
 }
 
 func handleSystemDNAT(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -46,6 +51,9 @@ func handleSystemDNAT(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
