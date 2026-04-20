@@ -109,7 +109,7 @@ func Start(
 	ssl *sslpkg.Collector,
 ) {
 	if err := validateStartupConfig(cfg); err != nil {
-		logging.Logf("[apiserver] fatal startup config error: %v", err)
+		logging.LogfAPI("[apiserver] fatal startup config error: %v", err)
 		return
 	}
 
@@ -200,7 +200,7 @@ func Start(
 		m.Handle("/api/v1/mysql/user-kills", scopedMySQLFilterHandler(mysqlScopedMux))
 		m.Handle("/api/v1/mysql/user-history", scopedMySQLFilterHandler(mysqlScopedMux))
 
-		logging.Logf("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
+		logging.LogfAPI("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
 	}
 
 	// ── Scoped token issuance ─────────────────────────────────────────────────
@@ -210,7 +210,7 @@ func Start(
 		tokensPath = filepath.Join(filepath.Dir(cfg.Debug.AuthDBPath), "tokens.json")
 	}
 	if err := store.Load(tokensPath); err != nil {
-		logging.Logf("[apiserver] token store load: %v", err)
+		logging.LogfAPI("[apiserver] token store load: %v", err)
 	}
 
 	store.StartPurger(ctx)
@@ -246,28 +246,28 @@ func Start(
 		}
 		if cfg.Debug.AuthSessionDBPath != "" {
 			if ok := setOptionalGoauthStringField(&authCfg, "SessionDBPath", cfg.Debug.AuthSessionDBPath); ok {
-				logging.Logf("[apiserver] goauth session DB path: %s", cfg.Debug.AuthSessionDBPath)
+				logging.LogfAPI("[apiserver] goauth session DB path: %s", cfg.Debug.AuthSessionDBPath)
 			} else {
-				logging.Logf("[apiserver] AUTH_SESSION_DB_PATH is set but current goauth version does not support SessionDBPath")
+				logging.LogfAPI("[apiserver] AUTH_SESSION_DB_PATH is set but current goauth version does not support SessionDBPath")
 			}
 		}
 		authMgr, err := initGoAuthWithRetry(ctx, authCfg)
 		if err != nil {
 			SetAuth(nil)
-			logging.Logf("[apiserver] goauth init failed: %v — browser auth disabled", err)
+			logging.LogfAPI("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
 			SetAuth(authMgr)
 			if cfg.Debug.AuthSessionDBPath != "" {
-				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
 					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
 			} else {
-				logging.Logf("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
+				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
 					cfg.Debug.AuthDBPath, cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
 			}
 		}
 	} else {
 		SetAuth(nil)
-		logging.Logf("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")
+		logging.LogfAPI("[apiserver] AUTH_DB_PATH not set — browser auth disabled (token-only)")
 	}
 	registerMeSecurityRoutes(m)
 
@@ -298,10 +298,10 @@ func Start(
 
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logging.Logf("[apiserver] http error: %v", err)
+			logging.LogfAPI("[apiserver] http error: %v", err)
 		}
 	}()
-	logging.Logf("[apiserver] HTTP listening on %s", httpAddr)
+	logging.LogfAPI("[apiserver] HTTP listening on %s", httpAddr)
 
 	// ── TLS server (optional) ─────────────────────────────────────────────────
 	var tlsSrv *http.Server
@@ -320,7 +320,7 @@ func Start(
 
 		ln, err := net.Listen("tcp", fullTLSAddr)
 		if err != nil {
-			logging.Logf("[apiserver] TLS listen failed on %s: %v", fullTLSAddr, err)
+			logging.LogfAPI("[apiserver] TLS listen failed on %s: %v", fullTLSAddr, err)
 		} else {
 			tlsSrv = &http.Server{
 				Addr:              fullTLSAddr,
@@ -334,13 +334,13 @@ func Start(
 			}
 			go func() {
 				if err := tlsSrv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
-					logging.Logf("[apiserver] TLS error: %v", err)
+					logging.LogfAPI("[apiserver] TLS error: %v", err)
 				}
 			}()
-			logging.Logf("[apiserver] TLS listening on %s", fullTLSAddr)
+			logging.LogfAPI("[apiserver] TLS listening on %s", fullTLSAddr)
 		}
 	} else if cfg.Debug.TLSPort > 0 && ssl == nil {
-		logging.Logf("[apiserver] TLS_PORT set but SSLCollector not available — TLS disabled")
+		logging.LogfAPI("[apiserver] TLS_PORT set but SSLCollector not available — TLS disabled")
 	}
 
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
@@ -349,11 +349,11 @@ func Start(
 	defer cancel()
 
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
-		logging.Logf("[apiserver] HTTP shutdown error: %v", err)
+		logging.LogfAPI("[apiserver] HTTP shutdown error: %v", err)
 	}
 	if tlsSrv != nil {
 		if err := tlsSrv.Shutdown(shutCtx); err != nil {
-			logging.Logf("[apiserver] TLS shutdown error: %v", err)
+			logging.LogfAPI("[apiserver] TLS shutdown error: %v", err)
 		}
 	}
 	if authMgr != nil {
@@ -372,15 +372,15 @@ func resolveMFAEncryptionKey(cfg *cfgpkg.Config) string {
 	if token == "" {
 		key, err := loadOrCreateMFAEncryptionKey(mfaKeyStatePath)
 		if err != nil {
-			logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY missing and fallback key generation failed: %v", err)
+			logging.LogfAPI("[apiserver] AUTH_MFA_ENCRYPTION_KEY missing and fallback key generation failed: %v", err)
 			return ""
 		}
-		logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY and AUTH_TOKEN not set; using persisted MFA key at %s", mfaKeyStatePath)
+		logging.LogfAPI("[apiserver] AUTH_MFA_ENCRYPTION_KEY and AUTH_TOKEN not set; using persisted MFA key at %s", mfaKeyStatePath)
 		return key
 	}
 	sum := sha256.Sum256([]byte("cfm/goauth/mfa/v1:" + token))
 	derived := base64.RawStdEncoding.EncodeToString(sum[:]) // 32-byte key when decoded
-	logging.Logf("[apiserver] AUTH_MFA_ENCRYPTION_KEY not set; deriving MFA key from AUTH_TOKEN")
+	logging.LogfAPI("[apiserver] AUTH_MFA_ENCRYPTION_KEY not set; deriving MFA key from AUTH_TOKEN")
 	return derived
 }
 
@@ -452,7 +452,7 @@ func newGoAuth(cfg goauth.Config) (*goauth.Manager, error) {
 	// Keep this wrapper for centralized logging around goauth initialization.
 	mgr, err := goauth.New(cfg)
 	if err != nil && isGoAuthSQLiteBusy(err) {
-		logging.Logf("[apiserver] goauth init hit SQLITE_BUSY; restart service to retry cleanly: %v", err)
+		logging.LogfAPI("[apiserver] goauth init hit SQLITE_BUSY; restart service to retry cleanly: %v", err)
 	}
 	return mgr, err
 }
@@ -475,7 +475,7 @@ func initGoAuthWithRetry(ctx context.Context, cfg goauth.Config) (*goauth.Manage
 		}
 		mgr, err = newGoAuthForInit(cfg)
 		if err == nil {
-			logging.Logf("[apiserver] goauth init recovered after SQLITE_BUSY retries (attempt=%d)", i+2)
+			logging.LogfAPI("[apiserver] goauth init recovered after SQLITE_BUSY retries (attempt=%d)", i+2)
 			return mgr, nil
 		}
 		lastErr = err
@@ -514,7 +514,7 @@ func PprofWriteTimeoutMiddleware(next http.Handler) http.Handler {
 		}
 
 		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-			logging.Logf("[apiserver] pprof write deadline extension failed for %s: %v", r.URL.Path, err)
+			logging.LogfAPI("[apiserver] pprof write deadline extension failed for %s: %v", r.URL.Path, err)
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)

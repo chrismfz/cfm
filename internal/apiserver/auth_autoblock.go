@@ -32,7 +32,7 @@ func startAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Bac
 func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backend) {
 	db, err := sql.Open("sqlite", cfg.Debug.AuthDBPath)
 	if err != nil {
-		logging.Logf("[apiserver][auth-autoblock] sqlite open failed: %v", err)
+		logging.LogfAPI("[apiserver][auth-autoblock] sqlite open failed: %v", err)
 		return
 	}
 	defer db.Close()
@@ -40,7 +40,7 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 
 	var lastID int64
 	if err := db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM auth_log`).Scan(&lastID); err != nil {
-		logging.Logf("[apiserver][auth-autoblock] cursor init failed: %v", err)
+		logging.LogfAPI("[apiserver][auth-autoblock] cursor init failed: %v", err)
 		lastID = 0
 	}
 	failTSByIP := map[string][]int64{}
@@ -57,7 +57,7 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 
 		rows, err := db.Query(`SELECT id, ts, event, ip FROM auth_log WHERE id > ? AND event IN ('FAIL','RATELIMIT') ORDER BY id ASC LIMIT ?`, lastID, authAutoblockQueryBatch)
 		if err != nil {
-			logging.Logf("[apiserver][auth-autoblock] query failed: %v", err)
+			logging.LogfAPI("[apiserver][auth-autoblock] query failed: %v", err)
 			continue
 		}
 
@@ -119,7 +119,7 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 					lastBlock[key] = time.Now()
 				}
 				_ = be.ReportBlock(key, authAutoblockReason, "detector", mode, ttlSec)
-				logging.Logf("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", key, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
+				logging.LogfAPI("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", key, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
 			}
 		}
 		_ = rows.Close()

@@ -232,14 +232,14 @@ func RegisterEmbedBootstrapEndpoint(m *http.ServeMux, store *TokenStore) {
 
 		value, err := encodeEmbedCookie(r, st.ID, now.Add(embedBootstrapTTL))
 		if err != nil {
-			logging.Logf("[apiserver] embed bootstrap signing key unavailable: %v", err)
+			logging.LogfAPI("[apiserver] embed bootstrap signing key unavailable: %v", err)
 			apiJSONError(w, "failed to create embed bootstrap cookie", http.StatusInternalServerError)
 			return
 		}
 		writeEmbedBootstrapCookie(w, value)
 
 		redirectTarget := appendExpectedParentOrigin(nextPath, r.URL.Query().Get("cfmExpectedOrigin"))
-		logging.Logf("[apiserver] embed bootstrap ok token_id=%s label=%q role=%s next=%s", st.ID, st.Label, st.Role, nextPath)
+		logging.LogfAPI("[apiserver] embed bootstrap ok token_id=%s label=%q role=%s next=%s", st.ID, st.Label, st.Role, nextPath)
 		http.Redirect(w, r, redirectTarget, http.StatusSeeOther)
 	})
 }
@@ -373,7 +373,7 @@ func renewEmbedBootstrapCookie(w http.ResponseWriter, r *http.Request, tokenID s
 	}
 	value, err := encodeEmbedCookie(r, tokenID, now.Add(embedBootstrapTTL))
 	if err != nil {
-		logging.Logf("[apiserver] embed bootstrap cookie renewal failed: %v", err)
+		logging.LogfAPI("[apiserver] embed bootstrap cookie renewal failed: %v", err)
 		return
 	}
 	writeEmbedBootstrapCookie(w, value)
@@ -469,7 +469,7 @@ func decodeEmbedCookie(r *http.Request, v string) (bool, string, bool, time.Time
 	if time.Now().After(expiry) {
 		return false, "", false, time.Time{}
 	}
-	logging.Logf("[apiserver] accepted legacy unsigned embed cookie; migration deadline=%s", embedLegacyCookieCutoff.Format(time.RFC3339))
+	logging.LogfAPI("[apiserver] accepted legacy unsigned embed cookie; migration deadline=%s", embedLegacyCookieCutoff.Format(time.RFC3339))
 	return true, parts[1], true, expiry
 }
 
