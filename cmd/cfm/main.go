@@ -259,7 +259,7 @@ Usage:
   cfm which <IP> [--json]   -- search <IP>
   cfm asn <AS12345> [--json] -- list announced prefixes for ASN
   cfm htpasswd <username> [password] -- legacy quick helper: generate OpenResty/htpasswd-compatible bcrypt ($2y$) entry
-  cfm status [--json] [--timings] [--no-ttl] [--cache-ttl 5s]
+  cfm status [--json] [--timings] [--ttl-summary] [--cache-ttl 5s]
   cfm disable -- disable and drop everything in nft
   cfm reset   -- empty all tables / sets
 
