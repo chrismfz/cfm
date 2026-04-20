@@ -280,7 +280,8 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
-					logging.Logf("[apiserver] auth_source=token_admin")
+					logging.LogfAPI("[apiserver] auth_source=token_admin src_ip=%s method=%s path=%q ua=%q",
+						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 					next.ServeHTTP(w, r.WithContext(ctx))
@@ -288,9 +289,11 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				}
 				if st, ok := store.Lookup(tok); ok {
 					if embedded {
-						logging.Logf("[apiserver] auth_source=token_scoped_embedded")
+						logging.LogfAPI("[apiserver] auth_source=token_scoped_embedded src_ip=%s method=%s path=%q ua=%q",
+							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 					} else {
-						logging.Logf("[apiserver] auth_source=token_scoped")
+						logging.LogfAPI("[apiserver] auth_source=token_scoped src_ip=%s method=%s path=%q ua=%q",
+							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 					}
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
 					ctx = context.WithValue(ctx, webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
@@ -315,7 +318,8 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
 					if shouldLogEmbedBootstrapAuth(time.Now()) {
-						logging.Logf("[apiserver] auth_source=embed_bootstrap_cookie (sampled_every=15s)")
+						logging.LogfAPI("[apiserver] auth_source=embed_bootstrap_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=15s)",
+							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 					}
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
@@ -335,7 +339,8 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 5. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				if shouldLogSessionCookieAuth(time.Now()) {
-					logging.Logf("[apiserver] auth_source=session_cookie (sampled_every=60s)")
+					logging.LogfAPI("[apiserver] auth_source=session_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=60s)",
+						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
 				}
 				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
