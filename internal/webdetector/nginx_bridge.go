@@ -1000,6 +1000,28 @@ func (b *NginxBridge) recordErr(msg string) {
 // This is the *server* side — OpenResty Lua connects here to get the current
 // decision state. Run as: go bridge.ServeDecisions(ctx)
 
+// slowHandlerThreshold is the "anything above this is worth investigating"
+// bar for bridge HTTP handlers. Under normal conditions all handlers finish
+// in well under a millisecond (pure in-memory state mutation + async hook
+// dispatch); anything over this threshold suggests GC pressure, mutex
+// contention, or a regression in a handler. Logged once per offending call
+// with the method+path so the culprit is unambiguous.
+const slowHandlerThreshold = 30 * time.Millisecond
+
+// instrument wraps an http.HandlerFunc with a wall-clock timer and emits a
+// warn-level log line when the handler exceeds slowHandlerThreshold. This
+// is the diagnostic hook for "why is the Lua client still timing out?" —
+// it tells us which bridge endpoint is actually slow instead of speculating.
+func (b *NginxBridge) instrument(name string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		h(w, r)
+		if dur := time.Since(start); dur >= slowHandlerThreshold {
+			logging.Logf("[nginx_bridge] slow handler %s %s took %s", r.Method, name, dur)
+		}
+	}
+}
+
 // ServeDecisions starts a unix-socket HTTP server that Lua queries.
 // It serves a simple decision API:
 //
@@ -1027,20 +1049,20 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/nginx/decision", b.handleDecision)
-	mux.HandleFunc("/nginx/ip", b.handleIPPush)
-	mux.HandleFunc("/nginx/ip/clear", b.handleIPClear)
-	mux.HandleFunc("/nginx/vhost", b.handleVhostPush)
-	mux.HandleFunc("/nginx/vhost/clear", b.handleVhostClear)
-	mux.HandleFunc("/nginx/ok/touch", b.handleOKTouch)
-	mux.HandleFunc("/nginx/observe", b.handleObserve)
-	mux.HandleFunc("/nginx/waf/excluded", b.handleWAFExcluded)
-	mux.HandleFunc("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta)
-	mux.HandleFunc("/nginx/waf/excludes", b.handleWAFExcludes)
-	mux.HandleFunc("/nginx/snapshot", b.handleSnapshot)
-	mux.HandleFunc("/nginx/status", b.handleStatus)
-	mux.HandleFunc("/nginx/upload", b.handleUpload)
-	mux.HandleFunc("/nginx/events/batch", b.handleEventsBatch)
+	mux.HandleFunc("/nginx/decision", b.instrument("/nginx/decision", b.handleDecision))
+	mux.HandleFunc("/nginx/ip", b.instrument("/nginx/ip", b.handleIPPush))
+	mux.HandleFunc("/nginx/ip/clear", b.instrument("/nginx/ip/clear", b.handleIPClear))
+	mux.HandleFunc("/nginx/vhost", b.instrument("/nginx/vhost", b.handleVhostPush))
+	mux.HandleFunc("/nginx/vhost/clear", b.instrument("/nginx/vhost/clear", b.handleVhostClear))
+	mux.HandleFunc("/nginx/ok/touch", b.instrument("/nginx/ok/touch", b.handleOKTouch))
+	mux.HandleFunc("/nginx/observe", b.instrument("/nginx/observe", b.handleObserve))
+	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
+	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
+	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
+	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
+	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
+	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
+	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 
 	srv := &http.Server{
 		Handler:           mux,
