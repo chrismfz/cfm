@@ -88,6 +88,13 @@ type HistoryStore struct {
 	pruneEvery    time.Duration
 	lastPrune     time.Time
 	db            *sql.DB
+
+	// Background pruner. Prune is done on its own ticker goroutine so that
+	// a slow DELETE cannot block Append (and, by extension, the bridge HTTP
+	// handlers that feed Append from OnTrigger / InjectObserved).
+	prunerOnce sync.Once
+	prunerStop chan struct{}
+	prunerDone chan struct{}
 }
 
 func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (*HistoryStore, error) {
@@ -137,7 +144,15 @@ func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (
 		return nil, err
 	}
 
-	s := &HistoryStore{path: path, retentionDays: retentionDays, pruneEvery: pruneEvery, db: db}
+	s := &HistoryStore{
+		path:          path,
+		retentionDays: retentionDays,
+		pruneEvery:    pruneEvery,
+		db:            db,
+		prunerStop:    make(chan struct{}),
+		prunerDone:    make(chan struct{}),
+	}
+	go s.prunerLoop()
 	if !existed || !wasSQLite {
 		logging.Logf("[webdetector][history] created sqlite db: %s", path)
 	}
@@ -145,10 +160,40 @@ func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (
 	return s, nil
 }
 
+// prunerLoop runs retention deletes on its own ticker. Runs under s.mu so
+// reads/writes see a consistent view, but crucially does NOT block Append
+// callers for the full ticker period — only for the duration of one DELETE.
+func (s *HistoryStore) prunerLoop() {
+	defer close(s.prunerDone)
+	t := time.NewTicker(s.pruneEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.prunerStop:
+			return
+		case <-t.C:
+			s.mu.Lock()
+			if _, err := s.pruneLocked(s.retentionDays); err != nil {
+				logging.Logf("[webdetector][history] sqlite prune failed: %v", err)
+			}
+			s.lastPrune = time.Now()
+			s.mu.Unlock()
+		}
+	}
+}
+
 func (s *HistoryStore) Close() {
 	if s == nil || s.db == nil {
 		return
 	}
+	s.prunerOnce.Do(func() {
+		if s.prunerStop != nil {
+			close(s.prunerStop)
+		}
+		if s.prunerDone != nil {
+			<-s.prunerDone
+		}
+	})
 	_ = s.db.Close()
 }
 
@@ -233,17 +278,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if id, err := res.LastInsertId(); err == nil {
 		ev.ID = id
 	}
-	s.pruneIfNeededLocked(time.Now())
-}
-
-func (s *HistoryStore) pruneIfNeededLocked(now time.Time) {
-	if now.Sub(s.lastPrune) < s.pruneEvery {
-		return
-	}
-	s.lastPrune = now
-	if _, err := s.pruneLocked(s.retentionDays); err != nil {
-		logging.Logf("[webdetector][history] sqlite prune failed: %v", err)
-	}
+	// Prune runs on its own ticker (see prunerLoop); Append never blocks on it.
 }
 
 // readAllLocked returns all events ordered by ts desc.
