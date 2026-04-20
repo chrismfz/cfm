@@ -183,6 +183,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(page))
 
 	case http.MethodPost:
+		username := loginAttemptUsername(r)
+		if !protectLoginAttempt(w, r, username) {
+			return
+		}
+
 		h := authLoginHandler()
 		if h == nil {
 			http.Error(w, `{"error":"auth not configured"}`, http.StatusServiceUnavailable)
@@ -191,6 +196,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 		rec := httptest.NewRecorder()
 		h(rec, r)
+		recordLoginLimiterResult(r, username, rec.Code)
 		recordLoginAttemptResult(r, rec.Code)
 
 		if isBrowser(r) && mfaLoginVerifyEnabled() && isMFARequiredResponse(rec.Body.Bytes()) {
