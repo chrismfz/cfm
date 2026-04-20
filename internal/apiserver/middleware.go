@@ -245,7 +245,7 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 // TokenMiddleware enforces auth on all non-public routes.
 func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) http.Handler {
 	if adminToken == "" {
-		logging.Logf("[apiserver] auth_reject=server_misconfigured_missing_auth_token")
+		logging.LogfAPI("[apiserver] auth_reject=server_misconfigured_missing_auth_token")
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if isRequiredHealthPath(r) {
@@ -306,7 +306,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					return
 				}
 				if embedded {
-					logging.Logf("[apiserver] auth_reject=invalid_scoped_embedded")
+					logging.LogfAPI("[apiserver] auth_reject=invalid_scoped_embedded")
 				}
 				w.Header().Set("Content-Type", "application/json")
 				setAPIAnomalyReason(w, "token_invalid")
@@ -328,7 +328,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			// ── 4. Embedded requests require token or embed bootstrap cookie ─
 			if embedded {
-				logging.Logf("[apiserver] auth_reject=missing_scoped_embedded")
+				logging.LogfAPI("[apiserver] auth_reject=missing_scoped_embedded")
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 				setAPIAnomalyReason(w, "auth_missing")
@@ -351,7 +351,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 6. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				if isEmbedShellBootstrapRequest(r) {
-					logging.Logf("[apiserver] auth_source=embed_shell_bootstrap")
+					logging.LogfAPI("[apiserver] auth_source=embed_shell_bootstrap")
 					next.ServeHTTP(w, r)
 					return
 				}

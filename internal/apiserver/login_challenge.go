@@ -99,7 +99,7 @@ func maybeHandlePreAuthLoginChallenge(w http.ResponseWriter, r *http.Request) bo
 		return false
 	}
 	if err := policy.enforce(ip, policy.ttl, preAuthChallengeReason); err != nil {
-		logging.Logf("[apiserver] preauth challenge enforce failed ip=%s err=%v", ip.String(), err)
+		logging.LogfAPI("[apiserver] preauth challenge enforce failed ip=%s err=%v", ip.String(), err)
 		return false
 	}
 
