@@ -42,6 +42,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -108,6 +109,16 @@ type NginxBridge struct {
 	//enricher maxmind
 	enr interface{ Lookup(string) enrich.Result } // optional enricher for country fallback
 
+	// Asynchronous hook dispatcher. OnTrigger / OnObserve callbacks do
+	// SQLite writes (history_store.Append) and disk logging which can
+	// exceed the Lua-side decision_timeout_ms. They are dispatched onto
+	// hookCh and processed by a single drainer goroutine so that the
+	// bridge HTTP handlers never block on them. Buffered + drop-on-full
+	// — under scanner floods we'd rather lose a few audit rows than
+	// push backpressure into the enforcement path.
+	hookCh      chan func()
+	hookDropped atomic.Int64
+	hookStopped atomic.Bool
 }
 
 func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }
@@ -624,6 +635,72 @@ func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, statu
 	b.OnObserve = fn
 }
 
+// hookQueueSize is the buffer depth for the async hook dispatcher. Sized so
+// that a short scanner burst (a few thousand WAF triggers/sec for a second
+// or two) can be absorbed without dropping; sustained overload will drop
+// the overflow and count it in hookDropped.
+const hookQueueSize = 4096
+
+// startHookDispatcher spawns the single drainer goroutine that runs
+// OnTrigger / OnObserve callbacks off the HTTP handler path. Returns a
+// channel that closes when the drainer has exited after hookCh is closed.
+func (b *NginxBridge) startHookDispatcher() <-chan struct{} {
+	if b.hookCh == nil {
+		b.hookCh = make(chan func(), hookQueueSize)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for fn := range b.hookCh {
+			// A panicking hook must not kill the drainer; the bridge would
+			// then silently stop dispatching every subsequent event.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logging.Logf("[nginx_bridge] hook panic: %v", r)
+					}
+				}()
+				fn()
+			}()
+		}
+	}()
+	return done
+}
+
+// dispatchHook schedules fn to run on the drainer goroutine. If the hook
+// queue is full (rare — scanner flood) the event is dropped and a warn is
+// logged at a throttled cadence. If the dispatcher is not running (tests,
+// pre-Serve, post-shutdown) fn is executed inline so callers never silently
+// lose events in the default case.
+func (b *NginxBridge) dispatchHook(fn func()) {
+	if b == nil || fn == nil {
+		return
+	}
+	if b.hookStopped.Load() || b.hookCh == nil {
+		fn()
+		return
+	}
+	select {
+	case b.hookCh <- fn:
+	default:
+		n := b.hookDropped.Add(1)
+		// Log the first drop and then every 1000th — a noisy attacker
+		// shouldn't be able to flood our own error log.
+		if n == 1 || n%1000 == 0 {
+			logging.Logf("[nginx_bridge] hook queue full; dropped %d events (buffer=%d)", n, cap(b.hookCh))
+		}
+	}
+}
+
+// HookDroppedCount returns the cumulative number of hook events dropped
+// because the dispatcher queue was full. Exposed for status/telemetry.
+func (b *NginxBridge) HookDroppedCount() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.hookDropped.Load()
+}
+
 func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -970,12 +1047,21 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 		ReadHeaderTimeout: 2 * time.Second,
 	}
 
+	hookDone := b.startHookDispatcher()
+
 	go func() {
 		<-ctx.Done()
 		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx2)
 		_ = os.Remove(sockPath)
+		// HTTP handlers are done; safe to stop accepting new hook events
+		// and let the drainer finish whatever it was mid-flight.
+		b.hookStopped.Store(true)
+		if b.hookCh != nil {
+			close(b.hookCh)
+			<-hookDone
+		}
 	}()
 
 	logging.Logf("[nginx_bridge] decision server listening on unix:%s", sockPath)
@@ -1152,8 +1238,13 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// cfm_waf.lua or another external caller that knows why it triggered).
 	// Internal ChallengeIP/BlockIP calls from the Go engine don't set a reason
 	// (they log via challenge_rules.go / RecordIPChallenge instead).
+	// Dispatched async — hook writes to SQLite and disk, which must not be
+	// allowed to exceed the Lua client's decision_timeout_ms.
 	if reason != "" && b.OnTrigger != nil {
-		b.OnTrigger(msg.IP, msg.Action, reason, ttl, msg.Host, msg.URI, msg.Method)
+		ip, action, host, uri, method := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method
+		b.dispatchHook(func() {
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method)
+		})
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1310,9 +1401,13 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 		status = 0
 	}
 
-	// Fire hook (do not block bridge). The hook must be fast / non-blocking.
+	// Fire hook (do not block bridge). Dispatched async — InjectObserved
+	// writes history rows and runs the ingest pipeline, either of which
+	// can spike well past the Lua client's decision_timeout_ms.
 	if b.OnObserve != nil {
-		b.OnObserve(ip, host, uri, method, status, reason)
+		b.dispatchHook(func() {
+			b.OnObserve(ip, host, uri, method, status, reason)
+		})
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1391,7 +1486,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			reason := strings.TrimSpace(msg.Reason)
 			if b.OnObserve != nil {
-				b.OnObserve(ip, host, uri, method, status, reason)
+				b.dispatchHook(func() {
+					b.OnObserve(ip, host, uri, method, status, reason)
+				})
 			}
 			processed++
 
@@ -1445,7 +1542,10 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				b.mu.Unlock()
 			}
 			if reason != "" && b.OnTrigger != nil {
-				b.OnTrigger(msg.IP, msg.Action, reason, ttl, msg.Host, msg.URI, msg.Method)
+				ip, action, host, uri, method := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method
+				b.dispatchHook(func() {
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method)
+				})
 			}
 			processed++
 
