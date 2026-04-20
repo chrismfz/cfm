@@ -70,7 +70,7 @@ local CFG = {
   debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
-  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "1800"),
+  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "3600"),
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
   keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
@@ -758,6 +758,19 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
   end
 end
 if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
+
+-- ── Step 2.5: Forced challenge for marked locations ──────────────────────────
+-- Triggered via `set $cfm_force_challenge 1;` in nginx location blocks
+-- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
+-- and is skipped entirely when a valid cfm_ok cookie is present (Step 1).
+if ngx.var.cfm_force_challenge == "1" then
+  ngx.header["X-CFM-Action"]  = "challenge_forced"
+  ngx.header["Cache-Control"] = "no-store"
+  ngx.var.cfm_upstream = "cfm_challenge"
+  ngx.var.cfm_pass     = "http://cfm_challenge"
+  log_route(ngx.INFO, "challenge_forced ip=" .. ip .. " host=" .. host .. " uri=" .. uri)
+  return
+end
 
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
