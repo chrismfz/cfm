@@ -31,6 +31,50 @@ func TestCSRFMiddlewareRejectsSessionMutatingWithoutOriginOrReferer(t *testing.T
 	}
 }
 
+func TestCSRFMiddlewareRejectsSessionMutatingWithInvalidOrigin(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPut, "http://cfm.local/api/v1/firewall/block", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismSession))
+	req.Header.Set("Origin", "://not-a-valid-origin")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if nextCalled {
+		t.Fatalf("expected middleware to reject invalid Origin")
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestCSRFMiddlewareRejectsSessionMutatingWithInvalidReferer(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPatch, "http://cfm.local/api/v1/firewall/block", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismSession))
+	req.Header.Set("Referer", "not a url")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if nextCalled {
+		t.Fatalf("expected middleware to reject invalid Referer")
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
 func TestCSRFMiddlewareAllowsSessionMutatingWithMatchingOrigin(t *testing.T) {
 	nextCalled := false
 	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +92,29 @@ func TestCSRFMiddlewareAllowsSessionMutatingWithMatchingOrigin(t *testing.T) {
 
 	if !nextCalled {
 		t.Fatalf("expected middleware to allow request")
+	}
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+}
+
+func TestCSRFMiddlewareAllowsSessionMutatingWithMatchingReferer(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://cfm.local/api/v1/firewall/block", nil)
+	req.Host = "cfm.local:6060"
+	req.Header.Set("Referer", "https://cfm.local/some/path")
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismSession))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if !nextCalled {
+		t.Fatalf("expected middleware to allow matching Referer")
 	}
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", rr.Code)

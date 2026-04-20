@@ -21,6 +21,8 @@ type cmdCacheEntry struct {
 
 var cmdCache sync.Map
 
+var runCachedCommandFn = runCachedCommand
+
 // RegisterSystemStatus wires read-only system/status style helpers for web UI.
 func RegisterSystemStatus(m *http.ServeMux) {
 	if m == nil {
@@ -41,7 +43,7 @@ func handleSystemDNAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 5*time.Second)
-	out, ms, err := runCachedCommand("system_dnat", cacheTTL, "cfm", "dnat")
+	out, ms, err := runCachedCommandFn("system_dnat", cacheTTL, "cfm", "dnat")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(out)})
@@ -61,7 +63,7 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 10*time.Second)
-	out, ms, err := runCachedCommand("system_ssl_stats", cacheTTL, "cfm", "ssl", "stats", "--json")
+	out, ms, err := runCachedCommandFn("system_ssl_stats", cacheTTL, "cfm", "ssl", "stats", "--json")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(out)})

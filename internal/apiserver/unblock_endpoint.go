@@ -26,6 +26,8 @@ import (
 	"cfm/internal/unblock"
 )
 
+var unblockDo = unblock.Do
+
 // RegisterUnblock adds the /unblock route to the provided mux.
 func RegisterUnblock(m *http.ServeMux, be firewall.Backend, cfgDir string) {
 	if m == nil {
@@ -148,7 +150,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			defer cancel()
 
 			ttl := 24 * time.Hour
-			res, _ := unblock.Do(ctx, ip, unblock.Options{
+			res, _ := unblockDo(ctx, ip, unblock.Options{
 				BE:            be,
 				ConfigDir:     cfgDir,
 				TempWhitelist: true,
