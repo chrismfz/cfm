@@ -417,6 +417,10 @@ deploy_cfm_files() {
     backup_and_copy_file "/usr/share/cfm/configs/cfm_clamav.lua"        "$lua_dir/cfm_clamav.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_cache_log.lua"        "$lua_dir/cfm_cache_log.lua"
 
+    # log-cfm: log_by_lua sender that pushes every request to
+    # /run/cfm/ingest.sock so webdetector does not need to tail the TSV file.
+    backup_and_copy_file "/usr/share/cfm/configs/log-cfm.lua"        "$lua_dir/log-cfm.lua"
+
     backup_and_copy_file "/usr/share/cfm/configs/sslcollector.lua"   "$lua_dir/sslcollector.lua"
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
