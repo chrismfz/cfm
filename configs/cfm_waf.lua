@@ -70,6 +70,13 @@ local CFG = {
   -- Sources: uusec-waf (BSD), ZhongKui (Apache2), anti_ddos_challenge (MIT),
   --          nginx_waf (MIT).  Promote individually after watching logs.
 
+  -- Known scanner probe URIs (.env, .git/, wp-config.php, /.ssh/, etc.)
+  -- Fires regardless of UA — these paths have no legitimate public use.
+  -- Intentionally conservative: /.well-known/, /.env.example, /.env.sample
+  -- and application-legitimate /config.php-style paths are NOT matched.
+  rule_probe_uris       = "challenge",
+  probe_uris_ttl_sec    = 600,
+
   -- [top-6]  Header vulnerability bundle
   rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
   rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
@@ -1183,6 +1190,61 @@ end
 -- RESEARCH ADDITIONS – HEADER / PROTOCOL CHECKS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Scanner probe URIs — unconditional challenge (no UA scoring needed).
+-- These paths have no legitimate public use on any well-configured site.
+-- Deliberately tight to minimise false positives: well-known ACME paths
+-- (/.well-known/) and deliberately-public env templates (.env.example,
+-- .env.sample) are excluded.
+--
+-- Returns: tag (string) or nil.
+local function detect_probe_uri(uri)
+  local ul = lower(uri or "")
+  if ul == "" then return nil end
+
+  -- ACME / Let's Encrypt — MUST pass through.
+  if ul:sub(1, 13) == "/.well-known/" then return nil end
+
+  -- .env and common variants (exclude public templates).
+  if ul == "/.env"
+     or ul:sub(1, 6) == "/.env?"
+     or ul:sub(1, 6) == "/.env/" then
+    return "ENV"
+  end
+  if ul:match("^/%.env%.[%w_-]+$")
+     and not ul:match("%.example$")
+     and not ul:match("%.sample$")
+     and not ul:match("%.dist$") then
+    return "ENV"
+  end
+
+  -- VCS metadata exposure.
+  if ul == "/.git" or has(ul, "/.git/") or ul == "/.gitignore" then return "VCS_GIT" end
+  if has(ul, "/.svn/")  then return "VCS_SVN" end
+  if has(ul, "/.hg/")   then return "VCS_HG"  end
+  if has(ul, "/.bzr/")  then return "VCS_BZR" end
+
+  -- WordPress config (and common backup suffixes thereof).
+  if has(ul, "/wp-config.php") then return "WP_CONFIG" end
+
+  -- Apache control files probed directly over HTTP.
+  if has(ul, "/.htaccess") then return "HTACCESS" end
+  if has(ul, "/.htpasswd") then return "HTPASSWD" end
+
+  -- Diagnostic / phpinfo dumps.
+  if ul == "/phpinfo.php" or ul == "/info.php" or ul == "/pi.php"
+     or ul == "/_phpinfo.php" or ul == "/test.php" then
+    return "PHPINFO"
+  end
+
+  -- Credential artefacts.
+  if has(ul, "/.ssh/")             then return "DOTSSH" end
+  if has(ul, "/.aws/credentials")  then return "AWS_CREDS" end
+  if has(ul, "/.docker/config")    then return "DOCKER_CONFIG" end
+  if has(ul, "/.npmrc")            then return "NPMRC" end
+
+  return nil
+end
+
 -- [top-6a] Bad UA scorer.
 -- Sources: uusec scanner-detection (plugin), anti_ddos_challenge.lua UA list.
 --
@@ -1873,6 +1935,18 @@ function _M.check(ctx)
       if score >= threshold then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode
+      end
+    end
+  end
+
+  -- ── 1b) Scanner probe URIs (always-challenge regardless of UA) ───────────
+  do
+    local mode = rule_mode(CFG.rule_probe_uris, "challenge")
+    if mode ~= "disabled" then
+      local tag = detect_probe_uri(uri)
+      if tag then
+        local ttl = CFG.probe_uris_ttl_sec or CFG.default_ttl_sec
+        return true, "WAF_PROBE_URI:" .. tag, ttl, mode
       end
     end
   end
