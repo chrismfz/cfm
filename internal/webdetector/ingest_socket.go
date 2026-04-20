@@ -98,7 +98,13 @@ func (s *IngestSocket) Serve(ctx context.Context, e *Engine) error {
 	}
 
 	// Ensure the parent directory exists (tmpfs under systemd is wiped on boot).
-	_ = os.MkdirAll("/run/cfm", 0o755)
+	// 0750 root:cfm — workers (cfm group) traverse in to reach the socket, no
+	// other user needs access. main.go normally does the Chmod+Chown at daemon
+	// start; this is a defensive fallback if webdetector comes up first.
+	_ = os.MkdirAll("/run/cfm", 0o750)
+	if gid := sslcollector.CfmGroupID(); gid > 0 {
+		_ = os.Chown("/run/cfm", 0, gid)
+	}
 
 	// Remove any stale socket file from a previous run.
 	_ = os.Remove(s.sockPath)

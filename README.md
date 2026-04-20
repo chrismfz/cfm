@@ -300,7 +300,7 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 
 ### Ingestion Modes
 
-**Socket mode** — Unix stream socket at `/run/cfm/ingest.sock` (root:cfm 0660). Used automatically when OpenResty/Angie is installed via `scripts/install-openresty.sh` / `scripts/install-angie.sh`: a `log_by_lua_block` sender (`configs/log-cfm.lua`) pushes every request as a TSV line, so webdetector does not have to tail a file on disk. Requires no config — presence of socket traffic is self-advertising.
+**Socket mode** — Unix stream socket at `/run/cfm/ingest.sock` (root:cfm 0660, parent dir root:cfm 0750). Used automatically when OpenResty/Angie is installed via `scripts/install-openresty.sh` / `scripts/install-angie.sh`: a `log_by_lua_block` sender (`configs/log-cfm.lua`) pushes every request as a TSV line, so webdetector does not have to tail a file on disk. Requires no config — presence of socket traffic is self-advertising.
 
 **File mode** — single TSV log. Best for nginx/Apache custom log formats you control.
 

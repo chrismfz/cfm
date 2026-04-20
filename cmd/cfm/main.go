@@ -732,7 +732,10 @@ func runDaemon(args []string) {
 		{"/var/log/cfm", 0o700},
 		// /var/run is tmpfs on systemd systems — recreate on every daemon start.
 		// Without this the bridge socket (OPENRESTY_SOCK) creation fails on boot.
-		{"/var/run/cfm", 0o755},
+		// 0750 root:cfm: OpenResty/Angie workers (cfm group) need to traverse in
+		// to reach sockets; no other local user has a reason to list this dir.
+		// The chown to cfm gid happens below alongside the other cfm-group dirs.
+		{"/var/run/cfm", 0o750},
 	} {
 		_ = os.MkdirAll(d.path, d.mode)
 		_ = os.Chmod(d.path, d.mode)
@@ -740,6 +743,7 @@ func runDaemon(args []string) {
 	if cfmGID > 0 {
 		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
 		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		_ = os.Chown("/var/run/cfm", 0, cfmGID)
 		// Chown the snapshot file if it already exists (e.g. written as root:root
 		// before the cfm group was in place). Without this, OpenResty (cfm user)
 		// cannot read the snapshot on startup until it successfully writes a new one.
