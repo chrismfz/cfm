@@ -48,6 +48,7 @@ import (
 
 	"github.com/chrismfz/goauth"
 
+	"cfm/internal/authstore"
 	cfgpkg "cfm/internal/config"
 	mysqlpkg "cfm/internal/detectors/mysql"
 	"cfm/internal/firewall"
@@ -257,6 +258,9 @@ func Start(
 			logging.LogfAPI("[apiserver] goauth init failed: %v — browser auth disabled", err)
 		} else {
 			SetAuth(authMgr)
+			if err := authstore.HardenSQLiteFiles(cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath); err != nil {
+				logging.LogfAPI("[apiserver] auth db permission hardening warning: %v", err)
+			}
 			if cfg.Debug.AuthSessionDBPath != "" {
 				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
 					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)

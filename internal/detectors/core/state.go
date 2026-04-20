@@ -41,7 +41,7 @@ func LoadState(path string) (*State, error) {
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		return nil, errors.New("state path is not a directory: " + path)
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, err
 	}
 	return &State{dir: path}, nil
@@ -51,7 +51,6 @@ func LoadState(path string) (*State, error) {
 func (s *State) file(name string) string {
 	return filepath.Join(s.dir, sanitize(name)+".json")
 }
-
 
 // FileStateKey builds a stable, unique key for a detector+file path pair.
 // Use it to store per-source positions without collisions.
@@ -66,8 +65,6 @@ func FileStateKey(detectorName, path string) string {
 	joined := detectorName + "__" + abs
 	return sanitize(joined)
 }
-
-
 
 // Get reads a single detector's position from its file.
 func (s *State) Get(name string) (Position, bool) {
@@ -91,10 +88,11 @@ func (s *State) Put(name string, p Position) {
 	fn := s.file(name)
 	tmp := fn + ".tmp"
 
-	_ = os.MkdirAll(s.dir, 0o755)
+	_ = os.MkdirAll(s.dir, 0o700)
 	if b, err := json.MarshalIndent(p, "", "  "); err == nil {
-		_ = os.WriteFile(tmp, b, 0o644)
+		_ = os.WriteFile(tmp, b, 0o600)
 		_ = os.Rename(tmp, fn)
+		_ = os.Chmod(fn, 0o600)
 	}
 }
 

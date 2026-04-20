@@ -27,6 +27,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"cfm/internal/authstore"
 	"github.com/chrismfz/goauth"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -113,7 +114,7 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 }
 
 func authOpen(dbPath *string) (*goauth.Manager, error) {
-	return goauth.New(goauth.Config{
+	mgr, err := goauth.New(goauth.Config{
 		DBPath:       *dbPath,
 		SessionTTL:   8 * time.Hour,
 		SecureCookie: false, // irrelevant for CLI
@@ -121,6 +122,11 @@ func authOpen(dbPath *string) (*goauth.Manager, error) {
 		MFAEncryptionKey: "cfm-auth-cli-mfa-key-32-bytes!!!",
 		MFAIssuer:        "cfm-admin",
 	})
+	if err != nil {
+		return nil, err
+	}
+	_ = authstore.HardenSQLiteFiles(*dbPath)
+	return mgr, nil
 }
 
 func authPromptPassword(prompt string) (string, error) {
