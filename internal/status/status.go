@@ -206,7 +206,7 @@ func Run(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	showTimings := fs.Bool("timings", false, "print per-section timings")
-	noTTL := fs.Bool("no-ttl", false, "skip TTL summary (faster)")
+	showTTL := fs.Bool("ttl-summary", false, "include TTL summary (slower)")
 	cacheTTL := fs.Duration("cache-ttl", 0, "cache table/sets summary for duration (example: 5s)")
 	_ = fs.Parse(args)
 	timing := make(map[string]int64)
@@ -267,7 +267,7 @@ func Run(args []string) {
 	timing["challenge_ms"] = time.Since(t0).Milliseconds()
 
 	// --- TTL summary (manual hosts + nets) ---
-	if st.TablePresent && !*noTTL {
+	if st.TablePresent && *showTTL {
 		t0 = time.Now()
 		// BLOCK v4
 		b4hTTL, b4hTot := countTTLInSet("block_v4")
