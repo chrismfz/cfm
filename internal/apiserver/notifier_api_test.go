@@ -345,19 +345,35 @@ func TestNotifierMetricsEndpoint(t *testing.T) {
 		t.Fatalf("GET status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	var payload struct {
-		Window     string         `json:"window"`
-		Total      int            `json:"total_attempts"`
-		Success    int            `json:"success_count"`
-		Errors     int            `json:"error_count"`
-		PerKind    map[string]int `json:"per_kind"`
-		PerChannel map[string]int `json:"per_channel"`
-		Cached     bool           `json:"cached"`
+		Window           string         `json:"window"`
+		WindowStart      string         `json:"window_start"`
+		WindowEnd        string         `json:"window_end"`
+		GeneratedAt      string         `json:"generated_at"`
+		Source           string         `json:"source"`
+		TotalRowsScanned int            `json:"total_rows_scanned"`
+		Total            int            `json:"total_attempts"`
+		Success          int            `json:"success_count"`
+		Errors           int            `json:"error_count"`
+		PerKind          map[string]int `json:"per_kind"`
+		PerChannel       map[string]int `json:"per_channel"`
+		Degraded         bool           `json:"degraded"`
+		Warnings         []string       `json:"warnings"`
+		Cached           bool           `json:"cached"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v body=%s", err, rr.Body.String())
 	}
 	if payload.Window != "1h" {
 		t.Fatalf("window=%q", payload.Window)
+	}
+	if payload.WindowStart == "" || payload.WindowEnd == "" {
+		t.Fatalf("missing window bounds")
+	}
+	if payload.GeneratedAt == "" || payload.Source != "live" {
+		t.Fatalf("expected generated_at/source to be set: %#v", payload)
+	}
+	if payload.TotalRowsScanned != 4 {
+		t.Fatalf("expected scanned rows=4, got %d", payload.TotalRowsScanned)
 	}
 	if payload.Total != 3 || payload.Success != 2 || payload.Errors != 1 {
 		t.Fatalf("unexpected counts total=%d success=%d error=%d", payload.Total, payload.Success, payload.Errors)
@@ -371,6 +387,9 @@ func TestNotifierMetricsEndpoint(t *testing.T) {
 	if payload.Cached {
 		t.Fatalf("first request should not be cached")
 	}
+	if !payload.Degraded || len(payload.Warnings) == 0 {
+		t.Fatalf("expected degraded metrics due to missing channel fields: %#v", payload)
+	}
 
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/metrics?window=1h", nil)
 	rr2 := httptest.NewRecorder()
@@ -379,13 +398,17 @@ func TestNotifierMetricsEndpoint(t *testing.T) {
 		t.Fatalf("GET status=%d body=%s", rr2.Code, rr2.Body.String())
 	}
 	var payload2 struct {
-		Cached bool `json:"cached"`
+		Cached bool   `json:"cached"`
+		Source string `json:"source"`
 	}
 	if err := json.Unmarshal(rr2.Body.Bytes(), &payload2); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !payload2.Cached {
 		t.Fatalf("second request should be cached")
+	}
+	if payload2.Source != "cache" {
+		t.Fatalf("expected source=cache on cached response, got %q", payload2.Source)
 	}
 }
 

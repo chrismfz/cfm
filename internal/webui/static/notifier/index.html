@@ -50,9 +50,18 @@
           <span id="notifierOverviewToggleResult" class="pill" style="display:none"></span>
           <button id="notifierOverviewRefreshMetrics" class="btn-quiet">Refresh counters</button>
         </div>
+        <div class="summary-grid">
+          <div class="summary-card"><h4>Metrics source</h4><div class="value" id="notifierMetricsSource">-</div></div>
+          <div class="summary-card"><h4>Window start</h4><div class="value" id="notifierMetricsWindowStart">-</div></div>
+          <div class="summary-card"><h4>Window end</h4><div class="value" id="notifierMetricsWindowEnd">-</div></div>
+          <div class="summary-card"><h4>Rows scanned</h4><div class="value" id="notifierMetricsRowsScanned">0</div></div>
+          <div class="summary-card"><h4>Updated</h4><div class="value" id="notifierMetricsUpdatedAgo">-</div></div>
+        </div>
+        <p id="notifierMetricsWarning" class="statusline" style="display:none;color:#facc15"></p>
+        <p id="notifierMetricsEmptyState" class="muted" style="display:none"></p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Channel</th><th>1h attempts</th><th>1h success</th><th>1h fail</th><th>24h attempts</th><th>24h success</th><th>24h fail</th></tr></thead>
+            <thead><tr><th>Channel</th><th>1h attempts</th><th>1h success</th><th>1h fail</th><th>24h attempts</th><th>24h success</th><th>24h fail</th><th>Trend</th></tr></thead>
             <tbody id="notifierOverviewCountersBody"></tbody>
           </table>
         </div>

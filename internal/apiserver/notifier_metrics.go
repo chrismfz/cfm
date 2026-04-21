@@ -91,16 +91,23 @@ type notifierMetricsBucket struct {
 }
 
 type notifierMetricsResponse struct {
-	Window     string                  `json:"window"`
-	From       string                  `json:"from"`
-	To         string                  `json:"to"`
-	Total      int                     `json:"total_attempts"`
-	Success    int                     `json:"success_count"`
-	Errors     int                     `json:"error_count"`
-	PerChannel map[string]int          `json:"per_channel"`
-	PerKind    map[string]int          `json:"per_kind"`
-	Series     []notifierMetricsBucket `json:"series"`
-	Cached     bool                    `json:"cached"`
+	Window           string                  `json:"window"`
+	WindowStart      string                  `json:"window_start"`
+	WindowEnd        string                  `json:"window_end"`
+	From             string                  `json:"from"`
+	To               string                  `json:"to"`
+	GeneratedAt      string                  `json:"generated_at"`
+	Source           string                  `json:"source"`
+	TotalRowsScanned int                     `json:"total_rows_scanned"`
+	Total            int                     `json:"total_attempts"`
+	Success          int                     `json:"success_count"`
+	Errors           int                     `json:"error_count"`
+	PerChannel       map[string]int          `json:"per_channel"`
+	PerKind          map[string]int          `json:"per_kind"`
+	Series           []notifierMetricsBucket `json:"series"`
+	Degraded         bool                    `json:"degraded"`
+	Warnings         []string                `json:"warnings,omitempty"`
+	Cached           bool                    `json:"cached"`
 }
 
 func handleNotifierMetrics(w http.ResponseWriter, r *http.Request, cfgDir string) {
@@ -132,6 +139,8 @@ func handleNotifierMetrics(w http.ResponseWriter, r *http.Request, cfgDir string
 	if statErr == nil {
 		if cached, hit := notifierMetricsAggCache.get(path, stat, window, now); hit {
 			cached.Cached = true
+			cached.Source = "cache"
+			cached.GeneratedAt = now.Format(time.RFC3339)
 			writeNotifierJSON(w, http.StatusOK, cached)
 			return
 		}
@@ -150,6 +159,8 @@ func handleNotifierMetrics(w http.ResponseWriter, r *http.Request, cfgDir string
 	if statErr == nil {
 		notifierMetricsAggCache.set(path, stat, window, now, payload)
 	}
+	payload.Source = "live"
+	payload.GeneratedAt = now.Format(time.RFC3339)
 	writeNotifierJSON(w, http.StatusOK, payload)
 }
 
@@ -157,12 +168,17 @@ func emptyNotifierMetrics(spec notifierWindowSpec, now time.Time) notifierMetric
 	from := now.Add(-spec.Dur)
 	series := buildNotifierSeries(from, now, spec.Bucket)
 	return notifierMetricsResponse{
-		Window:     spec.Name,
-		From:       from.Format(time.RFC3339),
-		To:         now.Format(time.RFC3339),
-		PerChannel: map[string]int{},
-		PerKind:    map[string]int{},
-		Series:     series,
+		Window:      spec.Name,
+		WindowStart: from.Format(time.RFC3339),
+		WindowEnd:   now.Format(time.RFC3339),
+		From:        from.Format(time.RFC3339),
+		To:          now.Format(time.RFC3339),
+		PerChannel:  map[string]int{},
+		PerKind:     map[string]int{},
+		Series:      series,
+		Warnings:    []string{},
+		Source:      "live",
+		GeneratedAt: now.Format(time.RFC3339),
 	}
 }
 
@@ -182,13 +198,19 @@ func aggregateNotifierMetrics(path string, spec notifierWindowSpec, now time.Tim
 	}
 
 	out := notifierMetricsResponse{
-		Window:     spec.Name,
-		From:       from.Format(time.RFC3339),
-		To:         now.Format(time.RFC3339),
-		PerChannel: map[string]int{},
-		PerKind:    map[string]int{},
-		Series:     series,
+		Window:      spec.Name,
+		WindowStart: from.Format(time.RFC3339),
+		WindowEnd:   now.Format(time.RFC3339),
+		From:        from.Format(time.RFC3339),
+		To:          now.Format(time.RFC3339),
+		PerChannel:  map[string]int{},
+		PerKind:     map[string]int{},
+		Series:      series,
+		Warnings:    []string{},
+		Source:      "live",
+		GeneratedAt: now.Format(time.RFC3339),
 	}
+	missingChannelRows := 0
 
 	s := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -198,6 +220,7 @@ func aggregateNotifierMetrics(path string, spec notifierWindowSpec, now time.Tim
 		if line == "" {
 			continue
 		}
+		out.TotalRowsScanned++
 		var row map[string]any
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			continue
@@ -220,7 +243,11 @@ func aggregateNotifierMetrics(path string, spec notifierWindowSpec, now time.Tim
 		if kind != "" {
 			out.PerKind[kind]++
 		}
-		for _, ch := range notifierRecordChannels(row) {
+		channels := notifierRecordChannels(row)
+		if len(channels) == 0 {
+			missingChannelRows++
+		}
+		for _, ch := range channels {
 			out.PerChannel[ch]++
 		}
 
@@ -236,6 +263,10 @@ func aggregateNotifierMetrics(path string, spec notifierWindowSpec, now time.Tim
 	}
 	if err := s.Err(); err != nil {
 		return notifierMetricsResponse{}, err
+	}
+	if missingChannelRows > 0 {
+		out.Degraded = true
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d records are missing channel/channels fields", missingChannelRows))
 	}
 
 	return out, nil
