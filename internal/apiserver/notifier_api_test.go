@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -662,5 +663,28 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	}
 	if len(p3.Rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(p3.Rows))
+	}
+	cursor, ok := p3.Rows[1]["cursor"].(string)
+	if !ok || cursor == "" {
+		t.Fatalf("expected cursor on row: %#v", p3.Rows[1])
+	}
+
+	req4 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=10&status=all&since="+url.QueryEscape(cursor), nil)
+	rr4 := httptest.NewRecorder()
+	mux.ServeHTTP(rr4, adminCtx(req4))
+	if rr4.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr4.Code, rr4.Body.String())
+	}
+	var p4 struct {
+		Rows []map[string]any `json:"rows"`
+	}
+	if err := json.Unmarshal(rr4.Body.Bytes(), &p4); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(p4.Rows) != 1 {
+		t.Fatalf("expected 1 newer row, got %d (%#v)", len(p4.Rows), p4.Rows)
+	}
+	if got := p4.Rows[0]["cursor"]; got != p3.Rows[0]["cursor"] {
+		t.Fatalf("expected newest row cursor %v, got %v", p3.Rows[0]["cursor"], got)
 	}
 }

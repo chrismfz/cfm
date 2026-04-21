@@ -77,6 +77,15 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		}
 		before = &parsed
 	}
+	var since *notifierHistoryCursor
+	if rawSince := strings.TrimSpace(q.Get("since")); rawSince != "" {
+		parsed, err := decodeNotifierHistoryCursor(rawSince)
+		if err != nil {
+			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid since cursor"})
+			return
+		}
+		since = &parsed
+	}
 
 	adminCfg, _, err := notify.LoadAdminConfig(cfgDir)
 	if err != nil {
@@ -102,6 +111,9 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 	hasMore := false
 	for _, row := range rows {
 		if before != nil && !notifierHistoryRowIsBefore(row, *before) {
+			continue
+		}
+		if since != nil && !notifierHistoryRowIsAfter(row, *since) {
 			continue
 		}
 		item := rowToNotifierHistoryItem(row)
@@ -142,6 +154,16 @@ func clampInt(raw string, def, min, max int) int {
 		return n
 	}
 	return def
+}
+
+func notifierHistoryRowIsAfter(row notifierHistoryParsedRow, cursor notifierHistoryCursor) bool {
+	if row.TSUnixNano > cursor.TSUnixNano {
+		return true
+	}
+	if row.TSUnixNano < cursor.TSUnixNano {
+		return false
+	}
+	return row.Offset > cursor.Offset
 }
 
 func readNotifierHistoryRows(path string) ([]notifierHistoryParsedRow, error) {
