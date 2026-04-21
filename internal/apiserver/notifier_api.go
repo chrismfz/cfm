@@ -23,6 +23,9 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/notifier/test", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierTest(w, r)
 	})))
+	m.Handle("/api/v1/notifier/metrics", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierMetrics(w, r, cfgDir)
+	})))
 }
 
 func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
