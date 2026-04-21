@@ -1,5 +1,5 @@
 (() => {
-  let state = { config: { channels: [], detectors: {} }, path: '' };
+  let state = { config: { channels: [], detectors: {} }, path: '', testResults: [], activeTab: 'config' };
 
   function byId(id) { return document.getElementById(id); }
 
@@ -44,6 +44,30 @@
   async function reloadNotifier() {
     await request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' });
     showStatus('Notifier reloaded successfully.');
+  }
+
+  function parseSampleInput() {
+    const raw = (byId('notifierTestSample')?.value || '').trim();
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Sample payload must be a JSON object.');
+    }
+    return parsed;
+  }
+
+  async function runNotifierTest() {
+    const channel = (byId('notifierTestChannel')?.value || '').trim();
+    const detector = (byId('notifierTestDetector')?.value || '').trim();
+    if (!channel) throw new Error('Channel is required.');
+    const sample = parseSampleInput();
+    const payload = await request('/cfm-admin/api/v1/notifier/test', {
+      method: 'POST',
+      body: JSON.stringify({ channel, detector, sample }),
+    });
+    state.testResults = Array.isArray(payload.results) ? payload.results : [];
+    renderTests();
+    showStatus(`Completed notifier test for ${channel}.`, true);
   }
 
   function channelTargets(ch) {
@@ -114,6 +138,43 @@
   function render() {
     renderChannels();
     renderDetectors();
+    renderTests();
+    applyTabVisibility();
+  }
+
+  function renderTests() {
+    const body = byId('notifierTestsBody');
+    if (!body) return;
+    body.replaceChildren();
+    for (const result of state.testResults || []) {
+      const tr = document.createElement('tr');
+      const statusText = result.success || result.status === 'success' ? 'success' : 'failure';
+      const statusColor = statusText === 'success' ? '#4ade80' : '#f87171';
+      tr.innerHTML = `
+        <td>${result.channel || '-'}</td>
+        <td>${result.attempted_at || '-'}</td>
+        <td style="color:${statusColor};font-weight:600">${statusText}</td>
+        <td>${result.error || '-'}</td>
+        <td>${result.delivery_duration || '-'}</td>
+      `;
+      body.appendChild(tr);
+    }
+  }
+
+  function applyTabVisibility() {
+    const active = state.activeTab || 'config';
+    document.querySelectorAll('[data-notifier-tab]').forEach((el) => {
+      if (el.getAttribute('data-notifier-tab') === active) {
+        el.style.display = '';
+      } else {
+        el.style.display = 'none';
+      }
+    });
+  }
+
+  function setActiveTab(tab) {
+    state.activeTab = tab === 'tests' ? 'tests' : 'config';
+    applyTabVisibility();
   }
 
   function upsertChannel(existingId = '') {
@@ -179,6 +240,9 @@
     byId('notifierReloadBtn')?.addEventListener('click', () => reloadNotifier().catch((e) => showStatus(e.message, false)));
     byId('notifierAddChannelBtn')?.addEventListener('click', () => upsertChannel(''));
     byId('notifierAddDetectorBtn')?.addEventListener('click', () => upsertDetector(''));
+    byId('notifierRunTestBtn')?.addEventListener('click', () => runNotifierTest().catch((e) => showStatus(e.message, false)));
+    byId('notifierTabConfigBtn')?.addEventListener('click', () => setActiveTab('config'));
+    byId('notifierTabTestsBtn')?.addEventListener('click', () => setActiveTab('tests'));
     loadConfig().catch((e) => showStatus(e.message || 'Failed to load notifier config.', false));
   }
 
