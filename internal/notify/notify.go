@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,124 +51,68 @@ func SetEnricher(e *enrich.Enricher) { enricher = e }
 
 func Init(cfgDir string) error {
 	hostname, _ = os.Hostname()
-
-	var fp string
-	if cfgDir != "" {
-		if fileExists(filepath.Join(cfgDir, "notify.conf")) {
-			fp = filepath.Join(cfgDir, "notify.conf")
-		}
-	}
-	if fp == "" && fileExists("/etc/cfm/notify.conf") {
-		fp = "/etc/cfm/notify.conf"
-	}
-
-	if fp == "" { // no config -> disabled
-		cfgMu.Lock()
-		cfg = &config{Enabled: false}
-		cfgMu.Unlock()
-		return nil
-	}
-	ini, err := parseINI(fp)
+	admin, _, err := LoadAdminConfig(cfgDir)
 	if err != nil {
 		return err
 	}
 
 	c := &config{
-		Enabled:         true,
+		Enabled:         admin.Notifier.Enabled,
 		DefaultCooldown: 5 * time.Minute,
 		JSONLPath:       "/var/lib/cfm/notify.log.jsonl",
-		SubjectTmpl:     "",
-		BodyTmpl:        "",
+		SubjectTmpl:     strings.TrimSpace(admin.Notifier.SubjectTemplate),
+		BodyTmpl:        strings.TrimSpace(admin.Notifier.BodyTemplate),
 		DedupeKey:       "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}",
 		DedupeTTL:       5 * time.Minute,
 		Detectors:       map[string]detectorOverride{},
 	}
-
-	if s := ini.getSection("notifier"); s != nil {
-		c.Enabled = parseBool(s["enabled"], true)
-		if d, err := time.ParseDuration(zv(s["default_cooldown"], "5m")); err == nil {
-			c.DefaultCooldown = d
-		}
-		if p := strings.TrimSpace(s["jsonl_path"]); p != "" {
-			c.JSONLPath = p
-		}
-		if hn := strings.TrimSpace(s["hostname_override"]); hn != "" {
-			hostname = hn
-		}
-		if subj := strings.TrimSpace(s["subject_template"]); subj != "" {
-			c.SubjectTmpl = subj
-		}
-		if body := strings.TrimSpace(s["body_template"]); body != "" {
-			c.BodyTmpl = body
-		}
-		if rl := strings.TrimSpace(s["rate_limit_per_min"]); rl != "" {
-			if n, _ := strconv.Atoi(rl); n > 0 {
-				c.GlobalRatePerMin = n
-			}
-		}
+	if d, err := time.ParseDuration(zv(admin.Notifier.DefaultCooldown, "5m")); err == nil {
+		c.DefaultCooldown = d
 	}
-	if s := ini.getSection("dedupe"); s != nil {
-		if key := strings.TrimSpace(s["key"]); key != "" {
-			c.DedupeKey = key
-		}
-		if d := strings.TrimSpace(s["cooldown"]); d != "" {
-			if dur, err := time.ParseDuration(d); err == nil {
-				c.DedupeTTL = dur
-			}
+	if p := strings.TrimSpace(admin.Notifier.JSONLPath); p != "" {
+		c.JSONLPath = p
+	}
+	if hn := strings.TrimSpace(admin.Notifier.HostnameOverride); hn != "" {
+		hostname = hn
+	}
+	if admin.Notifier.RateLimitPerMin > 0 {
+		c.GlobalRatePerMin = admin.Notifier.RateLimitPerMin
+	}
+	if key := strings.TrimSpace(admin.Dedupe.Key); key != "" {
+		c.DedupeKey = key
+	}
+	if d := strings.TrimSpace(admin.Dedupe.Cooldown); d != "" {
+		if dur, err := time.ParseDuration(d); err == nil {
+			c.DedupeTTL = dur
 		}
 	}
 
-	// channels
 	chans := []Channel{}
-	for name, sec := range ini.sectionsWithPrefix(`channel "`) {
-		_ = name // id is inside quotes
-		id := between(name, `channel "`, `"`)
-		if id == "" || !parseBool(sec["enabled"], true) {
+	for _, sec := range admin.Channels {
+		id := strings.TrimSpace(sec.ID)
+		if id == "" || !sec.Enabled {
 			continue
 		}
-
-		switch strings.TrimSpace(sec["type"]) {
+		switch strings.TrimSpace(sec.Type) {
 		case "sendmail":
-			from := strings.TrimSpace(sec["from"])
+			from := strings.TrimSpace(sec.From)
 			if from == "" {
 				if hostname == "" {
 					hostname, _ = os.Hostname()
 				}
 				from = fmt.Sprintf("root@%s", hostname)
 			}
-			ch := &sendmailChannel{
-				name: id,
-				path: zv(sec["path"], "/usr/sbin/sendmail"),
-				from: from,
-				to:   splitCSV(sec["to"]),
-			}
+			ch := &sendmailChannel{name: id, path: zv(sec.Path, "/usr/sbin/sendmail"), from: from, to: sec.To}
 			if len(ch.to) > 0 {
 				chans = append(chans, ch)
 			}
-
 		case "smtp":
-			ch := &smtpChannel{
-				name:     id,
-				host:     sec["host"],
-				user:     sec["user"],
-				pass:     sec["pass"],
-				from:     sec["from"],
-				to:       splitCSV(sec["to"]),
-				starttls: parseBool(sec["starttls"], true),
-				insecure: parseBool(sec["insecure_skip_verify"], false),
-			}
+			ch := &smtpChannel{name: id, host: sec.Host, user: sec.User, pass: sec.Pass, from: sec.From, to: sec.To, starttls: sec.StartTLS, insecure: sec.InsecureSkipVerify}
 			if ch.host != "" && ch.from != "" && len(ch.to) > 0 {
 				chans = append(chans, ch)
 			}
-
 		case "slack", "slack_webhook":
-			ch := &slackChannel{
-				name:      id,
-				webhook:   sec["webhook_url"],
-				mention:   strings.TrimSpace(sec["mention"]),
-				username:  strings.TrimSpace(sec["username"]),
-				iconEmoji: strings.TrimSpace(sec["icon_emoji"]),
-			}
+			ch := &slackChannel{name: id, webhook: sec.WebhookURL, mention: strings.TrimSpace(sec.Mention), username: strings.TrimSpace(sec.Username), iconEmoji: strings.TrimSpace(sec.IconEmoji)}
 			if ch.webhook != "" {
 				chans = append(chans, ch)
 			}
@@ -177,25 +120,16 @@ func Init(cfgDir string) error {
 	}
 	c.Channels = chans
 
-	// detectors (per-detector routing/overrides)
-	for name, sec := range ini.sectionsWithPrefix(`detector "`) {
-		id := between(name, `detector "`, `"`)
-		if id == "" {
+	for name, sec := range admin.Detectors {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
 			continue
 		}
-		key := strings.ToLower(strings.TrimSpace(id)) // store lowercase for matching
-		ov := detectorOverride{
-			Notify:      parseBool(sec["notify"], true),
-			MinSeverity: strings.ToLower(strings.TrimSpace(sec["min_severity"])),
-			Channels:    splitCSV(sec["channels"]),
-		}
-		if cd := strings.TrimSpace(sec["cooldown"]); cd != "" {
+		ov := detectorOverride{Notify: sec.Notify, MinSeverity: strings.ToLower(strings.TrimSpace(sec.MinSeverity)), Channels: sec.Channels}
+		if cd := strings.TrimSpace(sec.Cooldown); cd != "" {
 			if dur, err := time.ParseDuration(cd); err == nil {
 				ov.Cooldown = dur
 			}
-		}
-		if c.Detectors == nil {
-			c.Detectors = map[string]detectorOverride{}
 		}
 		c.Detectors[key] = ov
 	}
@@ -203,7 +137,6 @@ func Init(cfgDir string) error {
 	cfgMu.Lock()
 	cfg = c
 	cfgMu.Unlock()
-
 	dedup = newDeduper(c.DedupeTTL)
 	if queueCh == nil {
 		queueCh = make(chan Event, 100)
