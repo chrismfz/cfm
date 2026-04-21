@@ -46,7 +46,8 @@
           <div class="summary-card"><h4>Load result</h4><div class="value" id="notifierOverviewLoadResult">Unknown</div></div>
         </div>
         <div class="toolbar wrap">
-          <button id="notifierOverviewToggleEnabled" class="btn-quiet">Toggle enabled</button>
+          <button id="notifierOverviewToggleEnabled" class="btn-quiet">Disable notifier</button>
+          <span id="notifierOverviewToggleResult" class="pill" style="display:none"></span>
           <button id="notifierOverviewRefreshMetrics" class="btn-quiet">Refresh counters</button>
         </div>
         <div class="table-wrap">
@@ -115,6 +116,7 @@
 
   <div id="notifierDeleteConfirmModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Confirm delete</h2><p id="notifierDeleteConfirmText" class="muted"></p><div class="toolbar wrap"><button id="notifierDeleteConfirmBtn" class="btn-danger">Delete</button><button id="notifierDeleteConfirmCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
   <div id="notifierUnsavedLeaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Discard unsaved changes?</h2><p class="muted">You have unsaved edits.</p><div class="toolbar wrap"><button id="notifierUnsavedLeaveDiscardBtn" class="btn-danger">Discard and continue</button><button id="notifierUnsavedLeaveCancelBtn" class="btn-quiet">Stay</button></div></div></div>
+  <div id="notifierDisableConfirmModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Disable notifier?</h2><p class="muted">This saves the config and attempts a notifier reload immediately.</p><div class="toolbar wrap"><button id="notifierDisableConfirmBtn" class="btn-danger">Disable notifier</button><button id="notifierDisableConfirmCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
   <div id="notifierSaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Save config</h2><h3>Semantic summary</h3><pre id="notifierSaveChannelsSummary" class="diff-preview"></pre><h3>Diff preview</h3><pre id="notifierSaveDiffPreview" class="diff-preview"></pre><label><input type="checkbox" id="notifierSaveBackup" checked /> create backup</label><br /><label><input type="checkbox" id="notifierSaveReload" checked /> reload after save</label><div class="toolbar wrap"><button id="notifierSaveConfirmBtn">Confirm save</button><button id="notifierSaveCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
   <div id="notifierValidationErrorsModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Validation errors</h2><ul id="notifierValidationErrorsList" class="list-compact"></ul><div class="toolbar wrap"><button id="notifierValidationErrorsCloseBtn" class="btn-quiet">Close</button></div></div></div>
 </body>
