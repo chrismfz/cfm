@@ -32,10 +32,11 @@ type notifierHistoryItem struct {
 }
 
 type notifierHistoryResponse struct {
-	Rows       []notifierHistoryItem `json:"rows"`
-	Limit      int                   `json:"limit"`
-	HasMore    bool                  `json:"has_more"`
-	NextCursor string                `json:"next_cursor,omitempty"`
+	Rows          []notifierHistoryItem `json:"rows"`
+	Limit         int                   `json:"limit"`
+	HasMore       bool                  `json:"has_more"`
+	NextCursor    string                `json:"next_cursor,omitempty"`
+	TotalEstimate int                   `json:"total_estimate"`
 }
 
 type notifierHistoryCursor struct {
@@ -57,6 +58,10 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 
 	q := r.URL.Query()
 	limit := clampInt(q.Get("limit"), 50, 1, 500)
+	queryText := strings.TrimSpace(q.Get("q"))
+	srcIPFilter := strings.TrimSpace(q.Get("src_ip"))
+	asnFilter := strings.TrimSpace(q.Get("asn"))
+	ptrFilter := strings.TrimSpace(q.Get("ptr"))
 	kindFilter := strings.TrimSpace(q.Get("kind"))
 	channelFilter := strings.TrimSpace(q.Get("channel"))
 	statusFilter := strings.ToLower(strings.TrimSpace(q.Get("status")))
@@ -68,15 +73,35 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		return
 	}
 
-	var before *notifierHistoryCursor
-	if rawBefore := strings.TrimSpace(q.Get("before")); rawBefore != "" {
-		parsed, err := decodeNotifierHistoryCursor(rawBefore)
+	fromTime, err := parseNotifierHistoryTime(strings.TrimSpace(q.Get("from")))
+	if err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid from timestamp; expected RFC3339 or RFC3339Nano"})
+		return
+	}
+	toTime, err := parseNotifierHistoryTime(strings.TrimSpace(q.Get("to")))
+	if err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid to timestamp; expected RFC3339 or RFC3339Nano"})
+		return
+	}
+	if !fromTime.IsZero() && !toTime.IsZero() && fromTime.After(toTime) {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "from must be <= to"})
+		return
+	}
+
+	var cursor *notifierHistoryCursor
+	rawCursor := strings.TrimSpace(q.Get("cursor"))
+	if rawCursor == "" {
+		rawCursor = strings.TrimSpace(q.Get("before"))
+	}
+	if rawCursor != "" {
+		parsed, err := decodeNotifierHistoryCursor(rawCursor)
 		if err != nil {
-			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid before cursor"})
+			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid cursor"})
 			return
 		}
-		before = &parsed
+		cursor = &parsed
 	}
+
 	var since *notifierHistoryCursor
 	if rawSince := strings.TrimSpace(q.Get("since")); rawSince != "" {
 		parsed, err := decodeNotifierHistoryCursor(rawSince)
@@ -109,14 +134,31 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 
 	out := make([]notifierHistoryItem, 0, limit)
 	hasMore := false
+	totalEstimate := 0
 	for _, row := range rows {
-		if before != nil && !notifierHistoryRowIsBefore(row, *before) {
+		if cursor != nil && !notifierHistoryRowIsBefore(row, *cursor) {
 			continue
 		}
 		if since != nil && !notifierHistoryRowIsAfter(row, *since) {
 			continue
 		}
+		ts := time.Unix(0, row.TSUnixNano).UTC()
+		if !fromTime.IsZero() && ts.Before(fromTime) {
+			continue
+		}
+		if !toTime.IsZero() && ts.After(toTime) {
+			continue
+		}
 		item := rowToNotifierHistoryItem(row)
+		if srcIPFilter != "" && !strings.EqualFold(item.SrcIP, srcIPFilter) {
+			continue
+		}
+		if asnFilter != "" && !strings.EqualFold(strings.TrimSpace(toString(row.Raw["asn"])), asnFilter) {
+			continue
+		}
+		if ptrFilter != "" && !strings.EqualFold(strings.TrimSpace(toString(row.Raw["ptr"])), ptrFilter) {
+			continue
+		}
 		if kindFilter != "" && !strings.EqualFold(item.Kind, kindFilter) {
 			continue
 		}
@@ -128,6 +170,11 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		if statusFilter != "all" && item.Status != statusFilter {
 			continue
 		}
+		if queryText != "" && !notifierHistoryMatchesQuery(row.Raw, item, queryText) {
+			continue
+		}
+
+		totalEstimate++
 
 		if len(out) >= limit {
 			hasMore = true
@@ -136,7 +183,7 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		out = append(out, item)
 	}
 
-	resp := notifierHistoryResponse{Rows: out, Limit: limit, HasMore: hasMore}
+	resp := notifierHistoryResponse{Rows: out, Limit: limit, HasMore: hasMore, TotalEstimate: totalEstimate}
 	if hasMore && len(out) > 0 {
 		resp.NextCursor = out[len(out)-1].Cursor
 	}
@@ -258,6 +305,35 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func notifierHistoryMatchesQuery(raw map[string]any, item notifierHistoryItem, query string) bool {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		item.SrcIP,
+		strings.TrimSpace(toString(raw["asn"])),
+		strings.TrimSpace(toString(raw["ptr"])),
+		item.Reason,
+		item.Kind,
+	}, " "))
+	return strings.Contains(haystack, needle)
+}
+
+func parseNotifierHistoryTime(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts.UTC(), nil
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts.UTC(), nil
+	}
+	return time.Time{}, errors.New("invalid time format")
 }
 
 func notifierHistoryRowIsBefore(row notifierHistoryParsedRow, before notifierHistoryCursor) bool {
