@@ -16,6 +16,7 @@
     runtime: { loaded_at: null, reloaded_at: null, config_path: '', config_hash: '', last_load_ok: false, last_load_error: '', last_reload_error: '' },
     metricsMeta: { generated_at: '', source: '', window_start: '', window_end: '', total_rows_scanned: 0, degraded: false, warnings: [] },
     metricsUpdatedTimer: null,
+    recentActions: [],
   };
 
   const byId = (id) => document.getElementById(id);
@@ -55,6 +56,58 @@
     const el = byId('notifierStatus'); if (!el) return;
     el.textContent = msg; el.style.color = ok ? '#4ade80' : '#f87171';
   }
+  const TAB_STATUS_IDS = {
+    overview: 'notifierStatusOverview',
+    channels: 'notifierStatusChannels',
+    routing: 'notifierStatusRouting',
+    templates: 'notifierStatusTemplates',
+    test: 'notifierStatusTest',
+    history: 'notifierStatusHistory',
+  };
+
+  function clearTabStatus(tab = null) {
+    const tabs = tab ? [tab] : Object.keys(TAB_STATUS_IDS);
+    tabs.forEach((name) => {
+      const el = byId(TAB_STATUS_IDS[name]);
+      if (!el) return;
+      el.style.display = 'none';
+      el.textContent = '';
+    });
+  }
+
+  function showTabStatus(tab, msg, ok = true) {
+    const el = byId(TAB_STATUS_IDS[tab]);
+    if (!el) return showStatus(msg, ok);
+    el.style.display = '';
+    el.textContent = msg;
+    el.style.color = ok ? '#4ade80' : '#f87171';
+  }
+
+  function renderRecentActions() {
+    const list = byId('notifierRecentActionsList');
+    if (!list) return;
+    list.replaceChildren();
+    if (!state.recentActions.length) {
+      const li = document.createElement('li');
+      li.className = 'muted';
+      li.textContent = 'No actions yet.';
+      list.appendChild(li);
+      return;
+    }
+    state.recentActions.forEach((entry) => {
+      const li = document.createElement('li');
+      li.textContent = `[${entry.at}] ${entry.action}: ${entry.result}`;
+      li.className = entry.ok ? '' : 'danger-text';
+      list.appendChild(li);
+    });
+  }
+
+  function pushRecentAction(action, result, ok = true) {
+    const at = new Date().toLocaleTimeString();
+    state.recentActions.unshift({ at, action, result, ok });
+    state.recentActions = state.recentActions.slice(0, 12);
+    renderRecentActions();
+  }
 
   function syncDirty() {
     state.isDirty = !configsEqual(state.currentConfig, state.draftConfig);
@@ -75,6 +128,7 @@
       btn.classList.toggle('btn-nav-active', active);
     });
     document.querySelectorAll('.notifier-tab-panel').forEach((p) => { p.style.display = p.dataset.tab === state.tab ? '' : 'none'; });
+    clearTabStatus();
   }
 
   function renderOverview(counters = null) {
@@ -297,9 +351,13 @@
       let res;
       try { res = await request('/cfm-admin/api/v1/notifier/test', { method: 'POST', body: JSON.stringify(payloadNew) }); }
       catch (_) { res = await request('/cfm-admin/api/v1/notifier/test', { method: 'POST', body: JSON.stringify(payloadOld) }); }
-      out.textContent = JSON.stringify(res, null, 2); showStatus('Test notification sent.');
+      out.textContent = JSON.stringify(res, null, 2);
+      showTabStatus('test', 'Test notification sent.');
+      pushRecentAction('test send result', 'success', true);
     } catch (err) {
-      out.textContent = err.message; showStatus(err.message, false);
+      out.textContent = err.message;
+      showTabStatus('test', err.message, false);
+      pushRecentAction('test send result', err.message, false);
     }
   }
 
@@ -450,7 +508,8 @@
     state.currentConfig = normalizeConfig(state.draftConfig);
     byId('notifierSaveModal').style.display = 'none';
     syncDirty();
-    showStatus('Saved config and reloaded notifier.');
+    showTabStatus('overview', 'Saved config and reloaded notifier.');
+    pushRecentAction('save config', reload_after_save ? 'saved + reload requested' : 'saved', true);
     if (reload_after_save) await refreshRuntimeStatus();
     await refreshCounters();
   }
@@ -484,7 +543,21 @@
     state.draftConfig = normalizeConfig(state.currentConfig);
     renderChannels(); renderDetectors(); renderTemplateFields(); syncDirty();
     setToggleResultChip();
-    showStatus('Draft discarded.');
+    showTabStatus('overview', 'Draft discarded.');
+  }
+
+  async function restoreBackup() {
+    const id = String(byId('notifierRestoreBackupId')?.value || '').trim();
+    if (!id) {
+      showTabStatus('history', 'Backup id is required.', false);
+      return;
+    }
+    await request('/cfm-admin/api/v1/notifier/backups/restore', { method: 'POST', body: JSON.stringify({ id }) });
+    showTabStatus('history', `Backup restored: ${id}`);
+    pushRecentAction('restore backup', id, true);
+    await loadConfig();
+    await refreshRuntimeStatus();
+    await fetchHistory();
   }
 
   function openUnsavedLeave(fn) { state.pendingLeave = fn; byId('notifierUnsavedLeaveModal').style.display = 'flex'; }
@@ -516,14 +589,17 @@
       if (state.runtime.last_reload_error) {
         setToggleResultChip('reload failed', 'danger');
         showStatus(`Saved config but reload failed: ${state.runtime.last_reload_error}`, false);
+        pushRecentAction('save config', `reload failed: ${state.runtime.last_reload_error}`, false);
         return;
       }
       setToggleResultChip('reload applied');
       showStatus('Saved config and applied notifier reload.');
+      pushRecentAction('save config', 'saved + reload applied', true);
       await refreshCounters();
     } catch (err) {
       setToggleResultChip('reload failed', 'danger');
       showStatus(err.message || 'Failed to apply notifier enabled state.', false);
+      pushRecentAction('save config', err.message || 'Failed to apply notifier enabled state.', false);
     }
   }
 
@@ -546,7 +622,14 @@
 
     byId('notifierDiscardBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(discardDraft) : discardDraft()));
     byId('notifierReloadFromFileBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(() => loadConfig().catch((e) => showStatus(e.message, false))) : loadConfig().catch((e) => showStatus(e.message, false))));
-    byId('notifierReloadBtn')?.addEventListener('click', () => request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' }).then(async () => { await refreshRuntimeStatus(); showStatus('Notifier reloaded successfully.'); }).catch((e) => showStatus(e.message, false)));
+    byId('notifierReloadBtn')?.addEventListener('click', () => request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' }).then(async () => {
+      await refreshRuntimeStatus();
+      showTabStatus('overview', 'Notifier reloaded successfully.');
+      pushRecentAction('reload notifier', 'success', true);
+    }).catch((e) => {
+      showTabStatus('overview', e.message, false);
+      pushRecentAction('reload notifier', e.message, false);
+    }));
 
     byId('notifierDeleteConfirmCancelBtn')?.addEventListener('click', closeDelete);
     byId('notifierDeleteConfirmBtn')?.addEventListener('click', doDelete);
@@ -555,7 +638,7 @@
 
     byId('notifierRunTestBtn')?.addEventListener('click', () => {
       const selected = Array.from(document.querySelectorAll('#notifierTestChannels input[type="checkbox"]:checked')).map((x) => x.value);
-      if (!selected.length) return showStatus('Select at least one channel for test.', false);
+      if (!selected.length) return showTabStatus('test', 'Select at least one channel for test.', false);
       runChannelTest(selected);
     });
     byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory().catch((e) => showStatus(e.message, false)));
@@ -573,8 +656,12 @@
       closeDisableConfirm();
       applyNotifierEnabled(false).catch((e) => showStatus(e.message, false));
     });
+    byId('notifierRestoreBackupBtn')?.addEventListener('click', () => restoreBackup().catch((e) => {
+      showTabStatus('history', e.message, false);
+      pushRecentAction('restore backup', e.message, false);
+    }));
 
-    bindTemplateInputs(); renderTabs(); renderDetectorHints();
+    bindTemplateInputs(); renderTabs(); renderDetectorHints(); renderRecentActions();
     state.metricsUpdatedTimer = window.setInterval(() => setMetricsMeta(), 1000);
     loadConfig()
       .then(() => refreshRuntimeStatus())
