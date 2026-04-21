@@ -29,7 +29,10 @@
         <h2>Config</h2>
         <p class="muted">Manage notifier channels and detector overrides, then save + reload to apply.</p>
         <div class="toolbar wrap">
+          <span id="notifierDirtyBadge" class="pill">Saved</span>
           <button id="notifierRefreshBtn" class="btn-quiet">Refresh</button>
+          <button id="notifierRevertAllBtn" class="btn-quiet">Revert all</button>
+          <button id="notifierCancelBtn" class="btn-quiet">Cancel</button>
           <button id="notifierSaveBtn">Save config</button>
           <button id="notifierReloadBtn" class="btn-quiet">Reload notifier</button>
         </div>
@@ -40,6 +43,7 @@
         <h2>Channels</h2>
         <div class="toolbar wrap">
           <button id="notifierAddChannelBtn">Add channel</button>
+          <button id="notifierRevertChannelsBtn" class="btn-quiet">Revert section</button>
         </div>
         <div class="table-wrap">
           <table>
@@ -55,6 +59,7 @@
         <h2>Detector overrides</h2>
         <div class="toolbar wrap">
           <button id="notifierAddDetectorBtn">Add detector override</button>
+          <button id="notifierRevertDetectorsBtn" class="btn-quiet">Revert section</button>
         </div>
         <div class="table-wrap">
           <table>
