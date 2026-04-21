@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,7 @@ func defaultConfig() Config {
 	return Config{Notifier: Notifier{Enabled: false, DefaultCooldown: "5m", JSONLPath: "/var/lib/cfm/notify.log.jsonl"}, Dedupe: Dedupe{Key: "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}", Cooldown: "5m"}, Channels: []Channel{}, Detectors: []DetectorOverride{}, Doc: &Document{Sections: map[string]*Section{}}}
 }
 func ParseFile(path string) (Config, error) {
+	// #nosec G304 -- path is controlled by cfm config location resolution.
 	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, err
@@ -281,15 +283,20 @@ func WriteFile(path string, payload []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
+	// #nosec G304 -- lock path is derived from validated notify.conf path.
 	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	fd, err := fileFD(lf)
+	if err != nil {
 		return err
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(fd, syscall.LOCK_UN) //nolint:errcheck
 	if _, err := os.Stat(path); err == nil {
 		if err := copyFile(path, fmt.Sprintf("%s.bak-%s", path, time.Now().UTC().Format("20060102150405"))); err != nil {
 			return err
@@ -322,12 +329,21 @@ func WriteFile(path string, payload []byte) error {
 	return nil
 }
 
+func fileFD(f *os.File) (int, error) {
+	fd := f.Fd()
+	if fd > math.MaxInt {
+		return 0, fmt.Errorf("file descriptor overflow")
+	}
+	return int(fd), nil
+}
 func copyFile(src, dst string) error {
+	// #nosec G304 -- source path is computed from existing target config path.
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	// #nosec G304 -- destination backup path is derived from target config path.
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
