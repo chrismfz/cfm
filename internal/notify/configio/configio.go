@@ -19,6 +19,8 @@ type Notifier struct {
 	DefaultCooldown, JSONLPath, HostnameOverride string
 	RateLimitPerMin                              int
 	SubjectTemplate, BodyTemplate                string
+	MaxEntries                                   int
+	MaxAge                                       string
 }
 type Dedupe struct{ Key, Cooldown string }
 type Channel struct {
@@ -135,6 +137,8 @@ func parseKnown(doc *Document, cfg *Config) {
 		cfg.Notifier.RateLimitPerMin = atoiPos(m["rate_limit_per_min"])
 		cfg.Notifier.SubjectTemplate = strings.TrimSpace(m["subject_template"])
 		cfg.Notifier.BodyTemplate = strings.TrimSpace(m["body_template"])
+		cfg.Notifier.MaxEntries = atoiPos(m["max_entries"])
+		cfg.Notifier.MaxAge = strings.TrimSpace(m["max_age"])
 	}
 	if s := doc.Sections["dedupe"]; s != nil {
 		m, e := parseKV(s.Raw)
@@ -210,6 +214,10 @@ func SerializeDeterministic(cfg Config) string {
 			}
 			writeIf(&b, "subject_template", cfg.Notifier.SubjectTemplate)
 			writeIf(&b, "body_template", cfg.Notifier.BodyTemplate)
+			if cfg.Notifier.MaxEntries > 0 {
+				b.WriteString(fmt.Sprintf("max_entries = %d\n", cfg.Notifier.MaxEntries))
+			}
+			writeIf(&b, "max_age", cfg.Notifier.MaxAge)
 			appendExtras(&b, doc.Sections["notifier"])
 			rendered["notifier"] = true
 		case "dedupe":
@@ -364,7 +372,7 @@ func copyFile(src, dst string) error {
 func parseKV(lines []string) (map[string]string, []string) {
 	m := map[string]string{}
 	extras := []string{}
-	known := map[string]struct{}{"enabled": {}, "default_cooldown": {}, "jsonl_path": {}, "hostname_override": {}, "rate_limit_per_min": {}, "subject_template": {}, "body_template": {}, "key": {}, "cooldown": {}, "type": {}, "to": {}, "from": {}, "path": {}, "host": {}, "user": {}, "pass": {}, "starttls": {}, "insecure_skip_verify": {}, "webhook_url": {}, "mention": {}, "username": {}, "icon_emoji": {}, "notify": {}, "min_severity": {}, "channels": {}}
+	known := map[string]struct{}{"enabled": {}, "default_cooldown": {}, "jsonl_path": {}, "hostname_override": {}, "rate_limit_per_min": {}, "subject_template": {}, "body_template": {}, "max_entries": {}, "max_age": {}, "key": {}, "cooldown": {}, "type": {}, "to": {}, "from": {}, "path": {}, "host": {}, "user": {}, "pass": {}, "starttls": {}, "insecure_skip_verify": {}, "webhook_url": {}, "mention": {}, "username": {}, "icon_emoji": {}, "notify": {}, "min_severity": {}, "channels": {}}
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {

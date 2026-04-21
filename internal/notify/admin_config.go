@@ -26,6 +26,8 @@ type AdminNotifierConfig struct {
 	RateLimitPerMin  int    `json:"rate_limit_per_min"`
 	SubjectTemplate  string `json:"subject_template"`
 	BodyTemplate     string `json:"body_template"`
+	MaxEntries       int    `json:"max_entries"`
+	MaxAge           string `json:"max_age"`
 }
 
 type AdminDedupeConfig struct {
@@ -324,6 +326,8 @@ func defaultAdminConfig() AdminConfig {
 			Enabled:         false,
 			DefaultCooldown: "5m",
 			JSONLPath:       "/var/lib/cfm/notify.log.jsonl",
+			MaxEntries:      100000,
+			MaxAge:          "30d",
 		},
 		Dedupe: AdminDedupeConfig{
 			Key:      "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}",
@@ -344,6 +348,8 @@ func fromRaw(raw configio.Config) AdminConfig {
 		RateLimitPerMin:  raw.Notifier.RateLimitPerMin,
 		SubjectTemplate:  raw.Notifier.SubjectTemplate,
 		BodyTemplate:     raw.Notifier.BodyTemplate,
+		MaxEntries:       raw.Notifier.MaxEntries,
+		MaxAge:           raw.Notifier.MaxAge,
 	}
 	c.Dedupe = AdminDedupeConfig{Key: raw.Dedupe.Key, Cooldown: raw.Dedupe.Cooldown}
 	for _, ch := range raw.Channels {
@@ -430,6 +436,8 @@ func toRaw(c AdminConfig, doc *configio.Document) configio.Config {
 			RateLimitPerMin:  c.Notifier.RateLimitPerMin,
 			SubjectTemplate:  strings.TrimSpace(c.Notifier.SubjectTemplate),
 			BodyTemplate:     strings.TrimSpace(c.Notifier.BodyTemplate),
+			MaxEntries:       c.Notifier.MaxEntries,
+			MaxAge:           strings.TrimSpace(c.Notifier.MaxAge),
 		},
 		Dedupe: configio.Dedupe{
 			Key:      strings.TrimSpace(c.Dedupe.Key),
@@ -463,6 +471,8 @@ func applyMutations(raw *configio.Config, m AdminMutations) {
 		raw.Notifier.RateLimitPerMin = m.Notifier.RateLimitPerMin
 		raw.Notifier.SubjectTemplate = strings.TrimSpace(m.Notifier.SubjectTemplate)
 		raw.Notifier.BodyTemplate = strings.TrimSpace(m.Notifier.BodyTemplate)
+		raw.Notifier.MaxEntries = m.Notifier.MaxEntries
+		raw.Notifier.MaxAge = strings.TrimSpace(m.Notifier.MaxAge)
 	}
 	if m.Dedupe != nil {
 		raw.Dedupe.Key = strings.TrimSpace(m.Dedupe.Key)

@@ -278,8 +278,13 @@ func TestNotifierTestEndpoint(t *testing.T) {
 
 func TestNotifierStatusIncludesRuntimeMetadata(t *testing.T) {
 	dir := t.TempDir()
+	jsonl := filepath.Join(dir, "notify.log.jsonl")
+	now := time.Now().UTC()
+	if err := os.WriteFile(jsonl, []byte(`{"time":"`+now.Add(-time.Minute).Format(time.RFC3339Nano)+`","kind":"a"}`+"\n"+`{"time":"`+now.Format(time.RFC3339Nano)+`","kind":"b"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := notify.AdminConfig{
-		Notifier: notify.AdminNotifierConfig{Enabled: true},
+		Notifier: notify.AdminNotifierConfig{Enabled: true, JSONLPath: jsonl, MaxEntries: 100000, MaxAge: "30d"},
 	}
 	if _, err := notify.SaveAdminConfig(dir, cfg); err != nil {
 		t.Fatal(err)
@@ -313,6 +318,17 @@ func TestNotifierStatusIncludesRuntimeMetadata(t *testing.T) {
 	}
 	if strings.TrimSpace(toString(got["reloaded_at"])) == "" {
 		t.Fatalf("expected reloaded_at to be set after manual reload: %s", rr.Body.String())
+	}
+	retention, ok := got["retention"].(map[string]any)
+	if !ok || retention["max_entries"] == nil || retention["max_age"] == nil {
+		t.Fatalf("expected retention object in status payload: %s", rr.Body.String())
+	}
+	usage, ok := got["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected usage object in status payload: %s", rr.Body.String())
+	}
+	if int(usage["entries"].(float64)) != 2 {
+		t.Fatalf("expected usage.entries=2, got %#v", usage["entries"])
 	}
 }
 
