@@ -776,7 +776,7 @@ end
   return nil
 end
 
-local function detect_auth_burst(ip, uri, method, shdict)
+local function detect_auth_burst(ip, host, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
   local tag = auth_endpoint_tag(uri, method)
@@ -786,8 +786,11 @@ local function detect_auth_burst(ip, uri, method, shdict)
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
-  local kts  = "auth|ts|"  .. ip .. "|" .. tag
-  local kcnt = "auth|cnt|" .. ip .. "|" .. tag
+  local host_key = lower(host or "-")
+  if host_key == "" then host_key = "-" end
+
+  local kts  = "auth|ts|"  .. ip .. "|" .. host_key .. "|" .. tag
+  local kcnt = "auth|cnt|" .. ip .. "|" .. host_key .. "|" .. tag
 
   local ts  = shdict:get(kts)
   local cnt = shdict:get(kcnt) or 0
@@ -974,7 +977,7 @@ local function detect_xmlrpc_probe(uri, method, body)
   return nil
 end
 
-local function detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
+local function detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
   if not shdict or not ip or ip == "" then return nil end
 
   uri = lower(uri or "")
@@ -991,8 +994,11 @@ local function detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, 
   local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
-  local kts  = "xmlrpc|ts|"  .. ip
-  local kcnt = "xmlrpc|cnt|" .. ip
+  local host_key = lower(host or "-")
+  if host_key == "" then host_key = "-" end
+
+  local kts  = "xmlrpc|ts|"  .. ip .. "|" .. host_key
+  local kcnt = "xmlrpc|cnt|" .. ip .. "|" .. host_key
 
   local ts  = shdict:get(kts)
   local cnt = shdict:get(kcnt) or 0
@@ -2219,7 +2225,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
-      local tag = detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
+      local tag = detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
@@ -2236,7 +2242,7 @@ function _M.check(ctx)
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = nil
         if not is_known_legit_xmlrpc(uri, args, headers, body) then
-          tag = detect_auth_burst(ip, uri, method, shdict)
+          tag = detect_auth_burst(ip, host, uri, method, shdict)
         end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
