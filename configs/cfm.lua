@@ -134,7 +134,7 @@ end
 
 local _SELF_IPS_FILE = "/var/lib/cfm/lua/cfm_self_ips.lua"
 local _SELF_IPS_TTL_SEC = tonumber(os.getenv("CFM_SELF_IPS_TTL_SEC") or "30")
-local _self_ip_cache = { expires_at = 0, map = {} }
+local _self_ip_cache = { expires_at = 0, map = {}, generated_at = "" }
 
 local function normalize_ip(raw)
   local ip = tostring(raw or "")
@@ -165,41 +165,40 @@ local function load_self_ip_cache(force)
   end
 
   local map = {}
-  local chunk, load_err = loadfile(_SELF_IPS_FILE)
-  if not chunk then
+  local generated_at = ""
+  local ok_load, chunk_or_err = pcall(loadfile, _SELF_IPS_FILE)
+  if not ok_load then
+    ngx.log(ngx.WARN, "[cfm] self-ip loadfile panic ", _SELF_IPS_FILE, ": ", tostring(chunk_or_err))
+  elseif not chunk_or_err then
     if CFG.debug then
-      log_route(ngx.NOTICE, "self-ip cache unavailable file=" .. _SELF_IPS_FILE .. " err=" .. tostring(load_err))
+      log_route(ngx.NOTICE, "self-ip cache unavailable file=" .. _SELF_IPS_FILE)
     end
   else
-    local ok, val = pcall(chunk)
-    if ok and type(val) == "table" then
-      for k, v in pairs(val) do
-        if type(k) == "string" then
-          local nk = normalize_ip(k)
-          if nk ~= "" then map[nk] = true end
-        end
-        if type(v) == "string" then
-          local nv = normalize_ip(v)
-          if nv ~= "" then map[nv] = true end
-        elseif type(v) == "table" then
-          local nested = v.ip or v.addr or v.address
-          if type(nested) == "string" then
-            local nn = normalize_ip(nested)
-            if nn ~= "" then map[nn] = true end
+    local ok_run, val = pcall(chunk_or_err)
+    if ok_run and type(val) == "table" then
+      generated_at = tostring(val.generated_at or "")
+      if type(val.ips) == "table" then
+        for k, v in pairs(val.ips) do
+          if v then
+            local nk = normalize_ip(k)
+            if nk ~= "" then map[nk] = true end
           end
         end
+      else
+        ngx.log(ngx.WARN, "[cfm] invalid self-ip cache payload (missing ips table): ", _SELF_IPS_FILE)
       end
     else
-      ngx.log(ngx.WARN, "[cfm] invalid self-ip cache file ", _SELF_IPS_FILE, ": ", tostring(ok and "non-table value" or val))
+      ngx.log(ngx.WARN, "[cfm] invalid self-ip cache file ", _SELF_IPS_FILE, ": ", tostring(ok_run and "non-table value" or val))
     end
   end
 
   _self_ip_cache.map = map
+  _self_ip_cache.generated_at = generated_at
   _self_ip_cache.expires_at = now + _SELF_IPS_TTL_SEC
   return map
 end
 
-local function is_self_ip(ip)
+local function is_self_origin(ip)
   local nip = normalize_ip(ip)
   if nip == "" then return false end
   if is_loopback_or_linklocal(nip) then return true end
@@ -740,7 +739,7 @@ end
 -- ── Step 0a: Local-origin hard bypass ────────────────────────────────────────
 do
   local p = peer_ip; local has_cf = cf_ip ~= ""; local srv = ngx.var.server_addr or ""
-  if is_self_ip(ip) then
+  if is_self_origin(ip) then
     ngx.header["X-CFM-Bypass"] = "self_ip"
     log_route(ngx.INFO, "bypass=self_ip ip=" .. tostring(ip) .. " peer=" .. tostring(peer_ip) .. " host=" .. host)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
@@ -789,11 +788,12 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
   else
     local req_headers = ngx.req.get_headers()
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
+    local self_origin = is_self_origin(ip)
     local hit, reason, ttl, waf_action = waf.check({
       uri = uri, args = ngx.var.args or "", method = method,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
-      headers = req_headers, body = req_body,
+      headers = req_headers, body = req_body, self_origin = self_origin,
     })
     if clamav_ok then clamav.notify(ip, hit and reason or nil) end
     if hit then
