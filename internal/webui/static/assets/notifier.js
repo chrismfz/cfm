@@ -12,7 +12,8 @@
     currentConfig: { notifier: {}, dedupe: {}, channels: [], detectors: {} },
     draftConfig: { notifier: {}, dedupe: {}, channels: [], detectors: {} },
     path: '', isDirty: false, pendingDelete: null, pendingLeave: null,
-    tab: 'overview', lastReloadAt: null, historyRows: [], detectorHints: ['*'],
+    tab: 'overview', historyRows: [], detectorHints: ['*'],
+    runtime: { loaded_at: null, reloaded_at: null, config_path: '', config_hash: '', last_load_ok: false, last_load_error: '', last_reload_error: '' },
   };
 
   const byId = (id) => document.getElementById(id);
@@ -76,8 +77,17 @@
 
   function renderOverview(counters = null) {
     byId('notifierOverviewEnabled').textContent = state.draftConfig.notifier.enabled === false ? 'Disabled' : 'Enabled';
-    byId('notifierOverviewLastReload').textContent = state.lastReloadAt || 'Never';
-    byId('notifierOverviewPath').textContent = state.path || '-';
+    const loadedAt = state.runtime.loaded_at || '';
+    byId('notifierOverviewLoadedAt').textContent = loadedAt || '-';
+    if (state.runtime.reloaded_at) {
+      byId('notifierOverviewLastReload').textContent = state.runtime.reloaded_at;
+    } else if (loadedAt) {
+      byId('notifierOverviewLastReload').textContent = `Not manually reloaded yet (loaded at ${loadedAt})`;
+    } else {
+      byId('notifierOverviewLastReload').textContent = 'Not manually reloaded yet';
+    }
+    byId('notifierOverviewPath').textContent = state.runtime.config_path || state.path || '-';
+    byId('notifierOverviewLoadResult').textContent = state.runtime.last_reload_error || (state.runtime.last_load_ok ? 'OK' : (state.runtime.last_load_error || 'Unknown'));
     const body = byId('notifierOverviewCountersBody');
     if (!body || !counters) return;
     body.replaceChildren();
@@ -358,7 +368,7 @@
     byId('notifierSaveModal').style.display = 'none';
     syncDirty();
     showStatus('Saved config and reloaded notifier.');
-    if (reload_after_save) state.lastReloadAt = new Date().toISOString();
+    if (reload_after_save) await refreshRuntimeStatus();
     await refreshCounters();
   }
 
@@ -370,6 +380,20 @@
     renderOverview();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
     await refreshCounters();
+  }
+
+  async function refreshRuntimeStatus() {
+    const status = await request('/cfm-admin/api/v1/notifier/status');
+    state.runtime = {
+      loaded_at: status.loaded_at || null,
+      reloaded_at: status.reloaded_at || null,
+      config_path: status.config_path || '',
+      config_hash: status.config_hash || '',
+      last_load_ok: status.last_load_ok !== false,
+      last_load_error: status.last_load_error || '',
+      last_reload_error: status.last_reload_error || '',
+    };
+    renderOverview();
   }
 
   function discardDraft() {
@@ -401,7 +425,7 @@
 
     byId('notifierDiscardBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(discardDraft) : discardDraft()));
     byId('notifierReloadFromFileBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(() => loadConfig().catch((e) => showStatus(e.message, false))) : loadConfig().catch((e) => showStatus(e.message, false))));
-    byId('notifierReloadBtn')?.addEventListener('click', () => request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' }).then(() => { state.lastReloadAt = new Date().toISOString(); renderOverview(); showStatus('Notifier reloaded successfully.'); }).catch((e) => showStatus(e.message, false)));
+    byId('notifierReloadBtn')?.addEventListener('click', () => request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' }).then(async () => { await refreshRuntimeStatus(); showStatus('Notifier reloaded successfully.'); }).catch((e) => showStatus(e.message, false)));
 
     byId('notifierDeleteConfirmCancelBtn')?.addEventListener('click', closeDelete);
     byId('notifierDeleteConfirmBtn')?.addEventListener('click', doDelete);
@@ -418,7 +442,9 @@
     byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => { state.draftConfig.notifier.enabled = state.draftConfig.notifier.enabled === false; syncDirty(); renderOverview(); });
 
     bindTemplateInputs(); renderTabs(); renderDetectorHints();
-    loadConfig().catch((err) => showStatus(err.message || 'Failed to load config.', false));
+    loadConfig()
+      .then(() => refreshRuntimeStatus())
+      .catch((err) => showStatus(err.message || 'Failed to load config.', false));
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();

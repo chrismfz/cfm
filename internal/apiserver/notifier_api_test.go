@@ -275,6 +275,46 @@ func TestNotifierTestEndpoint(t *testing.T) {
 	}
 }
 
+func TestNotifierStatusIncludesRuntimeMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cfg := notify.AdminConfig{
+		Notifier: notify.AdminNotifierConfig{Enabled: true},
+	}
+	if _, err := notify.SaveAdminConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.Init(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.Reload(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/status", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status endpoint code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode status payload: %v", err)
+	}
+	for _, key := range []string{"loaded_at", "config_path", "last_load_ok"} {
+		if strings.TrimSpace(toString(got[key])) == "" && key != "last_load_ok" {
+			t.Fatalf("expected %s in status payload: %s", key, rr.Body.String())
+		}
+	}
+	if got["last_load_ok"] != true {
+		t.Fatalf("expected last_load_ok=true, got %v", got["last_load_ok"])
+	}
+	if strings.TrimSpace(toString(got["reloaded_at"])) == "" {
+		t.Fatalf("expected reloaded_at to be set after manual reload: %s", rr.Body.String())
+	}
+}
+
 func TestNotifierMetricsEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	jsonl := filepath.Join(dir, "notify.log.jsonl")
