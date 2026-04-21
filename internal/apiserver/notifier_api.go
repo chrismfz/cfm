@@ -37,6 +37,15 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/notifier/preview", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierPreview(w, r, cfgDir)
 	})))
+	m.Handle("/api/v1/notifier/backups", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierBackups(w, r, cfgDir)
+	})))
+	m.Handle("/api/v1/notifier/backups/diff", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierBackupDiff(w, r, cfgDir)
+	})))
+	m.Handle("/api/v1/notifier/backups/restore", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierBackupRestore(w, r, cfgDir)
+	})))
 }
 
 func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
@@ -67,7 +76,7 @@ func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string)
 				writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
-			path, err := notify.SaveAdminConfigMutations(cfgDir, notify.AdminMutations{
+			path, backupID, err := notify.SaveAdminConfigMutationsWithBackup(cfgDir, notify.AdminMutations{
 				Notifier:            req.Notifier,
 				Dedupe:              req.Dedupe,
 				Channels:            req.ChannelMutations,
@@ -79,19 +88,19 @@ func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string)
 				writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
-			writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
+			writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "backup_id": backupID})
 			return
 		}
 		if err := validateNotifierConfig(req.Config); err != nil {
 			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		path, err := notify.SaveAdminConfig(cfgDir, req.Config)
+		path, backupID, err := notify.SaveAdminConfigWithBackup(cfgDir, req.Config)
 		if err != nil {
 			writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
+		writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "backup_id": backupID})
 	default:
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 	}
@@ -398,4 +407,78 @@ func unifiedTextDiff(fileName, before, after string) string {
 		j++
 	}
 	return out.String()
+}
+
+func handleNotifierBackups(w http.ResponseWriter, r *http.Request, cfgDir string) {
+	if r.Method != http.MethodGet {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	backups, err := notify.ListAdminConfigBackups(cfgDir)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{"backups": backups})
+}
+
+func handleNotifierBackupDiff(w http.ResponseWriter, r *http.Request, cfgDir string) {
+	if r.Method != http.MethodGet {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "backup id is required"})
+		return
+	}
+	backupText, err := notify.ReadAdminConfigBackup(cfgDir, id)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	currentCfg, _, err := notify.LoadAdminConfig(cfgDir)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	currentText, err := notify.RenderAdminConfig(cfgDir, currentCfg)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"id":   id,
+		"diff": unifiedTextDiff("notify.conf", backupText, currentText),
+	})
+}
+
+func handleNotifierBackupRestore(w http.ResponseWriter, r *http.Request, cfgDir string) {
+	if r.Method != http.MethodPost {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	path, restoreBackupID, err := notify.RestoreAdminConfigBackup(cfgDir, req.ID)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := notify.Reload(cfgDir); err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"path":              path,
+		"restored_id":       strings.TrimSpace(req.ID),
+		"backup_id":         restoreBackupID,
+		"reloaded_notifier": true,
+	})
 }

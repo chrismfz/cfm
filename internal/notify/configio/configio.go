@@ -279,54 +279,57 @@ func SerializeDeterministic(cfg Config) string {
 	return strings.TrimSpace(b.String()) + "\n"
 }
 
-func WriteFile(path string, payload []byte) error {
+func WriteFile(path string, payload []byte) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
+		return "", err
 	}
 	// #nosec G304 -- lock path is derived from validated notify.conf path.
 	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer lf.Close()
 	fd, err := fileFD(lf)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
-		return err
+		return "", err
 	}
 	defer syscall.Flock(fd, syscall.LOCK_UN) //nolint:errcheck
+	backupPath := ""
 	if _, err := os.Stat(path); err == nil {
-		if err := copyFile(path, fmt.Sprintf("%s.bak-%s", path, time.Now().UTC().Format("20060102150405"))); err != nil {
-			return err
+		stamp := strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+		backupPath = fmt.Sprintf("%s.bak-%s", path, stamp)
+		if err := copyFile(path, backupPath); err != nil {
+			return "", err
 		}
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(payload); err != nil {
 		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		return "", err
 	}
 	if d, err := os.Open(filepath.Dir(path)); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-	return nil
+	return backupPath, nil
 }
 
 func fileFD(f *os.File) (int, error) {

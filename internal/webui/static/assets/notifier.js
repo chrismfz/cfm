@@ -33,6 +33,8 @@
     historyPage: 0,
     historyHasMore: false,
     historyNextCursor: '',
+    backups: [],
+    activeBackupID: '',
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -42,6 +44,16 @@
     if (!el) return;
     el.textContent = msg;
     el.style.color = ok ? '#4ade80' : '#f87171';
+  }
+
+  let toastTimer = null;
+  function showToast(msg, ms = 4500) {
+    const el = byId('notifierToast');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
   }
 
   function syncDirtyState() {
@@ -74,6 +86,7 @@
       path: payload.path || '',
     };
     render();
+    await loadBackups();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
   }
 
@@ -84,6 +97,8 @@
     });
     state.currentConfig = normalizeConfig(cloneConfig(state.draftConfig));
     syncDirtyState();
+    await loadBackups();
+    showToast(`Saved + backup created (${payload.backup_id || 'n/a'})`);
     showStatus(`Config saved to ${payload.path || state.path}.`);
   }
 
@@ -111,6 +126,33 @@
   async function reloadNotifier() {
     await request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' });
     showStatus('Notifier reloaded successfully.');
+  }
+
+  async function loadBackups() {
+    const payload = await request('/cfm-admin/api/v1/notifier/backups');
+    state.backups = Array.isArray(payload.backups) ? payload.backups : [];
+    renderBackups();
+  }
+
+  async function previewBackupDiff(backupID) {
+    const q = new URLSearchParams({ id: backupID });
+    const payload = await request(`/cfm-admin/api/v1/notifier/backups/diff?${q.toString()}`);
+    state.activeBackupID = backupID;
+    const box = byId('notifierBackupDiffPreview');
+    if (box) box.textContent = payload.diff || '(No diff)';
+    const modal = byId('notifierBackupDiffModal');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async function restoreBackup(backupID) {
+    const payload = await request('/cfm-admin/api/v1/notifier/backups/restore', {
+      method: 'POST',
+      body: JSON.stringify({ id: backupID }),
+    });
+    closeBackupDiffModal();
+    await loadConfig();
+    showToast(`Backup restored (${payload.restored_id || backupID}), notifier reloaded`);
+    showStatus(`Restored backup ${backupID} and reloaded notifier.`);
   }
 
   function parseSampleInput() {
@@ -209,6 +251,33 @@
     renderHistory();
     applyTabVisibility();
     syncDirtyState();
+    renderBackups();
+  }
+
+  function renderBackups() {
+    const body = byId('notifierBackupsBody');
+    if (!body) return;
+    body.replaceChildren();
+    for (const b of state.backups || []) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><code>${b.id || '-'}</code></td>
+        <td>${b.created || '-'}</td>
+        <td>${b.size ?? '-'}</td>
+        <td class="actions-cell"></td>
+      `;
+      const actions = tr.querySelector('.actions-cell');
+      const preview = document.createElement('button');
+      preview.className = 'btn-quiet btn-sm';
+      preview.textContent = 'Preview diff';
+      preview.onclick = () => previewBackupDiff(String(b.id || '')).catch((e) => showStatus(e.message, false));
+      const restore = document.createElement('button');
+      restore.className = 'btn-danger btn-sm';
+      restore.textContent = 'Restore';
+      restore.onclick = () => restoreBackup(String(b.id || '')).catch((e) => showStatus(e.message, false));
+      actions.append(preview, restore);
+      body.appendChild(tr);
+    }
   }
 
   function renderTests() {
@@ -552,6 +621,11 @@
     if (modal) modal.style.display = 'none';
   }
 
+  function closeBackupDiffModal() {
+    const modal = byId('notifierBackupDiffModal');
+    if (modal) modal.style.display = 'none';
+  }
+
   function init() {
     window.addEventListener('beforeunload', (evt) => {
       if (!state.isDirty) return;
@@ -581,6 +655,12 @@
     byId('notifierHistoryApplyBtn')?.addEventListener('click', historyApplyFilters);
     byId('notifierHistoryNextBtn')?.addEventListener('click', historyNextPage);
     byId('notifierHistoryPrevBtn')?.addEventListener('click', historyPrevPage);
+    byId('notifierBackupsRefreshBtn')?.addEventListener('click', () => loadBackups().catch((e) => showStatus(e.message, false)));
+    byId('notifierBackupDiffCloseBtn')?.addEventListener('click', closeBackupDiffModal);
+    byId('notifierBackupRestoreBtn')?.addEventListener('click', () => {
+      if (!state.activeBackupID) return;
+      restoreBackup(state.activeBackupID).catch((e) => showStatus(e.message, false));
+    });
     loadConfig().catch((e) => showStatus(e.message || 'Failed to load notifier config.', false));
   }
 

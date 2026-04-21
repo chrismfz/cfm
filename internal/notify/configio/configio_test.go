@@ -41,7 +41,7 @@ func TestWriteFileCreatesBackup(t *testing.T) {
 	if err := os.WriteFile(p, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFile(p, []byte("new\n")); err != nil {
+	if _, err := WriteFile(p, []byte("new\n")); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)

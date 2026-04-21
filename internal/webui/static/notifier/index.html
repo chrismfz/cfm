@@ -71,6 +71,22 @@
         </div>
       </section>
 
+      <section class="card wide" data-notifier-tab="config">
+        <h2>Backups</h2>
+        <p class="muted">Timestamped <code>notify.conf</code> backups created on save.</p>
+        <div class="toolbar wrap">
+          <button id="notifierBackupsRefreshBtn" class="btn-quiet">Refresh backups</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Backup ID</th><th>Created</th><th>Size</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="notifierBackupsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card wide" data-notifier-tab="tests" style="display:none">
         <h2>Tests</h2>
         <p class="muted">Send a synthetic notifier event directly to a specific channel.</p>
@@ -149,5 +165,17 @@
       </div>
     </div>
   </div>
+  <div id="notifierBackupDiffModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierBackupDiffTitle">
+    <div class="modal-card">
+      <h2 id="notifierBackupDiffTitle">Backup diff</h2>
+      <p class="muted">Diff against current <code>notify.conf</code>.</p>
+      <pre id="notifierBackupDiffPreview" class="diff-preview"></pre>
+      <div class="toolbar wrap">
+        <button id="notifierBackupRestoreBtn" class="btn-danger">Restore this backup</button>
+        <button id="notifierBackupDiffCloseBtn" class="btn-quiet">Close</button>
+      </div>
+    </div>
+  </div>
+  <div id="notifierToast" style="display:none"></div>
 </body>
 </html>
