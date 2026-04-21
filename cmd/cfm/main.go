@@ -35,6 +35,7 @@ import (
 	"cfm/internal/detectors/mysql"
 	"cfm/internal/dnat"
 	"cfm/internal/sslcollector"
+	"cfm/internal/traffic"
 	webdet "cfm/internal/webdetector"
 
 	"cfm/internal/clam"
@@ -231,6 +232,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "mysqltop error:", err)
 			os.Exit(1)
 		}
+	case "traffic":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := traffic.RunCLI(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "traffic error:", err)
+			os.Exit(1)
+		}
 
 	case "clam", "clamd", "clamav":
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
@@ -272,6 +280,7 @@ Usage:
 
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm mysqltop -- MySQL Live stats
+  cfm traffic [live|summary|top|conn|--json] -- system traffic telemetry
 
   cfm clam ping
   cfm clam version
