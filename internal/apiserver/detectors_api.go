@@ -271,21 +271,32 @@ func handleDetectorsLive(w http.ResponseWriter, r *http.Request, cfgDir string) 
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	file := strings.TrimSpace(r.URL.Query().Get("file"))
-	live := false
-	if file != "" {
-		safePath, err := resolveSafeDetectorPath(file, cfgDir)
-		if err != nil {
-			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+	requestedFile := strings.TrimSpace(r.URL.Query().Get("file"))
+	candidates := configuredDetectorFiles(cfgDir)
+	if requestedFile != "" {
+		filtered := make([]string, 0, 1)
+		for _, c := range candidates {
+			if samePath(c, requestedFile) {
+				filtered = append(filtered, c)
+				break
+			}
+		}
+		if len(filtered) == 0 {
+			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not configured in detectors.conf"})
 			return
 		}
-		// #nosec G304 -- safePath is canonicalized and constrained by resolveSafeDetectorPath.
-		if st, err := os.Stat(safePath); err == nil && st.Size() > 0 {
-			live = true
-		}
-		file = safePath
+		candidates = filtered
 	}
-	writeNotifierJSON(w, http.StatusOK, map[string]any{"live": live, "file": file})
+	live := false
+	liveFile := ""
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && st.Size() > 0 {
+			live = true
+			liveFile = c
+			break
+		}
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{"live": live, "file": liveFile, "candidates": candidates})
 }
 
 func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
@@ -323,4 +334,30 @@ func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
 		}
 	}
 	return "", os.ErrPermission
+}
+
+func configuredDetectorFiles(cfgDir string) []string {
+	cfg, _, err := detectorscfg.LoadAdminConfig(cfgDir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Core))
+	for _, sec := range cfg.Core {
+		p := strings.TrimSpace(sec.Keys["LOG_PATH"])
+		if p == "" {
+			continue
+		}
+		safe, err := resolveSafeDetectorPath(p, cfgDir)
+		if err != nil {
+			continue
+		}
+		out = append(out, safe)
+	}
+	return out
+}
+
+func samePath(a, b string) bool {
+	ac := filepath.Clean(strings.TrimSpace(a))
+	bc := filepath.Clean(strings.TrimSpace(b))
+	return ac == bc
 }
