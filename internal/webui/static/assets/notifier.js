@@ -76,7 +76,10 @@
   }
 
   function renderOverview(counters = null) {
+    const enabled = state.draftConfig.notifier.enabled !== false;
     byId('notifierOverviewEnabled').textContent = state.draftConfig.notifier.enabled === false ? 'Disabled' : 'Enabled';
+    const toggleBtn = byId('notifierOverviewToggleEnabled');
+    if (toggleBtn) toggleBtn.textContent = enabled ? 'Disable notifier' : 'Enable notifier';
     const loadedAt = state.runtime.loaded_at || '';
     byId('notifierOverviewLoadedAt').textContent = loadedAt || '-';
     if (state.runtime.reloaded_at) {
@@ -97,6 +100,20 @@
       tr.innerHTML = `<td>${channel}</td><td>${c.h1.attempts}</td><td>${c.h1.success}</td><td>${c.h1.fail}</td><td>${c.h24.attempts}</td><td>${c.h24.success}</td><td>${c.h24.fail}</td>`;
       body.appendChild(tr);
     });
+  }
+
+  function setToggleResultChip(text = '', type = 'default') {
+    const chip = byId('notifierOverviewToggleResult');
+    if (!chip) return;
+    if (!text) {
+      chip.style.display = 'none';
+      chip.textContent = '';
+      chip.className = 'pill';
+      return;
+    }
+    chip.style.display = '';
+    chip.textContent = text;
+    chip.className = type === 'warn' ? 'pill warn' : (type === 'danger' ? 'pill danger' : 'pill');
   }
 
   function addChannel() {
@@ -378,6 +395,7 @@
     state.currentConfig = cfg; state.draftConfig = normalizeConfig(cfg); state.path = payload.path || '';
     renderChannels(); renderDetectors(); renderTemplateFields(); renderTestChannels(); syncDirty();
     renderOverview();
+    setToggleResultChip();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
     await refreshCounters();
   }
@@ -399,12 +417,49 @@
   function discardDraft() {
     state.draftConfig = normalizeConfig(state.currentConfig);
     renderChannels(); renderDetectors(); renderTemplateFields(); syncDirty();
+    setToggleResultChip();
     showStatus('Draft discarded.');
   }
 
   function openUnsavedLeave(fn) { state.pendingLeave = fn; byId('notifierUnsavedLeaveModal').style.display = 'flex'; }
   function closeUnsavedLeave() { state.pendingLeave = null; byId('notifierUnsavedLeaveModal').style.display = 'none'; }
   function runPendingLeave() { const fn = state.pendingLeave; closeUnsavedLeave(); if (typeof fn === 'function') fn(); }
+  function openDisableConfirm() { byId('notifierDisableConfirmModal').style.display = 'flex'; }
+  function closeDisableConfirm() { byId('notifierDisableConfirmModal').style.display = 'none'; }
+
+  async function applyNotifierEnabled(targetEnabled) {
+    const currentEnabled = state.draftConfig.notifier.enabled !== false;
+    if (currentEnabled === targetEnabled) {
+      renderOverview();
+      showStatus(targetEnabled ? 'Notifier is already enabled.' : 'Notifier is already disabled.');
+      return;
+    }
+    state.draftConfig.notifier.enabled = targetEnabled;
+    syncDirty();
+    renderOverview();
+    setToggleResultChip('pending save', 'warn');
+    try {
+      await request('/cfm-admin/api/v1/notifier/save', {
+        method: 'POST',
+        body: JSON.stringify({ draft: state.draftConfig, options: { create_backup: true, reload_after_save: true } }),
+      });
+      state.currentConfig = normalizeConfig(state.draftConfig);
+      syncDirty();
+      setToggleResultChip('saved to file');
+      await refreshRuntimeStatus();
+      if (state.runtime.last_reload_error) {
+        setToggleResultChip('reload failed', 'danger');
+        showStatus(`Saved config but reload failed: ${state.runtime.last_reload_error}`, false);
+        return;
+      }
+      setToggleResultChip('reload applied');
+      showStatus('Saved config and applied notifier reload.');
+      await refreshCounters();
+    } catch (err) {
+      setToggleResultChip('reload failed', 'danger');
+      showStatus(err.message || 'Failed to apply notifier enabled state.', false);
+    }
+  }
 
   function bindTemplateInputs() {
     [['notifierSubjectTemplate', 'subject_template', 'notifier'], ['notifierBodyTemplate', 'body_template', 'notifier'], ['notifierDedupeKey', 'key', 'dedupe'], ['notifierDedupeCooldown', 'cooldown', 'dedupe'], ['notifierDefaultCooldown', 'default_cooldown', 'notifier']].forEach(([id, key, root]) => {
@@ -439,7 +494,19 @@
     });
     byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory().catch((e) => showStatus(e.message, false)));
     byId('notifierOverviewRefreshMetrics')?.addEventListener('click', () => refreshCounters().catch((e) => showStatus(e.message, false)));
-    byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => { state.draftConfig.notifier.enabled = state.draftConfig.notifier.enabled === false; syncDirty(); renderOverview(); });
+    byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => {
+      const currentEnabled = state.draftConfig.notifier.enabled !== false;
+      if (currentEnabled) {
+        openDisableConfirm();
+        return;
+      }
+      applyNotifierEnabled(true).catch((e) => showStatus(e.message, false));
+    });
+    byId('notifierDisableConfirmCancelBtn')?.addEventListener('click', closeDisableConfirm);
+    byId('notifierDisableConfirmBtn')?.addEventListener('click', () => {
+      closeDisableConfirm();
+      applyNotifierEnabled(false).catch((e) => showStatus(e.message, false));
+    });
 
     bindTemplateInputs(); renderTabs(); renderDetectorHints();
     loadConfig()
