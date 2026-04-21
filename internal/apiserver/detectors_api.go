@@ -258,6 +258,7 @@ func handleDetectorsTest(w http.ResponseWriter, r *http.Request, cfgDir string) 
 			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		// #nosec G304 -- safePath is canonicalized and constrained by resolveSafeDetectorPath.
 		_, err = os.Stat(safePath)
 		ok = err == nil
 		req.File = safePath
@@ -278,6 +279,7 @@ func handleDetectorsLive(w http.ResponseWriter, r *http.Request, cfgDir string) 
 			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		// #nosec G304 -- safePath is canonicalized and constrained by resolveSafeDetectorPath.
 		if st, err := os.Stat(safePath); err == nil && st.Size() > 0 {
 			live = true
 		}
@@ -289,7 +291,7 @@ func handleDetectorsLive(w http.ResponseWriter, r *http.Request, cfgDir string) 
 func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
 	p := strings.TrimSpace(rawPath)
 	if p == "" {
-		return "", http.ErrMissingFile
+		return "", os.ErrInvalid
 	}
 	allowedRoots := []string{"/var/log", "/var/lib", "/etc/cfm"}
 	if cfgDir != "" {
@@ -299,13 +301,25 @@ func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	canonicalTarget := absTarget
+	if evalTarget, err := filepath.EvalSymlinks(absTarget); err == nil {
+		canonicalTarget = evalTarget
+	}
 	for _, root := range allowedRoots {
-		absRoot, err := filepath.Abs(root)
+		absRoot, err := filepath.Abs(filepath.Clean(root))
 		if err != nil {
 			continue
 		}
-		if absTarget == absRoot || strings.HasPrefix(absTarget, absRoot+string(os.PathSeparator)) {
-			return absTarget, nil
+		canonicalRoot := absRoot
+		if evalRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
+			canonicalRoot = evalRoot
+		}
+		rel, err := filepath.Rel(canonicalRoot, canonicalTarget)
+		if err != nil {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)) {
+			return canonicalTarget, nil
 		}
 	}
 	return "", os.ErrPermission
