@@ -386,6 +386,58 @@ func TestNotifierValidateEndpointAcceptsValidDraft(t *testing.T) {
 	}
 }
 
+func TestNotifierPreviewEndpointReturnsUnifiedDiff(t *testing.T) {
+	dir := t.TempDir()
+	initial := notify.AdminConfig{
+		Notifier: notify.AdminNotifierConfig{Enabled: true, DefaultCooldown: "5m"},
+		Channels: []notify.AdminChannelConfig{
+			{ID: "ops", Type: "slack", Enabled: true, WebhookURL: "https://example.test/old"},
+		},
+	}
+	if _, err := notify.SaveAdminConfig(dir, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	body := map[string]any{
+		"config": map[string]any{
+			"notifier": map[string]any{
+				"enabled":          true,
+				"default_cooldown": "3m",
+			},
+			"dedupe": map[string]any{
+				"key":      "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}",
+				"cooldown": "5m",
+			},
+			"channels": []map[string]any{
+				{"id": "ops", "type": "slack", "enabled": true, "webhook_url": "https://example.test/new"},
+			},
+			"detectors": map[string]any{},
+		},
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/preview", bytes.NewReader(buf))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Diff string `json:"diff"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(payload.Diff, "--- notify.conf") || !strings.Contains(payload.Diff, "+++ notify.conf") {
+		t.Fatalf("expected unified diff header, got: %s", payload.Diff)
+	}
+	if !strings.Contains(payload.Diff, "-default_cooldown = 5m") || !strings.Contains(payload.Diff, "+default_cooldown = 3m") {
+		t.Fatalf("expected changed notifier line in diff, got: %s", payload.Diff)
+	}
+}
+
 func TestNotifierHistoryEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	jsonl := filepath.Join(dir, "notify.log.jsonl")

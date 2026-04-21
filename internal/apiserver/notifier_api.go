@@ -34,6 +34,9 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/notifier/validate", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierValidate(w, r)
 	})))
+	m.Handle("/api/v1/notifier/preview", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierPreview(w, r, cfgDir)
+	})))
 }
 
 func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
@@ -311,4 +314,88 @@ func validateNotifierConfig(c notify.AdminConfig) error {
 		}
 	}
 	return nil
+}
+
+func handleNotifierPreview(w http.ResponseWriter, r *http.Request, cfgDir string) {
+	if r.Method != http.MethodPost {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Config notify.AdminConfig `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	currentCfg, _, err := notify.LoadAdminConfig(cfgDir)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	currentText, err := notify.RenderAdminConfig(cfgDir, currentCfg)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	draftText, err := notify.RenderAdminConfig(cfgDir, req.Config)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"diff": unifiedTextDiff("notify.conf", currentText, draftText),
+	})
+}
+
+func unifiedTextDiff(fileName, before, after string) string {
+	if before == after {
+		return "--- " + fileName + "\n+++ " + fileName + "\n@@ -1,0 +1,0 @@\n"
+	}
+	a := strings.Split(strings.TrimSuffix(before, "\n"), "\n")
+	b := strings.Split(strings.TrimSuffix(after, "\n"), "\n")
+	dp := make([][]int, len(a)+1)
+	for i := range dp {
+		dp[i] = make([]int, len(b)+1)
+	}
+	for i := len(a) - 1; i >= 0; i-- {
+		for j := len(b) - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	var out strings.Builder
+	out.WriteString("--- " + fileName + "\n")
+	out.WriteString("+++ " + fileName + "\n")
+	out.WriteString("@@ -1," + strconv.Itoa(len(a)) + " +1," + strconv.Itoa(len(b)) + " @@\n")
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i] == b[j] {
+			out.WriteString(" " + a[i] + "\n")
+			i++
+			j++
+			continue
+		}
+		if dp[i+1][j] >= dp[i][j+1] {
+			out.WriteString("-" + a[i] + "\n")
+			i++
+		} else {
+			out.WriteString("+" + b[j] + "\n")
+			j++
+		}
+	}
+	for i < len(a) {
+		out.WriteString("-" + a[i] + "\n")
+		i++
+	}
+	for j < len(b) {
+		out.WriteString("+" + b[j] + "\n")
+		j++
+	}
+	return out.String()
 }
