@@ -29,7 +29,7 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 		handleNotifierMetrics(w, r, cfgDir)
 	})))
 	m.Handle("/api/v1/notifier/status", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleNotifierStatus(w, r)
+		handleNotifierStatus(w, r, cfgDir)
 	})))
 	m.Handle("/api/v1/notifier/history", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierHistory(w, r, cfgDir)
@@ -181,12 +181,40 @@ func handleNotifierTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleNotifierStatus(w http.ResponseWriter, r *http.Request) {
+func handleNotifierStatus(w http.ResponseWriter, r *http.Request, cfgDir string) {
 	if r.Method != http.MethodGet {
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	writeNotifierJSON(w, http.StatusOK, notify.RuntimeStatus())
+	runtime := notify.RuntimeStatus()
+	adminCfg, _, err := notify.LoadAdminConfig(cfgDir)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	path := strings.TrimSpace(adminCfg.Notifier.JSONLPath)
+	if path == "" {
+		path = "/var/lib/cfm/notify.log.jsonl"
+	}
+	usage, err := notify.JSONLUsage(path)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"loaded_at":         runtime.LoadedAt,
+		"reloaded_at":       runtime.ReloadedAt,
+		"config_path":       runtime.ConfigPath,
+		"config_hash":       runtime.ConfigHash,
+		"last_load_ok":      runtime.LastLoadOK,
+		"last_load_error":   runtime.LastLoadError,
+		"last_reload_error": runtime.LastReloadError,
+		"retention": map[string]any{
+			"max_entries": adminCfg.Notifier.MaxEntries,
+			"max_age":     adminCfg.Notifier.MaxAge,
+		},
+		"usage": usage,
+	})
 }
 
 func writeNotifierJSON(w http.ResponseWriter, code int, v any) {
@@ -252,6 +280,14 @@ func validateNotifierDraft(c notify.AdminConfig) []notifierValidationError {
 
 	validateDuration("notifier.default_cooldown", c.Notifier.DefaultCooldown)
 	validateDuration("dedupe.cooldown", c.Dedupe.Cooldown)
+	if c.Notifier.MaxEntries < 0 {
+		pushErr("notifier.max_entries", "must be >= 0", "invalid_range")
+	}
+	if v := strings.TrimSpace(c.Notifier.MaxAge); v != "" {
+		if _, err := parseNotifierRetentionAge(v); err != nil {
+			pushErr("notifier.max_age", "invalid duration", "invalid_duration")
+		}
+	}
 
 	channelSeen := map[string]int{}
 	channelExists := map[string]struct{}{}
@@ -333,6 +369,24 @@ func validateNotifierConfig(c notify.AdminConfig) error {
 		}
 	}
 	return nil
+}
+
+func parseNotifierRetentionAge(raw string) (time.Duration, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return 0, nil
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d, nil
+	}
+	if strings.HasSuffix(v, "d") {
+		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(v, "d")))
+		if err != nil || n <= 0 {
+			return 0, errors.New("invalid max_age")
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return 0, errors.New("invalid max_age")
 }
 
 func handleNotifierPreview(w http.ResponseWriter, r *http.Request, cfgDir string) {

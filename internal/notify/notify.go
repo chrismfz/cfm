@@ -23,6 +23,8 @@ type config struct {
 	GlobalRatePerMin int
 	SubjectTmpl      string
 	BodyTmpl         string
+	MaxEntries       int
+	MaxAge           time.Duration
 
 	DedupeKey string
 	DedupeTTL time.Duration
@@ -79,6 +81,8 @@ func Init(cfgDir string) error {
 		JSONLPath:       "/var/lib/cfm/notify.log.jsonl",
 		SubjectTmpl:     strings.TrimSpace(admin.Notifier.SubjectTemplate),
 		BodyTmpl:        strings.TrimSpace(admin.Notifier.BodyTemplate),
+		MaxEntries:      100000,
+		MaxAge:          30 * 24 * time.Hour,
 		DedupeKey:       "{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}",
 		DedupeTTL:       5 * time.Minute,
 		Detectors:       map[string]detectorOverride{},
@@ -94,6 +98,12 @@ func Init(cfgDir string) error {
 	}
 	if admin.Notifier.RateLimitPerMin > 0 {
 		c.GlobalRatePerMin = admin.Notifier.RateLimitPerMin
+	}
+	if admin.Notifier.MaxEntries > 0 {
+		c.MaxEntries = admin.Notifier.MaxEntries
+	}
+	if maxAge, err := parseRetentionAge(admin.Notifier.MaxAge); err == nil && maxAge > 0 {
+		c.MaxAge = maxAge
 	}
 	if key := strings.TrimSpace(admin.Dedupe.Key); key != "" {
 		c.DedupeKey = key
@@ -155,6 +165,7 @@ func Init(cfgDir string) error {
 	cfg = c
 	recordLoadResultLocked(cfgDir, true, nil, false)
 	cfgMu.Unlock()
+	ensureRetentionPruner()
 	dedup = newDeduper(c.DedupeTTL)
 	if queueCh == nil {
 		queueCh = make(chan Event, 100)
@@ -327,13 +338,23 @@ func appendJSONL(path string, v interface{}) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return err
 	}
+	jsonlRetentionMu.Lock()
+	defer jsonlRetentionMu.Unlock()
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
-	return enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	maxEntries, maxAge := activeRetentionLimits()
+	if maxEntries <= 0 && maxAge <= 0 {
+		return nil
+	}
+	return pruneJSONLWithLimits(path, maxEntries, maxAge, time.Now().UTC())
 }
 
 func renderLiteral(tmpl string, ev Event) string {

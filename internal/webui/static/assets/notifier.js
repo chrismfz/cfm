@@ -13,7 +13,11 @@
     draftConfig: { notifier: {}, dedupe: {}, channels: [], detectors: {} },
     path: '', isDirty: false, pendingDelete: null, pendingLeave: null,
     tab: 'overview', historyRows: [], detectorHints: ['*'],
-    runtime: { loaded_at: null, reloaded_at: null, config_path: '', config_hash: '', last_load_ok: false, last_load_error: '', last_reload_error: '' },
+    runtime: {
+      loaded_at: null, reloaded_at: null, config_path: '', config_hash: '', last_load_ok: false, last_load_error: '', last_reload_error: '',
+      retention: { max_entries: 0, max_age: '' },
+      usage: { entries: 0, approx_size_bytes: 0, oldest: '', newest: '' },
+    },
     metricsMeta: { generated_at: '', source: '', window_start: '', window_end: '', total_rows_scanned: 0, degraded: false, warnings: [] },
     metricsUpdatedTimer: null,
     recentActions: [],
@@ -153,6 +157,12 @@
     }
     byId('notifierOverviewPath').textContent = state.runtime.config_path || state.path || '-';
     byId('notifierOverviewLoadResult').textContent = state.runtime.last_reload_error || (state.runtime.last_load_ok ? 'OK' : (state.runtime.last_load_error || 'Unknown'));
+    byId('notifierOverviewRetentionCap').textContent = String(state.runtime.retention?.max_entries || state.draftConfig.notifier.max_entries || '-');
+    byId('notifierOverviewRetentionAge').textContent = state.runtime.retention?.max_age || state.draftConfig.notifier.max_age || '-';
+    byId('notifierOverviewUsageEntries').textContent = String(state.runtime.usage?.entries || 0);
+    byId('notifierOverviewUsageSize').textContent = formatBytes(state.runtime.usage?.approx_size_bytes || 0);
+    byId('notifierOverviewUsageOldest').textContent = state.runtime.usage?.oldest || '-';
+    byId('notifierOverviewUsageNewest').textContent = state.runtime.usage?.newest || '-';
     const body = byId('notifierOverviewCountersBody');
     if (!body || !counters) return;
     body.replaceChildren();
@@ -198,6 +208,19 @@
     const max = Math.max(...points, 0);
     if (max <= 0) return '';
     return points.map((v) => chars[Math.max(0, Math.min(chars.length - 1, Math.round((v / max) * (chars.length - 1))))]).join('');
+  }
+
+  function formatBytes(n) {
+    const v = Number(n || 0);
+    if (!Number.isFinite(v) || v <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let idx = 0;
+    let cur = v;
+    while (cur >= 1024 && idx < units.length - 1) {
+      cur /= 1024;
+      idx += 1;
+    }
+    return `${cur.toFixed(cur >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
   }
 
   function setToggleResultChip(text = '', type = 'default') {
@@ -714,6 +737,8 @@
       last_load_ok: status.last_load_ok !== false,
       last_load_error: status.last_load_error || '',
       last_reload_error: status.last_reload_error || '',
+      retention: status.retention || { max_entries: 0, max_age: '' },
+      usage: status.usage || { entries: 0, approx_size_bytes: 0, oldest: '', newest: '' },
     };
     renderOverview();
   }

@@ -59,3 +59,25 @@ func TestWriteFileCreatesBackup(t *testing.T) {
 		t.Fatalf("expected backup file, entries=%v", entries)
 	}
 }
+
+func TestParseRetentionFields(t *testing.T) {
+	in := `[notifier]
+enabled = true
+max_entries = 1234
+max_age = 30d
+`
+	cfg, err := Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Notifier.MaxEntries != 1234 {
+		t.Fatalf("expected max_entries=1234 got %d", cfg.Notifier.MaxEntries)
+	}
+	if cfg.Notifier.MaxAge != "30d" {
+		t.Fatalf("expected max_age=30d got %q", cfg.Notifier.MaxAge)
+	}
+	out := SerializeDeterministic(cfg)
+	if !strings.Contains(out, "max_entries = 1234") || !strings.Contains(out, "max_age = 30d") {
+		t.Fatalf("retention fields were not serialized: %s", out)
+	}
+}
