@@ -86,7 +86,7 @@ func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {
 
 func SaveAdminConfig(cfgDir string, c AdminConfig) (string, error) {
 	path, _ := resolveConfigPath(cfgDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return path, err
 	}
 	payload := strings.TrimSpace(renderConfig(c)) + "\n"
