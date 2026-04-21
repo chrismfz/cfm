@@ -14,6 +14,8 @@
     path: '', isDirty: false, pendingDelete: null, pendingLeave: null,
     tab: 'overview', historyRows: [], detectorHints: ['*'],
     runtime: { loaded_at: null, reloaded_at: null, config_path: '', config_hash: '', last_load_ok: false, last_load_error: '', last_reload_error: '' },
+    metricsMeta: { generated_at: '', source: '', window_start: '', window_end: '', total_rows_scanned: 0, degraded: false, warnings: [] },
+    metricsUpdatedTimer: null,
   };
 
   const byId = (id) => document.getElementById(id);
@@ -97,9 +99,45 @@
     Object.keys(counters).sort().forEach((channel) => {
       const c = counters[channel];
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${channel}</td><td>${c.h1.attempts}</td><td>${c.h1.success}</td><td>${c.h1.fail}</td><td>${c.h24.attempts}</td><td>${c.h24.success}</td><td>${c.h24.fail}</td>`;
+      tr.innerHTML = `<td>${channel}</td><td>${c.h1.attempts}</td><td>${c.h1.success}</td><td>${c.h1.fail}</td><td>${c.h24.attempts}</td><td>${c.h24.success}</td><td>${c.h24.fail}</td><td style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace">${c.trend || ''}</td>`;
       body.appendChild(tr);
     });
+  }
+
+  function relativeAge(ts) {
+    const at = Date.parse(ts || '');
+    if (!at) return '-';
+    const sec = Math.max(0, Math.floor((Date.now() - at) / 1000));
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    return `${Math.floor(sec / 3600)}h ago`;
+  }
+
+  function setMetricsMeta(meta = {}) {
+    state.metricsMeta = { ...state.metricsMeta, ...meta };
+    byId('notifierMetricsSource').textContent = state.metricsMeta.source || '-';
+    byId('notifierMetricsWindowStart').textContent = state.metricsMeta.window_start || '-';
+    byId('notifierMetricsWindowEnd').textContent = state.metricsMeta.window_end || '-';
+    byId('notifierMetricsRowsScanned').textContent = String(state.metricsMeta.total_rows_scanned || 0);
+    byId('notifierMetricsUpdatedAgo').textContent = state.metricsMeta.generated_at ? `Updated ${relativeAge(state.metricsMeta.generated_at)}` : '-';
+    const warning = byId('notifierMetricsWarning');
+    if (warning) {
+      if (state.metricsMeta.degraded) {
+        const details = Array.isArray(state.metricsMeta.warnings) ? state.metricsMeta.warnings.join('; ') : '';
+        warning.textContent = `⚠ Metrics are degraded. ${details}`;
+        warning.style.display = '';
+      } else {
+        warning.style.display = 'none';
+        warning.textContent = '';
+      }
+    }
+  }
+
+  function toSparkline(points) {
+    const chars = '▁▂▃▄▅▆▇█';
+    const max = Math.max(...points, 0);
+    if (max <= 0) return '';
+    return points.map((v) => chars[Math.max(0, Math.min(chars.length - 1, Math.round((v / max) * (chars.length - 1))))]).join('');
   }
 
   function setToggleResultChip(text = '', type = 'default') {
@@ -284,19 +322,47 @@
   }
 
   async function refreshCounters() {
-    await fetchHistory();
-    const now = Date.now();
+    const [h1, h24] = await Promise.all([
+      request('/cfm-admin/api/v1/notifier/metrics?window=1h'),
+      request('/cfm-admin/api/v1/notifier/metrics?window=24h'),
+    ]);
     const counters = {};
     const add = (channel) => {
-      if (!counters[channel]) counters[channel] = { h1: { attempts: 0, success: 0, fail: 0 }, h24: { attempts: 0, success: 0, fail: 0 } };
+      if (!counters[channel]) counters[channel] = { h1: { attempts: 0, success: 0, fail: 0 }, h24: { attempts: 0, success: 0, fail: 0 }, trend: '' };
       return counters[channel];
     };
-    for (const row of state.historyRows) {
-      const ts = Date.parse(row.time || ''); if (!ts) continue;
-      const age = now - ts; const ch = row.channel || 'unknown'; const status = row.status === 'error' ? 'fail' : 'success';
-      if (age <= 24 * 3600 * 1000) { const c = add(ch); c.h24.attempts += 1; c.h24[status] += 1; }
-      if (age <= 3600 * 1000) { const c = add(ch); c.h1.attempts += 1; c.h1[status] += 1; }
+    Object.entries(h1.per_channel || {}).forEach(([channel, attempts]) => { add(channel).h1.attempts = Number(attempts || 0); });
+    Object.entries(h24.per_channel || {}).forEach(([channel, attempts]) => { add(channel).h24.attempts = Number(attempts || 0); });
+    const allSeries = Array.isArray(h24.series) ? h24.series : [];
+    const recent = allSeries.slice(-12).map((b) => Number(b.attempts || 0));
+    const spark = toSparkline(recent);
+    Object.keys(counters).forEach((channel) => { counters[channel].trend = spark; });
+
+    const empty = byId('notifierMetricsEmptyState');
+    if (empty) {
+      if ((h1.total_attempts || 0) === 0 && (h24.total_attempts || 0) === 0) {
+        empty.style.display = '';
+        empty.textContent = 'No deliveries in last 1h/24h.';
+      } else if ((h1.total_attempts || 0) === 0) {
+        empty.style.display = '';
+        empty.textContent = 'No deliveries in last 1h.';
+      } else if ((h24.total_attempts || 0) === 0) {
+        empty.style.display = '';
+        empty.textContent = 'No deliveries in last 24h.';
+      } else {
+        empty.style.display = 'none';
+        empty.textContent = '';
+      }
     }
+    setMetricsMeta({
+      generated_at: h1.generated_at || '',
+      source: h1.source || (h1.cached ? 'cache' : 'live'),
+      window_start: h1.window_start || h1.from || '',
+      window_end: h1.window_end || h1.to || '',
+      total_rows_scanned: h1.total_rows_scanned || 0,
+      degraded: !!(h1.degraded || h24.degraded),
+      warnings: [...(h1.warnings || []), ...(h24.warnings || [])],
+    });
     renderOverview(counters);
   }
 
@@ -509,6 +575,7 @@
     });
 
     bindTemplateInputs(); renderTabs(); renderDetectorHints();
+    state.metricsUpdatedTimer = window.setInterval(() => setMetricsMeta(), 1000);
     loadConfig()
       .then(() => refreshRuntimeStatus())
       .catch((err) => showStatus(err.message || 'Failed to load config.', false));
