@@ -132,6 +132,81 @@ local function has(s, pat)
   return string.find(s, pat, 1, true) ~= nil
 end
 
+local _SELF_IPS_FILE = "/var/lib/cfm/lua/cfm_self_ips.lua"
+local _SELF_IPS_TTL_SEC = tonumber(os.getenv("CFM_SELF_IPS_TTL_SEC") or "30")
+local _self_ip_cache = { expires_at = 0, map = {} }
+
+local function normalize_ip(raw)
+  local ip = tostring(raw or "")
+  if ip == "" then return "" end
+  if ip:sub(1, 1) == "[" and ip:sub(-1) == "]" then
+    ip = ip:sub(2, -2)
+  end
+  return lower(ip)
+end
+
+local function is_loopback_or_linklocal(ip)
+  ip = normalize_ip(ip)
+  if ip == "" then return false end
+  local b2 = tonumber(ip:match("^169%.(%d+)%."))
+  if ip == "::1" then return true end
+  if ip:sub(1, 4) == "127." then return true end
+  if ip:sub(1, 6) == "fe80::" or ip:sub(1, 6) == "fe90::" or ip:sub(1, 6) == "fea0::" or ip:sub(1, 6) == "feb0::" then
+    return true
+  end
+  if b2 and b2 == 254 then return true end
+  return false
+end
+
+local function load_self_ip_cache(force)
+  local now = ngx.now()
+  if not force and now < (_self_ip_cache.expires_at or 0) then
+    return _self_ip_cache.map or {}
+  end
+
+  local map = {}
+  local chunk, load_err = loadfile(_SELF_IPS_FILE)
+  if not chunk then
+    if CFG.debug then
+      log_route(ngx.NOTICE, "self-ip cache unavailable file=" .. _SELF_IPS_FILE .. " err=" .. tostring(load_err))
+    end
+  else
+    local ok, val = pcall(chunk)
+    if ok and type(val) == "table" then
+      for k, v in pairs(val) do
+        if type(k) == "string" then
+          local nk = normalize_ip(k)
+          if nk ~= "" then map[nk] = true end
+        end
+        if type(v) == "string" then
+          local nv = normalize_ip(v)
+          if nv ~= "" then map[nv] = true end
+        elseif type(v) == "table" then
+          local nested = v.ip or v.addr or v.address
+          if type(nested) == "string" then
+            local nn = normalize_ip(nested)
+            if nn ~= "" then map[nn] = true end
+          end
+        end
+      end
+    else
+      ngx.log(ngx.WARN, "[cfm] invalid self-ip cache file ", _SELF_IPS_FILE, ": ", tostring(ok and "non-table value" or val))
+    end
+  end
+
+  _self_ip_cache.map = map
+  _self_ip_cache.expires_at = now + _SELF_IPS_TTL_SEC
+  return map
+end
+
+local function is_self_ip(ip)
+  local nip = normalize_ip(ip)
+  if nip == "" then return false end
+  if is_loopback_or_linklocal(nip) then return true end
+  local map = load_self_ip_cache(false)
+  return map[nip] == true
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- WAF BODY INSPECTION
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -665,17 +740,23 @@ end
 -- ── Step 0a: Local-origin hard bypass ────────────────────────────────────────
 do
   local p = peer_ip; local has_cf = cf_ip ~= ""; local srv = ngx.var.server_addr or ""
+  if is_self_ip(ip) then
+    ngx.header["X-CFM-Bypass"] = "self_ip"
+    log_route(ngx.INFO, "bypass=self_ip ip=" .. tostring(ip) .. " peer=" .. tostring(peer_ip) .. " host=" .. host)
+    ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+    return
+  end
   if not has_cf and p ~= "" then
-    if p:sub(1, 1) == "[" then p = p:sub(2, -2) end
+    p = normalize_ip(p)
     local b2 = tonumber(p:match("^172%.(%d+)%."))
-    if (p == "127.0.0.1") or (p == "::1") or (p == srv)
+    if (p == normalize_ip(srv))
        or (p:sub(1, 8) == "192.168.") or (p:sub(1, 3) == "10.")
        or (b2 and b2 >= 16 and b2 <= 31) then
       ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
       return
     end
   end
-  if has_cf and srv ~= "" and ip == srv then
+  if has_cf and srv ~= "" and normalize_ip(ip) == normalize_ip(srv) then
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
     return
   end
