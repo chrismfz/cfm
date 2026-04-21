@@ -587,9 +587,9 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	rows := []string{
-		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","reason":"slow","channel":"ops","err":""}`,
+		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","asn":"13335","ptr":"one.example.test","reason":"slow","channel":"ops","err":""}`,
 		`{"time":"` + now.Add(-450*time.Second).Format(time.RFC3339Nano) + `","host":"db01","kind":"NOTIFIER/TEST","srcip":"1.1.1.2","reason":"manual","channel":"ops","status":"success","latency":"10ms","correlation_id":"corr-1","err":""}`,
-		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
+		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","asn":"64510","ptr":"attacker.example.test","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
 		`{"time":"` + now.Add(-3*time.Minute).Format(time.RFC3339Nano) + `","host":"db03","kind":"mysql","srcip":"3.3.3.3","reason":"deadlock","channel":"ops","err":""}`,
 	}
 	if err := os.WriteFile(jsonl, []byte(strings.Join(rows, "\n")+"\n"), 0600); err != nil {
@@ -606,9 +606,10 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("GET status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	var payload struct {
-		Rows       []map[string]any `json:"rows"`
-		HasMore    bool             `json:"has_more"`
-		NextCursor string           `json:"next_cursor"`
+		Rows          []map[string]any `json:"rows"`
+		HasMore       bool             `json:"has_more"`
+		NextCursor    string           `json:"next_cursor"`
+		TotalEstimate int              `json:"total_estimate"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v body=%s", err, rr.Body.String())
@@ -628,6 +629,9 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	if payload.NextCursor != "" {
 		t.Fatalf("expected empty next_cursor when has_more=false")
 	}
+	if payload.TotalEstimate != 2 {
+		t.Fatalf("expected total_estimate=2, got %d", payload.TotalEstimate)
+	}
 
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=1&status=all&kind=NOTIFIER/TEST", nil)
 	rr2 := httptest.NewRecorder()
@@ -636,15 +640,19 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("GET status=%d body=%s", rr2.Code, rr2.Body.String())
 	}
 	var p2 struct {
-		Rows       []map[string]any `json:"rows"`
-		HasMore    bool             `json:"has_more"`
-		NextCursor string           `json:"next_cursor"`
+		Rows          []map[string]any `json:"rows"`
+		HasMore       bool             `json:"has_more"`
+		NextCursor    string           `json:"next_cursor"`
+		TotalEstimate int              `json:"total_estimate"`
 	}
 	if err := json.Unmarshal(rr2.Body.Bytes(), &p2); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if len(p2.Rows) != 1 || p2.HasMore || p2.NextCursor != "" {
 		t.Fatalf("unexpected page-1 payload: %#v", p2)
+	}
+	if p2.TotalEstimate != 1 {
+		t.Fatalf("expected total_estimate=1, got %d", p2.TotalEstimate)
 	}
 	if p2.Rows[0]["kind"] != "NOTIFIER/TEST" || p2.Rows[0]["correlation_id"] != "corr-1" {
 		t.Fatalf("expected test history row with correlation id, got %#v", p2.Rows[0])
@@ -669,7 +677,7 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("expected cursor on row: %#v", p3.Rows[1])
 	}
 
-	req4 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=10&status=all&since="+url.QueryEscape(cursor), nil)
+	req4 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=10&status=all&cursor="+url.QueryEscape(cursor), nil)
 	rr4 := httptest.NewRecorder()
 	mux.ServeHTTP(rr4, adminCtx(req4))
 	if rr4.Code != http.StatusOK {
@@ -681,10 +689,32 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rr4.Body.Bytes(), &p4); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(p4.Rows) != 1 {
-		t.Fatalf("expected 1 newer row, got %d (%#v)", len(p4.Rows), p4.Rows)
+	if len(p4.Rows) != 2 {
+		t.Fatalf("expected 2 older rows, got %d (%#v)", len(p4.Rows), p4.Rows)
 	}
-	if got := p4.Rows[0]["cursor"]; got != p3.Rows[0]["cursor"] {
-		t.Fatalf("expected newest row cursor %v, got %v", p3.Rows[0]["cursor"], got)
+	if got := p4.Rows[0]["srcip"]; got != "1.1.1.1" {
+		t.Fatalf("expected first older row srcip=1.1.1.1, got %v", got)
+	}
+
+	from := now.Add(-4*time.Minute - 15*time.Second).Format(time.RFC3339Nano)
+	to := now.Add(-3*time.Minute + 15*time.Second).Format(time.RFC3339Nano)
+	req5 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?status=all&q=attacker&asn=64510&ptr=attacker.example.test&kind=ssh&channel=pager&src_ip=2.2.2.2&from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), nil)
+	rr5 := httptest.NewRecorder()
+	mux.ServeHTTP(rr5, adminCtx(req5))
+	if rr5.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr5.Code, rr5.Body.String())
+	}
+	var p5 struct {
+		Rows          []map[string]any `json:"rows"`
+		TotalEstimate int              `json:"total_estimate"`
+	}
+	if err := json.Unmarshal(rr5.Body.Bytes(), &p5); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(p5.Rows) != 1 || p5.TotalEstimate != 1 {
+		t.Fatalf("expected one filtered row with total_estimate=1, got rows=%d total=%d", len(p5.Rows), p5.TotalEstimate)
+	}
+	if p5.Rows[0]["srcip"] != "2.2.2.2" || p5.Rows[0]["kind"] != "ssh" {
+		t.Fatalf("unexpected filtered row: %#v", p5.Rows[0])
 	}
 }
