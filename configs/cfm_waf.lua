@@ -46,7 +46,9 @@ local CFG = {
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
   rule_auth_burst         = "challenge", -- generic login endpoint burst
-  rule_auth_wp_checks     = "challenge", -- HEAD wp-login, no UA+Referer POST wp-login
+  rule_auth_wp_checks     = "challenge", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
+                                         -- rollout: start this rule in "logonly" to baseline HEAD noise,
+                                         -- then promote to "challenge" after validating logs.
   rule_xmlrpc_multicall   = "challenge", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "challenge", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
@@ -106,6 +108,8 @@ local CFG = {
   auth_ttl_sec         = 600,
 
   -- WP login helper tuning
+  auth_wp_login_head_window_sec = 20,
+  auth_wp_login_head_threshold  = 3,
   auth_wp_login_head_ttl_sec = 600,
   auth_wp_login_noua_ttl_sec = 600,
 
@@ -803,7 +807,7 @@ local function detect_auth_burst(ip, uri, method, shdict)
   return nil
 end
 
-local function detect_wp_login_probe(uri, method, headers)
+local function detect_wp_login_probe(uri, method, headers, ip, host, shdict)
   uri = lower(uri or "")
   method = lower(method or "get")
   headers = headers or {}
@@ -812,9 +816,44 @@ local function detect_wp_login_probe(uri, method, headers)
 
   local ua  = lower(headers["user-agent"] or headers["User-Agent"] or "")
   local ref = lower(headers["referer"]   or headers["Referer"]   or "")
+  local accept = lower(headers["accept"] or headers["Accept"] or "")
 
   if method == "head" then
-    return "AUTH_WP_LOGIN_HEAD"
+    local empty_ua = (ua == "")
+    local missing_accept = (accept == "")
+    local suspicious_ua_family =
+      has(ua, "sqlmap") or has(ua, "nikto") or has(ua, "nmap") or has(ua, "masscan")
+      or has(ua, "curl/") or has(ua, "python-requests") or has(ua, "wget/")
+
+    local repeated_head = false
+    if shdict and ip and ip ~= "" then
+      local now = ngx.now()
+      local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
+      local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
+      local host_key = lower(host or "-")
+      if host_key == "" then host_key = "-" end
+
+      local kts  = "authwph|ts|"  .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
+      local kcnt = "authwph|cnt|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
+      local ts = shdict:get(kts)
+      local cnt = shdict:get(kcnt) or 0
+
+      if not ts or (now - ts) >= win then
+        shdict:set(kts, now, win + 1)
+        shdict:set(kcnt, 1, win + 1)
+      else
+        cnt = cnt + 1
+        shdict:set(kcnt, cnt, win + 1)
+        if cnt >= thr then
+          repeated_head = true
+        end
+      end
+    end
+
+    if empty_ua or missing_accept or suspicious_ua_family or repeated_head then
+      return "AUTH_WP_LOGIN_HEAD"
+    end
+    return nil
   end
 
   if method == "post" and ua == "" and ref == "" then
@@ -2141,7 +2180,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
-      local tag = detect_wp_login_probe(uri, method, headers)
+      local tag = detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       if tag == "AUTH_WP_LOGIN_HEAD" then
         local ttl = CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
