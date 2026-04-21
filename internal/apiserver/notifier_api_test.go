@@ -70,6 +70,97 @@ func TestNotifierConfigRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestNotifierConfigMutationsPreserveUnknownAndRequireExplicitDeletes(t *testing.T) {
+	dir := t.TempDir()
+	initial := strings.TrimSpace(`
+# preamble-preserved
+[channel "ops"]
+enabled = true
+type = smtp
+host = smtp.example.test
+user = keep-user
+pass = keep-pass
+custom_channel_key = keep-me
+
+[detector "mysql"]
+notify = true
+channels = ops
+custom_detector_key = keep-det
+
+[detector "ssh"]
+notify = true
+channels = ops
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "notify.conf"), []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	// 1) Partial channel/detector edits should not implicitly delete missing fields.
+	putBody := map[string]any{
+		"channel_mutations": []map[string]any{
+			{"id": "ops", "host": "smtp2.example.test"},
+		},
+		"detector_mutations": []map[string]any{
+			{"name": "mysql", "notify": false},
+		},
+	}
+	buf, _ := json.Marshal(putBody)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/notifier/config", bytes.NewReader(buf))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("partial PUT status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	afterPartial, err := os.ReadFile(filepath.Join(dir, "notify.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txtPartial := string(afterPartial)
+	for _, want := range []string{
+		"user = keep-user",
+		"pass = keep-pass",
+		"custom_channel_key = keep-me",
+		"custom_detector_key = keep-det",
+		"[detector \"ssh\"]",
+	} {
+		if !strings.Contains(txtPartial, want) {
+			t.Fatalf("expected %q preserved, got:\n%s", want, txtPartial)
+		}
+	}
+
+	// 2) Explicit delete flags should remove only requested fields/blocks.
+	putBody2 := map[string]any{
+		"channel_mutations": []map[string]any{
+			{"id": "ops", "delete_user": true},
+		},
+		"delete_detectors": []string{"ssh"},
+	}
+	buf2, _ := json.Marshal(putBody2)
+	req2 := httptest.NewRequest(http.MethodPut, "/api/v1/notifier/config", bytes.NewReader(buf2))
+	rr2 := httptest.NewRecorder()
+	mux.ServeHTTP(rr2, adminCtx(req2))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("delete PUT status=%d body=%s", rr2.Code, rr2.Body.String())
+	}
+	afterDelete, err := os.ReadFile(filepath.Join(dir, "notify.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txtDelete := string(afterDelete)
+	if strings.Contains(txtDelete, "user = keep-user") {
+		t.Fatalf("expected user to be explicitly deleted, got:\n%s", txtDelete)
+	}
+	if strings.Contains(txtDelete, "[detector \"ssh\"]") {
+		t.Fatalf("expected ssh detector to be deleted, got:\n%s", txtDelete)
+	}
+	if !strings.Contains(txtDelete, "pass = keep-pass") {
+		t.Fatalf("expected pass to remain without explicit delete, got:\n%s", txtDelete)
+	}
+}
+
 func TestNotifierTestEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	cfg := notify.AdminConfig{
