@@ -246,10 +246,13 @@ type HotIPRow struct {
 	Req    int    `json:"req"`
 	Vhosts int    `json:"vhosts"`
 
-	PTR     string `json:"ptr,omitempty"`
-	ASN     string `json:"asn,omitempty"`
-	ASNName string `json:"asn_name,omitempty"`
-	Country string `json:"country,omitempty"`
+	PTR           string `json:"ptr,omitempty"`
+	ASN           string `json:"asn,omitempty"`
+	ASNName       string `json:"asn_name,omitempty"`
+	Country       string `json:"country,omitempty"`
+	EnrichPending bool   `json:"enrich_pending,omitempty"`
+	EnrichError   string `json:"enrich_error,omitempty"`
+	EnrichAgeSec  int64  `json:"enrich_age_sec,omitempty"`
 }
 
 // IPDetail είναι short-window drilldown για ένα IP.
@@ -274,10 +277,13 @@ type IPDetail struct {
 	LongReasons    []string `json:"long_reasons,omitempty"`
 
 	// enrichment
-	PTR     string `json:"ptr,omitempty"`
-	ASN     string `json:"asn,omitempty"`
-	ASNName string `json:"asn_name,omitempty"`
-	Country string `json:"country,omitempty"`
+	PTR           string `json:"ptr,omitempty"`
+	ASN           string `json:"asn,omitempty"`
+	ASNName       string `json:"asn_name,omitempty"`
+	Country       string `json:"country,omitempty"`
+	EnrichPending bool   `json:"enrich_pending,omitempty"`
+	EnrichError   string `json:"enrich_error,omitempty"`
+	EnrichAgeSec  int64  `json:"enrich_age_sec,omitempty"`
 }
 
 // IPSignals είναι το "full" IP-level row με score & προτάσεις.
@@ -289,10 +295,13 @@ type IPSignals struct {
 	Score   float64  `json:"score"`
 	Reasons []string `json:"reasons,omitempty"`
 
-	PTR     string `json:"ptr,omitempty"`
-	ASN     string `json:"asn,omitempty"`
-	ASNName string `json:"asn_name,omitempty"`
-	Country string `json:"country,omitempty"`
+	PTR           string `json:"ptr,omitempty"`
+	ASN           string `json:"asn,omitempty"`
+	ASNName       string `json:"asn_name,omitempty"`
+	Country       string `json:"country,omitempty"`
+	EnrichPending bool   `json:"enrich_pending,omitempty"`
+	EnrichError   string `json:"enrich_error,omitempty"`
+	EnrichAgeSec  int64  `json:"enrich_age_sec,omitempty"`
 
 	Proposals []IPActionProposal `json:"proposals,omitempty"`
 }
@@ -344,9 +353,10 @@ type Engine struct {
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
-	longwin *LongWindow
-	scorer  Scorer
-	enr     *enrich.Enricher
+	longwin      *LongWindow
+	scorer       Scorer
+	enr          *enrich.Enricher
+	enrichWorker *enrich.Worker
 
 	lastFeed time.Time  // last time we fed long-window
 	ipLong   *ipLongMem // long-window IP aggregates (EMA)
@@ -475,6 +485,15 @@ func NewEngine(cfg Config) *Engine {
 		}
 		if enr, err := enrich.New(dirs...); err == nil {
 			e.enr = enr
+			e.enrichWorker = enrich.NewWorker(enr, enrich.WorkerConfig{
+				MaxEntries:   8192,
+				CacheTTL:     time.Hour,
+				NegativeTTL:  5 * time.Minute,
+				PTRTimeout:   time.Second,
+				PTRRateLimit: 100,
+				VerifyFCRDNS: false,
+				Workers:      2,
+			})
 			logging.Logf("[webdetector] enrichment enabled (dirs=%v)", dirs)
 		} else {
 			logging.Logf("[webdetector] enrichment init failed: %v", err)
@@ -636,6 +655,13 @@ func (e *Engine) Every() time.Duration                { return e.cfg.Every }
 
 // Enricher returns the optional MaxMind/DNS enricher instance (may be nil).
 func (e *Engine) Enricher() *enrich.Enricher { return e.enr }
+
+func (e *Engine) getEnrichment(ip string) enrich.WorkerValue {
+	if e == nil || e.enrichWorker == nil || net.ParseIP(ip) == nil {
+		return enrich.WorkerValue{}
+	}
+	return e.enrichWorker.Get(ip)
+}
 
 // NginxBridge returns the bridge instance (may be nil).
 func (e *Engine) NginxBridge() *NginxBridge { return e.nginxBridge }
@@ -2343,16 +2369,9 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 	for i := range rows {
 		rows[i].Proposals = proposeIPActions(rows[i])
 
-		if e.enr == nil {
-			continue
-		}
-
 		ip := rows[i].IP
-		if net.ParseIP(ip) == nil {
-			continue
-		}
-
-		geo := e.enr.Lookup(ip)
+		ev := e.getEnrichment(ip)
+		geo := ev.Result
 		if geo.PTR != "" {
 			rows[i].PTR = geo.PTR
 		}
@@ -2365,6 +2384,9 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 		if geo.Country != "" {
 			rows[i].Country = geo.Country
 		}
+		rows[i].EnrichPending = ev.Pending
+		rows[i].EnrichError = ev.Error
+		rows[i].EnrichAgeSec = ev.AgeSec
 	}
 
 	return rows
@@ -2378,13 +2400,16 @@ func (e *Engine) HotIPs(limit int) []HotIPRow {
 	rows := make([]HotIPRow, 0, len(sigs))
 	for _, s := range sigs {
 		rows = append(rows, HotIPRow{
-			IP:      s.IP,
-			Req:     s.Req,
-			Vhosts:  s.Vhosts,
-			PTR:     s.PTR,
-			ASN:     s.ASN,
-			ASNName: s.ASNName,
-			Country: s.Country,
+			IP:            s.IP,
+			Req:           s.Req,
+			Vhosts:        s.Vhosts,
+			PTR:           s.PTR,
+			ASN:           s.ASN,
+			ASNName:       s.ASNName,
+			Country:       s.Country,
+			EnrichPending: s.EnrichPending,
+			EnrichError:   s.EnrichError,
+			EnrichAgeSec:  s.EnrichAgeSec,
 		})
 	}
 	return rows
@@ -2461,21 +2486,23 @@ func (e *Engine) IPDetail(ip string) IPDetail {
 	}
 
 	// enrichment
-	if e.enr != nil {
-		geo := e.enr.Lookup(ip)
-		if geo.PTR != "" {
-			d.PTR = geo.PTR
-		}
-		if geo.ASN != 0 {
-			d.ASN = strconv.FormatUint(uint64(geo.ASN), 10)
-		}
-		if geo.ASNName != "" {
-			d.ASNName = geo.ASNName
-		}
-		if geo.Country != "" {
-			d.Country = geo.Country
-		}
+	ev := e.getEnrichment(ip)
+	geo := ev.Result
+	if geo.PTR != "" {
+		d.PTR = geo.PTR
 	}
+	if geo.ASN != 0 {
+		d.ASN = strconv.FormatUint(uint64(geo.ASN), 10)
+	}
+	if geo.ASNName != "" {
+		d.ASNName = geo.ASNName
+	}
+	if geo.Country != "" {
+		d.Country = geo.Country
+	}
+	d.EnrichPending = ev.Pending
+	d.EnrichError = ev.Error
+	d.EnrichAgeSec = ev.AgeSec
 
 	// attach long-window EMA view
 	if snap, ok := e.ipLongOne(ip); ok {
@@ -2536,16 +2563,9 @@ func (e *Engine) IPLong(limit int) []IPSignals {
 	for i := range rows {
 		rows[i].Proposals = proposeIPActions(rows[i])
 
-		if e.enr == nil {
-			continue
-		}
-
 		ip := rows[i].IP
-		if net.ParseIP(ip) == nil {
-			continue
-		}
-
-		geo := e.enr.Lookup(ip)
+		ev := e.getEnrichment(ip)
+		geo := ev.Result
 		if geo.PTR != "" {
 			rows[i].PTR = geo.PTR
 		}
@@ -2558,6 +2578,9 @@ func (e *Engine) IPLong(limit int) []IPSignals {
 		if geo.Country != "" {
 			rows[i].Country = geo.Country
 		}
+		rows[i].EnrichPending = ev.Pending
+		rows[i].EnrichError = ev.Error
+		rows[i].EnrichAgeSec = ev.AgeSec
 	}
 
 	return rows

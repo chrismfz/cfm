@@ -31,12 +31,15 @@ type wafTopValue struct {
 }
 
 type wafTopIPValue struct {
-	Key     string `json:"key"`
-	Count   int    `json:"count"`
-	PTR     string `json:"ptr,omitempty"`
-	Country string `json:"country,omitempty"`
-	ASN     uint   `json:"asn,omitempty"`
-	ASNName string `json:"asn_name,omitempty"`
+	Key           string `json:"key"`
+	Count         int    `json:"count"`
+	PTR           string `json:"ptr,omitempty"`
+	Country       string `json:"country,omitempty"`
+	ASN           uint   `json:"asn,omitempty"`
+	ASNName       string `json:"asn_name,omitempty"`
+	EnrichPending bool   `json:"enrich_pending,omitempty"`
+	EnrichError   string `json:"enrich_error,omitempty"`
+	EnrichAgeSec  int64  `json:"enrich_age_sec,omitempty"`
 }
 
 type wafEngineSummary struct {
@@ -184,8 +187,8 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				row.Country = info.Country
 				row.ASN = info.ASN
 				row.ASNName = info.ASNName
-			} else if row.IP != "" && e.enr != nil {
-				r := e.enr.Lookup(row.IP)
+			} else if row.IP != "" {
+				r := e.getEnrichment(row.IP).Result
 				row.Country = r.Country
 				row.ASN = r.ASN
 				row.ASNName = r.ASNName
@@ -229,8 +232,9 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 			continue
 		}
 		row := wafTopIPValue{Key: ip, Count: v}
-		if enrichEnabled && e != nil && e.enr != nil && net.ParseIP(ip) != nil {
-			geo := e.enr.Lookup(ip)
+		if enrichEnabled && e != nil && net.ParseIP(ip) != nil {
+			ev := e.getEnrichment(ip)
+			geo := ev.Result
 			if geo.PTR != "" {
 				row.PTR = geo.PTR
 			}
@@ -243,6 +247,9 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 			if geo.ASNName != "" {
 				row.ASNName = geo.ASNName
 			}
+			row.EnrichPending = ev.Pending
+			row.EnrichError = ev.Error
+			row.EnrichAgeSec = ev.AgeSec
 		}
 		out = append(out, row)
 	}

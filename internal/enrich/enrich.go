@@ -2,29 +2,30 @@ package enrich
 
 import (
 	"context"
+	"fmt"
+	"github.com/oschwald/geoip2-golang"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"github.com/oschwald/geoip2-golang"
 )
 
 const (
 	cacheTTL   = 3600 * time.Second // 1h cache για αποτελέσματα
 	dnsTimeout = 1 * time.Second    // 1s timeout για PTR lookups
-	statEvery  = 300 * time.Second   // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+	statEvery  = 300 * time.Second  // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
 )
 
 type Result struct {
-	PTR     string
-	ASN     uint
-	ASNName string
-	Country string
-	CountryISO string  // ISO-2 "GR" (rule matching)
-	City    string
-	ts      time.Time
+	PTR        string
+	ASN        uint
+	ASNName    string
+	Country    string
+	CountryISO string // ISO-2 "GR" (rule matching)
+	City       string
+	ts         time.Time
 }
 
 type Enricher struct {
@@ -80,14 +81,18 @@ func New(dirs ...string) (*Enricher, error) {
 		if db, err := geoip2.Open(asnPath); err == nil {
 			e.asnDB = db
 			e.asnPath = asnPath
-			if fi, err2 := os.Stat(asnPath); err2 == nil { e.asnMTime = fi.ModTime() }
+			if fi, err2 := os.Stat(asnPath); err2 == nil {
+				e.asnMTime = fi.ModTime()
+			}
 		}
 	}
 	if cityPath != "" {
 		if db, err := geoip2.Open(cityPath); err == nil {
 			e.cityDB = db
 			e.cityPath = cityPath
-			if fi, err2 := os.Stat(cityPath); err2 == nil { e.cityMTime = fi.ModTime() }
+			if fi, err2 := os.Stat(cityPath); err2 == nil {
+				e.cityMTime = fi.ModTime()
+			}
 		}
 	}
 
@@ -118,23 +123,36 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	// hot-reload if underlying files changed (rate-limited stat calls)
 	e.refreshIfChanged()
 
-
 	r := Result{ts: now}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return r
 	}
 
-	// PTR (reverse DNS) με timeout
-
-	if e.enablePTR && isRoutable(ip) {
+	r = e.LookupLocal(ipStr)
+	r.ts = now
+	if e.enablePTR {
 		ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
-		names, _ := net.DefaultResolver.LookupAddr(ctx, ipStr)
-		cancel()
-		if len(names) > 0 {
-			// καθάρισε τυχόν τελεία στο τέλος
-			r.PTR = strings.TrimSuffix(names[0], ".")
+		if ptr, err := e.LookupPTR(ctx, ipStr, false); err == nil {
+			r.PTR = ptr
 		}
+		cancel()
+	}
+
+	// store in cache
+	e.mu.Lock()
+	e.cache[ipStr] = r
+	e.mu.Unlock()
+
+	return r
+}
+
+// LookupLocal returns only local DB enrichment (ASN/Country/City) without DNS PTR.
+func (e *Enricher) LookupLocal(ipStr string) Result {
+	r := Result{ts: time.Now()}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return r
 	}
 
 	// ASN
@@ -151,33 +169,58 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	}
 
 	// Country/City
-if localCity != nil {
-    if rec, err := localCity.City(ip); err == nil && rec != nil {
-        r.CountryISO = rec.Country.IsoCode  // ← add this line
-        if name, ok := rec.Country.Names["en"]; ok && name != "" {
-            r.Country = name
-        } else {
-            r.Country = rec.Country.IsoCode
-        }
-        if c, ok := rec.City.Names["en"]; ok {
-            r.City = c
-        }
-    }
+	if localCity != nil {
+		if rec, err := localCity.City(ip); err == nil && rec != nil {
+			r.CountryISO = rec.Country.IsoCode
+			if name, ok := rec.Country.Names["en"]; ok && name != "" {
+				r.Country = name
+			} else {
+				r.Country = rec.Country.IsoCode
+			}
+			if c, ok := rec.City.Names["en"]; ok {
+				r.City = c
+			}
+		}
+	}
+	return r
 }
 
-	// store in cache
-	e.mu.Lock()
-	e.cache[ipStr] = r
-	e.mu.Unlock()
-
-	return r
+// LookupPTR resolves reverse DNS with optional forward-confirm verification.
+func (e *Enricher) LookupPTR(ctx context.Context, ipStr string, verifyForward bool) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid ip")
+	}
+	if !isRoutable(ip) {
+		return "", nil
+	}
+	names, err := net.DefaultResolver.LookupAddr(ctx, ipStr)
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	ptr := strings.TrimSuffix(strings.TrimSpace(names[0]), ".")
+	if ptr == "" || !verifyForward {
+		return ptr, nil
+	}
+	fwd, err := net.DefaultResolver.LookupIPAddr(ctx, ptr)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range fwd {
+		if a.IP.Equal(ip) {
+			return ptr, nil
+		}
+	}
+	return "", fmt.Errorf("forward verify mismatch")
 }
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
 func (e *Enricher) Enabled() bool {
 	return e != nil && (e.asnDB != nil || e.cityDB != nil)
 }
-
 
 // refreshIfChanged checks if files changed and safely reopens them.
 // CRITICAL: Does file I/O OUTSIDE the mutex to avoid blocking all Lookup() calls.
@@ -191,8 +234,6 @@ func (e *Enricher) refreshIfChanged() {
 		return
 	}
 	e.lastStatChk = now
-
-
 
 	asnPath := e.asnPath
 	cityPath := e.cityPath
@@ -217,8 +258,6 @@ func (e *Enricher) refreshIfChanged() {
 
 	}
 
-
-
 	// Check and load City DB (outside lock)
 	if cityPath != "" {
 		if fi, err := os.Stat(cityPath); err == nil {
@@ -230,9 +269,7 @@ func (e *Enricher) refreshIfChanged() {
 			}
 		}
 
-
 	}
-
 
 	// Quick lock to swap pointers
 	e.mu.Lock()
@@ -242,18 +279,20 @@ func (e *Enricher) refreshIfChanged() {
 		old := e.asnDB
 		e.asnDB = newASN
 		e.asnMTime = newASNTime
-		if old != nil { _ = old.Close() }
+		if old != nil {
+			_ = old.Close()
+		}
 	}
 	if newCity != nil {
 		old := e.cityDB
 		e.cityDB = newCity
 		e.cityMTime = newCityTime
-		if old != nil { _ = old.Close() }
+		if old != nil {
+			_ = old.Close()
+		}
 	}
 
 }
-
-
 
 // isRoutable: αποφυγή PTR για private/loopback/link-local/multicast/unspecified
 func isRoutable(ip net.IP) bool {
