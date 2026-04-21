@@ -248,10 +248,10 @@ func TestNotifierTestEndpoint(t *testing.T) {
 	RegisterNotifierEndpoints(mux, dir)
 
 	body := map[string]any{
-		"channel":  "missing-bin",
-		"detector": "mysql",
-		"sample": map[string]any{
-			"host": "db01.example.test",
+		"channel": "missing-bin",
+		"payload": map[string]any{
+			"host":     "db01.example.test",
+			"severity": "warn",
 		},
 	}
 	buf, _ := json.Marshal(body)
@@ -266,6 +266,12 @@ func TestNotifierTestEndpoint(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"status":"failure"`)) {
 		t.Fatalf("expected failure status in response body: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"latency":"`)) {
+		t.Fatalf("expected latency in response body: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"correlation_id":"`)) {
+		t.Fatalf("expected correlation_id in response body: %s", rr.Body.String())
 	}
 }
 
@@ -518,6 +524,7 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	now := time.Now().UTC()
 	rows := []string{
 		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","reason":"slow","channel":"ops","err":""}`,
+		`{"time":"` + now.Add(-450*time.Second).Format(time.RFC3339Nano) + `","host":"db01","kind":"NOTIFIER/TEST","srcip":"1.1.1.2","reason":"manual","channel":"ops","status":"success","latency":"10ms","correlation_id":"corr-1","err":""}`,
 		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
 		`{"time":"` + now.Add(-3*time.Minute).Format(time.RFC3339Nano) + `","host":"db03","kind":"mysql","srcip":"3.3.3.3","reason":"deadlock","channel":"ops","err":""}`,
 	}
@@ -558,7 +565,7 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("expected empty next_cursor when has_more=false")
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=1&status=all", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=1&status=all&kind=NOTIFIER/TEST", nil)
 	rr2 := httptest.NewRecorder()
 	mux.ServeHTTP(rr2, adminCtx(req2))
 	if rr2.Code != http.StatusOK {
@@ -572,10 +579,13 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rr2.Body.Bytes(), &p2); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(p2.Rows) != 1 || !p2.HasMore || p2.NextCursor == "" {
+	if len(p2.Rows) != 1 || p2.HasMore || p2.NextCursor != "" {
 		t.Fatalf("unexpected page-1 payload: %#v", p2)
 	}
-	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=2&before="+p2.NextCursor, nil)
+	if p2.Rows[0]["kind"] != "NOTIFIER/TEST" || p2.Rows[0]["correlation_id"] != "corr-1" {
+		t.Fatalf("expected test history row with correlation id, got %#v", p2.Rows[0])
+	}
+	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=2&status=all", nil)
 	rr3 := httptest.NewRecorder()
 	mux.ServeHTTP(rr3, adminCtx(req3))
 	if rr3.Code != http.StatusOK {
@@ -588,6 +598,6 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if len(p3.Rows) != 2 {
-		t.Fatalf("expected 2 remaining rows, got %d", len(p3.Rows))
+		t.Fatalf("expected 2 rows, got %d", len(p3.Rows))
 	}
 }
