@@ -5,6 +5,7 @@ import (
 	//	"net"
 	"cfm/internal/enrich"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,26 +199,40 @@ func Emit(ev Event) error {
 	// send
 	var firstErr error
 	dest := selectChannels(c, ov, hasOV)
+	eventID := notificationEventID()
 	for _, ch := range dest {
-		if err := ch.Send(ev, subj, body); err != nil && firstErr == nil {
+		attemptedAt := time.Now().UTC()
+		attemptStart := time.Now()
+		err := ch.Send(ev, subj, body)
+		latency := time.Since(attemptStart).Milliseconds()
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+
+		// audit JSONL (per-channel attempt row)
+		_ = appendJSONL(c.JSONLPath, map[string]interface{}{
+			"time":           attemptedAt.Format(time.RFC3339Nano),
+			"host":           ev.Host,
+			"event_id":       eventID,
+			"correlation_id": eventID,
+			"kind":           ev.Kind,
+			"srcip":          ev.SrcIP,
+			"reason":         ev.Reason,
+			"ttl":            ev.TTL.String(),
+			"asn":            ev.ASN,
+			"country":        ev.Country,
+			"ptr":            ev.PTR,
+			"count":          ev.Count,
+			"section":        ev.Section,
+			"channel":        channelAuditName(ch),
+			"attempted":      true,
+			"success":        err == nil,
+			"error":          errString(err),
+			"err":            errString(err),
+			"latency_ms":     latency,
+		})
 	}
-	// audit JSONL
-	_ = appendJSONL(c.JSONLPath, map[string]interface{}{
-		"time":    ev.When.Format(time.RFC3339),
-		"host":    ev.Host,
-		"kind":    ev.Kind,
-		"srcip":   ev.SrcIP,
-		"reason":  ev.Reason,
-		"ttl":     ev.TTL.String(),
-		"asn":     ev.ASN,
-		"country": ev.Country,
-		"ptr":     ev.PTR,
-		"count":   ev.Count,
-		"section": ev.Section,
-		"err":     errString(firstErr),
-	})
+
 	return firstErr
 }
 
@@ -359,6 +374,23 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func notificationEventID() string {
+	return fmt.Sprintf("evt-%x-%x", time.Now().UTC().UnixNano(), rand.Uint64())
+}
+
+func channelAuditName(ch Channel) string {
+	switch ch.(type) {
+	case *sendmailChannel:
+		return "sendmail"
+	case *smtpChannel:
+		return "smtp"
+	case *slackChannel:
+		return "slack"
+	default:
+		return strings.TrimSpace(ch.Name())
+	}
 }
 
 // ---- helpers for detector overrides ----
