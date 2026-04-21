@@ -133,6 +133,19 @@ button:disabled { opacity: .65; cursor: default; }
 .input-small { width: 68px; }
 .input-wide { width: 260px; max-width: 100%; }
 .card.wide { grid-column: 1 / -1; }
+.notifier-history-layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 2fr) minmax(320px, 1fr);
+  gap: .8rem;
+  align-items: start;
+}
+.notifier-history-detail {
+  position: sticky;
+  top: 80px;
+}
+tr.clickable.active-row {
+  background: rgba(77, 163, 255, .18);
+}
 .placeholder { min-height: 120px; opacity: .9; }
 .table-wrap { overflow: auto; }
 .stable-table-wrap {
