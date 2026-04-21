@@ -198,10 +198,6 @@ func RenderAdminConfig(cfgDir string, c AdminConfig) (string, error) {
 	return configio.SerializeDeterministic(raw), nil
 }
 
-func Reload(cfgDir string) error {
-	return Init(cfgDir)
-}
-
 type AdminConfigBackup struct {
 	ID      string    `json:"id"`
 	Path    string    `json:"path"`

@@ -1,9 +1,11 @@
 package notify
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	//	"net"
 	"cfm/internal/enrich"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"os"
@@ -37,12 +39,25 @@ type detectorOverride struct {
 }
 
 var (
-	cfgMu    sync.RWMutex
-	cfg      *config
-	queueCh  chan Event
-	dedup    *deduper
-	hostname string
+	cfgMu       sync.RWMutex
+	cfg         *config
+	queueCh     chan Event
+	dedup       *deduper
+	hostname    string
+	runtimeMeta RuntimeMetadata
 )
+
+type RuntimeMetadata struct {
+	LoadedAt        time.Time  `json:"loaded_at"`
+	ReloadedAt      *time.Time `json:"reloaded_at,omitempty"`
+	ConfigPath      string     `json:"config_path"`
+	ConfigHash      string     `json:"config_hash,omitempty"`
+	LastLoadOK      bool       `json:"last_load_ok"`
+	LastLoadError   string     `json:"last_load_error,omitempty"`
+	LastLoadedAt    time.Time  `json:"last_loaded_at"`
+	LastReloadedAt  *time.Time `json:"last_reloaded_at,omitempty"`
+	LastReloadError string     `json:"last_reload_error,omitempty"`
+}
 
 // enrichment (optional)
 var enricher *enrich.Enricher
@@ -54,6 +69,7 @@ func Init(cfgDir string) error {
 	hostname, _ = os.Hostname()
 	admin, _, err := LoadAdminConfig(cfgDir)
 	if err != nil {
+		recordLoadResult(cfgDir, false, err, false)
 		return err
 	}
 
@@ -137,6 +153,7 @@ func Init(cfgDir string) error {
 
 	cfgMu.Lock()
 	cfg = c
+	recordLoadResultLocked(cfgDir, true, nil, false)
 	cfgMu.Unlock()
 	dedup = newDeduper(c.DedupeTTL)
 	if queueCh == nil {
@@ -234,6 +251,25 @@ func Emit(ev Event) error {
 	}
 
 	return firstErr
+}
+
+func Reload(cfgDir string) error {
+	if err := Init(cfgDir); err != nil {
+		cfgMu.Lock()
+		recordLoadResultLocked(cfgDir, false, err, true)
+		cfgMu.Unlock()
+		return err
+	}
+	cfgMu.Lock()
+	recordLoadResultLocked(cfgDir, true, nil, true)
+	cfgMu.Unlock()
+	return nil
+}
+
+func RuntimeStatus() RuntimeMetadata {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return runtimeMeta
 }
 
 func worker() {
@@ -378,6 +414,52 @@ func errString(err error) string {
 
 func notificationEventID() string {
 	return fmt.Sprintf("evt-%x-%x", time.Now().UTC().UnixNano(), rand.Uint64())
+}
+
+func recordLoadResult(cfgDir string, ok bool, err error, manual bool) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	recordLoadResultLocked(cfgDir, ok, err, manual)
+}
+
+func recordLoadResultLocked(cfgDir string, ok bool, err error, manual bool) {
+	now := time.Now().UTC()
+	path, _ := resolveConfigPath(cfgDir)
+	meta := runtimeMeta
+	if meta.LoadedAt.IsZero() && ok {
+		meta.LoadedAt = now
+	}
+	if ok {
+		meta.ConfigPath = path
+		meta.ConfigHash = configFileHash(path)
+		meta.LastLoadError = ""
+		meta.LastReloadError = ""
+	} else if err != nil {
+		meta.LastLoadError = err.Error()
+		if manual {
+			meta.LastReloadError = err.Error()
+		}
+	}
+	meta.LastLoadOK = ok
+	meta.LastLoadedAt = now
+	if manual {
+		reloadedAt := now
+		meta.ReloadedAt = &reloadedAt
+		meta.LastReloadedAt = &reloadedAt
+	}
+	runtimeMeta = meta
+}
+
+func configFileHash(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func channelAuditName(ch Channel) string {

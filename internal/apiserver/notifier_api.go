@@ -28,6 +28,9 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/notifier/metrics", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierMetrics(w, r, cfgDir)
 	})))
+	m.Handle("/api/v1/notifier/status", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierStatus(w, r)
+	})))
 	m.Handle("/api/v1/notifier/history", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierHistory(w, r, cfgDir)
 	})))
@@ -176,6 +179,14 @@ func handleNotifierTest(w http.ResponseWriter, r *http.Request) {
 	writeNotifierJSON(w, http.StatusOK, map[string]any{
 		"results": results,
 	})
+}
+
+func handleNotifierStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, notify.RuntimeStatus())
 }
 
 func writeNotifierJSON(w http.ResponseWriter, code int, v any) {
