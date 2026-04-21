@@ -17,6 +17,11 @@
     metricsMeta: { generated_at: '', source: '', window_start: '', window_end: '', total_rows_scanned: 0, degraded: false, warnings: [] },
     metricsUpdatedTimer: null,
     recentActions: [],
+    historyPollTimer: null,
+    historyPollMs: 7000,
+    historyLatestCursor: '',
+    historyKnownCursors: new Set(),
+    historyPollInFlight: false,
   };
 
   const byId = (id) => document.getElementById(id);
@@ -361,22 +366,112 @@
     }
   }
 
-  async function fetchHistory() {
+  function historyFilters() {
+    const limitRaw = Number(byId('notifierHistoryLimit')?.value || 100);
+    const limit = limitRaw === 50 ? 50 : 100;
+    return {
+      limit,
+      channel: String(byId('notifierHistoryChannel')?.value || '').trim(),
+      kind: String(byId('notifierHistoryKind')?.value || '').trim(),
+      status: String(byId('notifierHistoryStatus')?.value || 'all'),
+    };
+  }
+
+  function historyQueryString(filters, sinceCursor = '') {
     const p = new URLSearchParams();
-    p.set('limit', String(Math.max(1, Number(byId('notifierHistoryLimit')?.value || 50))));
-    const c = String(byId('notifierHistoryChannel')?.value || '').trim(); if (c) p.set('channel', c);
-    const k = String(byId('notifierHistoryKind')?.value || '').trim(); if (k) p.set('kind', k);
-    p.set('status', String(byId('notifierHistoryStatus')?.value || 'all'));
-    const payload = await request(`/cfm-admin/api/v1/notifier/history?${p.toString()}`);
-    state.historyRows = Array.isArray(payload.rows) ? payload.rows : [];
-    const body = byId('notifierHistoryBody'); body.replaceChildren();
+    p.set('limit', String(filters.limit));
+    if (filters.channel) p.set('channel', filters.channel);
+    if (filters.kind) p.set('kind', filters.kind);
+    p.set('status', filters.status);
+    if (sinceCursor) p.set('since', sinceCursor);
+    return p.toString();
+  }
+
+  function historyRowToHTML(row) {
+    return `<td>${row.time || ''}</td><td>${row.kind || ''}</td><td>${row.channel || ''}</td><td>${row.status || ''}</td><td>${row.reason || ''}</td><td>${row.error || ''}</td>`;
+  }
+
+  function prependHistoryRows(rows) {
+    const body = byId('notifierHistoryBody');
+    if (!body || !Array.isArray(rows) || rows.length === 0) return 0;
+    let added = 0;
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (!row?.cursor || state.historyKnownCursors.has(row.cursor)) continue;
+      state.historyKnownCursors.add(row.cursor);
+      const tr = document.createElement('tr');
+      tr.innerHTML = historyRowToHTML(row);
+      body.insertBefore(tr, body.firstChild);
+      state.historyRows.unshift(row);
+      if (row.kind) state.detectorHints.push(row.kind);
+      added += 1;
+    }
+    return added;
+  }
+
+  function replaceHistoryRows(rows) {
+    const body = byId('notifierHistoryBody');
+    if (!body) return;
+    state.historyRows = Array.isArray(rows) ? rows : [];
+    state.historyKnownCursors = new Set(state.historyRows.map((row) => String(row?.cursor || '')).filter(Boolean));
+    body.replaceChildren();
     for (const row of state.historyRows) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${row.time || ''}</td><td>${row.kind || ''}</td><td>${row.channel || ''}</td><td>${row.status || ''}</td><td>${row.reason || ''}</td><td>${row.error || ''}</td>`;
+      tr.innerHTML = historyRowToHTML(row);
       body.appendChild(tr);
       if (row.kind) state.detectorHints.push(row.kind);
     }
+  }
+
+  async function fetchHistory({ poll = false } = {}) {
+    const filters = historyFilters();
+    byId('notifierHistoryLimit').value = String(filters.limit);
+    const qs = historyQueryString(filters, poll ? state.historyLatestCursor : '');
+    const payload = await request(`/cfm-admin/api/v1/notifier/history?${qs}`);
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    if (poll) {
+      const added = prependHistoryRows(rows);
+      if (added > 0) showTabStatus('history', `Added ${added} new row${added === 1 ? '' : 's'}.`);
+    } else {
+      replaceHistoryRows(rows);
+    }
+    if (state.historyRows[0]?.cursor) state.historyLatestCursor = state.historyRows[0].cursor;
     state.detectorHints = Array.from(new Set(state.detectorHints)); renderDetectorHints();
+  }
+
+  async function pollHistory() {
+    if (state.tab !== 'history' || state.historyPollInFlight) return;
+    if (!state.historyLatestCursor) return fetchHistory({ poll: false });
+    state.historyPollInFlight = true;
+    try {
+      await fetchHistory({ poll: true });
+    } catch (_) {
+      // keep UI quiet during background polls
+    } finally {
+      state.historyPollInFlight = false;
+    }
+  }
+
+  function stopHistoryPolling() {
+    if (state.historyPollTimer) {
+      window.clearInterval(state.historyPollTimer);
+      state.historyPollTimer = null;
+    }
+  }
+
+  function startHistoryPolling() {
+    stopHistoryPolling();
+    fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false));
+    state.historyPollTimer = window.setInterval(() => { pollHistory(); }, state.historyPollMs);
+  }
+
+  function setTab(nextTab) {
+    if (!nextTab || state.tab === nextTab) return;
+    const prevTab = state.tab;
+    state.tab = nextTab;
+    renderTabs();
+    if (prevTab === 'history' && nextTab !== 'history') stopHistoryPolling();
+    if (nextTab === 'history') startHistoryPolling();
   }
 
   async function refreshCounters() {
@@ -612,7 +707,7 @@
   function cell(child) { const td = document.createElement('td'); td.appendChild(child); return td; }
 
   function init() {
-    document.querySelectorAll('.notifier-tab-btn').forEach((btn) => btn.addEventListener('click', () => { state.tab = btn.dataset.tab; renderTabs(); }));
+    document.querySelectorAll('.notifier-tab-btn').forEach((btn) => btn.addEventListener('click', () => { setTab(btn.dataset.tab); }));
     byId('notifierAddChannelBtn')?.addEventListener('click', addChannel);
     byId('notifierAddDetectorBtn')?.addEventListener('click', addDetector);
     byId('notifierSaveDraftBtn')?.addEventListener('click', () => openSaveModal().catch((e) => showStatus(e.message, false)));
@@ -641,7 +736,7 @@
       if (!selected.length) return showTabStatus('test', 'Select at least one channel for test.', false);
       runChannelTest(selected);
     });
-    byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory().catch((e) => showStatus(e.message, false)));
+    byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false)));
     byId('notifierOverviewRefreshMetrics')?.addEventListener('click', () => refreshCounters().catch((e) => showStatus(e.message, false)));
     byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => {
       const currentEnabled = state.draftConfig.notifier.enabled !== false;
@@ -666,6 +761,7 @@
     loadConfig()
       .then(() => refreshRuntimeStatus())
       .catch((err) => showStatus(err.message || 'Failed to load config.', false));
+    if (state.tab === 'history') startHistoryPolling();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
