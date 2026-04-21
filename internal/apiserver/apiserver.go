@@ -175,6 +175,9 @@ func Start(
 	// ── Debug API (admin-only) ───────────────────────────────────────────────
 	RegisterDebugEndpoints(m)
 
+	// ── Notifier admin API (admin-only) ─────────────────────────────────────
+	RegisterNotifierEndpoints(m, cfgDir)
+
 	// ── MySQL governor ────────────────────────────────────────────────────────
 	if gov != nil {
 		// Global MySQL governor routes stay strictly admin-only.
