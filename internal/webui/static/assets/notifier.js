@@ -1,5 +1,15 @@
 (() => {
-  let state = { config: { channels: [], detectors: {} }, path: '', testResults: [], activeTab: 'config' };
+  let state = {
+    config: { channels: [], detectors: {} },
+    path: '',
+    testResults: [],
+    activeTab: 'config',
+    historyRows: [],
+    historyStack: [''],
+    historyPage: 0,
+    historyHasMore: false,
+    historyNextCursor: '',
+  };
 
   function byId(id) { return document.getElementById(id); }
 
@@ -139,6 +149,7 @@
     renderChannels();
     renderDetectors();
     renderTests();
+    renderHistory();
     applyTabVisibility();
   }
 
@@ -173,8 +184,110 @@
   }
 
   function setActiveTab(tab) {
-    state.activeTab = tab === 'tests' ? 'tests' : 'config';
+    if (tab !== 'tests' && tab !== 'history') tab = 'config';
+    state.activeTab = tab;
     applyTabVisibility();
+    if (tab === 'history' && state.historyRows.length === 0) {
+      loadHistory().catch((e) => showStatus(e.message, false));
+    }
+  }
+
+  function historyFilters() {
+    const limitRaw = parseInt(byId('notifierHistoryLimit')?.value || '50', 10);
+    return {
+      kind: (byId('notifierHistoryKind')?.value || '').trim(),
+      channel: (byId('notifierHistoryChannel')?.value || '').trim(),
+      status: (byId('notifierHistoryStatus')?.value || '').trim(),
+      limit: Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 50,
+    };
+  }
+
+  function buildHistoryURL(beforeCursor = '') {
+    const f = historyFilters();
+    const q = new URLSearchParams();
+    q.set('limit', String(f.limit));
+    if (beforeCursor) q.set('before', beforeCursor);
+    if (f.kind) q.set('kind', f.kind);
+    if (f.channel) q.set('channel', f.channel);
+    if (f.status) q.set('status', f.status);
+    return `/cfm-admin/api/v1/notifier/history?${q.toString()}`;
+  }
+
+  async function loadHistory(beforeCursor = '') {
+    const payload = await request(buildHistoryURL(beforeCursor));
+    state.historyRows = Array.isArray(payload.rows) ? payload.rows : [];
+    state.historyHasMore = payload.has_more === true;
+    state.historyNextCursor = payload.next_cursor || '';
+    renderHistory();
+  }
+
+  function historyApplyFilters() {
+    state.historyStack = [''];
+    state.historyPage = 0;
+    loadHistory('').catch((e) => showStatus(e.message, false));
+  }
+
+  function historyNextPage() {
+    if (!state.historyHasMore || !state.historyNextCursor) return;
+    state.historyStack.push(state.historyNextCursor);
+    state.historyPage = state.historyStack.length - 1;
+    loadHistory(state.historyNextCursor).catch((e) => showStatus(e.message, false));
+  }
+
+  function historyPrevPage() {
+    if (state.historyPage <= 0) return;
+    state.historyStack.pop();
+    state.historyPage = state.historyStack.length - 1;
+    const before = state.historyStack[state.historyPage] || '';
+    loadHistory(before).catch((e) => showStatus(e.message, false));
+  }
+
+  function prettyJSON(v) {
+    try {
+      return JSON.stringify(v || {}, null, 2);
+    } catch (_) {
+      return '{}';
+    }
+  }
+
+  function renderHistory() {
+    const body = byId('notifierHistoryBody');
+    if (!body) return;
+    body.replaceChildren();
+    for (const row of state.historyRows || []) {
+      const tr = document.createElement('tr');
+      const statusColor = row.status === 'error' ? '#f87171' : '#4ade80';
+      tr.innerHTML = `
+        <td>${row.time || '-'}</td>
+        <td>${row.host || '-'}</td>
+        <td>${row.kind || '-'}</td>
+        <td>${row.srcip || '-'}</td>
+        <td>${row.reason || '-'}</td>
+        <td>${row.channel || '-'}</td>
+        <td style="color:${statusColor};font-weight:600">${row.status || '-'}</td>
+        <td></td>
+      `;
+      const detailsTD = tr.children[7];
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'View';
+      const pre = document.createElement('pre');
+      pre.style.maxWidth = '720px';
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.textContent = prettyJSON(row.payload);
+      details.append(summary, pre);
+      detailsTD.appendChild(details);
+      body.appendChild(tr);
+    }
+    const label = byId('notifierHistoryPageLabel');
+    if (label) {
+      const count = (state.historyRows || []).length;
+      label.textContent = `Page ${state.historyPage + 1} • ${count} row${count === 1 ? '' : 's'}`;
+    }
+    const prevBtn = byId('notifierHistoryPrevBtn');
+    if (prevBtn) prevBtn.disabled = state.historyPage <= 0;
+    const nextBtn = byId('notifierHistoryNextBtn');
+    if (nextBtn) nextBtn.disabled = !(state.historyHasMore && state.historyNextCursor);
   }
 
   function upsertChannel(existingId = '') {
@@ -243,6 +356,10 @@
     byId('notifierRunTestBtn')?.addEventListener('click', () => runNotifierTest().catch((e) => showStatus(e.message, false)));
     byId('notifierTabConfigBtn')?.addEventListener('click', () => setActiveTab('config'));
     byId('notifierTabTestsBtn')?.addEventListener('click', () => setActiveTab('tests'));
+    byId('notifierTabHistoryBtn')?.addEventListener('click', () => setActiveTab('history'));
+    byId('notifierHistoryApplyBtn')?.addEventListener('click', historyApplyFilters);
+    byId('notifierHistoryNextBtn')?.addEventListener('click', historyNextPage);
+    byId('notifierHistoryPrevBtn')?.addEventListener('click', historyPrevPage);
     loadConfig().catch((e) => showStatus(e.message || 'Failed to load notifier config.', false));
   }
 

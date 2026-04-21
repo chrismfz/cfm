@@ -21,6 +21,7 @@
         <div class="toolbar wrap">
           <button id="notifierTabConfigBtn" class="btn-quiet">Config</button>
           <button id="notifierTabTestsBtn" class="btn-quiet">Tests</button>
+          <button id="notifierTabHistoryBtn" class="btn-quiet">History</button>
         </div>
       </section>
 
@@ -81,6 +82,35 @@
               <tr><th>Channel</th><th>Attempted at</th><th>Status</th><th>Error</th><th>Delivery duration</th></tr>
             </thead>
             <tbody id="notifierTestsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide" data-notifier-tab="history" style="display:none">
+        <h2>History</h2>
+        <p class="muted">Newest-first delivery history from notify.log.jsonl with cursor-based pagination.</p>
+        <div class="toolbar wrap">
+          <input id="notifierHistoryKind" placeholder="Kind (optional)" />
+          <input id="notifierHistoryChannel" placeholder="Channel (optional)" />
+          <select id="notifierHistoryStatus">
+            <option value="">Any status</option>
+            <option value="success">Success</option>
+            <option value="error">Error</option>
+          </select>
+          <input id="notifierHistoryLimit" type="number" min="1" max="200" value="50" placeholder="Limit" />
+          <button id="notifierHistoryApplyBtn">Apply</button>
+        </div>
+        <div class="toolbar wrap">
+          <button id="notifierHistoryPrevBtn" class="btn-quiet">Newer</button>
+          <button id="notifierHistoryNextBtn" class="btn-quiet">Older</button>
+          <span id="notifierHistoryPageLabel" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Host</th><th>Kind</th><th>SrcIP</th><th>Reason</th><th>Channel</th><th>Status</th><th>Details</th></tr>
+            </thead>
+            <tbody id="notifierHistoryBody"></tbody>
           </table>
         </div>
       </section>

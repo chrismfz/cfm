@@ -195,3 +195,89 @@ func TestNotifierMetricsInvalidWindow(t *testing.T) {
 		t.Fatalf("expected 400, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestNotifierHistoryEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := filepath.Join(dir, "notify.log.jsonl")
+	cfg := notify.AdminConfig{
+		Notifier: notify.AdminNotifierConfig{Enabled: true, JSONLPath: jsonl},
+	}
+	if _, err := notify.SaveAdminConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	rows := []string{
+		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","reason":"slow","channel":"ops","err":""}`,
+		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
+		`{"time":"` + now.Add(-3*time.Minute).Format(time.RFC3339Nano) + `","host":"db03","kind":"mysql","srcip":"3.3.3.3","reason":"deadlock","channel":"ops","err":""}`,
+	}
+	if err := os.WriteFile(jsonl, []byte(strings.Join(rows, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=2&kind=mysql&channel=ops&status=success", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Rows       []map[string]any `json:"rows"`
+		HasMore    bool             `json:"has_more"`
+		NextCursor string           `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rr.Body.String())
+	}
+	if len(payload.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(payload.Rows))
+	}
+	if payload.Rows[0]["kind"] != "mysql" || payload.Rows[1]["kind"] != "mysql" {
+		t.Fatalf("unexpected kinds: %#v", payload.Rows)
+	}
+	if payload.Rows[0]["status"] != "success" {
+		t.Fatalf("expected success status: %#v", payload.Rows[0])
+	}
+	if payload.HasMore {
+		t.Fatalf("expected no more rows")
+	}
+	if payload.NextCursor != "" {
+		t.Fatalf("expected empty next_cursor when has_more=false")
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=1&status=all", nil)
+	rr2 := httptest.NewRecorder()
+	mux.ServeHTTP(rr2, adminCtx(req2))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr2.Code, rr2.Body.String())
+	}
+	var p2 struct {
+		Rows       []map[string]any `json:"rows"`
+		HasMore    bool             `json:"has_more"`
+		NextCursor string           `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &p2); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(p2.Rows) != 1 || !p2.HasMore || p2.NextCursor == "" {
+		t.Fatalf("unexpected page-1 payload: %#v", p2)
+	}
+	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?limit=2&before="+p2.NextCursor, nil)
+	rr3 := httptest.NewRecorder()
+	mux.ServeHTTP(rr3, adminCtx(req3))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr3.Code, rr3.Body.String())
+	}
+	var p3 struct {
+		Rows []map[string]any `json:"rows"`
+	}
+	if err := json.Unmarshal(rr3.Body.Bytes(), &p3); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(p3.Rows) != 2 {
+		t.Fatalf("expected 2 remaining rows, got %d", len(p3.Rows))
+	}
+}
