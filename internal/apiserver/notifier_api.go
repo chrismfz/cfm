@@ -42,10 +42,36 @@ func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string)
 		writeNotifierJSON(w, http.StatusOK, map[string]any{"config": cfg, "path": path})
 	case http.MethodPut:
 		var req struct {
-			Config notify.AdminConfig `json:"config"`
+			Config            notify.AdminConfig             `json:"config"`
+			Notifier          *notify.AdminNotifierConfig    `json:"notifier,omitempty"`
+			Dedupe            *notify.AdminDedupeConfig      `json:"dedupe,omitempty"`
+			ChannelMutations  []notify.AdminChannelMutation  `json:"channel_mutations,omitempty"`
+			DetectorMutations []notify.AdminDetectorMutation `json:"detector_mutations,omitempty"`
+			DeleteChannels    []string                       `json:"delete_channels,omitempty"`
+			DeleteDetectors   []string                       `json:"delete_detectors,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+			return
+		}
+		if len(req.ChannelMutations) > 0 || len(req.DetectorMutations) > 0 || len(req.DeleteChannels) > 0 || len(req.DeleteDetectors) > 0 || req.Notifier != nil || req.Dedupe != nil {
+			if err := validateNotifierMutations(req.ChannelMutations, req.DetectorMutations); err != nil {
+				writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			path, err := notify.SaveAdminConfigMutations(cfgDir, notify.AdminMutations{
+				Notifier:            req.Notifier,
+				Dedupe:              req.Dedupe,
+				Channels:            req.ChannelMutations,
+				Detectors:           req.DetectorMutations,
+				DeleteChannelIDs:    req.DeleteChannels,
+				DeleteDetectorNames: req.DeleteDetectors,
+			})
+			if err != nil {
+				writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
 			return
 		}
 		if err := validateNotifierConfig(req.Config); err != nil {
@@ -61,6 +87,32 @@ func handleNotifierConfig(w http.ResponseWriter, r *http.Request, cfgDir string)
 	default:
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 	}
+}
+
+func validateNotifierMutations(chMut []notify.AdminChannelMutation, detMut []notify.AdminDetectorMutation) error {
+	for _, m := range chMut {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			return errors.New("channel mutation id is required")
+		}
+		if m.Delete {
+			continue
+		}
+		if m.Type != nil {
+			typ := strings.TrimSpace(*m.Type)
+			switch typ {
+			case "sendmail", "smtp", "slack", "slack_webhook":
+			default:
+				return errors.New("unsupported channel type: " + typ)
+			}
+		}
+	}
+	for _, m := range detMut {
+		if strings.TrimSpace(m.Name) == "" {
+			return errors.New("detector mutation name is required")
+		}
+	}
+	return nil
 }
 
 func handleNotifierReload(w http.ResponseWriter, r *http.Request, cfgDir string) {
