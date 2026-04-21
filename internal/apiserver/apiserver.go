@@ -177,6 +177,7 @@ func Start(
 
 	// ── Notifier admin API (admin-only) ─────────────────────────────────────
 	RegisterNotifierEndpoints(m, cfgDir)
+	RegisterDetectorsEndpoints(m, cfgDir)
 
 	// ── MySQL governor ────────────────────────────────────────────────────────
 	if gov != nil {
