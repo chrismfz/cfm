@@ -42,6 +42,28 @@ body {
   gap: .5rem;
 }
 .meta { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-left: auto; justify-content: flex-end; }
+.recent-actions { position: relative; }
+.recent-actions > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.recent-actions > summary::-webkit-details-marker { display: none; }
+.recent-actions-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + .35rem);
+  width: min(460px, 80vw);
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0a1426;
+  padding: .5rem .65rem;
+  box-shadow: 0 12px 28px rgba(2, 6, 23, .48);
+}
+.tab-status { margin-top: -.2rem; }
+.danger-text { color: #fca5a5; }
 button {
   background: var(--accent);
   color: white;

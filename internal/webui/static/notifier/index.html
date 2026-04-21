@@ -15,6 +15,12 @@
       <h1>Notifier</h1>
       <nav class="top-nav" data-shared-nav></nav>
       <div class="meta">
+        <details class="recent-actions">
+          <summary class="btn-quiet">Recent actions</summary>
+          <div class="recent-actions-menu">
+            <ul id="notifierRecentActionsList" class="list-compact"></ul>
+          </div>
+        </details>
         <span id="notifierDirtyBadge" class="pill">Saved</span>
         <button id="notifierSaveDraftBtn">Save</button>
         <button id="notifierDiscardBtn" class="btn-quiet">Cancel edits</button>
@@ -38,6 +44,7 @@
 
       <section class="card wide notifier-tab-panel" data-tab="overview">
         <h2>Overview</h2>
+        <p id="notifierStatusOverview" class="statusline tab-status" style="display:none"></p>
         <div class="summary-grid">
           <div class="summary-card"><h4>Enabled</h4><div class="value" id="notifierOverviewEnabled"></div></div>
           <div class="summary-card"><h4>Loaded at</h4><div class="value" id="notifierOverviewLoadedAt">-</div></div>
@@ -69,6 +76,7 @@
 
       <section class="card wide notifier-tab-panel" data-tab="channels" style="display:none">
         <h2>Channels</h2>
+        <p id="notifierStatusChannels" class="statusline tab-status" style="display:none"></p>
         <div class="toolbar wrap">
           <select id="notifierNewChannelType" class="input"><option value="sendmail">sendmail</option><option value="smtp">smtp</option><option value="slack_webhook">slack_webhook</option></select>
           <input id="notifierNewChannelName" class="input input-wide" placeholder="channel name" />
@@ -79,6 +87,7 @@
 
       <section class="card wide notifier-tab-panel" data-tab="routing" style="display:none">
         <h2>Routing (Detector Overrides)</h2>
+        <p id="notifierStatusRouting" class="statusline tab-status" style="display:none"></p>
         <div class="toolbar wrap"><button id="notifierAddDetectorBtn">Add detector override</button></div>
         <datalist id="notifierDetectorKeys"></datalist>
         <div class="table-wrap"><table><thead><tr><th>Detector key</th><th>Notify</th><th>Channels</th><th>Min severity</th><th>Cooldown</th><th>Actions</th></tr></thead><tbody id="notifierDetectorsBody"></tbody></table></div>
@@ -87,6 +96,7 @@
 
       <section class="card wide notifier-tab-panel" data-tab="templates" style="display:none">
         <h2>Templates & Dedupe</h2>
+        <p id="notifierStatusTemplates" class="statusline tab-status" style="display:none"></p>
         <div class="summary-grid">
           <div><label class="muted">Subject template</label><textarea id="notifierSubjectTemplate" class="input" style="width:100%;min-height:76px"></textarea></div>
           <div><label class="muted">Body template</label><textarea id="notifierBodyTemplate" class="input" style="width:100%;min-height:76px"></textarea></div>
@@ -100,6 +110,7 @@
 
       <section class="card wide notifier-tab-panel" data-tab="test" style="display:none">
         <h2>Test Center</h2>
+        <p id="notifierStatusTest" class="statusline tab-status" style="display:none"></p>
         <div id="notifierTestChannels" class="chips"></div>
         <div class="summary-grid" style="margin-top:.7rem;">
           <input id="notifierTestSubject" class="input input-wide" placeholder="Subject" />
@@ -111,12 +122,17 @@
 
       <section class="card wide notifier-tab-panel" data-tab="history" style="display:none">
         <h2>History</h2>
+        <p id="notifierStatusHistory" class="statusline tab-status" style="display:none"></p>
         <div class="toolbar wrap">
           <input id="notifierHistoryChannel" class="input" placeholder="channel" />
           <input id="notifierHistoryKind" class="input" placeholder="kind" />
           <select id="notifierHistoryStatus" class="input"><option value="all">all</option><option value="success">success</option><option value="error">error</option></select>
           <input id="notifierHistoryLimit" class="input" value="50" />
           <button id="notifierHistoryRefreshBtn" class="btn-quiet">Refresh</button>
+        </div>
+        <div class="toolbar wrap">
+          <input id="notifierRestoreBackupId" class="input input-wide" placeholder="backup id" />
+          <button id="notifierRestoreBackupBtn" class="btn-quiet">Restore backup</button>
         </div>
         <div class="table-wrap"><table><thead><tr><th>Time</th><th>Kind</th><th>Channel</th><th>Status</th><th>Reason</th><th>Error</th></tr></thead><tbody id="notifierHistoryBody"></tbody></table></div>
       </section>
