@@ -35,6 +35,8 @@
     historyNextCursor: '',
     backups: [],
     activeBackupID: '',
+    historyDetectorTelemetry: { sections: [], kinds: [] },
+    detectorModalEditing: '',
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -86,8 +88,30 @@
       path: payload.path || '',
     };
     render();
+    await refreshDetectorSuggestionTelemetry();
     await loadBackups();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
+  }
+
+  async function refreshDetectorSuggestionTelemetry() {
+    try {
+      const payload = await request('/cfm-admin/api/v1/notifier/history?limit=200&status=all');
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const sectionSet = new Set();
+      const kindSet = new Set();
+      for (const row of rows) {
+        const section = String(row?.payload?.section || '').trim();
+        const kind = String(row?.kind || row?.payload?.kind || '').trim();
+        if (section) sectionSet.add(section);
+        if (kind) kindSet.add(kind);
+      }
+      state.historyDetectorTelemetry = {
+        sections: Array.from(sectionSet).sort((a, b) => a.localeCompare(b)),
+        kinds: Array.from(kindSet).sort((a, b) => a.localeCompare(b)),
+      };
+    } catch (_) {
+      state.historyDetectorTelemetry = { sections: [], kinds: [] };
+    }
   }
 
   async function saveConfig() {
@@ -531,24 +555,87 @@
     syncDirtyState();
   }
 
-  function upsertDetector(existing = '') {
+  function validateDetectorKey(value) {
+    const key = String(value || '').trim();
+    if (!key) return { ok: false, message: 'Detector key is required.' };
+    if (/\s/.test(key)) return { ok: false, message: 'Detector key cannot include whitespace.' };
+    if (/[\r\n\[\]"]/.test(key)) {
+      return { ok: false, message: 'Detector key cannot include line breaks, quotes, or brackets.' };
+    }
+    if (key.length > 128) return { ok: false, message: 'Detector key is too long (max 128 chars).' };
+    return { ok: true, message: '' };
+  }
+
+  function detectorSuggestionKeys() {
+    const out = new Set(Object.keys(state.draftConfig.detectors || {}));
+    for (const section of state.historyDetectorTelemetry.sections || []) out.add(section);
+    for (const kind of state.historyDetectorTelemetry.kinds || []) out.add(kind);
+    return Array.from(out).sort((a, b) => a.localeCompare(b));
+  }
+
+  function renderDetectorSuggestionList() {
+    const list = byId('notifierDetectorSuggestions');
+    if (!list) return;
+    list.replaceChildren();
+    for (const key of detectorSuggestionKeys()) {
+      const opt = document.createElement('option');
+      opt.value = key;
+      list.appendChild(opt);
+    }
+  }
+
+  function closeDetectorModal() {
+    const modal = byId('notifierDetectorModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function openDetectorModal(existing = '') {
     const source = (state.draftConfig.detectors || {})[existing] || {};
-    const detector = (prompt('Detector name', existing || '') || '').trim().toLowerCase();
-    if (!detector) return;
-    const notify = confirm('Send notifications for this detector?');
-    const cooldown = (prompt('Cooldown (optional, e.g. 5m)', source.cooldown || '') || '').trim();
-    const minSeverity = (prompt('Minimum severity (optional)', source.min_severity || '') || '').trim();
-    const channels = (prompt('Channel IDs CSV (optional)', Array.isArray(source.channels) ? source.channels.join(',') : '') || '')
+    state.detectorModalEditing = existing;
+    renderDetectorSuggestionList();
+
+    const nameInput = byId('notifierDetectorNameInput');
+    const notifyInput = byId('notifierDetectorNotifyInput');
+    const cooldownInput = byId('notifierDetectorCooldownInput');
+    const minSeverityInput = byId('notifierDetectorMinSeverityInput');
+    const channelsInput = byId('notifierDetectorChannelsInput');
+    const errLine = byId('notifierDetectorNameError');
+    if (nameInput) nameInput.value = existing || '';
+    if (notifyInput) notifyInput.checked = source.notify !== false;
+    if (cooldownInput) cooldownInput.value = source.cooldown || '';
+    if (minSeverityInput) minSeverityInput.value = source.min_severity || '';
+    if (channelsInput) channelsInput.value = Array.isArray(source.channels) ? source.channels.join(',') : '';
+    if (errLine) errLine.textContent = '';
+    const modal = byId('notifierDetectorModal');
+    if (modal) modal.style.display = 'flex';
+    nameInput?.focus();
+  }
+
+  function saveDetectorFromModal() {
+    const existing = state.detectorModalEditing || '';
+    const detector = (byId('notifierDetectorNameInput')?.value || '').trim();
+    const validation = validateDetectorKey(detector);
+    const errLine = byId('notifierDetectorNameError');
+    if (!validation.ok) {
+      if (errLine) errLine.textContent = validation.message;
+      return;
+    }
+    const notify = byId('notifierDetectorNotifyInput')?.checked !== false;
+    const cooldown = (byId('notifierDetectorCooldownInput')?.value || '').trim();
+    const minSeverity = (byId('notifierDetectorMinSeverityInput')?.value || '').trim();
+    const channels = (byId('notifierDetectorChannelsInput')?.value || '')
       .split(',').map((v) => v.trim()).filter(Boolean);
 
     if (!state.draftConfig.detectors || typeof state.draftConfig.detectors !== 'object') state.draftConfig.detectors = {};
     if (existing && existing !== detector) delete state.draftConfig.detectors[existing];
     state.draftConfig.detectors[detector] = { notify, cooldown, min_severity: minSeverity, channels };
+    closeDetectorModal();
     renderDetectors();
     syncDirtyState();
   }
 
-  function editDetector(detector) { upsertDetector(detector); }
+  function upsertDetector(existing = '') { openDetectorModal(existing); }
+  function editDetector(detector) { openDetectorModal(detector); }
   function deleteDetector(detector) {
     if (!confirm(`Delete detector override ${detector}?`)) return;
     delete state.draftConfig.detectors[detector];
@@ -752,6 +839,15 @@
     byId('notifierHistoryPrevBtn')?.addEventListener('click', historyPrevPage);
     byId('notifierBackupsRefreshBtn')?.addEventListener('click', () => loadBackups().catch((e) => showStatus(e.message, false)));
     byId('notifierBackupDiffCloseBtn')?.addEventListener('click', closeBackupDiffModal);
+    byId('notifierDetectorCancelBtn')?.addEventListener('click', closeDetectorModal);
+    byId('notifierDetectorSaveBtn')?.addEventListener('click', saveDetectorFromModal);
+    byId('notifierDetectorNameInput')?.addEventListener('input', () => {
+      const key = byId('notifierDetectorNameInput')?.value || '';
+      const validation = validateDetectorKey(key);
+      const errLine = byId('notifierDetectorNameError');
+      if (!errLine) return;
+      errLine.textContent = validation.ok ? '' : validation.message;
+    });
     byId('notifierBackupRestoreBtn')?.addEventListener('click', () => {
       if (!state.activeBackupID) return;
       restoreBackup(state.activeBackupID).catch((e) => showStatus(e.message, false));
