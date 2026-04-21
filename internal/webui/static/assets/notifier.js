@@ -1,500 +1,425 @@
 (() => {
   function clone(v) {
-    try {
-      if (typeof structuredClone === 'function') return structuredClone(v);
-    } catch (_) {}
+    try { if (typeof structuredClone === 'function') return structuredClone(v); } catch (_) {}
     return JSON.parse(JSON.stringify(v || {}));
   }
 
-  function normalizeConfig(config) {
-    const next = config && typeof config === 'object' ? config : {};
-    next.channels = Array.isArray(next.channels) ? next.channels : [];
-    next.detectors = next.detectors && typeof next.detectors === 'object' ? next.detectors : {};
-    return next;
-  }
+  const SAMPLE_EVENT = {
+    Host: 'edge-1', Kind: 'NOTIFIER/TEST', SrcIP: '203.0.113.10', Reason: 'Manual test from UI', Severity: 'info',
+  };
 
-  function request(path, opts = {}) {
-    return fetch(path, {
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      ...opts,
-    }).then(async (res) => {
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`);
-      return payload;
-    });
-  }
-
-  let state = {
-    currentConfig: { channels: [], detectors: {} },
-    draftConfig: { channels: [], detectors: {} },
-    path: '',
-    isDirty: false,
-    pendingDelete: null,
-    pendingTabSwitch: null,
-    saveSummary: null,
+  const state = {
+    currentConfig: { notifier: {}, dedupe: {}, channels: [], detectors: {} },
+    draftConfig: { notifier: {}, dedupe: {}, channels: [], detectors: {} },
+    path: '', isDirty: false, pendingDelete: null, pendingLeave: null,
+    tab: 'overview', lastReloadAt: null, historyRows: [], detectorHints: ['*'],
   };
 
   const byId = (id) => document.getElementById(id);
-  const keyedDetectors = (cfg) => (cfg?.detectors && typeof cfg.detectors === 'object' ? cfg.detectors : {});
 
-  function keyedChannels(cfg) {
-    const out = {};
-    for (const ch of cfg?.channels || []) {
-      const id = String(ch?.id || '').trim();
-      if (id) out[id] = ch;
+  function request(path, opts = {}) {
+    return fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, ...opts })
+      .then(async (res) => {
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`);
+        return payload;
+      });
+  }
+
+  function normalizeConfig(input) {
+    const cfg = input && typeof input === 'object' ? clone(input) : {};
+    cfg.notifier = cfg.notifier && typeof cfg.notifier === 'object' ? cfg.notifier : {};
+    cfg.dedupe = cfg.dedupe && typeof cfg.dedupe === 'object' ? cfg.dedupe : {};
+    cfg.channels = Array.isArray(cfg.channels) ? cfg.channels.map((c) => ({ ...c, id: String(c.id || c.name || '').trim() })) : [];
+    if (Array.isArray(cfg.detectors)) {
+      const map = {};
+      for (const row of cfg.detectors) {
+        const key = String(row?.key || row?.name || '').trim();
+        if (!key) continue;
+        map[key] = { notify: row.notify !== false, channels: Array.isArray(row.channels) ? row.channels : [], min_severity: row.min_severity || '', cooldown: row.cooldown || '' };
+      }
+      cfg.detectors = map;
     }
-    return out;
+    cfg.detectors = cfg.detectors && typeof cfg.detectors === 'object' ? cfg.detectors : {};
+    return cfg;
   }
 
   function configsEqual(a, b) {
-    try { return JSON.stringify(a || {}) === JSON.stringify(b || {}); } catch (_) { return false; }
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch (_) { return false; }
   }
 
   function showStatus(msg, ok = true) {
-    const el = byId('notifierStatus');
-    if (!el) return;
-    el.textContent = msg;
-    el.style.color = ok ? '#4ade80' : '#f87171';
+    const el = byId('notifierStatus'); if (!el) return;
+    el.textContent = msg; el.style.color = ok ? '#4ade80' : '#f87171';
   }
 
   function syncDirty() {
     state.isDirty = !configsEqual(state.currentConfig, state.draftConfig);
     const badge = byId('notifierDirtyBadge');
-    if (badge) {
-      badge.textContent = state.isDirty ? 'Unsaved changes' : 'Saved';
-      badge.className = state.isDirty ? 'pill warn' : 'pill';
-    }
+    if (badge) { badge.textContent = state.isDirty ? 'Unsaved changes' : 'Saved'; badge.className = state.isDirty ? 'pill warn' : 'pill'; }
+    renderOverview(); renderTestChannels(); renderTemplatePreview();
   }
 
-  function rowInput(value, cls = 'input input-wide', placeholder = '') {
-    const input = document.createElement('input');
-    input.className = cls;
-    input.value = value == null ? '' : String(value);
-    input.placeholder = placeholder;
-    return input;
+  function rowInput(v, cls = 'input', ph = '') {
+    const i = document.createElement('input'); i.className = cls; i.value = v == null ? '' : String(v); i.placeholder = ph; return i;
   }
 
-  function normalizeCSV(raw) {
-    return String(raw || '').split(',').map((v) => v.trim()).filter(Boolean);
+  function csv(raw) { return String(raw || '').split(',').map((v) => v.trim()).filter(Boolean); }
+
+  function renderTabs() {
+    document.querySelectorAll('.notifier-tab-btn').forEach((btn) => {
+      const active = btn.dataset.tab === state.tab;
+      btn.classList.toggle('btn-nav-active', active);
+    });
+    document.querySelectorAll('.notifier-tab-panel').forEach((p) => { p.style.display = p.dataset.tab === state.tab ? '' : 'none'; });
+  }
+
+  function renderOverview(counters = null) {
+    byId('notifierOverviewEnabled').textContent = state.draftConfig.notifier.enabled === false ? 'Disabled' : 'Enabled';
+    byId('notifierOverviewLastReload').textContent = state.lastReloadAt || 'Never';
+    byId('notifierOverviewPath').textContent = state.path || '-';
+    const body = byId('notifierOverviewCountersBody');
+    if (!body || !counters) return;
+    body.replaceChildren();
+    Object.keys(counters).sort().forEach((channel) => {
+      const c = counters[channel];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${channel}</td><td>${c.h1.attempts}</td><td>${c.h1.success}</td><td>${c.h1.fail}</td><td>${c.h24.attempts}</td><td>${c.h24.success}</td><td>${c.h24.fail}</td>`;
+      body.appendChild(tr);
+    });
   }
 
   function addChannel() {
-    const base = 'channel';
-    const known = new Set((state.draftConfig.channels || []).map((c) => String(c?.id || '').trim()).filter(Boolean));
-    let n = known.size + 1;
-    while (known.has(`${base}-${n}`)) n += 1;
-    state.draftConfig.channels.push({ id: `${base}-${n}`, type: 'sendmail', enabled: true, to: [] });
-    renderChannels();
-    syncDirty();
-  }
-
-  function duplicateChannel(id) {
-    const src = (state.draftConfig.channels || []).find((c) => String(c?.id || '').trim() === id);
-    if (!src) return;
-    let copyId = `${id}-copy`;
-    const known = new Set((state.draftConfig.channels || []).map((c) => String(c?.id || '').trim()));
-    let i = 2;
-    while (known.has(copyId)) {
-      copyId = `${id}-copy-${i}`;
-      i += 1;
-    }
-    state.draftConfig.channels.push({ ...clone(src), id: copyId });
-    renderChannels();
-    syncDirty();
-  }
-
-  function addDetector() {
-    const keys = new Set(Object.keys(keyedDetectors(state.draftConfig)));
-    let idx = keys.size + 1;
-    let key = `detector/${idx}`;
-    while (keys.has(key)) {
-      idx += 1;
-      key = `detector/${idx}`;
-    }
-    state.draftConfig.detectors[key] = { notify: true, cooldown: '', min_severity: '', channels: [] };
-    renderDetectors();
-    syncDirty();
-  }
-
-  function duplicateDetector(key) {
-    const src = keyedDetectors(state.draftConfig)[key];
-    if (!src) return;
-    const keys = new Set(Object.keys(keyedDetectors(state.draftConfig)));
-    let next = `${key}-copy`;
-    let i = 2;
-    while (keys.has(next)) {
-      next = `${key}-copy-${i}`;
-      i += 1;
-    }
-    state.draftConfig.detectors[next] = clone(src);
-    renderDetectors();
-    syncDirty();
-  }
-
-  function openDeleteConfirm(target) {
-    state.pendingDelete = target;
-    const msg = byId('notifierDeleteConfirmText');
-    if (msg) msg.textContent = `Delete ${target.kind} "${target.id}"?`;
-    const modal = byId('notifierDeleteConfirmModal');
-    if (modal) modal.style.display = 'flex';
-  }
-
-  function closeDeleteConfirm() {
-    state.pendingDelete = null;
-    const modal = byId('notifierDeleteConfirmModal');
-    if (modal) modal.style.display = 'none';
-  }
-
-  function doDelete() {
-    const pending = state.pendingDelete;
-    if (!pending) return;
-    if (pending.kind === 'channel') {
-      state.draftConfig.channels = state.draftConfig.channels.filter((c) => String(c?.id || '').trim() !== pending.id);
-      for (const [name, ov] of Object.entries(keyedDetectors(state.draftConfig))) {
-        if (!Array.isArray(ov?.channels)) continue;
-        keyedDetectors(state.draftConfig)[name].channels = ov.channels.filter((id) => String(id || '').trim() !== pending.id);
-      }
-      renderChannels();
-      renderDetectors();
-    } else {
-      delete state.draftConfig.detectors[pending.id];
-      renderDetectors();
-    }
-    syncDirty();
-    closeDeleteConfirm();
+    const type = String(byId('notifierNewChannelType')?.value || 'sendmail');
+    const nameRaw = String(byId('notifierNewChannelName')?.value || '').trim();
+    const base = nameRaw || `${type}-channel`;
+    const ids = new Set((state.draftConfig.channels || []).map((c) => String(c.id || '')));
+    let id = base; let i = 2;
+    while (ids.has(id)) { id = `${base}-${i}`; i += 1; }
+    state.draftConfig.channels.push({ id, type, enabled: true, to: [], path: '/usr/sbin/sendmail' });
+    if (byId('notifierNewChannelName')) byId('notifierNewChannelName').value = '';
+    renderChannels(); syncDirty();
   }
 
   function renderChannels() {
-    const body = byId('notifierChannelsBody');
-    if (!body) return;
+    const body = byId('notifierChannelsBody'); if (!body) return;
     body.replaceChildren();
-    for (const channel of state.draftConfig.channels || []) {
+    for (const ch of state.draftConfig.channels || []) {
       const tr = document.createElement('tr');
-      const id = String(channel?.id || '').trim();
-      const tdId = document.createElement('td');
-      const idInput = rowInput(id, 'input input-wide', 'channel id');
-      idInput.oninput = () => {
-        channel.id = String(idInput.value || '').trim();
-        renderDetectors();
-        syncDirty();
+      const idInput = rowInput(ch.id, 'input input-wide', 'name');
+      idInput.oninput = () => { ch.id = String(idInput.value || '').trim(); syncDirty(); renderDetectors(); };
+
+      const typeInput = rowInput(ch.type || '', 'input', 'sendmail/smtp/slack_webhook');
+      typeInput.oninput = () => { ch.type = String(typeInput.value || '').trim(); renderChannels(); syncDirty(); };
+
+      const enabledBtn = document.createElement('button'); enabledBtn.className = 'btn-quiet btn-sm'; enabledBtn.textContent = ch.enabled === false ? 'Disabled' : 'Enabled';
+      enabledBtn.onclick = () => { ch.enabled = ch.enabled === false; renderChannels(); syncDirty(); };
+
+      const fields = document.createElement('div'); fields.className = 'chips';
+      const addField = (label, key, ph = '') => {
+        const input = rowInput(ch[key] || '', 'input', ph);
+        input.oninput = () => { ch[key] = String(input.value || '').trim(); syncDirty(); };
+        const wrap = document.createElement('label'); wrap.className = 'muted'; wrap.textContent = `${label} `; wrap.appendChild(input); fields.appendChild(wrap);
       };
-      tdId.appendChild(idInput);
+      if (ch.type === 'sendmail') { addField('path', 'path', '/usr/sbin/sendmail'); addField('to', 'toCSV', 'a@b,c@d'); }
+      if (ch.type === 'smtp') { addField('host', 'host', 'smtp.example.com:587'); addField('from', 'from', 'cfm@example.com'); addField('to', 'toCSV', 'ops@example.com'); }
+      if (ch.type === 'slack' || ch.type === 'slack_webhook') { addField('webhook_url', 'webhook_url', 'https://hooks.slack...'); addField('mention', 'mention', '@ops'); }
+      if (ch.toCSV != null) ch.to = csv(ch.toCSV);
 
-      const tdType = document.createElement('td');
-      const typeInput = rowInput(channel.type || '', 'input input-wide', 'sendmail|smtp|slack');
-      typeInput.oninput = () => { channel.type = String(typeInput.value || '').trim(); syncDirty(); };
-      tdType.appendChild(typeInput);
+      const testBtn = document.createElement('button'); testBtn.className = 'btn-quiet btn-sm'; testBtn.textContent = 'Test';
+      testBtn.onclick = () => runChannelTest([ch.id]);
 
-      const tdEnabled = document.createElement('td');
-      const enabledBtn = document.createElement('button');
-      enabledBtn.className = 'btn-quiet btn-sm';
-      enabledBtn.textContent = channel.enabled === false ? 'Disabled' : 'Enabled';
-      enabledBtn.onclick = () => {
-        channel.enabled = channel.enabled === false;
-        renderChannels();
-        syncDirty();
-      };
-      tdEnabled.appendChild(enabledBtn);
+      const delBtn = document.createElement('button'); delBtn.className = 'btn-danger btn-sm'; delBtn.textContent = 'Delete';
+      delBtn.onclick = () => openDelete({ kind: 'channel', id: ch.id });
 
-      const tdTargets = document.createElement('td');
-      const targetsInput = rowInput(Array.isArray(channel.to) ? channel.to.join(', ') : '', 'input input-wide', 'to1,to2');
-      targetsInput.oninput = () => { channel.to = normalizeCSV(targetsInput.value); syncDirty(); };
-      tdTargets.appendChild(targetsInput);
-
-      const tdActions = document.createElement('td');
-      tdActions.className = 'actions-cell';
-      const dupBtn = document.createElement('button');
-      dupBtn.className = 'btn-quiet btn-sm';
-      dupBtn.textContent = 'Duplicate';
-      dupBtn.onclick = () => duplicateChannel(id || channel.id);
-      const toggleBtn = document.createElement('button');
-      toggleBtn.className = 'btn-quiet btn-sm';
-      toggleBtn.textContent = channel.enabled === false ? 'Enable' : 'Disable';
-      toggleBtn.onclick = () => {
-        channel.enabled = channel.enabled === false;
-        renderChannels();
-        syncDirty();
-      };
-      const delBtn = document.createElement('button');
-      delBtn.className = 'btn-danger btn-sm';
-      delBtn.textContent = 'Delete';
-      delBtn.onclick = () => openDeleteConfirm({ kind: 'channel', id: id || channel.id });
-      tdActions.append(dupBtn, toggleBtn, delBtn);
-
-      tr.append(tdId, tdType, tdEnabled, tdTargets, tdActions);
+      tr.append(cell(idInput), cell(typeInput), cell(enabledBtn), cell(fields), cell(testBtn), cell(delBtn));
       body.appendChild(tr);
     }
+  }
+
+  function renderDetectorHints() {
+    const dl = byId('notifierDetectorKeys'); if (!dl) return;
+    dl.replaceChildren();
+    state.detectorHints.forEach((key) => {
+      const opt = document.createElement('option'); opt.value = key; dl.appendChild(opt);
+    });
+  }
+
+  function addDetector() {
+    let next = '*';
+    if (state.draftConfig.detectors['*']) {
+      let i = 1;
+      while (state.draftConfig.detectors[`detector/${i}`]) i += 1;
+      next = `detector/${i}`;
+    }
+    state.draftConfig.detectors[next] = { notify: true, channels: [], min_severity: '', cooldown: '' };
+    renderDetectors(); syncDirty();
   }
 
   function renderDetectors() {
-    const body = byId('notifierDetectorsBody');
-    if (!body) return;
+    const body = byId('notifierDetectorsBody'); if (!body) return;
     body.replaceChildren();
-    for (const detector of Object.keys(keyedDetectors(state.draftConfig)).sort()) {
-      const ov = keyedDetectors(state.draftConfig)[detector] || {};
+    const allChannels = (state.draftConfig.channels || []).map((c) => c.id).filter(Boolean);
+    Object.keys(state.draftConfig.detectors || {}).sort().forEach((key) => {
+      const d = state.draftConfig.detectors[key] || {};
       const tr = document.createElement('tr');
-
-      const tdKey = document.createElement('td');
-      const keyInput = rowInput(detector, 'input input-wide', 'detector key');
+      const keyInput = rowInput(key, 'input input-wide'); keyInput.setAttribute('list', 'notifierDetectorKeys');
       keyInput.onchange = () => {
         const next = String(keyInput.value || '').trim();
-        if (!next || next === detector) return;
-        const exists = keyedDetectors(state.draftConfig)[next];
-        if (exists) {
-          showStatus(`Detector key ${next} already exists.`, false);
-          keyInput.value = detector;
-          return;
-        }
-        keyedDetectors(state.draftConfig)[next] = keyedDetectors(state.draftConfig)[detector];
-        delete keyedDetectors(state.draftConfig)[detector];
-        renderDetectors();
-        syncDirty();
+        if (!next || next === key || state.draftConfig.detectors[next]) { keyInput.value = key; return; }
+        state.draftConfig.detectors[next] = d; delete state.draftConfig.detectors[key]; renderDetectors(); syncDirty();
       };
-      tdKey.appendChild(keyInput);
+      const notifyBtn = document.createElement('button'); notifyBtn.className = 'btn-quiet btn-sm'; notifyBtn.textContent = d.notify === false ? 'Off' : 'On';
+      notifyBtn.onclick = () => { d.notify = d.notify === false; renderDetectors(); syncDirty(); };
 
-      const tdNotify = document.createElement('td');
-      const notifyBtn = document.createElement('button');
-      notifyBtn.className = 'btn-quiet btn-sm';
-      notifyBtn.textContent = ov.notify === false ? 'Off' : 'On';
-      notifyBtn.onclick = () => {
-        ov.notify = ov.notify === false;
-        renderDetectors();
-        syncDirty();
-      };
-      tdNotify.appendChild(notifyBtn);
-
-      const tdCooldown = document.createElement('td');
-      const cooldownInput = rowInput(ov.cooldown || '', 'input', '5m');
-      cooldownInput.oninput = () => { ov.cooldown = String(cooldownInput.value || '').trim(); syncDirty(); };
-      tdCooldown.appendChild(cooldownInput);
-
-      const tdSeverity = document.createElement('td');
-      const sevInput = rowInput(ov.min_severity || '', 'input', 'warn');
-      sevInput.oninput = () => { ov.min_severity = String(sevInput.value || '').trim(); syncDirty(); };
-      tdSeverity.appendChild(sevInput);
-
-      const tdChannels = document.createElement('td');
-      const channelsInput = rowInput(Array.isArray(ov.channels) ? ov.channels.join(', ') : '', 'input input-wide', 'channel ids csv');
-      channelsInput.oninput = () => { ov.channels = normalizeCSV(channelsInput.value); syncDirty(); };
-      tdChannels.appendChild(channelsInput);
-
-      const tdActions = document.createElement('td');
-      tdActions.className = 'actions-cell';
-      const dupBtn = document.createElement('button');
-      dupBtn.className = 'btn-quiet btn-sm';
-      dupBtn.textContent = 'Duplicate';
-      dupBtn.onclick = () => duplicateDetector(detector);
-      const toggleBtn = document.createElement('button');
-      toggleBtn.className = 'btn-quiet btn-sm';
-      toggleBtn.textContent = ov.notify === false ? 'Enable' : 'Disable';
-      toggleBtn.onclick = () => {
-        ov.notify = ov.notify === false;
-        renderDetectors();
-        syncDirty();
-      };
-      const delBtn = document.createElement('button');
-      delBtn.className = 'btn-danger btn-sm';
-      delBtn.textContent = 'Delete';
-      delBtn.onclick = () => openDeleteConfirm({ kind: 'detector override', id: detector });
-      tdActions.append(dupBtn, toggleBtn, delBtn);
-
-      tr.append(tdKey, tdNotify, tdCooldown, tdSeverity, tdChannels, tdActions);
+      const channelsWrap = document.createElement('div'); channelsWrap.className = 'chips';
+      allChannels.forEach((id) => {
+        const label = document.createElement('label'); label.className = 'pill';
+        const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = (d.channels || []).includes(id);
+        chk.onchange = () => {
+          const set = new Set(Array.isArray(d.channels) ? d.channels : []);
+          if (chk.checked) set.add(id); else set.delete(id);
+          d.channels = Array.from(set); syncDirty();
+        };
+        label.append(chk, document.createTextNode(` ${id}`)); channelsWrap.appendChild(label);
+      });
+      const sev = rowInput(d.min_severity || '', 'input', 'info/warn/error'); sev.oninput = () => { d.min_severity = sev.value.trim(); syncDirty(); };
+      const cool = rowInput(d.cooldown || '', 'input', '5m'); cool.oninput = () => { d.cooldown = cool.value.trim(); syncDirty(); };
+      const del = document.createElement('button'); del.className = 'btn-danger btn-sm'; del.textContent = 'Delete'; del.onclick = () => openDelete({ kind: 'detector', id: key });
+      tr.append(cell(keyInput), cell(notifyBtn), cell(channelsWrap), cell(sev), cell(cool), cell(del));
       body.appendChild(tr);
+    });
+  }
+
+  function renderTemplateFields() {
+    const n = state.draftConfig.notifier || {}, d = state.draftConfig.dedupe || {};
+    byId('notifierSubjectTemplate').value = n.subject_template || '';
+    byId('notifierBodyTemplate').value = n.body_template || '';
+    byId('notifierDedupeKey').value = d.key || '';
+    byId('notifierDedupeCooldown').value = d.cooldown || '';
+    byId('notifierDefaultCooldown').value = n.default_cooldown || '';
+    renderTemplatePreview();
+  }
+
+  function renderTemplatePreview() {
+    const n = state.draftConfig.notifier || {}, d = state.draftConfig.dedupe || {};
+    const applyTemplate = (tpl) => String(tpl || '').replace(/\{\{\.([A-Za-z0-9_]+)\}\}/g, (_, k) => SAMPLE_EVENT[k] || SAMPLE_EVENT[k.charAt(0).toUpperCase() + k.slice(1)] || '');
+    const subject = applyTemplate(n.subject_template || '[CFM] {{.Kind}} from {{.Host}}');
+    const body = applyTemplate(n.body_template || '{{.Reason}} ({{.SrcIP}})');
+    const dedupeKey = applyTemplate(d.key || '{{.Host}}|{{.Kind}}|{{.SrcIP}}|{{.Reason}}');
+    byId('notifierTemplatePreview').textContent = `Sample event:\n${JSON.stringify(SAMPLE_EVENT, null, 2)}\n\nSubject => ${subject}\nBody => ${body}\nDedupe key => ${dedupeKey}`;
+  }
+
+  function renderTestChannels() {
+    const wrap = byId('notifierTestChannels'); if (!wrap) return;
+    wrap.replaceChildren();
+    (state.draftConfig.channels || []).forEach((ch) => {
+      const label = document.createElement('label'); label.className = 'pill';
+      const chk = document.createElement('input'); chk.type = 'checkbox'; chk.value = ch.id;
+      label.append(chk, document.createTextNode(` ${ch.id}`)); wrap.appendChild(label);
+    });
+  }
+
+  async function runChannelTest(channels) {
+    const subject = byId('notifierTestSubject')?.value || '[CFM TEST] Channel connectivity';
+    const body = byId('notifierTestBody')?.value || 'This is a test notification from CFM WebUI.';
+    const event = { kind: 'NOTIFIER/TEST', section: 'notifier_test', severity: 'info', src_ip: '203.0.113.10', reason: 'Manual test from UI', extra: { target: channels.join(',') } };
+    const payloadNew = { channels, event, subject, body };
+    const payloadOld = { channels, payload: event };
+    const out = byId('notifierTestResult');
+    out.textContent = 'Sending test...';
+    try {
+      let res;
+      try { res = await request('/cfm-admin/api/v1/notifier/test', { method: 'POST', body: JSON.stringify(payloadNew) }); }
+      catch (_) { res = await request('/cfm-admin/api/v1/notifier/test', { method: 'POST', body: JSON.stringify(payloadOld) }); }
+      out.textContent = JSON.stringify(res, null, 2); showStatus('Test notification sent.');
+    } catch (err) {
+      out.textContent = err.message; showStatus(err.message, false);
     }
   }
 
-  function validateDraft() {
-    const errors = [];
-    const channelMap = keyedChannels(state.draftConfig);
-    for (const ch of state.draftConfig.channels || []) {
-      const id = String(ch?.id || '').trim();
-      const type = String(ch?.type || '').trim();
-      if (!id) errors.push('Channel id is required.');
-      if (!type) errors.push(`Channel ${id || '(new)'} type is required.`);
+  async function fetchHistory() {
+    const p = new URLSearchParams();
+    p.set('limit', String(Math.max(1, Number(byId('notifierHistoryLimit')?.value || 50))));
+    const c = String(byId('notifierHistoryChannel')?.value || '').trim(); if (c) p.set('channel', c);
+    const k = String(byId('notifierHistoryKind')?.value || '').trim(); if (k) p.set('kind', k);
+    p.set('status', String(byId('notifierHistoryStatus')?.value || 'all'));
+    const payload = await request(`/cfm-admin/api/v1/notifier/history?${p.toString()}`);
+    state.historyRows = Array.isArray(payload.rows) ? payload.rows : [];
+    const body = byId('notifierHistoryBody'); body.replaceChildren();
+    for (const row of state.historyRows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.time || ''}</td><td>${row.kind || ''}</td><td>${row.channel || ''}</td><td>${row.status || ''}</td><td>${row.reason || ''}</td><td>${row.error || ''}</td>`;
+      body.appendChild(tr);
+      if (row.kind) state.detectorHints.push(row.kind);
     }
-    for (const [detector, ov] of Object.entries(keyedDetectors(state.draftConfig))) {
-      if (!String(detector || '').trim()) errors.push('Detector key cannot be empty.');
-      for (const channel of Array.isArray(ov?.channels) ? ov.channels : []) {
-        const id = String(channel || '').trim();
-        if (!id) continue;
-        if (!channelMap[id]) errors.push(`Detector ${detector} references unknown channel ${id}.`);
-      }
-    }
-    return errors;
+    state.detectorHints = Array.from(new Set(state.detectorHints)); renderDetectorHints();
   }
 
-  function openValidationErrors(errors) {
-    const list = byId('notifierValidationErrorsList');
-    if (list) {
-      list.replaceChildren();
-      for (const err of errors) {
-        const li = document.createElement('li');
-        li.textContent = err;
-        list.appendChild(li);
-      }
+  async function refreshCounters() {
+    await fetchHistory();
+    const now = Date.now();
+    const counters = {};
+    const add = (channel) => {
+      if (!counters[channel]) counters[channel] = { h1: { attempts: 0, success: 0, fail: 0 }, h24: { attempts: 0, success: 0, fail: 0 } };
+      return counters[channel];
+    };
+    for (const row of state.historyRows) {
+      const ts = Date.parse(row.time || ''); if (!ts) continue;
+      const age = now - ts; const ch = row.channel || 'unknown'; const status = row.status === 'error' ? 'fail' : 'success';
+      if (age <= 24 * 3600 * 1000) { const c = add(ch); c.h24.attempts += 1; c.h24[status] += 1; }
+      if (age <= 3600 * 1000) { const c = add(ch); c.h1.attempts += 1; c.h1[status] += 1; }
     }
-    const modal = byId('notifierValidationErrorsModal');
-    if (modal) modal.style.display = 'flex';
+    renderOverview(counters);
   }
 
-  function closeValidationErrors() {
-    const modal = byId('notifierValidationErrorsModal');
-    if (modal) modal.style.display = 'none';
+  function openDelete(target) {
+    state.pendingDelete = target;
+    byId('notifierDeleteConfirmText').textContent = `Delete ${target.kind} "${target.id}"?`;
+    byId('notifierDeleteConfirmModal').style.display = 'flex';
+  }
+
+  function closeDelete() { state.pendingDelete = null; byId('notifierDeleteConfirmModal').style.display = 'none'; }
+
+  function doDelete() {
+    const p = state.pendingDelete; if (!p) return;
+    if (p.kind === 'channel') {
+      state.draftConfig.channels = (state.draftConfig.channels || []).filter((c) => c.id !== p.id);
+      Object.keys(state.draftConfig.detectors || {}).forEach((k) => {
+        const list = Array.isArray(state.draftConfig.detectors[k].channels) ? state.draftConfig.detectors[k].channels : [];
+        state.draftConfig.detectors[k].channels = list.filter((id) => id !== p.id);
+      });
+      renderChannels(); renderDetectors();
+    } else { delete state.draftConfig.detectors[p.id]; renderDetectors(); }
+    closeDelete(); syncDirty();
   }
 
   function computeSummary() {
-    const currentChannels = keyedChannels(state.currentConfig);
-    const draftChannels = keyedChannels(state.draftConfig);
-    const currentDetectors = keyedDetectors(state.currentConfig);
-    const draftDetectors = keyedDetectors(state.draftConfig);
-
-    const channelAdded = Object.keys(draftChannels).filter((k) => !currentChannels[k]).sort();
-    const channelRemoved = Object.keys(currentChannels).filter((k) => !draftChannels[k]).sort();
-    const channelEdited = Object.keys(draftChannels).filter((k) => currentChannels[k] && JSON.stringify(currentChannels[k]) !== JSON.stringify(draftChannels[k])).sort();
-
-    const detectorAdded = Object.keys(draftDetectors).filter((k) => !currentDetectors[k]).sort();
-    const detectorRemoved = Object.keys(currentDetectors).filter((k) => !draftDetectors[k]).sort();
-    const detectorEdited = Object.keys(draftDetectors).filter((k) => currentDetectors[k] && JSON.stringify(currentDetectors[k]) !== JSON.stringify(draftDetectors[k])).sort();
-
-    return { channelAdded, channelRemoved, channelEdited, detectorAdded, detectorRemoved, detectorEdited };
+    const c0 = new Set((state.currentConfig.channels || []).map((c) => c.id));
+    const c1 = new Set((state.draftConfig.channels || []).map((c) => c.id));
+    const d0 = new Set(Object.keys(state.currentConfig.detectors || {}));
+    const d1 = new Set(Object.keys(state.draftConfig.detectors || {}));
+    return {
+      channels_added: Array.from(c1).filter((k) => !c0.has(k)), channels_removed: Array.from(c0).filter((k) => !c1.has(k)),
+      detectors_added: Array.from(d1).filter((k) => !d0.has(k)), detectors_removed: Array.from(d0).filter((k) => !d1.has(k)),
+    };
   }
 
-  async function previewConfigDiff() {
-    const payload = await request('/cfm-admin/api/v1/notifier/preview', {
-      method: 'POST',
-      body: JSON.stringify({ config: state.draftConfig }),
+  async function validateDraftServer() {
+    try {
+      const res = await request('/cfm-admin/api/v1/notifier/validate', { method: 'POST', body: JSON.stringify({ draft: state.draftConfig }) });
+      return { ok: !!res.ok, errors: res.errors || [] };
+    } catch (_) {
+      const res = await request('/cfm-admin/api/v1/notifier/validate', { method: 'POST', body: JSON.stringify({ config: state.draftConfig }) });
+      return { ok: !!res.ok, errors: res.errors || [] };
+    }
+  }
+
+  async function previewDiff() {
+    try {
+      const res = await request('/cfm-admin/api/v1/notifier/preview', { method: 'POST', body: JSON.stringify({ draft: state.draftConfig }) });
+      return res.diff || '(No textual diff)';
+    } catch (_) {
+      const res = await request('/cfm-admin/api/v1/notifier/preview', { method: 'POST', body: JSON.stringify({ config: state.draftConfig }) });
+      return res.diff || '(No textual diff)';
+    }
+  }
+
+  function openValidationErrors(errors) {
+    const ul = byId('notifierValidationErrorsList'); ul.replaceChildren();
+    errors.forEach((e) => {
+      const li = document.createElement('li');
+      li.textContent = typeof e === 'string' ? e : `${e.path || 'draft'}: ${e.message || 'invalid'}`;
+      ul.appendChild(li);
     });
-    return payload.diff || '(No textual diff)';
+    byId('notifierValidationErrorsModal').style.display = 'flex';
   }
 
   async function openSaveModal() {
-    const errors = validateDraft();
-    if (errors.length) {
-      openValidationErrors(errors);
-      return;
-    }
-    state.saveSummary = computeSummary();
-    byId('notifierSaveChannelsSummary').textContent = `Added: ${state.saveSummary.channelAdded.join(', ') || 'none'}\nEdited: ${state.saveSummary.channelEdited.join(', ') || 'none'}\nRemoved: ${state.saveSummary.channelRemoved.join(', ') || 'none'}`;
-    byId('notifierSaveDetectorsSummary').textContent = `Added: ${state.saveSummary.detectorAdded.join(', ') || 'none'}\nEdited: ${state.saveSummary.detectorEdited.join(', ') || 'none'}\nRemoved: ${state.saveSummary.detectorRemoved.join(', ') || 'none'}`;
-    const diffEl = byId('notifierSaveDiffPreview');
-    if (diffEl) {
-      diffEl.textContent = 'Loading diff...';
-      try { diffEl.textContent = await previewConfigDiff(); } catch (err) { diffEl.textContent = err.message; }
-    }
-    const modal = byId('notifierSaveModal');
-    if (modal) modal.style.display = 'flex';
-  }
-
-  function closeSaveModal() {
-    const modal = byId('notifierSaveModal');
-    if (modal) modal.style.display = 'none';
+    const validation = await validateDraftServer();
+    if (!validation.ok) return openValidationErrors(validation.errors);
+    const s = computeSummary();
+    byId('notifierSaveChannelsSummary').textContent = `Channels added: ${s.channels_added.join(', ') || 'none'}\nChannels removed: ${s.channels_removed.join(', ') || 'none'}\nDetectors added: ${s.detectors_added.join(', ') || 'none'}\nDetectors removed: ${s.detectors_removed.join(', ') || 'none'}`;
+    byId('notifierSaveDiffPreview').textContent = 'Loading diff...';
+    byId('notifierSaveModal').style.display = 'flex';
+    byId('notifierSaveDiffPreview').textContent = await previewDiff();
   }
 
   async function saveDraft() {
-    await request('/cfm-admin/api/v1/notifier/config', {
-      method: 'PUT',
-      body: JSON.stringify({ config: state.draftConfig }),
-    });
-    state.currentConfig = normalizeConfig(clone(state.draftConfig));
+    const create_backup = byId('notifierSaveBackup')?.checked !== false;
+    const reload_after_save = byId('notifierSaveReload')?.checked !== false;
+    try {
+      await request('/cfm-admin/api/v1/notifier/save', { method: 'POST', body: JSON.stringify({ draft: state.draftConfig, options: { create_backup, reload_after_save } }) });
+    } catch (_) {
+      await request('/cfm-admin/api/v1/notifier/config', { method: 'PUT', body: JSON.stringify({ config: state.draftConfig }) });
+      if (reload_after_save) await request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' });
+    }
+    state.currentConfig = normalizeConfig(state.draftConfig);
+    byId('notifierSaveModal').style.display = 'none';
     syncDirty();
-    closeSaveModal();
-    showStatus('Draft saved.');
-  }
-
-  function openUnsavedLeave(nextAction) {
-    state.pendingTabSwitch = nextAction;
-    const modal = byId('notifierUnsavedLeaveModal');
-    if (modal) modal.style.display = 'flex';
-  }
-
-  function closeUnsavedLeave() {
-    state.pendingTabSwitch = null;
-    const modal = byId('notifierUnsavedLeaveModal');
-    if (modal) modal.style.display = 'none';
-  }
-
-  function runPendingLeave() {
-    const action = state.pendingTabSwitch;
-    closeUnsavedLeave();
-    if (typeof action === 'function') action();
+    showStatus('Saved config and reloaded notifier.');
+    if (reload_after_save) state.lastReloadAt = new Date().toISOString();
+    await refreshCounters();
   }
 
   async function loadConfig() {
     const payload = await request('/cfm-admin/api/v1/notifier/config');
-    const loaded = normalizeConfig(clone(payload.config || {}));
-    state.currentConfig = loaded;
-    state.draftConfig = clone(loaded);
-    state.path = payload.path || '';
-    renderChannels();
-    renderDetectors();
-    syncDirty();
+    const cfg = normalizeConfig(payload.config || payload);
+    state.currentConfig = cfg; state.draftConfig = normalizeConfig(cfg); state.path = payload.path || '';
+    renderChannels(); renderDetectors(); renderTemplateFields(); renderTestChannels(); syncDirty();
+    renderOverview();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
+    await refreshCounters();
   }
 
   function discardDraft() {
-    state.draftConfig = normalizeConfig(clone(state.currentConfig));
-    renderChannels();
-    renderDetectors();
-    syncDirty();
+    state.draftConfig = normalizeConfig(state.currentConfig);
+    renderChannels(); renderDetectors(); renderTemplateFields(); syncDirty();
     showStatus('Draft discarded.');
   }
 
-  function reloadFromFile() {
-    loadConfig().catch((err) => showStatus(err.message, false));
+  function openUnsavedLeave(fn) { state.pendingLeave = fn; byId('notifierUnsavedLeaveModal').style.display = 'flex'; }
+  function closeUnsavedLeave() { state.pendingLeave = null; byId('notifierUnsavedLeaveModal').style.display = 'none'; }
+  function runPendingLeave() { const fn = state.pendingLeave; closeUnsavedLeave(); if (typeof fn === 'function') fn(); }
+
+  function bindTemplateInputs() {
+    [['notifierSubjectTemplate', 'subject_template', 'notifier'], ['notifierBodyTemplate', 'body_template', 'notifier'], ['notifierDedupeKey', 'key', 'dedupe'], ['notifierDedupeCooldown', 'cooldown', 'dedupe'], ['notifierDefaultCooldown', 'default_cooldown', 'notifier']].forEach(([id, key, root]) => {
+      byId(id)?.addEventListener('input', (e) => { state.draftConfig[root][key] = String(e.target.value || ''); syncDirty(); renderTemplatePreview(); });
+    });
   }
 
-  async function reloadNotifier() {
-    await request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' });
-    showStatus('Notifier reloaded successfully.');
-  }
+  function cell(child) { const td = document.createElement('td'); td.appendChild(child); return td; }
 
   function init() {
-    window.addEventListener('beforeunload', (evt) => {
-      if (!state.isDirty) return;
-      evt.preventDefault();
-      evt.returnValue = 'You have unsaved changes';
-    });
-
+    document.querySelectorAll('.notifier-tab-btn').forEach((btn) => btn.addEventListener('click', () => { state.tab = btn.dataset.tab; renderTabs(); }));
     byId('notifierAddChannelBtn')?.addEventListener('click', addChannel);
     byId('notifierAddDetectorBtn')?.addEventListener('click', addDetector);
-    byId('notifierSaveDraftBtn')?.addEventListener('click', () => openSaveModal().catch((err) => showStatus(err.message, false)));
-    byId('notifierSaveConfirmBtn')?.addEventListener('click', () => saveDraft().catch((err) => showStatus(err.message, false)));
-    byId('notifierSaveCancelBtn')?.addEventListener('click', closeSaveModal);
+    byId('notifierSaveDraftBtn')?.addEventListener('click', () => openSaveModal().catch((e) => showStatus(e.message, false)));
+    byId('notifierSaveConfirmBtn')?.addEventListener('click', () => saveDraft().catch((e) => showStatus(e.message, false)));
+    byId('notifierSaveCancelBtn')?.addEventListener('click', () => { byId('notifierSaveModal').style.display = 'none'; });
+    byId('notifierValidationErrorsCloseBtn')?.addEventListener('click', () => { byId('notifierValidationErrorsModal').style.display = 'none'; });
 
-    byId('notifierDiscardBtn')?.addEventListener('click', () => {
-      if (!state.isDirty) return discardDraft();
-      openUnsavedLeave(() => discardDraft());
-    });
-    byId('notifierReloadFromFileBtn')?.addEventListener('click', () => {
-      if (!state.isDirty) return reloadFromFile();
-      openUnsavedLeave(() => reloadFromFile());
-    });
-    byId('notifierValidateBtn')?.addEventListener('click', () => {
-      const errors = validateDraft();
-      if (errors.length) return openValidationErrors(errors);
-      showStatus('Validation passed.');
-    });
-    byId('notifierReloadBtn')?.addEventListener('click', () => reloadNotifier().catch((err) => showStatus(err.message, false)));
+    byId('notifierDiscardBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(discardDraft) : discardDraft()));
+    byId('notifierReloadFromFileBtn')?.addEventListener('click', () => (state.isDirty ? openUnsavedLeave(() => loadConfig().catch((e) => showStatus(e.message, false))) : loadConfig().catch((e) => showStatus(e.message, false))));
+    byId('notifierReloadBtn')?.addEventListener('click', () => request('/cfm-admin/api/v1/notifier/reload', { method: 'POST', body: '{}' }).then(() => { state.lastReloadAt = new Date().toISOString(); renderOverview(); showStatus('Notifier reloaded successfully.'); }).catch((e) => showStatus(e.message, false)));
 
-    byId('notifierDeleteConfirmCancelBtn')?.addEventListener('click', closeDeleteConfirm);
+    byId('notifierDeleteConfirmCancelBtn')?.addEventListener('click', closeDelete);
     byId('notifierDeleteConfirmBtn')?.addEventListener('click', doDelete);
-
     byId('notifierUnsavedLeaveCancelBtn')?.addEventListener('click', closeUnsavedLeave);
     byId('notifierUnsavedLeaveDiscardBtn')?.addEventListener('click', runPendingLeave);
 
-    byId('notifierValidationErrorsCloseBtn')?.addEventListener('click', closeValidationErrors);
-
-    byId('notifierTabConfigBtn')?.addEventListener('click', () => {
-      byId('notifierConfigPanels')?.style.setProperty('display', '');
+    byId('notifierRunTestBtn')?.addEventListener('click', () => {
+      const selected = Array.from(document.querySelectorAll('#notifierTestChannels input[type="checkbox"]:checked')).map((x) => x.value);
+      if (!selected.length) return showStatus('Select at least one channel for test.', false);
+      runChannelTest(selected);
     });
+    byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory().catch((e) => showStatus(e.message, false)));
+    byId('notifierOverviewRefreshMetrics')?.addEventListener('click', () => refreshCounters().catch((e) => showStatus(e.message, false)));
+    byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => { state.draftConfig.notifier.enabled = state.draftConfig.notifier.enabled === false; syncDirty(); renderOverview(); });
 
+    bindTemplateInputs(); renderTabs(); renderDetectorHints();
     loadConfig().catch((err) => showStatus(err.message || 'Failed to load config.', false));
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
-  } else {
-    init();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
 })();
