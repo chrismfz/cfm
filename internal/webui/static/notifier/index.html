@@ -14,101 +14,106 @@
     <header class="topbar">
       <h1>Notifier</h1>
       <nav class="top-nav" data-shared-nav></nav>
+      <div class="meta">
+        <span id="notifierDirtyBadge" class="pill">Saved</span>
+        <button id="notifierSaveDraftBtn">Save</button>
+        <button id="notifierDiscardBtn" class="btn-quiet">Cancel edits</button>
+        <button id="notifierReloadFromFileBtn" class="btn-quiet">Reload file</button>
+        <button id="notifierReloadBtn" class="btn-quiet">Reload notifier</button>
+      </div>
     </header>
 
-    <main class="layout" id="notifierConfigPanels">
+    <main class="layout">
       <section class="card wide">
-        <h2>Config</h2>
-        <p class="muted">Edit channels and detector overrides in place.</p>
-        <div class="sticky-action-bar">
-          <span id="notifierDirtyBadge" class="pill">Saved</span>
-          <button id="notifierSaveDraftBtn">Save draft</button>
-          <button id="notifierDiscardBtn" class="btn-quiet">Discard</button>
-          <button id="notifierValidateBtn" class="btn-quiet">Validate</button>
-          <button id="notifierReloadFromFileBtn" class="btn-quiet">Reload from file</button>
-          <button id="notifierReloadBtn" class="btn-quiet">Reload notifier</button>
+        <div class="toolbar wrap">
+          <button class="btn-quiet notifier-tab-btn" data-tab="overview">Overview</button>
+          <button class="btn-quiet notifier-tab-btn" data-tab="channels">Channels</button>
+          <button class="btn-quiet notifier-tab-btn" data-tab="routing">Routing</button>
+          <button class="btn-quiet notifier-tab-btn" data-tab="templates">Templates & Dedupe</button>
+          <button class="btn-quiet notifier-tab-btn" data-tab="test">Test Center</button>
+          <button class="btn-quiet notifier-tab-btn" data-tab="history">History</button>
         </div>
         <p id="notifierStatus" class="statusline" style="display:block"></p>
       </section>
 
-      <section class="card wide">
-        <h2>Channels</h2>
+      <section class="card wide notifier-tab-panel" data-tab="overview">
+        <h2>Overview</h2>
+        <div class="summary-grid">
+          <div class="summary-card"><h4>Enabled</h4><div class="value" id="notifierOverviewEnabled"></div></div>
+          <div class="summary-card"><h4>Last reload</h4><div class="value" id="notifierOverviewLastReload">Never</div></div>
+          <div class="summary-card"><h4>Config path</h4><div class="value" id="notifierOverviewPath">-</div></div>
+        </div>
         <div class="toolbar wrap">
-          <button id="notifierAddChannelBtn">Add channel</button>
+          <button id="notifierOverviewToggleEnabled" class="btn-quiet">Toggle enabled</button>
+          <button id="notifierOverviewRefreshMetrics" class="btn-quiet">Refresh counters</button>
         </div>
         <div class="table-wrap">
           <table>
-            <thead>
-              <tr><th>ID</th><th>Type</th><th>Enabled</th><th>Targets</th><th>Actions</th></tr>
-            </thead>
-            <tbody id="notifierChannelsBody"></tbody>
+            <thead><tr><th>Channel</th><th>1h attempts</th><th>1h success</th><th>1h fail</th><th>24h attempts</th><th>24h success</th><th>24h fail</th></tr></thead>
+            <tbody id="notifierOverviewCountersBody"></tbody>
           </table>
         </div>
       </section>
 
-      <section class="card wide">
-        <h2>Detector overrides</h2>
+      <section class="card wide notifier-tab-panel" data-tab="channels" style="display:none">
+        <h2>Channels</h2>
         <div class="toolbar wrap">
-          <button id="notifierAddDetectorBtn">Add detector override</button>
+          <select id="notifierNewChannelType" class="input"><option value="sendmail">sendmail</option><option value="smtp">smtp</option><option value="slack_webhook">slack_webhook</option></select>
+          <input id="notifierNewChannelName" class="input input-wide" placeholder="channel name" />
+          <button id="notifierAddChannelBtn">Add channel</button>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Detector</th><th>Notify</th><th>Cooldown</th><th>Min severity</th><th>Channels</th><th>Actions</th></tr>
-            </thead>
-            <tbody id="notifierDetectorsBody"></tbody>
-          </table>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Enabled</th><th>Key fields</th><th>Test</th><th>Actions</th></tr></thead><tbody id="notifierChannelsBody"></tbody></table></div>
+      </section>
+
+      <section class="card wide notifier-tab-panel" data-tab="routing" style="display:none">
+        <h2>Routing (Detector Overrides)</h2>
+        <div class="toolbar wrap"><button id="notifierAddDetectorBtn">Add detector override</button></div>
+        <datalist id="notifierDetectorKeys"></datalist>
+        <div class="table-wrap"><table><thead><tr><th>Detector key</th><th>Notify</th><th>Channels</th><th>Min severity</th><th>Cooldown</th><th>Actions</th></tr></thead><tbody id="notifierDetectorsBody"></tbody></table></div>
+        <div class="summary-card" style="margin-top:.8rem;"><h4>Precedence helper</h4><div class="value">Exact detector key overrides wildcard <code>*</code>. Example: <code>CLAM/INFECTED</code> wins over <code>*</code>. If no channels are set for a detector, fallback routing applies.</div></div>
+      </section>
+
+      <section class="card wide notifier-tab-panel" data-tab="templates" style="display:none">
+        <h2>Templates & Dedupe</h2>
+        <div class="summary-grid">
+          <div><label class="muted">Subject template</label><textarea id="notifierSubjectTemplate" class="input" style="width:100%;min-height:76px"></textarea></div>
+          <div><label class="muted">Body template</label><textarea id="notifierBodyTemplate" class="input" style="width:100%;min-height:76px"></textarea></div>
+          <div><label class="muted">Dedupe key</label><input id="notifierDedupeKey" class="input input-wide" /></div>
+          <div><label class="muted">Dedupe cooldown</label><input id="notifierDedupeCooldown" class="input" /></div>
+          <div><label class="muted">Default cooldown</label><input id="notifierDefaultCooldown" class="input" /></div>
         </div>
+        <h3>Live preview</h3>
+        <pre id="notifierTemplatePreview" class="diff-preview"></pre>
+      </section>
+
+      <section class="card wide notifier-tab-panel" data-tab="test" style="display:none">
+        <h2>Test Center</h2>
+        <div id="notifierTestChannels" class="chips"></div>
+        <div class="summary-grid" style="margin-top:.7rem;">
+          <input id="notifierTestSubject" class="input input-wide" placeholder="Subject" />
+          <input id="notifierTestBody" class="input input-wide" placeholder="Body" />
+        </div>
+        <div class="toolbar wrap"><button id="notifierRunTestBtn">Send test</button></div>
+        <pre id="notifierTestResult"></pre>
+      </section>
+
+      <section class="card wide notifier-tab-panel" data-tab="history" style="display:none">
+        <h2>History</h2>
+        <div class="toolbar wrap">
+          <input id="notifierHistoryChannel" class="input" placeholder="channel" />
+          <input id="notifierHistoryKind" class="input" placeholder="kind" />
+          <select id="notifierHistoryStatus" class="input"><option value="all">all</option><option value="success">success</option><option value="error">error</option></select>
+          <input id="notifierHistoryLimit" class="input" value="50" />
+          <button id="notifierHistoryRefreshBtn" class="btn-quiet">Refresh</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Time</th><th>Kind</th><th>Channel</th><th>Status</th><th>Reason</th><th>Error</th></tr></thead><tbody id="notifierHistoryBody"></tbody></table></div>
       </section>
     </main>
   </div>
 
-  <div id="notifierDeleteConfirmModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierDeleteConfirmTitle">
-    <div class="modal-card">
-      <h2 id="notifierDeleteConfirmTitle">Confirm delete</h2>
-      <p id="notifierDeleteConfirmText" class="muted"></p>
-      <div class="toolbar wrap">
-        <button id="notifierDeleteConfirmBtn" class="btn-danger">Delete</button>
-        <button id="notifierDeleteConfirmCancelBtn" class="btn-quiet">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="notifierUnsavedLeaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierUnsavedLeaveTitle">
-    <div class="modal-card">
-      <h2 id="notifierUnsavedLeaveTitle">Discard unsaved changes?</h2>
-      <p class="muted">You have unsaved edits.</p>
-      <div class="toolbar wrap">
-        <button id="notifierUnsavedLeaveDiscardBtn" class="btn-danger">Discard and continue</button>
-        <button id="notifierUnsavedLeaveCancelBtn" class="btn-quiet">Stay</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="notifierSaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierSaveModalTitle">
-    <div class="modal-card">
-      <h2 id="notifierSaveModalTitle">Confirm save draft</h2>
-      <h3>Channels summary</h3>
-      <pre id="notifierSaveChannelsSummary" class="diff-preview"></pre>
-      <h3>Detector summary</h3>
-      <pre id="notifierSaveDetectorsSummary" class="diff-preview"></pre>
-      <h3>Diff preview</h3>
-      <pre id="notifierSaveDiffPreview" class="diff-preview"></pre>
-      <div class="toolbar wrap">
-        <button id="notifierSaveConfirmBtn">Confirm save</button>
-        <button id="notifierSaveCancelBtn" class="btn-quiet">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="notifierValidationErrorsModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierValidationErrorsTitle">
-    <div class="modal-card">
-      <h2 id="notifierValidationErrorsTitle">Blocking validation errors</h2>
-      <ul id="notifierValidationErrorsList" class="list-compact"></ul>
-      <div class="toolbar wrap">
-        <button id="notifierValidationErrorsCloseBtn" class="btn-quiet">Close</button>
-      </div>
-    </div>
-  </div>
+  <div id="notifierDeleteConfirmModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Confirm delete</h2><p id="notifierDeleteConfirmText" class="muted"></p><div class="toolbar wrap"><button id="notifierDeleteConfirmBtn" class="btn-danger">Delete</button><button id="notifierDeleteConfirmCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
+  <div id="notifierUnsavedLeaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Discard unsaved changes?</h2><p class="muted">You have unsaved edits.</p><div class="toolbar wrap"><button id="notifierUnsavedLeaveDiscardBtn" class="btn-danger">Discard and continue</button><button id="notifierUnsavedLeaveCancelBtn" class="btn-quiet">Stay</button></div></div></div>
+  <div id="notifierSaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Save config</h2><h3>Semantic summary</h3><pre id="notifierSaveChannelsSummary" class="diff-preview"></pre><h3>Diff preview</h3><pre id="notifierSaveDiffPreview" class="diff-preview"></pre><label><input type="checkbox" id="notifierSaveBackup" checked /> create backup</label><br /><label><input type="checkbox" id="notifierSaveReload" checked /> reload after save</label><div class="toolbar wrap"><button id="notifierSaveConfirmBtn">Confirm save</button><button id="notifierSaveCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
+  <div id="notifierValidationErrorsModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Validation errors</h2><ul id="notifierValidationErrorsList" class="list-compact"></ul><div class="toolbar wrap"><button id="notifierValidationErrorsCloseBtn" class="btn-quiet">Close</button></div></div></div>
 </body>
 </html>
