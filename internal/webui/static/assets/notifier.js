@@ -37,6 +37,7 @@
     activeBackupID: '',
     historyDetectorTelemetry: { sections: [], kinds: [] },
     detectorModalEditing: '',
+    detectorModalReturnDraft: null,
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -598,13 +599,13 @@
     const notifyInput = byId('notifierDetectorNotifyInput');
     const cooldownInput = byId('notifierDetectorCooldownInput');
     const minSeverityInput = byId('notifierDetectorMinSeverityInput');
-    const channelsInput = byId('notifierDetectorChannelsInput');
     const errLine = byId('notifierDetectorNameError');
+    const selectedChannels = Array.isArray(source.channels) ? source.channels : [];
     if (nameInput) nameInput.value = existing || '';
     if (notifyInput) notifyInput.checked = source.notify !== false;
     if (cooldownInput) cooldownInput.value = source.cooldown || '';
     if (minSeverityInput) minSeverityInput.value = source.min_severity || '';
-    if (channelsInput) channelsInput.value = Array.isArray(source.channels) ? source.channels.join(',') : '';
+    renderDetectorChannelOptions(selectedChannels);
     if (errLine) errLine.textContent = '';
     const modal = byId('notifierDetectorModal');
     if (modal) modal.style.display = 'flex';
@@ -623,8 +624,22 @@
     const notify = byId('notifierDetectorNotifyInput')?.checked !== false;
     const cooldown = (byId('notifierDetectorCooldownInput')?.value || '').trim();
     const minSeverity = (byId('notifierDetectorMinSeverityInput')?.value || '').trim();
-    const channels = (byId('notifierDetectorChannelsInput')?.value || '')
-      .split(',').map((v) => v.trim()).filter(Boolean);
+    const channels = Array.from(byId('notifierDetectorChannelsInput')?.selectedOptions || [])
+      .map((opt) => String(opt.value || '').trim())
+      .filter(Boolean);
+    const channelList = channelCatalog();
+    const knownChannels = new Set(channelList.map((ch) => ch.id));
+    const unknown = channels.filter((name) => !knownChannels.has(name));
+    if (unknown.length) {
+      if (errLine) errLine.textContent = `Unknown channel(s): ${unknown.join(', ')}`;
+      return;
+    }
+    const disabledPicked = channelList.filter((channel) => channels.includes(channel.id) && !channel.enabled).map((channel) => channel.id);
+    if (disabledPicked.length) {
+      showStatus(`Warning: selected disabled channel(s): ${disabledPicked.join(', ')}.`, false);
+    } else if (!channels.length) {
+      showStatus('No channels selected for this override; notifier falls back to global channel order.', true);
+    }
 
     if (!state.draftConfig.detectors || typeof state.draftConfig.detectors !== 'object') state.draftConfig.detectors = {};
     if (existing && existing !== detector) delete state.draftConfig.detectors[existing];
@@ -636,6 +651,30 @@
 
   function upsertDetector(existing = '') { openDetectorModal(existing); }
   function editDetector(detector) { openDetectorModal(detector); }
+  function createChannelFromDetectorModal() {
+    state.detectorModalReturnDraft = {
+      existing: state.detectorModalEditing || '',
+      detector: (byId('notifierDetectorNameInput')?.value || '').trim(),
+      notify: byId('notifierDetectorNotifyInput')?.checked !== false,
+      cooldown: (byId('notifierDetectorCooldownInput')?.value || '').trim(),
+      minSeverity: (byId('notifierDetectorMinSeverityInput')?.value || '').trim(),
+      channels: Array.from(byId('notifierDetectorChannelsInput')?.selectedOptions || []).map((opt) => String(opt.value || '').trim()),
+    };
+    closeDetectorModal();
+    setActiveTab('config');
+    byId('notifierChannelsSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    upsertChannel('');
+
+    const draft = state.detectorModalReturnDraft;
+    state.detectorModalReturnDraft = null;
+    if (!draft) return;
+    openDetectorModal(draft.existing || '');
+    if (byId('notifierDetectorNameInput')) byId('notifierDetectorNameInput').value = draft.detector || draft.existing || '';
+    if (byId('notifierDetectorNotifyInput')) byId('notifierDetectorNotifyInput').checked = draft.notify !== false;
+    if (byId('notifierDetectorCooldownInput')) byId('notifierDetectorCooldownInput').value = draft.cooldown || '';
+    if (byId('notifierDetectorMinSeverityInput')) byId('notifierDetectorMinSeverityInput').value = draft.minSeverity || '';
+    renderDetectorChannelOptions(draft.channels || []);
+  }
   function deleteDetector(detector) {
     if (!confirm(`Delete detector override ${detector}?`)) return;
     delete state.draftConfig.detectors[detector];
@@ -650,6 +689,40 @@
       out[String(channel.id)] = channel;
     }
     return out;
+  }
+
+  function channelCatalog() {
+    return Object.values(keyedChannels(state.draftConfig))
+      .map((ch) => ({
+        id: String(ch?.id || '').trim(),
+        enabled: ch?.enabled !== false,
+      }))
+      .filter((ch) => ch.id)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  function renderDetectorChannelOptions(selected = []) {
+    const select = byId('notifierDetectorChannelsInput');
+    if (!select) return;
+    const selectedSet = new Set((selected || []).map((id) => String(id || '').trim()).filter(Boolean));
+    const known = new Set();
+    select.replaceChildren();
+    for (const channel of channelCatalog()) {
+      known.add(channel.id);
+      const opt = document.createElement('option');
+      opt.value = channel.id;
+      opt.textContent = channel.enabled ? channel.id : `${channel.id} (disabled)`;
+      if (selectedSet.has(channel.id)) opt.selected = true;
+      select.appendChild(opt);
+    }
+    for (const unknownID of selectedSet) {
+      if (known.has(unknownID)) continue;
+      const opt = document.createElement('option');
+      opt.value = unknownID;
+      opt.textContent = `${unknownID} (unknown)`;
+      opt.selected = true;
+      select.appendChild(opt);
+    }
   }
 
   function keyedDetectors(config) {
@@ -715,6 +788,31 @@
       destructive,
       blockers,
     };
+  }
+
+  function validateDetectorOverrideChannels() {
+    const known = keyedChannels(state.draftConfig);
+    const unknown = [];
+    const disabled = [];
+    const empty = [];
+    for (const [detectorName, override] of Object.entries(keyedDetectors(state.draftConfig))) {
+      const channels = Array.isArray(override?.channels) ? override.channels : [];
+      if (!channels.length) {
+        empty.push(detectorName);
+        continue;
+      }
+      for (const channelID of channels) {
+        const id = String(channelID || '').trim();
+        if (!id) continue;
+        const channel = known[id];
+        if (!channel) {
+          unknown.push({ detector: detectorName, channel: id });
+          continue;
+        }
+        if (channel.enabled === false) disabled.push({ detector: detectorName, channel: id });
+      }
+    }
+    return { unknown, disabled, empty };
   }
 
   function renderSummaryList(id, parts) {
@@ -819,6 +917,21 @@
         showStatus('Cannot save: unresolved detector references to channels scheduled for deletion. Use guided delete options first.', false);
         return;
       }
+      const channelValidation = validateDetectorOverrideChannels();
+      if (channelValidation.unknown.length) {
+        const lines = channelValidation.unknown.map((entry) => `${entry.detector} -> ${entry.channel}`).join(', ');
+        showStatus(`Cannot save: detector overrides reference unknown channels (${lines}).`, false);
+        return;
+      }
+      if (channelValidation.disabled.length) {
+        const lines = channelValidation.disabled.map((entry) => `${entry.detector} -> ${entry.channel}`).join(', ');
+        showStatus(`Warning: saving overrides with disabled channels (${lines}).`, false);
+      } else if (channelValidation.empty.length) {
+        showStatus(
+          `Info: detector overrides with no channels (${channelValidation.empty.join(', ')}) will follow global channel order.`,
+          true
+        );
+      }
       saveConfig()
         .then(closeSaveModal)
         .catch((e) => showStatus(e.message, false));
@@ -841,6 +954,7 @@
     byId('notifierBackupDiffCloseBtn')?.addEventListener('click', closeBackupDiffModal);
     byId('notifierDetectorCancelBtn')?.addEventListener('click', closeDetectorModal);
     byId('notifierDetectorSaveBtn')?.addEventListener('click', saveDetectorFromModal);
+    byId('notifierDetectorCreateChannelBtn')?.addEventListener('click', createChannelFromDetectorModal);
     byId('notifierDetectorNameInput')?.addEventListener('input', () => {
       const key = byId('notifierDetectorNameInput')?.value || '';
       const validation = validateDetectorKey(key);

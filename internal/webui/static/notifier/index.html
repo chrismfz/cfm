@@ -25,7 +25,7 @@
         </div>
       </section>
 
-      <section class="card wide" data-notifier-tab="config">
+      <section id="notifierChannelsSection" class="card wide" data-notifier-tab="config">
         <h2>Config</h2>
         <p class="muted">Manage notifier channels and detector overrides, then save + reload to apply.</p>
         <div class="toolbar wrap">
@@ -39,7 +39,7 @@
         <p id="notifierStatus" class="statusline" style="display:block"></p>
       </section>
 
-      <section class="card wide" data-notifier-tab="config">
+      <section id="notifierChannelsSection" class="card wide" data-notifier-tab="config">
         <h2>Channels</h2>
         <div class="toolbar wrap">
           <button id="notifierAddChannelBtn">Add channel</button>
@@ -55,7 +55,7 @@
         </div>
       </section>
 
-      <section class="card wide" data-notifier-tab="config">
+      <section id="notifierDetectorsSection" class="card wide" data-notifier-tab="config">
         <h2>Detector overrides</h2>
         <div class="toolbar wrap">
           <button id="notifierAddDetectorBtn">Add detector override</button>
@@ -198,8 +198,12 @@
       <input id="notifierDetectorCooldownInput" placeholder="e.g. 5m" />
       <label for="notifierDetectorMinSeverityInput" class="muted">Min severity (optional)</label>
       <input id="notifierDetectorMinSeverityInput" placeholder="info | warn | critical" />
-      <label for="notifierDetectorChannelsInput" class="muted">Channel IDs CSV (optional)</label>
-      <input id="notifierDetectorChannelsInput" placeholder="ops, pager" />
+      <label for="notifierDetectorChannelsInput" class="muted">Channels (optional)</label>
+      <select id="notifierDetectorChannelsInput" multiple size="6"></select>
+      <p id="notifierDetectorChannelsHint" class="muted">If no channels are selected, notifications fall back to global channel order.</p>
+      <p>
+        <button id="notifierDetectorCreateChannelBtn" type="button" class="btn-quiet btn-sm">Create channel</button>
+      </p>
       <div class="toolbar wrap">
         <button id="notifierDetectorSaveBtn">Save override</button>
         <button id="notifierDetectorCancelBtn" class="btn-quiet">Cancel</button>
