@@ -1,0 +1,424 @@
+package detectorscfg
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+)
+
+type AdminSection struct {
+	Name     string            `json:"name"`
+	Kind     string            `json:"kind"`
+	Enabled  bool              `json:"enabled"`
+	Keys     map[string]string `json:"keys"`
+	RawLines []string          `json:"raw_lines,omitempty"`
+}
+
+type AdminConfig struct {
+	Global   map[string]string `json:"global"`
+	Core     []AdminSection    `json:"core"`
+	Leniency []AdminSection    `json:"leniency"`
+	Advanced []AdminSection    `json:"advanced"`
+}
+
+type sectionDoc struct {
+	Name  string
+	Lines []string
+}
+
+type doc struct {
+	Preamble []string
+	Order    []string
+	Sections map[string]*sectionDoc
+}
+
+type AdminConfigBackup struct {
+	ID      string    `json:"id"`
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	Created time.Time `json:"created"`
+}
+
+func resolveDetectorsConfigPath(cfgDir string) (string, bool) {
+	if fileExists("/etc/cfm/detectors.conf") {
+		return "/etc/cfm/detectors.conf", true
+	}
+	if cfgDir != "" {
+		p := filepath.Join(cfgDir, "detectors.conf")
+		_, err := os.Stat(p)
+		return p, err == nil
+	}
+	return "/etc/cfm/detectors.conf", false
+}
+
+func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {
+	path, exists := resolveDetectorsConfigPath(cfgDir)
+	if !exists {
+		return AdminConfig{Global: map[string]string{}}, path, nil
+	}
+	d, err := parseDoc(path)
+	if err != nil {
+		return AdminConfig{}, path, err
+	}
+	return buildAdminConfig(d), path, nil
+}
+
+func RenderAdminConfig(cfgDir string, cfg AdminConfig) (string, error) {
+	path, exists := resolveDetectorsConfigPath(cfgDir)
+	var d *doc
+	if exists {
+		parsed, err := parseDoc(path)
+		if err != nil {
+			return "", err
+		}
+		d = parsed
+	} else {
+		d = &doc{Sections: map[string]*sectionDoc{}}
+	}
+	return renderFromDoc(d, cfg), nil
+}
+
+func SaveAdminConfigWithBackup(cfgDir string, cfg AdminConfig) (string, string, error) {
+	path, _ := resolveDetectorsConfigPath(cfgDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return path, "", err
+	}
+	text, err := RenderAdminConfig(cfgDir, cfg)
+	if err != nil {
+		return path, "", err
+	}
+	backupPath, err := writeFileAtomic(path, []byte(text))
+	if err != nil {
+		return path, "", err
+	}
+	return path, backupIDFromPath(backupPath), nil
+}
+
+func ReloadNow() error { return nil }
+
+func ListAdminConfigBackups(cfgDir string) ([]AdminConfigBackup, error) {
+	path, _ := resolveDetectorsConfigPath(cfgDir)
+	matches, err := filepath.Glob(path + ".bak-*")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AdminConfigBackup, 0, len(matches))
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
+		id := backupIDFromPath(match)
+		if id == "" {
+			continue
+		}
+		out = append(out, AdminConfigBackup{ID: id, Path: match, Size: info.Size(), Created: info.ModTime().UTC()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out, nil
+}
+
+func ReadAdminConfigBackup(cfgDir, backupID string) (string, error) {
+	bp, err := resolveBackupPath(cfgDir, backupID)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(bp)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func RestoreAdminConfigBackup(cfgDir, backupID string) (string, string, error) {
+	path, _ := resolveDetectorsConfigPath(cfgDir)
+	bp, err := resolveBackupPath(cfgDir, backupID)
+	if err != nil {
+		return path, "", err
+	}
+	content, err := os.ReadFile(bp)
+	if err != nil {
+		return path, "", err
+	}
+	restoreID := backupID + "-restore-" + time.Now().UTC().Format("20060102150405")
+	if fileExists(path) {
+		if err := copyFileSafe(path, path+".bak-"+restoreID); err != nil {
+			return path, "", err
+		}
+	}
+	if _, err := writeFileAtomic(path, content); err != nil {
+		return path, "", err
+	}
+	return path, restoreID, nil
+}
+
+func resolveBackupPath(cfgDir, backupID string) (string, error) {
+	path, _ := resolveDetectorsConfigPath(cfgDir)
+	id := strings.TrimSpace(backupID)
+	if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") {
+		return "", fmt.Errorf("invalid backup id")
+	}
+	bp := path + ".bak-" + id
+	if !fileExists(bp) {
+		return "", fmt.Errorf("backup not found")
+	}
+	return bp, nil
+}
+
+func parseDoc(path string) (*doc, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	d := &doc{Sections: map[string]*sectionDoc{}}
+	cur := ""
+	sc := bufio.NewScanner(strings.NewReader(string(b)))
+	for sc.Scan() {
+		raw := sc.Text()
+		trim := strings.TrimSpace(raw)
+		if strings.HasPrefix(trim, "[") && strings.Contains(trim, "]") {
+			idx := strings.Index(trim, "]")
+			cur = strings.TrimSpace(trim[1:idx])
+			if d.Sections[cur] == nil {
+				d.Sections[cur] = &sectionDoc{Name: cur}
+				d.Order = append(d.Order, cur)
+			}
+			continue
+		}
+		if cur == "" {
+			d.Preamble = append(d.Preamble, raw)
+			continue
+		}
+		d.Sections[cur].Lines = append(d.Sections[cur].Lines, raw)
+	}
+	return d, sc.Err()
+}
+
+func buildAdminConfig(d *doc) AdminConfig {
+	cfg := AdminConfig{Global: map[string]string{}, Core: []AdminSection{}, Leniency: []AdminSection{}, Advanced: []AdminSection{}}
+	for _, name := range d.Order {
+		sec := d.Sections[name]
+		keys := parseSectionKeys(sec.Lines)
+		if name == "global" {
+			cfg.Global = keys
+			continue
+		}
+		as := AdminSection{Name: name, Enabled: parseEnabled(keys), Keys: keys, RawLines: append([]string{}, sec.Lines...)}
+		switch {
+		case strings.HasSuffix(name, ".leniency"):
+			as.Kind = "leniency"
+			cfg.Leniency = append(cfg.Leniency, as)
+		case name == "webdetector":
+			as.Kind = "advanced"
+			cfg.Advanced = append(cfg.Advanced, as)
+		default:
+			as.Kind = "core"
+			cfg.Core = append(cfg.Core, as)
+		}
+	}
+	sort.Slice(cfg.Core, func(i, j int) bool { return cfg.Core[i].Name < cfg.Core[j].Name })
+	sort.Slice(cfg.Leniency, func(i, j int) bool { return cfg.Leniency[i].Name < cfg.Leniency[j].Name })
+	sort.Slice(cfg.Advanced, func(i, j int) bool { return cfg.Advanced[i].Name < cfg.Advanced[j].Name })
+	return cfg
+}
+
+func parseEnabled(keys map[string]string) bool {
+	v := strings.ToLower(strings.TrimSpace(keys["ENABLED"]))
+	return !(v == "0" || v == "no" || v == "false" || v == "off")
+}
+
+func parseSectionKeys(lines []string) map[string]string {
+	out := map[string]string{}
+	var last string
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if i := strings.Index(line, "="); i > 0 {
+			k := strings.TrimSpace(line[:i])
+			if isConfigKey(k) {
+				last = strings.ToUpper(k)
+				out[last] = strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
+				continue
+			}
+		}
+		if last != "" {
+			out[last] = out[last] + "\n" + strings.TrimSpace(line)
+		}
+	}
+	return out
+}
+
+func renderFromDoc(d *doc, cfg AdminConfig) string {
+	if d.Sections == nil {
+		d.Sections = map[string]*sectionDoc{}
+	}
+	byName := map[string]AdminSection{}
+	for _, sec := range cfg.Core {
+		sec.Kind = "core"
+		byName[sec.Name] = sec
+	}
+	for _, sec := range cfg.Leniency {
+		sec.Kind = "leniency"
+		byName[sec.Name] = sec
+	}
+	for _, sec := range cfg.Advanced {
+		sec.Kind = "advanced"
+		byName[sec.Name] = sec
+	}
+	if _, ok := byName["global"]; !ok {
+		byName["global"] = AdminSection{Name: "global", Kind: "global", Keys: cfg.Global}
+	}
+	var b strings.Builder
+	for _, l := range d.Preamble {
+		b.WriteString(l + "\n")
+	}
+	if len(d.Preamble) > 0 {
+		b.WriteString("\n")
+	}
+	rendered := map[string]bool{}
+	for _, name := range d.Order {
+		if name == "global" {
+			renderSection(&b, "global", cfg.Global)
+			rendered[name] = true
+			continue
+		}
+		if sec, ok := byName[name]; ok {
+			renderSection(&b, name, sec.Keys)
+			rendered[name] = true
+		} else if src := d.Sections[name]; src != nil {
+			b.WriteString("[" + name + "]\n")
+			for _, l := range src.Lines {
+				b.WriteString(l + "\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+	for name, sec := range byName {
+		if rendered[name] {
+			continue
+		}
+		renderSection(&b, name, sec.Keys)
+	}
+	if !rendered["global"] {
+		renderSection(&b, "global", cfg.Global)
+	}
+	return strings.TrimSpace(b.String()) + "\n"
+}
+
+func renderSection(b *strings.Builder, name string, keys map[string]string) {
+	b.WriteString("[" + name + "]\n")
+	ord := make([]string, 0, len(keys))
+	for k := range keys {
+		ord = append(ord, k)
+	}
+	sort.Strings(ord)
+	for _, k := range ord {
+		v := strings.TrimSpace(keys[k])
+		if strings.Contains(v, "\n") {
+			b.WriteString(k + " =\n")
+			for _, ln := range strings.Split(v, "\n") {
+				ln = strings.TrimSpace(ln)
+				if ln == "" {
+					continue
+				}
+				b.WriteString("  " + ln + "\n")
+			}
+			continue
+		}
+		b.WriteString(k + " = " + v + "\n")
+	}
+	b.WriteString("\n")
+}
+
+func isConfigKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func writeFileAtomic(path string, payload []byte) (string, error) {
+	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return "", err
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	backupPath := ""
+	if fileExists(path) {
+		backupPath = fmt.Sprintf("%s.bak-%s", path, time.Now().UTC().Format("20060102150405.000000000"))
+		if err := copyFileSafe(path, backupPath); err != nil {
+			return "", err
+		}
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return "", err
+	}
+	return backupPath, nil
+}
+
+func backupIDFromPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	idx := strings.Index(filepath.Base(path), ".bak-")
+	if idx < 0 {
+		return ""
+	}
+	return filepath.Base(path)[idx+5:]
+}
+
+func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+func copyFileSafe(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := out.ReadFrom(in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}

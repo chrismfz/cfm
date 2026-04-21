@@ -137,9 +137,8 @@ Start with `cfm auth`, then log in to `/cfm-admin` and configure Notifier from U
 #### Roadmap
 
 - Notifier Web UI is available now.
-- Detectors Settings UI (`detectors.conf`) is planned in phased rollout:
-  - v1: core detectors
-  - v2: deeper webdetector integration
+- Detectors Settings UI phase 1 is available at `/cfm-admin/detectors/` with safe draft validation, diff preview, backup/restore and reload hooks.
+- Phase 2 (planned): deeper webdetector key coverage and advanced modeling.
 
 ### Manual install (from source)
 

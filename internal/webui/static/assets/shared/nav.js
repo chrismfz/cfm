@@ -7,6 +7,7 @@ const MENU_ITEMS = [
   { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", match: "/cfm-admin/webdetector/controls/" },
   { label: "MySQL governor", href: "/cfm-admin/governor/", match: "/cfm-admin/governor/" },
   { label: "Notifier", href: "/cfm-admin/notifier/", match: "/cfm-admin/notifier/" },
+  { label: "Detectors", href: "/cfm-admin/detectors/", match: "/cfm-admin/detectors/" },
   { label: "Settings", href: "/cfm-admin/settings/", match: "/cfm-admin/settings/" },
   { label: "Debug", href: "/cfm-admin/debug/", match: "/cfm-admin/debug/" },
   { label: "Logout", href: "/cfm-admin/logout", match: "/cfm-admin/logout" },

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin · Detectors</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script type="module" src="/cfm-admin/assets/detectors.js"></script>
+  <link rel="icon" href="data:," />
+</head>
+<body>
+<div class="landing-shell">
+<header class="topbar">
+  <h1>Detectors</h1>
+  <nav class="top-nav" data-shared-nav></nav>
+  <div class="meta">
+    <span id="detectorsDirty" class="pill">Saved</span>
+    <button id="detectorsSaveBtn">Save</button>
+    <button id="detectorsDiscardBtn" class="btn-quiet">Cancel edits</button>
+    <button id="detectorsReloadBtn" class="btn-quiet">Reload detectors</button>
+  </div>
+</header>
+<main class="layout">
+  <section class="card wide"><p id="detectorsStatus" class="statusline" style="display:block"></p></section>
+  <section class="card wide"><h2>Global</h2><div id="detectorsGlobal" class="summary-grid"></div></section>
+  <section class="card wide"><h2>Core detectors</h2><div class="table-wrap"><table><thead><tr><th>Section</th><th>Enabled</th><th>Key settings (JSON)</th></tr></thead><tbody id="detectorsCoreBody"></tbody></table></div></section>
+  <section class="card wide"><h2>Leniency editor</h2><div class="table-wrap"><table><thead><tr><th>Section</th><th>Settings (JSON)</th></tr></thead><tbody id="detectorsLeniencyBody"></tbody></table></div><p class="muted">Tip: create <code>[section.leniency]</code> and set <code>MATCH_COUNTRY</code> or <code>MATCH_ASN</code> with BLOCK/BLOCK_COOLDOWN.</p></section>
+  <section class="card wide"><h2>Advanced raw blocks</h2><div id="detectorsAdvanced"></div></section>
+  <section class="card wide"><h2>Backups</h2><div class="toolbar wrap"><button id="detectorsRefreshBackups" class="btn-quiet">Refresh backups</button><input id="detectorsRestoreID" class="input" placeholder="backup id"/><button id="detectorsRestoreBtn" class="btn-quiet">Restore</button></div><ul id="detectorsBackupsList" class="list-compact"></ul></section>
+</main></div>
+<div id="detectorsSaveModal" class="modal-backdrop" style="display:none"><div class="modal-card"><h2>Save detectors.conf</h2><pre id="detectorsDiff" class="diff-preview"></pre><div class="toolbar wrap"><button id="detectorsConfirmSave">Confirm save</button><button id="detectorsCancelSave" class="btn-quiet">Cancel</button></div></div></div>
+<div id="detectorsValidationModal" class="modal-backdrop" style="display:none"><div class="modal-card"><h2>Validation errors</h2><ul id="detectorsValidationErrors" class="list-compact"></ul><div class="toolbar wrap"><button id="detectorsValidationClose" class="btn-quiet">Close</button></div></div></div>
+</body></html>
