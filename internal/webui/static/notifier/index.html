@@ -18,6 +18,13 @@
 
     <main class="layout">
       <section class="card wide">
+        <div class="toolbar wrap">
+          <button id="notifierTabConfigBtn" class="btn-quiet">Config</button>
+          <button id="notifierTabTestsBtn" class="btn-quiet">Tests</button>
+        </div>
+      </section>
+
+      <section class="card wide" data-notifier-tab="config">
         <h2>Config</h2>
         <p class="muted">Manage notifier channels and detector overrides, then save + reload to apply.</p>
         <div class="toolbar wrap">
@@ -28,7 +35,7 @@
         <p id="notifierStatus" class="statusline" style="display:block"></p>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" data-notifier-tab="config">
         <h2>Channels</h2>
         <div class="toolbar wrap">
           <button id="notifierAddChannelBtn">Add channel</button>
@@ -43,7 +50,7 @@
         </div>
       </section>
 
-      <section class="card wide">
+      <section class="card wide" data-notifier-tab="config">
         <h2>Detector overrides</h2>
         <div class="toolbar wrap">
           <button id="notifierAddDetectorBtn">Add detector override</button>
@@ -54,6 +61,26 @@
               <tr><th>Detector</th><th>Notify</th><th>Cooldown</th><th>Min severity</th><th>Channels</th><th>Actions</th></tr>
             </thead>
             <tbody id="notifierDetectorsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide" data-notifier-tab="tests" style="display:none">
+        <h2>Tests</h2>
+        <p class="muted">Send a synthetic notifier event directly to a specific channel.</p>
+        <div class="toolbar wrap">
+          <input id="notifierTestChannel" placeholder="Channel ID (required)" />
+          <input id="notifierTestDetector" placeholder="Detector (optional)" />
+          <button id="notifierRunTestBtn">Run test</button>
+        </div>
+        <label for="notifierTestSample" class="muted">Sample payload JSON (optional)</label>
+        <textarea id="notifierTestSample" rows="5" style="width:100%" placeholder='{"host":"db01.example.test","error":"timeout"}'></textarea>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Channel</th><th>Attempted at</th><th>Status</th><th>Error</th><th>Delivery duration</th></tr>
+            </thead>
+            <tbody id="notifierTestsBody"></tbody>
           </table>
         </div>
       </section>

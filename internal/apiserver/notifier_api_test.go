@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"cfm/internal/notify"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -63,5 +64,45 @@ func TestNotifierConfigRequiresAdmin(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected forbidden, got %d", rr.Code)
+	}
+}
+
+func TestNotifierTestEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := notify.AdminConfig{
+		Notifier: notify.AdminNotifierConfig{Enabled: true},
+		Channels: []notify.AdminChannelConfig{
+			{ID: "missing-bin", Type: "sendmail", Enabled: true, Path: "/definitely/missing/sendmail", To: []string{"ops@example.test"}},
+		},
+	}
+	if _, err := notify.SaveAdminConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.Reload(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	body := map[string]any{
+		"channel":  "missing-bin",
+		"detector": "mysql",
+		"sample": map[string]any{
+			"host": "db01.example.test",
+		},
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/test", bytes.NewReader(buf))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"channel":"missing-bin"`)) {
+		t.Fatalf("expected channel in response body: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"status":"failure"`)) {
+		t.Fatalf("expected failure status in response body: %s", rr.Body.String())
 	}
 }
