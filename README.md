@@ -500,6 +500,23 @@ The shipped `openresty.conf` / `angie.conf` Lua block implements:
 - Real-time cfm decision socket query
 - Optional cache via `shared_dict`
 
+#### Self-IP bypass semantics (shared nft + Lua source)
+
+CFM now keeps a single authoritative self-IP snapshot for both layers:
+
+- During nft refresh, cfm rebuilds `self_v4` / `self_v6` and also writes
+  `/var/lib/cfm/lua/cfm_self_ips.lua` with:
+  - exact local interface IP entries, and
+  - a `generated_at` timestamp.
+- The Lua file is written atomically (`.tmp` + rename), so OpenResty/Angie workers
+  never read a partially-written snapshot.
+- `configs/cfm.lua` loads the file safely (`pcall(loadfile(...))`) and fails open
+  if the file is missing or malformed (logs warning, continues with loopback/link-local checks).
+- Step **0a** local-origin bypass consumes this shared map, so nft and Lua stay aligned
+  on what is considered “self traffic”.
+- The same computed self-origin flag is also passed into WAF check context for optional
+  rule tagging/telemetry.
+
 `configs/cfm_waf.lua` also includes staged payload detectors with per-rule modes
 (`disabled|logonly|challenge|block`). Two body-focused rules are designed to be
 deployed conservatively:
