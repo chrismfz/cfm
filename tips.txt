@@ -53,3 +53,5 @@ go tool pprof /usr/bin/cfm /tmp/cfm.cpu
 grep -c '^goroutine ' /tmp/cfm.gor    # total goroutines
 grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 
+
+5
