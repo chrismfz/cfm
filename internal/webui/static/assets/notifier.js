@@ -445,11 +445,89 @@
     syncDirtyState();
   }
 
+  function findDetectorChannelImpacts(config, channelIDs = []) {
+    const targets = new Set((channelIDs || []).map((id) => String(id || '').trim()).filter(Boolean));
+    const impacts = [];
+    for (const [detectorName, override] of Object.entries(keyedDetectors(config))) {
+      const channels = Array.isArray(override?.channels) ? override.channels : [];
+      channels.forEach((channelID, idx) => {
+        const normalized = String(channelID || '').trim();
+        if (!normalized) return;
+        if (targets.size > 0 && !targets.has(normalized)) return;
+        impacts.push({
+          detector: detectorName,
+          channel: normalized,
+          kind: 'detector_override',
+          section: `channels[${idx}]`,
+        });
+      });
+    }
+    return impacts;
+  }
+
+  function applyChannelRemap(fromID, toID) {
+    for (const detectorName of Object.keys(keyedDetectors(state.draftConfig))) {
+      const override = state.draftConfig.detectors[detectorName];
+      if (!Array.isArray(override?.channels)) continue;
+      const next = [];
+      for (const channelID of override.channels) {
+        const normalized = String(channelID || '').trim();
+        if (!normalized) continue;
+        next.push(normalized === fromID ? toID : normalized);
+      }
+      override.channels = Array.from(new Set(next));
+    }
+  }
+
+  function removeChannelReferences(channelID) {
+    for (const detectorName of Object.keys(keyedDetectors(state.draftConfig))) {
+      const override = state.draftConfig.detectors[detectorName];
+      if (!Array.isArray(override?.channels)) continue;
+      override.channels = override.channels.map((id) => String(id || '').trim()).filter((id) => id && id !== channelID);
+    }
+  }
+
   function editChannel(id) { upsertChannel(id); }
   function deleteChannel(id) {
-    if (!confirm(`Delete channel ${id}?`)) return;
-    state.draftConfig.channels = state.draftConfig.channels.filter((c) => c.id !== id);
-    renderChannels();
+    const channelID = String(id || '').trim();
+    if (!channelID) return;
+    if (!confirm(`Delete channel ${channelID}?`)) return;
+
+    const impacts = findDetectorChannelImpacts(state.draftConfig, [channelID]);
+    if (impacts.length) {
+      const affectedDetectors = impacts.map((impact) => impact.detector).join(', ');
+      const remap = confirm(
+        `Channel ${channelID} is still referenced by detector overrides: ${affectedDetectors}.\n\n`
+        + 'Click OK to remap all detector references to another channel. Click Cancel to choose removal instead.'
+      );
+      if (remap) {
+        const candidates = state.draftConfig.channels
+          .map((ch) => String(ch?.id || '').trim())
+          .filter((candidate) => candidate && candidate !== channelID);
+        if (!candidates.length) {
+          showStatus(`Cannot remap ${channelID}: no other channels are available.`, false);
+          return;
+        }
+        const nextID = (
+          prompt(`Remap ${channelID} references to which channel?\nAvailable: ${candidates.join(', ')}`, candidates[0]) || ''
+        ).trim();
+        if (!nextID) return;
+        if (!candidates.includes(nextID)) {
+          showStatus(`Invalid remap target: ${nextID}.`, false);
+          return;
+        }
+        applyChannelRemap(channelID, nextID);
+        showStatus(`Remapped detector references from ${channelID} to ${nextID}.`);
+      } else {
+        const removeRefs = confirm(`Remove ${channelID} from each affected detector override and continue deleting the channel?`);
+        if (!removeRefs) return;
+        removeChannelReferences(channelID);
+        showStatus(`Removed detector references to ${channelID}.`);
+      }
+    }
+
+    state.draftConfig.channels = state.draftConfig.channels.filter((c) => String(c?.id || '').trim() !== channelID);
+    render();
     syncDirtyState();
   }
 
@@ -533,15 +611,14 @@
       ...summarizeFieldChanges('dedupe', state.currentConfig.dedupe || {}, state.draftConfig.dedupe || {}),
     ];
 
+    const blockers = [];
     const destructive = [];
     for (const channelID of channelRemoved) {
-      const usedBy = [];
-      for (const [detectorName, override] of Object.entries(draftDetectors)) {
-        if (Array.isArray(override?.channels) && override.channels.includes(channelID)) usedBy.push(detectorName);
-      }
-      if (usedBy.length) {
-        destructive.push(`Channel "${channelID}" is removed but still referenced by detector overrides: ${usedBy.join(', ')}.`);
-      }
+      const impacts = findDetectorChannelImpacts(state.draftConfig, [channelID]);
+      if (!impacts.length) continue;
+      const usedBy = Array.from(new Set(impacts.map((impact) => impact.detector))).sort();
+      destructive.push(`Channel "${channelID}" is removed but still referenced by detector overrides: ${usedBy.join(', ')}.`);
+      blockers.push(...impacts);
     }
 
     return {
@@ -549,6 +626,7 @@
       detectors: { added: detectorAdded, edited: detectorEdited, removed: detectorRemoved },
       globalsChanged,
       destructive,
+      blockers,
     };
   }
 
@@ -585,6 +663,16 @@
     const destructiveWrap = byId('notifierSaveDestructiveWrap');
     const destructiveCheckbox = byId('notifierSaveDestructiveConfirm');
     const confirmBtn = byId('notifierSaveConfirmBtn');
+    const impactWrap = byId('notifierSaveImpactWrap');
+    if (summary.blockers?.length) {
+      if (impactWrap) impactWrap.style.display = '';
+      renderSummaryList('notifierSaveImpactList', summary.blockers.map((impact) => (
+        `Detector ${impact.detector} • kind=${impact.kind} • section=${impact.section} • channel=${impact.channel}`
+      )));
+    } else if (impactWrap) {
+      impactWrap.style.display = 'none';
+    }
+
     if (destructiveWrap && destructiveCheckbox && confirmBtn) {
       destructiveCheckbox.checked = false;
       if (summary.destructive.length) {
@@ -596,9 +684,11 @@
       } else {
         destructiveWrap.style.display = 'none';
       }
-      confirmBtn.disabled = summary.destructive.length > 0;
+      confirmBtn.disabled = summary.destructive.length > 0 || summary.blockers?.length > 0;
       destructiveCheckbox.onchange = () => {
-        confirmBtn.disabled = summary.destructive.length > 0 && !destructiveCheckbox.checked;
+        const destructiveBlocked = summary.destructive.length > 0 && !destructiveCheckbox.checked;
+        const referenceBlocked = summary.blockers?.length > 0;
+        confirmBtn.disabled = destructiveBlocked || referenceBlocked;
       };
     }
 
@@ -637,6 +727,11 @@
     byId('notifierSaveBtn')?.addEventListener('click', () => openSaveModal().catch((e) => showStatus(e.message, false)));
     byId('notifierSaveCancelBtn')?.addEventListener('click', closeSaveModal);
     byId('notifierSaveConfirmBtn')?.addEventListener('click', () => {
+      const summary = computeSaveSummary();
+      if (summary.blockers?.length) {
+        showStatus('Cannot save: unresolved detector references to channels scheduled for deletion. Use guided delete options first.', false);
+        return;
+      }
       saveConfig()
         .then(closeSaveModal)
         .catch((e) => showStatus(e.message, false));
