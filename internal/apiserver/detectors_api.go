@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,10 +35,10 @@ func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
 		handleDetectorsBackupRestore(w, r, cfgDir)
 	})))
 	m.Handle("/api/v1/detectors/test", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleDetectorsTest(w, r)
+		handleDetectorsTest(w, r, cfgDir)
 	})))
 	m.Handle("/api/v1/detectors/live", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleDetectorsLive(w, r)
+		handleDetectorsLive(w, r, cfgDir)
 	})))
 }
 
@@ -234,7 +235,7 @@ func handleDetectorsBackupRestore(w http.ResponseWriter, r *http.Request, cfgDir
 	writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "restored_id": req.ID, "backup_id": rid, "reloaded_detectors": req.Reload})
 }
 
-func handleDetectorsTest(w http.ResponseWriter, r *http.Request) {
+func handleDetectorsTest(w http.ResponseWriter, r *http.Request, cfgDir string) {
 	if r.Method != http.MethodPost {
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
@@ -252,13 +253,19 @@ func handleDetectorsTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ok := true
 	if req.Source == "file" {
-		_, err := os.Stat(strings.TrimSpace(req.File))
+		safePath, err := resolveSafeDetectorPath(strings.TrimSpace(req.File), cfgDir)
+		if err != nil {
+			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		_, err = os.Stat(safePath)
 		ok = err == nil
+		req.File = safePath
 	}
 	writeNotifierJSON(w, http.StatusOK, map[string]any{"ok": ok, "source": req.Source, "file": req.File, "autofind": req.Autofind})
 }
 
-func handleDetectorsLive(w http.ResponseWriter, r *http.Request) {
+func handleDetectorsLive(w http.ResponseWriter, r *http.Request, cfgDir string) {
 	if r.Method != http.MethodGet {
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
@@ -266,9 +273,40 @@ func handleDetectorsLive(w http.ResponseWriter, r *http.Request) {
 	file := strings.TrimSpace(r.URL.Query().Get("file"))
 	live := false
 	if file != "" {
-		if st, err := os.Stat(file); err == nil && st.Size() > 0 {
+		safePath, err := resolveSafeDetectorPath(file, cfgDir)
+		if err != nil {
+			writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if st, err := os.Stat(safePath); err == nil && st.Size() > 0 {
 			live = true
 		}
+		file = safePath
 	}
 	writeNotifierJSON(w, http.StatusOK, map[string]any{"live": live, "file": file})
+}
+
+func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
+	p := strings.TrimSpace(rawPath)
+	if p == "" {
+		return "", http.ErrMissingFile
+	}
+	allowedRoots := []string{"/var/log", "/var/lib", "/etc/cfm"}
+	if cfgDir != "" {
+		allowedRoots = append(allowedRoots, cfgDir)
+	}
+	absTarget, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", err
+	}
+	for _, root := range allowedRoots {
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if absTarget == absRoot || strings.HasPrefix(absTarget, absRoot+string(os.PathSeparator)) {
+			return absTarget, nil
+		}
+	}
+	return "", os.ErrPermission
 }

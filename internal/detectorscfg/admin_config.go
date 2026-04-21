@@ -3,6 +3,7 @@ package detectorscfg
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -128,6 +129,7 @@ func ReadAdminConfigBackup(cfgDir, backupID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// #nosec G304 -- backup path is constrained by resolveBackupPath + validateBackupID.
 	b, err := os.ReadFile(bp)
 	if err != nil {
 		return "", err
@@ -137,15 +139,20 @@ func ReadAdminConfigBackup(cfgDir, backupID string) (string, error) {
 
 func RestoreAdminConfigBackup(cfgDir, backupID string) (string, string, error) {
 	path, _ := resolveDetectorsConfigPath(cfgDir)
-	bp, err := resolveBackupPath(cfgDir, backupID)
+	safeBackupID, err := validateBackupID(backupID)
 	if err != nil {
 		return path, "", err
 	}
+	bp, err := resolveBackupPath(cfgDir, safeBackupID)
+	if err != nil {
+		return path, "", err
+	}
+	// #nosec G304 -- backup path is constrained by resolveBackupPath + validateBackupID.
 	content, err := os.ReadFile(bp)
 	if err != nil {
 		return path, "", err
 	}
-	restoreID := backupID + "-restore-" + time.Now().UTC().Format("20060102150405")
+	restoreID := safeBackupID + "-restore-" + time.Now().UTC().Format("20060102150405")
 	if fileExists(path) {
 		if err := copyFileSafe(path, path+".bak-"+restoreID); err != nil {
 			return path, "", err
@@ -159,9 +166,9 @@ func RestoreAdminConfigBackup(cfgDir, backupID string) (string, string, error) {
 
 func resolveBackupPath(cfgDir, backupID string) (string, error) {
 	path, _ := resolveDetectorsConfigPath(cfgDir)
-	id := strings.TrimSpace(backupID)
-	if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") {
-		return "", fmt.Errorf("invalid backup id")
+	id, err := validateBackupID(backupID)
+	if err != nil {
+		return "", err
 	}
 	bp := path + ".bak-" + id
 	if !fileExists(bp) {
@@ -171,6 +178,7 @@ func resolveBackupPath(cfgDir, backupID string) (string, error) {
 }
 
 func parseDoc(path string) (*doc, error) {
+	// #nosec G304 -- path is resolved from the configured detectors.conf location.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -350,15 +358,20 @@ func isConfigKey(s string) bool {
 }
 
 func writeFileAtomic(path string, payload []byte) (string, error) {
+	// #nosec G304 -- lock file path is derived from the validated detectors.conf target path.
 	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return "", err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	fd, err := fileFD(lf)
+	if err != nil {
 		return "", err
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		return "", err
+	}
+	defer syscall.Flock(fd, syscall.LOCK_UN) //nolint:errcheck
 	backupPath := ""
 	if fileExists(path) {
 		backupPath = fmt.Sprintf("%s.bak-%s", path, time.Now().UTC().Format("20060102150405.000000000"))
@@ -400,14 +413,41 @@ func backupIDFromPath(path string) string {
 	return filepath.Base(path)[idx+5:]
 }
 
+func validateBackupID(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("backup id is required")
+	}
+	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid backup id")
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return "", fmt.Errorf("invalid backup id")
+	}
+	return id, nil
+}
+
+func fileFD(f *os.File) (int, error) {
+	fd := f.Fd()
+	if fd > math.MaxInt {
+		return 0, fmt.Errorf("file descriptor overflow")
+	}
+	return int(fd), nil
+}
+
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
 
 func copyFileSafe(src, dst string) error {
+	// #nosec G304 -- source path is derived from current/backup config paths.
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	// #nosec G304 -- destination path is derived from current/backup config paths.
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
