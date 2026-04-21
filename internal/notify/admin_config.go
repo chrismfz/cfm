@@ -1,10 +1,12 @@
 package notify
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"cfm/internal/notify/configio"
 )
@@ -137,9 +139,14 @@ func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {
 }
 
 func SaveAdminConfig(cfgDir string, c AdminConfig) (string, error) {
+	path, _, err := SaveAdminConfigWithBackup(cfgDir, c)
+	return path, err
+}
+
+func SaveAdminConfigWithBackup(cfgDir string, c AdminConfig) (string, string, error) {
 	path, _ := resolveConfigPath(cfgDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return path, err
+		return path, "", err
 	}
 	doc := (*configio.Document)(nil)
 	if fileExists(path) {
@@ -148,26 +155,33 @@ func SaveAdminConfig(cfgDir string, c AdminConfig) (string, error) {
 		}
 	}
 	raw := toRaw(c, doc)
-	if err := configio.WriteFile(path, []byte(configio.SerializeDeterministic(raw))); err != nil {
-		return path, err
+	backupPath, err := configio.WriteFile(path, []byte(configio.SerializeDeterministic(raw)))
+	if err != nil {
+		return path, "", err
 	}
-	return path, nil
+	return path, backupIDFromPath(backupPath), nil
 }
 
 func SaveAdminConfigMutations(cfgDir string, m AdminMutations) (string, error) {
+	path, _, err := SaveAdminConfigMutationsWithBackup(cfgDir, m)
+	return path, err
+}
+
+func SaveAdminConfigMutationsWithBackup(cfgDir string, m AdminMutations) (string, string, error) {
 	path, _ := resolveConfigPath(cfgDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return path, err
+		return path, "", err
 	}
 	base, err := loadRawConfig(path)
 	if err != nil {
-		return path, err
+		return path, "", err
 	}
 	applyMutations(&base, m)
-	if err := configio.WriteFile(path, []byte(configio.SerializeDeterministic(base))); err != nil {
-		return path, err
+	backupPath, err := configio.WriteFile(path, []byte(configio.SerializeDeterministic(base)))
+	if err != nil {
+		return path, "", err
 	}
-	return path, nil
+	return path, backupIDFromPath(backupPath), nil
 }
 
 func RenderAdminConfig(cfgDir string, c AdminConfig) (string, error) {
@@ -186,6 +200,126 @@ func RenderAdminConfig(cfgDir string, c AdminConfig) (string, error) {
 
 func Reload(cfgDir string) error {
 	return Init(cfgDir)
+}
+
+type AdminConfigBackup struct {
+	ID      string    `json:"id"`
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	Created time.Time `json:"created"`
+}
+
+func ListAdminConfigBackups(cfgDir string) ([]AdminConfigBackup, error) {
+	path, _ := resolveConfigPath(cfgDir)
+	matches, err := filepath.Glob(path + ".bak-*")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AdminConfigBackup, 0, len(matches))
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
+		id := backupIDFromPath(match)
+		if id == "" {
+			continue
+		}
+		out = append(out, AdminConfigBackup{
+			ID:      id,
+			Path:    match,
+			Size:    info.Size(),
+			Created: info.ModTime().UTC(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out, nil
+}
+
+func ReadAdminConfigBackup(cfgDir, backupID string) (string, error) {
+	backupPath, err := resolveBackupPath(cfgDir, backupID)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(backupPath)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func RestoreAdminConfigBackup(cfgDir, backupID string) (string, string, error) {
+	path, _ := resolveConfigPath(cfgDir)
+	backupPath, err := resolveBackupPath(cfgDir, backupID)
+	if err != nil {
+		return path, "", err
+	}
+	content, err := os.ReadFile(backupPath)
+	if err != nil {
+		return path, "", err
+	}
+	restoredAt := time.Now().UTC().Format("20060102150405")
+	restoreID := backupID + "-restore-" + restoredAt
+	restorePath := path + ".bak-" + restoreID
+	if fileExists(path) {
+		if err := copyFileSafe(path, restorePath); err != nil {
+			return path, "", err
+		}
+	}
+	if _, err := configio.WriteFile(path, content); err != nil {
+		return path, "", err
+	}
+	return path, restoreID, nil
+}
+
+func resolveBackupPath(cfgDir, backupID string) (string, error) {
+	path, _ := resolveConfigPath(cfgDir)
+	id := strings.TrimSpace(backupID)
+	if id == "" {
+		return "", fmt.Errorf("backup id is required")
+	}
+	if strings.Contains(id, "/") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid backup id")
+	}
+	p := path + ".bak-" + id
+	if !fileExists(p) {
+		return "", fmt.Errorf("backup not found")
+	}
+	return p, nil
+}
+
+func backupIDFromPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(path)
+	const marker = ".bak-"
+	idx := strings.Index(base, marker)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(base[idx+len(marker):])
+}
+
+func copyFileSafe(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := out.ReadFrom(in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func defaultAdminConfig() AdminConfig {

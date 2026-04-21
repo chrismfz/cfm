@@ -59,6 +59,74 @@ func TestNotifierConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNotifierBackupsListDiffRestore(t *testing.T) {
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	save := func(cooldown string) {
+		putBody := map[string]any{
+			"config": map[string]any{
+				"notifier": map[string]any{"enabled": true, "default_cooldown": cooldown},
+			},
+		}
+		buf, _ := json.Marshal(putBody)
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/notifier/config", bytes.NewReader(buf))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, adminCtx(req))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	}
+
+	save("1m")
+	save("2m")
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/backups", nil)
+	listRR := httptest.NewRecorder()
+	mux.ServeHTTP(listRR, adminCtx(listReq))
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("backups list status=%d body=%s", listRR.Code, listRR.Body.String())
+	}
+	var listPayload struct {
+		Backups []struct {
+			ID string `json:"id"`
+		} `json:"backups"`
+	}
+	if err := json.Unmarshal(listRR.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listPayload.Backups) == 0 || strings.TrimSpace(listPayload.Backups[0].ID) == "" {
+		t.Fatalf("expected at least one backup id: %s", listRR.Body.String())
+	}
+	backupID := listPayload.Backups[0].ID
+
+	diffReq := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/backups/diff?id="+backupID, nil)
+	diffRR := httptest.NewRecorder()
+	mux.ServeHTTP(diffRR, adminCtx(diffReq))
+	if diffRR.Code != http.StatusOK {
+		t.Fatalf("backups diff status=%d body=%s", diffRR.Code, diffRR.Body.String())
+	}
+	if !strings.Contains(diffRR.Body.String(), "\"diff\"") {
+		t.Fatalf("expected diff payload, got: %s", diffRR.Body.String())
+	}
+
+	restoreBody := []byte(`{"id":"` + backupID + `"}`)
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/backups/restore", bytes.NewReader(restoreBody))
+	restoreRR := httptest.NewRecorder()
+	mux.ServeHTTP(restoreRR, adminCtx(restoreReq))
+	if restoreRR.Code != http.StatusOK {
+		t.Fatalf("restore status=%d body=%s", restoreRR.Code, restoreRR.Body.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "notify.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "default_cooldown = 1m") {
+		t.Fatalf("restore did not roll back content:\n%s", string(raw))
+	}
+}
+
 func TestNotifierConfigRequiresAdmin(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterNotifierEndpoints(mux, t.TempDir())
