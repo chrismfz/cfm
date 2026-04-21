@@ -121,5 +121,33 @@
       </section>
     </main>
   </div>
+  <div id="notifierSaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="notifierSaveModalTitle">
+    <div class="modal-card">
+      <h2 id="notifierSaveModalTitle">Confirm notifier config save</h2>
+      <p class="muted">Review config changes before writing <code>notify.conf</code>.</p>
+
+      <h3>Channels</h3>
+      <ul id="notifierSaveChannelsSummary" class="list-compact"></ul>
+
+      <h3>Detector overrides</h3>
+      <ul id="notifierSaveDetectorsSummary" class="list-compact"></ul>
+
+      <h3>Notifier/Dedupe globals</h3>
+      <ul id="notifierSaveGlobalsSummary" class="list-compact"></ul>
+
+      <h3>Unified diff preview (<code>notify.conf</code>)</h3>
+      <pre id="notifierSaveDiffPreview" class="diff-preview"></pre>
+
+      <label id="notifierSaveDestructiveWrap" class="checkline" style="display:none">
+        <input id="notifierSaveDestructiveConfirm" type="checkbox" />
+        I understand this destructive change and want to continue.
+      </label>
+
+      <div class="toolbar wrap">
+        <button id="notifierSaveConfirmBtn">Confirm save</button>
+        <button id="notifierSaveCancelBtn" class="btn-quiet">Cancel</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

@@ -87,6 +87,14 @@
     showStatus(`Config saved to ${payload.path || state.path}.`);
   }
 
+  async function previewConfigDiff() {
+    const payload = await request('/cfm-admin/api/v1/notifier/preview', {
+      method: 'POST',
+      body: JSON.stringify({ config: state.draftConfig }),
+    });
+    return payload.diff || '';
+  }
+
   function cancelEdits() {
     state.draftConfig = normalizeConfig(cloneConfig(state.currentConfig));
     render();
@@ -401,6 +409,149 @@
     syncDirtyState();
   }
 
+  function keyedChannels(config) {
+    const out = {};
+    for (const channel of config?.channels || []) {
+      if (!channel || !channel.id) continue;
+      out[String(channel.id)] = channel;
+    }
+    return out;
+  }
+
+  function keyedDetectors(config) {
+    return config?.detectors && typeof config.detectors === 'object' ? config.detectors : {};
+  }
+
+  function summarizeFieldChanges(prefix, beforeObj, afterObj) {
+    const keys = Array.from(new Set([...(Object.keys(beforeObj || {})), ...(Object.keys(afterObj || {}))])).sort();
+    const changes = [];
+    for (const key of keys) {
+      if (JSON.stringify((beforeObj || {})[key]) === JSON.stringify((afterObj || {})[key])) continue;
+      changes.push(`${prefix}.${key}`);
+    }
+    return changes;
+  }
+
+  function computeSaveSummary() {
+    const currentChannels = keyedChannels(state.currentConfig);
+    const draftChannels = keyedChannels(state.draftConfig);
+    const channelAdded = [];
+    const channelEdited = [];
+    const channelRemoved = [];
+    for (const id of Object.keys(draftChannels).sort()) {
+      if (!currentChannels[id]) channelAdded.push(id);
+      else if (JSON.stringify(currentChannels[id]) !== JSON.stringify(draftChannels[id])) channelEdited.push(id);
+    }
+    for (const id of Object.keys(currentChannels).sort()) {
+      if (!draftChannels[id]) channelRemoved.push(id);
+    }
+
+    const currentDetectors = keyedDetectors(state.currentConfig);
+    const draftDetectors = keyedDetectors(state.draftConfig);
+    const detectorAdded = [];
+    const detectorEdited = [];
+    const detectorRemoved = [];
+    for (const name of Object.keys(draftDetectors).sort()) {
+      if (!currentDetectors[name]) detectorAdded.push(name);
+      else if (JSON.stringify(currentDetectors[name]) !== JSON.stringify(draftDetectors[name])) detectorEdited.push(name);
+    }
+    for (const name of Object.keys(currentDetectors).sort()) {
+      if (!draftDetectors[name]) detectorRemoved.push(name);
+    }
+
+    const globalsChanged = [
+      ...summarizeFieldChanges('notifier', state.currentConfig.notifier || {}, state.draftConfig.notifier || {}),
+      ...summarizeFieldChanges('dedupe', state.currentConfig.dedupe || {}, state.draftConfig.dedupe || {}),
+    ];
+
+    const destructive = [];
+    for (const channelID of channelRemoved) {
+      const usedBy = [];
+      for (const [detectorName, override] of Object.entries(draftDetectors)) {
+        if (Array.isArray(override?.channels) && override.channels.includes(channelID)) usedBy.push(detectorName);
+      }
+      if (usedBy.length) {
+        destructive.push(`Channel "${channelID}" is removed but still referenced by detector overrides: ${usedBy.join(', ')}.`);
+      }
+    }
+
+    return {
+      channels: { added: channelAdded, edited: channelEdited, removed: channelRemoved },
+      detectors: { added: detectorAdded, edited: detectorEdited, removed: detectorRemoved },
+      globalsChanged,
+      destructive,
+    };
+  }
+
+  function renderSummaryList(id, parts) {
+    const el = byId(id);
+    if (!el) return;
+    el.replaceChildren();
+    const addLine = (txt) => {
+      const li = document.createElement('li');
+      li.textContent = txt;
+      el.appendChild(li);
+    };
+    for (const part of parts) addLine(part);
+    if (!parts.length) addLine('No changes.');
+  }
+
+  async function openSaveModal() {
+    const summary = computeSaveSummary();
+    renderSummaryList('notifierSaveChannelsSummary', [
+      `Added: ${summary.channels.added.join(', ') || 'none'}`,
+      `Edited: ${summary.channels.edited.join(', ') || 'none'}`,
+      `Removed: ${summary.channels.removed.join(', ') || 'none'}`,
+    ]);
+    renderSummaryList('notifierSaveDetectorsSummary', [
+      `Added: ${summary.detectors.added.join(', ') || 'none'}`,
+      `Edited: ${summary.detectors.edited.join(', ') || 'none'}`,
+      `Removed: ${summary.detectors.removed.join(', ') || 'none'}`,
+    ]);
+    renderSummaryList(
+      'notifierSaveGlobalsSummary',
+      summary.globalsChanged.length ? summary.globalsChanged.map((key) => `Edited: ${key}`) : []
+    );
+
+    const destructiveWrap = byId('notifierSaveDestructiveWrap');
+    const destructiveCheckbox = byId('notifierSaveDestructiveConfirm');
+    const confirmBtn = byId('notifierSaveConfirmBtn');
+    if (destructiveWrap && destructiveCheckbox && confirmBtn) {
+      destructiveCheckbox.checked = false;
+      if (summary.destructive.length) {
+        destructiveWrap.style.display = '';
+        renderSummaryList('notifierSaveGlobalsSummary', [
+          ...(summary.globalsChanged.length ? summary.globalsChanged.map((key) => `Edited: ${key}`) : ['No changes.']),
+          `Destructive actions: ${summary.destructive.join(' ')}`,
+        ]);
+      } else {
+        destructiveWrap.style.display = 'none';
+      }
+      confirmBtn.disabled = summary.destructive.length > 0;
+      destructiveCheckbox.onchange = () => {
+        confirmBtn.disabled = summary.destructive.length > 0 && !destructiveCheckbox.checked;
+      };
+    }
+
+    const diffBox = byId('notifierSaveDiffPreview');
+    if (diffBox) {
+      diffBox.textContent = 'Loading diff preview…';
+      try {
+        const diffText = await previewConfigDiff();
+        diffBox.textContent = diffText || '(No textual diff)';
+      } catch (err) {
+        diffBox.textContent = `Failed to load preview: ${err.message}`;
+      }
+    }
+    const modal = byId('notifierSaveModal');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  function closeSaveModal() {
+    const modal = byId('notifierSaveModal');
+    if (modal) modal.style.display = 'none';
+  }
+
   function init() {
     window.addEventListener('beforeunload', (evt) => {
       if (!state.isDirty) return;
@@ -409,7 +560,13 @@
     });
 
     byId('notifierRefreshBtn')?.addEventListener('click', () => loadConfig().catch((e) => showStatus(e.message, false)));
-    byId('notifierSaveBtn')?.addEventListener('click', () => saveConfig().catch((e) => showStatus(e.message, false)));
+    byId('notifierSaveBtn')?.addEventListener('click', () => openSaveModal().catch((e) => showStatus(e.message, false)));
+    byId('notifierSaveCancelBtn')?.addEventListener('click', closeSaveModal);
+    byId('notifierSaveConfirmBtn')?.addEventListener('click', () => {
+      saveConfig()
+        .then(closeSaveModal)
+        .catch((e) => showStatus(e.message, false));
+    });
     byId('notifierCancelBtn')?.addEventListener('click', cancelEdits);
     byId('notifierRevertAllBtn')?.addEventListener('click', cancelEdits);
     byId('notifierRevertChannelsBtn')?.addEventListener('click', () => revertSection('channels'));

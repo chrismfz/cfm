@@ -170,6 +170,20 @@ func SaveAdminConfigMutations(cfgDir string, m AdminMutations) (string, error) {
 	return path, nil
 }
 
+func RenderAdminConfig(cfgDir string, c AdminConfig) (string, error) {
+	path, _ := resolveConfigPath(cfgDir)
+	doc := (*configio.Document)(nil)
+	if fileExists(path) {
+		existing, err := configio.ParseFile(path)
+		if err != nil {
+			return "", err
+		}
+		doc = existing.Doc
+	}
+	raw := toRaw(c, doc)
+	return configio.SerializeDeterministic(raw), nil
+}
+
 func Reload(cfgDir string) error {
 	return Init(cfgDir)
 }
