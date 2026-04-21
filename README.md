@@ -34,6 +34,7 @@ for the trade-offs and how to choose.
 
 1. [What is CFM?](#1-what-is-cfm)
 2. [Installation](#2-installation)
+   - [Web UI quick start (recommended)](#web-ui-quick-start-recommended)
 3. [Repository Layout](#3-repository-layout)
 4. [Configuration Files](#4-configuration-files)
 5. [Key Features](#5-key-features)
@@ -121,6 +122,24 @@ dnf install cfm
 ```
 
 Both packages create the `cfm` system user and group automatically during installation.
+
+### Web UI quick start (recommended)
+
+Start with `cfm auth`, then log in to `/cfm-admin` and configure Notifier from UI.
+
+1. Notifier now includes a Web UI for channels, routing, templates/dedupe, test send, history, and backups/restore.
+2. First-time setup: run `cfm auth` initialization and create a login-capable user.
+3. Login entry paths:
+   - direct API port: `http(s)://<server>:<API_PORT>/cfm-admin`
+   - via OpenResty/Angie interceptor: `http(s)://<hostname>/cfm-admin`
+4. These paths serve the same UI and authentication flow.
+
+#### Roadmap
+
+- Notifier Web UI is available now.
+- Detectors Settings UI (`detectors.conf`) is planned in phased rollout:
+  - v1: core detectors
+  - v2: deeper webdetector integration
 
 ### Manual install (from source)
 
