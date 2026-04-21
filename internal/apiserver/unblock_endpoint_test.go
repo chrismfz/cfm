@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,10 +59,16 @@ func TestUnblockRejectsNonPOSTMethods(t *testing.T) {
 func TestUnblockPOSTWithValidPayloadProceeds(t *testing.T) {
 	be := &stubFirewallBackend{}
 	origUnblockDo := unblockDo
+	var wg sync.WaitGroup
+	wg.Add(1)
 	unblockDo = func(_ context.Context, ip net.IP, _ unblock.Options) (unblock.Result, error) {
+		defer wg.Done()
 		return unblock.Result{WasBlocked: false}, nil
 	}
-	t.Cleanup(func() { unblockDo = origUnblockDo })
+	t.Cleanup(func() {
+		wg.Wait()
+		unblockDo = origUnblockDo
+	})
 
 	h := makeUnblockHandler(be, t.TempDir())
 	req := httptest.NewRequest(http.MethodPost, "/unblock", strings.NewReader(`{"ip":"192.0.2.10"}`))
@@ -70,6 +77,7 @@ func TestUnblockPOSTWithValidPayloadProceeds(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	h.ServeHTTP(rr, req)
+	wg.Wait()
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
