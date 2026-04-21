@@ -1,7 +1,31 @@
 (() => {
+  function cloneConfig(config) {
+    try {
+      if (typeof structuredClone === 'function') return structuredClone(config);
+    } catch (_) {}
+    return JSON.parse(JSON.stringify(config || {}));
+  }
+
+  function normalizeConfig(config) {
+    const next = config && typeof config === 'object' ? config : {};
+    next.channels = Array.isArray(next.channels) ? next.channels : [];
+    next.detectors = next.detectors && typeof next.detectors === 'object' ? next.detectors : {};
+    return next;
+  }
+
+  function configsEqual(a, b) {
+    try {
+      return JSON.stringify(a || {}) === JSON.stringify(b || {});
+    } catch (_) {
+      return false;
+    }
+  }
+
   let state = {
-    config: { channels: [], detectors: {} },
+    currentConfig: { channels: [], detectors: {} },
+    draftConfig: { channels: [], detectors: {} },
     path: '',
+    isDirty: false,
     testResults: [],
     activeTab: 'config',
     historyRows: [],
@@ -20,6 +44,15 @@
     el.style.color = ok ? '#4ade80' : '#f87171';
   }
 
+  function syncDirtyState() {
+    state.isDirty = !configsEqual(state.draftConfig, state.currentConfig);
+    const badge = byId('notifierDirtyBadge');
+    if (badge) {
+      badge.textContent = state.isDirty ? 'Unsaved changes' : 'Saved';
+      badge.className = state.isDirty ? 'pill warn' : 'pill';
+    }
+  }
+
   async function request(path, opts = {}) {
     const res = await fetch(path, {
       credentials: 'same-origin',
@@ -33,12 +66,13 @@
 
   async function loadConfig() {
     const payload = await request('/cfm-admin/api/v1/notifier/config');
+    const loaded = normalizeConfig(cloneConfig(payload.config || { channels: [], detectors: {} }));
     state = {
-      config: payload.config || { channels: [], detectors: {} },
+      ...state,
+      currentConfig: loaded,
+      draftConfig: cloneConfig(loaded),
       path: payload.path || '',
     };
-    state.config.channels = Array.isArray(state.config.channels) ? state.config.channels : [];
-    state.config.detectors = state.config.detectors && typeof state.config.detectors === 'object' ? state.config.detectors : {};
     render();
     showStatus(`Loaded config from ${state.path || 'default path'}.`);
   }
@@ -46,9 +80,24 @@
   async function saveConfig() {
     const payload = await request('/cfm-admin/api/v1/notifier/config', {
       method: 'PUT',
-      body: JSON.stringify({ config: state.config }),
+      body: JSON.stringify({ config: state.draftConfig }),
     });
+    state.currentConfig = normalizeConfig(cloneConfig(state.draftConfig));
+    syncDirtyState();
     showStatus(`Config saved to ${payload.path || state.path}.`);
+  }
+
+  function cancelEdits() {
+    state.draftConfig = normalizeConfig(cloneConfig(state.currentConfig));
+    render();
+    showStatus('Unsaved edits discarded.');
+  }
+
+  function revertSection(section) {
+    if (section !== 'channels' && section !== 'detectors') return;
+    state.draftConfig[section] = cloneConfig(state.currentConfig[section]);
+    render();
+    showStatus(`Reverted ${section} to saved state.`);
   }
 
   async function reloadNotifier() {
@@ -92,7 +141,7 @@
     const body = byId('notifierChannelsBody');
     if (!body) return;
     body.replaceChildren();
-    for (const channel of state.config.channels) {
+    for (const channel of state.draftConfig.channels) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${channel.id || ''}</td>
@@ -119,9 +168,9 @@
     const body = byId('notifierDetectorsBody');
     if (!body) return;
     body.replaceChildren();
-    const keys = Object.keys(state.config.detectors || {}).sort();
+    const keys = Object.keys(state.draftConfig.detectors || {}).sort();
     for (const detector of keys) {
-      const ov = state.config.detectors[detector] || {};
+      const ov = state.draftConfig.detectors[detector] || {};
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${detector}</td>
@@ -151,6 +200,7 @@
     renderTests();
     renderHistory();
     applyTabVisibility();
+    syncDirtyState();
   }
 
   function renderTests() {
@@ -291,7 +341,7 @@
   }
 
   function upsertChannel(existingId = '') {
-    const source = state.config.channels.find((c) => c.id === existingId) || {};
+    const source = state.draftConfig.channels.find((c) => c.id === existingId) || {};
     const id = prompt('Channel ID', source.id || '');
     if (!id) return;
     const type = prompt('Type (sendmail, smtp, slack, slack_webhook)', source.type || 'sendmail');
@@ -311,21 +361,23 @@
       webhook_url: webhook || '',
       host: host || '',
     };
-    state.config.channels = state.config.channels.filter((c) => c.id !== existingId && c.id !== ch.id);
-    state.config.channels.push(ch);
-    state.config.channels.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    state.draftConfig.channels = state.draftConfig.channels.filter((c) => c.id !== existingId && c.id !== ch.id);
+    state.draftConfig.channels.push(ch);
+    state.draftConfig.channels.sort((a, b) => String(a.id).localeCompare(String(b.id)));
     renderChannels();
+    syncDirtyState();
   }
 
   function editChannel(id) { upsertChannel(id); }
   function deleteChannel(id) {
     if (!confirm(`Delete channel ${id}?`)) return;
-    state.config.channels = state.config.channels.filter((c) => c.id !== id);
+    state.draftConfig.channels = state.draftConfig.channels.filter((c) => c.id !== id);
     renderChannels();
+    syncDirtyState();
   }
 
   function upsertDetector(existing = '') {
-    const source = (state.config.detectors || {})[existing] || {};
+    const source = (state.draftConfig.detectors || {})[existing] || {};
     const detector = (prompt('Detector name', existing || '') || '').trim().toLowerCase();
     if (!detector) return;
     const notify = confirm('Send notifications for this detector?');
@@ -334,22 +386,34 @@
     const channels = (prompt('Channel IDs CSV (optional)', Array.isArray(source.channels) ? source.channels.join(',') : '') || '')
       .split(',').map((v) => v.trim()).filter(Boolean);
 
-    if (!state.config.detectors || typeof state.config.detectors !== 'object') state.config.detectors = {};
-    if (existing && existing !== detector) delete state.config.detectors[existing];
-    state.config.detectors[detector] = { notify, cooldown, min_severity: minSeverity, channels };
+    if (!state.draftConfig.detectors || typeof state.draftConfig.detectors !== 'object') state.draftConfig.detectors = {};
+    if (existing && existing !== detector) delete state.draftConfig.detectors[existing];
+    state.draftConfig.detectors[detector] = { notify, cooldown, min_severity: minSeverity, channels };
     renderDetectors();
+    syncDirtyState();
   }
 
   function editDetector(detector) { upsertDetector(detector); }
   function deleteDetector(detector) {
     if (!confirm(`Delete detector override ${detector}?`)) return;
-    delete state.config.detectors[detector];
+    delete state.draftConfig.detectors[detector];
     renderDetectors();
+    syncDirtyState();
   }
 
   function init() {
+    window.addEventListener('beforeunload', (evt) => {
+      if (!state.isDirty) return;
+      evt.preventDefault();
+      evt.returnValue = 'You have unsaved changes';
+    });
+
     byId('notifierRefreshBtn')?.addEventListener('click', () => loadConfig().catch((e) => showStatus(e.message, false)));
     byId('notifierSaveBtn')?.addEventListener('click', () => saveConfig().catch((e) => showStatus(e.message, false)));
+    byId('notifierCancelBtn')?.addEventListener('click', cancelEdits);
+    byId('notifierRevertAllBtn')?.addEventListener('click', cancelEdits);
+    byId('notifierRevertChannelsBtn')?.addEventListener('click', () => revertSection('channels'));
+    byId('notifierRevertDetectorsBtn')?.addEventListener('click', () => revertSection('detectors'));
     byId('notifierReloadBtn')?.addEventListener('click', () => reloadNotifier().catch((e) => showStatus(e.message, false)));
     byId('notifierAddChannelBtn')?.addEventListener('click', () => upsertChannel(''));
     byId('notifierAddDetectorBtn')?.addEventListener('click', () => upsertDetector(''));
