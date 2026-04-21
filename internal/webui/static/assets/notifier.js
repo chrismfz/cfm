@@ -93,6 +93,24 @@
     el.style.color = ok ? '#4ade80' : '#f87171';
   }
 
+  let toastTimer = null;
+  function showToast(msg, ok = true) {
+    const el = byId('notifierToast');
+    if (!el) return;
+    if (toastTimer) {
+      window.clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+    el.style.display = '';
+    el.textContent = msg;
+    el.className = ok ? 'pill' : 'pill danger';
+    toastTimer = window.setTimeout(() => {
+      el.style.display = 'none';
+      el.textContent = '';
+      el.className = 'pill';
+    }, 3200);
+  }
+
   function renderRecentActions() {
     const list = byId('notifierRecentActionsList');
     if (!list) return;
@@ -764,6 +782,25 @@
     await fetchHistory();
   }
 
+  async function truncateHistory() {
+    const confirmation = String(byId('notifierHistoryTruncateConfirm')?.value || '').trim().toUpperCase();
+    if (confirmation !== 'TRUNCATE') {
+      showTabStatus('history', 'Type TRUNCATE to confirm history truncation.', false);
+      return;
+    }
+    const res = await request('/cfm-admin/api/v1/notifier/history/truncate', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation }),
+    });
+    const deleted = Number(res.deleted_count || 0);
+    showToast(`History truncated. Deleted ${deleted} row${deleted === 1 ? '' : 's'}.`, true);
+    showTabStatus('history', `History truncated (${deleted} deleted).`);
+    pushRecentAction('truncate history', `${deleted} deleted`, true);
+    if (byId('notifierHistoryTruncateConfirm')) byId('notifierHistoryTruncateConfirm').value = '';
+    await refreshRuntimeStatus();
+    await fetchHistory({ poll: false });
+  }
+
   function openUnsavedLeave(fn) { state.pendingLeave = fn; byId('notifierUnsavedLeaveModal').style.display = 'flex'; }
   function closeUnsavedLeave() { state.pendingLeave = null; byId('notifierUnsavedLeaveModal').style.display = 'none'; }
   function runPendingLeave() { const fn = state.pendingLeave; closeUnsavedLeave(); if (typeof fn === 'function') fn(); }
@@ -863,6 +900,11 @@
     byId('notifierRestoreBackupBtn')?.addEventListener('click', () => restoreBackup().catch((e) => {
       showTabStatus('history', e.message, false);
       pushRecentAction('restore backup', e.message, false);
+    }));
+    byId('notifierHistoryTruncateBtn')?.addEventListener('click', () => truncateHistory().catch((e) => {
+      showToast(e.message || 'Failed to truncate history.', false);
+      showTabStatus('history', e.message || 'Failed to truncate history.', false);
+      pushRecentAction('truncate history', e.message || 'failed', false);
     }));
     byId('notifierHistoryDetailClose')?.addEventListener('click', () => showHistoryDetail(null));
 

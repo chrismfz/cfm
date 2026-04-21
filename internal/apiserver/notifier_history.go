@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/logging"
 	"cfm/internal/notify"
 )
 
@@ -188,6 +189,99 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		resp.NextCursor = out[len(out)-1].Cursor
 	}
 	writeNotifierJSON(w, http.StatusOK, resp)
+}
+
+func handleNotifierHistoryTruncate(w http.ResponseWriter, r *http.Request, cfgDir string) {
+	if r.Method != http.MethodPost {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Confirmation string `json:"confirmation"`
+		Token        string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	confirm := strings.ToUpper(strings.TrimSpace(req.Confirmation))
+	if confirm == "" {
+		confirm = strings.ToUpper(strings.TrimSpace(req.Token))
+	}
+	if confirm != "TRUNCATE" {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "confirmation token mismatch"})
+		return
+	}
+
+	adminCfg, _, err := notify.LoadAdminConfig(cfgDir)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	path := strings.TrimSpace(adminCfg.Notifier.JSONLPath)
+	if path == "" {
+		path = "/var/lib/cfm/notify.log.jsonl"
+	}
+	deletedCount, err := truncateNotifierHistoryFile(path)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("truncate failed: %v", err)})
+		return
+	}
+
+	at := time.Now().UTC()
+	actor := notifierHistoryActor(r)
+	logging.LogfAPI("[audit] event=notifier_history_truncate actor=%q src_ip=%s timestamp=%s deleted_count=%d path=%q",
+		actor, realIPFromRequest(r), at.Format(time.RFC3339Nano), deletedCount, path)
+
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"deleted_count": deletedCount,
+		"actor":         actor,
+		"timestamp":     at.Format(time.RFC3339Nano),
+	})
+}
+
+func truncateNotifierHistoryFile(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer f.Close()
+
+	deleted := 0
+	s := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	s.Buffer(buf, 2*1024*1024)
+	for s.Scan() {
+		if strings.TrimSpace(s.Text()) != "" {
+			deleted++
+		}
+	}
+	if err := s.Err(); err != nil {
+		return 0, err
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+func notifierHistoryActor(r *http.Request) string {
+	if user, ok := authUserFromContext(r.Context()); ok {
+		if name := strings.TrimSpace(user.Username); name != "" {
+			return name
+		}
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-User")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-CFM-Actor")); v != "" {
+		return v
+	}
+	return "unknown"
 }
 
 func clampInt(raw string, def, min, max int) int {

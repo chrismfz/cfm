@@ -34,6 +34,9 @@ func RegisterNotifierEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/notifier/history", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierHistory(w, r, cfgDir)
 	})))
+	m.Handle("/api/v1/notifier/history/truncate", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleNotifierHistoryTruncate(w, r, cfgDir)
+	})))
 	m.Handle("/api/v1/notifier/validate", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleNotifierValidate(w, r)
 	})))

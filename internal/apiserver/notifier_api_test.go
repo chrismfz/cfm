@@ -734,3 +734,56 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 		t.Fatalf("unexpected filtered row: %#v", p5.Rows[0])
 	}
 }
+
+func TestNotifierHistoryTruncateEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := filepath.Join(dir, "notify.log.jsonl")
+	cfg := notify.AdminConfig{
+		Notifier: notify.AdminNotifierConfig{Enabled: true, JSONLPath: jsonl},
+	}
+	if _, err := notify.SaveAdminConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, []byte("{\"time\":\"2026-01-01T00:00:00Z\"}\n{\"time\":\"2026-01-01T00:00:01Z\"}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, dir)
+
+	badReq := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/history/truncate", strings.NewReader(`{"confirmation":"NOPE"}`))
+	badReq.Header.Set("Content-Type", "application/json")
+	badRR := httptest.NewRecorder()
+	mux.ServeHTTP(badRR, adminCtx(badReq))
+	if badRR.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad confirmation to fail with 400, got %d body=%s", badRR.Code, badRR.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/history/truncate", strings.NewReader(`{"confirmation":"TRUNCATE"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CFM-Actor", "admin-ui")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("truncate status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		OK           bool   `json:"ok"`
+		DeletedCount int    `json:"deleted_count"`
+		Actor        string `json:"actor"`
+		Timestamp    string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.OK || payload.DeletedCount != 2 || payload.Actor != "admin-ui" || payload.Timestamp == "" {
+		t.Fatalf("unexpected truncate payload: %#v", payload)
+	}
+	info, err := os.Stat(jsonl)
+	if err != nil {
+		t.Fatalf("stat truncated file: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("expected truncated file size to be 0, got %d", info.Size())
+	}
+}
