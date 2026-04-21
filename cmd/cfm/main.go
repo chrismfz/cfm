@@ -997,7 +997,13 @@ func runDaemon(args []string) {
 }
 
 func bootstrapTrafficEngine(ctx context.Context) error {
-	collector := traffic.NoopCollector{}
+	collector := traffic.Collector(traffic.NoopCollector{})
+	if conntrackCollector, err := traffic.NewConntrackCollector(); err != nil {
+		logging.Logf("[traffic] warning: conntrack collector init failed, using noop collector: %v", err)
+	} else {
+		collector = conntrackCollector
+	}
+
 	engine, err := traffic.NewEngine(collector, traffic.Config{})
 	if err != nil {
 		return err
