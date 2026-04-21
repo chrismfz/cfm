@@ -169,8 +169,9 @@ func Start(
 	RegisterUnblock(m, be, cfgDir)
 	RegisterBlock(m, be)
 
-	// ── System status ─────────────────────────────────────────────────────────
+	// ── System status + traffic API ───────────────────────────────────────────
 	RegisterSystemStatus(m)
+	RegisterTrafficEndpoints(m)
 
 	// ── Debug API (admin-only) ───────────────────────────────────────────────
 	RegisterDebugEndpoints(m)
