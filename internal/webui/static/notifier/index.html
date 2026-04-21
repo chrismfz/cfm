@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin · Notifier</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <link rel="icon" href="data:," />
+  <script type="module" src="/cfm-admin/assets/notifier.js"></script>
+</head>
+<body>
+  <div class="landing-shell">
+    <header class="topbar">
+      <h1>Notifier</h1>
+      <nav class="top-nav" data-shared-nav></nav>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Config</h2>
+        <p class="muted">Manage notifier channels and detector overrides, then save + reload to apply.</p>
+        <div class="toolbar wrap">
+          <button id="notifierRefreshBtn" class="btn-quiet">Refresh</button>
+          <button id="notifierSaveBtn">Save config</button>
+          <button id="notifierReloadBtn" class="btn-quiet">Reload notifier</button>
+        </div>
+        <p id="notifierStatus" class="statusline" style="display:block"></p>
+      </section>
+
+      <section class="card wide">
+        <h2>Channels</h2>
+        <div class="toolbar wrap">
+          <button id="notifierAddChannelBtn">Add channel</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Type</th><th>Enabled</th><th>Targets</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="notifierChannelsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Detector overrides</h2>
+        <div class="toolbar wrap">
+          <button id="notifierAddDetectorBtn">Add detector override</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Detector</th><th>Notify</th><th>Cooldown</th><th>Min severity</th><th>Channels</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="notifierDetectorsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
