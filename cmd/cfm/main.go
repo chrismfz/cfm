@@ -665,6 +665,10 @@ func runDaemon(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if err := bootstrapTrafficEngine(ctx); err != nil {
+		logging.Logf("[traffic] traffic engine disabled: %v", err)
+	}
+
 	// periodic clam bridge retry
 	go func() {
 		t := time.NewTicker(15 * time.Second)
@@ -990,6 +994,27 @@ func runDaemon(args []string) {
 			ddm.Tick(context.Background(), time.Now())
 		}
 	}
+}
+
+func bootstrapTrafficEngine(ctx context.Context) error {
+	collector := traffic.NoopCollector{}
+	engine, err := traffic.NewEngine(collector, traffic.Config{})
+	if err != nil {
+		return err
+	}
+
+	apiserver.SetTrafficSnapshotSource(engine)
+	logging.Logf("[traffic] traffic source registered")
+
+	go func() {
+		engine.Run(ctx)
+		apiserver.SetTrafficSnapshotSource(nil)
+		logging.Logf("[traffic] traffic engine stopped")
+		logging.Logf("[traffic] traffic source cleared")
+	}()
+
+	logging.Logf("[traffic] traffic engine started")
+	return nil
 }
 
 // --- config helpers --------------------------------------------------------

@@ -19,6 +19,14 @@ type Collector interface {
 	Collect(context.Context) ([]FlowSample, error)
 }
 
+// NoopCollector is a minimal collector used when no live flow source is wired.
+// It keeps the traffic engine running and serving empty snapshots.
+type NoopCollector struct{}
+
+func (NoopCollector) Collect(context.Context) ([]FlowSample, error) {
+	return nil, nil
+}
+
 // Config controls poll cadence and memory bounds.
 type Config struct {
 	TickInterval   time.Duration
