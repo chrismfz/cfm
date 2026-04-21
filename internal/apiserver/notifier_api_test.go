@@ -287,6 +287,105 @@ func TestNotifierMetricsInvalidWindow(t *testing.T) {
 	}
 }
 
+func TestNotifierValidateEndpointReturnsStructuredErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, t.TempDir())
+
+	body := map[string]any{
+		"channels": []map[string]any{
+			{"id": "ops", "type": "smtp", "host": "", "from": "", "to": []string{}},
+			{"id": "ops", "type": "pagerduty"},
+			{"id": "slack-main", "type": "slack", "webhook_url": ""},
+		},
+		"detectors": map[string]any{
+			"CLAM/INFECTED": map[string]any{
+				"cooldown":     "xyz",
+				"min_severity": "panic",
+				"channels":     []string{"ops", "missing"},
+			},
+		},
+		"notifier": map[string]any{"default_cooldown": "nope"},
+		"dedupe":   map[string]any{"cooldown": "-1m"},
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/validate", bytes.NewReader(buf))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Path string `json:"path"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rr.Body.String())
+	}
+	if payload.OK {
+		t.Fatalf("expected validation to fail: %s", rr.Body.String())
+	}
+	paths := map[string]bool{}
+	for _, e := range payload.Errors {
+		paths[e.Path] = true
+	}
+	for _, want := range []string{
+		"notifier.default_cooldown",
+		"dedupe.cooldown",
+		"channels[0].host",
+		"channels[0].from",
+		"channels[0].to",
+		"channels[1].id",
+		"channels[1].type",
+		"channels[2].webhook_url",
+		"detectors['CLAM/INFECTED'].cooldown",
+		"detectors['CLAM/INFECTED'].min_severity",
+		"detectors['CLAM/INFECTED'].channels[1]",
+	} {
+		if !paths[want] {
+			t.Fatalf("expected error path %q in response: %s", want, rr.Body.String())
+		}
+	}
+}
+
+func TestNotifierValidateEndpointAcceptsValidDraft(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterNotifierEndpoints(mux, t.TempDir())
+
+	body := map[string]any{
+		"config": map[string]any{
+			"notifier": map[string]any{"default_cooldown": "5m"},
+			"dedupe":   map[string]any{"cooldown": "2m"},
+			"channels": []map[string]any{
+				{"id": "mail", "type": "sendmail", "path": "/usr/sbin/sendmail"},
+				{"id": "ops", "type": "smtp", "host": "smtp.example.test", "from": "noreply@example.test", "to": []string{"ops@example.test"}},
+				{"id": "slack-main", "type": "slack_webhook", "webhook_url": "https://example.test/webhook"},
+			},
+			"detectors": map[string]any{
+				"CLAM/INFECTED": map[string]any{"cooldown": "30s", "min_severity": "critical", "channels": []string{"ops", "slack-main"}},
+			},
+		},
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifier/validate", bytes.NewReader(buf))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtx(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		OK     bool  `json:"ok"`
+		Errors []any `json:"errors"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rr.Body.String())
+	}
+	if !payload.OK || len(payload.Errors) != 0 {
+		t.Fatalf("expected valid payload, got %s", rr.Body.String())
+	}
+}
+
 func TestNotifierHistoryEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	jsonl := filepath.Join(dir, "notify.log.jsonl")
