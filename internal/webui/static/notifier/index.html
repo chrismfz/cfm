@@ -134,7 +134,29 @@
           <input id="notifierRestoreBackupId" class="input input-wide" placeholder="backup id" />
           <button id="notifierRestoreBackupBtn" class="btn-quiet">Restore backup</button>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>Time</th><th>Kind</th><th>Channel</th><th>Status</th><th>Reason</th><th>Error</th></tr></thead><tbody id="notifierHistoryBody"></tbody></table></div>
+        <div class="notifier-history-layout">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Kind</th><th>Channel</th><th>Status</th><th>Reason</th><th>Error</th></tr></thead>
+              <tbody id="notifierHistoryBody"></tbody>
+            </table>
+          </div>
+          <aside id="notifierHistoryDetail" class="summary-card notifier-history-detail" style="display:none">
+            <div class="toolbar wrap" style="justify-content:space-between">
+              <h3 style="margin:0">Delivery detail</h3>
+              <button id="notifierHistoryDetailClose" class="btn-quiet btn-sm">Close</button>
+            </div>
+            <div id="notifierHistoryDetailMeta" class="summary-grid" style="grid-template-columns:repeat(2,minmax(150px,1fr));"></div>
+            <div class="summary-card">
+              <h4>Rendered text</h4>
+              <pre id="notifierHistoryRenderedText" class="diff-preview" style="white-space:pre-wrap"></pre>
+            </div>
+            <details>
+              <summary class="btn-quiet btn-sm">Raw JSON payload</summary>
+              <pre id="notifierHistoryRawPayload" class="diff-preview"></pre>
+            </details>
+          </aside>
+        </div>
       </section>
     </main>
   </div>

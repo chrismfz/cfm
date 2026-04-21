@@ -22,6 +22,7 @@
     historyLatestCursor: '',
     historyKnownCursors: new Set(),
     historyPollInFlight: false,
+    historySelectedCursor: '',
   };
 
   const byId = (id) => document.getElementById(id);
@@ -388,7 +389,90 @@
   }
 
   function historyRowToHTML(row) {
-    return `<td>${row.time || ''}</td><td>${row.kind || ''}</td><td>${row.channel || ''}</td><td>${row.status || ''}</td><td>${row.reason || ''}</td><td>${row.error || ''}</td>`;
+    return `<td>${escapeHTML(row.time || '')}</td><td>${escapeHTML(row.kind || '')}</td><td>${escapeHTML(row.channel || '')}</td><td>${escapeHTML(row.status || '')}</td><td>${escapeHTML(row.reason || '')}</td><td>${escapeHTML(row.error || '')}</td>`;
+  }
+
+  function escapeHTML(value) {
+    return String(value == null ? '' : value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function payloadField(payload, ...keys) {
+    for (const key of keys) {
+      const val = payload?.[key];
+      if (val != null && String(val).trim() !== '') return String(val);
+    }
+    return '';
+  }
+
+  function updateHistorySelectionStyles() {
+    document.querySelectorAll('#notifierHistoryBody tr.clickable').forEach((tr) => {
+      tr.classList.toggle('active-row', tr.dataset.cursor === state.historySelectedCursor);
+    });
+  }
+
+  function showHistoryDetail(row = null) {
+    const panel = byId('notifierHistoryDetail');
+    const meta = byId('notifierHistoryDetailMeta');
+    const text = byId('notifierHistoryRenderedText');
+    const raw = byId('notifierHistoryRawPayload');
+    if (!panel || !meta || !text || !raw) return;
+    if (!row) {
+      state.historySelectedCursor = '';
+      panel.style.display = 'none';
+      meta.replaceChildren();
+      text.textContent = '';
+      raw.textContent = '';
+      updateHistorySelectionStyles();
+      return;
+    }
+    const payload = row.payload || {};
+    const statusText = String(row.status || '').toLowerCase() === 'success' ? 'success' : 'fail';
+    const fields = [
+      ['timestamp', row.time || '-'],
+      ['kind', row.kind || '-'],
+      ['section', payloadField(payload, 'section') || '-'],
+      ['severity', payloadField(payload, 'severity') || '-'],
+      ['channel', row.channel || payloadField(payload, 'channel') || '-'],
+      ['success/fail', statusText],
+      ['error text', row.error || payloadField(payload, 'err', 'error') || '-'],
+      ['src ip', row.srcip || payloadField(payload, 'srcip', 'src_ip') || '-'],
+      ['asn', payloadField(payload, 'asn') || '-'],
+      ['country', payloadField(payload, 'country') || '-'],
+      ['ptr', payloadField(payload, 'ptr') || '-'],
+    ];
+    meta.replaceChildren();
+    fields.forEach(([label, value]) => {
+      const card = document.createElement('div');
+      card.className = 'summary-card';
+      const h = document.createElement('h4');
+      h.textContent = label;
+      const v = document.createElement('div');
+      v.className = 'value';
+      v.textContent = value;
+      card.append(h, v);
+      meta.appendChild(card);
+    });
+    const renderedSubject = payloadField(payload, 'subject');
+    const renderedBody = payloadField(payload, 'body');
+    text.textContent = `Subject\n${renderedSubject || '-'}\n\nBody\n${renderedBody || '-'}`;
+    raw.textContent = JSON.stringify(payload, null, 2);
+    panel.style.display = '';
+    state.historySelectedCursor = row.cursor || '';
+    updateHistorySelectionStyles();
+  }
+
+  function historyRowElement(row) {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.dataset.cursor = row.cursor || '';
+    tr.innerHTML = historyRowToHTML(row);
+    tr.addEventListener('click', () => showHistoryDetail(row));
+    return tr;
   }
 
   function prependHistoryRows(rows) {
@@ -399,8 +483,7 @@
       const row = rows[i];
       if (!row?.cursor || state.historyKnownCursors.has(row.cursor)) continue;
       state.historyKnownCursors.add(row.cursor);
-      const tr = document.createElement('tr');
-      tr.innerHTML = historyRowToHTML(row);
+      const tr = historyRowElement(row);
       body.insertBefore(tr, body.firstChild);
       state.historyRows.unshift(row);
       if (row.kind) state.detectorHints.push(row.kind);
@@ -416,11 +499,12 @@
     state.historyKnownCursors = new Set(state.historyRows.map((row) => String(row?.cursor || '')).filter(Boolean));
     body.replaceChildren();
     for (const row of state.historyRows) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = historyRowToHTML(row);
+      const tr = historyRowElement(row);
       body.appendChild(tr);
       if (row.kind) state.detectorHints.push(row.kind);
     }
+    const selected = state.historyRows.find((row) => row.cursor === state.historySelectedCursor);
+    showHistoryDetail(selected || null);
   }
 
   async function fetchHistory({ poll = false } = {}) {
@@ -755,6 +839,7 @@
       showTabStatus('history', e.message, false);
       pushRecentAction('restore backup', e.message, false);
     }));
+    byId('notifierHistoryDetailClose')?.addEventListener('click', () => showHistoryDetail(null));
 
     bindTemplateInputs(); renderTabs(); renderDetectorHints(); renderRecentActions();
     state.metricsUpdatedTimer = window.setInterval(() => setMetricsMeta(), 1000);
