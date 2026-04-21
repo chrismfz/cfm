@@ -152,8 +152,7 @@ func handleNotifierTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel  string         `json:"channel"`
 		Channels []string       `json:"channels"`
-		Detector string         `json:"detector"`
-		Sample   map[string]any `json:"sample"`
+		Payload  map[string]any `json:"payload"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
@@ -168,7 +167,7 @@ func handleNotifierTest(w http.ResponseWriter, r *http.Request) {
 		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "channel is required"})
 		return
 	}
-	ev := notify.BuildSyntheticTestEvent(req.Detector, req.Sample)
+	ev := notify.BuildSyntheticTestEventFromPayload(req.Payload)
 	results, err := notify.SendSyntheticTest(ev, channels)
 	if err != nil {
 		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})

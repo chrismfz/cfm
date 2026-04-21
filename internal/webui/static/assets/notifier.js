@@ -181,7 +181,7 @@
   }
 
   function parseSampleInput() {
-    const raw = (byId('notifierTestSample')?.value || '').trim();
+    const raw = (byId('notifierTestPayload')?.value || '').trim();
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -190,18 +190,47 @@
     return parsed;
   }
 
-  async function runNotifierTest() {
-    const channel = (byId('notifierTestChannel')?.value || '').trim();
-    const detector = (byId('notifierTestDetector')?.value || '').trim();
-    if (!channel) throw new Error('Channel is required.');
+  function buildTestPayloadInput() {
     const sample = parseSampleInput();
+    const subject = (byId('notifierTestSubject')?.value || '').trim();
+    const body = (byId('notifierTestBody')?.value || '').trim();
+    const severity = (byId('notifierTestSeverity')?.value || '').trim();
+    const srcIP = (byId('notifierTestSrcIP')?.value || '').trim();
+    if (subject) sample.subject = subject;
+    if (body) sample.body = body;
+    if (severity) sample.severity = severity;
+    if (srcIP) sample.srcip = srcIP;
+    return sample;
+  }
+
+  async function runNotifierTest(channels = []) {
+    const channelInput = (byId('notifierTestChannel')?.value || '').trim();
+    const targetChannels = [...channels];
+    if (channelInput) targetChannels.push(channelInput);
+    const uniqueChannels = Array.from(new Set(targetChannels.map((c) => String(c || '').trim()).filter(Boolean)));
+    if (!uniqueChannels.length) throw new Error('Channel is required.');
+    const payloadInput = buildTestPayloadInput();
     const payload = await request('/cfm-admin/api/v1/notifier/test', {
       method: 'POST',
-      body: JSON.stringify({ channel, detector, sample }),
+      body: JSON.stringify({ channels: uniqueChannels, payload: payloadInput }),
     });
     state.testResults = Array.isArray(payload.results) ? payload.results : [];
     renderTests();
-    showStatus(`Completed notifier test for ${channel}.`, true);
+    showStatus(`Completed notifier test for ${uniqueChannels.join(', ')}.`, true);
+  }
+
+  async function runEnabledChannelTests() {
+    const enabled = (state.draftConfig.channels || [])
+      .filter((ch) => ch?.enabled !== false)
+      .map((ch) => String(ch?.id || '').trim())
+      .filter(Boolean);
+    if (!enabled.length) throw new Error('No enabled channels found.');
+    await runNotifierTest(enabled);
+  }
+
+  function runSingleChannelTest(channelID) {
+    setActiveTab('tests');
+    runNotifierTest([String(channelID || '').trim()]).catch((e) => showStatus(e.message, false));
   }
 
   function channelTargets(ch) {
@@ -234,7 +263,11 @@
       del.className = 'btn-danger btn-sm';
       del.textContent = 'Delete';
       del.onclick = () => deleteChannel(channel.id);
-      actions.append(edit, del);
+      const test = document.createElement('button');
+      test.className = 'btn-quiet btn-sm';
+      test.textContent = 'Test this channel';
+      test.onclick = () => runSingleChannelTest(channel.id);
+      actions.append(edit, test, del);
       body.appendChild(tr);
     }
   }
@@ -315,10 +348,11 @@
       const statusColor = statusText === 'success' ? '#4ade80' : '#f87171';
       tr.innerHTML = `
         <td>${result.channel || '-'}</td>
-        <td>${result.attempted_at || '-'}</td>
         <td style="color:${statusColor};font-weight:600">${statusText}</td>
         <td>${result.error || '-'}</td>
-        <td>${result.delivery_duration || '-'}</td>
+        <td>${result.latency || result.delivery_duration || '-'}</td>
+        <td>${result.attempted_at || '-'}</td>
+        <td><code>${result.correlation_id || '-'}</code></td>
       `;
       body.appendChild(tr);
     }
@@ -944,6 +978,7 @@
     byId('notifierAddChannelBtn')?.addEventListener('click', () => upsertChannel(''));
     byId('notifierAddDetectorBtn')?.addEventListener('click', () => upsertDetector(''));
     byId('notifierRunTestBtn')?.addEventListener('click', () => runNotifierTest().catch((e) => showStatus(e.message, false)));
+    byId('notifierRunTestAllBtn')?.addEventListener('click', () => runEnabledChannelTests().catch((e) => showStatus(e.message, false)));
     byId('notifierTabConfigBtn')?.addEventListener('click', () => setActiveTab('config'));
     byId('notifierTabTestsBtn')?.addEventListener('click', () => setActiveTab('tests'));
     byId('notifierTabHistoryBtn')?.addEventListener('click', () => setActiveTab('history'));

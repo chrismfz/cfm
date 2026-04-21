@@ -17,16 +17,18 @@ import (
 )
 
 type notifierHistoryItem struct {
-	Cursor  string         `json:"cursor"`
-	Time    string         `json:"time"`
-	Host    string         `json:"host,omitempty"`
-	Kind    string         `json:"kind,omitempty"`
-	SrcIP   string         `json:"srcip,omitempty"`
-	Reason  string         `json:"reason,omitempty"`
-	Channel string         `json:"channel,omitempty"`
-	Status  string         `json:"status"`
-	Error   string         `json:"error,omitempty"`
-	Payload map[string]any `json:"payload"`
+	Cursor        string         `json:"cursor"`
+	Time          string         `json:"time"`
+	Host          string         `json:"host,omitempty"`
+	Kind          string         `json:"kind,omitempty"`
+	SrcIP         string         `json:"srcip,omitempty"`
+	Reason        string         `json:"reason,omitempty"`
+	Channel       string         `json:"channel,omitempty"`
+	Status        string         `json:"status"`
+	Error         string         `json:"error,omitempty"`
+	Latency       string         `json:"latency,omitempty"`
+	CorrelationID string         `json:"correlation_id,omitempty"`
+	Payload       map[string]any `json:"payload"`
 }
 
 type notifierHistoryResponse struct {
@@ -193,6 +195,14 @@ func readNotifierHistoryRows(path string) ([]notifierHistoryParsedRow, error) {
 func rowToNotifierHistoryItem(row notifierHistoryParsedRow) notifierHistoryItem {
 	status := "success"
 	errVal := strings.TrimSpace(toString(row.Raw["err"]))
+	statusRaw := strings.ToLower(strings.TrimSpace(toString(row.Raw["status"])))
+	if statusRaw == "success" || statusRaw == "error" || statusRaw == "failure" {
+		if statusRaw == "failure" {
+			status = "error"
+		} else {
+			status = statusRaw
+		}
+	}
 	if notifierRecordIsError(row.Raw) {
 		status = "error"
 	}
@@ -204,16 +214,18 @@ func rowToNotifierHistoryItem(row notifierHistoryParsedRow) notifierHistoryItem 
 	}
 	payload := cloneMap(row.Raw)
 	return notifierHistoryItem{
-		Cursor:  encodeNotifierHistoryCursor(notifierHistoryCursor{TSUnixNano: row.TSUnixNano, Offset: row.Offset}),
-		Time:    time.Unix(0, row.TSUnixNano).UTC().Format(time.RFC3339Nano),
-		Host:    strings.TrimSpace(toString(row.Raw["host"])),
-		Kind:    strings.TrimSpace(toString(row.Raw["kind"])),
-		SrcIP:   strings.TrimSpace(toString(row.Raw["srcip"])),
-		Reason:  strings.TrimSpace(toString(row.Raw["reason"])),
-		Channel: channel,
-		Status:  status,
-		Error:   errVal,
-		Payload: payload,
+		Cursor:        encodeNotifierHistoryCursor(notifierHistoryCursor{TSUnixNano: row.TSUnixNano, Offset: row.Offset}),
+		Time:          time.Unix(0, row.TSUnixNano).UTC().Format(time.RFC3339Nano),
+		Host:          strings.TrimSpace(toString(row.Raw["host"])),
+		Kind:          strings.TrimSpace(toString(row.Raw["kind"])),
+		SrcIP:         strings.TrimSpace(toString(row.Raw["srcip"])),
+		Reason:        strings.TrimSpace(toString(row.Raw["reason"])),
+		Channel:       channel,
+		Status:        status,
+		Error:         errVal,
+		Latency:       strings.TrimSpace(toString(row.Raw["latency"])),
+		CorrelationID: strings.TrimSpace(toString(row.Raw["correlation_id"])),
+		Payload:       payload,
 	}
 }
 
