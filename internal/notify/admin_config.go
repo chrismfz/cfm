@@ -1,12 +1,12 @@
 package notify
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+
+	"cfm/internal/notify/configio"
 )
 
 type AdminConfig struct {
@@ -77,11 +77,11 @@ func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {
 	if !exists {
 		return defaultAdminConfig(), path, nil
 	}
-	ini, err := parseINI(path)
+	raw, err := configio.ParseFile(path)
 	if err != nil {
 		return AdminConfig{}, path, err
 	}
-	return fromINI(ini), path, nil
+	return fromRaw(raw), path, nil
 }
 
 func SaveAdminConfig(cfgDir string, c AdminConfig) (string, error) {
@@ -89,8 +89,14 @@ func SaveAdminConfig(cfgDir string, c AdminConfig) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return path, err
 	}
-	payload := strings.TrimSpace(renderConfig(c)) + "\n"
-	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+	doc := (*configio.Document)(nil)
+	if fileExists(path) {
+		if existing, err := configio.ParseFile(path); err == nil {
+			doc = existing.Doc
+		}
+	}
+	raw := toRaw(c, doc)
+	if err := configio.WriteFile(path, []byte(configio.SerializeDeterministic(raw))); err != nil {
 		return path, err
 	}
 	return path, nil
@@ -116,156 +122,109 @@ func defaultAdminConfig() AdminConfig {
 	}
 }
 
-func fromINI(ini *iniFile) AdminConfig {
+func fromRaw(raw configio.Config) AdminConfig {
 	c := defaultAdminConfig()
-	if s := ini.getSection("notifier"); s != nil {
-		c.Notifier.Enabled = parseBool(s["enabled"], true)
-		c.Notifier.DefaultCooldown = zv(s["default_cooldown"], c.Notifier.DefaultCooldown)
-		if p := strings.TrimSpace(s["jsonl_path"]); p != "" {
-			c.Notifier.JSONLPath = p
-		}
-		c.Notifier.HostnameOverride = strings.TrimSpace(s["hostname_override"])
-		if rl := strings.TrimSpace(s["rate_limit_per_min"]); rl != "" {
-			n, _ := strconv.Atoi(strings.TrimSpace(rl))
-			if n > 0 {
-				c.Notifier.RateLimitPerMin = n
-			}
-		}
-		c.Notifier.SubjectTemplate = strings.TrimSpace(s["subject_template"])
-		c.Notifier.BodyTemplate = strings.TrimSpace(s["body_template"])
+	c.Notifier = AdminNotifierConfig{
+		Enabled:          raw.Notifier.Enabled,
+		DefaultCooldown:  raw.Notifier.DefaultCooldown,
+		JSONLPath:        raw.Notifier.JSONLPath,
+		HostnameOverride: raw.Notifier.HostnameOverride,
+		RateLimitPerMin:  raw.Notifier.RateLimitPerMin,
+		SubjectTemplate:  raw.Notifier.SubjectTemplate,
+		BodyTemplate:     raw.Notifier.BodyTemplate,
 	}
-	if s := ini.getSection("dedupe"); s != nil {
-		if key := strings.TrimSpace(s["key"]); key != "" {
-			c.Dedupe.Key = key
-		}
-		if cd := strings.TrimSpace(s["cooldown"]); cd != "" {
-			c.Dedupe.Cooldown = cd
-		}
-	}
-	for name, sec := range ini.sectionsWithPrefix(`channel "`) {
-		id := between(name, `channel "`, `"`)
-		if id == "" {
-			continue
-		}
-		ch := AdminChannelConfig{
-			ID:                 id,
-			Type:               strings.TrimSpace(sec["type"]),
-			Enabled:            parseBool(sec["enabled"], true),
-			To:                 splitCSV(sec["to"]),
-			From:               strings.TrimSpace(sec["from"]),
-			Path:               strings.TrimSpace(sec["path"]),
-			Host:               strings.TrimSpace(sec["host"]),
-			User:               strings.TrimSpace(sec["user"]),
-			Pass:               strings.TrimSpace(sec["pass"]),
-			StartTLS:           parseBool(sec["starttls"], true),
-			InsecureSkipVerify: parseBool(sec["insecure_skip_verify"], false),
-			WebhookURL:         strings.TrimSpace(sec["webhook_url"]),
-			Mention:            strings.TrimSpace(sec["mention"]),
-			Username:           strings.TrimSpace(sec["username"]),
-			IconEmoji:          strings.TrimSpace(sec["icon_emoji"]),
-		}
-		c.Channels = append(c.Channels, ch)
+	c.Dedupe = AdminDedupeConfig{Key: raw.Dedupe.Key, Cooldown: raw.Dedupe.Cooldown}
+	for _, ch := range raw.Channels {
+		c.Channels = append(c.Channels, AdminChannelConfig{
+			ID:                 ch.ID,
+			Type:               ch.Type,
+			Enabled:            ch.Enabled,
+			To:                 ch.To,
+			From:               ch.From,
+			Path:               ch.Path,
+			Host:               ch.Host,
+			User:               ch.User,
+			Pass:               ch.Pass,
+			StartTLS:           ch.StartTLS,
+			InsecureSkipVerify: ch.InsecureSkipVerify,
+			WebhookURL:         ch.WebhookURL,
+			Mention:            ch.Mention,
+			Username:           ch.Username,
+			IconEmoji:          ch.IconEmoji,
+		})
 	}
 	sort.Slice(c.Channels, func(i, j int) bool { return c.Channels[i].ID < c.Channels[j].ID })
-
 	c.Detectors = map[string]AdminDetectorConfig{}
-	for name, sec := range ini.sectionsWithPrefix(`detector "`) {
-		id := strings.ToLower(strings.TrimSpace(between(name, `detector "`, `"`)))
-		if id == "" {
-			continue
-		}
-		c.Detectors[id] = AdminDetectorConfig{
-			Notify:      parseBool(sec["notify"], true),
-			Cooldown:    strings.TrimSpace(sec["cooldown"]),
-			MinSeverity: strings.ToLower(strings.TrimSpace(sec["min_severity"])),
-			Channels:    splitCSV(sec["channels"]),
+	for _, d := range raw.Detectors {
+		c.Detectors[strings.ToLower(strings.TrimSpace(d.Name))] = AdminDetectorConfig{
+			Notify:      d.Notify,
+			Cooldown:    d.Cooldown,
+			MinSeverity: d.MinSeverity,
+			Channels:    d.Channels,
 		}
 	}
 	return c
 }
 
-func renderConfig(c AdminConfig) string {
-	if c.Detectors == nil {
-		c.Detectors = map[string]AdminDetectorConfig{}
-	}
-	var b strings.Builder
-	b.WriteString("[notifier]\n")
-	b.WriteString(fmt.Sprintf("enabled = %t\n", c.Notifier.Enabled))
-	if strings.TrimSpace(c.Notifier.DefaultCooldown) != "" {
-		b.WriteString("default_cooldown = " + strings.TrimSpace(c.Notifier.DefaultCooldown) + "\n")
-	}
-	if strings.TrimSpace(c.Notifier.JSONLPath) != "" {
-		b.WriteString("jsonl_path = " + strings.TrimSpace(c.Notifier.JSONLPath) + "\n")
-	}
-	if strings.TrimSpace(c.Notifier.HostnameOverride) != "" {
-		b.WriteString("hostname_override = " + strings.TrimSpace(c.Notifier.HostnameOverride) + "\n")
-	}
-	if c.Notifier.RateLimitPerMin > 0 {
-		b.WriteString(fmt.Sprintf("rate_limit_per_min = %d\n", c.Notifier.RateLimitPerMin))
-	}
-	if strings.TrimSpace(c.Notifier.SubjectTemplate) != "" {
-		b.WriteString("subject_template = " + strings.TrimSpace(c.Notifier.SubjectTemplate) + "\n")
-	}
-	if strings.TrimSpace(c.Notifier.BodyTemplate) != "" {
-		b.WriteString("body_template = " + strings.TrimSpace(c.Notifier.BodyTemplate) + "\n")
-	}
-	b.WriteString("\n[dedupe]\n")
-	if strings.TrimSpace(c.Dedupe.Key) != "" {
-		b.WriteString("key = " + strings.TrimSpace(c.Dedupe.Key) + "\n")
-	}
-	if strings.TrimSpace(c.Dedupe.Cooldown) != "" {
-		b.WriteString("cooldown = " + strings.TrimSpace(c.Dedupe.Cooldown) + "\n")
-	}
-
+func toRaw(c AdminConfig, doc *configio.Document) configio.Config {
+	channels := make([]configio.Channel, 0, len(c.Channels))
 	for _, ch := range c.Channels {
 		id := strings.TrimSpace(ch.ID)
 		if id == "" {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("\n[channel %q]\n", id))
-		b.WriteString(fmt.Sprintf("enabled = %t\n", ch.Enabled))
-		if t := strings.TrimSpace(ch.Type); t != "" {
-			b.WriteString("type = " + t + "\n")
-		}
-		writeIf(&b, "to", strings.Join(ch.To, ","))
-		writeIf(&b, "from", ch.From)
-		writeIf(&b, "path", ch.Path)
-		writeIf(&b, "host", ch.Host)
-		writeIf(&b, "user", ch.User)
-		writeIf(&b, "pass", ch.Pass)
-		if ch.Type == "smtp" {
-			b.WriteString(fmt.Sprintf("starttls = %t\n", ch.StartTLS))
-			b.WriteString(fmt.Sprintf("insecure_skip_verify = %t\n", ch.InsecureSkipVerify))
-		}
-		writeIf(&b, "webhook_url", ch.WebhookURL)
-		writeIf(&b, "mention", ch.Mention)
-		writeIf(&b, "username", ch.Username)
-		writeIf(&b, "icon_emoji", ch.IconEmoji)
+		channels = append(channels, configio.Channel{
+			ID:                 id,
+			Type:               strings.TrimSpace(ch.Type),
+			Enabled:            ch.Enabled,
+			To:                 ch.To,
+			From:               strings.TrimSpace(ch.From),
+			Path:               strings.TrimSpace(ch.Path),
+			Host:               strings.TrimSpace(ch.Host),
+			User:               strings.TrimSpace(ch.User),
+			Pass:               strings.TrimSpace(ch.Pass),
+			StartTLS:           ch.StartTLS,
+			InsecureSkipVerify: ch.InsecureSkipVerify,
+			WebhookURL:         strings.TrimSpace(ch.WebhookURL),
+			Mention:            strings.TrimSpace(ch.Mention),
+			Username:           strings.TrimSpace(ch.Username),
+			IconEmoji:          strings.TrimSpace(ch.IconEmoji),
+		})
 	}
+	sort.Slice(channels, func(i, j int) bool { return channels[i].ID < channels[j].ID })
 
-	detectorIDs := make([]string, 0, len(c.Detectors))
-	for k := range c.Detectors {
-		detectorIDs = append(detectorIDs, strings.TrimSpace(strings.ToLower(k)))
-	}
-	sort.Strings(detectorIDs)
-	for _, id := range detectorIDs {
+	detectors := make([]configio.DetectorOverride, 0, len(c.Detectors))
+	for name, d := range c.Detectors {
+		id := strings.ToLower(strings.TrimSpace(name))
 		if id == "" {
 			continue
 		}
-		d := c.Detectors[id]
-		b.WriteString(fmt.Sprintf("\n[detector %q]\n", id))
-		b.WriteString(fmt.Sprintf("notify = %t\n", d.Notify))
-		writeIf(&b, "cooldown", d.Cooldown)
-		writeIf(&b, "min_severity", strings.ToLower(d.MinSeverity))
-		writeIf(&b, "channels", strings.Join(d.Channels, ","))
+		detectors = append(detectors, configio.DetectorOverride{
+			Name:        id,
+			Notify:      d.Notify,
+			Cooldown:    strings.TrimSpace(d.Cooldown),
+			MinSeverity: strings.ToLower(strings.TrimSpace(d.MinSeverity)),
+			Channels:    d.Channels,
+		})
 	}
-	return b.String()
-}
+	sort.Slice(detectors, func(i, j int) bool { return detectors[i].Name < detectors[j].Name })
 
-func writeIf(b *strings.Builder, key, value string) {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return
+	return configio.Config{
+		Notifier: configio.Notifier{
+			Enabled:          c.Notifier.Enabled,
+			DefaultCooldown:  strings.TrimSpace(c.Notifier.DefaultCooldown),
+			JSONLPath:        strings.TrimSpace(c.Notifier.JSONLPath),
+			HostnameOverride: strings.TrimSpace(c.Notifier.HostnameOverride),
+			RateLimitPerMin:  c.Notifier.RateLimitPerMin,
+			SubjectTemplate:  strings.TrimSpace(c.Notifier.SubjectTemplate),
+			BodyTemplate:     strings.TrimSpace(c.Notifier.BodyTemplate),
+		},
+		Dedupe: configio.Dedupe{
+			Key:      strings.TrimSpace(c.Dedupe.Key),
+			Cooldown: strings.TrimSpace(c.Dedupe.Cooldown),
+		},
+		Channels:  channels,
+		Detectors: detectors,
+		Doc:       doc,
 	}
-	b.WriteString(key + " = " + v + "\n")
 }
