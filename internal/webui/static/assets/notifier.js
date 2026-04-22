@@ -29,6 +29,8 @@
     historySelectedCursor: '',
     historyFilterKey: '',
     historyKnownKinds: new Set(),
+    historySortBy: 'time',
+    historySortDir: 'desc',
   };
 
   const byId = (id) => document.getElementById(id);
@@ -441,6 +443,8 @@
     if (filters.from) p.set('from', filters.from);
     if (filters.to) p.set('to', filters.to);
     p.set('status', filters.status);
+    p.set('sort_by', state.historySortBy);
+    p.set('sort_dir', state.historySortDir);
     if (sinceCursor) p.set('since', sinceCursor);
     return p.toString();
   }
@@ -504,7 +508,7 @@
   }
 
   function historyRowToHTML(row) {
-    return `<td>${escapeHTML(row.time || '')}</td><td>${escapeHTML(row.kind || '')}</td><td>${escapeHTML(row.channel || '')}</td><td>${escapeHTML(row.status || '')}</td><td>${escapeHTML(row.reason || '')}</td><td>${escapeHTML(row.error || '')}</td>`;
+    return `<td>${escapeHTML(row.time || '')}</td><td>${escapeHTML(row.kind || '')}</td><td>${escapeHTML(row.channel || '')}</td><td>${escapeHTML(row.status || '')}</td><td>${escapeHTML(row.srcip || '')}</td><td>${escapeHTML(row.reason || '')}</td><td>${escapeHTML(row.error || '')}</td>`;
   }
 
   function escapeHTML(value) {
@@ -528,6 +532,165 @@
     document.querySelectorAll('#notifierHistoryBody tr.clickable').forEach((tr) => {
       tr.classList.toggle('active-row', tr.dataset.cursor === state.historySelectedCursor);
     });
+    renderHistoryActionCells();
+  }
+
+  function historySortValue(row, key) {
+    if (key === 'time') {
+      return Date.parse(String(row?.time || '')) || 0;
+    }
+    return String(row?.[key] || '').toLowerCase();
+  }
+
+  function sortHistoryRows() {
+    const dir = state.historySortDir === 'asc' ? 1 : -1;
+    const key = state.historySortBy || 'time';
+    state.historyRows.sort((a, b) => {
+      const av = historySortValue(a, key);
+      const bv = historySortValue(b, key);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      const at = Date.parse(String(a?.time || '')) || 0;
+      const bt = Date.parse(String(b?.time || '')) || 0;
+      if (at !== bt) return bt - at;
+      return String(b?.cursor || '').localeCompare(String(a?.cursor || ''));
+    });
+  }
+
+  function renderHistorySortHeaders() {
+    document.querySelectorAll('.notifier-history-sort').forEach((btn) => {
+      const key = btn.dataset.sortKey || '';
+      const active = key === state.historySortBy;
+      const labelBase = String(key || '').replace('_', ' ');
+      const pretty = labelBase ? labelBase.charAt(0).toUpperCase() + labelBase.slice(1) : 'Sort';
+      const arrow = active ? (state.historySortDir === 'asc' ? ' ↑' : ' ↓') : '';
+      btn.textContent = `${pretty}${arrow}`;
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function onHistorySortClick(key) {
+    if (!key) return;
+    if (state.historySortBy === key) {
+      state.historySortDir = state.historySortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.historySortBy = key;
+      state.historySortDir = key === 'time' ? 'desc' : 'asc';
+    }
+    sortHistoryRows();
+    renderHistoryRows();
+  }
+
+  function renderHistoryActionsCell(row) {
+    const td = document.createElement('td');
+    const wrap = document.createElement('div');
+    wrap.className = 'toolbar wrap';
+    const isSelected = row.cursor === state.historySelectedCursor;
+    const srcIP = String(row.srcip || payloadField(row.payload || {}, 'srcip', 'src_ip') || '').trim();
+    if (!isSelected) {
+      const muted = document.createElement('span');
+      muted.className = 'muted';
+      muted.textContent = 'Select row';
+      td.appendChild(muted);
+      return td;
+    }
+    const unblockBtn = document.createElement('button');
+    unblockBtn.type = 'button';
+    unblockBtn.className = 'btn-quiet btn-sm';
+    unblockBtn.textContent = 'Unblock IP';
+    unblockBtn.disabled = !srcIP;
+    unblockBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      historyActionUnblockIP(srcIP);
+    });
+
+    const allowBtn = document.createElement('button');
+    allowBtn.type = 'button';
+    allowBtn.className = 'btn-quiet btn-sm';
+    allowBtn.textContent = 'Add to Allow';
+    allowBtn.disabled = !srcIP;
+    allowBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      historyActionAddToAllow(srcIP);
+    });
+
+    const ignoreBtn = document.createElement('button');
+    ignoreBtn.type = 'button';
+    ignoreBtn.className = 'btn-quiet btn-sm';
+    ignoreBtn.textContent = 'Add to Ignore';
+    ignoreBtn.disabled = true;
+    ignoreBtn.title = 'Feature flag disabled';
+    ignoreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showToast('Add to Ignore is not enabled yet.', false);
+    });
+    wrap.append(unblockBtn, allowBtn, ignoreBtn);
+    td.appendChild(wrap);
+    return td;
+  }
+
+  async function historyActionUnblockIP(ip) {
+    if (!ip) return;
+    try {
+      await request('/cfm-admin/api/v1/firewall/unblock', {
+        method: 'POST',
+        body: JSON.stringify({ ip }),
+      });
+      showToast(`Unblocked ${ip}.`, true);
+      showTabStatus('history', `Unblocked ${ip}.`);
+      pushRecentAction('unblock ip', ip, true);
+    } catch (e) {
+      showToast(e.message || `Failed to unblock ${ip}.`, false);
+      showTabStatus('history', e.message || `Failed to unblock ${ip}.`, false);
+      pushRecentAction('unblock ip', e.message || 'failed', false);
+    }
+  }
+
+  function historyActionAddToAllow(ip) {
+    if (!ip) return;
+    const callback = window.CFMNotifierHistoryActions?.addToAllow;
+    if (typeof callback === 'function') {
+      Promise.resolve(callback({ ip }))
+        .then(() => {
+          showToast(`Added ${ip} to allow target.`, true);
+          pushRecentAction('add allow', ip, true);
+        })
+        .catch((e) => {
+          showToast(e?.message || `Failed to add ${ip} to allow target.`, false);
+          pushRecentAction('add allow', e?.message || 'failed', false);
+        });
+      return;
+    }
+    showToast(`No allow API wired. Use: cfm allow ${ip} (or append to cfm.allow).`, true);
+    pushRecentAction('add allow', `${ip} (stub)`, true);
+  }
+
+  function renderHistoryActionCells() {
+    document.querySelectorAll('#notifierHistoryBody tr.clickable').forEach((tr) => {
+      const cursor = tr.dataset.cursor || '';
+      const row = state.historyRows.find((item) => String(item?.cursor || '') === cursor);
+      if (!row) return;
+      const currentCell = tr.querySelector('td[data-history-actions="1"]');
+      const nextCell = renderHistoryActionsCell(row);
+      nextCell.dataset.historyActions = '1';
+      if (currentCell) tr.replaceChild(nextCell, currentCell);
+      else tr.appendChild(nextCell);
+    });
+  }
+
+  function renderHistoryRows() {
+    const body = byId('notifierHistoryBody');
+    if (!body) return;
+    sortHistoryRows();
+    body.replaceChildren();
+    for (const row of state.historyRows) {
+      const tr = historyRowElement(row);
+      body.appendChild(tr);
+      if (row.kind) state.detectorHints.push(row.kind);
+    }
+    const selected = state.historyRows.find((row) => row.cursor === state.historySelectedCursor);
+    showHistoryDetail(selected || null);
+    renderHistorySortHeaders();
   }
 
   function showHistoryDetail(row = null) {
@@ -586,52 +749,48 @@
     tr.className = 'clickable';
     tr.dataset.cursor = row.cursor || '';
     tr.innerHTML = historyRowToHTML(row);
+    const actionTd = renderHistoryActionsCell(row);
+    actionTd.dataset.historyActions = '1';
+    tr.appendChild(actionTd);
     tr.addEventListener('click', () => showHistoryDetail(row));
     return tr;
   }
 
   function prependHistoryRows(rows) {
-    const body = byId('notifierHistoryBody');
-    if (!body || !Array.isArray(rows) || rows.length === 0) return 0;
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
     let added = 0;
-    for (let i = rows.length - 1; i >= 0; i -= 1) {
+    for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
       if (!row?.cursor || state.historyKnownCursors.has(row.cursor)) continue;
       state.historyKnownCursors.add(row.cursor);
-      const tr = historyRowElement(row);
-      body.insertBefore(tr, body.firstChild);
       state.historyRows.unshift(row);
       if (row.kind) state.historyKnownKinds.add(String(row.kind).trim());
       if (row.kind) state.detectorHints.push(row.kind);
       added += 1;
     }
+    if (added > 0) renderHistoryRows();
     return added;
   }
 
   function replaceHistoryRows(rows) {
-    const body = byId('notifierHistoryBody');
-    if (!body) return;
     state.historyRows = Array.isArray(rows) ? rows : [];
     state.historyKnownCursors = new Set(state.historyRows.map((row) => String(row?.cursor || '')).filter(Boolean));
     state.historyRows.forEach((row) => {
       const kind = String(row?.kind || '').trim();
       if (kind) state.historyKnownKinds.add(kind);
     });
-    body.replaceChildren();
-    for (const row of state.historyRows) {
-      const tr = historyRowElement(row);
-      body.appendChild(tr);
-      if (row.kind) state.detectorHints.push(row.kind);
-    }
-    const selected = state.historyRows.find((row) => row.cursor === state.historySelectedCursor);
-    showHistoryDetail(selected || null);
+    renderHistoryRows();
   }
 
   async function fetchHistory({ poll = false } = {}) {
     const filters = historyFilters();
     byId('notifierHistoryLimit').value = String(filters.limit);
     const filterKey = historyFilterKey(filters);
-    const canPoll = poll && state.historyFilterKey === filterKey && !!state.historyLatestCursor;
+    const canPoll = poll
+      && state.historyFilterKey === filterKey
+      && !!state.historyLatestCursor
+      && state.historySortBy === 'time'
+      && state.historySortDir === 'desc';
     const qs = historyQueryString(filters, canPoll ? state.historyLatestCursor : '');
     const payload = await request(`/cfm-admin/api/v1/notifier/history?${qs}`);
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
@@ -1001,8 +1160,11 @@
       pushRecentAction('truncate history', e.message || 'failed', false);
     }));
     byId('notifierHistoryDetailClose')?.addEventListener('click', () => showHistoryDetail(null));
+    document.querySelectorAll('.notifier-history-sort').forEach((btn) => {
+      btn.addEventListener('click', () => onHistorySortClick(btn.dataset.sortKey || ''));
+    });
 
-    bindTemplateInputs(); renderTabs(); renderDetectorHints(); renderRecentActions();
+    bindTemplateInputs(); renderTabs(); renderDetectorHints(); renderRecentActions(); renderHistorySortHeaders();
     state.metricsUpdatedTimer = window.setInterval(() => setMetricsMeta(), 1000);
     loadConfig()
       .then(() => refreshRuntimeStatus())
