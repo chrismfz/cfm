@@ -58,7 +58,7 @@ export const detectorKeySchema = {
   MODE: {
     type: 'enum',
     allowed: ['journal', 'file', 'docker'],
-    examples: ['journal', 'file'],
+    examples: ['journal', 'file', 'docker'],
     help: 'Data source mode for detector input.',
   },
   LOG_PATH: {
@@ -75,6 +75,32 @@ export const detectorKeySchema = {
     type: 'list',
     examples: ['_SYSTEMD_UNIT=postfix@-.service'],
     help: 'Comma-separated or newline-separated journal match filters.',
+  },
+  MATCH_TARGET: {
+    type: 'enum',
+    allowed: ['auto', 'ip', 'user', 'both'],
+    examples: ['both', 'ip'],
+    help: 'How FAIL_REGEX named captures are interpreted for counters and blocking targets.',
+  },
+  FAIL_REGEX: {
+    type: 'regex_multiline',
+    examples: ['Failed password for .* from (?P<ip>\\S+)', 'authentication failure.*rhost=(?P<ip>\\S+)'],
+    help: 'One regex per line. Use named captures (?P<ip>...) and optionally (?P<user>...).',
+  },
+  IGNORE_REGEX: {
+    type: 'regex_multiline',
+    examples: ['^Accepted password', '^session opened for user'],
+    help: 'Optional ignore filters, one regex per line.',
+  },
+  AUTHFAIL_IP: {
+    type: 'int',
+    examples: ['20', '10'],
+    help: 'Threshold of matched failures per source IP within WINDOW.',
+  },
+  AUTHFAIL_USER: {
+    type: 'int',
+    examples: ['10', '5'],
+    help: 'Threshold of matched failures per user within WINDOW.',
   },
   ENRICH: {
     type: 'bool',

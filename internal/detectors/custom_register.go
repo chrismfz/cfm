@@ -107,10 +107,41 @@ func (e *customInitError) Diagnostics() []string {
 
 func init() {
 	meta.Register(meta.DetectorMeta{
-		TypeKey:             "custom",
-		Title:               "Custom regex detector",
-		Description:         "Detect authentication-like failures using custom regex rules and key on captured IP/user values.",
-		DefaultsTemplate:    map[string]string{"ENABLED": "1", "MODE": "file", "LOG_PATH": "/var/log/auth.log", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "SAMPLE_LIMIT": "10", "AUTHFAIL_IP": "20", "AUTHFAIL_USER": "10", "MATCH_TARGET": "both", "FAIL_REGEX": "(?P<ip>\\S+) .* invalid user (?P<user>\\S+)", "BLOCK": "dryrun", "BLOCK_COOLDOWN": "20m"},
+		TypeKey:          "custom",
+		Title:            "Custom regex detector",
+		Description:      "Detect authentication-like failures using custom regex rules and key on captured IP/user values.",
+		DefaultsTemplate: map[string]string{"ENABLED": "1", "MODE": "file", "LOG_PATH": "/var/log/auth.log", "JOURNAL_UNIT": "", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "SAMPLE_LIMIT": "10", "AUTHFAIL_IP": "20", "AUTHFAIL_USER": "10", "MATCH_TARGET": "both", "FAIL_REGEX": "(?P<ip>\\S+) .* invalid user (?P<user>\\S+)", "IGNORE_REGEX": "", "BLOCK": "dryrun", "BLOCK_COOLDOWN": "20m"},
+		ExamplePresets: []meta.Preset{
+			{
+				ID:          "proxmox-auth-failure",
+				Title:       "Proxmox-style auth failure",
+				Description: "Parses pvedaemon auth failures and keys by source IP and username.",
+				Template: map[string]string{
+					"MODE":          "file",
+					"LOG_PATH":      "/var/log/auth.log",
+					"MATCH_TARGET":  "both",
+					"AUTHFAIL_IP":   "8",
+					"AUTHFAIL_USER": "5",
+					"FAIL_REGEX":    "authentication failure; .* rhost=(?P<ip>\\S+) user=(?P<user>\\S+)",
+					"IGNORE_REGEX":  "rhost=(127\\.0\\.0\\.1|::1)",
+					"BLOCK":         "30m",
+				},
+			},
+			{
+				ID:          "pam-unix-auth-failure",
+				Title:       "generic pam_unix auth failure",
+				Description: "Matches generic pam_unix authentication failures from Linux auth logs.",
+				Template: map[string]string{
+					"MODE":          "file",
+					"LOG_PATH":      "/var/log/auth.log",
+					"MATCH_TARGET":  "both",
+					"AUTHFAIL_IP":   "12",
+					"AUTHFAIL_USER": "8",
+					"FAIL_REGEX":    "pam_unix\\([^)]*\\): authentication failure; .*rhost=(?P<ip>\\S+).*user=(?P<user>\\S+)",
+					"BLOCK":         "dryrun",
+				},
+			},
+		},
 		LeniencySupported:   true,
 		LeniencyRecommended: true,
 	})

@@ -337,6 +337,27 @@ function isPermanentBlock(v){
   return ['permanent', 'perm'].includes(String(v||'').trim().toLowerCase());
 }
 
+function detectorTypeFromSectionName(sectionName){
+  const name = String(sectionName || '').trim().toLowerCase();
+  if(!name) return '';
+  return name.split('.')[0].split('_')[0];
+}
+
+function regexSourceForJS(raw){
+  return String(raw||'').replaceAll(/\(\?P<([a-zA-Z_][a-zA-Z0-9_]*)>/g, '(?<$1>');
+}
+
+function validateRegexLine(raw){
+  const value = String(raw||'').trim();
+  if(!value) return { ok: false, message: 'Regex is empty' };
+  try{
+    new RegExp(regexSourceForJS(value));
+    return { ok: true, message: '' };
+  }catch(err){
+    return { ok: false, message: err?.message || 'Invalid regex' };
+  }
+}
+
 function collectLocalValidation(){
   const errs = [];
   const bySection = {};
@@ -381,6 +402,15 @@ function collectLocalValidation(){
           errs.push({ path:`${sec.name}.${k}`, message:'invalid block mode', expected:'named mode or Go duration, e.g. dryrun or 30m' });
           push(sectionName, `${k}: invalid block mode (use dryrun/permanent/etc or Go duration like 30m)`);
         }
+      } else if(schema?.type === 'regex_multiline'){
+        const lines = String(v||'').split('\n');
+        lines.forEach((line, idx)=>{
+          const verdict = validateRegexLine(line);
+          if(!verdict.ok){
+            errs.push({ path:`${sec.name}.${k}[${idx}]`, message:verdict.message, expected:'a non-empty compileable regex' });
+            push(sectionName, `${k} line ${idx+1}: ${verdict.message}`);
+          }
+        });
       }
       if(isThresholdKey(k)){
         const n = parsePositiveNumber(v);
@@ -484,6 +514,34 @@ function buildTypedControl(key, value, onChange){
     sel.addEventListener('change',(e)=>onChange(e.target.value));
     return wrap;
   }
+  if(schema.type === 'regex_multiline'){
+    wrap.innerHTML = `<label class="muted">${keyLabel}</label><textarea class="input input-wide" style="min-height:100px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${safeText(raw)}</textarea>${help}`;
+    const ta = wrap.querySelector('textarea');
+    const inlineState = document.createElement('div');
+    inlineState.style.marginTop = '4px';
+    inlineState.style.fontSize = '11px';
+    inlineState.className = 'muted';
+    wrap.appendChild(inlineState);
+    const renderInline = (nextRaw)=>{
+      const lines = String(nextRaw||'').split('\n');
+      const problems = lines
+        .map((line, idx)=>({ idx, line, verdict: validateRegexLine(line) }))
+        .filter((item)=>String(item.line).trim() !== '' ? !item.verdict.ok : true);
+      if(problems.length === 0){
+        inlineState.textContent = '';
+        inlineState.style.color = '';
+        return;
+      }
+      inlineState.innerHTML = problems
+        .slice(0, 6)
+        .map((item)=>`Line ${item.idx + 1}: ${safeText(item.verdict.message)}`)
+        .join('<br>');
+      inlineState.style.color = '#fca5a5';
+    };
+    renderInline(raw);
+    ta.addEventListener('input',(e)=>{ renderInline(e.target.value); onChange(e.target.value); });
+    return wrap;
+  }
   const inputType = schema.type === 'int' ? 'number' : 'text';
   wrap.innerHTML = `<label class="muted">${keyLabel}</label><input type="${inputType}" class="input input-wide" value="${raw.replaceAll('"','&quot;')}">${help}`;
   wrap.querySelector('input').addEventListener('input',(e)=>onChange(e.target.value));
@@ -571,7 +629,7 @@ function renderConfigEditors(){
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
   const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
-  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const meta = detectorMeta(sec.name); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${leniencyHint}${validation?`<div style="margin-top:6px">${validation}</div>`:''}<div class="muted" style="margin-top:4px;display:none" data-runtime-detail></div></td><td><span class="pill" data-runtime-badge style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
+  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const meta = detectorMeta(sec.name) || detectorMeta(detectorTypeFromSectionName(sec.name)); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const customWarning = String(meta?.type_key||'').toLowerCase()==='custom' ? `<div class="muted" style="margin-top:6px;padding:8px;border:1px solid #fbbf24;background:#422006;color:#fde68a;border-radius:6px">⚠️ Test regex against real sample lines before enabling permanent block.</div>` : ''; const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${leniencyHint}${customWarning}${validation?`<div style="margin-top:6px">${validation}</div>`:''}<div class="muted" style="margin-top:4px;display:none" data-runtime-detail></div></td><td><span class="pill" data-runtime-badge style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
     tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); renderConfigEditors();});
     const leniencyBtn = tr.querySelector('[data-leniency-for]');
     if(leniencyBtn) leniencyBtn.addEventListener('click',()=>addLeniencyCompanion(sec.name));
