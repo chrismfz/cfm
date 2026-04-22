@@ -39,8 +39,25 @@ type AdminExample struct {
 }
 
 type sectionDoc struct {
-	Name  string
-	Lines []string
+	Name    string
+	Entries []sectionEntry
+}
+
+type sectionEntryKind string
+
+const (
+	sectionEntryBlank   sectionEntryKind = "blank"
+	sectionEntryComment sectionEntryKind = "comment"
+	sectionEntryKey     sectionEntryKind = "key"
+	sectionEntryOther   sectionEntryKind = "other"
+)
+
+type sectionEntry struct {
+	Kind         sectionEntryKind
+	Raw          string
+	Key          string
+	Value        string
+	InlineSuffix string
 }
 
 type exampleDoc struct {
@@ -255,7 +272,7 @@ func parseDoc(path string) (*doc, error) {
 			d.Preamble = append(d.Preamble, raw)
 			continue
 		}
-		d.Sections[cur].Lines = append(d.Sections[cur].Lines, raw)
+		d.Sections[cur].Entries = append(d.Sections[cur].Entries, parseSectionEntry(raw))
 	}
 	flushExample()
 	return d, sc.Err()
@@ -265,12 +282,16 @@ func buildAdminConfig(d *doc) AdminConfig {
 	cfg := AdminConfig{Global: map[string]string{}, Core: []AdminSection{}, Leniency: []AdminSection{}, Advanced: []AdminSection{}, Examples: []AdminExample{}}
 	for _, name := range d.Order {
 		sec := d.Sections[name]
-		keys := parseSectionKeys(sec.Lines)
+		keys := parseSectionKeys(sec.Entries)
 		if name == "global" {
 			cfg.Global = keys
 			continue
 		}
-		as := AdminSection{Name: name, Enabled: parseEnabled(keys), Keys: keys, RawLines: append([]string{}, sec.Lines...)}
+		rawLines := make([]string, 0, len(sec.Entries))
+		for _, entry := range sec.Entries {
+			rawLines = append(rawLines, entry.Raw)
+		}
+		as := AdminSection{Name: name, Enabled: parseEnabled(keys), Keys: keys, RawLines: rawLines}
 		switch {
 		case strings.HasSuffix(name, ".leniency"):
 			as.Kind = "leniency"
@@ -436,24 +457,21 @@ func parseEnabled(keys map[string]string) bool {
 	return !(v == "0" || v == "no" || v == "false" || v == "off")
 }
 
-func parseSectionKeys(lines []string) map[string]string {
+func parseSectionKeys(entries []sectionEntry) map[string]string {
 	out := map[string]string{}
 	var last string
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+	for _, entry := range entries {
+		line := strings.TrimSpace(entry.Raw)
+		if entry.Kind == sectionEntryBlank || entry.Kind == sectionEntryComment {
 			continue
 		}
-		if i := strings.Index(line, "="); i > 0 {
-			k := strings.TrimSpace(line[:i])
-			if isConfigKey(k) {
-				last = strings.ToUpper(k)
-				out[last] = strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
-				continue
-			}
+		if entry.Kind == sectionEntryKey {
+			last = entry.Key
+			out[last] = entry.Value
+			continue
 		}
 		if last != "" {
-			out[last] = out[last] + "\n" + strings.TrimSpace(line)
+			out[last] = out[last] + "\n" + line
 		}
 	}
 	return out
@@ -483,23 +501,23 @@ func renderFromDoc(d *doc, cfg AdminConfig) string {
 	for _, l := range d.Preamble {
 		b.WriteString(l + "\n")
 	}
-	if len(d.Preamble) > 0 {
+	if len(d.Preamble) > 0 && strings.TrimSpace(d.Preamble[len(d.Preamble)-1]) != "" {
 		b.WriteString("\n")
 	}
 	rendered := map[string]bool{}
 	for _, name := range d.Order {
 		if name == "global" {
-			renderSection(&b, "global", cfg.Global)
+			renderSection(&b, "global", cfg.Global, d.Sections[name])
 			rendered[name] = true
 			continue
 		}
 		if sec, ok := byName[name]; ok {
-			renderSection(&b, name, sec.Keys)
+			renderSection(&b, name, sec.Keys, d.Sections[name])
 			rendered[name] = true
 		} else if src := d.Sections[name]; src != nil {
 			b.WriteString("[" + name + "]\n")
-			for _, l := range src.Lines {
-				b.WriteString(l + "\n")
+			for _, entry := range src.Entries {
+				b.WriteString(entry.Raw + "\n")
 			}
 			b.WriteString("\n")
 		}
@@ -508,37 +526,109 @@ func renderFromDoc(d *doc, cfg AdminConfig) string {
 		if rendered[name] {
 			continue
 		}
-		renderSection(&b, name, sec.Keys)
-	}
-	if !rendered["global"] {
-		renderSection(&b, "global", cfg.Global)
+		renderSection(&b, name, sec.Keys, nil)
 	}
 	return strings.TrimSpace(b.String()) + "\n"
 }
 
-func renderSection(b *strings.Builder, name string, keys map[string]string) {
+func renderSection(b *strings.Builder, name string, keys map[string]string, src *sectionDoc) {
 	b.WriteString("[" + name + "]\n")
+	rendered := map[string]bool{}
+	lastBlank := false
+	if src != nil && len(src.Entries) > 0 {
+		for _, entry := range src.Entries {
+			switch entry.Kind {
+			case sectionEntryKey:
+				v, ok := keys[entry.Key]
+				if !ok {
+					continue
+				}
+				if strings.TrimSpace(v) == entry.Value && !strings.Contains(v, "\n") {
+					b.WriteString(entry.Raw + "\n")
+					lastBlank = strings.TrimSpace(entry.Raw) == ""
+				} else {
+					lastBlank = renderKeyValue(b, entry.Key, v)
+				}
+				rendered[entry.Key] = true
+			default:
+				b.WriteString(entry.Raw + "\n")
+				lastBlank = strings.TrimSpace(entry.Raw) == ""
+			}
+		}
+	}
 	ord := make([]string, 0, len(keys))
 	for k := range keys {
+		if rendered[k] {
+			continue
+		}
 		ord = append(ord, k)
 	}
 	sort.Strings(ord)
 	for _, k := range ord {
-		v := strings.TrimSpace(keys[k])
-		if strings.Contains(v, "\n") {
-			b.WriteString(k + " =\n")
-			for _, ln := range strings.Split(v, "\n") {
-				ln = strings.TrimSpace(ln)
-				if ln == "" {
-					continue
-				}
-				b.WriteString("  " + ln + "\n")
-			}
-			continue
-		}
-		b.WriteString(k + " = " + v + "\n")
+		lastBlank = renderKeyValue(b, k, keys[k])
 	}
-	b.WriteString("\n")
+	if !lastBlank {
+		b.WriteString("\n")
+	}
+}
+
+func renderKeyValue(b *strings.Builder, key, value string) bool {
+	v := strings.TrimSpace(value)
+	if strings.Contains(v, "\n") {
+		b.WriteString(key + " =\n")
+		for _, ln := range strings.Split(v, "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				continue
+			}
+			b.WriteString("  " + ln + "\n")
+		}
+		return false
+	}
+	b.WriteString(key + " = " + v + "\n")
+	return false
+}
+
+func parseSectionEntry(raw string) sectionEntry {
+	trim := strings.TrimSpace(raw)
+	if trim == "" {
+		return sectionEntry{Kind: sectionEntryBlank, Raw: raw}
+	}
+	if strings.HasPrefix(trim, "#") || strings.HasPrefix(trim, ";") {
+		return sectionEntry{Kind: sectionEntryComment, Raw: raw}
+	}
+	i := strings.Index(trim, "=")
+	if i <= 0 {
+		return sectionEntry{Kind: sectionEntryOther, Raw: raw}
+	}
+	key := strings.TrimSpace(trim[:i])
+	if !isConfigKey(key) {
+		return sectionEntry{Kind: sectionEntryOther, Raw: raw}
+	}
+	valuePart := strings.TrimSpace(trim[i+1:])
+	return sectionEntry{
+		Kind:  sectionEntryKey,
+		Raw:   raw,
+		Key:   strings.ToUpper(key),
+		Value: parseConfigValue(valuePart),
+	}
+}
+
+func parseConfigValue(raw string) string {
+	s := strings.TrimSpace(raw)
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case '#', ';':
+			if !inQuote && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+				s = strings.TrimSpace(s[:i])
+				return strings.Trim(s, `"`)
+			}
+		}
+	}
+	return strings.Trim(s, `"`)
 }
 
 func isConfigKey(s string) bool {
