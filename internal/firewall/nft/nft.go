@@ -1829,11 +1829,17 @@ func (b *Backend) writeSelfIPsLua(cached map[string]struct{}) {
 		logging.Logf("[nft] self-ip lua write failed path=%s err=%v", tmp, err)
 		return
 	}
+	if err := os.Chmod(tmp, 0o640); err != nil {
+		logging.Logf("[nft] self-ip lua chmod failed path=%s err=%v", tmp, err)
+	}
 	b.ensureCFMGroupRead(tmp)
 	if err := os.Rename(tmp, selfIPsLuaPath); err != nil {
 		_ = os.Remove(tmp)
 		logging.Logf("[nft] self-ip lua rename failed from=%s to=%s err=%v", tmp, selfIPsLuaPath, err)
 		return
+	}
+	if err := os.Chmod(selfIPsLuaPath, 0o640); err != nil {
+		logging.Logf("[nft] self-ip lua chmod failed path=%s err=%v", selfIPsLuaPath, err)
 	}
 	b.ensureCFMGroupRead(selfIPsLuaPath)
 	b.ensureCFMGroupRead(dir)
