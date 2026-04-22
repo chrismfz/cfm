@@ -1,6 +1,6 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core' };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] } };
 const byId = (id) => document.getElementById(id);
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
@@ -97,6 +97,19 @@ function insertExample(example, kind){
   setStatus(`Inserted template "${example.title}" as ${secName}`);
 }
 
+async function copyExampleConfig(example, kind){
+  const section = uniqueSectionName(example.section || example.id, kind);
+  const keys = sanitizeExampleKeys(example.keys || {});
+  const payload = { section, kind, keys };
+  const text = JSON.stringify(payload, null, 2);
+  try{
+    await navigator.clipboard.writeText(text);
+    setStatus(`Copied ${example.title || example.id} example config`);
+  } catch(_){
+    setStatus('Clipboard unavailable in this browser context', true);
+  }
+}
+
 function openExamplesModal(kind){
   state.exampleKind = kind;
   const items = (state.examples || []).filter((ex)=>ex.kind === kind);
@@ -111,8 +124,9 @@ function openExamplesModal(kind){
   items.forEach((ex)=>{
     const card = document.createElement('div');
     card.className = 'summary-card';
-    card.innerHTML = `<h4 style="margin-top:0">${safeText(ex.title || ex.id)}</h4><p class="muted" style="margin:4px 0 8px 0">Source section: <code>${safeText(ex.section || '-')}</code></p><p class="muted" style="margin:0 0 10px 0">${safeText(ex.preview || 'No preview')}</p><button type="button">Insert safely</button>`;
-    card.querySelector('button').addEventListener('click', ()=>insertExample(ex, kind));
+    card.innerHTML = `<h4 style="margin-top:0">${safeText(ex.title || ex.id)}</h4><p class="muted" style="margin:4px 0 8px 0">Source section: <code>${safeText(ex.section || '-')}</code></p><p class="muted" style="margin:0 0 10px 0">${safeText(ex.preview || 'No preview')}</p><div class="toolbar wrap"><button type="button" data-action="insert">Insert safely</button><button type="button" class="btn-quiet" data-action="copy">Copy example config</button></div>`;
+    card.querySelector('[data-action="insert"]').addEventListener('click', ()=>insertExample(ex, kind));
+    card.querySelector('[data-action="copy"]').addEventListener('click', ()=>copyExampleConfig(ex, kind));
     list.appendChild(card);
   });
   byId('detectorsExamplesModal').style.display='flex';
@@ -131,21 +145,81 @@ function isDurationFamilyKey(k){
   return ['EVERY','TIMEOUT','COOLDOWN','WINDOW','TTL'].some((t)=>u.includes(t)) || u.includes('BLOCK');
 }
 
-function collectDurationErrors(){
+function parsePositiveNumber(v){
+  const n = Number.parseFloat(String(v ?? '').trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function isThresholdKey(k){
+  const u = String(k||'').toUpperCase();
+  return u.includes('THRESHOLD') || u.endsWith('_LIMIT') || u.endsWith('_MAX') || u.includes('SCORE_MIN');
+}
+
+function isPermanentBlock(v){
+  return ['permanent', 'perm'].includes(String(v||'').trim().toLowerCase());
+}
+
+function collectLocalValidation(){
   const errs = [];
+  const bySection = {};
+  const global = [];
+  const push = (section, msg) => {
+    if(section){
+      bySection[section] = bySection[section] || [];
+      bySection[section].push(msg);
+    } else {
+      global.push(msg);
+    }
+  };
+
   for(const [k,v] of Object.entries(state.draft.global||{})){
     if(isDurationFamilyKey(k) && String(v||'').trim()!=='' && !parseDurationStrict(v)){
       errs.push({ path:`global.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
+      push(null, `global.${k}: invalid duration format (expected Go duration e.g. 30s, 5m, 1h30m)`);
     }
   }
   [...(state.draft.core||[]),...(state.draft.leniency||[])].forEach((sec)=>{
+    const sectionName = sec.name || '(unnamed)';
+    let lowestThreshold = null;
     for(const [k,v] of Object.entries(sec.keys||{})){
       if(isDurationFamilyKey(k) && String(v||'').trim()!=='' && !parseDurationStrict(v)){
         errs.push({ path:`${sec.name}.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
+        push(sectionName, `${k}: invalid duration format`);
+      }
+      if(isThresholdKey(k)){
+        const n = parsePositiveNumber(v);
+        if(n !== null && (lowestThreshold === null || n < lowestThreshold)) lowestThreshold = n;
       }
     }
+    if(isPermanentBlock(sec.keys?.BLOCK) && lowestThreshold !== null && lowestThreshold <= 2){
+      push(sectionName, 'Risky combo: BLOCK=permanent with very low threshold (<=2). Use dryrun/timed block first.');
+    }
   });
-  return errs;
+  return { errs, bySection, global };
+}
+
+function highRiskHelpForKey(key){
+  const upper = String(key||'').toUpperCase();
+  if(upper === 'BLOCK') return 'High risk: permanent blocking can lock out legitimate senders. Start with dryrun, then timed block.';
+  if(upper === 'BLOCK_COOLDOWN') return 'High risk: very long cooldown may repeatedly re-block less often, very short cooldown can hammer retries.';
+  if(isThresholdKey(upper)) return 'Threshold sensitivity: lower values increase detections and false positives. Tune gradually.';
+  return '';
+}
+
+function riskBadgesForSection(sec){
+  const badges = [];
+  const lowestThreshold = Object.entries(sec.keys||{})
+    .filter(([k])=>isThresholdKey(k))
+    .map(([,v])=>parsePositiveNumber(v))
+    .filter((v)=>v !== null);
+  const minThreshold = lowestThreshold.length ? Math.min(...lowestThreshold) : null;
+  if(isPermanentBlock(sec.keys?.BLOCK) && minThreshold !== null && minThreshold <= 2){
+    badges.push('Permanent block + low threshold');
+  }
+  if(String(sec.keys?.BLOCK||'').trim().toLowerCase() === 'dryrun'){
+    badges.push('Dryrun (safe)');
+  }
+  return badges;
 }
 
 function buildTypedControl(key, value, onChange){
@@ -155,9 +229,11 @@ function buildTypedControl(key, value, onChange){
   if(!schema) return null;
   const wrap = document.createElement('div');
   wrap.style.marginBottom = '8px';
+  const riskHelp = highRiskHelpForKey(key);
+  const keyLabel = riskHelp ? `${key} <span title="${safeText(riskHelp)}" style="cursor:help;color:#fbbf24;font-weight:700">ⓘ</span>` : key;
   const help = schema.help ? `<div class="muted" style="font-size:11px">${schema.help}${schema.examples?.length?` Example: ${schema.examples.join(', ')}`:''}</div>` : '';
   if(schema.type === 'bool'){
-    wrap.innerHTML = `<label class="muted">${key}</label><select class="input input-wide"><option value="1">true (1)</option><option value="0">false (0)</option></select>${help}`;
+    wrap.innerHTML = `<label class="muted">${keyLabel}</label><select class="input input-wide"><option value="1">true (1)</option><option value="0">false (0)</option></select>${help}`;
     const sel = wrap.querySelector('select');
     const low = normalized.toLowerCase();
     sel.value = ['1','yes','true','on'].includes(low) ? '1' : '0';
@@ -166,7 +242,7 @@ function buildTypedControl(key, value, onChange){
   }
   if(schema.allowed?.length){
     const opts = schema.allowed.map((o)=>`<option value="${o}">${o}</option>`).join('');
-    wrap.innerHTML = `<label class="muted">${key}</label><select class="input input-wide"><option value="">-- select --</option>${opts}</select>${help}`;
+    wrap.innerHTML = `<label class="muted">${keyLabel}</label><select class="input input-wide"><option value="">-- select --</option>${opts}</select>${help}`;
     const sel = wrap.querySelector('select');
     const candidate = normalized.toLowerCase();
     const match = schema.allowed.find((v)=>v.toLowerCase()===candidate);
@@ -182,7 +258,7 @@ function buildTypedControl(key, value, onChange){
     return wrap;
   }
   const inputType = schema.type === 'int' ? 'number' : 'text';
-  wrap.innerHTML = `<label class="muted">${key}</label><input type="${inputType}" class="input input-wide" value="${raw.replaceAll('"','&quot;')}">${help}`;
+  wrap.innerHTML = `<label class="muted">${keyLabel}</label><input type="${inputType}" class="input input-wide" value="${raw.replaceAll('"','&quot;')}">${help}`;
   wrap.querySelector('input').addEventListener('input',(e)=>onChange(e.target.value));
   return wrap;
 }
@@ -229,18 +305,20 @@ function renderSectionEditor(container, sec){
 }
 
 function render(){
+  const localValidation = collectLocalValidation();
+  state.inlineValidation = { bySection: localValidation.bySection, global: localValidation.global };
   const g=byId('detectorsGlobal'); g.innerHTML='';
   Object.entries(state.draft.global||{}).forEach(([k,v])=>{ const d=document.createElement('div'); d.innerHTML=`<label class="muted">${k}</label><input class="input input-wide" value="${String(v).replaceAll('"','&quot;')}"/>`; d.querySelector('input').addEventListener('input',e=>{state.draft.global[k]=e.target.value; setDirty(true);}); g.appendChild(d); });
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
-  (state.draft.core||[]).forEach((sec)=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${sec.name}</td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
+  (state.draft.core||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
     tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); render();});
     renderSectionEditor(tr.querySelector('div'), sec);
     core.appendChild(tr);
   });
 
   const len=byId('detectorsLeniencyBody'); len.innerHTML='';
-  (state.draft.leniency||[]).forEach((sec)=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${sec.name}</td><td><div></div></td>`; renderSectionEditor(tr.querySelector('div'), sec); len.appendChild(tr); });
+  (state.draft.leniency||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><div></div></td>`; renderSectionEditor(tr.querySelector('div'), sec); len.appendChild(tr); });
 
   const adv=byId('detectorsAdvanced'); adv.innerHTML='';
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
@@ -251,10 +329,12 @@ async function load(){ const j=await api('/api/v1/detectors/config'); state.orig
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
 
 async function saveFlow(){
-  const localDurationErrors = collectDurationErrors();
-  if(localDurationErrors.length){
+  const localValidation = collectLocalValidation();
+  state.inlineValidation = { bySection: localValidation.bySection, global: localValidation.global };
+  render();
+  if(localValidation.errs.length){
     const ul=byId('detectorsValidationErrors'); ul.innerHTML='';
-    localDurationErrors.forEach((e)=>{ const li=document.createElement('li'); li.textContent=`${e.path}: ${e.message}. Expected: ${e.expected}`; ul.appendChild(li); });
+    localValidation.errs.forEach((e)=>{ const li=document.createElement('li'); li.textContent=`${e.path}: ${e.message}. Expected: ${e.expected}`; ul.appendChild(li); });
     byId('detectorsValidationModal').style.display='flex';
     return;
   }
