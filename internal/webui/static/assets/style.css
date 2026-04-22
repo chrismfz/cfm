@@ -210,6 +210,22 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
 .compact-table tr.pinned-row {
   background: rgba(77, 163, 255, .12);
 }
+.detector-section-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: .01em;
+  margin-bottom: .45rem;
+}
+.detector-row td {
+  padding-top: .9rem;
+  padding-bottom: .9rem;
+}
+.detector-row + .detector-row td {
+  border-top: 1px solid rgba(38, 52, 73, .65);
+}
+.detector-row td:first-child {
+  background: rgba(18, 30, 50, .22);
+}
 .list { margin: 0; padding: 0; list-style: none; display: grid; gap: .55rem; }
 .list li { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .list button { background: transparent; border: 1px solid var(--border); color: var(--fg); }
@@ -376,6 +392,14 @@ code {
   }
   th, td {
     padding: .36rem;
+  }
+  .detector-row td {
+    padding-top: .55rem;
+    padding-bottom: .55rem;
+  }
+  .detector-section-title {
+    font-size: .9rem;
+    margin-bottom: .3rem;
   }
   .stable-table-wrap {
     min-height: 320px;
