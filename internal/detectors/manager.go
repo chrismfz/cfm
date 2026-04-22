@@ -206,7 +206,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		}
 	}
 	availableTypes := RegisteredTypes()
-	detectorstatus.ResetConfiguredSections(configured)
+	detectorstatus.UpsertConfiguredSections(configured)
 	detectorstatus.SetLoadedTypes(len(availableTypes))
 	detectorstatus.SetInventory(availableTypes, configuredSections, enabledCount)
 	// No change from current running config: clear any pending reload.

@@ -148,6 +148,27 @@ func ResetConfiguredSections(list []SectionConfig) {
 	defer global.mu.Unlock()
 	next := map[string]*runtimeState{}
 	for _, sec := range list {
+		st := &runtimeState{
+			Section:            sec.Section,
+			Type:               sec.Type,
+			Configured:         sec.Configured,
+			Enabled:            sec.Enabled,
+			Active:             false,
+			InitOK:             false,
+			LastError:          "",
+			SourceProbeOK:      sec.SourceProbeOK,
+			SourceProbeMessage: sec.SourceProbeMessage,
+		}
+		next[sec.Section] = st
+	}
+	global.sections = next
+}
+
+func UpsertConfiguredSections(list []SectionConfig) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	next := map[string]*runtimeState{}
+	for _, sec := range list {
 		st, ok := global.sections[sec.Section]
 		if !ok {
 			st = &runtimeState{Section: sec.Section}
@@ -156,9 +177,6 @@ func ResetConfiguredSections(list []SectionConfig) {
 		st.Type = sec.Type
 		st.Configured = sec.Configured
 		st.Enabled = sec.Enabled
-		st.Active = false
-		st.InitOK = false
-		st.LastError = ""
 		st.SourceProbeOK = sec.SourceProbeOK
 		st.SourceProbeMessage = sec.SourceProbeMessage
 		next[sec.Section] = st

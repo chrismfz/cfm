@@ -31,3 +31,24 @@ func TestSetInventoryComputesDriftAndCounts(t *testing.T) {
 		t.Fatalf("unknown=%v", snap.Inventory.UnknownSections)
 	}
 }
+
+func TestUpsertConfiguredSectionsPreservesRuntimeState(t *testing.T) {
+	ResetConfiguredSections([]SectionConfig{{Section: "ssh_auth", Type: "ssh_auth", Configured: true, Enabled: true, SourceProbeOK: true}})
+	MarkInitOK("ssh_auth")
+	before := GetSnapshot()
+	if len(before.Sections) != 1 || !before.Sections[0].InitOK || !before.Sections[0].Active {
+		t.Fatalf("unexpected precondition snapshot: %+v", before.Sections)
+	}
+
+	UpsertConfiguredSections([]SectionConfig{{Section: "ssh_auth", Type: "ssh_auth", Configured: true, Enabled: true, SourceProbeOK: true}})
+	after := GetSnapshot()
+	if len(after.Sections) != 1 {
+		t.Fatalf("expected one section, got %d", len(after.Sections))
+	}
+	if !after.Sections[0].InitOK {
+		t.Fatalf("expected init_ok to be preserved")
+	}
+	if !after.Sections[0].Active {
+		t.Fatalf("expected active to be preserved")
+	}
+}
