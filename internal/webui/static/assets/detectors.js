@@ -3,6 +3,9 @@ import { runtimeBadge } from './runtime-badge.js';
 
 const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} }, catalog: [], configExists: true };
 const byId = (id) => document.getElementById(id);
+const RUNTIME_REFRESH_INTERVAL_MS = 30_000;
+const RUNTIME_SKIP_NOTICE_THRESHOLD = 3;
+const runtimeRefreshState = { inFlight: false, consecutiveSkips: 0, refreshAfterEditing: false };
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function setStatus(msg,bad=false){ const el=byId('detectorsStatus'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
@@ -66,13 +69,73 @@ function renderInventoryLists(inventory){
 }
 
 async function refreshRuntimeStatus(){
+  if(runtimeRefreshState.inFlight) return;
+  runtimeRefreshState.inFlight = true;
   try{
     const j = await api('/api/v1/detectors/status');
     state.runtime = j || { sections: [], summary: {}, inventory: {} };
     renderRuntimeOnly();
   }catch(e){
     setStatus(`Runtime status unavailable: ${e.message}`, true);
+  } finally {
+    runtimeRefreshState.inFlight = false;
   }
+}
+
+function isElementVisible(el){
+  return Boolean(el) && el.style.display !== 'none' && el.getClientRects().length > 0;
+}
+
+function isDirectTextEditModalOpen(){
+  return Array.from(document.querySelectorAll('.modal-backdrop')).some((modal)=>{
+    if(!isElementVisible(modal)) return false;
+    return modal.querySelector('input, textarea, [contenteditable=""], [contenteditable="true"]') !== null;
+  });
+}
+
+function isUserEditing(){
+  const active = document.activeElement;
+  const tag = String(active?.tagName || '').toLowerCase();
+  if(tag === 'input' || tag === 'textarea') return true;
+  if(active?.isContentEditable) return true;
+  return isDirectTextEditModalOpen();
+}
+
+function setRuntimePauseNotice(show){
+  const summary = byId('detectorsRuntimeSummary');
+  if(!summary) return;
+  let note = byId('detectorsRuntimePauseNote');
+  if(!note){
+    note = document.createElement('div');
+    note.id = 'detectorsRuntimePauseNote';
+    note.className = 'muted';
+    note.style.marginTop = '6px';
+    summary.insertAdjacentElement('afterend', note);
+  }
+  note.textContent = show ? 'Runtime updates paused while editing' : '';
+  note.style.display = show ? 'block' : 'none';
+}
+
+function triggerRuntimeRefreshAfterEditing(){
+  if(!runtimeRefreshState.refreshAfterEditing || isUserEditing()) return;
+  runtimeRefreshState.refreshAfterEditing = false;
+  runtimeRefreshState.consecutiveSkips = 0;
+  setRuntimePauseNotice(false);
+  refreshRuntimeStatus();
+}
+
+function refreshRuntimeStatusIfSafe(){
+  if(isUserEditing()){
+    runtimeRefreshState.consecutiveSkips += 1;
+    runtimeRefreshState.refreshAfterEditing = true;
+    if(runtimeRefreshState.consecutiveSkips >= RUNTIME_SKIP_NOTICE_THRESHOLD){
+      setRuntimePauseNotice(true);
+    }
+    return;
+  }
+  runtimeRefreshState.consecutiveSkips = 0;
+  setRuntimePauseNotice(false);
+  refreshRuntimeStatus();
 }
 
 async function api(path,opt={}){ const r=await fetch(`/cfm-admin${path}`,{credentials:'include',headers:{'Content-Type':'application/json'},...opt}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||`HTTP ${r.status}`); return j; }
@@ -562,7 +625,9 @@ function init(){
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
   byId('detectorsInitFromCatalogBtn').onclick=()=>{ state.draft = buildCatalogDefaultsConfig(); renderConfigEditors(); setDirty(true); setStatus('Initialized draft from catalog defaults. Review and save.'); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });
-  window.setInterval(()=>{ refreshRuntimeStatus(); }, 10000);
+  document.addEventListener('focusout',()=>window.setTimeout(triggerRuntimeRefreshAfterEditing, 0));
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden) triggerRuntimeRefreshAfterEditing(); });
+  window.setInterval(refreshRuntimeStatusIfSafe, RUNTIME_REFRESH_INTERVAL_MS);
   load().catch((e)=>setStatus(e.message,true));
 }
 
