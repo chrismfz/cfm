@@ -1,25 +1,23 @@
 package exim
 
 import (
-//	"bufio"
+	//	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"net"
-	"path/filepath"
-	"io"
-//	"bufio"
+	//	"bufio"
 	core "cfm/internal/detectors/core"
-	"cfm/internal/logging"
 	"cfm/internal/enrich"
+	"cfm/internal/logging"
 )
-
-
 
 type SecConfig struct {
 	LogPath     string
@@ -29,7 +27,7 @@ type SecConfig struct {
 	SampleLimit int
 	Cooldown    time.Duration
 
-	RulesPath  string         // π.χ. /etc/cfm/exim_security.rules (προαιρετικό)
+	RulesPath  string // π.χ. /etc/cfm/exim_security.rules (προαιρετικό)
 	UseEnrich  bool
 	UsePTR     bool
 	EnrichDirs []string
@@ -50,116 +48,152 @@ type secRule struct {
 type EximSecurity struct {
 	cfg SecConfig
 
-	mu       sync.Mutex
-	path     string
-	rpaths   []string            // zero, one, or two: rejectlog / exim_rejectlog
+	mu     sync.Mutex
+	path   string
+	rpaths []string // zero, one, or two: rejectlog / exim_rejectlog
 
 	inode    uint64
 	off      int64
 	readyLog bool
 
-	pending  map[string]pend
-	rules    []secRule
-	enr      *enrich.Enricher
-	reHostIP *regexp.Regexp
-	reSetID  *regexp.Regexp   // (set_id=foo)
-	reUserAng*regexp.Regexp   // user=<foo>
+	pending   map[string]pend
+	rules     []secRule
+	enr       *enrich.Enricher
+	reHostIP  *regexp.Regexp
+	reSetID   *regexp.Regexp // (set_id=foo)
+	reUserAng *regexp.Regexp // user=<foo>
 
-	name string          // unique instance name (section)
+	name string // unique instance name (section)
 
-    src   *core.FileTailer       // mainlog
-    rsrcs []*core.FileTailer     // reject logs
+	src   *core.FileTailer   // mainlog
+	rsrcs []*core.FileTailer // reject logs
 
 	// per-user recent distinct IPs (small, capped)
-	state *core.State
-	userIPs map[string]*recentIPs
-	reSrvPort *regexp.Regexp  // I=<server_ip>:<port> (for 465/587 inference)
-	samples *core.SampleRing
-	gate    *core.AlertGate
-	counts  *core.SlidingCounter
+	state        *core.State
+	userIPs      map[string]*recentIPs
+	reSrvPort    *regexp.Regexp // I=<server_ip>:<port> (for 465/587 inference)
+	reAuthMarker *regexp.Regexp // A=dovecot_login/auth markers
+	samples      *core.SampleRing
+	gate         *core.AlertGate
+	counts       *core.SlidingCounter
 
+	// short-window dedup cache (protects double-counting between mainlog/rejectlog)
+	dedupTTL        time.Duration
+	dedupMaxEntries int
+	dedupBucket     time.Duration
+	dedupMu         sync.Mutex
+	dedupSeen       map[string]time.Time
+	dedupOrder      []dedupEntry
+	dedupHits       uint64
+	dedupMisses     uint64
+	dedupPrunedTTL  uint64
+	dedupPrunedCap  uint64
 }
 
+type dedupEntry struct {
+	key string
+	exp time.Time
+}
 
 // small deduped, ordered list
 type recentIPs struct {
-    order []string
-    set   map[string]struct{}
+	order []string
+	set   map[string]struct{}
 }
+
 func (r *recentIPs) Add(ip string, capN int) {
-    if ip == "" { return }
-    if r.set == nil { r.set = make(map[string]struct{}) }
-    if _, ok := r.set[ip]; ok { return }
-    r.order = append(r.order, ip)
-    r.set[ip] = struct{}{}
-    if capN > 0 && len(r.order) > capN {
-        old := r.order[0]
-        r.order = r.order[1:]
-        delete(r.set, old)
-    }
+	if ip == "" {
+		return
+	}
+	if r.set == nil {
+		r.set = make(map[string]struct{})
+	}
+	if _, ok := r.set[ip]; ok {
+		return
+	}
+	r.order = append(r.order, ip)
+	r.set[ip] = struct{}{}
+	if capN > 0 && len(r.order) > capN {
+		old := r.order[0]
+		r.order = r.order[1:]
+		delete(r.set, old)
+	}
 }
 
 func (r *recentIPs) CSV() (csv string, n int) {
-    return strings.Join(r.order, ","), len(r.order)
+	return strings.Join(r.order, ","), len(r.order)
 }
 
-
 func NewSecurity(cfg SecConfig) *EximSecurity {
-	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
-	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
-	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
-	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
-	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.Every <= 0 {
+		cfg.Every = 2 * time.Second
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = 15 * time.Minute
+	}
+	if cfg.SampleLimit <= 0 {
+		cfg.SampleLimit = 10
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = 20 * time.Minute
+	}
+	if !cfg.UseEnrich && !cfg.UsePTR {
+		cfg.UsePTR = true
+	}
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 
-defaults := map[string]int{
-			"AUTHFAIL":            10,
-			"SENDER_VERIFY_FAIL":  10,
-			"RCPT_REJECT":         10,
-			"SYNC_ERR":             8,
-			"PROTO_ERR":            8,
-			"NO_MAIL":             10,
-			"DROP_ACL":             6,
-			"RCPT_AUTH_REQUIRED":      6,
-			"NONMAIL_CMD":             4,
-			"NO_HELO":                 6,
-			"BAD_HELO_IMPERSONATION":  6,
-			"HELO_SYNTAX":             6,
-			"PIPELINING":              6,
-			"SESSION_ALL_FAILED":     10, // "Detected session with all messages failed"
-			"SLOW_FAIL_BLOCK":        10, // "Increment slow_fail_block Ratelimit"
+	defaults := map[string]int{
+		"AUTHFAIL":               10,
+		"SENDER_VERIFY_FAIL":     10,
+		"RCPT_REJECT":            10,
+		"RCPT_REJECT_SV_SOFT":    25,
+		"SYNC_ERR":               8,
+		"PROTO_ERR":              8,
+		"NO_MAIL":                10,
+		"DROP_ACL":               6,
+		"RCPT_AUTH_REQUIRED":     6,
+		"NONMAIL_CMD":            4,
+		"NO_HELO":                6,
+		"BAD_HELO_IMPERSONATION": 6,
+		"HELO_SYNTAX":            6,
+		"PIPELINING":             6,
+		"SESSION_ALL_FAILED":     10, // "Detected session with all messages failed"
+		"SLOW_FAIL_BLOCK":        10, // "Increment slow_fail_block Ratelimit"
+	}
+
+	if cfg.Thresholds == nil {
+		cfg.Thresholds = defaults
+	} else {
+		// merge: keep existing keys, fill the rest from defaults
+		for k, v := range defaults {
+			if _, ok := cfg.Thresholds[k]; !ok {
+				cfg.Thresholds[k] = v
+			}
 		}
+	}
 
+	d := &EximSecurity{
+		cfg:      cfg,
+		reHostIP: regexp.MustCompile(`\[((?:\d{1,3}(?:\.\d{1,3}){3})|[0-9a-fA-F:]+)\]`), // IPv4 ή IPv6 σε αγκύλες
+		userIPs:  make(map[string]*recentIPs),
+	}
 
-    if cfg.Thresholds == nil {
-        cfg.Thresholds = defaults
-    } else {
-        // merge: keep existing keys, fill the rest from defaults
-        for k, v := range defaults {
-            if _, ok := cfg.Thresholds[k]; !ok {
-                cfg.Thresholds[k] = v
-            }
-        }
-    }
+	// init core window primitives
+	d.samples = core.NewSampleRing(cfg.SampleLimit)
+	d.gate = core.NewAlertGate(cfg.Cooldown)
+	d.counts = core.NewSlidingCounter(cfg.Window, 0) // optional cap=0
+	d.reSrvPort = regexp.MustCompile(`\bI=\S+:(\d{2,5})\b`)
+	d.reAuthMarker = regexp.MustCompile(`\bA=([^\s]+)\b`)
 
-
-    d := &EximSecurity{
-        cfg:      cfg,
-        reHostIP: regexp.MustCompile(`\[((?:\d{1,3}(?:\.\d{1,3}){3})|[0-9a-fA-F:]+)\]`), // IPv4 ή IPv6 σε αγκύλες
-        userIPs:  make(map[string]*recentIPs),
-    }
-
-    // init core window primitives
-    d.samples = core.NewSampleRing(cfg.SampleLimit)
-    d.gate    = core.NewAlertGate(cfg.Cooldown)
-    d.counts  = core.NewSlidingCounter(cfg.Window, 0) // optional cap=0
-    d.reSrvPort = regexp.MustCompile(`\bI=\S+:(\d{2,5})\b`)
-
-    d.reSetID   = regexp.MustCompile(`\bset_id=([^) \t]+)`)
-    d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
-
+	d.reSetID = regexp.MustCompile(`\bset_id=([^) \t]+)`)
+	d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
+	d.dedupTTL = 60 * time.Second
+	d.dedupMaxEntries = 5000
+	d.dedupBucket = 10 * time.Second
+	d.dedupSeen = make(map[string]time.Time, d.dedupMaxEntries)
+	d.dedupOrder = make([]dedupEntry, 0, d.dedupMaxEntries)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -174,39 +208,39 @@ defaults := map[string]int{
 }
 
 func (d *EximSecurity) Name() string {
-	if d.name != "" { return d.name }
+	if d.name != "" {
+		return d.name
+	}
 	return "exim/security"
 }
 
 // SetState allows the register to inject a shared state handle.
 func (d *EximSecurity) SetState(st *core.State) { d.state = st }
 
-
 func (d *EximSecurity) Every() time.Duration { return d.cfg.Every }
-//if you want to shave a bit more CPU, add a coarse strings.Contains(s, "rejected rcpt") / "authenticator failed" guard per rule before the regex .MatchString(s)
+
+// if you want to shave a bit more CPU, add a coarse strings.Contains(s, "rejected rcpt") / "authenticator failed" guard per rule before the regex .MatchString(s)
 // φόρτωσε κανόνες από rules file ή βάλε defaults
 func (d *EximSecurity) loadRules() {
-	var raws = []struct{
+	var raws = []struct {
 		name, desc, re string
 	}{
 
-	{"AUTHFAIL", "SMTP AUTH failed", `(?:authenticator failed .* \[[^\]]+\].* 535 incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
-	{"SENDER_VERIFY_FAIL", "sender verify fail", `sender verify fail\b`},
-	{"RCPT_REJECT", "RCPT rejected", `rejected rcpt\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|rejected relay attempt|sender verify failed|unknown user|unrouteable address)`},
-	{"SYNC_ERR", "protocol sync error", `smtp protocol synchronization error .* rejected .*`},
-	{"PROTO_ERR", "AUTH used when not advertised", `smtp protocol error in ".*" .*auth command used when not advertised`},
-	{"NO_MAIL", "no MAIL in SMTP connection", `no mail in smtp connection .*`},
-	{"DROP_ACL", "closed by DROP in ACL", `smtp connection .* closed by drop in acl`},
-	{"RCPT_AUTH_REQUIRED", "RCPT rejected: auth required on submission", `rejected rcpt\b.*:\s*(?:smtp )?auth (?:is )?required(?: for (?:message )?submission)?(?: on port \d+)?|rejected rcpt\b.*:\s*authentication required|rcpt .* rejected: authentication required`},
-	{"NONMAIL_CMD", "Too many nonmail commands", `smtp call from \[[^\]]+\] dropped: too many nonmail commands`},
-	{"NO_HELO", "No HELO/EHLO given", `rejected (?:mail|rcpt) .*: no helo/ehlo given`},
-	{"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `bad helo - host impersonating domain name`},
-	{"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:ehlo|helo)\b.*\b(?:syntax error|invalid|bad)\b`},
-	{"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
-	{"SESSION_ALL_FAILED", "Session all messages failed", `\bwarning:\s*"detected session with all messages failed"`},
-	{"SLOW_FAIL_BLOCK", "Slow fail block ratelimit", `\bwarning:\s*"increment slow_fail_block ratelimit\b`},
-
-
+		{"AUTHFAIL", "SMTP AUTH failed", `(?:authenticator failed .* \[[^\]]+\].* 535 incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
+		{"SENDER_VERIFY_FAIL", "sender verify fail", `sender verify fail(?:ed)?\b`},
+		{"RCPT_REJECT", "RCPT rejected", `rejected rcpt\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|rejected relay attempt|unknown user|unrouteable address)`},
+		{"SYNC_ERR", "protocol sync error", `smtp protocol synchronization error .* rejected .*`},
+		{"PROTO_ERR", "AUTH used when not advertised", `smtp protocol error in ".*" .*auth command used when not advertised`},
+		{"NO_MAIL", "no MAIL in SMTP connection", `no mail in smtp connection .*`},
+		{"DROP_ACL", "closed by DROP in ACL", `smtp connection .* closed by drop in acl`},
+		{"RCPT_AUTH_REQUIRED", "RCPT rejected: auth required on submission", `rejected rcpt\b.*:\s*(?:smtp )?auth (?:is )?required(?: for (?:message )?submission)?(?: on port \d+)?|rejected rcpt\b.*:\s*authentication required|rcpt .* rejected: authentication required`},
+		{"NONMAIL_CMD", "Too many nonmail commands", `smtp call from \[[^\]]+\] dropped: too many nonmail commands`},
+		{"NO_HELO", "No HELO/EHLO given", `rejected (?:mail|rcpt) .*: no helo/ehlo given`},
+		{"BAD_HELO_IMPERSONATION", "Bad HELO impersonation", `bad helo - host impersonating domain name`},
+		{"HELO_SYNTAX", "HELO/EHLO syntax error", `rejected (?:ehlo|helo)\b.*\b(?:syntax error|invalid|bad)\b`},
+		{"PIPELINING", "Command pipelining / sync", `(?:pipelining not supported|command pipelining).*rejected|did not wait for response`},
+		{"SESSION_ALL_FAILED", "Session all messages failed", `\bwarning:\s*"detected session with all messages failed"`},
+		{"SLOW_FAIL_BLOCK", "Slow fail block ratelimit", `\bwarning:\s*"increment slow_fail_block ratelimit\b`},
 	}
 	// TODO: αν υπάρχει d.cfg.RulesPath → διάβασέ το (macros, κ.λπ.). Για αρχή βάλε τα defaults.
 	d.rules = make([]secRule, 0, len(raws))
@@ -220,7 +254,11 @@ func (d *EximSecurity) loadRules() {
 func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// (1) ensure log path
 	if d.path == "" {
-		if d.cfg.LogPath != "" { d.path = d.cfg.LogPath } else { d.path = autoDetectEximLog() }
+		if d.cfg.LogPath != "" {
+			d.path = d.cfg.LogPath
+		} else {
+			d.path = autoDetectEximLog()
+		}
 		if d.path == "" {
 			if !d.readyLog {
 				logging.Logf("[detectors] exim/security: no log path found (set LOG_PATH)")
@@ -229,38 +267,37 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 			return nil
 		}
 
-    // Decide reject logs:
-    if d.rpaths == nil {
-        d.rpaths = d.pickRejectLogs(d.path, d.cfg.RejectPath)
-    }
-    if !d.readyLog {
-        logging.Logf("[detectors] exim/security using main log: %s", d.path)
-        if len(d.rpaths) == 0 {
-            logging.Logf("[detectors] exim/security no reject log found (looked for rejectlog/exim_rejectlog next to main or at REJECT_LOG_PATH)")
-        } else {
-            for _, p := range d.rpaths {
-                logging.Logf("[detectors] exim/security using reject log: %s", p)
-            }
-        }
-        d.readyLog = true
-    }
+		// Decide reject logs:
+		if d.rpaths == nil {
+			d.rpaths = d.pickRejectLogs(d.path, d.cfg.RejectPath)
+		}
+		if !d.readyLog {
+			logging.Logf("[detectors] exim/security using main log: %s", d.path)
+			if len(d.rpaths) == 0 {
+				logging.Logf("[detectors] exim/security no reject log found (looked for rejectlog/exim_rejectlog next to main or at REJECT_LOG_PATH)")
+			} else {
+				for _, p := range d.rpaths {
+					logging.Logf("[detectors] exim/security using reject log: %s", p)
+				}
+			}
+			d.readyLog = true
+		}
 
 	}
 
 	// reset per-run aggregation
 	d.pending = make(map[string]pend)
 
-
 	// Prepare tailer and resume from state (after path is known)
 	if d.src == nil {
 		d.src = core.NewFileTailer(d.path)
 	}
 
-    if d.rsrcs == nil && len(d.rpaths) > 0 {
-        for _, rp := range d.rpaths {
-            d.rsrcs = append(d.rsrcs, core.NewFileTailer(rp))
-        }
-    }
+	if d.rsrcs == nil && len(d.rpaths) > 0 {
+		for _, rp := range d.rpaths {
+			d.rsrcs = append(d.rsrcs, core.NewFileTailer(rp))
+		}
+	}
 	var stateKey string
 	rStateKeys := make([]string, len(d.rsrcs))
 
@@ -271,25 +308,31 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 		}
 	}
 
-    if d.state != nil && len(d.rsrcs) > 0 {
-        for i, t := range d.rsrcs {
-            if t == nil { continue }
-            k := core.FileStateKey(d.Name(), d.rpaths[i])
-            rStateKeys[i] = k
-            if p, ok := d.state.Get(k); ok {
-                t.ApplyResume(p.Inode, p.Offset)
-            }
-        }
-    }
-
+	if d.state != nil && len(d.rsrcs) > 0 {
+		for i, t := range d.rsrcs {
+			if t == nil {
+				continue
+			}
+			k := core.FileStateKey(d.Name(), d.rpaths[i])
+			rStateKeys[i] = k
+			if p, ok := d.state.Get(k); ok {
+				t.ApplyResume(p.Inode, p.Offset)
+			}
+		}
+	}
 
 	if err := d.src.Open(); err != nil {
 		// quiet: missing/rotating log; next tick will retry
 		return nil
 	}
 	defer d.src.Close()
-    // Open reject tailers (best-effort)
-    for _, t := range d.rsrcs { if t != nil { _ = t.Open(); defer t.Close() } }
+	// Open reject tailers (best-effort)
+	for _, t := range d.rsrcs {
+		if t != nil {
+			_ = t.Open()
+			defer t.Close()
+		}
+	}
 
 	// Always persist position on exit
 	if stateKey != "" {
@@ -297,47 +340,53 @@ func (d *EximSecurity) RunOnce(ctx context.Context, out chan<- core.Alert) error
 			d.state.Put(stateKey, d.Position())
 		}()
 	}
-    // Persist reject positions
-    if len(rStateKeys) > 0 {
-        defer func() {
-            for i, t := range d.rsrcs {
-                if t == nil || rStateKeys[i] == "" { continue }
-                off, ino, ts := t.Position()
-                d.state.Put(rStateKeys[i], core.Position{Offset: off, Inode: ino, TS: ts})
-            }
-        }()
-    }
-
-now := time.Now()
-// drain mainlog
-for {
-	line, err := d.src.ReadNext(ctx)
-	if err == io.EOF {
-		break // caught up
+	// Persist reject positions
+	if len(rStateKeys) > 0 {
+		defer func() {
+			for i, t := range d.rsrcs {
+				if t == nil || rStateKeys[i] == "" {
+					continue
+				}
+				off, ino, ts := t.Position()
+				d.state.Put(rStateKeys[i], core.Position{Offset: off, Inode: ino, TS: ts})
+			}
+		}()
 	}
-	if err != nil {
-		break // transient read issue; retry next tick
+
+	now := time.Now()
+	// drain mainlog
+	for {
+		line, err := d.src.ReadNext(ctx)
+		if err == io.EOF {
+			break // caught up
+		}
+		if err != nil {
+			break // transient read issue; retry next tick
+		}
+		d.processLine(now, line)
 	}
-	d.processLine(now, line)
+	// drain reject logs
+	for _, t := range d.rsrcs {
+		if t == nil {
+			continue
+		}
+		for {
+			line, err := t.ReadNext(ctx)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			d.processLine(now, line)
+		}
+	}
+
+	// flush aggregated alerts
+	d.flush(now, out)
+	return nil
+
 }
-    // drain reject logs
-    for _, t := range d.rsrcs {
-        if t == nil { continue }
-        for {
-            line, err := t.ReadNext(ctx)
-            if err == io.EOF { break }
-            if err != nil    { break }
-            d.processLine(now, line)
-        }
-    }
-
-// flush aggregated alerts
-d.flush(now, out)
-return nil
-
-}
-
-
 
 // sender verify fail can be triggered for totally benign local reasons:
 // mailbox full / disk quota / inode limit / blocks limit, etc.
@@ -348,218 +397,403 @@ func isBenignSenderVerifyFail(s string) bool {
 		return false
 	}
 	// common quota/storage phrases seen in exim/cpanel
-	if strings.Contains(s, "mailbox is full") { return true }
-	if strings.Contains(s, "blocks limit exceeded") { return true }
-	if strings.Contains(s, "inode limit exceeded") { return true }
-	if strings.Contains(s, "disk quota") { return true }          // "Disk quota exceeded", etc
-	if strings.Contains(s, "over quota") { return true }
-	if strings.Contains(s, "quota exceeded") { return true }
-	if strings.Contains(s, "maildirsize") { return true }         // maildir quota mechanism
-	if strings.Contains(s, "maildir size exceeded") { return true }
-	if strings.Contains(s, "quota is full") { return true }
-	if strings.Contains(s, "user is over quota") { return true }
-	if strings.Contains(s, "recipient is over quota") { return true }
-	if strings.Contains(s, "storage full") { return true }
-	if strings.Contains(s, "insufficient storage") { return true } // SMTP 452/552 wording sometimes
-	if strings.Contains(s, "not enough storage") { return true }
-	if strings.Contains(s, "no space left on device") { return true }
-	if strings.Contains(s, "not enough disk space") { return true }
+	if strings.Contains(s, "mailbox is full") {
+		return true
+	}
+	if strings.Contains(s, "blocks limit exceeded") {
+		return true
+	}
+	if strings.Contains(s, "inode limit exceeded") {
+		return true
+	}
+	if strings.Contains(s, "disk quota") {
+		return true
+	} // "Disk quota exceeded", etc
+	if strings.Contains(s, "over quota") {
+		return true
+	}
+	if strings.Contains(s, "quota exceeded") {
+		return true
+	}
+	if strings.Contains(s, "maildirsize") {
+		return true
+	} // maildir quota mechanism
+	if strings.Contains(s, "maildir size exceeded") {
+		return true
+	}
+	if strings.Contains(s, "quota is full") {
+		return true
+	}
+	if strings.Contains(s, "user is over quota") {
+		return true
+	}
+	if strings.Contains(s, "recipient is over quota") {
+		return true
+	}
+	if strings.Contains(s, "storage full") {
+		return true
+	}
+	if strings.Contains(s, "insufficient storage") {
+		return true
+	} // SMTP 452/552 wording sometimes
+	if strings.Contains(s, "not enough storage") {
+		return true
+	}
+	if strings.Contains(s, "no space left on device") {
+		return true
+	}
+	if strings.Contains(s, "not enough disk space") {
+		return true
+	}
 
 	return false
 }
 
-
-
-
 func (d *EximSecurity) processLine(now time.Time, line string) {
-    s := strings.ToLower(line)
+	s := strings.ToLower(line)
 
-    // quick skip: must have brackets (socket ip is always bracketed)
-    if !strings.Contains(s, "[") || !strings.Contains(s, "]") { return }
+	// quick skip: must have brackets (socket ip is always bracketed)
+	if !strings.Contains(s, "[") || !strings.Contains(s, "]") {
+		return
+	}
 
-    ip := lastBracketIP(line) // <-- only trust bracketed token, validated
+	ip := lastBracketIP(line) // <-- only trust bracketed token, validated
 
-// DEBUG: show what we picked for every matching line
-    if logging.DebugEnabled() {
-        if ip != "" {
-            logging.LogfDETECTOR("[exim/security][debug] picked_ip=%q line=%s", ip, line)
-        } else {
-            logging.LogfDETECTOR("[exim/security][debug] no_ip line=%s", line)
-        }
-    }
-//debug end
+	// DEBUG: show what we picked for every matching line
+	if logging.DebugEnabled() {
+		if ip != "" {
+			logging.LogfDETECTOR("[exim/security][debug] picked_ip=%q line=%s", ip, line)
+		} else {
+			logging.LogfDETECTOR("[exim/security][debug] no_ip line=%s", line)
+		}
+	}
+	//debug end
 
-    if ip == "" { return }
+	if ip == "" {
+		return
+	}
 
-    // ... keep the rest the same ...
-    for _, r := range d.rules {
-        if r.Re.MatchString(s) {
+	sess := d.extractSessionContext(line, s)
 
-            // Ignore benign SENDER_VERIFY_FAIL caused by local mailbox quota/storage limits
-            if r.Name == "SENDER_VERIFY_FAIL" && isBenignSenderVerifyFail(s) {
-                if logging.DebugEnabled() {
-                    logging.LogfDETECTOR("[exim/security][debug] ignore benign SENDER_VERIFY_FAIL ip=%q line=%s", ip, line)
-                }
-                continue
-            }
+	for _, r := range d.rules {
+		if r.Re.MatchString(s) {
+			if sess.authSubmission {
+				if r.Name == "SENDER_VERIFY_FAIL" {
+					if logging.DebugEnabled() {
+						logging.LogfDETECTOR("[exim/security][debug] suppress rule=SENDER_VERIFY_FAIL ip=%q reason=authenticated_submission auth=%q port=%q line=%s", ip, sess.authMarker, sess.port, line)
+					}
+					continue
+				}
+				if r.Name == "RCPT_REJECT" && isSenderVerifyRelatedReject(s) {
+					if d.isDuplicateEvent(now, "RCPT_REJECT_SV_SOFT", ip, line) {
+						continue
+					}
+					if logging.DebugEnabled() {
+						logging.LogfDETECTOR("[exim/security][debug] downgrade rule=RCPT_REJECT->RCPT_REJECT_SV_SOFT ip=%q reason=authenticated_submission sender_verify_related auth=%q port=%q line=%s", ip, sess.authMarker, sess.port, line)
+					}
+					d.bump(now, "RCPT_REJECT_SV_SOFT", ip, line)
+					continue
+				}
+			}
 
+			// Ignore benign SENDER_VERIFY_FAIL caused by local mailbox quota/storage limits
+			if r.Name == "SENDER_VERIFY_FAIL" && isBenignSenderVerifyFail(s) {
+				if logging.DebugEnabled() {
+					logging.LogfDETECTOR("[exim/security][debug] ignore benign SENDER_VERIFY_FAIL ip=%q line=%s", ip, line)
+				}
+				continue
+			}
 
-            if r.Name == "AUTHFAIL" {
+			if r.Name == "AUTHFAIL" {
+				if sess.authSubmission && logging.DebugEnabled() {
+					logging.LogfDETECTOR("[exim/security][debug] keep AUTHFAIL active on authenticated submission ip=%q auth=%q port=%q", ip, sess.authMarker, sess.port)
+				}
 
-                if logging.DebugEnabled() {
-                    logging.LogfDETECTOR("[exim/security][debug] bump AUTHFAIL ip=%q", ip)
-                }
+				if logging.DebugEnabled() {
+					logging.LogfDETECTOR("[exim/security][debug] bump AUTHFAIL ip=%q", ip)
+				}
 
-                d.bump(now, "AUTHFAIL|ip", ip, line) // now always the real socket IP
-                if u := d.extractUser(s); u != "" {
-                    d.bump(now, "AUTHFAIL|user", u, line)
-                    d.addUserIP(u, ip)
-                }
-            } else {
-                d.bump(now, r.Name, ip, line)
-            }
-        }
-    }
+				if d.isDuplicateEvent(now, "AUTHFAIL|ip", ip, line) {
+					continue
+				}
+				d.bump(now, "AUTHFAIL|ip", ip, line) // now always the real socket IP
+				if u := d.extractUser(s); u != "" {
+					d.bump(now, "AUTHFAIL|user", u, line)
+					d.addUserIP(u, ip)
+				}
+			} else {
+				if d.isDuplicateEvent(now, r.Name, ip, line) {
+					continue
+				}
+				d.bump(now, r.Name, ip, line)
+			}
+		}
+	}
 }
 
+func (d *EximSecurity) isDuplicateEvent(now time.Time, rule, ip, line string) bool {
+	fp := d.dedupFingerprint(now, rule, ip, line)
 
+	d.dedupMu.Lock()
+	defer d.dedupMu.Unlock()
 
+	d.pruneDedupLocked(now)
+	if exp, ok := d.dedupSeen[fp]; ok && now.Before(exp) {
+		d.dedupHits++
+		if logging.DebugEnabled() && d.dedupHits%25 == 0 {
+			logging.LogfDETECTOR("[exim/security][debug] dedup hit key=%q hits=%d misses=%d size=%d ttl_pruned=%d cap_pruned=%d",
+				fp, d.dedupHits, d.dedupMisses, len(d.dedupSeen), d.dedupPrunedTTL, d.dedupPrunedCap)
+		}
+		return true
+	}
 
+	exp := now.Add(d.dedupTTL)
+	d.dedupSeen[fp] = exp
+	d.dedupOrder = append(d.dedupOrder, dedupEntry{key: fp, exp: exp})
+	d.dedupMisses++
+	if d.dedupMisses%200 == 0 && logging.DebugEnabled() {
+		logging.LogfDETECTOR("[exim/security][debug] dedup stats hits=%d misses=%d size=%d ttl_pruned=%d cap_pruned=%d",
+			d.dedupHits, d.dedupMisses, len(d.dedupSeen), d.dedupPrunedTTL, d.dedupPrunedCap)
+	}
+	return false
+}
+
+func (d *EximSecurity) pruneDedupLocked(now time.Time) {
+	for len(d.dedupOrder) > 0 {
+		head := d.dedupOrder[0]
+		if now.Before(head.exp) {
+			break
+		}
+		d.dedupOrder = d.dedupOrder[1:]
+		if cur, ok := d.dedupSeen[head.key]; ok && !now.Before(cur) {
+			delete(d.dedupSeen, head.key)
+			d.dedupPrunedTTL++
+		}
+	}
+	for d.dedupMaxEntries > 0 && len(d.dedupSeen) > d.dedupMaxEntries && len(d.dedupOrder) > 0 {
+		head := d.dedupOrder[0]
+		d.dedupOrder = d.dedupOrder[1:]
+		if _, ok := d.dedupSeen[head.key]; ok {
+			delete(d.dedupSeen, head.key)
+			d.dedupPrunedCap++
+		}
+	}
+}
+
+func (d *EximSecurity) dedupFingerprint(now time.Time, rule, ip, line string) string {
+	bucket := int64(0)
+	if d.dedupBucket > 0 {
+		bucket = now.Unix() / int64(d.dedupBucket/time.Second)
+	}
+	return fmt.Sprintf("%s|%s|%d|%s", rule, ip, bucket, normalizeDedupLine(line))
+}
+
+func normalizeDedupLine(line string) string {
+	s := strings.ToLower(strings.TrimSpace(line))
+	if s == "" {
+		return s
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+type sessionContext struct {
+	authMarker     string
+	port           string
+	submissionPort bool
+	authenticated  bool
+	authSubmission bool
+}
+
+func (d *EximSecurity) extractSessionContext(line, lowerLine string) sessionContext {
+	ctx := sessionContext{}
+	if m := d.reAuthMarker.FindStringSubmatch(line); m != nil {
+		ctx.authMarker = strings.ToLower(m[1])
+		if ctx.authMarker != "" && ctx.authMarker != "none" {
+			ctx.authenticated = true
+		}
+	}
+	if m := d.reSrvPort.FindStringSubmatch(line); m != nil {
+		ctx.port = m[1]
+		ctx.submissionPort = ctx.port == "465" || ctx.port == "587"
+	}
+	if ctx.authenticated {
+		ctx.authSubmission = true
+	} else if ctx.submissionPort && strings.Contains(lowerLine, "auth") {
+		// Some lines include only port context plus auth text; still treat as submission-auth traffic.
+		ctx.authSubmission = true
+	}
+	return ctx
+}
+
+func isSenderVerifyRelatedReject(s string) bool {
+	if strings.Contains(s, "sender verify fail") {
+		return true
+	}
+	if strings.Contains(s, "sender verify defer") {
+		return true
+	}
+	if strings.Contains(s, "sender verify callout") {
+		return true
+	}
+	if strings.Contains(s, "could not complete sender verify") {
+		return true
+	}
+	return false
+}
 
 func (d *EximSecurity) extractUser(line string) string {
-    if m := d.reSetID.FindStringSubmatch(line); m != nil && m[1] != "" {
-        return strings.ToLower(m[1])
-    }
-    if m := d.reUserAng.FindStringSubmatch(line); m != nil && m[1] != "" {
-        return strings.ToLower(m[1])
-    }
-    return ""
+	if m := d.reSetID.FindStringSubmatch(line); m != nil && m[1] != "" {
+		return strings.ToLower(m[1])
+	}
+	if m := d.reUserAng.FindStringSubmatch(line); m != nil && m[1] != "" {
+		return strings.ToLower(m[1])
+	}
+	return ""
 }
 
 func (d *EximSecurity) addUserIP(user, ip string) {
-    if user == "" || ip == "" { return }
-    d.mu.Lock()
-    rp := d.userIPs[user]
-    if rp == nil {
-        rp = &recentIPs{}
-        d.userIPs[user] = rp
-    }
-    d.mu.Unlock()
-    rp.Add(ip, 20) // keep last ~20 distinct IPs per user
+	if user == "" || ip == "" {
+		return
+	}
+	d.mu.Lock()
+	rp := d.userIPs[user]
+	if rp == nil {
+		rp = &recentIPs{}
+		d.userIPs[user] = rp
+	}
+	d.mu.Unlock()
+	rp.Add(ip, 20) // keep last ~20 distinct IPs per user
 }
-
 
 func (d *EximSecurity) bump(now time.Time, tag, key, line string) {
-    sk := tag + ":" + key
-    d.samples.Add(sk, line)
-    _ = d.counts.Add(sk, now) // real counting in sliding window
+	sk := tag + ":" + key
+	d.samples.Add(sk, line)
+	_ = d.counts.Add(sk, now) // real counting in sliding window
 
-    if d.pending == nil { d.pending = make(map[string]pend) }
-    d.pending[sk] = pend{kindKey: tag, key: key} // no per-tick n here
+	if d.pending == nil {
+		d.pending = make(map[string]pend)
+	}
+	d.pending[sk] = pend{kindKey: tag, key: key} // no per-tick n here
 }
-
-
-
-
 
 func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
-    for sk, p := range d.pending {
-        thr, kind, isIP, base := d.thresholdAndKey(p.kindKey, p.key)
-        if thr <= 0 { continue }
+	for sk, p := range d.pending {
+		thr, kind, isIP, base := d.thresholdAndKey(p.kindKey, p.key)
+		if thr <= 0 {
+			continue
+		}
 
-        n := d.counts.Count(sk, now)
-        if !d.gate.Allow(sk, now, n, thr) { continue }
+		n := d.counts.Count(sk, now)
+		if !d.gate.Allow(sk, now, n, thr) {
+			continue
+		}
 
-        // display + enrichment exactly as before
-        displayKey := base
-        if isIP {
-            displayKey = "ip " + base
-            if d.cfg.UseEnrich || d.cfg.UsePTR {
-                if meta := d.lookupMeta(base); meta != "" {
-                    displayKey += " (" + meta + ")"
-                }
-            }
-        }
+		// display + enrichment exactly as before
+		displayKey := base
+		if isIP {
+			displayKey = "ip " + base
+			if d.cfg.UseEnrich || d.cfg.UsePTR {
+				if meta := d.lookupMeta(base); meta != "" {
+					displayKey += " (" + meta + ")"
+				}
+			}
+		}
 
-        samples := d.samples.GetAndClear(sk)
-        // Derive submission transport info (best-effort) from first sample
-        enc := ""
-        port := ""
-        if len(samples) > 0 {
-            s0 := strings.ToLower(samples[0])
-            if strings.Contains(s0, "ssl on the wire") { enc = "smtps" } else if strings.Contains(s0, "tls") { enc = "tls" }
-            if m := d.reSrvPort.FindStringSubmatch(samples[0]); m != nil { port = m[1] }
-        }
+		samples := d.samples.GetAndClear(sk)
+		// Derive submission transport info (best-effort) from first sample
+		enc := ""
+		port := ""
+		if len(samples) > 0 {
+			s0 := strings.ToLower(samples[0])
+			if strings.Contains(s0, "ssl on the wire") {
+				enc = "smtps"
+			} else if strings.Contains(s0, "tls") {
+				enc = "tls"
+			}
+			if m := d.reSrvPort.FindStringSubmatch(samples[0]); m != nil {
+				port = m[1]
+			}
+		}
 
+		// DEBUG: single line that mirrors what will be emitted as an alert
+		if logging.DebugEnabled() {
+			if len(samples) > 0 {
+				logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s first=%q",
+					kind, displayKey, isIP, base, n, thr, len(samples), enc, port, samples[0])
+			} else {
+				logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s",
+					kind, displayKey, isIP, base, n, thr, len(samples), enc, port)
+			}
+		}
+		//DEBUG END
 
-// DEBUG: single line that mirrors what will be emitted as an alert
-        if logging.DebugEnabled() {
-            if len(samples) > 0 {
-                logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s first=%q",
-                    kind, displayKey, isIP, base, n, thr, len(samples), enc, port, samples[0])
-            } else {
-                logging.LogfDETECTOR("[exim/security][debug] flush kind=%s key=%s isIP=%t base=%s count=%d thr=%d samples=%d enc=%s port=%s",
-                    kind, displayKey, isIP, base, n, thr, len(samples), enc, port)
-            }
-        }
-//DEBUG END
+		extra := map[string]string{
+			"log":      d.path,
+			"window":   d.cfg.Window.String(),
+			"cooldown": d.cfg.Cooldown.String(),
+			"limit":    strconv.Itoa(thr),
+			"rule":     p.kindKey,
+		}
+		if isIP {
+			extra["ip"] = base
+		} else if rp := d.userIPs[base]; rp != nil {
+			csv, n := rp.CSV()
+			if n > 0 {
+				extra["ips"], extra["unique_ips"] = csv, strconv.Itoa(n)
+			}
+		}
 
-        extra := map[string]string{
-            "log":      d.path,
-            "window":   d.cfg.Window.String(),
-            "cooldown": d.cfg.Cooldown.String(),
-            "limit":    strconv.Itoa(thr),
-            "rule":     p.kindKey,
-        }
-        if isIP {
-            extra["ip"] = base
-        } else if rp := d.userIPs[base]; rp != nil {
-            csv, n := rp.CSV()
-            if n > 0 { extra["ips"], extra["unique_ips"] = csv, strconv.Itoa(n) }
-        }
-
-        if enc != "" { extra["enc"] = enc }   // smtps or tls
-        if port != "" { extra["port"] = port } // often 465 or 587
-        out <- core.Alert{
-            When: now, Kind: core.AlertKind(kind),
-            Key: displayKey, Count: n, Samples: samples, Extra: extra,
-        }
-    }
+		if enc != "" {
+			extra["enc"] = enc
+		} // smtps or tls
+		if port != "" {
+			extra["port"] = port
+		} // often 465 or 587
+		out <- core.Alert{
+			When: now, Kind: core.AlertKind(kind),
+			Key: displayKey, Count: n, Samples: samples, Extra: extra,
+		}
+	}
 }
-
-
-
-
-
 
 func (d *EximSecurity) thresholdAndKey(kindKey, rawKey string) (thr int, alertKind string, isIP bool, base string) {
-    // AUTHFAIL per-IP/per-user
-    if strings.HasPrefix(kindKey, "AUTHFAIL|") {
-        alertKind = "SECURITY/AUTHFAIL"
-        base = rawKey
-        if strings.HasSuffix(kindKey, "|ip") {
-            thr = d.cfg.Thresholds["AUTHFAIL_IP"]
-            if thr == 0 { thr = d.cfg.Thresholds["AUTHFAIL"] }
-            return thr, alertKind, true, base
-        }
-        if strings.HasSuffix(kindKey, "|user") {
-            thr = d.cfg.Thresholds["AUTHFAIL_USER"]
-            if thr == 0 { thr = d.cfg.Thresholds["AUTHFAIL"] }
-            return thr, alertKind, false, base
-        }
-        thr = d.cfg.Thresholds["AUTHFAIL"]
-        return thr, alertKind, false, base
-    }
-    // other tags unchanged
-    thr = d.cfg.Thresholds[kindKey]
-    alertKind = "SECURITY/" + kindKey
-    base = rawKey // ip
-    return thr, alertKind, true, base
+	// AUTHFAIL per-IP/per-user
+	if strings.HasPrefix(kindKey, "AUTHFAIL|") {
+		alertKind = "SECURITY/AUTHFAIL"
+		base = rawKey
+		if strings.HasSuffix(kindKey, "|ip") {
+			thr = d.cfg.Thresholds["AUTHFAIL_IP"]
+			if thr == 0 {
+				thr = d.cfg.Thresholds["AUTHFAIL"]
+			}
+			return thr, alertKind, true, base
+		}
+		if strings.HasSuffix(kindKey, "|user") {
+			thr = d.cfg.Thresholds["AUTHFAIL_USER"]
+			if thr == 0 {
+				thr = d.cfg.Thresholds["AUTHFAIL"]
+			}
+			return thr, alertKind, false, base
+		}
+		thr = d.cfg.Thresholds["AUTHFAIL"]
+		return thr, alertKind, false, base
+	}
+	if kindKey == "RCPT_REJECT_SV_SOFT" {
+		thr = d.cfg.Thresholds["RCPT_REJECT_SV_SOFT"]
+		if thr == 0 {
+			thr = d.cfg.Thresholds["RCPT_REJECT"] * 2
+		}
+		if thr == 0 {
+			thr = 20
+		}
+		return thr, "SECURITY/RCPT_REJECT_SOFT", true, rawKey
+	}
+	// other tags unchanged
+	thr = d.cfg.Thresholds[kindKey]
+	alertKind = "SECURITY/" + kindKey
+	base = rawKey // ip
+	return thr, alertKind, true, base
 }
-
-
-
-
 
 // --- helpers που ήδη έχεις στο relays.go, ανακύκλωσε/εξήγαγε κοινά αν θέλεις ---
 
@@ -568,30 +802,59 @@ func (d *EximSecurity) lookupMeta(ip string) string {
 	var asn uint
 	if d.enr != nil {
 		r := d.enr.Lookup(ip)
-		if r.Country != "" { country = r.Country }
-		if r.City != "" { city = r.City }
-		if r.PTR != "" { ptr = strings.TrimSuffix(r.PTR, ".") }
-		if r.ASN > 0 { asn = r.ASN; asname = r.ASNName }
+		if r.Country != "" {
+			country = r.Country
+		}
+		if r.City != "" {
+			city = r.City
+		}
+		if r.PTR != "" {
+			ptr = strings.TrimSuffix(r.PTR, ".")
+		}
+		if r.ASN > 0 {
+			asn = r.ASN
+			asname = r.ASNName
+		}
 	}
 	if d.cfg.UsePTR && ptr == "" {
 		names, _ := net.LookupAddr(ip)
-		if len(names) > 0 { ptr = strings.TrimSuffix(names[0], ".") }
+		if len(names) > 0 {
+			ptr = strings.TrimSuffix(names[0], ".")
+		}
 	}
 	geo := ""
 	if country != "" || city != "" {
-		if country == "" { country = "-" }
-		if city == "" { city = "-" }
+		if country == "" {
+			country = "-"
+		}
+		if city == "" {
+			city = "-"
+		}
 		geo = country + "/" + city
 	}
 	as := ""
-	if asn > 0 && asname != "" { as = fmt.Sprintf("[AS%d %s", asn, asname) } else if asn > 0 { as = fmt.Sprintf("[AS%d", asn) }
-	if ptr != "" { if as != "" { as += "; PTR " + ptr + "]" } else { as = "[PTR " + ptr + "]" } } else if as != "" { as += "]" }
-	if geo != "" && as != "" { return geo + "/" + as }
-	if geo != "" { return geo }
+	if asn > 0 && asname != "" {
+		as = fmt.Sprintf("[AS%d %s", asn, asname)
+	} else if asn > 0 {
+		as = fmt.Sprintf("[AS%d", asn)
+	}
+	if ptr != "" {
+		if as != "" {
+			as += "; PTR " + ptr + "]"
+		} else {
+			as = "[PTR " + ptr + "]"
+		}
+	} else if as != "" {
+		as += "]"
+	}
+	if geo != "" && as != "" {
+		return geo + "/" + as
+	}
+	if geo != "" {
+		return geo
+	}
 	return as
 }
-
-
 
 // helper: return canonical IPv4 or IPv6 from the last/right-most [ ... ] token on the line,
 // preferring a global/public address if multiple bracketed IPs exist.
@@ -699,22 +962,19 @@ func lastBracketIP(line string) string {
 	return ""
 }
 
-
-
-
-//new position
+// new position
 func (d *EximSecurity) ApplyPosition(p core.Position) {
-    if d.src != nil {
-        d.src.ApplyResume(p.Inode, p.Offset)
-    }
+	if d.src != nil {
+		d.src.ApplyResume(p.Inode, p.Offset)
+	}
 }
 
 func (d *EximSecurity) Position() core.Position {
-    if d.src == nil {
-        return core.Position{}
-    }
-    off, ino, ts := d.src.Position()
-    return core.Position{Offset: off, Inode: ino, TS: ts}
+	if d.src == nil {
+		return core.Position{}
+	}
+	off, ino, ts := d.src.Position()
+	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
 
 // Setter used by the factory
@@ -722,22 +982,30 @@ func (d *EximSecurity) SetName(n string) { d.name = n }
 
 // ---- helpers ---------------------------------------------------------------
 func (d *EximSecurity) pickRejectLogs(mainPath, override string) []string {
-    // If explicit, use that (and only that) if it exists.
-    if s := strings.TrimSpace(override); s != "" {
-        if fileExists(s) { return []string{s} }
-        return nil
-    }
-    // Otherwise, try siblings next to mainPath: rejectlog, exim_rejectlog (cPanel)
-    dir := filepath.Dir(mainPath)
-    c1 := filepath.Join(dir, "rejectlog")
-    c2 := filepath.Join(dir, "exim_rejectlog")
-    out := make([]string, 0, 2)
-    if fileExists(c1) { out = append(out, c1) }
-    if fileExists(c2) { out = append(out, c2) }
-    return out
+	// If explicit, use that (and only that) if it exists.
+	if s := strings.TrimSpace(override); s != "" {
+		if fileExists(s) {
+			return []string{s}
+		}
+		return nil
+	}
+	// Otherwise, try siblings next to mainPath: rejectlog, exim_rejectlog (cPanel)
+	dir := filepath.Dir(mainPath)
+	c1 := filepath.Join(dir, "rejectlog")
+	c2 := filepath.Join(dir, "exim_rejectlog")
+	out := make([]string, 0, 2)
+	if fileExists(c1) {
+		out = append(out, c1)
+	}
+	if fileExists(c2) {
+		out = append(out, c2)
+	}
+	return out
 }
 func fileExists(p string) bool {
-    if p == "" { return false }
-    fi, err := os.Stat(p)
-    return err == nil && !fi.IsDir()
+	if p == "" {
+		return false
+	}
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }
