@@ -172,10 +172,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			Extra: map[string]string{
 				"ip":     ev.SrcIP,
 				"source": ev.Source,
-				"reason": "api_probe",
+				"reason": ev.Reason,
 				"signal": ev.Signal,
 				"stage":  fmt.Sprintf("%d", next),
 			},
+		}
+		if strings.TrimSpace(alert.Extra["reason"]) == "" {
+			alert.Extra["reason"] = "api_probe"
 		}
 
 		switch next {
