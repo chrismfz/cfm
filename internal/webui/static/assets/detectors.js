@@ -1,6 +1,6 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {} } };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} } };
 const byId = (id) => document.getElementById(id);
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
@@ -29,18 +29,66 @@ function runtimeBadge(sec, runtime){
   return {color:'#f59e0b', label:'warming', reason:successes===0?'Enabled but no successful runs yet.':'Waiting for fresh successful run.'};
 }
 
-function setRuntimeSummary(summary){
+function setRuntimeSummary(summary, inventory){
   const el = byId('detectorsRuntimeSummary');
   if(!el) return;
-  const s = summary || {};
-  el.textContent = `Loaded ${s.loaded_types||0} detector types, Configured ${s.configured_sections||0} sections, Enabled ${s.enabled_sections||0}, Active ${s.active_sections||0}`;
+  const c = inventory?.counts || {};
+  const fallback = summary || {};
+  const loaded = Number.isFinite(c.loaded) ? c.loaded : (fallback.loaded_types||0);
+  const configured = Number.isFinite(c.configured) ? c.configured : (fallback.configured_sections||0);
+  const enabled = Number.isFinite(c.enabled) ? c.enabled : (fallback.enabled_sections||0);
+  const active = Number.isFinite(c.active) ? c.active : (fallback.active_sections||0);
+  el.textContent = `Loaded ${loaded} detector types, configured ${configured} sections, enabled ${enabled}, active ${active}`;
+}
+
+function renderInventoryLists(inventory){
+  const inv = inventory || {};
+  const missing = Array.isArray(inv.missing_config_for_available) ? inv.missing_config_for_available : [];
+  const unknown = Array.isArray(inv.unknown_sections) ? inv.unknown_sections : [];
+
+  const missingList = byId('detectorsMissingConfigList');
+  const unknownList = byId('detectorsUnknownSectionsList');
+  const missingCount = byId('detectorsMissingConfigCount');
+  const unknownCount = byId('detectorsUnknownSectionsCount');
+  const warning = byId('detectorsInventoryWarning');
+
+  if(missingCount) missingCount.textContent = String(missing.length);
+  if(unknownCount) unknownCount.textContent = String(unknown.length);
+
+  if(missingList){
+    missingList.innerHTML = '';
+    if(missing.length===0){
+      missingList.innerHTML = '<li class="muted">None</li>';
+    }else{
+      missing.forEach((name)=>{ const li=document.createElement('li'); li.textContent=String(name); missingList.appendChild(li); });
+    }
+  }
+  if(unknownList){
+    unknownList.innerHTML = '';
+    if(unknown.length===0){
+      unknownList.innerHTML = '<li class="muted">None</li>';
+    }else{
+      unknown.forEach((name)=>{ const li=document.createElement('li'); li.textContent=String(name); unknownList.appendChild(li); });
+    }
+  }
+
+  if(warning){
+    if(missing.length || unknown.length){
+      warning.textContent = `Config drift detected: ${missing.length} missing config type(s), ${unknown.length} unknown section(s).`;
+      warning.style.color = '#fca5a5';
+    } else {
+      warning.textContent = 'No detector config drift detected.';
+      warning.style.color = '#86efac';
+    }
+  }
 }
 
 async function refreshRuntimeStatus(){
   try{
     const j = await api('/api/v1/detectors/status');
-    state.runtime = j || { sections: [], summary: {} };
-    setRuntimeSummary(state.runtime.summary);
+    state.runtime = j || { sections: [], summary: {}, inventory: {} };
+    setRuntimeSummary(state.runtime.summary, state.runtime.inventory);
+    renderInventoryLists(state.runtime.inventory);
     render();
   }catch(e){
     setStatus(`Runtime status unavailable: ${e.message}`, true);
@@ -386,7 +434,7 @@ async function saveFlow(){
 function init(){
   byId('detectorsSaveBtn').onclick=saveFlow;
   byId('detectorsDiscardBtn').onclick=()=>{ state.draft=clone(state.original); render(); setDirty(false); setStatus('Draft reverted'); };
-  byId('detectorsReloadBtn').onclick=async()=>{ await api('/api/v1/detectors/reload',{method:'POST'}); setStatus('Detectors reload requested'); };
+  byId('detectorsReloadBtn').onclick=async()=>{ await api('/api/v1/detectors/reload',{method:'POST'}); setStatus('Detectors reload requested'); await refreshRuntimeStatus(); };
   byId('detectorsConfirmSave').onclick=async()=>{ await api('/api/v1/detectors/config',{method:'PUT',body:JSON.stringify({config:state.draft})}); byId('detectorsSaveModal').style.display='none'; setStatus('Saved detectors config'); await load(); };
   byId('detectorsCancelSave').onclick=()=>byId('detectorsSaveModal').style.display='none';
   byId('detectorsValidationClose').onclick=()=>byId('detectorsValidationModal').style.display='none';
