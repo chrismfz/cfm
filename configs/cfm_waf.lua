@@ -31,7 +31,7 @@ local CFG = {
   --   "block"     -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
-  rule_traversal       = "disabled",   -- ../, null bytes, basic traversal markers
+  rule_traversal       = "logonly",   -- ../, null bytes, basic traversal markers
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
@@ -41,8 +41,8 @@ local CFG = {
   rule_php_wrappers      = "logonly",  -- php:// phar:// data:// zip:// expect:// glob://
   rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
   rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
-  rule_php_webshell_body = "logonly",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_b64_injection     = "logonly",  -- POST-body base64 decode heuristic scanner
+  rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
+  rule_b64_injection     = "challenge",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
   rule_auth_burst         = "challenge", -- generic login endpoint burst
@@ -61,11 +61,11 @@ local CFG = {
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
-  rule_cmd_payload_semi_cmd  = nil,         -- PAY_SEMI_CMD
-  rule_cmd_payload_pipe_wget = nil,         -- PAY_PIPE_WGET
-  rule_cmd_payload_pipe_curl = nil,         -- PAY_PIPE_CURL
-  rule_cmd_payload_pipe_bash = nil,         -- PAY_PIPE_BASH
-  rule_cmd_payload_pipe_sh   = nil,         -- PAY_PIPE_SH
+  rule_cmd_payload_semi_cmd  = "challenge",         -- PAY_SEMI_CMD
+  rule_cmd_payload_pipe_wget = "challenge",         -- PAY_PIPE_WGET
+  rule_cmd_payload_pipe_curl = "challenge",         -- PAY_PIPE_CURL
+  rule_cmd_payload_pipe_bash = "challenge",         -- PAY_PIPE_BASH
+  rule_cmd_payload_pipe_sh   = "challenge",         -- PAY_PIPE_SH
   rule_cmd_payload_backtick  = "logonly",   -- PAY_BACKTICK
 
   -- ── Research additions – all logonly for initial FP observation ────────────
@@ -82,15 +82,15 @@ local CFG = {
   rule_content_type_anomaly = "logonly",  -- non-standard charset bypass; malformed multipart boundary
 
   -- [top-8]  Proxy header integrity
-  rule_proxy_header_sqli = "logonly",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
+  rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
 
   -- [top-9]  SSRF + JS prototype pollution
   rule_ssrf             = "logonly",  -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
-  rule_js_proto         = "logonly",  -- JS __proto__ / constructor.prototype pollution
+  rule_js_proto         = "challenge",  -- JS __proto__ / constructor.prototype pollution
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "logonly",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
-  rule_crlf_injection   = "logonly",  -- CRLF / HTTP response-splitting in args or body
+  rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
+  rule_crlf_injection   = "challenge",  -- CRLF / HTTP response-splitting in args or body
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
