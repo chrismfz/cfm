@@ -14,6 +14,7 @@ import (
 
 	"cfm/internal/apiserver"
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 	// "cfm/internal/clam"
@@ -574,6 +575,18 @@ func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
 }
 
 func init() {
+	meta.Register(meta.DetectorMeta{
+		TypeKey:          "webdetector",
+		Title:            "Web detector",
+		Description:      "HTTP anomaly/challenge detector and bridge.",
+		DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "2m", "BLOCK": "dryrun"},
+		ExamplePresets: []meta.Preset{
+			{ID: "generic", Title: "Generic", Description: "Generic shared web stack defaults.", Template: map[string]string{"CHALLENGE_MODE": "on"}},
+			{ID: "cpanel", Title: "cPanel", Description: "cPanel reverse-proxy style deployment.", Template: map[string]string{"CHALLENGE_MODE": "on", "TRUST_PROXY_HEADERS": "1"}},
+		},
+		LeniencySupported:   true,
+		LeniencyRecommended: true,
+	})
 	Register("webdetector", func(section string, kv, global KV) (core.PeriodicDetector, error) {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 5*time.Second)
 		defWindow := kvDur(global, "DEFAULT_WINDOW", 120*time.Second)

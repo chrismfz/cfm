@@ -5,6 +5,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/detectors/ssh"
 	"cfm/internal/logging"
 )
@@ -13,27 +14,38 @@ import (
 var sshState, _ = core.LoadState("")
 
 func init() {
+	meta.Register(meta.DetectorMeta{
+		TypeKey:          "ssh_auth",
+		Title:            "SSH authentication",
+		Description:      "Detect SSH brute-force/authentication abuse.",
+		DefaultsTemplate: map[string]string{"ENABLED": "1", "MODE": "journal", "JOURNAL_UNIT": "sshd.service", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
+		ExamplePresets: []meta.Preset{
+			{ID: "generic", Title: "Generic Linux", Description: "Journald-based SSH defaults.", Template: map[string]string{"MODE": "journal", "JOURNAL_UNIT": "sshd.service"}},
+			{ID: "cpanel", Title: "cPanel host", Description: "File mode for cPanel-like log layouts.", Template: map[string]string{"MODE": "file", "LOG_PATH": "/var/log/secure"}},
+		},
+		LeniencySupported:   true,
+		LeniencyRecommended: true,
+	})
 	Register("ssh_auth", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
-		defEvery    := kvDur(global, "DEFAULT_EVERY",    2*time.Second)
-		defWindow   := kvDur(global, "DEFAULT_WINDOW",   10*time.Minute)
+		defEvery := kvDur(global, "DEFAULT_EVERY", 2*time.Second)
+		defWindow := kvDur(global, "DEFAULT_WINDOW", 10*time.Minute)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
 
-
-        // Enrichment: global defaults, allow per-section override
-        rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
-        var dirs []string
-        if rawDirs != "" {
-            fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
-                return r == ',' || r == ':' || r == ' ' || r == '\t'
-            })
-            for _, f := range fields {
-                if f != "" { dirs = append(dirs, f) }
-            }
-        }
-        useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
-        usePTR    := kvBool(kv, "PTR",    kvBool(global, "PTR",    true))
-
-		
+		// Enrichment: global defaults, allow per-section override
+		rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
+		var dirs []string
+		if rawDirs != "" {
+			fields := strings.FieldsFunc(rawDirs, func(r rune) bool {
+				return r == ',' || r == ':' || r == ' ' || r == '\t'
+			})
+			for _, f := range fields {
+				if f != "" {
+					dirs = append(dirs, f)
+				}
+			}
+		}
+		useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
+		usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
 
 		cfg := ssh.AuthConfig{
 			Mode:        kvStrClean(kv, "MODE", "journal"), // Debian 13 defaults journal
@@ -45,9 +57,9 @@ func init() {
 			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
 			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
 
-			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP",   25),
+			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 25),
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
-			DDOSPerIP:       kvInt(kv, "DDOS_IP",       30),
+			DDOSPerIP:       kvInt(kv, "DDOS_IP", 30),
 
 			UseEnrich:  useEnrich,
 			UsePTR:     usePTR,
@@ -77,12 +89,11 @@ func init() {
 			}
 		}
 
-
-if cfg.Mode == "file" {
-    logging.Logf("[detectors][%s] source=file path=%s (explicit)", section, cfg.LogPath)
-} else {
-    logging.Logf("[detectors][%s] source=journal unit=%s (explicit)", section, cfg.JournalUnit)
-}
+		if cfg.Mode == "file" {
+			logging.Logf("[detectors][%s] source=file path=%s (explicit)", section, cfg.LogPath)
+		} else {
+			logging.Logf("[detectors][%s] source=journal unit=%s (explicit)", section, cfg.JournalUnit)
+		}
 
 		// pretty start line
 		if cfg.Mode == "file" {

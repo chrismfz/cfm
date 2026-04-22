@@ -9,6 +9,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/detectors/modsec"
 	"cfm/internal/logging"
 )
@@ -55,6 +56,13 @@ func scoreFile(path string, maxTail int64) (hits int, _ error) {
 }
 
 func init() {
+	meta.Register(meta.DetectorMeta{
+		TypeKey:           "modsec",
+		Title:             "ModSecurity",
+		Description:       "Detect WAF-denied traffic from ModSecurity logs.",
+		DefaultsTemplate:  map[string]string{"ENABLED": "1", "MODE": "auto", "EVERY": "10s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
+		LeniencySupported: true,
+	})
 	Register("modsec", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 2*time.Second)
 		defWindow := kvDur(global, "DEFAULT_WINDOW", 15*time.Minute)
@@ -74,16 +82,16 @@ func init() {
 		usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
 
 		cfg := modsec.Config{
-			Mode:         strings.ToLower(kvStrClean(kv, "MODE", "auto")), // auto|file
-			LogPath:      kvStrClean(kv, "LOG_PATH", "auto"),              // path|auto
-			Every:        kvDur(kv, "EVERY", defEvery),
-			Window:       kvDur(kv, "WINDOW", defWindow),
-			Cooldown:     kvDur(kv, "COOLDOWN", defCooldown),
-			SampleLimit:  kvInt(kv, "SAMPLE_LIMIT", 10),
-			ModsecPerIP:  kvInt(kv, "MODSEC_IP", 20),
-			UseEnrich:    useEnrich,
-			UsePTR:       usePTR,
-			EnrichDirs:   dirs,
+			Mode:        strings.ToLower(kvStrClean(kv, "MODE", "auto")), // auto|file
+			LogPath:     kvStrClean(kv, "LOG_PATH", "auto"),              // path|auto
+			Every:       kvDur(kv, "EVERY", defEvery),
+			Window:      kvDur(kv, "WINDOW", defWindow),
+			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
+			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+			ModsecPerIP: kvInt(kv, "MODSEC_IP", 20),
+			UseEnrich:   useEnrich,
+			UsePTR:      usePTR,
+			EnrichDirs:  dirs,
 		}
 
 		d := modsec.New(cfg)
@@ -96,16 +104,16 @@ func init() {
 			if path == "" || strings.EqualFold(path, "auto") {
 				// common locations (cPanel / RHEL / Debian / Nginx / Virtualmin; include audit logs)
 				candidates := []string{
-					"/usr/local/apache/logs/error_log",     // cPanel Apache error
+					"/usr/local/apache/logs/error_log",        // cPanel Apache error
 					"/usr/local/apache/logs/modsec_audit.log", // cPanel audit (often JSON)
-					"/var/log/httpd/error_log",             // RHEL/CentOS Apache error
-					"/var/log/httpd/modsec_audit.log",      // RHEL audit
-					"/var/log/apache2/error.log",           // Debian/Ubuntu Apache error
-					"/var/log/modsec_audit.log",            // generic audit
-					"/var/log/modsecurity/audit.log",       // generic audit
-					"/var/log/nginx/error.log",             // Nginx + ModSec v3 error
-					"/var/log/nginx/modsec_audit.log",      // Nginx audit
-					"/var/log/virtualmin/error_log",        // sometimes aggregated
+					"/var/log/httpd/error_log",                // RHEL/CentOS Apache error
+					"/var/log/httpd/modsec_audit.log",         // RHEL audit
+					"/var/log/apache2/error.log",              // Debian/Ubuntu Apache error
+					"/var/log/modsec_audit.log",               // generic audit
+					"/var/log/modsecurity/audit.log",          // generic audit
+					"/var/log/nginx/error.log",                // Nginx + ModSec v3 error
+					"/var/log/nginx/modsec_audit.log",         // Nginx audit
+					"/var/log/virtualmin/error_log",           // sometimes aggregated
 				}
 				best := ""
 				bestHits := 0

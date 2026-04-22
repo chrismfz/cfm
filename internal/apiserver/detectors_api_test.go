@@ -71,6 +71,20 @@ EVERY = 20s
 	}
 }
 
+func TestDetectorsCatalogEndpoint(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterDetectorsEndpoints(mux, t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/detectors/catalog", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, adminCtxDet(req))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "catalog") {
+		t.Fatalf("expected catalog payload: %s", rr.Body.String())
+	}
+}
+
 func adminCtxDet(r *http.Request) *http.Request {
 	ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)

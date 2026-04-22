@@ -1,6 +1,6 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} } };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} }, catalog: [], configExists: true };
 const byId = (id) => document.getElementById(id);
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
@@ -104,6 +104,55 @@ function allSectionNames(){
     if(name) names.add(name.toLowerCase());
   });
   return names;
+}
+
+function detectorMeta(sectionName){
+  const key = String(sectionName||'').trim().toLowerCase();
+  return (state.catalog||[]).find((m)=>String(m.type_key||'').toLowerCase()===key) || null;
+}
+
+function uniqueCoreSectionName(base){
+  const names = allSectionNames();
+  if(!names.has(String(base).toLowerCase())) return base;
+  let i=2;
+  while(names.has(`${base}_${i}`.toLowerCase())) i++;
+  return `${base}_${i}`;
+}
+
+function addCoreFromTemplate(typeKey, template){
+  const name = uniqueCoreSectionName(typeKey);
+  const keys = clone(template||{});
+  if(!Object.prototype.hasOwnProperty.call(keys,'ENABLED')) keys.ENABLED = '0';
+  if(!Object.prototype.hasOwnProperty.call(keys,'BLOCK')) keys.BLOCK = 'dryrun';
+  state.draft.core = state.draft.core || [];
+  state.draft.core.push({ name, kind: 'core', enabled: ['1','true','yes','on'].includes(String(keys.ENABLED).toLowerCase()), keys });
+  render();
+  setDirty(true);
+  setStatus(`Added detector section ${name}`);
+}
+
+function addLeniencyCompanion(baseName){
+  const sectionName = `${baseName}.leniency`;
+  const names = allSectionNames();
+  if(names.has(sectionName.toLowerCase())){ setStatus(`Leniency section ${sectionName} already exists`, true); return; }
+  state.draft.leniency = state.draft.leniency || [];
+  state.draft.leniency.push({ name: sectionName, kind: 'leniency', keys: { MATCH_COUNTRY: '', MATCH_ASN: '', BLOCK: '30m', BLOCK_COOLDOWN: '1h', SEND_TO_API: '0' } });
+  render();
+  setDirty(true);
+  setStatus(`Added leniency companion ${sectionName}`);
+}
+
+function refreshCatalogUI(){
+  const typeSel = byId('detectorsCatalogType');
+  const presetSel = byId('detectorsPresetSelect');
+  if(typeSel){
+    typeSel.innerHTML = '';
+    (state.catalog||[]).forEach((m)=>{ const opt=document.createElement('option'); opt.value=m.type_key; opt.textContent=`${m.type_key} — ${m.title||m.type_key}`; typeSel.appendChild(opt); });
+  }
+  if(presetSel){
+    presetSel.innerHTML = '<option value="">Select preset…</option>';
+    (state.catalog||[]).forEach((m)=> (m.example_presets||[]).forEach((p)=>{ const opt=document.createElement('option'); opt.value=`${m.type_key}::${p.id}`; opt.textContent=`${m.type_key} / ${p.title||p.id}`; presetSel.appendChild(opt); }));
+  }
 }
 
 function openLeniencyModal(){
@@ -398,8 +447,10 @@ function render(){
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
   const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
-  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const detail = runtime ? `<div class="muted" style="margin-top:4px">runs=${runtime.runs||0}, fail=${runtime.failures||0}, timeout=${runtime.timeouts||0}, last run=${safeText(fmtDate(runtime.last_run_at))}${runtime.last_error?`, err=${safeText(runtime.last_error)}`:''}</div>` : ''; const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}${detail}</td><td><span class="pill" style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
+  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const detail = runtime ? `<div class="muted" style="margin-top:4px">runs=${runtime.runs||0}, fail=${runtime.failures||0}, timeout=${runtime.timeouts||0}, last run=${safeText(fmtDate(runtime.last_run_at))}${runtime.last_error?`, err=${safeText(runtime.last_error)}`:''}</div>` : ''; const meta = detectorMeta(sec.name); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${leniencyHint}${validation?`<div style="margin-top:6px">${validation}</div>`:''}${detail}</td><td><span class="pill" style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
     tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); render();});
+    const leniencyBtn = tr.querySelector('[data-leniency-for]');
+    if(leniencyBtn) leniencyBtn.addEventListener('click',()=>addLeniencyCompanion(sec.name));
     renderSectionEditor(tr.querySelector('div'), sec);
     core.appendChild(tr);
   });
@@ -411,7 +462,18 @@ function render(){
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
 }
 
-async function load(){ const j=await api('/api/v1/detectors/config'); state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.modes={}; render(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]); }
+function buildCatalogDefaultsConfig(){
+  const core = (state.catalog||[]).map((m)=>({ name: m.type_key, kind: 'core', enabled: false, keys: { ENABLED: '0', BLOCK: 'dryrun', ...(m.defaults_template||{}) } }));
+  return { global: { DEFAULT_EVERY: '30s', DEFAULT_WINDOW: '10m', DEFAULT_COOLDOWN: '20m' }, core, leniency: [], advanced: [], examples: [] };
+}
+
+async function load(){
+  const [j, c] = await Promise.all([api('/api/v1/detectors/config'), api('/api/v1/detectors/catalog')]);
+  state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.configExists = j.exists !== false; state.catalog = clone(c.catalog||[]); state.modes={};
+  refreshCatalogUI();
+  byId('detectorsInitCard').style.display = state.configExists ? 'none' : 'block';
+  render(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]);
+}
 
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
 
@@ -439,6 +501,8 @@ function init(){
   byId('detectorsCancelSave').onclick=()=>byId('detectorsSaveModal').style.display='none';
   byId('detectorsValidationClose').onclick=()=>byId('detectorsValidationModal').style.display='none';
   byId('detectorsAddLeniencyBtn').onclick=openLeniencyModal;
+  byId('detectorsAddCatalogBtn').onclick=()=>{ const type = byId('detectorsCatalogType').value; const meta = (state.catalog||[]).find((m)=>m.type_key===type); if(!meta){ setStatus('Select a detector type first.', true); return; } addCoreFromTemplate(type, meta.defaults_template||{}); };
+  byId('detectorsCreatePresetBtn').onclick=()=>{ const v = byId('detectorsPresetSelect').value; if(!v){ setStatus('Select a preset first.', true); return; } const [type,presetID]=v.split('::'); const meta = (state.catalog||[]).find((m)=>m.type_key===type); const preset = (meta?.example_presets||[]).find((p)=>p.id===presetID); if(!meta || !preset){ setStatus('Preset not found.', true); return; } addCoreFromTemplate(type, { ...(meta.defaults_template||{}), ...(preset.template||{}) }); };
   byId('detectorsAddCoreFromExampleBtn').onclick=()=>openExamplesModal('core');
   byId('detectorsAddLeniencyFromExampleBtn').onclick=()=>openExamplesModal('leniency');
   byId('detectorsLeniencyConfirm').onclick=confirmAddLeniency;
@@ -446,6 +510,7 @@ function init(){
   byId('detectorsExamplesClose').onclick=()=>byId('detectorsExamplesModal').style.display='none';
   byId('detectorsRefreshBackups').onclick=refreshBackups;
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
+  byId('detectorsInitFromCatalogBtn').onclick=()=>{ state.draft = buildCatalogDefaultsConfig(); render(); setDirty(true); setStatus('Initialized draft from catalog defaults. Review and save.'); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });
   window.setInterval(()=>{ refreshRuntimeStatus(); }, 10000);
   load().catch((e)=>setStatus(e.message,true));

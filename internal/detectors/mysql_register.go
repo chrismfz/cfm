@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/detectors/mysql"
 	"cfm/internal/logging"
 )
@@ -26,6 +27,8 @@ func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
 }
 
 func init() {
+	meta.Register(meta.DetectorMeta{TypeKey: "mysql", Title: "MySQL auth", Description: "Detect MySQL login abuse.", DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"}, LeniencySupported: true})
+	meta.Register(meta.DetectorMeta{TypeKey: "mysql_governor", Title: "MySQL governor", Description: "Connection/query governor for MySQL.", DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "5s"}})
 	// -------------------------------------------------------------------------
 	// [mysql] — brute-force / login detector
 	// -------------------------------------------------------------------------
@@ -210,7 +213,7 @@ func init() {
 //
 // Each non-empty line has the format:
 //
-//   <user_pattern> : <max_runtime> : <action> [: condition ...]
+//	<user_pattern> : <max_runtime> : <action> [: condition ...]
 func parseQueryRules(lines []string) []mysql.QueryRule {
 	var rules []mysql.QueryRule
 	for _, line := range lines {
@@ -279,7 +282,7 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 //
 // Each non-empty line has the format:
 //
-//   <user_pattern> : max=N : <action> [: condition]
+//	<user_pattern> : max=N : <action> [: condition]
 func parseConnRules(lines []string) []mysql.ConnRule {
 	var rules []mysql.ConnRule
 	for _, line := range lines {
@@ -402,9 +405,6 @@ func queryActionName(a mysql.RuleAction) string {
 		return "unknown"
 	}
 }
-
-
-
 
 func logMySQLGovf(format string, args ...any) {
 	logging.Logf(format, args...)

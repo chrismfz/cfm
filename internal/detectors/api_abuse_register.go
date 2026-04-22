@@ -7,10 +7,18 @@ import (
 	"cfm/internal/apiserver"
 	"cfm/internal/detectors/apiabuse"
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/webdetector"
 )
 
 func init() {
+	meta.Register(meta.DetectorMeta{
+		TypeKey:           "api_abuse",
+		Title:             "API abuse",
+		Description:       "Detect abusive API request patterns and escalations.",
+		DefaultsTemplate:  map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "2m", "DRY_RUN": "0", "STAGE1_THRESHOLD": "8", "STAGE2_THRESHOLD": "12", "STAGE3_THRESHOLD": "16"},
+		LeniencySupported: true,
+	})
 	Register("api_abuse", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 2*time.Second)
 		cfg := apiabuse.Config{

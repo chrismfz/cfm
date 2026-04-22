@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/detectors/meta"
 	"cfm/internal/detectorstatus"
 	"encoding/json"
 	"net/http"
@@ -44,6 +45,9 @@ func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/detectors/status", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleDetectorsStatus(w, r, cfgDir)
 	})))
+	m.Handle("/api/v1/detectors/catalog", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleDetectorsCatalog(w, r)
+	})))
 }
 
 func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
@@ -54,7 +58,8 @@ func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string
 			writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		writeNotifierJSON(w, http.StatusOK, map[string]any{"config": cfg, "path": path})
+		_, statErr := os.Stat(path)
+		writeNotifierJSON(w, http.StatusOK, map[string]any{"config": cfg, "path": path, "exists": statErr == nil})
 	case http.MethodPut:
 		var req struct {
 			Config detectorscfg.AdminConfig `json:"config"`
@@ -77,6 +82,14 @@ func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string
 	default:
 		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 	}
+}
+
+func handleDetectorsCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{"catalog": meta.Catalog()})
 }
 
 type detectorValidationError struct {
