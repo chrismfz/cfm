@@ -25,6 +25,17 @@ type AdminConfig struct {
 	Core     []AdminSection    `json:"core"`
 	Leniency []AdminSection    `json:"leniency"`
 	Advanced []AdminSection    `json:"advanced"`
+	Examples []AdminExample    `json:"examples,omitempty"`
+}
+
+type AdminExample struct {
+	ID            string            `json:"id"`
+	Title         string            `json:"title"`
+	Section       string            `json:"section"`
+	Kind          string            `json:"kind"`
+	Preview       string            `json:"preview"`
+	Keys          map[string]string `json:"keys"`
+	CommentSource string            `json:"comment_source,omitempty"`
 }
 
 type sectionDoc struct {
@@ -32,10 +43,18 @@ type sectionDoc struct {
 	Lines []string
 }
 
+type exampleDoc struct {
+	ID      string
+	Title   string
+	Section string
+	Keys    map[string]string
+}
+
 type doc struct {
 	Preamble []string
 	Order    []string
 	Sections map[string]*sectionDoc
+	Examples []exampleDoc
 }
 
 type AdminConfigBackup struct {
@@ -185,11 +204,24 @@ func parseDoc(path string) (*doc, error) {
 	}
 	d := &doc{Sections: map[string]*sectionDoc{}}
 	cur := ""
+	var currentExample *exampleDoc
+	flushExample := func() {
+		if currentExample == nil {
+			return
+		}
+		if currentExample.ID == "" || len(currentExample.Keys) == 0 {
+			currentExample = nil
+			return
+		}
+		d.Examples = append(d.Examples, *currentExample)
+		currentExample = nil
+	}
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	for sc.Scan() {
 		raw := sc.Text()
 		trim := strings.TrimSpace(raw)
 		if strings.HasPrefix(trim, "[") && strings.Contains(trim, "]") {
+			flushExample()
 			idx := strings.Index(trim, "]")
 			cur = strings.TrimSpace(trim[1:idx])
 			if d.Sections[cur] == nil {
@@ -198,17 +230,39 @@ func parseDoc(path string) (*doc, error) {
 			}
 			continue
 		}
+		if attrs, ok := parseExampleTag(trim); ok {
+			flushExample()
+			currentExample = &exampleDoc{
+				ID:      attrs["id"],
+				Title:   attrs["title"],
+				Section: attrs["section"],
+				Keys:    map[string]string{},
+			}
+			continue
+		}
+		if currentExample != nil {
+			candidate, ok := parseCommentKeyValue(trim)
+			if ok {
+				currentExample.Keys[candidate[0]] = candidate[1]
+				continue
+			}
+			if trim == "" || strings.HasPrefix(trim, ";") || strings.HasPrefix(trim, "#") {
+				continue
+			}
+			flushExample()
+		}
 		if cur == "" {
 			d.Preamble = append(d.Preamble, raw)
 			continue
 		}
 		d.Sections[cur].Lines = append(d.Sections[cur].Lines, raw)
 	}
+	flushExample()
 	return d, sc.Err()
 }
 
 func buildAdminConfig(d *doc) AdminConfig {
-	cfg := AdminConfig{Global: map[string]string{}, Core: []AdminSection{}, Leniency: []AdminSection{}, Advanced: []AdminSection{}}
+	cfg := AdminConfig{Global: map[string]string{}, Core: []AdminSection{}, Leniency: []AdminSection{}, Advanced: []AdminSection{}, Examples: []AdminExample{}}
 	for _, name := range d.Order {
 		sec := d.Sections[name]
 		keys := parseSectionKeys(sec.Lines)
@@ -232,7 +286,149 @@ func buildAdminConfig(d *doc) AdminConfig {
 	sort.Slice(cfg.Core, func(i, j int) bool { return cfg.Core[i].Name < cfg.Core[j].Name })
 	sort.Slice(cfg.Leniency, func(i, j int) bool { return cfg.Leniency[i].Name < cfg.Leniency[j].Name })
 	sort.Slice(cfg.Advanced, func(i, j int) bool { return cfg.Advanced[i].Name < cfg.Advanced[j].Name })
+	for _, ex := range d.Examples {
+		title := strings.TrimSpace(ex.Title)
+		if title == "" {
+			title = ex.ID
+		}
+		preview := buildExamplePreview(ex.Keys)
+		cfg.Examples = append(cfg.Examples, AdminExample{
+			ID:            ex.ID,
+			Title:         title,
+			Section:       ex.Section,
+			Kind:          classifySectionKind(ex.Section),
+			Preview:       preview,
+			Keys:          cloneStringMap(ex.Keys),
+			CommentSource: "detectors.conf comments",
+		})
+	}
+	sort.Slice(cfg.Examples, func(i, j int) bool { return cfg.Examples[i].ID < cfg.Examples[j].ID })
 	return cfg
+}
+
+func classifySectionKind(section string) string {
+	s := strings.TrimSpace(strings.ToLower(section))
+	switch {
+	case strings.HasSuffix(s, ".leniency"):
+		return "leniency"
+	case s == "" || s == "global":
+		return "global"
+	case s == "webdetector":
+		return "advanced"
+	default:
+		return "core"
+	}
+}
+
+func buildExamplePreview(keys map[string]string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	ordered := make([]string, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Strings(ordered)
+	parts := make([]string, 0, 3)
+	for _, k := range ordered {
+		v := strings.TrimSpace(keys[k])
+		if v == "" {
+			continue
+		}
+		parts = append(parts, k+"="+v)
+		if len(parts) == 3 {
+			break
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func parseExampleTag(trim string) (map[string]string, bool) {
+	if !(strings.HasPrefix(trim, ";@example") || strings.HasPrefix(trim, "#@example")) {
+		return nil, false
+	}
+	body := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trim, ";@example"), "#@example"))
+	attrs := parseTagAttrs(body)
+	if strings.TrimSpace(attrs["id"]) == "" {
+		return nil, false
+	}
+	return attrs, true
+}
+
+func parseTagAttrs(body string) map[string]string {
+	out := map[string]string{}
+	i := 0
+	for i < len(body) {
+		for i < len(body) && body[i] == ' ' {
+			i++
+		}
+		if i >= len(body) {
+			break
+		}
+		start := i
+		for i < len(body) && body[i] != '=' && body[i] != ' ' {
+			i++
+		}
+		key := strings.TrimSpace(body[start:i])
+		if key == "" || i >= len(body) || body[i] != '=' {
+			for i < len(body) && body[i] != ' ' {
+				i++
+			}
+			continue
+		}
+		i++
+		if i >= len(body) {
+			out[strings.ToLower(key)] = ""
+			break
+		}
+		if body[i] == '"' {
+			i++
+			valueStart := i
+			for i < len(body) && body[i] != '"' {
+				i++
+			}
+			out[strings.ToLower(key)] = body[valueStart:i]
+			if i < len(body) && body[i] == '"' {
+				i++
+			}
+			continue
+		}
+		valueStart := i
+		for i < len(body) && body[i] != ' ' {
+			i++
+		}
+		out[strings.ToLower(key)] = body[valueStart:i]
+	}
+	return out
+}
+
+func parseCommentKeyValue(trim string) ([2]string, bool) {
+	var empty [2]string
+	if !(strings.HasPrefix(trim, ";") || strings.HasPrefix(trim, "#")) {
+		return empty, false
+	}
+	line := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trim, ";"), "#"))
+	if line == "" || strings.HasPrefix(line, "@") {
+		return empty, false
+	}
+	idx := strings.Index(line, "=")
+	if idx <= 0 {
+		return empty, false
+	}
+	key := strings.TrimSpace(line[:idx])
+	if !isConfigKey(key) {
+		return empty, false
+	}
+	val := strings.TrimSpace(line[idx+1:])
+	return [2]string{strings.ToUpper(key), strings.Trim(val, `"`)}, true
 }
 
 func parseEnabled(keys map[string]string) bool {
