@@ -51,3 +51,29 @@ func TestDetectorAllowPathException(t *testing.T) {
 	default:
 	}
 }
+
+func TestDetectorAlertReasonUsesEventReason(t *testing.T) {
+	d := New(Config{
+		Stage1Threshold: 1,
+	})
+	out := make(chan core.Alert, 1)
+	d.Enqueue(core.InputEvent{
+		Source: "apiserver",
+		Reason: "api_unauthorized_burst",
+		Signal: "unauthorized_burst",
+		SrcIP:  "198.51.100.21",
+		Path:   "/api/v1/mysql/state",
+		Status: 401,
+	})
+	if err := d.RunOnce(context.Background(), out); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	select {
+	case alert := <-out:
+		if got := alert.Extra["reason"]; got != "api_unauthorized_burst" {
+			t.Fatalf("expected reason api_unauthorized_burst, got %q", got)
+		}
+	default:
+		t.Fatal("expected alert")
+	}
+}

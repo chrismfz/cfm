@@ -16,7 +16,7 @@ func init() {
 		TypeKey:           "api_abuse",
 		Title:             "API abuse",
 		Description:       "Detect abusive API request patterns and escalations.",
-		DefaultsTemplate:  map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "2m", "DRY_RUN": "0", "STAGE1_THRESHOLD": "8", "STAGE2_THRESHOLD": "12", "STAGE3_THRESHOLD": "16"},
+		DefaultsTemplate:  map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "2m", "DRY_RUN": "0", "STAGE1_THRESHOLD": "10", "STAGE2_THRESHOLD": "12", "STAGE3_THRESHOLD": "16"},
 		LeniencySupported: true,
 	})
 	Register("api_abuse", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
@@ -25,7 +25,7 @@ func init() {
 			Every:              kvDur(kv, "EVERY", defEvery),
 			Window:             kvDur(kv, "WINDOW", 2*time.Minute),
 			SampleLimit:        kvInt(kv, "SAMPLE_LIMIT", 10),
-			Stage1Threshold:    kvInt(kv, "STAGE1_THRESHOLD", 8),
+			Stage1Threshold:    kvInt(kv, "STAGE1_THRESHOLD", 10),
 			Stage2Threshold:    kvInt(kv, "STAGE2_THRESHOLD", 12),
 			Stage3Threshold:    kvInt(kv, "STAGE3_THRESHOLD", 16),
 			Stage2ChallengeTTL: kvDur(kv, "STAGE2_CHALLENGE_TTL", 10*time.Minute),
