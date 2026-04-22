@@ -191,8 +191,8 @@ func (d *EximSecurity) loadRules() {
 	}{
 
 	{"AUTHFAIL", "SMTP AUTH failed", `(?:authenticator failed .* \[[^\]]+\].* 535 incorrect authentication data|smtp authentication failed\b|authentic(?:ate|ation) failed\b|plaintext authentication failure\b)`},
-	{"SENDER_VERIFY_FAIL", "sender verify fail", `sender verify fail\b`},
-	{"RCPT_REJECT", "RCPT rejected", `rejected rcpt\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|rejected relay attempt|sender verify failed|unknown user|unrouteable address)`},
+	{"SENDER_VERIFY_FAIL", "sender verify fail", `sender verify fail(?:ed)?\b`},
+	{"RCPT_REJECT", "RCPT rejected", `rejected rcpt\s+(?:<[^>]+>|[^: ]+)\s*:\s*(?:relay not permitted|rejected relay attempt|unknown user|unrouteable address)`},
 	{"SYNC_ERR", "protocol sync error", `smtp protocol synchronization error .* rejected .*`},
 	{"PROTO_ERR", "AUTH used when not advertised", `smtp protocol error in ".*" .*auth command used when not advertised`},
 	{"NO_MAIL", "no MAIL in SMTP connection", `no mail in smtp connection .*`},
