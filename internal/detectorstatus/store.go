@@ -28,6 +28,7 @@ type RuntimeStatus struct {
 	LastRunAt          *time.Time `json:"last_run_at,omitempty"`
 	LastSuccessAt      *time.Time `json:"last_success_at,omitempty"`
 	LastError          string     `json:"last_error,omitempty"`
+	InitDiagnostics    []string   `json:"init_diagnostics,omitempty"`
 	SourceProbeOK      bool       `json:"source_probe_ok"`
 	SourceProbeMessage string     `json:"source_probe_message,omitempty"`
 	Runs               uint64     `json:"runs"`
@@ -74,6 +75,7 @@ type runtimeState struct {
 	LastRunAt          time.Time
 	LastSuccessAt      time.Time
 	LastError          string
+	InitDiagnostics    []string
 	SourceProbeOK      bool
 	SourceProbeMessage string
 }
@@ -156,6 +158,7 @@ func ResetConfiguredSections(list []SectionConfig) {
 			Active:             false,
 			InitOK:             false,
 			LastError:          "",
+			InitDiagnostics:    nil,
 			SourceProbeOK:      sec.SourceProbeOK,
 			SourceProbeMessage: sec.SourceProbeMessage,
 		}
@@ -185,12 +188,17 @@ func UpsertConfiguredSections(list []SectionConfig) {
 }
 
 func MarkInitFailed(section, errText string) {
+	MarkInitFailedWithDiagnostics(section, errText, nil)
+}
+
+func MarkInitFailedWithDiagnostics(section, errText string, diagnostics []string) {
 	global.mu.Lock()
 	defer global.mu.Unlock()
 	st := global.ensure(section)
 	st.InitOK = false
 	st.Active = false
 	st.LastError = strings.TrimSpace(errText)
+	st.InitDiagnostics = append([]string(nil), diagnostics...)
 }
 
 func MarkInitOK(section string) {
@@ -200,6 +208,7 @@ func MarkInitOK(section string) {
 	st.InitOK = true
 	st.Active = true
 	st.LastError = ""
+	st.InitDiagnostics = nil
 }
 
 func MarkRunStart(section string, at time.Time) {
@@ -254,7 +263,7 @@ func GetSnapshot() Snapshot {
 	defer global.mu.RUnlock()
 	out.Summary.LoadedTypes = global.loadedTypes
 	for _, st := range global.sections {
-		row := RuntimeStatus{Section: st.Section, Type: st.Type, Configured: st.Configured, Enabled: st.Enabled, Active: st.Active, InitOK: st.InitOK, LastError: st.LastError, SourceProbeOK: st.SourceProbeOK, SourceProbeMessage: st.SourceProbeMessage}
+		row := RuntimeStatus{Section: st.Section, Type: st.Type, Configured: st.Configured, Enabled: st.Enabled, Active: st.Active, InitOK: st.InitOK, LastError: st.LastError, InitDiagnostics: append([]string(nil), st.InitDiagnostics...), SourceProbeOK: st.SourceProbeOK, SourceProbeMessage: st.SourceProbeMessage}
 		if !st.LastRunAt.IsZero() {
 			t := st.LastRunAt
 			row.LastRunAt = &t

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -95,6 +96,8 @@ func handleDetectorsCatalog(w http.ResponseWriter, r *http.Request) {
 type detectorValidationError struct {
 	Path, Message, Code, Expected string
 }
+
+const maxCustomFailRegexRules = 128
 
 func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError {
 	errList := []detectorValidationError{}
@@ -200,9 +203,13 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		}
 	}
 	all := append(append([]detectorscfg.AdminSection{}, c.Core...), c.Leniency...)
+	all = append(all, c.Advanced...)
 	for i, sec := range all {
 		if strings.TrimSpace(sec.Name) == "" {
 			push("sections["+strconv.Itoa(i)+"].name", "section name required", "required", "non-empty section name")
+		}
+		if isCustomSection(sec.Name) {
+			validateCustomSectionRules(push, sec)
 		}
 		for k, v := range sec.Keys {
 			if strings.TrimSpace(v) == "" && (strings.EqualFold(k, "ENABLED") || strings.EqualFold(k, "BLOCK")) {
@@ -231,6 +238,81 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		}
 	}
 	return errList
+}
+
+func isCustomSection(sectionName string) bool {
+	parts := strings.FieldsFunc(strings.TrimSpace(sectionName), func(r rune) bool {
+		return r == ':' || r == ' ' || r == '\t'
+	})
+	if len(parts) == 0 {
+		return false
+	}
+	return strings.EqualFold(parts[0], "custom")
+}
+
+func customRegexLines(raw string) []string {
+	lines := strings.Split(raw, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func validateCustomSectionRules(push func(path, msg, code, expected string), sec detectorscfg.AdminSection) {
+	raw, ok := sec.Keys["FAIL_REGEX"]
+	if !ok {
+		push(sec.Name+".FAIL_REGEX", "FAIL_REGEX is required for custom sections", "required", "at least one regex rule")
+		return
+	}
+	lines := customRegexLines(raw)
+	if len(lines) == 0 {
+		push(sec.Name+".FAIL_REGEX", "FAIL_REGEX must include at least one non-empty regex", "empty_regex_list", "1-"+strconv.Itoa(maxCustomFailRegexRules)+" regex entries")
+		return
+	}
+	if len(lines) > maxCustomFailRegexRules {
+		push(sec.Name+".FAIL_REGEX", "FAIL_REGEX has too many entries", "regex_list_too_long", "at most "+strconv.Itoa(maxCustomFailRegexRules)+" regex entries")
+		return
+	}
+
+	matchTarget := strings.ToLower(strings.TrimSpace(sec.Keys["MATCH_TARGET"]))
+	hasIPCapture := false
+	hasUserCapture := false
+	for idx, reStr := range lines {
+		re, err := regexp.Compile(reStr)
+		path := sec.Name + ".FAIL_REGEX[" + strconv.Itoa(idx) + "]"
+		if err != nil {
+			push(path, "regex does not compile: "+err.Error(), "invalid_regex", "valid regular expression")
+			continue
+		}
+		hasIP := re.SubexpIndex("ip") > 0
+		hasUser := re.SubexpIndex("user") > 0
+		hasIPCapture = hasIPCapture || hasIP
+		hasUserCapture = hasUserCapture || hasUser
+		switch matchTarget {
+		case "ip":
+			if !hasIP {
+				push(path, "MATCH_TARGET=ip requires named (?P<ip>...) capture", "missing_capture", "include named capture: ip")
+			}
+		case "user":
+			if !hasUser {
+				push(path, "MATCH_TARGET=user requires named (?P<user>...) capture", "missing_capture", "include named capture: user")
+			}
+		case "both":
+			if !hasIP || !hasUser {
+				push(path, "MATCH_TARGET=both requires both (?P<ip>...) and (?P<user>...) captures", "missing_capture", "include both named captures: ip and user")
+			}
+		}
+	}
+
+	strategyOK := hasIPCapture || (matchTarget == "user" && hasUserCapture)
+	if !strategyOK {
+		push(sec.Name+".FAIL_REGEX", "no target capture strategy found", "missing_target_capture_strategy", "add named (?P<ip>...) capture, or set MATCH_TARGET=user and capture (?P<user>...)")
+	}
 }
 
 func mapKeys[T any](m map[string]T) []string {

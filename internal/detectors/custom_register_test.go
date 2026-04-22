@@ -78,3 +78,36 @@ func TestCustomDetectorConsumeIgnoreAndNormalizeMappedIPv4(t *testing.T) {
 		t.Fatalf("expected user key in alert")
 	}
 }
+
+func TestParseCustomRulesResultRejectsMissingFailRegex(t *testing.T) {
+	parsed := parseCustomRulesResult(KV{}, customTargetIP)
+	if len(parsed.errs) == 0 {
+		t.Fatalf("expected validation errors")
+	}
+}
+
+func TestCustomDetectorConsumeSkipsMalformedCapture(t *testing.T) {
+	parsed := parseCustomRulesResult(KV{
+		"MATCH_TARGET": "both",
+		"FAIL_REGEX":   `src=(?P<ip>\S+) user=(?P<user>\S+)`,
+	}, customTargetBoth)
+	if len(parsed.errs) > 0 {
+		t.Fatalf("unexpected parse errors: %+v", parsed.errs)
+	}
+	d := &customDetector{
+		cfg: customConfig{
+			MatchTarget:     customTargetBoth,
+			AuthFailPerIP:   1,
+			AuthFailPerUser: 1,
+		},
+		rules:   parsed.rules,
+		samples: core.NewSampleRing(5),
+		counts:  core.NewSlidingCounter(5*time.Minute, 0),
+		gate:    core.NewAlertGate(0),
+	}
+	out := make(chan core.Alert, 4)
+	d.consume(time.Now(), "src=not_an_ip user=alice", out)
+	if len(out) != 0 {
+		t.Fatalf("expected malformed capture to be skipped")
+	}
+}

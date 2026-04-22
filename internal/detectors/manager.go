@@ -38,6 +38,11 @@ type manager struct {
 	chalExclude *ChallengeExclude
 }
 
+type initDiagnosticsError interface {
+	error
+	Diagnostics() []string
+}
+
 func probeSourceStatus(kv KV) (bool, string) {
 	mode := strings.ToLower(strings.TrimSpace(kvStrClean(kv, "MODE", "")))
 	logPath := strings.TrimSpace(kvStrClean(kv, "LOG_PATH", ""))
@@ -413,7 +418,11 @@ func (m *manager) maybeReload(parent context.Context) {
 		// return (nil, nil). Treat that as a successful no-op, not an init failure.
 		if err != nil {
 			logging.Logf("[detectors] failed to init %s: %v", secName, err)
-			detectorstatus.MarkInitFailed(secName, err.Error())
+			if de, ok := err.(initDiagnosticsError); ok {
+				detectorstatus.MarkInitFailedWithDiagnostics(secName, err.Error(), de.Diagnostics())
+			} else {
+				detectorstatus.MarkInitFailed(secName, err.Error())
+			}
 			continue
 		}
 		if det == nil {

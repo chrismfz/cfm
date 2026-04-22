@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"cfm/internal/detectorscfg"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -89,4 +90,58 @@ func adminCtxDet(r *http.Request) *http.Request {
 	ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 	return r.WithContext(ctx)
+}
+
+func TestValidateDetectorDraftCustomFailRegexRules(t *testing.T) {
+	cfg := detectorscfg.AdminConfig{
+		Core: []detectorscfg.AdminSection{
+			{
+				Name: "custom:auth",
+				Keys: map[string]string{
+					"MATCH_TARGET": "ip",
+				},
+			},
+		},
+	}
+	errs := validateDetectorDraft(cfg)
+	if len(errs) == 0 {
+		t.Fatalf("expected missing FAIL_REGEX error")
+	}
+	found := false
+	for _, err := range errs {
+		if strings.Contains(err.Path, "FAIL_REGEX") && err.Code == "required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected FAIL_REGEX required error, got %+v", errs)
+	}
+}
+
+func TestValidateDetectorDraftCustomPerRuleErrors(t *testing.T) {
+	cfg := detectorscfg.AdminConfig{
+		Core: []detectorscfg.AdminSection{
+			{
+				Name: "custom:auth",
+				Keys: map[string]string{
+					"MATCH_TARGET": "both",
+					"FAIL_REGEX":   "(?P<ip>\\S+)\n[",
+				},
+			},
+		},
+	}
+	errs := validateDetectorDraft(cfg)
+	if len(errs) == 0 {
+		t.Fatalf("expected validation errors")
+	}
+	var sawPerRule bool
+	for _, err := range errs {
+		if strings.Contains(err.Path, "FAIL_REGEX[") {
+			sawPerRule = true
+			break
+		}
+	}
+	if !sawPerRule {
+		t.Fatalf("expected per-rule FAIL_REGEX errors, got %+v", errs)
+	}
 }
