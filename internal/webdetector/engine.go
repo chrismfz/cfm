@@ -964,6 +964,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		}
 	}
 
+	p := rec.URI
+	if p == "" || p == "-" {
+		p = "/"
+	}
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
 		if rec.Status == 403 && e.cfg.IP403Count > 0 {
@@ -973,10 +981,12 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			b.ips403[rec.IP]++
 		}
 		if rec.Status == 404 && e.cfg.IP404Count > 0 {
-			if b.ips404 == nil {
-				b.ips404 = make(map[string]int)
+			if !isStaticAssetPath(p) {
+				if b.ips404 == nil {
+					b.ips404 = make(map[string]int)
+				}
+				b.ips404[rec.IP]++
 			}
-			b.ips404[rec.IP]++
 		}
 		if len(e.cfg.AgentList) > 0 && e.cfg.AgentCount > 0 && rec.UA != "" {
 			if uaMatchAny(rec.UA, e.cfg.AgentList) {
@@ -1012,13 +1022,6 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	if b.paths == nil {
 		b.paths = make(map[string]int)
-	}
-	p := rec.URI
-	if p == "" || p == "-" {
-		p = "/"
-	}
-	if i := strings.IndexByte(p, '?'); i >= 0 {
-		p = p[:i]
 	}
 	b.paths[p]++
 
