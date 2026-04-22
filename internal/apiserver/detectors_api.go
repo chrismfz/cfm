@@ -76,13 +76,64 @@ func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string
 }
 
 type detectorValidationError struct {
-	Path, Message, Code string
+	Path, Message, Code, Expected string
 }
 
 func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError {
 	errList := []detectorValidationError{}
-	push := func(path, msg, code string) {
-		errList = append(errList, detectorValidationError{Path: path, Message: msg, Code: code})
+	push := func(path, msg, code, expected string) {
+		errList = append(errList, detectorValidationError{Path: path, Message: msg, Code: code, Expected: expected})
+	}
+	allowedBool := map[string]struct{}{"0": {}, "1": {}, "no": {}, "yes": {}, "false": {}, "true": {}, "off": {}, "on": {}}
+	allowedBlockMode := map[string]struct{}{"0": {}, "no": {}, "off": {}, "dryrun": {}, "alert": {}, "permanent": {}, "perm": {}}
+	enumByKey := map[string]map[string]struct{}{
+		"ENABLED":     allowedBool,
+		"SEND_TO_API": allowedBool,
+		"ENRICH":      allowedBool,
+		"PTR":         allowedBool,
+		"LOG_IGNORED": allowedBool,
+		"DRY_RUN":     allowedBool,
+		"MODE":        {"journal": {}, "file": {}, "docker": {}},
+	}
+	isDurationKey := func(key string) bool {
+		u := strings.ToUpper(strings.TrimSpace(key))
+		return strings.Contains(u, "TIMEOUT") || strings.Contains(u, "COOLDOWN") || strings.Contains(u, "EVERY") || strings.Contains(u, "WINDOW") || strings.Contains(u, "TTL") || strings.Contains(u, "BLOCK")
+	}
+	isIntegerKey := func(key string) bool {
+		u := strings.ToUpper(strings.TrimSpace(key))
+		if strings.Contains(u, "MAX") || strings.Contains(u, "LIMIT") || strings.Contains(u, "THRESHOLD") {
+			return true
+		}
+		switch u {
+		case "SEND_TO_API", "ENABLED", "ENRICH", "PTR", "DRY_RUN", "LOG_IGNORED":
+			return false
+		default:
+			return false
+		}
+	}
+	validateKnownEnum := func(path, key, raw string) {
+		normalized := strings.ToLower(strings.Trim(strings.TrimSpace(raw), `"`))
+		if normalized == "" {
+			push(path, "empty value for required enum key", "required", "one of the allowed enum values")
+			return
+		}
+		if strings.EqualFold(key, "BLOCK") {
+			if _, ok := allowedBlockMode[normalized]; ok {
+				return
+			}
+			if _, err := time.ParseDuration(normalized); err == nil {
+				return
+			}
+			push(path, "invalid enum/duration for BLOCK", "invalid_enum", "BLOCK expects one of no/off/0/dryrun/alert/permanent/perm or a Go duration like 30m")
+			return
+		}
+		allowed, ok := enumByKey[strings.ToUpper(strings.TrimSpace(key))]
+		if !ok {
+			return
+		}
+		if _, exists := allowed[normalized]; !exists {
+			push(path, "invalid enum value", "invalid_enum", "allowed values are: "+strings.Join(mapKeys(allowed), ", "))
+		}
 	}
 	checkDur := func(path, v string) {
 		if strings.TrimSpace(v) == "" {
@@ -90,12 +141,21 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		}
 		d, err := time.ParseDuration(strings.Trim(strings.TrimSpace(v), `"`))
 		if err != nil || d <= 0 {
-			push(path, "invalid duration", "invalid_duration")
+			push(path, "invalid duration", "invalid_duration", "positive Go duration, e.g. 30s, 10m, 1h30m")
 		}
 	}
 	for k, v := range c.Global {
-		if strings.Contains(strings.ToUpper(k), "TIMEOUT") || strings.Contains(strings.ToUpper(k), "COOLDOWN") || strings.Contains(strings.ToUpper(k), "EVERY") {
+		if isDurationKey(k) {
 			checkDur("global."+k, v)
+		}
+		validateKnownEnum("global."+k, k, v)
+		if isIntegerKey(k) {
+			n, err := strconv.Atoi(strings.Trim(strings.TrimSpace(v), `"`))
+			if err != nil {
+				push("global."+k, "invalid integer value", "invalid_int", "integer >= 0")
+			} else if n < 0 {
+				push("global."+k, "negative numbers are not allowed", "negative_number", "integer >= 0")
+			}
 		}
 	}
 	seenSections := map[string]string{}
@@ -116,7 +176,7 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 			key := strings.ToLower(trimmed)
 			currentPath := group.Name + "[" + strconv.Itoa(idx) + "].name"
 			if firstPath, ok := seenSections[key]; ok {
-				push(currentPath, "duplicate section name (already defined at "+firstPath+")", "duplicate_section_name")
+				push(currentPath, "duplicate section name (already defined at "+firstPath+")", "duplicate_section_name", "unique section name")
 				continue
 			}
 			seenSections[key] = currentPath
@@ -125,23 +185,43 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 	all := append(append([]detectorscfg.AdminSection{}, c.Core...), c.Leniency...)
 	for i, sec := range all {
 		if strings.TrimSpace(sec.Name) == "" {
-			push("sections["+strconv.Itoa(i)+"].name", "section name required", "required")
+			push("sections["+strconv.Itoa(i)+"].name", "section name required", "required", "non-empty section name")
 		}
 		for k, v := range sec.Keys {
-			u := strings.ToUpper(k)
-			if strings.Contains(u, "TIMEOUT") || strings.Contains(u, "COOLDOWN") || strings.Contains(u, "EVERY") || strings.Contains(u, "WINDOW") || strings.Contains(u, "TTL") || strings.Contains(u, "BLOCK") && strings.Contains(v, "m") {
+			if strings.TrimSpace(v) == "" && (strings.EqualFold(k, "ENABLED") || strings.EqualFold(k, "BLOCK")) {
+				push(sec.Name+"."+k, "empty required key", "required", "non-empty value")
+				continue
+			}
+			if isDurationKey(k) {
 				checkDur(sec.Name+"."+k, v)
+			}
+			validateKnownEnum(sec.Name+"."+k, k, v)
+			if isIntegerKey(k) {
+				n, err := strconv.Atoi(strings.Trim(strings.TrimSpace(v), `"`))
+				if err != nil {
+					push(sec.Name+"."+k, "invalid integer value", "invalid_int", "integer >= 0")
+				} else if n < 0 {
+					push(sec.Name+"."+k, "negative numbers are not allowed", "negative_number", "integer >= 0")
+				}
 			}
 			if strings.Contains(v, "\n") {
 				for _, ln := range strings.Split(v, "\n") {
 					if strings.Count(ln, ":") > 0 && strings.TrimSpace(ln) == ":" {
-						push(sec.Name+"."+k, "malformed multiline rule", "invalid_multiline")
+						push(sec.Name+"."+k, "malformed multiline rule", "invalid_multiline", "each multiline entry should be non-empty and not just ':'")
 					}
 				}
 			}
 		}
 	}
 	return errList
+}
+
+func mapKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func handleDetectorsValidate(w http.ResponseWriter, r *http.Request) {
