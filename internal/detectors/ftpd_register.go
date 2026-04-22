@@ -12,9 +12,9 @@ import (
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/ftpd"
+	"cfm/internal/detectors/meta"
 	"cfm/internal/logging"
 )
-
 
 // shared state for detectors
 var ftpdState, _ = core.LoadState("")
@@ -30,8 +30,10 @@ Autodetect strategy
 
 // Genuine ftp failure-ish line (daemon + fail verb)
 var ftpQuick = regexp.MustCompile(`(?i)\b(pure-?ftpd|vsftpd|proftpd|cpanel_ftp_auth)\b.*\b(fail|failed|violation|denied|authentication failure|maximum login)\b`)
+
 // Genuine ftp daemon mention (even without failure words)
 var ftpDaemon = regexp.MustCompile(`(?i)\b(pure-?ftpd|vsftpd|proftpd|cpanel_ftp_auth)\b`)
+
 // Hard exclude: ssh noise (e.g., "sshd: Invalid user ftpuser …")
 var sshNoise = regexp.MustCompile(`\bsshd\b`)
 
@@ -120,6 +122,13 @@ func isUnitActive(unit string) bool {
 }
 
 func init() {
+	meta.Register(meta.DetectorMeta{
+		TypeKey:           "ftpd",
+		Title:             "FTP daemon auth",
+		Description:       "Detect FTP authentication abuse across common daemons.",
+		DefaultsTemplate:  map[string]string{"ENABLED": "1", "MODE": "auto", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
+		LeniencySupported: true,
+	})
 	Register("ftpd", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		// cadence defaults from [global]
 		defEvery := kvDur(global, "DEFAULT_EVERY", 2*time.Second)
@@ -205,9 +214,15 @@ func init() {
 							d.SetState(ftpdState, key)
 						}
 
-						if strings.Contains(u, "vsftpd") { d.SetDaemon("vsftpd") }
-						if strings.Contains(u, "proftpd") { d.SetDaemon("proftpd") }
-						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") { d.SetDaemon("pure-ftpd") }
+						if strings.Contains(u, "vsftpd") {
+							d.SetDaemon("vsftpd")
+						}
+						if strings.Contains(u, "proftpd") {
+							d.SetDaemon("proftpd")
+						}
+						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") {
+							d.SetDaemon("pure-ftpd")
+						}
 
 						return d, nil
 					}
@@ -217,9 +232,15 @@ func init() {
 					if isUnitActive(u) {
 						logging.Logf("[detectors][ftpd] autodetect: using journal unit %s (active; no recent lines seen yet)", u)
 						d.SetSource(core.NewJournalTailer(u))
-						if strings.Contains(u, "vsftpd") { d.SetDaemon("vsftpd") }
-						if strings.Contains(u, "proftpd") { d.SetDaemon("proftpd") }
-						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") { d.SetDaemon("pure-ftpd") }
+						if strings.Contains(u, "vsftpd") {
+							d.SetDaemon("vsftpd")
+						}
+						if strings.Contains(u, "proftpd") {
+							d.SetDaemon("proftpd")
+						}
+						if strings.Contains(u, "pure-ftpd") || strings.Contains(u, "pureftpd") {
+							d.SetDaemon("pure-ftpd")
+						}
 						return d, nil
 					}
 				}
@@ -287,9 +308,15 @@ func init() {
 			}
 			// best effort daemon hint from explicit path
 			lb := strings.ToLower(path)
-			if strings.Contains(lb, "vsftpd") { d.SetDaemon("vsftpd") }
-			if strings.Contains(lb, "proftpd") { d.SetDaemon("proftpd") }
-			if strings.Contains(lb, "pure-ftpd") || strings.Contains(lb, "pureftpd") { d.SetDaemon("pure-ftpd") }
+			if strings.Contains(lb, "vsftpd") {
+				d.SetDaemon("vsftpd")
+			}
+			if strings.Contains(lb, "proftpd") {
+				d.SetDaemon("proftpd")
+			}
+			if strings.Contains(lb, "pure-ftpd") || strings.Contains(lb, "pureftpd") {
+				d.SetDaemon("pure-ftpd")
+			}
 			return d, nil
 
 		default:
