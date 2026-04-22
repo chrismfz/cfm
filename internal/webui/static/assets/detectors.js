@@ -1,4 +1,5 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
+import { runtimeBadge } from './runtime-badge.js';
 
 const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} }, catalog: [], configExists: true };
 const byId = (id) => document.getElementById(id);
@@ -9,25 +10,6 @@ function setDirty(v){ state.dirty=v; byId('detectorsDirty').textContent=v?'Unsav
 function setLeniencyFeedback(msg,bad=false){ const el=byId('detectorsLeniencyModalFeedback'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
 function safeText(v){ return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 function fmtDate(v){ if(!v) return 'never'; const d=new Date(v); return Number.isNaN(d.getTime())?'never':d.toLocaleString(); }
-
-function runtimeBadge(sec, runtime){
-  if(!runtime || !sec?.enabled) return {color:'#9ca3af', label:'disabled', reason:'Section is disabled.'};
-  const successes = Math.max(0, Number(runtime.runs||0)-Number(runtime.failures||0));
-  const lastSuccessAt = runtime.last_success_at ? new Date(runtime.last_success_at) : null;
-  const recentSuccess = lastSuccessAt && (Date.now() - lastSuccessAt.getTime()) <= (20*60*1000);
-  const repeatedFailures = Number(runtime.failures||0) >= 3;
-  const timeoutStreak = Number(runtime.timeouts||0) >= 2;
-  if(runtime.init_ok === false || repeatedFailures || timeoutStreak || (runtime.last_error||'').toLowerCase().includes('timeout')){
-    return {color:'#ef4444', label:'error', reason:runtime.last_error || 'Init failure/repeated failures/timeouts.'};
-  }
-  if(runtime.active && recentSuccess && runtime.source_probe_ok){
-    return {color:'#22c55e', label:'healthy', reason:`Recent success at ${fmtDate(runtime.last_success_at)}.`};
-  }
-  if(!runtime.source_probe_ok){
-    return {color:'#f59e0b', label:'waiting', reason:runtime.source_probe_message || 'No source activity yet.'};
-  }
-  return {color:'#f59e0b', label:'warming', reason:successes===0?'Enabled but no successful runs yet.':'Waiting for fresh successful run.'};
-}
 
 function setRuntimeSummary(summary, inventory){
   const el = byId('detectorsRuntimeSummary');
