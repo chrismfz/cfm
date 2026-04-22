@@ -3,6 +3,7 @@ package detectors
 import (
 	"context"
 	"io"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -24,8 +25,9 @@ const (
 )
 
 type customRule struct {
-	target customRuleTarget
-	re     *regexp.Regexp
+	re      *regexp.Regexp
+	hasIP   bool
+	hasUser bool
 }
 
 type customDetector struct {
@@ -37,6 +39,7 @@ type customDetector struct {
 	stateKey string
 
 	rules   []customRule
+	ignores []*regexp.Regexp
 	samples *core.SampleRing
 	counts  *core.SlidingCounter
 	gate    *core.AlertGate
@@ -53,6 +56,7 @@ type customConfig struct {
 	SampleLimit     int
 	AuthFailPerIP   int
 	AuthFailPerUser int
+	MatchTarget     customRuleTarget
 }
 
 func init() {
@@ -60,7 +64,7 @@ func init() {
 		TypeKey:             "custom",
 		Title:               "Custom regex detector",
 		Description:         "Detect authentication-like failures using custom regex rules and key on captured IP/user values.",
-		DefaultsTemplate:    map[string]string{"ENABLED": "1", "MODE": "file", "LOG_PATH": "/var/log/auth.log", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "SAMPLE_LIMIT": "10", "AUTHFAIL_IP": "20", "AUTHFAIL_USER": "10", "BLOCK": "dryrun", "BLOCK_COOLDOWN": "20m"},
+		DefaultsTemplate:    map[string]string{"ENABLED": "1", "MODE": "file", "LOG_PATH": "/var/log/auth.log", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "SAMPLE_LIMIT": "10", "AUTHFAIL_IP": "20", "AUTHFAIL_USER": "10", "MATCH_TARGET": "both", "FAIL_REGEX": "(?P<ip>\\S+) .* invalid user (?P<user>\\S+)", "BLOCK": "dryrun", "BLOCK_COOLDOWN": "20m"},
 		LeniencySupported:   true,
 		LeniencyRecommended: true,
 	})
@@ -81,17 +85,20 @@ func init() {
 			SampleLimit:     kvInt(kv, "SAMPLE_LIMIT", 10),
 			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 20),
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 10),
+			MatchTarget:     parseCustomMatchTarget(kvStrClean(kv, "MATCH_TARGET", "both"), customTargetBoth),
 		}
 
 		// Parse auth-like knobs for parity with built-in detectors.
 		_ = kvStrClean(kv, "BLOCK", kvStrClean(global, "BLOCK", ""))
 		_ = kvDur(kv, "BLOCK_COOLDOWN", kvDur(global, "BLOCK_COOLDOWN", 20*time.Minute))
 
-		rules := parseCustomRules(kv)
+		rules := parseCustomRules(kv, cfg.MatchTarget)
+		ignores := parseCustomIgnoreRules(kv)
 		d := &customDetector{
 			name:    section,
 			cfg:     cfg,
 			rules:   rules,
+			ignores: ignores,
 			samples: core.NewSampleRing(cfg.SampleLimit),
 			counts:  core.NewSlidingCounter(cfg.Window, 0),
 			gate:    core.NewAlertGate(cfg.Cooldown),
@@ -125,8 +132,16 @@ func init() {
 	})
 }
 
-func parseCustomRules(kv KV) []customRule {
-	lines := kvLines(kv, "RULES")
+func parseCustomRules(kv KV, target customRuleTarget) []customRule {
+	lines := kvLines(kv, "FAIL_REGEX")
+	if len(lines) == 0 {
+		lines = kvLines(kv, "RULES")
+	}
+	if len(lines) == 0 {
+		if raw := strings.TrimSpace(kvStrClean(kv, "FAIL_REGEX", "")); raw != "" {
+			lines = append(lines, raw)
+		}
+	}
 	if len(lines) == 0 {
 		if raw := strings.TrimSpace(kvStrClean(kv, "RULES", "")); raw != "" {
 			lines = append(lines, raw)
@@ -134,22 +149,7 @@ func parseCustomRules(kv KV) []customRule {
 	}
 	out := make([]customRule, 0, len(lines))
 	for _, line := range lines {
-		target := customTargetAuto
 		reStr := strings.TrimSpace(line)
-		if i := strings.Index(line, ":"); i > 0 {
-			prefix := strings.ToLower(strings.TrimSpace(line[:i]))
-			switch prefix {
-			case "ip":
-				target = customTargetIP
-				reStr = strings.TrimSpace(line[i+1:])
-			case "user":
-				target = customTargetUser
-				reStr = strings.TrimSpace(line[i+1:])
-			case "both":
-				target = customTargetBoth
-				reStr = strings.TrimSpace(line[i+1:])
-			}
-		}
 		if reStr == "" {
 			continue
 		}
@@ -158,9 +158,73 @@ func parseCustomRules(kv KV) []customRule {
 			logging.Logf("[detectors][custom] invalid regex %q: %v", line, err)
 			continue
 		}
-		out = append(out, customRule{target: target, re: re})
+		hasIP := re.SubexpIndex("ip") > 0
+		hasUser := re.SubexpIndex("user") > 0
+		if !validCustomCaptureTarget(target, hasIP, hasUser) {
+			logging.Logf("[detectors][custom] regex %q missing required named captures for MATCH_TARGET=%s", line, customMatchTargetString(target))
+			continue
+		}
+		out = append(out, customRule{re: re, hasIP: hasIP, hasUser: hasUser})
 	}
 	return out
+}
+
+func parseCustomIgnoreRules(kv KV) []*regexp.Regexp {
+	lines := kvLines(kv, "IGNORE_REGEX")
+	if len(lines) == 0 {
+		if raw := strings.TrimSpace(kvStrClean(kv, "IGNORE_REGEX", "")); raw != "" {
+			lines = append(lines, raw)
+		}
+	}
+	out := make([]*regexp.Regexp, 0, len(lines))
+	for _, line := range lines {
+		re, err := regexp.Compile(strings.TrimSpace(line))
+		if err != nil {
+			logging.Logf("[detectors][custom] invalid ignore regex %q: %v", line, err)
+			continue
+		}
+		out = append(out, re)
+	}
+	return out
+}
+
+func parseCustomMatchTarget(raw string, def customRuleTarget) customRuleTarget {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "ip":
+		return customTargetIP
+	case "user":
+		return customTargetUser
+	case "both":
+		return customTargetBoth
+	default:
+		return def
+	}
+}
+
+func customMatchTargetString(target customRuleTarget) string {
+	switch target {
+	case customTargetIP:
+		return "ip"
+	case customTargetUser:
+		return "user"
+	case customTargetBoth:
+		return "both"
+	default:
+		return "auto"
+	}
+}
+
+func validCustomCaptureTarget(target customRuleTarget, hasIP, hasUser bool) bool {
+	switch target {
+	case customTargetIP:
+		return hasIP
+	case customTargetUser:
+		return hasUser
+	case customTargetBoth:
+		return hasIP && hasUser
+	default:
+		return hasIP || hasUser
+	}
 }
 
 func (d *customDetector) Name() string { return d.name }
@@ -211,22 +275,22 @@ func (d *customDetector) RunOnce(ctx context.Context, out chan<- core.Alert) err
 }
 
 func (d *customDetector) consume(now time.Time, line string, out chan<- core.Alert) {
+	for _, ignore := range d.ignores {
+		if ignore.FindStringSubmatch(line) != nil {
+			return
+		}
+	}
+
 	for _, rule := range d.rules {
 		m := rule.re.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
 
-		ip := captureByName(rule.re, m, "ip")
-		user := strings.ToLower(captureByName(rule.re, m, "user"))
-		if ip == "" && len(m) > 1 {
-			ip = m[1]
-		}
-		if user == "" && len(m) > 2 {
-			user = strings.ToLower(m[2])
-		}
+		ip := normalizeCustomIP(captureByName(rule.re, m, "ip"))
+		user := strings.ToLower(strings.TrimSpace(captureByName(rule.re, m, "user")))
 
-		switch rule.target {
+		switch d.cfg.MatchTarget {
 		case customTargetIP:
 			d.bump(now, "AUTHFAIL|ip", ip, line, out)
 		case customTargetUser:
@@ -235,10 +299,10 @@ func (d *customDetector) consume(now time.Time, line string, out chan<- core.Ale
 			d.bump(now, "AUTHFAIL|ip", ip, line, out)
 			d.bump(now, "AUTHFAIL|user", user, line, out)
 		default:
-			if ip != "" {
+			if rule.hasIP && ip != "" {
 				d.bump(now, "AUTHFAIL|ip", ip, line, out)
 			}
-			if user != "" {
+			if rule.hasUser && user != "" {
 				d.bump(now, "AUTHFAIL|user", user, line, out)
 			}
 		}
@@ -251,6 +315,21 @@ func captureByName(re *regexp.Regexp, m []string, name string) string {
 		return m[idx]
 	}
 	return ""
+}
+
+func normalizeCustomIP(raw string) string {
+	s := strings.Trim(strings.TrimSpace(raw), "[]")
+	if s == "" {
+		return ""
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
 }
 
 func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out chan<- core.Alert) {
