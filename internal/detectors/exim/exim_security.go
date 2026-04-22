@@ -76,6 +76,23 @@ type EximSecurity struct {
 	samples      *core.SampleRing
 	gate         *core.AlertGate
 	counts       *core.SlidingCounter
+
+	// short-window dedup cache (protects double-counting between mainlog/rejectlog)
+	dedupTTL        time.Duration
+	dedupMaxEntries int
+	dedupBucket     time.Duration
+	dedupMu         sync.Mutex
+	dedupSeen       map[string]time.Time
+	dedupOrder      []dedupEntry
+	dedupHits       uint64
+	dedupMisses     uint64
+	dedupPrunedTTL  uint64
+	dedupPrunedCap  uint64
+}
+
+type dedupEntry struct {
+	key string
+	exp time.Time
 }
 
 // small deduped, ordered list
@@ -172,6 +189,11 @@ func NewSecurity(cfg SecConfig) *EximSecurity {
 
 	d.reSetID = regexp.MustCompile(`\bset_id=([^) \t]+)`)
 	d.reUserAng = regexp.MustCompile(`\buser=<([^>]+)>`)
+	d.dedupTTL = 60 * time.Second
+	d.dedupMaxEntries = 5000
+	d.dedupBucket = 10 * time.Second
+	d.dedupSeen = make(map[string]time.Time, d.dedupMaxEntries)
+	d.dedupOrder = make([]dedupEntry, 0, d.dedupMaxEntries)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -463,6 +485,9 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
 					continue
 				}
 				if r.Name == "RCPT_REJECT" && isSenderVerifyRelatedReject(s) {
+					if d.isDuplicateEvent(now, "RCPT_REJECT_SV_SOFT", ip, line) {
+						continue
+					}
 					if logging.DebugEnabled() {
 						logging.LogfDETECTOR("[exim/security][debug] downgrade rule=RCPT_REJECT->RCPT_REJECT_SV_SOFT ip=%q reason=authenticated_submission sender_verify_related auth=%q port=%q line=%s", ip, sess.authMarker, sess.port, line)
 					}
@@ -488,16 +513,87 @@ func (d *EximSecurity) processLine(now time.Time, line string) {
 					logging.LogfDETECTOR("[exim/security][debug] bump AUTHFAIL ip=%q", ip)
 				}
 
+				if d.isDuplicateEvent(now, "AUTHFAIL|ip", ip, line) {
+					continue
+				}
 				d.bump(now, "AUTHFAIL|ip", ip, line) // now always the real socket IP
 				if u := d.extractUser(s); u != "" {
 					d.bump(now, "AUTHFAIL|user", u, line)
 					d.addUserIP(u, ip)
 				}
 			} else {
+				if d.isDuplicateEvent(now, r.Name, ip, line) {
+					continue
+				}
 				d.bump(now, r.Name, ip, line)
 			}
 		}
 	}
+}
+
+func (d *EximSecurity) isDuplicateEvent(now time.Time, rule, ip, line string) bool {
+	fp := d.dedupFingerprint(now, rule, ip, line)
+
+	d.dedupMu.Lock()
+	defer d.dedupMu.Unlock()
+
+	d.pruneDedupLocked(now)
+	if exp, ok := d.dedupSeen[fp]; ok && now.Before(exp) {
+		d.dedupHits++
+		if logging.DebugEnabled() && d.dedupHits%25 == 0 {
+			logging.LogfDETECTOR("[exim/security][debug] dedup hit key=%q hits=%d misses=%d size=%d ttl_pruned=%d cap_pruned=%d",
+				fp, d.dedupHits, d.dedupMisses, len(d.dedupSeen), d.dedupPrunedTTL, d.dedupPrunedCap)
+		}
+		return true
+	}
+
+	exp := now.Add(d.dedupTTL)
+	d.dedupSeen[fp] = exp
+	d.dedupOrder = append(d.dedupOrder, dedupEntry{key: fp, exp: exp})
+	d.dedupMisses++
+	if d.dedupMisses%200 == 0 && logging.DebugEnabled() {
+		logging.LogfDETECTOR("[exim/security][debug] dedup stats hits=%d misses=%d size=%d ttl_pruned=%d cap_pruned=%d",
+			d.dedupHits, d.dedupMisses, len(d.dedupSeen), d.dedupPrunedTTL, d.dedupPrunedCap)
+	}
+	return false
+}
+
+func (d *EximSecurity) pruneDedupLocked(now time.Time) {
+	for len(d.dedupOrder) > 0 {
+		head := d.dedupOrder[0]
+		if now.Before(head.exp) {
+			break
+		}
+		d.dedupOrder = d.dedupOrder[1:]
+		if cur, ok := d.dedupSeen[head.key]; ok && !now.Before(cur) {
+			delete(d.dedupSeen, head.key)
+			d.dedupPrunedTTL++
+		}
+	}
+	for d.dedupMaxEntries > 0 && len(d.dedupSeen) > d.dedupMaxEntries && len(d.dedupOrder) > 0 {
+		head := d.dedupOrder[0]
+		d.dedupOrder = d.dedupOrder[1:]
+		if _, ok := d.dedupSeen[head.key]; ok {
+			delete(d.dedupSeen, head.key)
+			d.dedupPrunedCap++
+		}
+	}
+}
+
+func (d *EximSecurity) dedupFingerprint(now time.Time, rule, ip, line string) string {
+	bucket := int64(0)
+	if d.dedupBucket > 0 {
+		bucket = now.Unix() / int64(d.dedupBucket/time.Second)
+	}
+	return fmt.Sprintf("%s|%s|%d|%s", rule, ip, bucket, normalizeDedupLine(line))
+}
+
+func normalizeDedupLine(line string) string {
+	s := strings.ToLower(strings.TrimSpace(line))
+	if s == "" {
+		return s
+	}
+	return strings.Join(strings.Fields(s), " ")
 }
 
 type sessionContext struct {
