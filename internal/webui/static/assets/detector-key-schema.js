@@ -44,6 +44,11 @@ export const detectorKeySchema = {
     examples: ['10m', '1h'],
     help: 'Do not block the same source again before this delay.',
   },
+  SLOW_FAIL_BLOCK: {
+    type: 'int',
+    examples: ['6', '10'],
+    help: 'Threshold count before triggering slow-fail block handling.',
+  },
   SEND_TO_API: {
     type: 'bool',
     allowed: BOOL_VALUES,
@@ -106,12 +111,16 @@ export const detectorKeySchema = {
 };
 
 const durationFamilyToken = ['EVERY', 'TIMEOUT', 'COOLDOWN', 'WINDOW', 'TTL'];
+const thresholdBlockKeys = new Set(['SLOW_FAIL_BLOCK']);
 
 export function lookupDetectorKeySchema(key) {
   if (!key) return null;
   const upper = String(key).toUpperCase();
   if (detectorKeySchema[upper]) return detectorKeySchema[upper];
-  if (upper.includes('BLOCK')) return detectorKeySchema.BLOCK;
+  if (upper === 'BLOCK') return detectorKeySchema.BLOCK;
+  if (upper.endsWith('_BLOCK') && thresholdBlockKeys.has(upper)) {
+    return detectorKeySchema[upper];
+  }
   if (durationFamilyToken.some((t) => upper.includes(t))) {
     return { type: 'duration', examples: ['30s', '10m'], help: 'Expected Go-style duration (e.g. 30s, 10m, 1h).' };
   }
