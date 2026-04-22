@@ -217,14 +217,22 @@ tr.clickable:hover { background: #19253a; cursor: pointer; }
   margin-bottom: .45rem;
 }
 .detector-row td {
-  padding-top: .9rem;
-  padding-bottom: .9rem;
+  padding-top: 1.2rem;
+  padding-bottom: 1.2rem;
 }
 .detector-row + .detector-row td {
-  border-top: 1px solid rgba(38, 52, 73, .65);
+  border-top: 2px solid rgba(38, 52, 73, .8);
 }
 .detector-row td:first-child {
-  background: rgba(18, 30, 50, .22);
+  background: rgba(18, 30, 50, .32);
+  box-shadow: inset 1px 0 0 rgba(38, 52, 73, .45);
+}
+.detector-row td:first-child .detector-section-title {
+  display: inline-block;
+  padding: .2rem .5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(38, 52, 73, .55);
+  background: rgba(11, 16, 32, .42);
 }
 .list { margin: 0; padding: 0; list-style: none; display: grid; gap: .55rem; }
 .list li { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
@@ -394,8 +402,8 @@ code {
     padding: .36rem;
   }
   .detector-row td {
-    padding-top: .55rem;
-    padding-bottom: .55rem;
+    padding-top: .72rem;
+    padding-bottom: .72rem;
   }
   .detector-section-title {
     font-size: .9rem;
