@@ -43,9 +43,25 @@ type RuntimeSummary struct {
 }
 
 type Snapshot struct {
-	Now      time.Time       `json:"now"`
-	Summary  RuntimeSummary  `json:"summary"`
-	Sections []RuntimeStatus `json:"sections"`
+	Now       time.Time       `json:"now"`
+	Summary   RuntimeSummary  `json:"summary"`
+	Sections  []RuntimeStatus `json:"sections"`
+	Inventory Inventory       `json:"inventory"`
+}
+
+type InventoryCounts struct {
+	Loaded     int `json:"loaded"`
+	Configured int `json:"configured"`
+	Enabled    int `json:"enabled"`
+	Active     int `json:"active"`
+}
+
+type Inventory struct {
+	AvailableTypes            []string        `json:"available_types"`
+	ConfiguredSections        []string        `json:"configured_sections"`
+	MissingConfigForAvailable []string        `json:"missing_config_for_available"`
+	UnknownSections           []string        `json:"unknown_sections"`
+	Counts                    InventoryCounts `json:"counts"`
 }
 
 type runtimeState struct {
@@ -66,6 +82,7 @@ type store struct {
 	mu          sync.RWMutex
 	loadedTypes int
 	sections    map[string]*runtimeState
+	inventory   Inventory
 }
 
 var global = &store{sections: map[string]*runtimeState{}}
@@ -74,6 +91,56 @@ func SetLoadedTypes(n int) {
 	global.mu.Lock()
 	defer global.mu.Unlock()
 	global.loadedTypes = n
+}
+
+func SetInventory(availableTypes, configuredSections []string, enabledCount int) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+
+	available := append([]string(nil), availableTypes...)
+	configured := append([]string(nil), configuredSections...)
+	sort.Strings(available)
+	sort.Strings(configured)
+
+	availableSet := make(map[string]struct{}, len(available))
+	for _, typ := range available {
+		availableSet[strings.ToLower(strings.TrimSpace(typ))] = struct{}{}
+	}
+
+	configuredTypes := map[string]struct{}{}
+	unknown := make([]string, 0)
+	for _, section := range configured {
+		typ := strings.ToLower(strings.TrimSpace(sectionType(section)))
+		if typ == "" {
+			continue
+		}
+		configuredTypes[typ] = struct{}{}
+		if _, ok := availableSet[typ]; !ok {
+			unknown = append(unknown, section)
+		}
+	}
+
+	missing := make([]string, 0)
+	for _, typ := range available {
+		key := strings.ToLower(strings.TrimSpace(typ))
+		if _, ok := configuredTypes[key]; !ok {
+			missing = append(missing, typ)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(unknown)
+
+	global.inventory = Inventory{
+		AvailableTypes:            available,
+		ConfiguredSections:        configured,
+		MissingConfigForAvailable: missing,
+		UnknownSections:           unknown,
+		Counts: InventoryCounts{
+			Loaded:     len(available),
+			Configured: len(configured),
+			Enabled:    enabledCount,
+		},
+	}
 }
 
 func ResetConfiguredSections(list []SectionConfig) {
@@ -195,6 +262,17 @@ func GetSnapshot() Snapshot {
 		out.Sections = append(out.Sections, row)
 	}
 	sort.Slice(out.Sections, func(i, j int) bool { return out.Sections[i].Section < out.Sections[j].Section })
+	out.Inventory = global.inventory
+	out.Inventory.Counts.Active = out.Summary.Active
+	if out.Inventory.Counts.Loaded == 0 {
+		out.Inventory.Counts.Loaded = out.Summary.LoadedTypes
+	}
+	if out.Inventory.Counts.Configured == 0 {
+		out.Inventory.Counts.Configured = out.Summary.Configured
+	}
+	if out.Inventory.Counts.Enabled == 0 {
+		out.Inventory.Counts.Enabled = out.Summary.Enabled
+	}
 	return out
 }
 
@@ -205,4 +283,14 @@ func (s *store) ensure(section string) *runtimeState {
 	st := &runtimeState{Section: section, Configured: true, Enabled: true}
 	s.sections[section] = st
 	return st
+}
+
+func sectionType(section string) string {
+	parts := strings.FieldsFunc(section, func(r rune) bool {
+		return r == ':' || r == ' ' || r == '\t'
+	})
+	if len(parts) == 0 {
+		return strings.TrimSpace(section)
+	}
+	return strings.TrimSpace(parts[0])
 }

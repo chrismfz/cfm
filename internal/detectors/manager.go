@@ -179,23 +179,32 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 	sig := cfgSig(&secs)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
+	configuredSections := make([]string, 0, len(secs.ByName))
+	enabledCount := 0
 	for secName, kv := range secs.ByName {
 		if secName == "global" || strings.HasSuffix(secName, ".leniency") {
 			continue
 		}
 		typ, _ := splitTypeInstance(secName)
+		enabled := kvBool(kv, "ENABLED", true)
 		sourceOK, sourceMsg := probeSourceStatus(kv)
 		configured = append(configured, detectorstatus.SectionConfig{
 			Section:            secName,
 			Type:               typ,
 			Configured:         true,
-			Enabled:            kvBool(kv, "ENABLED", true),
+			Enabled:            enabled,
 			SourceProbeOK:      sourceOK,
 			SourceProbeMessage: sourceMsg,
 		})
+		configuredSections = append(configuredSections, secName)
+		if enabled {
+			enabledCount++
+		}
 	}
+	availableTypes := RegisteredTypes()
 	detectorstatus.ResetConfiguredSections(configured)
-	detectorstatus.SetLoadedTypes(len(RegisteredTypes()))
+	detectorstatus.SetLoadedTypes(len(availableTypes))
+	detectorstatus.SetInventory(availableTypes, configuredSections, enabledCount)
 	// No change from current running config: clear any pending reload.
 	if sig == m.lastSig && m.running {
 		m.hasPending = false
