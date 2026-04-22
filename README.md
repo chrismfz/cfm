@@ -228,6 +228,22 @@ internal/
 - Webdetector history knobs live in `[webdetector]` here (not in `cfm.conf`): `HISTORY_ENABLED`, `HISTORY_DB_PATH`, `HISTORY_RETENTION_DAYS`, `HISTORY_PRUNE_EVERY`
 - Per-section block policy: `BLOCK = no|dryrun|permanent|<duration>` + `BLOCK_COOLDOWN`
 
+### Detectors
+
+CFM detector runtime config lives at **`/etc/cfm/detectors.conf`** (packaged baseline: `configs/detectors.conf`).
+
+- Inline detector examples and templates: [`configs/detectors.conf`](configs/detectors.conf)
+- Detector model, built-ins, and custom detector how-to: [`docs/DETECTORS.md`](docs/DETECTORS.md)
+- Leniency tuning and `.leniency` companion sections: [`docs/Detectors.Leniency.md`](docs/Detectors.Leniency.md)
+
+Capabilities at a glance:
+- Built-in detectors for SSH, mail, FTP, MySQL, cPanel, ModSecurity, health, web traffic, and API abuse.
+- Per-section block modes: `off`/`no`, `dryrun`, `permanent`, or duration TTL (for example `30m`, `2h`).
+- Multiple log sources by detector: `file`, `journal`, and `docker` where supported.
+- Custom regex detectors via `[custom:<name>]` sections (and expanding UI support as it becomes available).
+
+> **Start safe:** set `BLOCK = dryrun` while tuning thresholds, regexes, and ignore lists; switch to TTL or `permanent` only after validation.
+
 #### API abuse rollout guidance
 - Start with detect-only by setting `[api_abuse]` `BLOCK = no` and tuning `STAGE1_THRESHOLD` from production logs.
 - Enable gradual mitigation next: keep stage 1 as observe, set `STAGE2_THRESHOLD` + `STAGE2_CHALLENGE_TTL` for temporary challenge responses.
