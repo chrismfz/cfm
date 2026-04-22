@@ -161,6 +161,8 @@ func (m *manager) maybeReload(parent context.Context) {
 
 	secs, _, err := readSections(path)
 	if err != nil {
+		availableTypes := RegisteredTypes()
+		detectorstatus.SetLoadedTypes(len(availableTypes))
 
 		// If the config is missing, stop everything (detectors disabled).
 		if os.IsNotExist(err) {
@@ -169,6 +171,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			} else {
 				logging.Logf("[detectors] no detections.conf at %s — disabled", path)
 			}
+			detectorstatus.ResetConfiguredSections(nil)
+			detectorstatus.SetInventory(availableTypes, nil, 0)
 			m.stopAll()
 			return
 		}

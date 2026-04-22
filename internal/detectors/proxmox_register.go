@@ -16,8 +16,9 @@ func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:             "proxmox_auth",
 		Title:               "Proxmox authentication",
-		Description:         "Detect authentication failures from Proxmox pvedaemon/pam logs.",
-		DefaultsTemplate:    map[string]string{"ENABLED": "1", "MODE": "journal", "JOURNAL_UNIT": "pvedaemon.service", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
+		Description:         "Detect authentication failures from Proxmox VE auth/pvedaemon logs.",
+		DefaultsTemplate:    map[string]string{"ENABLED": "1", "MODE": "journal", "JOURNAL_UNIT": "pvedaemon.service", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "SAMPLE_LIMIT": "10", "AUTHFAIL_IP": "20", "AUTHFAIL_USER": "10", "BLOCK": "dryrun", "BLOCK_COOLDOWN": "20m", "ENRICH": "1", "PTR": "1", "ENRICH_DIRS": "/var/lib/cfm/maxmind:/etc/cfm"},
+		ExamplePresets:      []meta.Preset{{ID: "proxmox_ve_journal", Title: "Proxmox VE journal", Description: "Use journald for pvedaemon authentication events.", Template: map[string]string{"MODE": "journal", "JOURNAL_UNIT": "pvedaemon.service"}}},
 		LeniencySupported:   true,
 		LeniencyRecommended: true,
 	})
