@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/detectorstatus"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -39,6 +40,9 @@ func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
 	})))
 	m.Handle("/api/v1/detectors/live", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleDetectorsLive(w, r, cfgDir)
+	})))
+	m.Handle("/api/v1/detectors/status", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleDetectorsStatus(w, r)
 	})))
 }
 
@@ -401,6 +405,14 @@ func handleDetectorsLive(w http.ResponseWriter, r *http.Request, cfgDir string) 
 		}
 	}
 	writeNotifierJSON(w, http.StatusOK, map[string]any{"live": live, "file": liveFile, "candidates": candidates})
+}
+
+func handleDetectorsStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeNotifierJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, detectorstatus.GetSnapshot())
 }
 
 func resolveSafeDetectorPath(rawPath, cfgDir string) (string, error) {
