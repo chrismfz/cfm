@@ -131,7 +131,10 @@
         <p id="notifierStatusHistory" class="statusline tab-status" style="display:none"></p>
         <div class="toolbar wrap">
           <input id="notifierHistoryChannel" class="input" placeholder="channel" />
-          <input id="notifierHistoryKind" class="input" list="notifierHistoryKindOptions" placeholder="kind" />
+          <select id="notifierHistoryKindSelect" class="input">
+            <option value="">kind (all)</option>
+          </select>
+          <input id="notifierHistoryKindCustom" class="input" list="notifierHistoryKindOptions" placeholder="custom kind" />
           <datalist id="notifierHistoryKindOptions"></datalist>
           <input id="notifierHistorySearch" class="input" placeholder="q" />
           <input id="notifierHistorySrcIP" class="input" placeholder="src_ip" />
