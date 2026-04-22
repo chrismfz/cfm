@@ -323,11 +323,6 @@ function parseDurationStrict(v){
   return re.test(s);
 }
 
-function isDurationFamilyKey(k){
-  const u = String(k||'').toUpperCase();
-  return ['EVERY','TIMEOUT','COOLDOWN','WINDOW','TTL'].some((t)=>u.includes(t)) || u.includes('BLOCK');
-}
-
 function parsePositiveNumber(v){
   const n = Number.parseFloat(String(v ?? '').trim());
   return Number.isFinite(n) ? n : null;
@@ -356,18 +351,36 @@ function collectLocalValidation(){
   };
 
   for(const [k,v] of Object.entries(state.draft.global||{})){
-    if(isDurationFamilyKey(k) && String(v||'').trim()!=='' && !parseDurationStrict(v)){
+    const schema = lookupDetectorKeySchema(k);
+    const trimmed = String(v||'').trim();
+    if(schema?.type === 'duration' && trimmed!=='' && !parseDurationStrict(v)){
       errs.push({ path:`global.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
       push(null, `global.${k}: invalid duration format (expected Go duration e.g. 30s, 5m, 1h30m)`);
+    } else if(schema?.type === 'duration_or_enum' && trimmed!==''){
+      const low = normalizeSchemaValue(trimmed).toLowerCase();
+      const allowed = (schema.allowed||[]).some((item)=>String(item).toLowerCase() === low);
+      if(!allowed && !parseDurationStrict(trimmed)){
+        errs.push({ path:`global.${k}`, message:'invalid block mode', expected:'named mode or Go duration, e.g. dryrun or 30m' });
+        push(null, `global.${k}: invalid block mode (expected dryrun/permanent/etc or Go duration like 30m)`);
+      }
     }
   }
   [...(state.draft.core||[]),...(state.draft.leniency||[])].forEach((sec)=>{
     const sectionName = sec.name || '(unnamed)';
     let lowestThreshold = null;
     for(const [k,v] of Object.entries(sec.keys||{})){
-      if(isDurationFamilyKey(k) && String(v||'').trim()!=='' && !parseDurationStrict(v)){
+      const schema = lookupDetectorKeySchema(k);
+      const trimmed = String(v||'').trim();
+      if(schema?.type === 'duration' && trimmed!=='' && !parseDurationStrict(v)){
         errs.push({ path:`${sec.name}.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
         push(sectionName, `${k}: invalid duration format`);
+      } else if(schema?.type === 'duration_or_enum' && trimmed!==''){
+        const low = normalizeSchemaValue(trimmed).toLowerCase();
+        const allowed = (schema.allowed||[]).some((item)=>String(item).toLowerCase() === low);
+        if(!allowed && !parseDurationStrict(trimmed)){
+          errs.push({ path:`${sec.name}.${k}`, message:'invalid block mode', expected:'named mode or Go duration, e.g. dryrun or 30m' });
+          push(sectionName, `${k}: invalid block mode (use dryrun/permanent/etc or Go duration like 30m)`);
+        }
       }
       if(isThresholdKey(k)){
         const n = parsePositiveNumber(v);
