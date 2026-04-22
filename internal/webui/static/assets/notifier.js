@@ -28,6 +28,7 @@
     historyPollInFlight: false,
     historySelectedCursor: '',
     historyFilterKey: '',
+    historyKnownKinds: new Set(),
   };
 
   const byId = (id) => document.getElementById(id);
@@ -412,10 +413,12 @@
   function historyFilters() {
     const limitRaw = Number(byId('notifierHistoryLimit')?.value || 100);
     const limit = limitRaw === 50 ? 50 : 100;
+    const kindCustom = String(byId('notifierHistoryKindCustom')?.value || '').trim();
+    const kindSelect = String(byId('notifierHistoryKindSelect')?.value || '').trim();
     return {
       limit,
       channel: String(byId('notifierHistoryChannel')?.value || '').trim(),
-      kind: String(byId('notifierHistoryKind')?.value || '').trim(),
+      kind: kindCustom || kindSelect,
       q: String(byId('notifierHistorySearch')?.value || '').trim(),
       src_ip: String(byId('notifierHistorySrcIP')?.value || '').trim(),
       asn: String(byId('notifierHistoryASN')?.value || '').trim(),
@@ -458,9 +461,23 @@
   }
 
   function renderHistoryKindOptions() {
+    const select = byId('notifierHistoryKindSelect');
     const dl = byId('notifierHistoryKindOptions');
-    if (!dl) return;
-    const kinds = Array.from(new Set((state.historyRows || []).map((row) => String(row?.kind || '').trim()).filter(Boolean))).sort();
+    if (!select || !dl) return;
+    const selected = String(select.value || '').trim();
+    const kinds = Array.from(state.historyKnownKinds).sort();
+    select.replaceChildren();
+    const allOption = document.createElement('option');
+    allOption.value = '';
+    allOption.textContent = 'kind (all)';
+    select.appendChild(allOption);
+    kinds.forEach((kind) => {
+      const opt = document.createElement('option');
+      opt.value = kind;
+      opt.textContent = kind;
+      select.appendChild(opt);
+    });
+    if (selected && state.historyKnownKinds.has(selected)) select.value = selected;
     dl.replaceChildren();
     kinds.forEach((kind) => {
       const opt = document.createElement('option');
@@ -471,7 +488,8 @@
 
   function clearHistoryFilters() {
     if (byId('notifierHistoryChannel')) byId('notifierHistoryChannel').value = '';
-    if (byId('notifierHistoryKind')) byId('notifierHistoryKind').value = '';
+    if (byId('notifierHistoryKindSelect')) byId('notifierHistoryKindSelect').value = '';
+    if (byId('notifierHistoryKindCustom')) byId('notifierHistoryKindCustom').value = '';
     if (byId('notifierHistorySearch')) byId('notifierHistorySearch').value = '';
     if (byId('notifierHistorySrcIP')) byId('notifierHistorySrcIP').value = '';
     if (byId('notifierHistoryASN')) byId('notifierHistoryASN').value = '';
@@ -583,6 +601,7 @@
       const tr = historyRowElement(row);
       body.insertBefore(tr, body.firstChild);
       state.historyRows.unshift(row);
+      if (row.kind) state.historyKnownKinds.add(String(row.kind).trim());
       if (row.kind) state.detectorHints.push(row.kind);
       added += 1;
     }
@@ -594,6 +613,10 @@
     if (!body) return;
     state.historyRows = Array.isArray(rows) ? rows : [];
     state.historyKnownCursors = new Set(state.historyRows.map((row) => String(row?.cursor || '')).filter(Boolean));
+    state.historyRows.forEach((row) => {
+      const kind = String(row?.kind || '').trim();
+      if (kind) state.historyKnownKinds.add(kind);
+    });
     body.replaceChildren();
     for (const row of state.historyRows) {
       const tr = historyRowElement(row);
@@ -943,6 +966,16 @@
       runChannelTest(selected);
     });
     byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false)));
+    byId('notifierHistoryKindSelect')?.addEventListener('change', () => {
+      if (byId('notifierHistoryKindCustom')) byId('notifierHistoryKindCustom').value = '';
+      fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false));
+    });
+    byId('notifierHistoryKindCustom')?.addEventListener('change', () => {
+      const custom = String(byId('notifierHistoryKindCustom')?.value || '').trim();
+      const select = byId('notifierHistoryKindSelect');
+      if (select) select.value = state.historyKnownKinds.has(custom) ? custom : '';
+      fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false));
+    });
     byId('notifierHistoryClearFiltersBtn')?.addEventListener('click', clearHistoryFilters);
     byId('notifierOverviewRefreshMetrics')?.addEventListener('click', () => refreshCounters().catch((e) => showStatus(e.message, false)));
     byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => {
