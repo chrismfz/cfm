@@ -138,6 +138,7 @@
           <datalist id="notifierHistoryKindOptions"></datalist>
           <input id="notifierHistorySearch" class="input" placeholder="q" />
           <input id="notifierHistorySrcIP" class="input" placeholder="src_ip" />
+          <input id="notifierHistoryCountry" class="input" placeholder="country" />
           <input id="notifierHistoryASN" class="input" placeholder="asn" />
           <input id="notifierHistoryPTR" class="input" placeholder="ptr" />
           <input id="notifierHistoryFrom" class="input" type="datetime-local" />
@@ -157,7 +158,19 @@
         <div class="notifier-history-layout">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Time</th><th>Kind</th><th>Channel</th><th>Status</th><th>Reason</th><th>Error</th></tr></thead>
+              <thead>
+                <tr>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="time" type="button">Time</button></th>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="kind" type="button">Kind</button></th>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="channel" type="button">Channel</button></th>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="status" type="button">Status</button></th>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="srcip" type="button">Src IP</button></th>
+                  <th><button class="btn-quiet btn-sm notifier-history-sort" data-sort-key="country" type="button">Country</button></th>
+                  <th>Reason</th>
+                  <th>Error</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
               <tbody id="notifierHistoryBody"></tbody>
             </table>
           </div>
