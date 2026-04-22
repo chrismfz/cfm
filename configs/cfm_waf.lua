@@ -31,7 +31,7 @@ local CFG = {
   --   "block"     -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
-  rule_traversal       = "disabled",   -- ../, null bytes, basic traversal markers
+  rule_traversal       = "logonly",   -- ../, null bytes, basic traversal markers
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
@@ -41,12 +41,14 @@ local CFG = {
   rule_php_wrappers      = "logonly",  -- php:// phar:// data:// zip:// expect:// glob://
   rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
   rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
-  rule_php_webshell_body = "logonly",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_b64_injection     = "logonly",  -- POST-body base64 decode heuristic scanner
+  rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
+  rule_b64_injection     = "challenge",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
   rule_auth_burst         = "challenge", -- generic login endpoint burst
-  rule_auth_wp_checks     = "challenge", -- HEAD wp-login, no UA+Referer POST wp-login
+  rule_auth_wp_checks     = "challenge", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
+                                         -- rollout: start this rule in "logonly" to baseline HEAD noise,
+                                         -- then promote to "challenge" after validating logs.
   rule_xmlrpc_multicall   = "challenge", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "challenge", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
@@ -59,11 +61,11 @@ local CFG = {
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
-  rule_cmd_payload_semi_cmd  = nil,         -- PAY_SEMI_CMD
-  rule_cmd_payload_pipe_wget = nil,         -- PAY_PIPE_WGET
-  rule_cmd_payload_pipe_curl = nil,         -- PAY_PIPE_CURL
-  rule_cmd_payload_pipe_bash = nil,         -- PAY_PIPE_BASH
-  rule_cmd_payload_pipe_sh   = nil,         -- PAY_PIPE_SH
+  rule_cmd_payload_semi_cmd  = "challenge",         -- PAY_SEMI_CMD
+  rule_cmd_payload_pipe_wget = "challenge",         -- PAY_PIPE_WGET
+  rule_cmd_payload_pipe_curl = "challenge",         -- PAY_PIPE_CURL
+  rule_cmd_payload_pipe_bash = "challenge",         -- PAY_PIPE_BASH
+  rule_cmd_payload_pipe_sh   = "challenge",         -- PAY_PIPE_SH
   rule_cmd_payload_backtick  = "logonly",   -- PAY_BACKTICK
 
   -- ── Research additions – all logonly for initial FP observation ────────────
@@ -80,15 +82,15 @@ local CFG = {
   rule_content_type_anomaly = "logonly",  -- non-standard charset bypass; malformed multipart boundary
 
   -- [top-8]  Proxy header integrity
-  rule_proxy_header_sqli = "logonly",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
+  rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
 
   -- [top-9]  SSRF + JS prototype pollution
   rule_ssrf             = "logonly",  -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
-  rule_js_proto         = "logonly",  -- JS __proto__ / constructor.prototype pollution
+  rule_js_proto         = "challenge",  -- JS __proto__ / constructor.prototype pollution
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "logonly",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
-  rule_crlf_injection   = "logonly",  -- CRLF / HTTP response-splitting in args or body
+  rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
+  rule_crlf_injection   = "challenge",  -- CRLF / HTTP response-splitting in args or body
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
@@ -106,6 +108,8 @@ local CFG = {
   auth_ttl_sec         = 600,
 
   -- WP login helper tuning
+  auth_wp_login_head_window_sec = 20,
+  auth_wp_login_head_threshold  = 3,
   auth_wp_login_head_ttl_sec = 600,
   auth_wp_login_noua_ttl_sec = 600,
 
@@ -772,7 +776,7 @@ end
   return nil
 end
 
-local function detect_auth_burst(ip, uri, method, shdict)
+local function detect_auth_burst(ip, host, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
   local tag = auth_endpoint_tag(uri, method)
@@ -782,8 +786,11 @@ local function detect_auth_burst(ip, uri, method, shdict)
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
-  local kts  = "auth|ts|"  .. ip .. "|" .. tag
-  local kcnt = "auth|cnt|" .. ip .. "|" .. tag
+  local host_key = lower(host or "-")
+  if host_key == "" then host_key = "-" end
+
+  local kts  = "auth|ts|"  .. ip .. "|" .. host_key .. "|" .. tag
+  local kcnt = "auth|cnt|" .. ip .. "|" .. host_key .. "|" .. tag
 
   local ts  = shdict:get(kts)
   local cnt = shdict:get(kcnt) or 0
@@ -803,7 +810,7 @@ local function detect_auth_burst(ip, uri, method, shdict)
   return nil
 end
 
-local function detect_wp_login_probe(uri, method, headers)
+local function detect_wp_login_probe(uri, method, headers, ip, host, shdict)
   uri = lower(uri or "")
   method = lower(method or "get")
   headers = headers or {}
@@ -812,9 +819,44 @@ local function detect_wp_login_probe(uri, method, headers)
 
   local ua  = lower(headers["user-agent"] or headers["User-Agent"] or "")
   local ref = lower(headers["referer"]   or headers["Referer"]   or "")
+  local accept = lower(headers["accept"] or headers["Accept"] or "")
 
   if method == "head" then
-    return "AUTH_WP_LOGIN_HEAD"
+    local empty_ua = (ua == "")
+    local missing_accept = (accept == "")
+    local suspicious_ua_family =
+      has(ua, "sqlmap") or has(ua, "nikto") or has(ua, "nmap") or has(ua, "masscan")
+      or has(ua, "curl/") or has(ua, "python-requests") or has(ua, "wget/")
+
+    local repeated_head = false
+    if shdict and ip and ip ~= "" then
+      local now = ngx.now()
+      local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
+      local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
+      local host_key = lower(host or "-")
+      if host_key == "" then host_key = "-" end
+
+      local kts  = "authwph|ts|"  .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
+      local kcnt = "authwph|cnt|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
+      local ts = shdict:get(kts)
+      local cnt = shdict:get(kcnt) or 0
+
+      if not ts or (now - ts) >= win then
+        shdict:set(kts, now, win + 1)
+        shdict:set(kcnt, 1, win + 1)
+      else
+        cnt = cnt + 1
+        shdict:set(kcnt, cnt, win + 1)
+        if cnt >= thr then
+          repeated_head = true
+        end
+      end
+    end
+
+    if empty_ua or missing_accept or suspicious_ua_family or repeated_head then
+      return "AUTH_WP_LOGIN_HEAD"
+    end
+    return nil
   end
 
   if method == "post" and ua == "" and ref == "" then
@@ -935,7 +977,7 @@ local function detect_xmlrpc_probe(uri, method, body)
   return nil
 end
 
-local function detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
+local function detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
   if not shdict or not ip or ip == "" then return nil end
 
   uri = lower(uri or "")
@@ -952,8 +994,11 @@ local function detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, 
   local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
-  local kts  = "xmlrpc|ts|"  .. ip
-  local kcnt = "xmlrpc|cnt|" .. ip
+  local host_key = lower(host or "-")
+  if host_key == "" then host_key = "-" end
+
+  local kts  = "xmlrpc|ts|"  .. ip .. "|" .. host_key
+  local kcnt = "xmlrpc|cnt|" .. ip .. "|" .. host_key
 
   local ts  = shdict:get(kts)
   local cnt = shdict:get(kcnt) or 0
@@ -2141,7 +2186,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
-      local tag = detect_wp_login_probe(uri, method, headers)
+      local tag = detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       if tag == "AUTH_WP_LOGIN_HEAD" then
         local ttl = CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
@@ -2180,7 +2225,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
     if mode ~= "disabled" then
-      local tag = detect_xmlrpc_post_burst(ip, uri, method, shdict, args, headers, body)
+      local tag = detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
@@ -2197,7 +2242,7 @@ function _M.check(ctx)
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = nil
         if not is_known_legit_xmlrpc(uri, args, headers, body) then
-          tag = detect_auth_burst(ip, uri, method, shdict)
+          tag = detect_auth_burst(ip, host, uri, method, shdict)
         end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
