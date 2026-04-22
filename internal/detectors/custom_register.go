@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"regexp"
@@ -28,6 +29,7 @@ type customRule struct {
 	re      *regexp.Regexp
 	hasIP   bool
 	hasUser bool
+	raw     string
 }
 
 type customDetector struct {
@@ -57,6 +59,50 @@ type customConfig struct {
 	AuthFailPerIP   int
 	AuthFailPerUser int
 	MatchTarget     customRuleTarget
+}
+
+const (
+	customMaxLinesPerTick = 3000
+	customRunBudget       = 900 * time.Millisecond
+	customMaxLineBytes    = 16 * 1024
+	customMaxFailRegex    = 128
+)
+
+type customRuleValidationError struct {
+	RuleIndex int
+	Rule      string
+	Message   string
+}
+
+type customRuleValidationResult struct {
+	rules []customRule
+	errs  []customRuleValidationError
+}
+
+func (r customRuleValidationResult) strategyOK(target customRuleTarget) bool {
+	hasIP := false
+	hasUser := false
+	for _, rule := range r.rules {
+		hasIP = hasIP || rule.hasIP
+		hasUser = hasUser || rule.hasUser
+	}
+	if hasIP {
+		return true
+	}
+	return target == customTargetUser && hasUser
+}
+
+type customInitError struct {
+	summary     string
+	diagnostics []string
+}
+
+func (e *customInitError) Error() string { return e.summary }
+
+func (e *customInitError) Diagnostics() []string {
+	out := make([]string, len(e.diagnostics))
+	copy(out, e.diagnostics)
+	return out
 }
 
 func init() {
@@ -92,7 +138,25 @@ func init() {
 		_ = kvStrClean(kv, "BLOCK", kvStrClean(global, "BLOCK", ""))
 		_ = kvDur(kv, "BLOCK_COOLDOWN", kvDur(global, "BLOCK_COOLDOWN", 20*time.Minute))
 
-		rules := parseCustomRules(kv, cfg.MatchTarget)
+		parsed := parseCustomRulesResult(kv, cfg.MatchTarget)
+		if len(parsed.errs) > 0 {
+			diagnostics := make([]string, 0, len(parsed.errs))
+			for _, e := range parsed.errs {
+				diagnostics = append(diagnostics, fmt.Sprintf("FAIL_REGEX[%d] %s", e.RuleIndex, e.Message))
+			}
+			return nil, &customInitError{
+				summary:     fmt.Sprintf("invalid FAIL_REGEX configuration (%d error(s))", len(parsed.errs)),
+				diagnostics: diagnostics,
+			}
+		}
+		if !parsed.strategyOK(cfg.MatchTarget) {
+			msg := "at least one target capture strategy is required (named (?P<ip>...) capture or MATCH_TARGET=user with (?P<user>...))"
+			return nil, &customInitError{
+				summary:     "invalid FAIL_REGEX capture strategy",
+				diagnostics: []string{msg},
+			}
+		}
+		rules := parsed.rules
 		ignores := parseCustomIgnoreRules(kv)
 		d := &customDetector{
 			name:    section,
@@ -133,6 +197,11 @@ func init() {
 }
 
 func parseCustomRules(kv KV, target customRuleTarget) []customRule {
+	result := parseCustomRulesResult(kv, target)
+	return result.rules
+}
+
+func parseCustomRulesResult(kv KV, target customRuleTarget) customRuleValidationResult {
 	lines := kvLines(kv, "FAIL_REGEX")
 	if len(lines) == 0 {
 		lines = kvLines(kv, "RULES")
@@ -147,26 +216,53 @@ func parseCustomRules(kv KV, target customRuleTarget) []customRule {
 			lines = append(lines, raw)
 		}
 	}
-	out := make([]customRule, 0, len(lines))
-	for _, line := range lines {
+	result := customRuleValidationResult{rules: make([]customRule, 0, len(lines))}
+	if len(lines) == 0 {
+		result.errs = append(result.errs, customRuleValidationError{
+			RuleIndex: -1,
+			Message:   "FAIL_REGEX is required and must contain at least one regex",
+		})
+		return result
+	}
+	if len(lines) > customMaxFailRegex {
+		result.errs = append(result.errs, customRuleValidationError{
+			RuleIndex: -1,
+			Message:   fmt.Sprintf("too many FAIL_REGEX rules (%d > %d)", len(lines), customMaxFailRegex),
+		})
+		return result
+	}
+	for idx, line := range lines {
 		reStr := strings.TrimSpace(line)
 		if reStr == "" {
+			result.errs = append(result.errs, customRuleValidationError{
+				RuleIndex: idx,
+				Rule:      line,
+				Message:   "regex is empty",
+			})
 			continue
 		}
 		re, err := regexp.Compile(reStr)
 		if err != nil {
-			logging.Logf("[detectors][custom] invalid regex %q: %v", line, err)
+			result.errs = append(result.errs, customRuleValidationError{
+				RuleIndex: idx,
+				Rule:      line,
+				Message:   fmt.Sprintf("regex does not compile: %v", err),
+			})
 			continue
 		}
 		hasIP := re.SubexpIndex("ip") > 0
 		hasUser := re.SubexpIndex("user") > 0
 		if !validCustomCaptureTarget(target, hasIP, hasUser) {
-			logging.Logf("[detectors][custom] regex %q missing required named captures for MATCH_TARGET=%s", line, customMatchTargetString(target))
+			result.errs = append(result.errs, customRuleValidationError{
+				RuleIndex: idx,
+				Rule:      line,
+				Message:   fmt.Sprintf("missing required named captures for MATCH_TARGET=%s", customMatchTargetString(target)),
+			})
 			continue
 		}
-		out = append(out, customRule{re: re, hasIP: hasIP, hasUser: hasUser})
+		result.rules = append(result.rules, customRule{re: re, hasIP: hasIP, hasUser: hasUser, raw: reStr})
 	}
-	return out
+	return result
 }
 
 func parseCustomIgnoreRules(kv KV) []*regexp.Regexp {
@@ -256,6 +352,8 @@ func (d *customDetector) RunOnce(ctx context.Context, out chan<- core.Alert) err
 	defer d.src.Close()
 
 	now := time.Now()
+	deadline := now.Add(customRunBudget)
+	lines := 0
 	for {
 		line, err := d.src.ReadNext(ctx)
 		if err == io.EOF {
@@ -264,7 +362,11 @@ func (d *customDetector) RunOnce(ctx context.Context, out chan<- core.Alert) err
 		if err != nil {
 			break
 		}
+		lines++
 		d.consume(now, line, out)
+		if lines >= customMaxLinesPerTick || time.Now().After(deadline) {
+			break
+		}
 	}
 
 	if d.state != nil && d.stateKey != "" {
@@ -275,6 +377,9 @@ func (d *customDetector) RunOnce(ctx context.Context, out chan<- core.Alert) err
 }
 
 func (d *customDetector) consume(now time.Time, line string, out chan<- core.Alert) {
+	if len(line) > customMaxLineBytes {
+		return
+	}
 	for _, ignore := range d.ignores {
 		if ignore.FindStringSubmatch(line) != nil {
 			return
@@ -292,10 +397,19 @@ func (d *customDetector) consume(now time.Time, line string, out chan<- core.Ale
 
 		switch d.cfg.MatchTarget {
 		case customTargetIP:
+			if ip == "" {
+				continue
+			}
 			d.bump(now, "AUTHFAIL|ip", ip, line, out)
 		case customTargetUser:
+			if user == "" {
+				continue
+			}
 			d.bump(now, "AUTHFAIL|user", user, line, out)
 		case customTargetBoth:
+			if ip == "" || user == "" {
+				continue
+			}
 			d.bump(now, "AUTHFAIL|ip", ip, line, out)
 			d.bump(now, "AUTHFAIL|user", user, line, out)
 		default:

@@ -52,3 +52,20 @@ func TestUpsertConfiguredSectionsPreservesRuntimeState(t *testing.T) {
 		t.Fatalf("expected active to be preserved")
 	}
 }
+
+func TestMarkInitFailedWithDiagnosticsAppearsInSnapshot(t *testing.T) {
+	ResetConfiguredSections([]SectionConfig{{Section: "custom:auth", Type: "custom", Configured: true, Enabled: true}})
+	MarkInitFailedWithDiagnostics("custom:auth", "invalid FAIL_REGEX configuration", []string{
+		"FAIL_REGEX[0] regex does not compile",
+	})
+	snap := GetSnapshot()
+	if len(snap.Sections) != 1 {
+		t.Fatalf("expected one section, got %d", len(snap.Sections))
+	}
+	if snap.Sections[0].LastError == "" {
+		t.Fatalf("expected last_error to be set")
+	}
+	if len(snap.Sections[0].InitDiagnostics) != 1 {
+		t.Fatalf("expected init_diagnostics, got %+v", snap.Sections[0].InitDiagnostics)
+	}
+}
