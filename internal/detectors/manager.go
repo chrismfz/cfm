@@ -2,6 +2,7 @@ package detectors
 
 import (
 	core "cfm/internal/detectors/core"
+	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
@@ -35,6 +36,26 @@ type manager struct {
 
 	ignore      *IPIgnore // New ignore IP and Subnets
 	chalExclude *ChallengeExclude
+}
+
+func probeSourceStatus(kv KV) (bool, string) {
+	mode := strings.ToLower(strings.TrimSpace(kvStrClean(kv, "MODE", "")))
+	logPath := strings.TrimSpace(kvStrClean(kv, "LOG_PATH", ""))
+	switch mode {
+	case "journal":
+		return true, "journal source configured"
+	case "docker":
+		return true, "docker source configured"
+	}
+	if logPath == "" {
+		return false, "log path not configured"
+	}
+	f, err := os.Open(logPath) // #nosec G304 -- detector LOG_PATH is explicitly configured by admin.
+	if err != nil {
+		return false, "log file unreadable: " + err.Error()
+	}
+	_ = f.Close()
+	return true, "log file readable"
 }
 
 // cfgSig changes when either detections.conf changes (StampNS) OR any watched
@@ -157,6 +178,24 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 	sig := cfgSig(&secs)
+	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
+	for secName, kv := range secs.ByName {
+		if secName == "global" || strings.HasSuffix(secName, ".leniency") {
+			continue
+		}
+		typ, _ := splitTypeInstance(secName)
+		sourceOK, sourceMsg := probeSourceStatus(kv)
+		configured = append(configured, detectorstatus.SectionConfig{
+			Section:            secName,
+			Type:               typ,
+			Configured:         true,
+			Enabled:            kvBool(kv, "ENABLED", true),
+			SourceProbeOK:      sourceOK,
+			SourceProbeMessage: sourceMsg,
+		})
+	}
+	detectorstatus.ResetConfiguredSections(configured)
+	detectorstatus.SetLoadedTypes(len(RegisteredTypes()))
 	// No change from current running config: clear any pending reload.
 	if sig == m.lastSig && m.running {
 		m.hasPending = false
@@ -352,6 +391,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		fac, ok := getFactory(typ)
 		if !ok {
 			logging.Logf("[detectors] unknown section type: %s (section %q) — skipping", typ, secName)
+			detectorstatus.MarkInitFailed(secName, "unknown detector type: "+typ)
 			continue
 		}
 
@@ -360,12 +400,16 @@ func (m *manager) maybeReload(parent context.Context) {
 		// return (nil, nil). Treat that as a successful no-op, not an init failure.
 		if err != nil {
 			logging.Logf("[detectors] failed to init %s: %v", secName, err)
+			detectorstatus.MarkInitFailed(secName, err.Error())
 			continue
 		}
 		if det == nil {
 			logging.Logf("[detectors] %s: no detector instance (config-only) — skipping", secName)
+			detectorstatus.MarkInitOK(secName)
+			detectorstatus.MarkExit(secName, nil)
 			continue
 		}
+		detectorstatus.MarkInitOK(secName)
 
 		// If detector supports enrichment, inject the shared enricher
 		if enr != nil {
@@ -504,18 +548,31 @@ func (m *manager) maybeReload(parent context.Context) {
 		secSink := newSectionSink(secName, pol, m.opts.Sink, m.opts.FW, enr, m.ignore, chalCooldown, secExclude, leniency)
 
 		m.wg.Add(1)
-		go func() {
+		go func(sectionName string, detector core.PeriodicDetector) {
 			defer m.wg.Done()
+			hooks := &RunHooks{
+				OnRunStart: func(name string) {
+					detectorstatus.MarkRunStart(sectionName, time.Now())
+				},
+				OnRunComplete: func(name string, runErr error) {
+					detectorstatus.MarkRunComplete(sectionName, time.Now(), runErr)
+				},
+				OnRunTimeout: func(name string) {
+					detectorstatus.MarkRunTimeout(sectionName)
+				},
+			}
 
 			// If a detector goroutine exits unexpectedly (ctx not canceled),
 			// it will silently stop. Log exits so we can spot stuck/failed loops.
-			if err := RunPeriodicWithState(ctx, det, secSink, m.state); err != nil && err != context.Canceled {
-				logging.Logf("[detectors][%s] exited: %v", secName, err)
+			if err := RunPeriodicWithStateAndHooks(ctx, detector, secSink, m.state, hooks); err != nil && err != context.Canceled {
+				detectorstatus.MarkExit(sectionName, err)
+				logging.Logf("[detectors][%s] exited: %v", sectionName, err)
 			} else {
-				logging.Logf("[detectors][%s] exited", secName)
+				detectorstatus.MarkExit(sectionName, nil)
+				logging.Logf("[detectors][%s] exited", sectionName)
 			}
 
-		}()
+		}(secName, det)
 	}
 }
 

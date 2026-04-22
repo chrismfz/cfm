@@ -1,6 +1,6 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] } };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {} } };
 const byId = (id) => document.getElementById(id);
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
@@ -8,6 +8,44 @@ function setStatus(msg,bad=false){ const el=byId('detectorsStatus'); el.textCont
 function setDirty(v){ state.dirty=v; byId('detectorsDirty').textContent=v?'Unsaved':'Saved'; }
 function setLeniencyFeedback(msg,bad=false){ const el=byId('detectorsLeniencyModalFeedback'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
 function safeText(v){ return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
+function fmtDate(v){ if(!v) return 'never'; const d=new Date(v); return Number.isNaN(d.getTime())?'never':d.toLocaleString(); }
+
+function runtimeBadge(sec, runtime){
+  if(!runtime || !sec?.enabled) return {color:'#9ca3af', label:'disabled', reason:'Section is disabled.'};
+  const successes = Math.max(0, Number(runtime.runs||0)-Number(runtime.failures||0));
+  const lastSuccessAt = runtime.last_success_at ? new Date(runtime.last_success_at) : null;
+  const recentSuccess = lastSuccessAt && (Date.now() - lastSuccessAt.getTime()) <= (20*60*1000);
+  const repeatedFailures = Number(runtime.failures||0) >= 3;
+  const timeoutStreak = Number(runtime.timeouts||0) >= 2;
+  if(runtime.init_ok === false || repeatedFailures || timeoutStreak || (runtime.last_error||'').toLowerCase().includes('timeout')){
+    return {color:'#ef4444', label:'error', reason:runtime.last_error || 'Init failure/repeated failures/timeouts.'};
+  }
+  if(runtime.active && recentSuccess && runtime.source_probe_ok){
+    return {color:'#22c55e', label:'healthy', reason:`Recent success at ${fmtDate(runtime.last_success_at)}.`};
+  }
+  if(!runtime.source_probe_ok){
+    return {color:'#f59e0b', label:'waiting', reason:runtime.source_probe_message || 'No source activity yet.'};
+  }
+  return {color:'#f59e0b', label:'warming', reason:successes===0?'Enabled but no successful runs yet.':'Waiting for fresh successful run.'};
+}
+
+function setRuntimeSummary(summary){
+  const el = byId('detectorsRuntimeSummary');
+  if(!el) return;
+  const s = summary || {};
+  el.textContent = `Loaded ${s.loaded_types||0} detector types, Configured ${s.configured_sections||0} sections, Enabled ${s.enabled_sections||0}, Active ${s.active_sections||0}`;
+}
+
+async function refreshRuntimeStatus(){
+  try{
+    const j = await api('/api/v1/detectors/status');
+    state.runtime = j || { sections: [], summary: {} };
+    setRuntimeSummary(state.runtime.summary);
+    render();
+  }catch(e){
+    setStatus(`Runtime status unavailable: ${e.message}`, true);
+  }
+}
 
 async function api(path,opt={}){ const r=await fetch(`/cfm-admin${path}`,{credentials:'include',headers:{'Content-Type':'application/json'},...opt}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||`HTTP ${r.status}`); return j; }
 
@@ -311,7 +349,8 @@ function render(){
   Object.entries(state.draft.global||{}).forEach(([k,v])=>{ const d=document.createElement('div'); d.innerHTML=`<label class="muted">${k}</label><input class="input input-wide" value="${String(v).replaceAll('"','&quot;')}"/>`; d.querySelector('input').addEventListener('input',e=>{state.draft.global[k]=e.target.value; setDirty(true);}); g.appendChild(d); });
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
-  (state.draft.core||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
+  const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
+  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const detail = runtime ? `<div class="muted" style="margin-top:4px">runs=${runtime.runs||0}, fail=${runtime.failures||0}, timeout=${runtime.timeouts||0}, last run=${safeText(fmtDate(runtime.last_run_at))}${runtime.last_error?`, err=${safeText(runtime.last_error)}`:''}</div>` : ''; const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}${detail}</td><td><span class="pill" style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
     tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); render();});
     renderSectionEditor(tr.querySelector('div'), sec);
     core.appendChild(tr);
@@ -324,7 +363,7 @@ function render(){
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
 }
 
-async function load(){ const j=await api('/api/v1/detectors/config'); state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.modes={}; render(); setDirty(false); setStatus(`Loaded ${state.path}`); await refreshBackups(); }
+async function load(){ const j=await api('/api/v1/detectors/config'); state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.modes={}; render(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]); }
 
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
 
@@ -360,6 +399,7 @@ function init(){
   byId('detectorsRefreshBackups').onclick=refreshBackups;
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });
+  window.setInterval(()=>{ refreshRuntimeStatus(); }, 10000);
   load().catch((e)=>setStatus(e.message,true));
 }
 
