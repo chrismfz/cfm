@@ -423,6 +423,7 @@
       kind: kindCustom || kindSelect,
       q: String(byId('notifierHistorySearch')?.value || '').trim(),
       src_ip: String(byId('notifierHistorySrcIP')?.value || '').trim(),
+      country: String(byId('notifierHistoryCountry')?.value || '').trim(),
       asn: String(byId('notifierHistoryASN')?.value || '').trim(),
       ptr: String(byId('notifierHistoryPTR')?.value || '').trim(),
       from: String(byId('notifierHistoryFrom')?.value || '').trim(),
@@ -438,6 +439,7 @@
     if (filters.kind) p.set('kind', filters.kind);
     if (filters.q) p.set('q', filters.q);
     if (filters.src_ip) p.set('src_ip', filters.src_ip);
+    if (filters.country) p.set('country', filters.country);
     if (filters.asn) p.set('asn', filters.asn);
     if (filters.ptr) p.set('ptr', filters.ptr);
     if (filters.from) p.set('from', filters.from);
@@ -456,6 +458,7 @@
       kind: filters.kind,
       q: filters.q,
       src_ip: filters.src_ip,
+      country: filters.country,
       asn: filters.asn,
       ptr: filters.ptr,
       from: filters.from,
@@ -496,6 +499,7 @@
     if (byId('notifierHistoryKindCustom')) byId('notifierHistoryKindCustom').value = '';
     if (byId('notifierHistorySearch')) byId('notifierHistorySearch').value = '';
     if (byId('notifierHistorySrcIP')) byId('notifierHistorySrcIP').value = '';
+    if (byId('notifierHistoryCountry')) byId('notifierHistoryCountry').value = '';
     if (byId('notifierHistoryASN')) byId('notifierHistoryASN').value = '';
     if (byId('notifierHistoryPTR')) byId('notifierHistoryPTR').value = '';
     if (byId('notifierHistoryFrom')) byId('notifierHistoryFrom').value = '';
@@ -508,7 +512,8 @@
   }
 
   function historyRowToHTML(row) {
-    return `<td>${escapeHTML(row.time || '')}</td><td>${escapeHTML(row.kind || '')}</td><td>${escapeHTML(row.channel || '')}</td><td>${escapeHTML(row.status || '')}</td><td>${escapeHTML(row.srcip || '')}</td><td>${escapeHTML(row.reason || '')}</td><td>${escapeHTML(row.error || '')}</td>`;
+    const country = payloadField(row.payload || {}, 'country');
+    return `<td>${escapeHTML(row.time || '')}</td><td>${escapeHTML(row.kind || '')}</td><td>${escapeHTML(row.channel || '')}</td><td>${escapeHTML(row.status || '')}</td><td>${escapeHTML(row.srcip || '')}</td><td>${escapeHTML(country || '')}</td><td>${escapeHTML(row.reason || '')}</td><td>${escapeHTML(row.error || '')}</td>`;
   }
 
   function escapeHTML(value) {
@@ -538,6 +543,9 @@
   function historySortValue(row, key) {
     if (key === 'time') {
       return Date.parse(String(row?.time || '')) || 0;
+    }
+    if (key === 'country') {
+      return String(payloadField(row?.payload || {}, 'country') || '').toLowerCase();
     }
     return String(row?.[key] || '').toLowerCase();
   }

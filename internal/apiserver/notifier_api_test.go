@@ -603,10 +603,10 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	rows := []string{
-		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","asn":"13335","ptr":"one.example.test","reason":"slow","channel":"ops","err":""}`,
-		`{"time":"` + now.Add(-450*time.Second).Format(time.RFC3339Nano) + `","host":"db01","kind":"NOTIFIER/TEST","srcip":"1.1.1.2","reason":"manual","channel":"ops","status":"success","latency":"10ms","correlation_id":"corr-1","err":""}`,
-		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","asn":"64510","ptr":"attacker.example.test","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
-		`{"time":"` + now.Add(-3*time.Minute).Format(time.RFC3339Nano) + `","host":"db03","kind":"mysql","srcip":"3.3.3.3","reason":"deadlock","channel":"ops","err":""}`,
+		`{"time":"` + now.Add(-5*time.Minute).Format(time.RFC3339Nano) + `","host":"db01","kind":"mysql","srcip":"1.1.1.1","country":"US","asn":"13335","ptr":"one.example.test","reason":"slow","channel":"ops","err":""}`,
+		`{"time":"` + now.Add(-450*time.Second).Format(time.RFC3339Nano) + `","host":"db01","kind":"NOTIFIER/TEST","srcip":"1.1.1.2","country":"US","reason":"manual","channel":"ops","status":"success","latency":"10ms","correlation_id":"corr-1","err":""}`,
+		`{"time":"` + now.Add(-4*time.Minute).Format(time.RFC3339Nano) + `","host":"db02","kind":"ssh","srcip":"2.2.2.2","country":"CA","asn":"64510","ptr":"attacker.example.test","reason":"bruteforce","channels":["pager"],"err":"smtp timeout"}`,
+		`{"time":"` + now.Add(-3*time.Minute).Format(time.RFC3339Nano) + `","host":"db03","kind":"mysql","srcip":"3.3.3.3","country":"US","reason":"deadlock","channel":"ops","err":""}`,
 	}
 	if err := os.WriteFile(jsonl, []byte(strings.Join(rows, "\n")+"\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -714,7 +714,7 @@ func TestNotifierHistoryEndpoint(t *testing.T) {
 
 	from := now.Add(-4*time.Minute - 15*time.Second).Format(time.RFC3339Nano)
 	to := now.Add(-3*time.Minute + 15*time.Second).Format(time.RFC3339Nano)
-	req5 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?status=all&q=attacker&asn=64510&ptr=attacker.example.test&kind=ssh&channel=pager&src_ip=2.2.2.2&from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), nil)
+	req5 := httptest.NewRequest(http.MethodGet, "/api/v1/notifier/history?status=all&q=ca&country=CA&asn=64510&ptr=attacker.example.test&kind=ssh&channel=pager&src_ip=2.2.2.2&from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), nil)
 	rr5 := httptest.NewRecorder()
 	mux.ServeHTTP(rr5, adminCtx(req5))
 	if rr5.Code != http.StatusOK {

@@ -61,6 +61,7 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 	limit := clampInt(q.Get("limit"), 50, 1, 500)
 	queryText := strings.TrimSpace(q.Get("q"))
 	srcIPFilter := strings.TrimSpace(q.Get("src_ip"))
+	countryFilter := strings.TrimSpace(q.Get("country"))
 	asnFilter := strings.TrimSpace(q.Get("asn"))
 	ptrFilter := strings.TrimSpace(q.Get("ptr"))
 	kindFilter := strings.TrimSpace(q.Get("kind"))
@@ -152,6 +153,9 @@ func handleNotifierHistory(w http.ResponseWriter, r *http.Request, cfgDir string
 		}
 		item := rowToNotifierHistoryItem(row)
 		if srcIPFilter != "" && !strings.EqualFold(item.SrcIP, srcIPFilter) {
+			continue
+		}
+		if countryFilter != "" && !strings.EqualFold(strings.TrimSpace(toString(row.Raw["country"])), countryFilter) {
 			continue
 		}
 		if asnFilter != "" && !strings.EqualFold(strings.TrimSpace(toString(row.Raw["asn"])), asnFilter) {
@@ -408,6 +412,7 @@ func notifierHistoryMatchesQuery(raw map[string]any, item notifierHistoryItem, q
 	}
 	haystack := strings.ToLower(strings.Join([]string{
 		item.SrcIP,
+		strings.TrimSpace(toString(raw["country"])),
 		strings.TrimSpace(toString(raw["asn"])),
 		strings.TrimSpace(toString(raw["ptr"])),
 		item.Reason,
