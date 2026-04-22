@@ -175,9 +175,11 @@ function confirmAddLeniency(){
 }
 
 function normalizeSafeBlockValue(v){
-  const mode = String(v||'').trim().toLowerCase();
+  const raw = String(v||'').trim();
+  const mode = raw.toLowerCase();
   if(!mode) return 'dryrun';
-  if(['0','no','off','dryrun','alert'].includes(mode)) return mode;
+  if(['0','no','off','dryrun','alert','permanent','perm'].includes(mode)) return mode;
+  if(parseDurationStrict(raw)) return raw;
   return 'dryrun';
 }
 
@@ -190,16 +192,18 @@ function uniqueSectionName(baseName, kind){
   return `${clean}_${idx}`;
 }
 
-function sanitizeExampleKeys(keys){
+function sanitizeExampleKeys(keys, opt={}){
+  const safeInsert = opt.safeInsert === true;
   const next = clone(keys||{});
-  if(Object.prototype.hasOwnProperty.call(next,'BLOCK')) next.BLOCK = normalizeSafeBlockValue(next.BLOCK);
+  if(safeInsert && Object.prototype.hasOwnProperty.call(next,'BLOCK')) next.BLOCK = normalizeSafeBlockValue(next.BLOCK);
   if(Object.prototype.hasOwnProperty.call(next,'SEND_TO_API') && String(next.SEND_TO_API).trim()==='') next.SEND_TO_API = '0';
   return next;
 }
 
-function insertExample(example, kind){
+function insertExample(example, kind, opt={}){
+  const safeInsert = opt.safeInsert !== false;
   const secName = uniqueSectionName(example.section || example.id, kind);
-  const keys = sanitizeExampleKeys(example.keys || {});
+  const keys = sanitizeExampleKeys(example.keys || {}, { safeInsert });
   if(kind === 'core'){
     keys.ENABLED = '0';
     state.draft.core = state.draft.core || [];
@@ -211,12 +215,12 @@ function insertExample(example, kind){
   byId('detectorsExamplesModal').style.display='none';
   render();
   setDirty(true);
-  setStatus(`Inserted template "${example.title}" as ${secName}`);
+  setStatus(`Inserted template "${example.title}" as ${secName}${safeInsert?' (safe insert)':''}`);
 }
 
 async function copyExampleConfig(example, kind){
   const section = uniqueSectionName(example.section || example.id, kind);
-  const keys = sanitizeExampleKeys(example.keys || {});
+  const keys = sanitizeExampleKeys(example.keys || {}, { safeInsert: false });
   const payload = { section, kind, keys };
   const text = JSON.stringify(payload, null, 2);
   try{
@@ -241,8 +245,9 @@ function openExamplesModal(kind){
   items.forEach((ex)=>{
     const card = document.createElement('div');
     card.className = 'summary-card';
-    card.innerHTML = `<h4 style="margin-top:0">${safeText(ex.title || ex.id)}</h4><p class="muted" style="margin:4px 0 8px 0">Source section: <code>${safeText(ex.section || '-')}</code></p><p class="muted" style="margin:0 0 10px 0">${safeText(ex.preview || 'No preview')}</p><div class="toolbar wrap"><button type="button" data-action="insert">Insert safely</button><button type="button" class="btn-quiet" data-action="copy">Copy example config</button></div>`;
-    card.querySelector('[data-action="insert"]').addEventListener('click', ()=>insertExample(ex, kind));
+    card.innerHTML = `<h4 style="margin-top:0">${safeText(ex.title || ex.id)}</h4><p class="muted" style="margin:4px 0 8px 0">Source section: <code>${safeText(ex.section || '-')}</code></p><p class="muted" style="margin:0 0 10px 0">${safeText(ex.preview || 'No preview')}</p><div class="toolbar wrap"><button type="button" data-action="insert-safe">Insert safely</button><button type="button" class="btn-quiet" data-action="insert-raw">Insert as-is</button><button type="button" class="btn-quiet" data-action="copy">Copy example config</button></div>`;
+    card.querySelector('[data-action="insert-safe"]').addEventListener('click', ()=>insertExample(ex, kind, { safeInsert: true }));
+    card.querySelector('[data-action="insert-raw"]').addEventListener('click', ()=>insertExample(ex, kind, { safeInsert: false }));
     card.querySelector('[data-action="copy"]').addEventListener('click', ()=>copyExampleConfig(ex, kind));
     list.appendChild(card);
   });
@@ -358,6 +363,37 @@ function buildTypedControl(key, value, onChange){
     return wrap;
   }
   if(schema.allowed?.length){
+    if(schema.type === 'duration_or_enum'){
+      const suggestions = Array.from(new Set([...(schema.allowed||[]), '30m', '1h', '24h', '1h30m']));
+      const listId = `detectors-${String(key).toLowerCase().replace(/[^a-z0-9_-]/g,'-')}-duration-suggestions`;
+      wrap.innerHTML = `<label class="muted">${keyLabel}</label><input type="text" class="input input-wide" list="${listId}" value="${raw.replaceAll('"','&quot;')}"><datalist id="${listId}">${suggestions.map((s)=>`<option value="${safeText(s)}"></option>`).join('')}</datalist><div class="muted" style="font-size:11px">Go duration, e.g. 30m, 24h, 1h30m</div>${help}`;
+      const input = wrap.querySelector('input');
+      const inlineState = document.createElement('div');
+      inlineState.className = 'muted';
+      inlineState.style.fontSize = '11px';
+      inlineState.style.minHeight = '16px';
+      inlineState.style.marginTop = '2px';
+      wrap.appendChild(inlineState);
+      const allowedMap = new Map((schema.allowed||[]).map((v)=>[String(v).toLowerCase(), v]));
+      const renderInline = (nextRaw)=>{
+        const next = String(nextRaw||'').trim();
+        if(!next){
+          inlineState.textContent='';
+          inlineState.style.color = '';
+          return;
+        }
+        if(allowedMap.has(next.toLowerCase()) || parseDurationStrict(next)){
+          inlineState.textContent='';
+          inlineState.style.color = '';
+          return;
+        }
+        inlineState.textContent = 'Invalid value: use a listed mode or Go duration, e.g. 30m, 24h, 1h30m';
+        inlineState.style.color = '#fca5a5';
+      };
+      renderInline(raw);
+      input.addEventListener('input',(e)=>{ renderInline(e.target.value); onChange(e.target.value); });
+      return wrap;
+    }
     const opts = schema.allowed.map((o)=>`<option value="${o}">${o}</option>`).join('');
     wrap.innerHTML = `<label class="muted">${keyLabel}</label><select class="input input-wide"><option value="">-- select --</option>${opts}</select>${help}`;
     const sel = wrap.querySelector('select');
