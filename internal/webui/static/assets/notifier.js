@@ -27,6 +27,7 @@
     historyKnownCursors: new Set(),
     historyPollInFlight: false,
     historySelectedCursor: '',
+    historyFilterKey: '',
   };
 
   const byId = (id) => document.getElementById(id);
@@ -415,6 +416,12 @@
       limit,
       channel: String(byId('notifierHistoryChannel')?.value || '').trim(),
       kind: String(byId('notifierHistoryKind')?.value || '').trim(),
+      q: String(byId('notifierHistorySearch')?.value || '').trim(),
+      src_ip: String(byId('notifierHistorySrcIP')?.value || '').trim(),
+      asn: String(byId('notifierHistoryASN')?.value || '').trim(),
+      ptr: String(byId('notifierHistoryPTR')?.value || '').trim(),
+      from: String(byId('notifierHistoryFrom')?.value || '').trim(),
+      to: String(byId('notifierHistoryTo')?.value || '').trim(),
       status: String(byId('notifierHistoryStatus')?.value || 'all'),
     };
   }
@@ -424,9 +431,58 @@
     p.set('limit', String(filters.limit));
     if (filters.channel) p.set('channel', filters.channel);
     if (filters.kind) p.set('kind', filters.kind);
+    if (filters.q) p.set('q', filters.q);
+    if (filters.src_ip) p.set('src_ip', filters.src_ip);
+    if (filters.asn) p.set('asn', filters.asn);
+    if (filters.ptr) p.set('ptr', filters.ptr);
+    if (filters.from) p.set('from', filters.from);
+    if (filters.to) p.set('to', filters.to);
     p.set('status', filters.status);
     if (sinceCursor) p.set('since', sinceCursor);
     return p.toString();
+  }
+
+  function historyFilterKey(filters) {
+    return JSON.stringify({
+      limit: filters.limit,
+      channel: filters.channel,
+      kind: filters.kind,
+      q: filters.q,
+      src_ip: filters.src_ip,
+      asn: filters.asn,
+      ptr: filters.ptr,
+      from: filters.from,
+      to: filters.to,
+      status: filters.status,
+    });
+  }
+
+  function renderHistoryKindOptions() {
+    const dl = byId('notifierHistoryKindOptions');
+    if (!dl) return;
+    const kinds = Array.from(new Set((state.historyRows || []).map((row) => String(row?.kind || '').trim()).filter(Boolean))).sort();
+    dl.replaceChildren();
+    kinds.forEach((kind) => {
+      const opt = document.createElement('option');
+      opt.value = kind;
+      dl.appendChild(opt);
+    });
+  }
+
+  function clearHistoryFilters() {
+    if (byId('notifierHistoryChannel')) byId('notifierHistoryChannel').value = '';
+    if (byId('notifierHistoryKind')) byId('notifierHistoryKind').value = '';
+    if (byId('notifierHistorySearch')) byId('notifierHistorySearch').value = '';
+    if (byId('notifierHistorySrcIP')) byId('notifierHistorySrcIP').value = '';
+    if (byId('notifierHistoryASN')) byId('notifierHistoryASN').value = '';
+    if (byId('notifierHistoryPTR')) byId('notifierHistoryPTR').value = '';
+    if (byId('notifierHistoryFrom')) byId('notifierHistoryFrom').value = '';
+    if (byId('notifierHistoryTo')) byId('notifierHistoryTo').value = '';
+    if (byId('notifierHistoryStatus')) byId('notifierHistoryStatus').value = 'all';
+    if (byId('notifierHistoryLimit')) byId('notifierHistoryLimit').value = '100';
+    state.historyLatestCursor = '';
+    state.historyFilterKey = '';
+    fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false));
   }
 
   function historyRowToHTML(row) {
@@ -551,16 +607,20 @@
   async function fetchHistory({ poll = false } = {}) {
     const filters = historyFilters();
     byId('notifierHistoryLimit').value = String(filters.limit);
-    const qs = historyQueryString(filters, poll ? state.historyLatestCursor : '');
+    const filterKey = historyFilterKey(filters);
+    const canPoll = poll && state.historyFilterKey === filterKey && !!state.historyLatestCursor;
+    const qs = historyQueryString(filters, canPoll ? state.historyLatestCursor : '');
     const payload = await request(`/cfm-admin/api/v1/notifier/history?${qs}`);
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
-    if (poll) {
+    if (canPoll) {
       const added = prependHistoryRows(rows);
       if (added > 0) showTabStatus('history', `Added ${added} new row${added === 1 ? '' : 's'}.`);
     } else {
       replaceHistoryRows(rows);
     }
     if (state.historyRows[0]?.cursor) state.historyLatestCursor = state.historyRows[0].cursor;
+    state.historyFilterKey = filterKey;
+    renderHistoryKindOptions();
     state.detectorHints = Array.from(new Set(state.detectorHints)); renderDetectorHints();
   }
 
@@ -883,6 +943,7 @@
       runChannelTest(selected);
     });
     byId('notifierHistoryRefreshBtn')?.addEventListener('click', () => fetchHistory({ poll: false }).catch((e) => showStatus(e.message, false)));
+    byId('notifierHistoryClearFiltersBtn')?.addEventListener('click', clearHistoryFilters);
     byId('notifierOverviewRefreshMetrics')?.addEventListener('click', () => refreshCounters().catch((e) => showStatus(e.message, false)));
     byId('notifierOverviewToggleEnabled')?.addEventListener('click', () => {
       const currentEnabled = state.draftConfig.notifier.enabled !== false;
