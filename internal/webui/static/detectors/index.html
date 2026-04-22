@@ -22,6 +22,25 @@
   </div>
 </header>
 <main class="layout">
+  <section class="card wide">
+    <details open>
+      <summary><strong>Quick start</strong> · safe rollout workflows</summary>
+      <div class="summary-grid" style="margin-top:10px">
+        <div class="summary-card">
+          <h4 style="margin-top:0">1) Tune threshold</h4>
+          <p class="muted">Start with detector-only mode and increase/decrease threshold keys in small steps while checking false positives.</p>
+        </div>
+        <div class="summary-card">
+          <h4 style="margin-top:0">2) Add leniency</h4>
+          <p class="muted">Create <code>[&lt;base&gt;.leniency]</code> scoped by <code>MATCH_COUNTRY</code> / <code>MATCH_ASN</code> for noisy sources before changing global policy.</p>
+        </div>
+        <div class="summary-card">
+          <h4 style="margin-top:0">3) Enable blocking safely</h4>
+          <p class="muted">Set <code>BLOCK=dryrun</code> first, validate event volume, then move to timed blocks. Keep <code>BLOCK=permanent</code> for last-resort cases.</p>
+        </div>
+      </div>
+    </details>
+  </section>
   <section class="card wide"><p id="detectorsStatus" class="statusline" style="display:block"></p></section>
   <section class="card wide"><h2>Global</h2><div id="detectorsGlobal" class="summary-grid"></div></section>
   <section class="card wide"><div class="toolbar wrap" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Core detectors</h2><button id="detectorsAddCoreFromExampleBtn" class="btn-quiet">Insert from template/example</button></div><div class="table-wrap"><table><thead><tr><th>Section</th><th>Enabled</th><th>Key settings (JSON)</th></tr></thead><tbody id="detectorsCoreBody"></tbody></table></div></section>
