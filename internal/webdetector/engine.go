@@ -1193,8 +1193,9 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	}
 
 	// 40x combo counters (403+404) per IP, with optional ignore prefixes + unique-path gating.
+	// Static asset paths are excluded to reduce false positives from missing files.
 	if rec.IP != "" && e.cfg.IP40xComboCount > 0 && (rec.Status == 403 || rec.Status == 404) {
-		if !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
+		if !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
 			if b.ips40x == nil {
 				b.ips40x = make(map[string]int)
 			}
@@ -2728,8 +2729,9 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		b.ips403WAF[ip]++
 	}
 
-	// Also feed into the combined 40x combo counter if enabled
-	if e.cfg.IP40xComboCount > 0 && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
+	// Also feed into the combined 40x combo counter if enabled.
+	// Static asset paths are excluded to reduce false positives from missing files.
+	if e.cfg.IP40xComboCount > 0 && !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
 		if b.ips40x == nil {
 			b.ips40x = make(map[string]int)
 		}
