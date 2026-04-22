@@ -69,9 +69,7 @@ async function refreshRuntimeStatus(){
   try{
     const j = await api('/api/v1/detectors/status');
     state.runtime = j || { sections: [], summary: {}, inventory: {} };
-    setRuntimeSummary(state.runtime.summary, state.runtime.inventory);
-    renderInventoryLists(state.runtime.inventory);
-    render();
+    renderRuntimeOnly();
   }catch(e){
     setStatus(`Runtime status unavailable: ${e.message}`, true);
   }
@@ -108,7 +106,7 @@ function addCoreFromTemplate(typeKey, template){
   if(!Object.prototype.hasOwnProperty.call(keys,'BLOCK')) keys.BLOCK = 'dryrun';
   state.draft.core = state.draft.core || [];
   state.draft.core.push({ name, kind: 'core', enabled: ['1','true','yes','on'].includes(String(keys.ENABLED).toLowerCase()), keys });
-  render();
+  renderConfigEditors();
   setDirty(true);
   setStatus(`Added detector section ${name}`);
 }
@@ -119,7 +117,7 @@ function addLeniencyCompanion(baseName){
   if(names.has(sectionName.toLowerCase())){ setStatus(`Leniency section ${sectionName} already exists`, true); return; }
   state.draft.leniency = state.draft.leniency || [];
   state.draft.leniency.push({ name: sectionName, kind: 'leniency', keys: { MATCH_COUNTRY: '', MATCH_ASN: '', BLOCK: '30m', BLOCK_COOLDOWN: '1h', SEND_TO_API: '0' } });
-  render();
+  renderConfigEditors();
   setDirty(true);
   setStatus(`Added leniency companion ${sectionName}`);
 }
@@ -169,7 +167,7 @@ function confirmAddLeniency(){
   state.draft.leniency = state.draft.leniency || [];
   state.draft.leniency.push({ name: sectionName, kind: 'leniency', keys });
   byId('detectorsLeniencyModal').style.display='none';
-  render();
+  renderConfigEditors();
   setDirty(true);
   setStatus(`Added leniency section ${sectionName}`);
 }
@@ -213,7 +211,7 @@ function insertExample(example, kind, opt={}){
     state.draft.leniency.push({ name: secName, kind: 'leniency', keys });
   }
   byId('detectorsExamplesModal').style.display='none';
-  render();
+  renderConfigEditors();
   setDirty(true);
   setStatus(`Inserted template "${example.title}" as ${secName}${safeInsert?' (safe insert)':''}`);
 }
@@ -424,7 +422,7 @@ function renderSectionEditor(container, sec){
   toolbar.className = 'toolbar wrap';
   toolbar.style.marginBottom='8px';
   toolbar.innerHTML = `<span class="pill">${state.modes[sectionKey]==='form'?'Form mode':'JSON mode'}</span><button type="button" class="btn-quiet">${state.modes[sectionKey]==='form'?'JSON mode':'Form mode'}</button>`;
-  toolbar.querySelector('button').addEventListener('click',()=>{ state.modes[sectionKey]=state.modes[sectionKey]==='form'?'json':'form'; render(); });
+  toolbar.querySelector('button').addEventListener('click',()=>{ state.modes[sectionKey]=state.modes[sectionKey]==='form'?'json':'form'; renderConfigEditors(); });
   container.appendChild(toolbar);
 
   if(state.modes[sectionKey] === 'json'){
@@ -457,7 +455,39 @@ function renderSectionEditor(container, sec){
   container.appendChild(advanced);
 }
 
-function render(){
+function renderRuntimeOnly(){
+  setRuntimeSummary(state.runtime.summary, state.runtime.inventory);
+  renderInventoryLists(state.runtime.inventory);
+
+  const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
+  const coreRows = document.querySelectorAll('#detectorsCoreBody tr[data-section]');
+  coreRows.forEach((tr)=>{
+    const sectionName = tr.getAttribute('data-section') || '';
+    const sec = (state.draft.core||[]).find((item)=>String(item?.name||'')===sectionName);
+    if(!sec) return;
+    const runtime = runtimeBySection.get(sectionName);
+    const status = runtimeBadge(sec, runtime);
+    const badgeEl = tr.querySelector('[data-runtime-badge]');
+    const detailEl = tr.querySelector('[data-runtime-detail]');
+    if(badgeEl){
+      badgeEl.textContent = status.label;
+      badgeEl.title = status.reason || '';
+      badgeEl.style.background = status.color;
+      badgeEl.style.color = '#111827';
+    }
+    if(detailEl){
+      if(runtime){
+        detailEl.textContent = `runs=${runtime.runs||0}, fail=${runtime.failures||0}, timeout=${runtime.timeouts||0}, last run=${fmtDate(runtime.last_run_at)}${runtime.last_error?`, err=${runtime.last_error}`:''}`;
+        detailEl.style.display = '';
+      } else {
+        detailEl.textContent = '';
+        detailEl.style.display = 'none';
+      }
+    }
+  });
+}
+
+function renderConfigEditors(){
   const localValidation = collectLocalValidation();
   state.inlineValidation = { bySection: localValidation.bySection, global: localValidation.global };
   const g=byId('detectorsGlobal'); g.innerHTML='';
@@ -465,8 +495,8 @@ function render(){
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
   const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
-  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const detail = runtime ? `<div class="muted" style="margin-top:4px">runs=${runtime.runs||0}, fail=${runtime.failures||0}, timeout=${runtime.timeouts||0}, last run=${safeText(fmtDate(runtime.last_run_at))}${runtime.last_error?`, err=${safeText(runtime.last_error)}`:''}</div>` : ''; const meta = detectorMeta(sec.name); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${leniencyHint}${validation?`<div style="margin-top:6px">${validation}</div>`:''}${detail}</td><td><span class="pill" style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
-    tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); render();});
+  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const meta = detectorMeta(sec.name); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const tr=document.createElement('tr'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${leniencyHint}${validation?`<div style="margin-top:6px">${validation}</div>`:''}<div class="muted" style="margin-top:4px;display:none" data-runtime-detail></div></td><td><span class="pill" data-runtime-badge style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div></div></td>`;
+    tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); renderConfigEditors();});
     const leniencyBtn = tr.querySelector('[data-leniency-for]');
     if(leniencyBtn) leniencyBtn.addEventListener('click',()=>addLeniencyCompanion(sec.name));
     renderSectionEditor(tr.querySelector('div'), sec);
@@ -474,10 +504,12 @@ function render(){
   });
 
   const len=byId('detectorsLeniencyBody'); len.innerHTML='';
-  (state.draft.leniency||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><div></div></td>`; renderSectionEditor(tr.querySelector('div'), sec); len.appendChild(tr); });
+  (state.draft.leniency||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td>${safeText(sec.name)}${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><div></div></td>`; renderSectionEditor(tr.querySelector('div'), sec); len.appendChild(tr); });
 
   const adv=byId('detectorsAdvanced'); adv.innerHTML='';
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
+
+  renderRuntimeOnly();
 }
 
 function buildCatalogDefaultsConfig(){
@@ -490,7 +522,7 @@ async function load(){
   state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.configExists = j.exists !== false; state.catalog = clone(c.catalog||[]); state.modes={};
   refreshCatalogUI();
   byId('detectorsInitCard').style.display = state.configExists ? 'none' : 'block';
-  render(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]);
+  renderConfigEditors(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]);
 }
 
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
@@ -498,7 +530,7 @@ async function refreshBackups(){ const j=await api('/api/v1/detectors/backups');
 async function saveFlow(){
   const localValidation = collectLocalValidation();
   state.inlineValidation = { bySection: localValidation.bySection, global: localValidation.global };
-  render();
+  renderConfigEditors();
   if(localValidation.errs.length){
     const ul=byId('detectorsValidationErrors'); ul.innerHTML='';
     localValidation.errs.forEach((e)=>{ const li=document.createElement('li'); li.textContent=`${e.path}: ${e.message}. Expected: ${e.expected}`; ul.appendChild(li); });
@@ -513,7 +545,7 @@ async function saveFlow(){
 
 function init(){
   byId('detectorsSaveBtn').onclick=saveFlow;
-  byId('detectorsDiscardBtn').onclick=()=>{ state.draft=clone(state.original); render(); setDirty(false); setStatus('Draft reverted'); };
+  byId('detectorsDiscardBtn').onclick=()=>{ state.draft=clone(state.original); renderConfigEditors(); setDirty(false); setStatus('Draft reverted'); };
   byId('detectorsReloadBtn').onclick=async()=>{ await api('/api/v1/detectors/reload',{method:'POST'}); setStatus('Detectors reload requested'); await refreshRuntimeStatus(); };
   byId('detectorsConfirmSave').onclick=async()=>{ await api('/api/v1/detectors/config',{method:'PUT',body:JSON.stringify({config:state.draft})}); byId('detectorsSaveModal').style.display='none'; setStatus('Saved detectors config'); await load(); };
   byId('detectorsCancelSave').onclick=()=>byId('detectorsSaveModal').style.display='none';
@@ -528,7 +560,7 @@ function init(){
   byId('detectorsExamplesClose').onclick=()=>byId('detectorsExamplesModal').style.display='none';
   byId('detectorsRefreshBackups').onclick=refreshBackups;
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
-  byId('detectorsInitFromCatalogBtn').onclick=()=>{ state.draft = buildCatalogDefaultsConfig(); render(); setDirty(true); setStatus('Initialized draft from catalog defaults. Review and save.'); };
+  byId('detectorsInitFromCatalogBtn').onclick=()=>{ state.draft = buildCatalogDefaultsConfig(); renderConfigEditors(); setDirty(true); setStatus('Initialized draft from catalog defaults. Review and save.'); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });
   window.setInterval(()=>{ refreshRuntimeStatus(); }, 10000);
   load().catch((e)=>setStatus(e.message,true));
