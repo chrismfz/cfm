@@ -1,12 +1,13 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {} };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core' };
 const byId = (id) => document.getElementById(id);
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function setStatus(msg,bad=false){ const el=byId('detectorsStatus'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
 function setDirty(v){ state.dirty=v; byId('detectorsDirty').textContent=v?'Unsaved':'Saved'; }
 function setLeniencyFeedback(msg,bad=false){ const el=byId('detectorsLeniencyModalFeedback'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
+function safeText(v){ return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 
 async function api(path,opt={}){ const r=await fetch(`/cfm-admin${path}`,{credentials:'include',headers:{'Content-Type':'application/json'},...opt}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||`HTTP ${r.status}`); return j; }
 
@@ -54,6 +55,67 @@ function confirmAddLeniency(){
   render();
   setDirty(true);
   setStatus(`Added leniency section ${sectionName}`);
+}
+
+function normalizeSafeBlockValue(v){
+  const mode = String(v||'').trim().toLowerCase();
+  if(!mode) return 'dryrun';
+  if(['0','no','off','dryrun','alert'].includes(mode)) return mode;
+  return 'dryrun';
+}
+
+function uniqueSectionName(baseName, kind){
+  const clean = String(baseName||'').trim() || (kind === 'leniency' ? 'example.leniency' : 'example_detector');
+  const names = allSectionNames();
+  if(!names.has(clean.toLowerCase())) return clean;
+  let idx = 2;
+  while(names.has(`${clean}_${idx}`.toLowerCase())) idx++;
+  return `${clean}_${idx}`;
+}
+
+function sanitizeExampleKeys(keys){
+  const next = clone(keys||{});
+  if(Object.prototype.hasOwnProperty.call(next,'BLOCK')) next.BLOCK = normalizeSafeBlockValue(next.BLOCK);
+  if(Object.prototype.hasOwnProperty.call(next,'SEND_TO_API') && String(next.SEND_TO_API).trim()==='') next.SEND_TO_API = '0';
+  return next;
+}
+
+function insertExample(example, kind){
+  const secName = uniqueSectionName(example.section || example.id, kind);
+  const keys = sanitizeExampleKeys(example.keys || {});
+  if(kind === 'core'){
+    keys.ENABLED = '0';
+    state.draft.core = state.draft.core || [];
+    state.draft.core.push({ name: secName, kind: 'core', enabled: false, keys });
+  } else {
+    state.draft.leniency = state.draft.leniency || [];
+    state.draft.leniency.push({ name: secName, kind: 'leniency', keys });
+  }
+  byId('detectorsExamplesModal').style.display='none';
+  render();
+  setDirty(true);
+  setStatus(`Inserted template "${example.title}" as ${secName}`);
+}
+
+function openExamplesModal(kind){
+  state.exampleKind = kind;
+  const items = (state.examples || []).filter((ex)=>ex.kind === kind);
+  byId('detectorsExamplesTitle').textContent = kind === 'leniency' ? 'Insert leniency template/example' : 'Insert core template/example';
+  const list = byId('detectorsExamplesList');
+  list.innerHTML = '';
+  if(items.length === 0){
+    list.innerHTML = '<p class="muted">No matching examples found in detectors.conf metadata comments.</p>';
+    byId('detectorsExamplesModal').style.display='flex';
+    return;
+  }
+  items.forEach((ex)=>{
+    const card = document.createElement('div');
+    card.className = 'summary-card';
+    card.innerHTML = `<h4 style="margin-top:0">${safeText(ex.title || ex.id)}</h4><p class="muted" style="margin:4px 0 8px 0">Source section: <code>${safeText(ex.section || '-')}</code></p><p class="muted" style="margin:0 0 10px 0">${safeText(ex.preview || 'No preview')}</p><button type="button">Insert safely</button>`;
+    card.querySelector('button').addEventListener('click', ()=>insertExample(ex, kind));
+    list.appendChild(card);
+  });
+  byId('detectorsExamplesModal').style.display='flex';
 }
 
 function parseDurationStrict(v){
@@ -184,7 +246,7 @@ function render(){
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
 }
 
-async function load(){ const j=await api('/api/v1/detectors/config'); state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.modes={}; render(); setDirty(false); setStatus(`Loaded ${state.path}`); await refreshBackups(); }
+async function load(){ const j=await api('/api/v1/detectors/config'); state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.modes={}; render(); setDirty(false); setStatus(`Loaded ${state.path}`); await refreshBackups(); }
 
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
 
@@ -210,8 +272,11 @@ function init(){
   byId('detectorsCancelSave').onclick=()=>byId('detectorsSaveModal').style.display='none';
   byId('detectorsValidationClose').onclick=()=>byId('detectorsValidationModal').style.display='none';
   byId('detectorsAddLeniencyBtn').onclick=openLeniencyModal;
+  byId('detectorsAddCoreFromExampleBtn').onclick=()=>openExamplesModal('core');
+  byId('detectorsAddLeniencyFromExampleBtn').onclick=()=>openExamplesModal('leniency');
   byId('detectorsLeniencyConfirm').onclick=confirmAddLeniency;
   byId('detectorsLeniencyCancel').onclick=()=>byId('detectorsLeniencyModal').style.display='none';
+  byId('detectorsExamplesClose').onclick=()=>byId('detectorsExamplesModal').style.display='none';
   byId('detectorsRefreshBackups').onclick=refreshBackups;
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });
