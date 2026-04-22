@@ -4,8 +4,69 @@ const byId = (id) => document.getElementById(id);
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function setStatus(msg,bad=false){ const el=byId('detectorsStatus'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
 function setDirty(v){ state.dirty=v; byId('detectorsDirty').textContent=v?'Unsaved':'Saved'; }
+function setLeniencyFeedback(msg,bad=false){ const el=byId('detectorsLeniencyModalFeedback'); el.textContent=msg; el.style.color=bad?'#f87171':'#93c5fd'; }
 
 async function api(path,opt={}){ const r=await fetch(`/cfm-admin${path}`,{credentials:'include',headers:{'Content-Type':'application/json'},...opt}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||`HTTP ${r.status}`); return j; }
+
+function allSectionNames(){
+  const names = new Set();
+  [...(state.draft.core||[]), ...(state.draft.leniency||[]), ...(state.draft.advanced||[])].forEach((sec)=>{
+    const name = (sec?.name||'').trim();
+    if(name) names.add(name.toLowerCase());
+  });
+  return names;
+}
+
+function openLeniencyModal(){
+  const coreSections = (state.draft.core||[]).filter((sec)=>String(sec?.name||'').trim() !== '');
+  if(coreSections.length===0){
+    setStatus('Add at least one core detector before creating leniency sections.', true);
+    return;
+  }
+  const baseSel = byId('detectorsLeniencyBase');
+  baseSel.innerHTML='';
+  coreSections.forEach((sec)=>{ const opt=document.createElement('option'); opt.value=sec.name; opt.textContent=sec.name; baseSel.appendChild(opt); });
+  byId('detectorsLeniencySectionName').value='';
+  byId('detectorsLeniencyMatchCountry').value='';
+  byId('detectorsLeniencyMatchASN').value='';
+  byId('detectorsLeniencyBlock').value='30m';
+  byId('detectorsLeniencyBlockCooldown').value='1h';
+  byId('detectorsLeniencySendToAPI').value='0';
+  setLeniencyFeedback('Create a starter leniency block and adjust values as needed.');
+  byId('detectorsLeniencyModal').style.display='flex';
+}
+
+function confirmAddLeniency(){
+  const base = byId('detectorsLeniencyBase').value.trim();
+  const manual = byId('detectorsLeniencySectionName').value.trim();
+  const sectionName = manual || `${base}.leniency`;
+  const dupes = allSectionNames();
+  if(!sectionName){
+    setLeniencyFeedback('Section name is required.', true);
+    return;
+  }
+  if(dupes.has(sectionName.toLowerCase())){
+    setLeniencyFeedback(`Section "${sectionName}" already exists. Choose a different name.`, true);
+    return;
+  }
+  const keys = {
+    MATCH_COUNTRY: byId('detectorsLeniencyMatchCountry').value.trim(),
+    MATCH_ASN: byId('detectorsLeniencyMatchASN').value.trim(),
+    BLOCK: byId('detectorsLeniencyBlock').value.trim() || '30m',
+    BLOCK_COOLDOWN: byId('detectorsLeniencyBlockCooldown').value.trim() || '1h',
+    SEND_TO_API: byId('detectorsLeniencySendToAPI').value.trim() || '0',
+  };
+  state.draft.leniency = state.draft.leniency || [];
+  state.draft.leniency.push({
+    name: sectionName,
+    kind: 'leniency',
+    keys,
+  });
+  byId('detectorsLeniencyModal').style.display='none';
+  render();
+  setDirty(true);
+  setStatus(`Added leniency section ${sectionName}`);
+}
 
 function render(){
   const g=byId('detectorsGlobal'); g.innerHTML='';
@@ -43,6 +104,9 @@ function init(){
   byId('detectorsConfirmSave').onclick=async()=>{ await api('/api/v1/detectors/config',{method:'PUT',body:JSON.stringify({config:state.draft})}); byId('detectorsSaveModal').style.display='none'; setStatus('Saved detectors config'); await load(); };
   byId('detectorsCancelSave').onclick=()=>byId('detectorsSaveModal').style.display='none';
   byId('detectorsValidationClose').onclick=()=>byId('detectorsValidationModal').style.display='none';
+  byId('detectorsAddLeniencyBtn').onclick=openLeniencyModal;
+  byId('detectorsLeniencyConfirm').onclick=confirmAddLeniency;
+  byId('detectorsLeniencyCancel').onclick=()=>byId('detectorsLeniencyModal').style.display='none';
   byId('detectorsRefreshBackups').onclick=refreshBackups;
   byId('detectorsRestoreBtn').onclick=async()=>{ const id=byId('detectorsRestoreID').value.trim(); if(!id)return; await api('/api/v1/detectors/backups/restore',{method:'POST',body:JSON.stringify({id,reload:true})}); setStatus(`Restored ${id}`); await load(); };
   window.addEventListener('beforeunload',(e)=>{ if(!state.dirty) return; e.preventDefault(); e.returnValue=''; });

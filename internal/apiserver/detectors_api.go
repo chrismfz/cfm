@@ -98,6 +98,30 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 			checkDur("global."+k, v)
 		}
 	}
+	seenSections := map[string]string{}
+	sectionGroups := []struct {
+		Name     string
+		Sections []detectorscfg.AdminSection
+	}{
+		{Name: "core", Sections: c.Core},
+		{Name: "leniency", Sections: c.Leniency},
+		{Name: "advanced", Sections: c.Advanced},
+	}
+	for _, group := range sectionGroups {
+		for idx, sec := range group.Sections {
+			trimmed := strings.TrimSpace(sec.Name)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			currentPath := group.Name + "[" + strconv.Itoa(idx) + "].name"
+			if firstPath, ok := seenSections[key]; ok {
+				push(currentPath, "duplicate section name (already defined at "+firstPath+")", "duplicate_section_name")
+				continue
+			}
+			seenSections[key] = currentPath
+		}
+	}
 	all := append(append([]detectorscfg.AdminSection{}, c.Core...), c.Leniency...)
 	for i, sec := range all {
 		if strings.TrimSpace(sec.Name) == "" {
