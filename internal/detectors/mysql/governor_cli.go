@@ -592,7 +592,7 @@ func runMySQLWatch(baseURL string, args []string) error {
 	var f *os.File
 	var err error
 	if logPath != "" {
-		f, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 		if err != nil {
 			return err
 		}

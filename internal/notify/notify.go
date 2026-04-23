@@ -1,13 +1,14 @@
 package notify
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	//	"net"
 	"cfm/internal/enrich"
-	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -434,7 +435,9 @@ func errString(err error) string {
 }
 
 func notificationEventID() string {
-	return fmt.Sprintf("evt-%x-%x", time.Now().UTC().UnixNano(), rand.Uint64())
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("evt-%x-%x", time.Now().UTC().UnixNano(), binary.LittleEndian.Uint64(b[:]))
 }
 
 func recordLoadResult(cfgDir string, ok bool, err error, manual bool) {
