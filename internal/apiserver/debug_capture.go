@@ -163,21 +163,21 @@ func (r *debugCaptureRunner) finishRecord(id string, snapshots []telemetry.LiveS
 }
 
 func (r *debugCaptureRunner) writeArtifacts(rec *DebugCaptureRecord) {
-	if err := os.MkdirAll(r.cfg.ArtifactDir, 0o755); err != nil {
+	if err := os.MkdirAll(r.cfg.ArtifactDir, 0o750); err != nil {
 		r.updateArtifactError(rec.ID, err)
 		return
 	}
 	jsonPath := filepath.Join(r.cfg.ArtifactDir, rec.ID+".json")
 	txtPath := filepath.Join(r.cfg.ArtifactDir, rec.ID+".txt")
 	b, _ := json.MarshalIndent(rec, "", "  ")
-	if err := os.WriteFile(jsonPath, b, 0o644); err != nil {
+	if err := os.WriteFile(jsonPath, b, 0o600); err != nil {
 		r.updateArtifactError(rec.ID, err)
 		return
 	}
 	summary := fmt.Sprintf("capture_id=%s\nstatus=%s\nduration_sec=%d\nsnapshots=%d\nstarted_at=%s\ncompleted_at=%s\n",
 		rec.ID, rec.Status, rec.RequestedDurationS, rec.SnapshotsCollected,
 		rec.StartedAt.Format(time.RFC3339), rec.CompletedAt.Format(time.RFC3339))
-	if err := os.WriteFile(txtPath, []byte(summary), 0o644); err != nil {
+	if err := os.WriteFile(txtPath, []byte(summary), 0o600); err != nil {
 		r.updateArtifactError(rec.ID, err)
 		return
 	}
