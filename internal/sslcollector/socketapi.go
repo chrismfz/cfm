@@ -1,3 +1,38 @@
+// Package sslcollector serves TLS certificate and private-key material to
+// OpenResty/Angie workers via an authenticated unix socket so they can perform
+// dynamic SNI-based certificate selection without the keys being world-readable.
+//
+// # Security model
+//
+// The socket is protected by a bearer token stored in
+// /var/lib/cfm/lua/cfm_token.lua (mode 0640, root:cfm).  The only members of
+// the cfm OS group are the nginx/OpenResty/Angie worker processes — no login
+// shell, no other services.  Consequently any cfm-group principal is considered
+// as trusted as a running nginx worker.
+//
+// Realistic attack paths that reach this socket therefore require either:
+//   - Root access (which can read cert files directly from disk anyway), or
+//   - A remote-code-execution vulnerability in the nginx worker itself.
+//
+// In both cases the socket does not materially increase the attacker's reach
+// beyond what they already have.
+//
+// # Future hardening (tracked — not yet implemented)
+//
+//   1. SO_PEERCRED: replace the group-readable bearer token with kernel-verified
+//      process credentials (UID/GID/PID).  This would restrict callers to the
+//      exact nginx worker binary rather than any cfm-group process.  Note: it
+//      does NOT improve security against a compromised nginx worker — the worker
+//      already holds all cert+key pairs in memory — but it eliminates the
+//      "another process obtains the token" vector entirely.
+//      See: docs/ssl-collector.md
+//
+//   2. Encrypted offline snapshot: the on-disk snapshot
+//      (/var/lib/cfm/sslcollector/dump.json, mode 0640) contains cert+key pairs
+//      for all hosted domains.  Encrypting it with a key only available from the
+//      running cfm daemon would prevent exfiltration of the file in isolation.
+//      Controlled via SSLCOLLECTOR_OFFLINE_CACHE in cfm.conf.
+//      See: docs/ssl-collector.md
 package sslcollector
 
 import (

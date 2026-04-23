@@ -1,9 +1,20 @@
 -- /opt/openresty/nginx/lua/sslcollector.lua
 -- QUIC-safe SSL Collector (preload + refresh + disk snapshot):
 -- - Background poll /stats (version change) and fetches /dumpall over unix socket
--- - Stores PEM strings in shared_dict (TTL=0 => never expire, avoids cert cliffs)
+-- - Stores PEM strings in worker-local table (not shared dict — see note below)
 -- - Writes disk snapshot atomically; loads it on startup so restarts survive CFM downtime
 -- - ssl_certificate_by_lua_block ONLY does dict lookup + PEM parse + set_cert (no I/O, no yield)
+--
+-- Security model (see also docs/ssl-collector.md and internal/sslcollector/socketapi.go):
+--   The bearer token is written to /var/lib/cfm/lua/cfm_token.lua at mode 0640 (root:cfm).
+--   The only members of the cfm OS group are nginx/OpenResty/Angie worker processes.
+--   Any cfm-group principal is therefore trusted at the same level as a running nginx worker.
+--
+--   Future hardening options (not yet implemented):
+--     1. SO_PEERCRED — restrict socket callers to the exact nginx worker binary via kernel
+--        credential verification rather than a group-readable file token.
+--     2. Encrypted offline snapshot — encrypt dump.json so the on-disk artifact cannot be
+--        used in isolation if exfiltrated.  Toggle via SSLCOLLECTOR_OFFLINE_CACHE = 0/1.
 --
 --
 -- Health keys written to shared dict (all TTL=0, never expire):
@@ -60,6 +71,31 @@ do
   end
   TOKEN = val
 end
+
+-- ---------------------------------------------------------------------------
+-- Per-daemon runtime config (written by CFM at startup, optional)
+-- ---------------------------------------------------------------------------
+-- cfm_sslcollector_config.lua returns a table with boolean flags.
+-- If the file is absent (e.g. older cfm build) all flags default to true.
+-- cfm daemon reads SSLCOLLECTOR_OFFLINE_CACHE from /etc/cfm/cfm.conf (root-only)
+-- and writes the resolved value here (0640 root:cfm) — same indirection as the
+-- token file.  Nginx workers read this file, not cfm.conf directly.
+local _CFG_FILE = "/var/lib/cfm/lua/cfm_sslcollector_config.lua"
+local _cfg = {}
+do
+  local chunk = loadfile(_CFG_FILE)
+  if chunk then
+    local ok, result = pcall(chunk)
+    if ok and type(result) == "table" then
+      _cfg = result
+    end
+  end
+end
+
+-- OFFLINE_CACHE: when false, skip snapshot read/write.
+-- Disable via SSLCOLLECTOR_OFFLINE_CACHE = 0 in cfm.conf.
+-- Default true when config file is absent (older cfm build compatibility).
+local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 
 -- ---------------------------------------------------------------------------
 -- Tunables
@@ -416,6 +452,10 @@ local function ingest_dumpall(data, src)
 end
 
 local function load_from_snapshot()
+  if not OFFLINE_CACHE then
+    ngx.log(ngx.INFO, "[sslcollector] offline cache disabled (SSLCOLLECTOR_OFFLINE_CACHE=0), skipping snapshot load")
+    return
+  end
   local body = read_snapshot()
   if not body then
     ngx.log(ngx.WARN, "[sslcollector] no snapshot on disk (first boot?)")
@@ -471,10 +511,11 @@ local function do_dumpall()
     -- Always update RAM cache (soft: version optional)
     ingest_dumpall(vdata, "dumpall")
 
-    -- [FIX-B] Only write disk snapshot if payload carries a Version field.
-    -- A version-less payload might be a degraded upstream response; preserve the
-    -- last known-good versioned snapshot rather than overwriting it with unknowns.
-    if has_version then
+    -- [FIX-B] Only write disk snapshot if payload carries a Version field AND
+    -- offline cache is enabled (SSLCOLLECTOR_OFFLINE_CACHE).
+    if not OFFLINE_CACHE then
+      -- offline cache disabled: skip snapshot write entirely
+    elseif has_version then
       local wok, we = write_snapshot(r.body, vdata)
       if not wok then
         ngx.log(ngx.WARN, "[sslcollector] snapshot write skipped: ", we)

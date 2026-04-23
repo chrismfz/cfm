@@ -12,6 +12,7 @@ import (
 )
 
 const sharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
+const sharedLuaConfigPath = "/var/lib/cfm/lua/cfm_sslcollector_config.lua"
 
 // SockLifecycle owns the start/stop/restart state of the SSLCollector
 // unix socket server. Create once with NewSockLifecycle (passing the shared
@@ -87,6 +88,11 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 				logging.Logf("[sslcollector] failed to write lua token path=%s: %v", sharedLuaTokenPath, werr)
 			} else {
 				logging.Logf("[sslcollector] wrote lua token path=%s", sharedLuaTokenPath)
+			}
+			// Write per-daemon runtime flags so Lua workers pick them up at init.
+			offlineCache := cfg.OfflineCache == nil || *cfg.OfflineCache
+			if werr := WriteLuaConfig(sharedLuaConfigPath, offlineCache, gid); werr != nil {
+				logging.Logf("[sslcollector] failed to write lua config path=%s: %v", sharedLuaConfigPath, werr)
 			}
 		}
 	}
