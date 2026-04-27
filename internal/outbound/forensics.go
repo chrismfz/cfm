@@ -43,12 +43,29 @@ type EximSnap struct {
 	SourceOK bool     // false if exim binary missing or command failed
 }
 
-// readProcText returns the trimmed contents of /proc/<pid>/<file>, or "" if
-// the file can't be read (process may have already exited).
+// allowedProcFiles is the closed set of /proc/<pid>/<file> entries the
+// outbound forensics package is allowed to read. Restricting to a literal
+// allowlist neutralises the gosec G304 (file-inclusion-via-variable) class
+// of report and prevents a future caller from accidentally passing a path
+// traversal string.
+var allowedProcFiles = map[string]struct{}{
+	"cwd":     {},
+	"cmdline": {},
+	"comm":    {},
+}
+
+// readProcText returns the trimmed contents of /proc/<pid>/<file>. Returns
+// "" if pid is invalid, the file is unreadable (process exited), or the
+// requested file name is not in the allowlist.
 func readProcText(pid int, name string) string {
 	if pid <= 0 {
 		return ""
 	}
+	if _, ok := allowedProcFiles[name]; !ok {
+		return ""
+	}
+	// #nosec G304 -- pid is a validated int and name is allowlisted above;
+	// the resulting path is structurally constrained to /proc/<int>/<allowlist>.
 	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), name))
 	if err != nil {
 		return ""
@@ -63,6 +80,10 @@ func readProcLink(pid int, name string) string {
 	if pid <= 0 {
 		return ""
 	}
+	if _, ok := allowedProcFiles[name]; !ok {
+		return ""
+	}
+	// #nosec G304 -- same reasoning as readProcText.
 	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), name))
 	if err != nil {
 		return ""
@@ -91,24 +112,46 @@ func EximQueueForUser(ctx context.Context, user string, sampleLimit int, timeout
 	// line is a separate stanza we'd have to associate with the message. We use
 	// -bpr and detect frozen via age sign (negative pretty-time prefix). If
 	// -bpr is unavailable, we still try -bp.
-	for _, args := range [][]string{{"-bpr"}, {"-bp"}} {
-		snap, ok := runExim(ctx, args, user, sampleLimit, timeout)
-		if ok {
-			snap.SourceOK = true
-			return snap
-		}
+	if snap, ok := runEximBPR(ctx, user, sampleLimit, timeout); ok {
+		snap.SourceOK = true
+		return snap
+	}
+	if snap, ok := runEximBP(ctx, user, sampleLimit, timeout); ok {
+		snap.SourceOK = true
+		return snap
 	}
 	return EximSnap{SourceOK: false}
 }
 
-func runExim(ctx context.Context, args []string, user string, sampleLimit int, timeout time.Duration) (EximSnap, bool) {
+// runEximBPR / runEximBP each call exim with one of two literal flags. They
+// exist as separate functions (rather than a single helper that takes a
+// []string) so the gosec G204 (subprocess-with-variable) check can prove the
+// argv is constant at every call site.
+func runEximBPR(ctx context.Context, user string, sampleLimit int, timeout time.Duration) (EximSnap, bool) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "exim", args...)
-	out, err := cmd.Output()
+	// #nosec G204 -- binary and flag are string literals; no caller-controlled args.
+	out, err := exec.CommandContext(cctx, "exim", "-bpr").Output()
 	if err != nil {
 		return EximSnap{}, false
 	}
+	return parseEximQueue(out, user, sampleLimit), true
+}
+
+func runEximBP(ctx context.Context, user string, sampleLimit int, timeout time.Duration) (EximSnap, bool) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// #nosec G204 -- binary and flag are string literals; no caller-controlled args.
+	out, err := exec.CommandContext(cctx, "exim", "-bp").Output()
+	if err != nil {
+		return EximSnap{}, false
+	}
+	return parseEximQueue(out, user, sampleLimit), true
+}
+
+// parseEximQueue extracts a per-user EximSnap from `exim -bp[r]` output. Pure
+// (no I/O) so it's straightforward to unit-test if we add a fixture later.
+func parseEximQueue(out []byte, user string, sampleLimit int) EximSnap {
 
 	// exim -bp output stanza per message looks like:
 	//   24h  1.5K 1tBwAr-0001Yz-Lx <sender@example.com>
@@ -174,7 +217,7 @@ func runExim(ctx context.Context, args []string, user string, sampleLimit int, t
 			}
 		}
 	}
-	return snap, true
+	return snap
 }
 
 func matchUser(addr, user string) bool {
