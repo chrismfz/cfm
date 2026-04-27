@@ -25,6 +25,7 @@ type Config struct {
 	SystemTweaks     SystemTweaksConfig
 	Hardening        HardeningConfig
 	SMTPBlock        SMTPBlockConfig
+	Outbound         OutboundConfig
 	MaxMind          MaxMindConfig
 	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
@@ -95,6 +96,32 @@ type SMTPBlockConfig struct {
 	LogBurst   int    // SMTP_LOG_BURST
 	LogNFLOG   int    // SMTP_LOG_NFLOG (0=kernel log, >0=nflog group)
 	LogEnrich  bool   // SMTP_LOG_ENRICH (use enrich on DST IP in our consumer)
+}
+
+// OutboundConfig — Outbound Abuse Sentinel (phase 1: observe + warn).
+//
+// Watches new outbound TCP connections (and UDP/53) per Linux uid via NFLOG and
+// classifies them by destination port group. When a uid crosses a per-window
+// threshold for any signal, a forensic warning is logged to cfm.smtp.log and an
+// admin notification is emitted. Phase 1 never throttles or suspends; an nft
+// "observe" chain only NFLOGs.
+type OutboundConfig struct {
+	Enabled         bool     // OUTBOUND_ENABLED
+	NFLOGGroup      int      // OUTBOUND_NFLOG (must differ from SMTP_LOG_NFLOG)
+	WindowSec       int      // OUTBOUND_WINDOW_SECONDS (default 60)
+	SMTPPerMin      int      // OUTBOUND_SMTP_CONN_PER_MIN (default 30)
+	UniqueDstPerMin int      // OUTBOUND_SCAN_UNIQUE_DST_PER_MIN (default 50)
+	HTTPPerMin      int      // OUTBOUND_HTTP_RATE_PER_MIN (default 200)
+	DNSPerMin       int      // OUTBOUND_DNS_PER_MIN (default 200)
+	ScanPorts       []uint16 // OUTBOUND_SCAN_PORTS (default 22,23,3389)
+	SMTPPorts       []uint16 // OUTBOUND_SMTP_PORTS (default 25,465,587)
+	HTTPPorts       []uint16 // OUTBOUND_HTTP_PORTS (default 80,443,8080,8443)
+	LogDedupSec     int      // OUTBOUND_LOG_DEDUP_SECONDS (default 300)
+	NotifySeverity  string   // OUTBOUND_NOTIFY_SEVERITY (default warning)
+	QueueSamples    int      // OUTBOUND_QUEUE_SAMPLES (default 5)
+	AllowUIDs       []uint32 // OUTBOUND_ALLOW_UIDS (root always allowed)
+	AllowGIDs       []uint32 // OUTBOUND_ALLOW_GIDS
+	Enrich          bool     // OUTBOUND_LOG_ENRICH (GeoIP/ASN on dst)
 }
 
 // MaxMindConfig — updater and DB locations for GeoLite/GeoIP2
@@ -366,6 +393,46 @@ func (c *Config) SetDefaults() {
 		c.Logging.SMTPFile = "/var/log/cfm.smtp.log"
 	}
 
+	// Outbound Abuse Sentinel defaults (phase 1: observe + warn)
+	if c.Outbound.WindowSec <= 0 {
+		c.Outbound.WindowSec = 60
+	}
+	if c.Outbound.SMTPPerMin <= 0 {
+		c.Outbound.SMTPPerMin = 30
+	}
+	if c.Outbound.UniqueDstPerMin <= 0 {
+		c.Outbound.UniqueDstPerMin = 50
+	}
+	if c.Outbound.HTTPPerMin <= 0 {
+		c.Outbound.HTTPPerMin = 200
+	}
+	if c.Outbound.DNSPerMin <= 0 {
+		c.Outbound.DNSPerMin = 200
+	}
+	if len(c.Outbound.SMTPPorts) == 0 {
+		c.Outbound.SMTPPorts = []uint16{25, 465, 587}
+	}
+	if len(c.Outbound.ScanPorts) == 0 {
+		c.Outbound.ScanPorts = []uint16{22, 23, 3389}
+	}
+	if len(c.Outbound.HTTPPorts) == 0 {
+		c.Outbound.HTTPPorts = []uint16{80, 443, 8080, 8443}
+	}
+	if c.Outbound.LogDedupSec <= 0 {
+		c.Outbound.LogDedupSec = 300
+	}
+	if c.Outbound.NotifySeverity == "" {
+		c.Outbound.NotifySeverity = "warning"
+	}
+	if c.Outbound.QueueSamples <= 0 {
+		c.Outbound.QueueSamples = 5
+	}
+	// Outbound shares the SMTP log file (operator preference: keep one place
+	// for outbound abuse signals).
+	if c.Outbound.Enabled && c.Logging.SMTPFile == "" {
+		c.Logging.SMTPFile = "/var/log/cfm.smtp.log"
+	}
+
 	// Hardening
 	if c.Hardening.NewRate < 0 {
 		c.Hardening.NewRate = 0
@@ -443,6 +510,14 @@ func (c *Config) Validate() error {
 			out = append(out, uint16(p))
 		}
 		c.SMTPBlock.Ports = out
+	}
+
+	// Outbound: NFLOG group must not collide with SMTP_LOG_NFLOG (different
+	// callbacks would be wired to the same group and packets would be split).
+	if c.Outbound.Enabled && c.Outbound.NFLOGGroup > 0 &&
+		c.SMTPBlock.LogNFLOG > 0 && c.Outbound.NFLOGGroup == c.SMTPBlock.LogNFLOG {
+		return fmt.Errorf("OUTBOUND_NFLOG (%d) must differ from SMTP_LOG_NFLOG (%d)",
+			c.Outbound.NFLOGGroup, c.SMTPBlock.LogNFLOG)
 	}
 
 	// MaxMind sanity
@@ -629,6 +704,40 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.SMTPBlock.LogNFLOG = parseInt(val)
 		case "SMTP_LOG_ENRICH":
 			cfg.SMTPBlock.LogEnrich = parseBool(val)
+
+		// --- Outbound Abuse Sentinel (phase 1) ---
+		case "OUTBOUND_ENABLED":
+			cfg.Outbound.Enabled = parseBool(val)
+		case "OUTBOUND_NFLOG":
+			cfg.Outbound.NFLOGGroup = parseInt(val)
+		case "OUTBOUND_WINDOW_SECONDS":
+			cfg.Outbound.WindowSec = parseInt(val)
+		case "OUTBOUND_SMTP_CONN_PER_MIN":
+			cfg.Outbound.SMTPPerMin = parseInt(val)
+		case "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN":
+			cfg.Outbound.UniqueDstPerMin = parseInt(val)
+		case "OUTBOUND_HTTP_RATE_PER_MIN":
+			cfg.Outbound.HTTPPerMin = parseInt(val)
+		case "OUTBOUND_DNS_PER_MIN":
+			cfg.Outbound.DNSPerMin = parseInt(val)
+		case "OUTBOUND_SMTP_PORTS":
+			cfg.Outbound.SMTPPorts = append(cfg.Outbound.SMTPPorts, parseUint16CSV(val)...)
+		case "OUTBOUND_SCAN_PORTS":
+			cfg.Outbound.ScanPorts = append(cfg.Outbound.ScanPorts, parseUint16CSV(val)...)
+		case "OUTBOUND_HTTP_PORTS":
+			cfg.Outbound.HTTPPorts = append(cfg.Outbound.HTTPPorts, parseUint16CSV(val)...)
+		case "OUTBOUND_LOG_DEDUP_SECONDS":
+			cfg.Outbound.LogDedupSec = parseInt(val)
+		case "OUTBOUND_NOTIFY_SEVERITY":
+			cfg.Outbound.NotifySeverity = val
+		case "OUTBOUND_QUEUE_SAMPLES":
+			cfg.Outbound.QueueSamples = parseInt(val)
+		case "OUTBOUND_ALLOW_UIDS":
+			cfg.Outbound.AllowUIDs = append(cfg.Outbound.AllowUIDs, parseUint32CSV(val)...)
+		case "OUTBOUND_ALLOW_GIDS":
+			cfg.Outbound.AllowGIDs = append(cfg.Outbound.AllowGIDs, parseUint32CSV(val)...)
+		case "OUTBOUND_LOG_ENRICH":
+			cfg.Outbound.Enrich = parseBool(val)
 
 		// --- Debug / HTTP listen ---
 		case "LISTEN_ADDRESS":
