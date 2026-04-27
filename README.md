@@ -203,6 +203,17 @@ internal/
 - Throttle-to-autoblock glue: `THROTTLE_*`
 - Portscan tracking: `PS_*`
 - MaxMind updater: `MAXMIND_*`
+- **Why MMDB is critical**
+  - MMDB databases are shared across CFM enrichment pipelines and power IP→country/ASN lookups used by detection, reporting, and automation flows.
+  - The same MMDB data is also used by OpenResty/Angie integrations for country-aware location and filtering decisions.
+- **Download source selection** (deterministic order)
+  1. If both `MAXMIND_ACCOUNT_ID` and `MAXMIND_LICENSE_KEY` are set, CFM uses MaxMind GeoLite2 sources.
+  2. Otherwise, CFM fetches open MMDB files from IPLocate GitHub raw URLs:
+     - `https://github.com/iplocate/ip-address-databases/raw/refs/heads/main/ip-to-asn/ip-to-asn.mmdb`
+     - `https://github.com/iplocate/ip-address-databases/raw/refs/heads/main/ip-to-country/ip-to-country.mmdb`
+- **Canonical on-disk filenames**
+  - CFM expects MMDB files to be present as `GeoLite2-ASN.mmdb` and `GeoLite2-City.mmdb`.
+  - When fallback IPLocate sources are used, downloaded files are mapped/renamed to these canonical filenames on disk.
 - API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
   - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.
   - API ports must stay firewalled by default (`PORT` usually `6060` plaintext and `TLS_PORT` usually `6061`) and should only be reachable from localhost or explicitly allowed sources (for example entries resolved from `cfm.allow` / `cfm.dyndns`).
