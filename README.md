@@ -42,6 +42,7 @@ for the trade-offs and how to choose.
    - [Connection Protections](#-connection-protections)
    - [Detection Engine](#-detection-engine)
    - [Autoblock Engine](#-autoblock-engine)
+   - [Outbound Abuse Sentinel](#-outbound-abuse-sentinel)
 6. [Web Detector](#6-web-detector)
    - [Ingestion Modes](#ingestion-modes)
    - [Log Line Format](#log-line-format-tsv)
@@ -100,6 +101,7 @@ backend and no iptables dependency.
 - Broad detector coverage: SSH, Exim, Dovecot, FTP, MySQL, cPanel, ModSecurity, Web
 - Web Detector that can escalate to an **interactive challenge** instead of always hard-blocking
 - MySQL Governor that can kill runaway queries and enforce per-user connection limits
+- **Outbound Abuse Sentinel** — per-uid detection of SMTP bursts, scanner activity, HTTP fan-out and DNS amplification before your IPs land on blacklists
 - ML-Ready: the scoring system is a hand-crafted classifier based on trusted signals
 
 ---
@@ -313,6 +315,84 @@ Detectors parse logs/metrics to spot abuse:
 - Per-detector policies: `dryrun`, `ttl=1h`, `permanent`
 - Dedupe suppression for noisy repeats (`host|kind|ip|reason`)
 - Unified reasons: `SSH_BRUTE`, `PORTSCAN`, `CONNLIMIT`, `WEB_*`, etc.
+
+### 📤 Outbound Abuse Sentinel
+
+A direct counterpart to the inbound detection engine: instead of asking "who is
+attacking us?" it asks "which of my hosted accounts is generating outbound
+abuse?" — the question that decides whether your mail IPs end up on Spamhaus,
+your egress IP gets nullrouted by your upstream, or a compromised PHP site
+turns your server into a botnet node.
+
+**What it does (phase 1 — observe + warn):**
+- Watches new outbound TCP connections (and UDP/53) per Linux uid via NFLOG.
+- Classifies each event by destination port group:
+  - **SMTP** — outbound 25 / 465 / 587 (mail flood, compromised CMS sending spam)
+  - **SCAN** — outbound 22 / 23 / 3389 (brute-forcer / scanner running on your box)
+  - **HTTP** — outbound 80 / 443 / 8080 / 8443 (POST flood, botnet C2)
+  - **DNS** — outbound UDP/53 + TCP/53 (amplification participant)
+  - **UNIQ_DST** — many distinct destination IPs in the window (horizontal scanner)
+- Maintains a per-uid sliding window with per-signal dedup so a runaway
+  account doesn't spam the log.
+- On threshold trip, writes a single forensic line to `cfm.smtp.log` with the
+  user, process, pid, **cwd**, **cmdline**, peer sample, dst-IP enrichment
+  (ASN/Country/PTR), and an **exim queue snapshot** (msgids + sender
+  addresses) when the signal is SMTP — so the offending script is identifiable
+  from one log line.
+- Emits a `notify.Event` (`kind=outbound_abuse`, `section=outbound`,
+  `severity=warning`) so existing Slack / email / webhook channels carry it.
+
+**Architecture (observe-only):**
+```
+nftables OUTPUT chain (cfm_outbound_observe, priority 10)
+   ├─ skuid 0 / allowlist → return            (root + system services exempt)
+   ├─ ct state new tcp dport {SMTP|SCAN|HTTP} → NFLOG group N
+   └─ udp/53 + tcp/53 ct state new           → NFLOG group N
+                                                       ↓
+                                       internal/outbound/collector.go
+                                                       ↓
+                                       analyzer (sliding window per uid)
+                                                       ↓
+                                       alerter → cfm.smtp.log + notify
+```
+
+The chain is installed at output priority 10 (after `smtpblock` at -100), so a
+packet already being denied by SMTP_BLOCK is never double-logged. Root traffic
+is filtered at the **kernel** boundary, not in user space — system mailers and
+cfm itself don't waste netlink bandwidth.
+
+**Phase 1 is observe-only.** No throttle, no suspend, no nft rate-limit. The
+chain is `policy accept`; if cfm crashes, no outbound traffic is affected.
+Phase 2 (planned) will add a sibling `cfm_outbound_enforce` chain with opt-in
+per-uid throttle and configurable suspend hook.
+
+**Configuration** (defaults shown — all in `cfm.conf`):
+```ini
+OUTBOUND_ENABLED                 = 0       # off by default
+OUTBOUND_NFLOG                   = 0       # NFLOG group; must differ from SMTP_LOG_NFLOG
+OUTBOUND_WINDOW_SECONDS          = 60
+OUTBOUND_SMTP_CONN_PER_MIN       = 30
+OUTBOUND_SCAN_UNIQUE_DST_PER_MIN = 50
+OUTBOUND_HTTP_RATE_PER_MIN       = 200
+OUTBOUND_DNS_PER_MIN             = 200
+OUTBOUND_LOG_DEDUP_SECONDS       = 300     # don't re-warn within this window
+OUTBOUND_QUEUE_SAMPLES           = 5       # exim msgid/sender lines per warning
+OUTBOUND_LOG_ENRICH              = 1       # GeoIP/ASN on destination IP
+# OUTBOUND_ALLOW_UIDS = 8,12               # mailnull / mailman if you see false positives
+# OUTBOUND_ALLOW_GIDS = 12
+```
+
+**Example forensic line** (written to `cfm.smtp.log`):
+```
+2026-04-27 14:23:45 outbound signal=smtp uid=1042 (user:johndoe) gid=1042 (group:johndoe) \
+  count=31 threshold=30 window=1m0s uniq_dst=14 proc=php pid=28104 cwd="/home/johndoe/public_html/wp-content/uploads/cache" \
+  cmd="/usr/bin/php /home/johndoe/public_html/wp-content/uploads/cache/x.php" \
+  peers=185.220.101.5:25,193.150.10.7:25,... | dst_asn=AS15169 (Google LLC) cc=US city=Mountain View ptr=mx.google.com \
+  | exim_queue total=412 frozen=8 msgids=1uH...,1uI... senders=johndoe@example.com
+```
+The `cwd` and `cmdline` fields, plus the exim queue snapshot, normally let an
+operator identify the compromised script in seconds rather than grepping
+through `/var/log/exim_mainlog`.
 
 ---
 
