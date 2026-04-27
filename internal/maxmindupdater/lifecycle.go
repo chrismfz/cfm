@@ -34,6 +34,12 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.MaxMindConfig) 
 
 	switch {
 	case cfg.Enabled && !l.started:
+		sourceMode := cfg.Source
+		provider := "IPLocate"
+		if sourceMode == "maxmind" || (sourceMode == "auto" && cfg.AccountID != "" && cfg.LicenseKey != "") {
+			provider = "MaxMind"
+		}
+
 		upd := New(Config{
 			Enabled:         cfg.Enabled,
 			AccountID:       cfg.AccountID,
@@ -44,6 +50,7 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.MaxMindConfig) 
 			MinAgeBetweenDL: cfg.MinAgeBetweenDL,
 			HTTPTimeout:     cfg.HTTPTimeout,
 			Permalinks:      cfg.Permalinks,
+			SourceMode:      sourceMode,
 		})
 		c, cancel := context.WithCancel(ctx)
 		l.cancel = cancel
@@ -53,8 +60,8 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.MaxMindConfig) 
 				logging.Logf("[maxmind] updater stopped: %v", err)
 			}
 		}()
-		logging.Logf("[maxmind] updater started (editions=%v dir=%s every=%s min_age=%s)",
-			cfg.Editions, cfg.Dir, cfg.CheckEvery, cfg.MinAgeBetweenDL)
+		logging.Logf("[maxmind] updater started (provider=%s source=%s editions=%v dir=%s every=%s min_age=%s)",
+			provider, sourceMode, cfg.Editions, cfg.Dir, cfg.CheckEvery, cfg.MinAgeBetweenDL)
 
 	case !cfg.Enabled && l.started:
 		l.cancel()

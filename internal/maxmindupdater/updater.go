@@ -44,9 +44,10 @@ var (
 )
 
 type Updater struct {
-	cfg   Config
-	httpc *http.Client
-	mu    sync.Mutex
+	cfg              Config
+	httpc            *http.Client
+	mu               sync.Mutex
+	bootstrapTriedEd map[string]bool
 }
 
 func New(cfg Config) *Updater {
@@ -83,6 +84,7 @@ func New(cfg Config) *Updater {
 			Timeout: cfg.HTTPTimeout,
 			// Default CheckRedirect follows up to 10 redirects – good for R2
 		},
+		bootstrapTriedEd: map[string]bool{},
 	}
 }
 
@@ -131,6 +133,7 @@ func (u *Updater) Run(ctx context.Context, logf func(string, ...any)) error {
 func (u *Updater) checkOnce(ctx context.Context, logf func(string, ...any)) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	bootstrapNeeded := u.dirHasNoMMDB()
 
 	st, _ := u.loadState()
 	if st == nil {
@@ -145,12 +148,14 @@ func (u *Updater) checkOnce(ctx context.Context, logf func(string, ...any)) {
 		url := u.sourceURL(ed)
 		if url == "" {
 			logf("[maxmind] no source URL for edition %s; skipping", ed)
+			u.tryBootstrapFromIPLocate(ctx, logf, ed, bootstrapNeeded, "no primary source URL configured")
 			continue
 		}
 
 		remoteDate, etag, err := u.head(ctx, url)
 		if err != nil {
 			logf("[maxmind] HEAD %s failed for %s: %v", url, ed, err)
+			u.tryBootstrapFromIPLocate(ctx, logf, ed, bootstrapNeeded, "HEAD failed")
 			continue
 		}
 
@@ -175,9 +180,11 @@ func (u *Updater) checkOnce(ctx context.Context, logf func(string, ...any)) {
 		logf("[maxmind] updating %s (lastDL=%v, remoteDate=%v)", ed, lastDL, remoteDate)
 		if err := u.downloadAndInstall(ctx, url, ed); err != nil {
 			logf("[maxmind] download/install failed for %s: %v", ed, err)
+			u.tryBootstrapFromIPLocate(ctx, logf, ed, bootstrapNeeded, "download failed")
 			continue
 		}
 		st.LastDownloaded[ed] = time.Now()
+		bootstrapNeeded = false
 	}
 
 	if err := u.saveState(st); err != nil {
@@ -225,12 +232,16 @@ func (u *Updater) head(ctx context.Context, url string) (time.Time, string, erro
 }
 
 func (u *Updater) downloadAndInstall(ctx context.Context, url, edition string) error {
+	return u.downloadAndInstallWithAuth(ctx, url, edition, u.useMaxMindSource())
+}
+
+func (u *Updater) downloadAndInstallWithAuth(ctx context.Context, url, edition string, useMaxMindAuth bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 
-	if u.useMaxMindSource() {
+	if useMaxMindAuth {
 		req.SetBasicAuth(u.cfg.AccountID, u.cfg.LicenseKey)
 	}
 	resp, err := u.httpc.Do(req)
@@ -249,6 +260,46 @@ func (u *Updater) downloadAndInstall(ctx context.Context, url, edition string) e
 		return extractFromTarGZ(resp.Body, u.cfg.Dir, outBase, outPath, edition)
 	}
 	return streamToAtomicFile(resp.Body, u.cfg.Dir, outBase, outPath)
+}
+
+func (u *Updater) tryBootstrapFromIPLocate(ctx context.Context, logf func(string, ...any), edition string, bootstrapNeeded bool, reason string) {
+	if !bootstrapNeeded {
+		return
+	}
+	if u.useMaxMindSource() == false {
+		return
+	}
+	if u.bootstrapTriedEd[edition] {
+		return
+	}
+	fallbackURL := u.cfg.IPLocateURLs[edition]
+	if fallbackURL == "" {
+		return
+	}
+
+	u.bootstrapTriedEd[edition] = true
+	logf("[maxmind] bootstrap fallback to IPLocate for %s (%s): %s", edition, reason, fallbackURL)
+	if err := u.downloadAndInstallWithAuth(ctx, fallbackURL, edition, false); err != nil {
+		logf("[maxmind] bootstrap IPLocate download failed for %s: %v", edition, err)
+		return
+	}
+	logf("[maxmind] bootstrap IPLocate download succeeded for %s", edition)
+}
+
+func (u *Updater) dirHasNoMMDB() bool {
+	ents, err := os.ReadDir(u.cfg.Dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(e.Name()), ".mmdb") {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalOutputName(edition string) string {

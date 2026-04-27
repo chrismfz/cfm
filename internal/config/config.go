@@ -129,6 +129,7 @@ type OutboundConfig struct {
 // MaxMindConfig — updater and DB locations for GeoLite/GeoIP2
 type MaxMindConfig struct {
 	Enabled         bool          // MAXMIND_ENABLED
+	Source          string        // MAXMIND_SOURCE (auto|maxmind|iplocate)
 	AccountID       string        // MAXMIND_ACCOUNT_ID
 	LicenseKey      string        // MAXMIND_LICENSE_KEY
 	Editions        []string      // MAXMIND_EDITIONS (comma-separated), e.g. GeoLite2-ASN,GeoLite2-City
@@ -328,6 +329,9 @@ func (c *Config) SetDefaults() {
 	}
 
 	// --- MaxMind defaults ---
+	if c.MaxMind.Source == "" {
+		c.MaxMind.Source = "auto"
+	}
 	if c.MaxMind.Dir == "" {
 		c.MaxMind.Dir = "/var/lib/cfm/maxmind"
 	}
@@ -523,6 +527,15 @@ func (c *Config) Validate() error {
 	}
 
 	// MaxMind sanity
+	c.MaxMind.Source = strings.ToLower(strings.TrimSpace(c.MaxMind.Source))
+	switch c.MaxMind.Source {
+	case "", "auto", "maxmind", "iplocate":
+		if c.MaxMind.Source == "" {
+			c.MaxMind.Source = "auto"
+		}
+	default:
+		return fmt.Errorf("invalid MAXMIND_SOURCE %q (must be auto|maxmind|iplocate)", c.MaxMind.Source)
+	}
 	if c.MaxMind.CheckEvery < 0 || c.MaxMind.MinAgeBetweenDL < 0 || c.MaxMind.HTTPTimeout < 0 {
 		return errors.New("negative durations are not allowed in MaxMind config")
 	}
@@ -803,6 +816,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		// --- MaxMind (GeoLite/GeoIP2 updater) ---
 		case "MAXMIND_ENABLED":
 			cfg.MaxMind.Enabled = parseBool(val)
+		case "MAXMIND_SOURCE":
+			cfg.MaxMind.Source = val
 		case "MAXMIND_ACCOUNT_ID":
 			cfg.MaxMind.AccountID = val
 		case "MAXMIND_LICENSE_KEY":
@@ -967,7 +982,7 @@ func IsKnownKey(key string) bool {
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_ENCRYPTION_KEY", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
-		"MAXMIND_ENABLED", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
+		"MAXMIND_ENABLED", "MAXMIND_SOURCE", "MAXMIND_ACCOUNT_ID", "MAXMIND_LICENSE_KEY", "MAXMIND_EDITIONS", "MAXMIND_DIR", "MAXMIND_CHECK_EVERY", "MAXMIND_MIN_AGE", "MAXMIND_HTTP_TIMEOUT", "MAXMIND_PERMALINKS_JSON",
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX", "SSLCOLLECTOR_OFFLINE_CACHE",
 		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",
 		"CLAM_LOG_STDOUT", "CLAM_LOG_FILE",
