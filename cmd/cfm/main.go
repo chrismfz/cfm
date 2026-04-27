@@ -918,27 +918,45 @@ func runDaemon(args []string) {
 	}
 
 	// ── onCFMConfChanged ─────────────────────────────────────────────────────────
-	// Parses cfm.conf once when it changes, distributes to all subsystems.
-	onCFMConfChanged := func() {
+	// Parses cfm.conf once when it changes.
+	loadCFMConfigIfChanged := func() (*cfgpkg.Config, bool) {
 		if cfgDir == "" || confW == nil {
-			return
+			return nil, false
 		}
 		b, ok := confW.Changed()
 		if !ok {
-			return
+			return nil, false
 		}
 		cfg, err := cli.LoadConfigWithAPIOverride(cfgDir, b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cfm.conf parse error:", err)
-			return
+			return nil, false
 		}
+		return cfg, true
+	}
 
-		applySystemConfig(cfg)                            // logging, sysctl, SMTP owners
-		mmdbLc.ApplyConfig(ctx, &cfg.MaxMind)             // MaxMind updater
+	// Phase 1: config/system + MaxMind lifecycle (must happen before detectors on first boot).
+	applyCFMConfigEarly := func(cfg *cfgpkg.Config) {
+		applySystemConfig(cfg)                // logging, sysctl, SMTP owners
+		mmdbLc.ApplyConfig(ctx, &cfg.MaxMind) // MaxMind updater/fallback
+	}
+
+	// Phase 3: remaining subsystems after detector startup on first boot.
+	applyCFMConfigRemaining := func(cfg *cfgpkg.Config) {
 		sslSockLc.ApplyConfig(ctx, &cfg.SSLCollectorSock) // SSL collector socket
 		agLc.ApplyConfig(cfg)                             // API agent
 		applyDebugServer(cfg)                             // MySQL governor + debug HTTP (start-once)
 		applyNFTRules(cfg)                                // nft: flood, ports, smtp, reporter, nflog
+	}
+
+	// Parses cfm.conf once when it changes and applies all reloadable phases.
+	onCFMConfChanged := func() {
+		cfg, ok := loadCFMConfigIfChanged()
+		if !ok {
+			return
+		}
+		applyCFMConfigEarly(cfg)
+		applyCFMConfigRemaining(cfg)
 	}
 
 	// ── Initial load ─────────────────────────────────────────────────────────────
@@ -946,18 +964,33 @@ func runDaemon(args []string) {
 	loadAll()
 	done()
 
-	// Start detectors BEFORE first onCFMConfChanged(), so applyDebugServer() can
-	// see mysql_governor pending config.
+	// First boot sequencing:
+	//   1) early cfm.conf phase (system + MaxMind updater/fallback),
+	//   2) detector startup (needed for mysql_governor pending config),
+	//   3) remaining cfm.conf phase (API/debug/nft/etc.).
+	done = step("initial:loadCFMConfigIfChanged")
+	cfg, cfgOK := loadCFMConfigIfChanged()
+	done()
+	if cfgOK {
+		done = step("initial:applyCFMConfigEarly")
+		applyCFMConfigEarly(cfg)
+		done()
+	}
+
+	done = step("initial:detectorsStart")
 	detpkg.SetFW(be)
 	detpkg.Start(ctx, detpkg.Options{
 		CfgPath: filepath.Join(cfgDir, "detectors.conf"),
 		Sink:    detpkg.OutcomeLoggerSink{},
 		FW:      be,
 	})
-
-	done = step("initial:onCFMConfChanged")
-	onCFMConfChanged()
 	done()
+
+	if cfgOK {
+		done = step("initial:applyCFMConfigRemaining")
+		applyCFMConfigRemaining(cfg)
+		done()
+	}
 
 	done = step("initial:reloadBlocklists")
 	reloadBlocklists()
