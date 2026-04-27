@@ -29,6 +29,7 @@ import (
 	"cfm/internal/apiserver"
 
 	nflog "cfm/internal/nflog"
+	"cfm/internal/outbound"
 
 	mmdb "cfm/internal/maxmindupdater"
 
@@ -712,6 +713,9 @@ func runDaemon(args []string) {
 	// SMTP NFLOG snooper lifecycle (start-once, driven by config)
 	smtpLc := nflog.NewSnoopLifecycle()
 
+	// Outbound Abuse Sentinel lifecycle (phase 1: observe + warn)
+	outboundLc := outbound.NewLifecycle()
+
 	// Ensure base data dirs exist with correct permissions.
 	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty worker
 	// (running as the cfm user) can write the cert snapshot there.
@@ -900,6 +904,16 @@ func runDaemon(args []string) {
 			nb.SetReporter(&agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken})
 		}
 		smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
+
+		// Outbound Abuse Sentinel — observe-only nft chain + NFLOG collector.
+		// The chain is installed/cleaned every reload (idempotent); the
+		// collector goroutine is start-once.
+		if err := nb.ApplyOutboundObserve(&cfg.Outbound); err != nil {
+			fmt.Fprintln(os.Stderr, "outbound observe apply error:", err)
+		} else if cfg.Outbound.Enabled {
+			logging.Logf("[outbound] observe chain applied (group=%d)", cfg.Outbound.NFLOGGroup)
+		}
+		outboundLc.ApplyConfig(ctx, &cfg.Outbound)
 	}
 
 	// ── onCFMConfChanged ─────────────────────────────────────────────────────────
