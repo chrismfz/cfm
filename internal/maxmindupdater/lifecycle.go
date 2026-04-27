@@ -29,8 +29,8 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.MaxMindConfig) 
 		cfg.Dir = "/var/lib/cfm/maxmind"
 	}
 
-_ = os.MkdirAll(cfg.Dir, 0o755)
-_ = os.Chmod(cfg.Dir, 0o755)
+	_ = os.MkdirAll(cfg.Dir, 0o755)
+	_ = os.Chmod(cfg.Dir, 0o755)
 
 	switch {
 	case cfg.Enabled && !l.started:
