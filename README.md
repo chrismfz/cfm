@@ -374,10 +374,13 @@ OUTBOUND_WINDOW_SECONDS          = 60
 OUTBOUND_SMTP_CONN_PER_MIN       = 30
 OUTBOUND_SCAN_UNIQUE_DST_PER_MIN = 50
 OUTBOUND_HTTP_RATE_PER_MIN       = 200
-OUTBOUND_DNS_PER_MIN             = 200
+OUTBOUND_DNS_PER_MIN             = 300
 OUTBOUND_LOG_DEDUP_SECONDS       = 300     # don't re-warn within this window
 OUTBOUND_QUEUE_SAMPLES           = 5       # exim msgid/sender lines per warning
 OUTBOUND_LOG_ENRICH              = 1       # GeoIP/ASN on destination IP
+# Auto-exempt (when present): users cfm,mailnull and groups cfm,mail
+# OUTBOUND_ALLOW_USERS = mailman,exim      # extra names (resolved at load time)
+# OUTBOUND_ALLOW_GROUPS = mailman
 # OUTBOUND_ALLOW_UIDS = 8,12               # mailnull / mailman if you see false positives
 # OUTBOUND_ALLOW_GIDS = 12
 ```

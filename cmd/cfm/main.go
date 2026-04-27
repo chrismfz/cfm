@@ -840,6 +840,7 @@ func runDaemon(args []string) {
 			logging.Logf("[config] %s", ln)
 		}
 		resolveSMTPAllowOwners(cfg)
+		resolveOutboundAllowOwners(cfg)
 		if err := sysctl.ApplyTweaks(&cfg.SystemTweaks); err != nil {
 			fmt.Fprintln(os.Stderr, "sysctl tweaks error:", err)
 		}
@@ -1047,6 +1048,57 @@ func resolveSMTPAllowOwners(cfg *cfgpkg.Config) {
 	cfg.SMTPBlock.AllowGIDs = cfg.SMTPBlock.AllowGIDs[:0]
 	for id := range seenGID {
 		cfg.SMTPBlock.AllowGIDs = append(cfg.SMTPBlock.AllowGIDs, id)
+	}
+}
+
+// Resolve outbound allow-list owners (usernames/groups) into numeric IDs in-place.
+func resolveOutboundAllowOwners(cfg *cfgpkg.Config) {
+	if cfg == nil {
+		return
+	}
+
+	// Users → UIDs (always include root).
+	seenUID := map[uint32]struct{}{0: {}}
+	for _, u := range cfg.Outbound.AllowUIDs {
+		seenUID[u] = struct{}{}
+	}
+	defaultUsers := []string{"cfm", "mailnull"}
+	for _, name := range append(defaultUsers, cfg.Outbound.AllowUsers...) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if u, err := user.Lookup(name); err == nil {
+			if uid64, err := strconv.ParseUint(u.Uid, 10, 32); err == nil {
+				seenUID[uint32(uid64)] = struct{}{}
+			}
+		}
+	}
+	cfg.Outbound.AllowUIDs = cfg.Outbound.AllowUIDs[:0]
+	for id := range seenUID {
+		cfg.Outbound.AllowUIDs = append(cfg.Outbound.AllowUIDs, id)
+	}
+
+	// Groups → GIDs.
+	seenGID := map[uint32]struct{}{}
+	for _, g := range cfg.Outbound.AllowGIDs {
+		seenGID[g] = struct{}{}
+	}
+	defaultGroups := []string{"cfm", "mail"}
+	for _, name := range append(defaultGroups, cfg.Outbound.AllowGroups...) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if g, err := user.LookupGroup(name); err == nil {
+			if gid64, err := strconv.ParseUint(g.Gid, 10, 32); err == nil {
+				seenGID[uint32(gid64)] = struct{}{}
+			}
+		}
+	}
+	cfg.Outbound.AllowGIDs = cfg.Outbound.AllowGIDs[:0]
+	for id := range seenGID {
+		cfg.Outbound.AllowGIDs = append(cfg.Outbound.AllowGIDs, id)
 	}
 }
 

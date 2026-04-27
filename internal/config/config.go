@@ -112,13 +112,15 @@ type OutboundConfig struct {
 	SMTPPerMin      int      // OUTBOUND_SMTP_CONN_PER_MIN (default 30)
 	UniqueDstPerMin int      // OUTBOUND_SCAN_UNIQUE_DST_PER_MIN (default 50)
 	HTTPPerMin      int      // OUTBOUND_HTTP_RATE_PER_MIN (default 200)
-	DNSPerMin       int      // OUTBOUND_DNS_PER_MIN (default 200)
+	DNSPerMin       int      // OUTBOUND_DNS_PER_MIN (default 300)
 	ScanPorts       []uint16 // OUTBOUND_SCAN_PORTS (default 22,23,3389)
 	SMTPPorts       []uint16 // OUTBOUND_SMTP_PORTS (default 25,465,587)
 	HTTPPorts       []uint16 // OUTBOUND_HTTP_PORTS (default 80,443,8080,8443)
 	LogDedupSec     int      // OUTBOUND_LOG_DEDUP_SECONDS (default 300)
 	NotifySeverity  string   // OUTBOUND_NOTIFY_SEVERITY (default warning)
 	QueueSamples    int      // OUTBOUND_QUEUE_SAMPLES (default 5)
+	AllowUsers      []string // OUTBOUND_ALLOW_USERS (extra usernames; cfm/mailnull auto-checked)
+	AllowGroups     []string // OUTBOUND_ALLOW_GROUPS (extra group names; cfm/mail auto-checked)
 	AllowUIDs       []uint32 // OUTBOUND_ALLOW_UIDS (root always allowed)
 	AllowGIDs       []uint32 // OUTBOUND_ALLOW_GIDS
 	Enrich          bool     // OUTBOUND_LOG_ENRICH (GeoIP/ASN on dst)
@@ -407,7 +409,7 @@ func (c *Config) SetDefaults() {
 		c.Outbound.HTTPPerMin = 200
 	}
 	if c.Outbound.DNSPerMin <= 0 {
-		c.Outbound.DNSPerMin = 200
+		c.Outbound.DNSPerMin = 300
 	}
 	if len(c.Outbound.SMTPPorts) == 0 {
 		c.Outbound.SMTPPorts = []uint16{25, 465, 587}
@@ -732,6 +734,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Outbound.NotifySeverity = val
 		case "OUTBOUND_QUEUE_SAMPLES":
 			cfg.Outbound.QueueSamples = parseInt(val)
+		case "OUTBOUND_ALLOW_USERS":
+			cfg.Outbound.AllowUsers = append(cfg.Outbound.AllowUsers, splitCSV(val)...)
+		case "OUTBOUND_ALLOW_GROUPS":
+			cfg.Outbound.AllowGroups = append(cfg.Outbound.AllowGroups, splitCSV(val)...)
 		case "OUTBOUND_ALLOW_UIDS":
 			cfg.Outbound.AllowUIDs = append(cfg.Outbound.AllowUIDs, parseUint32CSV(val)...)
 		case "OUTBOUND_ALLOW_GIDS":
@@ -957,6 +963,7 @@ func IsKnownKey(key string) bool {
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
+		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_ENCRYPTION_KEY", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
