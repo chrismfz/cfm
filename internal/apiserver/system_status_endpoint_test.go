@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
+
+	"cfm/internal/healthstore"
 )
 
 func newSystemStatusTestServer(t *testing.T) (*TokenStore, http.Handler) {
@@ -61,6 +64,13 @@ func TestSystemStatusEndpoints_Authz(t *testing.T) {
 		}
 	})
 
+	t.Run("scoped token forbidden health snapshot", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/snapshot", scoped.Token, false)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+	})
+
 	t.Run("admin token can read dnat", func(t *testing.T) {
 		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/dnat?cache_ttl=0", "admin-secret", false)
 		if rr.Code != http.StatusOK {
@@ -101,6 +111,92 @@ func TestSystemStatusEndpoints_Authz(t *testing.T) {
 	})
 }
 
+func TestSystemStatusEndpoints_HealthEndpoints(t *testing.T) {
+	origStore := healthstore.Global()
+	hs := healthstore.NewRingStore(32)
+	healthstore.SetGlobal(hs)
+	t.Cleanup(func() { healthstore.SetGlobal(origStore) })
+
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "local"
+	}
+	now := time.Now().UTC()
+	hs.Append(hostname, healthstore.Sample{NodeID: hostname, Hostname: hostname, CollectedAt: now.Add(-4 * time.Minute), Load1: 1, RamUsedPct: 40, DiskRootPct: 50, DiskTmpPct: 20, TempMaxC: 60, RxMbps: 10, TxMbps: 20})
+	hs.Append(hostname, healthstore.Sample{NodeID: hostname, Hostname: hostname, CollectedAt: now.Add(-2 * time.Minute), Load1: 2, RamUsedPct: 45, DiskRootPct: 52, DiskTmpPct: 21, TempMaxC: 61, RxMbps: 12, TxMbps: 22})
+
+	_, h := newSystemStatusTestServer(t)
+
+	t.Run("snapshot returns schema version", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/snapshot", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if got, _ := body["schema_version"].(string); got != healthSnapshotSchemaV1 {
+			t.Fatalf("schema_version=%q", got)
+		}
+	})
+
+	t.Run("timeseries returns deterministic points", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/timeseries?window=10m&step=1m", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var body struct {
+			SchemaVersion string `json:"schema_version"`
+			Points        []struct {
+				SampleCount float64 `json:"sample_count"`
+			} `json:"points"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if body.SchemaVersion != healthTimeseriesSchemaV1 {
+			t.Fatalf("schema_version=%q", body.SchemaVersion)
+		}
+		if len(body.Points) == 0 {
+			t.Fatalf("expected non-empty points")
+		}
+	})
+
+	t.Run("anomalies since filter", func(t *testing.T) {
+		publishAPIAnomalyEvent(APIAnomalyEvent{When: now.Add(-10 * time.Minute), Source: "apiserver", Reason: "old", Signal: "old"})
+		publishAPIAnomalyEvent(APIAnomalyEvent{When: now.Add(-1 * time.Minute), Source: "apiserver", Reason: "new", Signal: "new"})
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/anomalies?since=5m", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var body struct {
+			SchemaVersion string `json:"schema_version"`
+			Count         int    `json:"count"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if body.SchemaVersion != healthAnomaliesSchemaV1 {
+			t.Fatalf("schema_version=%q", body.SchemaVersion)
+		}
+		if body.Count < 1 {
+			t.Fatalf("expected at least one anomaly in window")
+		}
+	})
+
+	t.Run("ingest accepted", func(t *testing.T) {
+		payload := bytes.NewBufferString(`{"node_id":"` + hostname + `","sample":{"collected_at":"` + time.Now().UTC().Format(time.RFC3339) + `","load1":3.5}}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/health/ingest", payload)
+		req.Header.Set("Authorization", "Bearer admin-secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
 func TestSystemStatusEndpoints_MethodNotAllowed(t *testing.T) {
 	store, h := newSystemStatusTestServer(t)
 	_ = store
@@ -116,5 +212,10 @@ func TestSystemStatusEndpoints_MethodNotAllowed(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte("method not allowed")) {
 		t.Fatalf("expected method-not-allowed message, got %s", rr.Body.String())
+	}
+
+	rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/health/snapshot", "admin-secret", false)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusMethodNotAllowed, rr.Body.String())
 	}
 }
