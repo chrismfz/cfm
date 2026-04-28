@@ -2,6 +2,7 @@ package healthcli
 
 import (
 	"cfm/internal/clihttp"
+	"cfm/internal/healthmodel"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -429,13 +430,70 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return out, fmt.Errorf("health snapshot failed: status=%d body=%s", res.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(res.Body).Decode(&out.Envelope); err != nil {
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
 		return out, err
 	}
-	_ = json.Unmarshal(out.Envelope.Snapshot, &out.Legacy)
-	_ = json.Unmarshal(out.Envelope.Snapshot, &out.Modern)
-	_ = json.Unmarshal(out.Envelope.Snapshot, &out.RawMap)
-	return out, nil
+	if err := json.Unmarshal(body, &out.Envelope); err == nil && len(out.Envelope.Snapshot) > 0 {
+		_ = json.Unmarshal(out.Envelope.Snapshot, &out.Legacy)
+		_ = json.Unmarshal(out.Envelope.Snapshot, &out.Modern)
+		_ = json.Unmarshal(out.Envelope.Snapshot, &out.RawMap)
+		return out, nil
+	}
+	var latest healthmodel.HealthSnapshotV1
+	if err := json.Unmarshal(body, &latest); err == nil && latest.SchemaVersion == healthmodel.SchemaVersionV1 {
+		out.Modern.NodeID = latest.NodeID
+		out.Modern.CollectedAt = latest.CollectedAt
+		out.Modern.Host.Hostname = latest.Host.Hostname
+		out.Modern.Host.LoadAvg1 = latest.Host.LoadAvg1
+		out.Modern.Host.CPUPercent = latest.Host.CPUPercent
+		out.Modern.Host.MemUsedBytes = latest.Host.MemUsedBytes
+		out.Modern.Host.MemTotalBytes = latest.Host.MemTotalBytes
+		out.Modern.Disk.SmartHealth = latest.Disk.SmartHealth
+		out.Modern.Disk.DiskWearout = latest.Disk.DiskWearout
+		out.Modern.Disk.MDADMHealth = latest.Disk.MDADMHealth
+		out.Modern.Disk.ZFSHealth = latest.Disk.ZFSHealth
+		for _, m := range latest.Disk.Mounts {
+			out.Modern.Disk.Mounts = append(out.Modern.Disk.Mounts, struct {
+				Mount        string  "json:\"mount\""
+				UsedBytes    uint64  "json:\"used_bytes\""
+				TotalBytes   uint64  "json:\"total_bytes\""
+				UsedPct      float64 "json:\"used_pct\""
+				UsedInodes   uint64  "json:\"used_inodes\""
+				TotalInodes  uint64  "json:\"total_inodes\""
+				InodeUsedPct float64 "json:\"inode_used_pct\""
+			}{
+				Mount:        m.Mount,
+				UsedBytes:    m.UsedBytes,
+				TotalBytes:   m.TotalBytes,
+				UsedPct:      m.UsedPct,
+				UsedInodes:   m.UsedInodes,
+				TotalInodes:  m.TotalInodes,
+				InodeUsedPct: m.InodeUsedPct,
+			})
+		}
+		out.Modern.CFM.ActiveBlocks = latest.CFM.ActiveBlocks
+		out.Modern.CFM.ChallengeQueue = latest.CFM.ChallengeQueue
+		out.Modern.CFM.WAFEvents1h = latest.CFM.WAFEvents1h
+		out.Modern.CFM.OutboundAlerts = latest.CFM.OutboundAlerts
+		out.Modern.Network.InBps = latest.Network.BandwidthInBytesPerSec
+		out.Modern.Network.OutBps = latest.Network.BandwidthOutBytesPerSec
+		for _, svc := range latest.Services {
+			out.Modern.Services = append(out.Modern.Services, serviceStatus{
+				Name:      svc.Name,
+				Active:    svc.Active,
+				Enabled:   svc.Enabled,
+				State:     svc.State,
+				LastError: svc.LastError,
+			})
+		}
+		_ = json.Unmarshal(body, &out.RawMap)
+		out.Envelope.SchemaVersion = latest.SchemaVersion
+		out.Envelope.NodeID = latest.NodeID
+		out.Envelope.GeneratedAt = latest.CollectedAt
+		return out, nil
+	}
+	return out, fmt.Errorf("decode health snapshot: unsupported payload")
 }
 
 func getJSON(u string) (*http.Response, error) {
