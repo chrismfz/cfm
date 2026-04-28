@@ -9,6 +9,7 @@ type HealthSnapshotV1 struct {
 	SchemaVersion string            `json:"schema_version"`
 	NodeID        string            `json:"node_id"`
 	CollectedAt   time.Time         `json:"collected_at"`
+	Error         string            `json:"error,omitempty"`
 	Host          HostSystem        `json:"host"`
 	Disk          DiskSnapshot      `json:"disk"`
 	Services      []ServiceStatus   `json:"services"`
