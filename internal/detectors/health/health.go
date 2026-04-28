@@ -25,6 +25,7 @@ import (
 	core "cfm/internal/detectors/core"
 	//	"cfm/internal/logging"
 	"cfm/internal/enrich"
+	"cfm/internal/healthstore"
 )
 
 type Config struct {
@@ -170,6 +171,26 @@ func (d *Detector) decorateIP(ip string) string {
 func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// collect
 	snap := d.snapshot()
+	collectedAt := snap.Time
+	if collectedAt.IsZero() {
+		collectedAt = time.Now().UTC()
+	}
+	nodeID := strings.TrimSpace(snap.Host)
+	if nodeID == "" {
+		nodeID = "local"
+	}
+	healthstore.Global().Append(nodeID, healthstore.Sample{
+		NodeID:      nodeID,
+		Hostname:    snap.Host,
+		CollectedAt: collectedAt,
+		Load1:       snap.Load1,
+		RamUsedPct:  snap.RamUsedPct,
+		DiskRootPct: snap.DiskRootPct,
+		DiskTmpPct:  snap.DiskTmpPct,
+		TempMaxC:    snap.TempMaxC,
+		RxMbps:      snap.RxMbps,
+		TxMbps:      snap.TxMbps,
+	})
 
 	// evaluate & emit
 	for _, a := range d.evaluate(snap) {
