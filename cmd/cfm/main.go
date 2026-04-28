@@ -43,6 +43,7 @@ import (
 	"cfm/internal/clihttp"
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
+	"cfm/internal/healthcli"
 )
 
 var (
@@ -233,6 +234,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "health":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := healthcli.Run(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "health error:", err)
+			os.Exit(1)
+		}
+
 	case "clam", "clamd", "clamav":
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
@@ -273,6 +282,7 @@ Usage:
 
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm mysqltop -- MySQL Live stats
+  cfm health [json|live|watch] -- system health snapshot
 
   cfm clam ping
   cfm clam version
