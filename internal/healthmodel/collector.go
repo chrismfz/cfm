@@ -65,6 +65,10 @@ func collectRuntimeStatus() RuntimeStatus {
 		DNATEnabled:     "unknown",
 		DNATFrontend:    "unknown",
 		FrontendWorking: "down",
+		EdgeService:     "unknown",
+		UpstreamService: "unknown",
+		EdgeStatus:      "unknown",
+		UpstreamStatus:  "unknown",
 	}
 	out.CFMDaemonLive, out.CFMDaemonPID = probeCFMDaemonLive()
 	if state, ok := probeSystemdServiceState("cfm.service"); ok {
@@ -84,7 +88,19 @@ func collectRuntimeStatus() RuntimeStatus {
 	out.DNATFrontend = frontend
 	out.DNATWarning = warning
 	out.FrontendWorking, out.FrontendReason = deriveFrontendWorking(out.DNATFrontend, out.DNATEnabled)
+	edge := detectEdgeRuntime(out.DNATEnabled)
+	out.EdgeService = edge.service
+	out.EdgeStatus = edge.status
+	upstream := detectUpstreamRuntime(edge.service)
+	out.UpstreamService = upstream.service
+	out.UpstreamStatus = upstream.status
 	return out
+}
+
+type runtimeRoleSignal struct {
+	service       string
+	status        string
+	listeningPort []int
 }
 
 type frontendSignal struct {
@@ -355,6 +371,121 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string) {
 	}
 
 	return "working", ""
+}
+
+func detectEdgeRuntime(dnatState string) runtimeRoleSignal {
+	service, _ := detectDNATFrontend()
+	out := runtimeRoleSignal{
+		service: service,
+		status:  "inactive",
+	}
+	if strings.TrimSpace(out.service) == "" {
+		out.service = "unknown"
+	}
+	listeners := probeFrontendListeners()
+	expectedHTTP, expectedHTTPS := 80, 443
+	if strings.EqualFold(strings.TrimSpace(dnatState), "on") {
+		expectedHTTP, expectedHTTPS = dnat.EffectiveTargetPorts()
+	}
+	out.listeningPort = detectedPortsForService(listeners, out.service, expectedHTTP, expectedHTTPS)
+	switch out.service {
+	case "angie", "openresty", "nginx":
+		active, _, ok := probeSystemdUnit(out.service + ".service")
+		if !ok {
+			out.status = "unknown"
+		} else if active && len(out.listeningPort) >= 1 {
+			out.status = "active"
+		} else if active {
+			out.status = "degraded"
+		} else {
+			out.status = "inactive"
+		}
+	default:
+		out.service = "unknown"
+		if len(out.listeningPort) > 0 {
+			out.status = "active"
+		} else {
+			out.status = "unknown"
+		}
+	}
+	return out
+}
+
+func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
+	candidates := []struct {
+		name        string
+		unit        string
+		markerPaths []string
+	}{
+		{name: "nginx", unit: "nginx.service", markerPaths: []string{"/etc/nginx/nginx.conf", "/etc/nginx/conf.d", "/etc/nginx/sites-enabled"}},
+		{name: "apache", unit: "apache2.service", markerPaths: []string{"/etc/apache2/apache2.conf", "/etc/apache2/sites-enabled", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf.d"}},
+		{name: "caddy", unit: "caddy.service", markerPaths: []string{"/etc/caddy/Caddyfile"}},
+	}
+	best := runtimeRoleSignal{service: "unknown", status: "unknown"}
+	bestScore := 0
+	for _, c := range candidates {
+		score := 0
+		active, _, ok := probeSystemdUnit(c.unit)
+		status := "inactive"
+		if ok {
+			if active {
+				score += 3
+				status = "active"
+			}
+		} else {
+			status = "unknown"
+		}
+		for _, p := range c.markerPaths {
+			if _, err := os.Stat(p); err == nil {
+				score++
+			}
+		}
+		if c.name == "nginx" && (edgeService == "angie" || edgeService == "openresty") {
+			score++
+		}
+		if score > bestScore {
+			bestScore = score
+			best = runtimeRoleSignal{service: c.name, status: status}
+		}
+	}
+	if bestScore == 0 {
+		return best
+	}
+	return best
+}
+
+func detectedPortsForService(listeners frontendListenerSnapshot, service string, ports ...int) []int {
+	aliases := frontendAliases(service)
+	if len(aliases) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(ports))
+	seen := map[int]struct{}{}
+	for _, port := range ports {
+		if port <= 0 {
+			continue
+		}
+		if listeners.hasOwnerOnPorts(aliases, port) {
+			if _, ok := seen[port]; !ok {
+				out = append(out, port)
+				seen[port] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+func frontendAliases(service string) []string {
+	switch strings.ToLower(strings.TrimSpace(service)) {
+	case "angie":
+		return []string{"angie", "nginx"}
+	case "openresty":
+		return []string{"openresty", "nginx"}
+	case "nginx":
+		return []string{"nginx"}
+	default:
+		return nil
+	}
 }
 
 func probeFrontendHTTP() (bool, string) {

@@ -30,7 +30,7 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown)"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown)", "Edge: unknown (unknown)", "Upstream: unknown (unknown)"},
 			wantNone: []string{"[cfm health watch]"},
 		},
 		{
@@ -79,6 +79,10 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	s.Modern.Runtime.DNATEnabled = "on"
 	s.Modern.Runtime.DNATFrontend = "angie"
 	s.Modern.Runtime.FrontendWorking = "working"
+	s.Modern.Runtime.EdgeService = "angie"
+	s.Modern.Runtime.EdgeStatus = "active"
+	s.Modern.Runtime.UpstreamService = "nginx"
+	s.Modern.Runtime.UpstreamStatus = "active"
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
 
 	out, err := runWithCapturedStdout(func() error {
@@ -93,6 +97,12 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	}
 	if !strings.Contains(out, "Frontend: angie (working)") {
 		t.Fatalf("expected frontend working verdict, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Edge: angie (active, listening 9080/9043)") {
+		t.Fatalf("expected edge role output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Upstream: nginx (active)") {
+		t.Fatalf("expected upstream role output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Warning: ambiguous ownership") {
 		t.Fatalf("expected warning output, got:\n%s", out)

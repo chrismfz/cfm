@@ -27,6 +27,10 @@ type RuntimeStatus struct {
 	DNATWarning     string `json:"dnat_warning,omitempty"`
 	FrontendWorking string `json:"frontend_working,omitempty"` // working/degraded/down
 	FrontendReason  string `json:"frontend_reason,omitempty"`
+	EdgeService     string `json:"edge_service,omitempty"`     // angie/openresty/nginx/unknown
+	UpstreamService string `json:"upstream_service,omitempty"` // nginx/apache/...
+	EdgeStatus      string `json:"edge_status,omitempty"`      // active/inactive/degraded/unknown
+	UpstreamStatus  string `json:"upstream_status,omitempty"`  // active/inactive/unknown
 }
 
 type HostSystem struct {
