@@ -365,28 +365,46 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 
 func printNetworkSection(s parsedSnapshot, opts cliOptions) {
 	inBps, outBps := networkBps(s)
+	bandwidthAvailable := networkBandwidthAvailable(s)
 	tcp := s.Modern.Network.TCP
 	if len(tcp) == 0 {
 		if m, ok := getMapInt(s.RawMap, "connection_states"); ok {
 			tcp = m
 		}
 	}
-	if inBps == 0 && outBps == 0 && len(tcp) == 0 {
-		return
+	if len(tcp) == 0 {
+		if m, ok := getNestedMapInt(s.RawMap, "network", "connection_states"); ok {
+			tcp = m
+		}
 	}
+	ifaces := networkInterfaces(s)
 	status := labelByThroughput(inBps + outBps)
 	if opts.Compact {
-		fmt.Printf("Network %-6s in=%s out=%s", badge(status, opts), bytesPerSec(inBps), bytesPerSec(outBps))
+		if bandwidthAvailable {
+			fmt.Printf("Network %-6s in=%s out=%s", badge(status, opts), bytesPerSec(inBps), bytesPerSec(outBps))
+		} else {
+			fmt.Printf("Network %-6s unavailable (warming up)", badge(status, opts))
+		}
 		if len(tcp) > 0 {
 			fmt.Printf(" conn=%s", renderConnStates(tcp))
+		}
+		if len(ifaces) > 0 {
+			fmt.Printf(" if=%s", strings.Join(ifaces, ","))
 		}
 		fmt.Println()
 		return
 	}
 	fmt.Printf("Network %s\n", badge(status, opts))
-	fmt.Printf("  Bandwidth: in=%s out=%s\n", bytesPerSec(inBps), bytesPerSec(outBps))
+	if bandwidthAvailable {
+		fmt.Printf("  Bandwidth: in=%s out=%s\n", bytesPerSec(inBps), bytesPerSec(outBps))
+	} else {
+		fmt.Printf("  Bandwidth: unavailable (warming up)\n")
+	}
 	if len(tcp) > 0 {
 		fmt.Printf("  Connection states: %s\n", renderConnStates(tcp))
+	}
+	if len(ifaces) > 0 {
+		fmt.Printf("  Interfaces: %s\n", strings.Join(ifaces, ", "))
 	}
 }
 
@@ -607,6 +625,36 @@ func networkBps(s parsedSnapshot) (uint64, uint64) {
 	return mbpsToBps(s.Legacy.RxMbps), mbpsToBps(s.Legacy.TxMbps)
 }
 
+func networkBandwidthAvailable(s parsedSnapshot) bool {
+	if s.Modern.Network.InBps > 0 || s.Modern.Network.OutBps > 0 || s.Legacy.RxMbps > 0 || s.Legacy.TxMbps > 0 {
+		return true
+	}
+	if hasKey(s.RawMap, "bandwidth_in_bps") || hasKey(s.RawMap, "bandwidth_out_bps") ||
+		hasKey(s.RawMap, "rx_mbps") || hasKey(s.RawMap, "tx_mbps") {
+		return true
+	}
+	if networkRaw, ok := s.RawMap["network"].(map[string]any); ok {
+		if hasKey(networkRaw, "bandwidth_in_bps") || hasKey(networkRaw, "bandwidth_out_bps") {
+			return true
+		}
+	}
+	return false
+}
+
+func networkInterfaces(s parsedSnapshot) []string {
+	if out, ok := getStringSlice(s.RawMap, "network_interfaces"); ok {
+		return out
+	}
+	if networkRaw, ok := s.RawMap["network"].(map[string]any); ok {
+		for _, key := range []string{"interfaces", "ifaces", "network_interfaces"} {
+			if out, ok := getStringSlice(networkRaw, key); ok {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
 func mbpsToBps(v float64) uint64 {
 	if v <= 0 {
 		return 0
@@ -668,6 +716,46 @@ func getMapInt(m map[string]any, key string) (map[string]int, bool) {
 		}
 	}
 	return out, len(out) > 0
+}
+
+func getNestedMapInt(m map[string]any, parent, key string) (map[string]int, bool) {
+	v, ok := m[parent]
+	if !ok {
+		return nil, false
+	}
+	raw, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return getMapInt(raw, key)
+}
+
+func getStringSlice(m map[string]any, key string) ([]string, bool) {
+	v, ok := m[key]
+	if !ok {
+		return nil, false
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out, len(out) > 0
+}
+
+func hasKey(m map[string]any, key string) bool {
+	_, ok := m[key]
+	return ok
 }
 
 func getStr(m map[string]any, key string) string {
