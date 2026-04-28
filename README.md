@@ -955,6 +955,32 @@ cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --pa
 
 **Sort keys:** `rps`, `2xx`, `3xx`, `4xx`, `5xx`, `uniq`, `err`, `rt`, `bot`, `ua_div`, `score`
 
+### `cfm health` (local-node health, federation later)
+
+`cfm health` currently reports health for the **local node** via the local API snapshot endpoint.
+Cross-node/federated health rollups are planned for a later release.
+
+```bash
+cfm health
+# human summary sections (Host, Disk, Network, CFM)
+
+cfm health json
+# pretty-printed JSON payload from /api/v1/health/snapshot
+
+cfm health watch --interval=2s
+# periodic one-line samples; prints selected interval first
+
+cfm health live
+# interactive TTY dashboard when stdout is a terminal
+# fallback: if no TTY is available, auto-runs watch mode
+```
+
+Expected output semantics:
+- `cfm health` is optimized for operators (readable summary).
+- `cfm health json` is stable machine-readable output for scripts/integration.
+- `cfm health watch` emits a banner with effective interval, then one line per sample.
+- `cfm health live` requires a TTY; otherwise it safely degrades to watch output.
+
 ---
 
 ## 12. Web Detector HTTP API

@@ -1,13 +1,16 @@
 package healthcli
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
-	"time"
 )
 
-func TestRunSummaryAndJSON(t *testing.T) {
+func TestHealthCommandOutputs_Table(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/health/snapshot" {
 			http.NotFound(w, r)
@@ -18,34 +21,73 @@ func TestRunSummaryAndJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Run(srv.URL, nil); err != nil {
-		t.Fatalf("summary run: %v", err)
+	tests := []struct {
+		name     string
+		args     []string
+		wantAll  []string
+		wantNone []string
+	}{
+		{
+			name:     "cfm health summary",
+			args:     nil,
+			wantAll:  []string{"Node: host1", "Host", "Disk", "Network", "CFM"},
+			wantNone: []string{"[cfm health watch]"},
+		},
+		{
+			name:     "cfm health json",
+			args:     []string{"json"},
+			wantAll:  []string{"\"schema_version\": \"health.snapshot.v1\"", "\"snapshot\"", "\"hostname\": \"host1\""},
+			wantNone: []string{"Node: host1"},
+		},
+		{
+			name:    "cfm health watch --interval (one shot for test)",
+			args:    []string{"watch", "--interval=2s", "--once"},
+			wantAll: []string{"[cfm health watch] interval=2s", "host=host1", "load=1.20"},
+		},
+		{
+			name:    "cfm health live falls back to watch when no TTY",
+			args:    []string{"live"},
+			wantAll: []string{"[cfm health watch] interval=5s", "host=host1"},
+		},
 	}
-	if err := Run(srv.URL, []string{"json"}); err != nil {
-		t.Fatalf("json run: %v", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runWithCapturedStdout(func() error {
+				return Run(srv.URL, tc.args)
+			})
+			if err != nil {
+				t.Fatalf("Run error: %v", err)
+			}
+
+			for _, want := range tc.wantAll {
+				if !strings.Contains(out, want) {
+					t.Fatalf("expected output to contain %q\noutput:\n%s", want, out)
+				}
+			}
+			for _, unwanted := range tc.wantNone {
+				if strings.Contains(out, unwanted) {
+					t.Fatalf("expected output to not contain %q\noutput:\n%s", unwanted, out)
+				}
+			}
+		})
 	}
 }
 
-func TestRunLiveFallsBackWithoutTTY(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"schema_version":"health.snapshot.v1","node_id":"n1","generated_at":"2026-04-28T00:00:00Z","snapshot":{"node_id":"n1","hostname":"host1","collected_at":"2026-04-28T00:00:00Z"}}`))
-	}))
-	defer srv.Close()
+func runWithCapturedStdout(fn func() error) (string, error) {
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
 
-	if err := Run(srv.URL, []string{"live"}); err != nil {
-		t.Fatalf("live fallback run: %v", err)
-	}
-}
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = origStdout
 
-func TestParseInterval(t *testing.T) {
-	if got := parseInterval(nil, 0); got != 0 {
-		t.Fatalf("unexpected default: %s", got)
-	}
-	if got := parseInterval([]string{"3"}, 0); got.Seconds() != 3 {
-		t.Fatalf("unexpected interval: %s", got)
-	}
-	if got := parseInterval([]string{"x"}, 5*time.Second); got.Seconds() != 5 {
-		t.Fatalf("unexpected fallback: %s", got)
-	}
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String(), runErr
 }
