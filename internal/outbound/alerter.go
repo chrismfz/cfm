@@ -118,7 +118,7 @@ func (a *Alerter) Emit(ctx context.Context, v Verdict, ac alertContext) {
 	}
 	logging.LogfSMTP("%s", b.String())
 	if v.Signal == SignalDNS && a.dnsdbg != nil {
-		go a.dnsdbg.Trigger(v.UID, v.GID, v.When)
+		go a.dnsdbg.Trigger(v.UID, v.GID, v.When, ac.dnsPretrigger)
 	}
 
 	// Notify channel — best-effort, never blocks.
