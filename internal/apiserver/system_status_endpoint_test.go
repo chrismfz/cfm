@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 )
 
@@ -138,6 +139,30 @@ func TestSystemStatusEndpoints_HealthEndpoints(t *testing.T) {
 		}
 		if got, _ := body["schema_version"].(string); got != healthSnapshotSchemaV1 {
 			t.Fatalf("schema_version=%q", got)
+		}
+	})
+
+	t.Run("snapshot degrades gracefully when collector panics", func(t *testing.T) {
+		origSnapshotNowFn := healthmodel.TestOnlySwapSnapshotNowFn(func() healthmodel.RawDetectorSnapshot {
+			panic("smart probe failure")
+		})
+		t.Cleanup(func() {
+			healthmodel.TestOnlySwapSnapshotNowFn(origSnapshotNowFn)
+		})
+
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/snapshot", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if got, _ := body["schema_version"].(string); got != healthSnapshotSchemaV1 {
+			t.Fatalf("schema_version=%q", got)
+		}
+		if got, ok := body["error"].(string); !ok || got == "" {
+			t.Fatalf("expected degraded error payload, got %v", body)
 		}
 	})
 

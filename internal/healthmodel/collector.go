@@ -1,6 +1,7 @@
 package healthmodel
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -10,14 +11,43 @@ import (
 	"cfm/internal/detectors/health"
 )
 
+// snapshotNowFn exists as a small test seam to force collector failures.
+var snapshotNowFn = health.SnapshotNow
+
+// RawDetectorSnapshot aliases the detector snapshot type for tests outside this package.
+type RawDetectorSnapshot = health.Snapshot
+
+// TestOnlySwapSnapshotNowFn replaces the snapshot collector function and returns the previous one.
+func TestOnlySwapSnapshotNowFn(fn func() health.Snapshot) func() health.Snapshot {
+	prev := snapshotNowFn
+	snapshotNowFn = fn
+	return prev
+}
+
 // CollectSnapshotNow builds the canonical health snapshot directly from live host collectors.
-func CollectSnapshotNow(nodeID string) HealthSnapshotV1 {
-	raw := health.SnapshotNow()
+func CollectSnapshotNow(nodeID string) (snap HealthSnapshotV1) {
+	snap = HealthSnapshotV1{
+		SchemaVersion: SchemaVersionV1,
+		NodeID:        nodeID,
+		CollectedAt:   time.Now().UTC(),
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			snap = HealthSnapshotV1{
+				SchemaVersion: SchemaVersionV1,
+				NodeID:        nodeID,
+				CollectedAt:   time.Now().UTC(),
+				Error:         fmt.Sprintf("collector panic: %v", recovered),
+			}
+		}
+	}()
+
+	raw := snapshotNowFn()
 	collectedAt := raw.Time
 	if collectedAt.IsZero() {
 		collectedAt = time.Now().UTC()
 	}
-	snap := FromDetectorSnapshot(raw, nodeID, collectedAt)
+	snap = FromDetectorSnapshot(raw, nodeID, collectedAt)
 	enrichHostMemoryAndLoad(&snap.Host)
 	snap.Services = collectServiceStatuses()
 	return snap
