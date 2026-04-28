@@ -76,6 +76,15 @@ type modernSample struct {
 		OutBps uint64         `json:"bandwidth_out_bps"`
 		TCP    map[string]int `json:"connection_states"`
 	} `json:"network"`
+	Services []serviceStatus `json:"services"`
+}
+
+type serviceStatus struct {
+	Name      string `json:"name"`
+	Active    bool   `json:"active"`
+	Enabled   bool   `json:"enabled"`
+	State     string `json:"state"`
+	LastError string `json:"last_error"`
 }
 
 type parsedSnapshot struct {
@@ -96,7 +105,7 @@ func Run(baseURL string, args []string) error {
 		return runJSON(baseURL)
 	case "live":
 		if !isTTY() {
-			return runSummary(baseURL, opts)
+			return runWatch(baseURL, append(argv[1:], "--once"), opts)
 		}
 		return runLive(baseURL, argv[1:], opts)
 	case "watch":
@@ -133,7 +142,7 @@ func printHelp() {
 	fmt.Println("Usage:")
 	fmt.Println("  cfm health [--compact] [--no-color]             # summary")
 	fmt.Println("  cfm health json                                 # machine-readable snapshot")
-	fmt.Println("  cfm health live [N] [--compact] [--no-color]    # live dashboard (TTY), fallback to summary")
+	fmt.Println("  cfm health live [--interval=2s] [--compact] [--no-color] # live dashboard (TTY), fallback to watch")
 	fmt.Println("  cfm health watch [N] [--compact] [--no-color]   # periodic text refresh every N seconds (default 5)")
 }
 
@@ -165,24 +174,41 @@ func runJSON(baseURL string) error {
 	return nil
 }
 
-func runLive(baseURL string, args []string, opts cliOptions) error {
-	interval := parseInterval(args, 2*time.Second)
-	for tick := 0; ; tick++ {
-		snap, err := fetchSnapshot(baseURL)
-		fmt.Print("\033[H\033[2J")
-		fmt.Printf("cfm health live tick=%d interval=%s %s\n\n", tick, interval, time.Now().Format("15:04:05"))
-		if err != nil {
-			fmt.Printf("error: %v\n", err)
-		} else {
-			printSummary(snap, opts)
+type watchConfig struct {
+	interval time.Duration
+	once     bool
+}
+
+func parseWatchConfig(args []string) watchConfig {
+	cfg := watchConfig{interval: 5 * time.Second}
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		switch {
+		case a == "--once":
+			cfg.once = true
+		case a == "--interval" || a == "-i":
+			if i+1 < len(args) {
+				i++
+				if d, err := time.ParseDuration(args[i]); err == nil && d > 0 {
+					cfg.interval = d
+				}
+			}
+		case strings.HasPrefix(a, "--interval="):
+			if d, err := time.ParseDuration(strings.TrimPrefix(a, "--interval=")); err == nil && d > 0 {
+				cfg.interval = d
+			}
+		default:
+			if n, err := strconv.Atoi(a); err == nil && n > 0 {
+				cfg.interval = time.Duration(n) * time.Second
+			}
 		}
-		time.Sleep(interval)
 	}
+	return cfg
 }
 
 func runWatch(baseURL string, args []string, opts cliOptions) error {
-	interval := parseInterval(args, 5*time.Second)
-	fmt.Printf("[cfm health watch] interval=%s\n", interval)
+	cfg := parseWatchConfig(args)
+	fmt.Printf("[cfm health watch] interval=%s\n", cfg.interval)
 	for {
 		snap, err := fetchSnapshot(baseURL)
 		if err != nil {
@@ -190,7 +216,10 @@ func runWatch(baseURL string, args []string, opts cliOptions) error {
 		} else {
 			printOneLine(snap, opts)
 		}
-		time.Sleep(interval)
+		if cfg.once {
+			return nil
+		}
+		time.Sleep(cfg.interval)
 	}
 }
 
