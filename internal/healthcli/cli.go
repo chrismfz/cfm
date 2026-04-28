@@ -17,8 +17,9 @@ import (
 )
 
 type cliOptions struct {
-	NoColor bool
-	Compact bool
+	NoColor    bool
+	Compact    bool
+	DiskDetail bool
 }
 
 type snapshotEnvelope struct {
@@ -61,10 +62,11 @@ type modernSample struct {
 			TotalInodes  uint64  `json:"total_inodes"`
 			InodeUsedPct float64 `json:"inode_used_pct"`
 		} `json:"mounts"`
-		SmartHealth string `json:"smart_health"`
-		DiskWearout string `json:"disk_wearout"`
-		MDADMHealth string `json:"mdadm_health"`
-		ZFSHealth   string `json:"zfs_health"`
+		SmartHealth  string                             `json:"smart_health"`
+		DiskWearout  string                             `json:"disk_wearout"`
+		SmartDevices map[string]healthmodel.SmartDevice `json:"smart_devices"`
+		MDADMHealth  string                             `json:"mdadm_health"`
+		ZFSHealth    string                             `json:"zfs_health"`
 	} `json:"disk"`
 	CFM struct {
 		ActiveBlocks   int `json:"active_blocks"`
@@ -128,6 +130,8 @@ func parseGlobalFlags(args []string) (cliOptions, []string) {
 			opts.NoColor = true
 		case "--compact":
 			opts.Compact = true
+		case "--disk-detail":
+			opts.DiskDetail = true
 		default:
 			out = append(out, a)
 		}
@@ -141,7 +145,7 @@ func isTTY() bool {
 
 func printHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm health [--compact] [--no-color]             # summary")
+	fmt.Println("  cfm health [--compact] [--disk-detail] [--no-color]             # summary")
 	fmt.Println("  cfm health json                                 # machine-readable snapshot")
 	fmt.Println("  cfm health live [--interval=2s] [--compact] [--no-color] # live dashboard (TTY), fallback to watch")
 	fmt.Println("  cfm health watch [N] [--compact] [--no-color]   # periodic text refresh every N seconds (default 5)")
@@ -354,6 +358,7 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 	if opts.Compact {
 		fmt.Printf("Storage %-6s smart=%s wear=%s mdadm=%s zfs=%s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts),
 			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), nonEmptyOr(mdadm, "n/a"), nonEmptyOr(zfs, "n/a"))
+		printDiskSmartDeviceSection(s, opts)
 		return
 	}
 	fmt.Printf("Storage health %s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts))
@@ -361,6 +366,135 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  Wearout (highest devices): %s\n", nonEmptyOr(wear, "n/a"))
 	fmt.Printf("  mdadm: %s\n", nonEmptyOr(mdadm, "n/a"))
 	fmt.Printf("  ZFS: %s\n", nonEmptyOr(zfs, "n/a"))
+	printDiskSmartDeviceSection(s, opts)
+}
+
+type diskSmartRow struct {
+	Key            string
+	Model          string
+	Serial         string
+	DeviceType     string
+	Normalized     string
+	WearoutUsed    *int
+	WearoutSource  string
+	TemperatureC   string
+	ProbeOrErr     string
+	normalizedRank healthLabelRank
+}
+
+func collectDiskSmartRows(s parsedSnapshot) []diskSmartRow {
+	if len(s.Modern.Disk.SmartDevices) == 0 {
+		return nil
+	}
+	rows := make([]diskSmartRow, 0, len(s.Modern.Disk.SmartDevices))
+	for key, dev := range s.Modern.Disk.SmartDevices {
+		r := diskSmartRow{
+			Key:            strings.TrimPrefix(strings.TrimSpace(key), "/dev/"),
+			Model:          strings.TrimSpace(dev.Model),
+			Serial:         strings.TrimSpace(dev.Serial),
+			DeviceType:     strings.TrimSpace(dev.DeviceType),
+			Normalized:     strings.TrimSpace(dev.NormalizedHealth),
+			WearoutUsed:    dev.WearoutPctUsed,
+			WearoutSource:  strings.TrimSpace(dev.WearoutSource),
+			TemperatureC:   strings.TrimSpace(dev.TemperatureC),
+			ProbeOrErr:     strings.TrimSpace(dev.Error),
+			normalizedRank: healthLabel(strings.TrimSpace(dev.NormalizedHealth)),
+		}
+		if r.Key == "" {
+			r.Key = strings.TrimSpace(key)
+		}
+		if r.ProbeOrErr == "" && strings.TrimSpace(dev.Health) != "" && strings.TrimSpace(dev.Health) != strings.TrimSpace(dev.NormalizedHealth) {
+			r.ProbeOrErr = strings.TrimSpace(dev.Health)
+		}
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].normalizedRank != rows[j].normalizedRank {
+			return rows[i].normalizedRank > rows[j].normalizedRank
+		}
+		wi := -1
+		if rows[i].WearoutUsed != nil {
+			wi = *rows[i].WearoutUsed
+		}
+		wj := -1
+		if rows[j].WearoutUsed != nil {
+			wj = *rows[j].WearoutUsed
+		}
+		if wi != wj {
+			return wi > wj
+		}
+		return rows[i].Key < rows[j].Key
+	})
+	return rows
+}
+
+func printDiskSmartDeviceSection(s parsedSnapshot, opts cliOptions) {
+	rows := collectDiskSmartRows(s)
+	if len(rows) == 0 {
+		return
+	}
+	if !opts.Compact {
+		fmt.Println("Disk SMART devices")
+		fmt.Printf("  %-10s %-16s %-14s %-10s %-10s %-18s %-7s %s\n",
+			"device", "model", "serial", "type", "health", "wearout_used", "temp", "probe/error")
+	}
+	limit := len(rows)
+	if !opts.DiskDetail {
+		limit = 3
+		if limit > len(rows) {
+			limit = len(rows)
+		}
+	}
+	for i := 0; i < limit; i++ {
+		row := rows[i]
+		wear := "n/a"
+		if row.WearoutUsed != nil {
+			wear = fmt.Sprintf("%d%%", *row.WearoutUsed)
+			if row.WearoutSource != "" {
+				wear += " (" + row.WearoutSource + ")"
+			}
+		}
+		model := nonEmptyOr(row.Model, "-")
+		if len(model) > 16 {
+			model = model[:15] + "…"
+		}
+		serial := maskOrTrimSerial(row.Serial, opts.DiskDetail)
+		dtype := nonEmptyOr(row.DeviceType, "-")
+		health := nonEmptyOr(row.Normalized, "unknown")
+		temp := nonEmptyOr(row.TemperatureC, "-")
+		probe := nonEmptyOr(row.ProbeOrErr, "-")
+		if len(probe) > 42 {
+			probe = probe[:41] + "…"
+		}
+		if opts.Compact {
+			fmt.Printf("DiskDev %-6s %s %s h=%s wear=%s temp=%s err=%s\n",
+				badge(healthLabel(health), opts), row.Key, serial, health, wear, temp, probe)
+			continue
+		}
+		fmt.Printf("  %-10s %-16s %-14s %-10s %-10s %-18s %-7s %s\n",
+			row.Key, model, serial, dtype, health, wear, temp, probe)
+	}
+	if !opts.DiskDetail && len(rows) > limit {
+		if opts.Compact {
+			fmt.Printf("DiskDev %-6s +%d more (use --disk-detail)\n", badge(okLabel, opts), len(rows)-limit)
+		} else {
+			fmt.Printf("  ... +%d more devices (use --disk-detail)\n", len(rows)-limit)
+		}
+	}
+}
+
+func maskOrTrimSerial(serial string, showFull bool) string {
+	serial = strings.TrimSpace(serial)
+	if serial == "" {
+		return "-"
+	}
+	if showFull {
+		return serial
+	}
+	if len(serial) <= 8 {
+		return serial
+	}
+	return serial[:4] + "…" + serial[len(serial)-3:]
 }
 
 func printNetworkSection(s parsedSnapshot, opts cliOptions) {
@@ -469,6 +603,7 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Host.MemTotalBytes = latest.Host.MemTotalBytes
 		out.Modern.Disk.SmartHealth = latest.Disk.SmartHealth
 		out.Modern.Disk.DiskWearout = latest.Disk.DiskWearout
+		out.Modern.Disk.SmartDevices = latest.Disk.SmartDevices
 		out.Modern.Disk.MDADMHealth = latest.Disk.MDADMHealth
 		out.Modern.Disk.ZFSHealth = latest.Disk.ZFSHealth
 		for _, m := range latest.Disk.Mounts {

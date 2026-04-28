@@ -119,6 +119,11 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 	storage := widgets.NewParagraph()
 	storage.Title = " Storage health "
 	storage.WrapText = true
+	diskDevices := widgets.NewTable()
+	diskDevices.Title = " Disk SMART devices "
+	diskDevices.FillRow = true
+	diskDevices.RowSeparator = false
+	diskDevices.Rows = [][]string{{"device", "model", "serial", "type", "health", "wearout", "temp", "error"}}
 
 	grid := ui.NewGrid()
 	layout := func() {
@@ -129,7 +134,8 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 			ui.NewRow(0.06, ui.NewCol(1.0, help)),
 			ui.NewRow(0.28, ui.NewCol(0.5, cpuPlot), ui.NewCol(0.5, ramPlot)),
 			ui.NewRow(0.28, ui.NewCol(0.5, diskPlot), ui.NewCol(0.5, netPlot)),
-			ui.NewRow(0.30, ui.NewCol(0.6, svcTable), ui.NewCol(0.4, storage)),
+			ui.NewRow(0.30, ui.NewCol(0.5, svcTable), ui.NewCol(0.5, storage)),
+			ui.NewRow(0.22, ui.NewCol(1.0, diskDevices)),
 		)
 	}
 	layout()
@@ -231,6 +237,36 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 		zfs := firstNonEmpty(s.Modern.Disk.ZFSHealth, getStr(s.RawMap, "zfs_health"))
 		storage.Text = fmt.Sprintf("SMART: %s\nWearout: %s\nmdadm: %s\nZFS: %s",
 			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), nonEmptyOr(mdadm, "n/a"), nonEmptyOr(zfs, "n/a"))
+
+		devRows := collectDiskSmartRows(s)
+		devTable := [][]string{{"device", "model", "serial", "type", "health", "wearout", "temp", "error"}}
+		maxRows := 8
+		if len(devRows) > maxRows {
+			devRows = devRows[:maxRows]
+		}
+		for _, row := range devRows {
+			wear := "n/a"
+			if row.WearoutUsed != nil {
+				wear = fmt.Sprintf("%d%%", *row.WearoutUsed)
+				if row.WearoutSource != "" {
+					wear += " (" + row.WearoutSource + ")"
+				}
+			}
+			devTable = append(devTable, []string{
+				row.Key,
+				truncateText(nonEmptyOr(row.Model, "-"), 18),
+				maskOrTrimSerial(row.Serial, false),
+				truncateText(nonEmptyOr(row.DeviceType, "-"), 8),
+				nonEmptyOr(row.Normalized, "unknown"),
+				truncateText(wear, 16),
+				nonEmptyOr(row.TemperatureC, "-"),
+				truncateText(nonEmptyOr(row.ProbeOrErr, "-"), 22),
+			})
+		}
+		if len(devTable) == 1 {
+			devTable = append(devTable, []string{"(no data)", "-", "-", "-", "-", "-", "-", "-"})
+		}
+		diskDevices.Rows = devTable
 	}
 
 	refresh()
