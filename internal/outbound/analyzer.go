@@ -2,14 +2,13 @@
 //
 // Phase 1 is observe-only: it reads NFLOG events for new outbound connections
 // produced by the cfm_outbound_observe nft chain, classifies each event by
-// destination port group (SMTP / SCAN / HTTP / DNS), maintains per-uid sliding
+// destination port group (SMTP / SCAN / HTTP), maintains per-uid sliding
 // window counters, and emits a forensic warning to cfm.smtp.log plus an admin
 // notification when a uid crosses a configured threshold. Nothing here drops,
 // throttles or suspends — those actions belong to phase 2 (enforcer).
 package outbound
 
 import (
-	"strings"
 	"sync"
 	"time"
 )
@@ -21,12 +20,11 @@ const (
 	SignalSMTP    Signal = "smtp"     // outbound 25/465/587 (mail flood)
 	SignalSCAN    Signal = "scan"     // outbound 22/23/3389 (brute-force / scanner)
 	SignalHTTP    Signal = "http"     // outbound 80/443/8080/8443 (POST flood / botnet C2)
-	SignalDNS     Signal = "dns"      // outbound UDP 53 (amplification participant)
 	SignalUNIQDST Signal = "uniq_dst" // unique destination IPs across all ports (horizontal scan)
 )
 
 // AllSignals is iteration order for analyzer ticks and reset.
-var AllSignals = []Signal{SignalSMTP, SignalSCAN, SignalHTTP, SignalDNS, SignalUNIQDST}
+var AllSignals = []Signal{SignalSMTP, SignalSCAN, SignalHTTP, SignalUNIQDST}
 
 // Thresholds returns the configured per-window threshold for a signal.
 // Returns 0 (disabled) for unknown signals.
@@ -35,7 +33,6 @@ func Thresholds(cfg Runtime) map[Signal]int {
 		SignalSMTP:    cfg.SMTPPerWindow,
 		SignalSCAN:    cfg.UniqueDstPerWindow, // scan reuses uniq-dst threshold; flagged separately
 		SignalHTTP:    cfg.HTTPPerWindow,
-		SignalDNS:     cfg.DNSPerWindow,
 		SignalUNIQDST: cfg.UniqueDstPerWindow,
 	}
 }
@@ -44,27 +41,19 @@ func Thresholds(cfg Runtime) map[Signal]int {
 // It is independent of config.OutboundConfig so test code can build one
 // directly without parsing.
 type Runtime struct {
-	Window              time.Duration
-	SMTPPerWindow       int
-	UniqueDstPerWindow  int
-	HTTPPerWindow       int
-	DNSPerWindow        int
-	DedupCooldown       time.Duration
-	QueueSampleLimit    int
-	NotifySeverity      string
-	DNSUniqDstMin       int
-	DNSSeverityMode     string
-	DNSNXDOMAINRatio    float64
-	SMTPPorts           map[uint16]struct{}
-	ScanPorts           map[uint16]struct{}
-	HTTPPorts           map[uint16]struct{}
-	AllowUIDs           map[uint32]struct{}
-	AllowGIDs           map[uint32]struct{}
-	Enrich              bool
-	DNSDebugEnabled     bool
-	DNSDebugSampleCount int
-	DNSDebugDuration    time.Duration
-	DNSDebugDir         string
+	Window             time.Duration
+	SMTPPerWindow      int
+	UniqueDstPerWindow int
+	HTTPPerWindow      int
+	DedupCooldown      time.Duration
+	QueueSampleLimit   int
+	NotifySeverity     string
+	SMTPPorts          map[uint16]struct{}
+	ScanPorts          map[uint16]struct{}
+	HTTPPorts          map[uint16]struct{}
+	AllowUIDs          map[uint32]struct{}
+	AllowGIDs          map[uint32]struct{}
+	Enrich             bool
 }
 
 // Event is one classified outbound connection observation.
@@ -79,9 +68,6 @@ type Event struct {
 	DPort  uint16
 	IsUDP  bool
 	Signal Signal
-	// Optional DNS parser output from collector path.
-	DNSRCode      uint8
-	DNSRCodeKnown bool
 }
 
 // Verdict is what the analyzer hands to the alerter when a threshold is
@@ -97,15 +83,6 @@ type Verdict struct {
 	UniqueDsts  int      // distinct destination IPs in this window for this uid (any signal)
 	SamplePeers []string // up to 5 recent dst:port hits for forensics
 	Severity    string
-	DNS         DNSVerdict
-}
-
-type DNSVerdict struct {
-	Total           int
-	UniqueResolvers int
-	ParsedResponses int
-	ErrorResponses  int
-	ErrorRatio      float64
 }
 
 // uidState tracks per-uid sliding-window data for every signal.
@@ -122,10 +99,6 @@ type uidState struct {
 
 	// ring of recent peers for forensics (most recent at end).
 	peers []string
-	// DNS-specific per-window dimensions.
-	dnsResolvers map[string]time.Time
-	dnsParsed    []time.Time
-	dnsErrors    []time.Time
 
 	// last verdict emission per signal — used for dedup.
 	lastEmit map[Signal]time.Time
@@ -133,13 +106,10 @@ type uidState struct {
 
 func newUIDState() *uidState {
 	return &uidState{
-		hits:         make(map[Signal][]time.Time, len(AllSignals)),
-		dstWindow:    make(map[string]time.Time, 32),
-		peers:        make([]string, 0, 16),
-		dnsResolvers: make(map[string]time.Time, 8),
-		dnsParsed:    make([]time.Time, 0, 16),
-		dnsErrors:    make([]time.Time, 0, 16),
-		lastEmit:     make(map[Signal]time.Time, len(AllSignals)),
+		hits:      make(map[Signal][]time.Time, len(AllSignals)),
+		dstWindow: make(map[string]time.Time, 32),
+		peers:     make([]string, 0, 16),
+		lastEmit:  make(map[Signal]time.Time, len(AllSignals)),
 	}
 }
 
@@ -218,26 +188,6 @@ func (a *Analyzer) Observe(ev Event) *Verdict {
 	if len(st.peers) > peerCap {
 		st.peers = st.peers[len(st.peers)-peerCap:]
 	}
-	if ev.Signal == SignalDNS {
-		st.dnsResolvers[dstKey] = ev.When
-		for k, t := range st.dnsResolvers {
-			if t.Before(cutoff) {
-				delete(st.dnsResolvers, k)
-			}
-		}
-		if ev.DNSRCodeKnown {
-			st.dnsParsed = append(st.dnsParsed, ev.When)
-			for len(st.dnsParsed) > 0 && st.dnsParsed[0].Before(cutoff) {
-				st.dnsParsed = st.dnsParsed[1:]
-			}
-			if isDNSErrorCode(ev.DNSRCode) {
-				st.dnsErrors = append(st.dnsErrors, ev.When)
-			}
-		}
-		for len(st.dnsErrors) > 0 && st.dnsErrors[0].Before(cutoff) {
-			st.dnsErrors = st.dnsErrors[1:]
-		}
-	}
 
 	// Threshold check for this signal.
 	count := len(hits)
@@ -296,57 +246,16 @@ func (a *Analyzer) makeVerdict(ev Event, sig Signal, count, thr int, st *uidStat
 		Window:      a.cfg.Window,
 		UniqueDsts:  uniq,
 		SamplePeers: peers,
+		Severity:    a.computeSeverity(),
 	}
-	v.Severity = a.computeSeverity(sig, count, v, st)
 	return v
 }
 
-func (a *Analyzer) computeSeverity(sig Signal, count int, v *Verdict, st *uidState) string {
-	base := strings.ToLower(strings.TrimSpace(a.cfg.NotifySeverity))
-	if base == "" {
-		base = "warning"
-	}
-	if sig != SignalDNS {
-		return base
-	}
-	v.DNS = DNSVerdict{
-		Total:           count,
-		UniqueResolvers: len(st.dnsResolvers),
-		ParsedResponses: len(st.dnsParsed),
-		ErrorResponses:  len(st.dnsErrors),
-	}
-	if v.DNS.ParsedResponses > 0 {
-		v.DNS.ErrorRatio = float64(v.DNS.ErrorResponses) / float64(v.DNS.ParsedResponses)
-	}
-	mode := strings.ToLower(strings.TrimSpace(a.cfg.DNSSeverityMode))
-	if mode == "" || mode == "volume-only" {
-		return base
-	}
-	suspiciousDispersion := a.cfg.DNSUniqDstMin > 0 && v.DNS.UniqueResolvers >= a.cfg.DNSUniqDstMin
-	suspiciousErrors := a.cfg.DNSNXDOMAINRatio > 0 && v.DNS.ErrorRatio >= a.cfg.DNSNXDOMAINRatio
-	if suspiciousDispersion || suspiciousErrors {
-		return base
-	}
-	return lowerSeverity(base)
-}
-
-func lowerSeverity(in string) string {
-	switch in {
-	case "critical":
+func (a *Analyzer) computeSeverity() string {
+	if a.cfg.NotifySeverity == "" {
 		return "warning"
-	case "warning":
-		return "info"
-	case "error":
-		return "warning"
-	case "notice":
-		return "info"
-	default:
-		return in
 	}
-}
-
-func isDNSErrorCode(rcode uint8) bool {
-	return rcode == 2 || rcode == 3 // SERVFAIL / NXDOMAIN
+	return a.cfg.NotifySeverity
 }
 
 // IsAllowed reports whether the analyzer should skip a uid+gid combo entirely.
