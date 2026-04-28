@@ -57,20 +57,24 @@ type Runtime struct {
 	AllowUIDs           map[uint32]struct{}
 	AllowGIDs           map[uint32]struct{}
 	Enrich              bool
+	DNSDebugEnabled     bool
+	DNSDebugSampleCount int
+	DNSDebugDuration    time.Duration
+	DNSDebugDir         string
 }
 
 // Event is one classified outbound connection observation.
 type Event struct {
-	When    time.Time
-	UID     uint32
-	GID     uint32
-	IPVer   int
-	SrcIP   [16]byte
-	DstIP   [16]byte
-	SPort   uint16
-	DPort   uint16
-	IsUDP   bool
-	Signal  Signal
+	When   time.Time
+	UID    uint32
+	GID    uint32
+	IPVer  int
+	SrcIP  [16]byte
+	DstIP  [16]byte
+	SPort  uint16
+	DPort  uint16
+	IsUDP  bool
+	Signal Signal
 }
 
 // Verdict is what the analyzer hands to the alerter when a threshold is
