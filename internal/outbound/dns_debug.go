@@ -55,8 +55,9 @@ type dnsDebugSession struct {
 type DNSDebugCapture struct {
 	rt Runtime
 
-	mu       sync.Mutex
-	sessions map[dnsDebugKey]*dnsDebugSession
+	mu                 sync.Mutex
+	sessions           map[dnsDebugKey]*dnsDebugSession
+	unmatchedPacketLog int
 }
 
 func NewDNSDebugCapture(rt Runtime) *DNSDebugCapture {
@@ -160,6 +161,13 @@ func (d *DNSDebugCapture) writeSample(uid, gid uint32, msg dnsDebugMsg) {
 	d.mu.Lock()
 	s := d.sessions[key]
 	if s == nil {
+		key, s = d.lookupUIDFallbackLocked(uid)
+	}
+	if s == nil {
+		d.unmatchedPacketLog++
+		if d.unmatchedPacketLog == 1 || d.unmatchedPacketLog%100 == 0 {
+			logging.Logf("[outbound-dns-debug] packet seen but no active session matched uid=%d gid=%d unmatched_total=%d active_sessions=%d", uid, gid, d.unmatchedPacketLog, len(d.sessions))
+		}
 		d.mu.Unlock()
 		return
 	}
@@ -186,6 +194,25 @@ func (d *DNSDebugCapture) writeSample(uid, gid uint32, msg dnsDebugMsg) {
 		s.bytes += n
 	}
 	d.mu.Unlock()
+}
+
+func (d *DNSDebugCapture) lookupUIDFallbackLocked(uid uint32) (dnsDebugKey, *dnsDebugSession) {
+	var (
+		found   bool
+		chosenK dnsDebugKey
+		chosenS *dnsDebugSession
+	)
+	for k, s := range d.sessions {
+		if s == nil || k.uid != uid {
+			continue
+		}
+		if !found || s.started.After(chosenS.started) || (s.started.Equal(chosenS.started) && k.gid < chosenK.gid) {
+			found = true
+			chosenK = k
+			chosenS = s
+		}
+	}
+	return chosenK, chosenS
 }
 
 func (d *DNSDebugCapture) openLog(gid uint32, when time.Time) (string, *os.File, error) {
