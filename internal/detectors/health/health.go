@@ -71,9 +71,12 @@ type Detector struct {
 
 	enr *enrich.Enricher
 
-	mu   sync.Mutex
+	mu sync.Mutex
+
 	last map[string]time.Time // cooldown per key
 	base map[string]float64   // EWMA baselines
+
+	smartProbeCache map[string]string // /dev node -> successful smartctl -d driver ("" for native)
 
 	// throughput deltas
 	lastRxBytes uint64
@@ -111,9 +114,10 @@ func New(cfg Config) *Detector {
 	}
 
 	d := &Detector{
-		cfg:  cfg,
-		last: make(map[string]time.Time),
-		base: make(map[string]float64),
+		cfg:             cfg,
+		last:            make(map[string]time.Time),
+		base:            make(map[string]float64),
+		smartProbeCache: make(map[string]string),
 	}
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -199,6 +203,7 @@ type SmartInfo struct {
 	Model  string `json:"model,omitempty"`
 	Serial string `json:"serial,omitempty"`
 	Type   string `json:"type,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type DiskStat struct {
@@ -291,7 +296,7 @@ func (d *Detector) snapshot() Snapshot {
 	s.Zfs = readZpool()
 
 	// smartctl (optional, minimal)
-	s.Smart = readSmartSummary()
+	s.Smart = d.readSmartSummary()
 
 	// pretty JSON for sinks/alert body
 	body := map[string]any{
@@ -679,58 +684,272 @@ func readZpool() map[string]string {
 	return res
 }
 
-// Minimal SMART summary (per /dev/(sdX|nvmeNn1|vdX|xvdX)). Best-effort, cheap.
-func readSmartSummary() map[string]SmartInfo {
+type smartScanEntry struct {
+	Device string
+	Driver string
+}
+
+// SMART summary with adaptive smartctl probe strategies.
+func (d *Detector) readSmartSummary() map[string]SmartInfo {
 	res := map[string]SmartInfo{}
 	if _, err := exec.LookPath("smartctl"); err != nil {
 		return res
 	}
-	devs := listBlockDevices()
-	for _, dev := range devs {
-		info := SmartInfo{}
-		// smartctl -H (overall), -A (attributes), -i (model/serial)
-		hi, _ := exec.Command("smartctl", "-H", dev).CombinedOutput()
-		ai, _ := exec.Command("smartctl", "-A", dev).CombinedOutput()
-		ii, _ := exec.Command("smartctl", "-i", dev).CombinedOutput()
-		// overall
-		if bytes.Contains(bytes.ToLower(hi), []byte("pass")) {
-			info.Health = "PASS"
-		} else if bytes.Contains(bytes.ToLower(hi), []byte("fail")) {
-			info.Health = "FAIL"
+
+	devs := d.discoverSmartDevices()
+	for _, entry := range devs {
+		info, ok := d.probeSmartDevice(entry)
+		if !ok && info.Error == "" {
+			info.Error = "unable to read SMART"
 		}
-		// temp (best-effort)
-		reT := regexp.MustCompile(`(?i)(Temperature_Celsius|Temperature:)\s+(\d+)`)
-		if m := reT.FindSubmatch(ai); len(m) == 3 {
-			info.TempC = string(m[2])
-		}
-		// wear (for NVMe or SSD attr)
-		reWear := regexp.MustCompile(`(?i)(Percent_Lifetime_Remain|Wear_Leveling_Count|Media_Wearout_Indicator)\s+(\d+)`)
-		if m := reWear.FindSubmatch(ai); len(m) == 3 {
-			info.Wear = string(m[2])
-		}
-		// id
-		info.Model = firstMatch(ii, `(?mi)^(?:Device Model|Model Number):\s*(.+)$`)
-		info.Serial = firstMatch(ii, `(?mi)^Serial Number:\s*(.+)$`)
-		info.Type = devType(dev, ii)
-		res[filepath.Base(dev)] = info
+		res[filepath.Base(entry.Device)] = info
 	}
 	return res
 }
 
-func listBlockDevices() []string {
-	// /dev/(nvmeNn1|sdX|vdX|xvdX|hdX)
-	var devs []string
-	_ = filepath.Walk("/dev", func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			base := filepath.Base(path)
-			if regexp.MustCompile(`^(sd[a-z]|vd[a-z]|xvd[a-z]|hd[a-z])$`).MatchString(base) ||
-				regexp.MustCompile(`^nvme\d+n\d+$`).MatchString(base) {
-				devs = append(devs, "/dev/"+base)
+func (d *Detector) discoverSmartDevices() []smartScanEntry {
+	if entries := discoverViaSmartctlScanOpen(); len(entries) > 0 {
+		return entries
+	}
+	return discoverViaLsblkAndSysfs()
+}
+
+func discoverViaSmartctlScanOpen() []smartScanEntry {
+	out, err := exec.Command("smartctl", "--scan-open").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var entries []smartScanEntry
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/dev/") {
+			continue
+		}
+		e := smartScanEntry{Device: fields[0]}
+		for i := 1; i < len(fields)-1; i++ {
+			if fields[i] == "-d" {
+				e.Driver = strings.TrimSpace(fields[i+1])
+				break
 			}
 		}
+		key := e.Device + "|" + e.Driver
+		if !seen[key] {
+			seen[key] = true
+			entries = append(entries, e)
+		}
+	}
+	return entries
+}
+
+func discoverViaLsblkAndSysfs() []smartScanEntry {
+	type lsblkNode struct {
+		Name     string      `json:"name"`
+		Type     string      `json:"type"`
+		Children []lsblkNode `json:"children"`
+	}
+	type lsblkJSON struct {
+		Blockdevices []lsblkNode `json:"blockdevices"`
+	}
+
+	out, err := exec.Command("lsblk", "-J", "-o", "NAME,TYPE").Output()
+	if err != nil {
 		return nil
-	})
-	return devs
+	}
+	var parsed lsblkJSON
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var outEntries []smartScanEntry
+	var walk func([]lsblkNode)
+	walk = func(nodes []lsblkNode) {
+		for _, n := range nodes {
+			if n.Type == "disk" && n.Name != "" {
+				sysPath := filepath.Join("/sys/block", n.Name)
+				if fi, err := os.Stat(sysPath); err == nil && fi.IsDir() {
+					dev := "/dev/" + n.Name
+					if !seen[dev] {
+						seen[dev] = true
+						outEntries = append(outEntries, smartScanEntry{Device: dev})
+					}
+				}
+			}
+			if len(n.Children) > 0 {
+				walk(n.Children)
+			}
+		}
+	}
+	walk(parsed.Blockdevices)
+	return outEntries
+}
+
+func (d *Detector) probeSmartDevice(entry smartScanEntry) (SmartInfo, bool) {
+	candidates := d.buildProbeCandidates(entry)
+	var lastErr string
+	for _, driver := range candidates {
+		out, err := runSmartctlProbe(entry.Device, driver)
+		if !smartProbeSucceeded(out, err) {
+			lastErr = smartProbeError(out, err)
+			continue
+		}
+		d.rememberSmartProbe(entry.Device, driver)
+		info := parseSmartInfo(entry.Device, out)
+		if driver != "" && info.Type == "Unknown" {
+			info.Type = strings.ToUpper(driver)
+		}
+		return info, true
+	}
+	return SmartInfo{Error: lastErr}, false
+}
+
+func (d *Detector) buildProbeCandidates(entry smartScanEntry) []string {
+	base := filepath.Base(entry.Device)
+	var candidates []string
+	seen := map[string]bool{}
+	add := func(v string) {
+		if !seen[v] {
+			seen[v] = true
+			candidates = append(candidates, v)
+		}
+	}
+
+	if entry.Driver != "" {
+		add(entry.Driver)
+	}
+	if cached := d.cachedSmartProbe(entry.Device); cached != "" || (cached == "" && d.hasCachedSmartProbe(entry.Device)) {
+		add(cached)
+	}
+	add("") // native: smartctl -a /dev/...
+	if strings.HasPrefix(base, "nvme") {
+		add("nvme")
+	}
+	add("scsi")
+	if isUSBBlockDevice(base) {
+		add("sat")
+		add("sat,12")
+		add("usbsunplus")
+		add("jmicron")
+		add("usbjmicron")
+	}
+	if looksLikeMegaRaid(base) {
+		for i := 0; i < 8; i++ {
+			add(fmt.Sprintf("megaraid,%d", i))
+		}
+	}
+	return candidates
+}
+
+func runSmartctlProbe(dev, driver string) ([]byte, error) {
+	args := []string{"-a"}
+	if driver != "" {
+		args = append(args, "-d", driver)
+	}
+	args = append(args, dev)
+	return exec.Command("smartctl", args...).CombinedOutput()
+}
+
+func smartProbeSucceeded(out []byte, err error) bool {
+	l := strings.ToLower(string(out))
+	if strings.Contains(l, "unknown usb bridge") ||
+		strings.Contains(l, "please specify device type with the -d option") ||
+		strings.Contains(l, "unsupported usb bridge") ||
+		strings.Contains(l, "unable to detect device type") ||
+		strings.Contains(l, "inappropriate ioctl for device") ||
+		strings.Contains(l, "device open failed") {
+		return false
+	}
+	if strings.Contains(l, "smart support is: available") ||
+		strings.Contains(l, "smart health status") ||
+		strings.Contains(l, "nvme smart/health information") ||
+		strings.Contains(l, "=== start of information section ===") {
+		return true
+	}
+	return err == nil && len(out) > 0
+}
+
+func smartProbeError(out []byte, err error) string {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" && err != nil {
+		msg = err.Error()
+	}
+	if len(msg) > 180 {
+		msg = msg[:180] + "..."
+	}
+	return msg
+}
+
+func parseSmartInfo(dev string, out []byte) SmartInfo {
+	info := SmartInfo{}
+	l := bytes.ToLower(out)
+	switch {
+	case bytes.Contains(l, []byte("pass")):
+		info.Health = "PASS"
+	case bytes.Contains(l, []byte("fail")):
+		info.Health = "FAIL"
+	}
+	if m := regexp.MustCompile(`(?mi)^(?:194\s+Temperature_Celsius|190\s+Airflow_Temperature_Cel|Temperature:\s+)\D*([0-9]{1,3})`).FindSubmatch(out); len(m) == 2 {
+		info.TempC = string(m[1])
+	} else if m := regexp.MustCompile(`(?mi)^Temperature:\s+([0-9]{1,3})`).FindSubmatch(out); len(m) == 2 {
+		info.TempC = string(m[1])
+	}
+	if m := regexp.MustCompile(`(?mi)(?:Percentage Used:\s+([0-9]{1,3})|Percent_Lifetime_Remain\s+\S+\s+\S+\s+\S+\s+\S+\s+([0-9]{1,3})|Media_Wearout_Indicator\s+\S+\s+\S+\s+\S+\s+\S+\s+([0-9]{1,3}))`).FindSubmatch(out); len(m) >= 2 {
+		for i := 1; i < len(m); i++ {
+			if len(m[i]) > 0 {
+				info.Wear = string(m[i])
+				break
+			}
+		}
+	}
+	info.Model = firstMatch(out, `(?mi)^(?:Device Model|Model Number|Product):\s*(.+)$`)
+	info.Serial = firstMatch(out, `(?mi)^Serial Number:\s*(.+)$`)
+	info.Type = devType(dev, out)
+	return info
+}
+
+func isUSBBlockDevice(base string) bool {
+	target, err := filepath.EvalSymlinks(filepath.Join("/sys/block", base))
+	if err == nil && strings.Contains(strings.ToLower(target), "/usb") {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join("/sys/block", base, "device", "modalias"))
+	return err == nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(string(b))), "usb:")
+}
+
+func looksLikeMegaRaid(base string) bool {
+	vendor, _ := os.ReadFile(filepath.Join("/sys/block", base, "device", "vendor"))
+	model, _ := os.ReadFile(filepath.Join("/sys/block", base, "device", "model"))
+	id := strings.ToUpper(strings.TrimSpace(string(vendor)) + " " + strings.TrimSpace(string(model)))
+	return strings.Contains(id, "LSI") ||
+		strings.Contains(id, "AVAGO") ||
+		strings.Contains(id, "BROADCOM") ||
+		strings.Contains(id, "PERC") ||
+		strings.Contains(id, "MEGARAID")
+}
+
+func (d *Detector) rememberSmartProbe(device, driver string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.smartProbeCache[device] = driver
+}
+
+func (d *Detector) cachedSmartProbe(device string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.smartProbeCache[device]
+}
+
+func (d *Detector) hasCachedSmartProbe(device string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.smartProbeCache[device]
+	return ok
 }
 
 func firstMatch(b []byte, pattern string) string {
