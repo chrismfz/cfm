@@ -78,6 +78,7 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.DNATEnabled = "on"
 	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Runtime.FrontendWorking = "working"
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
 
 	out, err := runWithCapturedStdout(func() error {
@@ -90,8 +91,30 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	if !strings.Contains(out, "DNAT: on (frontend=angie)") {
 		t.Fatalf("expected frontend output, got:\n%s", out)
 	}
+	if !strings.Contains(out, "Frontend: angie (working)") {
+		t.Fatalf("expected frontend working verdict, got:\n%s", out)
+	}
 	if !strings.Contains(out, "Warning: ambiguous ownership") {
 		t.Fatalf("expected warning output, got:\n%s", out)
+	}
+}
+
+func TestRuntimeSectionFrontendDegradedReason(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Runtime.DNATEnabled = "on"
+	s.Modern.Runtime.DNATFrontend = "openresty"
+	s.Modern.Runtime.FrontendWorking = "degraded"
+	s.Modern.Runtime.FrontendReason = "listener missing on :443"
+
+	out, err := runWithCapturedStdout(func() error {
+		printRuntimeSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printRuntimeSection error: %v", err)
+	}
+	if !strings.Contains(out, "Frontend: openresty (degraded: listener missing on :443)") {
+		t.Fatalf("expected degraded frontend output, got:\n%s", out)
 	}
 }
 
