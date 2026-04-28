@@ -91,3 +91,40 @@ func runWithCapturedStdout(fn func() error) (string, error) {
 	_, _ = io.Copy(&buf, r)
 	return buf.String(), runErr
 }
+
+func TestHealthLabelUnknownIsNeutral(t *testing.T) {
+	tests := []string{"", "unknown", "n/a", "UNKNOWN", " N/A "}
+	for _, tc := range tests {
+		if got := healthLabel(tc); got != okLabel {
+			t.Fatalf("healthLabel(%q)=%v, want %v", tc, got, okLabel)
+		}
+	}
+}
+
+func TestStorageOptionalSubsystemNotPresent(t *testing.T) {
+	s := parsedSnapshot{
+		Modern: modernSample{},
+		RawMap: map[string]any{
+			"smart_health":  "ok",
+			"disk_wearout":  "ok",
+			"mdadm_health":  "degraded",
+			"zfs_health":    "degraded",
+			"mdadm_present": false,
+			"zfs_present":   false,
+		},
+	}
+
+	out, err := runWithCapturedStdout(func() error {
+		printStorageSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printStorageSection error: %v", err)
+	}
+	if !strings.Contains(out, "Storage health [OK]") {
+		t.Fatalf("expected overall storage status to remain OK for absent optional subsystems, got:\n%s", out)
+	}
+	if !strings.Contains(out, "mdadm: not present") || !strings.Contains(out, "ZFS: not present") {
+		t.Fatalf("expected explicit not-present labels, got:\n%s", out)
+	}
+}
