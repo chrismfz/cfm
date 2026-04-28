@@ -30,7 +30,7 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown)", "Edge: unknown (unknown)", "Upstream: unknown (unknown)"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown, confidence=low)", "Edge: unknown (unknown)", "Upstream: unknown (unknown)"},
 			wantNone: []string{"[cfm health watch]"},
 		},
 		{
@@ -78,6 +78,7 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.DNATEnabled = "on"
 	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Runtime.DNATConfidence = "low"
 	s.Modern.Runtime.FrontendWorking = "working"
 	s.Modern.Runtime.EdgeService = "angie"
 	s.Modern.Runtime.EdgeStatus = "active"
@@ -92,7 +93,7 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("printRuntimeSection error: %v", err)
 	}
-	if !strings.Contains(out, "DNAT: on (frontend=angie)") {
+	if !strings.Contains(out, "DNAT: on (frontend=angie, confidence=low)") {
 		t.Fatalf("expected frontend output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Frontend: angie (working)") {
@@ -113,8 +114,10 @@ func TestRuntimeSectionFrontendDegradedReason(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.DNATEnabled = "on"
 	s.Modern.Runtime.DNATFrontend = "openresty"
+	s.Modern.Runtime.DNATConfidence = "high"
 	s.Modern.Runtime.FrontendWorking = "degraded"
 	s.Modern.Runtime.FrontendReason = "listener missing on :443"
+	s.Modern.Runtime.DNATWarning = "ambiguous ownership: openresty(score=6), nginx(score=6)"
 
 	out, err := runWithCapturedStdout(func() error {
 		printRuntimeSection(s, cliOptions{NoColor: true})
@@ -125,6 +128,9 @@ func TestRuntimeSectionFrontendDegradedReason(t *testing.T) {
 	}
 	if !strings.Contains(out, "Frontend: openresty (degraded: listener missing on :443)") {
 		t.Fatalf("expected degraded frontend output, got:\n%s", out)
+	}
+	if strings.Contains(out, "Warning:") {
+		t.Fatalf("expected warning to be suppressed when confidence is high, got:\n%s", out)
 	}
 }
 
