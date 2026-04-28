@@ -28,6 +28,14 @@ import (
 	"cfm/internal/healthstore"
 )
 
+var (
+	throughputNow = time.Now
+	openNetDev    = func() (io.ReadCloser, error) { return os.Open("/proc/net/dev") }
+
+	snapshotCollectorMu sync.Mutex
+	snapshotCollector   *Detector
+)
+
 type Config struct {
 	Every, Window, Cooldown time.Duration
 
@@ -633,9 +641,9 @@ func parseHexPort(local string) int {
 
 // Throughput from /proc/net/dev deltas (excluding "lo")
 func (d *Detector) readThroughput() (rxMbps, txMbps float64) {
-	now := time.Now()
+	now := throughputNow()
 	var rx, tx uint64
-	f, err := os.Open("/proc/net/dev")
+	f, err := openNetDev()
 	if err != nil {
 		return 0, 0
 	}
@@ -1653,6 +1661,10 @@ func (d *Detector) lookupMeta(ip string) string {
 
 // SnapshotNow collects a one-off health snapshot for status CLI.
 func SnapshotNow() Snapshot {
-	d := New(Config{})
-	return d.snapshot()
+	snapshotCollectorMu.Lock()
+	defer snapshotCollectorMu.Unlock()
+	if snapshotCollector == nil {
+		snapshotCollector = New(Config{})
+	}
+	return snapshotCollector.snapshot()
 }
