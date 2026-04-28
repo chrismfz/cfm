@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -100,7 +101,7 @@ type SMTPBlockConfig struct {
 
 // OutboundConfig — Outbound Abuse Sentinel (phase 1: observe + warn).
 //
-// Watches new outbound TCP connections (and UDP/53) per Linux uid via NFLOG and
+// Watches new outbound TCP connections per Linux uid via NFLOG and
 // classifies them by destination port group. When a uid crosses a per-window
 // threshold for any signal, a forensic warning is logged to cfm.smtp.log and an
 // admin notification is emitted. Phase 1 never throttles or suspends; an nft
@@ -112,10 +113,6 @@ type OutboundConfig struct {
 	SMTPPerMin      int      // OUTBOUND_SMTP_CONN_PER_MIN (default 30)
 	UniqueDstPerMin int      // OUTBOUND_SCAN_UNIQUE_DST_PER_MIN (default 50)
 	HTTPPerMin      int      // OUTBOUND_HTTP_RATE_PER_MIN (default 200)
-	DNSPerMin       int      // OUTBOUND_DNS_PER_MIN (default 300)
-	DNSUniqDstMin   int      // OUTBOUND_DNS_UNIQ_DST_MIN (default 2)
-	DNSSeverityMode string   // OUTBOUND_DNS_SEVERITY_MODE (volume-only|volume+dispersion)
-	DNSNXRatioAlert float64  // OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT (0 disables)
 	ScanPorts       []uint16 // OUTBOUND_SCAN_PORTS (default 22,23,3389)
 	SMTPPorts       []uint16 // OUTBOUND_SMTP_PORTS (default 25,465,587)
 	HTTPPorts       []uint16 // OUTBOUND_HTTP_PORTS (default 80,443,8080,8443)
@@ -127,10 +124,6 @@ type OutboundConfig struct {
 	AllowUIDs       []uint32 // OUTBOUND_ALLOW_UIDS (root always allowed)
 	AllowGIDs       []uint32 // OUTBOUND_ALLOW_GIDS
 	Enrich          bool     // OUTBOUND_LOG_ENRICH (GeoIP/ASN on dst)
-	DNSDebugEnabled bool     // OUTBOUND_DNS_DEBUG_ENABLED
-	DNSDebugSamples int      // OUTBOUND_DNS_DEBUG_SAMPLE_COUNT
-	DNSDebugDurSec  int      // OUTBOUND_DNS_DEBUG_DURATION_SEC
-	DNSDebugDir     string   // OUTBOUND_DNS_DEBUG_DIR
 }
 
 // MaxMindConfig — updater and DB locations for GeoLite/GeoIP2
@@ -419,18 +412,6 @@ func (c *Config) SetDefaults() {
 	if c.Outbound.HTTPPerMin <= 0 {
 		c.Outbound.HTTPPerMin = 200
 	}
-	if c.Outbound.DNSPerMin <= 0 {
-		c.Outbound.DNSPerMin = 300
-	}
-	if c.Outbound.DNSUniqDstMin <= 0 {
-		c.Outbound.DNSUniqDstMin = 2
-	}
-	if c.Outbound.DNSSeverityMode == "" {
-		c.Outbound.DNSSeverityMode = "volume-only"
-	}
-	if c.Outbound.DNSNXRatioAlert < 0 {
-		c.Outbound.DNSNXRatioAlert = 0
-	}
 	if len(c.Outbound.SMTPPorts) == 0 {
 		c.Outbound.SMTPPorts = []uint16{25, 465, 587}
 	}
@@ -448,15 +429,6 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Outbound.QueueSamples <= 0 {
 		c.Outbound.QueueSamples = 5
-	}
-	if c.Outbound.DNSDebugSamples <= 0 {
-		c.Outbound.DNSDebugSamples = 100
-	}
-	if c.Outbound.DNSDebugDurSec <= 0 {
-		c.Outbound.DNSDebugDurSec = 30
-	}
-	if c.Outbound.DNSDebugDir == "" {
-		c.Outbound.DNSDebugDir = "/var/log/cfm/outbound"
 	}
 	// Outbound shares the SMTP log file (operator preference: keep one place
 	// for outbound abuse signals).
@@ -550,19 +522,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("OUTBOUND_NFLOG (%d) must differ from SMTP_LOG_NFLOG (%d)",
 			c.Outbound.NFLOGGroup, c.SMTPBlock.LogNFLOG)
 	}
-	c.Outbound.DNSSeverityMode = strings.ToLower(strings.TrimSpace(c.Outbound.DNSSeverityMode))
-	switch c.Outbound.DNSSeverityMode {
-	case "", "volume-only", "volume+dispersion":
-		if c.Outbound.DNSSeverityMode == "" {
-			c.Outbound.DNSSeverityMode = "volume-only"
-		}
-	default:
-		return fmt.Errorf("invalid OUTBOUND_DNS_SEVERITY_MODE %q (must be volume-only|volume+dispersion)", c.Outbound.DNSSeverityMode)
-	}
-	if c.Outbound.DNSNXRatioAlert < 0 || c.Outbound.DNSNXRatioAlert > 1 {
-		return fmt.Errorf("OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT must be in [0..1], got %v", c.Outbound.DNSNXRatioAlert)
-	}
-
 	// MaxMind sanity
 	c.MaxMind.Source = strings.ToLower(strings.TrimSpace(c.MaxMind.Source))
 	switch c.MaxMind.Source {
@@ -597,6 +556,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	s := bufio.NewScanner(r)
 	cfg := &Config{}
 	cfg.Debug.AuthMFALoginVerifyEnabled = true
+	outboundDNSDeprecatedSeen := false
 	lineNo := 0
 	for s.Scan() {
 		lineNo++
@@ -771,13 +731,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "OUTBOUND_HTTP_RATE_PER_MIN":
 			cfg.Outbound.HTTPPerMin = parseInt(val)
 		case "OUTBOUND_DNS_PER_MIN":
-			cfg.Outbound.DNSPerMin = parseInt(val)
-		case "OUTBOUND_DNS_UNIQ_DST_MIN":
-			cfg.Outbound.DNSUniqDstMin = parseInt(val)
-		case "OUTBOUND_DNS_SEVERITY_MODE":
-			cfg.Outbound.DNSSeverityMode = val
-		case "OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT":
-			cfg.Outbound.DNSNXRatioAlert = parseFloat64(val)
+			outboundDNSDeprecatedSeen = true
 		case "OUTBOUND_SMTP_PORTS":
 			cfg.Outbound.SMTPPorts = append(cfg.Outbound.SMTPPorts, parseUint16CSV(val)...)
 		case "OUTBOUND_SCAN_PORTS":
@@ -801,13 +755,13 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "OUTBOUND_LOG_ENRICH":
 			cfg.Outbound.Enrich = parseBool(val)
 		case "OUTBOUND_DNS_DEBUG_ENABLED":
-			cfg.Outbound.DNSDebugEnabled = parseBool(val)
+			outboundDNSDeprecatedSeen = true
 		case "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT":
-			cfg.Outbound.DNSDebugSamples = parseInt(val)
+			outboundDNSDeprecatedSeen = true
 		case "OUTBOUND_DNS_DEBUG_DURATION_SEC":
-			cfg.Outbound.DNSDebugDurSec = parseInt(val)
+			outboundDNSDeprecatedSeen = true
 		case "OUTBOUND_DNS_DEBUG_DIR":
-			cfg.Outbound.DNSDebugDir = val
+			outboundDNSDeprecatedSeen = true
 
 		// --- Debug / HTTP listen ---
 		case "LISTEN_ADDRESS":
@@ -1010,6 +964,9 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	if err := s.Err(); err != nil {
 		return nil, err
 	}
+	if outboundDNSDeprecatedSeen {
+		log.Printf("OUTBOUND_DNS_* is deprecated and ignored; DNS outbound detector has been removed")
+	}
 	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -1029,7 +986,7 @@ func IsKnownKey(key string) bool {
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
-		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_DNS_UNIQ_DST_MIN", "OUTBOUND_DNS_SEVERITY_MODE", "OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH", "OUTBOUND_DNS_DEBUG_ENABLED", "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT", "OUTBOUND_DNS_DEBUG_DURATION_SEC", "OUTBOUND_DNS_DEBUG_DIR",
+		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_DNS_DEBUG_ENABLED", "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT", "OUTBOUND_DNS_DEBUG_DURATION_SEC", "OUTBOUND_DNS_DEBUG_DIR",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_ENCRYPTION_KEY", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
@@ -1094,11 +1051,6 @@ func parseBool(s string) bool {
 func parseInt(s string) int {
 	i, _ := strconv.Atoi(strings.TrimSpace(s))
 	return i
-}
-
-func parseFloat64(s string) float64 {
-	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	return f
 }
 
 func splitCSV(s string) []string {
