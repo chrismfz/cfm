@@ -298,17 +298,41 @@ func printHostSection(s parsedSnapshot, opts cliOptions) {
 
 func printDiskSection(s parsedSnapshot, opts cliOptions) {
 	type row struct {
-		mount    string
-		usedPct  float64
-		inodePct float64
-		hasInode bool
+		mount       string
+		usedBytes   uint64
+		totalBytes  uint64
+		freeBytes   uint64
+		usedPct     float64
+		inodePct    float64
+		hasInode    bool
+		usedInodes  uint64
+		totalInodes uint64
 	}
 	rows := make([]row, 0, len(s.Modern.Disk.Mounts)+2)
 	for _, m := range s.Modern.Disk.Mounts {
-		r := row{mount: m.Mount, usedPct: m.UsedPct}
+		usedPct := m.UsedPct
+		if usedPct <= 0 && m.TotalBytes > 0 {
+			usedPct = 100 * float64(m.UsedBytes) / float64(m.TotalBytes)
+		}
+		free := uint64(0)
+		if m.TotalBytes > m.UsedBytes {
+			free = m.TotalBytes - m.UsedBytes
+		}
+		r := row{
+			mount:      m.Mount,
+			usedBytes:  m.UsedBytes,
+			totalBytes: m.TotalBytes,
+			freeBytes:  free,
+			usedPct:    usedPct,
+		}
 		if m.TotalInodes > 0 {
 			r.hasInode = true
+			r.usedInodes = m.UsedInodes
+			r.totalInodes = m.TotalInodes
 			r.inodePct = m.InodeUsedPct
+			if r.inodePct <= 0 {
+				r.inodePct = 100 * float64(m.UsedInodes) / float64(m.TotalInodes)
+			}
 		}
 		rows = append(rows, r)
 	}
@@ -323,27 +347,41 @@ func printDiskSection(s parsedSnapshot, opts cliOptions) {
 	if len(rows) == 0 {
 		return
 	}
-	if !opts.Compact {
-		fmt.Println("Disk")
-	}
-	for _, r := range rows {
-		status := labelByPct(r.usedPct)
-		if r.hasInode && labelByPct(r.inodePct) > status {
-			status = labelByPct(r.inodePct)
-		}
-		if opts.Compact {
+	if opts.Compact {
+		for _, r := range rows {
+			status := labelByPct(r.usedPct)
+			if r.hasInode && labelByPct(r.inodePct) > status {
+				status = labelByPct(r.inodePct)
+			}
 			fmt.Printf("Disk %-6s %s=%s", badge(status, opts), r.mount, pctStr(r.usedPct))
 			if r.hasInode {
 				fmt.Printf(" i=%s", pctStr(r.inodePct))
 			}
 			fmt.Println()
-		} else {
-			fmt.Printf("  %s %-12s used=%s", badge(status, opts), r.mount, pctStr(r.usedPct))
-			if r.hasInode {
-				fmt.Printf(" inodes=%s", pctStr(r.inodePct))
-			}
-			fmt.Println()
 		}
+		return
+	}
+
+	fmt.Println("Disk")
+	fmt.Printf("  %-6s %-16s %-29s %-7s %-24s\n", "state", "mount", "used / total / free", "disk %", "inode %")
+	for _, r := range rows {
+		status := labelByPct(r.usedPct)
+		if r.hasInode && labelByPct(r.inodePct) > status {
+			status = labelByPct(r.inodePct)
+		}
+		usage := pctStr(r.usedPct)
+		capacity := "n/a"
+		if r.totalBytes > 0 {
+			capacity = fmt.Sprintf("%s / %s / %s", bytesIEC(r.usedBytes), bytesIEC(r.totalBytes), bytesIEC(r.freeBytes))
+		}
+		inode := "n/a"
+		if r.hasInode {
+			inode = pctStr(r.inodePct)
+			if r.totalInodes > 0 {
+				inode = fmt.Sprintf("%s (%d/%d)", inode, r.usedInodes, r.totalInodes)
+			}
+		}
+		fmt.Printf("  %-6s %-16s %-29s %-7s %-24s\n", badge(status, opts), r.mount, capacity, usage, inode)
 	}
 }
 
