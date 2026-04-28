@@ -80,8 +80,10 @@ func init() {
 			ThruSpikeX:  kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
 			ThruMinMbps: kvFlt(kv, "THROUGHPUT_MIN_MBPS", 0.0),
 
-			TempWarnC: kvInt(kv, "TEMP_C_WARN", 85),
-			TempCritC: kvInt(kv, "TEMP_C_CRIT", 95),
+			TempWarnC:        kvInt(kv, "TEMP_C_WARN", 85),
+			TempCritC:        kvInt(kv, "TEMP_C_CRIT", 95),
+			SmartWearWarnPct: kvInt(kv, "SMART_WEAR_WARN_PCT", 80),
+			SmartWearCritPct: kvInt(kv, "SMART_WEAR_CRIT_PCT", 95),
 
 			SmartAlert: kvBool(kv, "SMART_FAIL_ALERT", true),
 			MdadmAlert: kvBool(kv, "MDADM_ALERT", true),

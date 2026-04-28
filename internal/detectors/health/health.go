@@ -40,6 +40,8 @@ type Config struct {
 	ThruMinMbps float64
 
 	TempWarnC, TempCritC int
+	SmartWearWarnPct     int
+	SmartWearCritPct     int
 
 	SmartAlert, MdadmAlert, ZfsAlert bool
 
@@ -111,6 +113,15 @@ func New(cfg Config) *Detector {
 	} // aligns with your current hardcoded 50
 	if cfg.SpikeMinDelta == 0 {
 		cfg.SpikeMinDelta = 10
+	}
+	if cfg.SmartWearWarnPct <= 0 {
+		cfg.SmartWearWarnPct = 80
+	}
+	if cfg.SmartWearCritPct <= 0 {
+		cfg.SmartWearCritPct = 95
+	}
+	if cfg.SmartWearCritPct < cfg.SmartWearWarnPct {
+		cfg.SmartWearCritPct = cfg.SmartWearWarnPct
 	}
 
 	d := &Detector{
@@ -197,13 +208,16 @@ type Snapshot struct {
 }
 
 type SmartInfo struct {
-	Health string `json:"health"`
-	Wear   string `json:"wear"`
-	TempC  string `json:"temp_c"`
-	Model  string `json:"model,omitempty"`
-	Serial string `json:"serial,omitempty"`
-	Type   string `json:"type,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Health         string            `json:"health"`
+	Wear           string            `json:"wear"`
+	WearoutPctUsed *int              `json:"wearout_pct_used,omitempty"`
+	WearoutSource  string            `json:"wearout_source,omitempty"`
+	WearDebug      map[string]string `json:"wearout_debug,omitempty"`
+	TempC          string            `json:"temp_c"`
+	Model          string            `json:"model,omitempty"`
+	Serial         string            `json:"serial,omitempty"`
+	Type           string            `json:"type,omitempty"`
+	Error          string            `json:"error,omitempty"`
 }
 
 type DiskStat struct {
@@ -907,10 +921,93 @@ func parseSmartInfo(dev string, out []byte) SmartInfo {
 			}
 		}
 	}
+	if pctUsed, source, debugRaw, ok := normalizeWear(out); ok {
+		info.WearoutPctUsed = &pctUsed
+		info.WearoutSource = source
+		info.WearDebug = debugRaw
+		if info.Wear == "" && debugRaw["source_value"] != "" {
+			info.Wear = debugRaw["source_value"]
+		}
+	}
 	info.Model = firstMatch(out, `(?mi)^(?:Device Model|Model Number|Product):\s*(.+)$`)
 	info.Serial = firstMatch(out, `(?mi)^Serial Number:\s*(.+)$`)
 	info.Type = devType(dev, out)
 	return info
+}
+
+func normalizeWear(infoRaw []byte) (pctUsed int, source string, raw map[string]string, ok bool) {
+	raw = map[string]string{}
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v > 100 {
+			return 100
+		}
+		return v
+	}
+
+	if m := regexp.MustCompile(`(?mi)^Percentage Used:\s*([0-9]{1,3})%?`).FindSubmatch(infoRaw); len(m) == 2 {
+		v, _ := strconv.Atoi(string(m[1]))
+		v = clamp(v)
+		raw["source_value"] = string(m[1])
+		raw["nvme_percentage_used"] = string(m[1])
+		return v, "nvme.percentage_used", raw, true
+	}
+
+	type ataCandidate struct {
+		id    string
+		name  string
+		value int
+		raw   int
+	}
+	attrRe := regexp.MustCompile(`(?mi)^\s*(\d+)\s+([A-Za-z0-9_\-]+)\s+\S+\s+([0-9]{1,3})\s+[0-9]{1,3}\s+[0-9]{1,3}\s+\S+\s+\S+\s+\S+\s+([0-9]+)\s*$`)
+	matches := attrRe.FindAllSubmatch(infoRaw, -1)
+	cands := make([]ataCandidate, 0, len(matches))
+	for _, m := range matches {
+		value, _ := strconv.Atoi(string(m[3]))
+		rawV, _ := strconv.Atoi(string(m[4]))
+		cands = append(cands, ataCandidate{
+			id:    string(m[1]),
+			name:  strings.ToLower(string(m[2])),
+			value: value,
+			raw:   rawV,
+		})
+	}
+
+	remainingStyle := map[string]bool{
+		"percent_lifetime_remain": true,
+		"ssd_life_left":           true,
+		"remaining_life":          true,
+		"life_remaining":          true,
+		"media_wearout_indicator": true, // common Intel/SATA style, VALUE is usually life remaining
+	}
+	usedStyle := map[string]bool{
+		"percent_lifetime_used":          true,
+		"lifetime_used":                  true,
+		"percentage_used":                true,
+		"percentage_used_endurance_indi": true,
+	}
+
+	for _, c := range cands {
+		v := clamp(c.value)
+		sourceBase := fmt.Sprintf("ata.attr.%s(%s)", c.id, c.name)
+		raw["attr_id"] = c.id
+		raw["attr_name"] = c.name
+		raw["attr_value"] = strconv.Itoa(c.value)
+		raw["attr_raw"] = strconv.Itoa(c.raw)
+
+		if usedStyle[c.name] {
+			raw["source_value"] = strconv.Itoa(v)
+			return v, sourceBase + ".value_used", raw, true
+		}
+		if remainingStyle[c.name] {
+			raw["source_value"] = strconv.Itoa(v)
+			return clamp(100 - v), sourceBase + ".value_remaining", raw, true
+		}
+	}
+
+	return 0, "", nil, false
 }
 
 func isUSBBlockDevice(base string) bool {
@@ -982,20 +1079,27 @@ func devType(dev string, ident []byte) string {
 func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	var alerts []core.Alert
 
-	emit := func(kind, key string) {
+	emitExtra := func(kind, key string, extra map[string]string) {
 		if d.cool(key, s.Time) {
+			merged := map[string]string{
+				"window":   d.cfg.Window.String(),
+				"cooldown": d.cfg.Cooldown.String(),
+				"body":     s.RawJSON,
+			}
+			for k, v := range extra {
+				merged[k] = v
+			}
 			alerts = append(alerts, core.Alert{
 				When:  s.Time,
 				Kind:  core.AlertKind(kind),
 				Key:   key,
 				Count: 1,
-				Extra: map[string]string{
-					"window":   d.cfg.Window.String(),
-					"cooldown": d.cfg.Cooldown.String(),
-					"body":     s.RawJSON,
-				},
+				Extra: merged,
 			})
 		}
+	}
+	emit := func(kind, key string) {
+		emitExtra(kind, key, nil)
 	}
 
 	emitS := func(kind, key string, samples []string) {
@@ -1195,6 +1299,23 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 			health := strings.ToUpper(info.Health)
 			if strings.Contains(health, "FAIL") || strings.Contains(health, "CRIT") {
 				emit("HEALTH/SMART_FAIL", "smart."+dev)
+			}
+			if info.WearoutPctUsed != nil {
+				extra := map[string]string{
+					"smart_device":      dev,
+					"wearout_pct_used":  strconv.Itoa(*info.WearoutPctUsed),
+					"wearout_source":    info.WearoutSource,
+					"wearout_raw_value": info.Wear,
+				}
+				for k, v := range info.WearDebug {
+					extra["wear_debug_"+k] = v
+				}
+				switch {
+				case *info.WearoutPctUsed >= d.cfg.SmartWearCritPct:
+					emitExtra("HEALTH/SMART_WEAR_CRIT", "smart.wear."+dev, extra)
+				case *info.WearoutPctUsed >= d.cfg.SmartWearWarnPct:
+					emitExtra("HEALTH/SMART_WEAR_WARN", "smart.wear."+dev, extra)
+				}
 			}
 		}
 	}
