@@ -2,7 +2,9 @@ package healthmodel
 
 import (
 	"cfm/internal/dnat"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -62,6 +64,7 @@ func collectRuntimeStatus() RuntimeStatus {
 		CFMServiceState: "unknown",
 		DNATEnabled:     "unknown",
 		DNATFrontend:    "unknown",
+		FrontendWorking: "down",
 	}
 	out.CFMDaemonLive, out.CFMDaemonPID = probeCFMDaemonLive()
 	if state, ok := probeSystemdServiceState("cfm.service"); ok {
@@ -80,6 +83,7 @@ func collectRuntimeStatus() RuntimeStatus {
 	frontend, warning := detectDNATFrontend()
 	out.DNATFrontend = frontend
 	out.DNATWarning = warning
+	out.FrontendWorking, out.FrontendReason = deriveFrontendWorking(out.DNATFrontend)
 	return out
 }
 
@@ -193,9 +197,53 @@ func probeSystemdUnit(unit string) (active bool, enabled bool, ok bool) {
 }
 
 var ssListenerOwnerRE = regexp.MustCompile(`users:\(\("([^"]+)",pid=([0-9]+),fd=[0-9]+\)\)`)
+var ssPortRE = regexp.MustCompile(`:([0-9]+)\b`)
 
 func probeListenerProcessNames() map[string]int {
 	out := map[string]int{}
+	snap := probeFrontendListeners()
+	for _, ln := range snap.entries {
+		out[ln.name]++
+	}
+	return out
+}
+
+type listenerEntry struct {
+	name string
+	port int
+}
+
+type frontendListenerSnapshot struct {
+	entries []listenerEntry
+}
+
+func (s frontendListenerSnapshot) hasOwnerOnPorts(owners []string, ports ...int) bool {
+	if len(owners) == 0 || len(ports) == 0 {
+		return false
+	}
+	ownerSet := make(map[string]struct{}, len(owners))
+	for _, owner := range owners {
+		o := strings.ToLower(strings.TrimSpace(owner))
+		if o == "" {
+			continue
+		}
+		ownerSet[o] = struct{}{}
+	}
+	for _, e := range s.entries {
+		if _, ok := ownerSet[e.name]; !ok {
+			continue
+		}
+		for _, port := range ports {
+			if e.port == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func probeFrontendListeners() frontendListenerSnapshot {
+	out := frontendListenerSnapshot{entries: make([]listenerEntry, 0, 8)}
 	if _, err := exec.LookPath("ss"); err != nil {
 		return out
 	}
@@ -218,10 +266,115 @@ func probeListenerProcessNames() map[string]int {
 			if name == "" {
 				continue
 			}
-			out[name]++
+			port := parseListenerPort(ln)
+			if port <= 0 {
+				continue
+			}
+			out.entries = append(out.entries, listenerEntry{name: name, port: port})
 		}
 	}
 	return out
+}
+
+func parseListenerPort(ssLine string) int {
+	portMatch := ssPortRE.FindAllStringSubmatch(ssLine, -1)
+	if len(portMatch) == 0 {
+		return 0
+	}
+	last := portMatch[len(portMatch)-1]
+	if len(last) != 2 {
+		return 0
+	}
+	port, _ := strconv.Atoi(last[1])
+	return port
+}
+
+func deriveFrontendWorking(frontend string) (string, string) {
+	frontend = strings.ToLower(strings.TrimSpace(frontend))
+	if frontend == "" || frontend == "unknown" {
+		return "down", "frontend unknown"
+	}
+
+	candidates := map[string]frontendSignal{
+		"angie": {
+			name:           "angie",
+			serviceUnit:    "angie.service",
+			processAliases: []string{"angie", "nginx"},
+		},
+		"openresty": {
+			name:           "openresty",
+			serviceUnit:    "openresty.service",
+			processAliases: []string{"openresty", "nginx"},
+		},
+		"nginx": {
+			name:           "nginx",
+			serviceUnit:    "nginx.service",
+			processAliases: []string{"nginx"},
+		},
+	}
+	sig, ok := candidates[frontend]
+	if !ok {
+		return "down", fmt.Sprintf("unsupported frontend: %s", frontend)
+	}
+
+	active, _, systemdOK := probeSystemdUnit(sig.serviceUnit)
+	if !systemdOK || !active {
+		return "down", fmt.Sprintf("service inactive: %s", sig.serviceUnit)
+	}
+
+	listeners := probeFrontendListeners()
+	if !listeners.hasOwnerOnPorts(sig.processAliases, 80, 443) {
+		return "degraded", "listener missing on :80/:443"
+	}
+
+	if ok, reason := probeFrontendHTTP(); !ok {
+		return "degraded", reason
+	}
+
+	return "working", ""
+}
+
+func probeFrontendHTTP() (bool, string) {
+	clientHTTP := &http.Client{Timeout: 1500 * time.Millisecond}
+	clientHTTPS := &http.Client{
+		Timeout: 1500 * time.Millisecond,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local liveness probe only
+		},
+	}
+	type probeTarget struct {
+		url    string
+		client *http.Client
+	}
+	targets := []probeTarget{
+		{url: "http://127.0.0.1/hello", client: clientHTTP},
+		{url: "http://127.0.0.1/healthz", client: clientHTTP},
+		{url: "http://127.0.0.1/", client: clientHTTP},
+		{url: "https://127.0.0.1/hello", client: clientHTTPS},
+	}
+	lastErr := ""
+	for _, target := range targets {
+		req, err := http.NewRequest(http.MethodGet, target.url, nil)
+		if err != nil {
+			lastErr = err.Error()
+			continue
+		}
+		req.Host = "localhost"
+		resp, err := target.client.Do(req)
+		if err != nil {
+			lastErr = err.Error()
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+			return true, ""
+		}
+		lastErr = fmt.Sprintf("probe status %d on %s", resp.StatusCode, target.url)
+	}
+	if lastErr == "" {
+		lastErr = "probe failed"
+	}
+	return false, "http probe failed: " + lastErr
 }
 
 func probeCFMDaemonLive() (bool, *int) {

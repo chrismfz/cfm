@@ -82,6 +82,8 @@ type modernSample struct {
 		DNATEnabled     string `json:"dnat_enabled"`
 		DNATFrontend    string `json:"dnat_frontend"`
 		DNATWarning     string `json:"dnat_warning"`
+		FrontendWorking string `json:"frontend_working"`
+		FrontendReason  string `json:"frontend_reason"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -287,8 +289,16 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if frontend == "" {
 		frontend = "unknown"
 	}
+	frontendVerdict := strings.TrimSpace(r.FrontendWorking)
+	if frontendVerdict == "" {
+		frontendVerdict = "down"
+	}
+	frontendLabel := fmt.Sprintf("%s (%s)", frontend, frontendVerdict)
+	if reason := strings.TrimSpace(r.FrontendReason); reason != "" && strings.ToLower(frontendVerdict) != "working" {
+		frontendLabel = fmt.Sprintf("%s (%s: %s)", frontend, frontendVerdict, reason)
+	}
 	if opts.Compact {
-		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontend)
+		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel)
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
 			fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
 		}
@@ -299,6 +309,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  CFM daemon: %s\n", daemon)
 	fmt.Printf("  Service: %s\n", serviceState)
 	fmt.Printf("  DNAT: %s (frontend=%s)\n", dnatState, frontend)
+	fmt.Printf("  Frontend: %s\n", frontendLabel)
 	if w := strings.TrimSpace(r.DNATWarning); w != "" {
 		fmt.Printf("  Warning: %s\n", w)
 	}
@@ -869,6 +880,8 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.DNATEnabled = latest.Runtime.DNATEnabled
 		out.Modern.Runtime.DNATFrontend = latest.Runtime.DNATFrontend
 		out.Modern.Runtime.DNATWarning = latest.Runtime.DNATWarning
+		out.Modern.Runtime.FrontendWorking = latest.Runtime.FrontendWorking
+		out.Modern.Runtime.FrontendReason = latest.Runtime.FrontendReason
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,

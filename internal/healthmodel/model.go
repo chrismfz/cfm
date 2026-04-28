@@ -25,6 +25,8 @@ type RuntimeStatus struct {
 	DNATEnabled     string `json:"dnat_enabled,omitempty"` // on/off/unknown
 	DNATFrontend    string `json:"dnat_frontend,omitempty"`
 	DNATWarning     string `json:"dnat_warning,omitempty"`
+	FrontendWorking string `json:"frontend_working,omitempty"` // working/degraded/down
+	FrontendReason  string `json:"frontend_reason,omitempty"`
 }
 
 type HostSystem struct {
