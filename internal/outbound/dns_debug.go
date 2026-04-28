@@ -83,7 +83,7 @@ func (d *DNSDebugCapture) Start(ctx context.Context) {
 }
 
 // Trigger arms (or skips) a temporary uid-specific DNS capture window.
-func (d *DNSDebugCapture) Trigger(uid, gid uint32, when time.Time) {
+func (d *DNSDebugCapture) Trigger(uid, gid uint32, when time.Time, pretrigger []DNSPacketSummary) {
 	if d == nil || !d.rt.DNSDebugEnabled {
 		return
 	}
@@ -105,7 +105,7 @@ func (d *DNSDebugCapture) Trigger(uid, gid uint32, when time.Time) {
 		}
 		d.closeSessionLocked(key)
 	}
-	path, f, err := d.openLog(gid, when)
+	path, f, err := d.openLog(gid, when, pretrigger)
 	if err != nil {
 		d.mu.Unlock()
 		logging.Logf("[outbound-dns-debug] open log failed uid=%d gid=%d: %v", uid, gid, err)
@@ -228,7 +228,7 @@ func (d *DNSDebugCapture) lookupUIDFallbackLocked(uid uint32) (dnsDebugKey, *dns
 	return chosenK, chosenS
 }
 
-func (d *DNSDebugCapture) openLog(gid uint32, when time.Time) (string, *os.File, error) {
+func (d *DNSDebugCapture) openLog(gid uint32, when time.Time, pretrigger []DNSPacketSummary) (string, *os.File, error) {
 	dir := d.rt.DNSDebugDir
 	if dir == "" {
 		dir = "/var/log/cfm/outbound"
@@ -242,7 +242,13 @@ func (d *DNSDebugCapture) openLog(gid uint32, when time.Time) (string, *os.File,
 	if err != nil {
 		return "", nil, err
 	}
-	_, _ = fmt.Fprintf(f, "# cfm outbound dns debug capture gid=%d started=%s duration=%s sample_limit=%d\n", gid, when.Format(time.RFC3339Nano), d.rt.DNSDebugDuration, d.rt.DNSDebugSampleCount)
+	_, _ = fmt.Fprintf(f, "# cfm outbound dns debug capture gid=%d started=%s duration=%s sample_limit=%d pretrigger_ttl=%s pretrigger_per_uid_max=%d\n",
+		gid, when.Format(time.RFC3339Nano), d.rt.DNSDebugDuration, d.rt.DNSDebugSampleCount, dnsRecentTTL, dnsRecentPerUIDMax)
+	_, _ = fmt.Fprintln(f, "## pretrigger")
+	for _, line := range formatDNSPretriggerLines(pretrigger) {
+		_, _ = fmt.Fprintln(f, line)
+	}
+	_, _ = fmt.Fprintln(f, "## live")
 	return path, f, nil
 }
 
