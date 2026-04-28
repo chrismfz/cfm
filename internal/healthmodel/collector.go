@@ -86,7 +86,7 @@ func collectRuntimeStatus() RuntimeStatus {
 			out.DNATEnabled = "off"
 		}
 	}
-	frontend, confidence, warning := detectDNATFrontend()
+	frontend, confidence, warning := detectDNATFrontend(out.DNATEnabled)
 	out.DNATFrontend = frontend
 	out.DNATConfidence = confidence
 	out.DNATWarning = warning
@@ -117,12 +117,14 @@ type frontendSignal struct {
 	enabled         bool
 	binaryPresent   bool
 	ownsDNATPorts   bool
+	ownsPublicPorts bool
 	listenerHits    int
 	configHits      int
 	score           int
 }
 
-func detectDNATFrontend() (string, string, string) {
+func detectDNATFrontend(dnatState string) (string, string, string) {
+	dnatOn := strings.EqualFold(strings.TrimSpace(dnatState), "on")
 	candidates := []frontendSignal{
 		{
 			name:            "angie",
@@ -150,7 +152,6 @@ func detectDNATFrontend() (string, string, string) {
 		},
 	}
 
-	listeners := probeListenerProcessNames()
 	dnatListeners := probeFrontendListeners()
 	dnatHTTP, dnatHTTPS := dnat.EffectiveTargetPorts()
 	activeUnits := make([]string, 0, len(candidates))
@@ -171,11 +172,15 @@ func detectDNATFrontend() (string, string, string) {
 		if candidates[i].binaryPresent {
 			candidates[i].score += 2
 		}
-		for _, alias := range candidates[i].processAliases {
-			candidates[i].listenerHits += listeners[alias]
-		}
-		candidates[i].score += candidates[i].listenerHits * 2
 		candidates[i].ownsDNATPorts = dnatListeners.hasOwnerOnAllPorts(candidates[i].processAliases, dnatHTTP, dnatHTTPS)
+		candidates[i].ownsPublicPorts = dnatListeners.hasOwnerOnAllPorts(candidates[i].processAliases, 80, 443)
+		if dnatOn {
+			if candidates[i].ownsPublicPorts {
+				candidates[i].score++
+			}
+		} else if candidates[i].ownsPublicPorts {
+			candidates[i].score += 2
+		}
 		if candidates[i].ownsDNATPorts {
 			candidates[i].score += 5
 		}
@@ -187,7 +192,7 @@ func detectDNATFrontend() (string, string, string) {
 		candidates[i].score += candidates[i].configHits
 	}
 
-	if frontend, confidence := resolveFrontendDeterministically(candidates); frontend != "" {
+	if frontend, confidence := resolveFrontendDeterministically(candidates, dnatOn); frontend != "" {
 		warning := ""
 		if confidence == "low" {
 			warning = buildAmbiguityWarning(candidates)
@@ -230,19 +235,21 @@ func detectDNATFrontend() (string, string, string) {
 	return best.name, confidence, warning
 }
 
-func resolveFrontendDeterministically(candidates []frontendSignal) (string, string) {
-	owners := filterFrontendSignals(candidates, func(c frontendSignal) bool { return c.ownsDNATPorts })
-	if len(owners) == 1 {
-		return owners[0].name, "high"
-	}
-	if len(owners) > 1 {
-		activeOwners := filterFrontendSignals(owners, func(c frontendSignal) bool { return c.active })
-		if len(activeOwners) == 1 {
-			return activeOwners[0].name, "high"
+func resolveFrontendDeterministically(candidates []frontendSignal, dnatOn bool) (string, string) {
+	if dnatOn {
+		owners := filterFrontendSignals(candidates, func(c frontendSignal) bool { return c.ownsDNATPorts })
+		if len(owners) == 1 {
+			return owners[0].name, "high"
 		}
-		strongOwners := filterFrontendSignals(owners, func(c frontendSignal) bool { return c.binaryPresent && c.configHits > 0 })
-		if len(strongOwners) == 1 {
-			return strongOwners[0].name, "medium"
+		if len(owners) > 1 {
+			activeOwners := filterFrontendSignals(owners, func(c frontendSignal) bool { return c.active })
+			if len(activeOwners) == 1 {
+				return activeOwners[0].name, "high"
+			}
+			strongOwners := filterFrontendSignals(owners, func(c frontendSignal) bool { return c.binaryPresent && c.configHits > 0 })
+			if len(strongOwners) == 1 {
+				return strongOwners[0].name, "medium"
+			}
 		}
 	}
 
@@ -544,7 +551,7 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string) {
 }
 
 func detectEdgeRuntime(dnatState string) runtimeRoleSignal {
-	service, _, _ := detectDNATFrontend()
+	service, _, _ := detectDNATFrontend(dnatState)
 	out := runtimeRoleSignal{
 		service: service,
 		status:  "inactive",
