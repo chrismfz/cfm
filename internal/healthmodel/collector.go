@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -309,8 +310,8 @@ func probeSystemdUnit(unit string) (active bool, enabled bool, ok bool) {
 	return activeState == "active", enabledState == "enabled", true
 }
 
-var ssListenerOwnerRE = regexp.MustCompile(`users:\(\("([^"]+)",pid=([0-9]+),fd=[0-9]+\)\)`)
-var ssPortRE = regexp.MustCompile(`:([0-9]+)\b`)
+var ssOwnerTupleRE = regexp.MustCompile(`\("([^"]+)",pid=([0-9]+),fd=[0-9]+\)`)
+var ssAddrPortSuffixRE = regexp.MustCompile(`:([0-9]+)$`)
 
 func probeListenerProcessNames() map[string]int {
 	out := map[string]int{}
@@ -363,27 +364,14 @@ func probeFrontendListeners() frontendListenerSnapshot {
 	queries := [][]string{
 		{"-H", "-ltnp"},
 		{"-H", "-lunp"},
+		{"-H", "-tnp"},
 	}
 	for _, args := range queries {
 		lines := strings.Split(string(mustCombinedOutput(exec.Command("ss", args...))), "\n")
 		for _, ln := range lines {
-			ln = strings.TrimSpace(ln)
-			if ln == "" {
-				continue
+			for _, entry := range parseSocketOwnerEntries(ln) {
+				out.entries = append(out.entries, entry)
 			}
-			match := ssListenerOwnerRE.FindStringSubmatch(ln)
-			if len(match) != 3 {
-				continue
-			}
-			name := strings.ToLower(strings.TrimSpace(match[1]))
-			if name == "" {
-				continue
-			}
-			port := parseListenerPort(ln)
-			if port <= 0 {
-				continue
-			}
-			out.entries = append(out.entries, listenerEntry{name: name, port: port})
 		}
 	}
 	return out
@@ -406,16 +394,101 @@ func (s frontendListenerSnapshot) hasOwnerOnAnyPorts(owners []string, ports ...i
 }
 
 func parseListenerPort(ssLine string) int {
-	portMatch := ssPortRE.FindAllStringSubmatch(ssLine, -1)
-	if len(portMatch) == 0 {
+	parts := strings.Fields(strings.TrimSpace(ssLine))
+	if len(parts) < 4 {
 		return 0
 	}
-	last := portMatch[len(portMatch)-1]
-	if len(last) != 2 {
-		return 0
+	localCandidates := []string{parts[3]}
+	if len(parts) > 4 {
+		localCandidates = append(localCandidates, parts[4])
 	}
-	port, _ := strconv.Atoi(last[1])
-	return port
+	for _, localAddr := range localCandidates {
+		match := ssAddrPortSuffixRE.FindStringSubmatch(localAddr)
+		if len(match) != 2 {
+			continue
+		}
+		port, _ := strconv.Atoi(match[1])
+		return port
+	}
+	return 0
+}
+
+func parseSocketOwnerEntries(ssLine string) []listenerEntry {
+	ln := strings.TrimSpace(ssLine)
+	if ln == "" || !strings.Contains(ln, "pid=") {
+		return nil
+	}
+	port := parseListenerPort(ln)
+	if port <= 0 {
+		return nil
+	}
+	matches := ssOwnerTupleRE.FindAllStringSubmatch(ln, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]listenerEntry, 0, len(matches))
+	for _, m := range matches {
+		if len(m) != 3 {
+			continue
+		}
+		pid, _ := strconv.Atoi(strings.TrimSpace(m[2]))
+		name := normalizeFrontendProcessName(m[1], pid)
+		if name == "" {
+			continue
+		}
+		out = append(out, listenerEntry{name: name, port: port})
+	}
+	return out
+}
+
+func normalizeFrontendProcessName(raw string, pid int) string {
+	candidates := []string{raw}
+	if pid > 0 {
+		if comm := readProcComm(pid); comm != "" {
+			candidates = append(candidates, comm)
+		}
+	}
+	for _, c := range candidates {
+		name := normalizeFrontendProcessToken(c)
+		if name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func normalizeFrontendProcessToken(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "/openresty/") {
+		return "openresty"
+	}
+	if strings.Contains(s, "/") {
+		s = strings.ToLower(strings.TrimSpace(filepath.Base(s)))
+	}
+	if strings.Contains(s, "openresty") {
+		return "openresty"
+	}
+	if strings.HasPrefix(s, "angie:") || strings.HasPrefix(s, "angie ") || s == "angie" {
+		return "angie"
+	}
+	if strings.HasPrefix(s, "nginx:") || strings.HasPrefix(s, "nginx ") || s == "nginx" {
+		return "nginx"
+	}
+	return ""
+}
+
+func readProcComm(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func deriveFrontendWorking(frontend, dnatState string) (string, string) {
