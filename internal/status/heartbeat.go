@@ -38,8 +38,8 @@ func BuildHeartbeatHealth() HeartbeatHealth {
 		TCPListen:      hs.TCP["LISTEN"],
 	}
 
-	if hs.Mdadm != "" && hs.Mdadm != "NO RAID" {
-		out.RAIDStatus = hs.Mdadm
+	if hs.Mdadm.Status != "" && hs.Mdadm.Status != "NO RAID" {
+		out.RAIDStatus = hs.Mdadm.Status
 	}
 
 	total, fails := 0, 0

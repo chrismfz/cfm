@@ -305,8 +305,8 @@ func Run(args []string) {
 	fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
 		hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
 
-	if hs.Mdadm != "" && hs.Mdadm != "NO RAID" {
-		fmt.Printf("  RAID: %s\n", hs.Mdadm)
+	if hs.Mdadm.Status != "" && hs.Mdadm.Status != "NO RAID" {
+		fmt.Printf("  RAID: %s\n", hs.Mdadm.Status)
 	}
 
 	// Compact SMART summary

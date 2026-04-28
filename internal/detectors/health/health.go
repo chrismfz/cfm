@@ -200,11 +200,36 @@ type Snapshot struct {
 	RxMbps, TxMbps float64
 
 	TempMaxC float64
-	Mdadm    string
-	Zfs      map[string]string
+	Mdadm    MdstatSummary
+	Zfs      map[string]ZpoolStatus
 	Smart    map[string]SmartInfo
 
 	RawJSON string // pretty JSON to embed in alert Extra["body"]
+}
+
+type MdstatSummary struct {
+	Status string        `json:"status"`
+	Arrays []MdArrayInfo `json:"arrays,omitempty"`
+}
+
+type MdArrayInfo struct {
+	Name            string   `json:"name"`
+	Level           string   `json:"level,omitempty"`
+	ExpectedMembers int      `json:"expected_members"`
+	ActiveMembers   int      `json:"active_members"`
+	FailedMissing   int      `json:"failed_missing_members"`
+	MemberStates    []string `json:"member_states,omitempty"`
+	ProgressPct     float64  `json:"progress_pct,omitempty"`
+	ProgressPhase   string   `json:"progress_phase,omitempty"`
+}
+
+type ZpoolStatus struct {
+	Pool            string `json:"pool"`
+	State           string `json:"state"`
+	UnhealthyVdevs  int    `json:"unhealthy_vdev_count"`
+	ScanStatus      string `json:"scan_status,omitempty"`
+	Resilvering     bool   `json:"resilvering,omitempty"`
+	ResilverPercent string `json:"resilver_progress,omitempty"`
 }
 
 type SmartInfo struct {
@@ -658,42 +683,156 @@ func readMaxTempSensors() float64 {
 	return max
 }
 
-// /proc/mdstat → "HEALTHY", "DEGRADED", "NO ACTIVE RAID"/"NO RAID"
-func readMdstat() string {
+// /proc/mdstat parsed into structured array health summary.
+func readMdstat() MdstatSummary {
 	b, err := os.ReadFile("/proc/mdstat")
 	if err != nil {
-		return "NO RAID"
+		return MdstatSummary{Status: "NO RAID"}
 	}
-	txt := string(b)
-	if !strings.Contains(txt, "active") {
-		return "NO ACTIVE RAID"
-	}
-	if strings.Contains(txt, " DEGRADED") || strings.Contains(txt, "[U_]") || strings.Contains(txt, "[_U]") {
-		return "DEGRADED"
-	}
-	return "HEALTHY"
-}
-
-// zpool list -H -o name,health (if zpool exists)
-func readZpool() map[string]string {
-	if _, err := exec.LookPath("zpool"); err != nil {
-		return map[string]string{}
-	}
-	out, err := exec.Command("zpool", "list", "-H", "-o", "name,health").Output()
-	if err != nil {
-		return map[string]string{}
-	}
-	res := map[string]string{}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
+	lines := strings.Split(string(b), "\n")
+	var out MdstatSummary
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "Personalities") || strings.HasPrefix(line, "unused devices") {
 			continue
 		}
 		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			res[parts[0]] = strings.ToUpper(parts[1])
+		if len(parts) < 4 || parts[1] != ":" || parts[2] != "active" {
+			continue
 		}
+		arr := MdArrayInfo{Name: parts[0]}
+		for _, p := range parts[3:] {
+			if strings.HasPrefix(p, "raid") {
+				arr.Level = p
+				break
+			}
+		}
+		for j := i + 1; j < len(lines); j++ {
+			l := strings.TrimSpace(lines[j])
+			if l == "" {
+				break
+			}
+			if strings.Contains(l, "[") && strings.Contains(l, "/") {
+				re := regexp.MustCompile(`\[(\d+)/(\d+)\]`)
+				if m := re.FindStringSubmatch(l); len(m) == 3 {
+					arr.ExpectedMembers, _ = strconv.Atoi(m[1])
+					arr.ActiveMembers, _ = strconv.Atoi(m[2])
+				}
+				reState := regexp.MustCompile(`\[([U_]+)\]`)
+				if m := reState.FindStringSubmatch(l); len(m) == 2 {
+					for _, ch := range m[1] {
+						if ch == 'U' {
+							arr.MemberStates = append(arr.MemberStates, "up")
+						} else {
+							arr.MemberStates = append(arr.MemberStates, "missing")
+						}
+					}
+				}
+			}
+			if strings.Contains(l, "recovery =") || strings.Contains(l, "resync =") || strings.Contains(l, "reshape =") || strings.Contains(l, "check =") {
+				switch {
+				case strings.Contains(l, "recovery ="):
+					arr.ProgressPhase = "recovery"
+				case strings.Contains(l, "resync ="):
+					arr.ProgressPhase = "resync"
+				case strings.Contains(l, "reshape ="):
+					arr.ProgressPhase = "reshape"
+				case strings.Contains(l, "check ="):
+					arr.ProgressPhase = "check"
+				}
+				rePct := regexp.MustCompile(`=\s*([0-9]+(?:\.[0-9]+)?)%`)
+				if m := rePct.FindStringSubmatch(l); len(m) == 2 {
+					arr.ProgressPct, _ = strconv.ParseFloat(m[1], 64)
+				}
+			}
+		}
+		if arr.ExpectedMembers > 0 && arr.ActiveMembers <= arr.ExpectedMembers {
+			arr.FailedMissing = arr.ExpectedMembers - arr.ActiveMembers
+		}
+		out.Arrays = append(out.Arrays, arr)
+	}
+	if len(out.Arrays) == 0 {
+		out.Status = "NO ACTIVE RAID"
+		return out
+	}
+	out.Status = "HEALTHY"
+	for _, arr := range out.Arrays {
+		if arr.FailedMissing > 0 {
+			out.Status = "DEGRADED"
+			break
+		}
+	}
+	return out
+}
+
+// zpool status parsed into structured per-pool health.
+func readZpool() map[string]ZpoolStatus {
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return map[string]ZpoolStatus{}
+	}
+	out, err := exec.Command("zpool", "status").Output()
+	if err != nil {
+		return map[string]ZpoolStatus{}
+	}
+	res := map[string]ZpoolStatus{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	var cur *ZpoolStatus
+	inConfig := false
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" && inConfig {
+			inConfig = false
+			continue
+		}
+		if strings.HasPrefix(line, "pool:") {
+			if cur != nil {
+				res[cur.Pool] = *cur
+			}
+			name := strings.TrimSpace(strings.TrimPrefix(line, "pool:"))
+			cur = &ZpoolStatus{Pool: name}
+			inConfig = false
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		if strings.HasPrefix(line, "state:") {
+			cur.State = strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(line, "state:")))
+			continue
+		}
+		if strings.HasPrefix(line, "scan:") {
+			cur.ScanStatus = strings.TrimSpace(strings.TrimPrefix(line, "scan:"))
+			l := strings.ToLower(cur.ScanStatus)
+			if strings.Contains(l, "resilver") || strings.Contains(l, "resilvered") {
+				cur.Resilvering = !strings.Contains(l, "completed") && !strings.Contains(l, "repaired")
+			}
+			re := regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%`)
+			if m := re.FindStringSubmatch(cur.ScanStatus); len(m) == 2 {
+				cur.ResilverPercent = m[1] + "%"
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "config:") {
+			inConfig = true
+			continue
+		}
+		if inConfig {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				state := strings.ToUpper(parts[1])
+				switch state {
+				case "ONLINE":
+					// healthy
+				case "NAME", "STATE", "READ", "WRITE", "CKSUM":
+					// header
+				default:
+					cur.UnhealthyVdevs++
+				}
+			}
+		}
+	}
+	if cur != nil {
+		res[cur.Pool] = *cur
 	}
 	return res
 }
@@ -1284,13 +1423,17 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	}
 
 	// RAID / ZFS / SMART
-	if d.cfg.MdadmAlert && strings.Contains(s.Mdadm, "DEGRADED") {
+	if d.cfg.MdadmAlert && s.Mdadm.Status == "DEGRADED" {
 		emit("HEALTH/MDADM_DEGRADED", "disk.raid")
 	}
 	if d.cfg.ZfsAlert {
-		for name, h := range s.Zfs {
-			if h != "HEALTHY" && h != "ONLINE" {
-				emit("HEALTH/ZFS_"+h, "zfs."+name)
+		for name, info := range s.Zfs {
+			if info.State != "HEALTHY" && info.State != "ONLINE" {
+				emit("HEALTH/ZFS_"+info.State, "zfs."+name)
+				continue
+			}
+			if info.UnhealthyVdevs > 0 {
+				emit("HEALTH/ZFS_VDEV_DEGRADED", "zfs."+name)
 			}
 		}
 	}
