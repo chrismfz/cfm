@@ -19,19 +19,31 @@ type HealthSnapshotV1 struct {
 }
 
 type RuntimeStatus struct {
-	CFMDaemonLive   bool   `json:"cfm_daemon_live"`
-	CFMDaemonPID    *int   `json:"cfm_daemon_pid,omitempty"`
-	CFMServiceState string `json:"cfm_service_state,omitempty"`
-	DNATEnabled     string `json:"dnat_enabled,omitempty"` // on/off/unknown
-	DNATFrontend    string `json:"dnat_frontend,omitempty"`
-	DNATConfidence  string `json:"dnat_confidence,omitempty"` // high/medium/low
-	DNATWarning     string `json:"dnat_warning,omitempty"`
-	FrontendWorking string `json:"frontend_working,omitempty"` // working/degraded/down
-	FrontendReason  string `json:"frontend_reason,omitempty"`
-	EdgeService     string `json:"edge_service,omitempty"`     // angie/openresty/nginx/unknown
-	UpstreamService string `json:"upstream_service,omitempty"` // nginx/apache/...
-	EdgeStatus      string `json:"edge_status,omitempty"`      // active/inactive/degraded/unknown
-	UpstreamStatus  string `json:"upstream_status,omitempty"`  // active/inactive/unknown
+	CFMDaemonLive   bool          `json:"cfm_daemon_live"`
+	CFMDaemonPID    *int          `json:"cfm_daemon_pid,omitempty"`
+	CFMServiceState string        `json:"cfm_service_state,omitempty"`
+	DNATEnabled     string        `json:"dnat_enabled,omitempty"` // on/off/unknown
+	DNATFrontend    string        `json:"dnat_frontend,omitempty"`
+	DNATConfidence  string        `json:"dnat_confidence,omitempty"` // high/medium/low
+	DNATWarning     string        `json:"dnat_warning,omitempty"`
+	FrontendWorking string        `json:"frontend_working,omitempty"` // working/degraded/down
+	FrontendReason  string        `json:"frontend_reason,omitempty"`
+	EdgeService     string        `json:"edge_service,omitempty"`     // angie/openresty/nginx/unknown
+	UpstreamService string        `json:"upstream_service,omitempty"` // nginx/apache/...
+	EdgeStatus      string        `json:"edge_status,omitempty"`      // active/inactive/degraded/unknown
+	UpstreamStatus  string        `json:"upstream_status,omitempty"`  // active/inactive/unknown
+	FrontendDebug   FrontendDebug `json:"frontend_debug,omitempty"`
+}
+
+type FrontendDebug struct {
+	CheckedPorts []int               `json:"checked_ports,omitempty"`
+	PortOwners   []FrontendPortOwner `json:"port_owners,omitempty"`
+}
+
+type FrontendPortOwner struct {
+	Port           int      `json:"port"`
+	ListenerOwners []string `json:"listener_owners,omitempty"`
+	FlowOwners     []string `json:"flow_owners,omitempty"`
 }
 
 type HostSystem struct {

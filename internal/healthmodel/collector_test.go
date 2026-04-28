@@ -28,14 +28,14 @@ func TestResolveFrontendDeterministically_StrongConfiguredFallback(t *testing.T)
 
 func TestNormalizeFrontendProcessToken(t *testing.T) {
 	cases := map[string]string{
-		"angie: master process /usr/sbin/angie":  "angie",
-		"angie: worker process":                  "angie",
-		"nginx: master process /usr/sbin/nginx":  "nginx",
-		"nginx: worker process":                  "nginx",
-		"openresty":                              "openresty",
-		"openresty: worker process":              "openresty",
+		"angie: master process /usr/sbin/angie": "angie",
+		"angie: worker process":                 "angie",
+		"nginx: master process /usr/sbin/nginx": "nginx",
+		"nginx: worker process":                 "nginx",
+		"openresty":                             "openresty",
+		"openresty: worker process":             "openresty",
 		"/usr/local/openresty/nginx/sbin/nginx": "openresty",
-		"/usr/sbin/nginx":                        "nginx",
+		"/usr/sbin/nginx":                       "nginx",
 	}
 	for in, want := range cases {
 		got := normalizeFrontendProcessToken(in)
@@ -70,5 +70,37 @@ func TestParseSocketOwnerEntries_NormalizesListenerAndEstablishedOwners(t *testi
 	}
 	if l[0].port != 9080 || e[0].port != 9080 {
 		t.Fatalf("expected parsed local port 9080, got listener=%d established=%d", l[0].port, e[0].port)
+	}
+	if l[0].established {
+		t.Fatalf("expected LISTEN entry to not be marked established")
+	}
+	if !e[0].established {
+		t.Fatalf("expected ESTAB entry to be marked established")
+	}
+}
+
+func TestFrontendListenerSnapshotDebugForOwners(t *testing.T) {
+	s := frontendListenerSnapshot{
+		listeners: []listenerEntry{
+			{name: "nginx", port: 9080},
+			{name: "openresty", port: 9043},
+		},
+		flows: []listenerEntry{
+			{name: "nginx", port: 9043, established: true},
+		},
+	}
+
+	debug := s.debugForOwners([]string{"nginx"}, 9080, 9043)
+	if len(debug.CheckedPorts) != 2 || debug.CheckedPorts[0] != 9080 || debug.CheckedPorts[1] != 9043 {
+		t.Fatalf("unexpected checked ports: %#v", debug.CheckedPorts)
+	}
+	if len(debug.PortOwners) != 2 {
+		t.Fatalf("expected 2 port owner entries, got %d", len(debug.PortOwners))
+	}
+	if got := debug.PortOwners[0]; got.Port != 9080 || len(got.ListenerOwners) != 1 || got.ListenerOwners[0] != "nginx" || len(got.FlowOwners) != 0 {
+		t.Fatalf("unexpected owners for :9080: %#v", got)
+	}
+	if got := debug.PortOwners[1]; got.Port != 9043 || len(got.ListenerOwners) != 0 || len(got.FlowOwners) != 1 || got.FlowOwners[0] != "nginx" {
+		t.Fatalf("unexpected owners for :9043: %#v", got)
 	}
 }
