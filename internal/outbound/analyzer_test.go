@@ -14,6 +14,9 @@ func newTestRuntime() Runtime {
 		DNSPerWindow:       5,
 		DedupCooldown:      30 * time.Second,
 		QueueSampleLimit:   3,
+		NotifySeverity:     "warning",
+		DNSUniqDstMin:      2,
+		DNSSeverityMode:    "volume+dispersion",
 		SMTPPorts:          map[uint16]struct{}{25: {}, 465: {}, 587: {}},
 		ScanPorts:          map[uint16]struct{}{22: {}, 23: {}, 3389: {}},
 		HTTPPorts:          map[uint16]struct{}{80: {}, 443: {}},
@@ -116,7 +119,7 @@ func TestAnalyzer_UniqDstSideChannel(t *testing.T) {
 	// Even if SMTP threshold isn't met, hitting many distinct dst IPs should
 	// trip UNIQDST (horizontal scanner pattern).
 	rt := newTestRuntime()
-	rt.SMTPPerWindow = 100        // can't trip via count
+	rt.SMTPPerWindow = 100 // can't trip via count
 	rt.UniqueDstPerWindow = 3
 	a := NewAnalyzer(rt)
 	now := time.Now()
@@ -132,5 +135,53 @@ func TestAnalyzer_UniqDstSideChannel(t *testing.T) {
 	}
 	if v.UniqueDsts < 3 {
 		t.Fatalf("uniq_dst count low: %+v", v)
+	}
+}
+
+func TestAnalyzer_DNSLowDispersionDemotesSeverity(t *testing.T) {
+	rt := newTestRuntime()
+	rt.DNSPerWindow = 3
+	rt.NotifySeverity = "warning"
+	rt.DNSUniqDstMin = 2
+	rt.DNSSeverityMode = "volume+dispersion"
+	a := NewAnalyzer(rt)
+	now := time.Now()
+
+	// All DNS hits go to the same resolver -> low dispersion.
+	for i := 0; i < 2; i++ {
+		if v := a.Observe(mkEvent(now.Add(time.Duration(i)*time.Second), 2001, SignalDNS, 53, 9)); v != nil {
+			t.Fatalf("unexpected early verdict: %+v", v)
+		}
+	}
+	v := a.Observe(mkEvent(now.Add(3*time.Second), 2001, SignalDNS, 53, 9))
+	if v == nil {
+		t.Fatal("expected dns verdict")
+	}
+	if v.Severity != "info" {
+		t.Fatalf("expected demoted severity, got %q", v.Severity)
+	}
+}
+
+func TestAnalyzer_DNSDispersionKeepsConfiguredSeverity(t *testing.T) {
+	rt := newTestRuntime()
+	rt.DNSPerWindow = 3
+	rt.NotifySeverity = "warning"
+	rt.DNSUniqDstMin = 2
+	rt.DNSSeverityMode = "volume+dispersion"
+	a := NewAnalyzer(rt)
+	now := time.Now()
+
+	for i := 0; i < 2; i++ {
+		a.Observe(mkEvent(now.Add(time.Duration(i)*time.Second), 2002, SignalDNS, 53, byte(i+1)))
+	}
+	v := a.Observe(mkEvent(now.Add(3*time.Second), 2002, SignalDNS, 53, 9))
+	if v == nil {
+		t.Fatal("expected dns verdict")
+	}
+	if v.Severity != "warning" {
+		t.Fatalf("expected configured severity, got %q", v.Severity)
+	}
+	if v.DNS.UniqueResolvers < 2 {
+		t.Fatalf("expected resolver dispersion in verdict: %+v", v.DNS)
 	}
 }

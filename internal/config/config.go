@@ -113,6 +113,9 @@ type OutboundConfig struct {
 	UniqueDstPerMin int      // OUTBOUND_SCAN_UNIQUE_DST_PER_MIN (default 50)
 	HTTPPerMin      int      // OUTBOUND_HTTP_RATE_PER_MIN (default 200)
 	DNSPerMin       int      // OUTBOUND_DNS_PER_MIN (default 300)
+	DNSUniqDstMin   int      // OUTBOUND_DNS_UNIQ_DST_MIN (default 2)
+	DNSSeverityMode string   // OUTBOUND_DNS_SEVERITY_MODE (volume-only|volume+dispersion)
+	DNSNXRatioAlert float64  // OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT (0 disables)
 	ScanPorts       []uint16 // OUTBOUND_SCAN_PORTS (default 22,23,3389)
 	SMTPPorts       []uint16 // OUTBOUND_SMTP_PORTS (default 25,465,587)
 	HTTPPorts       []uint16 // OUTBOUND_HTTP_PORTS (default 80,443,8080,8443)
@@ -419,6 +422,15 @@ func (c *Config) SetDefaults() {
 	if c.Outbound.DNSPerMin <= 0 {
 		c.Outbound.DNSPerMin = 300
 	}
+	if c.Outbound.DNSUniqDstMin <= 0 {
+		c.Outbound.DNSUniqDstMin = 2
+	}
+	if c.Outbound.DNSSeverityMode == "" {
+		c.Outbound.DNSSeverityMode = "volume-only"
+	}
+	if c.Outbound.DNSNXRatioAlert < 0 {
+		c.Outbound.DNSNXRatioAlert = 0
+	}
 	if len(c.Outbound.SMTPPorts) == 0 {
 		c.Outbound.SMTPPorts = []uint16{25, 465, 587}
 	}
@@ -537,6 +549,18 @@ func (c *Config) Validate() error {
 		c.SMTPBlock.LogNFLOG > 0 && c.Outbound.NFLOGGroup == c.SMTPBlock.LogNFLOG {
 		return fmt.Errorf("OUTBOUND_NFLOG (%d) must differ from SMTP_LOG_NFLOG (%d)",
 			c.Outbound.NFLOGGroup, c.SMTPBlock.LogNFLOG)
+	}
+	c.Outbound.DNSSeverityMode = strings.ToLower(strings.TrimSpace(c.Outbound.DNSSeverityMode))
+	switch c.Outbound.DNSSeverityMode {
+	case "", "volume-only", "volume+dispersion":
+		if c.Outbound.DNSSeverityMode == "" {
+			c.Outbound.DNSSeverityMode = "volume-only"
+		}
+	default:
+		return fmt.Errorf("invalid OUTBOUND_DNS_SEVERITY_MODE %q (must be volume-only|volume+dispersion)", c.Outbound.DNSSeverityMode)
+	}
+	if c.Outbound.DNSNXRatioAlert < 0 || c.Outbound.DNSNXRatioAlert > 1 {
+		return fmt.Errorf("OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT must be in [0..1], got %v", c.Outbound.DNSNXRatioAlert)
 	}
 
 	// MaxMind sanity
@@ -748,6 +772,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Outbound.HTTPPerMin = parseInt(val)
 		case "OUTBOUND_DNS_PER_MIN":
 			cfg.Outbound.DNSPerMin = parseInt(val)
+		case "OUTBOUND_DNS_UNIQ_DST_MIN":
+			cfg.Outbound.DNSUniqDstMin = parseInt(val)
+		case "OUTBOUND_DNS_SEVERITY_MODE":
+			cfg.Outbound.DNSSeverityMode = val
+		case "OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT":
+			cfg.Outbound.DNSNXRatioAlert = parseFloat64(val)
 		case "OUTBOUND_SMTP_PORTS":
 			cfg.Outbound.SMTPPorts = append(cfg.Outbound.SMTPPorts, parseUint16CSV(val)...)
 		case "OUTBOUND_SCAN_PORTS":
@@ -999,7 +1029,7 @@ func IsKnownKey(key string) bool {
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
-		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH", "OUTBOUND_DNS_DEBUG_ENABLED", "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT", "OUTBOUND_DNS_DEBUG_DURATION_SEC", "OUTBOUND_DNS_DEBUG_DIR",
+		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_DNS_UNIQ_DST_MIN", "OUTBOUND_DNS_SEVERITY_MODE", "OUTBOUND_DNS_NXDOMAIN_RATIO_ALERT", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH", "OUTBOUND_DNS_DEBUG_ENABLED", "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT", "OUTBOUND_DNS_DEBUG_DURATION_SEC", "OUTBOUND_DNS_DEBUG_DIR",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_ENCRYPTION_KEY", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",
 		"DEBUG_CAPTURE_ENABLED", "DEBUG_CAPTURE_DIR", "DEBUG_CAPTURE_COOLDOWN", "DEBUG_CAPTURE_MAX_DURATION", "DEBUG_CAPTURE_RETENTION_COUNT", "DEBUG_CAPTURE_RETENTION_AGE",
@@ -1064,6 +1094,11 @@ func parseBool(s string) bool {
 func parseInt(s string) int {
 	i, _ := strconv.Atoi(strings.TrimSpace(s))
 	return i
+}
+
+func parseFloat64(s string) float64 {
+	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f
 }
 
 func splitCSV(s string) []string {

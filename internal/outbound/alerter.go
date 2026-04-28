@@ -92,6 +92,13 @@ func (a *Alerter) Emit(ctx context.Context, v Verdict, ac alertContext) {
 		// Render readable peer list (raw bytes -> dotted IPs).
 		fmt.Fprintf(&b, " peers=%s", renderPeers(v.SamplePeers))
 	}
+	if v.Signal == SignalDNS {
+		fmt.Fprintf(&b, " dns_total=%d dns_uniq_resolvers=%d", v.DNS.Total, v.DNS.UniqueResolvers)
+		if v.DNS.ParsedResponses > 0 {
+			fmt.Fprintf(&b, " dns_err_responses=%d dns_parsed_responses=%d dns_err_ratio=%.3f",
+				v.DNS.ErrorResponses, v.DNS.ParsedResponses, v.DNS.ErrorRatio)
+		}
+	}
 	if enrInfo.ASN != 0 || enrInfo.Country != "" || enrInfo.PTR != "" {
 		fmt.Fprintf(&b, " | dst_asn=AS%d (%s) cc=%s city=%s ptr=%s",
 			enrInfo.ASN, enrInfo.ASNName, enrInfo.Country, enrInfo.City, enrInfo.PTR)
@@ -137,6 +144,15 @@ func (a *Alerter) dispatchNotify(
 		"window":    v.Window.String(),
 		"uniq_dst":  strconv.Itoa(v.UniqueDsts),
 	}
+	if v.Signal == SignalDNS {
+		extra["dns_total"] = strconv.Itoa(v.DNS.Total)
+		extra["dns_uniq_resolvers"] = strconv.Itoa(v.DNS.UniqueResolvers)
+		if v.DNS.ParsedResponses > 0 {
+			extra["dns_error_responses"] = strconv.Itoa(v.DNS.ErrorResponses)
+			extra["dns_parsed_responses"] = strconv.Itoa(v.DNS.ParsedResponses)
+			extra["dns_error_ratio"] = fmt.Sprintf("%.3f", v.DNS.ErrorRatio)
+		}
+	}
 	if pid > 0 {
 		extra["proc"] = comm
 		extra["pid"] = strconv.Itoa(pid)
@@ -158,7 +174,10 @@ func (a *Alerter) dispatchNotify(
 		}
 	}
 
-	severity := a.rt.NotifySeverity
+	severity := v.Severity
+	if severity == "" {
+		severity = a.rt.NotifySeverity
+	}
 	if severity == "" {
 		severity = "warning"
 	}
