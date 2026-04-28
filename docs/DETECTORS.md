@@ -84,6 +84,7 @@ Typical defaults below are representative from the shipped template and should b
 | `postfix_relays` | Postfix relay-style abuse counters | threshold family similar to Exim relays, `BLOCK` | `WINDOW=15m` |
 | `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD`, queue thresholds | `EVERY=60s`, alerting focus |
 | `modsec` | ModSecurity denial bursts per IP | `LOG_PATH`, `MODSEC_IP`, `BLOCK` | `WINDOW=15m`, `BLOCK=permanent` |
+| `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 
@@ -242,6 +243,19 @@ Checks:
 
 Safe action:
 - Keep `BLOCK=dryrun` while validating.
+
+### Outbound alerts need DNS corroboration
+
+Symptoms:
+- Outbound sentinel warns on unusual per-uid destination churn or burst rates.
+
+Checks:
+- Confirm the triggering uid/gid and process metadata from the alert line.
+- Pivot to the ad-hoc DNS forensics runbook only when baseline telemetry is insufficient:
+  [`admin-notes/ad-hoc-dns-forensics.md`](admin-notes/ad-hoc-dns-forensics.md).
+
+Safe action:
+- Keep captures short, identity-scoped, and temporary (no permanent detector/rule changes).
 
 ### Source not found
 
