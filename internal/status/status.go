@@ -130,6 +130,11 @@ func getDaemonInfo() DaemonInfo {
 	return DaemonInfo{Running: len(pids) > 0, PIDs: pids, Cmdlines: cmds}
 }
 
+// DaemonInfoNow returns the current cfm daemon process visibility.
+func DaemonInfoNow() DaemonInfo {
+	return getDaemonInfo()
+}
+
 func trim1(b []byte) string         { return strings.TrimSpace(string(b)) }
 func must(b []byte, _ error) []byte { return b }
 
@@ -156,6 +161,11 @@ func getUnitServiceInfo(unit string) ServiceInfo {
 	}
 	si.Active = ac
 	return si
+}
+
+// UnitServiceInfoNow returns current systemd state for the provided unit.
+func UnitServiceInfoNow(unit string) ServiceInfo {
+	return getUnitServiceInfo(unit)
 }
 
 func serviceHuman(si ServiceInfo) string {

@@ -74,6 +74,12 @@ type modernSample struct {
 		WAFEvents1h    int `json:"waf_events_1h"`
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
+	Runtime struct {
+		CFMDaemonLive   bool   `json:"cfm_daemon_live"`
+		CFMDaemonPID    *int   `json:"cfm_daemon_pid"`
+		CFMServiceState string `json:"cfm_service_state"`
+		DNATEnabled     string `json:"dnat_enabled"`
+	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
 		OutBps uint64         `json:"bandwidth_out_bps"`
@@ -247,10 +253,38 @@ func printSummary(s parsedSnapshot, opts cliOptions) {
 		fmt.Printf("Collected: %s\n\n", collected.Local().Format(time.RFC3339))
 	}
 	printHostSection(s, opts)
+	printRuntimeSection(s, opts)
 	printDiskSection(s, opts)
 	printStorageSection(s, opts)
 	printNetworkSection(s, opts)
 	printCFMSection(s, opts)
+}
+
+func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
+	r := s.Modern.Runtime
+	daemon := "down"
+	if r.CFMDaemonLive {
+		daemon = "live"
+	}
+	if r.CFMDaemonPID != nil && *r.CFMDaemonPID > 0 {
+		daemon = fmt.Sprintf("%s (pid %d)", daemon, *r.CFMDaemonPID)
+	}
+	serviceState := strings.TrimSpace(r.CFMServiceState)
+	if serviceState == "" {
+		serviceState = "unknown"
+	}
+	dnatState := strings.TrimSpace(r.DNATEnabled)
+	if dnatState == "" {
+		dnatState = "unknown"
+	}
+	if opts.Compact {
+		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState)
+		return
+	}
+	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
+	fmt.Printf("  CFM daemon: %s\n", daemon)
+	fmt.Printf("  Service: %s\n", serviceState)
+	fmt.Printf("  DNAT: %s\n", dnatState)
 }
 
 func printOneLine(s parsedSnapshot, opts cliOptions) {
@@ -669,6 +703,10 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.CFM.OutboundAlerts = latest.CFM.OutboundAlerts
 		out.Modern.Network.InBps = latest.Network.BandwidthInBytesPerSec
 		out.Modern.Network.OutBps = latest.Network.BandwidthOutBytesPerSec
+		out.Modern.Runtime.CFMDaemonLive = latest.Runtime.CFMDaemonLive
+		out.Modern.Runtime.CFMDaemonPID = latest.Runtime.CFMDaemonPID
+		out.Modern.Runtime.CFMServiceState = latest.Runtime.CFMServiceState
+		out.Modern.Runtime.DNATEnabled = latest.Runtime.DNATEnabled
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,

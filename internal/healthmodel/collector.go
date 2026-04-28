@@ -1,6 +1,7 @@
 package healthmodel
 
 import (
+	"cfm/internal/dnat"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"cfm/internal/detectors/health"
+	"cfm/internal/firewall/nft"
 )
 
 // snapshotNowFn exists as a small test seam to force collector failures.
@@ -50,7 +52,66 @@ func CollectSnapshotNow(nodeID string) (snap HealthSnapshotV1) {
 	snap = FromDetectorSnapshot(raw, nodeID, collectedAt)
 	enrichHostMemoryAndLoad(&snap.Host)
 	snap.Services = collectServiceStatuses()
+	snap.Runtime = collectRuntimeStatus()
 	return snap
+}
+
+func collectRuntimeStatus() RuntimeStatus {
+	out := RuntimeStatus{
+		CFMServiceState: "unknown",
+		DNATEnabled:     "unknown",
+	}
+	out.CFMDaemonLive, out.CFMDaemonPID = probeCFMDaemonLive()
+	if state, ok := probeSystemdServiceState("cfm.service"); ok {
+		out.CFMServiceState = state
+	}
+	if !out.CFMDaemonLive && out.CFMServiceState == "active" {
+		out.CFMDaemonLive = true
+	}
+	if enabled, err := dnat.Status(nft.New()); err == nil {
+		if enabled {
+			out.DNATEnabled = "on"
+		} else {
+			out.DNATEnabled = "off"
+		}
+	}
+	return out
+}
+
+func probeCFMDaemonLive() (bool, *int) {
+	if _, err := exec.LookPath("pgrep"); err == nil {
+		out := strings.TrimSpace(string(mustCombinedOutput(exec.Command("pgrep", "-fa", "cfm daemon"))))
+		for _, ln := range strings.Split(out, "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				continue
+			}
+			parts := strings.Fields(ln)
+			if len(parts) < 2 {
+				continue
+			}
+			pid, err := strconv.Atoi(parts[0])
+			if err != nil || pid <= 0 {
+				continue
+			}
+			cmd := strings.TrimSpace(strings.TrimPrefix(ln, parts[0]))
+			if strings.Contains(cmd, "cfm") && strings.Contains(cmd, "daemon") {
+				return true, &pid
+			}
+		}
+	}
+	return false, nil
+}
+
+func probeSystemdServiceState(unit string) (string, bool) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return "", false
+	}
+	state := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))
+	if state == "" {
+		state = "unknown"
+	}
+	return state, true
 }
 
 func enrichHostMemoryAndLoad(host *HostSystem) {
