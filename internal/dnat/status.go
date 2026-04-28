@@ -1,10 +1,14 @@
 package dnat
 
-import "fmt"
+import (
+	"fmt"
+)
 
 const (
-	DefaultFamily = "inet"
-	DefaultTable  = "cfm_redirect"
+	DefaultFamily    = "inet"
+	DefaultTable     = "cfm_redirect"
+	DefaultHTTPPort  = 9080
+	DefaultHTTPSPort = 9043
 )
 
 // Status returns whether DNAT is currently enabled using the same defaults
@@ -16,4 +20,10 @@ func Status(backend any) (bool, error) {
 	}
 
 	return d.DNATStatus(DefaultFamily, DefaultTable)
+}
+
+// EffectiveTargetPorts returns the DNAT target ports resolved using the same
+// env-driven behavior as the CLI (HTTP_PORT/HTTPS_PORT) with sane defaults.
+func EffectiveTargetPorts() (httpPort int, httpsPort int) {
+	return getenvInt("HTTP_PORT", DefaultHTTPPort), getenvInt("HTTPS_PORT", DefaultHTTPSPort)
 }

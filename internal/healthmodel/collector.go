@@ -83,7 +83,7 @@ func collectRuntimeStatus() RuntimeStatus {
 	frontend, warning := detectDNATFrontend()
 	out.DNATFrontend = frontend
 	out.DNATWarning = warning
-	out.FrontendWorking, out.FrontendReason = deriveFrontendWorking(out.DNATFrontend)
+	out.FrontendWorking, out.FrontendReason = deriveFrontendWorking(out.DNATFrontend, out.DNATEnabled)
 	return out
 }
 
@@ -248,8 +248,8 @@ func probeFrontendListeners() frontendListenerSnapshot {
 		return out
 	}
 	queries := [][]string{
-		{"-H", "-ltnp", "( sport = :80 or sport = :443 )"},
-		{"-H", "-lunp", "sport = :443"},
+		{"-H", "-ltnp"},
+		{"-H", "-lunp"},
 	}
 	for _, args := range queries {
 		lines := strings.Split(string(mustCombinedOutput(exec.Command("ss", args...))), "\n")
@@ -276,6 +276,22 @@ func probeFrontendListeners() frontendListenerSnapshot {
 	return out
 }
 
+func (s frontendListenerSnapshot) hasOwnerOnAllPorts(owners []string, ports ...int) bool {
+	if len(ports) == 0 {
+		return false
+	}
+	for _, port := range ports {
+		if !s.hasOwnerOnPorts(owners, port) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s frontendListenerSnapshot) hasOwnerOnAnyPorts(owners []string, ports ...int) bool {
+	return s.hasOwnerOnPorts(owners, ports...)
+}
+
 func parseListenerPort(ssLine string) int {
 	portMatch := ssPortRE.FindAllStringSubmatch(ssLine, -1)
 	if len(portMatch) == 0 {
@@ -289,7 +305,7 @@ func parseListenerPort(ssLine string) int {
 	return port
 }
 
-func deriveFrontendWorking(frontend string) (string, string) {
+func deriveFrontendWorking(frontend, dnatState string) (string, string) {
 	frontend = strings.ToLower(strings.TrimSpace(frontend))
 	if frontend == "" || frontend == "unknown" {
 		return "down", "frontend unknown"
@@ -323,8 +339,15 @@ func deriveFrontendWorking(frontend string) (string, string) {
 	}
 
 	listeners := probeFrontendListeners()
-	if !listeners.hasOwnerOnPorts(sig.processAliases, 80, 443) {
-		return "degraded", "listener missing on :80/:443"
+	expectedHTTP, expectedHTTPS := 80, 443
+	if strings.EqualFold(strings.TrimSpace(dnatState), "on") {
+		expectedHTTP, expectedHTTPS = dnat.EffectiveTargetPorts()
+	}
+	if !listeners.hasOwnerOnAllPorts(sig.processAliases, expectedHTTP, expectedHTTPS) {
+		return "degraded", fmt.Sprintf("listener missing on expected ports :%d/:%d", expectedHTTP, expectedHTTPS)
+	}
+	if strings.EqualFold(strings.TrimSpace(dnatState), "on") && listeners.hasOwnerOnAnyPorts(sig.processAliases, 80, 443) {
+		return "degraded", "listener present on :80/:443 while DNAT is on"
 	}
 
 	if ok, reason := probeFrontendHTTP(); !ok {
