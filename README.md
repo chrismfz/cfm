@@ -336,12 +336,11 @@ your egress IP gets nullrouted by your upstream, or a compromised PHP site
 turns your server into a botnet node.
 
 **What it does (phase 1 — observe + warn):**
-- Watches new outbound TCP connections (and UDP/53) per Linux uid via NFLOG.
+- Watches new outbound TCP connections per Linux uid via NFLOG.
 - Classifies each event by destination port group:
   - **SMTP** — outbound 25 / 465 / 587 (mail flood, compromised CMS sending spam)
   - **SCAN** — outbound 22 / 23 / 3389 (brute-forcer / scanner running on your box)
   - **HTTP** — outbound 80 / 443 / 8080 / 8443 (POST flood, botnet C2)
-  - **DNS** — outbound UDP/53 + TCP/53 (amplification participant)
   - **UNIQ_DST** — many distinct destination IPs in the window (horizontal scanner)
 - Maintains a per-uid sliding window with per-signal dedup so a runaway
   account doesn't spam the log.
@@ -358,7 +357,6 @@ turns your server into a botnet node.
 nftables OUTPUT chain (cfm_outbound_observe, priority 10)
    ├─ skuid 0 / allowlist → return            (root + system services exempt)
    ├─ ct state new tcp dport {SMTP|SCAN|HTTP} → NFLOG group N
-   └─ udp/53 + tcp/53 ct state new           → NFLOG group N
                                                        ↓
                                        internal/outbound/collector.go
                                                        ↓
@@ -385,7 +383,6 @@ OUTBOUND_WINDOW_SECONDS          = 60
 OUTBOUND_SMTP_CONN_PER_MIN       = 30
 OUTBOUND_SCAN_UNIQUE_DST_PER_MIN = 50
 OUTBOUND_HTTP_RATE_PER_MIN       = 200
-OUTBOUND_DNS_PER_MIN             = 300
 OUTBOUND_LOG_DEDUP_SECONDS       = 300     # don't re-warn within this window
 OUTBOUND_QUEUE_SAMPLES           = 5       # exim msgid/sender lines per warning
 OUTBOUND_LOG_ENRICH              = 1       # GeoIP/ASN on destination IP
