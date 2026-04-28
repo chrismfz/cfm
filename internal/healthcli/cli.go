@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,14 +15,19 @@ import (
 	"golang.org/x/term"
 )
 
-type snapshotResponse struct {
-	SchemaVersion string       `json:"schema_version"`
-	NodeID        string       `json:"node_id"`
-	GeneratedAt   time.Time    `json:"generated_at"`
-	Snapshot      healthSample `json:"snapshot"`
+type cliOptions struct {
+	NoColor bool
+	Compact bool
 }
 
-type healthSample struct {
+type snapshotEnvelope struct {
+	SchemaVersion string          `json:"schema_version"`
+	NodeID        string          `json:"node_id"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	Snapshot      json.RawMessage `json:"snapshot"`
+}
+
+type legacySample struct {
 	NodeID      string    `json:"node_id"`
 	Hostname    string    `json:"hostname"`
 	CollectedAt time.Time `json:"collected_at"`
@@ -34,27 +40,89 @@ type healthSample struct {
 	TxMbps      float64   `json:"tx_mbps"`
 }
 
+type modernSample struct {
+	NodeID      string    `json:"node_id"`
+	CollectedAt time.Time `json:"collected_at"`
+	Host        struct {
+		Hostname      string  `json:"hostname"`
+		LoadAvg1      float64 `json:"load_avg_1"`
+		CPUPercent    float64 `json:"cpu_percent"`
+		MemUsedBytes  uint64  `json:"mem_used_bytes"`
+		MemTotalBytes uint64  `json:"mem_total_bytes"`
+	} `json:"host"`
+	Disk struct {
+		Mounts []struct {
+			Mount        string  `json:"mount"`
+			UsedBytes    uint64  `json:"used_bytes"`
+			TotalBytes   uint64  `json:"total_bytes"`
+			UsedPct      float64 `json:"used_pct"`
+			UsedInodes   uint64  `json:"used_inodes"`
+			TotalInodes  uint64  `json:"total_inodes"`
+			InodeUsedPct float64 `json:"inode_used_pct"`
+		} `json:"mounts"`
+		SmartHealth string `json:"smart_health"`
+		DiskWearout string `json:"disk_wearout"`
+		MDADMHealth string `json:"mdadm_health"`
+		ZFSHealth   string `json:"zfs_health"`
+	} `json:"disk"`
+	CFM struct {
+		ActiveBlocks   int `json:"active_blocks"`
+		ChallengeQueue int `json:"challenge_queue"`
+		WAFEvents1h    int `json:"waf_events_1h"`
+		OutboundAlerts int `json:"outbound_alerts"`
+	} `json:"cfm_metrics"`
+	Network struct {
+		InBps  uint64         `json:"bandwidth_in_bps"`
+		OutBps uint64         `json:"bandwidth_out_bps"`
+		TCP    map[string]int `json:"connection_states"`
+	} `json:"network"`
+}
+
+type parsedSnapshot struct {
+	Envelope snapshotEnvelope
+	Legacy   legacySample
+	Modern   modernSample
+	RawMap   map[string]any
+}
+
 func Run(baseURL string, args []string) error {
-	if len(args) == 0 {
-		return runSummary(baseURL)
+	opts, argv := parseGlobalFlags(args)
+	if len(argv) == 0 {
+		return runSummary(baseURL, opts)
 	}
 
-	switch args[0] {
+	switch argv[0] {
 	case "json":
 		return runJSON(baseURL)
 	case "live":
 		if !isTTY() {
-			return runSummary(baseURL)
+			return runSummary(baseURL, opts)
 		}
-		return runLive(baseURL, args[1:])
+		return runLive(baseURL, argv[1:], opts)
 	case "watch":
-		return runWatch(baseURL, args[1:])
+		return runWatch(baseURL, argv[1:], opts)
 	case "help", "-h", "--help":
 		printHelp()
 		return nil
 	default:
-		return fmt.Errorf("unknown subcommand: %s", args[0])
+		return fmt.Errorf("unknown subcommand: %s", argv[0])
 	}
+}
+
+func parseGlobalFlags(args []string) (cliOptions, []string) {
+	var opts cliOptions
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		switch a {
+		case "--no-color":
+			opts.NoColor = true
+		case "--compact":
+			opts.Compact = true
+		default:
+			out = append(out, a)
+		}
+	}
+	return opts, out
 }
 
 func isTTY() bool {
@@ -63,18 +131,18 @@ func isTTY() bool {
 
 func printHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm health             # summary")
-	fmt.Println("  cfm health json        # machine-readable snapshot")
-	fmt.Println("  cfm health live        # live dashboard (TTY), auto-fallback to summary")
-	fmt.Println("  cfm health watch [N]   # periodic text refresh every N seconds (default 5)")
+	fmt.Println("  cfm health [--compact] [--no-color]             # summary")
+	fmt.Println("  cfm health json                                 # machine-readable snapshot")
+	fmt.Println("  cfm health live [N] [--compact] [--no-color]    # live dashboard (TTY), fallback to summary")
+	fmt.Println("  cfm health watch [N] [--compact] [--no-color]   # periodic text refresh every N seconds (default 5)")
 }
 
-func runSummary(baseURL string) error {
+func runSummary(baseURL string, opts cliOptions) error {
 	snap, err := fetchSnapshot(baseURL)
 	if err != nil {
 		return err
 	}
-	printSummary(snap)
+	printSummary(snap, opts)
 	return nil
 }
 
@@ -97,22 +165,22 @@ func runJSON(baseURL string) error {
 	return nil
 }
 
-func runLive(baseURL string, args []string) error {
+func runLive(baseURL string, args []string, opts cliOptions) error {
 	interval := parseInterval(args, 2*time.Second)
 	for tick := 0; ; tick++ {
 		snap, err := fetchSnapshot(baseURL)
 		fmt.Print("\033[H\033[2J")
-		fmt.Printf("cfm health live  tick=%d  interval=%s  %s\n\n", tick, interval, time.Now().Format("15:04:05"))
+		fmt.Printf("cfm health live tick=%d interval=%s %s\n\n", tick, interval, time.Now().Format("15:04:05"))
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
 		} else {
-			printSummary(snap)
+			printSummary(snap, opts)
 		}
 		time.Sleep(interval)
 	}
 }
 
-func runWatch(baseURL string, args []string) error {
+func runWatch(baseURL string, args []string, opts cliOptions) error {
 	interval := parseInterval(args, 5*time.Second)
 	fmt.Printf("[cfm health watch] interval=%s\n", interval)
 	for {
@@ -120,7 +188,7 @@ func runWatch(baseURL string, args []string) error {
 		if err != nil {
 			fmt.Printf("[%s] error: %v\n", time.Now().Format(time.RFC3339), err)
 		} else {
-			printOneLine(snap)
+			printOneLine(snap, opts)
 		}
 		time.Sleep(interval)
 	}
@@ -137,39 +205,192 @@ func parseInterval(args []string, def time.Duration) time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-func printSummary(s snapshotResponse) {
-	host := s.Snapshot.Hostname
-	if host == "" {
-		host = s.NodeID
-	}
+func printSummary(s parsedSnapshot, opts cliOptions) {
+	host := chooseHost(s)
+	collected := chooseCollectedAt(s)
 	fmt.Printf("Node: %s\n", host)
-	fmt.Printf("Collected: %s\n", s.Snapshot.CollectedAt.Local().Format(time.RFC3339))
-	fmt.Printf("Load1: %.2f\n", s.Snapshot.Load1)
-	fmt.Printf("RAM: %.1f%%\n", s.Snapshot.RamUsedPct)
-	fmt.Printf("Disk: / %.1f%%   /tmp %.1f%%\n", s.Snapshot.DiskRootPct, s.Snapshot.DiskTmpPct)
-	fmt.Printf("Temp max: %.1f°C\n", s.Snapshot.TempMaxC)
-	fmt.Printf("Net: RX %.2f Mbps   TX %.2f Mbps\n", s.Snapshot.RxMbps, s.Snapshot.TxMbps)
+	if !collected.IsZero() {
+		fmt.Printf("Collected: %s\n\n", collected.Local().Format(time.RFC3339))
+	}
+	printHostSection(s, opts)
+	printDiskSection(s, opts)
+	printStorageSection(s, opts)
+	printNetworkSection(s, opts)
+	printCFMSection(s, opts)
 }
 
-func printOneLine(s snapshotResponse) {
-	host := s.Snapshot.Hostname
-	if host == "" {
-		host = s.NodeID
+func printOneLine(s parsedSnapshot, opts cliOptions) {
+	host := chooseHost(s)
+	load := nonZero(s.Modern.Host.LoadAvg1, s.Legacy.Load1)
+	ram := s.Legacy.RamUsedPct
+	if s.Modern.Host.MemTotalBytes > 0 {
+		ram = 100 * float64(s.Modern.Host.MemUsedBytes) / float64(s.Modern.Host.MemTotalBytes)
 	}
-	fmt.Printf("[%s] host=%s load=%.2f ram=%.1f%% disk(/)=%.1f%% temp=%.1fC rx=%.2f tx=%.2f\n",
-		time.Now().Format("15:04:05"),
-		host,
-		s.Snapshot.Load1,
-		s.Snapshot.RamUsedPct,
-		s.Snapshot.DiskRootPct,
-		s.Snapshot.TempMaxC,
-		s.Snapshot.RxMbps,
-		s.Snapshot.TxMbps,
+	inBps, outBps := networkBps(s)
+	fmt.Printf("[%s] host=%s load=%.2f ram=%s net=%s/%s %s\n",
+		time.Now().Format("15:04:05"), host, load, pctStr(ram),
+		bytesPerSec(inBps), bytesPerSec(outBps),
+		badge(labelByPct(max(ram, load*25)), opts),
 	)
 }
 
-func fetchSnapshot(baseURL string) (snapshotResponse, error) {
-	var out snapshotResponse
+func printHostSection(s parsedSnapshot, opts cliOptions) {
+	load := nonZero(s.Modern.Host.LoadAvg1, s.Legacy.Load1)
+	cpu := nonZero(s.Modern.Host.CPUPercent, load*25)
+	ramUsed := s.Modern.Host.MemUsedBytes
+	ramTotal := s.Modern.Host.MemTotalBytes
+	ramPct := s.Legacy.RamUsedPct
+	if ramTotal > 0 {
+		ramPct = 100 * float64(ramUsed) / float64(ramTotal)
+	}
+
+	if opts.Compact {
+		fmt.Printf("Host %-6s load=%.2f cpu=%s ram=%s", badge(labelByPct(max(cpu, ramPct)), opts), load, pctStr(cpu), pctStr(ramPct))
+		if ramTotal > 0 {
+			fmt.Printf(" (%s/%s)", bytesIEC(ramUsed), bytesIEC(ramTotal))
+		}
+		fmt.Println()
+		return
+	}
+	fmt.Printf("Host %s\n", badge(labelByPct(max(cpu, ramPct)), opts))
+	fmt.Printf("  Load avg: %.2f\n", load)
+	fmt.Printf("  CPU: %s\n", pctStr(cpu))
+	if ramTotal > 0 {
+		fmt.Printf("  RAM: %s / %s (%s)\n", bytesIEC(ramUsed), bytesIEC(ramTotal), pctStr(ramPct))
+	} else {
+		fmt.Printf("  RAM: %s\n", pctStr(ramPct))
+	}
+}
+
+func printDiskSection(s parsedSnapshot, opts cliOptions) {
+	type row struct {
+		mount    string
+		usedPct  float64
+		inodePct float64
+		hasInode bool
+	}
+	rows := make([]row, 0, len(s.Modern.Disk.Mounts)+2)
+	for _, m := range s.Modern.Disk.Mounts {
+		r := row{mount: m.Mount, usedPct: m.UsedPct}
+		if m.TotalInodes > 0 {
+			r.hasInode = true
+			r.inodePct = m.InodeUsedPct
+		}
+		rows = append(rows, r)
+	}
+	if len(rows) == 0 {
+		if s.Legacy.DiskRootPct > 0 {
+			rows = append(rows, row{mount: "/", usedPct: s.Legacy.DiskRootPct})
+		}
+		if s.Legacy.DiskTmpPct > 0 {
+			rows = append(rows, row{mount: "/tmp", usedPct: s.Legacy.DiskTmpPct})
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	if !opts.Compact {
+		fmt.Println("Disk")
+	}
+	for _, r := range rows {
+		status := labelByPct(r.usedPct)
+		if r.hasInode && labelByPct(r.inodePct) > status {
+			status = labelByPct(r.inodePct)
+		}
+		if opts.Compact {
+			fmt.Printf("Disk %-6s %s=%s", badge(status, opts), r.mount, pctStr(r.usedPct))
+			if r.hasInode {
+				fmt.Printf(" i=%s", pctStr(r.inodePct))
+			}
+			fmt.Println()
+		} else {
+			fmt.Printf("  %s %-12s used=%s", badge(status, opts), r.mount, pctStr(r.usedPct))
+			if r.hasInode {
+				fmt.Printf(" inodes=%s", pctStr(r.inodePct))
+			}
+			fmt.Println()
+		}
+	}
+}
+
+func printStorageSection(s parsedSnapshot, opts cliOptions) {
+	smart := firstNonEmpty(s.Modern.Disk.SmartHealth, getStr(s.RawMap, "smart_health"))
+	wear := firstNonEmpty(s.Modern.Disk.DiskWearout, getStr(s.RawMap, "disk_wearout"))
+	mdadm := firstNonEmpty(s.Modern.Disk.MDADMHealth, getStr(s.RawMap, "mdadm_health"))
+	zfs := firstNonEmpty(s.Modern.Disk.ZFSHealth, getStr(s.RawMap, "zfs_health"))
+	if smart == "" && wear == "" && mdadm == "" && zfs == "" {
+		return
+	}
+	if opts.Compact {
+		fmt.Printf("Storage %-6s smart=%s wear=%s mdadm=%s zfs=%s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts),
+			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), nonEmptyOr(mdadm, "n/a"), nonEmptyOr(zfs, "n/a"))
+		return
+	}
+	fmt.Printf("Storage health %s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts))
+	fmt.Printf("  SMART summary: %s\n", nonEmptyOr(smart, "n/a"))
+	fmt.Printf("  Wearout (highest devices): %s\n", nonEmptyOr(wear, "n/a"))
+	fmt.Printf("  mdadm: %s\n", nonEmptyOr(mdadm, "n/a"))
+	fmt.Printf("  ZFS: %s\n", nonEmptyOr(zfs, "n/a"))
+}
+
+func printNetworkSection(s parsedSnapshot, opts cliOptions) {
+	inBps, outBps := networkBps(s)
+	tcp := s.Modern.Network.TCP
+	if len(tcp) == 0 {
+		if m, ok := getMapInt(s.RawMap, "connection_states"); ok {
+			tcp = m
+		}
+	}
+	if inBps == 0 && outBps == 0 && len(tcp) == 0 {
+		return
+	}
+	status := labelByThroughput(inBps + outBps)
+	if opts.Compact {
+		fmt.Printf("Network %-6s in=%s out=%s", badge(status, opts), bytesPerSec(inBps), bytesPerSec(outBps))
+		if len(tcp) > 0 {
+			fmt.Printf(" conn=%s", renderConnStates(tcp))
+		}
+		fmt.Println()
+		return
+	}
+	fmt.Printf("Network %s\n", badge(status, opts))
+	fmt.Printf("  Bandwidth: in=%s out=%s\n", bytesPerSec(inBps), bytesPerSec(outBps))
+	if len(tcp) > 0 {
+		fmt.Printf("  Connection states: %s\n", renderConnStates(tcp))
+	}
+}
+
+func printCFMSection(s parsedSnapshot, opts cliOptions) {
+	m := s.Modern.CFM
+	if m == (struct {
+		ActiveBlocks   int "json:\"active_blocks\""
+		ChallengeQueue int "json:\"challenge_queue\""
+		WAFEvents1h    int "json:\"waf_events_1h\""
+		OutboundAlerts int "json:\"outbound_alerts\""
+	}{}) {
+		m.ActiveBlocks = getInt(s.RawMap, "active_blocks")
+		m.ChallengeQueue = getInt(s.RawMap, "challenge_queue")
+		m.WAFEvents1h = getInt(s.RawMap, "waf_events_1h")
+		m.OutboundAlerts = getInt(s.RawMap, "outbound_alerts")
+	}
+	if m.ActiveBlocks == 0 && m.ChallengeQueue == 0 && m.WAFEvents1h == 0 && m.OutboundAlerts == 0 {
+		fmt.Printf("CFM %s metrics not available\n", badge(okLabel, opts))
+		return
+	}
+	status := worstLabel(labelByCount(m.ChallengeQueue, 5, 25), labelByCount(m.WAFEvents1h, 50, 200), labelByCount(m.OutboundAlerts, 1, 5))
+	if opts.Compact {
+		fmt.Printf("CFM %-6s blocks=%d queue=%d waf1h=%d alerts=%d\n", badge(status, opts), m.ActiveBlocks, m.ChallengeQueue, m.WAFEvents1h, m.OutboundAlerts)
+		return
+	}
+	fmt.Printf("CFM %s\n", badge(status, opts))
+	fmt.Printf("  Active blocks: %d\n", m.ActiveBlocks)
+	fmt.Printf("  Challenge queue: %d\n", m.ChallengeQueue)
+	fmt.Printf("  WAF events (1h): %d\n", m.WAFEvents1h)
+	fmt.Printf("  Outbound alerts: %d\n", m.OutboundAlerts)
+}
+
+func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
+	var out parsedSnapshot
 	res, err := getJSON(baseURL + "/api/v1/health/snapshot")
 	if err != nil {
 		return out, err
@@ -179,9 +400,12 @@ func fetchSnapshot(baseURL string) (snapshotResponse, error) {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return out, fmt.Errorf("health snapshot failed: status=%d body=%s", res.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(&out.Envelope); err != nil {
 		return out, err
 	}
+	_ = json.Unmarshal(out.Envelope.Snapshot, &out.Legacy)
+	_ = json.Unmarshal(out.Envelope.Snapshot, &out.Modern)
+	_ = json.Unmarshal(out.Envelope.Snapshot, &out.RawMap)
 	return out, nil
 }
 
@@ -192,4 +416,223 @@ func getJSON(u string) (*http.Response, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	return clihttp.Do(req)
+}
+
+type healthLabelRank int
+
+const (
+	okLabel healthLabelRank = iota
+	warnLabel
+	critLabel
+)
+
+func labelByPct(v float64) healthLabelRank {
+	switch {
+	case v >= 95:
+		return critLabel
+	case v >= 85:
+		return warnLabel
+	default:
+		return okLabel
+	}
+}
+
+func labelByCount(v, warn, crit int) healthLabelRank {
+	if v >= crit {
+		return critLabel
+	}
+	if v >= warn {
+		return warnLabel
+	}
+	return okLabel
+}
+
+func labelByThroughput(bps uint64) healthLabelRank {
+	if bps > 5*1024*1024*1024 {
+		return warnLabel
+	}
+	return okLabel
+}
+
+func healthLabel(s string) healthLabelRank {
+	x := strings.ToLower(strings.TrimSpace(s))
+	switch {
+	case x == "", x == "unknown", x == "n/a":
+		return warnLabel
+	case strings.Contains(x, "crit"), strings.Contains(x, "fail"), strings.Contains(x, "degraded"):
+		return critLabel
+	case strings.Contains(x, "warn"), strings.Contains(x, "recover"), strings.Contains(x, "resilver"):
+		return warnLabel
+	default:
+		return okLabel
+	}
+}
+
+func worstLabel(in ...healthLabelRank) healthLabelRank {
+	out := okLabel
+	for _, v := range in {
+		if v > out {
+			out = v
+		}
+	}
+	return out
+}
+
+func badge(l healthLabelRank, opts cliOptions) string {
+	text := "[OK]"
+	color := "\033[32m"
+	switch l {
+	case warnLabel:
+		text = "[WARN]"
+		color = "\033[33m"
+	case critLabel:
+		text = "[CRIT]"
+		color = "\033[31m"
+	}
+	if opts.NoColor || !isTTY() {
+		return text
+	}
+	return color + text + "\033[0m"
+}
+
+func chooseHost(s parsedSnapshot) string {
+	for _, v := range []string{s.Modern.Host.Hostname, s.Legacy.Hostname, s.Envelope.NodeID, s.Legacy.NodeID, s.Modern.NodeID} {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return "local"
+}
+
+func chooseCollectedAt(s parsedSnapshot) time.Time {
+	for _, ts := range []time.Time{s.Modern.CollectedAt, s.Legacy.CollectedAt, s.Envelope.GeneratedAt} {
+		if !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func networkBps(s parsedSnapshot) (uint64, uint64) {
+	if s.Modern.Network.InBps > 0 || s.Modern.Network.OutBps > 0 {
+		return s.Modern.Network.InBps, s.Modern.Network.OutBps
+	}
+	return mbpsToBps(s.Legacy.RxMbps), mbpsToBps(s.Legacy.TxMbps)
+}
+
+func mbpsToBps(v float64) uint64 {
+	if v <= 0 {
+		return 0
+	}
+	return uint64(v * 1024 * 1024 / 8)
+}
+
+func bytesIEC(v uint64) string {
+	const unit = 1024
+	if v < unit {
+		return fmt.Sprintf("%d B", v)
+	}
+	div, exp := uint64(unit), 0
+	for n := v / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(v)/float64(div), "KMGTPE"[exp])
+}
+
+func bytesPerSec(v uint64) string { return bytesIEC(v) + "/s" }
+
+func pctStr(v float64) string {
+	if v <= 0 {
+		return "0%"
+	}
+	return fmt.Sprintf("%.1f%%", v)
+}
+
+func renderConnStates(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", strings.ToLower(k), m[k]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func getMapInt(m map[string]any, key string) (map[string]int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return nil, false
+	}
+	raw, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := map[string]int{}
+	for k, vv := range raw {
+		switch n := vv.(type) {
+		case float64:
+			out[k] = int(n)
+		case int:
+			out[k] = n
+		}
+	}
+	return out, len(out) > 0
+}
+
+func getStr(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func getInt(m map[string]any, key string) int {
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func nonEmptyOr(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+func nonZero(a, b float64) float64 {
+	if a != 0 {
+		return a
+	}
+	return b
+}
+
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
