@@ -1653,6 +1653,6 @@ func (d *Detector) lookupMeta(ip string) string {
 
 // SnapshotNow collects a one-off health snapshot for status CLI.
 func SnapshotNow() Snapshot {
-	d := &Detector{}
+	d := New(Config{})
 	return d.snapshot()
 }
