@@ -6,8 +6,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/miekg/dns"
-
 	nflog "github.com/florianl/go-nflog/v2"
 	"github.com/mdlayher/netlink"
 
@@ -61,7 +59,6 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 	um := syslookup.New()
 	pf := syslookup.NewProcFinder()
 	an := NewAnalyzer(c.Runtime)
-	dnsRecent := newDNSRecentRing(0, 0, 0)
 
 	go func() {
 		defer nf.Close()
@@ -80,23 +77,18 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 				if sig == "" {
 					continue
 				}
-				if sig == SignalDNS {
-					dnsRecent.add(re.uid, dnsSummaryFromRaw(re))
-				}
 				if an.IsAllowed(re.uid, re.gid) {
 					continue
 				}
 				ev := Event{
-					When:          re.when,
-					UID:           re.uid,
-					GID:           re.gid,
-					IPVer:         re.ipver,
-					SPort:         re.sport,
-					DPort:         re.dport,
-					IsUDP:         re.isUDP,
-					Signal:        sig,
-					DNSRCode:      re.dnsRCode,
-					DNSRCodeKnown: re.dnsRCodeKnown,
+					When:   re.when,
+					UID:    re.uid,
+					GID:    re.gid,
+					IPVer:  re.ipver,
+					SPort:  re.sport,
+					DPort:  re.dport,
+					IsUDP:  re.isUDP,
+					Signal: sig,
 				}
 				copyIP(&ev.SrcIP, re.src)
 				copyIP(&ev.DstIP, re.dst)
@@ -115,9 +107,6 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 					sport: re.sport,
 					dport: re.dport,
 				}
-				if v.Signal == SignalDNS {
-					ac.dnsPretrigger = dnsRecent.snapshot(v.UID, v.When)
-				}
 				alerter.Emit(ctx, *v, ac)
 			}
 		}
@@ -132,21 +121,16 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 			gid = *a.GID
 		}
 		var (
-			ipver         int
-			src, dst      net.IP
-			sport, dport  uint16
-			isUDP         bool
-			dnsQType      uint16
-			dnsQTypeKnown bool
-			dnsQName      string
-			dnsRCode      uint8
-			dnsRCodeKnown bool
+			ipver        int
+			src, dst     net.IP
+			sport, dport uint16
+			isUDP        bool
 		)
 		if a.Payload != nil && len(*a.Payload) > 0 {
-			ipver, src, dst, sport, dport, isUDP, dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown = parsePacket(*a.Payload)
+			ipver, src, dst, sport, dport, isUDP = parsePacket(*a.Payload)
 		}
 		select {
-		case events <- rawEvent{time.Now(), uid, gid, ipver, src, dst, sport, dport, isUDP, dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown}:
+		case events <- rawEvent{time.Now(), uid, gid, ipver, src, dst, sport, dport, isUDP}:
 		default:
 			// Drop on overflow rather than block the kernel callback.
 		}
@@ -157,31 +141,25 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 }
 
 type rawEvent struct {
-	when          time.Time
-	uid, gid      uint32
-	ipver         int
-	src, dst      net.IP
-	sport, dport  uint16
-	isUDP         bool
-	dnsQName      string
-	dnsQType      uint16
-	dnsQTypeKnown bool
-	dnsRCode      uint8
-	dnsRCodeKnown bool
+	when         time.Time
+	uid, gid     uint32
+	ipver        int
+	src, dst     net.IP
+	sport, dport uint16
+	isUDP        bool
 }
 
 // alertContext carries the bits the alerter needs to render a forensic line
 // without re-resolving uid/proc/enrich on its own.
 type alertContext struct {
-	um            *syslookup.Map
-	pf            *syslookup.ProcFinder
-	en            *enrich.Enricher
-	ipver         int
-	srcIP         net.IP
-	dstIP         net.IP
-	sport         uint16
-	dport         uint16
-	dnsPretrigger []DNSPacketSummary
+	um    *syslookup.Map
+	pf    *syslookup.ProcFinder
+	en    *enrich.Enricher
+	ipver int
+	srcIP net.IP
+	dstIP net.IP
+	sport uint16
+	dport uint16
 }
 
 func copyIP(dst *[16]byte, src net.IP) {
@@ -196,14 +174,10 @@ func copyIP(dst *[16]byte, src net.IP) {
 	copy(dst[:], src.To16())
 }
 
-// classify maps a raw event to a Signal based on dport (and proto for DNS).
+// classify maps a raw event to a Signal based on dport.
 // Returns "" if the event doesn't match any configured signal.
 func classify(re rawEvent, rt Runtime) Signal {
 	if re.isUDP {
-		// Phase 1 cares about UDP/53 only.
-		if re.dport == 53 {
-			return SignalDNS
-		}
 		return ""
 	}
 	if _, ok := rt.SMTPPorts[re.dport]; ok {
@@ -215,16 +189,12 @@ func classify(re rawEvent, rt Runtime) Signal {
 	if _, ok := rt.HTTPPorts[re.dport]; ok {
 		return SignalHTTP
 	}
-	// TCP/53 (rare) is also DNS.
-	if re.dport == 53 {
-		return SignalDNS
-	}
 	return ""
 }
 
 // parsePacket decodes IPv4/IPv6 + TCP/UDP. Returns ipver=0 on malformed input.
 // We accept both protocols here (smtp_snoop.go only handled TCP).
-func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isUDP bool, dnsQName string, dnsQType uint16, dnsQTypeKnown bool, dnsRCode uint8, dnsRCodeKnown bool) {
+func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isUDP bool) {
 	if len(p) < 1 {
 		return
 	}
@@ -245,12 +215,7 @@ func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isU
 		dst = net.IPv4(p[16], p[17], p[18], p[19])
 		sport = binary.BigEndian.Uint16(p[ihl : ihl+2])
 		dport = binary.BigEndian.Uint16(p[ihl+2 : ihl+4])
-		if (sport == 53 || dport == 53) && len(p) >= ihl {
-			if payload, ok := dnsPayload(proto, p[ihl:]); ok {
-				dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown = parseDNSFields(payload)
-			}
-		}
-		return 4, src, dst, sport, dport, proto == 17, dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown
+		return 4, src, dst, sport, dport, proto == 17
 	case 6:
 		if len(p) < 40 {
 			return
@@ -266,61 +231,7 @@ func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isU
 		}
 		sport = binary.BigEndian.Uint16(p[40:42])
 		dport = binary.BigEndian.Uint16(p[42:44])
-		if sport == 53 || dport == 53 {
-			if payload, ok := dnsPayload(proto, p[40:]); ok {
-				dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown = parseDNSFields(payload)
-			}
-		}
-		return 6, src, dst, sport, dport, proto == 17, dnsQName, dnsQType, dnsQTypeKnown, dnsRCode, dnsRCodeKnown
-	}
-	return
-}
-
-func dnsPayload(proto byte, l4 []byte) ([]byte, bool) {
-	switch proto {
-	case 17:
-		if len(l4) < 8 {
-			return nil, false
-		}
-		return l4[8:], true
-	case 6:
-		if len(l4) < 20 {
-			return nil, false
-		}
-		off := int((l4[12] >> 4) * 4)
-		if len(l4) < off+2 {
-			return nil, false
-		}
-		dnsStart := l4[off:]
-		if len(dnsStart) < 2 {
-			return nil, false
-		}
-		msgLen := int(binary.BigEndian.Uint16(dnsStart[:2]))
-		if msgLen <= 0 || len(dnsStart) < 2+msgLen {
-			return nil, false
-		}
-		return dnsStart[2 : 2+msgLen], true
-	default:
-		return nil, false
-	}
-}
-
-func parseDNSFields(payload []byte) (qname string, qtype uint16, qtypeKnown bool, rcode uint8, rcodeKnown bool) {
-	if len(payload) < 12 {
-		return
-	}
-	var msg dns.Msg
-	if err := msg.Unpack(payload); err != nil {
-		return
-	}
-	if len(msg.Question) > 0 {
-		qname = msg.Question[0].Name
-		qtype = msg.Question[0].Qtype
-		qtypeKnown = true
-	}
-	if msg.Response {
-		rcode = uint8(msg.Rcode)
-		rcodeKnown = true
+		return 6, src, dst, sport, dport, proto == 17
 	}
 	return
 }

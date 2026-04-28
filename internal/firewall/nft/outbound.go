@@ -14,8 +14,8 @@ import (
 //
 // Phase-1 contract: this chain is OBSERVE-ONLY — it never drops or rejects.
 // It NFLOGs new outbound connections in three port groups (SMTP / SCAN / HTTP)
-// and outbound DNS (UDP and TCP/53) so the user-space outbound collector can
-// classify traffic per uid. Root traffic is excluded at the kernel level so
+// so the user-space outbound collector can classify traffic per uid. Root
+// traffic is excluded at the kernel level so
 // cfm itself, system services, and exim's own outbound delivery don't dominate
 // the signal.
 //
@@ -71,10 +71,6 @@ func (b *Backend) ApplyOutboundObserve(cfg *cfgpkg.OutboundConfig) error {
 	if http != "" {
 		_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm cfm_outbound_observe ct state new tcp dport { %s } %s`, http, logSuffix))
 	}
-
-	// DNS: UDP/53 (no ct state new for UDP) and TCP/53 (rare but possible).
-	_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm cfm_outbound_observe udp dport 53 %s`, logSuffix))
-	_ = b.nftExpr(fmt.Sprintf(`add rule inet cfm cfm_outbound_observe ct state new tcp dport 53 %s`, logSuffix))
 
 	return nil
 }
