@@ -8,21 +8,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"fmt"
 
 	core "cfm/internal/detectors/core"
-//	"cfm/internal/logging"
+	//	"cfm/internal/logging"
 	"cfm/internal/enrich"
 )
 
@@ -30,12 +31,12 @@ type Config struct {
 	Every, Window, Cooldown time.Duration
 
 	CpuLoadPct, RamUsedPct, DiskRootPct int
-	TmpUsedPct int
+	TmpUsedPct                          int
 
 	ConnTotalSpikeX, ConnEstSpikeX, ConnSynSpikeX float64
 	ConnTotalAbs, EstablishedAbs, SynRecvAbs      int
 
-	ThruSpikeX float64
+	ThruSpikeX  float64
 	ThruMinMbps float64
 
 	TempWarnC, TempCritC int
@@ -45,13 +46,13 @@ type Config struct {
 	PortWatch  []int
 	PortSpikeX float64
 
-// Minimum absolute counts required for spike-style alerts to fire
-	ConnTotalMin   int     // default 50
-	EstablishedMin int     // default 30
-	SynRecvMin     int     // default 50
-	PortConnMin    int     // default 50
-// Optional: require a minimum absolute jump vs baseline for spike alerts
-	SpikeMinDelta  int     // default 10
+	// Minimum absolute counts required for spike-style alerts to fire
+	ConnTotalMin   int // default 50
+	EstablishedMin int // default 30
+	SynRecvMin     int // default 50
+	PortConnMin    int // default 50
+	// Optional: require a minimum absolute jump vs baseline for spike alerts
+	SpikeMinDelta int // default 10
 
 	// --- NEW: enrichment & spike probe ---
 	SpikeProbeTopN int      // how many top talkers to include on a spike (default 10; 0 disables)
@@ -60,7 +61,7 @@ type Config struct {
 	EnrichDirs     []string // enricher databases (e.g. "/etc/cfm", "/usr/share/GeoIP", ...)
 
 	// tmp filesystem cleanup
-	TmpCleanOlder  time.Duration // if >0 and /tmp usage exceeds TmpUsedPct, delete files older than this
+	TmpCleanOlder time.Duration // if >0 and /tmp usage exceeds TmpUsedPct, delete files older than this
 
 }
 
@@ -70,9 +71,9 @@ type Detector struct {
 
 	enr *enrich.Enricher
 
-	mu    sync.Mutex
-	last  map[string]time.Time // cooldown per key
-	base  map[string]float64   // EWMA baselines
+	mu   sync.Mutex
+	last map[string]time.Time // cooldown per key
+	base map[string]float64   // EWMA baselines
 
 	// throughput deltas
 	lastRxBytes uint64
@@ -83,19 +84,31 @@ type Detector struct {
 func New(cfg Config) *Detector {
 
 	// sensible defaults
-	if cfg.SpikeProbeTopN == 0 { cfg.SpikeProbeTopN = 10 }
-	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.SpikeProbeTopN == 0 {
+		cfg.SpikeProbeTopN = 10
+	}
+	if !cfg.UseEnrich && !cfg.UsePTR {
+		cfg.UsePTR = true
+	}
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
 
-	if cfg.ConnTotalMin == 0 { cfg.ConnTotalMin = 50 }
-	if cfg.EstablishedMin == 0 { cfg.EstablishedMin = 30 }
-	if cfg.SynRecvMin == 0 { cfg.SynRecvMin = 50 }
-	if cfg.PortConnMin == 0 { cfg.PortConnMin = 50 } // aligns with your current hardcoded 50
-	if cfg.SpikeMinDelta == 0 { cfg.SpikeMinDelta = 10 }
-
-
+	if cfg.ConnTotalMin == 0 {
+		cfg.ConnTotalMin = 50
+	}
+	if cfg.EstablishedMin == 0 {
+		cfg.EstablishedMin = 30
+	}
+	if cfg.SynRecvMin == 0 {
+		cfg.SynRecvMin = 50
+	}
+	if cfg.PortConnMin == 0 {
+		cfg.PortConnMin = 50
+	} // aligns with your current hardcoded 50
+	if cfg.SpikeMinDelta == 0 {
+		cfg.SpikeMinDelta = 10
+	}
 
 	d := &Detector{
 		cfg:  cfg,
@@ -112,7 +125,12 @@ func New(cfg Config) *Detector {
 }
 
 func (d *Detector) SetName(n string) { d.name = n }
-func (d *Detector) Name() string     { if d.name != "" { return d.name } ; return "health" }
+func (d *Detector) Name() string {
+	if d.name != "" {
+		return d.name
+	}
+	return "health"
+}
 func (d *Detector) Every() time.Duration {
 	if d.cfg.Every > 0 {
 		return d.cfg.Every
@@ -122,12 +140,15 @@ func (d *Detector) Every() time.Duration {
 
 // decorateIP renders "1.2.3.4 [AS1234 Example | US | ptr.example]" if enrich is available.
 func (d *Detector) decorateIP(ip string) string {
-	if ip == "" { return ip }
+	if ip == "" {
+		return ip
+	}
 	meta := d.lookupMeta(ip)
-	if meta == "" { return ip }
+	if meta == "" {
+		return ip
+	}
 	return ip + " [" + meta + "]"
 }
-
 
 // -------- core.PeriodicDetector API (matches your types.go) --------
 // Manager calls this once every Every(); we sample + evaluate once.
@@ -156,6 +177,7 @@ type Snapshot struct {
 	RamUsedPct  float64
 	DiskRootPct float64
 	DiskTmpPct  float64
+	DiskStats   []DiskStat
 
 	TCP      map[string]int // state counts incl total
 	PortConn map[int]int    // approx per-local-port active conns
@@ -177,6 +199,20 @@ type SmartInfo struct {
 	Model  string `json:"model,omitempty"`
 	Serial string `json:"serial,omitempty"`
 	Type   string `json:"type,omitempty"`
+}
+
+type DiskStat struct {
+	MountPath    string  `json:"mount_path"`
+	TotalBytes   uint64  `json:"total_bytes"`
+	UsedBytes    uint64  `json:"used_bytes"`
+	FreeBytes    uint64  `json:"free_bytes"`
+	UsedPct      float64 `json:"used_pct"`
+	TotalInodes  uint64  `json:"total_inodes"`
+	UsedInodes   uint64  `json:"used_inodes"`
+	FreeInodes   uint64  `json:"free_inodes"`
+	InodeUsedPct float64 `json:"inode_used_pct"`
+	FSType       string  `json:"fs_type"`
+	Device       string  `json:"device"`
 }
 
 func (d *Detector) snapshot() Snapshot {
@@ -218,15 +254,26 @@ func (d *Detector) snapshot() Snapshot {
 		}
 	}
 
-	// Disk / via syscall.Statfs
-	if pct, err := rootUsagePct(); err == nil {
-		s.DiskRootPct = pct
+	// Mount table disk stats (new) + backward-compatible root/tmp summary fields.
+	s.DiskStats = collectDiskStats()
+	for _, ds := range s.DiskStats {
+		switch ds.MountPath {
+		case "/":
+			s.DiskRootPct = ds.UsedPct
+		case "/tmp":
+			s.DiskTmpPct = ds.UsedPct
+		}
 	}
-
-    // Disk /tmp via syscall.Statfs
-    if pct, err := fsUsagePct("/tmp"); err == nil {
-        s.DiskTmpPct = pct
-    }
+	if s.DiskRootPct == 0 {
+		if pct, err := rootUsagePct(); err == nil {
+			s.DiskRootPct = pct
+		}
+	}
+	if s.DiskTmpPct == 0 {
+		if pct, err := fsUsagePct("/tmp"); err == nil {
+			s.DiskTmpPct = pct
+		}
+	}
 
 	// TCP states + per-port
 	s.TCP, s.PortConn = readTCPandPorts()
@@ -251,7 +298,8 @@ func (d *Detector) snapshot() Snapshot {
 		"hostname": s.Host, "time": s.Time.Format(time.RFC3339),
 		"cpu_cores": s.CPUCores, "load1": s.Load1,
 		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct, "disk_tmp_pct": s.DiskTmpPct,
-		"tcp": s.TCP, "port_conn": s.PortConn,
+		"disk_stats": s.DiskStats,
+		"tcp":        s.TCP, "port_conn": s.PortConn,
 		"rx_mbps": s.RxMbps, "tx_mbps": s.TxMbps,
 		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart,
 	}
@@ -272,19 +320,158 @@ func parseLastFloat(line string) (float64, error) {
 }
 
 func fsUsagePct(path string) (float64, error) {
-    var st syscall.Statfs_t
-    if err := syscall.Statfs(path, &st); err != nil {
-        return 0, err
-    }
-    if st.Blocks == 0 {
-        return 0, errors.New("blocks=0")
-    }
-    used := 1.0 - float64(st.Bavail)/float64(st.Blocks)
-    return 100.0 * used, nil
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	if st.Blocks == 0 {
+		return 0, errors.New("blocks=0")
+	}
+	used := 1.0 - float64(st.Bavail)/float64(st.Blocks)
+	return 100.0 * used, nil
 }
 
 func rootUsagePct() (float64, error) {
-    return fsUsagePct("/")
+	return fsUsagePct("/")
+}
+
+func collectDiskStats() []DiskStat {
+	mounts := parseMountInfo("/proc/self/mountinfo")
+	if len(mounts) == 0 {
+		mounts = parseProcMounts("/proc/mounts")
+	}
+
+	stats := make([]DiskStat, 0, len(mounts))
+	seenFS := make(map[string]struct{})
+	for _, m := range mounts {
+		if m.mountPath == "" || isPseudoFSType(m.fsType) {
+			continue
+		}
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(m.mountPath, &st); err != nil || st.Blocks == 0 {
+			continue
+		}
+
+		totalBytes := uint64(st.Blocks) * uint64(st.Bsize)
+		freeBytes := uint64(st.Bavail) * uint64(st.Bsize)
+		usedBytes := totalBytes - freeBytes
+
+		var usedPct float64
+		if totalBytes > 0 {
+			usedPct = 100.0 * float64(usedBytes) / float64(totalBytes)
+		}
+
+		totalInodes := uint64(st.Files)
+		freeInodes := uint64(st.Ffree)
+		usedInodes := uint64(0)
+		inodeUsedPct := 0.0
+		if totalInodes > 0 {
+			usedInodes = totalInodes - freeInodes
+			inodeUsedPct = 100.0 * float64(usedInodes) / float64(totalInodes)
+		}
+
+		// Dedupe bind-mount noise and repeated views into same filesystem.
+		fsKey := strings.Join([]string{
+			m.device, m.fsType,
+			strconv.FormatUint(totalBytes, 10),
+			strconv.FormatUint(totalInodes, 10),
+		}, "|")
+		if _, ok := seenFS[fsKey]; ok {
+			continue
+		}
+		seenFS[fsKey] = struct{}{}
+
+		stats = append(stats, DiskStat{
+			MountPath:    m.mountPath,
+			TotalBytes:   totalBytes,
+			UsedBytes:    usedBytes,
+			FreeBytes:    freeBytes,
+			UsedPct:      usedPct,
+			TotalInodes:  totalInodes,
+			UsedInodes:   usedInodes,
+			FreeInodes:   freeInodes,
+			InodeUsedPct: inodeUsedPct,
+			FSType:       m.fsType,
+			Device:       m.device,
+		})
+	}
+
+	sort.Slice(stats, func(i, j int) bool { return stats[i].MountPath < stats[j].MountPath })
+	return stats
+}
+
+type mountEntry struct {
+	mountPath string
+	fsType    string
+	device    string
+}
+
+func parseMountInfo(path string) []mountEntry {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var out []mountEntry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		parts := strings.Split(line, " - ")
+		if len(parts) != 2 {
+			continue
+		}
+		left := strings.Fields(parts[0])
+		right := strings.Fields(parts[1])
+		if len(left) < 5 || len(right) < 2 {
+			continue
+		}
+		out = append(out, mountEntry{
+			mountPath: unescapeMountField(left[4]),
+			fsType:    right[0],
+			device:    right[1],
+		})
+	}
+	return out
+}
+
+func parseProcMounts(path string) []mountEntry {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var out []mountEntry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		out = append(out, mountEntry{
+			device:    unescapeMountField(fields[0]),
+			mountPath: unescapeMountField(fields[1]),
+			fsType:    fields[2],
+		})
+	}
+	return out
+}
+
+func unescapeMountField(s string) string {
+	repl := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return repl.Replace(s)
+}
+
+func isPseudoFSType(fsType string) bool {
+	switch fsType {
+	case "proc", "sysfs", "devtmpfs", "devpts", "cgroup", "cgroup2", "pstore", "securityfs",
+		"autofs", "mqueue", "hugetlbfs", "debugfs", "tracefs", "configfs", "fusectl",
+		"rpc_pipefs", "binfmt_misc", "ramfs", "tmpfs", "overlay":
+		return true
+	default:
+		return false
+	}
 }
 
 // Parse /proc/net/tcp and /proc/net/tcp6
@@ -609,7 +796,6 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 		}
 	}
 
-
 	// helper: EWMA baseline
 	upd := func(name string, x float64) float64 {
 		const alpha = 0.2
@@ -640,149 +826,132 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 		emit("HEALTH/DISK_ROOT_HIGH", "fs")
 	}
 
+	// Disk /tmp
+	if d.cfg.TmpUsedPct > 0 && int(s.DiskTmpPct+0.5) >= d.cfg.TmpUsedPct {
+		if d.cfg.TmpCleanOlder > 0 {
+			removed, freed := cleanupTmp("/tmp", d.cfg.TmpCleanOlder)
+			samples := []string{
+				fmt.Sprintf("/tmp usage=%.1f%% threshold=%d%% removed_files=%d freed≈%s",
+					s.DiskTmpPct, d.cfg.TmpUsedPct, removed, humanBytes(freed)),
+			}
+			emitS("HEALTH/DISK_TMP_HIGH", "fs.tmp", samples)
+		} else {
+			emit("HEALTH/DISK_TMP_HIGH", "fs.tmp")
+		}
+	}
 
+	// --- Total connections spike ---
+	bTot := upd("conn.total", float64(s.TCP["total"]))
+	tot := s.TCP["total"]
+	if tot >= d.cfg.ConnTotalAbs ||
+		(tot >= d.cfg.ConnTotalMin &&
+			float64(tot) > d.cfg.ConnTotalSpikeX*bTot &&
+			tot-int(bTot) >= d.cfg.SpikeMinDelta) {
+		emitS("HEALTH/CONN_TOTAL_SPIKE", "net.total",
+			[]string{fmt.Sprintf(
+				"Total conn spike  cur=%d  baseline≈%.0f  x=%.2f",
+				tot, bTot, float64(tot)/maxf(bTot, 1),
+			)})
+	}
 
-    // Disk /tmp
-    if d.cfg.TmpUsedPct > 0 && int(s.DiskTmpPct+0.5) >= d.cfg.TmpUsedPct {
-        if d.cfg.TmpCleanOlder > 0 {
-            removed, freed := cleanupTmp("/tmp", d.cfg.TmpCleanOlder)
-            samples := []string{
-                fmt.Sprintf("/tmp usage=%.1f%% threshold=%d%% removed_files=%d freed≈%s",
-                    s.DiskTmpPct, d.cfg.TmpUsedPct, removed, humanBytes(freed)),
-            }
-            emitS("HEALTH/DISK_TMP_HIGH", "fs.tmp", samples)
-        } else {
-            emit("HEALTH/DISK_TMP_HIGH", "fs.tmp")
-        }
-    }
+	// --- ESTABLISHED spike ---
+	bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
+	est := s.TCP["ESTABLISHED"]
+	if est >= d.cfg.EstablishedAbs ||
+		(est >= d.cfg.EstablishedMin &&
+			float64(est) > d.cfg.ConnEstSpikeX*bEst &&
+			est-int(bEst) >= d.cfg.SpikeMinDelta) {
+		emitS("HEALTH/CONN_EST_SPIKE", "net.est",
+			[]string{fmt.Sprintf(
+				"ESTABLISHED spike  cur=%d  baseline≈%.0f  x=%.2f",
+				est, bEst, float64(est)/maxf(bEst, 1),
+			)})
+	}
 
+	// --- SYN_RECV spike ---
+	bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
+	syn := s.TCP["SYN_RECV"]
+	if syn >= d.cfg.SynRecvAbs ||
+		(syn >= d.cfg.SynRecvMin &&
+			float64(syn) > d.cfg.ConnSynSpikeX*bSyn &&
+			syn-int(bSyn) >= d.cfg.SpikeMinDelta) {
+		samples := []string{
+			fmt.Sprintf("SYN_RECV spike  cur=%d  baseline≈%.0f  x=%.2f",
+				syn, bSyn, float64(syn)/maxf(bSyn, 1)),
+		}
+		if d.cfg.SpikeProbeTopN > 0 {
+			top := d.probeSynRecvTalkers(d.cfg.SpikeProbeTopN)
+			if len(top) > 0 {
+				samples = append(samples, "Top remote IPs (SYN_RECV):")
+				samples = append(samples, top...)
+			}
+		}
+		emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
+	}
 
-// --- Total connections spike ---
-bTot := upd("conn.total", float64(s.TCP["total"]))
-tot := s.TCP["total"]
-if tot >= d.cfg.ConnTotalAbs ||
-   (tot >= d.cfg.ConnTotalMin &&
-    float64(tot) > d.cfg.ConnTotalSpikeX*bTot &&
-    tot - int(bTot) >= d.cfg.SpikeMinDelta) {
-    emitS("HEALTH/CONN_TOTAL_SPIKE", "net.total",
-        []string{fmt.Sprintf(
-            "Total conn spike  cur=%d  baseline≈%.0f  x=%.2f",
-            tot, bTot, float64(tot)/maxf(bTot, 1),
-        )})
-}
+	// --- Per-port spikes (watchlist) ---
+	for p, c := range s.PortConn {
+		if !containsInt(d.cfg.PortWatch, p) {
+			continue
+		}
+		key := "port." + strconv.Itoa(p)
+		b := upd(key, float64(c))
+		if c >= d.cfg.PortConnMin &&
+			float64(c) > d.cfg.PortSpikeX*b &&
+			c-int(b) >= d.cfg.SpikeMinDelta {
+			samples := []string{
+				fmt.Sprintf("Spike on tcp/%d  conns=%d  baseline≈%.0f  x=%.2f", p, c, b, float64(c)/maxf(b, 1)),
+			}
+			if d.cfg.SpikeProbeTopN > 0 {
+				top := d.probeTopTalkers(p, []string{"SYN_RECV", "ESTABLISHED"}, d.cfg.SpikeProbeTopN)
+				if len(top) > 0 {
+					samples = append(samples, "Top talkers:")
+					samples = append(samples, top...)
+				}
+			}
+			emitS("HEALTH/PORT_CONN_SPIKE", key, samples)
+		}
+	}
 
-// --- ESTABLISHED spike ---
-bEst := upd("conn.est", float64(s.TCP["ESTABLISHED"]))
-est := s.TCP["ESTABLISHED"]
-if est >= d.cfg.EstablishedAbs ||
-   (est >= d.cfg.EstablishedMin &&
-    float64(est) > d.cfg.ConnEstSpikeX*bEst &&
-    est - int(bEst) >= d.cfg.SpikeMinDelta) {
-    emitS("HEALTH/CONN_EST_SPIKE", "net.est",
-        []string{fmt.Sprintf(
-            "ESTABLISHED spike  cur=%d  baseline≈%.0f  x=%.2f",
-            est, bEst, float64(est)/maxf(bEst, 1),
-        )})
-}
+	// throughput spikes (now with samples)
+	bRx := upd("rx", s.RxMbps)
+	bTx := upd("tx", s.TxMbps)
 
-// --- SYN_RECV spike ---
-bSyn := upd("conn.syn", float64(s.TCP["SYN_RECV"]))
-syn := s.TCP["SYN_RECV"]
-if syn >= d.cfg.SynRecvAbs ||
-   (syn >= d.cfg.SynRecvMin &&
-    float64(syn) > d.cfg.ConnSynSpikeX*bSyn &&
-    syn - int(bSyn) >= d.cfg.SpikeMinDelta) {
-    samples := []string{
-        fmt.Sprintf("SYN_RECV spike  cur=%d  baseline≈%.0f  x=%.2f",
-            syn, bSyn, float64(syn)/maxf(bSyn, 1)),
-    }
-    if d.cfg.SpikeProbeTopN > 0 {
-        top := d.probeSynRecvTalkers(d.cfg.SpikeProbeTopN)
-        if len(top) > 0 {
-            samples = append(samples, "Top remote IPs (SYN_RECV):")
-            samples = append(samples, top...)
-        }
-    }
-    emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
-}
+	if s.RxMbps >= d.cfg.ThruMinMbps && s.RxMbps > d.cfg.ThruSpikeX*bRx {
+		samples := []string{
+			fmt.Sprintf("RX spike  rx=%.1f Mbps  baseline≈%.1f  x=%.2f",
+				s.RxMbps, bRx, s.RxMbps/maxf(bRx, 1)),
+		}
+		if d.cfg.SpikeProbeTopN > 0 {
+			if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
+				samples = append(samples, "Top PIDs (ESTABLISHED):")
+				samples = append(samples, top...)
+			}
+			if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
+				samples = append(samples, "Top remote IPs (ESTABLISHED):")
+				samples = append(samples, talk...)
+			}
+		}
+		emitS("HEALTH/RX_THRU_SPIKE", "net.rx", samples)
+	}
 
-// --- Per-port spikes (watchlist) ---
-for p, c := range s.PortConn {
-    if !containsInt(d.cfg.PortWatch, p) { continue }
-    key := "port." + strconv.Itoa(p)
-    b := upd(key, float64(c))
-    if c >= d.cfg.PortConnMin &&
-       float64(c) > d.cfg.PortSpikeX*b &&
-       c - int(b) >= d.cfg.SpikeMinDelta {
-        samples := []string{
-            fmt.Sprintf("Spike on tcp/%d  conns=%d  baseline≈%.0f  x=%.2f", p, c, b, float64(c)/maxf(b,1)),
-        }
-        if d.cfg.SpikeProbeTopN > 0 {
-            top := d.probeTopTalkers(p, []string{"SYN_RECV", "ESTABLISHED"}, d.cfg.SpikeProbeTopN)
-            if len(top) > 0 {
-                samples = append(samples, "Top talkers:")
-                samples = append(samples, top...)
-            }
-        }
-        emitS("HEALTH/PORT_CONN_SPIKE", key, samples)
-    }
-}
-
-
-
-
-
-
-
-
-
-
-// throughput spikes (now with samples)
-bRx := upd("rx", s.RxMbps)
-bTx := upd("tx", s.TxMbps)
-
-if s.RxMbps >= d.cfg.ThruMinMbps && s.RxMbps > d.cfg.ThruSpikeX*bRx {
-    samples := []string{
-        fmt.Sprintf("RX spike  rx=%.1f Mbps  baseline≈%.1f  x=%.2f",
-            s.RxMbps, bRx, s.RxMbps/maxf(bRx, 1)),
-    }
-    if d.cfg.SpikeProbeTopN > 0 {
-        if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
-            samples = append(samples, "Top PIDs (ESTABLISHED):")
-            samples = append(samples, top...)
-        }
-        if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
-            samples = append(samples, "Top remote IPs (ESTABLISHED):")
-            samples = append(samples, talk...)
-        }
-    }
-    emitS("HEALTH/RX_THRU_SPIKE", "net.rx", samples)
-}
-
-if s.TxMbps >= d.cfg.ThruMinMbps && s.TxMbps > d.cfg.ThruSpikeX*bTx {
-    samples := []string{
-        fmt.Sprintf("TX spike  tx=%.1f Mbps  baseline≈%.1f  x=%.2f",
-            s.TxMbps, bTx, s.TxMbps/maxf(bTx, 1)),
-    }
-    if d.cfg.SpikeProbeTopN > 0 {
-        if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
-            samples = append(samples, "Top PIDs (ESTABLISHED):")
-            samples = append(samples, top...)
-        }
-        if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
-            samples = append(samples, "Top remote IPs (ESTABLISHED):")
-            samples = append(samples, talk...)
-        }
-    }
-    emitS("HEALTH/TX_THRU_SPIKE", "net.tx", samples)
-}
-
-
-
-
-
-
-
+	if s.TxMbps >= d.cfg.ThruMinMbps && s.TxMbps > d.cfg.ThruSpikeX*bTx {
+		samples := []string{
+			fmt.Sprintf("TX spike  tx=%.1f Mbps  baseline≈%.1f  x=%.2f",
+				s.TxMbps, bTx, s.TxMbps/maxf(bTx, 1)),
+		}
+		if d.cfg.SpikeProbeTopN > 0 {
+			if top := d.probeTopPIDsByConn(-1, []string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(top) > 0 {
+				samples = append(samples, "Top PIDs (ESTABLISHED):")
+				samples = append(samples, top...)
+			}
+			if talk := d.probeTalkersAllPorts([]string{"ESTABLISHED"}, d.cfg.SpikeProbeTopN); len(talk) > 0 {
+				samples = append(samples, "Top remote IPs (ESTABLISHED):")
+				samples = append(samples, talk...)
+			}
+		}
+		emitS("HEALTH/TX_THRU_SPIKE", "net.tx", samples)
+	}
 
 	// temperature
 	if s.TempMaxC >= float64(d.cfg.TempCritC) {
@@ -836,64 +1005,61 @@ func containsInt(slice []int, v int) bool {
 }
 
 func maxf(a, b float64) float64 {
-	if a > b { return a }
+	if a > b {
+		return a
+	}
 	return b
 }
-
-
 
 // cleanupTmp deletes regular files under root that are older than maxAge.
 // It returns number of files removed and total bytes freed.
 func cleanupTmp(root string, maxAge time.Duration) (removed int, freedBytes int64) {
-    now := time.Now()
-    filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-        if err != nil {
-            return nil
-        }
-        if d.IsDir() {
-            return nil
-        }
-        info, err := d.Info()
-        if err != nil {
-            return nil
-        }
-        // skip sockets/FIFOs/devices just in case
-        if !info.Mode().IsRegular() {
-            return nil
-        }
-        if now.Sub(info.ModTime()) < maxAge {
-            return nil
-        }
-        if err := os.Remove(path); err == nil {
-            removed++
-            freedBytes += info.Size()
-        }
-        return nil
-    })
-    return removed, freedBytes
+	now := time.Now()
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		// skip sockets/FIFOs/devices just in case
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if now.Sub(info.ModTime()) < maxAge {
+			return nil
+		}
+		if err := os.Remove(path); err == nil {
+			removed++
+			freedBytes += info.Size()
+		}
+		return nil
+	})
+	return removed, freedBytes
 }
 
 // humanBytes renders a rough human-readable size string.
 func humanBytes(b int64) string {
-    const (
-        kb = 1024
-        mb = 1024 * kb
-        gb = 1024 * mb
-    )
-    switch {
-    case b >= gb:
-        return fmt.Sprintf("%.1fGiB", float64(b)/float64(gb))
-    case b >= mb:
-        return fmt.Sprintf("%.1fMiB", float64(b)/float64(mb))
-    case b >= kb:
-        return fmt.Sprintf("%.1fKiB", float64(b)/float64(kb))
-    default:
-        return fmt.Sprintf("%dB", b)
-    }
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1fGiB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.1fMiB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.1fKiB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
 }
-
-
-
 
 // (utility) decode hex-encoded IPv4/IPv6 (debugging aid)
 func decodeHexIP(s string) net.IP {
@@ -918,7 +1084,6 @@ func init() {
 	//logging.Logf("[detectors] health loaded")
 }
 
-
 // -------- enrichment helpers (borrowed from exim relays/security style) --------
 func (d *Detector) lookupMeta(ip string) string {
 	if ip == "" {
@@ -928,10 +1093,19 @@ func (d *Detector) lookupMeta(ip string) string {
 	var asn uint
 	if d.enr != nil {
 		r := d.enr.Lookup(ip)
-		if r.Country != "" { country = r.Country }
-		if r.City != ""    { city = r.City }
-		if r.PTR != ""     { ptr = strings.TrimSuffix(r.PTR, ".") }
-		if r.ASN > 0       { asn = r.ASN; asname = r.ASNName }
+		if r.Country != "" {
+			country = r.Country
+		}
+		if r.City != "" {
+			city = r.City
+		}
+		if r.PTR != "" {
+			ptr = strings.TrimSuffix(r.PTR, ".")
+		}
+		if r.ASN > 0 {
+			asn = r.ASN
+			asname = r.ASNName
+		}
 	}
 	if d.cfg.UsePTR && ptr == "" {
 		names, _ := net.LookupAddr(ip)
@@ -941,8 +1115,12 @@ func (d *Detector) lookupMeta(ip string) string {
 	}
 	geo := ""
 	if country != "" || city != "" {
-		if country == "" { country = "-" }
-		if city == ""    { city = "-" }
+		if country == "" {
+			country = "-"
+		}
+		if city == "" {
+			city = "-"
+		}
 		geo = country + "/" + city
 	}
 	as := ""
@@ -952,19 +1130,25 @@ func (d *Detector) lookupMeta(ip string) string {
 		as = fmt.Sprintf("[AS%d", asn)
 	}
 	if ptr != "" {
-		if as != "" { as += "; PTR " + ptr + "]" } else { as = "[PTR " + ptr + "]" }
+		if as != "" {
+			as += "; PTR " + ptr + "]"
+		} else {
+			as = "[PTR " + ptr + "]"
+		}
 	} else if as != "" {
 		as += "]"
 	}
-	if geo != "" && as != "" { return geo + "/" + as }
-	if geo != "" { return geo }
+	if geo != "" && as != "" {
+		return geo + "/" + as
+	}
+	if geo != "" {
+		return geo
+	}
 	return as
 }
 
-
-
 // SnapshotNow collects a one-off health snapshot for status CLI.
 func SnapshotNow() Snapshot {
-    d := &Detector{}
-    return d.snapshot()
+	d := &Detector{}
+	return d.snapshot()
 }
