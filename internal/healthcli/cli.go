@@ -427,18 +427,29 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 	if smart == "" && wear == "" && mdadm == "" && zfs == "" {
 		return
 	}
+	mdadmText, mdadmRank := optionalStorageSubsystemStatus(s, "mdadm_present", mdadm)
+	zfsText, zfsRank := optionalStorageSubsystemStatus(s, "zfs_present", zfs)
+	storageRank := worstLabel(healthLabel(smart), healthLabel(wear), mdadmRank, zfsRank)
 	if opts.Compact {
-		fmt.Printf("Storage %-6s smart=%s wear=%s mdadm=%s zfs=%s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts),
-			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), nonEmptyOr(mdadm, "n/a"), nonEmptyOr(zfs, "n/a"))
+		fmt.Printf("Storage %-6s smart=%s wear=%s mdadm=%s zfs=%s\n", badge(storageRank, opts),
+			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), mdadmText, zfsText)
 		printDiskSmartDeviceSection(s, opts)
 		return
 	}
-	fmt.Printf("Storage health %s\n", badge(worstLabel(healthLabel(smart), healthLabel(wear), healthLabel(mdadm), healthLabel(zfs)), opts))
+	fmt.Printf("Storage health %s\n", badge(storageRank, opts))
 	fmt.Printf("  SMART summary: %s\n", nonEmptyOr(smart, "n/a"))
 	fmt.Printf("  Wearout (highest devices): %s\n", nonEmptyOr(wear, "n/a"))
-	fmt.Printf("  mdadm: %s\n", nonEmptyOr(mdadm, "n/a"))
-	fmt.Printf("  ZFS: %s\n", nonEmptyOr(zfs, "n/a"))
+	fmt.Printf("  mdadm: %s\n", mdadmText)
+	fmt.Printf("  ZFS: %s\n", zfsText)
 	printDiskSmartDeviceSection(s, opts)
+}
+
+func optionalStorageSubsystemStatus(s parsedSnapshot, presentKey, health string) (string, healthLabelRank) {
+	present, known := getOptionalBool(s.RawMap, presentKey)
+	if known && !present {
+		return "not present", okLabel
+	}
+	return nonEmptyOr(health, "n/a"), healthLabel(health)
 }
 
 type diskSmartRow struct {
@@ -774,7 +785,7 @@ func healthLabel(s string) healthLabelRank {
 	x := strings.ToLower(strings.TrimSpace(s))
 	switch {
 	case x == "", x == "unknown", x == "n/a":
-		return warnLabel
+		return okLabel
 	case strings.Contains(x, "crit"), strings.Contains(x, "fail"), strings.Contains(x, "degraded"):
 		return critLabel
 	case strings.Contains(x, "warn"), strings.Contains(x, "recover"), strings.Contains(x, "resilver"):
@@ -976,6 +987,51 @@ func getStr(m map[string]any, key string) string {
 	}
 	s, _ := v.(string)
 	return strings.TrimSpace(s)
+}
+
+func getOptionalBool(m map[string]any, key string) (bool, bool) {
+	if v, ok := m[key]; ok {
+		if b, ok := parseOptionalBool(v); ok {
+			return b, true
+		}
+	}
+	if rawDisk, ok := m["disk"].(map[string]any); ok {
+		if v, ok := rawDisk[key]; ok {
+			if b, ok := parseOptionalBool(v); ok {
+				return b, true
+			}
+		}
+	}
+	return false, false
+}
+
+func parseOptionalBool(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "y", "on":
+			return true, true
+		case "false", "0", "no", "n", "off":
+			return false, true
+		}
+	case float64:
+		if x == 0 {
+			return false, true
+		}
+		if x == 1 {
+			return true, true
+		}
+	case int:
+		if x == 0 {
+			return false, true
+		}
+		if x == 1 {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 func getInt(m map[string]any, key string) int {
