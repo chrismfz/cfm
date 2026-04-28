@@ -74,7 +74,7 @@ func parseLiveConfig(args []string) liveCfg {
 	return cfg
 }
 
-func runLive(baseURL string, args []string, _ cliOptions) error {
+func runLive(baseURL string, args []string, opts cliOptions) error {
 	cfg := parseLiveConfig(args)
 	if err := ui.Init(); err != nil {
 		return fmt.Errorf("termui init: %w", err)
@@ -110,20 +110,29 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 	netPlot.Data = [][]float64{{0, 0}, {0, 0}}
 	netPlot.AxesColor = ui.ColorWhite
 
+	diskTable := widgets.NewTable()
+	diskTable.Title = " Disk mounts "
+	diskTable.FillRow = true
+	diskTable.RowSeparator = false
+	diskTable.Rows = [][]string{{"state", "mount", "used/total/free", "disk %", "inode %"}}
+
+	runtimeTable := widgets.NewTable()
+	runtimeTable.Title = " Runtime "
+	runtimeTable.FillRow = true
+	runtimeTable.RowSeparator = false
+	runtimeTable.Rows = [][]string{{"cfm live", "dnat"}, {"down", "unknown"}}
+
 	svcTable := widgets.NewTable()
 	svcTable.Title = " Service states "
 	svcTable.FillRow = true
 	svcTable.RowSeparator = false
-	svcTable.Rows = [][]string{{"service", "state", "enabled", "error"}}
+	svcTable.Rows = [][]string{{"service", "state", "enabled", "last_error"}}
 
-	storage := widgets.NewParagraph()
-	storage.Title = " Storage health "
-	storage.WrapText = true
 	diskDevices := widgets.NewTable()
 	diskDevices.Title = " Disk SMART devices "
 	diskDevices.FillRow = true
 	diskDevices.RowSeparator = false
-	diskDevices.Rows = [][]string{{"device", "model", "serial", "type", "health", "wearout", "temp", "error"}}
+	diskDevices.Rows = [][]string{{"device", "model", "serial", "type", "normalized health", "wearout %", "wearout source", "temp", "probe/error"}}
 
 	grid := ui.NewGrid()
 	layout := func() {
@@ -132,10 +141,10 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 		grid.Set(
 			ui.NewRow(0.08, ui.NewCol(1.0, header)),
 			ui.NewRow(0.06, ui.NewCol(1.0, help)),
-			ui.NewRow(0.28, ui.NewCol(0.5, cpuPlot), ui.NewCol(0.5, ramPlot)),
-			ui.NewRow(0.28, ui.NewCol(0.5, diskPlot), ui.NewCol(0.5, netPlot)),
-			ui.NewRow(0.30, ui.NewCol(0.5, svcTable), ui.NewCol(0.5, storage)),
-			ui.NewRow(0.22, ui.NewCol(1.0, diskDevices)),
+			ui.NewRow(0.24, ui.NewCol(0.5, cpuPlot), ui.NewCol(0.5, ramPlot)),
+			ui.NewRow(0.24, ui.NewCol(0.5, diskPlot), ui.NewCol(0.5, netPlot)),
+			ui.NewRow(0.20, ui.NewCol(0.55, diskTable), ui.NewCol(0.45, runtimeTable)),
+			ui.NewRow(0.22, ui.NewCol(0.5, svcTable), ui.NewCol(0.5, diskDevices)),
 		)
 	}
 	layout()
@@ -210,11 +219,44 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 		netInRing.push(float64(inBps) / (1024 * 1024))
 		netOuRing.push(float64(outBps) / (1024 * 1024))
 
+		diskRows := collectDiskMountRows(s)
+		diskTableRows := [][]string{{"state", "mount", "used/total/free", "disk %", "inode %"}}
+		for _, r := range diskRows {
+			status := labelByPct(r.usedPct)
+			if r.hasInode && labelByPct(r.inodePct) > status {
+				status = labelByPct(r.inodePct)
+			}
+			capacity := "n/a"
+			if r.totalBytes > 0 {
+				capacity = fmt.Sprintf("%s/%s/%s", bytesIEC(r.usedBytes), bytesIEC(r.totalBytes), bytesIEC(r.freeBytes))
+			}
+			inode := "n/a"
+			if r.hasInode {
+				inode = pctStr(r.inodePct)
+			}
+			diskTableRows = append(diskTableRows, []string{badge(status, opts), r.mount, capacity, pctStr(r.usedPct), inode})
+		}
+		if len(diskTableRows) == 1 {
+			diskTableRows = append(diskTableRows, []string{"-", "(no data)", "-", "-", "-"})
+		}
+		diskTable.Rows = diskTableRows
+
+		dnat := strings.TrimSpace(s.Modern.Runtime.DNATEnabled)
+		if dnat == "" {
+			dnat = "unknown"
+		}
+		liveState := "down"
+		if s.Modern.Runtime.CFMDaemonLive {
+			liveState = "live"
+		}
+		runtimeTable.Rows = [][]string{{"cfm live", "dnat"}, {liveState, dnat}}
+
 		services := s.Modern.Services
 		if len(services) == 0 {
 			services = servicesFromRaw(s.RawMap)
 		}
-		rows := [][]string{{"service", "state", "enabled", "error"}}
+		svcRows := [][]string{{"service", "state", "enabled", "last_error"}}
+		hasErr := false
 		for _, svc := range services {
 			state := strings.TrimSpace(svc.State)
 			if state == "" {
@@ -224,22 +266,21 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 					state = "inactive"
 				}
 			}
-			rows = append(rows, []string{svc.Name, state, boolYN(svc.Enabled), truncateText(svc.LastError, 36)})
+			errText := strings.TrimSpace(svc.LastError)
+			if errText != "" {
+				hasErr = true
+			}
+			svcRows = append(svcRows, []string{svc.Name, state, boolYN(svc.Enabled), truncateText(errText, 36)})
 		}
-		if len(rows) == 1 {
-			rows = append(rows, []string{"(no data)", "-", "-", "-"})
+		if len(svcRows) == 1 {
+			svcRows = append(svcRows, []string{"(no data)", "-", "-", "-"})
+		} else if !hasErr {
+			svcRows[0][3] = "-"
 		}
-		svcTable.Rows = rows
-
-		smart := firstNonEmpty(s.Modern.Disk.SmartHealth, getStr(s.RawMap, "smart_health"))
-		wear := firstNonEmpty(s.Modern.Disk.DiskWearout, getStr(s.RawMap, "disk_wearout"))
-		mdadm := firstNonEmpty(s.Modern.Disk.MDADMHealth, getStr(s.RawMap, "mdadm_health"))
-		zfs := firstNonEmpty(s.Modern.Disk.ZFSHealth, getStr(s.RawMap, "zfs_health"))
-		storage.Text = fmt.Sprintf("SMART: %s\nWearout: %s\nmdadm: %s\nZFS: %s",
-			nonEmptyOr(smart, "n/a"), nonEmptyOr(wear, "n/a"), nonEmptyOr(mdadm, "n/a"), nonEmptyOr(zfs, "n/a"))
+		svcTable.Rows = svcRows
 
 		devRows := collectDiskSmartRows(s)
-		devTable := [][]string{{"device", "model", "serial", "type", "health", "wearout", "temp", "error"}}
+		devTable := [][]string{{"device", "model", "serial", "type", "normalized health", "wearout %", "wearout source", "temp", "probe/error"}}
 		maxRows := 8
 		if len(devRows) > maxRows {
 			devRows = devRows[:maxRows]
@@ -248,23 +289,22 @@ func runLive(baseURL string, args []string, _ cliOptions) error {
 			wear := "n/a"
 			if row.WearoutUsed != nil {
 				wear = fmt.Sprintf("%d%%", *row.WearoutUsed)
-				if row.WearoutSource != "" {
-					wear += " (" + row.WearoutSource + ")"
-				}
 			}
+			wearSource := nonEmptyOr(row.WearoutSource, "-")
 			devTable = append(devTable, []string{
 				row.Key,
-				truncateText(nonEmptyOr(row.Model, "-"), 18),
-				maskOrTrimSerial(row.Serial, false),
+				truncateIdentifier(nonEmptyOr(row.Model, "-"), 18, opts.FullIdent),
+				maskOrTrimSerial(row.Serial, opts.FullIdent),
 				truncateText(nonEmptyOr(row.DeviceType, "-"), 8),
 				nonEmptyOr(row.Normalized, "unknown"),
-				truncateText(wear, 16),
+				wear,
+				truncateText(wearSource, 14),
 				nonEmptyOr(row.TemperatureC, "-"),
 				truncateText(nonEmptyOr(row.ProbeOrErr, "-"), 22),
 			})
 		}
 		if len(devTable) == 1 {
-			devTable = append(devTable, []string{"(no data)", "-", "-", "-", "-", "-", "-", "-"})
+			devTable = append(devTable, []string{"(no data)", "-", "-", "-", "-", "-", "-", "-", "-"})
 		}
 		diskDevices.Rows = devTable
 	}

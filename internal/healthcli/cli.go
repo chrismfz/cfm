@@ -20,6 +20,7 @@ type cliOptions struct {
 	NoColor    bool
 	Compact    bool
 	DiskDetail bool
+	FullIdent  bool
 }
 
 type snapshotEnvelope struct {
@@ -138,6 +139,8 @@ func parseGlobalFlags(args []string) (cliOptions, []string) {
 			opts.Compact = true
 		case "--disk-detail":
 			opts.DiskDetail = true
+		case "--full-ident":
+			opts.FullIdent = true
 		default:
 			out = append(out, a)
 		}
@@ -151,9 +154,9 @@ func isTTY() bool {
 
 func printHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm health [--compact] [--disk-detail] [--no-color]             # summary")
+	fmt.Println("  cfm health [--compact] [--disk-detail] [--full-ident] [--no-color]             # summary")
 	fmt.Println("  cfm health json                                 # machine-readable snapshot")
-	fmt.Println("  cfm health live [--interval=2s] [--compact] [--no-color] # live dashboard (TTY), fallback to watch")
+	fmt.Println("  cfm health live [--interval=2s] [--compact] [--full-ident] [--no-color] # live dashboard (TTY), fallback to watch")
 	fmt.Println("  cfm health watch [N] [--compact] [--no-color]   # periodic text refresh every N seconds (default 5)")
 }
 
@@ -331,53 +334,7 @@ func printHostSection(s parsedSnapshot, opts cliOptions) {
 }
 
 func printDiskSection(s parsedSnapshot, opts cliOptions) {
-	type row struct {
-		mount       string
-		usedBytes   uint64
-		totalBytes  uint64
-		freeBytes   uint64
-		usedPct     float64
-		inodePct    float64
-		hasInode    bool
-		usedInodes  uint64
-		totalInodes uint64
-	}
-	rows := make([]row, 0, len(s.Modern.Disk.Mounts)+2)
-	for _, m := range s.Modern.Disk.Mounts {
-		usedPct := m.UsedPct
-		if usedPct <= 0 && m.TotalBytes > 0 {
-			usedPct = 100 * float64(m.UsedBytes) / float64(m.TotalBytes)
-		}
-		free := uint64(0)
-		if m.TotalBytes > m.UsedBytes {
-			free = m.TotalBytes - m.UsedBytes
-		}
-		r := row{
-			mount:      m.Mount,
-			usedBytes:  m.UsedBytes,
-			totalBytes: m.TotalBytes,
-			freeBytes:  free,
-			usedPct:    usedPct,
-		}
-		if m.TotalInodes > 0 {
-			r.hasInode = true
-			r.usedInodes = m.UsedInodes
-			r.totalInodes = m.TotalInodes
-			r.inodePct = m.InodeUsedPct
-			if r.inodePct <= 0 {
-				r.inodePct = 100 * float64(m.UsedInodes) / float64(m.TotalInodes)
-			}
-		}
-		rows = append(rows, r)
-	}
-	if len(rows) == 0 {
-		if s.Legacy.DiskRootPct > 0 {
-			rows = append(rows, row{mount: "/", usedPct: s.Legacy.DiskRootPct})
-		}
-		if s.Legacy.DiskTmpPct > 0 {
-			rows = append(rows, row{mount: "/tmp", usedPct: s.Legacy.DiskTmpPct})
-		}
-	}
+	rows := collectDiskMountRows(s)
 	if len(rows) == 0 {
 		return
 	}
@@ -417,6 +374,58 @@ func printDiskSection(s parsedSnapshot, opts cliOptions) {
 		}
 		fmt.Printf("  %-6s %-16s %-29s %-7s %-24s\n", badge(status, opts), r.mount, capacity, usage, inode)
 	}
+}
+
+type diskMountRow struct {
+	mount       string
+	usedBytes   uint64
+	totalBytes  uint64
+	freeBytes   uint64
+	usedPct     float64
+	inodePct    float64
+	hasInode    bool
+	usedInodes  uint64
+	totalInodes uint64
+}
+
+func collectDiskMountRows(s parsedSnapshot) []diskMountRow {
+	rows := make([]diskMountRow, 0, len(s.Modern.Disk.Mounts)+2)
+	for _, m := range s.Modern.Disk.Mounts {
+		usedPct := m.UsedPct
+		if usedPct <= 0 && m.TotalBytes > 0 {
+			usedPct = 100 * float64(m.UsedBytes) / float64(m.TotalBytes)
+		}
+		free := uint64(0)
+		if m.TotalBytes > m.UsedBytes {
+			free = m.TotalBytes - m.UsedBytes
+		}
+		r := diskMountRow{
+			mount:      m.Mount,
+			usedBytes:  m.UsedBytes,
+			totalBytes: m.TotalBytes,
+			freeBytes:  free,
+			usedPct:    usedPct,
+		}
+		if m.TotalInodes > 0 {
+			r.hasInode = true
+			r.usedInodes = m.UsedInodes
+			r.totalInodes = m.TotalInodes
+			r.inodePct = m.InodeUsedPct
+			if r.inodePct <= 0 {
+				r.inodePct = 100 * float64(m.UsedInodes) / float64(m.TotalInodes)
+			}
+		}
+		rows = append(rows, r)
+	}
+	if len(rows) == 0 {
+		if s.Legacy.DiskRootPct > 0 {
+			rows = append(rows, diskMountRow{mount: "/", usedPct: s.Legacy.DiskRootPct})
+		}
+		if s.Legacy.DiskTmpPct > 0 {
+			rows = append(rows, diskMountRow{mount: "/tmp", usedPct: s.Legacy.DiskTmpPct})
+		}
+	}
+	return rows
 }
 
 func printStorageSection(s parsedSnapshot, opts cliOptions) {
@@ -537,11 +546,8 @@ func printDiskSmartDeviceSection(s parsedSnapshot, opts cliOptions) {
 				wear += " (" + row.WearoutSource + ")"
 			}
 		}
-		model := nonEmptyOr(row.Model, "-")
-		if len(model) > 16 {
-			model = model[:15] + "…"
-		}
-		serial := maskOrTrimSerial(row.Serial, opts.DiskDetail)
+		model := truncateIdentifier(nonEmptyOr(row.Model, "-"), 16, opts.FullIdent)
+		serial := maskOrTrimSerial(row.Serial, opts.FullIdent)
 		dtype := nonEmptyOr(row.DeviceType, "-")
 		health := nonEmptyOr(row.Normalized, "unknown")
 		temp := nonEmptyOr(row.TemperatureC, "-")
@@ -578,6 +584,20 @@ func maskOrTrimSerial(serial string, showFull bool) string {
 		return serial
 	}
 	return serial[:4] + "…" + serial[len(serial)-3:]
+}
+
+func truncateIdentifier(v string, n int, showFull bool) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "-"
+	}
+	if showFull || len(v) <= n {
+		return v
+	}
+	if n <= 1 {
+		return v[:n]
+	}
+	return v[:n-1] + "…"
 }
 
 func printNetworkSection(s parsedSnapshot, opts cliOptions) {
