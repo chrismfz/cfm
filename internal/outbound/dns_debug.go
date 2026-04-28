@@ -26,6 +26,7 @@ const (
 	dnsDebugChain      = "output"
 	dnsDebugUIDSet     = "active_uids"
 	dnsDebugNFLOGGroup = uint16(40123)
+	dnsDebugSnaplen    = 256
 
 	dnsDebugMaxBytes      = 256 * 1024
 	dnsDebugRetentionMax  = 128
@@ -58,6 +59,7 @@ type DNSDebugCapture struct {
 	mu                 sync.Mutex
 	sessions           map[dnsDebugKey]*dnsDebugSession
 	unmatchedPacketLog int
+	parseFailureLog    int
 }
 
 func NewDNSDebugCapture(rt Runtime) *DNSDebugCapture {
@@ -72,6 +74,7 @@ func (d *DNSDebugCapture) Start(ctx context.Context) {
 		logging.Logf("[outbound-dns-debug] nft init failed: %v", err)
 		return
 	}
+	logging.Logf("[outbound-dns-debug] started nflog_group=%d snaplen=%d", dnsDebugNFLOGGroup, dnsDebugSnaplen)
 	go d.runConsumer(ctx)
 	go func() {
 		<-ctx.Done()
@@ -144,6 +147,7 @@ func (d *DNSDebugCapture) runConsumer(ctx context.Context) {
 		}
 		msg, ok := parseDNSFromPacket(*a.Payload)
 		if !ok {
+			d.recordParseFailure(uid, gid, len(*a.Payload))
 			return 0
 		}
 		d.writeSample(uid, gid, msg)
@@ -151,6 +155,15 @@ func (d *DNSDebugCapture) runConsumer(ctx context.Context) {
 	}
 	if err := nf.Register(ctx, cb); err != nil {
 		logging.Logf("[outbound-dns-debug] nflog register failed: %v", err)
+	}
+}
+
+func (d *DNSDebugCapture) recordParseFailure(uid, gid uint32, payloadLen int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parseFailureLog++
+	if d.parseFailureLog == 1 || d.parseFailureLog%100 == 0 {
+		logging.Logf("[outbound-dns-debug] packet parse failed uid=%d gid=%d payload_len=%d parse_failures=%d", uid, gid, payloadLen, d.parseFailureLog)
 	}
 }
 
@@ -239,8 +252,8 @@ func (d *DNSDebugCapture) ensureNFT() error {
 		{"add", "table", "inet", dnsDebugTable},
 		{"add", "set", "inet", dnsDebugTable, dnsDebugUIDSet, "{", "type", "uid", ";", "flags", "timeout", ";", "}"},
 		{"add", "chain", "inet", dnsDebugTable, dnsDebugChain, "{", "type", "filter", "hook", "output", "priority", "-50", ";", "policy", "accept", ";", "}"},
-		{"add", "rule", "inet", dnsDebugTable, dnsDebugChain, "meta", "skuid", "@" + dnsDebugUIDSet, "udp", "dport", "53", "nflog", "group", strconv.Itoa(int(dnsDebugNFLOGGroup))},
-		{"add", "rule", "inet", dnsDebugTable, dnsDebugChain, "meta", "skuid", "@" + dnsDebugUIDSet, "tcp", "dport", "53", "nflog", "group", strconv.Itoa(int(dnsDebugNFLOGGroup))},
+		{"add", "rule", "inet", dnsDebugTable, dnsDebugChain, "meta", "skuid", "@" + dnsDebugUIDSet, "udp", "dport", "53", "nflog", "group", strconv.Itoa(int(dnsDebugNFLOGGroup)), "snaplen", strconv.Itoa(dnsDebugSnaplen)},
+		{"add", "rule", "inet", dnsDebugTable, dnsDebugChain, "meta", "skuid", "@" + dnsDebugUIDSet, "tcp", "dport", "53", "nflog", "group", strconv.Itoa(int(dnsDebugNFLOGGroup)), "snaplen", strconv.Itoa(dnsDebugSnaplen)},
 	}
 	for _, c := range cmds {
 		if out, err := exec.Command("nft", c...).CombinedOutput(); err != nil {
