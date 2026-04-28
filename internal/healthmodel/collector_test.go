@@ -8,7 +8,7 @@ func TestResolveFrontendDeterministically_DNATOwnerActiveWins(t *testing.T) {
 		{name: "openresty", ownsDNATPorts: true, active: false, binaryPresent: true, configHits: 1},
 		{name: "nginx", ownsDNATPorts: false, active: false, binaryPresent: true, configHits: 1},
 	}
-	frontend, confidence := resolveFrontendDeterministically(candidates)
+	frontend, confidence := resolveFrontendDeterministically(candidates, true)
 	if frontend != "angie" || confidence != "high" {
 		t.Fatalf("got (%s,%s), want (angie,high)", frontend, confidence)
 	}
@@ -20,7 +20,7 @@ func TestResolveFrontendDeterministically_StrongConfiguredFallback(t *testing.T)
 		{name: "openresty", binaryPresent: true, configHits: 2},
 		{name: "nginx", binaryPresent: false, configHits: 0},
 	}
-	frontend, confidence := resolveFrontendDeterministically(candidates)
+	frontend, confidence := resolveFrontendDeterministically(candidates, false)
 	if frontend != "openresty" || confidence != "medium" {
 		t.Fatalf("got (%s,%s), want (openresty,medium)", frontend, confidence)
 	}
@@ -42,6 +42,17 @@ func TestNormalizeFrontendProcessToken(t *testing.T) {
 		if got != want {
 			t.Fatalf("normalizeFrontendProcessToken(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestResolveFrontendDeterministically_DNATOnIgnoresPublicPortOnlyOwners(t *testing.T) {
+	candidates := []frontendSignal{
+		{name: "angie", ownsPublicPorts: true, active: true, binaryPresent: true, configHits: 1},
+		{name: "openresty", ownsPublicPorts: false, active: true, binaryPresent: true, configHits: 1},
+	}
+	frontend, confidence := resolveFrontendDeterministically(candidates, true)
+	if frontend != "" || confidence != "" {
+		t.Fatalf("got (%s,%s), want empty deterministic result when no DNAT target owners", frontend, confidence)
 	}
 }
 
