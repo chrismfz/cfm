@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,7 +91,7 @@ func collectRuntimeStatus() RuntimeStatus {
 	out.DNATFrontend = frontend
 	out.DNATConfidence = confidence
 	out.DNATWarning = warning
-	out.FrontendWorking, out.FrontendReason = deriveFrontendWorking(out.DNATFrontend, out.DNATEnabled)
+	out.FrontendWorking, out.FrontendReason, out.FrontendDebug = deriveFrontendWorking(out.DNATFrontend, out.DNATEnabled)
 	edge := detectEdgeRuntime(out.DNATEnabled)
 	out.EdgeService = edge.service
 	out.EdgeStatus = edge.status
@@ -323,48 +324,31 @@ var ssAddrPortSuffixRE = regexp.MustCompile(`:([0-9]+)$`)
 func probeListenerProcessNames() map[string]int {
 	out := map[string]int{}
 	snap := probeFrontendListeners()
-	for _, ln := range snap.entries {
+	for _, ln := range snap.listeners {
+		out[ln.name]++
+	}
+	for _, ln := range snap.flows {
 		out[ln.name]++
 	}
 	return out
 }
 
 type listenerEntry struct {
-	name string
-	port int
+	name        string
+	port        int
+	established bool
 }
 
 type frontendListenerSnapshot struct {
-	entries []listenerEntry
-}
-
-func (s frontendListenerSnapshot) hasOwnerOnPorts(owners []string, ports ...int) bool {
-	if len(owners) == 0 || len(ports) == 0 {
-		return false
-	}
-	ownerSet := make(map[string]struct{}, len(owners))
-	for _, owner := range owners {
-		o := strings.ToLower(strings.TrimSpace(owner))
-		if o == "" {
-			continue
-		}
-		ownerSet[o] = struct{}{}
-	}
-	for _, e := range s.entries {
-		if _, ok := ownerSet[e.name]; !ok {
-			continue
-		}
-		for _, port := range ports {
-			if e.port == port {
-				return true
-			}
-		}
-	}
-	return false
+	listeners []listenerEntry
+	flows     []listenerEntry
 }
 
 func probeFrontendListeners() frontendListenerSnapshot {
-	out := frontendListenerSnapshot{entries: make([]listenerEntry, 0, 8)}
+	out := frontendListenerSnapshot{
+		listeners: make([]listenerEntry, 0, 8),
+		flows:     make([]listenerEntry, 0, 8),
+	}
 	if _, err := exec.LookPath("ss"); err != nil {
 		return out
 	}
@@ -377,7 +361,11 @@ func probeFrontendListeners() frontendListenerSnapshot {
 		lines := strings.Split(string(mustCombinedOutput(exec.Command("ss", args...))), "\n")
 		for _, ln := range lines {
 			for _, entry := range parseSocketOwnerEntries(ln) {
-				out.entries = append(out.entries, entry)
+				if entry.established {
+					out.flows = append(out.flows, entry)
+					continue
+				}
+				out.listeners = append(out.listeners, entry)
 			}
 		}
 	}
@@ -394,10 +382,6 @@ func (s frontendListenerSnapshot) hasOwnerOnAllPorts(owners []string, ports ...i
 		}
 	}
 	return true
-}
-
-func (s frontendListenerSnapshot) hasOwnerOnAnyPorts(owners []string, ports ...int) bool {
-	return s.hasOwnerOnPorts(owners, ports...)
 }
 
 func parseListenerPort(ssLine string) int {
@@ -434,6 +418,7 @@ func parseSocketOwnerEntries(ssLine string) []listenerEntry {
 		return nil
 	}
 	out := make([]listenerEntry, 0, len(matches))
+	established := strings.HasPrefix(ln, "ESTAB ") || strings.HasPrefix(ln, "ESTAB\t")
 	for _, m := range matches {
 		if len(m) != 3 {
 			continue
@@ -443,7 +428,7 @@ func parseSocketOwnerEntries(ssLine string) []listenerEntry {
 		if name == "" {
 			continue
 		}
-		out = append(out, listenerEntry{name: name, port: port})
+		out = append(out, listenerEntry{name: name, port: port, established: established})
 	}
 	return out
 }
@@ -498,10 +483,10 @@ func readProcComm(pid int) string {
 	return strings.TrimSpace(string(b))
 }
 
-func deriveFrontendWorking(frontend, dnatState string) (string, string) {
+func deriveFrontendWorking(frontend, dnatState string) (string, string, FrontendDebug) {
 	frontend = strings.ToLower(strings.TrimSpace(frontend))
 	if frontend == "" || frontend == "unknown" {
-		return "down", "frontend unknown"
+		return "down", "frontend unknown", FrontendDebug{}
 	}
 
 	candidates := map[string]frontendSignal{
@@ -523,12 +508,12 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string) {
 	}
 	sig, ok := candidates[frontend]
 	if !ok {
-		return "down", fmt.Sprintf("unsupported frontend: %s", frontend)
+		return "down", fmt.Sprintf("unsupported frontend: %s", frontend), FrontendDebug{}
 	}
 
 	active, _, systemdOK := probeSystemdUnit(sig.serviceUnit)
 	if !systemdOK || !active {
-		return "down", fmt.Sprintf("service inactive: %s", sig.serviceUnit)
+		return "down", fmt.Sprintf("service inactive: %s", sig.serviceUnit), FrontendDebug{}
 	}
 
 	listeners := probeFrontendListeners()
@@ -536,18 +521,26 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string) {
 	if strings.EqualFold(strings.TrimSpace(dnatState), "on") {
 		expectedHTTP, expectedHTTPS = dnat.EffectiveTargetPorts()
 	}
-	if !listeners.hasOwnerOnAllPorts(sig.processAliases, expectedHTTP, expectedHTTPS) {
-		return "degraded", fmt.Sprintf("listener missing on expected ports :%d/:%d", expectedHTTP, expectedHTTPS)
+	debug := listeners.debugForOwners(sig.processAliases, expectedHTTP, expectedHTTPS)
+	missing := make([]int, 0, 2)
+	for _, info := range debug.PortOwners {
+		if len(info.ListenerOwners) == 0 && len(info.FlowOwners) == 0 {
+			missing = append(missing, info.Port)
+		}
 	}
-	if strings.EqualFold(strings.TrimSpace(dnatState), "on") && listeners.hasOwnerOnAnyPorts(sig.processAliases, 80, 443) {
-		return "degraded", "listener present on :80/:443 while DNAT is on"
+	if len(missing) > 0 {
+		return "degraded", fmt.Sprintf("no listener/active flow ownership on expected ports: %s", joinPorts(missing)), debug
 	}
 
-	if ok, reason := probeFrontendHTTP(); !ok {
-		return "degraded", reason
-	}
+	return "working", "", debug
+}
 
-	return "working", ""
+func joinPorts(ports []int) string {
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, fmt.Sprintf(":%d", p))
+	}
+	return strings.Join(out, "/")
 }
 
 func detectEdgeRuntime(dnatState string) runtimeRoleSignal {
@@ -642,13 +635,96 @@ func detectedPortsForService(listeners frontendListenerSnapshot, service string,
 		if port <= 0 {
 			continue
 		}
-		if listeners.hasOwnerOnPorts(aliases, port) {
+		if listeners.hasOwnerOnPorts(aliases, port) || listeners.hasOwnerOnFlows(aliases, port) {
 			if _, ok := seen[port]; !ok {
 				out = append(out, port)
 				seen[port] = struct{}{}
 			}
 		}
 	}
+	return out
+}
+
+func (s frontendListenerSnapshot) hasOwnerOnPorts(owners []string, ports ...int) bool {
+	return s.hasOwnerInEntries(s.listeners, owners, ports...)
+}
+
+func (s frontendListenerSnapshot) hasOwnerOnFlows(owners []string, ports ...int) bool {
+	return s.hasOwnerInEntries(s.flows, owners, ports...)
+}
+
+func (s frontendListenerSnapshot) hasOwnerInEntries(entries []listenerEntry, owners []string, ports ...int) bool {
+	if len(owners) == 0 || len(ports) == 0 {
+		return false
+	}
+	ownerSet := make(map[string]struct{}, len(owners))
+	for _, owner := range owners {
+		o := strings.ToLower(strings.TrimSpace(owner))
+		if o == "" {
+			continue
+		}
+		ownerSet[o] = struct{}{}
+	}
+	for _, e := range entries {
+		if _, ok := ownerSet[e.name]; !ok {
+			continue
+		}
+		for _, port := range ports {
+			if e.port == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s frontendListenerSnapshot) debugForOwners(owners []string, ports ...int) FrontendDebug {
+	debug := FrontendDebug{
+		CheckedPorts: append([]int(nil), ports...),
+		PortOwners:   make([]FrontendPortOwner, 0, len(ports)),
+	}
+	for _, p := range ports {
+		if p <= 0 {
+			continue
+		}
+		debug.PortOwners = append(debug.PortOwners, FrontendPortOwner{
+			Port:           p,
+			ListenerOwners: s.ownersForPort(s.listeners, owners, p),
+			FlowOwners:     s.ownersForPort(s.flows, owners, p),
+		})
+	}
+	return debug
+}
+
+func (s frontendListenerSnapshot) ownersForPort(entries []listenerEntry, owners []string, port int) []string {
+	if port <= 0 {
+		return nil
+	}
+	ownerSet := make(map[string]struct{}, len(owners))
+	for _, owner := range owners {
+		o := strings.ToLower(strings.TrimSpace(owner))
+		if o == "" {
+			continue
+		}
+		ownerSet[o] = struct{}{}
+	}
+	found := map[string]struct{}{}
+	for _, e := range entries {
+		if e.port != port {
+			continue
+		}
+		if len(ownerSet) > 0 {
+			if _, ok := ownerSet[e.name]; !ok {
+				continue
+			}
+		}
+		found[e.name] = struct{}{}
+	}
+	out := make([]string, 0, len(found))
+	for name := range found {
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 
