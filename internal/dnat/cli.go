@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,9 +37,9 @@ func getenvInt(key string, def int) int {
 }
 
 // StartFailSafe runs a simple DNAT watchdog:
-// - If DNAT is ON and OpenResty ports are not listening for N consecutive checks,
-//   it disables DNAT (fail-open) and logs the reason.
-// - DNAT stays OFF until manually re-enabled.
+//   - If DNAT is ON and edge proxy ports are not listening for N consecutive checks,
+//     it disables DNAT (fail-open) and logs the reason.
+//   - DNAT stays OFF until manually re-enabled.
 //
 // No config needed: it watches the same ports used by DNAT (defaults: 9080/9043).
 func StartFailSafe(ctx context.Context, backend any) {
@@ -133,11 +134,11 @@ func StartFailSafe(ctx context.Context, backend any) {
 	}()
 }
 
-
 // RunCLI implements:
-//   cfm dnat        -> report (ON/OFF + rules if ON + explanation)
-//   cfm dnat on     -> enable
-//   cfm dnat off    -> disable
+//
+//	cfm dnat        -> report (ON/OFF + rules if ON + explanation)
+//	cfm dnat on     -> enable
+//	cfm dnat off    -> disable
 //
 // Returns an exit code (0 ok, 1 error, 2 usage).
 func RunCLI(args []string, backend any) int {
@@ -200,6 +201,7 @@ func RunCLI(args []string, backend any) int {
 	}
 
 	fmt.Printf("DNAT table: %s %s\n", *family, *table)
+	edgeTarget := dnatTargetLabel(detectEdgeService())
 	if enabled {
 		fmt.Printf("State: ON  (tcp/80->:%d, tcp+udp/443->:%d)\n\n", *httpPort, *httpsPort)
 		fmt.Println("Current rules:")
@@ -218,13 +220,71 @@ func RunCLI(args []string, backend any) int {
 
 	fmt.Println()
 	fmt.Println("Explanation:")
-	fmt.Println("  - ON  : creates a NAT prerouting table that DNATs tcp/80 and tcp+udp/443 to OpenResty ports.")
+	fmt.Printf("  - ON  : creates a NAT prerouting table that DNATs tcp/80 and tcp+udp/443 to %s.\n", edgeTarget)
 	fmt.Println("  - OFF : deletes that DNAT table, returning traffic handling to the normal path.")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  cfm dnat on   [--http-port 9080] [--https-port 9043]")
 	fmt.Println("  cfm dnat off")
 	return 0
+}
+
+func dnatTargetLabel(edgeService string) string {
+	label := "CFM edge proxy ports"
+	if edgeService == "" {
+		return label
+	}
+	return fmt.Sprintf("%s (%s)", label, edgeService)
+}
+
+func detectEdgeService() string {
+	procEntries, err := os.ReadDir("/proc")
+	if err != nil {
+		return ""
+	}
+
+	for _, ent := range procEntries {
+		if !ent.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(ent.Name()); err != nil {
+			continue
+		}
+
+		pidPath := filepath.Join("/proc", ent.Name())
+		if service := normalizeEdgeService(readProcValue(filepath.Join(pidPath, "comm"))); service != "" {
+			return service
+		}
+		if service := normalizeEdgeService(readProcValue(filepath.Join(pidPath, "cmdline"))); service != "" {
+			return service
+		}
+	}
+
+	return ""
+}
+
+func readProcValue(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " ")))
+}
+
+func normalizeEdgeService(s string) string {
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "openresty") || strings.Contains(s, "/openresty/") {
+		return "openresty"
+	}
+	if strings.Contains(s, "angie") {
+		return "angie"
+	}
+	if strings.Contains(s, "nginx") {
+		return "nginx"
+	}
+	return ""
 }
 
 func help() {
