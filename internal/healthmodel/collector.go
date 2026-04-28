@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,7 @@ func collectRuntimeStatus() RuntimeStatus {
 	out := RuntimeStatus{
 		CFMServiceState: "unknown",
 		DNATEnabled:     "unknown",
+		DNATFrontend:    "unknown",
 	}
 	out.CFMDaemonLive, out.CFMDaemonPID = probeCFMDaemonLive()
 	if state, ok := probeSystemdServiceState("cfm.service"); ok {
@@ -73,6 +75,150 @@ func collectRuntimeStatus() RuntimeStatus {
 			out.DNATEnabled = "on"
 		} else {
 			out.DNATEnabled = "off"
+		}
+	}
+	frontend, warning := detectDNATFrontend()
+	out.DNATFrontend = frontend
+	out.DNATWarning = warning
+	return out
+}
+
+type frontendSignal struct {
+	name            string
+	serviceUnit     string
+	processAliases  []string
+	configHookPaths []string
+	active          bool
+	enabled         bool
+	listenerHits    int
+	configHits      int
+	score           int
+}
+
+func detectDNATFrontend() (string, string) {
+	candidates := []frontendSignal{
+		{
+			name:            "angie",
+			serviceUnit:     "angie.service",
+			processAliases:  []string{"angie", "nginx"},
+			configHookPaths: []string{"/etc/angie/conf.d/cfm.conf", "/etc/angie/conf.d/nginx-cfm.conf", "/etc/angie/angie.conf"},
+		},
+		{
+			name:            "openresty",
+			serviceUnit:     "openresty.service",
+			processAliases:  []string{"openresty", "nginx"},
+			configHookPaths: []string{"/usr/local/openresty/nginx/conf/nginx-cfm.conf", "/usr/local/openresty/nginx/conf/openresty-cfm-tsv.conf", "/usr/local/openresty/nginx/conf/nginx.conf"},
+		},
+		{
+			name:            "nginx",
+			serviceUnit:     "nginx.service",
+			processAliases:  []string{"nginx"},
+			configHookPaths: []string{"/etc/nginx/conf.d/nginx-cfm.conf", "/etc/nginx/nginx.conf"},
+		},
+	}
+
+	listeners := probeListenerProcessNames()
+	activeUnits := make([]string, 0, len(candidates))
+	for i := range candidates {
+		active, enabled, ok := probeSystemdUnit(candidates[i].serviceUnit)
+		if ok {
+			candidates[i].active = active
+			candidates[i].enabled = enabled
+		}
+		if candidates[i].active {
+			activeUnits = append(activeUnits, candidates[i].name)
+			candidates[i].score += 3
+		}
+		if candidates[i].enabled {
+			candidates[i].score++
+		}
+		for _, alias := range candidates[i].processAliases {
+			candidates[i].listenerHits += listeners[alias]
+		}
+		candidates[i].score += candidates[i].listenerHits * 2
+		for _, p := range candidates[i].configHookPaths {
+			if _, err := os.Stat(p); err == nil {
+				candidates[i].configHits++
+			}
+		}
+		candidates[i].score += candidates[i].configHits
+	}
+
+	best := candidates[0]
+	tie := false
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i].score > best.score {
+			best = candidates[i]
+			tie = false
+			continue
+		}
+		if candidates[i].score == best.score {
+			tie = true
+		}
+	}
+	if best.score <= 0 {
+		if len(activeUnits) == 1 {
+			return activeUnits[0], ""
+		}
+		if len(activeUnits) > 1 {
+			return activeUnits[0], fmt.Sprintf("ambiguous ownership: multiple active frontends (%s)", strings.Join(activeUnits, ", "))
+		}
+		return "unknown", ""
+	}
+
+	warning := ""
+	if tie || len(activeUnits) > 1 {
+		parts := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			if c.score <= 0 {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s(score=%d)", c.name, c.score))
+		}
+		if len(parts) > 1 {
+			warning = fmt.Sprintf("ambiguous ownership: %s", strings.Join(parts, ", "))
+		}
+	}
+
+	return best.name, warning
+}
+
+func probeSystemdUnit(unit string) (active bool, enabled bool, ok bool) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false, false, false
+	}
+	activeState := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))
+	enabledState := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-enabled", unit))))
+	return activeState == "active", enabledState == "enabled", true
+}
+
+var ssListenerOwnerRE = regexp.MustCompile(`users:\(\("([^"]+)",pid=([0-9]+),fd=[0-9]+\)\)`)
+
+func probeListenerProcessNames() map[string]int {
+	out := map[string]int{}
+	if _, err := exec.LookPath("ss"); err != nil {
+		return out
+	}
+	queries := [][]string{
+		{"-H", "-ltnp", "( sport = :80 or sport = :443 )"},
+		{"-H", "-lunp", "sport = :443"},
+	}
+	for _, args := range queries {
+		lines := strings.Split(string(mustCombinedOutput(exec.Command("ss", args...))), "\n")
+		for _, ln := range lines {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				continue
+			}
+			match := ssListenerOwnerRE.FindStringSubmatch(ln)
+			if len(match) != 3 {
+				continue
+			}
+			name := strings.ToLower(strings.TrimSpace(match[1]))
+			if name == "" {
+				continue
+			}
+			out[name]++
 		}
 	}
 	return out
@@ -157,7 +303,7 @@ func collectServiceStatuses() []ServiceStatus {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil
 	}
-	units := []string{"cfm.service", "nginx.service", "openresty.service"}
+	units := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service"}
 	out := make([]ServiceStatus, 0, len(units))
 	for _, unit := range units {
 		active := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))

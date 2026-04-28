@@ -245,11 +245,15 @@ func runLive(baseURL string, args []string, opts cliOptions) error {
 		if dnat == "" {
 			dnat = "unknown"
 		}
+		frontend := strings.TrimSpace(s.Modern.Runtime.DNATFrontend)
+		if frontend == "" {
+			frontend = "unknown"
+		}
 		liveState := "down"
 		if s.Modern.Runtime.CFMDaemonLive {
 			liveState = "live"
 		}
-		runtimeTable.Rows = [][]string{{"cfm live", "dnat"}, {liveState, dnat}}
+		runtimeTable.Rows = [][]string{{"cfm live", "dnat"}, {liveState, fmt.Sprintf("%s (%s)", dnat, frontend)}}
 
 		services := s.Modern.Services
 		if len(services) == 0 {

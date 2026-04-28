@@ -80,6 +80,8 @@ type modernSample struct {
 		CFMDaemonPID    *int   `json:"cfm_daemon_pid"`
 		CFMServiceState string `json:"cfm_service_state"`
 		DNATEnabled     string `json:"dnat_enabled"`
+		DNATFrontend    string `json:"dnat_frontend"`
+		DNATWarning     string `json:"dnat_warning"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -280,14 +282,24 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if dnatState == "" {
 		dnatState = "unknown"
 	}
+	frontend := strings.TrimSpace(r.DNATFrontend)
+	if frontend == "" {
+		frontend = "unknown"
+	}
 	if opts.Compact {
-		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState)
+		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontend)
+		if w := strings.TrimSpace(r.DNATWarning); w != "" {
+			fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
+		}
 		return
 	}
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
 	fmt.Printf("  CFM daemon: %s\n", daemon)
 	fmt.Printf("  Service: %s\n", serviceState)
-	fmt.Printf("  DNAT: %s\n", dnatState)
+	fmt.Printf("  DNAT: %s (frontend=%s)\n", dnatState, frontend)
+	if w := strings.TrimSpace(r.DNATWarning); w != "" {
+		fmt.Printf("  Warning: %s\n", w)
+	}
 }
 
 func printOneLine(s parsedSnapshot, opts cliOptions) {
@@ -738,6 +750,8 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.CFMDaemonPID = latest.Runtime.CFMDaemonPID
 		out.Modern.Runtime.CFMServiceState = latest.Runtime.CFMServiceState
 		out.Modern.Runtime.DNATEnabled = latest.Runtime.DNATEnabled
+		out.Modern.Runtime.DNATFrontend = latest.Runtime.DNATFrontend
+		out.Modern.Runtime.DNATWarning = latest.Runtime.DNATWarning
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,
