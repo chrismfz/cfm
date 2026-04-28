@@ -81,14 +81,16 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 					continue
 				}
 				ev := Event{
-					When:   re.when,
-					UID:    re.uid,
-					GID:    re.gid,
-					IPVer:  re.ipver,
-					SPort:  re.sport,
-					DPort:  re.dport,
-					IsUDP:  re.isUDP,
-					Signal: sig,
+					When:          re.when,
+					UID:           re.uid,
+					GID:           re.gid,
+					IPVer:         re.ipver,
+					SPort:         re.sport,
+					DPort:         re.dport,
+					IsUDP:         re.isUDP,
+					Signal:        sig,
+					DNSRCode:      re.dnsRCode,
+					DNSRCodeKnown: re.dnsRCodeKnown,
 				}
 				copyIP(&ev.SrcIP, re.src)
 				copyIP(&ev.DstIP, re.dst)
@@ -98,14 +100,14 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 					continue
 				}
 				alerter.Emit(ctx, *v, alertContext{
-					um:     um,
-					pf:     pf,
-					en:     en,
-					ipver:  re.ipver,
-					srcIP:  re.src,
-					dstIP:  re.dst,
-					sport:  re.sport,
-					dport:  re.dport,
+					um:    um,
+					pf:    pf,
+					en:    en,
+					ipver: re.ipver,
+					srcIP: re.src,
+					dstIP: re.dst,
+					sport: re.sport,
+					dport: re.dport,
 				})
 			}
 		}
@@ -120,16 +122,18 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 			gid = *a.GID
 		}
 		var (
-			ipver        int
-			src, dst     net.IP
-			sport, dport uint16
-			isUDP        bool
+			ipver         int
+			src, dst      net.IP
+			sport, dport  uint16
+			isUDP         bool
+			dnsRCode      uint8
+			dnsRCodeKnown bool
 		)
 		if a.Payload != nil && len(*a.Payload) > 0 {
-			ipver, src, dst, sport, dport, isUDP = parsePacket(*a.Payload)
+			ipver, src, dst, sport, dport, isUDP, dnsRCode, dnsRCodeKnown = parsePacket(*a.Payload)
 		}
 		select {
-		case events <- rawEvent{time.Now(), uid, gid, ipver, src, dst, sport, dport, isUDP}:
+		case events <- rawEvent{time.Now(), uid, gid, ipver, src, dst, sport, dport, isUDP, dnsRCode, dnsRCodeKnown}:
 		default:
 			// Drop on overflow rather than block the kernel callback.
 		}
@@ -140,25 +144,27 @@ func Start(ctx context.Context, c CollectorConfig, alerter *Alerter) error {
 }
 
 type rawEvent struct {
-	when         time.Time
-	uid, gid     uint32
-	ipver        int
-	src, dst     net.IP
-	sport, dport uint16
-	isUDP        bool
+	when          time.Time
+	uid, gid      uint32
+	ipver         int
+	src, dst      net.IP
+	sport, dport  uint16
+	isUDP         bool
+	dnsRCode      uint8
+	dnsRCodeKnown bool
 }
 
 // alertContext carries the bits the alerter needs to render a forensic line
 // without re-resolving uid/proc/enrich on its own.
 type alertContext struct {
-	um     *syslookup.Map
-	pf     *syslookup.ProcFinder
-	en     *enrich.Enricher
-	ipver  int
-	srcIP  net.IP
-	dstIP  net.IP
-	sport  uint16
-	dport  uint16
+	um    *syslookup.Map
+	pf    *syslookup.ProcFinder
+	en    *enrich.Enricher
+	ipver int
+	srcIP net.IP
+	dstIP net.IP
+	sport uint16
+	dport uint16
 }
 
 func copyIP(dst *[16]byte, src net.IP) {
@@ -201,7 +207,7 @@ func classify(re rawEvent, rt Runtime) Signal {
 
 // parsePacket decodes IPv4/IPv6 + TCP/UDP. Returns ipver=0 on malformed input.
 // We accept both protocols here (smtp_snoop.go only handled TCP).
-func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isUDP bool) {
+func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isUDP bool, dnsRCode uint8, dnsRCodeKnown bool) {
 	if len(p) < 1 {
 		return
 	}
@@ -222,7 +228,10 @@ func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isU
 		dst = net.IPv4(p[16], p[17], p[18], p[19])
 		sport = binary.BigEndian.Uint16(p[ihl : ihl+2])
 		dport = binary.BigEndian.Uint16(p[ihl+2 : ihl+4])
-		return 4, src, dst, sport, dport, proto == 17
+		if proto == 17 && (sport == 53 || dport == 53) {
+			dnsRCode, dnsRCodeKnown = parseDNSRCode(p[ihl+8:])
+		}
+		return 4, src, dst, sport, dport, proto == 17, dnsRCode, dnsRCodeKnown
 	case 6:
 		if len(p) < 40 {
 			return
@@ -238,7 +247,23 @@ func parsePacket(p []byte) (ipver int, src, dst net.IP, sport, dport uint16, isU
 		}
 		sport = binary.BigEndian.Uint16(p[40:42])
 		dport = binary.BigEndian.Uint16(p[42:44])
-		return 6, src, dst, sport, dport, proto == 17
+		if proto == 17 && (sport == 53 || dport == 53) {
+			dnsRCode, dnsRCodeKnown = parseDNSRCode(p[48:])
+		}
+		return 6, src, dst, sport, dport, proto == 17, dnsRCode, dnsRCodeKnown
 	}
 	return
+}
+
+func parseDNSRCode(payload []byte) (uint8, bool) {
+	// DNS header is 12 bytes. RCODE is lower 4 bits of byte 3.
+	if len(payload) < 12 {
+		return 0, false
+	}
+	flagsHi := payload[2]
+	// QR bit indicates response.
+	if flagsHi&0x80 == 0 {
+		return 0, false
+	}
+	return payload[3] & 0x0F, true
 }

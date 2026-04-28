@@ -9,6 +9,7 @@
 package outbound
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,6 +52,9 @@ type Runtime struct {
 	DedupCooldown       time.Duration
 	QueueSampleLimit    int
 	NotifySeverity      string
+	DNSUniqDstMin       int
+	DNSSeverityMode     string
+	DNSNXDOMAINRatio    float64
 	SMTPPorts           map[uint16]struct{}
 	ScanPorts           map[uint16]struct{}
 	HTTPPorts           map[uint16]struct{}
@@ -75,6 +79,9 @@ type Event struct {
 	DPort  uint16
 	IsUDP  bool
 	Signal Signal
+	// Optional DNS parser output from collector path.
+	DNSRCode      uint8
+	DNSRCodeKnown bool
 }
 
 // Verdict is what the analyzer hands to the alerter when a threshold is
@@ -89,6 +96,16 @@ type Verdict struct {
 	Window      time.Duration
 	UniqueDsts  int      // distinct destination IPs in this window for this uid (any signal)
 	SamplePeers []string // up to 5 recent dst:port hits for forensics
+	Severity    string
+	DNS         DNSVerdict
+}
+
+type DNSVerdict struct {
+	Total           int
+	UniqueResolvers int
+	ParsedResponses int
+	ErrorResponses  int
+	ErrorRatio      float64
 }
 
 // uidState tracks per-uid sliding-window data for every signal.
@@ -105,6 +122,10 @@ type uidState struct {
 
 	// ring of recent peers for forensics (most recent at end).
 	peers []string
+	// DNS-specific per-window dimensions.
+	dnsResolvers map[string]time.Time
+	dnsParsed    []time.Time
+	dnsErrors    []time.Time
 
 	// last verdict emission per signal — used for dedup.
 	lastEmit map[Signal]time.Time
@@ -112,10 +133,13 @@ type uidState struct {
 
 func newUIDState() *uidState {
 	return &uidState{
-		hits:      make(map[Signal][]time.Time, len(AllSignals)),
-		dstWindow: make(map[string]time.Time, 32),
-		peers:     make([]string, 0, 16),
-		lastEmit:  make(map[Signal]time.Time, len(AllSignals)),
+		hits:         make(map[Signal][]time.Time, len(AllSignals)),
+		dstWindow:    make(map[string]time.Time, 32),
+		peers:        make([]string, 0, 16),
+		dnsResolvers: make(map[string]time.Time, 8),
+		dnsParsed:    make([]time.Time, 0, 16),
+		dnsErrors:    make([]time.Time, 0, 16),
+		lastEmit:     make(map[Signal]time.Time, len(AllSignals)),
 	}
 }
 
@@ -194,6 +218,26 @@ func (a *Analyzer) Observe(ev Event) *Verdict {
 	if len(st.peers) > peerCap {
 		st.peers = st.peers[len(st.peers)-peerCap:]
 	}
+	if ev.Signal == SignalDNS {
+		st.dnsResolvers[dstKey] = ev.When
+		for k, t := range st.dnsResolvers {
+			if t.Before(cutoff) {
+				delete(st.dnsResolvers, k)
+			}
+		}
+		if ev.DNSRCodeKnown {
+			st.dnsParsed = append(st.dnsParsed, ev.When)
+			for len(st.dnsParsed) > 0 && st.dnsParsed[0].Before(cutoff) {
+				st.dnsParsed = st.dnsParsed[1:]
+			}
+			if isDNSErrorCode(ev.DNSRCode) {
+				st.dnsErrors = append(st.dnsErrors, ev.When)
+			}
+		}
+		for len(st.dnsErrors) > 0 && st.dnsErrors[0].Before(cutoff) {
+			st.dnsErrors = st.dnsErrors[1:]
+		}
+	}
 
 	// Threshold check for this signal.
 	count := len(hits)
@@ -242,7 +286,7 @@ func (a *Analyzer) makeVerdict(ev Event, sig Signal, count, thr int, st *uidStat
 		limit = len(st.peers)
 	}
 	peers := append([]string(nil), st.peers[len(st.peers)-limit:]...)
-	return &Verdict{
+	v := &Verdict{
 		When:        ev.When,
 		UID:         ev.UID,
 		GID:         st.gid,
@@ -253,6 +297,56 @@ func (a *Analyzer) makeVerdict(ev Event, sig Signal, count, thr int, st *uidStat
 		UniqueDsts:  uniq,
 		SamplePeers: peers,
 	}
+	v.Severity = a.computeSeverity(sig, count, v, st)
+	return v
+}
+
+func (a *Analyzer) computeSeverity(sig Signal, count int, v *Verdict, st *uidState) string {
+	base := strings.ToLower(strings.TrimSpace(a.cfg.NotifySeverity))
+	if base == "" {
+		base = "warning"
+	}
+	if sig != SignalDNS {
+		return base
+	}
+	v.DNS = DNSVerdict{
+		Total:           count,
+		UniqueResolvers: len(st.dnsResolvers),
+		ParsedResponses: len(st.dnsParsed),
+		ErrorResponses:  len(st.dnsErrors),
+	}
+	if v.DNS.ParsedResponses > 0 {
+		v.DNS.ErrorRatio = float64(v.DNS.ErrorResponses) / float64(v.DNS.ParsedResponses)
+	}
+	mode := strings.ToLower(strings.TrimSpace(a.cfg.DNSSeverityMode))
+	if mode == "" || mode == "volume-only" {
+		return base
+	}
+	suspiciousDispersion := a.cfg.DNSUniqDstMin > 0 && v.DNS.UniqueResolvers >= a.cfg.DNSUniqDstMin
+	suspiciousErrors := a.cfg.DNSNXDOMAINRatio > 0 && v.DNS.ErrorRatio >= a.cfg.DNSNXDOMAINRatio
+	if suspiciousDispersion || suspiciousErrors {
+		return base
+	}
+	return lowerSeverity(base)
+}
+
+func lowerSeverity(in string) string {
+	switch in {
+	case "critical":
+		return "warning"
+	case "warning":
+		return "info"
+	case "error":
+		return "warning"
+	case "notice":
+		return "info"
+	default:
+		return in
+	}
+}
+
+func isDNSErrorCode(rcode uint8) bool {
+	return rcode == 2 || rcode == 3 // SERVFAIL / NXDOMAIN
 }
 
 // IsAllowed reports whether the analyzer should skip a uid+gid combo entirely.
