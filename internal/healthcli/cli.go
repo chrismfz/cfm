@@ -2,6 +2,7 @@ package healthcli
 
 import (
 	"cfm/internal/clihttp"
+	"cfm/internal/dnat"
 	"cfm/internal/healthmodel"
 	"encoding/json"
 	"fmt"
@@ -84,6 +85,10 @@ type modernSample struct {
 		DNATWarning     string `json:"dnat_warning"`
 		FrontendWorking string `json:"frontend_working"`
 		FrontendReason  string `json:"frontend_reason"`
+		EdgeService     string `json:"edge_service"`
+		UpstreamService string `json:"upstream_service"`
+		EdgeStatus      string `json:"edge_status"`
+		UpstreamStatus  string `json:"upstream_status"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -299,6 +304,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	}
 	if opts.Compact {
 		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel)
+		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
 			fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
 		}
@@ -310,10 +316,38 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  Service: %s\n", serviceState)
 	fmt.Printf("  DNAT: %s (frontend=%s)\n", dnatState, frontend)
 	fmt.Printf("  Frontend: %s\n", frontendLabel)
+	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState))
+	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
 	if w := strings.TrimSpace(r.DNATWarning); w != "" {
 		fmt.Printf("  Warning: %s\n", w)
 	}
 	printWebStackSection(s, opts)
+}
+
+func runtimeServiceName(primary, fallback string) string {
+	name := strings.TrimSpace(primary)
+	if name == "" || strings.EqualFold(name, "unknown") {
+		name = strings.TrimSpace(fallback)
+	}
+	if name == "" {
+		return "unknown"
+	}
+	return strings.ToLower(name)
+}
+
+func formatRuntimeServiceRole(service, status, dnatState string) string {
+	name := runtimeServiceName(service, "")
+	state := strings.ToLower(strings.TrimSpace(status))
+	if state == "" {
+		state = "unknown"
+	}
+	extra := ""
+	if strings.EqualFold(dnatState, "on") && state == "active" {
+		httpPort, httpsPort := 80, 443
+		httpPort, httpsPort = dnat.EffectiveTargetPorts()
+		extra = fmt.Sprintf(", listening %d/%d", httpPort, httpsPort)
+	}
+	return fmt.Sprintf("%s (%s%s)", name, state, extra)
 }
 
 func printWebStackSection(s parsedSnapshot, opts cliOptions) {
