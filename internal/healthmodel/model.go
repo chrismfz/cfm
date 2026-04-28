@@ -15,6 +15,14 @@ type HealthSnapshotV1 struct {
 	Services      []ServiceStatus   `json:"services"`
 	CFM           CFMMetrics        `json:"cfm_metrics"`
 	Network       NetworkThroughput `json:"network"`
+	Runtime       RuntimeStatus     `json:"runtime"`
+}
+
+type RuntimeStatus struct {
+	CFMDaemonLive   bool   `json:"cfm_daemon_live"`
+	CFMDaemonPID    *int   `json:"cfm_daemon_pid,omitempty"`
+	CFMServiceState string `json:"cfm_service_state,omitempty"`
+	DNATEnabled     string `json:"dnat_enabled,omitempty"` // on/off/unknown
 }
 
 type HostSystem struct {
