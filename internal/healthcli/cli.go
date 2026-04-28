@@ -82,6 +82,7 @@ type modernSample struct {
 		CFMServiceState string `json:"cfm_service_state"`
 		DNATEnabled     string `json:"dnat_enabled"`
 		DNATFrontend    string `json:"dnat_frontend"`
+		DNATConfidence  string `json:"dnat_confidence"`
 		DNATWarning     string `json:"dnat_warning"`
 		FrontendWorking string `json:"frontend_working"`
 		FrontendReason  string `json:"frontend_reason"`
@@ -294,6 +295,10 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if frontend == "" {
 		frontend = "unknown"
 	}
+	confidence := strings.ToLower(strings.TrimSpace(r.DNATConfidence))
+	if confidence == "" {
+		confidence = "low"
+	}
 	frontendVerdict := strings.TrimSpace(r.FrontendWorking)
 	if frontendVerdict == "" {
 		frontendVerdict = "down"
@@ -303,10 +308,12 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 		frontendLabel = fmt.Sprintf("%s (%s: %s)", frontend, frontendVerdict, reason)
 	}
 	if opts.Compact {
-		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel)
+		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s confidence=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel, confidence)
 		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
-		if w := strings.TrimSpace(r.DNATWarning); w != "" {
-			fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
+		if confidence == "low" {
+			if w := strings.TrimSpace(r.DNATWarning); w != "" {
+				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
+			}
 		}
 		printWebStackSection(s, opts)
 		return
@@ -314,12 +321,14 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
 	fmt.Printf("  CFM daemon: %s\n", daemon)
 	fmt.Printf("  Service: %s\n", serviceState)
-	fmt.Printf("  DNAT: %s (frontend=%s)\n", dnatState, frontend)
+	fmt.Printf("  DNAT: %s (frontend=%s, confidence=%s)\n", dnatState, frontend, confidence)
 	fmt.Printf("  Frontend: %s\n", frontendLabel)
 	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState))
 	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
-	if w := strings.TrimSpace(r.DNATWarning); w != "" {
-		fmt.Printf("  Warning: %s\n", w)
+	if confidence == "low" {
+		if w := strings.TrimSpace(r.DNATWarning); w != "" {
+			fmt.Printf("  Warning: %s\n", w)
+		}
 	}
 	printWebStackSection(s, opts)
 }
@@ -913,6 +922,7 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.CFMServiceState = latest.Runtime.CFMServiceState
 		out.Modern.Runtime.DNATEnabled = latest.Runtime.DNATEnabled
 		out.Modern.Runtime.DNATFrontend = latest.Runtime.DNATFrontend
+		out.Modern.Runtime.DNATConfidence = latest.Runtime.DNATConfidence
 		out.Modern.Runtime.DNATWarning = latest.Runtime.DNATWarning
 		out.Modern.Runtime.FrontendWorking = latest.Runtime.FrontendWorking
 		out.Modern.Runtime.FrontendReason = latest.Runtime.FrontendReason
