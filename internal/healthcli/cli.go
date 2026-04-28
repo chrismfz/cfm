@@ -309,7 +309,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	}
 	if opts.Compact {
 		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s confidence=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel, confidence)
-		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
+		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, dnatState), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
 		if confidence == "low" {
 			if w := strings.TrimSpace(r.DNATWarning); w != "" {
 				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
@@ -323,7 +323,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  Service: %s\n", serviceState)
 	fmt.Printf("  DNAT: %s (frontend=%s, confidence=%s)\n", dnatState, frontend, confidence)
 	fmt.Printf("  Frontend: %s\n", frontendLabel)
-	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(runtimeServiceName(r.EdgeService, frontend), r.EdgeStatus, dnatState))
+	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, dnatState))
 	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
 	if confidence == "low" {
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
@@ -333,19 +333,11 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	printWebStackSection(s, opts)
 }
 
-func runtimeServiceName(primary, fallback string) string {
-	name := strings.TrimSpace(primary)
-	if name == "" || strings.EqualFold(name, "unknown") {
-		name = strings.TrimSpace(fallback)
-	}
-	if name == "" {
-		return "unknown"
-	}
-	return strings.ToLower(name)
-}
-
 func formatRuntimeServiceRole(service, status, dnatState string) string {
-	name := runtimeServiceName(service, "")
+	name := strings.ToLower(strings.TrimSpace(service))
+	if name == "" || strings.EqualFold(name, "unknown") {
+		name = "unknown"
+	}
 	state := strings.ToLower(strings.TrimSpace(status))
 	if state == "" {
 		state = "unknown"

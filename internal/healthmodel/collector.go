@@ -87,18 +87,46 @@ func collectRuntimeStatus() RuntimeStatus {
 			out.DNATEnabled = "off"
 		}
 	}
-	frontend, confidence, warning := detectDNATFrontend(out.DNATEnabled)
-	out.DNATFrontend = frontend
-	out.DNATConfidence = confidence
-	out.DNATWarning = warning
-	out.FrontendWorking, out.FrontendReason, out.FrontendDebug = deriveFrontendWorking(out.DNATFrontend, out.DNATEnabled)
-	edge := detectEdgeRuntime(out.DNATEnabled)
-	out.EdgeService = edge.service
-	out.EdgeStatus = edge.status
-	upstream := detectUpstreamRuntime(edge.service)
-	out.UpstreamService = upstream.service
-	out.UpstreamStatus = upstream.status
+	resolution := ResolveWebRoles(out.DNATEnabled)
+	out.DNATFrontend = resolution.frontend
+	out.DNATConfidence = resolution.frontendConfidence
+	out.DNATWarning = resolution.frontendWarning
+	out.FrontendWorking = resolution.frontendVerdict
+	out.FrontendReason = resolution.frontendReason
+	out.FrontendDebug = resolution.frontendDebug
+	out.EdgeService = resolution.edge.service
+	out.EdgeStatus = resolution.edge.status
+	out.UpstreamService = resolution.upstream.service
+	out.UpstreamStatus = resolution.upstream.status
 	return out
+}
+
+type webRoleResolution struct {
+	frontend           string
+	frontendConfidence string
+	frontendWarning    string
+	frontendVerdict    string
+	frontendReason     string
+	frontendDebug      FrontendDebug
+	edge               runtimeRoleSignal
+	upstream           runtimeRoleSignal
+}
+
+func ResolveWebRoles(dnatState string) webRoleResolution {
+	frontend, confidence, warning := detectDNATFrontend(dnatState)
+	verdict, reason, debug := deriveFrontendWorking(frontend, dnatState)
+	edge := detectEdgeRuntime(frontend, dnatState)
+	upstream := detectUpstreamRuntime(edge.service)
+	return webRoleResolution{
+		frontend:           frontend,
+		frontendConfidence: confidence,
+		frontendWarning:    warning,
+		frontendVerdict:    verdict,
+		frontendReason:     reason,
+		frontendDebug:      debug,
+		edge:               edge,
+		upstream:           upstream,
+	}
 }
 
 type runtimeRoleSignal struct {
@@ -543,8 +571,11 @@ func joinPorts(ports []int) string {
 	return strings.Join(out, "/")
 }
 
-func detectEdgeRuntime(dnatState string) runtimeRoleSignal {
-	service, _, _ := detectDNATFrontend(dnatState)
+func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
+	service := strings.ToLower(strings.TrimSpace(frontend))
+	if service == "" {
+		service = "unknown"
+	}
 	out := runtimeRoleSignal{
 		service: service,
 		status:  "inactive",
