@@ -23,6 +23,8 @@ type RuntimeStatus struct {
 	CFMDaemonPID    *int   `json:"cfm_daemon_pid,omitempty"`
 	CFMServiceState string `json:"cfm_service_state,omitempty"`
 	DNATEnabled     string `json:"dnat_enabled,omitempty"` // on/off/unknown
+	DNATFrontend    string `json:"dnat_frontend,omitempty"`
+	DNATWarning     string `json:"dnat_warning,omitempty"`
 }
 
 type HostSystem struct {

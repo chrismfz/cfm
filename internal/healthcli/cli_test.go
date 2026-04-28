@@ -30,7 +30,7 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown)"},
 			wantNone: []string{"[cfm health watch]"},
 		},
 		{
@@ -71,6 +71,27 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Runtime.DNATEnabled = "on"
+	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
+
+	out, err := runWithCapturedStdout(func() error {
+		printRuntimeSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printRuntimeSection error: %v", err)
+	}
+	if !strings.Contains(out, "DNAT: on (frontend=angie)") {
+		t.Fatalf("expected frontend output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Warning: ambiguous ownership") {
+		t.Fatalf("expected warning output, got:\n%s", out)
 	}
 }
 
