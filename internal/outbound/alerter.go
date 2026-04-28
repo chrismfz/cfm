@@ -17,13 +17,15 @@ import (
 type Alerter struct {
 	rt      Runtime
 	notifyT time.Duration // notify dedup TTL hint; reused as Event.TTL
+	dnsdbg  *DNSDebugCapture
 }
 
 // NewAlerter builds an alerter. The Runtime is captured by value.
-func NewAlerter(rt Runtime) *Alerter {
+func NewAlerter(rt Runtime, dnsdbg *DNSDebugCapture) *Alerter {
 	return &Alerter{
 		rt:      rt,
 		notifyT: rt.DedupCooldown,
+		dnsdbg:  dnsdbg,
 	}
 }
 
@@ -108,6 +110,9 @@ func (a *Alerter) Emit(ctx context.Context, v Verdict, ac alertContext) {
 		}
 	}
 	logging.LogfSMTP("%s", b.String())
+	if v.Signal == SignalDNS && a.dnsdbg != nil {
+		go a.dnsdbg.Trigger(v.UID, v.GID, v.When)
+	}
 
 	// Notify channel — best-effort, never blocks.
 	go a.dispatchNotify(v, uname, gname, comm, pid, cwd, cmdline, enrInfo, queueSnap)
@@ -122,15 +127,15 @@ func (a *Alerter) dispatchNotify(
 	queueSnap EximSnap,
 ) {
 	extra := map[string]string{
-		"signal":     string(v.Signal),
-		"uid":        strconv.FormatUint(uint64(v.UID), 10),
-		"user":       uname,
-		"gid":        strconv.FormatUint(uint64(v.GID), 10),
-		"group":      gname,
-		"count":      strconv.Itoa(v.Count),
-		"threshold":  strconv.Itoa(v.Threshold),
-		"window":     v.Window.String(),
-		"uniq_dst":   strconv.Itoa(v.UniqueDsts),
+		"signal":    string(v.Signal),
+		"uid":       strconv.FormatUint(uint64(v.UID), 10),
+		"user":      uname,
+		"gid":       strconv.FormatUint(uint64(v.GID), 10),
+		"group":     gname,
+		"count":     strconv.Itoa(v.Count),
+		"threshold": strconv.Itoa(v.Threshold),
+		"window":    v.Window.String(),
+		"uniq_dst":  strconv.Itoa(v.UniqueDsts),
 	}
 	if pid > 0 {
 		extra["proc"] = comm

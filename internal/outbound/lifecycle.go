@@ -16,6 +16,7 @@ import (
 // runtime (that's a phase-2 concern that needs the analyzer to swap atomically).
 type Lifecycle struct {
 	started bool
+	dnsdbg  *DNSDebugCapture
 }
 
 // NewLifecycle returns a fresh Lifecycle.
@@ -36,14 +37,20 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.OutboundConfig)
 	}
 
 	rt := buildRuntime(cfg)
+	var dnsdbg *DNSDebugCapture
+	if rt.DNSDebugEnabled {
+		dnsdbg = NewDNSDebugCapture(rt)
+		dnsdbg.Start(ctx)
+	}
 	cc := CollectorConfig{
 		Group:   uint16(cfg.NFLOGGroup),
 		Queue:   2048,
 		Runtime: rt,
 	}
-	alerter := NewAlerter(rt)
+	alerter := NewAlerter(rt, dnsdbg)
 
 	l.started = true
+	l.dnsdbg = dnsdbg
 	go func() {
 		if err := Start(ctx, cc, alerter); err != nil {
 			logging.Logf("[outbound] nflog start error: %v", err)
@@ -58,26 +65,39 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.OutboundConfig)
 // Maps are cheap to allocate once and read-only thereafter.
 func buildRuntime(cfg *cfgpkg.OutboundConfig) Runtime {
 	rt := Runtime{
-		Window:             time.Duration(cfg.WindowSec) * time.Second,
-		SMTPPerWindow:      cfg.SMTPPerMin,
-		UniqueDstPerWindow: cfg.UniqueDstPerMin,
-		HTTPPerWindow:      cfg.HTTPPerMin,
-		DNSPerWindow:       cfg.DNSPerMin,
-		DedupCooldown:      time.Duration(cfg.LogDedupSec) * time.Second,
-		QueueSampleLimit:   cfg.QueueSamples,
-		NotifySeverity:     cfg.NotifySeverity,
-		Enrich:             cfg.Enrich,
-		SMTPPorts:          portSet(cfg.SMTPPorts),
-		ScanPorts:          portSet(cfg.ScanPorts),
-		HTTPPorts:          portSet(cfg.HTTPPorts),
-		AllowUIDs:          uidSet(cfg.AllowUIDs),
-		AllowGIDs:          uidSet(cfg.AllowGIDs),
+		Window:              time.Duration(cfg.WindowSec) * time.Second,
+		SMTPPerWindow:       cfg.SMTPPerMin,
+		UniqueDstPerWindow:  cfg.UniqueDstPerMin,
+		HTTPPerWindow:       cfg.HTTPPerMin,
+		DNSPerWindow:        cfg.DNSPerMin,
+		DedupCooldown:       time.Duration(cfg.LogDedupSec) * time.Second,
+		QueueSampleLimit:    cfg.QueueSamples,
+		NotifySeverity:      cfg.NotifySeverity,
+		Enrich:              cfg.Enrich,
+		SMTPPorts:           portSet(cfg.SMTPPorts),
+		ScanPorts:           portSet(cfg.ScanPorts),
+		HTTPPorts:           portSet(cfg.HTTPPorts),
+		AllowUIDs:           uidSet(cfg.AllowUIDs),
+		AllowGIDs:           uidSet(cfg.AllowGIDs),
+		DNSDebugEnabled:     cfg.DNSDebugEnabled,
+		DNSDebugSampleCount: cfg.DNSDebugSamples,
+		DNSDebugDuration:    time.Duration(cfg.DNSDebugDurSec) * time.Second,
+		DNSDebugDir:         cfg.DNSDebugDir,
 	}
 	if rt.Window <= 0 {
 		rt.Window = 60 * time.Second
 	}
 	if rt.DedupCooldown <= 0 {
 		rt.DedupCooldown = 5 * time.Minute
+	}
+	if rt.DNSDebugSampleCount <= 0 {
+		rt.DNSDebugSampleCount = 100
+	}
+	if rt.DNSDebugDuration <= 0 {
+		rt.DNSDebugDuration = 30 * time.Second
+	}
+	if rt.DNSDebugDir == "" {
+		rt.DNSDebugDir = "/var/log/cfm/outbound"
 	}
 	return rt
 }
