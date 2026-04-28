@@ -2,7 +2,7 @@ package healthmodel
 
 import "time"
 
-const SchemaVersionV1 = "health_snapshot.v1"
+const SchemaVersionV1 = "health.snapshot.v1"
 
 // HealthSnapshotV1 is the canonical versioned health payload envelope.
 type HealthSnapshotV1 struct {
@@ -28,22 +28,62 @@ type HostSystem struct {
 }
 
 type DiskSnapshot struct {
-	Mounts      []DiskMount `json:"mounts"`
-	DiskHealth  string      `json:"disk_health"`
-	SmartHealth string      `json:"smart_health"`
-	DiskWearout string      `json:"disk_wearout"`
-	MDADMHealth string      `json:"mdadm_health"`
-	ZFSHealth   string      `json:"zfs_health"`
+	Mounts       []DiskMount             `json:"mounts"`
+	DiskHealth   string                  `json:"disk_health"`
+	SmartHealth  string                  `json:"smart_health"`
+	DiskWearout  string                  `json:"disk_wearout"`
+	SmartDevices map[string]SmartDevice  `json:"smart_devices,omitempty"`
+	MDADMHealth  string                  `json:"mdadm_health"`
+	MDADM        MDADMStatus             `json:"mdadm"`
+	ZFSHealth    string                  `json:"zfs_health"`
+	ZFSPools     map[string]ZFSPoolState `json:"zfs_pools,omitempty"`
 }
 
 type DiskMount struct {
-	Mount       string  `json:"mount"`
-	UsedBytes   uint64  `json:"used_bytes"`
-	TotalBytes  uint64  `json:"total_bytes"`
-	UsedPct     float64 `json:"used_pct"`
-	UsedInodes  uint64  `json:"used_inodes,omitempty"`
-	TotalInodes uint64  `json:"total_inodes,omitempty"`
+	Mount        string  `json:"mount"`
+	UsedBytes    uint64  `json:"used_bytes"`
+	TotalBytes   uint64  `json:"total_bytes"`
+	UsedPct      float64 `json:"used_pct"`
+	UsedInodes   uint64  `json:"used_inodes,omitempty"`
+	TotalInodes  uint64  `json:"total_inodes,omitempty"`
 	InodeUsedPct float64 `json:"inode_used_pct,omitempty"`
+}
+
+type SmartDevice struct {
+	Health           string `json:"health"`
+	WearoutPctUsed   *int   `json:"wearout_pct_used,omitempty"`
+	WearoutSource    string `json:"wearout_source,omitempty"`
+	TemperatureC     string `json:"temperature_c,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Serial           string `json:"serial,omitempty"`
+	DeviceType       string `json:"device_type,omitempty"`
+	Error            string `json:"error,omitempty"`
+	NormalizedHealth string `json:"normalized_health"`
+}
+
+type MDADMStatus struct {
+	Status string       `json:"status"`
+	Arrays []MDADMArray `json:"arrays,omitempty"`
+}
+
+type MDADMArray struct {
+	Name            string   `json:"name"`
+	Level           string   `json:"level,omitempty"`
+	ExpectedMembers int      `json:"expected_members"`
+	ActiveMembers   int      `json:"active_members"`
+	FailedMissing   int      `json:"failed_missing_members"`
+	MemberStates    []string `json:"member_states,omitempty"`
+	ProgressPct     float64  `json:"progress_pct,omitempty"`
+	ProgressPhase   string   `json:"progress_phase,omitempty"`
+}
+
+type ZFSPoolState struct {
+	PoolName        string `json:"pool_name"`
+	State           string `json:"state"`
+	UnhealthyVdevs  int    `json:"unhealthy_vdev_count"`
+	ScanStatus      string `json:"scan_status,omitempty"`
+	Resilvering     bool   `json:"resilvering,omitempty"`
+	ResilverPercent string `json:"resilver_progress,omitempty"`
 }
 
 type ServiceStatus struct {

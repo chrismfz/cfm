@@ -45,6 +45,15 @@ func TestFromDetectorSnapshot(t *testing.T) {
 	if out.Disk.DiskWearout != "critical:/dev/sda" {
 		t.Fatalf("wearout = %q", out.Disk.DiskWearout)
 	}
+	if out.Disk.SmartDevices["/dev/sda"].NormalizedHealth != "critical" {
+		t.Fatalf("normalized smart health = %q", out.Disk.SmartDevices["/dev/sda"].NormalizedHealth)
+	}
+	if out.Disk.MDADM.Status != "clean" {
+		t.Fatalf("mdadm status = %q", out.Disk.MDADM.Status)
+	}
+	if out.Disk.ZFSPools["tank"].State != "ONLINE" {
+		t.Fatalf("zfs state = %q", out.Disk.ZFSPools["tank"].State)
+	}
 	if out.Network.BandwidthInBytesPerSec == 0 || out.Network.BandwidthOutBytesPerSec == 0 {
 		t.Fatalf("bandwidth should be mapped")
 	}

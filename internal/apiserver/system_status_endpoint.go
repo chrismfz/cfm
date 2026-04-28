@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	webdet "cfm/internal/webdetector"
 )
@@ -32,13 +33,6 @@ const (
 	healthTimeseriesSchemaV1 = "health.timeseries.v1"
 	healthAnomaliesSchemaV1  = "health.anomalies.v1"
 )
-
-type healthSnapshotResponse struct {
-	SchemaVersion string             `json:"schema_version"`
-	NodeID        string             `json:"node_id"`
-	GeneratedAt   time.Time          `json:"generated_at"`
-	Snapshot      healthstore.Sample `json:"snapshot"`
-}
 
 type healthTimeseriesResponse struct {
 	SchemaVersion string                    `json:"schema_version"`
@@ -235,21 +229,7 @@ func handleHealthSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nodeID := localNodeID()
-	snapshot, ok := healthstore.Global().Latest(nodeID)
-	if !ok {
-		http.Error(w, `{"error":"no snapshot available"}`, http.StatusNotFound)
-		return
-	}
-	if snapshot.NodeID == "" {
-		snapshot.NodeID = nodeID
-	}
-	resp := healthSnapshotResponse{
-		SchemaVersion: healthSnapshotSchemaV1,
-		NodeID:        nodeID,
-		GeneratedAt:   time.Now().UTC(),
-		Snapshot:      snapshot,
-	}
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(healthmodel.CollectSnapshotNow(nodeID))
 }
 
 func handleHealthTimeseries(w http.ResponseWriter, r *http.Request) {
