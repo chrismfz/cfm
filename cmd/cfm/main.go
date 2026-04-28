@@ -282,7 +282,10 @@ Usage:
 
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm mysqltop -- MySQL Live stats
-  cfm health [json|live|watch] -- system health snapshot
+  cfm health                      -- local-node health summary (federation view planned)
+  cfm health json                 -- machine-readable local snapshot
+  cfm health watch --interval=2s  -- periodic one-line local snapshot output
+  cfm health live                 -- TTY dashboard; non-TTY auto-falls back to watch
 
   cfm clam ping
   cfm clam version
