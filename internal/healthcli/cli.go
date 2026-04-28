@@ -92,11 +92,12 @@ type modernSample struct {
 }
 
 type serviceStatus struct {
-	Name      string `json:"name"`
-	Active    bool   `json:"active"`
-	Enabled   bool   `json:"enabled"`
-	State     string `json:"state"`
-	LastError string `json:"last_error"`
+	Name                 string `json:"name"`
+	Active               bool   `json:"active"`
+	Enabled              bool   `json:"enabled"`
+	State                string `json:"state"`
+	LastError            string `json:"last_error"`
+	ActiveEnterTimestamp string `json:"active_enter_timestamp,omitempty"`
 }
 
 type parsedSnapshot struct {
@@ -291,6 +292,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
 			fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
 		}
+		printWebStackSection(s, opts)
 		return
 	}
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
@@ -300,6 +302,121 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if w := strings.TrimSpace(r.DNATWarning); w != "" {
 		fmt.Printf("  Warning: %s\n", w)
 	}
+	printWebStackSection(s, opts)
+}
+
+func printWebStackSection(s parsedSnapshot, opts cliOptions) {
+	rows := collectWebStackRows(s)
+	if len(rows) == 0 {
+		return
+	}
+	status := okLabel
+	for _, row := range rows {
+		switch strings.ToLower(strings.TrimSpace(row.State)) {
+		case "failed":
+			status = worstLabel(status, critLabel)
+		case "inactive":
+			status = worstLabel(status, warnLabel)
+		}
+	}
+	if opts.Compact {
+		parts := make([]string, 0, len(rows))
+		for _, row := range rows {
+			parts = append(parts, fmt.Sprintf("%s: enabled=%s active=%s state=%s%s", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row)))
+		}
+		fmt.Printf("Web stack %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
+		return
+	}
+	fmt.Printf("Web stack %s\n", badge(status, opts))
+	for _, row := range rows {
+		fmt.Printf("  %s: enabled=%s active=%s state=%s%s\n", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row))
+	}
+}
+
+func collectWebStackRows(s parsedSnapshot) []serviceStatus {
+	targets := []string{"angie", "openresty", "nginx"}
+	byName := make(map[string]serviceStatus, len(s.Modern.Services))
+	for _, svc := range s.Modern.Services {
+		name := strings.ToLower(strings.TrimSpace(svc.Name))
+		if name == "" {
+			continue
+		}
+		byName[name] = svc
+	}
+	out := make([]serviceStatus, 0, len(targets))
+	for _, name := range targets {
+		row, ok := byName[name]
+		if !ok {
+			row = serviceStatus{Name: name, State: "inactive"}
+		}
+		row.Name = name
+		state := strings.ToLower(strings.TrimSpace(row.State))
+		if state == "" {
+			if row.Active {
+				state = "active"
+			} else {
+				state = "inactive"
+			}
+		}
+		row.State = state
+		out = append(out, row)
+	}
+	return out
+}
+
+func formatWebStackUptime(svc serviceStatus) string {
+	ts := strings.TrimSpace(svc.ActiveEnterTimestamp)
+	if ts == "" {
+		return ""
+	}
+	t, err := parseActiveEnterTimestamp(ts)
+	if err != nil {
+		return fmt.Sprintf(" started=%s", ts)
+	}
+	if delta := time.Since(t); delta > 0 {
+		return fmt.Sprintf(" uptime=%s", formatShortDuration(delta))
+	}
+	return fmt.Sprintf(" started=%s", t.Local().Format("2006-01-02 15:04:05"))
+}
+
+func parseActiveEnterTimestamp(v string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339,
+		"Mon 2006-01-02 15:04:05 MST",
+		"Mon 2006-01-02 15:04:05 UTC",
+		"Mon 2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parse active enter timestamp")
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	days := d / (24 * time.Hour)
+	d -= days * 24 * time.Hour
+	hours := d / time.Hour
+	d -= hours * time.Hour
+	minutes := d / time.Minute
+	if days > 0 {
+		return fmt.Sprintf("%dd%dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+func yesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
 }
 
 func printOneLine(s parsedSnapshot, opts cliOptions) {
