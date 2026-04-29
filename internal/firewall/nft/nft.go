@@ -139,6 +139,8 @@ type Backend struct {
 	apiCacheResolvedAt time.Time
 }
 
+var _ firewall.Backend = (*Backend)(nil)
+
 // GetEnricher returns the enrichment engine (if enabled).
 func (b *Backend) GetEnricher() *enrichpkg.Enricher {
 	return b.enr
