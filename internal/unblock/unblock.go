@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 	"cfm/internal/reporting"
 )
 
@@ -90,11 +89,8 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 
 	// 1) nft remove (no expensive EnsureBase; table should already exist in normal ops)
 	if opts.BE != nil {
-		if !nft.TableExistsCFM() {
-			// last-resort bootstrap, but extremely rare in practice
-			if err := opts.BE.EnsureBase(); err != nil {
-				r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
-			}
+		if err := opts.BE.EnsureBase(); err != nil {
+			r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "EnsureBase failed", Err: err.Error()})
 		}
 		t1 := time.Now()
 		if err := opts.BE.RemoveBlock(ip); err != nil {
