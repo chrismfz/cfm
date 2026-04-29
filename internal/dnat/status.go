@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"cfm/internal/firewall"
 	"fmt"
 )
 
@@ -13,13 +14,12 @@ const (
 
 // Status returns whether DNAT is currently enabled using the same defaults
 // as the CLI/report path.
-func Status(backend any) (bool, error) {
-	d, ok := backend.(Capable)
-	if !ok || d == nil {
+func Status(backend firewall.Backend) (bool, error) {
+	if backend == nil {
 		return false, fmt.Errorf("backend does not support DNAT")
 	}
 
-	return d.DNATStatus(DefaultFamily, DefaultTable)
+	return backend.DNATStatus(DefaultFamily, DefaultTable)
 }
 
 // EffectiveTargetPorts returns the DNAT target ports resolved using the same

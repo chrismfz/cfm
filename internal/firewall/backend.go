@@ -39,6 +39,12 @@ type Backend interface {
 	SetChallengeRedirectEnabled(enabled bool)
 	CleanupChallengeRedirect() error
 
+	// DNAT/redirect inspection + toggle APIs.
+	DNATStatus(family, table string) (bool, error)
+	DNATShow(family, table string) (string, error)
+	DNATOn(family, table string, httpPort, httpsPort int) error
+	DNATOff(family, table string) error
+
 	// ReportBlock: centralized policy-aware API reporting.
 	// source: "detector" | "autoblock" | "manual"
 	// mode:   "ttl" | "permanent" | "dryrun"
