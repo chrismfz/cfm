@@ -7,7 +7,7 @@ import (
 	"cfm/internal/detectors/health"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
-	"cfm/internal/firewall/nft"
+	"cfm/internal/firewall"
 	"context"
 	"encoding/json"
 	"errors"
@@ -203,7 +203,7 @@ var (
 	reNoSyn   = regexp.MustCompile(`tcp flags (?:& syn == 0|! syn)`)
 )
 
-func Run(args []string) {
+func Run(args []string, backend firewall.Backend) {
 
 	// optional enrich (δεν διαβάζουμε config· ψάχνει μόνο σε standard dirs)
 	en, _ := enrich.New("/etc/cfm", "./configs")
@@ -465,18 +465,18 @@ func Run(args []string) {
 
 	// --- Bridge / Interceptor (best-effort diagnostics) ---
 	t0 = time.Now()
-	printBridgeInterceptorStatus()
+	printBridgeInterceptorStatus(backend)
 	timing["bridge_interceptor_ms"] = time.Since(t0).Milliseconds()
 
 	printTimings()
 
 }
 
-func printBridgeInterceptorStatus() {
+func printBridgeInterceptorStatus(backend firewall.Backend) {
 	fmt.Println("\n---- Bridge / Interceptor ----")
 
 	dnatState := "OFF"
-	if on, err := dnat.Status(nft.New()); err == nil && on {
+	if on, err := dnat.Status(backend); err == nil && on {
 		dnatState = "ON"
 	}
 

@@ -170,7 +170,7 @@ func Start(
 	RegisterBlock(m, be)
 
 	// ── System status ─────────────────────────────────────────────────────────
-	RegisterSystemStatus(m)
+	RegisterSystemStatus(m, be)
 
 	// ── Debug API (admin-only) ───────────────────────────────────────────────
 	RegisterDebugEndpoints(m)
