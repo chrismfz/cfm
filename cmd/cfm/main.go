@@ -99,6 +99,7 @@ func mustBackend() firewall.Backend {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logging.Logf("[startup] backend type=%T engine=%s", be, engine)
 	return be
 }
 
@@ -423,6 +424,7 @@ func runDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logging.Logf("[startup] backend type=%T engine=%s", be, engine)
 
 	done = step("backend:EnsureBase")
 	if err := be.EnsureBase(); err != nil {
