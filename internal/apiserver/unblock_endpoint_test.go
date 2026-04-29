@@ -23,6 +23,8 @@ type stubFirewallBackend struct {
 	removed []string
 }
 
+var _ firewall.Backend = (*stubFirewallBackend)(nil)
+
 func (s *stubFirewallBackend) EnsureBase() error                                     { return nil }
 func (s *stubFirewallBackend) AddBlock(net.IP, string, *time.Duration) error         { return nil }
 func (s *stubFirewallBackend) ListBlocks() ([]firewall.BlockedEntry, error)          { return nil, nil }
@@ -78,6 +80,10 @@ func (s *stubFirewallBackend) ReplaceSetFlushAdd(string, []string, *time.Duratio
 func (s *stubFirewallBackend) AddElementsBulk(string, []string, *time.Duration) error { return nil }
 func (s *stubFirewallBackend) HasElem(string, string) (bool, error)                    { return false, nil }
 func (s *stubFirewallBackend) ListSetElementsRaw(string) ([]string, error)             { return nil, nil }
+func (s *stubFirewallBackend) ListTableJSON(string, string) ([]byte, error)            { return nil, nil }
+func (s *stubFirewallBackend) ListSetJSON(string, string, string) ([]byte, error)      { return nil, nil }
+func (s *stubFirewallBackend) ListTableTextNoDNS(string, string) (string, error)       { return "", nil }
+func (s *stubFirewallBackend) FlushSet(string, string, string) error                    { return nil }
 func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {
 	s.removed = append(s.removed, ip.String())
