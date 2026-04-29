@@ -64,18 +64,25 @@ func firewallEngine() string {
 }
 
 func getBackend() (firewall.Backend, error) {
-	switch firewallEngine() {
-	case "", "nft":
+	engine := firewallEngine()
+
+	switch engine {
+	case "nft":
 		if _, ok := cli.LookPath("nft"); ok {
 			return nft.New(), nil
 		}
 		return nil, fmt.Errorf("nft backend selected but nft binary not found")
 	case "nftlib":
+		// Placeholder for future nftables library backend.
 		return nil, fmt.Errorf("firewall engine \"nftlib\" not built yet")
 	case "pf":
+		// Placeholder for future pf backend.
 		return nil, fmt.Errorf("firewall engine \"pf\" not built yet")
+	case "iptables":
+		// Placeholder for future iptables backend.
+		return nil, fmt.Errorf("firewall engine \"iptables\" not built yet")
 	default:
-		return nil, fmt.Errorf("unsupported firewall engine %q", firewallEngine())
+		return nil, fmt.Errorf("unsupported firewall engine %q", engine)
 	}
 }
 
