@@ -15,6 +15,7 @@ import (
 // Config is flat-by-category: one struct per logical area.
 type Config struct {
 	API              APIConfig
+	Firewall         FirewallConfig
 	Logging          LoggingConfig
 	NFT              NFTConfig
 	Ports            PortsConfig
@@ -190,6 +191,10 @@ type APIConfig struct {
 	DetectorsSend   bool // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
 }
 
+type FirewallConfig struct {
+	Engine string // FIREWALL_ENGINE
+}
+
 type LoggingConfig struct {
 	Stdout bool   // LOG_STDOUT
 	File   string // LOG_FILE
@@ -284,6 +289,12 @@ type PortFloodRule struct {
 
 // SetDefaults populates sane defaults where zero values are ambiguous.
 func (c *Config) SetDefaults() {
+	// Firewall
+	c.Firewall.Engine = strings.ToLower(strings.TrimSpace(c.Firewall.Engine))
+	if c.Firewall.Engine == "" {
+		c.Firewall.Engine = "nft"
+	}
+
 	// NFT
 	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
 	// PacketRate
@@ -588,6 +599,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.API.UnblockSend = parseBool(val)
 		case "DETECTORS_SEND_TO_API":
 			cfg.API.DetectorsSend = parseBool(val)
+		// Firewall
+		case "FIREWALL_ENGINE":
+			cfg.Firewall.Engine = val
+
 		// Logging
 		case "LOG_STDOUT":
 			cfg.Logging.Stdout = parseBool(val)

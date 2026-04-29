@@ -56,17 +56,19 @@ var (
 // Backend abstraction
 // ----------------------------------------------------------------------------
 
-func firewallEngine() string {
-	engine := strings.ToLower(strings.TrimSpace(os.Getenv("CFM_FIREWALL_ENGINE")))
-	if engine == "" {
-		return "nft"
+func resolveFirewallEngine(cfg *cfgpkg.Config) (string, string) {
+	if engine := strings.ToLower(strings.TrimSpace(os.Getenv("CFM_FIREWALL_ENGINE"))); engine != "" {
+		return engine, "env"
 	}
-	return engine
+	if cfg != nil {
+		if engine := strings.ToLower(strings.TrimSpace(cfg.Firewall.Engine)); engine != "" {
+			return engine, "config"
+		}
+	}
+	return "nft", "default"
 }
 
-func getBackend() (firewall.Backend, error) {
-	engine := firewallEngine()
-
+func getBackend(engine string) (firewall.Backend, error) {
 	switch engine {
 	case "nft":
 		if _, ok := cli.LookPath("nft"); ok {
@@ -86,12 +88,13 @@ func getBackend() (firewall.Backend, error) {
 		// Placeholder for future iptables backend.
 		return nil, fmt.Errorf("firewall engine \"iptables\" not built yet")
 	default:
-		return nil, fmt.Errorf("unsupported firewall engine %q", engine)
+		return nil, fmt.Errorf("unsupported firewall engine %q (supported: nft, nftlib, pf, iptables)", engine)
 	}
 }
 
 func mustBackend() firewall.Backend {
-	be, err := getBackend()
+	engine, _ := resolveFirewallEngine(nil)
+	be, err := getBackend(engine)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -101,7 +104,7 @@ func mustBackend() firewall.Backend {
 
 func tableExistsProbe(be firewall.Backend) func() bool {
 	return func() bool {
-		if firewallEngine() == "nft" {
+		if engine, _ := resolveFirewallEngine(nil); engine == "nft" {
 			return nft.TableExistsCFM()
 		}
 		return be != nil
@@ -401,11 +404,20 @@ func runDaemon(args []string) {
 		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
-	logging.Logf("[startup] firewall engine: %s", firewallEngine())
+	var engineCfg *cfgpkg.Config
+	if cfgDir != "" {
+		if b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); err == nil {
+			if cfg, err := cli.LoadConfigWithAPIOverride(cfgDir, b); err == nil {
+				engineCfg = cfg
+			}
+		}
+	}
+	engine, engineSource := resolveFirewallEngine(engineCfg)
+	logging.Logf("[startup] firewall engine: %s (source=%s)", engine, engineSource)
 
 	// Backend
 	done := step("backend:getBackend")
-	be, err := getBackend()
+	be, err := getBackend(engine)
 	done()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
