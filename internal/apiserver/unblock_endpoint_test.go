@@ -35,6 +35,8 @@ func (s *stubFirewallBackend) AddIgnoreNet(string, *time.Duration) error        
 func (s *stubFirewallBackend) RemoveIgnoreNet(string) error                          { return nil }
 func (s *stubFirewallBackend) AddChallenge(net.IP, *time.Duration) error             { return nil }
 func (s *stubFirewallBackend) RemoveChallenge(net.IP) error                          { return nil }
+func (s *stubFirewallBackend) SetChallengeRedirectEnabled(bool)                      {}
+func (s *stubFirewallBackend) CleanupChallengeRedirect() error                       { return nil }
 func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {
 	s.removed = append(s.removed, ip.String())

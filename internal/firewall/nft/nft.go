@@ -171,17 +171,17 @@ func New() *Backend {
 	}
 }
 
-func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
+func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	if b == nil {
 		return
 	}
 	b.challengeDNATEnabled = enabled
 	if !enabled {
-		_ = b.CleanupChallengeDNAT()
+		_ = b.CleanupChallengeRedirect()
 	}
 }
 
-func (b *Backend) CleanupChallengeDNAT() error {
+func (b *Backend) CleanupChallengeRedirect() error {
 	if b == nil {
 		return nil
 	}
@@ -197,6 +197,14 @@ func (b *Backend) CleanupChallengeDNAT() error {
 		_ = b.nftCmd(fmt.Sprintf(`flush chain %s %s challenge_guard`, family, tableName))
 	}
 	return nil
+}
+
+func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
+	b.SetChallengeRedirectEnabled(enabled)
+}
+
+func (b *Backend) CleanupChallengeDNAT() error {
+	return b.CleanupChallengeRedirect()
 }
 
 // ReportBlock decides (based on config + source) whether to notify the API and then calls reporter.
@@ -503,7 +511,7 @@ func (b *Backend) EnsureBase() error {
 			return err
 		}
 	} else {
-		_ = b.CleanupChallengeDNAT()
+		_ = b.CleanupChallengeRedirect()
 	}
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
@@ -1980,7 +1988,7 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error 
 	}
 
 	if !b.challengeDNATEnabled {
-		_ = b.CleanupChallengeDNAT()
+		_ = b.CleanupChallengeRedirect()
 		return nil
 	}
 

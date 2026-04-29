@@ -27,7 +27,6 @@ type Backend interface {
 	AddAllowNet(cidr string, ttl *time.Duration) error
 	RemoveAllowNet(cidr string) error
 
-
 	// NEW: Ignore (manual) — skip enforcement but still log/notify/report
 	AddIgnore(ip net.IP, ttl *time.Duration) error
 	RemoveIgnore(ip net.IP) error
@@ -37,14 +36,12 @@ type Backend interface {
 	// NEW: Challenge (HTTP/HTTPS redirect for selected source IPs)
 	AddChallenge(ip net.IP, ttl *time.Duration) error
 	RemoveChallenge(ip net.IP) error
+	SetChallengeRedirectEnabled(enabled bool)
+	CleanupChallengeRedirect() error
 
-
-        // ReportBlock: centralized policy-aware API reporting.
-        // source: "detector" | "autoblock" | "manual"
-        // mode:   "ttl" | "permanent" | "dryrun"
-        // ttlSeconds used only when mode == "ttl".
-        ReportBlock(ip, comment, source, mode string, ttlSeconds int) error
-
-
-
+	// ReportBlock: centralized policy-aware API reporting.
+	// source: "detector" | "autoblock" | "manual"
+	// mode:   "ttl" | "permanent" | "dryrun"
+	// ttlSeconds used only when mode == "ttl".
+	ReportBlock(ip, comment, source, mode string, ttlSeconds int) error
 }

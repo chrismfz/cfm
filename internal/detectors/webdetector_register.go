@@ -182,11 +182,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 			// Disable nft dynamic DNAT challenge sets in OpenResty mode
 			if fwBackend != nil {
-				if t, ok := any(fwBackend).(interface{ SetChallengeDNATEnabled(bool) }); ok {
-					t.SetChallengeDNATEnabled(false)
-				} else if t, ok := any(fwBackend).(interface{ CleanupChallengeDNAT() error }); ok {
-					_ = t.CleanupChallengeDNAT()
-				}
+				fwBackend.SetChallengeRedirectEnabled(false)
+				_ = fwBackend.CleanupChallengeRedirect()
 			}
 
 			if b := w.eng.NginxBridge(); b != nil {
@@ -545,11 +542,8 @@ func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
 	// OpenResty mode: do not manage challenge DNAT sets/rules
 	if w.cfg.OpenRestyMode {
 		if fwBackend != nil {
-			if t, ok := any(fwBackend).(interface{ SetChallengeDNATEnabled(bool) }); ok {
-				t.SetChallengeDNATEnabled(false)
-			} else if t, ok := any(fwBackend).(interface{ CleanupChallengeDNAT() error }); ok {
-				_ = t.CleanupChallengeDNAT()
-			}
+			fwBackend.SetChallengeRedirectEnabled(false)
+			_ = fwBackend.CleanupChallengeRedirect()
 		}
 		return
 	}
