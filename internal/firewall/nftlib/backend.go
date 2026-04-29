@@ -86,6 +86,8 @@ type Backend struct {
 	reporter      reporting.Reporter
 	challengeLogf func(format string, args ...any)
 	cfgDir        string
+
+	challengeRedirectEnabled bool
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.
@@ -97,6 +99,7 @@ func New() (*Backend, error) {
 	return &Backend{
 		conn:      conn,
 		cli:       nft.New(),
+		challengeRedirectEnabled: true,
 		namedSets: make(map[string]*nftables.Set),
 		extAllow:  make(map[string]extFeedData),
 		extBlock:  make(map[string]extFeedData),
