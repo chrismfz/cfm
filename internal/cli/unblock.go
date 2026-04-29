@@ -12,13 +12,12 @@ import (
 
 	agentpkg "cfm/internal/agent"
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 	ipquery "cfm/internal/ipquery"
 	"cfm/internal/reporting"
 	"cfm/internal/unblock"
 )
 
-func RunUnblock(args []string, be firewall.Backend, cfgDir string) int {
+func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>")
 		return 2
@@ -33,7 +32,7 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1

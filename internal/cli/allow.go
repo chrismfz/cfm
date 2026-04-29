@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 )
 
-func RunAllow(args []string, be firewall.Backend, cfgDir string) int {
+func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("allow", flag.ExitOnError)
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
 	flagArgs, posArgs := SplitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
@@ -68,7 +67,7 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1
@@ -106,7 +105,7 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string) int {
 	return 0
 }
 
-func RunUnallow(args []string, be firewall.Backend, cfgDir string) int {
+func RunUnallow(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP|CIDR>")
 		return 2
@@ -123,7 +122,7 @@ func RunUnallow(args []string, be firewall.Backend, cfgDir string) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1

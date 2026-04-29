@@ -14,7 +14,6 @@ import (
 	agentpkg "cfm/internal/agent"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 )
 
 // LoadConfigWithAPIOverride parses cfm.conf then overlays cfm.api.conf when
@@ -60,7 +59,7 @@ func LoadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config,
 	return cfg, nil
 }
 
-func RunBlock(args []string, be firewall.Backend, cfgDir string) int {
+func RunBlock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("block", flag.ExitOnError)
 	reasonFlag := fs.String("r", "", "reason/comment")
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
@@ -117,7 +116,7 @@ func RunBlock(args []string, be firewall.Backend, cfgDir string) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1

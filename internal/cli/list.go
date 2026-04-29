@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 )
 
-func RunList(args []string, be firewall.Backend) int {
+func RunList(args []string, be firewall.Backend, tableExists func() bool) int {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
@@ -22,7 +21,7 @@ func RunList(args []string, be firewall.Backend) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1
@@ -66,7 +65,7 @@ func RunList(args []string, be firewall.Backend) int {
 	return 0
 }
 
-func RunAllowList(args []string, be firewall.Backend) int {
+func RunAllowList(args []string, be firewall.Backend, tableExists func() bool) int {
 	fs := flag.NewFlagSet("allow-list", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
@@ -75,7 +74,7 @@ func RunAllowList(args []string, be firewall.Backend) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1
