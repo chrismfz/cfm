@@ -613,6 +613,12 @@ func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
 }
 
 func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
+	listeners := probeFrontendListeners()
+	active, _, _ := probeSystemdUnit("nginx.service")
+	if sig, ok := detectNginxUpstreamFromSignals(listeners, active); ok {
+		return sig
+	}
+
 	candidates := []struct {
 		name        string
 		unit        string
@@ -653,6 +659,48 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 		return best
 	}
 	return best
+}
+
+func detectNginxUpstreamFromSignals(listeners frontendListenerSnapshot, serviceActive bool) (runtimeRoleSignal, bool) {
+	status := "inactive"
+	if serviceActive {
+		status = "active"
+	}
+
+	hasMasterWorker := false
+	for _, ln := range listeners.listeners {
+		if ln.name == "nginx" {
+			hasMasterWorker = true
+			break
+		}
+	}
+	if !hasMasterWorker {
+		for _, fl := range listeners.flows {
+			if fl.name == "nginx" {
+				hasMasterWorker = true
+				break
+			}
+		}
+	}
+
+	hasPublic := listeners.hasOwnerOnPorts([]string{"nginx"}, 80, 443)
+	hasDNATTier := listeners.hasOwnerOnPorts([]string{"nginx"}, 9080, 9043)
+	if !hasDNATTier {
+		hasDNATTier = listeners.hasOwnerOnFlows([]string{"nginx"}, 9080, 9043)
+	}
+	hasLoopbackPath := listeners.hasOwnerOnFlows([]string{"nginx"}, 80, 443) || listeners.hasOwnerOnFlows([]string{"nginx"}, 9080, 9043)
+
+	strong := hasMasterWorker && serviceActive && hasPublic && hasDNATTier
+	if strong {
+		_ = hasLoopbackPath // optional supporting signal
+		return runtimeRoleSignal{service: "nginx", status: status}, true
+	}
+
+	if !hasMasterWorker && !serviceActive && !hasPublic && !hasDNATTier {
+		return runtimeRoleSignal{}, false
+	}
+
+	return runtimeRoleSignal{service: "unknown", status: "unknown"}, true
 }
 
 func detectedPortsForService(listeners frontendListenerSnapshot, service string, ports ...int) []int {
