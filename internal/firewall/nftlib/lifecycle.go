@@ -2,12 +2,76 @@
 
 package nftlib
 
-// EnsureBase delegates to the embedded nft.Backend to create all CFM-owned
-// tables, chains, and sets. The local set handle cache is invalidated so the
-// next nftlib operation re-fetches handles from the kernel.
+import (
+	"fmt"
+	"strings"
+
+	"github.com/google/nftables"
+)
+
+// EnsureBase creates all core CFM-owned tables, chains, and sets using netlink.
+// The local set handle cache is invalidated so the next nftlib operation
+// re-fetches handles from the kernel.
 func (b *Backend) EnsureBase() error {
-	if err := b.cli.EnsureBase(); err != nil {
-		return err
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.AddTable(table)
+
+	b.conn.AddChain(&nftables.Chain{Table: table, Name: "input"})
+	b.conn.AddChain(&nftables.Chain{Table: table, Name: "flood"})
+	b.conn.AddChain(&nftables.Chain{Table: table, Name: "preraw"})
+
+	for _, spec := range []struct {
+		name       string
+		keyType    nftables.SetDatatype
+		hasTimeout bool
+		interval   bool
+	}{
+		{name: setAllowV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: setAllowV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: setBlockV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: setBlockV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: setAllowV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: setAllowV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		{name: setBlockV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: setBlockV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		{name: setIgnoreV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: setIgnoreV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: setIgnoreV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: setIgnoreV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		{name: setChalV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: setChalV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
+	} {
+		b.conn.AddSet(&nftables.Set{
+			Table:      table,
+			Name:       spec.name,
+			KeyType:    spec.keyType,
+			HasTimeout: spec.hasTimeout,
+			Interval:   spec.interval,
+		}, nil)
+	}
+
+	if err := b.conn.Flush(); err != nil {
+		if isAlreadyExists(err) {
+			// preserve idempotency for repeated EnsureBase calls
+		} else {
+			return fmt.Errorf("nftlib: ensure base: %w", err)
+		}
+	}
+
+	b.mu.Lock()
+	b.invalidateCache()
+	b.mu.Unlock()
+	return nil
+}
+
+// DropEverything removes all CFM-owned firewall state.
+func (b *Backend) DropEverything() error {
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.FlushTable(table)
+	b.conn.DelTable(table)
+	err := b.conn.Flush()
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("nftlib: drop everything: %w", err)
 	}
 	b.mu.Lock()
 	b.invalidateCache()
@@ -15,46 +79,88 @@ func (b *Backend) EnsureBase() error {
 	return nil
 }
 
-// DropEverything delegates to cli; removes all CFM-owned firewall state.
-func (b *Backend) DropEverything() error {
-	err := b.cli.DropEverything()
-	b.mu.Lock()
-	b.invalidateCache()
-	b.mu.Unlock()
-	return err
-}
-
-// ResetTable flushes and rebuilds rules from current in-memory config.
+// ResetTable flushes the whole CFM table but keeps it present.
 func (b *Backend) ResetTable() error {
-	err := b.cli.ResetTable()
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.FlushTable(table)
+	err := b.conn.Flush()
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("nftlib: reset table: %w", err)
+	}
 	b.mu.Lock()
 	b.invalidateCache()
 	b.mu.Unlock()
-	return err
+	return nil
 }
 
 // EnsureSetDynamic creates a named dynamic set if it does not exist.
 // The cache entry for that set is cleared so the next lookup re-fetches it.
 func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
-	err := b.cli.EnsureSetDynamic(name, v6, isNet)
-	if err == nil {
-		b.mu.Lock()
-		delete(b.namedSets, name)
-		b.mu.Unlock()
+	keyType := nftables.TypeIPAddr
+	if v6 {
+		keyType = nftables.TypeIP6Addr
 	}
-	return err
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.AddSet(&nftables.Set{
+		Table:      table,
+		Name:       name,
+		KeyType:    keyType,
+		HasTimeout: true,
+		Interval:   isNet,
+	}, nil)
+	err := b.conn.Flush()
+	if err != nil && !isAlreadyExists(err) {
+		return fmt.Errorf("nftlib: ensure dynamic set %q: %w", name, err)
+	}
+	b.mu.Lock()
+	delete(b.namedSets, name)
+	b.mu.Unlock()
+	return nil
 }
 
 // DeleteSetIfExists removes a named set, ignoring not-found errors.
 func (b *Backend) DeleteSetIfExists(name string) error {
-	err := b.cli.DeleteSetIfExists(name)
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.DelSet(&nftables.Set{Table: table, Name: name})
+	err := b.conn.Flush()
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
+	}
 	b.mu.Lock()
 	delete(b.namedSets, name)
 	b.mu.Unlock()
-	return err
+	return nil
 }
 
-// FlushSet empties a named set by family/table/set path, delegating to cli.
+// FlushSet empties a named set by family/table/set path.
 func (b *Backend) FlushSet(family, table, set string) error {
-	return b.cli.FlushSet(family, table, set)
+	if !strings.EqualFold(family, "inet") || table != cfmTableName {
+		return fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
+	}
+	nt := &nftables.Table{Name: table, Family: nftables.TableFamilyINet}
+	ns := &nftables.Set{Table: nt, Name: set}
+	b.conn.FlushSet(ns)
+	if err := b.conn.Flush(); err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
+	}
+	return nil
+}
+
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no such") || strings.Contains(s, "not found")
+}
+
+func isAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "file exists") || strings.Contains(s, "already exists")
 }
