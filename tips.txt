@@ -55,3 +55,44 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 
 
 5
+
+
+# ─── nftlib backend verification ────────────────────────────────────────────
+#
+# nftlib talks directly to the kernel via netlink — no nft subprocess.
+# The set/element contents are identical; only the write path changes.
+# Use the same `nft list` commands to verify state (kernel is the ground truth).
+#
+# Switch to nftlib (no restart needed for CLI commands; daemon needs restart):
+#   CFM_FIREWALL_ENGINE=nftlib cfm status
+#   CFM_FIREWALL_ENGINE=nftlib cfm block 1.2.3.4 --ttl 1h
+#   systemctl set-environment CFM_FIREWALL_ENGINE=nftlib && systemctl restart cfm
+#
+# Confirm which engine the running daemon is using:
+grep CFM_FIREWALL_ENGINE /proc/$(pgrep -f "cfm daemon" | head -1)/environ 2>/dev/null \
+  || echo "(env var not set → engine is nft)"
+#
+# Confirm nftlib is NOT spawning nft subprocesses during a block:
+#   In one terminal, watch for nft forks:
+strace -f -e trace=execve -p $(pgrep -f "cfm daemon") 2>&1 | grep nft
+#   In another terminal, add a block. With nft engine you see "execve nft ...".
+#   With nftlib engine: silence (no execve for nft).
+#
+# Same check with fork count — should stay flat with nftlib:
+watch -n1 "cat /proc/$(pgrep -f 'cfm daemon' | head -1)/stat | awk '{print \"forks:\", \$10}'"
+#
+# Verify a block added via nftlib shows up in kernel state:
+CFM_FIREWALL_ENGINE=nftlib cfm block 203.0.113.1 --ttl 5m
+nft list set inet cfm block_v4 | grep 203.0.113.1
+#
+# Check a bulk feed loaded via nftlib (element count should match):
+nft list set inet cfm block_ext_v4_hosts_dshield | wc -l
+# Should be same count regardless of engine; nftlib just writes it faster.
+#
+# Check open netlink sockets (nftlib keeps one fd open per daemon; nft has none):
+ls -la /proc/$(pgrep -f "cfm daemon" | head -1)/fd 2>/dev/null | grep netlink
+# With nftlib: one NETLINK fd present. With nft: none.
+#
+# Debug nftlib netlink traffic (requires root):
+nft monitor   # shows all kernel-side set/rule changes in real time
+# Add a block and watch the element appear; same output for both engines.

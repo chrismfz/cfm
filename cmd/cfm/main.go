@@ -9,6 +9,7 @@ import (
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
+	"cfm/internal/firewall/nftlib"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
@@ -73,8 +74,11 @@ func getBackend() (firewall.Backend, error) {
 		}
 		return nil, fmt.Errorf("nft backend selected but nft binary not found")
 	case "nftlib":
-		// Placeholder for future nftables library backend.
-		return nil, fmt.Errorf("firewall engine \"nftlib\" not built yet")
+		be, err := nftlib.New()
+		if err != nil {
+			return nil, fmt.Errorf("nftlib backend: %w", err)
+		}
+		return be, nil
 	case "pf":
 		// Placeholder for future pf backend.
 		return nil, fmt.Errorf("firewall engine \"pf\" not built yet")

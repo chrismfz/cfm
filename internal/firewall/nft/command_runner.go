@@ -13,6 +13,15 @@ import (
 
 const defaultNFTCommandTimeout = 10 * time.Second
 
+// nftSem limits the number of concurrent nft subprocesses to prevent fork-storm
+// conditions during large feed updates or high-frequency detector activity.
+// Four concurrent nft processes is enough for parallelism without saturating the
+// fork table. Operations that cannot acquire a slot wait until one is free.
+var nftSem = make(chan struct{}, 4)
+
+func acquireSem() { nftSem <- struct{}{} }
+func releaseSem() { <-nftSem }
+
 type commandErrorMeta struct {
 	ExitCode   int
 	TimedOut   bool
@@ -38,6 +47,9 @@ func runCommand(ctx context.Context, timeout time.Duration, name string, args ..
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+
+	acquireSem()
+	defer releaseSem()
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
@@ -113,6 +125,10 @@ func runNFTCommandInput(ctx context.Context, input string, args ...string) (comm
 		ctx, cancel = context.WithTimeout(ctx, defaultNFTCommandTimeout)
 		defer cancel()
 	}
+
+	acquireSem()
+	defer releaseSem()
+
 	cmd := exec.CommandContext(ctx, "nft", args...)
 	cmd.Stdin = strings.NewReader(input)
 	var stdout, stderr bytes.Buffer
