@@ -16,6 +16,22 @@ type BlockedEntry struct {
 	Comment string
 }
 
+// Phase 2 backend operation ownership matrix (roadmap-aligned):
+// - nftlib-owned operations:
+//   - Lifecycle/list primitives: EnsureBase, ResetTable, List* + table/set dump helpers.
+//   - Manual element writes: Add/Remove Block|Allow|Ignore|Challenge (+ CIDR, batch variants).
+//   - Set/bulk/feed lifecycle: EnsureSetDynamic, DeleteSetIfExists, ReplaceSetFlushAdd,
+//     AddElementsBulk, FlushSet, HasElem/ListSetElementsRaw, ApplyFeed/RebuildExternalUnions/
+//     PruneExternalFeeds/DropFeedSets/RemoveFeedByKey.
+//   - Standards: use transaction-style commit boundaries for related mutations, fail closed on
+//     partial updates, and return wrapped errors with op/family/table/set/attempt context.
+// - nftcli-owned operations (hybrid until nftlib parity):
+//   - Policy/rules programming: ApplyFloodRules, ApplyHardeningRules, ApplyPortsPolicy,
+//     ApplyConnlimit, ApplyPortFlood, ApplySMTPBlock, ApplyOutboundObserve.
+//   - Challenge redirect/DNAT control: SetChallengeRedirectEnabled, CleanupChallengeRedirect,
+//     EnsureChallengeRedirect, DNATStatus, DNATShow, DNATOn, DNATOff.
+//   - Protections: keep timeout + backpressure controls (central command runner, bounded
+//     concurrency/serialization, and context cancellation propagation) on every subprocess path.
 type Backend interface {
 	// Lifecycle / wiring
 	EnsureBase() error
