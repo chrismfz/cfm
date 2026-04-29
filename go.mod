@@ -7,7 +7,7 @@ require (
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gizak/termui/v3 v3.1.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/nftables v0.3.0
 	github.com/mdlayher/netlink v1.11.1
 	github.com/miekg/dns v1.1.72
@@ -16,7 +16,7 @@ require (
 	golang.org/x/crypto v0.50.0
 	golang.org/x/term v0.42.0
 	golang.org/x/text v0.36.0
-	modernc.org/sqlite v1.49.1
+	modernc.org/sqlite v1.50.0
 )
 
 require (
@@ -28,15 +28,14 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/go-webauthn/webauthn v0.16.5 // indirect
+	github.com/go-webauthn/webauthn v0.17.0 // indirect
 	github.com/go-webauthn/x v0.2.3 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/mattn/go-isatty v0.0.21 // indirect
+	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
@@ -54,7 +53,7 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
-	modernc.org/libc v1.72.0 // indirect
+	modernc.org/libc v1.72.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
