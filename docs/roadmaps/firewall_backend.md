@@ -933,9 +933,22 @@ Options:
    This is the cleanest long-term approach but requires changing the `Backend`
    interface.
 
-**Recommendation:** Keep as cli delegates (option 1) unless the `nft` binary
-removal becomes an explicit requirement. Document the decision here so it is a
-conscious choice, not an oversight.
+**Architecture decision (Phase 2.5):** **Option 1** is adopted for Phase 2.5
+completion: keep `ListTableJSON`, `ListSetJSON`, `ListTableTextNoDNS`, and
+`ListChainText` as CLI delegates for diagnostics only, and explicitly document
+that `nft` binary availability remains a runtime prerequisite for these
+inspection paths.
+
+**Phase 2.5 completion criterion for this decision:**
+- `CFM_FIREWALL_ENGINE=nftlib` removes CLI delegation from policy/sets/lifecycle/
+  challenge mutation paths, while the four diagnostic inspection methods above
+  continue to shell out to `nft` by design.
+- Operator docs must state that diagnostic commands requiring these methods need
+  a working `nft` binary in `PATH`.
+
+If a future phase requires zero-CLI operation for diagnostics as well, open a new
+ADR/update and migrate to option 2 (structured netlink output + internal
+formatter).
 
 ---
 
@@ -1149,7 +1162,7 @@ Any implementation of `firewall.Backend` must follow these rules:
 | Native `DNATOn`/`DNATOff`: `expr.NAT{Type: NATTypeDestNAT}` prerouting rule | `internal/firewall/nftlib/challenge.go` | ☐ |
 | Native `DNATStatus`/`DNATShow`: `conn.GetRules` + scan for `expr.NAT` | `internal/firewall/nftlib/challenge.go` | ☐ |
 | Native `EnsureChallengeRedirect`/`CleanupChallengeRedirect`: compose `DNATStatus`+`DNATOn`/`DNATOff` | `internal/firewall/nftlib/challenge.go` | ☐ |
-| Decision: keep `ListTableJSON`/`ListSetJSON`/`ListTableTextNoDNS`/`ListChainText` as cli delegates (diagnostic-only) OR replace with structured Go types | `internal/firewall/nftlib/inspect.go` | ☐ |
+| **Architecture decision (Phase 2.5):** keep `ListTableJSON`/`ListSetJSON`/`ListTableTextNoDNS`/`ListChainText` as CLI delegates for diagnostics only; document `nft` binary requirement | `internal/firewall/nftlib/inspect.go` | ✅ |
 | Remove `cli *nft.Backend` field and `nft.New()` from `nftlib.New()` | `internal/firewall/nftlib/backend.go` | ☐ |
 | Remove `cfm/internal/firewall/nft` import from all `nftlib/*.go` | `internal/firewall/nftlib/` | ☐ |
 | Parity validation: run both engines on virgo, diff `nft list table inet cfm` output | virgo testlab | ☐ |
