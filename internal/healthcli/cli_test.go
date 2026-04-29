@@ -30,7 +30,7 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown, confidence=low)", "Edge: unknown (confidence=low, via unknown)", "Upstream: unknown (confidence=low, via unknown)"},
 			wantNone: []string{"[cfm health watch]"},
 		},
 		{
@@ -91,16 +91,16 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
 
 	out, err := runWithCapturedStdout(func() error {
-		printRuntimeSection(s, cliOptions{NoColor: true, DebugRuntime: true})
+		printRuntimeSection(s, cliOptions{NoColor: true})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("printRuntimeSection error: %v", err)
 	}
-	if !strings.Contains(out, "DNAT: on") {
+	if !strings.Contains(out, "DNAT: on (frontend=angie, confidence=low)") {
 		t.Fatalf("expected frontend output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Frontend: angie (working) (confidence=low)") {
+	if !strings.Contains(out, "Frontend: angie (working)") {
 		t.Fatalf("expected frontend working verdict, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Edge: angie (confidence=high, via dnat_targets_owner)") {
@@ -124,7 +124,7 @@ func TestRuntimeSectionFrontendDegradedReason(t *testing.T) {
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: openresty(score=6), nginx(score=6)"
 
 	out, err := runWithCapturedStdout(func() error {
-		printRuntimeSection(s, cliOptions{NoColor: true, DebugRuntime: true})
+		printRuntimeSection(s, cliOptions{NoColor: true})
 		return nil
 	})
 	if err != nil {
