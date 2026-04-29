@@ -1,17 +1,116 @@
 //go:build linux
 
-// Inspection methods delegate to the embedded nft.Backend.
-// Native nftlib implementations (using conn.GetSetElements) will replace
-// these in a later phase.
 package nftlib
 
-func (b *Backend) HasElem(setName, elem string) (bool, error) {
-	return b.cli.HasElem(setName, elem)
+import (
+	"fmt"
+	"net"
+	"time"
+
+	"cfm/internal/firewall"
+)
+
+// ListBlocks returns all entries in the block_v4 and block_v6 sets.
+// Uses conn.GetSetElements — no subprocess, no fork.
+func (b *Backend) ListBlocks() ([]firewall.BlockedEntry, error) {
+	return b.listHostSetPair(setBlockV4, setBlockV6)
 }
 
-func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
-	return b.cli.ListSetElementsRaw(setName)
+// ListAllows returns all entries in the allow_v4 and allow_v6 sets.
+func (b *Backend) ListAllows() ([]firewall.BlockedEntry, error) {
+	return b.listHostSetPair(setAllowV4, setAllowV6)
 }
+
+func (b *Backend) listHostSetPair(v4Name, v6Name string) ([]firewall.BlockedEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	var result []firewall.BlockedEntry
+	for _, name := range []string{v4Name, v6Name} {
+		set, err := b.lookupSet(name)
+		if err != nil {
+			continue // set may not exist yet
+		}
+		elems, err := b.conn.GetSetElements(set)
+		if err != nil {
+			continue
+		}
+		for _, e := range elems {
+			if e.IntervalEnd {
+				continue
+			}
+			ip := keyToIP(e.Key)
+			if ip == nil {
+				continue
+			}
+			entry := firewall.BlockedEntry{IP: ip}
+			// e.Expires is the remaining lifetime (time.Duration); convert to
+			// absolute time so callers can display it as a wall-clock timestamp.
+			if e.Expires > 0 {
+				exp := now.Add(e.Expires)
+				entry.Expires = &exp
+			}
+			result = append(result, entry)
+		}
+	}
+	return result, nil
+}
+
+// HasElem returns true if elem is currently in the named set.
+// Fetches elements via netlink and scans for a match — no fork.
+// Used by interactive commands, not hot paths.
+func (b *Backend) HasElem(setName, elem string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	set, err := b.lookupSet(setName)
+	if err != nil {
+		return false, fmt.Errorf("nftlib HasElem %s: %w", setName, err)
+	}
+	elems, err := b.conn.GetSetElements(set)
+	if err != nil {
+		return false, fmt.Errorf("nftlib HasElem %s: %w", setName, err)
+	}
+
+	// Normalise the query to canonical form so "::1" and "0:0:…:1" both match.
+	var targetStr string
+	if ip := net.ParseIP(elem); ip != nil {
+		targetStr = ip.String()
+	} else {
+		targetStr = elem
+	}
+
+	for _, e := range elems {
+		if e.IntervalEnd {
+			continue
+		}
+		ip := keyToIP(e.Key)
+		if ip != nil && ip.String() == targetStr {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ListSetElementsRaw returns all elements of a named set as strings.
+// For host sets: IP strings. For interval/CIDR sets: CIDR notation strings.
+func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	set, err := b.lookupSet(setName)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListSetElementsRaw %s: %w", setName, err)
+	}
+	elems, err := b.conn.GetSetElements(set)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListSetElementsRaw %s: %w", setName, err)
+	}
+	return elemsToStrings(elems), nil
+}
+
+// ── Table/set dump methods — delegate to cli (text/JSON formatting) ──────────
 
 func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
 	return b.cli.ListTableJSON(family, table)

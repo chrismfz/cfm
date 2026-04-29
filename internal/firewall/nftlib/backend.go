@@ -13,6 +13,7 @@ package nftlib
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
@@ -21,6 +22,16 @@ import (
 
 	"github.com/google/nftables"
 )
+
+// extFeedData mirrors nft.extFeedData — the in-memory element cache that
+// lets RebuildExternalUnions avoid reading the kernel on every feed update.
+type extFeedData struct {
+	H4  []string
+	N4  []string
+	H6  []string
+	N6  []string
+	TTL *time.Duration
+}
 
 // Compile-time: nftlib.Backend must satisfy firewall.Backend.
 // Build fails here — not at runtime — if any method is missing.
@@ -63,6 +74,13 @@ type Backend struct {
 	// Methods not yet implemented natively forward here.
 	cli *nft.Backend
 
+	// External feed element cache — mirrors nft.Backend's in-memory store so
+	// RebuildExternalUnions never needs to read the kernel state.
+	extFeedMu sync.RWMutex
+	extAllow  map[string]extFeedData // feedKey → data
+	extBlock  map[string]extFeedData // feedKey → data
+	feedKeys  map[string]struct{}    // active sanitized feed keys
+
 	// Wiring fields — forwarded to cli on set so both backends stay consistent.
 	enr           *enrichpkg.Enricher
 	reporter      reporting.Reporter
@@ -80,5 +98,8 @@ func New() (*Backend, error) {
 		conn:      conn,
 		cli:       nft.New(),
 		namedSets: make(map[string]*nftables.Set),
+		extAllow:  make(map[string]extFeedData),
+		extBlock:  make(map[string]extFeedData),
+		feedKeys:  make(map[string]struct{}),
 	}, nil
 }

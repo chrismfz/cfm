@@ -7,8 +7,6 @@ import (
 	"net"
 	"time"
 
-	"cfm/internal/firewall"
-
 	"github.com/google/nftables"
 )
 
@@ -70,10 +68,6 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 	return b.conn.Flush()
 }
 
-// ListBlocks delegates to cli; nftlib inspection is implemented in a later phase.
-func (b *Backend) ListBlocks() ([]firewall.BlockedEntry, error) {
-	return b.cli.ListBlocks()
-}
 
 // ── AddAllow / RemoveAllow ───────────────────────────────────────────────────
 
@@ -93,10 +87,6 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	return b.delIPElem(setName, ip)
 }
 
-// ListAllows delegates to cli; nftlib inspection is implemented in a later phase.
-func (b *Backend) ListAllows() ([]firewall.BlockedEntry, error) {
-	return b.cli.ListAllows()
-}
 
 // ── AddIgnore / RemoveIgnore ─────────────────────────────────────────────────
 

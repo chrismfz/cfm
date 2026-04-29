@@ -3,7 +3,10 @@
 package nftlib
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math/big"
+	"math/bits"
 	"net"
 	"strings"
 	"time"
@@ -148,4 +151,92 @@ func parseElems(set *nftables.Set, elems []string, ttl *time.Duration) []nftable
 		}
 	}
 	return result
+}
+
+// ── Read-path helpers (decode kernel set elements back to Go types) ───────────
+
+// keyToIP converts a set element Key byte slice back to a net.IP.
+// Returns nil for unrecognised lengths.
+func keyToIP(key []byte) net.IP {
+	switch len(key) {
+	case 4:
+		ip := make(net.IP, 4)
+		copy(ip, key)
+		return ip
+	case 16:
+		ip := make(net.IP, 16)
+		copy(ip, key)
+		return ip
+	}
+	return nil
+}
+
+// keysToCIDR reconstructs a CIDR string from an interval set element pair.
+// startKey is the network address; endKey is broadcastPlusOne (the IntervalEnd
+// marker stored by the kernel).
+func keysToCIDR(startKey, endKey []byte) string {
+	startIP := keyToIP(startKey)
+	if startIP == nil || len(startKey) != len(endKey) {
+		return ""
+	}
+	totalBits := len(startKey) * 8
+	var prefix int
+
+	if totalBits == 32 {
+		s := binary.BigEndian.Uint32(startKey)
+		e := binary.BigEndian.Uint32(endKey)
+		if e <= s {
+			prefix = 32
+		} else {
+			// range = 2^(32 - prefix), so prefix = 32 - trailingZeros(range)
+			prefix = 32 - bits.TrailingZeros32(e-s)
+		}
+	} else {
+		sInt := new(big.Int).SetBytes(startKey)
+		eInt := new(big.Int).SetBytes(endKey)
+		rng := new(big.Int).Sub(eInt, sInt)
+		if rng.Sign() <= 0 {
+			prefix = 128
+		} else {
+			prefix = 128 - int(rng.TrailingZeroBits())
+		}
+	}
+
+	mask := net.CIDRMask(prefix, totalBits)
+	cidr := &net.IPNet{IP: startIP.Mask(mask), Mask: mask}
+	return cidr.String()
+}
+
+// elemsToStrings converts kernel set elements to IP or CIDR strings.
+// For interval sets, start/end pairs are reconstructed into CIDR notation.
+func elemsToStrings(elems []nftables.SetElement) []string {
+	// Partition into starts and interval-end markers.
+	var starts, ends [][]byte
+	for _, e := range elems {
+		if e.IntervalEnd {
+			ends = append(ends, e.Key)
+		} else {
+			starts = append(starts, e.Key)
+		}
+	}
+
+	// No interval-end markers: plain host-IP set.
+	if len(ends) == 0 {
+		var out []string
+		for _, e := range elems {
+			if ip := keyToIP(e.Key); ip != nil {
+				out = append(out, ip.String())
+			}
+		}
+		return out
+	}
+
+	// Interval set: pair starts and ends (kernel returns them sorted by key).
+	var out []string
+	for i := 0; i < len(starts) && i < len(ends); i++ {
+		if s := keysToCIDR(starts[i], ends[i]); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

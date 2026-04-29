@@ -236,9 +236,9 @@ Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We 
 - [x] Hybrid wiring: policy/DNAT/inspection/feeds/diagnostics delegate to embedded `*nft.Backend`.
 - [x] Compile-time assertion `var _ firewall.Backend = (*Backend)(nil)` in `nftlib/backend.go`.
 - [x] `CFM_FIREWALL_ENGINE=nftlib` selector wired in `cmd/cfm/main.go`; nft remains production default.
-- [ ] Validate parity for DNAT/challenge redirect, feed management, and bulk set operations.
-- [ ] Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) — currently delegated.
-- [ ] Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`) — currently delegated.
+- [ ] Validate parity for DNAT/challenge redirect and bulk set operations.
+- [x] Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) — `conn.GetSetElements`; CIDR interval pairs reconstructed via `keysToCIDR`.
+- [x] Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`, `PruneExternalFeeds`, `DropFeedSets`, `RemoveFeedByKey`) — calls own `ReplaceSetFlushAdd`; set discovery uses `conn.GetSets`. Full feed path now zero-fork.
 
 ### Phase 2 exit criteria to move `nftlib` beyond experimental
 
@@ -965,8 +965,8 @@ Any implementation of `firewall.Backend` must follow these rules:
 | Phase 1.5: bounded semaphore (cap=4) for nft subprocess calls | `internal/firewall/nft/command_runner.go` | ✅ |
 | Phase 1 cleanup: remove always-true `EnsureChallengeRedirect` type assertion | `internal/detectors/webdetector_register.go` | ✅ |
 | Integration test: apply blocklist, verify nft list | `internal/firewall/nftlib/*_test.go` | ☐ |
-| Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) | `internal/firewall/nftlib/inspect.go` | ☐ |
-| Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`) | `internal/firewall/nftlib/feeds.go` | ☐ |
+| Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) | `internal/firewall/nftlib/inspect.go` | ✅ (`conn.GetSetElements`; CIDR pairs reconstructed via `keysToCIDR`) |
+| Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`, `PruneExternalFeeds`, `DropFeedSets`, `RemoveFeedByKey`) | `internal/firewall/nftlib/feeds.go` | ✅ (own `ReplaceSetFlushAdd`; set discovery via `conn.GetSets`) |
 
 ### Phase 3 — pf backend (BSD)
 
