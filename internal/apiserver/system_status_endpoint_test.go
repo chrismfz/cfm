@@ -17,7 +17,7 @@ func newSystemStatusTestServer(t *testing.T) (*TokenStore, http.Handler) {
 	t.Helper()
 	store := NewTokenStore()
 	mux := http.NewServeMux()
-	RegisterSystemStatus(mux)
+	RegisterSystemStatus(mux, nil)
 	return store, TokenMiddleware("admin-secret", store)(mux)
 }
 

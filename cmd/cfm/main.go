@@ -205,7 +205,7 @@ func main() {
 	case "htpasswd":
 		os.Exit(cli.RunHtpasswd(os.Args[2:]))
 	case "status":
-		status.Run(os.Args[2:])
+		status.Run(os.Args[2:], getBackend())
 	case "reset":
 		os.Exit(cli.RunReset(os.Args[2:], getBackend()))
 	case "disable":

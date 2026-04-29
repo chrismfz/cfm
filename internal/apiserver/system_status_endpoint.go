@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/firewall"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	webdet "cfm/internal/webdetector"
@@ -135,7 +136,7 @@ var (
 )
 
 // RegisterSystemStatus wires read-only system/status style helpers for web UI.
-func RegisterSystemStatus(m *http.ServeMux) {
+func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	if m == nil {
 		return
 	}
@@ -159,7 +160,7 @@ func RegisterSystemStatus(m *http.ServeMux) {
 
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
-	m.HandleFunc("/api/v1/health/snapshot", handleHealthSnapshot)
+	m.HandleFunc("/api/v1/health/snapshot", handleHealthSnapshot(backend))
 	m.HandleFunc("/api/v1/health/timeseries", handleHealthTimeseries)
 	m.HandleFunc("/api/v1/health/anomalies", handleHealthAnomalies)
 	m.HandleFunc("/api/v1/health/ingest", handleHealthIngest)
@@ -218,18 +219,20 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parsed})
 }
 
-func handleHealthSnapshot(w http.ResponseWriter, r *http.Request) {
-	if !requireHealthAccess(w, r) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
+func handleHealthSnapshot(backend firewall.Backend) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireHealthAccess(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
 
-	nodeID := localNodeID()
-	_ = json.NewEncoder(w).Encode(healthmodel.CollectSnapshotNow(nodeID))
+		nodeID := localNodeID()
+		_ = json.NewEncoder(w).Encode(healthmodel.CollectSnapshotNow(nodeID, backend))
+	}
 }
 
 func handleHealthTimeseries(w http.ResponseWriter, r *http.Request) {

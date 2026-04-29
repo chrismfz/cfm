@@ -2,6 +2,7 @@ package healthmodel
 
 import (
 	"cfm/internal/dnat"
+	"cfm/internal/firewall"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"cfm/internal/detectors/health"
-	"cfm/internal/firewall/nft"
 )
 
 // snapshotNowFn exists as a small test seam to force collector failures.
@@ -32,7 +32,7 @@ func TestOnlySwapSnapshotNowFn(fn func() health.Snapshot) func() health.Snapshot
 }
 
 // CollectSnapshotNow builds the canonical health snapshot directly from live host collectors.
-func CollectSnapshotNow(nodeID string) (snap HealthSnapshotV1) {
+func CollectSnapshotNow(nodeID string, backend firewall.Backend) (snap HealthSnapshotV1) {
 	snap = HealthSnapshotV1{
 		SchemaVersion: SchemaVersionV1,
 		NodeID:        nodeID,
@@ -57,11 +57,11 @@ func CollectSnapshotNow(nodeID string) (snap HealthSnapshotV1) {
 	snap = FromDetectorSnapshot(raw, nodeID, collectedAt)
 	enrichHostMemoryAndLoad(&snap.Host)
 	snap.Services = collectServiceStatuses()
-	snap.Runtime = collectRuntimeStatus()
+	snap.Runtime = collectRuntimeStatus(backend)
 	return snap
 }
 
-func collectRuntimeStatus() RuntimeStatus {
+func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out := RuntimeStatus{
 		CFMServiceState:    "unknown",
 		DNATEnabled:        "unknown",
@@ -84,7 +84,9 @@ func collectRuntimeStatus() RuntimeStatus {
 	if !out.CFMDaemonLive && out.CFMServiceState == "active" {
 		out.CFMDaemonLive = true
 	}
-	if enabled, err := dnat.Status(nft.New()); err == nil {
+	if backend == nil {
+		out.DNATEnabled = "unavailable"
+	} else if enabled, err := dnat.Status(backend); err == nil {
 		if enabled {
 			out.DNATEnabled = "on"
 		} else {
