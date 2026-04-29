@@ -96,17 +96,14 @@ func (b *Backend) ResetTable() error {
 // EnsureSetDynamic creates a named dynamic set if it does not exist.
 // The cache entry for that set is cleared so the next lookup re-fetches it.
 func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
-	keyType := nftables.TypeIPAddr
-	if v6 {
-		keyType = nftables.TypeIP6Addr
-	}
+	keyType, interval := setShape(v6, isNet)
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddSet(&nftables.Set{
 		Table:      table,
 		Name:       name,
 		KeyType:    keyType,
 		HasTimeout: true,
-		Interval:   isNet,
+		Interval:   interval,
 	}, nil)
 	err := b.conn.Flush()
 	if err != nil && !isAlreadyExists(err) {
@@ -120,9 +117,17 @@ func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
 
 // DeleteSetIfExists removes a named set, ignoring not-found errors.
 func (b *Backend) DeleteSetIfExists(name string) error {
-	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
-	b.conn.DelSet(&nftables.Set{Table: table, Name: name})
-	err := b.conn.Flush()
+	b.mu.Lock()
+	ns, err := b.lookupSet(name)
+	b.mu.Unlock()
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
+	}
+	b.conn.DelSet(ns)
+	err = b.conn.Flush()
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
 	}
@@ -130,6 +135,13 @@ func (b *Backend) DeleteSetIfExists(name string) error {
 	delete(b.namedSets, name)
 	b.mu.Unlock()
 	return nil
+}
+
+func setShape(v6 bool, isNet bool) (nftables.SetDatatype, bool) {
+	if v6 {
+		return nftables.TypeIP6Addr, isNet
+	}
+	return nftables.TypeIPAddr, isNet
 }
 
 // FlushSet empties a named set by family/table/set path.
