@@ -22,7 +22,6 @@ type cliOptions struct {
 	DiskDetail   bool
 	FullIdent    bool
 	DebugRuntime bool
-	ShowWebStack bool
 }
 
 type snapshotEnvelope struct {
@@ -159,8 +158,6 @@ func parseGlobalFlags(args []string) (cliOptions, []string) {
 			opts.FullIdent = true
 		case "--debug-runtime":
 			opts.DebugRuntime = true
-		case "--show-web-stack":
-			opts.ShowWebStack = true
 		default:
 			out = append(out, a)
 		}
@@ -174,7 +171,7 @@ func isTTY() bool {
 
 func printHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  cfm health [--compact] [--disk-detail] [--full-ident] [--no-color] [--show-web-stack] # summary")
+	fmt.Println("  cfm health [--compact] [--disk-detail] [--full-ident] [--no-color]             # summary")
 	fmt.Println("  cfm health json                                 # machine-readable snapshot")
 	fmt.Println("  cfm health live [--interval=2s] [--compact] [--full-ident] [--no-color] # live dashboard (TTY), fallback to watch")
 	fmt.Println("  cfm health watch [N] [--compact] [--no-color]   # periodic text refresh every N seconds (default 5)")
@@ -327,9 +324,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
 			}
 		}
-		if opts.ShowWebStack {
-			printWebStackSection(s, opts)
-		}
+		printWebStackSection(s, opts)
 		return
 	}
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
@@ -346,9 +341,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 			fmt.Printf("  Warning: %s\n", w)
 		}
 	}
-	if opts.ShowWebStack {
-		printWebStackSection(s, opts)
-	}
+	printWebStackSection(s, opts)
 }
 
 func formatRuntimeServiceRole(service, status, confidence, reasonCode string) string {
