@@ -1,15 +1,14 @@
 package agent
 
 import (
-    "context"
-    "net"
-    "strings"
-    "time"
+	"context"
+	"net"
+	"strings"
+	"time"
 
-    "cfm/internal/firewall"
-    "cfm/internal/firewall/nft"
-    "cfm/internal/logging"
-    "cfm/internal/unblock"
+	"cfm/internal/firewall"
+	"cfm/internal/logging"
+	"cfm/internal/unblock"
 )
 
 
@@ -32,12 +31,9 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         return
     }
 
- // Only bootstrap if the table is missing (fast path on normal systems).
- if !nft.TableExistsCFM() {
-     if err := be.EnsureBase(); err != nil {
-         logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
-     }
- }
+	if err := be.EnsureBase(); err != nil {
+		logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
+	}
 
     ttl := 4 * time.Hour // covers max feed sync interval
     res, err := unblock.Do(ctx, ip, unblock.Options{
@@ -71,7 +67,6 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
     }
     logging.LogfAPI("[api] unblock-confirm OK id=%d ip=%s", id, ipStr)
 }
-
 
 
 
