@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 	"cfm/internal/logging"
 	"cfm/internal/unblock"
 )
@@ -112,12 +111,10 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		// ── 2. Fast local path: remove from nft immediately ───────────────
 		// Point-lookup instead of full set dump — O(1) vs O(n)
 		wasBlocked := false
-		if nb, ok := be.(*nft.Backend); ok {
-			if found, _ := nb.HasElem("block_v4", ip.String()); found {
-				wasBlocked = true
-			} else if found, _ := nb.HasElem("block_v6", ip.String()); found {
-				wasBlocked = true
-			}
+		if found, _ := be.HasElem("block_v4", ip.String()); found {
+			wasBlocked = true
+		} else if found, _ := be.HasElem("block_v6", ip.String()); found {
+			wasBlocked = true
 		}
 		_ = be.RemoveBlock(ip) // idempotent
 

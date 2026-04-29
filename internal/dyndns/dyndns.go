@@ -22,7 +22,6 @@ import (
 
 	"cfm/internal/filewatch"
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 	"cfm/internal/logging"
 
 	"github.com/miekg/dns"
@@ -45,9 +44,9 @@ type record struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Manager watches cfm.dyndns, resolves hostnames and pushes IPs into the
-// nftables allow sets via the nft.Backend.
+// nftables allow sets via firewall.Backend.
 type Manager struct {
-	nb      *nft.Backend
+	be      firewall.Backend
 	watcher *filewatch.Watcher
 	records map[string]*record // host → record
 }
@@ -60,9 +59,7 @@ func NewManager(be firewall.Backend, cfgDir string) *Manager {
 	if cfgDir != "" {
 		m.watcher = filewatch.New(filepath.Join(cfgDir, "cfm.dyndns"))
 	}
-	if nb, ok := be.(*nft.Backend); ok {
-		m.nb = nb
-	}
+	m.be = be
 	return m
 }
 
@@ -114,7 +111,7 @@ func (m *Manager) FileChanged() bool {
 // LoadOnce resolves every tracked host and immediately pushes the full allow
 // sets. Call this at startup and whenever FileChanged returns true.
 func (m *Manager) LoadOnce(ctx context.Context) error {
-	if m.nb == nil {
+	if m.be == nil {
 		return nil
 	}
 	if len(m.records) == 0 {
@@ -168,7 +165,7 @@ func (m *Manager) LoadOnce(ctx context.Context) error {
 // Tick refreshes only the hosts whose TTL / interval has elapsed.
 // Call this on every daemon tick; it is cheap when nothing is due.
 func (m *Manager) Tick(ctx context.Context, now time.Time) {
-	if m.nb == nil || len(m.records) == 0 {
+	if m.be == nil || len(m.records) == 0 {
 		return
 	}
 	var allV4, allV6 []string
@@ -218,10 +215,10 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 
 // apply pushes v4/v6 slices into the nft allow_dyn sets.
 func (m *Manager) apply(v4, v6 []string) error {
-	if err := m.nb.ReplaceSetFlushAdd("allow_dyn_v4", v4, nil); err != nil {
+	if err := m.be.ReplaceSetFlushAdd("allow_dyn_v4", v4, nil); err != nil {
 		return fmt.Errorf("dyndns apply v4: %w", err)
 	}
-	if err := m.nb.ReplaceSetFlushAdd("allow_dyn_v6", v6, nil); err != nil {
+	if err := m.be.ReplaceSetFlushAdd("allow_dyn_v6", v6, nil); err != nil {
 		return fmt.Errorf("dyndns apply v6: %w", err)
 	}
 	if os.Getenv("CFM_DEBUG") != "" {
