@@ -137,11 +137,22 @@ func (b *Backend) FlushSet(family, table, set string) error {
 	if !strings.EqualFold(family, "inet") || table != cfmTableName {
 		return fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
 	}
-	nt := &nftables.Table{Name: table, Family: nftables.TableFamilyINet}
-	ns := &nftables.Set{Table: nt, Name: set}
+	b.mu.Lock()
+	ns, err := b.lookupSet(set)
+	b.mu.Unlock()
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
+	}
+
 	b.conn.FlushSet(ns)
 	if err := b.conn.Flush(); err != nil {
 		if isNotFound(err) {
+			b.mu.Lock()
+			b.invalidateCache()
+			b.mu.Unlock()
 			return nil
 		}
 		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
