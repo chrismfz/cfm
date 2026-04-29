@@ -305,18 +305,9 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if confidence == "" {
 		confidence = "low"
 	}
-	frontendVerdict := strings.TrimSpace(r.FrontendWorking)
-	if frontendVerdict == "" {
-		frontendVerdict = "down"
-	}
-	frontendLabel := fmt.Sprintf("%s (%s)", frontend, frontendVerdict)
-	if reason := strings.TrimSpace(r.FrontendReason); reason != "" && strings.ToLower(frontendVerdict) != "working" {
-		frontendLabel = fmt.Sprintf("%s (%s: %s)", frontend, frontendVerdict, reason)
-	}
 	if opts.Compact {
 		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState)
 		if opts.DebugRuntime {
-			fmt.Printf("Runtime %-6s frontend=%s confidence=%s\n", badge(okLabel, opts), frontendLabel, confidence)
 			fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
 		}
 		if confidence == "low" {
@@ -332,7 +323,6 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  Service: %s\n", serviceState)
 	fmt.Printf("  DNAT: %s\n", dnatState)
 	if opts.DebugRuntime {
-		fmt.Printf("  Frontend: %s (confidence=%s)\n", frontendLabel, confidence)
 		fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode))
 		fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
 	}
