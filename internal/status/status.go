@@ -243,7 +243,7 @@ func Run(args []string, backend firewall.Backend) {
 	t0 := time.Now()
 	st, fromCache := readCachedTableSummary(*cacheTTL)
 	if !fromCache {
-		st = readTableSummary()
+		st = readTableSummary(backend)
 		if *cacheTTL > 0 {
 			writeCachedTableSummary(st)
 		}
@@ -273,7 +273,7 @@ func Run(args []string, backend firewall.Backend) {
 
 	// --- Challenge section (nft + journal) ---
 	t0 = time.Now()
-	printChallengeStatus(st, en)
+	printChallengeStatus(backend, st, en)
 	timing["challenge_ms"] = time.Since(t0).Milliseconds()
 
 	// --- TTL summary (manual hosts + nets) ---
@@ -361,7 +361,7 @@ func Run(args []string, backend firewall.Backend) {
 		return
 	}
 	locals := localIPs()
-	tcpIn := readTCPInPorts()
+	tcpIn := readTCPInPorts(backend)
 	timing["conntrack_scan_ms"] = time.Since(t0).Milliseconds()
 
 	// 2) Top N από conntrack (inbound προς TCP_IN)
@@ -1183,9 +1183,9 @@ func writeCachedTableSummary(st statusOut) {
 	_ = os.WriteFile(statusCachePath(), payload, 0o600)
 }
 
-func readTableSummary() statusOut {
+func readTableSummary(backend firewall.Backend) statusOut {
 	out := statusOut{}
-	raw, err := exec.Command("nft", "-j", "list", "table", "inet", "cfm").CombinedOutput()
+	raw, err := backend.ListTableJSON("inet", "cfm")
 	if err != nil {
 		out.TablePresent = false
 		out.RulesPresent = false
@@ -1482,9 +1482,9 @@ func topNStats(entries []ctEntry, tcpIn map[int]struct{}, locals map[string]stru
 // Part C: read TCP_IN from nft (no config)
 // ---------------------------------------------------------------------------
 
-func readTCPInPorts() map[int]struct{} {
+func readTCPInPorts(backend firewall.Backend) map[int]struct{} {
 	out := make(map[int]struct{})
-	raw, err := exec.Command("nft", "-j", "list", "set", "inet", "cfm", "tcp_in_ports").CombinedOutput()
+	raw, err := backend.ListSetJSON("inet", "cfm", "tcp_in_ports")
 	if err != nil {
 		return out
 	}
@@ -1582,9 +1582,9 @@ func readConntrackUsage() (count, max int, err error) {
 }
 
 // helper to read counters from nft JSON
-func readNftCounters() (map[string]int, error) {
+func readNftCounters(backend firewall.Backend) (map[string]int, error) {
 	out := map[string]int{}
-	b, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", "cfm").CombinedOutput()
+	b, err := backend.ListTableJSON("inet", "cfm")
 	if err != nil {
 		return out, err
 	}
@@ -1718,15 +1718,15 @@ func portBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[str
 // Challenge printing
 // ---------------------------------------------------------------------------
 
-func printChallengeStatus(st statusOut, en *enrich.Enricher) {
+func printChallengeStatus(backend firewall.Backend, st statusOut, en *enrich.Enricher) {
 	// Enabled if challenge sets or chains exist
 	if !st.TablePresent {
 		return
 	}
 
 	// Check for presence via nft output (cheap + robust)
-	pre := listChainFiltered("prerouting", "cfm_challenge_nat_")
-	guard := listChainFiltered("challenge_guard", "cfm_challenge_guard_")
+	pre := listChainFiltered(backend, "prerouting", "cfm_challenge_nat_")
+	guard := listChainFiltered(backend, "challenge_guard", "cfm_challenge_guard_")
 
 	// Also treat as enabled if sets exist even if chain listing fails
 	v4 := listSetElemsDetailed("challenge_v4", 50)
@@ -1808,9 +1808,9 @@ func printChallengeStatus(st statusOut, en *enrich.Enricher) {
 	}
 }
 
-func listChainFiltered(chain, contains string) []string {
+func listChainFiltered(backend firewall.Backend, chain, contains string) []string {
 	// Use -a so handles present; but we print compact lines without the "table inet cfm {"
-	out, err := exec.Command("nft", "-a", "list", "chain", "inet", "cfm", chain).CombinedOutput()
+	out, err := backend.ListChainText("inet", "cfm", chain)
 	if err != nil {
 		return nil
 	}

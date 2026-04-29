@@ -2366,6 +2366,16 @@ func (b *Backend) ListTableTextNoDNS(fam, table string) (string, error) {
 	return string(out), nil
 }
 
+func (b *Backend) ListChainText(fam, table, chain string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "-a", "list", "chain", fam, table, chain).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("nft list chain %s %s %s: %v: %s", fam, table, chain, err, string(out))
+	}
+	return string(out), nil
+}
+
 func (b *Backend) FlushSet(fam, table, set string) error {
 	out, err := exec.Command("nft", "-n", "flush", "set", fam, table, set).CombinedOutput()
 	if err != nil {

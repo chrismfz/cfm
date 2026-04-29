@@ -83,6 +83,7 @@ type Backend interface {
 	ListTableJSON(family, table string) ([]byte, error)
 	ListSetJSON(family, table, set string) ([]byte, error)
 	ListTableTextNoDNS(family, table string) (string, error)
+	ListChainText(family, table, chain string) (string, error)
 	FlushSet(family, table, set string) error
 
 	// DNAT/redirect inspection + toggle APIs (implementation-neutral aliases).
