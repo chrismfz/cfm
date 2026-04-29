@@ -1,6 +1,6 @@
 # CFM — Firewall Backend Abstraction Roadmap
 
-**Status:** Phase 1 in progress  
+**Status:** Phase 1 complete (no behavior change; production default remains nft shell backend)  
 **Scope:** `internal/firewall/` — interface, nft implementation, future backends  
 **Goal:** Decouple *what CFM tells the firewall to do* from *how a specific firewall does it*
 
@@ -210,14 +210,35 @@ The vocabulary is in `internal/firewall/backend.go`. Every engine file is an ind
 
 Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We are not adding new code — we are promoting existing code into the interface so it is reachable without type assertions.
 
+**Status note (2026-04-29):** Phase 1 completed. This was a refactor-only milestone: production default remains the nft **shell** backend and runtime behavior is unchanged.
+
 **Checklist:**
-- [ ] Rewrite `internal/firewall/backend.go` with the full interface (§4a)
-- [ ] Rename the two DNAT-named methods to implementation-neutral names on `nft.Backend` (§4b)
-- [ ] Remove type-assertion workarounds in `webdetector_register.go` (§4c)
-- [ ] Merge `dnat.Capable` into the main interface; remove the mini-interface (§4c)
-- [ ] Fix `status.go` direct `nft.New()` call (§4d)
-- [ ] Fix `main.go` `getBackend()` to support engine selection (§4d)
-- [ ] Add compile-time assertion that `nft.Backend` satisfies `firewall.Backend` (§4b)
+- [x] full backend contract exposed through `firewall.Backend`
+- [x] type-assertion workarounds removed
+- [x] `dnat.Capable` removed/merged into backend surface
+- [x] direct `nft.New()` escapes removed except intended selector path
+- [x] compile-time assertion for nft backend conformance
+- [x] backend selector skeleton in `cmd/cfm/main.go` with nft default
+
+**Verification summary (2026-04-29):**
+- `exec.Command("nft", ...)` usage is confined to `internal/firewall/nft/*`.
+- Only selector/wiring paths import the concrete `internal/firewall/nft` package.
+- `nft.New()` appears only in the selector path.
+
+**Phase 1.5 (hardening while keeping nft shell backend as default):**
+- [ ] Shell backend hardening: enforce timeouts and centralized command runner for all nft subprocess execution.
+- [ ] Shell backend concurrency controls: lock/serialize high-volume mutation paths to reduce process pressure.
+- [ ] Add targeted stress/regression coverage for large feed updates and concurrent applies.
+
+**Phase 2 (new engine, opt-in):**
+- [ ] Introduce `internal/firewall/nftlib` backend (`github.com/google/nftables`, netlink-based).
+- [ ] Add experimental wiring/selection path for `nftlib` while keeping nft shell as production default.
+- [ ] Validate parity for DNAT/challenge redirect, feed management, and bulk set operations.
+
+**What remains (concise):**
+- Shell backend hardening (timeouts, runner centralization, locking).
+- nftlib backend introduction plus experimental wiring.
+- Optional hybrid model and future pf backend.
 
 ### 4a. The full Backend interface
 
