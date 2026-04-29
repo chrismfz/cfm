@@ -66,10 +66,18 @@ func (b *Backend) EnsureBase() error {
 
 // DropEverything removes all CFM-owned firewall state.
 func (b *Backend) DropEverything() error {
-	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
-	b.conn.FlushTable(table)
+	b.mu.Lock()
+	table, err := b.lookupTable()
+	b.mu.Unlock()
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib: drop everything: %w", err)
+	}
+
 	b.conn.DelTable(table)
-	err := b.conn.Flush()
+	err = b.conn.Flush()
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("nftlib: drop everything: %w", err)
 	}
