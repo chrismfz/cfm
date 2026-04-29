@@ -29,7 +29,7 @@
    - [6d. DNAT / challenge redirect — native nftlib](#6d-dnat--challenge-redirect--native-nftlib)
    - [6e. Diagnostic text / JSON output — native nftlib](#6e-diagnostic-text--json-output--native-nftlib)
    - [6f. Removing the embedded cli field](#6f-removing-the-embedded-cli-field)
-7. [Phase 3 — pf backend (BSD, future)](#7-phase-3--pf-backend-bsd-future)
+7. [Phase 3 — BSD backend (firewall TBD: pf / ipfw / ipf)](#7-phase-3--bsd-backend-firewall-tbd-pf--ipfw--ipf)
 8. [Compatibility contract](#8-compatibility-contract)
 9. [Progress tracking](#9-progress-tracking)
 
@@ -315,7 +315,7 @@ Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We 
 **What remains (concise):**
 - Shell backend hardening (timeouts, runner centralization, locking).
 - nftlib backend introduction plus experimental wiring.
-- Optional hybrid model and future pf backend.
+- Optional hybrid model and future BSD backend (pf recommended; ipfw as alternative).
 
 ### 4a. The full Backend interface
 
@@ -955,45 +955,119 @@ After this, `CFM_FIREWALL_ENGINE=nftlib` requires zero `nft` binary presence.
 
 ---
 
-## 7. Phase 3 — pf backend (BSD, future)
+## 7. Phase 3 — BSD backend (firewall TBD: pf / ipfw / ipf)
 
-> **Pre-requisite:** Phase 1 complete. Phase 2 is not a prerequisite — pf can
-> be implemented independently.
+> **Pre-requisite:** Phase 1 complete. Phase 2 is not a prerequisite — the BSD
+> backend can be implemented independently.  
+> **Decision deferred:** FreeBSD ships three firewalls in base — pf, ipfw, and
+> ipfilter (ipf). The right choice depends on which CFM features matter most on
+> the target BSD platform. This section documents the comparison so the decision
+> can be made when implementation begins.
 
-BSD's `pf` does not have nftables sets or NFLOG, but every concept in the interface has a pf equivalent.
+---
+
+### 7a. FreeBSD firewall options — overview
+
+| | **pf** | **ipfw** | **ipfilter (ipf)** |
+|---|---|---|---|
+| Origin | OpenBSD, ported to FreeBSD | FreeBSD native | Darren Reed; multi-platform |
+| Availability | FreeBSD, OpenBSD, NetBSD, macOS | FreeBSD only | FreeBSD, Solaris, NetBSD |
+| Rule syntax | `pf.conf` (declarative) | Numbered rules (sequential) | `ipf.conf` (declarative) |
+| IP tables / sets | ✅ `pfctl -t name -T add` — bulk native | ✅ `ipfw table name add` | ✅ `pool` hash tables |
+| Per-element TTL | ❌ tables have no expiry — user-space manager required | ❌ same gap | ❌ same gap |
+| Connection tracking | ✅ `keep state` / `max-src-conn` | ✅ `keep-state` / `limit` option | ✅ state tables |
+| Per-src conn limit | ✅ `max-src-conn N` in rule | ✅ `limit src-addr N` | ⚠️ state limit only, less expressive |
+| Per-port rate limit | ✅ `max-src-conn-rate N/M` | ✅ `dummynet` pipe + `limit` | ⚠️ limited, no native rate-per-port |
+| UID/GID match | ✅ `user { uid N }` in rule | ✅ `uid N` / `gid N` match | ❌ no UID/GID matching |
+| DNAT / redirect | ✅ `rdr-to` in anchors | ✅ `fwd` rule action | ✅ `rdr-to` in NAT rules |
+| Traffic observation | ✅ pflog interface + bpf tap | ✅ divert sockets / ngx | ⚠️ limited; no equivalent of pflog |
+| Bandwidth shaping | ✅ ALTQ (tightly coupled) | ✅ dummynet (tightly coupled) | ❌ no native shaper |
+| Anchor / namespace | ✅ anchors isolate CFM rules cleanly | ⚠️ rule numbers must be reserved | ⚠️ groups exist but less isolation |
+| Active development | ✅ actively maintained | ✅ actively maintained | ⚠️ less active; considered legacy |
+
+**Per-element TTL gap (all three):** None of the BSD firewalls support per-table-entry expiry natively. CFM uses TTL on blocks (`AddBlock(ip, ttl)`). A BSD backend must run a user-space expiry goroutine (min-heap of `{ip, expireAt}` entries, timer fires `RemoveBlock` when due). The design is the same regardless of which firewall is chosen.
+
+---
+
+### 7b. Capability mapping against CFM Backend methods
+
+| Backend method group | pf | ipfw | ipf |
+|---|---|---|---|
+| `AddBlock` / `RemoveBlock` / bulk | ✅ tables | ✅ tables | ✅ pools |
+| `AddBlockNet` / CIDR subnets | ✅ table entries accept CIDR | ✅ table accepts CIDR | ✅ pool accepts CIDR |
+| `AddAllow` / `AddIgnore` / `AddChallenge` | ✅ separate named tables | ✅ separate named tables | ✅ separate pools |
+| `ApplyPortsPolicy` (TCP/UDP allowlist) | ✅ `pass in proto tcp to port { ... }` anchor | ✅ numbered `allow tcp from any to any dst-port ...` | ✅ `pass in proto tcp to port ...` |
+| `ApplyHardeningRules` (bad flags, ICMP rate) | ✅ `block in quick proto tcp flags SF/SFRA` | ✅ `deny tcp from any to any tcpflags syn,fin` | ✅ similar; less expressive rate limiting |
+| `ApplyConnlimit` (per-src conn count) | ✅ `max-src-conn N` | ✅ `limit src-addr N` | ⚠️ state table limits only |
+| `ApplyPortFlood` (per-port conn rate) | ✅ `max-src-conn-rate N/M` | ✅ dummynet pipe per port | ⚠️ not directly supported |
+| `ApplySMTPBlock` (outbound, UID-aware) | ✅ `block out proto tcp to port 25 user { N }` | ✅ `deny tcp from me to any dst-port 25 uid N` | ❌ no UID match — cannot implement natively |
+| `ApplyOutboundObserve` (per-UID logging) | ✅ `user { uid }` match + pflog + bpf | ✅ `uid` match + divert socket | ❌ no UID match |
+| `EnsureChallengeRedirect` / `DNATOn` | ✅ `rdr-to` in cfm anchor | ✅ `fwd` rule | ✅ `rdr-to` in NAT rules |
+| `AddElementsBulk` (batch performance) | ✅ tables are bulk-native | ✅ tables are bulk-native | ✅ pools support bulk load |
+| `DumpFloodCounters` / `DumpThrottledIPs` | ✅ `pfctl -s rules -vv` | ✅ `ipfw show` | ✅ `ipfstat -i` |
+| `ListBlocks` / `HasElem` (read back) | ✅ `pfctl -t name -T show` | ✅ `ipfw table name list` | ✅ `ippool -l` |
+
+---
+
+### 7c. Recommendation
+
+**Primary choice: pf.** Covers every CFM Backend method including UID-based
+`ApplySMTPBlock` and `ApplyOutboundObserve`. Runs on FreeBSD, OpenBSD, NetBSD,
+and macOS. Anchors provide clean namespace isolation. Established Go tooling
+(`pfctl` subprocess, or direct `/dev/pf` ioctl). The only structural gap vs
+nftables — per-element TTL — requires the same user-space expiry manager
+regardless of which BSD firewall is chosen.
+
+**Fallback consideration: ipfw.** If pf proves insufficient for a specific
+deployment (e.g., dummynet-based bandwidth control is needed alongside CFM),
+ipfw is a viable alternative. It supports UID matching and tables.
+FreeBSD-only — not portable to OpenBSD or NetBSD.
+
+**Do not use ipfilter.** Missing UID/GID matching makes `ApplySMTPBlock` and
+`ApplyOutboundObserve` impossible to implement natively. Treating them as
+`ErrNotSupported` stubs is an option, but ipf has no advantage over pf or ipfw
+for the features it does support.
+
+**The decision can be deferred** until someone picks up Phase 3. The Backend
+interface is firewall-agnostic; the compile-time assertion will catch any
+incomplete implementation. Both pf and ipfw would produce the same package
+layout (`internal/firewall/pf/` or `internal/firewall/ipfw/`) with identical
+method signatures.
+
+---
+
+### 7d. pf package layout and method mapping (reference)
+
+If pf is chosen, the package structure and core method translations are:
 
 ```
 internal/firewall/pf/
   backend.go     ← struct, New(), compile-time assertion
-  sets.go        ← pfctl tables for block/allow
-  policy.go      ← pf.conf anchor generation
+  sets.go        ← pfctl tables for block/allow/ignore/challenge
+  policy.go      ← pf.conf anchor generation for port/flood/hardening rules
   challenge.go   ← rdr-to rules instead of DNAT
   outbound.go    ← pflog interface + bpf instead of NFLOG
-  ...
+  expiry.go      ← user-space TTL manager (min-heap goroutine)
 ```
 
-**Method mapping, nftables → pf:**
+**Key nftables → pf method translations:**
 
-| Backend method | nftables implementation | pf implementation |
+| Backend method | nftables | pf |
 |---|---|---|
-| `AddBlock` | `add element inet cfm block_v4 { ip }` | `pfctl -t cfm_block -T add ip` |
-| `AddBlockNet` | `add element inet cfm block_v4_nets { cidr }` | `pfctl -t cfm_block_net -T add cidr` |
-| `ApplyPortsPolicy` | `nft -f` with set of port ranges | Generate `pass in proto tcp to port { ... }` pf anchor rules |
-| `ApplyHardeningRules` | `tcp flags & (syn|fin) == (syn|fin) drop` | `block in quick proto tcp flags SF/SFRA` in pf anchor |
-| `ApplySMTPBlock` | `skuid != allowedUIDs drop` outbound chain | `authpf` anchor or `block out proto tcp to port 25 !user { uid }` |
-| `ApplyOutboundObserve` | nftables NFLOG chain → user-space NFLOG | pflog interface + bpf tap → user-space capture |
-| `EnsureChallengeRedirect` | DNAT prerouting: `dnat to 127.0.0.1:port` | `rdr pass on em0 proto tcp to port 80 -> 127.0.0.1 port 8080` |
-| `SetChallengeRedirectEnabled` | flush/recreate DNAT chain | flush/recreate rdr anchor |
+| `AddBlock(ip, ttl)` | `add element inet cfm block_v4 { ip timeout ttl }` | `pfctl -t cfm_block -T add ip` + expiry goroutine schedules `RemoveBlock` |
+| `AddBlockNet(cidr, ttl)` | `add element inet cfm block_v4_nets { cidr }` | `pfctl -t cfm_block_net -T add cidr` + expiry goroutine |
+| `ApplyHardeningRules` | `tcp flags & (syn\|fin) == (syn\|fin) drop` | `block in quick proto tcp flags SF/SFRA` in cfm anchor |
+| `ApplySMTPBlock` | `skuid != allowedUIDs drop` outbound | `block out quick proto tcp to port 25 user { uid }` |
+| `ApplyOutboundObserve` | nftables NFLOG chain | pflog interface + bpf tap |
+| `EnsureChallengeRedirect` | DNAT prerouting: `dnat to 127.0.0.1:port` | `rdr pass proto tcp to port 80 -> 127.0.0.1 port 8080` in cfm/dnat anchor |
 | `DNATOn` | `nft add rule inet nat prerouting ...` | `echo "rdr-to ..." \| pfctl -a cfm/dnat -f -` |
-| `DNATOff` | flush the nat prerouting chain | `pfctl -a cfm/dnat -F rules` |
-| `AddElementsBulk` | `nft add element` batch | `pfctl -t tablename -T add ip1 ip2 ...` (pf tables are bulk-native) |
+| `DNATOff` | flush nat prerouting chain | `pfctl -a cfm/dnat -F rules` |
+| `AddElementsBulk` | `nft add element` batch | `pfctl -t name -T add ip1 ip2 ...` (tables are bulk-native) |
 | `DumpFloodCounters` | `nft list counters` | `pfctl -s rules -vv` |
 
-**Compile-time assertion in `pf/backend.go`:**
+**Compile-time assertion (`pf/backend.go`):**
 
 ```go
-// Ensures pf.Backend satisfies the interface at compile time.
-// Any missing method causes a build error here, not a runtime panic.
 var _ firewall.Backend = (*Backend)(nil)
 ```
 
@@ -1080,14 +1154,19 @@ Any implementation of `firewall.Backend` must follow these rules:
 | Remove `cfm/internal/firewall/nft` import from all `nftlib/*.go` | `internal/firewall/nftlib/` | ☐ |
 | Parity validation: run both engines on virgo, diff `nft list table inet cfm` output | virgo testlab | ☐ |
 
-### Phase 3 — pf backend (BSD)
+### Phase 3 — BSD backend (firewall TBD)
 
 | Task | File | Status |
 |---|---|---|
-| Create `pf/backend.go` with struct + `New()` + compile assertion | `internal/firewall/pf/backend.go` | ☐ |
-| Implement all interface methods using `pfctl` | `internal/firewall/pf/` | ☐ |
-| Build tag: `//go:build freebsd \|\| openbsd` | all `pf/` files | ☐ |
-| Wire `CFM_FIREWALL_ENGINE=pf` in `getBackend()` | `cmd/cfm/main.go` | ☐ |
+| **Decision:** choose pf, ipfw, or ipf (see §7c — recommendation is pf) | — | ☐ |
+| Create `<fw>/backend.go` with struct + `New()` + compile assertion | `internal/firewall/<fw>/backend.go` | ☐ |
+| Implement table ops (`AddBlock`, `AddAllow`, `AddIgnore`, `AddChallenge`, CIDR variants, bulk) | `internal/firewall/<fw>/sets.go` | ☐ |
+| Implement policy rules (`ApplyPortsPolicy`, `ApplyHardeningRules`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`) | `internal/firewall/<fw>/policy.go` | ☐ |
+| Implement challenge redirect (`EnsureChallengeRedirect`, `DNATOn`/`DNATOff`) | `internal/firewall/<fw>/challenge.go` | ☐ |
+| Implement outbound observe (`ApplyOutboundObserve`) — pflog+bpf (pf) or divert (ipfw) | `internal/firewall/<fw>/outbound.go` | ☐ |
+| Implement user-space TTL expiry manager (min-heap goroutine, fires `RemoveBlock` on expiry) | `internal/firewall/<fw>/expiry.go` | ☐ |
+| Build tag: `//go:build freebsd` (ipfw) or `//go:build freebsd \|\| openbsd` (pf) | all `<fw>/` files | ☐ |
+| Wire `CFM_FIREWALL_ENGINE=<fw>` in `getBackend()` | `cmd/cfm/main.go` | ☐ |
 
 ---
 
@@ -1095,8 +1174,8 @@ Any implementation of `firewall.Backend` must follow these rules:
 
 This section documents every Linux/nftables-specific mechanism currently used in
 `internal/firewall/nft/` and grades its portability to alternative backends
-(pf/BSD, future eBPF, hypothetical next-generation systems). Used as a reference
-when implementing Phase 3 and beyond.
+(BSD/pf/ipfw, future eBPF, hypothetical next-generation systems). Used as a reference
+when implementing Phase 3 and beyond. For the BSD firewall selection rationale see §7.
 
 **Grades:**
 - ✅ **Ports cleanly** — concept exists, syntax differs, direct translation
