@@ -80,6 +80,10 @@ type Backend interface {
 	AddElementsBulk(setName string, elems []string, ttl *time.Duration) error
 	HasElem(setName, elem string) (bool, error)
 	ListSetElementsRaw(setName string) ([]string, error)
+	ListTableJSON(family, table string) ([]byte, error)
+	ListSetJSON(family, table, set string) ([]byte, error)
+	ListTableTextNoDNS(family, table string) (string, error)
+	FlushSet(family, table, set string) error
 
 	// DNAT/redirect inspection + toggle APIs (implementation-neutral aliases).
 	DNATStatus(family, table string) (bool, error)

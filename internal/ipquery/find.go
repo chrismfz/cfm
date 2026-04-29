@@ -4,11 +4,11 @@ package ipquery
 import (
 	"bytes"
 	enrichpkg "cfm/internal/enrich"
+	"cfm/internal/firewall"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -36,7 +36,7 @@ func classifyActionFromName(name string) string {
 }
 
 // Find τρέχει δυναμικά nft list table/set και επιστρέφει τα hits για IP ή CIDR.
-func Find(arg string) ([]Hit, error) {
+func Find(be firewall.Backend, arg string) ([]Hit, error) {
 	var nip net.IP
 	var nnet *net.IPNet
 	isCIDR := false
@@ -55,7 +55,7 @@ func Find(arg string) ([]Hit, error) {
 		}
 	}
 
-	tblOut, err := exec.Command("nft", "-j", "list", "table", "inet", "cfm").CombinedOutput()
+	tblOut, err := be.ListTableJSON("inet", "cfm")
 	if err != nil {
 		return nil, fmt.Errorf("cannot read nftables table inet cfm (maybe needs sudo?): %v\n%s", err, string(tblOut))
 	}
@@ -66,7 +66,7 @@ func Find(arg string) ([]Hit, error) {
 
 	var hits []Hit
 	for _, s := range setNames {
-		so, err := exec.Command("nft", "-j", "list", "set", "inet", "cfm", s.name).CombinedOutput()
+		so, err := be.ListSetJSON("inet", "cfm", s.name)
 		if err != nil {
 			continue
 		}

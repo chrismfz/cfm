@@ -4,7 +4,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"cfm/internal/firewall"
 )
@@ -23,9 +22,8 @@ func RunFlush(args []string, be firewall.Backend, tableExists func() bool) int {
 
 	sets := []string{"block_v4", "block_v6"}
 	for _, setName := range sets {
-		out, err := exec.Command("nft", "-n", "flush", "set", "inet", "cfm", setName).CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "flush error: %s: %v\n", string(out), err)
+		if err := be.FlushSet("inet", "cfm", setName); err != nil {
+			fmt.Fprintf(os.Stderr, "flush error: %v\n", err)
 			return 1
 		}
 	}
