@@ -30,7 +30,7 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown, confidence=low)", "Edge: unknown (unknown)", "Upstream: unknown (unknown)"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown (frontend=unknown, confidence=low)", "Edge: unknown (confidence=low, via unknown)", "Upstream: unknown (confidence=low, via unknown)"},
 			wantNone: []string{"[cfm health watch]"},
 		},
 		{
@@ -82,8 +82,12 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	s.Modern.Runtime.FrontendWorking = "working"
 	s.Modern.Runtime.EdgeService = "angie"
 	s.Modern.Runtime.EdgeStatus = "active"
+	s.Modern.Runtime.EdgeConfidence = "high"
+	s.Modern.Runtime.EdgeReasonCode = "dnat_targets_owner"
 	s.Modern.Runtime.UpstreamService = "nginx"
 	s.Modern.Runtime.UpstreamStatus = "active"
+	s.Modern.Runtime.UpstreamConfidence = "high"
+	s.Modern.Runtime.UpstreamReasonCode = ":80_listener+service_active"
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
 
 	out, err := runWithCapturedStdout(func() error {
@@ -99,10 +103,10 @@ func TestRuntimeSectionIncludesFrontendAndWarning(t *testing.T) {
 	if !strings.Contains(out, "Frontend: angie (working)") {
 		t.Fatalf("expected frontend working verdict, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Edge: angie (active, listening 9080/9043)") {
+	if !strings.Contains(out, "Edge: angie (confidence=high, via dnat_targets_owner)") {
 		t.Fatalf("expected edge role output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Upstream: nginx (active)") {
+	if !strings.Contains(out, "Upstream: nginx (confidence=high, via :80_listener+service_active)") {
 		t.Fatalf("expected upstream role output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Warning: ambiguous ownership") {

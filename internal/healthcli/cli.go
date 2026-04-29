@@ -2,7 +2,6 @@ package healthcli
 
 import (
 	"cfm/internal/clihttp"
-	"cfm/internal/dnat"
 	"cfm/internal/healthmodel"
 	"encoding/json"
 	"fmt"
@@ -77,19 +76,23 @@ type modernSample struct {
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
 	Runtime struct {
-		CFMDaemonLive   bool   `json:"cfm_daemon_live"`
-		CFMDaemonPID    *int   `json:"cfm_daemon_pid"`
-		CFMServiceState string `json:"cfm_service_state"`
-		DNATEnabled     string `json:"dnat_enabled"`
-		DNATFrontend    string `json:"dnat_frontend"`
-		DNATConfidence  string `json:"dnat_confidence"`
-		DNATWarning     string `json:"dnat_warning"`
-		FrontendWorking string `json:"frontend_working"`
-		FrontendReason  string `json:"frontend_reason"`
-		EdgeService     string `json:"edge_service"`
-		UpstreamService string `json:"upstream_service"`
-		EdgeStatus      string `json:"edge_status"`
-		UpstreamStatus  string `json:"upstream_status"`
+		CFMDaemonLive      bool   `json:"cfm_daemon_live"`
+		CFMDaemonPID       *int   `json:"cfm_daemon_pid"`
+		CFMServiceState    string `json:"cfm_service_state"`
+		DNATEnabled        string `json:"dnat_enabled"`
+		DNATFrontend       string `json:"dnat_frontend"`
+		DNATConfidence     string `json:"dnat_confidence"`
+		DNATWarning        string `json:"dnat_warning"`
+		FrontendWorking    string `json:"frontend_working"`
+		FrontendReason     string `json:"frontend_reason"`
+		EdgeService        string `json:"edge_service"`
+		UpstreamService    string `json:"upstream_service"`
+		EdgeStatus         string `json:"edge_status"`
+		UpstreamStatus     string `json:"upstream_status"`
+		EdgeConfidence     string `json:"edge_confidence"`
+		UpstreamConfidence string `json:"upstream_confidence"`
+		EdgeReasonCode     string `json:"edge_reason_code"`
+		UpstreamReasonCode string `json:"upstream_reason_code"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -309,7 +312,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	}
 	if opts.Compact {
 		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s confidence=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel, confidence)
-		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, dnatState), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
+		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
 		if confidence == "low" {
 			if w := strings.TrimSpace(r.DNATWarning); w != "" {
 				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
@@ -323,8 +326,8 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  Service: %s\n", serviceState)
 	fmt.Printf("  DNAT: %s (frontend=%s, confidence=%s)\n", dnatState, frontend, confidence)
 	fmt.Printf("  Frontend: %s\n", frontendLabel)
-	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, dnatState))
-	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, ""))
+	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode))
+	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
 	if confidence == "low" {
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
 			fmt.Printf("  Warning: %s\n", w)
@@ -333,7 +336,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	printWebStackSection(s, opts)
 }
 
-func formatRuntimeServiceRole(service, status, dnatState string) string {
+func formatRuntimeServiceRole(service, status, confidence, reasonCode string) string {
 	name := strings.ToLower(strings.TrimSpace(service))
 	if name == "" || strings.EqualFold(name, "unknown") {
 		name = "unknown"
@@ -342,13 +345,15 @@ func formatRuntimeServiceRole(service, status, dnatState string) string {
 	if state == "" {
 		state = "unknown"
 	}
-	extra := ""
-	if strings.EqualFold(dnatState, "on") && state == "active" {
-		httpPort, httpsPort := 80, 443
-		httpPort, httpsPort = dnat.EffectiveTargetPorts()
-		extra = fmt.Sprintf(", listening %d/%d", httpPort, httpsPort)
+	conf := strings.ToLower(strings.TrimSpace(confidence))
+	if conf == "" {
+		conf = "low"
 	}
-	return fmt.Sprintf("%s (%s%s)", name, state, extra)
+	reason := strings.TrimSpace(reasonCode)
+	if reason == "" {
+		reason = "unknown"
+	}
+	return fmt.Sprintf("%s (confidence=%s, via %s)", name, conf, reason)
 }
 
 func printWebStackSection(s parsedSnapshot, opts cliOptions) {
@@ -918,6 +923,14 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.DNATWarning = latest.Runtime.DNATWarning
 		out.Modern.Runtime.FrontendWorking = latest.Runtime.FrontendWorking
 		out.Modern.Runtime.FrontendReason = latest.Runtime.FrontendReason
+		out.Modern.Runtime.EdgeService = latest.Runtime.EdgeService
+		out.Modern.Runtime.UpstreamService = latest.Runtime.UpstreamService
+		out.Modern.Runtime.EdgeStatus = latest.Runtime.EdgeStatus
+		out.Modern.Runtime.UpstreamStatus = latest.Runtime.UpstreamStatus
+		out.Modern.Runtime.EdgeConfidence = latest.Runtime.EdgeConfidence
+		out.Modern.Runtime.UpstreamConfidence = latest.Runtime.UpstreamConfidence
+		out.Modern.Runtime.EdgeReasonCode = latest.Runtime.EdgeReasonCode
+		out.Modern.Runtime.UpstreamReasonCode = latest.Runtime.UpstreamReasonCode
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,
