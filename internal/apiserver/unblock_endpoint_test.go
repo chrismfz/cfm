@@ -37,6 +37,10 @@ func (s *stubFirewallBackend) AddChallenge(net.IP, *time.Duration) error        
 func (s *stubFirewallBackend) RemoveChallenge(net.IP) error                          { return nil }
 func (s *stubFirewallBackend) SetChallengeRedirectEnabled(bool)                      {}
 func (s *stubFirewallBackend) CleanupChallengeRedirect() error                       { return nil }
+func (s *stubFirewallBackend) DNATStatus(string, string) (bool, error)               { return false, nil }
+func (s *stubFirewallBackend) DNATShow(string, string) (string, error)               { return "", nil }
+func (s *stubFirewallBackend) DNATOn(string, string, int, int) error                 { return nil }
+func (s *stubFirewallBackend) DNATOff(string, string) error                           { return nil }
 func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {
 	s.removed = append(s.removed, ip.String())

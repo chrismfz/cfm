@@ -2,6 +2,7 @@ package dnat
 
 import (
 	"context"
+	"cfm/internal/firewall"
 	"flag"
 	"fmt"
 	"io"
@@ -14,15 +15,6 @@ import (
 
 	"cfm/internal/logging"
 )
-
-// We do NOT force firewall.Backend interface changes.
-// We only require that the concrete backend supports these DNAT methods.
-type Capable interface {
-	DNATStatus(family, table string) (bool, error)
-	DNATShow(family, table string) (string, error)
-	DNATOn(family, table string, httpPort, httpsPort int) error
-	DNATOff(family, table string) error
-}
 
 func getenvInt(key string, def int) int {
 	v := strings.TrimSpace(os.Getenv(key))
@@ -42,9 +34,8 @@ func getenvInt(key string, def int) int {
 //   - DNAT stays OFF until manually re-enabled.
 //
 // No config needed: it watches the same ports used by DNAT (defaults: 9080/9043).
-func StartFailSafe(ctx context.Context, backend any) {
-	d, ok := backend.(Capable)
-	if !ok || d == nil {
+func StartFailSafe(ctx context.Context, backend firewall.Backend) {
+	if backend == nil {
 		return
 	}
 
@@ -84,7 +75,7 @@ func StartFailSafe(ctx context.Context, backend any) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				on, err := d.DNATStatus(family, table)
+				on, err := backend.DNATStatus(family, table)
 				if err != nil {
 					// don't flap on nft errors; just log occasionally
 					logging.Logf("[dnat:failsafe] status check failed: %v", err)
@@ -116,8 +107,8 @@ func StartFailSafe(ctx context.Context, backend any) {
 
 				if failCount >= failNeed {
 					// confirm still on, then fail-open
-					if on2, _ := d.DNATStatus(family, table); on2 {
-						_ = d.DNATOff(family, table)
+					if on2, _ := backend.DNATStatus(family, table); on2 {
+						_ = backend.DNATOff(family, table)
 						if lastErr != nil {
 							logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; last=%s err=%v)", lastWhich, lastErr)
 						} else {
@@ -141,9 +132,8 @@ func StartFailSafe(ctx context.Context, backend any) {
 //	cfm dnat off    -> disable
 //
 // Returns an exit code (0 ok, 1 error, 2 usage).
-func RunCLI(args []string, backend any) int {
-	dnat, ok := backend.(Capable)
-	if !ok || dnat == nil {
+func RunCLI(args []string, backend firewall.Backend) int {
+	if backend == nil {
 		fmt.Fprintln(os.Stderr, "dnat: backend does not support DNAT")
 		return 1
 	}
@@ -171,7 +161,7 @@ func RunCLI(args []string, backend any) int {
 
 	switch sub {
 	case "on":
-		if err := dnat.DNATOn(*family, *table, *httpPort, *httpsPort); err != nil {
+		if err := backend.DNATOn(*family, *table, *httpPort, *httpsPort); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
 		}
@@ -179,7 +169,7 @@ func RunCLI(args []string, backend any) int {
 		return 0
 
 	case "off":
-		if err := dnat.DNATOff(*family, *table); err != nil {
+		if err := backend.DNATOff(*family, *table); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat off failed:", err)
 			return 1
 		}
@@ -194,7 +184,7 @@ func RunCLI(args []string, backend any) int {
 		return 2
 	}
 
-	enabled, err := dnat.DNATStatus(*family, *table)
+	enabled, err := backend.DNATStatus(*family, *table)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dnat status failed:", err)
 		return 1
@@ -205,7 +195,7 @@ func RunCLI(args []string, backend any) int {
 	if enabled {
 		fmt.Printf("State: ON  (tcp/80->:%d, tcp+udp/443->:%d)\n\n", *httpPort, *httpsPort)
 		fmt.Println("Current rules:")
-		s, err := dnat.DNATShow(*family, *table)
+		s, err := backend.DNATShow(*family, *table)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dnat show failed:", err)
 			return 1
