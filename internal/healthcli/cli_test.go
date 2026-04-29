@@ -138,6 +138,66 @@ func TestRuntimeSectionOmitsFrontendDegradedReasonLine(t *testing.T) {
 	}
 }
 
+func TestCollectWebStackRowsExcludesNginx(t *testing.T) {
+	s := parsedSnapshot{
+		Modern: modernSample{
+			Services: []serviceStatus{
+				{Name: "angie", State: "active", Active: true, Enabled: true},
+				{Name: "openresty", State: "inactive", Active: false, Enabled: true},
+				{Name: "nginx", State: "active", Active: true, Enabled: true},
+			},
+		},
+	}
+	rows := collectWebStackRows(s)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 web stack rows, got %d", len(rows))
+	}
+	if rows[0].Name != "angie" || rows[1].Name != "openresty" {
+		t.Fatalf("unexpected rows: %+v", rows)
+	}
+}
+
+func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Runtime.EdgeService = "angie"
+	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Services = []serviceStatus{
+		{Name: "angie", State: "active", Active: true, Enabled: true},
+		{Name: "openresty", State: "inactive", Active: false, Enabled: true},
+	}
+
+	out, err := runWithCapturedStdout(func() error {
+		printWebStackSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printWebStackSection error: %v", err)
+	}
+	if !strings.Contains(out, "Web stack [OK]") {
+		t.Fatalf("expected OK web stack when selected edge is active, got:\n%s", out)
+	}
+}
+
+func TestRuntimeCompactWebStackExcludesNginx(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Services = []serviceStatus{
+		{Name: "angie", State: "active", Active: true, Enabled: true},
+		{Name: "openresty", State: "active", Active: true, Enabled: true},
+		{Name: "nginx", State: "active", Active: true, Enabled: true},
+	}
+
+	out, err := runWithCapturedStdout(func() error {
+		printRuntimeSection(s, cliOptions{NoColor: true, Compact: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printRuntimeSection error: %v", err)
+	}
+	if strings.Contains(out, "nginx:") {
+		t.Fatalf("expected compact web stack to exclude nginx, got:\n%s", out)
+	}
+}
+
 func runWithCapturedStdout(fn func() error) (string, error) {
 	origStdout := os.Stdout
 	r, w, err := os.Pipe()
