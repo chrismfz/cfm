@@ -7,15 +7,14 @@ import (
 	"os/exec"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 )
 
-func RunFlush(args []string, be firewall.Backend) int {
+func RunFlush(args []string, be firewall.Backend, tableExists func() bool) int {
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1

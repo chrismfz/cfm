@@ -95,6 +95,15 @@ func mustBackend() firewall.Backend {
 	return be
 }
 
+func tableExistsProbe(be firewall.Backend) func() bool {
+	return func() bool {
+		if firewallEngine() == "nft" {
+			return nft.TableExistsCFM()
+		}
+		return be != nil
+	}
+}
+
 // cfgDir resolves the active config directory for one-shot CLI commands.
 func cfgDir() string {
 	d, _ := cli.ResolveConfigDir("")
@@ -216,23 +225,31 @@ func main() {
 	case "test":
 		cli.RunTest()
 	case "block":
-		os.Exit(cli.RunBlock(os.Args[2:], mustBackend(), cfgDir()))
+		be := mustBackend()
+		os.Exit(cli.RunBlock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unblock":
-		os.Exit(cli.RunUnblock(os.Args[2:], mustBackend(), cfgDir()))
+		be := mustBackend()
+		os.Exit(cli.RunUnblock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "list":
-		os.Exit(cli.RunList(os.Args[2:], mustBackend()))
+		be := mustBackend()
+		os.Exit(cli.RunList(os.Args[2:], be, tableExistsProbe(be)))
 	case "allow":
-		os.Exit(cli.RunAllow(os.Args[2:], mustBackend(), cfgDir()))
+		be := mustBackend()
+		os.Exit(cli.RunAllow(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unallow":
-		os.Exit(cli.RunUnallow(os.Args[2:], mustBackend(), cfgDir()))
+		be := mustBackend()
+		os.Exit(cli.RunUnallow(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "allow-list":
-		os.Exit(cli.RunAllowList(os.Args[2:], mustBackend()))
+		be := mustBackend()
+		os.Exit(cli.RunAllowList(os.Args[2:], be, tableExistsProbe(be)))
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "flush":
-		os.Exit(cli.RunFlush(os.Args[2:], mustBackend()))
+		be := mustBackend()
+		os.Exit(cli.RunFlush(os.Args[2:], be, tableExistsProbe(be)))
 	case "which", "search":
-		os.Exit(cli.RunWhich(os.Args[2:], mustBackend(), cfgDir()))
+		be := mustBackend()
+		os.Exit(cli.RunWhich(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "asn":
 		os.Exit(cli.RunASN(os.Args[2:]))
 	case "htpasswd":

@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/nft"
 	ipquery "cfm/internal/ipquery"
 )
 
@@ -22,7 +21,7 @@ type WhichHit struct {
 	Feed   string `json:"feed"`   // optional feed key
 }
 
-func RunWhich(args []string, be firewall.Backend, cfgDir string) int {
+func RunWhich(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("which", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	_ = fs.Parse(args)
@@ -38,7 +37,7 @@ func RunWhich(args []string, be firewall.Backend, cfgDir string) int {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1
 	}
-	if !nft.TableExistsCFM() {
+	if tableExists == nil || !tableExists() {
 		if err := be.EnsureBase(); err != nil {
 			fmt.Fprintln(os.Stderr, "EnsureBase error:", err)
 			return 1
