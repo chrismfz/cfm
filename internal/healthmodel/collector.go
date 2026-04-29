@@ -63,15 +63,19 @@ func CollectSnapshotNow(nodeID string) (snap HealthSnapshotV1) {
 
 func collectRuntimeStatus() RuntimeStatus {
 	out := RuntimeStatus{
-		CFMServiceState: "unknown",
-		DNATEnabled:     "unknown",
-		DNATFrontend:    "unknown",
-		DNATConfidence:  "low",
-		FrontendWorking: "down",
-		EdgeService:     "unknown",
-		UpstreamService: "unknown",
-		EdgeStatus:      "unknown",
-		UpstreamStatus:  "unknown",
+		CFMServiceState:    "unknown",
+		DNATEnabled:        "unknown",
+		DNATFrontend:       "unknown",
+		DNATConfidence:     "low",
+		FrontendWorking:    "down",
+		EdgeService:        "unknown",
+		UpstreamService:    "unknown",
+		EdgeStatus:         "unknown",
+		UpstreamStatus:     "unknown",
+		EdgeConfidence:     "low",
+		UpstreamConfidence: "low",
+		EdgeReasonCode:     "unknown",
+		UpstreamReasonCode: "unknown",
 	}
 	out.CFMDaemonLive, out.CFMDaemonPID = probeCFMDaemonLive()
 	if state, ok := probeSystemdServiceState("cfm.service"); ok {
@@ -96,8 +100,12 @@ func collectRuntimeStatus() RuntimeStatus {
 	out.FrontendDebug = resolution.frontendDebug
 	out.EdgeService = resolution.edge.service
 	out.EdgeStatus = resolution.edge.status
+	out.EdgeConfidence = resolution.edge.confidence
+	out.EdgeReasonCode = resolution.edge.reasonCode
 	out.UpstreamService = resolution.upstream.service
 	out.UpstreamStatus = resolution.upstream.status
+	out.UpstreamConfidence = resolution.upstream.confidence
+	out.UpstreamReasonCode = resolution.upstream.reasonCode
 	return out
 }
 
@@ -132,6 +140,8 @@ func ResolveWebRoles(dnatState string) webRoleResolution {
 type runtimeRoleSignal struct {
 	service       string
 	status        string
+	confidence    string
+	reasonCode    string
 	listeningPort []int
 }
 
@@ -577,8 +587,10 @@ func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
 		service = "unknown"
 	}
 	out := runtimeRoleSignal{
-		service: service,
-		status:  "inactive",
+		service:    service,
+		status:     "inactive",
+		confidence: "low",
+		reasonCode: "unknown",
 	}
 	if strings.TrimSpace(out.service) == "" {
 		out.service = "unknown"
@@ -594,19 +606,28 @@ func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
 		active, _, ok := probeSystemdUnit(out.service + ".service")
 		if !ok {
 			out.status = "unknown"
+			out.reasonCode = "unit_state_unknown"
 		} else if active && len(out.listeningPort) >= 1 {
 			out.status = "active"
+			out.confidence = "high"
+			out.reasonCode = "dnat_targets_owner"
 		} else if active {
 			out.status = "degraded"
+			out.confidence = "medium"
+			out.reasonCode = "service_active_no_listener"
 		} else {
 			out.status = "inactive"
+			out.reasonCode = "service_inactive"
 		}
 	default:
 		out.service = "unknown"
 		if len(out.listeningPort) > 0 {
 			out.status = "active"
+			out.confidence = "low"
+			out.reasonCode = "listener_owner_unknown"
 		} else {
 			out.status = "unknown"
+			out.reasonCode = "unknown"
 		}
 	}
 	return out
@@ -628,7 +649,7 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 		{name: "apache", unit: "apache2.service", markerPaths: []string{"/etc/apache2/apache2.conf", "/etc/apache2/sites-enabled", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf.d"}},
 		{name: "caddy", unit: "caddy.service", markerPaths: []string{"/etc/caddy/Caddyfile"}},
 	}
-	best := runtimeRoleSignal{service: "unknown", status: "unknown"}
+	best := runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "unknown"}
 	bestScore := 0
 	for _, c := range candidates {
 		score := 0
@@ -652,7 +673,13 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 		}
 		if score > bestScore {
 			bestScore = score
-			best = runtimeRoleSignal{service: c.name, status: status}
+			reason := "marker_only"
+			conf := "low"
+			if ok && active {
+				reason = "service_active"
+				conf = "medium"
+			}
+			best = runtimeRoleSignal{service: c.name, status: status, confidence: conf, reasonCode: reason}
 		}
 	}
 	if bestScore == 0 {
@@ -693,14 +720,14 @@ func detectNginxUpstreamFromSignals(listeners frontendListenerSnapshot, serviceA
 	strong := hasMasterWorker && serviceActive && hasPublic && hasDNATTier
 	if strong {
 		_ = hasLoopbackPath // optional supporting signal
-		return runtimeRoleSignal{service: "nginx", status: status}, true
+		return runtimeRoleSignal{service: "nginx", status: status, confidence: "high", reasonCode: ":80_listener+service_active"}, true
 	}
 
 	if !hasMasterWorker && !serviceActive && !hasPublic && !hasDNATTier {
 		return runtimeRoleSignal{}, false
 	}
 
-	return runtimeRoleSignal{service: "unknown", status: "unknown"}, true
+	return runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "insufficient_upstream_signals"}, true
 }
 
 func detectedPortsForService(listeners frontendListenerSnapshot, service string, ports ...int) []int {
