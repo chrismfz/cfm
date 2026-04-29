@@ -16,9 +16,26 @@ func (b *Backend) EnsureBase() error {
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddTable(table)
 
-	b.conn.AddChain(&nftables.Chain{Table: table, Name: "input"})
+	inputPrio := nftables.ChainPriority(-50)
+	acceptPolicy := nftables.ChainPolicyAccept
+	b.conn.AddChain(&nftables.Chain{
+		Table:    table,
+		Name:     "input",
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookInput,
+		Priority: &inputPrio,
+		Policy:   &acceptPolicy,
+	})
 	b.conn.AddChain(&nftables.Chain{Table: table, Name: "flood"})
-	b.conn.AddChain(&nftables.Chain{Table: table, Name: "preraw"})
+	dstNatPrio := *nftables.ChainPriorityNATDest
+	b.conn.AddChain(&nftables.Chain{
+		Table:    table,
+		Name:     "preraw",
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: &dstNatPrio,
+		Policy:   &acceptPolicy,
+	})
 
 	for _, spec := range []struct {
 		name       string
