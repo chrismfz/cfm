@@ -235,6 +235,26 @@ Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We 
 - [ ] Add experimental wiring/selection path for `nftlib` while keeping nft shell as production default.
 - [ ] Validate parity for DNAT/challenge redirect, feed management, and bulk set operations.
 
+### Phase 2 operation/owner matrix (planned split)
+
+| Operation group | Backend operations | Phase 2 engine owner | Required guardrails |
+|---|---|---|---|
+| Base lifecycle + list primitives | `EnsureBase`, `ResetTable`, `List*` reads, JSON/text dump helpers | **nftlib** | Use transaction-style `Flush` boundaries and normalized wrapped errors (include table/set/op context). |
+| Manual element writes (single + batch) | `AddBlock`, `RemoveBlock`, `AddAllow`, `RemoveAllow`, `RemoveBlockBatch`, `Add*Net`, `Remove*Net`, `AddIgnore*`, `RemoveIgnore*`, `AddChallenge`, `RemoveChallenge` | **nftlib** | Batch related mutations in one transaction when possible; return typed errors for parse/not-found/conflict classes. |
+| Set/bulk operations | `EnsureSetDynamic`, `DeleteSetIfExists`, `ReplaceSetFlushAdd`, `AddElementsBulk`, `HasElem`, `ListSetElementsRaw`, `FlushSet` | **nftlib** | Prefer single netlink transaction per batch apply; fail closed on partial mutation; emit deterministic error envelopes. |
+| Feed lifecycle | `ApplyFeed`, `RebuildExternalUnions`, `PruneExternalFeeds`, `DropFeedSets`, `RemoveFeedByKey` | **nftlib** | Transaction boundary per feed generation; rollback/retry strategy for interrupted set replace. |
+| Policy/rules programming | `ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve` | **hybrid: nftcli (initial)** | Keep existing command timeout and backpressure protections (bounded workers/serialization) until rule synthesis reaches nftlib parity. |
+| Challenge redirect/DNAT control | `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff` | **hybrid: nftcli (initial)** | Keep timeout + retry/backpressure controls on subprocess calls; preserve idempotent cleanup semantics. |
+| Reporting/wiring | `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger`, `ReportBlock`, `LoadPortScanner`, dumps | **non-engine (shared)** | No engine split; preserve thread-safety and nil-safe adapters. |
+
+**Standards for Phase 2 execution paths**
+- **Any operation still on nftcli must keep timeout and backpressure protections** (central command runner, bounded concurrency, cancellation propagation).
+- **Any operation owned by nftlib must adopt transaction + error-handling standards**:
+  - Group logically-related netlink changes into a single commit boundary.
+  - Wrap all errors with operation metadata (`op`, `family`, `table`, `chain/set`, `attempt`).
+  - Distinguish retryable netlink interruption/resource pressure from non-retryable semantic errors.
+  - Reject silent partial success; either commit the whole unit or surface explicit degraded-state errors.
+
 **What remains (concise):**
 - Shell backend hardening (timeouts, runner centralization, locking).
 - nftlib backend introduction plus experimental wiring.
