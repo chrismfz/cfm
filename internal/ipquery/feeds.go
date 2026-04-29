@@ -1,10 +1,12 @@
 // internal/ipquery/feeds.go
 package ipquery
 
+import "cfm/internal/firewall"
+
 // FeedsBlocking επιστρέφει τα feeds (ονόματα ή IDs) που “πιάνουν” το ipStr.
 // Implementation: re-use των δομών/ευρετηρίων που ήδη διαβάζεις για το which().
-func FeedsBlocking(ipStr string) ([]string, error) {
-    hits, err := Find(ipStr) // υπάρχει ήδη
+func FeedsBlocking(be firewall.Backend, ipStr string) ([]string, error) {
+    hits, err := Find(be, ipStr) // υπάρχει ήδη
     if err != nil { return nil, err }
     uniq := map[string]struct{}{}
     var out []string

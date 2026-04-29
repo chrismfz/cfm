@@ -2335,3 +2335,41 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 
 	return fmt.Errorf("nft batch delete failed: %v: %s", err, s)
 }
+
+func (b *Backend) ListTableJSON(fam, table string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", fam, table).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("nft list table %s %s: %v: %s", fam, table, err, string(out))
+	}
+	return out, nil
+}
+
+func (b *Backend) ListSetJSON(fam, table, set string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "set", fam, table, set).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("nft list set %s %s %s: %v: %s", fam, table, set, err, string(out))
+	}
+	return out, nil
+}
+
+func (b *Backend) ListTableTextNoDNS(fam, table string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nft", "-t", "-n", "list", "table", fam, table).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("nft list table %s %s: %v: %s", fam, table, err, string(out))
+	}
+	return string(out), nil
+}
+
+func (b *Backend) FlushSet(fam, table, set string) error {
+	out, err := exec.Command("nft", "-n", "flush", "set", fam, table, set).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nft flush set %s %s %s: %v: %s", fam, table, set, err, string(out))
+	}
+	return nil
+}

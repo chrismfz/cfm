@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -271,7 +270,7 @@ func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
 		return nil
 	}
 	// Discover per-feed set names once (no elements printed).
-	sets, err := listSetNamesByPrefixes(
+	sets, err := listSetNamesByPrefixes(be,
 		"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
 		"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
 	)
@@ -299,12 +298,10 @@ func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
 
 // listSetNamesByPrefixes parses a single "nft -t -n list table inet cfm" output
 // and returns set names that start with any of the provided prefixes.
-func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "-t", "-n", "list", "table", "inet", "cfm").CombinedOutput()
+func listSetNamesByPrefixes(be firewall.Backend, prefixes ...string) ([]string, error) {
+	outS, err := be.ListTableTextNoDNS("inet", "cfm")
 	if err != nil {
-		return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
+		return nil, err
 	}
 	// normalize prefixes
 	pfx := make([]string, 0, len(prefixes))
@@ -315,7 +312,7 @@ func listSetNamesByPrefixes(prefixes ...string) ([]string, error) {
 		}
 	}
 	var names []string
-	sc := bufio.NewScanner(bytes.NewReader(out))
+	sc := bufio.NewScanner(bytes.NewReader([]byte(outS)))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		// lines like:  set block_ext_v4_hosts_myblock { type ipv4_addr; flags timeout; }

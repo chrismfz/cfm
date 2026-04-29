@@ -44,7 +44,7 @@ func RunWhich(args []string, be firewall.Backend, cfgDir string, tableExists fun
 		}
 	}
 
-	rawHits, err := ipquery.Find(arg)
+	rawHits, err := ipquery.Find(be, arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		return 1
