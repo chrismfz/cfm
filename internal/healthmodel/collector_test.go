@@ -104,3 +104,30 @@ func TestFrontendListenerSnapshotDebugForOwners(t *testing.T) {
 		t.Fatalf("unexpected owners for :9043: %#v", got)
 	}
 }
+
+func TestDetectNginxUpstreamFromSignals_StrongSignal(t *testing.T) {
+	listeners := frontendListenerSnapshot{
+		listeners: []listenerEntry{
+			{name: "nginx", port: 80},
+			{name: "nginx", port: 443},
+			{name: "nginx", port: 9080},
+			{name: "nginx", port: 9043},
+		},
+		flows: []listenerEntry{{name: "nginx", port: 9080, established: true}},
+	}
+	got, ok := detectNginxUpstreamFromSignals(listeners, true)
+	if !ok {
+		t.Fatalf("expected upstream decision")
+	}
+	if got.service != "nginx" {
+		t.Fatalf("expected nginx upstream, got %#v", got)
+	}
+}
+
+func TestDetectNginxUpstreamFromSignals_NoStrongSignal(t *testing.T) {
+	listeners := frontendListenerSnapshot{}
+	_, ok := detectNginxUpstreamFromSignals(listeners, false)
+	if ok {
+		t.Fatalf("expected no upstream decision when no strong signals exist")
+	}
+}
