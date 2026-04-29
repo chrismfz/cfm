@@ -55,11 +55,37 @@ var (
 // Backend abstraction
 // ----------------------------------------------------------------------------
 
-func getBackend() firewall.Backend {
-	if _, ok := cli.LookPath("nft"); ok {
-		return nft.New()
+func firewallEngine() string {
+	engine := strings.ToLower(strings.TrimSpace(os.Getenv("CFM_FIREWALL_ENGINE")))
+	if engine == "" {
+		return "nft"
 	}
-	return nil
+	return engine
+}
+
+func getBackend() (firewall.Backend, error) {
+	switch firewallEngine() {
+	case "", "nft":
+		if _, ok := cli.LookPath("nft"); ok {
+			return nft.New(), nil
+		}
+		return nil, fmt.Errorf("nft backend selected but nft binary not found")
+	case "nftlib":
+		return nil, fmt.Errorf("firewall engine \"nftlib\" not built yet")
+	case "pf":
+		return nil, fmt.Errorf("firewall engine \"pf\" not built yet")
+	default:
+		return nil, fmt.Errorf("unsupported firewall engine %q", firewallEngine())
+	}
+}
+
+func mustBackend() firewall.Backend {
+	be, err := getBackend()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return be
 }
 
 // cfgDir resolves the active config directory for one-shot CLI commands.
@@ -183,40 +209,40 @@ func main() {
 	case "test":
 		cli.RunTest()
 	case "block":
-		os.Exit(cli.RunBlock(os.Args[2:], getBackend(), cfgDir()))
+		os.Exit(cli.RunBlock(os.Args[2:], mustBackend(), cfgDir()))
 	case "unblock":
-		os.Exit(cli.RunUnblock(os.Args[2:], getBackend(), cfgDir()))
+		os.Exit(cli.RunUnblock(os.Args[2:], mustBackend(), cfgDir()))
 	case "list":
-		os.Exit(cli.RunList(os.Args[2:], getBackend()))
+		os.Exit(cli.RunList(os.Args[2:], mustBackend()))
 	case "allow":
-		os.Exit(cli.RunAllow(os.Args[2:], getBackend(), cfgDir()))
+		os.Exit(cli.RunAllow(os.Args[2:], mustBackend(), cfgDir()))
 	case "unallow":
-		os.Exit(cli.RunUnallow(os.Args[2:], getBackend(), cfgDir()))
+		os.Exit(cli.RunUnallow(os.Args[2:], mustBackend(), cfgDir()))
 	case "allow-list":
-		os.Exit(cli.RunAllowList(os.Args[2:], getBackend()))
+		os.Exit(cli.RunAllowList(os.Args[2:], mustBackend()))
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "flush":
-		os.Exit(cli.RunFlush(os.Args[2:], getBackend()))
+		os.Exit(cli.RunFlush(os.Args[2:], mustBackend()))
 	case "which", "search":
-		os.Exit(cli.RunWhich(os.Args[2:], getBackend(), cfgDir()))
+		os.Exit(cli.RunWhich(os.Args[2:], mustBackend(), cfgDir()))
 	case "asn":
 		os.Exit(cli.RunASN(os.Args[2:]))
 	case "htpasswd":
 		os.Exit(cli.RunHtpasswd(os.Args[2:]))
 	case "status":
-		status.Run(os.Args[2:], getBackend())
+		status.Run(os.Args[2:], mustBackend())
 	case "reset":
-		os.Exit(cli.RunReset(os.Args[2:], getBackend()))
+		os.Exit(cli.RunReset(os.Args[2:], mustBackend()))
 	case "disable":
-		os.Exit(cli.RunDisable(os.Args[2:], getBackend()))
+		os.Exit(cli.RunDisable(os.Args[2:], mustBackend()))
 
 	case "ssl", "sslcollector", "ssl-collector":
 		sock, token := sslSockDefaults()
 		sslcollector.RunCLI(os.Args[2:], sock, token)
 
 	case "dnat":
-		os.Exit(dnat.RunCLI(os.Args[2:], getBackend()))
+		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
 
 	case "webtop", "nginx-top", "httpd-top":
 		addr := apiBaseURL()
@@ -347,12 +373,14 @@ func runDaemon(args []string) {
 		logging.Logf("→ no config dir found (no -c / no CFM_CONFIG_DIR / no /etc/cfm / no ./configs). Running without file persistence.")
 	}
 
+	logging.Logf("[startup] firewall engine: %s", firewallEngine())
+
 	// Backend
 	done := step("backend:getBackend")
-	be := getBackend()
+	be, err := getBackend()
 	done()
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "no firewall backend available")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
