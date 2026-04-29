@@ -235,6 +235,51 @@ Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We 
 - [ ] Add experimental wiring/selection path for `nftlib` while keeping nft shell as production default.
 - [ ] Validate parity for DNAT/challenge redirect, feed management, and bulk set operations.
 
+### Phase 2 exit criteria to move `nftlib` beyond experimental
+
+`nftlib` remains experimental until all criteria below are green in CI and in a staged environment.
+
+1. **Functional parity tests (set operations)**
+   - Scope: `AddElementsBulk`/add, `Remove*`/remove, `ReplaceSetFlushAdd`/replace, `HasElem`/has, `ListSetElementsRaw`/list.
+   - Test matrix: IPv4 + IPv6, empty set, duplicate inserts, missing element removal, and mixed TTL/non-TTL entries.
+   - Pass criteria:
+     - `nftlib` and `nftcli` produce byte-equivalent normalized set snapshots for identical test inputs.
+     - Zero unexpected diffs across 100 consecutive parity runs.
+     - No leaked temporary sets/chains after test teardown.
+
+2. **Performance benchmark on large feed updates vs `nftcli`**
+   - Benchmark profile: at least 10k, 50k, and 100k element feed updates using `ApplyFeed` + union rebuild paths.
+   - Measurements: p50/p95 apply latency, CPU time, peak RSS, and syscall/fork counts.
+   - Pass criteria:
+     - `nftlib` p95 apply latency is **at least 2x better** than `nftcli` at 50k+ entries.
+     - `nftlib` process fork count is zero for feed apply path.
+     - No regression >10% in memory usage versus agreed baseline envelope.
+
+3. **Failure-mode tests (netlink errors, interruptions, partial updates)**
+   - Injected faults: transient netlink `EINTR`/`ENOBUFS`, permission errors, context cancellation mid-apply, and kernel-side rejection on one element in batch.
+   - Pass criteria:
+     - Retryable failures are classified and retried according to policy.
+     - Non-retryable semantic failures return typed errors with operation metadata.
+     - Partial mutation is not silent: either full transaction commits, or degraded-state error is emitted and detected.
+
+4. **Runtime fallback behavior**
+   - Required behavior definition: if an `nftlib` mutation op fails, request handling must return an explicit failure to caller; there is **no implicit per-op fallback** to `nftcli` in the same execution path.
+   - Startup/selection fallback: unknown engine or disabled experimental flag falls back to `nft` selector default.
+   - Pass criteria:
+     - Integration tests verify explicit error propagation for failed `nftlib` ops.
+     - Selector tests verify deterministic fallback only at engine selection boundaries.
+
+5. **Observability metrics per engine**
+   - Required counters/histograms (labeled by `engine` + `operation`):
+     - latency distribution,
+     - error count by class (retryable/non-retryable/semantic),
+     - timeout count,
+     - fallback count (selection-level only).
+   - Pass criteria:
+     - Metrics emitted for both `nft` and `nftlib` in equivalent code paths.
+     - Dashboard and alert thresholds defined for p95 latency and error/timeout spikes.
+     - On-call runbook updated with metric interpretation and initial triage steps.
+
 ### Phase 2 operation/owner matrix (planned split)
 
 | Operation group | Backend operations | Phase 2 engine owner | Required guardrails |
