@@ -390,11 +390,9 @@ func runDaemon(args []string) {
 
 	// NFT backend extras
 	done = step("nft:extras")
-	if nb, ok := be.(*nft.Backend); ok {
-		nb.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
-		nb.SetConfigDir(cfgDir)
-		notify.SetEnricher(nb.GetEnricher())
-	}
+	be.EnableEnrichment(cfgDir, "/var/lib/cfm/maxmind", "/etc/cfm", "./configs")
+	be.SetConfigDir(cfgDir)
+	notify.SetEnricher(be.GetEnricher())
 	done()
 
 	// Blocklists Manager (scheduler+apply)
@@ -402,38 +400,33 @@ func runDaemon(args []string) {
 	done = step("blocklists:wiring")
 	var (
 		blMgr      *blocklists.Manager
-		nb         *nft.Backend
 		blReloadCh chan []blocklists.Feed
 	)
 
-	if x, ok := be.(*nft.Backend); ok {
-		nb = x
+	blMgr = blocklists.NewManager(blocklists.ApplierFunc(be.ApplyFeed))
 
-		blMgr = blocklists.NewManager(blocklists.ApplierFunc(nb.ApplyFeed))
+	// Start scheduler
+	blMgr.Start(context.Background())
+	defer blMgr.Stop()
 
-		// Start scheduler
-		blMgr.Start(context.Background())
-		defer blMgr.Stop()
+	blReloadCh = make(chan []blocklists.Feed, 1)
 
-		blReloadCh = make(chan []blocklists.Feed, 1)
+	go func() {
+		for feeds := range blReloadCh {
+			start := time.Now()
+			blMgr.Reload(feeds)
+			logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
 
-		go func() {
-			for feeds := range blReloadCh {
-				start := time.Now()
-				blMgr.Reload(feeds)
-				logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
-
-				if nb != nil {
-					keys := make([]string, 0, len(feeds))
-					for _, f := range feeds {
-						keys = append(keys, f.Name)
-					}
-					_ = nb.PruneExternalFeeds(keys)
+			if be != nil {
+				keys := make([]string, 0, len(feeds))
+				for _, f := range feeds {
+					keys = append(keys, f.Name)
 				}
+				_ = be.PruneExternalFeeds(keys)
 			}
-		}()
-		defer close(blReloadCh)
-	}
+		}
+	}()
+	defer close(blReloadCh)
 	done()
 
 	// Watchers
@@ -886,24 +879,21 @@ func runDaemon(args []string) {
 	// ── applyNFTRules ────────────────────────────────────────────────────────────
 	// Stateless: flood rules, ports policy, SMTP block, reporter, NFLOG snooper.
 	applyNFTRules := func(cfg *cfgpkg.Config) {
-		nb, ok := be.(*nft.Backend)
-		if !ok {
-			return
-		}
+
 		logging.Logf("[daemon] === Begin ApplyFloodRules ===")
-		if err := nb.ApplyFloodRules(cfg); err != nil {
+		if err := be.ApplyFloodRules(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "flood rules apply error:", err)
 		}
 		logging.Logf("[daemon] === End ApplyFloodRules ===")
 
 		logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
-		if err := nb.ApplyPortsPolicy(&cfg.Ports); err != nil {
+		if err := be.ApplyPortsPolicy(&cfg.Ports); err != nil {
 			fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
 		}
 		logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
 		if cfg.SMTPBlock.Enabled {
-			if err := nb.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
+			if err := be.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
 				fmt.Fprintln(os.Stderr, "smtpblock apply error:", err)
 			} else {
 				logging.Logf("[smtpblock] applied (mode=%s, ports=%v, allow_local=%v, nflog=%d)",
@@ -915,14 +905,14 @@ func runDaemon(args []string) {
 		logging.Logf("[daemon] === Finished all nft applies ===")
 
 		if cfg.API.URL != "" && cfg.API.AuthToken != "" {
-			nb.SetReporter(&agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken})
+			be.SetReporter(&agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken})
 		}
 		smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
 
 		// Outbound Abuse Sentinel — observe-only nft chain + NFLOG collector.
 		// The chain is installed/cleaned every reload (idempotent); the
 		// collector goroutine is start-once.
-		if err := nb.ApplyOutboundObserve(&cfg.Outbound); err != nil {
+		if err := be.ApplyOutboundObserve(&cfg.Outbound); err != nil {
 			fmt.Fprintln(os.Stderr, "outbound observe apply error:", err)
 		} else if cfg.Outbound.Enabled {
 			logging.Logf("[outbound] observe chain applied (group=%d)", cfg.Outbound.NFLOGGroup)
@@ -1028,14 +1018,12 @@ func runDaemon(args []string) {
 		loadAll()          // only if cfm.allow / cfm.deny / cfm.ignore changed
 		onCFMConfChanged() // only if cfm.conf changed
 
-		if nb, ok := be.(*nft.Backend); ok {
-			// DumpFloodCounters and LoadPortScanner are internally non-blocking:
-			// each launches its own goroutine with an overlap guard (if a previous
-			// tick's work is still running, the new call is a no-op). No wrapper
-			// goroutine needed here — they return immediately.
-			nb.DumpFloodCounters()
-			nb.LoadPortScanner()
-		}
+		// DumpFloodCounters and LoadPortScanner are internally non-blocking:
+		// each launches its own goroutine with an overlap guard (if a previous
+		// tick's work is still running, the new call is a no-op). No wrapper
+		// goroutine needed here — they return immediately.
+		be.DumpFloodCounters()
+		be.LoadPortScanner()
 		if ddm.FileChanged() {
 			_ = ddm.LoadOnce(context.Background())
 		} else {
