@@ -17,10 +17,11 @@ import (
 )
 
 type cliOptions struct {
-	NoColor    bool
-	Compact    bool
-	DiskDetail bool
-	FullIdent  bool
+	NoColor      bool
+	Compact      bool
+	DiskDetail   bool
+	FullIdent    bool
+	DebugRuntime bool
 }
 
 type snapshotEnvelope struct {
@@ -155,6 +156,8 @@ func parseGlobalFlags(args []string) (cliOptions, []string) {
 			opts.DiskDetail = true
 		case "--full-ident":
 			opts.FullIdent = true
+		case "--debug-runtime":
+			opts.DebugRuntime = true
 		default:
 			out = append(out, a)
 		}
@@ -311,8 +314,11 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 		frontendLabel = fmt.Sprintf("%s (%s: %s)", frontend, frontendVerdict, reason)
 	}
 	if opts.Compact {
-		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s frontend=%s confidence=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState, frontendLabel, confidence)
-		fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
+		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState)
+		if opts.DebugRuntime {
+			fmt.Printf("Runtime %-6s frontend=%s confidence=%s\n", badge(okLabel, opts), frontendLabel, confidence)
+			fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
+		}
 		if confidence == "low" {
 			if w := strings.TrimSpace(r.DNATWarning); w != "" {
 				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
@@ -324,10 +330,12 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
 	fmt.Printf("  CFM daemon: %s\n", daemon)
 	fmt.Printf("  Service: %s\n", serviceState)
-	fmt.Printf("  DNAT: %s (frontend=%s, confidence=%s)\n", dnatState, frontend, confidence)
-	fmt.Printf("  Frontend: %s\n", frontendLabel)
-	fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode))
-	fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
+	fmt.Printf("  DNAT: %s\n", dnatState)
+	if opts.DebugRuntime {
+		fmt.Printf("  Frontend: %s (confidence=%s)\n", frontendLabel, confidence)
+		fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode))
+		fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
+	}
 	if confidence == "low" {
 		if w := strings.TrimSpace(r.DNATWarning); w != "" {
 			fmt.Printf("  Warning: %s\n", w)
