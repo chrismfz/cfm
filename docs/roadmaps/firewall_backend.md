@@ -226,14 +226,19 @@ Phase 1 is a **pure refactor**. `nft.Backend` already implements everything. We 
 - `nft.New()` appears only in the selector path.
 
 **Phase 1.5 (hardening while keeping nft shell backend as default):**
-- [ ] Shell backend hardening: enforce timeouts and centralized command runner for all nft subprocess execution.
-- [ ] Shell backend concurrency controls: lock/serialize high-volume mutation paths to reduce process pressure.
+- [x] Shell backend hardening: centralized command runner (`command_runner.go`) for all nft subprocess execution.
+- [x] Shell backend concurrency controls: bounded semaphore (`nftSem`, cap=4) in `command_runner.go` serializes high-volume mutation paths.
 - [ ] Add targeted stress/regression coverage for large feed updates and concurrent applies.
 
-**Phase 2 (new engine, opt-in):**
-- [ ] Introduce `internal/firewall/nftlib` backend (`github.com/google/nftables`, netlink-based).
-- [ ] Add experimental wiring/selection path for `nftlib` while keeping nft shell as production default.
+**Phase 2 (new engine, opt-in) — 2026-04-29:**
+- [x] Introduce `internal/firewall/nftlib` backend (`github.com/google/nftables`, netlink-based).
+- [x] Set/bulk operations implemented natively via netlink: `AddBlock`, `RemoveBlock`, `RemoveBlockBatch`, `AddAllow`, `RemoveAllow`, `Add/RemoveBlockNet`, `Add/RemoveAllowNet`, `Add/RemoveIgnore`, `Add/RemoveIgnoreNet`, `AddChallenge`, `RemoveChallenge`, `AddElementsBulk`, `ReplaceSetFlushAdd`.
+- [x] Hybrid wiring: policy/DNAT/inspection/feeds/diagnostics delegate to embedded `*nft.Backend`.
+- [x] Compile-time assertion `var _ firewall.Backend = (*Backend)(nil)` in `nftlib/backend.go`.
+- [x] `CFM_FIREWALL_ENGINE=nftlib` selector wired in `cmd/cfm/main.go`; nft remains production default.
 - [ ] Validate parity for DNAT/challenge redirect, feed management, and bulk set operations.
+- [ ] Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) — currently delegated.
+- [ ] Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`) — currently delegated.
 
 ### Phase 2 exit criteria to move `nftlib` beyond experimental
 
@@ -945,18 +950,23 @@ Any implementation of `firewall.Backend` must follow these rules:
 
 | Task | File | Status |
 |---|---|---|
-| Add `github.com/google/nftables` to go.mod | `go.mod` | ☐ |
-| Create `nftlib/backend.go` with struct + `New()` + compile assertion | `internal/firewall/nftlib/backend.go` | ☐ |
-| Implement IP/net management (sets) | `internal/firewall/nftlib/sets.go` | ☐ |
-| Implement bulk operations (fork-storm fix) | `internal/firewall/nftlib/sets.go` | ☐ |
-| Implement policy methods | `internal/firewall/nftlib/policy.go` | ☐ |
-| Implement feed management | `internal/firewall/nftlib/feeds.go` | ☐ |
-| Implement challenge redirect (DNAT via netlink) | `internal/firewall/nftlib/challenge.go` | ☐ |
-| Implement DNAT CLI surface | `internal/firewall/nftlib/dnat.go` | ☐ |
-| Implement diagnostics | `internal/firewall/nftlib/diagnostics.go` | ☐ |
-| Implement wiring methods | `internal/firewall/nftlib/wiring.go` | ☐ |
-| Wire `CFM_FIREWALL_ENGINE=nftlib` in `getBackend()` | `cmd/cfm/main.go` | ☐ |
+| Add `github.com/google/nftables` to go.mod | `go.mod` | ✅ (v0.3.0) |
+| Create `nftlib/backend.go` with struct + `New()` + compile assertion | `internal/firewall/nftlib/backend.go` | ✅ |
+| Implement IP/net management (sets) — native netlink | `internal/firewall/nftlib/sets.go` | ✅ |
+| Implement bulk operations (fork-storm fix) — native netlink | `internal/firewall/nftlib/bulk.go` | ✅ |
+| Conn helpers: lookupTable, lookupSet, cache invalidation, normalizeIP, CIDR interval encoding | `internal/firewall/nftlib/conn.go` | ✅ |
+| Lifecycle methods (delegate + cache invalidation) | `internal/firewall/nftlib/lifecycle.go` | ✅ |
+| Inspection methods (delegate) | `internal/firewall/nftlib/inspect.go` | ✅ (delegated; native impl deferred) |
+| Feed management (delegate) | `internal/firewall/nftlib/feeds.go` | ✅ (delegated; native impl deferred) |
+| Policy methods (delegate) | `internal/firewall/nftlib/policy.go` | ✅ (delegated; native impl deferred) |
+| Challenge redirect / DNAT (delegate) | `internal/firewall/nftlib/challenge.go` | ✅ (delegated; native impl deferred) |
+| Wiring methods | `internal/firewall/nftlib/wiring.go` | ✅ |
+| Wire `CFM_FIREWALL_ENGINE=nftlib` in `getBackend()` | `cmd/cfm/main.go` | ✅ |
+| Phase 1.5: bounded semaphore (cap=4) for nft subprocess calls | `internal/firewall/nft/command_runner.go` | ✅ |
+| Phase 1 cleanup: remove always-true `EnsureChallengeRedirect` type assertion | `internal/detectors/webdetector_register.go` | ✅ |
 | Integration test: apply blocklist, verify nft list | `internal/firewall/nftlib/*_test.go` | ☐ |
+| Native nftlib inspection (`ListBlocks`, `ListAllows`, `HasElem`, `ListSetElementsRaw`) | `internal/firewall/nftlib/inspect.go` | ☐ |
+| Native nftlib feed management (`ApplyFeed`, `RebuildExternalUnions`) | `internal/firewall/nftlib/feeds.go` | ☐ |
 
 ### Phase 3 — pf backend (BSD)
 

@@ -552,15 +552,7 @@ func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
 		logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules (%s)", tag)
 		return
 	}
-	cr, ok := any(fwBackend).(interface {
-		EnsureChallengeRedirect(httpListen, httpsListen string) error
-	})
-	if !ok {
-		logging.Logf("[webdetector] firewall backend does not support EnsureChallengeRedirect (%s)", tag)
-		return
-	}
-
-	if err := cr.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
+	if err := fwBackend.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
 		logging.Logf("[webdetector] EnsureChallengeRedirect failed (%s): %v", tag, err)
 		return
 	}
