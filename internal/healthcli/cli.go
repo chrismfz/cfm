@@ -359,15 +359,7 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 	if len(rows) == 0 {
 		return
 	}
-	status := okLabel
-	for _, row := range rows {
-		switch strings.ToLower(strings.TrimSpace(row.State)) {
-		case "failed":
-			status = worstLabel(status, critLabel)
-		case "inactive":
-			status = worstLabel(status, warnLabel)
-		}
-	}
+	status := webStackStatus(rows, s.Modern.Runtime.EdgeService, s.Modern.Runtime.DNATFrontend)
 	if opts.Compact {
 		parts := make([]string, 0, len(rows))
 		for _, row := range rows {
@@ -383,7 +375,7 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 }
 
 func collectWebStackRows(s parsedSnapshot) []serviceStatus {
-	targets := []string{"angie", "openresty", "nginx"}
+	targets := []string{"angie", "openresty"}
 	byName := make(map[string]serviceStatus, len(s.Modern.Services))
 	for _, svc := range s.Modern.Services {
 		name := strings.ToLower(strings.TrimSpace(svc.Name))
@@ -411,6 +403,25 @@ func collectWebStackRows(s parsedSnapshot) []serviceStatus {
 		out = append(out, row)
 	}
 	return out
+}
+
+func webStackStatus(rows []serviceStatus, edgeService, dnatFrontend string) healthLabelRank {
+	status := okLabel
+	edge := strings.ToLower(strings.TrimSpace(edgeService))
+	if edge == "" || edge == "unknown" {
+		edge = strings.ToLower(strings.TrimSpace(dnatFrontend))
+	}
+	for _, row := range rows {
+		switch strings.ToLower(strings.TrimSpace(row.State)) {
+		case "failed":
+			status = worstLabel(status, critLabel)
+		case "inactive":
+			if edge == "" || edge == "unknown" || strings.EqualFold(row.Name, edge) {
+				status = worstLabel(status, warnLabel)
+			}
+		}
+	}
+	return status
 }
 
 func formatWebStackUptime(svc serviceStatus) string {
