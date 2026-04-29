@@ -3,6 +3,9 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"cfm/internal/blocklists"
+	"cfm/internal/config"
+	"cfm/internal/enrich"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/reporting"
 	"cfm/internal/unblock"
 )
 
@@ -37,13 +41,52 @@ func (s *stubFirewallBackend) AddChallenge(net.IP, *time.Duration) error        
 func (s *stubFirewallBackend) RemoveChallenge(net.IP) error                          { return nil }
 func (s *stubFirewallBackend) SetChallengeRedirectEnabled(bool)                      {}
 func (s *stubFirewallBackend) CleanupChallengeRedirect() error                       { return nil }
+func (s *stubFirewallBackend) DropEverything() error                                 { return nil }
+func (s *stubFirewallBackend) ResetTable() error                                     { return nil }
+func (s *stubFirewallBackend) SetConfigDir(string)                                   {}
+func (s *stubFirewallBackend) EnableEnrichment(...string)                            {}
+func (s *stubFirewallBackend) GetEnricher() *enrich.Enricher                         { return nil }
+func (s *stubFirewallBackend) SetReporter(reporting.Reporter)                        {}
+func (s *stubFirewallBackend) SetChallengeLogger(func(string, ...any))               {}
+func (s *stubFirewallBackend) ApplyFloodRules(*config.Config) error                  { return nil }
+func (s *stubFirewallBackend) ApplyHardeningRules(*config.Config) error              { return nil }
+func (s *stubFirewallBackend) ApplyPortsPolicy(*config.PortsConfig) error            { return nil }
+func (s *stubFirewallBackend) ApplyConnlimit([]config.ConnlimitRule) error           { return nil }
+func (s *stubFirewallBackend) ApplyPortFlood([]config.PortFloodRule) error           { return nil }
+func (s *stubFirewallBackend) ApplySMTPBlock(*config.SMTPBlockConfig) error          { return nil }
+func (s *stubFirewallBackend) ApplyOutboundObserve(*config.OutboundConfig) error     { return nil }
+func (s *stubFirewallBackend) DumpFloodCounters()                                     {}
+func (s *stubFirewallBackend) DumpThrottledIPs()                                     {}
+func (s *stubFirewallBackend) LoadPortScanner()                                      {}
 func (s *stubFirewallBackend) DNATStatus(string, string) (bool, error)               { return false, nil }
 func (s *stubFirewallBackend) DNATShow(string, string) (string, error)               { return "", nil }
 func (s *stubFirewallBackend) DNATOn(string, string, int, int) error                 { return nil }
 func (s *stubFirewallBackend) DNATOff(string, string) error                           { return nil }
+func (s *stubFirewallBackend) EnsureChallengeRedirect(string, string) error          { return nil }
+func (s *stubFirewallBackend) ApplyFeed(context.Context, blocklists.Feed, *blocklists.FetchResult) error {
+	return nil
+}
+func (s *stubFirewallBackend) RebuildExternalUnions() error               { return nil }
+func (s *stubFirewallBackend) PruneExternalFeeds([]string) error          { return nil }
+func (s *stubFirewallBackend) DropFeedSets(string)                        {}
+func (s *stubFirewallBackend) RemoveFeedByKey(string) error               { return nil }
+func (s *stubFirewallBackend) DeleteSetIfExists(string) error             { return nil }
+func (s *stubFirewallBackend) EnsureSetDynamic(string, bool, bool) error  { return nil }
+func (s *stubFirewallBackend) ReplaceSetFlushAdd(string, []string, *time.Duration) error {
+	return nil
+}
+func (s *stubFirewallBackend) AddElementsBulk(string, []string, *time.Duration) error { return nil }
+func (s *stubFirewallBackend) HasElem(string, string) (bool, error)                    { return false, nil }
+func (s *stubFirewallBackend) ListSetElementsRaw(string) ([]string, error)             { return nil, nil }
 func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {
 	s.removed = append(s.removed, ip.String())
+	return nil
+}
+func (s *stubFirewallBackend) RemoveBlockBatch(ips []net.IP) error {
+	for _, ip := range ips {
+		s.removed = append(s.removed, ip.String())
+	}
 	return nil
 }
 
