@@ -231,7 +231,8 @@ func removeFromFile(cfgDir, filename, ip string) bool {
 	if cleanPath != baseCfg && !strings.HasPrefix(cleanPath, baseCfg+string(os.PathSeparator)) {
 		return false
 	}
-	f, err := os.Open(path)
+	// #nosec G304 -- path is constrained to cfgDir + allowlisted filename and verified to remain within cfgDir.
+	f, err := os.Open(cleanPath)
 	if err != nil {
 		return false
 	}
@@ -257,7 +258,8 @@ func removeFromFile(cfgDir, filename, ip string) bool {
 		}
 		kept = append(kept, line)
 	}
-	_ = os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
+	// #nosec G304 -- same validated path guarantees as above.
+	_ = os.WriteFile(cleanPath, []byte(strings.Join(kept, "\n")+"\n"), 0600)
 	return removed
 }
 
