@@ -104,18 +104,27 @@ func (b *Backend) DropEverything() error {
 	return nil
 }
 
-// ResetTable flushes the whole CFM table but keeps it present.
+// ResetTable rebuilds CFM table state via native lifecycle operations and
+// then triggers delegated policy hook re-apply so hybrid behavior stays aligned
+// with the exec backend expectations.
 func (b *Backend) ResetTable() error {
-	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
-	b.conn.FlushTable(table)
-	err := b.conn.Flush()
-	if err != nil && !isNotFound(err) {
-		return fmt.Errorf("nftlib: reset table: %w", err)
+	if err := b.DropEverything(); err != nil {
+		return fmt.Errorf("nftlib: reset table (drop): %w", err)
 	}
-	b.mu.Lock()
-	b.invalidateCache()
-	b.mu.Unlock()
+	if err := b.EnsureBase(); err != nil {
+		return fmt.Errorf("nftlib: reset table (ensure): %w", err)
+	}
+	if err := b.reapplyPolicyHooks(); err != nil {
+		return fmt.Errorf("nftlib: reset table (reapply hooks): %w", err)
+	}
 	return nil
+}
+
+func (b *Backend) reapplyPolicyHooks() error {
+	if b.cli == nil {
+		return nil
+	}
+	return b.cli.EnsureBase()
 }
 
 // EnsureSetDynamic creates a named dynamic set if it does not exist.
