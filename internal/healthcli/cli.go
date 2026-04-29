@@ -351,6 +351,20 @@ func formatRuntimeServiceRole(service, status, confidence, reasonCode string) st
 	if reason == "" {
 		reason = "unknown"
 	}
+	portCtx := ""
+	switch {
+	case strings.HasPrefix(reason, "ports_80_443"):
+		portCtx = "port 80/443"
+	case strings.HasPrefix(reason, "ports_80_only"):
+		portCtx = "port 80"
+	case strings.HasPrefix(reason, "ports_443_only"):
+		portCtx = "port 443"
+	case strings.HasPrefix(reason, "mixed_80_443"):
+		portCtx = "ports 80/443 mixed"
+	}
+	if portCtx != "" {
+		return fmt.Sprintf("%s (%s, confidence=%s, via %s)", name, portCtx, conf, reason)
+	}
 	return fmt.Sprintf("%s (confidence=%s, via %s)", name, conf, reason)
 }
 

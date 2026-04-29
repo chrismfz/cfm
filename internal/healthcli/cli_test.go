@@ -87,7 +87,7 @@ func TestRuntimeSectionIncludesDnatEdgeUpstreamAndWarning(t *testing.T) {
 	s.Modern.Runtime.UpstreamService = "nginx"
 	s.Modern.Runtime.UpstreamStatus = "active"
 	s.Modern.Runtime.UpstreamConfidence = "high"
-	s.Modern.Runtime.UpstreamReasonCode = ":80_listener+service_active"
+	s.Modern.Runtime.UpstreamReasonCode = "ports_80_443"
 	s.Modern.Runtime.DNATWarning = "ambiguous ownership: angie(score=5), nginx(score=4)"
 
 	out, err := runWithCapturedStdout(func() error {
@@ -106,7 +106,7 @@ func TestRuntimeSectionIncludesDnatEdgeUpstreamAndWarning(t *testing.T) {
 	if !strings.Contains(out, "Edge: angie (confidence=high, via dnat_targets_owner)") {
 		t.Fatalf("expected edge role output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Upstream: nginx (confidence=high, via :80_listener+service_active)") {
+	if !strings.Contains(out, "Upstream: nginx (port 80/443, confidence=high, via ports_80_443)") {
 		t.Fatalf("expected upstream role output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Warning: ambiguous ownership") {
