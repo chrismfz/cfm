@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -359,7 +358,8 @@ func (b *Backend) EnsureBase() error {
 	} else {
 
 		ctx5, cancel5 := context.WithTimeout(context.Background(), 5*time.Second)
-		out, _ := exec.CommandContext(ctx5, "nft", "list", "chain", family, tableName, "input").CombinedOutput()
+		res, _ := runNFTCommand(ctx5, "list", "chain", family, tableName, "input")
+		out := []byte(res.Stdout + res.Stderr)
 		cancel5()
 		s := string(out)
 		want := fmt.Sprintf("priority %d", prio)
@@ -520,7 +520,8 @@ func (b *Backend) EnsureBase() error {
 	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
 	// large installations. Cache the input chain snapshot once and keep it updated
 	// as we add/insert rules during this EnsureBase run.
-	inputChainRaw, _ := exec.Command("nft", "list", "chain", family, tableName, "input").CombinedOutput()
+	resInput, _ := runNFTCommand(context.Background(), "list", "chain", family, tableName, "input")
+	inputChainRaw := []byte(resInput.Stdout + resInput.Stderr)
 	normalizeRule := func(s string) string {
 		s = strings.ReplaceAll(s, "\r", "")
 		s = strings.ReplaceAll(s, "\t", " ")
@@ -1089,7 +1090,8 @@ func (b *Backend) ListAllows() ([]firewall.BlockedEntry, error) {
 // -------- listing helpers (JSON + text fallback) --------
 
 func (b *Backend) listSetJSON_robust(setName string) ([]firewall.BlockedEntry, bool) {
-	raw, err := exec.Command("nft", "-j", "list", "set", family, tableName, setName).CombinedOutput()
+	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
+	raw := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, false
 	}
@@ -1196,7 +1198,8 @@ func toStr(x any) string {
 }
 
 func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry, bool) {
-	raw, err := exec.Command("nft", "list", "set", family, tableName, setName).CombinedOutput()
+	res, err := runNFTCommand(context.Background(), "list", "set", family, tableName, setName)
+	raw := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, false
 	}
@@ -1250,7 +1253,8 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 func (b *Backend) tableExists() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "list", "tables").Output()
+	res, err := runNFTCommand(ctx, "list", "tables")
+	out := []byte(res.Stdout)
 	if err != nil {
 		return false
 	}
@@ -1270,14 +1274,15 @@ func TableExistsCFM() bool {
 func (b *Backend) chainExists(chain string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := exec.CommandContext(ctx, "nft", "list", "chain", family, tableName, chain).CombinedOutput()
+	_, err := runNFTCommand(ctx, "list", "chain", family, tableName, chain)
 	return err == nil
 }
 
 func (b *Backend) ruleExists(chain, needle string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "list", "chain", family, tableName, chain).CombinedOutput()
+	res, err := runNFTCommand(ctx, "list", "chain", family, tableName, chain)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return false
 	}
@@ -1299,7 +1304,7 @@ func (b *Backend) ruleExists(chain, needle string) bool {
 func (b *Backend) setExists(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := exec.CommandContext(ctx, "nft", "-t", "list", "set", family, tableName, name).CombinedOutput()
+	_, err := runNFTCommand(ctx, "-t", "list", "set", family, tableName, name)
 	return err == nil
 }
 
@@ -1315,9 +1320,8 @@ func (b *Backend) nftOut(expr string) (string, error) {
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft] expr:", expr)
 	}
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = bytes.NewBufferString(expr + "\n")
-	out, err := cmd.CombinedOutput()
+	res, err := runNFTCommandInput(context.Background(), expr+"\n", "-f", "-")
+	out := []byte(res.Stdout + res.Stderr)
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft] rc:", err)
 		if len(out) > 0 {
@@ -1339,7 +1343,8 @@ func (b *Backend) nftAddElementArgv(set, ip, ttl string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	res, err := runNFTCommand(ctx, args...)
+	out := []byte(res.Stdout + res.Stderr)
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft argv] rc:", err)
 		if len(out) > 0 {
@@ -1460,9 +1465,8 @@ func (b *Backend) nftExpr(expr string) error {
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft expr]:", expr)
 	}
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(expr + "\n")
-	out, err := cmd.CombinedOutput()
+	res, err := runNFTCommandInput(context.Background(), expr+"\n", "-f", "-")
+	out := []byte(res.Stdout + res.Stderr)
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft] rc:", err)
 		if len(out) > 0 {
@@ -1727,8 +1731,8 @@ func (b *Backend) DropFeedSets(feedName string) {
 	}
 	for _, s := range sets {
 		// αγνόησε σφάλματα αν δεν υπάρχουν ή είναι δεσμευμένα
-		_ = exec.Command("nft", "flush", "set", "inet", tableName, s).Run()
-		_ = exec.Command("nft", "delete", "set", "inet", tableName, s).Run()
+		_, _ = runNFTCommand(context.Background(), "flush", "set", "inet", tableName, s)
+		_, _ = runNFTCommand(context.Background(), "delete", "set", "inet", tableName, s)
 	}
 
 	b.unregisterFeedKey(suff)
@@ -1743,7 +1747,7 @@ func (b *Backend) DropEverything() error {
 		return nil
 	}
 	// best-effort flush first (μην αποτύχει delete λόγω refs)
-	_ = exec.Command("nft", "flush", "table", family, tableName).Run()
+	_, _ = runNFTCommand(context.Background(), "flush", "table", family, tableName)
 	return b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
 }
 
@@ -1890,7 +1894,8 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
-	out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	res, err := runNFTCommand(ctx, args...)
+	out := []byte(res.Stdout + res.Stderr)
 	if err == nil {
 		return true, nil // found
 	}
@@ -1909,7 +1914,8 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
 // //// helpers caching allow lists for ignore feature /////
 // listSetsByPrefixes returns set names that start with any of the given prefixes.
 func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
-	out, err := exec.Command("nft", "-t", "-n", "list", "table", string(family), tableName).CombinedOutput()
+	res, err := runNFTCommand(context.Background(), "-t", "-n", "list", "table", string(family), tableName)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
 	}
@@ -2314,9 +2320,8 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 			family, tableName, setV6, strings.Join(v6, ", "))
 	}
 
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(sb.String())
-	out, err := cmd.CombinedOutput()
+	res, err := runNFTCommandInput(context.Background(), sb.String(), "-f", "-")
+	out := []byte(res.Stdout + res.Stderr)
 	if err == nil {
 		return nil // all done in one shot
 	}
@@ -2339,7 +2344,8 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 func (b *Backend) ListTableJSON(fam, table string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", fam, table).CombinedOutput()
+	res, err := runNFTCommand(ctx, "-j", "list", "table", fam, table)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("nft list table %s %s: %v: %s", fam, table, err, string(out))
 	}
@@ -2349,7 +2355,8 @@ func (b *Backend) ListTableJSON(fam, table string) ([]byte, error) {
 func (b *Backend) ListSetJSON(fam, table, set string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "set", fam, table, set).CombinedOutput()
+	res, err := runNFTCommand(ctx, "-j", "list", "set", fam, table, set)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("nft list set %s %s %s: %v: %s", fam, table, set, err, string(out))
 	}
@@ -2359,7 +2366,8 @@ func (b *Backend) ListSetJSON(fam, table, set string) ([]byte, error) {
 func (b *Backend) ListTableTextNoDNS(fam, table string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "-t", "-n", "list", "table", fam, table).CombinedOutput()
+	res, err := runNFTCommand(ctx, "-t", "-n", "list", "table", fam, table)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("nft list table %s %s: %v: %s", fam, table, err, string(out))
 	}
@@ -2369,7 +2377,8 @@ func (b *Backend) ListTableTextNoDNS(fam, table string) (string, error) {
 func (b *Backend) ListChainText(fam, table, chain string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nft", "-a", "list", "chain", fam, table, chain).CombinedOutput()
+	res, err := runNFTCommand(ctx, "-a", "list", "chain", fam, table, chain)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("nft list chain %s %s %s: %v: %s", fam, table, chain, err, string(out))
 	}
@@ -2377,7 +2386,8 @@ func (b *Backend) ListChainText(fam, table, chain string) (string, error) {
 }
 
 func (b *Backend) FlushSet(fam, table, set string) error {
-	out, err := exec.Command("nft", "-n", "flush", "set", fam, table, set).CombinedOutput()
+	res, err := runNFTCommand(context.Background(), "-n", "flush", "set", fam, table, set)
+	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return fmt.Errorf("nft flush set %s %s %s: %v: %s", fam, table, set, err, string(out))
 	}

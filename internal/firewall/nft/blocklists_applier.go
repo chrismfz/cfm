@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,27 +36,31 @@ func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blockli
 	// cache raw elems in-memory so union rebuild never needs `nft -j list set`
 	b.cacheExternalFeed(isAllow, feedKey, h4, n4, h6, n6, ttl)
 
-
 	// per-feed δυναμικά sets
 	nameH4 := fmt.Sprintf("%s_v4_hosts_%s", base, feedKey)
 	nameN4 := fmt.Sprintf("%s_v4_nets_%s", base, feedKey)
 	nameH6 := fmt.Sprintf("%s_v6_hosts_%s", base, feedKey)
 	nameN6 := fmt.Sprintf("%s_v6_nets_%s", base, feedKey)
 
-	if err := b.EnsureSetDynamic(nameH4, false, false); err == nil { _ = b.ReplaceSetFlushAdd(nameH4, h4, ttl) }
-	if err := b.EnsureSetDynamic(nameN4, false, true);  err == nil { _ = b.ReplaceSetFlushAdd(nameN4, n4, ttl) }
-	if err := b.EnsureSetDynamic(nameH6, true,  false); err == nil { _ = b.ReplaceSetFlushAdd(nameH6, h6, ttl) }
-	if err := b.EnsureSetDynamic(nameN6, true,  true);  err == nil { _ = b.ReplaceSetFlushAdd(nameN6, n6, ttl) }
+	if err := b.EnsureSetDynamic(nameH4, false, false); err == nil {
+		_ = b.ReplaceSetFlushAdd(nameH4, h4, ttl)
+	}
+	if err := b.EnsureSetDynamic(nameN4, false, true); err == nil {
+		_ = b.ReplaceSetFlushAdd(nameN4, n4, ttl)
+	}
+	if err := b.EnsureSetDynamic(nameH6, true, false); err == nil {
+		_ = b.ReplaceSetFlushAdd(nameH6, h6, ttl)
+	}
+	if err := b.EnsureSetDynamic(nameN6, true, true); err == nil {
+		_ = b.ReplaceSetFlushAdd(nameN6, n6, ttl)
+	}
 
 	// μετά από κάθε apply, ξαναχτίσε τα unions που κοιτούν οι rules
-b.registerFeedKey(feedKey)
+	b.registerFeedKey(feedKey)
 	return b.RebuildExternalUnions()
 }
 
 // RebuildExternalUnions: union όλων των per-feed sets σε 4 “global” sets
-
-
-
 
 func (b *Backend) RebuildExternalUnions() error {
 	// Build the 8 unions purely from in-memory feed caches.
@@ -94,42 +97,33 @@ func (b *Backend) RebuildExternalUnions() error {
 
 	// Ensure unions exist (they are referenced by the base rules)
 	_ = b.EnsureSetDynamic("allow_ext_v4_hosts", false, false)
-	_ = b.EnsureSetDynamic("allow_ext_v4_nets",  false, true)
-	_ = b.EnsureSetDynamic("allow_ext_v6_hosts", true,  false)
-	_ = b.EnsureSetDynamic("allow_ext_v6_nets",  true,  true)
+	_ = b.EnsureSetDynamic("allow_ext_v4_nets", false, true)
+	_ = b.EnsureSetDynamic("allow_ext_v6_hosts", true, false)
+	_ = b.EnsureSetDynamic("allow_ext_v6_nets", true, true)
 	_ = b.EnsureSetDynamic("block_ext_v4_hosts", false, false)
-	_ = b.EnsureSetDynamic("block_ext_v4_nets",  false, true)
-	_ = b.EnsureSetDynamic("block_ext_v6_hosts", true,  false)
-	_ = b.EnsureSetDynamic("block_ext_v6_nets",  true,  true)
+	_ = b.EnsureSetDynamic("block_ext_v4_nets", false, true)
+	_ = b.EnsureSetDynamic("block_ext_v6_hosts", true, false)
+	_ = b.EnsureSetDynamic("block_ext_v6_nets", true, true)
 
 	// Flush & add (even if empty → union becomes empty)
 	_ = b.ReplaceSetFlushAdd("allow_ext_v4_hosts", allowH4, nil)
-	_ = b.ReplaceSetFlushAdd("allow_ext_v4_nets",  allowN4, nil)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v4_nets", allowN4, nil)
 	_ = b.ReplaceSetFlushAdd("allow_ext_v6_hosts", allowH6, nil)
-	_ = b.ReplaceSetFlushAdd("allow_ext_v6_nets",  allowN6, nil)
+	_ = b.ReplaceSetFlushAdd("allow_ext_v6_nets", allowN6, nil)
 	_ = b.ReplaceSetFlushAdd("block_ext_v4_hosts", blockH4, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v4_nets",  blockN4, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v4_nets", blockN4, nil)
 	_ = b.ReplaceSetFlushAdd("block_ext_v6_hosts", blockH6, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v6_nets",  blockN6, nil)
+	_ = b.ReplaceSetFlushAdd("block_ext_v6_nets", blockN6, nil)
 
 	return nil
 }
-
-
-
-
-
-
-
-
-
-
 
 // --- Helpers -------------------------------------------------------------
 
 // Επιστρέφει τα elements ενός set ως raw []string (IP ή CIDR), χωρίς parsing σε net.IP
 func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
-	raw, err := exec.Command("nft", "-j", "list", "set", family, tableName, setName).CombinedOutput()
+	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
+	raw := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -242,21 +236,17 @@ func dedupKeepOrder(in []string) []string {
 	return out
 }
 
-
-
-
-
 // Optional: remove all per-feed sets for a given sanitized feed key
 func (b *Backend) RemoveFeedByKey(feedKey string) error {
 	names := []string{
 		fmt.Sprintf("allow_ext_v4_hosts_%s", feedKey),
-		fmt.Sprintf("allow_ext_v4_nets_%s",  feedKey),
+		fmt.Sprintf("allow_ext_v4_nets_%s", feedKey),
 		fmt.Sprintf("allow_ext_v6_hosts_%s", feedKey),
-		fmt.Sprintf("allow_ext_v6_nets_%s",  feedKey),
+		fmt.Sprintf("allow_ext_v6_nets_%s", feedKey),
 		fmt.Sprintf("block_ext_v4_hosts_%s", feedKey),
-		fmt.Sprintf("block_ext_v4_nets_%s",  feedKey),
+		fmt.Sprintf("block_ext_v4_nets_%s", feedKey),
 		fmt.Sprintf("block_ext_v6_hosts_%s", feedKey),
-		fmt.Sprintf("block_ext_v6_nets_%s",  feedKey),
+		fmt.Sprintf("block_ext_v6_nets_%s", feedKey),
 	}
 	for _, n := range names {
 		_ = b.DeleteSetIfExists(n) // best-effort
@@ -275,7 +265,9 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 	re := regexp.MustCompile(`^(allow|block)_ext_(v4|v6)_(hosts|nets)_(.+)$`)
 	for _, name := range allNames {
 		m := re.FindStringSubmatch(name)
-		if m == nil { continue }
+		if m == nil {
+			continue
+		}
 		key := m[4] // suffix after last underscore(s)
 		if _, ok := allowed[key]; !ok {
 			_ = b.DeleteSetIfExists(name)
@@ -286,13 +278,13 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 	return b.RebuildExternalUnions()
 }
 
-
 func (b *Backend) DeleteSetIfExists(name string) error {
-    ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-    defer cancel()
-    args := []string{"delete", "set", family, tableName, name}
-    out, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
-    _ = out
-    _ = err // ignore; it's fine if the set wasn't there
-    return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	args := []string{"delete", "set", family, tableName, name}
+	res, err := runNFTCommand(ctx, args...)
+	out := []byte(res.Stdout + res.Stderr)
+	_ = out
+	_ = err // ignore; it's fine if the set wasn't there
+	return nil
 }

@@ -3,10 +3,10 @@ package nft
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -705,12 +705,12 @@ func (b *Backend) ensureCounter(name string) {
 // runCmdOutput executes an nft command and returns its combined output.
 // Calls nft directly (no shell wrapper) to avoid spawning two processes.
 func (b *Backend) runCmdOutput(cmd string) (string, error) {
-	args := strings.Fields("nft " + cmd)
-	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+	args := strings.Fields(cmd)
+	res, err := runNFTCommand(context.Background(), args...)
 	if err != nil {
-		return "", fmt.Errorf("nft failed: %v (out=%s)", err, out)
+		return "", fmt.Errorf("nft failed: %w", err)
 	}
-	return string(out), nil
+	return res.Stdout + res.Stderr, nil
 }
 
 // runCmdOutputWithTimeout executes an nft command and returns its combined output.
@@ -718,18 +718,21 @@ func (b *Backend) runCmdOutput(cmd string) (string, error) {
 // Calls nft directly (no shell wrapper) — eliminates the redundant sh -lc process
 // that was doubling the OS thread consumption per call.
 func (b *Backend) runCmdOutputWithTimeout(cmd string, timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	args := strings.Fields("nft " + cmd)
-	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	args := strings.Fields(cmd)
+	res, err := runNFTCommand(ctx, args...)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("nft timed out after %s", timeout)
 		}
-		return "", fmt.Errorf("nft failed: %v (out=%s)", err, out)
+		return "", fmt.Errorf("nft failed: %w", err)
 	}
-	return string(out), nil
+	return res.Stdout + res.Stderr, nil
 }
 
 // -----------------------------------------------------------------------------
