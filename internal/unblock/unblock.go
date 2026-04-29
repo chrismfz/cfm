@@ -193,7 +193,16 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 func binaryExists(name string) bool { _, err := exec.LookPath(name); return err == nil }
 
 func runCmd(ctx context.Context, r *Result, src Source, name string, args ...string) {
+	if !allowedBinary(name) {
+		r.mu.Lock()
+		r.Steps = append(r.Steps, Step{
+			Source: src, Action: ActionError, Err: "blocked binary", Detail: "binary not in allowlist",
+		})
+		r.mu.Unlock()
+		return
+	}
 	start := time.Now()
+	// #nosec G204 -- `name/args` are constrained by an internal allowlist + fixed callsites.
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	step := Step{Source: src, Action: ActionChecked, Dur: time.Since(start)}
@@ -213,7 +222,15 @@ func removeFromFile(cfgDir, filename, ip string) bool {
 	if cfgDir == "" {
 		return false
 	}
+	if !allowedConfigFile(filename) {
+		return false
+	}
 	path := filepath.Join(cfgDir, filename)
+	baseCfg := filepath.Clean(cfgDir)
+	cleanPath := filepath.Clean(path)
+	if cleanPath != baseCfg && !strings.HasPrefix(cleanPath, baseCfg+string(os.PathSeparator)) {
+		return false
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return false
@@ -332,5 +349,31 @@ func unitActive(unit string) bool {
 	if !binaryExists("systemctl") {
 		return true // best-effort: if no systemd, don't block
 	}
+	if !allowedSystemdUnit(unit) {
+		return false
+	}
+	// #nosec G204 -- unit is restricted to a static allowlist.
 	return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+func allowedBinary(name string) bool {
+	switch name {
+	case "csf", "fail2ban-client", "imunify360-agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedConfigFile(name string) bool {
+	return name == "cfm.deny"
+}
+
+func allowedSystemdUnit(unit string) bool {
+	switch unit {
+	case "csf", "fail2ban", "imunify360", "imunify360-agent", "imunify360.service", "imunify360-agent.service":
+		return true
+	default:
+		return false
+	}
 }
