@@ -507,7 +507,31 @@ func normalizeFrontendProcessToken(raw string) string {
 	if strings.HasPrefix(s, "nginx:") || strings.HasPrefix(s, "nginx ") || s == "nginx" {
 		return "nginx"
 	}
+	if strings.HasPrefix(s, "httpd") || strings.HasPrefix(s, "apache2") || strings.Contains(s, "apache") {
+		return "httpd"
+	}
+	if strings.HasPrefix(s, "lshttpd") {
+		return "lshttpd"
+	}
+	if strings.HasPrefix(s, "caddy") {
+		return "caddy"
+	}
 	return ""
+}
+
+func canonicalUpstreamServiceLabel(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "apache", "apache2", "httpd":
+		return "httpd"
+	case "nginx", "lshttpd", "caddy", "unknown", "mixed":
+		return n
+	default:
+		if n == "" {
+			return "unknown"
+		}
+		return "unknown"
+	}
 }
 
 func readProcComm(pid int) string {
@@ -635,8 +659,7 @@ func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
 
 func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 	listeners := probeFrontendListeners()
-	active, _, _ := probeSystemdUnit("nginx.service")
-	if sig, ok := detectNginxUpstreamFromSignals(listeners, active); ok {
+	if sig, ok := detectUpstreamFromPublicPortOwnership(listeners); ok {
 		return sig
 	}
 
@@ -646,10 +669,10 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 		markerPaths []string
 	}{
 		{name: "nginx", unit: "nginx.service", markerPaths: []string{"/etc/nginx/nginx.conf", "/etc/nginx/conf.d", "/etc/nginx/sites-enabled"}},
-		{name: "apache", unit: "apache2.service", markerPaths: []string{"/etc/apache2/apache2.conf", "/etc/apache2/sites-enabled", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf.d"}},
+		{name: "httpd", unit: "apache2.service", markerPaths: []string{"/etc/apache2/apache2.conf", "/etc/apache2/sites-enabled", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf.d"}},
 		{name: "caddy", unit: "caddy.service", markerPaths: []string{"/etc/caddy/Caddyfile"}},
 	}
-	best := runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "unknown"}
+	best := runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "no_public_listener"}
 	bestScore := 0
 	for _, c := range candidates {
 		score := 0
@@ -688,48 +711,46 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 	return best
 }
 
-func detectNginxUpstreamFromSignals(listeners frontendListenerSnapshot, serviceActive bool) (runtimeRoleSignal, bool) {
-	status := "inactive"
-	if serviceActive {
-		status = "active"
+func detectUpstreamFromPublicPortOwnership(listeners frontendListenerSnapshot) (runtimeRoleSignal, bool) {
+	owner80 := publicPortOwner(listeners, 80)
+	owner443 := publicPortOwner(listeners, 443)
+	if owner80 == "" && owner443 == "" {
+		return runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "no_public_listener"}, false
 	}
-
-	hasMasterWorker := false
-	for _, ln := range listeners.listeners {
-		if ln.name == "nginx" {
-			hasMasterWorker = true
-			break
+	if owner80 != "" && owner443 != "" {
+		if owner80 == owner443 {
+			return runtimeRoleSignal{service: owner80, status: "active", confidence: "high", reasonCode: "ports_80_443", listeningPort: []int{80, 443}}, true
 		}
+		return runtimeRoleSignal{service: "mixed", status: "active", confidence: "medium", reasonCode: fmt.Sprintf("mixed_80_443:%s_%s", owner80, owner443), listeningPort: []int{80, 443}}, true
 	}
-	if !hasMasterWorker {
-		for _, fl := range listeners.flows {
-			if fl.name == "nginx" {
-				hasMasterWorker = true
-				break
-			}
-		}
+	if owner80 != "" {
+		return runtimeRoleSignal{service: owner80, status: "active", confidence: "medium", reasonCode: "ports_80_only", listeningPort: []int{80}}, true
 	}
-
-	hasPublic := listeners.hasOwnerOnPorts([]string{"nginx"}, 80, 443)
-	hasDNATTier := listeners.hasOwnerOnPorts([]string{"nginx"}, 9080, 9043)
-	if !hasDNATTier {
-		hasDNATTier = listeners.hasOwnerOnFlows([]string{"nginx"}, 9080, 9043)
-	}
-	hasLoopbackPath := listeners.hasOwnerOnFlows([]string{"nginx"}, 80, 443) || listeners.hasOwnerOnFlows([]string{"nginx"}, 9080, 9043)
-
-	strong := hasMasterWorker && serviceActive && hasPublic && hasDNATTier
-	if strong {
-		_ = hasLoopbackPath // optional supporting signal
-		return runtimeRoleSignal{service: "nginx", status: status, confidence: "high", reasonCode: ":80_listener+service_active"}, true
-	}
-
-	if !hasMasterWorker && !serviceActive && !hasPublic && !hasDNATTier {
-		return runtimeRoleSignal{}, false
-	}
-
-	return runtimeRoleSignal{service: "unknown", status: "unknown", confidence: "low", reasonCode: "insufficient_upstream_signals"}, true
+	return runtimeRoleSignal{service: owner443, status: "active", confidence: "medium", reasonCode: "ports_443_only", listeningPort: []int{443}}, true
 }
 
+func publicPortOwner(listeners frontendListenerSnapshot, port int) string {
+	owners := map[string]struct{}{}
+	for _, e := range listeners.listeners {
+		if e.port == port {
+			owners[canonicalUpstreamServiceLabel(e.name)] = struct{}{}
+		}
+	}
+	for _, e := range listeners.flows {
+		if e.port == port {
+			owners[canonicalUpstreamServiceLabel(e.name)] = struct{}{}
+		}
+	}
+	if len(owners) == 1 {
+		for o := range owners {
+			return o
+		}
+	}
+	if len(owners) > 1 {
+		return "mixed"
+	}
+	return ""
+}
 func detectedPortsForService(listeners frontendListenerSnapshot, service string, ports ...int) []int {
 	aliases := frontendAliases(service)
 	if len(aliases) == 0 {

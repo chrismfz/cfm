@@ -105,29 +105,42 @@ func TestFrontendListenerSnapshotDebugForOwners(t *testing.T) {
 	}
 }
 
-func TestDetectNginxUpstreamFromSignals_StrongSignal(t *testing.T) {
-	listeners := frontendListenerSnapshot{
-		listeners: []listenerEntry{
-			{name: "nginx", port: 80},
-			{name: "nginx", port: 443},
-			{name: "nginx", port: 9080},
-			{name: "nginx", port: 9043},
-		},
-		flows: []listenerEntry{{name: "nginx", port: 9080, established: true}},
-	}
-	got, ok := detectNginxUpstreamFromSignals(listeners, true)
-	if !ok {
-		t.Fatalf("expected upstream decision")
-	}
-	if got.service != "nginx" {
-		t.Fatalf("expected nginx upstream, got %#v", got)
+func TestDetectUpstreamFromPublicPortOwnership_NginxBothPorts(t *testing.T) {
+	listeners := frontendListenerSnapshot{listeners: []listenerEntry{{name: "nginx", port: 80}, {name: "nginx", port: 443}}}
+	got, ok := detectUpstreamFromPublicPortOwnership(listeners)
+	if !ok || got.service != "nginx" || got.reasonCode != "ports_80_443" {
+		t.Fatalf("unexpected result: ok=%v got=%#v", ok, got)
 	}
 }
 
-func TestDetectNginxUpstreamFromSignals_NoStrongSignal(t *testing.T) {
+func TestDetectUpstreamFromPublicPortOwnership_HttpdBothPorts(t *testing.T) {
+	listeners := frontendListenerSnapshot{listeners: []listenerEntry{{name: "httpd", port: 80}, {name: "apache", port: 443}}}
+	got, ok := detectUpstreamFromPublicPortOwnership(listeners)
+	if !ok || got.service != "httpd" || got.reasonCode != "ports_80_443" {
+		t.Fatalf("unexpected result: ok=%v got=%#v", ok, got)
+	}
+}
+
+func TestDetectUpstreamFromPublicPortOwnership_LshttpdOnePort(t *testing.T) {
+	listeners := frontendListenerSnapshot{listeners: []listenerEntry{{name: "lshttpd", port: 443}}}
+	got, ok := detectUpstreamFromPublicPortOwnership(listeners)
+	if !ok || got.service != "lshttpd" || got.reasonCode != "ports_443_only" {
+		t.Fatalf("unexpected result: ok=%v got=%#v", ok, got)
+	}
+}
+
+func TestDetectUpstreamFromPublicPortOwnership_MixedOwners(t *testing.T) {
+	listeners := frontendListenerSnapshot{listeners: []listenerEntry{{name: "nginx", port: 80}, {name: "httpd", port: 443}}}
+	got, ok := detectUpstreamFromPublicPortOwnership(listeners)
+	if !ok || got.service != "mixed" || got.reasonCode != "mixed_80_443:nginx_httpd" {
+		t.Fatalf("unexpected result: ok=%v got=%#v", ok, got)
+	}
+}
+
+func TestDetectUpstreamFromPublicPortOwnership_NoListener(t *testing.T) {
 	listeners := frontendListenerSnapshot{}
-	_, ok := detectNginxUpstreamFromSignals(listeners, false)
+	_, ok := detectUpstreamFromPublicPortOwnership(listeners)
 	if ok {
-		t.Fatalf("expected no upstream decision when no strong signals exist")
+		t.Fatalf("expected no ownership decision")
 	}
 }
