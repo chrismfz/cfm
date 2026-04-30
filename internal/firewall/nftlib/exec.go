@@ -10,11 +10,45 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
 
 const nftlibCLITimeout = 10 * time.Second
+
+type portRange struct{ From, To int }
+
+func normalizePortRanges(prs []portRange) []portRange {
+	if len(prs) == 0 {
+		return prs
+	}
+	for _, r := range prs {
+		if r.From == 0 && r.To == 65535 {
+			return []portRange{{0, 65535}}
+		}
+	}
+	rs := make([]portRange, len(prs))
+	copy(rs, prs)
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i].From == rs[j].From {
+			return rs[i].To < rs[j].To
+		}
+		return rs[i].From < rs[j].From
+	})
+	out := []portRange{rs[0]}
+	for _, r := range rs[1:] {
+		cur := &out[len(out)-1]
+		if r.From <= cur.To+1 {
+			if r.To > cur.To {
+				cur.To = r.To
+			}
+		} else {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // nftExec runs `nft -f -` feeding expr via stdin (same mechanism as nft backend's nftExpr).
 // Errors from "already exists" are silently swallowed — callers that need to fail-fast
