@@ -17,6 +17,9 @@ import (
 // The local set handle cache is invalidated so the next nftlib operation
 // re-fetches handles from the kernel.
 func (b *Backend) EnsureBase() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddTable(table)
 
@@ -79,17 +82,16 @@ func (b *Backend) EnsureBase() error {
 		}
 	}
 
-	b.mu.Lock()
 	b.invalidateCache()
-	b.mu.Unlock()
 	return nil
 }
 
 // DropEverything removes all CFM-owned firewall state.
 func (b *Backend) DropEverything() error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	table, err := b.lookupTable()
-	b.mu.Unlock()
 	if err != nil {
 		if isNotFound(err) {
 			return nil
@@ -102,9 +104,7 @@ func (b *Backend) DropEverything() error {
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("nftlib: drop everything: %w", err)
 	}
-	b.mu.Lock()
 	b.invalidateCache()
-	b.mu.Unlock()
 	return nil
 }
 
@@ -136,6 +136,8 @@ func (b *Backend) ResetTable() error {
 func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
 	keyType, interval := setShape(v6, isNet)
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.conn.AddSet(&nftables.Set{
 		Table:      table,
 		Name:       name,
@@ -147,22 +149,20 @@ func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
 	if err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("nftlib: ensure dynamic set %q: %w", name, err)
 	}
-	b.mu.Lock()
 	delete(b.namedSets, name)
-	b.mu.Unlock()
 	return nil
 }
 
 // DeleteSetIfExists removes a named set, ignoring not-found errors.
 func (b *Backend) DeleteSetIfExists(name string) error {
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.conn.DelSet(&nftables.Set{Table: table, Name: name})
 	if err := b.conn.Flush(); err != nil && !isNotFound(err) {
 		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
 	}
-	b.mu.Lock()
 	delete(b.namedSets, name)
-	b.mu.Unlock()
 	return nil
 }
 
@@ -178,34 +178,32 @@ func setShape(v6 bool, isNet bool) (nftables.SetDatatype, bool) {
 // The delete and recreate are intentionally split into separate Flush() calls
 // to keep transaction boundaries explicit: first commit set removal, then commit
 // empty set creation. Missing table/set conditions are treated as no-ops.
+// b.mu is held for each transaction individually so the conn queue stays coherent.
 func (b *Backend) FlushSet(family, table, set string) error {
 	if !strings.EqualFold(family, "inet") || table != cfmTableName {
 		return fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
 	}
 
+	// Transaction 1: look up and delete the existing set.
 	b.mu.Lock()
 	ns, err := b.lookupSet(set)
-	b.mu.Unlock()
 	if err != nil {
+		b.mu.Unlock()
 		if isNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
 	}
-
-	// Transaction 1: delete the existing set.
 	b.conn.DelSet(ns)
 	if err := b.conn.Flush(); err != nil {
 		if isNotFound(err) {
-			b.mu.Lock()
 			b.invalidateCache()
 			b.mu.Unlock()
 			return nil
 		}
+		b.mu.Unlock()
 		return fmt.Errorf("nftlib: flush set %s %s %s (delete): %w", family, table, set, err)
 	}
-
-	b.mu.Lock()
 	delete(b.namedSets, set)
 	b.mu.Unlock()
 
@@ -217,24 +215,22 @@ func (b *Backend) FlushSet(family, table, set string) error {
 		HasTimeout: ns.HasTimeout,
 		Interval:   ns.Interval,
 	}
+	b.mu.Lock()
 	b.conn.AddSet(recreated, nil)
 	if err := b.conn.Flush(); err != nil {
 		if isNotFound(err) {
-			b.mu.Lock()
 			b.invalidateCache()
 			b.mu.Unlock()
 			return nil
 		}
 		if isAlreadyExists(err) {
-			b.mu.Lock()
 			delete(b.namedSets, set)
 			b.mu.Unlock()
 			return nil
 		}
+		b.mu.Unlock()
 		return fmt.Errorf("nftlib: flush set %s %s %s (recreate): %w", family, table, set, err)
 	}
-
-	b.mu.Lock()
 	delete(b.namedSets, set)
 	b.mu.Unlock()
 	return nil

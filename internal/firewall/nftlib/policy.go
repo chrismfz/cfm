@@ -184,6 +184,8 @@ func buildPortsAllowlistRules(cfg *config.PortsConfig) []portsPolicyRule {
 }
 
 func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules []portsPolicyRule) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for _, name := range chains {
 		ch, err := b.getChain(name)
 		if err != nil {
@@ -258,6 +260,9 @@ func (b *Backend) appendVerdictRulesBatched(chain string, kinds []expr.VerdictKi
 		batchSize = len(kinds)
 	}
 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	ch, err := b.getChain(chain)
 	if err != nil {
 		return err
@@ -294,6 +299,8 @@ func (b *Backend) getChain(name string) (*nftables.Chain, error) {
 
 func (b *Backend) ensureChain(name string) error {
 	t := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.conn.AddChain(&nftables.Chain{Table: t, Name: name})
 	if err := b.conn.Flush(); err != nil && !isAlreadyExists(err) {
 		return err
@@ -302,6 +309,8 @@ func (b *Backend) ensureChain(name string) error {
 }
 
 func (b *Backend) flushChain(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	ch, err := b.getChain(name)
 	if err != nil {
 		return err
