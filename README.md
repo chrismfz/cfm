@@ -157,9 +157,9 @@ The `cfm` group is required for the SSLCollector unix socket and token file to b
 
 ### nftlib-only deployment requirement clarity
 
-For `CFM_FIREWALL_ENGINE=nftlib`, structured inspection output is native (`ListTableJSON`, `ListSetJSON`) and does not shell out to `nft`.
+For `CFM_FIREWALL_ENGINE=nftlib`, all mutation and feed-management paths are zero-fork (pure netlink). Structured inspection (`ListTableJSON`, `ListSetJSON`) is also native.
 
-The CLI text inspection paths (`ListTableTextNoDNS`, `ListChainText`) still use the CLI backend adapter, so those specific commands require the `nft` binary to exist on the host.
+The two text-inspection diagnostic commands (`ListTableTextNoDNS`, `ListChainText`) shell out to the `nft` binary directly — no `nft` CLI backend adapter is involved, but the `nft` binary must be present on the host for those specific diagnostic paths.
 
 ---
 
@@ -194,7 +194,11 @@ packaging/
 internal/
   detectors/                # ssh/mysql/ftp/exim/dovecot/cpanel/webdetector/modsec/health/postfix...
   notify/                   # notifier engine (sendmail/smtp/slack), dedupe, templates
-  firewall/nft/             # nftables backend + hardening + ports policy
+  firewall/
+    nft/                    # exec-based nftables backend (default; CFM_FIREWALL_ENGINE=nft)
+    nftlib/                 # netlink backend, zero-fork (CFM_FIREWALL_ENGINE=nftlib)
+    autoblock/              # engine-neutral sliding-window auto-block evaluator
+    selfip/                 # engine-neutral local-interface IP resolver
   sslcollector/             # cert discovery + socket API for OpenResty/Angie
 ```
 
@@ -300,7 +304,10 @@ Ensures WebDetector sees a consistent TSV schema across stacks.
 ## 5. Key Features
 
 ### 🔒 Firewall Core
-- nftables backend (auto-created table/chains)
+- Two independent firewall backends, selectable via `CFM_FIREWALL_ENGINE`:
+  - `nft` (default) — exec-based nftables backend; no extra Go dependencies
+  - `nftlib` — zero-fork netlink backend (`github.com/google/nftables`); eliminates fork-storm risk on large feed updates; set `CFM_FIREWALL_ENGINE=nftlib` to enable
+- Auto-created `inet cfm` table/chains (idempotent on every daemon start)
 - Hook priority control (`NFT_INPUT_PRIORITY`) to run before/after other stacks (CSF/Imunify)
 - ALLOW/BLOCK sets (v4/v6) + dynamic allow via hostname/DynDNS resolution
 - Port policy from config (`TCP_IN`, `UDP_IN`, etc.)

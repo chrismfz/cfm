@@ -1,6 +1,6 @@
 # CFM — Firewall Backend Abstraction Roadmap
 
-**Status:** Phase 2 complete; Phase 2.5 in progress — `nftlib` engine operational, ~10 cli delegates remain (3 diagnostics, 5 wiring pass-throughs, 2 text inspection)  
+**Status:** Phase 2.5 complete — `nftlib` is a fully independent zero-fork backend; `cli *nft.Backend` field removed; `nft` binary required only for `ListTableTextNoDNS`/`ListChainText` diagnostic text paths (§6e Option 1)  
 **Scope:** `internal/firewall/` — interface, nft implementation, future backends  
 **Goal:** Decouple *what CFM tells the firewall to do* from *how a specific firewall does it*
 
@@ -773,10 +773,11 @@ func getBackend() firewall.Backend {
 > **Pre-requisite:** Phase 2 complete.  
 > **Goal:** Remove the embedded `*nft.Backend` from `nftlib.Backend` so nftlib is
 > a self-contained zero-fork implementation with no subprocess dependency.  
-> **Status:** Mostly complete. 27 delegated methods at Phase 2 entry; ~10 remain.
+> **Status:** ✅ COMPLETE. `cli *nft.Backend` field removed; `cfm/internal/firewall/nft` import removed from all nftlib files. Two engine-neutral helper packages extracted (`autoblock`, `selfip`).
 
-The `nftlib.Backend` still embeds `*nft.Backend` for the methods below. Deleting
-the `nft` import from `nftlib` requires resolving the remaining 10 delegations.
+All 27 methods are now either native (netlink) or invoke the `nft` binary directly
+(two text-inspection diagnostic methods per §6e Option 1 decision). The embedded
+`*nft.Backend` field is gone. §6a summarises the final state.
 
 ---
 
@@ -786,13 +787,13 @@ the `nft` import from `nftlib` requires resolving the remaining 10 delegations.
 |---|---|---|---|
 | ~~Table lifecycle~~ | ~~`EnsureBase`, `DropEverything`, `ResetTable`, `EnsureSetDynamic`, `DeleteSetIfExists`, `FlushSet`~~ | ~~6~~ | ✅ All native (PRs #475–#488) |
 | Policy mutators | ~~`ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve`~~ | ~~7~~ | ✅ All native (PRs #471, #483–#485) |
-| Policy diagnostics | `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner` | 3 | ☐ Intentional delegates (diagnostic/passive — no fork-storm risk) |
+| Policy diagnostics | `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner` | 3 | ✅ Native nftlib (`telemetry.go`) — `conn.GetObjects` / `conn.GetSetElements` |
 | ~~DNAT / challenge redirect~~ | ~~`SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`~~ | ~~7~~ | ✅ All native (PRs #472, #491–#492) |
 | ~~JSON output~~ | ~~`ListTableJSON`, `ListSetJSON`~~ | ~~2~~ | ✅ Native (PR #493) |
-| Text inspection | `ListTableTextNoDNS`, `ListChainText` | 2 | ☐ Intentional cli delegates (§6e Option 1 decision) |
-| Wiring pass-throughs | `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger` | 5 | ☐ Must forward to cli while cli is embedded; removed with §6f |
+| Text inspection | `ListTableTextNoDNS`, `ListChainText` | 2 | ✅ Direct `nft` subprocess (§6e Option 1) — no cli adapter; `nft` binary still required for these two paths |
+| Wiring pass-throughs | `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger` | 5 | ✅ Native (`wiring.go` reads own fields; cli field removed) |
 
-**Remaining: 10 delegations** — 8 intentional (documented decisions), 2 blocked on §6f cleanup.
+**Remaining: 0 delegations.** All methods are native netlink or direct subprocess (text inspection only). Phase 2.5 complete.
 
 ---
 
@@ -818,9 +819,10 @@ the `nft` import from `nftlib` requires resolving the remaining 10 delegations.
 `ApplyOutboundObserve` are all implemented natively via `expr.*` chains in
 `internal/firewall/nftlib/policy.go` (PRs #471, #483–#485).
 
-**Intentional cli delegates (diagnostic-only, no fork-storm risk):**
-- `DumpFloodCounters`, `DumpThrottledIPs` — read counter/quota objects; diagnostic paths, rare calls.
-- `LoadPortScanner` — attaches BPF/nflog collector; not rule synthesis; complex wiring outside the hot path.
+**Policy diagnostics — native nftlib (`telemetry.go`):**
+- `DumpFloodCounters` — reads counter objects via `conn.GetObjects`; delta-logs packet/byte counts.
+- `DumpThrottledIPs` — reads throttle sets via `conn.GetSetElements`; feeds `autoblock.Evaluator`.
+- `LoadPortScanner` — reads concat portscan sets via `conn.GetSetElements` + `decodeConcatIPPort`; feeds `autoblock.Evaluator`.
 
 ---
 
@@ -860,18 +862,16 @@ Options:
    This is the cleanest long-term approach but requires changing the `Backend`
    interface.
 
-**Architecture decision (Phase 2.5):** **Option 1** is adopted for Phase 2.5
-completion: keep `ListTableJSON`, `ListSetJSON`, `ListTableTextNoDNS`, and
-`ListChainText` as CLI delegates for diagnostics only, and explicitly document
-that `nft` binary availability remains a runtime prerequisite for these
-inspection paths.
+**Architecture decision (Phase 2.5):** **Option 1** is adopted and implemented.
+`ListTableJSON` and `ListSetJSON` are native (netlink). `ListTableTextNoDNS` and
+`ListChainText` call the `nft` binary directly via `exec.CommandContext` (5 s timeout)
+in `inspect.go` — no cli adapter, no delegation to `nft.Backend`.
 
-**Phase 2.5 completion criterion for this decision:**
-- `CFM_FIREWALL_ENGINE=nftlib` removes CLI delegation from policy/sets/lifecycle/
-  challenge mutation paths, while the four diagnostic inspection methods above
-  continue to shell out to `nft` by design.
-- Operator docs must state that diagnostic commands requiring these methods need
-  a working `nft` binary in `PATH`.
+**Phase 2.5 completion status:**
+- ✅ `CFM_FIREWALL_ENGINE=nftlib` has zero CLI delegation on all mutation, feed, and
+  lifecycle paths.
+- `nft` binary is required only for `ListTableTextNoDNS` / `ListChainText` (§6e Option 1).
+- Operator docs state: diagnostic text commands need `nft` in `PATH`.
 
 If a future phase requires zero-CLI operation for diagnostics as well, open a new
 ADR/update and migrate to option 2 (structured netlink output + internal
@@ -881,17 +881,32 @@ formatter).
 
 ### 6f. Removing the embedded cli field
 
-Once groups 6b, 6c, and 6d are fully native (or 6e is resolved via option 1/3),
-the `cli *nft.Backend` field in `nftlib.Backend` can be removed:
+**✅ DONE.** All steps completed.
 
-1. Delete the `cli` field from `internal/firewall/nftlib/backend.go`.
-2. Remove `nft.New()` call from `nftlib.New()`.
-3. Remove `"cfm/internal/firewall/nft"` import from all `nftlib/*.go` files.
-4. Run `go build ./...` — compile-time assertion catches any missed delegation.
-5. The `nft` package itself remains (it is still the production-default backend
-   behind `CFM_FIREWALL_ENGINE=nft`). Only nftlib stops importing it.
+1. ✅ Deleted the `cli` field from `internal/firewall/nftlib/backend.go`.
+2. ✅ Removed `nft.New()` call from `nftlib.New()`.
+3. ✅ Removed `"cfm/internal/firewall/nft"` import from all `nftlib/*.go` files.
+4. ✅ `go build ./...` passes — compile-time assertion `var _ firewall.Backend = (*Backend)(nil)` confirms zero missed delegations.
+5. The `nft` package itself remains (production-default backend behind `CFM_FIREWALL_ENGINE=nft`). Only nftlib stops importing it.
 
-After this, `CFM_FIREWALL_ENGINE=nftlib` requires zero `nft` binary presence.
+`CFM_FIREWALL_ENGINE=nftlib` requires zero `nft` binary presence for all mutation and
+feed-management paths. The `nft` binary is still required for the two diagnostic
+text-inspection paths (`ListTableTextNoDNS`, `ListChainText`) which shell out to it
+directly per §6e Option 1.
+
+---
+
+### 6g. Engine-neutral helper packages
+
+Two pure-stdlib packages were extracted during Phase 2.5 so both `nft.Backend`
+and `nftlib.Backend` can share logic without a cross-engine import:
+
+| Package | Path | Purpose |
+|---|---|---|
+| `autoblock` | `internal/firewall/autoblock/` | Sliding-window auto-block evaluator. Accumulates per-IP hit timestamps, prunes the window, and calls a `BlockAction` callback when threshold is exceeded. Used by both telemetry/DumpThrottledIPs and LoadPortScanner paths. |
+| `selfip` | `internal/firewall/selfip/` | Lazy-initialised snapshot of local interface IPs. `Contains(s)` checks loopback/link-local via stdlib then a map lookup. `Refresh()` re-enumerates `net.Interfaces()`. `LocalIPs()` returns a snapshot for nft-set writes. |
+
+Neither package imports any firewall engine — they only depend on stdlib.
 
 ---
 
@@ -1073,9 +1088,14 @@ Any implementation of `firewall.Backend` must follow these rules:
 
 | Task | File | Status |
 |---|---|---|
-| Fresh inventory scan (`2026-04-30`): `b.cli.` callsites in nftlib | `internal/firewall/nftlib/{inspect,policy,wiring}.go` | ✅ 10 callsites (2 inspect, 3 policy diagnostics, 5 wiring/reporting) |
-| Fresh inventory scan (`2026-04-30`): `"cfm/internal/firewall/nft"` imports in nftlib | `internal/firewall/nftlib/{backend,feeds}.go` | ✅ 2 files |
+| Fresh inventory scan (`2026-04-30`): `b.cli.` callsites in nftlib | `internal/firewall/nftlib/{inspect,policy,wiring}.go` | ✅ 10 callsites found (2 inspect, 3 policy diagnostics, 5 wiring/reporting) |
+| Fresh inventory scan (`2026-04-30`): `"cfm/internal/firewall/nft"` imports in nftlib | `internal/firewall/nftlib/{backend,feeds}.go` | ✅ 2 files found |
 | Method classification sweep (`2026-04-30`): every `firewall.Backend` method mapped to `native` / `delegated` / `mixed` with refs | `internal/firewall/nftlib/*.go` | ✅ (see checklist below) |
+| Engine-neutral `autoblock.Evaluator` (sliding-window auto-block; both engines share) | `internal/firewall/autoblock/eval.go` | ✅ |
+| Engine-neutral `selfip.Resolver` (local interface enumeration; both engines share) | `internal/firewall/selfip/resolver.go` | ✅ |
+| Native `DumpFloodCounters` / `DumpThrottledIPs` / `LoadPortScanner` | `internal/firewall/nftlib/telemetry.go` | ✅ |
+| Native wiring: `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger` (cli field removed) | `internal/firewall/nftlib/wiring.go` | ✅ |
+| Text inspection via direct subprocess — no cli adapter: `ListTableTextNoDNS`, `ListChainText` | `internal/firewall/nftlib/inspect.go` | ✅ |
 
 #### Backend method truth table (`internal/firewall/nftlib/*.go`, audited 2026-04-30)
 
@@ -1086,16 +1106,15 @@ Any implementation of `firewall.Backend` must follow these rules:
   - Primary policy + DNAT paths: `ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve`, `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`. (`policy.go`, `challenge.go`)
   - JSON/state listing: `ListBlocks`, `ListAllows`, `ListTableJSON`, `ListSetJSON`. (`inspect.go`)
 
-- **delegated**
-  - Wiring/reporting-only pass-throughs to `b.cli`: `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger`, `ReportBlock`. (`wiring.go`)
-  - Text diagnostics pass-throughs: `ListTableTextNoDNS`, `ListChainText`. (`inspect.go`)
-  - Policy diagnostics pass-throughs: `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner`. (`policy.go`)
+- **subprocess (direct `nft` exec, §6e Option 1 — no cli adapter)**
+  - `ListTableTextNoDNS`, `ListChainText` — `exec.CommandContext("nft", ...)` with 5 s timeout in `inspect.go`.
 
-- **mixed**
-  - File-level ownership: `inspect.go` (native + delegated), `policy.go` (native + delegated), `wiring.go` (delegated surface for shared services).
+- **delegated to `b.cli`** — none; `cli *nft.Backend` field removed.
 
-| Remove `cli *nft.Backend` field and `nft.New()` from `nftlib.New()` | `internal/firewall/nftlib/backend.go` | ☐ |
-| Remove `cfm/internal/firewall/nft` import from all `nftlib/*.go` | `internal/firewall/nftlib/` | ☐ |
+- **mixed** — none; all files are either fully native or the two subprocess paths above.
+
+| Remove `cli *nft.Backend` field and `nft.New()` from `nftlib.New()` | `internal/firewall/nftlib/backend.go` | ✅ |
+| Remove `cfm/internal/firewall/nft` import from all `nftlib/*.go` | `internal/firewall/nftlib/` | ✅ |
 | Parity validation: run both engines on virgo, diff `nft list table inet cfm` output | virgo testlab | ☐ |
 
 ### Phase 3 — BSD backend (firewall TBD)
