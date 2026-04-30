@@ -101,6 +101,11 @@ type Backend struct {
 
 	// selfResolver answers isSelfIP queries via net.Interfaces (no subprocess).
 	selfResolver *selfip.Resolver
+
+	// flood rebuild deduplication (same semantics as nft backend).
+	lastFloodHash    uint64
+	lastFloodRebuild time.Time
+
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.

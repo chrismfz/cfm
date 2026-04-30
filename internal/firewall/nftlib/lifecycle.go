@@ -5,6 +5,7 @@ package nftlib
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"syscall"
 	"time"
@@ -18,13 +19,19 @@ import (
 // re-fetches handles from the kernel.
 func (b *Backend) EnsureBase() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+
 
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddTable(table)
 
-	inputPrio := nftables.ChainPriority(-50)
+prio := -50
+	if b.cfg != nil && b.cfg.NFT.InputPriority != 0 {
+		prio = b.cfg.NFT.InputPriority
+	}
+	inputPrio := nftables.ChainPriority(prio)
+
 	acceptPolicy := nftables.ChainPolicyAccept
+
 	b.conn.AddChain(&nftables.Chain{
 		Table:    table,
 		Name:     "input",
@@ -37,7 +44,7 @@ func (b *Backend) EnsureBase() error {
 	dstNatPrio := *nftables.ChainPriorityNATDest
 	b.conn.AddChain(&nftables.Chain{
 		Table:    table,
-		Name:     "preraw",
+		Name:     "prerouting",
 		Type:     nftables.ChainTypeNAT,
 		Hooknum:  nftables.ChainHookPrerouting,
 		Priority: &dstNatPrio,
@@ -64,6 +71,37 @@ func (b *Backend) EnsureBase() error {
 		{name: setIgnoreV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
 		{name: setChalV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
 		{name: setChalV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
+
+		// self (loopback + local IPs) — interval set for CIDR entries
+		{name: "self_v4", keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: "self_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		// dyn allow (DynDNS)
+		{name: "allow_dyn_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "allow_dyn_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		// debug API (restricted to debug port only)
+		{name: "debug_api_v4", keyType: nftables.TypeIPAddr},
+		{name: "debug_api_v6", keyType: nftables.TypeIP6Addr},
+		// external allow/block unions (populated by feeds)
+		{name: "allow_ext_v4_hosts", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "allow_ext_v6_hosts", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "allow_ext_v4_nets", keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: "allow_ext_v6_nets", keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		{name: "block_ext_v4_hosts", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "block_ext_v6_hosts", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "block_ext_v4_nets", keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
+		{name: "block_ext_v6_nets", keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		// throttling sets
+		{name: "th_syn_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "th_syn_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "th_pps_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "th_pps_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "th_pf_tcp_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "th_pf_tcp_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "th_pf_udp_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "th_pf_udp_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+		{name: "throttled_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
+		{name: "throttled_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
+
 	} {
 		b.conn.AddSet(&nftables.Set{
 			Table:      table,
@@ -78,13 +116,142 @@ func (b *Backend) EnsureBase() error {
 		if isAlreadyExists(err) {
 			// preserve idempotency for repeated EnsureBase calls
 		} else {
+			b.mu.Unlock()
 			return fmt.Errorf("nftlib: ensure base: %w", err)
 		}
 	}
 
 	b.invalidateCache()
+
+	b.mu.Unlock()
+
+	// Populate self_v4 / self_v6 with loopback + local interface IPs.
+	b.refreshSelfSets()
+
+	// Install base input chain rules (idempotent).
+	b.applyBaseInputRules()
+
 	return nil
 }
+
+
+func (b *Backend) refreshSelfSets() {
+	_ = b.nftExec("flush set inet cfm self_v4")
+	_ = b.nftExec("flush set inet cfm self_v6")
+	_ = b.nftExec("add element inet cfm self_v4 { 127.0.0.0/8 }")
+	_ = b.nftExec("add element inet cfm self_v6 { ::1 }")
+	_ = b.nftExec("add element inet cfm self_v6 { fe80::/10 }")
+
+	b.selfResolver.Refresh()
+	for _, s := range b.selfResolver.LocalIPs() {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			_ = b.nftExec("add element inet cfm self_v4 { " + s + " }")
+		} else {
+			_ = b.nftExec("add element inet cfm self_v6 { " + s + " }")
+		}
+	}
+}
+
+// applyBaseInputRules installs all permanent set-matching rules in the input chain.
+// Each rule is added only if it is not already present (idempotent).
+func (b *Backend) applyBaseInputRules() {
+	addRule := func(expr string) {
+		if !b.ruleExistsCLI("input", expr) {
+			_ = b.nftExec("add rule inet cfm input " + expr)
+		}
+	}
+	insertRule := func(expr string) {
+		if !b.ruleExistsCLI("input", expr) {
+			_ = b.nftExec("insert rule inet cfm input position 0 " + expr)
+		}
+	}
+
+	// Early rules inserted at position 0 in reverse order so the final
+	// top-down order matches the nft backend's EnsureBase:
+	//   1 iif lo accept
+	//   2 ip saddr @self_v4 accept
+	//   3 ip6 saddr @self_v6 accept
+	//   4-13 allow sets (manual, dyn, ext, nets)
+	//   14-21 block sets (manual, ext, nets)
+	//   (optional) ICMP → jump flood
+
+	icmpEnabled := b.cfg != nil && b.cfg.Hardening.ICMPRate > 0
+
+	early := []string{
+		`iif "lo" accept`,
+		`ip saddr @self_v4 accept`,
+		`ip6 saddr @self_v6 accept`,
+		`ip saddr @allow_v4 accept`,
+		`ip6 saddr @allow_v6 accept`,
+		`ip saddr @allow_dyn_v4 accept`,
+		`ip6 saddr @allow_dyn_v6 accept`,
+		`ip saddr @allow_ext_v4_hosts accept`,
+		`ip6 saddr @allow_ext_v6_hosts accept`,
+		`ip saddr @allow_ext_v4_nets accept`,
+		`ip6 saddr @allow_ext_v6_nets accept`,
+		`ip saddr @allow_v4_nets accept`,
+		`ip6 saddr @allow_v6_nets accept`,
+		`ip saddr @block_v4 drop`,
+		`ip6 saddr @block_v6 drop`,
+		`ip saddr @block_ext_v4_hosts drop`,
+		`ip6 saddr @block_ext_v6_hosts drop`,
+		`ip saddr @block_ext_v4_nets drop`,
+		`ip6 saddr @block_ext_v6_nets drop`,
+		`ip saddr @block_v4_nets drop`,
+		`ip6 saddr @block_v6_nets drop`,
+	}
+	if icmpEnabled {
+		early = append(early,
+			`ip protocol icmp icmp type echo-request jump flood`,
+			`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
+		)
+	}
+
+	// Insert in reverse so the first item ends up at the top.
+	for i := len(early) - 1; i >= 0; i-- {
+		insertRule(early[i])
+	}
+
+	// Established/related drops for blocked sets (before the general est/rel accept).
+	addRule(`ct state established,related ip saddr @block_v4 drop`)
+	addRule(`ct state established,related ip6 saddr @block_v6 drop`)
+	addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`)
+	addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`)
+	addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`)
+	addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`)
+	addRule(`ct state established,related ip saddr @block_v4_nets drop`)
+	addRule(`ct state established,related ip6 saddr @block_v6_nets drop`)
+	addRule(`ct state established,related accept`)
+
+	// Duplicate allow/block rules appended (nft backend adds them both early and late).
+	addRule(`ip saddr @allow_v4 accept`)
+	addRule(`ip6 saddr @allow_v6 accept`)
+	addRule(`ip saddr @allow_dyn_v4 accept`)
+	addRule(`ip6 saddr @allow_dyn_v6 accept`)
+	addRule(`ip saddr @allow_ext_v4_hosts accept`)
+	addRule(`ip6 saddr @allow_ext_v6_hosts accept`)
+	addRule(`ip saddr @allow_ext_v4_nets accept`)
+	addRule(`ip6 saddr @allow_ext_v6_nets accept`)
+	addRule(`ip saddr @block_v4 drop`)
+	addRule(`ip6 saddr @block_v6 drop`)
+	addRule(`ip saddr @block_ext_v4_hosts drop`)
+	addRule(`ip6 saddr @block_ext_v6_hosts drop`)
+	addRule(`ip saddr @block_ext_v4_nets drop`)
+	addRule(`ip6 saddr @block_ext_v6_nets drop`)
+	addRule(`ip saddr @block_v4_nets drop`)
+	addRule(`ip6 saddr @block_v6_nets drop`)
+
+	// jump flood at the end of the base layer (before ports policy rules).
+	if !b.ruleExistsCLI("input", "jump flood") {
+		_ = b.nftExec("add rule inet cfm input jump flood")
+	}
+}
+
+
 
 // DropEverything removes all CFM-owned firewall state.
 func (b *Backend) DropEverything() error {
@@ -127,7 +294,7 @@ func (b *Backend) ResetTable() error {
 	}
 	ensureDur := time.Since(ensureStart)
 
-	logging.Logf("[nftlib] reset table timing after-native: drop=%s ensure=%s total=%s", dropDur, ensureDur, time.Since(start))
+logging.Logf("[nftlib] reset table timing: drop=%s ensure=%s total=%s", dropDur, ensureDur, time.Since(start))
 	return nil
 }
 
