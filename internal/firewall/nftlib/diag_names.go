@@ -6,11 +6,11 @@ const (
 	throttledSetV6Name = "throttled_v6"
 	scannerSetV4Name   = "port_scanners_v4"
 	scannerSetV6Name   = "port_scanners_v6"
-	blockSetName       = "block_ips"
-	allowSetName       = "allow_ips"
-	ignoreSetName      = "ignore_ips"
-	challengeSetName   = "challenge_ips"
-	feedSetName        = "feed_ext"
+	blockSetName       = "block_v4"
+	allowSetName       = "allow_v4"
+	ignoreSetName      = "ignore_v4"
+	challengeSetName   = "challenge_v4"
+	feedSetName        = "block_ext_v4_hosts"
 )
 
 func (b *Backend) FloodChainName() string { return floodChainName }

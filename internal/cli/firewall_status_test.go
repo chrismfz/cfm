@@ -23,11 +23,18 @@ func (m mockDiagBE) ListTableJSON(family, table string) ([]byte, error) {
 }
 
 func TestCollectFirewallStatusHealthy(t *testing.T) {
-	be := mockDiagBE{dnat:true, sets: map[string][]string{"block_ips":{"1.1.1.1"},"allow_ips":{},"ignore_ips":{},"challenge_ips":{"2.2.2.2"},"feed_ext":{}}}
+	be := mockDiagBE{dnat: true, sets: map[string][]string{
+		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
+		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
+		"allow_dyn_v4": {}, "allow_dyn_v6": {},
+		"challenge_v4": {}, "challenge_v6": {},
+		"throttled_v4": {}, "throttled_v6": {}, "port_scanners_v4": {}, "port_scanners_v6": {},
+	}}
 	r := collectFirewallStatus(be, "", "nft", "default", false)
 	if r.Status != "ok" { t.Fatalf("expected ok got %s", r.Status) }
 	if !r.Features["dnat"] { t.Fatalf("expected dnat enabled") }
-	if r.SetSizes["block_ips"] != 1 { t.Fatalf("expected block size 1") }
+	if r.SetSizes["block_v4"] != 0 { t.Fatalf("expected block_v4 size 0") }
 }
 
 func TestCollectFirewallStatusDegraded(t *testing.T) {
