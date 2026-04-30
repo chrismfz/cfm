@@ -4,6 +4,7 @@ package nftlib
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"cfm/internal/config"
@@ -42,13 +43,36 @@ func TestBuildPortsAllowlistRules_AllDirectionsProtocols(t *testing.T) {
 	}
 	got := buildPortsAllowlistRules(cfg)
 	want := []portsPolicyRule{
-		{Chain: "input", Protocol: "tcp", PortFrom: 80, PortTo: 80, Verdict: expr.VerdictAccept},
-		{Chain: "input", Protocol: "udp", PortFrom: 53, PortTo: 53, Verdict: expr.VerdictAccept},
-		{Chain: "output", Protocol: "tcp", PortFrom: 443, PortTo: 443, Verdict: expr.VerdictAccept},
-		{Chain: "output", Protocol: "udp", PortFrom: 123, PortTo: 123, Verdict: expr.VerdictAccept},
+		{Chain: "input", Protocol: "tcp", PortFrom: 80, PortTo: 80, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 80-80"}, ExpectedMatch: true},
+		{Chain: "input", Protocol: "udp", PortFrom: 53, PortTo: 53, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "udp dport 53-53"}, ExpectedMatch: true},
+		{Chain: "output", Protocol: "tcp", PortFrom: 443, PortTo: 443, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 443-443"}, ExpectedMatch: true},
+		{Chain: "output", Protocol: "udp", PortFrom: 123, PortTo: 123, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "udp dport 123-123"}, ExpectedMatch: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestValidateRuleBeforeCommit_RejectsAcceptWithoutExpectedMatch(t *testing.T) {
+	r := portsPolicyRule{Chain: "input", Protocol: "tcp", Verdict: expr.VerdictAccept, ExpectedMatch: true}
+	if err := validateRuleBeforeCommit(r); err == nil {
+		t.Fatalf("expected validation error")
+	}
+}
+
+func TestRenderExpressionsParity_NFTVsNFTLibFixture(t *testing.T) {
+	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 443, To: 443}}, UDPIn: []config.PortRange{{From: 53, To: 53}}}
+	rules := buildPortsAllowlistRules(cfg)
+	if len(rules) == 0 {
+		t.Fatalf("expected rules")
+	}
+	got := renderPortsPolicyRule(rules[0])
+	// nft backend equivalent expression shape
+	wantContains := []string{"ct state new", "dport", "verdict=accept"}
+	for _, s := range wantContains {
+		if !strings.Contains(strings.ToLower(got), strings.ToLower(s)) {
+			t.Fatalf("rendered rule missing key expression %q in %q", s, got)
+		}
 	}
 }
 
