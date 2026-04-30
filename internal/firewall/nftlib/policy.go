@@ -70,6 +70,14 @@ type portsPolicyRule struct {
 	ExpectedMatch bool
 }
 
+// hardeningRuleSnapshot is a compatibility snapshot used by parity tests to
+// validate logical rule intent without relying on nft expression internals.
+type hardeningRuleSnapshot struct {
+	Chain   string
+	Path    string
+	Verdict expr.VerdictKind
+}
+
 func cfgPortRanges(prs []config.PortRange) []portRange {
 	out := make([]portRange, len(prs))
 	for i, p := range prs {
@@ -245,6 +253,78 @@ func perIPRateLimitCmds(rate, burst, ttl int, mode string) []string {
 			),
 		}
 	}
+}
+
+// buildFloodVerdictPlan is a compatibility helper retained for parity tests.
+// It returns the planned verdict kind for each flood-path rule in order.
+func buildFloodVerdictPlan(c *config.Config) ([]expr.VerdictKind, error) {
+	if c == nil {
+		return nil, nil
+	}
+	snaps := buildHardeningRuleSnapshots(c)
+	out := make([]expr.VerdictKind, 0, len(snaps)+len(c.Connlimit.Rules)+len(c.PortFlood.Rules))
+	for _, s := range snaps {
+		out = append(out, s.Verdict)
+	}
+	for _, r := range c.Connlimit.Rules {
+		proto := strings.ToLower(strings.TrimSpace(r.Proto))
+		if proto != "tcp" && proto != "udp" {
+			return nil, fmt.Errorf("unknown proto %q", r.Proto)
+		}
+		out = append(out, expr.VerdictDrop)
+	}
+	for range c.PortFlood.Rules {
+		out = append(out, expr.VerdictDrop)
+	}
+	return out, nil
+}
+
+// buildHardeningRuleSnapshots is a compatibility helper retained for parity tests.
+func buildHardeningRuleSnapshots(c *config.Config) []hardeningRuleSnapshot {
+	if c == nil {
+		return nil
+	}
+	out := make([]hardeningRuleSnapshot, 0, 8)
+	if c.Hardening.BlockBadTCPFlags {
+		out = append(out,
+			hardeningRuleSnapshot{Chain: "flood", Path: "tcp.flags.syn_fin", Verdict: expr.VerdictDrop},
+			hardeningRuleSnapshot{Chain: "flood", Path: "tcp.flags.syn_rst", Verdict: expr.VerdictDrop},
+			hardeningRuleSnapshot{Chain: "flood", Path: "tcp.flags.xmas", Verdict: expr.VerdictDrop},
+			hardeningRuleSnapshot{Chain: "flood", Path: "tcp.flags.null", Verdict: expr.VerdictDrop},
+		)
+	}
+	if c.Hardening.NewRate > 0 {
+		out = append(out,
+			hardeningRuleSnapshot{Chain: "flood", Path: "ct.new.no_icmp.v4_over_rate", Verdict: expr.VerdictDrop},
+			hardeningRuleSnapshot{Chain: "flood", Path: "ct.new.no_icmp.v6_over_rate", Verdict: expr.VerdictDrop},
+		)
+	}
+	if c.Hardening.ICMPRate > 0 {
+		out = append(out,
+			hardeningRuleSnapshot{Chain: "flood", Path: "icmp.echo.v4_over_rate", Verdict: expr.VerdictDrop},
+			hardeningRuleSnapshot{Chain: "flood", Path: "icmp.echo.v6_over_rate", Verdict: expr.VerdictDrop},
+		)
+	}
+	return out
+}
+
+// buildPortsPolicySnapshots is a compatibility helper retained for parity tests.
+func buildPortsPolicySnapshots(cfg *config.PortsConfig) []hardeningRuleSnapshot {
+	rules := buildPortsAllowlistRules(cfg)
+	out := []hardeningRuleSnapshot{
+		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
+		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
+		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
+		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
+	}
+	for _, r := range rules {
+		out = append(out, hardeningRuleSnapshot{
+			Chain:   r.Chain,
+			Path:    fmt.Sprintf("ct.new.%s.accept", r.Protocol),
+			Verdict: r.Verdict,
+		})
+	}
+	return out
 }
 
 // ── ApplyHardeningRules ───────────────────────────────────────────────────────
