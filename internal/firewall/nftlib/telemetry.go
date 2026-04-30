@@ -212,7 +212,7 @@ func (b *Backend) getSetIPStrings(setName string) []string {
 			continue
 		}
 		s := ip.String()
-		if b.cli.IsSelfIP(s) {
+		if b.selfResolver.Contains(s) {
 			continue
 		}
 		ips = append(ips, s)
@@ -361,10 +361,12 @@ func (b *Backend) appendToDenyFile(ip, reason string) error {
 	if strings.TrimSpace(b.cfgDir) == "" {
 		return nil
 	}
-	if err := os.MkdirAll(b.cfgDir, 0750); err != nil {
+	dir := filepath.Clean(b.cfgDir)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
-	fp := filepath.Join(b.cfgDir, "cfm.deny")
+	fp := filepath.Join(dir, "cfm.deny")
+	// #nosec G304 -- path is operator-supplied config directory, not user input
 	f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -542,7 +544,7 @@ func (b *Backend) loadPortScannerOnce() {
 
 	keep4 := make([]string, 0, len(v4))
 	for _, s := range v4 {
-		if !b.cli.IsSelfIP(s) {
+		if !b.selfResolver.Contains(s) {
 			keep4 = append(keep4, s)
 		} else {
 			delete(b.ab.Reasons, s)
@@ -551,7 +553,7 @@ func (b *Backend) loadPortScannerOnce() {
 	v4 = keep4
 	keep6 := make([]string, 0, len(v6))
 	for _, s := range v6 {
-		if !b.cli.IsSelfIP(s) {
+		if !b.selfResolver.Contains(s) {
 			keep6 = append(keep6, s)
 		} else {
 			delete(b.ab.Reasons, s)
@@ -602,16 +604,18 @@ func (b *Backend) ensurePortscanSetsNative() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, s := range sets {
-		b.conn.AddSet(&nftables.Set{
+		if err := b.conn.AddSet(&nftables.Set{
 			Table:         table,
 			Name:          s.name,
 			KeyType:       s.keyType,
 			HasTimeout:    true,
 			Concatenation: true,
-		}, nil)
+		}, nil); err != nil {
+			logging.Logf("[portscan] ensurePortscanSetsNative queue %s: %v", s.name, err)
+		}
 	}
 	if err := b.conn.Flush(); err != nil && !isAlreadyExists(err) {
-		logging.Logf("[portscan] ensurePortscanSetsNative: %v", err)
+		logging.Logf("[portscan] ensurePortscanSetsNative flush: %v", err)
 	}
 }
 
