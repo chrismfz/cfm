@@ -5,12 +5,11 @@ package nftlib
 import (
 	"context"
 	"fmt"
-	"net"
 	"regexp"
 	"strings"
 
 	"cfm/internal/blocklists"
-	"cfm/internal/firewall/nft"
+	"cfm/internal/firewall/feedutil"
 )
 
 // ApplyFeed installs one external blocklist/allowlist feed result.
@@ -19,15 +18,15 @@ func (b *Backend) ApplyFeed(_ context.Context, f blocklists.Feed, res *blocklist
 	if res == nil {
 		return nil
 	}
-	feedKey := nft.SanitizeFeedName(f.Name)
+	feedKey := feedutil.SanitizeFeedName(f.Name)
 	isAllow := f.Type == blocklists.TypeAllow
 	base := "block_ext"
 	if isAllow {
 		base = "allow_ext"
 	}
 
-	h4, n4 := splitHostsNets(res.V4, false)
-	h6, n6 := splitHostsNets(res.V6, true)
+	h4, n4 := feedutil.SplitHostsNets(res.V4, false)
+	h6, n6 := feedutil.SplitHostsNets(res.V6, true)
 	ttl := f.TTL
 
 	// Cache in memory so RebuildExternalUnions never reads the kernel.
@@ -90,14 +89,14 @@ func (b *Backend) RebuildExternalUnions() error {
 	}
 	b.extFeedMu.RUnlock()
 
-	allowH4 = dedupKeepOrder(allowH4)
-	allowN4 = dedupKeepOrder(allowN4)
-	allowH6 = dedupKeepOrder(allowH6)
-	allowN6 = dedupKeepOrder(allowN6)
-	blockH4 = dedupKeepOrder(blockH4)
-	blockN4 = dedupKeepOrder(blockN4)
-	blockH6 = dedupKeepOrder(blockH6)
-	blockN6 = dedupKeepOrder(blockN6)
+	allowH4 = feedutil.DedupKeepOrder(allowH4)
+	allowN4 = feedutil.DedupKeepOrder(allowN4)
+	allowH6 = feedutil.DedupKeepOrder(allowH6)
+	allowN6 = feedutil.DedupKeepOrder(allowN6)
+	blockH4 = feedutil.DedupKeepOrder(blockH4)
+	blockN4 = feedutil.DedupKeepOrder(blockN4)
+	blockH6 = feedutil.DedupKeepOrder(blockH6)
+	blockN6 = feedutil.DedupKeepOrder(blockN6)
 
 	_ = b.EnsureSetDynamic("allow_ext_v4_hosts", false, false)
 	_ = b.EnsureSetDynamic("allow_ext_v4_nets", false, true)
@@ -125,7 +124,7 @@ func (b *Backend) RebuildExternalUnions() error {
 func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 	allowed := make(map[string]struct{}, len(activeKeys))
 	for _, k := range activeKeys {
-		allowed[nft.SanitizeFeedName(k)] = struct{}{}
+		allowed[feedutil.SanitizeFeedName(k)] = struct{}{}
 	}
 
 	allNames, err := b.listSetsByPrefix("allow_ext_", "block_ext_")
@@ -155,7 +154,7 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 
 // DropFeedSets removes all eight per-feed sets for a given feed name.
 func (b *Backend) DropFeedSets(feedName string) {
-	suff := nft.SanitizeFeedName(feedName)
+	suff := feedutil.SanitizeFeedName(feedName)
 	for _, pfx := range []string{"allow_ext", "block_ext"} {
 		for _, fam := range []string{"v4", "v6"} {
 			for _, kind := range []string{"hosts", "nets"} {
@@ -202,76 +201,4 @@ func (b *Backend) listSetsByPrefix(prefixes ...string) ([]string, error) {
 		}
 	}
 	return names, nil
-}
-
-// ── Feed helpers (pure functions, no engine dependency) ──────────────────────
-
-// splitHostsNets separates a mixed IP/CIDR slice into host IPs and network
-// prefixes, validating address-family consistency.
-func splitHostsNets(elems []string, isV6 bool) (hosts, nets []string) {
-	seenH := make(map[string]struct{})
-	seenN := make(map[string]struct{})
-	maxBits := 32
-	if isV6 {
-		maxBits = 128
-	}
-	for _, s := range elems {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if strings.Contains(s, "/") {
-			_, n, err := net.ParseCIDR(s)
-			if err != nil {
-				continue
-			}
-			ones, bits := n.Mask.Size()
-			if bits != maxBits {
-				continue
-			}
-			if ones == maxBits {
-				ip := n.IP.String()
-				if _, ok := seenH[ip]; !ok {
-					seenH[ip] = struct{}{}
-					hosts = append(hosts, ip)
-				}
-			} else {
-				canon := n.String()
-				if _, ok := seenN[canon]; !ok {
-					seenN[canon] = struct{}{}
-					nets = append(nets, canon)
-				}
-			}
-		} else {
-			ip := net.ParseIP(s)
-			if ip == nil {
-				continue
-			}
-			if !isV6 && ip.To4() == nil {
-				continue
-			}
-			if isV6 && (ip.To16() == nil || ip.To4() != nil) {
-				continue
-			}
-			ipS := ip.String()
-			if _, ok := seenH[ipS]; !ok {
-				seenH[ipS] = struct{}{}
-				hosts = append(hosts, ipS)
-			}
-		}
-	}
-	return
-}
-
-func dedupKeepOrder(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, x := range in {
-		if _, ok := seen[x]; ok {
-			continue
-		}
-		seen[x] = struct{}{}
-		out = append(out, x)
-	}
-	return out
 }
