@@ -4,6 +4,7 @@ package nftlib
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"cfm/internal/config"
@@ -24,6 +25,8 @@ type portsPolicyRule struct {
 	PortFrom int
 	PortTo   int
 	Verdict  expr.VerdictKind
+	MatchExprs []string
+	ExpectedMatch bool
 }
 
 const floodRuleFlushBatchSize = 128
@@ -170,18 +173,50 @@ func buildPortsAllowlistRules(cfg *config.PortsConfig) []portsPolicyRule {
 	}
 	rules := make([]portsPolicyRule, 0, len(cfg.TCPIn)+len(cfg.UDPIn)+len(cfg.TCPOut)+len(cfg.UDPOut))
 	for _, pr := range cfg.TCPIn {
-		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("tcp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
 	for _, pr := range cfg.UDPIn {
-		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("udp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
 	for _, pr := range cfg.TCPOut {
-		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("tcp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
 	for _, pr := range cfg.UDPOut {
-		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("udp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
 	return rules
+}
+
+func validateRuleBeforeCommit(r portsPolicyRule) error {
+	if r.ExpectedMatch && len(r.MatchExprs) == 0 {
+		return fmt.Errorf("rule validation failed: chain=%s proto=%s expected match expressions before verdict", r.Chain, r.Protocol)
+	}
+	if r.ExpectedMatch && r.Verdict == expr.VerdictAccept && len(r.MatchExprs) == 0 {
+		return fmt.Errorf("rule validation failed: verdict accept without required match expressions")
+	}
+	return nil
+}
+
+func debugLogRuleBatch(category string, rules []portsPolicyRule, sample int) {
+	if sample <= 0 {
+		sample = 3
+	}
+	log.Printf("[nftlib] rule batch category=%s count=%d", category, len(rules))
+	for i := 0; i < len(rules) && i < sample; i++ {
+		log.Printf("[nftlib] rule batch category=%s sample[%d]=%s", category, i, renderPortsPolicyRule(rules[i]))
+	}
+}
+
+func renderPortsPolicyRule(r portsPolicyRule) string {
+	parts := append([]string{}, r.MatchExprs...)
+	verdict := "unknown"
+	if r.Verdict == expr.VerdictAccept {
+		verdict = "accept"
+	} else if r.Verdict == expr.VerdictDrop {
+		verdict = "drop"
+	}
+	parts = append(parts, fmt.Sprintf("verdict=%s", verdict))
+	return strings.Join(parts, " ")
 }
 
 func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules []portsPolicyRule) error {
@@ -195,12 +230,16 @@ func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules 
 		b.conn.FlushChain(ch)
 	}
 	for _, r := range rules {
+		if err := validateRuleBeforeCommit(r); err != nil {
+			return err
+		}
 		ch, err := b.getChain(r.Chain)
 		if err != nil {
 			return err
 		}
 		b.conn.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: []expr.Any{&expr.Verdict{Kind: r.Verdict}}})
 	}
+	debugLogRuleBatch("ports_policy", rules, 5)
 	return b.conn.Flush()
 }
 
@@ -319,4 +358,3 @@ func (b *Backend) flushChain(name string) error {
 	b.conn.FlushChain(ch)
 	return b.conn.Flush()
 }
-
