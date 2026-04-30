@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"cfm/internal/config"
+	"cfm/internal/logging"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -157,9 +158,13 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
+		len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
 	if err := b.ensureChain("output"); err != nil {
 		return err
 	}
+	// Ensure portscan concat sets are present before policy insertion.
+	b.ensurePortscanSetsNative()
 	rules := buildPortsAllowlistRules(cfg)
 	if err := b.flushChainsAndAppendVerdictsAtomically([]string{"input", "output"}, rules); err != nil {
 		return err
