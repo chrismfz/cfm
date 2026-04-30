@@ -14,6 +14,28 @@ import (
 	"github.com/google/nftables"
 )
 
+// getChain resolves a named chain from inet cfm table.
+// Must be called with b.mu held.
+func (b *Backend) getChain(name string) (*nftables.Chain, error) {
+	t, err := b.lookupTable()
+	if err != nil {
+		return nil, err
+	}
+	chains, err := b.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib: list chains inet: %w", err)
+	}
+	for _, ch := range chains {
+		if ch == nil || ch.Table == nil {
+			continue
+		}
+		if ch.Table.Name == t.Name && ch.Name == name {
+			return ch, nil
+		}
+	}
+	return nil, fmt.Errorf("nftlib: chain %q in table %q not found", name, t.Name)
+}
+
 // lookupTable returns (or caches) the inet cfm table handle from the kernel.
 // Must be called with b.mu held.
 func (b *Backend) lookupTable() (*nftables.Table, error) {

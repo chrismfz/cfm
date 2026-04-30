@@ -91,6 +91,52 @@ func TestBuildPortsAllowlistRules_StableAcrossRepeatedApplies(t *testing.T) {
 	}
 }
 
+func TestBuildPortsAllowlistRules_EmptyPolicy(t *testing.T) {
+	if got := buildPortsAllowlistRules(&config.PortsConfig{}); len(got) != 0 {
+		t.Fatalf("expected empty rules, got %d", len(got))
+	}
+}
+
+func TestBuildPortsAllowlistRules_SingleRangeParity(t *testing.T) {
+	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 1000, To: 2000}}}
+	got := buildPortsAllowlistRules(cfg)
+	want := []portsPolicyRule{
+		{Chain: "input", Protocol: "tcp", PortFrom: 1000, PortTo: 2000, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 1000-2000"}, ExpectedMatch: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestBuildPortsAllowlistRules_OverlappingRangesNormalized(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn: []config.PortRange{{From: 100, To: 110}, {From: 105, To: 120}, {From: 121, To: 130}},
+	}
+	got := buildPortsAllowlistRules(cfg)
+	want := []portsPolicyRule{
+		{Chain: "input", Protocol: "tcp", PortFrom: 100, PortTo: 130, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 100-130"}, ExpectedMatch: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestBuildPortsAllowlistRules_InOutCombinations(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn:  []config.PortRange{{From: 22, To: 22}},
+		UDPIn:  []config.PortRange{{From: 53, To: 53}},
+		TCPOut: []config.PortRange{{From: 443, To: 443}},
+		UDPOut: []config.PortRange{{From: 123, To: 123}},
+	}
+	got := buildPortsAllowlistRules(cfg)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 rules, got %d", len(got))
+	}
+	if got[0].Chain != "input" || got[1].Chain != "input" || got[2].Chain != "output" || got[3].Chain != "output" {
+		t.Fatalf("unexpected chain ordering: %+v", got)
+	}
+}
+
 func TestBuildFloodVerdictPlan_ConnlimitProtoValidationParity(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Connlimit.Rules = []config.ConnlimitRule{{Proto: "icmp"}}
@@ -168,5 +214,78 @@ func TestBuildPortsPolicySnapshots_Parity(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("snapshot[%d] mismatch: got %+v want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestOutboundObserveSelectionRules_UIDGIDDedupSort(t *testing.T) {
+	cfg := &config.OutboundConfig{
+		AllowUIDs: []uint32{1002, 42, 42, 7},
+		AllowGIDs: []uint32{300, 1, 300},
+	}
+	got := nftlibOutboundObserveSelectionRules(cfg)
+	want := []string{
+		"add rule inet cfm cfm_outbound_observe meta skuid 0 return",
+		"add rule inet cfm cfm_outbound_observe meta skuid { 7, 42, 1002 } return",
+		"add rule inet cfm cfm_outbound_observe meta skgid { 1, 300 } return",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection rules mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestOutboundObservePortGroups_PerGroupEmission(t *testing.T) {
+	cfg := &config.OutboundConfig{
+		SMTPPorts: []uint16{587, 25},
+		ScanPorts: []uint16{23, 22},
+		HTTPPorts: []uint16{8443, 443},
+	}
+	got := nftlibOutboundObservePortGroups(cfg)
+	want := []string{"25, 587", "22, 23", "443, 8443"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("port groups mismatch:\n got=%v\nwant=%v", got, want)
+	}
+
+	rule := nftlibOutboundObservePortGroupRule(17, got[0])
+	if !strings.Contains(rule, `group 17`) || !strings.Contains(rule, `{ 25, 587 }`) {
+		t.Fatalf("unexpected outbound observe rule: %q", rule)
+	}
+}
+
+func TestThrottleSetEnsureCmds_ParityList(t *testing.T) {
+	if len(throttleSetEnsureCmds) != 10 {
+		t.Fatalf("unexpected throttle set cmd count: got %d want 10", len(throttleSetEnsureCmds))
+	}
+	mustContain := []string{"th_syn_v4", "th_syn_v6", "th_pps_v4", "th_pps_v6", "throttled_v4", "throttled_v6"}
+	joined := strings.Join(throttleSetEnsureCmds, "\n")
+	for _, needle := range mustContain {
+		if !strings.Contains(joined, needle) {
+			t.Fatalf("throttle ensure cmds missing %q", needle)
+		}
+	}
+}
+
+func TestPerIPRateLimitCmds_ModeAll(t *testing.T) {
+	cmds := perIPRateLimitCmds(100, 200, 60, "all")
+	if len(cmds) != 2 {
+		t.Fatalf("unexpected command count: got %d want 2", len(cmds))
+	}
+	if !strings.Contains(cmds[0], "meter pps_v4") || !strings.Contains(cmds[1], "meter pps_v6") {
+		t.Fatalf("expected pps meter names, got: %v", cmds)
+	}
+	if strings.Contains(cmds[0], "meter syn_v4") || strings.Contains(cmds[1], "meter syn_v6") {
+		t.Fatalf("did not expect syn meter names in mode=all: %v", cmds)
+	}
+}
+
+func TestPerIPRateLimitCmds_ModeSYN(t *testing.T) {
+	cmds := perIPRateLimitCmds(100, 200, 60, "syn")
+	if len(cmds) != 2 {
+		t.Fatalf("unexpected command count: got %d want 2", len(cmds))
+	}
+	if !strings.Contains(cmds[0], "meter syn_v4") || !strings.Contains(cmds[1], "meter syn_v6") {
+		t.Fatalf("expected syn meter names, got: %v", cmds)
+	}
+	if strings.Contains(cmds[0], "meter pps_v4") || strings.Contains(cmds[1], "meter pps_v6") {
+		t.Fatalf("did not expect pps meter names in mode=syn: %v", cmds)
 	}
 }
