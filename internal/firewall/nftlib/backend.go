@@ -1,13 +1,9 @@
 //go:build linux
 
 // Package nftlib implements firewall.Backend using github.com/google/nftables
-// (direct netlink, zero forks). Policy/DNAT/inspection methods delegate to an
-// embedded *nft.Backend (hybrid model) until full nftlib parity is reached.
-//
-// Production motivation: the nft exec backend spawns one subprocess per batch
-// element under high load, saturating the fork table. nftlib sends all batch
-// mutations in a single conn.Flush() netlink roundtrip — zero forks regardless
-// of batch size. This is the fork-storm fix.
+// (direct netlink, zero forks). All data-plane operations go through netlink;
+// two diagnostic methods (ListTableTextNoDNS, ListChainText) run nft once for
+// human-readable text output but are never on the hot path.
 package nftlib
 
 import (
@@ -19,7 +15,6 @@ import (
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
-	"cfm/internal/firewall/nft"
 	"cfm/internal/firewall/selfip"
 	"cfm/internal/reporting"
 
@@ -60,10 +55,7 @@ const (
 )
 
 // Backend implements firewall.Backend using github.com/google/nftables.
-//
-// Set/bulk operations (AddBlock, AddElementsBulk, ReplaceSetFlushAdd, …) are
-// implemented natively via netlink. Policy/DNAT/diagnostics delegate to the
-// embedded *nft.Backend (cli) until nftlib parity is achieved.
+// All data-plane operations use netlink directly (zero forks, zero execs).
 type Backend struct {
 	conn *nftables.Conn
 	mu   sync.Mutex
@@ -73,18 +65,13 @@ type Backend struct {
 	namedSets map[string]*nftables.Set
 	table     *nftables.Table
 
-	// cli is the embedded nft exec backend used for hybrid delegation.
-	// Methods not yet implemented natively forward here.
-	cli *nft.Backend
-
-	// External feed element cache — mirrors nft.Backend's in-memory store so
-	// RebuildExternalUnions never needs to read the kernel state.
+	// External feed element cache — avoids kernel reads on every feed update.
 	extFeedMu sync.RWMutex
 	extAllow  map[string]extFeedData // feedKey → data
 	extBlock  map[string]extFeedData // feedKey → data
 	feedKeys  map[string]struct{}    // active sanitized feed keys
 
-	// Wiring fields — forwarded to cli on set so both backends stay consistent.
+	// Wiring fields set by callers at startup.
 	enr           *enrichpkg.Enricher
 	reporter      reporting.Reporter
 	challengeLogf func(format string, args ...any)
@@ -112,7 +99,7 @@ type Backend struct {
 	lastAutoBlockAt map[string]time.Time
 	lastIgnoredAt   map[string]time.Time
 
-	// selfResolver answers isSelfIP queries without calling the nft cli.
+	// selfResolver answers isSelfIP queries via net.Interfaces (no subprocess).
 	selfResolver *selfip.Resolver
 }
 
@@ -124,7 +111,6 @@ func New() (*Backend, error) {
 	}
 	return &Backend{
 		conn:                     conn,
-		cli:                      nft.New(),
 		challengeRedirectEnabled: true,
 		namedSets:                make(map[string]*nftables.Set),
 		extAllow:                 make(map[string]extFeedData),

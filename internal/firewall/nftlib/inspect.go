@@ -3,9 +3,12 @@
 package nftlib
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -113,7 +116,7 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 	return elemsToStrings(elems), nil
 }
 
-// ── Table/set dump methods — delegate to cli (text/JSON formatting) ──────────
+// ── Table/set dump methods (text formatting via nft subprocess) ──────────────
 
 func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
 	if strings.TrimSpace(family) != "inet" || strings.TrimSpace(table) != cfmTableName {
@@ -159,9 +162,24 @@ func (b *Backend) ListSetJSON(family, table, set string) ([]byte, error) {
 }
 
 func (b *Backend) ListTableTextNoDNS(family, table string) (string, error) {
-	return b.cli.ListTableTextNoDNS(family, table)
+	return nftTextOutput(context.Background(), "-t", "-n", "list", "table", family, table)
 }
 
 func (b *Backend) ListChainText(family, table, chain string) (string, error) {
-	return b.cli.ListChainText(family, table, chain)
+	return nftTextOutput(context.Background(), "-a", "list", "chain", family, table, chain)
+}
+
+// nftTextOutput runs the nft binary with the given args and returns combined output.
+// Used only for diagnostic / human-readable inspection paths (not the data plane).
+func nftTextOutput(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nft", args...) // #nosec G204
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return stdout.String() + stderr.String(), nil
 }
