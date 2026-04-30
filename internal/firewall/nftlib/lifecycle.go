@@ -5,7 +5,9 @@ package nftlib
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"cfm/internal/logging"
 	"github.com/google/nftables"
 )
 
@@ -104,27 +106,27 @@ func (b *Backend) DropEverything() error {
 	return nil
 }
 
-// ResetTable rebuilds CFM table state via native lifecycle operations and
-// then triggers delegated policy hook re-apply so hybrid behavior stays aligned
-// with the exec backend expectations.
+// ResetTable rebuilds CFM table state via native lifecycle operations only.
+//
+// It emits explicit timing instrumentation so delegated-vs-native migration
+// comparisons can be tracked in production logs.
 func (b *Backend) ResetTable() error {
+	start := time.Now()
+
+	dropStart := time.Now()
 	if err := b.DropEverything(); err != nil {
 		return fmt.Errorf("nftlib: reset table (drop): %w", err)
 	}
+	dropDur := time.Since(dropStart)
+
+	ensureStart := time.Now()
 	if err := b.EnsureBase(); err != nil {
 		return fmt.Errorf("nftlib: reset table (ensure): %w", err)
 	}
-	if err := b.reapplyPolicyHooks(); err != nil {
-		return fmt.Errorf("nftlib: reset table (reapply hooks): %w", err)
-	}
-	return nil
-}
+	ensureDur := time.Since(ensureStart)
 
-func (b *Backend) reapplyPolicyHooks() error {
-	if b.cli == nil {
-		return nil
-	}
-	return b.cli.EnsureBase()
+	logging.Logf("[nftlib] reset table timing after-native: drop=%s ensure=%s total=%s", dropDur, ensureDur, time.Since(start))
+	return nil
 }
 
 // EnsureSetDynamic creates a named dynamic set if it does not exist.
