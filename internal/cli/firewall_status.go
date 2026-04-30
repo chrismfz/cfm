@@ -32,6 +32,14 @@ type diagNamesProbe interface {
 
 type fwFinding struct { Level, Message string `json:"level"` }
 
+type setProbeRequirement struct {
+	key        string
+	setName    string
+	required   bool
+	applicable bool
+	reason     string
+}
+
 type fwReport struct {
 	Engine string `json:"engine"`
 	Capabilities []string `json:"capabilities"`
@@ -130,18 +138,44 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 	}
 
+	probeReq := map[string]setProbeRequirement{}
 	for key, s := range setNames {
+		required := true
+		applicable := true
+		reason := "core infrastructure"
+		switch s {
+		case "challenge_v4", "challenge_v6":
+			required = r.Features["dnat"]
+			applicable = r.Features["dnat"]
+			reason = "required only when DNAT redirect is enabled"
+		}
+		probeReq[s] = setProbeRequirement{key: key, setName: s, required: required, applicable: applicable, reason: reason}
+	}
+	for _, s := range []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"} {
+		probeReq[s] = setProbeRequirement{key: s, setName: s, required: r.Features["smtp"], applicable: r.Features["smtp"], reason: "required only when smtpblock is enabled"}
+	}
+
+	for _, req := range probeReq {
+		s := req.setName
+		if !req.applicable {
+			r.Findings = append(r.Findings, fwFinding{"info", "set probe not applicable for " + s + " (" + req.reason + ")"})
+			continue
+		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
 			if canonical, ok := legacyAliases[s]; ok {
 				r.Findings = append(r.Findings, fwFinding{"warn", "legacy set alias "+s+" is absent (canonical: "+canonical+")"})
 				continue
 			}
-			r.Findings = append(r.Findings, fwFinding{"warn", "set probe failed for "+s+": "+err.Error()})
+			level := "warn"
+			if req.required {
+				level = "fail"
+			}
+			r.Findings = append(r.Findings, fwFinding{level, "set probe failed for "+s+": "+err.Error()})
 			continue
 		}
 		r.SetSizes[s] = len(elems)
-		r.SetSizes[key+"_cardinality"] = len(elems)
+		r.SetSizes[req.key+"_cardinality"] = len(elems)
 	}
 	for _, s := range append(throttledSets, scannerSets...) {
 		elems, err := be.ListSetElementsRaw(s)
@@ -164,7 +198,12 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		if ds, ok := any(be).(dnatShowProbe); ok { if raw, err := ds.DNATShow("inet", "cfm"); err != nil { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show probe failed: "+err.Error()}) } else if strings.TrimSpace(raw) == "" { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show returned empty output"}) } }
 	}
 	r.Status = "ok"
-	for _, f := range r.Findings { if f.Level == "fail" { r.Status = "fail"; break }; if f.Level == "warn" { r.Status = "warn" } }
+	for _, f := range r.Findings {
+		if f.Level == "fail" {
+			r.Status = "fail"
+			break
+		}
+	}
 	return r
 }
 
