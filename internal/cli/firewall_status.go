@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strings"
 
+	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/feedutil"
 )
 
 type fwDiagBackend interface {
@@ -84,7 +86,31 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil { r.Features["dnat"] = ok } else { r.Unsupported["dnat_redirect"] = true; r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: "+err.Error()}) }
 
-	setNames := map[string]string{"block":"block_ips","allow":"allow_ips","ignore":"ignore_ips","challenge":"challenge_ips","feed":"feed_ext"}
+	setNames := map[string]string{
+		"block_v4":       "block_v4",
+		"block_v6":       "block_v6",
+		"block_v4_nets":  "block_v4_nets",
+		"block_v6_nets":  "block_v6_nets",
+		"allow_v4":       "allow_v4",
+		"allow_v6":       "allow_v6",
+		"allow_v4_nets":  "allow_v4_nets",
+		"allow_v6_nets":  "allow_v6_nets",
+		"ignore_v4":      "ignore_v4",
+		"ignore_v6":      "ignore_v6",
+		"ignore_v4_nets": "ignore_v4_nets",
+		"ignore_v6_nets": "ignore_v6_nets",
+		"allow_dyn_v4":   "allow_dyn_v4",
+		"allow_dyn_v6":   "allow_dyn_v6",
+		"challenge_v4":   "challenge_v4",
+		"challenge_v6":   "challenge_v6",
+	}
+	legacyAliases := map[string]string{
+		"block_ips":     "block_v4/block_v6",
+		"allow_ips":     "allow_v4/allow_v6",
+		"ignore_ips":    "ignore_v4/ignore_v6",
+		"challenge_ips": "challenge_v4/challenge_v6",
+		"feed_ext":      "allow_ext_*/block_ext_*",
+	}
 	throttledSets := []string{"throttled_v4","throttled_v6"}
 	scannerSets := []string{"port_scanners_v4","port_scanners_v6"}
 	if np, ok := any(be).(diagNamesProbe); ok {
@@ -92,10 +118,28 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		if v := np.ThrottledSetNames(); len(v) > 0 { throttledSets = v }
 		if v := np.ScannerSetNames(); len(v) > 0 { scannerSets = v }
 	}
+	for _, f := range loadConfiguredFeeds(cfgDir) {
+		key := feedutil.SanitizeFeedName(f.Name)
+		base := "block_ext"
+		if f.Type == blocklists.TypeAllow {
+			base = "allow_ext"
+		}
+		for _, suffix := range []string{"v4_hosts", "v4_nets", "v6_hosts", "v6_nets"} {
+			name := base + "_" + suffix + "_" + key
+			setNames[name] = name
+		}
+	}
 
 	for key, s := range setNames {
 		elems, err := be.ListSetElementsRaw(s)
-		if err != nil { r.Findings = append(r.Findings, fwFinding{"warn", "set probe failed for "+s+": "+err.Error()}); continue }
+		if err != nil {
+			if canonical, ok := legacyAliases[s]; ok {
+				r.Findings = append(r.Findings, fwFinding{"warn", "legacy set alias "+s+" is absent (canonical: "+canonical+")"})
+				continue
+			}
+			r.Findings = append(r.Findings, fwFinding{"warn", "set probe failed for "+s+": "+err.Error()})
+			continue
+		}
 		r.SetSizes[s] = len(elems)
 		r.SetSizes[key+"_cardinality"] = len(elems)
 	}
@@ -129,6 +173,21 @@ func loadCfg(cfgDir string) *cfgpkg.Config {
 	b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); if err != nil { return &cfgpkg.Config{} }
 	cfg, err := LoadConfigWithAPIOverride(cfgDir, b); if err != nil || cfg == nil { return &cfgpkg.Config{} }
 	return cfg
+}
+
+func loadConfiguredFeeds(cfgDir string) []blocklists.Feed {
+	if cfgDir == "" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.blocklists"))
+	if err != nil {
+		return nil
+	}
+	feeds, err := blocklists.ParseConfig(bytes.NewReader(b))
+	if err != nil {
+		return nil
+	}
+	return feeds
 }
 
 func printFirewallReport(r fwReport) {
