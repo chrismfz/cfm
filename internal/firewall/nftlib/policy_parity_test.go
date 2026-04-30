@@ -170,3 +170,37 @@ func TestBuildPortsPolicySnapshots_Parity(t *testing.T) {
 		}
 	}
 }
+
+func TestOutboundObserveSelectionRules_UIDGIDDedupSort(t *testing.T) {
+	cfg := &config.OutboundConfig{
+		AllowUIDs: []uint32{1002, 42, 42, 7},
+		AllowGIDs: []uint32{300, 1, 300},
+	}
+	got := nftlibOutboundObserveSelectionRules(cfg)
+	want := []string{
+		"add rule inet cfm cfm_outbound_observe meta skuid 0 return",
+		"add rule inet cfm cfm_outbound_observe meta skuid { 7, 42, 1002 } return",
+		"add rule inet cfm cfm_outbound_observe meta skgid { 1, 300 } return",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection rules mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestOutboundObservePortGroups_PerGroupEmission(t *testing.T) {
+	cfg := &config.OutboundConfig{
+		SMTPPorts: []uint16{587, 25},
+		ScanPorts: []uint16{23, 22},
+		HTTPPorts: []uint16{8443, 443},
+	}
+	got := nftlibOutboundObservePortGroups(cfg)
+	want := []string{"25, 587", "22, 23", "443, 8443"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("port groups mismatch:\n got=%v\nwant=%v", got, want)
+	}
+
+	rule := nftlibOutboundObservePortGroupRule(17, got[0])
+	if !strings.Contains(rule, `group 17`) || !strings.Contains(rule, `{ 25, 587 }`) {
+		t.Fatalf("unexpected outbound observe rule: %q", rule)
+	}
+}
