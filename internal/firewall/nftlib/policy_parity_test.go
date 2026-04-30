@@ -289,3 +289,19 @@ func TestPerIPRateLimitCmds_ModeSYN(t *testing.T) {
 		t.Fatalf("did not expect pps meter names in mode=syn: %v", cmds)
 	}
 }
+
+func TestNftlibJoinPorts_DoesNotMutateInput(t *testing.T) {
+	in := []uint16{587, 25, 465}
+	orig := append([]uint16(nil), in...)
+	_ = nftlibJoinPorts(in, nil)
+	if !reflect.DeepEqual(in, orig) {
+		t.Fatalf("input slice mutated: got=%v want=%v", in, orig)
+	}
+}
+
+func TestNftlibMapRate_Parity(t *testing.T) {
+	n, unit := nftlibMapRate(120, 60)
+	if n != 120 || unit != "minute" {
+		t.Fatalf("unexpected map rate: %d/%s", n, unit)
+	}
+}
