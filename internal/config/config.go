@@ -600,7 +600,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "DETECTORS_SEND_TO_API":
 			cfg.API.DetectorsSend = parseBool(val)
 		// Firewall
-		case "FIREWALL_ENGINE":
+		case "FIREWALL_ENGINE", "CFM_FIREWALL_ENGINE":
 			cfg.Firewall.Engine = val
 
 		// Logging
@@ -972,8 +972,11 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.SystemTweaks.RouteLocalnetIF = val
 
 		default:
-			// Unknown key: ignore (forward-compat) or return error if you prefer
-			// fmt.Printf("config: warning: unknown key %q at line %d", key, lineNo)
+			// Unknown key: keep forward-compat behavior, but warn for engine-like keys
+			// so users don't silently misspell/rename firewall engine settings.
+			if strings.Contains(key, "ENGINE") {
+				log.Printf("config: warning: unrecognized engine-like key %q at line %d", key, lineNo)
+			}
 		}
 	}
 	if err := s.Err(); err != nil {
@@ -994,6 +997,7 @@ func IsKnownKey(key string) bool {
 	key = strings.ToUpper(strings.TrimSpace(key))
 	switch key {
 	case "API_URL", "AUTH_TOKEN", "TOKEN", "AUTOBLOCK_SEND_TO_API", "MANUAL_BLOCK_SEND_TO_API", "UNBLOCK_SEND_TO_API", "DETECTORS_SEND_TO_API",
+		"FIREWALL_ENGINE", "CFM_FIREWALL_ENGINE",
 		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
 		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
 		"NFT_INPUT_PRIORITY", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
