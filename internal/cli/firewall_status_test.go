@@ -23,7 +23,7 @@ func (m mockDiagBE) ListTableJSON(family, table string) ([]byte, error) {
 }
 
 func TestCollectFirewallStatusHealthy(t *testing.T) {
-	be := mockDiagBE{dnat:true, sets: map[string][]string{"block_ips":{"1.1.1.1"},"allow_ips":{},"ignore_ips":{},"challenge_ips":{"2.2.2.2"}}}
+	be := mockDiagBE{dnat:true, sets: map[string][]string{"block_ips":{"1.1.1.1"},"allow_ips":{},"ignore_ips":{},"challenge_ips":{"2.2.2.2"},"feed_ext":{}}}
 	r := collectFirewallStatus(be, "", "nft", "default", false)
 	if r.Status != "ok" { t.Fatalf("expected ok got %s", r.Status) }
 	if !r.Features["dnat"] { t.Fatalf("expected dnat enabled") }
