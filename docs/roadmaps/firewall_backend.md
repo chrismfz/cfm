@@ -1,6 +1,6 @@
 # CFM — Firewall Backend Abstraction Roadmap
 
-**Status:** Phase 1 complete (no behavior change; production default remains nft shell backend)  
+**Status:** Phase 2 complete; Phase 2.5 in progress — `nftlib` engine operational, ~10 cli delegates remain (3 diagnostics, 5 wiring pass-throughs, 2 text inspection)  
 **Scope:** `internal/firewall/` — interface, nft implementation, future backends  
 **Goal:** Decouple *what CFM tells the firewall to do* from *how a specific firewall does it*
 
@@ -773,139 +773,66 @@ func getBackend() firewall.Backend {
 > **Pre-requisite:** Phase 2 complete.  
 > **Goal:** Remove the embedded `*nft.Backend` from `nftlib.Backend` so nftlib is
 > a self-contained zero-fork implementation with no subprocess dependency.  
-> **Why not now:** The remaining delegated methods require building nftables rule
-> expression trees — non-trivial but tractable. Documented here so the work is
-> scoped and ready to pick up.
+> **Status:** Mostly complete. 27 delegated methods at Phase 2 entry; ~10 remain.
 
-After Phase 2, the `nftlib.Backend` still embeds `*nft.Backend` (the cli backend)
-and delegates 24 methods to it. Deleting the `nft` import from `nftlib` today would
-break the build. This phase tracks what each delegation group needs to go native.
+The `nftlib.Backend` still embeds `*nft.Backend` for the methods below. Deleting
+the `nft` import from `nftlib` requires resolving the remaining 10 delegations.
 
 ---
 
-### 6a. What still delegates to cli
+### 6a. What still delegates to cli (current state)
 
-| Group | Methods | Count |
-|---|---|---|
-| Table lifecycle | `EnsureBase`, `DropEverything`, `ResetTable`, `EnsureSetDynamic`, `DeleteSetIfExists`, `FlushSet` | 6 |
-| Policy rule synthesis | `ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve`, `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner` | 10 |
-| DNAT / challenge redirect | `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff` | 7 |
-| Diagnostic text/JSON output | `ListTableJSON`, `ListSetJSON`, `ListTableTextNoDNS`, `ListChainText` | 4 |
+| Group | Methods | Count | Status |
+|---|---|---|---|
+| ~~Table lifecycle~~ | ~~`EnsureBase`, `DropEverything`, `ResetTable`, `EnsureSetDynamic`, `DeleteSetIfExists`, `FlushSet`~~ | ~~6~~ | ✅ All native (PRs #475–#488) |
+| Policy mutators | ~~`ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve`~~ | ~~7~~ | ✅ All native (PRs #471, #483–#485) |
+| Policy diagnostics | `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner` | 3 | ☐ Intentional delegates (diagnostic/passive — no fork-storm risk) |
+| ~~DNAT / challenge redirect~~ | ~~`SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`~~ | ~~7~~ | ✅ All native (PRs #472, #491–#492) |
+| ~~JSON output~~ | ~~`ListTableJSON`, `ListSetJSON`~~ | ~~2~~ | ✅ Native (PR #493) |
+| Text inspection | `ListTableTextNoDNS`, `ListChainText` | 2 | ☐ Intentional cli delegates (§6e Option 1 decision) |
+| Wiring pass-throughs | `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger` | 5 | ☐ Must forward to cli while cli is embedded; removed with §6f |
 
-Total: **27 delegated methods** remaining. All subprocess invocations in nftlib
-trace back to one of these four groups.
-
----
-
-### 6b. Table lifecycle — native nftlib
-
-**Current delegation:** `EnsureBase`, `DropEverything`, `ResetTable`,
-`EnsureSetDynamic`, `DeleteSetIfExists`, `FlushSet` call `b.cli.*`.
-
-**What native implementation requires:**
-
-- `EnsureBase` — use `conn.AddTable` + `conn.AddChain` + `conn.AddSet` to
-  programmatically declare the full `inet cfm` table, all chains (`input`,
-  `forward`, `output`, `prerouting`), and all static named sets. Then
-  `conn.Flush()`. Complex but mechanical — no expression trees involved, just
-  structure declarations. The nft ruleset DSL in `nft/rules/` defines exactly
-  which objects to create; translate them once.
-- `DropEverything` — `conn.DelTable(table)` + `conn.Flush()`. One line once the
-  table handle is known.
-- `ResetTable` — `DropEverything` + `EnsureBase` + re-apply policy. With the
-  above two native, this follows automatically.
-- `EnsureSetDynamic` — `conn.AddSet` for a dynamically-named set with the right
-  `KeyType` (`TypeIPAddr` or `TypeIP6Addr`) and `Interval: true` for net sets.
-  The `google/nftables` API supports this directly.
-- `DeleteSetIfExists` — `conn.DelSet` guarded by a `lookupSet` check. Already
-  partially wired via `invalidateCache()`.
-- `FlushSet` — `conn.FlushSet(set)` + `conn.Flush()`. Direct API call.
-
-**Effort estimate:** medium. No rule expression trees. Purely structural
-declarations. The main work is translating the base ruleset template into
-`nftables.Table`/`Chain`/`Set` struct instantiations.
-
-**File:** `internal/firewall/nftlib/lifecycle.go`
+**Remaining: 10 delegations** — 8 intentional (documented decisions), 2 blocked on §6f cleanup.
 
 ---
 
-### 6c. Policy rule synthesis — native nftlib
+### 6b. Table lifecycle — native nftlib ✅
 
-**Current delegation:** `ApplyFloodRules`, `ApplyHardeningRules`,
+**Done.** `EnsureBase`, `DropEverything`, `ResetTable`, `EnsureSetDynamic`,
+`DeleteSetIfExists`, `FlushSet` are all implemented natively in
+`internal/firewall/nftlib/lifecycle.go` (PRs #475–#488).
+
+- `EnsureBase` — `conn.AddTable` + `conn.AddChain` (input, flood, preraw) + `conn.AddSet` for all static named sets + `conn.Flush()`. Idempotent via `isAlreadyExists` check.
+- `DropEverything` — `lookupTable()` + `conn.DelTable()` + `conn.Flush()`. Returns nil if table not found.
+- `ResetTable` — composes `DropEverything` + `EnsureBase`. Emits timing logs for production comparison.
+- `EnsureSetDynamic` — `conn.AddSet` with `TypeIPAddr`/`TypeIP6Addr`, `Interval`, `HasTimeout`. Idempotent via `isAlreadyExists`.
+- `DeleteSetIfExists` — `conn.DelSet` + `conn.Flush()`. Ignores `isNotFound`.
+- `FlushSet` — delete + recreate set in two separate Flush() transactions to keep explicit commit boundaries.
+
+---
+
+### 6c. Policy rule synthesis — native nftlib ✅
+
+**Done** (policy mutators). `ApplyFloodRules`, `ApplyHardeningRules`,
 `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`,
-`ApplyOutboundObserve`, `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner`.
+`ApplyOutboundObserve` are all implemented natively via `expr.*` chains in
+`internal/firewall/nftlib/policy.go` (PRs #471, #483–#485).
 
-**What native implementation requires:**
-
-These methods write nftables *rules* — sequences of match expressions plus a
-verdict. The `google/nftables` library exposes them via the `expr` package
-(`expr.Meta`, `expr.Cmp`, `expr.CT`, `expr.Limit`, `expr.Counter`, etc.).
-
-Each method translates a config struct into a chain of `[]expr.Any` and calls
-`conn.AddRule`. The mapping is:
-
-- `ApplyHardeningRules` — stateful conntrack accept (`CT state established/related`),
-  ICMP rate limits, invalid-state drop. Translates to ~10 `conn.AddRule` calls.
-- `ApplyPortsPolicy` — per-port TCP/UDP `Meta l4proto` + `Payload dport` + `Verdict`
-  accept/drop. Number of rules scales with config entries.
-- `ApplyConnlimit` — `expr.Connlimit` + `expr.Verdict`. One rule per
-  `ConnlimitRule` entry.
-- `ApplyPortFlood` — `expr.Limit` (rate limiting) + `expr.Verdict`. One rule per
-  `PortFloodRule` entry.
-- `ApplySMTPBlock` — `Meta l4proto tcp` + `Payload dport 25` + `Verdict drop`
-  (outbound chain). Simple.
-- `ApplyFloodRules` — flood counters (`expr.Counter`) + rate limits on input chain.
-- `ApplyOutboundObserve` — mark/log outbound traffic matching config.
-- `DumpFloodCounters` / `DumpThrottledIPs` — read named counter/quota objects
-  via `conn.GetObjects` or parse from `conn.GetRules`. Alternative: keep these
-  two as cli delegates long-term since they are diagnostic-only (rare calls, no
-  fork-storm risk).
-- `LoadPortScanner` — attaches a BPF/nflog collector; not rule synthesis. Can
-  remain a cli delegate or be wired to a native nflog socket.
-
-**Effort estimate:** high. Each `Apply*` method needs careful translation of the
-existing nft ruleset template into `expr` chains. The `google/nftables/expr`
-package is well-documented but verbose. Recommend implementing one method at a
-time, validated by `nft list chain` diffing against the cli output.
-
-**File:** `internal/firewall/nftlib/policy.go`
-
-**Suggested order:** `ApplyHardeningRules` → `ApplyPortsPolicy` → `ApplyConnlimit`
-→ `ApplyPortFlood` → `ApplySMTPBlock` → `ApplyFloodRules` → `ApplyOutboundObserve`.
-Leave `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner` as cli delegates
-until the others are done (they are read/diagnostic paths with no fork-storm impact).
+**Intentional cli delegates (diagnostic-only, no fork-storm risk):**
+- `DumpFloodCounters`, `DumpThrottledIPs` — read counter/quota objects; diagnostic paths, rare calls.
+- `LoadPortScanner` — attaches BPF/nflog collector; not rule synthesis; complex wiring outside the hot path.
 
 ---
 
-### 6d. DNAT / challenge redirect — native nftlib
+### 6d. DNAT / challenge redirect — native nftlib ✅
 
-**Current delegation:** `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`,
-`EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`.
+**Done.** `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`,
+`EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`
+are all native in `internal/firewall/nftlib/challenge.go` (PRs #472, #491–#492).
 
-**What native implementation requires:**
-
-Challenge redirect works by inserting a DNAT prerouting rule that redirects HTTP/S
-traffic from challenged IPs to cfm's local challenge server. The `google/nftables`
-library supports DNAT via `expr.NAT` with `Type: expr.NATTypeDestNAT`.
-
-- `DNATOn` — `conn.AddRule` on the prerouting chain with:
-  `[expr.Meta{Key: expr.MetaKeyL4PROTO}, expr.Cmp{...tcp}, expr.Payload{...dport},
-   expr.Cmp{...targetPort}, expr.NAT{Type: NATTypeDestNAT, ...redirectPort}]`
-- `DNATOff` — find and delete the DNAT rule: `conn.GetRules` + match by handle +
-  `conn.DelRule` + `conn.Flush`.
-- `DNATStatus` / `DNATShow` — `conn.GetRules` on prerouting chain, scan for
-  `expr.NAT` elements. No subprocess needed.
-- `EnsureChallengeRedirect` — idempotent: check `DNATStatus`, call `DNATOn` if not
-  already active.
-- `CleanupChallengeRedirect` — `DNATOff` if active.
-- `SetChallengeRedirectEnabled` — boolean gate (in-memory flag), no kernel call.
-
-**Effort estimate:** medium. DNAT rule construction via `expr.NAT` is well-supported
-in `google/nftables`. The trickiest part is rule identity for `DNATOff` — rules
-must be found by content (port match) rather than handle, since handles are not
-stable across `EnsureBase` calls. A named map or rule comment can anchor identity.
-
-**File:** `internal/firewall/nftlib/challenge.go`
+Rule identity for `DNATOff` is anchored by stable content scan (`conn.ListChains` +
+scan for `expr.NAT` elements) rather than by handle, since handles are not stable
+across `EnsureBase` calls.
 
 ---
 
