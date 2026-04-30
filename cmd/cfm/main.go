@@ -279,6 +279,10 @@ func main() {
 
 	case "dnat":
 		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
+	case "firewall":
+		be := mustBackend()
+		_, engine, source := resolveFirewallEngine(nil)
+		os.Exit(cli.RunFirewall(os.Args[2:], be, cfgDir(), engine, source))
 
 	case "webtop", "nginx-top", "httpd-top":
 		addr := apiBaseURL()
@@ -341,6 +345,7 @@ Usage:
   cfm ssl refresh [--json]
 
   cfm dnat
+  cfm firewall status [--verbose] [--json] [--strict]
 
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm mysqltop -- MySQL Live stats

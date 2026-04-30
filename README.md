@@ -965,6 +965,36 @@ cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --pa
 
 **Sort keys:** `rps`, `2xx`, `3xx`, `4xx`, `5xx`, `uniq`, `err`, `rt`, `bot`, `ua_div`, `score`
 
+### `cfm firewall status` (firewall diagnostics)
+
+Use this command to validate core firewall resources and generate a health report that works across firewall backends.
+
+```bash
+cfm firewall status
+# human-readable report (engine, capabilities, features, set sizes, counters, findings)
+
+cfm firewall status --json
+# machine-readable JSON report
+
+cfm firewall status --verbose
+# enables optional extra backend probes when available
+
+cfm firewall status --strict=false
+# do not return non-zero even if FAIL findings are present
+```
+
+Report fields include:
+- engine + config source
+- capability flags
+- feature enablement (`ports`, `connlimit`, `portflood`, `smtp`, `autoblock`, `feeds`, `dnat`)
+- set sizes for key sets (`block_ips`, `allow_ips`, `ignore_ips`, `challenge_ips`)
+- key counters (when backend exposes them)
+- health findings with level `ok` / `warn` / `fail`
+
+Exit behavior:
+- With default `--strict=true`, command exits non-zero if report status is `fail`.
+- Warnings (`warn`) do not cause non-zero exit by themselves.
+
 ### `cfm health` (local-node health, federation later)
 
 `cfm health` currently reports health for the **local node** via the local API snapshot endpoint.
