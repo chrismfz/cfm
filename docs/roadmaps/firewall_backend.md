@@ -1129,11 +1129,11 @@ Any implementation of `firewall.Backend` must follow these rules:
 | Implement IP/net management (sets) — native netlink | `internal/firewall/nftlib/sets.go` | ✅ |
 | Implement bulk operations (fork-storm fix) — native netlink | `internal/firewall/nftlib/bulk.go` | ✅ |
 | Conn helpers: lookupTable, lookupSet, cache invalidation, normalizeIP, CIDR interval encoding | `internal/firewall/nftlib/conn.go` | ✅ |
-| Lifecycle methods (delegate + cache invalidation) | `internal/firewall/nftlib/lifecycle.go` | ✅ |
-| Inspection methods (delegate) | `internal/firewall/nftlib/inspect.go` | ✅ (delegated; native impl deferred) |
-| Feed management (delegate) | `internal/firewall/nftlib/feeds.go` | ✅ (delegated; native impl deferred) |
-| Policy methods (delegate) | `internal/firewall/nftlib/policy.go` | ✅ (delegated; native impl deferred) |
-| Challenge redirect / DNAT (delegate) | `internal/firewall/nftlib/challenge.go` | ✅ (delegated; native impl deferred) |
+| Lifecycle methods | `internal/firewall/nftlib/lifecycle.go` | ✅ (native) |
+| Inspection methods | `internal/firewall/nftlib/inspect.go` | ✅ (mixed: `ListBlocks`/`ListAllows`/`HasElem`/`ListSetElementsRaw`/`ListTableJSON`/`ListSetJSON` native; `ListTableTextNoDNS`/`ListChainText` delegated) |
+| Feed management | `internal/firewall/nftlib/feeds.go` | ✅ (native) |
+| Policy methods | `internal/firewall/nftlib/policy.go` | ✅ (mixed: native policy mutators; delegated diagnostics `DumpFloodCounters`/`DumpThrottledIPs`/`LoadPortScanner`) |
+| Challenge redirect / DNAT | `internal/firewall/nftlib/challenge.go` | ✅ (native) |
 | Wiring methods | `internal/firewall/nftlib/wiring.go` | ✅ |
 | Wire `CFM_FIREWALL_ENGINE=nftlib` in `getBackend()` | `cmd/cfm/main.go` | ✅ |
 | Phase 1.5: bounded semaphore (cap=4) for nft subprocess calls | `internal/firewall/nft/command_runner.go` | ✅ |
@@ -1146,23 +1146,27 @@ Any implementation of `firewall.Backend` must follow these rules:
 
 | Task | File | Status |
 |---|---|---|
-| Native `EnsureBase`: declare table/chains/sets via `conn.AddTable`+`conn.AddChain`+`conn.AddSet` | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `DropEverything`: `conn.DelTable` + `conn.Flush` | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `ResetTable`: compose `DropEverything` + `EnsureBase` + re-apply policy | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `EnsureSetDynamic`: `conn.AddSet` with correct `KeyType` and `Interval` flag | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `DeleteSetIfExists`: `conn.DelSet` guarded by `lookupSet` | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `FlushSet`: `conn.FlushSet` + `conn.Flush` (direct API) | `internal/firewall/nftlib/lifecycle.go` | ☐ |
-| Native `ApplyHardeningRules`: conntrack accept + ICMP rate limits + invalid-state drop via `expr.*` | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplyPortsPolicy`: per-port TCP/UDP `expr.Payload dport` + verdict rules | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplyConnlimit`: `expr.Connlimit` + `expr.Verdict` per `ConnlimitRule` | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplyPortFlood`: `expr.Limit` (rate) + `expr.Verdict` per `PortFloodRule` | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplySMTPBlock`: outbound tcp dport 25 drop rule | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplyFloodRules`: flood counters (`expr.Counter`) + input-chain rate limits | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `ApplyOutboundObserve`: mark/log outbound via `expr.*` | `internal/firewall/nftlib/policy.go` | ☐ |
-| Native `DNATOn`/`DNATOff`: `expr.NAT{Type: NATTypeDestNAT}` prerouting rule | `internal/firewall/nftlib/challenge.go` | ☐ |
-| Native `DNATStatus`/`DNATShow`: `conn.GetRules` + scan for `expr.NAT` | `internal/firewall/nftlib/challenge.go` | ☐ |
-| Native `EnsureChallengeRedirect`/`CleanupChallengeRedirect`: compose `DNATStatus`+`DNATOn`/`DNATOff` | `internal/firewall/nftlib/challenge.go` | ☐ |
-| **Architecture decision (Phase 2.5):** keep `ListTableJSON`/`ListSetJSON`/`ListTableTextNoDNS`/`ListChainText` as CLI delegates for diagnostics only; document `nft` binary requirement | `internal/firewall/nftlib/inspect.go` | ✅ |
+| Fresh inventory scan (`2026-04-30`): `b.cli.` callsites in nftlib | `internal/firewall/nftlib/{inspect,policy,wiring}.go` | ✅ 10 callsites (2 inspect, 3 policy diagnostics, 5 wiring/reporting) |
+| Fresh inventory scan (`2026-04-30`): `"cfm/internal/firewall/nft"` imports in nftlib | `internal/firewall/nftlib/{backend,feeds}.go` | ✅ 2 files |
+| Method classification sweep (`2026-04-30`): every `firewall.Backend` method mapped to `native` / `delegated` / `mixed` with refs | `internal/firewall/nftlib/*.go` | ✅ (see checklist below) |
+
+#### Backend method truth table (`internal/firewall/nftlib/*.go`, audited 2026-04-30)
+
+- **native**
+  - Lifecycle/set primitives: `EnsureBase`, `DropEverything`, `ResetTable`, `EnsureSetDynamic`, `DeleteSetIfExists`, `FlushSet`. (`lifecycle.go`)
+  - Manual list mutations: `AddBlock`, `RemoveBlock`, `RemoveBlockBatch`, `AddAllow`, `RemoveAllow`, `AddIgnore`, `RemoveIgnore`, `AddChallenge`, `RemoveChallenge`, `AddBlockNet`, `RemoveBlockNet`, `AddAllowNet`, `RemoveAllowNet`, `AddIgnoreNet`, `RemoveIgnoreNet`. (`sets.go`)
+  - Feed/bulk/set ops: `ApplyFeed`, `RebuildExternalUnions`, `PruneExternalFeeds`, `DropFeedSets`, `RemoveFeedByKey`, `AddElementsBulk`, `ReplaceSetFlushAdd`, `HasElem`, `ListSetElementsRaw`. (`feeds.go`, `bulk.go`, `inspect.go`)
+  - Primary policy + DNAT paths: `ApplyFloodRules`, `ApplyHardeningRules`, `ApplyPortsPolicy`, `ApplyConnlimit`, `ApplyPortFlood`, `ApplySMTPBlock`, `ApplyOutboundObserve`, `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`, `EnsureChallengeRedirect`, `DNATStatus`, `DNATShow`, `DNATOn`, `DNATOff`. (`policy.go`, `challenge.go`)
+  - JSON/state listing: `ListBlocks`, `ListAllows`, `ListTableJSON`, `ListSetJSON`. (`inspect.go`)
+
+- **delegated**
+  - Wiring/reporting-only pass-throughs to `b.cli`: `SetConfigDir`, `EnableEnrichment`, `GetEnricher`, `SetReporter`, `SetChallengeLogger`, `ReportBlock`. (`wiring.go`)
+  - Text diagnostics pass-throughs: `ListTableTextNoDNS`, `ListChainText`. (`inspect.go`)
+  - Policy diagnostics pass-throughs: `DumpFloodCounters`, `DumpThrottledIPs`, `LoadPortScanner`. (`policy.go`)
+
+- **mixed**
+  - File-level ownership: `inspect.go` (native + delegated), `policy.go` (native + delegated), `wiring.go` (delegated surface for shared services).
+
 | Remove `cli *nft.Backend` field and `nft.New()` from `nftlib.New()` | `internal/firewall/nftlib/backend.go` | ☐ |
 | Remove `cfm/internal/firewall/nft` import from all `nftlib/*.go` | `internal/firewall/nftlib/` | ☐ |
 | Parity validation: run both engines on virgo, diff `nft list table inet cfm` output | virgo testlab | ☐ |
