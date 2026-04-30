@@ -3,8 +3,10 @@
 package nftlib
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"time"
 
 	"cfm/internal/logging"
@@ -153,18 +155,9 @@ func (b *Backend) EnsureSetDynamic(name string, v6 bool, isNet bool) error {
 
 // DeleteSetIfExists removes a named set, ignoring not-found errors.
 func (b *Backend) DeleteSetIfExists(name string) error {
-	b.mu.Lock()
-	ns, err := b.lookupSet(name)
-	b.mu.Unlock()
-	if err != nil {
-		if isNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
-	}
-	b.conn.DelSet(ns)
-	err = b.conn.Flush()
-	if err != nil && !isNotFound(err) {
+	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
+	b.conn.DelSet(&nftables.Set{Table: table, Name: name})
+	if err := b.conn.Flush(); err != nil && !isNotFound(err) {
 		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
 	}
 	b.mu.Lock()
@@ -251,6 +244,9 @@ func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ESRCH) {
+		return true
+	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "no such") || strings.Contains(s, "not found")
 }
@@ -258,6 +254,9 @@ func isNotFound(err error) bool {
 func isAlreadyExists(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, syscall.EEXIST) {
+		return true
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "file exists") || strings.Contains(s, "already exists")
