@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/config"
 
@@ -428,6 +429,33 @@ func TestNftlibJoinPorts_DoesNotMutateInput(t *testing.T) {
 	_ = nftlibJoinPorts(in, nil)
 	if !reflect.DeepEqual(in, orig) {
 		t.Fatalf("input slice mutated: got=%v want=%v", in, orig)
+	}
+}
+
+func TestShouldSkipFloodRebuild(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fresh := now.Add(-meterRefreshInterval + time.Second)
+	stale := now.Add(-meterRefreshInterval - time.Second)
+
+	tests := []struct {
+		name              string
+		tablePresent      bool
+		floodChainPresent bool
+		last              time.Time
+		want              bool
+	}{
+		{name: "fresh with table and chain", tablePresent: true, floodChainPresent: true, last: fresh, want: true},
+		{name: "missing table", tablePresent: false, floodChainPresent: true, last: fresh, want: false},
+		{name: "missing flood chain", tablePresent: true, floodChainPresent: false, last: fresh, want: false},
+		{name: "zero timestamp", tablePresent: true, floodChainPresent: true, last: time.Time{}, want: false},
+		{name: "stale timestamp", tablePresent: true, floodChainPresent: true, last: stale, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipFloodRebuild(tc.tablePresent, tc.floodChainPresent, tc.last, now); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
 	}
 }
 
