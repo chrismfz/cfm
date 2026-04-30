@@ -2,284 +2,47 @@ package nft
 
 import (
 	"bufio"
+	cfgpkg "cfm/internal/config"
+	"cfm/internal/firewall/autoblock"
+	"cfm/internal/logging"
+	"cfm/internal/notify"
 	"context"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	cfgpkg "cfm/internal/config"
-	"cfm/internal/firewall/autoblock"
-	"cfm/internal/logging"
-	"cfm/internal/notify"
-	"path/filepath"
 )
+
+func mapRate(packets, windowSec int) (int, string) {
+	if windowSec <= 0 {
+		windowSec = 1
+	}
+	if windowSec < 60 {
+		ratePerSecond := int(math.Ceil(float64(packets) / float64(windowSec)))
+		if ratePerSecond < 1 {
+			ratePerSecond = 1
+		}
+		return ratePerSecond, "second"
+	}
+	ratePerMinute := int(math.Ceil(float64(packets) / float64(windowSec) * 60.0))
+	if ratePerMinute < 1 {
+		ratePerMinute = 1
+	}
+	return ratePerMinute, "minute"
+}
 
 // floodCfgHash returns a cheap hash of all flood-relevant config fields.
 // If the hash is identical to the previous tick we skip the full rebuild.
-func floodCfgHash(c *cfgpkg.Config) uint64 {
-	if c == nil {
-		return 0
-	}
-	// fnv-style: combine all fields that, if changed, require a flood rebuild.
-	h := fnv64(0,
-		uint64(c.PacketRate.Rate),
-		uint64(c.PacketRate.Burst),
-		hashStr(c.PacketRate.Mode),
-		boolU64(c.Hardening.BlockBadTCPFlags),
-		uint64(c.Hardening.NewRate),
-		uint64(c.Hardening.ICMPRate),
-		uint64(len(c.Connlimit.Rules)),
-		uint64(len(c.PortFlood.Rules)),
-		uint64(c.NFT.InputPriority),
-	)
-	// stir in per-rule details so a rule change is detected
-	for _, r := range c.Connlimit.Rules {
-		h = fnv64(h, uint64(r.Port), uint64(r.Limit), hashStr(r.Proto))
-	}
-	for _, r := range c.PortFlood.Rules {
-		h = fnv64(h, uint64(r.Port), uint64(r.Packets), uint64(r.WindowSec), hashStr(r.Proto))
-	}
-	return h
-}
-
-func fnv64(h uint64, vals ...uint64) uint64 {
-	const prime = 1099511628211
-	if h == 0 {
-		h = 14695981039346656037
-	}
-	for _, v := range vals {
-		h ^= v
-		h *= prime
-	}
-	return h
-}
-
-func hashStr(s string) uint64 {
-	var h uint64 = 14695981039346656037
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= 1099511628211
-	}
-	return h
-}
-
-func boolU64(b bool) uint64 {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// -----------------------------------------------------------------------------
-// Flood rules application
-// -----------------------------------------------------------------------------
-
-func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
-	b.cfg = c
-
-	const meterRefreshInterval = 15 * time.Minute
-	h := floodCfgHash(c)
-	if h != 0 && h == b.lastFloodHash && b.tableExists() {
-		if !b.lastFloodRebuild.IsZero() && time.Since(b.lastFloodRebuild) < meterRefreshInterval {
-			return nil
-		}
-	}
-	b.lastFloodHash = h
-
-	// 1) Ensure βάσης (πίνακας/αλυσίδες/sets + refreshSelfSets μέσα στο EnsureBase)
-	if !b.tableExists() {
-		if err := b.EnsureBase(); err != nil {
-			return err
-		}
-	} else {
-		// καλό είναι να ανανεώνεις τα self sets ανά tick αν αλλάζουν IPs
-		// π.χ. b.refreshSelfSets() εδώ, αν δεν το καλείς ήδη μέσα στο EnsureBase
-	}
-
-	// 2) Καθαρό flood και early self-bypass (να μη γράφουν counters)
-	_ = b.nftExpr("flush chain inet cfm flood;")
-	_ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
-	_ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
-
-	// 3) Συνέχισε με τα υπόλοιπα
-	b.ensureThrottleSets()
-
-	if err := b.ApplyHardeningRules(c); err != nil {
-		return err
-	} // badflags/newrate/icmp κ.λπ. :contentReference[oaicite:0]{index=0}
-
-	// PacketRate (pps/syn per-IP)
-	if c.PacketRate.Rate > 0 {
-		burst := c.PacketRate.Burst
-		if burst <= 0 {
-			burst = c.PacketRate.Rate * 2
-		}
-		if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
-			return err
-		}
-	}
-
-	if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
-		return err
-	}
-	if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
-		return err
-	}
-	b.lastFloodRebuild = time.Now()
-	return nil
-}
-
-// ensureThrottleSets creates (idempotently) the dynamic sets that hold throttled IPs.
-func (b *Backend) ensureThrottleSets() {
-	_ = b.nftExpr("add set inet cfm th_syn_v4 { type ipv4_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_syn_v6 { type ipv6_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pps_v4 { type ipv4_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pps_v6 { type ipv6_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pf_tcp_v4 { type ipv4_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pf_tcp_v6 { type ipv6_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pf_udp_v4 { type ipv4_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm th_pf_udp_v6 { type ipv6_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm throttled_v4 { type ipv4_addr; flags timeout; }")
-	_ = b.nftExpr("add set inet cfm throttled_v6 { type ipv6_addr; flags timeout; }")
-}
-
-// -----------------------------------------------------------------------------
-// Connlimit
-// -----------------------------------------------------------------------------
-
-func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
-
-	const meterSize = 65535
-	for _, r := range rules {
-		cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
-		b.ensureCounter(cname)
-
-		switch strings.ToLower(r.Proto) {
-		case "tcp":
-			// IPv4 per-IP concurrent NEW connections on tcp dport
-			expr4 := fmt.Sprintf(
-				"add rule inet cfm flood ip protocol tcp ct state new tcp dport %d "+
-					"meter cl_%d_tcp_v4 size %d { ip saddr ct count over %d } "+
-					"counter name %q drop comment \"connlimit-ip %d;%d\";",
-				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr4); err != nil {
-				return fmt.Errorf("connlimit per-ip v4 tcp rule failed: %w", err)
-			}
-			// IPv6
-			expr6 := fmt.Sprintf(
-				"add rule inet cfm flood ip6 nexthdr tcp ct state new tcp dport %d "+
-					"meter cl_%d_tcp_v6 size %d { ip6 saddr ct count over %d } "+
-					"counter name %q drop comment \"connlimit-ip %d;%d\";",
-				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr6); err != nil {
-				return fmt.Errorf("connlimit per-ip v6 tcp rule failed: %w", err)
-			}
-
-		case "udp":
-			// IPv4 (UDP: counts conntrack entries per-IP; μικρότερη διάρκεια)
-			expr4 := fmt.Sprintf(
-				"add rule inet cfm flood ip protocol udp ct state new udp dport %d "+
-					"meter cl_%d_udp_v4 size %d { ip saddr ct count over %d } "+
-					"counter name %q drop comment \"connlimit-ip %d;%d\";",
-				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr4); err != nil {
-				return fmt.Errorf("connlimit per-ip v4 udp rule failed: %w", err)
-			}
-			// IPv6
-			expr6 := fmt.Sprintf(
-				"add rule inet cfm flood ip6 nexthdr udp ct state new udp dport %d "+
-					"meter cl_%d_udp_v6 size %d { ip6 saddr ct count over %d } "+
-					"counter name %q drop comment \"connlimit-ip %d;%d\";",
-				r.Port, r.Port, meterSize, r.Limit, cname, r.Limit, r.Port,
-			)
-			if err := b.nftExpr(expr6); err != nil {
-				return fmt.Errorf("connlimit per-ip v6 udp rule failed: %w", err)
-			}
-
-		default:
-			return fmt.Errorf("unknown proto %q in CONNLIMIT", r.Proto)
-		}
-	}
-	return nil
-}
-
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 // listSetsWithPrefix lists set names in table 'inet cfm' that start with the given prefix.
 
 // listSetsWithPrefix: φτιάχνει τα ονόματα από το in-memory registry· κανένα nft call.
-func (b *Backend) listSetsWithPrefix(prefix string) []string {
-	var out []string
-
-	// per-feed sets (allow/block, v4/v6, hosts/nets)
-	if strings.HasPrefix(prefix, "allow_ext_") || strings.HasPrefix(prefix, "block_ext_") {
-		for k := range b.feedKeys {
-			cand := []string{
-				"allow_ext_v4_hosts_" + k, "allow_ext_v4_nets_" + k,
-				"allow_ext_v6_hosts_" + k, "allow_ext_v6_nets_" + k,
-				"block_ext_v4_hosts_" + k, "block_ext_v4_nets_" + k,
-				"block_ext_v6_hosts_" + k, "block_ext_v6_nets_" + k,
-			}
-			for _, name := range cand {
-				if strings.HasPrefix(name, prefix) {
-					out = append(out, name)
-				}
-			}
-		}
-	}
-
-	// throttling per-port registries (ήδη τα γεμίζεις στην ApplyPortFlood/ApplyConnlimit)
-	if strings.HasPrefix(prefix, "th_pf_") {
-		out = append(out, b.pfSets...)
-	}
-	if strings.HasPrefix(prefix, "th_connlimit_") {
-		out = append(out, b.clSets...)
-	}
-
-	return out
-}
-
-// mapRate converts (max per intervalSeconds) into nft syntax <num>/<unit> with unit in {second,minute,hour,day}.
-func mapRate(max, intervalSeconds int) (int, string) {
-	if intervalSeconds <= 0 {
-		intervalSeconds = 60 // sane default to avoid div-by-zero
-	}
-	type unit struct {
-		name string
-		sec  int
-	}
-	candidates := []unit{
-		{"day", 86400},
-		{"hour", 3600},
-		{"minute", 60},
-		{"second", 1},
-	}
-	for _, u := range candidates {
-		if intervalSeconds%u.sec == 0 {
-			factor := intervalSeconds / u.sec
-			num := int(math.Ceil(float64(max) / float64(factor)))
-			if num < 1 {
-				num = 1
-			}
-			return num, u.name
-		}
-	}
-	return max, "second"
-}
-
-// -----------------------------------------------------------------------------
-// PortFlood (per-IP meters with overflow-only matching)
-// -----------------------------------------------------------------------------
-
-// ApplyPortFlood: per-port new-connection rate limiting (per-IP, overflow-only).
-// ApplyPortFlood: per-port new-connection rate limiting (per-IP, overflow-only).
 func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
 	for _, r := range rules {
 		proto := strings.ToLower(r.Proto)
@@ -467,7 +230,6 @@ func (b *Backend) dumpFloodCountersOnce() {
 		b.DumpThrottledIPs()
 	}
 }
-
 
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6),
 // χωρίς full table dump. Διαβάζει ΜΟΝΟ τα στοχευμένα throttling sets.
@@ -1175,7 +937,6 @@ func (b *Backend) loadPortScannerOnce() {
 	}
 
 }
-
 
 // enrichLabel επιστρέφει " — PTR | ASNNAME | City, Country" ή "" αν δεν υπάρχει enricher.
 func (b *Backend) enrichLabel(ip string) string {
