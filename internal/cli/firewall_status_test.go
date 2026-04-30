@@ -6,19 +6,23 @@ import (
 )
 
 type mockDiagBE struct {
-	dnat bool
-	dnatErr error
+	dnat     bool
+	dnatErr  error
 	tableErr error
-	sets map[string][]string
+	sets     map[string][]string
 }
 
 func (m mockDiagBE) DNATStatus(family, table string) (bool, error) { return m.dnat, m.dnatErr }
 func (m mockDiagBE) ListSetElementsRaw(setName string) ([]string, error) {
-	if v, ok := m.sets[setName]; ok { return v, nil }
+	if v, ok := m.sets[setName]; ok {
+		return v, nil
+	}
 	return nil, errors.New("missing set")
 }
 func (m mockDiagBE) ListTableJSON(family, table string) ([]byte, error) {
-	if m.tableErr != nil { return nil, m.tableErr }
+	if m.tableErr != nil {
+		return nil, m.tableErr
+	}
 	return []byte(`{"ok":true}`), nil
 }
 
@@ -32,14 +36,41 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 		"throttled_v4": {}, "throttled_v6": {}, "port_scanners_v4": {}, "port_scanners_v6": {},
 	}}
 	r := collectFirewallStatus(be, "", "nft", "default", false)
-	if r.Status != "ok" { t.Fatalf("expected ok got %s", r.Status) }
-	if !r.Features["dnat"] { t.Fatalf("expected dnat enabled") }
-	if r.SetSizes["block_v4"] != 0 { t.Fatalf("expected block_v4 size 0") }
+	if r.Status != "ok" {
+		t.Fatalf("expected ok got %s", r.Status)
+	}
+	if !r.Features["dnat"] {
+		t.Fatalf("expected dnat enabled")
+	}
+	if r.SetSizes["block_v4"] != 0 {
+		t.Fatalf("expected block_v4 size 0")
+	}
 }
 
 func TestCollectFirewallStatusDegraded(t *testing.T) {
 	be := mockDiagBE{tableErr: errors.New("boom"), sets: map[string][]string{}}
 	r := collectFirewallStatus(be, "", "nft", "default", false)
-	if r.Status != "fail" { t.Fatalf("expected fail got %s", r.Status) }
-	if len(r.Findings) == 0 { t.Fatalf("expected findings") }
+	if r.Status != "fail" {
+		t.Fatalf("expected fail got %s", r.Status)
+	}
+	if len(r.Findings) == 0 {
+		t.Fatalf("expected findings")
+	}
+}
+
+func TestCollectPolicyDomainsCanonicalDescriptors(t *testing.T) {
+	raw := []byte(`{"nftables":[
+		{"rule":{"chain":"input","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"drop":null}]}},
+		{"rule":{"chain":"smtpblock","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":{"set":[25,465]}}},{"accept":null}]}}
+	]}`)
+	got := collectPolicyDomains(raw)
+	if got["base"][0].Proto != "tcp" {
+		t.Fatalf("expected canonical proto tcp, got %#v", got["base"][0])
+	}
+	if got["base"][0].Verdict != "drop" {
+		t.Fatalf("expected drop verdict, got %#v", got["base"][0])
+	}
+	if len(got["smtp"]) != 1 {
+		t.Fatalf("expected smtp domain rule, got %#v", got["smtp"])
+	}
 }

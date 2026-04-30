@@ -108,15 +108,26 @@ func dynamicFeedSetProbes(feeds []blocklists.Feed) []setProbeItem {
 }
 
 type fwReport struct {
-	Engine       string           `json:"engine"`
-	Capabilities []string         `json:"capabilities"`
-	ConfigSource string           `json:"config_source"`
-	Features     map[string]bool  `json:"features"`
-	SetSizes     map[string]int   `json:"set_sizes"`
-	Counters     map[string]int64 `json:"counters"`
-	Unsupported  map[string]bool  `json:"unsupported,omitempty"`
-	Findings     []fwFinding      `json:"findings"`
-	Status       string           `json:"status"`
+	Engine             string                        `json:"engine"`
+	Capabilities       []string                      `json:"capabilities"`
+	ConfigSource       string                        `json:"config_source"`
+	Features           map[string]bool               `json:"features"`
+	SetSizes           map[string]int                `json:"set_sizes"`
+	PolicyDomainCounts map[string]int                `json:"policy_domain_counts,omitempty"`
+	PolicyDomains      map[string][]fwRuleDescriptor `json:"policy_domains,omitempty"`
+	Counters           map[string]int64              `json:"counters"`
+	Unsupported        map[string]bool               `json:"unsupported,omitempty"`
+	Findings           []fwFinding                   `json:"findings"`
+	Status             string                        `json:"status"`
+	Verbose            bool                          `json:"-"`
+}
+
+type fwRuleDescriptor struct {
+	Chain      string   `json:"chain"`
+	Proto      string   `json:"proto,omitempty"`
+	Ports      []string `json:"ports,omitempty"`
+	Verdict    string   `json:"verdict,omitempty"`
+	Conditions []string `json:"conditions,omitempty"`
 }
 
 func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, source string) int {
@@ -145,7 +156,7 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 }
 
 func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verbose bool) fwReport {
-	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, Counters: map[string]int64{}, Unsupported: map[string]bool{}}
+	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, PolicyDomainCounts: map[string]int{}, PolicyDomains: map[string][]fwRuleDescriptor{}, Counters: map[string]int64{}, Unsupported: map[string]bool{}, Verbose: verbose}
 	if caps, ok := any(be).(firewall.CapabilityReporter); ok {
 		c := caps.Capabilities()
 		if c.PortsPolicyInboundRules {
@@ -233,8 +244,13 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 		r.SetSizes[s] = len(elems)
 	}
-	if _, err := be.ListTableJSON("inet", "cfm"); err != nil {
+	if tableJSON, err := be.ListTableJSON("inet", "cfm"); err != nil {
 		r.Findings = append(r.Findings, fwFinding{"fail", "required table inet/cfm missing or unreadable: " + err.Error()})
+	} else {
+		r.PolicyDomains = collectPolicyDomains(tableJSON)
+		for domain, rules := range r.PolicyDomains {
+			r.PolicyDomainCounts[domain] = len(rules)
+		}
 	}
 	if cp, ok := any(be).(counterProbe); ok {
 		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} {
@@ -340,6 +356,31 @@ func printFirewallReport(r fwReport) {
 			fmt.Printf("  %-16s %d\n", k, r.Counters[k])
 		}
 	}
+	if len(r.PolicyDomainCounts) > 0 {
+		fmt.Println("Policy domains:")
+		keys := make([]string, 0, len(r.PolicyDomainCounts))
+		for k := range r.PolicyDomainCounts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-16s %d\n", k, r.PolicyDomainCounts[k])
+		}
+	}
+	if r.Verbose && len(r.PolicyDomains) > 0 {
+		fmt.Println("Policy descriptors (--verbose):")
+		keys := make([]string, 0, len(r.PolicyDomains))
+		for k := range r.PolicyDomains {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  [%s]\n", k)
+			for _, d := range r.PolicyDomains[k] {
+				fmt.Printf("    chain=%s proto=%s ports=%s verdict=%s conditions=%s\n", d.Chain, d.Proto, strings.Join(d.Ports, ","), d.Verdict, strings.Join(d.Conditions, ","))
+			}
+		}
+	}
 	if len(r.Findings) > 0 {
 		fmt.Println("Findings:")
 		for _, f := range r.Findings {
@@ -349,6 +390,95 @@ func printFirewallReport(r fwReport) {
 	if r.Status != "ok" {
 		fmt.Println("Recommendation: run `cfm firewall status --verbose` for deeper diagnostics and apply the suggested set/table remediation above.")
 	}
+}
+
+func collectPolicyDomains(tableJSON []byte) map[string][]fwRuleDescriptor {
+	var payload map[string]any
+	if err := json.Unmarshal(tableJSON, &payload); err != nil {
+		return map[string][]fwRuleDescriptor{}
+	}
+	out := map[string][]fwRuleDescriptor{}
+	nft, _ := payload["nftables"].([]any)
+	for _, item := range nft {
+		entry, _ := item.(map[string]any)
+		ruleWrap, ok := entry["rule"].(map[string]any)
+		if !ok {
+			continue
+		}
+		chain, _ := ruleWrap["chain"].(string)
+		domain := classifyPolicyDomain(chain)
+		if domain == "" {
+			continue
+		}
+		desc := fwRuleDescriptor{Chain: chain}
+		if exprs, ok := ruleWrap["expr"].([]any); ok {
+			for _, ex := range exprs {
+				s := canonicalExpr(ex)
+				if s == "" {
+					continue
+				}
+				if strings.HasPrefix(s, "proto=") {
+					desc.Proto = strings.TrimPrefix(s, "proto=")
+				} else if strings.HasPrefix(s, "port=") {
+					desc.Ports = append(desc.Ports, strings.TrimPrefix(s, "port="))
+				} else if strings.HasPrefix(s, "verdict=") {
+					desc.Verdict = strings.TrimPrefix(s, "verdict=")
+				} else {
+					desc.Conditions = append(desc.Conditions, s)
+				}
+			}
+		}
+		sort.Strings(desc.Ports)
+		sort.Strings(desc.Conditions)
+		out[domain] = append(out[domain], desc)
+	}
+	return out
+}
+
+func classifyPolicyDomain(chain string) string {
+	switch {
+	case strings.Contains(chain, "smtp"):
+		return "smtp"
+	case strings.Contains(chain, "flood"):
+		return "portflood"
+	case strings.Contains(chain, "connlimit"):
+		return "connlimit"
+	case chain == "input" || chain == "output" || chain == "forward":
+		return "base"
+	default:
+		return "ports"
+	}
+}
+
+func canonicalExpr(ex any) string {
+	m, ok := ex.(map[string]any)
+	if !ok || len(m) != 1 {
+		return ""
+	}
+	for k, v := range m {
+		switch k {
+		case "match":
+			mv, _ := v.(map[string]any)
+			left, _ := mv["left"].(map[string]any)
+			if p, ok := left["payload"].(map[string]any); ok {
+				proto, _ := p["protocol"].(string)
+				field, _ := p["field"].(string)
+				right := fmt.Sprintf("%v", mv["right"])
+				if field == "dport" || field == "sport" {
+					return "port=" + right
+				}
+				if proto != "" {
+					return "proto=" + proto
+				}
+			}
+			return "match"
+		case "accept", "drop", "reject", "jump", "dnat":
+			return "verdict=" + k
+		default:
+			return k
+		}
+	}
+	return ""
 }
 
 func MarshalFirewallReport(r fwReport) string {
