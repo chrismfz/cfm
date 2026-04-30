@@ -43,7 +43,16 @@ func mapRate(packets, windowSec int) (int, string) {
 // listSetsWithPrefix lists set names in table 'inet cfm' that start with the given prefix.
 
 // listSetsWithPrefix: φτιάχνει τα ονόματα από το in-memory registry· κανένα nft call.
-func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) error {
+func (b *Backend) ApplyPortFlood(rules []cfgpkg.PortFloodRule) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyPortFlood", "start", 0, nil, fmt.Sprintf("rules=%d", len(rules)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyPortFlood", st, time.Since(start), err, fmt.Sprintf("rules=%d", len(rules)))
+	}()
 	for _, r := range rules {
 		proto := strings.ToLower(r.Proto)
 		cname := fmt.Sprintf("portflood_%d_%s", r.Port, proto)

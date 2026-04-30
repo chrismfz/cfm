@@ -68,7 +68,6 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 	return b.conn.Flush()
 }
 
-
 // ── AddAllow / RemoveAllow ───────────────────────────────────────────────────
 
 func (b *Backend) AddAllow(ip net.IP, ttl *time.Duration) error {
@@ -86,7 +85,6 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	}
 	return b.delIPElem(setName, ip)
 }
-
 
 // ── AddIgnore / RemoveIgnore ─────────────────────────────────────────────────
 

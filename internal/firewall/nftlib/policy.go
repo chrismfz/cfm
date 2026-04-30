@@ -154,7 +154,22 @@ var throttleSetEnsureCmds = []string{
 	"add set inet cfm throttled_v6 { type ipv6_addr; flags timeout; }",
 }
 
-func (b *Backend) ApplyFloodRules(c *config.Config) error {
+func (b *Backend) ApplyFloodRules(c *config.Config) (err error) {
+	start := time.Now()
+	connRules := 0
+	pfRules := 0
+	if c != nil {
+		connRules = len(c.Connlimit.Rules)
+		pfRules = len(c.PortFlood.Rules)
+	}
+	b.logPhase("ApplyFloodRules", "start", 0, nil, fmt.Sprintf("connlimit_rules=%d portflood_rules=%d", connRules, pfRules))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyFloodRules", st, time.Since(start), err, fmt.Sprintf("connlimit_rules=%d portflood_rules=%d", connRules, pfRules))
+	}()
 	b.cfg = c
 
 	h := floodCfgHash(c)
@@ -173,7 +188,7 @@ func (b *Backend) ApplyFloodRules(c *config.Config) error {
 	_, tableErr := b.lookupTable()
 	b.mu.Unlock()
 	if tableErr != nil {
-		if err := b.EnsureBase(); err != nil {
+		if err = b.EnsureBase(); err != nil {
 			return err
 		}
 	}
@@ -187,7 +202,7 @@ func (b *Backend) ApplyFloodRules(c *config.Config) error {
 	if c == nil {
 		return nil
 	}
-	if err := b.ApplyHardeningRules(c); err != nil {
+	if err = b.ApplyHardeningRules(c); err != nil {
 		return err
 	}
 	if c.PacketRate.Rate > 0 {
@@ -195,14 +210,14 @@ func (b *Backend) ApplyFloodRules(c *config.Config) error {
 		if burst <= 0 {
 			burst = c.PacketRate.Rate * 2
 		}
-		if err := b.applyPerIPRateLimitCLI(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
+		if err = b.applyPerIPRateLimitCLI(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
 			return err
 		}
 	}
-	if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
+	if err = b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
 		return err
 	}
-	if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
+	if err = b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
 		return err
 	}
 	b.lastFloodRebuild = time.Now()
@@ -335,7 +350,16 @@ func buildPortsPolicySnapshots(cfg *config.PortsConfig) []hardeningRuleSnapshot 
 
 // ── ApplyHardeningRules ───────────────────────────────────────────────────────
 
-func (b *Backend) ApplyHardeningRules(c *config.Config) error {
+func (b *Backend) ApplyHardeningRules(c *config.Config) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyHardeningRules", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyHardeningRules", st, time.Since(start), err, "")
+	}()
 	if c == nil {
 		return nil
 	}
@@ -560,7 +584,16 @@ func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules 
 
 // ── ApplyConnlimit ────────────────────────────────────────────────────────────
 
-func (b *Backend) ApplyConnlimit(rules []config.ConnlimitRule) error {
+func (b *Backend) ApplyConnlimit(rules []config.ConnlimitRule) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyConnlimit", "start", 0, nil, fmt.Sprintf("rules=%d", len(rules)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyConnlimit", st, time.Since(start), err, fmt.Sprintf("rules=%d", len(rules)))
+	}()
 	const meterSize = 65535
 	for _, r := range rules {
 		proto := strings.ToLower(r.Proto)
@@ -629,7 +662,16 @@ func nftlibMapRate(max, intervalSec int) (int, string) {
 	return max, "second"
 }
 
-func (b *Backend) ApplyPortFlood(rules []config.PortFloodRule) error {
+func (b *Backend) ApplyPortFlood(rules []config.PortFloodRule) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyPortFlood", "start", 0, nil, fmt.Sprintf("rules=%d", len(rules)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyPortFlood", st, time.Since(start), err, fmt.Sprintf("rules=%d", len(rules)))
+	}()
 	ttl := 60
 	if b.cfg != nil && b.cfg.Throttle.SetTTL > 0 {
 		ttl = b.cfg.Throttle.SetTTL
@@ -693,7 +735,17 @@ func (b *Backend) ApplyPortFlood(rules []config.PortFloodRule) error {
 
 // ── ApplySMTPBlock ────────────────────────────────────────────────────────────
 
-func (b *Backend) ApplySMTPBlock(cfg *config.SMTPBlockConfig) error {
+func (b *Backend) ApplySMTPBlock(cfg *config.SMTPBlockConfig) (err error) {
+	start := time.Now()
+	enabled := cfg != nil && cfg.Enabled
+	b.logPhase("ApplySMTPBlock", "start", 0, nil, fmt.Sprintf("enabled=%t", enabled))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplySMTPBlock", st, time.Since(start), err, fmt.Sprintf("enabled=%t", enabled))
+	}()
 	if cfg == nil || !cfg.Enabled {
 		return nil
 	}
@@ -710,7 +762,16 @@ func (b *Backend) ApplySMTPBlock(cfg *config.SMTPBlockConfig) error {
 
 // ── ApplyPortsPolicy ─────────────────────────────────────────────────────────
 
-func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
+func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyPortsPolicy", "start", 0, nil, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyPortsPolicy", st, time.Since(start), err, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+	}()
 	if cfg == nil {
 		return nil
 	}

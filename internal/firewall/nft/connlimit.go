@@ -4,9 +4,19 @@ import (
 	cfgpkg "cfm/internal/config"
 	"fmt"
 	"strings"
+	"time"
 )
 
-func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) error {
+func (b *Backend) ApplyConnlimit(rules []cfgpkg.ConnlimitRule) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyConnlimit", "start", 0, nil, fmt.Sprintf("rules=%d", len(rules)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyConnlimit", st, time.Since(start), err, fmt.Sprintf("rules=%d", len(rules)))
+	}()
 	const meterSize = 65535
 	for _, r := range rules {
 		cname := fmt.Sprintf("connlimit_%d_%s", r.Port, r.Proto)
