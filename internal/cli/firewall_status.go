@@ -13,7 +13,7 @@ import (
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/feedutil"
+	"cfm/internal/firewall/setinventory"
 )
 
 type fwDiagBackend interface {
@@ -22,15 +22,21 @@ type fwDiagBackend interface {
 	ListTableJSON(family, table string) ([]byte, error)
 }
 
-type counterProbe interface { CounterValue(name string) (int64, error) }
-type dnatShowProbe interface { DNATShow(family, table string) (string, error) }
+type counterProbe interface {
+	CounterValue(name string) (int64, error)
+}
+type dnatShowProbe interface {
+	DNATShow(family, table string) (string, error)
+}
 type diagNamesProbe interface {
 	ThrottledSetNames() []string
 	ScannerSetNames() []string
 	CardinalitySetNames() map[string]string
 }
 
-type fwFinding struct { Level, Message string `json:"level"` }
+type fwFinding struct {
+	Level, Message string `json:"level"`
+}
 
 type setProbeRequirement struct {
 	key        string
@@ -41,15 +47,15 @@ type setProbeRequirement struct {
 }
 
 type fwReport struct {
-	Engine string `json:"engine"`
-	Capabilities []string `json:"capabilities"`
-	ConfigSource string `json:"config_source"`
-	Features map[string]bool `json:"features"`
-	SetSizes map[string]int `json:"set_sizes"`
-	Counters map[string]int64 `json:"counters"`
-	Unsupported map[string]bool `json:"unsupported,omitempty"`
-	Findings []fwFinding `json:"findings"`
-	Status string `json:"status"`
+	Engine       string           `json:"engine"`
+	Capabilities []string         `json:"capabilities"`
+	ConfigSource string           `json:"config_source"`
+	Features     map[string]bool  `json:"features"`
+	SetSizes     map[string]int   `json:"set_sizes"`
+	Counters     map[string]int64 `json:"counters"`
+	Unsupported  map[string]bool  `json:"unsupported,omitempty"`
+	Findings     []fwFinding      `json:"findings"`
+	Status       string           `json:"status"`
 }
 
 func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, source string) int {
@@ -71,16 +77,25 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 	} else {
 		printFirewallReport(report)
 	}
-	if *strict && report.Status == "fail" { return 1 }
+	if *strict && report.Status == "fail" {
+		return 1
+	}
 	return 0
 }
 
 func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verbose bool) fwReport {
 	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, Counters: map[string]int64{}, Unsupported: map[string]bool{}}
 	if caps, ok := any(be).(firewall.CapabilityReporter); ok {
-		c := caps.Capabilities(); if c.PortsPolicyInboundRules { r.Capabilities = append(r.Capabilities, "ports_policy") }
-		if c.PortscanTrackingSets { r.Capabilities = append(r.Capabilities, "portscan_sets") }
-		if c.NewStateDropFallback { r.Capabilities = append(r.Capabilities, "new_state_drop") }
+		c := caps.Capabilities()
+		if c.PortsPolicyInboundRules {
+			r.Capabilities = append(r.Capabilities, "ports_policy")
+		}
+		if c.PortscanTrackingSets {
+			r.Capabilities = append(r.Capabilities, "portscan_sets")
+		}
+		if c.NewStateDropFallback {
+			r.Capabilities = append(r.Capabilities, "new_state_drop")
+		}
 	}
 	sort.Strings(r.Capabilities)
 	cfg := loadCfg(cfgDir)
@@ -92,52 +107,28 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["feeds"] = true
 	r.Features["dnat"] = false
 
-	if ok, err := be.DNATStatus("inet", "cfm"); err == nil { r.Features["dnat"] = ok } else { r.Unsupported["dnat_redirect"] = true; r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: "+err.Error()}) }
+	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
+		r.Features["dnat"] = ok
+	} else {
+		r.Unsupported["dnat_redirect"] = true
+		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
+	}
 
-	setNames := map[string]string{
-		"block_v4":       "block_v4",
-		"block_v6":       "block_v6",
-		"block_v4_nets":  "block_v4_nets",
-		"block_v6_nets":  "block_v6_nets",
-		"allow_v4":       "allow_v4",
-		"allow_v6":       "allow_v6",
-		"allow_v4_nets":  "allow_v4_nets",
-		"allow_v6_nets":  "allow_v6_nets",
-		"ignore_v4":      "ignore_v4",
-		"ignore_v6":      "ignore_v6",
-		"ignore_v4_nets": "ignore_v4_nets",
-		"ignore_v6_nets": "ignore_v6_nets",
-		"allow_dyn_v4":   "allow_dyn_v4",
-		"allow_dyn_v6":   "allow_dyn_v6",
-		"challenge_v4":   "challenge_v4",
-		"challenge_v6":   "challenge_v6",
-	}
-	legacyAliases := map[string]string{
-		"block_ips":     "block_v4/block_v6",
-		"allow_ips":     "allow_v4/allow_v6",
-		"ignore_ips":    "ignore_v4/ignore_v6",
-		"challenge_ips": "challenge_v4/challenge_v6",
-		"feed_ext":      "allow_ext_*/block_ext_*",
-	}
-	throttledSets := []string{"throttled_v4","throttled_v6"}
-	scannerSets := []string{"port_scanners_v4","port_scanners_v6"}
+	setNames := setinventory.BuildSetNames(loadConfiguredFeeds(cfgDir))
+	legacyAliases := setinventory.LegacyAliases()
+	throttledSets := []string{"throttled_v4", "throttled_v6"}
+	scannerSets := []string{"port_scanners_v4", "port_scanners_v6"}
 	if np, ok := any(be).(diagNamesProbe); ok {
-		if v := np.CardinalitySetNames(); len(v) > 0 { setNames = v }
-		if v := np.ThrottledSetNames(); len(v) > 0 { throttledSets = v }
-		if v := np.ScannerSetNames(); len(v) > 0 { scannerSets = v }
-	}
-	for _, f := range loadConfiguredFeeds(cfgDir) {
-		key := feedutil.SanitizeFeedName(f.Name)
-		base := "block_ext"
-		if f.Type == blocklists.TypeAllow {
-			base = "allow_ext"
+		if v := np.CardinalitySetNames(); len(v) > 0 {
+			setNames = v
 		}
-		for _, suffix := range []string{"v4_hosts", "v4_nets", "v6_hosts", "v6_nets"} {
-			name := base + "_" + suffix + "_" + key
-			setNames[name] = name
+		if v := np.ThrottledSetNames(); len(v) > 0 {
+			throttledSets = v
+		}
+		if v := np.ScannerSetNames(); len(v) > 0 {
+			scannerSets = v
 		}
 	}
-
 	probeReq := map[string]setProbeRequirement{}
 	for key, s := range setNames {
 		required := true
@@ -164,14 +155,14 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
 			if canonical, ok := legacyAliases[s]; ok {
-				r.Findings = append(r.Findings, fwFinding{"warn", "legacy set alias "+s+" is absent (canonical: "+canonical+")"})
+				r.Findings = append(r.Findings, fwFinding{"warn", "legacy set alias " + s + " is absent (canonical: " + canonical + ")"})
 				continue
 			}
 			level := "warn"
 			if req.required {
 				level = "fail"
 			}
-			r.Findings = append(r.Findings, fwFinding{level, "set probe failed for "+s+": "+err.Error()})
+			r.Findings = append(r.Findings, fwFinding{level, "set probe failed for " + s + ": " + err.Error()})
 			continue
 		}
 		r.SetSizes[s] = len(elems)
@@ -185,9 +176,17 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 		r.SetSizes[s] = len(elems)
 	}
-	if _, err := be.ListTableJSON("inet", "cfm"); err != nil { r.Findings = append(r.Findings, fwFinding{"fail", "required table inet/cfm missing or unreadable: "+err.Error()}) }
+	if _, err := be.ListTableJSON("inet", "cfm"); err != nil {
+		r.Findings = append(r.Findings, fwFinding{"fail", "required table inet/cfm missing or unreadable: " + err.Error()})
+	}
 	if cp, ok := any(be).(counterProbe); ok {
-		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} { if v, err := cp.CounterValue(name); err == nil { r.Counters[name] = v } else { r.Unsupported[name+"_counter"] = true } }
+		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} {
+			if v, err := cp.CounterValue(name); err == nil {
+				r.Counters[name] = v
+			} else {
+				r.Unsupported[name+"_counter"] = true
+			}
+		}
 	}
 	if len(r.Counters) == 0 {
 		r.Unsupported["flood_counter"] = true
@@ -195,7 +194,13 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		r.Unsupported["connlimit_counter"] = true
 	}
 	if verbose {
-		if ds, ok := any(be).(dnatShowProbe); ok { if raw, err := ds.DNATShow("inet", "cfm"); err != nil { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show probe failed: "+err.Error()}) } else if strings.TrimSpace(raw) == "" { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show returned empty output"}) } }
+		if ds, ok := any(be).(dnatShowProbe); ok {
+			if raw, err := ds.DNATShow("inet", "cfm"); err != nil {
+				r.Findings = append(r.Findings, fwFinding{"warn", "dnat show probe failed: " + err.Error()})
+			} else if strings.TrimSpace(raw) == "" {
+				r.Findings = append(r.Findings, fwFinding{"warn", "dnat show returned empty output"})
+			}
+		}
 	}
 	r.Status = "ok"
 	for _, f := range r.Findings {
@@ -208,9 +213,17 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 }
 
 func loadCfg(cfgDir string) *cfgpkg.Config {
-	if cfgDir == "" { return &cfgpkg.Config{} }
-	b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf")); if err != nil { return &cfgpkg.Config{} }
-	cfg, err := LoadConfigWithAPIOverride(cfgDir, b); if err != nil || cfg == nil { return &cfgpkg.Config{} }
+	if cfgDir == "" {
+		return &cfgpkg.Config{}
+	}
+	b, err := os.ReadFile(filepath.Join(cfgDir, "cfm.conf"))
+	if err != nil {
+		return &cfgpkg.Config{}
+	}
+	cfg, err := LoadConfigWithAPIOverride(cfgDir, b)
+	if err != nil || cfg == nil {
+		return &cfgpkg.Config{}
+	}
 	return cfg
 }
 
@@ -234,12 +247,38 @@ func printFirewallReport(r fwReport) {
 	fmt.Printf("Config source: %s\n", r.ConfigSource)
 	fmt.Printf("Capabilities: %s\n", strings.Join(r.Capabilities, ", "))
 	fmt.Println("Features:")
-	for _, k := range []string{"ports","connlimit","portflood","smtp","autoblock","feeds","dnat"} { fmt.Printf("  %-10s %v\n", k, r.Features[k]) }
+	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat"} {
+		fmt.Printf("  %-10s %v\n", k, r.Features[k])
+	}
 	fmt.Println("Set sizes:")
-	keys := make([]string,0,len(r.SetSizes)); for k := range r.SetSizes { keys = append(keys,k) }; sort.Strings(keys)
-	for _, k := range keys { fmt.Printf("  %-14s %d\n", k, r.SetSizes[k]) }
-	if len(r.Counters) > 0 { fmt.Println("Counters:"); ckeys := make([]string,0,len(r.Counters)); for k := range r.Counters { ckeys=append(ckeys,k)}; sort.Strings(ckeys); for _, k := range ckeys { fmt.Printf("  %-16s %d\n", k, r.Counters[k]) } }
-	if len(r.Findings) > 0 { fmt.Println("Findings:"); for _, f := range r.Findings { fmt.Printf("  [%s] %s\n", strings.ToUpper(f.Level), f.Message) } }
+	keys := make([]string, 0, len(r.SetSizes))
+	for k := range r.SetSizes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("  %-14s %d\n", k, r.SetSizes[k])
+	}
+	if len(r.Counters) > 0 {
+		fmt.Println("Counters:")
+		ckeys := make([]string, 0, len(r.Counters))
+		for k := range r.Counters {
+			ckeys = append(ckeys, k)
+		}
+		sort.Strings(ckeys)
+		for _, k := range ckeys {
+			fmt.Printf("  %-16s %d\n", k, r.Counters[k])
+		}
+	}
+	if len(r.Findings) > 0 {
+		fmt.Println("Findings:")
+		for _, f := range r.Findings {
+			fmt.Printf("  [%s] %s\n", strings.ToUpper(f.Level), f.Message)
+		}
+	}
 }
 
-func MarshalFirewallReport(r fwReport) string { b,_ := json.Marshal(r); return string(bytes.TrimSpace(b)) }
+func MarshalFirewallReport(r fwReport) string {
+	b, _ := json.Marshal(r)
+	return string(bytes.TrimSpace(b))
+}

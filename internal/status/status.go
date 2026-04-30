@@ -8,6 +8,7 @@ import (
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/setinventory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1222,7 +1223,7 @@ func readTableSummary(backend firewall.Backend) statusOut {
 			continue
 		}
 		s := it.Set
-		action, family, scope, feed, ok := classifyStatusSet(s.Name, s.Type)
+		action, family, scope, feed, ok := setinventory.ClassifySet(s.Name)
 		if !ok {
 			continue
 		}
@@ -1308,52 +1309,6 @@ func printSummary(st statusOut) {
 		fmt.Printf(" - %-5s %-2s %-6s %-35s hosts=%-5d prefixes=%-5d%s\n",
 			r.Action, r.Family, r.Scope, r.Set, r.Hosts, r.Prefixes, extra)
 	}
-}
-
-func classifyStatusSet(name, typ string) (action, family, scope, feed string, ok bool) {
-	switch name {
-	case "allow_v4":
-		return "ALLOW", "v4", "manual", "", true
-	case "allow_v6":
-		return "ALLOW", "v6", "manual", "", true
-	case "allow_dyn_v4":
-		return "ALLOW", "v4", "dyn", "", true
-	case "allow_dyn_v6":
-		return "ALLOW", "v6", "dyn", "", true
-	case "block_v4":
-		return "BLOCK", "v4", "manual", "", true
-	case "block_v6":
-		return "BLOCK", "v6", "manual", "", true
-	}
-
-	// --- NEW: recognize manual *_nets sets so they show up in "Sets:" ---
-	switch name {
-	case "allow_v4_nets":
-		return "ALLOW", "v4", "manual", "", true
-	case "allow_v6_nets":
-		return "ALLOW", "v6", "manual", "", true
-	case "block_v4_nets":
-		return "BLOCK", "v4", "manual", "", true
-	case "block_v6_nets":
-		return "BLOCK", "v6", "manual", "", true
-	}
-
-	if strings.HasPrefix(name, "allow_ext_") || strings.HasPrefix(name, "block_ext_") {
-		parts := strings.Split(name, "_")
-		if len(parts) >= 5 {
-			action = strings.ToUpper(parts[0])
-			fam := parts[2]
-			if fam == "v4" || fam == "v6" {
-				family = fam
-			}
-			if parts[3] == "hosts" || parts[3] == "nets" {
-				scope = parts[3]
-			}
-			feed = strings.Join(parts[4:], "_")
-			return action, family, scope, feed, true
-		}
-	}
-	return "", "", "", "", false
 }
 
 // ---------------------------------------------------------------------------
