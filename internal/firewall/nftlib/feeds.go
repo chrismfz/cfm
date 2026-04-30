@@ -10,6 +10,7 @@ import (
 
 	"cfm/internal/blocklists"
 	"cfm/internal/firewall/feedutil"
+	"cfm/internal/logging"
 )
 
 // ApplyFeed installs one external blocklist/allowlist feed result.
@@ -28,6 +29,9 @@ func (b *Backend) ApplyFeed(_ context.Context, f blocklists.Feed, res *blocklist
 	h4, n4 := feedutil.SplitHostsNets(res.V4, false)
 	h6, n6 := feedutil.SplitHostsNets(res.V6, true)
 	ttl := f.TTL
+	parsed := len(res.V4) + len(res.V6)
+	accepted := len(h4) + len(n4) + len(h6) + len(n6)
+	rejected := parsed - accepted
 
 	// Cache in memory so RebuildExternalUnions never reads the kernel.
 	b.extFeedMu.Lock()
@@ -47,27 +51,35 @@ func (b *Backend) ApplyFeed(_ context.Context, f blocklists.Feed, res *blocklist
 	nameN6 := fmt.Sprintf("%s_v6_nets_%s", base, feedKey)
 
 	if err := b.EnsureSetDynamic(nameH4, false, false); err != nil {
+		logging.Logf("[feeds] apply feed=%s ensure=%s error=%v", f.Name, nameH4, err)
 		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameH4, err)
 	}
 	if err := b.ReplaceSetFlushAdd(nameH4, h4, ttl); err != nil {
+		logging.Logf("[feeds] apply feed=%s write=%s error=%v", f.Name, nameH4, err)
 		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameH4, err)
 	}
 	if err := b.EnsureSetDynamic(nameN4, false, true); err != nil {
+		logging.Logf("[feeds] apply feed=%s ensure=%s error=%v", f.Name, nameN4, err)
 		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameN4, err)
 	}
 	if err := b.ReplaceSetFlushAdd(nameN4, n4, ttl); err != nil {
+		logging.Logf("[feeds] apply feed=%s write=%s error=%v", f.Name, nameN4, err)
 		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameN4, err)
 	}
 	if err := b.EnsureSetDynamic(nameH6, true, false); err != nil {
+		logging.Logf("[feeds] apply feed=%s ensure=%s error=%v", f.Name, nameH6, err)
 		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameH6, err)
 	}
 	if err := b.ReplaceSetFlushAdd(nameH6, h6, ttl); err != nil {
+		logging.Logf("[feeds] apply feed=%s write=%s error=%v", f.Name, nameH6, err)
 		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameH6, err)
 	}
 	if err := b.EnsureSetDynamic(nameN6, true, true); err != nil {
+		logging.Logf("[feeds] apply feed=%s ensure=%s error=%v", f.Name, nameN6, err)
 		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameN6, err)
 	}
 	if err := b.ReplaceSetFlushAdd(nameN6, n6, ttl); err != nil {
+		logging.Logf("[feeds] apply feed=%s write=%s error=%v", f.Name, nameN6, err)
 		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameN6, err)
 	}
 
@@ -75,7 +87,12 @@ func (b *Backend) ApplyFeed(_ context.Context, f blocklists.Feed, res *blocklist
 	b.feedKeys[feedKey] = struct{}{}
 	b.extFeedMu.Unlock()
 
-	return b.RebuildExternalUnions()
+	if err := b.RebuildExternalUnions(); err != nil {
+		logging.Logf("[feeds] apply feed=%s parsed=%d accepted=%d rejected=%d union_error=%v", f.Name, parsed, accepted, rejected, err)
+		return err
+	}
+	logging.Logf("[feeds] apply feed=%s parsed=%d accepted=%d rejected=%d", f.Name, parsed, accepted, rejected)
+	return nil
 }
 
 // RebuildExternalUnions flushes and repopulates the eight union sets from the
