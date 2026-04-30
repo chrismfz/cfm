@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -107,6 +108,14 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			})
 			return
 		}
+		engine := "unknown"
+		if m, ok := be.(interface{ Engine() string }); ok {
+			engine = m.Engine()
+		}
+		backendType := "<nil>"
+		if t := reflect.TypeOf(be); t != nil {
+			backendType = t.String()
+		}
 
 		// ── 2. Fast local path: remove from nft immediately ───────────────
 		// Point-lookup instead of full set dump — O(1) vs O(n)
@@ -116,7 +125,11 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		} else if found, _ := be.HasElem("block_v6", ip.String()); found {
 			wasBlocked = true
 		}
+		removeStart := time.Now()
+		removeMethod := "RemoveBlock"
+		logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=%s ip=%s", engine, backendType, 1, removeMethod, ip.String())
 		_ = be.RemoveBlock(ip) // idempotent
+		logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=%s ip=%s duration=%s", engine, backendType, 1, removeMethod, ip.String(), time.Since(removeStart))
 
 		// ── 3. Capture requester identity for the audit log ───────────────
 		requester := func() string {

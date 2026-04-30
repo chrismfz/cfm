@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"reflect"
 
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
@@ -96,9 +97,21 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 		}
 	}
 	if be, ok := r.backend.(interface{ RemoveBlockBatch([]net.IP) error }); ok {
+		engine := "unknown"
+		if m, ok := r.backend.(interface{ Engine() string }); ok {
+			engine = m.Engine()
+		}
+		backendType := "<nil>"
+		if t := reflect.TypeOf(r.backend); t != nil {
+			backendType = t.String()
+		}
+		removeMethod := "RemoveBlockBatch"
+		removeStart := time.Now()
+		logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=%s", engine, backendType, len(ips), removeMethod)
 		if err := be.RemoveBlockBatch(ips); err != nil {
 			logging.LogfAPI("[unblock] batch nft remove error: %v", err)
 		}
+		logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=%s duration=%s", engine, backendType, len(ips), removeMethod, time.Since(removeStart))
 	}
 
 	// confirm each sequentially (API calls, not nft)
