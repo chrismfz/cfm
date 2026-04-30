@@ -180,11 +180,16 @@ func setShape(v6 bool, isNet bool) (nftables.SetDatatype, bool) {
 	return nftables.TypeIPAddr, isNet
 }
 
-// FlushSet empties a named set by family/table/set path.
+// FlushSet resets a named set by deleting and recreating it.
+//
+// The delete and recreate are intentionally split into separate Flush() calls
+// to keep transaction boundaries explicit: first commit set removal, then commit
+// empty set creation. Missing table/set conditions are treated as no-ops.
 func (b *Backend) FlushSet(family, table, set string) error {
 	if !strings.EqualFold(family, "inet") || table != cfmTableName {
 		return fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
 	}
+
 	b.mu.Lock()
 	ns, err := b.lookupSet(set)
 	b.mu.Unlock()
@@ -195,7 +200,8 @@ func (b *Backend) FlushSet(family, table, set string) error {
 		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
 	}
 
-	b.conn.FlushSet(ns)
+	// Transaction 1: delete the existing set.
+	b.conn.DelSet(ns)
 	if err := b.conn.Flush(); err != nil {
 		if isNotFound(err) {
 			b.mu.Lock()
@@ -203,8 +209,41 @@ func (b *Backend) FlushSet(family, table, set string) error {
 			b.mu.Unlock()
 			return nil
 		}
-		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
+		return fmt.Errorf("nftlib: flush set %s %s %s (delete): %w", family, table, set, err)
 	}
+
+	b.mu.Lock()
+	delete(b.namedSets, set)
+	b.mu.Unlock()
+
+	// Transaction 2: recreate the set with the original schema.
+	recreated := &nftables.Set{
+		Table:      &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet},
+		Name:       ns.Name,
+		KeyType:    ns.KeyType,
+		HasTimeout: ns.HasTimeout,
+		Interval:   ns.Interval,
+	}
+	b.conn.AddSet(recreated, nil)
+	if err := b.conn.Flush(); err != nil {
+		if isNotFound(err) {
+			b.mu.Lock()
+			b.invalidateCache()
+			b.mu.Unlock()
+			return nil
+		}
+		if isAlreadyExists(err) {
+			b.mu.Lock()
+			delete(b.namedSets, set)
+			b.mu.Unlock()
+			return nil
+		}
+		return fmt.Errorf("nftlib: flush set %s %s %s (recreate): %w", family, table, set, err)
+	}
+
+	b.mu.Lock()
+	delete(b.namedSets, set)
+	b.mu.Unlock()
 	return nil
 }
 
