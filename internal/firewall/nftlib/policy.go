@@ -18,6 +18,14 @@ type hardeningRuleSnapshot struct {
 	Verdict expr.VerdictKind
 }
 
+type portsPolicyRule struct {
+	Chain    string
+	Protocol string
+	PortFrom int
+	PortTo   int
+	Verdict  expr.VerdictKind
+}
+
 const floodRuleFlushBatchSize = 128
 
 func (b *Backend) ApplyFloodRules(c *config.Config) error {
@@ -148,37 +156,49 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
 	if err := b.ensureChain("output"); err != nil {
 		return err
 	}
-	if err := b.flushChain("input"); err != nil {
+	rules := buildPortsAllowlistRules(cfg)
+	if err := b.flushChainsAndAppendVerdictsAtomically([]string{"input", "output"}, rules); err != nil {
 		return err
-	}
-	if err := b.flushChain("output"); err != nil {
-		return err
-	}
-	for _, pr := range cfg.TCPIn {
-		_ = pr
-		if err := b.appendVerdictRule("input", expr.VerdictAccept); err != nil {
-			return err
-		}
-	}
-	for _, pr := range cfg.UDPIn {
-		_ = pr
-		if err := b.appendVerdictRule("input", expr.VerdictAccept); err != nil {
-			return err
-		}
-	}
-	for _, pr := range cfg.TCPOut {
-		_ = pr
-		if err := b.appendVerdictRule("output", expr.VerdictAccept); err != nil {
-			return err
-		}
-	}
-	for _, pr := range cfg.UDPOut {
-		_ = pr
-		if err := b.appendVerdictRule("output", expr.VerdictAccept); err != nil {
-			return err
-		}
 	}
 	return nil
+}
+
+func buildPortsAllowlistRules(cfg *config.PortsConfig) []portsPolicyRule {
+	if cfg == nil {
+		return nil
+	}
+	rules := make([]portsPolicyRule, 0, len(cfg.TCPIn)+len(cfg.UDPIn)+len(cfg.TCPOut)+len(cfg.UDPOut))
+	for _, pr := range cfg.TCPIn {
+		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+	}
+	for _, pr := range cfg.UDPIn {
+		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+	}
+	for _, pr := range cfg.TCPOut {
+		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+	}
+	for _, pr := range cfg.UDPOut {
+		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept})
+	}
+	return rules
+}
+
+func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules []portsPolicyRule) error {
+	for _, name := range chains {
+		ch, err := b.getChain(name)
+		if err != nil {
+			return err
+		}
+		b.conn.FlushChain(ch)
+	}
+	for _, r := range rules {
+		ch, err := b.getChain(r.Chain)
+		if err != nil {
+			return err
+		}
+		b.conn.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: []expr.Any{&expr.Verdict{Kind: r.Verdict}}})
+	}
+	return b.conn.Flush()
 }
 
 func (b *Backend) ApplyConnlimit(rules []config.ConnlimitRule) error {
