@@ -3,8 +3,11 @@
 package nftlib
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"time"
 
 	"cfm/internal/firewall"
@@ -113,11 +116,46 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 // ── Table/set dump methods — delegate to cli (text/JSON formatting) ──────────
 
 func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
-	return b.cli.ListTableJSON(family, table)
+	if strings.TrimSpace(family) != "inet" || strings.TrimSpace(table) != cfmTableName {
+		return nil, fmt.Errorf("nftlib: unsupported table path %s %s", family, table)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	tbl, err := b.lookupTable()
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListTableJSON %s %s: %w", family, table, err)
+	}
+	sets, err := b.conn.GetSets(tbl)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListTableJSON %s %s: %w", family, table, err)
+	}
+	names := make([]string, 0, len(sets))
+	for _, s := range sets {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	return json.MarshalIndent(map[string]any{
+		"family": "inet",
+		"table":  cfmTableName,
+		"sets":   names,
+	}, "", "  ")
 }
 
 func (b *Backend) ListSetJSON(family, table, set string) ([]byte, error) {
-	return b.cli.ListSetJSON(family, table, set)
+	if strings.TrimSpace(family) != "inet" || strings.TrimSpace(table) != cfmTableName {
+		return nil, fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
+	}
+	elems, err := b.ListSetElementsRaw(set)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(elems)
+	return json.MarshalIndent(map[string]any{
+		"family":   "inet",
+		"table":    cfmTableName,
+		"set":      set,
+		"elements": elems,
+	}, "", "  ")
 }
 
 func (b *Backend) ListTableTextNoDNS(family, table string) (string, error) {

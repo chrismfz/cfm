@@ -155,6 +155,12 @@ useradd --system --gid cfm --no-create-home \
 
 The `cfm` group is required for the SSLCollector unix socket and token file to be readable by OpenResty/Angie workers. The cfm daemon logs a warning at startup if the group is missing and the socket server is enabled.
 
+### nftlib-only deployment requirement clarity
+
+For `CFM_FIREWALL_ENGINE=nftlib`, structured inspection output is native (`ListTableJSON`, `ListSetJSON`) and does not shell out to `nft`.
+
+The CLI text inspection paths (`ListTableTextNoDNS`, `ListChainText`) still use the CLI backend adapter, so those specific commands require the `nft` binary to exist on the host.
+
 ---
 
 ## 3. Repository Layout
