@@ -39,24 +39,36 @@ func (b *Backend) ApplyFeed(_ context.Context, f blocklists.Feed, res *blocklist
 	}
 	b.extFeedMu.Unlock()
 
-	// Write per-feed sets. EnsureSetDynamic delegates to cli (rare operation);
-	// ReplaceSetFlushAdd is nftlib-native (zero forks, one Flush per set).
+	// Write per-feed sets. Both EnsureSetDynamic and ReplaceSetFlushAdd are
+	// nftlib-native (zero forks, one Flush per set).
 	nameH4 := fmt.Sprintf("%s_v4_hosts_%s", base, feedKey)
 	nameN4 := fmt.Sprintf("%s_v4_nets_%s", base, feedKey)
 	nameH6 := fmt.Sprintf("%s_v6_hosts_%s", base, feedKey)
 	nameN6 := fmt.Sprintf("%s_v6_nets_%s", base, feedKey)
 
-	if err := b.EnsureSetDynamic(nameH4, false, false); err == nil {
-		_ = b.ReplaceSetFlushAdd(nameH4, h4, ttl)
+	if err := b.EnsureSetDynamic(nameH4, false, false); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameH4, err)
 	}
-	if err := b.EnsureSetDynamic(nameN4, false, true); err == nil {
-		_ = b.ReplaceSetFlushAdd(nameN4, n4, ttl)
+	if err := b.ReplaceSetFlushAdd(nameH4, h4, ttl); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameH4, err)
 	}
-	if err := b.EnsureSetDynamic(nameH6, true, false); err == nil {
-		_ = b.ReplaceSetFlushAdd(nameH6, h6, ttl)
+	if err := b.EnsureSetDynamic(nameN4, false, true); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameN4, err)
 	}
-	if err := b.EnsureSetDynamic(nameN6, true, true); err == nil {
-		_ = b.ReplaceSetFlushAdd(nameN6, n6, ttl)
+	if err := b.ReplaceSetFlushAdd(nameN4, n4, ttl); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameN4, err)
+	}
+	if err := b.EnsureSetDynamic(nameH6, true, false); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameH6, err)
+	}
+	if err := b.ReplaceSetFlushAdd(nameH6, h6, ttl); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameH6, err)
+	}
+	if err := b.EnsureSetDynamic(nameN6, true, true); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed ensure %s: %w", nameN6, err)
+	}
+	if err := b.ReplaceSetFlushAdd(nameN6, n6, ttl); err != nil {
+		return fmt.Errorf("nftlib ApplyFeed write %s: %w", nameN6, err)
 	}
 
 	b.extFeedMu.Lock()
@@ -98,25 +110,32 @@ func (b *Backend) RebuildExternalUnions() error {
 	blockH6 = feedutil.DedupKeepOrder(blockH6)
 	blockN6 = feedutil.DedupKeepOrder(blockN6)
 
-	_ = b.EnsureSetDynamic("allow_ext_v4_hosts", false, false)
-	_ = b.EnsureSetDynamic("allow_ext_v4_nets", false, true)
-	_ = b.EnsureSetDynamic("allow_ext_v6_hosts", true, false)
-	_ = b.EnsureSetDynamic("allow_ext_v6_nets", true, true)
-	_ = b.EnsureSetDynamic("block_ext_v4_hosts", false, false)
-	_ = b.EnsureSetDynamic("block_ext_v4_nets", false, true)
-	_ = b.EnsureSetDynamic("block_ext_v6_hosts", true, false)
-	_ = b.EnsureSetDynamic("block_ext_v6_nets", true, true)
+	var firstErr error
+	track := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 
-	_ = b.ReplaceSetFlushAdd("allow_ext_v4_hosts", allowH4, nil)
-	_ = b.ReplaceSetFlushAdd("allow_ext_v4_nets", allowN4, nil)
-	_ = b.ReplaceSetFlushAdd("allow_ext_v6_hosts", allowH6, nil)
-	_ = b.ReplaceSetFlushAdd("allow_ext_v6_nets", allowN6, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v4_hosts", blockH4, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v4_nets", blockN4, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v6_hosts", blockH6, nil)
-	_ = b.ReplaceSetFlushAdd("block_ext_v6_nets", blockN6, nil)
+	track(b.EnsureSetDynamic("allow_ext_v4_hosts", false, false))
+	track(b.EnsureSetDynamic("allow_ext_v4_nets", false, true))
+	track(b.EnsureSetDynamic("allow_ext_v6_hosts", true, false))
+	track(b.EnsureSetDynamic("allow_ext_v6_nets", true, true))
+	track(b.EnsureSetDynamic("block_ext_v4_hosts", false, false))
+	track(b.EnsureSetDynamic("block_ext_v4_nets", false, true))
+	track(b.EnsureSetDynamic("block_ext_v6_hosts", true, false))
+	track(b.EnsureSetDynamic("block_ext_v6_nets", true, true))
 
-	return nil
+	track(b.ReplaceSetFlushAdd("allow_ext_v4_hosts", allowH4, nil))
+	track(b.ReplaceSetFlushAdd("allow_ext_v4_nets", allowN4, nil))
+	track(b.ReplaceSetFlushAdd("allow_ext_v6_hosts", allowH6, nil))
+	track(b.ReplaceSetFlushAdd("allow_ext_v6_nets", allowN6, nil))
+	track(b.ReplaceSetFlushAdd("block_ext_v4_hosts", blockH4, nil))
+	track(b.ReplaceSetFlushAdd("block_ext_v4_nets", blockN4, nil))
+	track(b.ReplaceSetFlushAdd("block_ext_v6_hosts", blockH6, nil))
+	track(b.ReplaceSetFlushAdd("block_ext_v6_nets", blockN6, nil))
+
+	return firstErr
 }
 
 // PruneExternalFeeds removes sets whose key is not in activeKeys.

@@ -110,10 +110,10 @@ func tableFamilyFromString(s string) nftables.TableFamily {
 
 func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.challengeRedirectEnabled = enabled
-	b.mu.Unlock()
 	if !enabled {
-		_ = b.CleanupChallengeRedirect()
+		_ = b.dnatOffUnlocked("", "")
 	}
 }
 
@@ -278,10 +278,9 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) error {
 	return b.conn.Flush()
 }
 
-func (b *Backend) DNATOff(family, table string) error {
+// dnatOffUnlocked removes all managed DNAT rules. Must be called with b.mu held.
+func (b *Backend) dnatOffUnlocked(family, table string) error {
 	family, table = dnatDefaults(family, table)
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	_, ch, err := b.getDNATTableAndChain(family, table)
 	if err != nil || ch == nil {
 		return err
@@ -296,4 +295,10 @@ func (b *Backend) DNATOff(family, table string) error {
 		}
 	}
 	return b.conn.Flush()
+}
+
+func (b *Backend) DNATOff(family, table string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dnatOffUnlocked(family, table)
 }

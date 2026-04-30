@@ -8,6 +8,7 @@ import (
 	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/autoblock"
 	"cfm/internal/logging"
 	"cfm/internal/reporting"
 	"context"
@@ -131,6 +132,11 @@ type Backend struct {
 	portScanMu      sync.Mutex
 	portScanRunning bool
 
+	// autoblock evaluator and per-IP debounce maps (moved from package-level vars).
+	ab             *autoblock.Evaluator
+	lastAutoBlockAt map[string]time.Time
+	lastIgnoredAt   map[string]time.Time
+
 	apiCacheMu         sync.Mutex
 	apiCacheHost       string
 	apiCacheV4         []string
@@ -169,8 +175,14 @@ func New() *Backend {
 		extBlock:             make(map[string]extFeedData),
 		selfIPs:              make(map[string]struct{}),
 		challengeDNATEnabled: true,
+		ab:                   autoblock.New(),
+		lastAutoBlockAt:      make(map[string]time.Time),
+		lastIgnoredAt:        make(map[string]time.Time),
 	}
 }
+
+// IsSelfIP reports whether s is one of this machine's own IP addresses.
+func (b *Backend) IsSelfIP(s string) bool { return b.isSelfIPString(s) }
 
 func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	if b == nil {

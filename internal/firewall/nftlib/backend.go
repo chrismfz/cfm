@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/autoblock"
 	"cfm/internal/firewall/nft"
 	"cfm/internal/reporting"
 
@@ -88,6 +90,26 @@ type Backend struct {
 	cfgDir        string
 
 	challengeRedirectEnabled bool
+
+	// cfg is stored in ApplyFloodRules so telemetry methods can read throttle
+	// and portscan config without re-reading the config file on every tick.
+	cfg *cfgpkg.Config
+
+	// ab evaluates the sliding-window auto-block algorithm.
+	ab *autoblock.Evaluator
+
+	// last tracks previous flood counter packet counts for delta logging.
+	last map[string]uint64
+
+	// Overlap guards for telemetry goroutines.
+	floodDumpMu      sync.Mutex
+	floodDumpRunning bool
+	portScanMu       sync.Mutex
+	portScanRunning  bool
+
+	// Per-IP debounce maps for auto-block actions.
+	lastAutoBlockAt map[string]time.Time
+	lastIgnoredAt   map[string]time.Time
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.
@@ -97,12 +119,16 @@ func New() (*Backend, error) {
 		return nil, fmt.Errorf("nftlib: open netlink conn: %w", err)
 	}
 	return &Backend{
-		conn:      conn,
-		cli:       nft.New(),
+		conn:                     conn,
+		cli:                      nft.New(),
 		challengeRedirectEnabled: true,
-		namedSets: make(map[string]*nftables.Set),
-		extAllow:  make(map[string]extFeedData),
-		extBlock:  make(map[string]extFeedData),
-		feedKeys:  make(map[string]struct{}),
+		namedSets:                make(map[string]*nftables.Set),
+		extAllow:                 make(map[string]extFeedData),
+		extBlock:                 make(map[string]extFeedData),
+		feedKeys:                 make(map[string]struct{}),
+		ab:                       autoblock.New(),
+		last:                     make(map[string]uint64),
+		lastAutoBlockAt:          make(map[string]time.Time),
+		lastIgnoredAt:            make(map[string]time.Time),
 	}, nil
 }
