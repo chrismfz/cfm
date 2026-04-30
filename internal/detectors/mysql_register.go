@@ -139,29 +139,33 @@ func init() {
 		// ── QUERY_RULES multiline block ──────────────────────────────────────
 		rawQueryLines := kvLines(kv, "QUERY_RULES")
 		queryRules := parseQueryRules(rawQueryLines)
+		logMySQLGovf("[detectors] %s mysql_governor QUERY_RULES loaded=%d source=detectors.conf", section, len(queryRules))
 
 		// ── CONN_RULES multiline block ───────────────────────────────────────
 		rawConnLines := kvLines(kv, "CONN_RULES")
 		connRules := parseConnRules(rawConnLines)
+		logMySQLGovf("[detectors] %s mysql_governor CONN_RULES loaded=%d source=detectors.conf", section, len(connRules))
 
-		logMySQLGovf("[detectors] %s raw QUERY_RULES lines=%d raw CONN_RULES lines=%d",
-			section, len(rawQueryLines), len(rawConnLines))
+		if logging.DebugEnabled() {
+			logMySQLGovf("[detectors] %s raw QUERY_RULES lines=%d raw CONN_RULES lines=%d",
+				section, len(rawQueryLines), len(rawConnLines))
 
-		for i, line := range rawQueryLines {
-			logMySQLGovf("[detectors] %s QUERY_RULES raw[%d]=%q", section, i, line)
-		}
-		for i, line := range rawConnLines {
-			logMySQLGovf("[detectors] %s CONN_RULES raw[%d]=%q", section, i, line)
-		}
+			for i, line := range rawQueryLines {
+				logMySQLGovf("[detectors] %s QUERY_RULES raw[%d]=%q", section, i, line)
+			}
+			for i, line := range rawConnLines {
+				logMySQLGovf("[detectors] %s CONN_RULES raw[%d]=%q", section, i, line)
+			}
 
-		for i, r := range queryRules {
-			logMySQLGovf("[detectors] %s query_rule[%d]: user=%q max=%s action=%s lock_fanout=%d conn_pct=%.0f",
-				section, i, r.UserPattern, r.MaxTime, queryActionName(r.Action), r.LockFanout, r.ConnPct)
-		}
+			for i, r := range queryRules {
+				logMySQLGovf("[detectors] %s query_rule[%d]: user=%q max=%s action=%s lock_fanout=%d conn_pct=%.0f",
+					section, i, r.UserPattern, r.MaxTime, queryActionName(r.Action), r.LockFanout, r.ConnPct)
+			}
 
-		for i, r := range connRules {
-			logMySQLGovf("[detectors] %s conn_rule[%d]: user=%q max=%d action=%s conn_pct=%.0f",
-				section, i, r.UserPattern, r.Max, connActionName(r.Action), r.ConnPct)
+			for i, r := range connRules {
+				logMySQLGovf("[detectors] %s conn_rule[%d]: user=%q max=%d action=%s conn_pct=%.0f",
+					section, i, r.UserPattern, r.Max, connActionName(r.Action), r.ConnPct)
+			}
 		}
 
 		// ── Build GovernorConfig ─────────────────────────────────────────────
