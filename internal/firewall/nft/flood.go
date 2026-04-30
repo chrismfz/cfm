@@ -2,6 +2,7 @@ package nft
 
 import (
 	cfgpkg "cfm/internal/config"
+	"fmt"
 	"time"
 )
 
@@ -60,6 +61,14 @@ func boolU64(b bool) uint64 {
 }
 
 func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
+	start := time.Now()
+	b.logPhase("ApplyFloodRules", "start", 0, nil, fmt.Sprintf("connlimit_rules=%d portflood_rules=%d", len(c.Connlimit.Rules), len(c.PortFlood.Rules)))
+	var err error
+	defer func() {
+		s := "ok"
+		if err != nil { s = "fail" }
+		b.logPhase("ApplyFloodRules", s, time.Since(start), err, fmt.Sprintf("connlimit_rules=%d portflood_rules=%d", len(c.Connlimit.Rules), len(c.PortFlood.Rules)))
+	}()
 	b.cfg = c
 	const meterRefreshInterval = 15 * time.Minute
 	h := floodCfgHash(c)
@@ -70,7 +79,7 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	}
 	b.lastFloodHash = h
 	if !b.tableExists() {
-		if err := b.EnsureBase(); err != nil {
+		if err = b.EnsureBase(); err != nil {
 			return err
 		}
 	}
@@ -78,7 +87,7 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	_ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
 	_ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)
 	b.ensureThrottleSets()
-	if err := b.ApplyHardeningRules(c); err != nil {
+	if err = b.ApplyHardeningRules(c); err != nil {
 		return err
 	}
 	if c.PacketRate.Rate > 0 {
@@ -86,14 +95,14 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 		if burst <= 0 {
 			burst = c.PacketRate.Rate * 2
 		}
-		if err := b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
+		if err = b.applyPerIPRateLimit(c.PacketRate.Rate, burst, c.PacketRate.Mode); err != nil {
 			return err
 		}
 	}
-	if err := b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
+	if err = b.ApplyConnlimit(c.Connlimit.Rules); err != nil {
 		return err
 	}
-	if err := b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
+	if err = b.ApplyPortFlood(c.PortFlood.Rules); err != nil {
 		return err
 	}
 	b.lastFloodRebuild = time.Now()
