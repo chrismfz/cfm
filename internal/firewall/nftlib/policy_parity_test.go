@@ -22,8 +22,12 @@ type parityRule struct {
 
 func assertSemanticParity(t *testing.T, domain string, got, want []parityRule) {
 	t.Helper()
-	sort.Slice(got, func(i, j int) bool { return got[i].Chain+got[i].Path+got[i].Verdict < got[j].Chain+got[j].Path+got[j].Verdict })
-	sort.Slice(want, func(i, j int) bool { return want[i].Chain+want[i].Path+want[i].Verdict < want[j].Chain+want[j].Path+want[j].Verdict })
+	sort.Slice(got, func(i, j int) bool {
+		return got[i].Chain+got[i].Path+got[i].Verdict < got[j].Chain+got[j].Path+got[j].Verdict
+	})
+	sort.Slice(want, func(i, j int) bool {
+		return want[i].Chain+want[i].Path+want[i].Verdict < want[j].Chain+want[j].Path+want[j].Verdict
+	})
 	gb, _ := json.Marshal(got)  // normalized ListTableJSON/ListSetJSON-style comparisons
 	wb, _ := json.Marshal(want) // backend-specific formatting is intentionally ignored
 	if string(gb) != string(wb) {
@@ -131,7 +135,7 @@ func TestPolicyDomainParity_Outbound(t *testing.T) {
 
 // Compile-time signature guards for parity-test-consumed helpers.
 var (
-	_ func(*config.Config) ([]expr.VerdictKind, error) = buildFloodVerdictPlan
+	_ func(*config.Config) ([]expr.VerdictKind, error)  = buildFloodVerdictPlan
 	_ func(*config.Config) []hardeningRuleSnapshot      = buildHardeningRuleSnapshots
 	_ func(*config.PortsConfig) []hardeningRuleSnapshot = buildPortsPolicySnapshots
 	_ func(*config.PortsConfig) []portsPolicyRule       = buildPortsAllowlistRules

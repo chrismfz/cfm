@@ -66,7 +66,9 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	var err error
 	defer func() {
 		s := "ok"
-		if err != nil { s = "fail" }
+		if err != nil {
+			s = "fail"
+		}
 		b.logPhase("ApplyFloodRules", s, time.Since(start), err, fmt.Sprintf("connlimit_rules=%d portflood_rules=%d", len(c.Connlimit.Rules), len(c.PortFlood.Rules)))
 	}()
 	b.cfg = c

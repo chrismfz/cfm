@@ -132,7 +132,7 @@ type Backend struct {
 	portScanRunning bool
 
 	// autoblock evaluator and per-IP debounce maps (moved from package-level vars).
-	ab             *autoblock.Evaluator
+	ab              *autoblock.Evaluator
 	lastAutoBlockAt map[string]time.Time
 	lastIgnoredAt   map[string]time.Time
 
@@ -179,7 +179,6 @@ func New() *Backend {
 		lastIgnoredAt:        make(map[string]time.Time),
 	}
 }
-
 
 func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	if b == nil {
@@ -341,7 +340,16 @@ func (b *Backend) ensureSet(name, typ string) error {
 	return b.ensureSetWithFlags(name, typ, "timeout")
 }
 
-func (b *Backend) EnsureBase() error {
+func (b *Backend) EnsureBase() (err error) {
+	start := time.Now()
+	b.logPhase("EnsureBase", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("EnsureBase", st, time.Since(start), err, "")
+	}()
 	// 1) Ensure table
 	if !b.tableExists() {
 		if err := b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName)); err != nil {
@@ -1948,7 +1956,16 @@ func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
 
 // EnsureChallengeRedirect installs NAT redirect rules for IPs in challenge sets.
 // httpListen / httpsListen are like "127.0.0.1:9098" or ":9098".
-func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error {
+func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
+	start := time.Now()
+	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "")
+	}()
 	httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
 	httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
 	if !okHTTP && !okHTTPS {

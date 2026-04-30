@@ -1,4 +1,3 @@
-
 // nft CLI helpers for rule-building operations in the nftlib backend.
 // These are used at startup and config reload only — not the hot path.
 // Hot-path set operations use the netlink conn field instead.

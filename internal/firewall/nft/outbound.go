@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	cfgpkg "cfm/internal/config"
 )
@@ -25,7 +26,17 @@ import (
 //     inet cfm cfm_outbound_observe`).
 //   - Phase 2 will add a sibling cfm_outbound_enforce chain for throttle/drop;
 //     this name reservation matters now.
-func (b *Backend) ApplyOutboundObserve(cfg *cfgpkg.OutboundConfig) error {
+func (b *Backend) ApplyOutboundObserve(cfg *cfgpkg.OutboundConfig) (err error) {
+	start := time.Now()
+	enabled := cfg != nil && cfg.Enabled
+	b.logPhase("ApplyOutboundObserve", "start", 0, nil, fmt.Sprintf("enabled=%t", enabled))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyOutboundObserve", st, time.Since(start), err, fmt.Sprintf("enabled=%t", enabled))
+	}()
 	if cfg == nil || !cfg.Enabled || cfg.NFLOGGroup <= 0 {
 		// Best-effort cleanup if previously installed.
 		_ = b.nftExpr(`delete chain inet cfm cfm_outbound_observe`)

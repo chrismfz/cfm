@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -121,7 +122,16 @@ func (b *Backend) CleanupChallengeRedirect() error {
 	return b.DNATOff("", "")
 }
 
-func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) error {
+func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
+	start := time.Now()
+	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "")
+	}()
 	if !b.challengeRedirectEnabled {
 		return b.CleanupChallengeRedirect()
 	}
@@ -220,7 +230,16 @@ func (b *Backend) DNATShow(family, table string) (string, error) {
 	return out.String(), nil
 }
 
-func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) error {
+func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err error) {
+	start := time.Now()
+	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	}()
 	family, table = dnatDefaults(family, table)
 	if httpPort <= 0 || httpsPort <= 0 {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
@@ -297,7 +316,16 @@ func (b *Backend) dnatOffUnlocked(family, table string) error {
 	return b.conn.Flush()
 }
 
-func (b *Backend) DNATOff(family, table string) error {
+func (b *Backend) DNATOff(family, table string) (err error) {
+	start := time.Now()
+	b.logPhase("DNATOff", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("DNATOff", st, time.Since(start), err, "")
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dnatOffUnlocked(family, table)

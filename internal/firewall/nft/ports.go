@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"cfm/internal/config"
 	"cfm/internal/logging"
@@ -104,7 +105,16 @@ func (b *Backend) replacePortSet(name string, prs []config.PortRange) error {
 }
 
 // ApplyPortsPolicy συνθέτει τα allow/drop των θυρών και (προαιρετικά) το port-scan tracking.
-func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) error {
+func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
+	start := time.Now()
+	b.logPhase("ApplyPortsPolicy", "start", 0, nil, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyPortsPolicy", st, time.Since(start), err, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+	}()
 	// μικρό summary
 	logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
 		len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))

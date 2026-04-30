@@ -7,11 +7,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"cfm/internal/config"
 )
 
-func (b *Backend) ApplyOutboundObserve(cfg *config.OutboundConfig) error {
+func (b *Backend) ApplyOutboundObserve(cfg *config.OutboundConfig) (err error) {
+	start := time.Now()
+	enabled := cfg != nil && cfg.Enabled
+	b.logPhase("ApplyOutboundObserve", "start", 0, nil, fmt.Sprintf("enabled=%t", enabled))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("ApplyOutboundObserve", st, time.Since(start), err, fmt.Sprintf("enabled=%t", enabled))
+	}()
 	if cfg == nil || !cfg.Enabled || cfg.NFLOGGroup <= 0 {
 		_ = b.nftExec("delete chain inet cfm cfm_outbound_observe")
 		return nil

@@ -38,20 +38,20 @@ var _ firewall.Backend = (*Backend)(nil)
 const (
 	cfmTableName = "cfm"
 
-	setBlockV4    = "block_v4"
-	setBlockV6    = "block_v6"
-	setAllowV4    = "allow_v4"
-	setAllowV6    = "allow_v6"
-	setBlockV4Net = "block_v4_nets"
-	setBlockV6Net = "block_v6_nets"
-	setAllowV4Net = "allow_v4_nets"
-	setAllowV6Net = "allow_v6_nets"
-	setIgnoreV4   = "ignore_v4"
-	setIgnoreV6   = "ignore_v6"
+	setBlockV4     = "block_v4"
+	setBlockV6     = "block_v6"
+	setAllowV4     = "allow_v4"
+	setAllowV6     = "allow_v6"
+	setBlockV4Net  = "block_v4_nets"
+	setBlockV6Net  = "block_v6_nets"
+	setAllowV4Net  = "allow_v4_nets"
+	setAllowV6Net  = "allow_v6_nets"
+	setIgnoreV4    = "ignore_v4"
+	setIgnoreV6    = "ignore_v6"
 	setIgnoreV4Net = "ignore_v4_nets"
 	setIgnoreV6Net = "ignore_v6_nets"
-	setChalV4     = "challenge_v4"
-	setChalV6     = "challenge_v6"
+	setChalV4      = "challenge_v4"
+	setChalV6      = "challenge_v6"
 )
 
 // Backend implements firewall.Backend using github.com/google/nftables.
@@ -105,7 +105,6 @@ type Backend struct {
 	// flood rebuild deduplication (same semantics as nft backend).
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
-
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.

@@ -17,14 +17,22 @@ import (
 // EnsureBase creates all core CFM-owned tables, chains, and sets using netlink.
 // The local set handle cache is invalidated so the next nftlib operation
 // re-fetches handles from the kernel.
-func (b *Backend) EnsureBase() error {
+func (b *Backend) EnsureBase() (err error) {
+	start := time.Now()
+	b.logPhase("EnsureBase", "start", 0, nil, "")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("EnsureBase", st, time.Since(start), err, "")
+	}()
 	b.mu.Lock()
-
 
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddTable(table)
 
-prio := -50
+	prio := -50
 	if b.cfg != nil && b.cfg.NFT.InputPriority != 0 {
 		prio = b.cfg.NFT.InputPriority
 	}
@@ -101,7 +109,6 @@ prio := -50
 		{name: "th_pf_udp_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
 		{name: "throttled_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
 		{name: "throttled_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
-
 	} {
 		b.conn.AddSet(&nftables.Set{
 			Table:      table,
@@ -133,7 +140,6 @@ prio := -50
 
 	return nil
 }
-
 
 func (b *Backend) refreshSelfSets() {
 	_ = b.nftExec("flush set inet cfm self_v4")
@@ -251,8 +257,6 @@ func (b *Backend) applyBaseInputRules() {
 	}
 }
 
-
-
 // DropEverything removes all CFM-owned firewall state.
 func (b *Backend) DropEverything() error {
 	b.mu.Lock()
@@ -294,7 +298,7 @@ func (b *Backend) ResetTable() error {
 	}
 	ensureDur := time.Since(ensureStart)
 
-logging.Logf("[nftlib] reset table timing: drop=%s ensure=%s total=%s", dropDur, ensureDur, time.Since(start))
+	logging.Logf("[nftlib] reset table timing: drop=%s ensure=%s total=%s", dropDur, ensureDur, time.Since(start))
 	return nil
 }
 
