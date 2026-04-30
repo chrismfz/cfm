@@ -1,8 +1,6 @@
 //go:build linux
 
 // Wiring methods wire enrichment, reporting, and logging into the backend.
-// All wiring is forwarded to the embedded cli backend so that delegated policy
-// methods have access to the same enricher / reporter configuration.
 package nftlib
 
 import (
@@ -18,28 +16,27 @@ import (
 
 func (b *Backend) SetConfigDir(dir string) {
 	b.cfgDir = strings.TrimSpace(dir)
-	b.cli.SetConfigDir(dir)
 }
 
-// EnableEnrichment initialises the GeoIP/ASN enricher and caches the handle so
-// GetEnricher() returns a valid enricher even for methods handled natively.
 func (b *Backend) EnableEnrichment(dirs ...string) {
-	b.cli.EnableEnrichment(dirs...)
-	b.enr = b.cli.GetEnricher()
+	if b.enr != nil {
+		return
+	}
+	if e, _ := enrichpkg.New(dirs...); e != nil {
+		b.enr = e
+	}
 }
 
 func (b *Backend) GetEnricher() *enrichpkg.Enricher {
-	return b.cli.GetEnricher()
+	return b.enr
 }
 
 func (b *Backend) SetReporter(r reporting.Reporter) {
 	b.reporter = r
-	b.cli.SetReporter(r)
 }
 
 func (b *Backend) SetChallengeLogger(f func(format string, args ...any)) {
 	b.challengeLogf = f
-	b.cli.SetChallengeLogger(f)
 }
 
 func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) error {
