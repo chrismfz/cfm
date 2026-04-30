@@ -212,25 +212,7 @@ func (b *Backend) CleanupChallengeDNAT() error {
 // source: "detector" | "autoblock" | "manual"
 // mode:   "ttl" | "permanent" | "dryrun"
 func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) error {
-	if b == nil || b.reporter == nil || b.cfg == nil {
-		return nil
-	}
-	switch source {
-	case "detector":
-		// Allow if DETECTORS_SEND_TO_API enabled, OR fall back to AUTOBLOCK_SEND_TO_API.
-		if !(b.cfg.API.DetectorsSend || b.cfg.API.AutoBlockSend) {
-			return nil
-		}
-	case "autoblock":
-		if !b.cfg.API.AutoBlockSend {
-			return nil
-		}
-	case "manual":
-		if !b.cfg.API.ManualBlockSend {
-			return nil
-		}
-	default:
-		// Unknown source → be conservative (no report)
+	if b == nil || b.reporter == nil || !firewall.ShouldReportBlock(b.cfg, source) {
 		return nil
 	}
 	return b.reporter.ReportBlock(ip, comment, source, mode, ttlSeconds)
