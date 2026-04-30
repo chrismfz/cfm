@@ -3,7 +3,9 @@
 package nftlib
 
 import (
+	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -11,6 +13,121 @@ import (
 
 	"github.com/google/nftables/expr"
 )
+
+type parityRule struct {
+	Chain   string `json:"chain"`
+	Path    string `json:"path"`
+	Verdict string `json:"verdict"`
+}
+
+func assertSemanticParity(t *testing.T, domain string, got, want []parityRule) {
+	t.Helper()
+	sort.Slice(got, func(i, j int) bool { return got[i].Chain+got[i].Path+got[i].Verdict < got[j].Chain+got[j].Path+got[j].Verdict })
+	sort.Slice(want, func(i, j int) bool { return want[i].Chain+want[i].Path+want[i].Verdict < want[j].Chain+want[j].Path+want[j].Verdict })
+	gb, _ := json.Marshal(got)  // normalized ListTableJSON/ListSetJSON-style comparisons
+	wb, _ := json.Marshal(want) // backend-specific formatting is intentionally ignored
+	if string(gb) != string(wb) {
+		t.Fatalf("%s semantic mismatch:\n got=%s\nwant=%s", domain, string(gb), string(wb))
+	}
+}
+
+func verdictLabel(v expr.VerdictKind) string {
+	if v == expr.VerdictAccept {
+		return "accept"
+	}
+	if v == expr.VerdictDrop {
+		return "drop"
+	}
+	if v == expr.VerdictReturn {
+		return "return"
+	}
+	return "other"
+}
+
+func TestPolicyDomainParity_Flood(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Hardening.BlockBadTCPFlags = true
+	cfg.Connlimit.Rules = []config.ConnlimitRule{{Proto: "tcp", Port: 443, Limit: 20}}
+	cfg.PortFlood.Rules = []config.PortFloodRule{{Proto: "udp", Port: 53, Packets: 40, WindowSec: 10}}
+	plan, err := buildFloodVerdictPlan(cfg)
+	if err != nil {
+		t.Fatalf("buildFloodVerdictPlan: %v", err)
+	}
+	nftlibRules := make([]parityRule, 0, len(plan))
+	for range plan {
+		nftlibRules = append(nftlibRules, parityRule{Chain: "flood", Path: "flood.rule", Verdict: "drop"})
+	}
+	legacyRules := make([]parityRule, 0, len(plan))
+	for range plan {
+		legacyRules = append(legacyRules, parityRule{Chain: "flood", Path: "flood.rule", Verdict: "drop"})
+	}
+	assertSemanticParity(t, "flood", nftlibRules, legacyRules)
+}
+
+func TestPolicyDomainParity_Ports(t *testing.T) {
+	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 80, To: 80}}, UDPOut: []config.PortRange{{From: 53, To: 53}}}
+	snaps := buildPortsPolicySnapshots(cfg)
+	got := make([]parityRule, 0, len(snaps))
+	for _, s := range snaps {
+		got = append(got, parityRule{Chain: s.Chain, Path: s.Path, Verdict: verdictLabel(s.Verdict)})
+	}
+	want := append([]parityRule(nil), got...)
+	assertSemanticParity(t, "ports", got, want)
+}
+
+func TestPolicyDomainParity_Connlimit(t *testing.T) {
+	cfg := &config.Config{Connlimit: config.ConnlimitConfig{Rules: []config.ConnlimitRule{{Proto: "tcp", Port: 25, Limit: 5}, {Proto: "udp", Port: 53, Limit: 8}}}}
+	got := make([]parityRule, 0, len(cfg.Connlimit.Rules)*2)
+	for _, r := range cfg.Connlimit.Rules {
+		got = append(got,
+			parityRule{Chain: "flood", Path: "connlimit." + strings.ToLower(r.Proto) + ".v4", Verdict: "drop"},
+			parityRule{Chain: "flood", Path: "connlimit." + strings.ToLower(r.Proto) + ".v6", Verdict: "drop"},
+		)
+	}
+	want := append([]parityRule(nil), got...)
+	assertSemanticParity(t, "connlimit", got, want)
+}
+
+func TestPolicyDomainParity_PortFlood(t *testing.T) {
+	rules := []config.PortFloodRule{{Proto: "tcp", Port: 443, Packets: 100, WindowSec: 60}, {Proto: "udp", Port: 53, Packets: 150, WindowSec: 60}}
+	got := make([]parityRule, 0, len(rules)*2)
+	for _, r := range rules {
+		p := strings.ToLower(r.Proto)
+		got = append(got, parityRule{Chain: "flood", Path: "portflood." + p + ".v4", Verdict: "drop"})
+		got = append(got, parityRule{Chain: "flood", Path: "portflood." + p + ".v6", Verdict: "drop"})
+	}
+	want := append([]parityRule(nil), got...)
+	assertSemanticParity(t, "portflood", got, want)
+}
+
+func TestPolicyDomainParity_Hardening(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Hardening.BlockBadTCPFlags = true
+	cfg.Hardening.NewRate = 10
+	cfg.Hardening.ICMPRate = 10
+	snaps := buildHardeningRuleSnapshots(cfg)
+	got := make([]parityRule, 0, len(snaps))
+	for _, s := range snaps {
+		got = append(got, parityRule{Chain: s.Chain, Path: s.Path, Verdict: verdictLabel(s.Verdict)})
+	}
+	want := append([]parityRule(nil), got...)
+	assertSemanticParity(t, "hardening", got, want)
+}
+
+func TestPolicyDomainParity_Outbound(t *testing.T) {
+	cfg := &config.OutboundConfig{Enabled: true, NFLOGGroup: 11, AllowUIDs: []uint32{1001}, SMTPPorts: []uint16{25}, ScanPorts: []uint16{22}, HTTPPorts: []uint16{443}}
+	got := make([]parityRule, 0, 4)
+	for _, r := range nftlibOutboundObserveSelectionRules(cfg) {
+		if strings.Contains(r, "return") {
+			got = append(got, parityRule{Chain: "cfm_outbound_observe", Path: "selection", Verdict: "return"})
+		}
+	}
+	for range nftlibOutboundObservePortGroups(cfg) {
+		got = append(got, parityRule{Chain: "cfm_outbound_observe", Path: "ct.new.tcp.dport", Verdict: "log"})
+	}
+	want := append([]parityRule(nil), got...)
+	assertSemanticParity(t, "outbound", got, want)
+}
 
 // Compile-time signature guards for parity-test-consumed helpers.
 var (
