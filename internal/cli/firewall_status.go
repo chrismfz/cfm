@@ -46,6 +46,67 @@ type setProbeRequirement struct {
 	reason     string
 }
 
+type setProbeItem struct {
+	key        string
+	setName    string
+	required   bool
+	applicable bool
+	reason     string
+	feature    string
+	dependsOn  string
+}
+
+func staticSetProbes(features map[string]bool, names map[string]string) []setProbeItem {
+	items := make([]setProbeItem, 0, 24)
+	for key, s := range names {
+		required := true
+		applicable := true
+		reason := "core infrastructure"
+		feature := "core"
+		dependsOn := "always"
+		switch s {
+		case "challenge_v4", "challenge_v6":
+			required = features["dnat"]
+			applicable = features["dnat"]
+			reason = "required only when DNAT redirect is enabled"
+			feature = "dnat"
+			dependsOn = "features.dnat"
+		}
+		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
+	}
+	for _, s := range []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"} {
+		items = append(items, setProbeItem{
+			key:        s,
+			setName:    s,
+			required:   features["smtp"],
+			applicable: features["smtp"],
+			reason:     "required only when smtpblock is enabled",
+			feature:    "smtp",
+			dependsOn:  "features.smtp",
+		})
+	}
+	return items
+}
+
+func dynamicFeedSetProbes(feeds []blocklists.Feed) []setProbeItem {
+	items := make([]setProbeItem, 0, len(feeds)*4)
+	for key, s := range setinventory.BuildSetNames(feeds) {
+		if !(strings.HasPrefix(key, "allow_ext_") || strings.HasPrefix(key, "block_ext_")) {
+			continue
+		}
+		items = append(items, setProbeItem{
+			key:        key,
+			setName:    s,
+			required:   true,
+			applicable: true,
+			reason:     "configured feed set",
+			feature:    "feeds",
+			dependsOn:  "cfm.blocklists",
+		})
+	}
+	return items
+}
+
 type fwReport struct {
 	Engine       string           `json:"engine"`
 	Capabilities []string         `json:"capabilities"`
@@ -114,7 +175,8 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
 	}
 
-	setNames := setinventory.BuildSetNames(loadConfiguredFeeds(cfgDir))
+	feeds := loadConfiguredFeeds(cfgDir)
+	setNames := setinventory.BuildSetNames(nil)
 	legacyAliases := setinventory.LegacyAliases()
 	throttledSets := []string{"throttled_v4", "throttled_v6"}
 	scannerSets := []string{"port_scanners_v4", "port_scanners_v6"}
@@ -129,40 +191,35 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 			scannerSets = v
 		}
 	}
-	probeReq := map[string]setProbeRequirement{}
-	for key, s := range setNames {
-		required := true
-		applicable := true
-		reason := "core infrastructure"
-		switch s {
-		case "challenge_v4", "challenge_v6":
-			required = r.Features["dnat"]
-			applicable = r.Features["dnat"]
-			reason = "required only when DNAT redirect is enabled"
-		}
-		probeReq[s] = setProbeRequirement{key: key, setName: s, required: required, applicable: applicable, reason: reason}
+	probeReq := map[string]setProbeItem{}
+	for _, req := range staticSetProbes(r.Features, setNames) {
+		probeReq[req.setName] = req
 	}
-	for _, s := range []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"} {
-		probeReq[s] = setProbeRequirement{key: s, setName: s, required: r.Features["smtp"], applicable: r.Features["smtp"], reason: "required only when smtpblock is enabled"}
+	dynReq := dynamicFeedSetProbes(feeds)
+	if len(dynReq) == 0 {
+		r.Findings = append(r.Findings, fwFinding{"info", "no feed-derived sets expected"})
+	}
+	for _, req := range dynReq {
+		probeReq[req.setName] = req
 	}
 
 	for _, req := range probeReq {
 		s := req.setName
 		if !req.applicable {
-			r.Findings = append(r.Findings, fwFinding{"info", fmt.Sprintf("set(%s) skipped (feature disabled; expected source: %s)", s, req.reason)})
+			r.Findings = append(r.Findings, fwFinding{"info", fmt.Sprintf("set(%s) skipped (feature=%s dependency=%s; expected source: %s)", s, req.feature, req.dependsOn, req.reason)})
 			continue
 		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
 			if canonical, ok := legacyAliases[s]; ok {
-				r.Findings = append(r.Findings, fwFinding{"warn", fmt.Sprintf("set(%s) missing (legacy alias; expected source: canonical %s)", s, canonical)})
+				r.Findings = append(r.Findings, fwFinding{"warn", fmt.Sprintf("set(%s) missing (legacy alias; feature=%s dependency=%s; expected source: canonical %s)", s, req.feature, req.dependsOn, canonical)})
 				continue
 			}
 			level := "warn"
 			if req.required {
 				level = "fail"
 			}
-			r.Findings = append(r.Findings, fwFinding{level, fmt.Sprintf("set(%s) missing (expected source: %s): %s", s, req.reason, err.Error())})
+			r.Findings = append(r.Findings, fwFinding{level, fmt.Sprintf("set(%s) missing (feature=%s dependency=%s; expected source: %s): %s", s, req.feature, req.dependsOn, req.reason, err.Error())})
 			continue
 		}
 		r.SetSizes[s] = len(elems)
