@@ -55,3 +55,59 @@ func TestAppendVerdictRulesBatched_SplitBounded(t *testing.T) {
 		t.Fatalf("unexpected computed batches: got %d want 4", batches)
 	}
 }
+
+func TestBuildHardeningRuleSnapshots_Parity(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Hardening.BlockBadTCPFlags = true
+	cfg.Hardening.NewRate = 10
+	cfg.Hardening.ICMPRate = 20
+
+	got := buildHardeningRuleSnapshots(cfg)
+	want := []hardeningRuleSnapshot{
+		{Chain: "flood", Path: "tcp.flags.syn_fin", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "tcp.flags.syn_rst", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "tcp.flags.xmas", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "tcp.flags.null", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "ct.new.no_icmp.v4_over_rate", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "ct.new.no_icmp.v6_over_rate", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "icmp.echo.v4_over_rate", Verdict: expr.VerdictDrop},
+		{Chain: "flood", Path: "icmp.echo.v6_over_rate", Verdict: expr.VerdictDrop},
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("snapshot count mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("snapshot[%d] mismatch: got %+v want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBuildPortsPolicySnapshots_Parity(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn:  []config.PortRange{{From: 80, To: 80}},
+		UDPIn:  []config.PortRange{{From: 53, To: 53}},
+		TCPOut: []config.PortRange{{From: 443, To: 443}},
+		UDPOut: []config.PortRange{{From: 123, To: 123}},
+	}
+	got := buildPortsPolicySnapshots(cfg)
+	want := []hardeningRuleSnapshot{
+		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
+		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
+		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
+		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
+		{Chain: "input", Path: "ct.new.tcp.accept", Verdict: expr.VerdictAccept},
+		{Chain: "input", Path: "ct.new.udp.accept", Verdict: expr.VerdictAccept},
+		{Chain: "output", Path: "ct.new.tcp.accept", Verdict: expr.VerdictAccept},
+		{Chain: "output", Path: "ct.new.udp.accept", Verdict: expr.VerdictAccept},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot count mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("snapshot[%d] mismatch: got %+v want %+v", i, got[i], want[i])
+		}
+	}
+}
