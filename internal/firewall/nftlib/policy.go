@@ -376,17 +376,22 @@ func buildPortsAllowlistRules(cfg *config.PortsConfig) []portsPolicyRule {
 	if cfg == nil {
 		return nil
 	}
-	rules := make([]portsPolicyRule, 0, len(cfg.TCPIn)+len(cfg.UDPIn)+len(cfg.TCPOut)+len(cfg.UDPOut))
-	for _, pr := range cfg.TCPIn {
+	tcpIn := normalizePortRanges(cfgPortRanges(cfg.TCPIn))
+	udpIn := normalizePortRanges(cfgPortRanges(cfg.UDPIn))
+	tcpOut := normalizePortRanges(cfgPortRanges(cfg.TCPOut))
+	udpOut := normalizePortRanges(cfgPortRanges(cfg.UDPOut))
+
+	rules := make([]portsPolicyRule, 0, len(tcpIn)+len(udpIn)+len(tcpOut)+len(udpOut))
+	for _, pr := range tcpIn {
 		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("tcp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
-	for _, pr := range cfg.UDPIn {
+	for _, pr := range udpIn {
 		rules = append(rules, portsPolicyRule{Chain: "input", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("udp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
-	for _, pr := range cfg.TCPOut {
+	for _, pr := range tcpOut {
 		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "tcp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("tcp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
-	for _, pr := range cfg.UDPOut {
+	for _, pr := range udpOut {
 		rules = append(rules, portsPolicyRule{Chain: "output", Protocol: "udp", PortFrom: pr.From, PortTo: pr.To, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", fmt.Sprintf("udp dport %d-%d", pr.From, pr.To)}, ExpectedMatch: true})
 	}
 	return rules
@@ -425,24 +430,44 @@ func renderPortsPolicyRule(r portsPolicyRule) string {
 }
 
 func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules []portsPolicyRule) error {
+	seen := make(map[string]struct{}, len(chains))
+	orderedChains := make([]string, 0, len(chains))
+	for _, name := range chains {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		orderedChains = append(orderedChains, name)
+	}
+
+	rulesByChain := make(map[string][]portsPolicyRule, len(orderedChains))
+	for _, r := range rules {
+		if err := validateRuleBeforeCommit(r); err != nil {
+			return err
+		}
+		if _, ok := seen[r.Chain]; !ok {
+			return fmt.Errorf("rule validation failed: unexpected chain %q", r.Chain)
+		}
+		rulesByChain[r.Chain] = append(rulesByChain[r.Chain], r)
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, name := range chains {
+	for _, name := range orderedChains {
 		ch, err := b.getChain(name)
 		if err != nil {
 			return err
 		}
 		b.conn.FlushChain(ch)
 	}
-	for _, r := range rules {
-		if err := validateRuleBeforeCommit(r); err != nil {
-			return err
-		}
-		ch, err := b.getChain(r.Chain)
+	for _, name := range orderedChains {
+		ch, err := b.getChain(name)
 		if err != nil {
 			return err
 		}
-		b.conn.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: []expr.Any{&expr.Verdict{Kind: r.Verdict}}})
+		for _, r := range rulesByChain[name] {
+			b.conn.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: []expr.Any{&expr.Verdict{Kind: r.Verdict}}})
+		}
 	}
 	debugLogRuleBatch("ports_policy", rules, 5)
 	return b.conn.Flush()

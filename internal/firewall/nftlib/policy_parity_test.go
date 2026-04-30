@@ -91,6 +91,52 @@ func TestBuildPortsAllowlistRules_StableAcrossRepeatedApplies(t *testing.T) {
 	}
 }
 
+func TestBuildPortsAllowlistRules_EmptyPolicy(t *testing.T) {
+	if got := buildPortsAllowlistRules(&config.PortsConfig{}); len(got) != 0 {
+		t.Fatalf("expected empty rules, got %d", len(got))
+	}
+}
+
+func TestBuildPortsAllowlistRules_SingleRangeParity(t *testing.T) {
+	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 1000, To: 2000}}}
+	got := buildPortsAllowlistRules(cfg)
+	want := []portsPolicyRule{
+		{Chain: "input", Protocol: "tcp", PortFrom: 1000, PortTo: 2000, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 1000-2000"}, ExpectedMatch: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestBuildPortsAllowlistRules_OverlappingRangesNormalized(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn: []config.PortRange{{From: 100, To: 110}, {From: 105, To: 120}, {From: 121, To: 130}},
+	}
+	got := buildPortsAllowlistRules(cfg)
+	want := []portsPolicyRule{
+		{Chain: "input", Protocol: "tcp", PortFrom: 100, PortTo: 130, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 100-130"}, ExpectedMatch: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestBuildPortsAllowlistRules_InOutCombinations(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn:  []config.PortRange{{From: 22, To: 22}},
+		UDPIn:  []config.PortRange{{From: 53, To: 53}},
+		TCPOut: []config.PortRange{{From: 443, To: 443}},
+		UDPOut: []config.PortRange{{From: 123, To: 123}},
+	}
+	got := buildPortsAllowlistRules(cfg)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 rules, got %d", len(got))
+	}
+	if got[0].Chain != "input" || got[1].Chain != "input" || got[2].Chain != "output" || got[3].Chain != "output" {
+		t.Fatalf("unexpected chain ordering: %+v", got)
+	}
+}
+
 func TestBuildFloodVerdictPlan_ConnlimitProtoValidationParity(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Connlimit.Rules = []config.ConnlimitRule{{Proto: "icmp"}}
