@@ -116,10 +116,19 @@ type fwReport struct {
 	PolicyDomainCounts map[string]int                `json:"policy_domain_counts,omitempty"`
 	PolicyDomains      map[string][]fwRuleDescriptor `json:"policy_domains,omitempty"`
 	Counters           map[string]int64              `json:"counters"`
+	FeatureChecks      map[string]fwFeatureCheck     `json:"feature_checks,omitempty"`
 	Unsupported        map[string]bool               `json:"unsupported,omitempty"`
 	Findings           []fwFinding                   `json:"findings"`
 	Status             string                        `json:"status"`
 	Verbose            bool                          `json:"-"`
+}
+
+type fwFeatureCheck struct {
+	Status      string            `json:"status"`
+	Reason      string            `json:"reason"`
+	RequiredSets []string         `json:"required_sets,omitempty"`
+	Counters    []string          `json:"counters,omitempty"`
+	Samples     map[string]string `json:"samples,omitempty"`
 }
 
 type fwRuleDescriptor struct {
@@ -156,7 +165,7 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 }
 
 func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verbose bool) fwReport {
-	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, PolicyDomainCounts: map[string]int{}, PolicyDomains: map[string][]fwRuleDescriptor{}, Counters: map[string]int64{}, Unsupported: map[string]bool{}, Verbose: verbose}
+	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, PolicyDomainCounts: map[string]int{}, PolicyDomains: map[string][]fwRuleDescriptor{}, Counters: map[string]int64{}, FeatureChecks: map[string]fwFeatureCheck{}, Unsupported: map[string]bool{}, Verbose: verbose}
 	if caps, ok := any(be).(firewall.CapabilityReporter); ok {
 		c := caps.Capabilities()
 		if c.PortsPolicyInboundRules {
@@ -266,6 +275,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		r.Unsupported["portflood_counter"] = true
 		r.Unsupported["connlimit_counter"] = true
 	}
+	r.FeatureChecks = evaluateFeatureChecks(r)
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok {
 			if raw, err := ds.DNATShow("inet", "cfm"); err != nil {
@@ -356,6 +366,28 @@ func printFirewallReport(r fwReport) {
 			fmt.Printf("  %-16s %d\n", k, r.Counters[k])
 		}
 	}
+	if len(r.FeatureChecks) > 0 {
+		fmt.Println("Feature checks:")
+		features := make([]string, 0, len(r.FeatureChecks))
+		for k := range r.FeatureChecks {
+			features = append(features, k)
+		}
+		sort.Strings(features)
+		for _, k := range features {
+			v := r.FeatureChecks[k]
+			fmt.Printf("  [%s] %s: %s\n", strings.ToUpper(v.Status), k, v.Reason)
+			if len(v.Samples) > 0 {
+				sks := make([]string, 0, len(v.Samples))
+				for sk := range v.Samples {
+					sks = append(sks, sk)
+				}
+				sort.Strings(sks)
+				for _, sk := range sks {
+					fmt.Printf("    - %s=%s\n", sk, v.Samples[sk])
+				}
+			}
+		}
+	}
 	if len(r.PolicyDomainCounts) > 0 {
 		fmt.Println("Policy domains:")
 		keys := make([]string, 0, len(r.PolicyDomainCounts))
@@ -390,6 +422,57 @@ func printFirewallReport(r fwReport) {
 	if r.Status != "ok" {
 		fmt.Println("Recommendation: run `cfm firewall status --verbose` for deeper diagnostics and apply the suggested set/table remediation above.")
 	}
+}
+
+func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
+	checks := map[string]fwFeatureCheck{}
+	for _, feature := range []string{"dnat", "smtp", "portflood", "connlimit", "autoblock"} {
+		enabled := r.Features[feature]
+		if !enabled {
+			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "feature disabled", Samples: map[string]string{"last_update": "n/a"}}
+			continue
+		}
+		check := fwFeatureCheck{Status: "pass", Reason: "required runtime signals present", Samples: map[string]string{"last_update": "n/a"}}
+		switch feature {
+		case "dnat":
+			check.RequiredSets = []string{"challenge_v4", "challenge_v6"}
+		case "smtp":
+			check.RequiredSets = []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"}
+		case "portflood":
+			check.Counters = []string{"portflood"}
+		case "connlimit":
+			check.Counters = []string{"connlimit"}
+		case "autoblock":
+			check.RequiredSets = []string{"throttled_v4", "throttled_v6"}
+			check.Counters = []string{"flood"}
+		}
+		for _, s := range check.RequiredSets {
+			v, ok := r.SetSizes[s]
+			if !ok {
+				check.Status = "fail"
+				check.Reason = "missing required set: " + s
+				break
+			}
+			check.Samples[s+"_size"] = fmt.Sprintf("%d", v)
+		}
+		if check.Status != "fail" {
+			for _, c := range check.Counters {
+				v, ok := r.Counters[c]
+				if !ok {
+					check.Status = "warn"
+					check.Reason = "counter unavailable: " + c
+					continue
+				}
+				if v < 0 {
+					check.Status = "warn"
+					check.Reason = "counter semantic check failed: negative " + c
+				}
+				check.Samples[c+"_total"] = fmt.Sprintf("%d", v)
+			}
+		}
+		checks[feature] = check
+	}
+	return checks
 }
 
 func collectPolicyDomains(tableJSON []byte) map[string][]fwRuleDescriptor {
