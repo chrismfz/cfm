@@ -22,6 +22,11 @@ type fwDiagBackend interface {
 
 type counterProbe interface { CounterValue(name string) (int64, error) }
 type dnatShowProbe interface { DNATShow(family, table string) (string, error) }
+type diagNamesProbe interface {
+	ThrottledSetNames() []string
+	ScannerSetNames() []string
+	CardinalitySetNames() map[string]string
+}
 
 type fwFinding struct { Level, Message string `json:"level"` }
 
@@ -32,6 +37,7 @@ type fwReport struct {
 	Features map[string]bool `json:"features"`
 	SetSizes map[string]int `json:"set_sizes"`
 	Counters map[string]int64 `json:"counters"`
+	Unsupported map[string]bool `json:"unsupported,omitempty"`
 	Findings []fwFinding `json:"findings"`
 	Status string `json:"status"`
 }
@@ -60,7 +66,7 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 }
 
 func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verbose bool) fwReport {
-	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, Counters: map[string]int64{}}
+	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, Counters: map[string]int64{}, Unsupported: map[string]bool{}}
 	if caps, ok := any(be).(firewall.CapabilityReporter); ok {
 		c := caps.Capabilities(); if c.PortsPolicyInboundRules { r.Capabilities = append(r.Capabilities, "ports_policy") }
 		if c.PortscanTrackingSets { r.Capabilities = append(r.Capabilities, "portscan_sets") }
@@ -76,15 +82,39 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["feeds"] = true
 	r.Features["dnat"] = false
 
-	if ok, err := be.DNATStatus("inet", "cfm"); err == nil { r.Features["dnat"] = ok } else { r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unavailable: "+err.Error()}) }
-	for _, s := range []string{"block_ips", "allow_ips", "ignore_ips", "challenge_ips"} {
+	if ok, err := be.DNATStatus("inet", "cfm"); err == nil { r.Features["dnat"] = ok } else { r.Unsupported["dnat_redirect"] = true; r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: "+err.Error()}) }
+
+	setNames := map[string]string{"block":"block_ips","allow":"allow_ips","ignore":"ignore_ips","challenge":"challenge_ips","feed":"feed_ext"}
+	throttledSets := []string{"throttled_v4","throttled_v6"}
+	scannerSets := []string{"port_scanners_v4","port_scanners_v6"}
+	if np, ok := any(be).(diagNamesProbe); ok {
+		if v := np.CardinalitySetNames(); len(v) > 0 { setNames = v }
+		if v := np.ThrottledSetNames(); len(v) > 0 { throttledSets = v }
+		if v := np.ScannerSetNames(); len(v) > 0 { scannerSets = v }
+	}
+
+	for key, s := range setNames {
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil { r.Findings = append(r.Findings, fwFinding{"warn", "set probe failed for "+s+": "+err.Error()}); continue }
+		r.SetSizes[s] = len(elems)
+		r.SetSizes[key+"_cardinality"] = len(elems)
+	}
+	for _, s := range append(throttledSets, scannerSets...) {
+		elems, err := be.ListSetElementsRaw(s)
+		if err != nil {
+			r.Unsupported[s+"_cardinality"] = true
+			continue
+		}
 		r.SetSizes[s] = len(elems)
 	}
 	if _, err := be.ListTableJSON("inet", "cfm"); err != nil { r.Findings = append(r.Findings, fwFinding{"fail", "required table inet/cfm missing or unreadable: "+err.Error()}) }
 	if cp, ok := any(be).(counterProbe); ok {
-		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop"} { if v, err := cp.CounterValue(name); err == nil { r.Counters[name] = v } }
+		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} { if v, err := cp.CounterValue(name); err == nil { r.Counters[name] = v } else { r.Unsupported[name+"_counter"] = true } }
+	}
+	if len(r.Counters) == 0 {
+		r.Unsupported["flood_counter"] = true
+		r.Unsupported["portflood_counter"] = true
+		r.Unsupported["connlimit_counter"] = true
 	}
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok { if raw, err := ds.DNATShow("inet", "cfm"); err != nil { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show probe failed: "+err.Error()}) } else if strings.TrimSpace(raw) == "" { r.Findings = append(r.Findings, fwFinding{"warn", "dnat show returned empty output"}) } }
