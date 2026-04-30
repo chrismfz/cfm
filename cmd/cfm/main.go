@@ -56,16 +56,20 @@ var (
 // Backend abstraction
 // ----------------------------------------------------------------------------
 
-func resolveFirewallEngine(cfg *cfgpkg.Config) (string, string) {
-	if engine := strings.ToLower(strings.TrimSpace(os.Getenv("CFM_FIREWALL_ENGINE"))); engine != "" {
-		return engine, "env"
+func normalizeFirewallEngine(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func resolveFirewallEngine(cfg *cfgpkg.Config) (raw string, normalized string, source string) {
+	if rawEnv := strings.TrimSpace(os.Getenv("CFM_FIREWALL_ENGINE")); rawEnv != "" {
+		return rawEnv, normalizeFirewallEngine(rawEnv), "env"
 	}
 	if cfg != nil {
-		if engine := strings.ToLower(strings.TrimSpace(cfg.Firewall.Engine)); engine != "" {
-			return engine, "config"
+		if rawCfg := strings.TrimSpace(cfg.Firewall.Engine); rawCfg != "" {
+			return rawCfg, normalizeFirewallEngine(rawCfg), "config"
 		}
 	}
-	return "nft", "default"
+	return "", "nft", "default"
 }
 
 func getBackend(engine string) (firewall.Backend, error) {
@@ -93,7 +97,7 @@ func getBackend(engine string) (firewall.Backend, error) {
 }
 
 func mustBackend() firewall.Backend {
-	engine, _ := resolveFirewallEngine(nil)
+	_, engine, _ := resolveFirewallEngine(nil)
 	be, err := getBackend(engine)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -105,7 +109,7 @@ func mustBackend() firewall.Backend {
 
 func tableExistsProbe(be firewall.Backend) func() bool {
 	return func() bool {
-		if engine, _ := resolveFirewallEngine(nil); engine == "nft" {
+		if _, engine, _ := resolveFirewallEngine(nil); engine == "nft" {
 			return nft.TableExistsCFM()
 		}
 		return be != nil
@@ -413,8 +417,8 @@ func runDaemon(args []string) {
 			}
 		}
 	}
-	engine, engineSource := resolveFirewallEngine(engineCfg)
-	logging.Logf("[startup] firewall engine: %s (source=%s)", engine, engineSource)
+	rawEngine, engine, engineSource := resolveFirewallEngine(engineCfg)
+	logging.Logf("[startup] firewall engine raw=%q normalized=%q source=%s", rawEngine, engine, engineSource)
 
 	// Backend
 	done := step("backend:getBackend")
