@@ -9,6 +9,7 @@ import (
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
+	"cfm/internal/firewall/selfip"
 	"cfm/internal/logging"
 	"cfm/internal/reporting"
 	"context"
@@ -120,9 +121,7 @@ type Backend struct {
 	extAllowV6Hosts []string
 	extAllowV6Nets  []string
 
-	selfIPsMu    sync.RWMutex
-	selfIPs      map[string]struct{}
-	selfInitOnce sync.Once
+	selfResolver *selfip.Resolver
 
 	floodDumpMu      sync.Mutex
 	floodDumpRunning bool
@@ -173,7 +172,7 @@ func New() *Backend {
 		feedKeys:             make(map[string]struct{}),
 		extAllow:             make(map[string]extFeedData),
 		extBlock:             make(map[string]extFeedData),
-		selfIPs:              make(map[string]struct{}),
+		selfResolver:         selfip.New(),
 		challengeDNATEnabled: true,
 		ab:                   autoblock.New(),
 		lastAutoBlockAt:      make(map[string]time.Time),
@@ -181,8 +180,6 @@ func New() *Backend {
 	}
 }
 
-// IsSelfIP reports whether s is one of this machine's own IP addresses.
-func (b *Backend) IsSelfIP(s string) bool { return b.isSelfIPString(s) }
 
 func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	if b == nil {
@@ -1761,64 +1758,35 @@ func (b *Backend) ResetCFMTable() error {
 }
 
 func (b *Backend) refreshSelfSets() {
-	// άδειασε τα sets
 	_ = b.nftExpr("flush set inet cfm self_v4;")
 	_ = b.nftExpr("flush set inet cfm self_v6;")
-	// loopbacks πάντα μέσα
 	_ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
 	_ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
 	_ = b.nftExpr("add element inet cfm self_v6 { fe80::/10 };")
 
-	// όλες οι τοπικές
-	ifaces, _ := net.Interfaces()
-	var v4s, v6s []string
-	for _, ifc := range ifaces {
-		if (ifc.Flags & net.FlagUp) == 0 {
+	b.selfResolver.Refresh()
+	for _, s := range b.selfResolver.LocalIPs() {
+		ip := net.ParseIP(s)
+		if ip == nil {
 			continue
 		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			ip, _, err := net.ParseCIDR(a.String())
-			if err != nil || ip == nil {
-				continue
-			}
-			if ip.IsLoopback() {
-				continue
-			}
-			if v4 := ip.To4(); v4 != nil {
-				v4s = append(v4s, v4.String())
-			} else {
-				v6s = append(v6s, ip.String())
-			}
+		if ip.To4() != nil {
+			_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", s))
+		} else {
+			_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", s))
 		}
 	}
-	// batch add
-	cached := make(map[string]struct{}, len(v4s)+len(v6s))
-	for _, ip := range v4s {
-		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", ip))
-		cached[ip] = struct{}{}
-	}
-	for _, ip := range v6s {
-		_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", ip))
-		cached[ip] = struct{}{}
-	}
-	b.selfIPsMu.Lock()
-	b.selfIPs = cached
-	b.selfIPsMu.Unlock()
-	b.writeSelfIPsLua(cached)
+	b.writeSelfIPsLua()
 }
 
-func (b *Backend) writeSelfIPsLua(cached map[string]struct{}) {
+func (b *Backend) writeSelfIPsLua() {
 	dir := filepath.Dir(selfIPsLuaPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Logf("[nft] self-ip lua mkdir failed path=%s err=%v", filepath.Dir(selfIPsLuaPath), err)
 		return
 	}
 
-	keys := make([]string, 0, len(cached))
-	for ip := range cached {
-		keys = append(keys, ip)
-	}
+	keys := b.selfResolver.LocalIPs()
 	sort.Strings(keys)
 
 	var buf bytes.Buffer
@@ -1865,22 +1833,8 @@ func (b *Backend) ensureCFMGroupRead(path string) {
 	_ = os.Chown(path, -1, gid)
 }
 
-// isSelfIPString: true αν είναι loopback ή υπάρχει στα self_v4/self_v6
 func (b *Backend) isSelfIPString(s string) bool {
-	b.selfInitOnce.Do(func() {
-		b.refreshSelfSets()
-	})
-	ip := net.ParseIP(strings.TrimSpace(s))
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-		return true
-	}
-	b.selfIPsMu.RLock()
-	_, ok := b.selfIPs[ip.String()]
-	b.selfIPsMu.RUnlock()
-	return ok
+	return b.selfResolver.Contains(s)
 }
 
 // HasElem returns true if elem is in setName without dumping the set.

@@ -20,6 +20,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
 	"cfm/internal/firewall/nft"
+	"cfm/internal/firewall/selfip"
 	"cfm/internal/reporting"
 
 	"github.com/google/nftables"
@@ -110,6 +111,9 @@ type Backend struct {
 	// Per-IP debounce maps for auto-block actions.
 	lastAutoBlockAt map[string]time.Time
 	lastIgnoredAt   map[string]time.Time
+
+	// selfResolver answers isSelfIP queries without calling the nft cli.
+	selfResolver *selfip.Resolver
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.
@@ -130,5 +134,6 @@ func New() (*Backend, error) {
 		last:                     make(map[string]uint64),
 		lastAutoBlockAt:          make(map[string]time.Time),
 		lastIgnoredAt:            make(map[string]time.Time),
+		selfResolver:             selfip.New(),
 	}, nil
 }
