@@ -3,6 +3,7 @@
 package nftlib
 
 import (
+	"reflect"
 	"testing"
 
 	"cfm/internal/config"
@@ -29,6 +30,40 @@ func TestBuildFloodVerdictPlan_OrderParity(t *testing.T) {
 		if kind != expr.VerdictDrop {
 			t.Fatalf("rule %d kind mismatch: got %v want drop", i, kind)
 		}
+	}
+}
+
+func TestBuildPortsAllowlistRules_AllDirectionsProtocols(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn:  []config.PortRange{{From: 80, To: 80}},
+		UDPIn:  []config.PortRange{{From: 53, To: 53}},
+		TCPOut: []config.PortRange{{From: 443, To: 443}},
+		UDPOut: []config.PortRange{{From: 123, To: 123}},
+	}
+	got := buildPortsAllowlistRules(cfg)
+	want := []portsPolicyRule{
+		{Chain: "input", Protocol: "tcp", PortFrom: 80, PortTo: 80, Verdict: expr.VerdictAccept},
+		{Chain: "input", Protocol: "udp", PortFrom: 53, PortTo: 53, Verdict: expr.VerdictAccept},
+		{Chain: "output", Protocol: "tcp", PortFrom: 443, PortTo: 443, Verdict: expr.VerdictAccept},
+		{Chain: "output", Protocol: "udp", PortFrom: 123, PortTo: 123, Verdict: expr.VerdictAccept},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestBuildPortsAllowlistRules_StableAcrossRepeatedApplies(t *testing.T) {
+	cfg := &config.PortsConfig{
+		TCPIn:  []config.PortRange{{From: 22, To: 22}, {From: 80, To: 81}},
+		UDPIn:  []config.PortRange{{From: 53, To: 53}},
+		TCPOut: []config.PortRange{{From: 443, To: 443}},
+		UDPOut: []config.PortRange{{From: 123, To: 123}, {From: 5000, To: 5001}},
+	}
+	first := buildPortsAllowlistRules(cfg)
+	second := buildPortsAllowlistRules(cfg)
+	third := buildPortsAllowlistRules(cfg)
+	if !reflect.DeepEqual(first, second) || !reflect.DeepEqual(second, third) {
+		t.Fatalf("rule planner is not stable across repeated applies")
 	}
 }
 
