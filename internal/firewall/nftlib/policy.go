@@ -29,6 +29,7 @@ type portsPolicyRule struct {
 const floodRuleFlushBatchSize = 128
 
 func (b *Backend) ApplyFloodRules(c *config.Config) error {
+	b.cfg = c
 	if err := b.EnsureBase(); err != nil {
 		return err
 	}
@@ -319,6 +320,3 @@ func (b *Backend) flushChain(name string) error {
 	return b.conn.Flush()
 }
 
-func (b *Backend) DumpFloodCounters() { b.cli.DumpFloodCounters() }
-func (b *Backend) DumpThrottledIPs()  { b.cli.DumpThrottledIPs() }
-func (b *Backend) LoadPortScanner()   { b.cli.LoadPortScanner() }

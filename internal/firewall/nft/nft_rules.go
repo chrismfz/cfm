@@ -10,25 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	//	"net"
-	//	"encoding/json"
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/firewall/autoblock"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
 	"path/filepath"
-)
-
-// Keep the last time we successfully autoblocked (and/or notified) a given IP
-var (
-	thV4Hits = map[string][]time.Time{}
-	thV6Hits = map[string][]time.Time{}
-
-	lastThrottleReason = map[string]string{} // ip -> reason
-
-	// NEW: last successful autoblock per IP (v4/v6 share the key as a string)
-	lastAutoBlockAt    = map[string]time.Time{}
-	lastIgnoredAt      = map[string]time.Time{}
-	autoBlockEvalCount int
 )
 
 // floodCfgHash returns a cheap hash of all flood-relevant config fields.
@@ -466,7 +452,7 @@ func (b *Backend) dumpFloodCountersOnce() {
 					if pkts > prev {
 						delta := pkts - prev
 						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
-							cur, pkts, delta, reasonForName(cur))
+							cur, pkts, delta, autoblock.ReasonForName(cur))
 					}
 					// reset (pkts < prev) το χειρίζεσαι ήδη “σιωπηλά” ενημερώνοντας την τιμή
 					b.last[cur] = pkts
@@ -482,68 +468,6 @@ func (b *Backend) dumpFloodCountersOnce() {
 	}
 }
 
-func reasonForName(name string) string {
-	switch {
-	case strings.HasPrefix(name, "synrate"):
-		return "SYN flood"
-	case strings.HasPrefix(name, "ppsrate"):
-		return "Packet flood (pps)"
-	case strings.HasPrefix(name, "portflood_"):
-		return "Port flood"
-	case strings.HasPrefix(name, "connlimit_"):
-		return "Connection limit"
-	case strings.HasPrefix(name, "th_syn"):
-		return "SYN flood"
-	case strings.HasPrefix(name, "th_pps"):
-		return "Packet flood (pps)"
-	case strings.HasPrefix(name, "th_pf_tcp"):
-		return "TCP port flood"
-	case strings.HasPrefix(name, "th_pf_udp"):
-		return "UDP port flood"
-	case strings.HasPrefix(name, "throttled"):
-		return "General throttle"
-	case strings.HasPrefix(name, "block_v4"), strings.HasPrefix(name, "block_v6"):
-		return "Auto-block"
-
-	case strings.HasPrefix(name, "th_connlimit_"):
-		// th_connlimit_<port>_<proto>_(v4|v6) → reason = "connlimit_<port>_<proto>"
-		x := strings.TrimPrefix(name, "th_connlimit_")
-		x = strings.TrimSuffix(x, "_v4")
-		x = strings.TrimSuffix(x, "_v6")
-		return "connlimit_" + x
-
-	case strings.HasPrefix(name, "th_pf_"):
-		// th_pf_<port>_<proto>_(v4|v6)  ή παλιό generic th_pf_tcp_v4
-		x := strings.TrimPrefix(name, "th_pf_") // π.χ. "65535_tcp_v4" ή "tcp_v4"
-		// Αν ξεκινάει με ψηφίο, είναι per-port
-		if len(x) > 0 && x[0] >= '0' && x[0] <= '9' {
-			// μορφή: "<port>_<proto>_v4|v6"
-			parts := strings.Split(x, "_")
-			if len(parts) >= 2 {
-				return "portflood_" + parts[0] + "_" + parts[1]
-			}
-		}
-		// fallback για τα generic:
-		if strings.Contains(x, "_udp_") {
-			return "UDP port flood"
-		}
-		return "TCP port flood"
-
-	case name == "badflags_drop":
-		return "Bad TCP flags"
-	case name == "newrate_v4", name == "newrate_v6":
-		return "Global NEW-rate"
-	case name == "icmp_v4", name == "icmp_v6":
-		return "ICMP echo limit"
-	case strings.HasPrefix(name, "th_new_"):
-		return "NEW-rate"
-	case strings.HasPrefix(name, "th_icmp_"):
-		return "ICMP echo limit"
-
-	default:
-		return "unknown"
-	}
-}
 
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6),
 // χωρίς full table dump. Διαβάζει ΜΟΝΟ τα στοχευμένα throttling sets.
@@ -598,16 +522,16 @@ func (b *Backend) DumpThrottledIPs() {
 		if len(ips) == 0 {
 			return
 		}
-		rsn := reasonForName(setName)
+		rsn := autoblock.ReasonForName(setName)
 		for _, ip := range ips {
 			// Prefer first/specific reason; avoid overwriting useful text with generic catch-alls
-			if prev, ok := lastThrottleReason[ip]; !ok || prev == "" || strings.HasPrefix(prev, "General throttle") || prev == "Auto-block" || prev == "unknown" {
-				lastThrottleReason[ip] = rsn
+			if prev, ok := b.ab.Reasons[ip]; !ok || prev == "" || strings.HasPrefix(prev, "General throttle") || prev == "Auto-block" || prev == "unknown" {
+				b.ab.Reasons[ip] = rsn
 			}
 
-			if parseIPFam(ip) == 4 {
+			if autoblock.ParseIPFam(ip) == 4 {
 				uniq4[ip] = struct{}{}
-			} else if parseIPFam(ip) == 6 {
+			} else if autoblock.ParseIPFam(ip) == 6 {
 				uniq6[ip] = struct{}{}
 			}
 
@@ -807,100 +731,18 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 // add it to block_v4/v6. MODE can be "permanent" (no TTL) or "ttl" (temporary).
 
 func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
-	// Issue 3: periodic cleanup — every 500 calls (~2.8h at 20s ticks)
-	autoBlockEvalCount++
-	if autoBlockEvalCount%500 == 0 {
-		pruneHitMaps(time.Duration(tc.WindowSec) * time.Second)
-	}
-
-	now := time.Now()
-	window := time.Duration(tc.WindowSec) * time.Second
-	for _, ip := range v4 {
-		thV4Hits[ip] = append(thV4Hits[ip], now)
-		thV4Hits[ip] = pruneOld(thV4Hits[ip], now.Add(-window))
-		if len(thV4Hits[ip]) >= tc.Hits {
-			_ = b.addToBlockSet("v4", ip, tc)
-			delete(thV4Hits, ip)
-		}
-	}
-	for _, ip := range v6 {
-		thV6Hits[ip] = append(thV6Hits[ip], now)
-		thV6Hits[ip] = pruneOld(thV6Hits[ip], now.Add(-window))
-		if len(thV6Hits[ip]) >= tc.Hits {
-			_ = b.addToBlockSet("v6", ip, tc)
-			delete(thV6Hits, ip)
-		}
-	}
+	b.ab.Eval(v4, v6, tc, b.autoBlockAction)
 }
 
-func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
-	var out []time.Time
-	for _, t := range ts {
-		if t.After(cutoff) {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// pruneHitMaps removes stale entries from all package-level IP maps.
-// Called periodically from autoBlockEval to prevent unbounded growth on
-// servers that see thousands of unique attacking IPs per day.
-func pruneHitMaps(window time.Duration) {
-	cutoff := time.Now().Add(-window)
-	deadline := time.Now().Add(-24 * time.Hour)
-
-	for ip, ts := range thV4Hits {
-		pruned := pruneOld(ts, cutoff)
-		if len(pruned) == 0 {
-			delete(thV4Hits, ip)
-		} else {
-			thV4Hits[ip] = pruned
-		}
-	}
-	for ip, ts := range thV6Hits {
-		pruned := pruneOld(ts, cutoff)
-		if len(pruned) == 0 {
-			delete(thV6Hits, ip)
-		} else {
-			thV6Hits[ip] = pruned
-		}
-	}
-	// Remove reason entries for IPs no longer being tracked
-	for ip := range lastThrottleReason {
-		_, in4 := thV4Hits[ip]
-		_, in6 := thV6Hits[ip]
-		if !in4 && !in6 {
-			delete(lastThrottleReason, ip)
-		}
-	}
-	// Remove timing entries older than 24h
-	for ip, t := range lastAutoBlockAt {
-		if t.Before(deadline) {
-			delete(lastAutoBlockAt, ip)
-		}
-	}
-	for ip, t := range lastIgnoredAt {
-		if t.Before(deadline) {
-			delete(lastIgnoredAt, ip)
-		}
-	}
-}
-
-// nft_rules.go
-func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error {
-	reason := lastThrottleReason[ip]
+// autoBlockAction satisfies autoblock.BlockAction. It is called by the
+// Evaluator for each IP that crosses the sliding-window threshold.
+func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConfig) error {
 	if reason == "" {
 		reason = "Auto-block"
 	}
 
-	// local debounce for repeated "ignored" logs/notifies
 	const ignoreNotifyCooldown = 90 * time.Second
-	if lastIgnoredAt == nil {
-		lastIgnoredAt = map[string]time.Time{}
-	}
 
-	// --- NEW: skip if IP is ignored or allowed ---
 	if skip, why := b.shouldSkipAutoBlock(ip); skip {
 		extraLabel := b.enrichLabel(ip)
 		logIP := ip + extraLabel
@@ -908,27 +750,22 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 		if ignReason == "" {
 			ignReason = "matched allow/ignore policy"
 		}
-
-		// Debounce loudness
-		t := lastIgnoredAt[ip]
+		t := b.lastIgnoredAt[ip]
 		if time.Since(t) >= ignoreNotifyCooldown {
 			logging.Logf("[autoblock][ignored] %s %s reason=%s", fam, logIP, ignReason)
-			// Do NOT report to API for ignored events (no external noise)
 			note := reason
 			if ignReason != "" {
 				note += " | " + ignReason
 			}
 			b.emitAutoBlockNotify(ip, fam, "ignored", note, 0, tc.Hits, tc.WindowSec)
-			lastIgnoredAt[ip] = time.Now()
+			b.lastIgnoredAt[ip] = time.Now()
 		}
 		return nil
 	}
 
-	// NEW: cooldown gate (applies to both v4/v6)
 	if tc.CooldownSec > 0 {
-		if t, ok := lastAutoBlockAt[ip]; ok {
+		if t, ok := b.lastAutoBlockAt[ip]; ok {
 			if time.Since(t) < time.Duration(tc.CooldownSec)*time.Second {
-				// Within cooldown → skip quietly (no log, no notify)
 				return nil
 			}
 		}
@@ -945,7 +782,6 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 
 	switch tc.Mode {
 	case "alert", "dryrun":
-		// unchanged: only log
 		if fam == "v4" {
 			logging.Logf("[dryrun] v4 %s -> would block_v4 %s (ttl=%ds, hits>=%d in %ds) reason=%s",
 				logIP, tc.Mode, tc.TTLSeconds, tc.Hits, tc.WindowSec, reason)
@@ -960,12 +796,9 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 		if ttl <= 0 {
 			ttl = 3600
 		}
-
-		// TRY insert first; only log+notify on success
 		if fam == "v4" {
 			err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
 			if err != nil {
-				// ignore duplicates to avoid spam
 				if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
 					return nil
 				}
@@ -973,14 +806,11 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 			}
 			logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
 				logIP, ttl, tc.Hits, tc.WindowSec, reason)
-			lastAutoBlockAt[ip] = time.Now()
-
+			b.lastAutoBlockAt[ip] = time.Now()
 			_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-
 			b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 			return nil
 		}
-
 		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
 		if err != nil {
 			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
@@ -988,19 +818,15 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 			}
 			return err
 		}
-
 		logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
 			logIP, ttl, tc.Hits, tc.WindowSec, reason)
-		lastAutoBlockAt[ip] = time.Now()
-
+		b.lastAutoBlockAt[ip] = time.Now()
 		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-
 		b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 		return nil
 
 	default: // "permanent"
 		if fam == "v4" {
-
 			err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s }", ip))
 			if err != nil {
 				if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
@@ -1008,20 +834,14 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 				}
 				return err
 			}
-
 			logging.Logf("[autoblock] v4 %s -> block_v4 permanent (hits>=%d in %ds) reason=%s",
 				logIP, tc.Hits, tc.WindowSec, reason)
-			lastAutoBlockAt[ip] = time.Now()
+			b.lastAutoBlockAt[ip] = time.Now()
 			_ = b.appendToDenyFile(ip, comment)
-			//            if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-			//                _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-			//            }
 			_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-
 			b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
 			return nil
 		}
-
 		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
 		if err != nil {
 			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
@@ -1029,16 +849,11 @@ func (b *Backend) addToBlockSet(fam, ip string, tc cfgpkg.ThrottleConfig) error 
 			}
 			return err
 		}
-
 		logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
 			logIP, tc.Hits, tc.WindowSec, reason)
-		lastAutoBlockAt[ip] = time.Now()
+		b.lastAutoBlockAt[ip] = time.Now()
 		_ = b.appendToDenyFile(ip, comment)
-		//	if b.reporter != nil && b.cfg != nil && b.cfg.API.AutoBlockSend {
-		//	    _ = b.reporter.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-		//	}
 		_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
-
 		b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
 		return nil
 	}
@@ -1297,8 +1112,8 @@ func (b *Backend) loadPortScannerOnce() {
 				reason = fmt.Sprintf("%s: %s", reason, strings.Join(parts, ","))
 			}
 
-			lastThrottleReason[ip] = reason
-			if net := parseIPFam(ip); net == 4 {
+			b.ab.Reasons[ip] = reason
+			if net := autoblock.ParseIPFam(ip); net == 4 {
 				v4 = append(v4, ip)
 			} else if net == 6 {
 				v6 = append(v6, ip)
@@ -1312,7 +1127,7 @@ func (b *Backend) loadPortScannerOnce() {
 			if !b.isSelfIPString(s) {
 				keep4 = append(keep4, s)
 			} else {
-				delete(lastThrottleReason, s) // μην αφήνεις stale reason
+				delete(b.ab.Reasons, s)
 			}
 		}
 		v4 = keep4
@@ -1322,30 +1137,27 @@ func (b *Backend) loadPortScannerOnce() {
 			if !b.isSelfIPString(s) {
 				keep6 = append(keep6, s)
 			} else {
-				delete(lastThrottleReason, s)
+				delete(b.ab.Reasons, s)
 			}
 		}
 		v6 = keep6
 	}
-
-	// ... αφού έχεις υπολογίσει τα v4, v6 και έχεις φτιάξει τα lastThrottleReason[..]
-	// και έχεις γεμίσει το tc (threshold config) με limit/interval κλπ.
 
 	mode := strings.ToLower(ps.Mode)
 
 	// ALERT / LOG-ONLY / TEST: μόνο log, καθόλου block.
 	if mode == "alert" || mode == "log" || mode == "test" {
 		for _, ip := range v4 {
-			enrich := b.enrichLabel(ip) // optional: αν έχεις τον enricher
-			reason := lastThrottleReason[ip]
+			enrich := b.enrichLabel(ip)
+			reason := b.ab.Reasons[ip]
 			logging.Logf("[portscan] possible port scan v4 %s%s %s", ip, enrich, reason)
 		}
 		for _, ip := range v6 {
 			enrich := b.enrichLabel(ip)
-			reason := lastThrottleReason[ip]
+			reason := b.ab.Reasons[ip]
 			logging.Logf("[portscan] possible port scan v6 %s%s %s", ip, enrich, reason)
 		}
-		return // τερματίζουμε εδώ — ΔΕΝ γίνεται block
+		return
 	}
 
 	// TTL/PERMANENT: κάνε block
@@ -1364,16 +1176,6 @@ func (b *Backend) loadPortScannerOnce() {
 
 }
 
-// parseIPFam: μικρός helper που γυρίζει 4|6 ή 0 αν δεν είναι IP
-func parseIPFam(ip string) int {
-	if strings.Contains(ip, ":") {
-		return 6
-	}
-	if strings.Count(ip, ".") == 3 {
-		return 4
-	}
-	return 0
-}
 
 // enrichLabel επιστρέφει " — PTR | ASNNAME | City, Country" ή "" αν δεν υπάρχει enricher.
 func (b *Backend) enrichLabel(ip string) string {
@@ -1446,7 +1248,7 @@ func (b *Backend) emitAutoBlockNotify(ip, fam, mode, reason string, ttlSeconds, 
 
 // shouldSkipAutoBlock returns (true, reason) if ip is in ignore_* OR any allow_* union.
 func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
-	f := parseIPFam(ip)
+	f := autoblock.ParseIPFam(ip)
 	if f == 0 {
 		return false, ""
 	}
