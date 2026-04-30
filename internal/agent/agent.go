@@ -5,11 +5,12 @@ import (
 	"context"
 	"crypto/tls"
 	"net/http"
+	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"reflect"
 
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
@@ -27,13 +28,14 @@ type Config struct {
 }
 
 type Runner struct {
-	client  *http.Client
-	cfg     atomic.Value // holds Config
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	once    sync.Once
-	backend firewall.Backend
-	cfgDir  string
+	client             *http.Client
+	cfg                atomic.Value // holds Config
+	stop               chan struct{}
+	wg                 sync.WaitGroup
+	once               sync.Once
+	backend            firewall.Backend
+	cfgDir             string
+	heartbeatSuccesses uint64
 }
 
 func New(cfg Config) *Runner {
@@ -180,7 +182,28 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 		}
 	}
 
-	if err := api.SendHeartbeat(ctx, cfg.Version, cfg.UserAgent, dnatEnabled); err != nil {
-		logging.LogfAPI("[agent] heartbeat failed: %v", err)
+	heartbeatHost := hostForLog(cfg.BaseURL)
+	if logging.DebugEnabled() {
+		logging.LogfAPI("[agent] heartbeat attempt host=%s", heartbeatHost)
 	}
+
+	statusCode, duration, err := api.SendHeartbeat(ctx, cfg.Version, cfg.UserAgent, dnatEnabled)
+	if err != nil {
+		logging.LogfAPI("[agent] heartbeat failed: %v", err)
+		return
+	}
+
+	successes := atomic.AddUint64(&r.heartbeatSuccesses, 1)
+	const heartbeatSuccessLogEvery = uint64(20)
+	if logging.DebugEnabled() || successes%heartbeatSuccessLogEvery == 0 {
+		logging.LogfAPI("[agent] heartbeat ok host=%s status=%d duration=%s successes=%d", heartbeatHost, statusCode, duration, successes)
+	}
+}
+
+func hostForLog(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return baseURL
+	}
+	return u.Host
 }
