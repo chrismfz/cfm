@@ -123,3 +123,11 @@ func New() (*Backend, error) {
 		selfResolver:             selfip.New(),
 	}, nil
 }
+
+func (b *Backend) Capabilities() firewall.Capabilities {
+	return firewall.Capabilities{
+		PortsPolicyInboundRules: true,
+		PortscanTrackingSets:    true,
+		NewStateDropFallback:    true,
+	}
+}

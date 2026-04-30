@@ -953,6 +953,11 @@ func runDaemon(args []string) {
 	// ── applyNFTRules ────────────────────────────────────────────────────────────
 	// Stateless: flood rules, ports policy, SMTP block, reporter, NFLOG snooper.
 	applyNFTRules := func(cfg *cfgpkg.Config) {
+		if capsBE, ok := be.(firewall.CapabilityReporter); ok {
+			caps := capsBE.Capabilities()
+			logging.Logf("[startup] backend capabilities: ports_inbound=%t portscan_sets=%t new_state_drop_fallback=%t",
+				caps.PortsPolicyInboundRules, caps.PortscanTrackingSets, caps.NewStateDropFallback)
+		}
 
 		logging.Logf("[daemon] === Begin ApplyFloodRules ===")
 		if err := be.ApplyFloodRules(cfg); err != nil {
@@ -961,6 +966,7 @@ func runDaemon(args []string) {
 		logging.Logf("[daemon] === End ApplyFloodRules ===")
 
 		logging.Logf("[daemon] === Begin ApplyPortsPolicy ===")
+		logging.Logf("[ports] applying policy...")
 		if err := be.ApplyPortsPolicy(&cfg.Ports); err != nil {
 			fmt.Fprintln(os.Stderr, "apply ports policy error:", err)
 		}

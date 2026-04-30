@@ -16,6 +16,18 @@ type BlockedEntry struct {
 	Comment string
 }
 
+// Capabilities describes feature-level backend support that startup wiring can
+// use to avoid engine-type hard gates.
+type Capabilities struct {
+	PortsPolicyInboundRules bool
+	PortscanTrackingSets    bool
+	NewStateDropFallback    bool
+}
+
+type CapabilityReporter interface {
+	Capabilities() Capabilities
+}
+
 // Phase 2 backend operation ownership matrix (roadmap-aligned):
 // - nftlib-owned operations:
 //   - Lifecycle/list primitives: EnsureBase, ResetTable, List* + table/set dump helpers.
