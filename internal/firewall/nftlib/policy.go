@@ -134,6 +134,19 @@ func nftlibBoolU64(b bool) uint64 {
 
 const meterRefreshInterval = 15 * time.Minute
 
+var throttleSetEnsureCmds = []string{
+	"add set inet cfm th_syn_v4 { type ipv4_addr; flags timeout; }",
+	"add set inet cfm th_syn_v6 { type ipv6_addr; flags timeout; }",
+	"add set inet cfm th_pps_v4 { type ipv4_addr; flags timeout; }",
+	"add set inet cfm th_pps_v6 { type ipv6_addr; flags timeout; }",
+	"add set inet cfm th_pf_tcp_v4 { type ipv4_addr; flags timeout; }",
+	"add set inet cfm th_pf_tcp_v6 { type ipv6_addr; flags timeout; }",
+	"add set inet cfm th_pf_udp_v4 { type ipv4_addr; flags timeout; }",
+	"add set inet cfm th_pf_udp_v6 { type ipv6_addr; flags timeout; }",
+	"add set inet cfm throttled_v4 { type ipv4_addr; flags timeout; }",
+	"add set inet cfm throttled_v6 { type ipv6_addr; flags timeout; }",
+}
+
 func (b *Backend) ApplyFloodRules(c *config.Config) error {
 	b.cfg = c
 
@@ -190,19 +203,48 @@ func (b *Backend) ApplyFloodRules(c *config.Config) error {
 }
 
 func (b *Backend) ensureThrottleSetsCLI() {
-	for _, s := range []string{
-		"add set inet cfm th_syn_v4 { type ipv4_addr; flags timeout; }",
-		"add set inet cfm th_syn_v6 { type ipv6_addr; flags timeout; }",
-		"add set inet cfm th_pps_v4 { type ipv4_addr; flags timeout; }",
-		"add set inet cfm th_pps_v6 { type ipv6_addr; flags timeout; }",
-		"add set inet cfm th_pf_tcp_v4 { type ipv4_addr; flags timeout; }",
-		"add set inet cfm th_pf_tcp_v6 { type ipv6_addr; flags timeout; }",
-		"add set inet cfm th_pf_udp_v4 { type ipv4_addr; flags timeout; }",
-		"add set inet cfm th_pf_udp_v6 { type ipv6_addr; flags timeout; }",
-		"add set inet cfm throttled_v4 { type ipv4_addr; flags timeout; }",
-		"add set inet cfm throttled_v6 { type ipv6_addr; flags timeout; }",
-	} {
+	for _, s := range throttleSetEnsureCmds {
 		_ = b.nftExec(s)
+	}
+}
+
+func perIPRateLimitCmds(rate, burst, ttl int, mode string) []string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "all":
+		return []string{
+			fmt.Sprintf(
+				"add rule inet cfm flood meter pps_v4 { ip saddr limit rate over %d/second burst %d packets } "+
+					"add @th_pps_v4 { ip saddr timeout %ds } "+
+					"add @throttled_v4 { ip saddr timeout %ds } "+
+					"counter name ppsrate_v4 drop comment \"per-ip pps rate %d/%d\"",
+				rate, burst, ttl, ttl, rate, burst,
+			),
+			fmt.Sprintf(
+				"add rule inet cfm flood meter pps_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
+					"add @th_pps_v6 { ip6 saddr timeout %ds } "+
+					"add @throttled_v6 { ip6 saddr timeout %ds } "+
+					"counter name ppsrate_v6 drop comment \"per-ip pps rate %d/%d\"",
+				rate, burst, ttl, ttl, rate, burst,
+			),
+		}
+	default:
+		return []string{
+			fmt.Sprintf(
+				"add rule inet cfm flood tcp flags syn meter syn_v4 { ip saddr limit rate over %d/second burst %d packets } "+
+					"add @th_syn_v4 { ip saddr timeout %ds } "+
+					"add @throttled_v4 { ip saddr timeout %ds } "+
+					"counter name synrate_v4 drop comment \"per-ip syn rate %d/%d\"",
+				rate, burst, ttl, ttl, rate, burst,
+			),
+			fmt.Sprintf(
+				"add rule inet cfm flood tcp flags syn meter syn_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
+					"add @th_syn_v6 { ip6 saddr timeout %ds } "+
+					"add @throttled_v6 { ip6 saddr timeout %ds } "+
+					"counter name synrate_v6 drop comment \"per-ip syn rate %d/%d\"",
+				rate, burst, ttl, ttl, rate, burst,
+			),
+		}
 	}
 }
 
@@ -308,44 +350,22 @@ func (b *Backend) applyPerIPRateLimitCLI(rate, burst int, mode string) error {
 	switch mode {
 	case "all":
 		b.ensureCounterCLI("ppsrate_v4")
-		if err := b.nftExec(fmt.Sprintf(
-			"add rule inet cfm flood meter pps_v4 { ip saddr limit rate over %d/second burst %d packets } "+
-				"add @th_pps_v4 { ip saddr timeout %ds } "+
-				"add @throttled_v4 { ip saddr timeout %ds } "+
-				"counter name ppsrate_v4 drop comment \"per-ip pps rate %d/%d\"",
-			rate, burst, ttl, ttl, rate, burst,
-		)); err != nil {
+		cmds := perIPRateLimitCmds(rate, burst, ttl, mode)
+		if err := b.nftExec(cmds[0]); err != nil {
 			return err
 		}
 		b.ensureCounterCLI("ppsrate_v6")
-		if err := b.nftExec(fmt.Sprintf(
-			"add rule inet cfm flood meter pps_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
-				"add @th_pps_v6 { ip6 saddr timeout %ds } "+
-				"add @throttled_v6 { ip6 saddr timeout %ds } "+
-				"counter name ppsrate_v6 drop comment \"per-ip pps rate %d/%d\"",
-			rate, burst, ttl, ttl, rate, burst,
-		)); err != nil {
+		if err := b.nftExec(cmds[1]); err != nil {
 			return err
 		}
 	default: // "syn"
 		b.ensureCounterCLI("synrate_v4")
-		if err := b.nftExec(fmt.Sprintf(
-			"add rule inet cfm flood tcp flags syn meter syn_v4 { ip saddr limit rate over %d/second burst %d packets } "+
-				"add @th_syn_v4 { ip saddr timeout %ds } "+
-				"add @throttled_v4 { ip saddr timeout %ds } "+
-				"counter name synrate_v4 drop comment \"per-ip syn rate %d/%d\"",
-			rate, burst, ttl, ttl, rate, burst,
-		)); err != nil {
+		cmds := perIPRateLimitCmds(rate, burst, ttl, mode)
+		if err := b.nftExec(cmds[0]); err != nil {
 			return err
 		}
 		b.ensureCounterCLI("synrate_v6")
-		if err := b.nftExec(fmt.Sprintf(
-			"add rule inet cfm flood tcp flags syn meter syn_v6 { ip6 saddr limit rate over %d/second burst %d packets } "+
-				"add @th_syn_v6 { ip6 saddr timeout %ds } "+
-				"add @throttled_v6 { ip6 saddr timeout %ds } "+
-				"counter name synrate_v6 drop comment \"per-ip syn rate %d/%d\"",
-			rate, burst, ttl, ttl, rate, burst,
-		)); err != nil {
+		if err := b.nftExec(cmds[1]); err != nil {
 			return err
 		}
 	}

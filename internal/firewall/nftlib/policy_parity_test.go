@@ -204,3 +204,42 @@ func TestOutboundObservePortGroups_PerGroupEmission(t *testing.T) {
 		t.Fatalf("unexpected outbound observe rule: %q", rule)
 	}
 }
+
+func TestThrottleSetEnsureCmds_ParityList(t *testing.T) {
+	if len(throttleSetEnsureCmds) != 10 {
+		t.Fatalf("unexpected throttle set cmd count: got %d want 10", len(throttleSetEnsureCmds))
+	}
+	mustContain := []string{"th_syn_v4", "th_syn_v6", "th_pps_v4", "th_pps_v6", "throttled_v4", "throttled_v6"}
+	joined := strings.Join(throttleSetEnsureCmds, "\n")
+	for _, needle := range mustContain {
+		if !strings.Contains(joined, needle) {
+			t.Fatalf("throttle ensure cmds missing %q", needle)
+		}
+	}
+}
+
+func TestPerIPRateLimitCmds_ModeAll(t *testing.T) {
+	cmds := perIPRateLimitCmds(100, 200, 60, "all")
+	if len(cmds) != 2 {
+		t.Fatalf("unexpected command count: got %d want 2", len(cmds))
+	}
+	if !strings.Contains(cmds[0], "meter pps_v4") || !strings.Contains(cmds[1], "meter pps_v6") {
+		t.Fatalf("expected pps meter names, got: %v", cmds)
+	}
+	if strings.Contains(cmds[0], "meter syn_v4") || strings.Contains(cmds[1], "meter syn_v6") {
+		t.Fatalf("did not expect syn meter names in mode=all: %v", cmds)
+	}
+}
+
+func TestPerIPRateLimitCmds_ModeSYN(t *testing.T) {
+	cmds := perIPRateLimitCmds(100, 200, 60, "syn")
+	if len(cmds) != 2 {
+		t.Fatalf("unexpected command count: got %d want 2", len(cmds))
+	}
+	if !strings.Contains(cmds[0], "meter syn_v4") || !strings.Contains(cmds[1], "meter syn_v6") {
+		t.Fatalf("expected syn meter names, got: %v", cmds)
+	}
+	if strings.Contains(cmds[0], "meter pps_v4") || strings.Contains(cmds[1], "meter pps_v6") {
+		t.Fatalf("did not expect pps meter names in mode=syn: %v", cmds)
+	}
+}
