@@ -4,24 +4,17 @@ package nftlib
 
 import (
 	"fmt"
-<<<<<<< HEAD
 	"log"
-=======
 	"math"
 	"sort"
 	"strconv"
->>>>>>> bc76701 (nftlib updates)
 	"strings"
 	"time"
 
 	"cfm/internal/config"
 	"cfm/internal/logging"
-<<<<<<< HEAD
-
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
-=======
->>>>>>> bc76701 (nftlib updates)
 )
 
 // ── port-set names ───────────────────────────────────────────────────────────
@@ -68,7 +61,6 @@ func normalizePortRanges(prs []portRange) []portRange {
 	return out
 }
 
-<<<<<<< HEAD
 type portsPolicyRule struct {
 	Chain    string
 	Protocol string
@@ -77,14 +69,14 @@ type portsPolicyRule struct {
 	Verdict  expr.VerdictKind
 	MatchExprs []string
 	ExpectedMatch bool
-=======
+}
+
 func cfgPortRanges(prs []config.PortRange) []portRange {
 	out := make([]portRange, len(prs))
 	for i, p := range prs {
 		out[i] = portRange{p.From, p.To}
 	}
 	return out
->>>>>>> bc76701 (nftlib updates)
 }
 
 // ── flood rebuild hash ────────────────────────────────────────────────────────
@@ -313,19 +305,6 @@ func (b *Backend) applyPerIPRateLimitCLI(rate, burst int, mode string) error {
 	if b.cfg != nil && b.cfg.Throttle.SetTTL > 0 {
 		ttl = b.cfg.Throttle.SetTTL
 	}
-<<<<<<< HEAD
-	logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
-		len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
-	if err := b.ensureChain("output"); err != nil {
-		return err
-	}
-	// Ensure portscan concat sets are present before policy insertion.
-	b.ensurePortscanSetsNative()
-	rules := buildPortsAllowlistRules(cfg)
-	if err := b.flushChainsAndAppendVerdictsAtomically([]string{"input", "output"}, rules); err != nil {
-		return err
-=======
-
 	switch mode {
 	case "all":
 		b.ensureCounterCLI("ppsrate_v4")
@@ -369,12 +348,10 @@ func (b *Backend) applyPerIPRateLimitCLI(rate, burst int, mode string) error {
 		)); err != nil {
 			return err
 		}
->>>>>>> bc76701 (nftlib updates)
 	}
 	return nil
 }
 
-<<<<<<< HEAD
 func buildPortsAllowlistRules(cfg *config.PortsConfig) []portsPolicyRule {
 	if cfg == nil {
 		return nil
@@ -450,9 +427,8 @@ func (b *Backend) flushChainsAndAppendVerdictsAtomically(chains []string, rules 
 	debugLogRuleBatch("ports_policy", rules, 5)
 	return b.conn.Flush()
 }
-=======
+
 // ── ApplyConnlimit ────────────────────────────────────────────────────────────
->>>>>>> bc76701 (nftlib updates)
 
 func (b *Backend) ApplyConnlimit(rules []config.ConnlimitRule) error {
 	const meterSize = 65535
@@ -869,36 +845,51 @@ func (b *Backend) ApplyOutboundObserve(cfg *config.OutboundConfig) error {
 	}
 	_ = b.nftExec("flush chain inet cfm cfm_outbound_observe")
 
-	group := cfg.NFLOGGroup
-	logSuffix := fmt.Sprintf(`log prefix "CFM_OUT: " group %d snaplen 96`, group)
+	for _, rule := range nftlibOutboundObserveSelectionRules(cfg) {
+		_ = b.nftExec(rule)
+	}
+	for _, ports := range nftlibOutboundObservePortGroups(cfg) {
+		_ = b.nftExec(nftlibOutboundObservePortGroupRule(cfg.NFLOGGroup, ports))
+	}
+	return nil
+}
 
-	_ = b.nftExec("add rule inet cfm cfm_outbound_observe meta skuid 0 return")
+func nftlibOutboundObserveSelectionRules(cfg *config.OutboundConfig) []string {
+	rules := []string{"add rule inet cfm cfm_outbound_observe meta skuid 0 return"}
 	if uids := nftlibSortedU32(cfg.AllowUIDs); len(uids) > 0 {
-		_ = b.nftExec(fmt.Sprintf(
+		rules = append(rules, fmt.Sprintf(
 			"add rule inet cfm cfm_outbound_observe meta skuid { %s } return",
 			strings.Join(uids, ", "),
 		))
 	}
 	if gids := nftlibSortedU32(cfg.AllowGIDs); len(gids) > 0 {
-		_ = b.nftExec(fmt.Sprintf(
+		rules = append(rules, fmt.Sprintf(
 			"add rule inet cfm cfm_outbound_observe meta skgid { %s } return",
 			strings.Join(gids, ", "),
 		))
 	}
+	return rules
+}
 
-	smtp := nftlibJoinPorts(cfg.SMTPPorts, []uint16{25, 465, 587})
-	scan := nftlibJoinPorts(cfg.ScanPorts, []uint16{22, 23, 3389})
-	http := nftlibJoinPorts(cfg.HTTPPorts, []uint16{80, 443, 8080, 8443})
-
-	for _, ports := range []string{smtp, scan, http} {
+func nftlibOutboundObservePortGroups(cfg *config.OutboundConfig) []string {
+	groups := make([]string, 0, 3)
+	for _, ports := range []string{
+		nftlibJoinPorts(cfg.SMTPPorts, []uint16{25, 465, 587}),
+		nftlibJoinPorts(cfg.ScanPorts, []uint16{22, 23, 3389}),
+		nftlibJoinPorts(cfg.HTTPPorts, []uint16{80, 443, 8080, 8443}),
+	} {
 		if ports != "" {
-			_ = b.nftExec(fmt.Sprintf(
-				"add rule inet cfm cfm_outbound_observe ct state new tcp dport { %s } %s",
-				ports, logSuffix,
-			))
+			groups = append(groups, ports)
 		}
 	}
-	return nil
+	return groups
+}
+
+func nftlibOutboundObservePortGroupRule(group int, ports string) string {
+	return fmt.Sprintf(
+		`add rule inet cfm cfm_outbound_observe ct state new tcp dport { %s } log prefix "CFM_OUT: " group %d snaplen 96`,
+		ports, group,
+	)
 }
 
 func nftlibJoinPorts(ports, defaults []uint16) string {
@@ -918,9 +909,6 @@ func nftlibJoinPorts(ports, defaults []uint16) string {
 	}
 	return strings.Join(out, ", ")
 }
-<<<<<<< HEAD
-=======
-
 func nftlibSortedU32(ids []uint32) []string {
 	if len(ids) == 0 {
 		return nil
@@ -940,4 +928,3 @@ func nftlibSortedU32(ids []uint32) []string {
 	}
 	return s
 }
->>>>>>> bc76701 (nftlib updates)
