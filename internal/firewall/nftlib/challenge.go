@@ -3,6 +3,7 @@
 package nftlib
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -13,6 +14,75 @@ import (
 const (
 	dnatRuleTag = "cfm-dnat-managed"
 )
+
+type dnatRuleSpec struct {
+	proto  uint8
+	dport  uint16
+	toPort uint16
+}
+
+func (s dnatRuleSpec) id() string {
+	return fmt.Sprintf("%s:v1:p%d:d%d:t%d", dnatRuleTag, s.proto, s.dport, s.toPort)
+}
+
+func managedDNATRule(userData []byte) bool {
+	return strings.HasPrefix(string(userData), dnatRuleTag)
+}
+
+func dnatRuleExprs(spec dnatRuleSpec) []expr.Any {
+	toPort := []byte{byte(spec.toPort >> 8), byte(spec.toPort)}
+	dport := []byte{byte(spec.dport >> 8), byte(spec.dport)}
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{spec.proto}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: dport},
+		&expr.Immediate{Register: 1, Data: toPort},
+		&expr.NAT{Type: expr.NATTypeDestNAT, Family: uint32(nftables.TableFamilyIPv4), RegProtoMin: 1},
+	}
+}
+
+func dnatRuleMatches(r *nftables.Rule, spec dnatRuleSpec) bool {
+	if string(r.UserData) != spec.id() {
+		return false
+	}
+	exprs := dnatRuleExprs(spec)
+	if len(r.Exprs) != len(exprs) {
+		return false
+	}
+	for i := range exprs {
+		switch want := exprs[i].(type) {
+		case *expr.Meta:
+			got, ok := r.Exprs[i].(*expr.Meta)
+			if !ok || got.Key != want.Key || got.Register != want.Register {
+				return false
+			}
+		case *expr.Cmp:
+			got, ok := r.Exprs[i].(*expr.Cmp)
+			if !ok || got.Op != want.Op || got.Register != want.Register || !bytes.Equal(got.Data, want.Data) {
+				return false
+			}
+		case *expr.Payload:
+			got, ok := r.Exprs[i].(*expr.Payload)
+			if !ok || got.DestRegister != want.DestRegister || got.Base != want.Base || got.Offset != want.Offset || got.Len != want.Len {
+				return false
+			}
+		case *expr.Immediate:
+			got, ok := r.Exprs[i].(*expr.Immediate)
+			if !ok || got.Register != want.Register || !bytes.Equal(got.Data, want.Data) {
+				return false
+			}
+		case *expr.NAT:
+			got, ok := r.Exprs[i].(*expr.NAT)
+			if !ok || got.Type != want.Type || got.Family != want.Family || got.RegProtoMin != want.RegProtoMin {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 func dnatDefaults(fam, tbl string) (string, string) {
 	fam = strings.TrimSpace(fam)
@@ -87,7 +157,7 @@ func (b *Backend) DNATStatus(family, table string) (bool, error) {
 		return false, err
 	}
 	for _, r := range rules {
-		if string(r.UserData) == dnatRuleTag {
+		if managedDNATRule(r.UserData) {
 			return true, nil
 		}
 	}
@@ -130,35 +200,36 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) error {
 		}
 		b.conn.AddChain(ch)
 	}
-	// idempotent: rely on stable comment tag identity.
+	wanted := []dnatRuleSpec{
+		{proto: 6, dport: 80, toPort: uint16(httpPort)},
+		{proto: 6, dport: 443, toPort: uint16(httpsPort)},
+		{proto: 17, dport: 443, toPort: uint16(httpsPort)},
+	}
 	rules, _ := b.conn.GetRules(t, ch)
+	wantedByID := make(map[string]dnatRuleSpec, len(wanted))
+	for _, spec := range wanted {
+		wantedByID[spec.id()] = spec
+	}
+
+	seen := make(map[string]struct{}, len(wanted))
 	for _, r := range rules {
-		if string(r.UserData) == dnatRuleTag {
-			return nil
+		if !managedDNATRule(r.UserData) {
+			continue
 		}
+		spec, ok := wantedByID[string(r.UserData)]
+		if !ok || !dnatRuleMatches(r, spec) {
+			b.conn.DelRule(r)
+			continue
+		}
+		seen[string(r.UserData)] = struct{}{}
 	}
-	addRule := func(proto uint8, dport, toPort uint16) {
-		b.conn.AddRule(&nftables.Rule{
-			Table: t, Chain: ch,
-			Exprs: []expr.Any{
-				&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{'l', 'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-				&expr.Counter{},
-				&expr.Verdict{Kind: expr.VerdictAccept},
-			},
-		})
-		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatRuleTag), Exprs: []expr.Any{
-			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
-			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{byte(dport >> 8), byte(dport)}},
-			&expr.NAT{Type: expr.NATTypeDestNAT, Family: uint32(nftables.TableFamilyIPv4), RegAddrMin: 0, RegProtoMin: 1},
-			&expr.Immediate{Register: 1, Data: []byte{byte(toPort >> 8), byte(toPort)}},
-		}})
+
+	for _, spec := range wanted {
+		if _, ok := seen[spec.id()]; ok {
+			continue
+		}
+		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(spec.id()), Exprs: dnatRuleExprs(spec)})
 	}
-	addRule(6, 80, uint16(httpPort))
-	addRule(6, 443, uint16(httpsPort))
-	addRule(17, 443, uint16(httpsPort))
 	return b.conn.Flush()
 }
 
@@ -175,7 +246,7 @@ func (b *Backend) DNATOff(family, table string) error {
 		return err
 	}
 	for _, r := range rules {
-		if string(r.UserData) == dnatRuleTag {
+		if managedDNATRule(r.UserData) {
 			b.conn.DelRule(r)
 		}
 	}
