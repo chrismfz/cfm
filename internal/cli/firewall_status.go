@@ -149,20 +149,20 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	for _, req := range probeReq {
 		s := req.setName
 		if !req.applicable {
-			r.Findings = append(r.Findings, fwFinding{"info", "set probe not applicable for " + s + " (" + req.reason + ")"})
+			r.Findings = append(r.Findings, fwFinding{"info", fmt.Sprintf("set(%s) skipped (feature disabled; expected source: %s)", s, req.reason)})
 			continue
 		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
 			if canonical, ok := legacyAliases[s]; ok {
-				r.Findings = append(r.Findings, fwFinding{"warn", "legacy set alias " + s + " is absent (canonical: " + canonical + ")"})
+				r.Findings = append(r.Findings, fwFinding{"warn", fmt.Sprintf("set(%s) missing (legacy alias; expected source: canonical %s)", s, canonical)})
 				continue
 			}
 			level := "warn"
 			if req.required {
 				level = "fail"
 			}
-			r.Findings = append(r.Findings, fwFinding{level, "set probe failed for " + s + ": " + err.Error()})
+			r.Findings = append(r.Findings, fwFinding{level, fmt.Sprintf("set(%s) missing (expected source: %s): %s", s, req.reason, err.Error())})
 			continue
 		}
 		r.SetSizes[s] = len(elems)
@@ -246,11 +246,11 @@ func printFirewallReport(r fwReport) {
 	fmt.Printf("Firewall diagnostics: %s (%s)\n", r.Engine, r.Status)
 	fmt.Printf("Config source: %s\n", r.ConfigSource)
 	fmt.Printf("Capabilities: %s\n", strings.Join(r.Capabilities, ", "))
-	fmt.Println("Features:")
+	fmt.Println("Configured features:")
 	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat"} {
 		fmt.Printf("  %-10s %v\n", k, r.Features[k])
 	}
-	fmt.Println("Set sizes:")
+	fmt.Println("Detected runtime objects:")
 	keys := make([]string, 0, len(r.SetSizes))
 	for k := range r.SetSizes {
 		keys = append(keys, k)
@@ -259,8 +259,21 @@ func printFirewallReport(r fwReport) {
 	for _, k := range keys {
 		fmt.Printf("  %-14s %d\n", k, r.SetSizes[k])
 	}
+	if len(r.SetSizes) > 0 {
+		fmt.Println("Set cardinality:")
+		keys := make([]string, 0, len(r.SetSizes))
+		for k := range r.SetSizes {
+			if strings.HasSuffix(k, "_cardinality") {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-14s %d\n", k, r.SetSizes[k])
+		}
+	}
 	if len(r.Counters) > 0 {
-		fmt.Println("Counters:")
+		fmt.Println("Counter snapshot:")
 		ckeys := make([]string, 0, len(r.Counters))
 		for k := range r.Counters {
 			ckeys = append(ckeys, k)
@@ -275,6 +288,9 @@ func printFirewallReport(r fwReport) {
 		for _, f := range r.Findings {
 			fmt.Printf("  [%s] %s\n", strings.ToUpper(f.Level), f.Message)
 		}
+	}
+	if r.Status != "ok" {
+		fmt.Println("Recommendation: run `cfm firewall status --verbose` for deeper diagnostics and apply the suggested set/table remediation above.")
 	}
 }
 
