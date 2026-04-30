@@ -5,6 +5,7 @@ package nftlib
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/nftables"
@@ -148,31 +149,75 @@ func (b *Backend) DNATStatus(family, table string) (bool, error) {
 	family, table = dnatDefaults(family, table)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ch, err := b.getDNATTableAndChain(family, table)
+	t, ch, err := b.getDNATTableAndChain(family, table)
 	if err != nil || ch == nil {
 		return false, err
 	}
-	rules, err := b.conn.GetRules(ch.Table, ch)
+	on, _, err := b.scanManagedDNATRules(t, ch)
 	if err != nil {
 		return false, err
 	}
+	return on, nil
+}
+
+func (b *Backend) scanManagedDNATRules(t *nftables.Table, ch *nftables.Chain) (bool, []dnatRuleSpec, error) {
+	rules, err := b.conn.GetRules(t, ch)
+	if err != nil {
+		return false, nil, err
+	}
+	found := make([]dnatRuleSpec, 0, 3)
 	for _, r := range rules {
-		if managedDNATRule(r.UserData) {
-			return true, nil
+		for _, spec := range []dnatRuleSpec{
+			{proto: 6, dport: 80, toPort: 9080},
+			{proto: 6, dport: 443, toPort: 9043},
+			{proto: 17, dport: 443, toPort: 9043},
+		} {
+			if dnatRuleMatches(r, spec) {
+				found = append(found, spec)
+				break
+			}
 		}
 	}
-	return false, nil
+	sort.Slice(found, func(i, j int) bool {
+		if found[i].dport != found[j].dport {
+			return found[i].dport < found[j].dport
+		}
+		return found[i].proto < found[j].proto
+	})
+	return len(found) > 0, found, nil
 }
 
 func (b *Backend) DNATShow(family, table string) (string, error) {
-	on, err := b.DNATStatus(family, table)
+	family, table = dnatDefaults(family, table)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ch, err := b.getDNATTableAndChain(family, table)
 	if err != nil {
 		return "", err
 	}
-	if on {
-		return "cfm dnat: on", nil
+	if ch == nil {
+		return "", nil
 	}
-	return "cfm dnat: off", nil
+	on, found, err := b.scanManagedDNATRules(t, ch)
+	if err != nil {
+		return "", err
+	}
+	if !on {
+		return "", nil
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "table %s %s {\n", family, table)
+	out.WriteString("  chain prerouting {\n")
+	out.WriteString("    type nat hook prerouting priority dstnat; policy accept;\n\n")
+	for _, spec := range found {
+		proto := "tcp"
+		if spec.proto == 17 {
+			proto = "udp"
+		}
+		fmt.Fprintf(&out, "    %s dport %d dnat to :%d\n", proto, spec.dport, spec.toPort)
+	}
+	out.WriteString("  }\n}\n")
+	return out.String(), nil
 }
 
 func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) error {
