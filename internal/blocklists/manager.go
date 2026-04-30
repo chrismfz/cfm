@@ -2,6 +2,7 @@ package blocklists
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -174,7 +175,11 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 		return
 	}
 	r.lastV4, r.lastV6 = len(res.V4), len(res.V6)
-	_ = m.applier.ApplyFeed(ctx, r.feed, res) // best-effort: log errors εκεί που την υλοποιείς
+	if err := m.applier.ApplyFeed(ctx, r.feed, res); err != nil {
+		r.lastErr = fmt.Errorf("apply feed %q: %w", r.feed.Name, err)
+		return
+	}
+	r.lastErr = nil
 }
 
 // Προαιρετικό: για μελλοντικό `cfm status` να δείχνει κατάσταση feeds
