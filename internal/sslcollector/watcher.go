@@ -2,7 +2,9 @@ package sslcollector
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -61,8 +63,43 @@ func (w *Watcher) Start(ctx context.Context, roots []string) error {
 	}
 
 	go w.loop(ctx)
-	logging.Logf("[sslcollector] watcher started roots=%v", roots)
+	if logging.DebugEnabled() {
+		logging.Logf("[sslcollector] watcher started roots=%v", roots)
+	} else {
+		logging.Logf("[sslcollector] watcher started %s", summarizeWatcherRoots(roots))
+	}
 	return nil
+}
+
+var homeSSLRootRE = regexp.MustCompile(`^/home([^/]*)/[^/]+/ssl$`)
+
+func summarizeWatcherRoots(roots []string) string {
+	buckets := make([]string, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+
+	for _, root := range roots {
+		bucket := watcherRootBucket(root)
+		if _, ok := seen[bucket]; ok {
+			continue
+		}
+		seen[bucket] = struct{}{}
+		buckets = append(buckets, bucket)
+	}
+
+	return fmt.Sprintf("roots=[%s] expanded=%d", strings.Join(buckets, " "), len(roots))
+}
+
+func watcherRootBucket(root string) string {
+	if m := homeSSLRootRE.FindStringSubmatch(root); m != nil {
+		return "/home" + m[1]
+	}
+
+	switch root {
+	case "/etc/letsencrypt", "/var/cpanel/ssl", "/usr/local/directadmin", "/etc/ssl":
+		return root
+	default:
+		return root
+	}
 }
 
 func (w *Watcher) loop(ctx context.Context) {
