@@ -255,8 +255,14 @@ func perIPRateLimitCmds(rate, burst, ttl int, mode string) []string {
 	}
 }
 
-// buildFloodVerdictPlan is a compatibility helper retained for parity tests.
-// It returns the planned verdict kind for each flood-path rule in order.
+// ── Test-consumed package-private helpers (compatibility surface) ────────────
+//
+// NOTE: These helpers are intentionally package-private and consumed by parity
+// tests. Keep names/signatures stable; if internals need to change, preserve
+// these entry points as wrappers first and migrate tests separately.
+
+// buildFloodVerdictPlan returns the planned verdict kind for each flood-path
+// rule in order.
 func buildFloodVerdictPlan(c *config.Config) ([]expr.VerdictKind, error) {
 	if c == nil {
 		return nil, nil
@@ -279,7 +285,7 @@ func buildFloodVerdictPlan(c *config.Config) ([]expr.VerdictKind, error) {
 	return out, nil
 }
 
-// buildHardeningRuleSnapshots is a compatibility helper retained for parity tests.
+// buildHardeningRuleSnapshots snapshots hardening rule intent for parity tests.
 func buildHardeningRuleSnapshots(c *config.Config) []hardeningRuleSnapshot {
 	if c == nil {
 		return nil
@@ -308,7 +314,7 @@ func buildHardeningRuleSnapshots(c *config.Config) []hardeningRuleSnapshot {
 	return out
 }
 
-// buildPortsPolicySnapshots is a compatibility helper retained for parity tests.
+// buildPortsPolicySnapshots snapshots ports policy rule intent for parity tests.
 func buildPortsPolicySnapshots(cfg *config.PortsConfig) []hardeningRuleSnapshot {
 	rules := buildPortsAllowlistRules(cfg)
 	out := []hardeningRuleSnapshot{

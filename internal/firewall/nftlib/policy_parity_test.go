@@ -12,6 +12,17 @@ import (
 	"github.com/google/nftables/expr"
 )
 
+// Compile-time signature guards for parity-test-consumed helpers.
+var (
+	_ func(*config.Config) ([]expr.VerdictKind, error) = buildFloodVerdictPlan
+	_ func(*config.Config) []hardeningRuleSnapshot      = buildHardeningRuleSnapshots
+	_ func(*config.PortsConfig) []hardeningRuleSnapshot = buildPortsPolicySnapshots
+	_ func(*config.PortsConfig) []portsPolicyRule       = buildPortsAllowlistRules
+	_ func(portsPolicyRule) error                       = validateRuleBeforeCommit
+	_ func(portsPolicyRule) string                      = renderPortsPolicyRule
+	_ func(int, int, int, string) []string              = perIPRateLimitCmds
+)
+
 func TestBuildFloodVerdictPlan_OrderParity(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Hardening.BlockBadTCPFlags = true
