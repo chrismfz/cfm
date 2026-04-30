@@ -213,6 +213,19 @@ func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
 	b.SetChallengeRedirectEnabled(enabled)
 }
 
+func (b *Backend) logPhase(phase, status string, duration time.Duration, err error, extra string) {
+	msg := fmt.Sprintf("[firewall] engine=nft phase=%s status=%s duration=%s", phase, status, duration)
+	if err != nil {
+		msg += fmt.Sprintf(" error=%q", err.Error())
+	} else {
+		msg += ` error=""`
+	}
+	if extra != "" {
+		msg += " " + extra
+	}
+	logging.Logf("%s", msg)
+}
+
 func (b *Backend) CleanupChallengeDNAT() error {
 	return b.CleanupChallengeRedirect()
 }
