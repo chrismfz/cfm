@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"cfm/internal/blocklists"
+	"cfm/internal/firewall/feedutil"
 )
 
 // --- Applier: καλείται από τον blocklists.Manager για κάθε feed ----
@@ -28,8 +27,8 @@ func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blockli
 	}
 
 	// χώρισε hosts vs nets, v4/v6
-	h4, n4 := splitHostsNets(res.V4, false)
-	h6, n6 := splitHostsNets(res.V6, true)
+	h4, n4 := feedutil.SplitHostsNets(res.V4, false)
+	h6, n6 := feedutil.SplitHostsNets(res.V6, true)
 
 	ttl := f.TTL // *time.Duration
 
@@ -86,14 +85,14 @@ func (b *Backend) RebuildExternalUnions() error {
 	b.extFeedMu.RUnlock()
 
 	// Optional: dedup (keeps unions stable if multiple feeds overlap)
-	allowH4 = dedupKeepOrder(allowH4)
-	allowN4 = dedupKeepOrder(allowN4)
-	allowH6 = dedupKeepOrder(allowH6)
-	allowN6 = dedupKeepOrder(allowN6)
-	blockH4 = dedupKeepOrder(blockH4)
-	blockN4 = dedupKeepOrder(blockN4)
-	blockH6 = dedupKeepOrder(blockH6)
-	blockN6 = dedupKeepOrder(blockN6)
+	allowH4 = feedutil.DedupKeepOrder(allowH4)
+	allowN4 = feedutil.DedupKeepOrder(allowN4)
+	allowH6 = feedutil.DedupKeepOrder(allowH6)
+	allowN6 = feedutil.DedupKeepOrder(allowN6)
+	blockH4 = feedutil.DedupKeepOrder(blockH4)
+	blockN4 = feedutil.DedupKeepOrder(blockN4)
+	blockH6 = feedutil.DedupKeepOrder(blockH6)
+	blockN6 = feedutil.DedupKeepOrder(blockN6)
 
 	// Ensure unions exist (they are referenced by the base rules)
 	_ = b.EnsureSetDynamic("allow_ext_v4_hosts", false, false)
@@ -166,74 +165,6 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// split hosts vs nets, validate family
-func splitHostsNets(elems []string, isV6 bool) (hosts []string, nets []string) {
-	seenH, seenN := map[string]struct{}{}, map[string]struct{}{}
-	maxBits := 32
-	if isV6 {
-		maxBits = 128
-	}
-	for _, s := range elems {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if strings.Contains(s, "/") {
-			_, n, err := net.ParseCIDR(s)
-			if err != nil {
-				continue
-			}
-			ones, bits := n.Mask.Size()
-			if bits != maxBits {
-				continue
-			}
-			if ones == maxBits {
-				ip := n.IP.String()
-				if _, ok := seenH[ip]; !ok {
-					seenH[ip] = struct{}{}
-					hosts = append(hosts, ip)
-				}
-			} else {
-				canon := n.IP.Mask(n.Mask).String() + "/" + strconv.Itoa(ones)
-				if _, ok := seenN[canon]; !ok {
-					seenN[canon] = struct{}{}
-					nets = append(nets, canon)
-				}
-			}
-		} else {
-			ip := net.ParseIP(s)
-			if ip == nil {
-				continue
-			}
-			if !isV6 && ip.To4() == nil {
-				continue
-			}
-			if isV6 && (ip.To16() == nil || ip.To4() != nil) {
-				continue
-			}
-			ipS := ip.String()
-			if _, ok := seenH[ipS]; !ok {
-				seenH[ipS] = struct{}{}
-				hosts = append(hosts, ipS)
-			}
-		}
-	}
-	return
-}
-
-func dedupKeepOrder(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, x := range in {
-		if _, ok := seen[x]; ok {
-			continue
-		}
-		seen[x] = struct{}{}
-		out = append(out, x)
-	}
-	return out
 }
 
 // Optional: remove all per-feed sets for a given sanitized feed key
