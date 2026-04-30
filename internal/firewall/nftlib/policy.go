@@ -177,8 +177,8 @@ func (b *Backend) ApplyFloodRules(c *config.Config) (err error) {
 		b.mu.Lock()
 		_, tableErr := b.lookupTable()
 		b.mu.Unlock()
-		if tableErr == nil && !b.lastFloodRebuild.IsZero() &&
-			time.Since(b.lastFloodRebuild) < meterRefreshInterval {
+		floodChainPresent := b.chainExistsCLI("flood")
+		if shouldSkipFloodRebuild(tableErr == nil, floodChainPresent, b.lastFloodRebuild, time.Now()) {
 			return nil
 		}
 	}
@@ -222,6 +222,13 @@ func (b *Backend) ApplyFloodRules(c *config.Config) (err error) {
 	}
 	b.lastFloodRebuild = time.Now()
 	return nil
+}
+
+func shouldSkipFloodRebuild(tablePresent, floodChainPresent bool, lastRebuild, now time.Time) bool {
+	if !tablePresent || !floodChainPresent || lastRebuild.IsZero() {
+		return false
+	}
+	return now.Sub(lastRebuild) < meterRefreshInterval
 }
 
 func (b *Backend) ensureThrottleSetsCLI() {
