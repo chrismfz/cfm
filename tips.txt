@@ -1,3 +1,56 @@
+1) Dump the active ruleset (ground truth)
+
+nft list ruleset > /tmp/nft.ruleset.txt
+nft -j list ruleset > /tmp/nft.ruleset.json
+
+2) Verify inet cfm exists + key chains
+
+nft list table inet cfm
+nft list chain inet cfm input
+nft list chain inet cfm flood
+nft list chain inet cfm output
+
+3) Verify the sets that diagnostics reported
+
+(Use your real names, not legacy ones)
+
+nft list set inet cfm allow_v4
+nft list set inet cfm block_v4
+nft list set inet cfm ignore_v4
+nft list set inet cfm throttled_v4
+nft list set inet cfm throttled_v6
+
+For dynamic feed sets:
+
+nft list set inet cfm allow_ext_v4_hosts_myallow
+nft list set inet cfm allow_ext_v4_nets_myallow
+nft list set inet cfm block_ext_v4_hosts_myblock
+nft list set inet cfm block_ext_v4_nets_myblock
+
+4) Verify DNAT edge mode (your OpenResty case)
+
+nft list table inet cfm_redirect
+nft list chain inet cfm_redirect prerouting
+cfm dnat
+
+If these are present and cfm dnat says ON, then dnat_edge is correct regardless of missing challenge_* sets.
+5) Check whether “counter unavailable” warnings are FP
+
+Those warnings usually mean the command expects named counters that may not exist in your current rules style.
+
+Inspect flood/connlimit/portflood chains for counters:
+
+nft -a list chain inet cfm flood
+nft -a list chain inet cfm input
+nft -a list chain inet cfm output
+
+If rules exist and enforce correctly but named counters are absent, warning is likely FP (observability gap, not policy failure).
+6) Compare with CLI diagnostics output quickly
+
+cfm firewall status --json > /tmp/cfm_firewall_status.json
+
+
+
 sudo nft list table inet cfm
 
 #find a subnet block
