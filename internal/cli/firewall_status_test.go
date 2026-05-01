@@ -13,6 +13,7 @@ type mockDiagBE struct {
 	tableErr error
 	dnatJSON []byte
 	sets     map[string][]string
+	counters map[string]int64
 }
 
 func (m mockDiagBE) DNATStatus(family, table string) (bool, error) { return m.dnat, m.dnatErr }
@@ -30,6 +31,12 @@ func (m mockDiagBE) ListTableJSON(family, table string) ([]byte, error) {
 		return nil, m.tableErr
 	}
 	return []byte(`{"ok":true}`), nil
+}
+func (m mockDiagBE) CounterValue(name string) (int64, error) {
+	if v, ok := m.counters[name]; ok {
+		return v, nil
+	}
+	return 0, errors.New("missing counter")
 }
 
 func TestCollectFirewallStatusHealthy(t *testing.T) {
@@ -221,5 +228,27 @@ func TestEvaluateCanonicalChecksCategories(t *testing.T) {
 	}
 	if cc.ByDomain["dnat"].UnsupportedFeature == 0 {
 		t.Fatalf("expected unsupported feature bucket to increment")
+	}
+}
+
+func TestEvaluateFeatureChecksCounterPatterns(t *testing.T) {
+	r := fwReport{
+		Features: map[string]bool{"portflood": true, "connlimit": true, "autoblock": true, "dnat_challenge": false, "challenge_redirect": false, "smtp": false},
+		SetSizes: map[string]int{"throttled_v4": 1, "throttled_v6": 1},
+		Counters: map[string]int64{
+			"portflood_443_tcp": 4,
+			"connlimit_443_tcp": 2,
+			"badflags_drop":     1,
+		},
+	}
+	checks := evaluateFeatureChecks(r)
+	if checks["portflood"].Status != "pass" {
+		t.Fatalf("expected portflood pass, got %s (%s)", checks["portflood"].Status, checks["portflood"].Reason)
+	}
+	if checks["connlimit"].Status != "pass" {
+		t.Fatalf("expected connlimit pass, got %s (%s)", checks["connlimit"].Status, checks["connlimit"].Reason)
+	}
+	if checks["autoblock"].Status != "warn" {
+		t.Fatalf("expected autoblock warn due to missing expected flood counters, got %s", checks["autoblock"].Status)
 	}
 }

@@ -26,6 +26,33 @@ type fwDiagBackend interface {
 type counterProbe interface {
 	CounterValue(name string) (int64, error)
 }
+
+func expectedCounterPatterns(cfg *cfgpkg.Config) []string {
+	patterns := []string{
+		"cfm_input_drop",
+		"cfm_forward_drop",
+		"badflags_drop",
+		"newrate_v4",
+		"newrate_v6",
+		"synrate_v4",
+		"synrate_v6",
+		"icmp_v4",
+		"icmp_v6",
+	}
+	if len(cfg.Connlimit.Rules) > 0 {
+		patterns = append(patterns, "connlimit_*")
+		for _, r := range cfg.Connlimit.Rules {
+			patterns = append(patterns, fmt.Sprintf("connlimit_%d_%s", r.Port, strings.ToLower(r.Proto)))
+		}
+	}
+	if len(cfg.PortFlood.Rules) > 0 {
+		patterns = append(patterns, "portflood_*")
+		for _, r := range cfg.PortFlood.Rules {
+			patterns = append(patterns, fmt.Sprintf("portflood_%d_%s", r.Port, strings.ToLower(r.Proto)))
+		}
+	}
+	return patterns
+}
 type dnatShowProbe interface {
 	DNATShow(family, table string) (string, error)
 }
@@ -291,7 +318,10 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 	}
 	if cp, ok := any(be).(counterProbe); ok {
-		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} {
+		for _, name := range expectedCounterPatterns(cfg) {
+			if strings.HasSuffix(name, "*") {
+				continue
+			}
 			if v, err := cp.CounterValue(name); err == nil {
 				r.Counters[name] = v
 			} else {
@@ -609,6 +639,17 @@ func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
 
 func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 	checks := map[string]fwFeatureCheck{}
+	matchesCounterPattern := func(pattern string) bool {
+		for name := range r.Counters {
+			if pattern == name {
+				return true
+			}
+			if strings.HasSuffix(pattern, "*") && strings.HasPrefix(name, strings.TrimSuffix(pattern, "*")) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, feature := range []string{"dnat_edge", "dnat_challenge", "challenge_redirect", "smtp", "portflood", "connlimit", "autoblock"} {
 		sourceFeature := feature
 		if feature == "challenge_redirect" {
@@ -634,12 +675,12 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		case "smtp":
 			check.RequiredSets = []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"}
 		case "portflood":
-			check.Counters = []string{"portflood"}
+			check.Counters = []string{"portflood_*"}
 		case "connlimit":
-			check.Counters = []string{"connlimit"}
+			check.Counters = []string{"connlimit_*"}
 		case "autoblock":
 			check.RequiredSets = []string{"throttled_v4", "throttled_v6"}
-			check.Counters = []string{"flood"}
+			check.Counters = []string{"badflags_drop", "newrate_v4", "newrate_v6", "synrate_v4", "synrate_v6", "icmp_v4", "icmp_v6"}
 		}
 		for _, s := range check.RequiredSets {
 			v, ok := r.SetSizes[s]
@@ -652,17 +693,18 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		}
 		if check.Status != "fail" {
 			for _, c := range check.Counters {
-				v, ok := r.Counters[c]
-				if !ok {
+				if !matchesCounterPattern(c) {
 					check.Status = "warn"
 					check.Reason = "counter unavailable: " + c
 					continue
 				}
-				if v < 0 {
+			}
+			for name, v := range r.Counters {
+				if v < 0 && check.Status == "pass" {
 					check.Status = "warn"
-					check.Reason = "counter semantic check failed: negative " + c
+					check.Reason = "counter semantic check failed: negative " + name
 				}
-				check.Samples[c+"_total"] = fmt.Sprintf("%d", v)
+				check.Samples[name+"_total"] = fmt.Sprintf("%d", v)
 			}
 		}
 		checks[feature] = check
