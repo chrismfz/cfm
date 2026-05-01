@@ -67,11 +67,11 @@ func staticSetProbes(features map[string]bool, engine string, names map[string]s
 		dependsOn := "always"
 		switch s {
 		case "challenge_v4", "challenge_v6":
-			applicable = true
-			required = features["dnat_challenge"] && engine == "nft"
-			reason = "required only when challenge redirect is enabled and nft DNAT runtime mode is active"
+			applicable = features["challenge_runtime_mode"] && engine == "nft"
+			required = applicable
+			reason = "required only when challenge runtime mode is enabled on nft backend"
 			feature = "challenge_redirect"
-			dependsOn = "features.dnat_challenge + engine=nft"
+			dependsOn = "features.challenge_runtime_mode + engine=nft"
 		}
 		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
 	}
@@ -275,11 +275,11 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 			r.PolicyDomainCounts[domain] = len(rules)
 		}
 	}
-	if r.Features["dnat_challenge"] {
+	if r.Features["dnat_edge"] {
 		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
 		if err != nil {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable: " + err.Error()})
-		} else if !hasExpectedDNATPreroutingRules(tableJSON) {
+		} else if r.Features["dnat_challenge"] && !hasExpectedDNATPreroutingRules(tableJSON) {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules"})
 		}
 	}
@@ -576,6 +576,10 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 			sourceFeature = "dnat_challenge"
 		}
 		enabled := r.Features[sourceFeature]
+		if feature == "challenge_redirect" && !r.Features["challenge_runtime_mode"] {
+			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "challenge runtime mode disabled", Samples: map[string]string{"last_update": "n/a"}}
+			continue
+		}
 		if !enabled {
 			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "feature disabled", Samples: map[string]string{"last_update": "n/a"}}
 			continue
@@ -601,11 +605,6 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		for _, s := range check.RequiredSets {
 			v, ok := r.SetSizes[s]
 			if !ok {
-				if feature == "challenge_redirect" && !r.Features["challenge_runtime_mode"] {
-					check.Status = "warn"
-					check.Reason = "optional set missing outside nft DNAT runtime mode: " + s
-					continue
-				}
 				check.Status = "fail"
 				check.Reason = "missing required set: " + s
 				break
