@@ -44,7 +44,7 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 	if r.Status != "ok" {
 		t.Fatalf("expected ok got %s", r.Status)
 	}
-	if !r.Features["dnat"] {
+	if !r.Features["dnat_challenge"] {
 		t.Fatalf("expected dnat enabled")
 	}
 	if r.SetSizes["block_v4"] != 0 {
@@ -60,8 +60,8 @@ func TestCollectFirewallStatusDNATPassWithoutChallengeSets(t *testing.T) {
 		"allow_dyn_v4": {}, "allow_dyn_v6": {},
 	}}
 	r := collectFirewallStatus(be, "", "nft", "default", false)
-	if r.FeatureChecks["dnat_redirect"].Status != "pass" {
-		t.Fatalf("expected dnat_redirect pass got %s", r.FeatureChecks["dnat_redirect"].Status)
+	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
+		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestCollectFirewallStatusDNATChallengeConfigWithoutChallengeSetPassesDNAT(t
 		"allow_dyn_v4": {}, "allow_dyn_v6": {},
 	}}
 	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_redirect"].Status != "pass" {
-		t.Fatalf("expected dnat_redirect pass got %s", r.FeatureChecks["dnat_redirect"].Status)
+	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
+		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
 	}
 }
 func TestCollectFirewallStatusChallengeEnabledMissingSetsFailsChallengeOnly(t *testing.T) {
@@ -93,8 +93,8 @@ func TestCollectFirewallStatusChallengeEnabledMissingSetsFailsChallengeOnly(t *t
 		"allow_dyn_v4": {}, "allow_dyn_v6": {},
 	}}
 	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_redirect"].Status != "pass" {
-		t.Fatalf("expected dnat_redirect pass got %s", r.FeatureChecks["dnat_redirect"].Status)
+	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
+		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
 	}
 	if r.FeatureChecks["challenge_redirect"].Status != "fail" {
 		t.Fatalf("expected challenge_redirect fail got %s", r.FeatureChecks["challenge_redirect"].Status)
@@ -102,10 +102,10 @@ func TestCollectFirewallStatusChallengeEnabledMissingSetsFailsChallengeOnly(t *t
 }
 
 func TestEvaluateFeatureChecksBothDisabled(t *testing.T) {
-	r := fwReport{Features: map[string]bool{"dnat": false, "challenge_redirect": false, "smtp": false, "portflood": false, "connlimit": false, "autoblock": false}, SetSizes: map[string]int{}, Counters: map[string]int64{}}
+	r := fwReport{Features: map[string]bool{"dnat_challenge": false, "challenge_redirect": false, "smtp": false, "portflood": false, "connlimit": false, "autoblock": false}, SetSizes: map[string]int{}, Counters: map[string]int64{}}
 	checks := evaluateFeatureChecks(r)
-	if checks["dnat_redirect"].Status != "N/A" {
-		t.Fatalf("expected dnat_redirect N/A got %s", checks["dnat_redirect"].Status)
+	if checks["dnat_challenge"].Status != "N/A" {
+		t.Fatalf("expected dnat_challenge N/A got %s", checks["dnat_challenge"].Status)
 	}
 	if checks["challenge_redirect"].Status != "N/A" {
 		t.Fatalf("expected challenge_redirect N/A got %s", checks["challenge_redirect"].Status)
