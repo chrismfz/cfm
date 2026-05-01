@@ -12,6 +12,7 @@ import (
 
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/detectors"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
 )
@@ -67,10 +68,10 @@ func staticSetProbes(features map[string]bool, engine string, names map[string]s
 		switch s {
 		case "challenge_v4", "challenge_v6":
 			applicable = true
-			required = features["challenge_redirect"] && features["dnat"] && engine == "nft"
+			required = features["dnat_challenge"] && engine == "nft"
 			reason = "required only when challenge redirect is enabled and nft DNAT runtime mode is active"
 			feature = "challenge_redirect"
-			dependsOn = "features.challenge_redirect + engine=nft + features.dnat"
+			dependsOn = "features.dnat_challenge + engine=nft"
 		}
 		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
 	}
@@ -201,13 +202,13 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["smtp"] = cfg.SMTPBlock.Enabled
 	r.Features["autoblock"] = cfg.Throttle.Enabled
 	r.Features["feeds"] = true
-	r.Features["dnat"] = false
-	r.Features["challenge_redirect"] = challengeRedirectConfigured(cfgDir)
+	r.Features["dnat_edge"] = openrestyModeConfigured(cfgDir)
+	r.Features["dnat_challenge"] = challengeRedirectConfigured(cfgDir)
 	r.Features["challenge_runtime_mode"] = false
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
-		r.Features["dnat"] = ok
-		r.Features["challenge_runtime_mode"] = r.Features["challenge_redirect"] && r.Features["dnat"] && engine == "nft"
+		r.Features["dnat_challenge"] = r.Features["dnat_challenge"] && ok
+		r.Features["challenge_runtime_mode"] = r.Features["dnat_challenge"] && engine == "nft"
 	} else {
 		r.Unsupported["dnat_redirect"] = true
 		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
@@ -274,7 +275,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 			r.PolicyDomainCounts[domain] = len(rules)
 		}
 	}
-	if r.Features["dnat"] {
+	if r.Features["dnat_challenge"] {
 		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
 		if err != nil {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable: " + err.Error()})
@@ -347,6 +348,28 @@ func loadConfiguredFeeds(cfgDir string) []blocklists.Feed {
 	return feeds
 }
 
+
+func openrestyModeConfigured(cfgDir string) bool {
+	if cfgDir == "" {
+		return false
+	}
+	secs, err := detectors.ReadSectionsFile(filepath.Join(cfgDir, "detectors.conf"))
+	if err != nil {
+		return false
+	}
+	for _, secName := range []string{"webdetector", "web"} {
+		if sec, ok := secs.ByName[secName]; ok {
+			if v := strings.TrimSpace(sec["OPENRESTY_MODE"]); strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "on") {
+				return true
+			}
+		}
+	}
+	if v := strings.TrimSpace(secs.Global["OPENRESTY_MODE"]); strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "on") {
+		return true
+	}
+	return false
+}
+
 func challengeRedirectConfigured(cfgDir string) bool {
 	if cfgDir == "" {
 		return false
@@ -360,7 +383,7 @@ func challengeRedirectConfigured(cfgDir string) bool {
 		if trim == "" || strings.HasPrefix(trim, "#") {
 			continue
 		}
-		if strings.Contains(trim, "CHALLENGE_") && (strings.HasSuffix(trim, "=1") || strings.HasSuffix(strings.ToLower(trim), "=true") || strings.HasSuffix(strings.ToLower(trim), "=on")) {
+		if strings.Contains(trim, "CHALLENGE_") && !strings.Contains(trim, "_LOG") && !strings.Contains(trim, "_NOTIFY") && (strings.HasSuffix(trim, "=1") || strings.HasSuffix(strings.ToLower(trim), "=true") || strings.HasSuffix(strings.ToLower(trim), "=on")) {
 			return true
 		}
 	}
@@ -372,7 +395,7 @@ func printFirewallReport(r fwReport) {
 	fmt.Printf("Config source: %s\n", r.ConfigSource)
 	fmt.Printf("Capabilities: %s\n", strings.Join(r.Capabilities, ", "))
 	fmt.Println("Configured features:")
-	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat", "challenge_redirect"} {
+	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat_edge", "dnat_challenge", "challenge_redirect"} {
 		fmt.Printf("  %-10s %v\n", k, r.Features[k])
 	}
 	fmt.Println("Detected runtime objects:")
@@ -492,7 +515,7 @@ func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
 	for _, f := range r.Findings {
 		msg := strings.ToLower(f.Message)
 		domain := "base"
-		for _, d := range []string{"dnat", "smtp", "portflood", "connlimit", "autoblock", "feeds", "ports"} {
+		for _, d := range []string{"dnat_edge", "dnat_challenge", "smtp", "portflood", "connlimit", "autoblock", "feeds", "ports"} {
 			if strings.Contains(msg, d) {
 				domain = d
 				break
@@ -547,10 +570,10 @@ func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
 
 func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 	checks := map[string]fwFeatureCheck{}
-	for _, feature := range []string{"dnat_redirect", "challenge_redirect", "smtp", "portflood", "connlimit", "autoblock"} {
+	for _, feature := range []string{"dnat_edge", "dnat_challenge", "challenge_redirect", "smtp", "portflood", "connlimit", "autoblock"} {
 		sourceFeature := feature
-		if feature == "dnat_redirect" {
-			sourceFeature = "dnat"
+		if feature == "challenge_redirect" {
+			sourceFeature = "dnat_challenge"
 		}
 		enabled := r.Features[sourceFeature]
 		if !enabled {
@@ -559,7 +582,9 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		}
 		check := fwFeatureCheck{Status: "pass", Reason: "required runtime signals present", Samples: map[string]string{"last_update": "n/a"}}
 		switch feature {
-		case "dnat_redirect":
+		case "dnat_edge":
+			check.Samples["mode"] = "openresty/angie"
+		case "dnat_challenge":
 			check.Samples["table"] = "inet/cfm_redirect"
 		case "challenge_redirect":
 			check.RequiredSets = []string{"challenge_v4", "challenge_v6"}

@@ -37,7 +37,7 @@ func TestCollectFirewallStatusParityFieldsAcrossEngines(t *testing.T) {
 			t.Fatalf("nftlib missing field %s", k)
 		}
 	}
-	if nft.Features["dnat"] != nftlib.Features["dnat"] {
+	if nft.Features["dnat_challenge"] != nftlib.Features["dnat_challenge"] {
 		t.Fatalf("dnat feature mismatch")
 	}
 }
