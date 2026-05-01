@@ -101,6 +101,66 @@ func TestCollectFirewallStatusChallengeEnabledMissingSetsFailsChallengeOnly(t *t
 	}
 }
 
+func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("OPENRESTY_MODE=1\n"), 0o644); err != nil {
+		t.Fatalf("write detectors.conf: %v", err)
+	}
+	be := mockDiagBE{
+		dnat: false,
+		dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`),
+		sets: map[string][]string{
+			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
+			"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
+			"allow_dyn_v4": {}, "allow_dyn_v6": {},
+		},
+	}
+	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
+	if r.FeatureChecks["dnat_edge"].Status != "pass" {
+		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
+	}
+	if s := r.FeatureChecks["dnat_challenge"].Status; s != "N/A" {
+		t.Fatalf("expected dnat_challenge N/A when challenge mode disabled, got %s", s)
+	}
+	if s := r.FeatureChecks["challenge_redirect"].Status; s != "N/A" {
+		t.Fatalf("expected challenge_redirect N/A when challenge mode disabled, got %s", s)
+	}
+	for _, f := range r.Findings {
+		if f.Level == "fail" {
+			t.Fatalf("expected no fail findings, got %+v", r.Findings)
+		}
+	}
+}
+
+func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("OPENRESTY_MODE=1\nCHALLENGE_PATHS=1\n"), 0o644); err != nil {
+		t.Fatalf("write detectors.conf: %v", err)
+	}
+	be := mockDiagBE{
+		dnat: true,
+		dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`),
+		sets: map[string][]string{
+			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
+			"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
+			"allow_dyn_v4": {}, "allow_dyn_v6": {},
+			"challenge_v4": {}, "challenge_v6": {},
+		},
+	}
+	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
+	if r.FeatureChecks["dnat_edge"].Status != "pass" {
+		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
+	}
+	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
+		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
+	}
+	if r.FeatureChecks["challenge_redirect"].Status != "pass" {
+		t.Fatalf("expected challenge_redirect pass got %s", r.FeatureChecks["challenge_redirect"].Status)
+	}
+}
+
 func TestEvaluateFeatureChecksBothDisabled(t *testing.T) {
 	r := fwReport{Features: map[string]bool{"dnat_challenge": false, "challenge_redirect": false, "smtp": false, "portflood": false, "connlimit": false, "autoblock": false}, SetSizes: map[string]int{}, Counters: map[string]int64{}}
 	checks := evaluateFeatureChecks(r)
