@@ -66,11 +66,11 @@ func staticSetProbes(features map[string]bool, names map[string]string) []setPro
 		dependsOn := "always"
 		switch s {
 		case "challenge_v4", "challenge_v6":
-			required = features["dnat"]
-			applicable = features["dnat"]
-			reason = "required only when DNAT redirect is enabled"
-			feature = "dnat"
-			dependsOn = "features.dnat"
+			required = features["challenge_redirect"]
+			applicable = features["challenge_redirect"]
+			reason = "required only when challenge redirect is enabled"
+			feature = "challenge_redirect"
+			dependsOn = "features.challenge_redirect"
 		}
 		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
 	}
@@ -202,6 +202,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["autoblock"] = cfg.Throttle.Enabled
 	r.Features["feeds"] = true
 	r.Features["dnat"] = false
+	r.Features["challenge_redirect"] = challengeRedirectConfigured(cfgDir)
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
 		r.Features["dnat"] = ok
@@ -271,6 +272,14 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 			r.PolicyDomainCounts[domain] = len(rules)
 		}
 	}
+	if r.Features["dnat"] {
+		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
+		if err != nil {
+			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable: " + err.Error()})
+		} else if !hasExpectedDNATPreroutingRules(tableJSON) {
+			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules"})
+		}
+	}
 	if cp, ok := any(be).(counterProbe); ok {
 		for _, name := range []string{"cfm_input_drop", "cfm_forward_drop", "flood", "portflood", "connlimit"} {
 			if v, err := cp.CounterValue(name); err == nil {
@@ -336,12 +345,32 @@ func loadConfiguredFeeds(cfgDir string) []blocklists.Feed {
 	return feeds
 }
 
+func challengeRedirectConfigured(cfgDir string) bool {
+	if cfgDir == "" {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(cfgDir, "detectors.conf"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") {
+			continue
+		}
+		if strings.Contains(trim, "CHALLENGE_") && (strings.HasSuffix(trim, "=1") || strings.HasSuffix(strings.ToLower(trim), "=true") || strings.HasSuffix(strings.ToLower(trim), "=on")) {
+			return true
+		}
+	}
+	return false
+}
+
 func printFirewallReport(r fwReport) {
 	fmt.Printf("Firewall diagnostics: %s (%s)\n", r.Engine, r.Status)
 	fmt.Printf("Config source: %s\n", r.ConfigSource)
 	fmt.Printf("Capabilities: %s\n", strings.Join(r.Capabilities, ", "))
 	fmt.Println("Configured features:")
-	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat"} {
+	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat", "challenge_redirect"} {
 		fmt.Printf("  %-10s %v\n", k, r.Features[k])
 	}
 	fmt.Println("Detected runtime objects:")
@@ -516,15 +545,21 @@ func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
 
 func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 	checks := map[string]fwFeatureCheck{}
-	for _, feature := range []string{"dnat", "smtp", "portflood", "connlimit", "autoblock"} {
-		enabled := r.Features[feature]
+	for _, feature := range []string{"dnat_redirect", "challenge_redirect", "smtp", "portflood", "connlimit", "autoblock"} {
+		sourceFeature := feature
+		if feature == "dnat_redirect" {
+			sourceFeature = "dnat"
+		}
+		enabled := r.Features[sourceFeature]
 		if !enabled {
 			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "feature disabled", Samples: map[string]string{"last_update": "n/a"}}
 			continue
 		}
 		check := fwFeatureCheck{Status: "pass", Reason: "required runtime signals present", Samples: map[string]string{"last_update": "n/a"}}
 		switch feature {
-		case "dnat":
+		case "dnat_redirect":
+			check.Samples["table"] = "inet/cfm_redirect"
+		case "challenge_redirect":
 			check.RequiredSets = []string{"challenge_v4", "challenge_v6"}
 		case "smtp":
 			check.RequiredSets = []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"}
@@ -563,6 +598,15 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		checks[feature] = check
 	}
 	return checks
+}
+
+func hasExpectedDNATPreroutingRules(tableJSON []byte) bool {
+	raw := strings.ToLower(string(tableJSON))
+	return strings.Contains(raw, `"chain":"prerouting"`) &&
+		strings.Contains(raw, `"field":"dport"`) &&
+		strings.Contains(raw, `"right":80`) &&
+		strings.Contains(raw, `"right":443`) &&
+		strings.Contains(raw, `"dnat"`)
 }
 
 func collectPolicyDomains(tableJSON []byte) map[string][]fwRuleDescriptor {
