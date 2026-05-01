@@ -67,3 +67,33 @@ func TestFirewallStatusFeeds_FeedRenamedOldStaleNewExpected(t *testing.T) {
 		}
 	}
 }
+
+func TestFirewallStatusFeeds_FeedAddedUpdatesProbeTargets(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "cfm.blocklists"), []byte("newfeed|ALLOW|3600|0|https://example/allow\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sets := map[string][]string{}
+	for _, s := range setinventory.BuildSetNames(loadConfiguredFeeds(tmp)) {
+		sets[s] = nil
+	}
+	be := mockDiagBE{dnat: true, sets: sets}
+	r := collectFirewallStatus(be, tmp, "nft", "default", false)
+	if _, ok := r.SetSizes["allow_ext_v4_hosts_newfeed"]; !ok {
+		t.Fatalf("expected added feed set target to be probed")
+	}
+}
+
+func TestFirewallStatusFeeds_FeedRemovedNoLongerProbed(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "cfm.blocklists"), []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	be := mockDiagBE{dnat: true, sets: map[string][]string{"block_ext_v4_hosts_oldfeed": nil}}
+	r := collectFirewallStatus(be, tmp, "nft", "default", false)
+	for _, f := range r.Findings {
+		if strings.Contains(f.Message, "oldfeed") {
+			t.Fatalf("removed feed should not be probed anymore: %+v", f)
+		}
+	}
+}
