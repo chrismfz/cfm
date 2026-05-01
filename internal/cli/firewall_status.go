@@ -56,7 +56,7 @@ type setProbeItem struct {
 	dependsOn  string
 }
 
-func staticSetProbes(features map[string]bool, names map[string]string) []setProbeItem {
+func staticSetProbes(features map[string]bool, engine string, names map[string]string) []setProbeItem {
 	items := make([]setProbeItem, 0, 24)
 	for key, s := range names {
 		required := true
@@ -66,11 +66,11 @@ func staticSetProbes(features map[string]bool, names map[string]string) []setPro
 		dependsOn := "always"
 		switch s {
 		case "challenge_v4", "challenge_v6":
-			required = features["challenge_redirect"]
-			applicable = features["challenge_redirect"]
-			reason = "required only when challenge redirect is enabled"
+			applicable = true
+			required = features["challenge_redirect"] && features["dnat"] && engine == "nft"
+			reason = "required only when challenge redirect is enabled and nft DNAT runtime mode is active"
 			feature = "challenge_redirect"
-			dependsOn = "features.challenge_redirect"
+			dependsOn = "features.challenge_redirect + engine=nft + features.dnat"
 		}
 		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
 	}
@@ -125,25 +125,25 @@ type fwReport struct {
 }
 
 type fwCanonicalChecks struct {
-	Score      float64              `json:"score"`
-	Summary    string               `json:"summary"`
+	Score      float64                 `json:"score"`
+	Summary    string                  `json:"summary"`
 	ByDomain   map[string]fwDomainDiff `json:"by_domain,omitempty"`
-	Actionable []string             `json:"actionable,omitempty"`
+	Actionable []string                `json:"actionable,omitempty"`
 }
 
 type fwDomainDiff struct {
-	MissingObject            int `json:"missing_object"`
-	MismatchedRuleCondition  int `json:"mismatched_rule_condition"`
-	MismatchedVerdict        int `json:"mismatched_verdict"`
-	UnsupportedFeature       int `json:"unsupported_feature"`
+	MissingObject           int `json:"missing_object"`
+	MismatchedRuleCondition int `json:"mismatched_rule_condition"`
+	MismatchedVerdict       int `json:"mismatched_verdict"`
+	UnsupportedFeature      int `json:"unsupported_feature"`
 }
 
 type fwFeatureCheck struct {
-	Status      string            `json:"status"`
-	Reason      string            `json:"reason"`
-	RequiredSets []string         `json:"required_sets,omitempty"`
-	Counters    []string          `json:"counters,omitempty"`
-	Samples     map[string]string `json:"samples,omitempty"`
+	Status       string            `json:"status"`
+	Reason       string            `json:"reason"`
+	RequiredSets []string          `json:"required_sets,omitempty"`
+	Counters     []string          `json:"counters,omitempty"`
+	Samples      map[string]string `json:"samples,omitempty"`
 }
 
 type fwRuleDescriptor struct {
@@ -203,9 +203,11 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["feeds"] = true
 	r.Features["dnat"] = false
 	r.Features["challenge_redirect"] = challengeRedirectConfigured(cfgDir)
+	r.Features["challenge_runtime_mode"] = false
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
 		r.Features["dnat"] = ok
+		r.Features["challenge_runtime_mode"] = r.Features["challenge_redirect"] && r.Features["dnat"] && engine == "nft"
 	} else {
 		r.Unsupported["dnat_redirect"] = true
 		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
@@ -227,7 +229,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 	}
 	probeReq := map[string]setProbeItem{}
-	for _, req := range staticSetProbes(r.Features, setNames) {
+	for _, req := range staticSetProbes(r.Features, engine, setNames) {
 		probeReq[req.setName] = req
 	}
 	dynReq := dynamicFeedSetProbes(feeds)
@@ -574,6 +576,11 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		for _, s := range check.RequiredSets {
 			v, ok := r.SetSizes[s]
 			if !ok {
+				if feature == "challenge_redirect" && !r.Features["challenge_runtime_mode"] {
+					check.Status = "warn"
+					check.Reason = "optional set missing outside nft DNAT runtime mode: " + s
+					continue
+				}
 				check.Status = "fail"
 				check.Reason = "missing required set: " + s
 				break
