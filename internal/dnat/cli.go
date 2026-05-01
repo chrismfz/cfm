@@ -163,7 +163,10 @@ func RunCLI(args []string, backend firewall.Backend) int {
 
 	switch sub {
 	case "on":
-		os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority))
+		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority)); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
+			return 1
+		}
 		if err := backend.DNATOn(*family, *table, *httpPort, *httpsPort); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1

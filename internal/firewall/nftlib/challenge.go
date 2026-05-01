@@ -338,16 +338,25 @@ func getenvInt(key string, def int) int {
 	if v == "" {
 		return def
 	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.ParseInt(v, 10, 32)
 	if err != nil {
 		return def
 	}
-	return n
+	return int(n)
 }
 
 func (b *Backend) dnatPriority() int {
+	prio := -99
 	if b != nil && b.cfg != nil && b.cfg.NFT.DNATPriority != 0 {
-		return b.cfg.NFT.DNATPriority
+		prio = b.cfg.NFT.DNATPriority
+	} else {
+		prio = getenvInt("NFT_DNAT_PRIORITY", prio)
 	}
-	return getenvInt("NFT_DNAT_PRIORITY", -99)
+	if prio < -300 {
+		return -300
+	}
+	if prio > 300 {
+		return 300
+	}
+	return prio
 }
