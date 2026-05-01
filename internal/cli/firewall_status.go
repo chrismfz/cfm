@@ -117,10 +117,25 @@ type fwReport struct {
 	PolicyDomains      map[string][]fwRuleDescriptor `json:"policy_domains,omitempty"`
 	Counters           map[string]int64              `json:"counters"`
 	FeatureChecks      map[string]fwFeatureCheck     `json:"feature_checks,omitempty"`
+	CanonicalChecks    fwCanonicalChecks             `json:"canonical_checks"`
 	Unsupported        map[string]bool               `json:"unsupported,omitempty"`
 	Findings           []fwFinding                   `json:"findings"`
 	Status             string                        `json:"status"`
 	Verbose            bool                          `json:"-"`
+}
+
+type fwCanonicalChecks struct {
+	Score      float64              `json:"score"`
+	Summary    string               `json:"summary"`
+	ByDomain   map[string]fwDomainDiff `json:"by_domain,omitempty"`
+	Actionable []string             `json:"actionable,omitempty"`
+}
+
+type fwDomainDiff struct {
+	MissingObject            int `json:"missing_object"`
+	MismatchedRuleCondition  int `json:"mismatched_rule_condition"`
+	MismatchedVerdict        int `json:"mismatched_verdict"`
+	UnsupportedFeature       int `json:"unsupported_feature"`
 }
 
 type fwFeatureCheck struct {
@@ -196,8 +211,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	}
 
 	feeds := loadConfiguredFeeds(cfgDir)
-	setNames := setinventory.BuildSetNames(nil)
-	legacyAliases := setinventory.LegacyAliases()
+	setNames := setinventory.BuildSetNames(feeds)
 	throttledSets := []string{"throttled_v4", "throttled_v6"}
 	scannerSets := []string{"port_scanners_v4", "port_scanners_v6"}
 	if np, ok := any(be).(diagNamesProbe); ok {
@@ -231,10 +245,6 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
-			if canonical, ok := legacyAliases[s]; ok {
-				r.Findings = append(r.Findings, fwFinding{"warn", fmt.Sprintf("set(%s) missing (legacy alias; feature=%s dependency=%s; expected source: canonical %s)", s, req.feature, req.dependsOn, canonical)})
-				continue
-			}
 			level := "warn"
 			if req.required {
 				level = "fail"
@@ -276,6 +286,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		r.Unsupported["connlimit_counter"] = true
 	}
 	r.FeatureChecks = evaluateFeatureChecks(r)
+	r.CanonicalChecks = evaluateCanonicalChecks(r)
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok {
 			if raw, err := ds.DNATShow("inet", "cfm"); err != nil {
@@ -419,9 +430,88 @@ func printFirewallReport(r fwReport) {
 			fmt.Printf("  [%s] %s\n", strings.ToUpper(f.Level), f.Message)
 		}
 	}
+	if r.CanonicalChecks.Summary != "" {
+		fmt.Println("Canonical diagnostics:")
+		fmt.Printf("  score=%.2f summary=%s\n", r.CanonicalChecks.Score, r.CanonicalChecks.Summary)
+		if len(r.CanonicalChecks.ByDomain) > 0 {
+			domains := make([]string, 0, len(r.CanonicalChecks.ByDomain))
+			for d := range r.CanonicalChecks.ByDomain {
+				domains = append(domains, d)
+			}
+			sort.Strings(domains)
+			for _, d := range domains {
+				v := r.CanonicalChecks.ByDomain[d]
+				fmt.Printf("  [%s] missing_object=%d mismatched_rule_condition=%d mismatched_verdict=%d unsupported_feature=%d\n", d, v.MissingObject, v.MismatchedRuleCondition, v.MismatchedVerdict, v.UnsupportedFeature)
+			}
+		}
+		for _, a := range r.CanonicalChecks.Actionable {
+			fmt.Printf("  - %s\n", a)
+		}
+	}
 	if r.Status != "ok" {
 		fmt.Println("Recommendation: run `cfm firewall status --verbose` for deeper diagnostics and apply the suggested set/table remediation above.")
 	}
+}
+
+func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
+	cc := fwCanonicalChecks{ByDomain: map[string]fwDomainDiff{}}
+	ensure := func(domain string) fwDomainDiff {
+		return cc.ByDomain[domain]
+	}
+	for _, f := range r.Findings {
+		msg := strings.ToLower(f.Message)
+		domain := "base"
+		for _, d := range []string{"dnat", "smtp", "portflood", "connlimit", "autoblock", "feeds", "ports"} {
+			if strings.Contains(msg, d) {
+				domain = d
+				break
+			}
+		}
+		d := ensure(domain)
+		switch {
+		case strings.Contains(msg, "missing"):
+			d.MissingObject++
+		case strings.Contains(msg, "verdict"):
+			d.MismatchedVerdict++
+		case strings.Contains(msg, "condition") || strings.Contains(msg, "dependency"):
+			d.MismatchedRuleCondition++
+		}
+		cc.ByDomain[domain] = d
+	}
+	for k := range r.Unsupported {
+		domain := "base"
+		if strings.Contains(k, "dnat") {
+			domain = "dnat"
+		} else if strings.Contains(k, "smtp") {
+			domain = "smtp"
+		} else if strings.Contains(k, "flood") {
+			domain = "portflood"
+		} else if strings.Contains(k, "connlimit") {
+			domain = "connlimit"
+		}
+		d := ensure(domain)
+		d.UnsupportedFeature++
+		cc.ByDomain[domain] = d
+	}
+	total := 0
+	bad := 0
+	for domain, v := range cc.ByDomain {
+		sum := v.MissingObject + v.MismatchedRuleCondition + v.MismatchedVerdict + v.UnsupportedFeature
+		total += sum
+		if sum > 0 {
+			bad += sum
+			cc.Actionable = append(cc.Actionable, fmt.Sprintf("domain=%s mismatches=%d", domain, sum))
+		}
+	}
+	if total == 0 {
+		cc.Score = 1
+		cc.Summary = "all canonical diagnostics passed"
+		return cc
+	}
+	cc.Score = float64(total-bad) / float64(total)
+	cc.Summary = fmt.Sprintf("%d mismatch(es) across %d domain(s)", bad, len(cc.ByDomain))
+	sort.Strings(cc.Actionable)
+	return cc
 }
 
 func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {

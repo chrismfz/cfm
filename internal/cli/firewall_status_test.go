@@ -64,13 +64,37 @@ func TestCollectPolicyDomainsCanonicalDescriptors(t *testing.T) {
 		{"rule":{"chain":"smtpblock","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":{"set":[25,465]}}},{"accept":null}]}}
 	]}`)
 	got := collectPolicyDomains(raw)
-	if got["base"][0].Proto != "tcp" {
-		t.Fatalf("expected canonical proto tcp, got %#v", got["base"][0])
+	if len(got["base"][0].Ports) == 0 || got["base"][0].Ports[0] != "22" {
+		t.Fatalf("expected canonical port 22, got %#v", got["base"][0])
 	}
 	if got["base"][0].Verdict != "drop" {
 		t.Fatalf("expected drop verdict, got %#v", got["base"][0])
 	}
 	if len(got["smtp"]) != 1 {
 		t.Fatalf("expected smtp domain rule, got %#v", got["smtp"])
+	}
+}
+
+func TestEvaluateCanonicalChecksCategories(t *testing.T) {
+	r := fwReport{
+		Findings: []fwFinding{
+			{Level: "fail", Message: "set(block_v4) missing (feature=ports dependency=always; expected source: core infrastructure): missing set"},
+			{Level: "warn", Message: "rule condition dependency mismatch for connlimit"},
+			{Level: "warn", Message: "verdict mismatch for smtp"},
+		},
+		Unsupported: map[string]bool{"dnat_redirect": true},
+	}
+	cc := evaluateCanonicalChecks(r)
+	if cc.ByDomain["ports"].MissingObject == 0 {
+		t.Fatalf("expected missing object bucket to increment")
+	}
+	if cc.ByDomain["connlimit"].MismatchedRuleCondition == 0 {
+		t.Fatalf("expected mismatched rule condition bucket to increment")
+	}
+	if cc.ByDomain["smtp"].MismatchedVerdict == 0 {
+		t.Fatalf("expected mismatched verdict bucket to increment")
+	}
+	if cc.ByDomain["dnat"].UnsupportedFeature == 0 {
+		t.Fatalf("expected unsupported feature bucket to increment")
 	}
 }
