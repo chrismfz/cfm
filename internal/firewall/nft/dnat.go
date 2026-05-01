@@ -6,6 +6,8 @@ package nft
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,11 +41,11 @@ func (b *Backend) DNATShow(fam, tbl string) (string, error) {
 	return b.nftOut(fmt.Sprintf("list table %s %s", fam, tbl))
 }
 
-func dnatScript(fam, tbl string, httpPort, httpsPort int) string {
+func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
 	// 1:1 with your dnatALL.sh heredoc
 	return fmt.Sprintf(`table %s %s {
   chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
+    type nat hook prerouting priority %d; policy accept;
 
     iif "lo" accept
 
@@ -52,7 +54,7 @@ func dnatScript(fam, tbl string, httpPort, httpsPort int) string {
     udp dport 443 dnat to :%d
   }
 }
-`, fam, tbl, httpPort, httpsPort, httpsPort)
+`, fam, tbl, priority, httpPort, httpsPort, httpsPort)
 }
 
 func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
@@ -77,7 +79,7 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	}
 
 	// Reuse your multi-line nft expression runner
-	return b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort))
+	return b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority()))
 }
 
 func (b *Backend) DNATOff(fam, tbl string) (err error) {
@@ -99,4 +101,23 @@ func (b *Backend) DNATOff(fam, tbl string) (err error) {
 
 	// Reuse your single-expression runner (auto adds ;)
 	return b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl))
+}
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func (b *Backend) dnatPriority() int {
+	if b != nil && b.cfg != nil && b.cfg.NFT.DNATPriority != 0 {
+		return b.cfg.NFT.DNATPriority
+	}
+	return getenvInt("NFT_DNAT_PRIORITY", -99)
 }

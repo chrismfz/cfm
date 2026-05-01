@@ -1,8 +1,8 @@
 package dnat
 
 import (
-	"context"
 	"cfm/internal/firewall"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -148,6 +148,8 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	defHTTPS := getenvInt("HTTPS_PORT", 9043)
 	httpPort := fs.Int("http-port", defHTTP, "DNAT target port for tcp/80 (env HTTP_PORT)")
 	httpsPort := fs.Int("https-port", defHTTPS, "DNAT target port for tcp+udp/443 (env HTTPS_PORT)")
+	defPrio := getenvInt("NFT_DNAT_PRIORITY", NFTDNATPriority)
+	priority := fs.Int("priority", defPrio, "DNAT prerouting priority (default: -99)")
 
 	sub := "" // default = report
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -161,11 +163,12 @@ func RunCLI(args []string, backend firewall.Backend) int {
 
 	switch sub {
 	case "on":
+		os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority))
 		if err := backend.DNATOn(*family, *table, *httpPort, *httpsPort); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
 		}
-		fmt.Printf("DNAT: ON  (tcp/80->:%d, tcp+udp/443->:%d)\n", *httpPort, *httpsPort)
+		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", *priority, *httpPort, *httpsPort)
 		return 0
 
 	case "off":
@@ -193,7 +196,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Printf("DNAT table: %s %s\n", *family, *table)
 	edgeTarget := dnatTargetLabel(detectEdgeService())
 	if enabled {
-		fmt.Printf("State: ON  (tcp/80->:%d, tcp+udp/443->:%d)\n\n", *httpPort, *httpsPort)
+		fmt.Printf("State: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n\n", getenvInt("NFT_DNAT_PRIORITY", NFTDNATPriority), *httpPort, *httpsPort)
 		fmt.Println("Current rules:")
 		s, err := backend.DNATShow(*family, *table)
 		if err != nil {
@@ -214,7 +217,11 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Println("  - OFF : deletes that DNAT table, returning traffic handling to the normal path.")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  cfm dnat on   [--http-port 9080] [--https-port 9043]")
+	fmt.Println("  cfm dnat on   [--http-port 9080] [--https-port 9043] [--priority -99]")
+	fmt.Println("  priority -99:")
+	fmt.Println("    Imunify/WebShield-first fallback mode. Imunify at -100 can DNAT matched traffic first; CFM catches the rest.")
+	fmt.Println("  priority -101:")
+	fmt.Println("    CFM-first mode. CFM catches web traffic before Imunify/WebShield.")
 	fmt.Println("  cfm dnat off")
 	return 0
 }

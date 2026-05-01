@@ -225,6 +225,9 @@ type LoggingConfig struct {
 
 type NFTConfig struct {
 	InputPriority int // clamped -300..+300
+	// DNATPriority controls priority of CFM's NAT prerouting DNAT chain.
+	// Recommended: -99 (Imunify/WebShield first), -101 (CFM first). Avoid -100.
+	DNATPriority int // clamped -300..+300
 }
 
 type PortsConfig struct {
@@ -297,6 +300,10 @@ func (c *Config) SetDefaults() {
 
 	// NFT
 	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
+	if c.NFT.DNATPriority == 0 {
+		c.NFT.DNATPriority = -99
+	}
+	c.NFT.DNATPriority = clamp(c.NFT.DNATPriority, -300, 300)
 	// PacketRate
 	if c.PacketRate.Mode == "" {
 		c.PacketRate.Mode = "syn"
@@ -497,6 +504,10 @@ func (c *Config) SetDefaults() {
 // Validate clamps, normalizes and ensures cross-field coherence.
 func (c *Config) Validate() error {
 	c.NFT.InputPriority = clamp(c.NFT.InputPriority, -300, 300)
+	if c.NFT.DNATPriority == 0 {
+		c.NFT.DNATPriority = -99
+	}
+	c.NFT.DNATPriority = clamp(c.NFT.DNATPriority, -300, 300)
 	if c.PacketRate.Mode != "syn" && c.PacketRate.Mode != "all" {
 		c.PacketRate.Mode = "syn"
 	}
@@ -634,6 +645,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		// NFT
 		case "NFT_INPUT_PRIORITY":
 			cfg.NFT.InputPriority = clamp(parseInt(val), -300, 300)
+		case "NFT_DNAT_PRIORITY":
+			cfg.NFT.DNATPriority = clamp(parseInt(val), -300, 300)
 
 		// Ports
 		case "TCP_IN":
@@ -1000,7 +1013,7 @@ func IsKnownKey(key string) bool {
 		"FIREWALL_ENGINE", "CFM_FIREWALL_ENGINE",
 		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
 		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
-		"NFT_INPUT_PRIORITY", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
+		"NFT_INPUT_PRIORITY", "NFT_DNAT_PRIORITY", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
 		"THROTTLE_ENABLED", "THROTTLE_WINDOW", "THROTTLE_HITS", "THROTTLE_MODE", "THROTTLE_TTL", "THROTTLE_SOURCES", "THROTTLE_SET_TTL", "THROTTLE_COOLDOWN",
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",

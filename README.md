@@ -1089,3 +1089,28 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 - `AUTH_TOKEN`-protected API access should be treated as local/trusted-only: token auth is expected to work from localhost and allowed IPs (including the resolved `API_URL` IP), not from arbitrary internet sources.
 - The `alter_user` action in `CONN_RULES` requires `GRANT CREATE USER`. This is a powerful privilege — scope it to `'cfm_governor'@'localhost'` only and use a strong password.
 - Always run the governor in `monitor` mode for at least one week before switching to `enforce` on a production server.
+
+## DNAT priority and Imunify360/WebShield compatibility
+
+CFM DNAT redirects:
+- tcp/80 -> 9080
+- tcp/443 -> 9043
+- udp/443 -> 9043
+
+Imunify360/WebShield may also install DNAT rules (typically at nft `dstnat` priority `-100`) for:
+- web: 80, 443 (often to 52224/52223)
+- cPanel/WHM/Webmail: 2082, 2083, 2086, 2087, 2095, 2096
+
+CFM default DNAT priority is `-99`, which means Imunify/WebShield (`-100`) gets first chance to DNAT matched traffic; CFM then catches unmatched remaining web traffic.
+
+If you want CFM-first behavior, set priority to `-101`.
+Avoid using `-100` for CFM because same-priority NAT chains can create ambiguous ordering.
+
+Examples:
+- `cfm dnat on --priority -99` (Imunify-first, CFM fallback)
+- `cfm dnat on --priority -101` (CFM-first)
+
+Safety notes:
+- `cfm dnat off` only removes CFM-owned `table inet cfm_redirect` behavior.
+- CFM does not modify Imunify rules/tables.
+- Loopback bypass remains enabled (`iif "lo" accept`).

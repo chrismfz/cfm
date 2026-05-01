@@ -10,6 +10,13 @@ const (
 	DefaultTable     = "cfm_redirect"
 	DefaultHTTPPort  = 9080
 	DefaultHTTPSPort = 9043
+	// NFTDNATPriority controls the priority of CFM's NAT prerouting chain.
+	// Imunify360/WebShield commonly installs DNAT rules at priority dstnat (-100).
+	// Recommended values:
+	//   -99  = Imunify/WebShield first, CFM fallback for remaining web traffic.
+	//   -101 = CFM first, CFM owns web traffic before Imunify/WebShield.
+	// Avoid -100 because same-priority NAT chains can produce ambiguous ordering.
+	NFTDNATPriority = -99
 )
 
 // Status returns whether DNAT is currently enabled using the same defaults

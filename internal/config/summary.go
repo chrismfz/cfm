@@ -10,16 +10,21 @@ func (c *Config) Summary() []string {
 
 	// --- Logging & API (χωρίς να διαρρέει token)
 	apiURL := c.API.URL
-	if apiURL == "" { apiURL = "-" }
+	if apiURL == "" {
+		apiURL = "-"
+	}
 	logFile := c.Logging.File
-	if logFile == "" { logFile = "-" }
+	if logFile == "" {
+		logFile = "-"
+	}
 	lines = append(lines,
 		fmt.Sprintf("api_url=%s auth_token=%t", apiURL, c.API.AuthToken != ""),
 		fmt.Sprintf("log_stdout=%t log_file=%s", c.Logging.Stdout, logFile),
 	)
 
 	// --- NFT
-	lines = append(lines, fmt.Sprintf("nft_input_priority=%d", c.NFT.InputPriority))
+	lines = append(lines, fmt.Sprintf("nft_input_priority=%d", c.NFT.InputPriority),
+		fmt.Sprintf("nft_dnat_priority=%d", c.NFT.DNATPriority))
 
 	// --- Ports
 	lines = append(lines, fmt.Sprintf(
@@ -31,7 +36,11 @@ func (c *Config) Summary() []string {
 	clTot, clTCP, clUDP := 0, 0, 0
 	for _, r := range c.Connlimit.Rules {
 		clTot++
-		if r.Proto == "udp" { clUDP++ } else { clTCP++ }
+		if r.Proto == "udp" {
+			clUDP++
+		} else {
+			clTCP++
+		}
 	}
 	lines = append(lines, fmt.Sprintf("connlimit: rules=%d (tcp=%d udp=%d)", clTot, clTCP, clUDP))
 
@@ -39,13 +48,19 @@ func (c *Config) Summary() []string {
 	pfTot, pfTCP, pfUDP := 0, 0, 0
 	for _, r := range c.PortFlood.Rules {
 		pfTot++
-		if r.Proto == "udp" { pfUDP++ } else { pfTCP++ }
+		if r.Proto == "udp" {
+			pfUDP++
+		} else {
+			pfTCP++
+		}
 	}
 	lines = append(lines, fmt.Sprintf("portflood: rules=%d (tcp=%d udp=%d)", pfTot, pfTCP, pfUDP))
 
 	// --- PacketRate
 	mode := c.PacketRate.Mode
-	if mode == "" { mode = "syn" }
+	if mode == "" {
+		mode = "syn"
+	}
 	lines = append(lines, fmt.Sprintf("pkt_rate: rate=%d pps burst=%d mode=%s",
 		c.PacketRate.Rate, c.PacketRate.Burst, mode))
 
@@ -61,27 +76,22 @@ func (c *Config) Summary() []string {
 		c.Throttle.TTLSeconds, c.Throttle.SetTTL, c.Throttle.CooldownSec, src,
 	))
 
-// -- tweaks
-// 
-lines = append(lines, fmt.Sprintf(
-	"sys_tweaks: enable=%t persist=%t ct[perGB=%d min=%d max=%d] strict=%t synR=%d synAckR=%d fin=%d tw=%d finw=%d closew=%d rp_filter=%d redir(acc=%t,send=%t)",
-	c.SystemTweaks.Enable, c.SystemTweaks.Persist,
-	c.SystemTweaks.CTPerGB, c.SystemTweaks.CTMin, c.SystemTweaks.CTMax,
-	c.SystemTweaks.TCPLooseStrict,
-	c.SystemTweaks.TCPSynRetries, c.SystemTweaks.TCPSynAckRetries, c.SystemTweaks.TCPFinTimeout,
-	c.SystemTweaks.CTTimeWait, c.SystemTweaks.CTFinWait, c.SystemTweaks.CTCloseWait,
-	c.SystemTweaks.RPFilter, c.SystemTweaks.AcceptRedirects, c.SystemTweaks.SendRedirects,
-))
+	// -- tweaks
+	lines = append(lines, fmt.Sprintf(
+		"sys_tweaks: enable=%t persist=%t ct[perGB=%d min=%d max=%d] strict=%t synR=%d synAckR=%d fin=%d tw=%d finw=%d closew=%d rp_filter=%d redir(acc=%t,send=%t)",
+		c.SystemTweaks.Enable, c.SystemTweaks.Persist,
+		c.SystemTweaks.CTPerGB, c.SystemTweaks.CTMin, c.SystemTweaks.CTMax,
+		c.SystemTweaks.TCPLooseStrict,
+		c.SystemTweaks.TCPSynRetries, c.SystemTweaks.TCPSynAckRetries, c.SystemTweaks.TCPFinTimeout,
+		c.SystemTweaks.CTTimeWait, c.SystemTweaks.CTFinWait, c.SystemTweaks.CTCloseWait,
+		c.SystemTweaks.RPFilter, c.SystemTweaks.AcceptRedirects, c.SystemTweaks.SendRedirects,
+	))
 
-
-lines = append(lines, fmt.Sprintf(
-  "hardening: badflags=%t new=%d/s burst=%d icmp=%d/s burst=%d",
-  c.Hardening.BlockBadTCPFlags, c.Hardening.NewRate, c.Hardening.NewBurst,
-  c.Hardening.ICMPRate, c.Hardening.ICMPBurst,
-))
-
-
-
+	lines = append(lines, fmt.Sprintf(
+		"hardening: badflags=%t new=%d/s burst=%d icmp=%d/s burst=%d",
+		c.Hardening.BlockBadTCPFlags, c.Hardening.NewRate, c.Hardening.NewBurst,
+		c.Hardening.ICMPRate, c.Hardening.ICMPBurst,
+	))
 
 	// --- Portscan
 	psOnly := "-"
@@ -98,8 +108,6 @@ lines = append(lines, fmt.Sprintf(
 		c.Portscan.Limit, c.Portscan.Diversity, c.Portscan.TrackTCP, c.Portscan.TrackUDP,
 		psOnly, psPorts,
 	))
-
-
 
 	// --- SMTPBlock ---
 	if c.SMTPBlock.Enabled {
@@ -124,7 +132,6 @@ lines = append(lines, fmt.Sprintf(
 	} else {
 		lines = append(lines, "smtpblock: enabled=false")
 	}
-
 
 	return lines
 }

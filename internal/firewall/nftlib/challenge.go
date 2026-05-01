@@ -5,7 +5,9 @@ package nftlib
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -218,7 +220,7 @@ func (b *Backend) DNATShow(family, table string) (string, error) {
 	var out strings.Builder
 	fmt.Fprintf(&out, "table %s %s {\n", family, table)
 	out.WriteString("  chain prerouting {\n")
-	out.WriteString("    type nat hook prerouting priority dstnat; policy accept;\n\n")
+	out.WriteString(fmt.Sprintf("    type nat hook prerouting priority %d; policy accept;\n\n", b.dnatPriority()))
 	for _, spec := range found {
 		proto := "tcp"
 		if spec.proto == 17 {
@@ -252,7 +254,7 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err err
 	}
 	if ch == nil {
 		b.conn.AddTable(t)
-		dstNat := *nftables.ChainPriorityNATDest
+		dstNat := nftables.ChainPriority(b.dnatPriority())
 		policy := nftables.ChainPolicyAccept
 		ch = &nftables.Chain{
 			Name:     "prerouting",
@@ -329,4 +331,23 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dnatOffUnlocked(family, table)
+}
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func (b *Backend) dnatPriority() int {
+	if b != nil && b.cfg != nil && b.cfg.NFT.DNATPriority != 0 {
+		return b.cfg.NFT.DNATPriority
+	}
+	return getenvInt("NFT_DNAT_PRIORITY", -99)
 }
