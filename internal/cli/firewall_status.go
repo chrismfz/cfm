@@ -118,11 +118,18 @@ type fwReport struct {
 	PolicyDomains      map[string][]fwRuleDescriptor `json:"policy_domains,omitempty"`
 	Counters           map[string]int64              `json:"counters"`
 	FeatureChecks      map[string]fwFeatureCheck     `json:"feature_checks,omitempty"`
+	DNATChecks         map[string]fwDNATCheck        `json:"dnat_checks,omitempty"`
 	CanonicalChecks    fwCanonicalChecks             `json:"canonical_checks"`
 	Unsupported        map[string]bool               `json:"unsupported,omitempty"`
 	Findings           []fwFinding                   `json:"findings"`
 	Status             string                        `json:"status"`
 	Verbose            bool                          `json:"-"`
+}
+
+type fwDNATCheck struct {
+	Status         string `json:"status"`
+	ExpectedSource string `json:"expected_source"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 type fwCanonicalChecks struct {
@@ -181,7 +188,7 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 }
 
 func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verbose bool) fwReport {
-	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, PolicyDomainCounts: map[string]int{}, PolicyDomains: map[string][]fwRuleDescriptor{}, Counters: map[string]int64{}, FeatureChecks: map[string]fwFeatureCheck{}, Unsupported: map[string]bool{}, Verbose: verbose}
+	r := fwReport{Engine: engine, ConfigSource: source, Features: map[string]bool{}, SetSizes: map[string]int{}, PolicyDomainCounts: map[string]int{}, PolicyDomains: map[string][]fwRuleDescriptor{}, Counters: map[string]int64{}, FeatureChecks: map[string]fwFeatureCheck{}, DNATChecks: map[string]fwDNATCheck{}, Unsupported: map[string]bool{}, Verbose: verbose}
 	if caps, ok := any(be).(firewall.CapabilityReporter); ok {
 		c := caps.Capabilities()
 		if c.PortsPolicyInboundRules {
@@ -278,9 +285,9 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	if r.Features["dnat_edge"] {
 		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
 		if err != nil {
-			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable: " + err.Error()})
+			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable (feature=dnat_edge expected source: cfm_redirect table): " + err.Error()})
 		} else if r.Features["dnat_challenge"] && !hasExpectedDNATPreroutingRules(tableJSON) {
-			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules"})
+			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=dnat_challenge expected source: challenge sets)"})
 		}
 	}
 	if cp, ok := any(be).(counterProbe); ok {
@@ -298,6 +305,8 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		r.Unsupported["connlimit_counter"] = true
 	}
 	r.FeatureChecks = evaluateFeatureChecks(r)
+	r.DNATChecks["dnat_edge"] = buildDNATCheckStatus(r, "dnat_edge")
+	r.DNATChecks["dnat_challenge"] = buildDNATCheckStatus(r, "dnat_challenge")
 	r.CanonicalChecks = evaluateCanonicalChecks(r)
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok {
@@ -453,6 +462,14 @@ func printFirewallReport(r fwReport) {
 			}
 		}
 	}
+	if len(r.DNATChecks) > 0 {
+		fmt.Println("DNAT status:")
+		for _, name := range []string{"dnat_edge", "dnat_challenge"} {
+			if d, ok := r.DNATChecks[name]; ok {
+				fmt.Printf("%s=%s\n", name, strings.ToUpper(d.Status))
+			}
+		}
+	}
 	if len(r.PolicyDomainCounts) > 0 {
 		fmt.Println("Policy domains:")
 		keys := make([]string, 0, len(r.PolicyDomainCounts))
@@ -504,6 +521,28 @@ func printFirewallReport(r fwReport) {
 	}
 	if r.Status != "ok" {
 		fmt.Println("Recommendation: run `cfm firewall status --verbose` for deeper diagnostics and apply the suggested set/table remediation above.")
+	}
+}
+
+func buildDNATCheckStatus(r fwReport, feature string) fwDNATCheck {
+	expected := "cfm_redirect table"
+	if feature == "dnat_challenge" {
+		expected = "challenge sets"
+	}
+	if !r.Features[feature] {
+		return fwDNATCheck{Status: "N/A", ExpectedSource: expected, Reason: "feature disabled"}
+	}
+	check, ok := r.FeatureChecks[feature]
+	if !ok {
+		return fwDNATCheck{Status: "FAIL", ExpectedSource: expected, Reason: "feature check unavailable"}
+	}
+	switch strings.ToLower(check.Status) {
+	case "pass":
+		return fwDNATCheck{Status: "ON", ExpectedSource: expected, Reason: check.Reason}
+	case "warn", "fail":
+		return fwDNATCheck{Status: "FAIL", ExpectedSource: expected, Reason: check.Reason}
+	default:
+		return fwDNATCheck{Status: "FAIL", ExpectedSource: expected, Reason: "unknown status: " + check.Status}
 	}
 }
 
