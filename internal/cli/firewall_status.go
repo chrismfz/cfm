@@ -283,7 +283,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
-			level := "warn"
+			level := "info"
 			if req.required {
 				level = "fail"
 			}
@@ -313,8 +313,14 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
 		if err != nil {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable (feature=dnat_edge expected source: cfm_redirect table): " + err.Error()})
-		} else if r.Features["dnat_challenge"] && !hasExpectedDNATPreroutingRules(tableJSON) {
-			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=dnat_challenge expected source: challenge sets)"})
+		} else if !hasExpectedDNATPreroutingRules(tableJSON) {
+			reasonFeature := "dnat_edge"
+			reasonSource := "cfm_redirect prerouting rules"
+			if r.Features["dnat_challenge"] {
+				reasonFeature = "dnat_challenge"
+				reasonSource = "challenge sets"
+			}
+			r.Findings = append(r.Findings, fwFinding{"fail", fmt.Sprintf("dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=%s expected source: %s)", reasonFeature, reasonSource)})
 		}
 	}
 	if cp, ok := any(be).(counterProbe); ok {
@@ -341,9 +347,9 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok {
 			if raw, err := ds.DNATShow("inet", "cfm"); err != nil {
-				r.Findings = append(r.Findings, fwFinding{"warn", "dnat show probe failed: " + err.Error()})
+				r.Findings = append(r.Findings, fwFinding{"info", "dnat show probe failed: " + err.Error()})
 			} else if strings.TrimSpace(raw) == "" {
-				r.Findings = append(r.Findings, fwFinding{"warn", "dnat show returned empty output"})
+				r.Findings = append(r.Findings, fwFinding{"info", "dnat show returned empty output"})
 			}
 		}
 	}
