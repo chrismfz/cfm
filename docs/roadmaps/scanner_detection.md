@@ -14,8 +14,9 @@ WordPress/CMS integrity, database scanning.
 5. [Feature 4 — Surgical PHP Cleaning](#5-feature-4--surgical-php-cleaning)
 6. [Feature 5 — WordPress & CMS Integrity](#6-feature-5--wordpress--cms-integrity)
 7. [Feature 6 — Database Scanning & Cleaning](#7-feature-6--database-scanning--cleaning)
-8. [Under Consideration — PAM Detector](#8-under-consideration--pam-detector)
-9. [Progress tracking](#9-progress-tracking)
+8. [Feature 7 — Real-Time Integrity Detector](#8-feature-7--real-time-integrity-detector)
+9. [Under Consideration — PAM Detector](#9-under-consideration--pam-detector)
+10. [Progress tracking](#10-progress-tracking)
 
 ---
 
@@ -766,7 +767,531 @@ internal/detectors/dbscanner/
 
 ---
 
-## 8. Under Consideration — PAM Detector
+## 8. Feature 7 — Real-Time Integrity Detector
+
+### What it does
+
+chkrootkit and rkhunter are periodic scanners — they run on a cron schedule
+and check for known rootkit artifacts and system inconsistencies. They have
+two fundamental problems: they run minutes or hours after the attack, and an
+attacker who knows the schedule can time around them.
+
+CFM can do better. The integrity detector combines three mechanisms:
+
+- **fanotify** — catches file-level attacks the moment they happen
+  (binary replacement, `.ko` dropped, `.so` injected, cron planted)
+- **Fast polling** — catches process/port hiding in under 5 seconds
+  (inconsistency between `/proc/` and user-space tools)
+- **filewatch.Watcher** — watches specific critical files for any modification
+  (`/etc/ld.so.preload`, `/etc/passwd`, `/etc/sudoers`)
+
+The result is a system that detects rootkit installation during the exploit
+window — the 30 seconds between "attacker has code execution" and "rootkit is
+fully loaded and hiding". chkrootkit/rkhunter detect it days later if at all.
+
+### Signature sources
+
+The signature database is compiled from three open-source tools:
+
+**chkrootkit** (`github.com/Magentron/chkrootkit`) — the canonical list of
+trojanized binary names and rootkit artifact paths accumulated since 1997.
+License: freely redistributable. Key content borrowed:
+
+- Trojanized binary names: `amd basename biff chfn chsh cron crontab date du
+  dirname echo egrep env find fingerd gpm grep hdparm su ifconfig inetd init
+  killall login ls lsof mail mingetty netstat named passwd pidof ps pstree
+  rpcinfo rlogind rshd slogin sendmail sshd syslogd tar tcpd tcpdump top
+  telnetd timed traceroute vdir w write`
+- `/proc/kallsyms` symbol checks for known LKM rootkits (Adore, Sebek, Knark)
+- Hidden directory patterns in `/dev/`, `/lib/`, `/usr/lib/`, `/usr/info/`
+- Process hiding detection via `/proc/` vs `ps` comparison
+- Port hiding via `/proc/net/tcp` vs `ss` comparison
+
+**rkhunter** — known rootkit file signatures and SUID binary inventory.
+Key content: known backdoor binary names, suspicious hidden files in system
+directories, immutable file detection.
+
+**CSM** (`pidginhost/csm`) — modern additions: GSocket/gs-netcat backdoor
+binaries in `~/.config/` directories, hidden files in `/tmp/`, `/dev/shm/`,
+SUID binaries in unexpected locations. Their `filesystem.go` and `system.go`
+are a useful reference for Go implementation patterns.
+
+### Architecture
+
+```
+Two components, both running in the same daemon:
+
+Component 1 — FastPoller (5s tick, PeriodicDetector)
+  ├── hidden process check:  /proc/ PIDs vs ps output
+  ├── hidden port check:     /proc/net/tcp vs ss -tnlp
+  └── kernel module check:   /proc/modules vs stored baseline
+
+Component 2 — FileIntegrity (event-driven, fanotify + filewatch)
+  ├── fanotify watches:
+  │     /usr/bin/, /usr/sbin/, /usr/local/bin/, /usr/local/sbin/
+  │     /etc/cron.d/, /etc/cron.daily/, /etc/cron.hourly/
+  │     /etc/systemd/system/, /etc/profile.d/, /etc/sudoers.d/
+  │     /lib/modules/, /home/*/.ssh/
+  │     /var/spool/cron/crontabs/
+  │     /tmp/, /dev/shm/  (already watched by scanner, different alert type)
+  │
+  └── filewatch.Watcher polls (30s):
+        /etc/ld.so.preload    ← CRITICAL on any content
+        /etc/ld.so.hash       ← rootkit artifact
+        /etc/passwd           ← new user added
+        /etc/shadow           ← shadow tampered
+        /etc/sudoers          ← privilege escalation persistence
+        /etc/ssh/sshd_config  ← backdoor SSH config
+        /etc/rc.local         ← legacy persistence
+```
+
+### Alert types and severity
+
+```go
+// internal/integrity/findings.go
+
+const (
+    // CRITICAL — immediate action required
+    FindingBinaryTampered   = "BINARY_TAMPERED"      // rpm -V mismatch after fanotify event
+    FindingPreloadModified  = "PRELOAD_MODIFIED"      // /etc/ld.so.preload non-empty or changed
+    FindingLKMLoaded        = "LKM_LOADED"            // new kernel module after baseline
+    FindingKallsymsRootkit  = "KALLSYMS_ROOTKIT"      // known LKM name in /proc/kallsyms
+    FindingRootkitArtifact  = "ROOTKIT_ARTIFACT"      // known rootkit path exists on disk
+
+    // HIGH — investigate within minutes
+    FindingHiddenProcess    = "HIDDEN_PROCESS"        // PID in /proc not in ps
+    FindingHiddenPort       = "HIDDEN_PORT"           // port in /proc/net/tcp not in ss
+    FindingCronAdded        = "CRON_ADDED"            // new file in /etc/cron.d/ etc.
+    FindingSystemdUnit      = "SYSTEMD_UNIT_ADDED"    // new .service in /etc/systemd/system/
+    FindingSudoersModified  = "SUDOERS_MODIFIED"      // sudoers or sudoers.d changed
+    FindingSSHKeyAdded      = "SSH_KEY_ADDED"         // authorized_keys written
+    FindingPasswdModified   = "PASSWD_MODIFIED"       // /etc/passwd or /etc/shadow changed
+    FindingNewELF           = "NEW_ELF_IN_SYSBIN"     // ELF binary appeared in /usr/bin etc.
+    FindingGSocketBackdoor  = "GSOCKET_BACKDOOR"      // gs-netcat/gsocket binary by name
+    FindingSUIDInTmp        = "SUID_IN_TMP"           // SUID binary in /tmp, /dev/shm
+
+    // MEDIUM — review when convenient
+    FindingProfileModified  = "PROFILE_MODIFIED"      // /etc/profile.d/ or ~/.bashrc changed
+    FindingHiddenInTmp      = "HIDDEN_FILE_IN_TMP"    // dotfile in /tmp not in known-safe list
+    FindingKOInTmp          = "KO_IN_TMP"             // .ko file outside /lib/modules/
+)
+```
+
+### Rootkit artifact database
+
+Compiled from chkrootkit + rkhunter + CSM signatures. Embedded in the binary
+as a Go map — no external signature file to manage, no update required for
+these (they've been stable for 20+ years), and new entries added via Go source
+updates.
+
+```go
+// internal/integrity/signatures.go
+
+// KnownRootkitPaths: if any of these paths exist, it is a rootkit artifact.
+// Sources: chkrootkit (primary), rkhunter, CSM filesystem.go
+var KnownRootkitPaths = []string{
+    // LKM rootkit artifacts (chkrootkit)
+    "/etc/.enyeOCULTAR.ko",
+    "/etc/.enyelkmOCULTAR.ko",
+    "/etc/ld.so.hash",        // t0rn rootkit
+    "/etc/ld.so.pre",         // ENYE-LKM
+
+    // Hidden directories used by rootkits (chkrootkit)
+    "/dev/.golf",
+    "/dev/.kork",
+    "/dev/.lib",
+    "/dev/ptyxx",
+    "/dev/rd/cdb",
+    "/dev/tux",
+    "/lib/.so",
+    "/lib/.ligh.gh",
+    "/usr/lib/.ark",
+    "/usr/lib/.egcs",
+    "/usr/lib/.fx",
+    "/usr/lib/.kinetic",
+    "/usr/lib/.wormie",
+    "/usr/lib/volc",
+    "/usr/info/.t0rn",
+    "/usr/info/.tc2k",
+    "/usr/info/.torn",
+    "/usr/src/.poop",
+    "/usr/src/.puta",
+    "/usr/bin/ishit",
+    "/usr/bin/sourcemask",
+    "/usr/bin/xchk",
+    "/usr/bin/xsf",
+    "/usr/sbin/kswapd",       // ZK rootkit (not real kswapd)
+    "/var/lib/games/.k",
+    "/var/run/.tmp",
+    "/var/local/.lpd",
+
+    // Worm/backdoor staging files (chkrootkit)
+    "/tmp/.bugtraq",
+    "/tmp/.bugtraq.c",
+    "/tmp/.unlock",
+    "/tmp/.uua",
+    "/tmp/.a",
+    "/tmp/.b",
+    "/tmp/.cinik",
+    "/tmp/.cheese",
+    "/tmp/.../a",             // W55808 worm
+    "/tmp/.../r",
+    "/tmp/ramen.tgz",
+
+    // GSocket backdoor suite (CSM)
+    // Found in /home/*/.config/htop/ and similar hidden locations
+    // gs-netcat gives persistent encrypted shell access — treat as CRITICAL
+}
+
+// KnownRootkitBinaryNames: binaries with these names in system dirs are
+// trojanized replacements of legitimate tools (chkrootkit TROJAN list).
+var KnownTrojanizedNames = []string{
+    "amd", "basename", "biff", "chfn", "chsh", "cron", "crontab",
+    "date", "du", "dirname", "echo", "egrep", "env", "find", "fingerd",
+    "gpm", "grep", "hdparm", "su", "ifconfig", "inetd", "init",
+    "killall", "login", "ls", "lsof", "mail", "mingetty", "netstat",
+    "named", "passwd", "pidof", "pop2", "pop3", "ps", "pstree",
+    "rpcinfo", "rlogind", "rshd", "slogin", "sendmail", "sshd",
+    "syslogd", "tar", "tcpd", "tcpdump", "top", "telnetd", "timed",
+    "traceroute", "vdir", "w", "write",
+}
+
+// GSocketBackdoorNames: GSocket persistence binaries (CSM)
+// These should never legitimately exist in ~/.config/ directories.
+var GSocketBackdoorNames = map[string]bool{
+    "defunct": true, "defunct.dat": true, "gs-netcat": true,
+    "gs-sftp": true, "gs-mount": true, "gsocket": true,
+}
+
+// KallsymsRootkitSymbols: strings that indicate a loaded LKM rootkit
+// when found in /proc/kallsyms (chkrootkit LKM checks).
+var KallsymsRootkitSymbols = []string{
+    "adore", "sebek", "knark", "rkperfect", "reptile", "diamorphine",
+    "enyelkm", "modhide", "syshide", "module_hide",
+}
+
+// KnownSafeHiddenInTmp: hidden files that legitimately exist in /tmp
+// Everything else is suspicious (chkrootkit / CSM approach).
+var KnownSafeHiddenInTmp = []string{
+    ".s.PGSQL", ".font-unix", ".ICE-unix", ".X11-unix",
+    ".XIM-unix", ".crontab.", ".Test-unix", ".X0-lock",
+}
+```
+
+### Fast polling checks (5-second tick)
+
+```go
+// internal/integrity/proccheck.go
+
+// CheckHiddenProcesses compares PIDs visible in /proc with ps output.
+// A rootkit hiding processes removes them from ps but cannot remove
+// the /proc/[pid]/ directory without kernel cooperation.
+// A kernel LKM rootkit CAN hide from /proc too — that's the limit of
+// user-space detection.
+func CheckHiddenProcesses() []Finding {
+    procPIDs := readProcPIDs()    // walk /proc/[0-9]*/
+    psPIDs   := readPsPIDs()     // parse: ps -e -o pid=
+
+    var findings []Finding
+    for pid := range procPIDs {
+        if !psPIDs[pid] {
+            cmdline := readCmdline(pid)  // /proc/<pid>/cmdline
+            findings = append(findings, Finding{
+                Kind:     FindingHiddenProcess,
+                Severity: SeverityHigh,
+                Detail:   fmt.Sprintf("PID %d visible in /proc but hidden from ps: %s", pid, cmdline),
+            })
+        }
+    }
+    return findings
+}
+
+// CheckHiddenPorts compares /proc/net/tcp with ss output.
+// Same principle — kernel populates /proc/net/tcp directly.
+func CheckHiddenPorts() []Finding {
+    procPorts := readProcNetTCP()   // parse /proc/net/tcp + /proc/net/tcp6
+    ssPorts   := readSSListeners()  // parse: ss -tnlp
+
+    var findings []Finding
+    for addr := range procPorts {
+        if !ssPorts[addr] {
+            findings = append(findings, Finding{
+                Kind:     FindingHiddenPort,
+                Severity: SeverityHigh,
+                Detail:   fmt.Sprintf("Listening port %s in /proc/net/tcp hidden from ss", addr),
+            })
+        }
+    }
+    return findings
+}
+
+// CheckKernelModules compares /proc/modules against the startup baseline.
+// Baseline is stored in SQLite on first daemon start.
+// Any module loaded AFTER baseline is flagged.
+// Also checks /proc/kallsyms for known LKM rootkit symbol names.
+func CheckKernelModules(baseline map[string]bool) []Finding {
+    current := readProcModules()  // parse /proc/modules
+
+    var findings []Finding
+    for mod := range current {
+        if !baseline[mod] {
+            findings = append(findings, Finding{
+                Kind:     FindingLKMLoaded,
+                Severity: SeverityHigh,
+                Detail:   fmt.Sprintf("Kernel module loaded after baseline: %s", mod),
+            })
+        }
+    }
+
+    // Check /proc/kallsyms for rootkit symbols — works even if module
+    // tries to hide itself from /proc/modules
+    kallsyms, _ := os.ReadFile("/proc/kallsyms")
+    content := strings.ToLower(string(kallsyms))
+    for _, sym := range KallsymsRootkitSymbols {
+        if strings.Contains(content, sym) {
+            findings = append(findings, Finding{
+                Kind:     FindingKallsymsRootkit,
+                Severity: SeverityCritical,
+                Detail:   fmt.Sprintf("Known LKM rootkit symbol in /proc/kallsyms: %q", sym),
+            })
+        }
+    }
+    return findings
+}
+```
+
+### fanotify-triggered checks
+
+These run immediately on file write events from the scanner pipeline's
+system watch group — no polling, no delay.
+
+```go
+// internal/integrity/filecheck.go
+
+// CheckSystemBinaryWrite is called by the scanner pipeline when fanotify
+// reports a write event in /usr/bin/, /usr/sbin/, etc.
+// Immediately runs rpm -V for the affected package.
+func CheckSystemBinaryWrite(path string) []Finding {
+    // 1. Check if it's a known trojanized binary name
+    name := filepath.Base(path)
+    for _, trojan := range KnownTrojanizedNames {
+        if name == trojan {
+            // Don't just alert on name — verify the checksum too
+            break
+        }
+    }
+
+    // 2. Run rpm -V for the package that owns this file
+    //    rpm -qf /usr/bin/sudo → "sudo-1.9.5p2-1.el8.x86_64"
+    //    rpm -V sudo-1.9.5p2-1.el8.x86_64 → "S.5....T.  /usr/bin/sudo" = tampered
+    pkg := rpmOwner(path)
+    if pkg == "" {
+        // Not rpm-managed — new file in system binary dir
+        if isELF(path) {
+            return []Finding{{
+                Kind:     FindingNewELF,
+                Severity: SeverityHigh,
+                Detail:   fmt.Sprintf("New ELF binary appeared in system directory: %s", path),
+            }}
+        }
+        return nil
+    }
+
+    out, _ := exec.Command("rpm", "-V", pkg).Output()
+    if len(strings.TrimSpace(string(out))) == 0 {
+        return nil // all good
+    }
+
+    return []Finding{{
+        Kind:     FindingBinaryTampered,
+        Severity: SeverityCritical,
+        Detail:   fmt.Sprintf("rpm -V %s: %s", pkg, strings.TrimSpace(string(out))),
+    }}
+}
+
+// CheckKODropped is called when fanotify sees a .ko file written outside
+// of /lib/modules/<kernel>/ (i.e. in /tmp, /dev/shm, /home/*, etc.)
+func CheckKODropped(path string) []Finding {
+    if !isKernelModulePath(path) {
+        return []Finding{{
+            Kind:     FindingKOInTmp,
+            Severity: SeverityHigh,
+            Detail:   fmt.Sprintf("Kernel module (.ko) written to unusual location: %s", path),
+        }}
+    }
+    return nil
+}
+
+// CheckSSHKeyWrite is called when fanotify sees a write to authorized_keys.
+// Compares against stored baseline of known-good keys.
+func CheckSSHKeyWrite(path string) []Finding {
+    // Read current keys
+    data, _ := os.ReadFile(path)
+    current := parseAuthorizedKeys(data)
+
+    // Load baseline from SQLite
+    baseline := loadKeyBaseline(path)
+
+    var findings []Finding
+    for key := range current {
+        if !baseline[key] {
+            findings = append(findings, Finding{
+                Kind:     FindingSSHKeyAdded,
+                Severity: SeverityHigh,
+                Detail:   fmt.Sprintf("New SSH authorized key in %s: %s...", path, key[:40]),
+            })
+        }
+    }
+
+    // Update baseline to include new keys (operator may have added them legitimately)
+    // Operator can silence future alerts by running: cfm integrity approve-key <path>
+    return findings
+}
+```
+
+### Scanner pipeline routing
+
+The existing scanner pipeline gets a second watch group. The `FileEvent`
+carries its group so `pipeline.go` routes correctly:
+
+```go
+// internal/scanner/pipeline.go
+
+func (p *Pipeline) handleEvent(ev filewatch.FileEvent) {
+    switch ev.Group {
+    case filewatch.GroupWeb:
+        // existing path: ClamAV + WP integrity + cleaner
+        p.handleWebEvent(ev)
+
+    case filewatch.GroupSystem:
+        // new path: integrity checks, no ClamAV needed
+        p.handleSystemEvent(ev)
+    }
+}
+
+func (p *Pipeline) handleSystemEvent(ev filewatch.FileEvent) {
+    switch {
+    case isSystemBinaryPath(ev.Path):
+        findings := integrity.CheckSystemBinaryWrite(ev.Path)
+        p.emitFindings(findings)
+
+    case strings.HasSuffix(ev.Path, ".ko"):
+        findings := integrity.CheckKODropped(ev.Path)
+        p.emitFindings(findings)
+
+    case strings.Contains(ev.Path, "/.ssh/authorized_keys"):
+        findings := integrity.CheckSSHKeyWrite(ev.Path)
+        p.emitFindings(findings)
+
+    case isNewCronOrSystemdPath(ev.Path):
+        p.emitFindings([]integrity.Finding{{
+            Kind:     integrity.FindingCronAdded,
+            Severity: integrity.SeverityHigh,
+            Detail:   fmt.Sprintf("New persistence file: %s", ev.Path),
+        }})
+    }
+}
+```
+
+### Artifact scan on daemon start
+
+On every CFM daemon start, run a one-time pass of `KnownRootkitPaths`:
+
+```go
+// internal/integrity/startscan.go
+
+// ScanKnownArtifacts checks for known rootkit files/dirs at daemon startup.
+// Fast: only checks explicit known paths, no directory walking.
+// Takes < 10ms on any server.
+func ScanKnownArtifacts() []Finding {
+    var findings []Finding
+    for _, path := range KnownRootkitPaths {
+        if _, err := os.Lstat(path); err == nil {
+            findings = append(findings, Finding{
+                Kind:     FindingRootkitArtifact,
+                Severity: SeverityCritical,
+                Detail:   fmt.Sprintf("Known rootkit artifact present: %s", path),
+            })
+        }
+    }
+    return findings
+}
+```
+
+Also scans `~/.config/` directories for GSocket backdoor binaries on startup
+and on the 5-second tick — the CSM approach that caught real-world compromises.
+
+### Honesty about limits
+
+| Threat | CFM detects? | How | Latency |
+|---|---|---|---|
+| Binary replaced in /usr/bin | ✅ | fanotify → rpm -V | < 1s |
+| New .ko file written to /tmp | ✅ | fanotify | < 1s |
+| New cron/systemd unit | ✅ | fanotify | < 1s |
+| SSH key injected | ✅ | fanotify | < 1s |
+| /etc/ld.so.preload modified | ✅ | filewatch.Watcher | ≤ 30s |
+| Known rootkit artifact present | ✅ | startup scan + periodic | ≤ 5s |
+| Process hidden from ps | ✅ | fast poll /proc vs ps | ≤ 5s |
+| Port hidden from ss | ✅ | fast poll /proc/net vs ss | ≤ 5s |
+| New kernel module loaded | ✅ | fast poll /proc/modules | ≤ 5s |
+| Known LKM rootkit symbol | ✅ | fast poll /proc/kallsyms | ≤ 5s |
+| LKM rootkit hides itself from /proc | ❌ | Not detectable from user space | — |
+| LKM rootkit hides processes from /proc | ❌ | Not detectable from user space | — |
+
+The last two rows are the hard limit of any user-space tool including chkrootkit,
+rkhunter, and CSM. The value of real-time detection is catching the installation
+window — before the rootkit is fully loaded and hiding. That window is where
+CFM wins.
+
+### detectors.conf section
+
+```ini
+[integrity]
+ENABLED              = 1
+
+; Fast poller — runs every 5 seconds
+PROCESS_CHECK        = 1
+PORT_CHECK           = 1
+MODULE_CHECK         = 1
+KALLSYMS_CHECK       = 1
+
+; File watches (always on when ENABLED=1)
+PRELOAD_CHECK        = 1        ; /etc/ld.so.preload
+PASSWD_CHECK         = 1        ; /etc/passwd + /etc/shadow
+SUDOERS_CHECK        = 1        ; /etc/sudoers + sudoers.d/
+SSHD_CONFIG_CHECK    = 1        ; /etc/ssh/sshd_config
+
+; Startup artifact scan
+ARTIFACT_SCAN        = 1        ; check KnownRootkitPaths on daemon start
+
+; Baseline management
+; cfm integrity baseline  → snapshot current /proc/modules and ssh keys
+; cfm integrity status    → show what's being watched and last check results
+```
+
+### Files to create
+
+```
+internal/integrity/
+  detector.go       ← PeriodicDetector (5s tick) for polling checks
+  proccheck.go      ← hidden process + hidden port + kernel module checks
+  filecheck.go      ← fanotify-triggered: binary tamper, .ko drop, ssh key
+  startscan.go      ← startup artifact scan (KnownRootkitPaths)
+  signatures.go     ← KnownRootkitPaths, KnownTrojanizedNames, etc.
+  findings.go       ← Finding struct, severity constants, kind constants
+  baseline.go       ← SQLite-backed baseline for modules + SSH keys
+  rpmcheck.go       ← rpm -V / debsums wrapper
+
+internal/detectors/integrity/
+  register.go       ← Register() call
+
+internal/filewatch/
+  monitor.go        ← add GroupWeb / GroupSystem to FileEvent (minor addition)
+```
+
+---
+
+
 
 **Status: deferred.** CFM already detects SSH, FTP, Dovecot, and cPanel
 brute force via log parsing. PAM adds ~1–4 seconds of speed but does not
@@ -807,7 +1332,7 @@ existing `filewatch.Watcher` to re-apply after authselect regenerates it.
 
 ---
 
-## 9. Progress tracking
+## 10. Progress tracking
 
 ### Feature 1 — fanotify Monitor
 
@@ -870,6 +1395,25 @@ existing `filewatch.Watcher` to re-apply after authselect regenerates it.
 | Add `cfm wp check <path>` CLI | `internal/cli/wp.go` | ☐ |
 | Phase 2: plugin integrity | `internal/wpintegrity/plugins.go` | ☐ |
 | Phase 3: Joomla / Drupal / Magento | `internal/cmsintegrity/` | ☐ |
+
+### Feature 7 — Real-Time Integrity Detector
+
+| Task | File | Status |
+|---|---|---|
+| Create `internal/integrity/signatures.go` | KnownRootkitPaths, KnownTrojanizedNames, GSocketBackdoorNames, KallsymsRootkitSymbols, KnownSafeHiddenInTmp | ☐ |
+| Create `internal/integrity/findings.go` | Finding struct, severity + kind constants | ☐ |
+| Create `internal/integrity/proccheck.go` | hidden process, hidden port, kernel module, kallsyms checks | ☐ |
+| Create `internal/integrity/startscan.go` | startup KnownRootkitPaths scan, GSocket scan in ~/.config/ | ☐ |
+| Create `internal/integrity/filecheck.go` | binary tamper (rpm -V), .ko drop, SSH key, cron/systemd unit alerts | ☐ |
+| Create `internal/integrity/rpmcheck.go` | rpm -V / debsums wrapper | ☐ |
+| Create `internal/integrity/baseline.go` | SQLite-backed baseline for /proc/modules and SSH keys | ☐ |
+| Create `internal/integrity/detector.go` | PeriodicDetector (5s tick) wiring all polling checks | ☐ |
+| Create `internal/detectors/integrity/register.go` | Register() call | ☐ |
+| Add GroupWeb / GroupSystem to FileEvent | `internal/filewatch/monitor.go` | ☐ |
+| Route GroupSystem events in pipeline | `internal/scanner/pipeline.go` | ☐ |
+| Add `[integrity]` section to `configs/detectors.conf` | | ☐ |
+| Add `cfm integrity baseline` CLI | `internal/cli/integrity.go` | ☐ |
+| Add `cfm integrity status` CLI | `internal/cli/integrity.go` | ☐ |
 
 ### Feature 6 — Database Scanning
 
