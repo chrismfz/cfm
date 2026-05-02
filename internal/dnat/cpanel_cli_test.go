@@ -58,7 +58,7 @@ func TestPanelHelpSnapshots(t *testing.T) {
 		"Commands: status, on, off",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: guard-only (default: guard-only)",
+		"Challenge options: off, guard-only, forced (default: guard-only)",
 	} {
 		if !strings.Contains(errOut, token) {
 			t.Fatalf("help output missing %q\n%s", token, errOut)
@@ -77,7 +77,7 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 		"Usage: cfm dnat cpanel on",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: guard-only (default: guard-only)",
+		"Challenge options: off, guard-only, forced (default: guard-only)",
 		"mode=direct-cpsrvd",
 		"priority=-101",
 	} {
