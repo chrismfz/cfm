@@ -174,9 +174,27 @@ local function next_points_to_challenge()
 end
 
 local function is_challenge_flow_request(uri)
-    return uri == "/__cfm_challenge" or next_points_to_challenge()
+    if uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") then return true end
+    return next_points_to_challenge()
 end
 
+
+local function append_set_cookie(v)
+    local h = ngx.header["Set-Cookie"]
+    if not h then ngx.header["Set-Cookie"] = v; return end
+    if type(h) == "table" then table.insert(h, v); ngx.header["Set-Cookie"] = h; return end
+    ngx.header["Set-Cookie"] = { h, v }
+end
+
+local function refresh_clearance_cookie()
+    local raw = ngx.var.cookie_cfm_ok
+    if not raw or raw == "" then return false end
+    local ttl = parse_duration_seconds(ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m", 2700)
+    local attrs = "Path=/; Max-Age=" .. tostring(ttl) .. "; HttpOnly; SameSite=Lax"
+    if ngx.var.https == "on" then attrs = attrs .. "; Secure" end
+    append_set_cookie("cfm_ok=" .. tostring(raw) .. "; " .. attrs)
+    return true
+end
 local function is_panel_sensitive(uri, method)
     if method == "POST" then return true end
     return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
@@ -286,6 +304,7 @@ end
 if mode == "forced" then
     if has_clearance_cookie() then
         mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
+        refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
