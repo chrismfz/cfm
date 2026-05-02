@@ -26,6 +26,9 @@ type unixSockProbe struct {
 	Err             string
 }
 
+var panelDecisionBackendLastErr string
+var panelDecisionBackendLastErrAt time.Time
+
 func probeUnixSocket(path string) unixSockProbe {
 	out := unixSockProbe{}
 	st, err := os.Stat(path)
@@ -43,6 +46,8 @@ func probeUnixSocket(path string) unixSockProbe {
 	conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
 	if err != nil {
 		out.Err = err.Error()
+		panelDecisionBackendLastErr = fmt.Sprintf("socket=%s error=%s", path, out.Err)
+		panelDecisionBackendLastErrAt = time.Now().UTC()
 		return out
 	}
 	out.Connectable = true
@@ -521,6 +526,13 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		fmt.Printf("Bridge socket (/var/run/cfm/cfm_nginx.sock): exists=%t socket=%t connectable=%t group_write=%t\n", bridgeSock.Exists, bridgeSock.IsSocket, bridgeSock.Connectable, bridgeSock.WritableByGroup)
 		if bridgeSock.Err != "" {
 			fmt.Printf("Bridge socket status: FAIL (%s)\n", bridgeSock.Err)
+		}
+		if bridgeSock.Err != "" {
+			fmt.Printf("Decision backend: DEGRADED (last error: socket=/var/run/cfm/cfm_nginx.sock error=%s at %s)\n", bridgeSock.Err, time.Now().UTC().Format(time.RFC3339))
+		} else if panelDecisionBackendLastErr != "" {
+			fmt.Printf("Decision backend: DEGRADED (last error: %s at %s)\n", panelDecisionBackendLastErr, panelDecisionBackendLastErrAt.Format(time.RFC3339))
+		} else {
+			fmt.Println("Decision backend: OK")
 		}
 		fmt.Printf("Ingest socket (/run/cfm/ingest.sock): exists=%t socket=%t connectable=%t group_write=%t\n", ingestSock.Exists, ingestSock.IsSocket, ingestSock.Connectable, ingestSock.WritableByGroup)
 		if ingestSock.Err != "" {
