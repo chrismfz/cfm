@@ -447,6 +447,7 @@ deploy_nginx_conf() {
         return 0
     fi
 
+    validate_panel_lua_guard_preflight "$src" "$prefix" || return 1
     log "Testing nginx config: $src"
     if openresty -t -p "$prefix" -c "$src" >/dev/null 2>&1; then
         log "Config test passed"
@@ -456,6 +457,40 @@ deploy_nginx_conf() {
         warn "Config test FAILED — nginx.conf NOT deployed. Output:"
         openresty -t -p "$prefix" -c "$src" >&2 || true
     fi
+}
+
+validate_panel_lua_guard_preflight() {
+    local nginx_src="$1"
+    local prefix="$2"
+    local listener_conf="$prefix/conf/cfm-panel-listeners.conf"
+
+    if ! grep -Eq '^[[:space:]]*include[[:space:]]+cfm-panel-listeners\.conf;' "$nginx_src"; then
+        return 0
+    fi
+    if [ ! -f "$listener_conf" ]; then
+        warn "Panel listener include enabled but listener file missing: $listener_conf"
+        return 1
+    fi
+    local lua_path
+    lua_path="$(awk '/access_by_lua_file/ && /cfm_panel\.lua/ {gsub(/;/,"",$2); print $2; exit}' "$listener_conf")"
+    if [ -z "$lua_path" ]; then
+        warn "Panel listener include enabled but cfm_panel.lua path is not configured in $listener_conf"
+        return 1
+    fi
+    if [ ! -r "$lua_path" ]; then
+        warn "Panel listener include enabled but Lua guard file missing/unreadable: $lua_path"
+        return 1
+    fi
+    if ! su -s /bin/sh -c "test -r '$lua_path'" cfm >/dev/null 2>&1; then
+        warn "Panel Lua guard file is not readable by worker user cfm: $lua_path"
+        return 1
+    fi
+    if ! luajit -bl "$lua_path" >/dev/null 2>&1; then
+        warn "Panel Lua guard syntax/load check failed: $lua_path"
+        luajit -bl "$lua_path" >&2 || true
+        return 1
+    fi
+    log "Panel Lua guard preflight passed: $lua_path"
 }
 
 check_lua_token_files() {

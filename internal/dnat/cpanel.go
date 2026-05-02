@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -106,4 +108,86 @@ func panelListenerGuardState() (string, bool) {
 		return mode, loaded
 	}
 	return "unknown", false
+}
+
+type panelLuaGuardStatus struct {
+	Path      string
+	Exists    bool
+	Readable  bool
+	LoadOK    bool
+	LoadError string
+}
+
+func panelLuaGuardPath() string {
+	for _, p := range []string{"/etc/angie/conf/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/angie-cfm-panel-listeners.conf", "configs/openresty-cfm-panel-listeners.conf"} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		s := string(b)
+		for _, line := range strings.Split(s, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "access_by_lua_file ") && strings.Contains(line, "cfm_panel.lua") {
+				v := strings.TrimSpace(strings.TrimPrefix(line, "access_by_lua_file "))
+				return strings.TrimSuffix(v, ";")
+			}
+		}
+	}
+	return ""
+}
+
+func checkPanelLuaGuard(path string) panelLuaGuardStatus {
+	st := panelLuaGuardStatus{Path: path}
+	if path == "" {
+		st.LoadError = "path not configured"
+		return st
+	}
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		st.Exists = true
+	} else if err != nil {
+		st.LoadError = err.Error()
+		return st
+	} else {
+		st.LoadError = "path is a directory, expected lua file"
+		return st
+	}
+	if f, err := os.Open(path); err == nil {
+		_ = f.Close()
+		st.Readable = true
+	} else {
+		st.LoadError = err.Error()
+		return st
+	}
+	cmdPath := path
+	if !filepath.IsAbs(cmdPath) {
+		if abs, err := filepath.Abs(cmdPath); err == nil {
+			cmdPath = abs
+		}
+	}
+	out, err := exec.Command("luajit", "-bl", cmdPath).CombinedOutput()
+	if err == nil {
+		st.LoadOK = true
+		return st
+	}
+	st.LoadError = strings.TrimSpace(string(out))
+	if st.LoadError == "" {
+		st.LoadError = err.Error()
+	}
+	return st
+}
+
+func panelLuaReadableByWorker(path string) (bool, string) {
+	u, err := user.Lookup("cfm")
+	if err != nil {
+		return false, "worker user cfm not present"
+	}
+	out, err := exec.Command("sudo", "-u", u.Username, "test", "-r", path).CombinedOutput()
+	if err == nil {
+		return true, ""
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = err.Error()
+	}
+	return false, msg
 }
