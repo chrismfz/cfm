@@ -8,6 +8,7 @@ local function decision_log(level, fields)
         " host=", fields.host or "-",
         " uri=", fields.uri or "-",
         " method=", fields.method or "-",
+        " ua=", fields.ua or "-",
         " ip=", fields.ip or "-",
         " decision=", fields.decision or "-",
         " reason=", fields.reason or "-",
@@ -170,7 +171,7 @@ local function issue_challenge(mode, reason, decision, cooldown_ttl)
     local loc = challenge_redirect_target(decision)
     mark_challenge_issued(ngx.var.remote_addr, cooldown_ttl or 0)
     decision_log(ngx.INFO, {
-        mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ip = ngx.var.remote_addr,
+        mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr,
         decision = "challenge", reason = reason, decision_reason = decision and decision.reason or "-",
         subreq_uri = decision and decision.subreq_uri or "-", subreq_status = decision and decision.subreq_status or "-", subreq_location = decision and decision.subreq_location or "-", decision_source = decision and decision.decision_source or "-",
         allow_origin = "0", challenge_issued = "1", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", deny_fail_closed = "0", target = loc,
@@ -179,7 +180,7 @@ local function issue_challenge(mode, reason, decision, cooldown_ttl)
 end
 
 local function deny(mode, reason)
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ip = ngx.var.remote_addr, decision = "deny", reason = reason, target = "-" })
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr, decision = "deny", reason = reason, target = "-" })
     return ngx.exit(ngx.HTTP_FORBIDDEN)
 end
 
@@ -247,7 +248,19 @@ local function refresh_clearance_cookie()
 end
 local function is_panel_sensitive(uri, method)
     if method == "POST" then return true end
-    return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
+    return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/openid_connect/") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
+end
+
+local function is_configured_panel_host(host)
+    local primary = (ngx.var.cfm_panel_primary_domain or ""):lower()
+    local h = (host or ""):lower()
+    if primary == "" then return true end
+    if h == primary then return true end
+    local proxies = (ngx.var.cfm_panel_proxy_domains or "")
+    for token in proxies:gmatch("[^,%s]+") do
+        if h == token:lower() then return true end
+    end
+    return false
 end
 
 local function query_decision_api()
@@ -298,6 +311,7 @@ end
 
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
+local ua = ngx.var.http_user_agent or "-"
 if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
     local args = ngx.req.get_uri_args() or {}
     local next_arg = args.next
@@ -318,6 +332,9 @@ local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.cfm_openresty_ok_ip_t
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
 
+if not is_configured_panel_host(ngx.var.host) then
+    return deny(mode, "host_not_configured")
+end
 
 if uri == decision_uri then
     local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
@@ -368,24 +385,33 @@ elseif mode == "forced" then
 end
 
 if mode == "forced" then
+    local sensitive = is_panel_sensitive(uri, method)
     if has_clearance_cookie() then
         mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
         return
     end
-    if has_bypass_ttl(ngx.var.remote_addr) then
+    if sensitive and has_bypass_ttl(ngx.var.remote_addr) then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
         return
     end
-    if cooldown_active(ngx.var.remote_addr) then
-        return issue_challenge(mode, "challenge_cooldown", nil, challenge_cooldown_ttl)
+    if sensitive and cooldown_active(ngx.var.remote_addr) then
+        if not is_browser_like(ua) then
+            return deny(mode, "challenge_loop_protection")
+        end
+        return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)
     end
-    return issue_challenge(mode, "forced_no_clearance_cookie", nil, challenge_cooldown_ttl)
+    if sensitive and not is_browser_like(ua) then
+        return deny(mode, "deny_unsolvable_client")
+    end
+    if sensitive then
+        return issue_challenge(mode, "forced_no_clearance_cookie", nil, challenge_cooldown_ttl)
+    end
 end
 
 if needs_challenge then
