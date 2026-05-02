@@ -11,7 +11,10 @@ local function decision_log(level, fields)
         " ip=", fields.ip or "-",
         " decision=", fields.decision or "-",
         " reason=", fields.reason or "-",
+        " subreq_uri=", fields.subreq_uri or "-",
         " subreq_status=", fields.subreq_status or "-",
+        " subreq_location=", fields.subreq_location or "-",
+        " decision_source=", fields.decision_source or "-",
         " decision_reason=", fields.decision_reason or "-",
         " target=", fields.target or "-")
 end
@@ -53,32 +56,48 @@ local function is_panel_sensitive(uri, method)
 end
 
 local function query_decision_api()
-    local res = ngx.location.capture("/__cfm_panel_decide")
+    local subreq_uri = "/__cfm_panel_decide"
+    local res = ngx.location.capture(subreq_uri)
     if not res then
-        return { outcome = "backend_unavailable", reason = "subrequest_nil", subreq_status = "-" }
+        return { outcome = "backend_unavailable", reason = "subrequest_nil", subreq_uri = subreq_uri, subreq_status = "-", decision_source = "transport" }
     end
+
     local status = tonumber(res.status) or 0
+    local status_s = tostring(status)
+    local headers = res.header or {}
+    local location = headers["Location"] or headers["location"] or "-"
+
     if status >= 500 then
-        return { outcome = "backend_unavailable", reason = "subrequest_5xx", subreq_status = tostring(status) }
+        return { outcome = "backend_unavailable", reason = "subrequest_5xx", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
     end
+
+    if status >= 300 and status < 400 then
+        return { outcome = "redirect", reason = "subrequest_redirect", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
+    end
+
     if status == 204 then
-        return { outcome = "allow", reason = "backend_allow_204", subreq_status = tostring(status) }
+        return { outcome = "allow", reason = "backend_allow_204", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
     end
+
     if status < 200 or status >= 300 then
-        return { outcome = "backend_unavailable", reason = "subrequest_non_2xx", subreq_status = tostring(status) }
+        return { outcome = "invalid_response", reason = "subrequest_unexpected_status", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
     end
 
     local body = ((res.body or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
-    if body == "allow" or body == '{"decision":"allow"}' then
-        return { outcome = "allow", reason = "backend_allow", subreq_status = tostring(status) }
+    local parsed = body:match('"decision"%s*:%s*"([a-z_%-]+)"')
+    local decision = parsed or body
+
+    if decision == "allow" then
+        return { outcome = "allow", reason = "backend_allow", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
     end
-    if body == "challenge" or body == '{"decision":"challenge"}' then
-        return { outcome = "challenge", reason = "backend_challenge", subreq_status = tostring(status) }
+    if decision == "challenge" then
+        return { outcome = "challenge", reason = "backend_challenge", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
     end
-    if body == "deny" or body == '{"decision":"deny"}' then
-        return { outcome = "deny", reason = "backend_deny", subreq_status = tostring(status) }
+    if decision == "deny" then
+        return { outcome = "deny", reason = "backend_deny", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
     end
-    return { outcome = "backend_unavailable", reason = "invalid_payload", subreq_status = tostring(status) }
+
+    return { outcome = "invalid_response", reason = "invalid_payload", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
 end
 
 local uri = ngx.var.uri or "/"
@@ -119,7 +138,7 @@ if needs_challenge then
     if decision.outcome == "allow" then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_allow", decision_reason = decision.reason, subreq_status = decision.subreq_status, target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_allow", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = origin })
         return
     end
 
@@ -127,24 +146,34 @@ if needs_challenge then
         if fail_mode == "fail-open" then
             ngx.var.cfm_pass = origin
             ngx.var.cfm_upstream = "cfm_panel_failopen"
-            decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_error_fail_open", decision_reason = decision.reason, subreq_status = decision.subreq_status, target = origin })
+            decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_error_fail_open", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = origin })
             return
         end
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_error_fail_closed", decision_reason = decision.reason, subreq_status = decision.subreq_status, target = "-" })
+        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_error_fail_closed", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
         return ngx.exit(ngx.HTTP_FORBIDDEN)
     end
 
+
+    if decision.outcome == "redirect" then
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "subrequest_redirect_not_allowed", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+
+    if decision.outcome == "invalid_response" then
+        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_invalid_response", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
     if decision.outcome == "challenge" then
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_required", decision_reason = decision.reason, subreq_status = decision.subreq_status, target = "-" })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_required", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
         return ngx.exit(ngx.HTTP_FORBIDDEN)
     end
 
     if decision.outcome == "deny" then
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_deny", decision_reason = decision.reason, subreq_status = decision.subreq_status, target = "-" })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_deny", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
         return ngx.exit(ngx.HTTP_FORBIDDEN)
     end
 
-    decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "unknown_decision", decision_reason = decision.reason or "-", subreq_status = decision.subreq_status or "-", target = "-" })
+    decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "unknown_decision", decision_reason = decision.reason or "-", subreq_uri = decision.subreq_uri or "-", subreq_status = decision.subreq_status or "-", subreq_location = decision.subreq_location or "-", decision_source = decision.decision_source or "-", target = "-" })
     return ngx.exit(ngx.HTTP_FORBIDDEN)
 end
 
