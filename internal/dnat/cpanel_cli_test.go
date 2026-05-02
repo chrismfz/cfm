@@ -143,6 +143,34 @@ func TestInvalidChallengeModeRejected(t *testing.T) {
 	}
 }
 
+func TestPanelStatusSnapshotOmitsRecentHitFields(t *testing.T) {
+	out, _ := captureStreams(t, func() {
+		code := runPanelCLI([]string{"status"}, nil)
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
+		}
+	})
+	for _, forbidden := range []string{
+		"Recent listener hits (last 15m, from access log ingestion):",
+		"recent_hits_15m=",
+		"last_seen=",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("status output unexpectedly contained %q\n%s", forbidden, out)
+		}
+	}
+	for _, required := range []string{
+		"Port 12083 listener=",
+		"firewall=",
+		"Bridge socket (/var/run/cfm/cfm_nginx.sock):",
+		"Ingest socket (/run/cfm/ingest.sock):",
+	} {
+		if !strings.Contains(out, required) {
+			t.Fatalf("status output missing %q\n%s", required, out)
+		}
+	}
+}
+
 
 func TestChallengeShortcutRejectsUnknown(t *testing.T) {
 	_, errOut := captureStreams(t, func() {
