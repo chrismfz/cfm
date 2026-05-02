@@ -440,7 +440,16 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		fw := panelFirewallState()
 		h := getPanelFirewallHealth()
+		fsState := getPanelFailSafeState()
 		fmt.Printf("Firewall state: %s\n", h.State)
+		fmt.Printf("Panel failsafe enabled: %t\n", fsState.Enabled)
+		fmt.Printf("Panel failsafe consecutive failures: %d\n", fsState.ConsecutiveFails)
+		if !fsState.LastActionAt.IsZero() {
+			fmt.Printf("Panel failsafe last action: %s\n", fsState.LastActionAt.Format(time.RFC3339))
+		}
+		if fsState.LastActionReason != "" {
+			fmt.Printf("Panel failsafe last reason: %s\n", fsState.LastActionReason)
+		}
 		if h.LastReason != "" {
 			fmt.Printf("Firewall last failure: %s\n", h.LastReason)
 		}

@@ -1094,6 +1094,7 @@ func runDaemon(args []string) {
 
 	// DNAT failsafe: if OpenResty ports die while DNAT is ON, turn it OFF.
 	dnat.StartFailSafe(ctx, be)
+	dnat.StartPanelFailSafe(ctx, be)
 
 	// ── Main tick loop ───────────────────────────────────────────────────────────
 	t := time.NewTicker(*interval)
