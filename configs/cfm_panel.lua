@@ -18,6 +18,9 @@ local function decision_log(level, fields)
         " decision_reason=", fields.decision_reason or "-",
         " allow_origin=", fields.allow_origin or "0",
         " challenge_issued=", fields.challenge_issued or "0",
+        " challenge_entry=", fields.challenge_entry or "0",
+        " challenge_solved=", fields.challenge_solved or "0",
+        " challenge_resume=", fields.challenge_resume or "0",
         " deny_fail_closed=", fields.deny_fail_closed or "0",
         " target=", fields.target or "-")
 end
@@ -117,7 +120,7 @@ local function issue_challenge(mode, reason, decision, cooldown_ttl)
         mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ip = ngx.var.remote_addr,
         decision = "challenge", reason = reason, decision_reason = decision and decision.reason or "-",
         subreq_uri = decision and decision.subreq_uri or "-", subreq_status = decision and decision.subreq_status or "-", subreq_location = decision and decision.subreq_location or "-", decision_source = decision and decision.decision_source or "-",
-        allow_origin = "0", challenge_issued = "1", deny_fail_closed = "0", target = loc,
+        allow_origin = "0", challenge_issued = "1", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", deny_fail_closed = "0", target = loc,
     })
     return ngx.redirect(loc, ngx.HTTP_TEMPORARY_REDIRECT)
 end
@@ -146,7 +149,7 @@ end
 
 local function has_clearance_cookie()
     local cookie = ngx.var.http_cookie or ""
-    return cookie:find("cfm_clearance=", 1, true) or cookie:find("cf_clearance=", 1, true) or cookie:find("cp_security_token=", 1, true)
+    return cookie:find("cfm_ok=", 1, true) or cookie:find("cfm_clearance=", 1, true) or cookie:find("cf_clearance=", 1, true) or cookie:find("cp_security_token=", 1, true)
 end
 
 local function is_exempt_path(uri)
@@ -257,13 +260,13 @@ if mode == "forced" then
         mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
         return
     end
     if has_bypass_ttl(ngx.var.remote_addr) then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
         return
     end
     if cooldown_active(ngx.var.remote_addr) then
