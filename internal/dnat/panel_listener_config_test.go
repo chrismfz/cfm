@@ -15,7 +15,7 @@ func TestPanelListenerConfig_HasLuaGuardAndNoDefaultBypass(t *testing.T) {
 	if strings.Count(s, "server {") < 3 {
 		t.Fatalf("expected server blocks")
 	}
-	for _, tok := range []string{"set $cfm_panel_challenge_mode", "access_by_lua_file /etc/angie/lua/cfm_panel.lua", "proxy_pass $cfm_pass", "set $cfm_pass \"\";"} {
+	for _, tok := range []string{"set $cfm_panel_challenge_mode", "access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua", "proxy_pass $cfm_pass", "set $cfm_pass \"\";"} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing token %q", tok)
 		}

@@ -89,7 +89,7 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 func TestChallengeModeFromActiveConfig(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := filepath.Join(tmp, "cfm-panel-listeners.conf")
-	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /etc/angie/lua/cfm_panel.lua; }`
+	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

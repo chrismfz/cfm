@@ -536,7 +536,7 @@ validate_shared_lua_runtime() {
     if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
     fi
-    if rg -n '/usr/local/openresty/nginx/lua/(cfm|log-cfm|sslcollector)' /usr/local/openresty/nginx/conf/nginx.conf /usr/local/openresty/nginx/conf/cfm-panel-listeners.conf >/dev/null 2>&1; then
+    if rg -n '/(etc/angie|usr/local/openresty/nginx)/lua/(cfm(_panel)?|cfm_rules|cfm_stats|cfm_waf|cfm_clamav|cfm_cache_log|log-cfm|sslcollector)\.lua' /usr/local/openresty/nginx/conf/nginx.conf /usr/local/openresty/nginx/conf/cfm-panel-listeners.conf >/dev/null 2>&1; then
         die "Detected legacy OpenResty Lua path references in deployed config files"
     fi
 }
