@@ -9,13 +9,84 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096, 2222: 12222}
 var panelTargetPorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
+
+var challengeHTTPPortRe = regexp.MustCompile(`(?:^|\s)port=(\d+)`)
+
+type panelPortAccessStats struct {
+	HitsRecent           map[int]int
+	LastSeenByPort       map[int]time.Time
+	XferRedirect2083Seen bool
+}
+
+func readPanelPortAccessStats(path string, now time.Time, recentWindow time.Duration) panelPortAccessStats {
+	stats := panelPortAccessStats{HitsRecent: map[int]int{}, LastSeenByPort: map[int]time.Time{}}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return stats
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "[challenge_http]") {
+			continue
+		}
+		if strings.Contains(line, "uri=/xfercpanel") || strings.Contains(line, "uri=/xfercpsess") {
+			if strings.Contains(line, "host=") && strings.Contains(line, ":2083") {
+				stats.XferRedirect2083Seen = true
+			}
+		}
+		m := challengeHTTPPortRe.FindStringSubmatch(line)
+		if len(m) != 2 {
+			continue
+		}
+		port, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if !isPanelTargetPort(port) {
+			continue
+		}
+		ts, ok := parseChallengeHTTPLineTime(line)
+		if !ok {
+			continue
+		}
+		if ts.After(stats.LastSeenByPort[port]) {
+			stats.LastSeenByPort[port] = ts
+		}
+		if now.Sub(ts) <= recentWindow {
+			stats.HitsRecent[port]++
+		}
+	}
+	return stats
+}
+
+func parseChallengeHTTPLineTime(line string) (time.Time, bool) {
+	if len(line) < len("2006-01-02 15:04:05") {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation("2006-01-02 15:04:05", line[:19], time.UTC)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+func isPanelTargetPort(port int) bool {
+	for _, p := range panelTargetPorts {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
 
 type panelOpts struct {
 	mode      string
