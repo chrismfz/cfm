@@ -430,6 +430,10 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
+		if err := reloadPanelListenerService(); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
+			return 1
+		}
 		setPanelFirewallHealth("OK", "", true)
 		if err := panelOn(*priority); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
@@ -479,7 +483,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		} else {
 			fmt.Println("State: OFF")
 		}
-		panelMode, luaLoaded := panelListenerGuardState()
+		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted
@@ -489,14 +493,17 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 				challengeSource = "config default"
 			}
 		} else {
-			challengeSource = "runtime flag"
+			challengeSource = "active listener config"
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		enforced := panelMode == *challenge && challengeSource == "active listener config"
 		fmt.Printf("Challenge mode: %s\n", panelMode)
 		fmt.Printf("Challenge mode requested (CLI): %s\n", *challenge)
-		fmt.Printf("Challenge mode source (runtime flag vs config default): %s\n", challengeSource)
+		fmt.Printf("Challenge mode source: %s\n", challengeSource)
+		if modePath != "" {
+			fmt.Printf("Challenge mode active file: %s\n", modePath)
+		}
 		fmt.Printf("Challenge mode enforced in active listener config: %t\n", enforced)
 		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
 		fmt.Printf("Panel Lua guard path: %s\n", panelLua.Path)

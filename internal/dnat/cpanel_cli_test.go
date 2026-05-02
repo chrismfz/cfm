@@ -109,12 +109,15 @@ func TestChallengeModeFromActiveConfig(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mode, loaded := panelListenerGuardStateFromPaths([]string{cfg})
+	mode, loaded, path := panelListenerGuardStateFromPaths([]string{cfg})
 	if mode != "guard-only" {
 		t.Fatalf("mode=%q", mode)
 	}
 	if !loaded {
 		t.Fatalf("expected lua guard loaded")
+	}
+	if path != cfg {
+		t.Fatalf("path=%q", path)
 	}
 }
 

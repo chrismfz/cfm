@@ -223,10 +223,11 @@ func detectedImunifyMappings() []string {
 
 func panelListenerGuardState() (string, bool) {
 	paths := []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}
-	return panelListenerGuardStateFromPaths(paths)
+	mode, loaded, _ := panelListenerGuardStateFromPaths(paths)
+	return mode, loaded
 }
 
-func panelListenerGuardStateFromPaths(paths []string) (string, bool) {
+func panelListenerGuardStateFromPaths(paths []string) (string, bool, string) {
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -244,9 +245,34 @@ func panelListenerGuardStateFromPaths(paths []string) (string, bool) {
 			}
 		}
 		loaded := strings.Contains(s, "access_by_lua_file") && strings.Contains(s, "cfm_panel.lua")
-		return mode, loaded
+		return mode, loaded, p
 	}
-	return "unknown", false
+	return "unknown", false, ""
+}
+
+func reloadPanelListenerService() error {
+	candidates := [][]string{
+		{"systemctl", "reload", "angie"},
+		{"service", "angie", "reload"},
+		{"systemctl", "restart", "angie"},
+		{"service", "angie", "restart"},
+		{"systemctl", "reload", "openresty"},
+		{"service", "openresty", "reload"},
+		{"systemctl", "restart", "openresty"},
+		{"service", "openresty", "restart"},
+	}
+	var lastErr error
+	for _, c := range candidates {
+		if err := execCommand(c[0], c[1:]...).Run(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		return fmt.Errorf("no angie/openresty service command candidates")
+	}
+	return fmt.Errorf("reload/restart listener service failed: %w", lastErr)
 }
 
 type panelLuaGuardStatus struct {
