@@ -153,7 +153,7 @@ local function has_clearance_cookie()
 end
 
 local function is_exempt_path(uri)
-    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/.well-known/")
+    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or uri == "/__cfm_verify" or starts_with(uri, "/.well-known/")
 end
 
 local function next_points_to_challenge()
@@ -278,10 +278,17 @@ if is_api and api_auth then
     return
 end
 
+if uri == "/__cfm_verify" then
+    ngx.var.cfm_pass = origin
+    ngx.var.cfm_upstream = "cfm_panel_origin"
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "verify_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
+    return
+end
+
 if is_challenge_flow_request(uri) then
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_flow_bypass", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
     return
 end
 
