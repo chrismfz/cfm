@@ -337,17 +337,29 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	switch sub {
 	case "on":
 		if err := panelOn(*priority); err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err); return 1 }
-		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority); return 0
+		changes, err := ensurePanelAllowlist()
+		if err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel on firewall failed:", err); return 1 }
+		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority)
+		if len(changes)==0 { fmt.Println("Firewall: no changes") } else { for _, ch := range changes { fmt.Println("Firewall:", ch) } }
+		return 0
 	case "off":
 		if err := exec.Command("nft","delete","table","inet","cfm_panel_redirect").Run(); err != nil { }
-		fmt.Println("DNAT cpanel: OFF"); return 0
+		changes, err := removePanelAllowlist()
+		if err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err); return 1 }
+		fmt.Println("DNAT cpanel: OFF")
+		if len(changes)==0 { fmt.Println("Firewall: no changes") } else { for _, ch := range changes { fmt.Println("Firewall:", ch) } }
+		return 0
 	case "status":
 		on, rules, _ := panelStatus()
 		fmt.Println("DNAT table: inet cfm_panel_redirect")
 		if on { fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected) } else { fmt.Println("State: OFF") }
+		fw := panelFirewallState()
 		fmt.Printf("Detected Imunify mappings: %s\n", strings.Join(detectedImunifyMappings(), ", "))
 		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096, 2222->12222")
 		if on { fmt.Println("Generated nft rules:"); fmt.Print(rules) }
+		for _, tp := range panelTargetPorts {
+			fmt.Printf("Port %d listener=%s firewall=%s\n", tp, panelListenerState(tp), fw[tp])
+		}
 		if selected == "fallback" && len(detectedImunifyMappings())>0 { fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.") }
 		return 0
 	default:

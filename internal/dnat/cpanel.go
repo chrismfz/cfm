@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096, 2222: 12222}
+var panelTargetPorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
 
 type panelOpts struct{ mode string; priority int; challenge string }
 
@@ -39,6 +42,15 @@ func panelOn(priority int) error {
 	in, _ := c.StdinPipe()
 	go func() { _, _ = io.WriteString(in, s); _ = in.Close() }()
 	return c.Run()
+}
+
+func panelListenerState(port int) string {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+	if err != nil {
+		return "down"
+	}
+	_ = conn.Close()
+	return "listening"
 }
 
 func detectedImunifyMappings() []string {
