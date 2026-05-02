@@ -439,6 +439,7 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
         "$conf_dir/trusted_proxies.conf"
+    # Panel listener scaffold includes HTTPS fallback certificates in :12083/:12087/:12096 blocks.
     backup_and_copy_file "/usr/share/cfm/configs/angie-cfm-panel-listeners.conf" \
         "$conf_dir/cfm-panel-listeners.conf"
 
