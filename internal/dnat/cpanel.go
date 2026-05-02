@@ -96,8 +96,36 @@ type panelOpts struct {
 
 const defaultPanelChallengeMode = "guard-only"
 
-var supportedPanelChallengeModes = []string{defaultPanelChallengeMode}
+var supportedPanelChallengeModes = []string{"off", defaultPanelChallengeMode, "forced"}
 var panelChallengeModeStatePath = "/var/lib/cfm/panel_challenge_mode"
+
+func panelChallengeModeChoices() string {
+	return strings.Join(supportedPanelChallengeModes, "|")
+}
+
+func setPanelChallengeModeInConfig(content, mode string) string {
+	return strings.ReplaceAll(content, `set $cfm_panel_challenge_mode "guard-only";`, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, mode))
+}
+
+func applyPanelChallengeModeToPaths(mode string, paths []string) error {
+	if !isSupportedPanelChallengeMode(mode) {
+		return fmt.Errorf("unsupported challenge mode %q (supported: %s)", mode, strings.Join(supportedPanelChallengeModes, ", "))
+	}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		updated := setPanelChallengeModeInConfig(string(b), mode)
+		if updated == string(b) {
+			continue
+		}
+		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+			return fmt.Errorf("update %s: %w", path, err)
+		}
+	}
+	return nil
+}
 
 func isSupportedPanelChallengeMode(mode string) bool {
 	for _, m := range supportedPanelChallengeModes {
