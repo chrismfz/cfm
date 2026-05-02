@@ -154,8 +154,13 @@ type panelLuaGuardStatus struct {
 	Path      string
 	Exists    bool
 	Readable  bool
-	LoadOK    bool
+	LoadState string
 	LoadError string
+}
+
+func cmdExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func panelLuaGuardPath() string {
@@ -204,15 +209,50 @@ func checkPanelLuaGuard(path string) panelLuaGuardStatus {
 			cmdPath = abs
 		}
 	}
-	out, err := exec.Command("luajit", "-bl", cmdPath).CombinedOutput()
-	if err == nil {
-		st.LoadOK = true
+	st.LoadState = "unknown"
+	if cmdExists("luajit") {
+		out, err := exec.Command("luajit", "-bl", cmdPath).CombinedOutput()
+		if err == nil {
+			st.LoadState = "true"
+			return st
+		}
+		st.LoadState = "false"
+		st.LoadError = strings.TrimSpace(string(out))
+		if st.LoadError == "" {
+			st.LoadError = err.Error()
+		}
 		return st
 	}
-	st.LoadError = strings.TrimSpace(string(out))
-	if st.LoadError == "" {
-		st.LoadError = err.Error()
+	if cmdExists("resty") {
+		out, err := exec.Command("resty", "-e", "assert(loadfile(arg[1]))", cmdPath).CombinedOutput()
+		if err == nil {
+			st.LoadState = "true"
+			return st
+		}
+		st.LoadState = "false"
+		st.LoadError = strings.TrimSpace(string(out))
+		if st.LoadError == "" {
+			st.LoadError = err.Error()
+		}
+		return st
 	}
+	for _, probe := range []string{"angie", "openresty"} {
+		if !cmdExists(probe) {
+			continue
+		}
+		out, err := exec.Command(probe, "-t").CombinedOutput()
+		if err == nil {
+			st.LoadError = "interpreter unavailable; relying on " + probe + " -t"
+			return st
+		}
+		st.LoadState = "false"
+		st.LoadError = strings.TrimSpace(string(out))
+		if st.LoadError == "" {
+			st.LoadError = err.Error()
+		}
+		return st
+	}
+	st.LoadError = "interpreter unavailable; no angie/openresty config test found"
 	return st
 }
 

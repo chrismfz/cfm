@@ -434,7 +434,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 				fmt.Printf("Panel Lua worker read check error: %s\n", workerErr)
 			}
 		}
-		fmt.Printf("Panel Lua load check: %t\n", panelLua.LoadOK)
+		fmt.Printf("Panel Lua load check: %s\n", panelLua.LoadState)
 		if panelLua.LoadError != "" {
 			fmt.Printf("Panel Lua load check error: %s\n", panelLua.LoadError)
 		}
