@@ -46,20 +46,19 @@ func TestOffCleanupStatusesReported(t *testing.T) {
 	}
 }
 
-func TestPanelLuaDecisionEndpoint302IsDenied(t *testing.T) {
+func TestPanelLuaDecisionEndpoint302IssuesChallenge(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
 	s := string(b)
 
-	// Current behavior for /__cfm_panel_decide HTTP 302 is to classify as redirect
-	// and deny with subrequest_redirect_not_allowed.
+	// /__cfm_panel_decide HTTP 302 should issue a browser-visible challenge redirect.
 	for _, tok := range []string{
 		"if status >= 300 and status < 400 then",
 		`outcome = "redirect"`,
 		`reason = "subrequest_redirect"`,
-		`reason = "subrequest_redirect_not_allowed"`,
+		`return issue_challenge(mode, "challenge_redirect", decision)`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing 302 handling token %q", tok)
@@ -85,5 +84,44 @@ func TestPanelLuaDecisionLogAnchorsRedirectStatusSignature(t *testing.T) {
 	}
 	if !strings.Contains(s, `reason = "subrequest_redirect"`) {
 		t.Fatalf("expected explicit redirect reason for 302 status")
+	}
+}
+
+func TestPanelLuaPolicy_GuardOnlySensitiveFlowAnchors(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`if mode == "guard-only" then`,
+		`needs_challenge = is_panel_sensitive(uri, method)`,
+		`if mode == "guard-only" and is_panel_sensitive(uri, method) then`,
+		`return issue_challenge(mode, "backend_error_fail_closed_challenge", decision)`,
+		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess")`,
+		`if method == "POST" then return true end`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing guard-only sensitive flow token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaPolicy_OutcomeLogFieldsPresent(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`" allow_origin=", fields.allow_origin or "0"`,
+		`" challenge_issued=", fields.challenge_issued or "0"`,
+		`" deny_fail_closed=", fields.deny_fail_closed or "0"`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing log outcome field token %q", tok)
+		}
 	}
 }
