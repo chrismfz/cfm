@@ -337,22 +337,20 @@ ensure_log_dir_ownership() {
 }
 
 detect_cert_dir() {
-    if [ -d "/etc/angie" ]; then
-        printf '%s\n' "/etc/angie/selfsigned"
-    else
-        return 1
-    fi
+    printf '%s\n' "/var/lib/cfm/certs/selfsigned"
 }
 
 create_default_certs_if_missing() {
     local cert_dir
-    cert_dir="$(detect_cert_dir)" || die "Angie conf directory not found"
+    cert_dir="$(detect_cert_dir)"
 
     local cert_file="$cert_dir/fullchain.pem"
     local key_file="$cert_dir/privkey.pem"
 
     if [ -s "$cert_file" ] && [ -s "$key_file" ]; then
         log "Default certs already present: $cert_file and $key_file"
+        chown root:cfm "$cert_file" "$key_file"
+        chmod 0640 "$cert_file" "$key_file"
         return 0
     fi
 
@@ -365,6 +363,27 @@ create_default_certs_if_missing() {
         -subj "/C=GR/ST=State/L=City/O=Angie/CN=localhost"
 
     log "Created: $cert_file and $key_file"
+    chown root:cfm "$cert_file" "$key_file"
+    chmod 0640 "$cert_file"
+    chmod 0640 "$key_file"
+}
+
+validate_fallback_cert_preflight() {
+    local cert_dir cert_file key_file key_mode
+    cert_dir="$(detect_cert_dir)"
+    cert_file="$cert_dir/fullchain.pem"
+    key_file="$cert_dir/privkey.pem"
+
+    [ -r "$cert_file" ] || die "Fallback cert missing/unreadable: $cert_file"
+    [ -r "$key_file" ] || die "Fallback key missing/unreadable: $key_file"
+    su -s /bin/sh -c "test -r '$cert_file' && test -r '$key_file'" cfm >/dev/null 2>&1 || \
+        die "Fallback cert/key are not readable by cfm group: $cert_dir"
+
+    key_mode="$(stat -c '%a' "$key_file")"
+    if [ $(( key_mode % 10 )) -ne 0 ]; then
+        die "Fallback key is world-readable; expected mode 0640/0600: $key_file ($key_mode)"
+    fi
+    log "Fallback cert preflight passed: $cert_file / $key_file"
 }
 
 ensure_lua_dir() {
@@ -557,7 +576,7 @@ Pre-flight status:
   Temp dirs (cfm:cfm):      /var/lib/cfm/nginx/{client_body_temp,proxy_temp}
   Log dir (cfm:cfm):        /var/log/angie/
   Cache dirs (cfm:cfm):     /var/cache/angie/cfm_{static,micro}
-  Self-signed fallback:     /etc/angie/selfsigned/{fullchain,privkey}.pem
+  Self-signed fallback:     /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem
   CFM lua deployed:         /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/
   angie.conf deployed:      $([ $deployed -eq 1 ] && echo yes || echo "NO — see below")
@@ -625,6 +644,7 @@ main() {
 
     # 3. Angie-specific setup
     create_default_certs_if_missing
+    validate_fallback_cert_preflight
     ensure_lua_dir
     ensure_cache_dirs
     deploy_cfm_files

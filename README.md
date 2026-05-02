@@ -597,7 +597,7 @@ they differ in a few practical places:
 | Adds distro repo | OpenResty official (openresty.org) | Angie official (angie.software) |
 | Core packages | `openresty`, `openresty-openssl3`, `openresty-opm` | `angie`, `angie-module-lua` (pulls `angie-module-ndk`) |
 | Extra resty libs | Fetched at install time via `opm get` (`lua-resty-http`, `lua-resty-string`, `lua-resty-maxminddb`) | Bundled in `angie-module-lua` except `lua-resty-maxminddb`, which the script `git clone`s into `/etc/angie/lualib/resty/` |
-| Self-signed fallback cert | `/usr/local/openresty/nginx/conf/selfsigned/` | `/etc/angie/selfsigned/` |
+| Self-signed fallback cert | `/var/lib/cfm/certs/selfsigned/` | `/var/lib/cfm/certs/selfsigned/` |
 | Temp / cache dir chown | Inherited from OpenResty package (usually fine) | Explicit chown of `/var/lib/cfm/nginx/*`, `/var/log/angie/`, `/var/cache/angie/*` to `cfm:cfm` (since the Angie package creates log dirs as `angie:angie` by default) |
 | Config validation before deploy | `openresty -t -p <prefix> -c <src>` before copy | `angie -t -p /etc/angie -c <src>` before copy |
 | Idempotent (safe to re-run) | Yes | Yes |

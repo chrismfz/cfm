@@ -42,7 +42,7 @@ check_file() {
   ' "$conf"
 }
 
-check_file "configs/angie-cfm-panel-listeners.conf" "/etc/angie/selfsigned"
-check_file "configs/openresty-cfm-panel-listeners.conf" "/usr/local/openresty/nginx/selfsigned"
+check_file "configs/angie-cfm-panel-listeners.conf" "/var/lib/cfm/certs/selfsigned"
+check_file "configs/openresty-cfm-panel-listeners.conf" "/var/lib/cfm/certs/selfsigned"
 
 echo "OK: all listen ... ssl panel server blocks have fallback cert directives and ssl_certificate_by_lua_block."
