@@ -110,3 +110,23 @@ assert_eq(out10.location, "/__cfm_challenge?next=%2F", "first hop must challenge
 local ngx11, out11 = run_case({ uri = "/", cookie = "cfm_ok=ok" }, shared_follow)
 assert_eq(out11, nil, "solved follow-up should pass through without redirect")
 assert_eq(ngx11.var.cfm_upstream, "cfm_panel_origin", "solved follow-up must route to panel origin")
+
+
+-- End-to-end forced flow: single redirect to challenge, single redirect back, then origin pass without loops
+local shared_e2e = {}
+local _, first_hop = run_case({ uri = "/", request_uri = "/" }, shared_e2e)
+assert_eq(first_hop.action, "redirect", "forced e2e first request should redirect")
+assert_eq(first_hop.location, "/__cfm_challenge?next=%2F", "forced e2e first hop should go to challenge with next")
+
+local ngx_challenge, challenge_hop = run_case({ uri = "/__cfm_challenge", request_uri = "/__cfm_challenge?next=%2F" }, shared_e2e)
+assert_eq(challenge_hop, nil, "challenge endpoint should proxy directly")
+assert_eq(ngx_challenge.var.cfm_upstream, "cfm_panel_origin", "challenge endpoint should be allowed to origin")
+
+local ngx_final, final_hop = run_case({ uri = "/", request_uri = "/", cookie = "cfm_ok=ok" }, shared_e2e)
+assert_eq(final_hop, nil, "forced e2e solved request should not redirect again")
+assert_eq(ngx_final.var.cfm_upstream, "cfm_panel_origin", "forced e2e solved request should pass to origin")
+local set_cookie = ngx_final.header and ngx_final.header["Set-Cookie"]
+assert_eq(type(set_cookie), "string", "forced solved request should refresh clearance cookie")
+if not set_cookie:find("cfm_ok=ok", 1, true) then
+  error("forced solved request did not refresh cfm_ok cookie", 2)
+end
