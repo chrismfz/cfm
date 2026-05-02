@@ -497,6 +497,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
+		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
 		challengeStatus := buildPanelChallengeStatus(*challenge, panelMode, luaLoaded)
 		fmt.Printf("Challenge mode requested (CLI): %s\n", challengeStatus.RequestedMode)
 		fmt.Printf("Challenge mode rendered (config): %s\n", challengeStatus.RenderedMode)
@@ -523,6 +524,16 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		fmt.Printf("Panel Lua load check: %s\n", panelLua.LoadState)
 		if panelLua.LoadError != "" {
 			fmt.Printf("Panel Lua load check error: %s\n", panelLua.LoadError)
+		}
+		fmt.Printf("Panel decision endpoint: %s\n", panelDecision.Status)
+		if panelDecision.Path != "" {
+			fmt.Printf("Panel decision endpoint file: %s\n", panelDecision.Path)
+		}
+		if panelDecision.Detail != "" {
+			fmt.Printf("Panel decision endpoint detail: %s\n", panelDecision.Detail)
+		}
+		if challengeStatus.EffectiveMode == "forced" && panelDecision.Status == "MISSING" {
+			fmt.Println("WARNING: challenge mode is forced, but /__cfm_panel_decide is missing; panel challenge cannot work until listener config is corrected and reloaded.")
 		}
 		fw := panelFirewallState()
 		h := getPanelFirewallHealth()

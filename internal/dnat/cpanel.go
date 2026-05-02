@@ -250,6 +250,35 @@ func panelListenerGuardStateFromPaths(paths []string) (string, bool, string) {
 	return "unknown", false, ""
 }
 
+type panelDecisionEndpointProbe struct {
+	Status string
+	Path   string
+	Detail string
+}
+
+func probePanelDecisionEndpoint(paths []string) panelDecisionEndpointProbe {
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		s := string(b)
+		hasExact := strings.Contains(s, "location = /__cfm_panel_decide")
+		hasLoose := strings.Contains(s, "location /__cfm_panel_decide")
+		if hasExact && !hasLoose {
+			return panelDecisionEndpointProbe{Status: "OK", Path: p}
+		}
+		if hasLoose && !hasExact {
+			return panelDecisionEndpointProbe{Status: "MISROUTED", Path: p, Detail: "non-exact location stanza detected; expected `location = /__cfm_panel_decide`"}
+		}
+		if !hasExact {
+			return panelDecisionEndpointProbe{Status: "MISSING", Path: p, Detail: "exact location stanza not found"}
+		}
+		return panelDecisionEndpointProbe{Status: "MISROUTED", Path: p, Detail: "conflicting endpoint stanzas detected"}
+	}
+	return panelDecisionEndpointProbe{Status: "MISSING", Detail: "listener config not found"}
+}
+
 func reloadPanelListenerService() error {
 	candidates := [][]string{
 		{"systemctl", "reload", "angie"},
