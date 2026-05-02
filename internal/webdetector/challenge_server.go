@@ -28,6 +28,7 @@ import (
 const (
 	verifyPath    = "/__cfm_verify" // new preferred endpoint
 	verifyPathOld = "/verify"       // legacy (keep during rollout)
+	challengePath = "/__cfm_challenge"
 )
 
 type ChallengeServer struct {
@@ -106,6 +107,78 @@ func newChallengeAccessLogger(path string) *challengeAccessLogger {
 		return nil
 	}
 	return &challengeAccessLogger{path: p}
+}
+
+func normalizeChallengeNext(raw string) string {
+	next := strings.TrimSpace(raw)
+	if next == "" {
+		return "/"
+	}
+	if len(next) > maxNextLen {
+		return "/"
+	}
+	decodeOnce := func(in string) string {
+		out, err := url.QueryUnescape(in)
+		if err != nil {
+			return in
+		}
+		return out
+	}
+	for i := 0; i < 4; i++ {
+		if strings.HasPrefix(next, "%2f") || strings.HasPrefix(next, "%2F") {
+			next = decodeOnce(next)
+		}
+		if !strings.HasPrefix(next, "/") {
+			return "/"
+		}
+		u, err := url.ParseRequestURI(next)
+		if err != nil {
+			return "/"
+		}
+		if u.Path == challengePath {
+			nested := strings.TrimSpace(u.Query().Get("next"))
+			if nested == "" {
+				return "/"
+			}
+			next = nested
+			continue
+		}
+		nested := strings.TrimSpace(u.Query().Get("next"))
+		if nested != "" && nestedChallengeTarget(nested) {
+			q := u.Query()
+			q.Del("next")
+			u.RawQuery = q.Encode()
+			next = u.RequestURI()
+		}
+		if len(next) > maxNextLen {
+			return "/"
+		}
+		return next
+	}
+	return "/"
+}
+
+func nestedChallengeTarget(raw string) bool {
+	v := strings.TrimSpace(raw)
+	for i := 0; i < 4; i++ {
+		if strings.HasPrefix(v, "%2f") || strings.HasPrefix(v, "%2F") {
+			d, err := url.QueryUnescape(v)
+			if err != nil {
+				break
+			}
+			v = d
+			continue
+		}
+		break
+	}
+	if !strings.HasPrefix(v, "/") {
+		return false
+	}
+	u, err := url.ParseRequestURI(v)
+	if err != nil {
+		return true
+	}
+	return u.Path == challengePath
 }
 func (l *challengeAccessLogger) close() {
 	if l == nil {
@@ -418,16 +491,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// This prevents false-positive abuse blocks on trusted/internal networks.
 		if ip := clientIP(r); ip != nil && s.shouldIgnoreIP(ip) {
 			host := cleanHost(r.Host)
-			next := r.URL.Query().Get("next")
-			if next == "" {
-				next = "/"
-			}
-			if !strings.HasPrefix(next, "/") {
-				next = "/"
-			}
-			if len(next) > maxNextLen {
-				next = "/"
-			}
+			next := normalizeChallengeNext(r.URL.Query().Get("next"))
 			s.autoSolveAndRelease(w, r, ip, host, next, "verify")
 			return
 		}
@@ -471,18 +535,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		ipStr = ip.String()
-		next := r.URL.Query().Get("next")
-		if next == "" {
-			next = "/"
-		}
-		// prevent open redirect
-		if !strings.HasPrefix(next, "/") {
-			next = "/"
-		}
-
-		if len(next) > maxNextLen {
-			next = "/"
-		}
+		next := normalizeChallengeNext(r.URL.Query().Get("next"))
 
 		// Require cookie + HMAC token
 		c, err := r.Cookie("cfm_chal")
@@ -652,7 +705,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				)
 
 				w.Header().Set("Cache-Control", "no-store")
-				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
+				http.Redirect(w, r, challengePath+"?next="+url.QueryEscape(normalizeChallengeNext(next)), http.StatusSeeOther) // 303
 				return
 			}
 
@@ -661,12 +714,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// Avoid browsers hitting /favicon.ico etc causing token/cookie churn.
-		// Always serve the challenge page from "/" only.
-		if r.URL.Path != "/" {
+		// Always serve the challenge page from canonical challenge paths only.
+		if r.URL.Path != "/" && r.URL.Path != challengePath {
 			next := r.URL.RequestURI()
 			w.Header().Set("Cache-Control", "no-store")
 
-			http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusFound)
+			http.Redirect(w, r, challengePath+"?next="+url.QueryEscape(normalizeChallengeNext(next)), http.StatusFound)
 			return
 		}
 		// let existing endpoints win (ServeMux does this anyway)
@@ -682,16 +735,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// next (single parse + sanitize; reused below)
-		next := r.URL.Query().Get("next")
-		if next == "" {
-			next = "/"
-		}
-		if !strings.HasPrefix(next, "/") {
-			next = "/"
-		}
-		if len(next) > maxNextLen {
-			next = "/"
-		}
+		next := normalizeChallengeNext(r.URL.Query().Get("next"))
 
 		// Global ignore: auto-solve + release (no challenge page, no abuse tracking).
 		if s.shouldIgnoreIP(ip) {
@@ -711,16 +755,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// If already solved (cookie present + token valid), release and redirect.
-		next = r.URL.Query().Get("next")
-		if next == "" {
-			next = "/"
-		}
-		if !strings.HasPrefix(next, "/") {
-			next = "/"
-		}
-		if len(next) > maxNextLen {
-			next = "/"
-		}
+		next = normalizeChallengeNext(r.URL.Query().Get("next"))
 
 		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
 		cookieVal := ""
