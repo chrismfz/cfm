@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const cpanelFWTag = "cfm_cpanel_dnat"
@@ -19,13 +20,61 @@ const (
 )
 
 func detectFWBackend() fwBackend {
-	if exec.Command("firewall-cmd", "--state").Run() == nil {
+	if execCommand("firewall-cmd", "--state").Run() == nil {
 		return fwFirewalld
 	}
-	if exec.Command("nft", "list", "ruleset").Run() == nil {
+	if execCommand("nft", "list", "ruleset").Run() == nil {
 		return fwNft
 	}
 	return fwUnknown
+}
+
+var execCommand = exec.Command
+
+type panelFirewallHealth struct {
+	State      string
+	LastReason string
+	Attempted  bool
+}
+
+var (
+	panelFWMu    sync.Mutex
+	panelFWState = panelFirewallHealth{State: "OK"}
+)
+
+func getPanelFirewallHealth() panelFirewallHealth {
+	panelFWMu.Lock()
+	defer panelFWMu.Unlock()
+	return panelFWState
+}
+
+func setPanelFirewallHealth(state, reason string, attempted bool) {
+	panelFWMu.Lock()
+	defer panelFWMu.Unlock()
+	panelFWState = panelFirewallHealth{State: state, LastReason: reason, Attempted: attempted}
+}
+
+type FirewallCommandError struct {
+	Backend fwBackend
+	Command string
+	Output  string
+	Err     error
+}
+
+func (e *FirewallCommandError) Error() string {
+	if strings.TrimSpace(e.Output) == "" {
+		return fmt.Sprintf("firewall backend=%s command=%q failed: %v", e.Backend, e.Command, e.Err)
+	}
+	return fmt.Sprintf("firewall backend=%s command=%q failed: %v; output=%s", e.Backend, e.Command, e.Err, strings.TrimSpace(e.Output))
+}
+
+func runFirewallCmd(backend fwBackend, name string, args ...string) error {
+	cmd := execCommand(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return &FirewallCommandError{Backend: backend, Command: name + " " + strings.Join(args, " "), Output: string(out), Err: err}
+	}
+	return nil
 }
 
 func ensurePanelAllowlist() ([]string, error) {
@@ -50,8 +99,8 @@ func removePanelAllowlist() ([]string, error) {
 }
 
 func ensureNftPorts() ([]string, error) {
-	_ = exec.Command("nft", "add", "table", "inet", "cfm").Run()
-	_ = exec.Command("nft", "add", "chain", "inet", "cfm", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}").Run()
+	_ = execCommand("nft", "add", "table", "inet", "cfm").Run()
+	_ = execCommand("nft", "add", "chain", "inet", "cfm", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}").Run()
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
 	changes := []string{}
 	for _, p := range panelTargetPorts {
@@ -60,11 +109,10 @@ func ensureNftPorts() ([]string, error) {
 			continue
 		}
 		cmd := fmt.Sprintf("add rule inet cfm input tcp dport %d ct state new accept comment \"%s:%d\"", p, cpanelFWTag, p)
-		if err := exec.Command("nft", "-f", "-").Run(); err != nil {
+		if err := execCommand("nft", "-f", "-").Run(); err != nil {
 			_ = cmd
 		}
-		c := exec.Command("nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("%s:%d", cpanelFWTag, p))
-		if err := c.Run(); err != nil {
+		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("%s:%d", cpanelFWTag, p)); err != nil {
 			return changes, err
 		}
 		changes = append(changes, fmt.Sprintf("opened tcp/%d (nft cfm/input)", p))
@@ -75,13 +123,26 @@ func ensureNftPorts() ([]string, error) {
 func removeNftPorts() ([]string, error) {
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
 	changes := []string{}
+	handles := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
 		port, h, ok := parseManagedRuleLine(line)
-		if !ok { continue }
-		if err := exec.Command("nft", "delete", "rule", "inet", "cfm", "input", "handle", h).Run(); err != nil {
-			return changes, err
+		if !ok {
+			continue
 		}
-		changes = append(changes, fmt.Sprintf("closed tcp/%s (nft handle %s)", port, h))
+		handles[port] = h
+	}
+	for _, p := range panelTargetPorts {
+		ps := strconv.Itoa(p)
+		h, ok := handles[ps]
+		if !ok {
+			changes = append(changes, fmt.Sprintf("tcp/%d not found", p))
+			continue
+		}
+		if err := runFirewallCmd(fwNft, "nft", "delete", "rule", "inet", "cfm", "input", "handle", h); err != nil {
+			changes = append(changes, fmt.Sprintf("tcp/%d failed (%v)", p, err))
+			continue
+		}
+		changes = append(changes, fmt.Sprintf("tcp/%d removed", p))
 	}
 	sort.Strings(changes)
 	return changes, nil
