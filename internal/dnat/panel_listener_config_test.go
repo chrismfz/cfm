@@ -92,9 +92,10 @@ func TestPanelLuaPolicy_QueryDecisionApiDoesNotMapAllNon5xxToDeny(t *testing.T) 
 
 	for _, tok := range []string{
 		"if status >= 500 then",
+		"if status >= 300 and status < 400 then",
 		"if status == 204 then",
 		"if status < 200 or status >= 300 then",
-		`return { outcome = "backend_unavailable", reason = "subrequest_non_2xx"`,
+		`return { outcome = "redirect", reason = "subrequest_redirect"`,
 		`return { outcome = "allow", reason = "backend_allow_204"`,
 	} {
 		if !strings.Contains(s, tok) {
