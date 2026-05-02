@@ -156,6 +156,27 @@ local function is_exempt_path(uri)
     return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/.well-known/")
 end
 
+local function next_points_to_challenge()
+    local args = ngx.req.get_uri_args()
+    local next_arg = args and args.next
+    if type(next_arg) == "table" then
+        next_arg = next_arg[1]
+    end
+    if type(next_arg) ~= "string" or next_arg == "" then
+        return false
+    end
+
+    local decoded = ngx.unescape_uri(next_arg):gsub("^%s+", ""):gsub("%s+$", "")
+    if decoded == "/__cfm_challenge" or starts_with(decoded, "/__cfm_challenge?") then
+        return true
+    end
+    return decoded:match("^https?://[^/]+/__cfm_challenge([/?#].*)?$") ~= nil
+end
+
+local function is_challenge_flow_request(uri)
+    return uri == "/__cfm_challenge" or next_points_to_challenge()
+end
+
 local function is_panel_sensitive(uri, method)
     if method == "POST" then return true end
     return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
@@ -236,6 +257,13 @@ if is_api and api_auth then
     ngx.var.cfm_upstream = "cfm_panel_api"
     local api_reason = is_directadmin_api and "api_authenticated_directadmin" or "api_authenticated"
     decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = api_reason, target = origin })
+    return
+end
+
+if is_challenge_flow_request(uri) then
+    ngx.var.cfm_pass = origin
+    ngx.var.cfm_upstream = "cfm_panel_origin"
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_flow_bypass", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
     return
 end
 
