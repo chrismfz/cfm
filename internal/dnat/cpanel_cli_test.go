@@ -40,6 +40,18 @@ func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
 	}
 }
 
+
+func TestChallengeShortcuts(t *testing.T) {
+	gotOn, err := normalizePanelArgs([]string{"on", "--challenge", "forced"})
+	if err != nil || strings.Join(gotOn, " ") != "on --challenge forced" {
+		t.Fatalf("unexpected normalize for forced: %v %v", gotOn, err)
+	}
+	gotOff, err := normalizePanelArgs([]string{"on", "--challenge", "off"})
+	if err != nil || strings.Join(gotOff, " ") != "on --challenge off" {
+		t.Fatalf("unexpected normalize for off: %v %v", gotOff, err)
+	}
+}
+
 func TestNormalizePanelArgs_RejectsUnknownKeyValue(t *testing.T) {
 	_, err := normalizePanelArgs([]string{"on", "foo=bar"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported key=value") {
@@ -56,6 +68,9 @@ func TestPanelHelpSnapshots(t *testing.T) {
 	})
 	for _, token := range []string{
 		"Commands: status, on, off",
+		"cfm dnat cpanel challenge on",
+		"cfm dnat cpanel challenge off",
+		"Migration: existing scripts using --challenge guard-only",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
 		"Challenge options: off, guard-only, forced (default: guard-only)",
@@ -125,6 +140,19 @@ func TestInvalidChallengeModeRejected(t *testing.T) {
 	})
 	if !strings.Contains(errOut, "unsupported challenge mode") {
 		t.Fatalf("expected validation error, got: %s", errOut)
+	}
+}
+
+
+func TestChallengeShortcutRejectsUnknown(t *testing.T) {
+	_, errOut := captureStreams(t, func() {
+		code := runPanelCLI([]string{"challenge", "maybe"}, nil)
+		if code != 2 {
+			t.Fatalf("expected code 2, got %d", code)
+		}
+	})
+	if !strings.Contains(errOut, "unknown challenge shortcut") {
+		t.Fatalf("expected shortcut validation error, got: %s", errOut)
 	}
 }
 

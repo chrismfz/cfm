@@ -1121,9 +1121,13 @@ CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftab
 
 Commands:
 - `cfm dnat cpanel status`
-- `cfm dnat cpanel on --mode auto --challenge guard-only`
-- `cfm dnat cpanel on --mode chain-imunify --priority -101 --challenge browser`
+- `cfm dnat cpanel on --mode auto --challenge guard-only` (full control)
+- `cfm dnat cpanel challenge on` (alias for `cfm dnat cpanel on --challenge forced`)
+- `cfm dnat cpanel challenge off` (alias for `cfm dnat cpanel on --challenge off`)
 - `cfm dnat cpanel off`
+
+Migration behavior:
+- Existing scripts using `--challenge guard-only` (or `challenge=guard-only`) remain unchanged.
 
 Modes:
 - `chain-imunify`: CFM catches panel ports first and proxies to detected Imunify/WebShield 522xx targets.

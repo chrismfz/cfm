@@ -359,6 +359,18 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		panelHelp()
 		return 0
 	}
+	if len(args) >= 2 && args[0] == "challenge" {
+		switch args[1] {
+		case "on":
+			args = append([]string{"on", "--challenge", "forced"}, args[2:]...)
+		case "off":
+			args = append([]string{"on", "--challenge", "off"}, args[2:]...)
+		default:
+			fmt.Fprintf(os.Stderr, "dnat cpanel: unknown challenge shortcut %q (use: cfm dnat cpanel challenge on|off)\n", args[1])
+			panelHelp()
+			return 2
+		}
+	}
 	args, err := normalizePanelArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -471,20 +483,20 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted
-				challengeSource = "runtime state"
+				challengeSource = "config default"
 			} else {
 				panelMode = defaultPanelChallengeMode
-				challengeSource = "default"
+				challengeSource = "config default"
 			}
 		} else {
-			challengeSource = "active listener config"
+			challengeSource = "runtime flag"
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		enforced := panelMode == *challenge && challengeSource == "active listener config"
 		fmt.Printf("Challenge mode: %s\n", panelMode)
-		fmt.Printf("Challenge mode requested: %s\n", *challenge)
-		fmt.Printf("Challenge mode source: %s\n", challengeSource)
+		fmt.Printf("Challenge mode requested (CLI): %s\n", *challenge)
+		fmt.Printf("Challenge mode source (runtime flag vs config default): %s\n", challengeSource)
 		fmt.Printf("Challenge mode enforced in active listener config: %t\n", enforced)
 		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
 		fmt.Printf("Panel Lua guard path: %s\n", panelLua.Path)
@@ -591,6 +603,8 @@ func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
 	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel challenge on   (alias for: cfm dnat cpanel on --challenge forced)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel challenge off  (alias for: cfm dnat cpanel on --challenge off)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel help")
 	fmt.Fprintln(os.Stderr, "")
@@ -598,6 +612,7 @@ func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
 	fmt.Fprintf(os.Stderr, "Challenge options: %s (default: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
+	fmt.Fprintln(os.Stderr, "Migration: existing scripts using --challenge guard-only (or challenge=guard-only) are unchanged.")
 	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority/challenge)")
 }
 
