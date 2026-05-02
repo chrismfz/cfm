@@ -22,6 +22,26 @@ local function decision_log(level, fields)
         " target=", fields.target or "-")
 end
 
+local function parse_socket_error(err)
+    local msg = tostring(err or "")
+    local path = msg:match("unix:([^:%s]+)")
+    if not path then
+        path = msg:match("connect%(%) to ([^%s]+) failed")
+    end
+    return path or "-", msg
+end
+
+local function should_emit_failopen_log()
+    local dict = ngx.shared and ngx.shared.cfm_stats
+    if not dict then return true end
+    local now = ngx.now and ngx.now() or os.time()
+    local key = "panel_failopen_log:last"
+    local last = tonumber(dict:get(key) or 0) or 0
+    if now-last < 30 then return false end
+    dict:set(key, now, 60)
+    return true
+end
+
 local function issue_challenge(mode, reason, decision)
     local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_panel_decide"
     local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
@@ -72,9 +92,10 @@ end
 
 local function query_decision_api()
     local subreq_uri = "/__cfm_panel_decide"
-    local res = ngx.location.capture(subreq_uri)
+    local res, err = ngx.location.capture(subreq_uri)
     if not res then
-        return { outcome = "backend_unavailable", reason = "subrequest_nil", subreq_uri = subreq_uri, subreq_status = "-", decision_source = "transport" }
+        local sock, detail = parse_socket_error(err)
+        return { outcome = "backend_unavailable", reason = "backend_unavailable", subreq_uri = subreq_uri, subreq_status = "-", subreq_location = "-", subreq_socket = sock, subreq_error = detail, decision_source = "transport" }
     end
 
     local status = tonumber(res.status) or 0
@@ -120,7 +141,7 @@ local method = ngx.req.get_method()
 local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or "guard-only"
-local fail_mode = ngx.var.cfm_panel_fail_mode or "fail-closed"
+local fail_mode = ngx.var.cfm_panel_fail_mode or "fail-open"
 
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
@@ -160,8 +181,10 @@ if needs_challenge then
     if decision.outcome == "backend_unavailable" then
         if fail_mode == "fail-open" then
             ngx.var.cfm_pass = origin
-            ngx.var.cfm_upstream = "cfm_panel_failopen"
-            decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_error_fail_open", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
+            ngx.var.cfm_upstream = "cfm_panel_origin"
+            if should_emit_failopen_log() then
+                decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_unavailable_fail_open", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = (decision.subreq_location or "-") .. " socket=" .. (decision.subreq_socket or "-") .. " error=" .. (decision.subreq_error or "-"), decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
+            end
             return
         end
         if mode == "guard-only" and is_panel_sensitive(uri, method) then
