@@ -1,5 +1,5 @@
-# cfm dnat cpanel listener template for OpenResty.
-# Install path: /usr/local/openresty/nginx/conf/cfm-panel-listeners.conf
+# cfm dnat cpanel listener template for @ENGINE@.
+# Install path: @LISTENER_DEST@
 
 # HTTPS panel listeners
 server {

@@ -423,6 +423,17 @@ backup_and_copy_file() {
     log "Copied: $src -> $dst"
 }
 
+render_panel_listener_template() {
+    local engine_name="$1"
+    local listener_dest="$2"
+    local src="/usr/share/cfm/configs/cfm-panel-listeners.conf.in"
+    local tmp
+    [ -f "$src" ] || die "panel listener template not found: $src"
+    tmp="$(mktemp)"
+    sed -e "s|@ENGINE@|${engine_name}|g" -e "s|@LISTENER_DEST@|${listener_dest}|g" "$src" > "$tmp"
+    printf '%s\n' "$tmp"
+}
+
 deploy_cfm_files() {
     local lua_dir
     local conf_dir
@@ -450,8 +461,10 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
         "$conf_dir/trusted_proxies.conf"
-    backup_and_copy_file "/usr/share/cfm/configs/openresty-cfm-panel-listeners.conf" \
-        "$conf_dir/cfm-panel-listeners.conf"
+    local listener_tpl
+    listener_tpl="$(render_panel_listener_template "OpenResty" "$conf_dir/cfm-panel-listeners.conf")"
+    backup_and_copy_file "$listener_tpl" "$conf_dir/cfm-panel-listeners.conf"
+    rm -f "$listener_tpl"
 
     backup_and_copy_file "/usr/share/cfm/configs/challenge_waf_bypass.conf" \
                          "$conf_dir/challenge_waf_bypass.conf"
