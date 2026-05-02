@@ -401,9 +401,25 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Println("State: OFF")
 		}
 		panelMode, luaLoaded := panelListenerGuardState()
+		panelLuaPath := panelLuaGuardPath()
+		panelLua := checkPanelLuaGuard(panelLuaPath)
 		fmt.Printf("Challenge mode: %s\n", panelMode)
 		fmt.Printf("Challenge mode source: %s\n", challengeSource)
 		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
+		fmt.Printf("Panel Lua guard path: %s\n", panelLua.Path)
+		fmt.Printf("Panel Lua exists: %t\n", panelLua.Exists)
+		fmt.Printf("Panel Lua readable: %t\n", panelLua.Readable)
+		if panelLua.Path != "" {
+			workerReadable, workerErr := panelLuaReadableByWorker(panelLua.Path)
+			fmt.Printf("Panel Lua readable by worker(cfm): %t\n", workerReadable)
+			if workerErr != "" {
+				fmt.Printf("Panel Lua worker read check error: %s\n", workerErr)
+			}
+		}
+		fmt.Printf("Panel Lua load check: %t\n", panelLua.LoadOK)
+		if panelLua.LoadError != "" {
+			fmt.Printf("Panel Lua load check error: %s\n", panelLua.LoadError)
+		}
 		fw := panelFirewallState()
 		h := getPanelFirewallHealth()
 		fmt.Printf("Firewall state: %s\n", h.State)
