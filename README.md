@@ -246,6 +246,7 @@ internal/
 ### `detectors.conf` — Detection engine
 - `[global]` defaults: `DEFAULT_EVERY`, `DEFAULT_TIMEOUT`, `DEFAULT_COOLDOWN`
 - Global ignores: `IGNORE_IPS`, `IGNORE_NETS`, `LOG_IGNORED`
+  - When panel routes use the shared `cfm_challenge` backend (`127.0.0.1:9098`), these global ignore lists affect both web and panel challenge decisions.
 - Per-detector sections: `[ssh_auth]`, `[mysql]`, `[mysql_governor]`, `[ftpd]`, `[cpanel]`, `[exim_*]`, `[dovecot_*]`, `[postfix_*]`, `[modsec]`, `[health]`, `[webdetector]`
 - API anomaly detector section: `[api_abuse]` (apiserver-origin anomalies with staged observe/challenge/block mitigation)
 - Webdetector history knobs live in `[webdetector]` here (not in `cfm.conf`): `HISTORY_ENABLED`, `HISTORY_DB_PATH`, `HISTORY_RETENTION_DAYS`, `HISTORY_PRUNE_EVERY`
@@ -1085,6 +1086,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 - When using `ssl_certificate_by_lua*` (OpenResty or Angie), cache aggressively (shared_dict + lock) and use tight timeouts.
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.
 - Keep API ports blocked by default in your host/network firewall (`6060` and `6061` in typical deployments). Only permit localhost or IPs present in allow lists (`cfm.allow`, `cfm.dyndns`, and trusted management ranges).
+- Avoid broad `IGNORE_IPS`/`IGNORE_NETS` entries (especially public cloud/customer subnets). Over-broad ignores bypass web and panel challenge flows when the shared challenge backend is active.
 - If `API_URL` is set, CFM auto-allows that endpoint IP so outbound/inbound API sync can function without opening API ports broadly.
 - `AUTH_TOKEN`-protected API access should be treated as local/trusted-only: token auth is expected to work from localhost and allowed IPs (including the resolved `API_URL` IP), not from arbitrary internet sources.
 - The `alter_user` action in `CONN_RULES` requires `GRANT CREATE USER`. This is a powerful privilege — scope it to `'cfm_governor'@'localhost'` only and use a strong password.

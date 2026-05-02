@@ -364,6 +364,9 @@ Options (overall top):
   --slimit N       rows under "Suspicious vhosts" (default 10)
   --json           output JSON of the main top table (suppresses the pretty table)
 
+Config safety notes:
+  - Avoid broad IGNORE_IPS/IGNORE_NETS (e.g., public cloud/customer CIDRs); they can bypass web and panel challenge decisions when shared challenge backend routing is enabled.
+
 
 Description:
   local nftables manager (block/allow with optional TTL),
