@@ -45,6 +45,38 @@ local CONNECT_MS   = 50
 local SEND_MS      = 50
 local KEEPALIVE_MS = 10000
 local POOL_SIZE    = 100
+local RETRY_MIN_SECS = 0.1
+local RETRY_MAX_SECS = 5
+
+local function retry_key(suffix)
+  return "cfm_log_sock:" .. suffix
+end
+
+local function should_skip_connect()
+  local dict = ngx.shared.cfm_metrics
+  if not dict then return false end
+  local until_ts = dict:get(retry_key("retry_after"))
+  return type(until_ts) == "number" and until_ts > ngx.now()
+end
+
+local function record_connect_failure(err)
+  local dict = ngx.shared.cfm_metrics
+  if not dict then return end
+  local fails = dict:incr(retry_key("fail_count"), 1, 0) or 1
+  local backoff = RETRY_MIN_SECS * (2 ^ math.min(fails-1, 6))
+  if backoff > RETRY_MAX_SECS then backoff = RETRY_MAX_SECS end
+  dict:set(retry_key("retry_after"), ngx.now() + backoff, backoff + 1)
+  if err and fails <= 3 then
+    ngx.log(ngx.WARN, "cfm log socket connect failed; backoff=", backoff, "s err=", err)
+  end
+end
+
+local function record_connect_success()
+  local dict = ngx.shared.cfm_metrics
+  if not dict then return end
+  dict:set(retry_key("fail_count"), 0, 60)
+  dict:delete(retry_key("retry_after"))
+end
 
 -- Sanitize a field so it cannot break the TSV contract: strip \t, \r, \n.
 local function clean(s)
@@ -67,12 +99,16 @@ local function send_line(premature, line)
   local sock = ngx.socket.tcp()
   sock:settimeouts(CONNECT_MS, SEND_MS, SEND_MS)
 
-  local ok, err = sock:connect("unix:" .. SOCK_PATH)
-  if not ok then
-    -- Socket absent / CFM down / permissions. Drop silently; a WARN here
-    -- would hit every request and drown the error log.
+  if should_skip_connect() then
     return
   end
+
+  local ok, err = sock:connect("unix:" .. SOCK_PATH)
+  if not ok then
+    record_connect_failure(err)
+    return
+  end
+  record_connect_success()
 
   local _, serr = sock:send(line)
   if serr then

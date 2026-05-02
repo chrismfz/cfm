@@ -1036,6 +1036,12 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	}
 
 	sockPath := b.cfg.SockPath
+	if dir := filepath.Dir(sockPath); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o750)
+		if gid := sslcollector.CfmGroupID(); gid > 0 {
+			_ = os.Chown(dir, 0, gid)
+		}
+	}
 	_ = os.Remove(sockPath)
 
 	ln, err := net.Listen("unix", sockPath)
