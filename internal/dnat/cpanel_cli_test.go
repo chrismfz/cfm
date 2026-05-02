@@ -3,6 +3,7 @@ package dnat
 import (
 	"bytes"
 	"io"
+	"os/exec"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,41 @@ func TestChallengeModeDefaultReflected(t *testing.T) {
 	}
 	if defaultPanelChallengeMode != "guard-only" {
 		t.Fatalf("unexpected default %q", defaultPanelChallengeMode)
+	}
+}
+
+func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "angie" {
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	t.Cleanup(func() { execCommand = origExec })
+
+	if err := applyPanelChallengeModeToPaths("forced", []string{listenerPath}); err != nil {
+		t.Fatalf("apply forced mode: %v", err)
+	}
+	mode, loaded, path := panelListenerGuardStateFromPaths([]string{listenerPath})
+	if mode != "forced" || !loaded || path != listenerPath {
+		t.Fatalf("listener guard state mismatch: mode=%q loaded=%v path=%q", mode, loaded, path)
+	}
+
+	if err := reloadPanelListenerService(); err != nil {
+		t.Fatalf("reload listener service: %v", err)
+	}
+	if len(calls) == 0 || calls[0] != "systemctl reload angie" {
+		t.Fatalf("expected first reload command to be Angie reload, got %v", calls)
 	}
 }
 
