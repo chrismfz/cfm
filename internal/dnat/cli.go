@@ -301,6 +301,16 @@ func help() {
 
 
 func runPanelCLI(args []string, backend firewall.Backend) int {
+	if len(args) > 0 && args[0] == "help" {
+		panelHelp()
+		return 0
+	}
+	args, err := normalizePanelArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		panelHelp()
+		return 2
+	}
 	fs := flag.NewFlagSet("dnat cpanel", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	mode := fs.String("mode", "auto", "mode")
@@ -311,7 +321,15 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		sub = args[0]
 		args = args[1:]
 	}
-	if err := fs.Parse(args); err != nil { return 2 }
+	if sub == "on" {
+		for _, a := range args {
+			if a == "--help" || a == "-h" {
+				panelOnHelp()
+				return 0
+			}
+		}
+	}
+	if err := fs.Parse(args); err != nil { panelHelp(); return 2 }
 	_ = challenge
 	selected := *mode
 	if selected == "auto" { if len(detectedImunifyMappings())>0 { selected = "chain-imunify" } else { selected = "direct-cpsrvd" } }
@@ -333,6 +351,52 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if selected == "fallback" && len(detectedImunifyMappings())>0 { fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.") }
 		return 0
 	default:
+		panelHelp()
 		return 2
 	}
+}
+
+func normalizePanelArgs(args []string) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "mode=") {
+			out = append(out, "--mode", strings.TrimPrefix(a, "mode="))
+			continue
+		}
+		if strings.HasPrefix(a, "priority=") {
+			out = append(out, "--priority", strings.TrimPrefix(a, "priority="))
+			continue
+		}
+		if strings.HasPrefix(a, "challenge=") {
+			out = append(out, "--challenge", strings.TrimPrefix(a, "challenge="))
+			continue
+		}
+		if strings.Contains(a, "=") && !strings.HasPrefix(a, "-") {
+			return nil, fmt.Errorf("dnat cpanel: unsupported key=value argument %q; use mode=, priority=, challenge=, or --flags", a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func panelHelp() {
+	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel help")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Commands: status, on, off")
+	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
+	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
+	fmt.Fprintln(os.Stderr, "Challenge options: guard-only (default)")
+	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority/challenge)")
+}
+
+func panelOnHelp() {
+	fmt.Fprintln(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
+	fmt.Fprintln(os.Stdout, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
+	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
+	fmt.Fprintln(os.Stdout, "Challenge options: guard-only (default)")
+	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101, --challenge guard-only")
 }
