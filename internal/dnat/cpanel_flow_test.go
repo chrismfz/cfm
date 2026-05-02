@@ -226,3 +226,52 @@ func TestPanelLuaXfercPanelRedirectAndcPanelSessionSensitivityAnchors(t *testing
 		}
 	}
 }
+
+func TestPanelLuaChallengeRedirectSanitizesInternalNextTargets(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local function sanitize_panel_next_target(raw_next, fallback)`,
+		`if c == "/__cfm_challenge" or starts_with(c, "/__cfm_challenge?") or starts_with(c, "/__cfm_challenge/") then return true end`,
+		`if c == "/__cfm_verify" or starts_with(c, "/__cfm_verify?") or starts_with(c, "/__cfm_verify/") then return true end`,
+		`local safe_next = sanitize_panel_next_target(req_uri, "/")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing sanitize token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaChallengeFlowStripsNestedEncodedNextChains(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local function strip_nested_next_chain(raw_next)`,
+		`if dk ~= "next" then`,
+		`args.next = strip_nested_next_chain(next_arg)`,
+		`local nested = sanitize_panel_next_target(value, "")`,
+	} {
+
+		encodedPayloads := []string{
+			"/__cfm_challenge?next=%252F__cfm_challenge%253Fnext%253D%25252Fadmin",
+			"/__cfm_verify?next=%252F__cfm_verify%253Fnext%253D%25252Fportal",
+		}
+		for _, payload := range encodedPayloads {
+			if strings.Count(payload, "next=") != 1 {
+				t.Fatalf("expected one challenge cycle in payload: %s", payload)
+			}
+		}
+
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing nested next stripping token %q", tok)
+		}
+	}
+}
