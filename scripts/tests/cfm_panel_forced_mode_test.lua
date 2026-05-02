@@ -1,9 +1,39 @@
 local panel_path = "configs/cfm_panel.lua"
+local CHALLENGE_COOLDOWN = "45m"
+local CHALLENGE_COOKIE_LIFE = "45m"
+local OPENRESTY_OK_IP_TTL = "45m"
+
+local function parse_duration_seconds(raw, fallback)
+  if raw == nil or raw == "" then return fallback end
+  local n, unit = tostring(raw):match("^%s*(%d+)%s*([smhdSMHD]?)%s*$")
+  n = tonumber(n)
+  if not n then return fallback end
+  unit = (unit or "s"):lower()
+  if unit == "m" then return n * 60 end
+  if unit == "h" then return n * 3600 end
+  if unit == "d" then return n * 86400 end
+  return n
+end
 
 local function run_case(c, shared)
-  shared = shared or {}
-  local function dict_get(k) return shared[k] end
-  local function dict_set(k, v) shared[k] = v; return true end
+  shared = shared or { kv = {}, now = 1000 }
+  if not shared.kv then shared.kv = {} end
+  if c.now then shared.now = c.now end
+  local function dict_get(k)
+    local row = shared.kv[k]
+    if not row then return nil end
+    if row.exp and row.exp <= shared.now then
+      shared.kv[k] = nil
+      return nil
+    end
+    return row.v
+  end
+  local function dict_set(k, v, ttl)
+    local exp = nil
+    if tonumber(ttl) and tonumber(ttl) > 0 then exp = shared.now + tonumber(ttl) end
+    shared.kv[k] = { v = v, exp = exp }
+    return true
+  end
   local ngx = {
     INFO = 1, WARN = 2, DEBUG = 3,
     HTTP_TEMPORARY_REDIRECT = 307,
@@ -19,9 +49,9 @@ local function run_case(c, shared)
       cfm_panel_origin = "http://origin",
       cfm_panel_challenge_mode = "forced",
       cfm_panel_fail_mode = "fail-open",
-      cfm_challenge_cooldown = "45m",
-      cfm_challenge_cookie_life = "45m",
-      cfm_openresty_ok_ip_ttl = "45m",
+      CHALLENGE_COOLDOWN = CHALLENGE_COOLDOWN,
+      CHALLENGE_COOKIE_LIFE = CHALLENGE_COOKIE_LIFE,
+      OPENRESTY_OK_IP_TTL = OPENRESTY_OK_IP_TTL,
       cfm_panel_challenge_location = "/__cfm_panel_decide",
     },
     req = { get_method = function() return c.method or "GET" end },
@@ -29,7 +59,7 @@ local function run_case(c, shared)
       cfm_decisions = { get = dict_get, set = dict_set },
       cfm_stats = { get = dict_get, set = dict_set },
     },
-    now = function() return 1000 end,
+    now = function() return shared.now end,
     log = function(...) end,
     location = { capture = function() return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } } end },
     redirect = function(loc, code) return { action = "redirect", location = loc, code = code } end,
@@ -88,8 +118,6 @@ if out7.location:find("/__cfm_panel_decide", 1, true) then
   error("forced /whm redirect chain leaked internal decision URI", 2)
 end
 
-print("ok")
-
 -- Forced-mode loop prevention: exactly one hop to challenge endpoint with next target
 local _, out8 = run_case({ uri = "/", request_uri = "/" })
 assert_eq(out8.action, "redirect", "forced / should redirect to challenge")
@@ -130,3 +158,28 @@ assert_eq(type(set_cookie), "string", "forced solved request should refresh clea
 if not set_cookie:find("cfm_ok=ok", 1, true) then
   error("forced solved request did not refresh cfm_ok cookie", 2)
 end
+
+-- Browser A solves challenge -> Browser B same IP bypasses within OPENRESTY_OK_IP_TTL
+local shared_ip = { now = 2000 }
+local _, out12 = run_case({ uri = "/", request_uri = "/", now = 2000 }, shared_ip)
+assert_eq(out12.location, "/__cfm_challenge?next=%2F", "initial same-ip flow must challenge")
+local ngx13 = run_case({ uri = "/__cfm_verify", request_uri = "/__cfm_verify?next=%2F", cookie = "cfm_ok=ok", now = 2001 }, shared_ip)
+assert_eq(ngx13.var.cfm_upstream, "cfm_panel_origin", "verify must pass to origin")
+local ngx14, out14 = run_case({ uri = "/", request_uri = "/", cookie = "", ua = "Mozilla/5.0 (Browser-B)", now = 2002 }, shared_ip)
+assert_eq(out14, nil, "same IP second browser must bypass after verify")
+assert_eq(ngx14.var.cfm_upstream, "cfm_panel_origin", "same IP bypass should route to origin")
+
+-- Same browser with valid cookie bypasses within CHALLENGE_COOKIE_LIFE
+local ngx15, out15 = run_case({ uri = "/", request_uri = "/", cookie = "cfm_ok=ok", now = 2100 }, { now = 2100 })
+assert_eq(out15, nil, "valid cookie should bypass challenge")
+assert_eq(ngx15.var.cfm_upstream, "cfm_panel_origin", "cookie bypass should route to origin")
+
+-- After TTL expiry, challenge is required again
+local shared_ttl = { now = 3000 }
+run_case({ uri = "/__cfm_verify", request_uri = "/__cfm_verify?next=%2F", cookie = "cfm_ok=ok", now = 3000 }, shared_ttl)
+local ip_ttl = parse_duration_seconds(OPENRESTY_OK_IP_TTL, 2700)
+local _, out16 = run_case({ uri = "/", request_uri = "/", cookie = "", now = 3000 + ip_ttl + 1 }, shared_ttl)
+assert_eq(out16.action, "redirect", "expired IP TTL should challenge again")
+assert_eq(out16.location, "/__cfm_challenge?next=%2F", "expired IP TTL should redirect to challenge")
+
+print("ok")

@@ -325,9 +325,9 @@ local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or "guard-only"
 local fail_mode = ngx.var.cfm_panel_fail_mode or "fail-open"
-local challenge_cooldown_ttl = parse_duration_seconds(ngx.var.cfm_challenge_cooldown or ngx.var.CHALLENGE_COOLDOWN or "45m", 2700)
-local challenge_cookie_life_ttl = parse_duration_seconds(ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m", 2700)
-local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.cfm_openresty_ok_ip_ttl or ngx.var.OPENRESTY_OK_IP_TTL or "45m", challenge_cookie_life_ttl)
+local challenge_cooldown_ttl = parse_duration_seconds(ngx.var.CHALLENGE_COOLDOWN or "45m", 2700)
+local challenge_cookie_life_ttl = parse_duration_seconds(ngx.var.CHALLENGE_COOKIE_LIFE or "45m", 2700)
+local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.OPENRESTY_OK_IP_TTL or "45m", challenge_cookie_life_ttl)
 
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
@@ -355,6 +355,8 @@ if is_api and api_auth then
 end
 
 if uri == "/__cfm_verify" then
+    mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
+    refresh_clearance_cookie()
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
     decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "verify_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
@@ -385,7 +387,6 @@ elseif mode == "forced" then
 end
 
 if mode == "forced" then
-    local sensitive = is_panel_sensitive(uri, method)
     if has_clearance_cookie() then
         mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
         refresh_clearance_cookie()
@@ -394,12 +395,13 @@ if mode == "forced" then
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
         return
     end
-    if sensitive and has_bypass_ttl(ngx.var.remote_addr) then
+    if has_bypass_ttl(ngx.var.remote_addr) then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
         return
     end
+    local sensitive = is_panel_sensitive(uri, method)
     if sensitive and cooldown_active(ngx.var.remote_addr) then
         if not is_browser_like(ua) then
             return deny(mode, "challenge_loop_protection")
