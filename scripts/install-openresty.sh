@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
+readonly CFM_LUA_MANIFEST=(
+    cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua
+    cfm_clamav.lua cfm_cache_log.lua log-cfm.lua sslcollector.lua
+)
+
 log() {
     echo "[+] $*"
 }
@@ -324,7 +330,7 @@ ensure_cfm_account() {
 }
 
 ensure_lua_dir() {
-    local lua_dir="/usr/local/openresty/nginx/lua"
+    local lua_dir="$CFM_SHARED_LUA_DIR"
 
     if [ -d "$lua_dir" ]; then
         log "Lua directory already present: $lua_dir"
@@ -403,7 +409,7 @@ deploy_cfm_files() {
     local lua_dir
     local conf_dir
 
-    lua_dir="/usr/local/openresty/nginx/lua"
+    lua_dir="$CFM_SHARED_LUA_DIR"
     conf_dir="/usr/local/openresty/nginx/conf"
 
     mkdir -p "$lua_dir"
@@ -435,6 +441,10 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/logrotate-cfm" \
                          "/etc/logrotate.d/logrotate-cfm"
+
+    chown -R root:cfm "$lua_dir"
+    chmod 0750 "$lua_dir"
+    chmod 0640 "$lua_dir"/*.lua
 }
 
 deploy_nginx_conf() {
@@ -495,8 +505,8 @@ validate_panel_lua_guard_preflight() {
 
 check_lua_token_files() {
     local token_files=(
-        "/usr/local/openresty/nginx/lua/cfm_token.lua"
-        "/usr/local/openresty/nginx/lua/cfm_bridge_token.lua"
+        "$CFM_SHARED_LUA_DIR/cfm_token.lua"
+        "$CFM_SHARED_LUA_DIR/cfm_bridge_token.lua"
     )
     local token_file
     local ready_count=0
@@ -515,6 +525,20 @@ check_lua_token_files() {
     done
 
     log "Token file readiness: ready=$ready_count missing=$missing_count expected=2"
+}
+
+validate_shared_lua_runtime() {
+    local missing=()
+    local name
+    for name in "${CFM_LUA_MANIFEST[@]}"; do
+        [ -r "$CFM_SHARED_LUA_DIR/$name" ] || missing+=("$CFM_SHARED_LUA_DIR/$name")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
+    fi
+    if rg -n '/usr/local/openresty/nginx/lua/(cfm|log-cfm|sslcollector)' /usr/local/openresty/nginx/conf/nginx.conf /usr/local/openresty/nginx/conf/cfm-panel-listeners.conf >/dev/null 2>&1; then
+        die "Detected legacy OpenResty Lua path references in deployed config files"
+    fi
 }
 
 
@@ -541,6 +565,7 @@ main() {
     ensure_nginx_temp_dirs
     ensure_cache_dirs
     deploy_cfm_files
+    validate_shared_lua_runtime
     deploy_nginx_conf
     check_lua_token_files
     log "Done"

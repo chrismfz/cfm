@@ -11,7 +11,7 @@
 #
 # Layout (differs from OpenResty):
 #   Angie configs: /etc/angie/
-#   CFM lua:       /etc/angie/lua/
+#   CFM lua:       /var/lib/cfm/lua/
 #   Extra resty:   /etc/angie/lualib/         (lua-resty-maxminddb here)
 #   Dyn modules:   /usr/lib/angie/modules/
 #   Logs:          /var/log/angie/            (chowned to cfm:cfm)
@@ -23,6 +23,12 @@
 # comparison.
 
 set -euo pipefail
+
+readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
+readonly CFM_LUA_MANIFEST=(
+    cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua
+    cfm_clamav.lua cfm_cache_log.lua log-cfm.lua sslcollector.lua
+)
 
 log()  { echo "[+] $*"; }
 warn() { echo "[!] $*" >&2; }
@@ -362,7 +368,7 @@ create_default_certs_if_missing() {
 }
 
 ensure_lua_dir() {
-    local lua_dir="/etc/angie/lua"
+    local lua_dir="$CFM_SHARED_LUA_DIR"
 
     if [ -d "$lua_dir" ]; then
         log "Lua directory already present: $lua_dir"
@@ -418,7 +424,7 @@ backup_and_copy_file() {
 }
 
 deploy_cfm_files() {
-    local lua_dir="/etc/angie/lua"
+    local lua_dir="$CFM_SHARED_LUA_DIR"
     local conf_dir="/etc/angie"
 
     mkdir -p "$lua_dir"
@@ -448,6 +454,24 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/logrotate-cfm" \
                          "/etc/logrotate.d/logrotate-cfm"
+
+    chown -R root:cfm "$lua_dir"
+    chmod 0750 "$lua_dir"
+    chmod 0640 "$lua_dir"/*.lua
+}
+
+validate_shared_lua_runtime() {
+    local missing=()
+    local name
+    for name in "${CFM_LUA_MANIFEST[@]}"; do
+        [ -r "$CFM_SHARED_LUA_DIR/$name" ] || missing+=("$CFM_SHARED_LUA_DIR/$name")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
+    fi
+    if rg -n '/etc/angie/lua/(cfm|log-cfm|sslcollector)' /etc/angie/angie.conf /etc/angie/cfm-panel-listeners.conf >/dev/null 2>&1; then
+        die "Detected legacy Angie Lua path references in deployed config files"
+    fi
 }
 
 deploy_angie_conf() {
@@ -534,7 +558,7 @@ Pre-flight status:
   Log dir (cfm:cfm):        /var/log/angie/
   Cache dirs (cfm:cfm):     /var/cache/angie/cfm_{static,micro}
   Self-signed fallback:     /etc/angie/selfsigned/{fullchain,privkey}.pem
-  CFM lua deployed:         /etc/angie/lua/
+  CFM lua deployed:         /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/
   angie.conf deployed:      $([ $deployed -eq 1 ] && echo yes || echo "NO — see below")
 
@@ -604,6 +628,7 @@ main() {
     ensure_lua_dir
     ensure_cache_dirs
     deploy_cfm_files
+    validate_shared_lua_runtime
 
     # 4. Auto-deploy angie.conf if shipped (with `angie -t` validation)
     deploy_angie_conf
