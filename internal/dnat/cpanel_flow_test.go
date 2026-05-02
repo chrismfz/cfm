@@ -58,7 +58,7 @@ func TestPanelLuaDecisionEndpoint302IssuesChallenge(t *testing.T) {
 		"if status >= 300 and status < 400 then",
 		`outcome = "redirect"`,
 		`reason = "subrequest_redirect"`,
-		`return issue_challenge(mode, "challenge_redirect", decision)`,
+		`return issue_challenge(mode, "challenge_redirect", decision, challenge_cooldown_ttl)`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing 302 handling token %q", tok)
@@ -98,7 +98,7 @@ func TestPanelLuaPolicy_GuardOnlySensitiveFlowAnchors(t *testing.T) {
 		`if mode == "guard-only" then`,
 		`needs_challenge = is_panel_sensitive(uri, method)`,
 		`if mode == "guard-only" and is_panel_sensitive(uri, method) then`,
-		`return issue_challenge(mode, "backend_error_fail_closed_challenge", decision)`,
+		`return issue_challenge(mode, "backend_error_fail_closed_challenge", decision, challenge_cooldown_ttl)`,
 		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess")`,
 		`if method == "POST" then return true end`,
 	} {
@@ -122,6 +122,103 @@ func TestPanelLuaPolicy_OutcomeLogFieldsPresent(t *testing.T) {
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing log outcome field token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`elseif mode == "forced" then`,
+		`needs_challenge = true`,
+		`if has_clearance_cookie() then`,
+		`mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)`,
+		`reason = "challenge_pass_cookie"`,
+		`if has_bypass_ttl(ngx.var.remote_addr) then`,
+		`reason = "challenge_bypass_ttl"`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing forced flow token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaForcedMode_45mNoRechallengeWhenCookieOrTTLEntryValid(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m"`,
+		`ngx.var.cfm_openresty_ok_ip_ttl or ngx.var.OPENRESTY_OK_IP_TTL or "45m"`,
+		`local function has_bypass_ttl(ip)`,
+		`return sh:get(ttl_key(ip)) ~= nil`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing 45m bypass TTL/cookie token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaForcedMode_RechallengeAfterTTLExpiry(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`if cooldown_active(ngx.var.remote_addr) then`,
+		`return issue_challenge(mode, "challenge_cooldown", nil, challenge_cooldown_ttl)`,
+		`local function cooldown_active(ip)`,
+		`return sh:get(cooldown_key(ip)) ~= nil`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing forced-mode rechallenge token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaOffMode_DirectPassThroughWithoutChallenge(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local needs_challenge = false`,
+		`ngx.var.cfm_pass = origin`,
+		`ngx.var.cfm_upstream = "cfm_panel_origin"`,
+		`reason = "mode_skip"`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing off-mode direct pass token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaXfercPanelRedirectAndcPanelSessionSensitivityAnchors(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`if status >= 300 and status < 400 then`,
+		`reason = "subrequest_redirect"`,
+		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing xfercpanel/session anchor token %q", tok)
 		}
 	}
 }
