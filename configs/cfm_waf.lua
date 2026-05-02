@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/cfm_waf.lua
+-- /var/lib/cfm/lua/cfm_waf.lua (CFM-managed canonical location)
 --
 -- CFM inline WAF
 --

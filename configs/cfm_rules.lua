@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/cfm_rules.lua
+-- /var/lib/cfm/lua/cfm_rules.lua (CFM-managed canonical location)
 -- Dynamic traffic-rules action executor for cfm.lua.
 --
 -- Current scope:

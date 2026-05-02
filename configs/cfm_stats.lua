@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/cfm_stats.lua
+-- /var/lib/cfm/lua/cfm_stats.lua (CFM-managed canonical location)
 --
 -- CFM shared-dict introspection module.
 -- Called exclusively by the /cfm-admin/lua-stats endpoint.

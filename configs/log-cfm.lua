@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/log-cfm.lua
+-- /var/lib/cfm/lua/log-cfm.lua (CFM-managed canonical location)
 --
 -- CFM webdetector log ingestion via Unix socket.
 --
