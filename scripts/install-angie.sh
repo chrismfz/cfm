@@ -501,9 +501,6 @@ validate_shared_lua_runtime() {
     if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
     fi
-    if ! check_legacy_lua_paths_in_runtime_configs /etc/angie /etc/angie/angie.conf; then
-        die "Detected legacy Angie Lua path references in deployed config files"
-    fi
 }
 
 check_legacy_lua_paths_in_runtime_configs() {
@@ -511,27 +508,51 @@ check_legacy_lua_paths_in_runtime_configs() {
     local entrypoint="$2"
     local pattern='^[[:space:]]*(access_by_lua_file|content_by_lua_file|rewrite_by_lua_file|log_by_lua_file|init_by_lua_file|init_worker_by_lua_file|lua_package_path)([[:space:]]|;|$)'
     local legacy='/(etc/angie|usr/local/openresty/nginx)/lua/(cfm(_panel)?|cfm_rules|cfm_stats|cfm_waf|cfm_clamav|cfm_cache_log|log-cfm|sslcollector)\.lua'
+    local -a queue=()
     local -a files=()
     local -A seen=()
+    local current
+    local include_path
     local f
     local hit=0
 
-    if [ -f "$entrypoint" ]; then
-        files+=("$entrypoint")
-        seen["$entrypoint"]=1
-    fi
+    [ -f "$entrypoint" ] || return 0
 
-    if [ -d "$conf_root" ]; then
-        while IFS= read -r f; do
-            if [ -z "${seen["$f"]+x}" ]; then
-                files+=("$f")
-                seen["$f"]=1
-            fi
-        done < <(find "$conf_root" -type f -name '*.conf' | sort)
-    fi
+    queue+=("$entrypoint")
+
+    while [ "${#queue[@]}" -gt 0 ]; do
+        current="${queue[0]}"
+        queue=("${queue[@]:1}")
+
+        if [ -n "${seen["$current"]+x}" ]; then
+            continue
+        fi
+        seen["$current"]=1
+
+        [ -f "$current" ] || continue
+        files+=("$current")
+
+        while IFS= read -r include_path; do
+            include_path="${include_path%;}"
+            include_path="${include_path#\"}"
+            include_path="${include_path%\"}"
+            case "$include_path" in
+                /*)
+                    ;;
+                *)
+                    include_path="$conf_root/$include_path"
+                    ;;
+            esac
+            while IFS= read -r f; do
+                [ -f "$f" ] || continue
+                if [ -z "${seen["$f"]+x}" ]; then
+                    queue+=("$f")
+                fi
+            done < <(compgen -G "$include_path" || true)
+        done < <(awk '($0 !~ /^[[:space:]]*#/) {if (match($0, /^[[:space:]]*include[[:space:]]+[^;]+;/)) {line=substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*include[[:space:]]+/, "", line); print line}}' "$current")
+    done
 
     for f in "${files[@]}"; do
-        [ -f "$f" ] || continue
         while IFS= read -r match; do
             warn "legacy Lua path in active directive: $match"
             hit=1
@@ -540,7 +561,6 @@ check_legacy_lua_paths_in_runtime_configs() {
 
     [ "$hit" -eq 0 ]
 }
-
 deploy_angie_conf() {
     # Mirrors install-openresty.sh's deploy_nginx_conf:
     # validate with `angie -t` against the staged config before swapping.
@@ -560,6 +580,10 @@ deploy_angie_conf() {
     fi
 
     validate_panel_lua_guard_preflight "$src" "$prefix" || return 1
+    if ! check_legacy_lua_paths_in_runtime_configs "$prefix" "$src"; then
+        die "Detected legacy Angie Lua path references in candidate Angie config bundle"
+    fi
+
     log "Testing angie config: $src"
     if angie -t -p "$prefix" -c "$src" >/dev/null 2>&1; then
         log "Config test passed"
