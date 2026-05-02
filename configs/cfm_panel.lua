@@ -86,6 +86,7 @@ end
 
 local decision_uri = "/__cfm_panel_decide"
 local function challenge_redirect_target(decision)
+    local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
     local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_challenge"
     if challenge_location == decision_uri then
         challenge_location = "/__cfm_challenge"
@@ -105,7 +106,8 @@ local function challenge_redirect_target(decision)
             return challenge_location
         end
     end
-    return loc
+    local sep = loc:find("?", 1, true) and "&" or "?"
+    return loc .. sep .. "next=" .. ngx.escape_uri(req_uri)
 end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
@@ -148,7 +150,7 @@ local function has_clearance_cookie()
 end
 
 local function is_exempt_path(uri)
-    return uri == "/healthz" or uri == "/ping" or starts_with(uri, "/.well-known/")
+    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/.well-known/")
 end
 
 local function is_panel_sensitive(uri, method)
