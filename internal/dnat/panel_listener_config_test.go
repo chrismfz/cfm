@@ -34,11 +34,18 @@ func TestPanelListenerConfig_HasExactDecideLocationAndDoesNotFallThroughToRootPr
 	if !strings.Contains(s, exact) {
 		t.Fatalf("missing exact location block %q", exact)
 	}
+	if strings.Contains(s, "location /__cfm_panel_decide") {
+		t.Fatalf("found non-exact decide location; this can route via generic location /")
+	}
 
 	exactCount := strings.Count(s, exact)
 	rootCount := strings.Count(s, root)
 	if exactCount == 0 || exactCount != rootCount {
 		t.Fatalf("expected matching exact/root locations per server block, got exact=%d root=%d", exactCount, rootCount)
+	}
+	const expectedPanelListenerCount = 7
+	if exactCount != expectedPanelListenerCount {
+		t.Fatalf("expected exact decide location for all panel listeners, got exact=%d want=%d", exactCount, expectedPanelListenerCount)
 	}
 
 	// Regression note: when /__cfm_panel_decide incorrectly falls through `location /`
