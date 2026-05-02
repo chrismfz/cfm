@@ -20,7 +20,7 @@ server {
     set $cfm_upstream "cfm_panel_2083";
     access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua;
     location = /__cfm_panel_decide { internal; default_type application/json; add_header Cache-Control "no-store" always; return 200 '{"decision":"allow","reason":"internal_panel_listener_decision"}'; }
-    location / { proxy_pass $cfm_pass; proxy_bind 127.0.0.1; proxy_set_header Host $host; proxy_set_header Proxy ""; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header X-Forwarded-Host $host; proxy_set_header X-Forwarded-Port 2083; proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-Server $host; proxy_set_header CF-Connecting-IP $remote_addr; proxy_request_buffering off; proxy_buffering off; proxy_connect_timeout 300s; proxy_read_timeout 300s; proxy_send_timeout 300s; }
+    location / { proxy_pass $cfm_pass; proxy_bind 127.0.0.1; proxy_set_header Host $host; proxy_set_header Proxy ""; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header X-Forwarded-Host $host; proxy_set_header X-Forwarded-Port 2083; proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-Server $host; proxy_set_header CF-Connecting-IP $remote_addr; proxy_redirect ~^https://([^/:]+):2083(/xfercpanel(?:/.*|\?.*)?)$ https://$1:2087$2; proxy_request_buffering off; proxy_buffering off; proxy_connect_timeout 300s; proxy_read_timeout 300s; proxy_send_timeout 300s; }
 }
 server {
     listen 12087 ssl;
