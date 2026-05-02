@@ -1117,7 +1117,7 @@ Safety notes:
 
 ## cPanel DNAT protection
 
-CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports.
+CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports. It also includes DirectAdmin redirect coverage (`2222 -> 12222`) under the same table/listener model.
 
 Commands:
 - `cfm dnat cpanel status`

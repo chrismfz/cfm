@@ -328,7 +328,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		fmt.Println("DNAT table: inet cfm_panel_redirect")
 		if on { fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected) } else { fmt.Println("State: OFF") }
 		fmt.Printf("Detected Imunify mappings: %s\n", strings.Join(detectedImunifyMappings(), ", "))
-		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096")
+		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096, 2222->12222")
 		if on { fmt.Println("Generated nft rules:"); fmt.Print(rules) }
 		if selected == "fallback" && len(detectedImunifyMappings())>0 { fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.") }
 		return 0

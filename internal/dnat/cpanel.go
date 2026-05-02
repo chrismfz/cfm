@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096}
+var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096, 2222: 12222}
 
 type panelOpts struct{ mode string; priority int; challenge string }
 
@@ -23,7 +23,7 @@ func panelStatus() (bool,string,error) {
 }
 
 func panelScript(priority int) string {
-	ports:=[]int{2082,2083,2086,2087,2095,2096}
+	ports:=[]int{2082,2083,2086,2087,2095,2096,2222}
 	var b strings.Builder
 	fmt.Fprintf(&b,"add table inet cfm_panel_redirect\n")
 	fmt.Fprintf(&b,"add chain inet cfm_panel_redirect prerouting { type nat hook prerouting priority %d; policy accept; }\n",priority)
