@@ -412,7 +412,7 @@ if mode == "forced" then
         return deny(mode, "deny_unsolvable_client")
     end
     if sensitive then
-        return issue_challenge(mode, "forced_no_clearance_cookie", nil, challenge_cooldown_ttl)
+        needs_challenge = true
     end
 end
 

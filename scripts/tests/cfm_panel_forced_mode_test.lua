@@ -61,7 +61,7 @@ local function run_case(c, shared)
     },
     now = function() return shared.now end,
     log = function(...) end,
-    location = { capture = function() return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } } end },
+    location = { capture = c.capture or function() return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } } end },
     redirect = function(loc, code) return { action = "redirect", location = loc, code = code } end,
     exit = function(code) return { action = "exit", code = code } end,
     decode_base64 = function(s) return s end,
@@ -181,5 +181,31 @@ local ip_ttl = parse_duration_seconds(OPENRESTY_OK_IP_TTL, 2700)
 local _, out16 = run_case({ uri = "/", request_uri = "/", cookie = "", now = 3000 + ip_ttl + 1 }, shared_ttl)
 assert_eq(out16.action, "redirect", "expired IP TTL should challenge again")
 assert_eq(out16.location, "/__cfm_challenge?next=%2F", "expired IP TTL should redirect to challenge")
+
+
+-- Forced mode should use shared decision backend path for panel routes.
+local capture_calls = 0
+local ngx17, out17 = run_case({ uri = "/", ip = "198.51.100.10", capture = function(uri)
+  capture_calls = capture_calls + 1
+  assert_eq(uri, "/__cfm_panel_decide", "forced panel route should query decision subrequest")
+  return { status = 200, body = "allow", header = {} }
+end })
+assert_eq(out17, nil, "ignored IP decision allow should bypass challenge")
+assert_eq(ngx17.var.cfm_upstream, "cfm_panel_origin", "ignored IP should pass to panel origin")
+assert_eq(capture_calls, 1, "forced flow should call decision backend once")
+
+local _, out18 = run_case({ uri = "/", ip = "198.51.100.11", capture = function(uri)
+  assert_eq(uri, "/__cfm_panel_decide", "non-ignored IP should still query decision path")
+  return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } }
+end })
+assert_eq(out18.action, "redirect", "non-ignored IP should be challenged")
+assert_eq(out18.location, "/__cfm_challenge?next=%2F", "non-ignored IP challenge should use panel redirect format")
+
+local ngx19, out19 = run_case({ uri = "/", ip = "198.51.100.42", capture = function(uri)
+  assert_eq(uri, "/__cfm_panel_decide", "ignored CIDR should use same decision path")
+  return { status = 200, body = '{"decision":"allow","reason":"ignore_net_match"}', header = {} }
+end })
+assert_eq(out19, nil, "ignored CIDR decision allow should bypass challenge")
+assert_eq(ngx19.var.cfm_upstream, "cfm_panel_origin", "ignored CIDR should route to panel origin")
 
 print("ok")
