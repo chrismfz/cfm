@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,56 @@ import (
 
 	"cfm/internal/logging"
 )
+
+type unixSockProbe struct {
+	Exists          bool
+	IsSocket        bool
+	WritableByGroup bool
+	Connectable     bool
+	Err             string
+}
+
+func probeUnixSocket(path string) unixSockProbe {
+	out := unixSockProbe{}
+	st, err := os.Stat(path)
+	if err != nil {
+		out.Err = err.Error()
+		return out
+	}
+	out.Exists = true
+	out.IsSocket = st.Mode()&os.ModeSocket != 0
+	out.WritableByGroup = st.Mode().Perm()&0o020 != 0
+	if !out.IsSocket {
+		out.Err = "not a unix socket"
+		return out
+	}
+	conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
+	if err != nil {
+		out.Err = err.Error()
+		return out
+	}
+	out.Connectable = true
+	_ = conn.Close()
+	return out
+}
+
+func workerInCFMGroup() bool {
+	u, err := user.Lookup("cfm")
+	if err != nil {
+		return false
+	}
+	ids, err := u.GroupIds()
+	if err != nil {
+		return false
+	}
+	for _, gid := range ids {
+		g, err := user.LookupGroupId(gid)
+		if err == nil && g.Name == "cfm" {
+			return true
+		}
+	}
+	return false
+}
 
 func getenvInt(key string, def int) int {
 	v := strings.TrimSpace(os.Getenv(key))
@@ -465,6 +516,17 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if selected == "fallback" && len(detectedImunifyMappings()) > 0 {
 			fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.")
 		}
+		bridgeSock := probeUnixSocket("/var/run/cfm/cfm_nginx.sock")
+		ingestSock := probeUnixSocket("/run/cfm/ingest.sock")
+		fmt.Printf("Bridge socket (/var/run/cfm/cfm_nginx.sock): exists=%t socket=%t connectable=%t group_write=%t\n", bridgeSock.Exists, bridgeSock.IsSocket, bridgeSock.Connectable, bridgeSock.WritableByGroup)
+		if bridgeSock.Err != "" {
+			fmt.Printf("Bridge socket status: FAIL (%s)\n", bridgeSock.Err)
+		}
+		fmt.Printf("Ingest socket (/run/cfm/ingest.sock): exists=%t socket=%t connectable=%t group_write=%t\n", ingestSock.Exists, ingestSock.IsSocket, ingestSock.Connectable, ingestSock.WritableByGroup)
+		if ingestSock.Err != "" {
+			fmt.Printf("Ingest socket status: FAIL (%s)\n", ingestSock.Err)
+		}
+		fmt.Printf("Worker user in cfm group: %t\n", workerInCFMGroup())
 		return 0
 	default:
 		panelHelp()
