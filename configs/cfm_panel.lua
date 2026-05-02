@@ -83,12 +83,33 @@ local function cooldown_active(ip)
     local sh = challenge_state(); if not sh then return false end
     return sh:get(cooldown_key(ip)) ~= nil
 end
-local function issue_challenge(mode, reason, decision, cooldown_ttl)
+
+local decision_uri = "/__cfm_panel_decide"
+local function challenge_redirect_target(decision)
     local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_challenge"
-    local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
-    if loc == "/__cfm_panel_decide" then
-        loc = challenge_location
+    if challenge_location == decision_uri then
+        challenge_location = "/__cfm_challenge"
     end
+
+    local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
+    if loc == decision_uri or starts_with(loc, decision_uri .. "?") then
+        return challenge_location
+    end
+    local full_decision = "http://" .. (ngx.var.host or "") .. decision_uri
+    local full_decisions = {
+        full_decision,
+        "https://" .. (ngx.var.host or "") .. decision_uri,
+    }
+    for _, candidate in ipairs(full_decisions) do
+        if starts_with(loc, candidate) then
+            return challenge_location
+        end
+    end
+    return loc
+end
+
+local function issue_challenge(mode, reason, decision, cooldown_ttl)
+    local loc = challenge_redirect_target(decision)
     mark_challenge_issued(ngx.var.remote_addr, cooldown_ttl or 0)
     decision_log(ngx.INFO, {
         mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ip = ngx.var.remote_addr,
@@ -134,8 +155,6 @@ local function is_panel_sensitive(uri, method)
     if method == "POST" then return true end
     return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
 end
-
-local decision_uri = "/__cfm_panel_decide"
 
 local function query_decision_api()
     local subreq_uri = decision_uri
