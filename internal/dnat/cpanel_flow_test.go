@@ -99,7 +99,7 @@ func TestPanelLuaPolicy_GuardOnlySensitiveFlowAnchors(t *testing.T) {
 		`needs_challenge = is_panel_sensitive(uri, method)`,
 		`if mode == "guard-only" and is_panel_sensitive(uri, method) then`,
 		`return issue_challenge(mode, "backend_error_fail_closed_challenge", decision, challenge_cooldown_ttl)`,
-		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess")`,
+		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/openid_connect/") or starts_with(uri, "/cpsess")`,
 		`if method == "POST" then return true end`,
 	} {
 		if !strings.Contains(s, tok) {
@@ -143,7 +143,7 @@ func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T
 		`cookie:find("cfm_ok=", 1, true)`,
 		`mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)`,
 		`reason = "challenge_pass_cookie"`,
-		`if has_bypass_ttl(ngx.var.remote_addr) then`,
+		`if sensitive and has_bypass_ttl(ngx.var.remote_addr) then`,
 		`reason = "challenge_bypass_ttl"`,
 	} {
 		if !strings.Contains(s, tok) {
@@ -179,8 +179,8 @@ func TestPanelLuaForcedMode_RechallengeAfterTTLExpiry(t *testing.T) {
 	s := string(b)
 
 	for _, tok := range []string{
-		`if cooldown_active(ngx.var.remote_addr) then`,
-		`return issue_challenge(mode, "challenge_cooldown", nil, challenge_cooldown_ttl)`,
+		`if sensitive and cooldown_active(ngx.var.remote_addr) then`,
+		`return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)`,
 		`local function cooldown_active(ip)`,
 		`return sh:get(cooldown_key(ip)) ~= nil`,
 	} {
@@ -219,7 +219,7 @@ func TestPanelLuaXfercPanelRedirectAndcPanelSessionSensitivityAnchors(t *testing
 	for _, tok := range []string{
 		`if status >= 300 and status < 400 then`,
 		`reason = "subrequest_redirect"`,
-		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")`,
+		`uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/openid_connect/") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing xfercpanel/session anchor token %q", tok)
@@ -272,6 +272,100 @@ func TestPanelLuaChallengeFlowStripsNestedEncodedNextChains(t *testing.T) {
 
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing nested next stripping token %q", tok)
+		}
+	}
+}
+
+
+func TestPanelLuaForcedModeSensitivePathsRequireCookieAndProtectLoops(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local sensitive = is_panel_sensitive(uri, method)`,
+		`if sensitive and cooldown_active(ngx.var.remote_addr) then`,
+		`return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)`,
+		`if sensitive and not is_browser_like(ua) then`,
+		`return deny(mode, "deny_unsolvable_client")`,
+		`return issue_challenge(mode, "forced_no_clearance_cookie", nil, challenge_cooldown_ttl)`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing forced sensitive/loop token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaDecisionLogsIncludeHostUAAndReasons(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`" host=", fields.host or "-"`,
+		`" ua=", fields.ua or "-"`,
+		`"forced_no_clearance_cookie"`,
+		`"challenge_loop_protection"`,
+		`"deny_unsolvable_client"`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing logging/reason token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaConfiguredHostEquivalenceIncludesProxyDomains(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local function is_configured_panel_host(host)`,
+		`local primary = (ngx.var.cfm_panel_primary_domain or ""):lower()`,
+		`local proxies = (ngx.var.cfm_panel_proxy_domains or "")`,
+		`if not is_configured_panel_host(ngx.var.host) then`,
+		`return deny(mode, "host_not_configured")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing host equivalence token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaProxyHostNonBrowserAgentsSensitivePaths(t *testing.T) {
+	cases := []struct {
+		host string
+		ua   string
+		uri  string
+	}{
+		{host: "proxy.example.test", ua: "Go-http-client/1.1", uri: "/openid_connect/cpanelid"},
+		{host: "proxy.example.test", ua: "python-requests/2.31.0", uri: "/login/?login_only=1"},
+	}
+	for _, tc := range cases {
+		if tc.host == "" || tc.ua == "" || tc.uri == "" {
+			t.Fatalf("invalid test case: %#v", tc)
+		}
+	}
+
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		`starts_with(uri, "/openid_connect/")`,
+		`if sensitive and not is_browser_like(ua) then`,
+		`return deny(mode, "deny_unsolvable_client")`,
+		`local proxies = (ngx.var.cfm_panel_proxy_domains or "")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing proxy-host/non-browser token %q", tok)
 		}
 	}
 }
