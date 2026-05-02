@@ -567,9 +567,44 @@ validate_shared_lua_runtime() {
     if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
     fi
-    if rg -n '/(etc/angie|usr/local/openresty/nginx)/lua/(cfm(_panel)?|cfm_rules|cfm_stats|cfm_waf|cfm_clamav|cfm_cache_log|log-cfm|sslcollector)\.lua' /usr/local/openresty/nginx/conf/nginx.conf /usr/local/openresty/nginx/conf/cfm-panel-listeners.conf >/dev/null 2>&1; then
+    if ! check_legacy_lua_paths_in_runtime_configs /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf; then
         die "Detected legacy OpenResty Lua path references in deployed config files"
     fi
+}
+
+check_legacy_lua_paths_in_runtime_configs() {
+    local conf_root="$1"
+    local entrypoint="$2"
+    local pattern='^[[:space:]]*(access_by_lua_file|content_by_lua_file|rewrite_by_lua_file|log_by_lua_file|init_by_lua_file|init_worker_by_lua_file|lua_package_path)([[:space:]]|;|$)'
+    local legacy='/(etc/angie|usr/local/openresty/nginx)/lua/(cfm(_panel)?|cfm_rules|cfm_stats|cfm_waf|cfm_clamav|cfm_cache_log|log-cfm|sslcollector)\.lua'
+    local -a files=()
+    local -A seen=()
+    local f
+    local hit=0
+
+    if [ -f "$entrypoint" ]; then
+        files+=("$entrypoint")
+        seen["$entrypoint"]=1
+    fi
+
+    if [ -d "$conf_root" ]; then
+        while IFS= read -r f; do
+            if [ -z "${seen["$f"]+x}" ]; then
+                files+=("$f")
+                seen["$f"]=1
+            fi
+        done < <(find "$conf_root" -type f -name '*.conf' | sort)
+    fi
+
+    for f in "${files[@]}"; do
+        [ -f "$f" ] || continue
+        while IFS= read -r match; do
+            warn "legacy Lua path in active directive: $match"
+            hit=1
+        done < <(awk -v p="$pattern" '($0 !~ /^[[:space:]]*#/ && $0 ~ p) {print FILENAME ":" FNR ":" $0}' "$f" | rg -n "$legacy")
+    done
+
+    [ "$hit" -eq 0 ]
 }
 
 
