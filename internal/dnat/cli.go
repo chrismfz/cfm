@@ -8,8 +8,8 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -162,7 +162,6 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		return 2
 	}
 
-
 	if sub == "cpanel" {
 		return runPanelCLI(fs.Args(), backend)
 	}
@@ -299,7 +298,6 @@ func help() {
 	fmt.Fprintln(os.Stderr, "  cfm dnat off    (disable DNAT)")
 }
 
-
 func runPanelCLI(args []string, backend firewall.Backend) int {
 	if len(args) > 0 && args[0] == "help" {
 		panelHelp()
@@ -316,6 +314,12 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	mode := fs.String("mode", "auto", "mode")
 	priority := fs.Int("priority", -101, "priority")
 	challenge := fs.String("challenge", "guard-only", "challenge")
+	challengeSource := "default"
+	for _, raw := range args {
+		if strings.HasPrefix(raw, "--challenge") || strings.HasPrefix(raw, "challenge=") {
+			challengeSource = "CLI flag"
+		}
+	}
 	sub := "status"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub = args[0]
@@ -329,38 +333,84 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			}
 		}
 	}
-	if err := fs.Parse(args); err != nil { panelHelp(); return 2 }
+	if err := fs.Parse(args); err != nil {
+		panelHelp()
+		return 2
+	}
 	_ = challenge
 	selected := *mode
-	if selected == "auto" { if len(detectedImunifyMappings())>0 { selected = "chain-imunify" } else { selected = "direct-cpsrvd" } }
-	if selected == "fallback" && *priority == -101 { *priority = -99 }
+	if selected == "auto" {
+		if len(detectedImunifyMappings()) > 0 {
+			selected = "chain-imunify"
+		} else {
+			selected = "direct-cpsrvd"
+		}
+	}
+	if selected == "fallback" && *priority == -101 {
+		*priority = -99
+	}
 	switch sub {
 	case "on":
-		if err := panelOn(*priority); err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err); return 1 }
+		if err := panelOn(*priority); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
+			return 1
+		}
 		changes, err := ensurePanelAllowlist()
-		if err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel on firewall failed:", err); return 1 }
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on firewall failed:", err)
+			return 1
+		}
 		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority)
-		if len(changes)==0 { fmt.Println("Firewall: no changes") } else { for _, ch := range changes { fmt.Println("Firewall:", ch) } }
+		if len(changes) == 0 {
+			fmt.Println("Firewall: no changes")
+		} else {
+			for _, ch := range changes {
+				fmt.Println("Firewall:", ch)
+			}
+		}
 		return 0
 	case "off":
-		if err := exec.Command("nft","delete","table","inet","cfm_panel_redirect").Run(); err != nil { }
+		if err := exec.Command("nft", "delete", "table", "inet", "cfm_panel_redirect").Run(); err != nil {
+		}
 		changes, err := removePanelAllowlist()
-		if err != nil { fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err); return 1 }
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
+			return 1
+		}
 		fmt.Println("DNAT cpanel: OFF")
-		if len(changes)==0 { fmt.Println("Firewall: no changes") } else { for _, ch := range changes { fmt.Println("Firewall:", ch) } }
+		if len(changes) == 0 {
+			fmt.Println("Firewall: no changes")
+		} else {
+			for _, ch := range changes {
+				fmt.Println("Firewall:", ch)
+			}
+		}
 		return 0
 	case "status":
 		on, rules, _ := panelStatus()
 		fmt.Println("DNAT table: inet cfm_panel_redirect")
-		if on { fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected) } else { fmt.Println("State: OFF") }
+		if on {
+			fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected)
+		} else {
+			fmt.Println("State: OFF")
+		}
+		panelMode, luaLoaded := panelListenerGuardState()
+		fmt.Printf("Challenge mode: %s\n", panelMode)
+		fmt.Printf("Challenge mode source: %s\n", challengeSource)
+		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
 		fw := panelFirewallState()
 		fmt.Printf("Detected Imunify mappings: %s\n", strings.Join(detectedImunifyMappings(), ", "))
 		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096, 2222->12222")
-		if on { fmt.Println("Generated nft rules:"); fmt.Print(rules) }
+		if on {
+			fmt.Println("Generated nft rules:")
+			fmt.Print(rules)
+		}
 		for _, tp := range panelTargetPorts {
 			fmt.Printf("Port %d listener=%s firewall=%s\n", tp, panelListenerState(tp), fw[tp])
 		}
-		if selected == "fallback" && len(detectedImunifyMappings())>0 { fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.") }
+		if selected == "fallback" && len(detectedImunifyMappings()) > 0 {
+			fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.")
+		}
 		return 0
 	default:
 		panelHelp()

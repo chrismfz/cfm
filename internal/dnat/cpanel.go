@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -14,31 +15,48 @@ import (
 var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096, 2222: 12222}
 var panelTargetPorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
 
-type panelOpts struct{ mode string; priority int; challenge string }
+type panelOpts struct {
+	mode      string
+	priority  int
+	challenge string
+}
 
-func runOut(name string, args ...string) string { c:=exec.Command(name,args...); var b bytes.Buffer; c.Stdout=&b; c.Stderr=&b; _=c.Run(); return b.String() }
+func runOut(name string, args ...string) string {
+	c := exec.Command(name, args...)
+	var b bytes.Buffer
+	c.Stdout = &b
+	c.Stderr = &b
+	_ = c.Run()
+	return b.String()
+}
 
-func panelStatus() (bool,string,error) {
-	out:=runOut("nft","list","table","inet","cfm_panel_redirect")
-	if strings.Contains(out,"No such file") || strings.Contains(out,"does not exist") { return false,"",nil }
-	if strings.TrimSpace(out)=="" { return false,"",nil }
-	return true,out,nil
+func panelStatus() (bool, string, error) {
+	out := runOut("nft", "list", "table", "inet", "cfm_panel_redirect")
+	if strings.Contains(out, "No such file") || strings.Contains(out, "does not exist") {
+		return false, "", nil
+	}
+	if strings.TrimSpace(out) == "" {
+		return false, "", nil
+	}
+	return true, out, nil
 }
 
 func panelScript(priority int) string {
-	ports:=[]int{2082,2083,2086,2087,2095,2096,2222}
+	ports := []int{2082, 2083, 2086, 2087, 2095, 2096, 2222}
 	var b strings.Builder
-	fmt.Fprintf(&b,"add table inet cfm_panel_redirect\n")
-	fmt.Fprintf(&b,"add chain inet cfm_panel_redirect prerouting { type nat hook prerouting priority %d; policy accept; }\n",priority)
+	fmt.Fprintf(&b, "add table inet cfm_panel_redirect\n")
+	fmt.Fprintf(&b, "add chain inet cfm_panel_redirect prerouting { type nat hook prerouting priority %d; policy accept; }\n", priority)
 	b.WriteString("add rule inet cfm_panel_redirect prerouting iif \"lo\" accept\n")
-	for _,p:= range ports { fmt.Fprintf(&b,"add rule inet cfm_panel_redirect prerouting tcp dport %d dnat to :%d\n",p,panelMap[p]) }
+	for _, p := range ports {
+		fmt.Fprintf(&b, "add rule inet cfm_panel_redirect prerouting tcp dport %d dnat to :%d\n", p, panelMap[p])
+	}
 	return b.String()
 }
 
 func panelOn(priority int) error {
-	_ = exec.Command("nft","delete","table","inet","cfm_panel_redirect").Run()
-	s:=panelScript(priority)
-	c := exec.Command("nft","-f","-")
+	_ = exec.Command("nft", "delete", "table", "inet", "cfm_panel_redirect").Run()
+	s := panelScript(priority)
+	c := exec.Command("nft", "-f", "-")
 	in, _ := c.StdinPipe()
 	go func() { _, _ = io.WriteString(in, s); _ = in.Close() }()
 	return c.Run()
@@ -54,9 +72,38 @@ func panelListenerState(port int) string {
 }
 
 func detectedImunifyMappings() []string {
-	rules := runOut("nft","-a","list","ruleset") + "\n" + runOut("iptables-save","-t","nat") + "\n" + runOut("ip6tables-save","-t","nat")
-	pairs:=map[string]string{"2087":"52227","2083":"52229","2096":"52231","2082":"52230","2086":"52228","2095":"52232","443":"52223","80":"52224"}
+	rules := runOut("nft", "-a", "list", "ruleset") + "\n" + runOut("iptables-save", "-t", "nat") + "\n" + runOut("ip6tables-save", "-t", "nat")
+	pairs := map[string]string{"2087": "52227", "2083": "52229", "2096": "52231", "2082": "52230", "2086": "52228", "2095": "52232", "443": "52223", "80": "52224"}
 	var got []string
-	for s,d:= range pairs { if strings.Contains(rules, s) && strings.Contains(rules, d) { got=append(got, fmt.Sprintf("%s->%s",s,d)) } }
-	sort.Strings(got); return got
+	for s, d := range pairs {
+		if strings.Contains(rules, s) && strings.Contains(rules, d) {
+			got = append(got, fmt.Sprintf("%s->%s", s, d))
+		}
+	}
+	sort.Strings(got)
+	return got
+}
+
+func panelListenerGuardState() (string, bool) {
+	paths := []string{"/etc/angie/conf/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/angie-cfm-panel-listeners.conf"}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		s := string(b)
+		mode := "unknown"
+		if i := strings.Index(s, "set $cfm_panel_challenge_mode "); i >= 0 {
+			line := s[i:]
+			if j := strings.Index(line, "\n"); j >= 0 {
+				line = line[:j]
+			}
+			if q := strings.Split(line, "\""); len(q) >= 2 {
+				mode = q[1]
+			}
+		}
+		loaded := strings.Contains(s, "access_by_lua_file") && strings.Contains(s, "cfm_panel.lua")
+		return mode, loaded
+	}
+	return "unknown", false
 }
