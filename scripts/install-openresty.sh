@@ -411,6 +411,7 @@ deploy_cfm_files() {
     mkdir -p /etc/logrotate.d
 
     backup_and_copy_file "/usr/share/cfm/configs/cfm.lua"            "$lua_dir/cfm.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/cfm_panel.lua"      "$lua_dir/cfm_panel.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
@@ -424,7 +425,9 @@ deploy_cfm_files() {
     backup_and_copy_file "/usr/share/cfm/configs/sslcollector.lua"   "$lua_dir/sslcollector.lua"
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
-                         "$conf_dir/trusted_proxies.conf"
+        "$conf_dir/trusted_proxies.conf"
+    backup_and_copy_file "/usr/share/cfm/configs/openresty-cfm-panel-listeners.conf" \
+        "$conf_dir/cfm-panel-listeners.conf"
 
     backup_and_copy_file "/usr/share/cfm/configs/challenge_waf_bypass.conf" \
                          "$conf_dir/challenge_waf_bypass.conf"
