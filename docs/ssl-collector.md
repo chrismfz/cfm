@@ -236,3 +236,39 @@ tmpfs path (root-only, lost on reboot) would achieve this.
 | `/var/lib/cfm/lua/cfm_sslcollector_config.lua` | Auto-generated runtime flags (0640 root:cfm) |
 | `/var/lib/cfm/sslcollector/dump.json` | Offline snapshot (0640 root:cfm, contains key material) |
 | `docs/security/root_compromise_audit_2026-04-15.md` | Privilege audit with Finding 1 (socket key access) |
+
+---
+
+## Angie panel listeners (12083 / 12087 / 12096)
+
+The HTTPS panel listeners in `configs/angie-cfm-panel-listeners.conf` are wired
+with both:
+
+- Static fallback cert directives:
+  - `ssl_certificate /etc/angie/selfsigned/fullchain.pem;`
+  - `ssl_certificate_key /etc/angie/selfsigned/privkey.pem;`
+- Dynamic certificate hook:
+  - `ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }`
+
+They also explicitly use `ssl_protocols TLSv1.2 TLSv1.3` to stay compatible with
+main HTTPS listener TLS policy in `configs/angie.conf`.
+
+### Expected behavior
+
+- **Warmup / cache miss window:** on startup or when cert inventory is not yet
+  loaded for a hostname, the first handshake can briefly present the fallback
+  self-signed certificate.
+- **Steady state:** once sslcollector has loaded certs, SNI host-based
+  selection should present the tenant/domain certificate, not the localhost
+  self-signed fallback.
+
+### Config validation
+
+Use this repo check to enforce panel HTTPS server wiring:
+
+```bash
+scripts/tests/check_angie_panel_ssl_hooks.sh
+```
+
+The check fails if any `listen ... ssl` panel server block is missing either
+fallback cert directive or the sslcollector Lua hook.
