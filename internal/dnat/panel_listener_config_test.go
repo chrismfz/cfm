@@ -7,7 +7,7 @@ import (
 )
 
 func TestPanelListenerConfig_HasLuaGuardAndNoDefaultBypass(t *testing.T) {
-	b, err := os.ReadFile("../../configs/angie-cfm-panel-listeners.conf")
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}

@@ -3,7 +3,7 @@ set -euo pipefail
 
 manifest='cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua cfm_clamav.lua cfm_cache_log.lua log-cfm.lua sslcollector.lua'
 
-for conf in configs/angie.conf configs/openresty.conf configs/angie-cfm-panel-listeners.conf configs/openresty-cfm-panel-listeners.conf; do
+for conf in configs/angie.conf configs/openresty.conf configs/cfm-panel-listeners.conf.in; do
   if rg -n '/etc/angie/lua/(cfm|log-cfm|sslcollector)|/usr/local/openresty/nginx/lua/(cfm|log-cfm|sslcollector)' "$conf" >/dev/null; then
     echo "legacy engine-specific Lua path found in $conf" >&2
     exit 1
@@ -18,3 +18,13 @@ for script in scripts/install-angie.sh scripts/install-openresty.sh; do
 done
 
 echo "OK: shared lua layout + installer manifest checks passed"
+
+if [ -e configs/angie-cfm-panel-listeners.conf ] || [ -e configs/openresty-cfm-panel-listeners.conf ]; then
+  echo "legacy duplicated panel listener templates must not exist" >&2
+  exit 1
+fi
+
+rg -q "cfm-panel-listeners.conf.in" scripts/install-angie.sh || { echo "install-angie.sh must render canonical panel listener template" >&2; exit 1; }
+rg -q "cfm-panel-listeners.conf.in" scripts/install-openresty.sh || { echo "install-openresty.sh must render canonical panel listener template" >&2; exit 1; }
+
+echo "OK: single template ownership enforced"

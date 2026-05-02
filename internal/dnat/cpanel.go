@@ -123,7 +123,7 @@ func detectedImunifyMappings() []string {
 }
 
 func panelListenerGuardState() (string, bool) {
-	paths := []string{"/etc/angie/conf/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/angie-cfm-panel-listeners.conf"}
+	paths := []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}
 	return panelListenerGuardStateFromPaths(paths)
 }
 
@@ -159,7 +159,7 @@ type panelLuaGuardStatus struct {
 }
 
 func panelLuaGuardPath() string {
-	for _, p := range []string{"/etc/angie/conf/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/angie-cfm-panel-listeners.conf", "configs/openresty-cfm-panel-listeners.conf"} {
+	for _, p := range []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"} {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
