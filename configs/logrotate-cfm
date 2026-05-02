@@ -45,9 +45,11 @@
 
 # --- OpenResty nginx logs ---
 /usr/local/openresty/nginx/logs/access.log
+/usr/local/openresty/nginx/logs/access-panel.log
 /usr/local/openresty/nginx/logs/access.cfm.log
 /usr/local/openresty/nginx/logs/throttle.log
 /usr/local/openresty/nginx/logs/access_cfm_tsv.log
+/var/log/angie/access-panel.log
 /usr/local/openresty/nginx/logs/error.log {
     daily
     rotate 14
