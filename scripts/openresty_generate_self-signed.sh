@@ -1,9 +1,9 @@
 #!/bin/bash
 
 if [ -d "/opt/openresty/nginx/conf" ]; then
-    CERT_DIR="/opt/openresty/nginx/conf/selfsigned"
+    CERT_DIR="/var/lib/cfm/certs/selfsigned"
 elif [ -d "/usr/local/openresty/nginx/conf" ]; then
-    CERT_DIR="/usr/local/openresty/nginx/conf/selfsigned"
+    CERT_DIR="/var/lib/cfm/certs/selfsigned"
 else
     echo "ERROR: Could not find OpenResty conf directory"
     exit 1

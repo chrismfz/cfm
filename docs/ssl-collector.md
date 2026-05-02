@@ -246,8 +246,8 @@ The HTTPS panel listeners in both
 `configs/openresty-cfm-panel-listeners.conf` are wired with both:
 
 - Static fallback cert directives:
-  - `ssl_certificate /etc/angie/selfsigned/fullchain.pem;`
-  - `ssl_certificate_key /etc/angie/selfsigned/privkey.pem;`
+  - `ssl_certificate /var/lib/cfm/certs/selfsigned/fullchain.pem;`
+  - `ssl_certificate_key /var/lib/cfm/certs/selfsigned/privkey.pem;`
 - Dynamic certificate hook:
   - `ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }`
 

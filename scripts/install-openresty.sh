@@ -264,13 +264,7 @@ install_opm_packages() {
 }
 
 detect_cert_dir() {
-    if [ -d "/opt/openresty/nginx/conf" ]; then
-        printf '%s\n' "/opt/openresty/nginx/conf/selfsigned"
-    elif [ -d "/usr/local/openresty/nginx/conf" ]; then
-        printf '%s\n' "/usr/local/openresty/nginx/conf/selfsigned"
-    else
-        return 1
-    fi
+    printf '%s\n' "/var/lib/cfm/certs/selfsigned"
 }
 
 create_default_certs_if_missing() {
@@ -278,13 +272,15 @@ create_default_certs_if_missing() {
     local cert_file
     local key_file
 
-    cert_dir="$(detect_cert_dir)" || die "Could not find OpenResty conf directory"
+    cert_dir="$(detect_cert_dir)"
 
     cert_file="$cert_dir/fullchain.pem"
     key_file="$cert_dir/privkey.pem"
 
     if [ -s "$cert_file" ] && [ -s "$key_file" ]; then
         log "Default certs already present: $cert_file and $key_file"
+        chown root:cfm "$cert_file" "$key_file"
+        chmod 0640 "$cert_file" "$key_file"
         return 0
     fi
 
@@ -297,6 +293,28 @@ create_default_certs_if_missing() {
         -subj "/C=GR/ST=State/L=City/O=OpenResty/CN=localhost"
 
     log "Created: $cert_file and $key_file"
+    chown root:cfm "$cert_file" "$key_file"
+    chmod 0640 "$cert_file"
+    chmod 0640 "$key_file"
+}
+
+validate_fallback_cert_preflight() {
+    local cert_dir cert_file key_file
+    cert_dir="$(detect_cert_dir)"
+    cert_file="$cert_dir/fullchain.pem"
+    key_file="$cert_dir/privkey.pem"
+
+    [ -r "$cert_file" ] || die "Fallback cert missing/unreadable: $cert_file"
+    [ -r "$key_file" ] || die "Fallback key missing/unreadable: $key_file"
+    su -s /bin/sh -c "test -r '$cert_file' && test -r '$key_file'" cfm >/dev/null 2>&1 || \
+        die "Fallback cert/key are not readable by cfm group: $cert_dir"
+
+    local key_mode
+    key_mode="$(stat -c '%a' "$key_file")"
+    if [ $(( key_mode % 10 )) -ne 0 ]; then
+        die "Fallback key is world-readable; expected mode 0640/0600: $key_file ($key_mode)"
+    fi
+    log "Fallback cert preflight passed: $cert_file / $key_file"
 }
 
 ensure_cfm_account() {
@@ -561,6 +579,7 @@ main() {
     install_opm_packages
     ensure_cfm_account
     create_default_certs_if_missing
+    validate_fallback_cert_preflight
     ensure_lua_dir
     ensure_nginx_temp_dirs
     ensure_cache_dirs
@@ -568,6 +587,7 @@ main() {
     validate_shared_lua_runtime
     deploy_nginx_conf
     check_lua_token_files
+    log "Shared fallback cert path: /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem"
     log "Done"
 }
 
