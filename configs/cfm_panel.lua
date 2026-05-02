@@ -52,8 +52,19 @@ end
 
 local function query_decision_api()
     local res = ngx.location.capture("/__cfm_panel_decide")
-    if not res or res.status >= 500 then return nil, "backend_unavailable" end
-    return nil, "backend_no_data"
+    if not res then return nil, "backend_unavailable" end
+    if res.status >= 500 then return nil, "backend_unavailable" end
+    if res.status == 204 then return "allow", "backend_allow_204" end
+    if res.status < 200 or res.status >= 300 then return nil, "backend_non_success" end
+
+    local body = ((res.body or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
+    if body == "allow" or body == '{"decision":"allow"}' then
+        return "allow", "backend_allow"
+    end
+    if body == "challenge" or body == '{"decision":"challenge"}' then
+        return "challenge", "backend_challenge"
+    end
+    return nil, "backend_invalid_payload"
 end
 
 local uri = ngx.var.uri or "/"
@@ -90,7 +101,14 @@ elseif mode == "browser" then
 end
 
 if needs_challenge then
-    local _, backend_reason = query_decision_api()
+    local decision, backend_reason = query_decision_api()
+    if decision == "allow" then
+        ngx.var.cfm_pass = origin
+        ngx.var.cfm_upstream = "cfm_panel_origin"
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = backend_reason, target = origin })
+        return
+    end
+
     if backend_reason == "backend_unavailable" then
         if fail_mode == "fail-open" then
             ngx.var.cfm_pass = origin
