@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/cfm.lua
+-- /var/lib/cfm/lua/cfm.lua (CFM-managed canonical location)
 --
 -- CFM OpenResty in-path enforcement
 -- Based on the proven Mars version with minimal additions:

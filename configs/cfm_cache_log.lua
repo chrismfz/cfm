@@ -1,4 +1,4 @@
--- /usr/local/openresty/nginx/lua/cfm_cache_log.lua
+-- /var/lib/cfm/lua/cfm_cache_log.lua (CFM-managed canonical location)
 --
 -- Lightweight cache status counters for dashboard use.
 -- Intended for log_by_lua_block only.
