@@ -84,8 +84,11 @@ local function cooldown_active(ip)
     return sh:get(cooldown_key(ip)) ~= nil
 end
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
-    local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_panel_decide"
+    local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_challenge"
     local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
+    if loc == "/__cfm_panel_decide" then
+        loc = challenge_location
+    end
     mark_challenge_issued(ngx.var.remote_addr, cooldown_ttl or 0)
     decision_log(ngx.INFO, {
         mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ip = ngx.var.remote_addr,
@@ -132,8 +135,10 @@ local function is_panel_sensitive(uri, method)
     return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
 end
 
+local decision_uri = "/__cfm_panel_decide"
+
 local function query_decision_api()
-    local subreq_uri = "/__cfm_panel_decide"
+    local subreq_uri = decision_uri
     local res, err = ngx.location.capture(subreq_uri)
     if not res then
         local sock, detail = parse_socket_error(err)
@@ -190,6 +195,14 @@ local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.cfm_openresty_ok_ip_t
 
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
+
+
+if uri == decision_uri then
+    local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
+    if not is_internal then
+        return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN)
+    end
+end
 
 local is_directadmin_api = starts_with(uri, "/api/")
 local is_api = is_directadmin_api or starts_with(uri, "/json-api/") or starts_with(uri, "/execute/") or starts_with(uri, "/cpanelwebcall") or uri == "/json-api/cpanel" or starts_with(uri, "/json-api/cpanel/")
