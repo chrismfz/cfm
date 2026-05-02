@@ -511,12 +511,23 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		fmt.Printf("Detected Imunify mappings: %s\n", strings.Join(detectedImunifyMappings(), ", "))
 		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096, 2222->12222")
+		accessStats := readPanelPortAccessStats("/var/log/cfm/challenge.access.log", time.Now().UTC(), 15*time.Minute)
+		fmt.Println("Recent listener hits (last 15m, from access log ingestion):")
 		if on {
 			fmt.Println("Generated nft rules:")
 			fmt.Print(rules)
 		}
 		for _, tp := range panelTargetPorts {
-			fmt.Printf("Port %d listener=%s firewall=%s\n", tp, panelListenerState(tp), fw[tp])
+			hits := accessStats.HitsRecent[tp]
+			lastSeen := "never"
+			if !accessStats.LastSeenByPort[tp].IsZero() {
+				lastSeen = accessStats.LastSeenByPort[tp].Format(time.RFC3339)
+			}
+			fmt.Printf("Port %d listener=%s firewall=%s recent_hits_15m=%d last_seen=%s\n", tp, panelListenerState(tp), fw[tp], hits, lastSeen)
+		}
+		if accessStats.XferRedirect2083Seen && accessStats.HitsRecent[12083] == 0 {
+			fmt.Println("WARNING: recent xfer redirects targeted :2083 but listener port 12083 has zero hits.")
+			fmt.Println("Hint: If xfer redirects to 2083 but no 12083 hits are recorded, check external firewall/provider proxy policy.")
 		}
 		if selected == "fallback" && len(detectedImunifyMappings()) > 0 {
 			fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.")

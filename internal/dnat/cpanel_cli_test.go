@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func captureStreams(t *testing.T, fn func()) (string, string) {
@@ -124,5 +125,31 @@ func TestInvalidChallengeModeRejected(t *testing.T) {
 	})
 	if !strings.Contains(errOut, "unsupported challenge mode") {
 		t.Fatalf("expected validation error, got: %s", errOut)
+	}
+}
+
+func TestReadPanelPortAccessStats(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "challenge.access.log")
+	log := strings.Join([]string{
+		"2026-05-02 10:00:00 [challenge_http] ip=1.1.1.1 host=example.test:2083 method=GET uri=/xfercpanel port=12083 status=302 bytes=0 ms=1",
+		"2026-05-02 10:04:00 [challenge_http] ip=1.1.1.1 host=example.test:2087 method=GET uri=/login port=12087 status=403 bytes=0 ms=1",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 5, 2, 10, 20, 0, 0, time.UTC)
+	stats := readPanelPortAccessStats(path, now, 15*time.Minute)
+	if stats.HitsRecent[12083] != 0 {
+		t.Fatalf("expected 0 recent hits on 12083, got %d", stats.HitsRecent[12083])
+	}
+	if stats.HitsRecent[12087] != 0 {
+		t.Fatalf("expected 0 recent hits on 12087, got %d", stats.HitsRecent[12087])
+	}
+	if stats.LastSeenByPort[12083].IsZero() {
+		t.Fatalf("expected last_seen for 12083")
+	}
+	if !stats.XferRedirect2083Seen {
+		t.Fatalf("expected xfer redirect marker")
 	}
 }

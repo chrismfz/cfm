@@ -197,12 +197,12 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
 				uri += "?" + r.URL.RawQuery
 			}
 			if s.accessLog != nil {
-				s.accessLog.logf("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
-					ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+				s.accessLog.logf("[challenge_http] ip=%s host=%s method=%s uri=%s port=%d status=%d bytes=%d ms=%d",
+					ip, host, r.Method, uri, localPort(r), sw.status, sw.bytes, time.Since(start).Milliseconds(),
 				)
 			} else {
-				logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s status=%d bytes=%d ms=%d",
-					ip, host, r.Method, uri, sw.status, sw.bytes, time.Since(start).Milliseconds(),
+				logging.LogfCHALLENGES("[challenge_http] ip=%s host=%s method=%s uri=%s port=%d status=%d bytes=%d ms=%d",
+					ip, host, r.Method, uri, localPort(r), sw.status, sw.bytes, time.Since(start).Milliseconds(),
 				)
 			}
 
@@ -625,38 +625,36 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			// We intentionally ONLY do this for POST (not OPTIONS) to avoid breaking
 			// preflights or non-browser clients.
 
-if r.Method == http.MethodPost {
-	next := r.URL.RequestURI()
+			if r.Method == http.MethodPost {
+				next := r.URL.RequestURI()
 
-	postIP := clientIP(r)
-	postIPStr := "-"
-	if postIP != nil {
-		postIPStr = postIP.String()
-	}
+				postIP := clientIP(r)
+				postIPStr := "-"
+				if postIP != nil {
+					postIPStr = postIP.String()
+				}
 
-	postAction, postReason := "", ""
-	if s.bridge != nil {
-		postAction, postReason = s.bridge.GetIPDecision(postIPStr)
-	}
-	if postReason == "" {
-		postReason = postAction // fallback
-	}
+				postAction, postReason := "", ""
+				if s.bridge != nil {
+					postAction, postReason = s.bridge.GetIPDecision(postIPStr)
+				}
+				if postReason == "" {
+					postReason = postAction // fallback
+				}
 
-	logHost := truncateForLog(cleanHost(r.Host), 120)
-	logPath := truncateForLog(r.URL.Path, 120)
-	logURI := truncateForLog(next, 220)
-	logCType := truncateForLog(strings.TrimSpace(r.Header.Get("Content-Type")), 80)
+				logHost := truncateForLog(cleanHost(r.Host), 120)
+				logPath := truncateForLog(r.URL.Path, 120)
+				logURI := truncateForLog(next, 220)
+				logCType := truncateForLog(strings.TrimSpace(r.Header.Get("Content-Type")), 80)
 
-	logging.LogfCHALLENGES("[challenge] post-intercept ip=%s host=%s path=%s uri=%s uri_len=%d ctype=%q clen=%d reason=%s note=no_replay",
-		postIPStr, logHost, logPath, logURI, len(next), logCType, r.ContentLength, postReason,
-	)
+				logging.LogfCHALLENGES("[challenge] post-intercept ip=%s host=%s path=%s uri=%s uri_len=%d ctype=%q clen=%d reason=%s note=no_replay",
+					postIPStr, logHost, logPath, logURI, len(next), logCType, r.ContentLength, postReason,
+				)
 
-	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
-	return
-}
-
-
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, "/?next="+url.QueryEscape(next), http.StatusSeeOther) // 303
+				return
+			}
 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -1705,4 +1703,18 @@ func challengeHTML() string {
 
 </body>
 </html>`
+}
+
+func localPort(r *http.Request) int {
+	if r == nil || r.Context() == nil {
+		return 0
+	}
+	if v := r.Context().Value(http.LocalAddrContextKey); v != nil {
+		if addr, ok := v.(net.Addr); ok {
+			if ta, ok := addr.(*net.TCPAddr); ok {
+				return ta.Port
+			}
+		}
+	}
+	return 0
 }
