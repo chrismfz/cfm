@@ -35,6 +35,11 @@ local function run_case(c)
     redirect = function(loc, code) return { action = "redirect", location = loc, code = code } end,
     exit = function(code) return { action = "exit", code = code } end,
     decode_base64 = function(s) return s end,
+    escape_uri = function(v)
+      v = tostring(v or "")
+      v = v:gsub("%%", "%%25"):gsub(" ", "%%20"):gsub("/", "%%2F"):gsub("%?", "%%3F"):gsub("=", "%%3D"):gsub("&", "%%26")
+      return v
+    end,
   }
 
   _G.ngx = ngx
@@ -84,3 +89,15 @@ if out7.location:find("/__cfm_panel_decide", 1, true) then
 end
 
 print("ok")
+
+-- Forced-mode loop prevention: exactly one hop to challenge endpoint with next target
+local _, out8 = run_case({ uri = "/", request_uri = "/" })
+assert_eq(out8.action, "redirect", "forced / should redirect to challenge")
+assert_eq(out8.location, "/__cfm_challenge?next=%2F", "forced / should include single-hop challenge target")
+if out8.location:find("/__cfm_challenge%?next=", 1, false) == nil then
+  error("forced / redirect missing challenge next parameter", 2)
+end
+
+-- Challenge endpoint is exempt and must not re-challenge itself
+local ngx9 = run_case({ uri = "/__cfm_challenge", request_uri = "/__cfm_challenge?next=%2F" })
+assert_eq(ngx9.var.cfm_upstream, "cfm_panel_exempt", "challenge endpoint must be exempt from guard recursion")
