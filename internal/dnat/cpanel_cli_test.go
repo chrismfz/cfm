@@ -52,6 +52,36 @@ func TestChallengeShortcuts(t *testing.T) {
 	}
 }
 
+func TestBuildPanelChallengeStatus_AfterApplyForced(t *testing.T) {
+	st := buildPanelChallengeStatus("forced", "forced", true)
+	if st.RequestedMode != "forced" {
+		t.Fatalf("requested=%q", st.RequestedMode)
+	}
+	if !st.Enforced {
+		t.Fatalf("expected enforced")
+	}
+}
+
+func TestBuildPanelChallengeStatus_AfterApplyOff(t *testing.T) {
+	st := buildPanelChallengeStatus("off", "off", true)
+	if st.RequestedMode != "off" {
+		t.Fatalf("requested=%q", st.RequestedMode)
+	}
+	if !st.Enforced {
+		t.Fatalf("expected enforced")
+	}
+}
+
+func TestBuildPanelChallengeStatus_MismatchWarningState(t *testing.T) {
+	st := buildPanelChallengeStatus("forced", "forced", false)
+	if st.Enforced {
+		t.Fatalf("expected enforced=false")
+	}
+	if st.MismatchCause == "" {
+		t.Fatalf("expected mismatch warning cause")
+	}
+}
+
 func TestNormalizePanelArgs_RejectsUnknownKeyValue(t *testing.T) {
 	_, err := normalizePanelArgs([]string{"on", "foo=bar"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported key=value") {

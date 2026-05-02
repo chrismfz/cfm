@@ -34,3 +34,27 @@ func Status(backend firewall.Backend) (bool, error) {
 func EffectiveTargetPorts() (httpPort int, httpsPort int) {
 	return getenvInt("HTTP_PORT", DefaultHTTPPort), getenvInt("HTTPS_PORT", DefaultHTTPSPort)
 }
+
+type panelChallengeStatus struct {
+	RequestedMode string
+	RenderedMode  string
+	EffectiveMode string
+	Enforced      bool
+	MismatchCause string
+}
+
+func buildPanelChallengeStatus(requestedMode, renderedMode string, luaLoaded bool) panelChallengeStatus {
+	s := panelChallengeStatus{
+		RequestedMode: requestedMode,
+		RenderedMode:  renderedMode,
+		EffectiveMode: renderedMode,
+	}
+	if !luaLoaded {
+		s.EffectiveMode = "off"
+	}
+	s.Enforced = s.EffectiveMode == s.RequestedMode
+	if s.EffectiveMode != s.RenderedMode {
+		s.MismatchCause = "pending reload or stale listener config"
+	}
+	return s
+}

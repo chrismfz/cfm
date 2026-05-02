@@ -497,14 +497,18 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
-		enforced := panelMode == *challenge && challengeSource == "active listener config"
-		fmt.Printf("Challenge mode: %s\n", panelMode)
-		fmt.Printf("Challenge mode requested (CLI): %s\n", *challenge)
+		challengeStatus := buildPanelChallengeStatus(*challenge, panelMode, luaLoaded)
+		fmt.Printf("Challenge mode requested (CLI): %s\n", challengeStatus.RequestedMode)
+		fmt.Printf("Challenge mode rendered (config): %s\n", challengeStatus.RenderedMode)
+		fmt.Printf("Challenge mode effective (runtime): %s\n", challengeStatus.EffectiveMode)
 		fmt.Printf("Challenge mode source: %s\n", challengeSource)
 		if modePath != "" {
 			fmt.Printf("Challenge mode active file: %s\n", modePath)
 		}
-		fmt.Printf("Challenge mode enforced in active listener config: %t\n", enforced)
+		fmt.Printf("Challenge mode enforced: %t\n", challengeStatus.Enforced)
+		if challengeStatus.MismatchCause != "" {
+			fmt.Printf("WARNING: challenge runtime/config mismatch (%s)\n", challengeStatus.MismatchCause)
+		}
 		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
 		fmt.Printf("Panel Lua guard path: %s\n", panelLua.Path)
 		fmt.Printf("Panel Lua exists: %t\n", panelLua.Exists)
