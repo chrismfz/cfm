@@ -239,10 +239,11 @@ tmpfs path (root-only, lost on reboot) would achieve this.
 
 ---
 
-## Angie panel listeners (12083 / 12087 / 12096)
+## Panel listeners (Angie + OpenResty, 12083 / 12087 / 12096)
 
-The HTTPS panel listeners in `configs/angie-cfm-panel-listeners.conf` are wired
-with both:
+The HTTPS panel listeners in both
+`configs/angie-cfm-panel-listeners.conf` and
+`configs/openresty-cfm-panel-listeners.conf` are wired with both:
 
 - Static fallback cert directives:
   - `ssl_certificate /etc/angie/selfsigned/fullchain.pem;`
@@ -264,7 +265,7 @@ main HTTPS listener TLS policy in `configs/angie.conf`.
 
 ### Config validation
 
-Use this repo check to enforce panel HTTPS server wiring:
+Use this repo check to enforce panel HTTPS server wiring across Angie and OpenResty templates:
 
 ```bash
 scripts/tests/check_angie_panel_ssl_hooks.sh
