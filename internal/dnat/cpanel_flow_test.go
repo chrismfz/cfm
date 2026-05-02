@@ -118,6 +118,9 @@ func TestPanelLuaPolicy_OutcomeLogFieldsPresent(t *testing.T) {
 	for _, tok := range []string{
 		`" allow_origin=", fields.allow_origin or "0"`,
 		`" challenge_issued=", fields.challenge_issued or "0"`,
+		`" challenge_entry=", fields.challenge_entry or "0"`,
+		`" challenge_solved=", fields.challenge_solved or "0"`,
+		`" challenge_resume=", fields.challenge_resume or "0"`,
 		`" deny_fail_closed=", fields.deny_fail_closed or "0"`,
 	} {
 		if !strings.Contains(s, tok) {
@@ -137,6 +140,7 @@ func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T
 		`elseif mode == "forced" then`,
 		`needs_challenge = true`,
 		`if has_clearance_cookie() then`,
+		`cookie:find("cfm_ok=", 1, true)`,
 		`mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)`,
 		`reason = "challenge_pass_cookie"`,
 		`if has_bypass_ttl(ngx.var.remote_addr) then`,

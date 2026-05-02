@@ -1,7 +1,7 @@
 local panel_path = "configs/cfm_panel.lua"
 
-local function run_case(c)
-  local shared = {}
+local function run_case(c, shared)
+  shared = shared or {}
   local function dict_get(k) return shared[k] end
   local function dict_set(k, v) shared[k] = v; return true end
   local ngx = {
@@ -59,7 +59,7 @@ assert_eq(out1.action, "redirect", "non-api without cookie should challenge")
 assert_eq(ngx1.var.cfm_pass, nil, "should not pass origin when challenged")
 
 -- same client with valid cookie -> pass
-local ngx2 = run_case({ uri = "/", cookie = "cfm_clearance=ok" })
+local ngx2 = run_case({ uri = "/", cookie = "cfm_ok=ok" })
 assert_eq(ngx2.var.cfm_upstream, "cfm_panel_origin", "cookie should allow origin pass")
 
 -- authenticated API request -> pass without challenge
@@ -101,3 +101,12 @@ end
 -- Challenge endpoint is exempt and must not re-challenge itself
 local ngx9 = run_case({ uri = "/__cfm_challenge", request_uri = "/__cfm_challenge?next=%2F" })
 assert_eq(ngx9.var.cfm_upstream, "cfm_panel_exempt", "challenge endpoint must be exempt from guard recursion")
+
+
+-- solve callback cookie should route subsequent request to origin (not challenge)
+local shared_follow = {}
+local _, out10 = run_case({ uri = "/" }, shared_follow)
+assert_eq(out10.location, "/__cfm_challenge?next=%2F", "first hop must challenge")
+local ngx11, out11 = run_case({ uri = "/", cookie = "cfm_ok=ok" }, shared_follow)
+assert_eq(out11, nil, "solved follow-up should pass through without redirect")
+assert_eq(ngx11.var.cfm_upstream, "cfm_panel_origin", "solved follow-up must route to panel origin")
