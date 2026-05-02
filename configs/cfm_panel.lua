@@ -191,12 +191,14 @@ local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.cfm_openresty_ok_ip_t
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
 
-local is_api = starts_with(uri, "/json-api/") or starts_with(uri, "/execute/") or starts_with(uri, "/cpanelwebcall") or uri == "/json-api/cpanel" or starts_with(uri, "/json-api/cpanel/")
+local is_directadmin_api = starts_with(uri, "/api/")
+local is_api = is_directadmin_api or starts_with(uri, "/json-api/") or starts_with(uri, "/execute/") or starts_with(uri, "/cpanelwebcall") or uri == "/json-api/cpanel" or starts_with(uri, "/json-api/cpanel/")
 local api_auth = auth:match("^whm%s+") or auth:match("^cpanel%s+") or auth:match("^[Bb]asic%s+")
 if is_api and api_auth then
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_api"
-    decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "api_authenticated", target = origin })
+    local api_reason = is_directadmin_api and "api_authenticated_directadmin" or "api_authenticated"
+    decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = api_reason, target = origin })
     return
 end
 

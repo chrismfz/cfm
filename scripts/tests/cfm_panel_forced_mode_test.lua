@@ -61,4 +61,17 @@ assert_eq(ngx2.var.cfm_upstream, "cfm_panel_origin", "cookie should allow origin
 local ngx3 = run_case({ uri = "/json-api/listaccts", auth = "whm token" })
 assert_eq(ngx3.var.cfm_upstream, "cfm_panel_api", "authenticated API should bypass challenge")
 
+
+-- DirectAdmin-compatible API request with valid auth -> pass without challenge
+local ngx4 = run_case({ uri = "/api/session", auth = "Basic dXNlcjpwYXNz" })
+assert_eq(ngx4.var.cfm_upstream, "cfm_panel_api", "directadmin API with auth should bypass challenge")
+
+-- DirectAdmin-compatible API request without auth -> not exempt, still challenged in forced mode
+local _, out5 = run_case({ uri = "/api/session" })
+assert_eq(out5.action, "redirect", "directadmin API without auth should not be exempt")
+
+-- Non-API UI route with API auth but missing clearance cookie -> still challenged in forced mode
+local _, out6 = run_case({ uri = "/", auth = "Basic dXNlcjpwYXNz" })
+assert_eq(out6.action, "redirect", "non-api route with auth should still challenge in forced mode")
+
 print("ok")
