@@ -88,8 +88,60 @@ local function cooldown_active(ip)
 end
 
 local decision_uri = "/__cfm_panel_decide"
+
+local function is_internal_challenge_uri(candidate)
+    if type(candidate) ~= "string" then return false end
+    local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
+    if c == "" then return false end
+    if c == "/__cfm_challenge" or starts_with(c, "/__cfm_challenge?") or starts_with(c, "/__cfm_challenge/") then return true end
+    if c == "/__cfm_verify" or starts_with(c, "/__cfm_verify?") or starts_with(c, "/__cfm_verify/") then return true end
+    if c:match("^https?://[^/]+/__cfm_challenge([/?#].*)?$") then return true end
+    if c:match("^https?://[^/]+/__cfm_verify([/?#].*)?$") then return true end
+    return false
+end
+
+local function sanitize_panel_next_target(raw_next, fallback)
+    local candidate = raw_next
+    for _ = 1, 6 do
+        if type(candidate) ~= "string" or candidate == "" then break end
+        local decoded = ngx.unescape_uri(candidate)
+        if decoded == candidate then
+            candidate = decoded
+            break
+        end
+        candidate = decoded
+    end
+    if is_internal_challenge_uri(candidate) then
+        return fallback or "/"
+    end
+    return candidate or fallback or "/"
+end
+
+local function strip_nested_next_chain(raw_next)
+    local candidate = sanitize_panel_next_target(raw_next, "/")
+    if type(candidate) ~= "string" or candidate == "" then return "/" end
+    if not starts_with(candidate, "/") then return candidate end
+    local path, query = candidate:match("^([^?]*)%??(.*)$")
+    if not query or query == "" then return candidate end
+    local cleaned = {}
+    for pair in query:gmatch("[^&]+") do
+        local key, value = pair:match("^([^=]+)=?(.*)$")
+        local dk = ngx.unescape_uri(key or "")
+        if dk ~= "next" then
+            cleaned[#cleaned+1] = pair
+        elseif value and value ~= "" then
+            local nested = sanitize_panel_next_target(value, "")
+            if nested ~= "" and not is_internal_challenge_uri(nested) then
+                cleaned[#cleaned+1] = "next=" .. ngx.escape_uri(nested)
+            end
+        end
+    end
+    if #cleaned == 0 then return path end
+    return path .. "?" .. table.concat(cleaned, "&")
+end
 local function challenge_redirect_target(decision)
     local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
+    req_uri = strip_nested_next_chain(req_uri)
     local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_challenge"
     if challenge_location == decision_uri then
         challenge_location = "/__cfm_challenge"
@@ -110,7 +162,8 @@ local function challenge_redirect_target(decision)
         end
     end
     local sep = loc:find("?", 1, true) and "&" or "?"
-    return loc .. sep .. "next=" .. ngx.escape_uri(req_uri)
+    local safe_next = sanitize_panel_next_target(req_uri, "/")
+    return loc .. sep .. "next=" .. ngx.escape_uri(safe_next)
 end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
@@ -166,11 +219,8 @@ local function next_points_to_challenge()
         return false
     end
 
-    local decoded = ngx.unescape_uri(next_arg):gsub("^%s+", ""):gsub("%s+$", "")
-    if decoded == "/__cfm_challenge" or starts_with(decoded, "/__cfm_challenge?") then
-        return true
-    end
-    return decoded:match("^https?://[^/]+/__cfm_challenge([/?#].*)?$") ~= nil
+    local decoded = sanitize_panel_next_target(next_arg, "")
+    return is_internal_challenge_uri(decoded)
 end
 
 local function is_challenge_flow_request(uri)
@@ -248,6 +298,15 @@ end
 
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
+if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
+    local args = ngx.req.get_uri_args() or {}
+    local next_arg = args.next
+    if type(next_arg) == "table" then next_arg = next_arg[1] end
+    if type(next_arg) == "string" and next_arg ~= "" then
+        args.next = strip_nested_next_chain(next_arg)
+        ngx.req.set_uri_args(args)
+    end
+end
 local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or "guard-only"
