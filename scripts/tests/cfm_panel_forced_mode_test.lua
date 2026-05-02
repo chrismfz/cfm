@@ -74,4 +74,13 @@ assert_eq(out5.action, "redirect", "directadmin API without auth should not be e
 local _, out6 = run_case({ uri = "/", auth = "Basic dXNlcjpwYXNz" })
 assert_eq(out6.action, "redirect", "non-api route with auth should still challenge in forced mode")
 
+
+-- Forced mode /whm entrypoint should never redirect browser to internal decision URI.
+local _, out7 = run_case({ uri = "/whm", request_uri = "/whm" })
+assert_eq(out7.action, "redirect", "forced /whm should still challenge")
+assert_eq(out7.location, "/__cfm_challenge", "forced /whm must redirect to public challenge endpoint")
+if out7.location:find("/__cfm_panel_decide", 1, true) then
+  error("forced /whm redirect chain leaked internal decision URI", 2)
+end
+
 print("ok")
