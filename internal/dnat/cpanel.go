@@ -23,6 +23,42 @@ type panelOpts struct {
 	challenge string
 }
 
+const defaultPanelChallengeMode = "guard-only"
+
+var supportedPanelChallengeModes = []string{defaultPanelChallengeMode}
+var panelChallengeModeStatePath = "/var/lib/cfm/panel_challenge_mode"
+
+func isSupportedPanelChallengeMode(mode string) bool {
+	for _, m := range supportedPanelChallengeModes {
+		if mode == m {
+			return true
+		}
+	}
+	return false
+}
+
+func persistPanelChallengeMode(mode string) error {
+	if !isSupportedPanelChallengeMode(mode) {
+		return fmt.Errorf("unsupported challenge mode %q (supported: %s)", mode, strings.Join(supportedPanelChallengeModes, ", "))
+	}
+	if err := os.MkdirAll(filepath.Dir(panelChallengeModeStatePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(panelChallengeModeStatePath, []byte(mode+"\n"), 0o644)
+}
+
+func loadPersistedPanelChallengeMode() string {
+	b, err := os.ReadFile(panelChallengeModeStatePath)
+	if err != nil {
+		return ""
+	}
+	mode := strings.TrimSpace(string(b))
+	if !isSupportedPanelChallengeMode(mode) {
+		return ""
+	}
+	return mode
+}
+
 func runOut(name string, args ...string) string {
 	c := exec.Command(name, args...)
 	var b bytes.Buffer
@@ -88,6 +124,10 @@ func detectedImunifyMappings() []string {
 
 func panelListenerGuardState() (string, bool) {
 	paths := []string{"/etc/angie/conf/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/angie-cfm-panel-listeners.conf"}
+	return panelListenerGuardStateFromPaths(paths)
+}
+
+func panelListenerGuardStateFromPaths(paths []string) (string, bool) {
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {

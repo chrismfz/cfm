@@ -337,7 +337,10 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		panelHelp()
 		return 2
 	}
-	_ = challenge
+	if !isSupportedPanelChallengeMode(*challenge) {
+		fmt.Fprintf(os.Stderr, "dnat cpanel: unsupported challenge mode %q (supported: %s)\n", *challenge, strings.Join(supportedPanelChallengeModes, ", "))
+		return 2
+	}
 	selected := *mode
 	if selected == "auto" {
 		if len(detectedImunifyMappings()) > 0 {
@@ -351,6 +354,10 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
+		if err := persistPanelChallengeMode(*challenge); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
+			return 1
+		}
 		setPanelFirewallHealth("OK", "", true)
 		if err := panelOn(*priority); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
@@ -401,6 +408,17 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Println("State: OFF")
 		}
 		panelMode, luaLoaded := panelListenerGuardState()
+		if panelMode == "unknown" {
+			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
+				panelMode = persisted
+				challengeSource = "runtime state"
+			} else {
+				panelMode = defaultPanelChallengeMode
+				challengeSource = "default"
+			}
+		} else {
+			challengeSource = "active listener config"
+		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		fmt.Printf("Challenge mode: %s\n", panelMode)
@@ -470,22 +488,22 @@ func normalizePanelArgs(args []string) ([]string, error) {
 
 func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
-	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
+	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", strings.Join(supportedPanelChallengeModes, "|"))
+	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", strings.Join(supportedPanelChallengeModes, "|"))
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel help")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands: status, on, off")
 	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintln(os.Stderr, "Challenge options: guard-only (default)")
+	fmt.Fprintf(os.Stderr, "Challenge options: %s (default: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
 	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority/challenge)")
 }
 
 func panelOnHelp() {
-	fmt.Fprintln(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge guard-only]")
+	fmt.Fprintf(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", strings.Join(supportedPanelChallengeModes, "|"))
 	fmt.Fprintln(os.Stdout, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintln(os.Stdout, "Challenge options: guard-only (default)")
-	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101, --challenge guard-only")
+	fmt.Fprintf(os.Stdout, "Challenge options: %s (default: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
+	fmt.Fprintf(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101, --challenge %s\n", defaultPanelChallengeMode)
 }

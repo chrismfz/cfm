@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,7 +57,7 @@ func TestPanelHelpSnapshots(t *testing.T) {
 		"Commands: status, on, off",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: guard-only (default)",
+		"Challenge options: guard-only (default: guard-only)",
 	} {
 		if !strings.Contains(errOut, token) {
 			t.Fatalf("help output missing %q\n%s", token, errOut)
@@ -75,12 +76,53 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 		"Usage: cfm dnat cpanel on",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: guard-only (default)",
+		"Challenge options: guard-only (default: guard-only)",
 		"mode=direct-cpsrvd",
 		"priority=-101",
 	} {
 		if !strings.Contains(out, token) {
 			t.Fatalf("on help output missing %q\n%s", token, out)
 		}
+	}
+}
+
+func TestChallengeModeFromActiveConfig(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /etc/angie/lua/cfm_panel.lua; }`
+	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mode, loaded := panelListenerGuardStateFromPaths([]string{cfg})
+	if mode != "guard-only" {
+		t.Fatalf("mode=%q", mode)
+	}
+	if !loaded {
+		t.Fatalf("expected lua guard loaded")
+	}
+}
+
+func TestChallengeModeDefaultReflected(t *testing.T) {
+	tmp := t.TempDir()
+	prev := panelChallengeModeStatePath
+	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
+	t.Cleanup(func() { panelChallengeModeStatePath = prev })
+	if got := loadPersistedPanelChallengeMode(); got != "" {
+		t.Fatalf("expected empty persisted mode, got %q", got)
+	}
+	if defaultPanelChallengeMode != "guard-only" {
+		t.Fatalf("unexpected default %q", defaultPanelChallengeMode)
+	}
+}
+
+func TestInvalidChallengeModeRejected(t *testing.T) {
+	_, errOut := captureStreams(t, func() {
+		code := runPanelCLI([]string{"status", "--challenge", "bogus"}, nil)
+		if code != 2 {
+			t.Fatalf("expected code 2, got %d", code)
+		}
+	})
+	if !strings.Contains(errOut, "unsupported challenge mode") {
+		t.Fatalf("expected validation error, got: %s", errOut)
 	}
 }
