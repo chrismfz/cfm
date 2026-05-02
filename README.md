@@ -1114,3 +1114,28 @@ Safety notes:
 - `cfm dnat off` only removes CFM-owned `table inet cfm_redirect` behavior.
 - CFM does not modify Imunify rules/tables.
 - Loopback bypass remains enabled (`iif "lo" accept`).
+
+## cPanel DNAT protection
+
+CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports.
+
+Commands:
+- `cfm dnat cpanel status`
+- `cfm dnat cpanel on --mode auto --challenge guard-only`
+- `cfm dnat cpanel on --mode chain-imunify --priority -101 --challenge browser`
+- `cfm dnat cpanel off`
+
+Modes:
+- `chain-imunify`: CFM catches panel ports first and proxies to detected Imunify/WebShield 522xx targets.
+- `direct-cpsrvd`: CFM catches panel ports first and proxies to local cpsrvd 208x targets.
+- `fallback`: priority `-99` Imunify-first behavior; not a complete panel exploit mitigation if Imunify already redirects panel ports.
+- `auto`: selects `chain-imunify` when Imunify mappings are detected, otherwise `direct-cpsrvd`.
+
+Priority guidance:
+- `-101`: CFM-first.
+- `-99`: Imunify-first fallback.
+
+Notes:
+- CFM never modifies or deletes Imunify chains/tables.
+- API/webcall traffic can bypass browser challenges, but exploit guard still runs first.
+- cPanel/WHM must still be patched; CFM is defense-in-depth.
