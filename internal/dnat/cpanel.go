@@ -292,28 +292,65 @@ func probePanelDecisionEndpoint(paths []string) panelDecisionEndpointProbe {
 }
 
 func reloadPanelListenerService() error {
-	candidates := [][]string{
-		{"systemctl", "reload", "angie"},
-		{"service", "angie", "reload"},
-		{"systemctl", "restart", "angie"},
-		{"service", "angie", "restart"},
-		{"systemctl", "reload", "openresty"},
-		{"service", "openresty", "reload"},
-		{"systemctl", "restart", "openresty"},
-		{"service", "openresty", "restart"},
-	}
+	active := panelListenerServiceDetector()
+	candidates := panelListenerServiceCandidates(active)
 	var lastErr error
+	primary := active
+	fallbackSucceeded := false
 	for _, c := range candidates {
+		svc := c[2]
 		if err := execCommand(c[0], c[1:]...).Run(); err == nil {
-			return nil
+			if primary == "" || svc == primary {
+				return nil
+			}
+			fallbackSucceeded = true
+			continue
 		} else {
 			lastErr = err
 		}
+	}
+	if fallbackSucceeded {
+		return fmt.Errorf("reload/restart listener service for active service %q failed despite fallback service success", primary)
 	}
 	if lastErr == nil {
 		return fmt.Errorf("no angie/openresty service command candidates")
 	}
 	return fmt.Errorf("reload/restart listener service failed: %w", lastErr)
+}
+
+var panelListenerServiceDetector = detectActivePanelListenerService
+
+func detectActivePanelListenerService() string {
+	_, _, path := panelListenerGuardStateFromPaths([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+	switch {
+	case strings.Contains(path, "/etc/angie/"):
+		return "angie"
+	case strings.Contains(path, "/openresty/"):
+		return "openresty"
+	}
+	service := detectEdgeService()
+	if service == "angie" || service == "openresty" {
+		return service
+	}
+	return ""
+}
+
+func panelListenerServiceCandidates(active string) [][]string {
+	serviceCommands := func(service string) [][]string {
+		return [][]string{
+			{"systemctl", "reload", service},
+			{"service", service, "reload"},
+			{"systemctl", "restart", service},
+			{"service", service, "restart"},
+		}
+	}
+	if active == "angie" {
+		return append(serviceCommands("angie"), serviceCommands("openresty")...)
+	}
+	if active == "openresty" {
+		return append(serviceCommands("openresty"), serviceCommands("angie")...)
+	}
+	return append(serviceCommands("angie"), serviceCommands("openresty")...)
 }
 
 type panelLuaGuardStatus struct {
