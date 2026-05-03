@@ -125,7 +125,7 @@ local function sanitize_panel_next_target(raw_next, fallback)
         end
         candidate = decoded
     end
-    if is_internal_guard_uri(candidate) then
+    if is_internal_guard_uri(candidate) or is_internal_decision_uri(candidate) then
         return fallback or "/"
     end
     return candidate or fallback or "/"
@@ -133,6 +133,7 @@ end
 
 local function strip_nested_next_chain(raw_next)
     local candidate = sanitize_panel_next_target(raw_next, "/")
+    if is_internal_decision_uri(candidate) then return "/" end
     if type(candidate) ~= "string" or candidate == "" then return "/" end
     if not starts_with(candidate, "/") then return candidate end
     local path, query = candidate:match("^([^?]*)%??(.*)$")
@@ -197,7 +198,7 @@ local function challenge_redirect_target(decision)
     end
     local sep = loc:find("?", 1, true) and "&" or "?"
     local safe_next = sanitize_panel_next_target(req_uri, "/")
-    if is_internal_guard_uri(safe_next) then safe_next = "/" end
+    if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end
     return loc .. sep .. "next=" .. ngx.escape_uri(safe_next)
 end
 
@@ -241,7 +242,7 @@ local function has_clearance_cookie()
 end
 
 local function is_exempt_path(uri)
-    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or uri == "/__cfm_verify" or starts_with(uri, "/.well-known/")
+    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/.well-known/")
 end
 
 local function next_points_to_challenge()
@@ -353,7 +354,11 @@ local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
     local args = ngx.req.get_uri_args() or {}
-    args.next = normalize_challenge_next_arg(args.next)
+    local normalized_next = normalize_challenge_next_arg(args.next)
+    if is_internal_guard_uri(normalized_next) or is_internal_decision_uri(normalized_next) then
+        normalized_next = "/"
+    end
+    args.next = normalized_next
     ngx.req.set_uri_args(args)
 end
 local auth = ngx.var.http_authorization or ""
