@@ -381,7 +381,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	fs.SetOutput(io.Discard)
 	mode := fs.String("mode", "auto", "mode")
 	priority := fs.Int("priority", -101, "priority")
-	challenge := fs.String("challenge", "guard-only", "challenge")
+	challenge := fs.String("challenge", defaultPanelChallengeMode, "challenge")
 	challengeSource := "default"
 	for _, raw := range args {
 		if strings.HasPrefix(raw, "--challenge") || strings.HasPrefix(raw, "challenge=") {
@@ -422,11 +422,15 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := persistPanelChallengeMode(*challenge); err != nil {
+		appliedChallenge := *challenge
+		if challengeSource == "default" {
+			appliedChallenge = "forced"
+		}
+		if err := persistPanelChallengeMode(appliedChallenge); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
-		if err := applyPanelChallengeModeToPaths(*challenge, []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}); err != nil {
+		if err := applyPanelChallengeModeToPaths(appliedChallenge, []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
@@ -498,7 +502,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
-		challengeStatus := buildPanelChallengeStatus(*challenge, panelMode, luaLoaded)
+		requestedMode := *challenge
+		if challengeSource == "default" {
+			requestedMode = panelMode
+		}
+		challengeStatus := buildPanelChallengeStatus(requestedMode, panelMode, luaLoaded)
 		fmt.Printf("Challenge mode requested (CLI): %s\n", challengeStatus.RequestedMode)
 		fmt.Printf("Challenge mode rendered (config): %s\n", challengeStatus.RenderedMode)
 		fmt.Printf("Challenge mode effective (runtime): %s\n", challengeStatus.EffectiveMode)
@@ -622,8 +630,8 @@ func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Commands: status, on, off")
 	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintf(os.Stderr, "Challenge options: %s (default: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
-	fmt.Fprintln(os.Stderr, "Migration: existing scripts using --challenge guard-only (or challenge=guard-only) are unchanged.")
+	fmt.Fprintf(os.Stderr, "Challenge options: %s (default for ON: forced; config fallback: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
+	fmt.Fprintln(os.Stderr, "Default behavior: cfm dnat cpanel on now applies --challenge forced unless explicitly overridden.\nMigration: existing scripts using --challenge guard-only (or challenge=guard-only) are unchanged.")
 	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority/challenge)")
 }
 
@@ -631,6 +639,6 @@ func panelOnHelp() {
 	fmt.Fprintf(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
 	fmt.Fprintln(os.Stdout, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintf(os.Stdout, "Challenge options: %s (default: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
+	fmt.Fprintf(os.Stdout, "Challenge options: %s (default for ON: forced; config fallback: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
 	fmt.Fprintf(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101, --challenge %s\n", defaultPanelChallengeMode)
 }
