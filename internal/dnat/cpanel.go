@@ -20,6 +20,7 @@ var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2
 var panelTargetPorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
 
 var challengeHTTPPortRe = regexp.MustCompile(`(?:^|\s)port=(\d+)`)
+var panelChallengeModeLineRe = regexp.MustCompile(`set \$cfm_panel_challenge_mode "[^"]*";`)
 
 type panelPortAccessStats struct {
 	HitsRecent           map[int]int
@@ -104,7 +105,8 @@ func panelChallengeModeChoices() string {
 }
 
 func setPanelChallengeModeInConfig(content, mode string) string {
-	return strings.ReplaceAll(content, `set $cfm_panel_challenge_mode "guard-only";`, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, mode))
+	repl := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, mode)
+	return panelChallengeModeLineRe.ReplaceAllStringFunc(content, func(string) string { return repl })
 }
 
 func applyPanelChallengeModeToPaths(mode string, paths []string) error {
