@@ -67,7 +67,6 @@ end
 
 local function ttl_key(ip, host) return "panel_ok|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 local function cooldown_key(ip, host) return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
-local function verify_key(ip, host) return "panel_verify|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 local function loop_key(ip, host) return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 
 local function mark_challenge_issued(ip, host, cooldown_ttl)
@@ -90,16 +89,6 @@ local function cooldown_active(ip, host)
     return sh:get(cooldown_key(ip, host)) ~= nil
 end
 
-local function note_verify_success(ip, host, ttl)
-    local sh = challenge_state(); if not sh then return end
-    sh:set(verify_key(ip, host), 1, ttl)
-end
-
-local function has_recent_verify(ip, host)
-    local sh = challenge_state(); if not sh then return false end
-    return sh:get(verify_key(ip, host)) ~= nil
-end
-
 local function note_challenge_attempt(ip, host, ttl)
     local sh = challenge_state(); if not sh then return 0 end
     local key = loop_key(ip, host)
@@ -107,11 +96,6 @@ local function note_challenge_attempt(ip, host, ttl)
     n = n + 1
     sh:set(key, n, ttl)
     return n
-end
-
-local function recent_challenge_attempts(ip, host)
-    local sh = challenge_state(); if not sh then return 0 end
-    return tonumber(sh:get(loop_key(ip, host)) or 0) or 0
 end
 
 local decision_uri = "/__cfm_panel_decide"
@@ -324,9 +308,9 @@ local function next_points_to_challenge()
     return is_internal_challenge_uri(decoded)
 end
 
--- /__cfm_verify is handled by exact nginx location blocks before Lua runs here.
+-- /__cfm_challenge can reach Lua via prefix matches; /__cfm_verify is handled by exact nginx location blocks before Lua runs here.
 local function is_challenge_flow_request(uri)
-    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") or uri == "/__cfm_verify" or starts_with(uri, "/__cfm_verify/")
+    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")
 end
 
 
@@ -421,12 +405,6 @@ end
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
-if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
-    local args = ngx.req.get_uri_args() or {}
-    local normalized_next = normalize_challenge_next_arg(args.next)
-    args.next = normalized_next
-    ngx.req.set_uri_args(args)
-end
 local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or "guard-only"
@@ -464,13 +442,6 @@ if is_api and api_auth then
 end
 
 if is_challenge_flow_request(uri) then
-    if uri == "/__cfm_verify" then
-        local has_cookie = clearance_cookie_state()
-        if has_cookie then
-            mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
-            note_verify_success(ngx.var.remote_addr, host, 20)
-        end
-    end
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
     decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
@@ -497,12 +468,6 @@ end
 if mode == "forced" then
     local has_cookie, cookie_reason = clearance_cookie_state()
     local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
-    if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then
-        ngx.var.cfm_pass = origin
-        ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "post_verify_loop_guard", decision_reason = cookie_reason or "cookie_missing", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
-        return
-    end
     if has_cookie or has_host_state then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin

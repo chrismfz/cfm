@@ -410,22 +410,7 @@ func TestPanelLuaDecision429FailClosedDeniesWithoutChallengeLoop(t *testing.T) {
 	}
 }
 
-func TestPanelLuaForcedMode_PostVerifyLoopGuardRequiresRecentVerifyOnly(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
-	if err != nil {
-		t.Fatalf("read lua: %v", err)
-	}
-	s := string(b)
-
-	if !strings.Contains(s, `if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then`) {
-		t.Fatalf("post-verify loop guard must require recent verify only")
-	}
-	if strings.Contains(s, `recent_challenge_attempts(ngx.var.remote_addr, host) > 0`) {
-		t.Fatalf("recent challenge attempts must not be treated as verification in forced mode allow path")
-	}
-}
-
-func TestPanelLuaForcedMode_PostVerifyLoopGuardStillAllowsResumeAfterVerify(t *testing.T) {
+func TestPanelLuaForcedMode_DoesNotDependOnLuaVerifyCallbackGuard(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
@@ -433,13 +418,32 @@ func TestPanelLuaForcedMode_PostVerifyLoopGuardStillAllowsResumeAfterVerify(t *t
 	s := string(b)
 
 	for _, tok := range []string{
-		`if uri == "/__cfm_verify" then`,
-		`note_verify_success(ngx.var.remote_addr, host, 20)`,
-		`if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then`,
+		`has_recent_verify(`,
+		`note_verify_success(`,
 		`reason = "post_verify_loop_guard"`,
 	} {
-		if !strings.Contains(s, tok) {
-			t.Fatalf("missing post-verify guard token %q", tok)
+		if strings.Contains(s, tok) {
+			t.Fatalf("forced mode must not depend on unreachable Lua verify callback token %q", tok)
 		}
+	}
+}
+
+func TestPanelLuaChallengeFlow_DoesNotTreatVerifyAsLuaPassThrough(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local function is_challenge_flow_request(uri)`,
+		`return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing challenge-flow token %q", tok)
+		}
+	}
+	if strings.Contains(s, `uri == "/__cfm_verify"`) {
+		t.Fatalf("verify endpoint must not be included in Lua challenge-flow pass-through")
 	}
 }
