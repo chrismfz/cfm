@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestEnsureNftPorts_UsesQuotedCommentToken(t *testing.T) {
+func TestEnsureNftPorts_UsesCanonicalUnquotedCommentToken(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "nft.log")
 	nftPath := filepath.Join(tmp, "nft")
@@ -34,27 +34,27 @@ func TestEnsureNftPorts_UsesQuotedCommentToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read nft log: %v", err)
 	}
-	if !strings.Contains(string(logData), `comment "cfm_cpanel_dnat:12082"`) {
-		t.Fatalf("expected quoted comment token in nft command log, got:\n%s", string(logData))
+	if !strings.Contains(string(logData), `comment cfm_cpanel_dnat:12082`) {
+		t.Fatalf("expected ununquoted comment token in nft command log, got:\n%s", string(logData))
 	}
 }
 
-func TestNftParserAcceptsColonCommentWhenQuoted(t *testing.T) {
+func TestNftParserAcceptsColonCommentUnquoted(t *testing.T) {
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed in test environment")
 	}
 	script := `add table inet cfm_test
 add chain inet cfm_test input { type filter hook input priority 0; policy accept; }
-add rule inet cfm_test input tcp dport 12082 ct state new accept comment "cfm_cpanel_dnat:12082"`
+add rule inet cfm_test input tcp dport 12082 ct state new accept comment cfm_cpanel_dnat:12082`
 	out := runOut("sh", "-c", "printf '%s\n' \""+strings.ReplaceAll(script, "\"", "\\\"")+"\" | nft -c -f -")
 	if strings.Contains(strings.ToLower(out), "error") {
-		t.Fatalf("nft parser rejected quoted comment: %s", out)
+		t.Fatalf("nft parser rejected unquoted comment: %s", out)
 	}
 }
 
-func TestParseManagedRuleLine_MatchesQuotedCommentForRemoval(t *testing.T) {
-	port, handle, ok := parseManagedRuleLine(`tcp dport 12082 ct state new accept comment "cfm_cpanel_dnat:12082" # handle 44`)
+func TestParseManagedRuleLine_MatchesUnquotedCommentForRemoval(t *testing.T) {
+	port, handle, ok := parseManagedRuleLine(`tcp dport 12082 ct state new accept comment cfm_cpanel_dnat:12082 # handle 44`)
 	if !ok || port != "12082" || handle != "44" {
-		t.Fatalf("unexpected parse for quoted comment: ok=%v port=%s handle=%s", ok, port, handle)
+		t.Fatalf("unexpected parse for unquoted comment: ok=%v port=%s handle=%s", ok, port, handle)
 	}
 }
