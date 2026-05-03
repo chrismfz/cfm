@@ -369,3 +369,43 @@ func TestPanelLuaProxyHostNonBrowserAgentsSensitivePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestPanelLuaDecision429FailOpenUsesConfiguredFailMode(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		`if decision.outcome == "challenge_rate_limited" then`,
+		`if fail_mode == "fail-open" then`,
+		`decision = "allow", reason = "challenge_rate_limited"`,
+		`allow_origin = "1"`,
+		`target = origin`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing 429 fail-open token %q", tok)
+		}
+	}
+}
+
+func TestPanelLuaDecision429FailClosedDeniesWithoutChallengeLoop(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		`if decision.outcome == "challenge_rate_limited" then`,
+		`decision = "deny", reason = "challenge_rate_limited"`,
+		`deny_fail_closed = "1"`,
+		`return ngx.exit(ngx.HTTP_FORBIDDEN)`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing 429 fail-closed token %q", tok)
+		}
+	}
+	if strings.Contains(s, `issue_challenge(mode, "challenge_rate_limited"`) {
+		t.Fatalf("429 handling must not rechallenge and loop")
+	}
+}
