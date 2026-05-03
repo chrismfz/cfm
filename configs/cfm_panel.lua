@@ -146,7 +146,7 @@ local function strip_nested_next_chain(raw_next)
     local candidate = sanitize_panel_next_target(raw_next, "/")
     if is_internal_decision_uri(candidate) then return "/" end
     if type(candidate) ~= "string" or candidate == "" then return "/" end
-    if not starts_with(candidate, "/") then return candidate end
+    if not starts_with(candidate, "/") then return "/" end
     local path, query = candidate:match("^([^?]*)%??(.*)$")
     if not query or query == "" then return candidate end
     local cleaned = {}
