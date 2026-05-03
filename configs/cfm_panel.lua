@@ -125,7 +125,7 @@ local function sanitize_panel_next_target(raw_next, fallback)
         end
         candidate = decoded
     end
-    if is_internal_guard_uri(candidate) or is_internal_decision_uri(candidate) then
+    if is_internal_guard_uri(candidate) then
         return fallback or "/"
     end
     return candidate or fallback or "/"
@@ -174,6 +174,15 @@ local function normalize_challenge_next_arg(next_arg)
     return "/"
 end
 
+local function safe_next_from_request(default_next)
+    local args = ngx.req.get_uri_args() or {}
+    local normalized = normalize_challenge_next_arg(args.next)
+    if normalized ~= "/" then
+        return normalized
+    end
+    return strip_nested_next_chain(default_next or "/")
+end
+
 
 local function with_single_next_arg(url, next_value)
     local safe_next = sanitize_panel_next_target(next_value, "/")
@@ -217,7 +226,10 @@ local function challenge_redirect_target(decision)
             return challenge_location
         end
     end
-    local safe_next = sanitize_panel_next_target(req_uri, "/")
+    local safe_next = safe_next_from_request(req_uri)
+    if loc == challenge_location and safe_next == "/whm" then
+        return challenge_location
+    end
     return with_single_next_arg(loc, safe_next)
 end
 

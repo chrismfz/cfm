@@ -18,6 +18,7 @@ end
 local function run_case(c, shared)
   shared = shared or { kv = {}, now = 1000 }
   if not shared.kv then shared.kv = {} end
+  if not shared.now then shared.now = 1000 end
   if c.now then shared.now = c.now end
   local function dict_get(k)
     local row = shared.kv[k]
@@ -138,7 +139,7 @@ end
 
 -- Challenge endpoint is exempt and must not re-challenge itself
 local ngx9 = run_case({ uri = "/__cfm_challenge", request_uri = "/__cfm_challenge?next=%2F" })
-assert_eq(ngx9.var.cfm_upstream, "cfm_panel_exempt", "challenge endpoint must be exempt from guard recursion")
+assert_eq(ngx9.var.cfm_upstream, "cfm_panel_origin", "challenge endpoint must be exempt from guard recursion")
 
 
 -- solve callback cookie should route subsequent request to origin (not challenge)
@@ -271,5 +272,45 @@ assert_eq(out24.location, "/__cfm_challenge?next=%2F", "internal decision next s
 if out24.location:find("/__cfm_panel_decide", 1, true) then
   error("decision flow leaked internal decision URI", 2)
 end
+
+
+-- Invalid internal next targeting verify must be sanitized to root.
+local _, out25 = run_case({
+  uri = "/",
+  request_uri = "/?next=%2F__cfm_verify",
+  uri_args = { next = "/__cfm_verify" },
+})
+assert_eq(out25.action, "redirect", "internal verify next should still challenge")
+assert_eq(out25.location, "/__cfm_challenge?next=%2F", "internal verify next must be normalized to root")
+if out25.location:find("/__cfm_verify", 1, true) then
+  error("internal verify next leaked into challenge redirect", 2)
+end
+
+-- Invalid internal next targeting challenge must be sanitized to root.
+local _, out26 = run_case({
+  uri = "/",
+  request_uri = "/?next=%2F__cfm_challenge",
+  uri_args = { next = "/__cfm_challenge" },
+})
+assert_eq(out26.action, "redirect", "internal challenge next should still challenge")
+assert_eq(out26.location, "/__cfm_challenge?next=%2F", "internal challenge next must be normalized to root")
+
+-- Duplicate next args with internal + safe must preserve first safe value before forwarding.
+local _, out27 = run_case({
+  uri = "/",
+  request_uri = "/?next=%2F__cfm_verify&next=%2Fsafe",
+  uri_args = { next = { "/__cfm_verify", "/safe" } },
+})
+assert_eq(out27.action, "redirect", "duplicate internal+safe next should still challenge")
+assert_eq(out27.location, "/__cfm_challenge?next=%2Fsafe", "duplicate internal+safe next should normalize to safe value")
+
+-- Verify route must never keep internal redirect targets after normalization.
+local ngx28 = run_case({
+  uri = "/__cfm_verify",
+  request_uri = "/__cfm_verify?next=%2F__cfm_challenge",
+  cookie = "cfm_ok=ok",
+  uri_args = { next = "/__cfm_challenge" },
+})
+assert_eq(ngx28.req.get_uri_args().next, "/", "verify next should normalize internal challenge target to root")
 
 print("ok")
