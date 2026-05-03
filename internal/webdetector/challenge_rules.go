@@ -30,8 +30,10 @@ type chalCtx struct {
 }
 
 
-// hostMatch returns true if host matches pattern exactly or as a subdomain.
-// Supports patterns like "example.com" or "*.example.com".
+// hostMatch returns true if host matches pattern using one of:
+//   - exact host: "example.com"
+//   - suffix-domain wildcard: "*.example.com"
+//   - prefix-label wildcard: "cpanel.*"
 func hostMatch(host, pattern string) bool {
     host = strings.ToLower(strings.TrimSpace(host))
     pattern = strings.ToLower(strings.TrimSpace(pattern))
@@ -40,6 +42,13 @@ func hostMatch(host, pattern string) bool {
     }
     if strings.HasPrefix(pattern, "*.") {
         pattern = strings.TrimPrefix(pattern, "*.")
+    }
+    if strings.HasSuffix(pattern, ".*") {
+        base := strings.TrimSuffix(pattern, ".*")
+        if base == "" {
+            return false
+        }
+        return strings.HasPrefix(host, base+".")
     }
     if host == pattern {
         return true
