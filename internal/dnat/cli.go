@@ -412,7 +412,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := persistPanelChallengeMode("forced"); err != nil {
+		if err := persistPanelChallengeEnabled(true); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
@@ -460,6 +460,9 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			return 1
 		}
 		setPanelFirewallHealth("OK", "", h.Attempted)
+		_ = persistPanelChallengeEnabled(false)
+		_ = applyPanelChallengeModeToPaths("off", []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+		_ = reloadPanelListenerService()
 		fmt.Println("DNAT cpanel: OFF")
 		for _, ch := range changes {
 			fmt.Println("Firewall:", ch)
