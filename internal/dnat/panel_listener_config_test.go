@@ -107,3 +107,29 @@ func TestPanelLuaPolicy_QueryDecisionApiDoesNotMapAllNon5xxToDeny(t *testing.T) 
 		t.Fatalf("query_decision_api appears to unconditionally deny non-5xx statuses")
 	}
 }
+
+func TestPanelLuaPolicy_ChallengeFlowDetectionDoesNotUseNextParam(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	start := strings.Index(s, "local function is_challenge_flow_request(uri)")
+	if start < 0 {
+		t.Fatalf("missing is_challenge_flow_request function")
+	}
+	end := strings.Index(s[start:], "\n\nlocal function append_set_cookie")
+	if end < 0 {
+		t.Fatalf("could not find end of is_challenge_flow_request function")
+	}
+	body := s[start : start+end]
+	if strings.Contains(body, "next_points_to_challenge(") {
+		t.Fatalf("is_challenge_flow_request must not call next_points_to_challenge")
+	}
+	for _, tok := range []string{"uri == \"/__cfm_challenge\"", "starts_with(uri, \"/__cfm_challenge/\")"} {
+		if !strings.Contains(body, tok) {
+			t.Fatalf("missing challenge-flow check token %q", tok)
+		}
+	}
+}

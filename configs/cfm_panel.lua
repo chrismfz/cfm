@@ -259,8 +259,7 @@ local function next_points_to_challenge()
 end
 
 local function is_challenge_flow_request(uri)
-    if uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") then return true end
-    return next_points_to_challenge()
+    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")
 end
 
 
