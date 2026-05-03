@@ -67,6 +67,8 @@ end
 
 local function ttl_key(ip, host) return "panel_ok|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 local function cooldown_key(ip, host) return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
+local function verify_key(ip, host) return "panel_verify|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
+local function loop_key(ip, host) return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 
 local function mark_challenge_issued(ip, host, cooldown_ttl)
     local sh = challenge_state(); if not sh then return end
@@ -86,6 +88,30 @@ end
 local function cooldown_active(ip, host)
     local sh = challenge_state(); if not sh then return false end
     return sh:get(cooldown_key(ip, host)) ~= nil
+end
+
+local function note_verify_success(ip, host, ttl)
+    local sh = challenge_state(); if not sh then return end
+    sh:set(verify_key(ip, host), 1, ttl)
+end
+
+local function has_recent_verify(ip, host)
+    local sh = challenge_state(); if not sh then return false end
+    return sh:get(verify_key(ip, host)) ~= nil
+end
+
+local function note_challenge_attempt(ip, host, ttl)
+    local sh = challenge_state(); if not sh then return 0 end
+    local key = loop_key(ip, host)
+    local n = tonumber(sh:get(key) or 0) or 0
+    n = n + 1
+    sh:set(key, n, ttl)
+    return n
+end
+
+local function recent_challenge_attempts(ip, host)
+    local sh = challenge_state(); if not sh then return 0 end
+    return tonumber(sh:get(loop_key(ip, host)) or 0) or 0
 end
 
 local decision_uri = "/__cfm_panel_decide"
@@ -144,11 +170,6 @@ local function strip_nested_next_chain(raw_next)
         local dk = ngx.unescape_uri(key or "")
         if dk ~= "next" then
             cleaned[#cleaned+1] = pair
-        elseif value and value ~= "" then
-            local nested = sanitize_panel_next_target(value, "")
-            if nested ~= "" and not is_internal_guard_uri(nested) then
-                cleaned[#cleaned+1] = "next=" .. ngx.escape_uri(nested)
-            end
         end
     end
     if #cleaned == 0 then return path end
@@ -165,9 +186,13 @@ local function normalize_challenge_next_arg(next_arg)
 
     for _, raw in ipairs(candidates) do
         if type(raw) == "string" and raw ~= "" then
-            local sanitized = strip_nested_next_chain(raw)
-            if type(sanitized) == "string" and sanitized ~= "" and not is_internal_guard_uri(sanitized) then
-                return sanitized
+            if is_internal_guard_uri(raw) then
+                -- try next candidate
+            else
+                local sanitized = strip_nested_next_chain(raw)
+                if type(sanitized) == "string" and sanitized ~= "" and not is_internal_guard_uri(sanitized) then
+                    return sanitized
+                end
             end
         end
     end
@@ -235,12 +260,13 @@ end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
     local loc = challenge_redirect_target(decision)
+    local attempts = note_challenge_attempt(ngx.var.remote_addr, ngx.var.host or "", 20)
     mark_challenge_issued(ngx.var.remote_addr, ngx.var.host or "", cooldown_ttl or 0)
     decision_log(ngx.INFO, {
         mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr,
         decision = "challenge", reason = reason, decision_reason = decision and decision.reason or "-",
         subreq_uri = decision and decision.subreq_uri or "-", subreq_status = decision and decision.subreq_status or "-", subreq_location = decision and decision.subreq_location or "-", decision_source = decision and decision.decision_source or "-",
-        allow_origin = "0", challenge_issued = "1", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", deny_fail_closed = "0", target = loc,
+        allow_origin = "0", challenge_issued = "1", challenge_entry = "1", challenge_solved = "0", challenge_resume = tostring(attempts), deny_fail_closed = "0", target = loc,
     })
     return ngx.redirect(loc, ngx.HTTP_TEMPORARY_REDIRECT)
 end
@@ -267,9 +293,16 @@ local function is_browser_like(ua)
     return ua:find("mozilla", 1, true) or ua:find("chrome", 1, true) or ua:find("safari", 1, true) or ua:find("firefox", 1, true) or ua:find("edg", 1, true)
 end
 
-local function has_clearance_cookie()
-    local cookie = "; " .. (ngx.var.http_cookie or "")
-    return cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true) or cookie:find("; cf_clearance=", 1, true) or cookie:find("; cp_security_token=", 1, true)
+local function clearance_cookie_state()
+    local raw = ngx.var.http_cookie or ""
+    local cookie = "; " .. raw
+    local has_any = cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true) or cookie:find("; cf_clearance=", 1, true) or cookie:find("; cp_security_token=", 1, true)
+    if not has_any then return false, "cookie_missing" end
+    local ok = cookie:match(";%s*cfm_ok=([^;]*)")
+    if ok ~= nil and (ok == "" or ok:find("[%c%s]")) then
+        return false, "cookie_parse_fail"
+    end
+    return true, "cookie_present"
 end
 
 local function is_exempt_path(uri)
@@ -355,6 +388,10 @@ local function query_decision_api()
         return { outcome = "redirect", reason = "subrequest_redirect", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
     end
 
+    if status == 429 then
+        return { outcome = "challenge_rate_limited", reason = "challenge_backend_429", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
+    end
+
     if status == 204 then
         return { outcome = "allow", reason = "backend_allow_204", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
     end
@@ -426,8 +463,12 @@ if is_api and api_auth then
 end
 
 if is_challenge_flow_request(uri) then
-    if uri == "/__cfm_verify" and has_clearance_cookie() then
-        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
+    if uri == "/__cfm_verify" then
+        local has_cookie = clearance_cookie_state()
+        if has_cookie then
+            mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
+            note_verify_success(ngx.var.remote_addr, host, 20)
+        end
     end
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
@@ -446,14 +487,21 @@ local needs_challenge = host_is_known_panel_prefix
 if mode == "guard-only" then
     needs_challenge = needs_challenge or is_panel_sensitive(uri, method)
 elseif mode == "browser" then
-    needs_challenge = needs_challenge or (is_browser_like(ngx.var.http_user_agent) and not has_clearance_cookie())
+    local has_cookie = clearance_cookie_state()
+    needs_challenge = needs_challenge or (is_browser_like(ngx.var.http_user_agent) and not has_cookie)
 elseif mode == "forced" then
     needs_challenge = true
 end
 
 if mode == "forced" then
-    local has_cookie = has_clearance_cookie()
+    local has_cookie, cookie_reason = clearance_cookie_state()
     local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
+    if (has_recent_verify(ngx.var.remote_addr, host) or recent_challenge_attempts(ngx.var.remote_addr, host) > 0) and (not has_cookie) and (not has_host_state) then
+        ngx.var.cfm_pass = origin
+        ngx.var.cfm_upstream = "cfm_panel_origin"
+        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "post_verify_loop_guard", decision_reason = cookie_reason or "cookie_missing", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
+        return
+    end
     if has_cookie or has_host_state then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
@@ -505,6 +553,11 @@ if needs_challenge then
 
     if decision.outcome == "redirect" then
         return issue_challenge(mode, "challenge_redirect", decision, challenge_cooldown_ttl)
+    end
+
+    if decision.outcome == "challenge_rate_limited" then
+        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_backend_429", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
     end
 
     if decision.outcome == "invalid_response" then
