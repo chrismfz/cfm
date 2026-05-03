@@ -104,7 +104,7 @@ func TestPanelHelpSnapshots(t *testing.T) {
 		"Migration: existing scripts using --challenge guard-only",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: off, guard-only, forced (default: guard-only)",
+		"Challenge options: off, guard-only, forced (default for ON: forced; config fallback: guard-only)",
 	} {
 		if !strings.Contains(errOut, token) {
 			t.Fatalf("help output missing %q\n%s", token, errOut)
@@ -123,7 +123,7 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 		"Usage: cfm dnat cpanel on",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: off, guard-only, forced (default: guard-only)",
+		"Challenge options: off, guard-only, forced (default for ON: forced; config fallback: guard-only)",
 		"mode=direct-cpsrvd",
 		"priority=-101",
 	} {
@@ -302,5 +302,53 @@ func TestReadPanelPortAccessStats(t *testing.T) {
 	}
 	if !stats.XferRedirect2083Seen {
 		t.Fatalf("expected xfer redirect marker")
+	}
+}
+
+func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
+	tmp := t.TempDir()
+	prevState := panelChallengeModeStatePath
+	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
+	t.Cleanup(func() { panelChallengeModeStatePath = prevState })
+
+	cfgDir := filepath.Join(tmp, "configs")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "cfm-panel-listeners.conf.in")
+	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "angie" {
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	t.Cleanup(func() { execCommand = origExec })
+
+	code := runPanelCLI([]string{"on"}, nil)
+	if code == 0 {
+		t.Fatalf("expected non-zero code in test env due missing nft/iptables dependencies")
+	}
+
+	if got := loadPersistedPanelChallengeMode(); got != "forced" {
+		t.Fatalf("persisted mode=%q want forced", got)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `set $cfm_panel_challenge_mode "forced";`) {
+		t.Fatalf("listener config not rewritten to forced:\n%s", string(b))
 	}
 }
