@@ -90,6 +90,15 @@ end
 
 local decision_uri = "/__cfm_panel_decide"
 
+local function is_internal_decision_uri(candidate)
+    if type(candidate) ~= "string" then return false end
+    local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
+    if c == "" then return false end
+    if c == decision_uri or starts_with(c, decision_uri .. "?") then return true end
+    if c:match("^https?://[^/]+/__cfm_panel_decide([/?#].*)?$") then return true end
+    return false
+end
+
 local function is_internal_challenge_uri(candidate)
     if type(candidate) ~= "string" then return false end
     local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
@@ -99,6 +108,10 @@ local function is_internal_challenge_uri(candidate)
     if c:match("^https?://[^/]+/__cfm_challenge([/?#].*)?$") then return true end
     if c:match("^https?://[^/]+/__cfm_verify([/?#].*)?$") then return true end
     return false
+end
+
+local function is_internal_guard_uri(candidate)
+    return is_internal_challenge_uri(candidate) or is_internal_decision_uri(candidate)
 end
 
 local function sanitize_panel_next_target(raw_next, fallback)
@@ -112,7 +125,7 @@ local function sanitize_panel_next_target(raw_next, fallback)
         end
         candidate = decoded
     end
-    if is_internal_challenge_uri(candidate) then
+    if is_internal_guard_uri(candidate) then
         return fallback or "/"
     end
     return candidate or fallback or "/"
@@ -132,7 +145,7 @@ local function strip_nested_next_chain(raw_next)
             cleaned[#cleaned+1] = pair
         elseif value and value ~= "" then
             local nested = sanitize_panel_next_target(value, "")
-            if nested ~= "" and not is_internal_challenge_uri(nested) then
+            if nested ~= "" and not is_internal_guard_uri(nested) then
                 cleaned[#cleaned+1] = "next=" .. ngx.escape_uri(nested)
             end
         end
@@ -164,6 +177,7 @@ local function challenge_redirect_target(decision)
     end
     local sep = loc:find("?", 1, true) and "&" or "?"
     local safe_next = sanitize_panel_next_target(req_uri, "/")
+    if is_internal_guard_uri(safe_next) then safe_next = "/" end
     return loc .. sep .. "next=" .. ngx.escape_uri(safe_next)
 end
 
@@ -323,6 +337,9 @@ if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
     if type(next_arg) == "table" then next_arg = next_arg[1] end
     if type(next_arg) == "string" and next_arg ~= "" then
         args.next = strip_nested_next_chain(next_arg)
+        if uri == "/__cfm_verify" and is_internal_guard_uri(args.next) then
+            args.next = "/"
+        end
         ngx.req.set_uri_args(args)
     end
 end

@@ -34,6 +34,11 @@ local function run_case(c, shared)
     shared.kv[k] = { v = v, exp = exp }
     return true
   end
+  local uri_args = c.uri_args or {}
+  local function unescape_uri(v)
+    v = tostring(v or "")
+    return (v:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end))
+  end
   local ngx = {
     INFO = 1, WARN = 2, DEBUG = 3,
     HTTP_TEMPORARY_REDIRECT = 307,
@@ -54,7 +59,11 @@ local function run_case(c, shared)
       OPENRESTY_OK_IP_TTL = OPENRESTY_OK_IP_TTL,
       cfm_panel_challenge_location = "/__cfm_panel_decide",
     },
-    req = { get_method = function() return c.method or "GET" end },
+    req = {
+      get_method = function() return c.method or "GET" end,
+      get_uri_args = function() return uri_args end,
+      set_uri_args = function(args) uri_args = args end,
+    },
     shared = {
       cfm_decisions = { get = dict_get, set = dict_set },
       cfm_stats = { get = dict_get, set = dict_set },
@@ -65,6 +74,7 @@ local function run_case(c, shared)
     redirect = function(loc, code) return { action = "redirect", location = loc, code = code } end,
     exit = function(code) return { action = "exit", code = code } end,
     decode_base64 = function(s) return s end,
+    unescape_uri = unescape_uri,
     escape_uri = function(v)
       v = tostring(v or "")
       v = v:gsub("%%", "%%25"):gsub(" ", "%%20"):gsub("/", "%%2F"):gsub("%?", "%%3F"):gsub("=", "%%3D"):gsub("&", "%%26")
@@ -207,5 +217,42 @@ local ngx19, out19 = run_case({ uri = "/", ip = "198.51.100.42", capture = funct
 end })
 assert_eq(out19, nil, "ignored CIDR decision allow should bypass challenge")
 assert_eq(ngx19.var.cfm_upstream, "cfm_panel_origin", "ignored CIDR should route to panel origin")
+
+
+-- Duplicate next params must not permit internal decision target.
+local _, out20 = run_case({
+  uri = "/",
+  request_uri = "/?next=%2F__cfm_panel_decide&next=%2F",
+  uri_args = { next = { "/__cfm_panel_decide", "/" } },
+})
+assert_eq(out20.action, "redirect", "duplicate next flow should still challenge")
+assert_eq(out20.location, "/__cfm_challenge?next=%2F", "duplicate next flow should normalize to public path")
+if out20.location:find("/__cfm_panel_decide", 1, true) then
+  error("duplicate next flow leaked internal decision URI", 2)
+end
+
+-- Verify path with internal next must sanitize next to /.
+local ngx21 = run_case({
+  uri = "/__cfm_verify",
+  request_uri = "/__cfm_verify?next=%2F__cfm_panel_decide",
+  cookie = "cfm_ok=ok",
+  uri_args = { next = "/__cfm_panel_decide" },
+})
+assert_eq(ngx21.var.cfm_upstream, "cfm_panel_origin", "verify with internal next should still pass to origin")
+
+-- Decision-provided internal next must be rewritten to public path.
+local _, out22 = run_case({
+  uri = "/",
+  request_uri = "/",
+  capture = function(uri)
+    assert_eq(uri, "/__cfm_panel_decide", "decision capture uri mismatch")
+    return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge?next=/__cfm_panel_decide" } }
+  end
+})
+assert_eq(out22.action, "redirect", "internal next decision flow should challenge")
+assert_eq(out22.location, "/__cfm_challenge?next=%2F", "internal decision next should be rewritten to /")
+if out22.location:find("/__cfm_panel_decide", 1, true) then
+  error("decision flow leaked internal decision URI", 2)
+end
 
 print("ok")
