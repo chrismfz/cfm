@@ -153,6 +153,26 @@ local function strip_nested_next_chain(raw_next)
     if #cleaned == 0 then return path end
     return path .. "?" .. table.concat(cleaned, "&")
 end
+
+local function normalize_challenge_next_arg(next_arg)
+    local candidates = {}
+    if type(next_arg) == "table" then
+        candidates = next_arg
+    else
+        candidates = { next_arg }
+    end
+
+    for _, raw in ipairs(candidates) do
+        if type(raw) == "string" and raw ~= "" then
+            local sanitized = strip_nested_next_chain(raw)
+            if type(sanitized) == "string" and sanitized ~= "" and not is_internal_guard_uri(sanitized) then
+                return sanitized
+            end
+        end
+    end
+    return "/"
+end
+
 local function challenge_redirect_target(decision)
     local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
     req_uri = strip_nested_next_chain(req_uri)
@@ -333,15 +353,8 @@ local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
     local args = ngx.req.get_uri_args() or {}
-    local next_arg = args.next
-    if type(next_arg) == "table" then next_arg = next_arg[1] end
-    if type(next_arg) == "string" and next_arg ~= "" then
-        args.next = strip_nested_next_chain(next_arg)
-        if uri == "/__cfm_verify" and is_internal_guard_uri(args.next) then
-            args.next = "/"
-        end
-        ngx.req.set_uri_args(args)
-    end
+    args.next = normalize_challenge_next_arg(args.next)
+    ngx.req.set_uri_args(args)
 end
 local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
