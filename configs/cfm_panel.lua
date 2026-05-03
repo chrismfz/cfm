@@ -251,6 +251,11 @@ local function is_panel_sensitive(uri, method)
     return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/openid_connect/") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
 end
 
+local function has_known_panel_prefix(host)
+    local h = (host or ""):lower()
+    return starts_with(h, "cpanel.") or starts_with(h, "whm.") or starts_with(h, "webmail.") or starts_with(h, "webdisk.")
+end
+
 local function is_configured_panel_host(host)
     local primary = (ngx.var.cfm_panel_primary_domain or ""):lower()
     local h = (host or ""):lower()
@@ -336,6 +341,9 @@ if not is_configured_panel_host(ngx.var.host) then
     return deny(mode, "host_not_configured")
 end
 
+local host = ngx.var.host or ""
+local host_is_known_panel_prefix = has_known_panel_prefix(host)
+
 if uri == decision_uri then
     local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
     if not is_internal then
@@ -377,11 +385,11 @@ if is_exempt_path(uri) then
     return
 end
 
-local needs_challenge = false
+local needs_challenge = host_is_known_panel_prefix
 if mode == "guard-only" then
-    needs_challenge = is_panel_sensitive(uri, method)
+    needs_challenge = needs_challenge or is_panel_sensitive(uri, method)
 elseif mode == "browser" then
-    needs_challenge = is_browser_like(ngx.var.http_user_agent) and not has_clearance_cookie()
+    needs_challenge = needs_challenge or (is_browser_like(ngx.var.http_user_agent) and not has_clearance_cookie())
 elseif mode == "forced" then
     needs_challenge = true
 end
