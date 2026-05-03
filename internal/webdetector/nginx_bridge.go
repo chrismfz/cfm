@@ -747,6 +747,11 @@ func vhostVariantsForBridge(host string) []string {
 		return []string{host}
 	}
 
+	// prefix-label wildcard: "cpanel.*" — store as-is, no www expansion
+	if strings.HasSuffix(host, ".*") {
+		return []string{host}
+	}
+
 	if strings.HasPrefix(host, "www.") {
 		return []string{host}
 	}
@@ -1167,7 +1172,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
 		vhAction = h.Action
 	} else if host != "" {
-		// wildcard match: keys like "*.example.com"
+		// wildcard match: "*.example.com" (suffix) or "cpanel.*" (prefix-label)
 		for pat, e := range b.vhState {
 			if !e.Expires.After(now) {
 				continue
@@ -1175,6 +1180,12 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			if len(pat) > 2 && pat[:2] == "*." {
 				suf := pat[1:] // ".example.com"
 				if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
+					vhAction = e.Action
+					break
+				}
+			} else if strings.HasSuffix(pat, ".*") {
+				base := pat[:len(pat)-2] // "cpanel"
+				if base != "" && strings.HasPrefix(host, base+".") {
 					vhAction = e.Action
 					break
 				}
