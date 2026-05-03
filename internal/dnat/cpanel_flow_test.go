@@ -409,3 +409,37 @@ func TestPanelLuaDecision429FailClosedDeniesWithoutChallengeLoop(t *testing.T) {
 		t.Fatalf("429 handling must not rechallenge and loop")
 	}
 }
+
+func TestPanelLuaForcedMode_PostVerifyLoopGuardRequiresRecentVerifyOnly(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	if !strings.Contains(s, `if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then`) {
+		t.Fatalf("post-verify loop guard must require recent verify only")
+	}
+	if strings.Contains(s, `recent_challenge_attempts(ngx.var.remote_addr, host) > 0`) {
+		t.Fatalf("recent challenge attempts must not be treated as verification in forced mode allow path")
+	}
+}
+
+func TestPanelLuaForcedMode_PostVerifyLoopGuardStillAllowsResumeAfterVerify(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`if uri == "/__cfm_verify" then`,
+		`note_verify_success(ngx.var.remote_addr, host, 20)`,
+		`if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then`,
+		`reason = "post_verify_loop_guard"`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing post-verify guard token %q", tok)
+		}
+	}
+}

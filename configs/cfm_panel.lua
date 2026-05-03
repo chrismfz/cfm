@@ -497,7 +497,7 @@ end
 if mode == "forced" then
     local has_cookie, cookie_reason = clearance_cookie_state()
     local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
-    if (has_recent_verify(ngx.var.remote_addr, host) or recent_challenge_attempts(ngx.var.remote_addr, host) > 0) and (not has_cookie) and (not has_host_state) then
+    if has_recent_verify(ngx.var.remote_addr, host) and (not has_cookie) and (not has_host_state) then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "post_verify_loop_guard", decision_reason = cookie_reason or "cookie_missing", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
