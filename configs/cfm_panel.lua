@@ -174,6 +174,27 @@ local function normalize_challenge_next_arg(next_arg)
     return "/"
 end
 
+
+local function with_single_next_arg(url, next_value)
+    local safe_next = sanitize_panel_next_target(next_value, "/")
+    if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end
+    local base, frag = url:match("^([^#]*)(#.*)$")
+    if not base then base, frag = url, "" end
+    local path, query = base:match("^([^?]*)%??(.*)$")
+    local kept = {}
+    if query and query ~= "" then
+        for pair in query:gmatch("[^&]+") do
+            local key = pair:match("^([^=]+)=?.*$") or ""
+            local decoded_key = ngx.unescape_uri(key)
+            if decoded_key ~= "next" then
+                kept[#kept + 1] = pair
+            end
+        end
+    end
+    kept[#kept + 1] = "next=" .. ngx.escape_uri(safe_next)
+    return path .. "?" .. table.concat(kept, "&") .. frag
+end
+
 local function challenge_redirect_target(decision)
     local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
     req_uri = strip_nested_next_chain(req_uri)
@@ -196,10 +217,8 @@ local function challenge_redirect_target(decision)
             return challenge_location
         end
     end
-    local sep = loc:find("?", 1, true) and "&" or "?"
     local safe_next = sanitize_panel_next_target(req_uri, "/")
-    if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end
-    return loc .. sep .. "next=" .. ngx.escape_uri(safe_next)
+    return with_single_next_arg(loc, safe_next)
 end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
@@ -355,9 +374,6 @@ local ua = ngx.var.http_user_agent or "-"
 if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then
     local args = ngx.req.get_uri_args() or {}
     local normalized_next = normalize_challenge_next_arg(args.next)
-    if is_internal_guard_uri(normalized_next) or is_internal_decision_uri(normalized_next) then
-        normalized_next = "/"
-    end
     args.next = normalized_next
     ngx.req.set_uri_args(args)
 end
