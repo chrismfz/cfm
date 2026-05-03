@@ -254,9 +254,10 @@ func TestPanelLuaChallengeFlowStripsNestedEncodedNextChains(t *testing.T) {
 
 	for _, tok := range []string{
 		`local function strip_nested_next_chain(raw_next)`,
-		`if dk ~= "next" then`,
-		`args.next = strip_nested_next_chain(next_arg)`,
-		`local nested = sanitize_panel_next_target(value, "")`,
+		`local function normalize_challenge_next_arg(next_arg)`,
+		`local sanitized = strip_nested_next_chain(raw)`,
+		`local normalized = normalize_challenge_next_arg(args.next)`,
+		`return with_single_next_arg(loc, safe_next)`,
 	} {
 
 		encodedPayloads := []string{
