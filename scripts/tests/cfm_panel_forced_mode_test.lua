@@ -337,4 +337,17 @@ local ngx28 = run_case({
 })
 assert_eq(ngx28.req.get_uri_args().next, "/", "verify next should normalize internal challenge target to root")
 
+-- Loop guard: recent verify marker + missing cookie/state should fail-safe allow (no infinite 307).
+local shared_loop = { now = 5000, kv = {} }
+shared_loop.kv["panel_verify|203.0.113.9|cpanel.example.test"] = { v = 1, exp = 5020 }
+shared_loop.kv["panel_loop|203.0.113.9|cpanel.example.test"] = { v = 1, exp = 5020 }
+local ngx_loop, out_loop = run_case({ uri = "/", request_uri = "/", host = "cpanel.example.test", cookie = "", now = 5001 }, shared_loop)
+assert_eq(out_loop, nil, "post-verify loop guard should allow temporary pass")
+assert_eq(ngx_loop.var.cfm_upstream, "cfm_panel_origin", "post-verify loop guard should route to origin")
+
+-- Non-looping baseline: request without recent verify still challenges.
+local _, out_baseline = run_case({ uri = "/", request_uri = "/", host = "cpanel.example.test", cookie = "", now = 5100 }, { now = 5100 })
+assert_eq(out_baseline.action, "redirect", "without recent verify, unsolved request should challenge")
+
+
 print("ok")
