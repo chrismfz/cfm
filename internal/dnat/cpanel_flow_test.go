@@ -197,7 +197,7 @@ func TestPanelLuaOffMode_DirectPassThroughWithoutChallenge(t *testing.T) {
 	s := string(b)
 
 	for _, tok := range []string{
-		`local needs_challenge = false`,
+		`local needs_challenge = host_is_known_panel_prefix`,
 		`ngx.var.cfm_pass = origin`,
 		`ngx.var.cfm_upstream = "cfm_panel_origin"`,
 		`reason = "mode_skip"`,
