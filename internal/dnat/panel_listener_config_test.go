@@ -144,3 +144,27 @@ func TestPanelLuaPolicy_DoesNotHandleVerifyEndpointInLua(t *testing.T) {
 		t.Fatalf("verify endpoint handling in Lua is dead code and must remain removed")
 	}
 }
+
+func TestPanelLuaPolicy_CookieDetectionUsesDelimitedNames(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	for _, tok := range []string{
+		`local cookie = "; " .. (ngx.var.http_cookie or "")`,
+		`cookie:find("; cfm_ok=", 1, true)`,
+		`cookie:find("; cfm_clearance=", 1, true)`,
+		`cookie:find("; cf_clearance=", 1, true)`,
+		`cookie:find("; cp_security_token=", 1, true)`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing delimited cookie detection token %q", tok)
+		}
+	}
+
+	if strings.Contains(s, `cookie:find("cfm_ok=", 1, true)`) {
+		t.Fatalf("raw cfm_ok cookie detection without delimiter may cause substring false positives")
+	}
+}
