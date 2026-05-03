@@ -725,12 +725,43 @@ do
   end
 end
 
--- ── Step 0: cPanel / webmail hard bypass ─────────────────────────────────────
+-- ── Step 0: cPanel / webmail targeted bypass ──────────────────────────────────
 do
+  local function panel_challenge_policy_active(h)
+    local mode = lower(ngx.var.cfm_panel_challenge_mode or "")
+    if mode == "forced" then return true end
+
+    -- If nginx maps host policy state into one of these vars, honor it.
+    local host_policy = lower(
+      ngx.var.cfm_panel_challenge_host
+      or ngx.var.cfm_panel_challenge_policy
+      or ngx.var.cfm_challenge_vhost
+      or ""
+    )
+    if host_policy == "1" or host_policy == "on" or host_policy == "true"
+       or host_policy == "active" or host_policy == "forced" or host_policy == "challenge" then
+      return true
+    end
+
+    local mode_by_host = lower(ngx.var.cfm_panel_challenge_host_mode or "")
+    if mode_by_host == "forced" or mode_by_host == "challenge" or mode_by_host == "active" then
+      return true
+    end
+
+    return false
+  end
+
   local h = lower(host); local u = lower(uri)
   local pfx = h:match("^([^%.]+)%.")
-  if (pfx == "cpanel" or pfx == "webmail" or pfx == "whm" or pfx == "mail")
-     or (u:sub(1, 7) == "/cpanel") or (u:sub(1, 8) == "/webmail") or (u:sub(1, 4) == "/whm") then
+
+  local is_panel_host = (pfx == "cpanel" or pfx == "webmail" or pfx == "whm" or pfx == "mail")
+  local is_panel_uri  = (u:sub(1, 7) == "/cpanel") or (u:sub(1, 8) == "/webmail") or (u:sub(1, 4) == "/whm")
+  local panel_like_req = is_panel_host or is_panel_uri
+
+  -- Keep Step 0 bypass only for explicit trusted/internal controls.
+  local explicit_trusted_bypass = (ngx.var.cfm_panel_trusted_bypass == "1") or (ngx.var.cfm_bypass_panel == "1")
+
+  if panel_like_req and explicit_trusted_bypass and not panel_challenge_policy_active(h) then
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
     return
   end
