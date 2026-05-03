@@ -108,7 +108,7 @@ func ensureNftPorts() ([]string, error) {
 		if strings.Contains(out, want) && strings.Contains(out, cpanelFWTag) {
 			continue
 		}
-		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("\"%s:%d\"", cpanelFWTag, p)); err != nil {
+		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("%s:%d", cpanelFWTag, p)); err != nil {
 			return changes, err
 		}
 		changes = append(changes, fmt.Sprintf("opened tcp/%d (nft cfm/input)", p))
@@ -187,7 +187,9 @@ func removeFirewalldPorts() ([]string, error) {
 
 func panelFirewallState() map[int]string {
 	state := map[int]string{}
-	for _, p := range panelTargetPorts { state[p] = "unknown" }
+	for _, p := range panelTargetPorts {
+		state[p] = "unknown"
+	}
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
 	for _, p := range panelTargetPorts {
 		if strings.Contains(out, fmt.Sprintf("tcp dport %d", p)) && strings.Contains(out, cpanelFWTag+":"+strconv.Itoa(p)) {
@@ -199,13 +201,19 @@ func panelFirewallState() map[int]string {
 	return state
 }
 
-func parseManagedRuleLine(line string) (string,string,bool) {
-	if !strings.Contains(line, cpanelFWTag+":") || !strings.Contains(line, " handle ") { return "","",false }
-	h := strings.TrimSpace(line[strings.LastIndex(line, " handle ")+8:])
-	parts := strings.Fields(line)
+func parseManagedRuleLine(line string) (string, string, bool) {
+	norm := strings.ReplaceAll(line, `"`, "")
+	if !strings.Contains(norm, cpanelFWTag+":") || !strings.Contains(norm, " handle ") {
+		return "", "", false
+	}
+	h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+	parts := strings.Fields(norm)
 	port := "?"
 	for i := 0; i+1 < len(parts); i++ {
-		if parts[i] == "dport" { port = parts[i+1]; break }
+		if parts[i] == "dport" {
+			port = parts[i+1]
+			break
+		}
 	}
-	return port,h,true
+	return port, h, true
 }
