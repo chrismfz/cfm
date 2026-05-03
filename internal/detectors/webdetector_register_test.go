@@ -1,6 +1,9 @@
 package detectors
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateChallengeHostPatterns(t *testing.T) {
 	tests := []struct {
@@ -21,5 +24,27 @@ func TestValidateChallengeHostPatterns(t *testing.T) {
 				t.Fatalf("validateChallengeHostPatterns() error=%v wantErr=%v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestChallengeVhostListParsing_NormalizesWhitespace(t *testing.T) {
+	raw := "  cpanel.* ,   whm.*  "
+	var got []string
+	for _, h := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ':' || r == ' ' || r == '\t'
+	}) {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h != "" {
+			got = append(got, h)
+		}
+	}
+	want := []string{"cpanel.*", "whm.*"}
+	if len(got) != len(want) {
+		t.Fatalf("parsed len=%d want len=%d parsed=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parsed[%d]=%q want %q (all=%v)", i, got[i], want[i], got)
+		}
 	}
 }
