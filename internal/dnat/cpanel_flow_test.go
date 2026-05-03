@@ -139,12 +139,11 @@ func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T
 	for _, tok := range []string{
 		`elseif mode == "forced" then`,
 		`needs_challenge = true`,
-		`if has_clearance_cookie() then`,
-		`cookie:find("cfm_ok=", 1, true)`,
-		`mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)`,
+		`local has_cookie, cookie_reason = clearance_cookie_state()`,
+		`cookie:find("; cfm_ok=", 1, true)`,
+		`local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)`,
 		`reason = "challenge_pass_cookie"`,
-		`if sensitive and has_bypass_ttl(ngx.var.remote_addr) then`,
-		`reason = "challenge_bypass_ttl"`,
+		`if has_cookie or has_host_state then`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing forced flow token %q", tok)
@@ -179,7 +178,7 @@ func TestPanelLuaForcedMode_RechallengeAfterTTLExpiry(t *testing.T) {
 	s := string(b)
 
 	for _, tok := range []string{
-		`if sensitive and cooldown_active(ngx.var.remote_addr) then`,
+		`if sensitive and cooldown_active(ngx.var.remote_addr, host) then`,
 		`return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)`,
 		`local function cooldown_active(ip)`,
 		`return sh:get(cooldown_key(ip)) ~= nil`,
@@ -286,11 +285,12 @@ func TestPanelLuaForcedModeSensitivePathsRequireCookieAndProtectLoops(t *testing
 
 	for _, tok := range []string{
 		`local sensitive = is_panel_sensitive(uri, method)`,
-		`if sensitive and cooldown_active(ngx.var.remote_addr) then`,
+		`if sensitive and cooldown_active(ngx.var.remote_addr, host) then`,
 		`return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)`,
 		`if sensitive and not is_browser_like(ua) then`,
 		`return deny(mode, "deny_unsolvable_client")`,
-		`return issue_challenge(mode, "forced_no_clearance_cookie", nil, challenge_cooldown_ttl)`,
+		`if sensitive then`,
+		`needs_challenge = true`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing forced sensitive/loop token %q", tok)
@@ -308,7 +308,7 @@ func TestPanelLuaDecisionLogsIncludeHostUAAndReasons(t *testing.T) {
 	for _, tok := range []string{
 		`" host=", fields.host or "-"`,
 		`" ua=", fields.ua or "-"`,
-		`"forced_no_clearance_cookie"`,
+		`"challenge_pass_cookie"`,
 		`"challenge_loop_protection"`,
 		`"deny_unsolvable_client"`,
 	} {

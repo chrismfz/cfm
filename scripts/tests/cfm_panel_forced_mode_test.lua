@@ -111,6 +111,25 @@ local ngx_cookie_only, out_cookie_only = run_case({ uri = "/", cookie = "cfm_ok=
 assert_eq(out_cookie_only, nil, "cookie-only request should pass in forced mode")
 assert_eq(ngx_cookie_only.var.cfm_upstream, "cfm_panel_origin", "cookie-only request should route to origin")
 
+-- third-party-only cookies are not direct forced-mode proof and must still hit backend decision
+local cf_capture_calls = 0
+local _, out_cf_only = run_case({ uri = "/", cookie = "cf_clearance=abc", capture = function(uri)
+  cf_capture_calls = cf_capture_calls + 1
+  assert_eq(uri, "/__cfm_panel_decide", "cf_clearance-only flow should call decision backend")
+  return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } }
+end })
+assert_eq(cf_capture_calls, 1, "cf_clearance-only flow should evaluate backend decision")
+assert_eq(out_cf_only.action, "redirect", "cf_clearance-only request should still challenge when backend says challenge")
+
+local cp_capture_calls = 0
+local _, out_cp_only = run_case({ uri = "/", cookie = "cp_security_token=abc", capture = function(uri)
+  cp_capture_calls = cp_capture_calls + 1
+  assert_eq(uri, "/__cfm_panel_decide", "cp_security_token-only flow should call decision backend")
+  return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge" } }
+end })
+assert_eq(cp_capture_calls, 1, "cp_security_token-only flow should evaluate backend decision")
+assert_eq(out_cp_only.action, "redirect", "cp_security_token-only request should still challenge when backend says challenge")
+
 -- authenticated API request -> pass without challenge
 local ngx3 = run_case({ uri = "/json-api/listaccts", auth = "whm token" })
 assert_eq(ngx3.var.cfm_upstream, "cfm_panel_api", "authenticated API should bypass challenge")

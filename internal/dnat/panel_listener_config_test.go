@@ -153,14 +153,23 @@ func TestPanelLuaPolicy_CookieDetectionUsesDelimitedNames(t *testing.T) {
 	s := string(b)
 
 	for _, tok := range []string{
-		`local cookie = "; " .. (ngx.var.http_cookie or "")`,
+		`local raw = ngx.var.http_cookie or ""`,
+		`local cookie = "; " .. raw`,
 		`cookie:find("; cfm_ok=", 1, true)`,
 		`cookie:find("; cfm_clearance=", 1, true)`,
-		`cookie:find("; cf_clearance=", 1, true)`,
-		`cookie:find("; cp_security_token=", 1, true)`,
+		`local clearance = cookie:match(";%s*cfm_clearance=([^;]*)")`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing delimited cookie detection token %q", tok)
+		}
+	}
+
+	for _, tok := range []string{
+		`cookie:find("; cf_clearance=", 1, true)`,
+		`cookie:find("; cp_security_token=", 1, true)`,
+	} {
+		if strings.Contains(s, tok) {
+			t.Fatalf("third-party cookie token %q must not be accepted as direct clearance", tok)
 		}
 	}
 

@@ -281,10 +281,14 @@ end
 local function clearance_cookie_state()
     local raw = ngx.var.http_cookie or ""
     local cookie = "; " .. raw
-    local has_any = cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true) or cookie:find("; cf_clearance=", 1, true) or cookie:find("; cp_security_token=", 1, true)
+    local has_any = cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true)
     if not has_any then return false, "cookie_missing" end
     local ok = cookie:match(";%s*cfm_ok=([^;]*)")
-    if ok ~= nil and (ok == "" or ok:find("[%c%s]")) then
+    if ok ~= nil and (ok == "" or ok:find("[%c]")) then
+        return false, "cookie_parse_fail"
+    end
+    local clearance = cookie:match(";%s*cfm_clearance=([^;]*)")
+    if clearance ~= nil and (clearance == "" or clearance:find("[%c]")) then
         return false, "cookie_parse_fail"
     end
     return true, "cookie_present"
@@ -468,6 +472,8 @@ end
 if mode == "forced" then
     local has_cookie, cookie_reason = clearance_cookie_state()
     local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
+    -- Third-party cookies (e.g., cf_clearance/cp_security_token) are not trusted
+    -- as direct challenge proof. Any use must happen via backend validation.
     if has_cookie or has_host_state then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
