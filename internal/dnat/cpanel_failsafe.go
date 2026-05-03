@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,15 +112,43 @@ func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
 }
 
 var panelProbePorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
+var panelProbeDialContextFn = func(ctx context.Context, network, address string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
 
 func probePanelTargets(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	type probeResult struct {
+		addr string
+		err  error
+	}
+
+	results := make(chan probeResult, len(panelProbePorts))
 	for _, p := range panelProbePorts {
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p))
-		c, err := net.DialTimeout("tcp", addr, timeout)
-		if err != nil {
-			return fmt.Errorf("%s down: %w", addr, err)
+		go func(address string) {
+			c, err := panelProbeDialContextFn(ctx, "tcp", address)
+			if err != nil {
+				results <- probeResult{addr: address, err: err}
+				return
+			}
+			_ = c.Close()
+			results <- probeResult{addr: address}
+		}(addr)
+	}
+
+	failed := make([]string, 0)
+	for range panelProbePorts {
+		r := <-results
+		if r.err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", r.addr, r.err))
 		}
-		_ = c.Close()
+	}
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		return fmt.Errorf("panel probe failed for %d/%d targets: %s", len(failed), len(panelProbePorts), strings.Join(failed, "; "))
 	}
 	return nil
 }
