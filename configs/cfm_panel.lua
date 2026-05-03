@@ -427,7 +427,7 @@ end
 local host = ngx.var.host or ""
 local host_is_known_panel_prefix = has_known_panel_prefix(host)
 
-if uri == decision_uri then
+if uri == decision_uri or uri == "/__cfm_verify" then
     local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
     if not is_internal then
         return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN)

@@ -134,14 +134,17 @@ func TestPanelLuaPolicy_ChallengeFlowDetectionDoesNotUseNextParam(t *testing.T) 
 	}
 }
 
-func TestPanelLuaPolicy_DoesNotHandleVerifyEndpointInLua(t *testing.T) {
+func TestPanelLuaPolicy_VerifyEndpointGuardIsScopedToInternalHandling(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
 	s := string(b)
-	if strings.Contains(s, `if uri == "/__cfm_verify" then`) {
-		t.Fatalf("verify endpoint handling in Lua is dead code and must remain removed")
+	if !strings.Contains(s, `if uri == decision_uri or uri == "/__cfm_verify" then`) {
+		t.Fatalf("missing internal-only guard branch for decision/verify endpoints")
+	}
+	if !strings.Contains(s, `return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN)`) {
+		t.Fatalf("internal-only guard branch must deny non-internal traffic")
 	}
 }
 
