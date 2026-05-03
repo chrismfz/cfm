@@ -487,22 +487,17 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
-		challengeSource := "active listener config"
-		if panelMode == "unknown" {
-			challengeSource = "config default"
-		}
-		requestedMode := panelMode
-		challengeStatus := buildPanelChallengeStatus(requestedMode, panelMode, luaLoaded)
-		fmt.Printf("Challenge mode requested (CLI): %s\n", challengeStatus.RequestedMode)
-		fmt.Printf("Challenge mode rendered (config): %s\n", challengeStatus.RenderedMode)
-		fmt.Printf("Challenge mode effective (runtime): %s\n", challengeStatus.EffectiveMode)
-		fmt.Printf("Challenge mode source: %s\n", challengeSource)
+		onProfile := buildPanelChallengeStatus(panelChallengeEnabledMode, panelMode, luaLoaded)
+		offProfile := buildPanelChallengeStatus(panelChallengeDisabledMode, panelChallengeDisabledMode, luaLoaded)
+		_ = offProfile // status always resolves both ON and OFF policy profiles.
+		policyActive := on && onProfile.Enforced
+		fmt.Printf("DNAT cpanel state: %s\n", map[bool]string{true: "ON", false: "OFF"}[on])
+		fmt.Printf("Policy: %s\n", map[bool]string{true: "active", false: "inactive"}[policyActive])
 		if modePath != "" {
-			fmt.Printf("Challenge mode active file: %s\n", modePath)
+			fmt.Printf("Policy active file: %s\n", modePath)
 		}
-		fmt.Printf("Challenge mode enforced: %t\n", challengeStatus.Enforced)
-		if challengeStatus.MismatchCause != "" {
-			fmt.Printf("WARNING: challenge runtime/config mismatch (%s)\n", challengeStatus.MismatchCause)
+		if onProfile.MismatchCause != "" && on {
+			fmt.Printf("WARNING: policy runtime/config mismatch (%s)\n", onProfile.MismatchCause)
 		}
 		fmt.Printf("Panel Lua guard loaded: %t\n", luaLoaded)
 		fmt.Printf("Panel Lua guard path: %s\n", panelLua.Path)
@@ -526,8 +521,8 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if panelDecision.Detail != "" {
 			fmt.Printf("Panel decision endpoint detail: %s\n", panelDecision.Detail)
 		}
-		if challengeStatus.EffectiveMode == "forced" && panelDecision.Status == "MISSING" {
-			fmt.Println("WARNING: challenge mode is forced, but /__cfm_panel_decide is missing; panel challenge cannot work until listener config is corrected and reloaded.")
+		if onProfile.EffectiveMode == panelChallengeEnabledMode && panelDecision.Status == "MISSING" {
+			fmt.Println("WARNING: policy is active, but /__cfm_panel_decide is missing; panel challenge cannot work until listener config is corrected and reloaded.")
 		}
 		fw := panelFirewallState()
 		h := getPanelFirewallHealth()
