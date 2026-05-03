@@ -258,6 +258,7 @@ local function next_points_to_challenge()
     return is_internal_challenge_uri(decoded)
 end
 
+-- /__cfm_verify is handled by exact nginx location blocks before Lua runs here.
 local function is_challenge_flow_request(uri)
     return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")
 end
@@ -388,15 +389,6 @@ if is_api and api_auth then
     ngx.var.cfm_upstream = "cfm_panel_api"
     local api_reason = is_directadmin_api and "api_authenticated_directadmin" or "api_authenticated"
     decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = api_reason, target = origin })
-    return
-end
-
-if uri == "/__cfm_verify" then
-    mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
-    refresh_clearance_cookie()
-    ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_origin"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "verify_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
     return
 end
 

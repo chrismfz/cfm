@@ -133,3 +133,14 @@ func TestPanelLuaPolicy_ChallengeFlowDetectionDoesNotUseNextParam(t *testing.T) 
 		}
 	}
 }
+
+func TestPanelLuaPolicy_DoesNotHandleVerifyEndpointInLua(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	if strings.Contains(s, `if uri == "/__cfm_verify" then`) {
+		t.Fatalf("verify endpoint handling in Lua is dead code and must remain removed")
+	}
+}
