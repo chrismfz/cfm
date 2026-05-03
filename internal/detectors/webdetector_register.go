@@ -71,6 +71,18 @@ func webdetRoutesProxy(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
+func validateChallengeHostPatterns(key string, entries []string) error {
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "*") && !strings.HasPrefix(entry, "*.") && !strings.HasSuffix(entry, ".*") {
+			return fmt.Errorf("%s entry %q is invalid: supported wildcards are only leading \"*.example.com\" or trailing \"label.*\" patterns", key, entry)
+		}
+	}
+	return nil
+}
+
 func (w *webdetectorWrapped) enqueueExternal(a core.Alert) {
 	if w == nil {
 		return
@@ -769,6 +781,15 @@ func init() {
 					cfg.ChallengeHostBypass = append(cfg.ChallengeHostBypass, h)
 				}
 			}
+		}
+		if err := validateChallengeHostPatterns("CHALLENGE_VHOST", cfg.ChallengeVHost); err != nil {
+			return nil, err
+		}
+		if err := validateChallengeHostPatterns("CHALLENGE_VHOST_IGNORE", cfg.ChallengeVHostIgnore); err != nil {
+			return nil, err
+		}
+		if err := validateChallengeHostPatterns("CHALLENGE_HOST_BYPASS", cfg.ChallengeHostBypass); err != nil {
+			return nil, err
 		}
 
 		rawAgents := kvStrClean(kv, "AGENT_LIST", "")
