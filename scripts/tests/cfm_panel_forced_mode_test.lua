@@ -47,7 +47,7 @@ local function run_case(c, shared)
     var = {
       uri = c.uri or "/",
       request_uri = c.request_uri or c.uri or "/",
-      host = "example.test",
+      host = c.host or "example.test",
       remote_addr = c.ip or "203.0.113.9",
       http_authorization = c.auth or "",
       http_user_agent = c.ua or "Mozilla/5.0",
@@ -66,6 +66,7 @@ local function run_case(c, shared)
       set_uri_args = function(args) uri_args = args end,
     },
     shared = {
+      cfm_challenge_state = { get = dict_get, set = dict_set },
       cfm_decisions = { get = dict_get, set = dict_set },
       cfm_stats = { get = dict_get, set = dict_set },
     },
@@ -99,9 +100,9 @@ local ngx1, out1 = run_case({ uri = "/" })
 assert_eq(out1.action, "redirect", "non-api without cookie should challenge")
 assert_eq(ngx1.var.cfm_pass, nil, "should not pass origin when challenged")
 
--- same client with valid cookie -> pass
-local ngx2 = run_case({ uri = "/", cookie = "cfm_ok=ok" })
-assert_eq(ngx2.var.cfm_upstream, "cfm_panel_origin", "cookie should allow origin pass")
+-- cookie alone should not bypass without host-scoped server state
+local _, out_cookie_only = run_case({ uri = "/", cookie = "cfm_ok=ok" })
+assert_eq(out_cookie_only.action, "redirect", "cookie-only request should still challenge without host-scoped state")
 
 -- authenticated API request -> pass without challenge
 local ngx3 = run_case({ uri = "/json-api/listaccts", auth = "whm token" })
@@ -170,15 +171,20 @@ if not set_cookie:find("cfm_ok=ok", 1, true) then
   error("forced solved request did not refresh cfm_ok cookie", 2)
 end
 
--- Browser A solves challenge -> Browser B same IP bypasses within OPENRESTY_OK_IP_TTL
+-- Browser A solves challenge -> Browser B same IP, unsolved host -> challenge required
 local shared_ip = { now = 2000 }
 local _, out12 = run_case({ uri = "/", request_uri = "/", now = 2000 }, shared_ip)
 assert_eq(out12.location, "/__cfm_challenge?next=%2F", "initial same-ip flow must challenge")
-local ngx13 = run_case({ uri = "/__cfm_verify", request_uri = "/__cfm_verify?next=%2F", cookie = "cfm_ok=ok", now = 2001 }, shared_ip)
+local ngx13 = run_case({ uri = "/__cfm_verify", request_uri = "/__cfm_verify?next=%2F", host = "cpanel.example.test", cookie = "cfm_ok=ok", now = 2001 }, shared_ip)
 assert_eq(ngx13.var.cfm_upstream, "cfm_panel_origin", "verify must pass to origin")
-local ngx14, out14 = run_case({ uri = "/", request_uri = "/", cookie = "", ua = "Mozilla/5.0 (Browser-B)", now = 2002 }, shared_ip)
-assert_eq(out14, nil, "same IP second browser must bypass after verify")
-assert_eq(ngx14.var.cfm_upstream, "cfm_panel_origin", "same IP bypass should route to origin")
+local _, out14 = run_case({ uri = "/", request_uri = "/", host = "whm.example.test", cookie = "cfm_ok=ok", ua = "Mozilla/5.0 (Browser-B)", now = 2002 }, shared_ip)
+assert_eq(out14.action, "redirect", "same IP on unsolved host must challenge")
+assert_eq(out14.location, "/__cfm_challenge?next=%2F", "same IP unsolved host should redirect to challenge")
+
+-- solve on host A then host A -> pass allowed
+local ngx14b, out14b = run_case({ uri = "/", request_uri = "/", host = "cpanel.example.test", cookie = "cfm_ok=ok", ua = "Mozilla/5.0 (Browser-B)", now = 2003 }, shared_ip)
+assert_eq(out14b, nil, "solved host with cookie should bypass")
+assert_eq(ngx14b.var.cfm_upstream, "cfm_panel_origin", "solved host with cookie should route to origin")
 
 -- Same browser with valid cookie bypasses within CHALLENGE_COOKIE_LIFE
 local ngx15, out15 = run_case({ uri = "/", request_uri = "/", cookie = "cfm_ok=ok", now = 2100 }, { now = 2100 })

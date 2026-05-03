@@ -292,7 +292,7 @@ end
 
 -- /__cfm_verify is handled by exact nginx location blocks before Lua runs here.
 local function is_challenge_flow_request(uri)
-    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")
+    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") or uri == "/__cfm_verify" or starts_with(uri, "/__cfm_verify/")
 end
 
 
@@ -426,6 +426,9 @@ if is_api and api_auth then
 end
 
 if is_challenge_flow_request(uri) then
+    if uri == "/__cfm_verify" and has_clearance_cookie() then
+        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
+    end
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
     decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
@@ -449,18 +452,13 @@ elseif mode == "forced" then
 end
 
 if mode == "forced" then
-    if has_clearance_cookie() then
-        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
+    local has_cookie = has_clearance_cookie()
+    local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
+    if has_cookie and has_host_state then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
-        return
-    end
-    if has_bypass_ttl(ngx.var.remote_addr, host) then
-        ngx.var.cfm_pass = origin
-        ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
         return
     end
     local sensitive = is_panel_sensitive(uri, method)
