@@ -556,7 +556,13 @@ if needs_challenge then
     end
 
     if decision.outcome == "challenge_rate_limited" then
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_backend_429", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
+        if fail_mode == "fail-open" then
+            ngx.var.cfm_pass = origin
+            ngx.var.cfm_upstream = "cfm_panel_origin"
+            decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_rate_limited", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
+            return
+        end
+        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_rate_limited", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "0", challenge_issued = "0", deny_fail_closed = "1", target = "-" })
         return ngx.exit(ngx.HTTP_FORBIDDEN)
     end
 
