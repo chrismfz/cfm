@@ -180,6 +180,8 @@ func TestPanelLuaPolicy_ChallengeVerifyFlowNeverResumesToInternalDecisionRoute(t
 	// GET / -> challenge redirect -> /__cfm_challenge?next=/__cfm_panel_decide&next=/ -> verify.
 	// Lua must normalize this chain so post-verify resume target is never /__cfm_panel_decide.
 	for _, tok := range []string{
+		`if c:find("/__cfm_panel_decide", 1, true) then return true end`,
+		`if is_internal_decision_uri(loc) then`,
 		`req_uri = strip_nested_next_chain(req_uri)`,
 		`if dk ~= "next" then`,
 		`local nested = sanitize_panel_next_target(value, "")`,
@@ -214,5 +216,22 @@ func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifySta
 	}
 	if decideCount != challengeCount || decideCount != verifyCount {
 		t.Fatalf("decide must stay internal while challenge/verify remain reachable per listener: decide=%d challenge=%d verify=%d", decideCount, challengeCount, verifyCount)
+	}
+}
+
+func TestPanelLuaPolicy_ChallengeRedirectNeverReturnsInternalDecisionLocationOn303(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		`if status >= 300 and status < 400 then`,
+		`if is_internal_decision_uri(loc) then`,
+		`return challenge_location`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing 303/internal-location guard token %q", tok)
+		}
 	}
 }

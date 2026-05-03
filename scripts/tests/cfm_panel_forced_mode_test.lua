@@ -292,7 +292,7 @@ local _, out24 = run_case({
   end
 })
 assert_eq(out24.action, "redirect", "internal next decision flow should challenge")
-assert_eq(out24.location, "/__cfm_challenge?next=%2F", "internal decision next should be rewritten to /")
+assert_eq(out24.location, "/__cfm_challenge", "internal decision next should be rewritten to public challenge endpoint")
 if out24.location:find("/__cfm_panel_decide", 1, true) then
   error("decision flow leaked internal decision URI", 2)
 end
@@ -348,6 +348,28 @@ assert_eq(ngx_loop.var.cfm_upstream, "cfm_panel_origin", "post-verify loop guard
 -- Non-looping baseline: request without recent verify still challenges.
 local _, out_baseline = run_case({ uri = "/", request_uri = "/", host = "cpanel.example.test", cookie = "", now = 5100 }, { now = 5100 })
 assert_eq(out_baseline.action, "redirect", "without recent verify, unsolved request should challenge")
+
+
+-- Production signature guard: 303 redirect location must never be internal decision URI.
+local _, out29 = run_case({
+  uri = "/",
+  request_uri = "/",
+  capture = function(uri)
+    assert_eq(uri, "/__cfm_panel_decide", "decision capture uri mismatch for 303 signature")
+    return { status = 303, body = "", header = { Location = "/__cfm_panel_decide" } }
+  end
+})
+assert_eq(out29.action, "redirect", "303 signature flow should redirect")
+assert_eq(out29.code, 307, "panel challenge redirect should stay temporary redirect")
+assert_eq(out29.location, "/__cfm_challenge", "303 internal decision location must be rewritten to public challenge endpoint")
+if out29.location == "/__cfm_panel_decide" then
+  error("303 Location leaked internal decision URI", 2)
+end
+
+-- Direct external access to internal decision URI must remain denied/not proxied.
+local out30 = run_case({ uri = "/__cfm_panel_decide", request_uri = "/__cfm_panel_decide", method = "GET" })
+assert_eq(out30.action, "exit", "external GET to internal decision URI must be denied")
+assert_eq(out30.code, 404, "external GET to internal decision URI must return 404")
 
 
 print("ok")

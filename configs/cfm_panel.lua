@@ -121,6 +121,7 @@ local function is_internal_decision_uri(candidate)
     local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
     if c == "" then return false end
     if c == decision_uri or starts_with(c, decision_uri .. "?") then return true end
+    if c:find("/__cfm_panel_decide", 1, true) then return true end
     if c:match("^https?://[^/]+/__cfm_panel_decide([/?#].*)?$") then return true end
     return false
 end
@@ -238,7 +239,7 @@ local function challenge_redirect_target(decision)
     end
 
     local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
-    if loc == decision_uri or starts_with(loc, decision_uri .. "?") then
+    if is_internal_decision_uri(loc) then
         return challenge_location
     end
     local full_decision = "http://" .. (ngx.var.host or "") .. decision_uri
