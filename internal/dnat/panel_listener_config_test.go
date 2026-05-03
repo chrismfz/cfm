@@ -168,3 +168,51 @@ func TestPanelLuaPolicy_CookieDetectionUsesDelimitedNames(t *testing.T) {
 		t.Fatalf("raw cfm_ok cookie detection without delimiter may cause substring false positives")
 	}
 }
+
+func TestPanelLuaPolicy_ChallengeVerifyFlowNeverResumesToInternalDecisionRoute(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+
+	// Regression path:
+	// GET / -> challenge redirect -> /__cfm_challenge?next=/__cfm_panel_decide&next=/ -> verify.
+	// Lua must normalize this chain so post-verify resume target is never /__cfm_panel_decide.
+	for _, tok := range []string{
+		`req_uri = strip_nested_next_chain(req_uri)`,
+		`if dk ~= "next" then`,
+		`local nested = sanitize_panel_next_target(value, "")`,
+		`if nested ~= "" and not is_internal_guard_uri(nested) then`,
+		`if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end`,
+		`local normalized_next = normalize_challenge_next_arg(args.next)`,
+		`args.next = normalized_next`,
+		`local decoded = sanitize_panel_next_target(next_arg, "")`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing verify/next-chain hardening token %q", tok)
+		}
+	}
+}
+
+func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifyStayReachable(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	s := string(b)
+
+	exactDecide := "location = /__cfm_panel_decide { internal;"
+	exactChallenge := "location = /__cfm_challenge { access_by_lua_block { return; } proxy_pass http://cfm_challenge;"
+	exactVerify := "location = /__cfm_verify { access_by_lua_block { return; } proxy_pass http://cfm_challenge;"
+
+	decideCount := strings.Count(s, exactDecide)
+	challengeCount := strings.Count(s, exactChallenge)
+	verifyCount := strings.Count(s, exactVerify)
+	if decideCount == 0 || challengeCount == 0 || verifyCount == 0 {
+		t.Fatalf("missing expected decide/challenge/verify locations: decide=%d challenge=%d verify=%d", decideCount, challengeCount, verifyCount)
+	}
+	if decideCount != challengeCount || decideCount != verifyCount {
+		t.Fatalf("decide must stay internal while challenge/verify remain reachable per listener: decide=%d challenge=%d verify=%d", decideCount, challengeCount, verifyCount)
+	}
+}
