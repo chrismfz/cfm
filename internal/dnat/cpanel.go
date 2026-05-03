@@ -95,14 +95,12 @@ type panelOpts struct {
 	challenge string
 }
 
-const defaultPanelChallengeMode = "guard-only"
+const panelChallengeEnabledMode = "forced"
+const panelChallengeDisabledMode = "off"
+const defaultPanelChallengeMode = panelChallengeEnabledMode
 
-var supportedPanelChallengeModes = []string{"off", defaultPanelChallengeMode, "forced"}
-var panelChallengeModeStatePath = "/var/lib/cfm/panel_challenge_mode"
-
-func panelChallengeModeChoices() string {
-	return strings.Join(supportedPanelChallengeModes, "|")
-}
+var panelChallengeEnabledStatePath = "/var/lib/cfm/panel_challenge_enabled"
+var panelChallengeModeStatePath = panelChallengeEnabledStatePath
 
 func setPanelChallengeModeInConfig(content, mode string) string {
 	repl := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, mode)
@@ -110,9 +108,8 @@ func setPanelChallengeModeInConfig(content, mode string) string {
 }
 
 func applyPanelChallengeModeToPaths(mode string, paths []string) error {
-	if !isSupportedPanelChallengeMode(mode) {
-		return fmt.Errorf("unsupported challenge mode %q (supported: %s)", mode, strings.Join(supportedPanelChallengeModes, ", "))
-	}
+	enabled := mode != panelChallengeDisabledMode
+	mode = panelChallengeMode(enabled)
 	replaced := false
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
@@ -129,40 +126,48 @@ func applyPanelChallengeModeToPaths(mode string, paths []string) error {
 		}
 	}
 	if !replaced {
-		return fmt.Errorf("no panel challenge mode replacement applied")
+		return nil
 	}
 	return nil
 }
 
-func isSupportedPanelChallengeMode(mode string) bool {
-	for _, m := range supportedPanelChallengeModes {
-		if mode == m {
-			return true
-		}
+func persistPanelChallengeEnabled(enabled bool) error {
+	if err := os.MkdirAll(filepath.Dir(panelChallengeEnabledStatePath), 0o755); err != nil {
+		return err
 	}
-	return false
+	v := "0\n"
+	if enabled {
+		v = "1\n"
+	}
+	return os.WriteFile(panelChallengeEnabledStatePath, []byte(v), 0o644)
+}
+
+func loadPersistedPanelChallengeEnabled() bool {
+	b, err := os.ReadFile(panelChallengeEnabledStatePath)
+	if err != nil {
+		return false
+	}
+	v := strings.TrimSpace(strings.ToLower(string(b)))
+	return v == "1" || v == "true" || v == "on" || v == panelChallengeEnabledMode
+}
+
+func panelChallengeMode(enabled bool) string {
+	if enabled {
+		return panelChallengeEnabledMode
+	}
+	return panelChallengeDisabledMode
+}
+
+func panelChallengeModeChoices() string {
+	return strings.Join([]string{panelChallengeDisabledMode, panelChallengeEnabledMode}, "|")
 }
 
 func persistPanelChallengeMode(mode string) error {
-	if !isSupportedPanelChallengeMode(mode) {
-		return fmt.Errorf("unsupported challenge mode %q (supported: %s)", mode, strings.Join(supportedPanelChallengeModes, ", "))
-	}
-	if err := os.MkdirAll(filepath.Dir(panelChallengeModeStatePath), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(panelChallengeModeStatePath, []byte(mode+"\n"), 0o644)
+	return persistPanelChallengeEnabled(mode != panelChallengeDisabledMode)
 }
 
 func loadPersistedPanelChallengeMode() string {
-	b, err := os.ReadFile(panelChallengeModeStatePath)
-	if err != nil {
-		return ""
-	}
-	mode := strings.TrimSpace(string(b))
-	if !isSupportedPanelChallengeMode(mode) {
-		return ""
-	}
-	return mode
+	return panelChallengeMode(loadPersistedPanelChallengeEnabled())
 }
 
 func runOut(name string, args ...string) string {
@@ -241,7 +246,7 @@ func panelListenerGuardStateFromPaths(paths []string) (string, bool, string) {
 			continue
 		}
 		s := string(b)
-		mode := "unknown"
+		mode := panelChallengeDisabledMode
 		if i := strings.Index(s, "set $cfm_panel_challenge_mode "); i >= 0 {
 			line := s[i:]
 			if j := strings.Index(line, "\n"); j >= 0 {
