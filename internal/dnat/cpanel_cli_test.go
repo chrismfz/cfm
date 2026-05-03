@@ -2,7 +2,6 @@ package dnat
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -36,7 +35,7 @@ func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	want := []string{"on", "--mode", "direct-cpsrvd", "--priority", "-101", "--challenge", "guard-only"}
+	want := []string{"on", "--mode", "direct-cpsrvd", "--priority", "-101"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %v want %v", got, want)
 	}
@@ -44,11 +43,11 @@ func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
 
 func TestChallengeShortcuts(t *testing.T) {
 	gotOn, err := normalizePanelArgs([]string{"on", "--challenge", "forced"})
-	if err != nil || strings.Join(gotOn, " ") != "on --challenge forced" {
+	if err != nil || strings.Join(gotOn, " ") != "on forced" {
 		t.Fatalf("unexpected normalize for forced: %v %v", gotOn, err)
 	}
 	gotOff, err := normalizePanelArgs([]string{"on", "--challenge", "off"})
-	if err != nil || strings.Join(gotOff, " ") != "on --challenge off" {
+	if err != nil || strings.Join(gotOff, " ") != "on off" {
 		t.Fatalf("unexpected normalize for off: %v %v", gotOff, err)
 	}
 }
@@ -114,11 +113,8 @@ func TestPanelHelpSnapshots(t *testing.T) {
 	for _, token := range []string{
 		"Commands: status, on, off",
 		"cfm dnat cpanel challenge on",
-		"cfm dnat cpanel challenge off",
-		"Migration: existing scripts using --challenge guard-only",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: off, guard-only, forced (default for ON: forced; config fallback: guard-only)",
 	} {
 		if !strings.Contains(errOut, token) {
 			t.Fatalf("help output missing %q\n%s", token, errOut)
@@ -137,7 +133,6 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 		"Usage: cfm dnat cpanel on",
 		"Modes: auto, chain-imunify, direct-cpsrvd, fallback",
 		"Priority guidance: -101 (CFM-first), -99 (Imunify-first)",
-		"Challenge options: off, guard-only, forced (default for ON: forced; config fallback: guard-only)",
 		"mode=direct-cpsrvd",
 		"priority=-101",
 	} {
@@ -214,41 +209,29 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 	}
 }
 
-func TestSetPanelChallengeModeInConfig_ReplacesAllExistingModes(t *testing.T) {
-	transitions := []struct{ from, to string }{
-		{from: "forced", to: "off"},
-		{from: "forced", to: "guard-only"},
-		{from: "off", to: "forced"},
-		{from: "off", to: "guard-only"},
-		{from: "guard-only", to: "forced"},
-		{from: "guard-only", to: "off"},
+func TestSetPanelChallengeModeInConfig_ReplacesAllOccurrences(t *testing.T) {
+	input := strings.Join([]string{
+		"server {",
+		`  set $cfm_panel_challenge_mode "off";`,
+		"}",
+		"server {",
+		`  set $cfm_panel_challenge_mode "off";`,
+		"}",
+		"server {",
+		`  set $cfm_panel_challenge_mode "off";`,
+		"}",
+	}, "\n")
+
+	got := setPanelChallengeModeInConfig(input, "forced")
+	if strings.Count(got, `set $cfm_panel_challenge_mode "forced";`) != 3 {
+		t.Fatalf("expected all listener blocks updated; got:\n%s", got)
 	}
-
-	for _, tc := range transitions {
-		input := strings.Join([]string{
-			"server {",
-			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
-			"}",
-			"server {",
-			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
-			"}",
-			"server {",
-			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
-			"}",
-		}, "\n")
-
-		got := setPanelChallengeModeInConfig(input, tc.to)
-		wantLine := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, tc.to)
-		if strings.Count(got, wantLine) != 3 {
-			t.Fatalf("from=%q to=%q expected all listener blocks updated; got:\n%s", tc.from, tc.to, got)
-		}
-		if strings.Contains(got, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, tc.from)) {
-			t.Fatalf("from=%q to=%q found old mode after replacement; got:\n%s", tc.from, tc.to, got)
-		}
+	if strings.Contains(got, `set $cfm_panel_challenge_mode "off";`) {
+		t.Fatalf("found old mode after replacement; got:\n%s", got)
 	}
 }
 
-func TestApplyPanelChallengeModeToPaths_ErrorWhenNoReplacementOccurs(t *testing.T) {
+func TestApplyPanelChallengeModeToPaths_NoReplacementIsNoOp(t *testing.T) {
 	tmp := t.TempDir()
 	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
 	content := `server { listen 443; }`
@@ -257,20 +240,66 @@ func TestApplyPanelChallengeModeToPaths_ErrorWhenNoReplacementOccurs(t *testing.
 	}
 
 	err := applyPanelChallengeModeToPaths("forced", []string{listenerPath})
-	if err == nil || !strings.Contains(err.Error(), "no panel challenge mode replacement applied") {
-		t.Fatalf("expected no replacement error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected no-op apply to succeed, got %v", err)
 	}
 }
 
-func TestInvalidChallengeModeRejected(t *testing.T) {
+func TestApplyPanelChallengeModeToPaths_OnWhenAlreadyOnSucceeds(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { set $cfm_panel_challenge_mode "forced"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyPanelChallengeModeToPaths("forced", []string{listenerPath}); err != nil {
+		t.Fatalf("expected idempotent on apply to succeed, got %v", err)
+	}
+	b, err := os.ReadFile(listenerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `set $cfm_panel_challenge_mode "forced";`) {
+		t.Fatalf("listener config should remain forced:\n%s", string(b))
+	}
+}
+
+func TestApplyPanelChallengeModeToPaths_NoOpConfigApplyDoesNotFail(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { listen 443; }`
+	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyPanelChallengeModeToPaths("forced", []string{listenerPath}); err != nil {
+		t.Fatalf("expected no-op config apply to succeed, got %v", err)
+	}
+}
+
+func TestApplyPanelChallengeModeToPaths_OffWhenAlreadyOffSucceeds(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { set $cfm_panel_challenge_mode "off"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyPanelChallengeModeToPaths("off", []string{listenerPath}); err != nil {
+		t.Fatalf("expected idempotent off apply to succeed, got %v", err)
+	}
+}
+
+func TestDeprecatedChallengeArgIsIgnored(t *testing.T) {
 	_, errOut := captureStreams(t, func() {
 		code := runPanelCLI([]string{"status", "--challenge", "bogus"}, nil)
-		if code != 2 {
-			t.Fatalf("expected code 2, got %d", code)
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
 		}
 	})
-	if !strings.Contains(errOut, "unsupported challenge mode") {
-		t.Fatalf("expected validation error, got: %s", errOut)
+	if !strings.Contains(errOut, "deprecated and ignored") {
+		t.Fatalf("expected deprecation warning, got: %s", errOut)
 	}
 }
 
@@ -322,7 +351,7 @@ func TestChallengeShortcutRejectsUnknown(t *testing.T) {
 			t.Fatalf("expected code 2, got %d", code)
 		}
 	})
-	if !strings.Contains(errOut, "unknown challenge shortcut") {
+	if !strings.Contains(errOut, "unknown deprecated challenge shortcut") {
 		t.Fatalf("expected shortcut validation error, got: %s", errOut)
 	}
 }
