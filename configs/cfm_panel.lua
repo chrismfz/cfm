@@ -65,27 +65,27 @@ local function challenge_state()
     return sh
 end
 
-local function ttl_key(ip) return "panel_ok|" .. tostring(ip or "-") end
-local function cooldown_key(ip) return "panel_cooldown|" .. tostring(ip or "-") end
+local function ttl_key(ip, host) return "panel_ok|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
+local function cooldown_key(ip, host) return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
 
-local function mark_challenge_issued(ip, cooldown_ttl)
+local function mark_challenge_issued(ip, host, cooldown_ttl)
     local sh = challenge_state(); if not sh then return end
-    sh:set(cooldown_key(ip), 1, cooldown_ttl)
+    sh:set(cooldown_key(ip, host), 1, cooldown_ttl)
 end
 
-local function mark_passed(ip, ok_ttl)
+local function mark_passed(ip, host, ok_ttl)
     local sh = challenge_state(); if not sh then return end
-    sh:set(ttl_key(ip), 1, ok_ttl)
+    sh:set(ttl_key(ip, host), 1, ok_ttl)
 end
 
-local function has_bypass_ttl(ip)
+local function has_bypass_ttl(ip, host)
     local sh = challenge_state(); if not sh then return false end
-    return sh:get(ttl_key(ip)) ~= nil
+    return sh:get(ttl_key(ip, host)) ~= nil
 end
 
-local function cooldown_active(ip)
+local function cooldown_active(ip, host)
     local sh = challenge_state(); if not sh then return false end
-    return sh:get(cooldown_key(ip)) ~= nil
+    return sh:get(cooldown_key(ip, host)) ~= nil
 end
 
 local decision_uri = "/__cfm_panel_decide"
@@ -169,7 +169,7 @@ end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
     local loc = challenge_redirect_target(decision)
-    mark_challenge_issued(ngx.var.remote_addr, cooldown_ttl or 0)
+    mark_challenge_issued(ngx.var.remote_addr, ngx.var.host or "", cooldown_ttl or 0)
     decision_log(ngx.INFO, {
         mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr,
         decision = "challenge", reason = reason, decision_reason = decision and decision.reason or "-",
@@ -363,7 +363,7 @@ if is_api and api_auth then
 end
 
 if uri == "/__cfm_verify" then
-    mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
+    mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
     refresh_clearance_cookie()
     ngx.var.cfm_pass = origin
     ngx.var.cfm_upstream = "cfm_panel_origin"
@@ -396,21 +396,21 @@ end
 
 if mode == "forced" then
     if has_clearance_cookie() then
-        mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
+        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
         return
     end
-    if has_bypass_ttl(ngx.var.remote_addr) then
+    if has_bypass_ttl(ngx.var.remote_addr, host) then
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_bypass_ttl", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "0", challenge_resume = "1", target = origin })
         return
     end
     local sensitive = is_panel_sensitive(uri, method)
-    if sensitive and cooldown_active(ngx.var.remote_addr) then
+    if sensitive and cooldown_active(ngx.var.remote_addr, host) then
         if not is_browser_like(ua) then
             return deny(mode, "challenge_loop_protection")
         end
@@ -427,7 +427,7 @@ end
 if needs_challenge then
     local decision = query_decision_api()
     if decision.outcome == "allow" then
-        mark_passed(ngx.var.remote_addr, openresty_ok_ip_ttl)
+        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
         decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_allow", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
