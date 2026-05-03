@@ -108,10 +108,6 @@ func ensureNftPorts() ([]string, error) {
 		if strings.Contains(out, want) && strings.Contains(out, cpanelFWTag) {
 			continue
 		}
-		cmd := fmt.Sprintf("add rule inet cfm input tcp dport %d ct state new accept comment \"%s:%d\"", p, cpanelFWTag, p)
-		if err := execCommand("nft", "-f", "-").Run(); err != nil {
-			_ = cmd
-		}
 		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("\"%s:%d\"", cpanelFWTag, p)); err != nil {
 			return changes, err
 		}
@@ -148,8 +144,46 @@ func removeNftPorts() ([]string, error) {
 	return changes, nil
 }
 
-func ensureFirewalldPorts() ([]string, error) { return nil, nil }
-func removeFirewalldPorts() ([]string, error) { return nil, nil }
+func ensureFirewalldPorts() ([]string, error) {
+	changes := []string{}
+	for _, p := range panelTargetPorts {
+		ps := fmt.Sprintf("%d/tcp", p)
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--query-port", ps); err == nil {
+			changes = append(changes, fmt.Sprintf("tcp/%d already open", p))
+			continue
+		}
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--add-port", ps); err != nil {
+			return changes, err
+		}
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--permanent", "--add-port", ps); err != nil {
+			return changes, err
+		}
+		changes = append(changes, fmt.Sprintf("opened tcp/%d (firewalld)", p))
+	}
+	return changes, nil
+}
+
+func removeFirewalldPorts() ([]string, error) {
+	changes := []string{}
+	for _, p := range panelTargetPorts {
+		ps := fmt.Sprintf("%d/tcp", p)
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--query-port", ps); err != nil {
+			changes = append(changes, fmt.Sprintf("tcp/%d not found", p))
+			continue
+		}
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--remove-port", ps); err != nil {
+			changes = append(changes, fmt.Sprintf("tcp/%d failed (%v)", p, err))
+			continue
+		}
+		if err := runFirewallCmd(fwFirewalld, "firewall-cmd", "--permanent", "--remove-port", ps); err != nil {
+			changes = append(changes, fmt.Sprintf("tcp/%d failed (%v)", p, err))
+			continue
+		}
+		changes = append(changes, fmt.Sprintf("tcp/%d removed", p))
+	}
+	sort.Strings(changes)
+	return changes, nil
+}
 
 func panelFirewallState() map[int]string {
 	state := map[int]string{}
