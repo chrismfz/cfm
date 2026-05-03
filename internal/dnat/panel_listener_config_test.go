@@ -76,7 +76,7 @@ func TestPanelLuaPolicy_DocumentsExemptionsAndModes(t *testing.T) {
 		t.Fatalf("read lua: %v", err)
 	}
 	s := string(b)
-	for _, tok := range []string{"guard-only", "browser", "is_exempt_path", "has_clearance_cookie", "backend_error_fail_closed", "backend_unavailable_fail_open", "cfm_panel_fail_mode or \"fail-open\""} {
+	for _, tok := range []string{"guard-only", "browser", "is_exempt_path", "clearance_cookie_state", "backend_error_fail_closed", "backend_unavailable_fail_open", "cfm_panel_fail_mode or \"fail-open\""} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing policy token %q", tok)
 		}
