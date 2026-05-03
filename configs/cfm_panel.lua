@@ -454,7 +454,7 @@ end
 if mode == "forced" then
     local has_cookie = has_clearance_cookie()
     local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
-    if has_cookie and has_host_state then
+    if has_cookie or has_host_state then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
