@@ -83,6 +83,20 @@ func TestBuildPanelChallengeStatus_MismatchWarningState(t *testing.T) {
 	}
 }
 
+func TestBuildPanelChallengeStatus_CleanOnSemantics(t *testing.T) {
+	st := buildPanelChallengeStatus(panelChallengeEnabledMode, panelChallengeEnabledMode, true)
+	if !st.Enforced {
+		t.Fatalf("expected ON profile to be enforced")
+	}
+}
+
+func TestBuildPanelChallengeStatus_CleanOffSemantics(t *testing.T) {
+	st := buildPanelChallengeStatus(panelChallengeDisabledMode, panelChallengeDisabledMode, true)
+	if !st.Enforced {
+		t.Fatalf("expected OFF profile to be enforced")
+	}
+}
+
 func TestNormalizePanelArgs_RejectsUnknownKeyValue(t *testing.T) {
 	_, err := normalizePanelArgs([]string{"on", "foo=bar"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported key=value") {
@@ -157,10 +171,10 @@ func TestChallengeModeDefaultReflected(t *testing.T) {
 	prev := panelChallengeModeStatePath
 	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
 	t.Cleanup(func() { panelChallengeModeStatePath = prev })
-	if got := loadPersistedPanelChallengeMode(); got != "" {
-		t.Fatalf("expected empty persisted mode, got %q", got)
+	if got := loadPersistedPanelChallengeMode(); got != "off" {
+		t.Fatalf("expected persisted mode off when unset, got %q", got)
 	}
-	if defaultPanelChallengeMode != "guard-only" {
+	if defaultPanelChallengeMode != "forced" {
 		t.Fatalf("unexpected default %q", defaultPanelChallengeMode)
 	}
 }
@@ -277,6 +291,8 @@ func TestPanelStatusSnapshotOmitsRecentHitFields(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
+		"DNAT cpanel state:",
+		"Policy: ",
 		"Port 12083 listener=",
 		"firewall=",
 		"Bridge socket (/var/run/cfm/cfm_nginx.sock):",
@@ -284,6 +300,17 @@ func TestPanelStatusSnapshotOmitsRecentHitFields(t *testing.T) {
 	} {
 		if !strings.Contains(out, required) {
 			t.Fatalf("status output missing %q\n%s", required, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"Challenge mode requested (CLI):",
+		"Challenge mode rendered (config):",
+		"Challenge mode effective (runtime):",
+		"Challenge mode source:",
+		"Challenge mode enforced:",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("status output unexpectedly contained stale field %q\n%s", forbidden, out)
 		}
 	}
 }
