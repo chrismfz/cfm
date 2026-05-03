@@ -2,9 +2,10 @@ package dnat
 
 import (
 	"bytes"
+	"fmt"
 	"io"
-	"os/exec"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,7 +41,6 @@ func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
-
 
 func TestChallengeShortcuts(t *testing.T) {
 	gotOn, err := normalizePanelArgs([]string{"on", "--challenge", "forced"})
@@ -200,6 +200,33 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 	}
 }
 
+func TestSetPanelChallengeModeInConfig_ReplacesAllExistingModes(t *testing.T) {
+	modes := []string{"off", "guard-only", "forced"}
+	for _, from := range modes {
+		for _, to := range modes {
+			if from == to {
+				continue
+			}
+			input := strings.Join([]string{
+				"server {",
+				fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, from),
+				"}",
+				"server {",
+				fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, from),
+				"}",
+			}, "\n")
+			got := setPanelChallengeModeInConfig(input, to)
+			wantLine := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, to)
+			if strings.Count(got, wantLine) != 2 {
+				t.Fatalf("from=%q to=%q expected both listener blocks updated; got:\n%s", from, to, got)
+			}
+			if strings.Contains(got, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, from)) {
+				t.Fatalf("from=%q to=%q found old mode after replacement; got:\n%s", from, to, got)
+			}
+		}
+	}
+}
+
 func TestInvalidChallengeModeRejected(t *testing.T) {
 	_, errOut := captureStreams(t, func() {
 		code := runPanelCLI([]string{"status", "--challenge", "bogus"}, nil)
@@ -239,7 +266,6 @@ func TestPanelStatusSnapshotOmitsRecentHitFields(t *testing.T) {
 		}
 	}
 }
-
 
 func TestChallengeShortcutRejectsUnknown(t *testing.T) {
 	_, errOut := captureStreams(t, func() {
