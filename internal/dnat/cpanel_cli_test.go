@@ -201,29 +201,50 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 }
 
 func TestSetPanelChallengeModeInConfig_ReplacesAllExistingModes(t *testing.T) {
-	modes := []string{"off", "guard-only", "forced"}
-	for _, from := range modes {
-		for _, to := range modes {
-			if from == to {
-				continue
-			}
-			input := strings.Join([]string{
-				"server {",
-				fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, from),
-				"}",
-				"server {",
-				fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, from),
-				"}",
-			}, "\n")
-			got := setPanelChallengeModeInConfig(input, to)
-			wantLine := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, to)
-			if strings.Count(got, wantLine) != 2 {
-				t.Fatalf("from=%q to=%q expected both listener blocks updated; got:\n%s", from, to, got)
-			}
-			if strings.Contains(got, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, from)) {
-				t.Fatalf("from=%q to=%q found old mode after replacement; got:\n%s", from, to, got)
-			}
+	transitions := []struct{ from, to string }{
+		{from: "forced", to: "off"},
+		{from: "forced", to: "guard-only"},
+		{from: "off", to: "forced"},
+		{from: "off", to: "guard-only"},
+		{from: "guard-only", to: "forced"},
+		{from: "guard-only", to: "off"},
+	}
+
+	for _, tc := range transitions {
+		input := strings.Join([]string{
+			"server {",
+			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
+			"}",
+			"server {",
+			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
+			"}",
+			"server {",
+			fmt.Sprintf(`  set $cfm_panel_challenge_mode %q;`, tc.from),
+			"}",
+		}, "\n")
+
+		got := setPanelChallengeModeInConfig(input, tc.to)
+		wantLine := fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, tc.to)
+		if strings.Count(got, wantLine) != 3 {
+			t.Fatalf("from=%q to=%q expected all listener blocks updated; got:\n%s", tc.from, tc.to, got)
 		}
+		if strings.Contains(got, fmt.Sprintf(`set $cfm_panel_challenge_mode %q;`, tc.from)) {
+			t.Fatalf("from=%q to=%q found old mode after replacement; got:\n%s", tc.from, tc.to, got)
+		}
+	}
+}
+
+func TestApplyPanelChallengeModeToPaths_ErrorWhenNoReplacementOccurs(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	content := `server { listen 443; }`
+	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyPanelChallengeModeToPaths("forced", []string{listenerPath})
+	if err == nil || !strings.Contains(err.Error(), "no panel challenge mode replacement applied") {
+		t.Fatalf("expected no replacement error, got %v", err)
 	}
 }
 

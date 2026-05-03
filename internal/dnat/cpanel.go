@@ -113,6 +113,7 @@ func applyPanelChallengeModeToPaths(mode string, paths []string) error {
 	if !isSupportedPanelChallengeMode(mode) {
 		return fmt.Errorf("unsupported challenge mode %q (supported: %s)", mode, strings.Join(supportedPanelChallengeModes, ", "))
 	}
+	replaced := false
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -122,9 +123,13 @@ func applyPanelChallengeModeToPaths(mode string, paths []string) error {
 		if updated == string(b) {
 			continue
 		}
+		replaced = true
 		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 			return fmt.Errorf("update %s: %w", path, err)
 		}
+	}
+	if !replaced {
+		return fmt.Errorf("no panel challenge mode replacement applied")
 	}
 	return nil
 }
