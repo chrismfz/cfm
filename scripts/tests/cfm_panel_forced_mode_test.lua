@@ -240,8 +240,25 @@ local ngx21 = run_case({
 })
 assert_eq(ngx21.var.cfm_upstream, "cfm_panel_origin", "verify with internal next should still pass to origin")
 
+-- Challenge endpoint must deterministically normalize table-form next to first non-internal value.
+local ngx22 = run_case({
+  uri = "/__cfm_challenge",
+  request_uri = "/__cfm_challenge?next=%2F__cfm_panel_decide&next=%2Fsafe",
+  uri_args = { next = { "/__cfm_panel_decide", "/safe" } },
+})
+assert_eq(ngx22.req.get_uri_args().next, "/safe", "challenge table next should normalize to first safe value")
+
+-- Verify endpoint table-form next with no safe value should normalize to root.
+local ngx23 = run_case({
+  uri = "/__cfm_verify",
+  request_uri = "/__cfm_verify?next=%2F__cfm_panel_decide&next=%2F__cfm_verify",
+  cookie = "cfm_ok=ok",
+  uri_args = { next = { "/__cfm_panel_decide", "/__cfm_verify" } },
+})
+assert_eq(ngx23.req.get_uri_args().next, "/", "verify table next should normalize to root when all candidates are internal")
+
 -- Decision-provided internal next must be rewritten to public path.
-local _, out22 = run_case({
+local _, out24 = run_case({
   uri = "/",
   request_uri = "/",
   capture = function(uri)
@@ -249,9 +266,9 @@ local _, out22 = run_case({
     return { status = 200, body = "challenge", header = { Location = "/__cfm_challenge?next=/__cfm_panel_decide" } }
   end
 })
-assert_eq(out22.action, "redirect", "internal next decision flow should challenge")
-assert_eq(out22.location, "/__cfm_challenge?next=%2F", "internal decision next should be rewritten to /")
-if out22.location:find("/__cfm_panel_decide", 1, true) then
+assert_eq(out24.action, "redirect", "internal next decision flow should challenge")
+assert_eq(out24.location, "/__cfm_challenge?next=%2F", "internal decision next should be rewritten to /")
+if out24.location:find("/__cfm_panel_decide", 1, true) then
   error("decision flow leaked internal decision URI", 2)
 end
 
