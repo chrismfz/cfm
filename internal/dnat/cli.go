@@ -360,13 +360,14 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "challenge" {
+		fmt.Fprintln(os.Stderr, "DEPRECATION: `cfm dnat cpanel challenge on|off` is deprecated and will be removed in a future release; use `cfm dnat cpanel on` or `cfm dnat cpanel off`.")
 		switch args[1] {
 		case "on":
-			args = append([]string{"on", "--challenge", "forced"}, args[2:]...)
+			args = append([]string{"on"}, args[2:]...)
 		case "off":
-			args = append([]string{"on", "--challenge", "off"}, args[2:]...)
+			args = append([]string{"off"}, args[2:]...)
 		default:
-			fmt.Fprintf(os.Stderr, "dnat cpanel: unknown challenge shortcut %q (use: cfm dnat cpanel challenge on|off)\n", args[1])
+			fmt.Fprintf(os.Stderr, "dnat cpanel: unknown deprecated challenge shortcut %q (use: cfm dnat cpanel on|off|status)\n", args[1])
 			panelHelp()
 			return 2
 		}
@@ -381,13 +382,6 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	fs.SetOutput(io.Discard)
 	mode := fs.String("mode", "auto", "mode")
 	priority := fs.Int("priority", -101, "priority")
-	challenge := fs.String("challenge", defaultPanelChallengeMode, "challenge")
-	challengeSource := "default"
-	for _, raw := range args {
-		if strings.HasPrefix(raw, "--challenge") || strings.HasPrefix(raw, "challenge=") {
-			challengeSource = "CLI flag"
-		}
-	}
 	sub := "status"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub = args[0]
@@ -405,10 +399,6 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		panelHelp()
 		return 2
 	}
-	if !isSupportedPanelChallengeMode(*challenge) {
-		fmt.Fprintf(os.Stderr, "dnat cpanel: unsupported challenge mode %q (supported: %s)\n", *challenge, strings.Join(supportedPanelChallengeModes, ", "))
-		return 2
-	}
 	selected := *mode
 	if selected == "auto" {
 		if len(detectedImunifyMappings()) > 0 {
@@ -422,15 +412,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		appliedChallenge := *challenge
-		if challengeSource == "default" {
-			appliedChallenge = "forced"
-		}
-		if err := persistPanelChallengeMode(appliedChallenge); err != nil {
+		if err := persistPanelChallengeMode("forced"); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
-		if err := applyPanelChallengeModeToPaths(appliedChallenge, []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}); err != nil {
+		if err := applyPanelChallengeModeToPaths("forced", []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
@@ -491,21 +477,18 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted
-				challengeSource = "config default"
 			} else {
 				panelMode = defaultPanelChallengeMode
-				challengeSource = "config default"
 			}
-		} else {
-			challengeSource = "active listener config"
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
 		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
-		requestedMode := *challenge
-		if challengeSource == "default" {
-			requestedMode = panelMode
+		challengeSource := "active listener config"
+		if panelMode == "unknown" {
+			challengeSource = "config default"
 		}
+		requestedMode := panelMode
 		challengeStatus := buildPanelChallengeStatus(requestedMode, panelMode, luaLoaded)
 		fmt.Printf("Challenge mode requested (CLI): %s\n", challengeStatus.RequestedMode)
 		fmt.Printf("Challenge mode rendered (config): %s\n", challengeStatus.RenderedMode)
@@ -607,11 +590,15 @@ func normalizePanelArgs(args []string) ([]string, error) {
 			continue
 		}
 		if strings.HasPrefix(a, "challenge=") {
-			out = append(out, "--challenge", strings.TrimPrefix(a, "challenge="))
+			fmt.Fprintln(os.Stderr, "DEPRECATION: `challenge=` is deprecated and ignored; `cfm dnat cpanel on` now always enables challenge mode.")
+			continue
+		}
+		if strings.HasPrefix(a, "--challenge") {
+			fmt.Fprintln(os.Stderr, "DEPRECATION: `--challenge` is deprecated and ignored; `cfm dnat cpanel on` now always enables challenge mode.")
 			continue
 		}
 		if strings.Contains(a, "=") && !strings.HasPrefix(a, "-") {
-			return nil, fmt.Errorf("dnat cpanel: unsupported key=value argument %q; use mode=, priority=, challenge=, or --flags", a)
+			return nil, fmt.Errorf("dnat cpanel: unsupported key=value argument %q; use mode=, priority=, or --flags", a)
 		}
 		out = append(out, a)
 	}
@@ -620,25 +607,23 @@ func normalizePanelArgs(args []string) ([]string, error) {
 
 func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
-	fmt.Fprintf(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
-	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel challenge on   (alias for: cfm dnat cpanel on --challenge forced)")
-	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel challenge off  (alias for: cfm dnat cpanel on --challenge off)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel help")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands: status, on, off")
 	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintf(os.Stderr, "Challenge options: %s (default for ON: forced; config fallback: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
-	fmt.Fprintln(os.Stderr, "Default behavior: cfm dnat cpanel on now applies --challenge forced unless explicitly overridden.\nMigration: existing scripts using --challenge guard-only (or challenge=guard-only) are unchanged.")
-	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority/challenge)")
+	fmt.Fprintln(os.Stderr, "Challenge behavior: cfm dnat cpanel on always enables forced challenge mode.")
+	fmt.Fprintln(os.Stderr, "Migration: deprecated `cfm dnat cpanel challenge on|off` and `--challenge` are accepted for one release cycle with warnings.")
+	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority)")
 }
 
 func panelOnHelp() {
-	fmt.Fprintf(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99] [--challenge %s]\n", panelChallengeModeChoices())
+	fmt.Fprintln(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
 	fmt.Fprintln(os.Stdout, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
-	fmt.Fprintf(os.Stdout, "Challenge options: %s (default for ON: forced; config fallback: %s)\n", strings.Join(supportedPanelChallengeModes, ", "), defaultPanelChallengeMode)
-	fmt.Fprintf(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101, --challenge %s\n", defaultPanelChallengeMode)
+	fmt.Fprintln(os.Stdout, "Challenge behavior: ON always applies forced challenge mode.")
+	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101")
 }
