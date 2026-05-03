@@ -187,8 +187,6 @@ func TestPanelLuaPolicy_ChallengeVerifyFlowNeverResumesToInternalDecisionRoute(t
 		`local nested = sanitize_panel_next_target(value, "")`,
 		`if nested ~= "" and not is_internal_guard_uri(nested) then`,
 		`if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end`,
-		`local normalized_next = normalize_challenge_next_arg(args.next)`,
-		`args.next = normalized_next`,
 		`local decoded = sanitize_panel_next_target(next_arg, "")`,
 	} {
 		if !strings.Contains(s, tok) {
@@ -216,6 +214,24 @@ func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifySta
 	}
 	if decideCount != challengeCount || decideCount != verifyCount {
 		t.Fatalf("decide must stay internal while challenge/verify remain reachable per listener: decide=%d challenge=%d verify=%d", decideCount, challengeCount, verifyCount)
+	}
+}
+
+func TestPanelLuaPolicy_NoTopLevelVerifyOrChallengeArgRewrite(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	if err != nil {
+		t.Fatalf("read lua: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		`if uri == "/__cfm_challenge" or uri == "/__cfm_verify" then`,
+		`local normalized_next = normalize_challenge_next_arg(args.next)`,
+		`args.next = normalized_next`,
+		`ngx.req.set_uri_args(args)`,
+	} {
+		if strings.Contains(s, tok) {
+			t.Fatalf("unexpected top-level endpoint-specific uri-arg rewrite token %q", tok)
+		}
 	}
 }
 
