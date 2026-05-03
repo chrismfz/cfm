@@ -236,8 +236,8 @@ local function is_browser_like(ua)
 end
 
 local function has_clearance_cookie()
-    local cookie = ngx.var.http_cookie or ""
-    return cookie:find("cfm_ok=", 1, true) or cookie:find("cfm_clearance=", 1, true) or cookie:find("cf_clearance=", 1, true) or cookie:find("cp_security_token=", 1, true)
+    local cookie = "; " .. (ngx.var.http_cookie or "")
+    return cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true) or cookie:find("; cf_clearance=", 1, true) or cookie:find("; cp_security_token=", 1, true)
 end
 
 local function is_exempt_path(uri)
