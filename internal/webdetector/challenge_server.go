@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"sync"
 )
@@ -614,10 +616,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
 		secure := (r.TLS != nil) || (xfProto == "https")
 
-		// Random token is enough: unguessable => cannot be forged.
-		// (Lua only checks presence; it doesn't validate, so don't use something guessable.)
-		okVal := randomCookieValue()
 		ttl := s.cookieTTL()
+		clearanceVal := issueClearanceToken(ipStr, host, clearanceScope(r), time.Now().UTC().Add(ttl))
+		http.SetCookie(w, &http.Cookie{
+			Name:     "cfm_clearance",
+			Value:    clearanceVal,
+			Path:     "/",
+			MaxAge:   int(ttl.Seconds()),
+			HttpOnly: true,
+			Secure:   secure,
+			SameSite: http.SameSiteLaxMode,
+		})
+
+		// Transitional legacy solved marker (non-authoritative; kept for migration).
+		okVal := randomCookieValue()
 		http.SetCookie(w, &http.Cookie{
 			Name:     "cfm_ok",
 			Value:    okVal,
@@ -1421,9 +1433,21 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 	xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
 	secure := (r.TLS != nil) || (xfProto == "https")
 
-	// Set solved cookie
-	okVal := randomCookieValue()
+	// Set signed clearance cookie (authoritative)
 	ttl := s.cookieTTL()
+	clearanceVal := issueClearanceToken(ipStr, host, clearanceScope(r), time.Now().UTC().Add(ttl))
+	http.SetCookie(w, &http.Cookie{
+		Name:     "cfm_clearance",
+		Value:    clearanceVal,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	// Transitional legacy solved marker (non-authoritative; kept for migration).
+	okVal := randomCookieValue()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "cfm_ok",
 		Value:    okVal,
@@ -1552,6 +1576,87 @@ func issueToken(ip, ua, cookieVal string) string {
 	mac.Write([]byte(cookieVal))
 	sum := mac.Sum(nil)
 	return base64.RawURLEncoding.EncodeToString(sum)
+}
+
+type clearancePayload struct {
+	V     string `json:"v"`
+	Exp   int64  `json:"exp"`
+	IP    string `json:"ip"`
+	Host  string `json:"host"`
+	Scope string `json:"scope"`
+	Nonce string `json:"nonce"`
+	HMAC  string `json:"hmac"`
+}
+
+func normalizeClearanceHost(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	h = strings.TrimSuffix(h, ".")
+	if strings.HasPrefix(h, "[") {
+		if end := strings.Index(h, "]"); end > 0 {
+			h = h[1:end]
+		}
+	} else if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	} else if strings.Count(h, ":") == 1 {
+		if idx := strings.LastIndex(h, ":"); idx > 0 {
+			h = h[:idx]
+		}
+	}
+	return strings.TrimSuffix(h, ".")
+}
+
+func clearanceScope(r *http.Request) string {
+	port := strings.TrimSpace(r.Header.Get("X-Forwarded-Port"))
+	digits := make([]rune, 0, len(port))
+	for _, ch := range port {
+		if ch >= '0' && ch <= '9' {
+			digits = append(digits, ch)
+		}
+	}
+	if len(digits) == 0 {
+		return "web"
+	}
+	p := string(digits)
+	if p == "80" || p == "443" {
+		return "web"
+	}
+	return "panel:" + p
+}
+
+func issueClearanceToken(ip, host, scope string, exp time.Time) string {
+	p := clearancePayload{V: "1", Exp: exp.Unix(), IP: ip, Host: normalizeClearanceHost(host), Scope: scope, Nonce: randomCookieValue()}
+	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, p.Host, p.Scope, p.Nonce)
+	mac := hmac.New(sha256.New, secretKey())
+	mac.Write([]byte(payload))
+	p.HMAC = hex.EncodeToString(mac.Sum(nil))
+	b, _ := json.Marshal(p)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func verifyClearanceToken(tok, ip, host, scope string, now time.Time) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(tok))
+	if err != nil {
+		return false
+	}
+	var p clearancePayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false
+	}
+	if p.V != "1" || p.Exp <= now.Unix() || strings.TrimSpace(p.Nonce) == "" {
+		return false
+	}
+	if p.IP != ip || normalizeClearanceHost(p.Host) != normalizeClearanceHost(host) || p.Scope != scope {
+		return false
+	}
+	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, normalizeClearanceHost(p.Host), p.Scope, p.Nonce)
+	mac := hmac.New(sha256.New, secretKey())
+	mac.Write([]byte(payload))
+	want := mac.Sum(nil)
+	got, err := hex.DecodeString(p.HMAC)
+	if err != nil || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
 func verifyToken(tok, ip, ua, cookieVal string) bool {
