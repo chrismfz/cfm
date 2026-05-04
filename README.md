@@ -186,8 +186,12 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
   angie.conf                # Angie equivalent of openresty.conf (for boxes where Angie is used instead)
   webdetector_*.txt         # webdetector path lists: challenge_paths, malpaths, exclude, etc.
   
-  webui/cfm-admin/          # starter Vue-based /cfm-admin dashboard (WebTop MVP)
-  docs/cfm-admin-webtop.md  # deployment/auth notes for /cfm-admin
+  internal/webui/embed.go   # embeds admin UI assets into the Go binary
+  internal/webui/static/    # embedded /cfm-admin UI pages and assets
+    detectors/              # detectors UI page
+    settings/               # settings UI page
+    webdetector/            # webdetector pages (overview, controls, forensics, vhost, waf)
+  docs/cfm-admin-webtop.md  # deployment/auth notes for embedded /cfm-admin UI
 packaging/
   debian/DEBIAN/*           # postinst/prerm/postrm, conffiles, etc.
   rpm/SPECS/cfm.spec
