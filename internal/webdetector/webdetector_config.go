@@ -276,11 +276,11 @@ func (c *Config) FillDefaults() {
 		c.ChallengeAbuseCooldown = 30 * time.Minute
 	}
 
-	// OpenResty: keep IP ok-state short by default (avoid CGNAT/Tor "whitelisting").
-	// Set to 0 for cookie-only.
-	if c.OpenRestyOkIPTTL == 0 {
-		// default: 1 minute (only to prevent immediate redirect loops after solve)
-		c.OpenRestyOkIPTTL = 1 * time.Minute
+	// OpenResty solved-ok IP/host/scope cache TTL.
+	// 0 means cookie-only and must not be defaulted here.
+	// Detector registration is responsible for missing-key defaults.
+	if c.OpenRestyOkIPTTL < 0 {
+		c.OpenRestyOkIPTTL = 0
 	}
 
 	if c.ChallengePathsFile == "" {

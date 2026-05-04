@@ -3,6 +3,7 @@ package detectors
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateChallengeHostPatterns(t *testing.T) {
@@ -46,5 +47,21 @@ func TestChallengeVhostListParsing_NormalizesWhitespace(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("parsed[%d]=%q want %q (all=%v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestKVDurOpenRestyOkIPTTL_DefaultWhenMissing(t *testing.T) {
+	kv := KV{}
+	got := kvDur(kv, "OPENRESTY_OK_IP_TTL", time.Minute)
+	if got != time.Minute {
+		t.Fatalf("kvDur missing key = %v, want %v", got, time.Minute)
+	}
+}
+
+func TestKVDurOpenRestyOkIPTTL_ExplicitZeroPreserved(t *testing.T) {
+	kv := KV{"OPENRESTY_OK_IP_TTL": "0"}
+	got := kvDur(kv, "OPENRESTY_OK_IP_TTL", time.Minute)
+	if got != 0 {
+		t.Fatalf("kvDur explicit zero = %v, want 0", got)
 	}
 }

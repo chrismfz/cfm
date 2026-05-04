@@ -277,3 +277,46 @@ func TestNginxBridgeDecisionReevaluatesUADependentRules(t *testing.T) {
 		t.Fatalf("expected ua_challenge rule id, got=%v payload=%+v", got, challengePayload)
 	}
 }
+
+func TestNginxBridgeOKTouchDisabledWhenOkIPTTLZero(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, 0)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/nginx/ok/touch", bytes.NewBufferString(`{"ip":"203.0.113.10","host":"a.example.com","scope":"web","ttl_sec":120}`))
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleOKTouch(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ok touch status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.okState) != 0 {
+		t.Fatalf("okState should remain empty when OkIPTTL=0, got len=%d", len(b.okState))
+	}
+}
+
+func TestNginxBridgeDecisionDoesNotUseOkStateWhenOkIPTTLZero(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, 0)
+	ip := "203.0.113.10"
+	host := "a.example.com"
+	scope := "web"
+
+	b.mu.Lock()
+	b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = time.Now().Add(time.Minute)
+	b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(time.Minute)}
+	b.mu.Unlock()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/nginx/decision?ip="+ip+"&host="+host+"&scope="+scope, nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(rr, req)
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["vhost_action"] != "challenge" {
+		t.Fatalf("expected challenge with OkIPTTL=0; payload=%+v", payload)
+	}
+}
