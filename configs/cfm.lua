@@ -538,7 +538,7 @@ local function refresh_clearance_cookie(cookie_val)
 end
 
 local function validate_clearance_token(token, ip, host, scope)
-  local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or CFG.token
+  local secret = CFG.token
   local ok_call, ok, reason = pcall(clearance_validator.validate, token, ip, host, scope, secret)
   if not ok_call then
     local validate_err = ok

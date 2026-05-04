@@ -65,7 +65,7 @@ local function ct_eq_hex(a, b)
 end
 
 function _M.validate(token, ip, host, scope, secret)
-  if not token or token == "" then return false, "missing_cookie" end
+  if not token or token == "" then return false, "missing" end
   local raw = b64url_decode(token)
   if not raw then return false, "bad_sig" end
   local obj = cjson.decode(raw)

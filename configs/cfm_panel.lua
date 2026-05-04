@@ -42,6 +42,25 @@ if not ok_clearance then
     }
 end
 
+
+local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+
+local function load_token(path, tag)
+    local chunk, load_err = loadfile(path)
+    if not chunk then
+        ngx.log(ngx.ERR, "[cfm_panel] cannot load ", tag, " ", path, ": ", tostring(load_err))
+        return nil
+    end
+    local ok, val = pcall(chunk)
+    if not ok or type(val) ~= "string" or #val < 32 then
+        ngx.log(ngx.ERR, "[cfm_panel] ", tag, " invalid or too short: ", path)
+        return nil
+    end
+    return val
+end
+
+local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
+
 local function starts_with(s, p)
     return s and p and s:sub(1, #p) == p
 end
@@ -469,7 +488,7 @@ end
 
 local function normalize_validator_reason(reason)
     local buckets = {
-        missing_cookie = true,
+        missing = true,
         bad_sig = true,
         expired = true,
         ip_mismatch = true,
@@ -477,9 +496,9 @@ local function normalize_validator_reason(reason)
         scope_mismatch = true,
         validator_error = true,
         decision_timeout = true,
+        missing_clearance_secret = true,
     }
     reason = tostring(reason or "")
-    if reason == "missing" then return "missing_cookie" end
     if reason == "module_error" or reason == "error" or reason == "crypto_unavailable" then
         return "validator_error"
     end
@@ -491,7 +510,12 @@ end
 
 local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
-    local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
+    local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET")
+    if not secret or secret == "" then secret = panel_bridge_token end
+    if not secret or secret == "" then
+        ngx.log(ngx.ERR, "[cfm_panel_clearance_debug] reason=missing_clearance_secret ip=", tostring(ip or "-"), " host=", tostring(host or "-"), " scope=", tostring(scope or "-"), " has_cookie=", token and "true" or "false")
+        return false, "missing_clearance_secret"
+    end
     if clearance_debug then
         ngx.log(
             ngx.NOTICE,
@@ -542,6 +566,7 @@ local function clearance_cookie_state(ip, host, scope)
 
     reason = normalize_validator_reason(reason)
     if not ok then
+        ngx.log(ngx.NOTICE, "[cfm_panel_clearance_debug] reason=", tostring(reason or "-"), " ip=", tostring(ip or "-"), " host=", tostring(host or "-"), " scope=", tostring(scope or "-"), " has_cookie=", token and "true" or "false")
         return false, reason
     end
 

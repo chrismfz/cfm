@@ -1,9 +1,13 @@
 package webdetector
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -93,5 +97,29 @@ func TestClearanceScope(t *testing.T) {
 				t.Fatalf("clearanceScope() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClearanceUsesChallengeSecretChain(t *testing.T) {
+	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-secret-a")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := issueClearanceToken("203.0.113.9", "example.com", "panel:2087", now.Add(5*time.Minute))
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p clearancePayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatal(err)
+	}
+	payload := "1|" + strconv.FormatInt(p.Exp, 10) + "|" + p.IP + "|" + normalizeClearanceHost(p.Host) + "|" + p.Scope + "|" + p.Nonce
+	mac := hmac.New(sha256.New, []byte("challenge-secret-a"))
+	mac.Write([]byte(payload))
+	if got := hex.EncodeToString(mac.Sum(nil)); got != p.HMAC {
+		t.Fatalf("expected clearance secret signature")
+	}
+	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-secret-b")
+	if verifyClearanceToken(tok, "203.0.113.9", "example.com", "panel:2087", now) {
+		t.Fatal("expected validation to fail when challenge secret changes")
 	}
 }
