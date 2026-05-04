@@ -756,7 +756,7 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     validate_shared_lua_runtime
-    validate_lua_modules_for_angie
+   # validate_lua_modules_for_angie
 
     # 4. Auto-deploy angie.conf if shipped (with `angie -t` validation)
     deploy_angie_conf

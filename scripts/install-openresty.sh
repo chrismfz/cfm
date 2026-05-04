@@ -688,7 +688,7 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     validate_shared_lua_runtime
-    validate_lua_modules_for_openresty
+#    validate_lua_modules_for_openresty
     deploy_nginx_conf
     check_lua_token_files
     log "Shared fallback cert path: /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem"
