@@ -32,6 +32,7 @@ local function fallback_normalize_host(raw)
 end
 
 local ok_clearance, clearance_validator = pcall(require, "cfm_clearance")
+local clearance_module_error_reported = false
 if not ok_clearance then
     ngx.log(ngx.ERR, "[cfm_panel] clearance module load failed module=cfm_clearance err=", tostring(clearance_validator))
     clearance_validator = {
@@ -417,6 +418,11 @@ local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
     local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
     local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
+
+    if reason == "module_error" and not clearance_module_error_reported then
+        clearance_module_error_reported = true
+        ngx.log(ngx.ERR, "[cfm_panel] clearance validator unavailable; continuing with challenge/passthrough flow")
+    end
 
     if not ok then
         return false, reason
