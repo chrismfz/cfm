@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestEnsureNftPorts_UsesCanonicalUnquotedCommentToken(t *testing.T) {
+func TestEnsureNftPorts_UsesQuotedCommentToken(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "nft.log")
 	nftPath := filepath.Join(tmp, "nft")
@@ -34,8 +34,8 @@ func TestEnsureNftPorts_UsesCanonicalUnquotedCommentToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read nft log: %v", err)
 	}
-	if !strings.Contains(string(logData), `comment cfm_cpanel_dnat:12082`) {
-		t.Fatalf("expected ununquoted comment token in nft command log, got:\n%s", string(logData))
+	if !strings.Contains(string(logData), `comment "cfm_cpanel_dnat:12082"`) {
+		t.Fatalf("expected quoted comment token in nft command log, got:\n%s", string(logData))
 	}
 }
 

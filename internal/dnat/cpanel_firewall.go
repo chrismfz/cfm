@@ -108,7 +108,7 @@ func ensureNftPorts() ([]string, error) {
 		if strings.Contains(out, want) && strings.Contains(out, cpanelFWTag) {
 			continue
 		}
-		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf("%s:%d", cpanelFWTag, p)); err != nil {
+		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf(`"%s:%d"`, cpanelFWTag, p)); err != nil {
 			return changes, err
 		}
 		changes = append(changes, fmt.Sprintf("opened tcp/%d (nft cfm/input)", p))
