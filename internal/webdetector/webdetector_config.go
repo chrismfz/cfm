@@ -77,6 +77,7 @@ type Config struct {
 	// How long the solved cookie (cfm_ok) should live (challenge server).
 	// If 0, detector register will default it to CHALLENGE_COOLDOWN.
 	ChallengeCookieLife time.Duration // CHALLENGE_COOKIE_LIFE = 10m
+	ChallengeCooldown   time.Duration // CHALLENGE_COOLDOWN = 10m
 
 	// Log one-line expiry when a challenged CID wasn't solved before TTL.
 	// Default: true.
@@ -256,6 +257,9 @@ func (c *Config) FillDefaults() {
 	// This keeps cfm.challenges.log focused on higher-level [challenge] events.
 	if c.ChallengeAccessLogPath == "" {
 		c.ChallengeAccessLogPath = "/var/log/cfm/challenge.access.log"
+	}
+	if c.ChallengeCooldown <= 0 {
+		c.ChallengeCooldown = 10 * time.Minute
 	}
 
 	// Safe defaults (disabled unless enabled explicitly)

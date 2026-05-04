@@ -683,6 +683,7 @@ func init() {
 
 			// How long the solved cookie should live. If unset/0 => inherit CHALLENGE_COOLDOWN.
 			ChallengeCookieLife: 0,
+			ChallengeCooldown:   chalCooldown,
 
 			// Challenge emit controls:
 			// - CHALLENGE_LOG=0 disables [challenge] logs
