@@ -2068,7 +2068,7 @@ func scoreIPSimple(rps float64, req int, vhosts int) (float64, []string) {
 	return score, reasons
 }
 
-func proposeIPActions(row IPSignals) []IPActionProposal {
+func (e *Engine) proposeIPActions(row IPSignals) []IPActionProposal {
 	// Hard triggers (404/403/agent floods) should always propose a block.
 	for _, r := range row.Reasons {
 		switch {
@@ -2087,30 +2087,16 @@ func proposeIPActions(row IPSignals) []IPActionProposal {
 		}
 	}
 
-	s := row.Score
-	out := []IPActionProposal{}
-
-	switch {
-	case s >= 0.90:
-		out = append(out, IPActionProposal{
-			Action: "block",
-			Reason: "ip_score_high",
-			Score:  s,
-		})
-	case s >= 0.70:
-		out = append(out, IPActionProposal{
-			Action: "notify",
-			Reason: "ip_score_elevated",
-			Score:  s,
-		})
-	case s >= 0.50:
-		out = append(out, IPActionProposal{
-			Action: "watch",
-			Reason: "ip_score_borderline",
-			Score:  s,
-		})
+	if len(e.cfg.IPScoreRules) == 0 {
+		return nil
 	}
-	return out
+	s := row.Score
+	for _, r := range e.cfg.IPScoreRules {
+		if s >= r.MinScore {
+			return []IPActionProposal{{Action: r.Action, Reason: "ip_score_rule", Score: s}}
+		}
+	}
+	return nil
 }
 
 // IPShort παράγει full IP signals (με score & proposals) από το short-window state.
@@ -2345,7 +2331,7 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 
 	// 🔥 Enrichment + proposals ΜΟΝΟ για τις top-N
 	for i := range rows {
-		rows[i].Proposals = proposeIPActions(rows[i])
+		rows[i].Proposals = e.proposeIPActions(rows[i])
 
 		if e.enr == nil {
 			continue
@@ -2538,7 +2524,7 @@ func (e *Engine) IPLong(limit int) []IPSignals {
 
 	// Enrichment + proposals για τις top-N
 	for i := range rows {
-		rows[i].Proposals = proposeIPActions(rows[i])
+		rows[i].Proposals = e.proposeIPActions(rows[i])
 
 		if e.enr == nil {
 			continue
@@ -2774,15 +2760,15 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 	for _, row := range rows {
 		// find "block" proposal
 		blockReason := ""
-		wantBlock := false
+		action := ""
 		for _, p := range row.Proposals {
-			if p.Action == "block" {
-				wantBlock = true
+			if p.Action == "block" || p.Action == "challenge" {
+				action = p.Action
 				blockReason = p.Reason
 				break
 			}
 		}
-		if !wantBlock {
+		if action == "" {
 			continue
 		}
 
@@ -2858,11 +2844,19 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			return false
 		}()
 		if skip {
-			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "suppressed_by_cooldown", "req": row.Req, "vhosts": row.Vhosts}})
+			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "suppressed_by_cooldown", "req": row.Req, "vhosts": row.Vhosts, "action": action}})
 			continue
 		}
 
-		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "block", "req": row.Req, "vhosts": row.Vhosts}})
+		outcome := action
+		if action == "challenge" && e.nginxBridge != nil {
+			ttl := e.cfg.ChallengeCooldown
+			if ttl <= 0 {
+				ttl = 10 * time.Minute
+			}
+			e.nginxBridge.ChallengeIP(row.IP, ttl)
+		}
+		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": outcome, "req": row.Req, "vhosts": row.Vhosts, "action": action}})
 		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "suspicious_snapshot", IP: row.IP, Reason: strings.Join(row.Reasons, ","), Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"req": row.Req, "vhosts": row.Vhosts}})
 
 		samples := e.ipSamples(row.IP, maxSamples)
@@ -2879,7 +2873,7 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			"vhosts":   strconv.Itoa(row.Vhosts),
 			"req":      strconv.Itoa(row.Req),
 			"reason":   strings.Join(row.Reasons, ","),
-			"action":   "block",
+			"action":   action,
 		}
 		if limit != "" {
 			extra["limit"] = limit
