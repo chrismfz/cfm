@@ -70,6 +70,7 @@ install_prereqs_debian() {
     dpkg -s ca-certificates >/dev/null 2>&1 || pkgs+=(ca-certificates)
     dpkg -s lsb-release >/dev/null 2>&1 || pkgs+=(lsb-release)
     dpkg -s openssl >/dev/null 2>&1 || pkgs+=(openssl)
+    dpkg -s ripgrep >/dev/null 2>&1 || pkgs+=(ripgrep)
     # lua-resty-maxminddb uses ffi.load('libmaxminddb') which needs the
     # unversioned .so symlink provided by the -dev package, not the runtime lib
     dpkg -s libmaxminddb-dev >/dev/null 2>&1 || pkgs+=(libmaxminddb-dev)
@@ -87,6 +88,7 @@ install_prereqs_el() {
     rpm -q wget >/dev/null 2>&1 || pkgs+=(wget)
     rpm -q ca-certificates >/dev/null 2>&1 || pkgs+=(ca-certificates)
     rpm -q openssl >/dev/null 2>&1 || pkgs+=(openssl)
+    rpm -q ripgrep >/dev/null 2>&1 || pkgs+=(ripgrep)
     # lua-resty-maxminddb uses ffi.load('libmaxminddb') which needs the
     # unversioned .so symlink provided by the -devel package, not the runtime lib
     rpm -q libmaxminddb-devel >/dev/null 2>&1 || pkgs+=(libmaxminddb-devel)
