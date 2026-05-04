@@ -1154,4 +1154,5 @@ Notes:
 - DirectAdmin `2222 -> 12222` is HTTPS-terminated at the CFM listener and proxied to a TLS origin (`https://127.0.0.1:2222`) by default.
 - API/webcall traffic can bypass browser challenges, but exploit guard still runs first.
 - In forced mode, only CFM-owned clearance proof (`cfm_ok` / `cfm_clearance`) is treated as direct pass state. Third-party cookies (for example `cf_clearance` or `cp_security_token`) do not count as challenge completion by themselves and should only be considered after explicit backend/API validation.
+- Scope and host-bound clearance model (including migration guidance and replay verification checklist): `docs/security/challenge-scope-mapping.md`.
 - cPanel/WHM must still be patched; CFM is defense-in-depth.

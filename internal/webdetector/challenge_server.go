@@ -492,7 +492,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Global ignore: auto-solve + release (no rate-limit, no pow/token).
 		// This prevents false-positive abuse blocks on trusted/internal networks.
 		if ip := clientIP(r); ip != nil && s.shouldIgnoreIP(ip) {
-			host := cleanHost(r.Host)
+			host := trustedForwardedHost(r)
 			next := normalizeChallengeNext(r.URL.Query().Get("next"))
 			s.autoSolveAndRelease(w, r, ip, host, next, "verify")
 			return
@@ -527,7 +527,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		verifyStart := time.Now()
-		host := cleanHost(r.Host)
+		host := trustedForwardedHost(r)
+		if host == "" {
+			http.Error(w, "missing forwarded host", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Path == verifyPath || r.URL.Path == verifyPathOld || r.URL.Path == challengePath {
+			if strings.HasPrefix(clearanceScope(r), "panel:") && normalizeForwardedPort(r.Header.Get("X-Forwarded-Port")) == "" {
+				http.Error(w, "missing forwarded port", http.StatusBadRequest)
+				return
+			}
+		}
 
 		ip := clientIP(r)
 		ipStr := ""
@@ -613,8 +623,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
 		// Secure should follow the *original* scheme (OpenResty terminates TLS),
 		// so trust X-Forwarded-Proto when present.
-		xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-		secure := (r.TLS != nil) || (xfProto == "https")
+		secure := trustedForwardedProto(r) == "https"
 
 		ttl := s.cookieTTL()
 		clearanceVal := issueClearanceToken(ipStr, host, clearanceScope(r), time.Now().UTC().Add(ttl))
@@ -751,7 +760,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		// Global ignore: auto-solve + release (no challenge page, no abuse tracking).
 		if s.shouldIgnoreIP(ip) {
-			host := cleanHost(r.Host)
+			host := trustedForwardedHost(r)
 			s.autoSolveAndRelease(w, r, ip, host, next, "page")
 			return
 		}
@@ -792,7 +801,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Prevent search engines from indexing the challenge page or following its links.
 		// X-Robots-Tag is the authoritative signal; the meta tag below is belt-and-suspenders.
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
-		host := cleanHost(r.Host)
+		host := trustedForwardedHost(r)
 
 		// token binds to IP+UA+cookie
 		//                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)
@@ -1430,8 +1439,7 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 	}
 
 	// Match secure flag to original scheme (OpenResty terminates TLS)
-	xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-	secure := (r.TLS != nil) || (xfProto == "https")
+	secure := trustedForwardedProto(r) == "https"
 
 	// Set signed clearance cookie (authoritative)
 	ttl := s.cookieTTL()
@@ -1605,19 +1613,42 @@ func normalizeClearanceHost(h string) string {
 	return strings.TrimSuffix(h, ".")
 }
 
-func clearanceScope(r *http.Request) string {
-	port := strings.TrimSpace(r.Header.Get("X-Forwarded-Port"))
-	digits := make([]rune, 0, len(port))
-	for _, ch := range port {
+func normalizeForwardedPort(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, ch := range v {
 		if ch >= '0' && ch <= '9' {
-			digits = append(digits, ch)
+			b.WriteRune(ch)
 		}
 	}
-	if len(digits) == 0 {
-		return "web"
+	return b.String()
+}
+
+func trustedForwardedHost(r *http.Request) string {
+	h := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if h == "" {
+		h = r.Host
 	}
-	p := string(digits)
-	if p == "80" || p == "443" {
+	return normalizeClearanceHost(h)
+}
+
+func trustedForwardedProto(r *http.Request) string {
+	xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	if xfProto == "http" || xfProto == "https" {
+		return xfProto
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func clearanceScope(r *http.Request) string {
+	p := normalizeForwardedPort(r.Header.Get("X-Forwarded-Port"))
+	if p == "" || p == "80" || p == "443" {
 		return "web"
 	}
 	return "panel:" + p
