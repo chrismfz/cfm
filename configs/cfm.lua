@@ -539,7 +539,23 @@ end
 
 local function validate_clearance_token(token, ip, host, scope)
   local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or CFG.token
-  local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
+  local ok_call, ok, reason = pcall(clearance_validator.validate, token, ip, host, scope, secret)
+  if not ok_call then
+    local validate_err = ok
+    ok = false
+    reason = "module_error"
+    if not ngx.ctx.cfm_clearance_error_logged then
+      ngx.ctx.cfm_clearance_error_logged = true
+      ngx.log(ngx.ERR,
+        "[cfm] clearance validator runtime error",
+        " module=cfm_clearance",
+        " err=", tostring(validate_err),
+        " host=", tostring(host or "-"),
+        " uri=", tostring(ngx.var.request_uri or "-"),
+        " scope=", tostring(scope or "-"),
+        " mode=", tostring(CFG.fail_open and "fail_open" or "fail_closed"))
+    end
+  end
   if reason == "module_error" then return false, "module_error" end
   return ok, reason
 end

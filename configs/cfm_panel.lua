@@ -417,7 +417,26 @@ local safe_cookie_value
 local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
     local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
-    local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
+    local ok_call, ok, reason = pcall(clearance_validator.validate, token, ip, host, scope, secret)
+
+    if not ok_call then
+        local validate_err = ok
+        reason = "module_error"
+        ok = false
+        if not ngx.ctx.cfm_panel_clearance_error_logged then
+            ngx.ctx.cfm_panel_clearance_error_logged = true
+            ngx.log(
+                ngx.ERR,
+                "[cfm_panel] clearance validator runtime error",
+                " module=cfm_clearance",
+                " err=", tostring(validate_err),
+                " host=", tostring(host or "-"),
+                " uri=", tostring(ngx.var.request_uri or "-"),
+                " scope=", tostring(scope or "-"),
+                " mode=", tostring(ngx.var.cfm_panel_mode or ngx.var.server_port or "-")
+            )
+        end
+    end
 
     if reason == "module_error" and not clearance_module_error_reported then
         clearance_module_error_reported = true
