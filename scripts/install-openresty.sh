@@ -575,6 +575,38 @@ validate_shared_lua_runtime() {
     fi
 }
 
+validate_lua_modules_for_openresty() {
+    local lua_dir="$CFM_SHARED_LUA_DIR"
+    local luac_bin
+    local name
+    local module
+    local -a required_modules=(
+        cfm_clearance cfm_panel cfm_rules cfm_waf cfm_stats cfm_clamav cfm_cache_log sslcollector
+    )
+
+    luac_bin="$(command -v luac || true)"
+    if [ -z "$luac_bin" ]; then
+        die "luac not found; install Lua compiler package before deploy"
+    fi
+
+    log "Validating Lua syntax via luac -p"
+    for name in "${CFM_LUA_MANIFEST[@]}"; do
+        "$luac_bin" -p "$lua_dir/$name" || die "Lua syntax validation failed: $lua_dir/$name"
+    done
+
+    log "Validating Lua module loadability in minimal OpenResty-compatible runtime"
+    LUA_PATH="$lua_dir/?.lua;;" luajit -e '
+        local required = {...}
+        for _, m in ipairs(required) do
+            local ok, mod = pcall(require, m)
+            if not ok then
+                io.stderr:write("require failed for ", m, ": ", tostring(mod), "\n")
+                os.exit(1)
+            end
+        end
+    ' "${required_modules[@]}" || die "Lua module runtime load smoke-test failed"
+}
+
 check_legacy_lua_paths_in_runtime_configs() {
     local conf_root="$1"
     local entrypoint="$2"
@@ -656,6 +688,7 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     validate_shared_lua_runtime
+    validate_lua_modules_for_openresty
     deploy_nginx_conf
     check_lua_token_files
     log "Shared fallback cert path: /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem"
