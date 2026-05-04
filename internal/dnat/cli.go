@@ -286,6 +286,32 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Println("  priority -101:")
 	fmt.Println("    CFM-first mode. CFM catches web traffic before Imunify/WebShield.")
 	fmt.Println("  cfm dnat off")
+
+	bridgeSock := probeUnixSocket("/var/run/cfm/cfm_nginx.sock")
+	ingestSock := probeUnixSocket("/run/cfm/ingest.sock")
+	sslCollectorSock := probeUnixSocket("/var/run/sslcollector.sock")
+	panelOn, _, _ := panelStatus()
+	fmt.Printf("cPanel DNAT enabled: %t\n", panelOn)
+	fmt.Printf("Bridge socket (/var/run/cfm/cfm_nginx.sock): exists=%t socket=%t connectable=%t group_write=%t\n", bridgeSock.Exists, bridgeSock.IsSocket, bridgeSock.Connectable, bridgeSock.WritableByGroup)
+	if bridgeSock.Err != "" {
+		fmt.Printf("Bridge socket status: FAIL (%s)\n", bridgeSock.Err)
+	}
+	if bridgeSock.Err != "" {
+		fmt.Printf("Decision backend: DEGRADED (last error: socket=/var/run/cfm/cfm_nginx.sock error=%s at %s)\n", bridgeSock.Err, time.Now().UTC().Format(time.RFC3339))
+	} else if panelDecisionBackendLastErr != "" {
+		fmt.Printf("Decision backend: DEGRADED (last error: %s at %s)\n", panelDecisionBackendLastErr, panelDecisionBackendLastErrAt.Format(time.RFC3339))
+	} else {
+		fmt.Println("Decision backend: OK")
+	}
+	fmt.Printf("Ingest socket (/run/cfm/ingest.sock): exists=%t socket=%t connectable=%t group_write=%t\n", ingestSock.Exists, ingestSock.IsSocket, ingestSock.Connectable, ingestSock.WritableByGroup)
+	if ingestSock.Err != "" {
+		fmt.Printf("Ingest socket status: FAIL (%s)\n", ingestSock.Err)
+	}
+	fmt.Printf("SSL collector socket (/var/run/sslcollector.sock): exists=%t socket=%t connectable=%t group_write=%t\n", sslCollectorSock.Exists, sslCollectorSock.IsSocket, sslCollectorSock.Connectable, sslCollectorSock.WritableByGroup)
+	if sslCollectorSock.Err != "" {
+		fmt.Printf("SSL collector socket status: FAIL (%s)\n", sslCollectorSock.Err)
+	}
+	fmt.Printf("Worker user in cfm group: %t\n", workerInCFMGroup())
 	return 0
 }
 
@@ -567,6 +593,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		fmt.Printf("Ingest socket (/run/cfm/ingest.sock): exists=%t socket=%t connectable=%t group_write=%t\n", ingestSock.Exists, ingestSock.IsSocket, ingestSock.Connectable, ingestSock.WritableByGroup)
 		if ingestSock.Err != "" {
 			fmt.Printf("Ingest socket status: FAIL (%s)\n", ingestSock.Err)
+		}
+		sslCollectorSock := probeUnixSocket("/var/run/sslcollector.sock")
+		fmt.Printf("SSL collector socket (/var/run/sslcollector.sock): exists=%t socket=%t connectable=%t group_write=%t\n", sslCollectorSock.Exists, sslCollectorSock.IsSocket, sslCollectorSock.Connectable, sslCollectorSock.WritableByGroup)
+		if sslCollectorSock.Err != "" {
+			fmt.Printf("SSL collector socket status: FAIL (%s)\n", sslCollectorSock.Err)
 		}
 		fmt.Printf("Worker user in cfm group: %t\n", workerInCFMGroup())
 		return 0
