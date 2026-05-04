@@ -440,10 +440,21 @@ end
 
 local safe_cookie_value
 local append_set_cookie
+local clearance_debug = (os.getenv("CFM_CLEARANCE_DEBUG") or "0") == "1"
 
 local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
     local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
+    if clearance_debug then
+        ngx.log(
+            ngx.NOTICE,
+            "[cfm_panel_clearance_debug] phase=validate_pre",
+            " req_id=", tostring(ngx.var.request_id or "-"),
+            " host=", tostring(host or "-"),
+            " panel_scope=", tostring(scope or "-"),
+            " cookie_present=", token and "1" or "0"
+        )
+    end
     local ok_call, ok, reason = pcall(clearance_validator.validate, token, ip, host, scope, secret)
 
     if not ok_call then
@@ -463,6 +474,18 @@ local function clearance_cookie_state(ip, host, scope)
                 " mode=", tostring(ngx.var.cfm_panel_mode or ngx.var.server_port or "-")
             )
         end
+    end
+    if clearance_debug then
+        ngx.log(
+            ngx.NOTICE,
+            "[cfm_panel_clearance_debug] phase=validate_post",
+            " req_id=", tostring(ngx.var.request_id or "-"),
+            " host=", tostring(host or "-"),
+            " panel_scope=", tostring(scope or "-"),
+            " cookie_present=", token and "1" or "0",
+            " result_ok=", ok and "1" or "0",
+            " reason=", tostring(reason or "-")
+        )
     end
 
     if reason == "module_error" and not clearance_module_error_reported then
