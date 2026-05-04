@@ -7,13 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 )
 
 func TestClearanceTokenValidation(t *testing.T) {
-	t.Setenv("CFM_CHALLENGE_SECRET", "unit-test-secret")
+	t.Setenv("OPENRESTY_TOKEN", "unit-test-bridge-secret")
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := issueClearanceToken("203.0.113.9", "Example.COM.", "panel:2083", now.Add(5*time.Minute))
 	if !verifyClearanceToken(tok, "203.0.113.9", "example.com", "panel:2083", now) {
@@ -34,7 +36,7 @@ func TestClearanceTokenValidation(t *testing.T) {
 }
 
 func TestClearanceTokenTamperedSig(t *testing.T) {
-	t.Setenv("CFM_CHALLENGE_SECRET", "unit-test-secret")
+	t.Setenv("OPENRESTY_TOKEN", "unit-test-bridge-secret")
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := issueClearanceToken("203.0.113.9", "example.com", "web", now.Add(5*time.Minute))
 	raw, _ := base64.RawURLEncoding.DecodeString(tok)
@@ -100,8 +102,9 @@ func TestClearanceScope(t *testing.T) {
 	}
 }
 
-func TestClearanceUsesChallengeSecretChain(t *testing.T) {
+func TestClearanceUsesOpenRestyTokenNotChallengeSecret(t *testing.T) {
 	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-secret-a")
+	t.Setenv("OPENRESTY_TOKEN", "bridge-secret-a")
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := issueClearanceToken("203.0.113.9", "example.com", "panel:2087", now.Add(5*time.Minute))
 	raw, err := base64.RawURLEncoding.DecodeString(tok)
@@ -113,13 +116,39 @@ func TestClearanceUsesChallengeSecretChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := "1|" + strconv.FormatInt(p.Exp, 10) + "|" + p.IP + "|" + normalizeClearanceHost(p.Host) + "|" + p.Scope + "|" + p.Nonce
-	mac := hmac.New(sha256.New, []byte("challenge-secret-a"))
+	mac := hmac.New(sha256.New, []byte("bridge-secret-a"))
 	mac.Write([]byte(payload))
 	if got := hex.EncodeToString(mac.Sum(nil)); got != p.HMAC {
-		t.Fatalf("expected clearance secret signature")
+		t.Fatalf("expected clearance signature to use OPENRESTY_TOKEN")
 	}
+	// Changing CHALLENGE secret alone must not invalidate clearance.
 	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-secret-b")
+	if !verifyClearanceToken(tok, "203.0.113.9", "example.com", "panel:2087", now) {
+		t.Fatal("expected token to remain valid after CHALLENGE secret change")
+	}
+	// Changing OPENRESTY token must invalidate clearance.
+	t.Setenv("OPENRESTY_TOKEN", "bridge-secret-b")
 	if verifyClearanceToken(tok, "203.0.113.9", "example.com", "panel:2087", now) {
-		t.Fatal("expected validation to fail when challenge secret changes")
+		t.Fatal("expected token to fail after OPENRESTY token change")
+	}
+}
+
+func TestClearanceUsesBridgeFileToken(t *testing.T) {
+	t.Setenv("OPENRESTY_TOKEN", "")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	d := t.TempDir()
+	bridge := filepath.Join(d, "cfm_bridge_token.lua")
+	if err := os.WriteFile(bridge, []byte("return 'bridge-file-secret'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := clearanceBridgeTokenPath
+	clearanceBridgeTokenPath = bridge
+	t.Cleanup(func() { clearanceBridgeTokenPath = old })
+	tok := issueClearanceToken("203.0.113.9", "example.com", "panel:2087", now.Add(5*time.Minute))
+	if tok == "" {
+		t.Fatal("expected token issuance with bridge file secret")
+	}
+	if !verifyClearanceToken(tok, "203.0.113.9", "example.com", "panel:2087", now) {
+		t.Fatal("expected verification with bridge file secret")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,8 @@ const (
 	verifyPathOld = "/verify"       // legacy (keep during rollout)
 	challengePath = "/__cfm_challenge"
 )
+
+var clearanceBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
 type ChallengeServer struct {
 	httpSrv  *http.Server
@@ -1593,8 +1596,36 @@ func secretKey() []byte {
 	return challengeEphemeralKey
 }
 
+var clearanceTokenWarnOnce sync.Once
+var clearanceLuaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+["']([^"']+)["']\s*$`)
+
 func clearanceSecretKey() []byte {
-	return secretKey()
+	if tok, ok := readBridgeTokenSecret(clearanceBridgeTokenPath); ok {
+		return []byte(tok)
+	}
+	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
+		return []byte(tok)
+	}
+	clearanceTokenWarnOnce.Do(func() {
+		logging.LogfCHALLENGES("[challenge] ERROR: no canonical clearance secret available (missing bridge token file and OPENRESTY_TOKEN env); refusing to issue/validate cfm_clearance")
+	})
+	return nil
+}
+
+func readBridgeTokenSecret(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	m := clearanceLuaReturnRe.FindSubmatch(b)
+	if len(m) < 2 {
+		return "", false
+	}
+	tok := strings.TrimSpace(string(m[1]))
+	if tok == "" {
+		return "", false
+	}
+	return tok, true
 }
 
 func issueToken(ip, ua, cookieVal string) string {
@@ -1682,7 +1713,11 @@ func clearanceScope(r *http.Request) string {
 func issueClearanceToken(ip, host, scope string, exp time.Time) string {
 	p := clearancePayload{V: "1", Exp: exp.Unix(), IP: ip, Host: normalizeClearanceHost(host), Scope: scope, Nonce: randomCookieValue()}
 	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, p.Host, p.Scope, p.Nonce)
-	mac := hmac.New(sha256.New, clearanceSecretKey())
+	key := clearanceSecretKey()
+	if len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	p.HMAC = hex.EncodeToString(mac.Sum(nil))
 	b, _ := json.Marshal(p)
@@ -1705,7 +1740,11 @@ func verifyClearanceToken(tok, ip, host, scope string, now time.Time) bool {
 		return false
 	}
 	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, normalizeClearanceHost(p.Host), p.Scope, p.Nonce)
-	mac := hmac.New(sha256.New, clearanceSecretKey())
+	key := clearanceSecretKey()
+	if len(key) == 0 {
+		return false
+	}
+	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	want := mac.Sum(nil)
 	got, err := hex.DecodeString(p.HMAC)

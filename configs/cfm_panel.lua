@@ -566,7 +566,7 @@ local function clearance_cookie_state(ip, host, scope)
 
     reason = normalize_validator_reason(reason)
     if not ok then
-        ngx.log(ngx.NOTICE, "[cfm_panel_clearance_debug] reason=", tostring(reason or "-"), " ip=", tostring(ip or "-"), " host=", tostring(host or "-"), " scope=", tostring(scope or "-"), " has_cookie=", token and "true" or "false")
+        ngx.log(ngx.NOTICE, "[cfm_panel_clearance_reject] reason=", tostring(reason or "-"), " ip=", tostring(ip or "-"), " host=", tostring(host or "-"), " scope=", tostring(scope or "-"), " has_cookie=", token and "true" or "false")
         return false, reason
     end
 
