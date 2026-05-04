@@ -1593,6 +1593,10 @@ func secretKey() []byte {
 	return challengeEphemeralKey
 }
 
+func clearanceSecretKey() []byte {
+	return secretKey()
+}
+
 func issueToken(ip, ua, cookieVal string) string {
 	mac := hmac.New(sha256.New, secretKey())
 	mac.Write([]byte(ip))
@@ -1678,7 +1682,7 @@ func clearanceScope(r *http.Request) string {
 func issueClearanceToken(ip, host, scope string, exp time.Time) string {
 	p := clearancePayload{V: "1", Exp: exp.Unix(), IP: ip, Host: normalizeClearanceHost(host), Scope: scope, Nonce: randomCookieValue()}
 	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, p.Host, p.Scope, p.Nonce)
-	mac := hmac.New(sha256.New, secretKey())
+	mac := hmac.New(sha256.New, clearanceSecretKey())
 	mac.Write([]byte(payload))
 	p.HMAC = hex.EncodeToString(mac.Sum(nil))
 	b, _ := json.Marshal(p)
@@ -1701,7 +1705,7 @@ func verifyClearanceToken(tok, ip, host, scope string, now time.Time) bool {
 		return false
 	}
 	payload := fmt.Sprintf("%s|%d|%s|%s|%s|%s", p.V, p.Exp, p.IP, normalizeClearanceHost(p.Host), p.Scope, p.Nonce)
-	mac := hmac.New(sha256.New, secretKey())
+	mac := hmac.New(sha256.New, clearanceSecretKey())
 	mac.Write([]byte(payload))
 	want := mac.Sum(nil)
 	got, err := hex.DecodeString(p.HMAC)
