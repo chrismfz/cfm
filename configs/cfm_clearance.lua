@@ -1,5 +1,14 @@
 local _M = {}
 
+local bit = require "bit"
+local ok, cjson = pcall(require, "cjson.safe")
+if not ok then
+  cjson = require "cjson"
+end
+
+-- ngx is provided by OpenResty at runtime.
+local ngx = ngx
+
 local function lower(s) return string.lower(s or "") end
 
 local function normalize_host(h)
@@ -34,7 +43,7 @@ function _M.validate(token, ip, host, scope, secret)
   local raw = b64url_decode(token)
   if not raw then return false, "bad_sig" end
   local obj = cjson.decode(raw)
-  if type(obj) ~= "table" then return false, "bad_sig" end
+  if obj == nil or type(obj) ~= "table" then return false, "bad_sig" end
   if tostring(obj.v or "") ~= "1" then return false, "bad_sig" end
   local exp = tonumber(obj.exp or 0) or 0
   if exp <= 0 or exp <= ngx.time() then return false, "expired" end
