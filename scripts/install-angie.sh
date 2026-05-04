@@ -84,6 +84,7 @@ install_prereqs_debian() {
     dpkg -s lsb-release    >/dev/null 2>&1 || pkgs+=(lsb-release)
     dpkg -s openssl        >/dev/null 2>&1 || pkgs+=(openssl)
     dpkg -s git            >/dev/null 2>&1 || pkgs+=(git)
+    dpkg -s ripgrep        >/dev/null 2>&1 || pkgs+=(ripgrep)
     dpkg -s libmaxminddb0  >/dev/null 2>&1 || pkgs+=(libmaxminddb0)
 
     if [ "${#pkgs[@]}" -gt 0 ]; then
@@ -100,6 +101,7 @@ install_prereqs_el() {
     rpm -q ca-certificates >/dev/null 2>&1 || pkgs+=(ca-certificates)
     rpm -q openssl         >/dev/null 2>&1 || pkgs+=(openssl)
     rpm -q git             >/dev/null 2>&1 || pkgs+=(git)
+    rpm -q ripgrep         >/dev/null 2>&1 || pkgs+=(ripgrep)
     rpm -q libmaxminddb    >/dev/null 2>&1 || pkgs+=(libmaxminddb)
 
     if [ "${#pkgs[@]}" -gt 0 ]; then
