@@ -54,16 +54,31 @@ function _M.normalize_host(host)
   return normalize_host(host)
 end
 
+local function normalize_forwarded_port(port)
+  local p = tostring(port or ""):match("%d+")
+  if not p or p == "" then return nil end
+  return p
+end
+
 function _M.panel_scope(forwarded_port, panel_origin, server_port)
-  local port = tostring(forwarded_port or ""):match("%d+")
-  if not port or port == "" then
-    port = tostring(panel_origin or ""):match(":(%d+)")
+  local port = normalize_forwarded_port(forwarded_port)
+  if not port then
+    port = normalize_forwarded_port(tostring(panel_origin or ""):match(":(%d+)"))
   end
-  if not port or port == "" then
-    port = tostring(server_port or ""):match("%d+")
+  if not port then
+    port = normalize_forwarded_port(server_port)
   end
-  if not port or port == "" then port = "unknown" end
+  if not port then port = "unknown" end
   return "panel:" .. port
+end
+
+function _M.derive_scope(mode, forwarded_port, panel_origin, server_port)
+  if tostring(mode or "web") == "web" then return "web" end
+  return _M.panel_scope(forwarded_port, panel_origin, server_port)
+end
+
+function _M.normalize_forwarded_port(port)
+  return normalize_forwarded_port(port)
 end
 
 return _M
