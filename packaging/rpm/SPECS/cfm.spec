@@ -141,5 +141,10 @@ fi
 %systemd_postun_with_restart cfm.service
 
 %changelog
+* Mon May 04 2026 CFM Maintainers <maintainers@cfm.local> - 0.0.0-1
+- Fix cfm_clearance normalize_host trailing-dot pattern ("%.+$") to avoid invalid escape syntax.
+- Add CI preflight check that requires cfm_clearance so Lua parse errors fail before deployment.
+- Note: this regression could abort OpenResty/Angie require loading and surface as HTTP 500 responses.
+
 * Tue Sep 02 2025 Chris <chris@nixpal.com> - 0.0.0-1
 - Initial RPM packaging

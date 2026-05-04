@@ -6,7 +6,7 @@ local function normalize_host(h)
   h = lower(h or "")
   h = h:gsub("^%s+", ""):gsub("%s+$", "")
   h = h:gsub(":%d+$", "")
-  h = h:gsub("\.+$", "")
+  h = h:gsub("%.+$", "")
   return h
 end
 

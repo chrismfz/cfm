@@ -33,6 +33,8 @@ jobs:
       - run: go mod tidy
       - name: Enforce CLI transport guardrail
         run: ./scripts/tests/check_cli_transport.sh
+      - name: Enforce Lua clearance module load check
+        run: ./scripts/tests/check_cfm_clearance_require.sh
       - run: go build ./...
       - run: go test -race -v ./...
 
