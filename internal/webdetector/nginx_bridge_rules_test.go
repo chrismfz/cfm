@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,55 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNginxBridgeOKTouchScopedByHostAndScope(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	ip := "203.0.113.10"
+
+	rr := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"ip":"203.0.113.10","host":"a.example.com","scope":"web","ttl_sec":120}`)
+	req := httptest.NewRequest(http.MethodPost, "/nginx/ok/touch", body)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleOKTouch(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ok touch status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	check := func(host, scope, wantVH string) {
+		drr := httptest.NewRecorder()
+		dreq := httptest.NewRequest(http.MethodGet, "/nginx/decision?ip="+ip+"&host="+host+"&scope="+scope, nil)
+		dreq.Header.Set("X-CFM-Token", "tok")
+		b.mu.Lock()
+		b.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(time.Minute)}
+		b.mu.Unlock()
+		b.handleDecision(drr, dreq)
+		var payload map[string]any
+		_ = json.Unmarshal(drr.Body.Bytes(), &payload)
+		if payload["vhost_action"] != wantVH {
+			t.Fatalf("host=%s scope=%s expected %s got payload=%+v", host, scope, wantVH, payload)
+		}
+	}
+
+	check("a.example.com", "web", "allow")
+	check("b.example.com", "web", "challenge")
+	check("a.example.com", "panel:2083", "challenge")
+}
+
+func TestNginxBridgeOKTouchRequiresHostAndScope(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	for _, raw := range []string{
+		`{"ip":"203.0.113.10","host":"","scope":"web","ttl_sec":120}`,
+		`{"ip":"203.0.113.10","host":"a.example.com","scope":"","ttl_sec":120}`,
+	} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/nginx/ok/touch", bytes.NewBufferString(raw))
+		req.Header.Set("X-CFM-Token", "tok")
+		b.handleOKTouch(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("raw=%s expected 400 got %d", raw, rr.Code)
+		}
+	}
+}
 
 func TestNginxBridgeWAFExcludesIncludesScopeHosts(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)

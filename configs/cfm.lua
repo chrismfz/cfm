@@ -527,7 +527,7 @@ local function fail_decision(errmsg)
 end
 
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
-local function get_decision(ip, host, uri, method, scheme, ua, country)
+local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
   local uri_part = (uri or "-"):sub(1, 64)
   local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
 
@@ -545,7 +545,8 @@ local function get_decision(ip, host, uri, method, scheme, ua, country)
                "&method="  .. esc(method)  ..
                "&scheme="  .. esc(scheme)  ..
                "&ua="      .. esc(ua or "")      ..
-               "&country=" .. esc(country or "")
+               "&country=" .. esc(country or "") ..
+               "&scope="   .. esc(scope or "web")
 
   local body, err = rpc_call("decision", "GET", path, nil, {
     ip = ip, host = host, uri = uri, method = method,
@@ -938,7 +939,7 @@ end
 -- [R1] ua + country passed so Go can evaluate traffic rules.
 local ua_raw  = ngx.var.http_user_agent or ""
 local country = geo_country_cached(ip)
-local d       = get_decision(ip, host, uri, method, scheme, ua_raw, country)
+local d       = get_decision(ip, host, uri, method, scheme, ua_raw, country, clearance_scope)
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"
