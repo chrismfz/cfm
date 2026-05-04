@@ -31,6 +31,32 @@ local function hex_from_bin(s)
   return (s:gsub('.', function(c) return string.format('%02x', string.byte(c)) end))
 end
 
+local function hmac_sha256_hex(secret, payload)
+  local key = tostring(secret or "")
+  local msg = tostring(payload or "")
+
+  if ngx and type(ngx.hmac_sha256) == "function" then
+    local ok, bin = pcall(ngx.hmac_sha256, key, msg)
+    if ok and type(bin) == "string" then
+      return hex_from_bin(bin), nil
+    end
+  end
+
+  local ok_hmac, hmac_mod = pcall(require, "resty.openssl.hmac")
+  if ok_hmac and hmac_mod then
+    local ctx, new_err = hmac_mod.new(key, "sha256")
+    if not ctx then return nil, "crypto_unavailable" end
+    local ok_update = pcall(ctx.update, ctx, msg)
+    if not ok_update then return nil, "crypto_unavailable" end
+    local ok_final, bin = pcall(ctx.final, ctx)
+    if ok_final and type(bin) == "string" then
+      return hex_from_bin(bin), nil
+    end
+  end
+
+  return nil, "crypto_unavailable"
+end
+
 local function ct_eq_hex(a, b)
   if not a or not b or #a ~= #b then return false end
   local acc = 0
@@ -54,7 +80,8 @@ function _M.validate(token, ip, host, scope, secret)
   local mac = tostring(obj.hmac or "")
   if not mac:match("^[0-9a-fA-F]+$") then return false, "bad_sig" end
   local payload = table.concat({ tostring(obj.v), tostring(exp), tostring(obj.ip), normalize_host(obj.host), tostring(obj.scope), tostring(obj.nonce) }, "|")
-  local want = hex_from_bin(ngx.hmac_sha256(secret or "", payload))
+  local want, hmac_err = hmac_sha256_hex(secret, payload)
+  if not want then return false, hmac_err or "crypto_unavailable" end
   if not ct_eq_hex(lower(mac), lower(want)) then return false, "bad_sig" end
   return true, "ok"
 end
