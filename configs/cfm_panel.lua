@@ -11,7 +11,36 @@
 --   - Do not validate WHM/API auth here. cpsrvd does that.
 --   - Do not require User-Agent or Authorization for API passthrough.
 
-local clearance_validator = require "cfm_clearance"
+local function fallback_normalize_host(raw)
+    local h = (tostring(raw or ""):lower()):gsub("%.$", "")
+    if h == "" then return "" end
+
+    if h:sub(1, 1) == "[" then
+        local inner, rest = h:match("^%[([^%]]+)%](.*)$")
+        if not inner then return "" end
+        if rest ~= "" and rest:sub(1, 1) ~= ":" then return "" end
+        return inner
+    end
+
+    local c = select(2, h:gsub(":", ""))
+    if c == 1 then
+        local host_no_port = h:match("^(.-):%d+$")
+        if host_no_port then h = host_no_port end
+    end
+
+    return h
+end
+
+local ok_clearance, clearance_validator = pcall(require, "cfm_clearance")
+local clearance_module_error_reported = false
+if not ok_clearance then
+    ngx.log(ngx.ERR, "[cfm_panel] clearance module load failed module=cfm_clearance err=", tostring(clearance_validator))
+    clearance_validator = {
+        validate = function(...) return false, "module_error" end,
+        normalize_host = fallback_normalize_host,
+        panel_scope = function(...) return "panel" end,
+    }
+end
 
 local function starts_with(s, p)
     return s and p and s:sub(1, #p) == p
@@ -390,6 +419,11 @@ local function clearance_cookie_state(ip, host, scope)
     local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
     local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
 
+    if reason == "module_error" and not clearance_module_error_reported then
+        clearance_module_error_reported = true
+        ngx.log(ngx.ERR, "[cfm_panel] clearance validator unavailable; continuing with challenge/passthrough flow")
+    end
+
     if not ok then
         return false, reason
     end
@@ -606,6 +640,9 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
     local clearance_ok, clearance_reason = clearance_cookie_state(client_ip, normalized_host, panel_scope)
     ngx.header["X-CFM-Panel-Scope"] = panel_scope
     ngx.header["X-CFM-Panel-Clearance"] = clearance_reason
+    if (ngx.var.http_x_cfm_debug_headers == "1" or os.getenv("CFM_DEBUG_HEADERS") == "1") and clearance_reason == "module_error" then
+        ngx.header["X-CFM-Clearance"] = "module_error"
+    end
 
     if clearance_ok then
         local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
