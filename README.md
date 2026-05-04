@@ -138,9 +138,13 @@ Start with `cfm auth`, then log in to `/cfm-admin` and configure Notifier from U
 
 #### Roadmap
 
-- Notifier Web UI is available now.
-- Detectors Settings UI phase 1 is available at `/cfm-admin/detectors/` with safe draft validation, diff preview, backup/restore and reload hooks.
-- Phase 2 (planned): deeper webdetector key coverage and advanced modeling.
+**Available now**
+- **Notifier Web UI** is production-ready in `/cfm-admin` for channel management, routing, templates/dedupe, test send, history, and backup/restore.
+- **Detectors Settings UI** is live at `/cfm-admin/detectors/` with safe draft validation, diff preview, backup/restore, and reload hooks.
+- **Verification anchors:** frontend implementation is under `internal/webui/static/detectors/`; backend detector settings endpoints are implemented in `internal/apiserver/detectors_api.go`.
+
+**Planned**
+- Expand detector-form coverage for additional advanced `webdetector` keys and modeling controls that are not yet represented in the current detectors UI.
 
 ### Manual install (from source)
 
