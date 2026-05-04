@@ -1,5 +1,5 @@
 # cfm dnat cpanel listener template for @ENGINE@.
-# NOTE: generated when `cfm dnat cpanel on` is enabled; listeners run in forced mode by policy.
+# NOTE: generated when `cfm dnat cpanel on` is enabled; listeners run with a single human-entry challenge policy.
 # Install path: @LISTENER_DEST@
 
 # HTTPS panel listeners
