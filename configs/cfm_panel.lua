@@ -606,10 +606,12 @@ local function allow_passthrough(mode, reason, origin, method, ua)
     return
 end
 
+local PANEL_FAIL_OPEN = (os.getenv("CFM_PANEL_FAIL_OPEN") or os.getenv("CFM_FAIL_OPEN") or "1") ~= "0"
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Main request flow
 -- ─────────────────────────────────────────────────────────────────────────────
-
+local function main()
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
@@ -682,3 +684,26 @@ end
 
 -- 4) Everything else passes to cpsrvd.
 return allow_origin(mode, "default_passthrough", origin, method, ua)
+end
+
+local ok, err = xpcall(main, debug.traceback)
+if not ok then
+    local req_id = ngx.var.request_id or "-"
+    local client = ngx.var.remote_addr or "-"
+    local host = ngx.var.host or "-"
+    local uri = ngx.var.request_uri or ngx.var.uri or "-"
+    local origin = ngx.var.cfm_panel_origin or ""
+    ngx.log(ngx.ERR, "[cfm_panel] request_failure",
+        " request_id=", req_id,
+        " client=", client,
+        " host=", host,
+        " uri=", uri,
+        " policy=", (PANEL_FAIL_OPEN and "fail_open" or "fail_closed"),
+        " stack=", tostring(err))
+    if PANEL_FAIL_OPEN then
+        ngx.var.cfm_pass = origin
+        ngx.var.cfm_upstream = "cfm_panel_passthrough"
+        return
+    end
+    return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+end

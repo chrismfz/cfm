@@ -90,7 +90,7 @@ local CFG = {
   waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
 
   block_code = 403,
-  fail_open  = true,
+  fail_open  = (os.getenv("CFM_FAIL_OPEN") or "1") ~= "0",
 
   debug         = (os.getenv("CFM_DEBUG") == "1"),
   debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
@@ -1056,11 +1056,27 @@ end
 
 end -- cfm_enforce()
 
--- [R2] pcall: any Lua panic → serve via Apache.
-local enforce_ok, enforce_err = pcall(cfm_enforce)
-if not enforce_ok then
-  ngx.log(ngx.ERR, "[cfm] cfm_enforce_panic err=", tostring(enforce_err),
-    " ip=", ip, " host=", host, " uri=", uri, " policy=fail_open_passthrough")
-  ngx.var.cfm_upstream = "cfm_apache"
-  ngx.var.cfm_pass     = origin_pass_for(scheme)
+local function main()
+  return cfm_enforce()
+end
+
+local ok, err = xpcall(main, debug.traceback)
+if not ok then
+  local req_id = ngx.var.request_id or "-"
+  local client = ngx.var.remote_addr or "-"
+  local host_v = ngx.var.host or "-"
+  local uri_v = ngx.var.request_uri or ngx.var.uri or "-"
+  ngx.log(ngx.ERR, "[cfm] request_failure",
+    " request_id=", req_id,
+    " client=", client,
+    " host=", host_v,
+    " uri=", uri_v,
+    " policy=", (CFG.fail_open and "fail_open" or "fail_closed"),
+    " stack=", tostring(err))
+  if CFG.fail_open then
+    ngx.var.cfm_upstream = "cfm_apache"
+    ngx.var.cfm_pass     = origin_pass_for(ngx.var.scheme)
+    return
+  end
+  return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
 end
