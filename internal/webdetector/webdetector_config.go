@@ -1,7 +1,15 @@
 // internal/webdetector/webdetector_config.go
 package webdetector
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+type IPScoreRule struct {
+	Action   string
+	MinScore float64
+}
 
 // Config is the full configuration for the webdetector engine.
 // It is built from [webdetector] in detectors.conf by the detector register.
@@ -193,9 +201,10 @@ type Config struct {
 	HistoryPruneEvery    time.Duration // HISTORY_PRUNE_EVERY
 
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
-	ChallengeExcludeStorePath string // CHALLENGE_EXCLUDE_STORE_PATH
-	WAFExcludeStorePath       string // WAF_EXCLUDE_STORE_PATH
-	TrafficRulesStorePath     string // TRAFFIC_RULES_STORE_PATH
+	ChallengeExcludeStorePath string        // CHALLENGE_EXCLUDE_STORE_PATH
+	WAFExcludeStorePath       string        // WAF_EXCLUDE_STORE_PATH
+	TrafficRulesStorePath     string        // TRAFFIC_RULES_STORE_PATH
+	IPScoreRules              []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
 
 }
 
@@ -425,6 +434,20 @@ func (c *Config) FillDefaults() {
 		if len(c.Ignore40xPrefixes) == 0 {
 			c.Ignore40xPrefixes = []string{"/.well-known/", "/robots.txt", "/favicon.ico", "/sitemap", "/apple-touch-icon", "/manifest.json"}
 		}
+	}
+	if len(c.IPScoreRules) > 0 {
+		out := make([]IPScoreRule, 0, len(c.IPScoreRules))
+		for _, r := range c.IPScoreRules {
+			act := strings.ToLower(strings.TrimSpace(r.Action))
+			if act != "block" && act != "challenge" {
+				continue
+			}
+			if r.MinScore < 0 || r.MinScore > 1 {
+				continue
+			}
+			out = append(out, IPScoreRule{Action: act, MinScore: r.MinScore})
+		}
+		c.IPScoreRules = out
 	}
 
 }

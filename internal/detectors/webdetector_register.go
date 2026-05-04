@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +83,33 @@ func validateChallengeHostPatterns(key string, entries []string) error {
 		}
 	}
 	return nil
+}
+
+func parseIPScoreRules(raw string) []webdet.IPScoreRule {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var rules []webdet.IPScoreRule
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' })
+	for _, part := range parts {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		kv := strings.SplitN(p, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		act := strings.ToLower(strings.TrimSpace(kv[0]))
+		min, err := strconv.ParseFloat(strings.TrimSpace(kv[1]), 64)
+		if err != nil {
+			continue
+		}
+		rules = append(rules, webdet.IPScoreRule{Action: act, MinScore: min})
+	}
+	sort.SliceStable(rules, func(i, j int) bool { return rules[i].MinScore > rules[j].MinScore })
+	return rules
 }
 
 func (w *webdetectorWrapped) enqueueExternal(a core.Alert) {
@@ -735,6 +764,7 @@ func init() {
 			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", "/var/lib/cfm/webdetector-history.db"),
 			HistoryRetentionDays:      kvInt(kv, "HISTORY_RETENTION_DAYS", 30),
 			HistoryPruneEvery:         kvDur(kv, "HISTORY_PRUNE_EVERY", time.Hour),
+			IPScoreRules:              parseIPScoreRules(kvStrClean(kv, "IP_SCORE_RULES", "")),
 		}
 
 		// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN
