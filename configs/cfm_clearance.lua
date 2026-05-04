@@ -65,7 +65,7 @@ local function ct_eq_hex(a, b)
 end
 
 function _M.validate(token, ip, host, scope, secret)
-  if not token or token == "" then return false, "missing" end
+  if not token or token == "" then return false, "missing_cookie" end
   local raw = b64url_decode(token)
   if not raw then return false, "bad_sig" end
   local obj = cjson.decode(raw)
@@ -81,7 +81,7 @@ function _M.validate(token, ip, host, scope, secret)
   if not mac:match("^[0-9a-fA-F]+$") then return false, "bad_sig" end
   local payload = table.concat({ tostring(obj.v), tostring(exp), tostring(obj.ip), normalize_host(obj.host), tostring(obj.scope), tostring(obj.nonce) }, "|")
   local want, hmac_err = hmac_sha256_hex(secret, payload)
-  if not want then return false, hmac_err or "crypto_unavailable" end
+  if not want then return false, hmac_err or "validator_error" end
   if not ct_eq_hex(lower(mac), lower(want)) then return false, "bad_sig" end
   return true, "ok"
 end
