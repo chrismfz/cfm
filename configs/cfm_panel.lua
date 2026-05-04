@@ -11,6 +11,8 @@
 --   - Do not validate WHM/API auth here. cpsrvd does that.
 --   - Do not require User-Agent or Authorization for API passthrough.
 
+local clearance_validator = require "cfm_clearance"
+
 local function starts_with(s, p)
     return s and p and s:sub(1, #p) == p
 end
@@ -381,18 +383,18 @@ local function is_browser_like(ua)
         or ua:find("edg", 1, true)
 end
 
-local function clearance_cookie_state()
-    local raw = ngx.var.http_cookie or ""
-    local cookie = "; " .. raw
+local safe_cookie_value
 
-    local has_any = cookie:find("; cfm_ok=", 1, true)
-        or cookie:find("; cfm_clearance=", 1, true)
+local function clearance_cookie_state(ip, host, scope)
+    local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
+    local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or (ngx.var.cfm_panel_token or "")
+    local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
 
-    if not has_any then
-        return false, "cookie_missing"
+    if not ok then
+        return false, reason
     end
 
-    return true, "cookie_present"
+    return true, "clearance_valid"
 end
 
 local function append_set_cookie(v)
@@ -412,7 +414,7 @@ local function append_set_cookie(v)
     ngx.header["Set-Cookie"] = { h, v }
 end
 
-local function safe_cookie_value(v)
+safe_cookie_value = function(v)
     if not v or v == "" then return nil end
     if v:find("[%c;]") then return nil end
 
@@ -432,12 +434,6 @@ local function refresh_clearance_cookie()
     end
 
     local refreshed = false
-
-    local cfm_ok = safe_cookie_value(ngx.var.cookie_cfm_ok)
-    if cfm_ok then
-        append_set_cookie("cfm_ok=" .. tostring(cfm_ok) .. "; " .. attrs)
-        refreshed = true
-    end
 
     local cfm_clearance = safe_cookie_value(ngx.var.cookie_cfm_clearance)
     if cfm_clearance then
@@ -566,6 +562,9 @@ local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or ngx.var.cfm_panel_policy or "human-entry-only"
+local panel_scope = clearance_validator.panel_scope(ngx.var.http_x_forwarded_port, origin, ngx.var.server_port)
+local client_ip = ngx.var.remote_addr
+local normalized_host = clearance_validator.normalize_host(ngx.var.host or "")
 
 local ok, reason = run_basic_guard()
 if not ok then
@@ -604,25 +603,25 @@ end
 
 -- 3) Human panel entrypoints.
 if is_human_panel_entry(ngx.var.host or "", uri) then
-    local has_cookie = clearance_cookie_state()
+    local clearance_ok, clearance_reason = clearance_cookie_state(client_ip, normalized_host, panel_scope)
+    ngx.header["X-CFM-Panel-Scope"] = panel_scope
+    ngx.header["X-CFM-Panel-Clearance"] = clearance_reason
 
-    if has_cookie then
+    if clearance_ok then
         local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
 
         if not ok_refresh then
             ngx.log(ngx.WARN, "CFM_PANEL clearance refresh failed: ", tostring(refresh_err))
         end
 
-        return allow_origin(mode, "challenge_pass_cookie", origin, method, ua)
+        return allow_origin(mode, "challenge_pass_clearance_valid", origin, method, ua)
     end
 
     if is_browser_like(ua) then
-        return issue_challenge(mode, "human_entry_challenge", nil, 0)
+        return issue_challenge(mode, "human_entry_challenge_" .. tostring(clearance_reason or "invalid"), nil, 0)
     end
 
-    -- Important: do not 403 curl/python/WHMCS/API-like clients just because
-    -- they are not browser-like. Let cpsrvd decide.
-    return allow_origin(mode, "non_browser_entry_passthrough", origin, method, ua)
+    return allow_origin(mode, "non_browser_entry_passthrough_" .. tostring(clearance_reason or "invalid"), origin, method, ua)
 end
 
 -- 4) Everything else passes to cpsrvd.

@@ -13,6 +13,7 @@
 --   - Cache means 95%+ of requests never touch the socket
 
 local cjson = require "cjson.safe"
+local clearance_validator = require "cfm_clearance"
 local bit = require "bit"
 
 
@@ -513,25 +514,8 @@ local function refresh_clearance_cookie(cookie_val)
 end
 
 local function validate_clearance_token(token, ip, host, scope)
-  if not token or token == "" then return false, "missing" end
   local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or CFG.token
-  local raw = b64url_decode(token)
-  if not raw then return false, "bad_sig" end
-  local obj = cjson.decode(raw)
-  if type(obj) ~= "table" then return false, "bad_sig" end
-  if tostring(obj.v or "") ~= "1" then return false, "bad_sig" end
-  local exp = tonumber(obj.exp or 0) or 0
-  if exp <= 0 or exp <= ngx.time() then return false, "expired" end
-  if tostring(obj.ip or "") ~= tostring(ip or "") then return false, "ip_mismatch" end
-  if normalize_host(obj.host) ~= normalize_host(host) then return false, "host_mismatch" end
-  if tostring(obj.scope or "") ~= tostring(scope or "") then return false, "scope_mismatch" end
-  if tostring(obj.nonce or "") == "" then return false, "bad_sig" end
-  local mac = tostring(obj.hmac or "")
-  if not mac:match("^[0-9a-fA-F]+$") then return false, "bad_sig" end
-  local payload = table.concat({ tostring(obj.v), tostring(exp), tostring(obj.ip), normalize_host(obj.host), tostring(obj.scope), tostring(obj.nonce) }, "|")
-  local want = hex_from_bin(ngx.hmac_sha256(secret, payload))
-  if not ct_eq_hex(lower(mac), lower(want)) then return false, "bad_sig" end
-  return true, "ok"
+  return clearance_validator.validate(token, ip, host, scope, secret)
 end
 
 local function fail_decision(errmsg)
