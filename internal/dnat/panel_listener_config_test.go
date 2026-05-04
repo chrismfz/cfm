@@ -229,6 +229,39 @@ func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifySta
 	}
 }
 
+func TestPanelListenerConfig_DirectAdminListenerUsesTLSOriginAndHeaders(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	s := string(b)
+	for _, tok := range []string{
+		"listen 12222 ssl;",
+		"ssl_protocols TLSv1.2 TLSv1.3;",
+		"ssl_certificate /var/lib/cfm/certs/selfsigned/fullchain.pem;",
+		"ssl_certificate_key /var/lib/cfm/certs/selfsigned/privkey.pem;",
+		`ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }`,
+		`set $cfm_panel_origin "https://127.0.0.1:2222";`,
+	} {
+		if !strings.Contains(s, tok) {
+			t.Fatalf("missing directadmin tls token %q", tok)
+		}
+	}
+
+	daIdx := strings.Index(s, "listen 12222 ssl;")
+	if daIdx < 0 {
+		t.Fatalf("directadmin listener start not found")
+	}
+	daBlock := s[daIdx:]
+	nextServer := strings.Index(daBlock[len("listen 12222 ssl;"):], "server {")
+	if nextServer > 0 {
+		daBlock = daBlock[:len("listen 12222 ssl;")+nextServer]
+	}
+	if strings.Count(daBlock, "X-Forwarded-Proto https;") != 3 {
+		t.Fatalf("expected https forwarded proto in challenge/verify/root locations for directadmin block")
+	}
+}
+
 func TestPanelLuaPolicy_NoTopLevelVerifyOrChallengeArgRewrite(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm_panel.lua")
 	if err != nil {
