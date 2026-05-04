@@ -66,7 +66,7 @@ type NginxBridge struct {
 	mu             sync.RWMutex
 	ipState        map[string]bridgeIPEntry    // ip   → current decision
 	vhState        map[string]bridgeVhostEntry // host → current decision
-	okState        map[string]time.Time        // ip   → solved-ok expiry (bypasses vhost challenge)
+	okState        map[okStateKey]time.Time    // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
 	bypassFunc     func(string) bool           // set once at startup; no lock needed (written before serving starts)
 	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
@@ -251,7 +251,15 @@ type nginxVhostClearMsg struct {
 
 type nginxOKTouchMsg struct {
 	IP     string `json:"ip"`
+	Host   string `json:"host"`
+	Scope  string `json:"scope"`
 	TTLSec int    `json:"ttl_sec"`
+}
+
+type okStateKey struct {
+	IP    string
+	Host  string
+	Scope string
 }
 
 // Observation from OpenResty/WAF: "I returned status X for this request"
@@ -292,18 +300,31 @@ func (b *NginxBridge) SetHostBypassFunc(fn func(string) bool) {
 // bypassed for at least ttl. Used for ASN/UA chalExclude in vhost mode.
 // Does NOT push to Lua (okState is checked in-process in handleDecision).
 func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
+	b.BypassIPScopeTemp(ip, "", "web", ttl)
+}
+
+// BypassIPScopeTemp extends okState for one (ip,host,scope) tuple so only the
+// matching scope/host request bypasses challenge.
+func (b *NginxBridge) BypassIPScopeTemp(ip, host, scope string, ttl time.Duration) {
 	if b == nil || !b.cfg.Enabled {
+		return
+	}
+	ip = strings.TrimSpace(ip)
+	host = normalizeHost(host)
+	scope = strings.TrimSpace(scope)
+	if ip == "" || host == "" || scope == "" {
 		return
 	}
 	if ttl <= 0 {
 		ttl = b.cfg.DefaultTTL
 	}
 	exp := time.Now().Add(ttl)
+	k := okStateKey{IP: ip, Host: host, Scope: scope}
 
 	b.mu.Lock()
-	cur, ok := b.okState[ip]
+	cur, ok := b.okState[k]
 	if !ok || exp.After(cur) {
-		b.okState[ip] = exp
+		b.okState[k] = exp
 	}
 	b.mu.Unlock()
 }
@@ -547,7 +568,7 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		},
 		ipState: make(map[string]bridgeIPEntry),
 		vhState: make(map[string]bridgeVhostEntry),
-		okState: make(map[string]time.Time),
+		okState: make(map[okStateKey]time.Time),
 	}
 
 	if b.cfg.Enabled {
@@ -710,16 +731,31 @@ func (b *NginxBridge) GetReason(ip string) string {
 // Also adds the IP to the solved-ok set so it bypasses vhost-wide challenge
 // for the next 60 minutes — matching the solved cookie TTL.
 func (b *NginxBridge) ClearIP(ip string) {
+	b.ClearIPScoped(ip, "", "web")
+}
+
+// ClearIPScoped removes ipState and records a solved-ok state only for the
+// provided host/scope.
+func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 	if !b.cfg.Enabled {
 		return
 	}
+	ip = strings.TrimSpace(ip)
+	host = normalizeHost(host)
+	scope = strings.TrimSpace(scope)
 
 	b.mu.Lock()
 	delete(b.ipState, ip)
 	if b.cfg.OkIPTTL > 0 {
-		b.okState[ip] = time.Now().Add(b.cfg.OkIPTTL)
+		if ip != "" && host != "" && scope != "" {
+			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = time.Now().Add(b.cfg.OkIPTTL)
+		}
 	} else {
-		delete(b.okState, ip)
+		for k := range b.okState {
+			if k.IP == ip {
+				delete(b.okState, k)
+			}
+		}
 	}
 	b.mu.Unlock()
 
@@ -1193,9 +1229,14 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Solved-ok: IP passed PoW recently — bypass vhost-wide challenge.
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		scope = "web"
+	}
+	// Solved-ok: IP passed PoW recently for same host/scope.
 	if b.cfg.OkIPTTL > 0 {
-		if exp, ok := b.okState[ip]; ok && exp.After(now) {
+		k := okStateKey{IP: ip, Host: host, Scope: scope}
+		if exp, ok := b.okState[k]; ok && exp.After(now) {
 			vhAction = "allow"
 			ipAction = "allow"
 		}
@@ -1360,7 +1401,7 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOKTouch: Lua tells us "this IP is active and has cfm_ok cookie, extend okState".
-// POST /nginx/ok/touch { "ip":"1.2.3.4", "ttl_sec":600 }
+// POST /nginx/ok/touch { "ip":"1.2.3.4", "host":"example.com", "scope":"web", "ttl_sec":600 }
 func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1380,7 +1421,9 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := strings.TrimSpace(msg.IP)
-	if ip == "" {
+	host := normalizeHost(msg.Host)
+	scope := strings.TrimSpace(msg.Scope)
+	if ip == "" || host == "" || scope == "" {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
@@ -1394,7 +1437,7 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	exp := now.Add(ttl)
 
 	b.mu.Lock()
-	b.okState[ip] = exp
+	b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
@@ -1513,10 +1556,10 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			ip := strings.TrimSpace(msg.IP)
+			host := normalizeHost(msg.Host)
 			if ip == "" {
 				continue
 			}
-			host := normalizeHost(msg.Host)
 			uri := strings.TrimSpace(msg.URI)
 			method := strings.ToLower(strings.TrimSpace(msg.Method))
 			status := msg.Status
@@ -1541,7 +1584,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			ip := strings.TrimSpace(msg.IP)
-			if ip == "" {
+			host := normalizeHost(msg.Host)
+			scope := strings.TrimSpace(msg.Scope)
+			if ip == "" || host == "" || scope == "" {
 				continue
 			}
 			ttl := time.Duration(msg.TTLSec) * time.Second
@@ -1550,7 +1595,7 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			exp := now.Add(ttl)
 			b.mu.Lock()
-			b.okState[ip] = exp
+			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
 			b.mu.Unlock()
 			processed++
 
