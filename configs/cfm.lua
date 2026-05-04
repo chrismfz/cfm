@@ -13,7 +13,31 @@
 --   - Cache means 95%+ of requests never touch the socket
 
 local cjson = require "cjson.safe"
-local clearance_validator = require "cfm_clearance"
+local function fallback_normalize_host(raw)
+  local h = string.lower(tostring(raw or "")):gsub("%.$", "")
+  if h == "" then return "" end
+  if h:sub(1, 1) == "[" then
+    local inner, rest = h:match("^%[([^%]]+)%](.*)$")
+    if not inner then return "" end
+    if rest ~= "" and rest:sub(1, 1) ~= ":" then return "" end
+    return inner
+  end
+  local c = select(2, h:gsub(":", ""))
+  if c == 1 then
+    local host_no_port = h:match("^(.-):%d+$")
+    if host_no_port then h = host_no_port end
+  end
+  return h
+end
+local ok_clearance, clearance_validator = pcall(require, "cfm_clearance")
+if not ok_clearance then
+  ngx.log(ngx.ERR, "[cfm] clearance module load failed module=cfm_clearance err=", tostring(clearance_validator))
+  clearance_validator = {
+    validate = function(...) return false, "module_error" end,
+    normalize_host = fallback_normalize_host,
+    panel_scope = function(...) return "web" end,
+  }
+end
 local bit = require "bit"
 
 
@@ -515,7 +539,9 @@ end
 
 local function validate_clearance_token(token, ip, host, scope)
   local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or CFG.token
-  return clearance_validator.validate(token, ip, host, scope, secret)
+  local ok, reason = clearance_validator.validate(token, ip, host, scope, secret)
+  if reason == "module_error" then return false, "module_error" end
+  return ok, reason
 end
 
 local function fail_decision(errmsg)
