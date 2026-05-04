@@ -13,6 +13,7 @@
 --   - Cache means 95%+ of requests never touch the socket
 
 local cjson = require "cjson.safe"
+local bit = require "bit"
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -130,6 +131,46 @@ local function lower(s) if not s then return "" end; return string.lower(s) end
 local function has(s, pat)
   if not s or s == "" then return false end
   return string.find(s, pat, 1, true) ~= nil
+end
+
+local function normalize_host(raw)
+  local h = lower(tostring(raw or "")):gsub("%.$", "")
+  if h == "" then return "" end
+  if h:sub(1, 1) == "[" then
+    local inner, rest = h:match("^%[([^%]]+)%](.*)$")
+    if not inner then return "" end
+    if rest ~= "" and rest:sub(1, 1) ~= ":" then return "" end
+    return inner
+  end
+  local c = select(2, h:gsub(":", ""))
+  if c == 1 then
+    local host_no_port = h:match("^(.-):%d+$")
+    if host_no_port then h = host_no_port end
+  end
+  return h
+end
+
+local function b64url_decode(s)
+  s = tostring(s or ""):gsub("-", "+"):gsub("_", "/")
+  local pad = #s % 4
+  if pad == 2 then s = s .. "=="
+  elseif pad == 3 then s = s .. "="
+  elseif pad == 1 then return nil end
+  return ngx.decode_base64(s)
+end
+
+local function hex_from_bin(bin)
+  if not bin then return "" end
+  return (bin:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+
+local function ct_eq_hex(a, b)
+  if #a ~= #b then return false end
+  local diff = 0
+  for i = 1, #a do
+    diff = bit.bor(diff, bit.bxor(a:byte(i), b:byte(i)))
+  end
+  return diff == 0
 end
 
 local _SELF_IPS_FILE = "/var/lib/cfm/lua/cfm_self_ips.lua"
@@ -452,23 +493,45 @@ local function observe_waf(ip, host, uri, method, status, reason)
   }), { ip = ip, host = host, uri = uri, method = method })
 end
 
-local function touch_ok(ip)
+local function touch_ok_scoped(ip, host, scope)
   if not SH then return end
-  local k = "ok_touch|" .. (ip or "-")
+  local k = "ok_touch|" .. (ip or "-") .. "|" .. normalize_host(host) .. "|" .. tostring(scope or "")
   local now = ngx.now()
   local last = SH:get(k)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
   SH:set(k, now, CFG.ok_touch_every_sec)
   rpc_call("ok_touch", "POST", "/nginx/ok/touch",
-    cjson.encode({ ip = ip, ttl_sec = CFG.ok_ttl_sec }),
-    { ip = ip })
+    cjson.encode({ ip = ip, host = normalize_host(host), scope = scope, ttl_sec = CFG.ok_ttl_sec }),
+    { ip = ip, host = host })
 end
 
-local function refresh_ok_cookie(cookie_val)
+local function refresh_clearance_cookie(cookie_val)
   if not cookie_val or cookie_val == "" then return end
   local attrs = "Path=/; Max-Age=" .. tostring(CFG.ok_ttl_sec) .. "; HttpOnly; SameSite=Lax"
   if ngx.var.scheme == "https" then attrs = attrs .. "; Secure" end
-  append_set_cookie("cfm_ok=" .. cookie_val .. "; " .. attrs)
+  append_set_cookie("cfm_clearance=" .. cookie_val .. "; " .. attrs)
+end
+
+local function validate_clearance_token(token, ip, host, scope)
+  if not token or token == "" then return false, "missing" end
+  local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET") or CFG.token
+  local raw = b64url_decode(token)
+  if not raw then return false, "bad_sig" end
+  local obj = cjson.decode(raw)
+  if type(obj) ~= "table" then return false, "bad_sig" end
+  if tostring(obj.v or "") ~= "1" then return false, "bad_sig" end
+  local exp = tonumber(obj.exp or 0) or 0
+  if exp <= 0 or exp <= ngx.time() then return false, "expired" end
+  if tostring(obj.ip or "") ~= tostring(ip or "") then return false, "ip_mismatch" end
+  if normalize_host(obj.host) ~= normalize_host(host) then return false, "host_mismatch" end
+  if tostring(obj.scope or "") ~= tostring(scope or "") then return false, "scope_mismatch" end
+  if tostring(obj.nonce or "") == "" then return false, "bad_sig" end
+  local mac = tostring(obj.hmac or "")
+  if not mac:match("^[0-9a-fA-F]+$") then return false, "bad_sig" end
+  local payload = table.concat({ tostring(obj.v), tostring(exp), tostring(obj.ip), normalize_host(obj.host), tostring(obj.scope), tostring(obj.nonce) }, "|")
+  local want = hex_from_bin(ngx.hmac_sha256(secret, payload))
+  if not ct_eq_hex(lower(mac), lower(want)) then return false, "bad_sig" end
+  return true, "ok"
 end
 
 local function fail_decision(errmsg)
@@ -804,9 +867,12 @@ method = ngx.req.get_method() or method
 uri    = ngx.var.uri          or uri
 
 -- ── Step 1: Solved Cookie fast-path ──────────────────────────────────────────
-local cfm_ok_cookie = ngx.var.cookie_cfm_ok
-if cfm_ok_cookie and cfm_ok_cookie ~= "" and not ngx.ctx.cfm_resumed_post then
-  refresh_ok_cookie(cfm_ok_cookie); touch_ok(ip)
+local clearance_scope = "web"
+local clearance_cookie = ngx.var.cookie_cfm_clearance
+local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
+if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
+if clearance_ok and not ngx.ctx.cfm_resumed_post then
+  refresh_clearance_cookie(clearance_cookie); touch_ok_scoped(ip, host, clearance_scope)
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
   return
@@ -874,7 +940,7 @@ if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 -- ── Step 2.5: Forced challenge for marked locations ──────────────────────────
 -- Triggered via `set $cfm_force_challenge 1;` in nginx location blocks
 -- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
--- and is skipped entirely when a valid cfm_ok cookie is present (Step 1).
+-- and is skipped entirely when a valid cfm_clearance cookie is present (Step 1).
 if ngx.var.cfm_force_challenge == "1" then
   ngx.header["X-CFM-Action"]  = "challenge_forced"
   ngx.header["Cache-Control"] = "no-store"
