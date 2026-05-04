@@ -106,6 +106,29 @@ local function loop_key(ip, host)
     return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
 end
 
+
+
+local function validator_degraded_reason(reason)
+    return reason == "module_error" or reason == "crypto_unavailable"
+end
+
+local function loop_marker_present()
+    local args = ngx.req.get_uri_args() or {}
+    local arg_val = args.cfm_vd_loop
+    if type(arg_val) == "table" then arg_val = arg_val[1] end
+    if tostring(arg_val or "") == "1" then return true end
+    return tostring(ngx.var.cookie_cfm_vd_loop or "") == "1"
+end
+
+local function set_loop_marker_cookie(ttl)
+    ttl = tonumber(ttl or 15) or 15
+    if ttl <= 0 then ttl = 15 end
+    local attrs = "Path=/; Max-Age=" .. tostring(ttl) .. "; HttpOnly; SameSite=Lax"
+    if ngx.var.https == "on" or ngx.var.scheme == "https" then
+        attrs = attrs .. "; Secure"
+    end
+    append_set_cookie("cfm_vd_loop=1; " .. attrs)
+end
 local function mark_challenge_issued(ip, host, cooldown_ttl)
     local ttl = tonumber(cooldown_ttl or 0) or 0
     if ttl <= 0 then return end
@@ -269,7 +292,7 @@ local function safe_next_from_request(default_next)
     return strip_nested_next_chain(default_next or "/")
 end
 
-local function with_single_next_arg(url, next_value)
+local function with_single_next_arg(url, next_value, include_loop_marker)
     local safe_next = sanitize_panel_next_target(next_value, "/")
 
     if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then
@@ -297,11 +320,14 @@ local function with_single_next_arg(url, next_value)
     end
 
     kept[#kept + 1] = "next=" .. ngx.escape_uri(safe_next)
+    if include_loop_marker then
+        kept[#kept + 1] = "cfm_vd_loop=1"
+    end
 
     return path .. "?" .. table.concat(kept, "&") .. frag
 end
 
-local function challenge_redirect_target(decision)
+local function challenge_redirect_target(decision, include_loop_marker)
     local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
     req_uri = strip_nested_next_chain(req_uri)
 
@@ -335,11 +361,11 @@ local function challenge_redirect_target(decision)
 
     local safe_next = safe_next_from_request(req_uri)
 
-    return with_single_next_arg(loc, safe_next)
+    return with_single_next_arg(loc, safe_next, include_loop_marker)
 end
 
-local function issue_challenge(mode, reason, decision, cooldown_ttl)
-    local loc = challenge_redirect_target(decision)
+local function issue_challenge(mode, reason, decision, cooldown_ttl, include_loop_marker)
+    local loc = challenge_redirect_target(decision, include_loop_marker)
 
     local attempts = note_challenge_attempt(ngx.var.remote_addr, ngx.var.host or "", 20)
     mark_challenge_issued(ngx.var.remote_addr, ngx.var.host or "", cooldown_ttl or 0)
@@ -413,6 +439,7 @@ local function is_browser_like(ua)
 end
 
 local safe_cookie_value
+local append_set_cookie
 
 local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
@@ -450,7 +477,7 @@ local function clearance_cookie_state(ip, host, scope)
     return true, "clearance_valid"
 end
 
-local function append_set_cookie(v)
+append_set_cookie = function(v)
     local h = ngx.header["Set-Cookie"]
 
     if not h then
@@ -665,6 +692,20 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         ngx.header["X-CFM-Clearance"] = "module_error"
     end
 
+    local validator_degraded = validator_degraded_reason(clearance_reason)
+    if validator_degraded then
+        ngx.ctx.cfm_validator_guard_reason = clearance_reason
+        ngx.header["X-CFM-Action"] = "bypass_validator_degraded"
+
+        if uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") or uri == "/__cfm_verify" or starts_with(uri, "/__cfm_verify/") then
+            return allow_origin(mode, "validator_degraded_challenge_endpoint_bypass_" .. tostring(clearance_reason), origin, method, ua)
+        end
+
+        if loop_marker_present() then
+            return allow_origin(mode, "validator_degraded_loop_guard_" .. tostring(clearance_reason), origin, method, ua)
+        end
+    end
+
     if clearance_ok then
         local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
 
@@ -676,7 +717,12 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
     end
 
     if is_browser_like(ua) then
-        return issue_challenge(mode, "human_entry_challenge_" .. tostring(clearance_reason or "invalid"), nil, 0)
+        if validator_degraded then
+            set_loop_marker_cookie(20)
+            return allow_origin(mode, "validator_degraded_fail_open_" .. tostring(clearance_reason), origin, method, ua)
+        end
+
+        return issue_challenge(mode, "human_entry_challenge_" .. tostring(clearance_reason or "invalid"), nil, 0, false)
     end
 
     return allow_origin(mode, "non_browser_entry_passthrough_" .. tostring(clearance_reason or "invalid"), origin, method, ua)
