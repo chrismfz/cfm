@@ -441,6 +441,53 @@ end
 local safe_cookie_value
 local append_set_cookie
 local clearance_debug = (os.getenv("CFM_CLEARANCE_DEBUG") or "0") == "1"
+local clearance_trace = ngx.shared and ngx.shared.cfm_panel_state
+
+local function trace_verify_success(req_id, ip, host, scope, exp_unix, set_cookie_sent)
+    if not clearance_trace then return end
+    local corr = tostring(req_id or "-")
+    local key = "trace_verify:" .. tostring(ip or "-")
+    local payload = table.concat({
+        corr,
+        tostring(host or "-"),
+        tostring(scope or "-"),
+        tostring(exp_unix or 0),
+        set_cookie_sent and "1" or "0",
+    }, "|")
+    clearance_trace:set(key, payload, 30)
+end
+
+local function pop_verify_trace(ip)
+    if not clearance_trace then return nil end
+    local key = "trace_verify:" .. tostring(ip or "-")
+    local payload = clearance_trace:get(key)
+    if payload then
+        clearance_trace:delete(key)
+    end
+    return payload
+end
+
+local function normalize_validator_reason(reason)
+    local buckets = {
+        missing_cookie = true,
+        bad_sig = true,
+        expired = true,
+        ip_mismatch = true,
+        host_mismatch = true,
+        scope_mismatch = true,
+        validator_error = true,
+        decision_timeout = true,
+    }
+    reason = tostring(reason or "")
+    if reason == "missing" then return "missing_cookie" end
+    if reason == "module_error" or reason == "error" or reason == "crypto_unavailable" then
+        return "validator_error"
+    end
+    if buckets[reason] then
+        return reason
+    end
+    return "validator_error"
+end
 
 local function clearance_cookie_state(ip, host, scope)
     local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
@@ -459,7 +506,7 @@ local function clearance_cookie_state(ip, host, scope)
 
     if not ok_call then
         local validate_err = ok
-        reason = "module_error"
+        reason = "validator_error"
         ok = false
         if not ngx.ctx.cfm_panel_clearance_error_logged then
             ngx.ctx.cfm_panel_clearance_error_logged = true
@@ -488,11 +535,12 @@ local function clearance_cookie_state(ip, host, scope)
         )
     end
 
-    if reason == "module_error" and not clearance_module_error_reported then
+    if reason == "validator_error" and not clearance_module_error_reported then
         clearance_module_error_reported = true
         ngx.log(ngx.ERR, "[cfm_panel] clearance validator unavailable; continuing with challenge/passthrough flow")
     end
 
+    reason = normalize_validator_reason(reason)
     if not ok then
         return false, reason
     end
@@ -670,6 +718,7 @@ local mode = ngx.var.cfm_panel_challenge_mode or ngx.var.cfm_panel_policy or "hu
 local panel_scope = clearance_validator.panel_scope(ngx.var.http_x_cfm_panel_port, ngx.var.http_x_forwarded_port, origin, ngx.var.server_port)
 local client_ip = ngx.var.remote_addr
 local normalized_host = clearance_validator.normalize_host(ngx.var.host or "")
+local req_id = ngx.var.request_id or ngx.var.http_x_request_id or ngx.var.http_x_cfm_request_id or "-"
 
 local ok, reason = run_basic_guard()
 if not ok then
@@ -709,6 +758,21 @@ end
 -- 3) Human panel entrypoints.
 if is_human_panel_entry(ngx.var.host or "", uri) then
     local clearance_ok, clearance_reason = clearance_cookie_state(client_ip, normalized_host, panel_scope)
+    clearance_reason = normalize_validator_reason(clearance_reason)
+    local cookie_present = safe_cookie_value(ngx.var.cookie_cfm_clearance) and "1" or "0"
+    local prior = pop_verify_trace(client_ip)
+    ngx.log(
+        ngx.NOTICE,
+        "[cfm_panel_trace] phase=validate_next",
+        " corr_id=", tostring(req_id),
+        " req_id=", tostring(req_id),
+        " prior_verify=", tostring(prior or "-"),
+        " host_header=", tostring(ngx.var.host or "-"),
+        " host_norm=", tostring(normalized_host or "-"),
+        " scope=", tostring(panel_scope or "-"),
+        " cookie_present=", cookie_present,
+        " validator_reason=", tostring(clearance_reason or "validator_error")
+    )
     ngx.header["X-CFM-Panel-Scope"] = panel_scope
     ngx.header["X-CFM-Panel-Clearance"] = clearance_reason
     if (ngx.var.http_x_cfm_debug_headers == "1" or os.getenv("CFM_DEBUG_HEADERS") == "1") and clearance_reason == "module_error" then
@@ -730,6 +794,11 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
     end
 
     if clearance_ok then
+        local ttl = parse_duration_seconds(
+            ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m",
+            2700
+        )
+        trace_verify_success(req_id, client_ip, normalized_host, panel_scope, ngx.time() + ttl, true)
         local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
 
         if not ok_refresh then
