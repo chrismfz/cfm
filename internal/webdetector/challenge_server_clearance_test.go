@@ -46,10 +46,10 @@ func TestClearanceTokenTamperedSig(t *testing.T) {
 
 func TestNormalizeClearanceHost(t *testing.T) {
 	cases := map[string]string{
-		"Example.COM.":        "example.com",
-		"example.com:443":     "example.com",
-		"[2001:db8::1]:8443":  "2001:db8::1",
-		"[2001:DB8::1].":      "2001:db8::1",
+		"Example.COM.":         "example.com",
+		"example.com:443":      "example.com",
+		"[2001:db8::1]:8443":   "2001:db8::1",
+		"[2001:DB8::1].":       "2001:db8::1",
 		"MiXeD.Example.com:80": "mixed.example.com",
 	}
 	for in, want := range cases {
@@ -60,16 +60,38 @@ func TestNormalizeClearanceHost(t *testing.T) {
 }
 
 func TestClearanceScope(t *testing.T) {
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	if got := clearanceScope(r); got != "web" {
-		t.Fatalf("scope default = %q", got)
+	tests := []struct {
+		name  string
+		panel string
+		xfwd  string
+		want  string
+	}{
+		{name: "default web", want: "web"},
+		{name: "cpanel 2082", xfwd: "2082", want: "panel:2082"},
+		{name: "cpanel 2083", xfwd: "2083", want: "panel:2083"},
+		{name: "cpanel 2086", xfwd: "2086", want: "panel:2086"},
+		{name: "cpanel 2087", xfwd: "2087", want: "panel:2087"},
+		{name: "cpanel 2095", xfwd: "2095", want: "panel:2095"},
+		{name: "cpanel 2096", xfwd: "2096", want: "panel:2096"},
+		{name: "directadmin 2222", xfwd: "2222", want: "panel:2222"},
+		{name: "normalize noisy numeric", xfwd: " :2087/tcp ", want: "panel:2087"},
+		{name: "web https", xfwd: "443", want: "web"},
+		{name: "panel header precedence", panel: "2096", xfwd: "12096", want: "panel:2096"},
+		{name: "panel header normalization", panel: "port=2083", xfwd: "9999", want: "panel:2083"},
+		{name: "panel header web override", panel: "443", xfwd: "2087", want: "web"},
 	}
-	r.Header.Set("X-Forwarded-Port", "2087")
-	if got := clearanceScope(r); got != "panel:2087" {
-		t.Fatalf("scope panel = %q", got)
-	}
-	r.Header.Set("X-Forwarded-Port", "443")
-	if got := clearanceScope(r); got != "web" {
-		t.Fatalf("scope https web = %q", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://example.com/", nil)
+			if tt.panel != "" {
+				r.Header.Set("X-CFM-Panel-Port", tt.panel)
+			}
+			if tt.xfwd != "" {
+				r.Header.Set("X-Forwarded-Port", tt.xfwd)
+			}
+			if got := clearanceScope(r); got != tt.want {
+				t.Fatalf("clearanceScope() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

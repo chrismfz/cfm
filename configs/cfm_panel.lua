@@ -667,7 +667,7 @@ local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or ngx.var.cfm_panel_policy or "human-entry-only"
-local panel_scope = clearance_validator.panel_scope(ngx.var.http_x_forwarded_port, origin, ngx.var.server_port)
+local panel_scope = clearance_validator.panel_scope(ngx.var.http_x_cfm_panel_port, ngx.var.http_x_forwarded_port, origin, ngx.var.server_port)
 local client_ip = ngx.var.remote_addr
 local normalized_host = clearance_validator.normalize_host(ngx.var.host or "")
 
