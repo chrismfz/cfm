@@ -27,7 +27,7 @@ set -euo pipefail
 readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
 readonly CFM_LUA_MANIFEST=(
     cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua
-    cfm_clamav.lua cfm_cache_log.lua log-cfm.lua sslcollector.lua
+    cfm_clamav.lua cfm_cache_log.lua cfm_clearance.lua log-cfm.lua sslcollector.lua
 )
 
 log()  { echo "[+] $*"; }
@@ -470,6 +470,7 @@ deploy_cfm_files() {
     backup_and_copy_file "/usr/share/cfm/configs/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_clamav.lua"     "$lua_dir/cfm_clamav.lua"
     backup_and_copy_file "/usr/share/cfm/configs/cfm_cache_log.lua"  "$lua_dir/cfm_cache_log.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/cfm_clearance.lua"  "$lua_dir/cfm_clearance.lua"
     # log-cfm: log_by_lua sender that pushes every request to
     # /run/cfm/ingest.sock so webdetector does not need to tail the TSV file.
     backup_and_copy_file "/usr/share/cfm/configs/log-cfm.lua"        "$lua_dir/log-cfm.lua"
