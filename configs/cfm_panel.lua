@@ -283,279 +283,101 @@ local function clearance_cookie_state()
     local cookie = "; " .. raw
     local has_any = cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true)
     if not has_any then return false, "cookie_missing" end
-    local ok = cookie:match(";%s*cfm_ok=([^;]*)")
-    if ok ~= nil and (ok == "" or ok:find("[%c]")) then
-        return false, "cookie_parse_fail"
-    end
-    local clearance = cookie:match(";%s*cfm_clearance=([^;]*)")
-    if clearance ~= nil and (clearance == "" or clearance:find("[%c]")) then
-        return false, "cookie_parse_fail"
-    end
     return true, "cookie_present"
 end
 
 local function is_exempt_path(uri)
-    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/.well-known/")
+    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") or starts_with(uri, "/.well-known/")
 end
 
-local function next_points_to_challenge()
-    local args = ngx.req.get_uri_args()
-    local next_arg = args and args.next
-    if type(next_arg) == "table" then
-        next_arg = next_arg[1]
-    end
-    if type(next_arg) ~= "string" or next_arg == "" then
-        return false
-    end
-
-    local decoded = sanitize_panel_next_target(next_arg, "")
-    return is_internal_challenge_uri(decoded)
+local function is_panel_api_or_sso(uri)
+    return starts_with(uri, "/json-api/")
+        or uri == "/json-api/cpanel"
+        or starts_with(uri, "/json-api/cpanel/")
+        or starts_with(uri, "/execute/")
+        or starts_with(uri, "/xml-api/")
+        or starts_with(uri, "/cpanelwebcall")
+        or starts_with(uri, "/openid_connect/")
+        or uri:match("^/cpsess%d+/json%-api/")
+        or uri:match("^/cpsess%d+/execute/")
+        or uri:match("^/cpsess%d+/xml%-api/")
+        or uri:match("^/cpsess%d+/login/")
+        or uri == "/session"
+        or starts_with(uri, "/session/")
+        or uri == "/xfercpanel"
+        or uri == "/xfercpsess"
+        or uri == "/api"
+        or starts_with(uri, "/api/")
 end
 
--- /__cfm_challenge can reach Lua via prefix matches; /__cfm_verify is handled by exact nginx location blocks before Lua runs here.
-local function is_challenge_flow_request(uri)
-    return uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")
+local function is_human_entry_uri(uri)
+    return uri == "/" or uri == "/login" or uri == "/login/" or uri == "/cpanel" or uri == "/cpanel/" or uri == "/whm" or uri == "/whm/" or uri == "/webmail" or uri == "/webmail/"
 end
 
-
-local function append_set_cookie(v)
-    local h = ngx.header["Set-Cookie"]
-    if not h then ngx.header["Set-Cookie"] = v; return end
-    if type(h) == "table" then table.insert(h, v); ngx.header["Set-Cookie"] = h; return end
-    ngx.header["Set-Cookie"] = { h, v }
-end
-
-local function refresh_clearance_cookie()
-    local raw = ngx.var.cookie_cfm_ok
-    if not raw or raw == "" then return false end
-    local ttl = parse_duration_seconds(ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m", 2700)
-    local attrs = "Path=/; Max-Age=" .. tostring(ttl) .. "; HttpOnly; SameSite=Lax"
-    if ngx.var.https == "on" then attrs = attrs .. "; Secure" end
-    append_set_cookie("cfm_ok=" .. tostring(raw) .. "; " .. attrs)
-    return true
-end
-local function is_panel_sensitive(uri, method)
-    if method == "POST" then return true end
-    return uri == "/" or uri == "/login/" or starts_with(uri, "/login") or starts_with(uri, "/openid_connect/") or starts_with(uri, "/cpsess") or starts_with(uri, "/session")
-end
-
-local function has_known_panel_prefix(host)
+local function has_panel_prefix(host)
     local h = (host or ""):lower()
     return starts_with(h, "cpanel.") or starts_with(h, "whm.") or starts_with(h, "webmail.") or starts_with(h, "webdisk.")
 end
 
-local function is_configured_panel_host(host)
-    local primary = (ngx.var.cfm_panel_primary_domain or ""):lower()
+local function is_ip_host(host)
     local h = (host or ""):lower()
-    if primary == "" then return true end
-    if h == primary then return true end
-    local proxies = (ngx.var.cfm_panel_proxy_domains or "")
-    for token in proxies:gmatch("[^,%s]+") do
-        if h == token:lower() then return true end
-    end
-    return false
+    return h:match("^%d+%.%d+%.%d+%.%d+$") ~= nil or h:match("^%[[0-9a-f:]+%]$") ~= nil or h:find(":", 1, true) ~= nil
 end
 
-local function query_decision_api()
-    local subreq_uri = decision_uri
-    local res, err = ngx.location.capture(subreq_uri)
-    if not res then
-        local sock, detail = parse_socket_error(err)
-        return { outcome = "backend_unavailable", reason = "backend_unavailable", subreq_uri = subreq_uri, subreq_status = "-", subreq_location = "-", subreq_socket = sock, subreq_error = detail, decision_source = "transport" }
-    end
-
-    local status = tonumber(res.status) or 0
-    local status_s = tostring(status)
-    local headers = res.header or {}
-    local location = headers["Location"] or headers["location"] or "-"
-
-    if status >= 500 then
-        return { outcome = "backend_unavailable", reason = "subrequest_5xx", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
-    end
-
-    if status >= 300 and status < 400 then
-        return { outcome = "redirect", reason = "subrequest_redirect", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
-    end
-
-    if status == 429 then
-        return { outcome = "challenge_rate_limited", reason = "challenge_backend_429", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
-    end
-
-    if status == 204 then
-        return { outcome = "allow", reason = "backend_allow_204", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
-    end
-
-    if status < 200 or status >= 300 then
-        return { outcome = "invalid_response", reason = "subrequest_unexpected_status", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = "http_status" }
-    end
-
-    local body = ((res.body or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
-    local parsed = body:match('"decision"%s*:%s*"([a-z_%-]+)"')
-    local decision = parsed or body
-
-    if decision == "allow" then
-        return { outcome = "allow", reason = "backend_allow", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
-    end
-    if decision == "challenge" then
-        return { outcome = "challenge", reason = "backend_challenge", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
-    end
-    if decision == "deny" then
-        return { outcome = "deny", reason = "backend_deny", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
-    end
-
-    return { outcome = "invalid_response", reason = "invalid_payload", subreq_uri = subreq_uri, subreq_status = status_s, subreq_location = location, decision_source = parsed and "body_json" or "body_plain" }
+local function is_human_panel_entry(host, uri)
+    if not is_human_entry_uri(uri) then return false end
+    if has_panel_prefix(host) then return true end
+    if is_ip_host(host) then return true end
+    return true
 end
 
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
-local auth = ngx.var.http_authorization or ""
 local origin = ngx.var.cfm_panel_origin or ""
-local mode = ngx.var.cfm_panel_challenge_mode or "guard-only"
-local fail_mode = ngx.var.cfm_panel_fail_mode or "fail-open"
-local challenge_cooldown_ttl = parse_duration_seconds(ngx.var.CHALLENGE_COOLDOWN or "45m", 2700)
-local challenge_cookie_life_ttl = parse_duration_seconds(ngx.var.CHALLENGE_COOKIE_LIFE or "45m", 2700)
-local openresty_ok_ip_ttl = parse_duration_seconds(ngx.var.OPENRESTY_OK_IP_TTL or "45m", challenge_cookie_life_ttl)
+local mode = ngx.var.cfm_panel_challenge_mode or "human-entry-only"
 
 local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
 if origin == "" then return deny(mode, "panel_origin_empty") end
 
-if not is_configured_panel_host(ngx.var.host) then
-    return deny(mode, "host_not_configured")
-end
-
-local host = ngx.var.host or ""
-local host_is_known_panel_prefix = has_known_panel_prefix(host)
-
 if uri == decision_uri or uri == "/__cfm_verify" then
     local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
-    if not is_internal then
-        return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN)
-    end
+    if not is_internal then return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN) end
 end
 
-local is_directadmin_api = starts_with(uri, "/api/")
-local is_api = is_directadmin_api or starts_with(uri, "/json-api/") or starts_with(uri, "/execute/") or starts_with(uri, "/cpanelwebcall") or uri == "/json-api/cpanel" or starts_with(uri, "/json-api/cpanel/")
-local api_auth = auth:match("^whm%s+") or auth:match("^cpanel%s+") or auth:match("^[Bb]asic%s+")
-if is_api and api_auth then
+if is_panel_api_or_sso(uri) then
     ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_api"
-    local api_reason = is_directadmin_api and "api_authenticated_directadmin" or "api_authenticated"
-    decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = api_reason, target = origin })
-    return
-end
-
-if is_challenge_flow_request(uri) then
-    ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_origin"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_endpoint_exempt", allow_origin = "1", challenge_issued = "0", challenge_entry = "1", challenge_solved = "0", challenge_resume = "0", target = origin })
+    ngx.var.cfm_upstream = "cfm_panel_passthrough"
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "api_sso_passthrough", target = origin })
     return
 end
 
 if is_exempt_path(uri) then
     ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_exempt"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "path_exempt", target = origin })
+    ngx.var.cfm_upstream = "cfm_panel_origin"
+    local reason = (uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")) and "challenge_endpoint_exempt" or "path_exempt"
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = reason, target = origin })
     return
 end
 
-local needs_challenge = host_is_known_panel_prefix
-if mode == "guard-only" then
-    needs_challenge = needs_challenge or is_panel_sensitive(uri, method)
-elseif mode == "browser" then
+if is_human_panel_entry(ngx.var.host or "", uri) then
     local has_cookie = clearance_cookie_state()
-    needs_challenge = needs_challenge or (is_browser_like(ngx.var.http_user_agent) and not has_cookie)
-elseif mode == "forced" then
-    needs_challenge = true
-end
-
-if mode == "forced" then
-    local has_cookie, cookie_reason = clearance_cookie_state()
-    local has_host_state = has_bypass_ttl(ngx.var.remote_addr, host)
-    -- Third-party cookies (e.g., cf_clearance/cp_security_token) are not trusted
-    -- as direct challenge proof. Any use must happen via backend validation.
-    if has_cookie or has_host_state then
+    if has_cookie then
         refresh_clearance_cookie()
         ngx.var.cfm_pass = origin
         ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", allow_origin = "1", challenge_issued = "0", challenge_entry = "0", challenge_solved = "1", challenge_resume = "1", target = origin })
+        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", target = origin })
         return
     end
-    local sensitive = is_panel_sensitive(uri, method)
-    if sensitive and cooldown_active(ngx.var.remote_addr, host) then
-        if not is_browser_like(ua) then
-            return deny(mode, "challenge_loop_protection")
-        end
-        return issue_challenge(mode, "challenge_loop_protection", nil, challenge_cooldown_ttl)
+    if is_browser_like(ua) then
+        return issue_challenge(mode, "human_entry_challenge", nil, 0)
     end
-    if sensitive and not is_browser_like(ua) then
-        return deny(mode, "deny_unsolvable_client")
-    end
-    if sensitive then
-        needs_challenge = true
-    end
-end
-
-if needs_challenge then
-    local decision = query_decision_api()
-    if decision.outcome == "allow" then
-        mark_passed(ngx.var.remote_addr, host, openresty_ok_ip_ttl)
-        ngx.var.cfm_pass = origin
-        ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_allow", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
-        return
-    end
-
-    if decision.outcome == "backend_unavailable" then
-        if fail_mode == "fail-open" then
-            ngx.var.cfm_pass = origin
-            ngx.var.cfm_upstream = "cfm_panel_origin"
-            if should_emit_failopen_log() then
-                decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "backend_unavailable_fail_open", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = (decision.subreq_location or "-") .. " socket=" .. (decision.subreq_socket or "-") .. " error=" .. (decision.subreq_error or "-"), decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
-            end
-            return
-        end
-        if mode == "guard-only" and is_panel_sensitive(uri, method) then
-            return issue_challenge(mode, "backend_error_fail_closed_challenge", decision, challenge_cooldown_ttl)
-        end
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_error_fail_closed", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "0", challenge_issued = "0", deny_fail_closed = "1", target = "-" })
-        return ngx.exit(ngx.HTTP_FORBIDDEN)
-    end
-
-
-    if decision.outcome == "redirect" then
-        return issue_challenge(mode, "challenge_redirect", decision, challenge_cooldown_ttl)
-    end
-
-    if decision.outcome == "challenge_rate_limited" then
-        if fail_mode == "fail-open" then
-            ngx.var.cfm_pass = origin
-            ngx.var.cfm_upstream = "cfm_panel_origin"
-            decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_rate_limited", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "1", challenge_issued = "0", deny_fail_closed = "0", target = origin })
-            return
-        end
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "challenge_rate_limited", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, allow_origin = "0", challenge_issued = "0", deny_fail_closed = "1", target = "-" })
-        return ngx.exit(ngx.HTTP_FORBIDDEN)
-    end
-
-    if decision.outcome == "invalid_response" then
-        decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_invalid_response", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
-        return ngx.exit(ngx.HTTP_FORBIDDEN)
-    end
-    if decision.outcome == "challenge" then
-        return issue_challenge(mode, "challenge_required", decision, challenge_cooldown_ttl)
-    end
-
-    if decision.outcome == "deny" then
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "backend_deny", decision_reason = decision.reason, subreq_uri = decision.subreq_uri, subreq_status = decision.subreq_status, subreq_location = decision.subreq_location, decision_source = decision.decision_source, target = "-" })
-        return ngx.exit(ngx.HTTP_FORBIDDEN)
-    end
-
-    decision_log(ngx.WARN, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "deny", reason = "unknown_decision", decision_reason = decision.reason or "-", subreq_uri = decision.subreq_uri or "-", subreq_status = decision.subreq_status or "-", subreq_location = decision.subreq_location or "-", decision_source = decision.decision_source or "-", target = "-" })
-    return ngx.exit(ngx.HTTP_FORBIDDEN)
+    ngx.var.cfm_pass = origin
+    ngx.var.cfm_upstream = "cfm_panel_origin"
+    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "default_passthrough", target = origin })
+    return
 end
 
 ngx.var.cfm_pass = origin
 ngx.var.cfm_upstream = "cfm_panel_origin"
-decision_log(ngx.DEBUG, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "mode_skip", target = origin })
-return
+decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "default_passthrough", target = origin })
