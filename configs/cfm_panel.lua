@@ -1,5 +1,19 @@
 -- Panel-specific CFM guard/router for cPanel/WHM/Webmail ports.
-local function starts_with(s, p) return s and p and s:sub(1, #p) == p end
+--
+-- Single simplified policy:
+--   1) API / SSO / cPanel internal flows: always pass to cpsrvd.
+--   2) Human panel entrypoints: browser challenge.
+--   3) Non-browser entrypoint clients: pass to cpsrvd, do not 403.
+--   4) Everything else: pass to cpsrvd.
+--
+-- Important:
+--   - Do not run mini-WAF here.
+--   - Do not validate WHM/API auth here. cpsrvd does that.
+--   - Do not require User-Agent or Authorization for API passthrough.
+
+local function starts_with(s, p)
+    return s and p and s:sub(1, #p) == p
+end
 
 local function decision_log(level, fields)
     ngx.log(level,
@@ -23,39 +37,23 @@ local function decision_log(level, fields)
         " challenge_solved=", fields.challenge_solved or "0",
         " challenge_resume=", fields.challenge_resume or "0",
         " deny_fail_closed=", fields.deny_fail_closed or "0",
-        " target=", fields.target or "-")
+        " target=", fields.target or "-"
+    )
 end
-
-local function parse_socket_error(err)
-    local msg = tostring(err or "")
-    local path = msg:match("unix:([^:%s]+)")
-    if not path then
-        path = msg:match("connect%(%) to ([^%s]+) failed")
-    end
-    return path or "-", msg
-end
-
-local function should_emit_failopen_log()
-    local dict = ngx.shared and ngx.shared.cfm_stats
-    if not dict then return true end
-    local now = ngx.now and ngx.now() or os.time()
-    local key = "panel_failopen_log:last"
-    local last = tonumber(dict:get(key) or 0) or 0
-    if now-last < 30 then return false end
-    dict:set(key, now, 60)
-    return true
-end
-
 
 local function parse_duration_seconds(raw, fallback)
     if raw == nil or raw == "" then return fallback end
+
     local n, unit = tostring(raw):match("^%s*(%d+)%s*([smhdSMHD]?)%s*$")
     n = tonumber(n)
     if not n then return fallback end
+
     unit = (unit or "s"):lower()
+
     if unit == "m" then return n * 60 end
     if unit == "h" then return n * 3600 end
     if unit == "d" then return n * 86400 end
+
     return n
 end
 
@@ -65,36 +63,62 @@ local function challenge_state()
     return sh
 end
 
-local function ttl_key(ip, host) return "panel_ok|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
-local function cooldown_key(ip, host) return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
-local function loop_key(ip, host) return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-") end
+local function ttl_key(ip, host)
+    return "panel_ok|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
+end
+
+local function cooldown_key(ip, host)
+    return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
+end
+
+local function loop_key(ip, host)
+    return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
+end
 
 local function mark_challenge_issued(ip, host, cooldown_ttl)
-    local sh = challenge_state(); if not sh then return end
-    sh:set(cooldown_key(ip, host), 1, cooldown_ttl)
+    local ttl = tonumber(cooldown_ttl or 0) or 0
+    if ttl <= 0 then return end
+
+    local sh = challenge_state()
+    if not sh then return end
+
+    sh:set(cooldown_key(ip, host), 1, ttl)
 end
 
 local function mark_passed(ip, host, ok_ttl)
-    local sh = challenge_state(); if not sh then return end
-    sh:set(ttl_key(ip, host), 1, ok_ttl)
+    local ttl = tonumber(ok_ttl or 0) or 0
+    if ttl <= 0 then return end
+
+    local sh = challenge_state()
+    if not sh then return end
+
+    sh:set(ttl_key(ip, host), 1, ttl)
 end
 
 local function has_bypass_ttl(ip, host)
-    local sh = challenge_state(); if not sh then return false end
+    local sh = challenge_state()
+    if not sh then return false end
+
     return sh:get(ttl_key(ip, host)) ~= nil
 end
 
 local function cooldown_active(ip, host)
-    local sh = challenge_state(); if not sh then return false end
+    local sh = challenge_state()
+    if not sh then return false end
+
     return sh:get(cooldown_key(ip, host)) ~= nil
 end
 
 local function note_challenge_attempt(ip, host, ttl)
-    local sh = challenge_state(); if not sh then return 0 end
+    local sh = challenge_state()
+    if not sh then return 0 end
+
     local key = loop_key(ip, host)
     local n = tonumber(sh:get(key) or 0) or 0
     n = n + 1
-    sh:set(key, n, ttl)
+
+    sh:set(key, n, ttl or 20)
+
     return n
 end
 
@@ -102,22 +126,28 @@ local decision_uri = "/__cfm_panel_decide"
 
 local function is_internal_decision_uri(candidate)
     if type(candidate) ~= "string" then return false end
+
     local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
     if c == "" then return false end
+
     if c == decision_uri or starts_with(c, decision_uri .. "?") then return true end
     if c:find("/__cfm_panel_decide", 1, true) then return true end
     if c:match("^https?://[^/]+/__cfm_panel_decide([/?#].*)?$") then return true end
+
     return false
 end
 
 local function is_internal_challenge_uri(candidate)
     if type(candidate) ~= "string" then return false end
+
     local c = candidate:gsub("^%s+", ""):gsub("%s+$", "")
     if c == "" then return false end
+
     if c == "/__cfm_challenge" or starts_with(c, "/__cfm_challenge?") or starts_with(c, "/__cfm_challenge/") then return true end
     if c == "/__cfm_verify" or starts_with(c, "/__cfm_verify?") or starts_with(c, "/__cfm_verify/") then return true end
     if c:match("^https?://[^/]+/__cfm_challenge([/?#].*)?$") then return true end
     if c:match("^https?://[^/]+/__cfm_verify([/?#].*)?$") then return true end
+
     return false
 end
 
@@ -127,42 +157,55 @@ end
 
 local function sanitize_panel_next_target(raw_next, fallback)
     local candidate = raw_next
+
     for _ = 1, 6 do
         if type(candidate) ~= "string" or candidate == "" then break end
+
         local decoded = ngx.unescape_uri(candidate)
         if decoded == candidate then
             candidate = decoded
             break
         end
+
         candidate = decoded
     end
+
     if is_internal_guard_uri(candidate) then
         return fallback or "/"
     end
+
     return candidate or fallback or "/"
 end
 
 local function strip_nested_next_chain(raw_next)
     local candidate = sanitize_panel_next_target(raw_next, "/")
+
     if is_internal_decision_uri(candidate) then return "/" end
     if type(candidate) ~= "string" or candidate == "" then return "/" end
     if not starts_with(candidate, "/") then return "/" end
+
     local path, query = candidate:match("^([^?]*)%??(.*)$")
     if not query or query == "" then return candidate end
+
     local cleaned = {}
+
     for pair in query:gmatch("[^&]+") do
-        local key, value = pair:match("^([^=]+)=?(.*)$")
-        local dk = ngx.unescape_uri(key or "")
-        if dk ~= "next" then
-            cleaned[#cleaned+1] = pair
+        local key = pair:match("^([^=]+)=?.*$") or ""
+        local decoded_key = ngx.unescape_uri(key)
+
+        if decoded_key ~= "next" then
+            cleaned[#cleaned + 1] = pair
         end
     end
+
     if #cleaned == 0 then return path end
+
     return path .. "?" .. table.concat(cleaned, "&")
 end
 
 local function normalize_challenge_next_arg(next_arg)
     local candidates = {}
+
     if type(next_arg) == "table" then
         candidates = next_arg
     else
@@ -171,123 +214,246 @@ local function normalize_challenge_next_arg(next_arg)
 
     for _, raw in ipairs(candidates) do
         if type(raw) == "string" and raw ~= "" then
-            if is_internal_guard_uri(raw) then
-                -- try next candidate
-            else
+            if not is_internal_guard_uri(raw) then
                 local sanitized = strip_nested_next_chain(raw)
+
                 if type(sanitized) == "string" and sanitized ~= "" and not is_internal_guard_uri(sanitized) then
                     return sanitized
                 end
             end
         end
     end
+
     return "/"
 end
 
 local function safe_next_from_request(default_next)
     local args = ngx.req.get_uri_args() or {}
     local normalized = normalize_challenge_next_arg(args.next)
+
     if normalized ~= "/" then
         return normalized
     end
+
     return strip_nested_next_chain(default_next or "/")
 end
 
-
 local function with_single_next_arg(url, next_value)
     local safe_next = sanitize_panel_next_target(next_value, "/")
-    if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then safe_next = "/" end
+
+    if is_internal_guard_uri(safe_next) or is_internal_decision_uri(safe_next) then
+        safe_next = "/"
+    end
+
     local base, frag = url:match("^([^#]*)(#.*)$")
-    if not base then base, frag = url, "" end
+    if not base then
+        base = url
+        frag = ""
+    end
+
     local path, query = base:match("^([^?]*)%??(.*)$")
     local kept = {}
+
     if query and query ~= "" then
         for pair in query:gmatch("[^&]+") do
             local key = pair:match("^([^=]+)=?.*$") or ""
             local decoded_key = ngx.unescape_uri(key)
+
             if decoded_key ~= "next" then
                 kept[#kept + 1] = pair
             end
         end
     end
+
     kept[#kept + 1] = "next=" .. ngx.escape_uri(safe_next)
+
     return path .. "?" .. table.concat(kept, "&") .. frag
 end
 
 local function challenge_redirect_target(decision)
     local req_uri = ngx.var.request_uri or ngx.var.uri or "/"
     req_uri = strip_nested_next_chain(req_uri)
+
     local challenge_location = ngx.var.cfm_panel_challenge_location or "/__cfm_challenge"
+
     if challenge_location == decision_uri then
         challenge_location = "/__cfm_challenge"
     end
 
-    local loc = (decision and decision.subreq_location and decision.subreq_location ~= "-") and decision.subreq_location or challenge_location
+    local loc = challenge_location
+
+    if decision and decision.subreq_location and decision.subreq_location ~= "-" then
+        loc = decision.subreq_location
+    end
+
     if is_internal_decision_uri(loc) then
         return challenge_location
     end
-    local full_decision = "http://" .. (ngx.var.host or "") .. decision_uri
+
+    local host = ngx.var.host or ""
     local full_decisions = {
-        full_decision,
-        "https://" .. (ngx.var.host or "") .. decision_uri,
+        "http://" .. host .. decision_uri,
+        "https://" .. host .. decision_uri,
     }
+
     for _, candidate in ipairs(full_decisions) do
         if starts_with(loc, candidate) then
             return challenge_location
         end
     end
+
     local safe_next = safe_next_from_request(req_uri)
-    if loc == challenge_location and safe_next == "/whm" then
-        return challenge_location
-    end
+
     return with_single_next_arg(loc, safe_next)
 end
 
 local function issue_challenge(mode, reason, decision, cooldown_ttl)
     local loc = challenge_redirect_target(decision)
+
     local attempts = note_challenge_attempt(ngx.var.remote_addr, ngx.var.host or "", 20)
     mark_challenge_issued(ngx.var.remote_addr, ngx.var.host or "", cooldown_ttl or 0)
+
     decision_log(ngx.INFO, {
-        mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr,
-        decision = "challenge", reason = reason, decision_reason = decision and decision.reason or "-",
-        subreq_uri = decision and decision.subreq_uri or "-", subreq_status = decision and decision.subreq_status or "-", subreq_location = decision and decision.subreq_location or "-", decision_source = decision and decision.decision_source or "-",
-        allow_origin = "0", challenge_issued = "1", challenge_entry = "1", challenge_solved = "0", challenge_resume = tostring(attempts), deny_fail_closed = "0", target = loc,
+        mode = mode,
+        host = ngx.var.host,
+        uri = ngx.var.request_uri,
+        method = ngx.req.get_method(),
+        ua = ngx.var.http_user_agent,
+        ip = ngx.var.remote_addr,
+        decision = "challenge",
+        reason = reason,
+        decision_reason = decision and decision.reason or "-",
+        subreq_uri = decision and decision.subreq_uri or "-",
+        subreq_status = decision and decision.subreq_status or "-",
+        subreq_location = decision and decision.subreq_location or "-",
+        decision_source = decision and decision.decision_source or "-",
+        allow_origin = "0",
+        challenge_issued = "1",
+        challenge_entry = "1",
+        challenge_solved = "0",
+        challenge_resume = tostring(attempts),
+        deny_fail_closed = "0",
+        target = loc,
     })
+
     return ngx.redirect(loc, ngx.HTTP_TEMPORARY_REDIRECT)
 end
 
 local function deny(mode, reason)
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = ngx.req.get_method(), ua = ngx.var.http_user_agent, ip = ngx.var.remote_addr, decision = "deny", reason = reason, target = "-" })
+    decision_log(ngx.INFO, {
+        mode = mode,
+        host = ngx.var.host,
+        uri = ngx.var.request_uri,
+        method = ngx.req.get_method(),
+        ua = ngx.var.http_user_agent,
+        ip = ngx.var.remote_addr,
+        decision = "deny",
+        reason = reason,
+        target = "-",
+    })
+
     return ngx.exit(ngx.HTTP_FORBIDDEN)
 end
 
 local function run_basic_guard()
     local auth = ngx.var.http_authorization or ""
     local b64 = auth:match("^[Bb]asic%s+(.+)$")
+
     if not b64 then return true end
+
     local decoded = ngx.decode_base64(b64)
+
     if not decoded then return nil, "basic_bad_base64" end
     if decoded:find("\r", 1, true) or decoded:find("\n", 1, true) then return nil, "basic_decoded_crlf" end
     if decoded:find("\0", 1, true) then return nil, "basic_decoded_nul" end
     if #decoded > 4096 then return nil, "basic_decoded_too_large" end
+
     return true
 end
 
 local function is_browser_like(ua)
     ua = (ua or ""):lower()
-    return ua:find("mozilla", 1, true) or ua:find("chrome", 1, true) or ua:find("safari", 1, true) or ua:find("firefox", 1, true) or ua:find("edg", 1, true)
+
+    return ua:find("mozilla", 1, true)
+        or ua:find("chrome", 1, true)
+        or ua:find("safari", 1, true)
+        or ua:find("firefox", 1, true)
+        or ua:find("edg", 1, true)
 end
 
 local function clearance_cookie_state()
     local raw = ngx.var.http_cookie or ""
     local cookie = "; " .. raw
-    local has_any = cookie:find("; cfm_ok=", 1, true) or cookie:find("; cfm_clearance=", 1, true)
-    if not has_any then return false, "cookie_missing" end
+
+    local has_any = cookie:find("; cfm_ok=", 1, true)
+        or cookie:find("; cfm_clearance=", 1, true)
+
+    if not has_any then
+        return false, "cookie_missing"
+    end
+
     return true, "cookie_present"
 end
 
+local function append_set_cookie(v)
+    local h = ngx.header["Set-Cookie"]
+
+    if not h then
+        ngx.header["Set-Cookie"] = v
+        return
+    end
+
+    if type(h) == "table" then
+        table.insert(h, v)
+        ngx.header["Set-Cookie"] = h
+        return
+    end
+
+    ngx.header["Set-Cookie"] = { h, v }
+end
+
+local function safe_cookie_value(v)
+    if not v or v == "" then return nil end
+    if v:find("[%c;]") then return nil end
+
+    return v
+end
+
+local function refresh_clearance_cookie()
+    local ttl = parse_duration_seconds(
+        ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m",
+        2700
+    )
+
+    local attrs = "Path=/; Max-Age=" .. tostring(ttl) .. "; HttpOnly; SameSite=Lax"
+
+    if ngx.var.https == "on" or ngx.var.scheme == "https" then
+        attrs = attrs .. "; Secure"
+    end
+
+    local refreshed = false
+
+    local cfm_ok = safe_cookie_value(ngx.var.cookie_cfm_ok)
+    if cfm_ok then
+        append_set_cookie("cfm_ok=" .. tostring(cfm_ok) .. "; " .. attrs)
+        refreshed = true
+    end
+
+    local cfm_clearance = safe_cookie_value(ngx.var.cookie_cfm_clearance)
+    if cfm_clearance then
+        append_set_cookie("cfm_clearance=" .. tostring(cfm_clearance) .. "; " .. attrs)
+        refreshed = true
+    end
+
+    return refreshed
+end
+
 local function is_exempt_path(uri)
-    return uri == "/healthz" or uri == "/ping" or uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") or starts_with(uri, "/.well-known/")
+    return uri == "/healthz"
+        or uri == "/ping"
+        or uri == "/__cfm_challenge"
+        or starts_with(uri, "/__cfm_challenge/")
+        or starts_with(uri, "/.well-known/")
 end
 
 local function is_panel_api_or_sso(uri)
@@ -311,73 +477,153 @@ local function is_panel_api_or_sso(uri)
 end
 
 local function is_human_entry_uri(uri)
-    return uri == "/" or uri == "/login" or uri == "/login/" or uri == "/cpanel" or uri == "/cpanel/" or uri == "/whm" or uri == "/whm/" or uri == "/webmail" or uri == "/webmail/"
+    return uri == "/"
+        or uri == "/login"
+        or uri == "/login/"
+        or uri == "/cpanel"
+        or uri == "/cpanel/"
+        or uri == "/whm"
+        or uri == "/whm/"
+        or uri == "/webmail"
+        or uri == "/webmail/"
 end
 
 local function has_panel_prefix(host)
     local h = (host or ""):lower()
-    return starts_with(h, "cpanel.") or starts_with(h, "whm.") or starts_with(h, "webmail.") or starts_with(h, "webdisk.")
+
+    return starts_with(h, "cpanel.")
+        or starts_with(h, "whm.")
+        or starts_with(h, "webmail.")
+        or starts_with(h, "webdisk.")
 end
 
 local function is_ip_host(host)
     local h = (host or ""):lower()
-    return h:match("^%d+%.%d+%.%d+%.%d+$") ~= nil or h:match("^%[[0-9a-f:]+%]$") ~= nil or h:find(":", 1, true) ~= nil
+
+    return h:match("^%d+%.%d+%.%d+%.%d+$") ~= nil
+        or h:match("^%[[0-9a-f:]+%]$") ~= nil
+        or h:find(":", 1, true) ~= nil
 end
 
 local function is_human_panel_entry(host, uri)
     if not is_human_entry_uri(uri) then return false end
+
+    -- Explicit panel subdomains.
     if has_panel_prefix(host) then return true end
+
+    -- Direct IP or Host header with :2087/:2083/etc.
     if is_ip_host(host) then return true end
+
+    -- This Lua file runs only on panel DNAT listeners, so "/" and "/login"
+    -- are direct human panel entrypoints even for normal hostnames.
     return true
 end
+
+local function allow_origin(mode, reason, origin, method, ua)
+    ngx.var.cfm_pass = origin
+    ngx.var.cfm_upstream = "cfm_panel_origin"
+
+    decision_log(ngx.INFO, {
+        mode = mode,
+        host = ngx.var.host,
+        uri = ngx.var.request_uri,
+        method = method,
+        ua = ua,
+        ip = ngx.var.remote_addr,
+        decision = "allow",
+        reason = reason,
+        target = origin,
+    })
+
+    return
+end
+
+local function allow_passthrough(mode, reason, origin, method, ua)
+    ngx.var.cfm_pass = origin
+    ngx.var.cfm_upstream = "cfm_panel_passthrough"
+
+    decision_log(ngx.INFO, {
+        mode = mode,
+        host = ngx.var.host,
+        uri = ngx.var.request_uri,
+        method = method,
+        ua = ua,
+        ip = ngx.var.remote_addr,
+        decision = "allow",
+        reason = reason,
+        target = origin,
+    })
+
+    return
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Main request flow
+-- ─────────────────────────────────────────────────────────────────────────────
 
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 local origin = ngx.var.cfm_panel_origin or ""
-local mode = ngx.var.cfm_panel_challenge_mode or "human-entry-only"
+local mode = ngx.var.cfm_panel_challenge_mode or ngx.var.cfm_panel_policy or "human-entry-only"
 
-local ok, reason = run_basic_guard(); if not ok then return deny(mode, reason) end
-if origin == "" then return deny(mode, "panel_origin_empty") end
+local ok, reason = run_basic_guard()
+if not ok then
+    return deny(mode, reason)
+end
 
+if origin == "" then
+    return deny(mode, "panel_origin_empty")
+end
+
+-- Protect internal CFM endpoints from direct external access.
 if uri == decision_uri or uri == "/__cfm_verify" then
     local is_internal = ngx.req and ngx.req.is_internal and ngx.req.is_internal()
-    if not is_internal then return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN) end
+
+    if not is_internal then
+        return ngx.exit(ngx.HTTP_NOT_FOUND or ngx.HTTP_FORBIDDEN)
+    end
 end
 
+-- 1) API / SSO / cPanel internal flows must bypass CFM challenge completely.
+-- This must happen before any host/panel-entry checks.
 if is_panel_api_or_sso(uri) then
-    ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_passthrough"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "api_sso_passthrough", target = origin })
-    return
+    return allow_passthrough(mode, "api_sso_passthrough", origin, method, ua)
 end
 
+-- 2) Local challenge/support endpoints and well-known paths.
 if is_exempt_path(uri) then
-    ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_origin"
-    local reason = (uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/")) and "challenge_endpoint_exempt" or "path_exempt"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = reason, target = origin })
-    return
+    local exempt_reason = "path_exempt"
+
+    if uri == "/__cfm_challenge" or starts_with(uri, "/__cfm_challenge/") then
+        exempt_reason = "challenge_endpoint_exempt"
+    end
+
+    return allow_origin(mode, exempt_reason, origin, method, ua)
 end
 
+-- 3) Human panel entrypoints.
 if is_human_panel_entry(ngx.var.host or "", uri) then
     local has_cookie = clearance_cookie_state()
+
     if has_cookie then
-        refresh_clearance_cookie()
-        ngx.var.cfm_pass = origin
-        ngx.var.cfm_upstream = "cfm_panel_origin"
-        decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "challenge_pass_cookie", target = origin })
-        return
+        local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
+
+        if not ok_refresh then
+            ngx.log(ngx.WARN, "CFM_PANEL clearance refresh failed: ", tostring(refresh_err))
+        end
+
+        return allow_origin(mode, "challenge_pass_cookie", origin, method, ua)
     end
+
     if is_browser_like(ua) then
         return issue_challenge(mode, "human_entry_challenge", nil, 0)
     end
-    ngx.var.cfm_pass = origin
-    ngx.var.cfm_upstream = "cfm_panel_origin"
-    decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ua = ua, ip = ngx.var.remote_addr, decision = "allow", reason = "default_passthrough", target = origin })
-    return
+
+    -- Important: do not 403 curl/python/WHMCS/API-like clients just because
+    -- they are not browser-like. Let cpsrvd decide.
+    return allow_origin(mode, "non_browser_entry_passthrough", origin, method, ua)
 end
 
-ngx.var.cfm_pass = origin
-ngx.var.cfm_upstream = "cfm_panel_origin"
-decision_log(ngx.INFO, { mode = mode, host = ngx.var.host, uri = ngx.var.request_uri, method = method, ip = ngx.var.remote_addr, decision = "allow", reason = "default_passthrough", target = origin })
+-- 4) Everything else passes to cpsrvd.
+return allow_origin(mode, "default_passthrough", origin, method, ua)
