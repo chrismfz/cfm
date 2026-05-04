@@ -1443,7 +1443,9 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 
 	// Set signed clearance cookie (authoritative)
 	ttl := s.cookieTTL()
-	clearanceVal := issueClearanceToken(ipStr, host, clearanceScope(r), time.Now().UTC().Add(ttl))
+	scope := clearanceScope(r)
+	exp := time.Now().UTC().Add(ttl)
+	clearanceVal := issueClearanceToken(ipStr, host, scope, exp)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "cfm_clearance",
 		Value:    clearanceVal,
@@ -1453,6 +1455,23 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
+	if strings.EqualFold(os.Getenv("CFM_CLEARANCE_DEBUG"), "1") {
+		normHost := normalizeClearanceHost(host)
+		reqID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if reqID == "" {
+			reqID = strings.TrimSpace(r.Header.Get("X-CFM-Request-ID"))
+		}
+		if reqID == "" {
+			reqID = "-"
+		}
+		ipHash := "-"
+		if ipStr != "" {
+			sum := sha256.Sum256([]byte(ipStr))
+			ipHash = hex.EncodeToString(sum[:6])
+		}
+		logging.LogfCHALLENGES("[clearance_debug] phase=issue req_id=%s host=%s scope=%s ip_hash=%s exp=%s set_cookie=1",
+			reqID, normHost, scope, ipHash, exp.Format(time.RFC3339))
+	}
 
 	// Transitional legacy solved marker (non-authoritative; kept for migration).
 	okVal := randomCookieValue()
