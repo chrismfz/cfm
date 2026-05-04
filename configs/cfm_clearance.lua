@@ -96,8 +96,11 @@ local function normalize_forwarded_port(port)
   return p
 end
 
-function _M.panel_scope(forwarded_port, panel_origin, server_port)
-  local port = normalize_forwarded_port(forwarded_port)
+function _M.panel_scope(panel_port, forwarded_port, panel_origin, server_port)
+  local port = normalize_forwarded_port(panel_port)
+  if not port then
+    port = normalize_forwarded_port(forwarded_port)
+  end
   if not port then
     port = normalize_forwarded_port(tostring(panel_origin or ""):match(":(%d+)"))
   end
@@ -110,7 +113,7 @@ end
 
 function _M.derive_scope(mode, forwarded_port, panel_origin, server_port)
   if tostring(mode or "web") == "web" then return "web" end
-  return _M.panel_scope(forwarded_port, panel_origin, server_port)
+  return _M.panel_scope(nil, forwarded_port, panel_origin, server_port)
 end
 
 function _M.normalize_forwarded_port(port)

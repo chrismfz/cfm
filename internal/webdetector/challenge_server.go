@@ -1666,7 +1666,10 @@ func trustedForwardedProto(r *http.Request) string {
 }
 
 func clearanceScope(r *http.Request) string {
-	p := normalizeForwardedPort(r.Header.Get("X-Forwarded-Port"))
+	p := normalizeForwardedPort(r.Header.Get("X-CFM-Panel-Port"))
+	if p == "" {
+		p = normalizeForwardedPort(r.Header.Get("X-Forwarded-Port"))
+	}
 	if p == "" || p == "80" || p == "443" {
 		return "web"
 	}
