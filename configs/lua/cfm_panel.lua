@@ -195,6 +195,12 @@ local function note_challenge_attempt(ip, host, ttl)
     return n
 end
 
+local function read_challenge_attempts(ip, host)
+    local sh = challenge_state()
+    if not sh then return 0 end
+    return tonumber(sh:get(loop_key(ip, host)) or 0) or 0
+end
+
 local decision_uri = "/__cfm_panel_decide"
 
 local function is_internal_decision_uri(candidate)
@@ -736,16 +742,24 @@ local PANEL_FAIL_OPEN = (os.getenv("CFM_PANEL_FAIL_OPEN") or os.getenv("CFM_FAIL
 -- ─────────────────────────────────────────────────────────────────────────────
 
 
-function cfm_panel_selftest()
-    local ok_dep, dep_err = pcall(require, "cfm_clearance")
-    if not ok_dep then return false, "require cfm_clearance failed: " .. tostring(dep_err) end
-    local chunk, load_err = loadfile(_BRIDGE_TOKEN_FILE)
-    if not chunk then return false, "bridge token load failed: " .. tostring(load_err) end
-    local ok_token, tok = pcall(chunk)
-    if not ok_token or type(tok) ~= "string" or #tok < 32 then
-        return false, "bridge token invalid"
-    end
-    return true, "ok"
+-- Selftest hook used by install-openresty.sh preflight (`resty -e ...`),
+-- which loads this file via dofile() and expects cfm_panel_selftest in _G.
+-- access_by_lua_file re-runs the chunk on every request, so guard the
+-- assignment to once per worker and use rawset() to bypass OpenResty's
+-- _G write guard (otherwise every request emits:
+--   "writing a global Lua variable ('cfm_panel_selftest')").
+if rawget(_G, "cfm_panel_selftest") == nil then
+    rawset(_G, "cfm_panel_selftest", function()
+        local ok_dep, dep_err = pcall(require, "cfm_clearance")
+        if not ok_dep then return false, "require cfm_clearance failed: " .. tostring(dep_err) end
+        local chunk, load_err = loadfile(_BRIDGE_TOKEN_FILE)
+        if not chunk then return false, "bridge token load failed: " .. tostring(load_err) end
+        local ok_token, tok = pcall(chunk)
+        if not ok_token or type(tok) ~= "string" or #tok < 32 then
+            return false, "bridge token invalid"
+        end
+        return true, "ok"
+    end)
 end
 local function main()
 local uri = ngx.var.uri or "/"
@@ -799,8 +813,13 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
     clearance_reason = normalize_validator_reason(clearance_reason)
     local cookie_present = safe_cookie_value(ngx.var.cookie_cfm_clearance) and "1" or "0"
     local prior = pop_verify_trace(client_ip)
+
+    -- error_log defaults to "warn"; use WARN on validation failures so the
+    -- operator can see WHY the cookie was rejected without flipping the
+    -- whole error_log level. Successful validations still log at NOTICE.
+    local trace_level = (clearance_ok and ngx.NOTICE) or ngx.WARN
     ngx.log(
-        ngx.NOTICE,
+        trace_level,
         "[cfm_panel_trace] phase=validate_next",
         " corr_id=", tostring(req_id),
         " req_id=", tostring(req_id),
@@ -808,6 +827,8 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         " host_header=", tostring(ngx.var.host or "-"),
         " host_norm=", tostring(normalized_host or "-"),
         " scope=", tostring(panel_scope or "-"),
+        " server_port=", tostring(ngx.var.server_port or "-"),
+        " origin=", tostring(origin or "-"),
         " cookie_present=", cookie_present,
         " validator_reason=", tostring(clearance_reason or "validator_error")
     )
@@ -850,6 +871,28 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         if validator_degraded then
             set_loop_marker_cookie(20)
             return allow_origin(mode, "validator_degraded_fail_open_" .. tostring(clearance_reason), origin, method, ua)
+        end
+
+        -- Circuit breaker: if a browser has already been bounced through the
+        -- challenge several times in the last 20s and *still* arrives without
+        -- a valid clearance cookie, validation is structurally broken (cookie
+        -- not coming back, scope/host/IP mismatch, etc). Fail open with a
+        -- loop-guard cookie so the user can actually use the panel; the
+        -- WARN log above already records the validator_reason for diagnosis.
+        local prior_attempts = read_challenge_attempts(client_ip, ngx.var.host or "")
+        if loop_marker_present() or prior_attempts >= 3 then
+            ngx.log(
+                ngx.WARN,
+                "[cfm_panel_loop_break] prior_attempts=", tostring(prior_attempts),
+                " loop_marker=", loop_marker_present() and "1" or "0",
+                " ip=", tostring(client_ip or "-"),
+                " host=", tostring(normalized_host or "-"),
+                " scope=", tostring(panel_scope or "-"),
+                " validator_reason=", tostring(clearance_reason or "-"),
+                " cookie_present=", cookie_present
+            )
+            set_loop_marker_cookie(20)
+            return allow_origin(mode, "challenge_loop_break_" .. tostring(clearance_reason or "invalid"), origin, method, ua)
         end
 
         return issue_challenge(mode, "human_entry_challenge_" .. tostring(clearance_reason or "invalid"), nil, 0, false)
