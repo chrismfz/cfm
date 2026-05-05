@@ -503,8 +503,8 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 		sockProbe.Category,
 		sockProbe.ErrorText,
 	)
-	fmt.Printf("  %-24s %s\n", "cfm_token:", tokenHealth(cfmToken))
-	fmt.Printf("  %-24s %s\n", "bridge_token:", tokenHealth(bridgeToken))
+	fmt.Printf("  %-24s %s\n", "challenge token (CHALLENGE_TOKEN):", tokenHealth(cfmToken))
+	fmt.Printf("  %-24s %s\n", "edge bridge token (OPENRESTY_TOKEN):", tokenHealth(bridgeToken))
 	fmt.Printf("  %-24s %s\n", "bridge socket auth:", bridgeRuntime.summary())
 	fmt.Printf("  %-24s socket=%s source=%s token_src=%s mode=%s\n",
 		"",

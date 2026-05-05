@@ -400,8 +400,8 @@ func printEdgeInterceptorSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Println("Edge interceptor")
 	fmt.Printf("  sslcollector.sock: %s\n", mapEdgeStatus(sock.Category))
 	fmt.Printf("    path=%s uid=%s gid=%s mode=%s probe=%s%s\n", sock.Path, sock.UID, sock.GID, sock.Mode, sock.Category, sock.ErrorText)
-	fmt.Printf("  cfm_token: %s\n", edgediag.TokenHealth(cfmToken))
-	fmt.Printf("  bridge_token: %s\n", edgediag.TokenHealth(bridgeToken))
+	fmt.Printf("  challenge token (CHALLENGE_TOKEN): %s\n", edgediag.TokenHealth(cfmToken))
+	fmt.Printf("  edge bridge token (OPENRESTY_TOKEN): %s\n", edgediag.TokenHealth(bridgeToken))
 	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
 
 }
