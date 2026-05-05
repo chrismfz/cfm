@@ -413,21 +413,9 @@ func checkPanelLuaGuard(path string) panelLuaGuardStatus {
 		}
 	}
 	st.LoadState = "unknown"
-	if cmdExists("luajit") {
-		out, err := exec.Command("luajit", "-bl", cmdPath).CombinedOutput()
-		if err == nil {
-			st.LoadState = "true"
-			return st
-		}
-		st.LoadState = "false"
-		st.LoadError = strings.TrimSpace(string(out))
-		if st.LoadError == "" {
-			st.LoadError = err.Error()
-		}
-		return st
-	}
+	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,time=os.time}; dofile(arg[1]); if type(cfm_panel_selftest)~='function' then error('missing cfm_panel_selftest') end; local ok,err=cfm_panel_selftest(); if not ok then error(err or 'selftest failed') end`
 	if cmdExists("resty") {
-		out, err := exec.Command("resty", "-e", "assert(loadfile(arg[1]))", cmdPath).CombinedOutput()
+		out, err := exec.Command("resty", "-e", selftest, cmdPath).CombinedOutput()
 		if err == nil {
 			st.LoadState = "true"
 			return st

@@ -751,8 +751,7 @@ func probeChallengeFlowReadiness() challengeFlowReadiness {
 	if !strings.Contains(listenAddr, ":") {
 		listenAddr = "127.0.0.1:" + listenAddr
 	}
-	challengeToken := luaTokenProbe{Token: strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")), Present: strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")) != ""}
-	challengeToken.Valid = isStrongToken(challengeToken.Token)
+	challengeToken := readChallengeTokenProbe()
 	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
 	cfg := resolveBridgeRuntimeConfig()
 
@@ -919,6 +918,22 @@ func readDetectorSectionKV(path, section string) map[string]string {
 		}
 	}
 	return out
+}
+
+
+func readChallengeTokenProbe() luaTokenProbe {
+	tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
+	if tok != "" {
+		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
+	}
+	kv := readDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
+	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
+		clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`)
+		if clean != "" {
+			return luaTokenProbe{Token: clean, Present: true, Valid: isStrongToken(clean)}
+		}
+	}
+	return luaTokenProbe{}
 }
 
 func pathExists(path string) bool {

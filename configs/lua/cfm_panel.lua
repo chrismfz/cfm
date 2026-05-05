@@ -734,6 +734,19 @@ local PANEL_FAIL_OPEN = (os.getenv("CFM_PANEL_FAIL_OPEN") or os.getenv("CFM_FAIL
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Main request flow
 -- ─────────────────────────────────────────────────────────────────────────────
+
+
+function cfm_panel_selftest()
+    local ok_dep, dep_err = pcall(require, "cfm_clearance")
+    if not ok_dep then return false, "require cfm_clearance failed: " .. tostring(dep_err) end
+    local chunk, load_err = loadfile(_BRIDGE_TOKEN_FILE)
+    if not chunk then return false, "bridge token load failed: " .. tostring(load_err) end
+    local ok_token, tok = pcall(chunk)
+    if not ok_token or type(tok) ~= "string" or #tok < 32 then
+        return false, "bridge token invalid"
+    end
+    return true, "ok"
+end
 local function main()
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()
