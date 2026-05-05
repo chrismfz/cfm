@@ -1091,7 +1091,31 @@ func probeNginxBridgeSocket(sockPath, token string) (int, string, error) {
 	if len(payload) == 0 {
 		return resp.StatusCode, "empty json", nil
 	}
+	if stats, ok := payload["stats"].(map[string]any); ok {
+		if timing, ok := stats["timing"].(map[string]any); ok {
+			totalP95 := intFromAny(timing["total_p95_ms"])
+			totalP99 := intFromAny(timing["total_p99_ms"])
+			queueP95 := intFromAny(timing["queue_wait_p95_ms"])
+			timeoutLast := intFromAny(timing["timeout_count_last_minute"])
+			return resp.StatusCode, fmt.Sprintf("bridge_timing total_p95=%dms total_p99=%dms queue_wait_p95=%dms timeouts_last_min=%d", totalP95, totalP99, queueP95, timeoutLast), nil
+		}
+	}
 	return resp.StatusCode, "json ok", nil
+}
+
+func intFromAny(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case float32:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	default:
+		return 0
+	}
 }
 
 func resolveRuntimeCFMConfigPath() string {
