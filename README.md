@@ -1100,36 +1100,16 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 - The `alter_user` action in `CONN_RULES` requires `GRANT CREATE USER`. This is a powerful privilege — scope it to `'cfm_governor'@'localhost'` only and use a strong password.
 - Always run the governor in `monitor` mode for at least one week before switching to `enforce` on a production server.
 
-## DNAT priority and Imunify360/WebShield compatibility
 
-CFM DNAT redirects:
-- tcp/80 -> 9080
-- tcp/443 -> 9043
-- udp/443 -> 9043
 
-Imunify360/WebShield may also install DNAT rules (typically at nft `dstnat` priority `-100`) for:
-- web: 80, 443 (often to 52224/52223)
-- cPanel/WHM/Webmail: 2082, 2083, 2086, 2087, 2095, 2096
+## cPanel DNAT / DirectAdmin DNAT protection
 
-CFM default DNAT priority is `-99`, which means Imunify/WebShield (`-100`) gets first chance to DNAT matched traffic; CFM then catches unmatched remaining web traffic.
+CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports.
 
-If you want CFM-first behavior, set priority to `-101`.
-Avoid using `-100` for CFM because same-priority NAT chains can create ambiguous ordering.
-
-Examples:
-- `cfm dnat on --priority -99` (Imunify-first, CFM fallback)
-- `cfm dnat on --priority -101` (CFM-first)
-
-Safety notes:
-- `cfm dnat off` only removes CFM-owned `table inet cfm_redirect` behavior.
-- CFM does not modify Imunify rules/tables.
-- Loopback bypass remains enabled (`iif "lo" accept`).
-
-## cPanel DNAT protection
-
-CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports. It also includes DirectAdmin redirect coverage (`2222 -> 12222`) under the same table/listener model.
+It also includes DirectAdmin redirect coverage (`2222 -> 12222`) under the same table/listener model.
 
 Commands:
+
 - `cfm dnat cpanel status`
 - `cfm dnat cpanel on --mode auto --challenge guard-only` (full control)
 - `cfm dnat cpanel challenge on` (alias for `cfm dnat cpanel on --challenge forced`)
@@ -1137,17 +1117,32 @@ Commands:
 - `cfm dnat cpanel off`
 
 Migration behavior:
-- Existing scripts using `--challenge guard-only` (or `challenge=guard-only`) remain unchanged.
+
+- Existing scripts using `--challenge guard-only` or `challenge=guard-only` remain unchanged.
 
 Modes:
-- `chain-imunify`: CFM catches panel ports first and proxies to detected Imunify/WebShield 522xx targets.
-- `direct-cpsrvd`: CFM catches panel ports first and proxies to local cpsrvd 208x targets.
+
+- `chain-imunify`: CFM catches panel ports first and proxies to detected Imunify/WebShield `522xx` targets.
+- `direct-cpsrvd`: CFM catches panel ports first and proxies to local `cpsrvd` `208x` targets.
 - `fallback`: priority `-99` Imunify-first behavior; not a complete panel exploit mitigation if Imunify already redirects panel ports.
 - `auto`: selects `chain-imunify` when Imunify mappings are detected, otherwise `direct-cpsrvd`.
 
 Priority guidance:
+
 - `-101`: CFM-first.
 - `-99`: Imunify-first fallback.
+
+DirectAdmin notes:
+
+- DirectAdmin `2222 -> 12222` is HTTPS-terminated at the CFM listener and proxied to a TLS origin, usually `https://127.0.0.1:2222`.
+- Because CFM proxies the request locally, DirectAdmin sees the TCP peer as `127.0.0.1` unless proxy headers are trusted.
+- CFM forwards the original client IP using `X-Forwarded-For`.
+- To make `/usr/local/directadmin/log/access.log` show the real visitor IP, enable DirectAdmin proxy trust for the local CFM listener:
+
+```bash
+da config-set x_forwarded_from_ip "127.0.0.1" --restart
+
+
 
 Notes:
 - CFM never modifies or deletes Imunify chains/tables.
