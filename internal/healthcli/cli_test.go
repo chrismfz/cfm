@@ -198,6 +198,29 @@ func TestRuntimeCompactWebStackExcludesNginx(t *testing.T) {
 	}
 }
 
+func TestRuntimeSectionShowsSubcheckWarningsWhenDegraded(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Runtime.BridgeSocketStatus = "warn"
+	s.Modern.Runtime.BridgeSocketReason = "decision path timeout"
+	s.Modern.Runtime.BridgeSocketLatencyMs = 1201
+	s.Modern.Runtime.ChallengeListenerStatus = "fail"
+	s.Modern.Runtime.ChallengeListenerReason = "connection refused"
+	s.Modern.Runtime.SSLCollectorStatus = "auth"
+
+	out, err := runWithCapturedStdout(func() error {
+		printRuntimeSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printRuntimeSection error: %v", err)
+	}
+	for _, want := range []string{"Warning (bridge_socket): decision path timeout (latency=1201ms)", "Warning (challenge_listener): connection refused", "Warning (sslcollector): auth"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func runWithCapturedStdout(fn func() error) (string, error) {
 	origStdout := os.Stdout
 	r, w, err := os.Pipe()

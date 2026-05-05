@@ -78,23 +78,29 @@ type modernSample struct {
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
 	Runtime struct {
-		CFMDaemonLive      bool   `json:"cfm_daemon_live"`
-		CFMDaemonPID       *int   `json:"cfm_daemon_pid"`
-		CFMServiceState    string `json:"cfm_service_state"`
-		DNATEnabled        string `json:"dnat_enabled"`
-		DNATFrontend       string `json:"dnat_frontend"`
-		DNATConfidence     string `json:"dnat_confidence"`
-		DNATWarning        string `json:"dnat_warning"`
-		FrontendWorking    string `json:"frontend_working"`
-		FrontendReason     string `json:"frontend_reason"`
-		EdgeService        string `json:"edge_service"`
-		UpstreamService    string `json:"upstream_service"`
-		EdgeStatus         string `json:"edge_status"`
-		UpstreamStatus     string `json:"upstream_status"`
-		EdgeConfidence     string `json:"edge_confidence"`
-		UpstreamConfidence string `json:"upstream_confidence"`
-		EdgeReasonCode     string `json:"edge_reason_code"`
-		UpstreamReasonCode string `json:"upstream_reason_code"`
+		CFMDaemonLive           bool   `json:"cfm_daemon_live"`
+		CFMDaemonPID            *int   `json:"cfm_daemon_pid"`
+		CFMServiceState         string `json:"cfm_service_state"`
+		DNATEnabled             string `json:"dnat_enabled"`
+		DNATFrontend            string `json:"dnat_frontend"`
+		DNATConfidence          string `json:"dnat_confidence"`
+		DNATWarning             string `json:"dnat_warning"`
+		FrontendWorking         string `json:"frontend_working"`
+		FrontendReason          string `json:"frontend_reason"`
+		EdgeService             string `json:"edge_service"`
+		UpstreamService         string `json:"upstream_service"`
+		EdgeStatus              string `json:"edge_status"`
+		UpstreamStatus          string `json:"upstream_status"`
+		EdgeConfidence          string `json:"edge_confidence"`
+		UpstreamConfidence      string `json:"upstream_confidence"`
+		EdgeReasonCode          string `json:"edge_reason_code"`
+		UpstreamReasonCode      string `json:"upstream_reason_code"`
+		BridgeSocketStatus      string `json:"bridge_socket_status"`
+		BridgeSocketReason      string `json:"bridge_socket_reason"`
+		BridgeSocketLatencyMs   int64  `json:"bridge_socket_latency_ms"`
+		ChallengeListenerStatus string `json:"challenge_listener_status"`
+		ChallengeListenerReason string `json:"challenge_listener_reason"`
+		SSLCollectorStatus      string `json:"sslcollector_status"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -317,6 +323,7 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 				fmt.Printf("Runtime %-6s warning=%s\n", badge(warnLabel, opts), w)
 			}
 		}
+		printRuntimeSubcheckWarnings(s.Modern, opts, true)
 		printWebStackSection(s, opts)
 		return
 	}
@@ -333,7 +340,32 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 			fmt.Printf("  Warning: %s\n", w)
 		}
 	}
+	printRuntimeSubcheckWarnings(s.Modern, opts, false)
 	printWebStackSection(s, opts)
+}
+
+func printRuntimeSubcheckWarnings(sample modernSample, opts cliOptions, compact bool) {
+	r := sample.Runtime
+	warn := func(name, reason string) {
+		if compact {
+			fmt.Printf("Runtime %-6s %s=%s\n", badge(warnLabel, opts), name, reason)
+			return
+		}
+		fmt.Printf("  Warning (%s): %s\n", name, reason)
+	}
+	if st := strings.ToLower(strings.TrimSpace(r.BridgeSocketStatus)); st == "warn" || st == "fail" {
+		reason := strings.TrimSpace(r.BridgeSocketReason)
+		if r.BridgeSocketLatencyMs > 0 {
+			reason = fmt.Sprintf("%s (latency=%dms)", reason, r.BridgeSocketLatencyMs)
+		}
+		warn("bridge_socket", reason)
+	}
+	if st := strings.ToLower(strings.TrimSpace(r.ChallengeListenerStatus)); st == "warn" || st == "fail" {
+		warn("challenge_listener", strings.TrimSpace(r.ChallengeListenerReason))
+	}
+	if st := strings.ToLower(strings.TrimSpace(r.SSLCollectorStatus)); st == "auth" || st == "perm" {
+		warn("sslcollector", st)
+	}
 }
 
 func formatRuntimeServiceRole(service, status, confidence, reasonCode string) string {
