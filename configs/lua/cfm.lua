@@ -487,21 +487,46 @@ local function http_unix(method, path, body)
   return resp, nil
 end
 
+local function classify_bridge_err(err)
+  local msg = lower(tostring(err or ""))
+  if msg == "" then return "unknown" end
+  if msg:find("timeout", 1, true) then return "timeout" end
+  if msg:find("connect:", 1, true) then return "connect" end
+  local code = msg:match("http%s+(%d%d%d)")
+  if code then return "http_" .. code end
+  if msg:find("decode", 1, true) or msg:find("json", 1, true) then return "json" end
+  return "unknown"
+end
+
 local function rpc_call(kind, method, path, body, req_ctx)
+  local t0 = ngx.now()
   local resp, err = http_unix(method, path, body)
+  local elapsed_ms = math.floor((ngx.now() - t0) * 1000 + 0.5)
   if err then
     req_ctx = req_ctx or {}
     local ctx_ip = req_ctx.ip or real_ip()
     local ctx_host = req_ctx.host or (ngx.var.host or "-")
     local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
-    local ctx_method = req_ctx.method or (ngx.req.get_method() or "-")
-    log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
-      " path=" .. tostring(path or "-") ..
-      " err=" .. tostring(err) ..
-      " ip=" .. tostring(ctx_ip or "-") ..
-      " host=" .. tostring(ctx_host or "-") ..
-      " uri=" .. tostring(ctx_uri or "-") ..
-      " method=" .. tostring(ctx_method or "-"))
+    local err_class = classify_bridge_err(err)
+
+    if CFG.debug or CFG.debug_headers then
+      ngx.ctx.cfm_bridge_error = err_class
+      ngx.ctx.cfm_bridge_latency_ms = elapsed_ms
+      if CFG.debug_headers then
+        ngx.header["X-CFM-Bridge-Error"] = err_class
+        ngx.header["X-CFM-Bridge-Latency-Ms"] = tostring(elapsed_ms)
+      end
+    end
+
+    if CFG.debug then
+      log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
+        " path=" .. tostring(path or "-") ..
+        " class=" .. tostring(err_class) ..
+        " elapsed_ms=" .. tostring(elapsed_ms) ..
+        " ip=" .. tostring(ctx_ip or "-") ..
+        " host=" .. tostring(ctx_host or "-") ..
+        " uri=" .. tostring(ctx_uri or "-"))
+    end
   end
   return resp, err
 end
@@ -597,7 +622,20 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
     return fail_decision(err)
   end
   local obj = cjson.decode(body)
-  if not obj then return fail_decision("decode_failed") end
+  if not obj then
+    if CFG.debug or CFG.debug_headers then
+      ngx.ctx.cfm_bridge_error = "json"
+    end
+    if CFG.debug_headers then
+      ngx.header["X-CFM-Bridge-Error"] = "json"
+    end
+    if CFG.debug then
+      log_route(ngx.WARN, "rpc_err kind=decision class=json elapsed_ms=- ip=" .. tostring(ip or "-") ..
+        " host=" .. tostring(host or "-") ..
+        " uri=" .. tostring(uri or "-"))
+    end
+    return fail_decision("decode_failed")
+  end
 
   -- Only cache clean allows (no rule action = no challenge/block/throttle pending)
   if SH and obj.ip_action == "allow" and obj.vhost_action == "allow"
