@@ -148,8 +148,12 @@ if [ -n "$lua_src_dir" ]; then
         new_hash="$(sha256sum "$src" | awk '{print $1}')"
 
         if [ ! -f "$dst" ]; then
-            install -m 0640 -o root -g cfm "$src" "$dst" || true
-            printf '%s\n' "$new_hash" > "$stamp"
+            if install -m 0640 -o root -g cfm "$src" "$dst"; then
+                echo "CFM Lua sync: copied new file $dst"
+                printf '%s\n' "$new_hash" > "$stamp"
+            else
+                echo "WARNING: failed to copy new Lua file: $dst"
+            fi
             continue
         fi
 
@@ -158,16 +162,25 @@ if [ -n "$lua_src_dir" ]; then
         cur_hash="$(sha256sum "$dst" | awk '{print $1}')"
 
         if [ -n "$old_hash" ] && [ "$cur_hash" = "$old_hash" ]; then
-            install -m 0640 -o root -g cfm "$src" "$dst" || true
-            printf '%s\n' "$new_hash" > "$stamp"
+            if install -m 0640 -o root -g cfm "$src" "$dst"; then
+                echo "CFM Lua sync: updated file $dst"
+                printf '%s\n' "$new_hash" > "$stamp"
+            else
+                echo "WARNING: failed to update Lua file: $dst"
+            fi
         elif [ "$cur_hash" = "$new_hash" ]; then
+            echo "CFM Lua sync: already current $dst"
             printf '%s\n' "$new_hash" > "$stamp"
         else
             backup="$dst.local-prepkg.$(date +%s)"
             cp -a "$dst" "$backup" || true
             echo "WARNING: local Lua runtime file differed; backup saved to $backup"
-            install -m 0640 -o root -g cfm "$src" "$dst" || true
-            printf '%s\n' "$new_hash" > "$stamp"
+            if install -m 0640 -o root -g cfm "$src" "$dst"; then
+                echo "CFM Lua sync: forced update applied $dst"
+                printf '%s\n' "$new_hash" > "$stamp"
+            else
+                echo "WARNING: failed forced update for Lua file: $dst"
+            fi
         fi
     done
 else
