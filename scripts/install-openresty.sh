@@ -437,30 +437,12 @@ render_panel_listener_template() {
 }
 
 deploy_cfm_files() {
-    local lua_dir
     local conf_dir
 
-    lua_dir="$CFM_SHARED_LUA_DIR"
     conf_dir="/usr/local/openresty/nginx/conf"
 
-    mkdir -p "$lua_dir"
     mkdir -p "$conf_dir"
     mkdir -p /etc/logrotate.d
-
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm.lua"            "$lua_dir/cfm.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_panel.lua"      "$lua_dir/cfm_panel.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clamav.lua"        "$lua_dir/cfm_clamav.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_cache_log.lua"        "$lua_dir/cfm_cache_log.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clearance.lua"      "$lua_dir/cfm_clearance.lua"
-
-    # log-cfm: log_by_lua sender that pushes every request to
-    # /run/cfm/ingest.sock so webdetector does not need to tail the TSV file.
-    backup_and_copy_file "/usr/share/cfm/configs/lua/log-cfm.lua"        "$lua_dir/log-cfm.lua"
-
-    backup_and_copy_file "/usr/share/cfm/configs/lua/sslcollector.lua"   "$lua_dir/sslcollector.lua"
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
         "$conf_dir/trusted_proxies.conf"
@@ -475,10 +457,6 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/logrotate-cfm" \
                          "/etc/logrotate.d/logrotate-cfm"
-
-    chown -R root:cfm "$lua_dir"
-    chmod 0750 "$lua_dir"
-    chmod 0640 "$lua_dir"/*.lua
 }
 
 deploy_nginx_conf() {
@@ -575,38 +553,6 @@ validate_shared_lua_runtime() {
     fi
 }
 
-validate_lua_modules_for_openresty() {
-    local lua_dir="$CFM_SHARED_LUA_DIR"
-    local luac_bin
-    local name
-    local module
-    local -a required_modules=(
-        cfm_clearance cfm_panel cfm_rules cfm_waf cfm_stats cfm_clamav cfm_cache_log sslcollector
-    )
-
-    luac_bin="$(command -v luac || true)"
-    if [ -z "$luac_bin" ]; then
-        die "luac not found; install Lua compiler package before deploy"
-    fi
-
-    log "Validating Lua syntax via luac -p"
-    for name in "${CFM_LUA_MANIFEST[@]}"; do
-        "$luac_bin" -p "$lua_dir/$name" || die "Lua syntax validation failed: $lua_dir/$name"
-    done
-
-    log "Validating Lua module loadability in minimal OpenResty-compatible runtime"
-    LUA_PATH="$lua_dir/?.lua;;" luajit -e '
-        local required = {...}
-        for _, m in ipairs(required) do
-            local ok, mod = pcall(require, m)
-            if not ok then
-                io.stderr:write("require failed for ", m, ": ", tostring(mod), "\n")
-                os.exit(1)
-            end
-        end
-    ' "${required_modules[@]}" || die "Lua module runtime load smoke-test failed"
-}
-
 check_legacy_lua_paths_in_runtime_configs() {
     local conf_root="$1"
     local entrypoint="$2"
@@ -688,7 +634,6 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     validate_shared_lua_runtime
-#    validate_lua_modules_for_openresty
     deploy_nginx_conf
     check_lua_token_files
     log "Shared fallback cert path: /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem"

@@ -11,7 +11,7 @@
 #
 # Layout (differs from OpenResty):
 #   Angie configs: /etc/angie/
-#   CFM lua:       /var/lib/cfm/lua/
+#   CFM lua:       /var/lib/cfm/lua/ (provided by package)
 #   Extra resty:   /etc/angie/lualib/         (lua-resty-maxminddb here)
 #   Dyn modules:   /usr/lib/angie/modules/
 #   Logs:          /var/log/angie/            (chowned to cfm:cfm)
@@ -456,25 +456,10 @@ render_panel_listener_template() {
 }
 
 deploy_cfm_files() {
-    local lua_dir="$CFM_SHARED_LUA_DIR"
     local conf_dir="/etc/angie"
 
-    mkdir -p "$lua_dir"
     mkdir -p "$conf_dir"
     mkdir -p /etc/logrotate.d
-
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm.lua"            "$lua_dir/cfm.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_panel.lua"      "$lua_dir/cfm_panel.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clamav.lua"     "$lua_dir/cfm_clamav.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_cache_log.lua"  "$lua_dir/cfm_cache_log.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clearance.lua"  "$lua_dir/cfm_clearance.lua"
-    # log-cfm: log_by_lua sender that pushes every request to
-    # /run/cfm/ingest.sock so webdetector does not need to tail the TSV file.
-    backup_and_copy_file "/usr/share/cfm/configs/lua/log-cfm.lua"        "$lua_dir/log-cfm.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/lua/sslcollector.lua"   "$lua_dir/sslcollector.lua"
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
         "$conf_dir/trusted_proxies.conf"
@@ -489,10 +474,6 @@ deploy_cfm_files() {
 
     backup_and_copy_file "/usr/share/cfm/configs/logrotate-cfm" \
                          "/etc/logrotate.d/logrotate-cfm"
-
-    chown -R root:cfm "$lua_dir"
-    chmod 0750 "$lua_dir"
-    chmod 0640 "$lua_dir"/*.lua
 }
 
 validate_shared_lua_runtime() {
@@ -504,38 +485,6 @@ validate_shared_lua_runtime() {
     if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing required CFM Lua files in shared runtime: ${missing[*]}"
     fi
-}
-
-validate_lua_modules_for_angie() {
-    local lua_dir="$CFM_SHARED_LUA_DIR"
-    local luac_bin
-    local name
-    local module
-    local -a required_modules=(
-        cfm_clearance cfm_panel cfm_rules cfm_waf cfm_stats cfm_clamav cfm_cache_log sslcollector
-    )
-
-    luac_bin="$(command -v luac || true)"
-    if [ -z "$luac_bin" ]; then
-        die "luac not found; install Lua compiler package before deploy"
-    fi
-
-    log "Validating Lua syntax via luac -p"
-    for name in "${CFM_LUA_MANIFEST[@]}"; do
-        "$luac_bin" -p "$lua_dir/$name" || die "Lua syntax validation failed: $lua_dir/$name"
-    done
-
-    log "Validating Lua module loadability in minimal OpenResty-compatible runtime"
-    LUA_PATH="$lua_dir/?.lua;;" luajit -e '
-        local required = {...}
-        for _, m in ipairs(required) do
-            local ok, mod = pcall(require, m)
-            if not ok then
-                io.stderr:write("require failed for ", m, ": ", tostring(mod), "\n")
-                os.exit(1)
-            end
-        end
-    ' "${required_modules[@]}" || die "Lua module runtime load smoke-test failed"
 }
 
 check_legacy_lua_paths_in_runtime_configs() {
@@ -684,7 +633,7 @@ Pre-flight status:
   Log dir (cfm:cfm):        /var/log/angie/
   Cache dirs (cfm:cfm):     /var/cache/angie/cfm_{static,micro}
   Self-signed fallback:     /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem
-  CFM lua deployed:         /var/lib/cfm/lua/
+  CFM lua runtime checked:  /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/
   angie.conf deployed:      $([ $deployed -eq 1 ] && echo yes || echo "NO — see below")
 
@@ -756,7 +705,6 @@ main() {
     ensure_cache_dirs
     deploy_cfm_files
     validate_shared_lua_runtime
-   # validate_lua_modules_for_angie
 
     # 4. Auto-deploy angie.conf if shipped (with `angie -t` validation)
     deploy_angie_conf
