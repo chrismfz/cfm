@@ -464,16 +464,11 @@ func Run(args []string, backend firewall.Backend) {
 		timing["topn_enrich_print_ms"] = time.Since(t0).Milliseconds()
 	}
 
-	// --- Bridge / Interceptor (best-effort diagnostics) ---
-	t0 = time.Now()
-	printBridgeInterceptorStatus(backend)
-	timing["bridge_interceptor_ms"] = time.Since(t0).Milliseconds()
-
 	printTimings()
 
 }
 
-func printBridgeInterceptorStatus(backend firewall.Backend) {
+func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 	fmt.Println("\n---- Bridge / Interceptor ----")
 
 	dnatState := "OFF"
