@@ -173,7 +173,7 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("printWebStackSection error: %v", err)
 	}
-	if !strings.Contains(out, "Web stack [OK]") {
+	if !strings.Contains(out, "Web stack - Edge Interceptor [OK]") {
 		t.Fatalf("expected OK web stack when selected edge is active, got:\n%s", out)
 	}
 }

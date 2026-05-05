@@ -381,10 +381,10 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 		for _, row := range rows {
 			parts = append(parts, fmt.Sprintf("%s: enabled=%s active=%s state=%s%s", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row)))
 		}
-		fmt.Printf("Web stack %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
+		fmt.Printf("Web stack - Edge Interceptor %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
 		return
 	}
-	fmt.Printf("Web stack %s\n", badge(status, opts))
+	fmt.Printf("Web stack - Edge Interceptor %s\n", badge(status, opts))
 	for _, row := range rows {
 		fmt.Printf("  %s: enabled=%s active=%s state=%s%s\n", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row))
 	}
