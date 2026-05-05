@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,6 +174,13 @@ type bridgeStatsState struct {
 	errors     int64
 	lastError  string
 	lastPushAt time.Time
+
+	totalDurations     []time.Duration
+	queueWaitDurations []time.Duration
+	stageADurations    []time.Duration
+	stageBDurations    []time.Duration
+	stageCDurations    []time.Duration
+	timeoutByMinute    map[int64]int64
 }
 
 // BridgeStats is exported for cfm status / JSON API.
@@ -184,6 +192,22 @@ type BridgeStats struct {
 
 	ActiveIPs    int `json:"active_ips"`
 	ActiveVhosts int `json:"active_vhosts"`
+
+	Timing BridgeTimingStats `json:"timing"`
+}
+
+type BridgeTimingStats struct {
+	TotalP50Ms      int64 `json:"total_p50_ms"`
+	TotalP95Ms      int64 `json:"total_p95_ms"`
+	TotalP99Ms      int64 `json:"total_p99_ms"`
+	QueueWaitP95Ms  int64 `json:"queue_wait_p95_ms"`
+	StageAAvgMs     int64 `json:"stage_a_avg_ms"`
+	StageBAvgMs     int64 `json:"stage_b_avg_ms"`
+	StageCAvgMs     int64 `json:"stage_c_avg_ms"`
+	TimeoutPerMin   int64 `json:"timeout_count_last_minute"`
+	TimeoutCurrMin  int64 `json:"timeout_count_current_minute"`
+	SamplesTotal    int64 `json:"samples_total"`
+	QueueSamples    int64 `json:"queue_wait_samples"`
 }
 
 // NginxBridgeStatus is what GET /nginx/status returns.
@@ -581,6 +605,9 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		ipState: make(map[string]bridgeIPEntry),
 		vhState: make(map[string]bridgeVhostEntry),
 		okState: make(map[okStateKey]time.Time),
+		stats: bridgeStatsState{
+			timeoutByMinute: make(map[int64]int64),
+		},
 	}
 
 	if b.cfg.Enabled {
@@ -956,6 +983,8 @@ func (b *NginxBridge) Status() NginxBridgeStatus {
 func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeStats {
 	b.stats.mu.Lock()
 	defer b.stats.mu.Unlock()
+	nowMin := time.Now().UTC().Unix() / 60
+	lastMin := nowMin - 1
 
 	return BridgeStats{
 		Pushes:       b.stats.pushes,
@@ -964,7 +993,58 @@ func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeSta
 		LastPushAt:   b.stats.lastPushAt,
 		ActiveIPs:    activeIPs,
 		ActiveVhosts: activeVhosts,
+		Timing: BridgeTimingStats{
+			TotalP50Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.50),
+			TotalP95Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.95),
+			TotalP99Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.99),
+			QueueWaitP95Ms: percentileDurationMsLocked(b.stats.queueWaitDurations, 0.95),
+			StageAAvgMs:    avgDurationMsLocked(b.stats.stageADurations),
+			StageBAvgMs:    avgDurationMsLocked(b.stats.stageBDurations),
+			StageCAvgMs:    avgDurationMsLocked(b.stats.stageCDurations),
+			TimeoutPerMin:  b.stats.timeoutByMinute[lastMin],
+			TimeoutCurrMin: b.stats.timeoutByMinute[nowMin],
+			SamplesTotal:   int64(len(b.stats.totalDurations)),
+			QueueSamples:   int64(len(b.stats.queueWaitDurations)),
+		},
 	}
+}
+
+const bridgeTimingWindowSamples = 4096
+
+func appendDurationSample(dst []time.Duration, d time.Duration) []time.Duration {
+	dst = append(dst, d)
+	if len(dst) > bridgeTimingWindowSamples {
+		copy(dst, dst[len(dst)-bridgeTimingWindowSamples:])
+		dst = dst[:bridgeTimingWindowSamples]
+	}
+	return dst
+}
+
+func avgDurationMsLocked(samples []time.Duration) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sum int64
+	for _, s := range samples {
+		sum += s.Milliseconds()
+	}
+	return sum / int64(len(samples))
+}
+
+func percentileDurationMsLocked(samples []time.Duration, p float64) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	cp := append([]time.Duration(nil), samples...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	idx := int(float64(len(cp)-1) * p)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(cp) {
+		idx = len(cp) - 1
+	}
+	return cp[idx].Milliseconds()
 }
 
 // RunExpireLoop cleans up expired local state.
@@ -1068,9 +1148,27 @@ const slowHandlerThreshold = 30 * time.Millisecond
 func (b *NginxBridge) instrument(name string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		enqueueAt := start
+		if hdr := strings.TrimSpace(r.Header.Get("X-CFM-Enqueued-At")); hdr != "" {
+			if unixNano, err := strconv.ParseInt(hdr, 10, 64); err == nil && unixNano > 0 {
+				enqueueAt = time.Unix(0, unixNano)
+			}
+		}
+		stageA := time.Since(start)
 		sw := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+		stageBStart := time.Now()
 		h(sw, r)
+		stageB := time.Since(stageBStart)
 		dur := time.Since(start)
+		stageC := dur - stageA - stageB
+		if stageC < 0 {
+			stageC = 0
+		}
+		queueWait := start.Sub(enqueueAt)
+		if queueWait < 0 {
+			queueWait = 0
+		}
+		b.recordTiming(stageA, stageB, stageC, dur, queueWait, errors.Is(r.Context().Err(), context.DeadlineExceeded))
 		if dur >= slowHandlerThreshold {
 			logging.Logf("[nginx_bridge] slow handler %s %s took %s", r.Method, name, dur)
 		}
@@ -1097,8 +1195,29 @@ func (b *NginxBridge) instrument(name string, h http.HandlerFunc) http.HandlerFu
 		} else if sw.status == http.StatusServiceUnavailable {
 			errClass = "queue_overflow"
 		}
-		logging.LogfSOCKET("[bridge_trace] timestamp=%s request_id=%s remote_addr=%q host=%q uri=%q method=%s action=%s duration_ms=%d status_code=%d error_class=%s auth_header=%s",
-			start.UTC().Format(time.RFC3339Nano), reqID, strings.TrimSpace(r.RemoteAddr), host, uri, r.Method, action, dur.Milliseconds(), sw.status, errClass, "[REDACTED]")
+		logging.LogfSOCKET("[bridge_trace] timestamp=%s request_id=%s remote_addr=%q host=%q uri=%q method=%s action=%s duration_ms=%d status_code=%d error_class=%s stage_a_ms=%d stage_b_ms=%d stage_c_ms=%d queue_wait_ms=%d auth_header=%s",
+			start.UTC().Format(time.RFC3339Nano), reqID, strings.TrimSpace(r.RemoteAddr), host, uri, r.Method, action, dur.Milliseconds(), sw.status, errClass, stageA.Milliseconds(), stageB.Milliseconds(), stageC.Milliseconds(), queueWait.Milliseconds(), "[REDACTED]")
+	}
+}
+
+func (b *NginxBridge) recordTiming(stageA, stageB, stageC, total, queueWait time.Duration, timedOut bool) {
+	b.stats.mu.Lock()
+	defer b.stats.mu.Unlock()
+	b.stats.stageADurations = appendDurationSample(b.stats.stageADurations, stageA)
+	b.stats.stageBDurations = appendDurationSample(b.stats.stageBDurations, stageB)
+	b.stats.stageCDurations = appendDurationSample(b.stats.stageCDurations, stageC)
+	b.stats.totalDurations = appendDurationSample(b.stats.totalDurations, total)
+	if queueWait > 0 {
+		b.stats.queueWaitDurations = appendDurationSample(b.stats.queueWaitDurations, queueWait)
+	}
+	nowMin := time.Now().UTC().Unix() / 60
+	for k := range b.stats.timeoutByMinute {
+		if k < nowMin-10 {
+			delete(b.stats.timeoutByMinute, k)
+		}
+	}
+	if timedOut {
+		b.stats.timeoutByMinute[nowMin]++
 	}
 }
 
