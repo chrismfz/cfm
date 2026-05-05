@@ -108,8 +108,15 @@ type NginxBridge struct {
 	clamPending  string
 	clamInfected string
 
-	//enricher maxmind
-	enr interface{ Lookup(string) enrich.Result } // optional enricher for country fallback
+	// enricher maxmind
+	// LookupCachedOrAsync is used on the request hot path so a cold IP's
+	// PTR/mmdb lookup never blocks the decision response (deferred to a
+	// background goroutine that warms the cache for next time). Lookup
+	// remains for non-hot-path callers (admin/analysis).
+	enr interface {
+		Lookup(string) enrich.Result
+		LookupCachedOrAsync(string) enrich.Result
+	}
 
 	// Asynchronous hook dispatcher. OnTrigger / OnObserve callbacks do
 	// SQLite writes (history_store.Append) and disk logging which can
@@ -1322,7 +1329,13 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 
 	if country == "" && ip != "" && b.enr != nil {
-		if geo := b.enr.Lookup(ip); geo.CountryISO != "" {
+		// LookupCachedOrAsync returns immediately: cache hit gives the real
+		// CountryISO, cache miss returns "" and warms the cache async. We
+		// trade off "first request from a fresh IP has no country" against
+		// "every request blocks up to ~1s on PTR DNS + mmdb cold reads".
+		// Subsequent requests from that IP (typically the next one, ms
+		// later under load) will see the populated cache.
+		if geo := b.enr.LookupCachedOrAsync(ip); geo.CountryISO != "" {
 			country = geo.CountryISO // "GR" not "Greece"
 		}
 	}

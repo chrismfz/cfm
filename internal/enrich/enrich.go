@@ -9,13 +9,36 @@ import (
 	"sync"
 	"time"
 
+	lruexp "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/oschwald/geoip2-golang"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	cacheTTL   = 3600 * time.Second // 1h cache για αποτελέσματα
-	dnsTimeout = 1 * time.Second    // 1s timeout για PTR lookups
-	statEvery  = 300 * time.Second  // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+	// 4-hour TTL: longer than mmdb publish cadence (weekly) and longer than
+	// any realistic ASN/PTR drift on stable networks. PTR-using consumers
+	// (FCrDNS for crawlers) re-verify the PTR back-resolves to the IP, so
+	// stale PTR data fails closed rather than open. Bumped from 1h after
+	// confirming the cache no longer grows unboundedly (LRU cap below).
+	cacheTTL   = 4 * time.Hour
+	dnsTimeout = 1 * time.Second   // 1s timeout για PTR lookups
+	statEvery  = 300 * time.Second // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+
+	// cacheCap is the maximum number of distinct IPs held in the geoip
+	// result cache. The previous map[string]Result had no eviction and
+	// grew with every unique IP seen since worker start (~250 bytes per
+	// entry). At 200 000 entries the worst-case footprint is ~50 MB per
+	// worker; the LRU evicts the coldest entry once the cap is reached,
+	// so memory plateaus regardless of how many unique IPs the worker
+	// has seen over its lifetime.
+	cacheCap = 200_000
+
+	// asyncWorkerCap caps the number of concurrent in-flight async PTR/mmdb
+	// lookups dispatched by LookupCachedOrAsync. Past this, fresh-IP misses
+	// quietly return an empty Result rather than spawning more goroutines —
+	// the next request for that IP will retry. Tuned to comfortably absorb a
+	// burst from a few hundred unique IPs without unbounded goroutine growth.
+	asyncWorkerCap = 32
 )
 
 type Result struct {
@@ -29,8 +52,17 @@ type Result struct {
 }
 
 type Enricher struct {
-	mu     sync.RWMutex
-	cache  map[string]Result
+	// mu protects the geoip DB pointers and hot-reload bookkeeping below.
+	// It is NOT held around cache reads/writes — the LRU has its own
+	// internal locking, so the hot path takes only one mutex (the LRU's)
+	// instead of two.
+	mu sync.RWMutex
+	// cache is a size-bounded TTL-expiring LRU. Eviction policy:
+	//   - entry expires after cacheTTL → auto-removed on next Get/Add
+	//   - cache full → coldest entry evicted on Add
+	// This bounds memory at cacheCap entries (~50 MB worst case per worker)
+	// regardless of how many unique IPs have been seen since worker start.
+	cache  *lruexp.LRU[string, Result]
 	asnDB  *geoip2.Reader
 	cityDB *geoip2.Reader
 	// hot-reload state
@@ -42,6 +74,12 @@ type Enricher struct {
 	lastStatChk time.Time
 	// options
 	enablePTR bool
+	// Async-dispatch primitives for LookupCachedOrAsync.
+	// sf coalesces concurrent fresh-IP misses for the same address into a
+	// single underlying Lookup call. asyncSem bounds total concurrent async
+	// lookups so a flood of unique IPs cannot spawn unbounded goroutines.
+	sf       singleflight.Group
+	asyncSem chan struct{}
 }
 
 // New ενεργοποιεί enrichment αν βρει mmdb αρχεία σε dirs (π.χ. /etc/cfm, ./configs).
@@ -49,8 +87,9 @@ type Enricher struct {
 
 func New(dirs ...string) (*Enricher, error) {
 	e := &Enricher{
-		cache:     make(map[string]Result),
+		cache:     lruexp.NewLRU[string, Result](cacheCap, nil, cacheTTL),
 		enablePTR: true,
+		asyncSem:  make(chan struct{}, asyncWorkerCap),
 	}
 	var asnPath, cityPath string
 
@@ -114,13 +153,10 @@ func (e *Enricher) Close() {
 func (e *Enricher) Lookup(ipStr string) Result {
 	now := time.Now()
 
-	// cache hit
-	e.mu.RLock()
-	if r, ok := e.cache[ipStr]; ok && now.Sub(r.ts) < cacheTTL {
-		e.mu.RUnlock()
+	// cache hit — TTL/LRU eviction is handled internally by the LRU
+	if r, ok := e.cache.Get(ipStr); ok {
 		return r
 	}
-	e.mu.RUnlock()
 
 	// hot-reload if underlying files changed (rate-limited stat calls)
 	e.refreshIfChanged()
@@ -171,12 +207,115 @@ func (e *Enricher) Lookup(ipStr string) Result {
 		}
 	}
 
-	// store in cache
-	e.mu.Lock()
-	e.cache[ipStr] = r
-	e.mu.Unlock()
+	// store in cache (LRU handles its own locking + eviction)
+	e.cache.Add(ipStr, r)
 
 	return r
+}
+
+// LookupGeoFast performs ONLY the synchronous mmdb (country + ASN + city)
+// lookups, deliberately skipping the slow reverse-DNS PTR resolution that
+// makes Lookup() unsafe on a request hot path. Typical cost is 1–10 μs
+// (memory-mapped DB reads); never blocks on the network.
+//
+// Used by LookupCachedOrAsync below so cache misses still return real
+// country / ASN data immediately — only PTR is deferred. This matters
+// because cfm-admin country-block rules consume Country directly from
+// the bridge's TrafficRuleEvalInput; if we returned an empty Result on
+// cache miss, the *first* request from a fresh IP from a blocked country
+// would slip through.
+func (e *Enricher) LookupGeoFast(ipStr string) Result {
+	if e == nil || ipStr == "" {
+		return Result{}
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return Result{}
+	}
+
+	e.mu.RLock()
+	localASN := e.asnDB
+	localCity := e.cityDB
+	e.mu.RUnlock()
+
+	r := Result{ts: time.Now()}
+
+	if localASN != nil {
+		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
+			r.ASN = rec.AutonomousSystemNumber
+			r.ASNName = rec.AutonomousSystemOrganization
+		}
+	}
+	if localCity != nil {
+		if rec, err := localCity.City(ip); err == nil && rec != nil {
+			r.CountryISO = rec.Country.IsoCode
+			if name, ok := rec.Country.Names["en"]; ok && name != "" {
+				r.Country = name
+			} else {
+				r.Country = rec.Country.IsoCode
+			}
+			if c, ok := rec.City.Names["en"]; ok {
+				r.City = c
+			}
+		}
+	}
+	return r
+}
+
+// LookupCachedOrAsync returns the cached Result for ipStr if one is fresh in
+// memory. On a cache miss it returns the *fast* mmdb-only data (country +
+// ASN — microseconds, no DNS) immediately and dispatches the *full* Lookup
+// (which includes PTR reverse-DNS) on a background goroutine, so the next
+// request for the same IP can serve the complete record from cache.
+//
+// Why: Lookup() does up to 1s of reverse-DNS plus mmdb reads on a cold IP.
+// On the bridge decision hot path (one call per HTTP request from nginx),
+// that latency can exhaust the Lua-side cosocket timeout under load even
+// though the bridge handler itself is otherwise sub-millisecond.
+//
+// Trade-off: only PTR is deferred. Country and ASN remain inline-accurate
+// on every request — country-block rules in cfm-admin still fire on the
+// FIRST request from a fresh IP. PTR-dependent paths (challenge_exclude
+// FCrDNS for Googlebot etc.) live in autoblock_sink and call Lookup()
+// synchronously on their own pipeline; they're unaffected by this method.
+//
+// Concurrent misses for the same IP are coalesced via singleflight, and
+// the total number of in-flight async lookups is bounded by asyncSem so
+// a flood of unique IPs can't spawn unbounded goroutines. If asyncSem is
+// saturated we just skip the dispatch — the next request retries.
+func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
+	if e == nil || ipStr == "" {
+		return Result{}
+	}
+
+	// Fast path: cache hit. LRU handles TTL expiry + recency tracking.
+	if r, ok := e.cache.Get(ipStr); ok {
+		return r
+	}
+
+	// Inline mmdb call: country + ASN in microseconds, no DNS.
+	// Returned to the caller right away so country-block / ASN-block rules
+	// have real data even on the *first* request from a fresh IP. We do
+	// NOT cache this partial result — the async dispatch below will
+	// overwrite cache with the full PTR-included Result shortly.
+	partial := e.LookupGeoFast(ipStr)
+
+	// Best-effort async dispatch — non-blocking on saturation.
+	select {
+	case e.asyncSem <- struct{}{}:
+		go func(ip string) {
+			defer func() { <-e.asyncSem }()
+			// singleflight guarantees only one Lookup runs per IP at a
+			// time even if many requests miss simultaneously.
+			_, _, _ = e.sf.Do(ip, func() (interface{}, error) {
+				return e.Lookup(ip), nil
+			})
+		}(ipStr)
+	default:
+		// asyncSem full; intentionally drop. Next request retries.
+	}
+
+	return partial
 }
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
