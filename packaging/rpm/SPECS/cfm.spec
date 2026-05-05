@@ -57,6 +57,14 @@ if [ -d "%{pkgroot}/var" ]; then
   cp -a "%{pkgroot}/var" "%{buildroot}/"
 fi
 
+# canonicalize Lua runtime payload permissions in the package payload itself
+if [ -d "%{buildroot}/var/lib/cfm/lua" ]; then
+  chown root:cfm "%{buildroot}/var/lib/cfm/lua"
+  chmod 0750 "%{buildroot}/var/lib/cfm/lua"
+  find "%{buildroot}/var/lib/cfm/lua" -type f -exec chown root:cfm {} +
+  find "%{buildroot}/var/lib/cfm/lua" -type f -exec chmod 0640 {} +
+fi
+
 if [ -f "%{buildroot}/lib/systemd/system/cfm.service" ]; then
   mkdir -p "%{buildroot}%{_unitdir}"
   mv "%{buildroot}/lib/systemd/system/cfm.service" "%{buildroot}%{_unitdir}/"
@@ -85,8 +93,8 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm-admin.htpasswd
 
 %dir /var/lib/cfm
-%dir /var/lib/cfm/lua
-/var/lib/cfm/lua/*
+%dir %attr(0750,root,cfm) /var/lib/cfm/lua
+%attr(0640,root,cfm) /var/lib/cfm/lua/*
 
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/cfm
