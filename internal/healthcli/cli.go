@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	edgediag "cfm/internal/diagnostics/edge"
 	"golang.org/x/term"
 )
 
@@ -274,6 +275,7 @@ func printSummary(s parsedSnapshot, opts cliOptions) {
 	}
 	printHostSection(s, opts)
 	printRuntimeSection(s, opts)
+	printEdgeInterceptorSection(s, opts)
 	printDiskSection(s, opts)
 	printStorageSection(s, opts)
 	printNetworkSection(s, opts)
@@ -388,6 +390,33 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 	}
 }
 
+func printEdgeInterceptorSection(s parsedSnapshot, opts cliOptions) {
+	_ = opts
+	cfmToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
+	bridgeToken := edgediag.ReadLuaToken(edgediag.CanonicalBridgeTokenPath)
+	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", cfmToken)
+	cfg := edgediag.BridgeRuntimeConfig{Enabled: true, SocketPath: "/var/run/cfm/cfm_nginx.sock", DisplaySocketPath: "/var/run/cfm/cfm_nginx.sock", SocketSource: "fallback"}
+	bridge := edgediag.ProbeNginxBridgeRuntime(cfg, bridgeToken)
+	fmt.Println("Edge interceptor")
+	fmt.Printf("  sslcollector.sock: %s\n", mapEdgeStatus(sock.Category))
+	fmt.Printf("    path=%s uid=%s gid=%s mode=%s probe=%s%s\n", sock.Path, sock.UID, sock.GID, sock.Mode, sock.Category, sock.ErrorText)
+	fmt.Printf("  cfm_token: %s\n", edgediag.TokenHealth(cfmToken))
+	fmt.Printf("  bridge_token: %s\n", edgediag.TokenHealth(bridgeToken))
+	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
+
+}
+
+func mapEdgeStatus(v string) string {
+	u := strings.ToUpper(strings.TrimSpace(v))
+	switch u {
+	case "OK":
+		return "OK"
+	case "MISSING", "AUTH_FAIL", "TOKEN_MISSING", "TOKEN_INVALID", "CONNECT_FAIL", "INVALID":
+		return "CRIT"
+	default:
+		return "WARN"
+	}
+}
 func collectWebStackRows(s parsedSnapshot) []serviceStatus {
 	targets := []string{"angie", "openresty"}
 	byName := make(map[string]serviceStatus, len(s.Modern.Services))
