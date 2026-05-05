@@ -27,10 +27,16 @@ fi
 # ensure config dir
 [ -d /etc/cfm ] || mkdir -p /etc/cfm
 
-# shared Lua token dir (root writable, cfm readable)
+# shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua
-chmod 750 /var/lib/cfm/lua
+chmod 0750 /var/lib/cfm/lua
+
+# enforce ownership/mode on shipped Lua payload
+if [ -d /var/lib/cfm/lua ]; then
+    find /var/lib/cfm/lua -type f -exec chown root:cfm {} +
+    find /var/lib/cfm/lua -type f -exec chmod 0640 {} +
+fi
 
 # nginx temp dirs — must be owned by the cfm worker user
 # (default OpenResty paths are root-owned; workers running as cfm can't write them)

@@ -53,6 +53,9 @@ fi
 if [ -d "%{pkgroot}/etc" ]; then
   cp -a "%{pkgroot}/etc" "%{buildroot}/"
 fi
+if [ -d "%{pkgroot}/var" ]; then
+  cp -a "%{pkgroot}/var" "%{buildroot}/"
+fi
 
 if [ -f "%{buildroot}/lib/systemd/system/cfm.service" ]; then
   mkdir -p "%{buildroot}%{_unitdir}"
@@ -81,6 +84,10 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.dyndns
 %config(noreplace) /etc/cfm/cfm-admin.htpasswd
 
+%dir /var/lib/cfm
+%dir /var/lib/cfm/lua
+/var/lib/cfm/lua/*
+
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/cfm
 %dir %{_datadir}/cfm/configs
@@ -92,10 +99,12 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
-# shared Lua token dir (root writable, cfm readable)
+# shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua
-chmod 750 /var/lib/cfm/lua
+chmod 0750 /var/lib/cfm/lua
+find /var/lib/cfm/lua -type f -exec chown root:cfm {} + || true
+find /var/lib/cfm/lua -type f -exec chmod 0640 {} + || true
 
 # nginx temp dirs — must be owned by the cfm worker user
 # (default OpenResty paths are root-owned; workers running as cfm can't write them)
