@@ -171,6 +171,7 @@ deb: build
 		"$(PKGROOT)/usr/share/cfm/configs" \
 		"$(PKGROOT)/usr/share/cfm/scripts" \
 		"$(PKGROOT)/usr/share/cfm/plugins" \
+		"$(PKGROOT)/var/lib/cfm/lua" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
 
@@ -196,7 +197,8 @@ deb: build
 
 
 
-	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@rsync -a --delete --exclude "lua/" "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@rsync -a --delete "$(CONFIG_DIR)/lua/" "$(PKGROOT)/var/lib/cfm/lua/"
 	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 	# executables
@@ -233,7 +235,9 @@ stage-pkgroot: build
 
 	# === ship ALL example configs ===
 	@mkdir -p $(PKGROOT)/usr/share/cfm/configs
-	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@mkdir -p $(PKGROOT)/var/lib/cfm/lua
+	@rsync -a --delete --exclude "lua/" "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
+	@rsync -a --delete "$(CONFIG_DIR)/lua/" "$(PKGROOT)/var/lib/cfm/lua/"
 	@mkdir -p $(PKGROOT)/usr/share/cfm/scripts
 	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@mkdir -p $(PKGROOT)/usr/share/cfm/plugins
