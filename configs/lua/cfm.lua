@@ -83,7 +83,7 @@ local CFG = {
   -- plus the bridge's synchronous-state mutation. Hook-backed work (WAF
   -- history, observations) is dispatched async on the Go side so this
   -- budget only needs to cover state mutation + JSON (sub-millisecond).
-  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "250"),
+  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
   decision_cache_ttl_ms = 15000,
   waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
