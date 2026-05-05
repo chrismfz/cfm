@@ -36,6 +36,9 @@ type RuntimeStatus struct {
 	UpstreamConfidence string        `json:"upstream_confidence,omitempty"` // high/medium/low
 	EdgeReasonCode     string        `json:"edge_reason_code,omitempty"`
 	UpstreamReasonCode string        `json:"upstream_reason_code,omitempty"`
+	ChallengeFlowState string        `json:"challenge_flow_state,omitempty"`
+	ChallengeFlowCode  string        `json:"challenge_flow_code,omitempty"`
+	ChallengeFlowReason string       `json:"challenge_flow_reason,omitempty"`
 	FrontendDebug      FrontendDebug `json:"frontend_debug,omitempty"`
 }
 

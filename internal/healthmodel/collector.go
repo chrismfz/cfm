@@ -1,10 +1,13 @@
 package healthmodel
 
 import (
+	"context"
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +23,37 @@ import (
 
 // snapshotNowFn exists as a small test seam to force collector failures.
 var snapshotNowFn = health.SnapshotNow
+var challengeDialTimeout = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout(network, addr, timeout)
+}
+var bridgeDecisionProbe = func(sockPath, token string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: 1500 * time.Millisecond}
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "unix", sockPath)
+			},
+			DisableKeepAlives: true,
+		},
+		Timeout: 2 * time.Second,
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/nginx/status", nil)
+	req.Header.Set("X-CFM-Token", token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+var weakTokenRE = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
+
+func isStrongToken(tok string) bool {
+	t := strings.TrimSpace(tok)
+	return len(t) >= 32 && !weakTokenRE.MatchString(t)
+}
 
 // RawDetectorSnapshot aliases the detector snapshot type for tests outside this package.
 type RawDetectorSnapshot = health.Snapshot
@@ -108,7 +142,58 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out.UpstreamStatus = resolution.upstream.status
 	out.UpstreamConfidence = resolution.upstream.confidence
 	out.UpstreamReasonCode = resolution.upstream.reasonCode
+	flow := probeChallengeFlowReadiness()
+	out.ChallengeFlowState = flow.Status
+	out.ChallengeFlowCode = flow.Code
+	out.ChallengeFlowReason = flow.Reason
 	return out
+}
+
+type flowProbe struct{ Status, Code, Reason string }
+
+func probeChallengeFlowReadiness() flowProbe {
+	listenAddr := strings.TrimSpace(os.Getenv("CHALLENGE_HTTP_LISTEN"))
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:9098"
+	}
+	if !strings.Contains(listenAddr, ":") {
+		listenAddr = "127.0.0.1:" + listenAddr
+	}
+	conn, err := challengeDialTimeout("tcp", listenAddr, 1200*time.Millisecond)
+	if err != nil {
+		return flowProbe{"FAIL", "challenge_listener_unreachable", err.Error()}
+	}
+	_ = conn.Close()
+	sockPath := strings.TrimSpace(os.Getenv("OPENRESTY_SOCK"))
+	if sockPath == "" {
+		sockPath = "/var/run/cfm/cfm_nginx.sock"
+	}
+	st, err := os.Stat(sockPath)
+	if err != nil || st.Mode()&os.ModeSocket == 0 {
+		return flowProbe{"FAIL", "bridge_socket_unreachable", sockPath}
+	}
+	ct := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
+	bt := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN"))
+	if ct == "" || bt == "" {
+		return flowProbe{"FAIL", "token_missing", "challenge/bridge token missing"}
+	}
+	if !isStrongToken(ct) || !isStrongToken(bt) {
+		return flowProbe{"FAIL", "token_weak", "challenge/bridge token weak"}
+	}
+	statusCode, err := bridgeDecisionProbe(sockPath, bt)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			return flowProbe{"WARN", "decision_path_timeout", "partial_ok: listener/socket/token present but decision path timed out"}
+		}
+		return flowProbe{"FAIL", "decision_path_connect_fail", err.Error()}
+	}
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return flowProbe{"FAIL", "bridge_auth_fail", fmt.Sprintf("http %d", statusCode)}
+	}
+	if statusCode != http.StatusOK {
+		return flowProbe{"WARN", "decision_path_unexpected_status", fmt.Sprintf("partial_ok: http %d", statusCode)}
+	}
+	return flowProbe{"OK", "ok", "challenge flow ready"}
 }
 
 type webRoleResolution struct {

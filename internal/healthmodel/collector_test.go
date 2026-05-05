@@ -1,6 +1,13 @@
 package healthmodel
 
-import "testing"
+import (
+	"context"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestResolveFrontendDeterministically_DNATOwnerActiveWins(t *testing.T) {
 	candidates := []frontendSignal{
@@ -142,5 +149,50 @@ func TestDetectUpstreamFromPublicPortOwnership_NoListener(t *testing.T) {
 	_, ok := detectUpstreamFromPublicPortOwnership(listeners)
 	if ok {
 		t.Fatalf("expected no ownership decision")
+	}
+}
+
+func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
+	oldDial := challengeDialTimeout
+	oldProbe := bridgeDecisionProbe
+	t.Cleanup(func() {
+		challengeDialTimeout = oldDial
+		bridgeDecisionProbe = oldProbe
+		_ = os.Unsetenv("CHALLENGE_HTTP_LISTEN")
+		_ = os.Unsetenv("OPENRESTY_SOCK")
+		_ = os.Unsetenv("CHALLENGE_TOKEN")
+		_ = os.Unsetenv("BRIDGE_TOKEN")
+	})
+
+	challengeDialTimeout = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		c1, c2 := net.Pipe()
+		_ = c2.Close()
+		return c1, nil
+	}
+	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	_ = os.Setenv("OPENRESTY_SOCK", sock)
+	_ = os.Setenv("CHALLENGE_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
+	_ = os.Setenv("BRIDGE_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
+
+	bridgeDecisionProbe = func(sockPath, token string) (int, error) { return 200, nil }
+	if got := probeChallengeFlowReadiness(); got.Status != "OK" {
+		t.Fatalf("expected OK got %+v", got)
+	}
+	bridgeDecisionProbe = func(sockPath, token string) (int, error) { return 0, context.DeadlineExceeded }
+	if got := probeChallengeFlowReadiness(); got.Status != "WARN" || got.Code != "decision_path_timeout" {
+		t.Fatalf("expected timeout WARN got %+v", got)
+	}
+	bridgeDecisionProbe = func(sockPath, token string) (int, error) { return 401, nil }
+	if got := probeChallengeFlowReadiness(); got.Status != "FAIL" || got.Code != "bridge_auth_fail" {
+		t.Fatalf("expected auth fail got %+v", got)
+	}
+	_ = os.Unsetenv("CHALLENGE_TOKEN")
+	if got := probeChallengeFlowReadiness(); got.Status != "FAIL" || got.Code != "token_missing" {
+		t.Fatalf("expected missing token got %+v", got)
 	}
 }
