@@ -25,11 +25,13 @@ func TestLookupCachedOrAsync_CacheHit_FastPath(t *testing.T) {
 	}
 }
 
-// TestLookupCachedOrAsync_CacheMiss_ReturnsEmptyImmediately: the call must
-// not block — even if the underlying Lookup would be slow, the response is
-// instant. We don't need a real geoip DB here; with no DBs configured,
-// Lookup() returns Result{} and that's what eventually populates the cache.
-func TestLookupCachedOrAsync_CacheMiss_ReturnsEmptyImmediately(t *testing.T) {
+// TestLookupCachedOrAsync_CacheMiss_ReturnsImmediately: the call must not
+// block — even if the underlying Lookup would do up-to-1s of reverse DNS,
+// the response is near-instant. With no geoip DBs configured the inline
+// LookupGeoFast returns an empty Result; the point of this test is wall
+// time, not data shape (which is exercised by TestLookupGeoFast_NoDBs and
+// would need a real mmdb fixture for the populated case).
+func TestLookupCachedOrAsync_CacheMiss_ReturnsImmediately(t *testing.T) {
 	e := &Enricher{
 		cache:     map[string]Result{},
 		asyncSem:  make(chan struct{}, asyncWorkerCap),
@@ -39,15 +41,52 @@ func TestLookupCachedOrAsync_CacheMiss_ReturnsEmptyImmediately(t *testing.T) {
 	const ip = "203.0.113.7"
 
 	start := time.Now()
-	got := e.LookupCachedOrAsync(ip)
+	_ = e.LookupCachedOrAsync(ip)
 	elapsed := time.Since(start)
 
-	if got.CountryISO != "" {
-		t.Fatalf("cache miss should return empty CountryISO, got %q", got.CountryISO)
-	}
-	// Generous bound: cache miss path is just a map lookup + channel send.
+	// Generous bound: cache miss path is just a map lookup + inline mmdb
+	// (no DBs loaded → no-op) + non-blocking channel send.
 	if elapsed > 50*time.Millisecond {
 		t.Fatalf("cache miss took %v, expected near-instant return", elapsed)
+	}
+}
+
+// TestLookupGeoFast_NoDBs: verifies the inline mmdb path is safe when no
+// geoip databases are loaded — must return zero Result, never panic, never
+// touch the network. This is the path country-block rules depend on so a
+// missing GeoLite2-City.mmdb shouldn't crash anything.
+func TestLookupGeoFast_NoDBs(t *testing.T) {
+	e := &Enricher{
+		cache:    map[string]Result{},
+		asyncSem: make(chan struct{}, asyncWorkerCap),
+	}
+
+	start := time.Now()
+	got := e.LookupGeoFast("8.8.8.8")
+	elapsed := time.Since(start)
+
+	if got.CountryISO != "" || got.ASN != 0 || got.PTR != "" {
+		t.Fatalf("no-DB LookupGeoFast should return zero Result, got %+v", got)
+	}
+	// Hard bound — this path must NOT do DNS.
+	if elapsed > 5*time.Millisecond {
+		t.Fatalf("LookupGeoFast took %v, expected <5ms (mmdb only, no DNS)", elapsed)
+	}
+}
+
+// TestLookupGeoFast_NilSafe: defensive guard for nil receiver / bad inputs.
+func TestLookupGeoFast_NilSafe(t *testing.T) {
+	var nilEnr *Enricher
+	if got := nilEnr.LookupGeoFast("1.2.3.4"); got.CountryISO != "" {
+		t.Fatalf("nil enricher should return zero Result")
+	}
+
+	e := &Enricher{cache: map[string]Result{}, asyncSem: make(chan struct{}, asyncWorkerCap)}
+	if got := e.LookupGeoFast(""); got.CountryISO != "" {
+		t.Fatalf("empty IP should return zero Result")
+	}
+	if got := e.LookupGeoFast("not-an-ip"); got.CountryISO != "" {
+		t.Fatalf("invalid IP should return zero Result")
 	}
 }
 

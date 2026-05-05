@@ -194,18 +194,71 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	return r
 }
 
+// LookupGeoFast performs ONLY the synchronous mmdb (country + ASN + city)
+// lookups, deliberately skipping the slow reverse-DNS PTR resolution that
+// makes Lookup() unsafe on a request hot path. Typical cost is 1–10 μs
+// (memory-mapped DB reads); never blocks on the network.
+//
+// Used by LookupCachedOrAsync below so cache misses still return real
+// country / ASN data immediately — only PTR is deferred. This matters
+// because cfm-admin country-block rules consume Country directly from
+// the bridge's TrafficRuleEvalInput; if we returned an empty Result on
+// cache miss, the *first* request from a fresh IP from a blocked country
+// would slip through.
+func (e *Enricher) LookupGeoFast(ipStr string) Result {
+	if e == nil || ipStr == "" {
+		return Result{}
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return Result{}
+	}
+
+	e.mu.RLock()
+	localASN := e.asnDB
+	localCity := e.cityDB
+	e.mu.RUnlock()
+
+	r := Result{ts: time.Now()}
+
+	if localASN != nil {
+		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
+			r.ASN = rec.AutonomousSystemNumber
+			r.ASNName = rec.AutonomousSystemOrganization
+		}
+	}
+	if localCity != nil {
+		if rec, err := localCity.City(ip); err == nil && rec != nil {
+			r.CountryISO = rec.Country.IsoCode
+			if name, ok := rec.Country.Names["en"]; ok && name != "" {
+				r.Country = name
+			} else {
+				r.Country = rec.Country.IsoCode
+			}
+			if c, ok := rec.City.Names["en"]; ok {
+				r.City = c
+			}
+		}
+	}
+	return r
+}
+
 // LookupCachedOrAsync returns the cached Result for ipStr if one is fresh in
-// memory. On a cache miss it returns an empty Result *immediately* and
-// dispatches the full Lookup (PTR + ASN + City) on a background goroutine,
-// so the next request for the same IP can serve from cache.
+// memory. On a cache miss it returns the *fast* mmdb-only data (country +
+// ASN — microseconds, no DNS) immediately and dispatches the *full* Lookup
+// (which includes PTR reverse-DNS) on a background goroutine, so the next
+// request for the same IP can serve the complete record from cache.
 //
 // Why: Lookup() does up to 1s of reverse-DNS plus mmdb reads on a cold IP.
 // On the bridge decision hot path (one call per HTTP request from nginx),
 // that latency can exhaust the Lua-side cosocket timeout under load even
-// though the bridge handler itself is otherwise sub-millisecond. Deferring
-// it costs us geo data on the *first* request from a fresh IP only —
-// always-acceptable because rules that depend on country still apply on
-// the second request (~tens of ms later under load) once the cache is warm.
+// though the bridge handler itself is otherwise sub-millisecond.
+//
+// Trade-off: only PTR is deferred. Country and ASN remain inline-accurate
+// on every request — country-block rules in cfm-admin still fire on the
+// FIRST request from a fresh IP. PTR-dependent paths (challenge_exclude
+// FCrDNS for Googlebot etc.) live in autoblock_sink and call Lookup()
+// synchronously on their own pipeline; they're unaffected by this method.
 //
 // Concurrent misses for the same IP are coalesced via singleflight, and
 // the total number of in-flight async lookups is bounded by asyncSem so
@@ -225,7 +278,14 @@ func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
 	}
 	e.mu.RUnlock()
 
-	// Cache miss. Best-effort async dispatch — non-blocking on saturation.
+	// Inline mmdb call: country + ASN in microseconds, no DNS.
+	// Returned to the caller right away so country-block / ASN-block rules
+	// have real data even on the *first* request from a fresh IP. We do
+	// NOT cache this partial result — the async dispatch below will
+	// overwrite cache with the full PTR-included Result shortly.
+	partial := e.LookupGeoFast(ipStr)
+
+	// Best-effort async dispatch — non-blocking on saturation.
 	select {
 	case e.asyncSem <- struct{}{}:
 		go func(ip string) {
@@ -240,7 +300,7 @@ func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
 		// asyncSem full; intentionally drop. Next request retries.
 	}
 
-	return Result{ts: now}
+	return partial
 }
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
