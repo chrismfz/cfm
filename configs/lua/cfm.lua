@@ -593,10 +593,43 @@ local function fail_decision(errmsg)
   end
 end
 
+-- Static asset extensions whose bridge verdict is purely a function of
+-- (ip, host, scope) — never CHALLENGE_PATHS-eligible (no .git/.env/wp-config
+-- has a .png/.css/.woff suffix), no SQLi/XSS surface in the URL itself.
+-- For these we share a single cache entry per (ip, host, scope) so a page
+-- with 50 embedded assets makes 1 bridge call per visitor per 15s window
+-- instead of 50. Massive reduction in cosocket scheduling pressure on the
+-- nginx worker — this is what was causing intermittent
+-- "lua tcp socket read timed out" under modest load even though the bridge
+-- itself was responding in 0ms (verified via OPENRESTY_BRIDGE_TRACE=1).
+local STATIC_ASSET_EXT = {
+  css=true, js=true, mjs=true, map=true,
+  png=true, jpg=true, jpeg=true, gif=true, webp=true, avif=true,
+  svg=true, ico=true, bmp=true, tiff=true, tif=true,
+  woff=true, woff2=true, ttf=true, otf=true, eot=true,
+}
+
+local function is_static_asset_uri(uri)
+  if type(uri) ~= "string" or uri == "" then return false end
+  -- Strip query string, then take the extension after the final dot.
+  local path = uri:match("^([^?#]+)") or uri
+  local ext = path:match("%.([%w]+)$")
+  if not ext then return false end
+  return STATIC_ASSET_EXT[ext:lower()] == true
+end
+
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
 local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
-  local uri_part = (uri or "-"):sub(1, 64)
-  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
+  local key
+  if is_static_asset_uri(uri) then
+    -- Coalesced cache entry: shared by every static asset from this
+    -- (ip, host, scope) combo. Prefix "ds|" keeps it disjoint from the
+    -- per-URL "d|" namespace below.
+    key = "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
+  else
+    local uri_part = (uri or "-"):sub(1, 64)
+    key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
+  end
 
   if SH then
     local cached = SH:get(key)
