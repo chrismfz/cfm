@@ -5,19 +5,28 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	lruexp "github.com/hashicorp/golang-lru/v2/expirable"
 )
+
+// newTestEnricher returns an Enricher configured for unit-testing the cache
+// hot paths: LRU at the production cap, no PTR DNS, no geoip DBs loaded.
+func newTestEnricher() *Enricher {
+	return &Enricher{
+		cache:     lruexp.NewLRU[string, Result](cacheCap, nil, cacheTTL),
+		asyncSem:  make(chan struct{}, asyncWorkerCap),
+		enablePTR: false,
+	}
+}
 
 // TestLookupCachedOrAsync_CacheHit_FastPath: when the cache already has the IP,
 // LookupCachedOrAsync must return it directly without dispatching anything.
 func TestLookupCachedOrAsync_CacheHit_FastPath(t *testing.T) {
-	e := &Enricher{
-		cache:    map[string]Result{},
-		asyncSem: make(chan struct{}, asyncWorkerCap),
-	}
+	e := newTestEnricher()
 
 	const ip = "1.2.3.4"
 	want := Result{CountryISO: "GR", Country: "Greece", ts: time.Now()}
-	e.cache[ip] = want
+	e.cache.Add(ip, want)
 
 	got := e.LookupCachedOrAsync(ip)
 	if got.CountryISO != want.CountryISO {
@@ -32,11 +41,7 @@ func TestLookupCachedOrAsync_CacheHit_FastPath(t *testing.T) {
 // time, not data shape (which is exercised by TestLookupGeoFast_NoDBs and
 // would need a real mmdb fixture for the populated case).
 func TestLookupCachedOrAsync_CacheMiss_ReturnsImmediately(t *testing.T) {
-	e := &Enricher{
-		cache:     map[string]Result{},
-		asyncSem:  make(chan struct{}, asyncWorkerCap),
-		enablePTR: false, // no DNS in tests
-	}
+	e := newTestEnricher()
 
 	const ip = "203.0.113.7"
 
@@ -44,7 +49,7 @@ func TestLookupCachedOrAsync_CacheMiss_ReturnsImmediately(t *testing.T) {
 	_ = e.LookupCachedOrAsync(ip)
 	elapsed := time.Since(start)
 
-	// Generous bound: cache miss path is just a map lookup + inline mmdb
+	// Generous bound: cache miss path is just an LRU Get + inline mmdb
 	// (no DBs loaded → no-op) + non-blocking channel send.
 	if elapsed > 50*time.Millisecond {
 		t.Fatalf("cache miss took %v, expected near-instant return", elapsed)
@@ -56,10 +61,7 @@ func TestLookupCachedOrAsync_CacheMiss_ReturnsImmediately(t *testing.T) {
 // touch the network. This is the path country-block rules depend on so a
 // missing GeoLite2-City.mmdb shouldn't crash anything.
 func TestLookupGeoFast_NoDBs(t *testing.T) {
-	e := &Enricher{
-		cache:    map[string]Result{},
-		asyncSem: make(chan struct{}, asyncWorkerCap),
-	}
+	e := newTestEnricher()
 
 	start := time.Now()
 	got := e.LookupGeoFast("8.8.8.8")
@@ -81,7 +83,7 @@ func TestLookupGeoFast_NilSafe(t *testing.T) {
 		t.Fatalf("nil enricher should return zero Result")
 	}
 
-	e := &Enricher{cache: map[string]Result{}, asyncSem: make(chan struct{}, asyncWorkerCap)}
+	e := newTestEnricher()
 	if got := e.LookupGeoFast(""); got.CountryISO != "" {
 		t.Fatalf("empty IP should return zero Result")
 	}
@@ -95,11 +97,7 @@ func TestLookupGeoFast_NilSafe(t *testing.T) {
 // (We don't have geoip DBs in test env, so the cached Result is empty — but
 // it's still cached, which is what we're verifying.)
 func TestLookupCachedOrAsync_PopulatesCacheForNextCall(t *testing.T) {
-	e := &Enricher{
-		cache:     map[string]Result{},
-		asyncSem:  make(chan struct{}, asyncWorkerCap),
-		enablePTR: false,
-	}
+	e := newTestEnricher()
 
 	const ip = "198.51.100.42"
 	_ = e.LookupCachedOrAsync(ip) // dispatches async
@@ -108,33 +106,23 @@ func TestLookupCachedOrAsync_PopulatesCacheForNextCall(t *testing.T) {
 	// goroutine just writes Result{ts: now} and returns — should be quick.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		e.mu.RLock()
-		_, cached := e.cache[ip]
-		e.mu.RUnlock()
-		if cached {
+		if e.cache.Contains(ip) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	e.mu.RLock()
-	_, cached := e.cache[ip]
-	e.mu.RUnlock()
-	if !cached {
+	if !e.cache.Contains(ip) {
 		t.Fatalf("expected cache to be populated after async dispatch")
 	}
 }
 
 // TestLookupCachedOrAsync_DedupesConcurrentMisses: many concurrent misses for
 // the same IP should result in at most one underlying Lookup call (singleflight
-// dedup). We instrument by replacing the geoip DBs with nil and counting how
-// many times the goroutine actually wrote into the cache map.
+// dedup). We instrument by counting how many times the goroutine actually
+// wrote into the cache.
 func TestLookupCachedOrAsync_DedupesConcurrentMisses(t *testing.T) {
-	e := &Enricher{
-		cache:     map[string]Result{},
-		asyncSem:  make(chan struct{}, asyncWorkerCap),
-		enablePTR: false,
-	}
+	e := newTestEnricher()
 
 	const ip = "192.0.2.99"
 	const N = 50
@@ -153,23 +141,17 @@ func TestLookupCachedOrAsync_DedupesConcurrentMisses(t *testing.T) {
 	// Wait briefly for whatever async work was scheduled to complete.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		e.mu.RLock()
-		_, cached := e.cache[ip]
-		e.mu.RUnlock()
-		if cached {
+		if e.cache.Contains(ip) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// The cache map should now contain exactly one entry for this IP.
+	// The cache should now contain exactly one entry for this IP.
 	// (singleflight ensures only one Lookup ran; the bounded asyncSem
 	// also caps in-flight goroutines but that's secondary.)
-	e.mu.RLock()
-	count := len(e.cache)
-	e.mu.RUnlock()
-	if count != 1 {
-		t.Fatalf("expected exactly 1 cached entry for the hammered IP, got %d", count)
+	if got := e.cache.Len(); got != 1 {
+		t.Fatalf("expected exactly 1 cached entry for the hammered IP, got %d", got)
 	}
 }
 
@@ -178,7 +160,7 @@ func TestLookupCachedOrAsync_DedupesConcurrentMisses(t *testing.T) {
 // just skips the dispatch this round. We saturate by filling asyncSem manually.
 func TestLookupCachedOrAsync_BoundedConcurrency(t *testing.T) {
 	e := &Enricher{
-		cache:     map[string]Result{},
+		cache:     lruexp.NewLRU[string, Result](cacheCap, nil, cacheTTL),
 		asyncSem:  make(chan struct{}, 2), // tiny cap to force saturation
 		enablePTR: false,
 	}
@@ -189,7 +171,6 @@ func TestLookupCachedOrAsync_BoundedConcurrency(t *testing.T) {
 	e.asyncSem <- struct{}{}
 
 	var dispatched int32
-	// Use a wait group of zero to confirm the call doesn't block.
 	done := make(chan struct{})
 	go func() {
 		_ = e.LookupCachedOrAsync("203.0.113.50")
@@ -205,10 +186,7 @@ func TestLookupCachedOrAsync_BoundedConcurrency(t *testing.T) {
 	}
 
 	// Cache should NOT have been populated for the saturated case.
-	e.mu.RLock()
-	_, cached := e.cache["203.0.113.50"]
-	e.mu.RUnlock()
-	if cached {
+	if e.cache.Contains("203.0.113.50") {
 		t.Fatalf("expected no cache entry when async dispatch was skipped")
 	}
 
@@ -225,12 +203,42 @@ func TestLookupCachedOrAsync_NilSafe(t *testing.T) {
 		t.Fatalf("nil enricher should return zero Result")
 	}
 
-	e2 := &Enricher{
-		cache:    map[string]Result{},
-		asyncSem: make(chan struct{}, asyncWorkerCap),
-	}
+	e2 := newTestEnricher()
 	got2 := e2.LookupCachedOrAsync("")
 	if got2.CountryISO != "" || got2.PTR != "" {
 		t.Fatalf("empty IP should return zero Result")
 	}
+}
+
+// TestEnricherCache_BoundedByLRU: stress test that proves the cache cannot
+// grow without bound. Add cacheCap+overflow entries directly via Lookup-style
+// path (here through cache.Add) and confirm len <= cacheCap.
+func TestEnricherCache_BoundedByLRU(t *testing.T) {
+	// Use a tiny cap for the test so we don't actually allocate 200K entries.
+	const tinyCap = 100
+	e := &Enricher{
+		cache:    lruexp.NewLRU[string, Result](tinyCap, nil, cacheTTL),
+		asyncSem: make(chan struct{}, asyncWorkerCap),
+	}
+
+	// Insert tinyCap*5 unique entries.
+	for i := 0; i < tinyCap*5; i++ {
+		e.cache.Add(uniqueIP(i), Result{CountryISO: "ZZ", ts: time.Now()})
+	}
+
+	if got := e.cache.Len(); got > tinyCap {
+		t.Fatalf("cache exceeded LRU cap: got %d, cap %d", got, tinyCap)
+	}
+	if got := e.cache.Len(); got != tinyCap {
+		t.Fatalf("cache should be exactly at cap after %d inserts, got %d", tinyCap*5, got)
+	}
+}
+
+func uniqueIP(i int) string {
+	// arbitrary unique strings; format doesn't matter for cache test
+	return "10." +
+		string(rune('0'+(i/65536)%10)) + "." +
+		string(rune('0'+(i/256)%10)) + "." +
+		string(rune('0'+i%10)) + "-" +
+		string(rune('0'+i/10%10))
 }

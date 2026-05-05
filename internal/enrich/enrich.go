@@ -9,14 +9,29 @@ import (
 	"sync"
 	"time"
 
+	lruexp "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/oschwald/geoip2-golang"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	cacheTTL   = 3600 * time.Second // 1h cache για αποτελέσματα
-	dnsTimeout = 1 * time.Second    // 1s timeout για PTR lookups
-	statEvery  = 300 * time.Second  // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+	// 4-hour TTL: longer than mmdb publish cadence (weekly) and longer than
+	// any realistic ASN/PTR drift on stable networks. PTR-using consumers
+	// (FCrDNS for crawlers) re-verify the PTR back-resolves to the IP, so
+	// stale PTR data fails closed rather than open. Bumped from 1h after
+	// confirming the cache no longer grows unboundedly (LRU cap below).
+	cacheTTL   = 4 * time.Hour
+	dnsTimeout = 1 * time.Second   // 1s timeout για PTR lookups
+	statEvery  = 300 * time.Second // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+
+	// cacheCap is the maximum number of distinct IPs held in the geoip
+	// result cache. The previous map[string]Result had no eviction and
+	// grew with every unique IP seen since worker start (~250 bytes per
+	// entry). At 200 000 entries the worst-case footprint is ~50 MB per
+	// worker; the LRU evicts the coldest entry once the cap is reached,
+	// so memory plateaus regardless of how many unique IPs the worker
+	// has seen over its lifetime.
+	cacheCap = 200_000
 
 	// asyncWorkerCap caps the number of concurrent in-flight async PTR/mmdb
 	// lookups dispatched by LookupCachedOrAsync. Past this, fresh-IP misses
@@ -37,8 +52,17 @@ type Result struct {
 }
 
 type Enricher struct {
-	mu     sync.RWMutex
-	cache  map[string]Result
+	// mu protects the geoip DB pointers and hot-reload bookkeeping below.
+	// It is NOT held around cache reads/writes — the LRU has its own
+	// internal locking, so the hot path takes only one mutex (the LRU's)
+	// instead of two.
+	mu sync.RWMutex
+	// cache is a size-bounded TTL-expiring LRU. Eviction policy:
+	//   - entry expires after cacheTTL → auto-removed on next Get/Add
+	//   - cache full → coldest entry evicted on Add
+	// This bounds memory at cacheCap entries (~50 MB worst case per worker)
+	// regardless of how many unique IPs have been seen since worker start.
+	cache  *lruexp.LRU[string, Result]
 	asnDB  *geoip2.Reader
 	cityDB *geoip2.Reader
 	// hot-reload state
@@ -63,7 +87,7 @@ type Enricher struct {
 
 func New(dirs ...string) (*Enricher, error) {
 	e := &Enricher{
-		cache:     make(map[string]Result),
+		cache:     lruexp.NewLRU[string, Result](cacheCap, nil, cacheTTL),
 		enablePTR: true,
 		asyncSem:  make(chan struct{}, asyncWorkerCap),
 	}
@@ -129,13 +153,10 @@ func (e *Enricher) Close() {
 func (e *Enricher) Lookup(ipStr string) Result {
 	now := time.Now()
 
-	// cache hit
-	e.mu.RLock()
-	if r, ok := e.cache[ipStr]; ok && now.Sub(r.ts) < cacheTTL {
-		e.mu.RUnlock()
+	// cache hit — TTL/LRU eviction is handled internally by the LRU
+	if r, ok := e.cache.Get(ipStr); ok {
 		return r
 	}
-	e.mu.RUnlock()
 
 	// hot-reload if underlying files changed (rate-limited stat calls)
 	e.refreshIfChanged()
@@ -186,10 +207,8 @@ func (e *Enricher) Lookup(ipStr string) Result {
 		}
 	}
 
-	// store in cache
-	e.mu.Lock()
-	e.cache[ipStr] = r
-	e.mu.Unlock()
+	// store in cache (LRU handles its own locking + eviction)
+	e.cache.Add(ipStr, r)
 
 	return r
 }
@@ -268,15 +287,11 @@ func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
 	if e == nil || ipStr == "" {
 		return Result{}
 	}
-	now := time.Now()
 
-	// Fast path: identical to Lookup()'s cache check.
-	e.mu.RLock()
-	if r, ok := e.cache[ipStr]; ok && now.Sub(r.ts) < cacheTTL {
-		e.mu.RUnlock()
+	// Fast path: cache hit. LRU handles TTL expiry + recency tracking.
+	if r, ok := e.cache.Get(ipStr); ok {
 		return r
 	}
-	e.mu.RUnlock()
 
 	// Inline mmdb call: country + ASN in microseconds, no DNS.
 	// Returned to the caller right away so country-block / ASN-block rules
