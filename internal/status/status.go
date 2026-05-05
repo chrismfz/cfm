@@ -345,6 +345,10 @@ func Run(args []string, backend firewall.Backend) {
 		fmt.Println()
 	}
 	fmt.Printf("\n ====================================================================== \n")
+	flow := probeChallengeFlowReadiness()
+	fmt.Printf("\nBridge / Interceptor:\n")
+	fmt.Printf("  Challenge flow readiness: %s [%s] %s\n", flow.Status, flow.Code, flow.Reason)
+	fmt.Printf("\n ====================================================================== \n")
 
 	// --- NEW: Conntrack usage ---
 	t0 = time.Now()
@@ -727,8 +731,59 @@ var (
 	canonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 	bridgeSocketProbe        = probeNginxBridgeSocket
 	socketStat               = os.Stat
+	tcpDialTimeout           = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		return net.DialTimeout(network, addr, timeout)
+	}
 	detectorsConfigPath      = "/etc/cfm/detectors.conf"
 )
+
+type challengeFlowReadiness struct {
+	Status string
+	Code   string
+	Reason string
+}
+
+func probeChallengeFlowReadiness() challengeFlowReadiness {
+	listenAddr := strings.TrimSpace(os.Getenv("CHALLENGE_HTTP_LISTEN"))
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:9098"
+	}
+	if !strings.Contains(listenAddr, ":") {
+		listenAddr = "127.0.0.1:" + listenAddr
+	}
+	challengeToken := luaTokenProbe{Token: strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")), Present: strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")) != ""}
+	challengeToken.Valid = isStrongToken(challengeToken.Token)
+	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
+	cfg := resolveBridgeRuntimeConfig()
+
+	if _, err := tcpDialTimeout("tcp", listenAddr, 1200*time.Millisecond); err != nil {
+		return challengeFlowReadiness{Status: "FAIL", Code: "challenge_listener_unreachable", Reason: shortErr(err)}
+	}
+	st, err := socketStat(cfg.SocketPath)
+	if err != nil || st.Mode()&os.ModeSocket == 0 {
+		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: cfg.DisplaySocketPath}
+	}
+	if !challengeToken.Present || !bridgeToken.Present {
+		return challengeFlowReadiness{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing"}
+	}
+	if !challengeToken.Valid || !bridgeToken.Valid {
+		return challengeFlowReadiness{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak"}
+	}
+	httpStatus, _, probeErr := bridgeSocketProbe(cfg.SocketPath, bridgeToken.Token)
+	if probeErr != nil {
+		if errors.Is(probeErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(probeErr.Error()), "timeout") {
+			return challengeFlowReadiness{Status: "WARN", Code: "decision_path_timeout", Reason: "partial_ok: listener/socket/token present but bridge probe timed out"}
+		}
+		return challengeFlowReadiness{Status: "FAIL", Code: "decision_path_connect_fail", Reason: shortErr(probeErr)}
+	}
+	if httpStatus == http.StatusUnauthorized || httpStatus == http.StatusForbidden {
+		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_auth_fail", Reason: "bridge rejected token"}
+	}
+	if httpStatus != http.StatusOK {
+		return challengeFlowReadiness{Status: "WARN", Code: "decision_path_unexpected_status", Reason: fmt.Sprintf("partial_ok: bridge http %d", httpStatus)}
+	}
+	return challengeFlowReadiness{Status: "OK", Code: "ok", Reason: "challenge flow ready"}
+}
 
 func readLuaToken(path string) luaTokenProbe {
 	b, err := os.ReadFile(path)
