@@ -510,9 +510,10 @@ validate_panel_lua_guard_preflight() {
         warn "Panel Lua guard file is not readable by worker user cfm: $lua_path"
         return 1
     fi
-    if ! luajit -bl "$lua_path" >/dev/null 2>&1; then
-        warn "Panel Lua guard syntax/load check failed: $lua_path"
-        luajit -bl "$lua_path" >&2 || true
+    local selftest="package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,time=os.time}; dofile(arg[1]); assert(type(cfm_panel_selftest)=='function','missing cfm_panel_selftest'); local ok,err=cfm_panel_selftest(); assert(ok, err or 'selftest failed')"
+    if ! resty -e "$selftest" "$lua_path" >/dev/null 2>&1; then
+        warn "Panel Lua guard syntax/module selftest failed: $lua_path"
+        resty -e "$selftest" "$lua_path" >&2 || true
         return 1
     fi
     log "Panel Lua guard preflight passed: $lua_path"
