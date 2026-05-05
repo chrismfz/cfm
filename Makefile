@@ -56,7 +56,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua
 
 # -------------------------------
 # Help
@@ -78,6 +78,20 @@ setup: ## First-time setup after git clone
 
 check-cli-transport: ## Verify CLI runtime HTTP transport consistency (clihttp)
 	@./scripts/check_cli_transport.sh
+
+
+LUA_CONFIG_SOURCES := $(wildcard configs/lua/*.lua)
+
+lua: ## Syntax-check production Lua configs under configs/lua/
+	@command -v luac >/dev/null 2>&1 || { echo "❌ luac is required for 'make lua' but was not found in PATH."; exit 1; }
+	@[ -n "$(LUA_CONFIG_SOURCES)" ] || { echo "❌ No Lua config files found at configs/lua/*.lua"; exit 1; }
+	@echo "→ Validating Lua syntax for production configs:"
+	@printf '%s\n' $(LUA_CONFIG_SOURCES)
+	@for f in $(LUA_CONFIG_SOURCES); do \
+		echo "Checking $$f"; \
+		luac -p "$$f" || exit $$?; \
+	done
+	@echo "✅ Lua syntax checks passed."
 
 update: ## Update all dependencies
 	@echo "🔍 Checking for module updates..."
