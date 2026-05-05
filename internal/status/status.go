@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/detectors"
-	"cfm/internal/detectors/health"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
@@ -303,48 +302,7 @@ func Run(args []string, backend firewall.Backend) {
 		timing["ttl_summary_ms"] = time.Since(t0).Milliseconds()
 	}
 
-	// --- Health snapshot (works even if daemon is not running) ---
-	t0 = time.Now()
-	hs := health.SnapshotNow()
-	timing["health_ms"] = time.Since(t0).Milliseconds()
-	fmt.Printf("\n ====================================================================== \n")
-	fmt.Printf("\nHealth:\n")
-	fmt.Printf("  Hostname: %s\n", hs.Host)
-	fmt.Printf("  CPU load: %.2f (1m)\n", hs.Load1)
-	fmt.Printf("  RAM: %.1f%%\n", hs.RamUsedPct)
-	fmt.Printf("  Disk /: %.1f%%\n", hs.DiskRootPct)
-	fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
-		hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
-
-	if hs.Mdadm.Status != "" && hs.Mdadm.Status != "NO RAID" {
-		fmt.Printf("  RAID: %s\n", hs.Mdadm.Status)
-	}
-
-	// Compact SMART summary
-	if len(hs.Smart) > 0 {
-		total, fails := 0, 0
-		temps := make([]string, 0, 3)
-		for dev, info := range hs.Smart {
-			total++
-			h := strings.ToUpper(info.Health)
-			if strings.Contains(h, "FAIL") || strings.Contains(h, "CRIT") {
-				fails++
-			}
-			if info.TempC != "" && len(temps) < 3 {
-				temps = append(temps, fmt.Sprintf("%s=%sC", dev, info.TempC))
-			}
-		}
-		if fails > 0 {
-			fmt.Printf("  SMART: FAIL=%d/%d", fails, total)
-		} else {
-			fmt.Printf("  SMART: PASS (%d)", total)
-		}
-		if len(temps) > 0 {
-			fmt.Printf(" | temps: %s", strings.Join(temps, ", "))
-		}
-		fmt.Println()
-	}
-	fmt.Printf("\n ====================================================================== \n")
+	fmt.Printf("\nSee: cfm health\n")
 
 	// --- NEW: Conntrack usage ---
 	t0 = time.Now()
