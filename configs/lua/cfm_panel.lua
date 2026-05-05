@@ -139,6 +139,17 @@ local function loop_marker_present()
     return tostring(ngx.var.cookie_cfm_vd_loop or "") == "1"
 end
 
+-- Forward-declared as locals so set_loop_marker_cookie/refresh_clearance_cookie
+-- below capture them as upvalues. Real bodies are assigned further down (next
+-- to clearance_cookie_state, where they belong logically). If these were left
+-- as the original forward declarations near line ~460, the Lua compiler would
+-- treat the references inside set_loop_marker_cookie() as global lookups and
+-- they'd resolve to nil at runtime — that's the
+--   "attempt to call global 'append_set_cookie' (a nil value)"
+-- crash that the panel circuit breaker exposed.
+local safe_cookie_value
+local append_set_cookie
+
 local function set_loop_marker_cookie(ttl)
     ttl = tonumber(ttl or 15) or 15
     if ttl <= 0 then ttl = 15 end
@@ -463,8 +474,9 @@ local function is_browser_like(ua)
         or ua:find("edg", 1, true)
 end
 
-local safe_cookie_value
-local append_set_cookie
+-- safe_cookie_value / append_set_cookie are forward-declared earlier in the
+-- file (above set_loop_marker_cookie) so closures there can capture them as
+-- upvalues. Their real bodies are assigned just below clearance_cookie_state.
 local clearance_debug = (os.getenv("CFM_CLEARANCE_DEBUG") or "0") == "1"
 local clearance_trace = ngx.shared and ngx.shared.cfm_panel_state
 
@@ -493,6 +505,13 @@ local function pop_verify_trace(ip)
 end
 
 local function normalize_validator_reason(reason)
+    -- Keep "module_error" and "crypto_unavailable" *separately* from
+    -- "validator_error" so validator_degraded_reason() (below) can route
+    -- them to the fail-open path. Previously this collapsed both into
+    -- "validator_error", which made the degraded check always miss when
+    -- HMAC was unavailable in the OpenResty install (no resty.openssl.hmac
+    -- and no ngx.hmac_sha256 from lua-resty-core) — symptom: cookie present,
+    -- validator_reason=validator_error, infinite challenge loop.
     local buckets = {
         missing = true,
         bad_sig = true,
@@ -503,9 +522,11 @@ local function normalize_validator_reason(reason)
         validator_error = true,
         decision_timeout = true,
         missing_clearance_secret = true,
+        module_error = true,
+        crypto_unavailable = true,
     }
     reason = tostring(reason or "")
-    if reason == "module_error" or reason == "error" or reason == "crypto_unavailable" then
+    if reason == "error" then
         return "validator_error"
     end
     if buckets[reason] then
