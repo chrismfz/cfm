@@ -84,8 +84,8 @@ local CFG = {
   -- history, observations) is dispatched async on the Go side so this
   -- budget only needs to cover state mutation + JSON (sub-millisecond).
   decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
-  decision_cache_ttl_ms = 15000,
-  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
+  decision_cache_ttl_ms = 90000,
+  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "6000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
   waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
 
@@ -99,8 +99,8 @@ local CFG = {
   ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "3600"),
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
-  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
-  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
+  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
+  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "512"),
 
   waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "8192"),
 
