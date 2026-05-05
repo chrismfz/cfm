@@ -5,7 +5,7 @@ Use this checklist for challenge or WAF Lua/config updates before reloading Angi
 ## Lua validation gate (required)
 
 1. Ensure all shipped Lua files parse:
-   - `luac -p configs/*.lua`
+   - `luac -p configs/lua/*.lua`
 2. Ensure rendered runtime artifacts parse (if generated in environment):
    - `luac -p /var/lib/cfm/lua/*.lua`
 3. Run runtime load smoke-test with OpenResty-compatible LuaJIT:

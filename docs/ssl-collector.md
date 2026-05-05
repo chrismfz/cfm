@@ -229,7 +229,7 @@ tmpfs path (root-only, lost on reboot) would achieve this.
 | `internal/sslcollector/socketapi.go` | Unix socket HTTP server, endpoint handlers |
 | `internal/sslcollector/token.go` | Token validation, generation, Lua file writers |
 | `internal/sslcollector/lifecycle.go` | Start/stop/restart lifecycle wired to config |
-| `configs/sslcollector.lua` | OpenResty/Angie Lua module (background poll + handshake hook) |
+| `configs/lua/sslcollector.lua` | OpenResty/Angie Lua module (background poll + handshake hook) |
 | `configs/openresty.conf` | `init_worker_by_lua_block` + `ssl_certificate_by_lua_block` wiring |
 | `configs/angie.conf` | Same for Angie |
 | `/var/lib/cfm/lua/cfm_token.lua` | Auto-generated bearer token (0640 root:cfm) |

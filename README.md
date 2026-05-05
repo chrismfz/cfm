@@ -447,7 +447,7 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 
 ### Ingestion Modes
 
-**Socket mode** — Unix stream socket at `/run/cfm/ingest.sock` (root:cfm 0660, parent dir root:cfm 0750). Used automatically when OpenResty/Angie is installed via `scripts/install-openresty.sh` / `scripts/install-angie.sh`: a `log_by_lua_block` sender (`configs/log-cfm.lua`) pushes every request as a TSV line, so webdetector does not have to tail a file on disk. Requires no config — presence of socket traffic is self-advertising.
+**Socket mode** — Unix stream socket at `/run/cfm/ingest.sock` (root:cfm 0660, parent dir root:cfm 0750). Used automatically when OpenResty/Angie is installed via `scripts/install-openresty.sh` / `scripts/install-angie.sh`: a `log_by_lua_block` sender (`configs/lua/log-cfm.lua`) pushes every request as a TSV line, so webdetector does not have to tail a file on disk. Requires no config — presence of socket traffic is self-advertising.
 
 **File mode** — single TSV log. Best for nginx/Apache custom log formats you control.
 
@@ -639,14 +639,14 @@ CFM now keeps a single authoritative self-IP snapshot for both layers:
   - a `generated_at` timestamp.
 - The Lua file is written atomically (`.tmp` + rename), so OpenResty/Angie workers
   never read a partially-written snapshot.
-- `configs/cfm.lua` loads the file safely (`pcall(loadfile(...))`) and fails open
+- `configs/lua/cfm.lua` loads the file safely (`pcall(loadfile(...))`) and fails open
   if the file is missing or malformed (logs warning, continues with loopback/link-local checks).
 - Step **0a** local-origin bypass consumes this shared map, so nft and Lua stay aligned
   on what is considered “self traffic”.
 - The same computed self-origin flag is also passed into WAF check context for optional
   rule tagging/telemetry.
 
-`configs/cfm_waf.lua` also includes staged payload detectors with per-rule modes
+`configs/lua/cfm_waf.lua` also includes staged payload detectors with per-rule modes
 (`disabled|logonly|challenge|block`). Two body-focused rules are designed to be
 deployed conservatively:
 

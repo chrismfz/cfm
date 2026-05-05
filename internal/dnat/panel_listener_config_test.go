@@ -71,7 +71,7 @@ func TestPanelListenerConfig_HasExactDecideLocationAndDoesNotFallThroughToRootPr
 }
 
 func TestPanelLuaPolicy_DocumentsExemptionsAndModes(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestPanelLuaPolicy_DocumentsExemptionsAndModes(t *testing.T) {
 }
 
 func TestPanelLuaPolicy_QueryDecisionApiDoesNotMapAllNon5xxToDeny(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPanelLuaPolicy_QueryDecisionApiDoesNotMapAllNon5xxToDeny(t *testing.T) 
 }
 
 func TestPanelLuaPolicy_ChallengeFlowDetectionDoesNotUseNextParam(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestPanelLuaPolicy_ChallengeFlowDetectionDoesNotUseNextParam(t *testing.T) 
 }
 
 func TestPanelLuaPolicy_VerifyEndpointGuardIsScopedToInternalHandling(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestPanelLuaPolicy_VerifyEndpointGuardIsScopedToInternalHandling(t *testing
 }
 
 func TestPanelLuaPolicy_CookieDetectionUsesDelimitedNames(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestPanelLuaPolicy_CookieDetectionUsesDelimitedNames(t *testing.T) {
 }
 
 func TestPanelLuaPolicy_ChallengeVerifyFlowNeverResumesToInternalDecisionRoute(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestPanelListenerConfig_DirectAdminListenerUsesTLSOriginAndHeaders(t *testi
 }
 
 func TestPanelLuaPolicy_NoTopLevelVerifyOrChallengeArgRewrite(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestPanelLuaPolicy_NoTopLevelVerifyOrChallengeArgRewrite(t *testing.T) {
 }
 
 func TestPanelLuaPolicy_ChallengeRedirectNeverReturnsInternalDecisionLocationOn303(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
