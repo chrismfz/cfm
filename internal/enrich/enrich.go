@@ -10,12 +10,20 @@ import (
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
 	cacheTTL   = 3600 * time.Second // 1h cache για αποτελέσματα
 	dnsTimeout = 1 * time.Second    // 1s timeout για PTR lookups
 	statEvery  = 300 * time.Second  // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
+
+	// asyncWorkerCap caps the number of concurrent in-flight async PTR/mmdb
+	// lookups dispatched by LookupCachedOrAsync. Past this, fresh-IP misses
+	// quietly return an empty Result rather than spawning more goroutines —
+	// the next request for that IP will retry. Tuned to comfortably absorb a
+	// burst from a few hundred unique IPs without unbounded goroutine growth.
+	asyncWorkerCap = 32
 )
 
 type Result struct {
@@ -42,6 +50,12 @@ type Enricher struct {
 	lastStatChk time.Time
 	// options
 	enablePTR bool
+	// Async-dispatch primitives for LookupCachedOrAsync.
+	// sf coalesces concurrent fresh-IP misses for the same address into a
+	// single underlying Lookup call. asyncSem bounds total concurrent async
+	// lookups so a flood of unique IPs cannot spawn unbounded goroutines.
+	sf       singleflight.Group
+	asyncSem chan struct{}
 }
 
 // New ενεργοποιεί enrichment αν βρει mmdb αρχεία σε dirs (π.χ. /etc/cfm, ./configs).
@@ -51,6 +65,7 @@ func New(dirs ...string) (*Enricher, error) {
 	e := &Enricher{
 		cache:     make(map[string]Result),
 		enablePTR: true,
+		asyncSem:  make(chan struct{}, asyncWorkerCap),
 	}
 	var asnPath, cityPath string
 
@@ -177,6 +192,55 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	e.mu.Unlock()
 
 	return r
+}
+
+// LookupCachedOrAsync returns the cached Result for ipStr if one is fresh in
+// memory. On a cache miss it returns an empty Result *immediately* and
+// dispatches the full Lookup (PTR + ASN + City) on a background goroutine,
+// so the next request for the same IP can serve from cache.
+//
+// Why: Lookup() does up to 1s of reverse-DNS plus mmdb reads on a cold IP.
+// On the bridge decision hot path (one call per HTTP request from nginx),
+// that latency can exhaust the Lua-side cosocket timeout under load even
+// though the bridge handler itself is otherwise sub-millisecond. Deferring
+// it costs us geo data on the *first* request from a fresh IP only —
+// always-acceptable because rules that depend on country still apply on
+// the second request (~tens of ms later under load) once the cache is warm.
+//
+// Concurrent misses for the same IP are coalesced via singleflight, and
+// the total number of in-flight async lookups is bounded by asyncSem so
+// a flood of unique IPs can't spawn unbounded goroutines. If asyncSem is
+// saturated we just skip the dispatch — the next request retries.
+func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
+	if e == nil || ipStr == "" {
+		return Result{}
+	}
+	now := time.Now()
+
+	// Fast path: identical to Lookup()'s cache check.
+	e.mu.RLock()
+	if r, ok := e.cache[ipStr]; ok && now.Sub(r.ts) < cacheTTL {
+		e.mu.RUnlock()
+		return r
+	}
+	e.mu.RUnlock()
+
+	// Cache miss. Best-effort async dispatch — non-blocking on saturation.
+	select {
+	case e.asyncSem <- struct{}{}:
+		go func(ip string) {
+			defer func() { <-e.asyncSem }()
+			// singleflight guarantees only one Lookup runs per IP at a
+			// time even if many requests miss simultaneously.
+			_, _, _ = e.sf.Do(ip, func() (interface{}, error) {
+				return e.Lookup(ip), nil
+			})
+		}(ipStr)
+	default:
+		// asyncSem full; intentionally drop. Next request retries.
+	}
+
+	return Result{ts: now}
 }
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
