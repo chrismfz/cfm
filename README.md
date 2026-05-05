@@ -1141,7 +1141,7 @@ DirectAdmin notes:
 
 ```bash
 da config-set x_forwarded_from_ip "127.0.0.1" --restart
-
+```
 
 
 Notes:
