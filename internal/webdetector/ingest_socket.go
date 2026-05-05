@@ -17,7 +17,7 @@ import (
 )
 
 // DefaultIngestSockPath is the Unix stream socket path used by log_by_lua_block
-// senders (configs/log-cfm.lua) to push TSV log lines into webdetector.
+// senders (configs/lua/log-cfm.lua) to push TSV log lines into webdetector.
 // Hardcoded by design: the arbiter in Engine.RunOnce selects socket-over-file
 // automatically based on whether lines arrive here, so users never have to
 // flip a config knob when switching between OpenResty/Angie (socket) and

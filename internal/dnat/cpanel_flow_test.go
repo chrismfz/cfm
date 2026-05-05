@@ -47,7 +47,7 @@ func TestOffCleanupStatusesReported(t *testing.T) {
 }
 
 func TestPanelLuaDecisionEndpoint302IssuesChallenge(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPanelLuaDecisionEndpoint302IssuesChallenge(t *testing.T) {
 }
 
 func TestPanelLuaDecisionLogAnchorsRedirectStatusSignature(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPanelLuaDecisionLogAnchorsRedirectStatusSignature(t *testing.T) {
 }
 
 func TestPanelLuaPolicy_GuardOnlySensitiveFlowAnchors(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPanelLuaPolicy_GuardOnlySensitiveFlowAnchors(t *testing.T) {
 }
 
 func TestPanelLuaPolicy_OutcomeLogFieldsPresent(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPanelLuaPolicy_OutcomeLogFieldsPresent(t *testing.T) {
 }
 
 func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPanelLuaForcedMode_ChallengeThenCookieOrTTLAllowsFollowUps(t *testing.T
 }
 
 func TestPanelLuaForcedMode_45mNoRechallengeWhenCookieOrTTLEntryValid(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestPanelLuaForcedMode_45mNoRechallengeWhenCookieOrTTLEntryValid(t *testing
 }
 
 func TestPanelLuaForcedMode_RechallengeAfterTTLExpiry(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestPanelLuaForcedMode_RechallengeAfterTTLExpiry(t *testing.T) {
 }
 
 func TestPanelLuaOffMode_DirectPassThroughWithoutChallenge(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestPanelLuaOffMode_DirectPassThroughWithoutChallenge(t *testing.T) {
 }
 
 func TestPanelLuaXfercPanelRedirectAndcPanelSessionSensitivityAnchors(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestPanelLuaXfercPanelRedirectAndcPanelSessionSensitivityAnchors(t *testing
 }
 
 func TestPanelLuaChallengeRedirectSanitizesInternalNextTargets(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestPanelLuaChallengeRedirectSanitizesInternalNextTargets(t *testing.T) {
 }
 
 func TestPanelLuaChallengeFlowStripsNestedEncodedNextChains(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestPanelLuaChallengeFlowStripsNestedEncodedNextChains(t *testing.T) {
 
 
 func TestPanelLuaForcedModeSensitivePathsRequireCookieAndProtectLoops(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestPanelLuaForcedModeSensitivePathsRequireCookieAndProtectLoops(t *testing
 }
 
 func TestPanelLuaDecisionLogsIncludeHostUAAndReasons(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestPanelLuaDecisionLogsIncludeHostUAAndReasons(t *testing.T) {
 }
 
 func TestPanelLuaConfiguredHostEquivalenceIncludesProxyDomains(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestPanelLuaProxyHostNonBrowserAgentsSensitivePaths(t *testing.T) {
 		}
 	}
 
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestPanelLuaProxyHostNonBrowserAgentsSensitivePaths(t *testing.T) {
 }
 
 func TestPanelLuaDecision429FailOpenUsesConfiguredFailMode(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestPanelLuaDecision429FailOpenUsesConfiguredFailMode(t *testing.T) {
 }
 
 func TestPanelLuaDecision429FailClosedDeniesWithoutChallengeLoop(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestPanelLuaDecision429FailClosedDeniesWithoutChallengeLoop(t *testing.T) {
 }
 
 func TestPanelLuaForcedMode_DoesNotDependOnLuaVerifyCallbackGuard(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestPanelLuaForcedMode_DoesNotDependOnLuaVerifyCallbackGuard(t *testing.T) 
 }
 
 func TestPanelLuaChallengeFlow_DoesNotTreatVerifyAsLuaPassThrough(t *testing.T) {
-	b, err := os.ReadFile("../../configs/cfm_panel.lua")
+	b, err := os.ReadFile("../../configs/lua/cfm_panel.lua")
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}

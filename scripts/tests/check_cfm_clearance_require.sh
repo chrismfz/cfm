@@ -2,7 +2,7 @@
 set -euo pipefail
 
 luajit -e '
-  package.path = "configs/?.lua;" .. package.path
+  package.path = "configs/lua/?.lua;" .. package.path
   local expected = "b82fcb791acec57859b989b430a826488ce2e479fdf92326bd0a2e8375a42ba4"
   local payload_token = "eyJ2IjoiMSIsImV4cCI6NDA3MDkwODgwMCwiaXAiOiIxLjIuMy40IiwiaG9zdCI6ImV4YW1wbGUuY29tIiwic2NvcGUiOiJ3ZWIiLCJub25jZSI6Im4iLCJobWFjIjoiYjgyZmNiNzkxYWNlYzU3ODU5Yjk4OWI0MzBhODI2NDg4Y2UyZTQ3OWZkZjkyMzI2YmQwYTJlODM3NWE0MmJhNCJ9"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-lua_file="${1:-configs/cfm.lua}"
+lua_file="${1:-configs/lua/cfm.lua}"
 
 [[ -f "$lua_file" ]] || { echo "missing file: $lua_file" >&2; exit 2; }
 

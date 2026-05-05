@@ -1,4 +1,4 @@
-local panel_path = "configs/cfm_panel.lua"
+local panel_path = "configs/lua/cfm_panel.lua"
 
 local function run_case(c)
   local uri_args = c.uri_args or {}

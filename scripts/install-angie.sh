@@ -463,18 +463,18 @@ deploy_cfm_files() {
     mkdir -p "$conf_dir"
     mkdir -p /etc/logrotate.d
 
-    backup_and_copy_file "/usr/share/cfm/configs/cfm.lua"            "$lua_dir/cfm.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_panel.lua"      "$lua_dir/cfm_panel.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_clamav.lua"     "$lua_dir/cfm_clamav.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_cache_log.lua"  "$lua_dir/cfm_cache_log.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/cfm_clearance.lua"  "$lua_dir/cfm_clearance.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm.lua"            "$lua_dir/cfm.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_panel.lua"      "$lua_dir/cfm_panel.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_rules.lua"      "$lua_dir/cfm_rules.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_stats.lua"      "$lua_dir/cfm_stats.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_waf.lua"        "$lua_dir/cfm_waf.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clamav.lua"     "$lua_dir/cfm_clamav.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_cache_log.lua"  "$lua_dir/cfm_cache_log.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/cfm_clearance.lua"  "$lua_dir/cfm_clearance.lua"
     # log-cfm: log_by_lua sender that pushes every request to
     # /run/cfm/ingest.sock so webdetector does not need to tail the TSV file.
-    backup_and_copy_file "/usr/share/cfm/configs/log-cfm.lua"        "$lua_dir/log-cfm.lua"
-    backup_and_copy_file "/usr/share/cfm/configs/sslcollector.lua"   "$lua_dir/sslcollector.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/log-cfm.lua"        "$lua_dir/log-cfm.lua"
+    backup_and_copy_file "/usr/share/cfm/configs/lua/sslcollector.lua"   "$lua_dir/sslcollector.lua"
 
     backup_and_copy_file "/usr/share/cfm/configs/trusted_proxies.conf" \
         "$conf_dir/trusted_proxies.conf"

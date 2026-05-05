@@ -45,7 +45,7 @@ _G.ngx = {
   },
 }
 
-local rules = dofile("configs/cfm_rules.lua")
+local rules = dofile("configs/lua/cfm_rules.lua")
 rules.init({})
 
 local function assert_eq(actual, expected, msg)
