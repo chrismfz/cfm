@@ -69,10 +69,11 @@ type Config struct {
 	ChallengeLogSuppressed bool
 
 	// OpenResty integration (optional)
-	OpenRestyMode    bool          // OPENRESTY_MODE = 1
-	OpenRestySock    string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
-	OpenRestyToken   string        // OPENRESTY_TOKEN = sometoken
-	OpenRestyOkIPTTL time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)
+	OpenRestyMode        bool          // OPENRESTY_MODE = 1
+	OpenRestySock        string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
+	OpenRestyToken       string        // OPENRESTY_TOKEN = sometoken
+	OpenRestyOkIPTTL     time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)
+	OpenRestyBridgeTrace bool          // OPENRESTY_BRIDGE_TRACE = 0|1
 
 	// How long the solved cookie (cfm_ok) should live (challenge server).
 	// If 0, detector register will default it to CHALLENGE_COOLDOWN.

@@ -434,6 +434,7 @@ func NewEngine(cfg Config) *Engine {
 	// enable openresty mode//
 	if cfg.OpenRestyMode {
 		e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
+		e.nginxBridge.cfg.Trace = cfg.OpenRestyBridgeTrace
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList

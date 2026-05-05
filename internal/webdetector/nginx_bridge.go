@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -140,6 +141,17 @@ type bridgeCfg struct {
 	Token      string
 	DefaultTTL time.Duration
 	OkIPTTL    time.Duration // if 0 -> cookie-only (no IP ok-state)
+	Trace      bool
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 type bridgeIPEntry struct {
@@ -1056,10 +1068,37 @@ const slowHandlerThreshold = 30 * time.Millisecond
 func (b *NginxBridge) instrument(name string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		h(w, r)
-		if dur := time.Since(start); dur >= slowHandlerThreshold {
+		sw := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+		h(sw, r)
+		dur := time.Since(start)
+		if dur >= slowHandlerThreshold {
 			logging.Logf("[nginx_bridge] slow handler %s %s took %s", r.Method, name, dur)
 		}
+		if !b.cfg.Trace {
+			return
+		}
+		reqID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if reqID == "" {
+			reqID = fmt.Sprintf("bridge-%d", start.UnixNano())
+		}
+		host := strings.TrimSpace(r.Host)
+		uri := r.URL.RequestURI()
+		action := "ok"
+		if sw.status >= 400 {
+			action = "error"
+		}
+		errClass := ""
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			errClass = "context_canceled"
+		} else if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			errClass = "timeout"
+		} else if sw.status == http.StatusBadRequest {
+			errClass = "json_error"
+		} else if sw.status == http.StatusServiceUnavailable {
+			errClass = "queue_overflow"
+		}
+		logging.LogfSOCKET("[bridge_trace] timestamp=%s request_id=%s remote_addr=%q host=%q uri=%q method=%s action=%s duration_ms=%d status_code=%d error_class=%s auth_header=%s",
+			start.UTC().Format(time.RFC3339Nano), reqID, strings.TrimSpace(r.RemoteAddr), host, uri, r.Method, action, dur.Milliseconds(), sw.status, errClass, "[REDACTED]")
 	}
 }
 

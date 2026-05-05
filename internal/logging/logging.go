@@ -18,6 +18,7 @@ var (
 	challengesLogFile *os.File
 	wafLogFile        *os.File
 	mysqlLogFile      *os.File // mysql enforcer
+	socketLogFile     *os.File
 	once              sync.Once
 	cfg               *config.LoggingConfig
 	clamLogFile       *os.File
@@ -59,29 +60,25 @@ func Init(c *config.LoggingConfig) {
 			}
 		}
 
-
-	// CLAM log
-	clamPath := cfg.CLAMFile
-	if clamPath == "" && cfg.File != "" {
-		base := cfg.File
-		ext := filepath.Ext(base)
-		if ext == "" {
-			clamPath = base + ".clam"
-		} else {
-			clamPath = strings.TrimSuffix(base, ext) + ".clam" + ext
+		// CLAM log
+		clamPath := cfg.CLAMFile
+		if clamPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				clamPath = base + ".clam"
+			} else {
+				clamPath = strings.TrimSuffix(base, ext) + ".clam" + ext
+			}
 		}
-	}
-	if clamPath == "" {
-		clamPath = "/var/log/cfm/cfm.clam.log"
-	}
-	if f, err := os.OpenFile(clamPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-		clamLogFile = f
-	} else {
-		fmt.Printf("failed to open clam log file %s: %v\n", clamPath, err)
-	}
-
-
-
+		if clamPath == "" {
+			clamPath = "/var/log/cfm/cfm.clam.log"
+		}
+		if f, err := os.OpenFile(clamPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+			clamLogFile = f
+		} else {
+			fmt.Printf("failed to open clam log file %s: %v\n", clamPath, err)
+		}
 
 		// SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
 		smtpPath := cfg.SMTPFile
@@ -113,6 +110,25 @@ func Init(c *config.LoggingConfig) {
 				challengesPath = strings.TrimSuffix(base, ext) + ".challenges" + ext
 			}
 		}
+
+		// SOCKET bridge log
+		socketPath := cfg.SOCKETFile
+		if socketPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				socketPath = base + ".socket"
+			} else {
+				socketPath = strings.TrimSuffix(base, ext) + ".socket" + ext
+			}
+		}
+		if socketPath != "" {
+			if f, err := os.OpenFile(socketPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+				socketLogFile = f
+			} else {
+				fmt.Printf("failed to open socket log file %s: %v\n", socketPath, err)
+			}
+		}
 		if challengesPath != "" {
 			if f, err := os.OpenFile(challengesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
 				challengesLogFile = f
@@ -122,30 +138,24 @@ func Init(c *config.LoggingConfig) {
 		}
 
 		// WAF log
-wafPath := cfg.WAFFile
-if wafPath == "" && cfg.File != "" {
-	base := cfg.File
-	ext := filepath.Ext(base)
-	if ext == "" {
-		wafPath = base + ".waf"
-	} else {
-		wafPath = strings.TrimSuffix(base, ext) + ".waf" + ext
-	}
-}
-if wafPath == "" {
-	wafPath = "/var/log/cfm/cfm.waf.log"
-}
-if f, err := os.OpenFile(wafPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-	wafLogFile = f
-} else {
-	fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
-}
-
-
-
-
-
-
+		wafPath := cfg.WAFFile
+		if wafPath == "" && cfg.File != "" {
+			base := cfg.File
+			ext := filepath.Ext(base)
+			if ext == "" {
+				wafPath = base + ".waf"
+			} else {
+				wafPath = strings.TrimSuffix(base, ext) + ".waf" + ext
+			}
+		}
+		if wafPath == "" {
+			wafPath = "/var/log/cfm/cfm.waf.log"
+		}
+		if f, err := os.OpenFile(wafPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+			wafLogFile = f
+		} else {
+			fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
+		}
 
 		// MYSQL GOVERNOR log
 		mysqlPath := cfg.MYSQLFile
@@ -291,8 +301,6 @@ func LogfMYSQLGOVERNOR(format string, args ...interface{}) {
 	}
 }
 
-
-
 // CLAM LOGGING
 func LogfCLAM(format string, args ...interface{}) {
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -304,6 +312,21 @@ func LogfCLAM(format string, args ...interface{}) {
 	}
 	if clamLogFile != nil {
 		_, _ = clamLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
+}
+
+func LogfSOCKET(format string, args ...interface{}) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
+
+	if cfg == nil || cfg.SOCKETStdout {
+		fmt.Print(line)
+	}
+	if socketLogFile != nil {
+		_, _ = socketLogFile.WriteString(line)
 	} else if logFile != nil {
 		_, _ = logFile.WriteString(line)
 	}

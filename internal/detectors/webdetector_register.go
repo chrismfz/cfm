@@ -675,9 +675,10 @@ func init() {
 			ChallengeToken: kvStrClean(kv, "CHALLENGE_TOKEN", ""),
 
 			// OpenResty in-path mode (replaces standalone challenge_server)
-			OpenRestyMode:  kvBool(kv, "OPENRESTY_MODE", false),
-			OpenRestySock:  kvStrClean(kv, "OPENRESTY_SOCK", "/var/run/cfm_nginx.sock"),
-			OpenRestyToken: kvStrClean(kv, "OPENRESTY_TOKEN", ""),
+			OpenRestyMode:        kvBool(kv, "OPENRESTY_MODE", false),
+			OpenRestySock:        kvStrClean(kv, "OPENRESTY_SOCK", "/var/run/cfm_nginx.sock"),
+			OpenRestyToken:       kvStrClean(kv, "OPENRESTY_TOKEN", ""),
+			OpenRestyBridgeTrace: kvBool(kv, "OPENRESTY_BRIDGE_TRACE", false),
 
 			OpenRestyOkIPTTL: kvDur(kv, "OPENRESTY_OK_IP_TTL", 1*time.Minute),
 
