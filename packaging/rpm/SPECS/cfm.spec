@@ -57,6 +57,17 @@ if [ -d "%{pkgroot}/var" ]; then
   cp -a "%{pkgroot}/var" "%{buildroot}/"
 fi
 
+
+# ensure canonical shared assets are always shipped, even if %{pkgroot} staging omitted them
+mkdir -p "%{buildroot}%{_datadir}/cfm"
+if [ -d "%{projectroot}/configs" ]; then
+  rm -rf "%{buildroot}%{_datadir}/cfm/configs"
+  cp -a "%{projectroot}/configs" "%{buildroot}%{_datadir}/cfm/configs"
+fi
+if [ -d "%{projectroot}/scripts" ]; then
+  rm -rf "%{buildroot}%{_datadir}/cfm/scripts"
+  cp -a "%{projectroot}/scripts" "%{buildroot}%{_datadir}/cfm/scripts"
+fi
 # canonicalize Lua runtime payload permissions in the package payload itself
 if [ -d "%{buildroot}/var/lib/cfm/lua" ]; then
   chmod 0750 "%{buildroot}/var/lib/cfm/lua"
@@ -120,8 +131,17 @@ find /var/lib/cfm/lua -type f -exec chmod 0640 {} + || true
 #  - existing file locally modified -> backup and force-refresh with packaged file
 stamp_dir=/var/lib/cfm/lua/.packaged
 mkdir -p "$stamp_dir"
-if [ -d /usr/share/cfm/configs/lua ]; then
-    find /usr/share/cfm/configs/lua -maxdepth 1 -type f -name "*.lua" | while read -r src; do
+
+lua_src_dir=""
+for cand in /usr/share/cfm/configs/lua /usr/share/cfm/lua; do
+    if [ -d "$cand" ]; then
+        lua_src_dir="$cand"
+        break
+    fi
+done
+
+if [ -n "$lua_src_dir" ]; then
+    find "$lua_src_dir" -maxdepth 1 -type f -name "*.lua" | while read -r src; do
         base="$(basename "$src")"
         dst="/var/lib/cfm/lua/$base"
         stamp="$stamp_dir/$base.sha256"
@@ -129,8 +149,7 @@ if [ -d /usr/share/cfm/configs/lua ]; then
 
         if [ ! -f "$dst" ]; then
             install -m 0640 -o root -g cfm "$src" "$dst" || true
-            printf '%s
-' "$new_hash" > "$stamp"
+            printf '%s\n' "$new_hash" > "$stamp"
             continue
         fi
 
@@ -140,23 +159,19 @@ if [ -d /usr/share/cfm/configs/lua ]; then
 
         if [ -n "$old_hash" ] && [ "$cur_hash" = "$old_hash" ]; then
             install -m 0640 -o root -g cfm "$src" "$dst" || true
-            printf '%s
-' "$new_hash" > "$stamp"
+            printf '%s\n' "$new_hash" > "$stamp"
+        elif [ "$cur_hash" = "$new_hash" ]; then
+            printf '%s\n' "$new_hash" > "$stamp"
         else
-            if [ "$cur_hash" = "$new_hash" ]; then
-                printf '%s
-' "$new_hash" > "$stamp"
-            else
-                backup="$dst.local-prepkg.$(date +%s)"
-                cp -a "$dst" "$backup" || true
-                echo "WARNING: local Lua runtime file differed; backup saved to $backup"
-                install -m 0640 -o root -g cfm "$src" "$dst" || true
-                printf '%s\n' "$new_hash" > "$stamp"
-            fi
+            backup="$dst.local-prepkg.$(date +%s)"
+            cp -a "$dst" "$backup" || true
+            echo "WARNING: local Lua runtime file differed; backup saved to $backup"
+            install -m 0640 -o root -g cfm "$src" "$dst" || true
+            printf '%s\n' "$new_hash" > "$stamp"
         fi
     done
 else
-    echo "WARNING: packaged lua source path missing: /usr/share/cfm/configs/lua"
+    echo "WARNING: packaged lua source path missing: /usr/share/cfm/configs/lua (and /usr/share/cfm/lua)"
 fi
 
 # nginx temp dirs — must be owned by the cfm worker user
