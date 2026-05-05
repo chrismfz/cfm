@@ -19,27 +19,33 @@ type HealthSnapshotV1 struct {
 }
 
 type RuntimeStatus struct {
-	CFMDaemonLive      bool          `json:"cfm_daemon_live"`
-	CFMDaemonPID       *int          `json:"cfm_daemon_pid,omitempty"`
-	CFMServiceState    string        `json:"cfm_service_state,omitempty"`
-	DNATEnabled        string        `json:"dnat_enabled,omitempty"` // on/off/unknown
-	DNATFrontend       string        `json:"dnat_frontend,omitempty"`
-	DNATConfidence     string        `json:"dnat_confidence,omitempty"` // high/medium/low
-	DNATWarning        string        `json:"dnat_warning,omitempty"`
-	FrontendWorking    string        `json:"frontend_working,omitempty"` // working/degraded/down
-	FrontendReason     string        `json:"frontend_reason,omitempty"`
-	EdgeService        string        `json:"edge_service,omitempty"`        // angie/openresty/nginx/unknown
-	UpstreamService    string        `json:"upstream_service,omitempty"`    // nginx/apache/...
-	EdgeStatus         string        `json:"edge_status,omitempty"`         // active/inactive/degraded/unknown
-	UpstreamStatus     string        `json:"upstream_status,omitempty"`     // active/inactive/unknown
-	EdgeConfidence     string        `json:"edge_confidence,omitempty"`     // high/medium/low
-	UpstreamConfidence string        `json:"upstream_confidence,omitempty"` // high/medium/low
-	EdgeReasonCode     string        `json:"edge_reason_code,omitempty"`
-	UpstreamReasonCode string        `json:"upstream_reason_code,omitempty"`
-	ChallengeFlowState string        `json:"challenge_flow_state,omitempty"`
-	ChallengeFlowCode  string        `json:"challenge_flow_code,omitempty"`
-	ChallengeFlowReason string       `json:"challenge_flow_reason,omitempty"`
-	FrontendDebug      FrontendDebug `json:"frontend_debug,omitempty"`
+	CFMDaemonLive           bool          `json:"cfm_daemon_live"`
+	CFMDaemonPID            *int          `json:"cfm_daemon_pid,omitempty"`
+	CFMServiceState         string        `json:"cfm_service_state,omitempty"`
+	DNATEnabled             string        `json:"dnat_enabled,omitempty"` // on/off/unknown
+	DNATFrontend            string        `json:"dnat_frontend,omitempty"`
+	DNATConfidence          string        `json:"dnat_confidence,omitempty"` // high/medium/low
+	DNATWarning             string        `json:"dnat_warning,omitempty"`
+	FrontendWorking         string        `json:"frontend_working,omitempty"` // working/degraded/down
+	FrontendReason          string        `json:"frontend_reason,omitempty"`
+	EdgeService             string        `json:"edge_service,omitempty"`        // angie/openresty/nginx/unknown
+	UpstreamService         string        `json:"upstream_service,omitempty"`    // nginx/apache/...
+	EdgeStatus              string        `json:"edge_status,omitempty"`         // active/inactive/degraded/unknown
+	UpstreamStatus          string        `json:"upstream_status,omitempty"`     // active/inactive/unknown
+	EdgeConfidence          string        `json:"edge_confidence,omitempty"`     // high/medium/low
+	UpstreamConfidence      string        `json:"upstream_confidence,omitempty"` // high/medium/low
+	EdgeReasonCode          string        `json:"edge_reason_code,omitempty"`
+	UpstreamReasonCode      string        `json:"upstream_reason_code,omitempty"`
+	ChallengeFlowState      string        `json:"challenge_flow_state,omitempty"`
+	ChallengeFlowCode       string        `json:"challenge_flow_code,omitempty"`
+	ChallengeFlowReason     string        `json:"challenge_flow_reason,omitempty"`
+	BridgeSocketStatus      string        `json:"bridge_socket_status,omitempty"`
+	BridgeSocketReason      string        `json:"bridge_socket_reason,omitempty"`
+	BridgeSocketLatencyMs   int64         `json:"bridge_socket_latency_ms,omitempty"`
+	ChallengeListenerStatus string        `json:"challenge_listener_status,omitempty"`
+	ChallengeListenerReason string        `json:"challenge_listener_reason,omitempty"`
+	SSLCollectorStatus      string        `json:"sslcollector_status,omitempty"`
+	FrontendDebug           FrontendDebug `json:"frontend_debug,omitempty"`
 }
 
 type FrontendDebug struct {
