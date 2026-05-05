@@ -59,9 +59,7 @@ fi
 
 # canonicalize Lua runtime payload permissions in the package payload itself
 if [ -d "%{buildroot}/var/lib/cfm/lua" ]; then
-  chown root:cfm "%{buildroot}/var/lib/cfm/lua"
   chmod 0750 "%{buildroot}/var/lib/cfm/lua"
-  find "%{buildroot}/var/lib/cfm/lua" -type f -exec chown root:cfm {} +
   find "%{buildroot}/var/lib/cfm/lua" -type f -exec chmod 0640 {} +
 fi
 
