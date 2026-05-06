@@ -6,6 +6,13 @@
 
 CFM_CONFIG_DIR=${CFM_CONFIG_DIR:-/usr/share/cfm/configs}
 
+ANGIE_DETECTED=0
+ANGIE_DEPLOYED=0
+ANGIE_ACTIVE=0
+OPENRESTY_DETECTED=0
+OPENRESTY_DEPLOYED=0
+OPENRESTY_ACTIVE=0
+
 find_first_executable() {
     ffe_cmd_name=$1
     shift
@@ -64,25 +71,73 @@ report_service_status() {
     fi
 }
 
-reload_command_for_engine() {
-    rcfe_unit=$1
-    rcfe_fallback=$2
+set_engine_state() {
+    ses_engine=$1
+    ses_detected=$2
+    ses_active=$3
+    ses_deployed=$4
 
-    if service_is_active "$rcfe_unit" || service_is_installed "$rcfe_unit"; then
-        printf 'systemctl reload %s\n' "${rcfe_unit%.service}"
+    case "$ses_engine" in
+        Angie)
+            ANGIE_DETECTED=$ses_detected
+            ANGIE_ACTIVE=$ses_active
+            ANGIE_DEPLOYED=$ses_deployed
+            ;;
+        OpenResty)
+            OPENRESTY_DETECTED=$ses_detected
+            OPENRESTY_ACTIVE=$ses_active
+            OPENRESTY_DEPLOYED=$ses_deployed
+            ;;
+    esac
+}
+
+print_engine_summary_line() {
+    pesl_engine=$1
+    pesl_detected=$2
+    pesl_active=$3
+    pesl_deployed=$4
+
+    if [ "$pesl_detected" -ne 1 ]; then
+        echo "  $pesl_engine: not detected"
         return 0
     fi
 
-    printf '%s\n' "$rcfe_fallback"
+    if [ "$pesl_active" -eq 1 ]; then
+        pesl_active_text=active
+    else
+        pesl_active_text=inactive
+    fi
+
+    if [ "$pesl_deployed" -eq 1 ]; then
+        pesl_deployed_text='config deployed'
+    else
+        pesl_deployed_text='config deploy failed'
+    fi
+
+    echo "  $pesl_engine: detected, $pesl_active_text, $pesl_deployed_text"
 }
 
-report_reload_command() {
-    rrc_engine=$1
-    rrc_unit=$2
-    rrc_fallback=$3
+print_proxy_config_summary() {
+    echo
+    echo "CFM proxy config summary:"
+    print_engine_summary_line Angie "$ANGIE_DETECTED" "$ANGIE_ACTIVE" "$ANGIE_DEPLOYED"
+    print_engine_summary_line OpenResty "$OPENRESTY_DETECTED" "$OPENRESTY_ACTIVE" "$OPENRESTY_DEPLOYED"
 
-    rrc_command=$(reload_command_for_engine "$rrc_unit" "$rrc_fallback")
-    echo "CFM proxy config: deployed $rrc_engine config; reload with: $rrc_command"
+    if [ "$ANGIE_ACTIVE" -eq 1 ] && [ "$OPENRESTY_ACTIVE" -eq 1 ]; then
+        echo "  Active edge: ambiguous; both Angie and OpenResty services are active"
+        echo "  Reload active edges with:"
+        echo "    systemctl reload angie"
+        echo "    systemctl reload openresty"
+    elif [ "$ANGIE_ACTIVE" -eq 1 ]; then
+        echo "  Active edge: Angie"
+        echo "  Reload active edge with: systemctl reload angie"
+    elif [ "$OPENRESTY_ACTIVE" -eq 1 ]; then
+        echo "  Active edge: OpenResty"
+        echo "  Reload active edge with: systemctl reload openresty"
+    else
+        echo "  Active edge: none detected"
+        echo "  No active edge reload needed. Configs are ready if you later switch engines."
+    fi
 }
 
 install_file() {
@@ -204,7 +259,12 @@ process_engine() {
     pe_main_dst=$4
     pe_sidecar_dir=$5
     pe_unit=$6
-    pe_reload_fallback=$7
+
+    pe_active=0
+    if service_is_active "$pe_unit"; then
+        pe_active=1
+    fi
+    set_engine_state "$pe_engine" 1 "$pe_active" 0
 
     echo "CFM proxy config: $pe_engine detected at $pe_bin"
     report_service_status "$pe_engine" "$pe_unit"
@@ -221,7 +281,7 @@ process_engine() {
     if "$pe_bin" -t -c "$pe_main_src"; then
         echo "CFM proxy config: $pe_engine config test passed"
         if deploy_main_config "$pe_engine" "$pe_main_src" "$pe_main_dst"; then
-            report_reload_command "$pe_engine" "$pe_unit" "$pe_reload_fallback"
+            set_engine_state "$pe_engine" 1 "$pe_active" 1
         fi
     else
         echo "WARNING: CFM proxy config: $pe_engine config test failed; command failed: $pe_bin -t -c $pe_main_src"
@@ -258,5 +318,7 @@ if [ -n "$OPENRESTY_BIN" ]; then
 else
     echo "CFM proxy config: OpenResty not detected; skipping"
 fi
+
+print_proxy_config_summary
 
 exit 0
