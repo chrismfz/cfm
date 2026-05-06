@@ -9,57 +9,36 @@ import (
 	"time"
 )
 
-func TestPanelFailSafeOnHealthyNoAction(t *testing.T) {
-	origStatus, origProbe, origDisable := panelStatusFn, panelProbeFn, panelDisableTableFn
-	defer func() { panelStatusFn, panelProbeFn, panelDisableTableFn = origStatus, origProbe, origDisable }()
-	panelStatusFn = func() (bool, string, error) { return true, "", nil }
-	panelProbeFn = func(time.Duration) error { return nil }
+func TestPanelDNATFailSafeTargetCleanupWiring(t *testing.T) {
+	origDisable := panelDisableTableFn
+	defer func() { panelDisableTableFn = origDisable }()
+
+	setPanelFirewallHealth("OK", "", false)
+	panelFailSafeMu.Lock()
+	panelFailSafe = panelFailSafeState{}
+	panelFailSafeMu.Unlock()
+
 	disabled := 0
-	panelDisableTableFn = func() error { disabled++; return nil }
+	panelDisableTableFn = func() error {
+		disabled++
+		return nil
+	}
+	t.Setenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST", "false")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	t.Setenv("CFM_PANEL_FAILSAFE_INTERVAL_MS", "10")
-	t.Setenv("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", "2")
-	StartPanelFailSafe(ctx, nil)
-	time.Sleep(60 * time.Millisecond)
-	if disabled != 0 { t.Fatalf("unexpected disable action") }
-}
+	target := newPanelDNATFailSafeTarget()
+	target.Cleanup(4, errors.New("panel down"))
 
-func TestPanelFailSafeOnDownThresholdAutoOff(t *testing.T) {
-	origStatus, origProbe, origDisable := panelStatusFn, panelProbeFn, panelDisableTableFn
-	defer func() { panelStatusFn, panelProbeFn, panelDisableTableFn = origStatus, origProbe, origDisable }()
-	panelStatusFn = func() (bool, string, error) { return true, "", nil }
-	panelProbeFn = func(time.Duration) error { return errors.New("down") }
-	disabled := 0
-	panelDisableTableFn = func() error { disabled++; return nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	t.Setenv("CFM_PANEL_FAILSAFE_INTERVAL_MS", "10")
-	t.Setenv("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", "2")
-	StartPanelFailSafe(ctx, nil)
-	time.Sleep(60 * time.Millisecond)
-	if disabled == 0 { t.Fatalf("expected disable action") }
-}
-
-func TestPanelFailSafeOffNoAction(t *testing.T) {
-	origStatus, origProbe, origDisable := panelStatusFn, panelProbeFn, panelDisableTableFn
-	defer func() { panelStatusFn, panelProbeFn, panelDisableTableFn = origStatus, origProbe, origDisable }()
-	panelStatusFn = func() (bool, string, error) { return false, "", nil }
-	probes := 0
-	panelProbeFn = func(time.Duration) error { probes++; return errors.New("down") }
-	disabled := 0
-	panelDisableTableFn = func() error { disabled++; return nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	t.Setenv("CFM_PANEL_FAILSAFE_INTERVAL_MS", "10")
-	t.Setenv("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", "2")
-	StartPanelFailSafe(ctx, nil)
-	time.Sleep(60 * time.Millisecond)
-	if disabled != 0 { t.Fatalf("unexpected disable action") }
-	if probes != 0 { t.Fatalf("probe should not run when table is off") }
+	if disabled != 1 {
+		t.Fatalf("expected panel table disable action once, got %d", disabled)
+	}
+	health := getPanelFirewallHealth()
+	if health.State != "AUTO_FAILSAFE" || !health.Attempted || !strings.Contains(health.LastReason, "auto-disabled after 4 consecutive probe failures: panel down") {
+		t.Fatalf("unexpected health update: %+v", health)
+	}
+	state := getPanelFailSafeState()
+	if state.LastActionAt.IsZero() || !strings.Contains(state.LastActionReason, "panel down") {
+		t.Fatalf("expected panel failsafe action state to be updated, got %+v", state)
+	}
 }
 
 func TestProbePanelTargetsBoundedDurationWithMixedSpeeds(t *testing.T) {
@@ -71,7 +50,9 @@ func TestProbePanelTargetsBoundedDurationWithMixedSpeeds(t *testing.T) {
 		switch {
 		case strings.HasSuffix(address, ":1"):
 			time.Sleep(10 * time.Millisecond)
-			c1, c2 := net.Pipe(); _ = c2.Close(); return c1, nil
+			c1, c2 := net.Pipe()
+			_ = c2.Close()
+			return c1, nil
 		case strings.HasSuffix(address, ":2"):
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -103,7 +84,9 @@ func TestProbePanelTargetsAllSuccess(t *testing.T) {
 
 	panelProbePorts = []int{1, 2}
 	panelProbeDialContextFn = func(context.Context, string, string) (net.Conn, error) {
-		c1, c2 := net.Pipe(); _ = c2.Close(); return c1, nil
+		c1, c2 := net.Pipe()
+		_ = c2.Close()
+		return c1, nil
 	}
 
 	if err := probePanelTargets(20 * time.Millisecond); err != nil {
