@@ -22,6 +22,44 @@ func TestPanelListenerConfig_HasLuaGuardAndNoDefaultBypass(t *testing.T) {
 	}
 }
 
+func TestPanelListenerConfig_TLSListenersHavePlainHTTPHelpAndHSTS(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	s := string(b)
+	for listenPort, publicPort := range map[string]string{
+		"12083": "2083",
+		"12087": "2087",
+		"12096": "2096",
+		"12222": "2222",
+	} {
+		listen := "listen " + listenPort + " ssl;"
+		start := strings.Index(s, listen)
+		if start < 0 {
+			t.Fatalf("missing TLS listener %s", listen)
+		}
+		block := s[start:]
+		if next := strings.Index(block[len(listen):], "server {"); next > 0 {
+			block = block[:len(listen)+next]
+		}
+		for _, tok := range []string{
+			`add_header Strict-Transport-Security "max-age=86400" always;`,
+			`error_page 497 = @cfm_plain_http_panel_https;`,
+			`location @cfm_plain_http_panel_https {`,
+			`access_by_lua_block { return; }`,
+			`add_header Refresh "3; url=https://$host:` + publicPort + `$request_uri" always;`,
+			`background:#0b1020`,
+			`border-top-color:#4da3ff`,
+			`Redirecting to the secure URL in 3 seconds...`,
+		} {
+			if !strings.Contains(block, tok) {
+				t.Fatalf("TLS listener %s missing token %q", listenPort, tok)
+			}
+		}
+	}
+}
+
 func TestPanelListenerConfig_HasExactDecideLocationAndDoesNotFallThroughToRootProxy(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
 	if err != nil {
@@ -257,8 +295,8 @@ func TestPanelListenerConfig_DirectAdminListenerUsesTLSOriginAndHeaders(t *testi
 	if nextServer > 0 {
 		daBlock = daBlock[:len("listen 12222 ssl;")+nextServer]
 	}
-	if strings.Count(daBlock, "X-Forwarded-Proto https;") != 3 {
-		t.Fatalf("expected https forwarded proto in challenge/verify/root locations for directadmin block")
+	if strings.Count(daBlock, "X-Forwarded-Proto https;") != 4 {
+		t.Fatalf("expected https forwarded proto in decide/challenge/verify/root locations for directadmin block")
 	}
 }
 
