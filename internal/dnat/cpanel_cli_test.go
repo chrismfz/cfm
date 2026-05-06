@@ -430,10 +430,10 @@ func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
 	}
 }
 
-func TestCheckPanelLuaGuard_UsesLuaWhenRestyUnavailable(t *testing.T) {
+func TestCheckPanelLuaGuard_SelftestHookCleanExitIsTrue(t *testing.T) {
 	tmp := t.TempDir()
 	luaPath := filepath.Join(tmp, "cfm_panel.lua")
-	if err := os.WriteFile(luaPath, []byte("-- fake panel lua\n"), 0o644); err != nil {
+	if err := os.WriteFile(luaPath, []byte("function cfm_panel_selftest() return true end\nif os.getenv('CFM_PANEL_SELFTEST_ONLY') == '1' then return cfm_panel_selftest() end\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fakeLua := filepath.Join(tmp, "lua")
@@ -459,7 +459,7 @@ func TestCheckPanelLuaGuard_UsesLuaWhenRestyUnavailable(t *testing.T) {
 	}
 }
 
-func TestCheckPanelLuaGuard_MissingSelftestHookIsUnknownNotFalse(t *testing.T) {
+func TestCheckPanelLuaGuard_MissingSelftestHookIsUnknownWithoutUserError(t *testing.T) {
 	tmp := t.TempDir()
 	luaPath := filepath.Join(tmp, "cfm_panel.lua")
 	if err := os.WriteFile(luaPath, []byte("-- fake panel lua\n"), 0o644); err != nil {
@@ -483,7 +483,83 @@ func TestCheckPanelLuaGuard_MissingSelftestHookIsUnknownNotFalse(t *testing.T) {
 	if st.LoadState != "unknown" {
 		t.Fatalf("LoadState=%q LoadError=%q", st.LoadState, st.LoadError)
 	}
-	if !strings.Contains(st.LoadError, "cfm_panel_selftest hook is missing") {
-		t.Fatalf("expected missing hook detail, got %q", st.LoadError)
+	if st.LoadError != "" {
+		t.Fatalf("unexpected missing hook LoadError=%q", st.LoadError)
+	}
+}
+
+func setupPanelStatusLuaTest(t *testing.T, fakeResty string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	luaPath := filepath.Join(tmp, "cfm_panel.lua")
+	if err := os.WriteFile(luaPath, []byte("function cfm_panel_selftest() return true end\nif os.getenv('CFM_PANEL_SELFTEST_ONLY') == '1' then return cfm_panel_selftest() end\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmp, "configs")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	listener := `server {
+    set $cfm_panel_challenge_mode "forced";
+    access_by_lua_file ` + luaPath + `;
+    location = /__cfm_panel_decide { internal; }
+}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "cfm-panel-listeners.conf.in"), []byte(listener), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "resty"), []byte(fakeResty), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	oldLookPath := lookPath
+	oldWD, _ := os.Getwd()
+	oldState := panelChallengeModeStatePath
+	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Setenv("PATH", tmp)
+	lookPath = exec.LookPath
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", oldPath)
+		lookPath = oldLookPath
+		_ = os.Chdir(oldWD)
+		panelChallengeModeStatePath = oldState
+	})
+	return tmp
+}
+
+func TestPanelStatusSuppressesMissingSelftestHookWhenDecisionEndpointOK(t *testing.T) {
+	setupPanelStatusLuaTest(t, "#!/bin/sh\necho CFM_PANEL_SELFTEST_HOOK_MISSING\nexit 0\n")
+
+	out, _ := captureStreams(t, func() {
+		code := runPanelCLI([]string{"status"}, nil)
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
+		}
+	})
+	if !strings.Contains(out, "Panel decision endpoint: OK") {
+		t.Fatalf("expected decision endpoint OK, got:\n%s", out)
+	}
+	if strings.Contains(out, "cfm_panel_selftest hook is missing") || strings.Contains(out, "CFM_PANEL_SELFTEST_HOOK_MISSING") {
+		t.Fatalf("status output should suppress missing hook warning when decision endpoint is OK:\n%s", out)
+	}
+}
+
+func TestPanelStatusShowsRealLuaLoadError(t *testing.T) {
+	setupPanelStatusLuaTest(t, "#!/bin/sh\necho \"syntax error near 'end'\" >&2\nexit 1\n")
+
+	out, _ := captureStreams(t, func() {
+		code := runPanelCLI([]string{"status"}, nil)
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
+		}
+	})
+	if !strings.Contains(out, "Panel decision endpoint: OK") {
+		t.Fatalf("expected decision endpoint OK, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Panel Lua load check error:") || !strings.Contains(out, "syntax error near 'end'") {
+		t.Fatalf("expected real lua load error in output:\n%s", out)
 	}
 }
