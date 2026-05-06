@@ -1218,6 +1218,12 @@ func (b *NginxBridge) instrument(name string, h http.HandlerFunc) http.HandlerFu
 		if sw.status >= 400 {
 			action = "error"
 		}
+		// handleDecision sets X-CFM-Bridge-Shed=1 on its concurrency-cap shed
+		// path so [bridge_trace] lines are greppable: action=shed cleanly
+		// distinguishes "we returned allow under load" from a normal allow.
+		if sw.Header().Get("X-CFM-Bridge-Shed") == "1" {
+			action = "shed"
+		}
 		errClass := ""
 		if errors.Is(r.Context().Err(), context.Canceled) {
 			errClass = "context_canceled"

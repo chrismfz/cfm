@@ -167,6 +167,44 @@ func TestDecisionConcurrencyCap_HasSensibleFloor(t *testing.T) {
 	}
 }
 
+// TestInstrument_ShedActionVisibleInTrace confirms that the bridge_trace
+// log line distinguishes shed from normal "ok": the shed path sets
+// X-CFM-Bridge-Shed=1 and instrument() surfaces that as action=shed.
+// This is what lets operators grep for shed events in cfm.socket.log
+// without aggregating SheddedCount.
+func TestInstrument_ShedActionVisibleInTrace(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+
+	// Saturate the semaphore to force the next call to shed.
+	cap := decisionConcurrencyCap()
+	for i := 0; i < cap; i++ {
+		b.decisionSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap; i++ {
+			<-b.decisionSem
+		}
+	}()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=203.0.113.7&host=example.com&scope=web", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+
+	// Run through instrument() so the trace-log action-derivation logic is
+	// exercised. We can't easily capture the LogfSOCKET output here without
+	// plumbing, but we CAN verify that the response header is present —
+	// which is what instrument() reads to override action="ok" → "shed".
+	b.instrument("decision", b.handleDecision)(rr, req)
+
+	if got := rr.Header().Get("X-CFM-Bridge-Shed"); got != "1" {
+		t.Fatalf("X-CFM-Bridge-Shed not set on shed response: got %q", got)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("shed should return 200, got %d", rr.Code)
+	}
+}
+
 // _ = atomic.LoadInt64 keeps the import alive if a future test wants atomic
 // counters; using non-atomic shedCount under stats.mu is fine today.
 var _ = atomic.LoadInt64
