@@ -79,36 +79,39 @@ type modernSample struct {
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
 	Runtime struct {
-		CFMDaemonLive           bool   `json:"cfm_daemon_live"`
-		CFMDaemonPID            *int   `json:"cfm_daemon_pid"`
-		CFMServiceState         string `json:"cfm_service_state"`
-		DNATEnabled             string `json:"dnat_enabled"`
-		PanelDNATEnabled        string `json:"panel_dnat_enabled"`
-		DNATFrontend            string `json:"dnat_frontend"`
-		DNATConfidence          string `json:"dnat_confidence"`
-		DNATWarning             string `json:"dnat_warning"`
-		FrontendWorking         string `json:"frontend_working"`
-		FrontendReason          string `json:"frontend_reason"`
-		EdgeService             string `json:"edge_service"`
-		UpstreamService         string `json:"upstream_service"`
-		EdgeStatus              string `json:"edge_status"`
-		UpstreamStatus          string `json:"upstream_status"`
-		EdgeConfidence          string `json:"edge_confidence"`
-		UpstreamConfidence      string `json:"upstream_confidence"`
-		EdgeReasonCode          string `json:"edge_reason_code"`
-		UpstreamReasonCode      string `json:"upstream_reason_code"`
-		BridgeSocketStatus      string `json:"bridge_socket_status"`
-		BridgeSocketReason      string `json:"bridge_socket_reason"`
-		BridgeSocketLatencyMs   int64  `json:"bridge_socket_latency_ms"`
-		ChallengeListenerStatus string `json:"challenge_listener_status"`
-		ChallengeListenerReason string `json:"challenge_listener_reason"`
-		ChallengeFlowState      string `json:"challenge_flow_state"`
-		ChallengeFlowCode       string `json:"challenge_flow_code"`
-		ChallengeFlowReason     string `json:"challenge_flow_reason"`
-		SSLCollectorStatus      string `json:"sslcollector_status"`
-		IngestSocketPath        string `json:"ingest_socket_path"`
-		IngestSocketStatus      string `json:"ingest_socket_status"`
-		IngestSocketReason      string `json:"ingest_socket_reason"`
+		CFMDaemonLive                bool   `json:"cfm_daemon_live"`
+		CFMDaemonPID                 *int   `json:"cfm_daemon_pid"`
+		CFMServiceState              string `json:"cfm_service_state"`
+		DNATEnabled                  string `json:"dnat_enabled"`
+		PanelDNATEnabled             string `json:"panel_dnat_enabled"`
+		DNATFrontend                 string `json:"dnat_frontend"`
+		DNATConfidence               string `json:"dnat_confidence"`
+		DNATWarning                  string `json:"dnat_warning"`
+		FrontendWorking              string `json:"frontend_working"`
+		FrontendReason               string `json:"frontend_reason"`
+		EdgeService                  string `json:"edge_service"`
+		UpstreamService              string `json:"upstream_service"`
+		EdgeStatus                   string `json:"edge_status"`
+		UpstreamStatus               string `json:"upstream_status"`
+		EdgeConfidence               string `json:"edge_confidence"`
+		UpstreamConfidence           string `json:"upstream_confidence"`
+		EdgeReasonCode               string `json:"edge_reason_code"`
+		UpstreamReasonCode           string `json:"upstream_reason_code"`
+		BridgeSocketStatus           string `json:"bridge_socket_status"`
+		BridgeSocketReason           string `json:"bridge_socket_reason"`
+		BridgeSocketLatencyMs        int64  `json:"bridge_socket_latency_ms"`
+		ChallengeListenerStatus      string `json:"challenge_listener_status"`
+		ChallengeListenerReason      string `json:"challenge_listener_reason"`
+		ChallengeFlowState           string `json:"challenge_flow_state"`
+		ChallengeFlowCode            string `json:"challenge_flow_code"`
+		ChallengeFlowReason          string `json:"challenge_flow_reason"`
+		SSLCollectorStatus           string `json:"sslcollector_status"`
+		IngestSocketPath             string `json:"ingest_socket_path"`
+		IngestSocketStatus           string `json:"ingest_socket_status"`
+		IngestSocketReason           string `json:"ingest_socket_reason"`
+		IngestSourceActive           string `json:"ingest_source_active"`
+		IngestSourceSockListening    bool   `json:"ingest_source_sock_listening"`
+		IngestSourceLastReceivedUnix int64  `json:"ingest_source_last_received_unix"`
 	} `json:"runtime"`
 	Network struct {
 		InBps             uint64         `json:"bandwidth_in_bps"`
@@ -505,7 +508,27 @@ func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  challenge token (CHALLENGE_TOKEN): %s\n", edgediag.TokenHealth(challengeToken))
 	fmt.Printf("  edge bridge token (OPENRESTY_TOKEN): %s\n", edgediag.TokenHealth(bridgeToken))
 	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
-	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, s.Modern.Runtime.IngestSocketStatus, s.Modern.Runtime.IngestSocketReason, opts)
+	status := effectiveIngestSocketStatus(s.Modern.Runtime.IngestSocketStatus, s.Modern.Runtime.IngestSourceActive, s.Modern.Runtime.IngestSourceSockListening, s.Modern.Runtime.IngestSourceLastReceivedUnix)
+	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, status, s.Modern.Runtime.IngestSocketReason, opts)
+}
+
+func effectiveIngestSocketStatus(status, active string, listening bool, lastReceivedUnix int64) string {
+	status = strings.TrimSpace(status)
+	if status != "" {
+		return status
+	}
+	if listening && strings.EqualFold(strings.TrimSpace(active), "socket") && recentUnix(lastReceivedUnix, 30*time.Second) {
+		return "live"
+	}
+	return status
+}
+
+func recentUnix(ts int64, window time.Duration) bool {
+	if ts <= 0 {
+		return false
+	}
+	d := time.Since(time.Unix(ts, 0))
+	return d >= 0 && d <= window
 }
 
 func printIngestSocketHealth(path, status, reason string, opts cliOptions) {
@@ -1275,6 +1298,18 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.ChallengeFlowState = latest.Runtime.ChallengeFlowState
 		out.Modern.Runtime.ChallengeFlowCode = latest.Runtime.ChallengeFlowCode
 		out.Modern.Runtime.ChallengeFlowReason = latest.Runtime.ChallengeFlowReason
+		out.Modern.Runtime.BridgeSocketStatus = latest.Runtime.BridgeSocketStatus
+		out.Modern.Runtime.BridgeSocketReason = latest.Runtime.BridgeSocketReason
+		out.Modern.Runtime.BridgeSocketLatencyMs = latest.Runtime.BridgeSocketLatencyMs
+		out.Modern.Runtime.ChallengeListenerStatus = latest.Runtime.ChallengeListenerStatus
+		out.Modern.Runtime.ChallengeListenerReason = latest.Runtime.ChallengeListenerReason
+		out.Modern.Runtime.SSLCollectorStatus = latest.Runtime.SSLCollectorStatus
+		out.Modern.Runtime.IngestSocketPath = latest.Runtime.IngestSocketPath
+		out.Modern.Runtime.IngestSocketStatus = latest.Runtime.IngestSocketStatus
+		out.Modern.Runtime.IngestSocketReason = latest.Runtime.IngestSocketReason
+		out.Modern.Runtime.IngestSourceActive = latest.Runtime.IngestSourceActive
+		out.Modern.Runtime.IngestSourceSockListening = latest.Runtime.IngestSourceSockListening
+		out.Modern.Runtime.IngestSourceLastReceivedUnix = latest.Runtime.IngestSourceLastReceivedUnix
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,

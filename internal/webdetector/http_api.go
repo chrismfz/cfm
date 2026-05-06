@@ -151,37 +151,11 @@ func (e *Engine) handleWebdetSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ingestSourceResponse is the payload returned by /api/v1/webdet/ingest-source.
-// It mirrors the arbiter state used at runtime so `cfm webtop source` reflects
-// exactly what is feeding the pipeline right now, not a guess.
-type ingestSourceResponse struct {
-	Active           string `json:"active"`       // "socket" | "file" | "none"
-	SockPath         string `json:"sock_path"`
-	SockListening    bool   `json:"sock_listening"`
-	LastReceivedUnix int64  `json:"last_received_unix"` // 0 == never
-	LogFile          string `json:"log_file"`           // "" when folder mode / not configured
-	FileActive       bool   `json:"file_active"`        // true iff Active=="file"
-}
-
 func (e *Engine) handleIngestSource(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
 	}
-	active := e.ActiveLogSource()
-	resp := ingestSourceResponse{
-		Active:     active,
-		SockPath:   DefaultIngestSockPath,
-		LogFile:    e.ConfiguredLogFile(),
-		FileActive: active == "file",
-	}
-	if s := e.IngestSocketRef(); s != nil {
-		resp.SockPath = s.SockPath()
-		resp.SockListening = s.Listening()
-		if t := s.LastReceived(); !t.IsZero() {
-			resp.LastReceivedUnix = t.Unix()
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, e.IngestSourceState())
 }
 
 // topShortResponse τυλίγει τα rows μαζί με config-based μεταδεδομένα

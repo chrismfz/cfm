@@ -197,9 +197,62 @@ func (s *IngestSocket) handleLine(e *Engine, line string) {
 
 // ── Engine-side arbiter helpers ──────────────────────────────────────────────
 
+// IngestSourceState is the shared arbiter view used by the HTTP API, CLI, and
+// health collectors. It intentionally mirrors /api/v1/webdet/ingest-source.
+type IngestSourceState struct {
+	Active           string `json:"active"`
+	SockPath         string `json:"sock_path"`
+	SockListening    bool   `json:"sock_listening"`
+	LastReceivedUnix int64  `json:"last_received_unix"`
+	LogFile          string `json:"log_file"`
+	FileActive       bool   `json:"file_active"`
+}
+
+var currentIngestSourceEngine atomic.Pointer[Engine]
+
+// CurrentIngestSourceState returns the latest package-level arbiter state from
+// the webdetector engine currently wired into the daemon. The boolean is false
+// when no engine has registered yet.
+func CurrentIngestSourceState() (IngestSourceState, bool) {
+	e := currentIngestSourceEngine.Load()
+	if e == nil {
+		return IngestSourceState{}, false
+	}
+	return e.IngestSourceState(), true
+}
+
+// IngestSourceState returns this engine's current arbiter state. It is the
+// single source used by /api/v1/webdet/ingest-source and health snapshots.
+func (e *Engine) IngestSourceState() IngestSourceState {
+	if e == nil {
+		return IngestSourceState{Active: "none", SockPath: DefaultIngestSockPath}
+	}
+	active := e.ActiveLogSource()
+	state := IngestSourceState{
+		Active:     active,
+		SockPath:   DefaultIngestSockPath,
+		LogFile:    e.ConfiguredLogFile(),
+		FileActive: active == "file",
+	}
+	if s := e.IngestSocketRef(); s != nil {
+		state.SockPath = s.SockPath()
+		state.SockListening = s.Listening()
+		if t := s.LastReceived(); !t.IsZero() {
+			state.LastReceivedUnix = t.Unix()
+		}
+	}
+	return state
+}
+
 // SetIngestSocket wires the listener into the engine so the file-tailer loop
 // can consult it for arbitration.
-func (e *Engine) SetIngestSocket(s *IngestSocket) { e.ingestSock = s }
+func (e *Engine) SetIngestSocket(s *IngestSocket) {
+	if e == nil {
+		return
+	}
+	e.ingestSock = s
+	currentIngestSourceEngine.Store(e)
+}
 
 // IngestSocketRef returns the currently wired IngestSocket (may be nil).
 func (e *Engine) IngestSocketRef() *IngestSocket { return e.ingestSock }

@@ -5,6 +5,7 @@ import (
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
+	webdet "cfm/internal/webdetector"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -175,7 +176,7 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out.ChallengeListenerStatus = flow.ChallengeListenerStatus
 	out.ChallengeListenerReason = flow.ChallengeListenerReason
 	out.SSLCollectorStatus = probeSSLCollectorStatus()
-	out.IngestSocketPath, out.IngestSocketStatus, out.IngestSocketReason = probeIngestSocketHealth()
+	populateIngestSocketHealth(&out)
 	return out
 }
 
@@ -258,24 +259,47 @@ func probeChallengeFlowReadiness() flowProbe {
 	return flowProbe{Status: "OK", Code: "ok", Reason: "challenge flow ready", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
 }
 
-func probeIngestSocketHealth() (path, status, reason string) {
-	path = "/run/cfm/ingest.sock"
-	st, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return path, "missing", "socket path missing"
-		}
-		return path, "invalid", err.Error()
+func populateIngestSocketHealth(out *RuntimeStatus) {
+	if out == nil {
+		return
 	}
-	if st.Mode()&os.ModeSocket == 0 {
-		return path, "invalid", "path exists but is not unix socket"
+	state, ok := webdet.CurrentIngestSourceState()
+	if !ok {
+		out.IngestSocketPath = webdet.DefaultIngestSockPath
+		return
 	}
-	conn, err := net.DialTimeout("unix", path, 1200*time.Millisecond)
-	if err != nil {
-		return path, "down", err.Error()
+	out.IngestSourceActive = state.Active
+	out.IngestSourceSockListening = state.SockListening
+	out.IngestSourceLastReceivedUnix = state.LastReceivedUnix
+	out.IngestSocketPath = strings.TrimSpace(state.SockPath)
+	if out.IngestSocketPath == "" {
+		out.IngestSocketPath = webdet.DefaultIngestSockPath
 	}
-	_ = conn.Close()
-	return path, "live", "connect ok"
+	activeSocket := strings.EqualFold(strings.TrimSpace(state.Active), "socket")
+	recentSocket := false
+	if state.LastReceivedUnix > 0 {
+		d := time.Since(time.Unix(state.LastReceivedUnix, 0))
+		recentSocket = d >= 0 && d <= webdet.SocketActiveWindow
+	}
+	if state.SockListening && activeSocket && recentSocket {
+		out.IngestSocketStatus = "live"
+		out.IngestSocketReason = "webdetector ingest arbiter: socket active and listening"
+		return
+	}
+	if state.SockListening {
+		out.IngestSocketStatus = "listening"
+		out.IngestSocketReason = fmt.Sprintf("webdetector ingest arbiter: active=%s last_received=%s", state.Active, humanUnixTime(state.LastReceivedUnix))
+		return
+	}
+	out.IngestSocketStatus = "down"
+	out.IngestSocketReason = fmt.Sprintf("webdetector ingest arbiter: socket not listening active=%s last_received=%s", state.Active, humanUnixTime(state.LastReceivedUnix))
+}
+
+func humanUnixTime(ts int64) string {
+	if ts <= 0 {
+		return "never"
+	}
+	return time.Unix(ts, 0).UTC().Format(time.RFC3339)
 }
 
 func probeSSLCollectorStatus() string {
