@@ -149,8 +149,11 @@ type CFMMetrics struct {
 }
 
 type NetworkThroughput struct {
-	BandwidthInBytesPerSec  uint64 `json:"bandwidth_in_bps"`
-	BandwidthOutBytesPerSec uint64 `json:"bandwidth_out_bps"`
+	BandwidthInBytesPerSec  uint64  `json:"bandwidth_in_bps"`
+	BandwidthOutBytesPerSec uint64  `json:"bandwidth_out_bps"`
+	ConntrackCount          int     `json:"conntrack_count,omitempty"`
+	ConntrackMax            int     `json:"conntrack_max,omitempty"`
+	ConntrackUsagePct       float64 `json:"conntrack_usage_pct,omitempty"`
 }
 
 type CounterSnapshot struct {

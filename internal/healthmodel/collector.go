@@ -1,6 +1,7 @@
 package healthmodel
 
 import (
+	"cfm/internal/conntrack"
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
@@ -24,6 +25,7 @@ import (
 
 // snapshotNowFn exists as a small test seam to force collector failures.
 var snapshotNowFn = health.SnapshotNow
+var readConntrackUsage = conntrack.ReadUsage
 var challengeDialTimeout = func(network, addr string, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout(network, addr, timeout)
 }
@@ -92,8 +94,22 @@ func CollectSnapshotNow(nodeID string, backend firewall.Backend) (snap HealthSna
 	snap = FromDetectorSnapshot(raw, nodeID, collectedAt)
 	enrichHostMemoryAndLoad(&snap.Host)
 	snap.Services = collectServiceStatuses()
+	populateConntrackUsage(&snap.Network)
 	snap.Runtime = collectRuntimeStatus(backend)
 	return snap
+}
+
+func populateConntrackUsage(network *NetworkThroughput) {
+	if network == nil {
+		return
+	}
+	usage, err := readConntrackUsage()
+	if err != nil || usage.Max <= 0 {
+		return
+	}
+	network.ConntrackCount = usage.Count
+	network.ConntrackMax = usage.Max
+	network.ConntrackUsagePct = usage.UsagePct
 }
 
 func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {

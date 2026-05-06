@@ -1,6 +1,7 @@
 package healthmodel
 
 import (
+	"cfm/internal/conntrack"
 	"context"
 	"net"
 	"os"
@@ -194,5 +195,19 @@ func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
 	_ = os.Unsetenv("CHALLENGE_TOKEN")
 	if got := probeChallengeFlowReadiness(); got.Status != "FAIL" || got.Code != "token_missing" {
 		t.Fatalf("expected missing token got %+v", got)
+	}
+}
+
+func TestPopulateConntrackUsage(t *testing.T) {
+	oldRead := readConntrackUsage
+	t.Cleanup(func() { readConntrackUsage = oldRead })
+	readConntrackUsage = func() (conntrack.Usage, error) {
+		return conntrack.Usage{Count: 2303, Max: 1548288, UsagePct: 0.14874}, nil
+	}
+
+	network := NetworkThroughput{}
+	populateConntrackUsage(&network)
+	if network.ConntrackCount != 2303 || network.ConntrackMax != 1548288 || network.ConntrackUsagePct != 0.14874 {
+		t.Fatalf("unexpected conntrack usage: %+v", network)
 	}
 }
