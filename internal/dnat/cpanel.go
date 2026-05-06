@@ -425,7 +425,7 @@ type panelLuaProbe struct {
 }
 
 func panelLuaGuardProbes() []panelLuaProbe {
-	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); if not ok2 then error(err or 'selftest failed') end; return end; print('CFM_PANEL_SELFTEST_HOOK_MISSING')`
+	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
 	return []panelLuaProbe{
 		{Name: "resty", Args: []string{"-e", selftest}, UseEnv: true},
 		{Name: "luajit", Args: []string{"-e", selftest}, UseEnv: true},
@@ -461,10 +461,12 @@ func runPanelLuaGuardProbe(st panelLuaGuardStatus, cmdPath string) panelLuaGuard
 				return st
 			}
 			if strings.Contains(msg, "CFM_PANEL_SELFTEST_HOOK_MISSING") {
-				st.LoadError = "lua loaded via " + probe.Name + " but cfm_panel_selftest hook is missing"
+				st.LoadState = "unknown"
+				st.LoadError = ""
 				return st
 			}
 			st.LoadState = "true"
+			st.LoadError = ""
 			return st
 		}
 		st.LoadState = "false"

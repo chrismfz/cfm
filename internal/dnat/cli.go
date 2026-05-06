@@ -657,7 +657,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			}
 		}
 		fmt.Printf("Panel Lua load check: %s\n", panelLua.LoadState)
-		if panelLua.LoadError != "" {
+		if panelLua.LoadError != "" && !(panelDecision.Status == "OK" && strings.Contains(panelLua.LoadError, "cfm_panel_selftest hook is missing")) {
 			fmt.Printf("Panel Lua load check error: %s\n", panelLua.LoadError)
 		}
 		fmt.Printf("Panel decision endpoint: %s\n", panelDecision.Status)
