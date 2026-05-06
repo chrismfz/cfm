@@ -74,6 +74,49 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 	}
 }
 
+func TestHealthSummaryIncludesChallengeFlowReadiness(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"schema_version":"health.snapshot.v1",
+			"node_id":"n1",
+			"collected_at":"2026-04-28T00:00:00Z",
+			"host":{"hostname":"host1"},
+			"disk":{},
+			"services":[
+				{"name":"angie","active":true,"enabled":true,"state":"active"},
+				{"name":"openresty","active":false,"enabled":true,"state":"inactive"}
+			],
+			"cfm_metrics":{},
+			"network":{},
+			"runtime":{
+				"edge_service":"angie",
+				"dnat_frontend":"angie",
+				"challenge_flow_state":"OK",
+				"challenge_flow_code":"ok",
+				"challenge_flow_reason":"challenge flow ready"
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	out, err := runWithCapturedStdout(func() error {
+		return Run(srv.URL, []string{"--no-color"})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for _, want := range []string{"Web stack - Edge Interceptor [OK]", "[OK]  Challenge flow readiness: OK challenge flow ready"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected health summary to contain %q\noutput:\n%s", want, out)
+		}
+	}
+}
+
 func TestRuntimeSectionIncludesDnatEdgeUpstreamAndWarning(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.DNATEnabled = "on"
@@ -161,6 +204,9 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.EdgeService = "angie"
 	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Runtime.ChallengeFlowState = "OK"
+	s.Modern.Runtime.ChallengeFlowCode = "ok"
+	s.Modern.Runtime.ChallengeFlowReason = "challenge flow ready"
 	s.Modern.Services = []serviceStatus{
 		{Name: "angie", State: "active", Active: true, Enabled: true},
 		{Name: "openresty", State: "inactive", Active: false, Enabled: true},
@@ -175,6 +221,36 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	}
 	if !strings.Contains(out, "Web stack - Edge Interceptor [OK]") {
 		t.Fatalf("expected OK web stack when selected edge is active, got:\n%s", out)
+	}
+	want := "[OK]  Challenge flow readiness: OK challenge flow ready"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected web stack summary to include %q under Edge Interceptor, got:\n%s", want, out)
+	}
+}
+
+func TestChallengeFlowReadinessLabels(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		wantLabel healthLabelRank
+		wantText  string
+	}{
+		{name: "ok", state: "OK", wantLabel: okLabel, wantText: "OK ready"},
+		{name: "warn", state: "WARN", wantLabel: warnLabel, wantText: "WARN ready"},
+		{name: "fail", state: "FAIL", wantLabel: critLabel, wantText: "FAIL ready"},
+		{name: "unknown bad state", state: "BROKEN", wantLabel: critLabel, wantText: "BROKEN ready"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotLabel, gotText, ok := challengeFlowReadiness(tc.state, "ok", "ready")
+			if !ok {
+				t.Fatalf("challengeFlowReadiness returned ok=false")
+			}
+			if gotLabel != tc.wantLabel || gotText != tc.wantText {
+				t.Fatalf("challengeFlowReadiness(%q)=(%v, %q), want (%v, %q)", tc.state, gotLabel, gotText, tc.wantLabel, tc.wantText)
+			}
+		})
 	}
 }
 

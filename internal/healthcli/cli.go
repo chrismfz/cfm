@@ -100,6 +100,9 @@ type modernSample struct {
 		BridgeSocketLatencyMs   int64  `json:"bridge_socket_latency_ms"`
 		ChallengeListenerStatus string `json:"challenge_listener_status"`
 		ChallengeListenerReason string `json:"challenge_listener_reason"`
+		ChallengeFlowState      string `json:"challenge_flow_state"`
+		ChallengeFlowCode       string `json:"challenge_flow_code"`
+		ChallengeFlowReason     string `json:"challenge_flow_reason"`
 		SSLCollectorStatus      string `json:"sslcollector_status"`
 	} `json:"runtime"`
 	Network struct {
@@ -414,12 +417,54 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 			parts = append(parts, fmt.Sprintf("%s: enabled=%s active=%s state=%s%s", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row)))
 		}
 		fmt.Printf("Web stack - Edge Interceptor %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
+		printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
 		return
 	}
 	fmt.Printf("Web stack - Edge Interceptor %s\n", badge(status, opts))
+	printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
 	for _, row := range rows {
 		fmt.Printf("  %s: enabled=%s active=%s state=%s%s\n", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row))
 	}
+}
+
+func printChallengeFlowReadiness(state, code, reason string, opts cliOptions) {
+	label, detail, ok := challengeFlowReadiness(state, code, reason)
+	if !ok {
+		return
+	}
+	fmt.Printf("  %s  Challenge flow readiness: %s\n", badge(label, opts), detail)
+}
+
+func challengeFlowReadiness(state, code, reason string) (healthLabelRank, string, bool) {
+	state = strings.TrimSpace(state)
+	code = strings.TrimSpace(code)
+	reason = strings.TrimSpace(reason)
+	if state == "" && code == "" && reason == "" {
+		return okLabel, "", false
+	}
+
+	displayState := strings.ToUpper(state)
+	if displayState == "" {
+		displayState = "UNKNOWN"
+	}
+	label := critLabel
+	switch displayState {
+	case "OK":
+		label = okLabel
+	case "WARN":
+		label = warnLabel
+	case "FAIL":
+		label = critLabel
+	}
+
+	detail := displayState
+	if reason == "" {
+		reason = code
+	}
+	if reason != "" {
+		detail += " " + reason
+	}
+	return label, detail, true
 }
 
 func printEdgeInterceptorSection(s parsedSnapshot, opts cliOptions) {
@@ -1015,6 +1060,9 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.UpstreamConfidence = latest.Runtime.UpstreamConfidence
 		out.Modern.Runtime.EdgeReasonCode = latest.Runtime.EdgeReasonCode
 		out.Modern.Runtime.UpstreamReasonCode = latest.Runtime.UpstreamReasonCode
+		out.Modern.Runtime.ChallengeFlowState = latest.Runtime.ChallengeFlowState
+		out.Modern.Runtime.ChallengeFlowCode = latest.Runtime.ChallengeFlowCode
+		out.Modern.Runtime.ChallengeFlowReason = latest.Runtime.ChallengeFlowReason
 		for _, svc := range latest.Services {
 			out.Modern.Services = append(out.Modern.Services, serviceStatus{
 				Name:      svc.Name,
