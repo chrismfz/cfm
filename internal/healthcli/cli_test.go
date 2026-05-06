@@ -2,6 +2,7 @@ package healthcli
 
 import (
 	"bytes"
+	"cfm/internal/healthmodel"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -356,7 +357,55 @@ func TestStorageOptionalSubsystemNotPresent(t *testing.T) {
 	if !strings.Contains(out, "Storage health [OK]") {
 		t.Fatalf("expected overall storage status to remain OK for absent optional subsystems, got:\n%s", out)
 	}
-	if !strings.Contains(out, "mdadm: not present") || !strings.Contains(out, "ZFS: not present") {
+	if !strings.Contains(out, "[OK]  MDADM RAID: not present") || !strings.Contains(out, "ZFS: not present") {
 		t.Fatalf("expected explicit not-present labels, got:\n%s", out)
+	}
+}
+
+func TestStorageSectionPrintsMDADMRAIDNormalLine(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Disk.SmartHealth = "ok"
+	s.Modern.Disk.DiskWearout = "ok"
+	s.Modern.Disk.MDADM = healthmodel.MDADMStatus{Status: "clean"}
+	s.Modern.Disk.ZFSHealth = "ok"
+
+	out, err := runWithCapturedStdout(func() error {
+		printStorageSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printStorageSection error: %v", err)
+	}
+	if !strings.Contains(out, "[OK]  MDADM RAID: normal") {
+		t.Fatalf("expected mdadm RAID status line with OK badge, got:\n%s", out)
+	}
+}
+
+func TestStorageSectionPrintsMDADMRAIDStatusLine(t *testing.T) {
+	s := parsedSnapshot{}
+	s.Modern.Disk.SmartHealth = "ok"
+	s.Modern.Disk.DiskWearout = "ok"
+	s.Modern.Disk.MDADM = healthmodel.MDADMStatus{
+		Status: "resync",
+		Arrays: []healthmodel.MDADMArray{{
+			Name:          "md0",
+			ProgressPhase: "resync",
+			ProgressPct:   42.5,
+		}},
+	}
+	s.Modern.Disk.ZFSHealth = "ok"
+
+	out, err := runWithCapturedStdout(func() error {
+		printStorageSection(s, cliOptions{NoColor: true})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printStorageSection error: %v", err)
+	}
+	if !strings.Contains(out, "Storage health [WARN]") {
+		t.Fatalf("expected overall storage warning for syncing mdadm, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[WARN]  MDADM RAID: syncing [RESYNC]") {
+		t.Fatalf("expected mdadm RAID status line with warning badge, got:\n%s", out)
 	}
 }
