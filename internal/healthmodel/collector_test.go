@@ -156,12 +156,17 @@ func TestDetectUpstreamFromPublicPortOwnership_NoListener(t *testing.T) {
 func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
 	oldDial := challengeDialTimeout
 	oldProbe := bridgeDecisionProbe
+	oldDetectorsConfigPath := challengeFlowDetectorsConfigPath
+	oldBridgeTokenPath := challengeFlowBridgeTokenPath
 	t.Cleanup(func() {
 		challengeDialTimeout = oldDial
 		bridgeDecisionProbe = oldProbe
+		challengeFlowDetectorsConfigPath = oldDetectorsConfigPath
+		challengeFlowBridgeTokenPath = oldBridgeTokenPath
 		_ = os.Unsetenv("CHALLENGE_HTTP_LISTEN")
 		_ = os.Unsetenv("OPENRESTY_SOCK")
 		_ = os.Unsetenv("CHALLENGE_TOKEN")
+		_ = os.Unsetenv("OPENRESTY_TOKEN")
 		_ = os.Unsetenv("BRIDGE_TOKEN")
 	})
 
@@ -170,15 +175,22 @@ func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
 		_ = c2.Close()
 		return c1, nil
 	}
-	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	tmp := t.TempDir()
+	sock := filepath.Join(tmp, "bridge.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	_ = os.Setenv("OPENRESTY_SOCK", sock)
+	challengeFlowDetectorsConfigPath = filepath.Join(tmp, "detectors.conf")
+	challengeFlowBridgeTokenPath = filepath.Join(tmp, "cfm_bridge_token.lua")
+	if err := os.WriteFile(challengeFlowDetectorsConfigPath, []byte("[webdetector]\nOPENRESTY_MODE=1\nOPENRESTY_SOCK="+sock+"\n"), 0o600); err != nil {
+		t.Fatalf("write detectors config: %v", err)
+	}
+	if err := os.WriteFile(challengeFlowBridgeTokenPath, []byte("return \"abcdefghijklmnopqrstuvwxyz012345\"\n"), 0o600); err != nil {
+		t.Fatalf("write bridge token: %v", err)
+	}
 	_ = os.Setenv("CHALLENGE_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
-	_ = os.Setenv("BRIDGE_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
 
 	bridgeDecisionProbe = func(sockPath, token string) (int, error) { return 200, nil }
 	if got := probeChallengeFlowReadiness(); got.Status != "OK" {
@@ -195,6 +207,66 @@ func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
 	_ = os.Unsetenv("CHALLENGE_TOKEN")
 	if got := probeChallengeFlowReadiness(); got.Status != "FAIL" || got.Code != "token_missing" {
 		t.Fatalf("expected missing token got %+v", got)
+	}
+}
+
+func TestProbeChallengeFlowReadinessUsesConfigAndTokenFile(t *testing.T) {
+	oldDial := challengeDialTimeout
+	oldProbe := bridgeDecisionProbe
+	oldDetectorsConfigPath := challengeFlowDetectorsConfigPath
+	oldBridgeTokenPath := challengeFlowBridgeTokenPath
+	t.Cleanup(func() {
+		challengeDialTimeout = oldDial
+		bridgeDecisionProbe = oldProbe
+		challengeFlowDetectorsConfigPath = oldDetectorsConfigPath
+		challengeFlowBridgeTokenPath = oldBridgeTokenPath
+		_ = os.Unsetenv("CHALLENGE_TOKEN")
+		_ = os.Unsetenv("OPENRESTY_TOKEN")
+		_ = os.Unsetenv("BRIDGE_TOKEN")
+		_ = os.Unsetenv("OPENRESTY_SOCK")
+	})
+	_ = os.Unsetenv("CHALLENGE_TOKEN")
+	_ = os.Unsetenv("OPENRESTY_TOKEN")
+	_ = os.Unsetenv("BRIDGE_TOKEN")
+	_ = os.Unsetenv("OPENRESTY_SOCK")
+
+	challengeToken := "abcdefghijklmnopqrstuvwxyz012345"
+	bridgeToken := "012345abcdefghijklmnopqrstuvwxyz"
+	tmp := t.TempDir()
+	sock := filepath.Join(tmp, "bridge.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	challengeFlowDetectorsConfigPath = filepath.Join(tmp, "detectors.conf")
+	challengeFlowBridgeTokenPath = filepath.Join(tmp, "cfm_bridge_token.lua")
+	conf := "[webdetector]\nOPENRESTY_MODE=1\nOPENRESTY_SOCK=" + sock + "\nCHALLENGE_TOKEN=" + challengeToken + "\n"
+	if err := os.WriteFile(challengeFlowDetectorsConfigPath, []byte(conf), 0o600); err != nil {
+		t.Fatalf("write detectors config: %v", err)
+	}
+	if err := os.WriteFile(challengeFlowBridgeTokenPath, []byte("return \""+bridgeToken+"\"\n"), 0o600); err != nil {
+		t.Fatalf("write bridge token: %v", err)
+	}
+
+	challengeDialTimeout = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		c1, c2 := net.Pipe()
+		_ = c2.Close()
+		return c1, nil
+	}
+	bridgeDecisionProbe = func(sockPath, token string) (int, error) {
+		if sockPath != sock {
+			t.Fatalf("probe used wrong socket path: %s", sockPath)
+		}
+		if token != bridgeToken {
+			t.Fatalf("probe used wrong bridge token: %q", token)
+		}
+		return 200, nil
+	}
+
+	got := probeChallengeFlowReadiness()
+	if got.Status != "OK" || got.Code != "ok" {
+		t.Fatalf("expected OK using detectors.conf and token file, got %+v", got)
 	}
 }
 

@@ -76,6 +76,158 @@ func TokenHealth(t LuaTokenProbe) string {
 	}
 	return "OK"
 }
+
+func ReadDetectorSectionKV(path, section string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	want := strings.ToLower(strings.TrimSpace(section))
+	current := ""
+	for _, raw := range strings.Split(string(b), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if end := strings.Index(line, "]"); end > 1 {
+				current = strings.ToLower(strings.TrimSpace(line[1:end]))
+			}
+			continue
+		}
+		if current != want {
+			continue
+		}
+		i := strings.Index(line, "=")
+		if i <= 0 {
+			continue
+		}
+		key := strings.ToUpper(strings.TrimSpace(line[:i]))
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(line[i+1:])
+	}
+	return out
+}
+
+func ReadChallengeTokenProbe(path string) LuaTokenProbe {
+	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
+		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+	}
+	kv := ReadDetectorSectionKV(path, "webdetector")
+	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
+		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+			return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
+		}
+	}
+	return LuaTokenProbe{}
+}
+
+func ReadBridgeTokenProbe(path string) LuaTokenProbe {
+	if t := ReadLuaToken(path); t.Present {
+		return t
+	}
+	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
+		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+	}
+	if tok := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN")); tok != "" {
+		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+	}
+	return LuaTokenProbe{}
+}
+
+func ResolveBridgeRuntimeConfig(path string) BridgeRuntimeConfig {
+	return ResolveBridgeRuntimeConfigWithStat(path, os.Stat)
+}
+
+func ResolveBridgeRuntimeConfigWithStat(path string, statFn func(string) (os.FileInfo, error)) BridgeRuntimeConfig {
+	const (
+		defaultSockPath = "/var/run/cfm/cfm_nginx.sock"
+		legacySockPath  = "/var/run/cfm_nginx.sock"
+	)
+	cfg := BridgeRuntimeConfig{Enabled: false, SocketPath: defaultSockPath, SocketSource: "fallback"}
+	kv := ReadDetectorSectionKV(path, "webdetector")
+	if v, ok := kv["OPENRESTY_MODE"]; ok {
+		cfg.Enabled = parseBoolLoose(v)
+	}
+	if v, ok := kv["OPENRESTY_SOCK"]; ok {
+		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+			cfg.SocketPath = clean
+			cfg.SocketSource = "config"
+		}
+	}
+	if cfg.SocketSource == "fallback" {
+		if _, err := statFn(cfg.SocketPath); err != nil {
+			if _, legacyErr := statFn(legacySockPath); legacyErr == nil {
+				cfg.SocketPath = legacySockPath
+			}
+		}
+	}
+	cfg.DisplaySocketPath = NormalizeRunPathForDisplay(cfg.SocketPath)
+	return cfg
+}
+
+func NormalizeRunPathForDisplay(path string) string {
+	trim := strings.TrimSpace(path)
+	if trim == "/run" || strings.HasPrefix(trim, "/run/") {
+		return "/var" + trim
+	}
+	if trim == "/var/run" || strings.HasPrefix(trim, "/var/run/") {
+		return trim
+	}
+	return trim
+}
+
+func parseBoolLoose(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(stripInlineComment(v))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func stripInlineComment(s string) string {
+	inQuote := false
+	var q rune
+	prevNonSpace := -1
+	for i, c := range s {
+		if c == '\'' || c == '"' {
+			if !inQuote {
+				inQuote = true
+				q = c
+			} else if q == c {
+				inQuote = false
+			}
+			if c != ' ' && c != '	' {
+				prevNonSpace = i
+			}
+			continue
+		}
+		if inQuote {
+			if c != ' ' && c != '	' {
+				prevNonSpace = i
+			}
+			continue
+		}
+		if c == ';' || c == '#' {
+			return strings.TrimSpace(s[:i])
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			if prevNonSpace >= 0 && s[prevNonSpace] == ':' {
+				// probably URL
+			} else if i == 0 || s[i-1] == ' ' || s[i-1] == '	' {
+				return strings.TrimSpace(s[:i])
+			}
+		}
+		if c != ' ' && c != '	' {
+			prevNonSpace = i
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
 func ProbeSSLCollector(path string, token LuaTokenProbe) SSLCollectorProbe {
 	out := SSLCollectorProbe{Path: path, UID: "-", GID: "-", Mode: "-", Category: "MISSING"}
 	st, err := os.Stat(path)
