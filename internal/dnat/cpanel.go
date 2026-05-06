@@ -361,8 +361,10 @@ type panelLuaGuardStatus struct {
 	LoadError string
 }
 
+var lookPath = exec.LookPath
+
 func cmdExists(name string) bool {
-	_, err := exec.LookPath(name)
+	_, err := lookPath(name)
 	return err == nil
 }
 
@@ -412,28 +414,73 @@ func checkPanelLuaGuard(path string) panelLuaGuardStatus {
 			cmdPath = abs
 		}
 	}
+	return runPanelLuaGuardProbe(st, cmdPath)
+}
+
+type panelLuaProbe struct {
+	Name   string
+	Args   []string
+	Syntax bool
+	UseEnv bool
+}
+
+func panelLuaGuardProbes() []panelLuaProbe {
+	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); if not ok2 then error(err or 'selftest failed') end; return end; print('CFM_PANEL_SELFTEST_HOOK_MISSING')`
+	return []panelLuaProbe{
+		{Name: "resty", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "luajit", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "lua", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "lua5.1", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "lua5.4", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "lua5.3", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "lua5.2", Args: []string{"-e", selftest}, UseEnv: true},
+		{Name: "luac", Args: []string{"-p"}, Syntax: true},
+		{Name: "luac5.1", Args: []string{"-p"}, Syntax: true},
+		{Name: "luac5.4", Args: []string{"-p"}, Syntax: true},
+		{Name: "luac5.3", Args: []string{"-p"}, Syntax: true},
+		{Name: "luac5.2", Args: []string{"-p"}, Syntax: true},
+	}
+}
+
+func runPanelLuaGuardProbe(st panelLuaGuardStatus, cmdPath string) panelLuaGuardStatus {
 	st.LoadState = "unknown"
-	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,time=os.time}; dofile(arg[1]); if type(cfm_panel_selftest)~='function' then error('missing cfm_panel_selftest') end; local ok,err=cfm_panel_selftest(); if not ok then error(err or 'selftest failed') end`
-	if cmdExists("resty") {
-		out, err := exec.Command("resty", "-e", selftest, cmdPath).CombinedOutput()
+	for _, probe := range panelLuaGuardProbes() {
+		if !cmdExists(probe.Name) {
+			continue
+		}
+		args := append(append([]string{}, probe.Args...), cmdPath)
+		cmd := execCommand(probe.Name, args...)
+		if probe.UseEnv {
+			cmd.Env = append(os.Environ(), "CFM_PANEL_SELFTEST_ONLY=1")
+		}
+		out, err := cmd.CombinedOutput()
+		msg := strings.TrimSpace(string(out))
 		if err == nil {
+			if probe.Syntax {
+				st.LoadError = "selftest interpreter unavailable; " + probe.Name + " syntax check passed"
+				return st
+			}
+			if strings.Contains(msg, "CFM_PANEL_SELFTEST_HOOK_MISSING") {
+				st.LoadError = "lua loaded via " + probe.Name + " but cfm_panel_selftest hook is missing"
+				return st
+			}
 			st.LoadState = "true"
 			return st
 		}
 		st.LoadState = "false"
-		st.LoadError = strings.TrimSpace(string(out))
-		if st.LoadError == "" {
-			st.LoadError = err.Error()
+		if msg == "" {
+			msg = err.Error()
 		}
+		st.LoadError = probe.Name + " failed: " + msg
 		return st
 	}
 	for _, probe := range []string{"angie", "openresty"} {
 		if !cmdExists(probe) {
 			continue
 		}
-		out, err := exec.Command(probe, "-t").CombinedOutput()
+		out, err := execCommand(probe, "-t").CombinedOutput()
 		if err == nil {
-			st.LoadError = "interpreter unavailable; relying on " + probe + " -t"
+			st.LoadError = "selftest interpreter unavailable; relying on " + probe + " -t"
 			return st
 		}
 		st.LoadState = "false"
@@ -443,7 +490,7 @@ func checkPanelLuaGuard(path string) panelLuaGuardStatus {
 		}
 		return st
 	}
-	st.LoadError = "interpreter unavailable; no angie/openresty config test found"
+	st.LoadError = "selftest interpreter unavailable; no resty/lua/luajit/luac or angie/openresty config test found"
 	return st
 }
 

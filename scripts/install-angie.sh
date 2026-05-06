@@ -607,13 +607,36 @@ validate_panel_lua_guard_preflight() {
         warn "Panel Lua guard file is not readable by worker user cfm: $lua_path"
         return 1
     fi
-    local selftest="package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,time=os.time}; dofile(arg[1]); assert(type(cfm_panel_selftest)=='function','missing cfm_panel_selftest'); local ok,err=cfm_panel_selftest(); assert(ok, err or 'selftest failed')"
-    if ! resty -e "$selftest" "$lua_path" >/dev/null 2>&1; then
-        warn "Panel Lua guard syntax/module selftest failed: $lua_path"
-        resty -e "$selftest" "$lua_path" >&2 || true
-        return 1
+    local selftest="package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); assert(ok2, err or 'selftest failed'); return end; error('missing cfm_panel_selftest')"
+    local interp=""
+    for cand in resty luajit lua lua5.1 lua5.4 lua5.3 lua5.2; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            interp="$cand"
+            break
+        fi
+    done
+    if [ -n "$interp" ]; then
+        if ! CFM_PANEL_SELFTEST_ONLY=1 "$interp" -e "$selftest" "$lua_path" >/dev/null 2>&1; then
+            warn "Panel Lua guard syntax/module selftest failed with $interp: $lua_path"
+            CFM_PANEL_SELFTEST_ONLY=1 "$interp" -e "$selftest" "$lua_path" >&2 || true
+            return 1
+        fi
+        log "Panel Lua guard preflight passed with $interp: $lua_path"
+        return 0
     fi
-    log "Panel Lua guard preflight passed: $lua_path"
+    for cand in luac luac5.1 luac5.4 luac5.3 luac5.2; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            if "$cand" -p "$lua_path" >/dev/null 2>&1; then
+                warn "Panel Lua guard selftest interpreter unavailable; $cand syntax check passed only: $lua_path"
+                return 0
+            fi
+            warn "Panel Lua guard syntax check failed with $cand: $lua_path"
+            "$cand" -p "$lua_path" >&2 || true
+            return 1
+        fi
+    done
+    warn "Panel Lua guard selftest skipped: no resty/lua/luajit/luac interpreter found"
+    return 0
 }
 
 print_next_steps() {
