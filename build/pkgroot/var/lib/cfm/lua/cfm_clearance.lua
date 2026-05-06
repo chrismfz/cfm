@@ -31,26 +31,132 @@ local function hex_from_bin(s)
   return (s:gsub('.', function(c) return string.format('%02x', string.byte(c)) end))
 end
 
+-- Lazy-cached HMAC backend resolution. Tried in order:
+--   1) ngx.hmac_sha256        (lua-resty-core, OpenResty 1.21+ default)
+--   2) resty.openssl.hmac     (lua-resty-openssl, optional package)
+--   3) resty.sha256 + manual  (lua-resty-string, ALWAYS bundled with OpenResty)
+-- Falling back to (3) is critical for environments where (1) and (2) are
+-- absent — without it, every clearance cookie verifies as
+-- "crypto_unavailable" and the panel goes into an endless challenge loop.
+local hmac_backend          -- "ngx" | "openssl" | "sha256" | false
+local hmac_backend_sha256   -- cached resty.sha256 module (when backend == "sha256")
+
+local function resolve_hmac_backend()
+  if hmac_backend ~= nil then return hmac_backend end
+  if ngx and type(ngx.hmac_sha256) == "function" then
+    hmac_backend = "ngx"
+    return hmac_backend
+  end
+  do
+    local ok, mod = pcall(require, "resty.openssl.hmac")
+    if ok and mod then
+      hmac_backend = "openssl"
+      return hmac_backend
+    end
+  end
+  do
+    local ok, mod = pcall(require, "resty.sha256")
+    if ok and mod then
+      hmac_backend = "sha256"
+      hmac_backend_sha256 = mod
+      return hmac_backend
+    end
+  end
+  hmac_backend = false
+  if ngx and type(ngx.log) == "function" then
+    ngx.log(ngx.WARN,
+      "[cfm_clearance] no HMAC-SHA256 backend available: ",
+      "tried ngx.hmac_sha256 (lua-resty-core), resty.openssl.hmac (lua-resty-openssl), ",
+      "and resty.sha256 (lua-resty-string) — clearance cookies will all fail validation")
+  end
+  return hmac_backend
+end
+
+local function hmac_sha256_via_resty_sha256(key, msg)
+  local sha = hmac_backend_sha256
+  if not sha then return nil, "crypto_unavailable" end
+  local block_size = 64  -- SHA-256 block size in bytes
+
+  -- Shorten an over-long key by hashing it.
+  if #key > block_size then
+    local h = sha:new()
+    if not h then return nil, "crypto_unavailable" end
+    h:update(key)
+    local short = h:final()
+    if not short then return nil, "crypto_unavailable" end
+    key = short
+  end
+  if #key < block_size then
+    key = key .. string.rep("\0", block_size - #key)
+  end
+
+  -- Inner / outer pads
+  local ipad = {}
+  local opad = {}
+  for i = 1, block_size do
+    local b = string.byte(key, i)
+    ipad[i] = string.char(bit.bxor(b, 0x36))
+    opad[i] = string.char(bit.bxor(b, 0x5c))
+  end
+  local ipad_s = table.concat(ipad)
+  local opad_s = table.concat(opad)
+
+  local h = sha:new()
+  if not h then return nil, "crypto_unavailable" end
+  h:update(ipad_s)
+  h:update(msg)
+  local inner = h:final()
+  if not inner then return nil, "crypto_unavailable" end
+
+  h = sha:new()
+  if not h then return nil, "crypto_unavailable" end
+  h:update(opad_s)
+  h:update(inner)
+  local final = h:final()
+  if not final then return nil, "crypto_unavailable" end
+  return final, nil
+end
+
 local function hmac_sha256_hex(secret, payload)
   local key = tostring(secret or "")
   local msg = tostring(payload or "")
 
-  if ngx and type(ngx.hmac_sha256) == "function" then
+  local backend = resolve_hmac_backend()
+  if backend == "ngx" then
     local ok, bin = pcall(ngx.hmac_sha256, key, msg)
     if ok and type(bin) == "string" then
       return hex_from_bin(bin), nil
     end
+    -- ngx.hmac_sha256 is a function but failed at runtime: fall through
+    -- to the next backend rather than wedging.
   end
 
-  local ok_hmac, hmac_mod = pcall(require, "resty.openssl.hmac")
-  if ok_hmac and hmac_mod then
-    local ctx, new_err = hmac_mod.new(key, "sha256")
-    if not ctx then return nil, "crypto_unavailable" end
-    local ok_update = pcall(ctx.update, ctx, msg)
-    if not ok_update then return nil, "crypto_unavailable" end
-    local ok_final, bin = pcall(ctx.final, ctx)
-    if ok_final and type(bin) == "string" then
-      return hex_from_bin(bin), nil
+  if backend == "openssl" or backend == "ngx" then
+    local ok_hmac, hmac_mod = pcall(require, "resty.openssl.hmac")
+    if ok_hmac and hmac_mod then
+      local ctx = hmac_mod.new(key, "sha256")
+      if ctx then
+        local ok_update = pcall(ctx.update, ctx, msg)
+        if ok_update then
+          local ok_final, bin = pcall(ctx.final, ctx)
+          if ok_final and type(bin) == "string" then
+            return hex_from_bin(bin), nil
+          end
+        end
+      end
+    end
+  end
+
+  -- Always reachable in stock OpenResty (lua-resty-string ships resty.sha256).
+  if backend == "sha256" or hmac_backend_sha256 == nil then
+    if hmac_backend_sha256 == nil then
+      local ok, mod = pcall(require, "resty.sha256")
+      if ok and mod then hmac_backend_sha256 = mod end
+    end
+    if hmac_backend_sha256 then
+      local bin, err = hmac_sha256_via_resty_sha256(key, msg)
+      if bin then return hex_from_bin(bin), nil end
+      return nil, err or "crypto_unavailable"
     end
   end
 

@@ -119,6 +119,7 @@ print_engine_summary_line() {
 
 print_proxy_config_summary() {
     echo
+    echo
     echo "CFM proxy config summary:"
     print_engine_summary_line Angie "$ANGIE_DETECTED" "$ANGIE_ACTIVE" "$ANGIE_DEPLOYED"
     print_engine_summary_line OpenResty "$OPENRESTY_DETECTED" "$OPENRESTY_ACTIVE" "$OPENRESTY_DEPLOYED"
@@ -128,15 +129,23 @@ print_proxy_config_summary() {
         echo "  Reload active edges with:"
         echo "    systemctl reload angie"
         echo "    systemctl reload openresty"
+	echo
+	echo
     elif [ "$ANGIE_ACTIVE" -eq 1 ]; then
         echo "  Active edge: Angie"
         echo "  Reload active edge with: systemctl reload angie"
+	echo
+	echo
     elif [ "$OPENRESTY_ACTIVE" -eq 1 ]; then
         echo "  Active edge: OpenResty"
         echo "  Reload active edge with: systemctl reload openresty"
+	echo
+	echo
     else
+	echo
         echo "  Active edge: none detected"
         echo "  No active edge reload needed. Configs are ready if you later switch engines."
+	echo
     fi
 }
 

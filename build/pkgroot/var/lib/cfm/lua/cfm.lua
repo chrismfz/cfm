@@ -83,9 +83,9 @@ local CFG = {
   -- plus the bridge's synchronous-state mutation. Hook-backed work (WAF
   -- history, observations) is dispatched async on the Go side so this
   -- budget only needs to cover state mutation + JSON (sub-millisecond).
-  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "100"),
-  decision_cache_ttl_ms = 12000,
-  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "5000"),
+  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
+  decision_cache_ttl_ms = 90000,
+  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "6000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
   waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
 
@@ -99,8 +99,8 @@ local CFG = {
   ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "3600"),
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
-  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "15000"),
-  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "128"),
+  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
+  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "512"),
 
   waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "8192"),
 
@@ -487,21 +487,46 @@ local function http_unix(method, path, body)
   return resp, nil
 end
 
+local function classify_bridge_err(err)
+  local msg = lower(tostring(err or ""))
+  if msg == "" then return "unknown" end
+  if msg:find("timeout", 1, true) then return "timeout" end
+  if msg:find("connect:", 1, true) then return "connect" end
+  local code = msg:match("http%s+(%d%d%d)")
+  if code then return "http_" .. code end
+  if msg:find("decode", 1, true) or msg:find("json", 1, true) then return "json" end
+  return "unknown"
+end
+
 local function rpc_call(kind, method, path, body, req_ctx)
+  local t0 = ngx.now()
   local resp, err = http_unix(method, path, body)
+  local elapsed_ms = math.floor((ngx.now() - t0) * 1000 + 0.5)
   if err then
     req_ctx = req_ctx or {}
     local ctx_ip = req_ctx.ip or real_ip()
     local ctx_host = req_ctx.host or (ngx.var.host or "-")
     local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
-    local ctx_method = req_ctx.method or (ngx.req.get_method() or "-")
-    log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
-      " path=" .. tostring(path or "-") ..
-      " err=" .. tostring(err) ..
-      " ip=" .. tostring(ctx_ip or "-") ..
-      " host=" .. tostring(ctx_host or "-") ..
-      " uri=" .. tostring(ctx_uri or "-") ..
-      " method=" .. tostring(ctx_method or "-"))
+    local err_class = classify_bridge_err(err)
+
+    if CFG.debug or CFG.debug_headers then
+      ngx.ctx.cfm_bridge_error = err_class
+      ngx.ctx.cfm_bridge_latency_ms = elapsed_ms
+      if CFG.debug_headers then
+        ngx.header["X-CFM-Bridge-Error"] = err_class
+        ngx.header["X-CFM-Bridge-Latency-Ms"] = tostring(elapsed_ms)
+      end
+    end
+
+    if CFG.debug then
+      log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
+        " path=" .. tostring(path or "-") ..
+        " class=" .. tostring(err_class) ..
+        " elapsed_ms=" .. tostring(elapsed_ms) ..
+        " ip=" .. tostring(ctx_ip or "-") ..
+        " host=" .. tostring(ctx_host or "-") ..
+        " uri=" .. tostring(ctx_uri or "-"))
+    end
   end
   return resp, err
 end
@@ -568,10 +593,43 @@ local function fail_decision(errmsg)
   end
 end
 
+-- Static asset extensions whose bridge verdict is purely a function of
+-- (ip, host, scope) — never CHALLENGE_PATHS-eligible (no .git/.env/wp-config
+-- has a .png/.css/.woff suffix), no SQLi/XSS surface in the URL itself.
+-- For these we share a single cache entry per (ip, host, scope) so a page
+-- with 50 embedded assets makes 1 bridge call per visitor per 15s window
+-- instead of 50. Massive reduction in cosocket scheduling pressure on the
+-- nginx worker — this is what was causing intermittent
+-- "lua tcp socket read timed out" under modest load even though the bridge
+-- itself was responding in 0ms (verified via OPENRESTY_BRIDGE_TRACE=1).
+local STATIC_ASSET_EXT = {
+  css=true, js=true, mjs=true, map=true,
+  png=true, jpg=true, jpeg=true, gif=true, webp=true, avif=true,
+  svg=true, ico=true, bmp=true, tiff=true, tif=true,
+  woff=true, woff2=true, ttf=true, otf=true, eot=true,
+}
+
+local function is_static_asset_uri(uri)
+  if type(uri) ~= "string" or uri == "" then return false end
+  -- Strip query string, then take the extension after the final dot.
+  local path = uri:match("^([^?#]+)") or uri
+  local ext = path:match("%.([%w]+)$")
+  if not ext then return false end
+  return STATIC_ASSET_EXT[ext:lower()] == true
+end
+
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
 local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
-  local uri_part = (uri or "-"):sub(1, 64)
-  local key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
+  local key
+  if is_static_asset_uri(uri) then
+    -- Coalesced cache entry: shared by every static asset from this
+    -- (ip, host, scope) combo. Prefix "ds|" keeps it disjoint from the
+    -- per-URL "d|" namespace below.
+    key = "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
+  else
+    local uri_part = (uri or "-"):sub(1, 64)
+    key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
+  end
 
   if SH then
     local cached = SH:get(key)
@@ -597,7 +655,20 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
     return fail_decision(err)
   end
   local obj = cjson.decode(body)
-  if not obj then return fail_decision("decode_failed") end
+  if not obj then
+    if CFG.debug or CFG.debug_headers then
+      ngx.ctx.cfm_bridge_error = "json"
+    end
+    if CFG.debug_headers then
+      ngx.header["X-CFM-Bridge-Error"] = "json"
+    end
+    if CFG.debug then
+      log_route(ngx.WARN, "rpc_err kind=decision class=json elapsed_ms=- ip=" .. tostring(ip or "-") ..
+        " host=" .. tostring(host or "-") ..
+        " uri=" .. tostring(uri or "-"))
+    end
+    return fail_decision("decode_failed")
+  end
 
   -- Only cache clean allows (no rule action = no challenge/block/throttle pending)
   if SH and obj.ip_action == "allow" and obj.vhost_action == "allow"

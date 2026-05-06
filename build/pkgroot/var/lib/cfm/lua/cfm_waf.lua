@@ -226,11 +226,41 @@ end
 
 local function has(s, pat)
   if not s or s == "" then return false end
+  if type(s) ~= "string" then return false end
   return string.find(s, pat, 1, true) ~= nil
 end
 
+-- Coerce a header value to a single string. ngx.req.get_headers() returns
+-- a table when a header appears multiple times; pick the first non-empty
+-- string element so downstream string ops don't crash.
+local function header_string(v)
+  if v == nil then return "" end
+  if type(v) == "string" then return v end
+  if type(v) == "table" then
+    for i = 1, #v do
+      local item = v[i]
+      if type(item) == "string" and item ~= "" then return item end
+    end
+    return ""
+  end
+  return ""
+end
+
+-- ngx.req.get_headers() can return a table for duplicate headers
+-- (e.g. multiple "Referer" or "User-Agent"); collapse those to the
+-- first non-empty string so callers can treat the result as a string.
 local function lower(s)
-  if not s then return "" end
+  if s == nil then return "" end
+  if type(s) == "table" then
+    for i = 1, #s do
+      local item = s[i]
+      if type(item) == "string" and item ~= "" then
+        return string.lower(item)
+      end
+    end
+    return ""
+  end
+  if type(s) ~= "string" then return "" end
   return string.lower(s)
 end
 
@@ -576,7 +606,7 @@ local function detect_php_webshell_body(body, headers)
   if not body or body == "" then return nil end
 
   headers = headers or {}
-  local ct = headers["content-type"] or headers["Content-Type"] or ""
+  local ct = header_string(headers["content-type"] or headers["Content-Type"])
   if not is_textual_body_content_type(ct) then
     return nil
   end
@@ -1247,7 +1277,7 @@ end
 --                 credential/backup artifact (*.sql, passwords.txt)=+3
 local function detect_bad_ua_scored(headers, uri, method)
   headers = headers or {}
-  local ua  = headers["user-agent"] or headers["User-Agent"] or ""
+  local ua  = header_string(headers["user-agent"] or headers["User-Agent"])
   local ual = lower(ua)
 
   -- INSTANT: named scanner / exploit tools - bypass scoring
@@ -1377,7 +1407,7 @@ local function detect_bad_ua_scored(headers, uri, method)
   -- Signal 3: no Accept header (+1)
   -- Applied only on higher-risk request context to avoid FP on benign crawlers.
   -- Suppress for machine-style endpoints where browser header expectations do not apply.
-  local accept = headers["accept"] or headers["Accept"] or ""
+  local accept = header_string(headers["accept"] or headers["Accept"])
   if accept == "" and strict_header_scoring and not machine_style then
     score = score + 1; tags[#tags+1] = "NO_ACCEPT"
   end
@@ -2026,7 +2056,7 @@ function _M.check(ctx)
   -- ── 11) Bare IP Host ──────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_ip_host, "logonly")
-    if mode ~= "disabled" and detect_ip_host(headers["Host"] or headers["host"] or "") then
+    if mode ~= "disabled" and detect_ip_host(header_string(headers["Host"] or headers["host"])) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       return true, "WAF_IP_HOST", ttl, mode
     end
