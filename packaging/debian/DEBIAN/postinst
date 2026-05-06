@@ -110,6 +110,13 @@ for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
     chmod 700 "$d"
 done
 
+# Validate and deploy packaged Angie/OpenResty configs for installed engines.
+if [ -x /usr/share/cfm/scripts/package-proxy-config-deploy.sh ]; then
+    /usr/share/cfm/scripts/package-proxy-config-deploy.sh || true
+else
+    echo "WARNING: CFM proxy config deploy helper missing: /usr/share/cfm/scripts/package-proxy-config-deploy.sh"
+fi
+
 # systemd reload/enable/start
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
