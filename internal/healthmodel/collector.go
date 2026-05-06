@@ -51,12 +51,8 @@ var bridgeDecisionProbe = func(sockPath, token string) (int, error) {
 	defer resp.Body.Close()
 	return resp.StatusCode, nil
 }
-var weakTokenRE = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
-
-func isStrongToken(tok string) bool {
-	t := strings.TrimSpace(tok)
-	return len(t) >= 32 && !weakTokenRE.MatchString(t)
-}
+var challengeFlowDetectorsConfigPath = "/etc/cfm/detectors.conf"
+var challengeFlowBridgeTokenPath = edgediag.CanonicalBridgeTokenPath
 
 // RawDetectorSnapshot aliases the detector snapshot type for tests outside this package.
 type RawDetectorSnapshot = health.Snapshot
@@ -214,30 +210,28 @@ func probeChallengeFlowReadiness() flowProbe {
 	out.ChallengeListenerStatus = "ok"
 	out.ChallengeListenerReason = "listener reachable"
 	_ = conn.Close()
-	sockPath := strings.TrimSpace(os.Getenv("OPENRESTY_SOCK"))
-	if sockPath == "" {
-		sockPath = "/var/run/cfm/cfm_nginx.sock"
-	}
+	cfg := edgediag.ResolveBridgeRuntimeConfig(challengeFlowDetectorsConfigPath)
+	sockPath := cfg.SocketPath
 	st, err := os.Stat(sockPath)
 	if err != nil || st.Mode()&os.ModeSocket == 0 {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = sockPath
 		return flowProbe{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: sockPath, BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
 	}
-	ct := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
-	bt := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN"))
-	if ct == "" || bt == "" {
+	challengeToken := edgediag.ReadChallengeTokenProbe(challengeFlowDetectorsConfigPath)
+	bridgeToken := edgediag.ReadBridgeTokenProbe(challengeFlowBridgeTokenPath)
+	if !challengeToken.Present || !bridgeToken.Present {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = "token missing"
 		return flowProbe{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
 	}
-	if !isStrongToken(ct) || !isStrongToken(bt) {
+	if !challengeToken.Valid || !bridgeToken.Valid {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = "token weak"
 		return flowProbe{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
 	}
 	started := time.Now()
-	statusCode, err := bridgeDecisionProbe(sockPath, bt)
+	statusCode, err := bridgeDecisionProbe(sockPath, bridgeToken.Token)
 	out.BridgeSocketLatencyMs = time.Since(started).Milliseconds()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {

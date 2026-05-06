@@ -435,7 +435,7 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 		"/usr/local/openresty/nginx/lua/cfm_token.lua",
 		"/etc/angie/lua/cfm_token.lua",
 	})
-	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
+	bridgeToken := readBridgeTokenProbe()
 	bridgeRuntime := probeBridgeRuntime(bridgeCfg, bridgeToken)
 
 	fmt.Printf("  %-24s %s\n", "DNAT:", dnatState)
@@ -696,7 +696,7 @@ func probeChallengeFlowReadiness() challengeFlowReadiness {
 		listenAddr = "127.0.0.1:" + listenAddr
 	}
 	challengeToken := readChallengeTokenProbe()
-	bridgeToken := readLuaToken(canonicalBridgeTokenPath)
+	bridgeToken := readBridgeTokenProbe()
 	cfg := resolveBridgeRuntimeConfig()
 
 	if _, err := tcpDialTimeout("tcp", listenAddr, 1200*time.Millisecond); err != nil {
@@ -862,6 +862,19 @@ func readDetectorSectionKV(path, section string) map[string]string {
 		}
 	}
 	return out
+}
+
+func readBridgeTokenProbe() luaTokenProbe {
+	if t := readLuaToken(canonicalBridgeTokenPath); t.Present {
+		return t
+	}
+	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
+		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
+	}
+	if tok := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN")); tok != "" {
+		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
+	}
+	return luaTokenProbe{}
 }
 
 func readChallengeTokenProbe() luaTokenProbe {

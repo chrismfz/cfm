@@ -494,14 +494,15 @@ func challengeFlowReadiness(state, code, reason string) (healthLabelRank, string
 }
 
 func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
-	cfmToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
-	bridgeToken := edgediag.ReadLuaToken(edgediag.CanonicalBridgeTokenPath)
-	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", cfmToken)
-	cfg := edgediag.BridgeRuntimeConfig{Enabled: true, SocketPath: "/var/run/cfm/cfm_nginx.sock", DisplaySocketPath: "/var/run/cfm/cfm_nginx.sock", SocketSource: "fallback"}
+	sslToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
+	challengeToken := edgediag.ReadChallengeTokenProbe("/etc/cfm/detectors.conf")
+	bridgeToken := edgediag.ReadBridgeTokenProbe(edgediag.CanonicalBridgeTokenPath)
+	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", sslToken)
+	cfg := edgediag.ResolveBridgeRuntimeConfig("/etc/cfm/detectors.conf")
 	bridge := edgediag.ProbeNginxBridgeRuntime(cfg, bridgeToken)
 	fmt.Printf("  SSL Collector Socket: %s\n", mapEdgeStatus(sock.Category))
 	fmt.Printf("    path=%s uid=%s gid=%s mode=%s probe=%s%s\n", sock.Path, sock.UID, sock.GID, sock.Mode, sock.Category, sock.ErrorText)
-	fmt.Printf("  challenge token (CHALLENGE_TOKEN): %s\n", edgediag.TokenHealth(cfmToken))
+	fmt.Printf("  challenge token (CHALLENGE_TOKEN): %s\n", edgediag.TokenHealth(challengeToken))
 	fmt.Printf("  edge bridge token (OPENRESTY_TOKEN): %s\n", edgediag.TokenHealth(bridgeToken))
 	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
 	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, s.Modern.Runtime.IngestSocketStatus, s.Modern.Runtime.IngestSocketReason, opts)
