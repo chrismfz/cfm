@@ -26,6 +26,65 @@ find_first_executable() {
     return 1
 }
 
+service_is_installed() {
+    sii_unit=$1
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+
+    systemctl list-unit-files "$sii_unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$sii_unit"
+}
+
+service_is_active() {
+    sia_unit=$1
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+
+    systemctl is-active --quiet "$sia_unit" 2>/dev/null
+}
+
+report_service_status() {
+    rss_engine=$1
+    rss_unit=$2
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "CFM proxy config: $rss_engine service status unavailable (systemctl not found)"
+        return 0
+    fi
+
+    if service_is_active "$rss_unit"; then
+        echo "CFM proxy config: $rss_engine service is active: $rss_unit"
+    elif service_is_installed "$rss_unit"; then
+        echo "CFM proxy config: $rss_engine service is installed but not active: $rss_unit"
+    else
+        echo "CFM proxy config: $rss_engine service unit not installed: $rss_unit"
+    fi
+}
+
+reload_command_for_engine() {
+    rcfe_unit=$1
+    rcfe_fallback=$2
+
+    if service_is_active "$rcfe_unit" || service_is_installed "$rcfe_unit"; then
+        printf 'systemctl reload %s\n' "${rcfe_unit%.service}"
+        return 0
+    fi
+
+    printf '%s\n' "$rcfe_fallback"
+}
+
+report_reload_command() {
+    rrc_engine=$1
+    rrc_unit=$2
+    rrc_fallback=$3
+
+    rrc_command=$(reload_command_for_engine "$rrc_unit" "$rrc_fallback")
+    echo "CFM proxy config: deployed $rrc_engine config; reload with: $rrc_command"
+}
+
 install_file() {
     if_src=$1
     if_dst=$2
@@ -137,8 +196,11 @@ process_engine() {
     pe_main_src=$3
     pe_main_dst=$4
     pe_sidecar_dir=$5
+    pe_unit=$6
+    pe_reload_fallback=$7
 
     echo "CFM proxy config: $pe_engine detected at $pe_bin"
+    report_service_status "$pe_engine" "$pe_unit"
 
     if ! prepare_sidecars "$pe_engine" "$pe_sidecar_dir"; then
         echo "WARNING: CFM proxy config: $pe_engine sidecar deployment failed; leaving existing $(basename "$pe_main_dst") unchanged"
@@ -151,7 +213,9 @@ process_engine() {
     echo "CFM proxy config: testing $pe_engine config with: $pe_bin -t -c $pe_main_src"
     if "$pe_bin" -t -c "$pe_main_src"; then
         echo "CFM proxy config: $pe_engine config test passed"
-        deploy_main_config "$pe_engine" "$pe_main_src" "$pe_main_dst" || true
+        if deploy_main_config "$pe_engine" "$pe_main_src" "$pe_main_dst"; then
+            report_reload_command "$pe_engine" "$pe_unit" "$pe_reload_fallback"
+        fi
     else
         echo "WARNING: CFM proxy config: $pe_engine config test failed; command failed: $pe_bin -t -c $pe_main_src"
         echo "WARNING: CFM proxy config: $pe_engine config test failed; leaving existing $(basename "$pe_main_dst") unchanged"
@@ -167,7 +231,9 @@ if [ -n "$ANGIE_BIN" ]; then
         "$ANGIE_BIN" \
         "$CFM_CONFIG_DIR/angie.conf" \
         /etc/angie/angie.conf \
-        /etc/angie
+        /etc/angie \
+        angie.service \
+        angie\ -s\ reload
 else
     echo "CFM proxy config: Angie not detected; skipping"
 fi
@@ -179,7 +245,9 @@ if [ -n "$OPENRESTY_BIN" ]; then
         "$OPENRESTY_BIN" \
         "$CFM_CONFIG_DIR/openresty.conf" \
         /usr/local/openresty/nginx/conf/nginx.conf \
-        /usr/local/openresty/nginx/conf
+        /usr/local/openresty/nginx/conf \
+        openresty.service \
+        /usr/local/openresty/sbin/nginx\ -s\ reload
 else
     echo "CFM proxy config: OpenResty not detected; skipping"
 fi
