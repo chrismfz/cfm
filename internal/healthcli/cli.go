@@ -509,7 +509,38 @@ func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("  edge bridge token (OPENRESTY_TOKEN): %s\n", edgediag.TokenHealth(bridgeToken))
 	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
 	status := effectiveIngestSocketStatus(s.Modern.Runtime.IngestSocketStatus, s.Modern.Runtime.IngestSourceActive, s.Modern.Runtime.IngestSourceSockListening, s.Modern.Runtime.IngestSourceLastReceivedUnix)
+	if status == "" && len(missingRuntimeFields(s, "ingest_socket_status", "challenge_flow_state", "panel_dnat_enabled")) > 0 {
+		printMissingRuntimeSocketFieldsWarning(opts)
+		return
+	}
 	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, status, s.Modern.Runtime.IngestSocketReason, opts)
+}
+
+func missingRuntimeFields(s parsedSnapshot, fields ...string) []string {
+	runtime, ok := runtimeRawMap(s)
+	if !ok {
+		return nil
+	}
+	missing := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if _, ok := runtime[field]; !ok {
+			missing = append(missing, field)
+		}
+	}
+	return missing
+}
+
+func runtimeRawMap(s parsedSnapshot) (map[string]any, bool) {
+	raw, ok := s.RawMap["runtime"]
+	if !ok {
+		return nil, false
+	}
+	runtime, ok := raw.(map[string]any)
+	return runtime, ok
+}
+
+func printMissingRuntimeSocketFieldsWarning(opts cliOptions) {
+	fmt.Printf("  %s  Health daemon snapshot is missing runtime socket fields; restart cfm service or upgrade daemon\n", badge(warnLabel, opts))
 }
 
 func effectiveIngestSocketStatus(status, active string, listening bool, lastReceivedUnix int64) string {

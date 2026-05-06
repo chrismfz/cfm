@@ -145,6 +145,43 @@ func TestHealthSummaryIngestSocketLiveRendersOK(t *testing.T) {
 	}
 }
 
+func TestHealthSummaryIngestSocketMissingStatusWarnsInsteadOfUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"schema_version":"health.snapshot.v1",
+			"node_id":"n1",
+			"collected_at":"2026-04-28T00:00:00Z",
+			"host":{"hostname":"host1"},
+			"disk":{},
+			"services":[],
+			"cfm_metrics":{},
+			"network":{},
+			"runtime":{"ingest_socket_path":"/run/cfm/ingest.sock"}
+		}`))
+	}))
+	defer srv.Close()
+
+	out, err := runWithCapturedStdout(func() error {
+		return Run(srv.URL, []string{"--no-color", "--debug-runtime"})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	want := "[WARN]  Health daemon snapshot is missing runtime socket fields; restart cfm service or upgrade daemon"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected output to contain %q\noutput:\n%s", want, out)
+	}
+	unwanted := "Using ingest socket /run/cfm/ingest.sock - Unknown"
+	if strings.Contains(out, unwanted) {
+		t.Fatalf("expected output to not contain %q\noutput:\n%s", unwanted, out)
+	}
+}
+
 func TestHealthSummaryIngestSocketUsesAuthoritativeSourceWhenStatusEmpty(t *testing.T) {
 	now := time.Now().Unix()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
