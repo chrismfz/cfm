@@ -22,7 +22,8 @@ type RuntimeStatus struct {
 	CFMDaemonLive           bool          `json:"cfm_daemon_live"`
 	CFMDaemonPID            *int          `json:"cfm_daemon_pid,omitempty"`
 	CFMServiceState         string        `json:"cfm_service_state,omitempty"`
-	DNATEnabled             string        `json:"dnat_enabled,omitempty"` // on/off/unknown
+	DNATEnabled             string        `json:"dnat_enabled,omitempty"`       // on/off/unknown
+	PanelDNATEnabled        string        `json:"panel_dnat_enabled,omitempty"` // on/off/unknown
 	DNATFrontend            string        `json:"dnat_frontend,omitempty"`
 	DNATConfidence          string        `json:"dnat_confidence,omitempty"` // high/medium/low
 	DNATWarning             string        `json:"dnat_warning,omitempty"`

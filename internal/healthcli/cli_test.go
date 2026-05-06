@@ -30,8 +30,8 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 		{
 			name:     "cfm health summary",
 			args:     nil,
-			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown", "DNAT: unknown"},
-			wantNone: []string{"[cfm health watch]"},
+			wantAll:  []string{"Node: host1", "Host", "Runtime", "Disk", "Network", "CFM", "CFM daemon: down", "Service: unknown"},
+			wantNone: []string{"[cfm health watch]", "  DNAT: unknown"},
 		},
 		{
 			name:     "cfm health json",
@@ -117,7 +117,7 @@ func TestHealthSummaryIncludesChallengeFlowReadiness(t *testing.T) {
 	}
 }
 
-func TestRuntimeSectionIncludesDnatEdgeUpstreamAndWarning(t *testing.T) {
+func TestRuntimeSectionIncludesEdgeUpstreamAndWarningWithoutTopLevelDNAT(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.DNATEnabled = "on"
 	s.Modern.Runtime.DNATFrontend = "angie"
@@ -140,8 +140,8 @@ func TestRuntimeSectionIncludesDnatEdgeUpstreamAndWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("printRuntimeSection error: %v", err)
 	}
-	if !strings.Contains(out, "DNAT: on") {
-		t.Fatalf("expected frontend output, got:\n%s", out)
+	if strings.Contains(out, "\n  DNAT: on\n") {
+		t.Fatalf("expected no top-level DNAT output, got:\n%s", out)
 	}
 	if strings.Contains(out, "Frontend:") {
 		t.Fatalf("expected explicit frontend line to be omitted, got:\n%s", out)
@@ -204,6 +204,8 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	s := parsedSnapshot{}
 	s.Modern.Runtime.EdgeService = "angie"
 	s.Modern.Runtime.DNATFrontend = "angie"
+	s.Modern.Runtime.DNATEnabled = "on"
+	s.Modern.Runtime.PanelDNATEnabled = "on"
 	s.Modern.Runtime.ChallengeFlowState = "OK"
 	s.Modern.Runtime.ChallengeFlowCode = "ok"
 	s.Modern.Runtime.ChallengeFlowReason = "challenge flow ready"
@@ -222,9 +224,16 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	if !strings.Contains(out, "Web stack - Edge Interceptor [OK]") {
 		t.Fatalf("expected OK web stack when selected edge is active, got:\n%s", out)
 	}
-	want := "[OK]  Challenge flow readiness: OK challenge flow ready"
-	if !strings.Contains(out, want) {
-		t.Fatalf("expected web stack summary to include %q under Edge Interceptor, got:\n%s", want, out)
+	for _, want := range []string{"[OK]  Web Traffic DNAT: on", "[OK]  Panel Traffic DNAT: on", "[OK]  Challenge flow readiness: OK challenge flow ready"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected web stack summary to include %q under Edge Interceptor, got:\n%s", want, out)
+		}
+	}
+	webDnatIdx := strings.Index(out, "Web Traffic DNAT")
+	panelDnatIdx := strings.Index(out, "Panel Traffic DNAT")
+	angieIdx := strings.Index(out, "angie: enabled")
+	if webDnatIdx < 0 || panelDnatIdx < 0 || angieIdx < 0 || webDnatIdx > angieIdx || panelDnatIdx > angieIdx {
+		t.Fatalf("expected DNAT subchecks before service rows, got:\n%s", out)
 	}
 }
 

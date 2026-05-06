@@ -82,6 +82,7 @@ type modernSample struct {
 		CFMDaemonPID            *int   `json:"cfm_daemon_pid"`
 		CFMServiceState         string `json:"cfm_service_state"`
 		DNATEnabled             string `json:"dnat_enabled"`
+		PanelDNATEnabled        string `json:"panel_dnat_enabled"`
 		DNATFrontend            string `json:"dnat_frontend"`
 		DNATConfidence          string `json:"dnat_confidence"`
 		DNATWarning             string `json:"dnat_warning"`
@@ -304,20 +305,12 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	if serviceState == "" {
 		serviceState = "unknown"
 	}
-	dnatState := strings.TrimSpace(r.DNATEnabled)
-	if dnatState == "" {
-		dnatState = "unknown"
-	}
-	frontend := strings.TrimSpace(r.DNATFrontend)
-	if frontend == "" {
-		frontend = "unknown"
-	}
 	confidence := strings.ToLower(strings.TrimSpace(r.DNATConfidence))
 	if confidence == "" {
 		confidence = "low"
 	}
 	if opts.Compact {
-		fmt.Printf("Runtime %-6s daemon=%s service=%s dnat=%s\n", badge(okLabel, opts), daemon, serviceState, dnatState)
+		fmt.Printf("Runtime %-6s daemon=%s service=%s\n", badge(okLabel, opts), daemon, serviceState)
 		if opts.DebugRuntime {
 			fmt.Printf("Runtime %-6s edge=%s upstream=%s\n", badge(okLabel, opts), formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode), formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
 		}
@@ -333,7 +326,6 @@ func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("Runtime %s\n", badge(okLabel, opts))
 	fmt.Printf("  CFM daemon: %s\n", daemon)
 	fmt.Printf("  Service: %s\n", serviceState)
-	fmt.Printf("  DNAT: %s\n", dnatState)
 	if opts.DebugRuntime {
 		fmt.Printf("  Edge: %s\n", formatRuntimeServiceRole(r.EdgeService, r.EdgeStatus, r.EdgeConfidence, r.EdgeReasonCode))
 		fmt.Printf("  Upstream: %s\n", formatRuntimeServiceRole(r.UpstreamService, r.UpstreamStatus, r.UpstreamConfidence, r.UpstreamReasonCode))
@@ -417,13 +409,39 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 			parts = append(parts, fmt.Sprintf("%s: enabled=%s active=%s state=%s%s", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row)))
 		}
 		fmt.Printf("Web stack - Edge Interceptor %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
+		printDNATSubchecks(s.Modern.Runtime.DNATEnabled, s.Modern.Runtime.PanelDNATEnabled, opts)
 		printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
 		return
 	}
 	fmt.Printf("Web stack - Edge Interceptor %s\n", badge(status, opts))
+	printDNATSubchecks(s.Modern.Runtime.DNATEnabled, s.Modern.Runtime.PanelDNATEnabled, opts)
 	printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
 	for _, row := range rows {
 		fmt.Printf("  %s: enabled=%s active=%s state=%s%s\n", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row))
+	}
+}
+
+func printDNATSubchecks(webState, panelState string, opts cliOptions) {
+	webState = normalizeDNATState(webState)
+	panelState = normalizeDNATState(panelState)
+	fmt.Printf("  %s  Web Traffic DNAT: %s\n", badge(dnatLabel(webState), opts), webState)
+	fmt.Printf("  %s  Panel Traffic DNAT: %s\n", badge(dnatLabel(panelState), opts), panelState)
+}
+
+func normalizeDNATState(state string) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return "unknown"
+	}
+	return state
+}
+
+func dnatLabel(state string) healthLabelRank {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "off", "unavailable":
+		return critLabel
+	default:
+		return okLabel
 	}
 }
 
@@ -1047,6 +1065,7 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Runtime.CFMDaemonPID = latest.Runtime.CFMDaemonPID
 		out.Modern.Runtime.CFMServiceState = latest.Runtime.CFMServiceState
 		out.Modern.Runtime.DNATEnabled = latest.Runtime.DNATEnabled
+		out.Modern.Runtime.PanelDNATEnabled = latest.Runtime.PanelDNATEnabled
 		out.Modern.Runtime.DNATFrontend = latest.Runtime.DNATFrontend
 		out.Modern.Runtime.DNATConfidence = latest.Runtime.DNATConfidence
 		out.Modern.Runtime.DNATWarning = latest.Runtime.DNATWarning
