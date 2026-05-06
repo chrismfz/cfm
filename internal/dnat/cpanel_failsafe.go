@@ -49,66 +49,48 @@ var panelStatusFn = panelStatus
 var panelProbeFn = probePanelTargets
 var panelDisableTableFn = func() error { return execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run() }
 
-func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
+func newPanelDNATFailSafeTarget() dnatFailSafeTarget {
 	every := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
 	failNeed := getenvInt("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", 3)
 	probeTimeout := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_PROBE_TIMEOUT_MS", 300)) * time.Millisecond
 	autoRemoveAllowlist := strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "true")
 
+	return dnatFailSafeTarget{
+		Name:             "cpanel",
+		LogPrefix:        "[dnat:cpanel:failsafe]",
+		Interval:         every,
+		FailureThreshold: failNeed,
+		StatusCheck: func() (bool, error) {
+			on, _, err := panelStatusFn()
+			return on, err
+		},
+		HealthProbe: func() error {
+			return panelProbeFn(probeTimeout)
+		},
+		Cleanup: func(failCount int, probeErr error) {
+			_ = panelDisableTableFn()
+			reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
+			if autoRemoveAllowlist {
+				if changes, err := removePanelAllowlist(); err != nil {
+					reason += "; allowlist removal failed: " + err.Error()
+				} else {
+					reason += "; allowlist removed: " + strings.Join(changes, ", ")
+				}
+			}
+			setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
+			setPanelFailSafeAction(reason)
+			logging.Logf("[dnat:cpanel:failsafe] %s", reason)
+		},
+		UpdateFailCount: setPanelFailSafeCounter,
+	}
+}
+
+func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
 	panelFailSafeMu.Lock()
 	panelFailSafe.Enabled = true
 	panelFailSafeMu.Unlock()
 
-	t := time.NewTicker(every)
-	go func() {
-		defer t.Stop()
-		failCount := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				on, _, err := panelStatusFn()
-				if err != nil {
-					logging.Logf("[dnat:cpanel:failsafe] status check failed: %v", err)
-					continue
-				}
-				if !on {
-					failCount = 0
-					setPanelFailSafeCounter(0)
-					continue
-				}
-				probeErr := panelProbeFn(probeTimeout)
-				if probeErr == nil {
-					failCount = 0
-					setPanelFailSafeCounter(0)
-					continue
-				}
-				failCount++
-				setPanelFailSafeCounter(failCount)
-				if failCount < failNeed {
-					continue
-				}
-				on2, _, _ := panelStatusFn()
-				if on2 {
-					_ = panelDisableTableFn()
-					reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
-					if autoRemoveAllowlist {
-						if changes, err := removePanelAllowlist(); err != nil {
-							reason += "; allowlist removal failed: " + err.Error()
-						} else {
-							reason += "; allowlist removed: " + strings.Join(changes, ", ")
-						}
-					}
-					setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
-					setPanelFailSafeAction(reason)
-					logging.Logf("[dnat:cpanel:failsafe] %s", reason)
-				}
-				failCount = 0
-				setPanelFailSafeCounter(0)
-			}
-		}
-	}()
+	startDNATFailSafe(ctx, newPanelDNATFailSafeTarget())
 }
 
 var panelProbePorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}

@@ -55,25 +55,23 @@ func probeUnixSocket(path string) unixSockProbe {
 	return out
 }
 
-
-
 type fileProbe struct {
-	Path            string
-	Exists          bool
-	ReadableByRoot  bool
+	Path             string
+	Exists           bool
+	ReadableByRoot   bool
 	ReadableByWorker string
-	WorkerErr       string
+	WorkerErr        string
 }
 
 type socketProbeDetailed struct {
-	Path               string
-	Exists             bool
-	IsSocket           bool
-	GroupWritable      bool
-	ConnectableByRoot  bool
+	Path                string
+	Exists              bool
+	IsSocket            bool
+	GroupWritable       bool
+	ConnectableByRoot   bool
 	ConnectableByWorker string
-	WorkerErr          string
-	Err                string
+	WorkerErr           string
+	Err                 string
 }
 
 func isRoot() bool { return os.Geteuid() == 0 }
@@ -86,12 +84,16 @@ func detectWorkerUser() string {
 	}
 	for _, p := range []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"} {
 		b, err := os.ReadFile(p)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "user ") {
 				fields := strings.Fields(strings.TrimSuffix(line, ";"))
-				if len(fields) >= 2 { return fields[1] }
+				if len(fields) >= 2 {
+					return fields[1]
+				}
 			}
 		}
 	}
@@ -99,41 +101,81 @@ func detectWorkerUser() string {
 }
 
 func runAsUser(userName string, cmd ...string) (bool, string) {
-	if len(cmd) == 0 { return false, "empty cmd" }
-	if !isRoot() { return false, "not tested as worker user (need root)" }
+	if len(cmd) == 0 {
+		return false, "empty cmd"
+	}
+	if !isRoot() {
+		return false, "not tested as worker user (need root)"
+	}
 	args := append([]string{"-u", userName, "--"}, cmd...)
 	out, err := exec.Command("runuser", args...).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		if msg == "" { msg = err.Error() }
+		if msg == "" {
+			msg = err.Error()
+		}
 		return false, msg
 	}
 	return true, ""
 }
 
 func probeReadable(path, worker string) fileProbe {
-	fp := fileProbe{Path:path, ReadableByWorker:"not tested"}
-	if st, err := os.Stat(path); err == nil && !st.IsDir() { fp.Exists=true } else { return fp }
-	if f, err := os.Open(path); err == nil { fp.ReadableByRoot=true; _=f.Close() }
+	fp := fileProbe{Path: path, ReadableByWorker: "not tested"}
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		fp.Exists = true
+	} else {
+		return fp
+	}
+	if f, err := os.Open(path); err == nil {
+		fp.ReadableByRoot = true
+		_ = f.Close()
+	}
 	ok, err := runAsUser(worker, "test", "-r", path)
-	if strings.HasPrefix(err, "not tested") { fp.ReadableByWorker = err; return fp }
-	if ok { fp.ReadableByWorker = "true" } else { fp.ReadableByWorker = "false"; fp.WorkerErr = err }
+	if strings.HasPrefix(err, "not tested") {
+		fp.ReadableByWorker = err
+		return fp
+	}
+	if ok {
+		fp.ReadableByWorker = "true"
+	} else {
+		fp.ReadableByWorker = "false"
+		fp.WorkerErr = err
+	}
 	return fp
 }
 
 func probeSocketDetailed(path, worker string) socketProbeDetailed {
-	sp := socketProbeDetailed{Path:path, ConnectableByWorker:"not tested"}
+	sp := socketProbeDetailed{Path: path, ConnectableByWorker: "not tested"}
 	st, err := os.Stat(path)
-	if err != nil { sp.Err = err.Error(); return sp }
+	if err != nil {
+		sp.Err = err.Error()
+		return sp
+	}
 	sp.Exists = true
 	sp.IsSocket = st.Mode()&os.ModeSocket != 0
 	sp.GroupWritable = st.Mode().Perm()&0o020 != 0
-	if !sp.IsSocket { sp.Err = "not a unix socket"; return sp }
+	if !sp.IsSocket {
+		sp.Err = "not a unix socket"
+		return sp
+	}
 	conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
-	if err == nil { sp.ConnectableByRoot = true; _ = conn.Close() } else { sp.Err = err.Error() }
+	if err == nil {
+		sp.ConnectableByRoot = true
+		_ = conn.Close()
+	} else {
+		sp.Err = err.Error()
+	}
 	ok, werr := runAsUser(worker, "sh", "-lc", "exec 3<>"+path)
-	if strings.HasPrefix(werr, "not tested") { sp.ConnectableByWorker = werr; return sp }
-	if ok { sp.ConnectableByWorker = "true" } else { sp.ConnectableByWorker = "false"; sp.WorkerErr = werr }
+	if strings.HasPrefix(werr, "not tested") {
+		sp.ConnectableByWorker = werr
+		return sp
+	}
+	if ok {
+		sp.ConnectableByWorker = "true"
+	} else {
+		sp.ConnectableByWorker = "false"
+		sp.WorkerErr = werr
+	}
 	return sp
 }
 func workerInCFMGroup() bool {
@@ -166,15 +208,18 @@ func getenvInt(key string, def int) int {
 	return n
 }
 
-// StartFailSafe runs a simple DNAT watchdog:
-//   - If DNAT is ON and edge proxy ports are not listening for N consecutive checks,
-//     it disables DNAT (fail-open) and logs the reason.
-//   - DNAT stays OFF until manually re-enabled.
-//
-// No config needed: it watches the same ports used by DNAT (defaults: 9080/9043).
-func StartFailSafe(ctx context.Context, backend firewall.Backend) {
+type webDNATProbeError struct {
+	addr string
+	err  error
+}
+
+func (e webDNATProbeError) Error() string {
+	return e.err.Error()
+}
+
+func newWebDNATFailSafeTarget(backend firewall.Backend) (dnatFailSafeTarget, bool) {
 	if backend == nil {
-		return
+		return dnatFailSafeTarget{}, false
 	}
 
 	// keep these aligned with RunCLI defaults
@@ -184,83 +229,65 @@ func StartFailSafe(ctx context.Context, backend firewall.Backend) {
 	httpsPort := getenvInt("HTTPS_PORT", 9043)
 
 	// simple, stable defaults
-	every := 2 * time.Second
-	failNeed := 3
 	dialTimeout := 300 * time.Millisecond
 
 	addrHTTP := fmt.Sprintf("127.0.0.1:%d", httpPort)
 	addrHTTPS := fmt.Sprintf("127.0.0.1:%d", httpsPort)
 
-	t := time.NewTicker(every)
-	go func() {
-		defer t.Stop()
+	check := func(addr string) error {
+		c, err := net.DialTimeout("tcp", addr, dialTimeout)
+		if err != nil {
+			return err
+		}
+		_ = c.Close()
+		return nil
+	}
 
-		failCount := 0
-		var lastErr error
-		var lastWhich string
-
-		check := func(addr string) error {
-			c, err := net.DialTimeout("tcp", addr, dialTimeout)
-			if err != nil {
-				return err
+	return dnatFailSafeTarget{
+		Name:             "web",
+		LogPrefix:        "[dnat:failsafe]",
+		Interval:         2 * time.Second,
+		FailureThreshold: 3,
+		StatusCheck: func() (bool, error) {
+			return backend.DNATStatus(family, table)
+		},
+		HealthProbe: func() error {
+			// DNAT is ON -> both ports must be listening.
+			if err := check(addrHTTPS); err != nil {
+				return webDNATProbeError{addr: addrHTTPS, err: err}
 			}
-			_ = c.Close()
+			if err := check(addrHTTP); err != nil {
+				return webDNATProbeError{addr: addrHTTP, err: err}
+			}
 			return nil
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
+		},
+		Cleanup: func(_ int, probeErr error) {
+			_ = backend.DNATOff(family, table)
+			if probeErr != nil {
+				if webErr, ok := probeErr.(webDNATProbeError); ok {
+					logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; last=%s err=%v)", webErr.addr, webErr.err)
+					return
+				}
+				logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; err=%v)", probeErr)
 				return
-			case <-t.C:
-				on, err := backend.DNATStatus(family, table)
-				if err != nil {
-					// don't flap on nft errors; just log occasionally
-					logging.Logf("[dnat:failsafe] status check failed: %v", err)
-					continue
-				}
-				if !on {
-					// DNAT is off -> do nothing, no auto-on
-					failCount = 0
-					lastErr = nil
-					lastWhich = ""
-					continue
-				}
-
-				// DNAT is ON -> both ports must be listening
-				if err := check(addrHTTPS); err != nil {
-					failCount++
-					lastErr = err
-					lastWhich = addrHTTPS
-				} else if err := check(addrHTTP); err != nil {
-					failCount++
-					lastErr = err
-					lastWhich = addrHTTP
-				} else {
-					failCount = 0
-					lastErr = nil
-					lastWhich = ""
-					continue
-				}
-
-				if failCount >= failNeed {
-					// confirm still on, then fail-open
-					if on2, _ := backend.DNATStatus(family, table); on2 {
-						_ = backend.DNATOff(family, table)
-						if lastErr != nil {
-							logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; last=%s err=%v)", lastWhich, lastErr)
-						} else {
-							logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening)")
-						}
-					}
-					// stay off; reset counter so we don't spam
-					failCount = 0
-					lastErr = nil
-					lastWhich = ""
-				}
 			}
-		}
-	}()
+			logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening)")
+		},
+	}, true
+}
+
+// StartFailSafe runs a simple DNAT watchdog:
+//   - If DNAT is ON and edge proxy ports are not listening for N consecutive checks,
+//     it disables DNAT (fail-open) and logs the reason.
+//   - DNAT stays OFF until manually re-enabled.
+//
+// No config needed: it watches the same ports used by DNAT (defaults: 9080/9043).
+func StartFailSafe(ctx context.Context, backend firewall.Backend) {
+	target, ok := newWebDNATFailSafeTarget(backend)
+	if !ok {
+		return
+	}
+	startDNATFailSafe(ctx, target)
 }
 
 // RunCLI implements:
@@ -378,9 +405,13 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Printf("cPanel DNAT enabled: %t\n", panelOn)
 	fmt.Printf("Worker user detected: %s\n", worker)
 	fmt.Printf("Bridge token file: exists=%t root_readable=%t worker_readable=%s\n", bridgeToken.Exists, bridgeToken.ReadableByRoot, bridgeToken.ReadableByWorker)
-	if bridgeToken.WorkerErr != "" { fmt.Printf("Bridge token worker read error: %s\n", bridgeToken.WorkerErr) }
+	if bridgeToken.WorkerErr != "" {
+		fmt.Printf("Bridge token worker read error: %s\n", bridgeToken.WorkerErr)
+	}
 	fmt.Printf("Clearance Lua file: exists=%t root_readable=%t worker_readable=%s\n", clearanceLua.Exists, clearanceLua.ReadableByRoot, clearanceLua.ReadableByWorker)
-	if clearanceLua.WorkerErr != "" { fmt.Printf("Clearance Lua worker read error: %s\n", clearanceLua.WorkerErr) }
+	if clearanceLua.WorkerErr != "" {
+		fmt.Printf("Clearance Lua worker read error: %s\n", clearanceLua.WorkerErr)
+	}
 	fmt.Printf("Bridge socket (/var/run/cfm/cfm_nginx.sock): exists=%t socket=%t root_connectable=%t worker_connectable=%s group_write=%t\n", bridgeSock.Exists, bridgeSock.IsSocket, bridgeSock.ConnectableByRoot, bridgeSock.ConnectableByWorker, bridgeSock.GroupWritable)
 	if bridgeSock.Err != "" {
 		fmt.Printf("Bridge socket status: FAIL (%s)\n", bridgeSock.Err)
