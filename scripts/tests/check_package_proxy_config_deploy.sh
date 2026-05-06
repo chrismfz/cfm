@@ -32,19 +32,64 @@ printf '%s\n' "$*" > "$FAKE_OPENRESTY_ARGS"
 EOF_FAKE
 chmod 0755 "$bin_dir/fake-openresty"
 
+cat >"$bin_dir/systemctl" <<'EOF_SYSTEMCTL'
+#!/bin/sh
+case "$1 $2 $3" in
+  "is-active --quiet openresty.service") exit 0 ;;
+  "list-unit-files openresty.service --no-legend") printf '%s\n' "openresty.service enabled"; exit 0 ;;
+  "list-unit-files angie.service --no-legend") printf '%s\n' "angie.service disabled"; exit 0 ;;
+esac
+exit 1
+EOF_SYSTEMCTL
+chmod 0755 "$bin_dir/systemctl"
+
 # Load only helper functions so this test can pass temp destinations without
 # touching system Angie/OpenResty paths.
 awk '/^ANGIE_BIN=/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
 
-CFM_CONFIG_DIR="$configs" \
-FAKE_OPENRESTY_ARGS="$tmp/openresty.args" \
-EXPECTED_MAIN_CONFIG="$configs/openresty.conf" \
-sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5"' sh \
-  "$tmp/functions.sh" \
-  "$bin_dir/fake-openresty" \
-  "$configs/openresty.conf" \
-  "$dst_dir/nginx.conf" \
-  "$engine_conf"
+process_output=$(
+  PATH="$bin_dir:$PATH" \
+  CFM_CONFIG_DIR="$configs" \
+  FAKE_OPENRESTY_ARGS="$tmp/openresty.args" \
+  EXPECTED_MAIN_CONFIG="$configs/openresty.conf" \
+  sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service "/usr/local/openresty/sbin/nginx -s reload"' sh \
+    "$tmp/functions.sh" \
+    "$bin_dir/fake-openresty" \
+    "$configs/openresty.conf" \
+    "$dst_dir/nginx.conf" \
+    "$engine_conf"
+)
+
+if ! printf '%s\n' "$process_output" | rg -q 'CFM proxy config: OpenResty service is active: openresty.service'; then
+  echo "FAIL: expected active OpenResty service status in output" >&2
+  printf '%s\n' "$process_output" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$process_output" | rg -q 'CFM proxy config: deployed OpenResty config; reload with: systemctl reload openresty'; then
+  echo "FAIL: expected OpenResty reload guidance in output" >&2
+  printf '%s\n' "$process_output" >&2
+  exit 1
+fi
+
+
+installed_inactive_output=$(
+  PATH="$bin_dir:$PATH" \
+  sh -c '. "$1"; report_service_status Angie angie.service; report_reload_command Angie angie.service "angie -s reload"' sh \
+    "$tmp/functions.sh"
+)
+
+if ! printf '%s\n' "$installed_inactive_output" | rg -q 'CFM proxy config: Angie service is installed but not active: angie.service'; then
+  echo "FAIL: expected installed-but-inactive Angie service status in output" >&2
+  printf '%s\n' "$installed_inactive_output" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$installed_inactive_output" | rg -q 'CFM proxy config: deployed Angie config; reload with: systemctl reload angie'; then
+  echo "FAIL: expected installed Angie service to use systemctl reload guidance" >&2
+  printf '%s\n' "$installed_inactive_output" >&2
+  exit 1
+fi
 
 actual_args="$(cat "$tmp/openresty.args")"
 expected_args="-t -c $configs/openresty.conf"
@@ -63,6 +108,11 @@ done
 
 if rg -n -- '-t[[:space:]]+-c[[:space:]]+.*(trusted_proxies|challenge_waf_bypass|cfm-panel-listeners)\.conf' scripts/package-proxy-config-deploy.sh >/dev/null; then
   echo "FAIL: package proxy helper must not test sidecar include files as standalone configs" >&2
+  exit 1
+fi
+
+if rg -n 'skipping deploy because another CFM proxy service is active' scripts/package-proxy-config-deploy.sh >/dev/null; then
+  echo "FAIL: package proxy helper must deploy all detected engine configs regardless of active service" >&2
   exit 1
 fi
 
