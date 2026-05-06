@@ -120,15 +120,17 @@ run: build ## Run the application
 # -------------------------------
 # Clean
 # -------------------------------
-# Καθαρίζει το binary και ό,τι προσωρινό υπάρχει στο pkgroot
+# Καθαρίζει το binary και τα staged package payload directories
 clean:
-	@rm -f bin/cfm
-	@rm -rf build/pkgroot/DEBIAN
-	@rm -rf build/pkgroot/etc
-	@rm -rf build/pkgroot/usr
-	@rm -rf build/pkgroot/lib
-	@rm -f  build/pkgroot/LICENSE
-	@echo "🧹 Cleaned: bin, build/pkgroot"
+	@test -n "$(PKGROOT)" && test "$(PKGROOT)" != "/"
+	@rm -f "$(BINARY)"
+	@rm -rf "$(PKGROOT)/DEBIAN"
+	@rm -rf "$(PKGROOT)/etc"
+	@rm -rf "$(PKGROOT)/usr"
+	@rm -rf "$(PKGROOT)/lib"
+	@rm -rf "$(PKGROOT)/var/lib/cfm/lua"
+	@rm -f  "$(PKGROOT)/LICENSE"
+	@echo "🧹 Cleaned: $(BINARY), staged package payload under $(PKGROOT)"
 
 # Καθαρίζει DEB artifacts (deb πακέτα + staging)
 clean-deb:
