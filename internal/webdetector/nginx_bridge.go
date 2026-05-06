@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +73,16 @@ type NginxBridge struct {
 	bypassFunc     func(string) bool           // set once at startup; no lock needed (written before serving starts)
 	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
+
+	// decisionSem caps concurrent in-flight handleDecision goroutines.
+	// Without it, the http.Server is goroutine-per-connection with no
+	// upper bound; under attack or a thundering-herd burst it can spawn
+	// thousands of goroutines and exhaust memory. When the semaphore is
+	// saturated, the handler returns an immediate fail-open allow/allow
+	// decision (matching the Lua-side fail_open default) and increments
+	// stats.shedCount so the operator can see when it's tripping.
+	// Sized at 8 * runtime.NumCPU() in NewNginxBridge.
+	decisionSem chan struct{}
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
@@ -188,6 +199,14 @@ type bridgeStatsState struct {
 	stageBDurations    []time.Duration
 	stageCDurations    []time.Duration
 	timeoutByMinute    map[int64]int64
+	// shedCount is incremented every time handleDecision returns an immediate
+	// fail-open response because the decision-handler concurrency semaphore
+	// was saturated. Surfaced as BridgeStats.Timing.SheddedCount so the
+	// operator can see when the bridge is actively shedding under burst
+	// load (vs. mysterious silence). A nonzero value means the bridge is
+	// protecting itself from goroutine explosion — not necessarily an
+	// error, but worth attention if it grows fast.
+	shedCount int64
 }
 
 // BridgeStats is exported for cfm status / JSON API.
@@ -215,6 +234,11 @@ type BridgeTimingStats struct {
 	TimeoutCurrMin  int64 `json:"timeout_count_current_minute"`
 	SamplesTotal    int64 `json:"samples_total"`
 	QueueSamples    int64 `json:"queue_wait_samples"`
+	// SheddedCount: total decision requests that were fail-open shed
+	// because the handler concurrency semaphore was saturated. See
+	// bridgeStatsState.shedCount for context. Cumulative since process
+	// start; resets only on bridge restart.
+	SheddedCount int64 `json:"shedded_count"`
 }
 
 // NginxBridgeStatus is what GET /nginx/status returns.
@@ -615,6 +639,7 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		stats: bridgeStatsState{
 			timeoutByMinute: make(map[int64]int64),
 		},
+		decisionSem: make(chan struct{}, decisionConcurrencyCap()),
 	}
 
 	if b.cfg.Enabled {
@@ -1012,6 +1037,7 @@ func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeSta
 			TimeoutCurrMin: b.stats.timeoutByMinute[nowMin],
 			SamplesTotal:   int64(len(b.stats.totalDurations)),
 			QueueSamples:   int64(len(b.stats.queueWaitDurations)),
+			SheddedCount:   b.stats.shedCount,
 		},
 	}
 }
@@ -1305,6 +1331,20 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	return nil
 }
 
+// decisionConcurrencyCap returns the size of the per-bridge decision-handler
+// semaphore. Defaults to 8 × runtime.NumCPU() with a floor of 32 (so even on
+// a 1-core test box / container the cap is a useful number, not 8). This is
+// roomy enough that legitimate traffic from a busy host (a few hundred req/s)
+// never trips it, but tight enough that a goroutine flood from a thundering
+// herd or attack does get capped.
+func decisionConcurrencyCap() int {
+	n := runtime.NumCPU() * 8
+	if n < 32 {
+		n = 32
+	}
+	return n
+}
+
 // ── HTTP handlers (server side, called by Lua) ────────────────────────────────
 
 // handleDecision: Lua asks "what do I do with this IP / vhost?"
@@ -1312,6 +1352,48 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Concurrency gate. If we're already at the cap of in-flight handlers,
+	// shed by returning an immediate fail-open allow/allow response. Counts
+	// in stats.shedCount so operators can see when this trips.
+	//
+	// CRITICAL: rule_action is set to "shed" in the response so cfm.lua's
+	// decision cache filter (which only caches when ip_action+vhost_action
+	// are both "allow" *and* rule_action is unset, see cfm.lua:675) skips
+	// caching this entry. Without this, a 1-second saturation event would
+	// cache "allow/allow" per-(IP,host,URL) for the full 90s
+	// decision_cache_ttl_ms — turning a brief overload into 90 seconds of
+	// degraded enforcement for affected requests. With rule_action set, each
+	// shed forces the next request to retry the bridge fresh, so as soon
+	// as the cap clears, normal enforcement resumes.
+	//
+	// Lua treats rule_action="shed" as fall-through-to-allow (cfm.lua only
+	// hard-codes "block"/"challenge"/"throttle" at lines 1075/1084/1102),
+	// so the user-visible behavior remains identical to a normal allow.
+	//
+	// Trade-off accepted: during shed, the handler does NOT consult ipState
+	// (so a blocked IP slips through for that request), vhState, or run
+	// traffic rules. For severe blocks, kernel-level nft rules drop the
+	// packet before it reaches nginx — so the soft "block" leak is bounded
+	// to web-only blocks during burst saturation. Operators should alert
+	// on SheddedCount > 0 sustained — it indicates the bridge is overloaded
+	// or its dependencies (geoip, rule engine) are stalled.
+	select {
+	case b.decisionSem <- struct{}{}:
+		defer func() { <-b.decisionSem }()
+	default:
+		b.stats.mu.Lock()
+		b.stats.shedCount++
+		b.stats.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-CFM-Bridge-Shed", "1")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"ip_action":    "allow",
+			"vhost_action": "allow",
+			"rule_action":  "shed",
+		})
 		return
 	}
 
