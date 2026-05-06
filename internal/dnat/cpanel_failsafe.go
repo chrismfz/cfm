@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,13 +46,12 @@ func setPanelFailSafeAction(reason string) {
 
 var panelStatusFn = panelStatus
 var panelProbeFn = probePanelTargets
-var panelDisableTableFn = func() error { return execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run() }
+var panelOffFn = panelOff
 
 func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
 	every := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
 	failNeed := getenvInt("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", 3)
 	probeTimeout := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_PROBE_TIMEOUT_MS", 300)) * time.Millisecond
-	autoRemoveAllowlist := strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "true")
 
 	panelFailSafeMu.Lock()
 	panelFailSafe.Enabled = true
@@ -91,14 +89,12 @@ func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
 				}
 				on2, _, _ := panelStatusFn()
 				if on2 {
-					_ = panelDisableTableFn()
+					result, err := panelOffFn()
 					reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
-					if autoRemoveAllowlist {
-						if changes, err := removePanelAllowlist(); err != nil {
-							reason += "; allowlist removal failed: " + err.Error()
-						} else {
-							reason += "; allowlist removed: " + strings.Join(changes, ", ")
-						}
+					if err != nil {
+						reason += "; cleanup failed: " + err.Error()
+					} else if len(result.FirewallChanges) > 0 {
+						reason += "; allowlist removed: " + strings.Join(result.FirewallChanges, ", ")
 					}
 					setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
 					setPanelFailSafeAction(reason)

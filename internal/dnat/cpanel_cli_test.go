@@ -429,3 +429,111 @@ func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
 		t.Fatalf("listener config not rewritten to forced:\n%s", string(b))
 	}
 }
+
+func TestPanelOffPerformsFullCleanup(t *testing.T) {
+	tmp := t.TempDir()
+	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
+	if err := os.WriteFile(listenerPath, []byte(`server { set $cfm_panel_challenge_mode "forced"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origPaths := panelListenerConfigPaths
+	origDelete := panelDeleteTableFn
+	origRemove := panelRemoveAllowlistFn
+	origPersist := panelChallengeEnabledStatePath
+	origModePath := panelChallengeModeStatePath
+	origApply := panelApplyChallengeModeToPathsFn
+	origReload := panelReloadListenerServiceFn
+	panelListenerConfigPaths = []string{listenerPath}
+	panelChallengeEnabledStatePath = filepath.Join(tmp, "panel_challenge_enabled")
+	panelChallengeModeStatePath = panelChallengeEnabledStatePath
+	deletes := 0
+	removes := 0
+	reloads := 0
+	panelDeleteTableFn = func() error { deletes++; return nil }
+	panelRemoveAllowlistFn = func() ([]string, error) {
+		removes++
+		return []string{"tcp/2083 removed", "tcp/2087 removed"}, nil
+	}
+	panelApplyChallengeModeToPathsFn = applyPanelChallengeModeToPaths
+	panelReloadListenerServiceFn = func() error { reloads++; return nil }
+	t.Cleanup(func() {
+		panelListenerConfigPaths = origPaths
+		panelDeleteTableFn = origDelete
+		panelRemoveAllowlistFn = origRemove
+		panelChallengeEnabledStatePath = origPersist
+		panelChallengeModeStatePath = origModePath
+		panelApplyChallengeModeToPathsFn = origApply
+		panelReloadListenerServiceFn = origReload
+	})
+
+	setPanelFirewallHealth("PARTIAL", "previous", true)
+	result, err := panelOff()
+	if err != nil {
+		t.Fatalf("panelOff: %v", err)
+	}
+	if deletes != 1 || removes != 1 || reloads != 1 {
+		t.Fatalf("expected table delete, allowlist removal, and reload once; deletes=%d removes=%d reloads=%d", deletes, removes, reloads)
+	}
+	if strings.Join(result.FirewallChanges, ",") != "tcp/2083 removed,tcp/2087 removed" {
+		t.Fatalf("unexpected firewall changes: %v", result.FirewallChanges)
+	}
+	if got := loadPersistedPanelChallengeMode(); got != "off" {
+		t.Fatalf("expected persisted challenge mode off, got %q", got)
+	}
+	b, err := os.ReadFile(listenerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `set $cfm_panel_challenge_mode "off";`) {
+		t.Fatalf("expected listener challenge mode off, got:\n%s", string(b))
+	}
+	health := getPanelFirewallHealth()
+	if health.State != "OK" || health.LastReason != "" || !health.Attempted {
+		t.Fatalf("unexpected health after panelOff: %+v", health)
+	}
+}
+
+func TestPanelCLIOffUsesSharedCleanupOutput(t *testing.T) {
+	origDelete := panelDeleteTableFn
+	origRemove := panelRemoveAllowlistFn
+	origPersistFn := panelPersistChallengeEnabledFn
+	origApplyFn := panelApplyChallengeModeToPathsFn
+	origReloadFn := panelReloadListenerServiceFn
+	deletes := 0
+	removes := 0
+	persisted := false
+	applied := ""
+	reloads := 0
+	panelDeleteTableFn = func() error { deletes++; return nil }
+	panelRemoveAllowlistFn = func() ([]string, error) {
+		removes++
+		return []string{"tcp/2083 removed"}, nil
+	}
+	panelPersistChallengeEnabledFn = func(enabled bool) error { persisted = enabled; return nil }
+	panelApplyChallengeModeToPathsFn = func(mode string, paths []string) error { applied = mode; return nil }
+	panelReloadListenerServiceFn = func() error { reloads++; return nil }
+	t.Cleanup(func() {
+		panelDeleteTableFn = origDelete
+		panelRemoveAllowlistFn = origRemove
+		panelPersistChallengeEnabledFn = origPersistFn
+		panelApplyChallengeModeToPathsFn = origApplyFn
+		panelReloadListenerServiceFn = origReloadFn
+	})
+
+	out, errOut := captureStreams(t, func() {
+		code := runPanelCLI([]string{"off"}, nil)
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
+		}
+	})
+	if errOut != "" {
+		t.Fatalf("unexpected stderr: %s", errOut)
+	}
+	if deletes != 1 || removes != 1 || persisted || applied != "off" || reloads != 1 {
+		t.Fatalf("cleanup mismatch deletes=%d removes=%d persisted=%v applied=%q reloads=%d", deletes, removes, persisted, applied, reloads)
+	}
+	if !strings.Contains(out, "DNAT cpanel: OFF") || !strings.Contains(out, "Firewall: tcp/2083 removed") {
+		t.Fatalf("unexpected off output:\n%s", out)
+	}
+}

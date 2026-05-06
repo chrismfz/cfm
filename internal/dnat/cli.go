@@ -55,25 +55,23 @@ func probeUnixSocket(path string) unixSockProbe {
 	return out
 }
 
-
-
 type fileProbe struct {
-	Path            string
-	Exists          bool
-	ReadableByRoot  bool
+	Path             string
+	Exists           bool
+	ReadableByRoot   bool
 	ReadableByWorker string
-	WorkerErr       string
+	WorkerErr        string
 }
 
 type socketProbeDetailed struct {
-	Path               string
-	Exists             bool
-	IsSocket           bool
-	GroupWritable      bool
-	ConnectableByRoot  bool
+	Path                string
+	Exists              bool
+	IsSocket            bool
+	GroupWritable       bool
+	ConnectableByRoot   bool
 	ConnectableByWorker string
-	WorkerErr          string
-	Err                string
+	WorkerErr           string
+	Err                 string
 }
 
 func isRoot() bool { return os.Geteuid() == 0 }
@@ -86,12 +84,16 @@ func detectWorkerUser() string {
 	}
 	for _, p := range []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"} {
 		b, err := os.ReadFile(p)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "user ") {
 				fields := strings.Fields(strings.TrimSuffix(line, ";"))
-				if len(fields) >= 2 { return fields[1] }
+				if len(fields) >= 2 {
+					return fields[1]
+				}
 			}
 		}
 	}
@@ -99,41 +101,81 @@ func detectWorkerUser() string {
 }
 
 func runAsUser(userName string, cmd ...string) (bool, string) {
-	if len(cmd) == 0 { return false, "empty cmd" }
-	if !isRoot() { return false, "not tested as worker user (need root)" }
+	if len(cmd) == 0 {
+		return false, "empty cmd"
+	}
+	if !isRoot() {
+		return false, "not tested as worker user (need root)"
+	}
 	args := append([]string{"-u", userName, "--"}, cmd...)
 	out, err := exec.Command("runuser", args...).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		if msg == "" { msg = err.Error() }
+		if msg == "" {
+			msg = err.Error()
+		}
 		return false, msg
 	}
 	return true, ""
 }
 
 func probeReadable(path, worker string) fileProbe {
-	fp := fileProbe{Path:path, ReadableByWorker:"not tested"}
-	if st, err := os.Stat(path); err == nil && !st.IsDir() { fp.Exists=true } else { return fp }
-	if f, err := os.Open(path); err == nil { fp.ReadableByRoot=true; _=f.Close() }
+	fp := fileProbe{Path: path, ReadableByWorker: "not tested"}
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		fp.Exists = true
+	} else {
+		return fp
+	}
+	if f, err := os.Open(path); err == nil {
+		fp.ReadableByRoot = true
+		_ = f.Close()
+	}
 	ok, err := runAsUser(worker, "test", "-r", path)
-	if strings.HasPrefix(err, "not tested") { fp.ReadableByWorker = err; return fp }
-	if ok { fp.ReadableByWorker = "true" } else { fp.ReadableByWorker = "false"; fp.WorkerErr = err }
+	if strings.HasPrefix(err, "not tested") {
+		fp.ReadableByWorker = err
+		return fp
+	}
+	if ok {
+		fp.ReadableByWorker = "true"
+	} else {
+		fp.ReadableByWorker = "false"
+		fp.WorkerErr = err
+	}
 	return fp
 }
 
 func probeSocketDetailed(path, worker string) socketProbeDetailed {
-	sp := socketProbeDetailed{Path:path, ConnectableByWorker:"not tested"}
+	sp := socketProbeDetailed{Path: path, ConnectableByWorker: "not tested"}
 	st, err := os.Stat(path)
-	if err != nil { sp.Err = err.Error(); return sp }
+	if err != nil {
+		sp.Err = err.Error()
+		return sp
+	}
 	sp.Exists = true
 	sp.IsSocket = st.Mode()&os.ModeSocket != 0
 	sp.GroupWritable = st.Mode().Perm()&0o020 != 0
-	if !sp.IsSocket { sp.Err = "not a unix socket"; return sp }
+	if !sp.IsSocket {
+		sp.Err = "not a unix socket"
+		return sp
+	}
 	conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
-	if err == nil { sp.ConnectableByRoot = true; _ = conn.Close() } else { sp.Err = err.Error() }
+	if err == nil {
+		sp.ConnectableByRoot = true
+		_ = conn.Close()
+	} else {
+		sp.Err = err.Error()
+	}
 	ok, werr := runAsUser(worker, "sh", "-lc", "exec 3<>"+path)
-	if strings.HasPrefix(werr, "not tested") { sp.ConnectableByWorker = werr; return sp }
-	if ok { sp.ConnectableByWorker = "true" } else { sp.ConnectableByWorker = "false"; sp.WorkerErr = werr }
+	if strings.HasPrefix(werr, "not tested") {
+		sp.ConnectableByWorker = werr
+		return sp
+	}
+	if ok {
+		sp.ConnectableByWorker = "true"
+	} else {
+		sp.ConnectableByWorker = "false"
+		sp.WorkerErr = werr
+	}
 	return sp
 }
 func workerInCFMGroup() bool {
@@ -378,9 +420,13 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Printf("cPanel DNAT enabled: %t\n", panelOn)
 	fmt.Printf("Worker user detected: %s\n", worker)
 	fmt.Printf("Bridge token file: exists=%t root_readable=%t worker_readable=%s\n", bridgeToken.Exists, bridgeToken.ReadableByRoot, bridgeToken.ReadableByWorker)
-	if bridgeToken.WorkerErr != "" { fmt.Printf("Bridge token worker read error: %s\n", bridgeToken.WorkerErr) }
+	if bridgeToken.WorkerErr != "" {
+		fmt.Printf("Bridge token worker read error: %s\n", bridgeToken.WorkerErr)
+	}
 	fmt.Printf("Clearance Lua file: exists=%t root_readable=%t worker_readable=%s\n", clearanceLua.Exists, clearanceLua.ReadableByRoot, clearanceLua.ReadableByWorker)
-	if clearanceLua.WorkerErr != "" { fmt.Printf("Clearance Lua worker read error: %s\n", clearanceLua.WorkerErr) }
+	if clearanceLua.WorkerErr != "" {
+		fmt.Printf("Clearance Lua worker read error: %s\n", clearanceLua.WorkerErr)
+	}
 	fmt.Printf("Bridge socket (/var/run/cfm/cfm_nginx.sock): exists=%t socket=%t root_connectable=%t worker_connectable=%s group_write=%t\n", bridgeSock.Exists, bridgeSock.IsSocket, bridgeSock.ConnectableByRoot, bridgeSock.ConnectableByWorker, bridgeSock.GroupWritable)
 	if bridgeSock.Err != "" {
 		fmt.Printf("Bridge socket status: FAIL (%s)\n", bridgeSock.Err)
@@ -467,6 +513,43 @@ func help() {
 	fmt.Fprintln(os.Stderr, "  cfm dnat        (show ON/OFF + rules + explanation)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat on     (enable DNAT)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat off    (disable DNAT)")
+}
+
+var panelListenerConfigPaths = []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}
+
+var panelDeleteTableFn = func() error { return execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run() }
+var panelRemoveAllowlistFn = removePanelAllowlist
+var panelPersistChallengeEnabledFn = persistPanelChallengeEnabled
+var panelApplyChallengeModeToPathsFn = applyPanelChallengeModeToPaths
+var panelReloadListenerServiceFn = reloadPanelListenerService
+
+type panelOffResult struct {
+	FirewallChanges []string
+}
+
+func panelOff() (panelOffResult, error) {
+	return panelOffWithOptions(true)
+}
+
+func panelOffWithOptions(autoRemoveAllowlist bool) (panelOffResult, error) {
+	result := panelOffResult{}
+	health := getPanelFirewallHealth()
+	_ = panelDeleteTableFn()
+
+	if autoRemoveAllowlist {
+		changes, err := panelRemoveAllowlistFn()
+		result.FirewallChanges = changes
+		if err != nil {
+			setPanelFirewallHealth("FAILED", err.Error(), health.Attempted)
+			return result, err
+		}
+	}
+
+	setPanelFirewallHealth("OK", "", health.Attempted)
+	_ = panelPersistChallengeEnabledFn(false)
+	_ = panelApplyChallengeModeToPathsFn("off", panelListenerConfigPaths)
+	_ = panelReloadListenerServiceFn()
+	return result, nil
 }
 
 func runPanelCLI(args []string, backend firewall.Backend) int {
@@ -565,21 +648,13 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		return 0
 	case "off":
-		h := getPanelFirewallHealth()
-		if err := exec.Command("nft", "delete", "table", "inet", "cfm_panel_redirect").Run(); err != nil {
-		}
-		changes, err := removePanelAllowlist()
+		result, err := panelOff()
 		if err != nil {
-			setPanelFirewallHealth("FAILED", err.Error(), h.Attempted)
 			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
 			return 1
 		}
-		setPanelFirewallHealth("OK", "", h.Attempted)
-		_ = persistPanelChallengeEnabled(false)
-		_ = applyPanelChallengeModeToPaths("off", []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
-		_ = reloadPanelListenerService()
 		fmt.Println("DNAT cpanel: OFF")
-		for _, ch := range changes {
+		for _, ch := range result.FirewallChanges {
 			fmt.Println("Firewall:", ch)
 		}
 		return 0
