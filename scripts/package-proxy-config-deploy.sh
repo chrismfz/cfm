@@ -148,9 +148,16 @@ prepare_sidecars() {
     ps_engine=$1
     ps_conf_dir=$2
 
-    install_file "$CFM_CONFIG_DIR/trusted_proxies.conf" "$ps_conf_dir/trusted_proxies.conf" || return 1
-    install_file "$CFM_CONFIG_DIR/challenge_waf_bypass.conf" "$ps_conf_dir/challenge_waf_bypass.conf" || return 1
-    render_listener_config "$ps_engine" "$ps_conf_dir/cfm-panel-listeners.conf" || return 1
+    ps_sidecar_src=$CFM_CONFIG_DIR/trusted_proxies.conf
+    ps_sidecar_dst=$ps_conf_dir/trusted_proxies.conf
+    install_file "$ps_sidecar_src" "$ps_sidecar_dst" || return 1
+
+    ps_sidecar_src=$CFM_CONFIG_DIR/challenge_waf_bypass.conf
+    ps_sidecar_dst=$ps_conf_dir/challenge_waf_bypass.conf
+    install_file "$ps_sidecar_src" "$ps_sidecar_dst" || return 1
+
+    ps_sidecar_dst=$ps_conf_dir/cfm-panel-listeners.conf
+    render_listener_config "$ps_engine" "$ps_sidecar_dst" || return 1
 
     return 0
 }
