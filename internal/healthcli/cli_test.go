@@ -3,12 +3,14 @@ package healthcli
 import (
 	"bytes"
 	"cfm/internal/healthmodel"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthCommandOutputs_Table(t *testing.T) {
@@ -107,6 +109,81 @@ func TestHealthSummaryNetworkRendersConntrackWithoutBandwidth(t *testing.T) {
 	}
 	if !strings.Contains(out, "Conntrack: 2303 / 1548288 (0%)") {
 		t.Fatalf("expected Conntrack line, got:\n%s", out)
+	}
+}
+
+func TestHealthSummaryIngestSocketLiveRendersOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"schema_version":"health.snapshot.v1",
+			"node_id":"n1",
+			"collected_at":"2026-04-28T00:00:00Z",
+			"host":{"hostname":"host1"},
+			"disk":{},
+			"services":[],
+			"cfm_metrics":{},
+			"network":{},
+			"runtime":{"ingest_socket_path":"/run/cfm/ingest.sock","ingest_socket_status":"live"}
+		}`))
+	}))
+	defer srv.Close()
+
+	out, err := runWithCapturedStdout(func() error {
+		return Run(srv.URL, []string{"--no-color", "--debug-runtime"})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	want := "[OK]  Using ingest socket /run/cfm/ingest.sock - Live"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected output to contain %q\noutput:\n%s", want, out)
+	}
+}
+
+func TestHealthSummaryIngestSocketUsesAuthoritativeSourceWhenStatusEmpty(t *testing.T) {
+	now := time.Now().Unix()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"schema_version":"health.snapshot.v1",
+			"node_id":"n1",
+			"collected_at":"2026-04-28T00:00:00Z",
+			"host":{"hostname":"host1"},
+			"disk":{},
+			"services":[],
+			"cfm_metrics":{},
+			"network":{},
+			"runtime":{
+				"ingest_socket_path":"/run/cfm/ingest.sock",
+				"ingest_source_active":"socket",
+				"ingest_source_sock_listening":true,
+				"ingest_source_last_received_unix":%d
+			}
+		}`, now)
+	}))
+	defer srv.Close()
+
+	out, err := runWithCapturedStdout(func() error {
+		return Run(srv.URL, []string{"--no-color", "--debug-runtime"})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	want := "[OK]  Using ingest socket /run/cfm/ingest.sock - Live"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected output to contain %q\noutput:\n%s", want, out)
+	}
+	if strings.Contains(out, "[WARN]  Using ingest socket") {
+		t.Fatalf("expected authoritative socket/listening source not to warn\noutput:\n%s", out)
 	}
 }
 
