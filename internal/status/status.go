@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/detectors"
-	"cfm/internal/detectors/health"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
@@ -302,61 +301,6 @@ func Run(args []string, backend firewall.Backend) {
 		}
 		timing["ttl_summary_ms"] = time.Since(t0).Milliseconds()
 	}
-
-	// --- Health snapshot (works even if daemon is not running) ---
-	t0 = time.Now()
-	hs := health.SnapshotNow()
-	timing["health_ms"] = time.Since(t0).Milliseconds()
-	fmt.Printf("\n ====================================================================== \n")
-	fmt.Printf("\nHealth:\n")
-	fmt.Printf("  Hostname: %s\n", hs.Host)
-	fmt.Printf("  CPU load: %.2f (1m)\n", hs.Load1)
-	fmt.Printf("  RAM: %.1f%%\n", hs.RamUsedPct)
-	fmt.Printf("  Disk /: %.1f%%\n", hs.DiskRootPct)
-	fmt.Printf("  Connections: %d (EST:%d SYN_RECV:%d LISTEN:%d)\n",
-		hs.TCP["total"], hs.TCP["ESTABLISHED"], hs.TCP["SYN_RECV"], hs.TCP["LISTEN"])
-
-	if hs.Mdadm.Status != "" && hs.Mdadm.Status != "NO RAID" {
-		fmt.Printf("  RAID: %s\n", hs.Mdadm.Status)
-	}
-
-	// Compact SMART summary
-	if len(hs.Smart) > 0 {
-		total, fails := 0, 0
-		temps := make([]string, 0, 3)
-		for dev, info := range hs.Smart {
-			total++
-			h := strings.ToUpper(info.Health)
-			if strings.Contains(h, "FAIL") || strings.Contains(h, "CRIT") {
-				fails++
-			}
-			if info.TempC != "" && len(temps) < 3 {
-				temps = append(temps, fmt.Sprintf("%s=%sC", dev, info.TempC))
-			}
-		}
-		if fails > 0 {
-			fmt.Printf("  SMART: FAIL=%d/%d", fails, total)
-		} else {
-			fmt.Printf("  SMART: PASS (%d)", total)
-		}
-		if len(temps) > 0 {
-			fmt.Printf(" | temps: %s", strings.Join(temps, ", "))
-		}
-		fmt.Println()
-	}
-	fmt.Printf("\n ====================================================================== \n")
-	flow := probeChallengeFlowReadiness()
-	fmt.Printf("\nBridge / Interceptor:\n")
-	fmt.Printf("  Challenge flow readiness: %s [%s] %s\n", flow.Status, flow.Code, flow.Reason)
-	fmt.Printf("\n ====================================================================== \n")
-
-	// --- NEW: Conntrack usage ---
-	t0 = time.Now()
-	if ct, mx, err := readConntrackUsage(); err == nil && mx > 0 {
-		p := float64(ct) * 100 / float64(mx)
-		fmt.Printf("Conntrack: %d / %d (%.0f%%)\n", ct, mx, p)
-	}
-	timing["conntrack_usage_ms"] = time.Since(t0).Milliseconds()
 
 	// --- Conntrack + locals + TCP_IN ports (needed for TopN) ---
 	t0 = time.Now()
@@ -734,7 +678,7 @@ var (
 	tcpDialTimeout           = func(network, addr string, timeout time.Duration) (net.Conn, error) {
 		return net.DialTimeout(network, addr, timeout)
 	}
-	detectorsConfigPath      = "/etc/cfm/detectors.conf"
+	detectorsConfigPath = "/etc/cfm/detectors.conf"
 )
 
 type challengeFlowReadiness struct {
@@ -919,7 +863,6 @@ func readDetectorSectionKV(path, section string) map[string]string {
 	}
 	return out
 }
-
 
 func readChallengeTokenProbe() luaTokenProbe {
 	tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
