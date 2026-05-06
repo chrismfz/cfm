@@ -29,6 +29,12 @@ func Status(backend firewall.Backend) (bool, error) {
 	return backend.DNATStatus(DefaultFamily, DefaultTable)
 }
 
+// PanelStatus returns whether panel DNAT is currently enabled using the same
+// defaults as the cPanel DNAT CLI/report path.
+func PanelStatus() (bool, string, error) {
+	return panelStatus()
+}
+
 // EffectiveTargetPorts returns the DNAT target ports resolved using the same
 // env-driven behavior as the CLI (HTTP_PORT/HTTPS_PORT) with sane defaults.
 func EffectiveTargetPorts() (httpPort int, httpsPort int) {

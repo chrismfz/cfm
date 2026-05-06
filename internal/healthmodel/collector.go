@@ -100,6 +100,7 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out := RuntimeStatus{
 		CFMServiceState:    "unknown",
 		DNATEnabled:        "unknown",
+		PanelDNATEnabled:   "unknown",
 		DNATFrontend:       "unknown",
 		DNATConfidence:     "low",
 		FrontendWorking:    "down",
@@ -127,6 +128,15 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 		} else {
 			out.DNATEnabled = "off"
 		}
+	}
+	if enabled, _, err := dnat.PanelStatus(); err == nil {
+		if enabled {
+			out.PanelDNATEnabled = "on"
+		} else {
+			out.PanelDNATEnabled = "off"
+		}
+	} else {
+		out.PanelDNATEnabled = "unavailable"
 	}
 	resolution := ResolveWebRoles(out.DNATEnabled)
 	out.DNATFrontend = resolution.frontend
