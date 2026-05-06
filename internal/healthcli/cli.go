@@ -105,6 +105,9 @@ type modernSample struct {
 		ChallengeFlowCode       string `json:"challenge_flow_code"`
 		ChallengeFlowReason     string `json:"challenge_flow_reason"`
 		SSLCollectorStatus      string `json:"sslcollector_status"`
+		IngestSocketPath        string `json:"ingest_socket_path"`
+		IngestSocketStatus      string `json:"ingest_socket_status"`
+		IngestSocketReason      string `json:"ingest_socket_reason"`
 	} `json:"runtime"`
 	Network struct {
 		InBps  uint64         `json:"bandwidth_in_bps"`
@@ -285,7 +288,6 @@ func printSummary(s parsedSnapshot, opts cliOptions) {
 	}
 	printHostSection(s, opts)
 	printRuntimeSection(s, opts)
-	printEdgeInterceptorSection(s, opts)
 	printDiskSection(s, opts)
 	printStorageSection(s, opts)
 	printNetworkSection(s, opts)
@@ -411,11 +413,13 @@ func printWebStackSection(s parsedSnapshot, opts cliOptions) {
 		fmt.Printf("Web stack - Edge Interceptor %-6s %s\n", badge(status, opts), strings.Join(parts, "; "))
 		printDNATSubchecks(s.Modern.Runtime.DNATEnabled, s.Modern.Runtime.PanelDNATEnabled, opts)
 		printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
+		printEdgeInterceptorDiagnostics(s, opts)
 		return
 	}
 	fmt.Printf("Web stack - Edge Interceptor %s\n", badge(status, opts))
 	printDNATSubchecks(s.Modern.Runtime.DNATEnabled, s.Modern.Runtime.PanelDNATEnabled, opts)
 	printChallengeFlowReadiness(s.Modern.Runtime.ChallengeFlowState, s.Modern.Runtime.ChallengeFlowCode, s.Modern.Runtime.ChallengeFlowReason, opts)
+	printEdgeInterceptorDiagnostics(s, opts)
 	for _, row := range rows {
 		fmt.Printf("  %s: enabled=%s active=%s state=%s%s\n", row.Name, yesNo(row.Enabled), yesNo(row.Active), row.State, formatWebStackUptime(row))
 	}
@@ -485,20 +489,50 @@ func challengeFlowReadiness(state, code, reason string) (healthLabelRank, string
 	return label, detail, true
 }
 
-func printEdgeInterceptorSection(s parsedSnapshot, opts cliOptions) {
-	_ = opts
+func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 	cfmToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
 	bridgeToken := edgediag.ReadLuaToken(edgediag.CanonicalBridgeTokenPath)
 	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", cfmToken)
 	cfg := edgediag.BridgeRuntimeConfig{Enabled: true, SocketPath: "/var/run/cfm/cfm_nginx.sock", DisplaySocketPath: "/var/run/cfm/cfm_nginx.sock", SocketSource: "fallback"}
 	bridge := edgediag.ProbeNginxBridgeRuntime(cfg, bridgeToken)
-	fmt.Println("Edge interceptor")
-	fmt.Printf("  sslcollector.sock: %s\n", mapEdgeStatus(sock.Category))
+	fmt.Printf("  SSL Collector Socket: %s\n", mapEdgeStatus(sock.Category))
 	fmt.Printf("    path=%s uid=%s gid=%s mode=%s probe=%s%s\n", sock.Path, sock.UID, sock.GID, sock.Mode, sock.Category, sock.ErrorText)
 	fmt.Printf("  challenge token (CHALLENGE_TOKEN): %s\n", edgediag.TokenHealth(cfmToken))
 	fmt.Printf("  edge bridge token (OPENRESTY_TOKEN): %s\n", edgediag.TokenHealth(bridgeToken))
 	fmt.Printf("  bridge socket auth: %s\n", bridge.Summary())
+	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, s.Modern.Runtime.IngestSocketStatus, s.Modern.Runtime.IngestSocketReason, opts)
+}
 
+func printIngestSocketHealth(path, status, reason string, opts cliOptions) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "/run/cfm/ingest.sock"
+	}
+	display, label := ingestSocketDisplay(status)
+	if label != okLabel {
+		reason = strings.TrimSpace(reason)
+		if reason != "" {
+			display += " (" + reason + ")"
+		}
+	}
+	fmt.Printf("  %s  Using ingest socket %s - %s\n", badge(label, opts), path, display)
+}
+
+func ingestSocketDisplay(status string) (string, healthLabelRank) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "live", "ok":
+		return "Live", okLabel
+	case "missing":
+		return "Missing", critLabel
+	case "invalid":
+		return "Invalid", critLabel
+	case "down":
+		return "Down", critLabel
+	case "":
+		return "Unknown", warnLabel
+	default:
+		return strings.TrimSpace(status), warnLabel
+	}
 }
 
 func mapEdgeStatus(v string) string {

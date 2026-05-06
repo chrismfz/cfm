@@ -46,6 +46,9 @@ type RuntimeStatus struct {
 	ChallengeListenerStatus string        `json:"challenge_listener_status,omitempty"`
 	ChallengeListenerReason string        `json:"challenge_listener_reason,omitempty"`
 	SSLCollectorStatus      string        `json:"sslcollector_status,omitempty"`
+	IngestSocketPath        string        `json:"ingest_socket_path,omitempty"`
+	IngestSocketStatus      string        `json:"ingest_socket_status,omitempty"`
+	IngestSocketReason      string        `json:"ingest_socket_reason,omitempty"`
 	FrontendDebug           FrontendDebug `json:"frontend_debug,omitempty"`
 }
 

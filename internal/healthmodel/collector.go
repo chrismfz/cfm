@@ -163,6 +163,7 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out.ChallengeListenerStatus = flow.ChallengeListenerStatus
 	out.ChallengeListenerReason = flow.ChallengeListenerReason
 	out.SSLCollectorStatus = probeSSLCollectorStatus()
+	out.IngestSocketPath, out.IngestSocketStatus, out.IngestSocketReason = probeIngestSocketHealth()
 	return out
 }
 
@@ -245,6 +246,26 @@ func probeChallengeFlowReadiness() flowProbe {
 	out.BridgeSocketStatus = "ok"
 	out.BridgeSocketReason = "ok"
 	return flowProbe{Status: "OK", Code: "ok", Reason: "challenge flow ready", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+}
+
+func probeIngestSocketHealth() (path, status, reason string) {
+	path = "/run/cfm/ingest.sock"
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, "missing", "socket path missing"
+		}
+		return path, "invalid", err.Error()
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return path, "invalid", "path exists but is not unix socket"
+	}
+	conn, err := net.DialTimeout("unix", path, 1200*time.Millisecond)
+	if err != nil {
+		return path, "down", err.Error()
+	}
+	_ = conn.Close()
+	return path, "live", "connect ok"
 }
 
 func probeSSLCollectorStatus() string {
