@@ -69,6 +69,7 @@ type modernSample struct {
 		DiskWearout  string                             `json:"disk_wearout"`
 		SmartDevices map[string]healthmodel.SmartDevice `json:"smart_devices"`
 		MDADMHealth  string                             `json:"mdadm_health"`
+		MDADM        healthmodel.MDADMStatus            `json:"mdadm"`
 		ZFSHealth    string                             `json:"zfs_health"`
 	} `json:"disk"`
 	CFM struct {
@@ -793,11 +794,12 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 	smart := firstNonEmpty(s.Modern.Disk.SmartHealth, getStr(s.RawMap, "smart_health"))
 	wear := firstNonEmpty(s.Modern.Disk.DiskWearout, getStr(s.RawMap, "disk_wearout"))
 	mdadm := firstNonEmpty(s.Modern.Disk.MDADMHealth, getStr(s.RawMap, "mdadm_health"))
+	mdadmRawStatus := firstNonEmpty(s.Modern.Disk.MDADM.Status, getRawMDADMStatus(s.RawMap))
 	zfs := firstNonEmpty(s.Modern.Disk.ZFSHealth, getStr(s.RawMap, "zfs_health"))
-	if smart == "" && wear == "" && mdadm == "" && zfs == "" {
+	if smart == "" && wear == "" && mdadm == "" && mdadmRawStatus == "" && zfs == "" {
 		return
 	}
-	mdadmText, mdadmRank := optionalStorageSubsystemStatus(s, "mdadm_present", mdadm)
+	mdadmText, mdadmRank := mdadmRAIDStatus(s, firstNonEmpty(mdadmRawStatus, mdadm))
 	zfsText, zfsRank := optionalStorageSubsystemStatus(s, "zfs_present", zfs)
 	storageRank := worstLabel(healthLabel(smart), healthLabel(wear), mdadmRank, zfsRank)
 	if opts.Compact {
@@ -809,7 +811,7 @@ func printStorageSection(s parsedSnapshot, opts cliOptions) {
 	fmt.Printf("Storage health %s\n", badge(storageRank, opts))
 	fmt.Printf("  SMART summary: %s\n", nonEmptyOr(smart, "n/a"))
 	fmt.Printf("  Wearout (highest devices): %s\n", nonEmptyOr(wear, "n/a"))
-	fmt.Printf("  mdadm: %s\n", mdadmText)
+	fmt.Printf("  %s  MDADM RAID: %s\n", badge(mdadmRank, opts), mdadmText)
 	fmt.Printf("  ZFS: %s\n", zfsText)
 	printDiskSmartDeviceSection(s, opts)
 }
@@ -820,6 +822,121 @@ func optionalStorageSubsystemStatus(s parsedSnapshot, presentKey, health string)
 		return "not present", okLabel
 	}
 	return nonEmptyOr(health, "n/a"), healthLabel(health)
+}
+
+func mdadmRAIDStatus(s parsedSnapshot, source string) (string, healthLabelRank) {
+	present, known := getOptionalBool(s.RawMap, "mdadm_present")
+	if known && !present {
+		return "not present", okLabel
+	}
+	if source == "" {
+		source = s.Modern.Disk.MDADM.Status
+	}
+	status, rank, why := normalizeMDADMStatus(source)
+	if rank != critLabel {
+		if degradedWhy := mdadmDegradedWhy(s.Modern.Disk.MDADM); degradedWhy != "" {
+			status, rank, why = "degraded", critLabel, degradedWhy
+		}
+	}
+	if rank == okLabel {
+		if syncingWhy := mdadmSyncingWhy(s.Modern.Disk.MDADM); syncingWhy != "" {
+			status, rank, why = "syncing", warnLabel, syncingWhy
+		}
+	}
+	if status == "" {
+		return "n/a", okLabel
+	}
+	if why != "" && rank != okLabel {
+		status += " [" + strings.ToUpper(why) + "]"
+	}
+	return status, rank
+}
+
+func normalizeMDADMStatus(source string) (string, healthLabelRank, string) {
+	x := strings.ToLower(strings.TrimSpace(source))
+	switch {
+	case x == "", x == "unknown", x == "n/a":
+		return "", okLabel, ""
+	case strings.Contains(x, "degraded"):
+		return "degraded", critLabel, "degraded"
+	case strings.Contains(x, "failed") || strings.Contains(x, "fail"):
+		return "degraded", critLabel, "failed"
+	case strings.Contains(x, "missing"):
+		return "degraded", critLabel, "missing"
+	case strings.Contains(x, "recover"):
+		return "syncing", warnLabel, "recover"
+	case strings.Contains(x, "resync"):
+		return "syncing", warnLabel, "resync"
+	case strings.Contains(x, "sync"):
+		return "syncing", warnLabel, "sync"
+	case strings.Contains(x, "check"):
+		return "syncing", warnLabel, "check"
+	case strings.Contains(x, "clean") || strings.Contains(x, "active") || strings.Contains(x, "ok") || strings.Contains(x, "healthy"):
+		return "normal", okLabel, ""
+	case strings.Contains(x, "critical"):
+		return "degraded", critLabel, "critical"
+	case strings.Contains(x, "warning") || strings.Contains(x, "warn"):
+		return "syncing", warnLabel, "warning"
+	default:
+		return strings.TrimSpace(source), healthLabel(source), ""
+	}
+}
+
+func mdadmDegradedWhy(m healthmodel.MDADMStatus) string {
+	for _, arr := range m.Arrays {
+		if arr.FailedMissing > 0 {
+			return "degraded"
+		}
+		if arr.ExpectedMembers > 0 && arr.ActiveMembers > 0 && arr.ActiveMembers < arr.ExpectedMembers {
+			return "missing"
+		}
+		for _, state := range arr.MemberStates {
+			state = strings.ToLower(strings.TrimSpace(state))
+			if state == "missing" || state == "failed" {
+				return state
+			}
+		}
+	}
+	return ""
+}
+
+func mdadmSyncingWhy(m healthmodel.MDADMStatus) string {
+	for _, arr := range m.Arrays {
+		phase := strings.ToLower(strings.TrimSpace(arr.ProgressPhase))
+		switch phase {
+		case "recovery", "recover":
+			return "recover"
+		case "resync":
+			return "resync"
+		case "sync":
+			return "sync"
+		case "check":
+			return "check"
+		}
+	}
+	return ""
+}
+
+func getRawMDADMStatus(raw map[string]any) string {
+	v, ok := raw["mdadm"]
+	if !ok {
+		if disk, ok := raw["disk"].(map[string]any); ok {
+			v = disk["mdadm"]
+		} else {
+			return ""
+		}
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if status, ok := m["status"].(string); ok {
+		return strings.TrimSpace(status)
+	}
+	return ""
 }
 
 type diskSmartRow struct {
@@ -1069,6 +1186,7 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.Disk.DiskWearout = latest.Disk.DiskWearout
 		out.Modern.Disk.SmartDevices = latest.Disk.SmartDevices
 		out.Modern.Disk.MDADMHealth = latest.Disk.MDADMHealth
+		out.Modern.Disk.MDADM = latest.Disk.MDADM
 		out.Modern.Disk.ZFSHealth = latest.Disk.ZFSHealth
 		for _, m := range latest.Disk.Mounts {
 			out.Modern.Disk.Mounts = append(out.Modern.Disk.Mounts, struct {
