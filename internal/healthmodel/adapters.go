@@ -144,6 +144,11 @@ func ApplyCounterSnapshot(dst *HealthSnapshotV1, src CounterSnapshot) {
 	if src.Network.BandwidthOutBytesPerSec > 0 {
 		dst.Network.BandwidthOutBytesPerSec = src.Network.BandwidthOutBytesPerSec
 	}
+	if src.Network.ConntrackMax > 0 {
+		dst.Network.ConntrackCount = src.Network.ConntrackCount
+		dst.Network.ConntrackMax = src.Network.ConntrackMax
+		dst.Network.ConntrackUsagePct = src.Network.ConntrackUsagePct
+	}
 }
 
 func mapDiskMounts(in []health.DiskStat) []DiskMount {

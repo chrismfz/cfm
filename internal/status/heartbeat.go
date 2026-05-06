@@ -3,6 +3,7 @@ package status
 import (
 	"strings"
 
+	"cfm/internal/conntrack"
 	"cfm/internal/detectors/health"
 )
 
@@ -66,10 +67,10 @@ func BuildHeartbeatHealth() HeartbeatHealth {
 		}
 	}
 
-	if ct, mx, err := readConntrackUsage(); err == nil && mx > 0 {
-		out.ConntrackCount = ct
-		out.ConntrackMax = mx
-		out.ConntrackPct = float64(ct) * 100 / float64(mx)
+	if usage, err := conntrack.ReadUsage(); err == nil && usage.Max > 0 {
+		out.ConntrackCount = usage.Count
+		out.ConntrackMax = usage.Max
+		out.ConntrackPct = usage.UsagePct
 	}
 
 	return out

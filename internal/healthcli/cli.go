@@ -110,9 +110,12 @@ type modernSample struct {
 		IngestSocketReason      string `json:"ingest_socket_reason"`
 	} `json:"runtime"`
 	Network struct {
-		InBps  uint64         `json:"bandwidth_in_bps"`
-		OutBps uint64         `json:"bandwidth_out_bps"`
-		TCP    map[string]int `json:"connection_states"`
+		InBps             uint64         `json:"bandwidth_in_bps"`
+		OutBps            uint64         `json:"bandwidth_out_bps"`
+		ConntrackCount    int            `json:"conntrack_count"`
+		ConntrackMax      int            `json:"conntrack_max"`
+		ConntrackUsagePct float64        `json:"conntrack_usage_pct"`
+		TCP               map[string]int `json:"connection_states"`
 	} `json:"network"`
 	Services []serviceStatus `json:"services"`
 }
@@ -962,8 +965,7 @@ func truncateIdentifier(v string, n int, showFull bool) string {
 }
 
 func printNetworkSection(s parsedSnapshot, opts cliOptions) {
-	inBps, outBps := networkBps(s)
-	bandwidthAvailable := networkBandwidthAvailable(s)
+	ctCount, ctMax, ctPct, ctAvailable := conntrackUsage(s)
 	tcp := s.Modern.Network.TCP
 	if len(tcp) == 0 {
 		if m, ok := getMapInt(s.RawMap, "connection_states"); ok {
@@ -976,12 +978,16 @@ func printNetworkSection(s parsedSnapshot, opts cliOptions) {
 		}
 	}
 	ifaces := networkInterfaces(s)
-	status := labelByThroughput(inBps + outBps)
+	status := okLabel
+	if ctAvailable {
+		status = labelByPct(ctPct)
+	}
 	if opts.Compact {
-		if bandwidthAvailable {
-			fmt.Printf("Network %-6s in=%s out=%s", badge(status, opts), bytesPerSec(inBps), bytesPerSec(outBps))
+		fmt.Printf("Network %-6s", badge(status, opts))
+		if ctAvailable {
+			fmt.Printf(" conntrack=%d/%d (%s)", ctCount, ctMax, pctWholeStr(ctPct))
 		} else {
-			fmt.Printf("Network %-6s unavailable (warming up)", badge(status, opts))
+			fmt.Printf(" conntrack=unavailable")
 		}
 		if len(tcp) > 0 {
 			fmt.Printf(" conn=%s", renderConnStates(tcp))
@@ -993,10 +999,10 @@ func printNetworkSection(s parsedSnapshot, opts cliOptions) {
 		return
 	}
 	fmt.Printf("Network %s\n", badge(status, opts))
-	if bandwidthAvailable {
-		fmt.Printf("  Bandwidth: in=%s out=%s\n", bytesPerSec(inBps), bytesPerSec(outBps))
+	if ctAvailable {
+		fmt.Printf("  Conntrack: %d / %d (%s)\n", ctCount, ctMax, pctWholeStr(ctPct))
 	} else {
-		fmt.Printf("  Bandwidth: unavailable (warming up)\n")
+		fmt.Printf("  Conntrack: unavailable\n")
 	}
 	if len(tcp) > 0 {
 		fmt.Printf("  Connection states: %s\n", renderConnStates(tcp))
@@ -1004,6 +1010,37 @@ func printNetworkSection(s parsedSnapshot, opts cliOptions) {
 	if len(ifaces) > 0 {
 		fmt.Printf("  Interfaces: %s\n", strings.Join(ifaces, ", "))
 	}
+}
+
+func conntrackUsage(s parsedSnapshot) (count, max int, pct float64, ok bool) {
+	count = s.Modern.Network.ConntrackCount
+	max = s.Modern.Network.ConntrackMax
+	pct = s.Modern.Network.ConntrackUsagePct
+	if max <= 0 {
+		if networkRaw, rawOK := s.RawMap["network"].(map[string]any); rawOK {
+			count = getInt(networkRaw, "conntrack_count")
+			max = getInt(networkRaw, "conntrack_max")
+			pct = getFloat(networkRaw, "conntrack_usage_pct")
+			if pct == 0 {
+				pct = getFloat(networkRaw, "conntrack_pct")
+			}
+		}
+	}
+	if max <= 0 {
+		count = getInt(s.RawMap, "conntrack_count")
+		max = getInt(s.RawMap, "conntrack_max")
+		pct = getFloat(s.RawMap, "conntrack_usage_pct")
+		if pct == 0 {
+			pct = getFloat(s.RawMap, "conntrack_pct")
+		}
+	}
+	if max <= 0 {
+		return 0, 0, 0, false
+	}
+	if pct == 0 && count > 0 {
+		pct = float64(count) * 100 / float64(max)
+	}
+	return count, max, pct, true
 }
 
 func printCFMSection(s parsedSnapshot, opts cliOptions) {
@@ -1095,6 +1132,9 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.CFM.OutboundAlerts = latest.CFM.OutboundAlerts
 		out.Modern.Network.InBps = latest.Network.BandwidthInBytesPerSec
 		out.Modern.Network.OutBps = latest.Network.BandwidthOutBytesPerSec
+		out.Modern.Network.ConntrackCount = latest.Network.ConntrackCount
+		out.Modern.Network.ConntrackMax = latest.Network.ConntrackMax
+		out.Modern.Network.ConntrackUsagePct = latest.Network.ConntrackUsagePct
 		out.Modern.Runtime.CFMDaemonLive = latest.Runtime.CFMDaemonLive
 		out.Modern.Runtime.CFMDaemonPID = latest.Runtime.CFMDaemonPID
 		out.Modern.Runtime.CFMServiceState = latest.Runtime.CFMServiceState
@@ -1297,6 +1337,13 @@ func bytesIEC(v uint64) string {
 
 func bytesPerSec(v uint64) string { return bytesIEC(v) + "/s" }
 
+func pctWholeStr(v float64) string {
+	if v <= 0 {
+		return "0%"
+	}
+	return fmt.Sprintf("%.0f%%", v)
+}
+
 func pctStr(v float64) string {
 	if v <= 0 {
 		return "0%"
@@ -1430,6 +1477,24 @@ func parseOptionalBool(v any) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func getFloat(m map[string]any, key string) float64 {
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case json.Number:
+		out, _ := n.Float64()
+		return out
+	default:
+		return 0
+	}
 }
 
 func getInt(m map[string]any, key string) int {

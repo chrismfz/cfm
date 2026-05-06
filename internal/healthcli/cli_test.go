@@ -74,6 +74,41 @@ func TestHealthCommandOutputs_Table(t *testing.T) {
 	}
 }
 
+func TestHealthSummaryNetworkRendersConntrackWithoutBandwidth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"schema_version":"health.snapshot.v1",
+			"node_id":"n1",
+			"collected_at":"2026-04-28T00:00:00Z",
+			"host":{"hostname":"host1"},
+			"disk":{},
+			"services":[],
+			"cfm_metrics":{},
+			"network":{"bandwidth_in_bps":1048576,"bandwidth_out_bps":2097152,"conntrack_count":2303,"conntrack_max":1548288,"conntrack_usage_pct":0.14874},
+			"runtime":{}
+		}`))
+	}))
+	defer srv.Close()
+
+	out, err := runWithCapturedStdout(func() error {
+		return Run(srv.URL, []string{"--no-color"})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if strings.Contains(out, "Bandwidth:") {
+		t.Fatalf("expected Bandwidth line to be absent, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Conntrack: 2303 / 1548288 (0%)") {
+		t.Fatalf("expected Conntrack line, got:\n%s", out)
+	}
+}
+
 func TestHealthSummaryIncludesChallengeFlowReadiness(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/health/snapshot" {

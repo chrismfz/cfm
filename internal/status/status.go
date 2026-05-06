@@ -1550,24 +1550,6 @@ func addPortRange(out map[int]struct{}, from, to int) {
 	}
 }
 
-// --- Conntrack usage (count/max) ---
-func readIntFile(path string) (int, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	s := strings.TrimSpace(string(b))
-	return strconv.Atoi(s)
-}
-func readConntrackUsage() (count, max int, err error) {
-	count, err = readIntFile("/proc/sys/net/netfilter/nf_conntrack_count")
-	if err != nil {
-		return
-	}
-	max, err = readIntFile("/proc/sys/net/netfilter/nf_conntrack_max")
-	return
-}
-
 // helper to read counters from nft JSON
 func readNftCounters(backend firewall.Backend) (map[string]int, error) {
 	out := map[string]int{}
