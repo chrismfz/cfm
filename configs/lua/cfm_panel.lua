@@ -782,6 +782,15 @@ if rawget(_G, "cfm_panel_selftest") == nil then
         return true, "ok"
     end)
 end
+
+-- CLI/package diagnostics can set this flag to validate the module without
+-- falling through into request handling. This keeps Angie-only installs from
+-- depending on OpenResty's `resty` runner; plain lua/luajit can load the file
+-- with a small ngx stub and receive the selftest result as dofile() returns.
+if os.getenv("CFM_PANEL_SELFTEST_ONLY") == "1" then
+    return cfm_panel_selftest()
+end
+
 local function main()
 local uri = ngx.var.uri or "/"
 local method = ngx.req.get_method()

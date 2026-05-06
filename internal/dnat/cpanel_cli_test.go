@@ -429,3 +429,61 @@ func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
 		t.Fatalf("listener config not rewritten to forced:\n%s", string(b))
 	}
 }
+
+func TestCheckPanelLuaGuard_UsesLuaWhenRestyUnavailable(t *testing.T) {
+	tmp := t.TempDir()
+	luaPath := filepath.Join(tmp, "cfm_panel.lua")
+	if err := os.WriteFile(luaPath, []byte("-- fake panel lua\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeLua := filepath.Join(tmp, "lua")
+	if err := os.WriteFile(fakeLua, []byte("#!/bin/sh\n[ \"$CFM_PANEL_SELFTEST_ONLY\" = 1 ] || exit 8\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	oldLookPath := lookPath
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", oldPath)
+		lookPath = oldLookPath
+	})
+	_ = os.Setenv("PATH", tmp)
+	lookPath = exec.LookPath
+
+	st := checkPanelLuaGuard(luaPath)
+	if st.LoadState != "true" {
+		t.Fatalf("LoadState=%q LoadError=%q", st.LoadState, st.LoadError)
+	}
+	if st.LoadError != "" {
+		t.Fatalf("unexpected LoadError=%q", st.LoadError)
+	}
+}
+
+func TestCheckPanelLuaGuard_MissingSelftestHookIsUnknownNotFalse(t *testing.T) {
+	tmp := t.TempDir()
+	luaPath := filepath.Join(tmp, "cfm_panel.lua")
+	if err := os.WriteFile(luaPath, []byte("-- fake panel lua\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeLua := filepath.Join(tmp, "lua")
+	if err := os.WriteFile(fakeLua, []byte("#!/bin/sh\necho CFM_PANEL_SELFTEST_HOOK_MISSING\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	oldLookPath := lookPath
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", oldPath)
+		lookPath = oldLookPath
+	})
+	_ = os.Setenv("PATH", tmp)
+	lookPath = exec.LookPath
+
+	st := checkPanelLuaGuard(luaPath)
+	if st.LoadState != "unknown" {
+		t.Fatalf("LoadState=%q LoadError=%q", st.LoadState, st.LoadError)
+	}
+	if !strings.Contains(st.LoadError, "cfm_panel_selftest hook is missing") {
+		t.Fatalf("expected missing hook detail, got %q", st.LoadError)
+	}
+}
