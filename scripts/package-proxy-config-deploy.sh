@@ -4,21 +4,21 @@
 # repositories/certificates; it only refreshes packaged config files when the
 # engine's own config test succeeds.
 
-CFM_CONFIG_DIR=/usr/share/cfm/configs
+CFM_CONFIG_DIR=${CFM_CONFIG_DIR:-/usr/share/cfm/configs}
 
 find_first_executable() {
-    _cmd_name=$1
+    ffe_cmd_name=$1
     shift
 
-    _found=$(command -v "$_cmd_name" 2>/dev/null || true)
-    if [ -n "$_found" ] && [ -x "$_found" ]; then
-        printf '%s\n' "$_found"
+    ffe_found=$(command -v "$ffe_cmd_name" 2>/dev/null || true)
+    if [ -n "$ffe_found" ] && [ -x "$ffe_found" ]; then
+        printf '%s\n' "$ffe_found"
         return 0
     fi
 
-    for _candidate do
-        if [ -x "$_candidate" ]; then
-            printf '%s\n' "$_candidate"
+    for ffe_candidate do
+        if [ -x "$ffe_candidate" ]; then
+            printf '%s\n' "$ffe_candidate"
             return 0
         fi
     done
@@ -27,22 +27,22 @@ find_first_executable() {
 }
 
 install_file() {
-    _src=$1
-    _dst=$2
+    if_src=$1
+    if_dst=$2
 
-    if [ ! -f "$_src" ]; then
-        echo "WARNING: CFM proxy config: packaged file missing: $_src"
+    if [ ! -f "$if_src" ]; then
+        echo "WARNING: CFM proxy config: packaged file missing: $if_src"
         return 1
     fi
 
-    _dst_dir=$(dirname "$_dst")
-    if ! mkdir -p "$_dst_dir"; then
-        echo "WARNING: CFM proxy config: failed to create directory: $_dst_dir"
+    if_dst_dir=$(dirname "$if_dst")
+    if ! mkdir -p "$if_dst_dir"; then
+        echo "WARNING: CFM proxy config: failed to create directory: $if_dst_dir"
         return 1
     fi
 
-    if ! install -m 0644 -o root -g root "$_src" "$_dst"; then
-        echo "WARNING: CFM proxy config: failed to install $_dst"
+    if ! install -m 0644 -o root -g root "$if_src" "$if_dst"; then
+        echo "WARNING: CFM proxy config: failed to install $if_dst"
         return 1
     fi
 
@@ -50,108 +50,111 @@ install_file() {
 }
 
 render_listener_config() {
-    _engine=$1
-    _dst=$2
-    _template=$CFM_CONFIG_DIR/cfm-panel-listeners.conf.in
+    rlc_engine=$1
+    rlc_dst=$2
+    rlc_template=$CFM_CONFIG_DIR/cfm-panel-listeners.conf.in
 
-    if [ ! -f "$_template" ]; then
-        echo "WARNING: CFM proxy config: packaged listener template missing: $_template"
+    if [ ! -f "$rlc_template" ]; then
+        echo "WARNING: CFM proxy config: packaged listener template missing: $rlc_template"
         return 1
     fi
 
-    _dst_dir=$(dirname "$_dst")
-    _tmp=$_dst.tmp.$$
-    if ! mkdir -p "$_dst_dir"; then
-        echo "WARNING: CFM proxy config: failed to create directory: $_dst_dir"
+    rlc_dst_dir=$(dirname "$rlc_dst")
+    rlc_tmp=$rlc_dst.tmp.$$
+    if ! mkdir -p "$rlc_dst_dir"; then
+        echo "WARNING: CFM proxy config: failed to create directory: $rlc_dst_dir"
         return 1
     fi
 
     if ! sed \
-        -e "s|@ENGINE@|$_engine|g" \
-        -e "s|@LISTENER_DEST@|$_dst|g" \
-        "$_template" > "$_tmp"; then
-        rm -f "$_tmp"
-        echo "WARNING: CFM proxy config: failed to render $_dst"
+        -e "s|@ENGINE@|$rlc_engine|g" \
+        -e "s|@LISTENER_DEST@|$rlc_dst|g" \
+        "$rlc_template" > "$rlc_tmp"; then
+        rm -f "$rlc_tmp"
+        echo "WARNING: CFM proxy config: failed to render $rlc_dst"
         return 1
     fi
 
-    if ! install -m 0644 -o root -g root "$_tmp" "$_dst"; then
-        rm -f "$_tmp"
-        echo "WARNING: CFM proxy config: failed to install $_dst"
+    if ! install -m 0644 -o root -g root "$rlc_tmp" "$rlc_dst"; then
+        rm -f "$rlc_tmp"
+        echo "WARNING: CFM proxy config: failed to install $rlc_dst"
         return 1
     fi
 
-    rm -f "$_tmp"
+    rm -f "$rlc_tmp"
     return 0
 }
 
 prepare_sidecars() {
-    _engine=$1
-    _conf_dir=$2
+    ps_engine=$1
+    ps_conf_dir=$2
 
-    install_file "$CFM_CONFIG_DIR/trusted_proxies.conf" "$_conf_dir/trusted_proxies.conf" || return 1
-    install_file "$CFM_CONFIG_DIR/challenge_waf_bypass.conf" "$_conf_dir/challenge_waf_bypass.conf" || return 1
-    render_listener_config "$_engine" "$_conf_dir/cfm-panel-listeners.conf" || return 1
+    install_file "$CFM_CONFIG_DIR/trusted_proxies.conf" "$ps_conf_dir/trusted_proxies.conf" || return 1
+    install_file "$CFM_CONFIG_DIR/challenge_waf_bypass.conf" "$ps_conf_dir/challenge_waf_bypass.conf" || return 1
+    render_listener_config "$ps_engine" "$ps_conf_dir/cfm-panel-listeners.conf" || return 1
 
     return 0
 }
 
 deploy_main_config() {
-    _engine=$1
-    _src=$2
-    _dst=$3
+    dmc_engine=$1
+    dmc_src=$2
+    dmc_dst=$3
 
-    if [ ! -f "$_src" ]; then
-        echo "WARNING: CFM proxy config: packaged $_engine config missing: $_src"
+    if [ ! -f "$dmc_src" ]; then
+        echo "WARNING: CFM proxy config: packaged $dmc_engine config missing: $dmc_src"
         return 1
     fi
 
-    _dst_dir=$(dirname "$_dst")
-    if ! mkdir -p "$_dst_dir"; then
-        echo "WARNING: CFM proxy config: failed to create directory: $_dst_dir"
+    dmc_dst_dir=$(dirname "$dmc_dst")
+    if ! mkdir -p "$dmc_dst_dir"; then
+        echo "WARNING: CFM proxy config: failed to create directory: $dmc_dst_dir"
         return 1
     fi
 
-    if [ -f "$_dst" ]; then
-        _backup=$_dst.cfm-prepkg.$(date +%Y%m%d%H%M%S)
-        if cp -a "$_dst" "$_backup"; then
-            echo "CFM proxy config: backed up $_dst to $_backup"
+    if [ -f "$dmc_dst" ]; then
+        dmc_backup=$dmc_dst.cfm-prepkg.$(date +%Y%m%d%H%M%S)
+        if cp -a "$dmc_dst" "$dmc_backup"; then
+            echo "CFM proxy config: backed up $dmc_dst to $dmc_backup"
         else
-            echo "WARNING: CFM proxy config: failed to back up $_dst; leaving existing $(basename "$_dst") unchanged"
+            echo "WARNING: CFM proxy config: failed to back up $dmc_dst; leaving existing $(basename "$dmc_dst") unchanged"
             return 1
         fi
     fi
 
-    if install -m 0644 -o root -g root "$_src" "$_dst"; then
-        echo "CFM proxy config: deployed $_dst"
+    if install -m 0644 -o root -g root "$dmc_src" "$dmc_dst"; then
+        echo "CFM proxy config: deployed $dmc_dst"
         return 0
     fi
 
-    echo "WARNING: CFM proxy config: failed to deploy $_dst"
+    echo "WARNING: CFM proxy config: failed to deploy $dmc_dst"
     return 1
 }
 
 process_engine() {
-    _engine=$1
-    _bin=$2
-    _src=$3
-    _dst=$4
-    _sidecar_dir=$5
+    pe_engine=$1
+    pe_bin=$2
+    pe_main_src=$3
+    pe_main_dst=$4
+    pe_sidecar_dir=$5
 
-    echo "CFM proxy config: $_engine detected at $_bin"
+    echo "CFM proxy config: $pe_engine detected at $pe_bin"
 
-    if ! prepare_sidecars "$_engine" "$_sidecar_dir"; then
-        echo "WARNING: CFM proxy config: $_engine sidecar deployment failed; leaving existing $(basename "$_dst") unchanged"
+    if ! prepare_sidecars "$pe_engine" "$pe_sidecar_dir"; then
+        echo "WARNING: CFM proxy config: $pe_engine sidecar deployment failed; leaving existing $(basename "$pe_main_dst") unchanged"
         return 0
     fi
 
-    echo "CFM proxy config: testing $_engine config with: $_bin -t -c $_src"
-    if "$_bin" -t -c "$_src"; then
-        echo "CFM proxy config: $_engine config test passed"
-        deploy_main_config "$_engine" "$_src" "$_dst" || true
+    # Only test the engine's packaged main config with -c. Sidecar includes are
+    # validated transitively through that main config; they are not valid
+    # standalone nginx/OpenResty/Angie configs.
+    echo "CFM proxy config: testing $pe_engine config with: $pe_bin -t -c $pe_main_src"
+    if "$pe_bin" -t -c "$pe_main_src"; then
+        echo "CFM proxy config: $pe_engine config test passed"
+        deploy_main_config "$pe_engine" "$pe_main_src" "$pe_main_dst" || true
     else
-        echo "WARNING: CFM proxy config: $_engine config test failed; command failed: $_bin -t -c $_src"
-        echo "WARNING: CFM proxy config: $_engine config test failed; leaving existing $(basename "$_dst") unchanged"
+        echo "WARNING: CFM proxy config: $pe_engine config test failed; command failed: $pe_bin -t -c $pe_main_src"
+        echo "WARNING: CFM proxy config: $pe_engine config test failed; leaving existing $(basename "$pe_main_dst") unchanged"
     fi
 
     return 0
