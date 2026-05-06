@@ -15,6 +15,54 @@ server {
     # Dynamic per-host certs from sslcollector (SNI-aware)
     ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }
 
+    # Keep HSTS conservative for panel hostnames: HTTPS-only for one day, with
+    # no includeSubDomains/preload, so operators can safely raise it later.
+    add_header Strict-Transport-Security "max-age=86400" always;
+
+    # Friendly handler for old bookmarks or mistyped http://host:<secure-panel-port>/ URLs.
+    # nginx/OpenResty/Angie raise 497 when plaintext HTTP is sent to an SSL listener.
+    error_page 497 = @cfm_plain_http_panel_https;
+
+    location @cfm_plain_http_panel_https {
+        access_by_lua_block { return; }
+        default_type text/html;
+        add_header Cache-Control "no-store" always;
+        add_header Refresh "3; url=https://$host:2083$request_uri" always;
+        return 200 '<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>HTTPS required</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0b1020;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{width:min(520px,92vw);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    .h{font-size:20px;font-weight:650;margin:0 0 10px}
+    .p{opacity:.9;line-height:1.45;margin:0 0 14px}
+    .muted{opacity:.7;font-size:13px}
+    .spinner{width:34px;height:34px;border-radius:999px;border:3px solid rgba(255,255,255,.18);border-top-color:#4da3ff;animation:spin 1s linear infinite;margin:14px 0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="h">HTTPS required</div>
+    <div class="p">This control panel port accepts secure HTTPS connections only.</div>
+    <div class="spinner"></div>
+    <div class="muted">Redirecting to the secure URL in 3 seconds...</div>
+  </div>
+  <script>
+  (function(){
+    setTimeout(function(){
+      window.location.replace("https://" + window.location.host + window.location.pathname + window.location.search + window.location.hash);
+    }, 3000);
+  })();
+  </script>
+</body>
+</html>';
+    }
+
     set $cfm_panel_origin "https://127.0.0.1:2083";
     set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
     set $cfm_pass "";
@@ -37,6 +85,54 @@ server {
     # Dynamic per-host certs from sslcollector (SNI-aware)
     ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }
 
+    # Keep HSTS conservative for panel hostnames: HTTPS-only for one day, with
+    # no includeSubDomains/preload, so operators can safely raise it later.
+    add_header Strict-Transport-Security "max-age=86400" always;
+
+    # Friendly handler for old bookmarks or mistyped http://host:<secure-panel-port>/ URLs.
+    # nginx/OpenResty/Angie raise 497 when plaintext HTTP is sent to an SSL listener.
+    error_page 497 = @cfm_plain_http_panel_https;
+
+    location @cfm_plain_http_panel_https {
+        access_by_lua_block { return; }
+        default_type text/html;
+        add_header Cache-Control "no-store" always;
+        add_header Refresh "3; url=https://$host:2087$request_uri" always;
+        return 200 '<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>HTTPS required</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0b1020;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{width:min(520px,92vw);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    .h{font-size:20px;font-weight:650;margin:0 0 10px}
+    .p{opacity:.9;line-height:1.45;margin:0 0 14px}
+    .muted{opacity:.7;font-size:13px}
+    .spinner{width:34px;height:34px;border-radius:999px;border:3px solid rgba(255,255,255,.18);border-top-color:#4da3ff;animation:spin 1s linear infinite;margin:14px 0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="h">HTTPS required</div>
+    <div class="p">This control panel port accepts secure HTTPS connections only.</div>
+    <div class="spinner"></div>
+    <div class="muted">Redirecting to the secure URL in 3 seconds...</div>
+  </div>
+  <script>
+  (function(){
+    setTimeout(function(){
+      window.location.replace("https://" + window.location.host + window.location.pathname + window.location.search + window.location.hash);
+    }, 3000);
+  })();
+  </script>
+</body>
+</html>';
+    }
+
     set $cfm_panel_origin "https://127.0.0.1:2087";
     set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
     set $cfm_pass "";
@@ -58,6 +154,54 @@ server {
 
     # Dynamic per-host certs from sslcollector (SNI-aware)
     ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }
+
+    # Keep HSTS conservative for panel hostnames: HTTPS-only for one day, with
+    # no includeSubDomains/preload, so operators can safely raise it later.
+    add_header Strict-Transport-Security "max-age=86400" always;
+
+    # Friendly handler for old bookmarks or mistyped http://host:<secure-panel-port>/ URLs.
+    # nginx/OpenResty/Angie raise 497 when plaintext HTTP is sent to an SSL listener.
+    error_page 497 = @cfm_plain_http_panel_https;
+
+    location @cfm_plain_http_panel_https {
+        access_by_lua_block { return; }
+        default_type text/html;
+        add_header Cache-Control "no-store" always;
+        add_header Refresh "3; url=https://$host:2096$request_uri" always;
+        return 200 '<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>HTTPS required</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0b1020;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{width:min(520px,92vw);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    .h{font-size:20px;font-weight:650;margin:0 0 10px}
+    .p{opacity:.9;line-height:1.45;margin:0 0 14px}
+    .muted{opacity:.7;font-size:13px}
+    .spinner{width:34px;height:34px;border-radius:999px;border:3px solid rgba(255,255,255,.18);border-top-color:#4da3ff;animation:spin 1s linear infinite;margin:14px 0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="h">HTTPS required</div>
+    <div class="p">This control panel port accepts secure HTTPS connections only.</div>
+    <div class="spinner"></div>
+    <div class="muted">Redirecting to the secure URL in 3 seconds...</div>
+  </div>
+  <script>
+  (function(){
+    setTimeout(function(){
+      window.location.replace("https://" + window.location.host + window.location.pathname + window.location.search + window.location.hash);
+    }, 3000);
+  })();
+  </script>
+</body>
+</html>';
+    }
 
     set $cfm_panel_origin "https://127.0.0.1:2096";
     set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
@@ -126,6 +270,54 @@ server {
     ssl_certificate /var/lib/cfm/certs/selfsigned/fullchain.pem;
     ssl_certificate_key /var/lib/cfm/certs/selfsigned/privkey.pem;
     ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }
+
+    # Keep HSTS conservative for panel hostnames: HTTPS-only for one day, with
+    # no includeSubDomains/preload, so operators can safely raise it later.
+    add_header Strict-Transport-Security "max-age=86400" always;
+
+    # Friendly handler for old bookmarks or mistyped http://host:<secure-panel-port>/ URLs.
+    # nginx/OpenResty/Angie raise 497 when plaintext HTTP is sent to an SSL listener.
+    error_page 497 = @cfm_plain_http_panel_https;
+
+    location @cfm_plain_http_panel_https {
+        access_by_lua_block { return; }
+        default_type text/html;
+        add_header Cache-Control "no-store" always;
+        add_header Refresh "3; url=https://$host:2222$request_uri" always;
+        return 200 '<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>HTTPS required</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0b1020;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{width:min(520px,92vw);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    .h{font-size:20px;font-weight:650;margin:0 0 10px}
+    .p{opacity:.9;line-height:1.45;margin:0 0 14px}
+    .muted{opacity:.7;font-size:13px}
+    .spinner{width:34px;height:34px;border-radius:999px;border:3px solid rgba(255,255,255,.18);border-top-color:#4da3ff;animation:spin 1s linear infinite;margin:14px 0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="h">HTTPS required</div>
+    <div class="p">This control panel port accepts secure HTTPS connections only.</div>
+    <div class="spinner"></div>
+    <div class="muted">Redirecting to the secure URL in 3 seconds...</div>
+  </div>
+  <script>
+  (function(){
+    setTimeout(function(){
+      window.location.replace("https://" + window.location.host + window.location.pathname + window.location.search + window.location.hash);
+    }, 3000);
+  })();
+  </script>
+</body>
+</html>';
+    }
 
     set $cfm_panel_origin "https://127.0.0.1:2222";
     set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
