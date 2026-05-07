@@ -61,6 +61,25 @@ end
 
 local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
 
+-- Webdetector → Lua runtime knobs (sibling file to the bridge token).
+-- Missing/unparseable file falls back to safe defaults so a daemon-vs-Lua
+-- upgrade lag doesn't break the panel request path.
+local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
+local panel_bridge_cfg = { clearance_refresh = true }
+do
+    local chunk = loadfile(_BRIDGE_CONFIG_FILE)
+    if chunk then
+        local ok, val = pcall(chunk)
+        if ok and type(val) == "table" then
+            if val.clearance_refresh ~= nil then
+                panel_bridge_cfg.clearance_refresh = (val.clearance_refresh ~= false)
+            end
+        else
+            ngx.log(ngx.WARN, "[cfm_panel] bridge config file did not return a table: ", _BRIDGE_CONFIG_FILE)
+        end
+    end
+end
+
 local function starts_with(s, p)
     return s and p and s:sub(1, #p) == p
 end
@@ -624,7 +643,7 @@ safe_cookie_value = function(v)
     return v
 end
 
-local function refresh_clearance_cookie()
+local function refresh_clearance_cookie(ip, host, scope)
     local ttl = parse_duration_seconds(
         ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m",
         2700
@@ -640,7 +659,23 @@ local function refresh_clearance_cookie()
 
     local cfm_clearance = safe_cookie_value(ngx.var.cookie_cfm_clearance)
     if cfm_clearance then
-        append_set_cookie("cfm_clearance=" .. tostring(cfm_clearance) .. "; " .. attrs)
+        local out_val = tostring(cfm_clearance)
+        if panel_bridge_cfg.clearance_refresh and ip and host and ok_clearance and clearance_validator and type(clearance_validator.mint) == "function" then
+            local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET")
+            if not secret or secret == "" then secret = panel_bridge_token end
+            if secret and secret ~= "" then
+                local fresh, mint_err = clearance_validator.mint(ip, host, scope or "", secret, ttl)
+                if fresh and fresh ~= "" then
+                    out_val = fresh
+                elseif mint_err and not ngx.ctx.cfm_panel_clearance_mint_err_logged then
+                    ngx.ctx.cfm_panel_clearance_mint_err_logged = true
+                    ngx.log(ngx.WARN, "[cfm_panel] clearance re-mint failed err=", tostring(mint_err),
+                        " host=", tostring(host or "-"), " scope=", tostring(scope or "-"),
+                        "; falling back to original cookie value")
+                end
+            end
+        end
+        append_set_cookie("cfm_clearance=" .. out_val .. "; " .. attrs)
         refreshed = true
     end
 
@@ -888,7 +923,7 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
             2700
         )
         trace_verify_success(req_id, client_ip, normalized_host, panel_scope, ngx.time() + ttl, true)
-        local ok_refresh, refresh_err = pcall(refresh_clearance_cookie)
+        local ok_refresh, refresh_err = pcall(refresh_clearance_cookie, client_ip, normalized_host, panel_scope)
 
         if not ok_refresh then
             ngx.log(ngx.WARN, "CFM_PANEL clearance refresh failed: ", tostring(refresh_err))

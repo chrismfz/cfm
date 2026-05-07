@@ -83,6 +83,7 @@ func (s *stubFirewallBackend) ListSetElementsRaw(string) ([]string, error)      
 func (s *stubFirewallBackend) ListTableJSON(string, string) ([]byte, error)            { return nil, nil }
 func (s *stubFirewallBackend) ListSetJSON(string, string, string) ([]byte, error)      { return nil, nil }
 func (s *stubFirewallBackend) ListTableTextNoDNS(string, string) (string, error)       { return "", nil }
+func (s *stubFirewallBackend) ListChainText(string, string, string) (string, error)    { return "", nil }
 func (s *stubFirewallBackend) FlushSet(string, string, string) error                    { return nil }
 func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {

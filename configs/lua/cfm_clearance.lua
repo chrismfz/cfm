@@ -192,6 +192,72 @@ function _M.validate(token, ip, host, scope, secret)
   return true, "ok"
 end
 
+-- mint() builds a fresh cfm_clearance token bound to (ip, host, scope)
+-- with exp = now + ttl_sec. Layout (payload + JSON keys + base64url-of-JSON)
+-- mirrors issueClearanceToken() in internal/webdetector/challenge_server.go
+-- so tokens minted here validate identically on the Go side.
+--
+-- Returns (token_string, nil) on success, (nil, err) otherwise.
+local function b64url_encode(s)
+  -- ngx.encode_base64 returns standard base64; convert to RawURLEncoding
+  -- (no padding, '+'→'-', '/'→'_') to match Go's base64.RawURLEncoding.
+  local b = ngx.encode_base64(s)
+  if not b then return nil end
+  b = b:gsub("=+$", ""):gsub("%+", "-"):gsub("/", "_")
+  return b
+end
+
+local _nonce_counter = 0
+
+local function random_nonce()
+  -- Try resty.random first (cryptographically random when available).
+  local ok_rnd, rnd = pcall(require, "resty.random")
+  if ok_rnd and rnd and type(rnd.bytes) == "function" then
+    local b = rnd.bytes(16, true) or rnd.bytes(16)
+    if b and #b > 0 then
+      local enc = b64url_encode(b)
+      if enc and enc ~= "" then return enc end
+    end
+  end
+  -- Fallback: time + worker pid + monotonic counter, hashed through whichever
+  -- HMAC backend is available so the result is opaque even if inputs are
+  -- guessable. Validator only requires nonce != "" and binds it via HMAC, so a
+  -- non-cryptographic nonce is still safe against forgery — the secret is.
+  _nonce_counter = _nonce_counter + 1
+  local seed = tostring(ngx.now()) .. "|" .. tostring(ngx.worker.pid())
+            .. "|" .. tostring(_nonce_counter) .. "|" .. tostring(math.random())
+  local hex = hmac_sha256_hex(seed, seed) -- routes via ngx/openssl/resty.sha256
+  if hex and hex ~= "" then return hex end
+  -- Last-resort: hex of the seed itself (still non-empty, validator passes).
+  return (seed:gsub('.', function(c) return string.format('%02x', string.byte(c)) end))
+end
+
+function _M.mint(ip, host, scope, secret, ttl_sec)
+  if not secret or secret == "" then return nil, "missing_secret" end
+  ttl_sec = tonumber(ttl_sec or 0) or 0
+  if ttl_sec <= 0 then return nil, "bad_ttl" end
+  local exp = ngx.time() + ttl_sec
+  local nhost = normalize_host(host)
+  local nonce = random_nonce()
+  local payload = table.concat({ "1", tostring(exp), tostring(ip or ""), nhost, tostring(scope or ""), nonce }, "|")
+  local mac, err = hmac_sha256_hex(secret, payload)
+  if not mac then return nil, err or "hmac_failed" end
+  local obj = {
+    v     = "1",
+    exp   = exp,
+    ip    = tostring(ip or ""),
+    host  = nhost,
+    scope = tostring(scope or ""),
+    nonce = nonce,
+    hmac  = mac,
+  }
+  local json = cjson.encode(obj)
+  if not json then return nil, "encode_failed" end
+  local tok = b64url_encode(json)
+  if not tok or tok == "" then return nil, "b64_failed" end
+  return tok, nil
+end
+
 function _M.normalize_host(host)
   return normalize_host(host)
 end
