@@ -60,6 +60,11 @@ import (
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
 
+const (
+	debugAPIServerReadTimeout  = 15 * time.Second
+	debugAPIServerWriteTimeout = 20 * time.Second
+)
+
 var (
 	mu        sync.Mutex
 	sharedMux *http.ServeMux
@@ -299,8 +304,8 @@ func Start(
 		Addr:              httpAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       debugAPIServerReadTimeout,
+		WriteTimeout:      debugAPIServerWriteTimeout,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
@@ -336,8 +341,8 @@ func Start(
 				Handler:           handler, // same stack as HTTP
 				TLSConfig:         tlsCfg,
 				ReadHeaderTimeout: 2 * time.Second,
-				ReadTimeout:       5 * time.Second,
-				WriteTimeout:      10 * time.Second,
+				ReadTimeout:       debugAPIServerReadTimeout,
+				WriteTimeout:      debugAPIServerWriteTimeout,
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
