@@ -31,7 +31,7 @@ func captureStreams(t *testing.T, fn func()) (string, string) {
 }
 
 func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
-	got, err := normalizePanelArgs([]string{"on", "mode=direct-cpsrvd", "priority=-101", "challenge=guard-only"})
+	got, err := normalizePanelArgs([]string{"on", "mode=direct-cpsrvd", "priority=-101", "challenge=forced"})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -145,12 +145,12 @@ func TestPanelOnHelpSnapshot(t *testing.T) {
 func TestChallengeModeFromActiveConfig(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := filepath.Join(tmp, "cfm-panel-listeners.conf")
-	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	content := `server { set $cfm_panel_challenge_mode "off"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mode, loaded, path := panelListenerGuardStateFromPaths([]string{cfg})
-	if mode != "guard-only" {
+	if mode != "off" {
 		t.Fatalf("mode=%q", mode)
 	}
 	if !loaded {
@@ -177,7 +177,7 @@ func TestChallengeModeDefaultReflected(t *testing.T) {
 func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T) {
 	tmp := t.TempDir()
 	listenerPath := filepath.Join(tmp, "cfm-panel-listeners.conf")
-	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	content := `server { set $cfm_panel_challenge_mode "off"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
 	if err := os.WriteFile(listenerPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(cfgDir, "cfm-panel-listeners.conf.in")
-	content := `server { set $cfm_panel_challenge_mode "guard-only"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
+	content := `server { set $cfm_panel_challenge_mode "off"; access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
