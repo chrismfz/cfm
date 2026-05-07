@@ -45,6 +45,7 @@
         activeIP: '',
         ipDrilldown: null,
         analyzeTarget: '',
+        analyzeLast: '',
         analyzeMode: 'ip',
         analyzeResult: null,
         analyzeLoading: false,
@@ -1292,6 +1293,7 @@
       },
       async runAnalyze(mode = this.analyzeMode) {
         const target = String(this.analyzeTarget || '').trim();
+        const last = String(this.analyzeLast || '').trim();
         if (!target) {
           this.actionMsg = 'Provide an IP or vhost to analyze.';
           return;
@@ -1299,14 +1301,16 @@
         this.analyzeMode = mode;
         this.analyzeLoading = true;
         try {
-          const path = mode === 'host'
+          let path = mode === 'host'
             ? `v1/webdet/analyze-host?host=${encodeURIComponent(target)}`
             : `v1/webdet/analyze-ip?ip=${encodeURIComponent(target)}`;
+          if (last) path += `&last=${encodeURIComponent(last)}`;
           this.analyzeResult = await this.fetchJSON(path);
           this.actionMsg = `Analyze ${mode} loaded for ${target}`;
         } catch (err) {
-          this.analyzeResult = { error: String(err), target, mode };
-          this.actionMsg = `Analyze failed for ${target}: ${err}`;
+          const error = this.formatApiError(err);
+          this.analyzeResult = { error, target, mode };
+          this.actionMsg = `Analyze failed for ${target}: ${error}`;
         } finally {
           this.analyzeLoading = false;
         }
