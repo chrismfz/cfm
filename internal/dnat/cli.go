@@ -562,7 +562,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
-		if err := applyPanelChallengeModeToPaths("forced", []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}); err != nil {
+		if err := applyPanelChallengeModeToPaths("forced", panelListenerChallengeConfigPaths); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
@@ -596,19 +596,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		return 0
 	case "off":
-		h := getPanelFirewallHealth()
-		if err := exec.Command("nft", "delete", "table", "inet", "cfm_panel_redirect").Run(); err != nil {
-		}
-		changes, err := removePanelAllowlist()
+		changes, err := panelOff()
 		if err != nil {
-			setPanelFirewallHealth("FAILED", err.Error(), h.Attempted)
 			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
 			return 1
 		}
-		setPanelFirewallHealth("OK", "", h.Attempted)
-		_ = persistPanelChallengeEnabled(false)
-		_ = applyPanelChallengeModeToPaths("off", []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
-		_ = reloadPanelListenerService()
 		fmt.Println("DNAT cpanel: OFF")
 		for _, ch := range changes {
 			fmt.Println("Firewall:", ch)
@@ -622,7 +614,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		} else {
 			fmt.Println("State: OFF")
 		}
-		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted

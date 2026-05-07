@@ -10,34 +10,64 @@ import (
 )
 
 func TestPanelDNATFailSafeTargetCleanupWiring(t *testing.T) {
-	origDisable := panelDisableTableFn
-	defer func() { panelDisableTableFn = origDisable }()
+	origOff := panelOffFn
+	defer func() { panelOffFn = origOff }()
 
 	setPanelFirewallHealth("OK", "", false)
 	panelFailSafeMu.Lock()
 	panelFailSafe = panelFailSafeState{}
 	panelFailSafeMu.Unlock()
 
-	disabled := 0
-	panelDisableTableFn = func() error {
-		disabled++
-		return nil
+	called := 0
+	var gotAutoRemove bool
+	panelOffFn = func(autoRemoveAllowlist bool) (panelOffResult, error) {
+		called++
+		gotAutoRemove = autoRemoveAllowlist
+		return panelOffResult{}, nil
 	}
 	t.Setenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST", "false")
 
 	target := newPanelDNATFailSafeTarget()
 	target.Cleanup(4, errors.New("panel down"))
 
-	if disabled != 1 {
-		t.Fatalf("expected panel table disable action once, got %d", disabled)
+	if called != 1 {
+		t.Fatalf("expected shared panel off action once, got %d", called)
+	}
+	if gotAutoRemove {
+		t.Fatalf("expected auto-remove allowlist=false")
 	}
 	health := getPanelFirewallHealth()
-	if health.State != "AUTO_FAILSAFE" || !health.Attempted || !strings.Contains(health.LastReason, "auto-disabled after 4 consecutive probe failures: panel down") {
+	if health.State != "AUTO_FAILSAFE" || !health.Attempted || !strings.Contains(health.LastReason, "auto-disabled after 4 consecutive probe failures: panel down") || !strings.Contains(health.LastReason, "allowlist removal skipped") {
 		t.Fatalf("unexpected health update: %+v", health)
 	}
 	state := getPanelFailSafeState()
 	if state.LastActionAt.IsZero() || !strings.Contains(state.LastActionReason, "panel down") {
 		t.Fatalf("expected panel failsafe action state to be updated, got %+v", state)
+	}
+}
+
+func TestPanelDNATFailSafeTargetReportsAllowlistRemoval(t *testing.T) {
+	origOff := panelOffFn
+	defer func() { panelOffFn = origOff }()
+
+	panelFailSafeMu.Lock()
+	panelFailSafe = panelFailSafeState{}
+	panelFailSafeMu.Unlock()
+
+	panelOffFn = func(autoRemoveAllowlist bool) (panelOffResult, error) {
+		if !autoRemoveAllowlist {
+			t.Fatalf("expected auto-remove allowlist=true")
+		}
+		return panelOffResult{FirewallChanges: []string{"tcp/12083 removed", "tcp/12087 removed"}}, nil
+	}
+	t.Setenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST", "true")
+
+	target := newPanelDNATFailSafeTarget()
+	target.Cleanup(3, errors.New("panel probe failed"))
+
+	health := getPanelFirewallHealth()
+	if health.State != "AUTO_FAILSAFE" || !strings.Contains(health.LastReason, "allowlist removed: tcp/12083 removed, tcp/12087 removed") {
+		t.Fatalf("unexpected health update: %+v", health)
 	}
 }
 

@@ -321,7 +321,7 @@ func reloadPanelListenerService() error {
 var panelListenerServiceDetector = detectActivePanelListenerService
 
 func detectActivePanelListenerService() string {
-	_, _, path := panelListenerGuardStateFromPaths([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+	_, _, path := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
 	switch {
 	case strings.Contains(path, "/etc/angie/"):
 		return "angie"

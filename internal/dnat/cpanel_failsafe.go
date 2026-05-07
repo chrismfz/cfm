@@ -47,7 +47,7 @@ func setPanelFailSafeAction(reason string) {
 
 var panelStatusFn = panelStatus
 var panelProbeFn = probePanelTargets
-var panelDisableTableFn = func() error { return execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run() }
+var panelOffFn = panelOffWithOptions
 
 func newPanelDNATFailSafeTarget() dnatFailSafeTarget {
 	every := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
@@ -68,14 +68,16 @@ func newPanelDNATFailSafeTarget() dnatFailSafeTarget {
 			return panelProbeFn(probeTimeout)
 		},
 		Cleanup: func(failCount int, probeErr error) {
-			_ = panelDisableTableFn()
+			offResult, offErr := panelOffFn(autoRemoveAllowlist)
 			reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
 			if autoRemoveAllowlist {
-				if changes, err := removePanelAllowlist(); err != nil {
-					reason += "; allowlist removal failed: " + err.Error()
+				if offErr != nil {
+					reason += "; allowlist removal failed: " + offErr.Error()
 				} else {
-					reason += "; allowlist removed: " + strings.Join(changes, ", ")
+					reason += "; allowlist removed: " + panelOffFirewallSummary(offResult.FirewallChanges)
 				}
+			} else {
+				reason += "; allowlist removal skipped"
 			}
 			setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
 			setPanelFailSafeAction(reason)
