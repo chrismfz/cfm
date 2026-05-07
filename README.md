@@ -961,7 +961,9 @@ cfm webtop long 30               # long-window top by score
 cfm webtop ip 50                 # global IP view
 cfm webtop ip 1.2.3.4            # drilldown a specific IP
 
-cfm webtop analyze <ip|host>     # offline drilldown from TSV (debug/forensics)
+cfm webtop analyze <ip|host> [--last 30m] # offline drilldown from TSV (debug/forensics)
+cfm webtop analyze example.com --last 30m   # host-filtered forensic analysis
+cfm webtop analyze 1.2.3.4 -last 1h        # IP-filtered forensic analysis
 
 # Traffic rules (Step 2 API/CLI management)
 cfm webtop rules list
@@ -971,6 +973,8 @@ cfm webtop rules update <rule-id> --file docs/examples/traffic-rule-challenge-lo
 cfm webtop rules remove <rule-id>
 cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --path / --method GET --country US
 ```
+
+The `--last` / `-last` duration uses Go-style duration strings, such as `30m`, `1h`, or `2h30m`.
 
 **Sort keys:** `rps`, `2xx`, `3xx`, `4xx`, `5xx`, `uniq`, `err`, `rt`, `bot`, `ua_div`, `score`
 
@@ -1045,8 +1049,8 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `GET /api/v1/webdet/long-top?limit=50` | Long-window top |
 | `GET /api/v1/webdet/ip-short?limit=50` | IP short view |
 | `GET /api/v1/webdet/ip-drilldown?ip=<ip>` | IP drilldown |
-| `GET /api/v1/webdet/analyze-ip?ip=<ip>` | Analyze IP (forensics) |
-| `GET /api/v1/webdet/analyze-host?host=<vhost>` | Analyze vhost (forensics) |
+| `GET /api/v1/webdet/analyze-ip?ip=<ip>[&last=<duration>]` | Analyze IP (forensics; optional `last`) |
+| `GET /api/v1/webdet/analyze-host?host=<vhost>[&last=<duration>]` | Analyze vhost (forensics; optional `last`) |
 | `GET /api/v1/webdet/rules` | List traffic rules |
 | `GET /api/v1/webdet/rules/get?id=<id>` | Get single traffic rule |
 | `POST /api/v1/webdet/rules/add` | Add traffic rule (JSON body) |
