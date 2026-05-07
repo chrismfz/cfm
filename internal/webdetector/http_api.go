@@ -358,12 +358,25 @@ func (e *Engine) handleAnalyzeIP(w http.ResponseWriter, r *http.Request) {
 			maxLines = n
 		}
 	}
-	res, err := e.AnalyzeIP(ip, maxLines)
+	last, err := parseAnalyzeLast(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid last duration"})
+		return
+	}
+	res, err := e.AnalyzeIPWithOptions(ip, AnalyzeOptions{MaxLines: maxLines, Last: last})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func parseAnalyzeLast(r *http.Request) (time.Duration, error) {
+	v := strings.TrimSpace(r.URL.Query().Get("last"))
+	if v == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(v)
 }
 
 // handleAnalyzeHost: offline log scan για ένα vhost.
@@ -389,7 +402,12 @@ func (e *Engine) handleAnalyzeHost(w http.ResponseWriter, r *http.Request) {
 			maxLines = n
 		}
 	}
-	res, err := e.AnalyzeHost(host, maxLines)
+	last, err := parseAnalyzeLast(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid last duration"})
+		return
+	}
+	res, err := e.AnalyzeHostWithOptions(host, AnalyzeOptions{MaxLines: maxLines, Last: last})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

@@ -82,7 +82,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop long [N]             # long-window top by score (no minScore)")
 	fmt.Println("  cfm webtop ip [N]               # global IP view (top IPs by score)")
 	fmt.Println("  cfm webtop ip <IP>              # drilldown specific IP")
-	fmt.Println("  cfm webtop analyze <ip|host>    # offline drilldown from TSV log")
+	fmt.Println("  cfm webtop analyze <ip|host> [-last 30m]  # offline drilldown from TSV log")
 	fmt.Println("  cfm webtop live            # scrollable live vhost picker")
 	fmt.Println("  cfm webtop live <vhost>        # live terminal dashboard")
 	fmt.Println("  cfm webtop live [N]        # picker showing top N vhosts")
@@ -132,17 +132,17 @@ func RunWebTop(baseURL string, args []string) error {
 
 	// 🔥 Offline analyze mode: cfm webtop analyze <ip>|<host>
 	if len(args) > 0 && args[0] == "analyze" {
-		if len(args) < 2 {
-			return fmt.Errorf("usage: cfm webtop analyze <ip|host>")
+		target, last, err := parseAnalyzeCLIArgs(args[1:])
+		if err != nil {
+			return err
 		}
-		target := args[1]
 
 		// Πρώτα δοκιμάζουμε αν μοιάζει για IP.
 		if net.ParseIP(target) != nil {
-			return runAnalyzeIP(baseURL, target)
+			return runAnalyzeIP(baseURL, target, last)
 		}
 		// consider it a  vhost
-		return runAnalyzeHost(baseURL, target)
+		return runAnalyzeHost(baseURL, target, last)
 	}
 
 	// Ειδικά modes: IP-top (hot / ip-top) & long window
@@ -900,9 +900,47 @@ func runLongTop(baseURL string, limit int) error {
 	return nil
 }
 
+func parseAnalyzeCLIArgs(args []string) (target string, last string, err error) {
+	if len(args) < 1 {
+		return "", "", fmt.Errorf("usage: cfm webtop analyze <ip|host> [--last <duration>]")
+	}
+	target = args[0]
+
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-last" || a == "--last":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("missing duration for %s", a)
+			}
+			last = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--last="):
+			last = strings.TrimPrefix(a, "--last=")
+			if strings.TrimSpace(last) == "" {
+				return "", "", fmt.Errorf("missing duration for --last")
+			}
+		default:
+			return "", "", fmt.Errorf("unknown analyze argument: %s", a)
+		}
+	}
+
+	if strings.TrimSpace(last) != "" {
+		if _, err := time.ParseDuration(last); err != nil {
+			return "", "", fmt.Errorf("invalid last duration: %s", last)
+		}
+	}
+	return target, last, nil
+}
+
 // runAnalyzeIP καλεί το /analyze-ip (offline log scan) και τυπώνει vhost breakdown.
-func runAnalyzeIP(baseURL, ip string) error {
-	u := fmt.Sprintf("%s/api/v1/webdet/analyze-ip?ip=%s", baseURL, url.QueryEscape(ip))
+func runAnalyzeIP(baseURL, ip, last string) error {
+	q := url.Values{}
+	q.Set("ip", ip)
+	if strings.TrimSpace(last) != "" {
+		q.Set("last", last)
+	}
+	u := fmt.Sprintf("%s/api/v1/webdet/analyze-ip?%s", baseURL, q.Encode())
 	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
@@ -926,7 +964,7 @@ func runAnalyzeIP(baseURL, ip string) error {
 	f, l := formatAnalyzeRange(res.FirstTS, res.LastTS)
 
 	fmt.Printf("[analyze ip %s] total=%d vhosts=%d\n", res.IP, res.TotalReq, len(res.VhostCnt))
-	fmt.Printf("  range: %s  →  %s (from TSV log)\n", f, l)
+	fmt.Printf("  range: %s  →  %s %s\n", f, l, analyzeRangeSource(last))
 
 	if len(res.VhostCnt) == 0 {
 		fmt.Println("  (no matches in log)")
@@ -943,9 +981,21 @@ func runAnalyzeIP(baseURL, ip string) error {
 	return nil
 }
 
+func analyzeRangeSource(last string) string {
+	if strings.TrimSpace(last) == "" {
+		return "(from TSV log)"
+	}
+	return fmt.Sprintf("(from TSV log, last=%s)", last)
+}
+
 // runAnalyzeHost καλεί το /analyze-host (offline log scan) και τυπώνει IP breakdown.
-func runAnalyzeHost(baseURL, host string) error {
-	u := fmt.Sprintf("%s/api/v1/webdet/analyze-host?host=%s", baseURL, url.QueryEscape(host))
+func runAnalyzeHost(baseURL, host, last string) error {
+	q := url.Values{}
+	q.Set("host", host)
+	if strings.TrimSpace(last) != "" {
+		q.Set("last", last)
+	}
+	u := fmt.Sprintf("%s/api/v1/webdet/analyze-host?%s", baseURL, q.Encode())
 	resp, err := clihttp.Get(u)
 	if err != nil {
 		return err
@@ -969,7 +1019,7 @@ func runAnalyzeHost(baseURL, host string) error {
 	f, l := formatAnalyzeRange(res.FirstTS, res.LastTS)
 
 	fmt.Printf("[analyze host %s] total=%d ips=%d\n", res.Host, res.TotalReq, len(res.IPCnt))
-	fmt.Printf("  range: %s  →  %s (from TSV log)\n", f, l)
+	fmt.Printf("  range: %s  →  %s %s\n", f, l, analyzeRangeSource(last))
 
 	if len(res.IPCnt) == 0 {
 		fmt.Println("  (no matches in log)")
