@@ -69,6 +69,25 @@ if not _bridge_token then
         .. "; details: " .. tostring(_bridge_token_err))
 end
 
+-- Webdetector → Lua runtime knobs (sibling file to the bridge token).
+-- Optional: if the file is missing or unloadable we fall back to safe defaults
+-- so an upgrade lag (cfm daemon old, Lua new) doesn't break the request path.
+local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
+local _bridge_cfg = { clearance_refresh = true }
+do
+  local chunk = loadfile(_BRIDGE_CONFIG_FILE)
+  if chunk then
+    local ok, val = pcall(chunk)
+    if ok and type(val) == "table" then
+      if val.clearance_refresh ~= nil then
+        _bridge_cfg.clearance_refresh = (val.clearance_refresh ~= false)
+      end
+    else
+      ngx.log(ngx.WARN, "[cfm] bridge config file did not return a table: ", _BRIDGE_CONFIG_FILE)
+    end
+  end
+end
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -98,6 +117,12 @@ local CFG = {
 
   ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "3600"),
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
+
+  -- Sliding clearance: when true, accepted requests re-mint cfm_clearance
+  -- with exp = now + ok_ttl_sec so active panel/webmail users don't get
+  -- re-challenged mid-session. Sourced from [webdetector] CHALLENGE_COOKIE_REFRESH
+  -- via /var/lib/cfm/lua/cfm_bridge_config.lua. Defaults to true.
+  clearance_refresh  = _bridge_cfg.clearance_refresh,
 
   keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
   keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "512"),
@@ -555,11 +580,24 @@ local function touch_ok_scoped(ip, host, scope)
     { ip = ip, host = host })
 end
 
-local function refresh_clearance_cookie(cookie_val)
+local function refresh_clearance_cookie(cookie_val, ip, host, scope)
   if not cookie_val or cookie_val == "" then return end
   local attrs = "Path=/; Max-Age=" .. tostring(CFG.ok_ttl_sec) .. "; HttpOnly; SameSite=Lax"
   if ngx.var.scheme == "https" then attrs = attrs .. "; Secure" end
-  append_set_cookie("cfm_clearance=" .. cookie_val .. "; " .. attrs)
+
+  local out_val = cookie_val
+  if CFG.clearance_refresh and ip and host then
+    local fresh, mint_err = clearance_validator.mint(ip, host, scope or "web", CFG.token, CFG.ok_ttl_sec)
+    if fresh and fresh ~= "" then
+      out_val = fresh
+    elseif mint_err and not ngx.ctx.cfm_clearance_mint_err_logged then
+      ngx.ctx.cfm_clearance_mint_err_logged = true
+      ngx.log(ngx.WARN, "[cfm] clearance re-mint failed err=", tostring(mint_err),
+        " host=", tostring(host or "-"), " scope=", tostring(scope or "-"),
+        "; falling back to original cookie value")
+    end
+  end
+  append_set_cookie("cfm_clearance=" .. out_val .. "; " .. attrs)
 end
 
 local function validate_clearance_token(token, ip, host, scope)
@@ -970,7 +1008,7 @@ local clearance_cookie = ngx.var.cookie_cfm_clearance
 local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
 if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 if clearance_ok and not ngx.ctx.cfm_resumed_post then
-  refresh_clearance_cookie(clearance_cookie); touch_ok_scoped(ip, host, clearance_scope)
+  refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope); touch_ok_scoped(ip, host, clearance_scope)
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
   return

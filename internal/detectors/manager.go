@@ -352,6 +352,17 @@ func (m *manager) maybeReload(parent context.Context) {
 			} else {
 				logging.Logf("[detectors] cfm_bridge_token.lua written path=%s", bridgeTokenPath)
 			}
+
+			// Webdetector → Lua runtime config (knobs that cfm.lua /
+			// cfm_panel.lua need at request time). Sibling to the bridge
+			// token so it inherits the same parent dir + permissions.
+			const bridgeConfigPath = "/var/lib/cfm/lua/cfm_bridge_config.lua"
+			clearanceRefresh := kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true)
+			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, clearanceRefresh, cfmGID); err != nil {
+				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
+			} else {
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v", bridgeConfigPath, clearanceRefresh)
+			}
 		}
 	}
 	// ─────────────────────────────────────────────────────────────────────────

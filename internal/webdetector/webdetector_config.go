@@ -80,6 +80,13 @@ type Config struct {
 	ChallengeCookieLife time.Duration // CHALLENGE_COOKIE_LIFE = 10m
 	ChallengeCooldown   time.Duration // CHALLENGE_COOLDOWN = 10m
 
+	// Sliding clearance: when true, every accepted request re-mints the
+	// cfm_clearance cookie with a fresh exp = now + ChallengeCookieLife so
+	// active users (cPanel, webmail, phpMyAdmin) don't get re-challenged
+	// mid-session. When false, the original exp baked at issuance stands.
+	// Default: true.
+	ChallengeCookieRefresh bool // CHALLENGE_COOKIE_REFRESH = 1
+
 	// Log one-line expiry when a challenged CID wasn't solved before TTL.
 	// Default: true.
 	ChallengeLogExpired bool

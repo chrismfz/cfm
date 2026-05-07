@@ -686,6 +686,12 @@ func init() {
 			ChallengeCookieLife: 0,
 			ChallengeCooldown:   chalCooldown,
 
+			// Sliding clearance: re-mint cfm_clearance on every accepted
+			// request so active panel/webmail users don't get re-challenged
+			// mid-session. Defaults to on; set CHALLENGE_COOKIE_REFRESH=0 to
+			// keep the original fixed-exp behavior.
+			ChallengeCookieRefresh: kvBool(kv, "CHALLENGE_COOKIE_REFRESH", true),
+
 			// Challenge emit controls:
 			// - CHALLENGE_LOG=0 disables [challenge] logs
 			// - CHALLENGE_NOTIFY=0 disables Alert emissions (notifications)
