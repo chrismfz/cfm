@@ -16,8 +16,11 @@ import (
 
 func newStep3Engine(t *testing.T) (*Engine, *http.ServeMux) {
 	t.Helper()
+	dir := t.TempDir()
 	e := NewEngine(Config{
-		TrafficRulesStorePath: filepath.Join(t.TempDir(), "rules.json"),
+		TrafficRulesStorePath:     filepath.Join(dir, "rules.json"),
+		ChallengeExcludeStorePath: filepath.Join(dir, "challenge_excludes.json"),
+		WAFExcludeStorePath:       filepath.Join(dir, "waf_excludes.json"),
 	})
 	mux := http.NewServeMux()
 	e.RegisterHTTP(mux)
