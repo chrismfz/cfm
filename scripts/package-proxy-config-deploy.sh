@@ -5,6 +5,7 @@
 # engine's own config test succeeds.
 
 CFM_CONFIG_DIR=${CFM_CONFIG_DIR:-/usr/share/cfm/configs}
+CFM_FALLBACK_CERT_DIR=${CFM_FALLBACK_CERT_DIR:-/var/lib/cfm/certs/selfsigned}
 
 ANGIE_DETECTED=0
 ANGIE_DEPLOYED=0
@@ -261,6 +262,45 @@ deploy_main_config() {
     return 1
 }
 
+ensure_fallback_cert_if_missing() {
+    efc_cert_dir=$CFM_FALLBACK_CERT_DIR
+    efc_cert_file=$efc_cert_dir/fullchain.pem
+    efc_key_file=$efc_cert_dir/privkey.pem
+
+    if [ -s "$efc_cert_file" ] && [ -s "$efc_key_file" ]; then
+        chown root:cfm "$efc_cert_file" "$efc_key_file" 2>/dev/null || true
+        chmod 0640 "$efc_cert_file" "$efc_key_file" 2>/dev/null || true
+        echo "CFM proxy config: fallback certs already present: $efc_cert_file $efc_key_file"
+        return 0
+    fi
+
+    if ! mkdir -p "$efc_cert_dir"; then
+        return 1
+    fi
+
+    if ! openssl req \
+        -x509 \
+        -nodes \
+        -days 3650 \
+        -newkey rsa:2048 \
+        -keyout "$efc_key_file" \
+        -out "$efc_cert_file" \
+        -subj "/C=US/ST=State/L=City/O=CFM/CN=localhost"; then
+        return 1
+    fi
+
+    if ! chown root:cfm "$efc_cert_file" "$efc_key_file" 2>/dev/null; then
+        return 1
+    fi
+
+    if ! chmod 0640 "$efc_cert_file" "$efc_key_file"; then
+        return 1
+    fi
+
+    echo "CFM proxy config: created self-signed fallback cert: $efc_cert_file"
+    return 0
+}
+
 process_engine() {
     pe_engine=$1
     pe_bin=$2
@@ -299,6 +339,10 @@ process_engine() {
 
     return 0
 }
+
+if ! ensure_fallback_cert_if_missing; then
+    echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"
+fi
 
 ANGIE_BIN=$(find_first_executable angie /usr/sbin/angie /sbin/angie || true)
 if [ -n "$ANGIE_BIN" ]; then

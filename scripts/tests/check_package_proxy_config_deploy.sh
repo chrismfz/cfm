@@ -63,9 +63,64 @@ exit 1
 EOF_SYSTEMCTL
 chmod 0755 "$bin_dir/systemctl"
 
+cat >"$bin_dir/openssl" <<'EOF_OPENSSL'
+#!/bin/sh
+key_file=
+cert_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -keyout)
+      shift
+      key_file=$1
+      ;;
+    -out)
+      shift
+      cert_file=$1
+      ;;
+  esac
+  shift
+done
+[ -n "$key_file" ] || exit 1
+[ -n "$cert_file" ] || exit 1
+mkdir -p "$(dirname "$key_file")" "$(dirname "$cert_file")"
+printf '%s\n' 'fake key' >"$key_file"
+printf '%s\n' 'fake cert' >"$cert_file"
+exit 0
+EOF_OPENSSL
+chmod 0755 "$bin_dir/openssl"
+
+cat >"$bin_dir/chown" <<'EOF_CHOWN'
+#!/bin/sh
+exit 0
+EOF_CHOWN
+chmod 0755 "$bin_dir/chown"
+
 # Load only helper functions so this test can pass temp destinations without
 # touching system Angie/OpenResty paths.
-awk '/^ANGIE_BIN=/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
+awk '/^if ! ensure_fallback_cert_if_missing/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
+
+fallback_cert_dir="$tmp/fallback-certs"
+fallback_output=$(
+  PATH="$bin_dir:/usr/bin:/bin" \
+  CFM_CONFIG_DIR="$configs" \
+  CFM_FALLBACK_CERT_DIR="$fallback_cert_dir" \
+  sh scripts/package-proxy-config-deploy.sh
+)
+
+if ! printf '%s\n' "$fallback_output" | rg -q "CFM proxy config: created self-signed fallback cert: $fallback_cert_dir/fullchain\.pem"; then
+  echo "FAIL: expected fallback certificate creation log" >&2
+  printf '%s\n' "$fallback_output" >&2
+  exit 1
+fi
+
+for f in "$fallback_cert_dir/fullchain.pem" "$fallback_cert_dir/privkey.pem"; do
+  [ -s "$f" ] || { echo "FAIL: expected fallback cert file missing or empty: $f" >&2; exit 1; }
+  mode="$(stat -c %a "$f")"
+  if [ "$mode" != "640" ]; then
+    echo "FAIL: expected fallback cert mode 640 for $f, got $mode" >&2
+    exit 1
+  fi
+done
 
 active_angie_output=$(
   PATH="$bin_dir:$PATH" \
