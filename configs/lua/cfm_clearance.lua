@@ -219,18 +219,15 @@ local function random_nonce()
       if enc and enc ~= "" then return enc end
     end
   end
-  -- Fallback: time + worker pid + monotonic counter, hashed through the
-  -- HMAC backend so the result is opaque even if inputs are guessable.
-  -- Validator only requires nonce != "" and binds it via HMAC, so a
+  -- Fallback: time + worker pid + monotonic counter, hashed through whichever
+  -- HMAC backend is available so the result is opaque even if inputs are
+  -- guessable. Validator only requires nonce != "" and binds it via HMAC, so a
   -- non-cryptographic nonce is still safe against forgery — the secret is.
   _nonce_counter = _nonce_counter + 1
   local seed = tostring(ngx.now()) .. "|" .. tostring(ngx.worker.pid())
             .. "|" .. tostring(_nonce_counter) .. "|" .. tostring(math.random())
-  local bin = hmac_sha256_via_resty_sha256(seed, seed) -- key=msg, result is opaque
-  if bin then
-    local enc = b64url_encode(bin)
-    if enc and enc ~= "" then return enc end
-  end
+  local hex = hmac_sha256_hex(seed, seed) -- routes via ngx/openssl/resty.sha256
+  if hex and hex ~= "" then return hex end
   -- Last-resort: hex of the seed itself (still non-empty, validator passes).
   return (seed:gsub('.', function(c) return string.format('%02x', string.byte(c)) end))
 end
