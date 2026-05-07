@@ -494,6 +494,8 @@
         <div class="toolbar">
           <label for="analyze-target">Target</label>
           <input id="analyze-target" class="input input-wide" type="text" v-model.trim="analyzeTarget" placeholder="IP or vhost" />
+          <label for="analyze-last">Last</label>
+          <input id="analyze-last" class="input" type="text" v-model.trim="analyzeLast" placeholder="last, e.g. 30m or 1h" />
           <button class="btn-quiet" :disabled="analyzeLoading" @click="runAnalyze('ip')">Analyze IP</button>
           <button class="btn-quiet" :disabled="analyzeLoading" @click="runAnalyze('host')">Analyze host</button>
         </div>
