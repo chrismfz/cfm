@@ -100,15 +100,44 @@ do
   check(act2 == "logonly" and did2 == true, "default after_challenge should be logonly")
 end
 
--- "challenge" must NOT round-trip — guard against operator setting it as a
--- knob value somewhere upstream and reintroducing the loop.
+-- Defence in depth: if a buggy caller passes "challenge" as a default,
+-- post_clearance_action must coerce it to a safe value (block for the
+-- high-risk slot, logonly for the noisy slot). cfm.lua's CFG sanitizer is
+-- the primary guard; this is the secondary one.
 do
   local act, did = waf.post_clearance_action("challenge", "WAF_BAD_UA", "challenge", "block")
-  -- post_clearance_action itself doesn't validate "challenge" as a default
-  -- (cfm.lua's CFG sanitizer rejects it before this is called). Document the
-  -- contract here: if cfm.lua passes "challenge" through, the function will
-  -- happily return it. CFG sanitization is the loop guard.
-  check(did == true, "post_clearance_action returns did=true even when caller passes invalid default")
+  check(act == "logonly" and did == true, "after_challenge='challenge' must coerce to logonly")
+end
+do
+  local act, did = waf.post_clearance_action("challenge", "WAF_RCE", "logonly", "challenge")
+  check(act == "block" and did == true, "after_high_risk='challenge' must coerce to block")
+end
+do
+  local act, did = waf.post_clearance_action("challenge", "WAF_BAD_UA", "challenge", "challenge")
+  check(act == "logonly" and did == true, "both='challenge' must still pick safe noisy default")
+end
+
+-- ── set_rule guards ─────────────────────────────────────────────────────────
+
+-- Name must be a string starting with "rule_": prevents typos from
+-- corrupting non-rule CFG fields.
+do
+  local ok, err = waf.set_rule("rule_traversal", "logonly")
+  check(ok == true, "set_rule(rule_traversal, logonly) accepted")
+  ok, err = waf.set_rule("max_scan_len", "block")
+  check(ok == false and err ~= nil, "set_rule rejects non-rule_ name")
+  ok, err = waf.set_rule("", "logonly")
+  check(ok == false, "set_rule rejects empty name")
+  ok, err = waf.set_rule(nil, "logonly")
+  check(ok == false, "set_rule rejects nil name")
+  ok, err = waf.set_rule("rule_traversal", "garbage")
+  check(ok == false and err ~= nil, "set_rule rejects unknown mode")
+  ok, err = waf.set_rule("rule_traversal", nil)
+  check(ok == false, "set_rule rejects nil mode")
+  -- Confirm the corruption attempt didn't actually mutate max_scan_len.
+  local snap = waf.get_config()
+  check(type(snap.max_scan_len) == "number",
+        "max_scan_len remained numeric after rejected set_rule call")
 end
 
 if fails > 0 then
