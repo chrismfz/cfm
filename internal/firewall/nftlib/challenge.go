@@ -18,10 +18,14 @@ import (
 )
 
 const (
-	dnatRuleTag             = "cfm-dnat-managed"
-	dnatLoopbackAcceptTag   = dnatRuleTag + ":loopback-accept:v1"
-	defaultWebDNATHTTPPort  = 9080
-	defaultWebDNATHTTPSPort = 9043
+	dnatRuleTag                  = "cfm-dnat-managed"
+	dnatLoopbackAcceptTag        = dnatRuleTag + ":loopback-accept:v1"
+	dnatAcceptNamespaceEdge      = "cfm_edge_dnat_accept"
+	dnatAcceptNamespaceChallenge = "cfm_challenge_dnat_accept"
+	dnatRuleNamespaceEdge        = "edge"
+	dnatRuleNamespaceChallenge   = "challenge"
+	defaultWebDNATHTTPPort       = 9080
+	defaultWebDNATHTTPSPort      = 9043
 )
 
 type dnatRuleSpec struct {
@@ -132,6 +136,27 @@ func parseDNATRuleSpecID(id string) (dnatRuleSpec, bool) {
 
 func managedDNATRule(userData []byte) bool {
 	return strings.HasPrefix(string(userData), dnatRuleTag)
+}
+
+func dnatAcceptNamespace(namespace string) string {
+	if namespace == dnatRuleNamespaceChallenge {
+		return dnatAcceptNamespaceChallenge
+	}
+	return dnatAcceptNamespaceEdge
+}
+
+func dnatRuleInNamespace(r *nftables.Rule, namespace string) bool {
+	if string(r.UserData) == dnatLoopbackAcceptTag {
+		return namespace == dnatRuleNamespaceEdge
+	}
+	spec, ok := parseDNATRuleSpecID(string(r.UserData))
+	if !ok {
+		return false
+	}
+	if namespace == dnatRuleNamespaceChallenge {
+		return spec.sourceSet != ""
+	}
+	return spec.sourceSet == ""
 }
 
 func dnatRuleExprs(spec dnatRuleSpec) []expr.Any {
@@ -280,12 +305,17 @@ func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	defer b.mu.Unlock()
 	b.challengeRedirectEnabled = enabled
 	if !enabled {
-		_ = b.dnatOffUnlocked("", "")
+		_ = b.cleanupChallengeRedirectUnlocked("", "")
 	}
 }
 
 func (b *Backend) CleanupChallengeRedirect() error {
-	return b.DNATOff("", "")
+	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceChallenge); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cleanupChallengeRedirectUnlocked("", "")
 }
 
 func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
@@ -523,18 +553,20 @@ func dnatTargetAddr(host string, fam nftables.TableFamily) (net.IP, bool) {
 	return ip16, true
 }
 
-func dnatAcceptComment(label string, from, to int) string {
-	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
+func dnatAcceptComment(namespace, label string, from, to int) string {
+	return fmt.Sprintf("%s:%s:%d:%d", namespace, label, from, to)
 }
 
-func (b *Backend) cleanupScopedDNATAccepts() error {
-	out, err := b.ListChainText("inet", "cfm", "input")
-	if err != nil {
+func scopedDNATAcceptHandles(out, namespace string) []string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
 		return nil
 	}
+	prefix := namespace + ":"
+	var handles []string
 	for _, line := range strings.Split(out, "\n") {
 		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, "cfm_dnat_accept:") || !strings.Contains(norm, " handle ") {
+		if !strings.Contains(norm, prefix) || !strings.Contains(norm, " handle ") {
 			continue
 		}
 		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
@@ -542,9 +574,20 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 			h = fields[0]
 		}
 		if h != "" {
-			if err := b.nftExec("delete rule inet cfm input handle " + h); err != nil {
-				return err
-			}
+			handles = append(handles, h)
+		}
+	}
+	return handles
+}
+
+func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
+	out, err := b.ListChainText("inet", "cfm", "input")
+	if err != nil {
+		return nil
+	}
+	for _, h := range scopedDNATAcceptHandles(out, namespace) {
+		if err := b.nftExec("delete rule inet cfm input handle " + h); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -571,7 +614,7 @@ func dnatAcceptKey(spec dnatRuleSpec) string {
 	return fmt.Sprintf("f%d:p%d:d%d:t%d:a%s", spec.family, spec.proto, spec.dport, spec.toPort, dnatAddrID(spec.toAddr))
 }
 
-func dnatAcceptRuleExpr(spec dnatRuleSpec, beforeHandle ...string) string {
+func dnatAcceptRuleExpr(namespace string, spec dnatRuleSpec, beforeHandle ...string) string {
 	proto := "tcp"
 	if spec.proto == 17 {
 		proto = "udp"
@@ -580,16 +623,16 @@ func dnatAcceptRuleExpr(spec dnatRuleSpec, beforeHandle ...string) string {
 	if len(beforeHandle) > 0 && strings.TrimSpace(beforeHandle[0]) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle[0])
 	}
-	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
+	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(namespace, dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
 	return strings.Join(strings.Fields(expr), " ")
 }
 
-func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
+func (b *Backend) ensureScopedDNATAccepts(namespace string, specs []dnatRuleSpec) error {
 	_ = b.nftExec("add table inet cfm")
 	_ = b.nftExec("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
 	out, _ := b.ListChainText("inet", "cfm", "input")
 	beforeHandle := firstInputDefaultDropHandle(out)
-	if err := b.cleanupScopedDNATAccepts(); err != nil {
+	if err := b.cleanupScopedDNATAccepts(namespace); err != nil {
 		return err
 	}
 	seen := make(map[string]struct{})
@@ -599,7 +642,7 @@ func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
 			continue
 		}
 		seen[key] = struct{}{}
-		if err := b.nftExec(dnatAcceptRuleExpr(spec, beforeHandle)); err != nil {
+		if err := b.nftExec(dnatAcceptRuleExpr(namespace, spec, beforeHandle)); err != nil {
 			return err
 		}
 	}
@@ -623,7 +666,7 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err err
 	if err := b.EnsureBase(); err != nil {
 		return err
 	}
-	return b.installDNATRules(family, table, dnatUnscopedWantedSpecs(tableFamilyFromString(family), httpPort, httpsPort), true)
+	return b.installDNATRules(family, table, dnatUnscopedWantedSpecs(tableFamilyFromString(family), httpPort, httpsPort), dnatRuleNamespaceEdge, true)
 }
 
 func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, httpsHost string, httpsPort int) (err error) {
@@ -644,15 +687,15 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 		return err
 	}
 	wanted := dnatWantedSpecs(httpHost, httpPort, httpsHost, httpsPort)
-	return b.installDNATRules(family, table, wanted, false)
+	return b.installDNATRules(family, table, wanted, dnatRuleNamespaceChallenge, false)
 }
 
-func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, includeLoopbackAccept bool) error {
+func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, namespace string, includeLoopbackAccept bool) error {
 	family, table = dnatDefaults(family, table)
 	if len(wanted) == 0 {
 		return nil
 	}
-	if err := b.ensureScopedDNATAccepts(wanted); err != nil {
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
 		return err
 	}
 	b.mu.Lock()
@@ -684,7 +727,7 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	seen := make(map[string]struct{}, len(wanted))
 	loopbackSeen := false
 	for _, r := range rules {
-		if !managedDNATRule(r.UserData) {
+		if !managedDNATRule(r.UserData) || !dnatRuleInNamespace(r, namespace) {
 			continue
 		}
 		if string(r.UserData) == dnatLoopbackAcceptTag {
@@ -716,8 +759,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	return b.conn.Flush()
 }
 
-// dnatOffUnlocked removes all managed DNAT rules. Must be called with b.mu held.
-func (b *Backend) dnatOffUnlocked(family, table string) error {
+// dnatOffUnlocked removes managed DNAT rules in namespace. Must be called with b.mu held.
+func (b *Backend) dnatOffUnlocked(family, table, namespace string) error {
 	family, table = dnatDefaults(family, table)
 	_, ch, err := b.getDNATTableAndChain(family, table)
 	if err != nil || ch == nil {
@@ -728,11 +771,15 @@ func (b *Backend) dnatOffUnlocked(family, table string) error {
 		return err
 	}
 	for _, r := range rules {
-		if managedDNATRule(r.UserData) {
+		if managedDNATRule(r.UserData) && dnatRuleInNamespace(r, namespace) {
 			b.conn.DelRule(r)
 		}
 	}
 	return b.conn.Flush()
+}
+
+func (b *Backend) cleanupChallengeRedirectUnlocked(family, table string) error {
+	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceChallenge)
 }
 
 func (b *Backend) DNATOff(family, table string) (err error) {
@@ -745,12 +792,12 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 		}
 		b.logPhase("DNATOff", st, time.Since(start), err, "")
 	}()
-	if err := b.cleanupScopedDNATAccepts(); err != nil {
+	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
 		return err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.dnatOffUnlocked(family, table)
+	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
 }
 
 func parseListenHostPort(addr string) (host string, port int, ok bool) {
