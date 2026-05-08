@@ -9,8 +9,9 @@
 | 3 | Post-clearance `challenge` is converted, never re-prompted | DONE |
 | 4 | Lua unit tests for Steps 1-3 | DONE |
 | 5 | Static-asset bypass at nginx layer | DONE |
-| 6 | Split `cfm_waf.lua` into engine / detectors / util files | TODO |
-| 7+ | New detector phases (W/R/C/X/B series) | TODO |
+| 6 | Production WAF log analysis + first-pass rule tuning | DONE — see `docs/waf-analysis-2026-05-08.md` |
+| 7 | Split `cfm_waf.lua` into engine / detectors / util files | TODO |
+| 8+ | New detector phases (W/R/C/X/B series) | TODO |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
 
