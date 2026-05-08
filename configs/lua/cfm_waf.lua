@@ -2395,6 +2395,64 @@ function _M.should_push(shdict, ip, reason)
   return ok == true
 end
 
+-- WAF reason families that should escalate to block (instead of degrading to
+-- logonly) when a "challenge"-mode rule fires under valid clearance. Match is
+-- on the family prefix before the first ":" (so "WAF_RCE:REVERSE_SHELL" still
+-- hits). Source of truth: docs/waf.md "High-risk reasons".
+_M.WAF_HIGH_RISK_REASONS = {
+  WAF_RCE                = true,
+  WAF_UPLOAD_CONTENT     = true,
+  WAF_UPLOAD_FNAME       = true,
+  WAF_UPLOAD_OBFUSCATION = true,
+  WAF_CMD_PAYLOAD        = true,
+  WAF_B64_INJECT         = true,
+  WAF_SHELLSHOCK         = true,
+  WAF_PHP_WEBSHELL_BODY  = true,
+  WAF_TRAVERSAL          = true,
+  WAF_XXE                = true,
+}
+
+function _M.is_high_risk_reason(reason)
+  if not reason or reason == "" then return false end
+  local prefix = reason:match("^([^:]+)") or reason
+  return _M.WAF_HIGH_RISK_REASONS[prefix] == true
+end
+
+-- Post-clearance challenge-loop converter. Returns (action, was_converted).
+-- Only "challenge" actions are eligible for conversion; everything else
+-- passes through unchanged. Defence in depth: if either default is itself
+-- "challenge", coerce it to the safe value for that slot. The CFG sanitizer
+-- in cfm.lua already rejects "challenge" as an env value, but a buggy
+-- caller passing it raw must not reintroduce the loop.
+function _M.post_clearance_action(action, reason, after_challenge, after_high_risk)
+  if action ~= "challenge" then return action, false end
+  if after_high_risk == "challenge" then after_high_risk = "block" end
+  if after_challenge == "challenge" then after_challenge = "logonly" end
+  if _M.is_high_risk_reason(reason) then
+    return after_high_risk or "block", true
+  end
+  return after_challenge or "logonly", true
+end
+
+-- Live rule-mode tuning. Accepts the same values rule_mode() does:
+-- "disabled" | "logonly" | "challenge" | "block". Returns true on success,
+-- (false, err) on rejection. Per-worker only — changes do not survive
+-- reload. Intended for ops kill-switches and tests.
+--
+-- Name must start with "rule_": this prevents typos like
+-- set_rule("max_scan_len", "block") from silently overwriting unrelated
+-- numeric tuning fields with a string mode value.
+function _M.set_rule(name, mode)
+  if type(name) ~= "string" or name:sub(1, 5) ~= "rule_" then
+    return false, "invalid rule name"
+  end
+  if mode ~= "disabled" and mode ~= "logonly" and mode ~= "challenge" and mode ~= "block" then
+    return false, "invalid mode"
+  end
+  CFG[name] = mode
+  return true
+end
+
 
 -- This exposes the full CFG table (rule modes + tuning values) to cfm_stats.lua
 -- without copying data or adding any runtime overhead to the hot path.

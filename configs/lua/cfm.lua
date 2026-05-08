@@ -197,29 +197,6 @@ local function has(s, pat)
   return string.find(s, pat, 1, true) ~= nil
 end
 
--- WAF reason families that should escalate to block (not logonly) when a
--- challenge-action rule fires under valid clearance. Match is on the family
--- prefix before the first ":" (so e.g. "WAF_RCE:REVERSE_SHELL" still hits).
--- Source list: docs/waf.md "High-risk reasons".
-local WAF_HIGH_RISK_REASONS = {
-  WAF_RCE                = true,
-  WAF_UPLOAD_CONTENT     = true,
-  WAF_UPLOAD_FNAME       = true,
-  WAF_UPLOAD_OBFUSCATION = true,
-  WAF_CMD_PAYLOAD        = true,
-  WAF_B64_INJECT         = true,
-  WAF_SHELLSHOCK         = true,
-  WAF_PHP_WEBSHELL_BODY  = true,
-  WAF_TRAVERSAL          = true,
-  WAF_XXE                = true,
-}
-
-local function is_high_risk_waf_reason(reason)
-  if not reason or reason == "" then return false end
-  local prefix = reason:match("^([^:]+)") or reason
-  return WAF_HIGH_RISK_REASONS[prefix] == true
-end
-
 local function normalize_host(raw)
   local h = lower(tostring(raw or "")):gsub("%.$", "")
   if h == "" then return "" end
@@ -1077,21 +1054,23 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       local p_meth = method
 
       -- Post-clearance challenge-loop prevention: if the request already
-      -- holds a valid cfm_clearance, re-challenging is pointless (the user
-      -- would just solve it again and retry the same payload). Convert the
-      -- action by reason family — high-risk indicators escalate to block,
-      -- everything else degrades to logonly so the hit is still recorded.
+      -- holds a valid cfm_clearance, re-challenging is pointless. Delegate
+      -- the conversion to cfm_waf so the high-risk reason classifier stays
+      -- next to the WAF code that emits the reason strings.
       local converted_from_challenge = false
-      if waf_action == "challenge" and clearance_allow then
-        local converted = is_high_risk_waf_reason(reason)
-            and CFG.waf_after_clearance_high_risk
-            or  CFG.waf_after_clearance_challenge
-        log_route(ngx.INFO, "waf_post_clearance_convert ip=" .. ip ..
-          " reason=" .. tostring(reason) ..
-          " from=challenge to=" .. tostring(converted))
-        waf_action = converted
-        converted_from_challenge = true
-        if CFG.debug_headers then ngx.header["X-CFM-WAF-Converted"] = converted end
+      if clearance_allow and waf and waf.post_clearance_action then
+        local converted, did_convert = waf.post_clearance_action(
+          waf_action, reason,
+          CFG.waf_after_clearance_challenge,
+          CFG.waf_after_clearance_high_risk)
+        if did_convert then
+          log_route(ngx.INFO, "waf_post_clearance_convert ip=" .. ip ..
+            " reason=" .. tostring(reason) ..
+            " from=challenge to=" .. tostring(converted))
+          waf_action = converted
+          converted_from_challenge = true
+          if CFG.debug_headers then ngx.header["X-CFM-WAF-Converted"] = converted end
+        end
       end
 
       if waf_action == "logonly" then
