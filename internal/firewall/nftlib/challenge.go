@@ -4,6 +4,7 @@ package nftlib
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -51,26 +52,58 @@ func parseDNATRuleSpecID(id string) (dnatRuleSpec, bool) {
 	if len(parts) < 8 {
 		return spec, false
 	}
-	parsePart := func(prefix, part string) (uint64, bool) {
+	parseFamily := func(prefix, part string) (nftables.TableFamily, bool) {
 		if !strings.HasPrefix(part, prefix) {
 			return 0, false
 		}
-		n, err := strconv.ParseUint(strings.TrimPrefix(part, prefix), 10, 16)
-		return n, err == nil
+		n, err := strconv.ParseInt(strings.TrimPrefix(part, prefix), 10, 32)
+		if err != nil {
+			return 0, false
+		}
+		if n < 0 || n > 255 {
+			return 0, false
+		}
+		return nftables.TableFamily(n), true
 	}
-	fam, ok := parsePart("f", parts[2])
+	parseProtocol := func(prefix, part string) (uint8, bool) {
+		if !strings.HasPrefix(part, prefix) {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(strings.TrimPrefix(part, prefix), 10, 32)
+		if err != nil {
+			return 0, false
+		}
+		if n < 0 || n > 255 {
+			return 0, false
+		}
+		return uint8(n), true
+	}
+	parsePort := func(prefix, part string) (uint16, bool) {
+		if !strings.HasPrefix(part, prefix) {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(strings.TrimPrefix(part, prefix), 10, 32)
+		if err != nil {
+			return 0, false
+		}
+		if n < 1 || n > 65535 {
+			return 0, false
+		}
+		return uint16(n), true
+	}
+	fam, ok := parseFamily("f", parts[2])
 	if !ok {
 		return spec, false
 	}
-	proto, ok := parsePart("p", parts[3])
-	if !ok || proto > 255 {
-		return spec, false
-	}
-	dport, ok := parsePart("d", parts[4])
+	proto, ok := parseProtocol("p", parts[3])
 	if !ok {
 		return spec, false
 	}
-	toPort, ok := parsePart("t", parts[5])
+	dport, ok := parsePort("d", parts[4])
+	if !ok {
+		return spec, false
+	}
+	toPort, ok := parsePort("t", parts[5])
 	if !ok {
 		return spec, false
 	}
@@ -88,10 +121,10 @@ func parseDNATRuleSpecID(id string) (dnatRuleSpec, bool) {
 		}
 		spec.toAddr = ip
 	}
-	spec.family = nftables.TableFamily(fam)
-	spec.proto = uint8(proto)
-	spec.dport = uint16(dport)
-	spec.toPort = uint16(toPort)
+	spec.family = fam
+	spec.proto = proto
+	spec.dport = dport
+	spec.toPort = toPort
 	spec.sourceSet = strings.TrimPrefix(parts[6], "s")
 	return spec, true
 }
@@ -101,8 +134,10 @@ func managedDNATRule(userData []byte) bool {
 }
 
 func dnatRuleExprs(spec dnatRuleSpec) []expr.Any {
-	toPort := []byte{byte(spec.toPort >> 8), byte(spec.toPort)}
-	dport := []byte{byte(spec.dport >> 8), byte(spec.dport)}
+	toPort := make([]byte, 2)
+	binary.BigEndian.PutUint16(toPort, spec.toPort)
+	dport := make([]byte, 2)
+	binary.BigEndian.PutUint16(dport, spec.dport)
 	saddrLen, saddrOff := uint32(4), uint32(12)
 	if spec.family == nftables.TableFamilyIPv6 {
 		saddrLen, saddrOff = 16, 8
@@ -375,9 +410,13 @@ func dnatAcceptLabel(spec dnatRuleSpec) string {
 func dnatWantedSpecs(httpHost string, httpPort int, httpsHost string, httpsPort int) []dnatRuleSpec {
 	var specs []dnatRuleSpec
 	addListener := func(host string, dport uint16, proto uint8, toPort int) {
-		if toPort <= 0 || toPort > 65535 {
+		if toPort < 1 {
 			return
 		}
+		if toPort > 65535 {
+			return
+		}
+		toPort16 := uint16(toPort)
 		for _, fam := range []nftables.TableFamily{nftables.TableFamilyIPv4, nftables.TableFamilyIPv6} {
 			addr, ok := dnatTargetAddr(host, fam)
 			if !ok {
@@ -388,7 +427,7 @@ func dnatWantedSpecs(httpHost string, httpPort int, httpsHost string, httpsPort 
 				sets = []string{setChalV6, "self_v6"}
 			}
 			for _, setName := range sets {
-				specs = append(specs, dnatRuleSpec{family: fam, proto: proto, dport: dport, toPort: uint16(toPort), sourceSet: setName, toAddr: addr})
+				specs = append(specs, dnatRuleSpec{family: fam, proto: proto, dport: dport, toPort: toPort16, sourceSet: setName, toAddr: addr})
 			}
 		}
 	}
@@ -498,7 +537,7 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
 	}()
 	family, table = dnatDefaults(family, table)
-	if httpPort <= 0 || httpsPort <= 0 {
+	if httpPort <= 0 || httpsPort <= 0 || httpPort > 65535 || httpsPort > 65535 {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
 	}
 	if err := b.EnsureBase(); err != nil {
@@ -519,7 +558,7 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 	}
 	if ch == nil {
 		b.conn.AddTable(t)
-		dstNat := nftables.ChainPriority(b.dnatPriority())
+		dstNat := b.dnatChainPriority()
 		policy := nftables.ChainPolicyAccept
 		ch = &nftables.Chain{
 			Name:     "prerouting",
@@ -644,4 +683,15 @@ func (b *Backend) dnatPriority() int {
 		return 300
 	}
 	return prio
+}
+
+func (b *Backend) dnatChainPriority() nftables.ChainPriority {
+	prio := b.dnatPriority()
+	if prio < -300 {
+		return nftables.ChainPriority(-300)
+	}
+	if prio > 300 {
+		return nftables.ChainPriority(300)
+	}
+	return nftables.ChainPriority(prio)
 }
