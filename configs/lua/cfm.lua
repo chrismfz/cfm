@@ -132,6 +132,20 @@ local CFG = {
   post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
   post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
   post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
+
+  -- Post-clearance WAF policy. cfm_clearance proves the client passed the
+  -- challenge gate, NOT that the payload is safe. So when WAF wants to
+  -- challenge a request that already has clearance we must NOT re-challenge
+  -- (would loop), but we also must not silently allow. Convert via these
+  -- knobs: high-risk reason families escalate, the rest degrade to logonly.
+  -- Allowed values: "block" | "logonly". "challenge" is intentionally NOT
+  -- accepted here because it would re-introduce the loop.
+  waf_after_clearance_challenge =
+      ({ block = "block", logonly = "logonly" })[os.getenv("CFM_WAF_AFTER_CLEARANCE_CHALLENGE") or ""]
+      or "logonly",
+  waf_after_clearance_high_risk =
+      ({ block = "block", logonly = "logonly" })[os.getenv("CFM_WAF_AFTER_CLEARANCE_HIGH_RISK") or ""]
+      or "block",
 }
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -181,6 +195,29 @@ local function lower(s) if not s then return "" end; return string.lower(s) end
 local function has(s, pat)
   if not s or s == "" then return false end
   return string.find(s, pat, 1, true) ~= nil
+end
+
+-- WAF reason families that should escalate to block (not logonly) when a
+-- challenge-action rule fires under valid clearance. Match is on the family
+-- prefix before the first ":" (so e.g. "WAF_RCE:REVERSE_SHELL" still hits).
+-- Source list: docs/waf.md "High-risk reasons".
+local WAF_HIGH_RISK_REASONS = {
+  WAF_RCE                = true,
+  WAF_UPLOAD_CONTENT     = true,
+  WAF_UPLOAD_FNAME       = true,
+  WAF_UPLOAD_OBFUSCATION = true,
+  WAF_CMD_PAYLOAD        = true,
+  WAF_B64_INJECT         = true,
+  WAF_SHELLSHOCK         = true,
+  WAF_PHP_WEBSHELL_BODY  = true,
+  WAF_TRAVERSAL          = true,
+  WAF_XXE                = true,
+}
+
+local function is_high_risk_waf_reason(reason)
+  if not reason or reason == "" then return false end
+  local prefix = reason:match("^([^:]+)") or reason
+  return WAF_HIGH_RISK_REASONS[prefix] == true
 end
 
 local function normalize_host(raw)
@@ -1002,19 +1039,23 @@ try_apply_post_resume(ip, host)
 method = ngx.req.get_method() or method
 uri    = ngx.var.uri          or uri
 
--- ── Step 1: Solved Cookie fast-path ──────────────────────────────────────────
+-- ── Step 1: Validate clearance (do NOT allow yet — WAF runs first) ──────────
+-- cfm_clearance proves the client passed the challenge gate. It does not
+-- prove the payload is safe, so the allow-to-origin is deferred until after
+-- WAF inspection in Step 2. The validation result is captured in
+-- `clearance_allow` and `ngx.ctx.cfm_clearance_ok` so downstream steps and
+-- the post-clearance WAF challenge converter can see it.
 local clearance_scope = "web"
 local clearance_cookie = ngx.var.cookie_cfm_clearance
 local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
 if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
-if clearance_ok and not ngx.ctx.cfm_resumed_post then
-  refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope); touch_ok_scoped(ip, host, clearance_scope)
-  ngx.header["X-CFM-Action"] = "allow_cookie"
-  ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
-  return
-end
+local clearance_allow = clearance_ok and not ngx.ctx.cfm_resumed_post
+ngx.ctx.cfm_clearance_ok = clearance_allow
 
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
+-- Runs even when clearance is valid: a solved challenge does not authorise
+-- exploit payloads, and a logonly hit must not silently let a webshell
+-- upload through just because the client is browser-capable.
 if waf_ok and waf and waf.enabled and waf.enabled() then
   if waf_is_excluded(host, uri) then
     if CFG.debug_headers then ngx.header["X-CFM-WAF-Excluded"] = "1" end
@@ -1035,14 +1076,36 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       local p_uri  = ngx.var.request_uri or uri
       local p_meth = method
 
+      -- Post-clearance challenge-loop prevention: if the request already
+      -- holds a valid cfm_clearance, re-challenging is pointless (the user
+      -- would just solve it again and retry the same payload). Convert the
+      -- action by reason family — high-risk indicators escalate to block,
+      -- everything else degrades to logonly so the hit is still recorded.
+      local converted_from_challenge = false
+      if waf_action == "challenge" and clearance_allow then
+        local converted = is_high_risk_waf_reason(reason)
+            and CFG.waf_after_clearance_high_risk
+            or  CFG.waf_after_clearance_challenge
+        log_route(ngx.INFO, "waf_post_clearance_convert ip=" .. ip ..
+          " reason=" .. tostring(reason) ..
+          " from=challenge to=" .. tostring(converted))
+        waf_action = converted
+        converted_from_challenge = true
+        if CFG.debug_headers then ngx.header["X-CFM-WAF-Converted"] = converted end
+      end
+
       if waf_action == "logonly" then
-        ngx.header["X-CFM-Action"] = "logonly"
+        ngx.header["X-CFM-Action"] = converted_from_challenge and "logonly_pc" or "logonly"
+        if clearance_allow then
+          refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope)
+          touch_ok_scoped(ip, host, clearance_scope)
+        end
         ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
       elseif waf_action == "block" then
-        ngx.header["X-CFM-Action"] = "block"
+        ngx.header["X-CFM-Action"] = converted_from_challenge and "block_pc" or "block"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
         observe_waf(ip, host, p_uri, p_meth, 403, reason)
-      else -- challenge
+      else -- challenge (only reachable when clearance_allow == false)
         if ngx.ctx.cfm_resumed_post then
           ngx.header["X-CFM-Action"] = "block_replayed"
           ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
@@ -1073,10 +1136,25 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
 end
 if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
 
+-- ── Step 2b: Honour clearance allow (deferred from Step 1) ──────────────────
+-- WAF either passed cleanly or is disabled/excluded for this host. Now we
+-- can safely apply the clearance fast-path: refresh the cookie, touch the
+-- ok cache, and route to origin. This intentionally short-circuits the
+-- forced-challenge and bridge-decision steps below — clearance means
+-- "don't repeatedly challenge this client for the same gate."
+if clearance_allow then
+  refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope)
+  touch_ok_scoped(ip, host, clearance_scope)
+  ngx.header["X-CFM-Action"] = "allow_cookie"
+  ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+  return
+end
+
 -- ── Step 2.5: Forced challenge for marked locations ──────────────────────────
 -- Triggered via `set $cfm_force_challenge 1;` in nginx location blocks
 -- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
--- and is skipped entirely when a valid cfm_clearance cookie is present (Step 1).
+-- and is skipped entirely when a valid cfm_clearance cookie is present
+-- (Step 2b above returns before we reach this block).
 if ngx.var.cfm_force_challenge == "1" then
   ngx.header["X-CFM-Action"]  = "challenge_forced"
   ngx.header["Cache-Control"] = "no-store"
