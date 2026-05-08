@@ -116,6 +116,23 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 	return elemsToStrings(elems), nil
 }
 
+// ListSetElementsTimed returns set elements paired with their remaining TTL.
+// Expires is zero on elements without a timeout.
+func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTimed, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	set, err := b.lookupSet(setName)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListSetElementsTimed %s: %w", setName, err)
+	}
+	elems, err := b.conn.GetSetElements(set)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib ListSetElementsTimed %s: %w", setName, err)
+	}
+	return elemsToTimed(elems), nil
+}
+
 // ── Table/set dump methods (text formatting via nft subprocess) ──────────────
 
 func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
