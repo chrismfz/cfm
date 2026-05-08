@@ -8,8 +8,8 @@
 | 2 | `cfm.lua` runs WAF before honoring `cfm_clearance` | DONE |
 | 3 | Post-clearance `challenge` is converted, never re-prompted | DONE |
 | 4 | Lua unit tests for Steps 1-3 | DONE |
-| 5 | Split `cfm_waf.lua` into engine / detectors / util files | TODO |
-| 6 | Static-asset bypass at nginx layer | TODO |
+| 5 | Static-asset bypass at nginx layer | DONE |
+| 6 | Split `cfm_waf.lua` into engine / detectors / util files | TODO |
 | 7+ | New detector phases (W/R/C/X/B series) | TODO |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
@@ -43,6 +43,10 @@ Return shape: `(hit, reason, ttl, action, hits)`. The first four are the origina
 ## Request flow (current)
 
 ```
+[ nginx: location-level dispatch ]
+  ├─ /__cfm_challenge, /__cfm_verify, /cpanelwebcall, /cfm-admin/  → bypass cfm.lua
+  ├─ \.(css|js|woff2?|ttf|eot|png|jpe?g|gif|webp|ico|map)$         → bypass cfm.lua, proxy to origin
+  └─ everything else                                               ↓
 [ access_by_lua: cfm.lua ]
   ├─ POST resume handling
   ├─ Step 1   validate cfm_clearance → clearance_allow (no return yet)
@@ -59,10 +63,11 @@ Return shape: `(hit, reason, ttl, action, hits)`. The first four are the origina
 
 Key invariants:
 
-1. **WAF runs even with valid clearance.** No payload reaches origin without inspection.
+1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection.
 2. **Post-clearance challenge cannot loop.** Conversion happens before the action switch; the `challenge` branch in the WAF hit handler is unreachable when `clearance_allow=true`.
 3. **POST replays are safe.** `clearance_allow` is force-false on `cfm_resumed_post`; a re-challenged replay hits the `block_replayed` safety net.
 4. **CFM control endpoints bypass `cfm.lua`.** `/__cfm_challenge`, `/__cfm_verify` are exact-match nginx locations — no WAF, no challenge, no origin.
+5. **Static-asset URIs bypass `cfm.lua`** (`.css/.js/.woff2?/.ttf/.eot/.png/.jpe?g/.gif/.webp/.ico/.map`). The `location` block in `openresty.conf` / `angie.conf` skips the access phase and proxies straight to Apache via `http://$server_addr:80` (HTTP) or `https://$server_addr:443` (HTTPS). `.svg` is NOT in the bypass — it can carry script. The block has a commented `# FUTURE: proxy_cache cfm_static; ...` slot so caching can be enabled later as a pure nginx-side change.
 
 `X-CFM-Action` values for visibility:
 
@@ -146,11 +151,10 @@ These are real and worth addressing, but not blocking:
 1. **Body truncation.** `CFM_WAF_BODY_MAX_LEN=8192` (in `cfm.lua`) means uploads/payloads larger than 8 KB skip body-inspection rules silently. Phase W2/W3/W4 won't deliver until either the cap is raised for upload endpoints or inspection is streamed.
 2. **No multipart parser.** Polyglot upload detection (W4), upload context for W2/W3, and X1-in-body assume part-aware inspection. Today the WAF runs literal `has()` over raw bytes — works for finding `<?php` in image content, but can't distinguish multipart parts (claimed CT, filename, content).
 3. **No hit-rate measurement.** The rollout playbook below requires `<0.01%` FP rate before promoting `logonly → challenge → block`, but there's no tooling to measure that today. Need shdict counters or sampled hit log.
-4. **Static-asset traffic still runs WAF.** Large media is bypassed at nginx; `.css/.js/.woff2?/.ttf/.eot/.png/.jpe?g/.gif/.webp/.ico/.map` is not. Cheap CPU win pending. Keep `.svg` going through WAF (script-bearing).
-5. **shdict pressure.** Auth-burst counters use shdict. Adding more counters scales contention. Per-rule benchmarks needed before Phase 5 lands.
-6. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
-7. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
-8. **Route log loses post-clearance signal.** The `waf_logonly` / `waf_block` log line at `cfm.lua:1131` after conversion doesn't say "from challenge". The separate `waf_post_clearance_convert` line at `cfm.lua:1089` carries it; correlation is by IP+timestamp. Could be folded into one line.
+4. **shdict pressure.** Auth-burst counters use shdict. Adding more counters scales contention. Per-rule benchmarks needed before Phase 5 lands.
+5. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
+6. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
+7. **Route log loses post-clearance signal.** The `waf_logonly` / `waf_block` log line at `cfm.lua:1131` after conversion doesn't say "from challenge". The separate `waf_post_clearance_convert` line at `cfm.lua:1089` carries it; correlation is by IP+timestamp. Could be folded into one line.
 
 ---
 
@@ -161,15 +165,14 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | # | Item | Why now | Size |
 |---|------|---------|------|
 | 1 | **File split** of `cfm_waf.lua` into `cfm_waf_util.lua` + `cfm_waf_detectors.lua` + `cfm_waf.lua`. Pure refactor, zero behaviour change. | Foundation for Phases below; lets each new detector tag its surface (header / uri / body / multipart) at move time. | M |
-| 2 | **Static-asset nginx bypass** for `.css/.js/.woff2?/.ttf/.eot/.png/.jpe?g/.gif/.webp/.ico/.map` (NOT `.svg`). | Cuts WAF CPU on highest-volume request class. Prerequisite-feel for adding many detectors. | S |
-| 3 | **C1+C2 (Log4Shell, Java deserialization)** | Cheapest CVE detectors, near-zero FP, scan headers + query + body. | S |
-| 4 | **R1 (Reverse shell payloads)** | Exact literal match, near-zero FP, instant block-class. | S |
-| 5 | **W1 (Known webshell paths)** as a hash-lookup table loaded from a data file. | Foundation for all path-based detectors. | S |
-| 6 | **W4 (Polyglot upload detection)** | Highest-value upload defense. Needs a tiny multipart parser (also unblocks W2/W3 in upload context). | M |
-| 7 | **CVE signature file** at `/etc/cfm/cve_signatures.txt` with hot-reload. | Needed before Phase 3 grows; ship updates without redeploying. | M |
-| 8 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
-| 9 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
-| 10 | **Hit-rate counter + sampled hit log** | Required before promoting any rule from logonly upward. Enables data-driven rollout. | M |
+| 2 | **C1+C2 (Log4Shell, Java deserialization)** | Cheapest CVE detectors, near-zero FP, scan headers + query + body. | S |
+| 3 | **R1 (Reverse shell payloads)** | Exact literal match, near-zero FP, instant block-class. | S |
+| 4 | **W1 (Known webshell paths)** as a hash-lookup table loaded from a data file. | Foundation for all path-based detectors. | S |
+| 5 | **W4 (Polyglot upload detection)** | Highest-value upload defense. Needs a tiny multipart parser (also unblocks W2/W3 in upload context). | M |
+| 6 | **CVE signature file** at `/etc/cfm/cve_signatures.txt` with hot-reload. | Needed before Phase 3 grows; ship updates without redeploying. | M |
+| 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
+| 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
+| 9 | **Hit-rate counter + sampled hit log** | Required before promoting any rule from logonly upward. Enables data-driven rollout. | M |
 
 ---
 
