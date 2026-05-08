@@ -445,7 +445,23 @@ func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *Chall
 	}
 }
 
+func normalizeChallengeListenAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	if p, err := strconv.Atoi(addr); err == nil && p > 0 && p <= 65535 {
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(p))
+	}
+	return addr
+}
+
 func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
+	httpAddr = normalizeChallengeListenAddress(httpAddr)
+	httpsAddr = normalizeChallengeListenAddress(httpsAddr)
 	if s.accessLog == nil && strings.TrimSpace(s.accessLogPath) != "" {
 		s.accessLog = newChallengeAccessLogger(s.accessLogPath)
 	}

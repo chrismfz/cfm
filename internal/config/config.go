@@ -32,6 +32,7 @@ type Config struct {
 	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
 	Clam             ClamConfig
+	Challenge        ChallengeConfig
 }
 
 // --- Categories ---
@@ -224,6 +225,11 @@ type LoggingConfig struct {
 	SOCKETStdout bool   // SOCKET_LOG_STDOUT
 	SOCKETFile   string // SOCKET_LOG_FILE
 
+}
+
+type ChallengeConfig struct {
+	HTTPListen  string // CHALLENGE_HTTP_LISTEN
+	HTTPSListen string // CHALLENGE_HTTPS_LISTEN
 }
 
 type NFTConfig struct {
@@ -651,6 +657,11 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "NFT_DNAT_PRIORITY":
 			cfg.NFT.DNATPriority = clamp(parseInt(val), -300, 300)
 
+		case "CHALLENGE_HTTP_LISTEN":
+			cfg.Challenge.HTTPListen = val
+		case "CHALLENGE_HTTPS_LISTEN":
+			cfg.Challenge.HTTPSListen = val
+
 		// Ports
 		case "TCP_IN":
 			cfg.Ports.TCPIn = append(cfg.Ports.TCPIn, parsePorts(val)...)
@@ -1020,7 +1031,7 @@ func IsKnownKey(key string) bool {
 		"FIREWALL_ENGINE", "CFM_FIREWALL_ENGINE",
 		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
 		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
-		"NFT_INPUT_PRIORITY", "NFT_DNAT_PRIORITY", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
+		"NFT_INPUT_PRIORITY", "NFT_DNAT_PRIORITY", "CHALLENGE_HTTP_LISTEN", "CHALLENGE_HTTPS_LISTEN", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
 		"THROTTLE_ENABLED", "THROTTLE_WINDOW", "THROTTLE_HITS", "THROTTLE_MODE", "THROTTLE_TTL", "THROTTLE_SOURCES", "THROTTLE_SET_TTL", "THROTTLE_COOLDOWN",
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
