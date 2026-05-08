@@ -880,21 +880,56 @@ What this does NOT yet fix:
 - Post-clearance `challenge` loop prevention is not implemented; it cannot be implemented until Step 2 moves WAF before clearance-allow.
 - The `hits` table is returned but not yet consumed anywhere. `cfm.lua` still only reads the first four return values.
 
-### Step 2 — TODO: move WAF before clearance-origin allow in `cfm.lua`
+### Step 2 — DONE: WAF runs before clearance-origin allow
 
-Smallest possible diff: in `cfm.lua` around the `allow_cookie` early return, validate clearance into `ngx.ctx.cfm_clearance_ok` (and refresh as today), but do NOT `return` yet. Let control fall through into the existing inline-WAF block. Then, only after WAF finishes (no hit, or `logonly`), honour the clearance allow.
+The clearance fast-path in `cfm.lua` no longer returns before WAF. Validation still happens up front (so the cookie status is recorded for debug headers and downstream context), but the `allow_cookie` return is deferred to a new "Step 2b" that runs after the WAF block.
 
-Risks to watch: replayed POST handling, sliding-clearance refresh side-effects, and any `X-CFM-Action: allow_cookie` consumers downstream. Do not move the CFM control endpoints (`/__cfm_challenge`, `/__cfm_verify`) — they are bypassed at nginx-level for a reason.
+Concretely, in `cfm.lua`:
 
-### Step 3 — TODO: post-clearance challenge-loop prevention
+- Step 1 now only validates the clearance token and stores the result in a local `clearance_allow` and `ngx.ctx.cfm_clearance_ok`. No early return, no cookie refresh yet.
+- Step 2 (inline WAF) is unchanged in shape but now sees clearance state via `clearance_allow`.
+- A new Step 2b runs after WAF: if `clearance_allow` is true and WAF didn't return early (block / challenge / logonly all return from the WAF block themselves), it does the cookie refresh + `touch_ok_scoped` + `allow_cookie` + origin route — i.e. exactly what the old fast-path used to do, just deferred.
 
-Becomes meaningful only after Step 2. Logic: when `waf_action == "challenge"` and clearance is valid, convert to either `block` (high-risk reason family prefix) or `logonly` (everything else). Drive via two env knobs:
+The `block_replayed` safety net for replayed POSTs (`ngx.ctx.cfm_resumed_post`) is preserved as-is. `clearance_allow` is forced false on resumed POSTs, so a replay never gets the post-clearance treatment and the existing block-on-rechallenge behaviour stands.
 
-- `CFM_WAF_AFTER_CLEARANCE_CHALLENGE` (default `logonly`)
-- `CFM_WAF_AFTER_CLEARANCE_HIGH_RISK` (default `block`)
+CFM control endpoints (`/__cfm_challenge`, `/__cfm_verify`) are still bypassed at the nginx layer — Step 2 changes nothing about them.
 
-High-risk reason families to start with: `WAF_RCE`, `WAF_UPLOAD_CONTENT`, `WAF_UPLOAD_FNAME`, `WAF_UPLOAD_OBFUSCATION`, `WAF_CMD_PAYLOAD`, `WAF_B64_INJECT`, `WAF_SHELLSHOCK`. Match by reason prefix (everything before the first `:`).
+### Step 3 — DONE: post-clearance challenge-loop prevention
+
+Inside the WAF hit handler in `cfm.lua`, when `waf_action == "challenge"` and `clearance_allow` is true, the action is converted in-place before the action-switch runs:
+
+```text
+challenge + clearance + high-risk reason  -> waf_after_clearance_high_risk  (default: block)
+challenge + clearance + other reason      -> waf_after_clearance_challenge  (default: logonly)
+challenge + no clearance                  -> normal challenge flow (unchanged)
+```
+
+The conversion is logged as `waf_post_clearance_convert` with the original reason and the new action so it's easy to grep in production.
+
+Two new env knobs (in `CFG` near the other WAF knobs):
+
+- `CFM_WAF_AFTER_CLEARANCE_CHALLENGE` — default `logonly`. Allowed values: `block` | `logonly`. `challenge` is intentionally rejected (would re-introduce the loop).
+- `CFM_WAF_AFTER_CLEARANCE_HIGH_RISK` — default `block`. Same allowed values.
+
+The high-risk reason set lives in `cfm.lua` as `WAF_HIGH_RISK_REASONS`, matched by family prefix (everything before the first `:`):
+
+```
+WAF_RCE, WAF_UPLOAD_CONTENT, WAF_UPLOAD_FNAME, WAF_UPLOAD_OBFUSCATION,
+WAF_CMD_PAYLOAD, WAF_B64_INJECT, WAF_SHELLSHOCK,
+WAF_PHP_WEBSHELL_BODY, WAF_TRAVERSAL, WAF_XXE
+```
+
+`WAF_PHP_WEBSHELL_BODY`, `WAF_TRAVERSAL`, and `WAF_XXE` were added beyond the original doc list because they are unambiguous compromise indicators — file inclusion, XML entity expansion, and PHP webshell scoring all map to "credentials are stolen, treat as exploit attempt." Tune in production via the env knobs if needed.
+
+X-CFM-Action header values for visibility:
+
+- `logonly` — WAF logonly hit, no clearance conversion involved.
+- `logonly_pc` — was a challenge hit, converted to logonly because clearance was valid (`pc` = post-clearance).
+- `block` — direct WAF block.
+- `block_pc` — challenge hit converted to block because clearance + high-risk reason.
+- `allow_cookie` — no WAF hit, clearance valid, allowed via Step 2b.
+- `block_replayed` — POST replay re-triggered WAF challenge; existing safety net.
 
 ### Step 4 — TODO: tests and fixtures
 
-The 9 cases enumerated in "Add tests" above. Aim for fixtures that exercise both the highest-severity aggregation (e.g. a request that triggers logonly-then-block in that order) and the post-clearance conversion matrix.
+The 9 cases enumerated in "Add tests" above. Aim for fixtures that exercise both the highest-severity aggregation (Step 1) and the post-clearance conversion matrix (Step 3). Useful X-CFM-Action values to assert against: `allow_cookie`, `logonly`, `logonly_pc`, `block`, `block_pc`, `challenge`, `challenge_resume`, `block_replayed`.
