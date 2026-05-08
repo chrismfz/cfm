@@ -126,6 +126,73 @@ func TestDNATOnRejectsInvalidPortsBeforeNetlink(t *testing.T) {
 	}
 }
 
+func TestDNATUnscopedWantedSpecsDoNotRequireChallengeSource(t *testing.T) {
+	specs := dnatUnscopedWantedSpecs(nftables.TableFamilyINet, 9080, 9043)
+	want := []struct {
+		proto  uint8
+		dport  uint16
+		toPort uint16
+		line   string
+	}{
+		{proto: 6, dport: 80, toPort: 9080, line: "tcp dport 80 dnat to :9080"},
+		{proto: 6, dport: 443, toPort: 9043, line: "tcp dport 443 dnat to :9043"},
+		{proto: 17, dport: 443, toPort: 9043, line: "udp dport 443 dnat to :9043"},
+	}
+	if len(specs) != len(want) {
+		t.Fatalf("dnatUnscopedWantedSpecs() returned %d specs, want %d: %#v", len(specs), len(want), specs)
+	}
+	for i, spec := range specs {
+		if spec.sourceSet != "" {
+			t.Fatalf("DNATOn spec %d has sourceSet %q, want unscoped", i, spec.sourceSet)
+		}
+		if spec.family != nftables.TableFamilyINet || spec.proto != want[i].proto || spec.dport != want[i].dport || spec.toPort != want[i].toPort || spec.toAddr != nil {
+			t.Fatalf("DNATOn spec %d = %#v, want family inet proto=%d dport=%d toPort=%d with no target address", i, spec, want[i].proto, want[i].dport, want[i].toPort)
+		}
+		for _, ex := range dnatRuleExprs(spec) {
+			if _, ok := ex.(*expr.Lookup); ok {
+				t.Fatalf("DNATOn spec %d installed source-set lookup in %#v", i, dnatRuleExprs(spec))
+			}
+		}
+		line := dnatShowRuleLine(spec)
+		if line != want[i].line {
+			t.Fatalf("dnatShowRuleLine(DNATOn spec %d) = %q, want %q", i, line, want[i].line)
+		}
+		if strings.Contains(line, "saddr @challenge_") || strings.Contains(line, "saddr @self_") {
+			t.Fatalf("DNATOn rule line is unexpectedly source-scoped: %q", line)
+		}
+	}
+
+	accepts := []string{
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_dnat_accept:web_http_tcp:80:9080"`,
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 tcp dport 9043 accept comment "cfm_dnat_accept:web_https_tcp:443:9043"`,
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 udp dport 9043 accept comment "cfm_dnat_accept:web_https_udp:443:9043"`,
+	}
+	for i, spec := range specs {
+		got := dnatAcceptRuleExpr(spec)
+		if got != accepts[i] {
+			t.Fatalf("dnatAcceptRuleExpr(DNATOn spec %d) = %q, want %q", i, got, accepts[i])
+		}
+		if strings.Contains(got, " saddr @") {
+			t.Fatalf("DNATOn accept rule is unexpectedly source-scoped: %q", got)
+		}
+	}
+}
+
+func TestDNATLoopbackAcceptRuleMatchesIIFLoAccept(t *testing.T) {
+	rule := &nftables.Rule{UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()}
+	if !dnatLoopbackAcceptMatches(rule) {
+		t.Fatalf("dnatLoopbackAcceptMatches() returned false for generated iif lo accept rule")
+	}
+	meta, ok := rule.Exprs[0].(*expr.Meta)
+	if !ok || meta.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("loopback accept first expr = %#v, want iifname meta load", rule.Exprs[0])
+	}
+	verdict, ok := rule.Exprs[2].(*expr.Verdict)
+	if !ok || verdict.Kind != expr.VerdictAccept {
+		t.Fatalf("loopback accept verdict = %#v, want accept", rule.Exprs[2])
+	}
+}
+
 func TestDNATWantedSpecsAreSourceScopedAndHostScoped(t *testing.T) {
 	specs := dnatWantedSpecs("127.0.0.1", 9080, "2001:db8::10", 9043)
 	assertHasSpec := func(fam nftables.TableFamily, proto uint8, dport uint16, setName, addr string) {
