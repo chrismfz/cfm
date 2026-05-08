@@ -132,18 +132,18 @@ func applyPanelChallengeModeToPaths(mode string, paths []string) error {
 }
 
 func persistPanelChallengeEnabled(enabled bool) error {
-	if err := os.MkdirAll(filepath.Dir(panelChallengeEnabledStatePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(panelChallengeModeStatePath), 0o755); err != nil {
 		return err
 	}
 	v := "0\n"
 	if enabled {
 		v = "1\n"
 	}
-	return os.WriteFile(panelChallengeEnabledStatePath, []byte(v), 0o644)
+	return os.WriteFile(panelChallengeModeStatePath, []byte(v), 0o644)
 }
 
 func loadPersistedPanelChallengeEnabled() bool {
-	b, err := os.ReadFile(panelChallengeEnabledStatePath)
+	b, err := os.ReadFile(panelChallengeModeStatePath)
 	if err != nil {
 		return false
 	}
@@ -293,6 +293,9 @@ func probePanelDecisionEndpoint(paths []string) panelDecisionEndpointProbe {
 
 func reloadPanelListenerService() error {
 	active := panelListenerServiceDetector()
+	if active == panelListenerServiceAmbiguous {
+		return fmt.Errorf("ambiguous active panel listener services: both angie and openresty are active and the loaded panel listener config is not unique")
+	}
 	candidates := panelListenerServiceCandidates(active)
 	var lastErr error
 	primary := active
@@ -320,22 +323,70 @@ func reloadPanelListenerService() error {
 
 var panelListenerServiceDetector = detectActivePanelListenerService
 
-func detectActivePanelListenerService() string {
-	_, _, path := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
+const panelListenerServiceAmbiguous = "__ambiguous__"
+
+func systemctlServiceIsActive(service string) bool {
+	return execCommand("systemctl", "is-active", "--quiet", service).Run() == nil
+}
+
+func activePanelListenerServicesFromSystemd() []string {
+	var active []string
+	for _, service := range []string{"angie", "openresty"} {
+		if systemctlServiceIsActive(service) {
+			active = append(active, service)
+		}
+	}
+	return active
+}
+
+func panelListenerConfigPathsForService(service string, paths []string) []string {
+	var servicePaths []string
+	for _, path := range paths {
+		if panelListenerConfigPathService(path) == service {
+			servicePaths = append(servicePaths, path)
+		}
+	}
+	return servicePaths
+}
+
+func panelListenerConfigPathService(path string) string {
 	switch {
 	case strings.Contains(path, "/etc/angie/"):
 		return "angie"
 	case strings.Contains(path, "/openresty/"):
 		return "openresty"
+	default:
+		return ""
 	}
-	service := detectEdgeService()
-	if service == "angie" || service == "openresty" {
-		return service
+}
+
+func detectActivePanelListenerService() string {
+	active := activePanelListenerServicesFromSystemd()
+	switch len(active) {
+	case 1:
+		return active[0]
+	case 2:
+		var loadedServices []string
+		for _, service := range active {
+			_, loaded, _ := panelListenerGuardStateFromPaths(panelListenerConfigPathsForService(service, panelListenerChallengeConfigPaths))
+			if loaded {
+				loadedServices = append(loadedServices, service)
+			}
+		}
+		if len(loadedServices) == 1 {
+			return loadedServices[0]
+		}
+		return panelListenerServiceAmbiguous
 	}
-	return ""
+
+	_, _, path := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
+	return panelListenerConfigPathService(path)
 }
 
 func panelListenerServiceCandidates(active string) [][]string {
+	if active == panelListenerServiceAmbiguous {
+		return nil
+	}
 	serviceCommands := func(service string) [][]string {
 		return [][]string{
 			{"systemctl", "reload", service},
