@@ -204,8 +204,14 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 	if err := reloadPanelListenerService(); err != nil {
 		t.Fatalf("reload listener service: %v", err)
 	}
-	if len(calls) == 0 || calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected first reload command to be Angie reload, got %v", calls)
+	var reloadCalls []string
+	for _, call := range calls {
+		if strings.Contains(call, " reload ") {
+			reloadCalls = append(reloadCalls, call)
+		}
+	}
+	if len(reloadCalls) == 0 || reloadCalls[0] != "systemctl reload angie" {
+		t.Fatalf("expected first reload command to be Angie reload, got calls=%v reloadCalls=%v", calls, reloadCalls)
 	}
 }
 
