@@ -4,6 +4,7 @@ package nftlib
 
 import (
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -163,12 +164,12 @@ func TestDNATUnscopedWantedSpecsDoNotRequireChallengeSource(t *testing.T) {
 	}
 
 	accepts := []string{
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_dnat_accept:web_http_tcp:80:9080"`,
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 tcp dport 9043 accept comment "cfm_dnat_accept:web_https_tcp:443:9043"`,
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 udp dport 9043 accept comment "cfm_dnat_accept:web_https_udp:443:9043"`,
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080"`,
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 tcp dport 9043 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9043"`,
+		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 udp dport 9043 accept comment "cfm_edge_dnat_accept:web_https_udp:443:9043"`,
 	}
 	for i, spec := range specs {
-		got := dnatAcceptRuleExpr(spec)
+		got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec)
 		if got != accepts[i] {
 			t.Fatalf("dnatAcceptRuleExpr(DNATOn spec %d) = %q, want %q", i, got, accepts[i])
 		}
@@ -259,8 +260,8 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 
 func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
 	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}
-	want := `add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 ip6 daddr 2001:db8::10 udp dport 9043 accept comment "cfm_dnat_accept:web_https_ip6_udp:443:9043"`
-	got := dnatAcceptRuleExpr(spec)
+	want := `add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 ip6 daddr 2001:db8::10 udp dport 9043 accept comment "cfm_challenge_dnat_accept:web_https_ip6_udp:443:9043"`
+	got := dnatAcceptRuleExpr(dnatAcceptNamespaceChallenge, spec)
 	if got != want {
 		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)
 	}
@@ -281,11 +282,56 @@ func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
 	if handle != "31" {
 		t.Fatalf("firstInputDefaultDropHandle() = %q, want 31", handle)
 	}
-	got := dnatAcceptRuleExpr(spec, handle)
+	got := dnatAcceptRuleExpr(dnatAcceptNamespaceChallenge, spec, handle)
 	if !strings.HasPrefix(got, "insert rule inet cfm input position 31 ") {
 		t.Fatalf("DNAT accept rule was not handle-inserted before default drops: %q", got)
 	}
 	if strings.HasPrefix(got, "add rule inet cfm input ") {
 		t.Fatalf("DNAT accept rule used append syntax that can place it after default drops: %q", got)
+	}
+}
+
+func TestScopedDNATAcceptHandlesFiltersChallengeWithoutEdge(t *testing.T) {
+	chain := strings.Join([]string{
+		`table inet cfm {`,
+		`  chain input {`,
+		`    ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080" # handle 11`,
+		`    ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_challenge_dnat_accept:web_http_ip_tcp:80:9080" # handle 22`,
+		`    ct state new ct status dnat ct original proto-dst 443 udp dport 9043 accept comment "cfm_challenge_dnat_accept:web_https_ip_udp:443:9043" # handle 33`,
+		`    ct state new ct status dnat ct original proto-dst 443 tcp dport 9443 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9443" # handle 44`,
+		`  }`,
+		`}`,
+	}, "\n")
+
+	gotChallenge := scopedDNATAcceptHandles(chain, dnatAcceptNamespaceChallenge)
+	wantChallenge := []string{"22", "33"}
+	if !reflect.DeepEqual(gotChallenge, wantChallenge) {
+		t.Fatalf("challenge cleanup handles = %v, want %v", gotChallenge, wantChallenge)
+	}
+
+	gotEdge := scopedDNATAcceptHandles(chain, dnatAcceptNamespaceEdge)
+	wantEdge := []string{"11", "44"}
+	if !reflect.DeepEqual(gotEdge, wantEdge) {
+		t.Fatalf("edge cleanup handles = %v, want %v", gotEdge, wantEdge)
+	}
+}
+
+func TestDNATRuleNamespaceFiltersChallengeWithoutEdge(t *testing.T) {
+	edgeSpec := dnatRuleSpec{family: nftables.TableFamilyINet, proto: 6, dport: 80, toPort: 9080}
+	challengeSpec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")}
+	edgeRule := &nftables.Rule{UserData: []byte(edgeSpec.id())}
+	challengeRule := &nftables.Rule{UserData: []byte(challengeSpec.id())}
+
+	if dnatRuleInNamespace(edgeRule, dnatRuleNamespaceChallenge) {
+		t.Fatal("edge DNAT rule was classified as challenge namespace")
+	}
+	if !dnatRuleInNamespace(edgeRule, dnatRuleNamespaceEdge) {
+		t.Fatal("edge DNAT rule was not classified as edge namespace")
+	}
+	if !dnatRuleInNamespace(challengeRule, dnatRuleNamespaceChallenge) {
+		t.Fatal("challenge DNAT rule was not classified as challenge namespace")
+	}
+	if dnatRuleInNamespace(challengeRule, dnatRuleNamespaceEdge) {
+		t.Fatal("challenge DNAT rule was classified as edge namespace")
 	}
 }
