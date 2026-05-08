@@ -19,6 +19,7 @@ import (
 
 const (
 	dnatRuleTag             = "cfm-dnat-managed"
+	dnatLoopbackAcceptTag   = dnatRuleTag + ":loopback-accept:v1"
 	defaultWebDNATHTTPPort  = 9080
 	defaultWebDNATHTTPSPort = 9043
 )
@@ -107,7 +108,7 @@ func parseDNATRuleSpecID(id string) (dnatRuleSpec, bool) {
 	if !ok {
 		return spec, false
 	}
-	if !strings.HasPrefix(parts[6], "s") || strings.TrimPrefix(parts[6], "s") == "" {
+	if !strings.HasPrefix(parts[6], "s") {
 		return spec, false
 	}
 	if !strings.HasPrefix(parts[7], "a") {
@@ -138,18 +139,23 @@ func dnatRuleExprs(spec dnatRuleSpec) []expr.Any {
 	binary.BigEndian.PutUint16(toPort, spec.toPort)
 	dport := make([]byte, 2)
 	binary.BigEndian.PutUint16(dport, spec.dport)
-	saddrLen, saddrOff := uint32(4), uint32(12)
-	if spec.family == nftables.TableFamilyIPv6 {
-		saddrLen, saddrOff = 16, 8
+	exprs := make([]expr.Any, 0, 9)
+	if spec.sourceSet != "" {
+		saddrLen, saddrOff := uint32(4), uint32(12)
+		if spec.family == nftables.TableFamilyIPv6 {
+			saddrLen, saddrOff = 16, 8
+		}
+		exprs = append(exprs,
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: saddrOff, Len: saddrLen},
+			&expr.Lookup{SourceRegister: 1, SetName: spec.sourceSet},
+		)
 	}
-	exprs := []expr.Any{
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: saddrOff, Len: saddrLen},
-		&expr.Lookup{SourceRegister: 1, SetName: spec.sourceSet},
+	exprs = append(exprs,
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{spec.proto}},
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: dport},
-	}
+	)
 	regProto := uint32(1)
 	if addr := dnatAddrBytes(spec); len(addr) > 0 {
 		exprs = append(exprs, &expr.Immediate{Register: 1, Data: addr}, &expr.Immediate{Register: 2, Data: toPort}, &expr.NAT{Type: expr.NATTypeDestNAT, Family: uint32(spec.family), RegAddrMin: 1, RegProtoMin: 2})
@@ -157,6 +163,36 @@ func dnatRuleExprs(spec dnatRuleSpec) []expr.Any {
 	}
 	exprs = append(exprs, &expr.Immediate{Register: 1, Data: toPort}, &expr.NAT{Type: expr.NATTypeDestNAT, Family: uint32(spec.family), RegProtoMin: regProto})
 	return exprs
+}
+
+func dnatLoopbackAcceptExprs() []expr.Any {
+	iifName := make([]byte, 16)
+	copy(iifName, "lo")
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: iifName},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+func dnatLoopbackAcceptMatches(r *nftables.Rule) bool {
+	if string(r.UserData) != dnatLoopbackAcceptTag {
+		return false
+	}
+	exprs := dnatLoopbackAcceptExprs()
+	if len(r.Exprs) != len(exprs) {
+		return false
+	}
+	meta, ok := r.Exprs[0].(*expr.Meta)
+	if !ok || meta.Key != expr.MetaKeyIIFNAME || meta.Register != 1 {
+		return false
+	}
+	cmp, ok := r.Exprs[1].(*expr.Cmp)
+	if !ok || cmp.Op != expr.CmpOpEq || cmp.Register != 1 || !bytes.Equal(cmp.Data, exprs[1].(*expr.Cmp).Data) {
+		return false
+	}
+	verdict, ok := r.Exprs[2].(*expr.Verdict)
+	return ok && verdict.Kind == expr.VerdictAccept
 }
 
 func dnatAddrBytes(spec dnatRuleSpec) []byte {
@@ -372,6 +408,9 @@ func dnatShowRuleLine(spec dnatRuleSpec) string {
 	if spec.proto == 17 {
 		proto = "udp"
 	}
+	if spec.sourceSet == "" {
+		return fmt.Sprintf("%s dport %d dnat to %s", proto, spec.dport, dnatToString(spec))
+	}
 	return fmt.Sprintf("%s saddr @%s %s dport %d dnat to %s", dnatFamilyPrefix(spec.family), spec.sourceSet, proto, spec.dport, dnatToString(spec))
 }
 
@@ -403,6 +442,9 @@ func dnatAcceptLabel(spec dnatRuleSpec) string {
 	portName := "web_https"
 	if spec.dport == 80 {
 		portName = "web_http"
+	}
+	if spec.sourceSet == "" && spec.toAddr == nil {
+		return fmt.Sprintf("%s_%s", portName, dnatAcceptProtoName(spec.proto))
 	}
 	return fmt.Sprintf("%s_%s_%s", portName, dnatFamilyPrefix(spec.family), dnatAcceptProtoName(spec.proto))
 }
@@ -442,6 +484,14 @@ func dnatWantedSpecs(httpHost string, httpPort int, httpsHost string, httpsPort 
 	addListener(httpsHost, 443, 6, httpsPort)
 	addListener(httpsHost, 443, 17, httpsPort)
 	return specs
+}
+
+func dnatUnscopedWantedSpecs(family nftables.TableFamily, httpPort, httpsPort int) []dnatRuleSpec {
+	return []dnatRuleSpec{
+		{family: family, proto: 6, dport: 80, toPort: uint16(httpPort)},
+		{family: family, proto: 6, dport: 443, toPort: uint16(httpsPort)},
+		{family: family, proto: 17, dport: 443, toPort: uint16(httpsPort)},
+	}
 }
 
 func dnatTargetAddr(host string, fam nftables.TableFamily) (net.IP, bool) {
@@ -557,7 +607,23 @@ func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
 }
 
 func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err error) {
-	return b.dnatOnScoped(family, table, "", httpPort, "", httpsPort)
+	start := time.Now()
+	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	}()
+	family, table = dnatDefaults(family, table)
+	if httpPort <= 0 || httpsPort <= 0 || httpPort > 65535 || httpsPort > 65535 {
+		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
+	}
+	if err := b.EnsureBase(); err != nil {
+		return err
+	}
+	return b.installDNATRules(family, table, dnatUnscopedWantedSpecs(tableFamilyFromString(family), httpPort, httpsPort), true)
 }
 
 func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, httpsHost string, httpsPort int) (err error) {
@@ -578,6 +644,11 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 		return err
 	}
 	wanted := dnatWantedSpecs(httpHost, httpPort, httpsHost, httpsPort)
+	return b.installDNATRules(family, table, wanted, false)
+}
+
+func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, includeLoopbackAccept bool) error {
+	family, table = dnatDefaults(family, table)
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -611,8 +682,17 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 	}
 
 	seen := make(map[string]struct{}, len(wanted))
+	loopbackSeen := false
 	for _, r := range rules {
 		if !managedDNATRule(r.UserData) {
+			continue
+		}
+		if string(r.UserData) == dnatLoopbackAcceptTag {
+			if includeLoopbackAccept && dnatLoopbackAcceptMatches(r) {
+				loopbackSeen = true
+				continue
+			}
+			b.conn.DelRule(r)
 			continue
 		}
 		spec, ok := wantedByID[string(r.UserData)]
@@ -621,6 +701,10 @@ func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, htt
 			continue
 		}
 		seen[string(r.UserData)] = struct{}{}
+	}
+
+	if includeLoopbackAccept && !loopbackSeen {
+		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()})
 	}
 
 	for _, spec := range wanted {
