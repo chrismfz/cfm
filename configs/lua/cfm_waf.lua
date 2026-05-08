@@ -193,6 +193,18 @@ local function mode_ttl_action(mode, ttl)
   return ttl, mode
 end
 
+-- Severity ordering for highest-severity-wins WAF aggregation.
+-- _M.check() records every rule hit and returns the strongest action,
+-- so a low-severity logonly never suppresses a later block/challenge.
+-- "disabled" stays at 0 so disabled rules never overwrite real findings.
+local ACTION_SEVERITY = {
+  disabled  = 0,
+  logonly   = 1,
+  challenge = 2,
+  block     = 3,
+}
+local SEV_BLOCK = ACTION_SEVERITY.block
+
 local function cmd_payload_mode(tag)
   local override = nil
 
@@ -1921,6 +1933,11 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
 
+  -- One-shot gating bools so body/upload rules don't each lower(method) again.
+  -- body_inspect_ok is the existing "POST + non-empty body" gate, hoisted.
+  local m_lower         = lower(method)
+  local body_inspect_ok = (m_lower == "post" and body ~= "")
+
   -- Pre-computed normalized scan strings, lazily initialised on first use.
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
   -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
@@ -1939,6 +1956,30 @@ function _M.check(ctx)
     return _norm_ab
   end
 
+  -- ── Severity accumulator ───────────────────────────────────────────────
+  -- Highest-severity-wins: every rule that matches calls record(); the
+  -- strongest action is what cfm.lua enforces. record() returns true when
+  -- it just stored a `block` hit, so the caller can `goto done` and skip
+  -- remaining detectors (block is the cap, nothing can exceed it).
+  local hits         = {}
+  local final_sev    = 0
+  local final_reason = nil
+  local final_ttl    = nil
+  local final_action = nil
+
+  local function record(reason, ttl, action)
+    local sev = ACTION_SEVERITY[action] or 0
+    if sev == 0 then return false end
+    hits[#hits + 1] = { reason = reason, ttl = ttl, action = action }
+    if sev > final_sev then
+      final_sev    = sev
+      final_reason = reason
+      final_ttl    = ttl
+      final_action = action
+    end
+    return sev >= SEV_BLOCK
+  end
+
   -- ── 1) Bad User-Agent (scored) ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_bad_ua, "logonly")
@@ -1947,7 +1988,7 @@ function _M.check(ctx)
       local threshold = tonumber(CFG.bad_ua_min_score) or 4
       if score >= threshold then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode
+        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode) then goto done end
       end
     end
   end
@@ -1959,7 +2000,7 @@ function _M.check(ctx)
       local tag = detect_header_vulns(headers, uri, method)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_HEADER_VULN:" .. tag, ttl, mode
+        if record("WAF_HEADER_VULN:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -1971,7 +2012,7 @@ function _M.check(ctx)
       local tag = detect_proxy_header_sqli(headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_PROXY_HDR:" .. tag, ttl, mode
+        if record("WAF_PROXY_HDR:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -1983,7 +2024,7 @@ function _M.check(ctx)
       local tag = detect_content_type_anomaly(headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_CT_ANOMALY:" .. tag, ttl, mode
+        if record("WAF_CT_ANOMALY:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -1994,7 +2035,7 @@ function _M.check(ctx)
     if mode ~= "disabled" and detect_traversal(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
-      return true, "WAF_TRAVERSAL", ttl, mode
+      if record("WAF_TRAVERSAL", ttl, mode) then goto done end
     end
   end
 
@@ -2004,7 +2045,7 @@ function _M.check(ctx)
     if mode ~= "disabled" and detect_rce(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
-      return true, "WAF_RCE", ttl, mode
+      if record("WAF_RCE", ttl, mode) then goto done end
     end
   end
 
@@ -2015,7 +2056,7 @@ function _M.check(ctx)
       local tag = detect_shellshock(headers, uri)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_SHELLSHOCK:" .. tag, ttl, mode
+        if record("WAF_SHELLSHOCK:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2028,11 +2069,11 @@ function _M.check(ctx)
       if maction == "block" then
         local final = (mode == "logonly") and "logonly" or "block"
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_EXPLOIT_METHOD", ttl, final
+        if record("WAF_EXPLOIT_METHOD", ttl, final) then goto done end
       elseif maction == "challenge" then
         local final = (mode == "block") and "block" or mode
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_EXPLOIT_METHOD", ttl, final
+        if record("WAF_EXPLOIT_METHOD", ttl, final) then goto done end
       end
     end
   end
@@ -2044,7 +2085,7 @@ function _M.check(ctx)
       local tag = detect_php_wrappers(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_PHP_WRAPPER:" .. tag, ttl, mode
+        if record("WAF_PHP_WRAPPER:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2058,7 +2099,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_ip_host, "logonly")
     if mode ~= "disabled" and detect_ip_host(header_string(headers["Host"] or headers["host"])) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      return true, "WAF_IP_HOST", ttl, mode
+      if record("WAF_IP_HOST", ttl, mode) then goto done end
     end
   end
 
@@ -2067,7 +2108,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_ctrl_chars, "logonly")
     if mode ~= "disabled" and detect_ctrl_chars(args, body, headers, uri) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      return true, "WAF_CTRL_CHARS", ttl, mode
+      if record("WAF_CTRL_CHARS", ttl, mode) then goto done end
     end
   end
 
@@ -2078,7 +2119,7 @@ function _M.check(ctx)
       local tag = detect_ssrf_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_SSRF:" .. tag, ttl, mode
+        if record("WAF_SSRF:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2090,7 +2131,7 @@ function _M.check(ctx)
       local tag = detect_js_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_JS_PROTO:" .. tag, ttl, mode
+        if record("WAF_JS_PROTO:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2098,11 +2139,11 @@ function _M.check(ctx)
   -- ── 15) Raw PHP webshell body (scored) ───────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_php_webshell_body(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode
+        if record("WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2110,11 +2151,11 @@ function _M.check(ctx)
   -- ── 16) Script / JS obfuscation scorer (raw POST body) ───────────────────
   do
     local mode = rule_mode(CFG.rule_script_obfuscation, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_script_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_SCRIPT_OBFUSCATION:" .. tag, ttl, mode
+        if record("WAF_SCRIPT_OBFUSCATION:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2122,11 +2163,11 @@ function _M.check(ctx)
   -- ── 17) Upload filename extension blacklist ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_filename, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_upload_filename(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_UPLOAD_FNAME:" .. tag, ttl, mode
+        if record("WAF_UPLOAD_FNAME:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2135,13 +2176,12 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_upload_content, "logonly")
     if mode ~= "disabled"
-       and lower(method) == "post"
-       and body ~= ""
+       and body_inspect_ok
        and not is_known_legit_php_upload_endpoint(uri) then
       local tag = detect_upload_content(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_UPLOAD_CONTENT:" .. tag, ttl, mode
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2149,11 +2189,11 @@ function _M.check(ctx)
   -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
   do
     local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_upload_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_UPLOAD_OBFUSCATION:" .. tag, ttl, mode
+        if record("WAF_UPLOAD_OBFUSCATION:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2163,7 +2203,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_xss, "challenge")
     if mode ~= "disabled" and detect_xss(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      return true, "WAF_XSS", ttl, mode
+      if record("WAF_XSS", ttl, mode) then goto done end
     end
   end
 
@@ -2172,18 +2212,18 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" and detect_sqli(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      return true, "WAF_SQLI", ttl, mode
+      if record("WAF_SQLI", ttl, mode) then goto done end
     end
   end
 
   -- ── 22) XXE ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xxe, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_xxe(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_XXE:" .. tag, ttl, mode
+        if record("WAF_XXE:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2195,7 +2235,7 @@ function _M.check(ctx)
       local tag = detect_crlf_injection(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_CRLF:" .. tag, ttl, mode
+        if record("WAF_CRLF:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2207,7 +2247,7 @@ function _M.check(ctx)
       local tag = detect_http_smuggling(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_HTTP_SMUGGLING:" .. tag, ttl, mode
+        if record("WAF_HTTP_SMUGGLING:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2219,10 +2259,10 @@ function _M.check(ctx)
       local tag = detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       if tag == "AUTH_WP_LOGIN_HEAD" then
         local ttl = CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
       elseif tag == "AUTH_WP_LOGIN_NO_UA_REF" then
         local ttl = CFG.auth_wp_login_noua_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2239,13 +2279,13 @@ function _M.check(ctx)
       local mode = rule_mode(CFG.rule_xmlrpc_multicall, "challenge")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_multicall_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_AUTH_BURST:" .. xtag, ttl, mode
+        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode) then goto done end
       end
     elseif xtag == "AUTH_WP_XMLRPC_PINGBACK" then
       local mode = rule_mode(CFG.rule_xmlrpc_pingback, "challenge")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_AUTH_BURST:" .. xtag, ttl, mode
+        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode) then goto done end
       end
     end
   end
@@ -2258,7 +2298,7 @@ function _M.check(ctx)
       local tag = detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2276,7 +2316,7 @@ function _M.check(ctx)
         end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
-          return true, "WAF_AUTH_BURST:" .. tag, ttl, mode
+          if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
         end
       end
 
@@ -2290,7 +2330,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = detect_cmd_param_key(args)
       if tag then
-        return true, "WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode
+        if record("WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode) then goto done end
       end
     end
   end
@@ -2302,7 +2342,7 @@ function _M.check(ctx)
       local mode = cmd_payload_mode(tag)
       if mode ~= "disabled" then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_CMD_PAYLOAD:" .. tag, ttl, mode
+        if record("WAF_CMD_PAYLOAD:" .. tag, ttl, mode) then goto done end
       end
     end
   end
@@ -2313,7 +2353,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = detect_debug_toggles(args)
       if tag then
-        return true, "WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode
+        if record("WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode) then goto done end
       end
     end
   end
@@ -2324,7 +2364,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = detect_php_serialize(args)
       if tag then
-        return true, "WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode
+        if record("WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode) then goto done end
       end
     end
   end
@@ -2332,16 +2372,20 @@ function _M.check(ctx)
   -- ── 33) Base64 POST body scanner ──────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_b64_injection, "logonly")
-    if mode ~= "disabled" and lower(method) == "post" and body ~= "" then
+    if mode ~= "disabled" and body_inspect_ok then
       local tag = detect_b64_injection(body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        return true, "WAF_B64_INJECT:" .. tag, ttl, mode
+        if record("WAF_B64_INJECT:" .. tag, ttl, mode) then goto done end
       end
     end
   end
 
-  return false, nil, nil, nil
+  ::done::
+  if final_sev == 0 then
+    return false, nil, nil, nil
+  end
+  return true, final_reason, final_ttl, final_action, hits
 end
 
 function _M.should_push(shdict, ip, reason)
