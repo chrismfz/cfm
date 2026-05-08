@@ -74,7 +74,7 @@ local CFG = {
 
   -- [top-6]  Header vulnerability bundle
   rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
-  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
+  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
   rule_header_vulns     = "challenge",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
 
@@ -1495,9 +1495,13 @@ end
 
 -- [top-6b] Shellshock CVE-2014-6271 / CVE-2014-7169.
 -- Source: uusec shellshock-vulnerability.lua.
--- Pattern: () { in any header value or URI.
--- Checks URL-decoded copy of each header to catch %28%29+%7b variants.
-local function detect_shellshock(headers, uri)
+-- Pattern: () { in any header value (CGI exposes headers as env vars).
+-- The URI/path branch was removed after a 2026-05-08 production analysis
+-- found the only URI hit was a JS code fragment "/function(t){...}" — JS
+-- minifiers commonly produce "() {" in URL paths and that is not Shellshock.
+-- Real Shellshock exploits arrive via CGI headers (User-Agent, Cookie,
+-- Referer); the URI surface produced FPs without catching real attacks.
+local function detect_shellshock(headers, _uri)
   local pat = "%(%)%s*{"
 
   headers = headers or {}
@@ -1514,9 +1518,6 @@ local function detect_shellshock(headers, uri)
       end
     end
   end
-
-  local u = url_decode_once(uri or "")
-  if u:find(pat) then return "SHELLSHOCK_URI" end
 
   return nil
 end
