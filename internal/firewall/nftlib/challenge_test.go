@@ -197,3 +197,24 @@ func TestDNATAcceptRuleExprIsSourceAndDestinationScoped(t *testing.T) {
 		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)
 	}
 }
+
+func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
+	spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")}
+	chain := `table inet cfm {
+		chain input {
+			ct state new tcp dport 0-65535 drop # handle 31
+			ct state new udp dport 0-65535 drop # handle 32
+		}
+	}`
+	handle := firstInputDefaultDropHandle(chain)
+	if handle != "31" {
+		t.Fatalf("firstInputDefaultDropHandle() = %q, want 31", handle)
+	}
+	got := dnatAcceptRuleExpr(spec, handle)
+	if !strings.HasPrefix(got, "insert rule inet cfm input position 31 ") {
+		t.Fatalf("DNAT accept rule was not handle-inserted before default drops: %q", got)
+	}
+	if strings.HasPrefix(got, "add rule inet cfm input ") {
+		t.Fatalf("DNAT accept rule used append syntax that can place it after default drops: %q", got)
+	}
+}

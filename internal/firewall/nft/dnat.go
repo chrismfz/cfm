@@ -76,9 +76,41 @@ func dnatAcceptRuleComment(label string, from, to int) string {
 	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
 }
 
+func firstInputDefaultDropHandle(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") || !strings.Contains(norm, " handle ") {
+			continue
+		}
+		if !strings.Contains(norm, "tcp dport 0-65535") && !strings.Contains(norm, "udp dport 0-65535") {
+			continue
+		}
+		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+func dnatAcceptRuleExpr(spec struct {
+	label string
+	from  int
+	to    int
+}, beforeHandle string) string {
+	prefix := "add rule inet cfm input"
+	if strings.TrimSpace(beforeHandle) != "" {
+		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
+	}
+	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, prefix, spec.from, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+	return strings.Join(strings.Fields(expr), " ")
+}
+
 func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 	_ = b.nftExpr("add table inet cfm")
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+	out, _ := b.nftOut("-a list chain inet cfm input")
+	beforeHandle := firstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
 		return err
 	}
@@ -86,8 +118,7 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 		if spec.to <= 0 {
 			continue
 		}
-		expr := fmt.Sprintf(`ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, spec.from, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
-		if err := b.nftCmd("add rule inet cfm input " + expr); err != nil {
+		if err := b.nftCmd(dnatAcceptRuleExpr(spec, beforeHandle)); err != nil {
 			return err
 		}
 	}

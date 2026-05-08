@@ -110,17 +110,65 @@ func cpanelScopedRuleComment(from, to int) string {
 	return fmt.Sprintf("%s:%d:%d", cpanelFWTag, from, to)
 }
 
+func isInputDefaultDropLine(line string) bool {
+	norm := strings.ReplaceAll(line, `"`, "")
+	if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") {
+		return false
+	}
+	return strings.Contains(norm, "tcp dport 0-65535") || strings.Contains(norm, "udp dport 0-65535")
+}
+
+func firstInputDefaultDropHandle(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !isInputDefaultDropLine(line) || !strings.Contains(norm, " handle ") {
+			continue
+		}
+		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+func managedRulePlacement(out, key string) (handle string, beforeDefaultDrop bool, ok bool) {
+	seenDefaultDrop := false
+	for _, line := range strings.Split(out, "\n") {
+		if isInputDefaultDropLine(line) {
+			seenDefaultDrop = true
+		}
+		port, h, managed := parseManagedRuleLine(line)
+		if managed && port == key {
+			return h, !seenDefaultDrop, true
+		}
+	}
+	return "", false, false
+}
+
 func ensureNftPorts() ([]string, error) {
 	_ = execCommand("nft", "add", "table", "inet", "cfm").Run()
 	_ = execCommand("nft", "add", "chain", "inet", "cfm", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}").Run()
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
+	beforeHandle := firstInputDefaultDropHandle(out)
 	changes := []string{}
 	for _, m := range panelMappings() {
 		comment := cpanelScopedRuleComment(m.from, m.to)
-		if strings.Contains(out, comment) && strings.Contains(out, fmt.Sprintf("tcp dport %d", m.to)) && strings.Contains(out, "ct status dnat") {
-			continue
+		key := fmt.Sprintf("%d:%d", m.from, m.to)
+		if handle, beforeDrop, ok := managedRulePlacement(out, key); ok {
+			if beforeDrop {
+				continue
+			}
+			if handle != "" {
+				if err := runFirewallCmd(fwNft, "nft", "delete", "rule", "inet", "cfm", "input", "handle", handle); err != nil {
+					return changes, err
+				}
+			}
 		}
 		args := []string{"add", "rule", "inet", "cfm", "input", "ct", "state", "new", "ct", "status", "dnat", "ct", "original", "proto-dst", strconv.Itoa(m.from), "tcp", "dport", strconv.Itoa(m.to), "accept", "comment", fmt.Sprintf(`"%s"`, comment)}
+		if beforeHandle != "" {
+			args = append([]string{"insert", "rule", "inet", "cfm", "input", "position", beforeHandle}, args[5:]...)
+		}
 		if err := runFirewallCmd(fwNft, "nft", args...); err != nil {
 			return changes, err
 		}

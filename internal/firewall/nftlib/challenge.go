@@ -493,18 +493,41 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 	return nil
 }
 
-func dnatAcceptRuleExpr(spec dnatRuleSpec) string {
+func firstInputDefaultDropHandle(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") || !strings.Contains(norm, " handle ") {
+			continue
+		}
+		if !strings.Contains(norm, "tcp dport 0-65535") && !strings.Contains(norm, "udp dport 0-65535") {
+			continue
+		}
+		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+func dnatAcceptRuleExpr(spec dnatRuleSpec, beforeHandle ...string) string {
 	proto := "tcp"
 	if spec.proto == 17 {
 		proto = "udp"
 	}
-	expr := fmt.Sprintf(`add rule inet cfm input ct state new ct status dnat ct original proto-dst %d %s saddr @%s %s %s dport %d accept comment "%s"`, spec.dport, dnatFamilyPrefix(spec.family), spec.sourceSet, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
+	prefix := "add rule inet cfm input"
+	if len(beforeHandle) > 0 && strings.TrimSpace(beforeHandle[0]) != "" {
+		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle[0])
+	}
+	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s saddr @%s %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatFamilyPrefix(spec.family), spec.sourceSet, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
 	return strings.Join(strings.Fields(expr), " ")
 }
 
 func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
 	_ = b.nftExec("add table inet cfm")
 	_ = b.nftExec("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+	out, _ := b.ListChainText("inet", "cfm", "input")
+	beforeHandle := firstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
 		return err
 	}
@@ -515,7 +538,7 @@ func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
 			continue
 		}
 		seen[key] = struct{}{}
-		if err := b.nftExec(dnatAcceptRuleExpr(spec)); err != nil {
+		if err := b.nftExec(dnatAcceptRuleExpr(spec, beforeHandle)); err != nil {
 			return err
 		}
 	}
