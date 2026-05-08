@@ -4,6 +4,7 @@ package nftlib
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/google/nftables"
@@ -60,6 +61,68 @@ func TestDNATRuleSpecIdentityParsing(t *testing.T) {
 	}
 	if _, ok := parseDNATRuleSpecID("cfm-dnat-managed:v1:p6:d80:t9080"); ok {
 		t.Fatal("old unscoped v1 managed DNAT id parsed as current rule")
+	}
+}
+
+func TestDNATRuleSpecIdentityPortBoundaries(t *testing.T) {
+	for _, port := range []uint16{1, 80, 443, 65535} {
+		spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: port, toPort: port, sourceSet: setChalV4}
+		got, ok := parseDNATRuleSpecID(spec.id())
+		if !ok {
+			t.Fatalf("parseDNATRuleSpecID(%q) returned !ok", spec.id())
+		}
+		if got.dport != port || got.toPort != port {
+			t.Fatalf("parseDNATRuleSpecID(%q) ports = d%d t%d, want d%d t%d", spec.id(), got.dport, got.toPort, port, port)
+		}
+	}
+}
+
+func TestDNATRuleSpecIdentityRejectsOutOfRangeComponents(t *testing.T) {
+	valid := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4}.id()
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{name: "zero dport", id: strings.Replace(valid, ":d80:", ":d0:", 1)},
+		{name: "negative dport", id: strings.Replace(valid, ":d80:", ":d-1:", 1)},
+		{name: "overflowing dport", id: strings.Replace(valid, ":d80:", ":d65536:", 1)},
+		{name: "huge dport", id: strings.Replace(valid, ":d80:", ":d18446744073709551616:", 1)},
+		{name: "zero toPort", id: strings.Replace(valid, ":t9080:", ":t0:", 1)},
+		{name: "negative toPort", id: strings.Replace(valid, ":t9080:", ":t-1:", 1)},
+		{name: "overflowing toPort", id: strings.Replace(valid, ":t9080:", ":t65536:", 1)},
+		{name: "huge toPort", id: strings.Replace(valid, ":t9080:", ":t18446744073709551616:", 1)},
+		{name: "overflowing protocol", id: strings.Replace(valid, ":p6:", ":p256:", 1)},
+		{name: "huge protocol", id: strings.Replace(valid, ":p6:", ":p18446744073709551616:", 1)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseDNATRuleSpecID(tc.id); ok {
+				t.Fatalf("parseDNATRuleSpecID(%q) returned ok", tc.id)
+			}
+		})
+	}
+}
+
+func TestDNATOnRejectsInvalidPortsBeforeNetlink(t *testing.T) {
+	b := &Backend{}
+	tests := []struct {
+		name      string
+		httpPort  int
+		httpsPort int
+	}{
+		{name: "zero http", httpPort: 0, httpsPort: 443},
+		{name: "zero https", httpPort: 80, httpsPort: 0},
+		{name: "negative http", httpPort: -1, httpsPort: 443},
+		{name: "negative https", httpPort: 80, httpsPort: -1},
+		{name: "overflowing http", httpPort: 65536, httpsPort: 443},
+		{name: "overflowing https", httpPort: 80, httpsPort: 65536},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := b.DNATOn("", "", tc.httpPort, tc.httpsPort); err == nil {
+				t.Fatalf("DNATOn(%d, %d) returned nil error", tc.httpPort, tc.httpsPort)
+			}
+		})
 	}
 }
 
