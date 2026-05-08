@@ -38,7 +38,7 @@ local CFG = {
   rule_sqli            = "challenge",  -- cheap SQLi signatures (+ SQL comment bypass)
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
-  rule_php_wrappers      = "logonly",  -- php:// phar:// data:// zip:// expect:// glob://
+  rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
   rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
   rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
   rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
@@ -54,7 +54,7 @@ local CFG = {
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
-  rule_cmd_params       = "challenge",   -- suspicious parameter keys like exec= system=
+  rule_cmd_params       = "challenge",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
   rule_cmd_payload      = "logonly",   -- fallback/default mode for payload-y separators/tokens in args
   rule_debug_toggles    = "logonly",   -- xdebug, trace, debug, stacktrace
   rule_serialize        = "logonly",   -- PHP serialized object markers
@@ -74,7 +74,7 @@ local CFG = {
 
   -- [top-6]  Header vulnerability bundle
   rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
-  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers/URI
+  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
   rule_header_vulns     = "challenge",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
 
@@ -94,8 +94,8 @@ local CFG = {
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
-  rule_upload_filename    = "challenge",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
-  rule_upload_content     = "challenge",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
+  rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
   rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
 
@@ -478,7 +478,21 @@ local function detect_traversal(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
   if has(s, "%00") or has(s, "\x00") then return true end
+
+  -- Facebook share-debug bots produce URIs starting with /.../ which
+  -- contains a literal "../" substring as a side effect, but is not
+  -- traversal. Skip when the raw URI begins with that prefix.
+  local raw = lower(uri or "")
+  if string.sub(raw, 1, 5) == "/.../" then
+    return false
+  end
+
   if has(s, "../") or has(s, "..\\") then return true end
+
+  -- Triple-URL-encoded path-separator variants survive scan_str's
+  -- double-decode and are sometimes used to bypass single-decode WAFs.
+  if has(s, "..%2f")   or has(s, "..%5c")   then return true end
+  if has(s, "%2e%2e/") or has(s, "%2e%2e\\") then return true end
 
   return false
 end
@@ -750,7 +764,12 @@ local function detect_xss(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
   if has(s, "<script")      or has(s, "%3cscript") then return true end
-  if has(s, "javascript:")                         then return true end
+  -- javascript: in attribute-value position only. Bots that follow
+  -- <a href="javascript:void(0)"> anchor hrefs hit URIs that literally
+  -- start with /javascript: — those are not XSS injections, skip them.
+  if has(s, "=javascript:")   then return true end
+  if has(s, "=\"javascript:") then return true end
+  if has(s, "='javascript:")  then return true end
   if has(s, "onerror=")     or has(s, "onload=")  then return true end
   if has(s, "onmouseover=") or has(s, "onfocus=") then return true end
 
@@ -1080,6 +1099,9 @@ local function detect_cmd_param_key(args)
   if key("shell_exec") then return "CMD_SHELL_EXEC" end
   if key("eval")       then return "CMD_EVAL" end
   if key("assert")     then return "CMD_ASSERT" end
+  if key("system")     then return "CMD_SYSTEM" end
+  if key("cmd")        then return "CMD_CMD" end
+  if key("command")    then return "CMD_COMMAND" end
 
   return nil
 end
@@ -1473,9 +1495,13 @@ end
 
 -- [top-6b] Shellshock CVE-2014-6271 / CVE-2014-7169.
 -- Source: uusec shellshock-vulnerability.lua.
--- Pattern: () { in any header value or URI.
--- Checks URL-decoded copy of each header to catch %28%29+%7b variants.
-local function detect_shellshock(headers, uri)
+-- Pattern: () { in any header value (CGI exposes headers as env vars).
+-- The URI/path branch was removed after a 2026-05-08 production analysis
+-- found the only URI hit was a JS code fragment "/function(t){...}" — JS
+-- minifiers commonly produce "() {" in URL paths and that is not Shellshock.
+-- Real Shellshock exploits arrive via CGI headers (User-Agent, Cookie,
+-- Referer); the URI surface produced FPs without catching real attacks.
+local function detect_shellshock(headers, _uri)
   local pat = "%(%)%s*{"
 
   headers = headers or {}
@@ -1492,9 +1518,6 @@ local function detect_shellshock(headers, uri)
       end
     end
   end
-
-  local u = url_decode_once(uri or "")
-  if u:find(pat) then return "SHELLSHOCK_URI" end
 
   return nil
 end
