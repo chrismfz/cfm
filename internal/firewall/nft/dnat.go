@@ -57,18 +57,18 @@ func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
 `, fam, tbl, priority, httpPort, httpsPort, httpsPort)
 }
 
-func dnatAcceptRuleSpecs(httpPort, httpsPort int) []struct {
+type dnatAcceptRuleSpec struct {
 	label string
+	proto string
 	from  int
 	to    int
-} {
-	return []struct {
-		label string
-		from  int
-		to    int
-	}{
-		{label: "web_http", from: 80, to: httpPort},
-		{label: "web_https", from: 443, to: httpsPort},
+}
+
+func dnatAcceptRuleSpecs(httpPort, httpsPort int) []dnatAcceptRuleSpec {
+	return []dnatAcceptRuleSpec{
+		{label: "web_http_tcp", proto: "tcp", from: 80, to: httpPort},
+		{label: "web_https_tcp", proto: "tcp", from: 443, to: httpsPort},
+		{label: "web_https_udp", proto: "udp", from: 443, to: httpsPort},
 	}
 }
 
@@ -93,16 +93,12 @@ func firstInputDefaultDropHandle(out string) string {
 	return ""
 }
 
-func dnatAcceptRuleExpr(spec struct {
-	label string
-	from  int
-	to    int
-}, beforeHandle string) string {
+func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
 	prefix := "add rule inet cfm input"
 	if strings.TrimSpace(beforeHandle) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
 	}
-	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, prefix, spec.from, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s dport %d accept comment "%s"`, prefix, spec.from, spec.proto, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
 	return strings.Join(strings.Fields(expr), " ")
 }
 

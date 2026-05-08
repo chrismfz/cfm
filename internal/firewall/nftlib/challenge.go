@@ -404,7 +404,14 @@ func dnatAcceptLabel(spec dnatRuleSpec) string {
 	if spec.dport == 80 {
 		portName = "web_http"
 	}
-	return fmt.Sprintf("%s_%s_%s", portName, dnatFamilyPrefix(spec.family), spec.sourceSet)
+	return fmt.Sprintf("%s_%s_%s", portName, dnatFamilyPrefix(spec.family), dnatAcceptProtoName(spec.proto))
+}
+
+func dnatAcceptProtoName(proto uint8) string {
+	if proto == 17 {
+		return "udp"
+	}
+	return "tcp"
 }
 
 func dnatWantedSpecs(httpHost string, httpPort int, httpsHost string, httpsPort int) []dnatRuleSpec {
@@ -510,6 +517,10 @@ func firstInputDefaultDropHandle(out string) string {
 	return ""
 }
 
+func dnatAcceptKey(spec dnatRuleSpec) string {
+	return fmt.Sprintf("f%d:p%d:d%d:t%d:a%s", spec.family, spec.proto, spec.dport, spec.toPort, dnatAddrID(spec.toAddr))
+}
+
 func dnatAcceptRuleExpr(spec dnatRuleSpec, beforeHandle ...string) string {
 	proto := "tcp"
 	if spec.proto == 17 {
@@ -519,7 +530,7 @@ func dnatAcceptRuleExpr(spec dnatRuleSpec, beforeHandle ...string) string {
 	if len(beforeHandle) > 0 && strings.TrimSpace(beforeHandle[0]) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle[0])
 	}
-	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s saddr @%s %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatFamilyPrefix(spec.family), spec.sourceSet, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
+	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
 	return strings.Join(strings.Fields(expr), " ")
 }
 
@@ -533,7 +544,7 @@ func (b *Backend) ensureScopedDNATAccepts(specs []dnatRuleSpec) error {
 	}
 	seen := make(map[string]struct{})
 	for _, spec := range specs {
-		key := spec.id()
+		key := dnatAcceptKey(spec)
 		if _, ok := seen[key]; ok {
 			continue
 		}
