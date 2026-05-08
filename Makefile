@@ -83,13 +83,13 @@ check-cli-transport: ## Verify CLI runtime HTTP transport consistency (clihttp)
 LUA_CONFIG_SOURCES := $(wildcard configs/lua/*.lua)
 
 lua: ## Syntax-check production Lua configs under configs/lua/
-	@command -v luac >/dev/null 2>&1 || { echo "❌ luac is required for 'make lua' but was not found in PATH."; exit 1; }
+	@command -v luajit >/dev/null 2>&1 || { echo "❌ luajit is required for 'make lua' but was not found in PATH."; exit 1; }
 	@[ -n "$(LUA_CONFIG_SOURCES)" ] || { echo "❌ No Lua config files found at configs/lua/*.lua"; exit 1; }
-	@echo "→ Validating Lua syntax for production configs:"
+	@echo "→ Validating Lua syntax for production configs (via luajit; OpenResty/Angie embed LuaJIT, not standalone Lua 5.1):"
 	@printf '%s\n' $(LUA_CONFIG_SOURCES)
 	@for f in $(LUA_CONFIG_SOURCES); do \
 		echo "Checking $$f"; \
-		luac -p "$$f" || exit $$?; \
+		luajit -bl "$$f" >/dev/null || exit $$?; \
 	done
 	@echo "✅ Lua syntax checks passed."
 
