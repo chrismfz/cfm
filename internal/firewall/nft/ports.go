@@ -137,14 +137,19 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 
 	// load contents
 	//    if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
-	// --- Debug port: remove it from the generic tcp_in set so it won't open to the world
+	// --- Debug ports: remove from the generic tcp_in set so they won't open to the world
 	filteredTCPIn := cfg.TCPIn
-	dbgPort := 0
-	if b.cfg != nil && b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
-		dbgPort = b.cfg.Debug.Port
-		if dbgPort > 0 {
-			filteredTCPIn = subtractPort(filteredTCPIn, dbgPort)
+	dbgPorts := []int{}
+	if b.cfg != nil {
+		if b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
+			dbgPorts = append(dbgPorts, b.cfg.Debug.Port)
 		}
+		if b.cfg.Debug.TLSPort > 0 && b.cfg.Debug.TLSPort <= 65535 {
+			dbgPorts = append(dbgPorts, b.cfg.Debug.TLSPort)
+		}
+	}
+	for _, p := range dbgPorts {
+		filteredTCPIn = subtractPort(filteredTCPIn, p)
 	}
 
 	// load contents (with debug port removed)
@@ -288,9 +293,9 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 		return err
 	}
 
-	// === Debug HTTP server exposure (strict) ===
-	// If debug port is configured, permit it ONLY from loopback/self and the resolved API IPs.
-	if dbgPort > 0 {
+	// === Debug HTTP/TLS server exposure (strict) ===
+	// If debug ports are configured, permit them ONLY from loopback/self and the resolved API IPs.
+	if len(dbgPorts) > 0 {
 		// Ensure API debug sets exist and are refreshed
 		if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil {
 			return err
@@ -301,19 +306,21 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 		b.refreshAPISets()
 
 		// Accept NEW only from self + API sets
-		if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @self_v4 accept`, dbgPort)); err != nil {
-			return err
+		for _, p := range dbgPorts {
+			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @self_v4 accept`, p)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @self_v6 accept`, p)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @%s accept`, p, debugAPIV4)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @%s accept`, p, debugAPIV6)); err != nil {
+				return err
+			}
 		}
-		if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @self_v6 accept`, dbgPort)); err != nil {
-			return err
-		}
-		if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @%s accept`, dbgPort, debugAPIV4)); err != nil {
-			return err
-		}
-		if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @%s accept`, dbgPort, debugAPIV6)); err != nil {
-			return err
-		}
-		// No generic accept for this port here — everyone else ends up in the default NEW drops below.
+		// No generic accept for these ports here — everyone else ends up in the default NEW drops below.
 	}
 
 	// -------------------------
