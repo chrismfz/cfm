@@ -190,11 +190,15 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 	}
 }
 
-func TestDNATAcceptRuleExprIsSourceAndDestinationScoped(t *testing.T) {
+func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
 	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}
-	want := `add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 ip6 saddr @self_v6 ip6 daddr 2001:db8::10 udp dport 9043 accept comment "cfm_dnat_accept:web_https_ip6_self_v6:443:9043"`
-	if got := dnatAcceptRuleExpr(spec); got != want {
+	want := `add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 ip6 daddr 2001:db8::10 udp dport 9043 accept comment "cfm_dnat_accept:web_https_ip6_udp:443:9043"`
+	got := dnatAcceptRuleExpr(spec)
+	if got != want {
 		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, " saddr @") {
+		t.Fatalf("dnatAcceptRuleExpr() = %q, want no source-set membership requirement", got)
 	}
 }
 
