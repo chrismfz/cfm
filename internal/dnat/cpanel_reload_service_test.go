@@ -34,19 +34,63 @@ func TestReloadPanelListenerService_OpenrestyActivePrefersOpenresty(t *testing.T
 	}
 }
 
-func TestReloadPanelListenerService_AngieActiveDoesNotAcceptOpenrestySuccess(t *testing.T) {
+func TestReloadPanelListenerService_StaleAngieDetectionAcceptsActiveOpenrestySuccess(t *testing.T) {
 	origExec := execCommand
 	origDetect := panelListenerServiceDetector
+	origProcDetect := panelListenerProcessDetector
 	t.Cleanup(func() {
 		execCommand = origExec
 		panelListenerServiceDetector = origDetect
+		panelListenerProcessDetector = origProcDetect
 	})
 
 	panelListenerServiceDetector = func() string { return "angie" }
+	panelListenerProcessDetector = func() string { return "" }
 	var calls []string
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if len(args) == 2 && args[1] == "openresty" {
+		if name == "systemctl" && len(args) == 3 && args[0] == "is-active" && args[1] == "--quiet" && args[2] == "openresty" {
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	if err := reloadPanelListenerService(); err != nil {
+		t.Fatalf("reload listener service: %v", err)
+	}
+	if len(calls) < 6 {
+		t.Fatalf("expected angie failures, openresty reload, and active check, got %v", calls)
+	}
+	if calls[0] != "systemctl reload angie" {
+		t.Fatalf("expected stale angie detection to try angie reload first, got %v", calls)
+	}
+	if calls[4] != "systemctl reload openresty" {
+		t.Fatalf("expected fallback openresty reload after angie failures, got %v", calls)
+	}
+	if calls[5] != "systemctl is-active --quiet openresty" {
+		t.Fatalf("expected active check before accepting fallback success, got %v", calls)
+	}
+}
+
+func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T) {
+	origExec := execCommand
+	origDetect := panelListenerServiceDetector
+	origProcDetect := panelListenerProcessDetector
+	t.Cleanup(func() {
+		execCommand = origExec
+		panelListenerServiceDetector = origDetect
+		panelListenerProcessDetector = origProcDetect
+	})
+
+	panelListenerServiceDetector = func() string { return "angie" }
+	panelListenerProcessDetector = func() string { return "" }
+	var calls []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
 			return exec.Command("sh", "-c", "exit 0")
 		}
 		return exec.Command("sh", "-c", "exit 1")
@@ -54,16 +98,16 @@ func TestReloadPanelListenerService_AngieActiveDoesNotAcceptOpenrestySuccess(t *
 
 	err := reloadPanelListenerService()
 	if err == nil {
-		t.Fatalf("expected error when only fallback service commands succeed")
+		t.Fatalf("expected error when fallback service success is not confirmed active")
 	}
-	if !strings.Contains(err.Error(), "active service \"angie\" failed") {
+	if !strings.Contains(err.Error(), "unconfirmed fallback service") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(calls) < 5 {
-		t.Fatalf("expected openresty fallback attempts after angie failures, got %v", calls)
+	if len(calls) < 6 {
+		t.Fatalf("expected openresty fallback and active check after angie failures, got %v", calls)
 	}
-	if calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected first command to be angie reload, got %v", calls)
+	if calls[5] != "systemctl is-active --quiet openresty" {
+		t.Fatalf("expected active check before rejecting fallback success, got %v", calls)
 	}
 }
 
