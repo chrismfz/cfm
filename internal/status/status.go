@@ -192,11 +192,6 @@ func serviceHuman(si ServiceInfo) string {
 	return fmt.Sprintf("Service is %s and %s", en, act)
 }
 
-func shOut(cmd string) string {
-	out, _ := exec.Command("sh", "-lc", cmd).CombinedOutput()
-	return string(out)
-}
-
 var (
 	reAckOnly = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == ack|ack / syn,ack)`)
 	reSynAck  = regexp.MustCompile(`tcp flags (?:& \(syn\|ack\) == \(syn\|ack\)|syn,ack / syn,ack)`)
@@ -280,17 +275,17 @@ func Run(args []string, backend firewall.Backend) {
 	if st.TablePresent && *showTTL {
 		t0 = time.Now()
 		// BLOCK v4
-		b4hTTL, b4hTot := countTTLInSet("block_v4")
-		b4nTTL, b4nTot := countTTLInSet("block_v4_nets")
+		b4hTTL, b4hTot := countTTLInSet(backend, "block_v4")
+		b4nTTL, b4nTot := countTTLInSet(backend, "block_v4_nets")
 		// BLOCK v6
-		b6hTTL, b6hTot := countTTLInSet("block_v6")
-		b6nTTL, b6nTot := countTTLInSet("block_v6_nets")
+		b6hTTL, b6hTot := countTTLInSet(backend, "block_v6")
+		b6nTTL, b6nTot := countTTLInSet(backend, "block_v6_nets")
 		// ALLOW v4
-		a4hTTL, a4hTot := countTTLInSet("allow_v4")
-		a4nTTL, a4nTot := countTTLInSet("allow_v4_nets")
+		a4hTTL, a4hTot := countTTLInSet(backend, "allow_v4")
+		a4nTTL, a4nTot := countTTLInSet(backend, "allow_v4_nets")
 		// ALLOW v6
-		a6hTTL, a6hTot := countTTLInSet("allow_v6")
-		a6nTTL, a6nTot := countTTLInSet("allow_v6_nets")
+		a6hTTL, a6hTot := countTTLInSet(backend, "allow_v6")
+		a6nTTL, a6nTot := countTTLInSet(backend, "allow_v6_nets")
 
 		fmt.Println("TTL summary:")
 		fmt.Printf("  BLOCK v4: %d/%d with TTL\n", b4hTTL+b4nTTL, b4hTot+b4nTot)
@@ -1593,61 +1588,63 @@ func readNftCounters(backend firewall.Backend) (map[string]int, error) {
 	return out, nil
 }
 
-// helper list count elements with  "expires/timeout"
-func countTTLInSet(set string) (withTTL, total int) {
-	s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
-
-	for _, m := range reElem.FindAllStringSubmatch(s, -1) { // reElem matches IP or CIDR
-		addr := strings.Trim(m[1], ",}")
+// countTTLInSet reports how many elements of the named set carry a TTL vs. the
+// total element count. Goes through the firewall backend so both the nft and
+// nftlib engines use the same code path.
+func countTTLInSet(backend firewall.Backend, set string) (withTTL, total int) {
+	if backend == nil {
+		return 0, 0
+	}
+	elems, err := backend.ListSetElementsTimed(set)
+	if err != nil {
+		return 0, 0
+	}
+	for _, e := range elems {
+		addr := e.Elem
 		valid := false
 		if strings.Contains(addr, "/") {
 			if _, _, err := net.ParseCIDR(addr); err == nil {
 				valid = true
 			}
-		} else {
-			if net.ParseIP(addr) != nil {
-				valid = true
-			}
+		} else if net.ParseIP(addr) != nil {
+			valid = true
 		}
 		if !valid {
 			continue
 		}
-
 		total++
-		if len(m) > 2 && strings.Trim(m[2], ",}") != "" {
+		if e.Expires > 0 {
 			withTTL++
 		}
 	}
 	return
 }
 
-// Parse "nft list set inet cfm <set>" and return up to max IPs with TTL if present.
 type recentHit struct {
 	IP      string
 	Expires string // e.g. "59m31s" (empty if not parsed)
 }
 
-var (
-	// NEW: match IP **or CIDR** (v4/v6) plus optional expires/timeout
-	reElem = regexp.MustCompile(
-		`(?P<addr>(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?|` +
-			`[0-9a-fA-F:]+(?:/\d{1,3})?)` +
-			`(?:\s+(?:expires|timeout)\s+(?P<ttl>[0-9smhd:]+))?`,
-	)
-)
-
-func listSetElemsDetailed(set string, max int) []recentHit {
-	s := shOut("nft list set inet cfm " + set + " 2>/dev/null")
+// listSetElemsDetailed returns up to max host IPs from a set with their
+// remaining TTL, going through the firewall backend.
+func listSetElemsDetailed(backend firewall.Backend, set string, max int) []recentHit {
+	if backend == nil {
+		return nil
+	}
+	elems, err := backend.ListSetElementsTimed(set)
+	if err != nil {
+		return nil
+	}
 	out := make([]recentHit, 0, max)
-	for _, m := range reElem.FindAllStringSubmatch(s, -1) {
-		ip := strings.Trim(m[1], ",}")
+	for _, e := range elems {
+		ip := e.Elem
 		// keep only host IPs here (recent hits list is per-IP)
 		if net.ParseIP(strings.TrimSuffix(ip, "/32")) == nil || strings.Contains(ip, "/") {
 			continue
 		}
 		ttl := ""
-		if len(m) > 2 {
-			ttl = strings.Trim(m[2], ",}")
+		if e.Expires > 0 {
+			ttl = e.Expires.Truncate(time.Second).String()
 		}
 		out = append(out, recentHit{IP: ip, Expires: ttl})
 		if len(out) >= max {
@@ -1711,8 +1708,8 @@ func printChallengeStatus(backend firewall.Backend, st statusOut, en *enrich.Enr
 	guard := listChainFiltered(backend, "challenge_guard", "cfm_challenge_guard_")
 
 	// Also treat as enabled if sets exist even if chain listing fails
-	v4 := listSetElemsDetailed("challenge_v4", 50)
-	v6 := listSetElemsDetailed("challenge_v6", 50)
+	v4 := listSetElemsDetailed(backend, "challenge_v4", 50)
+	v6 := listSetElemsDetailed(backend, "challenge_v6", 50)
 
 	enabled := len(pre) > 0 || len(guard) > 0 || len(v4) > 0 || len(v6) > 0
 	if !enabled {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/firewall"
 	"github.com/google/nftables"
 )
 
@@ -227,6 +228,38 @@ func keysToCIDR(startKey, endKey []byte) string {
 	mask := net.CIDRMask(prefix, totalBits)
 	cidr := &net.IPNet{IP: startIP.Mask(mask), Mask: mask}
 	return cidr.String()
+}
+
+// elemsToTimed converts kernel set elements to (string, expires) pairs,
+// preserving the per-element TTL reported by netlink. For interval sets the
+// timeout is taken from the start element of each (start, end) pair.
+func elemsToTimed(elems []nftables.SetElement) []firewall.SetElementTimed {
+	var starts, ends []nftables.SetElement
+	for _, e := range elems {
+		if e.IntervalEnd {
+			ends = append(ends, e)
+		} else {
+			starts = append(starts, e)
+		}
+	}
+
+	if len(ends) == 0 {
+		out := make([]firewall.SetElementTimed, 0, len(elems))
+		for _, e := range elems {
+			if ip := keyToIP(e.Key); ip != nil {
+				out = append(out, firewall.SetElementTimed{Elem: ip.String(), Expires: e.Expires})
+			}
+		}
+		return out
+	}
+
+	out := make([]firewall.SetElementTimed, 0, len(starts))
+	for i := 0; i < len(starts) && i < len(ends); i++ {
+		if s := keysToCIDR(starts[i].Key, ends[i].Key); s != "" {
+			out = append(out, firewall.SetElementTimed{Elem: s, Expires: starts[i].Expires})
+		}
+	}
+	return out
 }
 
 // elemsToStrings converts kernel set elements to IP or CIDR strings.

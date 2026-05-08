@@ -16,6 +16,13 @@ type BlockedEntry struct {
 	Comment string
 }
 
+// SetElementTimed pairs a set element (host IP or CIDR string) with its
+// remaining TTL. Expires is zero when the element has no timeout.
+type SetElementTimed struct {
+	Elem    string
+	Expires time.Duration
+}
+
 // Capabilities describes feature-level backend support that startup wiring can
 // use to avoid engine-type hard gates.
 type Capabilities struct {
@@ -110,6 +117,7 @@ type Backend interface {
 	AddElementsBulk(setName string, elems []string, ttl *time.Duration) error
 	HasElem(setName, elem string) (bool, error)
 	ListSetElementsRaw(setName string) ([]string, error)
+	ListSetElementsTimed(setName string) ([]SetElementTimed, error)
 	ListTableJSON(family, table string) ([]byte, error)
 	ListSetJSON(family, table, set string) ([]byte, error)
 	ListTableTextNoDNS(family, table string) (string, error)

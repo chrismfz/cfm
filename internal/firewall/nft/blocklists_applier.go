@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"cfm/internal/blocklists"
+	"cfm/internal/firewall"
 	"cfm/internal/firewall/feedutil"
 )
 
@@ -165,6 +167,76 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// ListSetElementsTimed parses `nft -j list set` and returns each element with
+// its remaining TTL. Expires is zero when the element has no timeout.
+func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTimed, error) {
+	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
+	raw := []byte(res.Stdout + res.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, err
+	}
+	nftablesArr, _ := root["nftables"].([]any)
+	var out []firewall.SetElementTimed
+	for _, it := range nftablesArr {
+		m, _ := it.(map[string]any)
+		setObj, _ := m["set"].(map[string]any)
+		if setObj == nil {
+			continue
+		}
+		arr, _ := setObj["elem"].([]any)
+		if len(arr) == 0 {
+			arr, _ = setObj["elements"].([]any)
+		}
+		for _, e := range arr {
+			switch v := e.(type) {
+			case string:
+				s := strings.TrimSpace(v)
+				if s != "" {
+					out = append(out, firewall.SetElementTimed{Elem: s})
+				}
+			case map[string]any:
+				if inner, ok := v["elem"].(map[string]any); ok {
+					val := strings.TrimSpace(toStr(inner["val"]))
+					if val == "" {
+						val = strings.TrimSpace(toStr(inner["prefix"]))
+					}
+					if val != "" {
+						out = append(out, firewall.SetElementTimed{Elem: val, Expires: parseExpires(inner["expires"])})
+					}
+				} else if val := strings.TrimSpace(toStr(v["elem"])); val != "" {
+					out = append(out, firewall.SetElementTimed{Elem: val, Expires: parseExpires(v["expires"])})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// parseExpires accepts the nft JSON forms for an element's remaining TTL:
+// numeric seconds, or duration-like strings ("30s", "5m"). Returns 0 on miss.
+func parseExpires(v any) time.Duration {
+	switch x := v.(type) {
+	case float64:
+		return time.Duration(x) * time.Second
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return 0
+		}
+		if d, err := time.ParseDuration(s); err == nil {
+			return d
+		}
+		if n, err := strconv.Atoi(s); err == nil {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 0
 }
 
 // Optional: remove all per-feed sets for a given sanitized feed key
