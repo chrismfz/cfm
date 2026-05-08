@@ -853,3 +853,48 @@ POST /admin/plugin-settings
 ## Expected invariant
 
 A solved `cfm_clearance` should mean: "do not repeatedly challenge this client for the same gate." It should never mean: "trust this request payload" or "skip WAF inspection before origin."
+
+## Implementation progress
+
+This section tracks what has actually shipped, separately from the design above. Future sessions should append here rather than rewriting earlier sections.
+
+### Step 1 — DONE: highest-severity WAF aggregation in `cfm_waf.lua`
+
+Implementation task #2 from the list above is complete. Behaviour change inside `cfm_waf.lua` only; `cfm.lua` is untouched in this step, so the clearance fast-path issue (task #1) and the challenge-loop issue (task #3) are still present.
+
+What changed:
+
+- Added a module-level `ACTION_SEVERITY` table (`disabled=0, logonly=1, challenge=2, block=3`) and constant `SEV_BLOCK`.
+- `_M.check(ctx)` now keeps a `final_*` accumulator and a `hits` array and uses a local `record(reason, ttl, action)` closure. `record()` stores every match, updates `final_*` only when the new severity is strictly greater, and returns `true` only when the just-recorded action is `block`.
+- All 35 first-match `return true, reason, ttl, mode` sites are replaced by `if record(reason, ttl, mode) then goto done end`. There is exactly one `::done::` label, before the final return.
+- Short-circuit on `block`: once any rule lands a block-class hit, remaining detectors are skipped (block is the cap and cannot be exceeded).
+- `_M.check` now returns a 5-tuple: `(hit, reason, ttl, action, hits)`. The first four are unchanged from before, so existing callers in `cfm.lua` keep working without modification. `hits` is for future logging/diagnostics.
+- CPU gating: hoisted the repeated `lower(method) == "post" and body ~= ""` check into a single `body_inspect_ok` local computed once at the top of `_M.check`. Eight body/upload rules (15, 16, 17, 18, 19, 22, 33) now use that local. No semantic change, just one `lower()` call instead of eight.
+- `host` is still referenced bare (not via `ctx.host`) inside rules 25/27/28. That is a pre-existing oversight and was deliberately left alone; touching it is not part of Step 1.
+
+Why severity-aggregation matters here: the previous first-match behaviour meant an early `WAF_CT_ANOMALY:logonly` hit would suppress a later `WAF_UPLOAD_CONTENT:block` hit on the same request. With the accumulator, a `block` hit anywhere in the rule list wins, regardless of order, and lower-severity matches are still preserved in `hits` for future logging without affecting enforcement.
+
+What this does NOT yet fix:
+
+- A valid `cfm_clearance` cookie still bypasses the WAF entirely. The fast-path `return` in `cfm.lua` (Step 1 in the request flow, around the `allow_cookie` line) runs before `_M.check` is ever called. So the severity refactor only affects requests that reach the WAF at all.
+- Post-clearance `challenge` loop prevention is not implemented; it cannot be implemented until Step 2 moves WAF before clearance-allow.
+- The `hits` table is returned but not yet consumed anywhere. `cfm.lua` still only reads the first four return values.
+
+### Step 2 — TODO: move WAF before clearance-origin allow in `cfm.lua`
+
+Smallest possible diff: in `cfm.lua` around the `allow_cookie` early return, validate clearance into `ngx.ctx.cfm_clearance_ok` (and refresh as today), but do NOT `return` yet. Let control fall through into the existing inline-WAF block. Then, only after WAF finishes (no hit, or `logonly`), honour the clearance allow.
+
+Risks to watch: replayed POST handling, sliding-clearance refresh side-effects, and any `X-CFM-Action: allow_cookie` consumers downstream. Do not move the CFM control endpoints (`/__cfm_challenge`, `/__cfm_verify`) — they are bypassed at nginx-level for a reason.
+
+### Step 3 — TODO: post-clearance challenge-loop prevention
+
+Becomes meaningful only after Step 2. Logic: when `waf_action == "challenge"` and clearance is valid, convert to either `block` (high-risk reason family prefix) or `logonly` (everything else). Drive via two env knobs:
+
+- `CFM_WAF_AFTER_CLEARANCE_CHALLENGE` (default `logonly`)
+- `CFM_WAF_AFTER_CLEARANCE_HIGH_RISK` (default `block`)
+
+High-risk reason families to start with: `WAF_RCE`, `WAF_UPLOAD_CONTENT`, `WAF_UPLOAD_FNAME`, `WAF_UPLOAD_OBFUSCATION`, `WAF_CMD_PAYLOAD`, `WAF_B64_INJECT`, `WAF_SHELLSHOCK`. Match by reason prefix (everything before the first `:`).
+
+### Step 4 — TODO: tests and fixtures
+
+The 9 cases enumerated in "Add tests" above. Aim for fixtures that exercise both the highest-severity aggregation (e.g. a request that triggers logonly-then-block in that order) and the post-clearance conversion matrix.
