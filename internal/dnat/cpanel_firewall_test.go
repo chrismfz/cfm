@@ -159,3 +159,82 @@ func containsChange(changes []string, want string) bool {
 	}
 	return false
 }
+
+func TestEnsureNftPorts_InsertsBeforeDefaultDropRules(t *testing.T) {
+	script := `
+LOGFILE="` + "${FAKE_LOG}" + `"
+printf "%s\n" "$0 $*" >> "$LOGFILE"
+if [ "$1" = "-a" ] && [ "$2" = "list" ] && [ "$3" = "chain" ]; then
+  cat <<'RULES'
+table inet cfm {
+	chain input {
+		ct state new tcp dport 0-65535 drop # handle 51
+		ct state new udp dport 0-65535 drop # handle 52
+	}
+}
+RULES
+  exit 0
+fi
+exit 0
+`
+	dir, logPath := writeFakeFWCommands(t, script)
+	t.Setenv("FAKE_LOG", logPath)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	changes, err := ensureNftPorts()
+	if err != nil {
+		t.Fatalf("ensureNftPorts failed: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("expected nft insert rule changes")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(data)
+	if !strings.Contains(calls, "nft insert rule inet cfm input position 51 ct state new ct status dnat") {
+		t.Fatalf("expected cPanel DNAT accepts to be inserted before first default drop handle, got:\n%s", calls)
+	}
+	if strings.Contains(calls, "nft add rule inet cfm input ct state new ct status dnat") {
+		t.Fatalf("DNAT accept used append syntax that can place it after default drops:\n%s", calls)
+	}
+}
+
+func TestEnsureNftPorts_RelocatesExistingManagedRulesAfterDefaultDrops(t *testing.T) {
+	script := `
+LOGFILE="` + "${FAKE_LOG}" + `"
+printf "%s\n" "$0 $*" >> "$LOGFILE"
+if [ "$1" = "-a" ] && [ "$2" = "list" ] && [ "$3" = "chain" ]; then
+  cat <<'RULES'
+table inet cfm {
+	chain input {
+		ct state new tcp dport 0-65535 drop # handle 61
+		ct state new udp dport 0-65535 drop # handle 62
+		ct state new ct status dnat ct original proto-dst 2082 tcp dport 12082 accept comment "cfm_cpanel_dnat:2082:12082" # handle 63
+	}
+}
+RULES
+  exit 0
+fi
+exit 0
+`
+	dir, logPath := writeFakeFWCommands(t, script)
+	t.Setenv("FAKE_LOG", logPath)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	if _, err := ensureNftPorts(); err != nil {
+		t.Fatalf("ensureNftPorts failed: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(data)
+	if !strings.Contains(calls, "nft delete rule inet cfm input handle 63") {
+		t.Fatalf("expected stale managed rule after default drops to be deleted before reinsertion, got:\n%s", calls)
+	}
+	if !strings.Contains(calls, "nft insert rule inet cfm input position 61 ct state new ct status dnat") {
+		t.Fatalf("expected relocated managed rule to be inserted before first default drop, got:\n%s", calls)
+	}
+}
