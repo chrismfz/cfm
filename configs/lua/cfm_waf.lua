@@ -478,7 +478,21 @@ local function detect_traversal(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
   if has(s, "%00") or has(s, "\x00") then return true end
+
+  -- Facebook share-debug bots produce URIs starting with /.../ which
+  -- contains a literal "../" substring as a side effect, but is not
+  -- traversal. Skip when the raw URI begins with that prefix.
+  local raw = lower(uri or "")
+  if string.sub(raw, 1, 5) == "/.../" then
+    return false
+  end
+
   if has(s, "../") or has(s, "..\\") then return true end
+
+  -- Triple-URL-encoded path-separator variants survive scan_str's
+  -- double-decode and are sometimes used to bypass single-decode WAFs.
+  if has(s, "..%2f")   or has(s, "..%5c")   then return true end
+  if has(s, "%2e%2e/") or has(s, "%2e%2e\\") then return true end
 
   return false
 end
