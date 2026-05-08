@@ -38,7 +38,7 @@ local CFG = {
   rule_sqli            = "challenge",  -- cheap SQLi signatures (+ SQL comment bypass)
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
-  rule_php_wrappers      = "logonly",  -- php:// phar:// data:// zip:// expect:// glob://
+  rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
   rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
   rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
   rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
@@ -94,8 +94,8 @@ local CFG = {
   rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
 
   -- [top-4]  Upload controls
-  rule_upload_filename    = "challenge",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
-  rule_upload_content     = "challenge",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
+  rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
   rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
 
