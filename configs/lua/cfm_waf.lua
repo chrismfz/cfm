@@ -750,7 +750,12 @@ local function detect_xss(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
   if has(s, "<script")      or has(s, "%3cscript") then return true end
-  if has(s, "javascript:")                         then return true end
+  -- javascript: in attribute-value position only. Bots that follow
+  -- <a href="javascript:void(0)"> anchor hrefs hit URIs that literally
+  -- start with /javascript: — those are not XSS injections, skip them.
+  if has(s, "=javascript:")   then return true end
+  if has(s, "=\"javascript:") then return true end
+  if has(s, "='javascript:")  then return true end
   if has(s, "onerror=")     or has(s, "onload=")  then return true end
   if has(s, "onmouseover=") or has(s, "onfocus=") then return true end
 
