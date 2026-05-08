@@ -54,7 +54,7 @@ local CFG = {
   rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
-  rule_cmd_params       = "challenge",   -- suspicious parameter keys like exec= system=
+  rule_cmd_params       = "challenge",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
   rule_cmd_payload      = "logonly",   -- fallback/default mode for payload-y separators/tokens in args
   rule_debug_toggles    = "logonly",   -- xdebug, trace, debug, stacktrace
   rule_serialize        = "logonly",   -- PHP serialized object markers
@@ -1080,6 +1080,9 @@ local function detect_cmd_param_key(args)
   if key("shell_exec") then return "CMD_SHELL_EXEC" end
   if key("eval")       then return "CMD_EVAL" end
   if key("assert")     then return "CMD_ASSERT" end
+  if key("system")     then return "CMD_SYSTEM" end
+  if key("cmd")        then return "CMD_CMD" end
+  if key("command")    then return "CMD_COMMAND" end
 
   return nil
 end
