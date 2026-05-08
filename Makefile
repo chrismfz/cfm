@@ -56,7 +56,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua
 
 # -------------------------------
 # Help
@@ -92,6 +92,22 @@ lua: ## Syntax-check production Lua configs under configs/lua/
 		luac -p "$$f" || exit $$?; \
 	done
 	@echo "✅ Lua syntax checks passed."
+
+LUA_TESTS := $(wildcard scripts/tests/*_test.lua)
+
+test-lua: ## Run Lua unit tests under scripts/tests/*_test.lua
+	@command -v luajit >/dev/null 2>&1 || { echo "❌ luajit is required for 'make test-lua' but was not found in PATH."; exit 1; }
+	@[ -n "$(LUA_TESTS)" ] || { echo "❌ No Lua tests found at scripts/tests/*_test.lua"; exit 1; }
+	@echo "→ Running Lua tests:"
+	@failed=0; for f in $(LUA_TESTS); do \
+		echo "  $$f"; \
+		luajit "$$f" || failed=$$((failed + 1)); \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+		echo "❌ $$failed Lua test file(s) failed."; exit 1; \
+	else \
+		echo "✅ Lua tests passed."; \
+	fi
 
 update: ## Update all dependencies
 	@echo "🔍 Checking for module updates..."
