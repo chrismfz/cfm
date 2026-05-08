@@ -801,14 +801,19 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 		}
 	}
 
-	dbgPort := 0
-	if b.cfg != nil && b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
-		dbgPort = b.cfg.Debug.Port
+	dbgPorts := []int{}
+	if b.cfg != nil {
+		if b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
+			dbgPorts = append(dbgPorts, b.cfg.Debug.Port)
+		}
+		if b.cfg.Debug.TLSPort > 0 && b.cfg.Debug.TLSPort <= 65535 {
+			dbgPorts = append(dbgPorts, b.cfg.Debug.TLSPort)
+		}
 	}
 
 	filteredTCPIn := cfgPortRanges(cfg.TCPIn)
-	if dbgPort > 0 {
-		filteredTCPIn = subtractPortRange(filteredTCPIn, dbgPort)
+	for _, p := range dbgPorts {
+		filteredTCPIn = subtractPortRange(filteredTCPIn, p)
 	}
 
 	if err := b.replacePortSetCLI(setTCPIn, filteredTCPIn); err != nil {
@@ -919,21 +924,23 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 		return err
 	}
 
-	// Debug port: restrict to self + API sets only.
-	if dbgPort > 0 {
+	// Debug ports (plaintext + TLS): restrict to self + API sets only.
+	if len(dbgPorts) > 0 {
 		_ = b.nftExec("add set inet cfm debug_api_v4 { type ipv4_addr; }")
 		_ = b.nftExec("add set inet cfm debug_api_v6 { type ipv6_addr; }")
-		if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip saddr @self_v4 accept", dbgPort)); err != nil {
-			return err
-		}
-		if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip6 saddr @self_v6 accept", dbgPort)); err != nil {
-			return err
-		}
-		if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip saddr @debug_api_v4 accept", dbgPort)); err != nil {
-			return err
-		}
-		if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip6 saddr @debug_api_v6 accept", dbgPort)); err != nil {
-			return err
+		for _, p := range dbgPorts {
+			if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip saddr @self_v4 accept", p)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip6 saddr @self_v6 accept", p)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip saddr @debug_api_v4 accept", p)); err != nil {
+				return err
+			}
+			if err := addRule("input", fmt.Sprintf("ct state new tcp dport %d ip6 saddr @debug_api_v6 accept", p)); err != nil {
+				return err
+			}
 		}
 	}
 
