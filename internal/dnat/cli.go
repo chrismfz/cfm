@@ -401,7 +401,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	sslCollectorSock := probeSocketDetailed("/var/run/sslcollector.sock", worker)
 	bridgeToken := probeReadable("/var/lib/cfm/lua/cfm_bridge_token.lua", worker)
 	clearanceLua := probeReadable("/var/lib/cfm/lua/cfm_clearance.lua", worker)
-	panelOn, _, _ := panelStatus()
+	panelOn, _, _ := panelStatusWithBackend(backend)
 	fmt.Printf("cPanel DNAT enabled: %t\n", panelOn)
 	fmt.Printf("Worker user detected: %s\n", worker)
 	fmt.Printf("Bridge token file: exists=%t root_readable=%t worker_readable=%s\n", bridgeToken.Exists, bridgeToken.ReadableByRoot, bridgeToken.ReadableByWorker)
@@ -571,15 +571,15 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			return 1
 		}
 		setPanelFirewallHealth("OK", "", true)
-		if err := panelOn(*priority); err != nil {
+		if err := panelOnWithBackend(backend, *priority); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
 		}
 		fmt.Println("Phase 1/2 (DNAT): OK")
-		changes, err := ensurePanelAllowlist()
+		changes, err := ensurePanelAllowlistWithBackend(backend)
 		if err != nil {
 			setPanelFirewallHealth("FAILED", err.Error(), true)
-			_ = execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run()
+			_ = backend.PanelDNATOff()
 			setPanelFirewallHealth("PARTIAL", err.Error()+"; remediation: cfm dnat cpanel on", true)
 			fmt.Fprintln(os.Stderr, "dnat cpanel on firewall failed:", err)
 			return 1
@@ -596,7 +596,8 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		return 0
 	case "off":
-		changes, err := panelOff()
+		res, err := panelOffWithBackend(backend)
+		changes := res.FirewallChanges
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
 			return 1
@@ -607,7 +608,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		return 0
 	case "status":
-		on, rules, _ := panelStatus()
+		on, rules, _ := panelStatusWithBackend(backend)
 		fmt.Println("DNAT table: inet cfm_panel_redirect")
 		if on {
 			fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected)
@@ -662,7 +663,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		if onProfile.EffectiveMode == panelChallengeEnabledMode && panelDecision.Status == "MISSING" {
 			fmt.Println("WARNING: policy is active, but /__cfm_panel_decide is missing; panel challenge cannot work until listener config is corrected and reloaded.")
 		}
-		fw := panelFirewallState()
+		fw := panelFirewallStateWithBackend(backend)
 		h := getPanelFirewallHealth()
 		fsState := getPanelFailSafeState()
 		fmt.Printf("Firewall state: %s\n", h.State)

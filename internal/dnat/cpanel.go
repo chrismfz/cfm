@@ -3,7 +3,6 @@ package dnat
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -14,10 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/firewall"
 )
 
-var panelMap = map[int]int{2082: 12082, 2083: 12083, 2086: 12086, 2087: 12087, 2095: 12095, 2096: 12096, 2222: 12222}
-var panelTargetPorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
+var panelMap = panelMappingMap()
+var panelTargetPorts = panelMappingTargetPorts()
 
 var challengeHTTPPortRe = regexp.MustCompile(`(?:^|\s)port=(\d+)`)
 var panelChallengeModeLineRe = regexp.MustCompile(`set \$cfm_panel_challenge_mode "[^"]*";`)
@@ -179,36 +180,22 @@ func runOut(name string, args ...string) string {
 	return b.String()
 }
 
-func panelStatus() (bool, string, error) {
-	out := runOut("nft", "list", "table", "inet", "cfm_panel_redirect")
-	if strings.Contains(out, "No such file") || strings.Contains(out, "does not exist") {
-		return false, "", nil
+func panelStatus() (bool, string, error) { return panelStatusWithBackend(defaultPanelBackend()) }
+
+func panelStatusWithBackend(backend firewall.Backend) (bool, string, error) {
+	if backend == nil {
+		return false, "", fmt.Errorf("backend does not support panel DNAT")
 	}
-	if strings.TrimSpace(out) == "" {
-		return false, "", nil
-	}
-	return true, out, nil
+	return backend.PanelDNATStatus()
 }
 
-func panelScript(priority int) string {
-	ports := []int{2082, 2083, 2086, 2087, 2095, 2096, 2222}
-	var b strings.Builder
-	fmt.Fprintf(&b, "add table inet cfm_panel_redirect\n")
-	fmt.Fprintf(&b, "add chain inet cfm_panel_redirect prerouting { type nat hook prerouting priority %d; policy accept; }\n", priority)
-	b.WriteString("add rule inet cfm_panel_redirect prerouting iif \"lo\" accept\n")
-	for _, p := range ports {
-		fmt.Fprintf(&b, "add rule inet cfm_panel_redirect prerouting tcp dport %d dnat to :%d\n", p, panelMap[p])
-	}
-	return b.String()
-}
+func panelOn(priority int) error { return panelOnWithBackend(defaultPanelBackend(), priority) }
 
-func panelOn(priority int) error {
-	_ = exec.Command("nft", "delete", "table", "inet", "cfm_panel_redirect").Run()
-	s := panelScript(priority)
-	c := exec.Command("nft", "-f", "-")
-	in, _ := c.StdinPipe()
-	go func() { _, _ = io.WriteString(in, s); _ = in.Close() }()
-	return c.Run()
+func panelOnWithBackend(backend firewall.Backend, priority int) error {
+	if backend == nil {
+		return fmt.Errorf("backend does not support panel DNAT")
+	}
+	return backend.PanelDNATOn(priority)
 }
 
 func panelListenerState(port int) string {

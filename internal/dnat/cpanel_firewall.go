@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"cfm/internal/firewall"
 )
 
 const cpanelFWTag = "cfm_cpanel_dnat"
@@ -78,18 +80,27 @@ func runFirewallCmd(backend fwBackend, name string, args ...string) error {
 }
 
 func ensurePanelAllowlist() ([]string, error) {
-	// Panel DNAT target ports must not be opened broadly. Always use scoped nft
-	// accepts when nft is available, even on hosts that also run firewalld.
-	if execCommand("nft", "list", "ruleset").Run() == nil {
-		return ensureNftPorts()
-	}
-	return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall rules")
+	return ensurePanelAllowlistWithBackend(defaultPanelBackend())
 }
-func removePanelAllowlist() ([]string, error) {
-	if execCommand("nft", "list", "ruleset").Run() == nil {
-		return removeNftPorts()
+
+func ensurePanelAllowlistWithBackend(backend firewall.Backend) ([]string, error) {
+	// Panel DNAT target ports must not be opened broadly. Always use scoped
+	// backend-managed accepts when nftables is available.
+	if backend == nil {
+		return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall rules")
 	}
-	return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall cleanup")
+	return backend.EnsurePanelDNATAccepts()
+}
+
+func removePanelAllowlist() ([]string, error) {
+	return removePanelAllowlistWithBackend(defaultPanelBackend())
+}
+
+func removePanelAllowlistWithBackend(backend firewall.Backend) ([]string, error) {
+	if backend == nil {
+		return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall cleanup")
+	}
+	return backend.RemovePanelDNATAccepts()
 }
 
 type panelMapping struct {
@@ -97,12 +108,27 @@ type panelMapping struct {
 	to   int
 }
 
-func panelMappings() []panelMapping {
-	mappings := make([]panelMapping, 0, len(panelMap))
-	for from, to := range panelMap {
-		mappings = append(mappings, panelMapping{from: from, to: to})
+func panelMappingMap() map[int]int {
+	m := make(map[int]int, len(firewall.PanelDNATMappings()))
+	for _, mapping := range firewall.PanelDNATMappings() {
+		m[mapping.From] = mapping.To
 	}
-	sort.Slice(mappings, func(i, j int) bool { return mappings[i].from < mappings[j].from })
+	return m
+}
+
+func panelMappingTargetPorts() []int {
+	ports := make([]int, 0, len(firewall.PanelDNATMappings()))
+	for _, mapping := range firewall.PanelDNATMappings() {
+		ports = append(ports, mapping.To)
+	}
+	return ports
+}
+
+func panelMappings() []panelMapping {
+	mappings := make([]panelMapping, 0, len(firewall.PanelDNATMappings()))
+	for _, mapping := range firewall.PanelDNATMappings() {
+		mappings = append(mappings, panelMapping{from: mapping.From, to: mapping.To})
+	}
 	return mappings
 }
 
@@ -246,20 +272,17 @@ func removeFirewalldPorts() ([]string, error) {
 	return changes, nil
 }
 
-func panelFirewallState() map[int]string {
+func panelFirewallState() map[int]string { return panelFirewallStateWithBackend(defaultPanelBackend()) }
+
+func panelFirewallStateWithBackend(backend firewall.Backend) map[int]string {
 	state := map[int]string{}
 	for _, p := range panelTargetPorts {
 		state[p] = "unknown"
 	}
-	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
-	for _, m := range panelMappings() {
-		if strings.Contains(out, fmt.Sprintf("tcp dport %d", m.to)) && strings.Contains(out, cpanelScopedRuleComment(m.from, m.to)) && strings.Contains(out, "ct status dnat") {
-			state[m.to] = "open"
-		} else if out != "" {
-			state[m.to] = "blocked"
-		}
+	if backend == nil {
+		return state
 	}
-	return state
+	return backend.PanelDNATAcceptState()
 }
 
 func parseManagedRuleLine(line string) (string, string, bool) {
