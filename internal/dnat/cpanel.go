@@ -307,13 +307,16 @@ func reloadPanelListenerService() error {
 				return nil
 			}
 			fallbackSucceeded = true
+			if panelListenerServiceIsConfirmedActive(svc) {
+				return nil
+			}
 			continue
 		} else {
 			lastErr = err
 		}
 	}
 	if fallbackSucceeded {
-		return fmt.Errorf("reload/restart listener service for active service %q failed despite fallback service success", primary)
+		return fmt.Errorf("reload/restart listener service for active service %q failed despite fallback service success from an unconfirmed fallback service", primary)
 	}
 	if lastErr == nil {
 		return fmt.Errorf("no angie/openresty service command candidates")
@@ -322,11 +325,19 @@ func reloadPanelListenerService() error {
 }
 
 var panelListenerServiceDetector = detectActivePanelListenerService
+var panelListenerProcessDetector = detectEdgeService
 
 const panelListenerServiceAmbiguous = "__ambiguous__"
 
 func systemctlServiceIsActive(service string) bool {
 	return execCommand("systemctl", "is-active", "--quiet", service).Run() == nil
+}
+
+func panelListenerServiceIsConfirmedActive(service string) bool {
+	if systemctlServiceIsActive(service) {
+		return true
+	}
+	return panelListenerProcessDetector() == service
 }
 
 func activePanelListenerServicesFromSystemd() []string {
