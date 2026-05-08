@@ -37,11 +37,13 @@ type CapabilityReporter interface {
 //     PruneExternalFeeds/DropFeedSets/RemoveFeedByKey.
 //   - Standards: use transaction-style commit boundaries for related mutations, fail closed on
 //     partial updates, and return wrapped errors with op/family/table/set/attempt context.
+//
 // - nftcli-owned operations (hybrid until nftlib parity):
 //   - Policy/rules programming: ApplyFloodRules, ApplyHardeningRules, ApplyPortsPolicy,
 //     ApplyConnlimit, ApplyPortFlood, ApplySMTPBlock, ApplyOutboundObserve.
 //   - Challenge redirect/DNAT control: SetChallengeRedirectEnabled, CleanupChallengeRedirect,
 //     EnsureChallengeRedirect, DNATStatus, DNATShow, DNATOn, DNATOff.
+//   - Panel DNAT control: PanelDNATOn/Off/Status and scoped panel DNAT accepts.
 //   - Protections: keep timeout + backpressure controls (central command runner, bounded
 //     concurrency/serialization, and context cancellation propagation) on every subprocess path.
 type Backend interface {
@@ -119,6 +121,14 @@ type Backend interface {
 	DNATShow(family, table string) (string, error)
 	DNATOn(family, table string, httpPort, httpsPort int) error
 	DNATOff(family, table string) error
+
+	// Panel DNAT APIs manage cPanel/DirectAdmin panel redirects and scoped input accepts.
+	PanelDNATOn(priority int) error
+	PanelDNATOff() error
+	PanelDNATStatus() (bool, string, error)
+	EnsurePanelDNATAccepts() ([]string, error)
+	RemovePanelDNATAccepts() ([]string, error)
+	PanelDNATAcceptState() map[int]string
 
 	// ReportBlock: centralized policy-aware API reporting.
 	// source: "detector" | "autoblock" | "manual"

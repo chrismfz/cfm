@@ -1,6 +1,10 @@
 package dnat
 
-import "strings"
+import (
+	"strings"
+
+	"cfm/internal/firewall"
+)
 
 var panelListenerChallengeConfigPaths = []string{
 	"/etc/angie/cfm-panel-listeners.conf",
@@ -14,7 +18,12 @@ type panelOffResult struct {
 }
 
 var (
-	panelDeleteRedirectTableFn        = func() error { return execCommand("nft", "delete", "table", "inet", "cfm_panel_redirect").Run() }
+	panelDeleteRedirectTableFn = func() error {
+		if backend := defaultPanelBackend(); backend != nil {
+			return backend.PanelDNATOff()
+		}
+		return nil
+	}
 	panelRemoveAllowlistFn            = removePanelAllowlist
 	panelPersistChallengeEnabledFn    = persistPanelChallengeEnabled
 	panelApplyChallengeModeToPathsFn  = applyPanelChallengeModeToPaths
@@ -24,17 +33,32 @@ var (
 )
 
 func panelOff() ([]string, error) {
-	res, err := panelOffWithOptions(true)
+	res, err := panelOffWithOptionsAndBackend(true, nil)
 	return res.FirewallChanges, err
 }
 
+func panelOffWithBackend(backend firewall.Backend) (panelOffResult, error) {
+	return panelOffWithOptionsAndBackend(true, backend)
+}
+
 func panelOffWithOptions(autoRemoveAllowlist bool) (panelOffResult, error) {
+	return panelOffWithOptionsAndBackend(autoRemoveAllowlist, nil)
+}
+
+func panelOffWithOptionsAndBackend(autoRemoveAllowlist bool, backend firewall.Backend) (panelOffResult, error) {
 	result := panelOffResult{}
 	health := panelGetFirewallHealthFn()
-	_ = panelDeleteRedirectTableFn()
+	if backend != nil {
+		_ = backend.PanelDNATOff()
+	} else {
+		_ = panelDeleteRedirectTableFn()
+	}
 
 	if autoRemoveAllowlist {
-		changes, err := panelRemoveAllowlistFn()
+		changes, err := removePanelAllowlistWithBackend(backend)
+		if panelRemoveAllowlistFn != nil && backend == nil {
+			changes, err = panelRemoveAllowlistFn()
+		}
 		result.FirewallChanges = changes
 		if err != nil {
 			result.AllowlistError = err
