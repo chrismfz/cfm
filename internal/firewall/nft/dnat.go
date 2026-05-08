@@ -57,6 +57,66 @@ func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
 `, fam, tbl, priority, httpPort, httpsPort, httpsPort)
 }
 
+func dnatAcceptRuleSpecs(httpPort, httpsPort int) []struct {
+	label string
+	from  int
+	to    int
+} {
+	return []struct {
+		label string
+		from  int
+		to    int
+	}{
+		{label: "web_http", from: 80, to: httpPort},
+		{label: "web_https", from: 443, to: httpsPort},
+	}
+}
+
+func dnatAcceptRuleComment(label string, from, to int) string {
+	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
+}
+
+func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
+	_ = b.nftExpr("add table inet cfm")
+	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+	if err := b.cleanupScopedDNATAccepts(); err != nil {
+		return err
+	}
+	for _, spec := range dnatAcceptRuleSpecs(httpPort, httpsPort) {
+		if spec.to <= 0 {
+			continue
+		}
+		expr := fmt.Sprintf(`ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, spec.from, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+		if err := b.nftCmd("add rule inet cfm input " + expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Backend) cleanupScopedDNATAccepts() error {
+	out, err := b.nftOut("-a list chain inet cfm input")
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, "cfm_dnat_accept:") || !strings.Contains(norm, " handle ") {
+			continue
+		}
+		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			h = fields[0]
+		}
+		if h != "" {
+			if err := b.nftCmd("delete rule inet cfm input handle " + h); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	start := time.Now()
 	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
@@ -73,9 +133,15 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
 	}
 
-	// Idempotent
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort); err != nil {
+		return err
+	}
+
+	// Replace CFM's managed DNAT table so changed listener ports are applied.
 	if b.dnatTableExists(fam, tbl) {
-		return nil
+		if err := b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl)); err != nil {
+			return err
+		}
 	}
 
 	// Reuse your multi-line nft expression runner
@@ -93,6 +159,10 @@ func (b *Backend) DNATOff(fam, tbl string) (err error) {
 		b.logPhase("DNATOff", st, time.Since(start), err, "")
 	}()
 	fam, tbl = dnatDefaults(fam, tbl)
+
+	if err := b.cleanupScopedDNATAccepts(); err != nil {
+		return err
+	}
 
 	// Idempotent
 	if !b.dnatTableExists(fam, tbl) {

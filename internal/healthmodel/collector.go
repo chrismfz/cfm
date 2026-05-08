@@ -175,41 +175,54 @@ func collectRuntimeStatus(backend firewall.Backend) RuntimeStatus {
 	out.BridgeSocketLatencyMs = flow.BridgeSocketLatencyMs
 	out.ChallengeListenerStatus = flow.ChallengeListenerStatus
 	out.ChallengeListenerReason = flow.ChallengeListenerReason
+	out.ChallengeListenerAddress = flow.ChallengeListenerAddress
 	out.SSLCollectorStatus = probeSSLCollectorStatus()
 	populateIngestSocketHealth(&out)
 	return out
 }
 
 type flowProbe struct {
-	Status                  string
-	Code                    string
-	Reason                  string
-	BridgeSocketStatus      string
-	BridgeSocketReason      string
-	BridgeSocketLatencyMs   int64
-	ChallengeListenerStatus string
-	ChallengeListenerReason string
+	Status                   string
+	Code                     string
+	Reason                   string
+	BridgeSocketStatus       string
+	BridgeSocketReason       string
+	BridgeSocketLatencyMs    int64
+	ChallengeListenerStatus  string
+	ChallengeListenerReason  string
+	ChallengeListenerAddress string
+}
+
+func resolvedChallengeListenAddr(envKey string, defPort int) string {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return fmt.Sprintf("127.0.0.1:%d", defPort)
+	}
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return raw
+	}
+	if p, err := strconv.Atoi(raw); err == nil && p > 0 && p <= 65535 {
+		return fmt.Sprintf("127.0.0.1:%d", p)
+	}
+	return raw
 }
 
 func probeChallengeFlowReadiness() flowProbe {
-	listenAddr := strings.TrimSpace(os.Getenv("CHALLENGE_HTTP_LISTEN"))
-	if listenAddr == "" {
-		listenAddr = "127.0.0.1:9098"
-	}
-	if !strings.Contains(listenAddr, ":") {
-		listenAddr = "127.0.0.1:" + listenAddr
-	}
+	httpPort, _ := dnat.EffectiveTargetPorts()
+	listenAddr := resolvedChallengeListenAddr("CHALLENGE_HTTP_LISTEN", httpPort)
 	out := flowProbe{}
 	conn, err := challengeDialTimeout("tcp", listenAddr, 1200*time.Millisecond)
 	if err != nil {
 		out.ChallengeListenerStatus = "fail"
-		out.ChallengeListenerReason = err.Error()
+		out.ChallengeListenerAddress = listenAddr
+		out.ChallengeListenerReason = fmt.Sprintf("%s: %v", listenAddr, err)
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = "listener unavailable"
-		return flowProbe{Status: "FAIL", Code: "challenge_listener_unreachable", Reason: err.Error(), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "challenge_listener_unreachable", Reason: out.ChallengeListenerReason, BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	out.ChallengeListenerStatus = "ok"
-	out.ChallengeListenerReason = "listener reachable"
+	out.ChallengeListenerAddress = listenAddr
+	out.ChallengeListenerReason = fmt.Sprintf("listener reachable at %s", listenAddr)
 	_ = conn.Close()
 	cfg := edgediag.ResolveBridgeRuntimeConfig(challengeFlowDetectorsConfigPath)
 	sockPath := cfg.SocketPath
@@ -217,19 +230,19 @@ func probeChallengeFlowReadiness() flowProbe {
 	if err != nil || st.Mode()&os.ModeSocket == 0 {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = sockPath
-		return flowProbe{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: sockPath, BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: sockPath, BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	challengeToken := edgediag.ReadChallengeTokenProbe(challengeFlowDetectorsConfigPath)
 	bridgeToken := edgediag.ReadBridgeTokenProbe(challengeFlowBridgeTokenPath)
 	if !challengeToken.Present || !bridgeToken.Present {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = "token missing"
-		return flowProbe{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	if !challengeToken.Valid || !bridgeToken.Valid {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = "token weak"
-		return flowProbe{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	started := time.Now()
 	statusCode, err := bridgeDecisionProbe(sockPath, bridgeToken.Token)
@@ -238,25 +251,25 @@ func probeChallengeFlowReadiness() flowProbe {
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
 			out.BridgeSocketStatus = "warn"
 			out.BridgeSocketReason = "decision path timeout"
-			return flowProbe{Status: "WARN", Code: "decision_path_timeout", Reason: "partial_ok: listener/socket/token present but decision path timed out", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+			return flowProbe{Status: "WARN", Code: "decision_path_timeout", Reason: "partial_ok: listener/socket/token present but decision path timed out", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 		}
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = err.Error()
-		return flowProbe{Status: "FAIL", Code: "decision_path_connect_fail", Reason: err.Error(), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "decision_path_connect_fail", Reason: err.Error(), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		out.BridgeSocketStatus = "fail"
 		out.BridgeSocketReason = fmt.Sprintf("http %d", statusCode)
-		return flowProbe{Status: "FAIL", Code: "bridge_auth_fail", Reason: fmt.Sprintf("http %d", statusCode), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "FAIL", Code: "bridge_auth_fail", Reason: fmt.Sprintf("http %d", statusCode), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	if statusCode != http.StatusOK {
 		out.BridgeSocketStatus = "warn"
 		out.BridgeSocketReason = fmt.Sprintf("http %d", statusCode)
-		return flowProbe{Status: "WARN", Code: "decision_path_unexpected_status", Reason: fmt.Sprintf("partial_ok: http %d", statusCode), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+		return flowProbe{Status: "WARN", Code: "decision_path_unexpected_status", Reason: fmt.Sprintf("partial_ok: http %d", statusCode), BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 	}
 	out.BridgeSocketStatus = "ok"
 	out.BridgeSocketReason = "ok"
-	return flowProbe{Status: "OK", Code: "ok", Reason: "challenge flow ready", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason}
+	return flowProbe{Status: "OK", Code: "ok", Reason: "challenge flow ready", BridgeSocketStatus: out.BridgeSocketStatus, BridgeSocketReason: out.BridgeSocketReason, BridgeSocketLatencyMs: out.BridgeSocketLatencyMs, ChallengeListenerStatus: out.ChallengeListenerStatus, ChallengeListenerReason: out.ChallengeListenerReason, ChallengeListenerAddress: out.ChallengeListenerAddress}
 }
 
 func populateIngestSocketHealth(out *RuntimeStatus) {

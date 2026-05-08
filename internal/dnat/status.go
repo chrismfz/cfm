@@ -3,6 +3,10 @@ package dnat
 import (
 	"cfm/internal/firewall"
 	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -35,10 +39,51 @@ func PanelStatus() (bool, string, error) {
 	return panelStatus()
 }
 
-// EffectiveTargetPorts returns the DNAT target ports resolved using the same
-// env-driven behavior as the CLI (HTTP_PORT/HTTPS_PORT) with sane defaults.
+// EffectiveTargetPorts returns the web DNAT target ports resolved from the
+// effective challenge listeners. CHALLENGE_HTTP_LISTEN and
+// CHALLENGE_HTTPS_LISTEN may be host:port, :port, or a plain port. Legacy
+// HTTP_PORT/HTTPS_PORT are retained as fallback overrides for CLI-driven DNAT.
 func EffectiveTargetPorts() (httpPort int, httpsPort int) {
-	return getenvInt("HTTP_PORT", DefaultHTTPPort), getenvInt("HTTPS_PORT", DefaultHTTPSPort)
+	httpPort = effectiveListenPort("CHALLENGE_HTTP_LISTEN", getenvInt("HTTP_PORT", DefaultHTTPPort))
+	httpsPort = effectiveListenPort("CHALLENGE_HTTPS_LISTEN", getenvInt("HTTPS_PORT", DefaultHTTPSPort))
+	return httpPort, httpsPort
+}
+
+func effectiveListenPort(envKey string, def int) int {
+	v := strings.TrimSpace(os.Getenv(envKey))
+	if v == "" {
+		return def
+	}
+	if p, ok := parseListenPort(v); ok {
+		return p
+	}
+	return def
+}
+
+func parseListenPort(addr string) (int, bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0, false
+	}
+	if p, err := strconv.Atoi(addr); err == nil {
+		return validPort(p)
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, false
+	}
+	return validPort(p)
+}
+
+func validPort(p int) (int, bool) {
+	if p <= 0 || p > 65535 {
+		return 0, false
+	}
+	return p, true
 }
 
 type panelChallengeStatus struct {

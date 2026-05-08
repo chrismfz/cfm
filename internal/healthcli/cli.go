@@ -102,6 +102,7 @@ type modernSample struct {
 		BridgeSocketLatencyMs        int64  `json:"bridge_socket_latency_ms"`
 		ChallengeListenerStatus      string `json:"challenge_listener_status"`
 		ChallengeListenerReason      string `json:"challenge_listener_reason"`
+		ChallengeListenerAddress     string `json:"challenge_listener_address"`
 		ChallengeFlowState           string `json:"challenge_flow_state"`
 		ChallengeFlowCode            string `json:"challenge_flow_code"`
 		ChallengeFlowReason          string `json:"challenge_flow_reason"`
@@ -366,6 +367,8 @@ func printRuntimeSubcheckWarnings(sample modernSample, opts cliOptions, compact 
 	}
 	if st := strings.ToLower(strings.TrimSpace(r.ChallengeListenerStatus)); st == "warn" || st == "fail" {
 		warn("challenge_listener", strings.TrimSpace(r.ChallengeListenerReason))
+	} else if addr := strings.TrimSpace(r.ChallengeListenerAddress); addr != "" && !compact {
+		fmt.Printf("  Challenge listener checked: %s\n", addr)
 	}
 	if st := strings.ToLower(strings.TrimSpace(r.SSLCollectorStatus)); st == "auth" || st == "perm" {
 		warn("sslcollector", st)

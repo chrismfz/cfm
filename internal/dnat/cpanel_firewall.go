@@ -78,24 +78,36 @@ func runFirewallCmd(backend fwBackend, name string, args ...string) error {
 }
 
 func ensurePanelAllowlist() ([]string, error) {
-	switch detectFWBackend() {
-	case fwFirewalld:
-		return ensureFirewalldPorts()
-	case fwNft:
+	// Panel DNAT target ports must not be opened broadly. Always use scoped nft
+	// accepts when nft is available, even on hosts that also run firewalld.
+	if execCommand("nft", "list", "ruleset").Run() == nil {
 		return ensureNftPorts()
-	default:
-		return nil, fmt.Errorf("no supported firewall backend detected")
 	}
+	return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall rules")
 }
 func removePanelAllowlist() ([]string, error) {
-	switch detectFWBackend() {
-	case fwFirewalld:
-		return removeFirewalldPorts()
-	case fwNft:
+	if execCommand("nft", "list", "ruleset").Run() == nil {
 		return removeNftPorts()
-	default:
-		return nil, fmt.Errorf("no supported firewall backend detected")
 	}
+	return nil, fmt.Errorf("nftables is required for scoped cPanel DNAT firewall cleanup")
+}
+
+type panelMapping struct {
+	from int
+	to   int
+}
+
+func panelMappings() []panelMapping {
+	mappings := make([]panelMapping, 0, len(panelMap))
+	for from, to := range panelMap {
+		mappings = append(mappings, panelMapping{from: from, to: to})
+	}
+	sort.Slice(mappings, func(i, j int) bool { return mappings[i].from < mappings[j].from })
+	return mappings
+}
+
+func cpanelScopedRuleComment(from, to int) string {
+	return fmt.Sprintf("%s:%d:%d", cpanelFWTag, from, to)
 }
 
 func ensureNftPorts() ([]string, error) {
@@ -103,15 +115,16 @@ func ensureNftPorts() ([]string, error) {
 	_ = execCommand("nft", "add", "chain", "inet", "cfm", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}").Run()
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
 	changes := []string{}
-	for _, p := range panelTargetPorts {
-		want := fmt.Sprintf("tcp dport %d", p)
-		if strings.Contains(out, want) && strings.Contains(out, cpanelFWTag) {
+	for _, m := range panelMappings() {
+		comment := cpanelScopedRuleComment(m.from, m.to)
+		if strings.Contains(out, comment) && strings.Contains(out, fmt.Sprintf("tcp dport %d", m.to)) && strings.Contains(out, "ct status dnat") {
 			continue
 		}
-		if err := runFirewallCmd(fwNft, "nft", "add", "rule", "inet", "cfm", "input", "tcp", "dport", strconv.Itoa(p), "ct", "state", "new", "accept", "comment", fmt.Sprintf(`"%s:%d"`, cpanelFWTag, p)); err != nil {
+		args := []string{"add", "rule", "inet", "cfm", "input", "ct", "state", "new", "ct", "status", "dnat", "ct", "original", "proto-dst", strconv.Itoa(m.from), "tcp", "dport", strconv.Itoa(m.to), "accept", "comment", fmt.Sprintf(`"%s"`, comment)}
+		if err := runFirewallCmd(fwNft, "nft", args...); err != nil {
 			return changes, err
 		}
-		changes = append(changes, fmt.Sprintf("opened tcp/%d (nft cfm/input)", p))
+		changes = append(changes, fmt.Sprintf("opened scoped %d->%d (nft cfm/input)", m.from, m.to))
 	}
 	return changes, nil
 }
@@ -127,18 +140,18 @@ func removeNftPorts() ([]string, error) {
 		}
 		handles[port] = h
 	}
-	for _, p := range panelTargetPorts {
-		ps := strconv.Itoa(p)
-		h, ok := handles[ps]
+	for _, m := range panelMappings() {
+		key := fmt.Sprintf("%d:%d", m.from, m.to)
+		h, ok := handles[key]
 		if !ok {
-			changes = append(changes, fmt.Sprintf("tcp/%d not found", p))
+			changes = append(changes, fmt.Sprintf("scoped %d->%d not found", m.from, m.to))
 			continue
 		}
 		if err := runFirewallCmd(fwNft, "nft", "delete", "rule", "inet", "cfm", "input", "handle", h); err != nil {
-			changes = append(changes, fmt.Sprintf("tcp/%d failed (%v)", p, err))
+			changes = append(changes, fmt.Sprintf("scoped %d->%d failed (%v)", m.from, m.to, err))
 			continue
 		}
-		changes = append(changes, fmt.Sprintf("tcp/%d removed", p))
+		changes = append(changes, fmt.Sprintf("scoped %d->%d removed", m.from, m.to))
 	}
 	sort.Strings(changes)
 	return changes, nil
@@ -191,11 +204,11 @@ func panelFirewallState() map[int]string {
 		state[p] = "unknown"
 	}
 	out := runOut("nft", "-a", "list", "chain", "inet", "cfm", "input")
-	for _, p := range panelTargetPorts {
-		if strings.Contains(out, fmt.Sprintf("tcp dport %d", p)) && strings.Contains(out, cpanelFWTag+":"+strconv.Itoa(p)) {
-			state[p] = "open"
+	for _, m := range panelMappings() {
+		if strings.Contains(out, fmt.Sprintf("tcp dport %d", m.to)) && strings.Contains(out, cpanelScopedRuleComment(m.from, m.to)) && strings.Contains(out, "ct status dnat") {
+			state[m.to] = "open"
 		} else if out != "" {
-			state[p] = "blocked"
+			state[m.to] = "blocked"
 		}
 	}
 	return state
@@ -207,8 +220,20 @@ func parseManagedRuleLine(line string) (string, string, bool) {
 		return "", "", false
 	}
 	h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+	if fields := strings.Fields(h); len(fields) > 0 {
+		h = fields[0]
+	}
 	parts := strings.Fields(norm)
 	port := "?"
+	for _, part := range parts {
+		if strings.HasPrefix(part, cpanelFWTag+":") {
+			comment := strings.TrimPrefix(part, cpanelFWTag+":")
+			cparts := strings.Split(comment, ":")
+			if len(cparts) >= 2 {
+				return cparts[0] + ":" + cparts[1], h, true
+			}
+		}
+	}
 	for i := 0; i+1 < len(parts); i++ {
 		if parts[i] == "dport" {
 			port = parts[i+1]

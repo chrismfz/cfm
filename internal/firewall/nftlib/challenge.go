@@ -5,6 +5,7 @@ package nftlib
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -16,7 +17,9 @@ import (
 )
 
 const (
-	dnatRuleTag = "cfm-dnat-managed"
+	dnatRuleTag             = "cfm-dnat-managed"
+	defaultWebDNATHTTPPort  = 9080
+	defaultWebDNATHTTPSPort = 9043
 )
 
 type dnatRuleSpec struct {
@@ -27,6 +30,37 @@ type dnatRuleSpec struct {
 
 func (s dnatRuleSpec) id() string {
 	return fmt.Sprintf("%s:v1:p%d:d%d:t%d", dnatRuleTag, s.proto, s.dport, s.toPort)
+}
+
+func parseDNATRuleSpecID(id string) (dnatRuleSpec, bool) {
+	var spec dnatRuleSpec
+	if !strings.HasPrefix(id, dnatRuleTag+":v1:") {
+		return spec, false
+	}
+	parts := strings.Split(id, ":")
+	if len(parts) != 5 {
+		return spec, false
+	}
+	parsePart := func(prefix, part string) (uint64, bool) {
+		if !strings.HasPrefix(part, prefix) {
+			return 0, false
+		}
+		n, err := strconv.ParseUint(strings.TrimPrefix(part, prefix), 10, 16)
+		return n, err == nil
+	}
+	proto, ok := parsePart("p", parts[2])
+	if !ok || proto > 255 {
+		return spec, false
+	}
+	dport, ok := parsePart("d", parts[3])
+	if !ok {
+		return spec, false
+	}
+	toPort, ok := parsePart("t", parts[4])
+	if !ok {
+		return spec, false
+	}
+	return dnatRuleSpec{proto: uint8(proto), dport: uint16(dport), toPort: uint16(toPort)}, true
 }
 
 func managedDNATRule(userData []byte) bool {
@@ -137,7 +171,15 @@ func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err e
 	if !b.challengeRedirectEnabled {
 		return b.CleanupChallengeRedirect()
 	}
-	return b.DNATOn("", "", 9080, 9043)
+	_, httpPort, okHTTP := parseListenHostPort(httpListen)
+	_, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
+	if !okHTTP {
+		httpPort = defaultWebDNATHTTPPort
+	}
+	if !okHTTPS {
+		httpsPort = defaultWebDNATHTTPSPort
+	}
+	return b.DNATOn("", "", httpPort, httpsPort)
 }
 
 func (b *Backend) getDNATTableAndChain(family, table string) (*nftables.Table, *nftables.Chain, error) {
@@ -179,15 +221,12 @@ func (b *Backend) scanManagedDNATRules(t *nftables.Table, ch *nftables.Chain) (b
 	}
 	found := make([]dnatRuleSpec, 0, 3)
 	for _, r := range rules {
-		for _, spec := range []dnatRuleSpec{
-			{proto: 6, dport: 80, toPort: 9080},
-			{proto: 6, dport: 443, toPort: 9043},
-			{proto: 17, dport: 443, toPort: 9043},
-		} {
-			if dnatRuleMatches(r, spec) {
-				found = append(found, spec)
-				break
-			}
+		spec, ok := parseDNATRuleSpecID(string(r.UserData))
+		if !ok {
+			continue
+		}
+		if dnatRuleMatches(r, spec) {
+			found = append(found, spec)
 		}
 	}
 	sort.Slice(found, func(i, j int) bool {
@@ -232,6 +271,55 @@ func (b *Backend) DNATShow(family, table string) (string, error) {
 	return out.String(), nil
 }
 
+func dnatAcceptComment(label string, from, to int) string {
+	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
+}
+
+func (b *Backend) cleanupScopedDNATAccepts() error {
+	out, err := b.ListChainText("inet", "cfm", "input")
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, "cfm_dnat_accept:") || !strings.Contains(norm, " handle ") {
+			continue
+		}
+		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			h = fields[0]
+		}
+		if h != "" {
+			if err := b.nftExec("delete rule inet cfm input handle " + h); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
+	_ = b.nftExec("add table inet cfm")
+	_ = b.nftExec("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+	if err := b.cleanupScopedDNATAccepts(); err != nil {
+		return err
+	}
+	for _, spec := range []struct {
+		label string
+		from  int
+		to    int
+	}{
+		{label: "web_http", from: 80, to: httpPort},
+		{label: "web_https", from: 443, to: httpsPort},
+	} {
+		expr := fmt.Sprintf(`add rule inet cfm input ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, spec.from, spec.to, dnatAcceptComment(spec.label, spec.from, spec.to))
+		if err := b.nftExec(expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err error) {
 	start := time.Now()
 	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
@@ -245,6 +333,9 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err err
 	family, table = dnatDefaults(family, table)
 	if httpPort <= 0 || httpsPort <= 0 {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
+	}
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort); err != nil {
+		return err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -328,9 +419,34 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 		}
 		b.logPhase("DNATOff", st, time.Since(start), err, "")
 	}()
+	if err := b.cleanupScopedDNATAccepts(); err != nil {
+		return err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dnatOffUnlocked(family, table)
+}
+
+func parseListenHostPort(addr string) (host string, port int, ok bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", 0, false
+	}
+	if p, err := strconv.Atoi(addr); err == nil {
+		if p > 0 && p <= 65535 {
+			return "", p, true
+		}
+		return "", 0, false
+	}
+	h, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 || p > 65535 {
+		return strings.TrimSpace(h), 0, false
+	}
+	return strings.TrimSpace(h), p, true
 }
 
 func getenvInt(key string, def int) int {

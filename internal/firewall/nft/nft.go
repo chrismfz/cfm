@@ -2199,18 +2199,20 @@ func parseListenHostPort(addr string) (host string, port int, ok bool) {
 	if addr == "" {
 		return "", 0, false
 	}
+	if p, err := strconv.Atoi(addr); err == nil {
+		if p > 0 && p <= 65535 {
+			return "", p, true
+		}
+		return "", 0, false
+	}
 	h, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		// handle ":9098" (SplitHostPort accepts it) or "9098" (not valid)
-		if strings.Count(addr, ":") == 0 {
-			return "", 0, false
-		}
 		return "", 0, false
 	}
 
 	host = strings.TrimSpace(h)
 	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 {
+	if err != nil || p <= 0 || p > 65535 {
 		return host, 0, false
 	}
 	return host, p, true

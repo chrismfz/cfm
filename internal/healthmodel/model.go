@@ -45,6 +45,7 @@ type RuntimeStatus struct {
 	BridgeSocketLatencyMs        int64         `json:"bridge_socket_latency_ms,omitempty"`
 	ChallengeListenerStatus      string        `json:"challenge_listener_status,omitempty"`
 	ChallengeListenerReason      string        `json:"challenge_listener_reason,omitempty"`
+	ChallengeListenerAddress     string        `json:"challenge_listener_address,omitempty"`
 	SSLCollectorStatus           string        `json:"sslcollector_status,omitempty"`
 	IngestSocketPath             string        `json:"ingest_socket_path,omitempty"`
 	IngestSocketStatus           string        `json:"ingest_socket_status,omitempty"`
