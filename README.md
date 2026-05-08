@@ -506,6 +506,8 @@ Client → nftables DNAT → CFM challenge listener → (pass) → origin
 
 Configured via `CHALLENGE_HTTP_LISTEN` / `CHALLENGE_HTTPS_LISTEN`. Keep listeners on `127.0.0.1`.
 
+`TCP_IN` no longer needs the DNAT listener ports `9098,9099,12222,9080,9043,12082,12083,12086,12087,12095,12096`. Translated traffic to those listeners is permitted by scoped `ct status dnat` firewall rules, so the legacy `TCP_IN` entry should stay commented unless you need it temporarily for compatibility testing or debugging.
+
 ### Challenge Triggers
 
 - Automatic: vhost score exceeds threshold + minimum unique IPs
@@ -1108,7 +1110,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 
 ## cPanel DNAT / DirectAdmin DNAT protection
 
-CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports.
+CFM includes dedicated cPanel/WHM/Webmail DNAT protection using a separate nftables table `inet cfm_panel_redirect` and dedicated edge listener ports. These listener ports do not need to be opened in `TCP_IN`; scoped `ct status dnat` firewall rules allow the translated traffic.
 
 It also includes DirectAdmin redirect coverage (`2222 -> 12222`) under the same table/listener model.
 
