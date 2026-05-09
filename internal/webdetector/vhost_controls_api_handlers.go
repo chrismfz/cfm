@@ -40,7 +40,10 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	wafEntries := hostExcludeValues(e.WAFExcludeList())
+	// Only whole-WAF excludes (RuleIDs empty) toggle the WAFEnabled flag.
+	// Rule-scoped excludes still leave the WAF active for that host — they
+	// just suppress specific rule IDs — so they must not flip this toggle.
+	wafEntries := hostExcludeValues(filterWholeWAFEntries(e.WAFExcludeList()))
 	for _, val := range wafEntries {
 		h := normalizeControlHost(val)
 		if h != "" {
@@ -73,6 +76,19 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, webdetVhostControlResponse{Rows: rows})
+}
+
+// filterWholeWAFEntries returns only entries that exclude the whole WAF
+// (RuleIDs empty). Rule-scoped entries are dropped — they don't disable the
+// WAF for the host, they just suppress specific rule IDs.
+func filterWholeWAFEntries(entries []excludeEntry) []excludeEntry {
+	out := make([]excludeEntry, 0, len(entries))
+	for _, e := range entries {
+		if len(e.RuleIDs) == 0 {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func hostExcludeValues(entries []excludeEntry) []string {

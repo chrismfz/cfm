@@ -890,6 +890,12 @@ local function waf_skip_for(host, uri)
   host = lower(host or ""); uri = lower(tostring(uri or "/"))
   local skip_ids = nil
   local function consider(target, row)
+    -- Back-compat: previous Lua versions cached this list as bare strings.
+    -- A graceful nginx reload during upgrade can briefly hand the new code
+    -- the old cache shape (≤ waf_excl_refresh_sec until the next refresh
+    -- overwrites). Treat a string entry as a whole-WAF exclude — its old
+    -- meaning — so excludes don't silently lapse during the upgrade window.
+    if type(row) == "string" then row = { v = row } end
     if not matches_rule(target, row.v) then return false end
     if not row.rule_ids or #row.rule_ids == 0 then
       return true -- whole-WAF skip; signal caller to short-circuit

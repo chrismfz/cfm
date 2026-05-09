@@ -148,6 +148,26 @@ func TestExcludeStore_RuleIDsPersistAcrossLoad(t *testing.T) {
 	}
 }
 
+// Vhost-controls panel filter: rule-scoped entries must not appear in the
+// "WAF disabled for this host" list — they only suppress specific rule IDs,
+// the WAF still runs.
+func TestFilterWholeWAFEntries_DropsRuleScoped(t *testing.T) {
+	entries := []excludeEntry{
+		{Type: "host", Value: "noisy.example.com"},                  // whole-WAF — kept
+		{Type: "host", Value: "tuned.example.com", RuleIDs: []int{321}}, // rule-scoped — dropped
+		{Type: "path", Value: "/admin"},                                // whole-WAF — kept
+	}
+	got := filterWholeWAFEntries(entries)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries (rule-scoped filtered out); got %d (%v)", len(got), got)
+	}
+	for _, e := range got {
+		if len(e.RuleIDs) > 0 {
+			t.Errorf("rule-scoped entry leaked into filtered list: %v", e)
+		}
+	}
+}
+
 // Remove targets the exact (type, value, scope, rule-ids) entry; whole-WAF
 // remove must not nuke a rule-scoped entry on the same host.
 func TestExcludeStore_RemoveDistinguishesRuleScoping(t *testing.T) {
