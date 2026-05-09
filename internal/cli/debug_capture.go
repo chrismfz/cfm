@@ -106,27 +106,51 @@ func procCmdline(pid int) string {
 }
 
 // filterCFMManagedWorkers narrows a list of "worker process" PIDs to
-// those whose parent (master process) cmdline references a CFM-managed
-// config path — typically `/etc/cfm/`, `/var/lib/cfm/`, or a config
-// file under those. Drops unrelated worker processes such as the
-// cPanel-stack `nginx` master, imunify360-webs, or any other vendor-
-// shipped HTTP server that happens to use the "worker process" naming
-// convention.
+// those that belong to a CFM-managed nginx/angie/openresty install,
+// dropping unrelated worker processes such as the cPanel-stack
+// `nginx` master, imunify360-webs, or any other vendor-shipped HTTP
+// server that happens to use the "worker process" naming convention.
 //
-// The filter is intentionally inclusive on the CFM side: if any of the
-// known CFM-managed path tokens appears anywhere on the master's
-// cmdline, the worker is kept. The token list is small and unlikely
-// to false-positive on third-party processes.
+// Two-stage detection, ordered by reliability:
+//
+//   1. Direct binary signal: if the worker's own cmdline starts with
+//      `angie:`, it's ours. cPanel does not ship the `angie` binary —
+//      it uses `nginx` (under /usr/sbin/nginx) and bundles its own
+//      stack. So the `angie:` prefix is exclusive to CFM-managed
+//      installs.
+//
+//   2. Master cmdline signal (for nginx/openresty deployments where
+//      the binary alone doesn't tell them apart from cPanel's nginx):
+//      check the parent process's cmdline for one of the path tokens
+//      that the install scripts (install-angie.sh / install-openresty.sh)
+//      embed in the angie/openresty invocation. The tokens cover both
+//      the angie config-suffix style (`.conf.cfm`) and the openresty
+//      paths (`/usr/share/cfm/` for the config source,
+//      `/usr/local/openresty/nginx/` for the prefix dir).
+//
+// Returns only PIDs we're confident are CFM-managed. Drops everything
+// else; manifest in the caller records the dropped count for the
+// operator's visibility.
 func filterCFMManagedWorkers(workerPIDs []int) []int {
-	cfmTokens := []string{
-		"/etc/cfm/",
-		"/var/lib/cfm/",
-		"/var/run/cfm/",
-		"cfm_nginx.conf",
-		"cfm_angie.conf",
+	cfmMasterTokens := []string{
+		".conf.cfm",                  // /etc/angie/angie.conf.cfm (install-angie.sh:691)
+		"/usr/share/cfm/",            // /usr/share/cfm/configs/openresty.conf (install-openresty.sh:464)
+		"/usr/local/openresty/nginx", // openresty prefix path (install-openresty.sh:466)
+		"/etc/cfm/",                  // any future direct -c reference
+		"/var/lib/cfm/",              // cfm-managed temp/cert/state paths
+		"/var/run/cfm/",              // bridge socket paths
+		"cfm_nginx.conf",             // future possibility
+		"cfm_angie.conf",             // future possibility
 	}
 	out := make([]int, 0, len(workerPIDs))
 	for _, pid := range workerPIDs {
+		// Stage 1: exclusive binary-name signal.
+		worker := procCmdline(pid)
+		if strings.HasPrefix(worker, "angie:") {
+			out = append(out, pid)
+			continue
+		}
+		// Stage 2: master-cmdline path signal for nginx/openresty.
 		ppid, err := procPPid(pid)
 		if err != nil || ppid <= 1 {
 			continue
@@ -135,15 +159,11 @@ func filterCFMManagedWorkers(workerPIDs []int) []int {
 		if master == "" {
 			continue
 		}
-		matched := false
-		for _, tok := range cfmTokens {
+		for _, tok := range cfmMasterTokens {
 			if strings.Contains(master, tok) {
-				matched = true
+				out = append(out, pid)
 				break
 			}
-		}
-		if matched {
-			out = append(out, pid)
 		}
 	}
 	return out
