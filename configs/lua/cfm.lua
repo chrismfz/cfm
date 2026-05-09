@@ -622,6 +622,11 @@ end
 -- flush body once per CFG.waf_stats_flush_sec across all workers, gated by
 -- shdict:add() (atomic claim on the lock key).
 --
+-- The actual snapshot+RPC happens in a background light-thread via
+-- ngx.timer.at(0, ...) so the originating request never pays the RPC
+-- round-trip latency (~5-10ms typical, up to decision_timeout_ms worst
+-- case). The lock-winning request pays only the lock-claim cost (~µs).
+--
 -- Pushes ABSOLUTE counts per (hour, host); Go upserts. Repeated pushes for
 -- the same hour overwrite cleanly. At hour rollover the current bucket
 -- starts fresh; the previous hour's bucket gets one more push then ages out.
@@ -636,19 +641,29 @@ local function maybe_flush_waf_insp()
   if not ok then return end
   SH:set("waf_insp:last_flush", now)
 
-  local rows = {}
-  local keys = SH:get_keys(2000) or {}
-  for _, k in ipairs(keys) do
-    if k:sub(1, 12) == "waf_insp:hr=" then
-      local hr_str, h = k:match("^waf_insp:hr=(%d+)|host=(.*)$")
-      local cnt = SH:get(k)
-      if hr_str and cnt and cnt > 0 then
-        rows[#rows + 1] = { hour_unix = tonumber(hr_str), host = h or "", count = cnt }
+  -- Off the request path. premature=true means the worker is exiting; in
+  -- that case skip the RPC (the next worker / next minute will retry).
+  -- cosocket APIs (used by http_unix → rpc_call) are supported in
+  -- ngx.timer.at callbacks.
+  local sched_ok, sched_err = ngx.timer.at(0, function(premature)
+    if premature then return end
+    local rows = {}
+    local keys = SH:get_keys(2000) or {}
+    for _, k in ipairs(keys) do
+      if k:sub(1, 12) == "waf_insp:hr=" then
+        local hr_str, h = k:match("^waf_insp:hr=(%d+)|host=(.*)$")
+        local cnt = SH:get(k)
+        if hr_str and cnt and cnt > 0 then
+          rows[#rows + 1] = { hour_unix = tonumber(hr_str), host = h or "", count = cnt }
+        end
       end
     end
+    if #rows == 0 then return end
+    rpc_call("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
+  end)
+  if not sched_ok and CFG.debug then
+    ngx.log(ngx.WARN, "cfm: waf_insp flush schedule failed: ", tostring(sched_err))
   end
-  if #rows == 0 then return end
-  rpc_call("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
 end
 
 local function touch_ok_scoped(ip, host, scope)
