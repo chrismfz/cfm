@@ -133,6 +133,22 @@ local CFG = {
   -- C3 (CVE signature file) is deferred to its own infra PR.
   rule_java_deserialize  = "logonly",  -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
 
+  -- ── Phase 4 — C2 / exfiltration (logonly rollout) ────────────────────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
+  -- service hostnames; X2 covers coinminer tool/pool fingerprints (the
+  -- stratum scheme is already folded into rule 701 per audit row 16).
+  rule_c2_tunnel         = "logonly",  -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
+  rule_coinminer         = "logonly",  -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
+
+  -- ── Phase 5 — behavioural / combined-signal (logonly rollout) ────────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 5. B2 was already absorbed
+  -- as a tightening of rule 607 (status row 18); B5 was shipped earlier
+  -- (rule 411). What's left: B1 (HTTP smuggling header pairs), B3 (long
+  -- URL segments), B4 (oversized header bag).
+  rule_smuggling_cl      = "logonly",  -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
+  rule_long_path_segment = "logonly",  -- single URL path segment ≥ 256 chars
+  rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -230,6 +246,7 @@ det.init(CFG, util)
 local RULE_IDS = {
   -- 1xx path / traversal
   rule_traversal               = 101,
+  rule_long_path_segment       = 102,
 
   -- 2xx client identity
   rule_bad_ua                  = 201,
@@ -258,6 +275,7 @@ local RULE_IDS = {
   rule_rootkit_artifacts       = 324,
   rule_lolbin                  = 325,
   rule_java_deserialize        = 326,
+  rule_coinminer               = 327,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -283,9 +301,12 @@ local RULE_IDS = {
   rule_crlf_injection          = 605,
   rule_http_smuggling          = 606,
   rule_exploit_methods         = 607,
+  rule_smuggling_cl            = 608,
+  rule_header_flood            = 609,
 
   -- 7xx SSRF
   rule_ssrf                    = 701,
+  rule_c2_tunnel               = 702,
 
   -- 8xx info disclosure / debug
   rule_debug_toggles           = 801,
@@ -950,6 +971,81 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:JAVA_DESERIALIZE:" .. tag, ttl, mode, RULE_IDS.rule_java_deserialize) then goto done end
+      end
+    end
+  end
+
+  -- ── 41) C2 / paste-tunnel hostnames (X1) ─────────────────────────────────
+  -- Body or args carries an exfil-friendly hostname (pastebin.com/raw/,
+  -- webhook.site, ngrok.io, transfer.sh, …). Family WAF_C2 is distinct from
+  -- WAF_SSRF (rule 701) — SSRF is about scheme abuse, C2 is about specific
+  -- hostnames known to host attacker infrastructure.
+  do
+    local mode = rule_mode(CFG.rule_c2_tunnel, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_c2_tunnel(args, body, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_C2:TUNNEL:" .. tag, ttl, mode, RULE_IDS.rule_c2_tunnel) then goto done end
+      end
+    end
+  end
+
+  -- ── 42) Coinminer tool/pool fingerprints (X2) ────────────────────────────
+  -- xmrig invocation flags, public XMR pool hostnames, monerod etc. The
+  -- stratum scheme is already covered by rule 701 (SSRF_STRATUM) — this
+  -- rule covers the tool/pool side only.
+  do
+    local mode = rule_mode(CFG.rule_coinminer, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_coinminer(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:COINMINER:" .. tag, ttl, mode, RULE_IDS.rule_coinminer) then goto done end
+      end
+    end
+  end
+
+  -- ── 43) Smuggling header pairs (B1) ──────────────────────────────────────
+  -- Content-Length + Transfer-Encoding both present, multiple CL/TE values,
+  -- malformed CL. Distinct from rule 606 (which catches embedded HTTP verbs
+  -- in body/args); both share family WAF_HTTP_SMUGGLING for log triage.
+  do
+    local mode = rule_mode(CFG.rule_smuggling_cl, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_smuggling_cl(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_HTTP_SMUGGLING:" .. tag, ttl, mode, RULE_IDS.rule_smuggling_cl) then goto done end
+      end
+    end
+  end
+
+  -- ── 44) Long URL path segment (B3) ───────────────────────────────────────
+  -- Single path segment (between two `/`) ≥ 256 chars. Indicator of token
+  -- stuffing, base64 in path, or buffer-overflow probing.
+  do
+    local mode = rule_mode(CFG.rule_long_path_segment, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_long_path_segment(uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_LONG_PATH:" .. tag, ttl, mode, RULE_IDS.rule_long_path_segment) then goto done end
+      end
+    end
+  end
+
+  -- ── 45) Header bag flood (B4) ────────────────────────────────────────────
+  -- Total header bytes > 16 KB after subtracting Cookie / Authorization
+  -- volume (those are session-state, not flood). Different mechanism from
+  -- rule 603 (header_vulns) which checks specific CVE headers.
+  do
+    local mode = rule_mode(CFG.rule_header_flood, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_header_flood(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_HEADER_FLOOD:" .. tag, ttl, mode, RULE_IDS.rule_header_flood) then goto done end
       end
     end
   end

@@ -1953,5 +1953,208 @@ function _M.detect_webshell_ping(method, headers, uri)
   return "PING"
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 4 — C2 / EXFILTRATION (X1, X2)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- C2_TUNNEL_HOSTS — hostnames known to be popular for attacker exfil and
+-- payload-hosting (paste services with raw-content URLs, request-bin /
+-- webhook services, free tunnel/relay services, ephemeral file hosts).
+-- Match is lower-cased substring against args+body (already normalised
+-- by get_norm_ab in cfm_waf.lua).
+--
+-- Operators on shared hosting may host pastebin clones legitimately —
+-- the rule ships at logonly so the hit-rate sampler quantifies that
+-- before any promotion. Specific noisy entries can be removed without
+-- renumbering rule_id 702.
+local C2_TUNNEL_HOSTS = {
+  -- Paste services with raw-content endpoints
+  { "pastebin.com/raw/",        "PASTEBIN_RAW" },
+  { "paste.ee/r/",              "PASTE_EE" },
+  { "dpaste.com/",              "DPASTE" },
+  { "rentry.co/",               "RENTRY" },
+  { "0x0.st/",                  "0X0_ST" },
+  { "transfer.sh/",             "TRANSFER_SH" },
+  { "controlc.com/",            "CONTROLC" },
+  { "ix.io/",                   "IX_IO" },
+
+  -- Code-host raw content (gist / github raw URLs are heavily abused)
+  { "gist.githubusercontent.com/", "GIST_RAW" },
+  { "raw.githubusercontent.com/",  "GITHUB_RAW" },
+
+  -- Request-bin / webhook services
+  { "webhook.site/",            "WEBHOOK_SITE" },
+  { "requestbin.net/",          "REQUESTBIN" },
+  { "pipedream.com/",           "PIPEDREAM" },
+
+  -- Tunneling / relay services
+  { "ngrok.io/",                "NGROK" },
+  { "ngrok-free.app/",          "NGROK" },
+  { "trycloudflare.com/",       "CLOUDFLARE_TUNNEL" },
+  { "loca.lt/",                 "LOCALTUNNEL" },
+  { "serveo.net/",              "SERVEO" },
+
+  -- Discord/Telegram CDN URLs frequently host malicious payloads
+  { "cdn.discordapp.com/attachments/", "DISCORD_CDN" },
+  { "media.discordapp.net/attachments/", "DISCORD_CDN" },
+  { "api.telegram.org/bot",     "TELEGRAM_BOT" },
+}
+
+function _M.detect_c2_tunnel(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  if s == "" then return nil end
+
+  for i = 1, #C2_TUNNEL_HOSTS do
+    local p = C2_TUNNEL_HOSTS[i]
+    if has(s, p[1]) then
+      return p[2]
+    end
+  end
+  return nil
+end
+
+-- COINMINER_PATTERNS — multi-token patterns specific to crypto-mining
+-- malware. Bare protocol scheme (stratum+tcp://) is intentionally NOT
+-- here — it's already in detect_ssrf_proto (rule 701) per the X2/rule-701
+-- design call recorded in docs/waf.md row 16.
+local COINMINER_PATTERNS = {
+  -- xmrig invocation flags. Multi-token pairs reduce FP risk vs. matching
+  -- "xmrig" alone (which appears in security-research articles).
+  { "xmrig --url",        "XMRIG_URL" },
+  { "xmrig -o ",          "XMRIG_O" },
+  { "xmrig --pool",       "XMRIG_POOL" },
+  { "xmr-stak --url",     "XMRSTAK_URL" },
+  { "xmr-stak -o ",       "XMRSTAK_O" },
+
+  -- Public XMR pool hostnames. These are the long-running "free pool"
+  -- endpoints that repeatedly show up in compromised-host telemetry.
+  { "pool.minexmr.com",   "POOL_MINEXMR" },
+  { "supportxmr.com",     "POOL_SUPPORTXMR" },
+  { "xmrpool.eu",         "POOL_XMRPOOL_EU" },
+  { "moneroocean.stream", "POOL_MONEROOCEAN" },
+  { "nanopool.org",       "POOL_NANOPOOL" },
+  { "fr.minexmr.com",     "POOL_MINEXMR" },
+
+  -- Generic miner control daemon names + binary fetch markers.
+  { "monerod -p ",        "MONEROD" },
+  { "ethminer --pool",    "ETHMINER" },
+}
+
+function _M.detect_coinminer(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), COINMINER_PATTERNS)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 5 — BEHAVIOURAL / COMBINED-SIGNAL (B1, B3, B4)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [B1] HTTP smuggling header pairs. Operates on header presence/value
+-- shape, NOT on body bytes — keeps the rule independent of the cfm body
+-- cap (a body that's too large to buffer locally would trip false rules
+-- if we tried to do byte-level CL/body-length comparison).
+--
+-- Returns:
+--   "CL_AND_TE"     — both Content-Length and Transfer-Encoding present.
+--                     RFC 7230 §3.3.3 forbids this combination; it's the
+--                     classic CL.TE smuggling primitive.
+--   "MULTI_CL"      — Content-Length value contains a comma (nginx/angie
+--                     joins duplicate headers with ", "). Two CL values
+--                     means two parsers can disagree.
+--   "MULTI_TE"      — Transfer-Encoding value contains a comma when it
+--                     isn't a recognised RFC chained-encoding (e.g.
+--                     "gzip, chunked" is fine; "chunked, identity" is
+--                     usually not).
+--   "CL_MALFORMED"  — Content-Length value isn't a non-negative integer.
+function _M.detect_smuggling_cl(headers)
+  if not headers then return nil end
+
+  local cl = header_string(headers["content-length"] or headers["Content-Length"])
+  local te = header_string(headers["transfer-encoding"] or headers["Transfer-Encoding"])
+
+  -- Both present → smuggling primitive regardless of values.
+  if cl ~= "" and te ~= "" then
+    return "CL_AND_TE"
+  end
+
+  if cl ~= "" then
+    if has(cl, ",") then
+      return "MULTI_CL"
+    end
+    -- Strict integer parse: must be all digits, non-empty, non-negative.
+    if not cl:match("^%d+$") then
+      return "CL_MALFORMED"
+    end
+  end
+
+  if te ~= "" then
+    -- "gzip, chunked" / "chunked" / "identity" are valid. Multiple values
+    -- with chunked NOT in the last position are a classic smuggling shape.
+    local te_low = lower(te)
+    if has(te_low, ",") then
+      -- Allow "gzip, chunked" / "deflate, chunked" / "identity" — only
+      -- flag when chunked appears but isn't the final element.
+      local last = te_low:match("([^,%s]+)%s*$")
+      if last and last ~= "chunked" and has(te_low, "chunked") then
+        return "MULTI_TE"
+      end
+    end
+  end
+
+  return nil
+end
+
+-- [B3] Long URL path segment. "Path segment" = substring between two `/`
+-- in the URI's path component (query/fragment stripped first). Threshold
+-- is 256 chars: most legitimate URIs are well under 100 chars per
+-- segment, including hashed asset filenames. Returns "SEG_<len>" — the
+-- length is the longest segment, included so log analysis can distinguish
+-- "just over 256" from "10 KB stuffed".
+local LONG_PATH_THRESHOLD = 256
+
+function _M.detect_long_path_segment(uri)
+  if not uri or uri == "" then return nil end
+
+  local path = uri:match("^([^?#]+)") or uri
+  local max_len = 0
+  for seg in path:gmatch("[^/]+") do
+    local n = #seg
+    if n > max_len then max_len = n end
+  end
+
+  if max_len >= LONG_PATH_THRESHOLD then
+    return "SEG_" .. max_len
+  end
+  return nil
+end
+
+-- [B4] Header bag flood. Sums header byte volume excluding Cookie /
+-- Authorization (those are session-state, frequently legit-large on
+-- shared hosting with WordPress / cPanel sessions). Anything > 16 KB
+-- in the remainder is well above legit traffic — typical request headers
+-- are 1-3 KB total.
+--
+-- Returns "FLOOD:<bytes>" — the value is the non-session header total.
+local HEADER_FLOOD_THRESHOLD = 16 * 1024  -- 16 KB
+
+function _M.detect_header_flood(headers)
+  if not headers then return nil end
+
+  local total = 0
+  for k, v in pairs(headers) do
+    local kl = lower(k)
+    if kl ~= "cookie" and kl ~= "authorization" then
+      local v_str = header_string(v)
+      -- Approximate "Key: Value\r\n" wire size; close enough for a threshold.
+      total = total + #k + #v_str + 4
+    end
+  end
+
+  if total >= HEADER_FLOOD_THRESHOLD then
+    return "FLOOD:" .. total
+  end
+  return nil
+end
+
 
 return _M
