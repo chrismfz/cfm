@@ -2,14 +2,18 @@
 # ============================================================
 # KSPP Server-Safe Hardening Script
 # ------------------------------------------------------------
-# REFERENCE IMPLEMENTATION for the cfm kernsec component.
-# See docs/kernsec.md. This script is the working contract that
-# `cfm kernsec` must match (bootloader detection, boot-arg
-# management, sysctl apply/verify, status checks). It will be
-# REMOVED from the tree once Phase 3 lands and the acceptance
-# gate ("cfm kernsec status" output is a strict superset of
-# "kspp.sh status" on Proxmox + EL + Debian) passes.
-# Do not extend this script — extend kernsec.
+# STANDALONE hardening script — usable on its own on hosts that
+# don't run cfm. Also serves as the reference implementation for
+# the cfm kernsec component (see docs/kernsec.md): bootloader
+# detection, boot-arg management, sysctl apply/verify, status
+# checks. cfm kernsec is the canonical implementation; this
+# script stays for non-cfm hosts and historical reference.
+#
+# When extending: prefer cfm kernsec for new functionality. Keep
+# this script focused on the KSPP server-safe profile and bug
+# fixes. A future direction is to have this script delegate to
+# `cfm kernsec` when present, falling back to the bash flow
+# otherwise — not implemented yet.
 # ------------------------------------------------------------
 # Cross-distro boot support:
 #   - Proxmox systemd-boot / proxmox-boot-tool
