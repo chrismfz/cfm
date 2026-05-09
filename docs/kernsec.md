@@ -37,7 +37,15 @@ caused apply to write a cmdline containing only managed args, dropping
 `root=`, `ro`, `console=`, etc.) — both fixed and pinned by tests. See
 "Sweep findings" below.
 
-**Phase 4 (Tier 2 opt-in rules) is next.**
+**Phase 4 shipped** (branch `kernsec-4`). Tier 2 server-aggressive
+rules: `user.max_user_namespaces=0`,
+`kernel.unprivileged_userns_clone=0`, `oops=panic`,
+`lockdown=integrity`, `module.sig_enforce=1`. Each gated on the
+existing host-profile probe (containers / DKMS / kdump). Operators
+opt in by setting `tier = 2` in `/etc/cfm/kernsec.conf`.
+`kernel.modules_disabled=1` was deferred — it needs a late systemd
+unit (post-`multi-user.target`) so cfm itself can finish loading
+kernel modules before the lockout fires; that's a follow-up PR.
 
 **`kspp.sh` status**: kept in the tree indefinitely. It started as the
 reference implementation for the cfm kernsec component; with Phase 3
@@ -935,11 +943,67 @@ this is purely defensive — it ensures specific modules **cannot** be
 loaded after the next reboot. Modules already loaded require
 operator action (reboot, `rmmod`).
 
-### Phase 4 — Tier 2 (opt-in)
+### Phase 4 — Tier 2 (opt-in) — DONE — branch `kernsec-4`
 
-`user.max_user_namespaces=0`, `kernel.modules_disabled=1` (late systemd
-unit), `lockdown=integrity`, `module.sig_enforce=1`, `oops=panic`. Each
-gated on host profile detection.
+Tier 2 rules ship behind explicit `tier = 2` opt-in in kernsec.conf,
+host-profile gated where they would clearly break things.
+
+**Sysctls** (`tier2.namespace` group):
+
+- `user.max_user_namespaces=0` (`KSEC-SCT-tier2.namespace-001`).
+  Disables unprivileged user namespace creation. Skipped when
+  containers (runc / containerd / lxc / podman) are detected.
+- `kernel.unprivileged_userns_clone=0` (`KSEC-SCT-tier2.namespace-002`).
+  Debian-flavoured alternative for the same surface. Same gating;
+  also skipped (via `sysctlExists` in render) on kernels that don't
+  expose the key.
+
+**Boot args** (one rule per group for explicit per-rule overrides):
+
+- `oops=panic` (`KSEC-BOOT-tier2.oops-001`). Pair with
+  `kernel.panic_on_oops=1` to stop oops-spray exploit techniques.
+  No host-profile gating — aggressive by design.
+- `lockdown=integrity` (`KSEC-BOOT-tier2.lockdown-001`). Kernel
+  lockdown LSM. Skipped when DKMS modules (zfs / nvidia) are
+  detected — lockdown=integrity blocks unsigned module load.
+- `module.sig_enforce=1` (`KSEC-BOOT-tier2.module-sig-enforce-001`).
+  Belt-and-suspenders alongside lockdown. Same DKMS gating.
+
+`ManagedBootArgKeys` extended to include `oops`, `lockdown`, and
+`module.sig_enforce` so `disable` and `apply --remove` strip them
+cleanly across both tiers.
+
+**Operator workflow**:
+
+```
+# audit Tier 2 effect without committing
+cfm kernsec preview --tier 2
+
+# audit one rule specifically
+cfm kernsec preview --tier 2 --id KSEC-SCT-tier2.namespace-001
+
+# commit: edit /etc/cfm/kernsec.conf
+tier = 2
+[rule "KSEC-BOOT-tier2.lockdown-001"]
+state = skip      # this box has zfs DKMS
+
+cfm kernsec apply
+```
+
+**Status output**: `cfm kernsec status` now reads the conf and
+filters its expected-rule list to `tier <= conf.Tier`. A tier=1
+host doesn't see Tier 2 rules reported as MISSING; a tier=2 host
+sees the full set audited.
+
+**Deferred (not in this phase)**:
+
+- `kernel.modules_disabled=1`. Setting it via `/etc/sysctl.d/`
+  fires at early boot before cfm has loaded its own kernel
+  modules — it would lock cfm out. Needs a late systemd unit
+  triggered after `multi-user.target` (or similar). Cleanest as a
+  separate PR with the systemd-unit infrastructure.
+- Other Tier 2 candidates from earlier brainstorming (`kfence`,
+  `iommu=force`, `efi=disable_early_pci_dma`) deferred until needed.
 
 ### Phase 5 — Drift detection wiring
 
@@ -959,6 +1023,32 @@ cross-component awareness.
 ## Progress
 
 ### DONE
+
+**Phase 4 — Tier 2 (opt-in)** (branch `kernsec-4`)
+- `Tier2Sysctls`: `user.max_user_namespaces=0`,
+  `kernel.unprivileged_userns_clone=0`. Group `tier2.namespace`,
+  host-profile gated on `HasContainers`.
+- `Tier2BootArgs`: `oops=panic` (no gating), `lockdown=integrity`
+  + `module.sig_enforce=1` (both gated on `HasDKMS`). Each in its
+  own group for granular per-rule overrides.
+- `ManagedBootArgKeys` extended for the new boot args so disable /
+  apply-remove strip them cleanly.
+- `AllSysctls()` / `AllBootArgs()` now concatenate Tier 1 + Tier 2
+  in stable order (Tier 1 first). `Resolve`, `BuildAuditRows`,
+  `ApplySysctls`, `ApplyBootArgs` all iterate the All* helpers, so
+  Phase 4 rules are first-class across preview / apply / status / TUI.
+- `HostProfile.SkipReason` extended for the new groups
+  (`tier2.namespace`, `tier2.lockdown`, `tier2.module-sig-enforce`).
+- `RunStatus` now best-effort loads the conf and filters its
+  expected-rule iteration to `rule.Tier <= conf.Tier` — tier=1
+  hosts don't see Tier 2 reported as MISSING.
+- `--tier N` preview flag overrides conf tier in either direction
+  (was clamp-down only); operators preview Tier 2 effect from a
+  tier=1 host without committing.
+- `StatusResult` gains `Tier` for callers / monitoring.
+- 2 new resolve tests: tier=2-applies-all + host-profile gates;
+  profile sanity test extends to Tier 2 (every rule has ID, Tier,
+  Description, Affects; no duplicate IDs across tiers).
 
 **Phase 3 — Modules** (branch `kernsec-3`)
 - `RenderModprobeFile` produces `/etc/modprobe.d/cfm-kernsec.conf`
@@ -1137,11 +1227,14 @@ cross-component awareness.
       back to its in-script bash flow otherwise. Single user-facing
       command across both managed and standalone hosts.
 
-**Phase 4 — Tier 2 (opt-in)**
-- [ ] Tier 2 rules with host-profile gating
-      (`user.max_user_namespaces=0`, `kernel.modules_disabled=1`,
+**Phase 4 — Tier 2 (opt-in)** (DONE — branch `kernsec-4`)
+- [x] Tier 2 rules with host-profile gating
+      (`user.max_user_namespaces=0`,
+      `kernel.unprivileged_userns_clone=0`,
       `lockdown=integrity`, `module.sig_enforce=1`, `oops=panic`).
-- [ ] Late systemd unit for `kernel.modules_disabled=1`.
+- [ ] Late systemd unit for `kernel.modules_disabled=1` —
+      separate follow-up PR; needs a small "managed systemd unit"
+      surface that other Tier 2 candidates may also want.
 
 **Phase 5 — drift wiring**
 - [ ] `cfm kernsec apply --check` + optional periodic systemd timer.

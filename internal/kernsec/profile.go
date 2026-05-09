@@ -178,17 +178,70 @@ var KSPPBootArgs = []BootArg{
 	},
 }
 
+// Tier2Sysctls is the server-aggressive sysctl profile (Phase 4).
+// Each rule is opt-in — operator must set tier=2 in kernsec.conf — and
+// host-profile gated where it would break common workloads.
+//
+// kernel.modules_disabled=1 is intentionally NOT here. It needs a late
+// systemd unit (post multi-user.target) so cfm itself can finish
+// loading kernel modules before the lockout fires; that's a follow-up
+// PR, not Phase 4.
+var Tier2Sysctls = []SysctlRule{
+	{
+		ID: "KSEC-SCT-tier2.namespace-001", Group: "tier2.namespace", Tier: Tier2,
+		Key: "user.max_user_namespaces", Value: "0",
+		Description: "Disable unprivileged user namespace creation — kills a major LPE primitive class.",
+		Affects:     "Breaks rootless podman, bwrap, Chromium sandbox, some cPanel jail variants. Skipped if containers detected.",
+	},
+	{
+		ID: "KSEC-SCT-tier2.namespace-002", Group: "tier2.namespace", Tier: Tier2,
+		Key: "kernel.unprivileged_userns_clone", Value: "0",
+		Description: "Debian-flavoured alternative for blocking unprivileged userns. Reversible without breaking root use.",
+		Affects:     "Same surface as user.max_user_namespaces=0. Skipped if containers detected. Skipped if kernel doesn't expose the key (non-Debian).",
+	},
+}
+
+// Tier2BootArgs is the server-aggressive boot-arg profile (Phase 4).
+//
+// Each adds an entry to ManagedBootArgKeys so disable / apply --remove
+// strip it cleanly.
+var Tier2BootArgs = []BootArg{
+	{
+		ID: "KSEC-BOOT-tier2.oops-001", Group: "tier2.oops", Tier: Tier2,
+		Key: "oops", Value: "panic",
+		Description: "Pair with kernel.panic_on_oops=1 to stop oops-spray exploit techniques cold.",
+		Affects:     "Aggressive: any kernel oops becomes a reboot. Trade reliability for exploit mitigation.",
+	},
+	{
+		ID: "KSEC-BOOT-tier2.lockdown-001", Group: "tier2.lockdown", Tier: Tier2,
+		Key: "lockdown", Value: "integrity",
+		Description: "Kernel lockdown LSM — blocks unsigned module load, /dev/mem write, unsigned kexec.",
+		Affects:     "Breaks DKMS modules (zfs, nvidia). Skipped if DKMS detected on host.",
+	},
+	{
+		ID: "KSEC-BOOT-tier2.module-sig-enforce-001", Group: "tier2.module-sig-enforce", Tier: Tier2,
+		Key: "module.sig_enforce", Value: "1",
+		Description: "Require kernel-signed modules. Belt-and-suspenders alongside lockdown=integrity.",
+		Affects:     "Breaks DKMS modules. Skipped if DKMS detected on host.",
+	},
+}
+
 // ManagedBootArgKeys is the set of cmdline keys kernsec owns.
 // Mirrors kspp.sh MANAGED_ARG_KEYS. enable removes any stale instance
 // of these keys before adding the desired set; disable removes them
 // entirely. Operator-set args on the cmdline outside this set are
 // preserved untouched.
 var ManagedBootArgKeys = []string{
+	// Tier 1 (KSPP)
 	"slab_nomerge",
 	"init_on_alloc",
 	"page_alloc.shuffle",
 	"randomize_kstack_offset",
 	"initcall_blacklist",
+	// Tier 2
+	"oops",
+	"lockdown",
+	"module.sig_enforce",
 }
 
 // String returns the cmdline form of a boot arg ("key" or "key=value").
@@ -199,15 +252,22 @@ func (a BootArg) String() string {
 	return a.Key + "=" + a.Value
 }
 
-// AllSysctls returns the full sysctl rule set across tiers.
-// Phase 2 only ships KSPP rules; Tier 2 sysctls land in Phase 4.
+// AllSysctls returns the full sysctl rule set across tiers (Tier 1 KSPP +
+// Tier 2 server-aggressive). Order: Tier 1 first, then Tier 2 — keeps the
+// rendered file deterministic and Tier-1-first-readable.
 func AllSysctls() []SysctlRule {
-	return append([]SysctlRule(nil), KSPPSysctls...)
+	out := make([]SysctlRule, 0, len(KSPPSysctls)+len(Tier2Sysctls))
+	out = append(out, KSPPSysctls...)
+	out = append(out, Tier2Sysctls...)
+	return out
 }
 
 // AllBootArgs returns the full boot-arg rule set across tiers.
 func AllBootArgs() []BootArg {
-	return append([]BootArg(nil), KSPPBootArgs...)
+	out := make([]BootArg, 0, len(KSPPBootArgs)+len(Tier2BootArgs))
+	out = append(out, KSPPBootArgs...)
+	out = append(out, Tier2BootArgs...)
+	return out
 }
 
 // AllModules returns the full module-blacklist rule set.

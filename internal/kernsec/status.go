@@ -16,10 +16,10 @@ type StatusOptions struct {
 }
 
 // StatusResult is the machine-readable summary returned by RunStatus.
-// Phase 1 keeps it minimal; Phase 2 expands it once rule IDs land.
 type StatusResult struct {
 	OK       bool // false if any check produced WARN
 	Warnings int
+	Tier     Tier // tier in effect when the audit ran (0/1/2)
 }
 
 // RunStatus prints the kernsec audit-only status to w. Mirrors
@@ -33,11 +33,23 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	currentCmdline := ReadProcCmdline()
 	nextCmdline, _ := be.NextBootCmdline()
 
+	// Best-effort conf load. If absent or unreadable, default to
+	// tier=1 — matches first-run UX and produces sensible audit on
+	// hosts that haven't run init yet.
+	conf, err := LoadConf(false)
+	if err != nil {
+		conf = &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
+	}
+	res.Tier = conf.Tier
+
 	fmt.Fprintln(w, "===== CFM kernsec STATUS =====")
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Boot mode]")
 	fmt.Fprintln(w, be.Label())
+	fmt.Fprintln(w)
+
+	fmt.Fprintf(w, "[Conf tier]  %d\n", conf.Tier)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Current running kernel cmdline]")
@@ -49,7 +61,10 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Expected runtime sysctl verification]")
-	for _, rule := range KSPPSysctls {
+	for _, rule := range AllSysctls() {
+		if rule.Tier > conf.Tier {
+			continue
+		}
 		state, found := CheckSysctl(rule)
 		switch state {
 		case SysctlOK:
@@ -66,8 +81,8 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	currentTokens := ParseCmdline(currentCmdline)
 	nextTokens := ParseCmdline(nextCmdline)
 
-	res.printArgState(w, "KSPP boot args in current running kernel", currentTokens)
-	res.printArgState(w, "KSPP boot args configured for next boot", nextTokens)
+	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, conf.Tier)
+	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, conf.Tier)
 
 	res.printModuleState(w)
 
@@ -178,10 +193,15 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 }
 
 // printArgState renders one section of expected boot args against a
-// concrete cmdline. Mirrors kspp.sh show_arg_state.
-func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string) {
+// concrete cmdline. Mirrors kspp.sh show_arg_state. Filters to rules
+// whose tier <= confTier so a tier=1 host doesn't see Tier 2 rules
+// reported as MISSING (they're not expected to apply at tier=1).
+func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string, confTier Tier) {
 	fmt.Fprintf(w, "[%s]\n", label)
-	for _, want := range KSPPBootArgs {
+	for _, want := range AllBootArgs() {
+		if want.Tier > confTier {
+			continue
+		}
 		state, found := CheckBootArg(tokens, want)
 		switch state {
 		case ArgOK:
