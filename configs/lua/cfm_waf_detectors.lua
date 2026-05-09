@@ -1669,6 +1669,139 @@ function _M.detect_reverse_shell(uri, args, body, _s)
   return nil
 end
 
+-- Shared helper for the Phase 2 RCE-marker detectors (R2/R3/R4). Builds
+-- the same uri+args+body lowered scan string and walks a {needle, tag}
+-- table. Kept local because it leaks the body cap policy: we cap body at
+-- CFG.max_scan_len (same as detect_reverse_shell) rather than the larger
+-- per-detector limits other body scanners use, since the patterns we look
+-- for are shell one-liners that fit comfortably in 2 KB.
+local function search_rce_markers(uri, args, body, scan_ua, patterns)
+  local s
+  if body and body ~= "" then
+    s = scan_ua .. " " .. lower(cap(body, CFG.max_scan_len))
+  else
+    s = scan_ua
+  end
+  for i = 1, #patterns do
+    local p = patterns[i]
+    if has(s, p[1]) then
+      return p[2]
+    end
+  end
+  return nil
+end
+
+-- [R2] Persistence markers — cron/systemd one-liners that an attacker
+-- runs once they have RCE to keep their foothold across reboots. Also
+-- matches the boundary case where a CGI/admin endpoint receives the
+-- persistence payload as a parameter.
+local PERSISTENCE_PATTERNS = {
+  -- Cron edits. `crontab -l` alone is too benign to flag; the append form
+  -- `(crontab -l; echo …) | crontab -` is the persistence shape.
+  { "crontab -e",                "CRONTAB_EDIT" },
+  { "(crontab -l;",              "CRONTAB_APPEND" },
+  { "echo '* * * * *",           "CRON_INLINE" },
+  { 'echo "* * * * *',           "CRON_INLINE" },
+
+  -- Cron drop-in directory writes. The `>` redirect is what distinguishes a
+  -- write attempt from someone merely mentioning the path in prose.
+  { ">/etc/cron.d/",             "CRON_D_DROP" },
+  { "> /etc/cron.d/",            "CRON_D_DROP" },
+  { ">/etc/cron.hourly/",        "CRON_HOURLY_DROP" },
+  { ">/etc/cron.daily/",         "CRON_DAILY_DROP" },
+  { ">/var/spool/cron/",         "CRON_SPOOL_DROP" },
+
+  -- Systemd unit files. `[Unit]` + `ExecStart=/` together is the canonical
+  -- pair; either alone would be too noisy.
+  { "[unit]\nexecstart=/",       "SYSTEMD_UNIT" },
+  { "[service]\nexecstart=/",    "SYSTEMD_SERVICE" },
+
+  -- Shell autorun appends. The `>>` shape is what flags the intent —
+  -- mere references to ~/.bashrc in docs/articles don't include the
+  -- redirection operator.
+  { ">> ~/.bashrc",                  "BASHRC_APPEND" },
+  { ">> ~/.profile",                 "PROFILE_APPEND" },
+  { ">> /etc/profile",               "ETC_PROFILE_APPEND" },
+  { ">> /etc/bash.bashrc",           "ETC_BASHRC_APPEND" },
+
+  -- SSH key persistence — the `>>` append form is the attack shape.
+  { ">> ~/.ssh/authorized_keys",     "AUTHKEYS_APPEND" },
+  { ">> /root/.ssh/authorized_keys", "ROOT_AUTHKEYS_APPEND" },
+}
+
+function _M.detect_persistence(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), PERSISTENCE_PATTERNS)
+end
+
+-- [R3] Rootkit / LD_PRELOAD artifacts. LD_PRELOAD by itself appears in
+-- legitimate environment debugging (the PHP `extension_dir` topic on
+-- Stack Overflow gets crawled), so the patterns require the assignment
+-- shape (`LD_PRELOAD=/path/`) or an explicit kernel-module insmod.
+local ROOTKIT_PATTERNS = {
+  -- LD_PRELOAD as an environment-variable assignment with a path. Bare
+  -- `LD_PRELOAD` text alone (e.g. blog post mentioning the variable name)
+  -- doesn't fire; the `=/` or `="/` shape is what marks invocation.
+  { "ld_preload=/",              "LD_PRELOAD_PATH" },
+  { 'ld_preload="/',             "LD_PRELOAD_QUOTED" },
+  { ">/etc/ld.so.preload",       "LD_SO_PRELOAD_DROP" },
+  { "> /etc/ld.so.preload",      "LD_SO_PRELOAD_DROP" },
+
+  -- Kernel-module insmod from a writable temp/web path. `insmod ./mod.ko`
+  -- and bare `modprobe` are intentionally NOT here — too generic. We only
+  -- flag insmod targets pointing at /tmp / /var/tmp / /dev/shm.
+  { "insmod /tmp/",              "INSMOD_TMP" },
+  { "insmod /var/tmp/",          "INSMOD_VAR_TMP" },
+  { "insmod /dev/shm/",          "INSMOD_DEV_SHM" },
+
+  -- Direct memory devices — extremely strong indicator. Any HTTP request
+  -- that mentions /dev/mem or /dev/kmem inside command-execution context
+  -- is overwhelmingly an exploit attempt.
+  { "/dev/mem",                  "DEV_MEM_ACCESS" },
+  { "/dev/kmem",                 "DEV_KMEM_ACCESS" },
+}
+
+function _M.detect_rootkit_artifacts(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), ROOTKIT_PATTERNS)
+end
+
+-- [R4] Living-off-the-land binaries. Trimmed to avoid overlap with R1's
+-- REVERSE_SHELL table — we deliberately do NOT include `iex(new-object`,
+-- TcpClient, or socat, because those already fire under rule 322 and
+-- double-counting wastes hit-rate slots. R4 covers the *download* /
+-- *encoded-command* side of post-exploitation, R1 covers the shell.
+local LOLBIN_PATTERNS = {
+  -- Windows certutil / bitsadmin downloaders. Both are classic LOLbins —
+  -- legitimate but rarely seen in HTTP traffic body content.
+  { "certutil -urlcache -split", "CERTUTIL_URLCACHE" },
+  { "certutil.exe -urlcache",    "CERTUTIL_URLCACHE" },
+  { "bitsadmin /transfer",       "BITSADMIN_TRANSFER" },
+  { "bitsadmin.exe /transfer",   "BITSADMIN_TRANSFER" },
+
+  -- Powershell encoded command + IEX webrequest variants not in R1.
+  -- `-enc ` short form is intentionally NOT here — three-char flag has too
+  -- many false-positive substring matches; the spelled-out form is fine.
+  { "-encodedcommand ",          "PS_ENCODED_CMD" },
+  { "iex(iwr ",                  "PS_IEX_IWR" },
+  { "iex(invoke-webrequest",     "PS_IEX_IWR" },
+  { ".downloadstring(",          "PS_DOWNLOAD_STRING" },
+  { ".downloadfile(",            "PS_DOWNLOAD_FILE" },
+
+  -- Linux LOLbin downloaders dropping into world-writable paths. Bare
+  -- `wget http://` is too noisy (legit content links); the `-o /tmp/` /
+  -- `-O /tmp/` shape is what marks dropper intent.
+  { "wget -o /tmp/",             "WGET_TMP_DROP" },
+  { "wget --output-document=/tmp/", "WGET_TMP_DROP" },
+  { "curl -o /tmp/",             "CURL_TMP_DROP" },
+  { "curl --output /tmp/",       "CURL_TMP_DROP" },
+}
+
+function _M.detect_lolbin(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), LOLBIN_PATTERNS)
+end
+
 -- [B5] Webshell ping fingerprint — POST + empty/missing UA + Content-Length:0
 -- + URI ending in .php / .phtml / .phar. The combination is what makes this
 -- low-FP: any one signal alone is common (legit POST forms, monitoring HEAD

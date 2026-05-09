@@ -118,6 +118,14 @@ local CFG = {
   rule_reverse_shell    = "logonly",  -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
   rule_webshell_ping    = "logonly",  -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
 
+  -- ── Phase 2 — post-exploitation / RCE markers (logonly rollout) ───────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 2 (R2/R3/R4). All three
+  -- emit family WAF_RCE so they share high-risk post-clearance routing.
+  -- C1 (Log4Shell) is NOT here — already covered by detect_rce (rule 320).
+  rule_persistence       = "logonly",  -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
+  rule_rootkit_artifacts = "logonly",  -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
+  rule_lolbin            = "logonly",  -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -239,6 +247,9 @@ local RULE_IDS = {
   rule_rce                     = 320,
   rule_proxy_header_sqli       = 321,
   rule_reverse_shell           = 322,
+  rule_persistence             = 323,
+  rule_rootkit_artifacts       = 324,
+  rule_lolbin                  = 325,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -870,6 +881,49 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_WEBSHELL:" .. tag, ttl, mode, RULE_IDS.rule_webshell_ping) then goto done end
+      end
+    end
+  end
+
+  -- ── 37) Persistence markers (R2) ─────────────────────────────────────────
+  -- Cron / systemd persistence one-liners (`crontab -e`, `/etc/cron.d/`,
+  -- `[Unit]…ExecStart=/`). Family WAF_RCE shares high-risk routing.
+  do
+    local mode = rule_mode(CFG.rule_persistence, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_persistence(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:PERSISTENCE:" .. tag, ttl, mode, RULE_IDS.rule_persistence) then goto done end
+      end
+    end
+  end
+
+  -- ── 38) Rootkit artifacts (R3) ───────────────────────────────────────────
+  -- LD_PRELOAD / /etc/ld.so.preload / kernel-module insmod patterns.
+  do
+    local mode = rule_mode(CFG.rule_rootkit_artifacts, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_rootkit_artifacts(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:ROOTKIT:" .. tag, ttl, mode, RULE_IDS.rule_rootkit_artifacts) then goto done end
+      end
+    end
+  end
+
+  -- ── 39) LOLbins (R4) ─────────────────────────────────────────────────────
+  -- Living-off-the-land binary invocations: certutil/bitsadmin downloaders,
+  -- powershell -EncodedCommand. The IEX-WebClient downloader and TcpClient
+  -- variants are intentionally NOT here — already in R1's REVERSE_SHELL
+  -- table to avoid double-counting on the same hit.
+  do
+    local mode = rule_mode(CFG.rule_lolbin, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_lolbin(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:LOLBIN:" .. tag, ttl, mode, RULE_IDS.rule_lolbin) then goto done end
       end
     end
   end

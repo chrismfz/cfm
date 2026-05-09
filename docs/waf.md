@@ -17,11 +17,13 @@
 | 11 | CI hardening — `Build & Test` job in `.github/workflows/security.yml` now installs `luajit`, then runs `check_cli_transport.sh`, `check_cfm_clearance_require.sh`, `make lua`, `make test-lua`, `go vet ./...`, `go build ./...`, `go test -race -v ./...`. Catches Lua syntax breakage, Lua-test regressions, mutex-copy / atomic-copy / duplicate-JSON-tag bugs at PR time. Four `go vet` issues that had sat in `main` were closed alongside (`unblock`, `telemetry`, `apiserver/detectors_api`, `cli/firewall_status`). | DONE |
 | 12 | Code-scanning triage (Critical+High, 2026-05-09) — 11 CodeQL alerts triaged: one real reflected XSS in `jsStringLiteral` fixed (was `strconv.Quote` only, didn't escape `<`/`>`/`&`/U+2028/U+2029, allowed `?next=` payloads to break out of `<script>` context), one defence-in-depth `int32` clamp on `nftables.ChainPriority`, nine FPs documented inline at the call sites. See `docs/security/code-scanning-triage-2026-05-09.md`. | DONE |
 | 13 | Phase 1 detectors at `logonly` — W1 (rule 410, `WAF_WEBSHELL:PATH:<basename>`), R1 (rule 322, `WAF_RCE:REVERSE_SHELL:<tag>`), B5 (rule 411, `WAF_WEBSHELL:PING`). All ship `logonly` per the rollout playbook; promote individually after `cfm webtop waf hit-rates --hours 168` shows `ok_to_promote`. `WAF_WEBSHELL` added to `WAF_HIGH_RISK_REASONS` so post-clearance routing is correct when promoted. | DONE |
-| 14+ | Remaining detector phases (W2/W3/W4, R2-R4, C1-C3, X1-X2, B1-B4) | TODO — see "Phase 1 starting context" below |
+| 14 | Cross-phase duplication audit — **C1 dropped** (Log4Shell `${jndi:` already covered by `detect_rce` rule 320), **W2/W3 reclassified as extensions** of rules 404/405, **B2 reclassified as a tightening** of rule 607, **R4 trimmed** to remove overlap with R1's REVERSE_SHELL table. | DONE |
+| 15 | Phase 2 detectors at `logonly` — R2 (rule 323, `WAF_RCE:PERSISTENCE:<tag>`), R3 (rule 324, `WAF_RCE:ROOTKIT:<tag>`), R4 (rule 325, `WAF_RCE:LOLBIN:<tag>`). All emit family `WAF_RCE` so they share rule_rce's high-risk post-clearance routing. | DONE |
+| 16+ | Remaining detector phases (W4, C2/C3, X1-X2, B1/B3/B4) + planned extensions to rules 404/405/607 | TODO — see "Phase 1 starting context" below |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua` (also wired into CI per row 11):
 
-- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set), Phase 1 detectors W1/R1/B5 — 27 cases covering Steps 1, 8, 10, 13.
+- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set), Phase 1 detectors W1/R1/B5, Phase 2 detectors R2/R3/R4 (including a non-overlap test that R4 doesn't double-count R1's IEX-WebClient pattern) — 33 cases covering Steps 1, 8, 10, 13, 14, 15.
 - `cfm_waf_post_clearance_test.lua` — `_M.post_clearance_action` matrix — covers Step 3.
 - `cfm_panel_forced_mode_test.lua` — panel dispatch decisions (challenge / origin pass-through / API SSO bypass / internal-endpoint deny). Asserts on side effects (captured `ngx.redirect` / `ngx.exit` calls) rather than chunk-return values, since `cfm_panel.lua`'s `main()` is wrapped in `xpcall` for fail-open hardening.
 - `cfm_rules_race_test.lua` — `cfm_rules` shdict-state compatibility under concurrent mutation.
@@ -91,6 +93,9 @@ Current assignments:
                                        320  rule_rce
                                        321  rule_proxy_header_sqli
                                        322  rule_reverse_shell
+                                       323  rule_persistence
+                                       324  rule_rootkit_artifacts
+                                       325  rule_lolbin
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -438,20 +443,20 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ### Phase 1 — webshell delivery
 
 - **W1** known-bad webshell path names (`/c99.php`, `/r57.php`, …) → `WAF_WEBSHELL:PATH:<basename>` — **shipped at `logonly` (rule 410)**.
-- **W2** webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) → `WAF_PHP_WEBSHELL_BODY:tag`, scored.
-- **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) → `WAF_SCRIPT_OBFUSCATION:tag`, `+5`.
-- **W4** polyglot upload (image extension/CT + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes) → `WAF_UPLOAD_CONTENT:POLYGLOT`, `+6`.
+- **W2 (RECLASSIFIED — extension, not new rule)**: extend `detect_php_webshell_body` (rule 404) with literals like `b374k`, `WSO 2.5`, `c99shell`, `r57shell`, `mini.php`, `@eval(`, `@assert(`. The scorer already covers `<?php` + superglobals + exec-family; adding webshell-name literals as scoring signals folds cleanly without a new rule ID.
+- **W3 (RECLASSIFIED — extension, not new rule)**: extend `score_obfuscation_blob` (rule 405) with `hex2bin(`. The scorer already covers `chr()` storm, `\x` storm, `eval(`, `base64_decode(`, `gzinflate(`, atob, new Function, charCodeAt+XOR, `preg_replace+/e`. Only `hex2bin` is missing; one line in `cfm_waf_util.lua`.
+- **W4** polyglot upload (image Content-Type + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes of multipart part) → extend `detect_upload_content` (rule 402) with a leading-bytes-while-image-CT check, or ship as a new rule if the tagging shape needs to be distinct.
 
 ### Phase 2 — post-exploitation / RCE
 
-- **R1** reverse shell strings (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`) → `WAF_RCE:REVERSE_SHELL:<tag>` — **shipped at `logonly` (rule 322)**; planned promotion to `block` after one week of clean hit-rate evidence per the rollout playbook.
-- **R2** cron/systemd persistence (`crontab -e`, `/etc/cron.d/`, `[Unit]…ExecStart=/`) → `WAF_RCE:PERSISTENCE`, `+6`.
-- **R3** LD_PRELOAD / userspace rootkit artifacts → `WAF_RCE:ROOTKIT_ARTIFACT`, `+6`.
-- **R4** LOLbins (`certutil -urlcache -split`, `iex(iwr`, `-EncodedCommand <b64>`) → `WAF_RCE:LOLBIN` / score combo with base64 detector.
+- **R1** reverse shell strings (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`) → `WAF_RCE:REVERSE_SHELL:<tag>` — **shipped at `logonly` (rule 322)**.
+- **R2** cron/systemd persistence (`crontab -e`, `(crontab -l;`, `>/etc/cron.d/`, `[Unit]\nExecStart=/`, `>> ~/.bashrc`, `>> ~/.ssh/authorized_keys`) → `WAF_RCE:PERSISTENCE:<tag>` — **shipped at `logonly` (rule 323)**.
+- **R3** LD_PRELOAD / rootkit artifacts (`LD_PRELOAD=/`, `>/etc/ld.so.preload`, `insmod /tmp/`, `/dev/mem`) → `WAF_RCE:ROOTKIT:<tag>` — **shipped at `logonly` (rule 324)**.
+- **R4** LOLbins (`certutil -urlcache -split`, `bitsadmin /transfer`, `-EncodedCommand `, `iex(iwr `, `wget -O /tmp/`) → `WAF_RCE:LOLBIN:<tag>` — **shipped at `logonly` (rule 325)**. The `iex(new-object net.webclient` and TcpClient variants are intentionally NOT in R4's table — they already fire under R1 (rule 322); R4 covers the *download/encoded-command* side, R1 covers the shell.
 
 ### Phase 3 — known-CVE fingerprints
 
-- **C1** Log4Shell (`${jndi:ldap://`, `${${::-j}…`, `${lower:j}…`, `${env:`) inspect headers/query/body → `WAF_CVE:LOG4SHELL`, instant block.
+- **C1 (DROPPED — already covered)**: Log4Shell `${jndi:`, `${j{n{d{i`, `$%7bjndi` are already detected by `detect_rce` (rule 320). Re-adding them as a separate rule would double-count hits. If a future Log4Shell variant slips past rule 320's three patterns, extend `detect_rce` rather than create a new rule.
 - **C2** Java deserialization (`rO0ABXNyAB`, `\xac\xed\x00\x05`) → `WAF_CVE:JAVA_DESERIALIZATION`.
 - **C3** signature file `/etc/cfm/cve_signatures.txt` (`reason<TAB>score<TAB>literal`), hot-reload via `refresh_*_if_needed` pattern.
 
@@ -463,7 +468,7 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ### Phase 5 — behavioural / combined-signal
 
 - **B1** Content-Length vs observed body mismatch → `WAF_HTTP_SMUGGLING:CONTENT_LENGTH_MISMATCH`, `+4`.
-- **B2** Suspicious method outside expected location (CONNECT to non-proxy, PROPFIND/SEARCH to non-DAV) → fold into existing exploit-method check, `+2`.
+- **B2 (RECLASSIFIED — extension, not new rule)**: tighten `detect_exploit_method` (rule 607) so PROPFIND/SEARCH to non-DAV and CONNECT to non-proxy emit a sub-tag instead of a flat method-block. The "outside expected location" angle is a per-vhost context the existing rule already has the entry point for; adding it as rule 608 would split a single semantic rule across two IDs.
 - **B3** Single URL segment ≥ 256 chars → `WAF_LONG_PATH`, `+3`; raise if high-entropy.
 - **B4** Header bag total > 16 KB without large `Cookie`/`Authorization` → `WAF_HEADER_FLOOD`, `+3`.
 - **B5** POST + empty UA + Content-Length:0 + URI ends in `.php`/`.phtml`/`.phar` → `WAF_WEBSHELL:PING` — **shipped at `logonly` (rule 411)**.
@@ -493,14 +498,16 @@ A solved `cfm_clearance` means: "do not repeatedly challenge this client for the
 
 This section is a self-contained briefing for picking up the next chunk of work without reading prior chat history. A fresh Claude session with this file plus `docs/waf-analysis-2026-05-08.md` should be able to scope, code, test, and ship a new detector.
 
-**Phase 1 first batch shipped** (W1 / R1 / B5 — rules 410, 322, 411) at `logonly`. Next pickup: **W2/W3/W4** (webshell magic strings in body, PHP function obfuscation, polyglot upload). Follow the same shape as the W1+R1+B5 PR.
+**Shipped so far**: Phase 1 (W1/R1/B5 — rules 410, 322, 411) and Phase 2 (R2/R3/R4 — rules 323, 324, 325), all at `logonly`. Cross-phase audit completed (see status rows 13-15) — **C1 dropped** (already covered by rule 320), **W2/W3/B2 reclassified as extensions** of existing rules, **R4 trimmed** to avoid overlap with R1.
+
+**Next pickup**: **W4** (polyglot upload), **C2** (Java deserialization), **X1/X2** (C2/exfiltration), **B1/B3/B4** (behavioural). Plus three small extension tweaks: rule 404 (W2 literals), rule 405 (W3 `hex2bin`), rule 607 (B2 method-out-of-place sub-tags). Follow the same shape as the existing PRs.
 
 ### What's already done
 
 | Layer | What | Where |
 |---|---|---|
 | Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches, `ctx.skip_rule_ids` gate | `configs/lua/cfm_waf.lua` |
-| Detectors | 42 detector functions invoked from `_M.check` (39 base + W1/R1/B5) | `configs/lua/cfm_waf_detectors.lua` |
+| Detectors | 45 detector functions invoked from `_M.check` (39 base + W1/R1/B5 + R2/R3/R4) | `configs/lua/cfm_waf_detectors.lua` |
 | Util | `scan_str`, `normalize`, `url_decode_once`, `header_string`, IP literal helpers | `configs/lua/cfm_waf_util.lua` |
 | Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
 | Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
