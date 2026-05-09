@@ -49,7 +49,14 @@ func (g *GRUBBackend) WriteCmdline(args []BootArg) error {
 	if err != nil {
 		return err
 	}
-	current, _ := g.NextBootCmdline()
+	current, err := g.NextBootCmdline()
+	if err != nil {
+		// Surface the read failure rather than silently treating
+		// "couldn't read" as "empty cmdline" — that path leads to
+		// writing a cmdline containing only managed args (i.e.
+		// dropping root=, ro, console=, etc).
+		return fmt.Errorf("read current cmdline: %w", err)
+	}
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
 	newLine := strings.Join(tokens, " ")
 

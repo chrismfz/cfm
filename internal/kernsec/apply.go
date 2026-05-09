@@ -88,30 +88,43 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 	fmt.Fprintln(w)
 
 	sysctlContent := RenderSysctlFile(sysctls)
-	desiredCmdline := buildDesiredCmdline(backend, bootArgs)
+	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	if cmdlineErr != nil {
+		fmt.Fprintln(w, "kernsec apply:", cmdlineErr)
+		fmt.Fprintln(w, "  cannot compute desired cmdline without reading current next-boot config")
+		return 1
+	}
 
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
 
 	fmt.Fprintln(w, "[Sysctl]")
 	fmt.Fprintf(w, "  target:  %s\n", SysctlPath)
-	if drift.SysctlDiffers {
+	switch {
+	case drift.SysctlReadErr != nil:
+		fmt.Fprintf(w, "  status:  ERROR reading existing file: %v\n", drift.SysctlReadErr)
+	case drift.SysctlDiffers:
 		fmt.Fprintf(w, "  status:  DRIFT (would write %d bytes)\n", len(sysctlContent))
-	} else {
+	default:
 		fmt.Fprintln(w, "  status:  in sync")
 	}
 
 	fmt.Fprintln(w, "[Boot args]")
-	fmt.Fprintf(w, "  current next-boot: %s\n", strings.TrimSpace(drift.CurrentCmdline))
-	fmt.Fprintf(w, "  desired:           %s\n", strings.TrimSpace(desiredCmdline))
-	if drift.BootDiffers {
-		fmt.Fprintln(w, "  status:            DRIFT (would rewrite cmdline)")
+	if drift.BootReadErr != nil {
+		fmt.Fprintf(w, "  status:            ERROR reading next-boot cmdline: %v\n", drift.BootReadErr)
 	} else {
-		fmt.Fprintln(w, "  status:            in sync")
+		fmt.Fprintf(w, "  current next-boot: %s\n", strings.TrimSpace(drift.CurrentCmdline))
+		fmt.Fprintf(w, "  desired:           %s\n", strings.TrimSpace(desiredCmdline))
+		if drift.BootDiffers {
+			fmt.Fprintln(w, "  status:            DRIFT (would rewrite cmdline)")
+		} else {
+			fmt.Fprintln(w, "  status:            in sync")
+		}
 	}
 	fmt.Fprintln(w)
 
 	if opts.Check {
-		if drift.SysctlDiffers || drift.BootDiffers {
+		if drift.SysctlDiffers || drift.BootDiffers ||
+			drift.SysctlReadErr != nil || drift.BootReadErr != nil {
 			fmt.Fprintln(w, "[!] drift detected — exit 1")
 			return 1
 		}
@@ -123,6 +136,11 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 		fmt.Fprintln(w, "(dry-run; nothing written)")
 		fmt.Fprintln(w, "===========================")
 		return 0
+	}
+
+	if drift.BootReadErr != nil {
+		fmt.Fprintln(w, "kernsec apply: refusing to write — cannot read current cmdline")
+		return 1
 	}
 
 	// Write sysctl.
@@ -168,6 +186,14 @@ type driftResult struct {
 	SysctlDiffers  bool
 	BootDiffers    bool
 	CurrentCmdline string
+	// BootReadErr is non-nil when the next-boot cmdline could not be
+	// read from the bootloader. The drift compare then defaults to
+	// "differs" (apply will refuse) but the error is surfaced to the
+	// operator so they don't think the system is in sync.
+	BootReadErr error
+	// SysctlReadErr is non-nil when the existing managed sysctl file
+	// is unreadable for a reason other than absence (permission etc.).
+	SysctlReadErr error
 }
 
 // computeDrift compares the desired sysctl content + cmdline against
@@ -175,15 +201,23 @@ type driftResult struct {
 func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBackend) driftResult {
 	res := driftResult{}
 
-	if got, err := os.ReadFile(SysctlPath); err == nil {
+	got, err := os.ReadFile(SysctlPath)
+	switch {
+	case err == nil:
 		res.SysctlDiffers = !bytes.Equal(got, sysctlContent)
-	} else if os.IsNotExist(err) {
+	case os.IsNotExist(err):
 		res.SysctlDiffers = true
-	} else {
+	default:
 		res.SysctlDiffers = true
+		res.SysctlReadErr = err
 	}
 
-	current, _ := backend.NextBootCmdline()
+	current, err := backend.NextBootCmdline()
+	if err != nil {
+		res.BootReadErr = err
+		res.BootDiffers = true
+		return res
+	}
 	res.CurrentCmdline = current
 	res.BootDiffers = !sameTokens(ParseCmdline(current), ParseCmdline(desiredCmdline))
 
@@ -192,11 +226,17 @@ func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBacke
 
 // buildDesiredCmdline computes what the next-boot cmdline would be
 // after WriteCmdline ran, without actually writing anything. Used by
-// preview / dry-run / check.
-func buildDesiredCmdline(backend BootBackend, args []BootArg) string {
-	current, _ := backend.NextBootCmdline()
+// preview / dry-run / check. Returns an error if the current cmdline
+// cannot be read — silently defaulting to empty here would cause apply
+// to compute a cmdline containing only managed args (dropping root=,
+// ro, console=, etc).
+func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
+	current, err := backend.NextBootCmdline()
+	if err != nil {
+		return "", fmt.Errorf("read current cmdline: %w", err)
+	}
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
-	return strings.Join(tokens, " ")
+	return strings.Join(tokens, " "), nil
 }
 
 // sameTokens reports whether two token lists contain exactly the same
