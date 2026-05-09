@@ -71,11 +71,15 @@ type Options struct {
 
 // ----------------------------------------------
 
-func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
+// Do returns *Result rather than Result so the embedded sync.Mutex is never
+// copied — runCmd holds it during concurrent goroutine appends to r.Steps,
+// and a value-return would copy the mutex into the caller's frame, leaving
+// the goroutines synchronizing on a now-orphaned lock.
+func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 	if ip == nil {
-		return Result{}, errors.New("nil IP")
+		return nil, errors.New("nil IP")
 	}
-	r := Result{IP: ip}
+	r := &Result{IP: ip}
 
 	// 0) Feeds detection — FAST: discover per-feed sets (terse) and probe membership with HasElem
 	t0 := time.Now()
@@ -119,9 +123,9 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 		go func() {
 			defer wg.Done()
 			// -tr, -dr, -ta
-			runCmd(ctx, &r, SrcCSF, "csf", "-tr", ip.String())
-			runCmd(ctx, &r, SrcCSF, "csf", "-dr", ip.String())
-			runCmd(ctx, &r, SrcCSF, "csf", "-ta", ip.String())
+			runCmd(ctx, r, SrcCSF, "csf", "-tr", ip.String())
+			runCmd(ctx, r, SrcCSF, "csf", "-dr", ip.String())
+			runCmd(ctx, r, SrcCSF, "csf", "-ta", ip.String())
 		}()
 	} else {
 		r.Steps = append(r.Steps, Step{Source: SrcCSF, Action: ActionChecked, Detail: "not present or inactive"})
@@ -133,7 +137,7 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runCmd(ctx, &r, SrcFail2Ban, "fail2ban-client", "unban", ip.String())
+			runCmd(ctx, r, SrcFail2Ban, "fail2ban-client", "unban", ip.String())
 		}()
 	} else {
 		r.Steps = append(r.Steps, Step{
@@ -147,11 +151,11 @@ func Do(ctx context.Context, ip net.IP, opts Options) (Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runCmd(ctx, &r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "drop", ip.String())
-			runCmd(ctx, &r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "captcha", ip.String())
+			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "drop", ip.String())
+			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "captcha", ip.String())
 			// Προαιρετικά: να μπει white όταν προέρχεται από feeds
 			if len(r.FromFeeds) > 0 {
-				runCmd(ctx, &r, SrcImunify, "imunify360-agent", "ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String())
+				runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String())
 			}
 		}()
 	} else {
