@@ -2156,5 +2156,128 @@ function _M.detect_header_flood(headers)
   return nil
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 1 — W4 POLYGLOT UPLOAD
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- POLYGLOT_OPENERS — first-bytes signatures that mark a "claimed image"
+-- part as actually executable. Order matters: more-specific tags first
+-- (`<%@` before `<%`, `<?php` before `<?`).
+local POLYGLOT_OPENERS = {
+  { "<?php",   "POLYGLOT_PHP" },
+  { "<?=",     "POLYGLOT_PHP_SHORT" },
+  { "<%@",     "POLYGLOT_JSP_DIRECTIVE" },
+  { "<jsp:",   "POLYGLOT_JSP" },
+  { "<%",      "POLYGLOT_ASP" },
+  { "<script", "POLYGLOT_SCRIPT" },
+}
+
+-- Image extensions that, combined with PHP/ASP/JSP/script content, mark
+-- a polyglot upload. Matched as suffixes on the lowered filename.
+local POLYGLOT_IMAGE_EXTS = {
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tif", ".tiff",
+}
+
+-- [W4] Polyglot upload — image-claimed multipart part whose payload starts
+-- with an executable opener. Distinct from rule 402 (detect_upload_content)
+-- which substring-scans the entire raw body: this rule parses parts and
+-- bounds the executable-opener check to the first 64 bytes of payload, so
+-- legitimate form fields containing PHP code samples can't trigger.
+--
+-- Returns "POLYGLOT_<TYPE>" on hit, nil on miss. Same family as rule 402
+-- (WAF_UPLOAD_CONTENT — already in WAF_HIGH_RISK_REASONS).
+function _M.detect_polyglot_upload(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  -- Boundary tokens are case-sensitive (RFC 2046 §5.1.1) — extract from the
+  -- original header value, not a lowered copy. Only the multipart/form-data
+  -- check itself is case-insensitive.
+  local ct_raw = headers["content-type"] or headers["Content-Type"] or ""
+  if not has(lower(ct_raw), "multipart/form-data") then return nil end
+
+  local boundary = ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  if not boundary then return nil end
+  boundary = boundary:gsub('^"', ''):gsub('"$', '')
+  if boundary == "" then return nil end
+
+  local sep = "--" .. boundary
+
+  -- Bound the part-walk to a safe iteration cap so a malformed body can't
+  -- spin the loop. Legit multipart uploads almost always have <10 parts.
+  local pos = 1
+  local iter_cap = 64
+  local iter = 0
+
+  while iter < iter_cap do
+    iter = iter + 1
+
+    local sep_at = body:find(sep, pos, true)
+    if not sep_at then break end
+
+    local hdr_start = sep_at + #sep
+    -- "--<boundary>--" marks end of multipart; stop walking.
+    if body:sub(hdr_start, hdr_start + 1) == "--" then break end
+    -- Skip the CRLF (or bare LF) that follows the boundary.
+    if body:sub(hdr_start, hdr_start + 1) == "\r\n" then
+      hdr_start = hdr_start + 2
+    elseif body:sub(hdr_start, hdr_start) == "\n" then
+      hdr_start = hdr_start + 1
+    end
+
+    -- Find header/payload split (blank line). Try CRLF first, then LF.
+    local split_at = body:find("\r\n\r\n", hdr_start, true)
+    local split_skip = 4
+    if not split_at then
+      split_at = body:find("\n\n", hdr_start, true)
+      split_skip = 2
+    end
+    if not split_at then break end
+
+    local part_headers = body:sub(hdr_start, split_at - 1)
+    local payload_start = split_at + split_skip
+    -- Only look at the first 64 bytes of payload; image polyglots that
+    -- wrap a PHP shell put the opener at the very start of the file so
+    -- that PHP's parser sees it before the rest of the "image" data.
+    local payload = body:sub(payload_start, payload_start + 63)
+
+    -- Decide if this part is image-claimed: either Content-Type: image/*
+    -- in the part headers, or a filename ending in a known image extension.
+    local part_ct = lower(part_headers:match("[Cc]ontent%-[Tt]ype:%s*([^\r\n]+)") or "")
+    local is_image_ct = has(part_ct, "image/")
+
+    local fname = part_headers:match('[Ff]ilename%s*=%s*"([^"]+)"')
+                  or part_headers:match("[Ff]ilename%s*=%s*'([^']+)'")
+                  or part_headers:match("[Ff]ilename%s*=%s*([^%s;\"'][^%s;\"']*)")
+                  or ""
+    local fname_low = lower(fname)
+    local is_image_ext = false
+    if fname_low ~= "" then
+      for i = 1, #POLYGLOT_IMAGE_EXTS do
+        local ext = POLYGLOT_IMAGE_EXTS[i]
+        if fname_low:sub(-#ext) == ext then
+          is_image_ext = true
+          break
+        end
+      end
+    end
+
+    if is_image_ct or is_image_ext then
+      local p_low = lower(payload)
+      for i = 1, #POLYGLOT_OPENERS do
+        local opener = POLYGLOT_OPENERS[i]
+        if has(p_low, opener[1]) then
+          return opener[2]
+        end
+      end
+    end
+
+    -- Advance past this part for the next iteration.
+    pos = payload_start
+  end
+
+  return nil
+end
+
 
 return _M

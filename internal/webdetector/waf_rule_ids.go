@@ -77,6 +77,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 405, Name: "rule_script_obfuscation", ReasonFamily: "WAF_SCRIPT_OBFUSCATION", DefaultMode: "challenge"},
 	{ID: 410, Name: "rule_webshell_path", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
 	{ID: 411, Name: "rule_webshell_ping", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
+	{ID: 412, Name: "rule_polyglot_upload", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
