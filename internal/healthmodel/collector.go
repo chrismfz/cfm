@@ -1093,7 +1093,11 @@ func probeFrontendHTTP() (bool, string) {
 	clientHTTPS := &http.Client{
 		Timeout: 1500 * time.Millisecond,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local liveness probe only
+			// Local liveness probe to https://127.0.0.1/hello — the only target
+		// of this client. MITM on loopback implies root-on-host already, so
+		// certificate validation is not in the threat model. CodeQL #677
+		// (2026-05-09 triage, accepted-risk).
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 	type probeTarget struct {

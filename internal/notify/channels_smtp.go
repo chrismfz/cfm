@@ -49,6 +49,15 @@ func (c *smtpChannel) Send(ev Event, subj, body string) error {
 	}
 
 	auth := smtp.PlainAuth("", c.user, c.pass, host)
+	// Header injection is structurally prevented here even though `body` may
+	// carry attacker-influenced bytes (template-rendered Event fields). All
+	// header inputs are CRLF-rejected upstream — `from`/`to` via
+	// sanitizeAddress, `subj` via sanitizeHeaderValue — and `body` is
+	// concatenated AFTER the literal "\r\n\r\n" header/body separator. By
+	// RFC 5322 every byte after that separator is parsed as message body,
+	// not headers; CRLF inside `body` is legitimate body content. The
+	// CodeQL "Email content injection" alerts (#605, #606 in the
+	// 2026-05-09 triage) are FPs against this construction.
 	msg := "From: " + from + "\r\n" +
 		"To: " + strings.Join(to, ", ") + "\r\n" +
 		fmt.Sprintf("Subject: %s\r\n", safeSubj) +

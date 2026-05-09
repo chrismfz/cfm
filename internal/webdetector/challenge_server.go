@@ -856,8 +856,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// challengeHTML placeholders are: host, token, powTok, next, difficulty.
-		// host is HTML-escaped; token/powTok/next are emitted as quoted JS string
-		// literals; and next is normalized above ("/" prefix + max length cap).
+		// host goes into <code>%s</code> via htmlEscape (covers &, <, >, ", '
+		// — sufficient for HTML element-content placement). token/powTok/next
+		// are emitted as JS string literals via jsStringLiteral, which post-
+		// processes strconv.Quote to also escape <, >, &, U+2028, U+2029 so
+		// they're safe inside <script>...</script>; see jsStringLiteral
+		// docs for why strconv.Quote alone wasn't enough. next is also
+		// normalized above ("/" prefix + max length cap). CodeQL #565
+		// (real, fixed in jsStringLiteral) and #765 (FP, htmlEscape is
+		// correct) at this call site, both 2026-05-09 triage.
 		fmt.Fprintf(w, challengeHTML(),
 			htmlEscape(host),
 			jsStringLiteral(tok),
