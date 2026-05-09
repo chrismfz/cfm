@@ -122,7 +122,16 @@ func loadConfForDisable() (*Conf, string) {
 // (.cfm-kernsec.bak) are intentionally left in place so operators
 // retain a manual-restore path even after a --purge. Idempotent:
 // missing files are not errors.
+//
+// Also tears down the periodic-drift-check systemd timer if it's
+// installed (Phase 5). Skipped silently if the timer was never set up.
 func purgeManagedFiles(w io.Writer) error {
+	if MonitorInstalled() {
+		fmt.Fprintln(w, "  monitor timer is installed — running `monitor remove` first")
+		if rc := RunMonitor(w, MonitorOptions{Action: "remove"}); rc != 0 {
+			return fmt.Errorf("monitor remove returned %d", rc)
+		}
+	}
 	for _, p := range []string{ConfPath, SysctlPath, ModprobePath} {
 		if err := os.Remove(p); err != nil {
 			if errors.Is(err, os.ErrNotExist) {

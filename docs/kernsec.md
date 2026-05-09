@@ -43,9 +43,18 @@ rules: `user.max_user_namespaces=0`,
 `lockdown=integrity`, `module.sig_enforce=1`. Each gated on the
 existing host-profile probe (containers / DKMS / kdump). Operators
 opt in by setting `tier = 2` in `/etc/cfm/kernsec.conf`.
-`kernel.modules_disabled=1` was deferred — it needs a late systemd
-unit (post-`multi-user.target`) so cfm itself can finish loading
-kernel modules before the lockout fires; that's a follow-up PR.
+
+**Phase 5 shipped** (branch `kernsec-5`). `cfm kernsec monitor`
+manages a periodic drift-check systemd timer
+(`cfm-kernsec-check.timer` / `.service`). Operators run
+`cfm kernsec monitor enable` once and the timer fires `apply --check`
+on the configured interval (default daily); drift exits non-zero so
+`systemctl is-failed` and the journal surface it. `disable --purge`
+auto-tears the timer down.
+
+**Phase 6 (late-systemd-unit infrastructure)** is next — ships the
+abstraction needed for `kernel.modules_disabled=1` and other Tier 2
+rules that have to fire after cfm's own modules finish loading.
 
 **`kspp.sh` status**: kept in the tree indefinitely. It started as the
 reference implementation for the cfm kernsec component; with Phase 3
@@ -162,7 +171,7 @@ audit group.
 
 Resolution: kernsec **audits and defers** for any setting `sys_tweaks` already
 owns — render as `EXT (managed by cfm sys_tweaks)` in `status`, never write a
-duplicate. Phase 6 (shared sysctl library) merges both packages so there's one
+duplicate. Phase 7 (shared sysctl library) merges both packages so there's one
 audit/apply/drift loop with rule-IDs. Until then: no double-write, no fights
 over `/etc/sysctl.d/`.
 
@@ -1005,13 +1014,80 @@ sees the full set audited.
 - Other Tier 2 candidates from earlier brainstorming (`kfence`,
   `iommu=force`, `efi=disable_early_pci_dma`) deferred until needed.
 
-### Phase 5 — Drift detection wiring
+### Phase 5 — Drift detection wiring (DONE — branch `kernsec-5`)
 
-`cfm kernsec apply --check` and `cfm kernsec status --check` (already
-shipped) return non-zero on any DRIFT, suitable for monitoring agents.
-Optional periodic systemd timer.
+`cfm kernsec apply --check` and `cfm kernsec status --check` shipped
+in Phase 2b — they return non-zero on any DRIFT, suitable for
+monitoring agents. Phase 5 makes the periodic check turnkey via a
+systemd timer:
 
-### Phase 6 — Shared sysctl library
+```
+cfm kernsec monitor enable [--interval=daily]   # install + start
+cfm kernsec monitor disable                     # stop + disable
+cfm kernsec monitor remove                      # stop + disable + delete unit files
+cfm kernsec monitor status                      # systemctl + last 5 service runs
+```
+
+What gets installed:
+
+- `/etc/systemd/system/cfm-kernsec-check.service` — `Type=oneshot`,
+  `ExecStart=<resolved cfm path> kernsec apply --check`. Drift exits
+  the service non-zero, which `systemctl is-failed` reports.
+- `/etc/systemd/system/cfm-kernsec-check.timer` —
+  `OnCalendar=<interval>` (default daily), `Persistent=true`,
+  `RandomizedDelaySec=1h` to spread fleet load.
+
+Apply path / verification:
+
+- Both unit files are written with `AtomicWriteFile`. No `.bak` —
+  these are wholly kernsec-owned (no operator content to preserve).
+- `enable` runs `systemctl daemon-reload` + `systemctl enable --now`.
+- `remove` reverses: `systemctl disable --now`, deletes both files,
+  `systemctl daemon-reload`. Idempotent on uninstalled hosts.
+- `status` shows file presence + `systemctl status` + last 5 lines
+  from `journalctl -u cfm-kernsec-check.service`.
+- `disable --purge` (Phase 2.5) auto-runs `monitor remove` first if
+  the timer is installed, so a single command tears everything down.
+
+Operator runbook:
+
+```
+cfm kernsec monitor enable        # most fleets: daily check is enough
+journalctl -u cfm-kernsec-check.service -n 50
+                                  # see history
+systemctl is-failed cfm-kernsec-check.service
+                                  # exits 0 if clean, 1 if drift seen
+```
+
+### Phase 6 — Late-systemd-unit infrastructure (TODO)
+
+Ships the abstraction needed for rules that can't be applied via
+`/etc/sysctl.d/` because they have to fire **after** cfm itself has
+finished loading kernel modules and starting up. The motivating case
+is `kernel.modules_disabled=1` (Tier 2, deferred from Phase 4).
+Setting it in `/etc/sysctl.d/` would lock cfm out before its own
+modules load.
+
+Approach (sketch):
+
+- Generalise the Phase 5 monitor unit-file pattern into a
+  "managed-systemd-unit" surface.
+- `kernel.modules_disabled=1` becomes a rule with a
+  `RuleKind = KindLateSystemd` that emits a small unit
+  (`cfm-kernsec-modules-disabled.service`) with `After=multi-user.target
+  network-online.target` and `ExecStart=/usr/bin/sysctl
+  kernel.modules_disabled=1`.
+- The rule's audit state distinguishes "unit installed + enabled" vs
+  "running" vs "never set". No automatic disable possible —
+  `modules_disabled=1` is one-way until reboot.
+- Future opt-ins that fit the same shape (`kfence` knobs, certain
+  late tunables) reuse the same plumbing.
+
+Acceptance gate: same as Phase 3 + 5 — operator runs on Proxmox + EL +
+Debian, confirms cfm's own modules still load successfully before the
+late unit fires.
+
+### Phase 7 — Shared sysctl library
 
 Refactor: extract the audit/apply/drift loop into a cfm-internal library.
 Migrate kernsec and cfm-firewall to use it. Single source of truth per
@@ -1023,6 +1099,35 @@ cross-component awareness.
 ## Progress
 
 ### DONE
+
+**Phase 5 — Drift detection wiring** (branch `kernsec-5`)
+- New `cfm kernsec monitor <action>` subcommand wired into cli.go +
+  top-level usage banner. Actions: `enable | disable | remove | status`.
+- `RenderMonitorService(cfmBinary)` produces a `Type=oneshot`
+  service with `ExecStart=<binary> kernsec apply --check`; the path
+  is resolved via `os.Executable()` at apply time so the service
+  references whatever cfm binary is actually running.
+- `RenderMonitorTimer(interval)` produces an `OnCalendar=<interval>`
+  timer with `Persistent=true` + `RandomizedDelaySec=1h` for
+  fleet-load smoothing. Default interval `daily`.
+- `monitor enable`: `AtomicWriteFile` for both unit files,
+  `systemctl daemon-reload`, `systemctl enable --now <timer>`.
+- `monitor disable`: `systemctl disable --now <timer>` (idempotent
+  on hosts where the unit was never installed).
+- `monitor remove`: stop + disable + remove both files +
+  daemon-reload. Idempotent on missing files.
+- `monitor status`: file-presence check + `systemctl status` +
+  last 5 lines from `journalctl -u <service> --no-pager`.
+- `disable --purge` (Phase 2.5) extended: if `MonitorInstalled()`
+  returns true, runs `monitor remove` first so a single command
+  tears the whole stack down.
+- `MonitorServicePath` and `MonitorTimerPath` declared as `var`
+  for tests to redirect to `t.TempDir()`. `MonitorInstalled()`
+  helper for the disable-purge hook.
+- 11 new tests covering: render content (binary path, interval,
+  stable shape, idempotency), `MonitorInstalled` truth table,
+  dry-run produces no writes, unknown / empty action returns
+  exit 2, dry-run remove on uninstalled host succeeds.
 
 **Phase 4 — Tier 2 (opt-in)** (branch `kernsec-4`)
 - `Tier2Sysctls`: `user.max_user_namespaces=0`,
@@ -1236,10 +1341,25 @@ cross-component awareness.
       separate follow-up PR; needs a small "managed systemd unit"
       surface that other Tier 2 candidates may also want.
 
-**Phase 5 — drift wiring**
-- [ ] `cfm kernsec apply --check` + optional periodic systemd timer.
+**Phase 5 — drift wiring** (DONE — branch `kernsec-5`)
+- [x] `cfm kernsec apply --check` exit-code (shipped in Phase 2b).
+- [x] `cfm kernsec monitor` subcommand: enable / disable / remove /
+      status of the periodic systemd timer.
+- [x] `disable --purge` auto-removes monitor units when present.
 
-**Phase 6 — shared sysctl library**
+**Phase 6 — late-systemd-unit infrastructure**
+- [ ] Generalise the Phase 5 unit-file pattern into a managed-systemd-
+      unit surface usable by rules that need post-`multi-user.target`
+      execution.
+- [ ] `kernel.modules_disabled=1` (Tier 2) lands on this surface as
+      `KSEC-LATE-tier2.modules-disabled-001`. Audit state distinguishes
+      "unit installed + enabled" vs "running" vs "never set". One-way
+      until reboot — no automatic disable.
+- [ ] Acceptance gate: same shape as Phase 3 + 5 — operator runs on
+      Proxmox + EL + Debian, confirms cfm's own modules still load
+      successfully before the late unit fires.
+
+**Phase 7 — shared sysctl library**
 - [ ] Extract audit/apply/drift loop into a cfm-internal library;
       migrate `internal/sysctl/sys_tweaks.go` into it; kernsec consumes
       the same library.
