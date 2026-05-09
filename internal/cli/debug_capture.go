@@ -14,6 +14,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -26,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/clihttp"
 )
 
 // captureProcStatus reads /proc/<pid>/status. Used for VmRSS/VmSize/Threads.
@@ -44,6 +47,106 @@ func captureProcIO(pid int) ([]byte, error) {
 // whether to keep the raw file alongside the parsed summary.
 func captureProcMaps(pid int) ([]byte, error) {
 	return os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "maps"))
+}
+
+// captureProcMapsGzipped returns the gzipped /proc/<pid>/maps contents.
+// Raw maps for a leaking worker can be hundreds of KB to several MB
+// (each mapped temp file is one line); gzipping keeps the bundle small
+// while preserving the file paths an operator needs to identify the
+// leak source.
+func captureProcMapsGzipped(pid int) ([]byte, error) {
+	raw, err := captureProcMaps(pid)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(raw); err != nil {
+		_ = gz.Close()
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// procPPid reads /proc/<pid>/stat and returns the parent PID. Uses the
+// same last-')' parse as procCPUTicks since field 4 (PPid) sits after
+// the (comm) group.
+func procPPid(pid int) (int, error) {
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, err
+	}
+	last := bytes.LastIndexByte(b, ')')
+	if last < 0 || last+2 >= len(b) {
+		return 0, fmt.Errorf("malformed /proc/%d/stat", pid)
+	}
+	rest := strings.Fields(string(b[last+2:]))
+	if len(rest) < 2 {
+		return 0, fmt.Errorf("truncated /proc/%d/stat", pid)
+	}
+	// rest[0] is state; rest[1] is PPid.
+	ppid, err := strconv.Atoi(rest[1])
+	if err != nil {
+		return 0, err
+	}
+	return ppid, nil
+}
+
+// procCmdline returns /proc/<pid>/cmdline with NUL separators replaced
+// by spaces. Returns "" on read error so callers can fall through.
+func procCmdline(pid int) string {
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.ReplaceAll(string(b), "\x00", " ")
+}
+
+// filterCFMManagedWorkers narrows a list of "worker process" PIDs to
+// those whose parent (master process) cmdline references a CFM-managed
+// config path — typically `/etc/cfm/`, `/var/lib/cfm/`, or a config
+// file under those. Drops unrelated worker processes such as the
+// cPanel-stack `nginx` master, imunify360-webs, or any other vendor-
+// shipped HTTP server that happens to use the "worker process" naming
+// convention.
+//
+// The filter is intentionally inclusive on the CFM side: if any of the
+// known CFM-managed path tokens appears anywhere on the master's
+// cmdline, the worker is kept. The token list is small and unlikely
+// to false-positive on third-party processes.
+func filterCFMManagedWorkers(workerPIDs []int) []int {
+	cfmTokens := []string{
+		"/etc/cfm/",
+		"/var/lib/cfm/",
+		"/var/run/cfm/",
+		"cfm_nginx.conf",
+		"cfm_angie.conf",
+	}
+	out := make([]int, 0, len(workerPIDs))
+	for _, pid := range workerPIDs {
+		ppid, err := procPPid(pid)
+		if err != nil || ppid <= 1 {
+			continue
+		}
+		master := procCmdline(ppid)
+		if master == "" {
+			continue
+		}
+		matched := false
+		for _, tok := range cfmTokens {
+			if strings.Contains(master, tok) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 // procCPUTicks returns the cumulative user+system CPU jiffies from
@@ -154,7 +257,12 @@ func fetchPprof(baseURL, endpoint string, dur time.Duration) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// Use clihttp.Do so the apiserver bearer token (set in main's
+	// debug-case dispatch) is injected as Authorization: Bearer <tok>.
+	// Without this the apiserver answers 401 for every pprof endpoint
+	// — losing CPU/heap/goroutine profiles, which are the highest-value
+	// items in the bundle.
+	resp, err := clihttp.Do(req)
 	if err != nil {
 		return nil, err
 	}
