@@ -24,7 +24,10 @@ const (
 // One source of truth for per-rule state; the text RunStatus and the TUI both
 // derive from BuildAuditRows.
 type AuditRow struct {
+	ID          string
 	Kind        RuleKind
+	Group       string
+	Tier        Tier
 	Display     string // "kernel.kptr_restrict=2" or "slab_nomerge"
 	State       RuleState
 	Description string
@@ -56,7 +59,10 @@ func BuildAuditRows() []AuditRow {
 	for _, r := range KSPPSysctls {
 		state, found := CheckSysctl(r)
 		row := AuditRow{
+			ID:            r.ID,
 			Kind:          KindSysctl,
+			Group:         r.Group,
+			Tier:          r.Tier,
 			Display:       r.Key + "=" + r.Value,
 			Description:   r.Description,
 			Affects:       r.Affects,
@@ -78,7 +84,10 @@ func BuildAuditRows() []AuditRow {
 		curState, _ := CheckBootArg(curTokens, a)
 		nxtState, _ := CheckBootArg(nxtTokens, a)
 		row := AuditRow{
+			ID:            a.ID,
 			Kind:          KindBoot,
+			Group:         a.Group,
+			Tier:          a.Tier,
 			Display:       a.String(),
 			Description:   a.Description,
 			Affects:       a.Affects,

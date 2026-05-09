@@ -5,19 +5,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // RunCLI is the entry point invoked from cmd/cfm/main.go.
 //
-// Phase 1 ships only audit-only modes:
+// Phase 1 + Phase 2a (read-only):
 //
-//	cfm kernsec            -> TUI when stdout is a TTY, else text
-//	cfm kernsec live       -> explicit TUI
-//	cfm kernsec text       -> plain-text status
-//	cfm kernsec status     -> alias for "text" (also supports --check)
-//	cfm kernsec help / -h  -> usage
+//	cfm kernsec                  -> TUI when stdout is a TTY, else text
+//	cfm kernsec live             -> explicit TUI
+//	cfm kernsec text             -> plain-text status
+//	cfm kernsec status           -> alias for "text" (also supports --check)
+//	cfm kernsec preview          -> read-only diff: what apply would select
+//	cfm kernsec init             -> write default tier=1 kernsec.conf
+//	cfm kernsec help / -h        -> usage
 //
-// enable / disable / preview / apply land in later phases.
+// apply / disable land in Phase 2b (next pass).
 func RunCLI(args []string) int {
 	if len(args) == 0 {
 		return runDefault(os.Stdout)
@@ -29,6 +32,10 @@ func RunCLI(args []string) int {
 		return runText(args[1:], os.Stdout)
 	case "status":
 		return runText(args[1:], os.Stdout)
+	case "preview":
+		return runPreviewCmd(args[1:], os.Stdout)
+	case "init":
+		return RunInit(os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -78,6 +85,49 @@ func runText(args []string, w io.Writer) int {
 	return 0
 }
 
+func runPreviewCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec preview", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	onlyApply := fs.Bool("only-apply", false, "hide rules that would be skipped")
+	group := fs.String("group", "", "filter by group prefix (e.g. modules.net.legacy)")
+	tier := fs.Int("tier", 0, "max tier filter (1 or 2; 0 = no filter)")
+	ids := fs.String("id", "", "comma-separated rule IDs to include")
+	skip := fs.String("skip", "", "comma-separated rule IDs to ad-hoc skip (not persisted)")
+	force := fs.String("force-id", "", "comma-separated rule IDs to ad-hoc force (not persisted)")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "kernsec preview:", err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	if *tier < 0 || *tier > 2 {
+		fmt.Fprintln(os.Stderr, "kernsec preview: --tier must be 0, 1, or 2")
+		return 2
+	}
+	return RunPreview(w, PreviewOptions{
+		OnlyApply: *onlyApply,
+		Group:     *group,
+		Tier:      Tier(*tier),
+		IDs:       splitCSV(*ids),
+		Skips:     splitCSV(*skip),
+		Forces:    splitCSV(*force),
+	})
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage: cfm kernsec [<subcommand>] [flags]
 
@@ -86,11 +136,21 @@ Subcommands:
   live                Force the interactive TUI
   text                Plain-text audit output
   status              Alias for "text" (supports --check for monitoring)
+  preview             Show what `+"`apply`"+` would do given conf + host profile
+  init                Write default tier=1 /etc/cfm/kernsec.conf if absent
   help                Show this message
 
-Status flags (text / status):
+Status / text flags:
   --skip-af-alg       Skip AF_ALG bind probes
   --check             Exit non-zero on any WARN (suitable for monitoring)
+
+Preview flags:
+  --only-apply        Hide skipped rules
+  --group <prefix>    Filter by group prefix (e.g. modules.net.legacy)
+  --tier <0|1|2>      Max tier filter
+  --id  <ids>         Comma-separated rule IDs to include
+  --skip <ids>        Comma-separated ad-hoc skip overrides (not persisted)
+  --force-id <ids>    Comma-separated ad-hoc force overrides (not persisted)
 
 TUI keys:
   q / Ctrl-C          Quit
@@ -100,6 +160,7 @@ TUI keys:
   r                   Re-run audit
   t                   Drop to text mode
   e / d               (Phase 3 — enable / disable, not yet implemented)
+  /                   Filter (Phase 2 — TBD)
   ?                   Toggle help
 
 See docs/kernsec.md for the full design.`)

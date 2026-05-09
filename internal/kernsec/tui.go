@@ -37,7 +37,8 @@ func RunTUI() (switchToText bool, err error) {
 	table.Title = " Rules "
 	table.RowSeparator = false
 	table.FillRow = false
-	table.ColumnWidths = []int{9, 8, 0}
+	// STATE | TIER | KIND | GROUP | RULE
+	table.ColumnWidths = []int{9, 5, 7, 22, 0}
 	table.TextAlignment = ui.AlignLeft
 
 	detail := widgets.NewParagraph()
@@ -65,17 +66,52 @@ func RunTUI() (switchToText bool, err error) {
 	}
 	layout()
 
-	rows := BuildAuditRows()
+	allRows := BuildAuditRows()
+	rows := allRows
 	cursor := 0
 	statusMsg := ""
 	statusUntil := time.Time{}
 	showHelp := false
 
+	// Filter mode state. When filterEditing == true the user is typing
+	// a filter substring into the footer; render() shows "filter: <buf>_".
+	filterEditing := false
+	filterBuf := ""
+	activeFilter := ""
+
+	applyFilter := func() {
+		if activeFilter == "" {
+			rows = allRows
+		} else {
+			needle := strings.ToLower(activeFilter)
+			rows = rows[:0]
+			for _, r := range allRows {
+				if strings.Contains(strings.ToLower(r.Display), needle) ||
+					strings.Contains(strings.ToLower(r.Group), needle) ||
+					strings.Contains(strings.ToLower(r.ID), needle) {
+					rows = append(rows, r)
+				}
+			}
+		}
+		if cursor >= len(rows) {
+			cursor = len(rows) - 1
+		}
+		if cursor < 0 {
+			cursor = 0
+		}
+	}
+
 	rebuildTable := func() {
 		rs := make([][]string, 0, len(rows)+1)
-		rs = append(rs, []string{"STATE", "KIND", "RULE"})
+		rs = append(rs, []string{"STATE", "TIER", "KIND", "GROUP", "RULE"})
 		for _, r := range rows {
-			rs = append(rs, []string{string(r.State), string(r.Kind), r.Display})
+			rs = append(rs, []string{
+				string(r.State),
+				"T" + r.Tier.label(),
+				string(r.Kind),
+				r.Group,
+				r.Display,
+			})
 		}
 		table.Rows = rs
 		table.RowStyles = make(map[int]ui.Style, len(rows)+1)
@@ -135,6 +171,10 @@ func RunTUI() (switchToText bool, err error) {
 	}
 
 	renderFooter := func() {
+		if filterEditing {
+			footer.Text = fmt.Sprintf("[filter:](fg:cyan,mod:bold) %s_   [Enter](fg:cyan) apply  [Esc](fg:cyan) cancel  [Backspace](fg:cyan) erase", filterBuf)
+			return
+		}
 		if showHelp {
 			footer.Text = "[help](fg:cyan,mod:bold)  Phase 1 audit-only.  e/d are stubs until Phase 3.  Press [?](fg:cyan) to dismiss."
 			return
@@ -143,7 +183,11 @@ func RunTUI() (switchToText bool, err error) {
 			footer.Text = fmt.Sprintf("[%s](fg:yellow)", statusMsg)
 			return
 		}
-		footer.Text = "[q](fg:cyan)uit  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [?](fg:cyan) help"
+		base := "[q](fg:cyan)uit  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [/](fg:cyan) filter  [?](fg:cyan) help"
+		if activeFilter != "" {
+			base += fmt.Sprintf("  •  [filter:](fg:cyan) %s  [c](fg:cyan)lear", activeFilter)
+		}
+		footer.Text = base
 	}
 
 	flash := func(msg string) {
@@ -160,13 +204,8 @@ func RunTUI() (switchToText bool, err error) {
 	}
 
 	refresh := func() {
-		rows = BuildAuditRows()
-		if cursor >= len(rows) {
-			cursor = len(rows) - 1
-		}
-		if cursor < 0 {
-			cursor = 0
-		}
+		allRows = BuildAuditRows()
+		applyFilter()
 	}
 
 	render()
@@ -178,6 +217,33 @@ func RunTUI() (switchToText bool, err error) {
 	for {
 		select {
 		case e := <-events:
+			if filterEditing {
+				switch e.ID {
+				case "<Enter>":
+					activeFilter = filterBuf
+					filterEditing = false
+					applyFilter()
+				case "<Escape>":
+					filterEditing = false
+					filterBuf = ""
+				case "<Backspace>", "<C-8>":
+					if len(filterBuf) > 0 {
+						filterBuf = filterBuf[:len(filterBuf)-1]
+					}
+				case "<Space>":
+					filterBuf += " "
+				default:
+					if len(e.ID) == 1 {
+						r := e.ID[0]
+						if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') ||
+							(r >= 'A' && r <= 'Z') || r == '.' || r == '_' || r == '-' {
+							filterBuf += e.ID
+						}
+					}
+				}
+				render()
+				continue
+			}
 			switch e.ID {
 			case "q", "<C-c>":
 				return false, nil
@@ -221,6 +287,17 @@ func RunTUI() (switchToText bool, err error) {
 			case "d":
 				flash("disable lands in Phase 3 — see docs/kernsec.md")
 				render()
+			case "/":
+				filterEditing = true
+				filterBuf = activeFilter
+				render()
+			case "c":
+				if activeFilter != "" {
+					activeFilter = ""
+					filterBuf = ""
+					applyFilter()
+					render()
+				}
 			case "?":
 				showHelp = !showHelp
 				render()
