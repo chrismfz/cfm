@@ -311,6 +311,9 @@ func main() {
 	case "clam", "clamd", "clamav":
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
+	case "debug":
+		os.Exit(cli.RunDebug(os.Args[2:]))
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
@@ -357,6 +360,11 @@ Usage:
   cfm clam ping
   cfm clam version
   cfm clam scan <file-or-dir>
+
+  cfm debug                          -- one-shot diagnostic bundle (pprof + /proc + logs + WAF state) → /tmp/cfm-debug/<ts>/
+  cfm debug --duration 5m            -- extend the trace window
+  cfm debug --quick                  -- short capture, skip log tails
+  cfm debug --no-pprof               -- skip pprof (apiserver down)
 
 Options (overall top):
   --limit N        rows for the main top table (default 10)
