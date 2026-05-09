@@ -138,6 +138,13 @@ local function score_obfuscation_blob(s, min_score)
   if has(s, "str_rot13(") then
     score = score + 1; tags[#tags+1] = "ROT13"
   end
+  -- hex2bin($_POST['x']) is the canonical W3 webshell delivery shape:
+  -- attacker pastes a hex-encoded blob, hex2bin() turns it back into bytes
+  -- that get fed to eval/assert. Same weight as base64_decode — both sit
+  -- one layer below the eval call in the obfuscation stack.
+  if has(s, "hex2bin(") then
+    score = score + 2; tags[#tags+1] = "HEX2BIN"
+  end
 
   -- PHP eval-in-regex (deprecated /e modifier)
   if has(s, "preg_replace") and has(s, "/e") then

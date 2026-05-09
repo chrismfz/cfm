@@ -28,6 +28,7 @@ local cap           = util.cap
 local normalize     = util.normalize
 local scan_str      = util.scan_str
 local header_string = util.header_string
+local is_known_legit_php_upload_endpoint = util.is_known_legit_php_upload_endpoint
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -117,6 +118,46 @@ local CFG = {
   rule_webshell_path    = "logonly",  -- URI basename matches a known webshell drop name (c99.php, r57.php, …)
   rule_reverse_shell    = "logonly",  -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
   rule_webshell_ping    = "logonly",  -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
+
+  -- ── Phase 2 — post-exploitation / RCE markers (logonly rollout) ───────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 2 (R2/R3/R4). All three
+  -- emit family WAF_RCE so they share high-risk post-clearance routing.
+  -- C1 (Log4Shell) is NOT here — already covered by detect_rce (rule 320).
+  rule_persistence       = "logonly",  -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
+  rule_rootkit_artifacts = "logonly",  -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
+  rule_lolbin            = "logonly",  -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
+
+  -- ── Phase 3 — known-CVE fingerprints (logonly rollout) ───────────────────
+  -- Java deserialization (CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725
+  -- pattern). Family WAF_RCE so it shares high-risk post-clearance routing.
+  -- C1 Log4Shell is NOT a separate rule — already in detect_rce (rule 320).
+  -- C3 (CVE signature file) is deferred to its own infra PR.
+  rule_java_deserialize  = "logonly",  -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
+
+  -- ── Phase 4 — C2 / exfiltration (logonly rollout) ────────────────────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
+  -- service hostnames; X2 covers coinminer tool/pool fingerprints (the
+  -- stratum scheme is already folded into rule 701 per audit row 16).
+  rule_c2_tunnel         = "logonly",  -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
+  rule_coinminer         = "logonly",  -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
+
+  -- ── Phase 5 — behavioural / combined-signal (logonly rollout) ────────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 5. B2 was already absorbed
+  -- as a tightening of rule 607 (status row 18); B5 was shipped earlier
+  -- (rule 411). What's left: B1 (HTTP smuggling header pairs), B3 (long
+  -- URL segments), B4 (oversized header bag).
+  rule_smuggling_cl      = "logonly",  -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
+  rule_long_path_segment = "logonly",  -- single URL path segment ≥ 256 chars
+  rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
+
+  -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
+  -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
+  -- 402 (detect_upload_content) which substring-scans the entire raw
+  -- multipart body — W4 parses parts and checks the first 64 bytes of any
+  -- image-typed / image-extension part for PHP/ASP/JSP/script openers.
+  -- Same family WAF_UPLOAD_CONTENT (high-risk) so post-clearance routing
+  -- is correct when promoted.
+  rule_polyglot_upload   = "logonly",  -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
@@ -234,6 +275,7 @@ det.init(CFG, util)
 local RULE_IDS = {
   -- 1xx path / traversal
   rule_traversal               = 101,
+  rule_long_path_segment       = 102,
 
   -- 2xx client identity
   rule_bad_ua                  = 201,
@@ -258,6 +300,11 @@ local RULE_IDS = {
   rule_rce                     = 320,
   rule_proxy_header_sqli       = 321,
   rule_reverse_shell           = 322,
+  rule_persistence             = 323,
+  rule_rootkit_artifacts       = 324,
+  rule_lolbin                  = 325,
+  rule_java_deserialize        = 326,
+  rule_coinminer               = 327,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -267,6 +314,7 @@ local RULE_IDS = {
   rule_script_obfuscation      = 405,
   rule_webshell_path           = 410,
   rule_webshell_ping           = 411,
+  rule_polyglot_upload         = 412,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -283,9 +331,12 @@ local RULE_IDS = {
   rule_crlf_injection          = 605,
   rule_http_smuggling          = 606,
   rule_exploit_methods         = 607,
+  rule_smuggling_cl            = 608,
+  rule_header_flood            = 609,
 
   -- 7xx SSRF
   rule_ssrf                    = 701,
+  rule_c2_tunnel               = 702,
 
   -- 8xx info disclosure / debug
   rule_debug_toggles           = 801,
@@ -542,15 +593,16 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_exploit_methods, "challenge")
     if mode ~= "disabled" then
-      local maction = det.detect_exploit_method(method)
+      local maction, mtag = det.detect_exploit_method(method)
+      local reason = mtag and ("WAF_EXPLOIT_METHOD:" .. mtag) or "WAF_EXPLOIT_METHOD"
       if maction == "block" then
         local final = (mode == "logonly") and "logonly" or "block"
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
+        if record(reason, ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       elseif maction == "challenge" then
         local final = (mode == "block") and "block" or mode
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
+        if record(reason, ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       end
     end
   end
@@ -899,6 +951,158 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_WEBSHELL:" .. tag, ttl, mode, RULE_IDS.rule_webshell_ping) then goto done end
+      end
+    end
+  end
+
+  -- ── 37) Persistence markers (R2) ─────────────────────────────────────────
+  -- Cron / systemd persistence one-liners (`crontab -e`, `/etc/cron.d/`,
+  -- `[Unit]…ExecStart=/`). Family WAF_RCE shares high-risk routing.
+  do
+    local mode = rule_mode(CFG.rule_persistence, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_persistence(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:PERSISTENCE:" .. tag, ttl, mode, RULE_IDS.rule_persistence) then goto done end
+      end
+    end
+  end
+
+  -- ── 38) Rootkit artifacts (R3) ───────────────────────────────────────────
+  -- LD_PRELOAD / /etc/ld.so.preload / kernel-module insmod patterns.
+  do
+    local mode = rule_mode(CFG.rule_rootkit_artifacts, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_rootkit_artifacts(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:ROOTKIT:" .. tag, ttl, mode, RULE_IDS.rule_rootkit_artifacts) then goto done end
+      end
+    end
+  end
+
+  -- ── 39) LOLbins (R4) ─────────────────────────────────────────────────────
+  -- Living-off-the-land binary invocations: certutil/bitsadmin downloaders,
+  -- powershell -EncodedCommand. The IEX-WebClient downloader and TcpClient
+  -- variants are intentionally NOT here — already in R1's REVERSE_SHELL
+  -- table to avoid double-counting on the same hit.
+  do
+    local mode = rule_mode(CFG.rule_lolbin, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_lolbin(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:LOLBIN:" .. tag, ttl, mode, RULE_IDS.rule_lolbin) then goto done end
+      end
+    end
+  end
+
+  -- ── 40) Java deserialization (C2) ────────────────────────────────────────
+  -- Detects ObjectOutputStream payloads by their stable wire-format prefix:
+  -- raw bytes 0xAC 0xED 0x00 0x05, base64 prefix "rO0AB", or "aced0005" hex.
+  -- These are how RCE chains (Commons Collections, Spring Framework, JBoss
+  -- Richfaces — CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725)
+  -- arrive over HTTP. PHP serialize is a separate rule (306).
+  do
+    local mode = rule_mode(CFG.rule_java_deserialize, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_java_deserialize(headers, args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:JAVA_DESERIALIZE:" .. tag, ttl, mode, RULE_IDS.rule_java_deserialize) then goto done end
+      end
+    end
+  end
+
+  -- ── 41) C2 / paste-tunnel hostnames (X1) ─────────────────────────────────
+  -- Body or args carries an exfil-friendly hostname (pastebin.com/raw/,
+  -- webhook.site, ngrok.io, transfer.sh, …). Family WAF_C2 is distinct from
+  -- WAF_SSRF (rule 701) — SSRF is about scheme abuse, C2 is about specific
+  -- hostnames known to host attacker infrastructure.
+  do
+    local mode = rule_mode(CFG.rule_c2_tunnel, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_c2_tunnel(args, body, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_C2:TUNNEL:" .. tag, ttl, mode, RULE_IDS.rule_c2_tunnel) then goto done end
+      end
+    end
+  end
+
+  -- ── 42) Coinminer tool/pool fingerprints (X2) ────────────────────────────
+  -- xmrig invocation flags, public XMR pool hostnames, monerod etc. The
+  -- stratum scheme is already covered by rule 701 (SSRF_STRATUM) — this
+  -- rule covers the tool/pool side only.
+  do
+    local mode = rule_mode(CFG.rule_coinminer, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_coinminer(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:COINMINER:" .. tag, ttl, mode, RULE_IDS.rule_coinminer) then goto done end
+      end
+    end
+  end
+
+  -- ── 43) Smuggling header pairs (B1) ──────────────────────────────────────
+  -- Content-Length + Transfer-Encoding both present, multiple CL/TE values,
+  -- malformed CL. Distinct from rule 606 (which catches embedded HTTP verbs
+  -- in body/args); both share family WAF_HTTP_SMUGGLING for log triage.
+  do
+    local mode = rule_mode(CFG.rule_smuggling_cl, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_smuggling_cl(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_HTTP_SMUGGLING:" .. tag, ttl, mode, RULE_IDS.rule_smuggling_cl) then goto done end
+      end
+    end
+  end
+
+  -- ── 44) Long URL path segment (B3) ───────────────────────────────────────
+  -- Single path segment (between two `/`) ≥ 256 chars. Indicator of token
+  -- stuffing, base64 in path, or buffer-overflow probing.
+  do
+    local mode = rule_mode(CFG.rule_long_path_segment, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_long_path_segment(uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_LONG_PATH:" .. tag, ttl, mode, RULE_IDS.rule_long_path_segment) then goto done end
+      end
+    end
+  end
+
+  -- ── 45) Header bag flood (B4) ────────────────────────────────────────────
+  -- Total header bytes > 16 KB after subtracting Cookie / Authorization
+  -- volume (those are session-state, not flood). Different mechanism from
+  -- rule 603 (header_vulns) which checks specific CVE headers.
+  do
+    local mode = rule_mode(CFG.rule_header_flood, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_header_flood(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_HEADER_FLOOD:" .. tag, ttl, mode, RULE_IDS.rule_header_flood) then goto done end
+      end
+    end
+  end
+
+  -- ── 46) Polyglot upload (W4) ─────────────────────────────────────────────
+  -- Multipart parts whose Content-Type / filename claim "image" but whose
+  -- first 64 bytes start with an executable opener (`<?php`, `<%`, `<jsp:`,
+  -- `<script`). Distinct from rule 402 (raw substring scan over the whole
+  -- multipart body) — W4 parses parts and bounds the search so a legit form
+  -- field containing `<?php` text can't trigger.
+  do
+    local mode = rule_mode(CFG.rule_polyglot_upload, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_polyglot_upload(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_polyglot_upload) then goto done end
       end
     end
   end

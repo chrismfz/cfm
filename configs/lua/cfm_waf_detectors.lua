@@ -91,17 +91,28 @@ function _M.detect_rce(uri, args, _s)
   return false
 end
 
+-- Returns (action, tag) so the wire-up emits a sub-tag in the reason
+-- string for log triage. Backwards-compatible at the rule-id level (607
+-- is still the rule that fires) and at the family level (`WAF_EXPLOIT_METHOD`
+-- is still the prefix); only the suffix is new (B2 extension).
 function _M.detect_exploit_method(method)
   method = lower(method or "")
 
-  if method == "trace"   then return "block" end
-  if method == "track"   then return "block" end
-  if method == "connect" then return "block" end
+  if method == "trace"   then return "block",     "TRACE"   end
+  if method == "track"   then return "block",     "TRACK"   end
+  -- CFM angie/openresty isn't a forward proxy, so any CONNECT we see is
+  -- by definition out-of-place. Sub-tag captures that intent for log
+  -- triage even though the action is unchanged.
+  if method == "connect" then return "block",     "CONNECT_NOT_PROXY" end
 
-  if method == "propfind" then return "challenge" end
-  if method == "search"   then return "challenge" end
+  -- DAV methods. We don't host WebDAV by default, so any of these is
+  -- out-of-place too. Operators who do run WebDAV should use a per-vhost
+  -- exclusion (rule_id 607) on the affected host rather than relax the
+  -- global default.
+  if method == "propfind" then return "challenge", "DAV_PROPFIND" end
+  if method == "search"   then return "challenge", "DAV_SEARCH"   end
 
-  return nil
+  return nil, nil
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -217,8 +228,32 @@ function _M.detect_php_webshell_body(body, headers)
     s = s:gsub("%+", " ")
   end
 
+  -- Webshell self-identifying strings (W2 extension). These are constants
+  -- and page-title markers found inside the source of well-known shells:
+  -- they're specific enough that a bare prose mention almost never matches
+  -- (no legitimate page contains "0byt3m1n1" or "indoxploit"), but the body
+  -- is still gated by the early-out below so we don't pay scoring cost on
+  -- requests that lack any PHP marker at all.
+  local function ws_name_match()
+    if has(s, "b374k")      then return "B374K"      end
+    if has(s, "c99shell")   then return "C99SHELL"   end
+    if has(s, "r57shell")   then return "R57SHELL"   end
+    if has(s, "indoxploit") then return "INDOXPLOIT" end
+    if has(s, "0byt3m1n1")  then return "0BYT3M1N1"  end
+    if has(s, "weevelyshell") then return "WEEVELY"  end
+    if has(s, "<title>c99")   then return "C99_TITLE"  end
+    if has(s, "<title>r57")   then return "R57_TITLE"  end
+    -- WSO ships under several version banners; the prefix is the stable bit.
+    if has(s, "wso 2.") or has(s, "wso 4.") or has(s, "wso 5.") then return "WSO" end
+    return nil
+  end
+
   if not (has(s, "<?") or has(s, "$_") or has(s, "eval") or has(s, "system")
-          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")) then
+          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")
+          or has(s, "b374k") or has(s, "c99shell") or has(s, "r57shell")
+          or has(s, "indoxploit") or has(s, "0byt3m1n1")
+          or has(s, "weevelyshell") or has(s, "wso 2.")
+          or has(s, "wso 4.") or has(s, "wso 5.")) then
     return nil
   end
 
@@ -239,6 +274,29 @@ function _M.detect_php_webshell_body(body, headers)
     return false
   end
 
+  -- Dynamic include / require — matches only when the include's argument
+  -- starts with `$` (a variable). This is the malicious-loader shape:
+  --   include $tmpfile;          ← matched
+  --   include_once $_POST['k'];  ← matched
+  --   include(@$cfg);            ← matched
+  --   require_once $plugin_path; ← matched
+  -- The literal-string forms used by all legitimate code do NOT match:
+  --   include 'file.php';        ← skipped
+  --   include "/abs/path.php";   ← skipped
+  --   include __DIR__."/x.php";  ← skipped (next char is `_`, not `$`)
+  --   require_once 'app.php';    ← skipped
+  -- This is the FP-mitigation: tightened from a generic
+  -- has_include_construct (which matched any argument shape) after the
+  -- 2026-05-09 sample-replay audit showed the broader pattern would FP
+  -- on common code-snippet plugin saves.
+  local function has_dynamic_include(name)
+    if s:find("%f[%a_]" .. name .. "%s+@?%$") then return true end
+    if s:find("%f[%a_]" .. name .. "%s*%(%s*@?%$") then return true end
+    if s:find("@%s*"     .. name .. "%s+@?%$") then return true end
+    if s:find("@%s*"     .. name .. "%s*%(%s*@?%$") then return true end
+    return false
+  end
+
   if has_php_callable("eval") then score = score + 3 end
   if has_php_callable("assert") then score = score + 3 end
   if has_php_callable("system") then score = score + 3 end
@@ -248,14 +306,42 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("popen") then score = score + 3 end
   if has_php_callable("proc_open") then score = score + 3 end
 
-  if has(s, ";") and (has(s, "?>") or has(s, "<?php") or has(s, "<?=")) then
-    score = score + 1
-  end
+  -- Dynamic include / require at +1. Combined with the existing <?php (+2)
+  -- and superglobal (+2) signals, the loader-style malware fingerprint
+  -- (forms.php / user.php samples from the 2026-05-09 audit, both of which
+  -- include a variable that came from $_POST) reaches score 5 — exactly
+  -- min_score. Literal-form includes (the WP-bootstrap case and any legit
+  -- code-snippet plugin save with `require 'app.php'`) don't match
+  -- has_dynamic_include and never contribute to the score, so they
+  -- can't push a body over threshold.
+  if has_dynamic_include("include")      then score = score + 1 end
+  if has_dynamic_include("include_once") then score = score + 1 end
+  if has_dynamic_include("require")      then score = score + 1 end
+  if has_dynamic_include("require_once") then score = score + 1 end
+
+  -- NOTE: removed in the 2026-05-09 audit follow-up — a bare +1 for
+  -- `;` + `<?php` was firing on any multi-statement legit PHP body that
+  -- mentioned a superglobal (`<?php $x=$_POST['msg']; echo $x;` scored
+  -- 2+2+1=5 → fired with tag RAW_SUPERGLOBAL, an FP on every code-paste
+  -- and form-helper plugin save). Score now needs an actual exec-class
+  -- callable, a webshell-name marker, OR a dynamic include to cross
+  -- threshold — which is the rule's stated intent.
+
+  -- Webshell-name signature: +3 weight, comparable to a single PHP callable.
+  -- Combined with the standard <?php (+2) opener it crosses the default
+  -- min_score (5); alone (no <?php, no superglobal, no callable) it stays
+  -- below threshold so a forum post mentioning "b374k" can't trigger.
+  local ws_tag = ws_name_match()
+  if ws_tag then score = score + 3 end
 
   local min_score = tonumber(CFG.php_webshell_min_score) or 5
   if score < min_score then
     return nil
   end
+
+  -- Webshell-name match outranks the generic RAW_* tags because operators
+  -- want to know *which* shell hit, not just that something did.
+  if ws_tag then return "RAW_WS_" .. ws_tag end
 
   if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
   if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
@@ -269,6 +355,15 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("shell_exec") then return "RAW_SHELL_EXEC" end
   if has_php_callable("popen")      then return "RAW_POPEN" end
   if has_php_callable("proc_open")  then return "RAW_PROC_OPEN" end
+
+  -- Include/require tags rank below the exec-family ones (an attacker who
+  -- has both eval and include in the body is already tagged RAW_EVAL —
+  -- which is the more actionable label). The `_once` variants are checked
+  -- first so the more-specific tag wins when both forms are present.
+  if has_dynamic_include("include_once") then return "RAW_DYN_INCLUDE_ONCE" end
+  if has_dynamic_include("require_once") then return "RAW_DYN_REQUIRE_ONCE" end
+  if has_dynamic_include("include")      then return "RAW_DYN_INCLUDE" end
+  if has_dynamic_include("require")      then return "RAW_DYN_REQUIRE" end
 
   if has(s, "$_get") or has(s, "$_post") or has(s, "$_request") then
     return "RAW_SUPERGLOBAL"
@@ -1233,12 +1328,17 @@ function _M.detect_ssrf_proto(args, body, _ns)
   local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
 
-  if has(s, "file://")   then return "SSRF_FILE" end
-  if has(s, "gopher://") then return "SSRF_GOPHER" end
-  if has(s, "dict://")   then return "SSRF_DICT" end
-  if has(s, "ldap://")   then return "SSRF_LDAP" end
-  if has(s, "ldaps://")  then return "SSRF_LDAPS" end
-  if has(s, "tftp://")   then return "SSRF_TFTP" end
+  if has(s, "file://")        then return "SSRF_FILE" end
+  if has(s, "gopher://")      then return "SSRF_GOPHER" end
+  if has(s, "dict://")        then return "SSRF_DICT" end
+  if has(s, "ldap://")        then return "SSRF_LDAP" end
+  if has(s, "ldaps://")       then return "SSRF_LDAPS" end
+  if has(s, "tftp://")        then return "SSRF_TFTP" end
+  -- Coinminer pool URL scheme. Folded into rule 701 (rather than added as
+  -- part of a future X2 detector) per the X2/rule-701 design call recorded
+  -- in docs/waf.md row 16. X2 will then cover only the tool/pool fingerprints.
+  if has(s, "stratum+tcp://") then return "SSRF_STRATUM" end
+  if has(s, "stratum+ssl://") then return "SSRF_STRATUM" end
   -- sftp:// and ftp:// in param values are suspicious but occur in some
   -- legitimate file-picker integrations; tag them differently for easier triage
   if has(s, "sftp://")   then return "SSRF_SFTP" end
@@ -1669,6 +1769,201 @@ function _M.detect_reverse_shell(uri, args, body, _s)
   return nil
 end
 
+-- Shared helper for the Phase 2 RCE-marker detectors (R2/R3/R4). Builds
+-- the same uri+args+body lowered scan string and walks a {needle, tag}
+-- table. Kept local because it leaks the body cap policy: we cap body at
+-- CFG.max_scan_len (same as detect_reverse_shell) rather than the larger
+-- per-detector limits other body scanners use, since the patterns we look
+-- for are shell one-liners that fit comfortably in 2 KB.
+local function search_rce_markers(uri, args, body, scan_ua, patterns)
+  local s
+  if body and body ~= "" then
+    s = scan_ua .. " " .. lower(cap(body, CFG.max_scan_len))
+  else
+    s = scan_ua
+  end
+  for i = 1, #patterns do
+    local p = patterns[i]
+    if has(s, p[1]) then
+      return p[2]
+    end
+  end
+  return nil
+end
+
+-- [R2] Persistence markers — cron/systemd one-liners that an attacker
+-- runs once they have RCE to keep their foothold across reboots. Also
+-- matches the boundary case where a CGI/admin endpoint receives the
+-- persistence payload as a parameter.
+local PERSISTENCE_PATTERNS = {
+  -- Cron edits. `crontab -l` alone is too benign to flag; the append form
+  -- `(crontab -l; echo …) | crontab -` is the persistence shape.
+  { "crontab -e",                "CRONTAB_EDIT" },
+  { "(crontab -l;",              "CRONTAB_APPEND" },
+  { "echo '* * * * *",           "CRON_INLINE" },
+  { 'echo "* * * * *',           "CRON_INLINE" },
+
+  -- Cron drop-in directory writes. The `>` redirect is what distinguishes a
+  -- write attempt from someone merely mentioning the path in prose.
+  { ">/etc/cron.d/",             "CRON_D_DROP" },
+  { "> /etc/cron.d/",            "CRON_D_DROP" },
+  { ">/etc/cron.hourly/",        "CRON_HOURLY_DROP" },
+  { ">/etc/cron.daily/",         "CRON_DAILY_DROP" },
+  { ">/var/spool/cron/",         "CRON_SPOOL_DROP" },
+
+  -- Systemd unit files. `[Unit]` + `ExecStart=/` together is the canonical
+  -- pair; either alone would be too noisy.
+  { "[unit]\nexecstart=/",       "SYSTEMD_UNIT" },
+  { "[service]\nexecstart=/",    "SYSTEMD_SERVICE" },
+
+  -- Shell autorun appends. The `>>` shape is what flags the intent —
+  -- mere references to ~/.bashrc in docs/articles don't include the
+  -- redirection operator.
+  { ">> ~/.bashrc",                  "BASHRC_APPEND" },
+  { ">> ~/.profile",                 "PROFILE_APPEND" },
+  { ">> /etc/profile",               "ETC_PROFILE_APPEND" },
+  { ">> /etc/bash.bashrc",           "ETC_BASHRC_APPEND" },
+
+  -- SSH key persistence — the `>>` append form is the attack shape.
+  { ">> ~/.ssh/authorized_keys",     "AUTHKEYS_APPEND" },
+  { ">> /root/.ssh/authorized_keys", "ROOT_AUTHKEYS_APPEND" },
+}
+
+function _M.detect_persistence(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), PERSISTENCE_PATTERNS)
+end
+
+-- [R3] Rootkit / LD_PRELOAD artifacts. LD_PRELOAD by itself appears in
+-- legitimate environment debugging (the PHP `extension_dir` topic on
+-- Stack Overflow gets crawled), so the patterns require the assignment
+-- shape (`LD_PRELOAD=/path/`) or an explicit kernel-module insmod.
+local ROOTKIT_PATTERNS = {
+  -- LD_PRELOAD as an environment-variable assignment with a path. Bare
+  -- `LD_PRELOAD` text alone (e.g. blog post mentioning the variable name)
+  -- doesn't fire; the `=/` or `="/` shape is what marks invocation.
+  { "ld_preload=/",              "LD_PRELOAD_PATH" },
+  { 'ld_preload="/',             "LD_PRELOAD_QUOTED" },
+  { ">/etc/ld.so.preload",       "LD_SO_PRELOAD_DROP" },
+  { "> /etc/ld.so.preload",      "LD_SO_PRELOAD_DROP" },
+
+  -- Kernel-module insmod from a writable temp/web path. `insmod ./mod.ko`
+  -- and bare `modprobe` are intentionally NOT here — too generic. We only
+  -- flag insmod targets pointing at /tmp / /var/tmp / /dev/shm.
+  { "insmod /tmp/",              "INSMOD_TMP" },
+  { "insmod /var/tmp/",          "INSMOD_VAR_TMP" },
+  { "insmod /dev/shm/",          "INSMOD_DEV_SHM" },
+
+  -- Direct memory devices — extremely strong indicator. Any HTTP request
+  -- that mentions /dev/mem or /dev/kmem inside command-execution context
+  -- is overwhelmingly an exploit attempt.
+  { "/dev/mem",                  "DEV_MEM_ACCESS" },
+  { "/dev/kmem",                 "DEV_KMEM_ACCESS" },
+}
+
+function _M.detect_rootkit_artifacts(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), ROOTKIT_PATTERNS)
+end
+
+-- [R4] Living-off-the-land binaries. Trimmed to avoid overlap with R1's
+-- REVERSE_SHELL table — we deliberately do NOT include `iex(new-object`,
+-- TcpClient, or socat, because those already fire under rule 322 and
+-- double-counting wastes hit-rate slots. R4 covers the *download* /
+-- *encoded-command* side of post-exploitation, R1 covers the shell.
+local LOLBIN_PATTERNS = {
+  -- Windows certutil / bitsadmin downloaders. Both are classic LOLbins —
+  -- legitimate but rarely seen in HTTP traffic body content.
+  { "certutil -urlcache -split", "CERTUTIL_URLCACHE" },
+  { "certutil.exe -urlcache",    "CERTUTIL_URLCACHE" },
+  { "bitsadmin /transfer",       "BITSADMIN_TRANSFER" },
+  { "bitsadmin.exe /transfer",   "BITSADMIN_TRANSFER" },
+
+  -- Powershell encoded command + IEX webrequest variants not in R1.
+  -- `-enc ` short form is intentionally NOT here — three-char flag has too
+  -- many false-positive substring matches; the spelled-out form is fine.
+  { "-encodedcommand ",          "PS_ENCODED_CMD" },
+  { "iex(iwr ",                  "PS_IEX_IWR" },
+  { "iex(invoke-webrequest",     "PS_IEX_IWR" },
+  { ".downloadstring(",          "PS_DOWNLOAD_STRING" },
+  { ".downloadfile(",            "PS_DOWNLOAD_FILE" },
+
+  -- Linux LOLbin downloaders dropping into world-writable paths. Bare
+  -- `wget http://` is too noisy (legit content links); the `-o /tmp/` /
+  -- `-O /tmp/` shape is what marks dropper intent.
+  { "wget -o /tmp/",             "WGET_TMP_DROP" },
+  { "wget --output-document=/tmp/", "WGET_TMP_DROP" },
+  { "curl -o /tmp/",             "CURL_TMP_DROP" },
+  { "curl --output /tmp/",       "CURL_TMP_DROP" },
+}
+
+function _M.detect_lolbin(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), LOLBIN_PATTERNS)
+end
+
+-- [C2] Java ObjectOutputStream deserialization. Three wire-form variants:
+--
+--   1. Raw bytes 0xAC 0xED 0x00 0x05 anywhere in the body. This is the
+--      JVM's STREAM_MAGIC + STREAM_VERSION pair, prepended to every Java
+--      serialized object stream. Match is plain-byte (no normalize) so we
+--      catch binary uploads / multipart parts that include them.
+--   2. Base64 prefix "rO0AB" (case-insensitive). Encoding 0xAC 0xED 0x00
+--      0x05 followed by any byte yields a stream that always starts with
+--      these five chars; six-byte prefix "rO0ABXNyA" / "rO0ABXcE" are
+--      common but the stable five-char form is what we match. Wide enough
+--      to catch all gadget chains, narrow enough to make accidental match
+--      against random base64 payloads negligible.
+--   3. Hex literal "aced0005" (case-insensitive). Less common in attack
+--      traffic but appears in pen-test write-ups and in some debug-logging
+--      reflections that get reposted into vulnerable forms.
+--
+-- Distinct from PHP serialize (rule 306) which detects O:N:"ClassName":N:{
+-- markers; the two formats share zero bytes so neither rule shadows the
+-- other. Family WAF_RCE so the rule shares post-clearance escalation.
+function _M.detect_java_deserialize(headers, args, body)
+  local function check_text(s)
+    if not s or s == "" then return nil end
+    local sl = lower(s)
+    if has(sl, "ro0ab")    then return "B64_PREFIX" end
+    if has(sl, "aced0005") then return "HEX_PREFIX" end
+    return nil
+  end
+
+  -- args is normalised on the way in by scan_str's callers, but we lower
+  -- it here defensively in case detect_java_deserialize is called from a
+  -- future code path that bypasses normalisation.
+  local t = check_text(args)
+  if t then return t end
+
+  -- Body: raw 4-byte magic match first (cheaper, no normalize), then
+  -- text-form fallback for base64 / hex deliveries.
+  if body and body ~= "" then
+    if string.find(body, "\xac\xed\x00\x05", 1, true) then
+      return "RAW_MAGIC"
+    end
+    t = check_text(body)
+    if t then return t end
+  end
+
+  -- Common header injection vectors for Java deserialize gadgets — both
+  -- Cookie (session-replay attacks) and Authorization (Vaadin-style token
+  -- bombs) are the typical entry points; X-Forwarded-For is occasionally
+  -- abused when an upstream parses the value into a Java object.
+  if headers then
+    local cookie = header_string(headers["cookie"] or headers["Cookie"])
+    t = check_text(cookie); if t then return t end
+
+    local auth = header_string(headers["authorization"] or headers["Authorization"])
+    t = check_text(auth); if t then return t end
+
+    local xff = header_string(headers["x-forwarded-for"] or headers["X-Forwarded-For"])
+    t = check_text(xff); if t then return t end
+  end
+
+  return nil
+end
+
 -- [B5] Webshell ping fingerprint — POST + empty/missing UA + Content-Length:0
 -- + URI ending in .php / .phtml / .phar. The combination is what makes this
 -- low-FP: any one signal alone is common (legit POST forms, monitoring HEAD
@@ -1705,6 +2000,332 @@ function _M.detect_webshell_ping(method, headers, uri)
   end
 
   return "PING"
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 4 — C2 / EXFILTRATION (X1, X2)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- C2_TUNNEL_HOSTS — hostnames known to be popular for attacker exfil and
+-- payload-hosting (paste services with raw-content URLs, request-bin /
+-- webhook services, free tunnel/relay services, ephemeral file hosts).
+-- Match is lower-cased substring against args+body (already normalised
+-- by get_norm_ab in cfm_waf.lua).
+--
+-- Operators on shared hosting may host pastebin clones legitimately —
+-- the rule ships at logonly so the hit-rate sampler quantifies that
+-- before any promotion. Specific noisy entries can be removed without
+-- renumbering rule_id 702.
+local C2_TUNNEL_HOSTS = {
+  -- Paste services with raw-content endpoints
+  { "pastebin.com/raw/",        "PASTEBIN_RAW" },
+  { "paste.ee/r/",              "PASTE_EE" },
+  { "dpaste.com/",              "DPASTE" },
+  { "rentry.co/",               "RENTRY" },
+  { "0x0.st/",                  "0X0_ST" },
+  { "transfer.sh/",             "TRANSFER_SH" },
+  { "controlc.com/",            "CONTROLC" },
+  { "ix.io/",                   "IX_IO" },
+
+  -- Code-host raw content (gist / github raw URLs are heavily abused)
+  { "gist.githubusercontent.com/", "GIST_RAW" },
+  { "raw.githubusercontent.com/",  "GITHUB_RAW" },
+
+  -- Request-bin / webhook services
+  { "webhook.site/",            "WEBHOOK_SITE" },
+  { "requestbin.net/",          "REQUESTBIN" },
+  { "pipedream.com/",           "PIPEDREAM" },
+
+  -- Tunneling / relay services
+  { "ngrok.io/",                "NGROK" },
+  { "ngrok-free.app/",          "NGROK" },
+  { "trycloudflare.com/",       "CLOUDFLARE_TUNNEL" },
+  { "loca.lt/",                 "LOCALTUNNEL" },
+  { "serveo.net/",              "SERVEO" },
+
+  -- Discord/Telegram CDN URLs frequently host malicious payloads
+  { "cdn.discordapp.com/attachments/", "DISCORD_CDN" },
+  { "media.discordapp.net/attachments/", "DISCORD_CDN" },
+  { "api.telegram.org/bot",     "TELEGRAM_BOT" },
+}
+
+function _M.detect_c2_tunnel(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  if s == "" then return nil end
+
+  for i = 1, #C2_TUNNEL_HOSTS do
+    local p = C2_TUNNEL_HOSTS[i]
+    if has(s, p[1]) then
+      return p[2]
+    end
+  end
+  return nil
+end
+
+-- COINMINER_PATTERNS — multi-token patterns specific to crypto-mining
+-- malware. Bare protocol scheme (stratum+tcp://) is intentionally NOT
+-- here — it's already in detect_ssrf_proto (rule 701) per the X2/rule-701
+-- design call recorded in docs/waf.md row 16.
+local COINMINER_PATTERNS = {
+  -- xmrig invocation flags. Multi-token pairs reduce FP risk vs. matching
+  -- "xmrig" alone (which appears in security-research articles).
+  { "xmrig --url",        "XMRIG_URL" },
+  { "xmrig -o ",          "XMRIG_O" },
+  { "xmrig --pool",       "XMRIG_POOL" },
+  { "xmr-stak --url",     "XMRSTAK_URL" },
+  { "xmr-stak -o ",       "XMRSTAK_O" },
+
+  -- Public XMR pool hostnames. These are the long-running "free pool"
+  -- endpoints that repeatedly show up in compromised-host telemetry.
+  { "pool.minexmr.com",   "POOL_MINEXMR" },
+  { "supportxmr.com",     "POOL_SUPPORTXMR" },
+  { "xmrpool.eu",         "POOL_XMRPOOL_EU" },
+  { "moneroocean.stream", "POOL_MONEROOCEAN" },
+  { "nanopool.org",       "POOL_NANOPOOL" },
+  { "fr.minexmr.com",     "POOL_MINEXMR" },
+
+  -- Generic miner control daemon names + binary fetch markers.
+  { "monerod -p ",        "MONEROD" },
+  { "ethminer --pool",    "ETHMINER" },
+}
+
+function _M.detect_coinminer(uri, args, body, _s)
+  return search_rce_markers(uri, args, body,
+    _s or scan_str(uri, args), COINMINER_PATTERNS)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 5 — BEHAVIOURAL / COMBINED-SIGNAL (B1, B3, B4)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- [B1] HTTP smuggling header pairs. Operates on header presence/value
+-- shape, NOT on body bytes — keeps the rule independent of the cfm body
+-- cap (a body that's too large to buffer locally would trip false rules
+-- if we tried to do byte-level CL/body-length comparison).
+--
+-- Returns:
+--   "CL_AND_TE"     — both Content-Length and Transfer-Encoding present.
+--                     RFC 7230 §3.3.3 forbids this combination; it's the
+--                     classic CL.TE smuggling primitive.
+--   "MULTI_CL"      — Content-Length value contains a comma (nginx/angie
+--                     joins duplicate headers with ", "). Two CL values
+--                     means two parsers can disagree.
+--   "MULTI_TE"      — Transfer-Encoding value contains a comma when it
+--                     isn't a recognised RFC chained-encoding (e.g.
+--                     "gzip, chunked" is fine; "chunked, identity" is
+--                     usually not).
+--   "CL_MALFORMED"  — Content-Length value isn't a non-negative integer.
+function _M.detect_smuggling_cl(headers)
+  if not headers then return nil end
+
+  local cl = header_string(headers["content-length"] or headers["Content-Length"])
+  local te = header_string(headers["transfer-encoding"] or headers["Transfer-Encoding"])
+
+  -- Both present → smuggling primitive regardless of values.
+  if cl ~= "" and te ~= "" then
+    return "CL_AND_TE"
+  end
+
+  if cl ~= "" then
+    if has(cl, ",") then
+      return "MULTI_CL"
+    end
+    -- Strict integer parse: must be all digits, non-empty, non-negative.
+    if not cl:match("^%d+$") then
+      return "CL_MALFORMED"
+    end
+  end
+
+  if te ~= "" then
+    -- "gzip, chunked" / "chunked" / "identity" are valid. Multiple values
+    -- with chunked NOT in the last position are a classic smuggling shape.
+    local te_low = lower(te)
+    if has(te_low, ",") then
+      -- Allow "gzip, chunked" / "deflate, chunked" / "identity" — only
+      -- flag when chunked appears but isn't the final element.
+      local last = te_low:match("([^,%s]+)%s*$")
+      if last and last ~= "chunked" and has(te_low, "chunked") then
+        return "MULTI_TE"
+      end
+    end
+  end
+
+  return nil
+end
+
+-- [B3] Long URL path segment. "Path segment" = substring between two `/`
+-- in the URI's path component (query/fragment stripped first). Threshold
+-- is 256 chars: most legitimate URIs are well under 100 chars per
+-- segment, including hashed asset filenames. Returns "SEG_<len>" — the
+-- length is the longest segment, included so log analysis can distinguish
+-- "just over 256" from "10 KB stuffed".
+local LONG_PATH_THRESHOLD = 256
+
+function _M.detect_long_path_segment(uri)
+  if not uri or uri == "" then return nil end
+
+  local path = uri:match("^([^?#]+)") or uri
+  local max_len = 0
+  for seg in path:gmatch("[^/]+") do
+    local n = #seg
+    if n > max_len then max_len = n end
+  end
+
+  if max_len >= LONG_PATH_THRESHOLD then
+    return "SEG_" .. max_len
+  end
+  return nil
+end
+
+-- [B4] Header bag flood. Sums header byte volume excluding Cookie /
+-- Authorization (those are session-state, frequently legit-large on
+-- shared hosting with WordPress / cPanel sessions). Anything > 16 KB
+-- in the remainder is well above legit traffic — typical request headers
+-- are 1-3 KB total.
+--
+-- Returns "FLOOD:<bytes>" — the value is the non-session header total.
+local HEADER_FLOOD_THRESHOLD = 16 * 1024  -- 16 KB
+
+function _M.detect_header_flood(headers)
+  if not headers then return nil end
+
+  local total = 0
+  for k, v in pairs(headers) do
+    local kl = lower(k)
+    if kl ~= "cookie" and kl ~= "authorization" then
+      local v_str = header_string(v)
+      -- Approximate "Key: Value\r\n" wire size; close enough for a threshold.
+      total = total + #k + #v_str + 4
+    end
+  end
+
+  if total >= HEADER_FLOOD_THRESHOLD then
+    return "FLOOD:" .. total
+  end
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 1 — W4 POLYGLOT UPLOAD
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- POLYGLOT_OPENERS — first-bytes signatures that mark a "claimed image"
+-- part as actually executable. Order matters: more-specific tags first
+-- (`<%@` before `<%`, `<?php` before `<?`).
+local POLYGLOT_OPENERS = {
+  { "<?php",   "POLYGLOT_PHP" },
+  { "<?=",     "POLYGLOT_PHP_SHORT" },
+  { "<%@",     "POLYGLOT_JSP_DIRECTIVE" },
+  { "<jsp:",   "POLYGLOT_JSP" },
+  { "<%",      "POLYGLOT_ASP" },
+  { "<script", "POLYGLOT_SCRIPT" },
+}
+
+-- Image extensions that, combined with PHP/ASP/JSP/script content, mark
+-- a polyglot upload. Matched as suffixes on the lowered filename.
+local POLYGLOT_IMAGE_EXTS = {
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tif", ".tiff",
+}
+
+-- [W4] Polyglot upload — image-claimed multipart part whose payload starts
+-- with an executable opener. Distinct from rule 402 (detect_upload_content)
+-- which substring-scans the entire raw body: this rule parses parts and
+-- bounds the executable-opener check to the first 64 bytes of payload, so
+-- legitimate form fields containing PHP code samples can't trigger.
+--
+-- Returns "POLYGLOT_<TYPE>" on hit, nil on miss. Same family as rule 402
+-- (WAF_UPLOAD_CONTENT — already in WAF_HIGH_RISK_REASONS).
+function _M.detect_polyglot_upload(body, headers)
+  if not body or body == "" then return nil end
+
+  headers = headers or {}
+  -- Boundary tokens are case-sensitive (RFC 2046 §5.1.1) — extract from the
+  -- original header value, not a lowered copy. Only the multipart/form-data
+  -- check itself is case-insensitive.
+  local ct_raw = headers["content-type"] or headers["Content-Type"] or ""
+  if not has(lower(ct_raw), "multipart/form-data") then return nil end
+
+  local boundary = ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  if not boundary then return nil end
+  boundary = boundary:gsub('^"', ''):gsub('"$', '')
+  if boundary == "" then return nil end
+
+  local sep = "--" .. boundary
+
+  -- Bound the part-walk to a safe iteration cap so a malformed body can't
+  -- spin the loop. Legit multipart uploads almost always have <10 parts.
+  local pos = 1
+  local iter_cap = 64
+  local iter = 0
+
+  while iter < iter_cap do
+    iter = iter + 1
+
+    local sep_at = body:find(sep, pos, true)
+    if not sep_at then break end
+
+    local hdr_start = sep_at + #sep
+    -- "--<boundary>--" marks end of multipart; stop walking.
+    if body:sub(hdr_start, hdr_start + 1) == "--" then break end
+    -- Skip the CRLF (or bare LF) that follows the boundary.
+    if body:sub(hdr_start, hdr_start + 1) == "\r\n" then
+      hdr_start = hdr_start + 2
+    elseif body:sub(hdr_start, hdr_start) == "\n" then
+      hdr_start = hdr_start + 1
+    end
+
+    -- Find header/payload split (blank line). Try CRLF first, then LF.
+    local split_at = body:find("\r\n\r\n", hdr_start, true)
+    local split_skip = 4
+    if not split_at then
+      split_at = body:find("\n\n", hdr_start, true)
+      split_skip = 2
+    end
+    if not split_at then break end
+
+    local part_headers = body:sub(hdr_start, split_at - 1)
+    local payload_start = split_at + split_skip
+    -- Only look at the first 64 bytes of payload; image polyglots that
+    -- wrap a PHP shell put the opener at the very start of the file so
+    -- that PHP's parser sees it before the rest of the "image" data.
+    local payload = body:sub(payload_start, payload_start + 63)
+
+    -- Decide if this part is image-claimed: either Content-Type: image/*
+    -- in the part headers, or a filename ending in a known image extension.
+    local part_ct = lower(part_headers:match("[Cc]ontent%-[Tt]ype:%s*([^\r\n]+)") or "")
+    local is_image_ct = has(part_ct, "image/")
+
+    local fname = part_headers:match('[Ff]ilename%s*=%s*"([^"]+)"')
+                  or part_headers:match("[Ff]ilename%s*=%s*'([^']+)'")
+                  or part_headers:match("[Ff]ilename%s*=%s*([^%s;\"'][^%s;\"']*)")
+                  or ""
+    local fname_low = lower(fname)
+    local is_image_ext = false
+    if fname_low ~= "" then
+      for i = 1, #POLYGLOT_IMAGE_EXTS do
+        local ext = POLYGLOT_IMAGE_EXTS[i]
+        if fname_low:sub(-#ext) == ext then
+          is_image_ext = true
+          break
+        end
+      end
+    end
+
+    if is_image_ct or is_image_ext then
+      local p_low = lower(payload)
+      for i = 1, #POLYGLOT_OPENERS do
+        local opener = POLYGLOT_OPENERS[i]
+        if has(p_low, opener[1]) then
+          return opener[2]
+        end
+      end
+    end
+
+    -- Advance past this part for the next iteration.
+    pos = payload_start
+  end
+
+  return nil
 end
 
 
