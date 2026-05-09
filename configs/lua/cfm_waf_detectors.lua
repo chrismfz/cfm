@@ -274,6 +274,23 @@ function _M.detect_php_webshell_body(body, headers)
     return false
   end
 
+  -- include / require are PHP language constructs, not functions — they
+  -- accept the parens form `include($f)` AND the bare-statement form
+  -- `include $f;`. Loader malware (forms.php / user.php samples) uses the
+  -- bare form, which has_php_callable's `name\s*\(` pattern misses. The
+  -- second form here matches "name + whitespace + non-whitespace argument
+  -- start" which covers `include $var`, `include 'file'`, `include "file"`,
+  -- `include __DIR__.  …`, `include /tmp/x` etc. The frontier %f[%a_]
+  -- still requires `include` to be a complete identifier (no false match
+  -- against `includes` or `pre_include`).
+  local function has_include_construct(name)
+    if s:find("%f[%a_]" .. name .. "%s*%(") then return true end
+    if s:find("%f[%a_]" .. name .. "%s+%S") then return true end
+    if s:find("@%s*"     .. name .. "%s*%(") then return true end
+    if s:find("@%s*"     .. name .. "%s+%S") then return true end
+    return false
+  end
+
   if has_php_callable("eval") then score = score + 3 end
   if has_php_callable("assert") then score = score + 3 end
   if has_php_callable("system") then score = score + 3 end
@@ -282,6 +299,19 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("shell_exec") then score = score + 3 end
   if has_php_callable("popen") then score = score + 3 end
   if has_php_callable("proc_open") then score = score + 3 end
+
+  -- include / require family at +1 (lower than eval/system at +3) because
+  -- legitimate code uses them constantly. The +1 weight, combined with the
+  -- existing <?php (+2), superglobal (+2), and ;<?php (+1) signals, means
+  -- the loader-style malware fingerprint (forms.php / user.php samples
+  -- from the 2026-05-09 audit) reaches score 6 — past min_score=5. A
+  -- bare `<?php include __DIR__."/wp-blog-header.php";` (WordPress-style
+  -- bootstrap with NO superglobal) scores 2+1+1=4, still below threshold.
+  -- That's the FP guard that makes adding include-family safe.
+  if has_include_construct("include")      then score = score + 1 end
+  if has_include_construct("include_once") then score = score + 1 end
+  if has_include_construct("require")      then score = score + 1 end
+  if has_include_construct("require_once") then score = score + 1 end
 
   if has(s, ";") and (has(s, "?>") or has(s, "<?php") or has(s, "<?=")) then
     score = score + 1
@@ -315,6 +345,15 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("shell_exec") then return "RAW_SHELL_EXEC" end
   if has_php_callable("popen")      then return "RAW_POPEN" end
   if has_php_callable("proc_open")  then return "RAW_PROC_OPEN" end
+
+  -- Include/require tags rank below the exec-family ones (an attacker who
+  -- has both eval and include in the body is already tagged RAW_EVAL —
+  -- which is the more actionable label). The `_once` variants are checked
+  -- first so the more-specific tag wins when both forms are present.
+  if has_include_construct("include_once") then return "RAW_INCLUDE_ONCE" end
+  if has_include_construct("require_once") then return "RAW_REQUIRE_ONCE" end
+  if has_include_construct("include")      then return "RAW_INCLUDE" end
+  if has_include_construct("require")      then return "RAW_REQUIRE" end
 
   if has(s, "$_get") or has(s, "$_post") or has(s, "$_request") then
     return "RAW_SUPERGLOBAL"

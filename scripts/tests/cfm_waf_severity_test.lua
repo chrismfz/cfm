@@ -993,6 +993,63 @@ do
   check(hit == false, "62: W4 polyglot — non-image text field with <?php text, no hit")
 end
 
+-- ── Test 63: Rule 404 ext — <?php + $_POST + include scores past threshold ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- <?php (+2) + $_POST (+2) + include( (+2) = 6 → past min_score 5.
+  -- This is the loader-pattern fingerprint shared by the forms.php and
+  -- user.php malware samples from the 2026-05-09 sample-replay audit.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "src=<?php $tmp=$_POST['key']; include $tmp;",
+  }))
+  check(hit == true,                                       "63: rule 404 ext — hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_INCLUDE",     "63: rule 404 ext — RAW_INCLUDE tag")
+  check(action == "challenge",                             "63: rule 404 ext — challenge action")
+  check(rule_id == 404,                                    "63: rule 404 ext — rule id 404 (extension, not new rule)")
+end
+
+-- ── Test 64: Rule 404 ext — sanitised forms.php loader sample fires ─────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Sanitised excerpt from the 5a71c4ab-forms.php sample: <?php opener,
+  -- $_POST superglobal, include_once executor. Without the include
+  -- extension this body scores 4 (below threshold) and misses.
+  local body = '<?php if(@$_POST["key"]!==null): '
+            .. '$f=fopen("/tmp/.pset","w"); '
+            .. 'fwrite($f,$payload); fclose($f); '
+            .. 'include_once "/tmp/.pset"; unlink("/tmp/.pset"); '
+            .. 'endif;'
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = body,
+  }))
+  check(hit == true,                                            "64: rule 404 ext — forms.php sample hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_INCLUDE_ONCE",     "64: rule 404 ext — RAW_INCLUDE_ONCE tag")
+end
+
+-- ── Test 65: Rule 404 ext — bare include without superglobal stays below ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- WordPress-style bootstrap: <?php (+2) + include( (+2) = 4. No
+  -- superglobal, no eval-family callable. Below min_score=5 → no hit.
+  -- This is the FP guard that makes the +2 weight (vs eval's +3) safe.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = '<?php include __DIR__."/wp-blog-header.php";',
+  }))
+  check(hit == false, "65: rule 404 ext — bare include without superglobal, no hit")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)
