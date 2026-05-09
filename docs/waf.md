@@ -206,7 +206,7 @@ The main `cfm.waf.log` stays compact for high-volume monitoring. Operators tail 
 | Path | Cost | Notes |
 |---|---|---|
 | Per WAF check | ~3-5µs | Two shdict incr + one get-and-compare. <1% of WAF check cost. |
-| Per flush (~1/min cluster-wide) | ~5-10ms on one request | Only the lock-winner pays it. ~1 in 6000 requests at 100 req/s. |
+| Per flush (~1/min cluster-wide) | ~3µs on the lock winner | The actual snapshot+RPC runs in a background light-thread via `ngx.timer.at(0, …)`; the request that wins the lock pays only the lock-claim + timer-schedule cost. RPC latency is 100% off the request path. |
 | Sampling (per request) | sub-µs | `math.random() < sr` and integer compare. |
 | Sampled trigger (1% of triggers) | ~50µs | Three extra string fields in JSON + one file write. |
 | `/api/v1/waf/hit-rates` | <100ms typical | `json_extract` is O(N events in window); operator-pulled, never on hot path. |
