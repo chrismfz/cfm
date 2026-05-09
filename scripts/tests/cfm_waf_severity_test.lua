@@ -905,6 +905,94 @@ do
   check(hit == false, "58: B4 header_flood — Cookie alone is session state, no hit")
 end
 
+-- Helper to build a multipart body with a single part of the given headers
+-- and payload. Boundary is a fixed test sentinel; the same string is fed
+-- into the request Content-Type header.
+local TEST_BOUNDARY = "----CFMTestBoundary12345"
+local function multipart_body(part_headers, payload)
+  return "--" .. TEST_BOUNDARY .. "\r\n"
+      .. part_headers .. "\r\n\r\n"
+      .. payload .. "\r\n"
+      .. "--" .. TEST_BOUNDARY .. "--\r\n"
+end
+local TEST_CT = "multipart/form-data; boundary=" .. TEST_BOUNDARY
+
+-- ── Test 59: W4 polyglot — image/png CT + <?php opener (rule 412) ───────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="avatar"; filename="x.png"\r\n'
+    .. 'Content-Type: image/png',
+    "<?php @eval($_POST['c']); ?>")
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == true,                                       "59: W4 polyglot — hit")
+  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_PHP",       "59: W4 polyglot — POLYGLOT_PHP tag")
+  check(action == "logonly",                               "59: W4 polyglot — logonly")
+  check(rule_id == 412,                                    "59: W4 polyglot — rule id 412")
+end
+
+-- ── Test 60: W4 polyglot — .jpg filename without image CT still fires ───────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- No Content-Type on the part — but the filename ends in .jpg, which is
+  -- enough to trigger the image-claimed branch.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="cute.jpg"',
+    "<%@ page import=\"java.util.*\" %>")
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == true,                                                    "60: W4 polyglot — jsp directive hit")
+  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_JSP_DIRECTIVE",          "60: W4 polyglot — JSP directive tag")
+end
+
+-- ── Test 61: W4 polyglot — image part without executable opener doesn't fire ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- A real PNG starts with the PNG signature bytes — no <?php / <% / <jsp:.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="avatar"; filename="x.png"\r\n'
+    .. 'Content-Type: image/png',
+    "\x89PNG\r\n\x1a\n....IHDR....actually-an-image")
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == false, "61: W4 polyglot — real PNG bytes, no hit")
+end
+
+-- ── Test 62: W4 polyglot — text form field with <?php text doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+
+  -- A regular text form field (no image CT, no image extension) carrying
+  -- <?php text. Rule 402 would scan the raw body and fire; W4 does NOT
+  -- because the part isn't image-claimed.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="snippet"',
+    "<?php echo 'pasted code sample for the article'; ?>")
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = TEST_CT },
+    body    = body,
+  }))
+  check(hit == false, "62: W4 polyglot — non-image text field with <?php text, no hit")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

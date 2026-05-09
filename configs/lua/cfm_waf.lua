@@ -149,6 +149,15 @@ local CFG = {
   rule_long_path_segment = "logonly",  -- single URL path segment ≥ 256 chars
   rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
 
+  -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
+  -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
+  -- 402 (detect_upload_content) which substring-scans the entire raw
+  -- multipart body — W4 parses parts and checks the first 64 bytes of any
+  -- image-typed / image-extension part for PHP/ASP/JSP/script openers.
+  -- Same family WAF_UPLOAD_CONTENT (high-risk) so post-clearance routing
+  -- is correct when promoted.
+  rule_polyglot_upload   = "logonly",  -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -285,6 +294,7 @@ local RULE_IDS = {
   rule_script_obfuscation      = 405,
   rule_webshell_path           = 410,
   rule_webshell_ping           = 411,
+  rule_polyglot_upload         = 412,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1046,6 +1056,23 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_HEADER_FLOOD:" .. tag, ttl, mode, RULE_IDS.rule_header_flood) then goto done end
+      end
+    end
+  end
+
+  -- ── 46) Polyglot upload (W4) ─────────────────────────────────────────────
+  -- Multipart parts whose Content-Type / filename claim "image" but whose
+  -- first 64 bytes start with an executable opener (`<?php`, `<%`, `<jsp:`,
+  -- `<script`). Distinct from rule 402 (raw substring scan over the whole
+  -- multipart body) — W4 parses parts and bounds the search so a legit form
+  -- field containing `<?php` text can't trigger.
+  do
+    local mode = rule_mode(CFG.rule_polyglot_upload, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_polyglot_upload(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_polyglot_upload) then goto done end
       end
     end
   end
