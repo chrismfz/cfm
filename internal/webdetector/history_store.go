@@ -219,6 +219,14 @@ CREATE INDEX IF NOT EXISTS idx_history_events_type_ts ON history_events(event_ty
 CREATE INDEX IF NOT EXISTS idx_history_events_host_ts ON history_events(host, ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_history_events_ip_ts ON history_events(ip, ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_history_events_reason_ts ON history_events(reason, ts_unix DESC);
+
+CREATE TABLE IF NOT EXISTS waf_inspected (
+    hour_unix INTEGER NOT NULL,
+    host      TEXT    NOT NULL DEFAULT '',
+    count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour_unix, host)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_waf_inspected_hour ON waf_inspected(hour_unix DESC);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("init history sqlite schema: %w", err)
@@ -435,6 +443,106 @@ ORDER BY cnt DESC`, args...)
 		out = []WAFRuleHit{}
 	}
 	return out, rows.Err()
+}
+
+// RecordWAFInspected upserts an absolute count for the (hour_unix, host)
+// tuple. Lua's maybe_flush_waf_insp pushes its full snapshot every minute;
+// since each push carries the live shdict counter for the current hour,
+// repeated upserts on the same row simply overwrite with the latest value.
+//
+// Multiple workers' independent counters cannot be summed by overwrite —
+// but Lua's `incr` already accumulates across workers in shared dict, so
+// the pushed `count` is already the union. Go just persists it.
+func (s *HistoryStore) RecordWAFInspected(hourUnix int64, host string, count int) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if hourUnix <= 0 || count < 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+INSERT INTO waf_inspected (hour_unix, host, count)
+VALUES (?, ?, ?)
+ON CONFLICT(hour_unix, host) DO UPDATE SET count = excluded.count`,
+		hourUnix, strings.TrimSpace(host), count)
+	return err
+}
+
+// WAFHitsByRuleID returns hit counts grouped by the waf_rule_id stored in
+// payload_json. Reason-string aggregation (WAFByRule) is too coarse for the
+// rollout-gate use case because several distinct rules share a reason family
+// (e.g. all WAF_AUTH_BURST tags). Per-ID precision needs json_extract.
+//
+// Events emitted before PR A's rule-id plumbing have NULL/missing
+// waf_rule_id and are excluded.
+func (s *HistoryStore) WAFHitsByRuleID(host string, hours int) (map[int]int, error) {
+	if s == nil || s.db == nil {
+		return map[int]int{}, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+	clauses := []string{
+		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
+		"ts_unix >= ?",
+		"payload_json IS NOT NULL",
+		"json_extract(payload_json, '$.waf_rule_id') IS NOT NULL",
+	}
+	args := []interface{}{from}
+	if host != "" {
+		clauses = append(clauses, "host = ?")
+		args = append(args, host)
+	}
+	q := `SELECT CAST(json_extract(payload_json, '$.waf_rule_id') AS INTEGER) AS rid, COUNT(*)
+FROM history_events
+WHERE ` + strings.Join(clauses, " AND ") + `
+GROUP BY rid`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]int{}
+	for rows.Next() {
+		var rid, cnt int
+		if err := rows.Scan(&rid, &cnt); err != nil {
+			return nil, err
+		}
+		if rid > 0 {
+			out[rid] = cnt
+		}
+	}
+	return out, rows.Err()
+}
+
+// WAFInspected returns the total inspection count over the given window.
+// host="" returns the global aggregate (the rows where host=''); a non-empty
+// host filters to that vhost's per-host counts.
+//
+// Window is [now - hours*3600, now]; the table stores per-hour buckets so
+// resolution is hourly.
+func (s *HistoryStore) WAFInspected(host string, hours int) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+	q := `SELECT COALESCE(SUM(count), 0) FROM waf_inspected WHERE hour_unix >= ? AND host = ?`
+	var n int
+	err := s.db.QueryRow(q, from, strings.TrimSpace(host)).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // VhostOverviewQuery returns the combined security overview for a single vhost.

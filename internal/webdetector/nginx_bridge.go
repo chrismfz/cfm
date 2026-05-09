@@ -89,7 +89,19 @@ type NginxBridge struct {
 	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), and TTL so the caller
 	// can log to cfm.challenges.log with enrichment. Optional metadata
 	// Set via SetTriggerHook. Called without b.mu held.
-	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int)
+	//
+	// `sample` mirrors nginxIPMsg.Sample — when true, the ua/referer/contentType
+	// strings are populated from the request and the consumer should write a
+	// richer line to cfm.waf.sampled.log. Non-sampled triggers pass empty
+	// strings for those three fields.
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string)
+
+	// OnWAFStats is called once per row of the snapshot pushed by Lua.
+	// Each call carries an absolute count for the (hour_unix, host) tuple;
+	// the persister must use UPSERT semantics — repeated calls for the same
+	// (hour, host) overwrite. Set via SetWAFStatsHook. Called without b.mu
+	// held; dispatched async.
+	OnWAFStats func(hourUnix int64, host string, count int)
 
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
@@ -306,6 +318,27 @@ type nginxIPMsg struct {
 	// Distinct from the decision-engine rule_id field returned in
 	// /nginx/decision (that one is for TrafficRuleEvalInput rules).
 	WAFRuleID int `json:"waf_rule_id,omitempty"`
+
+	// Sampled-hit-log fields. Present only when Lua decided to sample this
+	// trigger (CFM_WAF_SAMPLE_RATE). Used to write the richer
+	// cfm.waf.sampled.log entry without bloating every trigger push.
+	Sample      bool   `json:"sample,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Referer     string `json:"referer,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+// nginxWAFStatsMsg is the snapshot pushed by Lua's maybe_flush_waf_insp.
+// Each row is an absolute count for the (hour_unix, host) tuple — Go upserts
+// idempotently, so repeated pushes for the same hour are safe.
+type nginxWAFStatsMsg struct {
+	Rows []nginxWAFStatsRow `json:"rows"`
+}
+
+type nginxWAFStatsRow struct {
+	HourUnix int64  `json:"hour_unix"`
+	Host     string `json:"host"`
+	Count    int    `json:"count"`
 }
 
 type nginxIPClearMsg struct {
@@ -719,7 +752,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string)) {
 	if b == nil {
 		return
 	}
@@ -732,6 +765,16 @@ func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, statu
 		return
 	}
 	b.OnObserve = fn
+}
+
+// SetWAFStatsHook registers a callback that fires once per row of the
+// snapshot pushed by Lua. Rows carry absolute counts per (hour, host); the
+// consumer should UPSERT into a sparse table.
+func (b *NginxBridge) SetWAFStatsHook(fn func(hourUnix int64, host string, count int)) {
+	if b == nil {
+		return
+	}
+	b.OnWAFStats = fn
 }
 
 // hookQueueSize is the buffer depth for the async hook dispatcher. Sized so
@@ -1310,6 +1353,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
+	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
 	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
 	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
@@ -1588,8 +1632,9 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// allowed to exceed the Lua client's decision_timeout_ms.
 	if reason != "" && b.OnTrigger != nil {
 		ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
+		sample, ua, referer, ct := msg.Sample, msg.UA, msg.Referer, msg.ContentType
 		b.dispatchHook(func() {
-			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID)
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, sample, ua, referer, ct)
 		})
 	}
 
@@ -1893,8 +1938,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			if reason != "" && b.OnTrigger != nil {
 				ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
+				sample, ua, referer, ct := msg.Sample, msg.UA, msg.Referer, msg.ContentType
 				b.dispatchHook(func() {
-					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID)
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, sample, ua, referer, ct)
 				})
 			}
 			processed++
@@ -1969,6 +2015,39 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
+}
+
+// handleWAFStats accepts the periodic snapshot pushed by Lua's
+// maybe_flush_waf_insp. The body is {"rows":[{hour_unix, host, count}, ...]}
+// with absolute counts per (hour, host); Go upserts each row idempotently.
+//
+// Set via b.OnWAFStats; if no consumer is wired the request is accepted
+// silently to avoid Lua spamming retries during config reload.
+func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var msg nginxWAFStatsMsg
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if b.OnWAFStats != nil && len(msg.Rows) > 0 {
+		// Copy fields out of the request-scope slice; dispatch one hook per
+		// row so each persistence call is independent.
+		for _, r := range msg.Rows {
+			hr, host, cnt := r.HourUnix, r.Host, r.Count
+			b.dispatchHook(func() {
+				b.OnWAFStats(hr, host, cnt)
+			})
+		}
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (b *NginxBridge) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -70,6 +70,7 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove)
 	mux.HandleFunc("/api/v1/waf/engine/summary", e.handleWAFEngineSummary)
 	mux.HandleFunc("/api/v1/waf/rules", e.handleWAFRules)
+	mux.HandleFunc("/api/v1/waf/hit-rates", e.handleWAFHitRates)
 	e.RegisterCpanelHTTP(mux)
 }
 

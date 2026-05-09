@@ -609,6 +609,35 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 	})
 }
 
+// RecordWAFInspected forwards a single (hour_unix, host, count) bucket from
+// Lua's flush snapshot into the persistent store. Each row is an absolute
+// count for the bucket — repeated pushes overwrite, so calling this many
+// times for the same (hour, host) is safe.
+func (e *Engine) RecordWAFInspected(hourUnix int64, host string, count int) {
+	if e == nil || e.history == nil {
+		return
+	}
+	if err := e.history.RecordWAFInspected(hourUnix, host, count); err != nil {
+		// Non-fatal: the next flush will retry the same row. Log at debug
+		// only to avoid spamming on transient SQLite locks.
+		_ = err
+	}
+}
+
+// WAFInspected returns the inspection-count denominator for hit-rate
+// computations over the given window. host="" returns the global aggregate;
+// non-empty filters to that vhost.
+func (e *Engine) WAFInspected(host string, hours int) int {
+	if e == nil || e.history == nil {
+		return 0
+	}
+	n, err := e.history.WAFInspected(host, hours)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func (e *Engine) expireOldChallenges() {
 	if e == nil || e.history == nil || e.chalAPI == nil {
 		return
