@@ -70,6 +70,7 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 		fmt.Fprintln(w, "  --purge --dry-run: would remove")
 		fmt.Fprintln(w, "    ", ConfPath)
 		fmt.Fprintln(w, "    ", SysctlPath)
+		fmt.Fprintln(w, "    ", ModprobePath)
 		fmt.Fprintln(w, "  (.cfm-kernsec.bak files would be left in place)")
 	case opts.DryRun:
 		fmt.Fprintln(w, "  --dry-run: would write tier=0 to", ConfPath)
@@ -116,12 +117,13 @@ func loadConfForDisable() (*Conf, string) {
 	}, fmt.Sprintf("(conf load error: %v)", err)
 }
 
-// purgeManagedFiles removes /etc/cfm/kernsec.conf and the managed
-// sysctl file. Backup files (.cfm-kernsec.bak) are intentionally left
-// in place so operators retain a manual-restore path even after a
-// --purge. Idempotent: missing files are not errors.
+// purgeManagedFiles removes /etc/cfm/kernsec.conf, the managed sysctl
+// file, and the managed modprobe file. Backup files
+// (.cfm-kernsec.bak) are intentionally left in place so operators
+// retain a manual-restore path even after a --purge. Idempotent:
+// missing files are not errors.
 func purgeManagedFiles(w io.Writer) error {
-	for _, p := range []string{ConfPath, SysctlPath} {
+	for _, p := range []string{ConfPath, SysctlPath, ModprobePath} {
 		if err := os.Remove(p); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				fmt.Fprintf(w, "  %s already absent\n", p)

@@ -43,7 +43,7 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 
 	printResolvedSection(w, "Sysctls", rs.Sysctls, opts)
 	printResolvedSection(w, "Boot args", rs.BootArgs, opts)
-	printResolvedSection(w, "Modules (Phase 3 will write blacklist)", rs.Modules, opts)
+	printResolvedSection(w, "Modules", rs.Modules, opts)
 	printResolvedSection(w, "Mounts (audit-only)", rs.Mounts, opts)
 
 	fmt.Fprintln(w)

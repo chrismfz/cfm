@@ -74,6 +74,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	rs := Resolve(conf, profile)
 	sysctls := rs.ApplySysctls()
 	bootArgs := rs.ApplyBootArgs()
+	modules := rs.ApplyModules()
 
 	fs := RealFS{}
 	backend := DetectBackend(fs)
@@ -83,8 +84,8 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	fmt.Fprintf(w, "Tier:    %d\n", conf.Tier)
 	fmt.Fprintf(w, "Backend: %s\n", backend.Label())
 	fmt.Fprintf(w, "Profile: %s\n", describeProfile(profile))
-	fmt.Fprintf(w, "Rules:   sysctls=%d  boot=%d  modules=%d (Phase 3)  mounts=%d (audit)\n",
-		len(sysctls), len(bootArgs), count(rs.Modules, Apply), count(rs.Mounts, Apply))
+	fmt.Fprintf(w, "Rules:   sysctls=%d  boot=%d  modules=%d  mounts=%d (audit)\n",
+		len(sysctls), len(bootArgs), len(modules), count(rs.Mounts, Apply))
 	switch {
 	case opts.Check:
 		fmt.Fprintln(w, "Mode:    --check (no writes; exit 1 if drift)")
@@ -96,6 +97,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	fmt.Fprintln(w)
 
 	sysctlContent := RenderSysctlFile(sysctls)
+	modprobeContent := RenderModprobeFile(modules)
 	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
 	if cmdlineErr != nil {
 		fmt.Fprintln(w, "kernsec apply:", cmdlineErr)
@@ -104,6 +106,8 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
+	drift.ModprobeDiffers, drift.ModprobeReadErr = modprobeDriftCheck(modprobeContent)
+	loadedManaged := loadedAndManaged(modules)
 
 	fmt.Fprintln(w, "[Sysctl]")
 	fmt.Fprintf(w, "  target:  %s\n", SysctlPath)
@@ -128,11 +132,28 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 			fmt.Fprintln(w, "  status:            in sync")
 		}
 	}
+
+	fmt.Fprintln(w, "[Modules]")
+	fmt.Fprintf(w, "  target:  %s\n", ModprobePath)
+	switch {
+	case drift.ModprobeReadErr != nil:
+		fmt.Fprintf(w, "  status:  ERROR reading existing file: %v\n", drift.ModprobeReadErr)
+	case drift.ModprobeDiffers:
+		fmt.Fprintf(w, "  status:  DRIFT (would write %d bytes)\n", len(modprobeContent))
+	default:
+		fmt.Fprintln(w, "  status:  in sync")
+	}
+	if len(loadedManaged) > 0 {
+		fmt.Fprintf(w, "  loaded:  %d managed modules currently loaded — reboot or rmmod required:\n", len(loadedManaged))
+		for _, name := range loadedManaged {
+			fmt.Fprintf(w, "             %s\n", name)
+		}
+	}
 	fmt.Fprintln(w)
 
 	if opts.Check {
-		if drift.SysctlDiffers || drift.BootDiffers ||
-			drift.SysctlReadErr != nil || drift.BootReadErr != nil {
+		if drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers ||
+			drift.SysctlReadErr != nil || drift.BootReadErr != nil || drift.ModprobeReadErr != nil {
 			fmt.Fprintln(w, "[!] drift detected — exit 1")
 			return 1
 		}
@@ -179,6 +200,20 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		fmt.Fprintln(w, "[Boot args] --no-refresh: skipping bootloader refresh; run it yourself before reboot.")
 	}
 
+	// Write module blacklist.
+	if err := WriteModprobeFile(modprobeContent); err != nil {
+		fmt.Fprintln(w, "kernsec apply: write modprobe:", err)
+		return 1
+	}
+	fmt.Fprintf(w, "[Modules] wrote %s.\n", ModprobePath)
+	if len(loadedManaged) > 0 {
+		fmt.Fprintf(w, "[Modules] %d managed modules already loaded — reboot or rmmod required for them to be effective:\n",
+			len(loadedManaged))
+		for _, name := range loadedManaged {
+			fmt.Fprintf(w, "            %s\n", name)
+		}
+	}
+
 	// Post-write verify.
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[Verification]")
@@ -191,9 +226,10 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 }
 
 type driftResult struct {
-	SysctlDiffers  bool
-	BootDiffers    bool
-	CurrentCmdline string
+	SysctlDiffers   bool
+	BootDiffers     bool
+	ModprobeDiffers bool
+	CurrentCmdline  string
 	// BootReadErr is non-nil when the next-boot cmdline could not be
 	// read from the bootloader. The drift compare then defaults to
 	// "differs" (apply will refuse) but the error is surfaced to the
@@ -202,6 +238,9 @@ type driftResult struct {
 	// SysctlReadErr is non-nil when the existing managed sysctl file
 	// is unreadable for a reason other than absence (permission etc.).
 	SysctlReadErr error
+	// ModprobeReadErr is non-nil when the existing managed modprobe
+	// file is unreadable for a reason other than absence.
+	ModprobeReadErr error
 }
 
 // computeDrift compares the desired sysctl content + cmdline against
@@ -267,13 +306,47 @@ func sameTokens(a, b []string) bool {
 	return true
 }
 
+// modprobeDriftCheck compares the desired modprobe content with what's
+// at ModprobePath. Returns (differs, readErr).
+func modprobeDriftCheck(desired []byte) (bool, error) {
+	got, err := os.ReadFile(ModprobePath)
+	switch {
+	case err == nil:
+		return !bytes.Equal(got, desired), nil
+	case os.IsNotExist(err):
+		// Absent → differs (apply needs to write); not an error.
+		return true, nil
+	default:
+		return true, err
+	}
+}
+
+// loadedAndManaged returns the names of modules that the desired
+// rule set blacklists AND that are currently loaded — i.e. the set
+// the operator needs to rmmod or reboot to make the blacklist
+// actually effective.
+func loadedAndManaged(modules []ModuleRule) []string {
+	if len(modules) == 0 {
+		return nil
+	}
+	loaded := LoadedModules()
+	out := make([]string, 0, len(modules))
+	for _, m := range modules {
+		if _, ok := loaded[m.Name]; ok {
+			out = append(out, m.Name)
+		}
+	}
+	return out
+}
+
 // verifyAfterApply runs the audit rows pass and reports pass/fail.
 // Boot-arg rules will show as PEND/WARN until reboot — that's
 // expected; we tag them clearly rather than treating them as a
-// failure.
+// failure. Modules in LOADED state likewise need a reboot or rmmod
+// for the blacklist to be effective.
 func verifyAfterApply(w io.Writer) {
 	rows := BuildAuditRows()
-	var sysctlBad, bootPending int
+	var sysctlBad, bootPending, modulesLoaded, modulesMissing int
 	for _, r := range rows {
 		switch r.Kind {
 		case KindSysctl:
@@ -283,6 +356,13 @@ func verifyAfterApply(w io.Writer) {
 		case KindBoot:
 			if r.State != StateOK {
 				bootPending++
+			}
+		case KindModule:
+			switch r.State {
+			case StateLOADED:
+				modulesLoaded++
+			case StateMISSING:
+				modulesMissing++
 			}
 		}
 	}
@@ -297,5 +377,14 @@ func verifyAfterApply(w io.Writer) {
 	} else {
 		fmt.Fprintf(w, "  boot:   %d rules pending reboot (configured for next boot, not yet active)\n",
 			bootPending)
+	}
+	switch {
+	case modulesMissing > 0:
+		fmt.Fprintf(w, "  module: %d rules failed to land in modprobe.d — investigate\n", modulesMissing)
+	case modulesLoaded > 0:
+		fmt.Fprintf(w, "  module: blacklist on disk; %d managed modules loaded — reboot/rmmod for effect\n",
+			modulesLoaded)
+	default:
+		fmt.Fprintln(w, "  module: blacklist on disk; no managed modules currently loaded")
 	}
 }

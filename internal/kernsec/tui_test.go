@@ -65,17 +65,19 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	// rule in the static profile, with kinds split correctly. State
 	// values depend on the runtime kernel and aren't asserted.
 	rows := BuildAuditRows()
-	wantTotal := len(KSPPSysctls) + len(KSPPBootArgs)
+	wantTotal := len(KSPPSysctls) + len(KSPPBootArgs) + len(Tier1Modules)
 	if len(rows) != wantTotal {
 		t.Fatalf("BuildAuditRows() returned %d rows, want %d", len(rows), wantTotal)
 	}
-	var sysctlCount, bootCount int
+	var sysctlCount, bootCount, moduleCount int
 	for _, r := range rows {
 		switch r.Kind {
 		case KindSysctl:
 			sysctlCount++
 		case KindBoot:
 			bootCount++
+		case KindModule:
+			moduleCount++
 		default:
 			t.Errorf("unknown kind %q in row %+v", r.Kind, r)
 		}
@@ -91,6 +93,9 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	}
 	if sysctlCount != len(KSPPSysctls) {
 		t.Errorf("sysctl row count %d, want %d", sysctlCount, len(KSPPSysctls))
+	}
+	if moduleCount != len(Tier1Modules) {
+		t.Errorf("module row count %d, want %d", moduleCount, len(Tier1Modules))
 	}
 	if bootCount != len(KSPPBootArgs) {
 		t.Errorf("boot row count %d, want %d", bootCount, len(KSPPBootArgs))

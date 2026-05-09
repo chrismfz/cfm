@@ -150,7 +150,8 @@ func RunTUI() (switchToText bool, err error) {
 		fmt.Fprintf(&b, "[Description:](fg:cyan)\n  %s\n\n", r.Description)
 		fmt.Fprintf(&b, "[Affects:](fg:cyan)\n  %s\n\n", r.Affects)
 		fmt.Fprintf(&b, "[Live state:](fg:cyan)\n")
-		if r.Kind == KindSysctl {
+		switch r.Kind {
+		case KindSysctl:
 			switch r.State {
 			case StateSKIP:
 				fmt.Fprintln(&b, "  /proc/sys: missing on this kernel")
@@ -159,12 +160,21 @@ func RunTUI() (switchToText bool, err error) {
 			default:
 				fmt.Fprintf(&b, "  /proc/sys: %s  (expected %s)\n", r.LiveValue, r.ExpectedValue)
 			}
-		} else {
+		case KindBoot:
 			fmt.Fprintf(&b, "  /proc/cmdline:    %s\n", presence(r.InCurrent))
 			if r.NextBootKnown {
 				fmt.Fprintf(&b, "  next-boot config: %s\n", presence(r.InNextBoot))
 			} else {
 				fmt.Fprintln(&b, "  next-boot config: unknown (could not read bootloader)")
+			}
+		case KindModule:
+			fmt.Fprintf(&b, "  blacklisted in modprobe.d: %s\n", presence(r.BlacklistedInFile))
+			fmt.Fprintf(&b, "  currently loaded:          %s\n", presence(r.Loaded))
+			fmt.Fprintf(&b, "  built into this kernel:    %s\n", presence(r.PresentOnKernel))
+			if r.State == StateLOADED {
+				fmt.Fprintln(&b, "")
+				fmt.Fprintln(&b, "  [Note:](fg:yellow,mod:bold) blacklist active but module still loaded.")
+				fmt.Fprintln(&b, "  Reboot or `rmmod` for the blacklist to take effect.")
 			}
 		}
 		detail.Text = b.String()

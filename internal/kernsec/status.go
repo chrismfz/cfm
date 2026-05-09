@@ -1,8 +1,10 @@
 package kernsec
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 )
 
 // StatusOptions controls what RunStatus emits.
@@ -66,6 +68,8 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 
 	res.printArgState(w, "KSPP boot args in current running kernel", currentTokens)
 	res.printArgState(w, "KSPP boot args configured for next boot", nextTokens)
+
+	res.printModuleState(w)
 
 	klog := ReadKernelLog()
 	fmt.Fprintln(w, "[Kernel boot warnings about managed args]")
@@ -196,4 +200,64 @@ func (res *StatusResult) printArgState(w io.Writer, label string, tokens []strin
 func (res *StatusResult) warn() {
 	res.Warnings++
 	res.OK = false
+}
+
+// printModuleState surfaces the module-blacklist audit in the same
+// label-prefixed style as the rest of status output: managed file's
+// presence and per-module state. Phase 3 keeps this concise — the TUI
+// is the rich surface; text mode is for piping / monitoring.
+func (res *StatusResult) printModuleState(w io.Writer) {
+	fmt.Fprintln(w, "[Module blacklist]")
+
+	managedExists := true
+	if _, err := os.Stat(ModprobePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(w, "MISSING    %s not present — `cfm kernsec apply` to create it\n", ModprobePath)
+			res.warn()
+			managedExists = false
+		} else {
+			fmt.Fprintf(w, "ERROR      cannot stat %s: %v\n", ModprobePath, err)
+			res.warn()
+			managedExists = false
+		}
+	}
+
+	loaded := LoadedModules()
+	managed := ParseManagedBlacklist()
+	var loadedCount, missingCount, okCount, skipCount int
+
+	for _, m := range Tier1Modules {
+		_, isBlacklisted := managed[m.Name]
+		_, isLoaded := loaded[m.Name]
+		switch {
+		case isBlacklisted && isLoaded:
+			loadedCount++
+		case isBlacklisted:
+			okCount++
+		case !ModulePresentOnKernel(m.Name):
+			skipCount++
+		default:
+			missingCount++
+		}
+	}
+
+	if managedExists {
+		fmt.Fprintf(w, "OK         %s present (%d managed entries audited)\n",
+			ModprobePath, len(Tier1Modules))
+	}
+	fmt.Fprintf(w, "OK         %d modules blacklisted and not loaded\n", okCount)
+	if loadedCount > 0 {
+		fmt.Fprintf(w, "WARN       %d modules blacklisted but still loaded — reboot or rmmod for effect\n",
+			loadedCount)
+		res.warn()
+	}
+	if missingCount > 0 {
+		fmt.Fprintf(w, "MISSING    %d modules expected to be blacklisted but absent from %s\n",
+			missingCount, ModprobePath)
+		res.warn()
+	}
+	if skipCount > 0 {
+		fmt.Fprintf(w, "SKIP       %d modules not present on this kernel\n", skipCount)
+	}
+	fmt.Fprintln(w)
 }

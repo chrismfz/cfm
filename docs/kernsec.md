@@ -6,6 +6,12 @@
 an audit-only component with an interactive TermUI by default and a plain-
 text mode for pipes / monitoring.
 
+**Phase 3 shipped** (branch `kernsec-3`). Module blacklist generator
+(`/etc/modprobe.d/cfm-kernsec.conf` with `blacklist X` + `install X /bin/false`
+per applied rule), module rule wiring into apply / preview / disable / status
+/ TUI. **`scripts/kspp.sh` stays for one more PR** — operators verify on
+Proxmox + EL + Debian via the acceptance gate (below) before it gets deleted.
+
 **Phase 2 shipped** (PR #769 + #770, merged to main). Rule
 registry with stable IDs (`KSEC-<class>-<group>-<NNN>`), tier and group
 metadata, host-profile probe, declarative `/etc/cfm/kernsec.conf` with
@@ -28,7 +34,8 @@ caused apply to write a cmdline containing only managed args, dropping
 `root=`, `ro`, `console=`, etc.) — both fixed and pinned by tests. See
 "Sweep findings" below.
 
-**Phase 3 (modules + sunset `kspp.sh`) is next.**
+**Phase 4 (Tier 2 opt-in rules) is next once the kspp.sh acceptance
+gate passes on Proxmox + EL + Debian.**
 
 **`kspp.sh` is sunset** once Phase 3 lands — kernsec absorbs everything that
 script does (KSPP sysctls + boot args + cross-bootloader backends + status
@@ -843,17 +850,73 @@ this clean — `RunApply` loads the conf from disk and calls
 output) and calls the same helper. `WriteConf` was added for the
 persistence step. Backup files are never touched by purge.
 
-### Phase 3 — Modules + sunset `kspp.sh`
+### Phase 3 — Modules (DONE — branch `kernsec-3`) + sunset `kspp.sh` (operator gate)
 
-- Module blacklist file generation (`/etc/modprobe.d/cfm-kernsec.conf`,
-  both `blacklist` and `install … /bin/false` lines).
-- Module rule set wired into `apply`.
-- KSPP-profile rules registered under `KSEC-BOOT-kspp-*` (already
-  shipped as data in Phase 1; just need the IDs and conf-driven
-  selection from Phase 2 to apply them).
-- **Acceptance gate**: `cfm kernsec status` output is a strict superset
-  of `kspp.sh status`, verified on Proxmox + EL + Debian test hosts.
-- `kspp.sh` removed from the repo once the gate passes.
+**Module blacklist** is now wired through the same apply / preview /
+disable / status / TUI pipes as sysctls and boot args. Single rule set
+(67 Tier-1 modules), three views (preview decisions, apply drift +
+write, status audit), one source of truth.
+
+**File format** (`/etc/modprobe.d/cfm-kernsec.conf`):
+
+```
+# Managed by cfm kernsec — do not edit by hand.
+# Generated from /etc/cfm/kernsec.conf.
+
+# Group: modules.recent_cves
+blacklist ksmbd
+install ksmbd /bin/false
+blacklist n_hdlc
+install n_hdlc /bin/false
+…
+
+# Group: modules.net.legacy
+blacklist dccp
+install dccp /bin/false
+…
+```
+
+`blacklist` stops alias-loaded auto-loads; `install … /bin/false` stops
+direct `modprobe X` calls — defense in depth, matches the original
+design doc.
+
+**Audit states** for module rules (new `LOADED` state):
+
+| State | Meaning |
+|---|---|
+| `OK` | Module is in our managed file AND not loaded (or kernel doesn't ship it). |
+| `LOADED` | Module is blacklisted in our file BUT currently loaded. **Reboot or `rmmod`** for the blacklist to take effect. |
+| `MISSING` | Module is present on this kernel but not in our managed file. `cfm kernsec apply` will fix. |
+| `SKIP` | Module not present under `/lib/modules/$(uname -r)`. Irrelevant on this host. |
+
+**Apply behaviour** for modules:
+
+- Atomic write of `/etc/modprobe.d/cfm-kernsec.conf` with one-shot
+  `.cfm-kernsec.bak` of the previous content (if any).
+- No `modprobe -r` / `rmmod` — operators reboot or unload manually.
+  Loaded-but-blacklisted modules surface clearly in status output and
+  in the apply post-write verify pass.
+- `apply --check` extends to module-file byte equality.
+- `disable` empties the file (tier=0 → no rules → empty managed
+  content); `disable --purge` removes it entirely. Backups preserved.
+
+**Acceptance gate (operator-driven, before kspp.sh deletion)**:
+
+Run `cfm kernsec status` on:
+- A Proxmox host (validates ProxmoxBackend + proxmox-boot-tool refresh).
+- A RHEL/Alma/Rocky host (validates BLSBackend + grubby).
+- A Debian/Ubuntu host (validates GRUBBackend + update-grub).
+
+Compare the output to `bash scripts/kspp.sh status` on the same hosts.
+The kernsec output should be a strict superset (every label, every
+KSPP rule check, every probe). When all three pass, ship a follow-up
+PR that deletes `scripts/kspp.sh` and removes the
+"reference implementation" header note. Until then `kspp.sh` stays.
+
+**Limitation carried over**: kernsec does not autoload modules, so
+this is purely defensive — it ensures specific modules **cannot** be
+loaded after the next reboot. Modules already loaded require
+operator action (reboot, `rmmod`).
 
 ### Phase 4 — Tier 2 (opt-in)
 
@@ -879,6 +942,42 @@ cross-component awareness.
 ## Progress
 
 ### DONE
+
+**Phase 3 — Modules** (branch `kernsec-3`)
+- `RenderModprobeFile` produces `/etc/modprobe.d/cfm-kernsec.conf`
+  with `blacklist X` + `install X /bin/false` lines per applied rule,
+  grouped by `modules.<group>` for human readability.
+- `WriteModprobeFile` atomic write + one-shot `.cfm-kernsec.bak`
+  backup. `ModprobePath` declared as var so tests can redirect.
+- `ParseManagedBlacklist` reads our managed file back to compute the
+  current "what's blacklisted" set for audit / drift.
+- `ModulePresentOnKernel` walks `/lib/modules/$(uname -r)` for `.ko`
+  / `.ko.xz` / `.ko.zst` / `.ko.gz` to drive SKIP-on-missing-on-kernel
+  semantics.
+- `LoadedModules` reads `/proc/modules` once per audit pass.
+- `BuildAuditRows` extended with `KindModule` rows + new `StateLOADED`
+  for blacklisted-but-still-loaded modules.
+- `ResolvedSet.ApplyModules()` filters the resolved set down to the
+  Tier1Modules whose Decision == Apply.
+- `applyCore`: writes module file, drift-compares, surfaces
+  loaded-and-managed modules with reboot/rmmod hint, post-write
+  verify counts module states.
+- `disable.purgeManagedFiles` extends to remove `ModprobePath`;
+  `disable --purge --dry-run` lists it in would-remove output.
+- TUI detail panel: module-specific live state (blacklisted-in-file,
+  loaded, present-on-kernel) + "blacklist active but module loaded"
+  warning when `StateLOADED`.
+- Plain-text status: new `[Module blacklist]` section with managed-
+  file presence + per-state counts.
+- Preview: module rows under `[Modules]` section (was Phase-3-stub).
+- 11 new tests: render golden + idempotency, ParseManagedBlacklist
+  (incl. install-line-not-leaking + comment-immune), moduleRowState
+  truth table, atomic write + one-shot backup, modprobeDriftCheck
+  for absent / matching / different cases, loadedAndManaged on
+  fake module names.
+- Doc: Phase 3 status flipped to "shipped"; acceptance gate procedure
+  documented for operators (Proxmox + EL + Debian); `scripts/kspp.sh`
+  stays for one more PR until the gate passes.
 
 **Phase 2.5 — `cfm kernsec disable`** (branch `kernsec-disable`)
 - New subcommand. `cfm kernsec disable` persists tier=0 + applies;
@@ -1002,14 +1101,17 @@ cross-component awareness.
       no double-write. (Deferred to Phase 6 shared-library work; Phase 2
       profile contains no `KSEC-SCT-net.*` rules.)
 
-**Phase 3 — modules + sunset `kspp.sh`**
-- [ ] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
+**Phase 3 — modules** (DONE — branch `kernsec-3`) **+ sunset `kspp.sh`**
+- [x] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
       `blacklist` + `install … /bin/false` lines).
-- [ ] Module rules wired into `apply`.
-- [ ] KSPP-profile rules registered under `KSEC-BOOT-kspp-*`.
+- [x] Module rules wired into `apply`, `preview`, `disable`, `status`,
+      and TUI.
+- [x] KSPP-profile rules registered under `KSEC-BOOT-kspp-*`.
 - [ ] Acceptance gate — `cfm kernsec status` ⊇ `kspp.sh status` on
-      Proxmox + EL + Debian.
-- [ ] **Remove `kspp.sh` from the tree** once gate passes.
+      Proxmox + EL + Debian (operator-driven; can't be done from
+      this sandbox).
+- [ ] **Remove `kspp.sh` from the tree** once gate passes — separate
+      one-line PR on top of `kernsec-3`.
 
 **Phase 4 — Tier 2 (opt-in)**
 - [ ] Tier 2 rules with host-profile gating
