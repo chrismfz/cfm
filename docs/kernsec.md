@@ -6,7 +6,7 @@
 an audit-only component with an interactive TermUI by default and a plain-
 text mode for pipes / monitoring.
 
-**Phase 2 shipped** (branch `kernsec-2`, two-pass commit history). Rule
+**Phase 2 shipped** (PR #769 + #770, merged to main). Rule
 registry with stable IDs (`KSEC-<class>-<group>-<NNN>`), tier and group
 metadata, host-profile probe, declarative `/etc/cfm/kernsec.conf` with
 per-rule overrides, and three new subcommands:
@@ -16,6 +16,15 @@ per-rule overrides, and three new subcommands:
 - `cfm kernsec apply` — write managed sysctl + boot-arg files atomically,
   run `sysctl --load`, refresh the bootloader. `--dry-run` and `--check`
   flags. First-run auto-creates the conf.
+
+**Post-Phase-2 sweep complete.** Code review against the `kspp.sh`
+contract surfaced two real bugs (silent read-failure paths in
+`GRUBBackend.WriteCmdline` and `buildDesiredCmdline` that could have
+caused apply to write a cmdline containing only managed args, dropping
+`root=`, `ro`, `console=`, etc.) — both fixed and pinned by tests. See
+"Sweep findings" below.
+
+**Phase 3 (modules + sunset `kspp.sh`) is next.**
 
 **`kspp.sh` is sunset** once Phase 3 lands — kernsec absorbs everything that
 script does (KSPP sysctls + boot args + cross-bootloader backends + status
@@ -634,6 +643,93 @@ state = force         # we know we don't run containers on this box
 
 ---
 
+## Sweep findings (post-Phase-2)
+
+A focused code review against the `kspp.sh` contract immediately after
+Phase 2 merged. Surfaced two real bugs and a handful of robustness
+gaps. All fixes landed on `kernsec-sweep` with regression tests.
+
+### Bugs fixed
+
+**SF-001 — `GRUBBackend.WriteCmdline` swallowed `NextBootCmdline`
+errors.** The previous code used `current, _ := g.NextBootCmdline()`
+which made a transient or permission read-failure indistinguishable
+from "empty cmdline". `RemoveManagedArgs([])` then yields `[]`, and
+appending the desired managed args produces a cmdline containing
+**only kernsec-managed args** — `root=`, `ro`, `console=`,
+`crashkernel=`, etc. would have been dropped. Fix: propagate the
+error. Test: `TestBuildDesiredCmdline_ReadErrorPropagates`.
+
+**SF-002 — `buildDesiredCmdline` had the same pattern**, used by
+`preview` / `--dry-run` / `--check`. Same fix; test:
+`TestComputeDrift_BootReadErrorSurfaced`. Apply now also refuses to
+write if the read failed (`drift.BootReadErr != nil`).
+
+### Robustness improvements
+
+- **Drift report surfaces read errors.** `driftResult` gained
+  `BootReadErr` and `SysctlReadErr` fields. Operators see the cause
+  instead of a generic "DRIFT" line; `--check` exits non-zero on read
+  failure so monitoring catches it.
+- **`apply` refuses to write on cmdline read failure.** Closing the
+  loop on SF-002.
+- **`$tuned_params` literal token (Rocky 8 BLS hosts)** verified to
+  pass through `rebuildManagedCmdline` unchanged. Test:
+  `TestRebuildManagedCmdline_TunedParamsPassthrough` — captures the
+  exact shape from the operator's real transcript.
+- **Non-managed-token order preservation** verified. Test:
+  `TestRebuildManagedCmdline_PreservesNonManagedOrder`.
+- **Render determinism** verified — `RenderSysctlFile` produces
+  byte-identical output across calls with the same input. Foundation
+  for `apply --check` not false-positive after a clean apply. Test:
+  `TestRenderSysctlFile_Idempotent`.
+- **`tier = 0` documented semantics** verified. `tier = 0` + `apply`
+  strips managed boot args from cmdline (good) and writes an empty
+  managed sysctl file (good). **Limitation worth noting**: `sysctl
+  --load` on a file with no key=value lines does NOT revert previously
+  set live values to kernel defaults — those persist until reboot or
+  until something else writes them. Operators expecting an immediate
+  "back to baseline" need to reboot. Test:
+  `TestResolve_Tier0NoApplyForAnything`.
+- **Realistic rule IDs in conf stanzas** verified. Test:
+  `TestParseSectionHeader_RealisticIDs`.
+- **`state =` (empty value)** documented as alias for
+  `state = default`. Test: `TestParseConf_StateEqualsEmpty`.
+
+### Known limitations carried into Phase 3+
+
+- **No advisory lock on `apply`.** Concurrent `cfm kernsec apply`
+  invocations don't coordinate. Last writer wins on the cmdline file
+  (atomic rename). With the same conf both runs produce the same
+  content, so this is benign in practice — just hygiene worth
+  closing later. (Phase 5 candidate.)
+- **No `cfm kernsec rollback`.** Restoring the original cmdline from
+  `/etc/default/grub.cfm-kernsec.bak` or `/etc/kernel/cmdline.cfm-kernsec.bak`
+  is a manual operator step today. The `tier = 0` + `apply` workflow
+  is the documented disable path; full byte-perfect restore from the
+  one-shot backup is documented for operators but not automated.
+- **BLS systems have no source-file backup.** ProxmoxBackend and
+  GRUBBackend take a `.cfm-kernsec.bak` of `/etc/kernel/cmdline` and
+  `/etc/default/grub` respectively. The BLS path uses `grubby` which
+  manipulates BLS entry files internally — there's no single source
+  file to back up. Operators on BLS roll back via `grubby` itself.
+  Documented; not a bug.
+- **`sysctl --load` on a file with no rules does not revert live
+  values.** See tier=0 semantics above. Reboot-to-baseline is the
+  contract.
+- **No real-host integration test exists yet** for the three Refresh
+  paths (`proxmox-boot-tool refresh`, `update-grub`, `grubby`). Phase
+  3's acceptance gate (Proxmox + EL + Debian) covers this.
+
+### Phase 3 readiness
+
+Greenlight from this sweep. The Phase 2 surface is solid; the
+remaining unknowns (real-host bootloader Refresh, module unload
+semantics) are properly Phase 3 concerns covered by the existing
+acceptance gate.
+
+---
+
 ## Rollout plan
 
 Each phase ships independently and has a working `status` before any `apply`
@@ -728,6 +824,21 @@ cross-component awareness.
 ## Progress
 
 ### DONE
+
+**Post-Phase-2 sweep** (branch `kernsec-sweep`)
+- Code review of `apply.go`, `backend_*.go`, `sysctl_apply.go`,
+  `conf.go` against the `kspp.sh` contract.
+- Bug fix SF-001: `GRUBBackend.WriteCmdline` propagates
+  `NextBootCmdline` errors instead of silently treating them as empty
+  cmdline (would have nuked `root=` / `ro` / `console=` on read failure).
+- Bug fix SF-002: `buildDesiredCmdline` propagates the same error;
+  `RunApply` refuses to write on cmdline read failure.
+- `driftResult` carries `BootReadErr` + `SysctlReadErr` so operators
+  see the cause, not just "DRIFT".
+- 8 new edge-case tests pinning the fixes plus `$tuned_params`
+  passthrough, non-managed-order preservation, render determinism,
+  tier=0 zero-rules, realistic rule-ID parsing, `state =` empty alias.
+- All known limitations enumerated for Phase 3+.
 
 **Phase 0 (reference impl)**
 - `kspp.sh` server-safe profile shipping (sysctl + boot args + Proxmox/BLS/GRUB).
