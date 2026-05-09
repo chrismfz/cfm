@@ -210,6 +210,14 @@ end
 
 local function normalize(s)
   if not s or s == "" then return "" end
+  -- Fast path: a string with no "%" cannot contain any %xx escape, so both
+  -- url_decode_once gsubs would walk the whole string and return it
+  -- unchanged. Skip them and just lowercase. JSON / multipart bodies are
+  -- the common case here — they almost never carry %xx — and at the new
+  -- 32K JSON budget the gsub passes were the dominant per-request cost.
+  if not string.find(s, "%", 1, true) then
+    return string.lower(s)
+  end
   s = url_decode_once(s)
   s = url_decode_once(s)
   return string.lower(s)
@@ -225,6 +233,49 @@ end
 
 local function scan_str(uri, args)
   return normalize(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
+end
+
+-- Pick the body-scan byte budget for a request based on its Content-Type.
+-- Falls back to body_scan_budget.other when the header is missing/empty/
+-- unrecognised, and to CFG.max_scan_len when the table itself is absent
+-- (preserves behaviour in environments running an older config layout).
+-- Header parameters after ";" (e.g. "application/json; charset=utf-8")
+-- are handled — substring match on the type/subtype prefix.
+--
+-- Defensive: every step type-checks its inputs. A misconfigured override
+-- (body_scan_budget = nil / non-table / partial table / non-positive
+-- numbers) must never bubble a nil or bad value into cap(), since cap's
+-- numeric comparison would error and crash the worker on every request.
+local function body_budget(headers)
+  local fallback = 2048
+  if CFG and type(CFG.max_scan_len) == "number" and CFG.max_scan_len > 0 then
+    fallback = CFG.max_scan_len
+  end
+  local budget = CFG and CFG.body_scan_budget
+  if type(budget) ~= "table" then
+    return fallback
+  end
+
+  local function pick_or(key)
+    local v = budget[key]
+    if type(v) == "number" and v > 0 then return v end
+    local o = budget.other
+    if type(o) == "number" and o > 0 then return o end
+    return fallback
+  end
+
+  if not headers then return pick_or("other") end
+  local raw = headers["content-type"]
+  if raw == nil then raw = headers["Content-Type"] end
+  local ct = header_string(raw)
+  if ct == "" then return pick_or("other") end
+  ct = string.lower(ct)
+  if string.find(ct, "application/json", 1, true)               then return pick_or("json") end
+  if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
+  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
+  if string.find(ct, "application/xml", 1, true)
+     or string.find(ct, "text/xml", 1, true)                    then return pick_or("xml") end
+  return pick_or("other")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -280,6 +331,7 @@ _M.url_decode_once                    = url_decode_once
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str
+_M.body_budget                        = body_budget
 _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
