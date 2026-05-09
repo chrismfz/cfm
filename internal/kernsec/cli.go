@@ -40,6 +40,8 @@ func RunCLI(args []string) int {
 		return runApplyCmd(args[1:], os.Stdout)
 	case "disable":
 		return runDisableCmd(args[1:], os.Stdout)
+	case "monitor":
+		return runMonitorCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -137,6 +139,31 @@ func runApplyCmd(args []string, w io.Writer) int {
 	})
 }
 
+func runMonitorCmd(args []string, w io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "kernsec monitor: missing action (enable | disable | remove | status)")
+		printUsage(os.Stderr)
+		return 2
+	}
+	action := args[0]
+	rest := args[1:]
+
+	fs := flag.NewFlagSet("kernsec monitor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	interval := fs.String("interval", "", "systemd OnCalendar expression (default \"daily\")")
+	dryRun := fs.Bool("dry-run", false, "show what would happen without writing or running systemctl")
+	if err := fs.Parse(rest); err != nil {
+		fmt.Fprintln(os.Stderr, "kernsec monitor:", err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	return RunMonitor(w, MonitorOptions{
+		Action:   action,
+		Interval: *interval,
+		DryRun:   *dryRun,
+	})
+}
+
 func runDisableCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("kernsec disable", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -182,6 +209,7 @@ Subcommands:
   init                Write default tier=1 /etc/cfm/kernsec.conf if absent
   apply               Write managed sysctl + boot-arg files; run sysctl --load + bootloader refresh
   disable             Persistently disable kernsec (tier=0) and strip managed boot args + sysctl rules
+  monitor             Manage the periodic drift-check systemd timer (enable | disable | remove | status)
   help                Show this message
 
 Status / text flags:
@@ -205,6 +233,12 @@ Disable flags:
   --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
   --dry-run           Show what would happen without writing
   --no-refresh        Skip the bootloader refresh step
+
+Monitor subcommands:
+  cfm kernsec monitor enable [--interval=daily]   install + enable systemd timer
+  cfm kernsec monitor disable                     stop + disable timer (leave files)
+  cfm kernsec monitor remove                      stop + disable + remove unit files
+  cfm kernsec monitor status                      show timer + last service runs
 
 TUI keys:
   q / Ctrl-C          Quit
