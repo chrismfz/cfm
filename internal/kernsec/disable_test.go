@@ -14,13 +14,17 @@ func withTempConfPath(t *testing.T) (confDir, sysctlDir string) {
 	t.Helper()
 	confDir = t.TempDir()
 	sysctlDir = t.TempDir()
+	modprobeDir := t.TempDir()
 	origConf := ConfPath
 	origSysctl := SysctlPath
+	origModprobe := ModprobePath
 	ConfPath = filepath.Join(confDir, "kernsec.conf")
 	SysctlPath = filepath.Join(sysctlDir, "99-cfm-kernsec.conf")
+	ModprobePath = filepath.Join(modprobeDir, "cfm-kernsec.conf")
 	t.Cleanup(func() {
 		ConfPath = origConf
 		SysctlPath = origSysctl
+		ModprobePath = origModprobe
 	})
 	return confDir, sysctlDir
 }
@@ -73,42 +77,47 @@ func TestWriteConf_TierZeroPersistsAcrossLoad(t *testing.T) {
 	}
 }
 
-func TestPurgeManagedFiles_RemovesBoth(t *testing.T) {
+func TestPurgeManagedFiles_RemovesAllManaged(t *testing.T) {
 	confDir, sysctlDir := withTempConfPath(t)
 
-	// Pre-create both files.
+	// Pre-create all three managed files.
 	if err := os.WriteFile(ConfPath, []byte("tier = 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(SysctlPath, []byte("# managed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// And a backup file alongside — must NOT be removed by purge.
-	bak := SysctlPath + BackupSuffix
-	if err := os.WriteFile(bak, []byte("# old"), 0o644); err != nil {
+	if err := os.WriteFile(ModprobePath, []byte("# managed\nblacklist ksmbd\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	// And backup files alongside the sysctl + modprobe — must NOT be
+	// removed by purge.
+	sysctlBak := SysctlPath + BackupSuffix
+	modprobeBak := ModprobePath + BackupSuffix
+	for _, b := range []string{sysctlBak, modprobeBak} {
+		if err := os.WriteFile(b, []byte("# old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := purgeManagedFiles(devnullWriter{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(ConfPath); !os.IsNotExist(err) {
-		t.Errorf("conf still exists after purge: %v", err)
-	}
-	if _, err := os.Stat(SysctlPath); !os.IsNotExist(err) {
-		t.Errorf("sysctl file still exists after purge: %v", err)
-	}
-	if _, err := os.Stat(bak); err != nil {
-		t.Errorf("backup removed by purge (should be left in place): %v", err)
-	}
-	// Make sure we didn't leak files into the temp dirs.
-	for _, dir := range []string{confDir, sysctlDir} {
-		entries, _ := os.ReadDir(dir)
-		// The sysctlDir keeps the .bak file; confDir should be empty.
-		if dir == confDir && len(entries) != 0 {
-			t.Errorf("confDir has stray entries after purge: %v", entries)
+	for _, p := range []string{ConfPath, SysctlPath, ModprobePath} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after purge: %v", p, err)
 		}
 	}
+	for _, b := range []string{sysctlBak, modprobeBak} {
+		if _, err := os.Stat(b); err != nil {
+			t.Errorf("backup %s removed by purge (should be left in place): %v", b, err)
+		}
+	}
+	// Make sure conf temp dir is clean (no .bak there).
+	if entries, _ := os.ReadDir(confDir); len(entries) != 0 {
+		t.Errorf("confDir has stray entries after purge: %v", entries)
+	}
+	_ = sysctlDir
 }
 
 func TestPurgeManagedFiles_IdempotentOnMissing(t *testing.T) {

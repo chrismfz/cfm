@@ -78,6 +78,20 @@ func (s ResolvedSet) ApplyBootArgs() []BootArg {
 	return out
 }
 
+// ApplyModules returns just the module rules whose decision is Apply.
+// Order matches Tier1Modules so the rendered modprobe file is
+// deterministic — required for byte-equal drift detection.
+func (s ResolvedSet) ApplyModules() []ModuleRule {
+	want := decisionIDSet(s.Modules, Apply)
+	out := make([]ModuleRule, 0, len(want))
+	for _, r := range Tier1Modules {
+		if _, ok := want[r.ID]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func decisionIDSet(rs []ResolvedRule, want Decision) map[string]struct{} {
 	m := make(map[string]struct{}, len(rs))
 	for _, r := range rs {
