@@ -637,6 +637,104 @@ do
   check(rule_id == 306, "39: java/php disjoint — credited to PHP (306), not Java (326)")
 end
 
+-- ── Test 40: W2 ext — webshell-name b374k + <?php scores past threshold ──────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- b374k (+3) + <?php (+2) = 5 → exactly at min_score, fires.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "src=<?php /* b374k loader */",
+  }))
+  check(hit == true,                            "40: W2 ext — hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_WS_B374K", "40: W2 ext — RAW_WS_B374K tag")
+  check(action == "challenge",                  "40: W2 ext — challenge")
+  check(rule_id == 404,                         "40: W2 ext — rule id 404 (extension, not new rule)")
+end
+
+-- ── Test 41: W2 ext — bare webshell-name in prose without <?php doesn't fire ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Just "b374k" alone (+3) is below min_score (5). The early-out lets us
+  -- reach scoring (b374k is a trigger), but score stays under threshold.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "text/plain" },
+    body    = "Article comment: I read about the b374k shell yesterday.",
+  }))
+  check(hit == false, "41: W2 ext — bare prose mention doesn't trigger")
+end
+
+-- ── Test 42: W2 ext — c99shell name takes precedence over generic eval tag ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- c99shell (+3) + <?php (+2) + eval( (+3) = 8. Both ws_tag and the
+  -- callable would emit a tag; ws_tag wins per the design.
+  local _hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "code=<?php c99shell; eval($_POST['x']);",
+  }))
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_WS_C99SHELL",
+        "42: W2 ext — webshell-name tag outranks RAW_EVAL_POST")
+end
+
+-- ── Test 43: W3 ext — hex2bin contributes to obfuscation score (rule 405) ───
+do
+  disable_all_rules()
+  waf.set_rule("rule_script_obfuscation", "challenge")
+
+  -- hex2bin (+2) + base64_decode (+2) + eval (+3) = 7 → past min_score (6).
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "x=eval(hex2bin(base64_decode($_POST['p'])))",
+  }))
+  check(hit == true,                                         "43: W3 ext — hit")
+  check(reason and reason:find("HEX2BIN", 1, true),          "43: W3 ext — HEX2BIN in tags")
+  check(rule_id == 405,                                      "43: W3 ext — rule id 405")
+end
+
+-- ── Test 44: B2 ext — TRACE method emits sub-tag in reason ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_exploit_methods", "block")
+
+  local hit, reason, _ttl, action = waf.check(fresh_ctx({ method = "TRACE" }))
+  check(hit == true,                              "44: B2 ext — TRACE hit")
+  check(reason == "WAF_EXPLOIT_METHOD:TRACE",     "44: B2 ext — sub-tag emitted")
+  check(action == "block",                        "44: B2 ext — block action preserved")
+end
+
+-- ── Test 45: B2 ext — PROPFIND emits DAV_PROPFIND sub-tag ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_exploit_methods", "challenge")
+
+  local _hit, reason = waf.check(fresh_ctx({ method = "PROPFIND" }))
+  check(reason == "WAF_EXPLOIT_METHOD:DAV_PROPFIND",
+        "45: B2 ext — DAV_PROPFIND sub-tag")
+end
+
+-- ── Test 46: X2-stratum ext — stratum+tcp:// fires rule 701 ─────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_ssrf", "logonly")
+
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    args = "url=stratum+tcp://pool.minexmr.com:4444",
+  }))
+  check(hit == true,                          "46: X2-stratum — hit")
+  check(reason == "WAF_SSRF:SSRF_STRATUM",    "46: X2-stratum — reason")
+  check(rule_id == 701,                       "46: X2-stratum — rule id 701 (folded, not new)")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

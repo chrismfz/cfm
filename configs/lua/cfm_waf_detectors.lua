@@ -91,17 +91,28 @@ function _M.detect_rce(uri, args, _s)
   return false
 end
 
+-- Returns (action, tag) so the wire-up emits a sub-tag in the reason
+-- string for log triage. Backwards-compatible at the rule-id level (607
+-- is still the rule that fires) and at the family level (`WAF_EXPLOIT_METHOD`
+-- is still the prefix); only the suffix is new (B2 extension).
 function _M.detect_exploit_method(method)
   method = lower(method or "")
 
-  if method == "trace"   then return "block" end
-  if method == "track"   then return "block" end
-  if method == "connect" then return "block" end
+  if method == "trace"   then return "block",     "TRACE"   end
+  if method == "track"   then return "block",     "TRACK"   end
+  -- CFM angie/openresty isn't a forward proxy, so any CONNECT we see is
+  -- by definition out-of-place. Sub-tag captures that intent for log
+  -- triage even though the action is unchanged.
+  if method == "connect" then return "block",     "CONNECT_NOT_PROXY" end
 
-  if method == "propfind" then return "challenge" end
-  if method == "search"   then return "challenge" end
+  -- DAV methods. We don't host WebDAV by default, so any of these is
+  -- out-of-place too. Operators who do run WebDAV should use a per-vhost
+  -- exclusion (rule_id 607) on the affected host rather than relax the
+  -- global default.
+  if method == "propfind" then return "challenge", "DAV_PROPFIND" end
+  if method == "search"   then return "challenge", "DAV_SEARCH"   end
 
-  return nil
+  return nil, nil
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -217,8 +228,32 @@ function _M.detect_php_webshell_body(body, headers)
     s = s:gsub("%+", " ")
   end
 
+  -- Webshell self-identifying strings (W2 extension). These are constants
+  -- and page-title markers found inside the source of well-known shells:
+  -- they're specific enough that a bare prose mention almost never matches
+  -- (no legitimate page contains "0byt3m1n1" or "indoxploit"), but the body
+  -- is still gated by the early-out below so we don't pay scoring cost on
+  -- requests that lack any PHP marker at all.
+  local function ws_name_match()
+    if has(s, "b374k")      then return "B374K"      end
+    if has(s, "c99shell")   then return "C99SHELL"   end
+    if has(s, "r57shell")   then return "R57SHELL"   end
+    if has(s, "indoxploit") then return "INDOXPLOIT" end
+    if has(s, "0byt3m1n1")  then return "0BYT3M1N1"  end
+    if has(s, "weevelyshell") then return "WEEVELY"  end
+    if has(s, "<title>c99")   then return "C99_TITLE"  end
+    if has(s, "<title>r57")   then return "R57_TITLE"  end
+    -- WSO ships under several version banners; the prefix is the stable bit.
+    if has(s, "wso 2.") or has(s, "wso 4.") or has(s, "wso 5.") then return "WSO" end
+    return nil
+  end
+
   if not (has(s, "<?") or has(s, "$_") or has(s, "eval") or has(s, "system")
-          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")) then
+          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")
+          or has(s, "b374k") or has(s, "c99shell") or has(s, "r57shell")
+          or has(s, "indoxploit") or has(s, "0byt3m1n1")
+          or has(s, "weevelyshell") or has(s, "wso 2.")
+          or has(s, "wso 4.") or has(s, "wso 5.")) then
     return nil
   end
 
@@ -252,10 +287,21 @@ function _M.detect_php_webshell_body(body, headers)
     score = score + 1
   end
 
+  -- Webshell-name signature: +3 weight, comparable to a single PHP callable.
+  -- Combined with the standard <?php (+2) opener it crosses the default
+  -- min_score (5); alone (no <?php, no superglobal, no callable) it stays
+  -- below threshold so a forum post mentioning "b374k" can't trigger.
+  local ws_tag = ws_name_match()
+  if ws_tag then score = score + 3 end
+
   local min_score = tonumber(CFG.php_webshell_min_score) or 5
   if score < min_score then
     return nil
   end
+
+  -- Webshell-name match outranks the generic RAW_* tags because operators
+  -- want to know *which* shell hit, not just that something did.
+  if ws_tag then return "RAW_WS_" .. ws_tag end
 
   if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
   if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
@@ -1233,12 +1279,17 @@ function _M.detect_ssrf_proto(args, body, _ns)
   local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   if s == "" then return nil end
 
-  if has(s, "file://")   then return "SSRF_FILE" end
-  if has(s, "gopher://") then return "SSRF_GOPHER" end
-  if has(s, "dict://")   then return "SSRF_DICT" end
-  if has(s, "ldap://")   then return "SSRF_LDAP" end
-  if has(s, "ldaps://")  then return "SSRF_LDAPS" end
-  if has(s, "tftp://")   then return "SSRF_TFTP" end
+  if has(s, "file://")        then return "SSRF_FILE" end
+  if has(s, "gopher://")      then return "SSRF_GOPHER" end
+  if has(s, "dict://")        then return "SSRF_DICT" end
+  if has(s, "ldap://")        then return "SSRF_LDAP" end
+  if has(s, "ldaps://")       then return "SSRF_LDAPS" end
+  if has(s, "tftp://")        then return "SSRF_TFTP" end
+  -- Coinminer pool URL scheme. Folded into rule 701 (rather than added as
+  -- part of a future X2 detector) per the X2/rule-701 design call recorded
+  -- in docs/waf.md row 16. X2 will then cover only the tool/pool fingerprints.
+  if has(s, "stratum+tcp://") then return "SSRF_STRATUM" end
+  if has(s, "stratum+ssl://") then return "SSRF_STRATUM" end
   -- sftp:// and ftp:// in param values are suspicious but occur in some
   -- legitimate file-picker integrations; tag them differently for easier triage
   if has(s, "sftp://")   then return "SSRF_SFTP" end

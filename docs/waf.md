@@ -21,11 +21,12 @@
 | 15 | Phase 2 detectors at `logonly` — R2 (rule 323, `WAF_RCE:PERSISTENCE:<tag>`), R3 (rule 324, `WAF_RCE:ROOTKIT:<tag>`), R4 (rule 325, `WAF_RCE:LOLBIN:<tag>`). All emit family `WAF_RCE` so they share rule_rce's high-risk post-clearance routing. | DONE |
 | 16 | Phase 3/4/5 cross-phase duplication audit — **C1 already dropped** (rule 320), **C2/C3 are genuinely new** (Java deserialize / signature file infra), **X1 new** (tunnel/paste hostnames not covered by `detect_ssrf_proto`), **X2 has a half-overlap** on `stratum+tcp://` with rule 701 (design call: add as a tag inside 701 instead of duplicating in X2), **B1/B3/B4 new** (length mismatch / segment length / header-bag size are not covered by existing rules), **B2 already reclassified** as extension of rule 607 (row 14). | DONE |
 | 17 | Phase 3 detector at `logonly` — C2 (rule 326, `WAF_RCE:JAVA_DESERIALIZE:<tag>`). Detects Java ObjectOutputStream payloads via three wire forms: raw `0xAC 0xED 0x00 0x05` magic in body, base64 prefix `rO0AB` (case-insensitive), or `aced0005` hex literal. Searched in args, body, and the standard gadget-vector headers (Cookie, Authorization, X-Forwarded-For). Disjoint from PHP serialize (rule 306) — neither rule shadows the other. C3 (`/etc/cfm/cve_signatures.txt` hot-reload) is deferred to its own infra PR. | DONE |
-| 18+ | Remaining detector phases (W4, C3 infra, X1-X2, B1/B3/B4) + planned extensions to rules 404/405/607/701 | TODO — see "Phase 1 starting context" below |
+| 18 | Roadmap-extension tweaks (no new rule IDs). **W2** webshell self-identifying literals (`b374k`, `c99shell`, `r57shell`, `indoxploit`, `0byt3m1n1`, `weevelyshell`, `wso 2./4./5.`, `<title>c99`, `<title>r57`) folded into rule 404 with `RAW_WS_<NAME>` sub-tags that outrank the generic `RAW_*` set. **W3** `hex2bin(` added to `score_obfuscation_blob` (rule 405) at +2 weight. **B2** `detect_exploit_method` (rule 607) refactored to emit method sub-tags: `WAF_EXPLOIT_METHOD:TRACE` / `:TRACK` / `:CONNECT_NOT_PROXY` / `:DAV_PROPFIND` / `:DAV_SEARCH`. **X2/rule-701 design call resolved**: `stratum+tcp://` and `stratum+ssl://` folded into `detect_ssrf_proto` as `SSRF_STRATUM`; future X2 rule will then cover only the tool/pool fingerprints. | DONE |
+| 19+ | Remaining detector phases (W4, C3 infra, X1, X2 tool/pool fingerprints, B1/B3/B4) | TODO — see "Phase 1 starting context" below |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua` (also wired into CI per row 11):
 
-- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set), Phase 1 detectors W1/R1/B5, Phase 2 detectors R2/R3/R4 (including a non-overlap test that R4 doesn't double-count R1's IEX-WebClient pattern), Phase 3 detector C2 (including a disjoint-from-PHP-serialize test) — 39 cases covering Steps 1, 8, 10, 13, 14, 15, 17.
+- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set), Phase 1 detectors W1/R1/B5, Phase 2 detectors R2/R3/R4 (including a non-overlap test that R4 doesn't double-count R1's IEX-WebClient pattern), Phase 3 detector C2 (including a disjoint-from-PHP-serialize test), W2/W3/B2/X2-stratum extensions to rules 404/405/607/701 — 46 cases covering Steps 1, 8, 10, 13, 14, 15, 17, 18.
 - `cfm_waf_post_clearance_test.lua` — `_M.post_clearance_action` matrix — covers Step 3.
 - `cfm_panel_forced_mode_test.lua` — panel dispatch decisions (challenge / origin pass-through / API SSO bypass / internal-endpoint deny). Asserts on side effects (captured `ngx.redirect` / `ngx.exit` calls) rather than chunk-return values, since `cfm_panel.lua`'s `main()` is wrapped in `xpcall` for fail-open hardening.
 - `cfm_rules_race_test.lua` — `cfm_rules` shdict-state compatibility under concurrent mutation.
@@ -446,8 +447,8 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ### Phase 1 — webshell delivery
 
 - **W1** known-bad webshell path names (`/c99.php`, `/r57.php`, …) → `WAF_WEBSHELL:PATH:<basename>` — **shipped at `logonly` (rule 410)**.
-- **W2 (RECLASSIFIED — extension, not new rule)**: extend `detect_php_webshell_body` (rule 404) with literals like `b374k`, `WSO 2.5`, `c99shell`, `r57shell`, `mini.php`, `@eval(`, `@assert(`. The scorer already covers `<?php` + superglobals + exec-family; adding webshell-name literals as scoring signals folds cleanly without a new rule ID.
-- **W3 (RECLASSIFIED — extension, not new rule)**: extend `score_obfuscation_blob` (rule 405) with `hex2bin(`. The scorer already covers `chr()` storm, `\x` storm, `eval(`, `base64_decode(`, `gzinflate(`, atob, new Function, charCodeAt+XOR, `preg_replace+/e`. Only `hex2bin` is missing; one line in `cfm_waf_util.lua`.
+- **W2 (extension of rule 404)** — **DONE**. Added webshell self-identifying literals (`b374k`, `c99shell`, `r57shell`, `indoxploit`, `0byt3m1n1`, `weevelyshell`, `wso 2./4./5.`, `<title>c99`, `<title>r57`) to `detect_php_webshell_body` at +3 weight. Tag prefix `RAW_WS_<NAME>` outranks the generic `RAW_*` set so operators see *which* shell hit. Bare prose mention stays below `min_score=5` so a forum post can't trigger.
+- **W3 (extension of rule 405)** — **DONE**. Added `hex2bin(` to `score_obfuscation_blob` at +2 weight (same as `base64_decode` and `gzinflate`). Tag `HEX2BIN`.
 - **W4** polyglot upload (image Content-Type + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes of multipart part) → extend `detect_upload_content` (rule 402) with a leading-bytes-while-image-CT check, or ship as a new rule if the tagging shape needs to be distinct.
 
 ### Phase 2 — post-exploitation / RCE
@@ -466,12 +467,12 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ### Phase 4 — C2 / exfiltration
 
 - **X1** tunnel/paste services in body or upload (`pastebin.com/raw/`, `cdn.discordapp.com/attachments/`, `webhook.site`, `ngrok.io`) → `WAF_C2:TUNNEL`, `+5` body-only. Not covered by `detect_ssrf_proto` (rule 701), which checks protocol schemes + IP obfuscation, not specific hostnames.
-- **X2** coinminer URLs/tools (`xmrig --url`, `pool.minexmr.com`, `stratum+tcp://`) → `WAF_RCE:COINMINER`, `+5`. **Design call when implementing**: `stratum+tcp://` half-overlaps with rule 701's scheme list — prefer adding it as a tag inside `detect_ssrf_proto` rather than duplicating it in X2's table. X2 then covers only the tool/pool fingerprints.
+- **X2** coinminer URLs/tools (`xmrig --url`, `pool.minexmr.com`) → `WAF_RCE:COINMINER`, `+5`. The `stratum+tcp://` and `stratum+ssl://` schemes have already been folded into `detect_ssrf_proto` as `SSRF_STRATUM` (rule 701); X2 covers only the tool/pool fingerprints.
 
 ### Phase 5 — behavioural / combined-signal
 
 - **B1** Content-Length vs observed body mismatch → `WAF_HTTP_SMUGGLING:CONTENT_LENGTH_MISMATCH`, `+4`.
-- **B2 (RECLASSIFIED — extension, not new rule)**: tighten `detect_exploit_method` (rule 607) so PROPFIND/SEARCH to non-DAV and CONNECT to non-proxy emit a sub-tag instead of a flat method-block. The "outside expected location" angle is a per-vhost context the existing rule already has the entry point for; adding it as rule 608 would split a single semantic rule across two IDs.
+- **B2 (extension of rule 607)** — **DONE**. `detect_exploit_method` now returns `(action, tag)` and the wire-up emits `WAF_EXPLOIT_METHOD:TRACE` / `:TRACK` / `:CONNECT_NOT_PROXY` / `:DAV_PROPFIND` / `:DAV_SEARCH`. Sub-tags are advisory log triage; the per-vhost mechanism (rule_id 607 in `--rule-ids`) is what operators use to whitelist a DAV-hosting vhost.
 - **B3** Single URL segment ≥ 256 chars → `WAF_LONG_PATH`, `+3`; raise if high-entropy.
 - **B4** Header bag total > 16 KB without large `Cookie`/`Authorization` → `WAF_HEADER_FLOOD`, `+3`.
 - **B5** POST + empty UA + Content-Length:0 + URI ends in `.php`/`.phtml`/`.phar` → `WAF_WEBSHELL:PING` — **shipped at `logonly` (rule 411)**.
@@ -501,9 +502,9 @@ A solved `cfm_clearance` means: "do not repeatedly challenge this client for the
 
 This section is a self-contained briefing for picking up the next chunk of work without reading prior chat history. A fresh Claude session with this file plus `docs/waf-analysis-2026-05-08.md` should be able to scope, code, test, and ship a new detector.
 
-**Shipped so far**: Phase 1 (W1/R1/B5 — rules 410, 322, 411), Phase 2 (R2/R3/R4 — rules 323, 324, 325), Phase 3 partial (C2 — rule 326), all at `logonly`. Two cross-phase audits completed (status rows 14 and 16) — **C1 dropped** (already covered by rule 320), **W2/W3/B2 reclassified as extensions** of existing rules, **R4 trimmed** to avoid overlap with R1, **X2 `stratum+tcp://` half-overlap** flagged for design when implementing.
+**Shipped so far**: Phase 1 (W1/R1/B5 — rules 410, 322, 411), Phase 2 (R2/R3/R4 — rules 323, 324, 325), Phase 3 partial (C2 — rule 326), and the W2/W3/B2/X2-stratum extensions to rules 404/405/607/701 (no new rule IDs). All `logonly` for the new behaviour. Two cross-phase audits completed (status rows 14 and 16) — **C1 dropped** (already covered by rule 320), **R4 trimmed** to avoid overlap with R1, **X2/rule-701 design call resolved** by folding `stratum+tcp://` into rule 701.
 
-**Next pickup**: **W4** (polyglot upload), **C3** (CVE signature file infra — its own PR), **X1/X2** (C2/exfiltration; remember the X2 design call), **B1/B3/B4** (behavioural). Plus four small extension tweaks: rule 404 (W2 literals), rule 405 (W3 `hex2bin`), rule 607 (B2 method-out-of-place sub-tags), rule 701 (`stratum+tcp://` if X2 chooses to delegate it). Follow the same shape as the existing PRs.
+**Next pickup**: **W4** (polyglot upload), **C3** (CVE signature file infra — its own PR), **X1** (tunnel/paste hostnames), **X2** (coinminer tool/pool fingerprints — the scheme is already in 701), **B1/B3/B4** (length mismatch / segment length / header-bag size). Follow the same shape as the existing PRs.
 
 ### What's already done
 
