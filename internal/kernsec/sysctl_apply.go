@@ -9,7 +9,9 @@ import (
 // SysctlPath is where kernsec persists the sysctl rule set. Number 99
 // keeps it last in /etc/sysctl.d processing order — anything else
 // distros put in /etc/sysctl.d gets overridden by us.
-const SysctlPath = "/etc/sysctl.d/99-cfm-kernsec.conf"
+//
+// Declared as var (not const) so tests can redirect it to t.TempDir().
+var SysctlPath = "/etc/sysctl.d/99-cfm-kernsec.conf"
 
 // RenderSysctlFile produces the content of /etc/sysctl.d/99-cfm-kernsec.conf
 // for the given rule set. Rules whose key is not exposed by the

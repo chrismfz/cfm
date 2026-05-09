@@ -38,6 +38,8 @@ func RunCLI(args []string) int {
 		return RunInit(os.Stdout)
 	case "apply":
 		return runApplyCmd(args[1:], os.Stdout)
+	case "disable":
+		return runDisableCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -135,6 +137,25 @@ func runApplyCmd(args []string, w io.Writer) int {
 	})
 }
 
+func runDisableCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec disable", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	purge := fs.Bool("purge", false, "also remove /etc/cfm/kernsec.conf and managed sysctl file")
+	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
+	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "kernsec disable:", err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	return RunDisable(w, DisableOptions{
+		Purge:     *purge,
+		DryRun:    *dryRun,
+		NoRefresh: *noRefresh,
+	})
+}
+
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -160,6 +181,7 @@ Subcommands:
   preview             Show what `+"`apply`"+` would do given conf + host profile
   init                Write default tier=1 /etc/cfm/kernsec.conf if absent
   apply               Write managed sysctl + boot-arg files; run sysctl --load + bootloader refresh
+  disable             Persistently disable kernsec (tier=0) and strip managed boot args + sysctl rules
   help                Show this message
 
 Status / text flags:
@@ -178,6 +200,11 @@ Apply flags:
   --dry-run           Show what would change without writing
   --check             Exit non-zero on drift (implies no writes; for monitoring)
   --no-refresh        Skip the bootloader refresh after writing the cmdline
+
+Disable flags:
+  --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
+  --dry-run           Show what would happen without writing
+  --no-refresh        Skip the bootloader refresh step
 
 TUI keys:
   q / Ctrl-C          Quit

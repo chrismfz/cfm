@@ -16,6 +16,10 @@ per-rule overrides, and three new subcommands:
 - `cfm kernsec apply` — write managed sysctl + boot-arg files atomically,
   run `sysctl --load`, refresh the bootloader. `--dry-run` and `--check`
   flags. First-run auto-creates the conf.
+- `cfm kernsec disable` — friendly wrapper around `tier=0 + apply`.
+  Strips managed boot args, empties managed sysctl file, persists
+  `tier=0` to the conf. `--purge` removes the conf entirely
+  (full uninstall). `--dry-run` and `--no-refresh` flags.
 
 **Post-Phase-2 sweep complete.** Code review against the `kspp.sh`
 contract surfaced two real bugs (silent read-failure paths in
@@ -788,6 +792,57 @@ preview (no writes). Phase 2b: apply with writes.
 - Acceptance gate: `cfm kernsec status` after `apply` reports zero
   WARNs on a clean box.
 
+### Phase 2.5 — `cfm kernsec disable` (DONE — branch `kernsec-disable`)
+
+Friendly wrapper around `tier=0 + apply`. Same effect as editing the
+conf to `tier = 0` and running `cfm kernsec apply`, packaged as one
+command for ops who want a panic-button-flavoured disable.
+
+```
+cfm kernsec disable           # persistent: writes tier=0 to conf,
+                              # strips managed boot args, empties
+                              # managed sysctl, refreshes bootloader.
+                              # Re-running `apply` is a no-op until
+                              # the conf is edited back to tier=1.
+
+cfm kernsec disable --purge   # full uninstall: same as above, but
+                              # also removes /etc/cfm/kernsec.conf
+                              # and /etc/sysctl.d/99-cfm-kernsec.conf.
+                              # .cfm-kernsec.bak files are preserved.
+
+cfm kernsec disable --dry-run     # show what would change
+cfm kernsec disable --no-refresh  # skip post-write bootloader refresh
+```
+
+**What it does NOT do** (intentional, documented):
+- Does not byte-restore `/etc/default/grub` or `/etc/kernel/cmdline`
+  from `.cfm-kernsec.bak`. The .bak captures pre-kernsec state, not
+  pre-most-recent-apply — restoring it could lose operator edits made
+  between applies. Manual restore from the .bak is one `cp` away
+  if needed.
+- Does not revert live `/proc/sys/...` values to kernel defaults.
+  `sysctl --load` of an empty file does not reset values; reboot is
+  the contract.
+- Does not `rmmod` blacklisted modules (Phase 3 concern). Reboot or
+  manual `modprobe -r`.
+
+When operators reach for what:
+
+| Situation | Right command |
+|---|---|
+| Back kernsec off, may re-enable later | `cfm kernsec disable` |
+| Uninstall kernsec configuration entirely | `cfm kernsec disable --purge` |
+| System won't boot after apply | Edit cmdline at GRUB / systemd-boot rescue, or `proxmox-boot-tool kernel pin <old>` |
+| Restore exact pre-kernsec /etc/default/grub | `cp /etc/default/grub.cfm-kernsec.bak /etc/default/grub && update-grub` |
+| Fully clean state | `cfm kernsec disable --purge` + reboot |
+
+Implementation: `applyCore` was extracted from `RunApply` to make
+this clean — `RunApply` loads the conf from disk and calls
+`applyCore`; `RunDisable` constructs an in-memory tier=0 conf
+(preserving any existing per-rule overrides for transparency in
+output) and calls the same helper. `WriteConf` was added for the
+persistence step. Backup files are never touched by purge.
+
 ### Phase 3 — Modules + sunset `kspp.sh`
 
 - Module blacklist file generation (`/etc/modprobe.d/cfm-kernsec.conf`,
@@ -824,6 +879,24 @@ cross-component awareness.
 ## Progress
 
 ### DONE
+
+**Phase 2.5 — `cfm kernsec disable`** (branch `kernsec-disable`)
+- New subcommand. `cfm kernsec disable` persists tier=0 + applies;
+  `--purge` removes conf + managed sysctl file entirely.
+- `applyCore` extracted from `RunApply` so the same orchestration
+  drives apply (loads conf from disk) and disable (in-memory tier=0
+  conf with existing overrides preserved for transparency).
+- `WriteConf` added — atomic-write any `*Conf` to `ConfPath`.
+- ConfPath / SysctlPath demoted from `const` to `var` so tests can
+  redirect to `t.TempDir()`. No production-code behaviour change.
+- 7 new tests: WriteConf round-trip + nil-refused + tier-0
+  persistence; purgeManagedFiles removes both files and preserves
+  .cfm-kernsec.bak; idempotent on missing files; loadConfForDisable
+  returns tier=0 placeholder when no conf, preserves overrides when
+  conf exists.
+- Doc: when-to-use table operators can scan; explicit "what disable
+  does NOT do" list (no byte-restore from .bak, no live-sysctl
+  revert, no `rmmod`).
 
 **Post-Phase-2 sweep** (branch `kernsec-sweep`)
 - Code review of `apply.go`, `backend_*.go`, `sysctl_apply.go`,
