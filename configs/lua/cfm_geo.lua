@@ -4,24 +4,27 @@
 --
 -- WHY THIS IS A MODULE
 --
--- This file MUST be loaded via `require` (not pasted into an
--- access_by_lua_file body), because the underlying FFI mmap of the
--- GeoLite2 .mmdb file MUST happen exactly once per worker. The
--- previous implementation lived inside cfm.lua's top-level scope; that
--- scope is re-evaluated by openresty/angie on every request when
--- cfm.lua is loaded via access_by_lua_file. The "init guard" local
--- (`_geo_init_done`) reset to false on every request, so
+-- See the long-form pitfall block at the top of cfm.lua under
+-- "PITFALL: access_by_lua_file top-level locals". Short version:
+-- cfm.lua's chunk re-executes on every request, so a top-level
+-- `local _geo_init_done = false` reset to false on every request and
 -- `mmdb.init(path)` was called repeatedly. lua-resty-maxminddb's init
--- opens a fresh mmap of the ~60 MB DB file inside its FFI layer; the
--- previous handle becomes unreferenced but Lua's GC doesn't free it
--- (no `__gc` metamethod calls MMDB_close). Mappings accumulated
--- ~1/min until each worker had 200+ duplicate maps of the same file
--- (~13 GB virtual / ~0.5 GB resident per worker). Confirmed via
--- /proc/<pid>/maps captured by `cfm debug` on 2026-05-09.
+-- opens a fresh ~60 MB FFI mmap of the .mmdb file each call, and Lua's
+-- GC doesn't release it (no `__gc` metamethod calls MMDB_close).
+-- Mappings accumulated ~1/min until each worker had 200+ duplicate
+-- maps of the same file (~13 GB virtual / ~0.5 GB resident per
+-- worker). Confirmed on virgo via /proc/<pid>/maps captured by
+-- `cfm debug` on 2026-05-09; bundle filed under
+-- /var/lib/cfm/debug/20260509T143131Z/.
 --
 -- By living in `package.loaded["cfm_geo"]`, this module is initialised
 -- exactly once per worker. The init flag and any mmdb handle are
 -- module-scope locals — they survive across requests.
+--
+-- Sister-fix: cfm_waf_excl.lua holds the WAF-excludes cache state for
+-- the same reason. Both modules document the rule "state that must
+-- persist across requests goes in a `require`d module, never in a
+-- top-level local of an access_by_lua_file body".
 --
 -- API: `local geo = require "cfm_geo"; local cc = geo.country(ip_str)`.
 
