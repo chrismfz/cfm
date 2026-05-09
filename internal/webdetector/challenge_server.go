@@ -856,8 +856,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		}
 
 		// challengeHTML placeholders are: host, token, powTok, next, difficulty.
-		// host is HTML-escaped; token/powTok/next are emitted as quoted JS string
-		// literals; and next is normalized above ("/" prefix + max length cap).
+		// host goes into <code>%s</code> via htmlEscape (covers &, <, >, ", '
+		// — sufficient for HTML element-content placement). token/powTok/next
+		// are emitted as JS string literals via jsStringLiteral, which post-
+		// processes strconv.Quote to also escape <, >, &, U+2028, U+2029 so
+		// they're safe inside <script>...</script>; see jsStringLiteral
+		// docs for why strconv.Quote alone wasn't enough. next is also
+		// normalized above ("/" prefix + max length cap). CodeQL #565
+		// (real, fixed in jsStringLiteral) and #765 (FP, htmlEscape is
+		// correct) at this call site, both 2026-05-09 triage.
 		fmt.Fprintf(w, challengeHTML(),
 			htmlEscape(host),
 			jsStringLiteral(tok),
@@ -1028,8 +1035,33 @@ func htmlEscape(s string) string {
 	return r.Replace(s)
 }
 
-// jsStringLiteral returns a properly quoted/escaped JavaScript string literal.
-func jsStringLiteral(s string) string { return strconv.Quote(s) }
+// jsStringLiteral returns a JavaScript string literal that is safe to embed
+// inside an HTML <script> block. strconv.Quote alone is NOT safe for that
+// context: it escapes \, ", control chars, and non-printables, but leaves
+// <, >, &, and the JS-only line terminators U+2028 / U+2029 as-is. Inside
+// <script>...</script>, the HTML parser still tokenises </script>
+// regardless of JavaScript context, so an input value containing the
+// literal sequence </script> would close the script tag early and let the
+// remaining bytes execute as HTML — a reflected XSS via any tainted source
+// that flows here (the ?next= query parameter is the documented vector;
+// CodeQL #565 / 2026-05-09).
+//
+// Post-process the strconv.Quote output to escape those bytes via
+// \uXXXX. The escape form is valid in JS string literals (and JSON) and
+// does not change the runtime string value, only its source rendering —
+// so the page-side JS sees the original characters once parsed.
+func jsStringLiteral(s string) string {
+	q := strconv.Quote(s)
+	return jsHTMLEscapeReplacer.Replace(q)
+}
+
+var jsHTMLEscapeReplacer = strings.NewReplacer(
+	"<", `\u003c`,
+	">", `\u003e`,
+	"&", `\u0026`,
+	"\u2028", `\u2028`, // JS line separator: would terminate a string literal at runtime
+	"\u2029", `\u2029`, // JS paragraph separator: same hazard
+)
 
 // ---------------- self-protection (in-process rate limit) ----------------
 

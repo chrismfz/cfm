@@ -111,6 +111,11 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 		k := strings.TrimSpace(ev.IP) + "|" + cleanHost(ev.Host)
 		solvedSet[k] = struct{}{}
 	}
+	// boundedLimit is clamped above (line 94-97) to maxChallengeOutcomeLimit
+	// so these allocations are at most a small fixed constant. CodeQL #562
+	// and #563 (2026-05-09 triage) flag these as excessive-size make calls
+	// because the interprocedural constant propagation does not track the
+	// upstream clamp.
 	solved := make([]HistoryEvent, 0, boundedLimit)
 	unsolved := make([]HistoryEvent, 0, boundedLimit)
 	for _, ev := range issued {

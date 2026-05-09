@@ -258,6 +258,12 @@ func RestoreAdminConfigBackup(cfgDir, backupID string) (string, string, error) {
 	}
 	restoredAt := time.Now().UTC().Format("20060102150405")
 	restoreID := backupID + "-restore-" + restoredAt
+	// `restorePath` is constrained to the operator-controlled config
+	// directory: `path` comes from resolveConfigPath(cfgDir); `backupID`
+	// has been validated by resolveBackupPath above (rejects "/" and "..").
+	// CodeQL #613 (2026-05-09 triage) flags the os.OpenFile inside
+	// copyFileSafe as a tainted-path sink — FP since every byte of the
+	// path here is operator-derived and the id is sanitised upstream.
 	restorePath := path + ".bak-" + restoreID
 	if fileExists(path) {
 		if err := copyFileSafe(path, restorePath); err != nil {
