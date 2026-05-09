@@ -30,6 +30,15 @@ func readExcludeParams(r *http.Request) (string, string) {
 	return typ, value
 }
 
+// readWAFRuleIDsParam parses the rule_ids query parameter. The parameter
+// accepts a comma-separated list of: bare ints (320), group prefixes (3xx),
+// and inclusive ranges (310-317). An absent or empty parameter returns
+// (nil, nil) meaning "no rule scoping" — falls through to legacy whole-WAF
+// exclude semantics.
+func readWAFRuleIDsParam(r *http.Request) ([]int, error) {
+	return parseRuleIDs(r.URL.Query().Get("rule_ids"))
+}
+
 func containsWildcard(s string) bool {
 	return strings.ContainsAny(s, "*?")
 }
@@ -168,7 +177,11 @@ func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.WAFExcludeList(), scope))
 }
 
-// POST /api/v1/waf/exclude/add?type=host&value=example.com
+// POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317]
+//
+// rule_ids is optional. When absent/empty the legacy whole-WAF exclude is
+// added. When present the entry only suppresses hits whose waf_rule_id is in
+// the expanded set; the WAF still runs and other rules can still fire.
 func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -183,14 +196,23 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.WAFExcludeAdd(typ, value, scope); !ok {
+	ruleIDs, err := readWAFRuleIDsParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule_ids: " + err.Error()})
+		return
+	}
+	if ok := e.WAFExcludeAddRules(typ, value, scope, ruleIDs); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// POST /api/v1/waf/exclude/remove?type=host&value=example.com
+// POST /api/v1/waf/exclude/remove?type=host&value=example.com[&rule_ids=320]
+//
+// rule_ids must match the entry being removed exactly. Absent/empty targets
+// the legacy whole-WAF entry; present targets the rule-scoped entry whose
+// expanded rule-id set equals this one.
 func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -205,7 +227,12 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.WAFExcludeRemove(typ, value, scope); !ok {
+	ruleIDs, err := readWAFRuleIDsParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule_ids: " + err.Error()})
+		return
+	}
+	if ok := e.WAFExcludeRemoveRules(typ, value, scope, ruleIDs); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
 	}

@@ -13,7 +13,8 @@
 | 7 | Split `cfm_waf.lua` into engine / detectors / util files | DONE |
 | 8 | Stable numeric rule IDs (PR A of #10 below) — log line, `/api/v1/waf/rules`, CLI | DONE |
 | 9 | Hit-rate counters + sampled hit log — per-rule rate gates promotions, sampled log carries UA/Referer/CT for FP investigation. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, `cfm.waf.sampled.log`. | DONE |
-| 10+ | Per-vhost per-rule exclusions (PR B of #10) + new detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
+| 10 | Per-vhost per-rule exclusions (PR B of #10) — `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI flag, `rule_ids` API query param, `ctx.skip_rule_ids` gating inside `record()`. | DONE — see "Per-vhost rule exclusions" below |
+| 11+ | New detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
 
@@ -114,6 +115,63 @@ Current assignments:
 - **Public Lua API** — `_M.get_rule_ids()` returns a copy of the `RULE_IDS` table; `_M.rule_id_for("rule_traversal")` looks up a single ID. Both used by tests; available to in-process Lua callers.
 
 The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **separate** namespace (decision-engine traffic-rule IDs, not WAF rule IDs). The WAF path uses `waf_rule_id` everywhere to avoid collision.
+
+---
+
+## Per-vhost rule exclusions
+
+Operators can suppress specific WAF rules on specific hosts/paths without disabling the whole WAF for that scope. This solves the canonical "scraper triggers `WAF_PROXY_HDR` on one site" pattern (3xK Tech / vitolighting from `docs/waf-analysis-2026-05-08.md`) — keep the rest of the ruleset hot, drop just the noisy rule on the affected host.
+
+### Data model
+
+`excludeEntry` (`internal/webdetector/exclude_store.go`) gains an optional `RuleIDs []int`:
+
+- **`RuleIDs` empty/nil** → legacy whole-WAF skip (existing behaviour, on-disk back-compat).
+- **`RuleIDs` non-empty** → entry only suppresses hits whose `waf_rule_id` is in the set; the WAF still runs and other rules can still fire.
+
+The entry key includes the rule-ID set, so `(host=foo.com, RuleIDs=nil)` and `(host=foo.com, RuleIDs=[320])` are distinct entries. Two rule-scoped entries on the same host union their IDs at match time.
+
+### CLI
+
+```
+cfm webtop waf exclude add example.com --rule 320              # single ID
+cfm webtop waf exclude add example.com --rule 3xx              # whole 300..399 group
+cfm webtop waf exclude add example.com --rule 310-317          # inclusive range
+cfm webtop waf exclude add example.com --rule 320 --rule 401   # repeatable flag
+cfm webtop waf exclude add example.com                         # bare = whole-WAF (legacy)
+cfm webtop waf exclude remove example.com --rule 320           # exact-match remove
+cfm webtop waf exclude list                                    # RULES column shows IDs (or *)
+```
+
+`--rule` is WAF-only; `cfm webtop challenge exclude` ignores the flag.
+
+### API
+
+`POST /api/v1/waf/exclude/add?type=host&value=example.com&rule_ids=320,3xx,310-317`
+
+`rule_ids` accepts a comma-separated mix of bare ints, group prefixes, and ranges. Out-of-range IDs (outside 100..999) are rejected with HTTP 400. Empty/absent param means the legacy whole-WAF semantics. The `remove` endpoint takes the same `rule_ids` value and matches the entry exactly.
+
+### Lua wiring
+
+`/nginx/waf/excludes` already serves entries; `RuleIDs` flows through automatically via `rule_ids,omitempty`. `cfm.lua`'s exclude cache (`wxhosts` / `wxpaths` shdict snapshots) now carries `{v, rule_ids}` per entry. Per-request:
+
+```
+skip_all, skip_rule_ids = waf_skip_for(host, uri)
+if skip_all then          -- whole-WAF entry matched: short-circuit, never call _M.check
+  ...
+else
+  waf.check({ ..., skip_rule_ids = skip_rule_ids })  -- set { [101]=true, [320]=true, ... } or nil
+end
+```
+
+`cfm_waf.lua`'s `_M.check` consumes `ctx.skip_rule_ids` inside the severity-aggregation `record()` closure: any hit whose `rule_id` is in the set is silently dropped — no severity, no log, no counters. Detectors still execute (their work is dominated by helpers shared across rules; per-rule short-circuiting at the call sites was rejected in favour of a single choke point).
+
+When the `cfm_debug_headers` knob is on, `X-CFM-WAF-Skip-Rules` echoes the active set so operators can confirm the right rule IDs reach the request.
+
+### Tests
+
+- Go: `internal/webdetector/exclude_rule_ids_test.go` (parser: bare, `Nxx`, ranges, mixed, clipping, error cases) and `exclude_store_test.go` (rule-scoped entries don't trigger whole-WAF; whole-WAF wins on collision; union of multiple rule-scoped entries; persistence round-trip; remove distinguishes scoping).
+- Lua: tests 17-18 in `scripts/tests/cfm_waf_severity_test.lua` (skip suppresses hit; non-excluded rules still fire).
 
 ---
 
@@ -350,7 +408,7 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
 | 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
 | 9 | ~~**Hit-rate counter + sampled hit log**~~ DONE — see "Hit-rate measurement" section. | — | — |
-| 10 | **Stable rule IDs + per-vhost rule exclusions** (ModSec `SecRuleRemoveById`-style). Two-PR plan: **PR A — DONE** (this branch). Semantic 3-digit IDs grouped by first digit (1xx path, 2xx UA, 3xx injection, 4xx upload, 5xx auth, 6xx header/protocol, 7xx SSRF, 8xx info-disclosure, 9xx reserved). `waf_rule_id=N` in `cfm.waf.log` + `HistoryEvent.Payload`; `GET /api/v1/waf/rules` registry endpoint; `cfm webtop waf rules` CLI; Lua `_M.get_rule_ids()` / `_M.rule_id_for()`. See "Rule IDs" section above. **PR B — TODO**: extend `excludeEntry` (`internal/webdetector/exclude_store.go`) with optional `RuleIDs []int` (and group-prefix support, e.g. `--rule 3xx`, `--rule 310-317`); empty = whole-WAF skip (back-compat). Lua reads via existing `/nginx/waf/excludes` RPC, gates per-detector via `ctx.skip_rule_ids` set. CLI: `cfm webtop waf exclude add example.com --rule 320` / `--rule 3xx`; `/api/v1/waf/exclude/add` accepts `rule_ids` query param; panel UI multi-select on the vhost edit screen, sourced from `/api/v1/waf/rules`. Solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF. PR B sized ~1.5 days. | M |
+| 10 | ~~**Stable rule IDs + per-vhost rule exclusions**~~ (ModSec `SecRuleRemoveById`-style). **PR A DONE** + **PR B DONE** — see "Rule IDs" and "Per-vhost rule exclusions" sections above. Solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF. | — |
 
 ---
 

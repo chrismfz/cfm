@@ -3136,11 +3136,31 @@ func (e *Engine) WAFExcludeAdd(typ, value string, scope map[string]struct{}) boo
 	return e.wafExcludes.Add(typ, value, scope)
 }
 
+// WAFExcludeAddRules is the rule-scoped variant of WAFExcludeAdd. ruleIDs
+// nil/empty falls through to the legacy whole-WAF semantics. Two entries on
+// the same (typ, value, scope) tuple but different rule-id sets are
+// independent.
+func (e *Engine) WAFExcludeAddRules(typ, value string, scope map[string]struct{}, ruleIDs []int) bool {
+	if e == nil || e.wafExcludes == nil {
+		return false
+	}
+	return e.wafExcludes.AddWithRuleIDs(typ, value, scope, ruleIDs)
+}
+
 func (e *Engine) WAFExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
 	return e.wafExcludes.Remove(typ, value, scope)
+}
+
+// WAFExcludeRemoveRules removes the rule-scoped entry matching (typ, value,
+// scope, ruleIDs). nil/empty ruleIDs targets the legacy whole-WAF entry.
+func (e *Engine) WAFExcludeRemoveRules(typ, value string, scope map[string]struct{}, ruleIDs []int) bool {
+	if e == nil || e.wafExcludes == nil {
+		return false
+	}
+	return e.wafExcludes.RemoveWithRuleIDs(typ, value, scope, ruleIDs)
 }
 
 func (e *Engine) WAFExcludeList() []excludeEntry {

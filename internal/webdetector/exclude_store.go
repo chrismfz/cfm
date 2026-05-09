@@ -15,7 +15,12 @@ type excludeEntry struct {
 	Type       string    `json:"type"` // host | path
 	Value      string    `json:"value"`
 	ScopeHosts []string  `json:"scope_hosts,omitempty"` // nil/empty => admin-global
-	CreatedAt  time.Time `json:"created_at"`
+	// RuleIDs limits this exclude to specific WAF rule IDs. nil/empty means
+	// "whole-WAF skip" (back-compat). When set, the WAF still runs but any
+	// hit whose waf_rule_id is in this set is suppressed. Two entries with
+	// the same (type, value, scope) but different RuleIDs are distinct.
+	RuleIDs   []int     `json:"rule_ids,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type excludeStore struct {
@@ -28,9 +33,10 @@ type excludeStore struct {
 }
 
 type compiledExcludeEntry struct {
-	Type  string
-	Scope compiledScopeMatcher
-	Value compiledValueMatcher
+	Type    string
+	Scope   compiledScopeMatcher
+	Value   compiledValueMatcher
+	RuleIDs []int // nil/empty => whole-WAF skip
 }
 
 type compiledScopeMatcher struct {
@@ -69,9 +75,9 @@ func (s *excludeStore) normalize(t, v string) (string, string, bool) {
 	return t, v, true
 }
 
-func (s *excludeStore) key(t, v string, scopeHosts []string) string {
+func (s *excludeStore) key(t, v string, scopeHosts []string, ruleIDs []int) string {
 	scope := strings.Join(scopeHosts, ",")
-	return t + ":" + v + "|" + scope
+	return t + ":" + v + "|" + scope + "|" + ruleIDsKey(ruleIDs)
 }
 
 func normalizeScopeHosts(scopeHosts []string) []string {
@@ -110,32 +116,51 @@ func scopeMapToHosts(scope map[string]struct{}) []string {
 }
 
 func (s *excludeStore) Add(t, v string, scope map[string]struct{}) bool {
+	return s.AddWithRuleIDs(t, v, scope, nil)
+}
+
+// AddWithRuleIDs is the rule-scoped variant of Add. ruleIDs is normalized
+// (sorted, deduplicated, clipped to 100..999); empty/nil means whole-WAF
+// skip (legacy semantics, identical to Add). Two entries on the same
+// (type, value, scope) tuple but with different RuleIDs are independent.
+func (s *excludeStore) AddWithRuleIDs(t, v string, scope map[string]struct{}, ruleIDs []int) bool {
 	t, v, ok := s.normalize(t, v)
 	if !ok {
 		return false
 	}
 	scopeHosts := scopeMapToHosts(scope)
+	ruleIDs = normalizeRuleIDs(ruleIDs)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := s.key(t, v, scopeHosts)
+	k := s.key(t, v, scopeHosts, ruleIDs)
 	if _, exists := s.entries[k]; exists {
 		return false
 	}
-	s.entries[k] = excludeEntry{Type: t, Value: v, ScopeHosts: scopeHosts, CreatedAt: time.Now()}
+	s.entries[k] = excludeEntry{
+		Type: t, Value: v, ScopeHosts: scopeHosts, RuleIDs: ruleIDs,
+		CreatedAt: time.Now(),
+	}
 	s.rebuildCompiledLocked()
 	_ = s.saveLocked()
 	return true
 }
 
 func (s *excludeStore) Remove(t, v string, scope map[string]struct{}) bool {
+	return s.RemoveWithRuleIDs(t, v, scope, nil)
+}
+
+// RemoveWithRuleIDs targets the entry with the matching (type, value, scope,
+// rule-id-set) tuple. nil/empty ruleIDs targets the legacy whole-WAF entry.
+func (s *excludeStore) RemoveWithRuleIDs(t, v string, scope map[string]struct{}, ruleIDs []int) bool {
 	t, v, ok := s.normalize(t, v)
 	if !ok {
 		return false
 	}
 	scopeHosts := scopeMapToHosts(scope)
+	ruleIDs = normalizeRuleIDs(ruleIDs)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := s.key(t, v, scopeHosts)
+	k := s.key(t, v, scopeHosts, ruleIDs)
 	if _, exists := s.entries[k]; !exists {
 		return false
 	}
@@ -159,7 +184,10 @@ func (s *excludeStore) List() []excludeEntry {
 		if strings.Join(out[i].ScopeHosts, ",") != strings.Join(out[j].ScopeHosts, ",") {
 			return strings.Join(out[i].ScopeHosts, ",") < strings.Join(out[j].ScopeHosts, ",")
 		}
-		return out[i].Value < out[j].Value
+		if out[i].Value != out[j].Value {
+			return out[i].Value < out[j].Value
+		}
+		return ruleIDsKey(out[i].RuleIDs) < ruleIDsKey(out[j].RuleIDs)
 	})
 	return out
 }
@@ -255,13 +283,33 @@ func (s *excludeStore) MatchChallenge(host string) bool {
 	return false
 }
 
+// MatchWAF reports whether the (host, path) request should skip the WAF
+// entirely. Only whole-WAF entries (RuleIDs empty) count — rule-scoped
+// entries don't trigger this, since their semantics is "skip these rules"
+// rather than "skip the WAF". Callers that need the full picture should use
+// MatchWAFRules.
 func (s *excludeStore) MatchWAF(host, path string) bool {
+	skipAll, _ := s.MatchWAFRules(host, path)
+	return skipAll
+}
+
+// MatchWAFRules returns the WAF-skip decision for (host, path):
+//
+//   - skipAll=true  the whole WAF is excluded (legacy semantics; one or more
+//     matching entries had RuleIDs empty)
+//   - skipIDs       set of waf_rule_id values to suppress when WAF runs
+//     (union of RuleIDs from matching rule-scoped entries)
+//
+// When skipAll is true skipIDs is irrelevant. host and path are lower-cased
+// before matching. A nil/empty skipIDs and skipAll=false means "no exclude
+// applies".
+func (s *excludeStore) MatchWAFRules(host, path string) (skipAll bool, skipIDs map[int]struct{}) {
 	start, profEnabled := globalExcludeProfiler.start()
 	defer globalExcludeProfiler.end("match_waf", start, profEnabled)
 	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
 	if host == "" || path == "" {
-		return false
+		return false, nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -269,18 +317,29 @@ func (s *excludeStore) MatchWAF(host, path string) bool {
 		if !e.Scope.Match(host) {
 			continue
 		}
+		var matched bool
 		switch e.Type {
 		case "host":
-			if e.Value.Match(host) {
-				return true
-			}
+			matched = e.Value.Match(host)
 		case "path":
-			if e.Value.Match(path) {
-				return true
-			}
+			matched = e.Value.Match(path)
+		}
+		if !matched {
+			continue
+		}
+		if len(e.RuleIDs) == 0 {
+			// Whole-WAF skip: short-circuit. A rule-scoped exclude can never
+			// "un-skip" what a whole-WAF exclude already covers.
+			return true, nil
+		}
+		if skipIDs == nil {
+			skipIDs = make(map[int]struct{}, len(e.RuleIDs))
+		}
+		for _, id := range e.RuleIDs {
+			skipIDs[id] = struct{}{}
 		}
 	}
-	return false
+	return false, skipIDs
 }
 
 // MatchHost is retained for backwards compatibility with existing call-sites.
@@ -332,7 +391,8 @@ func (s *excludeStore) load() {
 		}
 		e.Type, e.Value = t, v
 		e.ScopeHosts = normalizeScopeHosts(e.ScopeHosts)
-		s.entries[s.key(t, v, e.ScopeHosts)] = e
+		e.RuleIDs = normalizeRuleIDs(e.RuleIDs)
+		s.entries[s.key(t, v, e.ScopeHosts, e.RuleIDs)] = e
 	}
 	s.rebuildCompiledLocked()
 }
@@ -343,9 +403,10 @@ func (s *excludeStore) rebuildCompiledLocked() {
 	pathEntries := make([]compiledExcludeEntry, 0, len(s.entries))
 	for _, e := range s.entries {
 		compiled := compiledExcludeEntry{
-			Type:  e.Type,
-			Scope: compileScopeMatcher(e.ScopeHosts),
-			Value: compileValueMatcher(e.Value),
+			Type:    e.Type,
+			Scope:   compileScopeMatcher(e.ScopeHosts),
+			Value:   compileValueMatcher(e.Value),
+			RuleIDs: append([]int(nil), e.RuleIDs...),
 		}
 		switch e.Type {
 		case "host":
@@ -444,7 +505,10 @@ func (s *excludeStore) saveLocked() error {
 		if arr[i].Type != arr[j].Type {
 			return arr[i].Type < arr[j].Type
 		}
-		return arr[i].Value < arr[j].Value
+		if arr[i].Value != arr[j].Value {
+			return arr[i].Value < arr[j].Value
+		}
+		return ruleIDsKey(arr[i].RuleIDs) < ruleIDsKey(arr[j].RuleIDs)
 	})
 	b, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {

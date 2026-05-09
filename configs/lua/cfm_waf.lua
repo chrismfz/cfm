@@ -352,6 +352,14 @@ function _M.check(ctx)
   local shdict  = ctx.shdict
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
+  -- skip_rule_ids: optional set { [rule_id] = true } of IDs to suppress.
+  -- Populated by cfm.lua from the per-vhost waf-excludes snapshot when the
+  -- operator has marked specific rules as excluded for this host (e.g. to
+  -- whitelist a noisy scraper while keeping the rest of the WAF active).
+  -- Detectors still execute (their cost is dominated by helpers shared with
+  -- other rules), but record() drops the hit so it never logs, never
+  -- counts, and never affects severity.
+  local skip_rule_ids = ctx.skip_rule_ids
 
   -- One-shot gating bools so body/upload rules don't each lower(method) again.
   -- body_inspect_ok is the existing "POST + non-empty body" gate, hoisted.
@@ -391,6 +399,13 @@ function _M.check(ctx)
   local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
     if sev == 0 then return false end
+    -- Per-vhost rule exclusion: drop hits whose rule_id is in the operator's
+    -- skip set. The detector's work is wasted (its match cost was already
+    -- paid) but the hit never leaks into severity/log/counters — exactly
+    -- the semantic the operator asked for ("ignore rule N on this host").
+    if skip_rule_ids and rule_id and skip_rule_ids[rule_id] then
+      return false
+    end
     hits[#hits + 1] = { reason = reason, ttl = ttl, action = action, waf_rule_id = rule_id }
     if sev > final_sev then
       final_sev     = sev

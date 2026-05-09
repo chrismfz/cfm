@@ -815,6 +815,12 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
 end
 
 -- WAF excludes snapshot
+--
+-- Each entry from /nginx/waf/excludes has shape {type, value, rule_ids?}.
+-- rule_ids is an optional array of integers; absent/empty means "whole-WAF
+-- skip" (legacy semantics). Present means "skip only these rule IDs when
+-- the WAF runs". The two cached lists below carry the rule_ids alongside
+-- the value so per-request matching can route to either path.
 local function refresh_waf_excludes_if_needed()
   if not SH then return end
   local now = ngx.now()
@@ -831,7 +837,9 @@ local function refresh_waf_excludes_if_needed()
   for _, e in ipairs(entries) do
     local t = lower(e.type or ""); local v = lower(tostring(e.value or ""))
     if v ~= "" then
-      if t == "host" then hosts[#hosts+1] = v elseif t == "path" then paths[#paths+1] = v end
+      local row = { v = v, rule_ids = e.rule_ids }
+      if t == "host" then hosts[#hosts+1] = row
+      elseif t == "path" then paths[#paths+1] = row end
     end
   end
   SH:set("wxhosts", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
@@ -870,12 +878,44 @@ local function load_waf_excludes_local_cache()
   wx_local_paths = cjson.decode(SH:get("wxpaths") or "[]") or {}
 end
 
-local function waf_is_excluded(host, uri)
+-- waf_skip_for(host, uri) returns:
+--   skip_all (bool)     true if any matching exclude is whole-WAF (no rule_ids)
+--   skip_ids (table)    set of waf_rule_id integers to suppress when WAF runs;
+--                        nil if no rule-scoped exclude applies
+-- A whole-WAF exclude short-circuits: caller skips the WAF entirely. Otherwise
+-- the WAF runs and skip_ids is passed through ctx.skip_rule_ids so cfm_waf
+-- silently drops any rule-fire whose ID is in the set.
+local function waf_skip_for(host, uri)
   refresh_waf_excludes_if_needed(); load_waf_excludes_local_cache()
   host = lower(host or ""); uri = lower(tostring(uri or "/"))
-  for _, r in ipairs(wx_local_hosts) do if matches_rule(host, r) then return true end end
-  for _, r in ipairs(wx_local_paths) do if matches_rule(uri, r) then return true end end
-  return false
+  local skip_ids = nil
+  local function consider(target, row)
+    if not matches_rule(target, row.v) then return false end
+    if not row.rule_ids or #row.rule_ids == 0 then
+      return true -- whole-WAF skip; signal caller to short-circuit
+    end
+    if not skip_ids then skip_ids = {} end
+    for _, id in ipairs(row.rule_ids) do
+      local n = tonumber(id)
+      if n then skip_ids[n] = true end
+    end
+    return false
+  end
+  for _, r in ipairs(wx_local_hosts) do
+    if consider(host, r) then return true, nil end
+  end
+  for _, r in ipairs(wx_local_paths) do
+    if consider(uri, r) then return true, nil end
+  end
+  return false, skip_ids
+end
+
+-- Back-compat shim: callers that just need the bool answer (existing
+-- behavior was "skip whole WAF or not"). True only for whole-WAF excludes,
+-- never for rule-scoped ones.
+local function waf_is_excluded(host, uri)
+  local skip_all, _ = waf_skip_for(host, uri)
+  return skip_all
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -1118,9 +1158,18 @@ ngx.ctx.cfm_clearance_ok = clearance_allow
 -- exploit payloads, and a logonly hit must not silently let a webshell
 -- upload through just because the client is browser-capable.
 if waf_ok and waf and waf.enabled and waf.enabled() then
-  if waf_is_excluded(host, uri) then
+  local skip_all, skip_rule_ids = waf_skip_for(host, uri)
+  if skip_all then
     if CFG.debug_headers then ngx.header["X-CFM-WAF-Excluded"] = "1" end
   else
+    if CFG.debug_headers and skip_rule_ids then
+      -- Visibility for operators tuning per-vhost rule exclusions. Sorted
+      -- output makes the header diffable across requests.
+      local ids = {}
+      for id in pairs(skip_rule_ids) do ids[#ids+1] = id end
+      table.sort(ids)
+      ngx.header["X-CFM-WAF-Skip-Rules"] = table.concat(ids, ",")
+    end
     local req_headers = ngx.req.get_headers()
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
@@ -1129,6 +1178,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = req_body, self_origin = self_origin,
+      skip_rule_ids = skip_rule_ids,
     })
     -- Hit-rate denominator: every WAF inspection counts, regardless of
     -- whether a rule fired. maybe_flush_waf_insp piggybacks on the request
