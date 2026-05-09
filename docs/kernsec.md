@@ -2,12 +2,20 @@
 
 ## Status
 
-Design phase. **`kspp.sh` is sunset** once kernsec lands — kernsec absorbs
-everything that script does (KSPP sysctls + boot args + cross-bootloader
-backends + status verification + Copy Fail mitigation), then extends it into a
-first-class cfm component: module blacklists, additional sysctls, fstab audit,
-drift detection, and rule-ID + group selectors so operators can opt rules in
-or out at fleet scale. Single tool, single config, single audit surface.
+**Phase 1 shipped** (PR #766, branch `kernsec-1`). `cfm kernsec` is live as
+an audit-only component with an interactive TermUI by default and a plain-
+text mode for pipes / monitoring.
+
+**Phase 2 (rule registry + `kernsec.conf` + `apply`) is next.** kernsec will
+own a fleet-friendly declarative config so operators ship a single conf via
+`scp` / `git` / Ansible and converge with `cfm kernsec apply`.
+
+**`kspp.sh` is sunset** once Phase 3 lands — kernsec absorbs everything that
+script does (KSPP sysctls + boot args + cross-bootloader backends + status
+verification + Copy Fail mitigation), then extends it into a first-class cfm
+component: module blacklists, additional sysctls, fstab audit, drift
+detection, and rule-ID + group selectors so operators can opt rules in or
+out at fleet scale. Single tool, single config, single audit surface.
 
 Motivation: 2025-2026 saw multiple public kernel zero-day LPEs (Dirty Frag /
 CVE-2026-31431 Copy Fail, ksmbd parade, watch_queue / Dirty Cred). Most of the
@@ -18,8 +26,6 @@ available right now and costs effectively nothing.
 Out of scope: file integrity monitoring (AIDE / Samhain territory), runtime
 exploit detection (LKRG — explicitly dropped, too fragile to ship by default),
 generic CIS-benchmark compliance.
-
----
 
 ---
 
@@ -458,9 +464,172 @@ apart. Also unifies backup, preview, and drift detection.
 
 ---
 
+## What Phase 1 actually shipped
+
+Branch: `kernsec-1`. PR: #766.
+
+**Package layout** (`internal/kernsec/`):
+
+| File | Purpose |
+|---|---|
+| `cli.go` | Subcommand dispatch (`status`, `text`, `live`, `help`, default = TUI w/ TTY auto-fallback) |
+| `profile.go` | KSPP rule data: 11 sysctls + 5 boot args, each with Description + Affects |
+| `audit.go` | `BuildAuditRows()` — single source of truth feeding text + TUI |
+| `backend.go` + `backend_{proxmox,bls,grub,detect}.go` | `BootBackend` interface + three impls + auto-detection (ports `kspp.sh`'s `is_proxmox_boot_tool` / `is_bls`) |
+| `fs.go` | `FS` interface + `RealFS` so detection is unit-testable without real bootloaders |
+| `cmdline.go` | `ParseCmdline`, `CheckBootArg` (OK/DIFF/MISSING), `RemoveManagedArgs` |
+| `sysctl.go` | `ReadSysctl`, `CheckSysctl` (OK/Mismatch/Missing) |
+| `probes.go` + `probes_{linux,other}.go` | Kernel CONFIG, page_alloc.shuffle, mem auto-init log, unknown-arg dmesg scan, AF_ALG bind probes (raw syscall, Linux build-tag split) |
+| `status.go` | Plain-text audit output mirroring `kspp.sh status` sections |
+| `tui.go` | TermUI (gizak/termui/v3) — Grid layout, ticker + PollEvents, no goroutines for fetch |
+| `*_test.go` | 4 test files, table-driven, `fakeFS` for backend detection |
+
+**Subcommands**:
+
+```
+cfm kernsec               # interactive TUI on TTY, auto-fallback to text
+cfm kernsec live          # force the TUI
+cfm kernsec text          # plain-text audit
+cfm kernsec status        # alias for text (supports --check)
+cfm kernsec status --check   # exit non-zero on any WARN (for monitoring)
+cfm kernsec help          # subcommand help
+```
+
+**TUI shape**:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Header  cfm kernsec • boot mode: BLS / grubby • rules: 16        │
+│         • warnings: 0 • updated: 19:49:29                        │
+├──────────────────────────────────┬───────────────────────────────┤
+│ Rules table (62%)                │ Detail panel (38%)            │
+│  STATE   KIND    RULE            │  Selected: init_on_alloc=1    │
+│  OK      sysctl  kernel.kptr_…=2 │  State:    OK                 │
+│  OK      sysctl  fs.protected_…  │  Description: Zero pages on   │
+│  OK      boot    slab_nomerge    │   allocation; kills uninit-   │
+│  OK      boot    init_on_alloc=1 │   memory leaks across kernel. │
+│  …                               │  Affects: ~0-5% perf cost on  │
+│                                  │   alloc-heavy workloads.      │
+│                                  │  Live state:                  │
+│                                  │   /proc/cmdline:    present   │
+│                                  │   next-boot config: present   │
+├──────────────────────────────────┴───────────────────────────────┤
+│ Footer  q quit • ↑/↓ nav • r refresh • t text • e enable         │
+│         • d disable • ? help                                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Per-row state→color: `OK` green · `WARN`/`DIFF`/`MISSING` yellow · `DRIFT`
+red · `SKIP` white. Cursor highlight via RowStyle bg swap.
+
+Keybinds:
+
+| Key | Action |
+|---|---|
+| `q`, `Ctrl-C` | Quit |
+| `↑`/`↓` or `j`/`k` | Cursor |
+| `Home`/`End` or `g`/`G` | First / last |
+| `PgUp`/`PgDn` | Page |
+| `r` | Re-run audit |
+| `t` | Drop to text mode |
+| `e` / `d` | Phase 3 stub — flashes "enable/disable lands in Phase 3" |
+| `?` | Toggle help |
+
+5-second refresh tick. No data goroutines. Non-TTY auto-falls back to
+text via `golang.org/x/term IsTerminal`, matching `cfm health live`.
+
+**Phase 1 explicitly does not yet do**:
+
+- Stable rule IDs (`KSEC-*-NNN`) and group/tier tagging.
+- `/etc/cfm/kernsec.conf` persistence.
+- Module blacklists, fstab audit, host-profile detection.
+- Anything that writes — `enable`, `disable`, `apply`, module blacklist
+  generation, sysctl `.conf` generation. The TUI's `e` / `d` keys
+  intentionally show "Phase 3" stubs to pre-wire muscle memory.
+
+---
+
+## Configuration model — `kernsec.conf` + `apply` (Phase 2 design)
+
+The fleet workflow operators want is: ship a conf via `scp` / `git` /
+Ansible, converge with one command, audit with another. cfm-firewall
+already follows this shape; kernsec mirrors it.
+
+**Three commands form the workflow**:
+
+| Command | Writes? | Purpose |
+|---|---|---|
+| `cfm kernsec status` | no | Audit + show config-vs-reality (Phase 1, shipped) |
+| `cfm kernsec preview` | no | Diff: "if I ran apply now, here's what would change" |
+| `cfm kernsec apply` | yes | Idempotent converge: write managed files, refresh bootloader, verify |
+
+**Config file**: `/etc/cfm/kernsec.conf` — INI-flavoured (matches the
+`[rule "..."]` stanza style cfm uses elsewhere; final format gated on
+checking `internal/config/` conventions before Phase 2 starts):
+
+```ini
+# /etc/cfm/kernsec.conf
+
+# Tier selection. 1 = safe-everywhere, 2 = server-aggressive.
+tier = 1
+
+# Per-rule overrides. Default state for any rule in the selected tier
+# is "applied"; these stanzas opt in or out by stable rule ID.
+#
+#   state = skip   -- configured but not applied (operator opt-out)
+#   state = force  -- applied even if host-profile detection says skip
+
+[rule "KSEC-MOD-net.legacy-014"]
+state = skip          # we run DCCP somewhere weird
+
+[rule "KSEC-SCT-namespace-001"]
+state = force         # we know we don't run containers on this box
+```
+
+**Apply semantics**:
+
+- Idempotent. Running `apply` twice is a no-op the second time.
+- Atomic per file: write to `*.tmp`, `fsync`, `rename`. Backups taken
+  once on first write (`.cfm-kernsec.bak`) and never overwritten.
+- Marks every file: header `# Managed by cfm kernsec — do not edit.`.
+- Targets in Phase 2 / 3:
+  - `/etc/sysctl.d/99-cfm-kernsec.conf` (Phase 2).
+  - Bootloader cmdline via `BootBackend` (Phase 2).
+  - `/etc/modprobe.d/cfm-kernsec.conf` (Phase 3, modules).
+- After writing, re-runs the audit and reports per-rule outcome.
+- `apply --check` returns non-zero if config and reality disagree
+  (CI / monitoring use case).
+- **First-run safety**: `apply` against a host with no `kernsec.conf`
+  refuses with a hint to run `cfm kernsec init` (writes a default
+  `tier = 1` conf so the operator commits an explicit choice).
+
+**Why this beats imperative `enable` / `disable`**:
+
+- **Source of truth in one file.** `git` it, `scp` it, audit with
+  `grep` / `vi` / `nano`. No "how was this box configured?" mystery.
+- **Per-host overrides without forking the rule set.** A special-case
+  box has one file that explains itself.
+- **Drift detection becomes natural.** `apply` is idempotent → cron
+  re-runs it; `status` already reports DRIFT when reality disagrees.
+- **Rollback is `git revert` + `apply`**, not "flip these 14 keys".
+
+**Open decisions (resolve at start of Phase 2)**:
+
+1. Final conf format — INI / TOML / something else. Match
+   `internal/config/` conventions.
+2. Where the conf lives (`/etc/cfm/` vs `/etc/cfm.d/kernsec.conf` vs
+   `/etc/cfm.conf` `[kernsec]` section) — match other cfm components.
+3. Bootloader-cmdline rollback semantics: keep one backup or N
+   generations? `kspp.sh` keeps one; that probably stays.
+4. Whether `apply` should auto-trigger a `proxmox-boot-tool refresh`
+   or `update-grub` (cost: a few seconds; benefit: idempotent
+   converge). Default yes.
+
+---
+
 ## Rollout plan
 
-Each phase ships independently and has a working `status` before any `enable`
+Each phase ships independently and has a working `status` before any `apply`
 is offered.
 
 ### Phase 0 — kspp.sh as reference impl (DONE, sunset on Phase 3)
@@ -471,44 +640,61 @@ match. **Removed from the tree once Phase 3 lands** and `cfm kernsec status`
 demonstrably covers everything `kspp.sh status` did. Until then it stays as
 the reference behaviour.
 
-### Phase 1 — `cfm kernsec status` (audit-only)
+### Phase 1 — `cfm kernsec status` + TUI (DONE — kernsec-1, PR #766)
 
-Read-only. Lists every rule, its tier, group, and tri-state runtime status.
-Implements:
+Read-only audit-only. See "What Phase 1 actually shipped" above for the
+package layout, subcommands, and TUI shape. Ports from `kspp.sh`:
+bootloader-backend detection (Proxmox / BLS / GRUB), sysctl apply/verify
+loop, boot-arg current-vs-next-boot diff, kernel-log scan for unknown
+managed args, AF_ALG bind probes (extended), page_alloc.shuffle and
+`mem auto-init` checks, kernel CONFIG introspection. Remaining audit
+pieces (module presence checks, fstab audit, host-profile probe) move
+to Phase 2 alongside the rule registry that needs them.
 
-- Bootloader backend detection (Proxmox / BLS / GRUB) — ported from `kspp.sh`.
-- Module presence + load detection (`/lib/modules/$(uname -r)`, `lsmod`).
-- Sysctl current vs recommended (apply/verify loop ported from `kspp.sh`).
-- Boot args: current `/proc/cmdline` vs configured next-boot per backend.
-- Kernel-log scan for rejected/unknown managed args (ported).
-- AF_ALG bind probes (extended beyond `kspp.sh`'s AEAD-only probe).
-- `/sys/module/page_alloc/parameters/shuffle` + `mem auto-init` log check.
-- Kernel `CONFIG_*` introspection.
-- fstab audit.
-- Host profile probe.
+### Phase 2 — Rule registry + `kernsec.conf` + `preview` + `apply` (sysctl + boot args)
 
-Ship this *first*. Operators run it across the fleet, see what's exposed,
-build confidence in the rule set before any mutation lands.
+The big phase. Splits naturally into two halves; ship as one PR if size
+is manageable, otherwise split into 2a / 2b.
 
-### Phase 2 — Rule registry + selectors
+**2a — registry, config, preview (no writes)**:
 
-Stable rule IDs, group tags, tier tags. Persistent config at
-`/etc/cfm/kernsec.conf`. CLI selectors: `--tier`, `--group`, `--id`,
-`--skip`, `--force-id`. `preview` subcommand prints diffs without writing.
+- Stable rule IDs (`KSEC-<class>-<group>-<NNN>`), group tags, tier tags
+  attached to the existing `KSPPSysctls` and `KSPPBootArgs` data plus
+  the new modules / namespace / fstab rule rows.
+- `/etc/cfm/kernsec.conf` loader — match `internal/config/` conventions.
+- `cfm kernsec init` — write a default `tier = 1` conf if absent.
+- `cfm kernsec preview [enable|apply]` — diff against current managed
+  files / cmdline. Read-only.
+- CLI selectors: `--tier`, `--group`, `--id`, `--skip`, `--force-id`
+  (override the conf for one-off invocations).
+- TUI gains group + tier columns and a `/` filter.
+- Module rule rows + fstab audit + host-profile probe land here so the
+  registry has them on day one.
+- kernsec audits `KSEC-SCT-net.*` settings owned by
+  `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
+  no double-write.
 
-### Phase 3 — Tier 1 enable / disable + sunset `kspp.sh`
+**2b — apply (writes)**:
+
+- `cfm kernsec apply` — write `/etc/sysctl.d/99-cfm-kernsec.conf`,
+  update bootloader cmdline through the existing `BootBackend`
+  abstraction, run the post-apply verify pass.
+- First-run safety: refuse if no conf, emit hint.
+- `apply --check` for monitoring.
+- Backups via `.cfm-kernsec.bak` (one-shot, never overwritten).
+- Acceptance gate: `cfm kernsec status` after `apply` reports zero
+  WARNs on a clean box.
+
+### Phase 3 — Modules + sunset `kspp.sh`
 
 - Module blacklist file generation (`/etc/modprobe.d/cfm-kernsec.conf`,
   both `blacklist` and `install … /bin/false` lines).
-- Sysctl file generation (`/etc/sysctl.d/99-cfm-kernsec.conf`).
-- Boot-arg backends ported in full from `kspp.sh` (Proxmox / BLS / GRUB),
-  `MANAGED_ARG_KEYS` model preserved, backups renamed to `.cfm-kernsec.bak`.
-- All KSPP-profile rules (`slab_nomerge`, `init_on_alloc=1`,
-  `page_alloc.shuffle=1`, `randomize_kstack_offset=on`,
-  `initcall_blacklist=algif_aead_init`) owned by kernsec under `KSEC-BOOT-kspp-*`.
-- All backups, all reversible. Every rule has both directions.
-- **Acceptance gate**: `cfm kernsec status` output is a strict superset of
-  `kspp.sh status` output, verified on Proxmox + EL + Debian test hosts.
+- Module rule set wired into `apply`.
+- KSPP-profile rules registered under `KSEC-BOOT-kspp-*` (already
+  shipped as data in Phase 1; just need the IDs and conf-driven
+  selection from Phase 2 to apply them).
+- **Acceptance gate**: `cfm kernsec status` output is a strict superset
+  of `kspp.sh status`, verified on Proxmox + EL + Debian test hosts.
 - `kspp.sh` removed from the repo once the gate passes.
 
 ### Phase 4 — Tier 2 (opt-in)
@@ -519,8 +705,9 @@ gated on host profile detection.
 
 ### Phase 5 — Drift detection wiring
 
-`cfm kernsec status --check` returns non-zero on any DRIFT, suitable for
-monitoring agents. Optional periodic timer.
+`cfm kernsec apply --check` and `cfm kernsec status --check` (already
+shipped) return non-zero on any DRIFT, suitable for monitoring agents.
+Optional periodic systemd timer.
 
 ### Phase 6 — Shared sysctl library
 
@@ -535,34 +722,87 @@ cross-component awareness.
 
 ### DONE
 
+**Phase 0 (reference impl)**
 - `kspp.sh` server-safe profile shipping (sysctl + boot args + Proxmox/BLS/GRUB).
 - `algif_aead_init` Copy Fail / CVE-2026-31431 mitigation in boot args.
 - AF_ALG runtime probe in status.
 - Cross-bootloader detection.
-- Design doc (this file).
 - `kspp.sh` committed to `scripts/kspp.sh` as the reference implementation
   (slated for removal in Phase 3 once acceptance gate passes).
+
+**Design / docs**
+- Design doc (this file), kept current after every kernsec PR.
 - Reconciliation pass against existing cfm internals (`internal/sysctl/sys_tweaks.go`
   overlap, CLI dispatch pattern, config/packaging conventions) documented.
+- Configuration model (`kernsec.conf` + `apply`) designed.
+
+**Phase 1 — `cfm kernsec` audit-only + TUI** (PR #766, branch `kernsec-1`)
+- `case "kernsec":` wired in `cmd/cfm/main.go`. Top-level `cfm` usage banner
+  lists the four subcommands (`/`, `live`, `text`, `status`).
+- `BootBackend` Go interface + Proxmox / BLS / GRUB implementations with
+  mockable `FS` interface; unit tests run without real bootloaders.
+- Bootloader detection logic ported from `kspp.sh` (`is_proxmox_boot_tool`,
+  `is_bls`, fallback-to-GRUB).
+- KSPP profile (11 sysctls + 5 boot args) lifted into Go data with
+  Description + Affects fields per rule.
+- `BuildAuditRows()` — single source of truth feeding both text and TUI.
+- Plain-text `RunStatus` mirrors `kspp.sh status` sections.
+- Interactive TermUI (gizak/termui/v3) with rules table + detail panel,
+  state→colour mapping, cursor, refresh tick, `t` to drop to text mode,
+  `e`/`d` Phase 3 stubs for muscle memory, `?` help overlay.
+- Auto-fallback from TUI to text on non-TTY (`golang.org/x/term IsTerminal`).
+- All probes ported: kernel CONFIG introspection (`/boot/config-$(uname -r)`
+  → `/proc/config.gz`), page_alloc.shuffle, mem auto-init log scan,
+  unknown-arg dmesg scan, AF_ALG bind probes (extended beyond `kspp.sh`'s
+  AEAD-only set to `{aead, hash, skcipher, rng, akcipher}`).
+- `--check` exit-code mode for monitoring (text/status path).
+- 4 test files, table-driven, 100% of pure-logic paths covered. `go vet`,
+  `go test`, `go build` clean.
 
 ### TODO
 
-- [ ] Phase 1: `cfm kernsec status` audit-only command (`case "kernsec":` in `cmd/cfm/main.go`).
-- [ ] Phase 1: define `BootBackend` Go interface (Proxmox / BLS / GRUB) with mockable detection, so unit tests don't need real bootloaders.
-- [ ] Phase 2: rule registry, ID/group/tier selectors, `/etc/cfm/kernsec.conf` (match `internal/config/` conventions).
-- [ ] Phase 2: kernsec audits `KSEC-SCT-net.*` settings owned by `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` — no double-write.
-- [ ] Phase 2: host profile detection probes.
-- [ ] Phase 3: module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`).
-- [ ] Phase 3: sysctl generator (`/etc/sysctl.d/99-cfm-kernsec.conf`).
-- [ ] Phase 3: port `kspp.sh` bootloader backends (Proxmox / BLS / GRUB) into kernsec, with original `MANAGED_ARG_KEYS` model and backups.
-- [ ] Phase 3: port `kspp.sh` sysctl apply/verify loop and status checks (AF_ALG probe, mem auto-init log, page_alloc.shuffle, kernel CONFIG introspection, unknown-arg dmesg scan).
-- [ ] Phase 3: KSPP-profile rules registered under `KSEC-BOOT-kspp-*` (incl. Copy Fail mitigation).
-- [ ] Phase 3: `preview enable` diff command.
-- [ ] Phase 3: acceptance gate — `cfm kernsec status` ⊇ `kspp.sh status` on Proxmox + EL + Debian.
-- [ ] Phase 3: **remove `kspp.sh` from the tree** once gate passes.
-- [ ] Phase 4: Tier 2 rules with host-profile gating.
-- [ ] Phase 4: late systemd unit for `kernel.modules_disabled=1`.
-- [ ] Phase 5: `--check` drift exit code + monitoring hook.
-- [ ] Phase 6: extract shared sysctl library, migrate `internal/sysctl/sys_tweaks.go` into it, kernsec consumes the same library.
-- [ ] Document operator runbook for fleet rollout (preview-on-one,
-      enable-on-canary, expand).
+**Phase 2 — registry + `kernsec.conf` + `preview` + `apply`** (next, branch `kernsec-2`)
+- [ ] Stable rule IDs (`KSEC-<class>-<group>-<NNN>`) attached to existing rules.
+- [ ] Tier and Group fields on `SysctlRule` and `BootArg`; populate.
+- [ ] `/etc/cfm/kernsec.conf` loader (format gated on a quick check of
+      `internal/config/` conventions before coding starts).
+- [ ] `cfm kernsec init` — write a default conf when absent.
+- [ ] `cfm kernsec preview` — diff against current managed files / cmdline.
+- [ ] CLI selectors: `--tier`, `--group`, `--id`, `--skip`, `--force-id`.
+- [ ] TUI: group + tier columns, `/` filter.
+- [ ] Module rule rows, fstab audit, host-profile probe (data only — apply
+      for modules waits until Phase 3).
+- [ ] Audit `KSEC-SCT-net.*` settings owned by
+      `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
+      no double-write.
+- [ ] `cfm kernsec apply` for sysctls + boot args (modules deferred).
+- [ ] First-run safety in `apply` (refuse without conf, hint to `init`).
+- [ ] `apply --check` for monitoring.
+- [ ] One-shot backup model (`.cfm-kernsec.bak`).
+
+**Phase 3 — modules + sunset `kspp.sh`**
+- [ ] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
+      `blacklist` + `install … /bin/false` lines).
+- [ ] Module rules wired into `apply`.
+- [ ] KSPP-profile rules registered under `KSEC-BOOT-kspp-*`.
+- [ ] Acceptance gate — `cfm kernsec status` ⊇ `kspp.sh status` on
+      Proxmox + EL + Debian.
+- [ ] **Remove `kspp.sh` from the tree** once gate passes.
+
+**Phase 4 — Tier 2 (opt-in)**
+- [ ] Tier 2 rules with host-profile gating
+      (`user.max_user_namespaces=0`, `kernel.modules_disabled=1`,
+      `lockdown=integrity`, `module.sig_enforce=1`, `oops=panic`).
+- [ ] Late systemd unit for `kernel.modules_disabled=1`.
+
+**Phase 5 — drift wiring**
+- [ ] `cfm kernsec apply --check` + optional periodic systemd timer.
+
+**Phase 6 — shared sysctl library**
+- [ ] Extract audit/apply/drift loop into a cfm-internal library;
+      migrate `internal/sysctl/sys_tweaks.go` into it; kernsec consumes
+      the same library.
+
+**Operator-facing**
+- [ ] Document operator runbook for fleet rollout
+      (preview-on-one → apply-on-canary → expand).
