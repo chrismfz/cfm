@@ -64,7 +64,8 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	// Smoke: the function must not panic and must return one row per
 	// rule across both tiers, with kinds split correctly. State
 	// values depend on the runtime kernel and aren't asserted.
-	rows := BuildAuditRows()
+	conf := &Conf{Tier: Tier2, Overrides: map[string]RuleOverride{}}
+	rows := BuildAuditRows(conf, HostProfile{})
 	wantTotal := len(AllSysctls()) + len(AllBootArgs()) + len(Tier1Modules)
 	if len(rows) != wantTotal {
 		t.Fatalf("BuildAuditRows() returned %d rows, want %d", len(rows), wantTotal)
@@ -99,5 +100,107 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	}
 	if bootCount != len(AllBootArgs()) {
 		t.Errorf("boot row count %d, want %d", bootCount, len(AllBootArgs()))
+	}
+}
+
+func TestBuildAuditRows_Tier0AllOff(t *testing.T) {
+	// Tier=0 (kernsec configured but no tier enabled) — every rule's
+	// decision must be SkipByTier and every row state must be OFF.
+	// Previously these rows showed as MISSING/WARN, prompting false-
+	// positive drift signals.
+	conf := &Conf{Tier: 0, Overrides: map[string]RuleOverride{}}
+	rows := BuildAuditRows(conf, HostProfile{})
+	if len(rows) == 0 {
+		t.Fatal("expected non-empty rows for tier=0")
+	}
+	for _, r := range rows {
+		if r.State != StateOFF {
+			t.Errorf("tier=0 row %s has state=%s, want OFF (decision=%v reason=%q)",
+				r.ID, r.State, r.Decision, r.Reason)
+		}
+		if r.Decision != SkipByTier {
+			t.Errorf("tier=0 row %s has decision=%v, want SkipByTier",
+				r.ID, r.Decision)
+		}
+	}
+}
+
+func TestBuildAuditRows_Tier1HidesTier2AsOff(t *testing.T) {
+	// Tier=1 conf — Tier 2 rules should render as OFF (operator-disabled
+	// because tier-gated), not as MISSING.
+	conf := &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
+	rows := BuildAuditRows(conf, HostProfile{})
+	var tier2OffCount, tier2WrongState int
+	for _, r := range rows {
+		if r.Tier != Tier2 {
+			continue
+		}
+		if r.State == StateOFF {
+			tier2OffCount++
+		} else {
+			tier2WrongState++
+			t.Errorf("tier=1 conf, tier 2 rule %s rendered as %s instead of OFF",
+				r.ID, r.State)
+		}
+	}
+	if tier2OffCount == 0 {
+		t.Fatal("expected at least one Tier 2 rule to render as OFF under tier=1 conf")
+	}
+}
+
+func TestBuildAuditRows_PerRuleSkipOverrideRendersOff(t *testing.T) {
+	// Pick the first sysctl rule and apply state=skip in conf — must
+	// render as OFF with reason citing the conf override.
+	allSysctls := AllSysctls()
+	if len(allSysctls) == 0 {
+		t.Skip("no sysctl rules registered; nothing to override")
+	}
+	target := allSysctls[0].ID
+	conf := &Conf{
+		Tier:      Tier2,
+		Overrides: map[string]RuleOverride{target: OverrideSkip},
+	}
+	rows := BuildAuditRows(conf, HostProfile{})
+	for _, r := range rows {
+		if r.ID != target {
+			continue
+		}
+		if r.State != StateOFF {
+			t.Errorf("per-rule skip override should render as OFF, got %s", r.State)
+		}
+		if r.Decision != SkipByConf {
+			t.Errorf("per-rule skip override decision should be SkipByConf, got %v", r.Decision)
+		}
+		return
+	}
+	t.Fatalf("rule %s not found in rows", target)
+}
+
+func TestBuildAuditRows_HostProfileSkipRendersSKIPNotOff(t *testing.T) {
+	// Host profile with HasContainers=true triggers SkipByHostProfile
+	// for the tier2.namespace group. Those rows must render as SKIP
+	// (not OFF — operator hasn't disabled them; the host can't safely
+	// take them on).
+	conf := &Conf{Tier: Tier2, Overrides: map[string]RuleOverride{}}
+	profile := HostProfile{HasContainers: true}
+	rows := BuildAuditRows(conf, profile)
+	var foundNamespace, mislabelled int
+	for _, r := range rows {
+		if r.Group != "tier2.namespace" {
+			continue
+		}
+		foundNamespace++
+		if r.State != StateSKIP {
+			mislabelled++
+			t.Errorf("host-profile skip on rule %s should render as SKIP, got %s (decision=%v)",
+				r.ID, r.State, r.Decision)
+		}
+	}
+	if foundNamespace == 0 {
+		t.Skip("no tier2.namespace rules registered to test against")
+	}
+	if mislabelled > 0 {
+		t.Errorf("%d/%d tier2.namespace rules mis-labelled with HasContainers=true",
+			mislabelled, foundNamespace)
 	}
 }

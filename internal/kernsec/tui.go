@@ -66,7 +66,7 @@ func RunTUI() (switchToText bool, err error) {
 	}
 	layout()
 
-	allRows := BuildAuditRows()
+	allRows := buildAuditRowsForTUI()
 	rows := allRows
 	cursor := 0
 	statusMsg := ""
@@ -128,7 +128,7 @@ func RunTUI() (switchToText bool, err error) {
 	renderHeader := func() {
 		warns := 0
 		for _, r := range rows {
-			if r.State != StateOK && r.State != StateSKIP {
+			if r.State != StateOK && r.State != StateSKIP && r.State != StateOFF {
 				warns++
 			}
 		}
@@ -146,8 +146,11 @@ func RunTUI() (switchToText bool, err error) {
 		r := rows[cursor]
 		var b strings.Builder
 		fmt.Fprintf(&b, "[Selected:](fg:cyan,mod:bold) %s\n\n", r.Display)
-		fmt.Fprintf(&b, "[State:](fg:cyan)  [%s](fg:%s,mod:bold)\n\n", r.State, StateColorName(r.State))
-		fmt.Fprintf(&b, "[Description:](fg:cyan)\n  %s\n\n", r.Description)
+		fmt.Fprintf(&b, "[State:](fg:cyan)  [%s](fg:%s,mod:bold)\n", r.State, StateColorName(r.State))
+		if r.Reason != "" {
+			fmt.Fprintf(&b, "[Reason:](fg:cyan) %s\n", r.Reason)
+		}
+		fmt.Fprintf(&b, "\n[Description:](fg:cyan)\n  %s\n\n", r.Description)
 		fmt.Fprintf(&b, "[Affects:](fg:cyan)\n  %s\n\n", r.Affects)
 		fmt.Fprintf(&b, "[Live state:](fg:cyan)\n")
 		switch r.Kind {
@@ -214,7 +217,7 @@ func RunTUI() (switchToText bool, err error) {
 	}
 
 	refresh := func() {
-		allRows = BuildAuditRows()
+		allRows = buildAuditRowsForTUI()
 		applyFilter()
 	}
 
@@ -327,7 +330,7 @@ func StateColor(s RuleState) ui.Color {
 	switch s {
 	case StateOK:
 		return ui.ColorGreen
-	case StateSKIP:
+	case StateSKIP, StateOFF:
 		return ui.ColorWhite
 	case StateDIFF, StateWARN, StateMISSING:
 		return ui.ColorYellow
@@ -343,7 +346,7 @@ func StateColorName(s RuleState) string {
 	switch s {
 	case StateOK:
 		return "green"
-	case StateSKIP:
+	case StateSKIP, StateOFF:
 		return "white"
 	case StateDIFF, StateWARN, StateMISSING:
 		return "yellow"
@@ -351,6 +354,19 @@ func StateColorName(s RuleState) string {
 		return "red"
 	}
 	return "white"
+}
+
+// buildAuditRowsForTUI is the wrapper TUI / status callers use when they
+// haven't already loaded conf + profile. Best-effort: a missing or
+// unreadable conf falls back to tier=1 in memory (matching first-run UX
+// and what `cfm kernsec status` prints on hosts that haven't run init).
+func buildAuditRowsForTUI() []AuditRow {
+	conf, err := LoadConf(false)
+	if err != nil {
+		conf = &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
+	}
+	profile := DetectHostProfile()
+	return BuildAuditRows(conf, profile)
 }
 
 func warnsColorName(n int) string {

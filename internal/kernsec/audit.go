@@ -17,9 +17,16 @@ const (
 	StateWARN    RuleState = "WARN"    // configured for next boot, not yet active in current cmdline
 	StateDIFF    RuleState = "DIFF"    // sysctl present with wrong value
 	StateMISSING RuleState = "MISSING" // expected entry absent from managed file
-	StateSKIP    RuleState = "SKIP"    // sysctl key / module not present on this kernel
+	StateSKIP    RuleState = "SKIP"    // host profile blocks the rule, OR the sysctl key / module isn't exposed by this kernel
 	StateDRIFT   RuleState = "DRIFT"   // active in current but missing from next-boot config
 	StateLOADED  RuleState = "LOADED"  // module blacklisted but still loaded — needs reboot or rmmod
+	// StateOFF means the operator chose to leave the rule disabled
+	// (tier=0, rule tier above conf tier, or per-rule `state = skip`
+	// in kernsec.conf). Unlike SKIP, OFF reflects operator intent
+	// rather than a host-profile or kernel-feature constraint.
+	// Operators can flip OFF rules on with `state = force`; SKIP rules
+	// are gated by something the operator should investigate first.
+	StateOFF RuleState = "OFF"
 )
 
 // AuditRow is one rule's audit summary for the TUI / future structured output.
@@ -34,6 +41,15 @@ type AuditRow struct {
 	State       RuleState
 	Description string
 	Affects     string
+
+	// Decision is the resolver's per-rule outcome (Apply / SkipByConf /
+	// SkipByTier / SkipByHostProfile). State maps from Decision plus the
+	// live probe result.
+	Decision Decision
+	// Reason is a free-text explanation of the Decision, e.g. "rule tier 2
+	// > conf tier 1" or "host has containers running". Empty for Apply
+	// rows that are in compliance (the State alone is enough).
+	Reason string
 
 	// Sysctl-only.
 	LiveValue     string // /proc/sys reading; "" if missing
@@ -51,15 +67,24 @@ type AuditRow struct {
 	PresentOnKernel   bool   // module file exists under /lib/modules/$(uname -r)
 }
 
-// BuildAuditRows runs the same probes as RunStatus and returns one row per
-// rule across sysctls, boot args, and modules. Pure data: no formatting, no
-// terminal output.
+// BuildAuditRows resolves every kernsec rule against the supplied conf and
+// host profile, then attaches per-rule live-state probes (sysctl read,
+// cmdline tokens, modprobe contents, /proc/modules). Returns one row per
+// rule across sysctls, boot args, and modules. Pure data: no formatting,
+// no terminal output.
 //
-// Resolved against the on-disk conf and host profile. Rules whose Decision
-// is not Apply are still surfaced as audit rows but with reasonable states
-// (modules not blacklisted in our file → MISSING; sysctls / boot args
-// behave as before).
-func BuildAuditRows() []AuditRow {
+// Decision-to-state mapping:
+//
+//	Apply              → existing OK/DIFF/MISSING/WARN/DRIFT/LOADED logic
+//	SkipByConf         → OFF (operator chose to disable this rule)
+//	SkipByTier         → OFF (rule's tier is above the configured tier)
+//	SkipByHostProfile  → SKIP (host probe says the rule would break workloads)
+//
+// Live probes still run for OFF/SKIP rows so the TUI can show whether a
+// disabled rule's underlying setting happens to already be in compliance.
+func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
+	rs := Resolve(conf, profile)
+
 	fs := RealFS{}
 	be := DetectBackend(fs)
 	current := ReadProcCmdline()
@@ -75,7 +100,11 @@ func BuildAuditRows() []AuditRow {
 	allBootArgs := AllBootArgs()
 	rows := make([]AuditRow, 0, len(allSysctls)+len(allBootArgs)+len(Tier1Modules))
 
-	for _, r := range allSysctls {
+	// rs.Sysctls / rs.BootArgs / rs.Modules are populated in the same
+	// stable order as AllSysctls / AllBootArgs / Tier1Modules (see
+	// Resolve in resolve.go), so index-zip is safe.
+	for i, r := range allSysctls {
+		rr := rs.Sysctls[i]
 		state, found := CheckSysctl(r)
 		row := AuditRow{
 			ID:            r.ID,
@@ -85,21 +114,17 @@ func BuildAuditRows() []AuditRow {
 			Display:       r.Key + "=" + r.Value,
 			Description:   r.Description,
 			Affects:       r.Affects,
+			Decision:      rr.Decision,
+			Reason:        rr.Reason,
 			LiveValue:     found,
 			ExpectedValue: r.Value,
 		}
-		switch state {
-		case SysctlOK:
-			row.State = StateOK
-		case SysctlMismatch:
-			row.State = StateDIFF
-		case SysctlMissing:
-			row.State = StateSKIP
-		}
+		row.State = sysctlRowState(rr.Decision, state)
 		rows = append(rows, row)
 	}
 
-	for _, a := range allBootArgs {
+	for i, a := range allBootArgs {
+		rr := rs.BootArgs[i]
 		curState, _ := CheckBootArg(curTokens, a)
 		nxtState, _ := CheckBootArg(nxtTokens, a)
 		row := AuditRow{
@@ -110,37 +135,86 @@ func BuildAuditRows() []AuditRow {
 			Display:       a.String(),
 			Description:   a.Description,
 			Affects:       a.Affects,
+			Decision:      rr.Decision,
+			Reason:        rr.Reason,
 			InCurrent:     curState == ArgOK,
 			InNextBoot:    nxtState == ArgOK,
 			NextBootKnown: nextErr == nil,
 		}
-		row.State = bootRowState(curState, nxtState, nextErr == nil)
+		row.State = bootRowStateForDecision(rr.Decision, curState, nxtState, nextErr == nil)
 		rows = append(rows, row)
 	}
 
-	for _, m := range Tier1Modules {
+	for i, m := range Tier1Modules {
+		rr := rs.Modules[i]
 		row := AuditRow{
-			ID:                m.ID,
-			Kind:              KindModule,
-			Group:             m.Group,
-			Tier:              m.Tier,
-			Display:           m.Name,
-			Description:       m.Description,
-			Affects:           m.Affects,
-			ModuleName:        m.Name,
-			PresentOnKernel:   ModulePresentOnKernel(m.Name),
+			ID:              m.ID,
+			Kind:            KindModule,
+			Group:           m.Group,
+			Tier:            m.Tier,
+			Display:         m.Name,
+			Description:     m.Description,
+			Affects:         m.Affects,
+			Decision:        rr.Decision,
+			Reason:          rr.Reason,
+			ModuleName:      m.Name,
+			PresentOnKernel: ModulePresentOnKernel(m.Name),
 		}
 		_, row.BlacklistedInFile = managedBlacklist[m.Name]
 		_, row.Loaded = loaded[m.Name]
-		row.State = moduleRowState(row.BlacklistedInFile, row.Loaded, row.PresentOnKernel)
+		row.State = moduleRowStateForDecision(rr.Decision, row.BlacklistedInFile, row.Loaded, row.PresentOnKernel)
 		rows = append(rows, row)
 	}
 
 	return rows
 }
 
+// sysctlRowState maps (decision, live probe) to a row state.
+func sysctlRowState(d Decision, live SysctlState) RuleState {
+	switch d {
+	case Apply:
+		switch live {
+		case SysctlOK:
+			return StateOK
+		case SysctlMismatch:
+			return StateDIFF
+		case SysctlMissing:
+			return StateSKIP
+		}
+	case SkipByConf, SkipByTier:
+		return StateOFF
+	case SkipByHostProfile:
+		return StateSKIP
+	}
+	return StateMISSING
+}
+
+// bootRowStateForDecision wraps bootRowState with the resolver decision.
+// OFF / SKIP short-circuit the (cur, nxt) interpretation.
+func bootRowStateForDecision(d Decision, cur, nxt CmdlineArgState, nextKnown bool) RuleState {
+	switch d {
+	case SkipByConf, SkipByTier:
+		return StateOFF
+	case SkipByHostProfile:
+		return StateSKIP
+	}
+	return bootRowState(cur, nxt, nextKnown)
+}
+
+// moduleRowStateForDecision wraps moduleRowState with the resolver
+// decision.
+func moduleRowStateForDecision(d Decision, blacklisted, loaded, presentOnKernel bool) RuleState {
+	switch d {
+	case SkipByConf, SkipByTier:
+		return StateOFF
+	case SkipByHostProfile:
+		return StateSKIP
+	}
+	return moduleRowState(blacklisted, loaded, presentOnKernel)
+}
+
 // moduleRowState collapses the (blacklisted, loaded, present-on-kernel)
-// triple into a single state for the TUI / status output.
+// triple into a single state for an Apply-decision module row.
 //
 //   - blacklisted + not loaded                  → OK
 //   - blacklisted + still loaded                → LOADED (need rmmod / reboot)
@@ -162,7 +236,7 @@ func moduleRowState(blacklisted, loaded, presentOnKernel bool) RuleState {
 }
 
 // bootRowState collapses the four-way (current present?, next-boot present?)
-// into a single state for the TUI. Pure for testability.
+// into a single state for an Apply-decision boot row. Pure for testability.
 func bootRowState(cur, nxt CmdlineArgState, nextKnown bool) RuleState {
 	curOK := cur == ArgOK
 	nxtOK := nxt == ArgOK

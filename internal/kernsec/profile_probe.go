@@ -27,7 +27,7 @@ type HostProfile struct {
 func DetectHostProfile() HostProfile {
 	return HostProfile{
 		IsKVMHost:            anyModuleLoaded("kvm_intel", "kvm_amd"),
-		HasContainers:        anyProcessRunning("runc", "containerd", "lxc-start", "podman"),
+		HasContainers:        defaultContainerProbe().detect(),
 		HasIPsec:             hasIPsecPolicies(),
 		HasWifi:              ModuleLoaded("cfg80211") || hasWifiHardware(),
 		HasDKMS:              anyModuleLoaded("zfs", "nvidia", "nvidia_drm", "nvidia_modeset"),
@@ -91,16 +91,95 @@ func anyModuleLoaded(names ...string) bool {
 	return false
 }
 
-// anyProcessRunning returns true if any of the named processes is
-// currently running (cheap exact-name match against /proc/<pid>/comm).
-func anyProcessRunning(names ...string) bool {
-	entries, err := os.ReadDir("/proc")
+// containerProbe holds the file paths consulted to detect whether the
+// host is currently running containers — meaning Tier 2 namespace-kill
+// rules would break workloads. Layered (any layer hits → host is a
+// container host) so socket-activated daemons and short-lived shims
+// both register.
+//
+// False-positive bias is intentional: missing detection silently
+// breaks rootless containers / k8s nodes (no rollback path until
+// reboot once the sysctl is loaded); over-detection skips Tier 2
+// namespace kill on hosts that don't run containers (operator can
+// re-enable per-rule with `state = force` in kernsec.conf).
+type containerProbe struct {
+	procDir   string   // /proc — read /proc/<pid>/comm for daemon names
+	sockets   []string // daemon control sockets (docker, crio, containerd, podman)
+	nspawnDir string   // /run/systemd/nspawn — non-empty iff machines registered
+}
+
+// containerDaemonNames is the exact-match set: long-lived daemons (and
+// `runc` itself, which is short-lived but exact-named) whose presence
+// in /proc means the host is actively running containers.
+var containerDaemonNames = []string{
+	"containerd",
+	"dockerd",
+	"crio",
+	"conmon",
+	"lxd",
+	"lxc-start",
+	"podman",
+	"kubelet",
+	"systemd-nspawn",
+	"kata-runtime",
+	"runsc",
+	"runc",
+}
+
+// containerShimPrefixes match version-suffixed shim processes:
+// `containerd-shim-runc-v2`, `containerd-shim-runhcs-v1`, etc.
+// Prefixes only — exact names like `runc` go in containerDaemonNames
+// to avoid false positives on short prefix collisions.
+var containerShimPrefixes = []string{
+	"containerd-shim",
+}
+
+// defaultContainerProbe returns the containerProbe pointed at the real
+// host paths. Constructor (not a global var) so tests can build their
+// own with a temp-dir-backed procDir / sockets / nspawnDir without
+// mutating package state.
+func defaultContainerProbe() containerProbe {
+	return containerProbe{
+		procDir: "/proc",
+		sockets: []string{
+			"/var/run/docker.sock",
+			"/run/docker.sock",
+			"/var/run/crio/crio.sock",
+			"/run/containerd/containerd.sock",
+			"/run/podman/podman.sock",
+		},
+		nspawnDir: "/run/systemd/nspawn",
+	}
+}
+
+// detect runs the layered probe.
+func (p containerProbe) detect() bool {
+	if p.anyProcessMatches() {
+		return true
+	}
+	for _, sock := range p.sockets {
+		if _, err := os.Stat(sock); err == nil {
+			return true
+		}
+	}
+	if dirHasEntries(p.nspawnDir) {
+		return true
+	}
+	return false
+}
+
+// anyProcessMatches walks p.procDir/<pid>/comm and reports whether any
+// running process matches a container daemon (exact match) or shim
+// (prefix match). Skips read errors silently — an unreadable /proc
+// entry is the kernel cleaning up a dead pid, not a probe failure.
+func (p containerProbe) anyProcessMatches() bool {
+	entries, err := os.ReadDir(p.procDir)
 	if err != nil {
 		return false
 	}
-	wanted := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		wanted[n] = struct{}{}
+	daemons := make(map[string]struct{}, len(containerDaemonNames))
+	for _, n := range containerDaemonNames {
+		daemons[n] = struct{}{}
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -109,13 +188,18 @@ func anyProcessRunning(names ...string) bool {
 		if _, err := strconvAtoi(e.Name()); err != nil {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
+		b, err := os.ReadFile(filepath.Join(p.procDir, e.Name(), "comm"))
 		if err != nil {
 			continue
 		}
 		comm := strings.TrimSpace(string(b))
-		if _, ok := wanted[comm]; ok {
+		if _, ok := daemons[comm]; ok {
 			return true
+		}
+		for _, prefix := range containerShimPrefixes {
+			if strings.HasPrefix(comm, prefix) {
+				return true
+			}
 		}
 	}
 	return false
