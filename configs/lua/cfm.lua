@@ -11,6 +11,63 @@
 --   - No timer callbacks, no event queues, no snapshot polling
 --   - Socket calls are best-effort with short timeouts and fail-open
 --   - Cache means 95%+ of requests never touch the socket
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PITFALL: access_by_lua_file top-level locals reset on every request.
+-- Read this BEFORE adding new state to this file.
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- This file is loaded by openresty/angie via `access_by_lua_file`. With
+-- the default `lua_code_cache on`, the openresty docs say "the code
+-- chunk is cached per worker" — which is true. What's NOT obvious until
+-- you trip on it: cached means COMPILED ONCE. The chunk's body is
+-- RE-EXECUTED on every request. Top-level `local` declarations are
+-- inside that body, so they re-initialise to their declared values on
+-- every invocation.
+--
+-- The two failure modes this caused on production (May 2026):
+--
+--   (1) GeoIP mmap leak. `local _geo_init_done = false` reset every
+--       request. The "have I initialised mmdb yet?" guard never
+--       triggered, so lua-resty-maxminddb's `init` mmap'd the ~60 MB
+--       GeoLite2-City.mmdb afresh each call. Lua's GC doesn't release
+--       FFI mmaps without a `__gc` metamethod, so mappings accumulated:
+--       200+ duplicate maps per worker, 13 GB virtual address space,
+--       ~10 MB/min RSS growth. Confirmed via /proc/<pid>/maps captured
+--       by `cfm debug`. Fixed by extracting state to `cfm_geo.lua`
+--       (loaded via `require`, which uses `package.loaded[name]` —
+--       per-worker cache that DOES survive across requests).
+--
+--   (2) WAF excludes cache miss. `local wx_local_ts = 0` reset every
+--       request. The shortcut `if ts == wx_local_ts then return end`
+--       in load_waf_excludes_local_cache was a permanent miss because
+--       wx_local_ts was always 0 at the start of a request, while the
+--       shdict's ts was non-zero (set by an earlier refresh on this or
+--       another worker). Result: every WAF-eligible request paid an
+--       unnecessary cjson.decode of the wxhosts/wxpaths shdict snapshot.
+--       Not a leak (Lua tables GC cleanly) but a perf hit. Fixed by
+--       moving the cache state to `cfm_waf_excl.lua`.
+--
+-- THE RULE for new code in this file:
+--
+--   * If a piece of state must persist across requests (init flags,
+--     caches, FFI handles, anything created by an expensive operation
+--     you don't want to repeat), put it in a separate `.lua` file and
+--     load it via `require`. The module's top-level scope persists.
+--   * If state is per-request (request-id, the response action being
+--     decided, the matched rule, anything derived from `ngx.var.*` or
+--     `ngx.req.*`), top-level locals here are fine — they're meant to
+--     re-initialise per request.
+--   * If you're not sure, default to "make it a module". The cost of
+--     an extra `require` is one map lookup per request; the cost of
+--     getting it wrong is the kind of thing operators only catch with
+--     `cfm debug` after a memory chart turns the wrong shape.
+--
+-- See:
+--   * configs/lua/cfm_geo.lua  — the geo-state module (case 1 above)
+--   * configs/lua/cfm_waf_excl.lua  — the excludes-cache module (case 2)
+--   * The two require sites in this file are commented to point back here.
+-- ─────────────────────────────────────────────────────────────────────────────
 
 local cjson = require "cjson.safe"
 local function fallback_normalize_host(raw)
@@ -848,9 +905,15 @@ local function refresh_waf_excludes_if_needed()
   SH:delete("wxsnap_lock")
 end
 
-local wx_local_ts = 0
-local wx_local_hosts = {}
-local wx_local_paths = {}
+-- WAF-excludes per-worker cache state. MUST be in a require'd module —
+-- previously these were `local wx_local_ts = 0` etc. on this line, but
+-- top-level locals reset on every request under access_by_lua_file
+-- (see the "PITFALL" block at the top of this file). The reset made
+-- the timestamp-equality shortcut in load_waf_excludes_local_cache a
+-- permanent miss, so every WAF-eligible request paid an unnecessary
+-- cjson.decode of the shdict snapshot. Moving the state to a require'd
+-- module restores the cache.
+local wx = require "cfm_waf_excl"
 
 local function glob_to_lua_pattern(glob)
   local p = tostring(glob or "")
@@ -870,12 +933,18 @@ local function matches_rule(value, rule)
 end
 
 local function load_waf_excludes_local_cache()
-  if not SH then wx_local_ts = 0; wx_local_hosts = {}; wx_local_paths = {}; return end
+  if not SH then wx.ts = 0; wx.hosts = {}; wx.paths = {}; return end
   local ts = tonumber(SH:get("wxsnap_ts") or "0") or 0
-  if ts == wx_local_ts then return end
-  wx_local_ts = ts
-  wx_local_hosts = cjson.decode(SH:get("wxhosts") or "[]") or {}
-  wx_local_paths = cjson.decode(SH:get("wxpaths") or "[]") or {}
+  -- This shortcut is the whole point of the cache; before the
+  -- access_by_lua_file pitfall fix, wx.ts (then `wx_local_ts`) reset
+  -- to 0 on every request and this comparison was always false. Now
+  -- wx.ts persists across requests via package.loaded, so subsequent
+  -- requests on a worker that's already at the latest snapshot
+  -- short-circuit here without re-decoding the shdict snapshot.
+  if ts == wx.ts then return end
+  wx.ts = ts
+  wx.hosts = cjson.decode(SH:get("wxhosts") or "[]") or {}
+  wx.paths = cjson.decode(SH:get("wxpaths") or "[]") or {}
 end
 
 -- waf_skip_for(host, uri) returns:
@@ -907,10 +976,10 @@ local function waf_skip_for(host, uri)
     end
     return false
   end
-  for _, r in ipairs(wx_local_hosts) do
+  for _, r in ipairs(wx.hosts) do
     if consider(host, r) then return true, nil end
   end
-  for _, r in ipairs(wx_local_paths) do
+  for _, r in ipairs(wx.paths) do
     if consider(uri, r) then return true, nil end
   end
   return false, skip_ids
@@ -927,26 +996,12 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 -- GEO LOOKUP (lazy, per-worker singleton — see cfm_geo.lua)
 --
--- IMPORTANT: This file is loaded by openresty/angie via access_by_lua_file,
--- whose top-level chunk re-evaluates on every request. Any state you put
--- here as a top-level local will reset on every request — including
--- "init guards" like `_geo_init_done = false`. The previous in-line geo
--- implementation was bitten by exactly that: lua-resty-maxminddb's `init`
--- mmap'd the ~60 MB GeoLite2-City.mmdb afresh on every request that hit
--- geo_country, leaking ~1 mapping/min/worker (200+ duplicate maps,
--- ~13 GB virtual / ~0.5 GB resident per worker, confirmed via
--- /proc/<pid>/maps captured 2026-05-09).
---
--- The fix is to put the state in a module loaded via `require` —
--- package.loaded[name] caches the module per worker, so the module's
--- top-level locals survive across requests and `mmdb.init` is called
--- exactly once per worker. See cfm_geo.lua.
---
--- The same pitfall applies to other top-level locals in this file
--- (e.g. wx_local_ts/hosts/paths around line 851). Those don't leak
--- because the cached state is plain Lua tables (GC'd cleanly), but
--- the cache miss costs an unnecessary cjson.decode of the shdict
--- snapshot per request. Worth extracting in a follow-up.
+-- This is one of the two PITFALL: access_by_lua_file fixes documented
+-- at the top of this file. The geo state lives in cfm_geo.lua because
+-- `mmdb.init` opens an FFI mmap that Lua's GC won't release — a
+-- per-request init was the cause of the 13 GB GeoIP mmap leak observed
+-- on virgo 2026-05-09. The require'd module's state survives across
+-- requests via package.loaded so init runs exactly once per worker.
 local geo_ok, geo = pcall(require, "cfm_geo")
 local function geo_country(ip_str)
   if not geo_ok or type(geo) ~= "table" or type(geo.country) ~= "function" then
