@@ -1802,6 +1802,68 @@ function _M.detect_lolbin(uri, args, body, _s)
     _s or scan_str(uri, args), LOLBIN_PATTERNS)
 end
 
+-- [C2] Java ObjectOutputStream deserialization. Three wire-form variants:
+--
+--   1. Raw bytes 0xAC 0xED 0x00 0x05 anywhere in the body. This is the
+--      JVM's STREAM_MAGIC + STREAM_VERSION pair, prepended to every Java
+--      serialized object stream. Match is plain-byte (no normalize) so we
+--      catch binary uploads / multipart parts that include them.
+--   2. Base64 prefix "rO0AB" (case-insensitive). Encoding 0xAC 0xED 0x00
+--      0x05 followed by any byte yields a stream that always starts with
+--      these five chars; six-byte prefix "rO0ABXNyA" / "rO0ABXcE" are
+--      common but the stable five-char form is what we match. Wide enough
+--      to catch all gadget chains, narrow enough to make accidental match
+--      against random base64 payloads negligible.
+--   3. Hex literal "aced0005" (case-insensitive). Less common in attack
+--      traffic but appears in pen-test write-ups and in some debug-logging
+--      reflections that get reposted into vulnerable forms.
+--
+-- Distinct from PHP serialize (rule 306) which detects O:N:"ClassName":N:{
+-- markers; the two formats share zero bytes so neither rule shadows the
+-- other. Family WAF_RCE so the rule shares post-clearance escalation.
+function _M.detect_java_deserialize(headers, args, body)
+  local function check_text(s)
+    if not s or s == "" then return nil end
+    local sl = lower(s)
+    if has(sl, "ro0ab")    then return "B64_PREFIX" end
+    if has(sl, "aced0005") then return "HEX_PREFIX" end
+    return nil
+  end
+
+  -- args is normalised on the way in by scan_str's callers, but we lower
+  -- it here defensively in case detect_java_deserialize is called from a
+  -- future code path that bypasses normalisation.
+  local t = check_text(args)
+  if t then return t end
+
+  -- Body: raw 4-byte magic match first (cheaper, no normalize), then
+  -- text-form fallback for base64 / hex deliveries.
+  if body and body ~= "" then
+    if string.find(body, "\xac\xed\x00\x05", 1, true) then
+      return "RAW_MAGIC"
+    end
+    t = check_text(body)
+    if t then return t end
+  end
+
+  -- Common header injection vectors for Java deserialize gadgets — both
+  -- Cookie (session-replay attacks) and Authorization (Vaadin-style token
+  -- bombs) are the typical entry points; X-Forwarded-For is occasionally
+  -- abused when an upstream parses the value into a Java object.
+  if headers then
+    local cookie = header_string(headers["cookie"] or headers["Cookie"])
+    t = check_text(cookie); if t then return t end
+
+    local auth = header_string(headers["authorization"] or headers["Authorization"])
+    t = check_text(auth); if t then return t end
+
+    local xff = header_string(headers["x-forwarded-for"] or headers["X-Forwarded-For"])
+    t = check_text(xff); if t then return t end
+  end
+
+  return nil
+end
+
 -- [B5] Webshell ping fingerprint — POST + empty/missing UA + Content-Length:0
 -- + URI ending in .php / .phtml / .phar. The combination is what makes this
 -- low-FP: any one signal alone is common (legit POST forms, monitoring HEAD

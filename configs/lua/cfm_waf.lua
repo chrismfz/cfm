@@ -126,6 +126,13 @@ local CFG = {
   rule_rootkit_artifacts = "logonly",  -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
   rule_lolbin            = "logonly",  -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
 
+  -- ── Phase 3 — known-CVE fingerprints (logonly rollout) ───────────────────
+  -- Java deserialization (CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725
+  -- pattern). Family WAF_RCE so it shares high-risk post-clearance routing.
+  -- C1 Log4Shell is NOT a separate rule — already in detect_rce (rule 320).
+  -- C3 (CVE signature file) is deferred to its own infra PR.
+  rule_java_deserialize  = "logonly",  -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -250,6 +257,7 @@ local RULE_IDS = {
   rule_persistence             = 323,
   rule_rootkit_artifacts       = 324,
   rule_lolbin                  = 325,
+  rule_java_deserialize        = 326,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -924,6 +932,23 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:LOLBIN:" .. tag, ttl, mode, RULE_IDS.rule_lolbin) then goto done end
+      end
+    end
+  end
+
+  -- ── 40) Java deserialization (C2) ────────────────────────────────────────
+  -- Detects ObjectOutputStream payloads by their stable wire-format prefix:
+  -- raw bytes 0xAC 0xED 0x00 0x05, base64 prefix "rO0AB", or "aced0005" hex.
+  -- These are how RCE chains (Commons Collections, Spring Framework, JBoss
+  -- Richfaces — CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725)
+  -- arrive over HTTP. PHP serialize is a separate rule (306).
+  do
+    local mode = rule_mode(CFG.rule_java_deserialize, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_java_deserialize(headers, args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:JAVA_DESERIALIZE:" .. tag, ttl, mode, RULE_IDS.rule_java_deserialize) then goto done end
       end
     end
   end
