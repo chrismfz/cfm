@@ -32,6 +32,13 @@ const (
 	quickBundleDuration    = 30 * time.Second
 	defaultRetainBundles   = 10
 	workerSampleInterval   = 30 * time.Second
+	// Upper bound for the pprof CPU profile's `seconds=` parameter.
+	// The apiserver caps the URL value at 300 and adds a 15s safety
+	// margin; in practice longer streams race that deadline (bundle-2
+	// from 2026-05-09 returned EOF on a 300s request). 60s of samples
+	// is sufficient for diagnosing hot paths; the worker memory trace
+	// and daemon CPU trace still run for the full --duration.
+	pprofCPUSecondsMax = 60
 )
 
 // RunDebug is the entry point invoked from cmd/cfm/main.go.
@@ -125,7 +132,16 @@ func RunDebug(args []string) int {
 	//    all run concurrently for the duration window. (wg declared
 	//    above so the system-info goroutine is also joined.)
 
-	// CPU profile (blocks for `duration` seconds).
+	// CPU profile. Cap the requested seconds at pprofCPUSecondsMax even
+	// if --duration is longer. Two reasons:
+	//   - the apiserver's pprof middleware caps the URL parameter at 300
+	//     and adds a 15s safety margin to its write deadline; in practice
+	//     5-minute streams race the deadline (bundle-2 returned EOF mid-
+	//     stream).
+	//   - 60s of CPU samples is enough for diagnosis; longer windows
+	//     dilute hot functions with noise rather than improve them.
+	// The worker memory trace and daemon CPU trace still run for the full
+	// --duration; only the pprof CPU window shrinks.
 	if !opts.skipPprof && daemonPID != 0 {
 		wg.Add(1)
 		go func() {
@@ -134,8 +150,12 @@ func RunDebug(args []string) int {
 			if seconds < 1 {
 				seconds = 1
 			}
+			if seconds > pprofCPUSecondsMax {
+				seconds = pprofCPUSecondsMax
+			}
+			cpuFetchDur := time.Duration(seconds) * time.Second
 			endpoint := fmt.Sprintf("profile?seconds=%d", seconds)
-			b, err := fetchPprof(opts.apiAddr, endpoint, opts.duration)
+			b, err := fetchPprof(opts.apiAddr, endpoint, cpuFetchDur)
 			if err != nil {
 				manifest.set("pprof-cpu.pb.gz", "error: "+err.Error())
 				return
