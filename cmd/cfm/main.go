@@ -45,6 +45,7 @@ import (
 	"cfm/internal/dyndns"
 	"cfm/internal/filewatch"
 	"cfm/internal/healthcli"
+	"cfm/internal/kernsec"
 )
 
 var (
@@ -318,6 +319,9 @@ func main() {
 		// Mirrors the webtop / mysqltop / health cases above.
 		clihttp.SetToken(apiAuthToken())
 		os.Exit(cli.RunDebug(os.Args[2:]))
+
+	case "kernsec":
+		os.Exit(kernsec.RunCLI(os.Args[2:]))
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
