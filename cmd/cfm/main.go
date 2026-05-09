@@ -373,6 +373,7 @@ Usage:
   cfm kernsec preview [...]       -- read-only diff: what 'apply' would select (filters: --tier --group --id --skip --force-id)
   cfm kernsec init                -- write default /etc/cfm/kernsec.conf if absent
   cfm kernsec apply [--dry-run]   -- write sysctl + boot-arg files, run sysctl --load + bootloader refresh; --check exits non-zero on drift
+  cfm kernsec disable [--purge]   -- persistently disable kernsec (tier=0): strip managed boot args, empty managed sysctl; --purge removes conf entirely
 
   cfm clam ping
   cfm clam version

@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,9 @@ import (
 // daemon's flat KEY=VALUE cfm.conf (internal/config/config.go) stays
 // separate — kernsec's per-rule overrides need a sectioned format that
 // flat conf can't express cleanly.
-const ConfPath = "/etc/cfm/kernsec.conf"
+//
+// Declared as var (not const) so tests can redirect it to t.TempDir().
+var ConfPath = "/etc/cfm/kernsec.conf"
 
 // RuleState declares operator intent for one rule, overriding the tier
 // default.
@@ -257,6 +260,19 @@ func WriteDefaultConf() (created bool, err error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// WriteConf atomically writes c to ConfPath. Used by `cfm kernsec
+// disable` to persist tier=0 without going through the
+// "absent → write default tier=1" path WriteDefaultConf takes.
+func WriteConf(c *Conf) error {
+	if c == nil {
+		return errors.New("WriteConf: nil conf")
+	}
+	if err := os.MkdirAll(filepath.Dir(ConfPath), 0o755); err != nil {
+		return err
+	}
+	return AtomicWriteFile(ConfPath, []byte(c.Render()), 0o644)
 }
 
 // sortStrings is a minimal in-place sort to avoid pulling sort just for

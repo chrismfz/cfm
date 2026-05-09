@@ -62,6 +62,14 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 		fmt.Fprintln(w, "kernsec apply: load conf:", err)
 		return 1
 	}
+	return applyCore(w, conf, opts, "APPLY")
+}
+
+// applyCore is the conf-agnostic apply orchestration. RunApply loads
+// from disk first; RunDisable constructs an in-memory tier=0 conf and
+// calls in directly. label is what appears in the banner ("APPLY" or
+// "DISABLE") so operator output reflects the operator's intent.
+func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	profile := DetectHostProfile()
 	rs := Resolve(conf, profile)
 	sysctls := rs.ApplySysctls()
@@ -70,7 +78,7 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 	fs := RealFS{}
 	backend := DetectBackend(fs)
 
-	fmt.Fprintln(w, "===== CFM kernsec APPLY =====")
+	fmt.Fprintf(w, "===== CFM kernsec %s =====\n", label)
 	fmt.Fprintf(w, "Conf:    %s\n", confSource(conf))
 	fmt.Fprintf(w, "Tier:    %d\n", conf.Tier)
 	fmt.Fprintf(w, "Backend: %s\n", backend.Label())
