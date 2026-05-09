@@ -60,12 +60,25 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w, nextCmdline)
 	fmt.Fprintln(w)
 
+	// Resolve every rule against conf + host profile so OFF (operator-
+	// disabled) and SKIP (host-profile blocked) decisions render
+	// honestly instead of being silently dropped or mis-classified
+	// as MISSING.
+	profile := DetectHostProfile()
+	resolved := Resolve(conf, profile)
+
 	fmt.Fprintln(w, "[Expected runtime sysctl verification]")
-	for _, rule := range AllSysctls() {
-		if rule.Tier > conf.Tier {
+	for i, rule := range AllSysctls() {
+		rr := resolved.Sysctls[i]
+		state, found := CheckSysctl(rule)
+		switch rr.Decision {
+		case SkipByConf, SkipByTier:
+			fmt.Fprintf(w, "OFF   %s  (%s)\n", rule.Key, rr.Reason)
+			continue
+		case SkipByHostProfile:
+			fmt.Fprintf(w, "SKIP  %s  (host profile: %s)\n", rule.Key, rr.Reason)
 			continue
 		}
-		state, found := CheckSysctl(rule)
 		switch state {
 		case SysctlOK:
 			fmt.Fprintf(w, "OK    %s=%s\n", rule.Key, found)
@@ -81,10 +94,10 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	currentTokens := ParseCmdline(currentCmdline)
 	nextTokens := ParseCmdline(nextCmdline)
 
-	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, conf.Tier)
-	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, conf.Tier)
+	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved)
+	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved)
 
-	res.printModuleState(w)
+	res.printModuleState(w, resolved)
 
 	klog := ReadKernelLog()
 	fmt.Fprintln(w, "[Kernel boot warnings about managed args]")
@@ -193,13 +206,20 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 }
 
 // printArgState renders one section of expected boot args against a
-// concrete cmdline. Mirrors kspp.sh show_arg_state. Filters to rules
-// whose tier <= confTier so a tier=1 host doesn't see Tier 2 rules
-// reported as MISSING (they're not expected to apply at tier=1).
-func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string, confTier Tier) {
+// concrete cmdline. Mirrors kspp.sh show_arg_state. Iterates the
+// resolved set so OFF (operator-disabled / tier-gated) and SKIP
+// (host-profile blocked) rules render explicitly instead of being
+// silently dropped.
+func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string, resolved ResolvedSet) {
 	fmt.Fprintf(w, "[%s]\n", label)
-	for _, want := range AllBootArgs() {
-		if want.Tier > confTier {
+	for i, want := range AllBootArgs() {
+		rr := resolved.BootArgs[i]
+		switch rr.Decision {
+		case SkipByConf, SkipByTier:
+			fmt.Fprintf(w, "OFF        %s  (%s)\n", want, rr.Reason)
+			continue
+		case SkipByHostProfile:
+			fmt.Fprintf(w, "SKIP       %s  (host profile: %s)\n", want, rr.Reason)
 			continue
 		}
 		state, found := CheckBootArg(tokens, want)
@@ -224,9 +244,10 @@ func (res *StatusResult) warn() {
 
 // printModuleState surfaces the module-blacklist audit in the same
 // label-prefixed style as the rest of status output: managed file's
-// presence and per-module state. Phase 3 keeps this concise — the TUI
-// is the rich surface; text mode is for piping / monitoring.
-func (res *StatusResult) printModuleState(w io.Writer) {
+// presence and per-module state. Buckets the rules by resolver
+// decision (OFF / SKIP / Apply) so operator-disabled and host-profile
+// gated rules don't get lumped into MISSING.
+func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 	fmt.Fprintln(w, "[Module blacklist]")
 
 	managedExists := true
@@ -244,9 +265,18 @@ func (res *StatusResult) printModuleState(w io.Writer) {
 
 	loaded := LoadedModules()
 	managed := ParseManagedBlacklist()
-	var loadedCount, missingCount, okCount, skipCount int
+	var loadedCount, missingCount, okCount, kernelSkipCount, offCount, hostSkipCount int
 
-	for _, m := range Tier1Modules {
+	for i, m := range Tier1Modules {
+		rr := resolved.Modules[i]
+		switch rr.Decision {
+		case SkipByConf, SkipByTier:
+			offCount++
+			continue
+		case SkipByHostProfile:
+			hostSkipCount++
+			continue
+		}
 		_, isBlacklisted := managed[m.Name]
 		_, isLoaded := loaded[m.Name]
 		switch {
@@ -255,7 +285,7 @@ func (res *StatusResult) printModuleState(w io.Writer) {
 		case isBlacklisted:
 			okCount++
 		case !ModulePresentOnKernel(m.Name):
-			skipCount++
+			kernelSkipCount++
 		default:
 			missingCount++
 		}
@@ -276,8 +306,14 @@ func (res *StatusResult) printModuleState(w io.Writer) {
 			missingCount, ModprobePath)
 		res.warn()
 	}
-	if skipCount > 0 {
-		fmt.Fprintf(w, "SKIP       %d modules not present on this kernel\n", skipCount)
+	if kernelSkipCount > 0 {
+		fmt.Fprintf(w, "SKIP       %d modules not present on this kernel\n", kernelSkipCount)
+	}
+	if hostSkipCount > 0 {
+		fmt.Fprintf(w, "SKIP       %d modules skipped by host profile (would break host workloads)\n", hostSkipCount)
+	}
+	if offCount > 0 {
+		fmt.Fprintf(w, "OFF        %d modules disabled by conf (tier or per-rule skip)\n", offCount)
 	}
 	fmt.Fprintln(w)
 }

@@ -2,16 +2,19 @@ package kernsec
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
 // fakeFS is an in-memory FS for testing backend detection without real
-// bootloaders. Only Phase 1 read-only methods are exercised.
+// bootloaders. Phase 5 follow-up adds cmdLog so write-path tests can
+// assert what argv was actually invoked.
 type fakeFS struct {
-	files map[string][]byte
-	dirs  map[string]bool
-	bins  map[string]bool
-	cmds  map[string]string // "name arg1 arg2" -> output
+	files  map[string][]byte
+	dirs   map[string]bool
+	bins   map[string]bool
+	cmds   map[string]string // "name arg1 arg2" -> output
+	cmdLog []string          // append-only record of every RunCapture key
 }
 
 func newFakeFS() *fakeFS {
@@ -42,6 +45,7 @@ func (f *fakeFS) RunCapture(name string, args ...string) (string, error) {
 	for _, a := range args {
 		key += " " + a
 	}
+	f.cmdLog = append(f.cmdLog, key)
 	if out, ok := f.cmds[key]; ok {
 		return out, nil
 	}
@@ -159,14 +163,14 @@ func TestProxmoxBackend_NextBootCmdline(t *testing.T) {
 	}
 }
 
-func TestBLSBackend_NextBootCmdline(t *testing.T) {
+func TestBLSBackend_NextBootCmdline_SingleKernel(t *testing.T) {
 	out := `index=0
 kernel="/boot/vmlinuz-6.1.0"
 initrd="/boot/initramfs-6.1.0.img"
 args="ro crashkernel=auto slab_nomerge init_on_alloc=1"
 title="Rocky Linux"
 `
-	fs := newFakeFS().withCmd("grubby --info=DEFAULT", out)
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
 	b := &BLSBackend{FS: fs}
 	got, err := b.NextBootCmdline()
 	if err != nil {
@@ -174,6 +178,211 @@ title="Rocky Linux"
 	}
 	if got != "ro crashkernel=auto slab_nomerge init_on_alloc=1" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_AllKernelsAgree(t *testing.T) {
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+title="Rocky 9"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro slab_nomerge init_on_alloc=1"
+title="Rocky 9 (older)"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("expected no error when all kernels agree, got %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_DivergedKernel(t *testing.T) {
+	// Older kernel is missing init_on_alloc=1 — drift the apply check
+	// must surface so the operator doesn't reboot into a stale entry.
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+title="Rocky 9"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro slab_nomerge"
+title="Rocky 9 (older)"
+
+index=2
+kernel="/boot/vmlinuz-rescue"
+args="ro slab_nomerge init_on_alloc=1"
+title="Rescue"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err == nil {
+		t.Fatal("expected divergence error, got nil")
+	}
+	if !strings.Contains(err.Error(), "/boot/vmlinuz-5.14.0") {
+		t.Errorf("error message should name the divergent kernel: %v", err)
+	}
+	if strings.Contains(err.Error(), "/boot/vmlinuz-rescue") {
+		t.Errorf("rescue kernel matches first entry; should not be flagged: %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Errorf("returned args should be from index=0: got %q", got)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_TokenOrderInsensitive(t *testing.T) {
+	// Reordered args on different kernels must not be flagged as drift —
+	// the kernel cmdline is order-insensitive.
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="init_on_alloc=1 ro slab_nomerge"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	if _, err := b.NextBootCmdline(); err != nil {
+		t.Fatalf("reordered tokens should not be drift, got %v", err)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_NoKernels(t *testing.T) {
+	fs := newFakeFS().withCmd("grubby --info=ALL", "")
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("expected nil error on empty grubby output, got %v", err)
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
+	fs := newFakeFS().withCmd(
+		"grubby --update-kernel=ALL --remove-args="+strings.Join(ManagedBootArgKeys, " ")+
+			" --args=slab_nomerge init_on_alloc=1",
+		"",
+	)
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{
+		{Key: "slab_nomerge"},
+		{Key: "init_on_alloc", Value: "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Fatalf("expected exactly 1 grubby invocation, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+	got := fs.cmdLog[0]
+	if !strings.Contains(got, "--remove-args=") {
+		t.Errorf("expected --remove-args in single call, got: %q", got)
+	}
+	if !strings.Contains(got, "--args=") {
+		t.Errorf("expected --args in single call, got: %q", got)
+	}
+}
+
+func TestBLSBackend_WriteCmdline_EmptyArgsNoAddFlag(t *testing.T) {
+	// Disable workflow: no managed args to add. Must still issue the
+	// remove call (in a single grubby invocation), but must not pass
+	// an empty --args= flag (grubby treats --args="" as a no-op anyway,
+	// but the omission keeps the command line cleaner).
+	fs := newFakeFS().withCmd(
+		"grubby --update-kernel=ALL --remove-args="+strings.Join(ManagedBootArgKeys, " "),
+		"",
+	)
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Fatalf("expected 1 grubby call, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+	if strings.Contains(fs.cmdLog[0], "--args=") {
+		t.Errorf("expected no --args= flag for empty arg set, got: %q", fs.cmdLog[0])
+	}
+}
+
+func TestParseGrubbyAll(t *testing.T) {
+	tests := []struct {
+		name      string
+		out       string
+		wantCount int
+		wantArgs  []string
+	}{
+		{
+			name:      "empty",
+			out:       "",
+			wantCount: 0,
+		},
+		{
+			name: "single kernel",
+			out: `index=0
+kernel="/boot/vmlinuz"
+args="ro slab_nomerge"
+`,
+			wantCount: 1,
+			wantArgs:  []string{"ro slab_nomerge"},
+		},
+		{
+			name: "two kernels blank-line separated",
+			out: `index=0
+kernel="/boot/vmlinuz-A"
+args="ro a"
+
+index=1
+kernel="/boot/vmlinuz-B"
+args="ro b"
+`,
+			wantCount: 2,
+			wantArgs:  []string{"ro a", "ro b"},
+		},
+		{
+			name: "two kernels no blank separator",
+			out: `index=0
+kernel="/boot/vmlinuz-A"
+args="ro a"
+index=1
+kernel="/boot/vmlinuz-B"
+args="ro b"
+`,
+			wantCount: 2,
+			wantArgs:  []string{"ro a", "ro b"},
+		},
+		{
+			name: "missing args key tolerated",
+			out: `index=0
+kernel="/boot/vmlinuz"
+title="weird"
+`,
+			wantCount: 1,
+			wantArgs:  []string{""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseGrubbyAll(tc.out)
+			if len(got) != tc.wantCount {
+				t.Fatalf("parseGrubbyAll() returned %d entries, want %d (got: %+v)",
+					len(got), tc.wantCount, got)
+			}
+			for i, want := range tc.wantArgs {
+				if got[i].Args != want {
+					t.Errorf("entry[%d].Args = %q, want %q", i, got[i].Args, want)
+				}
+			}
+		})
 	}
 }
 

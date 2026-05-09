@@ -1,7 +1,12 @@
 package kernsec
 
 import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -112,6 +117,190 @@ func TestApplyOptions_CheckAndDryRunNoOpWithoutRoot(t *testing.T) {
 	if mustWrite := !true && !false; mustWrite {
 		t.Fatal("logic bug")
 	}
+}
+
+// fakeBootBackend is a record-and-fail BootBackend for apply ordering
+// tests. The Fail* fields make individual steps return an error so the
+// test can assert that LoadSysctl is never invoked when an earlier
+// step fails.
+type fakeBootBackend struct {
+	WriteCalled    bool
+	RefreshCalled  bool
+	FailWrite      bool
+	FailRefresh    bool
+	NextBootResult string
+	NextBootErr    error
+}
+
+func (f *fakeBootBackend) Label() string                     { return "fake-backend" }
+func (f *fakeBootBackend) NextBootCmdline() (string, error)  { return f.NextBootResult, f.NextBootErr }
+func (f *fakeBootBackend) WriteCmdline(_ []BootArg) error {
+	f.WriteCalled = true
+	if f.FailWrite {
+		return errors.New("simulated WriteCmdline failure")
+	}
+	return nil
+}
+func (f *fakeBootBackend) Refresh() error {
+	f.RefreshCalled = true
+	if f.FailRefresh {
+		return errors.New("simulated Refresh failure")
+	}
+	return nil
+}
+
+// redirectManagedPaths swaps SysctlPath / ModprobePath / ConfPath to
+// per-test tempdirs so applyWrites' AtomicWriteFile calls don't touch
+// /etc/. Restored on cleanup.
+func redirectManagedPaths(t *testing.T) (sysctl, modprobe, conf string) {
+	t.Helper()
+	tmp := t.TempDir()
+	sysctl = filepath.Join(tmp, "99-cfm-kernsec.conf")
+	modprobe = filepath.Join(tmp, "modprobe.cfm-kernsec.conf")
+	conf = filepath.Join(tmp, "kernsec.conf")
+	origSysctl, origMod, origConf := SysctlPath, ModprobePath, ConfPath
+	SysctlPath, ModprobePath, ConfPath = sysctl, modprobe, conf
+	t.Cleanup(func() {
+		SysctlPath, ModprobePath, ConfPath = origSysctl, origMod, origConf
+	})
+	return sysctl, modprobe, conf
+}
+
+func TestApplyWrites_LoaderRunsLastOnSuccess(t *testing.T) {
+	redirectManagedPaths(t)
+	loaderCalled := false
+	be := &fakeBootBackend{}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl content\n"),
+		[]byte("# modprobe content\n"),
+		nil, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 0 {
+		t.Fatalf("expected rc=0 on success, got %d. Output:\n%s", rc, w.String())
+	}
+	if !be.WriteCalled || !be.RefreshCalled {
+		t.Errorf("expected backend WriteCmdline + Refresh called, got %+v", be)
+	}
+	if !loaderCalled {
+		t.Error("expected loader to be invoked on success path")
+	}
+}
+
+func TestApplyWrites_LoaderNotCalledWhenWriteCmdlineFails(t *testing.T) {
+	redirectManagedPaths(t)
+	loaderCalled := false
+	be := &fakeBootBackend{FailWrite: true}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		nil, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on WriteCmdline failure, got %d", rc)
+	}
+	if loaderCalled {
+		t.Fatal("LoadSysctl was invoked despite WriteCmdline failure — runtime kernel state mutated; production hosts could land Tier 2 namespace-kill before bootloader confirms")
+	}
+	if be.RefreshCalled {
+		t.Error("Refresh was invoked despite WriteCmdline failure")
+	}
+	out := w.String()
+	if !strings.Contains(out, "runtime state unchanged") {
+		t.Errorf("expected operator-facing 'runtime state unchanged' message, got:\n%s", out)
+	}
+}
+
+func TestApplyWrites_LoaderNotCalledWhenRefreshFails(t *testing.T) {
+	redirectManagedPaths(t)
+	loaderCalled := false
+	be := &fakeBootBackend{FailRefresh: true}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		nil, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on Refresh failure, got %d", rc)
+	}
+	if loaderCalled {
+		t.Fatal("LoadSysctl was invoked despite bootloader Refresh failure")
+	}
+	if !be.WriteCalled {
+		t.Error("WriteCmdline should have been called before Refresh failed")
+	}
+	out := w.String()
+	if !strings.Contains(out, "bootloader has NOT picked it up") {
+		t.Errorf("expected operator-facing recovery hint, got:\n%s", out)
+	}
+}
+
+func TestApplyWrites_NoRefreshSkipsRefreshButStillLoadsSysctl(t *testing.T) {
+	redirectManagedPaths(t)
+	loaderCalled := false
+	be := &fakeBootBackend{}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		nil, nil,
+		ApplyOptions{NoRefresh: true},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 0 {
+		t.Fatalf("expected rc=0, got %d. Output:\n%s", rc, w.String())
+	}
+	if be.RefreshCalled {
+		t.Error("Refresh should be skipped under --no-refresh")
+	}
+	if !loaderCalled {
+		t.Error("loader should still run when --no-refresh: bootloader is the operator's responsibility, sysctl is still safe to load")
+	}
+}
+
+func TestApplyWrites_LoaderFailureIsReportedButFilesAreWritten(t *testing.T) {
+	sysctl, modprobe, _ := redirectManagedPaths(t)
+	be := &fakeBootBackend{}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		nil, nil, ApplyOptions{},
+		func() error { return errors.New("simulated sysctl --load failure") },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1, got %d", rc)
+	}
+	// Files were written before the loader was called: that's by design.
+	// On reboot the persistent files take effect; the operator can also
+	// re-run apply once the load failure cause is addressed.
+	if _, err := readTestFile(sysctl); err != nil {
+		t.Errorf("sysctl file should be on disk despite loader failure: %v", err)
+	}
+	if _, err := readTestFile(modprobe); err != nil {
+		t.Errorf("modprobe file should be on disk despite loader failure: %v", err)
+	}
+	out := w.String()
+	if !strings.Contains(out, "sysctl --load") {
+		t.Errorf("expected sysctl --load failure to be surfaced, got:\n%s", out)
+	}
+}
+
+// readTestFile is a tiny helper to verify a file exists in the test
+// tempdir without pulling os into apply_test imports beyond what's
+// already there.
+func readTestFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
 }
 
 func contains(s, sub string) bool {

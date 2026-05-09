@@ -31,12 +31,15 @@ type ApplyOptions struct {
 //  3. Render the sysctl file from rules whose Decision==Apply.
 //  4. Render the desired managed-keys cmdline through BootBackend.
 //  5. Compare to current state; if Check, exit 0/1 based on equality.
-//  6. Otherwise (and not DryRun), write everything atomically with
-//     one-shot backups, then run sysctl --load and Refresh().
+//  6. Otherwise (and not DryRun), write managed files in
+//     transaction-safe order — file writes first (reversible),
+//     bootloader refresh next, sysctl --load LAST. The sysctl load
+//     is the only step that mutates the running kernel; ordering it
+//     last means a failure in the more-fragile bootloader path does
+//     NOT leave Tier 2 sysctls (e.g. user.max_user_namespaces=0)
+//     active in the running kernel with no drop-in file to roll
+//     back from.
 //  7. Run BuildAuditRows for a post-write verify pass.
-//
-// Phase 2b applies sysctls + boot args. Modules deferred to Phase 3.
-// Module rules pass through Resolve but are not written.
 func RunApply(w io.Writer, opts ApplyOptions) int {
 	mustWrite := !opts.DryRun && !opts.Check
 	if mustWrite && os.Geteuid() != 0 {
@@ -172,35 +175,62 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		return 1
 	}
 
-	// Write sysctl.
+	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, LoadSysctl); rc != 0 {
+		return rc
+	}
+
+	// Post-write verify.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "[Verification]")
+	verifyAfterApply(w, conf, profile)
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "[!] Boot-arg changes require reboot before they appear in /proc/cmdline.")
+	fmt.Fprintln(w, "===========================")
+	return 0
+}
+
+// applyWrites runs the mutating phase of apply in transaction-safe
+// order:
+//
+//  1. Write sysctl drop-in file (no `sysctl --load` yet — file on disk
+//     is a no-op for the running kernel until something loads it).
+//  2. Write modprobe drop-in file (idempotent file write; reboot
+//     required before blacklist takes effect anyway).
+//  3. Write next-boot cmdline via the bootloader backend (writes a
+//     config file or grubby invocation; takes effect on next boot).
+//  4. Refresh the bootloader (rebuilds grub.cfg / runs
+//     proxmox-boot-tool).  Skipped under --no-refresh.
+//  5. `sysctl --load` LAST. This is the only step that mutates the
+//     running kernel.  If anything in steps 1-4 fails the loader is
+//     never invoked, so the host's runtime state is unchanged from
+//     before apply ran. The drop-in files may exist on disk; the
+//     operator can re-run apply (idempotent) or remove them by hand.
+//
+// `loader` is injected so fault-injection tests can verify the LAST
+// invariant (LoadSysctl does NOT run when an earlier step fails).
+// Production callers pass kernsec.LoadSysctl.
+//
+// Returns 0 on full success, 1 on any failure (after printing a
+// human-readable error to w).
+func applyWrites(
+	w io.Writer,
+	backend BootBackend,
+	sysctlContent []byte,
+	modprobeContent []byte,
+	bootArgs []BootArg,
+	loadedManaged []string,
+	opts ApplyOptions,
+	loader func() error,
+) int {
+	// 1. Sysctl drop-in file.
 	if err := WriteSysctlFile(sysctlContent); err != nil {
 		fmt.Fprintln(w, "kernsec apply: write sysctl:", err)
 		return 1
 	}
-	if err := LoadSysctl(); err != nil {
-		fmt.Fprintln(w, "kernsec apply: sysctl --load:", err)
-		return 1
-	}
-	fmt.Fprintf(w, "[Sysctl] wrote %s and ran sysctl --load.\n", SysctlPath)
+	fmt.Fprintf(w, "[Sysctl] wrote %s (not yet loaded).\n", SysctlPath)
 
-	// Write boot args.
-	if err := backend.WriteCmdline(bootArgs); err != nil {
-		fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
-		return 1
-	}
-	fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
-
-	if !opts.NoRefresh {
-		if err := backend.Refresh(); err != nil {
-			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
-			return 1
-		}
-		fmt.Fprintln(w, "[Boot args] bootloader refreshed.")
-	} else {
-		fmt.Fprintln(w, "[Boot args] --no-refresh: skipping bootloader refresh; run it yourself before reboot.")
-	}
-
-	// Write module blacklist.
+	// 2. Modprobe blacklist file.
 	if err := WriteModprobeFile(modprobeContent); err != nil {
 		fmt.Fprintln(w, "kernsec apply: write modprobe:", err)
 		return 1
@@ -214,14 +244,36 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		}
 	}
 
-	// Post-write verify.
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "[Verification]")
-	verifyAfterApply(w)
+	// 3. Bootloader cmdline.
+	if err := backend.WriteCmdline(bootArgs); err != nil {
+		fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
+		fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT loaded; runtime state unchanged.")
+		return 1
+	}
+	fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "[!] Boot-arg changes require reboot before they appear in /proc/cmdline.")
-	fmt.Fprintln(w, "===========================")
+	// 4. Bootloader refresh.
+	if !opts.NoRefresh {
+		if err := backend.Refresh(); err != nil {
+			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
+			fmt.Fprintln(w, "  cmdline is written but bootloader has NOT picked it up.")
+			fmt.Fprintln(w, "  re-run `cfm kernsec apply` or refresh the bootloader manually before reboot.")
+			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT loaded; runtime state unchanged.")
+			return 1
+		}
+		fmt.Fprintln(w, "[Boot args] bootloader refreshed.")
+	} else {
+		fmt.Fprintln(w, "[Boot args] --no-refresh: skipping bootloader refresh; run it yourself before reboot.")
+	}
+
+	// 5. Sysctl --load LAST: the only step that mutates the running kernel.
+	if err := loader(); err != nil {
+		fmt.Fprintln(w, "kernsec apply: sysctl --load:", err)
+		fmt.Fprintln(w, "  files are on disk and bootloader is updated; runtime sysctl values may be partially loaded.")
+		fmt.Fprintln(w, "  inspect with `sysctl -a` and re-run apply once the cause is fixed.")
+		return 1
+	}
+	fmt.Fprintln(w, "[Sysctl] sysctl --load completed (rules now live).")
 	return 0
 }
 
@@ -343,14 +395,19 @@ func loadedAndManaged(modules []ModuleRule) []string {
 // Boot-arg rules will show as PEND/WARN until reboot — that's
 // expected; we tag them clearly rather than treating them as a
 // failure. Modules in LOADED state likewise need a reboot or rmmod
-// for the blacklist to be effective.
-func verifyAfterApply(w io.Writer) {
-	rows := BuildAuditRows()
+// for the blacklist to be effective. Rules whose decision is OFF or
+// SKIP are excluded from the failure counts (operator chose to
+// disable, or host profile blocks the rule).
+func verifyAfterApply(w io.Writer, conf *Conf, profile HostProfile) {
+	rows := BuildAuditRows(conf, profile)
 	var sysctlBad, bootPending, modulesLoaded, modulesMissing int
 	for _, r := range rows {
+		if r.State == StateOFF || r.State == StateSKIP {
+			continue
+		}
 		switch r.Kind {
 		case KindSysctl:
-			if r.State != StateOK && r.State != StateSKIP {
+			if r.State != StateOK {
 				sysctlBad++
 			}
 		case KindBoot:
