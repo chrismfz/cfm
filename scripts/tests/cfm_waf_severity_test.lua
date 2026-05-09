@@ -993,6 +993,113 @@ do
   check(hit == false, "62: W4 polyglot — non-image text field with <?php text, no hit")
 end
 
+-- ── Test 63: Rule 404 ext — <?php + $_POST + dynamic include fires (404) ───
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Loader-pattern fingerprint shared by samples 1+4 (forms.php / user.php)
+  -- from the 2026-05-09 sample-replay audit: include's argument is a
+  -- variable that came from $_POST. Score: <?php(+2) + $_POST(+2) +
+  -- dyn-include(+1) = 5 → fires.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "src=<?php $tmp=$_POST['key']; include $tmp;",
+  }))
+  check(hit == true,                                          "63: rule 404 ext — hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_DYN_INCLUDE",    "63: rule 404 ext — RAW_DYN_INCLUDE tag")
+  check(action == "challenge",                                "63: rule 404 ext — challenge action")
+  check(rule_id == 404,                                       "63: rule 404 ext — rule id 404 (extension, not new rule)")
+end
+
+-- ── Test 64: Rule 404 ext — sanitised forms.php loader (variable include) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Faithful sanitised excerpt from the 5a71c4ab-forms.php sample:
+  -- include_once $_13 (variable form). Score: <?php(+2) + $_POST(+2) +
+  -- dyn-include_once(+1) = 5 → fires.
+  local body = '<?php if(@$_POST["key"]!==null): '
+            .. '$_13="/tmp/.pset"; '
+            .. '$f=fopen($_13,"w"); fwrite($f,$payload); fclose($f); '
+            .. 'include_once $_13; unlink($_13); '
+            .. 'endif;'
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = body,
+  }))
+  check(hit == true,                                                 "64: rule 404 ext — forms.php sample hit")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_DYN_INCLUDE_ONCE",      "64: rule 404 ext — RAW_DYN_INCLUDE_ONCE tag")
+end
+
+-- ── Test 65: Rule 404 ext — bare WP bootstrap (literal include, no SG) ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- WordPress-style bootstrap: literal include __DIR__... — has_dynamic_include
+  -- skips this (next char after `include\s+` is `_`, not `$`). Score: 2+0=2.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = '<?php include __DIR__."/wp-blog-header.php";',
+  }))
+  check(hit == false, "65: rule 404 ext — WP bootstrap (literal include), no hit")
+end
+
+-- ── Test 66: Rule 404 ext — legit echo with $_POST does NOT fire (FP fix) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Pre-fix this body scored 5 (<?php + $_POST + ;<?php bonus) and FP'd
+  -- with tag RAW_SUPERGLOBAL — the bonus has been removed. New score:
+  -- <?php(+2) + $_POST(+2) = 4 < 5 → no hit. This is the targeted FP fix.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php $x=$_POST['msg']; echo htmlspecialchars($x);",
+  }))
+  check(hit == false, "66: rule 404 ext — legit echo with $_POST, no FP")
+end
+
+-- ── Test 67: Rule 404 ext — legit code-snippet save with literal require ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- Code-snippet plugin save: require_once with literal-string path,
+  -- alongside a $_POST capture. Pre-fix this scored 5 and FP'd. Now:
+  -- has_dynamic_include skips the literal-string require_once, so
+  -- score = <?php(+2) + $_POST(+2) = 4 → no hit.
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php require_once 'config.php'; $key=$_POST['k']; save($key);",
+  }))
+  check(hit == false, "67: rule 404 ext — legit literal-require + $_POST, no FP")
+end
+
+-- ── Test 68: Rule 404 ext — eval-family still fires (no regression) ────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_webshell_body", "challenge")
+
+  -- The original eval-detection path was the rule's main purpose. Removing
+  -- the ;<?php bonus mustn't weaken it. Score: <?php(+2) + $_POST(+2) +
+  -- eval((+3) = 7 → fires with RAW_EVAL_POST (the specific lookbehind).
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body    = "<?php @eval($_POST['c']);",
+  }))
+  check(hit == true,                                              "68: rule 404 ext — eval+$_POST still fires")
+  check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_EVAL_POST",          "68: rule 404 ext — RAW_EVAL_POST tag preserved")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

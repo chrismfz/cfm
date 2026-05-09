@@ -274,6 +274,29 @@ function _M.detect_php_webshell_body(body, headers)
     return false
   end
 
+  -- Dynamic include / require — matches only when the include's argument
+  -- starts with `$` (a variable). This is the malicious-loader shape:
+  --   include $tmpfile;          ← matched
+  --   include_once $_POST['k'];  ← matched
+  --   include(@$cfg);            ← matched
+  --   require_once $plugin_path; ← matched
+  -- The literal-string forms used by all legitimate code do NOT match:
+  --   include 'file.php';        ← skipped
+  --   include "/abs/path.php";   ← skipped
+  --   include __DIR__."/x.php";  ← skipped (next char is `_`, not `$`)
+  --   require_once 'app.php';    ← skipped
+  -- This is the FP-mitigation: tightened from a generic
+  -- has_include_construct (which matched any argument shape) after the
+  -- 2026-05-09 sample-replay audit showed the broader pattern would FP
+  -- on common code-snippet plugin saves.
+  local function has_dynamic_include(name)
+    if s:find("%f[%a_]" .. name .. "%s+@?%$") then return true end
+    if s:find("%f[%a_]" .. name .. "%s*%(%s*@?%$") then return true end
+    if s:find("@%s*"     .. name .. "%s+@?%$") then return true end
+    if s:find("@%s*"     .. name .. "%s*%(%s*@?%$") then return true end
+    return false
+  end
+
   if has_php_callable("eval") then score = score + 3 end
   if has_php_callable("assert") then score = score + 3 end
   if has_php_callable("system") then score = score + 3 end
@@ -283,9 +306,26 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("popen") then score = score + 3 end
   if has_php_callable("proc_open") then score = score + 3 end
 
-  if has(s, ";") and (has(s, "?>") or has(s, "<?php") or has(s, "<?=")) then
-    score = score + 1
-  end
+  -- Dynamic include / require at +1. Combined with the existing <?php (+2)
+  -- and superglobal (+2) signals, the loader-style malware fingerprint
+  -- (forms.php / user.php samples from the 2026-05-09 audit, both of which
+  -- include a variable that came from $_POST) reaches score 5 — exactly
+  -- min_score. Literal-form includes (the WP-bootstrap case and any legit
+  -- code-snippet plugin save with `require 'app.php'`) don't match
+  -- has_dynamic_include and never contribute to the score, so they
+  -- can't push a body over threshold.
+  if has_dynamic_include("include")      then score = score + 1 end
+  if has_dynamic_include("include_once") then score = score + 1 end
+  if has_dynamic_include("require")      then score = score + 1 end
+  if has_dynamic_include("require_once") then score = score + 1 end
+
+  -- NOTE: removed in the 2026-05-09 audit follow-up — a bare +1 for
+  -- `;` + `<?php` was firing on any multi-statement legit PHP body that
+  -- mentioned a superglobal (`<?php $x=$_POST['msg']; echo $x;` scored
+  -- 2+2+1=5 → fired with tag RAW_SUPERGLOBAL, an FP on every code-paste
+  -- and form-helper plugin save). Score now needs an actual exec-class
+  -- callable, a webshell-name marker, OR a dynamic include to cross
+  -- threshold — which is the rule's stated intent.
 
   -- Webshell-name signature: +3 weight, comparable to a single PHP callable.
   -- Combined with the standard <?php (+2) opener it crosses the default
@@ -315,6 +355,15 @@ function _M.detect_php_webshell_body(body, headers)
   if has_php_callable("shell_exec") then return "RAW_SHELL_EXEC" end
   if has_php_callable("popen")      then return "RAW_POPEN" end
   if has_php_callable("proc_open")  then return "RAW_PROC_OPEN" end
+
+  -- Include/require tags rank below the exec-family ones (an attacker who
+  -- has both eval and include in the body is already tagged RAW_EVAL —
+  -- which is the more actionable label). The `_once` variants are checked
+  -- first so the more-specific tag wins when both forms are present.
+  if has_dynamic_include("include_once") then return "RAW_DYN_INCLUDE_ONCE" end
+  if has_dynamic_include("require_once") then return "RAW_DYN_REQUIRE_ONCE" end
+  if has_dynamic_include("include")      then return "RAW_DYN_INCLUDE" end
+  if has_dynamic_include("require")      then return "RAW_DYN_REQUIRE" end
 
   if has(s, "$_get") or has(s, "$_post") or has(s, "$_request") then
     return "RAW_SUPERGLOBAL"
