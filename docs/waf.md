@@ -14,9 +14,16 @@
 | 8 | Stable numeric rule IDs (PR A of #10 below) — log line, `/api/v1/waf/rules`, CLI | DONE |
 | 9 | Hit-rate counters + sampled hit log — per-rule rate gates promotions, sampled log carries UA/Referer/CT for FP investigation. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, `cfm.waf.sampled.log`. | DONE |
 | 10 | Per-vhost per-rule exclusions (PR B of #10) — `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI flag, `rule_ids` API query param, `ctx.skip_rule_ids` gating inside `record()`. | DONE — see "Per-vhost rule exclusions" below |
-| 11+ | New detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
+| 11 | CI hardening — `Build & Test` job in `.github/workflows/security.yml` now installs `luajit`, then runs `check_cli_transport.sh`, `check_cfm_clearance_require.sh`, `make lua`, `make test-lua`, `go vet ./...`, `go build ./...`, `go test -race -v ./...`. Catches Lua syntax breakage, Lua-test regressions, mutex-copy / atomic-copy / duplicate-JSON-tag bugs at PR time. Four `go vet` issues that had sat in `main` were closed alongside (`unblock`, `telemetry`, `apiserver/detectors_api`, `cli/firewall_status`). | DONE |
+| 12 | Code-scanning triage (Critical+High, 2026-05-09) — 11 CodeQL alerts triaged: one real reflected XSS in `jsStringLiteral` fixed (was `strconv.Quote` only, didn't escape `<`/`>`/`&`/U+2028/U+2029, allowed `?next=` payloads to break out of `<script>` context), one defence-in-depth `int32` clamp on `nftables.ChainPriority`, nine FPs documented inline at the call sites. See `docs/security/code-scanning-triage-2026-05-09.md`. | DONE |
+| 13+ | New detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
 
-`make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
+`make test-lua` runs everything under `scripts/tests/*_test.lua` (also wired into CI per row 11):
+
+- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set) — 18 cases covering Steps 1, 8, 10.
+- `cfm_waf_post_clearance_test.lua` — `_M.post_clearance_action` matrix — covers Step 3.
+- `cfm_panel_forced_mode_test.lua` — panel dispatch decisions (challenge / origin pass-through / API SSO bypass / internal-endpoint deny). Asserts on side effects (captured `ngx.redirect` / `ngx.exit` calls) rather than chunk-return values, since `cfm_panel.lua`'s `main()` is wrapped in `xpcall` for fail-open hardening.
+- `cfm_rules_race_test.lua` — `cfm_rules` shdict-state compatibility under concurrent mutation.
 
 ---
 
@@ -110,7 +117,7 @@ Current assignments:
 
 - **WAF log line** — `cfm.waf.log` events now carry `waf_rule_id=N` alongside the existing `reason=` field. Field is omitted when the source can't supply it (older Lua clients, internal triggers without a rule context).
 - **History persistence** — stored in `HistoryEvent.Payload["waf_rule_id"]` for forensic queries. Schema unchanged (Payload is `map[string]any`).
-- **API** — `GET /api/v1/waf/rules` returns the registry: `{rules: [{id, name, group, group_name, reason_family, default_mode}, …], groups: {"1": "path", …}}`. Sorted by ID. Used by the panel rule glossary and (in PR B) the per-vhost exclusion picker.
+- **API** — `GET /api/v1/waf/rules` returns the registry: `{rules: [{id, name, group, group_name, reason_family, default_mode}, …], groups: {"1": "path", …}}`. Sorted by ID. Used by the panel rule glossary and the per-vhost exclusion picker (see "Per-vhost rule exclusions" below).
 - **CLI** — `cfm webtop waf rules` prints the table grouped by family. `--json` for scripts.
 - **Public Lua API** — `_M.get_rule_ids()` returns a copy of the `RULE_IDS` table; `_M.rule_id_for("rule_traversal")` looks up a single ID. Both used by tests; available to in-process Lua callers.
 
@@ -359,7 +366,7 @@ WAF_SHELLSHOCK
 
 ## Tests
 
-`scripts/tests/cfm_waf_severity_test.lua` — 12 cases:
+`scripts/tests/cfm_waf_severity_test.lua` — 18 cases:
 
 - single hit returns the configured action (block / challenge / logonly);
 - logonly-then-block, challenge-then-block: severity wins;
@@ -367,7 +374,11 @@ WAF_SHELLSHOCK
 - two logonly hits aggregate to logonly;
 - disabled rule does nothing even with the trigger payload present;
 - body-only detector skipped on GET, fires on POST (body_inspect_ok gating);
-- 4-tuple return on no-hit, 5-tuple on hit, hits[] ordering and entry shape.
+- 4-tuple return on no-hit, 5-tuple on hit, hits[] ordering and entry shape;
+- `_M.get_rule_ids()` snapshot is a copy (caller mutation doesn't leak), `rule_id_for(name)` lookup;
+- 6th return value (`waf_rule_id`) carries the strongest rule's ID; severity-wins picks the strongest's ID, not first-match;
+- `cmd_payload` sub-rule IDs map per tag (per-tag override table);
+- `ctx.skip_rule_ids` suppresses excluded IDs without affecting non-excluded rules — the per-vhost-rule-exclusion contract from row 10.
 
 `scripts/tests/cfm_waf_post_clearance_test.lua` — covers:
 
@@ -376,6 +387,10 @@ WAF_SHELLSHOCK
 - conversion table: challenge+high-risk → block, challenge+noisy → logonly;
 - pass-through for `block` and `logonly` actions;
 - custom defaults honoured; missing defaults fall back to safe values.
+
+`internal/webdetector/challenge_server_xss_test.go` — covers `jsStringLiteral`'s HTML-script-context safety: the dangerous bytes (`<`, `>`, `&`, U+2028, U+2029) are absent from the output for representative attack payloads, and the rewritten bytes appear as the documented `\uXXXX` form. Pins the fix for CodeQL #565 (2026-05-09).
+
+`internal/webdetector/exclude_rule_ids_test.go` and `exclude_store_test.go` — rule-id-spec parsing (`N`, `Nxx`, `N-M`, mixed) and per-vhost rule-exclusion store semantics (rule-scoped doesn't trigger whole-WAF skip; whole-WAF wins on collision; union of multiple rule-scoped entries; persistence round-trip; remove distinguishes scoping; vhost-controls panel filter drops rule-scoped from the WAF-toggle list).
 
 ---
 
@@ -390,6 +405,7 @@ These are real and worth addressing, but not blocking:
 5. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
 6. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
 7. **Route log loses post-clearance signal.** The `waf_logonly` / `waf_block` log line at `cfm.lua:1131` after conversion doesn't say "from challenge". The separate `waf_post_clearance_convert` line at `cfm.lua:1089` carries it; correlation is by IP+timestamp. Could be folded into one line.
+8. **Inspector-as-attack-surface follow-ups (2026-05-09 audit).** Quick sweep of the surface that reads attacker bytes (Lua WAF + challenge_server + nginx_bridge) showed strong defences in the high-risk places (no `ngx.re` → no PCRE ReDoS; bridge listener is unix-socket-only with token gate on every endpoint; body cap 8 KB; literal `string.find(s, pat, 1, true)` in the `util.has` hot helper; `cpanelUserExists` regex `^[a-z0-9][a-z0-9_]{0,15}$` blocks path traversal in `/var/cpanel/databases/<user>.json` reads) and one real reflected XSS that's now closed (#565). Items not fully audited: (a) caller traces for the remaining `os.Open`/`os.ReadFile` sites in `cpanel_api_handlers.go` and `challenge_server.go` outside the `cpanelUserExists`-gated path; (b) spot-check of the more exotic Lua patterns in `cfm_waf_detectors.lua` for polynomial-time backtracking (Lua patterns can't catastrophically backtrack but `(.-)*`-style patterns can be slow on crafted input); (c) per-field length bounds in bridge JSON handlers (the body is wrapped in `MaxBytesReader` but individual fields like `host` can still land 16 KB in memory); (d) `dispatchHook` channel-saturation behaviour under load. None block production; worth a dedicated `claude/inspector-audit-*` pass when there's space.
 
 ---
 
@@ -478,12 +494,15 @@ This section is a self-contained briefing for picking up the next chunk of work 
 
 | Layer | What | Where |
 |---|---|---|
-| Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches | `configs/lua/cfm_waf.lua` |
+| Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches, `ctx.skip_rule_ids` gate | `configs/lua/cfm_waf.lua` |
 | Detectors | 39 detector functions invoked from `_M.check` | `configs/lua/cfm_waf_detectors.lua` |
 | Util | `scan_str`, `normalize`, `url_decode_once`, `header_string`, IP literal helpers | `configs/lua/cfm_waf_util.lua` |
 | Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
-| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
-| Tests | Severity, post-clearance, rule ID drift, hit-rate aggregation | `scripts/tests/cfm_waf_*_test.lua`, `internal/webdetector/waf_*_test.go` |
+| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
+| Per-vhost exclusions | `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI, `rule_ids` API param, `ctx.skip_rule_ids` Lua gate, vhost-controls panel toggle ignores rule-scoped entries | `internal/webdetector/exclude_store.go`, `exclude_rule_ids.go`, `cli_exclude.go`, `configs/lua/cfm.lua` (`waf_skip_for`) |
+| CI | `Build & Test` job in `.github/workflows/security.yml` runs `go vet`, `make lua`, `make test-lua`, `check_*` shell guards alongside `go build` and `go test -race`. luajit installed explicitly per matrix run. | `.github/workflows/security.yml` |
+| Security audit | Critical+High CodeQL alerts triaged 2026-05-09 (1 real XSS fixed, 10 FPs documented at the call sites). Inspector-as-attack-surface sweep summary in "Known gaps" item 8. | `docs/security/code-scanning-triage-2026-05-09.md` |
+| Tests | Severity, post-clearance, rule ID drift, hit-rate aggregation, rule-id parsing, exclude-store match, jsStringLiteral XSS, panel forced-mode dispatch | `scripts/tests/cfm_*_test.lua`, `internal/webdetector/*_test.go` |
 | Production analysis | 2026-05-08 dataset findings + per-rule recommendations | `docs/waf-analysis-2026-05-08.md` |
 
 ### How to add a new detector — template
@@ -596,7 +615,7 @@ Detailed sketch in "Detector phases" above. Concrete starting points:
 
 ### Files you'll edit for the next infrastructure work
 
-- **Per-vhost rule exclusion (PR B of #10)**: `internal/webdetector/exclude_store.go` (extend `excludeEntry` with `RuleIDs []int`), `configs/lua/cfm_waf.lua` (extend `_M.check` to honor `ctx.skip_rule_ids`), `configs/lua/cfm.lua` (read rule IDs from waf-excludes RPC), `internal/webdetector/cli_exclude.go` (`--rule` flag), `internal/webdetector/exclude_api_handlers.go` (accept `rule_ids` query param). Plan in roadmap row #10.
+Item #10 (per-vhost rule exclusions, PR B) shipped — see "Per-vhost rule exclusions" section above for the deployed shape. Future infrastructure items (deferred) include the inspector-audit follow-ups noted in "Known gaps" item 8 and the Medium/Low code-scanning batch deferred from `docs/security/code-scanning-triage-2026-05-09.md`.
 
 ### Don't do these things
 
