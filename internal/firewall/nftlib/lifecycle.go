@@ -5,6 +5,7 @@ package nftlib
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strings"
 	"syscall"
@@ -35,6 +36,17 @@ func (b *Backend) EnsureBase() (err error) {
 	prio := -50
 	if b.cfg != nil && b.cfg.NFT.InputPriority != 0 {
 		prio = b.cfg.NFT.InputPriority
+	}
+	// Defence-in-depth: nftables.ChainPriority is int32. prio is operator
+	// config so this should never trip in practice, but a wildly out-of-
+	// range value would silently wrap on conversion, producing a
+	// surprising chain ordering rather than an error. Clamp at the
+	// boundary so the misconfiguration is bounded to a sane priority.
+	// (CodeQL #711, 2026-05-09 triage.)
+	if prio > math.MaxInt32 {
+		prio = math.MaxInt32
+	} else if prio < math.MinInt32 {
+		prio = math.MinInt32
 	}
 	inputPrio := nftables.ChainPriority(prio)
 
