@@ -99,6 +99,31 @@ do
     "live CFG still exposes max_scan_len = 2048 fallback")
 end
 
+-- ── Test 5b: defensive config — malformed body_scan_budget must never crash ──
+-- A user override (cfm_waf_config.lua) can replace any CFG entry. body_budget
+-- runs on every body-aware request, so a bad override must fall back rather
+-- than bubble nil / non-numeric values into cap(), where #s <= n would error.
+do
+  local cases = {
+    { cfg = { max_scan_len = 4096, body_scan_budget = "not a table" }, want = 4096, label = "non-table -> max_scan_len" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = 1234 },          want = 4096, label = "number -> max_scan_len" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = {} },            want = 4096, label = "empty table -> max_scan_len (no other)" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = { other = 999 } }, want = 999,  label = "only other -> other" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = { json = -1, other = 999 } },     want = 999,  label = "negative json -> other" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = { json = 0,  other = 999 } },     want = 999,  label = "zero json -> other" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = { json = "32k", other = 999 } },  want = 999,  label = "string json -> other" },
+    { cfg = { max_scan_len = 4096, body_scan_budget = { json = -1, other = -1 } },      want = 4096, label = "all bad -> max_scan_len" },
+    { cfg = {},                                                                          want = 2048, label = "no CFG entries at all -> 2048" },
+  }
+  for _, c in ipairs(cases) do
+    local fresh = loadfile("configs/lua/cfm_waf_util.lua")()
+    fresh.init(c.cfg)
+    local got = fresh.body_budget({ ["content-type"] = "application/json" })
+    check(got == c.want,
+      "defensive json: " .. c.label .. " budget=" .. tostring(got) .. " want=" .. tostring(c.want))
+  end
+end
+
 -- ── Test 6: end-to-end via the engine's body scan (smoke) ────────────────────
 -- The body-aware scan in cfm_waf.lua (get_norm_ab) feeds rule_php_wrappers,
 -- among others. With a 2 KB legacy cap, a php:// marker placed past byte

@@ -226,23 +226,41 @@ end
 -- (preserves behaviour in environments running an older config layout).
 -- Header parameters after ";" (e.g. "application/json; charset=utf-8")
 -- are handled — substring match on the type/subtype prefix.
+--
+-- Defensive: every step type-checks its inputs. A misconfigured override
+-- (body_scan_budget = nil / non-table / partial table / non-positive
+-- numbers) must never bubble a nil or bad value into cap(), since cap's
+-- numeric comparison would error and crash the worker on every request.
 local function body_budget(headers)
-  local budget = CFG and CFG.body_scan_budget
-  if not budget then
-    return (CFG and CFG.max_scan_len) or 2048
+  local fallback = 2048
+  if CFG and type(CFG.max_scan_len) == "number" and CFG.max_scan_len > 0 then
+    fallback = CFG.max_scan_len
   end
-  if not headers then return budget.other end
+  local budget = CFG and CFG.body_scan_budget
+  if type(budget) ~= "table" then
+    return fallback
+  end
+
+  local function pick_or(key)
+    local v = budget[key]
+    if type(v) == "number" and v > 0 then return v end
+    local o = budget.other
+    if type(o) == "number" and o > 0 then return o end
+    return fallback
+  end
+
+  if not headers then return pick_or("other") end
   local raw = headers["content-type"]
   if raw == nil then raw = headers["Content-Type"] end
   local ct = header_string(raw)
-  if ct == "" then return budget.other end
+  if ct == "" then return pick_or("other") end
   ct = string.lower(ct)
-  if string.find(ct, "application/json", 1, true)               then return budget.json end
-  if string.find(ct, "multipart/form-data", 1, true)            then return budget.multipart end
-  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return budget.urlencoded end
+  if string.find(ct, "application/json", 1, true)               then return pick_or("json") end
+  if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
+  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
   if string.find(ct, "application/xml", 1, true)
-     or string.find(ct, "text/xml", 1, true)                    then return budget.xml end
-  return budget.other
+     or string.find(ct, "text/xml", 1, true)                    then return pick_or("xml") end
+  return pick_or("other")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
