@@ -61,6 +61,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 317, Name: "rule_cmd_payload_backtick", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "logonly"},
 	{ID: 320, Name: "rule_rce", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge"},
+	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 
 	// 4xx upload / malware
 	{ID: 401, Name: "rule_upload_filename", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
@@ -68,6 +69,8 @@ var wafRuleIDs = []WAFRule{
 	{ID: 403, Name: "rule_upload_obfuscation", ReasonFamily: "WAF_UPLOAD_OBFUSCATION", DefaultMode: "challenge"},
 	{ID: 404, Name: "rule_php_webshell_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "challenge"},
 	{ID: 405, Name: "rule_script_obfuscation", ReasonFamily: "WAF_SCRIPT_OBFUSCATION", DefaultMode: "challenge"},
+	{ID: 410, Name: "rule_webshell_path", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
+	{ID: 411, Name: "rule_webshell_ping", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},

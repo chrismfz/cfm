@@ -1512,5 +1512,200 @@ function _M.detect_upload_obfuscation(body, headers)
   return score_obfuscation_blob(s, tonumber(CFG.upload_obfuscation_min_score) or 6)
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 1 — webshell delivery + reverse shell + webshell ping (W1 / R1 / B5)
+--
+-- All three start at logonly per the rollout playbook in docs/waf.md.
+-- Promotion happens individually after `cfm webtop waf hit-rates` shows
+-- ok_to_promote on a one-week sample.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- WEBSHELL_NAMES is a hash-set of literal lowered URI basenames seen in
+-- attack samples and uusec/ZhongKui payload corpora. Match is on the URI's
+-- final path segment (after the last "/", before "?"), so legitimate paths
+-- like `/help/r57.php-explained.html` don't trigger.
+--
+-- New entries: append the lowered basename. Don't include path prefixes
+-- (e.g. `/uploads/c99.php` would never match — `c99.php` is what we test).
+local WEBSHELL_NAMES = {
+  ["c99.php"]            = true,
+  ["c99shell.php"]       = true,
+  ["r57.php"]            = true,
+  ["r57shell.php"]       = true,
+  ["b374k.php"]          = true,
+  ["wso.php"]            = true,
+  ["wsoshell.php"]       = true,
+  ["webshell.php"]       = true,
+  ["shell.php"]          = true,
+  ["mini.php"]           = true,
+  ["minishell.php"]      = true,
+  ["p0wny.php"]          = true,
+  ["p0wny-shell.php"]    = true,
+  ["adminer.php"]        = true,  -- legit DB tool, but operators rarely deploy at site root
+  ["alfa.php"]           = true,
+  ["alfashell.php"]      = true,
+  ["indoxploit.php"]     = true,
+  ["ws0.php"]            = true,
+  ["ws.php"]             = true,
+  ["x.php"]              = true,
+  ["xx.php"]             = true,
+  ["xxx.php"]            = true,
+  ["1.php"]              = true,
+  ["2.php"]              = true,
+  ["3.php"]              = true,
+  ["a.php"]              = true,
+  ["aspxspy.aspx"]       = true,
+  ["aspxshell.aspx"]     = true,
+  ["cmd.aspx"]           = true,
+  ["cmd.jsp"]            = true,
+  ["jspspy.jsp"]         = true,
+  ["jshell.jsp"]         = true,
+}
+
+-- [W1] Webshell drop path. Returns "PATH:<basename>" tag on hit, nil on miss.
+-- Pure URI inspection — no body, headers, or normalisation beyond lower().
+-- Cost: one lower() + a single string.match for the basename + one set lookup.
+function _M.detect_webshell_path(uri)
+  if not uri or uri == "" then return nil end
+
+  -- Strip query and fragment, isolate basename. lower() last so the table
+  -- keys can be lowercase only.
+  local path = uri:match("^([^?#]+)") or uri
+  local base = path:match("([^/]+)$")
+  if not base or base == "" then return nil end
+  base = lower(base)
+
+  if WEBSHELL_NAMES[base] then
+    return "PATH:" .. base
+  end
+  return nil
+end
+
+-- REVERSE_SHELL_PATTERNS — literal substrings of well-known reverse-shell
+-- one-liners. Each entry is { needle, tag }. The needles are intentionally
+-- specific (multi-token) so they don't match prose like "import socket"
+-- alone in a forum post body.
+--
+-- Sources: PayloadsAllTheThings reverse-shell cheatsheet, GTFOBins,
+-- HighOn.Coffee one-liners, observed AbuseIPDB samples 2026-04..05.
+-- Patterns are deliberately multi-token so they don't fire on prose like
+-- "import socket" or "fsockopen(" alone (both common in tutorial pages that
+-- get scraped through the proxy). Each entry must contain at least one
+-- shell metacharacter or argument that signals invocation, not just the API
+-- name.
+local REVERSE_SHELL_PATTERNS = {
+  -- bash /dev/tcp redirection — "bash -i >& /dev/tcp/host/port" and variants.
+  { "bash -i >& /dev/tcp/",                  "BASH_TCP" },
+  { "bash -i >&/dev/tcp/",                   "BASH_TCP" },
+  { "bash -i &>/dev/tcp/",                   "BASH_TCP" },
+  { "exec 196<>/dev/tcp/",                   "BASH_FD_TCP" },
+  { "exec 5<>/dev/tcp/",                     "BASH_FD_TCP" },
+
+  -- Plain /dev/tcp redirection (file-descriptor variant); the leading "/"
+  -- byte avoids matching prose "dev/tcp" mentions.
+  { ">/dev/tcp/",                            "DEV_TCP_REDIR" },
+  { "</dev/tcp/",                            "DEV_TCP_REDIR" },
+
+  -- python -c reverse shells. Both quote styles (the proxy also sees URL-
+  -- decoded variants thanks to scan_str's double-decode).
+  { "python -c 'import socket",              "PY_SOCKET" },
+  { 'python -c "import socket',              "PY_SOCKET" },
+  { "python3 -c 'import socket",             "PY_SOCKET" },
+  { 'python3 -c "import socket',             "PY_SOCKET" },
+  { "import pty;pty.spawn",                  "PY_PTY" },
+
+  -- perl / ruby one-liners.
+  { "perl -e 'use socket",                   "PERL_SOCKET" },
+  { 'perl -e "use socket',                   "PERL_SOCKET" },
+  { "ruby -rsocket -e",                      "RUBY_SOCKET" },
+
+  -- netcat / ncat / socat with the invocation flags that turn them into
+  -- reverse shells. Bare "nc" is too common to match alone.
+  { "nc -e /bin/",                           "NC_EXEC" },
+  { "ncat -e /bin/",                         "NCAT_EXEC" },
+  { "nc.traditional -e",                     "NC_EXEC" },
+  { "socat tcp-connect:",                    "SOCAT_CONNECT" },
+  { "socat exec:",                           "SOCAT_EXEC" },
+  { "socat openssl-connect:",                "SOCAT_TLS" },
+
+  -- mkfifo named-pipe + reverse-shell trick.
+  { "mkfifo /tmp/",                          "MKFIFO_PIPE" },
+
+  -- powershell reverse shell + IEX-WebClient downloader.
+  { "iex(new-object net.webclient",                       "PS_IEX_WEBCLIENT" },
+  { "$client = new-object system.net.sockets.tcpclient",  "PS_TCPCLIENT" },
+}
+
+-- [R1] Reverse-shell payload. Searches uri/args/body for any of the literal
+-- one-liners above. Returns the matching tag ("BASH_TCP", "PY_SOCKET", …) or
+-- nil. Body is body-capped to CFG.max_scan_len like other detectors.
+--
+-- Note on FP: a few patterns ("/bin/sh -i", "fsockopen(", "/dev/tcp/")
+-- could appear in legitimate documentation/code-paste sites. The detector
+-- ships at logonly so the hit-rate sampler quantifies that before any
+-- promotion; if a specific tag is noisy it can be removed from the table
+-- without renumbering rule_id 322.
+function _M.detect_reverse_shell(uri, args, body, _s)
+  -- Combined args+body+uri scan string (already normalised + lowered for
+  -- uri/args; body is added raw and lowered here).
+  local scan_ua = _s or scan_str(uri, args)
+
+  -- Body inspection: the engine doesn't gate this rule on body_inspect_ok
+  -- because reverse-shell strings can also arrive in GET args. When body is
+  -- present, fold a capped+lowered slice into the search string.
+  local s
+  if body and body ~= "" then
+    s = scan_ua .. " " .. lower(cap(body, CFG.max_scan_len))
+  else
+    s = scan_ua
+  end
+
+  for i = 1, #REVERSE_SHELL_PATTERNS do
+    local p = REVERSE_SHELL_PATTERNS[i]
+    if has(s, p[1]) then
+      return p[2]
+    end
+  end
+  return nil
+end
+
+-- [B5] Webshell ping fingerprint — POST + empty/missing UA + Content-Length:0
+-- + URI ending in .php / .phtml / .phar. The combination is what makes this
+-- low-FP: any one signal alone is common (legit POST forms, monitoring HEAD
+-- pings with empty UA, browser preflights with CL:0); all four together is
+-- a pattern operators see in webshell C2 channels keeping their drop alive.
+--
+-- Returns "PING" on hit, nil otherwise. Single tag — there's no sub-pattern
+-- to distinguish.
+function _M.detect_webshell_ping(method, headers, uri)
+  if lower(method or "") ~= "post" then return nil end
+
+  headers = headers or {}
+
+  -- Empty / missing UA — header_string normalises array headers (some
+  -- bridges hand them over as tables) into a single string.
+  local ua = header_string(headers["user-agent"] or headers["User-Agent"])
+  if ua and ua ~= "" then
+    -- Whitespace-only UA also counts as empty.
+    if ua:find("%S") then return nil end
+  end
+
+  -- Content-Length: 0. Accept the literal "0"; reject anything else
+  -- including missing CL (chunked POSTs are not the C2 fingerprint).
+  local cl = header_string(headers["content-length"] or headers["Content-Length"])
+  if cl ~= "0" then return nil end
+
+  -- URI ends in .php / .phtml / .phar (path component, not query).
+  local path = (uri or ""):match("^([^?#]+)") or uri or ""
+  path = lower(path)
+  if not (path:sub(-4) == ".php"
+       or path:sub(-6) == ".phtml"
+       or path:sub(-5) == ".phar") then
+    return nil
+  end
+
+  return "PING"
+end
+
 
 return _M
