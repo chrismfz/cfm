@@ -110,6 +110,14 @@ local CFG = {
   rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
 
+  -- ── Phase 1 — webshell delivery + reverse shell (logonly rollout) ─────────
+  -- Sources: docs/waf.md "Detector phases" §Phase 1 / §Phase 2 / §Phase 5 (B5).
+  -- All three start at logonly per the rollout playbook; promote individually
+  -- only after `cfm webtop waf hit-rates --hours 168` produces ok_to_promote.
+  rule_webshell_path    = "logonly",  -- URI basename matches a known webshell drop name (c99.php, r57.php, …)
+  rule_reverse_shell    = "logonly",  -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
+  rule_webshell_ping    = "logonly",  -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -230,6 +238,7 @@ local RULE_IDS = {
   rule_cmd_payload_backtick    = 317,
   rule_rce                     = 320,
   rule_proxy_header_sqli       = 321,
+  rule_reverse_shell           = 322,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -237,6 +246,8 @@ local RULE_IDS = {
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
   rule_script_obfuscation      = 405,
+  rule_webshell_path           = 410,
+  rule_webshell_ping           = 411,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -818,6 +829,51 @@ function _M.check(ctx)
     end
   end
 
+  -- ── 34) Webshell drop path (W1) ──────────────────────────────────────────
+  -- URI basename matches a known webshell name (c99.php, r57.php, p0wny.php …).
+  -- Cheap (one lower(uri) + one hash-set lookup); near-zero legit traffic.
+  do
+    local mode = rule_mode(CFG.rule_webshell_path, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_webshell_path(uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_WEBSHELL:" .. tag, ttl, mode, RULE_IDS.rule_webshell_path) then goto done end
+      end
+    end
+  end
+
+  -- ── 35) Reverse shell payload (R1) ───────────────────────────────────────
+  -- Literal reverse-shell strings in URI/args/body (bash -i >& /dev/tcp/,
+  -- python -c 'import socket', socat tcp-connect …). Family WAF_RCE so it
+  -- shares the high-risk routing of rule_rce; distinct rule_id 322 keeps
+  -- hit-rate counters and per-vhost exclusions independent.
+  do
+    local mode = rule_mode(CFG.rule_reverse_shell, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_reverse_shell(uri, args, body, get_scan_ua())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:REVERSE_SHELL:" .. tag, ttl, mode, RULE_IDS.rule_reverse_shell) then goto done end
+      end
+    end
+  end
+
+  -- ── 36) Webshell ping fingerprint (B5) ───────────────────────────────────
+  -- POST + empty UA + Content-Length:0 + URI ending in .php/.phtml/.phar.
+  -- Pattern fingerprints C2 channels keeping a webshell warm; legit traffic
+  -- almost never matches all four signals at once.
+  do
+    local mode = rule_mode(CFG.rule_webshell_ping, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_webshell_ping(method, headers, uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_WEBSHELL:" .. tag, ttl, mode, RULE_IDS.rule_webshell_ping) then goto done end
+      end
+    end
+  end
+
   ::done::
   if final_sev == 0 then
     return false, nil, nil, nil
@@ -845,6 +901,7 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_B64_INJECT         = true,
   WAF_SHELLSHOCK         = true,
   WAF_PHP_WEBSHELL_BODY  = true,
+  WAF_WEBSHELL           = true,
   WAF_TRAVERSAL          = true,
   WAF_XXE                = true,
 }

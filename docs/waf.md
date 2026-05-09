@@ -16,11 +16,12 @@
 | 10 | Per-vhost per-rule exclusions (PR B of #10) — `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI flag, `rule_ids` API query param, `ctx.skip_rule_ids` gating inside `record()`. | DONE — see "Per-vhost rule exclusions" below |
 | 11 | CI hardening — `Build & Test` job in `.github/workflows/security.yml` now installs `luajit`, then runs `check_cli_transport.sh`, `check_cfm_clearance_require.sh`, `make lua`, `make test-lua`, `go vet ./...`, `go build ./...`, `go test -race -v ./...`. Catches Lua syntax breakage, Lua-test regressions, mutex-copy / atomic-copy / duplicate-JSON-tag bugs at PR time. Four `go vet` issues that had sat in `main` were closed alongside (`unblock`, `telemetry`, `apiserver/detectors_api`, `cli/firewall_status`). | DONE |
 | 12 | Code-scanning triage (Critical+High, 2026-05-09) — 11 CodeQL alerts triaged: one real reflected XSS in `jsStringLiteral` fixed (was `strconv.Quote` only, didn't escape `<`/`>`/`&`/U+2028/U+2029, allowed `?next=` payloads to break out of `<script>` context), one defence-in-depth `int32` clamp on `nftables.ChainPriority`, nine FPs documented inline at the call sites. See `docs/security/code-scanning-triage-2026-05-09.md`. | DONE |
-| 13+ | New detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
+| 13 | Phase 1 detectors at `logonly` — W1 (rule 410, `WAF_WEBSHELL:PATH:<basename>`), R1 (rule 322, `WAF_RCE:REVERSE_SHELL:<tag>`), B5 (rule 411, `WAF_WEBSHELL:PING`). All ship `logonly` per the rollout playbook; promote individually after `cfm webtop waf hit-rates --hours 168` shows `ok_to_promote`. `WAF_WEBSHELL` added to `WAF_HIGH_RISK_REASONS` so post-clearance routing is correct when promoted. | DONE |
+| 14+ | Remaining detector phases (W2/W3/W4, R2-R4, C1-C3, X1-X2, B1-B4) | TODO — see "Phase 1 starting context" below |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua` (also wired into CI per row 11):
 
-- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set) — 18 cases covering Steps 1, 8, 10.
+- `cfm_waf_severity_test.lua` — severity aggregation, post-clearance gating, rule-id stability, per-vhost rule exclusion (the `ctx.skip_rule_ids` set), Phase 1 detectors W1/R1/B5 — 27 cases covering Steps 1, 8, 10, 13.
 - `cfm_waf_post_clearance_test.lua` — `_M.post_clearance_action` matrix — covers Step 3.
 - `cfm_panel_forced_mode_test.lua` — panel dispatch decisions (challenge / origin pass-through / API SSO bypass / internal-endpoint deny). Asserts on side effects (captured `ngx.redirect` / `ngx.exit` calls) rather than chunk-return values, since `cfm_panel.lua`'s `main()` is wrapped in `xpcall` for fail-open hardening.
 - `cfm_rules_race_test.lua` — `cfm_rules` shdict-state compatibility under concurrent mutation.
@@ -89,11 +90,13 @@ Current assignments:
   308  rule_shellshock                 317  rule_cmd_payload_backtick
                                        320  rule_rce
                                        321  rule_proxy_header_sqli
+                                       322  rule_reverse_shell
 
 4xx — Upload / malware
-  401  rule_upload_filename            404  rule_php_webshell_body
-  402  rule_upload_content             405  rule_script_obfuscation
-  403  rule_upload_obfuscation
+  401  rule_upload_filename            405  rule_script_obfuscation
+  402  rule_upload_content             410  rule_webshell_path
+  403  rule_upload_obfuscation         411  rule_webshell_ping
+  404  rule_php_webshell_body
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -434,14 +437,14 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 
 ### Phase 1 — webshell delivery
 
-- **W1** known-bad webshell path names (`/c99.php`, `/r57.php`, …) → `WAF_WEBSHELL:PATH`, `+6`.
+- **W1** known-bad webshell path names (`/c99.php`, `/r57.php`, …) → `WAF_WEBSHELL:PATH:<basename>` — **shipped at `logonly` (rule 410)**.
 - **W2** webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) → `WAF_PHP_WEBSHELL_BODY:tag`, scored.
 - **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) → `WAF_SCRIPT_OBFUSCATION:tag`, `+5`.
 - **W4** polyglot upload (image extension/CT + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes) → `WAF_UPLOAD_CONTENT:POLYGLOT`, `+6`.
 
 ### Phase 2 — post-exploitation / RCE
 
-- **R1** reverse shell strings (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`) → `WAF_RCE:REVERSE_SHELL`, instant block.
+- **R1** reverse shell strings (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`) → `WAF_RCE:REVERSE_SHELL:<tag>` — **shipped at `logonly` (rule 322)**; planned promotion to `block` after one week of clean hit-rate evidence per the rollout playbook.
 - **R2** cron/systemd persistence (`crontab -e`, `/etc/cron.d/`, `[Unit]…ExecStart=/`) → `WAF_RCE:PERSISTENCE`, `+6`.
 - **R3** LD_PRELOAD / userspace rootkit artifacts → `WAF_RCE:ROOTKIT_ARTIFACT`, `+6`.
 - **R4** LOLbins (`certutil -urlcache -split`, `iex(iwr`, `-EncodedCommand <b64>`) → `WAF_RCE:LOLBIN` / score combo with base64 detector.
@@ -463,7 +466,7 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 - **B2** Suspicious method outside expected location (CONNECT to non-proxy, PROPFIND/SEARCH to non-DAV) → fold into existing exploit-method check, `+2`.
 - **B3** Single URL segment ≥ 256 chars → `WAF_LONG_PATH`, `+3`; raise if high-entropy.
 - **B4** Header bag total > 16 KB without large `Cookie`/`Authorization` → `WAF_HEADER_FLOOD`, `+3`.
-- **B5** POST + empty UA + Content-Length:0 + URI ends in `.php` → `WAF_WEBSHELL:PING`, `+6`.
+- **B5** POST + empty UA + Content-Length:0 + URI ends in `.php`/`.phtml`/`.phar` → `WAF_WEBSHELL:PING` — **shipped at `logonly` (rule 411)**.
 
 ---
 
@@ -488,14 +491,16 @@ A solved `cfm_clearance` means: "do not repeatedly challenge this client for the
 
 ## Phase 1 starting context
 
-This section is a self-contained briefing for picking up the next chunk of work (typically Phase 1 — webshell delivery: W1/W2/W3/W4) without reading prior chat history. A fresh Claude session with this file plus `docs/waf-analysis-2026-05-08.md` should be able to scope, code, test, and ship a new detector.
+This section is a self-contained briefing for picking up the next chunk of work without reading prior chat history. A fresh Claude session with this file plus `docs/waf-analysis-2026-05-08.md` should be able to scope, code, test, and ship a new detector.
+
+**Phase 1 first batch shipped** (W1 / R1 / B5 — rules 410, 322, 411) at `logonly`. Next pickup: **W2/W3/W4** (webshell magic strings in body, PHP function obfuscation, polyglot upload). Follow the same shape as the W1+R1+B5 PR.
 
 ### What's already done
 
 | Layer | What | Where |
 |---|---|---|
 | Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches, `ctx.skip_rule_ids` gate | `configs/lua/cfm_waf.lua` |
-| Detectors | 39 detector functions invoked from `_M.check` | `configs/lua/cfm_waf_detectors.lua` |
+| Detectors | 42 detector functions invoked from `_M.check` (39 base + W1/R1/B5) | `configs/lua/cfm_waf_detectors.lua` |
 | Util | `scan_str`, `normalize`, `url_decode_once`, `header_string`, IP literal helpers | `configs/lua/cfm_waf_util.lua` |
 | Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
 | Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
@@ -597,7 +602,7 @@ Promote one mode level at a time. Never go `logonly → block` directly.
 
 Detailed sketch in "Detector phases" above. Concrete starting points:
 
-- **W1 (known webshell paths)** — simplest. Add a hash-set of literal path segments (`/c99.php`, `/r57.php`, `/webshell.php`, `/aspxspy.aspx`, `/p0wny.php`, …). Detector reads the URI, lowers it, checks set membership. Reason `WAF_WEBSHELL:PATH:<name>`. Default mode `challenge` (these patterns have ~zero legitimate traffic). Rule ID 4xx (suggest 410, since 401-405 are existing upload rules).
+- **W1 (known webshell paths)** — **shipped (rule 410, `logonly`)**. `WEBSHELL_NAMES` hash-set in `cfm_waf_detectors.lua`; basename-only match (path's final segment after the last `/`, before `?`). Add new entries by appending the lowered basename — don't include path prefixes.
 - **W2 (webshell magic strings in body)** — extends `detect_php_webshell_body` with more literals (`b374k`, `WSO 2.5`, `c99shell`, `r57shell`, `mini.php`, `@eval(`, `@assert(`). Score-based to combine signals. Body-only (gated by `body_inspect_ok`). Already has a CFG knob (`rule_php_webshell_body`); maybe extend the existing rule rather than add a new one.
 - **W3 (PHP function obfuscation)** — extends `detect_script_obfuscation`. Add patterns: `\x65val`, `chr(101).chr(118)…`, `hex2bin($_POST[`, `base64_decode($_GET[`. Already has CFG knob (`rule_script_obfuscation`).
 - **W4 (polyglot upload)** — needs a tiny multipart parser (or settle for naïve raw-bytes scan of first 64 bytes after `Content-Type: image/*`). Reason `WAF_UPLOAD_CONTENT:POLYGLOT`. Foundational because W2/W3 in upload context also need this. New rule ID; suggest 411.
