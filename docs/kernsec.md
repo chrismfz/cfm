@@ -2,11 +2,12 @@
 
 ## Status
 
-Design phase. Builds on the existing `kspp.sh` server-safe hardening script
-(KSPP sysctls + boot args + cross-bootloader support: Proxmox boot tool, BLS /
-grubby, legacy GRUB). `kernsec` extends that into a first-class cfm component:
-module blacklists, additional sysctls, audit + drift detection, and rule-ID +
-group selectors so operators can opt rules in or out at fleet scale.
+Design phase. **`kspp.sh` is sunset** once kernsec lands — kernsec absorbs
+everything that script does (KSPP sysctls + boot args + cross-bootloader
+backends + status verification + Copy Fail mitigation), then extends it into a
+first-class cfm component: module blacklists, additional sysctls, fstab audit,
+drift detection, and rule-ID + group selectors so operators can opt rules in
+or out at fleet scale. Single tool, single config, single audit surface.
 
 Motivation: 2025-2026 saw multiple public kernel zero-day LPEs (Dirty Frag /
 CVE-2026-31431 Copy Fail, ksmbd parade, watch_queue / Dirty Cred). Most of the
@@ -17,6 +18,77 @@ available right now and costs effectively nothing.
 Out of scope: file integrity monitoring (AIDE / Samhain territory), runtime
 exploit detection (LKRG — explicitly dropped, too fragile to ship by default),
 generic CIS-benchmark compliance.
+
+---
+
+---
+
+## What kernsec absorbs from `kspp.sh`
+
+Everything `kspp.sh` does today must work identically in `cfm kernsec`. Nothing
+regresses. Concretely:
+
+**Bootloader backend abstraction.** Auto-detects and writes through the right
+backend, no operator config needed:
+
+- **Proxmox boot tool / systemd-boot** — `proxmox-boot-tool` present,
+  `/etc/kernel/cmdline` exists, current boot uses `\EFI\proxmox\` initrd, or
+  `proxmox-boot-tool status` reports configured ESPs. Edits
+  `/etc/kernel/cmdline`, runs `proxmox-boot-tool refresh`.
+- **BLS / grubby** — `/boot/loader/entries` populated, `grubby` present,
+  `GRUB_ENABLE_BLSCFG` not explicitly false, and either `blscfg` referenced in
+  `grub.cfg` or `GRUB_ENABLE_BLSCFG=true`. Uses `grubby --update-kernel=ALL`.
+- **Legacy GRUB** — fallback. Edits `GRUB_CMDLINE_LINUX` in `/etc/default/grub`,
+  regenerates with `update-grub` / `grub2-mkconfig` / `grub-mkconfig` against
+  the right output path (`/boot/grub2/grub.cfg`, `/boot/grub/grub.cfg`, or
+  EFI). Backs up `/etc/default/grub` before first edit.
+
+**Managed-key boot-arg model.** kernsec owns a fixed set of arg keys
+(`MANAGED_ARG_KEYS`); enable removes any stale instances of those keys and
+writes the desired set; disable removes them entirely. Other operator-set args
+on the cmdline are preserved untouched.
+
+**Sysctl apply + verify.** Render `/etc/sysctl.d/99-cfm-kernsec.conf` skipping
+keys absent from `/proc/sys/...` (with a `# skipped missing sysctl: …` line
+and a warning), apply with `sysctl --load`, then verify each `/proc/sys/...`
+matches expected.
+
+**Status / audit checks ported wholesale:**
+
+- `boot_backend_label` — display which backend is in use.
+- Current `/proc/cmdline` vs configured next-boot cmdline diff per managed arg
+  (`OK / DIFF / MISSING`).
+- Kernel log scan for `Unknown kernel command line parameters | unknown
+  parameter | invalid parameter | Malformed early option`, filtered to
+  managed keys only — catches kernels that silently rejected an arg.
+- AF_ALG AEAD bind probe (Python) — confirms `algif_aead_init` blacklist is
+  actually preventing AEAD socket creation. kernsec extends this to probe
+  `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher` too.
+- `/sys/module/page_alloc/parameters/shuffle` runtime read.
+- `mem auto-init: … heap alloc:on` line in kernel log → confirms
+  `init_on_alloc` actually active.
+- Kernel config inspection from `/boot/config-$(uname -r)` or `/proc/config.gz`
+  (via `zcat`) — verifies `CONFIG_HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET=y`,
+  `CONFIG_RANDOMIZE_KSTACK_OFFSET=y`, and surfaces `CONFIG_SHUFFLE_PAGE_ALLOCATOR`,
+  `CONFIG_INIT_ON_ALLOC`, `CONFIG_SLUB`, `CONFIG_BPF_JIT`,
+  `CONFIG_CRYPTO_USER_API*`.
+
+**Backups.** `kspp.sh` writes `/etc/default/grub.kspp.bak` and
+`/etc/kernel/cmdline.kspp.bak` once, before first edit. kernsec keeps the
+same one-shot backup pattern, renamed to `.cfm-kernsec.bak`. Disable does not
+remove backups.
+
+**Copy Fail / CVE-2026-31431 mitigation.** `initcall_blacklist=algif_aead_init`
+in the boot args, with a clear in-doc comment that it's a temporary mitigation
+to be removed once relevant kernels are patched. Stays exactly as-is, owned
+by kernsec under rule `KSEC-BOOT-kspp-005`.
+
+**Root + idempotency.** `EUID==0` check up front, every operation idempotent,
+`set -Eeuo pipefail` discipline.
+
+Anything `kspp.sh` does that isn't listed above is also in scope — the
+acceptance bar for sunsetting it is "operator runs `cfm kernsec status` and
+sees a strict superset of what `kspp.sh status` showed."
 
 ---
 
@@ -331,19 +403,27 @@ apart. Also unifies backup, preview, and drift detection.
 Each phase ships independently and has a working `status` before any `enable`
 is offered.
 
-### Phase 0 — kspp.sh in tree (DONE)
+### Phase 0 — kspp.sh as reference impl (DONE, sunset on Phase 3)
 
-The uploaded `kspp.sh` is the proof-of-concept and the basis for the boot-arg
-backend. It already handles Proxmox / BLS / GRUB cleanly. Stays in tree.
+`kspp.sh` is the working proof-of-concept for the bootloader backends, sysctl
+apply/verify loop, and status checks. Its logic is the contract kernsec has to
+match. **Removed from the tree once Phase 3 lands** and `cfm kernsec status`
+demonstrably covers everything `kspp.sh status` did. Until then it stays as
+the reference behaviour.
 
 ### Phase 1 — `cfm kernsec status` (audit-only)
 
 Read-only. Lists every rule, its tier, group, and tri-state runtime status.
 Implements:
 
+- Bootloader backend detection (Proxmox / BLS / GRUB) — ported from `kspp.sh`.
 - Module presence + load detection (`/lib/modules/$(uname -r)`, `lsmod`).
-- Sysctl current vs recommended.
-- Boot args current vs recommended (read from existing `kspp.sh` backends).
+- Sysctl current vs recommended (apply/verify loop ported from `kspp.sh`).
+- Boot args: current `/proc/cmdline` vs configured next-boot per backend.
+- Kernel-log scan for rejected/unknown managed args (ported).
+- AF_ALG bind probes (extended beyond `kspp.sh`'s AEAD-only probe).
+- `/sys/module/page_alloc/parameters/shuffle` + `mem auto-init` log check.
+- Kernel `CONFIG_*` introspection.
 - fstab audit.
 - Host profile probe.
 
@@ -356,13 +436,20 @@ Stable rule IDs, group tags, tier tags. Persistent config at
 `/etc/cfm/kernsec.conf`. CLI selectors: `--tier`, `--group`, `--id`,
 `--skip`, `--force-id`. `preview` subcommand prints diffs without writing.
 
-### Phase 3 — Tier 1 enable / disable
+### Phase 3 — Tier 1 enable / disable + sunset `kspp.sh`
 
 - Module blacklist file generation (`/etc/modprobe.d/cfm-kernsec.conf`,
   both `blacklist` and `install … /bin/false` lines).
 - Sysctl file generation (`/etc/sysctl.d/99-cfm-kernsec.conf`).
-- Boot-arg additions through the existing `kspp.sh` backend abstractions.
+- Boot-arg backends ported in full from `kspp.sh` (Proxmox / BLS / GRUB),
+  `MANAGED_ARG_KEYS` model preserved, backups renamed to `.cfm-kernsec.bak`.
+- All KSPP-profile rules (`slab_nomerge`, `init_on_alloc=1`,
+  `page_alloc.shuffle=1`, `randomize_kstack_offset=on`,
+  `initcall_blacklist=algif_aead_init`) owned by kernsec under `KSEC-BOOT-kspp-*`.
 - All backups, all reversible. Every rule has both directions.
+- **Acceptance gate**: `cfm kernsec status` output is a strict superset of
+  `kspp.sh status` output, verified on Proxmox + EL + Debian test hosts.
+- `kspp.sh` removed from the repo once the gate passes.
 
 ### Phase 4 — Tier 2 (opt-in)
 
@@ -401,8 +488,12 @@ cross-component awareness.
 - [ ] Phase 2: host profile detection probes.
 - [ ] Phase 3: module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`).
 - [ ] Phase 3: sysctl generator (`/etc/sysctl.d/99-cfm-kernsec.conf`).
-- [ ] Phase 3: extend `kspp.sh` boot-arg backend with kernsec's additional args.
+- [ ] Phase 3: port `kspp.sh` bootloader backends (Proxmox / BLS / GRUB) into kernsec, with original `MANAGED_ARG_KEYS` model and backups.
+- [ ] Phase 3: port `kspp.sh` sysctl apply/verify loop and status checks (AF_ALG probe, mem auto-init log, page_alloc.shuffle, kernel CONFIG introspection, unknown-arg dmesg scan).
+- [ ] Phase 3: KSPP-profile rules registered under `KSEC-BOOT-kspp-*` (incl. Copy Fail mitigation).
 - [ ] Phase 3: `preview enable` diff command.
+- [ ] Phase 3: acceptance gate — `cfm kernsec status` ⊇ `kspp.sh status` on Proxmox + EL + Debian.
+- [ ] Phase 3: **remove `kspp.sh` from the tree** once gate passes.
 - [ ] Phase 4: Tier 2 rules with host-profile gating.
 - [ ] Phase 4: late systemd unit for `kernel.modules_disabled=1`.
 - [ ] Phase 5: `--check` drift exit code + monitoring hook.
