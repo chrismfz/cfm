@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/cfm_webui.PNG" width="900">
+  <img src="docs/screenshots/cfm_webui.PNG" width="900">
 </p>
 
 <p align="center">
@@ -93,7 +93,7 @@ backend and no iptables dependency.
 | MySQL | Processlist governor, runaway query kill, connection-limit enforcement |
 | Support | Enrichment (PTR / ASN / Country), TLS-aware smart bridge, notifications |
 
-![WAF Reports](docs/waf_reports.png)
+![WAF Reports](docs/screenshots/waf_reports.png)
 
 **What makes it unique:**
 - Single Go binary, low footprint
@@ -439,9 +439,9 @@ It supports both **visibility** (who is doing what, on which vhost) and **action
 
 ### 📊 Live Views
 
-![WHM Live](docs/whm_live.png)
-![WebTop Index](docs/webtop_termui_index.PNG)
-![WebTop Vhost](docs/webtop_termui_vhost.PNG)
+![WHM Live](docs/screenshots/whm_live.png)
+![WebTop Index](docs/screenshots/webtop_termui_index.PNG)
+![WebTop Vhost](docs/screenshots/webtop_termui_vhost.PNG)
 
 
 
@@ -494,8 +494,8 @@ The Challenge System intercepts HTTP(S) traffic and presents a browser-solvable 
 
 ### 🚨 Challenge Pages
 
-![Challenge Desktop](docs/challenge_pc.png)
-![Challenge Mobile](docs/challenge_mobile.jpg)
+![Challenge Desktop](docs/screenshots/challenge_pc.png)
+![Challenge Mobile](docs/screenshots/challenge_mobile.jpg)
 
 
 ### DNAT Mode
@@ -619,8 +619,8 @@ existing install of the other.
 
 ### 🌐 Per-Vhost Control
 
-![cPanel Vhost](docs/cpanel_vhost.png)
-![Vhost Web](docs/vhost_web.png)
+![cPanel Vhost](docs/screenshots/cpanel_vhost.png)
+![Vhost Web](docs/screenshots/vhost_web.png)
 
 
 ### Smart Lua WAF Layer
@@ -698,8 +698,8 @@ It operates entirely through a standard MySQL connection — no agent, no plugin
 
 ### 🧠 Visual Overview
 
-![Governor Web](docs/governor_web.png)
-![MySQL CLI](docs/mysql_top_termui.PNG)
+![Governor Web](docs/screenshots/governor_web.png)
+![MySQL CLI](docs/screenshots/mysql_top_termui.PNG)
 
 ### Overview
 
@@ -903,7 +903,7 @@ CPU data is visible via `cfm mysqltop cpu` and the `/api/v1/mysql/cpu` endpoint.
 
 ### 🖥️ Terminal UI
 
-![WebTop CLI](docs/webtop_termui_index.PNG)
+![WebTop CLI](docs/screenshots/webtop_termui_index.PNG)
 
 
 ```bash
