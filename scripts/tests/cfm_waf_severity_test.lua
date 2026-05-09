@@ -1083,6 +1083,48 @@ do
   check(hit == false, "67: rule 404 ext — legit literal-require + $_POST, no FP")
 end
 
+-- ── Test for regression: rule 402 upload_content path doesn't crash ────────
+-- Pre-fix: cfm_waf.lua:679 called is_known_legit_php_upload_endpoint as a
+-- bare global (the helper is exported on the util module but no local
+-- binding existed in cfm_waf.lua). Any multipart POST that triggered the
+-- rule_upload_content branch would crash _M.check with
+--   "attempt to call global 'is_known_legit_php_upload_endpoint' (a nil value)"
+-- Default mode is `block`, so this fired in production on every multipart
+-- upload — but no test exercised the path because of the crash.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  -- Multipart body with a PHP-tag opener — would fire rule 402.
+  local body = "--b\r\n"
+            .. 'Content-Disposition: form-data; name="f"; filename="x.php"\r\n'
+            .. "\r\n"
+            .. "<?php eval($_POST['c']);\r\n"
+            .. "--b--\r\n"
+
+  -- Non-legit URI: rule should fire.
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    uri     = "/uploads/x.php",
+    headers = { ["Content-Type"] = "multipart/form-data; boundary=b" },
+    body    = body,
+  }))
+  check(hit == true,                                              "regression: rule 402 fires on multipart PHP upload")
+  check(reason and reason:find("WAF_UPLOAD_CONTENT", 1, true),    "regression: WAF_UPLOAD_CONTENT family")
+  check(action == "block",                                        "regression: block action")
+  check(rule_id == 402,                                           "regression: rule id 402")
+
+  -- Legit URI (Code Snippets plugin REST endpoint) should be skipped by
+  -- is_known_legit_php_upload_endpoint, so the rule does NOT fire.
+  local hit2 = waf.check(fresh_ctx({
+    method  = "POST",
+    uri     = "/wp-json/code-snippets/import",
+    headers = { ["Content-Type"] = "multipart/form-data; boundary=b" },
+    body    = body,
+  }))
+  check(hit2 == false, "regression: rule 402 skipped on Code Snippets endpoint (legit upload bypass)")
+end
+
 -- ── Test 68: Rule 404 ext — eval-family still fires (no regression) ────────
 do
   disable_all_rules()

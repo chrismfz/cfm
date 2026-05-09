@@ -28,6 +28,7 @@ local cap           = util.cap
 local normalize     = util.normalize
 local scan_str      = util.scan_str
 local header_string = util.header_string
+local is_known_legit_php_upload_endpoint = util.is_known_legit_php_upload_endpoint
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
