@@ -52,9 +52,9 @@ on the configured interval (default daily); drift exits non-zero so
 `systemctl is-failed` and the journal surface it. `disable --purge`
 auto-tears the timer down.
 
-**Phase 6 (late-systemd-unit infrastructure)** is next — ships the
-abstraction needed for `kernel.modules_disabled=1` and other Tier 2
-rules that have to fire after cfm's own modules finish loading.
+**`kernel.modules_disabled=1` is out of scope** for kernsec — see the
+"Out of scope" section under the rollout plan. **Phase 6 (shared
+sysctl library)** is the remaining roadmap item.
 
 **`kspp.sh` status**: kept in the tree indefinitely. It started as the
 reference implementation for the cfm kernsec component; with Phase 3
@@ -171,7 +171,7 @@ audit group.
 
 Resolution: kernsec **audits and defers** for any setting `sys_tweaks` already
 owns — render as `EXT (managed by cfm sys_tweaks)` in `status`, never write a
-duplicate. Phase 7 (shared sysctl library) merges both packages so there's one
+duplicate. Phase 6 (shared sysctl library) merges both packages so there's one
 audit/apply/drift loop with rule-IDs. Until then: no double-write, no fights
 over `/etc/sysctl.d/`.
 
@@ -189,8 +189,10 @@ Verify before Phase 2.
 
 - `/etc/modprobe.d/cfm-kernsec.conf` installed/removed on package upgrade.
 - `/etc/sysctl.d/99-cfm-kernsec.conf` ditto.
-- The late systemd unit for `kernel.modules_disabled=1` (Tier 2) packaged but
-  not enabled by default.
+- The Phase 5 `cfm-kernsec-check.service` / `.timer` units (operator-
+  installed via `cfm kernsec monitor enable`) are not packaged —
+  they're written by the binary at apply time so they reference the
+  installed cfm path correctly.
 
 **Internal packages worth using rather than reinventing**: `internal/logging`,
 `internal/config`, `internal/diagnostics`. Don't roll a new logger.
@@ -288,7 +290,7 @@ survives upgrades. Same backup/diff pattern `kspp.sh` already uses.
 | Tier | Examples | Default |
 |---|---|---|
 | 1. Safe-everywhere | KSPP sysctls, blacklist of legacy network protocols, `dev.tty.ldisc_autoload=0`, `vm.unprivileged_userfaultfd=0`, `kernel.kexec_load_disabled=1` (gated on no-kdump) | enable |
-| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `kernel.modules_disabled=1` post-boot, `oops=panic`, `lockdown=integrity`, `module.sig_enforce=1` (gated on no DKMS) | opt-in per role |
+| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `oops=panic`, `lockdown=integrity`, `module.sig_enforce=1` (gated on no DKMS) | opt-in per role |
 
 LKRG was considered and dropped: out-of-tree DKMS = breaks every kernel jump,
 ~3-5% perf hit, has had its own bugs. Not worth shipping in cfm.
@@ -416,11 +418,8 @@ file so the components don't fight.
 | KSEC-SCT-namespace-001 | `user.max_user_namespaces=0` | Hard kill of unprivileged userns LPE primitives | Breaks Chromium sandbox, bwrap, rootless podman, some cPanel jails. Skipped if containers detected. |
 | KSEC-SCT-namespace-002 | `kernel.unprivileged_userns_clone=0` (Debian) | Reversible variant of above | Same surface, easier rollback |
 
-**Group `sysctl.modules`** (Tier 2)
-
-| ID | Setting | Why | Affects |
-|---|---|---|---|
-| KSEC-SCT-modules-001 | `kernel.modules_disabled=1` (late systemd unit) | No module load post-boot | Cannot load any module without reboot. Apply *after* observability stack is up. |
+**Group `sysctl.modules`** (out of scope — see "Out of scope:
+`kernel.modules_disabled=1`" under the rollout plan for the rationale)
 
 **Group `sysctl.net`** — almost certainly already owned by cfm-firewall. Audit
 only here, mark `EXT (managed by cfm-firewall)` rather than fight for
@@ -1004,13 +1003,12 @@ filters its expected-rule list to `tier <= conf.Tier`. A tier=1
 host doesn't see Tier 2 rules reported as MISSING; a tier=2 host
 sees the full set audited.
 
-**Deferred (not in this phase)**:
+**Deferred / out of scope**:
 
-- `kernel.modules_disabled=1`. Setting it via `/etc/sysctl.d/`
-  fires at early boot before cfm has loaded its own kernel
-  modules — it would lock cfm out. Needs a late systemd unit
-  triggered after `multi-user.target` (or similar). Cleanest as a
-  separate PR with the systemd-unit infrastructure.
+- `kernel.modules_disabled=1` — out of scope (see the dedicated
+  "Out of scope" section under the rollout plan; cfm's own runtime
+  triggers `request_module()` long after boot, so a late-systemd
+  heuristic can't bracket it safely).
 - Other Tier 2 candidates from earlier brainstorming (`kfence`,
   `iommu=force`, `efi=disable_early_pci_dma`) deferred until needed.
 
@@ -1059,40 +1057,61 @@ systemctl is-failed cfm-kernsec-check.service
                                   # exits 0 if clean, 1 if drift seen
 ```
 
-### Phase 6 — Late-systemd-unit infrastructure (TODO)
-
-Ships the abstraction needed for rules that can't be applied via
-`/etc/sysctl.d/` because they have to fire **after** cfm itself has
-finished loading kernel modules and starting up. The motivating case
-is `kernel.modules_disabled=1` (Tier 2, deferred from Phase 4).
-Setting it in `/etc/sysctl.d/` would lock cfm out before its own
-modules load.
-
-Approach (sketch):
-
-- Generalise the Phase 5 monitor unit-file pattern into a
-  "managed-systemd-unit" surface.
-- `kernel.modules_disabled=1` becomes a rule with a
-  `RuleKind = KindLateSystemd` that emits a small unit
-  (`cfm-kernsec-modules-disabled.service`) with `After=multi-user.target
-  network-online.target` and `ExecStart=/usr/bin/sysctl
-  kernel.modules_disabled=1`.
-- The rule's audit state distinguishes "unit installed + enabled" vs
-  "running" vs "never set". No automatic disable possible —
-  `modules_disabled=1` is one-way until reboot.
-- Future opt-ins that fit the same shape (`kfence` knobs, certain
-  late tunables) reuse the same plumbing.
-
-Acceptance gate: same as Phase 3 + 5 — operator runs on Proxmox + EL +
-Debian, confirms cfm's own modules still load successfully before the
-late unit fires.
-
-### Phase 7 — Shared sysctl library
+### Phase 6 — Shared sysctl library (TODO)
 
 Refactor: extract the audit/apply/drift loop into a cfm-internal library.
 Migrate kernsec and cfm-firewall to use it. Single source of truth per
 setting; `EXT (managed by cfm-firewall)` markers replaced with proper
 cross-component awareness.
+
+---
+
+### Out of scope: `kernel.modules_disabled=1`
+
+Originally queued for Phase 6 alongside a late-systemd-unit
+abstraction, then dropped after a code review of cfm's own runtime.
+
+`modules_disabled=1` is a one-way switch — once set, the kernel
+refuses every subsequent module load until reboot. cfm has several
+runtime triggers that autoload kernel modules:
+
+- `internal/firewall/nftlib/backend.go` — `nftables.New(AsLasting())`
+  at daemon startup autoloads `nf_tables`, `nfnetlink`. Per-operation
+  `AddTable` / `Flush` / `SetAddElements` autoload family-specific
+  `nft_*` submodules on demand throughout the daemon's lifetime.
+- `internal/nflog/smtp_snoop.go` and `internal/outbound/collector.go`
+  — `nflog.Open(...)` triggers `nfnetlink_log` autoload **only when
+  the operator enables SMTP block / outbound tracking** in cfm.conf.
+  Could be enabled weeks after first boot.
+- `internal/firewall/nftlib/challenge.go` — DNAT / challenge flow
+  autoloads `nf_nat`, `nft_nat`, `nft_redir` the first time challenge
+  fires in production traffic.
+- `internal/sysctl/sys_tweaks.go::trySetHashsize` writes to
+  `/sys/module/nf_conntrack/parameters/hashsize` (silently fails if
+  `nf_conntrack` isn't loaded at write time).
+
+A "fire after `multi-user.target`" heuristic cannot bracket all of
+these — operator-driven feature toggles would still trigger
+`request_module()` weeks later. The protection added is also small
+relative to the existing Phase 3 module-blacklist set (67 modules);
+an attacker with `CAP_SYS_MODULE` typically already has another path
+to root.
+
+**Operator workaround for hosts that genuinely want
+`modules_disabled=1`**:
+
+- Pre-load every kernel module the environment needs via
+  `/etc/modules-load.d/` or initramfs (the cfm modules listed above,
+  plus any DKMS, plus distro-specific helpers).
+- Apply `modules_disabled=1` themselves outside kernsec, accepting
+  that any cfm feature toggled later that wants a new module will
+  fail.
+
+The late-systemd-unit infrastructure that would have shipped this
+rule isn't built — it would exist solely for `modules_disabled=1`.
+If a future Tier 2 candidate genuinely needs post-`multi-user.target`
+execution **and** is compatible with cfm's runtime, this decision
+can be revisited.
 
 ---
 
@@ -1337,9 +1356,11 @@ cross-component awareness.
       (`user.max_user_namespaces=0`,
       `kernel.unprivileged_userns_clone=0`,
       `lockdown=integrity`, `module.sig_enforce=1`, `oops=panic`).
-- [ ] Late systemd unit for `kernel.modules_disabled=1` —
-      separate follow-up PR; needs a small "managed systemd unit"
-      surface that other Tier 2 candidates may also want.
+- ~~Late systemd unit for `kernel.modules_disabled=1`~~ — dropped;
+      see "Out of scope: `kernel.modules_disabled=1`" under the
+      rollout plan. cfm's own runtime triggers `request_module()`
+      throughout the daemon's lifetime, so no late-systemd heuristic
+      can bracket it safely.
 
 **Phase 5 — drift wiring** (DONE — branch `kernsec-5`)
 - [x] `cfm kernsec apply --check` exit-code (shipped in Phase 2b).
@@ -1347,22 +1368,16 @@ cross-component awareness.
       status of the periodic systemd timer.
 - [x] `disable --purge` auto-removes monitor units when present.
 
-**Phase 6 — late-systemd-unit infrastructure**
-- [ ] Generalise the Phase 5 unit-file pattern into a managed-systemd-
-      unit surface usable by rules that need post-`multi-user.target`
-      execution.
-- [ ] `kernel.modules_disabled=1` (Tier 2) lands on this surface as
-      `KSEC-LATE-tier2.modules-disabled-001`. Audit state distinguishes
-      "unit installed + enabled" vs "running" vs "never set". One-way
-      until reboot — no automatic disable.
-- [ ] Acceptance gate: same shape as Phase 3 + 5 — operator runs on
-      Proxmox + EL + Debian, confirms cfm's own modules still load
-      successfully before the late unit fires.
-
-**Phase 7 — shared sysctl library**
+**Phase 6 — shared sysctl library**
 - [ ] Extract audit/apply/drift loop into a cfm-internal library;
       migrate `internal/sysctl/sys_tweaks.go` into it; kernsec consumes
       the same library.
+
+**Out of scope** (decision recorded in the rollout-plan section
+above — not a TODO, not coming back unless a future rule needs the
+abstraction)
+- ~~Late-systemd-unit infrastructure~~
+- ~~`kernel.modules_disabled=1`~~
 
 **Operator-facing**
 - [ ] Document operator runbook for fleet rollout
