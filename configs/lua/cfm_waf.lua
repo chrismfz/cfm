@@ -145,6 +145,25 @@ local CFG = {
   default_ttl_sec   = 600,
   block_ttl_sec     = 3600,
   push_cooldown_sec = 60,
+
+  -- Body scan budget, keyed by request Content-Type. The merged args+body
+  -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
+  -- ssrf/proto-pollution via get_norm_ab() below) is capped to the entry
+  -- that matches the request's Content-Type. cap() enforces the byte
+  -- ceiling per call, so a single huge body cannot starve the worker —
+  -- work scales with the budget, not the request size.
+  body_scan_budget = {
+    urlencoded = 8192,
+    json       = 32768,
+    multipart  = 16384,
+    xml        = 16384,
+    other      = 2048,
+  },
+
+  -- Legacy fallback scan cap. Used by callsites without request-headers
+  -- context (URI+args scans in scan_str(), body-only detectors invoked
+  -- outside the engine's hot path). Body-aware rules in the engine prefer
+  -- body_scan_budget above via util.body_budget(headers).
   max_scan_len      = 2048,
 
   -- Raw PHP webshell body scanner tuning
@@ -390,7 +409,7 @@ function _M.check(ctx)
 
   local function get_norm_ab()
     if not _norm_ab then
-      _norm_ab = normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+      _norm_ab = normalize(cap((args or "") .. "&" .. (body or ""), util.body_budget(headers)))
     end
     return _norm_ab
   end

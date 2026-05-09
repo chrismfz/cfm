@@ -220,6 +220,31 @@ local function scan_str(uri, args)
   return normalize(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
 end
 
+-- Pick the body-scan byte budget for a request based on its Content-Type.
+-- Falls back to body_scan_budget.other when the header is missing/empty/
+-- unrecognised, and to CFG.max_scan_len when the table itself is absent
+-- (preserves behaviour in environments running an older config layout).
+-- Header parameters after ";" (e.g. "application/json; charset=utf-8")
+-- are handled — substring match on the type/subtype prefix.
+local function body_budget(headers)
+  local budget = CFG and CFG.body_scan_budget
+  if not budget then
+    return (CFG and CFG.max_scan_len) or 2048
+  end
+  if not headers then return budget.other end
+  local raw = headers["content-type"]
+  if raw == nil then raw = headers["Content-Type"] end
+  local ct = header_string(raw)
+  if ct == "" then return budget.other end
+  ct = string.lower(ct)
+  if string.find(ct, "application/json", 1, true)               then return budget.json end
+  if string.find(ct, "multipart/form-data", 1, true)            then return budget.multipart end
+  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return budget.urlencoded end
+  if string.find(ct, "application/xml", 1, true)
+     or string.find(ct, "text/xml", 1, true)                    then return budget.xml end
+  return budget.other
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HOST HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +298,7 @@ _M.url_decode_once                    = url_decode_once
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str
+_M.body_budget                        = body_budget
 _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
