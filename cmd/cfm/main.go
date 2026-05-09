@@ -366,6 +366,11 @@ Usage:
   cfm health watch --interval=2s  -- periodic one-line local snapshot output
   cfm health live                 -- TTY dashboard; non-TTY auto-falls back to watch
 
+  cfm kernsec                     -- interactive TUI for kernel hardening audit (TTY); auto-falls back to text
+  cfm kernsec live                -- force the TUI
+  cfm kernsec text [--check]      -- plain-text audit; --check exits non-zero on WARN
+  cfm kernsec status [--check]    -- alias for "text"
+
   cfm clam ping
   cfm clam version
   cfm clam scan <file-or-dir>

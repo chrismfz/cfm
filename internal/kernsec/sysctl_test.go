@@ -33,11 +33,23 @@ func TestKSPPProfileSanity(t *testing.T) {
 		if !IsManagedKey(a.Key) {
 			t.Errorf("KSPPBootArgs key %q not in ManagedBootArgKeys", a.Key)
 		}
+		if a.Description == "" {
+			t.Errorf("KSPPBootArgs %q has empty Description", a.Key)
+		}
+		if a.Affects == "" {
+			t.Errorf("KSPPBootArgs %q has empty Affects", a.Key)
+		}
 	}
-	// Every sysctl rule must have a non-empty key and value.
+	// Every sysctl rule must have a non-empty key, value, description and affects.
 	for _, r := range KSPPSysctls {
 		if r.Key == "" || r.Value == "" {
 			t.Errorf("KSPPSysctls has empty key/value: %+v", r)
+		}
+		if r.Description == "" {
+			t.Errorf("KSPPSysctls %q has empty Description", r.Key)
+		}
+		if r.Affects == "" {
+			t.Errorf("KSPPSysctls %q has empty Affects", r.Key)
 		}
 	}
 }
