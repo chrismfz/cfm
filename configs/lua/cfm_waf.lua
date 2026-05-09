@@ -532,15 +532,16 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_exploit_methods, "challenge")
     if mode ~= "disabled" then
-      local maction = det.detect_exploit_method(method)
+      local maction, mtag = det.detect_exploit_method(method)
+      local reason = mtag and ("WAF_EXPLOIT_METHOD:" .. mtag) or "WAF_EXPLOIT_METHOD"
       if maction == "block" then
         local final = (mode == "logonly") and "logonly" or "block"
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
+        if record(reason, ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       elseif maction == "challenge" then
         local final = (mode == "block") and "block" or mode
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
+        if record(reason, ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       end
     end
   end
