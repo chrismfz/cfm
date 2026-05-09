@@ -178,6 +178,89 @@ do
   check(action2 == nil,   "text/plain body > 2KB php-wrapper: action=nil expected, got " .. tostring(action2))
 end
 
+-- ── Test 7: normalize() fast path is semantically identical ──────────────────
+-- The fast path (no "%" in input) skips both url_decode_once gsubs. Verify
+-- that for a representative set of inputs the result still matches what
+-- the slow path would produce. Build a fresh util module loaded with a
+-- dummy CFG to access its private helpers.
+do
+  -- Slow-path reference: replicate the original normalize using the public
+  -- helpers we still have. url_decode_once isn't exported, so test by
+  -- comparing fast-path output to manually-constructed expectations.
+  local cases = {
+    { input = "Hello, World",          want = "hello, world",       label = "ascii no %" },
+    { input = "ABC123",                want = "abc123",             label = "no special chars" },
+    { input = "",                      want = "",                   label = "empty" },
+    { input = "{\"a\":1,\"b\":\"X\"}", want = "{\"a\":1,\"b\":\"x\"}", label = "json no %" },
+    -- With "%": slow path runs url_decode_once twice. Both should produce
+    -- the same output regardless of fast path, since the input is the same.
+    { input = "%41%42",                want = "ab",                 label = "double-decoded ascii" },
+    { input = "abc%20def",             want = "abc def",            label = "single decode space" },
+    { input = "100%",                  want = "100%",               label = "trailing % no hex (slow path no-op)" },
+    { input = "%2541",                 want = "a",                  label = "double-encoded A" },
+  }
+  for _, c in ipairs(cases) do
+    -- Use util.normalize indirectly: util.scan_str(uri="", args=input) calls
+    -- normalize(cap(input, budget)). For these short inputs cap is a no-op.
+    local got = util.scan_str("", c.input)
+    -- scan_str prepends "?" between uri and args, so input becomes "?<c.input>".
+    local want = "?" .. c.want
+    check(got == want,
+      "normalize semantics " .. c.label .. ": got=" .. tostring(got) .. " want=" .. tostring(want))
+  end
+end
+
+-- ── Test 8: pre-cap before concat keeps end-to-end semantics ─────────────────
+-- Body of 1MB followed by a php:// marker beyond the json budget cap. The
+-- marker MUST NOT be visible regardless of optimisation, because cap() still
+-- enforces the final ceiling. This guards against an off-by-one in the
+-- pre-cap path letting truncated bytes leak through.
+do
+  local function disable_all_rules()
+    local snap = waf.get_config()
+    for k, _ in pairs(snap) do
+      if k:sub(1, 5) == "rule_" then
+        waf.set_rule(k, "disabled")
+      end
+    end
+  end
+
+  disable_all_rules()
+  waf.set_rule("rule_php_wrappers", "block")
+
+  -- 35KB filler (past json budget=32768), then a php:// marker at the very end.
+  local filler  = string.rep("a", 35000)
+  local body    = '{"pad":"' .. filler .. '","f":"php://input"}'
+
+  local hit, _r, _t, action = waf.check({
+    uri     = "/",
+    args    = "",
+    method  = "POST",
+    ip      = "1.2.3.4",
+    headers = { ["content-type"] = "application/json" },
+    body    = body,
+  })
+
+  check(hit == false,    "pre-cap: marker past budget must NOT be visible (got hit=" .. tostring(hit) .. ")")
+  check(action == nil,   "pre-cap: action=nil expected, got " .. tostring(action))
+
+  -- Now move the marker into-budget (body around 30K) — must hit, confirming
+  -- the pre-cap doesn't accidentally truncate too aggressively.
+  disable_all_rules()
+  waf.set_rule("rule_php_wrappers", "block")
+  local in_budget_body = '{"pad":"' .. string.rep("a", 30000) .. '","f":"php://input"}'
+  local hit2, _r2, _t2, action2 = waf.check({
+    uri     = "/",
+    args    = "",
+    method  = "POST",
+    ip      = "5.6.7.8",
+    headers = { ["content-type"] = "application/json" },
+    body    = in_budget_body,
+  })
+  check(hit2 == true,        "pre-cap: marker within budget MUST be visible")
+  check(action2 == "block",  "pre-cap: action=block expected, got " .. tostring(action2))
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_body_budget_test.lua\n")
   os.exit(1)

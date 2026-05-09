@@ -409,7 +409,17 @@ function _M.check(ctx)
 
   local function get_norm_ab()
     if not _norm_ab then
-      _norm_ab = normalize(cap((args or "") .. "&" .. (body or ""), util.body_budget(headers)))
+      local budget = util.body_budget(headers)
+      local a = args or ""
+      local b = body or ""
+      -- Pre-cap body before concat: when body >> budget (e.g. 1MB body
+      -- against the 32K json budget) the merged "args & body" string would
+      -- materialise the full body in memory just to be truncated by cap()
+      -- below. Capping body to the budget first bounds the concat
+      -- transient at ~budget+#args+1 bytes. cap() still enforces the
+      -- final ceiling, so semantics are identical to a single-cap merge.
+      if #b > budget then b = string.sub(b, 1, budget) end
+      _norm_ab = normalize(cap(a .. "&" .. b, budget))
     end
     return _norm_ab
   end

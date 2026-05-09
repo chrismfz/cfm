@@ -203,6 +203,14 @@ end
 
 local function normalize(s)
   if not s or s == "" then return "" end
+  -- Fast path: a string with no "%" cannot contain any %xx escape, so both
+  -- url_decode_once gsubs would walk the whole string and return it
+  -- unchanged. Skip them and just lowercase. JSON / multipart bodies are
+  -- the common case here — they almost never carry %xx — and at the new
+  -- 32K JSON budget the gsub passes were the dominant per-request cost.
+  if not string.find(s, "%", 1, true) then
+    return string.lower(s)
+  end
   s = url_decode_once(s)
   s = url_decode_once(s)
   return string.lower(s)
