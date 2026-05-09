@@ -63,7 +63,8 @@ type diagNamesProbe interface {
 }
 
 type fwFinding struct {
-	Level, Message string `json:"level"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
 }
 
 type setProbeRequirement struct {

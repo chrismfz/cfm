@@ -126,9 +126,9 @@ func TestUnblockPOSTWithValidPayloadProceeds(t *testing.T) {
 	origUnblockDo := unblockDo
 	var wg sync.WaitGroup
 	wg.Add(1)
-	unblockDo = func(_ context.Context, ip net.IP, _ unblock.Options) (unblock.Result, error) {
+	unblockDo = func(_ context.Context, ip net.IP, _ unblock.Options) (*unblock.Result, error) {
 		defer wg.Done()
-		return unblock.Result{WasBlocked: false}, nil
+		return &unblock.Result{WasBlocked: false}, nil
 	}
 	t.Cleanup(func() {
 		wg.Wait()

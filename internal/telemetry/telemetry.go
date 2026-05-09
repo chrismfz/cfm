@@ -129,7 +129,10 @@ func Snapshot() LiveSnapshot {
 		return true
 	})
 
-	wd := global.webdet
+	// Take the address: webdetectorStats holds atomic.Uint64 fields whose
+	// noCopy marker fires under `go vet` if copied by value. Reads via
+	// pointer don't change the per-field Load() semantics.
+	wd := &global.webdet
 	ingestCalls := wd.ingestCalls.Load()
 	runCalls := wd.runOnceCalls.Load()
 	avgIngestUS := 0.0
