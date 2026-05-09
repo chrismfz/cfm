@@ -65,3 +65,134 @@ func TestExcludeStore_MatchWAFChecksHostAndPathRulesWithScope(t *testing.T) {
 		t.Fatalf("expected out-of-scope tenant host to not match")
 	}
 }
+
+// Rule-scoped exclude should not trigger MatchWAF (which means "skip the
+// whole WAF"); it should only show up in MatchWAFRules.skipIDs.
+func TestExcludeStore_RuleScopedDoesNotTriggerWholeWAFSkip(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if ok := s.AddWithRuleIDs("host", "scraper-target.example.com", nil, []int{321}); !ok {
+		t.Fatalf("expected rule-scoped host add to succeed")
+	}
+	if s.MatchWAF("scraper-target.example.com", "/anything") {
+		t.Fatalf("rule-scoped exclude must NOT trigger whole-WAF MatchWAF")
+	}
+	skipAll, skipIDs := s.MatchWAFRules("scraper-target.example.com", "/anything")
+	if skipAll {
+		t.Fatalf("rule-scoped exclude wrongly returned skipAll=true")
+	}
+	if _, ok := skipIDs[321]; !ok {
+		t.Fatalf("expected skipIDs to contain 321; got %v", skipIDs)
+	}
+	if len(skipIDs) != 1 {
+		t.Fatalf("expected only rule 321 in skipIDs; got %v", skipIDs)
+	}
+}
+
+// Whole-WAF entry takes precedence; even with a rule-scoped entry alongside,
+// MatchWAFRules short-circuits on skipAll=true.
+func TestExcludeStore_WholeWAFShortCircuitsOverRuleScoped(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if ok := s.Add("host", "noisy.example.com", nil); !ok {
+		t.Fatalf("expected legacy whole-WAF add to succeed")
+	}
+	if ok := s.AddWithRuleIDs("host", "noisy.example.com", nil, []int{320}); !ok {
+		t.Fatalf("expected rule-scoped add on same host to succeed (different key)")
+	}
+	skipAll, _ := s.MatchWAFRules("noisy.example.com", "/")
+	if !skipAll {
+		t.Fatalf("expected whole-WAF entry to win → skipAll=true")
+	}
+}
+
+// Two rule-scoped entries on the same host union their RuleIDs in skipIDs.
+func TestExcludeStore_RuleScopedUnion(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if ok := s.AddWithRuleIDs("host", "vito.example.com", nil, []int{321}); !ok {
+		t.Fatalf("first add failed")
+	}
+	if ok := s.AddWithRuleIDs("host", "vito.example.com", nil, []int{401, 402}); !ok {
+		t.Fatalf("second add failed (different RuleIDs should be a distinct entry)")
+	}
+	skipAll, skipIDs := s.MatchWAFRules("vito.example.com", "/")
+	if skipAll {
+		t.Fatalf("no whole-WAF entry exists; skipAll must be false")
+	}
+	want := []int{321, 401, 402}
+	for _, id := range want {
+		if _, ok := skipIDs[id]; !ok {
+			t.Errorf("expected skipIDs to contain %d; got %v", id, skipIDs)
+		}
+	}
+	if len(skipIDs) != 3 {
+		t.Errorf("expected 3 IDs in union; got %v", skipIDs)
+	}
+}
+
+// Persistence round-trip: rule-scoped entries survive a store reload.
+func TestExcludeStore_RuleIDsPersistAcrossLoad(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "excludes.json")
+	s1 := newExcludeStore(p)
+	if ok := s1.AddWithRuleIDs("host", "persist.example.com", nil, []int{320, 401}); !ok {
+		t.Fatalf("add failed")
+	}
+	s2 := newExcludeStore(p) // reload from disk
+	skipAll, skipIDs := s2.MatchWAFRules("persist.example.com", "/")
+	if skipAll {
+		t.Fatalf("expected rule-scoped, got skipAll=true")
+	}
+	if _, ok := skipIDs[320]; !ok {
+		t.Fatalf("rule 320 lost across reload; skipIDs=%v", skipIDs)
+	}
+	if _, ok := skipIDs[401]; !ok {
+		t.Fatalf("rule 401 lost across reload; skipIDs=%v", skipIDs)
+	}
+}
+
+// Vhost-controls panel filter: rule-scoped entries must not appear in the
+// "WAF disabled for this host" list — they only suppress specific rule IDs,
+// the WAF still runs.
+func TestFilterWholeWAFEntries_DropsRuleScoped(t *testing.T) {
+	entries := []excludeEntry{
+		{Type: "host", Value: "noisy.example.com"},                  // whole-WAF — kept
+		{Type: "host", Value: "tuned.example.com", RuleIDs: []int{321}}, // rule-scoped — dropped
+		{Type: "path", Value: "/admin"},                                // whole-WAF — kept
+	}
+	got := filterWholeWAFEntries(entries)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries (rule-scoped filtered out); got %d (%v)", len(got), got)
+	}
+	for _, e := range got {
+		if len(e.RuleIDs) > 0 {
+			t.Errorf("rule-scoped entry leaked into filtered list: %v", e)
+		}
+	}
+}
+
+// Remove targets the exact (type, value, scope, rule-ids) entry; whole-WAF
+// remove must not nuke a rule-scoped entry on the same host.
+func TestExcludeStore_RemoveDistinguishesRuleScoping(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	_ = s.Add("host", "shared.example.com", nil)                     // whole-WAF
+	_ = s.AddWithRuleIDs("host", "shared.example.com", nil, []int{320}) // rule-scoped
+
+	// Removing the whole-WAF entry leaves the rule-scoped one in place.
+	if !s.Remove("host", "shared.example.com", nil) {
+		t.Fatalf("expected whole-WAF remove to succeed")
+	}
+	skipAll, skipIDs := s.MatchWAFRules("shared.example.com", "/")
+	if skipAll {
+		t.Fatalf("after whole-WAF remove, skipAll must be false")
+	}
+	if _, ok := skipIDs[320]; !ok {
+		t.Fatalf("rule-scoped entry was wrongly removed; skipIDs=%v", skipIDs)
+	}
+
+	// Now remove the rule-scoped entry by passing the matching rule-ids.
+	if !s.RemoveWithRuleIDs("host", "shared.example.com", nil, []int{320}) {
+		t.Fatalf("expected rule-scoped remove to succeed")
+	}
+	skipAll, skipIDs = s.MatchWAFRules("shared.example.com", "/")
+	if skipAll || len(skipIDs) != 0 {
+		t.Fatalf("expected no excludes left; got skipAll=%v skipIDs=%v", skipAll, skipIDs)
+	}
+}

