@@ -62,6 +62,9 @@ var wafRuleIDs = []WAFRule{
 	{ID: 320, Name: "rule_rce", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge"},
 	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
+	{ID: 323, Name: "rule_persistence", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
+	{ID: 324, Name: "rule_rootkit_artifacts", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
+	{ID: 325, Name: "rule_lolbin", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 
 	// 4xx upload / malware
 	{ID: 401, Name: "rule_upload_filename", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
