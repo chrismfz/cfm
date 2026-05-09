@@ -36,6 +36,8 @@ func RunCLI(args []string) int {
 		return runPreviewCmd(args[1:], os.Stdout)
 	case "init":
 		return RunInit(os.Stdout)
+	case "apply":
+		return runApplyCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -114,6 +116,25 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	})
 }
 
+func runApplyCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec apply", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dryRun := fs.Bool("dry-run", false, "show what would be written / refreshed without doing it")
+	check := fs.Bool("check", false, "exit non-zero on drift; implies no writes (for monitoring)")
+	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step (proxmox-boot-tool / update-grub)")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "kernsec apply:", err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	return RunApply(w, ApplyOptions{
+		DryRun:    *dryRun,
+		Check:     *check,
+		NoRefresh: *noRefresh,
+	})
+}
+
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -138,6 +159,7 @@ Subcommands:
   status              Alias for "text" (supports --check for monitoring)
   preview             Show what `+"`apply`"+` would do given conf + host profile
   init                Write default tier=1 /etc/cfm/kernsec.conf if absent
+  apply               Write managed sysctl + boot-arg files; run sysctl --load + bootloader refresh
   help                Show this message
 
 Status / text flags:
@@ -151,6 +173,11 @@ Preview flags:
   --id  <ids>         Comma-separated rule IDs to include
   --skip <ids>        Comma-separated ad-hoc skip overrides (not persisted)
   --force-id <ids>    Comma-separated ad-hoc force overrides (not persisted)
+
+Apply flags:
+  --dry-run           Show what would change without writing
+  --check             Exit non-zero on drift (implies no writes; for monitoring)
+  --no-refresh        Skip the bootloader refresh after writing the cmdline
 
 TUI keys:
   q / Ctrl-C          Quit

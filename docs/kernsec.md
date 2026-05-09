@@ -6,9 +6,16 @@
 an audit-only component with an interactive TermUI by default and a plain-
 text mode for pipes / monitoring.
 
-**Phase 2 (rule registry + `kernsec.conf` + `apply`) is next.** kernsec will
-own a fleet-friendly declarative config so operators ship a single conf via
-`scp` / `git` / Ansible and converge with `cfm kernsec apply`.
+**Phase 2 shipped** (branch `kernsec-2`, two-pass commit history). Rule
+registry with stable IDs (`KSEC-<class>-<group>-<NNN>`), tier and group
+metadata, host-profile probe, declarative `/etc/cfm/kernsec.conf` with
+per-rule overrides, and three new subcommands:
+
+- `cfm kernsec init` — write default tier=1 conf if absent.
+- `cfm kernsec preview` — read-only diff of what `apply` would do.
+- `cfm kernsec apply` — write managed sysctl + boot-arg files atomically,
+  run `sysctl --load`, refresh the bootloader. `--dry-run` and `--check`
+  flags. First-run auto-creates the conf.
 
 **`kspp.sh` is sunset** once Phase 3 lands — kernsec absorbs everything that
 script does (KSPP sysctls + boot args + cross-bootloader backends + status
@@ -651,10 +658,10 @@ managed args, AF_ALG bind probes (extended), page_alloc.shuffle and
 pieces (module presence checks, fstab audit, host-profile probe) move
 to Phase 2 alongside the rule registry that needs them.
 
-### Phase 2 — Rule registry + `kernsec.conf` + `preview` + `apply` (sysctl + boot args)
+### Phase 2 — Rule registry + `kernsec.conf` + `preview` + `apply` (DONE — branch `kernsec-2`)
 
-The big phase. Splits naturally into two halves; ship as one PR if size
-is manageable, otherwise split into 2a / 2b.
+Shipped as two passes on the same branch. Phase 2a: registry + conf +
+preview (no writes). Phase 2b: apply with writes.
 
 **2a — registry, config, preview (no writes)**:
 
@@ -736,6 +743,28 @@ cross-component awareness.
   overlap, CLI dispatch pattern, config/packaging conventions) documented.
 - Configuration model (`kernsec.conf` + `apply`) designed.
 
+**Phase 2 — registry + conf + preview + apply** (branch `kernsec-2`)
+- Stable rule IDs across 16 KSPP rules + 67 module rules + 4 mount-audit rules.
+- `/etc/cfm/kernsec.conf` INI-flavoured with `[rule "..."] state =` overrides; round-trip safe parser + canonical Render with deterministic ordering.
+- `cfm kernsec init` (idempotent default conf), `cfm kernsec preview`
+  (filterable read-only diff with apply/skip-conf/skip-tier/skip-host
+  decisions and reasons), `cfm kernsec apply` (atomic sysctl + boot-arg
+  writes, sysctl --load, bootloader refresh, post-write verify).
+- `BootBackend` interface extended with `WriteCmdline` + `Refresh`;
+  Proxmox / BLS / GRUB implementations port `kspp.sh apply_boot_args_*`
+  including managed-keys workflow (strip stale, add desired, preserve
+  everything else).
+- Atomic-write helpers (`AtomicWriteFile`, `BackupOnce`) with
+  `.cfm-kernsec.bak` one-shot backups for `/etc/kernel/cmdline` and
+  `/etc/default/grub`.
+- Host-profile probe (KVM, containers, IPsec, wifi, DKMS, kdump,
+  Bluetooth hardware, NFS) with per-group skip reasons.
+- TUI rules table grew TIER + GROUP columns and a `/` substring filter;
+  `c` clears the filter.
+- 50 new test functions (conf parser edge cases, override resolution,
+  host-profile decision tree, sysctl render with skipped-key handling,
+  cmdline rebuild, GRUB file rewrite, atomic write + backup helpers).
+
 **Phase 1 — `cfm kernsec` audit-only + TUI** (PR #766, branch `kernsec-1`)
 - `case "kernsec":` wired in `cmd/cfm/main.go`. Top-level `cfm` usage banner
   lists the four subcommands (`/`, `live`, `text`, `status`).
@@ -761,24 +790,33 @@ cross-component awareness.
 
 ### TODO
 
-**Phase 2 — registry + `kernsec.conf` + `preview` + `apply`** (next, branch `kernsec-2`)
-- [ ] Stable rule IDs (`KSEC-<class>-<group>-<NNN>`) attached to existing rules.
-- [ ] Tier and Group fields on `SysctlRule` and `BootArg`; populate.
-- [ ] `/etc/cfm/kernsec.conf` loader (format gated on a quick check of
-      `internal/config/` conventions before coding starts).
-- [ ] `cfm kernsec init` — write a default conf when absent.
-- [ ] `cfm kernsec preview` — diff against current managed files / cmdline.
-- [ ] CLI selectors: `--tier`, `--group`, `--id`, `--skip`, `--force-id`.
-- [ ] TUI: group + tier columns, `/` filter.
-- [ ] Module rule rows, fstab audit, host-profile probe (data only — apply
-      for modules waits until Phase 3).
+**Phase 2 — registry + `kernsec.conf` + `preview` + `apply`** (DONE — branch `kernsec-2`)
+- [x] Stable rule IDs (`KSEC-<class>-<group>-<NNN>`) on every rule.
+- [x] Tier and Group fields on `SysctlRule`, `BootArg`, `ModuleRule`,
+      `MountRule`; KSPP rules + 67 modules + 4 mount audits populated.
+- [x] `/etc/cfm/kernsec.conf` INI-flavoured loader/writer with
+      `[rule "KSEC-..."] state = skip|force|default` stanzas.
+- [x] `cfm kernsec init` — write default tier=1 conf if absent.
+- [x] `cfm kernsec preview` — diff against current managed files / cmdline.
+- [x] CLI selectors: `--tier`, `--group`, `--id`, `--skip`, `--force-id`,
+      `--only-apply`.
+- [x] TUI: group + tier columns; `/` filter (substring over Display + Group + ID).
+- [x] Host-profile probe (KVM, containers, IPsec, wifi, DKMS, kdump,
+      Bluetooth hardware, NFS) with per-group skip semantics; `--force-id`
+      override.
+- [x] `cfm kernsec apply` for sysctls + boot args (modules deferred to
+      Phase 3 per design). Atomic writes, one-shot `.cfm-kernsec.bak`,
+      `sysctl --load`, bootloader refresh.
+- [x] First-run safety: `apply` auto-creates `kernsec.conf` with tier=1
+      and proceeds (per the locked first-run UX choice).
+- [x] `apply --check` for monitoring (compares desired vs current; exit 1
+      on drift; no writes).
+- [x] `apply --dry-run` and `apply --no-refresh` flags.
+- [x] Module rule rows, fstab audit, host-profile probe (data + audit).
 - [ ] Audit `KSEC-SCT-net.*` settings owned by
       `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
-      no double-write.
-- [ ] `cfm kernsec apply` for sysctls + boot args (modules deferred).
-- [ ] First-run safety in `apply` (refuse without conf, hint to `init`).
-- [ ] `apply --check` for monitoring.
-- [ ] One-shot backup model (`.cfm-kernsec.bak`).
+      no double-write. (Deferred to Phase 6 shared-library work; Phase 2
+      profile contains no `KSEC-SCT-net.*` rules.)
 
 **Phase 3 — modules + sunset `kspp.sh`**
 - [ ] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
