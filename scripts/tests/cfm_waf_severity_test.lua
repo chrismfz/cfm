@@ -735,6 +735,176 @@ do
   check(rule_id == 701,                       "46: X2-stratum — rule id 701 (folded, not new)")
 end
 
+-- ── Test 47: X1 c2_tunnel — pastebin raw URL in body (rule 702) ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "fetch=https://pastebin.com/raw/AbCdEf12",
+  }))
+  check(hit == true,                          "47: X1 c2_tunnel — hit")
+  check(reason == "WAF_C2:TUNNEL:PASTEBIN_RAW", "47: X1 c2_tunnel — reason")
+  check(action == "logonly",                  "47: X1 c2_tunnel — logonly")
+  check(rule_id == 702,                       "47: X1 c2_tunnel — rule id 702")
+end
+
+-- ── Test 48: X1 c2_tunnel — Discord CDN attachment URL ──────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "url=https://cdn.discordapp.com/attachments/123/456/payload.exe",
+  }))
+  check(hit == true,                                       "48: X1 c2_tunnel — discord hit")
+  check(reason == "WAF_C2:TUNNEL:DISCORD_CDN",             "48: X1 c2_tunnel — discord tag")
+end
+
+-- ── Test 49: X1 c2_tunnel — bare pastebin.com without /raw/ doesn't fire ─────
+do
+  disable_all_rules()
+  waf.set_rule("rule_c2_tunnel", "logonly")
+
+  -- Pastebin homepage URLs don't have /raw/ — those are usually shared by
+  -- humans, not used for C2.
+  local hit = waf.check(fresh_ctx({
+    args = "ref=https://pastebin.com/AbCdEf12",
+  }))
+  check(hit == false, "49: X1 c2_tunnel — bare pastebin.com without /raw/, no hit")
+end
+
+-- ── Test 50: X2 coinminer — xmrig invocation flag (rule 327) ────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_coinminer", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "cmd=xmrig --url stratum+tcp://pool.example:4444 -u WALLET",
+  }))
+  check(hit == true,                                          "50: X2 coinminer — hit")
+  check(reason and reason:find("COINMINER:XMRIG_URL", 1, true), "50: X2 coinminer — XMRIG_URL tag")
+  check(action == "logonly",                                  "50: X2 coinminer — logonly")
+  check(rule_id == 327,                                       "50: X2 coinminer — rule id 327")
+end
+
+-- ── Test 51: X2 coinminer — public pool hostname only ───────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_coinminer", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    body = "config=pool.minexmr.com:5555",
+  }))
+  check(hit == true,                                                "51: X2 coinminer — pool hit")
+  check(reason and reason:find("COINMINER:POOL_MINEXMR", 1, true),  "51: X2 coinminer — POOL_MINEXMR tag")
+end
+
+-- ── Test 52: B1 smuggling_cl — both Content-Length and Transfer-Encoding ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = {
+      ["Content-Length"]    = "10",
+      ["Transfer-Encoding"] = "chunked",
+    },
+    body = "abcdef",
+  }))
+  check(hit == true,                              "52: B1 smuggling_cl — hit")
+  check(reason == "WAF_HTTP_SMUGGLING:CL_AND_TE", "52: B1 smuggling_cl — CL_AND_TE tag")
+  check(action == "logonly",                      "52: B1 smuggling_cl — logonly")
+  check(rule_id == 608,                           "52: B1 smuggling_cl — rule id 608")
+end
+
+-- ── Test 53: B1 smuggling_cl — multi-CL (joined by nginx) ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Length"] = "5, 10" },
+    body    = "abc",
+  }))
+  check(hit == true,                              "53: B1 smuggling_cl — multi-CL hit")
+  check(reason == "WAF_HTTP_SMUGGLING:MULTI_CL",  "53: B1 smuggling_cl — MULTI_CL tag")
+end
+
+-- ── Test 54: B1 smuggling_cl — well-formed CL alone doesn't fire ────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_smuggling_cl", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    method  = "POST",
+    headers = { ["Content-Length"] = "12" },
+    body    = "Hello world!",
+  }))
+  check(hit == false, "54: B1 smuggling_cl — well-formed CL, no hit")
+end
+
+-- ── Test 55: B3 long_path_segment — segment ≥ 256 chars (rule 102) ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_long_path_segment", "logonly")
+
+  -- 300-char segment, well over the 256 threshold.
+  local big = string.rep("A", 300)
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    uri = "/api/" .. big,
+  }))
+  check(hit == true,                                  "55: B3 long_path_segment — hit")
+  check(reason == "WAF_LONG_PATH:SEG_300",            "55: B3 long_path_segment — SEG_300 tag")
+  check(action == "logonly",                          "55: B3 long_path_segment — logonly")
+  check(rule_id == 102,                               "55: B3 long_path_segment — rule id 102")
+end
+
+-- ── Test 56: B3 long_path_segment — short URI doesn't fire ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_long_path_segment", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    uri = "/some/normal/path/with/many/segments/index.html",
+  }))
+  check(hit == false, "56: B3 long_path_segment — normal URI, no hit")
+end
+
+-- ── Test 57: B4 header_flood — > 16 KB of non-session headers (rule 609) ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_header_flood", "logonly")
+
+  -- Build a non-session header > 16 KB. X-Custom: <17000 chars>
+  local big = string.rep("X", 17000)
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    headers = { ["X-Custom-Junk"] = big },
+  }))
+  check(hit == true,                                "57: B4 header_flood — hit")
+  check(reason and reason:find("WAF_HEADER_FLOOD:FLOOD:", 1, true),
+                                                    "57: B4 header_flood — FLOOD tag")
+  check(action == "logonly",                        "57: B4 header_flood — logonly")
+  check(rule_id == 609,                             "57: B4 header_flood — rule id 609")
+end
+
+-- ── Test 58: B4 header_flood — large Cookie alone doesn't fire ──────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_header_flood", "logonly")
+
+  -- 17 KB Cookie — legit on shared hosting with WP/cPanel session bloat.
+  local big = string.rep("c", 17000)
+  local hit = waf.check(fresh_ctx({
+    headers = { ["Cookie"] = big },
+  }))
+  check(hit == false, "58: B4 header_flood — Cookie alone is session state, no hit")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)
