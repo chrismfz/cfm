@@ -444,8 +444,9 @@ func handleDetectorsTest(w http.ResponseWriter, r *http.Request, cfgDir string) 
 		return
 	}
 	var req struct {
-		Source, File string `json:"source"`
-		Autofind     bool   `json:"autofind"`
+		Source   string `json:"source"`
+		File     string `json:"file"`
+		Autofind bool   `json:"autofind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
