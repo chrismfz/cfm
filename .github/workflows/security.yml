@@ -31,10 +31,25 @@ jobs:
           cache: true
       - run: go version
       - run: go mod tidy
+      # OpenResty/Angie embed LuaJIT, so Lua-side regression checks run
+      # against luajit to match production semantics (see the "lua" rule in
+      # Makefile). ubuntu-latest doesn't ship luajit; install it explicitly.
+      - name: Install luajit (Lua interpreter for CI checks)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit
       - name: Enforce CLI transport guardrail
         run: ./scripts/tests/check_cli_transport.sh
       - name: Enforce Lua clearance module load check
         run: ./scripts/tests/check_cfm_clearance_require.sh
+      # Lua syntax check + unit tests. luajit was installed above; both
+      # targets bail out with a clear message if it ever goes missing.
+      - name: Lua syntax check (configs/lua)
+        run: make lua
+      - name: Lua unit tests (scripts/tests/*_test.lua)
+        run: make test-lua
+      # go vet catches mutex copies, duplicate JSON tags, atomic copies,
+      # and similar correctness issues at no cost.
+      - name: go vet
+        run: go vet ./...
       - run: go build ./...
       - run: go test -race -v ./...
 

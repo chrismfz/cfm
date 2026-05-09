@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# OpenResty/Angie embed LuaJIT, so this regression check runs the module
+# under luajit to match production semantics. If you see this message and
+# you're on Debian/Ubuntu: `sudo apt-get install -y luajit`. On Alpine:
+# `apk add luajit`. On macOS: `brew install luajit`.
+if ! command -v luajit >/dev/null 2>&1; then
+  echo "❌ luajit is required for this check but was not found in PATH." >&2
+  echo "   Install it (Debian/Ubuntu: apt-get install luajit) and retry." >&2
+  exit 127
+fi
+
 luajit -e '
   package.path = "configs/lua/?.lua;" .. package.path
   local expected = "b82fcb791acec57859b989b430a826488ce2e479fdf92326bd0a2e8375a42ba4"
