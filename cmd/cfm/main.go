@@ -370,6 +370,8 @@ Usage:
   cfm kernsec live                -- force the TUI
   cfm kernsec text [--check]      -- plain-text audit; --check exits non-zero on WARN
   cfm kernsec status [--check]    -- alias for "text"
+  cfm kernsec preview [...]       -- read-only diff: what 'apply' would select (filters: --tier --group --id --skip --force-id)
+  cfm kernsec init                -- write default /etc/cfm/kernsec.conf if absent
 
   cfm clam ping
   cfm clam version
