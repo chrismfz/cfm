@@ -90,6 +90,66 @@ Anything `kspp.sh` does that isn't listed above is also in scope — the
 acceptance bar for sunsetting it is "operator runs `cfm kernsec status` and
 sees a strict superset of what `kspp.sh status` showed."
 
+**"Port" means Go rewrite, not bash exec.** cfm is a Go binary; kernsec lives
+in Go alongside the rest. Do not shell out to `kspp.sh`. The bash patterns are
+the contract; the implementation is Go. Keep `scripts/kspp.sh` as a working
+reference to diff behaviour against during development.
+
+---
+
+## Reconciliation with existing cfm internals
+
+A scan of the repo before Phase 1 starts surfaced a few things that affect the
+design. Pin them here so a later session doesn't re-discover them.
+
+**`internal/sysctl/sys_tweaks.go` already exists** and writes
+`/etc/sysctl.d/99-cfm.conf`. It manages: `nf_conntrack_max` (RAM-derived),
+TCP timeouts, `rp_filter`, `accept_redirects`/`send_redirects` (v4 + v6),
+`route_localnet`, `tcp_syncookies`, `nf_conntrack_tcp_loose`, plus a best-effort
+conntrack hashsize tweak. This overlaps directly with the planned `KSEC-SCT-net.*`
+audit group.
+
+Resolution: kernsec **audits and defers** for any setting `sys_tweaks` already
+owns — render as `EXT (managed by cfm sys_tweaks)` in `status`, never write a
+duplicate. Phase 6 (shared sysctl library) merges both packages so there's one
+audit/apply/drift loop with rule-IDs. Until then: no double-write, no fights
+over `/etc/sysctl.d/`.
+
+**CLI dispatch is a flat switch in `cmd/cfm/main.go`** (~1263 lines, no cobra).
+Existing cases include `firewall`, `dnat`, `ssl`, `webtop`, `health`, `clam`,
+`debug`. kernsec lands as `case "kernsec":` in the same style. Subcommand
+parsing (`status`, `enable`, `disable`, `preview`, `audit`) follows the
+pattern in the `firewall` and `dnat` handlers — read those before starting.
+
+**`internal/config/`** holds the existing config conventions. Match its
+format/loader for `/etc/cfm/kernsec.conf` rather than inventing a new one.
+Verify before Phase 2.
+
+**`packaging/`** is where deb/rpm bits live. Phase 3 needs:
+
+- `/etc/modprobe.d/cfm-kernsec.conf` installed/removed on package upgrade.
+- `/etc/sysctl.d/99-cfm-kernsec.conf` ditto.
+- The late systemd unit for `kernel.modules_disabled=1` (Tier 2) packaged but
+  not enabled by default.
+
+**Internal packages worth using rather than reinventing**: `internal/logging`,
+`internal/config`, `internal/diagnostics`. Don't roll a new logger.
+
+**Test infrastructure for boot-arg paths does not exist.** Phase 3's acceptance
+gate ("strict superset on Proxmox + EL + Debian") needs a `BootBackend` Go
+interface from day one so unit tests can mock Proxmox/BLS/GRUB without real
+bootloaders. Real-host verification stays a manual gate.
+
+**Open external questions** (resolve before/during Phase 1):
+
+- Are kdump or DKMS modules (zfs, nvidia) in use on cfm fleets? Affects
+  whether `kernel.kexec_load_disabled=1` and `module.sig_enforce=1` are Tier 1
+  or Tier 2 in practice.
+- ssh access to a Proxmox + EL + Debian test host trio for the Phase 3
+  acceptance gate.
+- Confirm cfm packaging format(s) actually shipped (deb? rpm? both? install
+  script?) so Phase 3 packaging work targets the right thing.
+
 ---
 
 ## Design principles
@@ -480,11 +540,17 @@ cross-component awareness.
 - AF_ALG runtime probe in status.
 - Cross-bootloader detection.
 - Design doc (this file).
+- `kspp.sh` committed to `scripts/kspp.sh` as the reference implementation
+  (slated for removal in Phase 3 once acceptance gate passes).
+- Reconciliation pass against existing cfm internals (`internal/sysctl/sys_tweaks.go`
+  overlap, CLI dispatch pattern, config/packaging conventions) documented.
 
 ### TODO
 
-- [ ] Phase 1: `cfm kernsec status` audit-only command.
-- [ ] Phase 2: rule registry, ID/group/tier selectors, `/etc/cfm/kernsec.conf`.
+- [ ] Phase 1: `cfm kernsec status` audit-only command (`case "kernsec":` in `cmd/cfm/main.go`).
+- [ ] Phase 1: define `BootBackend` Go interface (Proxmox / BLS / GRUB) with mockable detection, so unit tests don't need real bootloaders.
+- [ ] Phase 2: rule registry, ID/group/tier selectors, `/etc/cfm/kernsec.conf` (match `internal/config/` conventions).
+- [ ] Phase 2: kernsec audits `KSEC-SCT-net.*` settings owned by `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` — no double-write.
 - [ ] Phase 2: host profile detection probes.
 - [ ] Phase 3: module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`).
 - [ ] Phase 3: sysctl generator (`/etc/sysctl.d/99-cfm-kernsec.conf`).
@@ -497,6 +563,6 @@ cross-component awareness.
 - [ ] Phase 4: Tier 2 rules with host-profile gating.
 - [ ] Phase 4: late systemd unit for `kernel.modules_disabled=1`.
 - [ ] Phase 5: `--check` drift exit code + monitoring hook.
-- [ ] Phase 6: extract shared sysctl library, migrate cfm-firewall.
+- [ ] Phase 6: extract shared sysctl library, migrate `internal/sysctl/sys_tweaks.go` into it, kernsec consumes the same library.
 - [ ] Document operator runbook for fleet rollout (preview-on-one,
       enable-on-canary, expand).
