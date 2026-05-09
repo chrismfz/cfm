@@ -312,6 +312,11 @@ func main() {
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
 	case "debug":
+		// Load the apiserver bearer token before dispatch — RunDebug
+		// fetches /debug/pprof/* and /api/v1/* which require auth, and
+		// without the token in clihttp's stash those fetches return 401.
+		// Mirrors the webtop / mysqltop / health cases above.
+		clihttp.SetToken(apiAuthToken())
 		os.Exit(cli.RunDebug(os.Args[2:]))
 
 	default:

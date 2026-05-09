@@ -195,6 +195,33 @@ func TestBuildSummary_ContainsExpectedSections(t *testing.T) {
 	}
 }
 
+// When the goroutine fetch failed (apiserver 401 / unreachable), the
+// orchestrator records -1 to distinguish "fetch failed" from "the
+// daemon happens to have zero goroutines" (which can't happen for a
+// live Go runtime). The summary must render this as "unavailable" so
+// the operator isn't misled.
+func TestBuildSummary_GoroutinesUnavailableWhenFetchFailed(t *testing.T) {
+	in := summaryInput{
+		BundlePath:       "/tmp/cfm-debug/test",
+		StartedAt:        time.Date(2026, 5, 9, 16, 0, 0, 0, time.UTC),
+		Duration:         60 * time.Second,
+		DaemonPID:        1234,
+		DaemonProcStatus: "Name:\tcfm\nVmRSS:\t100 kB\n",
+		DaemonGoroutines: -1, // sentinel: fetch failed
+		Manifest:         map[string]string{},
+	}
+	out := buildSummary(in)
+	if !strings.Contains(out, "goroutines:  unavailable") {
+		t.Errorf("summary should render unavailable goroutine fetch as 'unavailable'\n--- got ---\n%s", out)
+	}
+	if strings.Contains(out, "goroutines:  0") {
+		t.Errorf("summary must NOT render -1 sentinel as 'goroutines: 0'\n--- got ---\n%s", out)
+	}
+	if strings.Contains(out, "goroutines:  -1") {
+		t.Errorf("summary must hide the -1 sentinel from the operator\n--- got ---\n%s", out)
+	}
+}
+
 func TestBuildSummary_FlagsLeakers(t *testing.T) {
 	// 100 MB → 200 MB across 1 minute = 100 MB/min; should trip the
 	// ≥ 5 MB/min leaker threshold.

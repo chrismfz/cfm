@@ -78,8 +78,13 @@ func RunDebug(args []string) int {
 		manifest.set("proc-daemon.txt", "skipped: cfm daemon process not found")
 	}
 
-	// 3) Worker discovery (angie or nginx).
-	workerPIDs, _ := pidsByCommandSubstring("worker process")
+	// 3) Worker discovery — narrow to processes managed by CFM.
+	//    Without the filter, we'd also catch the cPanel-stack `nginx`
+	//    workers, imunify360-webs, and any other vendor HTTP server
+	//    that happens to print "worker process" on its cmdline. Their
+	//    state is noise for a CFM regression investigation.
+	allWorkerPIDs, _ := pidsByCommandSubstring("worker process")
+	workerPIDs := filterCFMManagedWorkers(allWorkerPIDs)
 
 	// 4) Daemon /proc snapshot at start (used by summary's CPU% calc).
 	clkTck := int64(systemClkTck())
@@ -91,13 +96,29 @@ func RunDebug(args []string) int {
 		daemonCPUStart, _ = procCPUTicks(daemonPID)
 	}
 
-	// 5) /proc snapshot for each worker.
+	// 5) /proc snapshots for each CFM-managed worker — both the
+	//    parsed summary (category aggregates) AND the raw maps (gzipped)
+	//    so the operator can identify what file paths are being mmap'd
+	//    when they need to chase a leak. Raw maps for a leaking worker
+	//    can be hundreds of KB per file; gzip compresses ~10x.
 	if len(workerPIDs) > 0 {
 		writeFile(bundlePath, "proc-workers.txt", buildWorkerProcSnapshot(workerPIDs), manifest, "proc-workers.txt")
 		writeFile(bundlePath, "proc-maps-summary.txt", buildWorkerMapsSummary(workerPIDs), manifest, "proc-maps-summary.txt")
+		for _, pid := range workerPIDs {
+			name := fmt.Sprintf("proc-maps-raw-%d.txt.gz", pid)
+			gz, err := captureProcMapsGzipped(pid)
+			if err != nil {
+				manifest.set(name, "error: "+err.Error())
+				continue
+			}
+			writeFile(bundlePath, name, gz, manifest, name)
+		}
 	} else {
-		manifest.set("proc-workers.txt", "skipped: no worker processes found")
-		manifest.set("proc-maps-summary.txt", "skipped: no worker processes found")
+		manifest.set("proc-workers.txt", "skipped: no CFM-managed worker processes found")
+		manifest.set("proc-maps-summary.txt", "skipped: no CFM-managed worker processes found")
+	}
+	if dropped := len(allWorkerPIDs) - len(workerPIDs); dropped > 0 {
+		manifest.set("worker-discovery", fmt.Sprintf("kept=%d cfm-managed, dropped=%d unrelated (e.g. cPanel nginx, vendor HTTP servers)", len(workerPIDs), dropped))
 	}
 
 	// 6) Pprof captures + worker memory trace + daemon CPU trace —
@@ -268,7 +289,11 @@ func RunDebug(args []string) int {
 	if b, err := os.ReadFile(filepath.Join(bundlePath, "pprof-heap-top.txt")); err == nil {
 		heapTopRows = parsePProfTop(string(b), 5)
 	}
-	goCount := 0
+	// -1 sentinel = the goroutine fetch failed (apiserver down, 401, etc).
+	// The summary builder renders this as "unavailable" rather than the
+	// misleading "goroutines: 0" we used to print. A live Go daemon always
+	// has at least one goroutine, so 0 was never actually a valid value.
+	goCount := -1
 	if b, err := fetchPprof(opts.apiAddr, "goroutine?debug=1", 3*time.Second); err == nil {
 		goCount = goroutineCountFromDebug1(string(b))
 	}

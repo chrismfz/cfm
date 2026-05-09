@@ -284,7 +284,16 @@ func buildSummary(in summaryInput) string {
 			cpuPct := float64(delta) * 100.0 / (in.DaemonElapsedSec * float64(in.DaemonClkTck))
 			fmt.Fprintf(&b, "cpu_pct:     %.2f (over %.1fs window)\n", cpuPct, in.DaemonElapsedSec)
 		}
-		fmt.Fprintf(&b, "goroutines:  %d\n", in.DaemonGoroutines)
+		// Negative value is the orchestrator's "fetch failed" sentinel
+		// (e.g. apiserver returned 401, or wasn't reachable). Show
+		// "unavailable" instead of 0 so the operator doesn't read it
+		// as "the daemon has no goroutines" (which can't happen for a
+		// live Go runtime).
+		if in.DaemonGoroutines < 0 {
+			fmt.Fprintf(&b, "goroutines:  unavailable\n")
+		} else {
+			fmt.Fprintf(&b, "goroutines:  %d\n", in.DaemonGoroutines)
+		}
 		b.WriteByte('\n')
 
 		if len(in.DaemonPProfTop) > 0 {
