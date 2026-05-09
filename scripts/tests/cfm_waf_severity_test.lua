@@ -555,6 +555,88 @@ do
   check(rule_id == 322, "33: lolbin/r1 — credited to R1 (322), not R4 (325)")
 end
 
+-- ── Test 34: C2 java_deserialize — base64 prefix in body (rule 326) ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    method = "POST",
+    body   = "payload=rO0ABXNyABxqYXZhLnV0aWwuQXJyYXlMaXN0",
+  }))
+  check(hit == true,                                                "34: java_deserialize — hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:B64_PREFIX",            "34: java_deserialize — reason")
+  check(action == "logonly",                                        "34: java_deserialize — logonly")
+  check(rule_id == 326,                                             "34: java_deserialize — rule id 326")
+end
+
+-- ── Test 35: C2 java_deserialize — raw magic bytes in body ──────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  -- Construct a body with the raw 4-byte STREAM_MAGIC + STREAM_VERSION.
+  local body = "garbagepre\xac\xed\x00\x05garbagepost"
+  local hit, reason = waf.check(fresh_ctx({
+    method = "POST",
+    body   = body,
+  }))
+  check(hit == true,                                       "35: java_deserialize — raw magic hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:RAW_MAGIC",    "35: java_deserialize — RAW_MAGIC tag")
+end
+
+-- ── Test 36: C2 java_deserialize — hex form in args ──────────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "blob=aced00057372001c6a6176",
+  }))
+  check(hit == true,                                       "36: java_deserialize — hex hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:HEX_PREFIX",   "36: java_deserialize — HEX_PREFIX tag")
+end
+
+-- ── Test 37: C2 java_deserialize — Cookie header carries the gadget ──────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    headers = { ["Cookie"] = "JSESSIONID=rO0ABXNyABF" },
+  }))
+  check(hit == true,                                               "37: java_deserialize — cookie hit")
+  check(reason == "WAF_RCE:JAVA_DESERIALIZE:B64_PREFIX",           "37: java_deserialize — cookie reason")
+  check(rule_id == 326,                                            "37: java_deserialize — cookie rule id")
+end
+
+-- ── Test 38: C2 java_deserialize — benign base64 doesn't fire ────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+
+  -- "Hello world" base64 = "SGVsbG8gd29ybGQ=" — has no rO0AB prefix and
+  -- no aced0005 substring. Verifies the detector doesn't fire on random b64.
+  local hit = waf.check(fresh_ctx({
+    args = "data=SGVsbG8gd29ybGQ=",
+  }))
+  check(hit == false, "38: java_deserialize — benign base64, no hit")
+end
+
+-- ── Test 39: C2 java_deserialize — does NOT shadow PHP serialize (rule 306) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "logonly")
+  waf.set_rule("rule_serialize",        "logonly")
+
+  -- PHP serialized object — should fire 306 only, not 326.
+  local hit, _reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({
+    args = 'data=O:8:"stdClass":1:{s:1:"x";i:1;}',
+  }))
+  check(hit == true,    "39: java/php disjoint — PHP serialize fires")
+  check(rule_id == 306, "39: java/php disjoint — credited to PHP (306), not Java (326)")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)
