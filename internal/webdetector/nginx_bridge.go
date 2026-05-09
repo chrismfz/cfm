@@ -89,7 +89,7 @@ type NginxBridge struct {
 	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), and TTL so the caller
 	// can log to cfm.challenges.log with enrichment. Optional metadata
 	// Set via SetTriggerHook. Called without b.mu held.
-	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string)
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int)
 
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
@@ -299,6 +299,13 @@ type nginxIPMsg struct {
 	Host   string `json:"host,omitempty"`
 	URI    string `json:"uri,omitempty"` // prefer request_uri (includes query)
 	Method string `json:"method,omitempty"`
+
+	// WAFRuleID is the cfm_waf RULE_IDS numeric handle for the rule that
+	// produced this trigger (e.g. 101 = rule_traversal, 320 = rule_rce).
+	// Optional — older Lua clients won't send it; 0 means "unknown".
+	// Distinct from the decision-engine rule_id field returned in
+	// /nginx/decision (that one is for TrafficRuleEvalInput rules).
+	WAFRuleID int `json:"waf_rule_id,omitempty"`
 }
 
 type nginxIPClearMsg struct {
@@ -712,7 +719,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int)) {
 	if b == nil {
 		return
 	}
@@ -1580,9 +1587,9 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// Dispatched async — hook writes to SQLite and disk, which must not be
 	// allowed to exceed the Lua client's decision_timeout_ms.
 	if reason != "" && b.OnTrigger != nil {
-		ip, action, host, uri, method := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method
+		ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
 		b.dispatchHook(func() {
-			b.OnTrigger(ip, action, reason, ttl, host, uri, method)
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID)
 		})
 	}
 
@@ -1885,9 +1892,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				b.mu.Unlock()
 			}
 			if reason != "" && b.OnTrigger != nil {
-				ip, action, host, uri, method := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method
+				ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
 				b.dispatchHook(func() {
-					b.OnTrigger(ip, action, reason, ttl, host, uri, method)
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID)
 				})
 			}
 			processed++

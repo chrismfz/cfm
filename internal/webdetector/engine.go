@@ -573,7 +573,10 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 
 // RecordWAFTrigger persists a WAF trigger event emitted by OpenResty/Lua bridge
 // so UI/CLI analytics can include logonly/challenge/block triggers from cfm.waf.log.
-func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country string) {
+//
+// wafRuleID is the cfm_waf RULE_IDS numeric handle (e.g. 101 = rule_traversal).
+// Pass 0 when the source can't supply one.
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country string, wafRuleID int) {
 	if e == nil {
 		return
 	}
@@ -583,22 +586,26 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 	if action == "" {
 		action = "triggered"
 	}
+	payload := map[string]interface{}{
+		"uri":      uri,
+		"method":   method,
+		"action":   action,
+		"asn":      asn,
+		"asn_name": strings.TrimSpace(asnName),
+		"country":  strings.TrimSpace(country),
+	}
+	if wafRuleID > 0 {
+		payload["waf_rule_id"] = wafRuleID
+	}
 	e.appendHistory(HistoryEvent{
-		TsUnix: time.Now().Unix(),
-		Type:   "waf_trigger",
-		Host:   host,
-		IP:     strings.TrimSpace(ip),
-		Reason: strings.TrimSpace(reason),
-		Mode:   action,
-		TTLSec: int(ttl / time.Second),
-		Payload: map[string]interface{}{
-			"uri":      uri,
-			"method":   method,
-			"action":   action,
-			"asn":      asn,
-			"asn_name": strings.TrimSpace(asnName),
-			"country":  strings.TrimSpace(country),
-		},
+		TsUnix:  time.Now().Unix(),
+		Type:    "waf_trigger",
+		Host:    host,
+		IP:      strings.TrimSpace(ip),
+		Reason:  strings.TrimSpace(reason),
+		Mode:    action,
+		TTLSec:  int(ttl / time.Second),
+		Payload: payload,
 	})
 }
 

@@ -343,7 +343,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// into cfm.challenges.log so trigger + solved appear in the same log.
 			// action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
 			if b := w.eng.NginxBridge(); b != nil {
-				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string) {
+				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int) {
 					suffix := ""
 					var asn uint
 					var asnName, country string
@@ -381,16 +381,21 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						meta += " method=" + method
 					}
 
+					ridFmt := ""
+					if wafRuleID > 0 {
+						ridFmt = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
+					}
 					logging.LogfWAF(
-						"[waf_engine] ip=%s%s result=%s reason=%s ttl=%s%s",
+						"[waf_engine] ip=%s%s result=%s reason=%s%s ttl=%s%s",
 						ip,
 						meta,
 						action+"_triggered",
 						reason,
+						ridFmt,
 						ttl.String(),
 						suffix,
 					)
-					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID)
 
 				})
 
