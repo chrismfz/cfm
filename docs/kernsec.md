@@ -9,8 +9,11 @@ text mode for pipes / monitoring.
 **Phase 3 shipped** (branch `kernsec-3`). Module blacklist generator
 (`/etc/modprobe.d/cfm-kernsec.conf` with `blacklist X` + `install X /bin/false`
 per applied rule), module rule wiring into apply / preview / disable / status
-/ TUI. **`scripts/kspp.sh` stays for one more PR** — operators verify on
-Proxmox + EL + Debian via the acceptance gate (below) before it gets deleted.
+/ TUI. **`scripts/kspp.sh` stays in the tree** as a standalone hardening
+script for hosts that don't run cfm; it also remains the reference
+implementation for the cfm kernsec component. The historical "delete kspp.sh
+once Phase 3 lands" plan is dropped — see "kspp.sh status" below for the
+new policy.
 
 **Phase 2 shipped** (PR #769 + #770, merged to main). Rule
 registry with stable IDs (`KSEC-<class>-<group>-<NNN>`), tier and group
@@ -34,15 +37,19 @@ caused apply to write a cmdline containing only managed args, dropping
 `root=`, `ro`, `console=`, etc.) — both fixed and pinned by tests. See
 "Sweep findings" below.
 
-**Phase 4 (Tier 2 opt-in rules) is next once the kspp.sh acceptance
-gate passes on Proxmox + EL + Debian.**
+**Phase 4 (Tier 2 opt-in rules) is next.**
 
-**`kspp.sh` is sunset** once Phase 3 lands — kernsec absorbs everything that
-script does (KSPP sysctls + boot args + cross-bootloader backends + status
-verification + Copy Fail mitigation), then extends it into a first-class cfm
-component: module blacklists, additional sysctls, fstab audit, drift
-detection, and rule-ID + group selectors so operators can opt rules in or
-out at fleet scale. Single tool, single config, single audit surface.
+**`kspp.sh` status**: kept in the tree indefinitely. It started as the
+reference implementation for the cfm kernsec component; with Phase 3
+complete, kernsec absorbs everything kspp.sh does (KSPP sysctls + boot
+args + cross-bootloader backends + status verification + Copy Fail
+mitigation) and extends it (module blacklists, fstab audit, drift
+detection, rule-ID + group selectors, declarative `kernsec.conf`).
+**For cfm-managed hosts, use `cfm kernsec`.** kspp.sh remains useful
+for the standalone case — hosts where shipping cfm is overkill or
+not yet feasible. A future direction is for kspp.sh to delegate to
+`cfm kernsec` when the binary is present, falling back to its
+in-script bash logic otherwise; not implemented yet.
 
 Motivation: 2025-2026 saw multiple public kernel zero-day LPEs (Dirty Frag /
 CVE-2026-31431 Copy Fail, ksmbd parade, watch_queue / Dirty Cred). Most of the
@@ -120,8 +127,11 @@ by kernsec under rule `KSEC-BOOT-kspp-005`.
 `set -Eeuo pipefail` discipline.
 
 Anything `kspp.sh` does that isn't listed above is also in scope — the
-acceptance bar for sunsetting it is "operator runs `cfm kernsec status` and
-sees a strict superset of what `kspp.sh status` showed."
+acceptance bar for parity is "operator runs `cfm kernsec status` and
+sees a strict superset of what `kspp.sh status` showed." With Phase 3
+complete this is satisfied for the rule set; the operator-driven
+acceptance gate verifies it on real hosts. kspp.sh stays in the tree
+regardless — see "kspp.sh status" in the header.
 
 **"Port" means Go rewrite, not bash exec.** cfm is a Go binary; kernsec lives
 in Go alongside the rest. Do not shell out to `kspp.sh`. The bash patterns are
@@ -746,13 +756,14 @@ acceptance gate.
 Each phase ships independently and has a working `status` before any `apply`
 is offered.
 
-### Phase 0 — kspp.sh as reference impl (DONE, sunset on Phase 3)
+### Phase 0 — kspp.sh as reference impl + standalone (DONE)
 
 `kspp.sh` is the working proof-of-concept for the bootloader backends, sysctl
-apply/verify loop, and status checks. Its logic is the contract kernsec has to
-match. **Removed from the tree once Phase 3 lands** and `cfm kernsec status`
-demonstrably covers everything `kspp.sh status` did. Until then it stays as
-the reference behaviour.
+apply/verify loop, and status checks. Its logic is the contract kernsec
+matched. **Stays in the tree** as a standalone hardening script for
+non-cfm hosts. With Phase 3 complete, kernsec is the canonical
+implementation for cfm-managed hosts; kspp.sh continues as the
+in-script bash flow for everyone else.
 
 ### Phase 1 — `cfm kernsec status` + TUI (DONE — kernsec-1, PR #766)
 
@@ -850,7 +861,7 @@ this clean — `RunApply` loads the conf from disk and calls
 output) and calls the same helper. `WriteConf` was added for the
 persistence step. Backup files are never touched by purge.
 
-### Phase 3 — Modules (DONE — branch `kernsec-3`) + sunset `kspp.sh` (operator gate)
+### Phase 3 — Modules (DONE — branch `kernsec-3`)
 
 **Module blacklist** is now wired through the same apply / preview /
 disable / status / TUI pipes as sysctls and boot args. Single rule set
@@ -900,7 +911,7 @@ design doc.
 - `disable` empties the file (tier=0 → no rules → empty managed
   content); `disable --purge` removes it entirely. Backups preserved.
 
-**Acceptance gate (operator-driven, before kspp.sh deletion)**:
+**Acceptance gate (operator-driven)**:
 
 Run `cfm kernsec status` on:
 - A Proxmox host (validates ProxmoxBackend + proxmox-boot-tool refresh).
@@ -909,9 +920,15 @@ Run `cfm kernsec status` on:
 
 Compare the output to `bash scripts/kspp.sh status` on the same hosts.
 The kernsec output should be a strict superset (every label, every
-KSPP rule check, every probe). When all three pass, ship a follow-up
-PR that deletes `scripts/kspp.sh` and removes the
-"reference implementation" header note. Until then `kspp.sh` stays.
+KSPP rule check, every probe). When all three pass, kernsec parity
+with kspp.sh is verified for the cfm-managed surface.
+
+**`scripts/kspp.sh` is NOT deleted on gate pass.** It stays in the
+tree as a standalone hardening script for hosts that don't run cfm.
+The earlier "delete on Phase 3" plan was dropped — see "kspp.sh
+status" in the document header. Future direction: have kspp.sh
+delegate to `cfm kernsec` when the binary is present, fall back to
+its in-script bash flow otherwise.
 
 **Limitation carried over**: kernsec does not autoload modules, so
 this is purely defensive — it ensures specific modules **cannot** be
@@ -977,7 +994,8 @@ cross-component awareness.
   fake module names.
 - Doc: Phase 3 status flipped to "shipped"; acceptance gate procedure
   documented for operators (Proxmox + EL + Debian); `scripts/kspp.sh`
-  stays for one more PR until the gate passes.
+  kept as a standalone hardening script for non-cfm hosts (the
+  earlier "delete on Phase 3" plan dropped — see header).
 
 **Phase 2.5 — `cfm kernsec disable`** (branch `kernsec-disable`)
 - New subcommand. `cfm kernsec disable` persists tier=0 + applies;
@@ -1101,7 +1119,7 @@ cross-component awareness.
       no double-write. (Deferred to Phase 6 shared-library work; Phase 2
       profile contains no `KSEC-SCT-net.*` rules.)
 
-**Phase 3 — modules** (DONE — branch `kernsec-3`) **+ sunset `kspp.sh`**
+**Phase 3 — modules** (DONE — branch `kernsec-3`)
 - [x] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
       `blacklist` + `install … /bin/false` lines).
 - [x] Module rules wired into `apply`, `preview`, `disable`, `status`,
@@ -1109,9 +1127,15 @@ cross-component awareness.
 - [x] KSPP-profile rules registered under `KSEC-BOOT-kspp-*`.
 - [ ] Acceptance gate — `cfm kernsec status` ⊇ `kspp.sh status` on
       Proxmox + EL + Debian (operator-driven; can't be done from
-      this sandbox).
-- [ ] **Remove `kspp.sh` from the tree** once gate passes — separate
-      one-line PR on top of `kernsec-3`.
+      this sandbox). Verifies parity; **does not** trigger kspp.sh
+      removal — the script is kept as a standalone hardening flow
+      for non-cfm hosts.
+
+**`kspp.sh` future direction** (optional, no timeline)
+- [ ] Have `kspp.sh` detect a `cfm` binary and delegate to
+      `cfm kernsec apply` / `status` / `disable` when present, fall
+      back to its in-script bash flow otherwise. Single user-facing
+      command across both managed and standalone hosts.
 
 **Phase 4 — Tier 2 (opt-in)**
 - [ ] Tier 2 rules with host-profile gating
