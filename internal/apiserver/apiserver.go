@@ -61,8 +61,32 @@ import (
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
 
 const (
-	debugAPIServerReadTimeout  = 15 * time.Second
-	debugAPIServerWriteTimeout = 20 * time.Second
+	debugAPIServerReadTimeout = 15 * time.Second
+	// debugAPIServerWriteTimeout is the apiserver's hard, conn-level
+	// write deadline. It MUST comfortably exceed the longest pprof
+	// capture window an operator can request, otherwise the
+	// /debug/pprof/profile?seconds=N stream gets killed mid-flight and
+	// the client sees an EOF with no usable profile.
+	//
+	// Sizing: the cfm debug client caps `seconds=` at
+	// pprofCPUSecondsMax = 60 (see internal/cli/debug.go). The apiserver's
+	// PprofWriteTimeoutMiddleware adds pprofRequestedSafetyMargin = 15s,
+	// targeting an effective 75s window for a 60s profile. 90s leaves a
+	// 15s cushion above that without inviting genuinely hung handlers
+	// (still bounded). Other apiserver endpoints — WAF, exclude,
+	// history, hit-rates — all complete well under a second; raising
+	// the ceiling for them costs nothing.
+	//
+	// History: was 20s. That fired during pprof CPU profile streaming
+	// long before pprof finished sampling, even at the 60s cap (bundle 4
+	// from 2026-05-09 returned EOF on a seconds=60 request). The
+	// PprofWriteTimeoutMiddleware tries to extend the deadline via
+	// http.NewResponseController(w).SetWriteDeadline, but in practice the
+	// override didn't reach the underlying conn — the middleware logs an
+	// error if it fails, but the conn was being killed at ~20s anyway.
+	// Diagnosing the middleware is its own follow-up; bumping the base
+	// is robust regardless and unblocks `cfm debug` today.
+	debugAPIServerWriteTimeout = 90 * time.Second
 )
 
 var (
