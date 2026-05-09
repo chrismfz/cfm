@@ -925,99 +925,34 @@ local function waf_is_excluded(host, uri)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- GEO LOOKUP (lazy, per-worker singleton)
--- ─────────────────────────────────────────────────────────────────────────────
-local mmdb_ok, mmdb = pcall(require, "resty.maxminddb")
-local _geo_db     = nil
-local _geo_api_mode = "disabled"
-local _geo_init_done = false
-local _geo_warned = false
-
-local GEO_DB_PATH = os.getenv("CFM_GEO_DB") or "/var/lib/cfm/maxmind/GeoLite2-City.mmdb"
-
-if mmdb_ok and type(mmdb) == "table" then
-  if type(mmdb.init) == "function" and type(mmdb.lookup) == "function" then
-    _geo_api_mode = "init_lookup"
-  elseif type(mmdb.new) == "function" then
-    _geo_api_mode = "new_object"
-  else
-    _geo_api_mode = "disabled"
-  end
-end
-
-local function geo_warn_once(...)
-  if _geo_warned then return end
-  _geo_warned = true
-  ngx.log(ngx.WARN, ...)
-end
-
+-- GEO LOOKUP (lazy, per-worker singleton — see cfm_geo.lua)
+--
+-- IMPORTANT: This file is loaded by openresty/angie via access_by_lua_file,
+-- whose top-level chunk re-evaluates on every request. Any state you put
+-- here as a top-level local will reset on every request — including
+-- "init guards" like `_geo_init_done = false`. The previous in-line geo
+-- implementation was bitten by exactly that: lua-resty-maxminddb's `init`
+-- mmap'd the ~60 MB GeoLite2-City.mmdb afresh on every request that hit
+-- geo_country, leaking ~1 mapping/min/worker (200+ duplicate maps,
+-- ~13 GB virtual / ~0.5 GB resident per worker, confirmed via
+-- /proc/<pid>/maps captured 2026-05-09).
+--
+-- The fix is to put the state in a module loaded via `require` —
+-- package.loaded[name] caches the module per worker, so the module's
+-- top-level locals survive across requests and `mmdb.init` is called
+-- exactly once per worker. See cfm_geo.lua.
+--
+-- The same pitfall applies to other top-level locals in this file
+-- (e.g. wx_local_ts/hosts/paths around line 851). Those don't leak
+-- because the cached state is plain Lua tables (GC'd cleanly), but
+-- the cache miss costs an unnecessary cjson.decode of the shdict
+-- snapshot per request. Worth extracting in a follow-up.
+local geo_ok, geo = pcall(require, "cfm_geo")
 local function geo_country(ip_str)
-  if _geo_api_mode == "disabled" then
-    if not mmdb_ok then
-      geo_warn_once("[cfm] lua-resty-maxminddb unavailable: ", tostring(mmdb), " — geo disabled")
-    else
-      geo_warn_once("[cfm] lua-resty-maxminddb loaded but unsupported API — geo disabled")
-    end
+  if not geo_ok or type(geo) ~= "table" or type(geo.country) ~= "function" then
     return ""
   end
-
-  if _geo_api_mode == "init_lookup" then
-    if not _geo_init_done then
-      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
-      local call_ok, ok, err = pcall(mmdb.init, GEO_DB_PATH)
-      if not call_ok then
-        geo_warn_once("[cfm] geo_country: mmdb init error: ", tostring(ok), " — geo disabled")
-        _geo_api_mode = "disabled"
-        return ""
-      end
-      if not ok then
-        geo_warn_once("[cfm] geo_country: mmdb init failed: ", tostring(err), " path=", GEO_DB_PATH)
-        _geo_api_mode = "disabled"
-        return ""
-      end
-      _geo_init_done = true
-    end
-    local call_ok, res, err = pcall(mmdb.lookup, ip_str)
-    if not call_ok or not res then
-      if not call_ok and res then
-        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
-      elseif err then
-        geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
-      end
-      return ""
-    end
-    return (res.country and res.country.iso_code) or ""
-  end
-
-  if _geo_api_mode == "new_object" then
-    if not _geo_db then
-      -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing)
-      local call_ok, db, err = pcall(mmdb.new, GEO_DB_PATH)
-      if not call_ok then
-        geo_warn_once("[cfm] geo_country: mmdb new error: ", tostring(db), " — geo disabled")
-        _geo_api_mode = "disabled"
-        return ""
-      end
-      if not db then
-        geo_warn_once("[cfm] geo_country: mmdb open failed: ", tostring(err), " path=", GEO_DB_PATH)
-        _geo_api_mode = "disabled"
-        return ""
-      end
-      _geo_db = db
-    end
-    local call_ok, res, err = pcall(_geo_db.lookup, _geo_db, ip_str)
-    if not call_ok or not res then
-      if not call_ok and res then
-        geo_warn_once("[cfm] geo_country: mmdb lookup error: ", tostring(res))
-      elseif err then
-        geo_warn_once("[cfm] geo_country: mmdb lookup failed: ", tostring(err))
-      end
-      return ""
-    end
-    return (res.country and res.country.iso_code) or ""
-  end
-
-  return ""
+  return geo.country(ip_str)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
