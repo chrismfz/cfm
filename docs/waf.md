@@ -11,7 +11,8 @@
 | 5 | Static-asset bypass at nginx layer | DONE |
 | 6 | Production WAF log analysis + first-pass rule tuning | DONE — see `docs/waf-analysis-2026-05-08.md` |
 | 7 | Split `cfm_waf.lua` into engine / detectors / util files | DONE |
-| 8+ | New detector phases (W/R/C/X/B series) | TODO |
+| 8 | Stable numeric rule IDs (PR A of #10 below) — log line, `/api/v1/waf/rules`, CLI | DONE |
+| 9+ | Per-vhost per-rule exclusions (PR B of #10) + new detector phases (W/R/C/X/B) | TODO |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
 
@@ -37,7 +38,81 @@ disabled (0) < logonly (1) < challenge (2) < block (3)
 
 `_M.check` collects every match into a `hits` array and returns the strongest action. A `block` hit short-circuits later detectors (block is the cap). Rule order no longer affects enforcement.
 
-Return shape: `(hit, reason, ttl, action, hits)`. The first four are the original API; the fifth is for diagnostics and is currently unused by callers.
+Return shape: `(hit, reason, ttl, action, hits, waf_rule_id)`. The first four are the original API; `hits` is per-rule diagnostics; `waf_rule_id` is the strongest rule's stable numeric ID (see "Rule IDs" below).
+
+---
+
+## Rule IDs
+
+Every WAF rule has a stable numeric ID grouped by first digit:
+
+| Group | Range | Family |
+|---|---|---|
+| 1xx | 100-199 | Path / traversal |
+| 2xx | 200-299 | Client identity (UA) |
+| 3xx | 300-399 | Injection (SQLi, XSS, RCE, b64, deserialization, XXE, shellshock, …) |
+| 4xx | 400-499 | Upload / malware / obfuscation |
+| 5xx | 500-599 | Auth abuse / brute force |
+| 6xx | 600-699 | Header / protocol anomaly |
+| 7xx | 700-799 | SSRF / external interaction |
+| 8xx | 800-899 | Information disclosure / debug |
+| 9xx | 900-999 | Reserved (future CVE detectors, behavioural rules) |
+
+Stability rule: **never renumber** an existing ID. New rules get the next free slot in their semantic group. Drift between the Lua source of truth (`configs/lua/cfm_waf.lua`) and the Go mirror (`internal/webdetector/waf_rule_ids.go`) is caught by `TestWAFRuleIDs_LuaParity`.
+
+Current assignments:
+
+```
+1xx — Path / traversal
+  101  rule_traversal
+
+2xx — Client identity
+  201  rule_bad_ua
+
+3xx — Injection
+  301  rule_sqli                       310  rule_cmd_params
+  302  rule_xss                        311  rule_cmd_payload
+  303  rule_js_proto                   312  rule_cmd_payload_semi_cmd
+  304  rule_b64_injection              313  rule_cmd_payload_pipe_wget
+  305  rule_php_wrappers               314  rule_cmd_payload_pipe_curl
+  306  rule_serialize                  315  rule_cmd_payload_pipe_bash
+  307  rule_xxe                        316  rule_cmd_payload_pipe_sh
+  308  rule_shellshock                 317  rule_cmd_payload_backtick
+                                       320  rule_rce
+                                       321  rule_proxy_header_sqli
+
+4xx — Upload / malware
+  401  rule_upload_filename            404  rule_php_webshell_body
+  402  rule_upload_content             405  rule_script_obfuscation
+  403  rule_upload_obfuscation
+
+5xx — Auth abuse
+  501  rule_auth_burst                 510  rule_xmlrpc_multicall
+  502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
+                                       512  rule_xmlrpc_post_burst
+
+6xx — Header / protocol anomaly
+  601  rule_ctrl_chars                 605  rule_crlf_injection
+  602  rule_ip_host                    606  rule_http_smuggling
+  603  rule_header_vulns               607  rule_exploit_methods
+  604  rule_content_type_anomaly
+
+7xx — SSRF
+  701  rule_ssrf
+
+8xx — Info disclosure / debug
+  801  rule_debug_toggles
+```
+
+### Where IDs surface
+
+- **WAF log line** — `cfm.waf.log` events now carry `waf_rule_id=N` alongside the existing `reason=` field. Field is omitted when the source can't supply it (older Lua clients, internal triggers without a rule context).
+- **History persistence** — stored in `HistoryEvent.Payload["waf_rule_id"]` for forensic queries. Schema unchanged (Payload is `map[string]any`).
+- **API** — `GET /api/v1/waf/rules` returns the registry: `{rules: [{id, name, group, group_name, reason_family, default_mode}, …], groups: {"1": "path", …}}`. Sorted by ID. Used by the panel rule glossary and (in PR B) the per-vhost exclusion picker.
+- **CLI** — `cfm webtop waf rules` prints the table grouped by family. `--json` for scripts.
+- **Public Lua API** — `_M.get_rule_ids()` returns a copy of the `RULE_IDS` table; `_M.rule_id_for("rule_traversal")` looks up a single ID. Both used by tests; available to in-process Lua callers.
+
+The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **separate** namespace (decision-engine traffic-rule IDs, not WAF rule IDs). The WAF path uses `waf_rule_id` everywhere to avoid collision.
 
 ---
 
@@ -174,7 +249,7 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
 | 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
 | 9 | **Hit-rate counter + sampled hit log** | Required before promoting any rule from logonly upward. Enables data-driven rollout. | M |
-| 10 | **Stable rule IDs + per-vhost rule exclusions** (ModSec `SecRuleRemoveById`-style). Three tiers: (a) assign 10-aligned numeric IDs to each `rule_*` CFG key (1010 = `rule_traversal`, 1240 = `rule_proxy_header_sqli`, …); include `rule_id=N` in `cfm.waf.log`. (b) Extend `excludeEntry` (`internal/webdetector/exclude_store.go`) with optional `rule_ids []int` — empty = whole-WAF skip (back-compat), populated = skip only those rules for the matched host/path. Lua reads via existing `/nginx/waf/excludes` RPC and gates per-detector via a small `ctx.skip_rule_ids` set. (c) `cfm webtop waf exclude add example.com --rule 1240` + `--rule 1010,1240` + `cfm webtop waf rules`; panel UI multi-select on the vhost edit screen; new `/api/v1/waf/rules` endpoint. Reuses the existing exclude store, RPC, host normalization, glob matching, persistence, CLI scaffold, and panel API — only adds a single optional field on `excludeEntry` plus per-rule gating in Lua. Solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF. ~2 days total, ship as two PRs (Tier 1 alone, then Tier 2+3 bundled). | M |
+| 10 | **Stable rule IDs + per-vhost rule exclusions** (ModSec `SecRuleRemoveById`-style). Two-PR plan: **PR A — DONE** (this branch). Semantic 3-digit IDs grouped by first digit (1xx path, 2xx UA, 3xx injection, 4xx upload, 5xx auth, 6xx header/protocol, 7xx SSRF, 8xx info-disclosure, 9xx reserved). `waf_rule_id=N` in `cfm.waf.log` + `HistoryEvent.Payload`; `GET /api/v1/waf/rules` registry endpoint; `cfm webtop waf rules` CLI; Lua `_M.get_rule_ids()` / `_M.rule_id_for()`. See "Rule IDs" section above. **PR B — TODO**: extend `excludeEntry` (`internal/webdetector/exclude_store.go`) with optional `RuleIDs []int` (and group-prefix support, e.g. `--rule 3xx`, `--rule 310-317`); empty = whole-WAF skip (back-compat). Lua reads via existing `/nginx/waf/excludes` RPC, gates per-detector via `ctx.skip_rule_ids` set. CLI: `cfm webtop waf exclude add example.com --rule 320` / `--rule 3xx`; `/api/v1/waf/exclude/add` accepts `rule_ids` query param; panel UI multi-select on the vhost edit screen, sourced from `/api/v1/waf/rules`. Solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF. PR B sized ~1.5 days. | M |
 
 ---
 

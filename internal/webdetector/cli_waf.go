@@ -9,6 +9,7 @@
 //   cfm webtop waf clear <host>                       # back to defaults
 //   cfm webtop waf profiles                           # show available profiles
 //   cfm webtop waf engine [--hours 24 --limit 20 --top 10]  # WAF engine stats/events
+//   cfm webtop waf rules [--json]                     # cfm_waf rule registry (IDs + groups)
 //
 // Profiles:  normal | attack | strict | off
 //
@@ -29,11 +30,14 @@ package webdetector
 import (
 	"encoding/json"
 	"fmt"
-	"cfm/internal/clihttp"
+	"io"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/clihttp"
 )
 
 // runWafWebTop is the entry point for `cfm webtop waf [subcommand]`.
@@ -54,10 +58,63 @@ func runWafWebTop(baseURL string, args []string) error {
 		return runWAFExclude(baseURL, args[1:])
 	case "engine", "summary", "stats":
 		return runWAFEngineSummary(baseURL, args[1:])
+	case "rules":
+		return runWAFRules(baseURL, args[1:])
 	default:
-		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|engine|exclude]", args[0])
+		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|engine|exclude|rules]", args[0])
 	}
 }
+
+// runWAFRules prints the cfm_waf rule registry: stable ID, CFG key, group,
+// reason family, default mode. Read by operators to look up an ID before
+// using it in (PR B) per-vhost exclusions.
+//
+// Usage:
+//   cfm webtop waf rules           # all rules, grouped by family
+//   cfm webtop waf rules --json    # JSON for scripts
+func runWAFRules(baseURL string, args []string) error {
+	wantJSON := false
+	for _, a := range args {
+		if a == "--json" || a == "-json" {
+			wantJSON = true
+		}
+	}
+
+	u := strings.TrimRight(baseURL, "/") + "/api/v1/waf/rules"
+	resp, err := clihttp.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("waf rules HTTP %d", resp.StatusCode)
+	}
+
+	if wantJSON {
+		_, err := io.Copy(os.Stdout, resp.Body)
+		return err
+	}
+
+	var out struct {
+		Rules  []WAFRule         `json:"rules"`
+		Groups map[string]string `json:"groups"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+
+	fmt.Printf("%-5s  %-32s  %-16s  %-25s  %s\n", "ID", "NAME", "GROUP", "REASON_FAMILY", "DEFAULT")
+	lastGroup := -1
+	for _, r := range out.Rules {
+		if r.Group != lastGroup {
+			fmt.Println()
+			lastGroup = r.Group
+		}
+		fmt.Printf("%-5d  %-32s  %-16s  %-25s  %s\n", r.ID, r.Name, r.GroupName, r.ReasonFamily, r.DefaultMode)
+	}
+	return nil
+}
+
 
 type wafEngineSummaryCLI struct {
 	FromUnix      int64 `json:"from_unix"`

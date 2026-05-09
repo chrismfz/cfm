@@ -1040,7 +1040,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     local req_headers = ngx.req.get_headers()
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
-    local hit, reason, ttl, waf_action = waf.check({
+    local hit, reason, ttl, waf_action, _waf_hits, waf_rule_id = waf.check({
       uri = uri, args = ngx.var.args or "", method = method,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
@@ -1105,9 +1105,12 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode({
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
           reason = reason, host = p_host, uri = p_uri, method = p_meth,
+          waf_rule_id = waf_rule_id,
         }), { ip = ip, host = p_host, uri = p_uri, method = p_meth })
       end
-      log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host .. " reason=" .. tostring(reason))
+      log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host ..
+        " reason=" .. tostring(reason) ..
+        (waf_rule_id and (" waf_rule_id=" .. tostring(waf_rule_id)) or ""))
       if waf_action == "block" then return ngx.exit(CFG.block_code) end
       return
     end

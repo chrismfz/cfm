@@ -188,6 +188,93 @@ util.init(CFG)
 det.init(CFG, util)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- RULE IDS
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Stable numeric IDs grouped by first digit:
+--   1xx path / traversal
+--   2xx client identity (UA)
+--   3xx injection (SQLi, XSS, RCE, b64, deserialization, XXE, shellshock, …)
+--   4xx upload / malware / obfuscation
+--   5xx auth abuse / brute force
+--   6xx header / protocol anomaly
+--   7xx SSRF / external interaction
+--   8xx info disclosure / debug
+--   9xx reserved (future CVE detectors, behavioural rules)
+--
+-- NEVER renumber an existing ID — operators reference these in per-vhost
+-- exclusions, dashboards, and tickets. New rules get the next free slot in
+-- their semantic group.
+local RULE_IDS = {
+  -- 1xx path / traversal
+  rule_traversal               = 101,
+
+  -- 2xx client identity
+  rule_bad_ua                  = 201,
+
+  -- 3xx injection
+  rule_sqli                    = 301,
+  rule_xss                     = 302,
+  rule_js_proto                = 303,
+  rule_b64_injection           = 304,
+  rule_php_wrappers            = 305,
+  rule_serialize               = 306,
+  rule_xxe                     = 307,
+  rule_shellshock              = 308,
+  rule_cmd_params              = 310,
+  rule_cmd_payload             = 311,  -- default tag
+  rule_cmd_payload_semi_cmd    = 312,
+  rule_cmd_payload_pipe_wget   = 313,
+  rule_cmd_payload_pipe_curl   = 314,
+  rule_cmd_payload_pipe_bash   = 315,
+  rule_cmd_payload_pipe_sh     = 316,
+  rule_cmd_payload_backtick    = 317,
+  rule_rce                     = 320,
+  rule_proxy_header_sqli       = 321,
+
+  -- 4xx upload / malware
+  rule_upload_filename         = 401,
+  rule_upload_content          = 402,
+  rule_upload_obfuscation      = 403,
+  rule_php_webshell_body       = 404,
+  rule_script_obfuscation      = 405,
+
+  -- 5xx auth abuse
+  rule_auth_burst              = 501,
+  rule_auth_wp_checks          = 502,
+  rule_xmlrpc_multicall        = 510,
+  rule_xmlrpc_pingback         = 511,
+  rule_xmlrpc_post_burst       = 512,
+
+  -- 6xx header / protocol anomaly
+  rule_ctrl_chars              = 601,
+  rule_ip_host                 = 602,
+  rule_header_vulns            = 603,
+  rule_content_type_anomaly    = 604,
+  rule_crlf_injection          = 605,
+  rule_http_smuggling          = 606,
+  rule_exploit_methods         = 607,
+
+  -- 7xx SSRF
+  rule_ssrf                    = 701,
+
+  -- 8xx info disclosure / debug
+  rule_debug_toggles           = 801,
+}
+
+-- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
+-- (rule_cmd_payload = 311) when the tag isn't in the override set.
+local function rule_id_for_cmd_payload(tag)
+  if     tag == "PAY_SEMI_CMD"  then return RULE_IDS.rule_cmd_payload_semi_cmd
+  elseif tag == "PAY_PIPE_WGET" then return RULE_IDS.rule_cmd_payload_pipe_wget
+  elseif tag == "PAY_PIPE_CURL" then return RULE_IDS.rule_cmd_payload_pipe_curl
+  elseif tag == "PAY_PIPE_BASH" then return RULE_IDS.rule_cmd_payload_pipe_bash
+  elseif tag == "PAY_PIPE_SH"   then return RULE_IDS.rule_cmd_payload_pipe_sh
+  elseif tag == "PAY_BACKTICK"  then return RULE_IDS.rule_cmd_payload_backtick
+  end
+  return RULE_IDS.rule_cmd_payload
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MODE HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -294,21 +381,23 @@ function _M.check(ctx)
   -- strongest action is what cfm.lua enforces. record() returns true when
   -- it just stored a `block` hit, so the caller can `goto done` and skip
   -- remaining detectors (block is the cap, nothing can exceed it).
-  local hits         = {}
-  local final_sev    = 0
-  local final_reason = nil
-  local final_ttl    = nil
-  local final_action = nil
+  local hits          = {}
+  local final_sev     = 0
+  local final_reason  = nil
+  local final_ttl     = nil
+  local final_action  = nil
+  local final_rule_id = nil
 
-  local function record(reason, ttl, action)
+  local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
     if sev == 0 then return false end
-    hits[#hits + 1] = { reason = reason, ttl = ttl, action = action }
+    hits[#hits + 1] = { reason = reason, ttl = ttl, action = action, waf_rule_id = rule_id }
     if sev > final_sev then
-      final_sev    = sev
-      final_reason = reason
-      final_ttl    = ttl
-      final_action = action
+      final_sev     = sev
+      final_reason  = reason
+      final_ttl     = ttl
+      final_action  = action
+      final_rule_id = rule_id
     end
     return sev >= SEV_BLOCK
   end
@@ -321,7 +410,7 @@ function _M.check(ctx)
       local threshold = tonumber(CFG.bad_ua_min_score) or 4
       if score >= threshold then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode) then goto done end
+        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode, RULE_IDS.rule_bad_ua) then goto done end
       end
     end
   end
@@ -333,7 +422,7 @@ function _M.check(ctx)
       local tag = det.detect_header_vulns(headers, uri, method)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_HEADER_VULN:" .. tag, ttl, mode) then goto done end
+        if record("WAF_HEADER_VULN:" .. tag, ttl, mode, RULE_IDS.rule_header_vulns) then goto done end
       end
     end
   end
@@ -345,7 +434,7 @@ function _M.check(ctx)
       local tag = det.detect_proxy_header_sqli(headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PROXY_HDR:" .. tag, ttl, mode) then goto done end
+        if record("WAF_PROXY_HDR:" .. tag, ttl, mode, RULE_IDS.rule_proxy_header_sqli) then goto done end
       end
     end
   end
@@ -357,7 +446,7 @@ function _M.check(ctx)
       local tag = det.detect_content_type_anomaly(headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CT_ANOMALY:" .. tag, ttl, mode) then goto done end
+        if record("WAF_CT_ANOMALY:" .. tag, ttl, mode, RULE_IDS.rule_content_type_anomaly) then goto done end
       end
     end
   end
@@ -368,7 +457,7 @@ function _M.check(ctx)
     if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
-      if record("WAF_TRAVERSAL", ttl, mode) then goto done end
+      if record("WAF_TRAVERSAL", ttl, mode, RULE_IDS.rule_traversal) then goto done end
     end
   end
 
@@ -378,7 +467,7 @@ function _M.check(ctx)
     if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
-      if record("WAF_RCE", ttl, mode) then goto done end
+      if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end
     end
   end
 
@@ -389,7 +478,7 @@ function _M.check(ctx)
       local tag = det.detect_shellshock(headers, uri)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_SHELLSHOCK:" .. tag, ttl, mode) then goto done end
+        if record("WAF_SHELLSHOCK:" .. tag, ttl, mode, RULE_IDS.rule_shellshock) then goto done end
       end
     end
   end
@@ -402,11 +491,11 @@ function _M.check(ctx)
       if maction == "block" then
         local final = (mode == "logonly") and "logonly" or "block"
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final) then goto done end
+        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       elseif maction == "challenge" then
         local final = (mode == "block") and "block" or mode
         local ttl = (final == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_EXPLOIT_METHOD", ttl, final) then goto done end
+        if record("WAF_EXPLOIT_METHOD", ttl, final, RULE_IDS.rule_exploit_methods) then goto done end
       end
     end
   end
@@ -418,7 +507,7 @@ function _M.check(ctx)
       local tag = det.detect_php_wrappers(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WRAPPER:" .. tag, ttl, mode) then goto done end
+        if record("WAF_PHP_WRAPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_wrappers) then goto done end
       end
     end
   end
@@ -432,7 +521,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_ip_host, "logonly")
     if mode ~= "disabled" and det.detect_ip_host(header_string(headers["Host"] or headers["host"])) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      if record("WAF_IP_HOST", ttl, mode) then goto done end
+      if record("WAF_IP_HOST", ttl, mode, RULE_IDS.rule_ip_host) then goto done end
     end
   end
 
@@ -441,7 +530,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_ctrl_chars, "logonly")
     if mode ~= "disabled" and det.detect_ctrl_chars(args, body, headers, uri) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      if record("WAF_CTRL_CHARS", ttl, mode) then goto done end
+      if record("WAF_CTRL_CHARS", ttl, mode, RULE_IDS.rule_ctrl_chars) then goto done end
     end
   end
 
@@ -452,7 +541,7 @@ function _M.check(ctx)
       local tag = det.detect_ssrf_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_SSRF:" .. tag, ttl, mode) then goto done end
+        if record("WAF_SSRF:" .. tag, ttl, mode, RULE_IDS.rule_ssrf) then goto done end
       end
     end
   end
@@ -464,7 +553,7 @@ function _M.check(ctx)
       local tag = det.detect_js_proto(args, body, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_JS_PROTO:" .. tag, ttl, mode) then goto done end
+        if record("WAF_JS_PROTO:" .. tag, ttl, mode, RULE_IDS.rule_js_proto) then goto done end
       end
     end
   end
@@ -476,7 +565,7 @@ function _M.check(ctx)
       local tag = det.detect_php_webshell_body(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode) then goto done end
+        if record("WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
       end
     end
   end
@@ -488,7 +577,7 @@ function _M.check(ctx)
       local tag = det.detect_script_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_SCRIPT_OBFUSCATION:" .. tag, ttl, mode) then goto done end
+        if record("WAF_SCRIPT_OBFUSCATION:" .. tag, ttl, mode, RULE_IDS.rule_script_obfuscation) then goto done end
       end
     end
   end
@@ -500,7 +589,7 @@ function _M.check(ctx)
       local tag = det.detect_upload_filename(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_UPLOAD_FNAME:" .. tag, ttl, mode) then goto done end
+        if record("WAF_UPLOAD_FNAME:" .. tag, ttl, mode, RULE_IDS.rule_upload_filename) then goto done end
       end
     end
   end
@@ -514,7 +603,7 @@ function _M.check(ctx)
       local tag = det.detect_upload_content(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode) then goto done end
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content) then goto done end
       end
     end
   end
@@ -526,7 +615,7 @@ function _M.check(ctx)
       local tag = det.detect_upload_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_UPLOAD_OBFUSCATION:" .. tag, ttl, mode) then goto done end
+        if record("WAF_UPLOAD_OBFUSCATION:" .. tag, ttl, mode, RULE_IDS.rule_upload_obfuscation) then goto done end
       end
     end
   end
@@ -536,7 +625,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_xss, "challenge")
     if mode ~= "disabled" and det.detect_xss(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      if record("WAF_XSS", ttl, mode) then goto done end
+      if record("WAF_XSS", ttl, mode, RULE_IDS.rule_xss) then goto done end
     end
   end
 
@@ -545,7 +634,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" and det.detect_sqli(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      if record("WAF_SQLI", ttl, mode) then goto done end
+      if record("WAF_SQLI", ttl, mode, RULE_IDS.rule_sqli) then goto done end
     end
   end
 
@@ -556,7 +645,7 @@ function _M.check(ctx)
       local tag = det.detect_xxe(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_XXE:" .. tag, ttl, mode) then goto done end
+        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
       end
     end
   end
@@ -568,7 +657,7 @@ function _M.check(ctx)
       local tag = det.detect_crlf_injection(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CRLF:" .. tag, ttl, mode) then goto done end
+        if record("WAF_CRLF:" .. tag, ttl, mode, RULE_IDS.rule_crlf_injection) then goto done end
       end
     end
   end
@@ -580,7 +669,7 @@ function _M.check(ctx)
       local tag = det.detect_http_smuggling(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_HTTP_SMUGGLING:" .. tag, ttl, mode) then goto done end
+        if record("WAF_HTTP_SMUGGLING:" .. tag, ttl, mode, RULE_IDS.rule_http_smuggling) then goto done end
       end
     end
   end
@@ -592,10 +681,10 @@ function _M.check(ctx)
       local tag = det.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       if tag == "AUTH_WP_LOGIN_HEAD" then
         local ttl = CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_auth_wp_checks) then goto done end
       elseif tag == "AUTH_WP_LOGIN_NO_UA_REF" then
         local ttl = CFG.auth_wp_login_noua_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_auth_wp_checks) then goto done end
       end
     end
   end
@@ -612,13 +701,13 @@ function _M.check(ctx)
       local mode = rule_mode(CFG.rule_xmlrpc_multicall, "challenge")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_multicall_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode) then goto done end
+        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_multicall) then goto done end
       end
     elseif xtag == "AUTH_WP_XMLRPC_PINGBACK" then
       local mode = rule_mode(CFG.rule_xmlrpc_pingback, "challenge")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode) then goto done end
+        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback) then goto done end
       end
     end
   end
@@ -631,7 +720,7 @@ function _M.check(ctx)
       local tag = det.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
+        if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_xmlrpc_post_burst) then goto done end
       end
     end
   end
@@ -649,7 +738,7 @@ function _M.check(ctx)
         end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
-          if record("WAF_AUTH_BURST:" .. tag, ttl, mode) then goto done end
+          if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_auth_burst) then goto done end
         end
       end
 
@@ -663,7 +752,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = det.detect_cmd_param_key(args)
       if tag then
-        if record("WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode) then goto done end
+        if record("WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_cmd_params) then goto done end
       end
     end
   end
@@ -675,7 +764,7 @@ function _M.check(ctx)
       local mode = cmd_payload_mode(tag)
       if mode ~= "disabled" then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CMD_PAYLOAD:" .. tag, ttl, mode) then goto done end
+        if record("WAF_CMD_PAYLOAD:" .. tag, ttl, mode, rule_id_for_cmd_payload(tag)) then goto done end
       end
     end
   end
@@ -686,7 +775,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = det.detect_debug_toggles(args)
       if tag then
-        if record("WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode) then goto done end
+        if record("WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_debug_toggles) then goto done end
       end
     end
   end
@@ -697,7 +786,7 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = det.detect_php_serialize(args)
       if tag then
-        if record("WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode) then goto done end
+        if record("WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_serialize) then goto done end
       end
     end
   end
@@ -709,7 +798,7 @@ function _M.check(ctx)
       local tag = det.detect_b64_injection(body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_B64_INJECT:" .. tag, ttl, mode) then goto done end
+        if record("WAF_B64_INJECT:" .. tag, ttl, mode, RULE_IDS.rule_b64_injection) then goto done end
       end
     end
   end
@@ -718,7 +807,7 @@ function _M.check(ctx)
   if final_sev == 0 then
     return false, nil, nil, nil
   end
-  return true, final_reason, final_ttl, final_action, hits
+  return true, final_reason, final_ttl, final_action, hits, final_rule_id
 end
 
 function _M.should_push(shdict, ip, reason)
@@ -797,6 +886,24 @@ function _M.get_config()
     snap[k] = v
   end
   return snap
+end
+
+-- Return a shallow copy of the rule_id table so callers (Go-side mirror,
+-- /api/v1/waf/rules endpoint, panel UI) can enumerate rules without being
+-- able to mutate the live mapping.
+function _M.get_rule_ids()
+  local snap = {}
+  for k, v in pairs(RULE_IDS) do
+    snap[k] = v
+  end
+  return snap
+end
+
+-- Look up a single rule's stable numeric ID by its CFG key. Returns nil for
+-- unknown keys.
+function _M.rule_id_for(cfg_key)
+  if type(cfg_key) ~= "string" then return nil end
+  return RULE_IDS[cfg_key]
 end
 
 return _M

