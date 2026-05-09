@@ -4,6 +4,7 @@ package detectors
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -343,7 +344,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// into cfm.challenges.log so trigger + solved appear in the same log.
 			// action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
 			if b := w.eng.NginxBridge(); b != nil {
-				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int) {
+				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string) {
 					suffix := ""
 					var asn uint
 					var asnName, country string
@@ -397,6 +398,32 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					)
 					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID)
 
+					// Sampled hit log: richer JSON line for FP investigation.
+					// Lua picks the sample (CFM_WAF_SAMPLE_RATE) and only then
+					// sends the UA/Referer/Content-Type — so the cost is paid
+					// for the sampled fraction only.
+					if sample {
+						entry := map[string]any{
+							"ip":          ip,
+							"host":        host,
+							"uri":         uri,
+							"method":      method,
+							"action":      action,
+							"reason":      reason,
+							"waf_rule_id": wafRuleID,
+							"ttl_sec":     int(ttl / time.Second),
+							"ua":          ua,
+							"referer":     referer,
+							"ct":          contentType,
+							"asn":         asn,
+							"asn_name":    asnName,
+							"country":     country,
+						}
+						if b, err := json.Marshal(entry); err == nil {
+							logging.LogfWAFSampled("%s", string(b))
+						}
+					}
+
 				})
 
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
@@ -406,6 +433,14 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					// Non-blocking: InjectObserved takes e.mu.Lock but returns fast.
 					// Called from bridge's HTTP handler goroutine; must not block.
 					w.eng.InjectObserved(ip, host, uri, method, status, reason)
+				})
+
+				// Hit-rate denominator persistence: Lua periodically flushes
+				// the per-(hour,host) inspection counter snapshot. Each row is
+				// an absolute count for the bucket; UPSERT-on-conflict is what
+				// makes repeated pushes safe.
+				b.SetWAFStatsHook(func(hourUnix int64, host string, count int) {
+					w.eng.RecordWAFInspected(hourUnix, host, count)
 				})
 
 			}

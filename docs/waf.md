@@ -12,7 +12,8 @@
 | 6 | Production WAF log analysis + first-pass rule tuning | DONE — see `docs/waf-analysis-2026-05-08.md` |
 | 7 | Split `cfm_waf.lua` into engine / detectors / util files | DONE |
 | 8 | Stable numeric rule IDs (PR A of #10 below) — log line, `/api/v1/waf/rules`, CLI | DONE |
-| 9+ | Per-vhost per-rule exclusions (PR B of #10) + new detector phases (W/R/C/X/B) | TODO |
+| 9 | Hit-rate counters + sampled hit log — per-rule rate gates promotions, sampled log carries UA/Referer/CT for FP investigation. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, `cfm.waf.sampled.log`. | DONE |
+| 10+ | Per-vhost per-rule exclusions (PR B of #10) + new detector phases (W/R/C/X/B) | TODO — see "Phase 1 starting context" below |
 
 `make test-lua` runs everything under `scripts/tests/*_test.lua`. The two new files (`cfm_waf_severity_test.lua`, `cfm_waf_post_clearance_test.lua`) cover Steps 1-3.
 
@@ -113,6 +114,106 @@ Current assignments:
 - **Public Lua API** — `_M.get_rule_ids()` returns a copy of the `RULE_IDS` table; `_M.rule_id_for("rule_traversal")` looks up a single ID. Both used by tests; available to in-process Lua callers.
 
 The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **separate** namespace (decision-engine traffic-rule IDs, not WAF rule IDs). The WAF path uses `waf_rule_id` everywhere to avoid collision.
+
+---
+
+## Hit-rate measurement
+
+The rollout playbook below requires `<0.01%` FP rate before promoting `logonly → challenge → block`. Step 9 ships the data pipeline that makes this measurable.
+
+### Pipeline
+
+```
+[ cfm.lua ] every WAF check:
+   waf_insp_incr(host)            # 2 shdict.incr ops per request (per-host + global)
+   maybe_flush_waf_insp()         # 1 shdict.get; only one worker per minute wins
+                                  # the SH:add lock and POSTs the snapshot
+                  │
+                  ▼  POST /nginx/waf/stats {rows:[{hour_unix, host, count}, ...]}
+[ Go bridge ] handleWAFStats → SetWAFStatsHook → engine.RecordWAFInspected
+                  │
+                  ▼  UPSERT waf_inspected(hour_unix, host) ← absolute count
+[ SQLite ] waf_inspected table (sparse, ~240 rows/day per host)
+```
+
+Each push carries the **absolute** value of the live shdict counter for the current hour. Repeated pushes for the same `(hour, host)` simply overwrite — `INSERT … ON CONFLICT DO UPDATE`. Lock TTL races are safe (idempotent).
+
+### API: `/api/v1/waf/hit-rates`
+
+```
+GET /api/v1/waf/hit-rates?hours=24          # global, 24h
+GET /api/v1/waf/hit-rates?hours=168&host=X  # per-vhost, 7 days
+```
+
+Response (one row per registered rule, even when `hits=0`):
+
+```json
+{
+  "hours": 24,
+  "host": "",
+  "inspected_total": 1500000,
+  "rules": [
+    {"id": 320, "name": "rule_rce", "group": 3, "group_name": "injection",
+     "reason_family": "WAF_RCE", "default_mode": "block",
+     "hits": 12, "rate_pct": 0.0008, "promotion_hint": "ok_to_promote"},
+    {"id": 101, "name": "rule_traversal", "group": 1, "group_name": "path",
+     "hits": 75000, "rate_pct": 5.0, "promotion_hint": "noisy"},
+    ...
+  ]
+}
+```
+
+`promotion_hint` maps the rate to an action label:
+
+| Hint | Condition | Operator action |
+|---|---|---|
+| `ok_to_promote` | hits > 0 AND rate < 0.01% | Safe to promote one mode level |
+| `silent` | inspected > 0 AND hits == 0 | Verify rule isn't broken before promoting |
+| `review` | 0.01% ≤ rate < 1% | Investigate FP candidates before promoting |
+| `noisy` | rate ≥ 1% | Demote, tighten, or add per-host exclusion |
+| `n_a` | inspected == 0 | Insufficient data — wait for the flusher |
+
+Per-rule precision uses `json_extract(payload_json, '$.waf_rule_id')` so families with multiple rules (e.g. all `WAF_AUTH_BURST` tags) are counted separately. Events from before the rule-IDs PR have NULL `waf_rule_id` and are excluded from the per-rule view (they still appear in the legacy `WAFByRule` reason-aggregation).
+
+### CLI
+
+```
+cfm webtop waf hit-rates                      # last 24h, all hosts, grouped by family
+cfm webtop waf hit-rates --hours 168          # last week
+cfm webtop waf hit-rates --host example.com   # single vhost
+cfm webtop waf hit-rates --hint ok_to_promote # filter to promotion candidates
+cfm webtop waf hit-rates --json               # machine-readable
+```
+
+### Sampled hit log
+
+A configurable fraction of WAF triggers (`CFM_WAF_SAMPLE_RATE`, default `0.01` = 1%) gets a richer entry written to `cfm.waf.sampled.log`. The fraction is chosen in Lua so the cost of capturing UA/Referer/Content-Type is paid only on sampled events.
+
+Format: one JSON object per line.
+
+```json
+{"ip":"1.2.3.4","host":"example.com","uri":"/admin/upload",
+ "method":"POST","action":"block","reason":"WAF_UPLOAD_FNAME:PHTML",
+ "waf_rule_id":401,"ttl_sec":3600,
+ "ua":"curl/7.81.0","referer":"","ct":"multipart/form-data; boundary=...",
+ "asn":12345,"asn_name":"EXAMPLE-AS","country":"US"}
+```
+
+The main `cfm.waf.log` stays compact for high-volume monitoring. Operators tail `cfm.waf.sampled.log` for FP investigation.
+
+### Cost / regression notes
+
+| Path | Cost | Notes |
+|---|---|---|
+| Per WAF check | ~3-5µs | Two shdict incr + one get-and-compare. <1% of WAF check cost. |
+| Per flush (~1/min cluster-wide) | ~5-10ms on one request | Only the lock-winner pays it. ~1 in 6000 requests at 100 req/s. |
+| Sampling (per request) | sub-µs | `math.random() < sr` and integer compare. |
+| Sampled trigger (1% of triggers) | ~50µs | Three extra string fields in JSON + one file write. |
+| `/api/v1/waf/hit-rates` | <100ms typical | `json_extract` is O(N events in window); operator-pulled, never on hot path. |
+
+Backward compat: all new wire fields are `omitempty`; `CREATE TABLE IF NOT EXISTS` upgrades existing SQLite DBs silently.
+
+Kill switches: `CFM_WAF_STATS_ENABLE=0` disables counters + flushing; `CFM_WAF_SAMPLE_RATE=0` disables sampled log.
 
 ---
 
@@ -226,7 +327,7 @@ These are real and worth addressing, but not blocking:
 
 1. **Body truncation.** `CFM_WAF_BODY_MAX_LEN=8192` (in `cfm.lua`) means uploads/payloads larger than 8 KB skip body-inspection rules silently. Phase W2/W3/W4 won't deliver until either the cap is raised for upload endpoints or inspection is streamed.
 2. **No multipart parser.** Polyglot upload detection (W4), upload context for W2/W3, and X1-in-body assume part-aware inspection. Today the WAF runs literal `has()` over raw bytes — works for finding `<?php` in image content, but can't distinguish multipart parts (claimed CT, filename, content).
-3. **No hit-rate measurement.** The rollout playbook below requires `<0.01%` FP rate before promoting `logonly → challenge → block`, but there's no tooling to measure that today. Need shdict counters or sampled hit log.
+3. ~~**No hit-rate measurement.**~~ DONE — see "Hit-rate measurement" above. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, plus `cfm.waf.sampled.log` for FP investigation.
 4. **shdict pressure.** Auth-burst counters use shdict. Adding more counters scales contention. Per-rule benchmarks needed before Phase 5 lands.
 5. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
 6. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
@@ -248,7 +349,7 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | 6 | **CVE signature file** at `/etc/cfm/cve_signatures.txt` with hot-reload. | Needed before Phase 3 grows; ship updates without redeploying. | M |
 | 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
 | 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
-| 9 | **Hit-rate counter + sampled hit log** | Required before promoting any rule from logonly upward. Enables data-driven rollout. | M |
+| 9 | ~~**Hit-rate counter + sampled hit log**~~ DONE — see "Hit-rate measurement" section. | — | — |
 | 10 | **Stable rule IDs + per-vhost rule exclusions** (ModSec `SecRuleRemoveById`-style). Two-PR plan: **PR A — DONE** (this branch). Semantic 3-digit IDs grouped by first digit (1xx path, 2xx UA, 3xx injection, 4xx upload, 5xx auth, 6xx header/protocol, 7xx SSRF, 8xx info-disclosure, 9xx reserved). `waf_rule_id=N` in `cfm.waf.log` + `HistoryEvent.Payload`; `GET /api/v1/waf/rules` registry endpoint; `cfm webtop waf rules` CLI; Lua `_M.get_rule_ids()` / `_M.rule_id_for()`. See "Rule IDs" section above. **PR B — TODO**: extend `excludeEntry` (`internal/webdetector/exclude_store.go`) with optional `RuleIDs []int` (and group-prefix support, e.g. `--rule 3xx`, `--rule 310-317`); empty = whole-WAF skip (back-compat). Lua reads via existing `/nginx/waf/excludes` RPC, gates per-detector via `ctx.skip_rule_ids` set. CLI: `cfm webtop waf exclude add example.com --rule 320` / `--rule 3xx`; `/api/v1/waf/exclude/add` accepts `rule_ids` query param; panel UI multi-select on the vhost edit screen, sourced from `/api/v1/waf/rules`. Solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF. PR B sized ~1.5 days. | M |
 
 ---
@@ -308,3 +409,141 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ## Expected invariant
 
 A solved `cfm_clearance` means: "do not repeatedly challenge this client for the same gate." It never means: "trust this request payload" or "skip WAF inspection before origin."
+
+---
+
+## Phase 1 starting context
+
+This section is a self-contained briefing for picking up the next chunk of work (typically Phase 1 — webshell delivery: W1/W2/W3/W4) without reading prior chat history. A fresh Claude session with this file plus `docs/waf-analysis-2026-05-08.md` should be able to scope, code, test, and ship a new detector.
+
+### What's already done
+
+| Layer | What | Where |
+|---|---|---|
+| Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches | `configs/lua/cfm_waf.lua` |
+| Detectors | 39 detector functions invoked from `_M.check` | `configs/lua/cfm_waf_detectors.lua` |
+| Util | `scan_str`, `normalize`, `url_decode_once`, `header_string`, IP literal helpers | `configs/lua/cfm_waf_util.lua` |
+| Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
+| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
+| Tests | Severity, post-clearance, rule ID drift, hit-rate aggregation | `scripts/tests/cfm_waf_*_test.lua`, `internal/webdetector/waf_*_test.go` |
+| Production analysis | 2026-05-08 dataset findings + per-rule recommendations | `docs/waf-analysis-2026-05-08.md` |
+
+### How to add a new detector — template
+
+Follow the existing patterns; new code should look like the rules already in the file. Rough recipe:
+
+1. **Pick a rule name + ID.** CFG key like `rule_<short>_<short>`, ID in the right group (1xx-8xx; see "Rule IDs"). Add the entry to:
+   - `configs/lua/cfm_waf.lua` CFG table (default mode — almost always `"logonly"` for new rules; see Rollout playbook)
+   - `configs/lua/cfm_waf.lua` `RULE_IDS` table (assign next free ID in the appropriate 100-block)
+   - `internal/webdetector/waf_rule_ids.go` `wafRuleIDs` slice (mirror of the Lua table — drift is caught by `TestWAFRuleIDs_LuaParity`)
+
+2. **Write the detector function** in `configs/lua/cfm_waf_detectors.lua`. Conventions:
+   - Pure function: `function _M.detect_<name>(args ...)`. Returns a tag string on hit, `nil` on miss.
+   - Uses `util.has`, `util.scan_str`, `util.url_decode_once`, etc. for input normalisation. Avoid duplicating helpers.
+   - For body-only detectors, the engine already gates on `body_inspect_ok` (POST + non-empty body).
+   - Cap scan length: respect `CFG.max_scan_len` (default 2048) for URI/args; body detectors usually have their own limit (`CFG.<rule>_max_scan_len`).
+   - Tags should be `SCREAMING_SNAKE_CASE` and convey *which sub-pattern* matched, e.g. `PHTML`, `BASE64_BLOB`, `JNDI_LDAP`.
+
+3. **Wire it into `_M.check`** in `configs/lua/cfm_waf.lua`. Add a numbered `do … end` block in the existing flow. Pattern:
+   ```lua
+   -- ── NN) <Name> ───────────────────────────────────────────────────────
+   do
+     local mode = rule_mode(CFG.rule_<name>, "logonly")
+     if mode ~= "disabled" and body_inspect_ok then  -- gate as needed
+       local tag = det.detect_<name>(body, headers)
+       if tag then
+         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+         if record("WAF_<FAMILY>:" .. tag, ttl, mode, RULE_IDS.rule_<name>) then goto done end
+       end
+     end
+   end
+   ```
+   Always pass `RULE_IDS.rule_<name>` as the 4th `record()` arg — the test `TestWAFRuleIDs_LuaParity` and the hit-rate aggregation depend on it.
+
+4. **High-risk?** If the rule is "block-on-detection" class (RCE, webshell, LFI, deserialization), add the family prefix to `_M.WAF_HIGH_RISK_REASONS`. This routes post-clearance challenges to `block` instead of `logonly`.
+
+5. **Tests.** Add cases to `scripts/tests/cfm_waf_severity_test.lua`:
+   ```lua
+   do
+     disable_all_rules()
+     waf.set_rule("rule_<name>", "<expected mode>")
+     local hit, reason, _ttl, action, _hits, waf_rule_id = waf.check(fresh_ctx({
+       <field that triggers it>
+     }))
+     check(hit == true,                                "NN: <name> — hit=true")
+     check(reason and reason:find("WAF_<FAMILY>", 1, true), "NN: reason prefix")
+     check(action == "<expected>",                     "NN: action")
+     check(waf_rule_id == <id>,                        "NN: rule id")
+   end
+   ```
+   And one negative case (input that *shouldn't* trigger). For the most-affected rules also add a Go test that the hit appears in `/api/v1/waf/hit-rates`.
+
+6. **Rollout** — see playbook below. Default mode for new rules is **always `logonly`** until hit-rate data justifies promotion.
+
+### Rule modes & defaults
+
+```
+disabled (0) < logonly (1) < challenge (2) < block (3)
+```
+
+`record()` aggregates all hits and returns the strongest action. New rules that look high-confidence (CVE, webshell, RCE patterns) can ship `challenge` if production-validated; everything else starts at `logonly`. `block` is reserved for instant-block patterns with near-zero FP risk (Log4Shell, reverse shells, known webshell uploads on confirmed-vulnerable endpoints).
+
+### Production data to consult before designing a new rule
+
+- `docs/waf-analysis-2026-05-08.md` — the Tier 1/2/3 analysis of three production servers. **Read this before adding rules in any family already represented there**, to avoid recreating known-FP patterns. Key takeaways:
+  - Facebook scrapers hit `/.../<path>` literals — already handled in `detect_traversal`'s FB-skip
+  - Vitolighting/3xK Tech case is the canonical "scraper that triggers `WAF_PROXY_HDR` with no real attack" — solved by PR B (per-vhost exclusions), not by tightening the rule
+  - `WAF_BAD_UA` scoring covers most scanner UAs without explicit per-tool literals
+- `cfm.waf.log` and `cfm.waf.sampled.log` on a running production server — replay representative attack samples through the new detector before promoting.
+
+### Promotion gate (use the data; don't eyeball)
+
+After landing a new detector at `logonly` mode:
+
+```
+cfm webtop waf hit-rates --hours 168          # one week of evidence
+```
+
+Operator looks at the row for the new rule:
+
+| `promotion_hint` | Action |
+|---|---|
+| `ok_to_promote` | Promote one mode level: `logonly → challenge` (or `challenge → block`). Rerun for another week. |
+| `silent` | Verify the rule isn't broken — run a known-positive sample through it. If it fires, leave it at logonly and wait. If not, debug. |
+| `review` | Investigate the hits in `cfm.waf.sampled.log` (look for FPs). Tighten the rule, then rerun. Don't promote yet. |
+| `noisy` | Clear FP source. Either tighten the detector, or add a per-vhost exclusion when PR B lands. Don't promote. |
+| `n_a` | Wait for the flusher (1 minute typical). |
+
+Promote one mode level at a time. Never go `logonly → block` directly.
+
+### Phase 1 specific guidance — webshell delivery (W1, W2, W3, W4)
+
+Detailed sketch in "Detector phases" above. Concrete starting points:
+
+- **W1 (known webshell paths)** — simplest. Add a hash-set of literal path segments (`/c99.php`, `/r57.php`, `/webshell.php`, `/aspxspy.aspx`, `/p0wny.php`, …). Detector reads the URI, lowers it, checks set membership. Reason `WAF_WEBSHELL:PATH:<name>`. Default mode `challenge` (these patterns have ~zero legitimate traffic). Rule ID 4xx (suggest 410, since 401-405 are existing upload rules).
+- **W2 (webshell magic strings in body)** — extends `detect_php_webshell_body` with more literals (`b374k`, `WSO 2.5`, `c99shell`, `r57shell`, `mini.php`, `@eval(`, `@assert(`). Score-based to combine signals. Body-only (gated by `body_inspect_ok`). Already has a CFG knob (`rule_php_webshell_body`); maybe extend the existing rule rather than add a new one.
+- **W3 (PHP function obfuscation)** — extends `detect_script_obfuscation`. Add patterns: `\x65val`, `chr(101).chr(118)…`, `hex2bin($_POST[`, `base64_decode($_GET[`. Already has CFG knob (`rule_script_obfuscation`).
+- **W4 (polyglot upload)** — needs a tiny multipart parser (or settle for naïve raw-bytes scan of first 64 bytes after `Content-Type: image/*`). Reason `WAF_UPLOAD_CONTENT:POLYGLOT`. Foundational because W2/W3 in upload context also need this. New rule ID; suggest 411.
+
+### Files you'll edit for any new detector
+
+| File | Why |
+|---|---|
+| `configs/lua/cfm_waf.lua` | CFG entry, RULE_IDS entry, `_M.check` call site |
+| `configs/lua/cfm_waf_detectors.lua` | Detector function |
+| `configs/lua/cfm_waf_util.lua` | New shared helpers (only if reused across multiple detectors) |
+| `internal/webdetector/waf_rule_ids.go` | Mirror entry — drift caught by `TestWAFRuleIDs_LuaParity` |
+| `scripts/tests/cfm_waf_severity_test.lua` | Positive + negative test cases |
+| `docs/waf.md` | Mark roadmap row done; mention the new rule in Rule IDs section if it's a new ID |
+
+### Files you'll edit for the next infrastructure work
+
+- **Per-vhost rule exclusion (PR B of #10)**: `internal/webdetector/exclude_store.go` (extend `excludeEntry` with `RuleIDs []int`), `configs/lua/cfm_waf.lua` (extend `_M.check` to honor `ctx.skip_rule_ids`), `configs/lua/cfm.lua` (read rule IDs from waf-excludes RPC), `internal/webdetector/cli_exclude.go` (`--rule` flag), `internal/webdetector/exclude_api_handlers.go` (accept `rule_ids` query param). Plan in roadmap row #10.
+
+### Don't do these things
+
+- Don't promote a rule to `block` without one full week at `challenge` first. Operator complaints in week 1 of `challenge` are how you find the false positives.
+- Don't add new helpers to `cfm_waf.lua` — they belong in `cfm_waf_util.lua` (and need `_M.init(cfg)` exposure if they need CFG).
+- Don't bypass `record()` to handle a hit specially. The severity-aggregation engine is load-bearing; one rule firing block must override another rule firing logonly on the same request.
+- Don't renumber existing rule IDs. Operators reference them in tickets, exclusion lists, and dashboards.
+- Don't add detectors that match Apache's default `Reject` patterns (`../`, certain methods); the prod analysis showed those are already handled upstream and CFM only matters when Apache is misconfigured.

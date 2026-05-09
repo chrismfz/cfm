@@ -10,6 +10,7 @@
 //   cfm webtop waf profiles                           # show available profiles
 //   cfm webtop waf engine [--hours 24 --limit 20 --top 10]  # WAF engine stats/events
 //   cfm webtop waf rules [--json]                     # cfm_waf rule registry (IDs + groups)
+//   cfm webtop waf hit-rates [--hours N] [--host X] [--json] [--hint H]  # per-rule hit count + rate
 //
 // Profiles:  normal | attack | strict | off
 //
@@ -60,9 +61,98 @@ func runWafWebTop(baseURL string, args []string) error {
 		return runWAFEngineSummary(baseURL, args[1:])
 	case "rules":
 		return runWAFRules(baseURL, args[1:])
+	case "hit-rates", "hitrates", "rates":
+		return runWAFHitRates(baseURL, args[1:])
 	default:
-		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|engine|exclude|rules]", args[0])
+		return fmt.Errorf("unknown waf subcommand %q\nusage: cfm webtop waf [set|clear|status|profiles|engine|exclude|rules|hit-rates]", args[0])
 	}
+}
+
+// runWAFHitRates prints per-rule hit count and rate over the requested
+// window, plus a promotion hint mapping the rate to the rollout playbook's
+// <0.01% gate. Operators read this before promoting any rule's mode.
+//
+// Usage:
+//   cfm webtop waf hit-rates                        # last 24h, all hosts
+//   cfm webtop waf hit-rates --hours 168            # last week
+//   cfm webtop waf hit-rates --host example.com     # single vhost
+//   cfm webtop waf hit-rates --json                 # machine-readable
+//   cfm webtop waf hit-rates --hint ok_to_promote   # filter by promotion hint
+func runWAFHitRates(baseURL string, args []string) error {
+	hours := 24
+	host := ""
+	wantJSON := false
+	filterHint := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json", "-json":
+			wantJSON = true
+		case "--hours":
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					hours = n
+				}
+				i++
+			}
+		case "--host":
+			if i+1 < len(args) {
+				host = args[i+1]
+				i++
+			}
+		case "--hint":
+			if i+1 < len(args) {
+				filterHint = args[i+1]
+				i++
+			}
+		}
+	}
+
+	q := url.Values{}
+	q.Set("hours", strconv.Itoa(hours))
+	if host != "" {
+		q.Set("host", host)
+	}
+	u := strings.TrimRight(baseURL, "/") + "/api/v1/waf/hit-rates?" + q.Encode()
+	resp, err := clihttp.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("waf hit-rates HTTP %d", resp.StatusCode)
+	}
+
+	if wantJSON {
+		_, err := io.Copy(os.Stdout, resp.Body)
+		return err
+	}
+
+	var out HitRatesResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+
+	hostLabel := out.Host
+	if hostLabel == "" {
+		hostLabel = "(global)"
+	}
+	fmt.Printf("WAF hit rates — host=%s, last %dh, total inspections=%d\n\n",
+		hostLabel, out.Hours, out.InspectedTotal)
+	fmt.Printf("%-5s  %-32s  %-16s  %8s  %8s  %s\n", "ID", "NAME", "GROUP", "HITS", "RATE_%", "PROMOTION_HINT")
+
+	lastGroup := -1
+	for _, r := range out.Rules {
+		if filterHint != "" && r.PromotionHint != filterHint {
+			continue
+		}
+		if r.Group != lastGroup && filterHint == "" {
+			fmt.Println()
+			lastGroup = r.Group
+		}
+		fmt.Printf("%-5d  %-32s  %-16s  %8d  %8.4f  %s\n",
+			r.ID, r.Name, r.GroupName, r.Hits, r.RatePct, r.PromotionHint)
+	}
+	return nil
 }
 
 // runWAFRules prints the cfm_waf rule registry: stable ID, CFG key, group,

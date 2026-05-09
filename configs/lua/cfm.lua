@@ -146,6 +146,18 @@ local CFG = {
   waf_after_clearance_high_risk =
       ({ block = "block", logonly = "logonly" })[os.getenv("CFM_WAF_AFTER_CLEARANCE_HIGH_RISK") or ""]
       or "block",
+
+  -- Hit-rate counters: every WAF inspection increments a per-host bucketed
+  -- shdict counter; one worker periodically flushes the snapshot to Go via
+  -- /nginx/waf/stats. Required by the rollout playbook (gate promotions on
+  -- <0.01% hit-rate evidence). See docs/waf.md "Hit-rate measurement".
+  waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
+  waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
+
+  -- Sampled hit log: this fraction of WAF triggers gets a richer log entry
+  -- written to cfm.waf.sampled.log (URI, UA, Referer, content-type).
+  -- 0 disables sampling entirely; default 0.01 = 1% of hits.
+  waf_sample_rate     = tonumber(os.getenv("CFM_WAF_SAMPLE_RATE") or "0.01"),
 }
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -580,6 +592,63 @@ local function observe_waf(ip, host, uri, method, status, reason)
     ip = ip, host = host or "", uri = uri or "/",
     method = method or "", status = status or 403, reason = reason or "",
   }), { ip = ip, host = host, uri = uri, method = method })
+end
+
+-- ── WAF inspection counters (hit-rate denominator) ──────────────────────────
+-- Counts every waf.check() call into per-host hour-bucketed shdict keys.
+-- Operator queries via /api/v1/waf/hit-rates compute hit-count / inspections
+-- per rule per window — needed by the rollout playbook to gate promotions.
+--
+-- Shdict layout (TTL 25h so the previous hour's bucket survives one rollover):
+--   waf_insp:hr=<hour_unix>|host=<host>   per-host counter
+--   waf_insp:hr=<hour_unix>|host=          empty host = global total
+--   waf_insp:last_flush                   ngx.now() of the last successful flush
+--   waf_insp:flush_lock                   one-worker mutex (TTL ~= flush window)
+local function waf_insp_incr(host)
+  if not SH or not CFG.waf_stats_enable then return end
+  local hr = math.floor(ngx.time() / 3600) * 3600
+  local h = host or ""
+  -- 25h TTL so an hourly bucket lives long enough for the post-rollover flush
+  -- to push its final value before SQLite-side eviction.
+  SH:incr("waf_insp:hr=" .. hr .. "|host=" .. h, 1, 0, 90000)
+  if h ~= "" then
+    SH:incr("waf_insp:hr=" .. hr .. "|host=", 1, 0, 90000)
+  end
+end
+
+-- maybe_flush_waf_insp opportunistically pushes the current shdict snapshot
+-- to /nginx/waf/stats. Called inline from cfm.lua's request hot path; cheap
+-- in the common case (one shdict get + numeric compare). Only runs the
+-- flush body once per CFG.waf_stats_flush_sec across all workers, gated by
+-- shdict:add() (atomic claim on the lock key).
+--
+-- Pushes ABSOLUTE counts per (hour, host); Go upserts. Repeated pushes for
+-- the same hour overwrite cleanly. At hour rollover the current bucket
+-- starts fresh; the previous hour's bucket gets one more push then ages out.
+local function maybe_flush_waf_insp()
+  if not SH or not CFG.waf_stats_enable then return end
+  local last = SH:get("waf_insp:last_flush") or 0
+  local now = ngx.now()
+  if (now - last) < CFG.waf_stats_flush_sec then return end
+  -- Atomic claim: SH:add returns false if the key already exists. TTL on
+  -- the lock matches the flush window so a crashed flusher unblocks others.
+  local ok = SH:add("waf_insp:flush_lock", 1, CFG.waf_stats_flush_sec)
+  if not ok then return end
+  SH:set("waf_insp:last_flush", now)
+
+  local rows = {}
+  local keys = SH:get_keys(2000) or {}
+  for _, k in ipairs(keys) do
+    if k:sub(1, 12) == "waf_insp:hr=" then
+      local hr_str, h = k:match("^waf_insp:hr=(%d+)|host=(.*)$")
+      local cnt = SH:get(k)
+      if hr_str and cnt and cnt > 0 then
+        rows[#rows + 1] = { hour_unix = tonumber(hr_str), host = h or "", count = cnt }
+      end
+    end
+  end
+  if #rows == 0 then return end
+  rpc_call("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
 end
 
 local function touch_ok_scoped(ip, host, scope)
@@ -1046,6 +1115,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = req_body, self_origin = self_origin,
     })
+    -- Hit-rate denominator: every WAF inspection counts, regardless of
+    -- whether a rule fired. maybe_flush_waf_insp piggybacks on the request
+    -- to push the snapshot to Go without needing an init_worker timer.
+    waf_insp_incr(host)
+    maybe_flush_waf_insp()
     if clamav_ok then clamav.notify(ip, hit and reason or nil) end
     if hit then
       waf_action = waf_action or "challenge"
@@ -1102,11 +1176,24 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       end
 
       if waf.should_push and waf.should_push(SH, ip, reason) then
-        rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode({
+        local push = {
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
           reason = reason, host = p_host, uri = p_uri, method = p_meth,
           waf_rule_id = waf_rule_id,
-        }), { ip = ip, host = p_host, uri = p_uri, method = p_meth })
+        }
+        -- Sampled hit log: include extra forensic context for a fraction of
+        -- triggers so operators can verify FP suspicions without needing
+        -- per-event headers in the main log. Sample-rate is configurable
+        -- via CFM_WAF_SAMPLE_RATE (default 0.01).
+        local sr = CFG.waf_sample_rate or 0
+        if sr > 0 and math.random() < sr then
+          push.sample        = true
+          push.ua            = req_headers["user-agent"]
+          push.referer       = req_headers["referer"]
+          push.content_type  = req_headers["content-type"]
+        end
+        rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode(push),
+          { ip = ip, host = p_host, uri = p_uri, method = p_meth })
       end
       log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host ..
         " reason=" .. tostring(reason) ..
