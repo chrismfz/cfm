@@ -372,6 +372,7 @@ Usage:
   cfm kernsec status [--check]    -- alias for "text"
   cfm kernsec preview [...]       -- read-only diff: what 'apply' would select (filters: --tier --group --id --skip --force-id)
   cfm kernsec init                -- write default /etc/cfm/kernsec.conf if absent
+  cfm kernsec apply [--dry-run]   -- write sysctl + boot-arg files, run sysctl --load + bootloader refresh; --check exits non-zero on drift
 
   cfm clam ping
   cfm clam version
