@@ -18,14 +18,76 @@ func TestResolve_Tier0SkipsEverything(t *testing.T) {
 
 func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{})
+	// Tier 1 rules should Apply; Tier 2 rules should SkipByTier.
+	for _, r := range rs.Sysctls {
+		if r.Tier == Tier1 && r.Decision != Apply {
+			t.Errorf("Tier 1 sysctl %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		}
+		if r.Tier == Tier2 && r.Decision != SkipByTier {
+			t.Errorf("Tier 2 sysctl %q at tier 1: decision %v, want SkipByTier", r.ID, r.Decision)
+		}
+	}
+	for _, r := range rs.BootArgs {
+		if r.Tier == Tier1 && r.Decision != Apply {
+			t.Errorf("Tier 1 boot %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		}
+		if r.Tier == Tier2 && r.Decision != SkipByTier {
+			t.Errorf("Tier 2 boot %q at tier 1: decision %v, want SkipByTier", r.ID, r.Decision)
+		}
+	}
+}
+
+func TestResolve_Tier2AppliesAll(t *testing.T) {
+	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{})
+	// At tier=2 with empty host profile, every rule should Apply.
 	for _, r := range rs.Sysctls {
 		if r.Decision != Apply {
-			t.Errorf("sysctl %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+			t.Errorf("sysctl %q at tier 2: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
 		}
 	}
 	for _, r := range rs.BootArgs {
 		if r.Decision != Apply {
-			t.Errorf("boot %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+			t.Errorf("boot %q at tier 2: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		}
+	}
+}
+
+func TestResolve_Tier2HostProfileGates(t *testing.T) {
+	// HasContainers → tier2.namespace skipped.
+	// HasDKMS       → tier2.lockdown + tier2.module-sig-enforce skipped.
+	conf := &Conf{Tier: Tier2}
+	profile := HostProfile{HasContainers: true, HasDKMS: true}
+	rs := Resolve(conf, profile)
+
+	wantSkip := map[string]bool{
+		"KSEC-SCT-tier2.namespace-001":            true,
+		"KSEC-SCT-tier2.namespace-002":            true,
+		"KSEC-BOOT-tier2.lockdown-001":            true,
+		"KSEC-BOOT-tier2.module-sig-enforce-001":  true,
+	}
+	for id := range wantSkip {
+		var got *ResolvedRule
+		for i := range rs.Sysctls {
+			if rs.Sysctls[i].ID == id {
+				got = &rs.Sysctls[i]
+				break
+			}
+		}
+		if got == nil {
+			for i := range rs.BootArgs {
+				if rs.BootArgs[i].ID == id {
+					got = &rs.BootArgs[i]
+					break
+				}
+			}
+		}
+		if got == nil {
+			t.Errorf("rule %q not in resolved set", id)
+			continue
+		}
+		if got.Decision != SkipByHostProfile {
+			t.Errorf("rule %q under host profile: got %v, want SkipByHostProfile (reason=%q)",
+				id, got.Decision, got.Reason)
 		}
 	}
 }

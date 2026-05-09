@@ -71,9 +71,11 @@ func BuildAuditRows() []AuditRow {
 	loaded := LoadedModules()
 	managedBlacklist := ParseManagedBlacklist()
 
-	rows := make([]AuditRow, 0, len(KSPPSysctls)+len(KSPPBootArgs)+len(Tier1Modules))
+	allSysctls := AllSysctls()
+	allBootArgs := AllBootArgs()
+	rows := make([]AuditRow, 0, len(allSysctls)+len(allBootArgs)+len(Tier1Modules))
 
-	for _, r := range KSPPSysctls {
+	for _, r := range allSysctls {
 		state, found := CheckSysctl(r)
 		row := AuditRow{
 			ID:            r.ID,
@@ -97,7 +99,7 @@ func BuildAuditRows() []AuditRow {
 		rows = append(rows, row)
 	}
 
-	for _, a := range KSPPBootArgs {
+	for _, a := range allBootArgs {
 		curState, _ := CheckBootArg(curTokens, a)
 		nxtState, _ := CheckBootArg(nxtTokens, a)
 		row := AuditRow{

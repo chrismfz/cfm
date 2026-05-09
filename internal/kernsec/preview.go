@@ -177,7 +177,11 @@ func applyAdHocOverrides(conf *Conf, opts PreviewOptions) *Conf {
 	for _, id := range opts.Forces {
 		conf.Overrides[id] = OverrideForce
 	}
-	if opts.Tier != 0 && opts.Tier < conf.Tier {
+	if opts.Tier != 0 {
+		// `--tier N` overrides whatever's in the conf for this preview
+		// invocation. Operators use it both to clamp down (preview as
+		// if I dropped to tier=1) and to bump up (preview as if I
+		// raised to tier=2). Not persisted.
 		conf.Tier = opts.Tier
 	}
 	return conf

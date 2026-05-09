@@ -62,10 +62,10 @@ func TestPresence(t *testing.T) {
 
 func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	// Smoke: the function must not panic and must return one row per
-	// rule in the static profile, with kinds split correctly. State
+	// rule across both tiers, with kinds split correctly. State
 	// values depend on the runtime kernel and aren't asserted.
 	rows := BuildAuditRows()
-	wantTotal := len(KSPPSysctls) + len(KSPPBootArgs) + len(Tier1Modules)
+	wantTotal := len(AllSysctls()) + len(AllBootArgs()) + len(Tier1Modules)
 	if len(rows) != wantTotal {
 		t.Fatalf("BuildAuditRows() returned %d rows, want %d", len(rows), wantTotal)
 	}
@@ -91,13 +91,13 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 			t.Errorf("row has empty Affects: %+v", r)
 		}
 	}
-	if sysctlCount != len(KSPPSysctls) {
-		t.Errorf("sysctl row count %d, want %d", sysctlCount, len(KSPPSysctls))
+	if sysctlCount != len(AllSysctls()) {
+		t.Errorf("sysctl row count %d, want %d", sysctlCount, len(AllSysctls()))
 	}
 	if moduleCount != len(Tier1Modules) {
 		t.Errorf("module row count %d, want %d", moduleCount, len(Tier1Modules))
 	}
-	if bootCount != len(KSPPBootArgs) {
-		t.Errorf("boot row count %d, want %d", bootCount, len(KSPPBootArgs))
+	if bootCount != len(AllBootArgs()) {
+		t.Errorf("boot row count %d, want %d", bootCount, len(AllBootArgs()))
 	}
 }

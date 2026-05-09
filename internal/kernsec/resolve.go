@@ -58,7 +58,7 @@ type ResolvedSet struct {
 func (s ResolvedSet) ApplySysctls() []SysctlRule {
 	want := decisionIDSet(s.Sysctls, Apply)
 	out := make([]SysctlRule, 0, len(want))
-	for _, r := range KSPPSysctls {
+	for _, r := range AllSysctls() {
 		if _, ok := want[r.ID]; ok {
 			out = append(out, r)
 		}
@@ -70,7 +70,7 @@ func (s ResolvedSet) ApplySysctls() []SysctlRule {
 func (s ResolvedSet) ApplyBootArgs() []BootArg {
 	want := decisionIDSet(s.BootArgs, Apply)
 	out := make([]BootArg, 0, len(want))
-	for _, r := range KSPPBootArgs {
+	for _, r := range AllBootArgs() {
 		if _, ok := want[r.ID]; ok {
 			out = append(out, r)
 		}
@@ -109,10 +109,10 @@ func decisionIDSet(rs []ResolvedRule, want Decision) map[string]struct{} {
 func Resolve(conf *Conf, profile HostProfile) ResolvedSet {
 	out := ResolvedSet{Profile: profile}
 
-	for _, r := range KSPPSysctls {
+	for _, r := range AllSysctls() {
 		out.Sysctls = append(out.Sysctls, decideSysctl(r, conf, profile))
 	}
-	for _, r := range KSPPBootArgs {
+	for _, r := range AllBootArgs() {
 		out.BootArgs = append(out.BootArgs, decideBootArg(r, conf, profile))
 	}
 	for _, r := range Tier1Modules {

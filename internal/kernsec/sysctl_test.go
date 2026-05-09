@@ -29,27 +29,60 @@ func TestKSPPProfileSanity(t *testing.T) {
 	}
 	// Every BootArg key must be in ManagedBootArgKeys, otherwise enable
 	// would add args that disable couldn't remove.
-	for _, a := range KSPPBootArgs {
+	for _, a := range AllBootArgs() {
 		if !IsManagedKey(a.Key) {
-			t.Errorf("KSPPBootArgs key %q not in ManagedBootArgKeys", a.Key)
+			t.Errorf("boot arg key %q not in ManagedBootArgKeys", a.Key)
 		}
 		if a.Description == "" {
-			t.Errorf("KSPPBootArgs %q has empty Description", a.Key)
+			t.Errorf("%q has empty Description", a.Key)
 		}
 		if a.Affects == "" {
-			t.Errorf("KSPPBootArgs %q has empty Affects", a.Key)
+			t.Errorf("%q has empty Affects", a.Key)
+		}
+		if a.ID == "" {
+			t.Errorf("%q has empty ID", a.Key)
+		}
+		if a.Tier != Tier1 && a.Tier != Tier2 {
+			t.Errorf("%q has invalid Tier %d", a.Key, a.Tier)
 		}
 	}
-	// Every sysctl rule must have a non-empty key, value, description and affects.
-	for _, r := range KSPPSysctls {
+	// Every sysctl rule must have a non-empty key, value, description, affects.
+	for _, r := range AllSysctls() {
 		if r.Key == "" || r.Value == "" {
-			t.Errorf("KSPPSysctls has empty key/value: %+v", r)
+			t.Errorf("sysctl has empty key/value: %+v", r)
 		}
 		if r.Description == "" {
-			t.Errorf("KSPPSysctls %q has empty Description", r.Key)
+			t.Errorf("sysctl %q has empty Description", r.Key)
 		}
 		if r.Affects == "" {
-			t.Errorf("KSPPSysctls %q has empty Affects", r.Key)
+			t.Errorf("sysctl %q has empty Affects", r.Key)
 		}
+		if r.ID == "" {
+			t.Errorf("sysctl %q has empty ID", r.Key)
+		}
+		if r.Tier != Tier1 && r.Tier != Tier2 {
+			t.Errorf("sysctl %q has invalid Tier %d", r.Key, r.Tier)
+		}
+	}
+	// Tier 2 rules must exist (Phase 4 invariant).
+	if len(Tier2Sysctls) == 0 {
+		t.Error("Tier2Sysctls is empty")
+	}
+	if len(Tier2BootArgs) == 0 {
+		t.Error("Tier2BootArgs is empty")
+	}
+	// Rule IDs must be unique across both tiers.
+	ids := map[string]struct{}{}
+	for _, r := range AllSysctls() {
+		if _, dup := ids[r.ID]; dup {
+			t.Errorf("duplicate sysctl ID: %q", r.ID)
+		}
+		ids[r.ID] = struct{}{}
+	}
+	for _, a := range AllBootArgs() {
+		if _, dup := ids[a.ID]; dup {
+			t.Errorf("duplicate boot arg ID: %q", a.ID)
+		}
+		ids[a.ID] = struct{}{}
 	}
 }

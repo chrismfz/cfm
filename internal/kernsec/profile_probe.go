@@ -53,10 +53,24 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasWifi {
 			return "host has wifi hardware or cfg80211 loaded"
 		}
-	case "boot.lockdown":
-		// module.sig_enforce=1 breaks DKMS modules.
+	case "boot.lockdown", "tier2.lockdown":
+		// lockdown=integrity blocks unsigned module load.
 		if p.HasDKMS {
-			return "host has DKMS modules loaded (zfs / nvidia)"
+			return "host has DKMS modules loaded (zfs / nvidia) — lockdown=integrity would block them"
+		}
+	case "tier2.module-sig-enforce":
+		// module.sig_enforce=1 also breaks DKMS modules — it
+		// requires every module to be kernel-signed and DKMS
+		// modules are usually not signed by the distro.
+		if p.HasDKMS {
+			return "host has DKMS modules loaded (zfs / nvidia) — module.sig_enforce would block them"
+		}
+	case "tier2.namespace":
+		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0
+		// break Chromium sandbox, bwrap, rootless podman, some
+		// cPanel jail variants. Skip when containers are running.
+		if p.HasContainers {
+			return "host has containers running (runc / containerd / lxc / podman)"
 		}
 	case "boot.kexec":
 		if p.HasKdump {
