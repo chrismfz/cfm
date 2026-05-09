@@ -3,7 +3,16 @@
 One-shot capture of everything an engineer needs to triage a regression
 in the cfm daemon or angie/openresty workers (CPU spike, memory leak,
 hung handler, latency, weird traffic). Drops a directory of plain-text
-+ pprof artifacts into `/tmp/cfm-debug/<UTC-timestamp>/`.
++ pprof artifacts into `/var/lib/cfm/debug/<UTC-timestamp>/`.
+
+> **Why /var/lib/cfm/debug, not /tmp?** `/tmp` is mounted noexec on
+> many production hosts. `go tool pprof` (used to render the
+> `pprof-*-top.txt` files) extracts a helper binary to `$TMPDIR`
+> and fork+exec's it; on a noexec /tmp the exec fails with
+> "permission denied" and the top renderings are lost. The
+> `/var/lib/cfm` tree is writable + exec by project convention
+> (already used by `client_body_temp` and `proxy_temp` in
+> install-openresty.sh).
 
 ## Quick start
 
@@ -22,7 +31,7 @@ cfm debug --no-pprof
 ```
 
 The bundle path is printed at the end. Share the directory or tarball
-it (`tar -C /tmp/cfm-debug -czf cfm-debug.tgz <ts>/`) and send to
+it (`tar -C /var/lib/cfm/debug -czf cfm-debug.tgz <ts>/`) and send to
 whoever is helping triage.
 
 ## What's in the bundle
@@ -56,7 +65,7 @@ whoever is helping triage.
 |---|---|---|
 | `--duration` | `60s` | Trace window for pprof + worker mem + daemon CPU traces. Min 1 s, max 10 m. |
 | `--quick` | off | Shortcut for `--duration 30s --no-logs`. ~45 s total. |
-| `--output` | `/tmp/cfm-debug` | Bundle root directory. Bundle goes in `<root>/<UTC-timestamp>`. |
+| `--output` | `/var/lib/cfm/debug` | Bundle root directory. Bundle goes in `<root>/<UTC-timestamp>`. Override only if you have a stronger reason than `/tmp` noexec to avoid the default — see the note at the top. |
 | `--no-pprof` | off | Skip all pprof captures. Use when the apiserver is down or unreachable. |
 | `--no-logs` | off | Skip log tails and journalctl. |
 | `--keep` | `10` | After capture, keep only the N most recent bundles in the output dir; older bundles are removed. `0` disables pruning. |

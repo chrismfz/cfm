@@ -1,9 +1,11 @@
 // Package cli — `cfm debug` orchestrator.
 //
 // Single-shot diagnostic capture. Invoked as `cfm debug [flags]`,
-// produces a directory under /tmp/cfm-debug/<UTC-timestamp>/ containing
-// pprof profiles, /proc snapshots, log tails, WAF state, and a
-// scannable summary.txt.
+// produces a directory under /var/lib/cfm/debug/<UTC-timestamp>/
+// containing pprof profiles, /proc snapshots, log tails, WAF state,
+// and a scannable summary.txt. Default is /var/lib/cfm/debug rather
+// than /tmp because /tmp is mounted noexec on many production hosts —
+// see the comment on defaultDebugBundleRoot below.
 //
 // The orchestrator never writes to global state and never modifies the
 // running daemon. It only reads /proc, fetches pprof endpoints, runs
@@ -27,7 +29,17 @@ import (
 )
 
 const (
-	defaultDebugBundleRoot = "/tmp/cfm-debug"
+	// /var/lib/cfm/debug is the default bundle root rather than /tmp/
+	// because /tmp is mounted noexec on many production hosts (a CIS
+	// hardening default). When `go tool pprof` is invoked, the Go
+	// toolchain extracts a helper binary to $TMPDIR / GOTMPDIR and
+	// fork+exec's it; on a noexec /tmp this fails with
+	// "fork/exec ...: permission denied" and the heap/cpu top
+	// renderings are lost (raw .pb.gz blobs are still saved). The
+	// /var/lib/cfm tree is writable+exec by project convention
+	// (install-openresty.sh:374-375 already uses it for client_body_temp
+	// and proxy_temp). Operators can override with --output.
+	defaultDebugBundleRoot = "/var/lib/cfm/debug"
 	defaultBundleDuration  = 60 * time.Second
 	quickBundleDuration    = 30 * time.Second
 	defaultRetainBundles   = 10
@@ -161,7 +173,7 @@ func RunDebug(args []string) int {
 				return
 			}
 			writeFile(bundlePath, "pprof-cpu.pb.gz", b, manifest, "pprof-cpu.pb.gz")
-			if top, err := runPProfTop(b); err == nil {
+			if top, err := runPProfTop(b, bundlePath); err == nil {
 				writeFile(bundlePath, "pprof-cpu-top.txt", top, manifest, "pprof-cpu-top.txt")
 			} else {
 				manifest.set("pprof-cpu-top.txt", "skipped: "+err.Error())
@@ -182,7 +194,7 @@ func RunDebug(args []string) int {
 				return
 			}
 			writeFile(bundlePath, "pprof-heap.pb.gz", b, manifest, "pprof-heap.pb.gz")
-			if top, err := runPProfTop(b); err == nil {
+			if top, err := runPProfTop(b, bundlePath); err == nil {
 				writeFile(bundlePath, "pprof-heap-top.txt", top, manifest, "pprof-heap-top.txt")
 			} else {
 				manifest.set("pprof-heap-top.txt", "skipped: "+err.Error())

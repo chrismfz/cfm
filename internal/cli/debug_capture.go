@@ -303,7 +303,16 @@ func fetchPprof(baseURL, endpoint string, dur time.Duration) ([]byte, error) {
 //
 // Profile is fed via stdin so we don't need to write a temp file just to
 // pipe it back out.
-func runPProfTop(profile []byte) ([]byte, error) {
+//
+// `workDir` must be a writable + EXECUTABLE directory: `go tool pprof`
+// extracts a helper binary into $TMPDIR / GOTMPDIR / GOCACHE and
+// fork+exec's it. On hosts where /tmp is mounted noexec (a common
+// hardening default — observed on virgo 2026-05-09), the exec fails
+// with "fork/exec ...: permission denied" and the top rendering is
+// lost. The orchestrator passes the bundle directory itself, which
+// lives under defaultDebugBundleRoot (/var/lib/cfm/debug) — exec by
+// project convention. Empty workDir falls back to the inherited env.
+func runPProfTop(profile []byte, workDir string) ([]byte, error) {
 	if _, err := exec.LookPath("go"); err != nil {
 		return nil, errors.New("go binary not on PATH; raw profile retained")
 	}
@@ -314,6 +323,18 @@ func runPProfTop(profile []byte) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if workDir != "" {
+		// Override TMPDIR/GOTMPDIR/GOCACHE to point at workDir so the
+		// pprof helper binary lands on an exec-able filesystem. We
+		// inherit the rest of the env so Go's toolchain discovery
+		// (GOROOT, etc.) keeps working.
+		env := append(os.Environ(),
+			"TMPDIR="+workDir,
+			"GOTMPDIR="+workDir,
+			"GOCACHE="+filepath.Join(workDir, ".gocache"),
+		)
+		cmd.Env = env
+	}
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("pprof top: %w (stderr=%q)", err, stderr.String())
 	}
