@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -169,7 +170,7 @@ func (a *Alerter) dispatchNotify(
 		Severity: severity,
 		Extra:    extra,
 		TTL:      a.notifyT,
-		Samples:  v.SamplePeers,
+		Samples:  renderPeerSlice(v.SamplePeers),
 	}
 	if enrInfo.ASN != 0 {
 		ev.ASN = fmt.Sprintf("AS%d %s", enrInfo.ASN, enrInfo.ASNName)
@@ -179,41 +180,38 @@ func (a *Alerter) dispatchNotify(
 	_ = notify.Emit(ev)
 }
 
-// renderPeers converts the analyzer's raw-byte peer keys ("\x7f\x00\x00\x01:80")
+// renderPeer converts one analyzer raw-byte peer key ("\x7f\x00\x00\x01:80")
 // back to printable "127.0.0.1:80" / "[::1]:80" form. Best-effort: if the key
 // length is unexpected we fall back to the raw bytes.
-func renderPeers(peers []string) string {
-	var sb strings.Builder
-	for i, p := range peers {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		// Format: <ipBytes>:<asciiPort>
-		colon := strings.LastIndexByte(p, ':')
-		if colon < 0 {
-			sb.WriteString(p)
-			continue
-		}
-		ipPart := p[:colon]
-		portPart := p[colon+1:]
-		switch len(ipPart) {
-		case 4:
-			fmt.Fprintf(&sb, "%d.%d.%d.%d:%s", ipPart[0], ipPart[1], ipPart[2], ipPart[3], portPart)
-		case 16:
-			fmt.Fprintf(&sb, "[%x:%x:%x:%x:%x:%x:%x:%x]:%s",
-				uint16(ipPart[0])<<8|uint16(ipPart[1]),
-				uint16(ipPart[2])<<8|uint16(ipPart[3]),
-				uint16(ipPart[4])<<8|uint16(ipPart[5]),
-				uint16(ipPart[6])<<8|uint16(ipPart[7]),
-				uint16(ipPart[8])<<8|uint16(ipPart[9]),
-				uint16(ipPart[10])<<8|uint16(ipPart[11]),
-				uint16(ipPart[12])<<8|uint16(ipPart[13]),
-				uint16(ipPart[14])<<8|uint16(ipPart[15]),
-				portPart,
-			)
-		default:
-			sb.WriteString(p)
-		}
+func renderPeer(peer string) string {
+	// Format: <ipBytes>:<asciiPort>
+	colon := strings.LastIndexByte(peer, ':')
+	if colon < 0 {
+		return peer
 	}
-	return sb.String()
+	ipPart := peer[:colon]
+	portPart := peer[colon+1:]
+	switch len(ipPart) {
+	case 4, 16:
+		return net.JoinHostPort(net.IP([]byte(ipPart)).String(), portPart)
+	default:
+		return peer
+	}
+}
+
+func renderPeerSlice(peers []string) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	rendered := make([]string, len(peers))
+	for i, p := range peers {
+		rendered[i] = renderPeer(p)
+	}
+	return rendered
+}
+
+// renderPeers converts the analyzer's raw-byte peer keys into a comma-separated
+// printable peer list for forensic logs.
+func renderPeers(peers []string) string {
+	return strings.Join(renderPeerSlice(peers), ",")
 }
