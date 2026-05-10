@@ -6,14 +6,16 @@ import (
 	"strings"
 )
 
-// shellMetaUnsafeForCmdline lists the runes that would cause the
+const tunedParamsToken = "$tuned_params"
+
+// shellMetaUnsafeForCmdline lists shell syntax that would cause the
 // /etc/default/grub line to mean something different on re-parse than
 // what we intended. Operators with cmdlines containing any of these
 // get a clear error from `apply` rather than a silently-corrupted
 // rewrite. The list is conservative: we reject characters our
 // minimal escaper cannot round-trip.
 //
-//	$  shell variable expansion
+//	$  shell variable expansion (except the literal $tuned_params token)
 //	`  command substitution (backtick form)
 //	'  single quote — would terminate the wrong context if our
 //	   double-quoted output were read by a shell that prefers single
@@ -22,7 +24,7 @@ import (
 // Backslash and double-quote ARE allowed; we escape them safely on
 // write. Whitespace within a token (kernel-style `module.param="x y"`)
 // is harder — we don't try to support it; reject if seen.
-var shellMetaUnsafeForCmdline = []string{"$", "`", "'", "$(", "${"}
+var shellMetaUnsafeForCmdline = []string{"`", "'"}
 
 // GRUBBackend implements BootBackend for legacy GRUB installs
 // (Debian/Ubuntu and RHEL non-BLS). Reads GRUB_CMDLINE_LINUX from
@@ -125,15 +127,24 @@ func readGrubCmdlineVar(content, varName string) (string, error) {
 // decodeGrubCmdlineValue reverses grubCmdlineLine for a single
 // GRUB_CMDLINE_LINUX assignment value (the right-hand-side of `=`).
 // Strips one layer of outer single OR double quotes, then unescapes
-// `\"` and `\\` if the outer quotes were double. Rejects values with
+// `\"`, `\\`, and `\$` if the outer quotes were double. Rejects values with
 // shell metacharacters our writer cannot safely round-trip — the
 // operator gets an explicit error pointing at the offending character
 // rather than a silently-corrupted rewrite.
 func decodeGrubCmdlineValue(s string) (string, error) {
 	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if s[0] == '"' && (len(s) < 2 || s[len(s)-1] != '"') {
+		return "", fmt.Errorf("malformed double-quoted value")
+	}
+	if s[0] == '\'' && (len(s) < 2 || s[len(s)-1] != '\'') {
+		return "", fmt.Errorf("malformed single-quoted value")
+	}
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		inner := s[1 : len(s)-1]
-		// Inside double quotes: \" → " and \\ → \. Other escapes are
+		// Inside double quotes: \" → ", \\ → \, and \$ → $. Other escapes are
 		// shell-specific; if we see one, refuse rather than guess.
 		decoded, err := decodeDoubleQuoted(inner)
 		if err != nil {
@@ -165,8 +176,8 @@ func decodeGrubCmdlineValue(s string) (string, error) {
 }
 
 // decodeDoubleQuoted unescapes a double-quoted shell string body. Only
-// `\"` and `\\` are recognised; any other backslash sequence is a
-// shell escape we don't support and surfaces as an error.
+// `\"`, `\\`, and `\$` are recognised; any other backslash sequence is
+// a shell escape we don't support and surfaces as an error.
 func decodeDoubleQuoted(s string) (string, error) {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -181,7 +192,7 @@ func decodeDoubleQuoted(s string) (string, error) {
 		}
 		next := s[i+1]
 		switch next {
-		case '"', '\\':
+		case '"', '\\', '$':
 			b.WriteByte(next)
 			i++
 		default:
@@ -202,21 +213,40 @@ func rejectUnsafeShellMeta(s string) error {
 				m)
 		}
 	}
+	if strings.Contains(s, "${") {
+		return fmt.Errorf("kernel cmdline contains shell metacharacter %q — kernsec cannot safely round-trip this through GRUB_CMDLINE_LINUX; edit /etc/default/grub manually and re-run apply", "${")
+	}
+	if strings.Contains(s, "$(") {
+		return fmt.Errorf("kernel cmdline contains shell metacharacter %q — kernsec cannot safely round-trip this through GRUB_CMDLINE_LINUX; edit /etc/default/grub manually and re-run apply", "$(")
+	}
+	for _, tok := range strings.Fields(s) {
+		if !strings.Contains(tok, "$") {
+			continue
+		}
+		if tok == tunedParamsToken {
+			continue
+		}
+		return fmt.Errorf("kernel cmdline contains shell metacharacter %q — kernsec only preserves literal %s in GRUB_CMDLINE_LINUX; edit /etc/default/grub manually and re-run apply",
+			tok, tunedParamsToken)
+	}
 	return nil
 }
 
 // encodeGrubCmdlineValue is the inverse of decodeGrubCmdlineValue:
 // returns the right-hand-side of a GRUB_CMDLINE_LINUX= assignment
 // for the given inner kernel-cmdline string. Always emits double-
-// quoted form with `\` and `"` escaped. Refuses to encode strings
-// with unsafe shell metacharacters (same set as the read side) so
-// the writer never produces output it can't read back.
+// quoted form with `\`, `"`, and literal `$` escaped. Refuses to
+// encode strings with unsafe shell metacharacters (same set as the
+// read side) so the writer never produces output it can't read back.
 func encodeGrubCmdlineValue(inner string) (string, error) {
 	if err := rejectUnsafeShellMeta(inner); err != nil {
 		return "", err
 	}
 	escaped := strings.ReplaceAll(inner, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	// Keep the literal tuned token from becoming shell expansion when
+	// grub-mkconfig/update-grub source /etc/default/grub.
+	escaped = strings.ReplaceAll(escaped, `$`, `\$`)
 	return `"` + escaped + `"`, nil
 }
 
