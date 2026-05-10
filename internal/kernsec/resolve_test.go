@@ -19,9 +19,17 @@ func TestResolve_Tier0SkipsEverything(t *testing.T) {
 func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{})
 	// Tier 1 rules should Apply; Tier 2 rules should SkipByTier.
+	// Exception: sysctl.net group is owned by cfm-sysctl-tweaks per
+	// managedsysctl, so those Tier 1 rules resolve to ManagedExternally
+	// (audit-only).
 	for _, r := range rs.Sysctls {
-		if r.Tier == Tier1 && r.Decision != Apply {
-			t.Errorf("Tier 1 sysctl %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		want := Apply
+		if r.Group == "sysctl.net" {
+			want = ManagedExternally
+		}
+		if r.Tier == Tier1 && r.Decision != want {
+			t.Errorf("Tier 1 sysctl %q (group %q) at tier 1: decision %v reason=%q, want %v",
+				r.ID, r.Group, r.Decision, r.Reason, want)
 		}
 		if r.Tier == Tier2 && r.Decision != SkipByTier {
 			t.Errorf("Tier 2 sysctl %q at tier 1: decision %v, want SkipByTier", r.ID, r.Decision)
@@ -39,10 +47,19 @@ func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 
 func TestResolve_Tier2AppliesAll(t *testing.T) {
 	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{})
-	// At tier=2 with empty host profile, every rule should Apply.
+	// At tier=2 with empty host profile, every rule should Apply
+	// EXCEPT KSEC-SCT-net.* which the managedsysctl registry marks
+	// as ManagedExternally (owned by cfm-sysctl-tweaks). That's the
+	// Phase 6 cross-component contract: kernsec audits but doesn't
+	// write keys another cfm component owns.
 	for _, r := range rs.Sysctls {
-		if r.Decision != Apply {
-			t.Errorf("sysctl %q at tier 2: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		want := Apply
+		if r.Group == "sysctl.net" {
+			want = ManagedExternally
+		}
+		if r.Decision != want {
+			t.Errorf("sysctl %q (group %q) at tier 2: decision %v reason=%q, want %v",
+				r.ID, r.Group, r.Decision, r.Reason, want)
 		}
 	}
 	for _, r := range rs.BootArgs {

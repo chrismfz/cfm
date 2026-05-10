@@ -444,7 +444,7 @@ func verifyAfterApply(w io.Writer, conf *Conf, profile HostProfile) {
 	rows := BuildAuditRows(conf, profile)
 	var sysctlBad, bootPending, modulesLoaded, modulesMissing int
 	for _, r := range rows {
-		if r.State == StateOFF || r.State == StateSKIP {
+		if r.State == StateOFF || r.State == StateSKIP || r.State == StateEXT {
 			continue
 		}
 		switch r.Kind {

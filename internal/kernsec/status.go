@@ -85,6 +85,24 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 		case SkipByHostProfile:
 			fmt.Fprintf(w, "SKIP  %s  (host profile: %s)\n", rule.Key, rr.Reason)
 			continue
+		case ManagedExternally:
+			// Audit-only: render the live value alongside the EXT
+			// label so the operator can see at a glance whether the
+			// other component's intent is actually live. No
+			// res.warn() — kernsec doesn't own the value, so
+			// drift here isn't a kernsec problem.
+			switch state {
+			case SysctlOK:
+				fmt.Fprintf(w, "EXT   %s=%s  (%s; live matches kernsec recommendation)\n",
+					rule.Key, found, rr.Reason)
+			case SysctlMismatch:
+				fmt.Fprintf(w, "EXT   %s=%s  (%s; live differs from kernsec recommendation %s)\n",
+					rule.Key, found, rr.Reason, rule.Value)
+			case SysctlMissing:
+				fmt.Fprintf(w, "EXT   %s  (%s; not exposed by this kernel)\n",
+					rule.Key, rr.Reason)
+			}
+			continue
 		}
 		switch state {
 		case SysctlOK:

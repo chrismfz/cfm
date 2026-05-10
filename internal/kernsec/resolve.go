@@ -1,7 +1,10 @@
 package kernsec
 
+import "cfm/internal/managedsysctl"
+
 // Decision is the per-rule outcome of combining the conf (tier +
-// overrides) with the host-profile probe.
+// overrides) with the host-profile probe and cross-component
+// ownership (managedsysctl registry).
 type Decision int
 
 const (
@@ -15,6 +18,12 @@ const (
 	// SkipByHostProfile means the host-profile probe blocked the rule
 	// (e.g. IPsec policies present, so the ipsec module group skips).
 	SkipByHostProfile
+	// ManagedExternally means another cfm component owns the
+	// underlying setting (per the managedsysctl registry). kernsec
+	// AUDITS the runtime state but never writes — that's the other
+	// component's job. Currently only KSEC-SCT-net.* rules hit this
+	// path (their keys are owned by internal/sysctl/sys_tweaks.go).
+	ManagedExternally
 )
 
 // String renders a Decision for status output.
@@ -28,6 +37,8 @@ func (d Decision) String() string {
 		return "SKIP-TIER"
 	case SkipByHostProfile:
 		return "SKIP-HOST"
+	case ManagedExternally:
+		return "EXT"
 	}
 	return "?"
 }
@@ -130,6 +141,23 @@ func decideSysctl(r SysctlRule, conf *Conf, profile HostProfile) ResolvedRule {
 		Display: r.Key + "=" + r.Value,
 	}
 	rr.Decision, rr.Reason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	// Cross-component check: if another cfm component (sys_tweaks /
+	// firewall / etc.) owns this key per the managedsysctl registry,
+	// flip the decision to ManagedExternally — kernsec audits but
+	// never writes externally-owned keys.
+	//
+	// Exception: `state = force` in conf is the operator escape hatch
+	// to take ownership back. decide() already returned Apply for
+	// force; we honour that explicit operator intent over the registry
+	// (operators who force a key into kernsec's hands accept the
+	// resulting cross-component conflict — surfaced separately by
+	// managedsysctl.Default().Conflicts() in apply output).
+	if rr.Decision == Apply && conf != nil && conf.Overrides[r.ID] != OverrideForce {
+		if owner := managedsysctl.Default().OwnerOf(r.Key); owner != "" && owner != managedsysctl.OwnerKernsec {
+			rr.Decision = ManagedExternally
+			rr.Reason = "managed by " + string(owner)
+		}
+	}
 	return rr
 }
 
