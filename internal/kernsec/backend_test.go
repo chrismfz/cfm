@@ -38,7 +38,7 @@ func (f *fakeFS) Exists(p string) bool {
 	}
 	return f.dirs[p]
 }
-func (f *fakeFS) IsDir(p string) bool   { return f.dirs[p] }
+func (f *fakeFS) IsDir(p string) bool    { return f.dirs[p] }
 func (f *fakeFS) LookPath(n string) bool { return f.bins[n] }
 func (f *fakeFS) RunCapture(name string, args ...string) (string, error) {
 	key := name
@@ -57,8 +57,8 @@ func (f *fakeFS) withFile(path, content string) *fakeFS {
 	f.files[path] = []byte(content)
 	return f
 }
-func (f *fakeFS) withDir(path string) *fakeFS  { f.dirs[path] = true; return f }
-func (f *fakeFS) withBin(name string) *fakeFS  { f.bins[name] = true; return f }
+func (f *fakeFS) withDir(path string) *fakeFS { f.dirs[path] = true; return f }
+func (f *fakeFS) withBin(name string) *fakeFS { f.bins[name] = true; return f }
 func (f *fakeFS) withCmd(key, out string) *fakeFS {
 	f.cmds[key] = out
 	return f
@@ -257,6 +257,57 @@ args="ro slab_nomerge init_on_alloc=1 crashkernel=2G-:512M transparent_hugepage=
 	b := &BLSBackend{FS: fs}
 	if _, err := b.NextBootCmdline(); err != nil {
 		t.Fatalf("unmanaged-only divergence should not be drift, got %v", err)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_IgnoresRecoveryAndDebugDivergence(t *testing.T) {
+	// Regular kernels agree on managed args. Rescue/debug entries are not
+	// part of the target set written by WriteCmdline, so missing managed args
+	// there must not be reported as next-boot drift.
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro init_on_alloc=1 slab_nomerge"
+
+index=2
+kernel="/boot/vmlinuz-0-rescue-abc123"
+args="ro"
+
+index=3
+kernel="/boot/vmlinuz-6.1.0+debug"
+args="ro"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("recovery/debug-only divergence should not be drift, got %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_OnlyRecoveryAndDebugReturnsEmpty(t *testing.T) {
+	out := `index=0
+kernel="/boot/vmlinuz-0-rescue-abc123"
+args="ro"
+
+index=1
+kernel="/boot/vmlinuz-6.1.0+debug"
+args="ro slab_nomerge"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("expected nil error when no non-recovery kernels remain, got %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty string", got)
 	}
 }
 
@@ -631,7 +682,7 @@ func TestEncodeGrubCmdlineValue(t *testing.T) {
 	}{
 		{name: "simple", in: "ro slab_nomerge", want: `"ro slab_nomerge"`},
 		{name: "embedded double quote",
-			in: `ro module.parameter="x y" quiet`,
+			in:   `ro module.parameter="x y" quiet`,
 			want: `"ro module.parameter=\"x y\" quiet"`},
 		{name: "embedded backslash",
 			in: `ro path=\foo`, want: `"ro path=\\foo"`},
