@@ -47,7 +47,7 @@ func (b *BLSBackend) NextBootCmdline() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	entries := parseGrubbyAll(out)
+	entries := nonRecoveryKernelEntries(parseGrubbyAll(out))
 	if len(entries) == 0 {
 		return "", nil
 	}
@@ -190,8 +190,8 @@ func (b *BLSBackend) WriteCmdline(args []BootArg) error {
 	if err != nil {
 		return fmt.Errorf("grubby --info=ALL: %v: %s", err, strings.TrimSpace(out))
 	}
-	entries := parseGrubbyAll(out)
-	targets := nonRecoveryKernels(entries)
+	entries := nonRecoveryKernelEntries(parseGrubbyAll(out))
+	targets := kernelPaths(entries)
 	if len(targets) == 0 {
 		// No targetable kernels. Could be a fresh chroot install
 		// before the first kernel package landed; skip gracefully
@@ -216,17 +216,16 @@ func (b *BLSBackend) WriteCmdline(args []BootArg) error {
 	return nil
 }
 
-// nonRecoveryKernels returns the kernel paths kernsec should write
-// — every entry whose kernel image path contains neither `rescue`
-// nor `-debug`. Recovery / debug kernels are intentionally excluded
-// so a bad managed arg can't brick the rescue path.
+// nonRecoveryKernelEntries returns the BLS entries kernsec should read/write
+// — every entry whose kernel image path contains neither a `rescue` nor
+// `debug` token. Recovery / debug kernels are intentionally excluded so a
+// bad managed arg can't brick the rescue path.
 //
-// Match is path-substring rather than glob: vendors name rescue
-// kernels variably (`vmlinuz-*-rescue-*`,
-// `vmlinuz-0-rescue-<machine-id>`, etc.) but always include the
-// literal `rescue` token.
-func nonRecoveryKernels(entries []blsKernelEntry) []string {
-	var out []string
+// Keeping the full blsKernelEntry records lets NextBootCmdline compare the
+// same target set that WriteCmdline and rollbackBLS update, while still
+// preserving Args for managed-argument divergence checks.
+func nonRecoveryKernelEntries(entries []blsKernelEntry) []blsKernelEntry {
+	var out []blsKernelEntry
 	for _, e := range entries {
 		if e.Kernel == "" {
 			continue
@@ -234,9 +233,24 @@ func nonRecoveryKernels(entries []blsKernelEntry) []string {
 		if isRecoveryKernel(e.Kernel) {
 			continue
 		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// kernelPaths projects BLS entries to their kernel image paths for grubby
+// --update-kernel=<path>[,<path>...] calls.
+func kernelPaths(entries []blsKernelEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
 		out = append(out, e.Kernel)
 	}
 	return out
+}
+
+// nonRecoveryKernels returns the kernel paths kernsec should write.
+func nonRecoveryKernels(entries []blsKernelEntry) []string {
+	return kernelPaths(nonRecoveryKernelEntries(entries))
 }
 
 // isRecoveryKernel reports whether the given kernel image path looks

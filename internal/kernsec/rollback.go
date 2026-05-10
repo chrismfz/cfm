@@ -189,8 +189,8 @@ func rollbackBLS(w io.Writer, dryRun bool, fs FS) int {
 		fmt.Fprintf(w, "[!] grubby --info=ALL: %v\n", err)
 		return 1
 	}
-	entries := parseGrubbyAll(out)
-	targets := nonRecoveryKernels(entries)
+	entries := nonRecoveryKernelEntries(parseGrubbyAll(out))
+	targets := kernelPaths(entries)
 	if len(targets) == 0 {
 		fmt.Fprintln(w, "[Boot] No non-rescue kernels found — nothing to restore.")
 		return 0
