@@ -111,7 +111,11 @@ func (a *Alerter) Emit(ctx context.Context, v Verdict, ac alertContext) {
 	logging.LogfSMTP("%s", b.String())
 
 	// Notify channel — best-effort, never blocks.
-	go a.dispatchNotify(v, uname, gname, comm, pid, cwd, cmdline, enrInfo, queueSnap)
+	dstIP := ""
+	if ac.dstIP != nil {
+		dstIP = ac.dstIP.String()
+	}
+	go a.dispatchNotify(v, uname, gname, comm, pid, cwd, cmdline, dstIP, ac.dport, enrInfo, queueSnap)
 }
 
 func (a *Alerter) dispatchNotify(
@@ -119,9 +123,25 @@ func (a *Alerter) dispatchNotify(
 	uname, gname, comm string,
 	pid int,
 	cwd, cmdline string,
+	dstIP string,
+	dstPort uint16,
 	enrInfo EnrichInfo,
 	queueSnap EximSnap,
 ) {
+	ev := a.buildNotifyEvent(v, uname, gname, comm, pid, cwd, cmdline, dstIP, dstPort, enrInfo, queueSnap)
+	_ = notify.Emit(ev)
+}
+
+func (a *Alerter) buildNotifyEvent(
+	v Verdict,
+	uname, gname, comm string,
+	pid int,
+	cwd, cmdline string,
+	dstIP string,
+	dstPort uint16,
+	enrInfo EnrichInfo,
+	queueSnap EximSnap,
+) notify.Event {
 	extra := map[string]string{
 		"signal":    string(v.Signal),
 		"uid":       strconv.FormatUint(uint64(v.UID), 10),
@@ -132,6 +152,15 @@ func (a *Alerter) dispatchNotify(
 		"threshold": strconv.Itoa(v.Threshold),
 		"window":    v.Window.String(),
 		"uniq_dst":  strconv.Itoa(v.UniqueDsts),
+	}
+	if dstIP != "" {
+		extra["dst_ip"] = dstIP
+	}
+	if dstPort > 0 {
+		extra["dst_port"] = strconv.Itoa(int(dstPort))
+	}
+	if dstIP != "" && dstPort > 0 {
+		extra["dst_endpoint"] = net.JoinHostPort(dstIP, strconv.Itoa(int(dstPort)))
 	}
 	if pid > 0 {
 		extra["proc"] = comm
@@ -161,11 +190,15 @@ func (a *Alerter) dispatchNotify(
 	if severity == "" {
 		severity = "warning"
 	}
+	reason := fmt.Sprintf("uid=%s (%s) %s burst: %d in %s (threshold %d)", extra["uid"], uname, v.Signal, v.Count, v.Window, v.Threshold)
+	if endpoint := extra["dst_endpoint"]; endpoint != "" {
+		reason += " outbound_dst=" + endpoint
+	}
 	ev := notify.Event{
 		Kind:     "outbound_abuse",
 		Section:  "outbound",
 		When:     v.When,
-		Reason:   fmt.Sprintf("uid=%s (%s) %s burst: %d in %s (threshold %d)", extra["uid"], uname, v.Signal, v.Count, v.Window, v.Threshold),
+		Reason:   reason,
 		Count:    v.Count,
 		Severity: severity,
 		Extra:    extra,
@@ -177,7 +210,7 @@ func (a *Alerter) dispatchNotify(
 	}
 	ev.Country = enrInfo.Country
 	ev.PTR = enrInfo.PTR
-	_ = notify.Emit(ev)
+	return ev
 }
 
 // renderPeer converts one analyzer raw-byte peer key ("\x7f\x00\x00\x01:80")
