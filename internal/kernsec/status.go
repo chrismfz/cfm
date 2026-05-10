@@ -31,10 +31,7 @@ type StatusResult struct {
 // aggregation (e.g. `for h in fleet; do ssh $h cfm kernsec status --json; done`).
 // The returned StatusResult mirrors RunStatus semantics (OK, Warnings, Tier).
 func RunStatusJSON(w io.Writer) StatusResult {
-	conf, _ := LoadConf(false)
-	if conf == nil {
-		conf = &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
-	}
+	conf, confErr := loadStatusConf()
 	profile := DetectHostProfile()
 	rows := BuildAuditRows(conf, profile)
 
@@ -48,7 +45,8 @@ func RunStatusJSON(w io.Writer) StatusResult {
 			warnings++
 		}
 	}
-	errs := auditRowErrors(rows)
+	errs := appendStatusErrors(nil, statusConfError(confErr))
+	errs = appendStatusErrors(errs, auditRowErrors(rows)...)
 
 	out := StatusJSON{
 		OK:       warnings == 0 && len(errs) == 0,
@@ -64,6 +62,43 @@ func RunStatusJSON(w io.Writer) StatusResult {
 	return StatusResult{OK: out.OK, Warnings: warnings, Tier: conf.Tier, Indeterminate: len(errs) > 0, Errors: errs}
 }
 
+func loadStatusConf() (*Conf, error) {
+	conf, err := LoadConf(false)
+	if err == nil {
+		return conf, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return DefaultConf(), nil
+	}
+	return DefaultConf(), err
+}
+
+func statusConfError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("kernsec config read failed: %v", err)
+}
+
+func appendStatusErrors(errs []string, msgs ...string) []string {
+	for _, msg := range msgs {
+		if msg == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range errs {
+			if existing == msg {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			errs = append(errs, msg)
+		}
+	}
+	return errs
+}
+
 // RunStatus prints the kernsec audit-only status to w. Mirrors
 // kspp.sh status output and adds AF_ALG probes for the broader
 // algif_* set. No mutations.
@@ -75,13 +110,12 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	currentCmdline := ReadProcCmdline()
 	nextCmdline, nextErr := be.NextBootCmdline()
 
-	// Best-effort conf load. If absent or unreadable, default to
-	// tier=1 — matches first-run UX and produces sensible audit on
-	// hosts that haven't run init yet.
-	conf, err := LoadConf(false)
-	if err != nil {
-		conf = &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
-	}
+	// Best-effort conf load. If absent, default to tier=1 — matches
+	// first-run UX and produces sensible audit on hosts that have not
+	// run init yet. Existing malformed or unreadable configs are also
+	// defaulted for rendering, but the original LoadConf(false) error is
+	// surfaced as an indeterminate status instead of being swallowed.
+	conf, confErr := loadStatusConf()
 	res.Tier = conf.Tier
 
 	fmt.Fprintln(w, "===== CFM kernsec STATUS =====")
@@ -92,6 +126,11 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintf(w, "[Conf tier]  %d\n", conf.Tier)
+	if confErr != nil {
+		msg := statusConfError(confErr)
+		fmt.Fprintf(w, "ERROR unable to read kernsec config from %s: %v\n", ConfPath, confErr)
+		res.indeterminate(msg)
+	}
 	if warnings := ValidateConfOverrideIDs(conf); len(warnings) > 0 {
 		for _, msg := range warnings {
 			fmt.Fprintf(w, "[!] %s\n", msg)

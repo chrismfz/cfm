@@ -76,6 +76,109 @@ func TestRunStatusJSON_IncludesNextBootReadError(t *testing.T) {
 	}
 }
 
+func TestRunStatus_AbsentConfigUsesFirstRunDefault(t *testing.T) {
+	withTempConfPath(t)
+
+	var w bytes.Buffer
+	res := RunStatus(&w, StatusOptions{SkipAFAlg: true})
+	out := w.String()
+
+	if res.Tier != Tier1 {
+		t.Fatalf("RunStatus tier = %d, want first-run default tier 1", res.Tier)
+	}
+	if strings.Contains(out, "unable to read kernsec config") {
+		t.Fatalf("absent config should not render a config error:\n%s", out)
+	}
+	if containsString(res.Errors, "kernsec config read failed") {
+		t.Fatalf("absent config should not be preserved as a config error: %#v", res.Errors)
+	}
+}
+
+func TestRunTextCheck_MalformedConfigIsIndeterminate(t *testing.T) {
+	withTempConfPath(t)
+	if err := os.WriteFile(ConfPath, []byte("totally not a conf file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	rc := runText([]string{"--check", "--skip-af-alg"}, &w)
+	if rc != 2 {
+		t.Fatalf("runText --check rc = %d, want 2 for malformed config; output:\n%s", rc, w.String())
+	}
+	for _, want := range []string{
+		"ERROR unable to read kernsec config",
+		"malformed",
+		"Status verification indeterminate",
+	} {
+		if !strings.Contains(w.String(), want) {
+			t.Fatalf("status output missing %q for malformed config:\n%s", want, w.String())
+		}
+	}
+}
+
+func TestRunStatus_UnreadableConfigIsIndeterminate(t *testing.T) {
+	withTempConfPath(t)
+	if err := os.Remove(ConfPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ConfPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	res := RunStatus(&w, StatusOptions{SkipAFAlg: true})
+	out := w.String()
+
+	if !res.Indeterminate {
+		t.Fatalf("RunStatus Indeterminate = false, want true for unreadable config; output:\n%s", out)
+	}
+	if !containsString(res.Errors, "kernsec config read failed") {
+		t.Fatalf("RunStatus errors missing config read failure: %#v", res.Errors)
+	}
+	if !strings.Contains(out, "ERROR unable to read kernsec config") {
+		t.Fatalf("status output missing config read error:\n%s", out)
+	}
+}
+
+func TestRunStatusJSON_IncludesMalformedConfigError(t *testing.T) {
+	withTempConfPath(t)
+	if err := os.WriteFile(ConfPath, []byte("tier = nope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	res := RunStatusJSON(&w)
+	if !res.Indeterminate {
+		t.Fatalf("RunStatusJSON Indeterminate = false, want true")
+	}
+	if !containsString(res.Errors, "kernsec config read failed") {
+		t.Fatalf("RunStatusJSON result errors missing config error: %#v", res.Errors)
+	}
+
+	var out StatusJSON
+	if err := json.Unmarshal(w.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal status JSON: %v\n%s", err, w.String())
+	}
+	if out.OK {
+		t.Fatalf("status JSON ok = true, want false on malformed config")
+	}
+	if out.Tier != Tier1 {
+		t.Fatalf("status JSON tier = %d, want default tier 1 after malformed config", out.Tier)
+	}
+	if !containsString(out.Errors, "kernsec config read failed") || !containsString(out.Errors, "tier must be 0, 1, or 2") {
+		t.Fatalf("status JSON errors missing malformed config details: %#v", out.Errors)
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildAuditRows_Tier0DoesNotMaskNextBootReadError(t *testing.T) {
 	withUnreadableNextBootCmdline(t)
 	rows := BuildAuditRows(&Conf{Tier: 0, Overrides: map[string]RuleOverride{}}, HostProfile{})
