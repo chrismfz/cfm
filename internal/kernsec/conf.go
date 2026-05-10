@@ -111,9 +111,10 @@ func ParseConf(r io.Reader) (*Conf, error) {
 	scanner.Buffer(make([]byte, 0, 4*1024), 1<<20)
 
 	var (
-		currentRule string // non-empty when inside a [rule "..."] stanza
-		lineno      int
-		seenRules   = map[string]int{} // rule ID -> line number of first occurrence
+		currentRule  string // non-empty when inside a [rule "..."] stanza
+		lineno       int
+		seenRules    = map[string]int{} // rule ID -> line number of first occurrence
+		seenTopLevel = map[string]int{} // top-level key (e.g. "tier") -> first line
 	)
 
 	for scanner.Scan() {
@@ -149,8 +150,20 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		}
 
 		if currentRule == "" {
-			// Top-level key.
-			switch strings.ToLower(key) {
+			// Top-level key. Reject duplicate keys explicitly so a
+			// merge artifact like
+			//   tier = 1
+			//   tier = 2
+			// surfaces with both line numbers instead of silently
+			// last-wins. The duplicate-rule-section check below
+			// already does this for [rule "X"] stanzas.
+			lk := strings.ToLower(key)
+			if firstLine, ok := seenTopLevel[lk]; ok {
+				return nil, fmt.Errorf("line %d: duplicate top-level key %q (first at line %d)",
+					lineno, lk, firstLine)
+			}
+			seenTopLevel[lk] = lineno
+			switch lk {
 			case "tier":
 				n, err := strconv.Atoi(val)
 				if err != nil || n < 0 || n > 2 {

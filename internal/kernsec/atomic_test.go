@@ -3,7 +3,9 @@ package kernsec
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestAtomicWriteFile_NewFile(t *testing.T) {
@@ -105,5 +107,93 @@ func TestBackupOnce_MissingSourceIsNoOp(t *testing.T) {
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Error("dst should not exist when src is missing")
+	}
+}
+
+func TestBackupTimestampedSuffix_DistinguishesByPID(t *testing.T) {
+	// Two same-second apply runs must produce distinct backup paths
+	// even when they hit within the same UTC second. Previously the
+	// suffix was just the timestamp; the second writer silently
+	// overwrote the first writer's preserved-extras backup, losing
+	// the operator's edits. PID disambiguates.
+	origNow := nowFunc
+	origPid := pidFunc
+	t.Cleanup(func() {
+		nowFunc = origNow
+		pidFunc = origPid
+	})
+
+	frozen := time.Date(2026, 5, 10, 14, 5, 30, 0, time.UTC)
+	nowFunc = func() time.Time { return frozen }
+
+	pidFunc = func() int { return 100 }
+	a := BackupTimestampedSuffix()
+	pidFunc = func() int { return 200 }
+	b := BackupTimestampedSuffix()
+
+	if a == b {
+		t.Fatalf("same-second + different PIDs collided: %q == %q", a, b)
+	}
+	if !strings.Contains(a, ".100") {
+		t.Errorf("PID 100 should be in suffix: %q", a)
+	}
+	if !strings.Contains(b, ".200") {
+		t.Errorf("PID 200 should be in suffix: %q", b)
+	}
+	if !strings.Contains(a, "20260510T140530Z") {
+		t.Errorf("timestamp should be in suffix: %q", a)
+	}
+}
+
+func TestCanonicalLine_StripsInlineComments(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"kernel.kptr_restrict = 2", "kernel.kptr_restrict=2"},
+		{"kernel.kptr_restrict=2", "kernel.kptr_restrict=2"},
+		// Inline comment on a managed line — operator-added note. Must
+		// canonicalise to the same form as the bare line so the next
+		// apply doesn't flag this as an unmanaged extra and trigger a
+		// per-run backup on every invocation.
+		{"kernel.kptr_restrict = 2 # bumped per CVE-X", "kernel.kptr_restrict=2"},
+		{"kernel.kptr_restrict=2  #note", "kernel.kptr_restrict=2"},
+		// Whole-line comment → empty.
+		{"# leading comment", ""},
+		// Comment-only after stripping → empty.
+		{"   # spaces then comment", ""},
+		// Modprobe-style two-token line with inline comment.
+		{"blacklist bluetooth # we have BT hw", "blacklist bluetooth"},
+		// Line that's only "#" → empty.
+		{"#", ""},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := canonicalLine(tc.in); got != tc.want {
+				t.Errorf("canonicalLine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuditExtraLines_InlineCommentsDoNotTriggerBackup(t *testing.T) {
+	// Operator added a comment after a managed line. Apply was
+	// previously flagging this as an unmanaged extra and writing a
+	// per-run backup on every invocation; with canonicalLine stripping
+	// inline comments, the line should match.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "managed.conf")
+	desired := []byte("# header\nkernel.kptr_restrict = 2\nfs.protected_hardlinks = 1\n")
+	existing := []byte("# header\nkernel.kptr_restrict = 2 # bumped per CVE-X\nfs.protected_hardlinks = 1\n")
+	if err := os.WriteFile(path, existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extras, err := auditExtraLines(path, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(extras) != 0 {
+		t.Errorf("inline-commented managed line should not be flagged as extra; got: %q", extras)
 	}
 }

@@ -206,12 +206,19 @@ func TestWriteModprobeFile_PreservesOperatorEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pin a deterministic timestamp so we can assert the backup name.
+	// Pin a deterministic timestamp + PID so we can assert the backup
+	// name. PID is part of the suffix so two same-second apply runs
+	// never collide on a single backup path.
 	origNow := nowFunc
+	origPid := pidFunc
 	nowFunc = func() time.Time {
 		return time.Date(2026, 5, 10, 14, 5, 30, 0, time.UTC)
 	}
-	t.Cleanup(func() { nowFunc = origNow })
+	pidFunc = func() int { return 12345 }
+	t.Cleanup(func() {
+		nowFunc = origNow
+		pidFunc = origPid
+	})
 
 	// Run apply with the same managed content. The audit must detect
 	// the operator-added lines, write a per-run backup, and warn.
@@ -221,7 +228,7 @@ func TestWriteModprobeFile_PreservesOperatorEdits(t *testing.T) {
 	}
 
 	// 1. Per-run backup file exists with the operator-edited content.
-	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z"
+	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z.12345"
 	bakContent, err := os.ReadFile(wantBackup)
 	if err != nil {
 		t.Fatalf("per-run backup missing: %v", err)
@@ -272,7 +279,7 @@ func TestWriteModprobeFile_NoBackupWhenNoOperatorEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z"
+	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z.12345"
 	if _, err := os.Stat(wantBackup); !os.IsNotExist(err) {
 		t.Errorf("per-run backup created without operator edits: %v", err)
 	}

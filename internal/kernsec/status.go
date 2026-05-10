@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // StatusOptions controls what RunStatus emits.
@@ -109,7 +110,12 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 
 	klog := ReadKernelLog()
 	fmt.Fprintln(w, "[Kernel boot warnings about managed args]")
-	if matched := UnknownArgWarnings(klog, ManagedBootArgKeys); len(matched) > 0 {
+	// Scan only for managed keys whose rule is currently in Apply
+	// state. Keys that are OFF / SKIP shouldn't be on the cmdline at
+	// all, so kernel warnings about them aren't kernsec-actionable —
+	// they reflect operator-managed args, not our drift.
+	applyBootKeys := applyBootKeysFromResolved(resolved)
+	if matched := UnknownArgWarnings(klog, applyBootKeys); len(matched) > 0 {
 		for _, line := range matched {
 			fmt.Fprintln(w, line)
 		}
@@ -143,12 +149,25 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 		}
 	}
 
+	// Each kernel-feature health probe below is paired with a
+	// kernsec-managed boot-arg rule. When that rule is OFF / SKIP the
+	// probe still runs (operator may want to know the kernel state)
+	// but we don't escalate to res.warn() — the operator chose to
+	// disable the rule, so a "missing" runtime state isn't drift
+	// against their intent. Previously every probe warned
+	// unconditionally, making `cfm kernsec status --check` exit
+	// non-zero on legitimately-disabled (tier=0 / per-rule skip) hosts.
+	algifApply := decisionForBootArg(resolved, "initcall_blacklist", "algif_aead_init") == Apply
+	shuffleApply := decisionForBootArg(resolved, "page_alloc.shuffle", "1") == Apply
+	initApply := decisionForBootArg(resolved, "init_on_alloc", "1") == Apply
+	kstackApply := decisionForBootArg(resolved, "randomize_kstack_offset", "on") == Apply
+
 	if !opts.SkipAFAlg {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "[AF_ALG bind probes]")
 		for _, r := range ProbeAllAFAlg() {
 			fmt.Fprintln(w, FormatAFAlg(r))
-			if r.Bound && r.Type == "aead" {
+			if r.Bound && r.Type == "aead" && algifApply {
 				res.warn()
 			}
 		}
@@ -156,7 +175,9 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[page_alloc.shuffle runtime state]")
-	if raw, ok := PageAllocShuffleState(); ok {
+	if !shuffleApply {
+		fmt.Fprintln(w, "OFF   page_alloc.shuffle rule is disabled by conf — runtime state not checked")
+	} else if raw, ok := PageAllocShuffleState(); ok {
 		if IsPageAllocShuffleOn(raw) {
 			fmt.Fprintf(w, "OK    /sys/module/page_alloc/parameters/shuffle = %s\n", raw)
 		} else {
@@ -171,7 +192,9 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[mem auto-init state]")
-	if line := MemAutoInitLine(klog); line != "" {
+	if !initApply {
+		fmt.Fprintln(w, "OFF   init_on_alloc rule is disabled by conf — runtime state not checked")
+	} else if line := MemAutoInitLine(klog); line != "" {
 		fmt.Fprintln(w, line)
 		if IsInitOnAllocActive(line) {
 			fmt.Fprintln(w, "OK    init_on_alloc appears active")
@@ -187,15 +210,24 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[randomize_kstack_offset support]")
-	cfg, ok := ReadKernelConfig()
-	if ok {
-		if HasKernelConfigIn(cfg, "HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET") &&
-			HasKernelConfigIn(cfg, "RANDOMIZE_KSTACK_OFFSET") {
-			fmt.Fprintln(w, "OK    kernel config supports randomize_kstack_offset")
-		} else {
-			fmt.Fprintln(w, "WARN  kernel config may not support randomize_kstack_offset")
-			res.warn()
-		}
+	cfg, cfgOK := ReadKernelConfig()
+	switch {
+	case !kstackApply:
+		fmt.Fprintln(w, "OFF   randomize_kstack_offset rule is disabled by conf — kernel-config support not checked")
+	case !cfgOK:
+		fmt.Fprintln(w, "WARN  kernel config not readable from /boot/config-<release> or /proc/config.gz")
+		res.warn()
+	case HasKernelConfigIn(cfg, "HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET") &&
+		HasKernelConfigIn(cfg, "RANDOMIZE_KSTACK_OFFSET"):
+		fmt.Fprintln(w, "OK    kernel config supports randomize_kstack_offset")
+	default:
+		fmt.Fprintln(w, "WARN  kernel config may not support randomize_kstack_offset")
+		res.warn()
+	}
+	// Kernel config hints are info-only; they print regardless of any
+	// rule decision so an operator inspecting `status` always sees
+	// what the kernel was built with.
+	if cfgOK {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "[Kernel config hints]")
 		for _, name := range []string{
@@ -212,9 +244,6 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 				fmt.Fprintf(w, "CONFIG_%s=y\n", name)
 			}
 		}
-	} else {
-		fmt.Fprintln(w, "WARN  kernel config not readable from /boot/config-<release> or /proc/config.gz")
-		res.warn()
 	}
 	fmt.Fprintln(w)
 
@@ -300,6 +329,26 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 	fmt.Fprintln(w)
 }
 
+// applyBootKeysFromResolved returns the bare keys (without value) of
+// boot-arg rules whose resolver decision is Apply. Used by the
+// kernel-log "unknown args" scan so warnings about kernsec-disabled
+// keys (which legitimately don't appear on the cmdline) don't get
+// surfaced as kernsec drift.
+func applyBootKeysFromResolved(resolved ResolvedSet) []string {
+	out := make([]string, 0, len(resolved.BootArgs))
+	for _, rr := range resolved.BootArgs {
+		if rr.Decision != Apply {
+			continue
+		}
+		if i := strings.IndexByte(rr.Display, '='); i >= 0 {
+			out = append(out, rr.Display[:i])
+		} else {
+			out = append(out, rr.Display)
+		}
+	}
+	return out
+}
+
 // decisionForBootArg returns the resolver decision for the boot-arg
 // rule matching the given key+value. Falls back to Apply if no rule is
 // registered for that pair — keeps the hard-coded follow-up checks in
@@ -323,26 +372,22 @@ func decisionForBootArg(resolved ResolvedSet, key, value string) Decision {
 // presence and per-module state. Buckets the rules by resolver
 // decision (OFF / SKIP / Apply) so operator-disabled and host-profile
 // gated rules don't get lumped into MISSING.
+//
+// The managed-file MISSING warning is suppressed when every module
+// rule is OFF / host-skipped / not-on-kernel — the file legitimately
+// shouldn't exist in that case. Previously the file-MISSING warn
+// fired even on tier=0 hosts, making `status --check` exit non-zero
+// on legitimately-disabled hosts.
 func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 	fmt.Fprintln(w, "[Module blacklist]")
-
-	managedExists := true
-	if _, err := os.Stat(ModprobePath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(w, "MISSING    %s not present — `cfm kernsec apply` to create it\n", ModprobePath)
-			res.warn()
-			managedExists = false
-		} else {
-			fmt.Fprintf(w, "ERROR      cannot stat %s: %v\n", ModprobePath, err)
-			res.warn()
-			managedExists = false
-		}
-	}
 
 	loaded := LoadedModules()
 	managed := ParseManagedBlacklist()
 	var loadedCount, missingCount, okCount, kernelSkipCount, offCount, hostSkipCount int
 
+	// Count first so we know whether any rule is in Apply state. If
+	// all rules are OFF / SKIP / not-on-kernel, the managed file
+	// genuinely doesn't need to exist — so a missing file isn't drift.
 	for i, m := range Tier1Modules {
 		rr := resolved.Modules[i]
 		switch rr.Decision {
@@ -364,6 +409,24 @@ func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 			kernelSkipCount++
 		default:
 			missingCount++
+		}
+	}
+	activeRules := okCount + missingCount + loadedCount
+
+	managedExists := true
+	if _, err := os.Stat(ModprobePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if activeRules == 0 {
+				fmt.Fprintf(w, "OFF        %s not present (no module rules active under current conf)\n", ModprobePath)
+			} else {
+				fmt.Fprintf(w, "MISSING    %s not present — `cfm kernsec apply` to create it\n", ModprobePath)
+				res.warn()
+			}
+			managedExists = false
+		} else {
+			fmt.Fprintf(w, "ERROR      cannot stat %s: %v\n", ModprobePath, err)
+			res.warn()
+			managedExists = false
 		}
 	}
 

@@ -50,7 +50,15 @@ GRUB_TIMEOUT=5
 GRUB_CMDLINE_LINUX="quiet splash old_arg=1"
 GRUB_DISABLE_RECOVERY="true"
 `
-	out, found := rewriteGrubCmdlineLinux(in, "quiet splash slab_nomerge init_on_alloc=1")
+	// rewriteGrubCmdlineLinux takes the already-encoded value (the
+	// shell-quoted RHS of `=`); production callers run their cmdline
+	// string through encodeGrubCmdlineValue first so encoding errors
+	// can be surfaced rather than silently swallowed.
+	encoded, err := encodeGrubCmdlineValue("quiet splash slab_nomerge init_on_alloc=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, found := rewriteGrubCmdlineLinux(in, encoded)
 	if !found {
 		t.Fatal("expected found=true")
 	}

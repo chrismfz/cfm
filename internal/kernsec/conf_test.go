@@ -198,6 +198,31 @@ func TestRuleOverrideString(t *testing.T) {
 	}
 }
 
+func TestParseConf_RejectsDuplicateTopLevelKey(t *testing.T) {
+	// A merge artifact or hand-edit can produce two `tier = N` lines.
+	// Previously the second silently overwrote the first; now it's a
+	// parse error naming both lines so the operator can resolve the
+	// conflict explicitly.
+	conf := `# header
+tier = 1
+tier = 2
+`
+	_, err := ParseConf(strings.NewReader(conf))
+	if err == nil {
+		t.Fatal("expected duplicate top-level key error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "duplicate top-level key") {
+		t.Errorf("error should mention duplicate top-level: %v", err)
+	}
+	if !strings.Contains(msg, "tier") {
+		t.Errorf("error should name the duplicated key: %v", err)
+	}
+	if !strings.Contains(msg, "first at line 2") {
+		t.Errorf("error should reference the first occurrence line: %v", err)
+	}
+}
+
 func TestParseConf_RejectsDuplicateRuleSection(t *testing.T) {
 	// A merge artifact or hand-edit can produce two `[rule "X"]`
 	// stanzas for the same ID. Previously the second silently
