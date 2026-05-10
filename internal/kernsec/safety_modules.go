@@ -28,18 +28,30 @@ import (
 // Patterns chosen to cover the canonical drivers a typical Linux
 // host needs to BOOT (mount /, bring up the console enough to see
 // grub or login prompt, optionally bring up the boot-time network
-// for iSCSI / NFS roots):
+// for iSCSI / NFS roots, and retain firewall / hosting-provider
+// plumbing that may be required for remote reachability):
 //
-//   - storage:     nvme*, ahci, sd_mod, sr_mod, scsi_mod, libata,
-//                  *_storage, mptsas, megaraid*, hpsa, mpt3sas,
-//                  virtio_blk, virtio_scsi, dm_*, md_mod, raid*,
-//                  xhci_*, ehci_*, uhci_*, ohci_*
-//   - filesystem:  xfs, ext2, ext3, ext4, btrfs, vfat, fat,
-//                  iso9660, squashfs, overlay, fuse
-//   - network:     e1000*, igb, ixgbe, vmxnet3, virtio_net,
-//                  bnx2*, tg3, r8169, mlx4_*, mlx5_*, i40e, ice
-//   - console:     vga*, drm, drm_kms_helper, i915, nouveau,
-//                  amdgpu, radeon, fbcon, framebuffer
+//   - storage:      nvme*, ahci, ata_*, pata_*, sata_*, sd_mod,
+//     sr_mod, scsi_*, libata, mpt*, megaraid*, hpsa,
+//     qla*, lpfc, virtio*, vmw_pvscsi, hv_storvsc,
+//     xen_blkfront, dm_*, md_*, raid*, xhci_*, ehci_*,
+//     uhci_*, ohci_*, usb_storage, uas, iscsi*
+//   - rootfs:       xfs, ext2, ext3, ext4, btrfs, f2fs, zfs, vfat,
+//     fat, iso9660, squashfs, overlay, fuse, virtiofs,
+//     nfs*, cifs, smb3, 9p, ceph
+//   - networking:   e1000*, igb, ixgbe, i40e, ice, ena, hv_netvsc,
+//     xen_netfront, vmxnet3, virtio_net, bnx2*, bnxt*,
+//     tg3, r8169, mlx4_*, mlx5_*, qed*, atlantic, enic
+//   - netfilter:    nf_conntrack*, nf_nat*, nf_tables*, nft_*,
+//     ip_tables, iptable_*, ip6_tables, ip6table_*,
+//     x_tables, xt_*, br_netfilter, ip_set*
+//   - console:      vga*, drm, drm_kms_helper, simpledrm, i915,
+//     nouveau, amdgpu, radeon, fbcon, framebuffer,
+//     efifb, vesafb, ast, virtio_console, hv_utils,
+//     xen_console, 8250*, serial_core
+//   - virtualization: virtio*, hv_vmbus, hv_storvsc, hv_netvsc,
+//     vmw_*, vmwgfx, vmxnet3, xen*, vboxguest
+//   - CloudLinux / hosting: lve*, kmodlve, kcare*, kpatch*, vz*, ploop
 //
 // Patterns are intentionally aggressive on the side of safety:
 // false positives (legitimate kernsec-suitable rules being
@@ -47,22 +59,41 @@ import (
 // negatives (a brick) cannot be fixed remotely.
 var dangerousModulePatterns = []string{
 	// Storage controllers + USB controllers (USB carries some boot media)
-	"nvme", "ahci", "sd_mod", "sr_mod", "scsi_mod", "libata",
-	"mptsas", "megaraid", "hpsa", "mpt3sas",
-	"virtio_blk", "virtio_scsi",
-	"dm_", "md_mod", "raid",
+	"nvme", "ahci", "ata_", "ata", "pata_", "sata_",
+	"sd_mod", "sr_mod", "scsi_mod", "scsi_", "libata",
+	"mptsas", "megaraid", "hpsa", "mpt3sas", "mptspi", "mptscsih",
+	"qla2", "qla4", "lpfc", "be2iscsi", "bnx2i", "cxgb4i",
+	"virtio", "vmw_pvscsi", "hv_storvsc", "xen_blkfront",
+	"dm_", "md_mod", "md_", "raid",
 	"xhci_", "ehci_", "uhci_", "ohci_",
-	"usb_storage", "usb-storage",
-	// Filesystems
-	"xfs", "ext2", "ext3", "ext4", "btrfs",
-	"vfat", "fat", "iso9660", "squashfs",
-	"overlay", "fuse",
+	"usb_storage", "usb-storage", "uas", "iscsi",
+
+	// Root filesystems and remote-root transports
+	"xfs", "ext2", "ext3", "ext4", "btrfs", "f2fs", "zfs",
+	"vfat", "fat", "iso9660", "squashfs", "overlay", "fuse", "virtiofs",
+	"nfs", "cifs", "smb3", "9p", "ceph",
+
 	// Boot-time networks
-	"e1000", "igb", "ixgbe", "vmxnet3", "virtio_net",
-	"bnx2", "tg3", "r8169", "mlx4_", "mlx5_", "i40e", "ice",
-	// Console / video
-	"vga", "drm", "drm_kms_helper", "i915", "nouveau",
-	"amdgpu", "radeon", "fbcon", "framebuffer",
+	"e1000", "igb", "ixgbe", "i40e", "ice", "ena", "hv_netvsc", "xen_netfront",
+	"vmxnet3", "virtio_net", "bnx2", "bnxt", "tg3", "r8169", "mlx4_", "mlx5_",
+	"qed", "atlantic", "enic",
+
+	// Netfilter / firewall plumbing required for remote reachability on managed hosts
+	"nf_conntrack", "nf_nat", "nf_tables", "nft_",
+	"ip_tables", "iptable_", "ip6_tables", "ip6table_",
+	"x_tables", "xt_", "br_netfilter", "ip_set",
+
+	// Console / video / serial console
+	"vga", "drm", "drm_kms_helper", "simpledrm", "i915", "nouveau",
+	"amdgpu", "radeon", "fbcon", "framebuffer", "efifb", "vesafb", "ast",
+	"virtio_console", "hv_utils", "xen_console", "8250", "serial_core",
+
+	// Virtualization substrate used by cloud, KVM, VMware, Hyper-V, Xen, and VirtualBox guests
+	"virtio_pci", "virtio_ring", "hv_vmbus", "hid_hyperv", "hyperv_keyboard",
+	"vmw_", "vmwgfx", "xen", "vboxguest",
+
+	// CloudLinux / hosting provider kernel extensions
+	"lve", "kmodlve", "kcare", "kpatch", "vz", "ploop",
 }
 
 // IsDangerousModule reports whether name matches any
@@ -94,7 +125,7 @@ func CheckSafeModuleRules(rules []ModuleRule) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"kernsec apply: refusing to blacklist storage/filesystem/network/console drivers — operator-risk to next-boot:\n%s\n"+
+		"kernsec apply: refusing to blacklist storage/rootfs/network/netfilter/console/virtualization/hosting drivers — operator-risk to next-boot:\n%s\n"+
 			"if you really mean it, edit internal/kernsec/safety_modules.go::dangerousModulePatterns and rebuild",
 		strings.Join(bad, "\n"))
 }
