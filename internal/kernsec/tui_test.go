@@ -209,3 +209,23 @@ func TestBuildAuditRows_HostProfileSkipRendersSKIPNotOff(t *testing.T) {
 			mislabelled, foundNamespace)
 	}
 }
+
+func TestBuildAuditRows_ForceOverrideReasonVisibleAgainstHostingPanelGate(t *testing.T) {
+	conf := &Conf{
+		Tier: Tier2,
+		Overrides: map[string]RuleOverride{
+			"KSEC-SCT-tier2.namespace-001": OverrideForce,
+		},
+	}
+	rows := BuildAuditRows(conf, HostProfile{IsCPanel: true, HasHostingPanelWorkload: true})
+	for _, row := range rows {
+		if row.ID != "KSEC-SCT-tier2.namespace-001" {
+			continue
+		}
+		if row.Decision != Apply || row.Reason != "forced by conf" || row.State == StateSKIP || row.State == StateOFF {
+			t.Fatalf("row decision=%v state=%v reason=%q, want forced Apply visibility", row.Decision, row.State, row.Reason)
+		}
+		return
+	}
+	t.Fatal("namespace audit row not found")
+}

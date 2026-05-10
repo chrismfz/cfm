@@ -315,3 +315,23 @@ func TestDecisionString(t *testing.T) {
 		}
 	}
 }
+
+func TestResolve_ForceOverrideShowsForcedAgainstHostingPanelGate(t *testing.T) {
+	conf := &Conf{
+		Tier: Tier2,
+		Overrides: map[string]RuleOverride{
+			"KSEC-SCT-tier2.namespace-001": OverrideForce,
+		},
+	}
+	rs := Resolve(conf, HostProfile{IsCPanel: true, HasHostingPanelWorkload: true})
+	for _, r := range rs.Sysctls {
+		if r.ID != "KSEC-SCT-tier2.namespace-001" {
+			continue
+		}
+		if r.Decision != Apply || r.Reason != "forced by conf" {
+			t.Fatalf("forced namespace rule = decision %v reason %q, want Apply/forced by conf", r.Decision, r.Reason)
+		}
+		return
+	}
+	t.Fatal("namespace rule not found")
+}

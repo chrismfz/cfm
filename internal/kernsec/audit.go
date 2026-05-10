@@ -87,12 +87,13 @@ type AuditRow struct {
 // Stable field names; new optional fields may be added in future
 // without breaking existing consumers.
 type StatusJSON struct {
-	OK       bool       `json:"ok"`
-	Warnings int        `json:"warnings"`
-	Tier     Tier       `json:"tier"`
-	Backend  string     `json:"backend"`
-	Errors   []string   `json:"errors,omitempty"`
-	Rules    []AuditRow `json:"rules"`
+	OK       bool        `json:"ok"`
+	Warnings int         `json:"warnings"`
+	Tier     Tier        `json:"tier"`
+	Backend  string      `json:"backend"`
+	Profile  HostProfile `json:"profile"`
+	Errors   []string    `json:"errors,omitempty"`
+	Rules    []AuditRow  `json:"rules"`
 }
 
 // BuildAuditRows resolves every kernsec rule against the supplied conf and

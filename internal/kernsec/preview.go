@@ -166,6 +166,42 @@ func describeProfile(p HostProfile) string {
 	if p.HasDKMS {
 		parts = append(parts, "dkms")
 	}
+	if p.IsCPanel {
+		parts = append(parts, "cpanel")
+	}
+	if p.IsDirectAdmin {
+		parts = append(parts, "directadmin")
+	}
+	if p.HasCloudLinuxLVE {
+		parts = append(parts, "cloudlinux-lve")
+	}
+	if p.HasCageFS {
+		parts = append(parts, "cagefs")
+	}
+	if p.HasImunify360 {
+		parts = append(parts, "imunify360")
+	}
+	if p.HasKernelCare {
+		parts = append(parts, "kernelcare")
+	}
+	if p.HasKsplice {
+		parts = append(parts, "ksplice")
+	}
+	if p.HasLivePatchingModules {
+		parts = append(parts, "livepatch-modules")
+	}
+	if p.IsProxmox {
+		parts = append(parts, "proxmox")
+	}
+	if p.HasZFS {
+		parts = append(parts, "zfs")
+	}
+	if p.HasNVIDIA {
+		parts = append(parts, "nvidia")
+	}
+	if p.HasHostingPanelWorkload {
+		parts = append(parts, "hosting-panel")
+	}
 	if p.HasKdump {
 		parts = append(parts, "kdump")
 	}
