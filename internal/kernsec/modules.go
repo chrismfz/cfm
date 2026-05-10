@@ -322,79 +322,93 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 
-	// --- modules.bus: buses / devices not present on KVM/dedis -------
+	// --- modules.bus.*: buses / devices not present on KVM/dedis ----
 	//
-	// Bluetooth, wifi, and Thunderbolt are gated by the host-profile
-	// probe (skipped if hardware is detected).
+	// Split into four sub-groups so host-profile gating can skip just
+	// the relevant subset on hosts with the matching hardware:
+	//
+	//   modules.bus.bluetooth   skipped if HasBluetoothHardware
+	//   modules.bus.thunderbolt skipped if HasThunderbolt
+	//   modules.bus.firewire    no probe — dedicated FireWire cards
+	//                           are rare; operator who has one
+	//                           overrides with `state = skip` in conf
+	//   modules.bus.misc        joydev / pcspkr / floppy — never
+	//                           gate (no use case on servers)
+	//
+	// The previous single `modules.bus` group skipped or applied all
+	// twelve modules together, so any hardware-aware gating was an
+	// all-or-nothing trade-off (fix Bluetooth → skip floppy too).
+	// IDs preserved across the rename so existing per-rule overrides
+	// in operator-authored kernsec.conf files keep working.
 
 	{
-		ID: "KSEC-MOD-bus-001", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-001", Group: "modules.bus.bluetooth", Tier: Tier1,
 		Name: "bluetooth",
 		Description: "Bluetooth core stack.",
-		Affects:     "None on hosting (no BT hardware).",
+		Affects:     "Skipped on hosts with Bluetooth hardware (host-profile gated).",
 	},
 	{
-		ID: "KSEC-MOD-bus-002", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-002", Group: "modules.bus.bluetooth", Tier: Tier1,
 		Name: "btusb",
 		Description: "USB Bluetooth dongle driver.",
-		Affects:     "None.",
+		Affects:     "Skipped on hosts with Bluetooth hardware (host-profile gated).",
 	},
 	{
-		ID: "KSEC-MOD-bus-003", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-003", Group: "modules.bus.bluetooth", Tier: Tier1,
 		Name: "bnep",
 		Description: "Bluetooth network encapsulation.",
-		Affects:     "None.",
+		Affects:     "Skipped on hosts with Bluetooth hardware (host-profile gated).",
 	},
 	{
-		ID: "KSEC-MOD-bus-004", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-004", Group: "modules.bus.bluetooth", Tier: Tier1,
 		Name: "hci_uart",
 		Description: "Bluetooth HCI over UART.",
-		Affects:     "None.",
+		Affects:     "Skipped on hosts with Bluetooth hardware (host-profile gated).",
 	},
 	{
-		ID: "KSEC-MOD-bus-005", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-005", Group: "modules.bus.firewire", Tier: Tier1,
 		Name: "firewire-core",
 		Description: "FireWire stack — DMA attack surface.",
-		Affects:     "None.",
+		Affects:     "None on servers; override per-rule if you actually use FireWire.",
 	},
 	{
-		ID: "KSEC-MOD-bus-006", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-006", Group: "modules.bus.firewire", Tier: Tier1,
 		Name: "firewire-ohci",
 		Description: "FireWire OHCI driver.",
-		Affects:     "None.",
+		Affects:     "None on servers; override per-rule if you actually use FireWire.",
 	},
 	{
-		ID: "KSEC-MOD-bus-007", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-007", Group: "modules.bus.firewire", Tier: Tier1,
 		Name: "firewire-net",
 		Description: "FireWire networking.",
-		Affects:     "None.",
+		Affects:     "None on servers; override per-rule if you actually use FireWire.",
 	},
 	{
-		ID: "KSEC-MOD-bus-008", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-008", Group: "modules.bus.firewire", Tier: Tier1,
 		Name: "firewire-sbp2",
 		Description: "FireWire storage transport.",
-		Affects:     "None.",
+		Affects:     "None on servers; override per-rule if you actually use FireWire.",
 	},
 	{
-		ID: "KSEC-MOD-bus-009", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-009", Group: "modules.bus.thunderbolt", Tier: Tier1,
 		Name: "thunderbolt",
-		Description: "Thunderbolt stack — DMA attack surface, KVM hosts only.",
-		Affects:     "Skipped on hosts with TB hardware (host-profile gated).",
+		Description: "Thunderbolt stack — DMA attack surface.",
+		Affects:     "Skipped on hosts with Thunderbolt hardware (host-profile gated).",
 	},
 	{
-		ID: "KSEC-MOD-bus-010", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-010", Group: "modules.bus.misc", Tier: Tier1,
 		Name: "joydev",
 		Description: "Joystick input — trivial surface, no use case.",
 		Affects:     "None.",
 	},
 	{
-		ID: "KSEC-MOD-bus-011", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-011", Group: "modules.bus.misc", Tier: Tier1,
 		Name: "pcspkr",
 		Description: "PC speaker driver.",
 		Affects:     "None.",
 	},
 	{
-		ID: "KSEC-MOD-bus-012", Group: "modules.bus", Tier: Tier1,
+		ID: "KSEC-MOD-bus-012", Group: "modules.bus.misc", Tier: Tier1,
 		Name: "floppy",
 		Description: "Floppy controller driver.",
 		Affects:     "None.",

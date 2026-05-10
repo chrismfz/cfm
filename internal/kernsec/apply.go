@@ -87,6 +87,13 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	fmt.Fprintf(w, "Tier:    %d\n", conf.Tier)
 	fmt.Fprintf(w, "Backend: %s\n", backend.Label())
 	fmt.Fprintf(w, "Profile: %s\n", describeProfile(profile))
+	if warnings := ValidateConfOverrideIDs(conf); len(warnings) > 0 {
+		fmt.Fprintln(w)
+		for _, msg := range warnings {
+			fmt.Fprintf(w, "[!] %s\n", msg)
+		}
+		fmt.Fprintln(w)
+	}
 	fmt.Fprintf(w, "Rules:   sysctls=%d  boot=%d  modules=%d  mounts=%d (audit)\n",
 		len(sysctls), len(bootArgs), len(modules), count(rs.Mounts, Apply))
 	switch {

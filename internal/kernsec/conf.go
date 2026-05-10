@@ -220,6 +220,64 @@ func splitKV(line string) (key, value string, ok bool) {
 	return key, value, true
 }
 
+// AllRuleIDs returns the union of every rule ID kernsec knows about
+// across sysctls, boot args, modules, and mount rules. Used to
+// cross-check operator-authored conf overrides against the registry.
+func AllRuleIDs() map[string]struct{} {
+	out := make(map[string]struct{},
+		len(AllSysctls())+len(AllBootArgs())+len(Tier1Modules)+len(Tier1Mounts))
+	for _, r := range AllSysctls() {
+		out[r.ID] = struct{}{}
+	}
+	for _, r := range AllBootArgs() {
+		out[r.ID] = struct{}{}
+	}
+	for _, r := range Tier1Modules {
+		out[r.ID] = struct{}{}
+	}
+	for _, r := range Tier1Mounts {
+		out[r.ID] = struct{}{}
+	}
+	return out
+}
+
+// ValidateConfOverrideIDs returns one warning per override key in the
+// conf that doesn't match a known rule ID. A typo like
+// `KSEC-MOD-net.legacy-024` (no such rule) silently never matches and
+// the operator's intended `state = skip` is inert — previously the
+// override sat there, undetected, until the operator ran preview
+// expecting the rule to be skipped.
+//
+// Warnings, not errors: an operator may legitimately leave a
+// placeholder override for a future rule, or run a forked tree with
+// extra rules. Failing loud would block those workflows; warning loud
+// catches the typos without breaking anything.
+//
+// Returns nil for nil conf or empty overrides.
+func ValidateConfOverrideIDs(c *Conf) []string {
+	if c == nil || len(c.Overrides) == 0 {
+		return nil
+	}
+	known := AllRuleIDs()
+	var unknown []string
+	for id := range c.Overrides {
+		if _, ok := known[id]; !ok {
+			unknown = append(unknown, id)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sortStrings(unknown)
+	out := make([]string, 0, len(unknown))
+	for _, id := range unknown {
+		out = append(out, fmt.Sprintf(
+			"unknown rule ID in conf override: %q (typo? renamed? — check docs/kernsec.md for current IDs)",
+			id))
+	}
+	return out
+}
+
 // Render emits the conf back to a string in canonical form. Stable
 // ordering: top-level keys first, then rule stanzas alphabetised by ID.
 func (c *Conf) Render() string {

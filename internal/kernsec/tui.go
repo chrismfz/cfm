@@ -179,6 +179,16 @@ func RunTUI() (switchToText bool, err error) {
 				fmt.Fprintln(&b, "  [Note:](fg:yellow,mod:bold) blacklist active but module still loaded.")
 				fmt.Fprintln(&b, "  Reboot or `rmmod` for the blacklist to take effect.")
 			}
+		case KindMount:
+			fmt.Fprintf(&b, "  mount point:        %s\n", r.MountPoint)
+			fmt.Fprintf(&b, "  recommended:        %s\n", r.RecommendedOptions)
+			if r.CurrentOptions == "" {
+				fmt.Fprintln(&b, "  current /proc/mounts: not separately mounted")
+			} else {
+				fmt.Fprintf(&b, "  current /proc/mounts: %s\n", r.CurrentOptions)
+			}
+			fmt.Fprintln(&b, "")
+			fmt.Fprintln(&b, "  [Note:](fg:cyan,mod:bold) audit-only — kernsec never edits /etc/fstab.")
 		}
 		detail.Text = b.String()
 	}

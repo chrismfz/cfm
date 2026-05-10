@@ -39,6 +39,12 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 	fmt.Fprintf(w, "Conf:     %s\n", confSource(conf))
 	fmt.Fprintf(w, "Tier:     %d\n", conf.Tier)
 	fmt.Fprintf(w, "Profile:  %s\n", describeProfile(profile))
+	if warnings := ValidateConfOverrideIDs(conf); len(warnings) > 0 {
+		fmt.Fprintln(w)
+		for _, msg := range warnings {
+			fmt.Fprintf(w, "[!] %s\n", msg)
+		}
+	}
 	fmt.Fprintln(w)
 
 	printResolvedSection(w, "Sysctls", rs.Sysctls, opts)
@@ -154,6 +160,9 @@ func describeProfile(p HostProfile) string {
 	}
 	if p.HasBluetoothHardware {
 		parts = append(parts, "bluetooth-hw")
+	}
+	if p.HasThunderbolt {
+		parts = append(parts, "thunderbolt-hw")
 	}
 	if p.HasNFS {
 		parts = append(parts, "nfs")

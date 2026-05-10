@@ -9,15 +9,16 @@ import (
 // HostProfile captures the runtime characteristics of the current host
 // that affect which rules should be applied. Auto-skipped rules render
 // as `SKIP (host profile: <reason>)` in audit output. Operators
-// override with `--force-id KSEC-...` if needed.
+// override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
 	IsKVMHost            bool   // kvm_intel / kvm_amd loaded → KVM hypervisor host
 	HasContainers        bool   // runc / containerd / lxc / podman process running → don't kill userns
 	HasIPsec             bool   // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasWifi              bool   // cfg80211 loaded or wifi hardware → don't blacklist wireless
+	HasWifi              bool   // cfg80211 loaded or wifi hardware → flag (no wifi rules ship today)
 	HasDKMS              bool   // zfs / nvidia / DKMS modules → don't enforce module sig
 	HasKdump             bool   // kdump enabled → don't disable kexec
-	HasBluetoothHardware bool   // /sys/class/bluetooth populated → flag (still blacklist)
+	HasBluetoothHardware bool   // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
+	HasThunderbolt       bool   // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasNFS               bool   // active NFS mounts → keep NFS untouched (already excluded by policy)
 	Reason               string // freeform note used in --check output
 }
@@ -33,6 +34,7 @@ func DetectHostProfile() HostProfile {
 		HasDKMS:              anyModuleLoaded("zfs", "nvidia", "nvidia_drm", "nvidia_modeset"),
 		HasKdump:             hasKdump(),
 		HasBluetoothHardware: dirHasEntries("/sys/class/bluetooth"),
+		HasThunderbolt:       dirHasEntries("/sys/bus/thunderbolt/devices"),
 		HasNFS:               procMountsHasFS("nfs", "nfs4"),
 	}
 }
@@ -42,16 +44,29 @@ func DetectHostProfile() HostProfile {
 //
 // The set of skip rules here is intentionally conservative: we only
 // skip when running the rule would clearly break something the operator
-// is using. Operators can `--force-id` to override.
+// is using. Operators can override per-rule with `state = force` in
+// kernsec.conf.
 func (p HostProfile) SkipReason(group string) string {
 	switch group {
 	case "modules.ipsec":
 		if p.HasIPsec {
 			return "host has active IPsec policies (ip xfrm policy non-empty)"
 		}
-	case "modules.wifi":
-		if p.HasWifi {
-			return "host has wifi hardware or cfg80211 loaded"
+	case "modules.bus.bluetooth":
+		// Blacklisting bluetooth/btusb/bnep/hci_uart on a host with
+		// real Bluetooth hardware would break paired keyboards / mice
+		// / audio. The previous single `modules.bus` group lumped
+		// unrelated drivers (firewire, floppy) under the same skip;
+		// the four-way split lets BT-only gating work.
+		if p.HasBluetoothHardware {
+			return "host has Bluetooth hardware (/sys/class/bluetooth non-empty)"
+		}
+	case "modules.bus.thunderbolt":
+		// Thunderbolt blacklist on a host with TB hardware breaks
+		// docks / external GPUs / TB networking. KVM hosts almost
+		// never have it; bare-metal workstations / laptops do.
+		if p.HasThunderbolt {
+			return "host has Thunderbolt hardware (/sys/bus/thunderbolt/devices non-empty)"
 		}
 	case "boot.lockdown", "tier2.lockdown":
 		// lockdown=integrity blocks unsigned module load.
