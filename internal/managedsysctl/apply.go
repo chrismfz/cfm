@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // ApplyResult is the outcome of ApplyKeys: how many keys succeeded,
@@ -40,12 +41,43 @@ func (r ApplyResult) Err() error {
 		len(r.Failures), strings.Join(lines, "\n"))
 }
 
-// SetCommand applies one sysctl key=value via `sysctl -w`. var, not
-// function, so tests can substitute a deterministic stub. Both
-// kernsec.LoadSysctl and any future component's apply path call
-// through this so the stub set in one place is honoured everywhere.
-var SetCommand = func(key, value string) ([]byte, error) {
+// setCommandMu guards setCommandFn against the racy package-var
+// pattern (read in production via SetCommand, written from tests via
+// SetSetCommandForTest). Latent footgun if any sibling test ever
+// uses t.Parallel() — the lock makes the substitution race-free.
+var setCommandMu sync.RWMutex
+
+// setCommandFn applies one sysctl key=value via `sysctl -w`. Hidden
+// behind getter/setter so callers can't bypass setCommandMu.
+var setCommandFn = func(key, value string) ([]byte, error) {
 	return exec.Command("sysctl", "-w", key+"="+value).CombinedOutput()
+}
+
+// SetCommand returns the current sysctl-apply hook. Production code
+// reads this once per ApplyKeys call; tests substitute via
+// SetSetCommandForTest.
+func SetCommand(key, value string) ([]byte, error) {
+	setCommandMu.RLock()
+	fn := setCommandFn
+	setCommandMu.RUnlock()
+	return fn(key, value)
+}
+
+// SetSetCommandForTest swaps the sysctl-apply hook and registers a
+// cleanup that restores the previous hook when the test ends. Tests
+// MUST use this rather than mutating package-level state directly —
+// the previous package-var pattern was a latent race when tests run
+// in parallel.
+func SetSetCommandForTest(t interface{ Cleanup(func()) }, fn func(key, value string) ([]byte, error)) {
+	setCommandMu.Lock()
+	prev := setCommandFn
+	setCommandFn = fn
+	setCommandMu.Unlock()
+	t.Cleanup(func() {
+		setCommandMu.Lock()
+		setCommandFn = prev
+		setCommandMu.Unlock()
+	})
 }
 
 // KeyValuePair is one (key, value) tuple to apply. Used by
@@ -94,8 +126,17 @@ func ApplyKeys(pairs []KeyValuePair) ApplyResult {
 // `=` sign) are returned as Skipped reasons rather than silently
 // dropped — kernsec writes the file itself, so a malformed line is
 // a render bug worth surfacing.
+//
+// Robust against:
+//   - UTF-8 BOM at file start (operator hand-edit with a BOM-emitting
+//     editor would otherwise fold the BOM into the first key).
+//   - CRLF line endings (TrimSpace strips the trailing \r).
+//   - `key=value=with=equals` (split on first `=` only).
 func ParseFileToPairs(content []byte) (pairs []KeyValuePair, skipped []string) {
-	for lineno, raw := range strings.Split(string(content), "\n") {
+	const utf8BOM = "\xef\xbb\xbf"
+	s := string(content)
+	s = strings.TrimPrefix(s, utf8BOM)
+	for lineno, raw := range strings.Split(s, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

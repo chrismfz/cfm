@@ -187,8 +187,20 @@ never writes externally-owned keys.
 Operator escape hatch: `[rule "KSEC-SCT-net.X"] state = force` in
 `/etc/cfm/kernsec.conf` overrides the cross-component check —
 kernsec writes its recommended value and the resulting cross-
-component conflict surfaces via
-`managedsysctl.Default().Conflicts()`.
+component conflict is reported by `cfm kernsec apply` (top-of-
+output `[!] cross-component sysctl ownership conflicts` block).
+
+Edge case: when an operator sets `SYS_TWEAKS_ENABLE=0` in
+`cfm.conf`, sys_tweaks's `ApplyTweaks` short-circuits and writes
+nothing — but the catalog still claims those 21 keys, so kernsec
+still resolves `KSEC-SCT-net.*` rules to `ManagedExternally`. The
+live values surfaced in `EXT` rows will reflect whatever the
+kernel/distro defaults are rather than sys_tweaks's intent. This
+is intentional: the catalog must be compile-time-stable so
+kernsec.Resolve can trust the cross-component view across init()
+ordering. Operators who turn sys_tweaks off but want kernsec-
+hardened net rules use `state = force` on each `KSEC-SCT-net.*`
+rule.
 
 **CLI dispatch is a flat switch in `cmd/cfm/main.go`** (~1263 lines, no cobra).
 Existing cases include `firewall`, `dnat`, `ssl`, `webtop`, `health`, `clam`,

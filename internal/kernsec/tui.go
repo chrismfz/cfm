@@ -160,6 +160,20 @@ func RunTUI() (switchToText bool, err error) {
 				fmt.Fprintln(&b, "  /proc/sys: missing on this kernel")
 			case StateOK:
 				fmt.Fprintf(&b, "  /proc/sys: %s\n", r.LiveValue)
+			case StateEXT:
+				// Externally managed: kernsec does NOT enforce a value
+				// here, so "expected X" wording would mislead the
+				// operator. Show the live value with the owner attribution.
+				owner := "another cfm component"
+				if r.Reason != "" {
+					owner = r.Reason
+				}
+				if r.LiveValue == "" {
+					fmt.Fprintf(&b, "  /proc/sys: not exposed by this kernel  (%s)\n", owner)
+				} else {
+					fmt.Fprintf(&b, "  /proc/sys: %s  (%s; kernsec audits but does not enforce)\n",
+						r.LiveValue, owner)
+				}
 			default:
 				fmt.Fprintf(&b, "  /proc/sys: %s  (expected %s)\n", r.LiveValue, r.ExpectedValue)
 			}

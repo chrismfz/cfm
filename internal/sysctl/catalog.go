@@ -42,6 +42,18 @@ var managedKeys = []string{
 // this set as "externally managed" rather than fight over them.
 //
 // Returns a copy so callers can't mutate the package-level slice.
+//
+// Trade-off: ownership is unconditional — the catalog claims these
+// keys even when an operator has set `SYS_TWEAKS_ENABLE=0` in
+// cfm.conf and ApplyTweaks short-circuits at sys_tweaks.go:18.
+// kernsec.Resolve will still resolve KSEC-SCT-net.* rules to
+// ManagedExternally; the live runtime value will reflect whatever
+// the kernel/distro defaults are rather than what sys_tweaks would
+// have written. This is intentional — the catalog must be
+// compile-time-stable so kernsec.Resolve can trust the cross-
+// component view across init() ordering. Operators who want
+// kernsec to take ownership of these keys instead use
+// `[rule "KSEC-SCT-net.X"] state = force` per docs/kernsec.md.
 func ManagedKeys() []string {
 	out := make([]string, len(managedKeys))
 	copy(out, managedKeys)
