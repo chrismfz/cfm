@@ -169,7 +169,13 @@ func TestGRUBRefreshCommand_UpdateGrubHasNoArgs(t *testing.T) {
 
 func TestRollbackGRUB_Grub2MkconfigUsesDetectedOutputPath(t *testing.T) {
 	grub := redirectGrubPath(t)
-	if err := os.WriteFile(grub+BackupSuffix, []byte("GRUB_CMDLINE_LINUX=\"ro\"\n"), 0o644); err != nil {
+	withTempManagedBackupPaths(t)
+	legacy := "GRUB_CMDLINE_LINUX=\"ro\"\n"
+	current := "GRUB_CMDLINE_LINUX=\"ro slab_nomerge\"\n"
+	if err := os.WriteFile(grub, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(grub+BackupSuffix, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +198,165 @@ func TestRollbackGRUB_Grub2MkconfigUsesDetectedOutputPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "GRUB_CMDLINE_LINUX=\"ro\"\n" {
+	if string(data) != legacy {
 		t.Fatalf("restored grub content = %q", string(data))
+	}
+}
+
+func withTempManagedBackupPaths(t *testing.T) (string, string) {
+	t.Helper()
+	origGrub, origPVE := GRUBManagedBackupPath, ProxmoxManagedBackupPath
+	dir := t.TempDir()
+	GRUBManagedBackupPath = dir + "/grub-managed.json"
+	ProxmoxManagedBackupPath = dir + "/pve-managed.json"
+	t.Cleanup(func() {
+		GRUBManagedBackupPath = origGrub
+		ProxmoxManagedBackupPath = origPVE
+	})
+	return GRUBManagedBackupPath, ProxmoxManagedBackupPath
+}
+
+func writeManagedSnapshotForTest(t *testing.T, path string, args []string) {
+	t.Helper()
+	data, err := json.Marshal(managedBootArgSnapshot{Version: managedBootArgSnapshotVersion, Args: args})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRollbackGRUB_ManagedSnapshotPreservesOperatorArgs(t *testing.T) {
+	grub := redirectGrubPath(t)
+	grubSnap, _ := withTempManagedBackupPaths(t)
+	writeManagedSnapshotForTest(t, grubSnap, []string{"init_on_alloc=0"})
+	current := "GRUB_CMDLINE_LINUX=\"ro slab_nomerge init_on_alloc=1 console=ttyS0 $tuned_params vendor.foo=bar\"\n" +
+		"GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\n"
+	if err := os.WriteFile(grub, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := newFakeFS().
+		withBin("update-grub").
+		withCmd("update-grub", "")
+
+	var out bytes.Buffer
+	if rc := rollbackGRUB(&out, false, fs); rc != 0 {
+		t.Fatalf("rollbackGRUB rc=%d, output:\n%s", rc, out.String())
+	}
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"ro", "console=ttyS0", "$tuned_params", "vendor.foo=bar", "init_on_alloc=0", `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rollback did not preserve/restore %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"slab_nomerge", "init_on_alloc=1"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("rollback kept stale managed token %q in:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestRollbackProxmox_ManagedSnapshotPreservesOperatorArgs(t *testing.T) {
+	_, pveSnap := withTempManagedBackupPaths(t)
+	origPVE := PathPVECmdline
+	PathPVECmdline = t.TempDir() + "/cmdline"
+	t.Cleanup(func() { PathPVECmdline = origPVE })
+	writeManagedSnapshotForTest(t, pveSnap, []string{"page_alloc.shuffle=0"})
+	current := "root=ZFS=rpool/ROOT/pve-1 ro slab_nomerge init_on_alloc=1 console=ttyS0 crashkernel=512M vendor.arg=1\n"
+	if err := os.WriteFile(PathPVECmdline, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withCmd("proxmox-boot-tool refresh", "")
+
+	var out bytes.Buffer
+	if rc := rollbackProxmox(&out, false, fs); rc != 0 {
+		t.Fatalf("rollbackProxmox rc=%d, output:\n%s", rc, out.String())
+	}
+	data, err := os.ReadFile(PathPVECmdline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"root=ZFS=rpool/ROOT/pve-1", "ro", "console=ttyS0", "crashkernel=512M", "vendor.arg=1", "page_alloc.shuffle=0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rollback did not preserve/restore %q in %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"slab_nomerge", "init_on_alloc=1"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("rollback kept stale managed token %q in %q", unwanted, got)
+		}
+	}
+}
+
+func TestRollbackProxmox_LegacyBackupRefusesOperatorChanges(t *testing.T) {
+	withTempManagedBackupPaths(t)
+	origPVE := PathPVECmdline
+	PathPVECmdline = t.TempDir() + "/cmdline"
+	t.Cleanup(func() { PathPVECmdline = origPVE })
+	legacy := "root=ZFS=rpool/ROOT/pve-1 ro\n"
+	current := "root=ZFS=rpool/ROOT/pve-1 ro slab_nomerge console=ttyS0\n"
+	if err := os.WriteFile(PathPVECmdline, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(PathPVECmdline+BackupSuffix, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withCmd("proxmox-boot-tool refresh", "")
+
+	var out bytes.Buffer
+	if rc := rollbackProxmox(&out, false, fs); rc == 0 {
+		t.Fatalf("rollbackProxmox unexpectedly succeeded, output:\n%s", out.String())
+	}
+	data, err := os.ReadFile(PathPVECmdline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != current {
+		t.Fatalf("legacy refusal must leave current content unchanged, got %q", string(data))
+	}
+	if len(fs.cmdLog) != 0 {
+		t.Fatalf("refused rollback must not refresh bootloader, got calls: %v", fs.cmdLog)
+	}
+	if !strings.Contains(out.String(), "refusing legacy byte-restore") || !strings.Contains(out.String(), "Manual recovery") {
+		t.Fatalf("expected refusal and manual recovery instructions, got:\n%s", out.String())
+	}
+}
+
+func TestRollbackGRUB_LegacyBackupRefusesOperatorChanges(t *testing.T) {
+	grub := redirectGrubPath(t)
+	withTempManagedBackupPaths(t)
+	legacy := "GRUB_CMDLINE_LINUX=\"ro\"\n"
+	current := "GRUB_CMDLINE_LINUX=\"ro slab_nomerge console=ttyS0\"\n"
+	if err := os.WriteFile(grub, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(grub+BackupSuffix, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withBin("update-grub").withCmd("update-grub", "")
+
+	var out bytes.Buffer
+	if rc := rollbackGRUB(&out, false, fs); rc == 0 {
+		t.Fatalf("rollbackGRUB unexpectedly succeeded, output:\n%s", out.String())
+	}
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != current {
+		t.Fatalf("legacy refusal must leave current content unchanged, got %q", string(data))
+	}
+	if len(fs.cmdLog) != 0 {
+		t.Fatalf("refused rollback must not refresh bootloader, got calls: %v", fs.cmdLog)
+	}
+	if !strings.Contains(out.String(), "refusing legacy byte-restore") || !strings.Contains(out.String(), "Manual recovery") {
+		t.Fatalf("expected refusal and manual recovery instructions, got:\n%s", out.String())
 	}
 }

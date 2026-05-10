@@ -14,16 +14,31 @@ import (
 // this path and use them in `cfm kernsec rollback`.
 var BLSBackupPath = "/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak"
 
+// GRUBManagedBackupPath and ProxmoxManagedBackupPath store the current
+// rollback snapshot format for single-cmdline boot backends. The legacy
+// <source>.cfm-kernsec.bak files remain full-file backups for manual
+// recovery and pre-upgrade rollback compatibility; these snapshots contain
+// only pre-apply kernsec-managed tokens.
+var (
+	GRUBManagedBackupPath    = "/var/lib/cfm/kernsec-grub-cmdline.cfm-kernsec.bak"
+	ProxmoxManagedBackupPath = "/var/lib/cfm/kernsec-proxmox-cmdline.cfm-kernsec.bak"
+)
+
 // RunRollback restores the pre-kernsec bootloader configuration from
 // .cfm-kernsec.bak files and refreshes the bootloader. It is the
 // operator escape hatch after a bad `cfm kernsec apply`.
 //
 // Per-backend behaviour:
 //
-//   - Legacy GRUB: reads /etc/default/grub.cfm-kernsec.bak → restores
-//     /etc/default/grub → regenerates grub.cfg with the available GRUB tool.
-//   - Proxmox: reads /etc/kernel/cmdline.cfm-kernsec.bak → restores
-//     /etc/kernel/cmdline → runs proxmox-boot-tool refresh.
+//   - Legacy GRUB: removes only kernsec-managed keys from the current
+//     GRUB_CMDLINE_LINUX value, restores only saved kernsec-managed values
+//     when a current-format managed snapshot exists, then regenerates grub.cfg.
+//     Legacy full-file backups are byte-restored only after a safe exact
+//     expected-form comparison.
+//   - Proxmox: removes only kernsec-managed keys from the current
+//     /etc/kernel/cmdline, restores only saved kernsec-managed values when a
+//     current-format managed snapshot exists, then runs proxmox-boot-tool
+//     refresh. Legacy full-file backups use the same safe comparison gate.
 //   - BLS / grubby: strips all managed args from every non-rescue kernel.
 //     If a current-format pre-apply snapshot exists at BLSBackupPath,
 //     restores only the per-kernel managed tokens saved for the matching
@@ -53,8 +68,7 @@ func RunRollback(w io.Writer, dryRun bool) int {
 	case *GRUBBackend:
 		rc = rollbackGRUB(w, dryRun, be.FS)
 	case *ProxmoxBackend:
-		rc = rollbackProxmox(w, dryRun)
-		_ = be
+		rc = rollbackProxmox(w, dryRun, be.FS)
 	case *BLSBackend:
 		rc = rollbackBLS(w, dryRun, fs)
 		_ = be
@@ -83,32 +97,76 @@ func RunRollback(w io.Writer, dryRun bool) int {
 	return rc
 }
 
-// rollbackGRUB restores /etc/default/grub from its .cfm-kernsec.bak
-// and regenerates grub.cfg via update-grub / grub2-mkconfig / grub-mkconfig.
+// rollbackGRUB removes kernsec-managed args from the current
+// GRUB_CMDLINE_LINUX value, restores only pre-apply managed tokens when the
+// current managed snapshot exists, and regenerates grub.cfg. Legacy full-file
+// backups are byte-restored only when the current file still matches the
+// post-kernsec form derived from that backup.
 func rollbackGRUB(w io.Writer, dryRun bool, fs FS) int {
-	bak := PathDefaultGrub + BackupSuffix
-	if _, err := os.Stat(bak); os.IsNotExist(err) {
-		fmt.Fprintf(w, "[!] No backup found at %s\n", bak)
-		fmt.Fprintln(w, "    cfm kernsec has not yet applied any changes to this host,")
-		fmt.Fprintln(w, "    or the backup was already restored / manually removed.")
-		return 1
+	legacyBak := PathDefaultGrub + BackupSuffix
+	snap, hasSnapshot, snapErr := readManagedBootArgSnapshot(GRUBManagedBackupPath)
+	if snapErr != nil {
+		fmt.Fprintf(w, "[Boot] Ignoring GRUB managed-args snapshot at %s: %v\n", GRUBManagedBackupPath, snapErr)
+	}
+	if !hasSnapshot {
+		if _, err := os.Stat(legacyBak); os.IsNotExist(err) {
+			fmt.Fprintf(w, "[!] No managed snapshot at %s and no legacy backup at %s\n", GRUBManagedBackupPath, legacyBak)
+			fmt.Fprintln(w, "    cfm kernsec has not yet applied any changes to this host,")
+			fmt.Fprintln(w, "    or rollback data was already restored / manually removed.")
+			return 1
+		}
 	}
 
-	fmt.Fprintf(w, "[Boot] will restore %s from %s\n", PathDefaultGrub, bak)
+	if hasSnapshot {
+		fmt.Fprintf(w, "[Boot] will remove kernsec-managed keys from %s and restore saved managed values from %s\n", PathDefaultGrub, GRUBManagedBackupPath)
+	} else {
+		fmt.Fprintf(w, "[Boot] no managed snapshot found; will use legacy backup %s only if current content matches kernsec's expected post-apply form\n", legacyBak)
+	}
 	if dryRun {
 		return 0
 	}
 
-	data, err := os.ReadFile(bak)
+	current, err := os.ReadFile(PathDefaultGrub)
 	if err != nil {
-		fmt.Fprintf(w, "[!] read %s: %v\n", bak, err)
+		fmt.Fprintf(w, "[!] read %s: %v\n", PathDefaultGrub, err)
 		return 1
 	}
-	if err := AtomicWriteFile(PathDefaultGrub, data, 0o644); err != nil {
+
+	var outContent []byte
+	if hasSnapshot {
+		out, err := grubContentWithManagedArgs(string(current), snap.Args)
+		if err != nil {
+			fmt.Fprintf(w, "[!] rollback %s safely: %v\n", PathDefaultGrub, err)
+			printManualGRUBRecovery(w)
+			return 1
+		}
+		outContent = []byte(out)
+	} else {
+		legacy, err := os.ReadFile(legacyBak)
+		if err != nil {
+			fmt.Fprintf(w, "[!] read %s: %v\n", legacyBak, err)
+			return 1
+		}
+		expected, err := expectedLegacyGRUBPostApply(string(legacy), string(current))
+		if err != nil {
+			fmt.Fprintf(w, "[!] inspect legacy rollback state: %v\n", err)
+			printManualGRUBRecovery(w)
+			return 1
+		}
+		if string(current) != expected {
+			fmt.Fprintf(w, "[!] refusing legacy byte-restore of %s: current content no longer matches kernsec's expected post-apply form.\n", PathDefaultGrub)
+			fmt.Fprintln(w, "    This usually means non-kernsec/operator boot arguments were added after apply.")
+			printManualGRUBRecovery(w)
+			return 1
+		}
+		outContent = legacy
+	}
+
+	if err := AtomicWriteFile(PathDefaultGrub, outContent, 0o644); err != nil {
 		fmt.Fprintf(w, "[!] restore %s: %v\n", PathDefaultGrub, err)
 		return 1
 	}
-	fmt.Fprintf(w, "[Boot] restored %s\n", PathDefaultGrub)
+	fmt.Fprintf(w, "[Boot] rolled back kernsec-managed GRUB args in %s\n", PathDefaultGrub)
 
 	grub := &GRUBBackend{FS: fs}
 	grubRefresh, grubRefreshArgs, err := grub.refreshCommand()
@@ -126,33 +184,65 @@ func rollbackGRUB(w io.Writer, dryRun bool, fs FS) int {
 	return 0
 }
 
-// rollbackProxmox restores /etc/kernel/cmdline from its backup and
-// runs proxmox-boot-tool refresh.
-func rollbackProxmox(w io.Writer, dryRun bool) int {
-	bak := PathPVECmdline + BackupSuffix
-	if _, err := os.Stat(bak); os.IsNotExist(err) {
-		fmt.Fprintf(w, "[!] No backup found at %s\n", bak)
-		fmt.Fprintln(w, "    cfm kernsec has not yet applied any changes to this host.")
-		return 1
+// rollbackProxmox removes kernsec-managed args from /etc/kernel/cmdline,
+// restores only pre-apply managed tokens when the current managed snapshot
+// exists, and refreshes proxmox-boot-tool. Legacy full-file backups are
+// byte-restored only after an exact post-kernsec expected-form comparison.
+func rollbackProxmox(w io.Writer, dryRun bool, fs FS) int {
+	legacyBak := PathPVECmdline + BackupSuffix
+	snap, hasSnapshot, snapErr := readManagedBootArgSnapshot(ProxmoxManagedBackupPath)
+	if snapErr != nil {
+		fmt.Fprintf(w, "[Boot] Ignoring Proxmox managed-args snapshot at %s: %v\n", ProxmoxManagedBackupPath, snapErr)
+	}
+	if !hasSnapshot {
+		if _, err := os.Stat(legacyBak); os.IsNotExist(err) {
+			fmt.Fprintf(w, "[!] No managed snapshot at %s and no legacy backup at %s\n", ProxmoxManagedBackupPath, legacyBak)
+			fmt.Fprintln(w, "    cfm kernsec has not yet applied any changes to this host.")
+			return 1
+		}
 	}
 
-	fmt.Fprintf(w, "[Boot] will restore %s from %s\n", PathPVECmdline, bak)
+	if hasSnapshot {
+		fmt.Fprintf(w, "[Boot] will remove kernsec-managed keys from %s and restore saved managed values from %s\n", PathPVECmdline, ProxmoxManagedBackupPath)
+	} else {
+		fmt.Fprintf(w, "[Boot] no managed snapshot found; will use legacy backup %s only if current content matches kernsec's expected post-apply form\n", legacyBak)
+	}
 	if dryRun {
 		return 0
 	}
 
-	data, err := os.ReadFile(bak)
+	current, err := os.ReadFile(PathPVECmdline)
 	if err != nil {
-		fmt.Fprintf(w, "[!] read %s: %v\n", bak, err)
+		fmt.Fprintf(w, "[!] read %s: %v\n", PathPVECmdline, err)
 		return 1
 	}
-	if err := AtomicWriteFile(PathPVECmdline, data, 0o644); err != nil {
+
+	var outContent []byte
+	if hasSnapshot {
+		tokens := rebuildManagedTokens(ParseCmdline(string(current)), snap.Args)
+		outContent = []byte(strings.Join(tokens, " ") + "\n")
+	} else {
+		legacy, err := os.ReadFile(legacyBak)
+		if err != nil {
+			fmt.Fprintf(w, "[!] read %s: %v\n", legacyBak, err)
+			return 1
+		}
+		expected := expectedLegacyCmdlinePostApply(string(legacy), string(current))
+		if string(current) != expected {
+			fmt.Fprintf(w, "[!] refusing legacy byte-restore of %s: current content no longer matches kernsec's expected post-apply form.\n", PathPVECmdline)
+			fmt.Fprintln(w, "    This usually means non-kernsec/operator boot arguments were added after apply.")
+			printManualProxmoxRecovery(w)
+			return 1
+		}
+		outContent = legacy
+	}
+
+	if err := AtomicWriteFile(PathPVECmdline, outContent, 0o644); err != nil {
 		fmt.Fprintf(w, "[!] restore %s: %v\n", PathPVECmdline, err)
 		return 1
 	}
-	fmt.Fprintf(w, "[Boot] restored %s\n", PathPVECmdline)
+	fmt.Fprintf(w, "[Boot] rolled back kernsec-managed Proxmox args in %s\n", PathPVECmdline)
 
-	fs := RealFS{}
 	out, err := fs.RunCapture("proxmox-boot-tool", "refresh")
 	if err != nil {
 		fmt.Fprintf(w, "[!] proxmox-boot-tool refresh: %v: %s\n", err, out)
@@ -250,6 +340,130 @@ func readBLSRollbackSnapshot(path string) (blsRollbackSnapshot, bool, error) {
 		}
 	}
 	return clean, true, nil
+}
+
+type managedBootArgSnapshot struct {
+	Version int      `json:"version"`
+	Args    []string `json:"args"`
+}
+
+const managedBootArgSnapshotVersion = 1
+
+func writeManagedBootArgSnapshot(path string, tokens []string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	snap := managedBootArgSnapshot{
+		Version: managedBootArgSnapshotVersion,
+		Args:    KeepManagedArgs(tokens),
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return AtomicWriteFile(path, data, 0o644)
+}
+
+func readManagedBootArgSnapshot(path string) (managedBootArgSnapshot, bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return managedBootArgSnapshot{}, false, nil
+	}
+	if err != nil {
+		return managedBootArgSnapshot{}, false, err
+	}
+	var snap managedBootArgSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return managedBootArgSnapshot{}, false, fmt.Errorf("unrecognized or legacy format")
+	}
+	if snap.Version != managedBootArgSnapshotVersion {
+		return managedBootArgSnapshot{}, false, fmt.Errorf("unsupported format version %d", snap.Version)
+	}
+	return managedBootArgSnapshot{Version: snap.Version, Args: KeepManagedArgs(snap.Args)}, true, nil
+}
+
+func rebuildManagedTokens(currentTokens, managed []string) []string {
+	out := RemoveManagedArgs(currentTokens)
+	out = append(out, KeepManagedArgs(managed)...)
+	return out
+}
+
+func grubContentWithManagedArgs(content string, managed []string) (string, error) {
+	currentLinux, err := readGrubCmdlineLinuxForRollback(content)
+	if err != nil {
+		return "", err
+	}
+	restored := strings.Join(rebuildManagedTokens(ParseCmdline(currentLinux), managed), " ")
+	encoded := encodeGrubCmdlineValueForRollback(restored)
+	out, found := rewriteGrubCmdlineLinux(content, encoded)
+	if !found {
+		out += "\n" + grubCmdlineLineEncoded(encoded) + "\n"
+	}
+	return out, nil
+}
+
+func expectedLegacyGRUBPostApply(legacyContent, currentContent string) (string, error) {
+	currentLinux, err := readGrubCmdlineLinuxForRollback(currentContent)
+	if err != nil {
+		return "", fmt.Errorf("read current GRUB_CMDLINE_LINUX: %w", err)
+	}
+	currentManaged := KeepManagedArgs(ParseCmdline(currentLinux))
+	return grubContentWithManagedArgs(legacyContent, currentManaged)
+}
+
+func expectedLegacyCmdlinePostApply(legacyContent, currentContent string) string {
+	currentManaged := KeepManagedArgs(ParseCmdline(currentContent))
+	tokens := rebuildManagedTokens(ParseCmdline(legacyContent), currentManaged)
+	return strings.Join(tokens, " ") + "\n"
+}
+
+func readGrubCmdlineLinuxForRollback(content string) (string, error) {
+	return readGrubCmdlineVarForRollback(content, "GRUB_CMDLINE_LINUX")
+}
+
+func readGrubCmdlineVarForRollback(content, varName string) (string, error) {
+	prefix := varName + "="
+	for _, line := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, prefix) {
+			continue
+		}
+		val := strings.TrimPrefix(t, prefix)
+		decoded, err := decodeGrubCmdlineValueForRollback(val)
+		if err != nil {
+			return "", fmt.Errorf("%s: %s: %w", PathDefaultGrub, varName, err)
+		}
+		return decoded, nil
+	}
+	return "", nil
+}
+
+func decodeGrubCmdlineValueForRollback(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return decodeDoubleQuoted(s[1 : len(s)-1])
+	}
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1], nil
+	}
+	return s, nil
+}
+
+func encodeGrubCmdlineValueForRollback(inner string) string {
+	escaped := strings.ReplaceAll(inner, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
+func printManualGRUBRecovery(w io.Writer) {
+	fmt.Fprintf(w, "    Manual recovery: edit %s, remove kernsec-managed keys (%s), restore any pre-kernsec managed values you still need from %s or %s, then regenerate grub.cfg.\n",
+		PathDefaultGrub, strings.Join(ManagedBootArgKeys, ", "), GRUBManagedBackupPath, PathDefaultGrub+BackupSuffix)
+}
+
+func printManualProxmoxRecovery(w io.Writer) {
+	fmt.Fprintf(w, "    Manual recovery: edit %s, remove kernsec-managed keys (%s), restore any pre-kernsec managed values you still need from %s or %s, then run proxmox-boot-tool refresh.\n",
+		PathPVECmdline, strings.Join(ManagedBootArgKeys, ", "), ProxmoxManagedBackupPath, PathPVECmdline+BackupSuffix)
 }
 
 // removeManagedSysctlFile removes SysctlPath so the kernel reverts
