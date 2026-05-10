@@ -3,11 +3,11 @@ package notify
 import "time"
 
 type Event struct {
-	Host     string            // titan.myip.gr
-	Kind     string            // "autoblock" | "portscan" | "ssh_authfail" ...
+	Host     string // titan.myip.gr
+	Kind     string // "autoblock" | "portscan" | "ssh_authfail" ...
 	When     time.Time
-	SrcIP    string
-	Reason   string            // "SYN flood", "portscan 8 ports", ...
+	SrcIP    string // source IP for source-oriented detectors; destination details belong in Extra for outbound alerts
+	Reason   string // "SYN flood", "portscan 8 ports", ...
 	TTL      time.Duration
 	Count    int
 	PTR      string
