@@ -46,7 +46,7 @@ type AuditRow struct {
 	Kind        RuleKind  `json:"kind"`
 	Group       string    `json:"group"`
 	Tier        Tier      `json:"tier"`
-	Display     string    `json:"display"`     // "kernel.kptr_restrict=2" or "slab_nomerge"
+	Display     string    `json:"display"` // "kernel.kptr_restrict=2" or "slab_nomerge"
 	State       RuleState `json:"state"`
 	Description string    `json:"description"`
 	Affects     string    `json:"affects"`
@@ -65,9 +65,10 @@ type AuditRow struct {
 	ExpectedValue string `json:"expected_value,omitempty"` // expected value as configured
 
 	// Boot-arg-only.
-	InCurrent     bool `json:"in_current,omitempty"`      // expected arg present in /proc/cmdline
-	InNextBoot    bool `json:"in_next_boot,omitempty"`    // expected arg present in next-boot cmdline
-	NextBootKnown bool `json:"next_boot_known,omitempty"` // bootloader cmdline read succeeded
+	InCurrent     bool   `json:"in_current,omitempty"`      // expected arg present in /proc/cmdline
+	InNextBoot    bool   `json:"in_next_boot,omitempty"`    // expected arg present in next-boot cmdline
+	NextBootKnown bool   `json:"next_boot_known,omitempty"` // bootloader cmdline read succeeded
+	Error         string `json:"error,omitempty"`           // bootloader read error, if any
 
 	// Module-only.
 	ModuleName        string `json:"module_name,omitempty"`         // module name (matches `lsmod` first column)
@@ -77,9 +78,9 @@ type AuditRow struct {
 
 	// Mount-only. kernsec audits but never auto-mutates /etc/fstab —
 	// these fields surface what the operator would need to add.
-	MountPoint         string `json:"mount_point,omitempty"`          // e.g. "/tmp"
-	RecommendedOptions string `json:"recommended_options,omitempty"`  // e.g. "nodev,nosuid,noexec"
-	CurrentOptions     string `json:"current_options,omitempty"`      // active mount options or "" if not separately mounted
+	MountPoint         string `json:"mount_point,omitempty"`         // e.g. "/tmp"
+	RecommendedOptions string `json:"recommended_options,omitempty"` // e.g. "nodev,nosuid,noexec"
+	CurrentOptions     string `json:"current_options,omitempty"`     // active mount options or "" if not separately mounted
 }
 
 // StatusJSON is the top-level structure for `cfm kernsec status --json`.
@@ -90,6 +91,7 @@ type StatusJSON struct {
 	Warnings int        `json:"warnings"`
 	Tier     Tier       `json:"tier"`
 	Backend  string     `json:"backend"`
+	Errors   []string   `json:"errors,omitempty"`
 	Rules    []AuditRow `json:"rules"`
 }
 
@@ -153,6 +155,10 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 		rr := rs.BootArgs[i]
 		curState, _ := CheckBootArg(curTokens, a)
 		nxtState, _ := CheckBootArg(nxtTokens, a)
+		readErr := ""
+		if nextErr != nil {
+			readErr = nextErr.Error()
+		}
 		row := AuditRow{
 			ID:            a.ID,
 			Kind:          KindBoot,
@@ -166,6 +172,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			InCurrent:     curState == ArgOK,
 			InNextBoot:    nxtState == ArgOK,
 			NextBootKnown: nextErr == nil,
+			Error:         readErr,
 		}
 		row.State = bootRowStateForDecision(rr.Decision, curState, nxtState, nextErr == nil)
 		rows = append(rows, row)

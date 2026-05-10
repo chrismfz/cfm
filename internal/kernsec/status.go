@@ -19,9 +19,11 @@ type StatusOptions struct {
 
 // StatusResult is the machine-readable summary returned by RunStatus.
 type StatusResult struct {
-	OK       bool // false if any check produced WARN
-	Warnings int
-	Tier     Tier // tier in effect when the audit ran (0/1/2)
+	OK            bool // false if any check produced WARN or an indeterminate read error
+	Warnings      int
+	Tier          Tier // tier in effect when the audit ran (0/1/2)
+	Indeterminate bool // true if a source of truth could not be read
+	Errors        []string
 }
 
 // RunStatusJSON emits the kernsec audit as a JSON document. It is the
@@ -46,18 +48,20 @@ func RunStatusJSON(w io.Writer) StatusResult {
 			warnings++
 		}
 	}
+	errs := auditRowErrors(rows)
 
 	out := StatusJSON{
-		OK:       warnings == 0,
+		OK:       warnings == 0 && len(errs) == 0,
 		Warnings: warnings,
 		Tier:     conf.Tier,
 		Backend:  be.Label(),
+		Errors:   errs,
 		Rules:    rows,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
-	return StatusResult{OK: out.OK, Warnings: warnings, Tier: conf.Tier}
+	return StatusResult{OK: out.OK, Warnings: warnings, Tier: conf.Tier, Indeterminate: len(errs) > 0, Errors: errs}
 }
 
 // RunStatus prints the kernsec audit-only status to w. Mirrors
@@ -69,7 +73,7 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fs := RealFS{}
 	be := DetectBackend(fs)
 	currentCmdline := ReadProcCmdline()
-	nextCmdline, _ := be.NextBootCmdline()
+	nextCmdline, nextErr := be.NextBootCmdline()
 
 	// Best-effort conf load. If absent or unreadable, default to
 	// tier=1 — matches first-run UX and produces sensible audit on
@@ -101,7 +105,12 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Configured default kernel cmdline — next boot]")
-	fmt.Fprintln(w, nextCmdline)
+	if nextErr != nil {
+		fmt.Fprintf(w, "ERROR unable to read next-boot cmdline from %s: %v\n", be.Label(), nextErr)
+		res.indeterminate(fmt.Sprintf("next-boot cmdline read failed: %v", nextErr))
+	} else {
+		fmt.Fprintln(w, nextCmdline)
+	}
 	fmt.Fprintln(w)
 
 	// Resolve every rule against conf + host profile so OFF (operator-
@@ -156,8 +165,8 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	currentTokens := ParseCmdline(currentCmdline)
 	nextTokens := ParseCmdline(nextCmdline)
 
-	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved)
-	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved)
+	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved, nil)
+	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved, nextErr)
 
 	res.printModuleState(w, resolved)
 
@@ -302,7 +311,9 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	}
 	fmt.Fprintln(w)
 
-	if res.Warnings == 0 {
+	if res.Indeterminate {
+		fmt.Fprintf(w, "[!] Status verification indeterminate due to %d read error(s). Review ERROR lines above.\n", len(res.Errors))
+	} else if res.Warnings == 0 {
 		fmt.Fprintln(w, "[+] Status verification looks good.")
 	} else {
 		fmt.Fprintf(w, "[!] Status verification found %d warning(s). Review output above.\n", res.Warnings)
@@ -316,8 +327,13 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 // resolved set so OFF (operator-disabled / tier-gated) and SKIP
 // (host-profile blocked) rules render explicitly instead of being
 // silently dropped.
-func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string, resolved ResolvedSet) {
+func (res *StatusResult) printArgState(w io.Writer, label string, tokens []string, resolved ResolvedSet, readErr error) {
 	fmt.Fprintf(w, "[%s]\n", label)
+	if readErr != nil {
+		fmt.Fprintf(w, "ERROR      unable to read cmdline: %v\n", readErr)
+		fmt.Fprintln(w)
+		return
+	}
 	for i, want := range AllBootArgs() {
 		rr := resolved.BootArgs[i]
 		switch rr.Decision {
@@ -346,6 +362,30 @@ func (res *StatusResult) printArgState(w io.Writer, label string, tokens []strin
 func (res *StatusResult) warn() {
 	res.Warnings++
 	res.OK = false
+}
+
+func (res *StatusResult) indeterminate(msg string) {
+	res.Indeterminate = true
+	res.OK = false
+	for _, existing := range res.Errors {
+		if existing == msg {
+			return
+		}
+	}
+	res.Errors = append(res.Errors, msg)
+}
+
+func auditRowErrors(rows []AuditRow) []string {
+	seen := map[string]bool{}
+	var errs []string
+	for _, r := range rows {
+		if r.Error == "" || seen[r.Error] {
+			continue
+		}
+		seen[r.Error] = true
+		errs = append(errs, r.Error)
+	}
+	return errs
 }
 
 // printMountState surfaces the fstab audit rules. kernsec never
