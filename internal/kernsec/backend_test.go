@@ -755,18 +755,28 @@ func TestDecodeGrubCmdlineValue(t *testing.T) {
 			in: `"ro module.parameter=\"x y\" quiet"`, want: `ro module.parameter="x y" quiet`},
 		{name: "double-quoted with escaped backslash",
 			in: `"ro path=\\foo"`, want: `ro path=\foo`},
-		{name: "rejects shell variable expansion",
-			in: `"ro $extra quiet"`, wantErr: true},
+		{name: "literal tuned params token",
+			in: `"ro $tuned_params quiet"`, want: `ro $tuned_params quiet`},
+		{name: "escaped literal tuned params token",
+			in: `"ro \$tuned_params quiet"`, want: `ro $tuned_params quiet`},
+		{name: "rejects ordinary shell variable expansion",
+			in: `"ro $BAD quiet"`, wantErr: true},
 		{name: "rejects backtick command substitution",
 			in: "\"ro `cmd` quiet\"", wantErr: true},
 		{name: "rejects $() command substitution",
 			in: `"ro $(cmd) quiet"`, wantErr: true},
+		{name: "rejects brace shell expansion",
+			in: `"ro ${BAD} quiet"`, wantErr: true},
 		{name: "rejects single quote inside double-quoted",
 			in: `"ro 'foo' quiet"`, wantErr: true},
 		{name: "rejects unsupported backslash escape",
 			in: `"ro \n quiet"`, wantErr: true},
 		{name: "rejects trailing backslash",
 			in: `"ro slab_nomerge\"`, wantErr: true},
+		{name: "rejects malformed double quote",
+			in: `"ro quiet`, wantErr: true},
+		{name: "rejects malformed single quote",
+			in: `'ro quiet`, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -794,14 +804,18 @@ func TestEncodeGrubCmdlineValue(t *testing.T) {
 			want: `"ro module.parameter=\"x y\" quiet"`},
 		{name: "embedded backslash",
 			in: `ro path=\foo`, want: `"ro path=\\foo"`},
-		{name: "rejects $",
-			in: "ro $extra quiet", wantErr: true},
+		{name: "literal tuned params token",
+			in: `ro $tuned_params quiet`, want: `"ro \$tuned_params quiet"`},
+		{name: "rejects ordinary shell variable",
+			in: "ro $BAD quiet", wantErr: true},
 		{name: "rejects backtick",
 			in: "ro `cmd`", wantErr: true},
 		{name: "rejects single quote",
 			in: "ro 'foo'", wantErr: true},
 		{name: "rejects $(",
 			in: "ro $(cmd)", wantErr: true},
+		{name: "rejects ${",
+			in: "ro ${BAD}", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -835,6 +849,57 @@ func TestGrubCmdline_RoundTripPreservesEmbeddedQuotes(t *testing.T) {
 	}
 	if decoded != original {
 		t.Errorf("round-trip mismatch:\n  before: %q\n  after:  %q", original, decoded)
+	}
+}
+
+func TestGrubCmdline_RoundTripPreservesTunedParamsLiteral(t *testing.T) {
+	original := `ro $tuned_params quiet module.parameter="x y"`
+	encoded, err := encodeGrubCmdlineValue(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEncoded := `"ro \$tuned_params quiet module.parameter=\"x y\""`
+	if encoded != wantEncoded {
+		t.Fatalf("encoded = %q, want %q", encoded, wantEncoded)
+	}
+	decoded, err := decodeGrubCmdlineValue(encoded)
+	if err != nil {
+		t.Fatalf("encoded form did not decode: %v", err)
+	}
+	if decoded != original {
+		t.Fatalf("decoded = %q, want %q", decoded, original)
+	}
+}
+
+func TestGRUBBackend_WriteCmdline_PreservesTunedParamsUnmanaged(t *testing.T) {
+	grub := redirectGrubPath(t)
+	content := `GRUB_CMDLINE_LINUX="ro $tuned_params quiet slab_nomerge"
+`
+	if err := os.WriteFile(grub, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(grub, content)
+	g := &GRUBBackend{FS: fs}
+
+	if err := g.WriteCmdline([]BootArg{{Key: "init_on_alloc", Value: "1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	want := `GRUB_CMDLINE_LINUX="ro \$tuned_params quiet init_on_alloc=1"`
+	if !strings.Contains(out, want) {
+		t.Fatalf("GRUB_CMDLINE_LINUX did not preserve literal tuned params token:\n%s\nwant substring: %s", out, want)
+	}
+	linux, err := readGrubCmdlineLinux(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linux != `ro $tuned_params quiet init_on_alloc=1` {
+		t.Fatalf("decoded linux = %q", linux)
 	}
 }
 
