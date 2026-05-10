@@ -194,7 +194,7 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasContainers {
 			return "host has containers running (runc / containerd / lxc / podman)"
 		}
-	case "boot.kexec":
+	case "boot.kexec", "sysctl.kernel.kexec":
 		if p.HasKdump {
 			return "host has kdump enabled — kexec_load_disabled would break it"
 		}

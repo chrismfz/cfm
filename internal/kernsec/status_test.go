@@ -99,7 +99,6 @@ func TestRunStatus_Tier0DoesNotWarnOnDisabledRuleProbes(t *testing.T) {
 	_ = res
 }
 
-
 func TestDecisionForBootArg_FallsBackToApplyForUnknown(t *testing.T) {
 	// Empty resolved set → Apply (so hard-coded RunStatus follow-up
 	// checks for kernel-feature health probes still run even when
@@ -143,5 +142,43 @@ func TestDecisionForBootArg_Tier1AppliesAlgifMitigation(t *testing.T) {
 	got := decisionForBootArg(resolved, "initcall_blacklist", "algif_aead_init")
 	if got != Apply {
 		t.Errorf("tier=1 with no override should Apply algif mitigation, got %v", got)
+	}
+}
+
+func TestBuildAuditRows_ReconciledSysctlsSurfaceInStatusRows(t *testing.T) {
+	rows := BuildAuditRows(&Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}, HostProfile{})
+	want := map[string]RuleState{
+		"KSEC-SCT-mem.exploit-001":    "",
+		"KSEC-SCT-mem.exploit-002":    "",
+		"KSEC-SCT-mem.exploit-003":    "",
+		"KSEC-SCT-mem.exploit-004":    "",
+		"KSEC-SCT-mem.exploit-005":    "",
+		"KSEC-SCT-mem.exploit-006":    StateOFF,
+		"KSEC-SCT-mem.exploit-007":    "",
+		"KSEC-SCT-mem.exploit-008":    StateOFF,
+		"KSEC-SCT-kernel.surface-001": "",
+		"KSEC-SCT-kernel.surface-002": "",
+		"KSEC-SCT-kernel.surface-003": "",
+	}
+	seen := map[string]AuditRow{}
+	for _, row := range rows {
+		if _, ok := want[row.ID]; ok {
+			seen[row.ID] = row
+		}
+	}
+	for id, wantState := range want {
+		row, ok := seen[id]
+		if !ok {
+			t.Fatalf("status rows missing %s", id)
+		}
+		if row.Kind != KindSysctl {
+			t.Errorf("%s kind = %s, want sysctl", id, row.Kind)
+		}
+		if row.Decision == ManagedExternally {
+			t.Errorf("%s unexpectedly managed externally", id)
+		}
+		if wantState != "" && row.State != wantState {
+			t.Errorf("%s state = %s, want %s", id, row.State, wantState)
+		}
 	}
 }

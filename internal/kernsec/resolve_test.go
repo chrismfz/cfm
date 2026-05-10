@@ -81,10 +81,10 @@ func TestResolve_Tier2HostProfileGates(t *testing.T) {
 	rs := Resolve(conf, profile)
 
 	wantSkip := map[string]bool{
-		"KSEC-SCT-tier2.namespace-001":            true,
-		"KSEC-SCT-tier2.namespace-002":            true,
-		"KSEC-BOOT-tier2.lockdown-001":            true,
-		"KSEC-BOOT-tier2.module-sig-enforce-001":  true,
+		"KSEC-SCT-tier2.namespace-001":           true,
+		"KSEC-SCT-tier2.namespace-002":           true,
+		"KSEC-BOOT-tier2.lockdown-001":           true,
+		"KSEC-BOOT-tier2.module-sig-enforce-001": true,
 	}
 	for id := range wantSkip {
 		var got *ResolvedRule
@@ -188,13 +188,14 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 	rs := Resolve(conf, HostProfile{IsEFIBoot: true})
 
 	// Expected applying sysctls at tier=1:
-	//   KSPPSysctls (11) - 1 skipped   = 10
-	//   KernelSurface  (1)              = 1
-	//   NetHardenSysctls (7)            = 7
+	//   KSPPSysctls (11) - 1 skipped     = 10
+	//   MemExploitSysctls (8) - Tier2 (2) = 6
+	//   KernelSurface  (4)                = 4
+	//   NetHardenSysctls (7)              = 7
 	//   Tier2Sysctls: SkipByTier        = 0
 	//   NetSysctls (5): ManagedExternally = 0
-	// Total = 18
-	wantSysctls := len(KSPPSysctls) - 1 + len(KernelSurface) + len(NetHardenSysctls)
+	// Total = 27
+	wantSysctls := len(KSPPSysctls) - 1 + (len(MemExploitSysctls) - 2) + len(KernelSurface) + len(NetHardenSysctls)
 	scts := rs.ApplySysctls()
 	if len(scts) != wantSysctls {
 		t.Errorf("ApplySysctls len = %d, want %d", len(scts), wantSysctls)
@@ -218,6 +219,83 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 	for _, a := range args {
 		if a.ID == "KSEC-BOOT-kspp-005" {
 			t.Error("skipped rule still in ApplyBootArgs")
+		}
+	}
+}
+
+func TestReconciledDocsOnlySysctlsAreRegistered(t *testing.T) {
+	want := map[string]struct {
+		id    string
+		value string
+		tier  Tier
+	}{
+		"vm.unprivileged_userfaultfd": {"KSEC-SCT-mem.exploit-001", "0", Tier1},
+		"vm.mmap_rnd_bits":            {"KSEC-SCT-mem.exploit-002", "32", Tier1},
+		"vm.mmap_rnd_compat_bits":     {"KSEC-SCT-mem.exploit-003", "16", Tier1},
+		"kernel.warn_limit":           {"KSEC-SCT-mem.exploit-004", "10", Tier1},
+		"kernel.oops_limit":           {"KSEC-SCT-mem.exploit-005", "10", Tier1},
+		"kernel.panic_on_oops":        {"KSEC-SCT-mem.exploit-006", "1", Tier2},
+		"fs.suid_dumpable":            {"KSEC-SCT-mem.exploit-007", "0", Tier1},
+		"kernel.panic":                {"KSEC-SCT-mem.exploit-008", "10", Tier2},
+		"dev.tty.ldisc_autoload":      {"KSEC-SCT-kernel.surface-001", "0", Tier1},
+		"kernel.kexec_load_disabled":  {"KSEC-SCT-kernel.surface-002", "1", Tier1},
+		"kernel.sysrq":                {"KSEC-SCT-kernel.surface-003", "0", Tier1},
+	}
+
+	seen := map[string]SysctlRule{}
+	for _, r := range AllSysctls() {
+		seen[r.Key] = r
+	}
+	for key, w := range want {
+		r, ok := seen[key]
+		if !ok {
+			t.Fatalf("%s missing from AllSysctls", key)
+		}
+		if r.ID != w.id || r.Value != w.value || r.Tier != w.tier {
+			t.Errorf("%s registered as id=%q value=%q tier=%v, want id=%q value=%q tier=%v",
+				key, r.ID, r.Value, r.Tier, w.id, w.value, w.tier)
+		}
+	}
+}
+
+func TestResolve_ReconciledSysctlTiersAndKdumpGate(t *testing.T) {
+	tier1 := Resolve(&Conf{Tier: Tier1}, HostProfile{})
+	decisions := map[string]Decision{}
+	for _, r := range tier1.Sysctls {
+		decisions[r.Display] = r.Decision
+	}
+	for _, display := range []string{
+		"vm.unprivileged_userfaultfd=0",
+		"vm.mmap_rnd_bits=32",
+		"vm.mmap_rnd_compat_bits=16",
+		"kernel.warn_limit=10",
+		"kernel.oops_limit=10",
+		"fs.suid_dumpable=0",
+		"dev.tty.ldisc_autoload=0",
+		"kernel.kexec_load_disabled=1",
+		"kernel.sysrq=0",
+	} {
+		if decisions[display] != Apply {
+			t.Errorf("tier1 decision for %s = %v, want Apply", display, decisions[display])
+		}
+	}
+	for _, display := range []string{"kernel.panic_on_oops=1", "kernel.panic=10"} {
+		if decisions[display] != SkipByTier {
+			t.Errorf("tier1 decision for %s = %v, want SkipByTier", display, decisions[display])
+		}
+	}
+
+	kdump := Resolve(&Conf{Tier: Tier1}, HostProfile{HasKdump: true})
+	for _, r := range kdump.Sysctls {
+		if r.Display == "kernel.kexec_load_disabled=1" && r.Decision != SkipByHostProfile {
+			t.Errorf("kdump host decision for kernel.kexec_load_disabled = %v, want SkipByHostProfile", r.Decision)
+		}
+	}
+
+	tier2 := Resolve(&Conf{Tier: Tier2}, HostProfile{})
+	for _, r := range tier2.Sysctls {
+		if (r.Display == "kernel.panic_on_oops=1" || r.Display == "kernel.panic=10") && r.Decision != Apply {
+			t.Errorf("tier2 decision for %s = %v, want Apply", r.Display, r.Decision)
 		}
 	}
 }
