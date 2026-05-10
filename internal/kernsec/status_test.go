@@ -2,9 +2,103 @@ package kernsec
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func withUnreadableNextBootCmdline(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	origPVE, origBLS, origGrub := PathPVECmdline, PathBLSEntries, PathDefaultGrub
+	PathPVECmdline = filepath.Join(tmp, "missing-pve-cmdline")
+	PathBLSEntries = filepath.Join(tmp, "missing-bls-entries")
+	PathDefaultGrub = filepath.Join(tmp, "grub")
+	t.Cleanup(func() {
+		PathPVECmdline, PathBLSEntries, PathDefaultGrub = origPVE, origBLS, origGrub
+	})
+	bad := []byte("GRUB_CMDLINE_LINUX=\"quiet ${UNSAFE}\"\n")
+	if err := os.WriteFile(PathDefaultGrub, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunTextCheck_IndeterminateWhenNextBootCmdlineUnreadable(t *testing.T) {
+	withTempConfPath(t)
+	withUnreadableNextBootCmdline(t)
+	if err := WriteConf(&Conf{Tier: 0, Overrides: map[string]RuleOverride{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	rc := runText([]string{"--check", "--skip-af-alg"}, &w)
+	if rc != 2 {
+		t.Fatalf("runText --check rc = %d, want 2; output:\n%s", rc, w.String())
+	}
+	if !strings.Contains(w.String(), "ERROR unable to read next-boot cmdline") {
+		t.Fatalf("status output missing next-boot ERROR line:\n%s", w.String())
+	}
+}
+
+func TestRunStatusJSON_IncludesNextBootReadError(t *testing.T) {
+	withTempConfPath(t)
+	withUnreadableNextBootCmdline(t)
+	if err := WriteConf(&Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	res := RunStatusJSON(&w)
+	if !res.Indeterminate {
+		t.Fatalf("RunStatusJSON Indeterminate = false, want true")
+	}
+	var out StatusJSON
+	if err := json.Unmarshal(w.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal status JSON: %v\n%s", err, w.String())
+	}
+	if out.OK {
+		t.Fatalf("status JSON ok = true, want false on read error")
+	}
+	if len(out.Errors) == 0 || !strings.Contains(out.Errors[0], "shell metacharacter") {
+		t.Fatalf("status JSON errors = %#v, want shell metacharacter read error", out.Errors)
+	}
+	foundBootRowError := false
+	for _, row := range out.Rules {
+		if row.Kind == KindBoot && strings.Contains(row.Error, "shell metacharacter") {
+			foundBootRowError = true
+			break
+		}
+	}
+	if !foundBootRowError {
+		t.Fatalf("no boot audit row carried read error")
+	}
+}
+
+func TestBuildAuditRows_Tier0DoesNotMaskNextBootReadError(t *testing.T) {
+	withUnreadableNextBootCmdline(t)
+	rows := BuildAuditRows(&Conf{Tier: 0, Overrides: map[string]RuleOverride{}}, HostProfile{})
+	checkedBoot := false
+	for _, row := range rows {
+		if row.Kind != KindBoot {
+			continue
+		}
+		checkedBoot = true
+		if row.State != StateOFF {
+			t.Fatalf("tier=0 boot row state = %s, want OFF", row.State)
+		}
+		if row.NextBootKnown {
+			t.Fatalf("tier=0 boot row NextBootKnown = true, want false")
+		}
+		if !strings.Contains(row.Error, "shell metacharacter") {
+			t.Fatalf("tier=0 boot row error = %q, want read error", row.Error)
+		}
+	}
+	if !checkedBoot {
+		t.Fatal("no boot rows found")
+	}
+}
 
 func TestApplyBootKeysFromResolved_FiltersToApply(t *testing.T) {
 	// tier=1 conf with one explicit per-rule skip on a tier-1 boot

@@ -107,16 +107,27 @@ func runText(args []string, w io.Writer) int {
 	}
 	if *jsonOut {
 		res := RunStatusJSON(w)
-		if *checkExit && !res.OK {
-			return 1
+		if *checkExit {
+			return statusCheckExitCode(res)
 		}
 		return 0
 	}
 	res := RunStatus(w, StatusOptions{SkipAFAlg: *skipAFAlg})
-	if *checkExit && !res.OK {
-		return 1
+	if *checkExit {
+		return statusCheckExitCode(res)
 	}
 	return 0
+}
+
+func statusCheckExitCode(res StatusResult) int {
+	switch {
+	case res.Indeterminate:
+		return 2
+	case !res.OK:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func runPreviewCmd(args []string, w io.Writer) int {
