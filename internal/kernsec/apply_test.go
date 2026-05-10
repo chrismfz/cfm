@@ -179,8 +179,8 @@ type fakeBootBackend struct {
 	NextBootErr    error
 }
 
-func (f *fakeBootBackend) Label() string                     { return "fake-backend" }
-func (f *fakeBootBackend) NextBootCmdline() (string, error)  { return f.NextBootResult, f.NextBootErr }
+func (f *fakeBootBackend) Label() string                    { return "fake-backend" }
+func (f *fakeBootBackend) NextBootCmdline() (string, error) { return f.NextBootResult, f.NextBootErr }
 func (f *fakeBootBackend) WriteCmdline(_ []BootArg) error {
 	f.WriteCalled = true
 	if f.FailWrite {
@@ -446,4 +446,158 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+type proxmoxApplyTestFS struct {
+	content     string
+	refreshHook func() error
+}
+
+func (f *proxmoxApplyTestFS) ReadFile(path string) ([]byte, error) {
+	if path == PathPVECmdline {
+		return []byte(f.content), nil
+	}
+	return nil, errors.New("not found: " + path)
+}
+func (f *proxmoxApplyTestFS) Exists(path string) bool { return path == PathPVECmdline }
+func (f *proxmoxApplyTestFS) IsDir(string) bool       { return false }
+func (f *proxmoxApplyTestFS) LookPath(string) bool    { return true }
+func (f *proxmoxApplyTestFS) RunCapture(name string, args ...string) (string, error) {
+	if name == "proxmox-boot-tool" && len(args) == 1 && args[0] == "refresh" {
+		if f.refreshHook != nil {
+			if err := f.refreshHook(); err != nil {
+				return "", err
+			}
+		}
+		return "refresh failed", errors.New("simulated refresh failure")
+	}
+	return "", errors.New("unexpected command")
+}
+
+func redirectProxmoxPath(t *testing.T) string {
+	t.Helper()
+	pve := filepath.Join(t.TempDir(), "cmdline")
+	orig := PathPVECmdline
+	PathPVECmdline = pve
+	t.Cleanup(func() { PathPVECmdline = orig })
+	return pve
+}
+
+func TestApplyWrites_ProxmoxRefreshFailureRollsBackCmdline(t *testing.T) {
+	redirectManagedPaths(t)
+	withTempManagedBackupPaths(t)
+	pvePath := redirectProxmoxPath(t)
+	original := "root=ZFS=rpool/ROOT/pve-1 ro quiet init_on_alloc=0\n"
+	if err := os.WriteFile(pvePath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	be := &ProxmoxBackend{FS: &proxmoxApplyTestFS{content: original}}
+	loaderCalled := false
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
+	}
+	if loaderCalled {
+		t.Fatal("LoadSysctl was invoked despite Proxmox Refresh failure")
+	}
+	got, err := os.ReadFile(pvePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("expected %s to be restored to original %q, got %q", pvePath, original, string(got))
+	}
+	out := w.String()
+	if !strings.Contains(out, "rolled back "+pvePath+" to a safe retry state") {
+		t.Fatalf("expected Proxmox rollback notice, got:\n%s", out)
+	}
+}
+
+func TestApplyWrites_ProxmoxRefreshFailureRollbackFailurePrintsManualRecovery(t *testing.T) {
+	redirectManagedPaths(t)
+	withTempManagedBackupPaths(t)
+	pvePath := redirectProxmoxPath(t)
+	original := "root=ZFS=rpool/ROOT/pve-1 ro quiet\n"
+	if err := os.WriteFile(pvePath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	be := &ProxmoxBackend{FS: &proxmoxApplyTestFS{
+		content: original,
+		refreshHook: func() error {
+			if err := os.Remove(pvePath); err != nil {
+				t.Fatal(err)
+			}
+			return nil
+		},
+	}}
+	loaderCalled := false
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		[]BootArg{{Key: "slab_nomerge"}}, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
+	}
+	if loaderCalled {
+		t.Fatal("LoadSysctl was invoked despite Proxmox Refresh failure")
+	}
+	out := w.String()
+	for _, want := range []string{"WARNING: rollback of " + pvePath + " failed", "Manual recovery: edit " + pvePath, "proxmox-boot-tool refresh"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestApplyWrites_ProxmoxRollbackPreservesUnmanagedOperatorArgs(t *testing.T) {
+	redirectManagedPaths(t)
+	withTempManagedBackupPaths(t)
+	pvePath := redirectProxmoxPath(t)
+	original := "root=ZFS=rpool/ROOT/pve-1 ro quiet init_on_alloc=0\n"
+	if err := os.WriteFile(pvePath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	be := &ProxmoxBackend{FS: &proxmoxApplyTestFS{
+		content: original,
+		refreshHook: func() error {
+			return os.WriteFile(pvePath, []byte("root=ZFS=rpool/ROOT/pve-1 ro quiet slab_nomerge init_on_alloc=1 console=ttyS0\n"), 0o644)
+		},
+	}}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
+		func() error { return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
+	}
+	gotBytes, err := os.ReadFile(pvePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(gotBytes)
+	for _, want := range []string{"root=ZFS=rpool/ROOT/pve-1", "ro", "quiet", "console=ttyS0", "init_on_alloc=0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected preserved/restored token %q in %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"slab_nomerge", "init_on_alloc=1"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("expected managed apply token %q to be removed from %q", unwanted, got)
+		}
+	}
 }
