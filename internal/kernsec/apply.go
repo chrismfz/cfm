@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"cfm/internal/managedsysctl"
 )
 
 // ApplyOptions controls RunApply behaviour.
@@ -101,6 +103,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		}
 		fmt.Fprintln(w)
 	}
+	reportCrossComponentConflicts(w, sysctls)
 	fmt.Fprintf(w, "Rules:   sysctls=%d  boot=%d  modules=%d  mounts=%d (audit)\n",
 		len(sysctls), len(bootArgs), len(modules), count(rs.Mounts, Apply))
 	switch {
@@ -485,5 +488,50 @@ func verifyAfterApply(w io.Writer, conf *Conf, profile HostProfile) {
 			modulesLoaded)
 	default:
 		fmt.Fprintln(w, "  module: blacklist on disk; no managed modules currently loaded")
+	}
+}
+
+// reportCrossComponentConflicts surfaces ownership disagreements that
+// would otherwise be silent kernel-level fights between kernsec and
+// another cfm component:
+//
+//  1. managedsysctl-registry conflicts: same key claimed by two
+//     catalogs (an init-order coding bug or a sys_tweaks-vs-kernsec
+//     misconfiguration).
+//  2. operator force-overrides: rules where `state = force` resurrected
+//     Apply for a key another component owns. Honoured per-design but
+//     the operator should see a one-line summary so they know what
+//     they're getting (kernsec will write the key on top of whatever
+//     sys_tweaks writes; the last writer wins).
+//
+// Honouring docs/kernsec.md:1117 — Phase 6 promises this surfaces in
+// apply output.
+func reportCrossComponentConflicts(w io.Writer, applySysctls []SysctlRule) {
+	any := false
+	for _, c := range managedsysctl.Default().Conflicts() {
+		if !any {
+			fmt.Fprintln(w, "[!] cross-component sysctl ownership conflicts (registry):")
+			any = true
+		}
+		owners := make([]string, len(c.Owners))
+		for i, o := range c.Owners {
+			owners[i] = string(o)
+		}
+		fmt.Fprintf(w, "    %s claimed by: %s\n", c.Key, strings.Join(owners, ", "))
+	}
+	for _, r := range applySysctls {
+		owner := managedsysctl.Default().OwnerOf(r.Key)
+		if owner == "" || owner == managedsysctl.OwnerKernsec {
+			continue
+		}
+		if !any {
+			fmt.Fprintln(w, "[!] cross-component sysctl ownership conflicts:")
+			any = true
+		}
+		fmt.Fprintf(w, "    %s (rule %s): forced by operator; %s also writes this key — last writer wins at runtime\n",
+			r.Key, r.ID, owner)
+	}
+	if any {
+		fmt.Fprintln(w)
 	}
 }

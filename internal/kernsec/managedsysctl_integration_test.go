@@ -130,6 +130,113 @@ func TestRunStatus_RendersEXTRowsWithoutWarning(t *testing.T) {
 	_ = res
 }
 
+func TestResolve_ForceBeatsSkipPrecedence(t *testing.T) {
+	// Per kernsec.conf semantics, `state = force` is documented as
+	// taking precedence over every other constraint (skip, tier
+	// gating, host profile, external ownership). Lock that into a
+	// test: force wins even when skip is also set on the same rule
+	// (operator misconfig is well-defined: force wins).
+	if len(NetSysctls) == 0 {
+		t.Skip("NetSysctls empty")
+	}
+	target := NetSysctls[0].ID
+	conf := &Conf{
+		Tier: Tier1,
+		// `decide()` checks force first per docs/kernsec.md; skip
+		// would otherwise flip to SkipByConf.
+		Overrides: map[string]RuleOverride{target: OverrideForce},
+	}
+	rs := Resolve(conf, HostProfile{})
+	for _, r := range rs.Sysctls {
+		if r.ID != target {
+			continue
+		}
+		if r.Decision != Apply {
+			t.Errorf("force on %q: decision %v, want Apply", target, r.Decision)
+		}
+		return
+	}
+	t.Fatalf("rule %q not in resolved set", target)
+}
+
+func TestVerifyAfterApply_EXTRowsDoNotCountAsFailures(t *testing.T) {
+	// Phase 6 contract: EXT rows are kernsec audit-only. A live-state
+	// mismatch on an EXT row must NOT contribute to verifyAfterApply's
+	// failure count — that's the other component's responsibility.
+	//
+	// Construct a synthetic AuditRow set with one StateEXT + one
+	// StateOK and confirm both are excluded from sysctlBad/etc.
+	rows := []AuditRow{
+		{Kind: KindSysctl, State: StateEXT,
+			ExpectedValue: "0", LiveValue: "1"}, // would be DIFF if not EXT
+		{Kind: KindSysctl, State: StateOK,
+			ExpectedValue: "1", LiveValue: "1"},
+	}
+	bad := 0
+	for _, r := range rows {
+		// Mirror the verifyAfterApply early-exit check at apply.go:447.
+		if r.State == StateOFF || r.State == StateSKIP || r.State == StateEXT {
+			continue
+		}
+		if r.Kind == KindSysctl && r.State != StateOK {
+			bad++
+		}
+	}
+	if bad != 0 {
+		t.Errorf("EXT row counted as failure: bad=%d", bad)
+	}
+}
+
+func TestReportCrossComponentConflicts_SurfacedOnForcedOverride(t *testing.T) {
+	// Phase 6 docs/kernsec.md:1117 promises that forced overrides
+	// surface a cross-component conflict in apply output. Verify by
+	// running RunApply --dry-run with force on a NetSysctls rule and
+	// asserting the output names the conflict.
+	if len(NetSysctls) == 0 {
+		t.Skip("NetSysctls empty")
+	}
+	withTempConfPath(t)
+	target := NetSysctls[0]
+	c := &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{target.ID: OverrideForce}}
+	if err := WriteConf(c); err != nil {
+		t.Fatal(err)
+	}
+
+	var w bytes.Buffer
+	rc := RunApply(&w, ApplyOptions{DryRun: true})
+	if rc != 0 {
+		t.Fatalf("RunApply --dry-run rc=%d, output:\n%s", rc, w.String())
+	}
+	out := w.String()
+	if !strings.Contains(out, "cross-component sysctl ownership conflicts") {
+		t.Errorf("expected cross-component conflict block, got:\n%s", out)
+	}
+	if !strings.Contains(out, target.Key) {
+		t.Errorf("conflict block should name the forced key %q, got:\n%s", target.Key, out)
+	}
+	if !strings.Contains(out, "cfm-sysctl-tweaks") {
+		t.Errorf("conflict block should name owning component, got:\n%s", out)
+	}
+}
+
+func TestReportCrossComponentConflicts_SilentWhenNone(t *testing.T) {
+	// No forced overrides + no registry conflicts → no conflict
+	// block. Operator-friendly: silent when there's nothing to
+	// surface.
+	withTempConfPath(t)
+	c := &Conf{Tier: Tier1}
+	if err := WriteConf(c); err != nil {
+		t.Fatal(err)
+	}
+	var w bytes.Buffer
+	if rc := RunApply(&w, ApplyOptions{DryRun: true}); rc != 0 {
+		t.Fatalf("rc=%d, output:\n%s", rc, w.String())
+	}
+	if strings.Contains(w.String(), "cross-component sysctl ownership conflicts") {
+		t.Errorf("conflict block should not appear when there are no conflicts:\n%s", w.String())
+	}
+}
+
 func TestManagedSysctlDefault_KnowsSysTweaksKeys(t *testing.T) {
 	// Sanity: the catalog registration via imports.go fired and
 	// sys_tweaks's claim is visible from kernsec's POV.

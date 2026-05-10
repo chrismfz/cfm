@@ -121,6 +121,57 @@ func TestRegistry_AllKeysSorted(t *testing.T) {
 	}
 }
 
+func TestRegistry_ThreeWayConflict(t *testing.T) {
+	// Three catalogs claiming the same key. recordConflictLocked
+	// merges via containsOwner so the resulting Conflict names all
+	// three owners; first-registrant wins for OwnerOf.
+	r := NewRegistry()
+	r.Register(stubCatalog{owner: OwnerSysTweaks, keys: []string{"k"}})
+	r.Register(stubCatalog{owner: OwnerKernsec, keys: []string{"k"}})
+	r.Register(stubCatalog{owner: OwnerFirewall, keys: []string{"k"}})
+
+	conflicts := r.Conflicts()
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflict (merged), got %d: %v", len(conflicts), conflicts)
+	}
+	c := conflicts[0]
+	if len(c.Owners) < 3 {
+		t.Errorf("conflict should name all 3 owners, got %v", c.Owners)
+	}
+	for _, want := range []Owner{OwnerSysTweaks, OwnerKernsec, OwnerFirewall} {
+		if !containsOwner(c.Owners, want) {
+			t.Errorf("conflict missing owner %q (got %v)", want, c.Owners)
+		}
+	}
+	if got := r.OwnerOf("k"); got != OwnerSysTweaks {
+		t.Errorf("OwnerOf in 3-way conflict = %q, want first registrant OwnerSysTweaks", got)
+	}
+}
+
+func TestRegistry_ConcurrentRegisterAndOwnerOf(t *testing.T) {
+	// Race-detector smoke: parallel writers + readers must not race.
+	// Run with `go test -race` to actually exercise.
+	r := NewRegistry()
+	const n = 100
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < n; i++ {
+			r.Register(stubCatalog{owner: OwnerSysTweaks, keys: []string{"k1"}})
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for i := 0; i < n; i++ {
+			_ = r.OwnerOf("k1")
+			_ = r.Conflicts()
+			_ = r.AllKeys()
+		}
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+}
+
 func TestRegistry_NilCatalogIgnored(t *testing.T) {
 	r := NewRegistry()
 	r.Register(nil) // must not panic
@@ -141,13 +192,11 @@ func TestRegistry_EmptyKeyIgnored(t *testing.T) {
 }
 
 func TestApplyKeys_HappyPath(t *testing.T) {
-	orig := SetCommand
-	defer func() { SetCommand = orig }()
 	calls := []string{}
-	SetCommand = func(key, value string) ([]byte, error) {
+	SetSetCommandForTest(t, func(key, value string) ([]byte, error) {
 		calls = append(calls, key+"="+value)
 		return []byte(key + " = " + value + "\n"), nil
-	}
+	})
 
 	res := ApplyKeys([]KeyValuePair{
 		{"a", "1"},
@@ -165,15 +214,13 @@ func TestApplyKeys_HappyPath(t *testing.T) {
 }
 
 func TestApplyKeys_ContinueOnError(t *testing.T) {
-	orig := SetCommand
-	defer func() { SetCommand = orig }()
 	failKey := "net.bad"
-	SetCommand = func(key, value string) ([]byte, error) {
+	SetSetCommandForTest(t, func(key, value string) ([]byte, error) {
 		if key == failKey {
 			return []byte("permission denied"), errors.New("exit 1")
 		}
 		return []byte(""), nil
-	}
+	})
 
 	res := ApplyKeys([]KeyValuePair{
 		{"net.good1", "1"},
@@ -195,9 +242,7 @@ func TestApplyKeys_ContinueOnError(t *testing.T) {
 }
 
 func TestApplyKeys_EmptyKeyMarkedSkipped(t *testing.T) {
-	orig := SetCommand
-	defer func() { SetCommand = orig }()
-	SetCommand = func(string, string) ([]byte, error) { return nil, nil }
+	SetSetCommandForTest(t, func(string, string) ([]byte, error) { return nil, nil })
 
 	res := ApplyKeys([]KeyValuePair{
 		{"", "99"},
@@ -239,3 +284,69 @@ empty_value =
 		t.Errorf("expected 2 skipped (malformed + empty key), got %v", skipped)
 	}
 }
+
+func TestParseFileToPairs_BOMStripped(t *testing.T) {
+	// Hand-edited file from a BOM-emitting editor would otherwise
+	// fold the BOM bytes into the first key.
+	content := []byte("\xef\xbb\xbfkernel.foo = 1\n")
+	pairs, skipped := ParseFileToPairs(content)
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d (skipped=%v)", len(pairs), skipped)
+	}
+	if pairs[0].Key != "kernel.foo" {
+		t.Errorf("BOM not stripped: got key %q, want kernel.foo", pairs[0].Key)
+	}
+}
+
+func TestParseFileToPairs_CRLFLineEndings(t *testing.T) {
+	content := []byte("kernel.a = 1\r\nkernel.b = 2\r\n")
+	pairs, _ := ParseFileToPairs(content)
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(pairs))
+	}
+	if pairs[0].Value != "1" || pairs[1].Value != "2" {
+		t.Errorf("CRLF not stripped from value: %+v", pairs)
+	}
+}
+
+func TestParseFileToPairs_EqualsInValue(t *testing.T) {
+	// Some sysctls (e.g. kernel.modprobe) take command-line values
+	// that contain `=`. Split must use first `=` only.
+	content := []byte("kernel.modprobe = /sbin/modprobe -k=yes\n")
+	pairs, _ := ParseFileToPairs(content)
+	if len(pairs) != 1 || pairs[0].Key != "kernel.modprobe" || pairs[0].Value != "/sbin/modprobe -k=yes" {
+		t.Errorf("equals-in-value: got %+v", pairs)
+	}
+}
+
+func TestApplyKeys_AllFailures(t *testing.T) {
+	SetSetCommandForTest(t, func(string, string) ([]byte, error) {
+		return []byte("EPERM"), errAllFail
+	})
+	res := ApplyKeys([]KeyValuePair{{"a", "1"}, {"b", "2"}})
+	if res.Applied != 0 {
+		t.Errorf("Applied = %d, want 0", res.Applied)
+	}
+	if len(res.Failures) != 2 {
+		t.Errorf("Failures = %d, want 2", len(res.Failures))
+	}
+	if res.Err() == nil {
+		t.Error("Err() should aggregate failures")
+	}
+}
+
+func TestApplyKeys_EmptyInput(t *testing.T) {
+	res := ApplyKeys(nil)
+	if res.Applied != 0 || len(res.Failures) != 0 || len(res.Skipped) != 0 {
+		t.Errorf("empty input should produce zero result, got %+v", res)
+	}
+	if res.Err() != nil {
+		t.Errorf("Err() on empty result should be nil, got %v", res.Err())
+	}
+}
+
+var errAllFail = stringError("simulated failure")
+
+type stringError string
+
+func (e stringError) Error() string { return string(e) }
