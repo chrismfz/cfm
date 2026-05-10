@@ -74,6 +74,14 @@ func monitorEnable(w io.Writer, opts MonitorOptions) int {
 		fmt.Fprintln(w, "kernsec monitor enable: must run as root (use --dry-run to inspect)")
 		return 1
 	}
+	if !opts.DryRun {
+		release, err := acquireKernsecLock()
+		if err != nil {
+			fmt.Fprintln(w, "kernsec monitor enable:", err)
+			return 1
+		}
+		defer release()
+	}
 	binary := opts.CFMBinary
 	if binary == "" {
 		got, err := os.Executable()
@@ -163,6 +171,12 @@ func monitorDisable(w io.Writer, opts MonitorOptions) int {
 		fmt.Fprintln(w, "(dry-run; nothing executed)")
 		return 0
 	}
+	release, err := acquireKernsecLock()
+	if err != nil {
+		fmt.Fprintln(w, "kernsec monitor disable:", err)
+		return 1
+	}
+	defer release()
 	if err := systemctl("disable", "--now", MonitorUnitName+".timer"); err != nil {
 		// disable is idempotent — if the unit was never installed,
 		// systemctl returns non-zero. Treat as informational rather
@@ -193,7 +207,22 @@ func monitorRemove(w io.Writer, opts MonitorOptions) int {
 		fmt.Fprintln(w, "(dry-run; nothing executed)")
 		return 0
 	}
+	release, err := acquireKernsecLock()
+	if err != nil {
+		fmt.Fprintln(w, "kernsec monitor remove:", err)
+		return 1
+	}
+	defer release()
+	return monitorRemoveLocked(w)
+}
 
+// monitorRemoveLocked is the lock-free body of monitorRemove. Callers
+// MUST already hold the kernsec lock. Used by `disable --purge` which
+// acquires the lock at the top of RunDisable and then drives the
+// monitor teardown without re-acquiring (flock would self-deadlock
+// across acquireKernsecLock calls in the same process — each opens
+// its own fd, so the second flock() fails with EWOULDBLOCK).
+func monitorRemoveLocked(w io.Writer) int {
 	// Stop + disable. Idempotent on hosts where the timer was never
 	// installed; on hosts where it WAS installed, surface real
 	// failures so the operator can investigate inconsistent systemd

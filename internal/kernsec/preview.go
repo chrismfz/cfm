@@ -160,9 +160,6 @@ func describeProfile(p HostProfile) string {
 	if p.HasIPsec {
 		parts = append(parts, "ipsec")
 	}
-	if p.HasWifi {
-		parts = append(parts, "wifi")
-	}
 	if p.HasDKMS {
 		parts = append(parts, "dkms")
 	}

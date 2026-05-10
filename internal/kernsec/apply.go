@@ -48,6 +48,13 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 	}
 
 	if mustWrite {
+		release, err := acquireKernsecLock()
+		if err != nil {
+			fmt.Fprintln(w, "kernsec apply:", err)
+			return 1
+		}
+		defer release()
+
 		if _, err := os.Stat(ConfPath); os.IsNotExist(err) {
 			created, werr := WriteDefaultConf()
 			if werr != nil {
