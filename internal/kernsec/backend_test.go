@@ -935,3 +935,63 @@ GRUB_DEFAULT=0
 		t.Error("expected match for unquoted true")
 	}
 }
+
+func TestGRUBBackend_WriteCmdline_SavesManagedSnapshotOnly(t *testing.T) {
+	grub := redirectGrubPath(t)
+	grubSnap, _ := withTempManagedBackupPaths(t)
+	content := `GRUB_CMDLINE_LINUX="ro crashkernel=auto slab_nomerge init_on_alloc=0 console=ttyS0"` + "\n"
+	if err := os.WriteFile(grub, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(grub, content)
+	g := &GRUBBackend{FS: fs}
+	if err := g.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(grubSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"slab_nomerge", "init_on_alloc=0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshot missing managed token %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"crashkernel", "console=ttyS0", "\"ro\""} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("snapshot included unmanaged token %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestProxmoxBackend_WriteCmdline_SavesManagedSnapshotOnly(t *testing.T) {
+	_, pveSnap := withTempManagedBackupPaths(t)
+	origPVE := PathPVECmdline
+	PathPVECmdline = t.TempDir() + "/cmdline"
+	t.Cleanup(func() { PathPVECmdline = origPVE })
+	content := "root=ZFS=rpool/ROOT/pve-1 ro crashkernel=auto slab_nomerge init_on_alloc=0 console=ttyS0\n"
+	if err := os.WriteFile(PathPVECmdline, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(PathPVECmdline, content)
+	p := &ProxmoxBackend{FS: fs}
+	if err := p.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(pveSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"slab_nomerge", "init_on_alloc=0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshot missing managed token %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"crashkernel", "console=ttyS0", "root=ZFS", "\"ro\""} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("snapshot included unmanaged token %q:\n%s", unwanted, got)
+		}
+	}
+}

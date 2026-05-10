@@ -31,6 +31,10 @@ func (p *ProxmoxBackend) WriteCmdline(args []BootArg) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", PathPVECmdline, err)
 	}
+	// Best-effort pre-apply managed-args snapshot for rollback. Legacy
+	// full-file backups are still written below for manual recovery.
+	_ = writeManagedBootArgSnapshot(ProxmoxManagedBackupPath, ParseCmdline(current))
+
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
 	newLine := strings.Join(tokens, " ")
 

@@ -256,6 +256,10 @@ func (g *GRUBBackend) WriteCmdline(args []BootArg) error {
 		// owned by kernsec's GRUB writer.
 		return fmt.Errorf("read current GRUB_CMDLINE_LINUX: %w", err)
 	}
+	// Best-effort pre-apply managed-args snapshot for rollback. Legacy
+	// full-file backups are still written below for manual recovery.
+	_ = writeManagedBootArgSnapshot(GRUBManagedBackupPath, ParseCmdline(currentLinux))
+
 	tokens := rebuildManagedCmdline(ParseCmdline(currentLinux), args)
 	newLine := strings.Join(tokens, " ")
 	encoded, err := encodeGrubCmdlineValue(newLine)
