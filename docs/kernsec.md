@@ -54,7 +54,12 @@ auto-tears the timer down.
 
 **`kernel.modules_disabled=1` is out of scope** for kernsec — see the
 "Out of scope" section under the rollout plan. **Phase 6 (shared
-sysctl library)** is the remaining roadmap item.
+sysctl library) shipped**: the new `internal/managedsysctl` package
+mediates cross-component sysctl ownership; kernsec's `KSEC-SCT-net.*`
+rule group resolves to `ManagedExternally` and renders as `EXT` in
+status/TUI for keys owned by `cfm-sysctl-tweaks`. The Phase 1-6
+rollout plan is now complete; remaining work items are
+operator-facing polish (real-host smoke testing, follow-up audits).
 
 **`kspp.sh` status**: kept in the tree indefinitely. It started as the
 reference implementation for the cfm kernsec component; with Phase 3
@@ -169,14 +174,21 @@ TCP timeouts, `rp_filter`, `accept_redirects`/`send_redirects` (v4 + v6),
 conntrack hashsize tweak. This overlaps directly with the planned `KSEC-SCT-net.*`
 audit group.
 
-Resolution as shipped: **`KSEC-SCT-net.*` rules are not in the
-registry** and `EXT` is not a state in `audit.go`. The plan to mark
-sys_tweaks-owned settings as `EXT (managed by cfm sys_tweaks)` is
-deferred to Phase 6 (shared sysctl library), which will introduce
-proper cross-component awareness rather than the EXT marker. Until
-then: kernsec leaves all of `internal/sysctl/sys_tweaks.go`'s
-settings strictly alone — no double-write, no fights over
-`/etc/sysctl.d/`.
+Resolution as shipped (Phase 6): the new `internal/managedsysctl`
+package owns a cross-component registry. `internal/sysctl/sys_tweaks.go`
+registers a Catalog at init() time naming every key it owns;
+`internal/kernsec/resolve.go::decideSysctl()` consults
+`managedsysctl.Default().OwnerOf(key)` and resolves any rule whose
+key falls in another component's catalog to the new
+`ManagedExternally` decision (rendered as `StateEXT` / `EXT` in
+`audit.go` + `status` + TUI). kernsec audits the runtime state but
+never writes externally-owned keys.
+
+Operator escape hatch: `[rule "KSEC-SCT-net.X"] state = force` in
+`/etc/cfm/kernsec.conf` overrides the cross-component check —
+kernsec writes its recommended value and the resulting cross-
+component conflict surfaces via
+`managedsysctl.Default().Conflicts()`.
 
 **CLI dispatch is a flat switch in `cmd/cfm/main.go`** (~1263 lines, no cobra).
 Existing cases include `firewall`, `dnat`, `ssl`, `webtop`, `health`, `clam`,
@@ -249,11 +261,7 @@ confirms it). The `status` command renders this as a tri-state per rule:
 | yes | n/a | `OK inert` | Module not present on this kernel — fine |
 | yes | mismatch | `DRIFT` | Someone overrode it post-apply |
 | no | — | `OFF` | Not enabled in cfm config |
-
-(An earlier design listed an `EXT` state for "active by other means
-(distro default, another tool)" — deferred to Phase 6 along with
-the cross-component sysctl awareness; not in the shipped state set
-in `audit.go`.)
+| n/a | — | `EXT` | Owned by another cfm component (e.g. `cfm-sysctl-tweaks`) — kernsec audits the live state but never writes |
 
 `DRIFT` gets its own non-zero exit code so monitoring agents can alert on it.
 Catches `sysctl -w` and stray `modprobe` after a fix.
@@ -454,31 +462,27 @@ file so the components don't fight.
 **Group `sysctl.modules`** (out of scope — see "Out of scope:
 `kernel.modules_disabled=1`" under the rollout plan for the rationale)
 
-**Group `sysctl.net`** — deferred. Currently owned by `cfm-firewall`
-and `internal/sysctl/sys_tweaks.go`; kernsec ships **no `KSEC-SCT-net.*`
-rules in the registry**. The original design called for kernsec to
-audit these settings with an `EXT` state marker; that work is queued
-for Phase 6 (shared sysctl library), which replaces the EXT marker
-with proper cross-component awareness. The list below is the
-historical design intent, kept here for traceability — it is **not**
-the current shipped behaviour.
+**Group `sysctl.net`** — audit-only, owned by
+`internal/sysctl/sys_tweaks.go` via the Phase 6 `managedsysctl`
+cross-component registry. kernsec resolves every rule in this group
+to `ManagedExternally`, prints `EXT` in status / TUI, and **never
+writes the keys**. Operators tune the actual values via `cfm.conf`'s
+`SystemTweaks` fields; kernsec's job here is the audit surface
+(visibility into whether sys_tweaks's intent is live).
 
-<details>
-<summary>Original design candidate set (not shipped — see Phase 6)</summary>
+| ID | Setting | Owned by | Why |
+|---|---|---|---|
+| KSEC-SCT-net.spoof-001 | `net.ipv4.conf.all.rp_filter=1` | `cfm-sysctl-tweaks` | Reverse-path spoof guard |
+| KSEC-SCT-net.redirect-001 | `net.ipv4.conf.all.accept_redirects=0` | `cfm-sysctl-tweaks` | ICMP-redirect MitM closure |
+| KSEC-SCT-net.redirect-002 | `net.ipv4.conf.all.send_redirects=0` | `cfm-sysctl-tweaks` | Don't emit redirects (host isn't a router) |
+| KSEC-SCT-net.tcp-001 | `net.ipv4.tcp_syncookies=1` | `cfm-sysctl-tweaks` | SYN flood survival |
+| KSEC-SCT-net.ipv6-001 | `net.ipv6.conf.all.accept_redirects=0` | `cfm-sysctl-tweaks` | v6 redirect MitM closure |
 
-| ID | Setting | Why |
-|---|---|---|
-| KSEC-SCT-net.icmp-001 | `net.ipv4.icmp_echo_ignore_broadcasts=1` | Smurf |
-| KSEC-SCT-net.icmp-002 | `net.ipv4.icmp_ignore_bogus_error_responses=1` | Bogus ICMP info leak |
-| KSEC-SCT-net.spoof-001 | `net.ipv4.conf.all.rp_filter=1`, `default.rp_filter=1` | Reverse-path spoof guard |
-| KSEC-SCT-net.spoof-002 | `net.ipv4.conf.all.accept_source_route=0` (+ v6) | Source-routed spoof |
-| KSEC-SCT-net.redirect-001 | `accept_redirects=0`, `send_redirects=0` (v4 + v6) | ICMP redirect MitM |
-| KSEC-SCT-net.tcp-001 | `net.ipv4.tcp_syncookies=1` | SYN flood |
-| KSEC-SCT-net.tcp-002 | `net.ipv4.tcp_rfc1337=1` | TIME_WAIT assassination |
-| KSEC-SCT-net.log-001 | `net.ipv4.conf.all.log_martians=1` | Visibility |
-| KSEC-SCT-net.ipv6-001 | `net.ipv6.conf.all.accept_ra=0`, `default.accept_ra=0` | RA spoof |
-
-</details>
+Additional design-intent rules (icmp_echo_ignore_broadcasts,
+icmp_ignore_bogus_error_responses, accept_source_route=0,
+log_martians=1, tcp_rfc1337=1, ipv6 accept_ra=0) are not yet shipped
+— sys_tweaks doesn't currently set them. A follow-up either expands
+sys_tweaks's surface to claim them or has kernsec own them directly.
 
 ### Boot args (extends `kspp.sh`)
 
@@ -849,11 +853,11 @@ preview (no writes). Phase 2b: apply with writes.
 - TUI gains group + tier columns and a `/` filter.
 - Module rule rows + fstab audit + host-profile probe land here so the
   registry has them on day one.
-- ~~kernsec audits `KSEC-SCT-net.*` settings owned by
-  `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
-  no double-write.~~ Deferred to Phase 6 (shared sysctl library);
-  `KSEC-SCT-net.*` rules and the `EXT` state are **not** in the
-  shipped registry.
+- kernsec audits `KSEC-SCT-net.*` settings owned by
+  `internal/sysctl/sys_tweaks.go` via the new `managedsysctl`
+  cross-component registry. Rules in this group resolve to
+  `ManagedExternally` and render as `EXT` — no double-write,
+  audit-only. (Phase 6.)
 
 **2b — apply (writes)**:
 
@@ -1097,16 +1101,51 @@ systemctl is-failed cfm-kernsec-check.service
                                   # exits 0 if clean, 1 if drift seen
 ```
 
-### Phase 6 — Shared sysctl library (TODO)
+### Phase 6 — Shared sysctl library (DONE)
 
-Refactor: extract the audit/apply/drift loop into a cfm-internal
-library. Migrate kernsec and cfm-firewall to use it. Single source of
-truth per setting; the originally-planned `EXT` state for "managed by
-another cfm component" is replaced with proper cross-component
-awareness — the shared library knows which component owns each
-setting and surfaces ownership in `status` directly. Phase 6 also
-re-introduces the `KSEC-SCT-net.*` audit group (currently absent from
-the registry pending this refactor).
+New `internal/managedsysctl` package owns a cross-component registry
+of (Owner, Key) tuples. Each cfm component that writes sysctls
+registers a `Catalog` at package-init() time naming the keys it
+owns. `kernsec.Resolve` consults `managedsysctl.Default().OwnerOf(key)`
+when deciding what to do with a sysctl rule:
+
+- Key owned by another component → `ManagedExternally` decision,
+  rendered as `EXT` in `status` / TUI / preview. kernsec audits the
+  live state but never writes the key.
+- Operator escape hatch: `[rule "X"] state = force` overrides the
+  cross-component check; kernsec writes its recommended value and
+  the resulting conflict is surfaced via
+  `managedsysctl.Default().Conflicts()`.
+
+Shipped scope:
+
+- `internal/managedsysctl` package: Registry, Catalog interface,
+  Owner enum (kernsec / cfm-sysctl-tweaks / cfm-firewall),
+  conflict detection, reusable primitives (`ApplyKeys` per-key
+  apply with continue-on-error, `ParseFileToPairs` for
+  /etc/sysctl.d-style files).
+- `internal/sysctl/catalog.go`: `ManagedKeys()` + Catalog impl
+  registers `cfm-sysctl-tweaks` ownership at init() for every
+  sysctl `sys_tweaks.go` may write.
+- `internal/kernsec`: new `NetSysctls` rule group
+  (`KSEC-SCT-net.*`); `decideSysctl` consults the registry; new
+  `ManagedExternally` Decision and `StateEXT` audit state;
+  `status.go` / `tui.go` / `preview.go` render EXT rows; force-
+  override escape hatch wired explicitly.
+
+Out of scope for this Phase 6 PR (deferred):
+
+- Migrating sys_tweaks.go's apply path to use
+  `managedsysctl.ApplyKeys` (currently it loops over its own map
+  and stderr-prints failures). The Catalog registration alone is
+  enough to satisfy the cross-component awareness contract;
+  routing through `ApplyKeys` is a future polish.
+- Migrating cfm-firewall to register a Catalog. Reserved
+  `OwnerFirewall` constant exists for the future migration.
+- Expanding `KSEC-SCT-net.*` beyond the keys sys_tweaks actually
+  owns today (icmp_echo, accept_source_route, log_martians, etc.).
+  Requires either expanding sys_tweaks's surface or having
+  kernsec own the additional keys directly.
 
 ---
 
@@ -1374,12 +1413,11 @@ can be revisited.
       on drift; no writes).
 - [x] `apply --dry-run` and `apply --no-refresh` flags.
 - [x] Module rule rows, fstab audit, host-profile probe (data + audit).
-- [ ] Audit `KSEC-SCT-net.*` settings owned by
-      `internal/sysctl/sys_tweaks.go`. Originally planned to render as
-      `EXT (managed by cfm sys_tweaks)` — that state and those rule
-      IDs are **not in the shipped registry**. Both are deferred to
-      Phase 6 (shared sysctl library) which replaces EXT with proper
-      cross-component awareness.
+- [x] Audit `KSEC-SCT-net.*` settings owned by
+      `internal/sysctl/sys_tweaks.go` — shipped in Phase 6 via the
+      `managedsysctl` cross-component registry; rules resolve to
+      `ManagedExternally` and render as `EXT` in status/TUI.
+      kernsec audits but never writes them.
 
 **Phase 3 — modules** (DONE — branch `kernsec-3`)
 - [x] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
@@ -1416,10 +1454,22 @@ can be revisited.
       status of the periodic systemd timer.
 - [x] `disable --purge` auto-removes monitor units when present.
 
-**Phase 6 — shared sysctl library**
-- [ ] Extract audit/apply/drift loop into a cfm-internal library;
-      migrate `internal/sysctl/sys_tweaks.go` into it; kernsec consumes
-      the same library.
+**Phase 6 — shared sysctl library** (DONE)
+- [x] New `internal/managedsysctl` package — Owner enum, Catalog
+      interface, default Registry singleton with conflict detection.
+- [x] `internal/sysctl/catalog.go` — sys_tweaks publishes its
+      `ManagedKeys()` via Catalog; init() registers
+      `cfm-sysctl-tweaks` ownership.
+- [x] `internal/kernsec`: `NetSysctls` rule group;
+      `ManagedExternally` Decision; `StateEXT` audit state;
+      `decideSysctl` consults registry; status / TUI / preview /
+      verifyAfterApply render EXT rows; `state = force` escape
+      hatch wired.
+- [ ] Migrate sys_tweaks.go's apply path to
+      `managedsysctl.ApplyKeys` (currently registers Catalog only;
+      apply path unchanged). Future polish.
+- [ ] cfm-firewall Catalog registration (reserved
+      `OwnerFirewall` constant). Future polish.
 
 **Out of scope** (decision recorded in the rollout-plan section
 above — not a TODO, not coming back unless a future rule needs the

@@ -28,6 +28,14 @@ const (
 	// Operators can flip OFF rules on with `state = force`; SKIP rules
 	// are gated by something the operator should investigate first.
 	StateOFF RuleState = "OFF"
+	// StateEXT means another cfm component (per the managedsysctl
+	// cross-component registry) owns the underlying setting, so
+	// kernsec audits the runtime state but never writes the key.
+	// Currently used only by KSEC-SCT-net.* rules whose keys are
+	// owned by internal/sysctl/sys_tweaks.go. The audit row also
+	// tracks live runtime state — the operator sees whether the
+	// other component's intent is actually live.
+	StateEXT RuleState = "EXT"
 )
 
 // AuditRow is one rule's audit summary for the TUI / future structured output.
@@ -209,6 +217,11 @@ func sysctlRowState(d Decision, live SysctlState) RuleState {
 		case SysctlMissing:
 			return StateSKIP
 		}
+	case ManagedExternally:
+		// Audit-only: render EXT regardless of live state. Live
+		// value still surfaces in the AuditRow for the operator to
+		// see whether the other component's intent is live.
+		return StateEXT
 	case SkipByConf, SkipByTier:
 		return StateOFF
 	case SkipByHostProfile:

@@ -71,6 +71,9 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 		countAll(rs, SkipByTier),
 		countAll(rs, SkipByHostProfile),
 	)
+	if extCount := countAll(rs, ManagedExternally); extCount > 0 {
+		fmt.Fprintf(w, "  ext:   %d rules audited; managed by another cfm component\n", extCount)
+	}
 	fmt.Fprintln(w, "===============================")
 	return 0
 }

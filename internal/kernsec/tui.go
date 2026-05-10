@@ -128,7 +128,7 @@ func RunTUI() (switchToText bool, err error) {
 	renderHeader := func() {
 		warns := 0
 		for _, r := range rows {
-			if r.State != StateOK && r.State != StateSKIP && r.State != StateOFF {
+			if r.State != StateOK && r.State != StateSKIP && r.State != StateOFF && r.State != StateEXT {
 				warns++
 			}
 		}
@@ -340,7 +340,7 @@ func StateColor(s RuleState) ui.Color {
 	switch s {
 	case StateOK:
 		return ui.ColorGreen
-	case StateSKIP, StateOFF:
+	case StateSKIP, StateOFF, StateEXT:
 		return ui.ColorWhite
 	case StateDIFF, StateWARN, StateMISSING:
 		return ui.ColorYellow
@@ -356,7 +356,7 @@ func StateColorName(s RuleState) string {
 	switch s {
 	case StateOK:
 		return "green"
-	case StateSKIP, StateOFF:
+	case StateSKIP, StateOFF, StateEXT:
 		return "white"
 	case StateDIFF, StateWARN, StateMISSING:
 		return "yellow"

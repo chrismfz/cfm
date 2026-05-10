@@ -256,10 +256,73 @@ func (a BootArg) String() string {
 // Tier 2 server-aggressive). Order: Tier 1 first, then Tier 2 — keeps the
 // rendered file deterministic and Tier-1-first-readable.
 func AllSysctls() []SysctlRule {
-	out := make([]SysctlRule, 0, len(KSPPSysctls)+len(Tier2Sysctls))
+	out := make([]SysctlRule, 0, len(KSPPSysctls)+len(Tier2Sysctls)+len(NetSysctls))
 	out = append(out, KSPPSysctls...)
 	out = append(out, Tier2Sysctls...)
+	out = append(out, NetSysctls...)
 	return out
+}
+
+// NetSysctls is the network-hardening sysctl audit set. Every key
+// here is owned by `internal/sysctl/sys_tweaks.go` (the cfm daemon's
+// imperative TCP/conntrack/spoof-guard tuning) per the
+// managedsysctl cross-component registry. kernsec ships these as
+// Tier 1 audit-only rules: the resolver consults
+// managedsysctl.Default().OwnerOf(), sees sys_tweaks owns the key,
+// and resolves every rule in this group to ManagedExternally —
+// kernsec NEVER writes these values, only audits whether the live
+// state matches what sys_tweaks intended.
+//
+// This realises the "single source of truth per setting" goal of
+// Phase 6 without merging the imperative sys_tweaks logic into
+// kernsec rule data: sys_tweaks keeps owning runtime computation
+// (RAM-derived nf_conntrack_max, config-driven rp_filter strict-
+// vs-loose, etc.), kernsec keeps owning the audit / status / TUI
+// surface, and the managedsysctl registry mediates.
+//
+// Scope intentionally limited to keys sys_tweaks's ManagedKeys()
+// actually claims. Additional network-hardening rules (icmp_echo
+// broadcast drop, accept_source_route=0, log_martians, etc.) are
+// design-table candidates but not shipped here — they'd require
+// either expanding sys_tweaks's surface or having kernsec own them
+// directly. Future PR.
+//
+// Operators who disagree with sys_tweaks's chosen values edit
+// cfm.conf's SystemTweaks fields rather than via kernsec overrides;
+// kernsec.Resolve respects `state = force` though, in which case
+// kernsec WILL write its recommended value and the conflict surfaces
+// in the daemon log.
+var NetSysctls = []SysctlRule{
+	{
+		ID: "KSEC-SCT-net.spoof-001", Group: "sysctl.net", Tier: Tier1,
+		Key: "net.ipv4.conf.all.rp_filter", Value: "1",
+		Description: "Reverse-path filter — drops packets whose source can't route back the same way.",
+		Affects:     "Asymmetric-routing setups (rare on hosting). Owned by cfm-sysctl-tweaks; tunable via SystemTweaks.RPFilter.",
+	},
+	{
+		ID: "KSEC-SCT-net.redirect-001", Group: "sysctl.net", Tier: Tier1,
+		Key: "net.ipv4.conf.all.accept_redirects", Value: "0",
+		Description: "Refuse ICMP redirects — closes the routing-table-MitM primitive.",
+		Affects:     "None — modern routing tables don't depend on ICMP redirects. Owned by cfm-sysctl-tweaks; tunable via SystemTweaks.AcceptRedirects.",
+	},
+	{
+		ID: "KSEC-SCT-net.redirect-002", Group: "sysctl.net", Tier: Tier1,
+		Key: "net.ipv4.conf.all.send_redirects", Value: "0",
+		Description: "Don't emit ICMP redirects — host isn't a router.",
+		Affects:     "None on hosting. Owned by cfm-sysctl-tweaks; tunable via SystemTweaks.SendRedirects.",
+	},
+	{
+		ID: "KSEC-SCT-net.tcp-001", Group: "sysctl.net", Tier: Tier1,
+		Key: "net.ipv4.tcp_syncookies", Value: "1",
+		Description: "TCP SYN cookies — survive SYN floods without resource exhaustion.",
+		Affects:     "None. Owned by cfm-sysctl-tweaks (hard-coded =1 when SystemTweaks.Enable).",
+	},
+	{
+		ID: "KSEC-SCT-net.ipv6-001", Group: "sysctl.net", Tier: Tier1,
+		Key: "net.ipv6.conf.all.accept_redirects", Value: "0",
+		Description: "v6 ICMP-redirect refusal — same MitM closure for IPv6.",
+		Affects:     "None. Owned by cfm-sysctl-tweaks (hard-coded =0 when SystemTweaks.Enable).",
+	},
 }
 
 // AllBootArgs returns the full boot-arg rule set across tiers.
