@@ -449,6 +449,136 @@ GRUB_TIMEOUT=5
 	}
 }
 
+func TestDecodeGrubCmdlineValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "double-quoted simple", in: `"ro slab_nomerge"`, want: "ro slab_nomerge"},
+		{name: "single-quoted simple", in: `'ro slab_nomerge'`, want: "ro slab_nomerge"},
+		{name: "unquoted simple", in: `ro`, want: "ro"},
+		{name: "double-quoted with escaped quotes",
+			in: `"ro module.parameter=\"x y\" quiet"`, want: `ro module.parameter="x y" quiet`},
+		{name: "double-quoted with escaped backslash",
+			in: `"ro path=\\foo"`, want: `ro path=\foo`},
+		{name: "rejects shell variable expansion",
+			in: `"ro $extra quiet"`, wantErr: true},
+		{name: "rejects backtick command substitution",
+			in: "\"ro `cmd` quiet\"", wantErr: true},
+		{name: "rejects $() command substitution",
+			in: `"ro $(cmd) quiet"`, wantErr: true},
+		{name: "rejects single quote inside double-quoted",
+			in: `"ro 'foo' quiet"`, wantErr: true},
+		{name: "rejects unsupported backslash escape",
+			in: `"ro \n quiet"`, wantErr: true},
+		{name: "rejects trailing backslash",
+			in: `"ro slab_nomerge\"`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeGrubCmdlineValue(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("decodeGrubCmdlineValue(%q) err=%v, wantErr=%v", tc.in, err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("decodeGrubCmdlineValue(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEncodeGrubCmdlineValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "simple", in: "ro slab_nomerge", want: `"ro slab_nomerge"`},
+		{name: "embedded double quote",
+			in: `ro module.parameter="x y" quiet`,
+			want: `"ro module.parameter=\"x y\" quiet"`},
+		{name: "embedded backslash",
+			in: `ro path=\foo`, want: `"ro path=\\foo"`},
+		{name: "rejects $",
+			in: "ro $extra quiet", wantErr: true},
+		{name: "rejects backtick",
+			in: "ro `cmd`", wantErr: true},
+		{name: "rejects single quote",
+			in: "ro 'foo'", wantErr: true},
+		{name: "rejects $(",
+			in: "ro $(cmd)", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := encodeGrubCmdlineValue(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("encodeGrubCmdlineValue(%q) err=%v, wantErr=%v", tc.in, err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("encodeGrubCmdlineValue(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGrubCmdline_RoundTripPreservesEmbeddedQuotes(t *testing.T) {
+	// Operator's existing /etc/default/grub has a kernel arg with a
+	// quoted value: `module.parameter="x y"`. Round-tripping through
+	// decode → encode must preserve the literal `"x y"` portion.
+	// Previously the rewriter emitted GRUB_CMDLINE_LINUX="...="x y"..."
+	// which is broken shell.
+	original := `ro module.parameter="x y" quiet`
+	encoded, err := encodeGrubCmdlineValue(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The encoded form is the RHS of GRUB_CMDLINE_LINUX=. Decode it
+	// back; we must get the original string.
+	decoded, err := decodeGrubCmdlineValue(encoded)
+	if err != nil {
+		t.Fatalf("encoded form did not decode: %v\nencoded: %s", err, encoded)
+	}
+	if decoded != original {
+		t.Errorf("round-trip mismatch:\n  before: %q\n  after:  %q", original, decoded)
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_RejectsShellExpansion(t *testing.T) {
+	// Operator wrote `GRUB_CMDLINE_LINUX="ro $extra quiet"` for shell
+	// expansion. kernsec cannot reason about $extra at parse time.
+	// Refuse with a clear error rather than silently mangling.
+	fs := newFakeFS().withFile("/etc/default/grub", `GRUB_CMDLINE_LINUX="ro $extra quiet"`+"\n")
+	g := &GRUBBackend{FS: fs}
+	_, err := g.NextBootCmdline()
+	if err == nil {
+		t.Fatal("expected error on shell-expansion cmdline, got nil")
+	}
+	if !strings.Contains(err.Error(), "shell metacharacter") {
+		t.Errorf("error should mention the offending metacharacter: %v", err)
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_HandlesEscapedQuotes(t *testing.T) {
+	// `module.parameter=\"x y\"` is the shell-encoded form of
+	// `module.parameter="x y"`. NextBootCmdline must decode the
+	// escapes so the kernel cmdline string we work with matches what
+	// the kernel will actually see at boot.
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX="ro module.parameter=\"x y\" quiet"`+"\n")
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ro module.parameter="x y" quiet`
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
 func TestGrubVarMatches(t *testing.T) {
 	content := `GRUB_TIMEOUT=5
 GRUB_ENABLE_BLSCFG="true"

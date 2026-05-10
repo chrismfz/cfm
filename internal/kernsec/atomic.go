@@ -60,20 +60,36 @@ func AtomicWriteFile(path string, content []byte, mode os.FileMode) error {
 // substitute deterministic timestamps for backup filenames.
 var nowFunc = time.Now
 
+// pidFunc returns the current process ID. var so tests can pin a
+// deterministic value for backup-filename assertions.
+var pidFunc = os.Getpid
+
 // BackupTimestampedSuffix returns the per-run backup suffix for `path`.
 // Used by WriteSysctlFile / WriteModprobeFile when operator edits to
 // the managed file are detected — those edits would otherwise be lost
-// on overwrite. Suffix is unambiguous and sortable:
+// on overwrite. Suffix shape:
 //
-//	<path>.cfm-kernsec.bak.20260510T140530Z
+//	<path>.cfm-kernsec.bak.20260510T140530Z.<pid>
 //
-// One per apply run. The single-shot BackupSuffix (no timestamp) is
-// preserved for first-touch backups of unmanaged files like
-// /etc/default/grub; the timestamped form is for "operator changed
-// our managed file between apply runs and we don't want to clobber
-// their changes silently".
+// PID disambiguates two `apply` runs that hit within the same UTC
+// second: previously they collided on the same path and the second
+// writer silently overwrote the first writer's preserved-extras
+// backup, losing the operator's edits. With PID appended, distinct
+// processes always produce distinct paths; same-process re-entry in
+// the same second is impossible because each `apply` invocation is
+// sequential within its own process.
+//
+// One per apply run. The single-shot BackupSuffix (no timestamp,
+// no PID) is preserved for first-touch backups of unmanaged files
+// like /etc/default/grub; the timestamped form is for "operator
+// changed our managed file between apply runs and we don't want to
+// clobber their changes silently".
 func BackupTimestampedSuffix() string {
-	return BackupSuffix + "." + nowFunc().UTC().Format("20060102T150405Z")
+	return fmt.Sprintf("%s.%s.%d",
+		BackupSuffix,
+		nowFunc().UTC().Format("20060102T150405Z"),
+		pidFunc(),
+	)
 }
 
 // CopyFileTo copies src to dst, atomically (tmp + rename). Used when
@@ -143,14 +159,24 @@ func canonicalLineSet(b []byte) map[string]struct{} {
 }
 
 // canonicalLine collapses a kernsec-managed-file line to its
-// comparable form: trimmed, comments dropped, whitespace runs
-// collapsed, and " = " / " =" / "= " normalised to "=" so
+// comparable form: trimmed, full-line comments dropped, inline
+// `# ...` trailing comments stripped, whitespace runs collapsed, and
+// " = " / " =" / "= " normalised to "=" so
 // `kernel.kptr_restrict = 2` and `kernel.kptr_restrict=2` compare
-// equal. Returns "" for blank / comment-only input.
+// equal. Inline-comment stripping means operator-added notes after a
+// managed line (e.g. `kernel.kptr_restrict = 2 # bumped per CVE-X`)
+// don't trigger a spurious unmanaged-line warning + per-run backup on
+// every subsequent apply. Returns "" for blank / comment-only input.
 func canonicalLine(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.HasPrefix(s, "#") {
 		return ""
+	}
+	if i := strings.IndexByte(s, '#'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+		if s == "" {
+			return ""
+		}
 	}
 	s = strings.ReplaceAll(s, " = ", "=")
 	s = strings.ReplaceAll(s, " =", "=")
