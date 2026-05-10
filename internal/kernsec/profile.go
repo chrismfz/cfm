@@ -226,6 +226,102 @@ var Tier2BootArgs = []BootArg{
 	},
 }
 
+// Tier1BootArgsExt are Tier 1 boot args beyond the KSPP baseline.
+// Each group has its own host-profile gate (see profile_probe.go).
+var Tier1BootArgsExt = []BootArg{
+	// --- boot.bug-detection ------------------------------------------
+	{
+		ID: "KSEC-BOOT-bug-detection-001", Group: "boot.bug-detection", Tier: Tier1,
+		Key: "kfence.sample_interval", Value: "100",
+		Description: "Enable KFENCE heap safety net: one in 100 allocations gets a guarded page, catching use-after-free and out-of-bounds bugs in production at effectively zero overhead.",
+		Affects:     "None measurable. The guarded fraction adds <0.1% allocation latency on benchmarks; field experience shows negligible impact on hosting workloads.",
+	},
+	// --- boot.dma: pre-IOMMU DMA window hardening (EFI only) ---------
+	{
+		ID: "KSEC-BOOT-dma-001", Group: "boot.dma", Tier: Tier1,
+		Key: "efi", Value: "disable_early_pci_dma",
+		Description: "Disable DMA from PCI devices before the IOMMU is initialised — closes the pre-IOMMU window that a malicious peripheral (e.g. a Thunderbolt device) could use to read/write kernel memory before protections are active.",
+		Affects:     "None on well-behaved hardware. Skipped on non-EFI systems (parameter is EFI-specific and a no-op on BIOS/legacy-boot).",
+	},
+	// --- boot.sidechannel: TSX side-channel mitigation ---------------
+	{
+		ID: "KSEC-BOOT-sidechannel-001", Group: "boot.sidechannel", Tier: Tier1,
+		Key: "tsx", Value: "off",
+		Description: "Disable Intel Transactional Synchronization Extensions — removes the hardware primitives exploited by TAA (CVE-2019-11135) and related MDS variants. TSX is unused by any standard hosting or KVM workload.",
+		Affects:     "None on hosting / KVM servers; TSX is not used by MySQL, nginx, PHP, Python, etc. Non-Intel CPUs and Intel CPUs with the TSX deprecation microcode already applied ignore the parameter.",
+	},
+	// --- boot.ssbd: Spectre v4 mitigation for seccomp workloads ------
+	{
+		ID: "KSEC-BOOT-ssbd-001", Group: "boot.ssbd", Tier: Tier1,
+		Key: "spec_store_bypass_disable", Value: "seccomp",
+		Description: "Enable Speculative Store Bypass Disable (SSBD / Spectre v4 mitigation) for all threads running under a seccomp policy. Covers sandboxed web workloads without the global perf hit of 'on'. Distro default 'prctl' means mitigation is off unless each process opts in explicitly.",
+		Affects:     "~1-5% syscall throughput reduction for heavily syscall-bound workloads running inside a seccomp sandbox (cgroups, systemd services with SeccompFilter=, etc.).",
+	},
+}
+
+// KernelSurface is the kernel attack-surface hardening sysctl group.
+// Rules that share a gate (e.g. kdump) use a sub-group so the
+// host-profile skip can target them without gating the whole surface
+// set.
+var KernelSurface = []SysctlRule{
+	// --- sysctl.kernel.coredump: core_pattern (kdump-gated) ----------
+	{
+		ID: "KSEC-SCT-kernel.coredump-001", Group: "sysctl.kernel.coredump", Tier: Tier1,
+		Key: "kernel.core_pattern", Value: "|/bin/false",
+		Description: "Redirect coredumps to /bin/false — prevents exploit-writable core-dump paths used by OverlayFS-class privilege escalations (CVE-2023-0386 and similar). On a shared hosting server where tenants can trigger process crashes you do not want coredumps landing anywhere.",
+		Affects:     "Coredumps are suppressed for all processes. Crash diagnostics require kdump or per-service CoreDumpDirectory overrides. Skipped when kdump is active (kdump depends on kernel crash capture).",
+	},
+}
+
+// NetHardenSysctls is the network hardening sysctl group owned
+// directly by kernsec. These keys are NOT owned by cfm-sysctl-tweaks
+// (compare NetSysctls which is audit-only / EXT for sys_tweaks keys).
+// kernsec writes these values itself via the normal apply pipeline.
+var NetHardenSysctls = []SysctlRule{
+	{
+		ID: "KSEC-SCT-net.harden-001", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv4.icmp_echo_ignore_broadcasts", Value: "1",
+		Description: "Ignore ICMP echo requests sent to broadcast addresses — prevents Smurf amplification attacks that can overwhelm bandwidth.",
+		Affects:     "None. Broadcast ping is unused in any legitimate hosting workflow.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-002", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv4.conf.all.accept_source_route", Value: "0",
+		Description: "Reject IPv4 source-routed packets — source routing can bypass firewall rules and enable traffic redirection attacks.",
+		Affects:     "None. Source routing is deprecated and unused on modern networks.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-003", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv4.conf.default.accept_source_route", Value: "0",
+		Description: "Same source-route rejection policy for newly-created interfaces (ensures the secure default propagates).",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-004", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv4.conf.all.log_martians", Value: "1",
+		Description: "Log packets with impossible (martian) source addresses — surfaces IP spoofing, route injection, and misconfigured upstream routers.",
+		Affects:     "Minor log volume on misconfigured network segments. Expected to produce no log lines on a well-configured host.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-005", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv4.tcp_rfc1337", Value: "1",
+		Description: "RFC 1337 TIME_WAIT assassination fix — prevents RST packets from prematurely killing connections in TIME_WAIT, closing a timing-based connection-hijack vector.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-006", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv6.conf.all.accept_ra", Value: "0",
+		Description: "Reject IPv6 Router Advertisements — prevents rogue RA attacks that redirect the default route or hand out an attacker-controlled DNS server. Critical on shared hosting where tenants share a broadcast domain.",
+		Affects:     "Breaks SLAAC (stateless address auto-configuration) if the host relies on RA for IPv6 address assignment. Static-IP hosting setups are unaffected. Use `state = skip` if SLAAC is required on this host.",
+	},
+	{
+		ID: "KSEC-SCT-net.harden-007", Group: "sysctl.net.harden", Tier: Tier1,
+		Key: "net.ipv6.conf.default.accept_ra", Value: "0",
+		Description: "Same RA rejection for newly-created interfaces — ensures the secure default propagates to any interface added after boot.",
+		Affects:     "Same as accept_ra=0 on all; new interfaces inherit the deny-RA policy.",
+	},
+}
+
 // ManagedBootArgKeys is the set of cmdline keys kernsec owns.
 // Mirrors kspp.sh MANAGED_ARG_KEYS. enable removes any stale instance
 // of these keys before adding the desired set; disable removes them
@@ -238,6 +334,11 @@ var ManagedBootArgKeys = []string{
 	"page_alloc.shuffle",
 	"randomize_kstack_offset",
 	"initcall_blacklist",
+	// Tier 1 extensions
+	"kfence.sample_interval",
+	"efi",
+	"tsx",
+	"spec_store_bypass_disable",
 	// Tier 2
 	"oops",
 	"lockdown",
@@ -253,11 +354,16 @@ func (a BootArg) String() string {
 }
 
 // AllSysctls returns the full sysctl rule set across tiers (Tier 1 KSPP +
-// Tier 2 server-aggressive). Order: Tier 1 first, then Tier 2 — keeps the
-// rendered file deterministic and Tier-1-first-readable.
+// Tier 1 surface/net extensions + Tier 2 server-aggressive + EXT audit).
+// Order: Tier 1 first, then Tier 2, EXT last — keeps the rendered file
+// deterministic and Tier-1-first-readable.
 func AllSysctls() []SysctlRule {
-	out := make([]SysctlRule, 0, len(KSPPSysctls)+len(Tier2Sysctls)+len(NetSysctls))
+	out := make([]SysctlRule, 0,
+		len(KSPPSysctls)+len(KernelSurface)+len(NetHardenSysctls)+
+			len(Tier2Sysctls)+len(NetSysctls))
 	out = append(out, KSPPSysctls...)
+	out = append(out, KernelSurface...)
+	out = append(out, NetHardenSysctls...)
 	out = append(out, Tier2Sysctls...)
 	out = append(out, NetSysctls...)
 	return out
@@ -326,9 +432,11 @@ var NetSysctls = []SysctlRule{
 }
 
 // AllBootArgs returns the full boot-arg rule set across tiers.
+// Order: Tier 1 KSPP baseline, Tier 1 extensions, Tier 2 opt-in.
 func AllBootArgs() []BootArg {
-	out := make([]BootArg, 0, len(KSPPBootArgs)+len(Tier2BootArgs))
+	out := make([]BootArg, 0, len(KSPPBootArgs)+len(Tier1BootArgsExt)+len(Tier2BootArgs))
 	out = append(out, KSPPBootArgs...)
+	out = append(out, Tier1BootArgsExt...)
 	out = append(out, Tier2BootArgs...)
 	return out
 }

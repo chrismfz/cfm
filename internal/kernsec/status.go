@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,42 @@ type StatusResult struct {
 	OK       bool // false if any check produced WARN
 	Warnings int
 	Tier     Tier // tier in effect when the audit ran (0/1/2)
+}
+
+// RunStatusJSON emits the kernsec audit as a JSON document. It is the
+// machine-readable counterpart to RunStatus, designed for fleet
+// aggregation (e.g. `for h in fleet; do ssh $h cfm kernsec status --json; done`).
+// The returned StatusResult mirrors RunStatus semantics (OK, Warnings, Tier).
+func RunStatusJSON(w io.Writer) StatusResult {
+	conf, _ := LoadConf(false)
+	if conf == nil {
+		conf = &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
+	}
+	profile := DetectHostProfile()
+	rows := BuildAuditRows(conf, profile)
+
+	fs := RealFS{}
+	be := DetectBackend(fs)
+
+	var warnings int
+	for _, r := range rows {
+		switch r.State {
+		case StateWARN, StateDIFF, StateMISSING, StateDRIFT:
+			warnings++
+		}
+	}
+
+	out := StatusJSON{
+		OK:       warnings == 0,
+		Warnings: warnings,
+		Tier:     conf.Tier,
+		Backend:  be.Label(),
+		Rules:    rows,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(out)
+	return StatusResult{OK: out.OK, Warnings: warnings, Tier: conf.Tier}
 }
 
 // RunStatus prints the kernsec audit-only status to w. Mirrors

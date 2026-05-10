@@ -38,48 +38,59 @@ const (
 	StateEXT RuleState = "EXT"
 )
 
-// AuditRow is one rule's audit summary for the TUI / future structured output.
-// One source of truth for per-rule state; the text RunStatus and the TUI both
-// derive from BuildAuditRows.
+// AuditRow is one rule's audit summary for the TUI / structured output.
+// One source of truth for per-rule state; the text RunStatus, TUI, and
+// the JSON renderer all derive from BuildAuditRows.
 type AuditRow struct {
-	ID          string
-	Kind        RuleKind
-	Group       string
-	Tier        Tier
-	Display     string // "kernel.kptr_restrict=2" or "slab_nomerge"
-	State       RuleState
-	Description string
-	Affects     string
+	ID          string    `json:"id"`
+	Kind        RuleKind  `json:"kind"`
+	Group       string    `json:"group"`
+	Tier        Tier      `json:"tier"`
+	Display     string    `json:"display"`     // "kernel.kptr_restrict=2" or "slab_nomerge"
+	State       RuleState `json:"state"`
+	Description string    `json:"description"`
+	Affects     string    `json:"affects"`
 
 	// Decision is the resolver's per-rule outcome (Apply / SkipByConf /
 	// SkipByTier / SkipByHostProfile). State maps from Decision plus the
 	// live probe result.
-	Decision Decision
+	Decision Decision `json:"decision"`
 	// Reason is a free-text explanation of the Decision, e.g. "rule tier 2
 	// > conf tier 1" or "host has containers running". Empty for Apply
 	// rows that are in compliance (the State alone is enough).
-	Reason string
+	Reason string `json:"reason,omitempty"`
 
 	// Sysctl-only.
-	LiveValue     string // /proc/sys reading; "" if missing
-	ExpectedValue string // expected value as configured
+	LiveValue     string `json:"live_value,omitempty"`     // /proc/sys reading; "" if missing
+	ExpectedValue string `json:"expected_value,omitempty"` // expected value as configured
 
 	// Boot-arg-only.
-	InCurrent     bool // expected arg present in /proc/cmdline
-	InNextBoot    bool // expected arg present in next-boot cmdline
-	NextBootKnown bool // bootloader cmdline read succeeded
+	InCurrent     bool `json:"in_current,omitempty"`      // expected arg present in /proc/cmdline
+	InNextBoot    bool `json:"in_next_boot,omitempty"`    // expected arg present in next-boot cmdline
+	NextBootKnown bool `json:"next_boot_known,omitempty"` // bootloader cmdline read succeeded
 
 	// Module-only.
-	ModuleName        string // module name (matches `lsmod` first column)
-	BlacklistedInFile bool   // module is in /etc/modprobe.d/cfm-kernsec.conf
-	Loaded            bool   // module is currently in /proc/modules
-	PresentOnKernel   bool   // module file exists under /lib/modules/$(uname -r)
+	ModuleName        string `json:"module_name,omitempty"`         // module name (matches `lsmod` first column)
+	BlacklistedInFile bool   `json:"blacklisted_in_file,omitempty"` // module is in /etc/modprobe.d/cfm-kernsec.conf
+	Loaded            bool   `json:"loaded,omitempty"`              // module is currently in /proc/modules
+	PresentOnKernel   bool   `json:"present_on_kernel,omitempty"`   // module file exists under /lib/modules/$(uname -r)
 
 	// Mount-only. kernsec audits but never auto-mutates /etc/fstab —
 	// these fields surface what the operator would need to add.
-	MountPoint         string // e.g. "/tmp"
-	RecommendedOptions string // e.g. "nodev,nosuid,noexec"
-	CurrentOptions     string // active mount options or "" if not separately mounted
+	MountPoint         string `json:"mount_point,omitempty"`          // e.g. "/tmp"
+	RecommendedOptions string `json:"recommended_options,omitempty"`  // e.g. "nodev,nosuid,noexec"
+	CurrentOptions     string `json:"current_options,omitempty"`      // active mount options or "" if not separately mounted
+}
+
+// StatusJSON is the top-level structure for `cfm kernsec status --json`.
+// Stable field names; new optional fields may be added in future
+// without breaking existing consumers.
+type StatusJSON struct {
+	OK       bool       `json:"ok"`
+	Warnings int        `json:"warnings"`
+	Tier     Tier       `json:"tier"`
+	Backend  string     `json:"backend"`
+	Rules    []AuditRow `json:"rules"`
 }
 
 // BuildAuditRows resolves every kernsec rule against the supplied conf and

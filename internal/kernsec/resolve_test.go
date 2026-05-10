@@ -17,7 +17,10 @@ func TestResolve_Tier0SkipsEverything(t *testing.T) {
 }
 
 func TestResolve_Tier1AppliesKSPP(t *testing.T) {
-	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{})
+	// IsEFIBoot: true ensures boot.dma (efi=disable_early_pci_dma) is not
+	// host-profile skipped in this test — the rule is EFI-specific but we
+	// want to verify the resolver lets it through on an EFI host.
+	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{IsEFIBoot: true})
 	// Tier 1 rules should Apply; Tier 2 rules should SkipByTier.
 	// Exception: sysctl.net group is owned by cfm-sysctl-tweaks per
 	// managedsysctl, so those Tier 1 rules resolve to ManagedExternally
@@ -46,8 +49,9 @@ func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 }
 
 func TestResolve_Tier2AppliesAll(t *testing.T) {
-	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{})
-	// At tier=2 with empty host profile, every rule should Apply
+	// IsEFIBoot: true so boot.dma rules apply (they're skipped on non-EFI hosts).
+	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{IsEFIBoot: true})
+	// At tier=2 with an EFI host profile, every rule should Apply
 	// EXCEPT KSEC-SCT-net.* which the managedsysctl registry marks
 	// as ManagedExternally (owned by cfm-sysctl-tweaks). That's the
 	// Phase 6 cross-component contract: kernsec audits but doesn't
@@ -180,11 +184,20 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 			"KSEC-BOOT-kspp-005":       OverrideSkip,
 		},
 	}
-	rs := Resolve(conf, HostProfile{})
+	// IsEFIBoot:true so efi=disable_early_pci_dma (boot.dma) applies.
+	rs := Resolve(conf, HostProfile{IsEFIBoot: true})
 
+	// Expected applying sysctls at tier=1:
+	//   KSPPSysctls (11) - 1 skipped   = 10
+	//   KernelSurface  (1)              = 1
+	//   NetHardenSysctls (7)            = 7
+	//   Tier2Sysctls: SkipByTier        = 0
+	//   NetSysctls (5): ManagedExternally = 0
+	// Total = 18
+	wantSysctls := len(KSPPSysctls) - 1 + len(KernelSurface) + len(NetHardenSysctls)
 	scts := rs.ApplySysctls()
-	if len(scts) != len(KSPPSysctls)-1 {
-		t.Errorf("ApplySysctls len = %d, want %d", len(scts), len(KSPPSysctls)-1)
+	if len(scts) != wantSysctls {
+		t.Errorf("ApplySysctls len = %d, want %d", len(scts), wantSysctls)
 	}
 	for _, s := range scts {
 		if s.ID == "KSEC-SCT-kspp.kernel-001" {
@@ -192,9 +205,15 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 		}
 	}
 
+	// Expected applying boot args at tier=1 with IsEFIBoot:
+	//   KSPPBootArgs (5) - 1 skipped       = 4
+	//   Tier1BootArgsExt (4): all apply on EFI host = 4
+	//   Tier2BootArgs: SkipByTier          = 0
+	// Total = 8
+	wantBootArgs := len(KSPPBootArgs) - 1 + len(Tier1BootArgsExt)
 	args := rs.ApplyBootArgs()
-	if len(args) != len(KSPPBootArgs)-1 {
-		t.Errorf("ApplyBootArgs len = %d, want %d", len(args), len(KSPPBootArgs)-1)
+	if len(args) != wantBootArgs {
+		t.Errorf("ApplyBootArgs len = %d, want %d", len(args), wantBootArgs)
 	}
 	for _, a := range args {
 		if a.ID == "KSEC-BOOT-kspp-005" {

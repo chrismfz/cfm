@@ -62,6 +62,8 @@ func RunCLI(args []string) int {
 		return runDisableCmd(args[1:], os.Stdout)
 	case "monitor":
 		return runMonitorCmd(args[1:], os.Stdout)
+	case "rollback":
+		return runRollbackCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -98,9 +100,17 @@ func runText(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	skipAFAlg := fs.Bool("skip-af-alg", false, "skip AF_ALG bind probes")
 	checkExit := fs.Bool("check", false, "exit non-zero on any WARN (for monitoring)")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text (for fleet aggregation)")
 
 	if rc, done := handleFlagErr("kernsec", fs.Parse(args), w); done {
 		return rc
+	}
+	if *jsonOut {
+		res := RunStatusJSON(w)
+		if *checkExit && !res.OK {
+			return 1
+		}
+		return 0
 	}
 	res := RunStatus(w, StatusOptions{SkipAFAlg: *skipAFAlg})
 	if *checkExit && !res.OK {
@@ -186,6 +196,17 @@ func runMonitorCmd(args []string, w io.Writer) int {
 	})
 }
 
+func runRollbackCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec rollback", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dryRun := fs.Bool("dry-run", false, "show what would be restored without writing")
+
+	if rc, done := handleFlagErr("kernsec rollback", fs.Parse(args), w); done {
+		return rc
+	}
+	return RunRollback(w, *dryRun)
+}
+
 func runDisableCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("kernsec disable", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -233,12 +254,14 @@ Subcommands:
   init                Write default tier=1 /etc/cfm/kernsec.conf if absent
   apply               Write managed sysctl + boot-arg files; run sysctl --load + bootloader refresh
   disable             Persistently disable kernsec (tier=0) and strip managed boot args + sysctl rules
+  rollback            Restore bootloader config from .cfm-kernsec.bak and refresh (operator recovery path)
   monitor             Manage the periodic drift-check systemd timer (enable | disable | remove | status)
   help                Show this message
 
 Status / text flags:
   --skip-af-alg       Skip AF_ALG bind probes
   --check             Exit non-zero on any WARN (suitable for monitoring)
+  --json              Emit machine-readable JSON instead of text (for fleet aggregation)
 
 Preview flags:
   --only-apply        Hide skipped rules
@@ -260,6 +283,9 @@ Disable flags:
   --no-refresh        Skip the bootloader refresh step
   --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
+
+Rollback flags:
+  --dry-run           Show what would be restored without writing
 
 Monitor subcommands:
   cfm kernsec monitor enable [--interval=daily]   install + enable systemd timer
