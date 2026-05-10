@@ -170,6 +170,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 	purge := fs.Bool("purge", false, "also remove /etc/cfm/kernsec.conf and managed sysctl file")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step")
+	force := fs.Bool("force", false, "proceed even if the existing kernsec.conf is malformed or unreadable (overrides will be lost)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, "kernsec disable:", err)
@@ -180,6 +181,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 		Purge:     *purge,
 		DryRun:    *dryRun,
 		NoRefresh: *noRefresh,
+		Force:     *force,
 	})
 }
 

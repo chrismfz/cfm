@@ -92,3 +92,19 @@ func RemoveManagedArgs(tokens []string) []string {
 	}
 	return out
 }
+
+// KeepManagedArgs is the dual of RemoveManagedArgs: returns a copy of
+// tokens containing ONLY managed-key tokens. Used by the BLS drift
+// check to compare the managed subset across kernels — distro-specific
+// unmanaged args (crashkernel=, transparent_hugepage=, …) legitimately
+// differ between installed kernels and must not be flagged as drift.
+func KeepManagedArgs(tokens []string) []string {
+	out := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		key, _ := splitArg(tok)
+		if IsManagedKey(key) {
+			out = append(out, tok)
+		}
+	}
+	return out
+}

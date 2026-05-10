@@ -27,13 +27,17 @@ type blsKernelEntry struct {
 
 // NextBootCmdline returns the args string from grubby --info=ALL.
 //
-// All installed kernel entries should agree, since `WriteCmdline` runs
-// `grubby --update-kernel=ALL`. If any entry diverges, the args from
-// the first entry are returned together with a non-nil error naming
-// the divergent kernels — `computeDrift` treats any non-nil error as
-// "refuse to apply, surface to operator," which is exactly the right
-// behaviour: a manually-edited / package-update-stale kernel entry
-// must be flagged before the next reboot lands on it.
+// `WriteCmdline` only rewrites kernsec-managed keys via
+// `grubby --update-kernel=ALL --remove-args=<managed> --args=<desired>`,
+// so each kernel entry's UNmanaged args (crashkernel=, distro-specific
+// tunables, …) legitimately differ across installed kernels. The
+// divergence check therefore projects each entry's args through
+// KeepManagedArgs first and compares only the managed subset.
+//
+// If the managed subset diverges between kernels, the args from the
+// first entry are returned together with a non-nil error naming the
+// divergent kernels — `computeDrift` surfaces this to the operator
+// as drift so the next boot doesn't land on a stale entry.
 //
 // Empty grubby output (no kernels) → ("", nil), matching the previous
 // DEFAULT-only behaviour.
@@ -47,15 +51,17 @@ func (b *BLSBackend) NextBootCmdline() (string, error) {
 		return "", nil
 	}
 	first := entries[0].Args
+	firstManaged := KeepManagedArgs(ParseCmdline(first))
 	var diverged []string
 	for _, e := range entries[1:] {
-		if !sameTokens(ParseCmdline(e.Args), ParseCmdline(first)) {
+		entryManaged := KeepManagedArgs(ParseCmdline(e.Args))
+		if !sameTokens(entryManaged, firstManaged) {
 			diverged = append(diverged, e.Kernel)
 		}
 	}
 	if len(diverged) > 0 {
 		return first, fmt.Errorf(
-			"BLS kernel entries diverge from %s — stale args on: %s",
+			"BLS kernel entries diverge on managed args from %s — stale on: %s",
 			entries[0].Kernel, strings.Join(diverged, ", "),
 		)
 	}

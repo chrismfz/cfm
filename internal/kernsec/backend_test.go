@@ -238,6 +238,53 @@ title="Rescue"
 	}
 }
 
+func TestBLSBackend_NextBootCmdline_UnmanagedOnlyDivergenceIsNotDrift(t *testing.T) {
+	// Two kernels with the SAME managed args but different unmanaged
+	// tokens (crashkernel=, transparent_hugepage=, distro-specific). The
+	// previous implementation flagged this as drift — wrong, because
+	// WriteCmdline preserves each kernel's unmanaged tokens. The fix
+	// projects to managed args before comparison, so this case must
+	// pass without error.
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1 crashkernel=auto transparent_hugepage=madvise"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro slab_nomerge init_on_alloc=1 crashkernel=2G-:512M transparent_hugepage=never"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	if _, err := b.NextBootCmdline(); err != nil {
+		t.Fatalf("unmanaged-only divergence should not be drift, got %v", err)
+	}
+}
+
+func TestBLSBackend_NextBootCmdline_DivergenceOnManagedKeyStillFlagged(t *testing.T) {
+	// Stale kernel is missing init_on_alloc=1 (a managed key) — must be
+	// flagged even though crashkernel= legitimately differs.
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1 crashkernel=auto"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro slab_nomerge crashkernel=2G-:512M"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	_, err := b.NextBootCmdline()
+	if err == nil {
+		t.Fatal("expected divergence error on managed-key drift, got nil")
+	}
+	if !strings.Contains(err.Error(), "/boot/vmlinuz-5.14.0") {
+		t.Errorf("error message should name the divergent kernel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "managed args") {
+		t.Errorf("error message should clarify it's managed-args divergence: %v", err)
+	}
+}
+
 func TestBLSBackend_NextBootCmdline_TokenOrderInsensitive(t *testing.T) {
 	// Reordered args on different kernels must not be flagged as drift —
 	// the kernel cmdline is order-insensitive.
