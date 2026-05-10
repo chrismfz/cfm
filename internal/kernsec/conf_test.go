@@ -197,3 +197,66 @@ func TestRuleOverrideString(t *testing.T) {
 		}
 	}
 }
+
+func TestAllRuleIDs_CoversEveryRegistry(t *testing.T) {
+	ids := AllRuleIDs()
+	// Spot-check at least one ID from each registry is present.
+	for _, want := range []string{
+		"KSEC-SCT-kspp.kernel-001",     // sysctl
+		"KSEC-BOOT-kspp-001",           // boot arg
+		"KSEC-MOD-net.legacy-001",      // module
+		"KSEC-FS-mount.tmp-001",        // mount
+	} {
+		if _, ok := ids[want]; !ok {
+			t.Errorf("AllRuleIDs missing %q", want)
+		}
+	}
+	// No duplicates / empty entries.
+	if _, ok := ids[""]; ok {
+		t.Error("AllRuleIDs contains empty string key")
+	}
+}
+
+func TestValidateConfOverrideIDs_NilAndEmpty(t *testing.T) {
+	if got := ValidateConfOverrideIDs(nil); got != nil {
+		t.Errorf("nil conf: got %v, want nil", got)
+	}
+	if got := ValidateConfOverrideIDs(&Conf{}); got != nil {
+		t.Errorf("conf with no overrides: got %v, want nil", got)
+	}
+}
+
+func TestValidateConfOverrideIDs_KnownIDsHaveNoWarning(t *testing.T) {
+	c := &Conf{
+		Overrides: map[string]RuleOverride{
+			"KSEC-SCT-kspp.kernel-001":  OverrideSkip,
+			"KSEC-MOD-net.legacy-001":   OverrideForce,
+			"KSEC-FS-mount.tmp-001":     OverrideSkip,
+		},
+	}
+	if got := ValidateConfOverrideIDs(c); got != nil {
+		t.Errorf("known IDs should produce no warnings, got %v", got)
+	}
+}
+
+func TestValidateConfOverrideIDs_TypoSurfacesWarning(t *testing.T) {
+	c := &Conf{
+		Overrides: map[string]RuleOverride{
+			"KSEC-MOD-net.legacy-024":  OverrideSkip, // typo: only -001..-023 exist
+			"KSEC-SCT-typo-999":        OverrideForce, // wholly fake
+			"KSEC-MOD-net.legacy-001":  OverrideSkip, // real, must NOT warn
+		},
+	}
+	got := ValidateConfOverrideIDs(c)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 warnings (one per typo), got %d: %v", len(got), got)
+	}
+	// Warnings are sorted by ID for stable output. KSEC-MOD-net.legacy-024
+	// comes before KSEC-SCT-typo-999 alphabetically.
+	if !strings.Contains(got[0], "KSEC-MOD-net.legacy-024") {
+		t.Errorf("first warning should mention the typo'd module ID: %v", got[0])
+	}
+	if !strings.Contains(got[1], "KSEC-SCT-typo-999") {
+		t.Errorf("second warning should mention the fake sysctl ID: %v", got[1])
+	}
+}

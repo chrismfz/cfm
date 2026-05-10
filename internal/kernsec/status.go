@@ -50,6 +50,12 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintf(w, "[Conf tier]  %d\n", conf.Tier)
+	if warnings := ValidateConfOverrideIDs(conf); len(warnings) > 0 {
+		for _, msg := range warnings {
+			fmt.Fprintf(w, "[!] %s\n", msg)
+			res.warn()
+		}
+	}
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Current running kernel cmdline]")
@@ -99,6 +105,8 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 
 	res.printModuleState(w, resolved)
 
+	res.printMountState(w, resolved)
+
 	klog := ReadKernelLog()
 	fmt.Fprintln(w, "[Kernel boot warnings about managed args]")
 	if matched := UnknownArgWarnings(klog, ManagedBootArgKeys); len(matched) > 0 {
@@ -113,12 +121,26 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 
 	fmt.Fprintln(w, "[Copy Fail / algif_aead mitigation]")
 	mitigation := BootArg{Key: "initcall_blacklist", Value: "algif_aead_init"}
-	if state, _ := CheckBootArg(currentTokens, mitigation); state == ArgOK {
-		fmt.Fprintln(w, "OK    initcall_blacklist=algif_aead_init present in current cmdline")
-	} else {
-		fmt.Fprintln(w, "WARN  initcall_blacklist=algif_aead_init not active in current cmdline")
-		fmt.Fprintln(w, "      Reboot is required after enable.")
-		res.warn()
+	// This is the kernsec-managed boot-arg rule KSEC-BOOT-kspp-005, so
+	// the WARN must respect the operator's conf: a tier=0 host or one
+	// that explicitly skipped this rule should see OFF, not WARN.
+	// Previously the check fired unconditionally and made
+	// `cfm kernsec status --check` a false-positive on legitimately
+	// disabled hosts.
+	mitigationDecision := decisionForBootArg(resolved, mitigation.Key, mitigation.Value)
+	switch mitigationDecision {
+	case SkipByConf, SkipByTier:
+		fmt.Fprintln(w, "OFF   initcall_blacklist=algif_aead_init disabled by conf (tier or per-rule skip)")
+	case SkipByHostProfile:
+		fmt.Fprintln(w, "SKIP  initcall_blacklist=algif_aead_init skipped by host profile")
+	default:
+		if state, _ := CheckBootArg(currentTokens, mitigation); state == ArgOK {
+			fmt.Fprintln(w, "OK    initcall_blacklist=algif_aead_init present in current cmdline")
+		} else {
+			fmt.Fprintln(w, "WARN  initcall_blacklist=algif_aead_init not active in current cmdline")
+			fmt.Fprintln(w, "      Reboot is required after enable.")
+			res.warn()
+		}
 	}
 
 	if !opts.SkipAFAlg {
@@ -240,6 +262,60 @@ func (res *StatusResult) printArgState(w io.Writer, label string, tokens []strin
 func (res *StatusResult) warn() {
 	res.Warnings++
 	res.OK = false
+}
+
+// printMountState surfaces the fstab audit rules. kernsec never
+// auto-mutates fstab — every MISSING line is operator-actionable
+// advice, not a kernsec bug. Counts as a warning so that
+// `cfm kernsec status --check` exits non-zero when an operator-
+// reviewable item exists, matching the boot-arg / module sections.
+// Each row also passes through the resolver so OFF / SKIP rows
+// surface honestly instead of being lumped into MISSING.
+func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
+	fmt.Fprintln(w, "[Mount audit (read-only — fstab is operator-managed)]")
+	for i, m := range Tier1Mounts {
+		rr := resolved.Mounts[i]
+		switch rr.Decision {
+		case SkipByConf, SkipByTier:
+			fmt.Fprintf(w, "OFF        %s  recommend %s  (%s)\n",
+				m.MountPoint, m.Recommended, rr.Reason)
+			continue
+		case SkipByHostProfile:
+			fmt.Fprintf(w, "SKIP       %s  (host profile: %s)\n",
+				m.MountPoint, rr.Reason)
+			continue
+		}
+		state, current := CheckMount(m)
+		switch state {
+		case MountOK:
+			fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
+		case MountMissingOptions:
+			fmt.Fprintf(w, "MISSING    %s  recommend %s  (current: %s)\n",
+				m.MountPoint, m.Recommended, current)
+			res.warn()
+		case MountNotSeparate:
+			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n", m.MountPoint)
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+// decisionForBootArg returns the resolver decision for the boot-arg
+// rule matching the given key+value. Falls back to Apply if no rule is
+// registered for that pair — keeps the hard-coded follow-up checks in
+// RunStatus (algif_aead_init etc.) functioning even if the rule
+// registry doesn't include the exact arg.
+func decisionForBootArg(resolved ResolvedSet, key, value string) Decision {
+	display := key
+	if value != "" {
+		display = key + "=" + value
+	}
+	for _, rr := range resolved.BootArgs {
+		if rr.Display == display {
+			return rr.Decision
+		}
+	}
+	return Apply
 }
 
 // printModuleState surfaces the module-blacklist audit in the same

@@ -7,6 +7,7 @@ const (
 	KindSysctl RuleKind = "sysctl"
 	KindBoot   RuleKind = "boot"
 	KindModule RuleKind = "module"
+	KindMount  RuleKind = "mount"
 )
 
 // RuleState is the per-row tri-state surfaced in status / TUI output.
@@ -65,6 +66,12 @@ type AuditRow struct {
 	BlacklistedInFile bool   // module is in /etc/modprobe.d/cfm-kernsec.conf
 	Loaded            bool   // module is currently in /proc/modules
 	PresentOnKernel   bool   // module file exists under /lib/modules/$(uname -r)
+
+	// Mount-only. kernsec audits but never auto-mutates /etc/fstab —
+	// these fields surface what the operator would need to add.
+	MountPoint         string // e.g. "/tmp"
+	RecommendedOptions string // e.g. "nodev,nosuid,noexec"
+	CurrentOptions     string // active mount options or "" if not separately mounted
 }
 
 // BuildAuditRows resolves every kernsec rule against the supplied conf and
@@ -166,6 +173,27 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 		rows = append(rows, row)
 	}
 
+	for i, m := range Tier1Mounts {
+		rr := rs.Mounts[i]
+		mountState, current := CheckMount(m)
+		row := AuditRow{
+			ID:                 m.ID,
+			Kind:               KindMount,
+			Group:              m.Group,
+			Tier:               m.Tier,
+			Display:            m.MountPoint,
+			Description:        m.Description,
+			Affects:            m.Affects,
+			Decision:           rr.Decision,
+			Reason:             rr.Reason,
+			MountPoint:         m.MountPoint,
+			RecommendedOptions: m.Recommended,
+			CurrentOptions:     current,
+		}
+		row.State = mountRowStateForDecision(rr.Decision, mountState)
+		rows = append(rows, row)
+	}
+
 	return rows
 }
 
@@ -211,6 +239,37 @@ func moduleRowStateForDecision(d Decision, blacklisted, loaded, presentOnKernel 
 		return StateSKIP
 	}
 	return moduleRowState(blacklisted, loaded, presentOnKernel)
+}
+
+// mountRowState maps a mount probe result to a row state for an
+// Apply-decision mount row. kernsec never auto-mutates fstab so even
+// MountMissingOptions is information, not a failure to act on — the
+// operator decides whether `nodev,nosuid,noexec` is compatible with
+// their workload.
+//
+//   - MountOK              → OK
+//   - MountMissingOptions  → DIFF (mount exists but options missing)
+//   - MountNotSeparate     → SKIP (not a distinct mount; recs N/A)
+func mountRowState(s MountState) RuleState {
+	switch s {
+	case MountOK:
+		return StateOK
+	case MountMissingOptions:
+		return StateDIFF
+	}
+	return StateSKIP
+}
+
+// mountRowStateForDecision wraps mountRowState with the resolver
+// decision.
+func mountRowStateForDecision(d Decision, s MountState) RuleState {
+	switch d {
+	case SkipByConf, SkipByTier:
+		return StateOFF
+	case SkipByHostProfile:
+		return StateSKIP
+	}
+	return mountRowState(s)
 }
 
 // moduleRowState collapses the (blacklisted, loaded, present-on-kernel)

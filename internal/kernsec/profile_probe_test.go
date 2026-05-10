@@ -136,6 +136,62 @@ func TestContainerProbe_MissingProcDir(t *testing.T) {
 	}
 }
 
+func TestSkipReason_BluetoothBusGroup(t *testing.T) {
+	// modules.bus.bluetooth must skip when HasBluetoothHardware.
+	p := HostProfile{HasBluetoothHardware: true}
+	if r := p.SkipReason("modules.bus.bluetooth"); r == "" {
+		t.Error("expected non-empty skip reason for modules.bus.bluetooth on BT-hw host")
+	}
+	// firewire / thunderbolt / misc must NOT be skipped just because
+	// Bluetooth is present — that was the bug: the old single
+	// modules.bus group skipped everything together.
+	for _, g := range []string{"modules.bus.firewire", "modules.bus.thunderbolt", "modules.bus.misc"} {
+		if r := p.SkipReason(g); r != "" {
+			t.Errorf("unexpected skip on %s with only Bluetooth hw: %q", g, r)
+		}
+	}
+}
+
+func TestSkipReason_ThunderboltBusGroup(t *testing.T) {
+	p := HostProfile{HasThunderbolt: true}
+	if r := p.SkipReason("modules.bus.thunderbolt"); r == "" {
+		t.Error("expected non-empty skip reason for modules.bus.thunderbolt on TB-hw host")
+	}
+	// Symmetric: TB-only host must not blanket-skip Bluetooth or
+	// firewire or misc.
+	for _, g := range []string{"modules.bus.bluetooth", "modules.bus.firewire", "modules.bus.misc"} {
+		if r := p.SkipReason(g); r != "" {
+			t.Errorf("unexpected skip on %s with only Thunderbolt hw: %q", g, r)
+		}
+	}
+}
+
+func TestSkipReason_BusGroupsApplyOnCleanHost(t *testing.T) {
+	// No hardware → all four bus groups apply (no skip).
+	p := HostProfile{}
+	for _, g := range []string{
+		"modules.bus.bluetooth",
+		"modules.bus.firewire",
+		"modules.bus.thunderbolt",
+		"modules.bus.misc",
+	} {
+		if r := p.SkipReason(g); r != "" {
+			t.Errorf("clean host should not skip %s: got %q", g, r)
+		}
+	}
+}
+
+func TestSkipReason_OldModulesBusNoLongerMatches(t *testing.T) {
+	// The bare `modules.bus` group is gone after the rename. SkipReason
+	// must return "" — falling through to apply — so any stale rule
+	// metadata (or a rogue conf override referencing the old group)
+	// does not silently match every host. Sub-groups handle the gate.
+	p := HostProfile{HasBluetoothHardware: true, HasThunderbolt: true}
+	if r := p.SkipReason("modules.bus"); r != "" {
+		t.Errorf("stale group `modules.bus` should not match SkipReason: %q", r)
+	}
+}
+
 func TestDefaultContainerProbe_ShapeOnly(t *testing.T) {
 	// Sanity: the default probe points at real host paths. Run it on
 	// the test host — result is whatever it is, but it must not panic

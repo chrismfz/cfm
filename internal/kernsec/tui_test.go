@@ -66,11 +66,11 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	// values depend on the runtime kernel and aren't asserted.
 	conf := &Conf{Tier: Tier2, Overrides: map[string]RuleOverride{}}
 	rows := BuildAuditRows(conf, HostProfile{})
-	wantTotal := len(AllSysctls()) + len(AllBootArgs()) + len(Tier1Modules)
+	wantTotal := len(AllSysctls()) + len(AllBootArgs()) + len(Tier1Modules) + len(Tier1Mounts)
 	if len(rows) != wantTotal {
 		t.Fatalf("BuildAuditRows() returned %d rows, want %d", len(rows), wantTotal)
 	}
-	var sysctlCount, bootCount, moduleCount int
+	var sysctlCount, bootCount, moduleCount, mountCount int
 	for _, r := range rows {
 		switch r.Kind {
 		case KindSysctl:
@@ -79,6 +79,8 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 			bootCount++
 		case KindModule:
 			moduleCount++
+		case KindMount:
+			mountCount++
 		default:
 			t.Errorf("unknown kind %q in row %+v", r.Kind, r)
 		}
@@ -100,6 +102,9 @@ func TestBuildAuditRows_PopulatesShape(t *testing.T) {
 	}
 	if bootCount != len(AllBootArgs()) {
 		t.Errorf("boot row count %d, want %d", bootCount, len(AllBootArgs()))
+	}
+	if mountCount != len(Tier1Mounts) {
+		t.Errorf("mount row count %d, want %d", mountCount, len(Tier1Mounts))
 	}
 }
 
