@@ -371,6 +371,9 @@ turns your server into a botnet node.
   (ASN/Country/PTR), and an **exim queue snapshot** (msgids + sender
   addresses) when the signal is SMTP — so the offending script is identifiable
   from one log line.
+- For HTTP/HTTPS signals, phase 1 reports destination IP/port samples only. It
+  does **not** report the URL, path, or HTTP host because the NFLOG collector
+  observes connection metadata, not application request payloads.
 - Emits a `notify.Event` (`kind=outbound_abuse`, `section=outbound`,
   `severity=warning`) so existing Slack / email / webhook channels carry it.
 
@@ -408,12 +411,36 @@ OUTBOUND_HTTP_RATE_PER_MIN       = 200
 OUTBOUND_LOG_DEDUP_SECONDS       = 300     # don't re-warn within this window
 OUTBOUND_QUEUE_SAMPLES           = 5       # exim msgid/sender lines per warning
 OUTBOUND_LOG_ENRICH              = 1       # GeoIP/ASN on destination IP
+OUTBOUND_HTTP_ATTRIBUTION_ENABLED = 0       # optional best-effort HTTP attribution; privacy-sensitive
 # Auto-exempt (when present): users cfm,mailnull and groups cfm,mail
 # OUTBOUND_ALLOW_USERS = mailman,exim      # extra names (resolved at load time)
 # OUTBOUND_ALLOW_GROUPS = mailman
 # OUTBOUND_ALLOW_UIDS = 8,12               # mailnull / mailman if you see false positives
 # OUTBOUND_ALLOW_GIDS = 12
 ```
+
+
+**HTTP attribution roadmap (optional, disabled by default):**
+
+The NFLOG collector remains intentionally small and connection-oriented. If an
+operator needs richer HTTP attribution than destination IPs, build it as a
+separate opt-in component instead of extending the core collector:
+
+- **Cleartext HTTP (`:80`)** — optionally sample the first request bytes and
+  extract the `Host` header. Keep samples bounded, avoid storing paths/bodies by
+  default, and treat captured request bytes as sensitive data.
+- **TLS (`:443`)** — because URLs and paths are encrypted, use best-effort
+  correlation instead: match destination IPs with process DNS lookups, collect
+  SNI via eBPF/pcap only where available and legally/operationally acceptable,
+  or consume proxy logs when CFM controls egress through an HTTP(S) proxy.
+- **Operational cost** — packet capture/eBPF/proxy correlation can add CPU,
+  memory, file-descriptor pressure, and debugging complexity on busy shared
+  hosts. It may also require elevated privileges and kernel/tooling support.
+- **Privacy impact** — hostnames, SNI, DNS questions, and sampled request bytes
+  can reveal tenant activity. Keep `OUTBOUND_HTTP_ATTRIBUTION_ENABLED=0` unless
+  you have an explicit operational need, retention policy, and customer/privacy
+  basis for collecting it. Any attribution emitted by this component should be
+  labeled **best-effort** because DNS/SNI/proxy timing can be ambiguous.
 
 **Example forensic line** (written to `cfm.smtp.log`):
 ```

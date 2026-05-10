@@ -59,3 +59,18 @@ func TestIsKnownKey_OutboundDNSDeprecationWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCFMConf_OutboundHTTPAttributionKnob(t *testing.T) {
+	cfg, err := ParseCFMConf(strings.NewReader(`
+OUTBOUND_HTTP_ATTRIBUTION_ENABLED=1
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !cfg.Outbound.HTTPAttributionEnabled {
+		t.Fatal("expected OUTBOUND_HTTP_ATTRIBUTION_ENABLED to be parsed")
+	}
+	if !IsKnownKey("OUTBOUND_HTTP_ATTRIBUTION_ENABLED") {
+		t.Fatal("expected OUTBOUND_HTTP_ATTRIBUTION_ENABLED to be known")
+	}
+}
