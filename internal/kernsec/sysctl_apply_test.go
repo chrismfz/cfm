@@ -204,3 +204,38 @@ func TestRenderSysctlFile_SkippedRulesAreCommented(t *testing.T) {
 		}
 	}
 }
+
+func TestApplySysctls_ReconciledDocsOnlySelection(t *testing.T) {
+	rules := Resolve(&Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}, HostProfile{}).ApplySysctls()
+	selected := map[string]bool{}
+	for _, r := range rules {
+		selected[r.Key] = true
+	}
+	for _, key := range []string{
+		"vm.unprivileged_userfaultfd",
+		"vm.mmap_rnd_bits",
+		"vm.mmap_rnd_compat_bits",
+		"kernel.warn_limit",
+		"kernel.oops_limit",
+		"fs.suid_dumpable",
+		"dev.tty.ldisc_autoload",
+		"kernel.kexec_load_disabled",
+		"kernel.sysrq",
+	} {
+		if !selected[key] {
+			t.Errorf("tier1 ApplySysctls missing %s", key)
+		}
+	}
+	for _, key := range []string{"kernel.panic_on_oops", "kernel.panic"} {
+		if selected[key] {
+			t.Errorf("tier1 ApplySysctls unexpectedly selected tier2 key %s", key)
+		}
+	}
+
+	kdumpRules := Resolve(&Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}, HostProfile{HasKdump: true}).ApplySysctls()
+	for _, r := range kdumpRules {
+		if r.Key == "kernel.kexec_load_disabled" {
+			t.Fatal("kdump host should not apply kernel.kexec_load_disabled")
+		}
+	}
+}

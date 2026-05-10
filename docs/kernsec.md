@@ -61,13 +61,15 @@ status/TUI for keys owned by `cfm-sysctl-tweaks`. The Phase 1-6
 rollout plan is now complete; remaining work items are
 operator-facing polish (real-host smoke testing, follow-up audits).
 
-**Post-Phase-6 audit sweep complete.** Eight new rules shipped on the
+**Post-Phase-6 audit sweep complete.** Additional rules shipped on the
 current branch:
 - **`KSEC-BOOT-bug-detection-001`** (`kfence.sample_interval=100`) — Tier 1, no gate.
 - **`KSEC-BOOT-dma-001`** (`efi=disable_early_pci_dma`) — Tier 1, EFI-boot gate (skipped on non-EFI/BIOS hosts).
 - **`KSEC-BOOT-sidechannel-001`** (`tsx=off`) — Tier 1, no gate.
 - **`KSEC-BOOT-ssbd-001`** (`spec_store_bypass_disable=seccomp`) — Tier 1, no gate.
 - **`KSEC-SCT-kernel.coredump-001`** (`kernel.core_pattern=|/bin/false`) — Tier 1, kdump-gated.
+- **`KSEC-SCT-mem.exploit-001` through `-008`** — reconciled formerly docs-only memory/exploit sysctls. Safe entries ship in Tier 1; the panic-on-oops pair is Tier 2 because it can reboot the host on kernel bugs.
+- **`KSEC-SCT-kernel.surface-001` through `-003`** — reconciled formerly docs-only kernel-surface sysctls (`dev.tty.ldisc_autoload=0`, kdump-gated `kernel.kexec_load_disabled=1`, `kernel.sysrq=0`).
 - **`KSEC-SCT-net.harden-001` through `-007`** — 7 new kernsec-owned net hardening sysctls (icmp_echo_ignore_broadcasts, accept_source_route, log_martians, tcp_rfc1337, ipv6 accept_ra).
 - **`cfm kernsec rollback`** — new subcommand that restores the pre-apply cmdline from `.cfm-kernsec.bak` and refreshes the bootloader. BLS backend now captures a pre-apply snapshot via `grubby --info=DEFAULT`.
 - **`cfm kernsec status --json`** — machine-readable JSON output for fleet aggregation.
@@ -241,13 +243,14 @@ gate ("strict superset on Proxmox + EL + Debian") needs a `BootBackend` Go
 interface from day one so unit tests can mock Proxmox/BLS/GRUB without real
 bootloaders. Real-host verification stays a manual gate.
 
-**Open external questions** (resolve before/during Phase 1):
+**Historical external questions** (resolved where they affect the reconciled rule shape):
 
-- Are kdump or DKMS modules (zfs, nvidia) in use on cfm fleets? Affects
-  whether `kernel.kexec_load_disabled=1` and `module.sig_enforce=1` are Tier 1
-  or Tier 2 in practice.
+- kdump / DKMS impact is now host-profile gated: `kernel.kexec_load_disabled=1`
+  ships as Tier 1 but skips when kdump is enabled; `module.sig_enforce=1` remains
+  Tier 2 and skips when DKMS / out-of-tree module evidence is present.
 - ssh access to a Proxmox + EL + Debian test host trio for the Phase 3
-  acceptance gate.
+  acceptance gate remains an operational smoke-test item, not a rule-shape
+  blocker.
 - Confirm cfm packaging format(s) actually shipped (deb? rpm? both? install
   script?) so Phase 3 packaging work targets the right thing.
 
@@ -303,7 +306,7 @@ KSEC-<class>-<group>-<NNN>
 Examples:
 
 - `KSEC-MOD-net.legacy-014`  — blacklist `dccp`
-- `KSEC-SCT-mem.exploit-007` — `vm.unprivileged_userfaultfd=0`
+- `KSEC-SCT-mem.exploit-001` — `vm.unprivileged_userfaultfd=0`
 - `KSEC-BOOT-kspp-002`       — `init_on_alloc=1`
 - `KSEC-FS-mount.tmp-001`    — audit `nodev,nosuid,noexec` on `/tmp`
 
@@ -342,7 +345,7 @@ Per-rule overrides are persisted in `/etc/cfm/kernsec.conf` via the
 | Tier | Examples | Default |
 |---|---|---|
 | 1. Safe-everywhere | KSPP sysctls, blacklist of legacy network protocols, `dev.tty.ldisc_autoload=0`, `vm.unprivileged_userfaultfd=0`, `kernel.kexec_load_disabled=1` (gated on no-kdump) | enable |
-| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `oops=panic`, `lockdown=integrity`, `module.sig_enforce=1` (gated on no DKMS) | opt-in per role |
+| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `oops=panic`, `kernel.panic_on_oops=1`, `kernel.panic=10`, `lockdown=integrity`, `module.sig_enforce=1` (gated on no DKMS) | opt-in per role |
 
 LKRG was considered and dropped: out-of-tree DKMS = breaks every kernel jump,
 ~3-5% perf hit, has had its own bugs. Not worth shipping in cfm.
@@ -459,25 +462,35 @@ Shipped as `/etc/sysctl.d/99-cfm-kernsec.conf`. Existing `kspp.sh` settings
 stay where they are (`/etc/sysctl.d/99-kspp.conf`); `kernsec` adds a separate
 file so the components don't fight.
 
-**Group `sysctl.mem.exploit`** — high signal, low breakage.
+**Group `sysctl.mem.exploit`** — shipped now. High-signal, low-breakage
+entries are Tier 1; the fail-closed oops/panic pair is Tier 2 because it can
+turn a kernel bug into an automatic reboot.
 
-| ID | Setting | Why | Affects |
-|---|---|---|---|
-| KSEC-SCT-mem.exploit-001 | `vm.unprivileged_userfaultfd=0` | Kills a huge class of LPE heap-spray techniques | Userspace userfaultfd (rare) |
-| KSEC-SCT-mem.exploit-002 | `vm.mmap_rnd_bits=32` | Strong ASLR (some distros ship 28) | None |
-| KSEC-SCT-mem.exploit-003 | `vm.mmap_rnd_compat_bits=16` | ASLR for 32-bit compat | None |
-| KSEC-SCT-mem.exploit-004 | `kernel.warn_limit=10` | Stops WARN-spray exploits | None |
-| KSEC-SCT-mem.exploit-005 | `kernel.oops_limit=10` | Stops oops-spray exploits | None |
-| KSEC-SCT-mem.exploit-006 | `kernel.panic_on_oops=1` + `kernel.panic=10` | Fail-closed posture | Reboot on kernel bug instead of continuing |
-| KSEC-SCT-mem.exploit-007 | `fs.suid_dumpable=0` | No core dumps from suid binaries | Lose crash diagnostics from suid |
+| ID | Tier | Setting | Why | Affects |
+|---|---:|---|---|---|
+| KSEC-SCT-mem.exploit-001 | 1 | `vm.unprivileged_userfaultfd=0` | Kills a huge class of LPE heap-spray / race techniques | Userspace userfaultfd without privileges (rare) |
+| KSEC-SCT-mem.exploit-002 | 1 | `vm.mmap_rnd_bits=32` | Strong 64-bit mmap ASLR (some distros ship lower) | None; skipped if the kernel does not expose the key |
+| KSEC-SCT-mem.exploit-003 | 1 | `vm.mmap_rnd_compat_bits=16` | Strong ASLR for 32-bit compat processes | None; skipped if unsupported |
+| KSEC-SCT-mem.exploit-004 | 1 | `kernel.warn_limit=10` | Stops WARN-spray exploits from looping indefinitely | None in production; noisy kernel debugging may need an override |
+| KSEC-SCT-mem.exploit-005 | 1 | `kernel.oops_limit=10` | Stops oops-spray exploits from looping indefinitely | None in normal operation |
+| KSEC-SCT-mem.exploit-006 | 2 | `kernel.panic_on_oops=1` | Fail closed after an oops instead of continuing after possible corruption | Reboot on kernel bug instead of continuing |
+| KSEC-SCT-mem.exploit-007 | 1 | `fs.suid_dumpable=0` | No core dumps from suid binaries | Lose crash diagnostics from suid helpers unless overridden |
+| KSEC-SCT-mem.exploit-008 | 2 | `kernel.panic=10` | Automatically reboot ten seconds after the Tier 2 panic path fires | Less console forensic time after a panic |
 
-**Group `sysctl.kernel.surface`**
+**Group `sysctl.kernel.surface`** — shipped now. `kernel.kexec_load_disabled`
+uses the `sysctl.kernel.kexec` resolver group internally so the kdump host-profile
+gate can target only that row.
 
-| ID | Setting | Why | Affects |
-|---|---|---|---|
-| KSEC-SCT-kernel.surface-001 | `dev.tty.ldisc_autoload=0` | Closes the n_hdlc class entirely | None |
-| KSEC-SCT-kernel.surface-002 | `kernel.kexec_load_disabled=1` | Prevents unsigned kernel kexec | Skipped if kdump enabled |
-| KSEC-SCT-kernel.surface-003 | `kernel.sysrq=0` (or 4 for SAK only) | Disables magic SysRq | Lose emergency-debug shortcuts |
+| ID | Tier | Setting | Why | Affects |
+|---|---:|---|---|---|
+| KSEC-SCT-kernel.surface-001 | 1 | `dev.tty.ldisc_autoload=0` | Closes n_hdlc-style line-discipline autoload paths entirely | None on servers; unusual line disciplines must be loaded explicitly by root |
+| KSEC-SCT-kernel.surface-002 | 1 | `kernel.kexec_load_disabled=1` | Prevents unsigned / unexpected kernel replacement via kexec | Skipped if kdump enabled; cannot be re-enabled until reboot once set |
+| KSEC-SCT-kernel.surface-003 | 1 | `kernel.sysrq=0` | Disables Magic SysRq emergency-control primitives | Lose emergency-debug shortcuts unless overridden (for example SAK-only mode) |
+
+**Future candidates / not shipped**: none from the `sysctl.mem.exploit` or
+`sysctl.kernel.surface` tables above. All previously docs-only rows in those
+two groups now have registry entries; unsupported kernel keys are rendered as
+commented `# skipped` lines rather than causing apply failures.
 
 **Group `sysctl.kernel.coredump`** (Tier 1, kdump-gated)
 
@@ -1172,8 +1185,10 @@ host-profile gated where they would clearly break things.
 **Boot args** (one rule per group for explicit per-rule overrides):
 
 - `oops=panic` (`KSEC-BOOT-tier2.oops-001`). Pair with
-  `kernel.panic_on_oops=1` to stop oops-spray exploit techniques.
-  No host-profile gating — aggressive by design.
+  `kernel.panic_on_oops=1` (`KSEC-SCT-mem.exploit-006`) and
+  `kernel.panic=10` (`KSEC-SCT-mem.exploit-008`) to stop oops-spray
+  exploit techniques and recover after the fail-closed panic. No
+  host-profile gating — aggressive by design.
 - `lockdown=integrity` (`KSEC-BOOT-tier2.lockdown-001`). Kernel
   lockdown LSM. Skipped when DKMS modules (zfs / nvidia) are
   detected — lockdown=integrity blocks unsigned module load.

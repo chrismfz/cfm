@@ -148,7 +148,7 @@ var KSPPSysctls = []SysctlRule{
 var KSPPBootArgs = []BootArg{
 	{
 		ID: "KSEC-BOOT-kspp-001", Group: "kspp.boot", Tier: Tier1,
-		Key: "slab_nomerge",
+		Key:         "slab_nomerge",
 		Description: "Don't merge slab caches that have similar size. Hardens against type-confusion UAF exploits.",
 		Affects:     "Small RAM overhead.",
 	},
@@ -259,11 +259,87 @@ var Tier1BootArgsExt = []BootArg{
 	},
 }
 
+// MemExploitSysctls is the memory/exploit-mitigation sysctl group.
+// The safe-everywhere entries reduce common LPE primitives without
+// changing normal server behaviour. The oops/panic pair intentionally
+// lives in Tier 2 because it trades availability for fail-closed exploit
+// mitigation: any kernel oops can reboot the host.
+var MemExploitSysctls = []SysctlRule{
+	{
+		ID: "KSEC-SCT-mem.exploit-001", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "vm.unprivileged_userfaultfd", Value: "0",
+		Description: "Disable unprivileged userfaultfd — removes a frequently-abused heap-spray / race primitive from unprivileged attackers.",
+		Affects:     "Rare userspace checkpointing / post-copy migration tools need privileges or a per-host override.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-002", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "vm.mmap_rnd_bits", Value: "32",
+		Description: "Maximise mmap ASLR entropy on 64-bit kernels that expose this knob.",
+		Affects:     "None on normal hosting workloads; skipped automatically on kernels that do not expose the key.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-003", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "vm.mmap_rnd_compat_bits", Value: "16",
+		Description: "Maximise mmap ASLR entropy for 32-bit compatibility processes where supported.",
+		Affects:     "None; skipped automatically on kernels without 32-bit compat ASLR support.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-004", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "kernel.warn_limit", Value: "10",
+		Description: "Rate-limit WARN splats so warning-spray exploit techniques cannot loop indefinitely.",
+		Affects:     "None for production use; very noisy kernel debugging sessions may need an override.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-005", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "kernel.oops_limit", Value: "10",
+		Description: "Rate-limit kernel oops handling to blunt oops-spray exploit techniques.",
+		Affects:     "None in normal operation; repeated kernel bugs stop producing unlimited oops reports.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-006", Group: "tier2.oops", Tier: Tier2,
+		Key: "kernel.panic_on_oops", Value: "1",
+		Description: "Fail closed on a kernel oops instead of continuing after possible kernel memory corruption.",
+		Affects:     "Aggressive: any kernel oops can reboot the host. Tier 2 only; pair with oops=panic and kernel.panic=10.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-007", Group: "sysctl.mem.exploit", Tier: Tier1,
+		Key: "fs.suid_dumpable", Value: "0",
+		Description: "Disable core dumps from setuid/setgid binaries so privileged memory is not written to attacker-readable paths.",
+		Affects:     "Crash diagnostics for setuid helpers require a deliberate per-host override.",
+	},
+	{
+		ID: "KSEC-SCT-mem.exploit-008", Group: "tier2.oops", Tier: Tier2,
+		Key: "kernel.panic", Value: "10",
+		Description: "Reboot ten seconds after a panic so Tier 2 oops=panic hosts recover automatically after fail-closed crashes.",
+		Affects:     "Aggressive: panic reboots may reduce forensic time on the console. Tier 2 only.",
+	},
+}
+
 // KernelSurface is the kernel attack-surface hardening sysctl group.
 // Rules that share a gate (e.g. kdump) use a sub-group so the
 // host-profile skip can target them without gating the whole surface
 // set.
 var KernelSurface = []SysctlRule{
+	// --- sysctl.kernel.surface: generic kernel surface reductions -----
+	{
+		ID: "KSEC-SCT-kernel.surface-001", Group: "sysctl.kernel.surface", Tier: Tier1,
+		Key: "dev.tty.ldisc_autoload", Value: "0",
+		Description: "Disable automatic TTY line-discipline module loading — closes n_hdlc-style autoload attack paths from unprivileged TTY users.",
+		Affects:     "None on servers; unusual TTY line disciplines must be loaded explicitly by root before use.",
+	},
+	{
+		ID: "KSEC-SCT-kernel.surface-002", Group: "sysctl.kernel.kexec", Tier: Tier1,
+		Key: "kernel.kexec_load_disabled", Value: "1",
+		Description: "Disable future kexec_load() calls after boot — prevents replacing the running kernel without a firmware/bootloader transition.",
+		Affects:     "Skipped when kdump is enabled. Once set, this knob cannot be re-enabled until reboot.",
+	},
+	{
+		ID: "KSEC-SCT-kernel.surface-003", Group: "sysctl.kernel.surface", Tier: Tier1,
+		Key: "kernel.sysrq", Value: "0",
+		Description: "Disable Magic SysRq actions from keyboard/proc triggers to reduce emergency-control primitives exposed to compromised privileged processes.",
+		Affects:     "Loses Magic SysRq emergency debugging shortcuts unless overridden (for example to SAK-only mode).",
+	},
+
 	// --- sysctl.kernel.coredump: core_pattern (kdump-gated) ----------
 	{
 		ID: "KSEC-SCT-kernel.coredump-001", Group: "sysctl.kernel.coredump", Tier: Tier1,
@@ -359,9 +435,10 @@ func (a BootArg) String() string {
 // deterministic and Tier-1-first-readable.
 func AllSysctls() []SysctlRule {
 	out := make([]SysctlRule, 0,
-		len(KSPPSysctls)+len(KernelSurface)+len(NetHardenSysctls)+
+		len(KSPPSysctls)+len(MemExploitSysctls)+len(KernelSurface)+len(NetHardenSysctls)+
 			len(Tier2Sysctls)+len(NetSysctls))
 	out = append(out, KSPPSysctls...)
+	out = append(out, MemExploitSysctls...)
 	out = append(out, KernelSurface...)
 	out = append(out, NetHardenSysctls...)
 	out = append(out, Tier2Sysctls...)
