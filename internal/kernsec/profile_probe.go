@@ -19,6 +19,7 @@ type HostProfile struct {
 	HasBluetoothHardware bool   // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt       bool   // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasNFS               bool   // active NFS mounts → keep NFS untouched (already excluded by policy)
+	IsEFIBoot            bool   // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	Reason               string // freeform note used in --check output
 }
 
@@ -34,7 +35,16 @@ func DetectHostProfile() HostProfile {
 		HasBluetoothHardware: dirHasEntries("/sys/class/bluetooth"),
 		HasThunderbolt:       dirHasEntries("/sys/bus/thunderbolt/devices"),
 		HasNFS:               procMountsHasFS("nfs", "nfs4"),
+		IsEFIBoot:            isEFIBoot(),
 	}
+}
+
+// isEFIBoot reports whether the system booted via EFI. The kernel
+// exposes /sys/firmware/efi only on EFI-booted systems; its absence
+// means BIOS/legacy-boot and any efi= kernel parameter is a no-op.
+func isEFIBoot() bool {
+	_, err := os.Stat("/sys/firmware/efi")
+	return err == nil
 }
 
 // hasOutOfTreeModuleEvidence is the layered "are there modules
@@ -187,6 +197,20 @@ func (p HostProfile) SkipReason(group string) string {
 	case "boot.kexec":
 		if p.HasKdump {
 			return "host has kdump enabled — kexec_load_disabled would break it"
+		}
+	case "boot.dma":
+		// efi=disable_early_pci_dma is an EFI-specific boot parameter;
+		// on BIOS/legacy-boot systems the kernel ignores it entirely so
+		// writing it to the cmdline would be a no-op but confuse operators.
+		if !p.IsEFIBoot {
+			return "non-EFI boot — efi=disable_early_pci_dma is a no-op on BIOS/legacy-boot systems"
+		}
+	case "sysctl.kernel.coredump":
+		// kernel.core_pattern=|/bin/false disables coredumps globally.
+		// kdump relies on crash dumps captured via kexec; suppressing
+		// core_pattern would silently break crash capture.
+		if p.HasKdump {
+			return "host has kdump enabled — kernel.core_pattern must remain writable for crash capture"
 		}
 	}
 	return ""

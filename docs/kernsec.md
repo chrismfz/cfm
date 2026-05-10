@@ -61,6 +61,18 @@ status/TUI for keys owned by `cfm-sysctl-tweaks`. The Phase 1-6
 rollout plan is now complete; remaining work items are
 operator-facing polish (real-host smoke testing, follow-up audits).
 
+**Post-Phase-6 audit sweep complete.** Eight new rules shipped on the
+current branch:
+- **`KSEC-BOOT-bug-detection-001`** (`kfence.sample_interval=100`) — Tier 1, no gate.
+- **`KSEC-BOOT-dma-001`** (`efi=disable_early_pci_dma`) — Tier 1, EFI-boot gate (skipped on non-EFI/BIOS hosts).
+- **`KSEC-BOOT-sidechannel-001`** (`tsx=off`) — Tier 1, no gate.
+- **`KSEC-BOOT-ssbd-001`** (`spec_store_bypass_disable=seccomp`) — Tier 1, no gate.
+- **`KSEC-SCT-kernel.coredump-001`** (`kernel.core_pattern=|/bin/false`) — Tier 1, kdump-gated.
+- **`KSEC-SCT-net.harden-001` through `-007`** — 7 new kernsec-owned net hardening sysctls (icmp_echo_ignore_broadcasts, accept_source_route, log_martians, tcp_rfc1337, ipv6 accept_ra).
+- **`cfm kernsec rollback`** — new subcommand that restores the pre-apply cmdline from `.cfm-kernsec.bak` and refreshes the bootloader. BLS backend now captures a pre-apply snapshot via `grubby --info=DEFAULT`.
+- **`cfm kernsec status --json`** — machine-readable JSON output for fleet aggregation.
+- **`kernel.unprivileged_bpf_disabled=1`** confirmed present as `KSEC-SCT-kspp.kernel-003` in `KSPPSysctls` (was documented in `kspp.sh` and correctly ported to the Go registry).
+
 **`kspp.sh` status**: kept in the tree indefinitely. It started as the
 reference implementation for the cfm kernsec component; with Phase 3
 complete, kernsec absorbs everything kspp.sh does (KSPP sysctls + boot
@@ -301,6 +313,7 @@ CLI surface as shipped:
 cfm kernsec                                               # interactive TUI on a TTY; auto-falls back to text
 cfm kernsec status                                        # plain-text per-rule audit (alias for `text`)
 cfm kernsec status --check                                # exit 1 on any WARN — for monitoring
+cfm kernsec status --json                                 # machine-readable JSON for fleet aggregation
 cfm kernsec preview                                       # diff: what apply would select, no writes
 cfm kernsec preview --tier 1 --only-apply                 # filter preview to tier 1, hide skipped
 cfm kernsec preview --skip KSEC-MOD-net.legacy-014        # ad-hoc skip override (not persisted)
@@ -312,6 +325,8 @@ cfm kernsec apply --dry-run                               # show what would chan
 cfm kernsec disable                                       # tier=0 + strip managed args; persistent
 cfm kernsec disable --purge                               # also remove /etc/cfm/kernsec.conf and managed files
 cfm kernsec disable --force                               # overwrite a malformed conf (loses overrides)
+cfm kernsec rollback                                      # restore cmdline from .cfm-kernsec.bak and refresh bootloader
+cfm kernsec rollback --dry-run                            # show what would be restored without writing
 cfm kernsec monitor enable [--interval=daily]             # systemd timer that runs apply --check periodically
 cfm kernsec monitor status                                # show timer + last service runs
 ```
@@ -464,6 +479,12 @@ file so the components don't fight.
 | KSEC-SCT-kernel.surface-002 | `kernel.kexec_load_disabled=1` | Prevents unsigned kernel kexec | Skipped if kdump enabled |
 | KSEC-SCT-kernel.surface-003 | `kernel.sysrq=0` (or 4 for SAK only) | Disables magic SysRq | Lose emergency-debug shortcuts |
 
+**Group `sysctl.kernel.coredump`** (Tier 1, kdump-gated)
+
+| ID | Setting | Why | Affects |
+|---|---|---|---|
+| KSEC-SCT-kernel.coredump-001 | `kernel.core_pattern=\|/bin/false` | Pipes core dumps to `/bin/false` — prevents unprivileged processes exploiting CVE-2023-0386-class `core_pattern` injection (writing to a setuid-root process's namespace via a specially crafted core pattern). Skipped when kdump is enabled, because kdump relies on `core_pattern` to invoke its capture helper. | None on hosts without kdump. kdump hosts keep distro default. |
+
 **Group `sysctl.namespace`** (Tier 2, host-profile gated)
 
 | ID | Setting | Why | Affects |
@@ -490,11 +511,20 @@ writes the keys**. Operators tune the actual values via `cfm.conf`'s
 | KSEC-SCT-net.tcp-001 | `net.ipv4.tcp_syncookies=1` | `cfm-sysctl-tweaks` | SYN flood survival |
 | KSEC-SCT-net.ipv6-001 | `net.ipv6.conf.all.accept_redirects=0` | `cfm-sysctl-tweaks` | v6 redirect MitM closure |
 
-Additional design-intent rules (icmp_echo_ignore_broadcasts,
-icmp_ignore_bogus_error_responses, accept_source_route=0,
-log_martians=1, tcp_rfc1337=1, ipv6 accept_ra=0) are not yet shipped
-— sys_tweaks doesn't currently set them. A follow-up either expands
-sys_tweaks's surface to claim them or has kernsec own them directly.
+**Group `sysctl.net.harden`** — kernsec-owned hardening settings not
+covered by `cfm-sysctl-tweaks`. These keys are not in the
+`managedsysctl` registry, so they resolve directly to `Apply` and are
+written to `/etc/sysctl.d/99-cfm-kernsec.conf`.
+
+| ID | Setting | Why | Affects |
+|---|---|---|---|
+| KSEC-SCT-net.harden-001 | `net.ipv4.icmp_echo_ignore_broadcasts=1` | Prevents smurf/broadcast amplification attacks | None |
+| KSEC-SCT-net.harden-002 | `net.ipv4.conf.all.accept_source_route=0` | Source-routing bypass for firewalls | None |
+| KSEC-SCT-net.harden-003 | `net.ipv4.conf.default.accept_source_route=0` | Same for newly-created interfaces | None |
+| KSEC-SCT-net.harden-004 | `net.ipv4.conf.all.log_martians=1` | Logs spoofed / unroutable source addresses | Adds log volume; useful for anomaly detection |
+| KSEC-SCT-net.harden-005 | `net.ipv4.tcp_rfc1337=1` | Drops RSTs in TIME_WAIT (RFC 1337 fix; prevents TCP hijack via RST in closing connections) | None |
+| KSEC-SCT-net.harden-006 | `net.ipv6.conf.all.accept_ra=0` | Disables IPv6 Router Advertisement acceptance; prevents rogue-RA attacks | May interfere with SLAAC on hosts that need IPv6 auto-config via RA; operator overrides per-rule |
+| KSEC-SCT-net.harden-007 | `net.ipv6.conf.default.accept_ra=0` | Same for newly-created interfaces | Same as above |
 
 ### Boot args (extends `kspp.sh`)
 
@@ -502,26 +532,36 @@ sys_tweaks's surface to claim them or has kernsec own them directly.
 `page_alloc.shuffle=1`, `randomize_kstack_offset=on`,
 `initcall_blacklist=algif_aead_init`. `kernsec` adds:
 
+**Group `boot.bug-detection`** (Tier 1, no gate)
+
+| ID | Arg | Why | Affects |
+|---|---|---|---|
+| KSEC-BOOT-bug-detection-001 | `kfence.sample_interval=100` | **SHIPPED.** KFENCE heap safety net: one in 100 allocations is guarded — catches UAF/OOB in production at effectively zero overhead. | None measurable. |
+
+**Group `boot.dma`** (Tier 1, EFI-boot gate)
+
+| ID | Arg | Why | Affects |
+|---|---|---|---|
+| KSEC-BOOT-dma-001 | `efi=disable_early_pci_dma` | **SHIPPED.** Closes the pre-IOMMU DMA window on EFI systems. Skipped on non-EFI (BIOS/legacy) hosts — parameter is EFI-specific and a no-op there. | None on well-behaved hardware. |
+
+**Group `boot.sidechannel`** (Tier 1, no gate)
+
+| ID | Arg | Why | Affects |
+|---|---|---|---|
+| KSEC-BOOT-sidechannel-001 | `tsx=off` | **SHIPPED.** Disables Intel TSX — removes the hardware primitive exploited by TAA (CVE-2019-11135) and MDS variants. Unused by any hosting/KVM workload. | None. Non-Intel CPUs and already-patched Intel microcode ignore it. |
+
+**Group `boot.ssbd`** (Tier 1, no gate)
+
+| ID | Arg | Why | Affects |
+|---|---|---|---|
+| KSEC-BOOT-ssbd-001 | `spec_store_bypass_disable=seccomp` | **SHIPPED.** Spectre v4 / SSBD mitigation for seccomp-sandboxed processes. Distro default `prctl` is opt-in per-process; `seccomp` covers all threads under a seccomp policy (sandboxed web workloads) without the global hit of `on`. | ~1-5% syscall throughput on heavily syscall-bound seccomp workloads. |
+
 **Group `boot.lockdown`** (Tier 2, gated)
 
 | ID | Arg | Why | Affects |
 |---|---|---|---|
-| KSEC-BOOT-lockdown-001 | `lockdown=integrity` | Kernel lockdown LSM, blocks unsigned modules / `/dev/mem` / unsigned kexec | Rarely breaks anything stock |
-| KSEC-BOOT-lockdown-002 | `module.sig_enforce=1` | Only signed modules load | Breaks DKMS (zfs, nvidia). Skipped if DKMS modules detected. |
-
-**Group `boot.bug-detection`**
-
-| ID | Arg | Why | Affects |
-|---|---|---|---|
-| KSEC-BOOT-bug-detection-001 | `kfence.sample_interval=100` | KFENCE catches UAF / OOB at ~0% overhead | None measurable |
-| KSEC-BOOT-bug-detection-002 | `oops=panic` | Pair with `panic_on_oops=1`; stops oops-spray | Aggressive: kernel bug = reboot |
-
-**Group `boot.dma`** (KVM hosts with passthrough — auto-detect)
-
-| ID | Arg | Why | Affects |
-|---|---|---|---|
-| KSEC-BOOT-dma-001 | `iommu=force iommu.strict=1 iommu.passthrough=0` | DMA attack surface containment | Mild perf cost on passthrough |
-| KSEC-BOOT-dma-002 | `efi=disable_early_pci_dma` | Same family, EFI systems | None |
+| KSEC-BOOT-tier2.lockdown-001 | `lockdown=integrity` | Kernel lockdown LSM, blocks unsigned modules / `/dev/mem` / unsigned kexec | Rarely breaks anything stock |
+| KSEC-BOOT-tier2.module-sig-enforce-001 | `module.sig_enforce=1` | Only signed modules load | Breaks DKMS (zfs, nvidia). Skipped if DKMS modules detected. |
 
 **Skipped permanently for hosting**: `init_on_free=1` (perf), `vsyscall=none`
 (compat), `debugfs=off` (perf tools), `mitigations=*,nosmt` (kills capacity).
@@ -555,10 +595,11 @@ to opt back in.
 | Container daemon / shim / socket / nspawn machine | Containers in use — skip userns kill (full probe set: see `defaultContainerProbe()`) |
 | `ip xfrm policy` non-empty | IPsec in use — skip ipsec module group |
 | Out-of-tree module evidence (see below) | Skip `module.sig_enforce` and `lockdown=integrity` |
-| kdump enabled (multi-distro detection) | Skip `kexec_load_disabled` AND `lockdown=integrity` (kexec primitives) |
+| kdump enabled (multi-distro detection) | Skip `kexec_load_disabled` AND `lockdown=integrity` (kexec primitives) AND `kernel.core_pattern` (kdump uses core_pattern for its capture helper) |
 | `/sys/class/bluetooth/*` populated | BT hardware present — skip `modules.bus.bluetooth` group |
 | `/sys/bus/thunderbolt/devices/*` populated | Thunderbolt hardware — skip `modules.bus.thunderbolt` group |
 | NFS mounts active | Don't touch NFS (already excluded by policy) |
+| `/sys/firmware/efi` present (`IsEFIBoot`) | EFI boot — `efi=disable_early_pci_dma` (`boot.dma` group) applies. On non-EFI/BIOS hosts this probe is absent and the rule is skipped as a no-op. |
 
 Out-of-tree-module evidence (any single signal flips `HasDKMS` to
 true, since any of these means `lockdown=integrity` /
@@ -894,17 +935,21 @@ write if the read failed (`drift.BootReadErr != nil`).
   (atomic rename). With the same conf both runs produce the same
   content, so this is benign in practice — just hygiene worth
   closing later. (Phase 5 candidate.)
-- **No `cfm kernsec rollback`.** Restoring the original cmdline from
-  `/etc/default/grub.cfm-kernsec.bak` or `/etc/kernel/cmdline.cfm-kernsec.bak`
-  is a manual operator step today. The `tier = 0` + `apply` workflow
-  is the documented disable path; full byte-perfect restore from the
-  one-shot backup is documented for operators but not automated.
-- **BLS systems have no source-file backup.** ProxmoxBackend and
-  GRUBBackend take a `.cfm-kernsec.bak` of `/etc/kernel/cmdline` and
-  `/etc/default/grub` respectively. The BLS path uses `grubby` which
-  manipulates BLS entry files internally — there's no single source
-  file to back up. Operators on BLS roll back via `grubby` itself.
-  Documented; not a bug.
+- **`cfm kernsec rollback` is now implemented** (`rollback.go`) and
+  wired into the CLI. Backend-specific behaviour: GRUB restores
+  `/etc/default/grub` from `.cfm-kernsec.bak` and re-runs
+  `update-grub`; Proxmox restores `/etc/kernel/cmdline` and runs
+  `proxmox-boot-tool refresh`; BLS replays the pre-apply args snapshot
+  saved in `/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak` (if
+  present) or falls back to stripping all managed args. Operator
+  recovery table updated — see Phase 2.5 section.
+- **BLS pre-apply snapshot is best-effort.** `BLSBackend.WriteCmdline`
+  now calls `grubby --info=DEFAULT` before any write and saves the
+  pre-kernsec non-managed args to
+  `/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak` (one-shot;
+  never overwritten). On hosts where apply was run before this version
+  of cfm, no snapshot exists and `rollback` falls back to
+  stripping managed args only.
 - **`sysctl --load` on a file with no rules does not revert live
   values.** See tier=0 semantics above. Reboot-to-baseline is the
   contract.
@@ -1022,8 +1067,10 @@ When operators reach for what:
 |---|---|
 | Back kernsec off, may re-enable later | `cfm kernsec disable` |
 | Uninstall kernsec configuration entirely | `cfm kernsec disable --purge` |
+| Restore cmdline to pre-kernsec state | `cfm kernsec rollback` (reads `.cfm-kernsec.bak`, rewrites cmdline, refreshes bootloader) |
+| Preview rollback without writing | `cfm kernsec rollback --dry-run` |
 | System won't boot after apply | Edit cmdline at GRUB / systemd-boot rescue, or `proxmox-boot-tool kernel pin <old>` |
-| Restore exact pre-kernsec /etc/default/grub | `cp /etc/default/grub.cfm-kernsec.bak /etc/default/grub && update-grub` |
+| Restore exact pre-kernsec /etc/default/grub manually | `cp /etc/default/grub.cfm-kernsec.bak /etc/default/grub && update-grub` |
 | Fully clean state | `cfm kernsec disable --purge` + reboot |
 
 Implementation: `applyCore` was extracted from `RunApply` to make
@@ -1165,8 +1212,11 @@ sees the full set audited.
   "Out of scope" section under the rollout plan; cfm's own runtime
   triggers `request_module()` long after boot, so a late-systemd
   heuristic can't bracket it safely).
-- Other Tier 2 candidates from earlier brainstorming (`kfence`,
-  `iommu=force`, `efi=disable_early_pci_dma`) deferred until needed.
+- `iommu=force` — deferred; requires broad hardware compatibility
+  testing across vendor BIOS/UEFI.
+- `kfence.sample_interval=100`, `efi=disable_early_pci_dma`, `tsx=off`,
+  `spec_store_bypass_disable=seccomp` — **now shipped** as Tier 1 in
+  `Tier1BootArgsExt` (see Boot args section above).
 
 ### Phase 5 — Drift detection wiring (DONE — branch `kernsec-5`)
 
@@ -1255,9 +1305,12 @@ Out of scope for this Phase 6 PR (deferred):
 - Migrating cfm-firewall to register a Catalog. Reserved
   `OwnerFirewall` constant exists for the future migration.
 - Expanding `KSEC-SCT-net.*` beyond the keys sys_tweaks actually
-  owns today (icmp_echo, accept_source_route, log_martians, etc.).
-  Requires either expanding sys_tweaks's surface or having
-  kernsec own the additional keys directly.
+  owns today — **now shipped** as the new `sysctl.net.harden` group
+  (`KSEC-SCT-net.harden-001` through `-007`): `icmp_echo_ignore_broadcasts`,
+  `accept_source_route=0` (all + default), `log_martians=1`,
+  `tcp_rfc1337=1`, `ipv6 accept_ra=0` (all + default). These keys are
+  not in the `managedsysctl` registry, so kernsec owns and writes them
+  directly (resolves to `Apply`, not `ManagedExternally`).
 
 ---
 

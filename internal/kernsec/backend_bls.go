@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -129,11 +130,44 @@ func unquoteValue(s string) string {
 	return s
 }
 
+// writeBLSSnapshot saves the default kernel's args to BLSBackupPath
+// exactly once (before the first kernsec write), so `cfm kernsec
+// rollback` can replay the pre-kernsec cmdline on BLS hosts.
+func (b *BLSBackend) writeBLSSnapshot() error {
+	// Already snapshotted — honour the one-shot guarantee.
+	if _, err := os.Stat(BLSBackupPath); err == nil {
+		return nil
+	}
+	out, err := b.FS.RunCapture("grubby", "--info=DEFAULT")
+	if err != nil {
+		// Non-fatal: snapshot is best-effort. The apply still proceeds;
+		// rollback will fall back to managed-args-strip mode.
+		return nil
+	}
+	entries := parseGrubbyAll(out)
+	var savedArgs string
+	if len(entries) > 0 {
+		// Strip managed args from the snapshot: we want the pre-kernsec
+		// non-managed args, not the managed args that may already be
+		// present from a previous partial apply or manual edit.
+		clean := RemoveManagedArgs(ParseCmdline(entries[0].Args))
+		savedArgs = strings.Join(clean, " ")
+	}
+	if err := AtomicWriteFile(BLSBackupPath, []byte(savedArgs), 0o644); err != nil {
+		// Best-effort; non-fatal.
+		return nil
+	}
+	return nil
+}
+
 // WriteCmdline runs a single `grubby --update-kernel=...` invocation
 // that combines `--remove-args` (stripping every managed-keys token)
 // with `--args=` (the desired set). grubby applies removes before adds
 // within a single call, closing the window where every kernel sat
 // stripped of managed args between the previous two-call sequence.
+//
+// Before writing, a one-shot snapshot of the default kernel's pre-kernsec
+// args is saved to BLSBackupPath so `cfm kernsec rollback` can recover.
 //
 // SAFETY (Phase 6 audit C4): the previous code used
 // `--update-kernel=ALL` which DOES include `vmlinuz-*-rescue-*` and
@@ -148,6 +182,10 @@ func unquoteValue(s string) string {
 // grubby commits to the active BLS entries immediately, so Refresh()
 // is a no-op on this backend.
 func (b *BLSBackend) WriteCmdline(args []BootArg) error {
+	// Best-effort pre-apply snapshot for rollback — non-fatal if it
+	// fails (write proceeds regardless).
+	_ = b.writeBLSSnapshot()
+
 	out, err := b.FS.RunCapture("grubby", "--info=ALL")
 	if err != nil {
 		return fmt.Errorf("grubby --info=ALL: %v: %s", err, strings.TrimSpace(out))

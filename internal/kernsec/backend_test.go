@@ -324,7 +324,15 @@ args="ro crashkernel=auto"
 `
 
 func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
+	// Redirect the BLS backup path to a temp dir so the snapshot
+	// does not write to the real filesystem and the "already exists"
+	// short-circuit does not hide the grubby --info=DEFAULT call.
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
 	fs := newFakeFS().
+		withCmd("grubby --info=DEFAULT", blsInfoAllSingleNonRescue).
 		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd(
 			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " ")+
@@ -338,12 +346,12 @@ func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Expect 2 grubby invocations now: --info=ALL (enumerate),
+	// Expect 3 grubby invocations: --info=DEFAULT (snapshot), --info=ALL (enumerate),
 	// then the explicit --update-kernel=<path> write.
-	if len(fs.cmdLog) != 2 {
-		t.Fatalf("expected 2 grubby invocations (info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 3 {
+		t.Fatalf("expected 3 grubby invocations (snapshot + info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	got := fs.cmdLog[1]
+	got := fs.cmdLog[2]
 	if !strings.Contains(got, "--remove-args=") {
 		t.Errorf("expected --remove-args in update call, got: %q", got)
 	}
@@ -360,7 +368,12 @@ func TestBLSBackend_WriteCmdline_EmptyArgsNoAddFlag(t *testing.T) {
 	// remove call (in a single grubby invocation), but must not pass
 	// an empty --args= flag (grubby treats --args="" as a no-op anyway,
 	// but the omission keeps the command line cleaner).
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
 	fs := newFakeFS().
+		withCmd("grubby --info=DEFAULT", blsInfoAllSingleNonRescue).
 		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd(
 			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " "),
@@ -370,11 +383,11 @@ func TestBLSBackend_WriteCmdline_EmptyArgsNoAddFlag(t *testing.T) {
 	if err := b.WriteCmdline(nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(fs.cmdLog) != 2 {
-		t.Fatalf("expected 2 grubby calls (info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 3 {
+		t.Fatalf("expected 3 grubby calls (snapshot + info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	if strings.Contains(fs.cmdLog[1], "--args=") {
-		t.Errorf("expected no --args= flag for empty arg set, got: %q", fs.cmdLog[1])
+	if strings.Contains(fs.cmdLog[2], "--args=") {
+		t.Errorf("expected no --args= flag for empty arg set, got: %q", fs.cmdLog[2])
 	}
 }
 
@@ -385,6 +398,10 @@ func TestBLSBackend_WriteCmdline_ExcludesRescueAndDebugKernels(t *testing.T) {
 	// --info=ALL fixture with one regular kernel + one rescue +
 	// one debug, run WriteCmdline, assert the --update-kernel
 	// list contains ONLY the regular kernel.
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
 	const infoAll = `index=0
 kernel="/boot/vmlinuz-6.1.0"
 args="ro"
@@ -400,16 +417,17 @@ args="ro"
 	expectedUpdate := "grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args=" +
 		strings.Join(ManagedBootArgKeys, " ") + " --args=slab_nomerge"
 	fs := newFakeFS().
+		withCmd("grubby --info=DEFAULT", infoAll).
 		withCmd("grubby --info=ALL", infoAll).
 		withCmd(expectedUpdate, "")
 	b := &BLSBackend{FS: fs}
 	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fs.cmdLog) != 2 {
-		t.Fatalf("expected 2 calls, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 3 {
+		t.Fatalf("expected 3 calls, got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	updateCall := fs.cmdLog[1]
+	updateCall := fs.cmdLog[2]
 	if strings.Contains(updateCall, "rescue") {
 		t.Errorf("rescue kernel must NOT appear in update call: %q", updateCall)
 	}
@@ -430,17 +448,25 @@ func TestBLSBackend_WriteCmdline_NoTargetableKernels(t *testing.T) {
 	// zero kernels (fresh chroot install). WriteCmdline must skip
 	// gracefully rather than confuse grubby with --update-kernel=
 	// (empty argv).
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
 	const onlyRescue = `index=0
 kernel="/boot/vmlinuz-0-rescue-abc"
 args="ro"
 `
-	fs := newFakeFS().withCmd("grubby --info=ALL", onlyRescue)
+	fs := newFakeFS().
+		withCmd("grubby --info=DEFAULT", onlyRescue).
+		withCmd("grubby --info=ALL", onlyRescue)
 	b := &BLSBackend{FS: fs}
 	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
 		t.Fatalf("write should skip cleanly when only rescue kernels exist: %v", err)
 	}
-	if len(fs.cmdLog) != 1 {
-		t.Errorf("expected only the info call (no update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	// Expect 2 calls: snapshot (--info=DEFAULT) + enumerate (--info=ALL).
+	// No update call since there are no targetable kernels.
+	if len(fs.cmdLog) != 2 {
+		t.Errorf("expected only snapshot+info calls (no update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
 }
 
