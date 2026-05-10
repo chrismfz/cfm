@@ -59,11 +59,31 @@ func (g *GRUBBackend) NextBootCmdline() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	linuxArgs, err := readGrubCmdlineVar(string(b), "GRUB_CMDLINE_LINUX")
+	return readGrubEffectiveCmdline(string(b))
+}
+
+// readGrubCmdlineLinux returns only GRUB_CMDLINE_LINUX. WriteCmdline uses
+// this narrow read path so GRUB_CMDLINE_LINUX_DEFAULT remains an operator-
+// owned input: its tokens are visible through NextBootCmdline, but are not
+// copied into the kernsec-managed GRUB_CMDLINE_LINUX rewrite.
+func readGrubCmdlineLinux(content string) (string, error) {
+	return readGrubCmdlineVar(content, "GRUB_CMDLINE_LINUX")
+}
+
+// readGrubCmdlineLinuxDefault returns only GRUB_CMDLINE_LINUX_DEFAULT.
+func readGrubCmdlineLinuxDefault(content string) (string, error) {
+	return readGrubCmdlineVar(content, "GRUB_CMDLINE_LINUX_DEFAULT")
+}
+
+// readGrubEffectiveCmdline returns the union that GRUB will use on the next
+// boot. Drift/status call through NextBootCmdline and therefore still show
+// managed args an operator manually placed in GRUB_CMDLINE_LINUX_DEFAULT.
+func readGrubEffectiveCmdline(content string) (string, error) {
+	linuxArgs, err := readGrubCmdlineLinux(content)
 	if err != nil {
 		return "", err
 	}
-	defaultArgs, err := readGrubCmdlineVar(string(b), "GRUB_CMDLINE_LINUX_DEFAULT")
+	defaultArgs, err := readGrubCmdlineLinuxDefault(content)
 	if err != nil {
 		return "", err
 	}
@@ -226,15 +246,17 @@ func (g *GRUBBackend) WriteCmdline(args []BootArg) error {
 	if err != nil {
 		return err
 	}
-	current, err := g.NextBootCmdline()
+	currentLinux, err := readGrubCmdlineLinux(string(b))
 	if err != nil {
 		// Surface the read failure rather than silently treating
 		// "couldn't read" as "empty cmdline" — that path leads to
 		// writing a cmdline containing only managed args (i.e.
-		// dropping root=, ro, console=, etc).
-		return fmt.Errorf("read current cmdline: %w", err)
+		// dropping root=, ro, console=, etc). Read only _LINUX here:
+		// _DEFAULT is part of the effective next-boot view, but is not
+		// owned by kernsec's GRUB writer.
+		return fmt.Errorf("read current GRUB_CMDLINE_LINUX: %w", err)
 	}
-	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
+	tokens := rebuildManagedCmdline(ParseCmdline(currentLinux), args)
 	newLine := strings.Join(tokens, " ")
 	encoded, err := encodeGrubCmdlineValue(newLine)
 	if err != nil {
