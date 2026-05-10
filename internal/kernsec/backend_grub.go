@@ -256,26 +256,41 @@ func (g *GRUBBackend) WriteCmdline(args []BootArg) error {
 // grub2-mkconfig / grub-mkconfig with the right output path. Mirrors
 // kspp.sh update_grub_cfg.
 func (g *GRUBBackend) Refresh() error {
-	if g.FS.LookPath("update-grub") {
-		if out, err := g.FS.RunCapture("update-grub"); err != nil {
-			return fmt.Errorf("update-grub: %v: %s", err, strings.TrimSpace(out))
-		}
-		return nil
+	name, args, err := g.refreshCommand()
+	if err != nil {
+		return err
 	}
-	cfg := g.findGrubCfgPath()
-	if cfg == "" {
-		return fmt.Errorf("could not determine GRUB config output path")
+	if out, err := g.FS.RunCapture(name, args...); err != nil {
+		return fmt.Errorf("%s: %v: %s", grubRefreshDisplay(name, args), err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// refreshCommand returns the GRUB config generator command and argv.
+// update-grub is intentionally returned with no arguments. The mkconfig
+// variants require an explicit -o path selected by findGrubCfgPath.
+func (g *GRUBBackend) refreshCommand() (string, []string, error) {
+	if g.FS.LookPath("update-grub") {
+		return "update-grub", nil, nil
 	}
 	for _, name := range []string{"grub2-mkconfig", "grub-mkconfig"} {
 		if !g.FS.LookPath(name) {
 			continue
 		}
-		if out, err := g.FS.RunCapture(name, "-o", cfg); err != nil {
-			return fmt.Errorf("%s -o %s: %v: %s", name, cfg, err, strings.TrimSpace(out))
+		cfg := g.findGrubCfgPath()
+		if cfg == "" {
+			return "", nil, fmt.Errorf("could not determine GRUB config output path")
 		}
-		return nil
+		return name, []string{"-o", cfg}, nil
 	}
-	return fmt.Errorf("no GRUB config generator found (update-grub / grub2-mkconfig / grub-mkconfig)")
+	return "", nil, fmt.Errorf("no GRUB config generator found (update-grub / grub2-mkconfig / grub-mkconfig)")
+}
+
+func grubRefreshDisplay(name string, args []string) string {
+	if len(args) == 0 {
+		return name
+	}
+	return name + " " + strings.Join(args, " ")
 }
 
 // findGrubCfgPath picks the most plausible grub.cfg output path.

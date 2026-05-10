@@ -150,3 +150,49 @@ func TestWriteBLSSnapshotSavesOnlyPerKernelManagedTokens(t *testing.T) {
 		t.Fatalf("unexpected managed snapshot for second kernel: %q", got)
 	}
 }
+
+func TestGRUBRefreshCommand_UpdateGrubHasNoArgs(t *testing.T) {
+	fs := newFakeFS().withBin("update-grub")
+	b := &GRUBBackend{FS: fs}
+
+	name, args, err := b.refreshCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "update-grub" {
+		t.Fatalf("refresh command = %q, want update-grub", name)
+	}
+	if len(args) != 0 {
+		t.Fatalf("update-grub must be called with no arguments, got: %v", args)
+	}
+}
+
+func TestRollbackGRUB_Grub2MkconfigUsesDetectedOutputPath(t *testing.T) {
+	grub := redirectGrubPath(t)
+	if err := os.WriteFile(grub+BackupSuffix, []byte("GRUB_CMDLINE_LINUX=\"ro\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := newFakeFS().
+		withBin("grub2-mkconfig").
+		withDir("/boot/grub2").
+		withCmd("grub2-mkconfig -o /boot/grub2/grub.cfg", "")
+
+	var out bytes.Buffer
+	if rc := rollbackGRUB(&out, false, fs); rc != 0 {
+		t.Fatalf("rollbackGRUB rc=%d, output:\n%s", rc, out.String())
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Fatalf("expected one grub refresh command, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+	if got, want := fs.cmdLog[0], "grub2-mkconfig -o /boot/grub2/grub.cfg"; got != want {
+		t.Fatalf("rollbackGRUB refresh command = %q, want %q", got, want)
+	}
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "GRUB_CMDLINE_LINUX=\"ro\"\n" {
+		t.Fatalf("restored grub content = %q", string(data))
+	}
+}

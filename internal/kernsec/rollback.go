@@ -21,7 +21,7 @@ var BLSBackupPath = "/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak"
 // Per-backend behaviour:
 //
 //   - Legacy GRUB: reads /etc/default/grub.cfm-kernsec.bak → restores
-//     /etc/default/grub → runs update-grub.
+//     /etc/default/grub → regenerates grub.cfg with the available GRUB tool.
 //   - Proxmox: reads /etc/kernel/cmdline.cfm-kernsec.bak → restores
 //     /etc/kernel/cmdline → runs proxmox-boot-tool refresh.
 //   - BLS / grubby: strips all managed args from every non-rescue kernel.
@@ -51,8 +51,7 @@ func RunRollback(w io.Writer, dryRun bool) int {
 	rc := 0
 	switch be := backend.(type) {
 	case *GRUBBackend:
-		rc = rollbackGRUB(w, dryRun)
-		_ = be
+		rc = rollbackGRUB(w, dryRun, be.FS)
 	case *ProxmoxBackend:
 		rc = rollbackProxmox(w, dryRun)
 		_ = be
@@ -85,8 +84,8 @@ func RunRollback(w io.Writer, dryRun bool) int {
 }
 
 // rollbackGRUB restores /etc/default/grub from its .cfm-kernsec.bak
-// and regenerates grub.cfg via update-grub / grub2-mkconfig.
-func rollbackGRUB(w io.Writer, dryRun bool) int {
+// and regenerates grub.cfg via update-grub / grub2-mkconfig / grub-mkconfig.
+func rollbackGRUB(w io.Writer, dryRun bool, fs FS) int {
 	bak := PathDefaultGrub + BackupSuffix
 	if _, err := os.Stat(bak); os.IsNotExist(err) {
 		fmt.Fprintf(w, "[!] No backup found at %s\n", bak)
@@ -111,19 +110,19 @@ func rollbackGRUB(w io.Writer, dryRun bool) int {
 	}
 	fmt.Fprintf(w, "[Boot] restored %s\n", PathDefaultGrub)
 
-	fs := RealFS{}
-	grubRefresh := grubRefreshCmd(fs)
-	if grubRefresh == "" {
-		fmt.Fprintln(w, "[!] no grub config generator found (tried update-grub, grub2-mkconfig, grub-mkconfig)")
+	grub := &GRUBBackend{FS: fs}
+	grubRefresh, grubRefreshArgs, err := grub.refreshCommand()
+	if err != nil {
+		fmt.Fprintf(w, "[!] %v\n", err)
 		fmt.Fprintln(w, "    run the appropriate command manually to regenerate grub.cfg")
 		return 1
 	}
-	out, err := fs.RunCapture(grubRefresh)
+	out, err := fs.RunCapture(grubRefresh, grubRefreshArgs...)
 	if err != nil {
-		fmt.Fprintf(w, "[!] %s: %v: %s\n", grubRefresh, err, out)
+		fmt.Fprintf(w, "[!] %s: %v: %s\n", grubRefreshDisplay(grubRefresh, grubRefreshArgs), err, out)
 		return 1
 	}
-	fmt.Fprintf(w, "[Boot] ran %s — grub.cfg regenerated.\n", grubRefresh)
+	fmt.Fprintf(w, "[Boot] ran %s — grub.cfg regenerated.\n", grubRefreshDisplay(grubRefresh, grubRefreshArgs))
 	return 0
 }
 
@@ -269,18 +268,6 @@ func removeManagedSysctlFile(w io.Writer, dryRun bool) error {
 	}
 	fmt.Fprintf(w, "[Sysctl] removed %s.\n", SysctlPath)
 	return nil
-}
-
-// grubRefreshCmd returns the name of the grub config generator
-// present on this host (update-grub, grub2-mkconfig, grub-mkconfig),
-// or "" if none is found.
-func grubRefreshCmd(fs FS) string {
-	for _, cmd := range []string{"update-grub", "grub2-mkconfig", "grub-mkconfig"} {
-		if fs.LookPath(cmd) {
-			return cmd
-		}
-	}
-	return ""
 }
 
 func joinKeys(keys []string, sep string) string {
