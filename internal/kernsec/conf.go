@@ -113,6 +113,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 	var (
 		currentRule string // non-empty when inside a [rule "..."] stanza
 		lineno      int
+		seenRules   = map[string]int{} // rule ID -> line number of first occurrence
 	)
 
 	for scanner.Scan() {
@@ -128,6 +129,15 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineno, err)
 			}
+			// Reject duplicate stanzas explicitly. Previously the
+			// second definition silently overwrote the first;
+			// operators with conflict-merge artifacts in their conf
+			// got the LAST stanza's behaviour with no warning.
+			if firstLine, ok := seenRules[id]; ok {
+				return nil, fmt.Errorf("line %d: duplicate rule section %q (first at line %d)",
+					lineno, id, firstLine)
+			}
+			seenRules[id] = lineno
 			currentRule = id
 			continue
 		}

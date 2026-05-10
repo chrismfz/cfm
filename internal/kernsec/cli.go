@@ -1,12 +1,31 @@
 package kernsec
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 )
+
+// handleFlagErr maps a flag.Parse error to a CLI exit code, printing
+// either operator-facing help (-h / --help → ErrHelp; usage to stdout
+// w, exit 0) or a parse error followed by usage (to stderr, exit 2).
+// Returns (rc, true) if Parse failed and the caller should propagate
+// rc; (0, false) when Parse succeeded.
+func handleFlagErr(name string, err error, w io.Writer) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		printUsage(w)
+		return 0, true
+	}
+	fmt.Fprintln(os.Stderr, name+":", err)
+	printUsage(os.Stderr)
+	return 2, true
+}
 
 // RunCLI is the entry point invoked from cmd/cfm/main.go.
 //
@@ -80,10 +99,8 @@ func runText(args []string, w io.Writer) int {
 	skipAFAlg := fs.Bool("skip-af-alg", false, "skip AF_ALG bind probes")
 	checkExit := fs.Bool("check", false, "exit non-zero on any WARN (for monitoring)")
 
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "kernsec:", err)
-		printUsage(os.Stderr)
-		return 2
+	if rc, done := handleFlagErr("kernsec", fs.Parse(args), w); done {
+		return rc
 	}
 	res := RunStatus(w, StatusOptions{SkipAFAlg: *skipAFAlg})
 	if *checkExit && !res.OK {
@@ -97,28 +114,34 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	onlyApply := fs.Bool("only-apply", false, "hide rules that would be skipped")
 	group := fs.String("group", "", "filter by group prefix (e.g. modules.net.legacy)")
-	tier := fs.Int("tier", 0, "max tier filter (1 or 2; 0 = no filter)")
+	tier := fs.Int("tier", -1, "override conf.Tier for this preview (0|1|2; default: honor conf)")
 	ids := fs.String("id", "", "comma-separated rule IDs to include")
 	skip := fs.String("skip", "", "comma-separated rule IDs to ad-hoc skip (not persisted)")
 	force := fs.String("force-id", "", "comma-separated rule IDs to ad-hoc force (not persisted)")
 
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "kernsec preview:", err)
-		printUsage(os.Stderr)
-		return 2
+	if rc, done := handleFlagErr("kernsec preview", fs.Parse(args), w); done {
+		return rc
 	}
-	if *tier < 0 || *tier > 2 {
+	if *tier < -1 || *tier > 2 {
 		fmt.Fprintln(os.Stderr, "kernsec preview: --tier must be 0, 1, or 2")
 		return 2
 	}
-	return RunPreview(w, PreviewOptions{
+	// Sentinel: -1 means "operator did not pass --tier"; PreviewOptions
+	// signals this by leaving Tier at the zero value of a sentinel
+	// distinct from the legitimate value 0. We use a TierOverride bool
+	// to disambiguate without changing the int type on the option.
+	po := PreviewOptions{
 		OnlyApply: *onlyApply,
 		Group:     *group,
-		Tier:      Tier(*tier),
 		IDs:       splitCSV(*ids),
 		Skips:     splitCSV(*skip),
 		Forces:    splitCSV(*force),
-	})
+	}
+	if *tier >= 0 {
+		po.Tier = Tier(*tier)
+		po.TierOverride = true
+	}
+	return RunPreview(w, po)
 }
 
 func runApplyCmd(args []string, w io.Writer) int {
@@ -128,10 +151,8 @@ func runApplyCmd(args []string, w io.Writer) int {
 	check := fs.Bool("check", false, "exit non-zero on drift; implies no writes (for monitoring)")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step (proxmox-boot-tool / update-grub)")
 
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "kernsec apply:", err)
-		printUsage(os.Stderr)
-		return 2
+	if rc, done := handleFlagErr("kernsec apply", fs.Parse(args), w); done {
+		return rc
 	}
 	return RunApply(w, ApplyOptions{
 		DryRun:    *dryRun,
@@ -153,10 +174,8 @@ func runMonitorCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	interval := fs.String("interval", "", "systemd OnCalendar expression (default \"daily\")")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing or running systemctl")
-	if err := fs.Parse(rest); err != nil {
-		fmt.Fprintln(os.Stderr, "kernsec monitor:", err)
-		printUsage(os.Stderr)
-		return 2
+	if rc, done := handleFlagErr("kernsec monitor", fs.Parse(rest), w); done {
+		return rc
 	}
 	return RunMonitor(w, MonitorOptions{
 		Action:   action,
@@ -173,10 +192,8 @@ func runDisableCmd(args []string, w io.Writer) int {
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step")
 	force := fs.Bool("force", false, "proceed even if the existing kernsec.conf is malformed or unreadable (overrides will be lost)")
 
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "kernsec disable:", err)
-		printUsage(os.Stderr)
-		return 2
+	if rc, done := handleFlagErr("kernsec disable", fs.Parse(args), w); done {
+		return rc
 	}
 	return RunDisable(w, DisableOptions{
 		Purge:     *purge,
@@ -222,7 +239,7 @@ Status / text flags:
 Preview flags:
   --only-apply        Hide skipped rules
   --group <prefix>    Filter by group prefix (e.g. modules.net.legacy)
-  --tier <0|1|2>      Max tier filter
+  --tier <0|1|2>      Override conf.Tier for this preview (0 renders every rule as OFF; 1 hides Tier 2; 2 shows all)
   --id  <ids>         Comma-separated rule IDs to include
   --skip <ids>        Comma-separated ad-hoc skip overrides (not persisted)
   --force-id <ids>    Comma-separated ad-hoc force overrides (not persisted)

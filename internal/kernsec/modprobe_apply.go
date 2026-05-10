@@ -3,9 +3,11 @@ package kernsec
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ModprobePath is where kernsec persists the module blacklist.
@@ -52,10 +54,17 @@ func RenderModprobeFile(rules []ModuleRule) []byte {
 }
 
 // WriteModprobeFile writes the rendered modprobe content to
-// ModprobePath atomically, taking a one-shot backup of any prior
-// version first.
-func WriteModprobeFile(content []byte) error {
+// ModprobePath atomically. Same two-tier backup as WriteSysctlFile:
+// one-shot `.cfm-kernsec.bak` of the first version seen, plus a
+// per-run timestamped backup whenever operator edits are detected.
+//
+// w is the writer used for the unmanaged-line warning. Pass io.Discard
+// when warnings shouldn't surface (tests, programmatic callers).
+func WriteModprobeFile(w io.Writer, content []byte) error {
 	if err := BackupOnce(ModprobePath, ModprobePath+BackupSuffix); err != nil {
+		return err
+	}
+	if _, err := preserveAndWarnOnExtras(w, ModprobePath, content, "modprobe drop-in"); err != nil {
 		return err
 	}
 	return AtomicWriteFile(ModprobePath, content, 0o644)
@@ -95,8 +104,13 @@ func ParseManagedBlacklist() map[string]struct{} {
 
 // ModulePresentOnKernel reports whether the kernel build supplies the
 // named module — i.e. whether <name>.ko or <name>.ko.xz is present
-// under /lib/modules/$(uname -r). Cheap glob; cached implicitly by
-// the OS dentry cache.
+// under /lib/modules/$(uname -r).
+//
+// O(1) lookup against a per-process cache built once on first call by
+// walking /lib/modules/<rel> exactly once. Previously this walked the
+// full tree per module: with ~70 module rules and a typical
+// /lib/modules tree of ~5000 entries that was ~350K stat() calls per
+// audit pass; now it's ~5000 once and a map lookup thereafter.
 //
 // Returns false on any error (kernel without /lib/modules entry,
 // permission, etc.). Treating "unknown" as "not present" produces
@@ -104,28 +118,55 @@ func ParseManagedBlacklist() map[string]struct{} {
 // prove the module is reachable, so it can't promise blacklisting it
 // matters here.
 func ModulePresentOnKernel(name string) bool {
-	rel := unameRelease()
-	if rel == "" {
+	cache := loadModuleFileCache()
+	if cache == nil {
 		return false
 	}
-	root := filepath.Join("/lib/modules", rel)
 	for _, suffix := range []string{".ko", ".ko.xz", ".ko.zst", ".ko.gz"} {
-		matches, _ := filepath.Glob(filepath.Join(root, "**", name+suffix))
-		if len(matches) > 0 {
-			return true
-		}
-		// Glob doesn't recurse with **; fall back to a Walk for the
-		// modules tree. Cap depth at the kernel module conventions
-		// (drivers/<subsys>/<name>.ko etc).
-		if found := walkModuleFile(root, name+suffix); found {
+		if _, ok := cache[name+suffix]; ok {
 			return true
 		}
 	}
 	return false
 }
 
-func walkModuleFile(root, leaf string) bool {
-	found := false
+var (
+	moduleFileCacheOnce sync.Once
+	moduleFileCacheVal  map[string]struct{}
+)
+
+// loadModuleFileCache walks /lib/modules/<release> once per process
+// and returns the set of basenames found under it. nil on any error
+// (no /lib/modules tree, permission, missing release).
+//
+// Exported indirectly via ResetModuleFileCache so tests can rebuild
+// the cache against a fixture path.
+func loadModuleFileCache() map[string]struct{} {
+	moduleFileCacheOnce.Do(func() {
+		moduleFileCacheVal = buildModuleFileCache()
+	})
+	return moduleFileCacheVal
+}
+
+// moduleFileCacheRoot is the root of the module tree to walk; var so
+// tests can redirect to a fixture without a real /lib/modules layout.
+var moduleFileCacheRoot = func() string {
+	rel := unameRelease()
+	if rel == "" {
+		return ""
+	}
+	return filepath.Join("/lib/modules", rel)
+}
+
+// buildModuleFileCache walks moduleFileCacheRoot() once and returns
+// the set of basenames it finds. Returns nil when the root is empty
+// or unreadable.
+func buildModuleFileCache() map[string]struct{} {
+	root := moduleFileCacheRoot()
+	if root == "" {
+		return nil
+	}
+	out := map[string]struct{}{}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -133,13 +174,21 @@ func walkModuleFile(root, leaf string) bool {
 		if d.IsDir() {
 			return nil
 		}
-		if d.Name() == leaf {
-			found = true
-			return filepath.SkipAll
-		}
+		out[d.Name()] = struct{}{}
 		return nil
 	})
-	return found
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ResetModuleFileCache forces the next loadModuleFileCache call to
+// rebuild from disk. Test-only: allows redirecting moduleFileCacheRoot
+// and re-populating the cache against a fixture tree.
+func ResetModuleFileCache() {
+	moduleFileCacheOnce = sync.Once{}
+	moduleFileCacheVal = nil
 }
 
 // LoadedModules returns the set of module names currently in

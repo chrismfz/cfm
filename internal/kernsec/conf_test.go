@@ -198,6 +198,34 @@ func TestRuleOverrideString(t *testing.T) {
 	}
 }
 
+func TestParseConf_RejectsDuplicateRuleSection(t *testing.T) {
+	// A merge artifact or hand-edit can produce two `[rule "X"]`
+	// stanzas for the same ID. Previously the second silently
+	// overwrote the first; now it's a parse error naming both lines.
+	conf := `tier = 1
+
+[rule "KSEC-MOD-net.legacy-001"]
+state = skip
+
+[rule "KSEC-MOD-net.legacy-001"]
+state = force
+`
+	_, err := ParseConf(strings.NewReader(conf))
+	if err == nil {
+		t.Fatal("expected duplicate-section error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "duplicate rule section") {
+		t.Errorf("error should mention duplicate-section: %v", err)
+	}
+	if !strings.Contains(msg, "KSEC-MOD-net.legacy-001") {
+		t.Errorf("error should name the rule ID: %v", err)
+	}
+	if !strings.Contains(msg, "first at line") {
+		t.Errorf("error should reference the first occurrence line: %v", err)
+	}
+}
+
 func TestAllRuleIDs_CoversEveryRegistry(t *testing.T) {
 	ids := AllRuleIDs()
 	// Spot-check at least one ID from each registry is present.

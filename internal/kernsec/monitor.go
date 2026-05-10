@@ -194,9 +194,25 @@ func monitorRemove(w io.Writer, opts MonitorOptions) int {
 		return 0
 	}
 
-	// Best-effort stop/disable — ignore failures from non-existent
-	// unit since remove is meant to be idempotent.
-	if err := systemctl("disable", "--now", MonitorUnitName+".timer"); err == nil {
+	// Stop + disable. Idempotent on hosts where the timer was never
+	// installed; on hosts where it WAS installed, surface real
+	// failures so the operator can investigate inconsistent systemd
+	// state — but proceed with file removal regardless. Operator
+	// invoked `remove` and wants the files gone; orphan files are
+	// worse than transient orphan systemd state, which the
+	// daemon-reload at the end will reconcile.
+	timerInstalled := false
+	if _, err := os.Stat(MonitorTimerPath); err == nil {
+		timerInstalled = true
+	}
+	if err := systemctl("disable", "--now", MonitorUnitName+".timer"); err != nil {
+		if timerInstalled {
+			fmt.Fprintf(w, "[!] systemctl disable %s.timer: %v — proceeding with file removal\n",
+				MonitorUnitName, err)
+		}
+		// If the timer file wasn't installed, the disable error is
+		// expected ("Unit ... does not exist") — don't pollute output.
+	} else {
 		fmt.Fprintf(w, "stopped and disabled %s.timer\n", MonitorUnitName)
 	}
 
