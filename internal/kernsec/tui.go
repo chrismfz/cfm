@@ -199,7 +199,7 @@ func RunTUI() (switchToText bool, err error) {
 			return
 		}
 		if showHelp {
-			footer.Text = "[help](fg:cyan,mod:bold)  Phase 1 audit-only.  e/d are stubs until Phase 3.  Press [?](fg:cyan) to dismiss."
+			footer.Text = "[help](fg:cyan,mod:bold)  Audit-only TUI. Run [cfm kernsec apply](fg:cyan)/[disable](fg:cyan) from the shell to mutate state. Press [?](fg:cyan) to dismiss."
 			return
 		}
 		if statusMsg != "" && time.Now().Before(statusUntil) {
@@ -305,10 +305,10 @@ func RunTUI() (switchToText bool, err error) {
 			case "t":
 				return true, nil
 			case "e":
-				flash("enable lands in Phase 3 — see docs/kernsec.md")
+				flash("press 't' for text mode, then run `cfm kernsec apply` from the shell")
 				render()
 			case "d":
-				flash("disable lands in Phase 3 — see docs/kernsec.md")
+				flash("press 't' for text mode, then run `cfm kernsec disable` from the shell")
 				render()
 			case "/":
 				filterEditing = true

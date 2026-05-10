@@ -18,9 +18,10 @@ import (
 //	cfm kernsec status           -> alias for "text" (also supports --check)
 //	cfm kernsec preview          -> read-only diff: what apply would select
 //	cfm kernsec init             -> write default tier=1 kernsec.conf
+//	cfm kernsec apply            -> render + write managed files; sysctl --load + bootloader refresh
+//	cfm kernsec disable          -> tier=0 + strip managed args (--purge for full uninstall)
+//	cfm kernsec monitor <action> -> manage the periodic drift-check systemd timer
 //	cfm kernsec help / -h        -> usage
-//
-// apply / disable land in Phase 2b (next pass).
 func RunCLI(args []string) int {
 	if len(args) == 0 {
 		return runDefault(os.Stdout)
@@ -235,6 +236,7 @@ Disable flags:
   --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
   --dry-run           Show what would happen without writing
   --no-refresh        Skip the bootloader refresh step
+  --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
 
 Monitor subcommands:
   cfm kernsec monitor enable [--interval=daily]   install + enable systemd timer
@@ -249,8 +251,9 @@ TUI keys:
   PgUp / PgDn         Page
   r                   Re-run audit
   t                   Drop to text mode
-  e / d               (Phase 3 — enable / disable, not yet implemented)
-  /                   Filter (Phase 2 — TBD)
+  /                   Filter rows by substring (display, group, or rule ID)
+  c                   Clear active filter
+  e / d               Hint keys — flash a pointer to `+"`cfm kernsec apply`"+` / `+"`disable`"+` (TUI write-mode is intentionally not implemented)
   ?                   Toggle help
 
 See docs/kernsec.md for the full design.`)
