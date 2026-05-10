@@ -268,20 +268,30 @@ Examples:
 - `KSEC-BOOT-kspp-002`       — `init_on_alloc=1`
 - `KSEC-FS-mount.tmp-001`    — audit `nodev,nosuid,noexec` on `/tmp`
 
-CLI selectors:
+CLI surface as shipped:
 
 ```
-cfm kernsec status                                        # tri-state per rule
-cfm kernsec preview enable --tier 1                       # diff, no writes
-cfm kernsec enable  --tier 1
-cfm kernsec enable  --tier 1 --skip KSEC-MOD-net.legacy-014
-cfm kernsec enable  --group mem.exploit
-cfm kernsec disable --id KSEC-SCT-net.icmp-003
-cfm kernsec audit                                         # adds: loaded-but-blacklisted, fstab gaps, AF_ALG probe, userns probe
+cfm kernsec                                               # interactive TUI on a TTY; auto-falls back to text
+cfm kernsec status                                        # plain-text per-rule audit (alias for `text`)
+cfm kernsec status --check                                # exit 1 on any WARN — for monitoring
+cfm kernsec preview                                       # diff: what apply would select, no writes
+cfm kernsec preview --tier 1 --only-apply                 # filter preview to tier 1, hide skipped
+cfm kernsec preview --skip KSEC-MOD-net.legacy-014        # ad-hoc skip override (not persisted)
+cfm kernsec preview --force-id KSEC-SCT-tier2.namespace-001  # ad-hoc force override (not persisted)
+cfm kernsec init                                          # write default tier=1 /etc/cfm/kernsec.conf if absent
+cfm kernsec apply                                         # render + write managed files; sysctl --load + bootloader refresh
+cfm kernsec apply --check                                 # exit 0 (sync) / 1 (drift) / 2 (indeterminate)
+cfm kernsec apply --dry-run                               # show what would change, no writes
+cfm kernsec disable                                       # tier=0 + strip managed args; persistent
+cfm kernsec disable --purge                               # also remove /etc/cfm/kernsec.conf and managed files
+cfm kernsec disable --force                               # overwrite a malformed conf (loses overrides)
+cfm kernsec monitor enable [--interval=daily]             # systemd timer that runs apply --check periodically
+cfm kernsec monitor status                                # show timer + last service runs
 ```
 
-Selection persisted to `/etc/cfm/kernsec.conf` so `apply` is idempotent and
-survives upgrades. Same backup/diff pattern `kspp.sh` already uses.
+Per-rule overrides are persisted in `/etc/cfm/kernsec.conf` via the
+`[rule "ID"] state = skip|force` syntax (see Phase 2 design below).
+`apply` is idempotent and survives upgrades.
 
 ---
 
@@ -567,8 +577,8 @@ cfm kernsec help          # subcommand help
 │                                  │   /proc/cmdline:    present   │
 │                                  │   next-boot config: present   │
 ├──────────────────────────────────┴───────────────────────────────┤
-│ Footer  q quit • ↑/↓ nav • r refresh • t text • e enable         │
-│         • d disable • ? help                                     │
+│ Footer  q quit • ↑/↓ nav • r refresh • t text • / filter         │
+│         • ? help                                                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -585,20 +595,13 @@ Keybinds:
 | `PgUp`/`PgDn` | Page |
 | `r` | Re-run audit |
 | `t` | Drop to text mode |
-| `e` / `d` | Phase 3 stub — flashes "enable/disable lands in Phase 3" |
+| `/` | Filter rows by substring (display, group, ID) |
+| `c` | Clear active filter |
+| `e` / `d` | Hint keys — flash a pointer to `cfm kernsec apply` / `disable` (TUI write-mode is intentionally not implemented; muscle-memory landing pad for shell commands) |
 | `?` | Toggle help |
 
 5-second refresh tick. No data goroutines. Non-TTY auto-falls back to
 text via `golang.org/x/term IsTerminal`, matching `cfm health live`.
-
-**Phase 1 explicitly does not yet do**:
-
-- Stable rule IDs (`KSEC-*-NNN`) and group/tier tagging.
-- `/etc/cfm/kernsec.conf` persistence.
-- Module blacklists, fstab audit, host-profile detection.
-- Anything that writes — `enable`, `disable`, `apply`, module blacklist
-  generation, sysctl `.conf` generation. The TUI's `e` / `d` keys
-  intentionally show "Phase 3" stubs to pre-wire muscle memory.
 
 ---
 
@@ -1293,7 +1296,9 @@ can be revisited.
 - Plain-text `RunStatus` mirrors `kspp.sh status` sections.
 - Interactive TermUI (gizak/termui/v3) with rules table + detail panel,
   state→colour mapping, cursor, refresh tick, `t` to drop to text mode,
-  `e`/`d` Phase 3 stubs for muscle memory, `?` help overlay.
+  `/` filter, `e`/`d` hint keys pointing to `cfm kernsec apply` /
+  `disable` (TUI write-mode intentionally not implemented), `?` help
+  overlay.
 - Auto-fallback from TUI to text on non-TTY (`golang.org/x/term IsTerminal`).
 - All probes ported: kernel CONFIG introspection (`/boot/config-$(uname -r)`
   → `/proc/config.gz`), page_alloc.shuffle, mem auto-init log scan,
