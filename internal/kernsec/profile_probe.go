@@ -6,44 +6,100 @@ import (
 	"strings"
 )
 
+var hostProfileProbeRoot = ""
+
+func hostProfilePath(path string) string {
+	if hostProfileProbeRoot == "" || !strings.HasPrefix(path, "/") {
+		return path
+	}
+	if path == hostProfileProbeRoot || strings.HasPrefix(path, hostProfileProbeRoot+string(os.PathSeparator)) {
+		return path
+	}
+	return filepath.Join(hostProfileProbeRoot, strings.TrimPrefix(path, "/"))
+}
+
+func anyPathExists(paths ...string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func anyGlobMatches(patterns ...string) bool {
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(hostProfilePath(pattern))
+		if len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // HostProfile captures the runtime characteristics of the current host
 // that affect which rules should be applied. Auto-skipped rules render
 // as `SKIP (host profile: <reason>)` in audit output. Operators
 // override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
-	IsKVMHost            bool   // kvm_intel / kvm_amd loaded → KVM hypervisor host
-	HasContainers        bool   // runc / containerd / lxc / podman process running → don't kill userns
-	HasIPsec             bool   // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasDKMS              bool   // any out-of-tree module evidence (loaded zfs/nvidia, /var/lib/dkms non-empty, akmods, /usr/src/*-dkms*) → don't enforce module sig / lockdown=integrity
-	HasKdump             bool   // kdump enabled → don't disable kexec / lockdown
-	HasBluetoothHardware bool   // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
-	HasThunderbolt       bool   // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
-	HasNFS               bool   // active NFS mounts → keep NFS untouched (already excluded by policy)
-	IsEFIBoot            bool   // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
-	Reason               string // freeform note used in --check output
+	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
+	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
+	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
+	HasDKMS                 bool   `json:"has_dkms"`                   // any out-of-tree module evidence → don't enforce module sig / lockdown=integrity
+	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → don't disable kexec / lockdown
+	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
+	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
+	HasNFS                  bool   `json:"has_nfs"`                    // active NFS mounts → keep NFS untouched (already excluded by policy)
+	IsEFIBoot               bool   `json:"is_efi_boot"`                // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
+	IsCPanel                bool   `json:"is_cpanel"`                  // /usr/local/cpanel exists → cPanel/WHM host
+	IsDirectAdmin           bool   `json:"is_directadmin"`             // /usr/local/directadmin exists → DirectAdmin host
+	HasCloudLinuxLVE        bool   `json:"has_cloudlinux_lve"`         // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
+	HasCageFS               bool   `json:"has_cagefs"`                 // /etc/cagefs or cagefsctl → CageFS host
+	HasImunify360           bool   `json:"has_imunify360"`             // Imunify360 service/package/path indicators
+	HasKernelCare           bool   `json:"has_kernelcare"`             // KernelCare live-patching indicators
+	HasKsplice              bool   `json:"has_ksplice"`                // Ksplice live-patching indicators
+	HasLivePatchingModules  bool   `json:"has_live_patching_modules"`  // loaded live-patching modules
+	IsProxmox               bool   `json:"is_proxmox"`                 // Proxmox paths or proxmox-boot-tool present
+	HasZFS                  bool   `json:"has_zfs"`                    // loaded zfs or ZFS path indicators
+	HasNVIDIA               bool   `json:"has_nvidia"`                 // loaded NVIDIA modules
+	HasHostingPanelWorkload bool   `json:"has_hosting_panel_workload"` // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
+	Reason                  string `json:"reason,omitempty"`           // freeform note used in --check output
 }
 
 // DetectHostProfile runs the cheap probes (~few hundred ms total).
 // Pure: returns a value, no side effects on disk or kernel state.
 func DetectHostProfile() HostProfile {
-	return HostProfile{
-		IsKVMHost:            anyModuleLoaded("kvm_intel", "kvm_amd"),
-		HasContainers:        defaultContainerProbe().detect(),
-		HasIPsec:             hasIPsecPolicies(),
-		HasDKMS:              hasOutOfTreeModuleEvidence(),
-		HasKdump:             hasKdump(),
-		HasBluetoothHardware: dirHasEntries("/sys/class/bluetooth"),
-		HasThunderbolt:       dirHasEntries("/sys/bus/thunderbolt/devices"),
-		HasNFS:               procMountsHasFS("nfs", "nfs4"),
-		IsEFIBoot:            isEFIBoot(),
+	p := HostProfile{
+		IsKVMHost:              anyModuleLoaded("kvm_intel", "kvm_amd"),
+		HasContainers:          defaultContainerProbe().detect(),
+		HasIPsec:               hasIPsecPolicies(),
+		HasKdump:               hasKdump(),
+		HasBluetoothHardware:   dirHasEntries("/sys/class/bluetooth"),
+		HasThunderbolt:         dirHasEntries("/sys/bus/thunderbolt/devices"),
+		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
+		IsEFIBoot:              isEFIBoot(),
+		IsCPanel:               detectCPanel(),
+		IsDirectAdmin:          detectDirectAdmin(),
+		HasCloudLinuxLVE:       detectCloudLinuxLVE(),
+		HasCageFS:              detectCageFS(),
+		HasImunify360:          detectImunify360(),
+		HasKernelCare:          detectKernelCare(),
+		HasKsplice:             detectKsplice(),
+		HasLivePatchingModules: detectLivePatchingModules(),
+		IsProxmox:              detectProxmox(),
+		HasZFS:                 detectZFS(),
+		HasNVIDIA:              detectNVIDIA(),
 	}
+	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
+	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
+	return p
 }
 
 // isEFIBoot reports whether the system booted via EFI. The kernel
 // exposes /sys/firmware/efi only on EFI-booted systems; its absence
 // means BIOS/legacy-boot and any efi= kernel parameter is a no-op.
 func isEFIBoot() bool {
-	_, err := os.Stat("/sys/firmware/efi")
+	_, err := os.Stat(hostProfilePath("/sys/firmware/efi"))
 	return err == nil
 }
 
@@ -73,8 +129,8 @@ func isEFIBoot() bool {
 // (operator can `state = force` per-rule); applying them on a host
 // that needs an unsigned root-fs driver / a paid-for live-patcher
 // is not.
-func hasOutOfTreeModuleEvidence() bool {
-	if anyModuleLoaded("zfs", "nvidia", "nvidia_drm", "nvidia_modeset") {
+func hasOutOfTreeModuleEvidence(profile HostProfile) bool {
+	if profile.HasZFS || profile.HasNVIDIA || profile.HasKernelCare || profile.HasKsplice || profile.HasLivePatchingModules || profile.HasCloudLinuxLVE {
 		return true
 	}
 	// /var/lib/dkms holds (re)built DKMS modules. Non-empty means
@@ -88,7 +144,7 @@ func hasOutOfTreeModuleEvidence() bool {
 	// minimal install means no akmod path; presence is enough to
 	// gate.
 	for _, p := range []string{"/usr/bin/akmods", "/usr/sbin/akmods"} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
@@ -104,7 +160,7 @@ func hasOutOfTreeModuleEvidence() bool {
 		"/usr/lib/systemd/system/kcare.service",
 		"/lib/systemd/system/kcare.service",
 	} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
@@ -114,21 +170,21 @@ func hasOutOfTreeModuleEvidence() bool {
 		"/var/lib/uptrack",
 		"/etc/uptrack",
 	} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
 	// /usr/src/*-dkms* — DKMS source trees per the dkms package
 	// convention. Glob-cheap relative to the rest of the apply
 	// path.
-	if matches, _ := filepath.Glob("/usr/src/*-dkms*"); len(matches) > 0 {
+	if matches, _ := filepath.Glob(hostProfilePath("/usr/src/*-dkms*")); len(matches) > 0 {
 		return true
 	}
 	// /lib/modules/$(uname -r)/{extra,updates} — out-of-tree
 	// module install dirs. Non-empty means modules outside the
 	// distro kernel tree exist on this host.
 	for _, sub := range []string{"extra", "updates"} {
-		matches, _ := filepath.Glob(filepath.Join("/lib/modules/*", sub))
+		matches, _ := filepath.Glob(hostProfilePath(filepath.Join("/lib/modules/*", sub)))
 		for _, m := range matches {
 			if dirHasEntries(m) {
 				return true
@@ -136,6 +192,124 @@ func hasOutOfTreeModuleEvidence() bool {
 		}
 	}
 	return false
+}
+
+func detectCPanel() bool {
+	return anyPathExists("/usr/local/cpanel")
+}
+
+func detectDirectAdmin() bool {
+	return anyPathExists("/usr/local/directadmin")
+}
+
+func detectCloudLinuxLVE() bool {
+	return anyPathExists("/proc/lve") || anyModuleLoaded("lve", "kmodlve")
+}
+
+func detectCageFS() bool {
+	return anyPathExists("/etc/cagefs", "/usr/sbin/cagefsctl")
+}
+
+func detectImunify360() bool {
+	return anyPathExists(
+		"/usr/bin/imunify360-agent",
+		"/usr/sbin/imunify360-agent",
+		"/usr/lib/systemd/system/imunify360.service",
+		"/lib/systemd/system/imunify360.service",
+		"/etc/sysconfig/imunify360",
+		"/etc/imunify360",
+		"/var/imunify360",
+		"/var/lib/imunify360",
+		"/etc/yum.repos.d/imunify360.repo",
+	) || anyGlobMatches(
+		"/var/lib/dpkg/info/imunify360*.list",
+		"/var/lib/rpm/*imunify360*",
+	)
+}
+
+func detectKernelCare() bool {
+	return anyPathExists(
+		"/usr/bin/kcarectl",
+		"/usr/sbin/kcarectl",
+		"/usr/lib/kernelcare",
+		"/var/cache/kcare",
+		"/etc/sysconfig/kcare",
+		"/usr/lib/systemd/system/kcare.service",
+		"/lib/systemd/system/kcare.service",
+	)
+}
+
+func detectKsplice() bool {
+	return anyPathExists(
+		"/usr/sbin/uptrack-upgrade",
+		"/usr/bin/uptrack-upgrade",
+		"/var/lib/uptrack",
+		"/etc/uptrack",
+		"/usr/lib/systemd/system/uptrack.service",
+		"/lib/systemd/system/uptrack.service",
+	)
+}
+
+func detectLivePatchingModules() bool {
+	return anyModuleLoaded("kcare", "kpatch", "kgraft", "uptrack", "ksplice") || anyModuleLoadedWithPrefix("livepatch", "kpatch_", "ksplice_")
+}
+
+func detectProxmox() bool {
+	return anyPathExists(
+		"/etc/pve",
+		"/etc/kernel/proxmox-boot-uuids",
+		"/usr/sbin/proxmox-boot-tool",
+		"/usr/bin/proxmox-boot-tool",
+		"/boot/efi/EFI/proxmox",
+	)
+}
+
+func detectZFS() bool {
+	return anyModuleLoaded("zfs") || anyPathExists("/sys/module/zfs", "/etc/zfs", "/usr/sbin/zpool", "/usr/bin/zpool")
+}
+
+func detectNVIDIA() bool {
+	return anyModuleLoaded("nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm")
+}
+
+func (p HostProfile) hostingPanelReason() string {
+	switch {
+	case p.IsCPanel:
+		return "cPanel/WHM detected (/usr/local/cpanel)"
+	case p.IsDirectAdmin:
+		return "DirectAdmin detected (/usr/local/directadmin)"
+	case p.HasCloudLinuxLVE:
+		return "CloudLinux LVE detected (/proc/lve or lve/kmodlve module)"
+	case p.HasCageFS:
+		return "CageFS detected (/etc/cagefs or cagefsctl)"
+	case p.HasImunify360:
+		return "Imunify360 detected (service/package/path indicator)"
+	case p.HasHostingPanelWorkload:
+		return "hosting panel workload detected"
+	}
+	return ""
+}
+
+func (p HostProfile) moduleSigningRiskReason(feature string) string {
+	switch {
+	case p.HasCloudLinuxLVE:
+		return "host has CloudLinux LVE (lve/kmodlve) — " + feature + " would block vendor modules"
+	case p.HasCageFS:
+		return "host has CageFS — " + feature + " would risk blocking CloudLinux hosting modules"
+	case p.HasKernelCare:
+		return "host has KernelCare live patching — " + feature + " would block future patch modules"
+	case p.HasKsplice:
+		return "host has Ksplice live patching — " + feature + " would block future patch modules"
+	case p.HasLivePatchingModules:
+		return "host has loaded live-patching modules — " + feature + " would block future patch modules"
+	case p.HasZFS:
+		return "host has ZFS evidence — " + feature + " would block ZFS modules"
+	case p.HasNVIDIA:
+		return "host has NVIDIA modules — " + feature + " would block NVIDIA modules"
+	case p.HasDKMS:
+		return "host has DKMS / out-of-tree modules — " + feature + " would block them"
+	}
+	return ""
 }
 
 // SkipReason returns a non-empty explanation if the rule with the given
@@ -170,29 +344,31 @@ func (p HostProfile) SkipReason(group string) string {
 	case "boot.lockdown", "tier2.lockdown":
 		// lockdown=integrity blocks unsigned module load and also
 		// closes a number of kexec / /dev/mem / kdump primitives.
-		// Skip on (a) hosts with DKMS / out-of-tree modules and
-		// (b) hosts with kdump enabled — kdump uses kexec which
+		// Skip on hosts with DKMS / out-of-tree / hosting vendor
+		// modules and on kdump hosts — kdump uses kexec which
 		// integrity lockdown restricts.
-		if p.HasDKMS {
-			return "host has DKMS / out-of-tree modules — lockdown=integrity would block them"
+		if reason := p.moduleSigningRiskReason("lockdown=integrity"); reason != "" {
+			return reason
 		}
 		if p.HasKdump {
 			return "host has kdump enabled — lockdown=integrity restricts kexec primitives kdump relies on"
 		}
 	case "tier2.module-sig-enforce":
-		// module.sig_enforce=1 also breaks DKMS / out-of-tree
-		// modules — it requires every module to be kernel-signed
-		// and DKMS / akmod / custom-built modules usually aren't
-		// signed by the distro.
-		if p.HasDKMS {
-			return "host has DKMS / out-of-tree modules — module.sig_enforce would block them"
+		// module.sig_enforce=1 requires every module to be kernel-signed;
+		// CloudLinux/LVE/CageFS, live-patching, ZFS, NVIDIA, DKMS, and
+		// akmod paths are safer skipped unless forced by the operator.
+		if reason := p.moduleSigningRiskReason("module.sig_enforce=1"); reason != "" {
+			return reason
 		}
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0
-		// break Chromium sandbox, bwrap, rootless podman, some
-		// cPanel jail variants. Skip when containers are running.
+		// break Chromium sandbox, bwrap, rootless podman, cPanel jails,
+		// CloudLinux/CageFS isolation, and hosting panel workloads.
 		if p.HasContainers {
 			return "host has containers running (runc / containerd / lxc / podman)"
+		}
+		if reason := p.hostingPanelReason(); reason != "" {
+			return "hosting panel namespace workload: " + reason
 		}
 	case "boot.kexec", "sysctl.kernel.kexec":
 		if p.HasKdump {
@@ -219,12 +395,46 @@ func (p HostProfile) SkipReason(group string) string {
 // anyModuleLoaded returns true if any of the named modules is in
 // /proc/modules.
 func anyModuleLoaded(names ...string) bool {
+	mods := readProcModules()
+	if len(mods) == 0 {
+		return false
+	}
+	want := make(map[string]struct{}, len(names))
 	for _, n := range names {
-		if ModuleLoaded(n) {
+		want[n] = struct{}{}
+	}
+	for _, m := range mods {
+		if _, ok := want[m]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+func anyModuleLoadedWithPrefix(prefixes ...string) bool {
+	for _, m := range readProcModules() {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(m, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readProcModules() []string {
+	b, err := os.ReadFile(hostProfilePath("/proc/modules"))
+	if err != nil {
+		return nil
+	}
+	var mods []string
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			mods = append(mods, fields[0])
+		}
+	}
+	return mods
 }
 
 // containerProbe holds the file paths consulted to detect whether the
@@ -276,15 +486,15 @@ var containerShimPrefixes = []string{
 // mutating package state.
 func defaultContainerProbe() containerProbe {
 	return containerProbe{
-		procDir: "/proc",
+		procDir: hostProfilePath("/proc"),
 		sockets: []string{
-			"/var/run/docker.sock",
-			"/run/docker.sock",
-			"/var/run/crio/crio.sock",
-			"/run/containerd/containerd.sock",
-			"/run/podman/podman.sock",
+			hostProfilePath("/var/run/docker.sock"),
+			hostProfilePath("/run/docker.sock"),
+			hostProfilePath("/var/run/crio/crio.sock"),
+			hostProfilePath("/run/containerd/containerd.sock"),
+			hostProfilePath("/run/podman/podman.sock"),
 		},
-		nspawnDir: "/run/systemd/nspawn",
+		nspawnDir: hostProfilePath("/run/systemd/nspawn"),
 	}
 }
 
@@ -367,7 +577,7 @@ func (e *profileProbeErr) Error() string { return e.s }
 // doesn't shell out.
 func hasIPsecPolicies() bool {
 	for _, p := range []string{"/proc/net/xfrm_policy", "/proc/net/pfkey"} {
-		if b, err := os.ReadFile(p); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		if b, err := os.ReadFile(hostProfilePath(p)); err == nil && len(strings.TrimSpace(string(b))) > 0 {
 			return true
 		}
 	}
@@ -388,7 +598,7 @@ func hasKdump() bool {
 	// happened AND `kdumpctl start` (or equivalent) loaded the
 	// crash kernel. False on freshly-rebooted host; defensive
 	// because the file-based checks below cover that.
-	if b, err := os.ReadFile("/sys/kernel/kexec_crash_loaded"); err == nil {
+	if b, err := os.ReadFile(hostProfilePath("/sys/kernel/kexec_crash_loaded")); err == nil {
 		if strings.TrimSpace(string(b)) == "1" {
 			return true
 		}
@@ -401,7 +611,7 @@ func hasKdump() bool {
 		"/etc/sysconfig/kdump",
 		"/etc/default/kdump-tools",
 	} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
@@ -414,7 +624,7 @@ func hasKdump() bool {
 		"/usr/lib/systemd/system/kdump-tools.service",
 		"/lib/systemd/system/kdump-tools.service",
 	} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
@@ -424,7 +634,7 @@ func hasKdump() bool {
 // dirHasEntries returns true if dir exists and contains at least one
 // non-"." / ".." entry.
 func dirHasEntries(dir string) bool {
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(hostProfilePath(dir))
 	if err != nil {
 		return false
 	}
@@ -434,7 +644,7 @@ func dirHasEntries(dir string) bool {
 // procMountsHasFS returns true if /proc/mounts lists any mount whose
 // fs type matches one of the names.
 func procMountsHasFS(types ...string) bool {
-	b, err := os.ReadFile("/proc/mounts")
+	b, err := os.ReadFile(hostProfilePath("/proc/mounts"))
 	if err != nil {
 		return false
 	}

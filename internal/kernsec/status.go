@@ -53,6 +53,7 @@ func RunStatusJSON(w io.Writer) StatusResult {
 		Warnings: warnings,
 		Tier:     conf.Tier,
 		Backend:  be.Label(),
+		Profile:  profile,
 		Errors:   errs,
 		Rules:    rows,
 	}

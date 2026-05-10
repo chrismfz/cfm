@@ -191,13 +191,13 @@ var Tier2Sysctls = []SysctlRule{
 		ID: "KSEC-SCT-tier2.namespace-001", Group: "tier2.namespace", Tier: Tier2,
 		Key: "user.max_user_namespaces", Value: "0",
 		Description: "Disable unprivileged user namespace creation — kills a major LPE primitive class.",
-		Affects:     "Breaks rootless podman, bwrap, Chromium sandbox, some cPanel jail variants. Skipped if containers detected.",
+		Affects:     "Breaks rootless podman, bwrap, Chromium sandbox, cPanel jails, CloudLinux/CageFS isolation. Skipped if containers or hosting panels detected.",
 	},
 	{
 		ID: "KSEC-SCT-tier2.namespace-002", Group: "tier2.namespace", Tier: Tier2,
 		Key: "kernel.unprivileged_userns_clone", Value: "0",
 		Description: "Debian-flavoured alternative for blocking unprivileged userns. Reversible without breaking root use.",
-		Affects:     "Same surface as user.max_user_namespaces=0. Skipped if containers detected. Skipped if kernel doesn't expose the key (non-Debian).",
+		Affects:     "Same surface as user.max_user_namespaces=0. Skipped if containers or hosting panels detected. Skipped if kernel doesn't expose the key (non-Debian).",
 	},
 }
 
@@ -216,13 +216,13 @@ var Tier2BootArgs = []BootArg{
 		ID: "KSEC-BOOT-tier2.lockdown-001", Group: "tier2.lockdown", Tier: Tier2,
 		Key: "lockdown", Value: "integrity",
 		Description: "Kernel lockdown LSM — blocks unsigned module load, /dev/mem write, unsigned kexec.",
-		Affects:     "Breaks DKMS modules (zfs, nvidia). Skipped if DKMS detected on host.",
+		Affects:     "Breaks DKMS/vendor modules (CloudLinux LVE/CageFS, live patching, ZFS, NVIDIA). Skipped when evidence is detected.",
 	},
 	{
 		ID: "KSEC-BOOT-tier2.module-sig-enforce-001", Group: "tier2.module-sig-enforce", Tier: Tier2,
 		Key: "module.sig_enforce", Value: "1",
 		Description: "Require kernel-signed modules. Belt-and-suspenders alongside lockdown=integrity.",
-		Affects:     "Breaks DKMS modules. Skipped if DKMS detected on host.",
+		Affects:     "Breaks DKMS/vendor modules (CloudLinux LVE/CageFS, live patching, ZFS, NVIDIA). Skipped when evidence is detected.",
 	},
 }
 

@@ -3,6 +3,7 @@ package kernsec
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -257,11 +258,132 @@ func TestHasOutOfTreeModuleEvidence_NoEvidence(t *testing.T) {
 	// CI host (no zfs, no nvidia, no /var/lib/dkms, no akmods).
 	// Cannot assert false because the build host might legitimately
 	// have one of these; just exercise the code path.
-	_ = hasOutOfTreeModuleEvidence()
+	_ = hasOutOfTreeModuleEvidence(HostProfile{})
 }
 
 func TestHasKdump_SmokeNoCrash(t *testing.T) {
 	// Smoke: no panic on stock CI host. Test environment is unlikely
 	// to have kdump configured, but don't assert false either.
 	_ = hasKdump()
+}
+
+func withHostProfileRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	old := hostProfileProbeRoot
+	hostProfileProbeRoot = root
+	t.Cleanup(func() { hostProfileProbeRoot = old })
+	return root
+}
+
+func touchHostPath(t *testing.T, root, path string) {
+	t.Helper()
+	full := filepath.Join(root, path[1:])
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mkdirHostPath(t *testing.T, root, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, path[1:]), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeHostModules(t *testing.T, root string, names ...string) {
+	t.Helper()
+	var body string
+	for _, name := range names {
+		body += name + " 1 0 - Live 0x0\n"
+	}
+	touchHostPath(t, root, "/proc/.keep")
+	if err := os.WriteFile(filepath.Join(root, "proc/modules"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectHostProfile_HostingPlatformsFromSafeIndicators(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		check func(HostProfile) bool
+	}{
+		{"cpanel", func(t *testing.T, root string) { mkdirHostPath(t, root, "/usr/local/cpanel") }, func(p HostProfile) bool { return p.IsCPanel && p.HasHostingPanelWorkload }},
+		{"directadmin", func(t *testing.T, root string) { mkdirHostPath(t, root, "/usr/local/directadmin") }, func(p HostProfile) bool { return p.IsDirectAdmin && p.HasHostingPanelWorkload }},
+		{"cloudlinux proc lve", func(t *testing.T, root string) { mkdirHostPath(t, root, "/proc/lve") }, func(p HostProfile) bool { return p.HasCloudLinuxLVE && p.HasHostingPanelWorkload && p.HasDKMS }},
+		{"cloudlinux module lve", func(t *testing.T, root string) { writeHostModules(t, root, "lve") }, func(p HostProfile) bool { return p.HasCloudLinuxLVE && p.HasHostingPanelWorkload && p.HasDKMS }},
+		{"cloudlinux module kmodlve", func(t *testing.T, root string) { writeHostModules(t, root, "kmodlve") }, func(p HostProfile) bool { return p.HasCloudLinuxLVE && p.HasHostingPanelWorkload && p.HasDKMS }},
+		{"cagefs", func(t *testing.T, root string) { touchHostPath(t, root, "/usr/sbin/cagefsctl") }, func(p HostProfile) bool { return p.HasCageFS && p.HasHostingPanelWorkload }},
+		{"imunify360", func(t *testing.T, root string) { touchHostPath(t, root, "/usr/lib/systemd/system/imunify360.service") }, func(p HostProfile) bool { return p.HasImunify360 && p.HasHostingPanelWorkload }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := withHostProfileRoot(t)
+			tc.setup(t, root)
+			if got := DetectHostProfile(); !tc.check(got) {
+				t.Fatalf("DetectHostProfile() = %+v", got)
+			}
+		})
+	}
+}
+
+func TestDetectHostProfile_LivePatchProxmoxZFSAndNVIDIAIndicators(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		check func(HostProfile) bool
+	}{
+		{"kernelcare", func(t *testing.T, root string) { touchHostPath(t, root, "/usr/bin/kcarectl") }, func(p HostProfile) bool { return p.HasKernelCare && p.HasDKMS }},
+		{"ksplice", func(t *testing.T, root string) { touchHostPath(t, root, "/usr/sbin/uptrack-upgrade") }, func(p HostProfile) bool { return p.HasKsplice && p.HasDKMS }},
+		{"livepatch module", func(t *testing.T, root string) { writeHostModules(t, root, "livepatch_cve") }, func(p HostProfile) bool { return p.HasLivePatchingModules && p.HasDKMS }},
+		{"proxmox", func(t *testing.T, root string) { touchHostPath(t, root, "/usr/sbin/proxmox-boot-tool") }, func(p HostProfile) bool { return p.IsProxmox }},
+		{"zfs module", func(t *testing.T, root string) { writeHostModules(t, root, "zfs") }, func(p HostProfile) bool { return p.HasZFS && p.HasDKMS }},
+		{"nvidia module", func(t *testing.T, root string) { writeHostModules(t, root, "nvidia") }, func(p HostProfile) bool { return p.HasNVIDIA && p.HasDKMS }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := withHostProfileRoot(t)
+			tc.setup(t, root)
+			if got := DetectHostProfile(); !tc.check(got) {
+				t.Fatalf("DetectHostProfile() = %+v", got)
+			}
+		})
+	}
+}
+
+func TestSkipReason_NamespaceGatesHostingPanels(t *testing.T) {
+	for _, tc := range []HostProfile{
+		{IsCPanel: true, HasHostingPanelWorkload: true},
+		{IsDirectAdmin: true, HasHostingPanelWorkload: true},
+		{HasCloudLinuxLVE: true, HasHostingPanelWorkload: true},
+		{HasCageFS: true, HasHostingPanelWorkload: true},
+		{HasImunify360: true, HasHostingPanelWorkload: true},
+	} {
+		if got := tc.SkipReason("tier2.namespace"); got == "" || !strings.Contains(got, "hosting panel") {
+			t.Errorf("SkipReason(tier2.namespace) on %+v = %q, want hosting panel reason", tc, got)
+		}
+	}
+}
+
+func TestSkipReason_ModuleSigningGatesPlatformEvidence(t *testing.T) {
+	tests := []HostProfile{
+		{HasCloudLinuxLVE: true},
+		{HasCageFS: true},
+		{HasKernelCare: true},
+		{HasKsplice: true},
+		{HasLivePatchingModules: true},
+		{HasZFS: true},
+		{HasNVIDIA: true},
+	}
+	for _, profile := range tests {
+		for _, group := range []string{"tier2.lockdown", "tier2.module-sig-enforce"} {
+			if got := profile.SkipReason(group); got == "" {
+				t.Errorf("SkipReason(%q) on %+v = empty, want skip", group, profile)
+			}
+		}
+	}
 }
