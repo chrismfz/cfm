@@ -320,26 +320,31 @@ func applyWrites(
 		if err := backend.Refresh(); err != nil {
 			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
 			fmt.Fprintln(w, "  cmdline is written but bootloader has NOT picked it up.")
-			// SAFETY (Phase 6 audit M1): on the legacy GRUB backend
-			// the bootloader refresh is what actually propagates
-			// /etc/default/grub into /boot/grub/grub.cfg. If
-			// update-grub failed and we leave the modified
-			// /etc/default/grub on disk, the NEXT legitimate
-			// operator change (kernel package install, etc.) will
-			// run update-grub on the corrupted-from-its-PoV file
-			// and the bad cmdline will land at boot. Restore the
-			// pre-write file from the .cfm-kernsec.bak BEFORE
-			// returning the error — operator now sees the failure
-			// AND has a clean /etc/default/grub to retry against.
+			// SAFETY (Phase 6 audit M1): for file-backed boot
+			// backends, refresh is what propagates the just-written
+			// next-boot cmdline into the bootloader state. If refresh
+			// fails and we leave the modified source file on disk, the
+			// NEXT legitimate operator/kernel-package refresh can pick
+			// up the half-applied cmdline. Restore a safe source-file
+			// state BEFORE returning the error — the operator sees the
+			// failure and can retry from clean boot config.
 			//
 			// BLS backend has no rollback (grubby committed in
 			// WriteCmdline; Refresh is a no-op there).
-			if _, isGrub := backend.(*GRUBBackend); isGrub {
+			switch backend.(type) {
+			case *GRUBBackend:
 				if rerr := restoreGrubFromBackup(); rerr != nil {
 					fmt.Fprintf(w, "  WARNING: rollback of %s failed: %v\n", PathDefaultGrub, rerr)
-					fmt.Fprintf(w, "  manual recovery: cp %s%s %s\n", PathDefaultGrub, BackupSuffix, PathDefaultGrub)
+					printManualGRUBRecovery(w)
 				} else {
 					fmt.Fprintf(w, "  rolled back %s from %s%s.\n", PathDefaultGrub, PathDefaultGrub, BackupSuffix)
+				}
+			case *ProxmoxBackend:
+				if rerr := restoreProxmoxCmdlineAfterRefreshFailure(); rerr != nil {
+					fmt.Fprintf(w, "  WARNING: rollback of %s failed: %v\n", PathPVECmdline, rerr)
+					printManualProxmoxRecovery(w)
+				} else {
+					fmt.Fprintf(w, "  rolled back %s to a safe retry state.\n", PathPVECmdline)
 				}
 			}
 			fmt.Fprintln(w, "  re-run `cfm kernsec apply` or refresh the bootloader manually before reboot.")

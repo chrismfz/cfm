@@ -1,7 +1,9 @@
 package kernsec
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -50,6 +52,41 @@ func (p *ProxmoxBackend) Refresh() error {
 	out, err := p.FS.RunCapture("proxmox-boot-tool", "refresh")
 	if err != nil {
 		return fmt.Errorf("proxmox-boot-tool refresh: %v: %s", err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// restoreProxmoxCmdlineAfterRefreshFailure returns /etc/kernel/cmdline to a
+// safe retry state after WriteCmdline succeeded but proxmox-boot-tool refresh
+// failed. If the current file is still exactly kernsec's expected post-apply
+// rewrite, the pre-apply full-file backup is restored byte-for-byte. If the
+// current file has picked up operator/unmanaged edits, preserve those current
+// unmanaged tokens and roll back only kernsec-managed keys to their pre-apply
+// values from the backup.
+func restoreProxmoxCmdlineAfterRefreshFailure() error {
+	bak := PathPVECmdline + BackupSuffix
+	if _, err := os.Stat(bak); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat %s: %w", bak, err)
+	}
+
+	legacy, err := os.ReadFile(bak)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", bak, err)
+	}
+	current, err := os.ReadFile(PathPVECmdline)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", PathPVECmdline, err)
+	}
+
+	outContent := legacy
+	if string(current) != expectedLegacyCmdlinePostApply(string(legacy), string(current)) {
+		tokens := rebuildManagedTokens(ParseCmdline(string(current)), KeepManagedArgs(ParseCmdline(string(legacy))))
+		outContent = []byte(strings.Join(tokens, " ") + "\n")
+	}
+	if err := AtomicWriteFile(PathPVECmdline, outContent, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", PathPVECmdline, err)
 	}
 	return nil
 }
