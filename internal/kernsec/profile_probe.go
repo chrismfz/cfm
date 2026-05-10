@@ -14,7 +14,6 @@ type HostProfile struct {
 	IsKVMHost            bool   // kvm_intel / kvm_amd loaded → KVM hypervisor host
 	HasContainers        bool   // runc / containerd / lxc / podman process running → don't kill userns
 	HasIPsec             bool   // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasWifi              bool   // cfg80211 loaded or wifi hardware → flag (no wifi rules ship today)
 	HasDKMS              bool   // zfs / nvidia / DKMS modules → don't enforce module sig
 	HasKdump             bool   // kdump enabled → don't disable kexec
 	HasBluetoothHardware bool   // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
@@ -30,7 +29,6 @@ func DetectHostProfile() HostProfile {
 		IsKVMHost:            anyModuleLoaded("kvm_intel", "kvm_amd"),
 		HasContainers:        defaultContainerProbe().detect(),
 		HasIPsec:             hasIPsecPolicies(),
-		HasWifi:              ModuleLoaded("cfg80211") || hasWifiHardware(),
 		HasDKMS:              anyModuleLoaded("zfs", "nvidia", "nvidia_drm", "nvidia_modeset"),
 		HasKdump:             hasKdump(),
 		HasBluetoothHardware: dirHasEntries("/sys/class/bluetooth"),
@@ -247,22 +245,6 @@ func (e *profileProbeErr) Error() string { return e.s }
 func hasIPsecPolicies() bool {
 	for _, p := range []string{"/proc/net/xfrm_policy", "/proc/net/pfkey"} {
 		if b, err := os.ReadFile(p); err == nil && len(strings.TrimSpace(string(b))) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// hasWifiHardware looks for /sys/class/net/* whose wireless attribute
-// directory exists. No exec, no shell.
-func hasWifiHardware() bool {
-	entries, err := os.ReadDir("/sys/class/net")
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		st, err := os.Stat(filepath.Join("/sys/class/net", e.Name(), "wireless"))
-		if err == nil && st.IsDir() {
 			return true
 		}
 	}

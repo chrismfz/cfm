@@ -43,6 +43,15 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 		return 1
 	}
 
+	if !opts.DryRun {
+		release, err := acquireKernsecLock()
+		if err != nil {
+			fmt.Fprintln(w, "kernsec disable:", err)
+			return 1
+		}
+		defer release()
+	}
+
 	conf, loadErr := loadConfForDisable()
 	if loadErr != nil {
 		// Existing conf is malformed / permission-denied / other
@@ -151,7 +160,12 @@ func loadConfForDisable() (*Conf, error) {
 func purgeManagedFiles(w io.Writer) error {
 	if MonitorInstalled() {
 		fmt.Fprintln(w, "  monitor timer is installed — running `monitor remove` first")
-		if rc := RunMonitor(w, MonitorOptions{Action: "remove"}); rc != 0 {
+		// Lock-free path: RunDisable already holds the kernsec lock
+		// at this point. Going through the public RunMonitor would
+		// try to acquire the lock again and self-deadlock with
+		// EWOULDBLOCK (each acquireKernsecLock opens its own fd, so
+		// flock() in the same process is not re-entrant).
+		if rc := monitorRemoveLocked(w); rc != 0 {
 			return fmt.Errorf("monitor remove returned %d", rc)
 		}
 	}
