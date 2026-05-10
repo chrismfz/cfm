@@ -34,6 +34,10 @@ func TestRenderMonitorService_ContainsBinaryAndCheck(t *testing.T) {
 		"Type=oneshot",
 		"ExecStart=/usr/local/bin/cfm kernsec apply --check",
 		"StandardOutput=journal",
+		// Exit 2 = "could not determine state"; the systemd unit must
+		// treat it as success so the timer keeps retrying without
+		// flagging the unit as Failed. See classifyCheckResult.
+		"SuccessExitStatus=2",
 	}
 	for _, s := range wantContains {
 		if !strings.Contains(got, s) {
@@ -164,6 +168,100 @@ func TestRunMonitor_EmptyActionReturns2(t *testing.T) {
 	rc := RunMonitor(&out, MonitorOptions{Action: ""})
 	if rc != 2 {
 		t.Errorf("empty action: rc=%d, want 2", rc)
+	}
+}
+
+func TestValidateMonitorBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "clean absolute path", path: "/usr/bin/cfm", wantErr: false},
+		{name: "deeply nested clean path", path: "/opt/cfm/bin/cfm", wantErr: false},
+		{name: "empty rejected", path: "", wantErr: true},
+		{name: "relative rejected", path: "cfm", wantErr: true},
+		{name: "tilde rejected as relative", path: "~/cfm", wantErr: true},
+		{name: "embedded space rejected", path: "/opt/My CFM/cfm", wantErr: true},
+		{name: "embedded tab rejected", path: "/opt/cfm\tbin/cfm", wantErr: true},
+		{name: "embedded newline rejected (smuggling)", path: "/opt/cfm\nExecStart=/bin/sh", wantErr: true},
+		{name: "embedded NUL rejected", path: "/opt/cfm\x00", wantErr: true},
+		{name: "embedded double-quote rejected", path: `/opt/cfm"/cfm`, wantErr: true},
+		{name: "embedded backslash rejected", path: `/opt/cfm\bin/cfm`, wantErr: true},
+		{name: "embedded dollar rejected", path: "/opt/cfm$/cfm", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMonitorBinary(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateMonitorBinary(%q) err=%v, wantErr=%v", tc.path, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateMonitorInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		val     string
+		wantErr bool
+	}{
+		{name: "daily shorthand", val: "daily", wantErr: false},
+		{name: "hourly shorthand", val: "hourly", wantErr: false},
+		{name: "weekly shorthand", val: "weekly", wantErr: false},
+		{name: "calendar spec time", val: "*-*-* 03:00:00", wantErr: false},
+		{name: "weekday range", val: "Mon..Fri 09:00", wantErr: false},
+		{name: "every 30 minutes", val: "*:0/30", wantErr: false},
+		{name: "empty rejected", val: "", wantErr: true},
+		{name: "newline injection rejected", val: "daily\nExecStart=/bin/sh", wantErr: true},
+		{name: "carriage return rejected", val: "daily\r", wantErr: true},
+		{name: "NUL rejected", val: "daily\x00", wantErr: true},
+		{name: "semicolon rejected (unit-file separator)", val: "daily;OnFailure=evil", wantErr: true},
+		{name: "equals rejected (would smuggle directive)", val: "daily=hourly", wantErr: true},
+		{name: "dollar rejected", val: "daily$VAR", wantErr: true},
+		{name: "tab rejected", val: "daily\t", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMonitorInterval(tc.val)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateMonitorInterval(%q) err=%v, wantErr=%v", tc.val, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunMonitor_RejectsBadBinaryPath(t *testing.T) {
+	withTempMonitorPaths(t)
+	var out bytes.Buffer
+	rc := RunMonitor(&out, MonitorOptions{
+		Action:    "enable",
+		CFMBinary: "/opt/My CFM/cfm",
+		Interval:  "daily",
+		DryRun:    true,
+	})
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on bad binary path, got %d. Output:\n%s", rc, out.String())
+	}
+	if !strings.Contains(out.String(), "whitespace or control character") {
+		t.Errorf("expected operator-facing message about whitespace; got:\n%s", out.String())
+	}
+}
+
+func TestRunMonitor_RejectsNewlineInjectionInterval(t *testing.T) {
+	withTempMonitorPaths(t)
+	var out bytes.Buffer
+	rc := RunMonitor(&out, MonitorOptions{
+		Action:    "enable",
+		CFMBinary: "/usr/bin/cfm",
+		Interval:  "daily\nExecStart=/bin/sh",
+		DryRun:    true,
+	})
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on newline-injected interval, got %d. Output:\n%s", rc, out.String())
+	}
+	if !strings.Contains(out.String(), "OnCalendar") {
+		t.Errorf("expected operator-facing message about OnCalendar; got:\n%s", out.String())
 	}
 }
 

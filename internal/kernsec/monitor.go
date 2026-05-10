@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -85,6 +86,19 @@ func monitorEnable(w io.Writer, opts MonitorOptions) int {
 	interval := opts.Interval
 	if interval == "" {
 		interval = "daily"
+	}
+
+	// Validate before rendering — a bogus binary path or interval
+	// would otherwise be written verbatim into the systemd unit file
+	// and silently break the timer (or, worst case, smuggle extra
+	// directives via newline injection from --interval).
+	if err := validateMonitorBinary(binary); err != nil {
+		fmt.Fprintln(w, "kernsec monitor enable:", err)
+		return 1
+	}
+	if err := validateMonitorInterval(interval); err != nil {
+		fmt.Fprintln(w, "kernsec monitor enable:", err)
+		return 1
 	}
 
 	service := RenderMonitorService(binary)
@@ -243,6 +257,59 @@ func monitorStatus(w io.Writer) int {
 	return 0
 }
 
+// validateMonitorBinary returns an error if the cfm binary path would
+// corrupt the systemd unit's ExecStart line. systemd command-line
+// parsing is whitespace-separated; rather than emit fragile escaping
+// we reject paths that need it and ask the operator to symlink to a
+// clean path. Tightens the threat model: anyone who can pass a custom
+// --cfm-binary can write whatever they want to the unit file by
+// embedding control characters; this rejects that surface.
+func validateMonitorBinary(p string) error {
+	if p == "" {
+		return errors.New("empty cfm binary path")
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("cfm binary path must be absolute (got %q)", p)
+	}
+	for _, r := range p {
+		switch {
+		case r == ' ', r == '\t', r == '\n', r == '\r', r == 0:
+			return fmt.Errorf("cfm binary path contains whitespace or control character (%q) — symlink to a clean path and pass that with --cfm-binary", p)
+		case r == '"', r == '\\', r == '$':
+			return fmt.Errorf("cfm binary path contains systemd-special character %q in %q — symlink to a clean path", string(r), p)
+		}
+	}
+	return nil
+}
+
+// validateMonitorInterval returns an error if the OnCalendar value
+// would corrupt the systemd unit. Allowed: ASCII letters, digits,
+// space, and the calendar-spec separators `, - : * . /`. This is a
+// superset of every shorthand systemd recognises (`daily`, `hourly`,
+// `weekly`, `*-*-* 03:00:00`, `Mon..Fri 09:00`, etc.) and excludes
+// anything that could smuggle a newline / NUL / shell metacharacter
+// into the unit file. systemd's own validator runs at unit-load time
+// and will reject syntactically-bad calendar specs even after this
+// passes — operators get a clear `systemctl daemon-reload` failure
+// then, distinct from the "you wrote garbage to a unit file" surface.
+func validateMonitorInterval(s string) error {
+	if s == "" {
+		return errors.New("empty OnCalendar value")
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r == ' ', r == ',', r == '-', r == ':', r == '*', r == '.', r == '/':
+		default:
+			return fmt.Errorf("OnCalendar value %q contains unsupported character %q — use a systemd calendar spec or shorthand (`daily`, `hourly`, `weekly`, `*-*-* 03:00:00`)",
+				s, string(r))
+		}
+	}
+	return nil
+}
+
 // RenderMonitorService produces the systemd .service file content
 // referencing the cfm binary at the supplied path.
 func RenderMonitorService(cfmBinary string) []byte {
@@ -261,7 +328,12 @@ func RenderMonitorService(cfmBinary string) []byte {
 	fmt.Fprintf(&b, "ExecStart=%s kernsec apply --check\n", cfmBinary)
 	b.WriteString("StandardOutput=journal\n")
 	b.WriteString("StandardError=journal\n")
-	// SuccessExitStatus on 0 only — drift (1) is correctly a failure.
+	// `apply --check` exits 0 (no drift), 1 (drift), 2 (could not
+	// determine state — retry later). Drift IS a failure (alert
+	// surface); exit 2 is soft-failure that the next timer fire will
+	// retry, so we tell systemd to treat it as success and not flag
+	// the unit as Failed in `systemctl status`.
+	b.WriteString("SuccessExitStatus=2\n")
 	return []byte(b.String())
 }
 

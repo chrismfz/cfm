@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,12 +132,15 @@ func TestPurgeManagedFiles_IdempotentOnMissing(t *testing.T) {
 func TestLoadConfForDisable_NoConfReturnsTier0(t *testing.T) {
 	withTempConfPath(t)
 	// No conf on disk.
-	c, src := loadConfForDisable()
+	c, err := loadConfForDisable()
+	if err != nil {
+		t.Fatalf("absent conf should not be an error: %v", err)
+	}
 	if c.Tier != 0 {
 		t.Errorf("got tier %d, want 0", c.Tier)
 	}
-	if !strings.Contains(src, "no conf") {
-		t.Errorf("source should signal absence: %q", src)
+	if !strings.Contains(c.Source, "no conf") {
+		t.Errorf("source should signal absence: %q", c.Source)
 	}
 }
 
@@ -152,7 +156,10 @@ func TestLoadConfForDisable_PreservesOverrides(t *testing.T) {
 	if err := WriteConf(c); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := loadConfForDisable()
+	got, err := loadConfForDisable()
+	if err != nil {
+		t.Fatalf("loadConfForDisable on valid conf: %v", err)
+	}
 	if got.Overrides["KSEC-MOD-net.legacy-001"] != OverrideSkip {
 		t.Error("skip override lost")
 	}
@@ -162,6 +169,74 @@ func TestLoadConfForDisable_PreservesOverrides(t *testing.T) {
 	// Tier hasn't been overridden yet — the caller does that.
 	if got.Tier != Tier1 {
 		t.Errorf("tier mutated by loadConfForDisable: got %d", got.Tier)
+	}
+}
+
+func TestLoadConfForDisable_ParseErrorSurfacesError(t *testing.T) {
+	withTempConfPath(t)
+	// Garbage that ParseConf will reject (unknown top-level key).
+	if err := os.WriteFile(ConfPath, []byte("totally not a conf file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfForDisable()
+	if err == nil {
+		t.Fatal("expected error on malformed conf, got nil")
+	}
+	if c != nil {
+		t.Errorf("expected nil conf on parse error, got: %+v", c)
+	}
+}
+
+func TestRunDisable_RefusesOverwriteOnParseErrorWithoutForce(t *testing.T) {
+	withTempConfPath(t)
+	original := []byte("garbage = sentinel\n")
+	if err := os.WriteFile(ConfPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var w bytes.Buffer
+	rc := RunDisable(&w, DisableOptions{DryRun: true})
+	if rc != 1 {
+		t.Fatalf("expected rc=1 (refuse), got %d. Output:\n%s", rc, w.String())
+	}
+	if !strings.Contains(w.String(), "--force") {
+		t.Errorf("expected operator-facing --force hint, got:\n%s", w.String())
+	}
+	// Original file untouched.
+	got, err := os.ReadFile(ConfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("malformed conf was overwritten without --force:\n  before: %q\n  after:  %q",
+			original, got)
+	}
+}
+
+func TestRunDisable_ForceProceedsThroughParseError(t *testing.T) {
+	withTempConfPath(t)
+	if err := os.WriteFile(ConfPath, []byte("garbage = sentinel\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var w bytes.Buffer
+	rc := RunDisable(&w, DisableOptions{DryRun: true, Force: true})
+	if rc != 0 {
+		t.Fatalf("--force --dry-run should succeed, got %d. Output:\n%s", rc, w.String())
+	}
+	if !strings.Contains(w.String(), "proceeding with --force") {
+		t.Errorf("expected confirmation of forced overwrite, got:\n%s", w.String())
+	}
+}
+
+func TestRunDisable_PurgeProceedsThroughParseError(t *testing.T) {
+	withTempConfPath(t)
+	if err := os.WriteFile(ConfPath, []byte("garbage = sentinel\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var w bytes.Buffer
+	rc := RunDisable(&w, DisableOptions{DryRun: true, Purge: true})
+	if rc != 0 {
+		t.Fatalf("--purge --dry-run on malformed conf should succeed (operator opted in to discard), got %d. Output:\n%s",
+			rc, w.String())
 	}
 }
 

@@ -109,6 +109,45 @@ func TestSameTokens(t *testing.T) {
 	}
 }
 
+func TestClassifyCheckResult(t *testing.T) {
+	tests := []struct {
+		name string
+		d    driftResult
+		want int
+	}{
+		{name: "in sync", d: driftResult{}, want: 0},
+		{name: "sysctl drift only", d: driftResult{SysctlDiffers: true}, want: 1},
+		{name: "boot drift only", d: driftResult{BootDiffers: true}, want: 1},
+		{name: "modprobe drift only", d: driftResult{ModprobeDiffers: true}, want: 1},
+		{name: "all three drift", d: driftResult{SysctlDiffers: true, BootDiffers: true, ModprobeDiffers: true}, want: 1},
+		{
+			name: "boot read error overrides drift",
+			d: driftResult{
+				SysctlDiffers: true,
+				BootReadErr:   errors.New("grubby failed"),
+			},
+			want: 2,
+		},
+		{
+			name: "sysctl read error",
+			d:    driftResult{SysctlReadErr: errors.New("permission denied")},
+			want: 2,
+		},
+		{
+			name: "modprobe read error",
+			d:    driftResult{ModprobeReadErr: errors.New("permission denied")},
+			want: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCheckResult(tc.d); got != tc.want {
+				t.Fatalf("classifyCheckResult(%+v) = %d, want %d", tc.d, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyOptions_CheckAndDryRunNoOpWithoutRoot(t *testing.T) {
 	// We can't fully exercise RunApply without root, but the entry
 	// point should not refuse for --dry-run / --check.

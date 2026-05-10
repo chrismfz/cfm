@@ -19,6 +19,11 @@ type DisableOptions struct {
 	// NoRefresh skips the bootloader refresh step. The cmdline file
 	// is still updated; operator runs the refresh later.
 	NoRefresh bool
+	// Force allows disable to proceed when the existing conf cannot
+	// be read or parsed. Without --force a malformed or unreadable
+	// conf aborts disable rather than silently overwriting it with a
+	// clean tier=0 conf (which would lose all per-rule overrides).
+	Force bool
 }
 
 // RunDisable is the friendly wrapper around `tier=0 + apply`. Strips
@@ -38,7 +43,23 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 		return 1
 	}
 
-	conf, _ := loadConfForDisable()
+	conf, loadErr := loadConfForDisable()
+	if loadErr != nil {
+		// Existing conf is malformed / permission-denied / other
+		// I/O. Without --force, refuse to overwrite — silently
+		// replacing it would lose every per-rule override the
+		// operator wrote. With --force or --purge the user has
+		// explicitly opted into discarding the file.
+		if !opts.Force && !opts.Purge {
+			fmt.Fprintf(w, "kernsec disable: existing conf at %s is unreadable: %v\n", ConfPath, loadErr)
+			fmt.Fprintln(w, "  Refusing to overwrite — re-run with --force to write tier=0 anyway")
+			fmt.Fprintln(w, "  (every per-rule override in the existing file will be lost),")
+			fmt.Fprintln(w, "  or --purge to remove the file entirely.")
+			return 1
+		}
+		fmt.Fprintf(w, "kernsec disable: existing conf at %s unreadable (%v) — proceeding with --force\n", ConfPath, loadErr)
+		conf = &Conf{Tier: 0, Overrides: map[string]RuleOverride{}, Source: fmt.Sprintf("(forced overwrite; original: %v)", loadErr)}
+	}
 	conf.Tier = 0
 
 	// Persist tier=0 to disk before driving applyCore — unless we're
@@ -88,14 +109,22 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 	return 0
 }
 
-// loadConfForDisable returns the current conf if one exists, else a
-// fresh in-memory tier=0 placeholder. Distinguishes the two so the
-// banner can be honest about whether any per-rule overrides are being
-// preserved.
-func loadConfForDisable() (*Conf, string) {
+// loadConfForDisable returns the current conf if one exists, an
+// in-memory tier=0 placeholder if none does, or an error if the conf
+// is on disk but cannot be read or parsed. Distinguishing the three
+// matters for safety: silently overwriting a malformed conf with a
+// clean tier=0 file (the previous behaviour) loses every per-rule
+// override the operator wrote.
+//
+//	(*Conf, nil)            conf loaded successfully OR no conf on
+//	                        disk (placeholder returned).
+//	(nil,   non-nil)        conf is on disk but unreadable / malformed.
+//	                        RunDisable refuses to overwrite without
+//	                        --force.
+func loadConfForDisable() (*Conf, error) {
 	c, err := LoadConf(false)
 	if err == nil {
-		return c, c.Source
+		return c, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		// No conf on disk — use a clean slate. We're disabling
@@ -105,16 +134,10 @@ func loadConfForDisable() (*Conf, string) {
 			Tier:      0,
 			Overrides: map[string]RuleOverride{},
 			Source:    "(no conf — using in-memory tier=0)",
-		}, "(no conf — using in-memory tier=0)"
+		}, nil
 	}
-	// Other I/O errors (permission etc.) — surface to caller via the
-	// applyCore path which will report and exit; we still need to
-	// return *something* so we use a clean tier=0.
-	return &Conf{
-		Tier:      0,
-		Overrides: map[string]RuleOverride{},
-		Source:    fmt.Sprintf("(conf load error: %v)", err),
-	}, fmt.Sprintf("(conf load error: %v)", err)
+	// Permission denied, parse error, or other I/O — surface to caller.
+	return nil, err
 }
 
 // purgeManagedFiles removes /etc/cfm/kernsec.conf, the managed sysctl

@@ -155,8 +155,11 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	fmt.Fprintln(w)
 
 	if opts.Check {
-		if drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers ||
-			drift.SysctlReadErr != nil || drift.BootReadErr != nil || drift.ModprobeReadErr != nil {
+		switch classifyCheckResult(drift) {
+		case 2:
+			fmt.Fprintln(w, "[!] could not determine state — exit 2 (retry later)")
+			return 2
+		case 1:
 			fmt.Fprintln(w, "[!] drift detected — exit 1")
 			return 1
 		}
@@ -293,6 +296,31 @@ type driftResult struct {
 	// ModprobeReadErr is non-nil when the existing managed modprobe
 	// file is unreadable for a reason other than absence.
 	ModprobeReadErr error
+}
+
+// classifyCheckResult maps a driftResult to the `apply --check` exit
+// code:
+//
+//	0 — no drift; the host matches what apply would write.
+//	1 — drift detected; an apply pass is needed.
+//	2 — indeterminate; one of the sources of truth (sysctl drop-in,
+//	    bootloader cmdline, modprobe drop-in) could not be read, so
+//	    drift cannot be determined. Monitoring agents should retry on
+//	    the next timer fire instead of paging operators.
+//
+// Read errors take precedence over drift: if the bootloader is
+// unreadable we genuinely don't know whether drift exists, so
+// reporting "drift detected" would be a lie. The systemd unit emitted
+// by `cfm kernsec monitor enable` sets `SuccessExitStatus=2` so exit 2
+// doesn't surface as a Failed unit.
+func classifyCheckResult(d driftResult) int {
+	switch {
+	case d.SysctlReadErr != nil, d.BootReadErr != nil, d.ModprobeReadErr != nil:
+		return 2
+	case d.SysctlDiffers, d.BootDiffers, d.ModprobeDiffers:
+		return 1
+	}
+	return 0
 }
 
 // computeDrift compares the desired sysctl content + cmdline against
