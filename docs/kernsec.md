@@ -543,23 +543,123 @@ Auto-applying breaks cPanel's `/tmp` and several composer/pip workflows, so
 
 ## Host profile detection
 
-Before applying any tier, probe the host for ~5 seconds:
+Before applying any tier, probe the host for ~5 seconds. Probes are
+intentionally over-broad: a false negative silently bricks (no
+recovery without reboot once the boot arg / sysctl is loaded), a
+false positive just means an operator runs `state = force` per-rule
+to opt back in.
 
 | Probe | Effect |
 |---|---|
 | `kvm_intel` / `kvm_amd` loaded | KVM host — keep IOMMU rules |
 | Container daemon / shim / socket / nspawn machine | Containers in use — skip userns kill (full probe set: see `defaultContainerProbe()`) |
 | `ip xfrm policy` non-empty | IPsec in use — skip ipsec module group |
-| `zfs` / `nvidia` loaded | DKMS in use — skip `module.sig_enforce` and `lockdown=integrity` |
-| kdump enabled | Skip `kexec_load_disabled` |
+| Out-of-tree module evidence (see below) | Skip `module.sig_enforce` and `lockdown=integrity` |
+| kdump enabled (multi-distro detection) | Skip `kexec_load_disabled` AND `lockdown=integrity` (kexec primitives) |
 | `/sys/class/bluetooth/*` populated | BT hardware present — skip `modules.bus.bluetooth` group |
 | `/sys/bus/thunderbolt/devices/*` populated | Thunderbolt hardware — skip `modules.bus.thunderbolt` group |
 | NFS mounts active | Don't touch NFS (already excluded by policy) |
+
+Out-of-tree-module evidence (any single signal flips `HasDKMS` to
+true, since any of these means `lockdown=integrity` /
+`module.sig_enforce=1` would brick something the operator paid for):
+
+- `zfs` / `nvidia` / `nvidia_drm` / `nvidia_modeset` loaded
+- `/var/lib/dkms` non-empty (DKMS modules installed even if not loaded)
+- `/usr/bin/akmods` or `/usr/sbin/akmods` present (akmod / ELRepo)
+- KernelCare (TuxCare) — `kcarectl` binary, `/usr/lib/kernelcare`,
+  `/var/cache/kcare`, `/etc/sysconfig/kcare`, or `kcare.service`
+  unit file. Common on cPanel hosts; KernelCare loads vendor-signed
+  patch modules that lockdown / sig_enforce would block, breaking
+  CVE coverage.
+- Ksplice (Oracle) — `uptrack-upgrade`, `/var/lib/uptrack`, `/etc/uptrack`
+- `/usr/src/*-dkms*` source trees
+- `/lib/modules/$(uname -r)/{extra,updates}` non-empty (out-of-tree
+  module install dirs)
+
+kdump multi-distro detection:
+
+- `/sys/kernel/kexec_crash_loaded == 1` (kernel-side; only set after
+  kdumpctl ran since last boot)
+- `/etc/kdump.conf`, `/etc/sysconfig/kdump` (RHEL/Alma/Rocky/CentOS),
+  `/etc/default/kdump-tools` (Debian/Ubuntu)
+- `kdump.service` / `kdump-tools.service` unit-file presence in
+  `/usr/lib/systemd/system/` or `/lib/systemd/system/`
 
 Auto-skipped rules render as `SKIP (host profile: <reason>)` in `status`.
 Operators override per-rule with `[rule "KSEC-..."] state = force` in
 `/etc/cfm/kernsec.conf` (persisted), or with `preview --force-id KSEC-...`
 for ad-hoc inspection.
+
+### Pre-flight safety gate
+
+Mutating `cfm kernsec apply` / `disable` invocations print a
+"[!] About to apply:" preview at the top of output and require an
+interactive `y` answer before any write happens. The preview lists:
+
+- Every managed file path that will be mutated (sysctl drop-in,
+  modprobe blacklist, /etc/default/grub etc.)
+- Every boot-impacting risk in the apply set: `lockdown=*` with
+  KernelCare / DKMS reminder, `module.sig_enforce=1`,
+  `init_on_alloc/init_on_free` perf hint, force-overrides on
+  externally-owned keys
+- The backup file paths the operator can restore from manually
+
+For unattended runs (cron, Ansible, shell-script wrappers), pass
+`--yes` to skip the prompt. EOF on stdin (e.g. `echo "" | cfm
+kernsec apply` without `--yes`) is treated as a decline so a piped
+empty input cannot accidentally bypass the gate.
+
+### Module deny-list (boot-critical drivers)
+
+`apply` runs every module rule through `IsDangerousModule` before
+writing `/etc/modprobe.d/cfm-kernsec.conf`. Any rule whose `Name`
+matches a storage / filesystem / network / console driver pattern
+(nvme*, ahci, ext4, btrfs, virtio_net, i915, drm, etc. — full list
+in `internal/kernsec/safety_modules.go`) causes apply to abort
+with the offending rule named.
+
+Why a deny-list at all: dracut host-only mode (default on
+RHEL/Alma/Rocky/CentOS) embeds `/etc/modprobe.d/*.conf` into the
+initramfs at the next kernel package update. A blacklist on the
+running root filesystem driver therefore becomes a brick at the
+NEXT reboot after a kernel upgrade — a delayed, remote-install-
+unfriendly failure mode. The deny-list is the belt-and-suspenders
+companion to the curated rule data; `TestNoDangerousModulesInRegistry`
+also runs the check at compile-time-test so the invariant can never
+silently regress.
+
+### BLS / grubby — rescue and debug kernels excluded
+
+On BLS hosts, `WriteCmdline` enumerates kernels via
+`grubby --info=ALL`, filters out any kernel image path containing
+the token `rescue` or `debug` (case-insensitive, separator-aware),
+and passes the remaining paths to
+`grubby --update-kernel=PATH1,PATH2,...`. The rescue / debug
+entries exist to recover from exactly the situation a bad managed
+boot arg creates; modifying them with the same arg leaves the
+operator with no recovery path.
+
+### update-grub failure rollback
+
+When the legacy GRUB backend's `Refresh()` (i.e. `update-grub`)
+fails after `WriteCmdline` already modified `/etc/default/grub`,
+applyWrites restores the file from `.cfm-kernsec.bak` before
+returning the error. The operator sees the failure AND has a
+clean `/etc/default/grub` to retry against. Without rollback the
+NEXT legitimate `update-grub` run (kernel package install etc.)
+would propagate the half-applied state into `grub.cfg` and the
+bad cmdline would land at boot.
+
+### GRUB_CMDLINE_LINUX_DEFAULT — read, don't write
+
+`NextBootCmdline` returns the union of `GRUB_CMDLINE_LINUX +
+GRUB_CMDLINE_LINUX_DEFAULT` so drift detection sees the full
+cmdline GRUB will assemble at boot. kernsec WRITES only to
+`GRUB_CMDLINE_LINUX`. Consequence: an operator who hand-edits a
+managed kernsec arg into `_DEFAULT` will see drift flagged but
+`cfm kernsec disable` cannot strip it (the disable code path only
+modifies `_LINUX`). Documented undo gap.
 
 ---
 

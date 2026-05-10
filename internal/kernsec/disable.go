@@ -24,6 +24,10 @@ type DisableOptions struct {
 	// conf aborts disable rather than silently overwriting it with a
 	// clean tier=0 conf (which would lose all per-rule overrides).
 	Force bool
+	// AssumeYes skips the safety preview / confirmation gate that
+	// applyCore inherits. Required for unattended runs. Phase 6
+	// audit C1.
+	AssumeYes bool
 }
 
 // RunDisable is the friendly wrapper around `tier=0 + apply`. Strips
@@ -85,6 +89,7 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 	rc := applyCore(w, conf, ApplyOptions{
 		DryRun:    opts.DryRun,
 		NoRefresh: opts.NoRefresh,
+		AssumeYes: opts.AssumeYes,
 	}, "DISABLE")
 	if rc != 0 {
 		return rc

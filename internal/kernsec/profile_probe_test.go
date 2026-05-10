@@ -208,3 +208,60 @@ func TestDefaultContainerProbe_ShapeOnly(t *testing.T) {
 	}
 	_ = p.detect()
 }
+
+func TestSkipReason_LockdownGatesOnDKMSAndKdump(t *testing.T) {
+	// Phase: tier2.lockdown skips on EITHER DKMS evidence OR kdump
+	// — the probe was previously DKMS-only; the safety audit
+	// flagged kdump as an under-recognised brick path because
+	// lockdown=integrity restricts kexec primitives.
+	tests := []struct {
+		name    string
+		profile HostProfile
+		group   string
+		wantSet bool // true → expect non-empty SkipReason
+	}{
+		{"clean host", HostProfile{}, "tier2.lockdown", false},
+		{"DKMS only", HostProfile{HasDKMS: true}, "tier2.lockdown", true},
+		{"kdump only", HostProfile{HasKdump: true}, "tier2.lockdown", true},
+		{"both", HostProfile{HasDKMS: true, HasKdump: true}, "tier2.lockdown", true},
+		// boot.lockdown shares the same gate
+		{"boot.lockdown DKMS", HostProfile{HasDKMS: true}, "boot.lockdown", true},
+		{"boot.lockdown kdump", HostProfile{HasKdump: true}, "boot.lockdown", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.profile.SkipReason(tc.group)
+			if (got != "") != tc.wantSet {
+				t.Errorf("SkipReason(%q) on %+v = %q, wantSet=%v",
+					tc.group, tc.profile, got, tc.wantSet)
+			}
+		})
+	}
+}
+
+func TestSkipReason_ModuleSigEnforceStillDKMSOnly(t *testing.T) {
+	// module.sig_enforce is purely a module-signing rule — kdump
+	// doesn't need unsigned modules, so the kdump escape doesn't
+	// apply here. Lock that into a test so a future broaden-the-
+	// gates change has to be deliberate.
+	if got := (HostProfile{HasKdump: true}).SkipReason("tier2.module-sig-enforce"); got != "" {
+		t.Errorf("module-sig-enforce should NOT skip on kdump-only host (DKMS=false): got %q", got)
+	}
+	if got := (HostProfile{HasDKMS: true}).SkipReason("tier2.module-sig-enforce"); got == "" {
+		t.Errorf("module-sig-enforce SHOULD skip on DKMS host: got empty")
+	}
+}
+
+func TestHasOutOfTreeModuleEvidence_NoEvidence(t *testing.T) {
+	// Smoke: function returns a bool without panicking on a stock
+	// CI host (no zfs, no nvidia, no /var/lib/dkms, no akmods).
+	// Cannot assert false because the build host might legitimately
+	// have one of these; just exercise the code path.
+	_ = hasOutOfTreeModuleEvidence()
+}
+
+func TestHasKdump_SmokeNoCrash(t *testing.T) {
+	// Smoke: no panic on stock CI host. Test environment is unlikely
+	// to have kdump configured, but don't assert false either.
+	_ = hasKdump()
+}

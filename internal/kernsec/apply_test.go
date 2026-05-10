@@ -213,6 +213,22 @@ func redirectManagedPaths(t *testing.T) (sysctl, modprobe, conf string) {
 	return sysctl, modprobe, conf
 }
 
+// redirectGrubPath swaps PathDefaultGrub to a per-test tempdir so
+// restoreGrubFromBackup tests don't touch /etc/default/grub.
+// Restored on cleanup. Returns the tempdir-rooted file path so the
+// test can populate it.
+func redirectGrubPath(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	grub := filepath.Join(tmp, "grub")
+	orig := PathDefaultGrub
+	PathDefaultGrub = grub
+	t.Cleanup(func() {
+		PathDefaultGrub = orig
+	})
+	return grub
+}
+
 func TestApplyWrites_LoaderRunsLastOnSuccess(t *testing.T) {
 	redirectManagedPaths(t)
 	loaderCalled := false
@@ -287,6 +303,79 @@ func TestApplyWrites_LoaderNotCalledWhenRefreshFails(t *testing.T) {
 	out := w.String()
 	if !strings.Contains(out, "bootloader has NOT picked it up") {
 		t.Errorf("expected operator-facing recovery hint, got:\n%s", out)
+	}
+}
+
+func TestApplyWrites_GrubBackendRollsBackOnRefreshFailure(t *testing.T) {
+	// Phase 6 audit M1: when running on the legacy GRUB backend
+	// and update-grub fails, applyWrites must restore
+	// /etc/default/grub from .cfm-kernsec.bak so the next
+	// legitimate update-grub (kernel package install etc.)
+	// doesn't propagate the half-applied state. Build a
+	// GRUBBackend pointing at a tempdir, seed a .bak with
+	// "ORIGINAL", overwrite the live file with "NEW", trigger
+	// Refresh failure via a fakeFS that reports update-grub
+	// available but missing the cmd entry, then assert the
+	// live file is back to "ORIGINAL".
+	redirectManagedPaths(t)
+	grubPath := redirectGrubPath(t)
+	if err := os.WriteFile(grubPath, []byte("ORIGINAL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the BackupOnce destination with the pre-modify content.
+	bak := grubPath + BackupSuffix
+	if err := os.WriteFile(bak, []byte("ORIGINAL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Now write the "NEW" content as if WriteCmdline already ran.
+	if err := os.WriteFile(grubPath, []byte("NEW\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// fakeFS that "has" update-grub but the cmd will fail (no
+	// matching `withCmd` registration → RunCapture returns error).
+	fs := newFakeFS().withFile(grubPath, "NEW\n").withBin("update-grub")
+	be := &GRUBBackend{FS: fs}
+	loaderCalled := false
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl\n"),
+		[]byte("# modprobe\n"),
+		nil, nil, ApplyOptions{},
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 1 {
+		t.Fatalf("expected rc=1 on Refresh failure, got %d, output:\n%s", rc, w.String())
+	}
+	if loaderCalled {
+		t.Fatal("LoadSysctl was invoked despite Refresh failure")
+	}
+	got, err := os.ReadFile(grubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ORIGINAL\n" {
+		t.Errorf("expected /etc/default/grub rolled back to %q, got %q", "ORIGINAL\n", string(got))
+	}
+	out := w.String()
+	if !strings.Contains(out, "rolled back") {
+		t.Errorf("expected rollback notice in operator output, got:\n%s", out)
+	}
+}
+
+func TestRestoreGrubFromBackup_NoBackupIsNoOp(t *testing.T) {
+	// Defensive: if the backup doesn't exist (very-first-apply
+	// failure path before BackupOnce ran), restore must not error.
+	grubPath := redirectGrubPath(t)
+	if err := os.WriteFile(grubPath, []byte("LIVE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreGrubFromBackup(); err != nil {
+		t.Errorf("expected nil on missing backup, got %v", err)
+	}
+	got, _ := os.ReadFile(grubPath)
+	if string(got) != "LIVE\n" {
+		t.Errorf("file must be untouched when backup absent: %q", string(got))
 	}
 }
 

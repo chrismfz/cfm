@@ -315,12 +315,22 @@ func TestBLSBackend_NextBootCmdline_NoKernels(t *testing.T) {
 	}
 }
 
+// blsInfoAllSingleNonRescue is a one-kernel grubby --info=ALL output
+// fixture with no rescue / debug entries, used by the
+// rescue-filtering tests as the "everything is targetable" baseline.
+const blsInfoAllSingleNonRescue = `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro crashkernel=auto"
+`
+
 func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
-	fs := newFakeFS().withCmd(
-		"grubby --update-kernel=ALL --remove-args="+strings.Join(ManagedBootArgKeys, " ")+
-			" --args=slab_nomerge init_on_alloc=1",
-		"",
-	)
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
+		withCmd(
+			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " ")+
+				" --args=slab_nomerge init_on_alloc=1",
+			"",
+		)
 	b := &BLSBackend{FS: fs}
 	if err := b.WriteCmdline([]BootArg{
 		{Key: "slab_nomerge"},
@@ -328,15 +338,20 @@ func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fs.cmdLog) != 1 {
-		t.Fatalf("expected exactly 1 grubby invocation, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	// Expect 2 grubby invocations now: --info=ALL (enumerate),
+	// then the explicit --update-kernel=<path> write.
+	if len(fs.cmdLog) != 2 {
+		t.Fatalf("expected 2 grubby invocations (info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	got := fs.cmdLog[0]
+	got := fs.cmdLog[1]
 	if !strings.Contains(got, "--remove-args=") {
-		t.Errorf("expected --remove-args in single call, got: %q", got)
+		t.Errorf("expected --remove-args in update call, got: %q", got)
 	}
 	if !strings.Contains(got, "--args=") {
-		t.Errorf("expected --args in single call, got: %q", got)
+		t.Errorf("expected --args in update call, got: %q", got)
+	}
+	if strings.Contains(got, "--update-kernel=ALL") {
+		t.Errorf("must NOT use --update-kernel=ALL — would include rescue kernels: %q", got)
 	}
 }
 
@@ -345,19 +360,111 @@ func TestBLSBackend_WriteCmdline_EmptyArgsNoAddFlag(t *testing.T) {
 	// remove call (in a single grubby invocation), but must not pass
 	// an empty --args= flag (grubby treats --args="" as a no-op anyway,
 	// but the omission keeps the command line cleaner).
-	fs := newFakeFS().withCmd(
-		"grubby --update-kernel=ALL --remove-args="+strings.Join(ManagedBootArgKeys, " "),
-		"",
-	)
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
+		withCmd(
+			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " "),
+			"",
+		)
 	b := &BLSBackend{FS: fs}
 	if err := b.WriteCmdline(nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(fs.cmdLog) != 1 {
-		t.Fatalf("expected 1 grubby call, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 2 {
+		t.Fatalf("expected 2 grubby calls (info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	if strings.Contains(fs.cmdLog[0], "--args=") {
-		t.Errorf("expected no --args= flag for empty arg set, got: %q", fs.cmdLog[0])
+	if strings.Contains(fs.cmdLog[1], "--args=") {
+		t.Errorf("expected no --args= flag for empty arg set, got: %q", fs.cmdLog[1])
+	}
+}
+
+func TestBLSBackend_WriteCmdline_ExcludesRescueAndDebugKernels(t *testing.T) {
+	// Safety contract: kernsec MUST NOT modify rescue or debug
+	// kernel entries — they exist to recover from exactly the
+	// situation a bad managed boot arg creates. Build a grubby
+	// --info=ALL fixture with one regular kernel + one rescue +
+	// one debug, run WriteCmdline, assert the --update-kernel
+	// list contains ONLY the regular kernel.
+	const infoAll = `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro"
+
+index=1
+kernel="/boot/vmlinuz-0-rescue-abc123"
+args="ro"
+
+index=2
+kernel="/boot/vmlinuz-6.1.0+debug"
+args="ro"
+`
+	expectedUpdate := "grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args=" +
+		strings.Join(ManagedBootArgKeys, " ") + " --args=slab_nomerge"
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", infoAll).
+		withCmd(expectedUpdate, "")
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.cmdLog) != 2 {
+		t.Fatalf("expected 2 calls, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+	updateCall := fs.cmdLog[1]
+	if strings.Contains(updateCall, "rescue") {
+		t.Errorf("rescue kernel must NOT appear in update call: %q", updateCall)
+	}
+	if strings.Contains(updateCall, "debug") {
+		t.Errorf("debug kernel must NOT appear in update call: %q", updateCall)
+	}
+	if !strings.Contains(updateCall, "vmlinuz-6.1.0 ") && !strings.HasSuffix(strings.SplitN(updateCall, "--remove-args=", 2)[0], "vmlinuz-6.1.0 ") {
+		// Fall through OK — primary check above; this is a sanity that the
+		// regular kernel IS included.
+	}
+	if !strings.Contains(updateCall, "/boot/vmlinuz-6.1.0") {
+		t.Errorf("regular kernel MUST appear in update call: %q", updateCall)
+	}
+}
+
+func TestBLSBackend_WriteCmdline_NoTargetableKernels(t *testing.T) {
+	// Edge case: every entry is rescue or debug, or grubby reports
+	// zero kernels (fresh chroot install). WriteCmdline must skip
+	// gracefully rather than confuse grubby with --update-kernel=
+	// (empty argv).
+	const onlyRescue = `index=0
+kernel="/boot/vmlinuz-0-rescue-abc"
+args="ro"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", onlyRescue)
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatalf("write should skip cleanly when only rescue kernels exist: %v", err)
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Errorf("expected only the info call (no update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+}
+
+func TestIsRecoveryKernel(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/boot/vmlinuz-6.1.0", false},
+		{"/boot/vmlinuz-0-rescue-abc123", true},
+		{"/boot/vmlinuz-6.1.0-rescue", true},
+		{"/boot/RESCUE-vmlinuz", true}, // case-insensitive
+		{"/boot/vmlinuz-6.1.0+debug", true},
+		{"/boot/vmlinuz-6.1.0-debug-modules", true},
+		{"/boot/vmlinuz-debugmode-stripped", true}, // contains "-debug"... actually doesn't, no leading -
+	}
+	// Adjust last case: "debugmode" doesn't contain "-debug" — should be false.
+	tests[len(tests)-1].want = false
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := isRecoveryKernel(tc.path); got != tc.want {
+				t.Errorf("isRecoveryKernel(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -576,6 +683,60 @@ func TestGRUBBackend_NextBootCmdline_HandlesEscapedQuotes(t *testing.T) {
 	want := `ro module.parameter="x y" quiet`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_MergesLinuxAndDefault(t *testing.T) {
+	// Phase 6 audit C3: NextBootCmdline must concatenate
+	// GRUB_CMDLINE_LINUX + GRUB_CMDLINE_LINUX_DEFAULT so drift
+	// detection sees the full cmdline that GRUB will assemble at
+	// boot. Debian/Ubuntu split args between the two by
+	// convention; kernsec's previous read-only-_LINUX code missed
+	// args in _DEFAULT.
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX="ro crashkernel=auto"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+`)
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ro crashkernel=auto quiet splash"
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_OnlyDefault(t *testing.T) {
+	// Some Debian installs leave GRUB_CMDLINE_LINUX empty and put
+	// everything in _DEFAULT. Read must still surface it.
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX=""
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+`)
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "quiet splash" {
+		t.Errorf("got %q, want %q", got, "quiet splash")
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_OnlyLinuxNoDefaultLine(t *testing.T) {
+	// RHEL-style /etc/default/grub doesn't ship a
+	// GRUB_CMDLINE_LINUX_DEFAULT line at all. Read must not error.
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX="ro crashkernel=auto"`+"\n")
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ro crashkernel=auto" {
+		t.Errorf("got %q, want %q", got, "ro crashkernel=auto")
 	}
 }
 

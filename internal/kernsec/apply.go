@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +24,16 @@ type ApplyOptions struct {
 	// (proxmox-boot-tool refresh / update-grub). The cmdline file
 	// is still updated; operator runs the refresh later.
 	NoRefresh bool
+	// AssumeYes skips the safety preview + interactive confirmation
+	// gate. Required for unattended (cron / Ansible / shell-script)
+	// invocations. When false (default), interactive applies print
+	// a "[!] about to mutate" preview and require a `y` answer
+	// before any write happens. Phase 6 audit C1.
+	AssumeYes bool
+	// Stdin is where the confirmation prompt reads from. Default
+	// (nil) means os.Stdin via the prompt helper. Tests inject a
+	// strings.Reader.
+	Stdin io.Reader
 }
 
 // RunApply is the main `cfm kernsec apply` orchestration:
@@ -116,6 +127,14 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 	fmt.Fprintln(w)
 
+	// Safety guard: refuse to blacklist boot-critical modules even
+	// if a future PR's curated rule data slipped one in. Runs BEFORE
+	// any rendering so the operator sees the rejection immediately.
+	if err := CheckSafeModuleRules(modules); err != nil {
+		fmt.Fprintln(w, err)
+		return 1
+	}
+
 	sysctlContent := RenderSysctlFile(sysctls)
 	modprobeContent := RenderModprobeFile(modules)
 	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
@@ -193,6 +212,30 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	if drift.BootReadErr != nil {
 		fmt.Fprintln(w, "kernsec apply: refusing to write — cannot read current cmdline")
 		return 1
+	}
+
+	// Phase 6 audit C1: interactive safety gate. Mutating operations
+	// (apply, disable when not --dry-run / --check) print a summary
+	// of every file kernsec is about to mutate, and require a `y`
+	// answer before any write. --yes (or AssumeYes) skips the gate
+	// for unattended runs (cron, Ansible, shell-script wrappers).
+	//
+	// Skip the gate when there's nothing to write (no drift) — the
+	// apply call is then equivalent to a `--check` and shouldn't
+	// pester the operator. drift.SysctlDiffers / BootDiffers /
+	// ModprobeDiffers cover the three managed surfaces.
+	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers
+	if mutating && !opts.AssumeYes {
+		preflightSummary(w, label, sysctls, bootArgs, modules, profile)
+		ok, err := confirmApply(w, opts.Stdin)
+		if err != nil {
+			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)
+			return 1
+		}
+		if !ok {
+			fmt.Fprintln(w, "kernsec apply: aborted by operator (no changes written).")
+			return 0
+		}
 	}
 
 	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, LoadSysctl); rc != 0 {
@@ -277,6 +320,28 @@ func applyWrites(
 		if err := backend.Refresh(); err != nil {
 			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
 			fmt.Fprintln(w, "  cmdline is written but bootloader has NOT picked it up.")
+			// SAFETY (Phase 6 audit M1): on the legacy GRUB backend
+			// the bootloader refresh is what actually propagates
+			// /etc/default/grub into /boot/grub/grub.cfg. If
+			// update-grub failed and we leave the modified
+			// /etc/default/grub on disk, the NEXT legitimate
+			// operator change (kernel package install, etc.) will
+			// run update-grub on the corrupted-from-its-PoV file
+			// and the bad cmdline will land at boot. Restore the
+			// pre-write file from the .cfm-kernsec.bak BEFORE
+			// returning the error — operator now sees the failure
+			// AND has a clean /etc/default/grub to retry against.
+			//
+			// BLS backend has no rollback (grubby committed in
+			// WriteCmdline; Refresh is a no-op there).
+			if _, isGrub := backend.(*GRUBBackend); isGrub {
+				if rerr := restoreGrubFromBackup(); rerr != nil {
+					fmt.Fprintf(w, "  WARNING: rollback of %s failed: %v\n", PathDefaultGrub, rerr)
+					fmt.Fprintf(w, "  manual recovery: cp %s%s %s\n", PathDefaultGrub, BackupSuffix, PathDefaultGrub)
+				} else {
+					fmt.Fprintf(w, "  rolled back %s from %s%s.\n", PathDefaultGrub, PathDefaultGrub, BackupSuffix)
+				}
+			}
 			fmt.Fprintln(w, "  re-run `cfm kernsec apply` or refresh the bootloader manually before reboot.")
 			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT loaded; runtime state unchanged.")
 			return 1
@@ -489,6 +554,33 @@ func verifyAfterApply(w io.Writer, conf *Conf, profile HostProfile) {
 	default:
 		fmt.Fprintln(w, "  module: blacklist on disk; no managed modules currently loaded")
 	}
+}
+
+// restoreGrubFromBackup is the M1 rollback path: when
+// update-grub fails after WriteCmdline succeeded, restore
+// /etc/default/grub from the BackupOnce-saved copy so the
+// next legitimate run of update-grub (kernel package install
+// etc.) doesn't propagate the half-applied state.
+//
+// No-op (returns nil) if the backup file doesn't exist —
+// could happen on the very first apply if BackupOnce hadn't
+// been called yet (it's called at the top of WriteCmdline,
+// so in practice this is the always-have-a-backup path).
+func restoreGrubFromBackup() error {
+	bak := PathDefaultGrub + BackupSuffix
+	if _, err := os.Stat(bak); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat %s: %w", bak, err)
+	}
+	data, err := os.ReadFile(bak)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", bak, err)
+	}
+	if err := AtomicWriteFile(PathDefaultGrub, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", PathDefaultGrub, err)
+	}
+	return nil
 }
 
 // reportCrossComponentConflicts surfaces ownership disagreements that

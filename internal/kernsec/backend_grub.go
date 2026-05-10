@@ -36,6 +36,21 @@ func (g *GRUBBackend) Label() string {
 	return "Legacy GRUB"
 }
 
+// NextBootCmdline returns the union of GRUB_CMDLINE_LINUX and
+// GRUB_CMDLINE_LINUX_DEFAULT from /etc/default/grub.
+//
+// SAFETY (Phase 6 audit C3): on Debian/Ubuntu the live kernel
+// cmdline is the concatenation of both; reading only
+// GRUB_CMDLINE_LINUX (the previous behaviour) caused the drift
+// check to silently miss managed args sitting in _DEFAULT, leading
+// to spurious DRIFT reports + duplicate-token rewrites at boot.
+//
+// kernsec WRITES only to GRUB_CMDLINE_LINUX (see WriteCmdline) so
+// `disable` cannot strip args an operator hand-placed in
+// _DEFAULT — that's documented as an undo gap in
+// docs/kernsec.md. The READ side here is the safety-side
+// completeness fix: drift detection sees the full picture even if
+// it can't fully reverse it.
 func (g *GRUBBackend) NextBootCmdline() (string, error) {
 	if !g.FS.Exists(PathDefaultGrub) {
 		return "", nil
@@ -44,15 +59,43 @@ func (g *GRUBBackend) NextBootCmdline() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	linuxArgs, err := readGrubCmdlineVar(string(b), "GRUB_CMDLINE_LINUX")
+	if err != nil {
+		return "", err
+	}
+	defaultArgs, err := readGrubCmdlineVar(string(b), "GRUB_CMDLINE_LINUX_DEFAULT")
+	if err != nil {
+		return "", err
+	}
+	// Concatenate _LINUX and _DEFAULT in the order GRUB itself uses
+	// (Debian/Ubuntu /etc/grub.d/10_linux: _DEFAULT comes after
+	// _LINUX in the generated grub.cfg). Either may be empty;
+	// strings.TrimSpace + strings.Join handles that cleanly.
+	parts := make([]string, 0, 2)
+	if linuxArgs != "" {
+		parts = append(parts, linuxArgs)
+	}
+	if defaultArgs != "" {
+		parts = append(parts, defaultArgs)
+	}
+	return strings.TrimSpace(strings.Join(parts, " ")), nil
+}
+
+// readGrubCmdlineVar locates the named GRUB_CMDLINE_LINUX* variable
+// in /etc/default/grub content, decodes its value, and returns it.
+// "" + nil if the variable is absent (some distros don't ship a
+// _DEFAULT line).
+func readGrubCmdlineVar(content, varName string) (string, error) {
+	prefix := varName + "="
+	for _, line := range strings.Split(content, "\n") {
 		t := strings.TrimSpace(line)
-		if !strings.HasPrefix(t, "GRUB_CMDLINE_LINUX=") {
+		if !strings.HasPrefix(t, prefix) {
 			continue
 		}
-		val := strings.TrimPrefix(t, "GRUB_CMDLINE_LINUX=")
+		val := strings.TrimPrefix(t, prefix)
 		decoded, err := decodeGrubCmdlineValue(val)
 		if err != nil {
-			return "", fmt.Errorf("%s: GRUB_CMDLINE_LINUX: %w", PathDefaultGrub, err)
+			return "", fmt.Errorf("%s: %s: %w", PathDefaultGrub, varName, err)
 		}
 		return decoded, nil
 	}
@@ -160,6 +203,15 @@ func encodeGrubCmdlineValue(inner string) (string, error) {
 // WriteCmdline rewrites GRUB_CMDLINE_LINUX in /etc/default/grub with
 // the managed-keys workflow. Mirrors kspp.sh apply_boot_args_grub +
 // set_grub_cmdline.
+//
+// kernsec writes ONLY to GRUB_CMDLINE_LINUX, never to
+// GRUB_CMDLINE_LINUX_DEFAULT. The read side (NextBootCmdline) reads
+// both — see its docstring for the rationale. Consequence: an
+// operator who hand-edits managed kernsec keys into
+// GRUB_CMDLINE_LINUX_DEFAULT will see them flagged as drift but
+// `cfm kernsec disable` cannot strip them (the disable code path
+// only modifies _LINUX). docs/kernsec.md flags this as a known
+// undo gap.
 //
 // Returns an explicit error if the current cmdline value contains
 // shell metacharacters our minimal escaper cannot safely round-trip
