@@ -522,6 +522,113 @@ args="ro"
 	}
 }
 
+func TestBLSBackend_WriteCmdline_SnapshotWriteFailureBlocksUpdate(t *testing.T) {
+	orig := BLSBackupPath
+	BLSBackupPath = "/proc/cfm-kernsec-test/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
+	const infoAll = `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", infoAll)
+	b := &BLSBackend{FS: fs}
+	err := b.WriteCmdline([]BootArg{{Key: "init_on_alloc", Value: "1"}})
+	if err == nil {
+		t.Fatal("expected snapshot write failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "write BLS rollback snapshot") {
+		t.Fatalf("expected actionable snapshot write error, got: %v", err)
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Fatalf("expected failure before enumerate/update, got calls: %v", fs.cmdLog)
+	}
+	for _, call := range fs.cmdLog {
+		if strings.Contains(call, "--update-kernel=") {
+			t.Fatalf("must not update kernels after snapshot write failure; calls: %v", fs.cmdLog)
+		}
+	}
+}
+
+func TestBLSBackend_WriteCmdline_MalformedGrubbyOutputBlocksUpdate(t *testing.T) {
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
+	const malformed = `index=0
+kernel="/boot/vmlinuz-6.1.0"
+`
+	fs := newFakeFS().withCmd("grubby --info=ALL", malformed)
+	b := &BLSBackend{FS: fs}
+	err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}})
+	if err == nil {
+		t.Fatal("expected malformed grubby output error, got nil")
+	}
+	if !strings.Contains(err.Error(), "malformed grubby --info=ALL output") || !strings.Contains(err.Error(), "missing args=") {
+		t.Fatalf("expected malformed args error, got: %v", err)
+	}
+	if len(fs.cmdLog) != 1 {
+		t.Fatalf("expected failure before enumerate/update, got calls: %v", fs.cmdLog)
+	}
+}
+
+func TestBLSBackend_WriteCmdline_AbsentTargetKernelsSkipsUpdate(t *testing.T) {
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
+	fs := newFakeFS().withCmd("grubby --info=ALL", "")
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatalf("write should skip cleanly when grubby reports no kernels: %v", err)
+	}
+	if len(fs.cmdLog) != 2 {
+		t.Fatalf("expected snapshot probe + enumerate only, got calls: %v", fs.cmdLog)
+	}
+	for _, call := range fs.cmdLog {
+		if strings.Contains(call, "--update-kernel=") {
+			t.Fatalf("must not update when no target kernels exist; calls: %v", fs.cmdLog)
+		}
+	}
+	if _, err := os.Stat(BLSBackupPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no empty snapshot to be written, stat err=%v", err)
+	}
+}
+
+func TestBLSBackend_WriteCmdline_ExistingSnapshotAllowsUpdate(t *testing.T) {
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+	originalSnapshot := []byte("already snapshotted\n")
+	if err := os.WriteFile(BLSBackupPath, originalSnapshot, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const infoAll = `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge"
+`
+	expectedUpdate := "grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args=" +
+		strings.Join(ManagedBootArgKeys, " ") + " --args=init_on_alloc=1"
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", infoAll).
+		withCmd(expectedUpdate, "")
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{{Key: "init_on_alloc", Value: "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.cmdLog) != 2 {
+		t.Fatalf("expected enumerate + update only when snapshot exists, got calls: %v", fs.cmdLog)
+	}
+	gotSnapshot, err := os.ReadFile(BLSBackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotSnapshot) != string(originalSnapshot) {
+		t.Fatalf("existing snapshot should not be overwritten; got %q", gotSnapshot)
+	}
+}
+
 func TestIsRecoveryKernel(t *testing.T) {
 	tests := []struct {
 		path string

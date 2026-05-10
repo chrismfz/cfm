@@ -23,8 +23,10 @@ func (b *BLSBackend) Label() string {
 
 // blsKernelEntry is one kernel block parsed out of grubby --info=ALL.
 type blsKernelEntry struct {
-	Kernel string // path to kernel image, used for divergence diagnostics
-	Args   string // contents of args="..." for this entry
+	Kernel    string // path to kernel image, used for divergence diagnostics
+	Args      string // contents of args="..." for this entry
+	hasKernel bool
+	hasArgs   bool
 }
 
 // NextBootCmdline returns the args string from grubby --info=ALL.
@@ -111,9 +113,11 @@ func parseGrubbyAll(out string) []blsKernelEntry {
 		case strings.HasPrefix(t, "kernel="):
 			started = true
 			cur.Kernel = unquoteValue(strings.TrimPrefix(t, "kernel="))
+			cur.hasKernel = true
 		case strings.HasPrefix(t, "args="):
 			started = true
 			cur.Args = unquoteValue(strings.TrimPrefix(t, "args="))
+			cur.hasArgs = true
 		}
 	}
 	flush()
@@ -143,34 +147,46 @@ const blsRollbackSnapshotVersion = 1
 // Unmanaged args are intentionally not snapshotted: grubby preserves them when
 // WriteCmdline removes/re-adds only kernsec-managed keys.
 func (b *BLSBackend) writeBLSSnapshot() error {
-	// Already snapshotted — honour the one-shot guarantee.
+	// Already snapshotted — honour the one-shot guarantee. Existing
+	// snapshots keep the historical rollback fallback available and do not
+	// block a new apply.
 	if _, err := os.Stat(BLSBackupPath); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat BLS rollback snapshot %s: %w", BLSBackupPath, err)
 	}
+
 	out, err := b.FS.RunCapture("grubby", "--info=ALL")
 	if err != nil {
-		// Non-fatal: snapshot is best-effort. The apply still proceeds;
-		// rollback will fall back to managed-args-strip mode.
-		return nil
+		return fmt.Errorf("cannot create BLS rollback snapshot: grubby --info=ALL: %w: %s", err, strings.TrimSpace(out))
 	}
+	entries := parseGrubbyAll(out)
+	if err := validateGrubbyEntries(entries); err != nil {
+		return fmt.Errorf("cannot create BLS rollback snapshot: malformed grubby --info=ALL output: %w", err)
+	}
+
 	snap := blsRollbackSnapshot{
 		Version: blsRollbackSnapshotVersion,
 		Kernels: map[string][]string{},
 	}
-	for _, e := range nonRecoveryKernelEntries(parseGrubbyAll(out)) {
+	for _, e := range nonRecoveryKernelEntries(entries) {
 		managed := KeepManagedArgs(ParseCmdline(e.Args))
 		if len(managed) > 0 {
 			snap.Kernels[e.Kernel] = managed
 		}
 	}
+	if len(snap.Kernels) == 0 {
+		// Nothing pre-existing is managed by kernsec, so rollback can safely
+		// use its managed-args-strip fallback without a snapshot.
+		return nil
+	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
-		return nil
+		return fmt.Errorf("marshal BLS rollback snapshot %s: %w", BLSBackupPath, err)
 	}
 	data = append(data, '\n')
 	if err := AtomicWriteFile(BLSBackupPath, data, 0o644); err != nil {
-		// Best-effort; non-fatal.
-		return nil
+		return fmt.Errorf("write BLS rollback snapshot %s: %w", BLSBackupPath, err)
 	}
 	return nil
 }
@@ -198,15 +214,19 @@ func (b *BLSBackend) writeBLSSnapshot() error {
 // grubby commits to the active BLS entries immediately, so Refresh()
 // is a no-op on this backend.
 func (b *BLSBackend) WriteCmdline(args []BootArg) error {
-	// Best-effort pre-apply snapshot for rollback — non-fatal if it
-	// fails (write proceeds regardless).
-	_ = b.writeBLSSnapshot()
+	if err := b.writeBLSSnapshot(); err != nil {
+		return err
+	}
 
 	out, err := b.FS.RunCapture("grubby", "--info=ALL")
 	if err != nil {
 		return fmt.Errorf("grubby --info=ALL: %v: %s", err, strings.TrimSpace(out))
 	}
-	entries := nonRecoveryKernelEntries(parseGrubbyAll(out))
+	parsed := parseGrubbyAll(out)
+	if err := validateGrubbyEntries(parsed); err != nil {
+		return fmt.Errorf("malformed grubby --info=ALL output: %w", err)
+	}
+	entries := nonRecoveryKernelEntries(parsed)
 	targets := kernelPaths(entries)
 	if len(targets) == 0 {
 		// No targetable kernels. Could be a fresh chroot install
@@ -228,6 +248,18 @@ func (b *BLSBackend) WriteCmdline(args []BootArg) error {
 	}
 	if out, err := b.FS.RunCapture("grubby", cmd...); err != nil {
 		return fmt.Errorf("grubby update-kernel: %v: %s", err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+func validateGrubbyEntries(entries []blsKernelEntry) error {
+	for i, e := range entries {
+		if !e.hasKernel {
+			return fmt.Errorf("entry %d missing kernel= line", i)
+		}
+		if !e.hasArgs {
+			return fmt.Errorf("entry %d missing args= line", i)
+		}
 	}
 	return nil
 }
