@@ -129,30 +129,103 @@ func unquoteValue(s string) string {
 	return s
 }
 
-// WriteCmdline runs a single `grubby --update-kernel=ALL` invocation
+// WriteCmdline runs a single `grubby --update-kernel=...` invocation
 // that combines `--remove-args` (stripping every managed-keys token)
 // with `--args=` (the desired set). grubby applies removes before adds
 // within a single call, closing the window where every kernel sat
 // stripped of managed args between the previous two-call sequence.
 //
+// SAFETY (Phase 6 audit C4): the previous code used
+// `--update-kernel=ALL` which DOES include `vmlinuz-*-rescue-*` and
+// `*-debug` entries — the rescue kernel exists to recover from
+// exactly the situation a bad cmdline arg creates. If
+// `lockdown=integrity` (or any other arg) makes the regular kernel
+// unbootable, applying the same arg to the rescue entry leaves the
+// operator with no recovery path. Now the backend enumerates
+// kernels via `grubby --info=ALL`, filters out rescue + debug
+// kernels by path, and writes only the explicit list.
+//
 // grubby commits to the active BLS entries immediately, so Refresh()
 // is a no-op on this backend.
 func (b *BLSBackend) WriteCmdline(args []BootArg) error {
+	out, err := b.FS.RunCapture("grubby", "--info=ALL")
+	if err != nil {
+		return fmt.Errorf("grubby --info=ALL: %v: %s", err, strings.TrimSpace(out))
+	}
+	entries := parseGrubbyAll(out)
+	targets := nonRecoveryKernels(entries)
+	if len(targets) == 0 {
+		// No targetable kernels. Could be a fresh chroot install
+		// before the first kernel package landed; skip gracefully
+		// rather than confuse grubby with `--update-kernel=`.
+		return nil
+	}
+
 	addArgs := make([]string, 0, len(args))
 	for _, a := range args {
 		addArgs = append(addArgs, a.String())
 	}
 	cmd := []string{
-		"--update-kernel=ALL",
+		"--update-kernel=" + strings.Join(targets, ","),
 		"--remove-args=" + strings.Join(ManagedBootArgKeys, " "),
 	}
 	if len(addArgs) > 0 {
 		cmd = append(cmd, "--args="+strings.Join(addArgs, " "))
 	}
 	if out, err := b.FS.RunCapture("grubby", cmd...); err != nil {
-		return fmt.Errorf("grubby update-kernel=ALL: %v: %s", err, strings.TrimSpace(out))
+		return fmt.Errorf("grubby update-kernel: %v: %s", err, strings.TrimSpace(out))
 	}
 	return nil
+}
+
+// nonRecoveryKernels returns the kernel paths kernsec should write
+// — every entry whose kernel image path contains neither `rescue`
+// nor `-debug`. Recovery / debug kernels are intentionally excluded
+// so a bad managed arg can't brick the rescue path.
+//
+// Match is path-substring rather than glob: vendors name rescue
+// kernels variably (`vmlinuz-*-rescue-*`,
+// `vmlinuz-0-rescue-<machine-id>`, etc.) but always include the
+// literal `rescue` token.
+func nonRecoveryKernels(entries []blsKernelEntry) []string {
+	var out []string
+	for _, e := range entries {
+		if e.Kernel == "" {
+			continue
+		}
+		if isRecoveryKernel(e.Kernel) {
+			continue
+		}
+		out = append(out, e.Kernel)
+	}
+	return out
+}
+
+// isRecoveryKernel reports whether the given kernel image path looks
+// like a rescue-or-debug entry that kernsec should leave alone.
+//
+// Token-based to avoid false positives on legitimate kernel names
+// that contain the substring (e.g. `vmlinuz-debugmode-stripped`):
+// the basename is split on `/_+-.` separators and a recovery hit
+// requires an EXACT token match against `rescue` or `debug` (case-
+// insensitive). This handles every separator convention vendors
+// use: `-rescue-`, `+debug`, `_debug_`, `.debug`.
+func isRecoveryKernel(path string) bool {
+	lower := strings.ToLower(path)
+	for _, token := range strings.FieldsFunc(lower, isKernelPathSep) {
+		if token == "rescue" || token == "debug" {
+			return true
+		}
+	}
+	return false
+}
+
+func isKernelPathSep(r rune) bool {
+	switch r {
+	case '/', '-', '_', '+', '.':
+		return true
+	}
+	return false
 }
 
 // Refresh is a no-op on BLS — grubby already committed.

@@ -150,6 +150,7 @@ func runApplyCmd(args []string, w io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "show what would be written / refreshed without doing it")
 	check := fs.Bool("check", false, "exit non-zero on drift; implies no writes (for monitoring)")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step (proxmox-boot-tool / update-grub)")
+	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 
 	if rc, done := handleFlagErr("kernsec apply", fs.Parse(args), w); done {
 		return rc
@@ -158,6 +159,7 @@ func runApplyCmd(args []string, w io.Writer) int {
 		DryRun:    *dryRun,
 		Check:     *check,
 		NoRefresh: *noRefresh,
+		AssumeYes: *yes,
 	})
 }
 
@@ -191,6 +193,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step")
 	force := fs.Bool("force", false, "proceed even if the existing kernsec.conf is malformed or unreadable (overrides will be lost)")
+	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 
 	if rc, done := handleFlagErr("kernsec disable", fs.Parse(args), w); done {
 		return rc
@@ -200,6 +203,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 		DryRun:    *dryRun,
 		NoRefresh: *noRefresh,
 		Force:     *force,
+		AssumeYes: *yes,
 	})
 }
 
@@ -248,12 +252,14 @@ Apply flags:
   --dry-run           Show what would change without writing
   --check             Exit non-zero on drift (implies no writes; for monitoring)
   --no-refresh        Skip the bootloader refresh after writing the cmdline
+  --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
 
 Disable flags:
   --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
   --dry-run           Show what would happen without writing
   --no-refresh        Skip the bootloader refresh step
   --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
+  --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
 
 Monitor subcommands:
   cfm kernsec monitor enable [--interval=daily]   install + enable systemd timer
