@@ -383,7 +383,7 @@ func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
 	defer func() { BLSBackupPath = orig }()
 
 	fs := newFakeFS().
-		withCmd("grubby --info=DEFAULT", blsInfoAllSingleNonRescue).
+		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd(
 			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " ")+
@@ -397,7 +397,7 @@ func TestBLSBackend_WriteCmdline_SingleGrubbyCall(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Expect 3 grubby invocations: --info=DEFAULT (snapshot), --info=ALL (enumerate),
+	// Expect 3 grubby invocations: --info=ALL (snapshot), --info=ALL (enumerate),
 	// then the explicit --update-kernel=<path> write.
 	if len(fs.cmdLog) != 3 {
 		t.Fatalf("expected 3 grubby invocations (snapshot + info + update), got %d: %v", len(fs.cmdLog), fs.cmdLog)
@@ -424,7 +424,7 @@ func TestBLSBackend_WriteCmdline_EmptyArgsNoAddFlag(t *testing.T) {
 	defer func() { BLSBackupPath = orig }()
 
 	fs := newFakeFS().
-		withCmd("grubby --info=DEFAULT", blsInfoAllSingleNonRescue).
+		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd("grubby --info=ALL", blsInfoAllSingleNonRescue).
 		withCmd(
 			"grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args="+strings.Join(ManagedBootArgKeys, " "),
@@ -468,7 +468,7 @@ args="ro"
 	expectedUpdate := "grubby --update-kernel=/boot/vmlinuz-6.1.0 --remove-args=" +
 		strings.Join(ManagedBootArgKeys, " ") + " --args=slab_nomerge"
 	fs := newFakeFS().
-		withCmd("grubby --info=DEFAULT", infoAll).
+		withCmd("grubby --info=ALL", infoAll).
 		withCmd("grubby --info=ALL", infoAll).
 		withCmd(expectedUpdate, "")
 	b := &BLSBackend{FS: fs}
@@ -508,13 +508,13 @@ kernel="/boot/vmlinuz-0-rescue-abc"
 args="ro"
 `
 	fs := newFakeFS().
-		withCmd("grubby --info=DEFAULT", onlyRescue).
+		withCmd("grubby --info=ALL", onlyRescue).
 		withCmd("grubby --info=ALL", onlyRescue)
 	b := &BLSBackend{FS: fs}
 	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
 		t.Fatalf("write should skip cleanly when only rescue kernels exist: %v", err)
 	}
-	// Expect 2 calls: snapshot (--info=DEFAULT) + enumerate (--info=ALL).
+	// Expect 2 calls: snapshot (--info=ALL) + enumerate (--info=ALL).
 	// No update call since there are no targetable kernels.
 	if len(fs.cmdLog) != 2 {
 		t.Errorf("expected only snapshot+info calls (no update), got %d: %v", len(fs.cmdLog), fs.cmdLog)

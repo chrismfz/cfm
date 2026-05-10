@@ -1,15 +1,17 @@
 package kernsec
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
-// BLSBackupPath is where WriteCmdline saves the pre-apply grubby
-// --info=DEFAULT output on BLS hosts. Unlike the GRUB and Proxmox
-// backends, BLS has no single source file — so we capture the grubby
-// snapshot into this path and use it in `cfm kernsec rollback`.
+// BLSBackupPath is where WriteCmdline saves the pre-apply BLS rollback
+// snapshot on grubby hosts. Unlike the GRUB and Proxmox backends, BLS has
+// no single source file — so we capture per-kernel managed tokens into
+// this path and use them in `cfm kernsec rollback`.
 var BLSBackupPath = "/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak"
 
 // RunRollback restores the pre-kernsec bootloader configuration from
@@ -22,10 +24,10 @@ var BLSBackupPath = "/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak"
 //     /etc/default/grub → runs update-grub.
 //   - Proxmox: reads /etc/kernel/cmdline.cfm-kernsec.bak → restores
 //     /etc/kernel/cmdline → runs proxmox-boot-tool refresh.
-//   - BLS / grubby: if a pre-apply snapshot exists at BLSBackupPath,
-//     strips all managed args from every non-rescue kernel and applies
-//     the saved args; if no snapshot exists, strips managed args only
-//     (returns managed args to distro default / absent state).
+//   - BLS / grubby: strips all managed args from every non-rescue kernel.
+//     If a current-format pre-apply snapshot exists at BLSBackupPath,
+//     restores only the per-kernel managed tokens saved for the matching
+//     kernel path; old full-cmdline snapshots are ignored defensively.
 //
 // The managed sysctl file (/etc/sysctl.d/99-cfm-kernsec.conf) is
 // removed so the next reboot sees kernel defaults. Live sysctl values
@@ -161,23 +163,25 @@ func rollbackProxmox(w io.Writer, dryRun bool) int {
 	return 0
 }
 
-// rollbackBLS restores managed args on BLS hosts. If a pre-apply
-// snapshot was captured at BLSBackupPath, it replays those args
-// (atomically removing managed keys and restoring the saved set).
-// If no snapshot exists, it strips managed keys and leaves the
-// cmdline in distro-default / no-managed-args state.
+// rollbackBLS restores managed args on BLS hosts. It always performs the
+// safest rollback operation first: strip kernsec-managed keys from every
+// non-rescue kernel while leaving unmanaged args untouched. If a
+// current-format snapshot exists, rollback then restores only the saved
+// managed tokens for matching kernel paths. Legacy snapshots containing a
+// default kernel's full cmdline are ignored rather than replayed onto every
+// kernel.
 func rollbackBLS(w io.Writer, dryRun bool, fs FS) int {
 	bak := BLSBackupPath
-	hasBak := false
-	if _, err := os.Stat(bak); err == nil {
-		hasBak = true
+	snap, hasSnapshot, snapErr := readBLSRollbackSnapshot(bak)
+	if snapErr != nil {
+		fmt.Fprintf(w, "[Boot] Ignoring BLS snapshot at %s: %v\n", bak, snapErr)
 	}
 
-	if hasBak {
-		fmt.Fprintf(w, "[Boot] BLS snapshot found at %s — will restore.\n", bak)
+	if hasSnapshot {
+		fmt.Fprintf(w, "[Boot] BLS managed-args snapshot found at %s — will restore matching kernels.\n", bak)
 	} else {
-		fmt.Fprintln(w, "[Boot] No BLS snapshot found (apply was run before this version of cfm).")
-		fmt.Fprintln(w, "       Will strip managed args only; cmdline will be in distro-default state.")
+		fmt.Fprintln(w, "[Boot] No usable BLS managed-args snapshot found.")
+		fmt.Fprintln(w, "       Will strip managed args only; unmanaged args stay untouched.")
 	}
 
 	if dryRun {
@@ -197,28 +201,56 @@ func rollbackBLS(w io.Writer, dryRun bool, fs FS) int {
 	}
 
 	removeArg := "--remove-args=" + joinKeys(ManagedBootArgKeys, " ")
-	cmd := []string{"--update-kernel=" + joinComma(targets), removeArg}
-
-	if hasBak {
-		savedArgs, err := os.ReadFile(bak)
-		if err != nil {
-			fmt.Fprintf(w, "[!] read BLS snapshot %s: %v\n", bak, err)
-			return 1
-		}
-		if argStr := string(savedArgs); argStr != "" {
-			cmd = append(cmd, "--args="+argStr)
-		}
-	}
-
-	if runOut, err := fs.RunCapture("grubby", cmd...); err != nil {
+	stripCmd := []string{"--update-kernel=" + joinComma(targets), removeArg}
+	if runOut, err := fs.RunCapture("grubby", stripCmd...); err != nil {
 		fmt.Fprintf(w, "[!] grubby: %v: %s\n", err, runOut)
 		return 1
 	}
 	fmt.Fprintln(w, "[Boot] grubby: managed args stripped from all non-rescue kernels.")
-	if hasBak {
-		fmt.Fprintln(w, "[Boot] pre-apply args restored.")
+
+	if hasSnapshot {
+		for _, kernel := range targets {
+			managed := snap.Kernels[kernel]
+			if len(managed) == 0 {
+				continue
+			}
+			cmd := []string{"--update-kernel=" + kernel, "--args=" + strings.Join(managed, " ")}
+			if runOut, err := fs.RunCapture("grubby", cmd...); err != nil {
+				fmt.Fprintf(w, "[!] grubby restore %s: %v: %s\n", kernel, err, runOut)
+				return 1
+			}
+		}
+		fmt.Fprintln(w, "[Boot] pre-apply managed args restored for matching kernels.")
 	}
 	return 0
+}
+
+func readBLSRollbackSnapshot(path string) (blsRollbackSnapshot, bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return blsRollbackSnapshot{}, false, nil
+	}
+	if err != nil {
+		return blsRollbackSnapshot{}, false, err
+	}
+	var snap blsRollbackSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return blsRollbackSnapshot{}, false, fmt.Errorf("unrecognized or legacy format")
+	}
+	if snap.Version != blsRollbackSnapshotVersion {
+		return blsRollbackSnapshot{}, false, fmt.Errorf("unsupported format version %d", snap.Version)
+	}
+	clean := blsRollbackSnapshot{Version: snap.Version, Kernels: map[string][]string{}}
+	for kernel, tokens := range snap.Kernels {
+		if kernel == "" {
+			continue
+		}
+		managed := KeepManagedArgs(tokens)
+		if len(managed) > 0 {
+			clean.Kernels[kernel] = managed
+		}
+	}
+	return clean, true, nil
 }
 
 // removeManagedSysctlFile removes SysctlPath so the kernel reverts
