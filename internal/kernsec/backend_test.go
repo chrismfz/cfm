@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -727,6 +728,108 @@ func TestGrubCmdline_RoundTripPreservesEmbeddedQuotes(t *testing.T) {
 	}
 	if decoded != original {
 		t.Errorf("round-trip mismatch:\n  before: %q\n  after:  %q", original, decoded)
+	}
+}
+
+func testContainsToken(tokens []string, want string) bool {
+	for _, tok := range tokens {
+		if tok == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGRUBBackend_WriteCmdline_DoesNotCopyDefaultTokensIntoLinux(t *testing.T) {
+	grub := redirectGrubPath(t)
+	content := `GRUB_CMDLINE_LINUX=""
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+`
+	if err := os.WriteFile(grub, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(grub, content)
+	g := &GRUBBackend{FS: fs}
+
+	if err := g.WriteCmdline([]BootArg{
+		{Key: "slab_nomerge"},
+		{Key: "init_on_alloc", Value: "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `GRUB_CMDLINE_LINUX="slab_nomerge init_on_alloc=1"`) {
+		t.Fatalf("GRUB_CMDLINE_LINUX was not rebuilt from _LINUX only:\n%s", out)
+	}
+	if !strings.Contains(out, `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`) {
+		t.Fatalf("GRUB_CMDLINE_LINUX_DEFAULT changed unexpectedly:\n%s", out)
+	}
+	linux, err := readGrubCmdlineLinux(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unexpected := range []string{"quiet", "splash"} {
+		if testContainsToken(ParseCmdline(linux), unexpected) {
+			t.Fatalf("_DEFAULT token %q was copied into _LINUX: %q", unexpected, linux)
+		}
+	}
+}
+
+func TestGRUBBackend_WriteCmdline_DisableRemovesLinuxManagedWithoutDefaultDuplication(t *testing.T) {
+	grub := redirectGrubPath(t)
+	content := `GRUB_CMDLINE_LINUX="ro slab_nomerge init_on_alloc=1"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+`
+	if err := os.WriteFile(grub, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(grub, content)
+	g := &GRUBBackend{FS: fs}
+
+	if err := g.WriteCmdline(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `GRUB_CMDLINE_LINUX="ro"`) {
+		t.Fatalf("managed args were not removed from _LINUX only:\n%s", out)
+	}
+	if !strings.Contains(out, `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`) {
+		t.Fatalf("GRUB_CMDLINE_LINUX_DEFAULT changed unexpectedly:\n%s", out)
+	}
+	linux, err := readGrubCmdlineLinux(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unexpected := range []string{"slab_nomerge", "init_on_alloc=1", "quiet", "splash"} {
+		if testContainsToken(ParseCmdline(linux), unexpected) {
+			t.Fatalf("unexpected token %q in _LINUX after disable: %q", unexpected, linux)
+		}
+	}
+}
+
+func TestGRUBBackend_NextBootCmdline_ShowsManagedArgsInDefault(t *testing.T) {
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX="ro"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet slab_nomerge"
+`)
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ro quiet slab_nomerge"
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
 
