@@ -1190,10 +1190,13 @@ host-profile gated where they would clearly break things.
   exploit techniques and recover after the fail-closed panic. No
   host-profile gating — aggressive by design.
 - `lockdown=integrity` (`KSEC-BOOT-tier2.lockdown-001`). Kernel
-  lockdown LSM. Skipped when DKMS modules (zfs / nvidia) are
-  detected — lockdown=integrity blocks unsigned module load.
+  lockdown LSM. Skipped when DKMS / out-of-tree modules (zfs /
+  nvidia) or kdump are detected — lockdown=integrity blocks
+  unsigned module load, and kdump crash capture depends on
+  kexec-related primitives that lockdown can restrict.
 - `module.sig_enforce=1` (`KSEC-BOOT-tier2.module-sig-enforce-001`).
-  Belt-and-suspenders alongside lockdown. Same DKMS gating.
+  Belt-and-suspenders alongside lockdown. Skipped only when DKMS /
+  out-of-tree modules are detected, matching `HostProfile.SkipReason`.
 
 `ManagedBootArgKeys` extended to include `oops`, `lockdown`, and
 `module.sig_enforce` so `disable` and `apply --remove` strip them
@@ -1416,8 +1419,10 @@ can be revisited.
   `kernel.unprivileged_userns_clone=0`. Group `tier2.namespace`,
   host-profile gated on `HasContainers`.
 - `Tier2BootArgs`: `oops=panic` (no gating), `lockdown=integrity`
-  + `module.sig_enforce=1` (both gated on `HasDKMS`). Each in its
-  own group for granular per-rule overrides.
+  (gated on `HasDKMS` or kdump), and `module.sig_enforce=1` (gated
+  only on `HasDKMS`). Each in its own group for granular per-rule
+  overrides. The kdump gate for lockdown exists because crash capture
+  uses kexec-related primitives that lockdown can restrict.
 - `ManagedBootArgKeys` extended for the new boot args so disable /
   apply-remove strip them cleanly.
 - `AllSysctls()` / `AllBootArgs()` now concatenate Tier 1 + Tier 2
