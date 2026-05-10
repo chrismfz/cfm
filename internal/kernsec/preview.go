@@ -10,10 +10,16 @@ import (
 type PreviewOptions struct {
 	OnlyApply bool   // hide SKIP-* rows (only show what would be applied)
 	Group     string // filter by group prefix; "" = all
-	Tier      Tier   // upper-bound tier filter; 0 = no filter (all tiers)
-	IDs       []string
-	Skips     []string // additional ad-hoc skips (not persisted)
-	Forces    []string // additional ad-hoc forces (not persisted)
+	// Tier overrides conf.Tier for this preview iff TierOverride is true.
+	// Setting Tier alone is not enough — the zero value of Tier is the
+	// legitimate value 0 ("resolve as if every rule were tier-gated
+	// off"), so we need an explicit flag to distinguish "operator did
+	// not pass --tier" from "operator passed --tier 0".
+	Tier         Tier
+	TierOverride bool
+	IDs          []string
+	Skips        []string // additional ad-hoc skips (not persisted)
+	Forces       []string // additional ad-hoc forces (not persisted)
 }
 
 // RunPreview renders a read-only diff of what `cfm kernsec apply` would
@@ -96,7 +102,12 @@ func filterRules(rs []ResolvedRule, opts PreviewOptions) []ResolvedRule {
 		if opts.Group != "" && !strings.HasPrefix(r.Group, opts.Group) {
 			continue
 		}
-		if opts.Tier != 0 && r.Tier > opts.Tier {
+		// Display filter: clip rules above an explicit tier ceiling.
+		// When opts.Tier == 0 (either default or explicit `--tier 0`)
+		// no clip is needed — the resolver itself classifies every
+		// rule as SkipByTier under tier=0 conf, and the operator
+		// wants to see those OFF rows.
+		if opts.Tier > 0 && r.Tier > opts.Tier {
 			continue
 		}
 		if len(idSet) > 0 {
@@ -186,11 +197,12 @@ func applyAdHocOverrides(conf *Conf, opts PreviewOptions) *Conf {
 	for _, id := range opts.Forces {
 		conf.Overrides[id] = OverrideForce
 	}
-	if opts.Tier != 0 {
+	if opts.TierOverride {
 		// `--tier N` overrides whatever's in the conf for this preview
 		// invocation. Operators use it both to clamp down (preview as
-		// if I dropped to tier=1) and to bump up (preview as if I
-		// raised to tier=2). Not persisted.
+		// if I dropped to tier=1, or even tier=0 to see what disable
+		// would render) and to bump up (preview as if I raised to
+		// tier=2). Not persisted.
 		conf.Tier = opts.Tier
 	}
 	return conf

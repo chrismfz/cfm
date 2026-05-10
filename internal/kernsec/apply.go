@@ -234,14 +234,14 @@ func applyWrites(
 	loader func() error,
 ) int {
 	// 1. Sysctl drop-in file.
-	if err := WriteSysctlFile(sysctlContent); err != nil {
+	if err := WriteSysctlFile(w, sysctlContent); err != nil {
 		fmt.Fprintln(w, "kernsec apply: write sysctl:", err)
 		return 1
 	}
 	fmt.Fprintf(w, "[Sysctl] wrote %s (not yet loaded).\n", SysctlPath)
 
 	// 2. Modprobe blacklist file.
-	if err := WriteModprobeFile(modprobeContent); err != nil {
+	if err := WriteModprobeFile(w, modprobeContent); err != nil {
 		fmt.Fprintln(w, "kernsec apply: write modprobe:", err)
 		return 1
 	}

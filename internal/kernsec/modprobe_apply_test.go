@@ -1,10 +1,13 @@
 package kernsec
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withTempModprobePath redirects ModprobePath to a per-test temp file.
@@ -129,12 +132,161 @@ func TestModuleRowState(t *testing.T) {
 	}
 }
 
+func TestModulePresentOnKernel_UsesCacheNotPerModuleWalk(t *testing.T) {
+	// Build a fixture /lib/modules tree with exactly two modules, then
+	// point the cache at it. ModulePresentOnKernel should hit the
+	// cache after the first call, not re-walk per name.
+	root := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(root, "kernel/drivers/net/legacy/dccp.ko"),
+		filepath.Join(root, "kernel/fs/cramfs/cramfs.ko.xz"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	origRoot := moduleFileCacheRoot
+	moduleFileCacheRoot = func() string { return root }
+	t.Cleanup(func() {
+		moduleFileCacheRoot = origRoot
+		ResetModuleFileCache()
+	})
+	ResetModuleFileCache()
+
+	if !ModulePresentOnKernel("dccp") {
+		t.Error("dccp.ko should be detected (lives at kernel/drivers/net/legacy/)")
+	}
+	if !ModulePresentOnKernel("cramfs") {
+		t.Error("cramfs.ko.xz should be detected (lives at kernel/fs/cramfs/)")
+	}
+	if ModulePresentOnKernel("not_present") {
+		t.Error("not_present should not be detected — fixture has only dccp + cramfs")
+	}
+
+	// Sanity: rebuild the cache with a different fixture and the
+	// same calls must reflect the new state.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "kernel/fs/cramfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Re-create cramfs only.
+	if err := os.WriteFile(filepath.Join(root, "kernel/fs/cramfs/cramfs.ko.xz"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ResetModuleFileCache()
+	if ModulePresentOnKernel("dccp") {
+		t.Error("dccp removed from fixture; cache reset should reflect it")
+	}
+	if !ModulePresentOnKernel("cramfs") {
+		t.Error("cramfs still in fixture")
+	}
+}
+
+func TestWriteModprobeFile_PreservesOperatorEdits(t *testing.T) {
+	withTempModprobePath(t)
+
+	// First write produces a clean managed file.
+	managed := []byte("# Managed by cfm kernsec — do not edit by hand.\nblacklist ksmbd\ninstall ksmbd /bin/false\n")
+	if err := WriteModprobeFile(io.Discard, managed); err != nil {
+		t.Fatal(err)
+	}
+
+	// Operator hand-edits the file: appends an extra `blacklist nfc`
+	// (a real module rule, but added directly rather than via tier
+	// upgrade) plus an unrelated comment.
+	operatorEdit := append([]byte{}, managed...)
+	operatorEdit = append(operatorEdit, []byte("# operator-added\nblacklist nfc\ninstall nfc /bin/false\n")...)
+	if err := os.WriteFile(ModprobePath, operatorEdit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin a deterministic timestamp so we can assert the backup name.
+	origNow := nowFunc
+	nowFunc = func() time.Time {
+		return time.Date(2026, 5, 10, 14, 5, 30, 0, time.UTC)
+	}
+	t.Cleanup(func() { nowFunc = origNow })
+
+	// Run apply with the same managed content. The audit must detect
+	// the operator-added lines, write a per-run backup, and warn.
+	var w bytes.Buffer
+	if err := WriteModprobeFile(&w, managed); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Per-run backup file exists with the operator-edited content.
+	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z"
+	bakContent, err := os.ReadFile(wantBackup)
+	if err != nil {
+		t.Fatalf("per-run backup missing: %v", err)
+	}
+	if !bytes.Equal(bakContent, operatorEdit) {
+		t.Errorf("per-run backup has wrong content")
+	}
+
+	// 2. Managed file overwritten with rendered content (idempotency).
+	now, _ := os.ReadFile(ModprobePath)
+	if !bytes.Equal(now, managed) {
+		t.Errorf("managed file not overwritten with rendered content")
+	}
+
+	// 3. Operator saw a warning naming the extra lines.
+	out := w.String()
+	if !strings.Contains(out, "unmanaged line") {
+		t.Errorf("expected unmanaged-line warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "blacklist nfc") {
+		t.Errorf("warning should name the operator-added line:\n%s", out)
+	}
+	if !strings.Contains(out, wantBackup) {
+		t.Errorf("warning should point at the backup path:\n%s", out)
+	}
+}
+
+func TestWriteModprobeFile_NoBackupWhenNoOperatorEdits(t *testing.T) {
+	withTempModprobePath(t)
+
+	// First write of the managed file.
+	managed := []byte("# Managed by cfm kernsec — do not edit by hand.\nblacklist ksmbd\ninstall ksmbd /bin/false\n")
+	if err := WriteModprobeFile(io.Discard, managed); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin time so any spurious backup would be detectable.
+	origNow := nowFunc
+	nowFunc = func() time.Time {
+		return time.Date(2026, 5, 10, 14, 5, 30, 0, time.UTC)
+	}
+	t.Cleanup(func() { nowFunc = origNow })
+
+	// Re-render same content (idempotent apply). No per-run backup
+	// should be created — there are no operator edits to preserve.
+	var w bytes.Buffer
+	if err := WriteModprobeFile(&w, managed); err != nil {
+		t.Fatal(err)
+	}
+
+	wantBackup := ModprobePath + ".cfm-kernsec.bak.20260510T140530Z"
+	if _, err := os.Stat(wantBackup); !os.IsNotExist(err) {
+		t.Errorf("per-run backup created without operator edits: %v", err)
+	}
+	if w.String() != "" {
+		t.Errorf("expected no warnings, got:\n%s", w.String())
+	}
+}
+
 func TestWriteModprobeFile_AtomicWithBackup(t *testing.T) {
 	withTempModprobePath(t)
 
 	// First write — no .bak should be created (no prior file).
 	first := []byte("# v1\nblacklist ksmbd\ninstall ksmbd /bin/false\n")
-	if err := WriteModprobeFile(first); err != nil {
+	if err := WriteModprobeFile(io.Discard, first); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(ModprobePath); string(got) != string(first) {
@@ -144,13 +296,11 @@ func TestWriteModprobeFile_AtomicWithBackup(t *testing.T) {
 		t.Errorf("backup created on first write — should not exist")
 	}
 
-	// Second write — .bak should now contain the v1 content.
-	second := []byte("# v2\nblacklist n_hdlc\ninstall n_hdlc /bin/false\n")
-	if err := WriteModprobeFile(second); err != nil {
+	// Second write — same content as first (just whitespace difference)
+	// → .bak should still be created (one-shot first-touch backup) but
+	// no per-run timestamped backup since no operator edits.
+	if err := WriteModprobeFile(io.Discard, first); err != nil {
 		t.Fatal(err)
-	}
-	if got, _ := os.ReadFile(ModprobePath); string(got) != string(second) {
-		t.Errorf("second write content mismatch")
 	}
 	bak, err := os.ReadFile(ModprobePath + BackupSuffix)
 	if err != nil {
@@ -160,9 +310,10 @@ func TestWriteModprobeFile_AtomicWithBackup(t *testing.T) {
 		t.Errorf("backup has wrong content:\n  got:  %s\n  want: %s", bak, first)
 	}
 
-	// Third write — .bak must NOT be overwritten (one-shot).
+	// Third write — different content. .bak (one-shot) must NOT be
+	// overwritten.
 	third := []byte("# v3\n")
-	if err := WriteModprobeFile(third); err != nil {
+	if err := WriteModprobeFile(io.Discard, third); err != nil {
 		t.Fatal(err)
 	}
 	bak2, _ := os.ReadFile(ModprobePath + BackupSuffix)
