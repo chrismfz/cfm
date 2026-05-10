@@ -14,6 +14,12 @@ func RunInit(w io.Writer) int {
 		fmt.Fprintln(w, "kernsec init: must run as root")
 		return 1
 	}
+	release, err := acquireKernsecLock()
+	if err != nil {
+		fmt.Fprintln(w, "kernsec init:", err)
+		return 1
+	}
+	defer release()
 	created, err := WriteDefaultConf()
 	if err != nil {
 		fmt.Fprintln(w, "kernsec init:", err)

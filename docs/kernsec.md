@@ -169,11 +169,14 @@ TCP timeouts, `rp_filter`, `accept_redirects`/`send_redirects` (v4 + v6),
 conntrack hashsize tweak. This overlaps directly with the planned `KSEC-SCT-net.*`
 audit group.
 
-Resolution: kernsec **audits and defers** for any setting `sys_tweaks` already
-owns — render as `EXT (managed by cfm sys_tweaks)` in `status`, never write a
-duplicate. Phase 6 (shared sysctl library) merges both packages so there's one
-audit/apply/drift loop with rule-IDs. Until then: no double-write, no fights
-over `/etc/sysctl.d/`.
+Resolution as shipped: **`KSEC-SCT-net.*` rules are not in the
+registry** and `EXT` is not a state in `audit.go`. The plan to mark
+sys_tweaks-owned settings as `EXT (managed by cfm sys_tweaks)` is
+deferred to Phase 6 (shared sysctl library), which will introduce
+proper cross-component awareness rather than the EXT marker. Until
+then: kernsec leaves all of `internal/sysctl/sys_tweaks.go`'s
+settings strictly alone — no double-write, no fights over
+`/etc/sysctl.d/`.
 
 **CLI dispatch is a flat switch in `cmd/cfm/main.go`** (~1263 lines, no cobra).
 Existing cases include `firewall`, `dnat`, `ssl`, `webtop`, `health`, `clam`,
@@ -246,7 +249,11 @@ confirms it). The `status` command renders this as a tri-state per rule:
 | yes | n/a | `OK inert` | Module not present on this kernel — fine |
 | yes | mismatch | `DRIFT` | Someone overrode it post-apply |
 | no | — | `OFF` | Not enabled in cfm config |
-| no | yes | `EXT` | Active by other means (distro default, another tool) |
+
+(An earlier design listed an `EXT` state for "active by other means
+(distro default, another tool)" — deferred to Phase 6 along with
+the cross-component sysctl awareness; not in the shipped state set
+in `audit.go`.)
 
 `DRIFT` gets its own non-zero exit code so monitoring agents can alert on it.
 Catches `sysctl -w` and stray `modprobe` after a fix.
@@ -340,9 +347,13 @@ alias-loaded names; `install … /bin/false` makes it stick.
 | KSEC-MOD-net.legacy-021 | `psnap`, `p8023`, `p8022`, `llc`, `llc2` | LLC encapsulations | None |
 | KSEC-MOD-net.legacy-022 | `pptp`, `gtp` | VPN protocols not in scope | Breaks PPTP/GTP if used |
 | KSEC-MOD-net.legacy-023 | `can`, `can_raw`, `can_bcm`, `can_gw`, `vcan` | CAN bus, automotive | None on servers |
-| KSEC-MOD-net.legacy-024 | `atm`, `br2684`, `clip`, `lec`, `mpoa`, `pppoatm` | ATM stack | None |
-| KSEC-MOD-net.legacy-025 | `6pack`, `mkiss`, `baycom_*`, `hostap_*` | Ham radio + old wifi | None |
-| KSEC-MOD-net.legacy-026 | `irda` | Dead, gone in newer kernels | None |
+| KSEC-MOD-net.legacy-022 | `atm` | ATM stack | None |
+| KSEC-MOD-net.legacy-023 | `irda` | Dead, gone in newer kernels | None |
+
+The above is a summary of the design intent; for the canonical list of
+shipped rules see `internal/kernsec/modules.go`. Rule IDs and sub-groups
+in the source registry take precedence over this table when they
+disagree.
 
 **Group `modules.net.conntrack_alg`** — niche conntrack ALGs with CVE history.
 Don't blanket-blacklist; opt-in.
@@ -365,13 +376,25 @@ Don't blanket-blacklist; opt-in.
 
 NFS / cifs / io_uring left **strictly alone** — operator depends on them.
 
-**Group `modules.bus`** — buses/devices that don't exist on KVM/dedis.
+**Group `modules.bus.*`** — buses/devices that don't exist on KVM/dedis.
+The single `modules.bus` group was split in PR #780 into four sub-
+groups so host-profile gating can target just the relevant subset
+(skip Bluetooth without skipping Thunderbolt, etc.).
 
-| ID | Module | Why | Affects |
-|---|---|---|---|
-| KSEC-MOD-bus-001 | `bluetooth`, `btusb`, `bnep`, `hci_uart`, `bluetooth_6lowpan` | No BT on servers | None (host probe skips if `/sys/class/bluetooth/*` exists) |
-| KSEC-MOD-bus-002 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | DMA attack surface | None |
-| KSEC-MOD-bus-003 | `cfg80211`, `mac80211` | Wifi stack | Skipped if wifi hardware present |
+| Group | Modules | Host-profile gate |
+|---|---|---|
+| `modules.bus.bluetooth` | `bluetooth`, `btusb`, `bnep`, `hci_uart` | skipped if `/sys/class/bluetooth/*` non-empty |
+| `modules.bus.firewire` | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | none (rare hardware; operator overrides per-rule if needed) |
+| `modules.bus.thunderbolt` | `thunderbolt` | skipped if `/sys/bus/thunderbolt/devices/*` non-empty |
+| `modules.bus.misc` | `joydev`, `pcspkr`, `floppy` | none |
+
+Wifi (`cfg80211` / `mac80211`) is **not** blacklisted today — the
+shipped registry contains no wifi rules. The earlier "wireless
+blacklist" plan was dropped: cfg80211 / mac80211 both have non-
+hostable use cases (operator-managed servers can run wifi cards
+intentionally), so kernsec leaves the decision to the operator. If
+wifi rules are added later, they'll get their own group + host-
+profile gate.
 | KSEC-MOD-bus-004 | `thunderbolt` | DMA / KVM hosts | None on most |
 | KSEC-MOD-bus-005 | `joydev`, `pcspkr`, `floppy` | Trivial surface, no use case | None |
 | KSEC-MOD-bus-006 | DVB / `dvb-usb-*`, `media` | TV tuner stack | None |
@@ -431,9 +454,17 @@ file so the components don't fight.
 **Group `sysctl.modules`** (out of scope — see "Out of scope:
 `kernel.modules_disabled=1`" under the rollout plan for the rationale)
 
-**Group `sysctl.net`** — almost certainly already owned by cfm-firewall. Audit
-only here, mark `EXT (managed by cfm-firewall)` rather than fight for
-ownership. Listed for completeness:
+**Group `sysctl.net`** — deferred. Currently owned by `cfm-firewall`
+and `internal/sysctl/sys_tweaks.go`; kernsec ships **no `KSEC-SCT-net.*`
+rules in the registry**. The original design called for kernsec to
+audit these settings with an `EXT` state marker; that work is queued
+for Phase 6 (shared sysctl library), which replaces the EXT marker
+with proper cross-component awareness. The list below is the
+historical design intent, kept here for traceability — it is **not**
+the current shipped behaviour.
+
+<details>
+<summary>Original design candidate set (not shipped — see Phase 6)</summary>
 
 | ID | Setting | Why |
 |---|---|---|
@@ -446,6 +477,8 @@ ownership. Listed for completeness:
 | KSEC-SCT-net.tcp-002 | `net.ipv4.tcp_rfc1337=1` | TIME_WAIT assassination |
 | KSEC-SCT-net.log-001 | `net.ipv4.conf.all.log_martians=1` | Visibility |
 | KSEC-SCT-net.ipv6-001 | `net.ipv6.conf.all.accept_ra=0`, `default.accept_ra=0` | RA spoof |
+
+</details>
 
 ### Boot args (extends `kspp.sh`)
 
@@ -499,16 +532,18 @@ Before applying any tier, probe the host for ~5 seconds:
 | Probe | Effect |
 |---|---|
 | `kvm_intel` / `kvm_amd` loaded | KVM host — keep IOMMU rules |
-| `runc`, `containerd`, `lxc` running | Containers — skip userns kill |
+| Container daemon / shim / socket / nspawn machine | Containers in use — skip userns kill (full probe set: see `defaultContainerProbe()`) |
 | `ip xfrm policy` non-empty | IPsec in use — skip ipsec module group |
-| `cfg80211` loaded or wifi hw | Has wifi — skip wireless blacklist |
-| `zfs` / `nvidia` loaded | DKMS in use — skip `module.sig_enforce` |
+| `zfs` / `nvidia` loaded | DKMS in use — skip `module.sig_enforce` and `lockdown=integrity` |
 | kdump enabled | Skip `kexec_load_disabled` |
-| `/sys/class/bluetooth/*` populated | BT hardware — flag, still allow blacklist |
+| `/sys/class/bluetooth/*` populated | BT hardware present — skip `modules.bus.bluetooth` group |
+| `/sys/bus/thunderbolt/devices/*` populated | Thunderbolt hardware — skip `modules.bus.thunderbolt` group |
 | NFS mounts active | Don't touch NFS (already excluded by policy) |
 
 Auto-skipped rules render as `SKIP (host profile: <reason>)` in `status`.
-Operators override with `--force-id KSEC-...` if they really mean it.
+Operators override per-rule with `[rule "KSEC-..."] state = force` in
+`/etc/cfm/kernsec.conf` (persisted), or with `preview --force-id KSEC-...`
+for ad-hoc inspection.
 
 ---
 
@@ -814,9 +849,11 @@ preview (no writes). Phase 2b: apply with writes.
 - TUI gains group + tier columns and a `/` filter.
 - Module rule rows + fstab audit + host-profile probe land here so the
   registry has them on day one.
-- kernsec audits `KSEC-SCT-net.*` settings owned by
+- ~~kernsec audits `KSEC-SCT-net.*` settings owned by
   `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
-  no double-write.
+  no double-write.~~ Deferred to Phase 6 (shared sysctl library);
+  `KSEC-SCT-net.*` rules and the `EXT` state are **not** in the
+  shipped registry.
 
 **2b — apply (writes)**:
 
@@ -1062,10 +1099,14 @@ systemctl is-failed cfm-kernsec-check.service
 
 ### Phase 6 — Shared sysctl library (TODO)
 
-Refactor: extract the audit/apply/drift loop into a cfm-internal library.
-Migrate kernsec and cfm-firewall to use it. Single source of truth per
-setting; `EXT (managed by cfm-firewall)` markers replaced with proper
-cross-component awareness.
+Refactor: extract the audit/apply/drift loop into a cfm-internal
+library. Migrate kernsec and cfm-firewall to use it. Single source of
+truth per setting; the originally-planned `EXT` state for "managed by
+another cfm component" is replaced with proper cross-component
+awareness — the shared library knows which component owns each
+setting and surfaces ownership in `status` directly. Phase 6 also
+re-introduces the `KSEC-SCT-net.*` audit group (currently absent from
+the registry pending this refactor).
 
 ---
 
@@ -1334,9 +1375,11 @@ can be revisited.
 - [x] `apply --dry-run` and `apply --no-refresh` flags.
 - [x] Module rule rows, fstab audit, host-profile probe (data + audit).
 - [ ] Audit `KSEC-SCT-net.*` settings owned by
-      `internal/sysctl/sys_tweaks.go` as `EXT (managed by cfm sys_tweaks)` —
-      no double-write. (Deferred to Phase 6 shared-library work; Phase 2
-      profile contains no `KSEC-SCT-net.*` rules.)
+      `internal/sysctl/sys_tweaks.go`. Originally planned to render as
+      `EXT (managed by cfm sys_tweaks)` — that state and those rule
+      IDs are **not in the shipped registry**. Both are deferred to
+      Phase 6 (shared sysctl library) which replaces EXT with proper
+      cross-component awareness.
 
 **Phase 3 — modules** (DONE — branch `kernsec-3`)
 - [x] Module blacklist generator (`/etc/modprobe.d/cfm-kernsec.conf`,
