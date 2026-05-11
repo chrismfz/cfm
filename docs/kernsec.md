@@ -18,11 +18,15 @@ The component currently manages:
 operator what is missing, but it never edits fstab because `noexec` and related
 options can break real hosting workflows.
 
-`scripts/kspp.sh` remains in the tree as a standalone hardening script and as a
-reference implementation. For cfm-managed hosts, **use `cfm kernsec`**; it is the
-canonical interface and includes the cfm-specific rule registry, config model,
-status output, bootloader backends, module blacklist writer, fstab audit, and
-monitor timer.
+## KSPP script relationship
+
+`scripts/kspp.sh` remains in the tree as a standalone hardening script and
+reference. For cfm-managed hosts, use `cfm kernsec`.
+
+kernsec covers the KSPP sysctls, boot arguments, bootloader backends, status
+checks, and Copy Fail mitigation from the standalone script, plus additional
+cfm-managed features such as the rule registry, config model, module blacklist
+writer, fstab audit, and monitor timer.
 
 ## Commands
 
