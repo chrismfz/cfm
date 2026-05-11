@@ -211,6 +211,24 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 
+	// --- modules.net.virt: virt-only socket families ----------------
+	//
+	// Single-module group so host-profile gating can target it
+	// precisely. vsock (virtio/VMware guest↔host socket protocol) is
+	// a named killswitch candidate — useless on bare-metal hosting,
+	// but the host-side transport (vhost_vsock) is a legitimate
+	// hypervisor surface for guest comms. We skip the blacklist when
+	// the host runs KVM (kvm_intel/kvm_amd loaded → IsKVMHost) so
+	// hypervisors retain it; everywhere else it's blacklisted by
+	// default.
+
+	{
+		ID: "KSEC-MOD-net.virt-001", Group: "modules.net.virt", Tier: Tier1,
+		Name:        "vsock",
+		Description: "Virtual socket protocol (virtio/VMware guest↔host). Named killswitch candidate; no use on bare-metal hosting.",
+		Affects:     "Skipped automatically on KVM hosts (host-profile gated via IsKVMHost).",
+	},
+
 	// --- modules.fs.unused: filesystems no hosting box mounts --------
 
 	{

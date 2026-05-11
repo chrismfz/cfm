@@ -498,6 +498,55 @@ args="ro"
 	}
 }
 
+func TestBLSBackend_WriteCmdline_MultipleKernelsPerKernelCalls(t *testing.T) {
+	// Regression: grubby's --update-kernel accepts a single kernel
+	// path (or ALL / DEFAULT / TITLE=...), NOT a comma-separated list.
+	// Hosts with multiple installed kernels were previously bricked
+	// during apply because we joined paths with commas and grubby
+	// rejected the whole string as an invalid path. The backend MUST
+	// issue one grubby invocation per non-rescue kernel.
+	orig := BLSBackupPath
+	BLSBackupPath = t.TempDir() + "/bls-bak"
+	defer func() { BLSBackupPath = orig }()
+
+	const infoAll = `index=0
+kernel="/boot/vmlinuz-6.12.0-A"
+args="ro"
+
+index=1
+kernel="/boot/vmlinuz-6.12.0-B"
+args="ro"
+
+index=2
+kernel="/boot/vmlinuz-0-rescue-abc"
+args="ro"
+`
+	removeArg := "--remove-args=" + strings.Join(ManagedBootArgKeys, " ")
+	expectedA := "grubby --update-kernel=/boot/vmlinuz-6.12.0-A " + removeArg + " --args=slab_nomerge"
+	expectedB := "grubby --update-kernel=/boot/vmlinuz-6.12.0-B " + removeArg + " --args=slab_nomerge"
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", infoAll).
+		withCmd("grubby --info=ALL", infoAll).
+		withCmd(expectedA, "").
+		withCmd(expectedB, "")
+	b := &BLSBackend{FS: fs}
+	if err := b.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatalf("WriteCmdline failed: %v", err)
+	}
+	// snapshot info + enumerate info + 2 per-kernel update calls.
+	if len(fs.cmdLog) != 4 {
+		t.Fatalf("expected 4 grubby calls (2 info + 2 per-kernel updates), got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	}
+	for _, call := range fs.cmdLog[2:] {
+		if strings.Contains(call, ",") {
+			t.Errorf("grubby --update-kernel does not accept comma-separated paths, got: %q", call)
+		}
+		if strings.Contains(call, "rescue") {
+			t.Errorf("rescue kernel must never appear in update call: %q", call)
+		}
+	}
+}
+
 func TestBLSBackend_WriteCmdline_NoTargetableKernels(t *testing.T) {
 	// Edge case: every entry is rescue or debug, or grubby reports
 	// zero kernels (fresh chroot install). WriteCmdline must skip

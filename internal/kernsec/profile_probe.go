@@ -337,6 +337,15 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasIPsec {
 			return "host has active IPsec policies (ip xfrm policy non-empty)"
 		}
+	case "modules.net.virt":
+		// vsock has two faces: guest-side (vmw_vsock_*_transport) and
+		// host-side (vhost_vsock). On a KVM hypervisor the host module
+		// is a legitimate channel for guest↔host comms, so we skip
+		// the blacklist there. Bare-metal hosting boxes have no such
+		// use case → default-blacklist remains.
+		if p.IsKVMHost {
+			return "KVM hypervisor — vhost_vsock may be in use for guest↔host comms"
+		}
 	case "modules.bus.bluetooth":
 		// Blacklisting bluetooth/btusb/bnep/hci_uart on a host with
 		// real Bluetooth hardware would break paired keyboards / mice

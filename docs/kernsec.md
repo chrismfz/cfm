@@ -242,6 +242,7 @@ per selected rule. This prevents both alias-based autoloading and direct
 |---|---:|---|---|
 | `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb` | Recently exploited or no normal server use. |
 | `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, and similar dead network stacks | Intended to be safe on normal hosting servers. |
+| `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
 | `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda` | Override if the host genuinely mounts one of these filesystems. |
 | `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
 | `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | No typical server use. |

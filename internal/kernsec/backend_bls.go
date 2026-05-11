@@ -197,25 +197,30 @@ func (b *BLSBackend) writeBLSSnapshot() error {
 	return nil
 }
 
-// WriteCmdline runs a single `grubby --update-kernel=...` invocation
-// that combines `--remove-args` (stripping every managed-keys token)
-// with `--args=` (the desired set). grubby applies removes before adds
-// within a single call, closing the window where every kernel sat
-// stripped of managed args between the previous two-call sequence.
+// WriteCmdline issues one `grubby --update-kernel=<path>` invocation
+// per targetable kernel that combines `--remove-args` (stripping every
+// managed-keys token) with `--args=` (the desired set). grubby applies
+// removes before adds within a single call, closing the window where a
+// kernel sits stripped of managed args between the previous two-call
+// sequence.
+//
+// One call per kernel is required: grubby's `--update-kernel` flag
+// accepts a single kernel-path, `ALL`, `DEFAULT`, or `TITLE=...`. A
+// comma-separated list is rejected as an invalid path on real systems,
+// so we loop instead of joining.
 //
 // Before writing, a one-shot snapshot of each kernel's pre-existing
 // kernsec-managed args is saved to BLSBackupPath so rollback can restore
 // only those managed values without replaying unrelated unmanaged args.
 //
-// SAFETY (Phase 6 audit C4): the previous code used
-// `--update-kernel=ALL` which DOES include `vmlinuz-*-rescue-*` and
-// `*-debug` entries — the rescue kernel exists to recover from
-// exactly the situation a bad cmdline arg creates. If
-// a bad cmdline arg makes the regular kernel unbootable, applying
-// the same arg to the rescue entry leaves the
-// operator with no recovery path. Now the backend enumerates
-// kernels via `grubby --info=ALL`, filters out rescue + debug
-// kernels by path, and writes only the explicit list.
+// SAFETY (Phase 6 audit C4): we deliberately do not use
+// `--update-kernel=ALL` — it includes `vmlinuz-*-rescue-*` and
+// `*-debug` entries, and the rescue kernel exists to recover from
+// exactly the situation a bad cmdline arg creates. If a bad arg
+// bricks the regular kernel, applying the same arg to the rescue
+// entry leaves the operator with no recovery path. The backend
+// enumerates kernels via `grubby --info=ALL`, filters out rescue
+// + debug by path, and writes only the explicit list.
 //
 // grubby commits to the active BLS entries immediately, so Refresh()
 // is a no-op on this backend.
@@ -245,15 +250,18 @@ func (b *BLSBackend) WriteCmdline(args []BootArg) error {
 	for _, a := range args {
 		addArgs = append(addArgs, a.String())
 	}
-	cmd := []string{
-		"--update-kernel=" + strings.Join(targets, ","),
-		"--remove-args=" + strings.Join(ManagedBootArgKeys, " "),
-	}
-	if len(addArgs) > 0 {
-		cmd = append(cmd, "--args="+strings.Join(addArgs, " "))
-	}
-	if out, err := b.FS.RunCapture("grubby", cmd...); err != nil {
-		return fmt.Errorf("grubby update-kernel: %v: %s", err, strings.TrimSpace(out))
+	removeArg := "--remove-args=" + strings.Join(ManagedBootArgKeys, " ")
+	for _, kernel := range targets {
+		cmd := []string{
+			"--update-kernel=" + kernel,
+			removeArg,
+		}
+		if len(addArgs) > 0 {
+			cmd = append(cmd, "--args="+strings.Join(addArgs, " "))
+		}
+		if out, err := b.FS.RunCapture("grubby", cmd...); err != nil {
+			return fmt.Errorf("grubby update-kernel %s: %v: %s", kernel, err, strings.TrimSpace(out))
+		}
 	}
 	return nil
 }

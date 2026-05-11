@@ -289,11 +289,16 @@ func rollbackBLS(w io.Writer, dryRun bool, fs FS) int {
 		return 0
 	}
 
+	// grubby's --update-kernel takes a single kernel-path (or ALL /
+	// DEFAULT / TITLE=...) — comma-separated lists are rejected as an
+	// invalid path. Loop once per non-rescue kernel.
 	removeArg := "--remove-args=" + joinKeys(ManagedBootArgKeys, " ")
-	stripCmd := []string{"--update-kernel=" + joinComma(targets), removeArg}
-	if runOut, err := fs.RunCapture("grubby", stripCmd...); err != nil {
-		fmt.Fprintf(w, "[!] grubby: %v: %s\n", err, runOut)
-		return 1
+	for _, kernel := range targets {
+		stripCmd := []string{"--update-kernel=" + kernel, removeArg}
+		if runOut, err := fs.RunCapture("grubby", stripCmd...); err != nil {
+			fmt.Fprintf(w, "[!] grubby strip %s: %v: %s\n", kernel, err, runOut)
+			return 1
+		}
 	}
 	fmt.Fprintln(w, "[Boot] grubby: managed args stripped from all non-rescue kernels.")
 
@@ -493,8 +498,4 @@ func joinKeys(keys []string, sep string) string {
 		result += k
 	}
 	return result
-}
-
-func joinComma(ss []string) string {
-	return joinKeys(ss, ",")
 }

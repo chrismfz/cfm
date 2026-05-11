@@ -32,28 +32,34 @@ func withTempBLSBackupPath(t *testing.T) string {
 func TestRollbackBLS_StripsManagedOnlyAcrossDivergentUnmanagedArgs(t *testing.T) {
 	withTempBLSBackupPath(t)
 
-	expectedStrip := "grubby --update-kernel=/boot/vmlinuz-6.8.0,/boot/vmlinuz-6.7.0 --remove-args=" +
-		strings.Join(ManagedBootArgKeys, " ")
+	removeArg := "--remove-args=" + strings.Join(ManagedBootArgKeys, " ")
+	expectedStripA := "grubby --update-kernel=/boot/vmlinuz-6.8.0 " + removeArg
+	expectedStripB := "grubby --update-kernel=/boot/vmlinuz-6.7.0 " + removeArg
 	fs := newFakeFS().
 		withCmd("grubby --info=ALL", blsInfoAllMultipleUnmanaged).
-		withCmd(expectedStrip, "")
+		withCmd(expectedStripA, "").
+		withCmd(expectedStripB, "")
 
 	var out bytes.Buffer
 	if rc := rollbackBLS(&out, false, fs); rc != 0 {
 		t.Fatalf("rollbackBLS rc=%d, output:\n%s", rc, out.String())
 	}
-	if len(fs.cmdLog) != 2 {
-		t.Fatalf("expected info + strip calls only, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 3 {
+		t.Fatalf("expected info + per-kernel strip calls, got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	stripCall := fs.cmdLog[1]
-	if strings.Contains(stripCall, "--args=") {
-		t.Fatalf("rollback must not append saved/default cmdline args in strip-only mode: %q", stripCall)
-	}
-	if strings.Contains(stripCall, "rescue") {
-		t.Fatalf("rollback must not target rescue kernels: %q", stripCall)
-	}
-	if !strings.Contains(stripCall, "--remove-args="+strings.Join(ManagedBootArgKeys, " ")) {
-		t.Fatalf("rollback must remove only kernsec-managed keys with grubby: %q", stripCall)
+	for _, stripCall := range fs.cmdLog[1:] {
+		if strings.Contains(stripCall, "--args=") {
+			t.Fatalf("rollback must not append saved/default cmdline args in strip-only mode: %q", stripCall)
+		}
+		if strings.Contains(stripCall, "rescue") {
+			t.Fatalf("rollback must not target rescue kernels: %q", stripCall)
+		}
+		if !strings.Contains(stripCall, removeArg) {
+			t.Fatalf("rollback must remove only kernsec-managed keys with grubby: %q", stripCall)
+		}
+		if strings.Contains(stripCall, ",") {
+			t.Fatalf("grubby --update-kernel does not accept comma-separated paths: %q", stripCall)
+		}
 	}
 }
 
@@ -74,13 +80,15 @@ func TestRollbackBLS_RestoresOnlyPerKernelManagedSnapshotTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedStrip := "grubby --update-kernel=/boot/vmlinuz-6.8.0,/boot/vmlinuz-6.7.0 --remove-args=" +
-		strings.Join(ManagedBootArgKeys, " ")
+	removeArg := "--remove-args=" + strings.Join(ManagedBootArgKeys, " ")
+	expectedStripA := "grubby --update-kernel=/boot/vmlinuz-6.8.0 " + removeArg
+	expectedStripB := "grubby --update-kernel=/boot/vmlinuz-6.7.0 " + removeArg
 	expectedRestoreA := "grubby --update-kernel=/boot/vmlinuz-6.8.0 --args=init_on_alloc=0"
 	expectedRestoreB := "grubby --update-kernel=/boot/vmlinuz-6.7.0 --args=slab_nomerge page_alloc.shuffle=0"
 	fs := newFakeFS().
 		withCmd("grubby --info=ALL", blsInfoAllMultipleUnmanaged).
-		withCmd(expectedStrip, "").
+		withCmd(expectedStripA, "").
+		withCmd(expectedStripB, "").
 		withCmd(expectedRestoreA, "").
 		withCmd(expectedRestoreB, "")
 
@@ -88,10 +96,10 @@ func TestRollbackBLS_RestoresOnlyPerKernelManagedSnapshotTokens(t *testing.T) {
 	if rc := rollbackBLS(&out, false, fs); rc != 0 {
 		t.Fatalf("rollbackBLS rc=%d, output:\n%s", rc, out.String())
 	}
-	if len(fs.cmdLog) != 4 {
-		t.Fatalf("expected info + strip + per-kernel restores, got %d: %v", len(fs.cmdLog), fs.cmdLog)
+	if len(fs.cmdLog) != 5 {
+		t.Fatalf("expected info + per-kernel strips + per-kernel restores, got %d: %v", len(fs.cmdLog), fs.cmdLog)
 	}
-	for _, call := range fs.cmdLog[2:] {
+	for _, call := range fs.cmdLog[3:] {
 		if strings.Contains(call, "crashkernel") || strings.Contains(call, "transparent_hugepage") || strings.Contains(call, " ro") {
 			t.Fatalf("restore call must contain only per-kernel managed snapshot tokens, got: %q", call)
 		}
@@ -104,17 +112,19 @@ func TestRollbackBLS_IgnoresLegacyFullCmdlineSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedStrip := "grubby --update-kernel=/boot/vmlinuz-6.8.0,/boot/vmlinuz-6.7.0 --remove-args=" +
-		strings.Join(ManagedBootArgKeys, " ")
+	removeArg := "--remove-args=" + strings.Join(ManagedBootArgKeys, " ")
+	expectedStripA := "grubby --update-kernel=/boot/vmlinuz-6.8.0 " + removeArg
+	expectedStripB := "grubby --update-kernel=/boot/vmlinuz-6.7.0 " + removeArg
 	fs := newFakeFS().
 		withCmd("grubby --info=ALL", blsInfoAllMultipleUnmanaged).
-		withCmd(expectedStrip, "")
+		withCmd(expectedStripA, "").
+		withCmd(expectedStripB, "")
 
 	var out bytes.Buffer
 	if rc := rollbackBLS(&out, false, fs); rc != 0 {
 		t.Fatalf("rollbackBLS rc=%d, output:\n%s", rc, out.String())
 	}
-	if len(fs.cmdLog) != 2 {
+	if len(fs.cmdLog) != 3 {
 		t.Fatalf("legacy full-cmdline snapshot must be ignored, got calls: %v", fs.cmdLog)
 	}
 	if strings.Contains(strings.Join(fs.cmdLog, "\n"), "--args=") {
