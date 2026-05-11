@@ -247,22 +247,43 @@ likely to break production workloads. `preview`, `status`, and the TUI show when
 a rule is skipped by host profile. Operators can override with `state = force`
 when they accept the risk.
 
-Important gates:
+The current host profile is a set of detected signals, not a phase or rollout
+plan. kernsec treats these signals conservatively: a positive signal skips the
+known-risk rule group, and the operator can force a rule only after accepting
+the workload impact.
 
-- Containers / rootless-container tooling / hosting isolation: skip namespace
-  kill rules.
-- DKMS, vendor modules, live patching, ZFS, NVIDIA, CloudLinux/LVE/CageFS, and
-  similar evidence: skip lockdown and module-signature enforcement.
-- kdump, Proxmox, and live patching: skip `kernel.kexec_load_disabled=1`.
-- kdump, hosting panels, backup agents, and monitoring/crash-diagnostic agents:
-  skip global core-dump suppression.
-- seccomp-heavy container, hosting, backup, or monitoring workloads: skip SSBD
-  seccomp mode unless forced.
-- EFI detection: apply `efi=disable_early_pci_dma` only on EFI-booted hosts.
-- IPsec/XFRM policy: skip IPsec module blacklists.
-- Bluetooth / Thunderbolt hardware: skip the corresponding bus module
-  blacklists.
-- SCTP evidence: skip the Tier 2 SCTP module blacklist.
+| Profile category | Detected signal | Host-profile effect |
+|---|---|---|
+| Containers | Container daemons, shims, runtime sockets, or systemd-nspawn machines (`runc`, `containerd`, `dockerd`, `crio`, `podman`, `kubelet`, LXC/LXD, Kata, gVisor, Docker/CRI-O/containerd/Podman sockets). | Skips Tier 2 namespace kill rules; also skips Tier 2 SSBD seccomp mode because container hosts are commonly seccomp-heavy. |
+| cPanel | `/usr/local/cpanel`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
+| DirectAdmin | `/usr/local/directadmin`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
+| CloudLinux/LVE | `/proc/lve` or loaded `lve`/`kmodlve` module. | Counts as hosting-panel workload and out-of-tree/vendor module evidence; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression, lockdown, and module-signature enforcement. |
+| CageFS | `/etc/cagefs` or `cagefsctl`. | Counts as hosting-panel workload and CloudLinux-style module risk; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression, lockdown, and module-signature enforcement. |
+| Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
+| KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
+| Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
+| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Skips lockdown, module-signature enforcement, and kexec disable so future live patches are not blocked. |
+| DKMS/akmods/out-of-tree modules | Non-empty `/var/lib/dkms`, `akmods` binary, `/usr/src/*-dkms*`, or non-empty `/lib/modules/*/{extra,updates}`. | Skips lockdown and module-signature enforcement because unsigned/vendor modules may fail to load. |
+| ZFS/NVIDIA | Loaded ZFS/NVIDIA modules or ZFS tooling/paths (`/sys/module/zfs`, `/etc/zfs`, `zpool`). | Counts as out-of-tree module evidence; skips lockdown and module-signature enforcement. |
+| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips kexec disable; also skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
+| kdump | Crash-kernel/kdump indicators. | Skips kexec disable, lockdown, and global coredump suppression so crash capture remains available. |
+| Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression to preserve backup performance and vendor diagnostics. |
+| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode, global coredump suppression, and SCTP module blacklisting when SCTP health checks may be present. |
+| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips IPsec/XFRM module blacklists. |
+| Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
+| Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
+| NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
+| EFI boot | `/sys/firmware/efi`. | Allows EFI-specific DMA boot hardening; non-EFI hosts skip `efi=disable_early_pci_dma` as a no-op. |
+
+Current risky Tier 2 skip reasons:
+
+| Tier 2 group | Current skip reason |
+|---|---|
+| Namespace rules (`tier2.namespace`) | Skip hosting/container workloads because disabling unprivileged user namespaces breaks rootless containers, container sandboxes, cPanel jails, CloudLinux/CageFS isolation, and similar hosting isolation. |
+| Lockdown/module signature enforcement (`tier2.lockdown`, `tier2.module-sig-enforce`) | Skip out-of-tree/live-patching/CloudLinux-style hosts because `lockdown=integrity` and `module.sig_enforce=1` can block DKMS, akmod, vendor, ZFS, NVIDIA, KernelCare, Ksplice, live-patching, and CloudLinux/LVE modules. |
+| SSBD seccomp mode (`tier2.ssbd`) | Skip seccomp-heavy hosting, container, backup, and monitoring workloads because `spec_store_bypass_disable=seccomp` can add measurable syscall overhead. |
+| Coredump suppression (`sysctl.kernel.coredump`) | Skip kdump, hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses coredumps globally and can break crash capture or vendor troubleshooting. |
+| kexec disable (`sysctl.kernel.kexec`) | Skip kdump, Proxmox, and live-patching evidence because `kernel.kexec_load_disabled=1` is irreversible until reboot and can break crash-kernel, hypervisor rescue/reboot, or live-patching workflows. |
 
 Mutating commands also run a pre-flight safety summary before risky applies.
 Use `--yes` only for unattended runs where that preview has already been
