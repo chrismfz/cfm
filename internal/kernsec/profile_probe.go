@@ -62,6 +62,9 @@ type HostProfile struct {
 	IsProxmox               bool   `json:"is_proxmox"`                 // Proxmox paths or proxmox-boot-tool present
 	HasZFS                  bool   `json:"has_zfs"`                    // loaded zfs or ZFS path indicators
 	HasNVIDIA               bool   `json:"has_nvidia"`                 // loaded NVIDIA modules
+	HasBackupWorkload       bool   `json:"has_backup_workload"`        // common backup agents/services present
+	HasMonitoringWorkload   bool   `json:"has_monitoring_workload"`    // common monitoring/crash-diagnostic agents present
+	HasSCTPWorkload         bool   `json:"has_sctp_workload"`          // SCTP module/socket/service evidence present
 	HasHostingPanelWorkload bool   `json:"has_hosting_panel_workload"` // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
 	Reason                  string `json:"reason,omitempty"`           // freeform note used in --check output
 }
@@ -89,6 +92,9 @@ func DetectHostProfile() HostProfile {
 		IsProxmox:              detectProxmox(),
 		HasZFS:                 detectZFS(),
 		HasNVIDIA:              detectNVIDIA(),
+		HasBackupWorkload:      detectBackupWorkload(),
+		HasMonitoringWorkload:  detectMonitoringWorkload(),
+		HasSCTPWorkload:        detectSCTPWorkload(),
 	}
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
@@ -272,6 +278,67 @@ func detectNVIDIA() bool {
 	return anyModuleLoaded("nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm")
 }
 
+func detectBackupWorkload() bool {
+	return anyPathExists(
+		"/opt/veeam",
+		"/usr/bin/veeam",
+		"/usr/sbin/veeam",
+		"/usr/lib/systemd/system/veeamservice.service",
+		"/usr/lib/systemd/system/veeamtransport.service",
+		"/usr/lib/systemd/system/acronis_mms.service",
+		"/usr/lib/Acronis",
+		"/opt/Acronis",
+		"/opt/cpanel/jetbackup",
+		"/usr/bin/jetbackup",
+		"/usr/local/jetapps",
+		"/usr/lib/systemd/system/bareos-fd.service",
+		"/usr/lib/systemd/system/bacula-fd.service",
+		"/usr/lib/systemd/system/urbackupclientbackend.service",
+	) || anyGlobMatches(
+		"/etc/systemd/system/*backup*.service",
+		"/usr/lib/systemd/system/*backup*.service",
+		"/lib/systemd/system/*backup*.service",
+	)
+}
+
+func detectMonitoringWorkload() bool {
+	return anyPathExists(
+		"/usr/bin/node_exporter",
+		"/usr/local/bin/node_exporter",
+		"/usr/lib/systemd/system/node_exporter.service",
+		"/usr/lib/systemd/system/zabbix-agent.service",
+		"/usr/lib/systemd/system/zabbix-agent2.service",
+		"/usr/sbin/zabbix_agentd",
+		"/usr/bin/datadog-agent",
+		"/etc/datadog-agent",
+		"/opt/datadog-agent",
+		"/opt/elastic-agent",
+		"/usr/bin/telegraf",
+		"/usr/lib/systemd/system/telegraf.service",
+		"/usr/lib/systemd/system/abrt-ccpp.service",
+		"/usr/lib/systemd/system/apport.service",
+		"/usr/lib/systemd/system/systemd-coredump.socket",
+	)
+}
+
+func detectSCTPWorkload() bool {
+	if anyModuleLoaded("sctp") || anyPathExists("/proc/net/sctp", "/sys/module/sctp") {
+		return true
+	}
+	return anyPathExists(
+		"/usr/lib/systemd/system/sctp.service",
+		"/usr/lib/systemd/system/sctp_darn.service",
+		"/usr/bin/sctp_darn",
+		"/usr/bin/check_sctp",
+		"/usr/lib/nagios/plugins/check_sctp",
+		"/usr/lib64/nagios/plugins/check_sctp",
+	) || anyGlobMatches(
+		"/etc/systemd/system/*sctp*.service",
+		"/usr/lib/systemd/system/*sctp*.service",
+		"/lib/systemd/system/*sctp*.service",
+	)
+}
+
 func (p HostProfile) hostingPanelReason() string {
 	switch {
 	case p.IsCPanel:
@@ -334,6 +401,13 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasBluetoothHardware {
 			return "host has Bluetooth hardware (/sys/class/bluetooth non-empty)"
 		}
+	case "tier2.modules.sctp":
+		if p.HasSCTPWorkload {
+			return "SCTP workload detected — do not blacklist the sctp module"
+		}
+		if p.HasMonitoringWorkload {
+			return "monitoring workload detected — SCTP health checks may need the sctp module"
+		}
 	case "modules.bus.thunderbolt":
 		// Thunderbolt blacklist on a host with TB hardware breaks
 		// docks / external GPUs / TB networking. KVM hosts almost
@@ -360,6 +434,19 @@ func (p HostProfile) SkipReason(group string) string {
 		if reason := p.moduleSigningRiskReason("module.sig_enforce=1"); reason != "" {
 			return reason
 		}
+	case "tier2.ssbd":
+		if p.HasContainers || p.IsProxmox {
+			return "seccomp-heavy container/Proxmox workload detected — SSBD seccomp mode may add measurable syscall overhead"
+		}
+		if reason := p.hostingPanelReason(); reason != "" {
+			return "hosting panel seccomp workload: " + reason
+		}
+		if p.HasBackupWorkload {
+			return "backup workload detected — avoid adding syscall overhead unless explicitly approved"
+		}
+		if p.HasMonitoringWorkload {
+			return "monitoring workload detected — avoid adding syscall overhead unless explicitly approved"
+		}
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0
 		// break Chromium sandbox, bwrap, rootless podman, cPanel jails,
@@ -374,6 +461,12 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasKdump {
 			return "host has kdump enabled — kexec_load_disabled would break it"
 		}
+		if p.IsProxmox {
+			return "Proxmox host detected — keep kexec available for hypervisor rescue/reboot workflows unless forced"
+		}
+		if p.HasKernelCare || p.HasKsplice || p.HasLivePatchingModules {
+			return "live-patching evidence detected — keep kexec available unless this host is explicitly approved"
+		}
 	case "boot.dma":
 		// efi=disable_early_pci_dma is an EFI-specific boot parameter;
 		// on BIOS/legacy-boot systems the kernel ignores it entirely so
@@ -387,6 +480,15 @@ func (p HostProfile) SkipReason(group string) string {
 		// core_pattern would silently break crash capture.
 		if p.HasKdump {
 			return "host has kdump enabled — kernel.core_pattern must remain writable for crash capture"
+		}
+		if reason := p.hostingPanelReason(); reason != "" {
+			return "hosting panel/vendor diagnostics may require coredumps: " + reason
+		}
+		if p.HasBackupWorkload {
+			return "backup workload detected — preserve global coredump handling for vendor diagnostics"
+		}
+		if p.HasMonitoringWorkload {
+			return "monitoring/crash-diagnostic workload detected — preserve global coredump handling"
 		}
 	}
 	return ""

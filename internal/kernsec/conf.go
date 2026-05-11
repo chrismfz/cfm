@@ -248,14 +248,14 @@ func splitKV(line string) (key, value string, ok bool) {
 // cross-check operator-authored conf overrides against the registry.
 func AllRuleIDs() map[string]struct{} {
 	out := make(map[string]struct{},
-		len(AllSysctls())+len(AllBootArgs())+len(Tier1Modules)+len(Tier1Mounts))
+		len(AllSysctls())+len(AllBootArgs())+len(AllModules())+len(Tier1Mounts))
 	for _, r := range AllSysctls() {
 		out[r.ID] = struct{}{}
 	}
 	for _, r := range AllBootArgs() {
 		out[r.ID] = struct{}{}
 	}
-	for _, r := range Tier1Modules {
+	for _, r := range AllModules() {
 		out[r.ID] = struct{}{}
 	}
 	for _, r := range Tier1Mounts {

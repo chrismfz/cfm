@@ -66,10 +66,10 @@ current branch:
 - **`KSEC-BOOT-bug-detection-001`** (`kfence.sample_interval=100`) — Tier 1, no gate.
 - **`KSEC-BOOT-dma-001`** (`efi=disable_early_pci_dma`) — Tier 1, EFI-boot gate (skipped on non-EFI/BIOS hosts).
 - **`KSEC-BOOT-sidechannel-001`** (`tsx=off`) — Tier 1, no gate.
-- **`KSEC-BOOT-ssbd-001`** (`spec_store_bypass_disable=seccomp`) — Tier 1, no gate.
-- **`KSEC-SCT-kernel.coredump-001`** (`kernel.core_pattern=|/bin/false`) — Tier 1, kdump-gated.
+- **`KSEC-BOOT-ssbd-001`** (`spec_store_bypass_disable=seccomp`) — Tier 2, gated for seccomp-heavy container/hosting/backup/monitoring workloads.
+- **`KSEC-SCT-kernel.coredump-001`** (`kernel.core_pattern=|/bin/false`) — Tier 2, gated for kdump, hosting panels, backup, and monitoring/crash-diagnostic workloads.
 - **`KSEC-SCT-mem.exploit-001` through `-008`** — reconciled formerly docs-only memory/exploit sysctls. Safe entries ship in Tier 1; the panic-on-oops pair is Tier 2 because it can reboot the host on kernel bugs.
-- **`KSEC-SCT-kernel.surface-001` through `-003`** — reconciled formerly docs-only kernel-surface sysctls (`dev.tty.ldisc_autoload=0`, kdump-gated `kernel.kexec_load_disabled=1`, `kernel.sysrq=0`).
+- **`KSEC-SCT-kernel.surface-001` through `-003`** — reconciled formerly docs-only kernel-surface sysctls (`dev.tty.ldisc_autoload=0`, Tier 2 `kernel.kexec_load_disabled=1`, `kernel.sysrq=0`).
 - **`KSEC-SCT-net.harden-001` through `-007`** — 7 new kernsec-owned net hardening sysctls (icmp_echo_ignore_broadcasts, accept_source_route, log_martians, tcp_rfc1337, ipv6 accept_ra).
 - **`cfm kernsec rollback`** — new subcommand that restores the pre-apply cmdline from `.cfm-kernsec.bak` and refreshes the bootloader. BLS backend now captures a pre-apply snapshot via `grubby --info=DEFAULT`.
 - **`cfm kernsec status --json`** — machine-readable JSON output for fleet aggregation.
@@ -246,8 +246,9 @@ bootloaders. Real-host verification stays a manual gate.
 **Historical external questions** (resolved where they affect the reconciled rule shape):
 
 - kdump / DKMS impact is now host-profile gated: `kernel.kexec_load_disabled=1`
-  ships as Tier 1 but skips when kdump is enabled; `module.sig_enforce=1` remains
-  Tier 2 and skips when DKMS / out-of-tree module evidence is present.
+  ships as Tier 2 and skips when kdump, Proxmox, or live-patching evidence is present;
+  `module.sig_enforce=1` remains Tier 2 and skips when DKMS / out-of-tree
+  module evidence is present.
 - ssh access to a Proxmox + EL + Debian test host trio for the Phase 3
   acceptance gate remains an operational smoke-test item, not a rule-shape
   blocker.
@@ -344,8 +345,8 @@ Per-rule overrides are persisted in `/etc/cfm/kernsec.conf` via the
 
 | Tier | Examples | Default |
 |---|---|---|
-| 1. Safe-everywhere | KSPP sysctls, blacklist of legacy network protocols, `dev.tty.ldisc_autoload=0`, `vm.unprivileged_userfaultfd=0`, `kernel.kexec_load_disabled=1` (gated on no-kdump) | enable |
-| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `oops=panic`, `kernel.panic_on_oops=1`, `kernel.panic=10`, `lockdown=integrity`, `module.sig_enforce=1` (gated on no DKMS) | opt-in per role |
+| 1. Safe-everywhere | KSPP sysctls, blacklist of safe legacy network protocols, `dev.tty.ldisc_autoload=0`, `vm.unprivileged_userfaultfd=0` | enable |
+| 2. Server-aggressive | `user.max_user_namespaces=0` (gated on no containers), `kernel.kexec_load_disabled=1`, global `kernel.core_pattern=|/bin/false`, `spec_store_bypass_disable=seccomp`, SCTP blacklist, `oops=panic`, `lockdown=integrity`, `module.sig_enforce=1` | opt-in per role |
 
 LKRG was considered and dropped: out-of-tree DKMS = breaks every kernel jump,
 ~3-5% perf hit, has had its own bugs. Not worth shipping in cfm.
@@ -376,7 +377,6 @@ alias-loaded names; `install … /bin/false` makes it stick.
 | ID | Module(s) | Why | Affects |
 |---|---|---|---|
 | KSEC-MOD-net.legacy-014 | `dccp` | Datagram Congestion Control, multiple LPE CVEs | None |
-| KSEC-MOD-net.legacy-015 | `sctp` | Stream Control, telco-only protocol | Breaks lksctp if used (unlikely on hosting) |
 | KSEC-MOD-net.legacy-016 | `tipc` | Cluster IPC, has had LPEs | None |
 | KSEC-MOD-net.legacy-017 | `rds` | Reliable Datagram Sockets, Oracle-internal | None |
 | KSEC-MOD-net.legacy-018 | `rxrpc` | AFS RPC, never on hosting | None |
@@ -387,6 +387,12 @@ alias-loaded names; `install … /bin/false` makes it stick.
 | KSEC-MOD-net.legacy-023 | `can`, `can_raw`, `can_bcm`, `can_gw`, `vcan` | CAN bus, automotive | None on servers |
 | KSEC-MOD-net.legacy-022 | `atm` | ATM stack | None |
 | KSEC-MOD-net.legacy-023 | `irda` | Dead, gone in newer kernels | None |
+
+**Group `tier2.modules.sctp`** — opt-in SCTP protocol disable.
+
+| ID | Module | Why | Affects |
+|---|---|---|---|
+| KSEC-MOD-net.legacy-002 | `sctp` | Removes SCTP kernel protocol attack surface when the host does not use SCTP. | Tier 2 because lksctp, SCTP health checks, telecom apps, and some clustered services can require it; skipped when SCTP module/socket/service or monitoring evidence is detected. |
 
 The above is a summary of the design intent; for the canonical list of
 shipped rules see `internal/kernsec/modules.go`. Rule IDs and sub-groups
@@ -478,13 +484,13 @@ turn a kernel bug into an automatic reboot.
 | KSEC-SCT-mem.exploit-008 | 2 | `kernel.panic=10` | Automatically reboot ten seconds after the Tier 2 panic path fires | Less console forensic time after a panic |
 
 **Group `sysctl.kernel.surface`** — shipped now. `kernel.kexec_load_disabled`
-uses the `sysctl.kernel.kexec` resolver group internally so the kdump host-profile
-gate can target only that row.
+uses the `sysctl.kernel.kexec` resolver group internally and is Tier 2 because
+it is irreversible until reboot; gates skip kdump, Proxmox, and live-patching hosts.
 
 | ID | Tier | Setting | Why | Affects |
 |---|---:|---|---|---|
 | KSEC-SCT-kernel.surface-001 | 1 | `dev.tty.ldisc_autoload=0` | Closes n_hdlc-style line-discipline autoload paths entirely | None on servers; unusual line disciplines must be loaded explicitly by root |
-| KSEC-SCT-kernel.surface-002 | 1 | `kernel.kexec_load_disabled=1` | Prevents unsigned / unexpected kernel replacement via kexec | Skipped if kdump enabled; cannot be re-enabled until reboot once set |
+| KSEC-SCT-kernel.surface-002 | 2 | `kernel.kexec_load_disabled=1` | Prevents unsigned / unexpected kernel replacement via kexec | Skipped if kdump, Proxmox, or live-patching evidence is detected; cannot be re-enabled until reboot once set |
 | KSEC-SCT-kernel.surface-003 | 1 | `kernel.sysrq=0` | Disables Magic SysRq emergency-control primitives | Lose emergency-debug shortcuts unless overridden (for example SAK-only mode) |
 
 **Future candidates / not shipped**: none from the `sysctl.mem.exploit` or
@@ -492,11 +498,11 @@ gate can target only that row.
 two groups now have registry entries; unsupported kernel keys are rendered as
 commented `# skipped` lines rather than causing apply failures.
 
-**Group `sysctl.kernel.coredump`** (Tier 1, kdump-gated)
+**Group `sysctl.kernel.coredump`** (Tier 2, host-profile gated)
 
 | ID | Setting | Why | Affects |
 |---|---|---|---|
-| KSEC-SCT-kernel.coredump-001 | `kernel.core_pattern=\|/bin/false` | Pipes core dumps to `/bin/false` — prevents unprivileged processes exploiting CVE-2023-0386-class `core_pattern` injection (writing to a setuid-root process's namespace via a specially crafted core pattern). Skipped when kdump is enabled, because kdump relies on `core_pattern` to invoke its capture helper. | None on hosts without kdump. kdump hosts keep distro default. |
+| KSEC-SCT-kernel.coredump-001 | `kernel.core_pattern=\|/bin/false` | Pipes core dumps to `/bin/false` — prevents unprivileged processes exploiting CVE-2023-0386-class `core_pattern` injection. | Suppresses coredumps globally for every process. Skipped for kdump, cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360, backup agents, and monitoring/crash-diagnostic agents. |
 
 **Group `sysctl.namespace`** (Tier 2, host-profile gated)
 
@@ -563,11 +569,11 @@ written to `/etc/sysctl.d/99-cfm-kernsec.conf`.
 |---|---|---|---|
 | KSEC-BOOT-sidechannel-001 | `tsx=off` | **SHIPPED.** Disables Intel TSX — removes the hardware primitive exploited by TAA (CVE-2019-11135) and MDS variants. Unused by any hosting/KVM workload. | None. Non-Intel CPUs and already-patched Intel microcode ignore it. |
 
-**Group `boot.ssbd`** (Tier 1, no gate)
+**Group `tier2.ssbd`** (Tier 2, host-profile gated)
 
 | ID | Arg | Why | Affects |
 |---|---|---|---|
-| KSEC-BOOT-ssbd-001 | `spec_store_bypass_disable=seccomp` | **SHIPPED.** Spectre v4 / SSBD mitigation for seccomp-sandboxed processes. Distro default `prctl` is opt-in per-process; `seccomp` covers all threads under a seccomp policy (sandboxed web workloads) without the global hit of `on`. | ~1-5% syscall throughput on heavily syscall-bound seccomp workloads. |
+| KSEC-BOOT-ssbd-001 | `spec_store_bypass_disable=seccomp` | Spectre v4 / SSBD mitigation for seccomp-sandboxed processes. Distro default `prctl` is opt-in per-process; `seccomp` covers all threads under a seccomp policy without the global hit of `on`. | Tier 2 because seccomp-heavy containers, hosting panels, backup agents, and monitoring agents can see measurable syscall overhead; those profiles are auto-skipped when detected. |
 
 **Group `boot.lockdown`** (Tier 2, gated)
 
@@ -608,7 +614,12 @@ to opt back in.
 | Container daemon / shim / socket / nspawn machine | Containers in use — skip userns kill (full probe set: see `defaultContainerProbe()`) |
 | `ip xfrm policy` non-empty | IPsec in use — skip ipsec module group |
 | Out-of-tree module evidence (see below) | Skip `module.sig_enforce` and `lockdown=integrity` |
-| kdump enabled (multi-distro detection) | Skip `kexec_load_disabled` AND `lockdown=integrity` (kexec primitives) AND `kernel.core_pattern` (kdump uses core_pattern for its capture helper) |
+| kdump enabled (multi-distro detection) | Skip `kexec_load_disabled` AND `lockdown=integrity` (kexec primitives) AND `kernel.core_pattern` (crash diagnostics) |
+| Proxmox detected | Skip `kexec_load_disabled`; Proxmox rescue/reboot workflows should keep kexec available unless forced |
+| cPanel / DirectAdmin / CloudLinux / CageFS / Imunify360 detected | Skip Tier 2 namespace kill, SSBD seccomp mode, and global coredump suppression where they risk panel/vendor workloads or diagnostics |
+| Backup workload detected | Skip SSBD seccomp mode and global coredump suppression; vendor agents may need predictable syscall performance and crash diagnostics |
+| Monitoring/crash-diagnostic workload detected | Skip SSBD seccomp mode, global coredump suppression, and SCTP blacklist where health checks or crash collectors may depend on them |
+| SCTP workload evidence | Skip Tier 2 SCTP blacklist |
 | `/sys/class/bluetooth/*` populated | BT hardware present — skip `modules.bus.bluetooth` group |
 | `/sys/bus/thunderbolt/devices/*` populated | Thunderbolt hardware — skip `modules.bus.thunderbolt` group |
 | NFS mounts active | Don't touch NFS (already excluded by policy) |
@@ -1232,9 +1243,10 @@ sees the full set audited.
   heuristic can't bracket it safely).
 - `iommu=force` — deferred; requires broad hardware compatibility
   testing across vendor BIOS/UEFI.
-- `kfence.sample_interval=100`, `efi=disable_early_pci_dma`, `tsx=off`,
-  `spec_store_bypass_disable=seccomp` — **now shipped** as Tier 1 in
-  `Tier1BootArgsExt` (see Boot args section above).
+- `kfence.sample_interval=100`, `efi=disable_early_pci_dma`, and `tsx=off` —
+  shipped as Tier 1 boot-arg extensions.
+- `spec_store_bypass_disable=seccomp` — shipped as a Tier 2 boot-arg extension
+  with seccomp-heavy workload gates (see Boot args section above).
 
 ### Phase 5 — Drift detection wiring (DONE — branch `kernsec-5`)
 

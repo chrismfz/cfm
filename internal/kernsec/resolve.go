@@ -90,12 +90,12 @@ func (s ResolvedSet) ApplyBootArgs() []BootArg {
 }
 
 // ApplyModules returns just the module rules whose decision is Apply.
-// Order matches Tier1Modules so the rendered modprobe file is
+// Order matches AllModules so the rendered modprobe file is
 // deterministic — required for byte-equal drift detection.
 func (s ResolvedSet) ApplyModules() []ModuleRule {
 	want := decisionIDSet(s.Modules, Apply)
 	out := make([]ModuleRule, 0, len(want))
-	for _, r := range Tier1Modules {
+	for _, r := range AllModules() {
 		if _, ok := want[r.ID]; ok {
 			out = append(out, r)
 		}
@@ -126,7 +126,7 @@ func Resolve(conf *Conf, profile HostProfile) ResolvedSet {
 	for _, r := range AllBootArgs() {
 		out.BootArgs = append(out.BootArgs, decideBootArg(r, conf, profile))
 	}
-	for _, r := range Tier1Modules {
+	for _, r := range AllModules() {
 		out.Modules = append(out.Modules, decideModule(r, conf, profile))
 	}
 	for _, r := range Tier1Mounts {

@@ -127,10 +127,10 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 
 	allSysctls := AllSysctls()
 	allBootArgs := AllBootArgs()
-	rows := make([]AuditRow, 0, len(allSysctls)+len(allBootArgs)+len(Tier1Modules))
+	rows := make([]AuditRow, 0, len(allSysctls)+len(allBootArgs)+len(AllModules()))
 
 	// rs.Sysctls / rs.BootArgs / rs.Modules are populated in the same
-	// stable order as AllSysctls / AllBootArgs / Tier1Modules (see
+	// stable order as AllSysctls / AllBootArgs / AllModules (see
 	// Resolve in resolve.go), so index-zip is safe.
 	for i, r := range allSysctls {
 		rr := rs.Sysctls[i]
@@ -179,7 +179,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 		rows = append(rows, row)
 	}
 
-	for i, m := range Tier1Modules {
+	for i, m := range AllModules() {
 		rr := rs.Modules[i]
 		row := AuditRow{
 			ID:              m.ID,

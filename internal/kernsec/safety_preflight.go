@@ -45,6 +45,7 @@ func preflightSummary(
 	fmt.Fprintf(w, "    - modules:   %-50s (%d modules)\n", ModprobePath, len(modules))
 
 	risks := boot_impacting_risks(bootArgs, modules, profile)
+	risks = append(risks, sysctl_impacting_risks(sysctls, profile)...)
 	if len(risks) > 0 {
 		fmt.Fprintln(w, "[!] Boot-impacting changes — read carefully:")
 		for _, r := range risks {
@@ -62,9 +63,30 @@ func preflightSummary(
 	fmt.Fprintln(w)
 }
 
+func sysctl_impacting_risks(sysctls []SysctlRule, profile HostProfile) []string {
+	var risks []string
+	for _, s := range sysctls {
+		switch s.Key {
+		case "kernel.kexec_load_disabled":
+			detail := "kernel.kexec_load_disabled=1 is irreversible until reboot: after apply, kexec/kdump crash-kernel loading cannot be re-enabled without rebooting into a kernel where this sysctl is unset."
+			if profile.HasKdump || profile.IsProxmox || profile.HasKernelCare || profile.HasKsplice || profile.HasLivePatchingModules {
+				detail += " Host-profile risk was detected; this rule should only be present if forced."
+			}
+			risks = append(risks, detail)
+		case "kernel.core_pattern":
+			detail := "kernel.core_pattern=|/bin/false suppresses coredumps globally for every process; this can disable crash diagnostics until the sysctl is changed back and affected services are retried."
+			if profile.HasHostingPanelWorkload || profile.HasBackupWorkload || profile.HasMonitoringWorkload || profile.HasKdump {
+				detail += " Host-profile diagnostics risk was detected; this rule should only be present if forced."
+			}
+			risks = append(risks, detail)
+		}
+	}
+	return risks
+}
+
 // boot_impacting_risks returns one human-readable bullet per
 // boot-impacting decision in the apply set. Empty slice when nothing
-// risky is being applied (Tier 1 KSPP sysctls + dccp/sctp blacklist
+// risky is being applied (Tier 1 KSPP sysctls + safe module blacklists
 // = no boot impact, for example).
 func boot_impacting_risks(bootArgs []BootArg, modules []ModuleRule, profile HostProfile) []string {
 	var risks []string
@@ -113,7 +135,7 @@ func confirmApply(w io.Writer, in io.Reader) (bool, error) {
 	if in == nil {
 		in = os.Stdin
 	}
-	fmt.Fprint(w, "Apply changes? [y/N]: ")
+	fmt.Fprint(w, "Apply these kernsec changes? This may include irreversible-until-reboot sysctls and global coredump suppression. [y/N]: ")
 	r := bufio.NewReader(in)
 	line, err := r.ReadString('\n')
 	if err != nil {
