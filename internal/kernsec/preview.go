@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -276,11 +277,14 @@ func printPreviewApplyPlan(w io.Writer, rs ResolvedSet) bool {
 	printBootTarget(w, backend)
 
 	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
-	if cmdlineErr != nil {
+	if cmdlineErr != nil && !errors.Is(cmdlineErr, ErrBLSDivergence) {
 		fmt.Fprintf(w, "  boot read error: %v\n", cmdlineErr)
 		fmt.Fprintln(w, "  status: cannot compute desired cmdline without reading current next-boot config")
 		fmt.Fprintln(w)
 		return true
+	}
+	if cmdlineErr != nil {
+		fmt.Fprintf(w, "  note: BLS entries diverge — apply will auto-reconcile (%v)\n", cmdlineErr)
 	}
 
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
