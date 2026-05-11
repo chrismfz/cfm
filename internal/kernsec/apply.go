@@ -85,7 +85,7 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 		fmt.Fprintln(w, "kernsec apply: load conf:", err)
 		return 1
 	}
-	rc, _ := applyCore(w, conf, opts, "APPLY")
+	rc := applyCore(w, conf, opts, "APPLY")
 	return rc
 }
 
@@ -93,12 +93,13 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 // from disk first; RunDisable constructs an in-memory tier=0 conf and
 // calls in directly. label is what appears in the banner ("APPLY" or
 // "DISABLE") so operator output reflects the operator's intent.
-// applyCore returns (rc, bootSkipped). bootSkipped is true when sysctl
-// and modprobe writes succeeded but the boot section was skipped due
-// to recoverable conditions (BLS divergence). Callers like the TUI use
-// it to give the operator an accurate post-apply summary; CLI callers
-// can ignore it — the human-readable output already flags the skip.
-func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, bool) {
+//
+// BLS divergence (two installed kernels with mismatched managed args)
+// is auto-reconciled: WriteCmdline writes the same desired managed set
+// to every non-recovery kernel, so calling it on a divergent host
+// aligns all entries. applyCore prints a RECONCILE note for visibility
+// and proceeds with the write.
+func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	profile := DetectHostProfile()
 	rs := Resolve(conf, profile)
 	sysctls := rs.ApplySysctls()
@@ -138,27 +139,24 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, b
 	// any rendering so the operator sees the rejection immediately.
 	if err := CheckSafeModuleRules(modules); err != nil {
 		fmt.Fprintln(w, err)
-		return 1, false
+		return 1
 	}
 
 	sysctlContent := RenderSysctlFile(sysctls)
 	modprobeContent := RenderModprobeFile(modules)
 	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
-	// BLS divergence (two installed kernels with mismatched managed args)
-	// is recoverable: we can still write the sysctl drop-in, the
-	// modprobe drop-in, and run runtime `sysctl -w`. We only skip the
-	// boot section. Every other cmdline-read failure is still fatal —
-	// writing a cmdline blind to current state is unsafe.
-	skipBoot := false
-	var bootSkipReason string
+	// BLS divergence is auto-reconciled — WriteCmdline writes the
+	// desired managed set to every non-recovery kernel, aligning all
+	// entries on the next pass. Other cmdline-read failures remain
+	// fatal: writing a cmdline blind to current state is unsafe.
+	var bootReconcileReason string
 	if cmdlineErr != nil {
 		if errors.Is(cmdlineErr, ErrBLSDivergence) {
-			skipBoot = true
-			bootSkipReason = cmdlineErr.Error()
+			bootReconcileReason = cmdlineErr.Error()
 		} else {
 			fmt.Fprintln(w, "kernsec apply:", cmdlineErr)
 			fmt.Fprintln(w, "  cannot compute desired cmdline without reading current next-boot config")
-			return 1, false
+			return 1
 		}
 	}
 
@@ -179,17 +177,18 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, b
 
 	fmt.Fprintln(w, "[Boot args]")
 	switch {
-	case skipBoot:
-		fmt.Fprintln(w, "  status:            SKIPPED — BLS kernel entries diverge; reconcile with grubby and re-run apply")
-		fmt.Fprintf(w, "  detail:            %s\n", bootSkipReason)
 	case drift.BootReadErr != nil:
 		fmt.Fprintf(w, "  status:            ERROR reading next-boot cmdline: %v\n", drift.BootReadErr)
 	default:
 		fmt.Fprintf(w, "  current next-boot: %s\n", strings.TrimSpace(drift.CurrentCmdline))
 		fmt.Fprintf(w, "  desired:           %s\n", strings.TrimSpace(desiredCmdline))
-		if drift.BootDiffers {
+		switch {
+		case bootReconcileReason != "":
+			fmt.Fprintln(w, "  status:            RECONCILE — BLS entries diverge; apply will align all kernels")
+			fmt.Fprintf(w, "  detail:            %s\n", bootReconcileReason)
+		case drift.BootDiffers:
 			fmt.Fprintln(w, "  status:            DRIFT (would rewrite cmdline)")
-		} else {
+		default:
 			fmt.Fprintln(w, "  status:            in sync")
 		}
 	}
@@ -216,24 +215,24 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, b
 		switch classifyCheckResult(drift) {
 		case 2:
 			fmt.Fprintln(w, "[!] could not determine state — exit 2 (retry later)")
-			return 2, false
+			return 2
 		case 1:
 			fmt.Fprintln(w, "[!] drift detected — exit 1")
-			return 1, false
+			return 1
 		}
 		fmt.Fprintln(w, "[+] no drift")
-		return 0, false
+		return 0
 	}
 
 	if opts.DryRun {
 		fmt.Fprintln(w, "(dry-run; nothing written)")
 		fmt.Fprintln(w, "===========================")
-		return 0, skipBoot
+		return 0
 	}
 
-	if drift.BootReadErr != nil && !skipBoot {
+	if drift.BootReadErr != nil {
 		fmt.Fprintln(w, "kernsec apply: refusing to write — cannot read current cmdline")
-		return 1, false
+		return 1
 	}
 
 	// Phase 6 audit C1: interactive safety gate. Mutating operations
@@ -245,23 +244,25 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, b
 	// Skip the gate when there's nothing to write (no drift) — the
 	// apply call is then equivalent to a `--check` and shouldn't
 	// pester the operator. drift.SysctlDiffers / BootDiffers /
-	// ModprobeDiffers cover the three managed surfaces.
-	mutating := drift.SysctlDiffers || (drift.BootDiffers && !skipBoot) || drift.ModprobeDiffers
+	// ModprobeDiffers cover the three managed surfaces. A BLS
+	// divergence forces a write even if drift.BootDiffers is false
+	// for the first entry, since the stale entries still need aligning.
+	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != ""
 	if mutating && !opts.AssumeYes {
 		preflightSummary(w, label, sysctls, bootArgs, modules, profile)
 		ok, err := confirmApply(w, opts.Stdin)
 		if err != nil {
 			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)
-			return 1, false
+			return 1
 		}
 		if !ok {
 			fmt.Fprintln(w, "kernsec apply: aborted by operator (no changes written).")
-			return 0, false
+			return 0
 		}
 	}
 
-	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, skipBoot, LoadSysctl); rc != 0 {
-		return rc, false
+	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, bootReconcileReason, LoadSysctl); rc != 0 {
+		return rc
 	}
 
 	// Post-write verify.
@@ -272,7 +273,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, b
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[!] Boot-arg changes require reboot before they appear in /proc/cmdline.")
 	fmt.Fprintln(w, "===========================")
-	return 0, skipBoot
+	return 0
 }
 
 // applyWrites runs the mutating phase of apply in transaction-safe
@@ -306,7 +307,7 @@ func applyWrites(
 	bootArgs []BootArg,
 	loadedManaged []string,
 	opts ApplyOptions,
-	skipBoot bool,
+	bootReconcileReason string,
 	loader func() error,
 ) int {
 	// 1. Sysctl drop-in file.
@@ -330,26 +331,23 @@ func applyWrites(
 		}
 	}
 
-	// 3. Bootloader cmdline. Skipped entirely on BLS divergence — we
-	// don't know which entry is the canonical baseline, so writing
-	// would risk codifying a stale set of managed args across all
-	// kernels. Operator reconciles via grubby and re-runs apply.
-	if skipBoot {
-		fmt.Fprintln(w, "[Boot args] SKIPPED — divergent BLS entries; cmdline unchanged.")
-		fmt.Fprintln(w, "  reconcile with `grubby --update-kernel=ALL` and re-run `cfm kernsec apply`.")
-	} else {
-		if err := backend.WriteCmdline(bootArgs); err != nil {
-			fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
-			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
-			return 1
-		}
-		fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
+	// 3. Bootloader cmdline. On BLS divergence (managed args mismatched
+	// across installed kernels), WriteCmdline writes the desired set to
+	// every non-recovery kernel, so a single apply pass aligns all
+	// entries. Recovery / debug entries are excluded by the backend.
+	if bootReconcileReason != "" {
+		fmt.Fprintln(w, "[Boot args] reconciling divergent BLS entries:")
+		fmt.Fprintf(w, "  %s\n", bootReconcileReason)
 	}
+	if err := backend.WriteCmdline(bootArgs); err != nil {
+		fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
+		fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
+		return 1
+	}
+	fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
 
-	// 4. Bootloader refresh. Skipped when boot section was skipped.
+	// 4. Bootloader refresh.
 	switch {
-	case skipBoot:
-		// already printed the SKIPPED line above; nothing to refresh.
 	case !opts.NoRefresh:
 		if err := backend.Refresh(); err != nil {
 			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
@@ -461,7 +459,11 @@ func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBacke
 	}
 
 	current, err := backend.NextBootCmdline()
-	if err != nil {
+	// BLS divergence is a recoverable signal, not a read error: the
+	// backend still returns the first entry's args. applyCore handles
+	// the auto-reconcile separately; here we just treat the read as
+	// successful for drift accounting against the first entry.
+	if err != nil && !errors.Is(err, ErrBLSDivergence) {
 		res.BootReadErr = err
 		res.BootDiffers = true
 		return res
@@ -478,13 +480,19 @@ func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBacke
 // cannot be read — silently defaulting to empty here would cause apply
 // to compute a cmdline containing only managed args (dropping root=,
 // ro, console=, etc).
+//
+// BLS divergence is special: NextBootCmdline still returns the first
+// entry's args alongside ErrBLSDivergence, so we propagate both the
+// computed desired cmdline AND the wrapped error. Callers that want to
+// auto-reconcile can ignore err==ErrBLSDivergence and proceed to write;
+// callers that want to halt can check errors.Is(err, ErrBLSDivergence).
 func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
 	current, err := backend.NextBootCmdline()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrBLSDivergence) {
 		return "", fmt.Errorf("read current cmdline: %w", err)
 	}
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
-	return strings.Join(tokens, " "), nil
+	return strings.Join(tokens, " "), err
 }
 
 // sameTokens reports whether two token lists contain exactly the same

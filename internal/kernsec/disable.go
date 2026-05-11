@@ -86,7 +86,7 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 
 	// applyCore owns the banner + mode line + the closing banner. We
 	// pipe in DISABLE as the label so the operator sees the intent.
-	rc, _ := applyCore(w, conf, ApplyOptions{
+	rc := applyCore(w, conf, ApplyOptions{
 		DryRun:    opts.DryRun,
 		NoRefresh: opts.NoRefresh,
 		AssumeYes: opts.AssumeYes,

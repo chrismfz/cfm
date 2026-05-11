@@ -471,7 +471,7 @@ func RunTUI() (switchToText bool, err error) {
 			return
 		}
 		var buf bytes.Buffer
-		rc, bootSkipped := applyCore(&buf, conf, ApplyOptions{AssumeYes: true}, "APPLY")
+		rc := applyCore(&buf, conf, ApplyOptions{AssumeYes: true}, "APPLY")
 		count := len(pending)
 		if rc != 0 {
 			flash(fmt.Sprintf("apply failed (rc=%d) — conf saved; re-run `cfm kernsec apply` from shell", rc))
@@ -479,11 +479,7 @@ func RunTUI() (switchToText bool, err error) {
 		}
 		pending = map[string]RuleOverride{}
 		refresh()
-		if bootSkipped {
-			flash(fmt.Sprintf("applied %d change(s) — boot skipped (BLS divergence)", count))
-		} else {
-			flash(fmt.Sprintf("applied %d change(s)", count))
-		}
+		flash(fmt.Sprintf("applied %d change(s)", count))
 	}
 
 	applyFilter()
@@ -758,7 +754,7 @@ func bootDivergenceMsg(rows []AuditRow) string {
 			continue
 		}
 		if strings.Contains(r.Error, "diverge") {
-			return "divergence — reconcile with grubby"
+			return "divergence — will auto-reconcile on apply"
 		}
 		return "next-boot unreadable"
 	}
