@@ -46,7 +46,7 @@ type HostProfile struct {
 	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
 	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
 	HasDKMS                 bool   `json:"has_dkms"`                   // any out-of-tree module evidence → don't enforce module sig / lockdown=integrity
-	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → don't disable kexec / lockdown
+	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep lockdown/coredump gates conservative
 	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasNFS                  bool   `json:"has_nfs"`                    // active NFS mounts → keep NFS untouched (already excluded by policy)
@@ -429,16 +429,6 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 		if reason := p.hostingPanelReason(); reason != "" {
 			return "hosting panel namespace workload: " + reason
-		}
-	case "boot.kexec", "sysctl.kernel.kexec":
-		if p.HasKdump {
-			return "host has kdump enabled — kexec_load_disabled would break it"
-		}
-		if p.IsProxmox {
-			return "Proxmox host detected — keep kexec available for hypervisor rescue/reboot workflows unless forced"
-		}
-		if p.HasKernelCare || p.HasKsplice || p.HasLivePatchingModules {
-			return "live-patching evidence detected — keep kexec available unless this host is explicitly approved"
 		}
 	case "boot.dma":
 		// efi=disable_early_pci_dma is an EFI-specific boot parameter;

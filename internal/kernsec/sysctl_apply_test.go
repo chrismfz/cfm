@@ -225,16 +225,9 @@ func TestApplySysctls_ReconciledDocsOnlySelection(t *testing.T) {
 			t.Errorf("tier1 ApplySysctls missing %s", key)
 		}
 	}
-	for _, key := range []string{"kernel.kexec_load_disabled", "kernel.core_pattern", "kernel.panic_on_oops", "kernel.panic"} {
+	for _, key := range []string{"kernel.core_pattern", "kernel.panic_on_oops", "kernel.panic"} {
 		if selected[key] {
 			t.Errorf("tier1 ApplySysctls unexpectedly selected tier2 key %s", key)
-		}
-	}
-
-	kdumpRules := Resolve(&Conf{Tier: Tier2, Overrides: map[string]RuleOverride{}}, HostProfile{HasKdump: true}).ApplySysctls()
-	for _, r := range kdumpRules {
-		if r.Key == "kernel.kexec_load_disabled" {
-			t.Fatal("kdump host should not apply kernel.kexec_load_disabled")
 		}
 	}
 }

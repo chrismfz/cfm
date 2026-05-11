@@ -67,12 +67,6 @@ func sysctl_impacting_risks(sysctls []SysctlRule, profile HostProfile) []string 
 	var risks []string
 	for _, s := range sysctls {
 		switch s.Key {
-		case "kernel.kexec_load_disabled":
-			detail := "kernel.kexec_load_disabled=1 is irreversible until reboot: after apply, kexec/kdump crash-kernel loading cannot be re-enabled without rebooting into a kernel where this sysctl is unset."
-			if profile.HasKdump || profile.IsProxmox || profile.HasKernelCare || profile.HasKsplice || profile.HasLivePatchingModules {
-				detail += " Host-profile risk was detected; this rule should only be present if forced."
-			}
-			risks = append(risks, detail)
 		case "kernel.core_pattern":
 			detail := "kernel.core_pattern=|/bin/false suppresses coredumps globally for every process; this can disable crash diagnostics until the sysctl is changed back and affected services are retried."
 			if profile.HasHostingPanelWorkload || profile.HasBackupWorkload || profile.HasMonitoringWorkload || profile.HasKdump {

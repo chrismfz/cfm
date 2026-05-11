@@ -198,7 +198,6 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
 | `tier2.oops` | 2 | `kernel.panic_on_oops=1`, `kernel.panic=10` | Any kernel oops can become a reboot; opt-in only. |
 | `sysctl.kernel.surface` | 1 | `dev.tty.ldisc_autoload=0`, `kernel.sysrq=0` | Disables automatic TTY line-discipline loading and Magic SysRq. |
-| `sysctl.kernel.kexec` | 2 | `kernel.kexec_load_disabled=1` | Irreversible until reboot; skipped on kdump, Proxmox, and live-patching evidence unless forced. |
 | `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=|/bin/false` | Suppresses core dumps globally; skipped for kdump, hosting panels, backup agents, and crash-diagnostic monitoring. |
 | `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, Chromium sandbox, and some hosting isolation; skipped when containers/hosting panels are detected. |
 | `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1` | Static-IP servers should be unaffected. |
@@ -297,13 +296,13 @@ the operator can force a rule only after accepting the workload impact.
 | CloudLinux/LVE | `/proc/lve` or loaded `lve`/`kmodlve` module. | Counts as hosting-panel workload and out-of-tree/vendor module evidence; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression, lockdown, and module-signature enforcement. |
 | CageFS | `/etc/cagefs` or `cagefsctl`. | Counts as hosting-panel workload and CloudLinux-style module risk; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression, lockdown, and module-signature enforcement. |
 | Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
-| KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
-| Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
-| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Skips lockdown, module-signature enforcement, and kexec disable so later live patches are not blocked. |
+| KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown and module-signature enforcement. |
+| Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown and module-signature enforcement. |
+| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Skips lockdown and module-signature enforcement so later live patches are not blocked. |
 | DKMS/akmods/out-of-tree modules | Non-empty `/var/lib/dkms`, `akmods` binary, `/usr/src/*-dkms*`, or non-empty `/lib/modules/*/{extra,updates}`. | Skips lockdown and module-signature enforcement because unsigned/vendor modules may fail to load. |
 | ZFS/NVIDIA | Loaded ZFS/NVIDIA modules or ZFS tooling/paths (`/sys/module/zfs`, `/etc/zfs`, `zpool`). | Counts as out-of-tree module evidence; skips lockdown and module-signature enforcement. |
-| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips kexec disable; also skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
-| kdump | Crash-kernel/kdump indicators. | Skips kexec disable, lockdown, and global coredump suppression so crash capture remains available. |
+| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
+| kdump | Crash-kernel/kdump indicators. | Skips lockdown and global coredump suppression so crash capture remains available. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression to preserve backup performance and vendor diagnostics. |
 | Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression. |
 | IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Recorded as host context; shipped IPsec/XFRM modules are intentionally not blacklisted. |
@@ -320,7 +319,6 @@ Current risky Tier 2 skip reasons:
 | Lockdown/module signature enforcement (`tier2.lockdown`, `tier2.module-sig-enforce`) | Skip out-of-tree/live-patching/CloudLinux-style hosts because `lockdown=integrity` and `module.sig_enforce=1` can block DKMS, akmod, vendor, ZFS, NVIDIA, KernelCare, Ksplice, live-patching, and CloudLinux/LVE modules. |
 | SSBD seccomp mode (`tier2.ssbd`) | Skip seccomp-heavy hosting, container, backup, and monitoring workloads because `spec_store_bypass_disable=seccomp` can add measurable syscall overhead. |
 | Coredump suppression (`sysctl.kernel.coredump`) | Skip kdump, hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses coredumps globally and can break crash capture or vendor troubleshooting. |
-| kexec disable (`sysctl.kernel.kexec`) | Skip kdump, Proxmox, and live-patching evidence because `kernel.kexec_load_disabled=1` is irreversible until reboot and can break crash-kernel, hypervisor rescue/reboot, or live-patching workflows. |
 
 Mutating commands also run a pre-flight safety summary before risky applies.
 Use `--yes` only for unattended runs where that preview has already been
@@ -439,7 +437,6 @@ failure and is visible through `systemctl is-failed` and the journal.
   registry still treats its keys as externally owned. Force individual kernsec
   rules only if you want kernsec to take over those keys and accept the reported
   conflict.
-- `kernel.kexec_load_disabled=1` cannot be undone until reboot after it is set.
 - Tier 2 oops/panic rules trade availability for fail-closed behavior.
 - Tier 2 module-signature and lockdown rules can break DKMS/vendor modules.
 - `kernel.core_pattern=|/bin/false` suppresses core dumps globally.
