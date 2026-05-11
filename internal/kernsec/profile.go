@@ -317,9 +317,6 @@ var MemExploitSysctls = []SysctlRule{
 }
 
 // KernelSurface is the kernel attack-surface hardening sysctl group.
-// Rules that share a gate (e.g. kdump) use a sub-group so the
-// host-profile skip can target them without gating the whole surface
-// set.
 var KernelSurface = []SysctlRule{
 	// --- sysctl.kernel.surface: generic kernel surface reductions -----
 	{
@@ -327,12 +324,6 @@ var KernelSurface = []SysctlRule{
 		Key: "dev.tty.ldisc_autoload", Value: "0",
 		Description: "Disable automatic TTY line-discipline module loading — closes n_hdlc-style autoload attack paths from unprivileged TTY users.",
 		Affects:     "None on servers; unusual TTY line disciplines must be loaded explicitly by root before use.",
-	},
-	{
-		ID: "KSEC-SCT-kernel.surface-002", Group: "sysctl.kernel.kexec", Tier: Tier2,
-		Key: "kernel.kexec_load_disabled", Value: "1",
-		Description: "Disable future kexec_load() calls after boot — prevents replacing the running kernel without a firmware/bootloader transition.",
-		Affects:     "Tier 2: skipped when kdump/Proxmox/live-patching evidence is detected. Once set, this knob cannot be re-enabled until reboot.",
 	},
 	{
 		ID: "KSEC-SCT-kernel.surface-003", Group: "sysctl.kernel.surface", Tier: Tier1,

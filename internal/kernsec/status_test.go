@@ -354,7 +354,6 @@ func TestBuildAuditRows_ReconciledSysctlsSurfaceInStatusRows(t *testing.T) {
 		"KSEC-SCT-mem.exploit-007":    "",
 		"KSEC-SCT-mem.exploit-008":    StateOFF,
 		"KSEC-SCT-kernel.surface-001": "",
-		"KSEC-SCT-kernel.surface-002": "",
 		"KSEC-SCT-kernel.surface-003": "",
 	}
 	seen := map[string]AuditRow{}

@@ -155,18 +155,6 @@ func TestResolve_OverrideForceBeatsHostProfile(t *testing.T) {
 	}
 }
 
-func TestResolve_HostProfileSkipsKexec(t *testing.T) {
-	conf := &Conf{Tier: Tier1}
-	profile := HostProfile{HasKdump: true}
-	d, reason := decide("KSEC-FAKE", Tier1, "boot.kexec", conf, profile)
-	if d != SkipByHostProfile {
-		t.Errorf("kdump host: got %v, want SkipByHostProfile", d)
-	}
-	if reason == "" {
-		t.Error("expected non-empty reason")
-	}
-}
-
 func TestResolve_NilConfTreatsEverythingAsSkipByTier(t *testing.T) {
 	rs := Resolve(nil, HostProfile{})
 	for _, r := range rs.Sysctls {
@@ -190,12 +178,12 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 	// Expected applying sysctls at tier=1:
 	//   KSPPSysctls (11) - 1 skipped     = 10
 	//   MemExploitSysctls (8) - Tier2 (2) = 6
-	//   KernelSurface  (4) - Tier2 (2)    = 2
+	//   KernelSurface  (3) - Tier2 (1)    = 2
 	//   NetHardenSysctls (5)              = 5
 	//   Tier2Sysctls: SkipByTier        = 0
 	//   NetSysctls (5): ManagedExternally = 0
-	// Total = 25
-	wantSysctls := len(KSPPSysctls) - 1 + (len(MemExploitSysctls) - 2) + (len(KernelSurface) - 2) + len(NetHardenSysctls)
+	// Total = 23
+	wantSysctls := len(KSPPSysctls) - 1 + (len(MemExploitSysctls) - 2) + (len(KernelSurface) - 1) + len(NetHardenSysctls)
 	scts := rs.ApplySysctls()
 	if len(scts) != wantSysctls {
 		t.Errorf("ApplySysctls len = %d, want %d", len(scts), wantSysctls)
@@ -238,7 +226,6 @@ func TestReconciledDocsOnlySysctlsAreRegistered(t *testing.T) {
 		"fs.suid_dumpable":            {"KSEC-SCT-mem.exploit-007", "0", Tier1},
 		"kernel.panic":                {"KSEC-SCT-mem.exploit-008", "10", Tier2},
 		"dev.tty.ldisc_autoload":      {"KSEC-SCT-kernel.surface-001", "0", Tier1},
-		"kernel.kexec_load_disabled":  {"KSEC-SCT-kernel.surface-002", "1", Tier2},
 		"kernel.sysrq":                {"KSEC-SCT-kernel.surface-003", "0", Tier1},
 	}
 
@@ -278,16 +265,9 @@ func TestResolve_ReconciledSysctlTiersAndKdumpGate(t *testing.T) {
 			t.Errorf("tier1 decision for %s = %v, want Apply", display, decisions[display])
 		}
 	}
-	for _, display := range []string{"kernel.kexec_load_disabled=1", "kernel.core_pattern=|/bin/false", "kernel.panic_on_oops=1", "kernel.panic=10"} {
+	for _, display := range []string{"kernel.core_pattern=|/bin/false", "kernel.panic_on_oops=1", "kernel.panic=10"} {
 		if decisions[display] != SkipByTier {
 			t.Errorf("tier1 decision for %s = %v, want SkipByTier", display, decisions[display])
-		}
-	}
-
-	kdump := Resolve(&Conf{Tier: Tier2}, HostProfile{HasKdump: true})
-	for _, r := range kdump.Sysctls {
-		if r.Display == "kernel.kexec_load_disabled=1" && r.Decision != SkipByHostProfile {
-			t.Errorf("kdump host decision for kernel.kexec_load_disabled = %v, want SkipByHostProfile", r.Decision)
 		}
 	}
 
@@ -343,18 +323,6 @@ func TestReviewedRulesTierAndHostProfileDecisions(t *testing.T) {
 		id      string
 		want    Decision
 	}{
-		{
-			name: "kexec disabled is tier2", tier: Tier1, id: "KSEC-SCT-kernel.surface-002", want: SkipByTier,
-		},
-		{
-			name: "kexec disabled applies on clean tier2 host", tier: Tier2, id: "KSEC-SCT-kernel.surface-002", want: Apply,
-		},
-		{
-			name: "kexec disabled skips kdump", tier: Tier2, profile: HostProfile{HasKdump: true}, id: "KSEC-SCT-kernel.surface-002", want: SkipByHostProfile,
-		},
-		{
-			name: "kexec disabled skips proxmox", tier: Tier2, profile: HostProfile{IsProxmox: true}, id: "KSEC-SCT-kernel.surface-002", want: SkipByHostProfile,
-		},
 		{
 			name: "core_pattern suppression is tier2", tier: Tier1, id: "KSEC-SCT-kernel.coredump-001", want: SkipByTier,
 		},
