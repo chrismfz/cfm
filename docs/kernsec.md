@@ -117,6 +117,32 @@ Runtime sysctl apply:
 - Runtime sysctl failures are continue-on-error: later keys are still attempted, and failures are accumulated into one report with `/etc/sysctl.d/99-cfm-kernsec.conf:<line>`, key, value, and kernel error context.
 - Commented skipped lines and malformed/non-key lines are not applied at runtime.
 
+## Cross-component sysctl ownership
+
+`internal/managedsysctl` owns the cfm-wide sysctl ownership registry. The
+registry records which cfm component is authoritative for each managed key; it
+is ownership metadata, not a promise that every component uses one shared
+render/apply pipeline.
+
+Current behavior:
+
+- `cfm-sysctl-tweaks` publishes its owned keys by registering its catalog with
+  `internal/managedsysctl`.
+- kernsec consults that registry during rule resolution. If another cfm
+  component owns a key, kernsec marks the row as `EXT`, audits the live value,
+  and reports whether it matches the kernsec recommendation.
+- `EXT` rows are audit-only for kernsec: kernsec does not render them into
+  `/etc/sysctl.d/99-cfm-kernsec.conf` and does not apply them at runtime with
+  `sysctl -w`.
+- `state = force` is the explicit operator override. A forced kernsec rule can
+  take over a key that the registry says is owned by another component, and
+  `apply` reports that ownership conflict rather than hiding it.
+
+The `cfm-sysctl-tweaks` apply-path migration is not part of kernsec behavior.
+kernsec's sysctl path renders and applies the kernsec-owned drop-in described
+above; `cfm-sysctl-tweaks` keeps its own apply path unless its code is changed
+separately.
+
 Backups and rollback snapshots:
 
 - Managed sysctl and modprobe files use one-shot `.cfm-kernsec.bak` backups
@@ -176,8 +202,9 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 ### Sysctl rules audited as externally managed
 
 `sysctl.net` rules are audited by kernsec but normally owned by
-`cfm-sysctl-tweaks` through the shared sysctl ownership registry. They render as
-`EXT`; kernsec does not write them unless the operator explicitly uses
+`cfm-sysctl-tweaks` through the `internal/managedsysctl` ownership
+registry. They render as `EXT`; kernsec audits their live values but does not
+write persistent or runtime values for them unless the operator explicitly uses
 `state = force` on a rule.
 
 Audited keys are `net.ipv4.conf.all.rp_filter=1`,
