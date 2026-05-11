@@ -44,7 +44,7 @@ back to text output when stdout is not a terminal.
 | `cfm kernsec init` | Write default `/etc/cfm/kernsec.conf` with `tier = 1` if absent. |
 | `cfm kernsec apply` | Render `/etc/sysctl.d/99-cfm-kernsec.conf` and managed modprobe files, update boot args, refresh the bootloader, then parse the rendered sysctl drop-in and apply runtime sysctls per key with `sysctl -w`. |
 | `cfm kernsec disable` | Persist `tier = 0`, strip kernsec-managed boot args, and empty managed sysctl/modprobe output. |
-| `cfm kernsec rollback` | Restore bootloader cmdline state from kernsec's pre-apply backup/snapshot and refresh the bootloader. |
+| `cfm kernsec rollback` | Restore kernsec-managed boot arguments from kernsec's pre-apply backup/snapshot and refresh the bootloader. |
 | `cfm kernsec monitor` | Manage the periodic systemd drift-check timer. |
 
 Useful flags:
@@ -122,8 +122,10 @@ Backups and rollback snapshots:
   kernsec preserves an additional timestamped backup and warns.
 - GRUB and Proxmox backends store managed-argument snapshots under
   `/var/lib/cfm/` and retain legacy `.cfm-kernsec.bak` files for recovery.
-- The BLS backend stores its pre-apply snapshot at
-  `/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak`.
+- The BLS backend builds its pre-apply snapshot from `grubby --info=ALL`
+  and stores it at `/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak`.
+  The snapshot contains only kernsec-managed boot arguments, keyed by kernel
+  image path; unmanaged args are intentionally not captured.
 - `disable --purge` removes the config, managed sysctl file, managed modprobe
   file, and installed monitor units, but intentionally leaves backups in place.
 
@@ -261,7 +263,7 @@ kernsec detects and uses one of these bootloader backends:
 | Backend | Detection / write path | Refresh behavior |
 |---|---|---|
 | Proxmox/systemd-boot | `/etc/kernel/cmdline` with `proxmox-boot-tool` | Writes `/etc/kernel/cmdline`, then runs `proxmox-boot-tool refresh`. |
-| BLS/grubby | `/boot/loader/entries` plus `grubby` | Uses `grubby --update-kernel`; refresh is a no-op because `grubby` updates entries directly. Rescue/debug kernels are excluded. |
+| BLS/grubby | `/boot/loader/entries` plus `grubby` | Enumerates entries with `grubby --info=ALL` and updates explicit non-rescue/non-debug kernel paths with `grubby --update-kernel`; refresh is a no-op because `grubby` updates entries directly. Rescue/debug kernels are intentionally excluded. |
 | GRUB | `/etc/default/grub` fallback | Rewrites `GRUB_CMDLINE_LINUX`, then runs `update-grub` or equivalent grub-mkconfig path. |
 
 Behavior that matters during operations:
@@ -272,7 +274,8 @@ Behavior that matters during operations:
   write it; managed args found there are reported as drift because kernsec only
   remediates `GRUB_CMDLINE_LINUX`.
 - Backends take a pre-change backup/snapshot so `rollback` can restore the
-  previous managed-argument state.
+  previous managed-argument state. These snapshots are scoped to kernsec-managed
+  boot args, not full kernel command lines.
 - If bootloader refresh fails after a write, kernsec attempts to roll the file
   back to a safe retry state and prints manual recovery steps if rollback also
   fails.
@@ -280,9 +283,18 @@ Behavior that matters during operations:
 ## Rollback/disable/purge
 
 Use `cfm kernsec rollback` when the last boot-argument apply needs to be undone
-without changing the rest of the kernsec config. It restores the bootloader
-cmdline from the backend-specific `.cfm-kernsec.bak` file or managed-argument
-snapshot and refreshes the bootloader where needed.
+without changing the rest of the kernsec config. Modern rollback restores only
+kernsec-managed boot arguments from the backend-specific managed-argument
+snapshot and refreshes the bootloader where needed. It does **not** replay a
+full saved default-kernel command line.
+
+On BLS/grubby hosts, rollback enumerates kernels with `grubby --info=ALL`, strips
+kernsec-managed args from every non-rescue/non-debug kernel, then restores the
+saved managed args for kernels whose image path matches the snapshot. The BLS
+snapshot is keyed by kernel image path and contains only kernsec-managed args;
+unmanaged per-kernel args are left untouched. Rescue and debug BLS entries are
+intentionally excluded from snapshot, apply, drift, and rollback operations so a
+bad managed arg does not remove the recovery path.
 
 Use `cfm kernsec disable --yes` to persistently turn kernsec apply mode off:
 
