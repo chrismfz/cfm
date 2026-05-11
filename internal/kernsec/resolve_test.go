@@ -376,15 +376,6 @@ func TestReviewedRulesTierAndHostProfileDecisions(t *testing.T) {
 		{
 			name: "ssbd skips containers", tier: Tier2, profile: HostProfile{IsEFIBoot: true, HasContainers: true}, id: "KSEC-BOOT-ssbd-001", want: SkipByHostProfile,
 		},
-		{
-			name: "sctp blacklist is tier2", tier: Tier1, id: "KSEC-MOD-net.legacy-002", want: SkipByTier,
-		},
-		{
-			name: "sctp blacklist applies on clean tier2 host", tier: Tier2, id: "KSEC-MOD-net.legacy-002", want: Apply,
-		},
-		{
-			name: "sctp blacklist skips sctp workloads", tier: Tier2, profile: HostProfile{HasSCTPWorkload: true}, id: "KSEC-MOD-net.legacy-002", want: SkipByHostProfile,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

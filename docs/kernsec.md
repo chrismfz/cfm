@@ -172,7 +172,7 @@ Backups and rollback snapshots:
 |---|---|---|
 | 0 | Disabled/audit-only | No rule is selected for apply; status still audits. |
 | 1 | Default hardening | Intended to be safe across typical hosting, KVM, cPanel, EL, and Debian hosts. |
-| 2 | Server-aggressive | Opt-in; can affect availability, diagnostics, containers, DKMS/vendor modules, kdump, SCTP, seccomp-heavy workloads, or hosting panels. Host-profile gates skip known-risk hosts unless forced. |
+| 2 | Server-aggressive | Opt-in; can affect availability, diagnostics, containers, DKMS/vendor modules, kdump, seccomp-heavy workloads, or hosting panels. Host-profile gates skip known-risk hosts unless forced. |
 
 Rule status states shown by status/TUI include applied/OK, warning/mismatch,
 skipped by tier, skipped by config, skipped by host profile, missing kernel
@@ -250,7 +250,6 @@ per selected rule. This prevents both alias-based autoloading and direct
 | `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
 | `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
 | `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher` | Extends the AF_ALG hardening beyond the boot-time `algif_aead` mitigation. |
-| `tier2.modules.sctp` | 2 | `sctp` | Opt-in; skipped when SCTP use is detected. |
 
 NFS, CIFS/SMB clients, `io_uring`, and wifi modules are intentionally not
 blacklisted by the shipped registry. These have legitimate operator-managed use
@@ -306,7 +305,7 @@ the operator can force a rule only after accepting the workload impact.
 | Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips kexec disable; also skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
 | kdump | Crash-kernel/kdump indicators. | Skips kexec disable, lockdown, and global coredump suppression so crash capture remains available. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression to preserve backup performance and vendor diagnostics. |
-| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode, global coredump suppression, and SCTP module blacklisting when SCTP health checks may be present. |
+| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression. |
 | IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Recorded as host context; shipped IPsec/XFRM modules are intentionally not blacklisted. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |

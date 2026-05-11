@@ -64,7 +64,6 @@ type HostProfile struct {
 	HasNVIDIA               bool   `json:"has_nvidia"`                 // loaded NVIDIA modules
 	HasBackupWorkload       bool   `json:"has_backup_workload"`        // common backup agents/services present
 	HasMonitoringWorkload   bool   `json:"has_monitoring_workload"`    // common monitoring/crash-diagnostic agents present
-	HasSCTPWorkload         bool   `json:"has_sctp_workload"`          // SCTP module/socket/service evidence present
 	HasHostingPanelWorkload bool   `json:"has_hosting_panel_workload"` // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
 	Reason                  string `json:"reason,omitempty"`           // freeform note used in --check output
 }
@@ -94,7 +93,6 @@ func DetectHostProfile() HostProfile {
 		HasNVIDIA:              detectNVIDIA(),
 		HasBackupWorkload:      detectBackupWorkload(),
 		HasMonitoringWorkload:  detectMonitoringWorkload(),
-		HasSCTPWorkload:        detectSCTPWorkload(),
 	}
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
@@ -321,24 +319,6 @@ func detectMonitoringWorkload() bool {
 	)
 }
 
-func detectSCTPWorkload() bool {
-	if anyModuleLoaded("sctp") || anyPathExists("/proc/net/sctp", "/sys/module/sctp") {
-		return true
-	}
-	return anyPathExists(
-		"/usr/lib/systemd/system/sctp.service",
-		"/usr/lib/systemd/system/sctp_darn.service",
-		"/usr/bin/sctp_darn",
-		"/usr/bin/check_sctp",
-		"/usr/lib/nagios/plugins/check_sctp",
-		"/usr/lib64/nagios/plugins/check_sctp",
-	) || anyGlobMatches(
-		"/etc/systemd/system/*sctp*.service",
-		"/usr/lib/systemd/system/*sctp*.service",
-		"/lib/systemd/system/*sctp*.service",
-	)
-}
-
 func (p HostProfile) hostingPanelReason() string {
 	switch {
 	case p.IsCPanel:
@@ -400,13 +380,6 @@ func (p HostProfile) SkipReason(group string) string {
 		// the four-way split lets BT-only gating work.
 		if p.HasBluetoothHardware {
 			return "host has Bluetooth hardware (/sys/class/bluetooth non-empty)"
-		}
-	case "tier2.modules.sctp":
-		if p.HasSCTPWorkload {
-			return "SCTP workload detected — do not blacklist the sctp module"
-		}
-		if p.HasMonitoringWorkload {
-			return "monitoring workload detected — SCTP health checks may need the sctp module"
 		}
 	case "modules.bus.thunderbolt":
 		// Thunderbolt blacklist on a host with TB hardware breaks

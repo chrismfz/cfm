@@ -128,7 +128,6 @@ func TestIsDangerousModule(t *testing.T) {
 		{desc: "safe/vivid", name: "vivid", want: false},
 		{desc: "safe/binfmt_aout", name: "binfmt_aout", want: false},
 		{desc: "safe/dccp", name: "dccp", want: false},
-		{desc: "safe/sctp", name: "sctp", want: false},
 		{desc: "safe/cramfs", name: "cramfs", want: false},
 		{desc: "safe/algif_hash", name: "algif_hash", want: false},
 		{desc: "safe/bluetooth", name: "bluetooth", want: false},
