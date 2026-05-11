@@ -3,6 +3,7 @@ package kernsec
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -23,12 +24,9 @@ type PreviewOptions struct {
 }
 
 // RunPreview renders a read-only diff of what `cfm kernsec apply` would
-// do given the current conf + host profile + ad-hoc selectors.
-//
-// Phase 2a: groups rules by kind, prints decision + reason for each.
-// The actual file/cmdline rendering for sysctls / boot args lands in
-// Pass 2 (Phase 2b apply); for now the table answers "if I ran apply
-// right now, which rules would be selected and why".
+// do given the current conf + host profile + ad-hoc selectors. It uses
+// the same render helpers as apply --dry-run for sysctl, modprobe, and
+// boot arguments, but never writes files or runs bootloader commands.
 func RunPreview(w io.Writer, opts PreviewOptions) int {
 	conf, err := LoadConf(true /* createDefault in memory */)
 	if err != nil {
@@ -58,6 +56,8 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 	printResolvedSection(w, "Modules", rs.Modules, opts)
 	printResolvedSection(w, "Mounts (audit-only)", rs.Mounts, opts)
 
+	readErr := printPreviewApplyPlan(w, rs)
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[Summary]")
 	fmt.Fprintf(w, "  apply: sysctls=%d  boot=%d  modules=%d  mounts=%d\n",
@@ -75,6 +75,9 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 		fmt.Fprintf(w, "  ext:   %d rules audited; managed by another cfm component\n", extCount)
 	}
 	fmt.Fprintln(w, "===============================")
+	if readErr {
+		return 1
+	}
 	return 0
 }
 
@@ -242,4 +245,190 @@ func applyAdHocOverrides(conf *Conf, opts PreviewOptions) *Conf {
 		conf.Tier = opts.Tier
 	}
 	return conf
+}
+
+// previewFSFactory is overridden by tests so preview can exercise backend
+// detection/read paths without touching the real host bootloader state.
+var previewFSFactory = func() FS { return RealFS{} }
+
+func printPreviewApplyPlan(w io.Writer, rs ResolvedSet) bool {
+	sysctls := rs.ApplySysctls()
+	bootArgs := rs.ApplyBootArgs()
+	modules := rs.ApplyModules()
+
+	fs := previewFSFactory()
+	backend := DetectBackend(fs)
+	sysctlContent := RenderSysctlFile(sysctls)
+	modprobeContent := RenderModprobeFile(modules)
+
+	fmt.Fprintln(w, "[Apply dry-run plan]")
+	fmt.Fprintf(w, "  backend: %s\n", backend.Label())
+	fmt.Fprintf(w, "  sysctl target:   %s\n", SysctlPath)
+	fmt.Fprintf(w, "  modprobe target: %s\n", ModprobePath)
+	printBootTarget(w, backend)
+
+	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	if cmdlineErr != nil {
+		fmt.Fprintf(w, "  boot read error: %v\n", cmdlineErr)
+		fmt.Fprintln(w, "  status: cannot compute desired cmdline without reading current next-boot config")
+		fmt.Fprintln(w)
+		return true
+	}
+
+	drift := computeDrift(sysctlContent, desiredCmdline, backend)
+	drift.ModprobeDiffers, drift.ModprobeReadErr = modprobeDriftCheck(modprobeContent)
+
+	readErr := false
+	fmt.Fprintln(w, "  next-boot cmdline:")
+	if drift.BootReadErr != nil {
+		readErr = true
+		fmt.Fprintf(w, "    current: ERROR reading next-boot cmdline: %v\n", drift.BootReadErr)
+	} else {
+		fmt.Fprintf(w, "    current: %s\n", strings.TrimSpace(drift.CurrentCmdline))
+		fmt.Fprintf(w, "    desired: %s\n", strings.TrimSpace(desiredCmdline))
+	}
+
+	fmt.Fprintln(w, "  backups that would be created:")
+	backups := plannedBackupPaths(backend, drift.CurrentCmdline)
+	if len(backups) == 0 {
+		fmt.Fprintln(w, "    (none; source files absent, already backed up, or no managed boot args to snapshot)")
+	} else {
+		for _, p := range backups {
+			fmt.Fprintf(w, "    %s\n", p)
+		}
+	}
+
+	fmt.Fprintln(w, "  bootloader refresh:")
+	if cmd, err := plannedRefreshCommand(backend); err != nil {
+		fmt.Fprintf(w, "    ERROR determining refresh command: %v\n", err)
+	} else {
+		fmt.Fprintf(w, "    %s\n", cmd)
+	}
+
+	fmt.Fprintln(w, "  planned mutations:")
+	printMutationStatus(w, "sysctl", drift.SysctlDiffers, drift.SysctlReadErr)
+	if drift.SysctlReadErr != nil {
+		readErr = true
+	}
+	printIndentedBlock(w, string(sysctlContent))
+	printMutationStatus(w, "modprobe", drift.ModprobeDiffers, drift.ModprobeReadErr)
+	if drift.ModprobeReadErr != nil {
+		readErr = true
+	}
+	printIndentedBlock(w, string(modprobeContent))
+	if drift.BootReadErr == nil {
+		printMutationStatus(w, "boot args", drift.BootDiffers, nil)
+		fmt.Fprintf(w, "      %s\n", strings.TrimSpace(desiredCmdline))
+	}
+	fmt.Fprintln(w, "  (preview; nothing written and no refresh command run)")
+	fmt.Fprintln(w)
+	return readErr
+}
+
+func printBootTarget(w io.Writer, backend BootBackend) {
+	switch b := backend.(type) {
+	case *ProxmoxBackend:
+		fmt.Fprintf(w, "  boot target:     %s\n", PathPVECmdline)
+	case *GRUBBackend:
+		fmt.Fprintf(w, "  boot target:     %s\n", PathDefaultGrub)
+	case *BLSBackend:
+		targets, err := blsTargetKernels(b)
+		if err != nil {
+			fmt.Fprintf(w, "  boot target:     ERROR reading grubby target kernels: %v\n", err)
+			return
+		}
+		if len(targets) == 0 {
+			fmt.Fprintln(w, "  boot target:     grubby target kernels: (none)")
+			return
+		}
+		fmt.Fprintln(w, "  boot target:     grubby target kernels:")
+		for _, k := range targets {
+			fmt.Fprintf(w, "                   %s\n", k)
+		}
+	default:
+		fmt.Fprintf(w, "  boot target:     %s\n", backend.Label())
+	}
+}
+
+func blsTargetKernels(b *BLSBackend) ([]string, error) {
+	out, err := b.FS.RunCapture("grubby", "--info=ALL")
+	if err != nil {
+		return nil, err
+	}
+	entries := parseGrubbyAll(out)
+	if err := validateGrubbyEntries(entries); err != nil {
+		return nil, err
+	}
+	return kernelPaths(nonRecoveryKernelEntries(entries)), nil
+}
+
+func plannedBackupPaths(backend BootBackend, currentCmdline string) []string {
+	var out []string
+	appendFileBackup := func(path string) {
+		if _, err := os.Stat(path); err == nil {
+			if _, berr := os.Stat(path + BackupSuffix); os.IsNotExist(berr) {
+				out = append(out, path+BackupSuffix)
+			}
+		}
+	}
+	appendFileBackup(SysctlPath)
+	appendFileBackup(ModprobePath)
+
+	switch backend.(type) {
+	case *ProxmoxBackend:
+		appendFileBackup(PathPVECmdline)
+		if len(KeepManagedArgs(ParseCmdline(currentCmdline))) > 0 {
+			out = append(out, ProxmoxManagedBackupPath)
+		}
+	case *GRUBBackend:
+		appendFileBackup(PathDefaultGrub)
+		if len(KeepManagedArgs(ParseCmdline(currentCmdline))) > 0 {
+			out = append(out, GRUBManagedBackupPath)
+		}
+	case *BLSBackend:
+		if len(KeepManagedArgs(ParseCmdline(currentCmdline))) > 0 {
+			out = append(out, BLSBackupPath)
+		}
+	}
+	return out
+}
+
+func plannedRefreshCommand(backend BootBackend) (string, error) {
+	switch b := backend.(type) {
+	case *ProxmoxBackend:
+		return "proxmox-boot-tool refresh", nil
+	case *GRUBBackend:
+		name, args, err := b.refreshCommand()
+		if err != nil {
+			return "", err
+		}
+		return grubRefreshDisplay(name, args), nil
+	case *BLSBackend:
+		return "(none; grubby commits updates immediately)", nil
+	default:
+		return backend.Label() + " refresh", nil
+	}
+}
+
+func printMutationStatus(w io.Writer, label string, differs bool, err error) {
+	if err != nil {
+		fmt.Fprintf(w, "    %s: ERROR reading current state: %v\n", label, err)
+		return
+	}
+	if differs {
+		fmt.Fprintf(w, "    %s: would write\n", label)
+		return
+	}
+	fmt.Fprintf(w, "    %s: already in sync (rendered content below)\n", label)
+}
+
+func printIndentedBlock(w io.Writer, content string) {
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		fmt.Fprintln(w, "      (empty)")
+		return
+	}
+	for _, line := range strings.Split(content, "\n") {
+		fmt.Fprintf(w, "      %s\n", line)
+	}
 }
