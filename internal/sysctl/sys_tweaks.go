@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	cfg "cfm/internal/config"
+	"cfm/internal/managedsysctl"
 )
 
 const persistPath = "/etc/sysctl.d/99-cfm.conf"
@@ -26,52 +28,15 @@ func ApplyTweaks(c *cfg.SystemTweaksConfig) error {
 	targetCT := clamp(memGB*c.CTPerGB, c.CTMin, c.CTMax)
 
 	// 2) Φτιάξε key→value pairs για runtime write
-	kv := map[string]string{
-		// Conntrack
-		"net/netfilter/nf_conntrack_max":                          itoa(targetCT),
-		// Strictness / timeouts
-		"net/ipv4/tcp_syn_retries":                                itoa(c.TCPSynRetries),
-		"net/ipv4/tcp_synack_retries":                             itoa(c.TCPSynAckRetries),
-		"net/ipv4/tcp_fin_timeout":                                itoa(c.TCPFinTimeout),
-		"net/netfilter/nf_conntrack_tcp_timeout_time_wait":        itoa(c.CTTimeWait),
-		"net/netfilter/nf_conntrack_tcp_timeout_fin_wait":         itoa(c.CTFinWait),
-		"net/netfilter/nf_conntrack_tcp_timeout_close_wait":       itoa(c.CTCloseWait),
-		// Hygiene
-		"net/ipv4/conf/all/rp_filter":                             itoa(c.RPFilter),
-		"net/ipv4/conf/all/accept_redirects":                      bool01(c.AcceptRedirects),
-		"net/ipv4/conf/all/send_redirects":                        bool01(c.SendRedirects),
+	kv := sysctlKeyValueMap(c, targetCT)
+	pairs := kvMapToManagedPairs(kv)
 
-    "net/ipv4/conf/default/rp_filter":                    itoa(c.RPFilter),
-    "net/ipv4/conf/default/accept_redirects":             bool01(c.AcceptRedirects),
-    "net/ipv4/conf/default/send_redirects":               bool01(c.SendRedirects),
-
-    // IPv6 hygiene (safe defaults)
-    "net/ipv6/conf/all/accept_redirects":                 "0",
-    "net/ipv6/conf/all/send_redirects":                   "0",
-    "net/ipv6/conf/default/accept_redirects":             "0",
-    "net/ipv6/conf/default/send_redirects":               "0",
-
-    // Needed for DNAT -> 127.0.0.1 (challenge loopback listeners)
-    // Default ON (when SYS_TWEAKS_ENABLE=1)
-    "net/ipv4/conf/all/route_localnet":                   "1",
-    "net/ipv4/conf/default/route_localnet":               "1",
-
-	// Safety net (συμπληρωματικό)
-	"net/ipv4/tcp_syncookies":                                 "1",
-	}
-
-	// nf_conntrack_tcp_loose -> 0 όταν strict
-	if c.TCPLooseStrict {
-		kv["net/netfilter/nf_conntrack_tcp_loose"] = "0"
-	}
-
-	// 3) Apply live
-	for k, v := range kv {
-		if err := writeProcSys(k, v); err != nil {
-			// δεν “σπάμε” το σύστημα — απλώς ενημερώνουμε
-			// (μπορεί π.χ. κάποιο key να μην υπάρχει σε παλιότερο kernel)
-			fmt.Fprintf(os.Stderr, "sysctl: apply %s=%s failed: %v\n", k, v, err)
-		}
+	// 3) Apply live. managedsysctl.ApplyKeys is deliberately
+	// continue-on-error: a missing kernel/module key should be visible to
+	// operators, but must not stop later keys or daemon startup.
+	res := managedsysctl.ApplyKeys(pairs)
+	if err := res.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 	}
 
 	// 3a) Προσπάθησε να ρυθμίσεις hashsize (όπου επιτρέπεται)
@@ -79,11 +44,82 @@ func ApplyTweaks(c *cfg.SystemTweaksConfig) error {
 
 	// 4) Persist (αν ζητηθεί)
 	if c.Persist {
-		if err := persistSysctlFile(kv); err != nil {
+		if err := persistSysctlFile(pairs); err != nil {
 			return fmt.Errorf("persist sysctl file: %w", err)
 		}
 	}
 	return nil
+}
+
+func sysctlKeyValueMap(c *cfg.SystemTweaksConfig, targetCT int) map[string]string {
+	kv := map[string]string{
+		// Conntrack
+		"net.netfilter.nf_conntrack_max": itoa(targetCT),
+		// Strictness / timeouts
+		"net.ipv4.tcp_syn_retries":                          itoa(c.TCPSynRetries),
+		"net.ipv4.tcp_synack_retries":                       itoa(c.TCPSynAckRetries),
+		"net.ipv4.tcp_fin_timeout":                          itoa(c.TCPFinTimeout),
+		"net.netfilter.nf_conntrack_tcp_timeout_time_wait":  itoa(c.CTTimeWait),
+		"net.netfilter.nf_conntrack_tcp_timeout_fin_wait":   itoa(c.CTFinWait),
+		"net.netfilter.nf_conntrack_tcp_timeout_close_wait": itoa(c.CTCloseWait),
+		// Hygiene
+		"net.ipv4.conf.all.rp_filter":        itoa(c.RPFilter),
+		"net.ipv4.conf.all.accept_redirects": bool01(c.AcceptRedirects),
+		"net.ipv4.conf.all.send_redirects":   bool01(c.SendRedirects),
+
+		"net.ipv4.conf.default.rp_filter":        itoa(c.RPFilter),
+		"net.ipv4.conf.default.accept_redirects": bool01(c.AcceptRedirects),
+		"net.ipv4.conf.default.send_redirects":   bool01(c.SendRedirects),
+
+		// IPv6 hygiene (safe defaults)
+		"net.ipv6.conf.all.accept_redirects":     "0",
+		"net.ipv6.conf.all.send_redirects":       "0",
+		"net.ipv6.conf.default.accept_redirects": "0",
+		"net.ipv6.conf.default.send_redirects":   "0",
+
+		// Needed for DNAT -> 127.0.0.1 (challenge loopback listeners)
+		// Default ON (when SYS_TWEAKS_ENABLE=1)
+		"net.ipv4.conf.all.route_localnet":     "1",
+		"net.ipv4.conf.default.route_localnet": "1",
+
+		// Safety net (συμπληρωματικό)
+		"net.ipv4.tcp_syncookies": "1",
+	}
+
+	// nf_conntrack_tcp_loose -> 0 όταν strict
+	if c.TCPLooseStrict {
+		kv["net.netfilter.nf_conntrack_tcp_loose"] = "0"
+	}
+	return kv
+}
+
+func kvMapToManagedPairs(kv map[string]string) []managedsysctl.KeyValuePair {
+	if len(kv) == 0 {
+		return nil
+	}
+	pairs := make([]managedsysctl.KeyValuePair, 0, len(kv))
+	seen := make(map[string]struct{}, len(kv))
+	for _, k := range managedKeys {
+		if v, ok := kv[k]; ok {
+			pairs = append(pairs, managedsysctl.KeyValuePair{Key: k, Value: v})
+			seen[k] = struct{}{}
+		}
+	}
+	if len(seen) == len(kv) {
+		return pairs
+	}
+	// Stable fallback for any future computed key not yet added to managedKeys.
+	extra := make([]string, 0, len(kv)-len(seen))
+	for k := range kv {
+		if _, ok := seen[k]; !ok {
+			extra = append(extra, k)
+		}
+	}
+	sort.Strings(extra)
+	for _, k := range extra {
+		pairs = append(pairs, managedsysctl.KeyValuePair{Key: k, Value: kv[k]})
+	}
+	return pairs
 }
 
 func readMemGB() (int, error) {
@@ -135,47 +171,78 @@ func bool01(b bool) string {
 
 func itoa(i int) string { return strconv.Itoa(i) }
 
-func writeProcSys(key, val string) error {
-	path := filepath.Join("/proc/sys", filepath.FromSlash(key))
-	return os.WriteFile(path, []byte(strings.TrimSpace(val)), 0600)
+func persistSysctlFile(pairs []managedsysctl.KeyValuePair) error {
+	return persistSysctlFileTo(persistPath, pairs)
 }
 
-func persistSysctlFile(kv map[string]string) error {
+func persistSysctlFileTo(path string, pairs []managedsysctl.KeyValuePair) error {
+	values := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		values[p.Key] = p.Value
+	}
+
 	var b strings.Builder
 	b.WriteString("# Generated by CFM - DO NOT EDIT\n")
 	b.WriteString("# Apply at boot via systemd-sysctl.\n")
-	// Για σταθερότητα, γράψε τα κλειδιά με “γνωστή” σειρά
-	keys := []string{
-		"net.ipv4.tcp_syncookies",
-		"net.ipv4.tcp_syn_retries",
-		"net.ipv4.tcp_synack_retries",
-		"net.ipv4.tcp_fin_timeout",
-		"net.netfilter.nf_conntrack_max",
-		"net.netfilter.nf_conntrack_tcp_timeout_time_wait",
-		"net.netfilter.nf_conntrack_tcp_timeout_fin_wait",
-		"net.netfilter.nf_conntrack_tcp_timeout_close_wait",
-		"net.netfilter.nf_conntrack_tcp_loose",
-		"net.ipv4.conf.all.rp_filter",
-		"net.ipv4.conf.all.accept_redirects",
-		"net.ipv4.conf.all.send_redirects",
-    "net.ipv4.conf.default.rp_filter",
-    "net.ipv4.conf.default.accept_redirects",
-    "net.ipv4.conf.default.send_redirects",
-    "net.ipv4.conf.all.route_localnet",
-    "net.ipv4.conf.default.route_localnet",
-    "net.ipv6.conf.all.accept_redirects",
-    "net.ipv6.conf.all.send_redirects",
-    "net.ipv6.conf.default.accept_redirects",
-    "net.ipv6.conf.default.send_redirects",
-	}
-	// Γράψε μόνο όσα υπήρχαν στο kv
-	for _, k := range keys {
- kProc := strings.ReplaceAll(k, ".", "/")
- if v, ok := kv[kProc]; ok {
+	// Για σταθερότητα, γράψε τα κλειδιά με “γνωστή” σειρά.
+	// Γράψε μόνο όσα υπήρχαν στο computed pair set.
+	written := make(map[string]struct{}, len(values))
+	for _, k := range managedKeys {
+		if v, ok := values[k]; ok {
 			fmt.Fprintf(&b, "%s = %s\n", k, v)
+			written[k] = struct{}{}
 		}
 	}
-	return os.WriteFile(persistPath, []byte(b.String()), 0600)
+	if len(written) < len(values) {
+		// Future-proof deterministic output for computed keys not yet part of
+		// the static ownership list.
+		extra := make([]string, 0, len(values)-len(written))
+		for k := range values {
+			if _, ok := written[k]; !ok {
+				extra = append(extra, k)
+			}
+		}
+		sort.Strings(extra)
+		for _, k := range extra {
+			fmt.Fprintf(&b, "%s = %s\n", k, values[k])
+		}
+	}
+	return atomicWriteFile(path, []byte(b.String()), 0600)
+}
+
+func atomicWriteFile(path string, content []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpPath := f.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", tmpPath, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("fsync %s: %w", tmpPath, err)
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
+	}
+	return nil
 }
 
 // Best-effort set hashsize (τρέχει μόνο αν υπάρχει parameter file)
@@ -190,6 +257,3 @@ func trySetHashsize(v int) {
 		_ = os.WriteFile(path, []byte(itoa(v)), 0600)
 	}
 }
-
-
-
