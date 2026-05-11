@@ -75,6 +75,24 @@ var Tier1Modules = []ModuleRule{
 		Description: "USB transport for the NFC reader; same surface.",
 		Affects:     "None.",
 	},
+	{
+		ID: "KSEC-MOD-recent_cves-010", Group: "modules.recent_cves", Tier: Tier1,
+		Name:        "kcm",
+		Description: "Kernel Connection Multiplexor; CVE-2024-50264 UAF family. No hosting use.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-recent_cves-011", Group: "modules.recent_cves", Tier: Tier1,
+		Name:        "n_gsm",
+		Description: "UMTS modem TTY line discipline; recent LPE chain. Same class as n_hdlc.",
+		Affects:     "None on servers.",
+	},
+	{
+		ID: "KSEC-MOD-recent_cves-012", Group: "modules.recent_cves", Tier: Tier1,
+		Name:        "n_r3964",
+		Description: "Siemens R3964 TTY line discipline — dead, CTF-popular surface.",
+		Affects:     "None.",
+	},
 
 	// --- modules.net.legacy: dead network protocols ------------------
 
@@ -210,6 +228,30 @@ var Tier1Modules = []ModuleRule{
 		Description: "Infrared Data Association; gone from modern kernels.",
 		Affects:     "None.",
 	},
+	{
+		ID: "KSEC-MOD-net.legacy-024", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "phonet",
+		Description: "Nokia phone protocol; long dead.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-025", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "caif",
+		Description: "ST-Ericsson modem comms (Communication CPU API Framework); dead.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-026", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "caif_socket",
+		Description: "AF_CAIF socket family; dead.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-027", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "hsr",
+		Description: "High-availability Seamless Redundancy; industrial fieldbus, not hosting.",
+		Affects:     "None.",
+	},
 
 	// --- modules.net.virt: virt-only socket families ----------------
 	//
@@ -227,6 +269,33 @@ var Tier1Modules = []ModuleRule{
 		Name:        "vsock",
 		Description: "Virtual socket protocol (virtio/VMware guest↔host). Named killswitch candidate; no use on bare-metal hosting.",
 		Affects:     "Skipped automatically on KVM hosts (host-profile gated via IsKVMHost).",
+	},
+
+	// --- modules.net.iot: IEEE 802.15.4 / Zigbee-class wireless ------
+	//
+	// Low-power wireless PAN stack. Hosting boxes have no 802.15.4
+	// radios; the module set exists only because distro kernels build
+	// it. No host-profile gating — there is no detection probe for
+	// 802.15.4 hardware and no realistic scenario where a hosting box
+	// has one.
+
+	{
+		ID: "KSEC-MOD-net.iot-001", Group: "modules.net.iot", Tier: Tier1,
+		Name:        "ieee802154",
+		Description: "IEEE 802.15.4 protocol stack and AF_IEEE802154 socket family.",
+		Affects:     "None on hosting.",
+	},
+	{
+		ID: "KSEC-MOD-net.iot-002", Group: "modules.net.iot", Tier: Tier1,
+		Name:        "mac802154",
+		Description: "802.15.4 soft-MAC layer.",
+		Affects:     "None on hosting.",
+	},
+	{
+		ID: "KSEC-MOD-net.iot-003", Group: "modules.net.iot", Tier: Tier1,
+		Name:        "6lowpan",
+		Description: "IPv6 over Low-Power Wireless PANs.",
+		Affects:     "None on hosting.",
 	},
 
 	// --- modules.fs.unused: filesystems no hosting box mounts --------
@@ -333,6 +402,27 @@ var Tier1Modules = []ModuleRule{
 		Description: "Coda distributed filesystem.",
 		Affects:     "None.",
 	},
+	{
+		ID: "KSEC-MOD-fs.unused-018", Group: "modules.fs.unused", Tier: Tier1,
+		Name:        "reiserfs",
+		Description: "Officially deprecated filesystem; removed from upstream defaults.",
+		Affects:     "None on modern hosting; legacy installs override with `state = skip`.",
+	},
+
+	// --- modules.fs.container: container-image filesystems ----------
+	//
+	// erofs (Enhanced Read-Only FS) is used by Android system images
+	// and by some container layer formats. We default-blacklist it on
+	// hosting boxes (no use case) but skip on hosts where containers
+	// are running — runc/containerd/podman may pull layers that rely
+	// on it.
+
+	{
+		ID: "KSEC-MOD-fs.container-001", Group: "modules.fs.container", Tier: Tier1,
+		Name:        "erofs",
+		Description: "Enhanced Read-Only FS; used by Android and some container image formats.",
+		Affects:     "Skipped on hosts running containers (host-profile gated via HasContainers).",
+	},
 
 	// --- modules.bus.*: buses / devices not present on KVM/dedis ----
 	//
@@ -426,6 +516,25 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 
+	// --- modules.input.userspace: userspace virtual input devices ---
+	//
+	// uinput / uhid let a userspace process inject input events or
+	// claim to be a HID device. Both have non-trivial historical
+	// exploit surface and zero use case on a hosting / server box.
+
+	{
+		ID: "KSEC-MOD-input.userspace-001", Group: "modules.input.userspace", Tier: Tier1,
+		Name:        "uinput",
+		Description: "Userspace input device injection (synthetic keyboard/mouse events).",
+		Affects:     "None on servers.",
+	},
+	{
+		ID: "KSEC-MOD-input.userspace-002", Group: "modules.input.userspace", Tier: Tier1,
+		Name:        "uhid",
+		Description: "Userspace HID device — process claims to be a HID device.",
+		Affects:     "None on servers.",
+	},
+
 	// --- modules.sidechannel ----------------------------------------
 
 	{
@@ -466,6 +575,12 @@ var Tier1Modules = []ModuleRule{
 		Name:        "algif_akcipher",
 		Description: "Userspace asymmetric cipher via AF_ALG.",
 		Affects:     "Userspace tools using AF_ALG akcipher (rare).",
+	},
+	{
+		ID: "KSEC-MOD-crypto_userapi-005", Group: "modules.crypto_userapi", Tier: Tier1,
+		Name:        "algif_aead",
+		Description: "Userspace AEAD via AF_ALG; parity with the rest of the algif_* family. Module-level blacklist complements the boot-time initcall_blacklist=algif_aead_init.",
+		Affects:     "Userspace tools using AF_ALG AEAD (rare).",
 	},
 }
 

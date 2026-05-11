@@ -346,6 +346,13 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.IsKVMHost {
 			return "KVM hypervisor — vhost_vsock may be in use for guest↔host comms"
 		}
+	case "modules.fs.container":
+		// erofs is used by some container image formats (and Android
+		// system images). Skip the blacklist if the host actually
+		// runs containers; everywhere else it has no use case.
+		if p.HasContainers {
+			return "host runs containers — erofs may back container image layers"
+		}
 	case "modules.bus.bluetooth":
 		// Blacklisting bluetooth/btusb/bnep/hci_uart on a host with
 		// real Bluetooth hardware would break paired keyboards / mice

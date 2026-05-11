@@ -295,7 +295,7 @@ func TestValidateConfOverrideIDs_KnownIDsHaveNoWarning(t *testing.T) {
 func TestValidateConfOverrideIDs_TypoSurfacesWarning(t *testing.T) {
 	c := &Conf{
 		Overrides: map[string]RuleOverride{
-			"KSEC-MOD-net.legacy-024":  OverrideSkip, // typo: only -001..-023 exist
+			"KSEC-MOD-net.legacy-099":  OverrideSkip, // typo: only the curated range exists
 			"KSEC-SCT-typo-999":        OverrideForce, // wholly fake
 			"KSEC-MOD-net.legacy-001":  OverrideSkip, // real, must NOT warn
 		},
@@ -304,9 +304,9 @@ func TestValidateConfOverrideIDs_TypoSurfacesWarning(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 warnings (one per typo), got %d: %v", len(got), got)
 	}
-	// Warnings are sorted by ID for stable output. KSEC-MOD-net.legacy-024
+	// Warnings are sorted by ID for stable output. KSEC-MOD-net.legacy-099
 	// comes before KSEC-SCT-typo-999 alphabetically.
-	if !strings.Contains(got[0], "KSEC-MOD-net.legacy-024") {
+	if !strings.Contains(got[0], "KSEC-MOD-net.legacy-099") {
 		t.Errorf("first warning should mention the typo'd module ID: %v", got[0])
 	}
 	if !strings.Contains(got[1], "KSEC-SCT-typo-999") {

@@ -2,10 +2,20 @@
 
 ## Overview
 
-`cfm kernsec` is cfm's canonical kernel-hardening component for cfm-managed
-hosts. It audits and, when requested, applies a curated set of kernel attack
-surface reductions across sysctls, kernel boot arguments, kernel module
-blacklists, and periodic drift monitoring.
+kernsec is cfm's preemptive kernel attack-surface reduction layer. Rather than
+waiting for a CVE to drop and chasing a patched kernel through the fleet,
+kernsec disables surface that has no business being reachable on a hosting box
+in the first place: dead network protocols, recently-exploited modules with no
+use case, userspace crypto APIs nobody calls, side-channel power telemetry,
+and filesystems no server mounts. The component combines four mechanisms —
+sysctls, boot arguments, module blacklists, and a drift monitor — with a
+tiered config model and host-profile gating so the same ruleset behaves
+correctly on cPanel, DirectAdmin, Proxmox, KVM hypervisors,
+KernelCare-patched kernels, and ZFS storage hosts.
+
+`cfm kernsec` audits and, when requested, applies these reductions across
+sysctls, kernel boot arguments, kernel module blacklists, and periodic drift
+monitoring.
 
 The component currently manages:
 
@@ -27,6 +37,41 @@ kernsec covers the KSPP sysctls, boot arguments, bootloader backends, status
 checks, and Copy Fail mitigation from the standalone script, plus additional
 cfm-managed features such as the rule registry, config model, module blacklist
 writer, fstab audit, and monitor timer.
+
+## Relationship to upstream killswitch
+
+Upstream Linux is gaining a `killswitch` primitive
+(`Documentation/admin-guide/killswitch.rst`) that lets a privileged operator
+make a chosen kernel function short-circuit and return a fixed value — a
+temporary "stop calling the buggy code" lever for when a CVE drops but a
+patched kernel isn't yet built or rebooted into. The canonical targets named
+in the patch series are AF_ALG, ksmbd, nf_tables, vsock, and ax25.
+
+kernsec attacks the same problem from the opposite end: it disables the
+surface *before* a CVE drops, so the same code paths are unreachable without
+needing a runtime mitigation. For the modules named as killswitch candidates,
+kernsec already ships rules:
+
+- **ksmbd** → blacklisted (`modules.recent_cves`).
+- **vsock** → blacklisted on bare-metal hosts, skipped on KVM hypervisors so
+  `vhost_vsock` stays available for guest↔host comms (`modules.net.virt`,
+  host-profile gated on `IsKVMHost`).
+- **ax25** → blacklisted (`modules.net.legacy`).
+- **AF_ALG** → boot-time `initcall_blacklist=algif_aead_init` plus
+  modprobe-blacklisted `algif_hash` / `algif_skcipher` / `algif_rng` /
+  `algif_akcipher` / `algif_aead` (`modules.crypto_userapi`).
+- **nf_tables** → deliberately NOT disabled. cfm's firewall is nftables-based,
+  and disabling the core would brick the firewall itself. This is the one
+  killswitch candidate where the trade-off inverts on a cfm host: the cost of
+  "firewall stops working for the day" is higher than running a known-vulnerable
+  nft path until the fix lands. Operators wanting belt-and-braces coverage can
+  engage upstream killswitch on the specific buggy `nft_*` function once the
+  interface ships.
+
+The two approaches are complementary. When upstream killswitch is widely
+available, cfm can drive it as a fast-rollout lever for the rare module or
+function we *can't* preemptively blacklist (nftables core, NFS client,
+`io_uring` on NVMe hosts).
 
 ## Commands
 
@@ -240,16 +285,19 @@ per selected rule. This prevents both alias-based autoloading and direct
 
 | Group | Tier | Modules | Notes |
 |---|---:|---|---|
-| `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb` | Recently exploited or no normal server use. |
-| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, and similar dead network stacks | Intended to be safe on normal hosting servers. |
+| `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
+| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, and similar dead network stacks | Intended to be safe on normal hosting servers. |
 | `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
-| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda` | Override if the host genuinely mounts one of these filesystems. |
+| `modules.net.iot` | 1 | `ieee802154`, `mac802154`, `6lowpan` | IEEE 802.15.4 / low-power wireless PAN stack — no 802.15.4 radios on hosting boxes. |
+| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs` | Override if the host genuinely mounts one of these filesystems. |
+| `modules.fs.container` | 1 | `erofs` | Skipped on hosts running containers (host-profile gated on `HasContainers`) since some container image layers use it. |
 | `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
 | `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | No typical server use. |
 | `modules.bus.thunderbolt` | 1 | `thunderbolt` | Skipped when Thunderbolt devices are detected. |
 | `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
+| `modules.input.userspace` | 1 | `uinput`, `uhid` | Userspace virtual input / HID devices — no use case on servers, non-trivial historical exploit surface. |
 | `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
-| `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher` | Extends the AF_ALG hardening beyond the boot-time `algif_aead` mitigation. |
+| `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher`, `algif_aead` | Extends the AF_ALG hardening; `algif_aead` is also covered at boot via `initcall_blacklist=algif_aead_init`. |
 
 NFS, CIFS/SMB clients, `io_uring`, and wifi modules are intentionally not
 blacklisted by the shipped registry. These have legitimate operator-managed use
