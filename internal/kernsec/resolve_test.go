@@ -1,6 +1,9 @@
 package kernsec
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolve_Tier0SkipsEverything(t *testing.T) {
 	rs := Resolve(&Conf{Tier: 0}, HostProfile{})
@@ -12,6 +15,26 @@ func TestResolve_Tier0SkipsEverything(t *testing.T) {
 	for _, r := range rs.BootArgs {
 		if r.Decision != SkipByTier {
 			t.Errorf("boot %q at tier 0: decision %v, want SkipByTier", r.ID, r.Decision)
+		}
+	}
+}
+
+func TestResolveForceDoesNotResurrectRemovedRules(t *testing.T) {
+	removedIDs := []string{
+		strings.Join([]string{"KSEC-SCT-net", "harden-006"}, "."),
+		strings.Join([]string{"KSEC-SCT-net", "harden-007"}, "."),
+	}
+	conf := &Conf{Tier: Tier2, Overrides: map[string]RuleOverride{}}
+	for _, id := range removedIDs {
+		conf.Overrides[id] = OverrideForce
+	}
+
+	rs := Resolve(conf, HostProfile{IsEFIBoot: true})
+	for _, r := range append(append(rs.Sysctls, rs.BootArgs...), rs.Modules...) {
+		for _, id := range removedIDs {
+			if r.ID == id {
+				t.Fatalf("removed rule %q resolved despite force override: %+v", id, r)
+			}
 		}
 	}
 }

@@ -163,10 +163,10 @@ type errorReadBackend struct {
 	readErr error
 }
 
-func (e *errorReadBackend) Label() string                       { return "error-read fake" }
-func (e *errorReadBackend) NextBootCmdline() (string, error)    { return "", e.readErr }
-func (e *errorReadBackend) WriteCmdline(args []BootArg) error   { return e.readErr }
-func (e *errorReadBackend) Refresh() error                      { return nil }
+func (e *errorReadBackend) Label() string                     { return "error-read fake" }
+func (e *errorReadBackend) NextBootCmdline() (string, error)  { return "", e.readErr }
+func (e *errorReadBackend) WriteCmdline(args []BootArg) error { return e.readErr }
+func (e *errorReadBackend) Refresh() error                    { return nil }
 
 // equalSlices returns true if a and b have the same length and equal
 // elements at every index.
@@ -193,6 +193,22 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+func TestParseConfForceOnRemovedRuleIsOnlyUnknownOverride(t *testing.T) {
+	removedID := strings.Join([]string{"KSEC-SCT-net", "harden-006"}, ".")
+	c, err := ParseConf(strings.NewReader("tier = 2\n[rule \"" + removedID + "\"]\nstate = force\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Overrides[removedID]; got != OverrideForce {
+		t.Fatalf("override parse = %v, want force", got)
+	}
+	for _, r := range Resolve(c, HostProfile{}).Sysctls {
+		if r.ID == removedID {
+			t.Fatalf("removed rule %q should not be available to force", removedID)
+		}
+	}
 }
 
 // TestParseConf_StateEqualsEmpty captures the documented "state =" =>

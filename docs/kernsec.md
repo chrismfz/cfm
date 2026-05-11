@@ -227,7 +227,10 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 
 kernsec only owns the managed boot-argument keys listed above. It strips stale
 instances of those keys before appending the desired managed set and preserves
-operator-provided arguments outside the managed set.
+operator-provided arguments outside the managed set. A per-rule `state = force`
+entry only affects rule IDs that are still present in the kernsec catalog; it
+does not resurrect removed IDs or make kernsec own boot/sysctl/module keys that
+are no longer registered here.
 
 ### Module blacklist rules
 

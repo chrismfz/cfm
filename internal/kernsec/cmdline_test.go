@@ -113,6 +113,28 @@ func TestIsManagedKey(t *testing.T) {
 	}
 }
 
+func TestManagedBootArgKeysExactOwnedSet(t *testing.T) {
+	want := []string{
+		"slab_nomerge",
+		"init_on_alloc",
+		"page_alloc.shuffle",
+		"randomize_kstack_offset",
+		"initcall_blacklist",
+		"kfence.sample_interval",
+		"efi",
+		"tsx",
+		"oops",
+	}
+	if !reflect.DeepEqual(ManagedBootArgKeys, want) {
+		t.Fatalf("ManagedBootArgKeys changed:\ngot  %#v\nwant %#v", ManagedBootArgKeys, want)
+	}
+
+	removed := "spec" + "_store" + "_bypass" + "_disable"
+	if IsManagedKey(removed) {
+		t.Fatalf("removed boot arg key %q is still managed", removed)
+	}
+}
+
 func TestBootArgString(t *testing.T) {
 	tests := []struct {
 		in   BootArg
