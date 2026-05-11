@@ -22,7 +22,7 @@ import (
 //	    - boot args: /etc/default/grub               (M args)
 //	    - modules: /etc/modprobe.d/cfm-kernsec.conf  (K modules)
 //	[!] Boot-impacting changes detected — read carefully:
-//	    - module.sig_enforce=1 will be added.
+//	    - bootloader configuration will be regenerated.
 //	[!] Backup files (operator recovery path):
 //	    - /etc/default/grub → /etc/default/grub.cfm-kernsec.bak
 //
@@ -83,9 +83,6 @@ func boot_impacting_risks(bootArgs []BootArg, modules []ModuleRule, profile Host
 	var risks []string
 	for _, a := range bootArgs {
 		switch a.Key {
-		case "module.sig_enforce":
-			detail := "module.sig_enforce=1 will be added; every module must be signed by a trusted key. KernelCare / akmod / DKMS modules signed by their own key will fail."
-			risks = append(risks, detail)
 		case "init_on_alloc", "init_on_free":
 			// Performance impact rather than brick — call it out
 			// briefly so operators on large RAM hosts see it.

@@ -210,19 +210,6 @@ func TestDefaultContainerProbe_ShapeOnly(t *testing.T) {
 	_ = p.detect()
 }
 
-func TestSkipReason_ModuleSigEnforceStillDKMSOnly(t *testing.T) {
-	// module.sig_enforce is purely a module-signing rule — kdump
-	// doesn't need unsigned modules, so the kdump escape doesn't
-	// apply here. Lock that into a test so a future broaden-the-
-	// gates change has to be deliberate.
-	if got := (HostProfile{HasKdump: true}).SkipReason("tier2.module-sig-enforce"); got != "" {
-		t.Errorf("module-sig-enforce should NOT skip on kdump-only host (DKMS=false): got %q", got)
-	}
-	if got := (HostProfile{HasDKMS: true}).SkipReason("tier2.module-sig-enforce"); got == "" {
-		t.Errorf("module-sig-enforce SHOULD skip on DKMS host: got empty")
-	}
-}
-
 func TestHasOutOfTreeModuleEvidence_NoEvidence(t *testing.T) {
 	// Smoke: function returns a bool without panicking on a stock
 	// CI host (no zfs, no nvidia, no /var/lib/dkms, no akmods).
@@ -335,25 +322,6 @@ func TestSkipReason_NamespaceGatesHostingPanels(t *testing.T) {
 	} {
 		if got := tc.SkipReason("tier2.namespace"); got == "" || !strings.Contains(got, "hosting panel") {
 			t.Errorf("SkipReason(tier2.namespace) on %+v = %q, want hosting panel reason", tc, got)
-		}
-	}
-}
-
-func TestSkipReason_ModuleSigningGatesPlatformEvidence(t *testing.T) {
-	tests := []HostProfile{
-		{HasCloudLinuxLVE: true},
-		{HasCageFS: true},
-		{HasKernelCare: true},
-		{HasKsplice: true},
-		{HasLivePatchingModules: true},
-		{HasZFS: true},
-		{HasNVIDIA: true},
-	}
-	for _, profile := range tests {
-		for _, group := range []string{"tier2.module-sig-enforce"} {
-			if got := profile.SkipReason(group); got == "" {
-				t.Errorf("SkipReason(%q) on %+v = empty, want skip", group, profile)
-			}
 		}
 	}
 }

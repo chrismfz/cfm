@@ -75,15 +75,13 @@ func TestResolve_Tier2AppliesAll(t *testing.T) {
 
 func TestResolve_Tier2HostProfileGates(t *testing.T) {
 	// HasContainers → tier2.namespace skipped.
-	// HasDKMS       → tier2.module-sig-enforce skipped.
 	conf := &Conf{Tier: Tier2}
-	profile := HostProfile{HasContainers: true, HasDKMS: true}
+	profile := HostProfile{HasContainers: true}
 	rs := Resolve(conf, profile)
 
 	wantSkip := map[string]bool{
-		"KSEC-SCT-tier2.namespace-001":           true,
-		"KSEC-SCT-tier2.namespace-002":           true,
-		"KSEC-BOOT-tier2.module-sig-enforce-001": true,
+		"KSEC-SCT-tier2.namespace-001": true,
+		"KSEC-SCT-tier2.namespace-002": true,
 	}
 	for id := range wantSkip {
 		var got *ResolvedRule

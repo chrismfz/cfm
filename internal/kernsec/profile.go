@@ -212,12 +212,6 @@ var Tier2BootArgs = []BootArg{
 		Description: "Pair with kernel.panic_on_oops=1 to stop oops-spray exploit techniques cold.",
 		Affects:     "Aggressive: any kernel oops becomes a reboot. Trade reliability for exploit mitigation.",
 	},
-	{
-		ID: "KSEC-BOOT-tier2.module-sig-enforce-001", Group: "tier2.module-sig-enforce", Tier: Tier2,
-		Key: "module.sig_enforce", Value: "1",
-		Description: "Require kernel-signed modules.",
-		Affects:     "Breaks DKMS/vendor modules (CloudLinux LVE/CageFS, live patching, ZFS, NVIDIA). Skipped when evidence is detected.",
-	},
 }
 
 // Tier1BootArgsExt are boot args beyond the KSPP baseline.
@@ -391,7 +385,6 @@ var ManagedBootArgKeys = []string{
 	// Tier 2
 	"spec_store_bypass_disable",
 	"oops",
-	"module.sig_enforce",
 }
 
 // String returns the cmdline form of a boot arg ("key" or "key=value").
