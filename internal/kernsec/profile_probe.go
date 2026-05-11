@@ -45,7 +45,7 @@ type HostProfile struct {
 	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
 	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
 	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasDKMS                 bool   `json:"has_dkms"`                   // any out-of-tree module evidence → don't enforce module sig
+	HasDKMS                 bool   `json:"has_dkms"`                   // out-of-tree module evidence detected
 	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep coredump gates conservative
 	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
@@ -107,32 +107,19 @@ func isEFIBoot() bool {
 	return err == nil
 }
 
-// hasOutOfTreeModuleEvidence is the layered "are there modules
-// module.sig_enforce would brick?" probe. The
-// previous narrow check was loaded-modules-only (zfs / nvidia) —
-// audit found multiple false-negative paths that would brick a
-// real host:
+// hasOutOfTreeModuleEvidence is the layered out-of-tree module probe.
+// The previous narrow check was loaded-modules-only (zfs / nvidia); keep
+// broader host inventory coverage for audit output:
 //
 //   - DKMS modules INSTALLED but not yet LOADED (e.g. zfs root not
 //     yet imported, nvidia not yet pulled in by display manager,
 //     virtualbox-modules pre-VM-launch).
-//   - akmod (ELRepo on AlmaLinux/Rocky) — kABI-tracking precompiled
-//     but not signed by the distro's kernel key.
+//   - akmod (ELRepo on AlmaLinux/Rocky) kABI-tracking modules.
 //   - Out-of-tree modules in /lib/modules/$(uname -r)/extra or
 //     /lib/modules/$(uname -r)/updates.
-//   - Live-kernel-patching modules (KernelCare / Ksplice). These
-//     load patch modules signed by the vendor's key, NOT the
-//     distro's. module.sig_enforce=1 would block subsequent
-//     patches → host stops receiving CVE
-//     coverage that the operator paid for. Especially relevant
-//     on hosting platforms (cPanel ships KernelCare integration).
+//   - Live-kernel-patching modules (KernelCare / Ksplice).
 //
-// Any single layer hitting → assume the host has unsigned/out-of-tree
-// modules. False-positive bias intentional: skipping
-// module.sig_enforce=1 is recoverable (operator can `state = force`
-// per-rule); applying it on a host
-// that needs an unsigned root-fs driver / a paid-for live-patcher
-// is not.
+// Any single layer hitting means the host has out-of-tree module evidence.
 func hasOutOfTreeModuleEvidence(profile HostProfile) bool {
 	if profile.HasZFS || profile.HasNVIDIA || profile.HasKernelCare || profile.HasKsplice || profile.HasLivePatchingModules || profile.HasCloudLinuxLVE {
 		return true
@@ -337,28 +324,6 @@ func (p HostProfile) hostingPanelReason() string {
 	return ""
 }
 
-func (p HostProfile) moduleSigningRiskReason(feature string) string {
-	switch {
-	case p.HasCloudLinuxLVE:
-		return "host has CloudLinux LVE (lve/kmodlve) — " + feature + " would block vendor modules"
-	case p.HasCageFS:
-		return "host has CageFS — " + feature + " would risk blocking CloudLinux hosting modules"
-	case p.HasKernelCare:
-		return "host has KernelCare live patching — " + feature + " would block future patch modules"
-	case p.HasKsplice:
-		return "host has Ksplice live patching — " + feature + " would block future patch modules"
-	case p.HasLivePatchingModules:
-		return "host has loaded live-patching modules — " + feature + " would block future patch modules"
-	case p.HasZFS:
-		return "host has ZFS evidence — " + feature + " would block ZFS modules"
-	case p.HasNVIDIA:
-		return "host has NVIDIA modules — " + feature + " would block NVIDIA modules"
-	case p.HasDKMS:
-		return "host has DKMS / out-of-tree modules — " + feature + " would block them"
-	}
-	return ""
-}
-
 // SkipReason returns a non-empty explanation if the rule with the given
 // group should be auto-skipped on this host, or "" if it should apply.
 //
@@ -387,13 +352,6 @@ func (p HostProfile) SkipReason(group string) string {
 		// never have it; bare-metal workstations / laptops do.
 		if p.HasThunderbolt {
 			return "host has Thunderbolt hardware (/sys/bus/thunderbolt/devices non-empty)"
-		}
-	case "tier2.module-sig-enforce":
-		// module.sig_enforce=1 requires every module to be kernel-signed;
-		// CloudLinux/LVE/CageFS, live-patching, ZFS, NVIDIA, DKMS, and
-		// akmod paths are safer skipped unless forced by the operator.
-		if reason := p.moduleSigningRiskReason("module.sig_enforce=1"); reason != "" {
-			return reason
 		}
 	case "tier2.ssbd":
 		if p.HasContainers || p.IsProxmox {

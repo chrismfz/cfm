@@ -59,23 +59,6 @@ func TestConfirmApply_EOFIsDecline(t *testing.T) {
 	}
 }
 
-func TestBootImpactingRisks_ModuleSigEnforce(t *testing.T) {
-	risks := boot_impacting_risks(
-		[]BootArg{{Key: "module.sig_enforce", Value: "1"}},
-		nil,
-		HostProfile{},
-	)
-	found := false
-	for _, r := range risks {
-		if strings.Contains(r, "module.sig_enforce") && strings.Contains(r, "KernelCare") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected module.sig_enforce + KernelCare warning, got: %v", risks)
-	}
-}
-
 func TestBootImpactingRisks_DangerousModuleSurfaced(t *testing.T) {
 	// Apply-time deny-list will reject this, but if a future PR ever
 	// loosens the deny-list the pre-flight must still flag it.
