@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"sort"
@@ -74,6 +75,10 @@ func RunTUI() (switchToText bool, err error) {
 	rows := allRows
 	cursor := 0
 	offset := 0
+	// pending maps rule ID -> queued RuleOverride. The user stages
+	// enable/disable with e/d/u and commits the batch with `a`. Held
+	// only in TUI memory until apply; `x` discards.
+	pending := map[string]RuleOverride{}
 	statusMsg := ""
 	statusUntil := time.Time{}
 	showHelp := false
@@ -151,7 +156,7 @@ func RunTUI() (switchToText bool, err error) {
 		rs = append(rs, []string{"STATE", "TIER", "KIND", "GROUP", "RULE"})
 		for _, r := range visible {
 			rs = append(rs, []string{
-				string(r.State),
+				stateCell(r, pending),
 				"T" + r.Tier.label(),
 				string(r.Kind),
 				r.Group,
@@ -162,11 +167,11 @@ func RunTUI() (switchToText bool, err error) {
 		table.RowStyles = make(map[int]ui.Style, len(visible)+1)
 		table.RowStyles[0] = ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
 		for i, r := range visible {
-			table.RowStyles[i+1] = ui.NewStyle(StateColor(r.State))
+			table.RowStyles[i+1] = ui.NewStyle(rowColor(r, pending))
 		}
 		if cursor >= offset && cursor < end {
 			sel := cursor - offset + 1
-			table.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, StateColor(rows[cursor].State))
+			table.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, rowColor(rows[cursor], pending))
 		}
 	}
 
@@ -265,7 +270,10 @@ func RunTUI() (switchToText bool, err error) {
 			footer.Text = fmt.Sprintf("[%s](fg:yellow)", statusMsg)
 			return
 		}
-		base := "[q](fg:cyan)uit  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [/](fg:cyan) filter  [?](fg:cyan) help"
+		base := "[q](fg:cyan)uit  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [u](fg:cyan)ndo  [a](fg:cyan)pply  [x](fg:cyan) discard  [/](fg:cyan) filter  [?](fg:cyan) help"
+		if len(pending) > 0 {
+			base += fmt.Sprintf("  •  [pending: %d](fg:magenta,mod:bold)", len(pending))
+		}
 		if activeFilter != "" {
 			base += fmt.Sprintf("  •  [filter:](fg:cyan) %s  [c](fg:cyan)lear", activeFilter)
 		}
@@ -291,6 +299,51 @@ func RunTUI() (switchToText bool, err error) {
 			return allRows[i].Tier < allRows[j].Tier
 		})
 		applyFilter()
+	}
+
+	// applyPending commits the queued overrides: merges them into the
+	// on-disk conf, then runs the full applier (sysctl file + modprobe
+	// file + bootloader cmdline + runtime sysctl -w). Output from
+	// applyCore is captured into a buffer so it doesn't shatter the
+	// TUI; the operator just sees a flash with rc + count.
+	applyPending := func() {
+		if len(pending) == 0 {
+			flash("no pending changes")
+			return
+		}
+		if os.Geteuid() != 0 {
+			flash("apply: must run as root")
+			return
+		}
+		conf, err := LoadConf(true)
+		if err != nil {
+			flash("apply: load conf: " + err.Error())
+			return
+		}
+		if conf.Overrides == nil {
+			conf.Overrides = map[string]RuleOverride{}
+		}
+		for id, ov := range pending {
+			if ov == OverrideDefault {
+				delete(conf.Overrides, id)
+			} else {
+				conf.Overrides[id] = ov
+			}
+		}
+		if err := WriteConf(conf); err != nil {
+			flash("apply: write conf: " + err.Error())
+			return
+		}
+		var buf bytes.Buffer
+		rc := applyCore(&buf, conf, ApplyOptions{AssumeYes: true}, "APPLY")
+		count := len(pending)
+		if rc != 0 {
+			flash(fmt.Sprintf("apply failed (rc=%d) — conf saved; re-run `cfm kernsec apply` from shell", rc))
+			return
+		}
+		pending = map[string]RuleOverride{}
+		refresh()
+		flash(fmt.Sprintf("applied %d change(s)", count))
 	}
 
 	render()
@@ -367,10 +420,29 @@ func RunTUI() (switchToText bool, err error) {
 			case "t":
 				return true, nil
 			case "e":
-				flash("press 't' for text mode, then run `cfm kernsec apply` from the shell")
+				if cursor >= 0 && cursor < len(rows) {
+					pending[rows[cursor].ID] = OverrideForce
+				}
 				render()
 			case "d":
-				flash("press 't' for text mode, then run `cfm kernsec disable` from the shell")
+				if cursor >= 0 && cursor < len(rows) {
+					pending[rows[cursor].ID] = OverrideSkip
+				}
+				render()
+			case "u":
+				if cursor >= 0 && cursor < len(rows) {
+					delete(pending, rows[cursor].ID)
+				}
+				render()
+			case "a":
+				applyPending()
+				render()
+			case "x":
+				if len(pending) > 0 {
+					n := len(pending)
+					pending = map[string]RuleOverride{}
+					flash(fmt.Sprintf("discarded %d pending change(s)", n))
+				}
 				render()
 			case "/":
 				filterEditing = true
@@ -453,4 +525,29 @@ func presence(b bool) string {
 		return "present"
 	}
 	return "missing"
+}
+
+// stateCell is the STATE column value, swapped for a PEND-* badge when
+// the rule has a queued override the operator hasn't committed yet.
+func stateCell(r AuditRow, pending map[string]RuleOverride) string {
+	if ov, ok := pending[r.ID]; ok {
+		switch ov {
+		case OverrideForce:
+			return "PEND-ON"
+		case OverrideSkip:
+			return "PEND-OFF"
+		default:
+			return "PEND-DEF"
+		}
+	}
+	return string(r.State)
+}
+
+// rowColor returns the table row color, using magenta for pending rows
+// so queued changes pop visually against the State palette.
+func rowColor(r AuditRow, pending map[string]RuleOverride) ui.Color {
+	if _, ok := pending[r.ID]; ok {
+		return ui.ColorMagenta
+	}
+	return StateColor(r.State)
 }
