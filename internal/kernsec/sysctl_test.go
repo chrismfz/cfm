@@ -1,6 +1,9 @@
 package kernsec
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSysctlProcPath(t *testing.T) {
 	tests := []struct {
@@ -84,5 +87,31 @@ func TestKSPPProfileSanity(t *testing.T) {
 			t.Errorf("duplicate boot arg ID: %q", a.ID)
 		}
 		ids[a.ID] = struct{}{}
+	}
+}
+
+func TestRemovedSysctlRulesAbsentFromRegistry(t *testing.T) {
+	removedIDs := []string{
+		strings.Join([]string{"KSEC-SCT-net", "harden-006"}, "."),
+		strings.Join([]string{"KSEC-SCT-net", "harden-007"}, "."),
+	}
+	removedKeys := []string{
+		"net.ipv6.conf.all." + "accept" + "_ra",
+		"kernel." + "kexec" + "_load_disabled",
+		"kernel." + "lock" + "down",
+		"module." + "sig" + "_enforce",
+	}
+
+	for _, r := range AllSysctls() {
+		for _, id := range removedIDs {
+			if r.ID == id {
+				t.Fatalf("removed sysctl rule ID %q is still registered", id)
+			}
+		}
+		for _, key := range removedKeys {
+			if r.Key == key {
+				t.Fatalf("removed sysctl key %q is still registered as %s", key, r.ID)
+			}
+		}
 	}
 }

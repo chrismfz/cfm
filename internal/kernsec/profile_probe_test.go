@@ -193,6 +193,19 @@ func TestSkipReason_OldModulesBusNoLongerMatches(t *testing.T) {
 	}
 }
 
+func TestSkipReasonDoesNotGateRemovedSysctlGroups(t *testing.T) {
+	p := HostProfile{HasKdump: true, HasDKMS: true}
+	for _, group := range []string{
+		"sysctl.kernel." + "kexec",
+		"sysctl.kernel." + "lock" + "down",
+		"sysctl.module." + "sig",
+	} {
+		if reason := p.SkipReason(group); reason != "" {
+			t.Fatalf("removed sysctl group %q still has host-profile gate %q", group, reason)
+		}
+	}
+}
+
 func TestDefaultContainerProbe_ShapeOnly(t *testing.T) {
 	// Sanity: the default probe points at real host paths. Run it on
 	// the test host — result is whatever it is, but it must not panic
