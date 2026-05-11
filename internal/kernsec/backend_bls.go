@@ -2,10 +2,18 @@ package kernsec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 )
+
+// ErrBLSDivergence is returned (wrapped) by BLSBackend.NextBootCmdline
+// when installed kernel entries disagree on managed args. Callers use
+// errors.Is to distinguish this recoverable condition — the boot
+// section is skipped, but sysctl and modprobe writes proceed — from
+// real read failures, which abort the whole apply.
+var ErrBLSDivergence = errors.New("BLS kernel entries diverge on managed args")
 
 // BLSBackend implements BootBackend for BLS / grubby installs
 // (RHEL/Alma/Rocky and similar). Reads next-boot args via
@@ -64,10 +72,8 @@ func (b *BLSBackend) NextBootCmdline() (string, error) {
 		}
 	}
 	if len(diverged) > 0 {
-		return first, fmt.Errorf(
-			"BLS kernel entries diverge on managed args from %s — stale on: %s",
-			entries[0].Kernel, strings.Join(diverged, ", "),
-		)
+		return first, fmt.Errorf("%w from %s — stale on: %s",
+			ErrBLSDivergence, entries[0].Kernel, strings.Join(diverged, ", "))
 	}
 	return first, nil
 }

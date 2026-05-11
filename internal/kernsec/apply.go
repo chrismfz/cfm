@@ -85,14 +85,20 @@ func RunApply(w io.Writer, opts ApplyOptions) int {
 		fmt.Fprintln(w, "kernsec apply: load conf:", err)
 		return 1
 	}
-	return applyCore(w, conf, opts, "APPLY")
+	rc, _ := applyCore(w, conf, opts, "APPLY")
+	return rc
 }
 
 // applyCore is the conf-agnostic apply orchestration. RunApply loads
 // from disk first; RunDisable constructs an in-memory tier=0 conf and
 // calls in directly. label is what appears in the banner ("APPLY" or
 // "DISABLE") so operator output reflects the operator's intent.
-func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
+// applyCore returns (rc, bootSkipped). bootSkipped is true when sysctl
+// and modprobe writes succeeded but the boot section was skipped due
+// to recoverable conditions (BLS divergence). Callers like the TUI use
+// it to give the operator an accurate post-apply summary; CLI callers
+// can ignore it — the human-readable output already flags the skip.
+func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) (int, bool) {
 	profile := DetectHostProfile()
 	rs := Resolve(conf, profile)
 	sysctls := rs.ApplySysctls()
@@ -132,16 +138,28 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	// any rendering so the operator sees the rejection immediately.
 	if err := CheckSafeModuleRules(modules); err != nil {
 		fmt.Fprintln(w, err)
-		return 1
+		return 1, false
 	}
 
 	sysctlContent := RenderSysctlFile(sysctls)
 	modprobeContent := RenderModprobeFile(modules)
 	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	// BLS divergence (two installed kernels with mismatched managed args)
+	// is recoverable: we can still write the sysctl drop-in, the
+	// modprobe drop-in, and run runtime `sysctl -w`. We only skip the
+	// boot section. Every other cmdline-read failure is still fatal —
+	// writing a cmdline blind to current state is unsafe.
+	skipBoot := false
+	var bootSkipReason string
 	if cmdlineErr != nil {
-		fmt.Fprintln(w, "kernsec apply:", cmdlineErr)
-		fmt.Fprintln(w, "  cannot compute desired cmdline without reading current next-boot config")
-		return 1
+		if errors.Is(cmdlineErr, ErrBLSDivergence) {
+			skipBoot = true
+			bootSkipReason = cmdlineErr.Error()
+		} else {
+			fmt.Fprintln(w, "kernsec apply:", cmdlineErr)
+			fmt.Fprintln(w, "  cannot compute desired cmdline without reading current next-boot config")
+			return 1, false
+		}
 	}
 
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
@@ -160,9 +178,13 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 
 	fmt.Fprintln(w, "[Boot args]")
-	if drift.BootReadErr != nil {
+	switch {
+	case skipBoot:
+		fmt.Fprintln(w, "  status:            SKIPPED — BLS kernel entries diverge; reconcile with grubby and re-run apply")
+		fmt.Fprintf(w, "  detail:            %s\n", bootSkipReason)
+	case drift.BootReadErr != nil:
 		fmt.Fprintf(w, "  status:            ERROR reading next-boot cmdline: %v\n", drift.BootReadErr)
-	} else {
+	default:
 		fmt.Fprintf(w, "  current next-boot: %s\n", strings.TrimSpace(drift.CurrentCmdline))
 		fmt.Fprintf(w, "  desired:           %s\n", strings.TrimSpace(desiredCmdline))
 		if drift.BootDiffers {
@@ -194,24 +216,24 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		switch classifyCheckResult(drift) {
 		case 2:
 			fmt.Fprintln(w, "[!] could not determine state — exit 2 (retry later)")
-			return 2
+			return 2, false
 		case 1:
 			fmt.Fprintln(w, "[!] drift detected — exit 1")
-			return 1
+			return 1, false
 		}
 		fmt.Fprintln(w, "[+] no drift")
-		return 0
+		return 0, false
 	}
 
 	if opts.DryRun {
 		fmt.Fprintln(w, "(dry-run; nothing written)")
 		fmt.Fprintln(w, "===========================")
-		return 0
+		return 0, skipBoot
 	}
 
-	if drift.BootReadErr != nil {
+	if drift.BootReadErr != nil && !skipBoot {
 		fmt.Fprintln(w, "kernsec apply: refusing to write — cannot read current cmdline")
-		return 1
+		return 1, false
 	}
 
 	// Phase 6 audit C1: interactive safety gate. Mutating operations
@@ -224,22 +246,22 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	// apply call is then equivalent to a `--check` and shouldn't
 	// pester the operator. drift.SysctlDiffers / BootDiffers /
 	// ModprobeDiffers cover the three managed surfaces.
-	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers
+	mutating := drift.SysctlDiffers || (drift.BootDiffers && !skipBoot) || drift.ModprobeDiffers
 	if mutating && !opts.AssumeYes {
 		preflightSummary(w, label, sysctls, bootArgs, modules, profile)
 		ok, err := confirmApply(w, opts.Stdin)
 		if err != nil {
 			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)
-			return 1
+			return 1, false
 		}
 		if !ok {
 			fmt.Fprintln(w, "kernsec apply: aborted by operator (no changes written).")
-			return 0
+			return 0, false
 		}
 	}
 
-	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, LoadSysctl); rc != 0 {
-		return rc
+	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, skipBoot, LoadSysctl); rc != 0 {
+		return rc, false
 	}
 
 	// Post-write verify.
@@ -250,7 +272,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[!] Boot-arg changes require reboot before they appear in /proc/cmdline.")
 	fmt.Fprintln(w, "===========================")
-	return 0
+	return 0, skipBoot
 }
 
 // applyWrites runs the mutating phase of apply in transaction-safe
@@ -284,6 +306,7 @@ func applyWrites(
 	bootArgs []BootArg,
 	loadedManaged []string,
 	opts ApplyOptions,
+	skipBoot bool,
 	loader func() error,
 ) int {
 	// 1. Sysctl drop-in file.
@@ -307,16 +330,27 @@ func applyWrites(
 		}
 	}
 
-	// 3. Bootloader cmdline.
-	if err := backend.WriteCmdline(bootArgs); err != nil {
-		fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
-		fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
-		return 1
+	// 3. Bootloader cmdline. Skipped entirely on BLS divergence — we
+	// don't know which entry is the canonical baseline, so writing
+	// would risk codifying a stale set of managed args across all
+	// kernels. Operator reconciles via grubby and re-runs apply.
+	if skipBoot {
+		fmt.Fprintln(w, "[Boot args] SKIPPED — divergent BLS entries; cmdline unchanged.")
+		fmt.Fprintln(w, "  reconcile with `grubby --update-kernel=ALL` and re-run `cfm kernsec apply`.")
+	} else {
+		if err := backend.WriteCmdline(bootArgs); err != nil {
+			fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
+			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
+			return 1
+		}
+		fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
 	}
-	fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
 
-	// 4. Bootloader refresh.
-	if !opts.NoRefresh {
+	// 4. Bootloader refresh. Skipped when boot section was skipped.
+	switch {
+	case skipBoot:
+		// already printed the SKIPPED line above; nothing to refresh.
+	case !opts.NoRefresh:
 		if err := backend.Refresh(); err != nil {
 			fmt.Fprintln(w, "kernsec apply: bootloader refresh:", err)
 			fmt.Fprintln(w, "  cmdline is written but bootloader has NOT picked it up.")
@@ -352,7 +386,7 @@ func applyWrites(
 			return 1
 		}
 		fmt.Fprintln(w, "[Boot args] bootloader refreshed.")
-	} else {
+	default:
 		fmt.Fprintln(w, "[Boot args] --no-refresh: skipping bootloader refresh; run it yourself before reboot.")
 	}
 

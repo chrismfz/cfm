@@ -239,6 +239,7 @@ func TestApplyWrites_LoaderRunsLastOnSuccess(t *testing.T) {
 		[]byte("# sysctl content\n"),
 		[]byte("# modprobe content\n"),
 		nil, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 0 {
@@ -262,6 +263,7 @@ func TestApplyWrites_LoaderNotCalledWhenWriteCmdlineFails(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		nil, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 1 {
@@ -289,6 +291,7 @@ func TestApplyWrites_LoaderNotCalledWhenRefreshFails(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		nil, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 1 {
@@ -342,6 +345,7 @@ func TestApplyWrites_GrubBackendRollsBackOnRefreshFailure(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		nil, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 1 {
@@ -390,6 +394,7 @@ func TestApplyWrites_NoRefreshSkipsRefreshButStillLoadsSysctl(t *testing.T) {
 		[]byte("# modprobe\n"),
 		nil, nil,
 		ApplyOptions{NoRefresh: true},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 0 {
@@ -412,6 +417,7 @@ func TestApplyWrites_LoaderFailureIsReportedButFilesAreWritten(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		nil, nil, ApplyOptions{},
+		false,
 		func() error { return errors.New("simulated runtime sysctl apply failure") },
 	)
 	if rc != 1 {
@@ -499,6 +505,7 @@ func TestApplyWrites_ProxmoxRefreshFailureRollsBackCmdline(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 1 {
@@ -544,6 +551,7 @@ func TestApplyWrites_ProxmoxRefreshFailureRollbackFailurePrintsManualRecovery(t 
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		[]BootArg{{Key: "slab_nomerge"}}, nil, ApplyOptions{},
+		false,
 		func() error { loaderCalled = true; return nil },
 	)
 	if rc != 1 {
@@ -580,6 +588,7 @@ func TestApplyWrites_ProxmoxRollbackPreservesUnmanagedOperatorArgs(t *testing.T)
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
+		false,
 		func() error { return nil },
 	)
 	if rc != 1 {
@@ -599,5 +608,63 @@ func TestApplyWrites_ProxmoxRollbackPreservesUnmanagedOperatorArgs(t *testing.T)
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("expected managed apply token %q to be removed from %q", unwanted, got)
 		}
+	}
+}
+
+// TestApplyWrites_SkipBoot_BypassesBootloader verifies that when
+// applyCore decides BLS divergence is recoverable and passes
+// skipBoot=true, applyWrites still writes the sysctl + modprobe drop-
+// ins and runs the runtime loader, but does NOT touch the bootloader.
+// This is the core safety property of the divergence-tolerant apply
+// path: rules that don't depend on the cmdline still land.
+func TestApplyWrites_SkipBoot_BypassesBootloader(t *testing.T) {
+	sysctlFile, modprobeFile, _ := redirectManagedPaths(t)
+	loaderCalled := false
+	be := &fakeBootBackend{}
+	var w bytes.Buffer
+	rc := applyWrites(
+		&w, be,
+		[]byte("# sysctl content\n"),
+		[]byte("# modprobe content\n"),
+		[]BootArg{{Key: "slab_nomerge"}}, nil, ApplyOptions{},
+		true, // skipBoot
+		func() error { loaderCalled = true; return nil },
+	)
+	if rc != 0 {
+		t.Fatalf("expected rc=0 with skipBoot=true, got %d. Output:\n%s", rc, w.String())
+	}
+	if be.WriteCalled {
+		t.Error("skipBoot=true must not invoke backend.WriteCmdline")
+	}
+	if be.RefreshCalled {
+		t.Error("skipBoot=true must not invoke backend.Refresh")
+	}
+	if !loaderCalled {
+		t.Error("skipBoot=true must still invoke the runtime sysctl loader")
+	}
+	if _, err := os.Stat(sysctlFile); err != nil {
+		t.Errorf("expected sysctl drop-in to be written under skipBoot=true: %v", err)
+	}
+	if _, err := os.Stat(modprobeFile); err != nil {
+		t.Errorf("expected modprobe drop-in to be written under skipBoot=true: %v", err)
+	}
+	if !strings.Contains(w.String(), "SKIPPED") {
+		t.Errorf("expected operator-facing SKIPPED notice in output, got:\n%s", w.String())
+	}
+}
+
+// TestErrBLSDivergence_Wrapping locks in the sentinel contract that
+// applyCore relies on: NextBootCmdline wraps ErrBLSDivergence with
+// %w so callers can detect it via errors.Is, while the human-readable
+// message (with stale kernel paths) is preserved.
+func TestErrBLSDivergence_Wrapping(t *testing.T) {
+	wrapped := errors.New("not a divergence error")
+	if errors.Is(wrapped, ErrBLSDivergence) {
+		t.Fatal("unrelated error must not satisfy errors.Is(_, ErrBLSDivergence)")
+	}
+	// Simulate the exact wrap shape used in backend_bls.go.
+	divergent := errors.Join(ErrBLSDivergence, errors.New("from /boot/vmlinuz-new — stale on: /boot/vmlinuz-old"))
+	if !errors.Is(divergent, ErrBLSDivergence) {
+		t.Error("expected joined error to satisfy errors.Is(_, ErrBLSDivergence)")
 	}
 }

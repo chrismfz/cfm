@@ -228,6 +228,9 @@ title="Rescue"
 	if err == nil {
 		t.Fatal("expected divergence error, got nil")
 	}
+	if !errors.Is(err, ErrBLSDivergence) {
+		t.Errorf("divergence error must satisfy errors.Is(_, ErrBLSDivergence): %v", err)
+	}
 	if !strings.Contains(err.Error(), "/boot/vmlinuz-5.14.0") {
 		t.Errorf("error message should name the divergent kernel: %v", err)
 	}
