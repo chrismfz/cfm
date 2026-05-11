@@ -115,8 +115,20 @@ func RunTUI() (switchToText bool, err error) {
 	// pageSize is how many data rows fit in the table's inner viewport
 	// (minus 1 for the sticky header). termui's Table doesn't scroll on
 	// its own — we feed it just the visible slice and track `offset`.
+	//
+	// termui's Grid sets child Rects only inside its Draw pass, so on
+	// the very first rebuildTable (before any ui.Render call has run)
+	// table.Inner is zero. Fall back to the terminal height using the
+	// same 0.84 fraction layout() uses for the middle row, minus 2 for
+	// the table border and 1 for the sticky header. Without this the
+	// initial frame would show a single rule and only fill in on the
+	// first keypress.
 	pageSize := func() int {
 		n := table.Inner.Dy() - 1
+		if n < 1 {
+			_, h := ui.TerminalDimensions()
+			n = int(float64(h)*0.84) - 3
+		}
 		if n < 1 {
 			n = 1
 		}
