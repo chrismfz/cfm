@@ -90,6 +90,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %{_unitdir}/cfm.service
 %config(noreplace) /etc/cfm/cfm.conf
 %config(noreplace) /etc/cfm/detectors.conf
+%attr(0600,root,root) %config(noreplace) /etc/cfm/kernsec.conf
 %config(noreplace) /etc/cfm/webdetector_malpaths.txt
 %config(noreplace) /etc/cfm/webdetector_challenge_paths.txt
 %config(noreplace) /etc/cfm/webdetector_challenge_exclude.txt
@@ -116,6 +117,12 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
+
+# kernsec.conf may reveal host hardening exceptions. Tighten only by
+# removing group/other bits so upgrades do not loosen operator-chosen owner
+# bits (for example 0400 stays 0400).
+[ -f /etc/cfm/kernsec.conf ] && chmod go-rwx /etc/cfm/kernsec.conf || true
+
 # shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua
