@@ -14,7 +14,7 @@ import (
 // ApplyOptions controls RunApply behaviour.
 type ApplyOptions struct {
 	// DryRun prints what would happen without writing or running
-	// sysctl --load / bootloader refresh.
+	// runtime sysctl apply / bootloader refresh.
 	DryRun bool
 	// Check exits non-zero if any managed file or cmdline differs
 	// from what apply would write. Implies no writes — the command
@@ -46,7 +46,7 @@ type ApplyOptions struct {
 //  5. Compare to current state; if Check, exit 0/1 based on equality.
 //  6. Otherwise (and not DryRun), write managed files in
 //     transaction-safe order — file writes first (reversible),
-//     bootloader refresh next, sysctl --load LAST. The sysctl load
+//     bootloader refresh next, runtime sysctl apply LAST. The sysctl apply
 //     is the only step that mutates the running kernel; ordering it
 //     last means a failure in the more-fragile bootloader path does
 //     NOT leave Tier 2 sysctls (e.g. user.max_user_namespaces=0)
@@ -256,15 +256,15 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 // applyWrites runs the mutating phase of apply in transaction-safe
 // order:
 //
-//  1. Write sysctl drop-in file (no `sysctl --load` yet — file on disk
-//     is a no-op for the running kernel until something loads it).
+//  1. Write sysctl drop-in file (not applied yet — file on disk
+//     is a no-op for the running kernel until apply parses it).
 //  2. Write modprobe drop-in file (idempotent file write; reboot
 //     required before blacklist takes effect anyway).
 //  3. Write next-boot cmdline via the bootloader backend (writes a
 //     config file or grubby invocation; takes effect on next boot).
 //  4. Refresh the bootloader (rebuilds grub.cfg / runs
 //     proxmox-boot-tool).  Skipped under --no-refresh.
-//  5. `sysctl --load` LAST. This is the only step that mutates the
+//  5. Runtime sysctl apply LAST. This is the only step that mutates the
 //     running kernel.  If anything in steps 1-4 fails the loader is
 //     never invoked, so the host's runtime state is unchanged from
 //     before apply ran. The drop-in files may exist on disk; the
@@ -291,7 +291,7 @@ func applyWrites(
 		fmt.Fprintln(w, "kernsec apply: write sysctl:", err)
 		return 1
 	}
-	fmt.Fprintf(w, "[Sysctl] wrote %s (not yet loaded).\n", SysctlPath)
+	fmt.Fprintf(w, "[Sysctl] wrote %s (not yet applied).\n", SysctlPath)
 
 	// 2. Modprobe blacklist file.
 	if err := WriteModprobeFile(w, modprobeContent); err != nil {
@@ -310,7 +310,7 @@ func applyWrites(
 	// 3. Bootloader cmdline.
 	if err := backend.WriteCmdline(bootArgs); err != nil {
 		fmt.Fprintln(w, "kernsec apply: write cmdline:", err)
-		fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT loaded; runtime state unchanged.")
+		fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
 		return 1
 	}
 	fmt.Fprintf(w, "[Boot args] rewrote next-boot cmdline via %s.\n", backend.Label())
@@ -348,7 +348,7 @@ func applyWrites(
 				}
 			}
 			fmt.Fprintln(w, "  re-run `cfm kernsec apply` or refresh the bootloader manually before reboot.")
-			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT loaded; runtime state unchanged.")
+			fmt.Fprintln(w, "  sysctl drop-in is on disk but NOT applied; runtime state unchanged.")
 			return 1
 		}
 		fmt.Fprintln(w, "[Boot args] bootloader refreshed.")
@@ -356,14 +356,14 @@ func applyWrites(
 		fmt.Fprintln(w, "[Boot args] --no-refresh: skipping bootloader refresh; run it yourself before reboot.")
 	}
 
-	// 5. Sysctl --load LAST: the only step that mutates the running kernel.
+	// 5. Runtime sysctl apply LAST: the only step that mutates the running kernel.
 	if err := loader(); err != nil {
-		fmt.Fprintln(w, "kernsec apply: sysctl --load:", err)
+		fmt.Fprintln(w, "kernsec apply: runtime sysctl apply:", err)
 		fmt.Fprintln(w, "  files are on disk and bootloader is updated; runtime sysctl values may be partially loaded.")
 		fmt.Fprintln(w, "  inspect with `sysctl -a` and re-run apply once the cause is fixed.")
 		return 1
 	}
-	fmt.Fprintln(w, "[Sysctl] sysctl --load completed (rules now live).")
+	fmt.Fprintln(w, "[Sysctl] runtime sysctl apply completed via per-key sysctl -w (rules now live).")
 	return 0
 }
 
@@ -541,7 +541,7 @@ func verifyAfterApply(w io.Writer, conf *Conf, profile HostProfile) {
 	if sysctlBad == 0 {
 		fmt.Fprintln(w, "  sysctl: all rules active (or not exposed by this kernel)")
 	} else {
-		fmt.Fprintf(w, "  sysctl: %d rules failed verification — investigate (sysctl --load output above)\n",
+		fmt.Fprintf(w, "  sysctl: %d rules failed verification — investigate the per-key sysctl -w output above\n",
 			sysctlBad)
 	}
 	if bootPending == 0 {

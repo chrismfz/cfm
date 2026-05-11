@@ -412,7 +412,7 @@ func TestApplyWrites_LoaderFailureIsReportedButFilesAreWritten(t *testing.T) {
 		[]byte("# sysctl\n"),
 		[]byte("# modprobe\n"),
 		nil, nil, ApplyOptions{},
-		func() error { return errors.New("simulated sysctl --load failure") },
+		func() error { return errors.New("simulated runtime sysctl apply failure") },
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1, got %d", rc)
@@ -427,8 +427,8 @@ func TestApplyWrites_LoaderFailureIsReportedButFilesAreWritten(t *testing.T) {
 		t.Errorf("modprobe file should be on disk despite loader failure: %v", err)
 	}
 	out := w.String()
-	if !strings.Contains(out, "sysctl --load") {
-		t.Errorf("expected sysctl --load failure to be surfaced, got:\n%s", out)
+	if !strings.Contains(out, "runtime sysctl apply") {
+		t.Errorf("expected runtime sysctl apply failure to be surfaced, got:\n%s", out)
 	}
 }
 

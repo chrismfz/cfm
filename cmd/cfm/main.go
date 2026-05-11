@@ -372,7 +372,7 @@ Usage:
   cfm kernsec status [--check]    -- alias for "text"
   cfm kernsec preview [...]       -- read-only diff: what 'apply' would select (filters: --tier --group --id --skip --force-id)
   cfm kernsec init                -- write default /etc/cfm/kernsec.conf if absent
-  cfm kernsec apply [--dry-run]   -- write sysctl + boot-arg files, run sysctl --load + bootloader refresh; prompts for irreversible-until-reboot/global-coredump risk; --check exits non-zero on drift
+  cfm kernsec apply [--dry-run]   -- write sysctl + boot-arg files, refresh bootloader, then apply runtime sysctls per-key with sysctl -w; prompts for irreversible-until-reboot/global-coredump risk; --check exits non-zero on drift
   cfm kernsec disable [--purge]   -- persistently disable kernsec (tier=0): strip managed boot args, empty managed sysctl; --purge removes conf entirely
   cfm kernsec monitor <action>    -- periodic drift-check systemd timer: enable | disable | remove | status
 

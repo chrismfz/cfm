@@ -42,7 +42,7 @@ back to text output when stdout is not a terminal.
 | `cfm kernsec status` | Alias for `text`. Add `--json` for machine-readable output or `--check` for monitoring exits. |
 | `cfm kernsec preview` | Show what `apply` would select after config, tier, and host-profile gates. Read-only. |
 | `cfm kernsec init` | Write default `/etc/cfm/kernsec.conf` with `tier = 1` if absent. |
-| `cfm kernsec apply` | Render managed sysctl and modprobe files, apply sysctls, update boot args, and refresh the bootloader. |
+| `cfm kernsec apply` | Render `/etc/sysctl.d/99-cfm-kernsec.conf` and managed modprobe files, update boot args, refresh the bootloader, then parse the rendered sysctl drop-in and apply runtime sysctls per key with `sysctl -w`. |
 | `cfm kernsec disable` | Persist `tier = 0`, strip kernsec-managed boot args, and empty managed sysctl/modprobe output. |
 | `cfm kernsec rollback` | Restore bootloader cmdline state from kernsec's pre-apply backup/snapshot and refresh the bootloader. |
 | `cfm kernsec monitor` | Manage the periodic systemd drift-check timer. |
@@ -99,7 +99,7 @@ hiding it.
 | Path | Managed by | Notes |
 |---|---|---|
 | `/etc/cfm/kernsec.conf` | `init`, `disable`, operator edits | Primary kernsec config. |
-| `/etc/sysctl.d/99-cfm-kernsec.conf` | `apply`, `disable`, `--purge` | kernsec-owned sysctl drop-in. Unsupported kernel keys are emitted as commented skipped lines. |
+| `/etc/sysctl.d/99-cfm-kernsec.conf` | `apply`, `disable`, `--purge` | kernsec-owned sysctl drop-in. `apply` renders this file, then parses the rendered key/value lines for runtime application. The drop-in persists settings for boot-time loading by the system sysctl service. Unsupported kernel keys are emitted as commented skipped lines. |
 | `/etc/modprobe.d/cfm-kernsec.conf` | `apply`, `disable`, `--purge` | Emits both `blacklist <module>` and `install <module> /bin/false`. |
 | `/etc/default/grub` | GRUB backend | Only `GRUB_CMDLINE_LINUX` is written; `_DEFAULT` is read for audit/drift but not written. |
 | `/etc/kernel/cmdline` | Proxmox/systemd-boot backend | Updated and followed by `proxmox-boot-tool refresh`. |
@@ -107,6 +107,13 @@ hiding it.
 | `/etc/systemd/system/cfm-kernsec-check.service` | `monitor enable/remove` | Runs `cfm kernsec apply --check`. |
 | `/etc/systemd/system/cfm-kernsec-check.timer` | `monitor enable/remove` | Periodic drift-check timer. |
 | `/run/lock/cfm-kernsec.lock` | mutating commands | Advisory lock to prevent concurrent kernsec writers. |
+
+Runtime sysctl apply:
+
+- `cfm kernsec apply` first renders `/etc/sysctl.d/99-cfm-kernsec.conf`; the rendered drop-in remains the persistent source of truth for boot.
+- After file writes and bootloader refresh succeed, `apply` parses the rendered drop-in and applies each active key at runtime with `sysctl -w key=value`.
+- Runtime sysctl failures are continue-on-error: later keys are still attempted, and failures are accumulated into one report with `/etc/sysctl.d/99-cfm-kernsec.conf:<line>`, key, value, and kernel error context.
+- Commented skipped lines and malformed/non-key lines are not applied at runtime.
 
 Backups and rollback snapshots:
 
