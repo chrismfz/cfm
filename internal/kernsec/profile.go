@@ -213,15 +213,9 @@ var Tier2BootArgs = []BootArg{
 		Affects:     "Aggressive: any kernel oops becomes a reboot. Trade reliability for exploit mitigation.",
 	},
 	{
-		ID: "KSEC-BOOT-tier2.lockdown-001", Group: "tier2.lockdown", Tier: Tier2,
-		Key: "lockdown", Value: "integrity",
-		Description: "Kernel lockdown LSM — blocks unsigned module load, /dev/mem write, unsigned kexec.",
-		Affects:     "Breaks DKMS/vendor modules (CloudLinux LVE/CageFS, live patching, ZFS, NVIDIA). Skipped when evidence is detected.",
-	},
-	{
 		ID: "KSEC-BOOT-tier2.module-sig-enforce-001", Group: "tier2.module-sig-enforce", Tier: Tier2,
 		Key: "module.sig_enforce", Value: "1",
-		Description: "Require kernel-signed modules. Belt-and-suspenders alongside lockdown=integrity.",
+		Description: "Require kernel-signed modules.",
 		Affects:     "Breaks DKMS/vendor modules (CloudLinux LVE/CageFS, live patching, ZFS, NVIDIA). Skipped when evidence is detected.",
 	},
 }
@@ -397,7 +391,6 @@ var ManagedBootArgKeys = []string{
 	// Tier 2
 	"spec_store_bypass_disable",
 	"oops",
-	"lockdown",
 	"module.sig_enforce",
 }
 

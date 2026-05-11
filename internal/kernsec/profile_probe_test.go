@@ -210,36 +210,6 @@ func TestDefaultContainerProbe_ShapeOnly(t *testing.T) {
 	_ = p.detect()
 }
 
-func TestSkipReason_LockdownGatesOnDKMSAndKdump(t *testing.T) {
-	// Phase: tier2.lockdown skips on EITHER DKMS evidence OR kdump
-	// — the probe was previously DKMS-only; the safety audit
-	// flagged kdump as an under-recognised brick path because
-	// lockdown=integrity restricts kexec primitives.
-	tests := []struct {
-		name    string
-		profile HostProfile
-		group   string
-		wantSet bool // true → expect non-empty SkipReason
-	}{
-		{"clean host", HostProfile{}, "tier2.lockdown", false},
-		{"DKMS only", HostProfile{HasDKMS: true}, "tier2.lockdown", true},
-		{"kdump only", HostProfile{HasKdump: true}, "tier2.lockdown", true},
-		{"both", HostProfile{HasDKMS: true, HasKdump: true}, "tier2.lockdown", true},
-		// boot.lockdown shares the same gate
-		{"boot.lockdown DKMS", HostProfile{HasDKMS: true}, "boot.lockdown", true},
-		{"boot.lockdown kdump", HostProfile{HasKdump: true}, "boot.lockdown", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := tc.profile.SkipReason(tc.group)
-			if (got != "") != tc.wantSet {
-				t.Errorf("SkipReason(%q) on %+v = %q, wantSet=%v",
-					tc.group, tc.profile, got, tc.wantSet)
-			}
-		})
-	}
-}
-
 func TestSkipReason_ModuleSigEnforceStillDKMSOnly(t *testing.T) {
 	// module.sig_enforce is purely a module-signing rule — kdump
 	// doesn't need unsigned modules, so the kdump escape doesn't
@@ -380,7 +350,7 @@ func TestSkipReason_ModuleSigningGatesPlatformEvidence(t *testing.T) {
 		{HasNVIDIA: true},
 	}
 	for _, profile := range tests {
-		for _, group := range []string{"tier2.lockdown", "tier2.module-sig-enforce"} {
+		for _, group := range []string{"tier2.module-sig-enforce"} {
 			if got := profile.SkipReason(group); got == "" {
 				t.Errorf("SkipReason(%q) on %+v = empty, want skip", group, profile)
 			}

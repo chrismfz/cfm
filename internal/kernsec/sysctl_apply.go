@@ -78,7 +78,7 @@ func WriteSysctlFile(w io.Writer, content []byte) error {
 // LoadSysctl applies every key=value line in SysctlPath via per-key
 // `sysctl -w` calls. Continue-on-error: a single bad key (kernel
 // rejects the value, key was removed by module unload between render
-// and load, lockdown blocks the write) does not stop subsequent keys
+// and load, or a security module blocks the write) does not stop subsequent keys
 // from being applied. All per-key failures are accumulated and
 // returned as a single error naming each rejected key plus the
 // kernel's response.

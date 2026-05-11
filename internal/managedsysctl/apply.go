@@ -90,7 +90,7 @@ type KeyValuePair struct {
 
 // ApplyKeys writes each (key, value) via `sysctl -w`. Continue-on-
 // error: a single bad rule (kernel rejects the value, key was
-// removed by module unload, lockdown blocks the write) does not stop
+// removed by module unload, or a security module blocks the write) does not stop
 // subsequent rules from being applied. All per-key failures are
 // accumulated in the returned ApplyResult.
 //

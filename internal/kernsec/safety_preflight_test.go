@@ -59,47 +59,6 @@ func TestConfirmApply_EOFIsDecline(t *testing.T) {
 	}
 }
 
-func TestBootImpactingRisks_LockdownPlusDKMSDetected(t *testing.T) {
-	// HasDKMS=true means probe DETECTED out-of-tree modules. If the
-	// rule still made it to the apply set the operator must have
-	// force-overridden — flag that loud and clear.
-	risks := boot_impacting_risks(
-		[]BootArg{{Key: "lockdown", Value: "integrity"}},
-		nil,
-		HostProfile{HasDKMS: true},
-	)
-	found := false
-	for _, r := range risks {
-		if strings.Contains(r, "lockdown") && strings.Contains(r, "DETECTED") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected DKMS-detected force-override warning, got: %v", risks)
-	}
-}
-
-func TestBootImpactingRisks_LockdownNoDKMSWarnsAboutKernelCare(t *testing.T) {
-	// HasDKMS=false (probe found nothing) — still warn, because the
-	// probe has known false-negatives (KernelCare not running, DKMS
-	// installed but not loaded, etc.). Audit C2 + the user's
-	// KernelCare question.
-	risks := boot_impacting_risks(
-		[]BootArg{{Key: "lockdown", Value: "integrity"}},
-		nil,
-		HostProfile{},
-	)
-	found := false
-	for _, r := range risks {
-		if strings.Contains(r, "lockdown") && strings.Contains(r, "KernelCare") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected KernelCare/DKMS hint when probe found nothing, got: %v", risks)
-	}
-}
-
 func TestBootImpactingRisks_ModuleSigEnforce(t *testing.T) {
 	risks := boot_impacting_risks(
 		[]BootArg{{Key: "module.sig_enforce", Value: "1"}},
