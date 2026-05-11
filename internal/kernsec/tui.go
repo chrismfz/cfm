@@ -186,6 +186,9 @@ func RunTUI() (switchToText bool, err error) {
 			"[cfm kernsec](fg:cyan,mod:bold)  •  boot mode: [%s](fg:white,mod:bold)  •  rules: %d  •  warnings: [%d](fg:%s)  •  updated: %s",
 			bootMode, len(rows), warns, warnsColorName(warns), time.Now().Format("15:04:05"),
 		)
+		if msg := bootDivergenceMsg(rows); msg != "" {
+			header.Text += fmt.Sprintf("  •  [BOOT: %s](fg:yellow,mod:bold)", msg)
+		}
 	}
 
 	renderDetail := func() {
@@ -229,9 +232,13 @@ func RunTUI() (switchToText bool, err error) {
 			}
 		case KindBoot:
 			fmt.Fprintf(&b, "  /proc/cmdline:    %s\n", presence(r.InCurrent))
-			if r.NextBootKnown {
+			switch {
+			case r.NextBootKnown:
 				fmt.Fprintf(&b, "  next-boot config: %s\n", presence(r.InNextBoot))
-			} else {
+			case r.Error != "":
+				fmt.Fprintf(&b, "  next-boot config: [unreadable](fg:yellow)\n")
+				fmt.Fprintf(&b, "  bootloader error: %s\n", r.Error)
+			default:
 				fmt.Fprintln(&b, "  next-boot config: unknown (could not read bootloader)")
 			}
 		case KindModule:
@@ -335,7 +342,7 @@ func RunTUI() (switchToText bool, err error) {
 			return
 		}
 		var buf bytes.Buffer
-		rc := applyCore(&buf, conf, ApplyOptions{AssumeYes: true}, "APPLY")
+		rc, bootSkipped := applyCore(&buf, conf, ApplyOptions{AssumeYes: true}, "APPLY")
 		count := len(pending)
 		if rc != 0 {
 			flash(fmt.Sprintf("apply failed (rc=%d) — conf saved; re-run `cfm kernsec apply` from shell", rc))
@@ -343,7 +350,11 @@ func RunTUI() (switchToText bool, err error) {
 		}
 		pending = map[string]RuleOverride{}
 		refresh()
-		flash(fmt.Sprintf("applied %d change(s)", count))
+		if bootSkipped {
+			flash(fmt.Sprintf("applied %d change(s) — boot skipped (BLS divergence)", count))
+		} else {
+			flash(fmt.Sprintf("applied %d change(s)", count))
+		}
 	}
 
 	render()
@@ -550,4 +561,21 @@ func rowColor(r AuditRow, pending map[string]RuleOverride) ui.Color {
 		return ui.ColorMagenta
 	}
 	return StateColor(r.State)
+}
+
+// bootDivergenceMsg surfaces bootloader-read failures in the TUI
+// header. BuildAuditRows attaches the bootloader error to every
+// boot-arg row's Error field; all such rows share the same message,
+// so we just pick the first non-empty one and short-summarise it.
+func bootDivergenceMsg(rows []AuditRow) string {
+	for _, r := range rows {
+		if r.Kind != KindBoot || r.Error == "" {
+			continue
+		}
+		if strings.Contains(r.Error, "diverge") {
+			return "divergence — reconcile with grubby"
+		}
+		return "next-boot unreadable"
+	}
+	return ""
 }
