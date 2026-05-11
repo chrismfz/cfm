@@ -64,6 +64,8 @@ func RunCLI(args []string) int {
 		return runMonitorCmd(args[1:], os.Stdout)
 	case "rollback":
 		return runRollbackCmd(args[1:], os.Stdout)
+	case "modules":
+		return runModulesCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -239,6 +241,46 @@ func runDisableCmd(args []string, w io.Writer) int {
 	})
 }
 
+// runModulesCmd dispatches `cfm kernsec modules <action>`. Today only
+// `audit` exists; future actions (e.g. `enforce-preflight`) hang off
+// the same verb so the CLI surface stays organised.
+func runModulesCmd(args []string, w io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "kernsec modules: missing action (try `cfm kernsec modules audit`)")
+		return 2
+	}
+	switch args[0] {
+	case "audit":
+		return runModulesAuditCmd(args[1:], w)
+	case "help", "-h", "--help":
+		fmt.Fprintln(w, `Usage: cfm kernsec modules <action>
+
+Actions:
+  audit               List currently-loaded modules with signature trust verdict`)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "kernsec modules: unknown action %q\n", args[0])
+		return 2
+	}
+}
+
+func runModulesAuditCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec modules audit", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	checkExit := fs.Bool("check", false, "exit non-zero if any unsigned or signed-untrusted modules are loaded")
+	if rc, done := handleFlagErr("kernsec modules audit", fs.Parse(args), w); done {
+		return rc
+	}
+	a := CollectModuleAudit()
+	fmt.Fprint(w, FormatTextAudit(a))
+	if *checkExit {
+		if a.Counts[ModuleSigUnsigned] > 0 || a.Counts[ModuleSigSignedUntrusted] > 0 || a.Counts[ModuleSigUnknown] > 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -267,6 +309,7 @@ Subcommands:
   disable             Persistently disable kernsec (tier=0) and strip managed boot args + sysctl rules
   rollback            Restore bootloader config from .cfm-kernsec.bak and refresh (operator recovery path)
   monitor             Manage the periodic drift-check systemd timer (enable | disable | remove | status)
+  modules             Module signature audit (audit subcommand: cfm kernsec modules audit)
   help                Show this message
 
 Status / text flags:
