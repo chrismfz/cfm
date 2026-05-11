@@ -24,11 +24,6 @@ canonical interface and includes the cfm-specific rule registry, config model,
 status output, bootloader backends, module blacklist writer, fstab audit, and
 monitor timer.
 
-`kernel.modules_disabled=1` is intentionally unsupported. It is a one-way
-runtime switch until reboot and requires very careful late-boot orchestration so
-cfm, the kernel, and host-specific services can finish loading required modules
-before module loading is disabled globally.
-
 ## Commands
 
 `cfm kernsec` with no subcommand opens the interactive TUI on a TTY and falls
@@ -176,7 +171,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | `sysctl.kernel.kexec` | 2 | `kernel.kexec_load_disabled=1` | Irreversible until reboot; skipped on kdump, Proxmox, and live-patching evidence unless forced. |
 | `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=|/bin/false` | Suppresses core dumps globally; skipped for kdump, hosting panels, backup agents, and crash-diagnostic monitoring. |
 | `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, Chromium sandbox, and some hosting isolation; skipped when containers/hosting panels are detected. |
-| `sysctl.net.harden` | 1 | Broadcast ICMP ignore, source-route rejection, martian logging, TCP RFC1337, IPv6 RA rejection | Static-IP servers should be unaffected; skip IPv6 RA rules if the host relies on SLAAC. |
+| `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1`, `net.ipv6.conf.all.accept_ra=0`, `net.ipv6.conf.default.accept_ra=0` | Static-IP servers should be unaffected; skip IPv6 RA rules if the host relies on SLAAC. |
 
 ### Sysctl rules audited as externally managed
 
@@ -185,8 +180,10 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 `EXT`; kernsec does not write them unless the operator explicitly uses
 `state = force` on a rule.
 
-Audited keys include `rp_filter`, IPv4/IPv6 redirect handling, and
-`net.ipv4.tcp_syncookies`.
+Audited keys are `net.ipv4.conf.all.rp_filter=1`,
+`net.ipv4.conf.all.accept_redirects=0`,
+`net.ipv4.conf.all.send_redirects=0`, `net.ipv4.tcp_syncookies=1`, and
+`net.ipv6.conf.all.accept_redirects=0`.
 
 ### Boot-argument rules
 
@@ -215,12 +212,12 @@ per selected rule. This prevents both alias-based autoloading and direct
 |---|---:|---|---|
 | `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb` | Recently exploited or no normal server use. |
 | `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, and similar dead network stacks | Intended to be safe on normal hosting servers. |
-| `modules.fs.legacy` | 1 | Obsolete or uncommon filesystems such as `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `squashfs`, `udf` | Override if the host genuinely mounts one of these filesystems. |
-| `modules.bus.bluetooth` | 1 | Bluetooth stack modules | Host-profile gated when Bluetooth hardware is detected. |
+| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda` | Override if the host genuinely mounts one of these filesystems. |
+| `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
+| `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | No typical server use. |
 | `modules.bus.thunderbolt` | 1 | `thunderbolt` | Skipped when Thunderbolt devices are detected. |
-| `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy`, DVB/media/tuner modules | No typical server use. |
+| `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
 | `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
-| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `xfrm_user`, `xfrm6_tunnel`, `xfrm4_tunnel` | Skipped if IPsec/XFRM policy is detected. |
 | `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher` | Extends the AF_ALG hardening beyond the boot-time `algif_aead` mitigation. |
 | `tier2.modules.sctp` | 2 | `sctp` | Opt-in; skipped when SCTP use is detected. |
 
@@ -233,12 +230,23 @@ cases on some hosts.
 These rules are **audit-only**. kernsec reports missing mount options but never
 edits `/etc/fstab`.
 
-| Rule | Recommendation | Notes |
-|---|---|---|
-| `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
-| `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
-| `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
-| `/home` | `nodev,nosuid` | `noexec` is intentionally not recommended for `/home`. |
+| Rule ID | Group | Mount point | Recommendation | Notes |
+|---|---|---|---|---|
+| `KSEC-FS-mount.tmp-001` | `fs.mount.tmp` | `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
+| `KSEC-FS-mount.tmp-002` | `fs.mount.tmp` | `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
+| `KSEC-FS-mount.tmp-003` | `fs.mount.tmp` | `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
+| `KSEC-FS-mount.home-001` | `fs.mount.home` | `/home` | `nodev,nosuid` | `noexec` is intentionally not recommended for `/home`. |
+
+## Intentionally unsupported
+
+`kernel.modules_disabled=1` is intentionally unsupported. It is a one-way
+runtime switch until reboot and requires very careful late-boot orchestration so
+cfm, the kernel, and host-specific services can finish loading required modules
+before module loading is disabled globally.
+
+NFS, CIFS/SMB clients, `io_uring`, wifi modules, and IPsec/XFRM modules are
+also intentionally not blacklisted by the shipped registry. These have
+legitimate operator-managed use cases on some hosts.
 
 ## Host-profile gates
 
@@ -247,10 +255,9 @@ likely to break production workloads. `preview`, `status`, and the TUI show when
 a rule is skipped by host profile. Operators can override with `state = force`
 when they accept the risk.
 
-The current host profile is a set of detected signals, not a phase or rollout
-plan. kernsec treats these signals conservatively: a positive signal skips the
-known-risk rule group, and the operator can force a rule only after accepting
-the workload impact.
+The current host profile is a set of detected signals. kernsec treats these
+signals conservatively: a positive signal skips the known-risk rule group, and
+the operator can force a rule only after accepting the workload impact.
 
 | Profile category | Detected signal | Host-profile effect |
 |---|---|---|
@@ -262,14 +269,14 @@ the workload impact.
 | Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
 | KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
 | Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Counts as live-patching and out-of-tree module evidence; skips lockdown, module-signature enforcement, and kexec disable. |
-| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Skips lockdown, module-signature enforcement, and kexec disable so future live patches are not blocked. |
+| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Skips lockdown, module-signature enforcement, and kexec disable so later live patches are not blocked. |
 | DKMS/akmods/out-of-tree modules | Non-empty `/var/lib/dkms`, `akmods` binary, `/usr/src/*-dkms*`, or non-empty `/lib/modules/*/{extra,updates}`. | Skips lockdown and module-signature enforcement because unsigned/vendor modules may fail to load. |
 | ZFS/NVIDIA | Loaded ZFS/NVIDIA modules or ZFS tooling/paths (`/sys/module/zfs`, `/etc/zfs`, `zpool`). | Counts as out-of-tree module evidence; skips lockdown and module-signature enforcement. |
 | Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips kexec disable; also skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
 | kdump | Crash-kernel/kdump indicators. | Skips kexec disable, lockdown, and global coredump suppression so crash capture remains available. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression to preserve backup performance and vendor diagnostics. |
 | Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode, global coredump suppression, and SCTP module blacklisting when SCTP health checks may be present. |
-| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips IPsec/XFRM module blacklists. |
+| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Recorded as host context; shipped IPsec/XFRM modules are intentionally not blacklisted. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
@@ -393,7 +400,7 @@ failure and is visible through `systemctl is-failed` and the journal.
 ## Compatibility notes
 
 - Unsupported sysctl keys are commented as skipped in the managed drop-in rather
-  than failing the whole apply. A future kernel that exposes the key can then use
+  than failing the whole apply. A later kernel that exposes the key can then use
   the same config intent.
 - kernsec-owned network hardening rules are written by kernsec, but the legacy
   `sysctl.net` group is normally owned by `cfm-sysctl-tweaks` and shown as
