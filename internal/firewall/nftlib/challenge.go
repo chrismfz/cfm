@@ -623,7 +623,7 @@ func dnatAcceptRuleExpr(namespace string, spec dnatRuleSpec, beforeHandle ...str
 	if len(beforeHandle) > 0 && strings.TrimSpace(beforeHandle[0]) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle[0])
 	}
-	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s %s dport %d accept comment "%s"`, prefix, spec.dport, dnatDaddrMatch(spec), proto, spec.toPort, dnatAcceptComment(namespace, dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
+	expr := fmt.Sprintf(`%s %s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, dnatDaddrMatch(spec), proto, spec.toPort, spec.dport, dnatAcceptComment(namespace, dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
 	return strings.Join(strings.Fields(expr), " ")
 }
 
