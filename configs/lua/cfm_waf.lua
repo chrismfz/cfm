@@ -102,13 +102,15 @@ local CFG = {
   rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
 
   -- [top-9]  SSRF + JS prototype pollution
-  rule_ssrf             = "logonly",  -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
+  rule_ssrf             = "challenge", -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
+                                       -- (no legitimate browser/HTTP client sends these schemes)
   rule_js_proto         = "challenge",  -- JS __proto__ / constructor.prototype pollution
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
   rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
   rule_crlf_injection   = "challenge",  -- CRLF / HTTP response-splitting in args or body
-  rule_http_smuggling   = "logonly",  -- HTTP verb embedded in body / querystring (smuggling)
+  rule_http_smuggling   = "challenge", -- HTTP verb embedded in body / querystring (smuggling)
+                                       -- (request-smuggling primitive; never benign)
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -123,23 +125,29 @@ local CFG = {
   rule_webshell_path    = "challenge", -- URI basename matches a known webshell drop name (c99.php, r57.php, …)
                                        -- (scanner-only paths: /shell.php, /webshell.php, /x.php,
                                        --  /adminer.php — zero legitimate traffic observed)
-  rule_reverse_shell    = "logonly",  -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
-  rule_webshell_ping    = "logonly",  -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
+  rule_reverse_shell    = "challenge", -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
+                                       -- (post-exploit primitive; no legitimate request shape)
+  rule_webshell_ping    = "challenge", -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
+                                       -- (narrow 4-signal AND-match; no legit traffic fits all four)
 
   -- ── Phase 2 — post-exploitation / RCE markers (logonly rollout) ───────────
   -- Sources: docs/waf.md "Detector phases" §Phase 2 (R2/R3/R4). All three
   -- emit family WAF_RCE so they share high-risk post-clearance routing.
   -- C1 (Log4Shell) is NOT here — already covered by detect_rce (rule 320).
-  rule_persistence       = "logonly",  -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
-  rule_rootkit_artifacts = "logonly",  -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
-  rule_lolbin            = "logonly",  -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
+  rule_persistence       = "challenge", -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
+                                        -- (post-exploit; never appears in legitimate HTTP)
+  rule_rootkit_artifacts = "challenge", -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
+                                        -- (kernel/loader artifacts; not part of any web request)
+  rule_lolbin            = "challenge", -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
+                                        -- (LOLBin command-line fragments; web traffic doesn't carry these)
 
   -- ── Phase 3 — known-CVE fingerprints (logonly rollout) ───────────────────
   -- Java deserialization (CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725
   -- pattern). Family WAF_RCE so it shares high-risk post-clearance routing.
   -- C1 Log4Shell is NOT a separate rule — already in detect_rce (rule 320).
   -- C3 (CVE signature file) is deferred to its own infra PR.
-  rule_java_deserialize  = "logonly",  -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
+  rule_java_deserialize  = "challenge", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
+                                        -- (Java-serialization-specific marker; not in legit web traffic)
 
   -- ── Phase 4 — C2 / exfiltration (logonly rollout) ────────────────────────
   -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
@@ -148,14 +156,16 @@ local CFG = {
   rule_c2_tunnel         = "challenge", -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
                                         -- (observed: POSTs to /wp-admin/admin-ajax.php from
                                         --  Tencent ASN referencing raw.githubusercontent.com)
-  rule_coinminer         = "logonly",  -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
+  rule_coinminer         = "challenge", -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
+                                        -- (miner CLI / pool URLs; not part of legitimate HTTP)
 
   -- ── Phase 5 — behavioural / combined-signal (logonly rollout) ────────────
   -- Sources: docs/waf.md "Detector phases" §Phase 5. B2 was already absorbed
   -- as a tightening of rule 607 (status row 18); B5 was shipped earlier
   -- (rule 411). What's left: B1 (HTTP smuggling header pairs), B3 (long
   -- URL segments), B4 (oversized header bag).
-  rule_smuggling_cl      = "logonly",  -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
+  rule_smuggling_cl      = "challenge", -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
+                                        -- (RFC-violating header combos used for request smuggling)
   rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
                                         -- slug-safe; observed abuse is base64 stuffing >1 KB)
   rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
@@ -167,7 +177,8 @@ local CFG = {
   -- image-typed / image-extension part for PHP/ASP/JSP/script openers.
   -- Same family WAF_UPLOAD_CONTENT (high-risk) so post-clearance routing
   -- is correct when promoted.
-  rule_polyglot_upload   = "logonly",  -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
+  rule_polyglot_upload   = "challenge", -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
+                                        -- (polyglot image upload; legit images never contain these openers)
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
@@ -436,6 +447,19 @@ function _M.check(ctx)
   end
 
   ctx = ctx or {}
+
+  -- Self-origin bypass (defense-in-depth). cfm.lua's "Step 0a" already
+  -- short-circuits self-origin requests before they reach the WAF
+  -- (cfm.lua:1106), but any caller that invokes waf.check() directly —
+  -- a future code path, a test harness, an admin tool — would otherwise
+  -- still run every rule against cron / cpanel / monitoring traffic.
+  -- ctx.self_origin is computed once by cfm.lua via is_self_origin(ip)
+  -- (loopback + link-local + the self-IP set written by Go at
+  -- /var/lib/cfm/lua/cfm_self_ips.lua); we just honour it here.
+  if ctx.self_origin then
+    return false, nil, nil, nil
+  end
+
   local uri     = ctx.uri     or ""
   local args    = ctx.args    or ""
   local method  = ctx.method  or "GET"
