@@ -37,7 +37,7 @@ func handleFlagErr(name string, err error, w io.Writer) (int, bool) {
 //	cfm kernsec status           -> alias for "text" (also supports --check)
 //	cfm kernsec preview          -> read-only diff: what apply would select
 //	cfm kernsec init             -> write default tier=1 kernsec.conf
-//	cfm kernsec apply            -> render + write managed files; sysctl --load + bootloader refresh
+//	cfm kernsec apply            -> render + write managed files; bootloader refresh; per-key sysctl -w
 //	cfm kernsec disable          -> tier=0 + strip managed args (--purge for full uninstall)
 //	cfm kernsec monitor <action> -> manage the periodic drift-check systemd timer
 //	cfm kernsec help / -h        -> usage
@@ -263,7 +263,7 @@ Subcommands:
   status              Alias for "text" (supports --check for monitoring)
   preview             Show what `+"`apply`"+` would do given conf + host profile
   init                Write default tier=1 /etc/cfm/kernsec.conf if absent
-  apply               Write managed sysctl + boot-arg files; run sysctl --load + bootloader refresh
+  apply               Write managed sysctl + boot-arg files; refresh bootloader; apply runtime sysctls per-key with sysctl -w
   disable             Persistently disable kernsec (tier=0) and strip managed boot args + sysctl rules
   rollback            Restore bootloader config from .cfm-kernsec.bak and refresh (operator recovery path)
   monitor             Manage the periodic drift-check systemd timer (enable | disable | remove | status)
