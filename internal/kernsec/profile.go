@@ -214,9 +214,7 @@ var Tier2BootArgs = []BootArg{
 	},
 }
 
-// Tier1BootArgsExt are boot args beyond the KSPP baseline.
-// Safe entries are Tier 1; compatibility-sensitive entries remain here for
-// stable ordering but carry Tier 2 and host-profile gates (see profile_probe.go).
+// Tier1BootArgsExt are Tier 1 boot args beyond the KSPP baseline.
 var Tier1BootArgsExt = []BootArg{
 	// --- boot.bug-detection ------------------------------------------
 	{
@@ -238,13 +236,6 @@ var Tier1BootArgsExt = []BootArg{
 		Key: "tsx", Value: "off",
 		Description: "Disable Intel Transactional Synchronization Extensions — removes the hardware primitives exploited by TAA (CVE-2019-11135) and related MDS variants. TSX is unused by any standard hosting or KVM workload.",
 		Affects:     "None on hosting / KVM servers; TSX is not used by MySQL, nginx, PHP, Python, etc. Non-Intel CPUs and Intel CPUs with the TSX deprecation microcode already applied ignore the parameter.",
-	},
-	// --- boot.ssbd: Spectre v4 mitigation for seccomp workloads ------
-	{
-		ID: "KSEC-BOOT-ssbd-001", Group: "tier2.ssbd", Tier: Tier2,
-		Key: "spec_store_bypass_disable", Value: "seccomp",
-		Description: "Enable Speculative Store Bypass Disable (SSBD / Spectre v4 mitigation) for all threads running under a seccomp policy. Covers sandboxed web workloads without the global perf hit of 'on'. Distro default 'prctl' means mitigation is off unless each process opts in explicitly.",
-		Affects:     "Tier 2: can impose a measurable syscall-throughput cost on seccomp-heavy container, backup, monitoring, and hosting-panel workloads; skipped when those workloads are detected.",
 	},
 }
 
@@ -383,7 +374,6 @@ var ManagedBootArgKeys = []string{
 	"efi",
 	"tsx",
 	// Tier 2
-	"spec_store_bypass_disable",
 	"oops",
 }
 

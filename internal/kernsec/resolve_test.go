@@ -192,11 +192,11 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 	}
 
 	// Expected applying boot args at tier=1 with IsEFIBoot:
-	//   KSPPBootArgs (5) - 1 skipped       = 4
-	//   Tier1BootArgsExt (4) - Tier2 SSBD = 3
-	//   Tier2BootArgs: SkipByTier          = 0
+	//   KSPPBootArgs (5) - 1 skipped = 4
+	//   Tier1BootArgsExt (3)        = 3
+	//   Tier2BootArgs: SkipByTier   = 0
 	// Total = 7
-	wantBootArgs := len(KSPPBootArgs) - 1 + (len(Tier1BootArgsExt) - 1)
+	wantBootArgs := len(KSPPBootArgs) - 1 + len(Tier1BootArgsExt)
 	args := rs.ApplyBootArgs()
 	if len(args) != wantBootArgs {
 		t.Errorf("ApplyBootArgs len = %d, want %d", len(args), wantBootArgs)
@@ -331,15 +331,6 @@ func TestReviewedRulesTierAndHostProfileDecisions(t *testing.T) {
 		},
 		{
 			name: "core_pattern skips backup workloads", tier: Tier2, profile: HostProfile{HasBackupWorkload: true}, id: "KSEC-SCT-kernel.coredump-001", want: SkipByHostProfile,
-		},
-		{
-			name: "ssbd seccomp is tier2", tier: Tier1, id: "KSEC-BOOT-ssbd-001", want: SkipByTier,
-		},
-		{
-			name: "ssbd applies on clean tier2 host", tier: Tier2, profile: HostProfile{IsEFIBoot: true}, id: "KSEC-BOOT-ssbd-001", want: Apply,
-		},
-		{
-			name: "ssbd skips containers", tier: Tier2, profile: HostProfile{IsEFIBoot: true, HasContainers: true}, id: "KSEC-BOOT-ssbd-001", want: SkipByHostProfile,
 		},
 	}
 	for _, tc := range tests {
