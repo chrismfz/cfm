@@ -20,6 +20,26 @@ func IsTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// focus identifies which pane currently receives keyboard navigation
+// (↑/↓/PageUp/PageDown/Home/End). The Detail pane is read-only and
+// never takes focus.
+const (
+	focusGroups = 0
+	focusRules  = 1
+)
+
+// groupKey is one row in the LEFT pane: a (Tier, Kind, Group) tuple
+// from the audit set, with the count of rules that share it. Used for
+// hierarchical navigation — operator picks a group on the left, sees
+// the group's rules on the middle pane, and the selected rule's
+// detail on the right.
+type groupKey struct {
+	Tier  Tier
+	Kind  RuleKind
+	Group string
+	Count int
+}
+
 // RunTUI launches the interactive kernsec audit. switchToText is set
 // when the user pressed 't' to drop to plain-text mode; the caller
 // should run RunStatus afterwards.
@@ -35,14 +55,25 @@ func RunTUI() (switchToText bool, err error) {
 	header.Border = false
 	header.PaddingLeft = 1
 
-	table := widgets.NewTable()
-	table.Title = " Rules "
-	table.RowSeparator = false
-	table.FillRow = false
-	// STATE | TIER | KIND | GROUP | RULE
-	table.ColumnWidths = []int{9, 5, 7, 22, 0}
-	table.TextAlignment = ui.AlignLeft
+	// LEFT pane — distinct groups with rule counts.
+	groupsTable := widgets.NewTable()
+	groupsTable.Title = " Groups "
+	groupsTable.RowSeparator = false
+	groupsTable.FillRow = false
+	// TIER | KIND | GROUP | COUNT
+	groupsTable.ColumnWidths = []int{4, 8, 24, 4}
+	groupsTable.TextAlignment = ui.AlignLeft
 
+	// MIDDLE pane — rules belonging to the currently-selected group.
+	rulesTable := widgets.NewTable()
+	rulesTable.Title = " Rules "
+	rulesTable.RowSeparator = false
+	rulesTable.FillRow = false
+	// STATE | RULE (RULE width is computed each render from panel Dx).
+	rulesTable.ColumnWidths = []int{9, 30}
+	rulesTable.TextAlignment = ui.AlignLeft
+
+	// RIGHT pane — detail for the selected rule.
 	detail := widgets.NewParagraph()
 	detail.Title = " Detail "
 	detail.WrapText = true
@@ -60,8 +91,9 @@ func RunTUI() (switchToText bool, err error) {
 		grid.Set(
 			ui.NewRow(0.08, ui.NewCol(1.0, header)),
 			ui.NewRow(0.84,
-				ui.NewCol(0.62, table),
-				ui.NewCol(0.38, detail),
+				ui.NewCol(0.25, groupsTable),
+				ui.NewCol(0.30, rulesTable),
+				ui.NewCol(0.45, detail),
 			),
 			ui.NewRow(0.08, ui.NewCol(1.0, footer)),
 		)
@@ -73,8 +105,11 @@ func RunTUI() (switchToText bool, err error) {
 		return allRows[i].Tier < allRows[j].Tier
 	})
 	rows := allRows
-	cursor := 0
-	offset := 0
+	var groups []groupKey
+	var rulesInGroup []AuditRow
+	groupCursor, groupOffset := 0, 0
+	ruleCursor, ruleOffset := 0, 0
+	focus := focusGroups
 	// pending maps rule ID -> queued RuleOverride. The user stages
 	// enable/disable with e/d/u and commits the batch with `a`. Held
 	// only in TUI memory until apply; `x` discards.
@@ -82,12 +117,42 @@ func RunTUI() (switchToText bool, err error) {
 	statusMsg := ""
 	statusUntil := time.Time{}
 	showHelp := false
-
-	// Filter mode state. When filterEditing == true the user is typing
-	// a filter substring into the footer; render() shows "filter: <buf>_".
 	filterEditing := false
 	filterBuf := ""
 	activeFilter := ""
+
+	recomputeRulesInGroup := func() {
+		rulesInGroup = rulesInGroup[:0]
+		if groupCursor < 0 || groupCursor >= len(groups) {
+			ruleCursor, ruleOffset = 0, 0
+			return
+		}
+		g := groups[groupCursor]
+		for _, r := range rows {
+			if r.Tier == g.Tier && r.Kind == g.Kind && r.Group == g.Group {
+				rulesInGroup = append(rulesInGroup, r)
+			}
+		}
+		if ruleCursor >= len(rulesInGroup) {
+			ruleCursor = len(rulesInGroup) - 1
+		}
+		if ruleCursor < 0 {
+			ruleCursor = 0
+		}
+		ruleOffset = 0
+	}
+
+	recomputeGroups := func() {
+		groups = buildGroupList(rows)
+		if groupCursor >= len(groups) {
+			groupCursor = len(groups) - 1
+		}
+		if groupCursor < 0 {
+			groupCursor = 0
+		}
+		groupOffset = 0
+		recomputeRulesInGroup()
+	}
 
 	applyFilter := func() {
 		if activeFilter == "" {
@@ -103,28 +168,16 @@ func RunTUI() (switchToText bool, err error) {
 				}
 			}
 		}
-		if cursor >= len(rows) {
-			cursor = len(rows) - 1
-		}
-		if cursor < 0 {
-			cursor = 0
-		}
-		offset = 0
+		recomputeGroups()
 	}
 
-	// pageSize is how many data rows fit in the table's inner viewport
-	// (minus 1 for the sticky header). termui's Table doesn't scroll on
-	// its own — we feed it just the visible slice and track `offset`.
-	//
-	// termui's Grid sets child Rects only inside its Draw pass, so on
-	// the very first rebuildTable (before any ui.Render call has run)
-	// table.Inner is zero. Fall back to the terminal height using the
-	// same 0.84 fraction layout() uses for the middle row, minus 2 for
-	// the table border and 1 for the sticky header. Without this the
-	// initial frame would show a single rule and only fill in on the
-	// first keypress.
-	pageSize := func() int {
-		n := table.Inner.Dy() - 1
+	// pageSizeOf computes how many data rows fit in a Table's inner
+	// viewport (minus 1 for the sticky header). On first render the
+	// Grid hasn't called Draw yet (gizak/termui/v3 grid.go:154 is what
+	// sets child Rects), so t.Inner.Dy() is 0. Fall back to the
+	// terminal-height fraction the layout assigns to the middle row.
+	pageSizeOf := func(t *widgets.Table) int {
+		n := t.Inner.Dy() - 1
 		if n < 1 {
 			_, h := ui.TerminalDimensions()
 			n = int(float64(h)*0.84) - 3
@@ -134,56 +187,122 @@ func RunTUI() (switchToText bool, err error) {
 		}
 		return n
 	}
+	groupsPageSize := func() int { return pageSizeOf(groupsTable) }
+	rulesPageSize := func() int { return pageSizeOf(rulesTable) }
 
-	clampOffset := func() {
-		ps := pageSize()
-		if cursor < offset {
-			offset = cursor
+	clampOffset := func(cursor, length, page int, offset *int) {
+		if cursor < *offset {
+			*offset = cursor
 		}
-		if cursor >= offset+ps {
-			offset = cursor - ps + 1
+		if cursor >= *offset+page {
+			*offset = cursor - page + 1
 		}
-		max := len(rows) - ps
+		max := length - page
 		if max < 0 {
 			max = 0
 		}
-		if offset > max {
-			offset = max
+		if *offset > max {
+			*offset = max
 		}
-		if offset < 0 {
-			offset = 0
+		if *offset < 0 {
+			*offset = 0
 		}
 	}
 
-	rebuildTable := func() {
-		clampOffset()
-		ps := pageSize()
-		end := offset + ps
-		if end > len(rows) {
-			end = len(rows)
+	rebuildGroupsTable := func() {
+		clampOffset(groupCursor, len(groups), groupsPageSize(), &groupOffset)
+		ps := groupsPageSize()
+		end := groupOffset + ps
+		if end > len(groups) {
+			end = len(groups)
 		}
-		visible := rows[offset:end]
+		visible := groups[groupOffset:end]
 
 		rs := make([][]string, 0, len(visible)+1)
-		rs = append(rs, []string{"STATE", "TIER", "KIND", "GROUP", "RULE"})
+		rs = append(rs, []string{"TIER", "KIND", "GROUP", "N"})
+		for _, g := range visible {
+			rs = append(rs, []string{
+				"T" + g.Tier.label(),
+				string(g.Kind),
+				g.Group,
+				fmt.Sprintf("%d", g.Count),
+			})
+		}
+		groupsTable.Rows = rs
+		groupsTable.RowStyles = make(map[int]ui.Style, len(visible)+1)
+		groupsTable.RowStyles[0] = ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
+		for i, g := range visible {
+			groupsTable.RowStyles[i+1] = ui.NewStyle(groupWorstColor(rows, g, pending))
+		}
+		if groupCursor >= groupOffset && groupCursor < end {
+			sel := groupCursor - groupOffset + 1
+			selColor := groupWorstColor(rows, groups[groupCursor], pending)
+			if focus == focusGroups {
+				groupsTable.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, selColor)
+			} else {
+				groupsTable.RowStyles[sel] = ui.NewStyle(selColor, ui.ColorClear, ui.ModifierBold)
+			}
+		}
+		groupsTable.BorderStyle = paneBorderStyle(focus == focusGroups)
+		groupsTable.TitleStyle = paneTitleStyle(focus == focusGroups)
+	}
+
+	rebuildRulesTable := func() {
+		clampOffset(ruleCursor, len(rulesInGroup), rulesPageSize(), &ruleOffset)
+		ps := rulesPageSize()
+		end := ruleOffset + ps
+		if end > len(rulesInGroup) {
+			end = len(rulesInGroup)
+		}
+		visible := rulesInGroup[ruleOffset:end]
+
+		// Fill the RULE column with whatever's left in the panel after
+		// the STATE column. termui doesn't auto-size a "0" width column
+		// (widgets/table.go:51 uses the slice verbatim), so we recompute
+		// each render. Falls back to terminal-dim on the first frame
+		// when Inner.Dx() is still zero — see pageSizeOf rationale.
+		ruleW := rulesTable.Inner.Dx() - 9 - 1
+		if ruleW <= 0 {
+			w, _ := ui.TerminalDimensions()
+			ruleW = int(float64(w)*0.30) - 9 - 2
+		}
+		if ruleW < 8 {
+			ruleW = 8
+		}
+		rulesTable.ColumnWidths = []int{9, ruleW}
+
+		rs := make([][]string, 0, len(visible)+1)
+		rs = append(rs, []string{"STATE", "RULE"})
 		for _, r := range visible {
 			rs = append(rs, []string{
 				stateCell(r, pending),
-				"T" + r.Tier.label(),
-				string(r.Kind),
-				r.Group,
 				r.Display,
 			})
 		}
-		table.Rows = rs
-		table.RowStyles = make(map[int]ui.Style, len(visible)+1)
-		table.RowStyles[0] = ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
+		rulesTable.Rows = rs
+		rulesTable.RowStyles = make(map[int]ui.Style, len(visible)+1)
+		rulesTable.RowStyles[0] = ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
 		for i, r := range visible {
-			table.RowStyles[i+1] = ui.NewStyle(rowColor(r, pending))
+			rulesTable.RowStyles[i+1] = ui.NewStyle(rowColor(r, pending))
 		}
-		if cursor >= offset && cursor < end {
-			sel := cursor - offset + 1
-			table.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, rowColor(rows[cursor], pending))
+		if ruleCursor >= ruleOffset && ruleCursor < end {
+			sel := ruleCursor - ruleOffset + 1
+			selColor := rowColor(rulesInGroup[ruleCursor], pending)
+			if focus == focusRules {
+				rulesTable.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, selColor)
+			} else {
+				rulesTable.RowStyles[sel] = ui.NewStyle(selColor, ui.ColorClear, ui.ModifierBold)
+			}
+		}
+		rulesTable.BorderStyle = paneBorderStyle(focus == focusRules)
+		rulesTable.TitleStyle = paneTitleStyle(focus == focusRules)
+		// Title gains the current group so the operator always knows
+		// which group's rules are listed.
+		if len(groups) > 0 && groupCursor < len(groups) {
+			rulesTable.Title = fmt.Sprintf(" Rules — %s (%d) ",
+				groups[groupCursor].Group, len(rulesInGroup))
+		} else {
+			rulesTable.Title = " Rules "
 		}
 	}
 
@@ -204,11 +323,11 @@ func RunTUI() (switchToText bool, err error) {
 	}
 
 	renderDetail := func() {
-		if cursor < 0 || cursor >= len(rows) {
+		if ruleCursor < 0 || ruleCursor >= len(rulesInGroup) {
 			detail.Text = ""
 			return
 		}
-		r := rows[cursor]
+		r := rulesInGroup[ruleCursor]
 		var b strings.Builder
 		fmt.Fprintf(&b, "[Selected:](fg:cyan,mod:bold) %s\n\n", r.Display)
 		fmt.Fprintf(&b, "[State:](fg:cyan)  [%s](fg:%s,mod:bold)\n", r.State, StateColorName(r.State))
@@ -226,9 +345,6 @@ func RunTUI() (switchToText bool, err error) {
 			case StateOK:
 				fmt.Fprintf(&b, "  /proc/sys: %s\n", r.LiveValue)
 			case StateEXT:
-				// Externally managed: kernsec does NOT enforce a value
-				// here, so "expected X" wording would mislead the
-				// operator. Show the live value with the owner attribution.
 				owner := "another cfm component"
 				if r.Reason != "" {
 					owner = r.Reason
@@ -289,7 +405,7 @@ func RunTUI() (switchToText bool, err error) {
 			footer.Text = fmt.Sprintf("[%s](fg:yellow)", statusMsg)
 			return
 		}
-		base := "[q](fg:cyan)uit  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [u](fg:cyan)ndo  [a](fg:cyan)pply  [x](fg:cyan) discard  [/](fg:cyan) filter  [?](fg:cyan) help"
+		base := "[q](fg:cyan)uit  [←/→/Tab](fg:cyan) pane  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [u](fg:cyan)ndo  [a](fg:cyan)pply  [x](fg:cyan) discard  [/](fg:cyan) filter  [?](fg:cyan) help"
 		if len(pending) > 0 {
 			base += fmt.Sprintf("  •  [pending: %d](fg:magenta,mod:bold)", len(pending))
 		}
@@ -306,7 +422,8 @@ func RunTUI() (switchToText bool, err error) {
 
 	render := func() {
 		renderHeader()
-		rebuildTable()
+		rebuildGroupsTable()
+		rebuildRulesTable()
 		renderDetail()
 		renderFooter()
 		ui.Render(grid)
@@ -334,9 +451,9 @@ func RunTUI() (switchToText bool, err error) {
 			flash("apply: must run as root")
 			return
 		}
-		conf, err := LoadConf(true)
-		if err != nil {
-			flash("apply: load conf: " + err.Error())
+		conf, lerr := LoadConf(true)
+		if lerr != nil {
+			flash("apply: load conf: " + lerr.Error())
 			return
 		}
 		if conf.Overrides == nil {
@@ -349,8 +466,8 @@ func RunTUI() (switchToText bool, err error) {
 				conf.Overrides[id] = ov
 			}
 		}
-		if err := WriteConf(conf); err != nil {
-			flash("apply: write conf: " + err.Error())
+		if werr := WriteConf(conf); werr != nil {
+			flash("apply: write conf: " + werr.Error())
 			return
 		}
 		var buf bytes.Buffer
@@ -369,6 +486,7 @@ func RunTUI() (switchToText bool, err error) {
 		}
 	}
 
+	applyFilter()
 	render()
 
 	tick := time.NewTicker(5 * time.Second)
@@ -408,32 +526,87 @@ func RunTUI() (switchToText bool, err error) {
 			switch e.ID {
 			case "q", "<C-c>":
 				return false, nil
+			case "<Tab>", "<Right>", "l":
+				if focus == focusGroups {
+					focus = focusRules
+				}
+				render()
+			case "<Left>", "h":
+				if focus == focusRules {
+					focus = focusGroups
+				}
+				render()
+			case "<Enter>":
+				if focus == focusGroups && len(rulesInGroup) > 0 {
+					focus = focusRules
+				}
+				render()
 			case "<Up>", "k":
-				if cursor > 0 {
-					cursor--
+				if focus == focusGroups {
+					if groupCursor > 0 {
+						groupCursor--
+						recomputeRulesInGroup()
+					}
+				} else if ruleCursor > 0 {
+					ruleCursor--
 				}
 				render()
 			case "<Down>", "j":
-				if cursor < len(rows)-1 {
-					cursor++
+				if focus == focusGroups {
+					if groupCursor < len(groups)-1 {
+						groupCursor++
+						recomputeRulesInGroup()
+					}
+				} else if ruleCursor < len(rulesInGroup)-1 {
+					ruleCursor++
 				}
 				render()
 			case "<Home>", "g":
-				cursor = 0
+				if focus == focusGroups {
+					if groupCursor != 0 {
+						groupCursor = 0
+						recomputeRulesInGroup()
+					}
+				} else {
+					ruleCursor = 0
+				}
 				render()
 			case "<End>", "G":
-				cursor = len(rows) - 1
+				if focus == focusGroups {
+					if last := len(groups) - 1; last >= 0 && groupCursor != last {
+						groupCursor = last
+						recomputeRulesInGroup()
+					}
+				} else if len(rulesInGroup) > 0 {
+					ruleCursor = len(rulesInGroup) - 1
+				}
 				render()
 			case "<PageUp>":
-				cursor -= pageSize()
-				if cursor < 0 {
-					cursor = 0
+				if focus == focusGroups {
+					groupCursor -= groupsPageSize()
+					if groupCursor < 0 {
+						groupCursor = 0
+					}
+					recomputeRulesInGroup()
+				} else {
+					ruleCursor -= rulesPageSize()
+					if ruleCursor < 0 {
+						ruleCursor = 0
+					}
 				}
 				render()
 			case "<PageDown>":
-				cursor += pageSize()
-				if cursor >= len(rows) {
-					cursor = len(rows) - 1
+				if focus == focusGroups {
+					groupCursor += groupsPageSize()
+					if groupCursor >= len(groups) {
+						groupCursor = len(groups) - 1
+					}
+					recomputeRulesInGroup()
+				} else {
+					ruleCursor += rulesPageSize()
+					if ruleCursor >= len(rulesInGroup) {
+						ruleCursor = len(rulesInGroup) - 1
+					}
 				}
 				render()
 			case "r":
@@ -443,18 +616,18 @@ func RunTUI() (switchToText bool, err error) {
 			case "t":
 				return true, nil
 			case "e":
-				if cursor >= 0 && cursor < len(rows) {
-					pending[rows[cursor].ID] = OverrideForce
+				if ruleCursor >= 0 && ruleCursor < len(rulesInGroup) {
+					pending[rulesInGroup[ruleCursor].ID] = OverrideForce
 				}
 				render()
 			case "d":
-				if cursor >= 0 && cursor < len(rows) {
-					pending[rows[cursor].ID] = OverrideSkip
+				if ruleCursor >= 0 && ruleCursor < len(rulesInGroup) {
+					pending[rulesInGroup[ruleCursor].ID] = OverrideSkip
 				}
 				render()
 			case "u":
-				if cursor >= 0 && cursor < len(rows) {
-					delete(pending, rows[cursor].ID)
+				if ruleCursor >= 0 && ruleCursor < len(rulesInGroup) {
+					delete(pending, rulesInGroup[ruleCursor].ID)
 				}
 				render()
 			case "a":
@@ -590,4 +763,82 @@ func bootDivergenceMsg(rows []AuditRow) string {
 		return "next-boot unreadable"
 	}
 	return ""
+}
+
+// buildGroupList returns the distinct (Tier, Kind, Group) tuples in
+// the same stable order as `rows`, with a count of rules per tuple.
+// Sorted upstream by Tier (in RunTUI), so groups inherit that order:
+// all T1 groups before T2.
+func buildGroupList(rows []AuditRow) []groupKey {
+	seen := map[string]int{}
+	var groups []groupKey
+	for _, r := range rows {
+		key := fmt.Sprintf("%d|%s|%s", r.Tier, r.Kind, r.Group)
+		if idx, ok := seen[key]; ok {
+			groups[idx].Count++
+			continue
+		}
+		seen[key] = len(groups)
+		groups = append(groups, groupKey{
+			Tier:  r.Tier,
+			Kind:  r.Kind,
+			Group: r.Group,
+			Count: 1,
+		})
+	}
+	return groups
+}
+
+// groupWorstColor returns the worst state color across all rules in a
+// group, so the LEFT pane's row color flags any group that contains a
+// drifted/diff/missing rule. Pending overrides anywhere in the group
+// promote the row to magenta, matching the rule-pane convention.
+func groupWorstColor(rows []AuditRow, g groupKey, pending map[string]RuleOverride) ui.Color {
+	rank := func(c ui.Color) int {
+		switch c {
+		case ui.ColorRed:
+			return 4
+		case ui.ColorYellow:
+			return 3
+		case ui.ColorWhite:
+			return 2
+		case ui.ColorGreen:
+			return 1
+		}
+		return 0
+	}
+	worst := ui.ColorGreen
+	hasPending := false
+	for _, r := range rows {
+		if r.Tier != g.Tier || r.Kind != g.Kind || r.Group != g.Group {
+			continue
+		}
+		if _, p := pending[r.ID]; p {
+			hasPending = true
+		}
+		if c := StateColor(r.State); rank(c) > rank(worst) {
+			worst = c
+		}
+	}
+	if hasPending {
+		return ui.ColorMagenta
+	}
+	return worst
+}
+
+// paneBorderStyle / paneTitleStyle make the focused pane's border and
+// title pop in bold cyan so the operator can see at a glance which
+// pane consumes ↑/↓ and apply-queue keys.
+func paneBorderStyle(focused bool) ui.Style {
+	if focused {
+		return ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
+	}
+	return ui.NewStyle(ui.ColorWhite)
+}
+
+func paneTitleStyle(focused bool) ui.Style {
+	if focused {
+		return ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
+	}
+	return ui.NewStyle(ui.ColorWhite)
 }
