@@ -47,25 +47,54 @@ end
 -- BLOCK-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Sensitive-sink keywords used by the single-`../` confirmation branch
+-- below. Substring match against the scan buffer (already lowercased and
+-- double-decoded by scan_str). Every real-attack traversal hit observed
+-- across mars/virgo/orion (2026-05-05 → 2026-05-11, 23,352-event sample)
+-- contains at least one of these tokens; legitimate `../` use in CMS-
+-- generated URLs (e.g. phpThumb `?src=../images/...`) does not.
+local TRAVERSAL_SENSITIVE_SINKS = {
+  "/etc/passwd", "/etc/shadow", "/proc/self", "/boot.ini",
+  "wp-config", "configuration.php", "config.inc.php", "settings.php",
+  "pearcmd", "xmlrpc.php",
+  "/.ssh/", "/.aws/", "/.git/config", "/.env",
+  "win.ini", "system32",
+}
+
 function _M.detect_traversal(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
+  -- Strong, unconditional signals — never legitimate in any request.
   if has(s, "%00") or has(s, "\x00") then return true end
-
-  -- Facebook share-debug bots produce URIs starting with /.../ which
-  -- contains a literal "../" substring as a side effect, but is not
-  -- traversal. Skip when the raw URI begins with that prefix.
-  local raw = lower(uri or "")
-  if string.sub(raw, 1, 5) == "/.../" then
-    return false
-  end
-
-  if has(s, "../") or has(s, "..\\") then return true end
 
   -- Triple-URL-encoded path-separator variants survive scan_str's
   -- double-decode and are sometimes used to bypass single-decode WAFs.
   if has(s, "..%2f")   or has(s, "..%5c")   then return true end
   if has(s, "%2e%2e/") or has(s, "%2e%2e\\") then return true end
+
+  -- Plain `../` or `..\` — must be exactly two dots. A run of three or
+  -- more dots (FB share-debug bot URIs like `/.../<x>`, ellipsis-style
+  -- CMS slugs like `/pro.../blouzaki-t-shirt-craft/`) is not traversal
+  -- and must not match.  Lua patterns: a non-dot byte followed by two
+  -- dots and a separator, OR `../` / `..\` at the start of scan.
+  local has_dotdot =
+       string.find(s, "[^.]%.%./",  1, false)
+    or string.find(s, "^%.%./",     1, false)
+    or string.find(s, "[^.]%.%.\\", 1, false)
+    or string.find(s, "^%.%.\\",    1, false)
+  if not has_dotdot then return false end
+
+  -- Multi-hop traversal — `../../` or `..\..\` is always an attack.
+  if string.find(s, "%.%./%.%./",   1, false) then return true end
+  if string.find(s, "%.%.\\%.%.\\", 1, false) then return true end
+
+  -- Single `../` only fires when paired with a sensitive sink. This
+  -- preserves every real-attack hit (wp-config, /etc/passwd, pearcmd,
+  -- xmlrpc.php LFI, RevSlider, etc.) while suppressing benign single
+  -- `../` use such as phpThumb `?src=../images/products/foo.jpg`.
+  for i = 1, #TRAVERSAL_SENSITIVE_SINKS do
+    if has(s, TRAVERSAL_SENSITIVE_SINKS[i]) then return true end
+  end
 
   return false
 end
@@ -2155,11 +2184,14 @@ end
 
 -- [B3] Long URL path segment. "Path segment" = substring between two `/`
 -- in the URI's path component (query/fragment stripped first). Threshold
--- is 256 chars: most legitimate URIs are well under 100 chars per
--- segment, including hashed asset filenames. Returns "SEG_<len>" — the
--- length is the longest segment, included so log analysis can distinguish
--- "just over 256" from "10 KB stuffed".
-local LONG_PATH_THRESHOLD = 256
+-- is 800 bytes: WordPress / Joomla shops with UTF-8 (especially Greek /
+-- Cyrillic / CJK) product slugs URL-encode each character to 6-9 bytes,
+-- so a single legitimate Greek product title routinely lands in the
+-- 300-700 byte range (e.g. SEG_603 on news1.gr, SEG_319 on nitromag.gr).
+-- Real abuse on the same surface is base64-stuffed redirect paths well
+-- past 1 KB. Threshold therefore sits above legitimate UTF-8 slugs and
+-- below all observed scanner payloads. Returns "SEG_<len>".
+local LONG_PATH_THRESHOLD = 800
 
 function _M.detect_long_path_segment(uri)
   if not uri or uri == "" then return nil end

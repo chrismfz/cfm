@@ -43,7 +43,10 @@ local CFG = {
   --   "block"     -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
-  rule_traversal       = "logonly",   -- ../, null bytes, basic traversal markers
+  rule_traversal       = "challenge",  -- ../, null bytes, basic traversal markers
+                                       -- (signal-confirmed: encoded forms, null bytes,
+                                       --  multi-hop, or single ../ paired with a
+                                       --  sensitive sink — see detect_traversal)
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
@@ -91,7 +94,9 @@ local CFG = {
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
 
   -- [top-7]  Content-Type validation
-  rule_content_type_anomaly = "logonly",  -- non-standard charset bypass; malformed multipart boundary
+  rule_content_type_anomaly = "challenge",  -- non-standard charset bypass; malformed multipart boundary
+                                            -- (all observed hits POST `/` against webmail / MX hosts
+                                            --  with non-string CT — never legitimate browser traffic)
 
   -- [top-8]  Proxy header integrity
   rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
@@ -115,7 +120,9 @@ local CFG = {
   -- Sources: docs/waf.md "Detector phases" §Phase 1 / §Phase 2 / §Phase 5 (B5).
   -- All three start at logonly per the rollout playbook; promote individually
   -- only after `cfm webtop waf hit-rates --hours 168` produces ok_to_promote.
-  rule_webshell_path    = "logonly",  -- URI basename matches a known webshell drop name (c99.php, r57.php, …)
+  rule_webshell_path    = "challenge", -- URI basename matches a known webshell drop name (c99.php, r57.php, …)
+                                       -- (scanner-only paths: /shell.php, /webshell.php, /x.php,
+                                       --  /adminer.php — zero legitimate traffic observed)
   rule_reverse_shell    = "logonly",  -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
   rule_webshell_ping    = "logonly",  -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
 
@@ -138,7 +145,9 @@ local CFG = {
   -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
   -- service hostnames; X2 covers coinminer tool/pool fingerprints (the
   -- stratum scheme is already folded into rule 701 per audit row 16).
-  rule_c2_tunnel         = "logonly",  -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
+  rule_c2_tunnel         = "challenge", -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
+                                        -- (observed: POSTs to /wp-admin/admin-ajax.php from
+                                        --  Tencent ASN referencing raw.githubusercontent.com)
   rule_coinminer         = "logonly",  -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
 
   -- ── Phase 5 — behavioural / combined-signal (logonly rollout) ────────────
@@ -147,7 +156,8 @@ local CFG = {
   -- (rule 411). What's left: B1 (HTTP smuggling header pairs), B3 (long
   -- URL segments), B4 (oversized header bag).
   rule_smuggling_cl      = "logonly",  -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
-  rule_long_path_segment = "logonly",  -- single URL path segment ≥ 256 chars
+  rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
+                                        -- slug-safe; observed abuse is base64 stuffing >1 KB)
   rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
 
   -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────

