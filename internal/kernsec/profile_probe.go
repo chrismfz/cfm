@@ -353,19 +353,6 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasThunderbolt {
 			return "host has Thunderbolt hardware (/sys/bus/thunderbolt/devices non-empty)"
 		}
-	case "tier2.ssbd":
-		if p.HasContainers || p.IsProxmox {
-			return "seccomp-heavy container/Proxmox workload detected — SSBD seccomp mode may add measurable syscall overhead"
-		}
-		if reason := p.hostingPanelReason(); reason != "" {
-			return "hosting panel seccomp workload: " + reason
-		}
-		if p.HasBackupWorkload {
-			return "backup workload detected — avoid adding syscall overhead unless explicitly approved"
-		}
-		if p.HasMonitoringWorkload {
-			return "monitoring workload detected — avoid adding syscall overhead unless explicitly approved"
-		}
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0
 		// break Chromium sandbox, bwrap, rootless podman, cPanel jails,

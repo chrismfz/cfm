@@ -223,7 +223,6 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 | `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Enables low-overhead KFENCE sampling. |
 | `boot.dma` | 1 | `efi=disable_early_pci_dma` | EFI-only pre-IOMMU DMA hardening; skipped on non-EFI hosts. |
 | `boot.sidechannel` | 1 | `tsx=off` | Disables Intel TSX side-channel surface; no expected hosting impact. |
-| `tier2.ssbd` | 2 | `spec_store_bypass_disable=seccomp` | Can cost syscall throughput on seccomp-heavy workloads; host-profile gated. |
 | `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
 
 kernsec only owns the managed boot-argument keys listed above. It strips stale
@@ -288,21 +287,21 @@ the operator can force a rule only after accepting the workload impact.
 
 | Profile category | Detected signal | Host-profile effect |
 |---|---|---|
-| Containers | Container daemons, shims, runtime sockets, or systemd-nspawn machines (`runc`, `containerd`, `dockerd`, `crio`, `podman`, `kubelet`, LXC/LXD, Kata, gVisor, Docker/CRI-O/containerd/Podman sockets). | Skips Tier 2 namespace kill rules; also skips Tier 2 SSBD seccomp mode because container hosts are commonly seccomp-heavy. |
-| cPanel | `/usr/local/cpanel`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
-| DirectAdmin | `/usr/local/directadmin`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
-| CloudLinux/LVE | `/proc/lve` or loaded `lve`/`kmodlve` module. | Counts as hosting-panel workload and out-of-tree/vendor module evidence; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression. |
-| CageFS | `/etc/cagefs` or `cagefsctl`. | Counts as hosting-panel workload and CloudLinux-style workload evidence; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, global coredump suppression. |
-| Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules, Tier 2 SSBD seccomp mode, and global coredump suppression. |
+| Containers | Container daemons, shims, runtime sockets, or systemd-nspawn machines (`runc`, `containerd`, `dockerd`, `crio`, `podman`, `kubelet`, LXC/LXD, Kata, gVisor, Docker/CRI-O/containerd/Podman sockets). | Skips Tier 2 namespace kill rules. |
+| cPanel | `/usr/local/cpanel`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules and global coredump suppression. |
+| DirectAdmin | `/usr/local/directadmin`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules and global coredump suppression. |
+| CloudLinux/LVE | `/proc/lve` or loaded `lve`/`kmodlve` module. | Counts as hosting-panel workload and out-of-tree/vendor module evidence; skips Tier 2 namespace kill rules and global coredump suppression. |
+| CageFS | `/etc/cagefs` or `cagefsctl`. | Counts as hosting-panel workload and CloudLinux-style workload evidence; skips Tier 2 namespace kill rules and global coredump suppression. |
+| Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules and global coredump suppression. |
 | KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Recorded as live-patching and out-of-tree module evidence. |
 | Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Recorded as live-patching and out-of-tree module evidence. |
 | Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Recorded as live-patching module evidence. |
 | DKMS/akmods/out-of-tree modules | Non-empty `/var/lib/dkms`, `akmods` binary, `/usr/src/*-dkms*`, or non-empty `/lib/modules/*/{extra,updates}`. | Recorded as out-of-tree module evidence. |
 | ZFS/NVIDIA | Loaded ZFS/NVIDIA modules or ZFS tooling/paths (`/sys/module/zfs`, `/etc/zfs`, `zpool`). | Recorded as out-of-tree module evidence. |
-| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Skips Tier 2 SSBD seccomp mode because Proxmox/container hosts are often seccomp-heavy. |
+| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Recorded as host context. |
 | kdump | Crash-kernel/kdump indicators. | Skips global coredump suppression so crash capture remains available. |
-| Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression to preserve backup performance and vendor diagnostics. |
-| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips Tier 2 SSBD seccomp mode and global coredump suppression. |
+| Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips global coredump suppression to preserve vendor diagnostics. |
+| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips global coredump suppression. |
 | IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Recorded as host context; shipped IPsec/XFRM modules are intentionally not blacklisted. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
@@ -314,7 +313,6 @@ Current risky Tier 2 skip reasons:
 | Tier 2 group | Current skip reason |
 |---|---|
 | Namespace rules (`tier2.namespace`) | Skip hosting/container workloads because disabling unprivileged user namespaces breaks rootless containers, container sandboxes, cPanel jails, CloudLinux/CageFS isolation, and similar hosting isolation. |
-| SSBD seccomp mode (`tier2.ssbd`) | Skip seccomp-heavy hosting, container, backup, and monitoring workloads because `spec_store_bypass_disable=seccomp` can add measurable syscall overhead. |
 | Coredump suppression (`sysctl.kernel.coredump`) | Skip kdump, hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses coredumps globally and can break crash capture or vendor troubleshooting. |
 
 Mutating commands also run a pre-flight safety summary before risky applies.
