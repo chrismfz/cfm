@@ -3,6 +3,7 @@ package kernsec
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,8 +68,12 @@ func RunTUI() (switchToText bool, err error) {
 	layout()
 
 	allRows := buildAuditRowsForTUI()
+	sort.SliceStable(allRows, func(i, j int) bool {
+		return allRows[i].Tier < allRows[j].Tier
+	})
 	rows := allRows
 	cursor := 0
+	offset := 0
 	statusMsg := ""
 	statusUntil := time.Time{}
 	showHelp := false
@@ -99,12 +104,52 @@ func RunTUI() (switchToText bool, err error) {
 		if cursor < 0 {
 			cursor = 0
 		}
+		offset = 0
+	}
+
+	// pageSize is how many data rows fit in the table's inner viewport
+	// (minus 1 for the sticky header). termui's Table doesn't scroll on
+	// its own — we feed it just the visible slice and track `offset`.
+	pageSize := func() int {
+		n := table.Inner.Dy() - 1
+		if n < 1 {
+			n = 1
+		}
+		return n
+	}
+
+	clampOffset := func() {
+		ps := pageSize()
+		if cursor < offset {
+			offset = cursor
+		}
+		if cursor >= offset+ps {
+			offset = cursor - ps + 1
+		}
+		max := len(rows) - ps
+		if max < 0 {
+			max = 0
+		}
+		if offset > max {
+			offset = max
+		}
+		if offset < 0 {
+			offset = 0
+		}
 	}
 
 	rebuildTable := func() {
-		rs := make([][]string, 0, len(rows)+1)
+		clampOffset()
+		ps := pageSize()
+		end := offset + ps
+		if end > len(rows) {
+			end = len(rows)
+		}
+		visible := rows[offset:end]
+
+		rs := make([][]string, 0, len(visible)+1)
 		rs = append(rs, []string{"STATE", "TIER", "KIND", "GROUP", "RULE"})
-		for _, r := range rows {
+		for _, r := range visible {
 			rs = append(rs, []string{
 				string(r.State),
 				"T" + r.Tier.label(),
@@ -114,13 +159,13 @@ func RunTUI() (switchToText bool, err error) {
 			})
 		}
 		table.Rows = rs
-		table.RowStyles = make(map[int]ui.Style, len(rows)+1)
+		table.RowStyles = make(map[int]ui.Style, len(visible)+1)
 		table.RowStyles[0] = ui.NewStyle(ui.ColorCyan, ui.ColorClear, ui.ModifierBold)
-		for i, r := range rows {
+		for i, r := range visible {
 			table.RowStyles[i+1] = ui.NewStyle(StateColor(r.State))
 		}
-		if cursor >= 0 && cursor < len(rows) {
-			sel := cursor + 1
+		if cursor >= offset && cursor < end {
+			sel := cursor - offset + 1
 			table.RowStyles[sel] = ui.NewStyle(ui.ColorBlack, StateColor(rows[cursor].State))
 		}
 	}
@@ -242,6 +287,9 @@ func RunTUI() (switchToText bool, err error) {
 
 	refresh := func() {
 		allRows = buildAuditRowsForTUI()
+		sort.SliceStable(allRows, func(i, j int) bool {
+			return allRows[i].Tier < allRows[j].Tier
+		})
 		applyFilter()
 	}
 
@@ -301,13 +349,13 @@ func RunTUI() (switchToText bool, err error) {
 				cursor = len(rows) - 1
 				render()
 			case "<PageUp>":
-				cursor -= 8
+				cursor -= pageSize()
 				if cursor < 0 {
 					cursor = 0
 				}
 				render()
 			case "<PageDown>":
-				cursor += 8
+				cursor += pageSize()
 				if cursor >= len(rows) {
 					cursor = len(rows) - 1
 				}
