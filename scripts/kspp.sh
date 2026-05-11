@@ -52,7 +52,7 @@ PVE_CMDLINE_BACKUP="/etc/kernel/cmdline.kspp.bak"
 KSPP_SYSCTL=(
   "kernel.kptr_restrict=2"
   "kernel.dmesg_restrict=1"
-  "kernel.unprivileged_bpf_disabled=1"
+  "kernel.unprivileged_bpf_disabled=2"
   "kernel.randomize_va_space=2"
 
   "fs.protected_hardlinks=1"

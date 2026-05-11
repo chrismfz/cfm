@@ -85,9 +85,9 @@ var KSPPSysctls = []SysctlRule{
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-003", Group: "kspp.kernel", Tier: Tier1,
-		Key: "kernel.unprivileged_bpf_disabled", Value: "1",
-		Description: "Block unprivileged BPF program loading.",
-		Affects:     "Kills a major LPE primitive class. Root BPF (cilium etc.) unchanged.",
+		Key: "kernel.unprivileged_bpf_disabled", Value: "2",
+		Description: "Block unprivileged BPF program loading and lock the setting until reboot. Value 2 differs from 1 in that it cannot be lowered back to 0 at runtime — closes the window where a kernel CVE or root-equivalent process re-enables unprivileged BPF without a reboot.",
+		Affects:     "Kills a major LPE primitive class (eBPF-assisted privesc chains). Root BPF (cilium, imunify360 syscall tracing, bcc/bpftrace as root) unchanged. On kernels older than ~5.13 that don't recognise =2, the runtime apply may report 'not exposed' and the value falls back to whatever the kernel accepts.",
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-004", Group: "kspp.kernel", Tier: Tier1,
