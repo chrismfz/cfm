@@ -164,9 +164,9 @@ func TestDNATUnscopedWantedSpecsDoNotRequireChallengeSource(t *testing.T) {
 	}
 
 	accepts := []string{
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 80 tcp dport 9080 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080"`,
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 tcp dport 9043 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9043"`,
-		`add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 udp dport 9043 accept comment "cfm_edge_dnat_accept:web_https_udp:443:9043"`,
+		`add rule inet cfm input tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080"`,
+		`add rule inet cfm input tcp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9043"`,
+		`add rule inet cfm input udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_udp:443:9043"`,
 	}
 	for i, spec := range specs {
 		got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec)
@@ -260,7 +260,7 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 
 func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
 	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}
-	want := `add rule inet cfm input ct state new ct status dnat ct original proto-dst 443 ip6 daddr 2001:db8::10 udp dport 9043 accept comment "cfm_challenge_dnat_accept:web_https_ip6_udp:443:9043"`
+	want := `add rule inet cfm input ip6 daddr 2001:db8::10 udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_challenge_dnat_accept:web_https_ip6_udp:443:9043"`
 	got := dnatAcceptRuleExpr(dnatAcceptNamespaceChallenge, spec)
 	if got != want {
 		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)

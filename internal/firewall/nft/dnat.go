@@ -98,7 +98,7 @@ func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
 	if strings.TrimSpace(beforeHandle) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
 	}
-	expr := fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d %s dport %d accept comment "%s"`, prefix, spec.from, spec.proto, spec.to, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+	expr := fmt.Sprintf(`%s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, spec.proto, spec.to, spec.from, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
 	return strings.Join(strings.Fields(expr), " ")
 }
 

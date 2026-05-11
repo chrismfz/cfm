@@ -86,7 +86,7 @@ func panelDNATAcceptRuleExpr(from, to int, beforeHandle string) string {
 	if strings.TrimSpace(beforeHandle) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
 	}
-	return strings.Join(strings.Fields(fmt.Sprintf(`%s ct state new ct status dnat ct original proto-dst %d tcp dport %d accept comment "%s"`, prefix, from, to, panelDNATAcceptComment(from, to))), " ")
+	return strings.Join(strings.Fields(fmt.Sprintf(`%s tcp dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, to, from, panelDNATAcceptComment(from, to))), " ")
 }
 
 func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
