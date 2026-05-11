@@ -45,8 +45,8 @@ type HostProfile struct {
 	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
 	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
 	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasDKMS                 bool   `json:"has_dkms"`                   // any out-of-tree module evidence → don't enforce module sig / lockdown=integrity
-	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep lockdown/coredump gates conservative
+	HasDKMS                 bool   `json:"has_dkms"`                   // any out-of-tree module evidence → don't enforce module sig
+	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep coredump gates conservative
 	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasNFS                  bool   `json:"has_nfs"`                    // active NFS mounts → keep NFS untouched (already excluded by policy)
@@ -108,7 +108,7 @@ func isEFIBoot() bool {
 }
 
 // hasOutOfTreeModuleEvidence is the layered "are there modules
-// kernel-lockdown / module.sig_enforce would brick?" probe. The
+// module.sig_enforce would brick?" probe. The
 // previous narrow check was loaded-modules-only (zfs / nvidia) —
 // audit found multiple false-negative paths that would brick a
 // real host:
@@ -122,15 +122,15 @@ func isEFIBoot() bool {
 //     /lib/modules/$(uname -r)/updates.
 //   - Live-kernel-patching modules (KernelCare / Ksplice). These
 //     load patch modules signed by the vendor's key, NOT the
-//     distro's. lockdown=integrity / module.sig_enforce=1 would
-//     block subsequent patches → host stops receiving CVE
+//     distro's. module.sig_enforce=1 would block subsequent
+//     patches → host stops receiving CVE
 //     coverage that the operator paid for. Especially relevant
 //     on hosting platforms (cPanel ships KernelCare integration).
 //
 // Any single layer hitting → assume the host has unsigned/out-of-tree
 // modules. False-positive bias intentional: skipping
-// lockdown=integrity / module.sig_enforce is recoverable
-// (operator can `state = force` per-rule); applying them on a host
+// module.sig_enforce=1 is recoverable (operator can `state = force`
+// per-rule); applying it on a host
 // that needs an unsigned root-fs driver / a paid-for live-patcher
 // is not.
 func hasOutOfTreeModuleEvidence(profile HostProfile) bool {
@@ -387,18 +387,6 @@ func (p HostProfile) SkipReason(group string) string {
 		// never have it; bare-metal workstations / laptops do.
 		if p.HasThunderbolt {
 			return "host has Thunderbolt hardware (/sys/bus/thunderbolt/devices non-empty)"
-		}
-	case "boot.lockdown", "tier2.lockdown":
-		// lockdown=integrity blocks unsigned module load and also
-		// closes a number of kexec / /dev/mem / kdump primitives.
-		// Skip on hosts with DKMS / out-of-tree / hosting vendor
-		// modules and on kdump hosts — kdump uses kexec which
-		// integrity lockdown restricts.
-		if reason := p.moduleSigningRiskReason("lockdown=integrity"); reason != "" {
-			return reason
-		}
-		if p.HasKdump {
-			return "host has kdump enabled — lockdown=integrity restricts kexec primitives kdump relies on"
 		}
 	case "tier2.module-sig-enforce":
 		// module.sig_enforce=1 requires every module to be kernel-signed;

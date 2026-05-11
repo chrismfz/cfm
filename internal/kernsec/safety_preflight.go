@@ -22,9 +22,6 @@ import (
 //	    - boot args: /etc/default/grub               (M args)
 //	    - modules: /etc/modprobe.d/cfm-kernsec.conf  (K modules)
 //	[!] Boot-impacting changes detected — read carefully:
-//	    - lockdown=integrity will be added to next-boot cmdline.
-//	      Host has DKMS / KernelCare / akmod evidence — those
-//	      modules will fail to load.  HasDKMS=false (probe missed?)
 //	    - module.sig_enforce=1 will be added.
 //	[!] Backup files (operator recovery path):
 //	    - /etc/default/grub → /etc/default/grub.cfm-kernsec.bak
@@ -86,14 +83,6 @@ func boot_impacting_risks(bootArgs []BootArg, modules []ModuleRule, profile Host
 	var risks []string
 	for _, a := range bootArgs {
 		switch a.Key {
-		case "lockdown":
-			detail := "lockdown=" + a.Value + " will be added to next-boot cmdline; restricts unsigned module load + kexec primitives."
-			if profile.HasDKMS {
-				detail += " Host probe DETECTED out-of-tree modules (DKMS/akmod/KernelCare) — this rule SHOULD have been auto-skipped; force-override?"
-			} else {
-				detail += " Host probe found NO out-of-tree module evidence; double-check before reboot if you run KernelCare / DKMS / Nvidia."
-			}
-			risks = append(risks, detail)
 		case "module.sig_enforce":
 			detail := "module.sig_enforce=1 will be added; every module must be signed by a trusted key. KernelCare / akmod / DKMS modules signed by their own key will fail."
 			risks = append(risks, detail)

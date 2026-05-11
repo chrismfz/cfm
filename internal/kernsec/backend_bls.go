@@ -205,8 +205,8 @@ func (b *BLSBackend) writeBLSSnapshot() error {
 // `--update-kernel=ALL` which DOES include `vmlinuz-*-rescue-*` and
 // `*-debug` entries — the rescue kernel exists to recover from
 // exactly the situation a bad cmdline arg creates. If
-// `lockdown=integrity` (or any other arg) makes the regular kernel
-// unbootable, applying the same arg to the rescue entry leaves the
+// a bad cmdline arg makes the regular kernel unbootable, applying
+// the same arg to the rescue entry leaves the
 // operator with no recovery path. Now the backend enumerates
 // kernels via `grubby --info=ALL`, filters out rescue + debug
 // kernels by path, and writes only the explicit list.
