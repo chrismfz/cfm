@@ -454,11 +454,4 @@ var Tier1Modules = []ModuleRule{
 // Tier2Modules is the server-aggressive module-blacklist set. These modules
 // are useful for uncommon-but-real hosting-adjacent workloads, so they are
 // opt-in and host-profile gated where kernsec can detect the risk.
-var Tier2Modules = []ModuleRule{
-	{
-		ID: "KSEC-MOD-net.legacy-002", Group: "tier2.modules.sctp", Tier: Tier2,
-		Name:        "sctp",
-		Description: "Stream Control Transmission Protocol. Reduces kernel protocol attack surface when the host does not run SCTP-aware telecom, monitoring, or clustered services.",
-		Affects:     "Tier 2: breaks lksctp users, SCTP health checks, and applications using SCTP multi-homing; skipped when SCTP is already loaded or SCTP indicators are present.",
-	},
-}
+var Tier2Modules = []ModuleRule{}
