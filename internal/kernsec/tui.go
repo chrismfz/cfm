@@ -405,7 +405,7 @@ func RunTUI() (switchToText bool, err error) {
 			footer.Text = fmt.Sprintf("[%s](fg:yellow)", statusMsg)
 			return
 		}
-		base := "[q](fg:cyan)uit  [←/→/Tab](fg:cyan) pane  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [e](fg:cyan)nable  [d](fg:cyan)isable  [u](fg:cyan)ndo  [a](fg:cyan)pply  [x](fg:cyan) discard  [/](fg:cyan) filter  [?](fg:cyan) help"
+		base := "[q](fg:cyan)uit  [←/→/Tab](fg:cyan) pane  [↑/↓](fg:cyan) nav  [r](fg:cyan)efresh  [t](fg:cyan)ext  [m](fg:cyan)odules  [e](fg:cyan)nable  [d](fg:cyan)isable  [u](fg:cyan)ndo  [a](fg:cyan)pply  [x](fg:cyan) discard  [/](fg:cyan) filter  [?](fg:cyan) help"
 		if len(pending) > 0 {
 			base += fmt.Sprintf("  •  [pending: %d](fg:magenta,mod:bold)", len(pending))
 		}
@@ -649,6 +649,12 @@ func RunTUI() (switchToText bool, err error) {
 				}
 			case "?":
 				showHelp = !showHelp
+				render()
+			case "m":
+				if runModulesScreen() {
+					return false, nil
+				}
+				layout()
 				render()
 			case "<Resize>":
 				layout()
