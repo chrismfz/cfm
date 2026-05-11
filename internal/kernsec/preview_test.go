@@ -110,7 +110,7 @@ func TestRunPreview_DryRunPlanDoesNotWriteAndShowsExactMutations(t *testing.T) {
 		"modprobe target: " + ModprobePath,
 		"boot target:     " + PathDefaultGrub,
 		"current: root=/dev/sda1 ro init_on_alloc=0 console=ttyS0",
-		"desired: root=/dev/sda1 ro console=ttyS0 slab_nomerge init_on_alloc=1 page_alloc.shuffle=1 randomize_kstack_offset=on initcall_blacklist=algif_aead_init kfence.sample_interval=100 tsx=off spec_store_bypass_disable=seccomp",
+		"desired: root=/dev/sda1 ro console=ttyS0 slab_nomerge init_on_alloc=1 page_alloc.shuffle=1 randomize_kstack_offset=on initcall_blacklist=algif_aead_init kfence.sample_interval=100 tsx=off",
 		SysctlPath + BackupSuffix,
 		ModprobePath + BackupSuffix,
 		PathDefaultGrub + BackupSuffix,

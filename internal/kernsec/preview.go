@@ -56,6 +56,14 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 	printResolvedSection(w, "Modules", rs.Modules, opts)
 	printResolvedSection(w, "Mounts (audit-only)", rs.Mounts, opts)
 
+	if risks := sysctl_impacting_risks(rs.ApplySysctls(), profile); len(risks) > 0 {
+		fmt.Fprintln(w, "[!] Sysctl-impacting changes — read carefully:")
+		for _, r := range risks {
+			fmt.Fprintf(w, "    - %s\n", r)
+		}
+		fmt.Fprintln(w)
+	}
+
 	readErr := printPreviewApplyPlan(w, rs)
 
 	fmt.Fprintln(w)

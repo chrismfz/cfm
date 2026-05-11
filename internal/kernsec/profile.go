@@ -226,8 +226,9 @@ var Tier2BootArgs = []BootArg{
 	},
 }
 
-// Tier1BootArgsExt are Tier 1 boot args beyond the KSPP baseline.
-// Each group has its own host-profile gate (see profile_probe.go).
+// Tier1BootArgsExt are boot args beyond the KSPP baseline.
+// Safe entries are Tier 1; compatibility-sensitive entries remain here for
+// stable ordering but carry Tier 2 and host-profile gates (see profile_probe.go).
 var Tier1BootArgsExt = []BootArg{
 	// --- boot.bug-detection ------------------------------------------
 	{
@@ -252,10 +253,10 @@ var Tier1BootArgsExt = []BootArg{
 	},
 	// --- boot.ssbd: Spectre v4 mitigation for seccomp workloads ------
 	{
-		ID: "KSEC-BOOT-ssbd-001", Group: "boot.ssbd", Tier: Tier1,
+		ID: "KSEC-BOOT-ssbd-001", Group: "tier2.ssbd", Tier: Tier2,
 		Key: "spec_store_bypass_disable", Value: "seccomp",
 		Description: "Enable Speculative Store Bypass Disable (SSBD / Spectre v4 mitigation) for all threads running under a seccomp policy. Covers sandboxed web workloads without the global perf hit of 'on'. Distro default 'prctl' means mitigation is off unless each process opts in explicitly.",
-		Affects:     "~1-5% syscall throughput reduction for heavily syscall-bound workloads running inside a seccomp sandbox (cgroups, systemd services with SeccompFilter=, etc.).",
+		Affects:     "Tier 2: can impose a measurable syscall-throughput cost on seccomp-heavy container, backup, monitoring, and hosting-panel workloads; skipped when those workloads are detected.",
 	},
 }
 
@@ -328,10 +329,10 @@ var KernelSurface = []SysctlRule{
 		Affects:     "None on servers; unusual TTY line disciplines must be loaded explicitly by root before use.",
 	},
 	{
-		ID: "KSEC-SCT-kernel.surface-002", Group: "sysctl.kernel.kexec", Tier: Tier1,
+		ID: "KSEC-SCT-kernel.surface-002", Group: "sysctl.kernel.kexec", Tier: Tier2,
 		Key: "kernel.kexec_load_disabled", Value: "1",
 		Description: "Disable future kexec_load() calls after boot — prevents replacing the running kernel without a firmware/bootloader transition.",
-		Affects:     "Skipped when kdump is enabled. Once set, this knob cannot be re-enabled until reboot.",
+		Affects:     "Tier 2: skipped when kdump/Proxmox/live-patching evidence is detected. Once set, this knob cannot be re-enabled until reboot.",
 	},
 	{
 		ID: "KSEC-SCT-kernel.surface-003", Group: "sysctl.kernel.surface", Tier: Tier1,
@@ -340,12 +341,12 @@ var KernelSurface = []SysctlRule{
 		Affects:     "Loses Magic SysRq emergency debugging shortcuts unless overridden (for example to SAK-only mode).",
 	},
 
-	// --- sysctl.kernel.coredump: core_pattern (kdump-gated) ----------
+	// --- sysctl.kernel.coredump: core_pattern (Tier 2, gated) -----
 	{
-		ID: "KSEC-SCT-kernel.coredump-001", Group: "sysctl.kernel.coredump", Tier: Tier1,
+		ID: "KSEC-SCT-kernel.coredump-001", Group: "sysctl.kernel.coredump", Tier: Tier2,
 		Key: "kernel.core_pattern", Value: "|/bin/false",
 		Description: "Redirect coredumps to /bin/false — prevents exploit-writable core-dump paths used by OverlayFS-class privilege escalations (CVE-2023-0386 and similar). On a shared hosting server where tenants can trigger process crashes you do not want coredumps landing anywhere.",
-		Affects:     "Coredumps are suppressed for all processes. Crash diagnostics require kdump or per-service CoreDumpDirectory overrides. Skipped when kdump is active (kdump depends on kernel crash capture).",
+		Affects:     "Tier 2: coredumps are suppressed for all processes, which can break support diagnostics, backup/monitoring crash capture, and hosting-panel/vendor troubleshooting. Skipped when those risks are detected.",
 	},
 }
 
@@ -414,8 +415,8 @@ var ManagedBootArgKeys = []string{
 	"kfence.sample_interval",
 	"efi",
 	"tsx",
-	"spec_store_bypass_disable",
 	// Tier 2
+	"spec_store_bypass_disable",
 	"oops",
 	"lockdown",
 	"module.sig_enforce",
@@ -521,7 +522,10 @@ func AllBootArgs() []BootArg {
 // AllModules returns the full module-blacklist rule set.
 // Phase 2 carries the data; apply lands in Phase 3.
 func AllModules() []ModuleRule {
-	return append([]ModuleRule(nil), Tier1Modules...)
+	out := make([]ModuleRule, 0, len(Tier1Modules)+len(Tier2Modules))
+	out = append(out, Tier1Modules...)
+	out = append(out, Tier2Modules...)
+	return out
 }
 
 // AllMounts returns the full fstab audit rule set.

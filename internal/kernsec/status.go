@@ -523,7 +523,7 @@ func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 	// Count first so we know whether any rule is in Apply state. If
 	// all rules are OFF / SKIP / not-on-kernel, the managed file
 	// genuinely doesn't need to exist — so a missing file isn't drift.
-	for i, m := range Tier1Modules {
+	for i, m := range AllModules() {
 		rr := resolved.Modules[i]
 		switch rr.Decision {
 		case SkipByConf, SkipByTier:
@@ -567,7 +567,7 @@ func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 
 	if managedExists {
 		fmt.Fprintf(w, "OK         %s present (%d managed entries audited)\n",
-			ModprobePath, len(Tier1Modules))
+			ModprobePath, len(AllModules()))
 	}
 	fmt.Fprintf(w, "OK         %d modules blacklisted and not loaded\n", okCount)
 	if loadedCount > 0 {
