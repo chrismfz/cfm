@@ -18,6 +18,8 @@ import (
 var (
 	MonitorServicePath = "/etc/systemd/system/cfm-kernsec-check.service"
 	MonitorTimerPath   = "/etc/systemd/system/cfm-kernsec-check.timer"
+
+	monitorLookPath = exec.LookPath
 )
 
 // MonitorUnitName is what systemctl operates on (without the .timer
@@ -281,7 +283,18 @@ func monitorStatus(w io.Writer) int {
 	}
 	fmt.Fprintln(w)
 
-	out, err := exec.Command("systemctl", "status", MonitorUnitName+".timer", "--no-pager").CombinedOutput()
+	systemctlPath, err := monitorLookPath("systemctl")
+	if err != nil {
+		fmt.Fprintln(w, "systemd not available: systemctl not found")
+		return 0
+	}
+	journalctlPath, err := monitorLookPath("journalctl")
+	if err != nil {
+		fmt.Fprintln(w, "systemd not available: journalctl not found")
+		return 0
+	}
+
+	out, err := exec.Command(systemctlPath, "status", MonitorUnitName+".timer", "--no-pager").CombinedOutput()
 	fmt.Fprintln(w, "[systemctl status "+MonitorUnitName+".timer]")
 	fmt.Fprint(w, string(out))
 	if err != nil {
@@ -292,7 +305,7 @@ func monitorStatus(w io.Writer) int {
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[Last 5 service runs from journal]")
-	jout, _ := exec.Command("journalctl",
+	jout, _ := exec.Command(journalctlPath,
 		"-u", MonitorUnitName+".service",
 		"-n", "5",
 		"--no-pager",
@@ -411,7 +424,11 @@ func RenderMonitorTimer(interval string) []byte {
 // systemctl runs `systemctl <args...>` and returns nil on success or
 // an error including the combined output.
 func systemctl(args ...string) error {
-	out, err := exec.Command("systemctl", args...).CombinedOutput()
+	systemctlPath, err := monitorLookPath("systemctl")
+	if err != nil {
+		return fmt.Errorf("systemd not available: systemctl not found")
+	}
+	out, err := exec.Command(systemctlPath, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl %s: %v: %s",
 			strings.Join(args, " "), err, strings.TrimSpace(string(out)))

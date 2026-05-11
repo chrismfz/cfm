@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,24 @@ func withTempMonitorPaths(t *testing.T) {
 		MonitorServicePath = origSvc
 		MonitorTimerPath = origTmr
 	})
+}
+
+func withMonitorLookPath(t *testing.T, lookPath func(string) (string, error)) {
+	t.Helper()
+	orig := monitorLookPath
+	monitorLookPath = lookPath
+	t.Cleanup(func() {
+		monitorLookPath = orig
+	})
+}
+
+func writeExecutable(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestRenderMonitorService_ContainsBinaryAndCheck(t *testing.T) {
@@ -150,6 +169,73 @@ func TestRunMonitor_DryRunEnableNoWrites(t *testing.T) {
 	}
 	if _, err := os.Stat(MonitorTimerPath); !os.IsNotExist(err) {
 		t.Error("dry-run wrote timer file")
+	}
+}
+
+func TestRunMonitor_StatusReturnsSuccessWhenSystemctlMissing(t *testing.T) {
+	withTempMonitorPaths(t)
+	withMonitorLookPath(t, func(name string) (string, error) {
+		return "", errors.New("lookup disabled")
+	})
+
+	var out bytes.Buffer
+	rc := RunMonitor(&out, MonitorOptions{Action: "status"})
+	if rc != 0 {
+		t.Fatalf("status without systemctl: rc=%d, want 0. Output:\n%s", rc, out.String())
+	}
+	if !strings.Contains(out.String(), "systemd not available: systemctl not found") {
+		t.Errorf("missing systemd unavailable message:\n%s", out.String())
+	}
+}
+
+func TestRunMonitor_StatusReturnsSuccessWhenJournalctlMissing(t *testing.T) {
+	withTempMonitorPaths(t)
+	withMonitorLookPath(t, func(name string) (string, error) {
+		if name == "systemctl" {
+			return "/bin/true", nil
+		}
+		return "", errors.New("lookup disabled")
+	})
+
+	var out bytes.Buffer
+	rc := RunMonitor(&out, MonitorOptions{Action: "status"})
+	if rc != 0 {
+		t.Fatalf("status without journalctl: rc=%d, want 0. Output:\n%s", rc, out.String())
+	}
+	if !strings.Contains(out.String(), "systemd not available: journalctl not found") {
+		t.Errorf("missing systemd unavailable message:\n%s", out.String())
+	}
+}
+
+func TestRunMonitor_StatusUsesInjectedCommandLookup(t *testing.T) {
+	withTempMonitorPaths(t)
+	dir := t.TempDir()
+	systemctlPath := writeExecutable(t, dir, "systemctl", "#!/bin/sh\necho fake-systemctl \"$@\"\n")
+	journalctlPath := writeExecutable(t, dir, "journalctl", "#!/bin/sh\necho fake-journalctl \"$@\"\n")
+	withMonitorLookPath(t, func(name string) (string, error) {
+		switch name {
+		case "systemctl":
+			return systemctlPath, nil
+		case "journalctl":
+			return journalctlPath, nil
+		default:
+			return "", errors.New("unexpected lookup")
+		}
+	})
+
+	var out bytes.Buffer
+	rc := RunMonitor(&out, MonitorOptions{Action: "status"})
+	if rc != 0 {
+		t.Fatalf("status with injected commands: rc=%d, want 0. Output:\n%s", rc, out.String())
+	}
+	o := out.String()
+	for _, want := range []string{
+		"fake-systemctl status cfm-kernsec-check.timer --no-pager",
+		"fake-journalctl -u cfm-kernsec-check.service -n 5 --no-pager -o short-iso",
+	} {
+		if !strings.Contains(o, want) {
+			t.Errorf("missing %q in status output:\n%s", want, o)
+		}
 	}
 }
 
