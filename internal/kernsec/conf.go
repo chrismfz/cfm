@@ -19,6 +19,12 @@ import (
 // Declared as var (not const) so tests can redirect it to t.TempDir().
 var ConfPath = "/etc/cfm/kernsec.conf"
 
+// ConfFileMode is intentionally root-only. kernsec.conf does not contain
+// credentials, but it can disclose which kernel mitigations an operator
+// disabled or forced on a host; package upgrades and CLI writes should never
+// make that security posture world-readable.
+const ConfFileMode os.FileMode = 0o600
+
 // RuleState declares operator intent for one rule, overriding the tier
 // default.
 type RuleOverride int
@@ -337,7 +343,7 @@ func WriteDefaultConf() (created bool, err error) {
 		return false, err
 	}
 	c := DefaultConf()
-	if err := os.WriteFile(ConfPath, []byte(c.Render()), 0o644); err != nil {
+	if err := os.WriteFile(ConfPath, []byte(c.Render()), ConfFileMode); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -353,7 +359,7 @@ func WriteConf(c *Conf) error {
 	if err := os.MkdirAll(filepath.Dir(ConfPath), 0o755); err != nil {
 		return err
 	}
-	return AtomicWriteFile(ConfPath, []byte(c.Render()), 0o644)
+	return AtomicWriteFile(ConfPath, []byte(c.Render()), ConfFileMode)
 }
 
 // sortStrings is a minimal in-place sort to avoid pulling sort just for

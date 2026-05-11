@@ -53,6 +53,40 @@ func TestWriteConf_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteDefaultConf_CreatesRootOnlyFile(t *testing.T) {
+	withTempConfPath(t)
+
+	created, err := WriteDefaultConf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	st, err := os.Stat(ConfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := st.Mode().Perm(); mode != ConfFileMode {
+		t.Errorf("mode = %v, want %v", mode, ConfFileMode)
+	}
+}
+
+func TestWriteConf_CreatesRootOnlyFile(t *testing.T) {
+	withTempConfPath(t)
+
+	if err := WriteConf(&Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(ConfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := st.Mode().Perm(); mode != ConfFileMode {
+		t.Errorf("mode = %v, want %v", mode, ConfFileMode)
+	}
+}
+
 func TestWriteConf_NilRefused(t *testing.T) {
 	withTempConfPath(t)
 	if err := WriteConf(nil); err == nil {

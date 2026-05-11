@@ -837,7 +837,14 @@ already follows this shape; kernsec mirrors it.
 
 **Config file**: `/etc/cfm/kernsec.conf` — INI-flavoured (matches the
 `[rule "..."]` stanza style cfm uses elsewhere; final format gated on
-checking `internal/config/` conventions before Phase 2 starts):
+checking `internal/config/` conventions before Phase 2 starts). The file is
+intentionally **not world-readable**: packaged installs, `cfm kernsec init`,
+and `cfm kernsec disable` create it at `0600` root-only because rule overrides
+can disclose which kernel mitigations were skipped or forced on a host. The
+deb/rpm packages ship it as an operator-owned conffile (`conffile` /
+`%config(noreplace)`) so local edits are preserved across upgrades; maintainer
+scripts only remove group/other permission bits and never add permissions that
+would loosen an operator-tightened file:
 
 ```ini
 # /etc/cfm/kernsec.conf

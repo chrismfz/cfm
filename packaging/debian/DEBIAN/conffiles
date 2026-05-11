@@ -1,5 +1,6 @@
 /etc/cfm/cfm.conf
 /etc/cfm/detectors.conf
+/etc/cfm/kernsec.conf
 /etc/cfm/notify.conf
 /etc/cfm/cfm.blocklists
 /etc/cfm/cfm.deny
