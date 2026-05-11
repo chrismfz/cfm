@@ -34,32 +34,39 @@ before module loading is disabled globally.
 `cfm kernsec` with no subcommand opens the interactive TUI on a TTY and falls
 back to text output when stdout is not a terminal.
 
-| Command | Purpose |
+### CLI surface as shipped
+
+| Command | Purpose | Mutation behavior |
+|---|---|---|
+| `cfm kernsec` | TUI on a TTY; text audit otherwise. | Read-only. |
+| `cfm kernsec live` | Force the interactive TUI. Aliases: `tui`, `ui`. | Read-only. |
+| `cfm kernsec text` | Plain-text audit output. | Read-only. |
+| `cfm kernsec status --check` | Run the text audit in check mode for automation. | Read-only; check modes do not write. |
+| `cfm kernsec status --json` | Emit machine-readable status output. | Read-only. |
+| `cfm kernsec preview --tier <0|1|2> --group <prefix> --id <ids> --skip <ids> --force-id <ids> --only-apply` | Show what `apply` would select after config, tier, host-profile gates, and per-rule overrides. | Read-only; preview never writes. |
+| `cfm kernsec init` | Write default `/etc/cfm/kernsec.conf` with `tier = 1` if absent. | Mutates only when creating the missing config. |
+| `cfm kernsec apply --dry-run --check --no-refresh --yes` | Render managed sysctl/modprobe state, update boot args, refresh the bootloader unless `--no-refresh`, then apply runtime sysctls per key. `--check` is the drift-check mode used by the monitor timer. | Mutates when not `--dry-run` or `--check`; dry-run and check modes do not write. |
+| `cfm kernsec disable --purge --dry-run --no-refresh --force` | Persist `tier = 0`, strip kernsec-managed boot args, empty managed sysctl/modprobe output, and optionally purge managed files/units. | Mutates when not `--dry-run`; dry-run does not write. |
+| `cfm kernsec rollback --dry-run` | Remove kernsec-managed boot args, restore saved managed values when a managed snapshot exists, and refresh the bootloader. | Mutates when not `--dry-run`; dry-run does not write. |
+| `cfm kernsec monitor enable --interval <OnCalendar> --cfm-binary <path> --dry-run` | Write and enable the periodic systemd drift-check timer using the requested schedule and cfm binary path. | Mutates when not `--dry-run`; dry-run does not write. |
+| `cfm kernsec monitor disable` | Stop and disable the timer while leaving unit files in place. | Mutates systemd timer state. |
+| `cfm kernsec monitor remove` | Stop and disable the timer, remove managed unit files, and reload systemd. | Mutates installed monitor state. |
+| `cfm kernsec monitor status` | Show timer status and recent service runs. | Read-only. |
+
+Status, preview, check, and dry-run modes are non-mutating: `status`,
+`preview`, `status --check`, `apply --check`, and every `--dry-run` invocation
+do not write files, change boot arguments, refresh bootloaders, apply runtime
+sysctls, or alter systemd state. `apply`, `disable`, `rollback`,
+`monitor enable`, and `monitor remove` mutate managed host state when run without
+their dry-run/check guard.
+
+Check-mode exit codes:
+
+| Exit code | Meaning |
 |---|---|
-| `cfm kernsec` | TUI on a TTY; text audit otherwise. |
-| `cfm kernsec live` | Force the interactive TUI. Aliases: `tui`, `ui`. |
-| `cfm kernsec text` | Plain-text audit output. |
-| `cfm kernsec status` | Alias for `text`. Add `--json` for machine-readable output or `--check` for monitoring exits. |
-| `cfm kernsec preview` | Show what `apply` would select after config, tier, and host-profile gates. Read-only. |
-| `cfm kernsec init` | Write default `/etc/cfm/kernsec.conf` with `tier = 1` if absent. |
-| `cfm kernsec apply` | Render `/etc/sysctl.d/99-cfm-kernsec.conf` and managed modprobe files, update boot args, refresh the bootloader, then parse the rendered sysctl drop-in and apply runtime sysctls per key with `sysctl -w`. |
-| `cfm kernsec disable` | Persist `tier = 0`, strip kernsec-managed boot args, and empty managed sysctl/modprobe output. |
-| `cfm kernsec rollback` | Remove kernsec-managed boot args, restore saved managed values when a managed snapshot exists, and refresh the bootloader. |
-| `cfm kernsec monitor` | Manage the periodic systemd drift-check timer. |
-
-Useful flags:
-
-- `status` / `text`: `--skip-af-alg`, `--check`, `--json`.
-- `preview`: `--only-apply`, `--group <prefix>`, `--tier <0|1|2>`,
-  `--id <ids>`, `--skip <ids>`, `--force-id <ids>`.
-- `apply`: `--dry-run`, `--check`, `--no-refresh`, `--yes`.
-- `disable`: `--purge`, `--dry-run`, `--no-refresh`, `--force`, `--yes`.
-- `rollback`: `--dry-run`.
-- `monitor enable`: `--interval=<OnCalendar>`, `--dry-run`.
-
-`apply --check` is the drift-check mode used by the timer: it performs no writes
-and exits non-zero when desired managed state differs from live/next-boot state.
-`status --check` exits non-zero on audit warnings.
+| `0` | Clean: no drift or audit warnings were found. |
+| `1` | Drift or warnings were found. |
+| `2` | Indeterminate result for `apply --check`. The monitor service treats this as a soft success. |
 
 ## Config
 
