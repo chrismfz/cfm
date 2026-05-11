@@ -385,18 +385,6 @@ var NetHardenSysctls = []SysctlRule{
 		Description: "RFC 1337 TIME_WAIT assassination fix — prevents RST packets from prematurely killing connections in TIME_WAIT, closing a timing-based connection-hijack vector.",
 		Affects:     "None.",
 	},
-	{
-		ID: "KSEC-SCT-net.harden-006", Group: "sysctl.net.harden", Tier: Tier1,
-		Key: "net.ipv6.conf.all.accept_ra", Value: "0",
-		Description: "Reject IPv6 Router Advertisements — prevents rogue RA attacks that redirect the default route or hand out an attacker-controlled DNS server. Critical on shared hosting where tenants share a broadcast domain.",
-		Affects:     "Breaks SLAAC (stateless address auto-configuration) if the host relies on RA for IPv6 address assignment. Static-IP hosting setups are unaffected. Use `state = skip` if SLAAC is required on this host.",
-	},
-	{
-		ID: "KSEC-SCT-net.harden-007", Group: "sysctl.net.harden", Tier: Tier1,
-		Key: "net.ipv6.conf.default.accept_ra", Value: "0",
-		Description: "Same RA rejection for newly-created interfaces — ensures the secure default propagates to any interface added after boot.",
-		Affects:     "Same as accept_ra=0 on all; new interfaces inherit the deny-RA policy.",
-	},
 }
 
 // ManagedBootArgKeys is the set of cmdline keys kernsec owns.

@@ -191,10 +191,10 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 	//   KSPPSysctls (11) - 1 skipped     = 10
 	//   MemExploitSysctls (8) - Tier2 (2) = 6
 	//   KernelSurface  (4) - Tier2 (2)    = 2
-	//   NetHardenSysctls (7)              = 7
+	//   NetHardenSysctls (5)              = 5
 	//   Tier2Sysctls: SkipByTier        = 0
 	//   NetSysctls (5): ManagedExternally = 0
-	// Total = 27
+	// Total = 25
 	wantSysctls := len(KSPPSysctls) - 1 + (len(MemExploitSysctls) - 2) + (len(KernelSurface) - 2) + len(NetHardenSysctls)
 	scts := rs.ApplySysctls()
 	if len(scts) != wantSysctls {
