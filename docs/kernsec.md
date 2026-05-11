@@ -201,7 +201,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | `sysctl.kernel.kexec` | 2 | `kernel.kexec_load_disabled=1` | Irreversible until reboot; skipped on kdump, Proxmox, and live-patching evidence unless forced. |
 | `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=|/bin/false` | Suppresses core dumps globally; skipped for kdump, hosting panels, backup agents, and crash-diagnostic monitoring. |
 | `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, Chromium sandbox, and some hosting isolation; skipped when containers/hosting panels are detected. |
-| `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1`, `net.ipv6.conf.all.accept_ra=0`, `net.ipv6.conf.default.accept_ra=0` | Static-IP servers should be unaffected; skip IPv6 RA rules if the host relies on SLAAC. |
+| `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1` | Static-IP servers should be unaffected. |
 
 ### Sysctl rules audited as externally managed
 
@@ -444,7 +444,6 @@ failure and is visible through `systemctl is-failed` and the journal.
 - Tier 2 oops/panic rules trade availability for fail-closed behavior.
 - Tier 2 module-signature and lockdown rules can break DKMS/vendor modules.
 - `kernel.core_pattern=|/bin/false` suppresses core dumps globally.
-- `net.ipv6.conf.*.accept_ra=0` can break hosts that rely on SLAAC for IPv6.
 - `initcall_blacklist=algif_aead_init` and the `algif_*` module blacklists can
   affect userspace AF_ALG consumers.
 
@@ -471,12 +470,7 @@ failure and is visible through `systemctl is-failed` and the journal.
    ```
 
 4. Review host-profile skips and add explicit per-rule overrides only where the
-   host owner accepts the compatibility impact:
-
-   ```ini
-   [rule "KSEC-SCT-net.harden-006"]
-   state = skip
-   ```
+   host owner accepts the compatibility impact.
 
 5. Apply interactively, or use `--yes` only for approved unattended runs:
 
