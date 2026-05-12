@@ -33,7 +33,6 @@ sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 tmpfs /tmp tmpfs rw,nosuid,nodev,seclabel,size=8128124k,nr_inodes=409600,inode64 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
-/dev/sda1 /home ext4 rw,relatime 0 0
 `
 	tests := []struct {
 		name      string
@@ -55,14 +54,6 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
 				Recommended: "nodev,nosuid,noexec",
 			},
 			wantState: MountOK,
-		},
-		{
-			name: "/home missing nodev,nosuid",
-			rule: MountRule{
-				MountPoint:  "/home",
-				Recommended: "nodev,nosuid",
-			},
-			wantState: MountMissingOptions,
 		},
 		{
 			name: "/var/tmp not a separate mount",
@@ -132,7 +123,6 @@ func TestBuildAuditRows_IncludesMountRows(t *testing.T) {
 	readProcMounts = func() string {
 		return `tmpfs /tmp tmpfs rw,nosuid,nodev,seclabel 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
-/dev/sda1 /home ext4 rw,nodev,nosuid,relatime 0 0
 `
 	}
 	t.Cleanup(func() { readProcMounts = origReader })
@@ -163,12 +153,13 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
 	if got := stateByMountPoint["/dev/shm"]; got != StateOK {
 		t.Errorf("/dev/shm state = %s, want OK", got)
 	}
-	// /home has nodev,nosuid → OK.
-	if got := stateByMountPoint["/home"]; got != StateOK {
-		t.Errorf("/home state = %s, want OK", got)
-	}
 	// /var/tmp not in the fixture → SKIP (not a separate mount).
 	if got := stateByMountPoint["/var/tmp"]; got != StateSKIP {
 		t.Errorf("/var/tmp state = %s, want SKIP (not separate)", got)
+	}
+	// /home was deliberately removed from Tier1Mounts — make sure no
+	// mount row references it any more.
+	if _, ok := stateByMountPoint["/home"]; ok {
+		t.Errorf("/home should no longer appear in Tier1Mounts audit rows")
 	}
 }

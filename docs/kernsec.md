@@ -314,7 +314,8 @@ edits `/etc/fstab`.
 | `KSEC-FS-mount.tmp-001` | `fs.mount.tmp` | `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
 | `KSEC-FS-mount.tmp-002` | `fs.mount.tmp` | `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
 | `KSEC-FS-mount.tmp-003` | `fs.mount.tmp` | `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
-| `KSEC-FS-mount.home-001` | `fs.mount.home` | `/home` | `nodev,nosuid` | `noexec` is intentionally not recommended for `/home`. |
+
+`/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
 
 ## Intentionally unsupported
 

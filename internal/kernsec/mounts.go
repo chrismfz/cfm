@@ -93,6 +93,15 @@ var readProcMounts = func() string {
 // workflows. The rule rows surface in `cfm kernsec status` / TUI as
 // audit-only "your /tmp would benefit from nodev,nosuid,noexec" hints
 // that operators decide on themselves.
+//
+// /home is deliberately NOT audited here. Operator setups vary enough
+// (panels that drop setuid helpers under /home, NFS-exported homes,
+// per-user development trees, CageFS layouts) that a one-size
+// recommendation produces more noise than signal — and the previous
+// "missing nodev,nosuid" warning misled operators into thinking those
+// options were universally safe. If a future host-profile-gated /home
+// rule lands, it goes in this set with explicit profile gating, not
+// as a blanket Tier 1 recommendation.
 var Tier1Mounts = []MountRule{
 	{
 		ID: "KSEC-FS-mount.tmp-001", Group: "fs.mount.tmp", Tier: Tier1,
@@ -114,12 +123,5 @@ var Tier1Mounts = []MountRule{
 		Recommended: "nodev,nosuid,noexec",
 		Description: "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
 		Affects:     "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
-	},
-	{
-		ID: "KSEC-FS-mount.home-001", Group: "fs.mount.home", Tier: Tier1,
-		MountPoint:  "/home",
-		Recommended: "nodev,nosuid",
-		Description: "nodev,nosuid on /home — noexec is intentionally NOT recommended (breaks too much).",
-		Affects:     "Nothing in normal use. Do not add noexec.",
 	},
 }
