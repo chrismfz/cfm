@@ -22,6 +22,12 @@ The scope here is intentionally narrow: exactly two LSM policies,
 a watch-list. Anything beyond those two requires a separate, named
 proposal — not a TODO inside this doc.
 
+The implementation shape is also fixed: an in-binary subsystem of the
+existing CFM daemon at `internal/lsm/`, loading CO-RE BPF LSM programs
+via [`cilium/ebpf`](https://github.com/cilium/ebpf). No separate
+daemon, no kernel module, no DKMS, no clang on the customer host. CFM
+stays `CGO_ENABLED=0`. See the Architecture section for details.
+
 ## Overview
 
 `cfm-lsm` is the CFM component that catches the post-exploit consequences
@@ -307,40 +313,136 @@ here only to answer the inevitable "why doesn't `cfm-lsm` block
 dangerous PHP functions directly?" That work, if it happens, lives in
 `cfm-php`, not here.
 
-## Architecture (sketch only)
+## Architecture
 
 The implementation details below are sketches, not commitments. They
 exist so a future implementer has a sane starting point, not so this
 doc becomes a blocker on choosing a different approach later.
 
-**Backend.** BPF LSM via CO-RE, using libbpf or `cilium/ebpf-go`. There
-is no LKM fallback. EL8 is explicitly unsupported for `cfm-lsm`; EL8
-hosts continue to rely on `kernsec`, the existing `internal/outbound/`
-sentinel, and Imunify (where licensed). Maintaining a DKMS LKM backend
-across KernelCare-patched RHEL 8 kernels is a perpetual maintenance
-tax that this MVP does not pay.
+The shape is deliberately **not** "separate C daemon + DKMS module +
+log file that CFM tails." That model would be the only CFM component
+to work that way, would require running clang on every customer host,
+and would invite the version-skew and IPC problems that come with a
+second binary. Instead, `cfm-lsm` follows the same in-binary subsystem
+pattern as `internal/outbound/` and `internal/kernsec/`.
 
-**Userspace.** A subsystem inside the existing CFM daemon, not a
-separate `cfm-lsmd` process. The reasoning: LSM event processing is
-not crash-prone enough to justify a separate daemon, and the
-vhost-resolution and host-profile detection code lives in the existing
-binary already (`internal/kernsec/profile.go`). Reuse, don't fork.
+### Backend
 
-**Host-profile reuse.** Consume the existing detection in
-`internal/kernsec/profile.go` (cPanel, DirectAdmin, CloudLinux / LVE,
-CageFS, Imunify360, KernelCare, Ksplice, Proxmox, ZFS, EFI). Do not
-reimplement detection.
+BPF LSM via CO-RE, loaded by the existing CFM Go daemon using
+[`cilium/ebpf`](https://github.com/cilium/ebpf). No libbpf C
+dependency on the runtime side; no kernel module; no DKMS. EL8 is
+explicitly unsupported for `cfm-lsm`; EL8 hosts continue to rely on
+`kernsec`, the existing `internal/outbound/` sentinel, and Imunify
+(where licensed). Maintaining a DKMS LKM backend across
+KernelCare-patched RHEL 8 kernels would be a perpetual maintenance
+tax this MVP does not pay.
 
-**Event shape.** Match the per-uid event shape that
-`internal/outbound/analyzer.go` already emits, so downstream pipeline
-code can consume both sources symmetrically.
+### Build model — no CGO, no clang on the install target
 
-**Config.** `/etc/cfm/lsm.conf`, INI-style, same format as
+CFM builds with `CGO_ENABLED=0` (see `Makefile:53`). That stays true
+for `cfm-lsm`. The mechanics:
+
+- The BPF C sources live in-tree at `internal/lsm/bpf/*.bpf.c` with a
+  CO-RE `vmlinux.h`.
+- `go generate` invokes
+  [`bpf2go`](https://github.com/cilium/ebpf/tree/main/cmd/bpf2go) from
+  `cilium/ebpf`, which calls clang to produce the compiled BPF object
+  plus Go bindings that wrap it.
+- The compiled `.o` and the generated Go bindings are **committed to
+  the repo**. `go build` does not call clang; it just embeds the
+  pre-compiled bytecode via `go:embed`.
+- `CGO_ENABLED=0` continues to work because `cilium/ebpf` is pure Go
+  — it talks to the kernel via `bpf(2)` syscalls through
+  `golang.org/x/sys/unix`, not via libbpf.
+- The Go runtime loads the embedded bytecode, CO-RE-relocates it for
+  the running kernel, and attaches it to LSM hooks. No clang on the
+  customer host. No kernel headers on the customer host.
+
+Build-time deps for **contributors who change the BPF programs**
+(documented in a `## Building` section, separate from runtime
+install): clang ≥ 11, libelf-dev, kernel headers ≥ 5.7 for
+`vmlinux.h` regeneration, optionally `bpftool` for debugging.
+
+Build-time deps for **everyone else** (downstream packagers,
+end-user installs, CI that doesn't touch `.bpf.c`): none beyond
+what CFM already needs.
+
+### In-tree layout
+
+```
+internal/lsm/
+├── lsm.go               # subsystem lifecycle: attach, detach, ring read loop
+├── policy.go            # /etc/cfm/lsm.conf parser (INI, same shape as kernsec.conf)
+├── events.go            # event types, fed into the existing CFM event bus
+├── cli.go               # `cfm lsm status`, `cfm lsm policy <id>`, etc.
+├── bpf/
+│   ├── memfd_exec.bpf.c # CFML-EXEC-001 BPF LSM program
+│   ├── revshell.bpf.c   # CFML-EXEC-003 BPF LSM program
+│   ├── common.bpf.h     # shared helpers, map definitions, event struct
+│   └── vmlinux.h        # CO-RE kernel type definitions (committed)
+├── bpf_bpfel.go         # bpf2go-generated bindings (committed)
+├── bpf_bpfel.o          # bpf2go-compiled BPF object (committed)
+└── doc.go
+```
+
+### Runtime — single daemon, single unit, single config
+
+A subsystem inside the existing CFM daemon, not a separate
+`cfm-lsmd` process. The reasoning: BPF event delivery is in-process
+already (the ringbuf reader is a goroutine), LSM event processing
+is not crash-prone enough to justify a second daemon, and the
+host-profile detection code lives in the existing binary already
+(`internal/kernsec/profile.go`). Reuse, don't fork.
+
+There is no "cfm-lsmd writes a log file that cfm watches" seam.
+Events flow from the ringbuf reader goroutine onto the same
+in-process channel that `internal/outbound/` already feeds into the
+notify, JSON-log, and webdetector-correlation paths.
+
+A single systemd unit (the existing `cfm.service`). A single config
+file. A single log destination (`/var/log/cfm/lsm.jsonl`).
+
+### Privileges
+
+BPF LSM loading needs `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_ADMIN`.
+The CFM daemon already runs with the privileges it needs for
+nftables and NFLOG (see `configs/cfm.service` for the existing
+hardening profile); the additional caps required for BPF LSM
+attach are within the same envelope and do not require a privilege
+boundary split. If a future iteration of CFM ever drops the main
+daemon to a lower-cap user, the cleanest split is a small one-shot
+`cfm-lsm-loader` helper that attaches programs at start and exits
+— not a long-running second daemon. That is a refinement for later,
+not part of the MVP.
+
+### Host-profile reuse
+
+Consume the existing detection in `internal/kernsec/profile.go`
+(cPanel, DirectAdmin, CloudLinux / LVE, CageFS, Imunify360,
+KernelCare, Ksplice, Proxmox, ZFS, EFI). Do not reimplement
+detection.
+
+### Event shape
+
+Match the per-uid event shape that `internal/outbound/analyzer.go`
+already emits, so downstream pipeline code can consume both sources
+symmetrically. The BPF programs write a minimal fixed-size struct
+into a per-CPU ringbuf; the Go side enriches it (pid → cgroup → user
+→ vhost) before forwarding to the event bus.
+
+### Config
+
+`/etc/cfm/lsm.conf`, INI-style, same format as
 `/etc/cfm/kernsec.conf`. The earlier draft proposed TOML; align with
 the existing format in the rest of CFM instead. Three modes per
 policy: `disabled`, `monitor`, `enforce`. Per-vhost overrides are
-reserved for future use; the two MVP policies are not vhost-keyed and
-do not need them.
+reserved for future use; the two MVP policies are not vhost-keyed
+and do not need them.
+
+The `enforce` vs `monitor` decision is **compiled into the BPF
+program at load time** via a `bpf2go` constant rewrite, so the hot
+path does not branch on the mode and runtime cost is identical in
+both modes.
 
 ## Coexistence
 
@@ -375,12 +477,17 @@ Tomoyo and Smack are untested and not on CFM's supported distros.
 
 Two phases, both about the same two policies.
 
-**Phase 1 — MVP, monitor mode.** Attach `CFML-EXEC-001` and
-`CFML-EXEC-003` in monitor mode. Build the CFM daemon subsystem, the
-`/etc/cfm/lsm.conf` parser, and the `cfm lsm status` / `cfm lsm
+**Phase 1 — MVP, monitor mode.** Stand up `internal/lsm/` with the
+two BPF C sources at `internal/lsm/bpf/`, the `bpf2go` `go generate`
+wiring, the committed compiled object and Go bindings. Attach
+`CFML-EXEC-001` and `CFML-EXEC-003` in monitor mode. Build the
+`/etc/cfm/lsm.conf` parser and the `cfm lsm status` / `cfm lsm
 preview` CLI surface. Wire events into the existing webdetector
-decision pipeline. Run 30 days of telemetry on a representative cPanel
-host and a representative Proxmox host before any enforcement.
+decision pipeline. Document the contributor-side build deps (clang,
+libelf, kernel headers) in a new `## Building cfm-lsm BPF objects`
+section that is explicit that those deps are **not** required for
+`go build` of CFM itself. Run 30 days of telemetry on a representative
+cPanel host and a representative Proxmox host before any enforcement.
 
 **Phase 2 — Promote to enforce.** `CFML-EXEC-001` to `enforce` once
 Phase 1 telemetry confirms zero or near-zero legitimate triggers.
