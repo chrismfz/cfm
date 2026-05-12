@@ -364,7 +364,13 @@ sync:
 # at top (or before recipe)
 GH := gh
 
-release: deb rpm
+# Release path always regenerates BPF bytecode before packaging so a
+# contributor's local oversight (editing cfmlsm.bpf.c without committing
+# the refreshed .o) can never reach a published .deb/.rpm. The
+# verify-bpf-bindings guard wired into `build:` will then re-validate
+# the freshly-regenerated .o against the Go bindings as a sanity check.
+# Requires clang + libbpf-devel on the release host (see `make bpf`).
+release: bpf deb rpm
 	@set -euo pipefail; \
 	echo "🔐 Checking GitHub auth..."; \
 	$(GH) auth status -h github.com >/dev/null || { echo "Run: gh auth login"; exit 1; }; \
