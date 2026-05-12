@@ -702,6 +702,7 @@ local function is_panel_api_or_sso(uri)
         or uri:match("^/cpsess%d+/execute/")
         or uri:match("^/cpsess%d+/xml%-api/")
         or uri:match("^/cpsess%d+/login/")
+        or uri:match("^/cpsess%d+/websocket/")
         or uri == "/session"
         or starts_with(uri, "/session/")
         or uri == "/xfercpanel"
