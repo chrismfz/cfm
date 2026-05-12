@@ -91,6 +91,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.conf
 %config(noreplace) /etc/cfm/detectors.conf
 %attr(0600,root,root) %config(noreplace) /etc/cfm/kernsec.conf
+%attr(0600,root,root) %config(noreplace) /etc/cfm/lsm.conf
 %config(noreplace) /etc/cfm/webdetector_malpaths.txt
 %config(noreplace) /etc/cfm/webdetector_challenge_paths.txt
 %config(noreplace) /etc/cfm/webdetector_challenge_exclude.txt
@@ -122,6 +123,10 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 # removing group/other bits so upgrades do not loosen operator-chosen owner
 # bits (for example 0400 stays 0400).
 [ -f /etc/cfm/kernsec.conf ] && chmod go-rwx /etc/cfm/kernsec.conf || true
+
+# lsm.conf discloses which BPF LSM policies are active on the host;
+# same lock-down as kernsec.conf.
+[ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
 
 # shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua

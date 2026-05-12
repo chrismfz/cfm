@@ -33,6 +33,7 @@ for the trade-offs and how to choose.
 ## Table of Contents
 
 1. [What is CFM?](#1-what-is-cfm)
+   - [Defence-in-Depth Layers](#defence-in-depth-layers)
 2. [Installation](#2-installation)
    - [Web UI quick start (recommended)](#web-ui-quick-start-recommended)
 3. [Repository Layout](#3-repository-layout)
@@ -103,6 +104,66 @@ backend and no iptables dependency.
 - MySQL Governor that can kill runaway queries and enforce per-user connection limits
 - **Outbound Abuse Sentinel** — per-uid detection of SMTP bursts, scanner activity, HTTP fan-out and DNS amplification before your IPs land on blacklists
 - ML-Ready: the scoring system is a hand-crafted classifier based on trusted signals
+
+### Defence-in-Depth Layers
+
+CFM is not one monolithic blocker — it is a stack of independent layers,
+each looking at the host from a different angle. They do not duplicate
+each other; each catches the threats the others structurally cannot
+see.
+
+```
+HTTP / mail / SSH / panel layer       detectors + webdetector
+                                      (log-driven, per-protocol)
+                                                   ↓
+Userspace process behaviour           cfm-lsm                      [design phase]
+                                      (BPF LSM: memfd exec,
+                                       reverse shell patterns)
+                                                   ↓
+Kernel surface                        kernsec
+                                      (sysctls, boot args,
+                                       modules, mount audit)
+```
+
+**How the layers pair.** Each layer can act on its own, but together
+they form a chain. A live attack typically traverses all three:
+
+1. **detectors / webdetector** see the request that *causes* the
+   compromise — a malicious POST, a brute-force burst on SSH, a
+   webshell drop URL. They can challenge or block at the HTTP /
+   protocol layer before the workload ever touches userspace.
+2. **cfm-lsm** sees the *consequence* once an exploit has landed — a
+   PHP-FPM worker spawning a process from a `memfd` payload, or a
+   compromised process exec'ing with stdin/stdout/stderr wired to a
+   remote socket. These behaviours are invisible to the HTTP layer
+   (the request has already returned) and to the kernel layer (no
+   sysctl can express them).
+3. **kernsec** removes the *kernel surface* an attacker would
+   otherwise pivot through after step 2 — disables risky legacy
+   modules, hardens sysctls (`kernel.yama.ptrace_scope`,
+   `kernel.kptr_restrict`, etc.), audits `noexec` mounts, manages
+   boot args. It is preemptive: it shapes the host before any
+   attack arrives, so even a successful userspace foothold has less
+   to work with.
+
+**Read order:**
+
+- [`docs/kernsec.md`](docs/kernsec.md) — kernel-surface reduction
+  (sysctls, boot args, modules, mounts).
+- [`docs/cfm-lsm.md`](docs/cfm-lsm.md) — userspace-behaviour
+  enforcement design (BPF LSM, two-policy MVP, kernel preflight,
+  CLI shape). Implementation is incremental; see
+  `cfm lsm status` for fleet-readiness preflight.
+- [`docs/DETECTORS.md`](docs/DETECTORS.md) — protocol-layer
+  detectors and per-section block policy.
+
+**Status.** `kernsec` and `detectors` / `webdetector` are shipping
+production layers. `cfm-lsm` is in design phase: the
+preflight, config, and CLI scaffolding are in this release, but
+the BPF programs that enforce `CFML-EXEC-001` (memfd exec) and
+`CFML-EXEC-003` (reverse shell) land in subsequent commits.
+Operators can already run `cfm lsm status` to audit fleet
+readiness ahead of the BPF rollout.
 
 ---
 

@@ -203,6 +203,7 @@ deb: build
 	@install -m0640 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
 	@install -m0640 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
 	@install -m0600 "$(CONFIG_DIR)/kernsec.conf"        "$(PKGROOT)/etc/cfm/kernsec.conf"
+	@install -m0600 "$(CONFIG_DIR)/lsm.conf"            "$(PKGROOT)/etc/cfm/lsm.conf"
 	@install -m0640 "$(CONFIG_DIR)/notify.conf"      "$(PKGROOT)/etc/cfm/notify.conf"
 	@install -m0640 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
 	@install -m0640 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
@@ -242,6 +243,8 @@ stage-pkgroot: build
 	@[ -f $(PKGROOT)/etc/cfm/detectors.conf ]       || cp -f $(CONFIG_DIR)/detectors.conf       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/kernsec.conf ]         || install -m0600 $(CONFIG_DIR)/kernsec.conf        $(PKGROOT)/etc/cfm/kernsec.conf
 	@chmod go-rwx $(PKGROOT)/etc/cfm/kernsec.conf
+	@[ -f $(PKGROOT)/etc/cfm/lsm.conf ]             || install -m0600 $(CONFIG_DIR)/lsm.conf            $(PKGROOT)/etc/cfm/lsm.conf
+	@chmod go-rwx $(PKGROOT)/etc/cfm/lsm.conf
 	@[ -f $(PKGROOT)/etc/cfm/notify.conf ]       || cp -f $(CONFIG_DIR)/notify.conf       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.allow ]      || cp -f $(CONFIG_DIR)/cfm.allow      $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.deny ]       || cp -f $(CONFIG_DIR)/cfm.deny       $(PKGROOT)/etc/cfm/

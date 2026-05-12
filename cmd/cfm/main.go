@@ -46,6 +46,7 @@ import (
 	"cfm/internal/filewatch"
 	"cfm/internal/healthcli"
 	"cfm/internal/kernsec"
+	"cfm/internal/lsm"
 )
 
 var (
@@ -323,6 +324,9 @@ func main() {
 	case "kernsec":
 		os.Exit(kernsec.RunCLI(os.Args[2:]))
 
+	case "lsm":
+		os.Exit(lsm.RunCLI(os.Args[2:]))
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
@@ -375,6 +379,11 @@ Usage:
   cfm kernsec apply [--dry-run]   -- write sysctl + boot-arg files, refresh bootloader, then apply runtime sysctls per-key with sysctl -w; prompts for irreversible-until-reboot/global-coredump risk; --check exits non-zero on drift
   cfm kernsec disable [--purge]   -- persistently disable kernsec (tier=0): strip managed boot args, empty managed sysctl; --purge removes conf entirely
   cfm kernsec monitor <action>    -- periodic drift-check systemd timer: enable | disable | remove | status
+
+  cfm lsm                         -- alias for "cfm lsm status"
+  cfm lsm status [--json --check] -- BPF LSM kernel preflight + per-policy state (scaffolding only; BPF not yet loaded)
+  cfm lsm preview                 -- read-only dry run: what would attach given /etc/cfm/lsm.conf + kernel
+  cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
 
   cfm clam ping
   cfm clam version

@@ -33,6 +33,10 @@ fi
 # bits (for example 0400 stays 0400).
 [ -f /etc/cfm/kernsec.conf ] && chmod go-rwx /etc/cfm/kernsec.conf || true
 
+# lsm.conf discloses which BPF LSM policies are active on the host;
+# same lock-down as kernsec.conf.
+[ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
+
 # shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua
