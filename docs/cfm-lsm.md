@@ -255,9 +255,6 @@ decisions, not TODOs.
 
 ## Prior art — what to borrow (and what not to)
 
-Two projects are routinely cited as references for a
-userspace-behaviour LSM: Falco and grsecurity / PaX. Both are useful as
-background reading, but neither is a code source for CFM.
 
 ### Falco
 
@@ -272,34 +269,6 @@ which container runtimes dup socket fds. Read the rules, lift the
 exemption lists as a starting point, reimplement the detection
 clean-room against BPF LSM hooks.
 
-What is not reusable: Falco's **engine and runtime**. Falco is a
-general-purpose syscall observability platform built on libsinsp /
-libscap, with a full YAML rules language and its own driver story.
-CFM's two-policy scope does not justify importing that dependency
-surface. The relationship is "borrow the detections, not the
-framework."
-
-Licensing: Falco is Apache-2.0; rule strings can be referenced as
-prior art in commits and documentation but no Falco code is vendored.
-
-### grsecurity / PaX
-
-What is reusable: **concepts and published documentation only**. TPE
-(Trusted Path Execution) is a grsec concept, and the way grsec frames
-exec-from-writable-paths is part of why this design concludes
-`CFML-EXEC-002` is *not* worth reimplementing on a CageFS / Imunify
-stack. Public papers on PaX exec restrictions and the older grsec
-wiki are useful background for the `CFML-EXEC-001` exemption model.
-
-What is not reusable: **code or patches**. grsec has been
-commercial-only since 2017 and the upstream PaX patches are no longer
-maintained for current kernels. There is no legal or practical path
-to lift implementation from grsec.
-
-Relationship to `kernsec`: most of grsec's hardening philosophy maps
-onto sysctls, boot arguments, module blacklists, and mount audits —
-which is what `kernsec` already does (see `docs/kernsec.md`).
-`cfm-lsm` does not duplicate that ground.
 
 ## Related future work
 
@@ -634,11 +603,7 @@ Phase 1 telemetry confirms zero or near-zero legitimate triggers.
 Phase 1 telemetry — likely later than `EXEC-001` because of the
 behavioural fd walk.
 
-There is no Phase 3 in this doc. New policies require a new proposal.
-The earlier draft's Phases 3–5 (network policy, hardening, EL8 LKM
-backport) are explicitly removed: `CFML-NET-001` belongs in
-`internal/outbound/`, hardening is already `kernsec`'s remit, and an
-EL8 LKM is a maintenance trap on KernelCare-patched kernels.
+
 
 ## Open questions
 
