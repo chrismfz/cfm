@@ -4,6 +4,7 @@ package lsm
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,35 @@ func TestRewriteEnforceConstants_RealSpec(t *testing.T) {
 	}
 }
 
+func TestBPFExecRingbufReserveFailureUsesEnforceVerdict(t *testing.T) {
+	src, err := os.ReadFile("bpf/cfmlsm.bpf.c")
+	if err != nil {
+		t.Fatalf("read BPF source: %v", err)
+	}
+	out := string(src)
+
+	helper := "static __always_inline int cfm_exec_verdict(__u8 enforce)\n{\n    if (enforce)\n        return CFM_LSM_DENY;\n    return 0;\n}"
+	if !strings.Contains(out, helper) {
+		t.Fatal("BPF source should centralize matched EXEC allow/deny decisions in cfm_exec_verdict so monitor allows and enforce denies")
+	}
+
+	cases := []struct {
+		name         string
+		enforceConst string
+	}{
+		{name: "CFML-EXEC-001", enforceConst: "cfm_enforce_memfd_exec"},
+		{name: "CFML-EXEC-003", enforceConst: "cfm_enforce_revshell"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := "if (!e)\n        return cfm_exec_verdict(" + tc.enforceConst + ");"
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s ringbuf reserve failure must return cfm_exec_verdict(%s), preserving monitor allow and enforce deny", tc.name, tc.enforceConst)
+			}
+		})
+	}
+}
+
 func TestRewriteEnforceConstants_MissingVariableErrs(t *testing.T) {
 	// Build a fake spec with no Variables. RewriteEnforceConstants
 	// should report which name is missing rather than silently
@@ -104,8 +134,8 @@ func TestConfirmEnforce_RejectsEverythingElse(t *testing.T) {
 	// Anything that is not an explicit y/yes — including empty
 	// input, "n", "no", random text, EOF — must be treated as no.
 	cases := []string{
-		"\n",      // bare Enter
-		"n\n",     // explicit no
+		"\n",  // bare Enter
+		"n\n", // explicit no
 		"no\n",
 		"abort\n",
 		"sure why not\n",

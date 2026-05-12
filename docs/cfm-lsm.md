@@ -667,6 +667,12 @@ level.
 | daemon crashed | **still works** | events buffer in ringbuf, drop when full |
 | `cfm lsm disable` | **stopped** | n/a |
 
+Audit emission is best-effort: a full or unavailable ringbuf may drop
+the userspace event, but it does **not** change an established LSM
+verdict. In monitor mode, a matched `CFML-EXEC-001` or
+`CFML-EXEC-003` exec is still allowed if `bpf_ringbuf_reserve()`
+fails; in enforce mode, the same matched exec is still denied.
+
 Ringbuf size is 256 KiB; at the per-event size of 112 bytes that's
 about 2,300 events before drops. EXEC-001 is a rare event in
 practice (memfd exec is post-exploit only); EXEC-003 likewise.
