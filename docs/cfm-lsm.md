@@ -636,6 +636,626 @@ default not forced) that appends `bpf` to the existing `lsm=` value
 without disrupting the operator's other LSM choices. Out of scope
 for this MVP; mentioned here as the known follow-up.
 
+## Future Policies — Detailed Planning
+
+This section is the design + continuation document for the next
+two policies in the cfm-lsm roadmap, in implementation order:
+
+1. **CFML-FS-005** — Sensitive-file modification by web user
+2. **CFML-CRED-002** — Privilege escalation without setuid path
+
+The "Out of scope" section above intentionally excluded earlier
+versions of these ideas (`CFML-FS-001`, `CFML-CRED-001`). The
+reversal is deliberate and worth recording: with EXEC-001 / EXEC-003
+shipping in production, the bpf2go toolchain, the lifecycle, the
+pinning model, the event pipeline, and the cilium/ebpf integration
+have all been proven on real-kernel hosts. The marginal cost of
+adding new policies is now "BPF C + a slice of `loader.go`" rather
+than "a whole subsystem from scratch." Per-policy FP risk is also
+no longer theoretical — EXEC-003's fd-walk taught us how the
+verifier reacts to bounded loops on older kernels, which informs
+the design choices below.
+
+Both policies follow the same architectural shape as the MVP:
+- compiled into the shared `cfmlsm.bpf.c` translation unit,
+- attached via the existing Loader (`internal/lsm/loader.go`),
+- pinned to `/sys/fs/bpf/cfm/links/<name>` by `cfm lsm enable`,
+- events delivered through the existing ringbuf into the existing
+  `notify.Event{kind=lsm_detect, section=lsm}` pipeline,
+- monitor-only on first ship, enforce-mode flip behind a bpf2go
+  constant rewrite after 30-day FP telemetry.
+
+Both stay focused on the "post-exploit cash-in" observable rather
+than trying to detect the underlying kernel primitive. That is the
+LSM-vs-LKRG line: LKRG-class tools try to catch kernel-side
+corruption; cfm-lsm catches the moment the attacker tries to use
+the corruption. The two layers are complementary, not competitive.
+
+### CFML-FS-005 — Sensitive-file modification by web user
+
+| | |
+|---|---|
+| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr` |
+| Default mode | `monitor` |
+| FP risk | Very low (CageFS makes legitimate access impossible) |
+| Perf impact | Negligible — only fires on rare write-class operations against a small set of paths |
+| Maps to add | `cfm_watched_uids` (hash, key=uid, val=u8), `cfm_watched_inodes` (hash, key=u64 inode, val=path-class enum) |
+
+**Threat model.** A compromised web-tier user (apache, nginx,
+php-fpm, lsphp, alt-php-N, plus every cPanel/DirectAdmin account
+uid on hosting hosts) attempts to mutate a host-sensitive file:
+`/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d/*`,
+`/etc/cron*`, `/var/spool/cron/*`, `/etc/ssh/sshd_config*`,
+`/root/.ssh/authorized_keys`, `/home/<other-user>/.ssh/*`,
+`/etc/pam.d/*`. The compromise vector may be:
+
+- A kernel 0-day (Dirty Pipe, Dirty COW class) that gave the user
+  the ability to write where they shouldn't.
+- A userspace exploit (e.g. PHP RCE) escalated via a setuid
+  binary bug.
+- Stolen credentials replayed.
+- A misconfigured filesystem that exposed the path.
+
+We do not need to know which. We watch the *attempt*, and on a
+CFM target stack the attempt is itself the smoking gun — CageFS
+on CloudLinux makes legitimate access to most of these paths
+literally impossible for a caged user, and on non-CloudLinux
+hosts the web users simply have no reason to touch them. The
+signal-to-noise ratio of this rule is the highest of any candidate
+post-MVP policy.
+
+**Worked example — Dirty Pipe cash-in.**
+1. Web user (uid 1001) compromised via a PHP RCE.
+2. Attacker uses CVE-2022-0847 to write a backdoor line into
+   `/etc/passwd`: a new uid 0 account with no password.
+3. The Dirty Pipe primitive itself does not go through the
+   standard write path — we cannot see it.
+4. But the kernel page cache now reflects the modified content,
+   and crucially the next operation the attacker performs to
+   verify the modification (`stat`, `open(O_RDONLY)`, `read`) is
+   irrelevant — they need to *use* the modification: log in as
+   the new account. By that time the host's IDS / detector
+   layer (sshd auth) has the signal.
+5. **What CFML-FS-005 actually catches**: if the attacker
+   instead modifies `/root/.ssh/authorized_keys` to add their
+   own key, the underlying file write is via a normal syscall
+   path (after the Dirty Pipe leg has corrupted the page cache,
+   subsequent writes still take the page cache path). Or, the
+   attacker uses a *different* primitive — for example, an
+   unprivileged user-namespace exploit (CVE-2022-0185) to gain
+   `CAP_SYS_ADMIN` and just write the file normally. Either way,
+   the `inode_setattr` / `inode_create` for `/root/.ssh/` by uid
+   1001 fires.
+6. Event delivered: `policy=CFML-FS-005`, `pid=12345`,
+   `uid=1001`, `comm=php-fpm`, `path=/root/.ssh/authorized_keys`,
+   `op=create`. Operator gets a notify event in real time;
+   forensic-grade evidence of compromise.
+
+**Detection logic (BPF C pseudo-shape).**
+
+```c
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs005_setattr, struct dentry *dentry, struct iattr *attr, int ret)
+{
+    if (ret != 0) return ret;
+
+    __u32 uid = bpf_get_current_uid_gid() & 0xffffffff;
+
+    // Cheap reject: is this uid one we watch?
+    __u8 *watch = bpf_map_lookup_elem(&cfm_watched_uids, &uid);
+    if (!watch) return 0;
+
+    // Resolve target inode. Walk dentry chain up to MAX_DEPTH,
+    // attempting to match against pinned inode set.
+    struct inode *target = BPF_CORE_READ(dentry, d_inode);
+    if (!target) return 0;
+    __u64 ino = BPF_CORE_READ(target, i_ino);
+
+    __u32 *pathClass = bpf_map_lookup_elem(&cfm_watched_inodes, &ino);
+    if (!pathClass) return 0;
+
+    // Match. Emit event.
+    emit_event(CFM_LSM_POLICY_SENSITIVE_WRITE, dentry, *pathClass, "setattr");
+    return 0; // monitor mode
+}
+```
+
+The same shape repeats for `inode_create`, `inode_unlink`,
+`inode_link`, `inode_rename`, `inode_setxattr`. Each is a
+separate `SEC("lsm/...")` program but they share the
+`cfm_watched_uids` and `cfm_watched_inodes` maps.
+
+**Map population.** Both maps are populated by the cfm daemon at
+attach time via the existing pinned-map pattern (or a sibling
+pinned map populated by `cfm lsm enable`):
+
+- `cfm_watched_uids`: walks `/etc/passwd` for web-class user
+  names (`apache`, `nginx`, `www-data`, `http`, `php`, `lsphp`,
+  `alt-php-*`, `proxy`, plus every cPanel-managed uid from
+  `/etc/userdomains` or `/etc/trueuserdomains`, plus every
+  DirectAdmin-managed uid from `/etc/virtual/domainowners`).
+  Refreshed on every config-reload tick.
+- `cfm_watched_inodes`: stat()s each path in a pinned
+  sensitive-paths list (initially a hard-coded set, later read
+  from `/etc/cfm/lsm.conf`'s new `[policy "CFML-FS-005"]
+  paths = ...` key), records inode numbers. Inode-based matching
+  avoids the BPF-side dentry-walk-then-compare-string problem
+  entirely.
+
+**vmlinux.h extensions needed.**
+- `struct iattr` (for `inode_setattr` hook). Only fields we
+  read: none initially (the policy fires regardless of what's
+  being changed — any write-class attempt is suspicious).
+- No new types beyond `iattr`. `struct dentry`, `struct inode`
+  are already in `internal/lsm/bpf/vmlinux.h` from EXEC-001/003.
+
+**Verifier complexity.** Lower than EXEC-003. No bounded loops,
+no fd walking; just three or four `BPF_CORE_READ` chains plus
+two map lookups. Expected to load cleanly on EL10, Debian 12+,
+Ubuntu 22.04+ kernels. Should work on RHEL 9.4+ kernels that
+ship `CONFIG_BPF_LSM=y` (CL9 still does not; that is a separate
+kernel-vendor blocker, not a verifier blocker).
+
+**FP risk and mitigations.**
+- **Near-zero on CageFS hosts.** A caged web user attempting to
+  open `/etc/shadow` for write hits a CageFS denial long before
+  cfm-lsm sees it. If cfm-lsm DOES see the attempt, it means
+  caging was bypassed — which is itself a compromise indicator.
+  We deliberately do NOT suppress events on CageFS hosts.
+- **Non-trivial on non-CageFS hosts** in edge cases: tools that
+  legitimately run as a web user and modify `/etc/`, e.g. a
+  custom panel cron job, a Let's Encrypt renewal hook run as
+  `www-data`, etc. Mitigation: an operator-editable allowlist
+  in `lsm.conf` like:
+  ```
+  [policy "CFML-FS-005"]
+  mode = monitor
+  allow_uids = cert-renewer,custom-cron
+  allow_paths = /etc/letsencrypt/live/*
+  ```
+- **systemd-managed paths.** systemd's tmpfiles.d / udev rules
+  can write to `/etc/` paths owned by services. The watched-uid
+  set deliberately excludes root and system service accounts
+  (uid < 100 by default), so systemd's writes are ignored.
+
+**Stack-specific behavior.**
+
+- **cPanel + CloudLinux + KernelCare.** Full policy applies.
+  Every cpanel user uid is in the watched set. CageFS makes
+  legitimate triggers vanishingly rare; any trigger should
+  alert.
+- **DirectAdmin + CloudLinux + KernelCare.** Same as cPanel,
+  reading from `/etc/virtual/domainowners` instead.
+- **Proxmox Debian KVM ZFS.** Limited watched-uid set
+  (apache/nginx/www-data if present; otherwise dormant). The
+  hypervisor has very few legitimate web-tier users by design,
+  so the policy is mostly latent — but the moment a compromised
+  guest reaches the host, the cash-in attempt fires.
+- **Plain hosting (no panel)**. Watched-uid set populated from
+  standard web server users. Operator can extend via the
+  `allow_uids` mechanism noted above.
+
+**Event shape (extends existing `cfm_lsm_event`).**
+
+The MVP event struct already carries `pid`, `tgid`, `uid`,
+`gid`, `comm`, `filename`. For FS-005 the `filename` field
+holds the target path (best-effort, truncated to
+`CFM_FILENAME_LEN`). A new `op` field is needed to distinguish
+`setattr` from `create` from `unlink` from `rename`. Add to
+`common.bpf.h`:
+
+```c
+enum cfm_fs_op {
+    CFM_FS_OP_UNKNOWN  = 0,
+    CFM_FS_OP_SETATTR  = 1,
+    CFM_FS_OP_CREATE   = 2,
+    CFM_FS_OP_UNLINK   = 3,
+    CFM_FS_OP_LINK     = 4,
+    CFM_FS_OP_RENAME   = 5,
+    CFM_FS_OP_SETXATTR = 6,
+};
+```
+
+Carry the op as a single byte in a new `path_class` field
+alongside the existing `_pad`. Update the Go-side `Event`
+struct in `internal/lsm/events.go` and the wire size constant
+to match.
+
+**Enforcement strategy.**
+
+Monitor-only on first ship. Enforce mode (return `-EACCES`)
+would be a very strong control — denying the actual write —
+but the cost of a false-positive enforce-mode block is severe
+(a legitimate operator-driven cron job that touches `/etc/`
+could fail), so the bar is high. Plan: 30-day monitor window
+across at least 3 representative production hosts (cPanel,
+DirectAdmin, plain), collect the operator-driven path list,
+turn it into the shipped allowlist, *then* consider enforce.
+
+**Open questions for FS-005.**
+
+1. **Dentry path resolution in BPF.** The detection logic above
+   uses inode-number matching to avoid path-walking in BPF
+   (which is verifier-painful). But inode numbers are
+   filesystem-local — `/etc/passwd` on a chroot has a different
+   inode than the host's. CageFS exposes a different inode for
+   the cage. Empirical question: does an attacker that has
+   bypassed CageFS see the *host* inode for `/etc/shadow` or
+   the cage's version? Needs a real CL host to test.
+2. **Bind mounts.** A bind mount of `/etc/sudoers.d/` into a
+   different path bypasses inode-number matching unless we
+   also record the bind-mount target. Worth checking how often
+   operators bind-mount sensitive paths in practice.
+3. **`/home/*/.ssh/` for other users.** Detecting "user A
+   writing to user B's `.ssh/`" is the highest-value case,
+   but distinguishing it from "user A writing to A's own
+   `.ssh/`" requires knowing the path ownership, not just the
+   path. Easiest implementation: skip the per-user `.ssh/`
+   set entirely in v1, ship it as v1.1 once the
+   uid-vs-path-owner correlation is sized.
+
+### CFML-CRED-002 — Privilege escalation without setuid path
+
+| | |
+|---|---|
+| Hook | `cred_prepare` (read-only observation), with optional `task_fix_setuid` follow-up |
+| Default mode | `monitor` (extended window — 60 days, see below) |
+| FP risk | Medium-low (whitelist of legitimate uid-0 transitions) |
+| Perf impact | Higher than EXEC-001 / FS-005 — `cred_prepare` fires on every credential install, not just on suspicious paths |
+| Maps to add | `cfm_setuid_inodes` (hash, key=u64 inode, val=u8 — pre-populated set of legitimate setuid binaries) |
+
+**Threat model.** A process gains effective uid 0 — or gains a
+capability set it should not have — without going through a
+recognised setuid binary or a legitimate root-owned parent in
+the fork/exec chain. This is the canonical kernel-exploit
+completion fingerprint. Concretely:
+
+- Process P (web user, uid 1001) is running PHP-FPM.
+- Attacker exploits a kernel bug (Dirty Pipe / CVE-2022-0185 /
+  pwnkit-class / new 0-day) to flip P's `cred->euid` to 0.
+- The flip happens *outside* the normal `setuid`/`execve`
+  syscall paths — that's what makes it an exploit.
+- Detection: at the next `cred_prepare` hook invocation (which
+  fires when P calls `setuid()`, `setresuid()`, or when the
+  kernel commits already-prepared creds), we compare:
+  - new `cred->euid == 0`
+  - old `cred->euid != 0`
+  - parent's `mm->exe_file` inode NOT in
+    `cfm_setuid_inodes` map
+  - parent's `cred->euid != 0` at the time of exec
+- If all four hold: emit event.
+
+This is the LKRG-style detection but at the LSM layer. It
+catches the *post-exploit fingerprint* — the moment the
+attacker tries to *use* the kernel-side privilege flip — rather
+than the kernel-side primitive itself. LKRG catches the
+primitive by inspecting kernel state; cfm-lsm catches the
+visible consequence by inspecting the cred-install path.
+
+**Worked example — pwnkit cash-in.**
+1. Web user calls a vulnerable `pkexec` binary in a way that
+   triggers CVE-2021-4034.
+2. The exploit flips `current->cred->euid = 0` via a kernel
+   path that does *not* count as a setuid transition through
+   pkexec's actual `cred_prepare`.
+3. Process now runs as uid 0; opens a root shell or modifies
+   `/etc/shadow`.
+4. **What CFML-CRED-002 catches**: the cred install. The
+   parent process at the time of pkexec exec was the web user
+   (uid != 0); pkexec's inode IS in the setuid set; but the
+   attack pattern abuses pkexec's own internal cred_prepare
+   call where the *previous* commit had uid 1001 and the
+   *new* commit has uid 0. The transition is legitimate from
+   pkexec's perspective, but pkexec itself was the buggy
+   binary. **Caveat: we will get a false positive on a
+   legitimate pkexec invocation too**, which is exactly why
+   this policy needs the long monitor window.
+
+The harder case — and the more useful one — is the kernel
+exploit that flips creds *without* touching the userspace
+setuid binary at all (e.g. CVE-2022-0185 via user namespaces).
+In that case the new cred has euid 0 but the parent exe is
+NOT a setuid binary, and the cleanest detection lands.
+
+**Detection logic (BPF C pseudo-shape).**
+
+```c
+SEC("lsm/cred_prepare")
+int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, gfp_t gfp, int ret)
+{
+    if (ret != 0) return ret;
+
+    __u32 new_euid = BPF_CORE_READ(new, euid.val);
+    __u32 old_euid = BPF_CORE_READ(old, euid.val);
+
+    // Only care about non-root → root transitions.
+    if (new_euid != 0 || old_euid == 0) return 0;
+
+    // Resolve current task's exe_file inode. If it's in the
+    // known-setuid-binary set, the transition is from a
+    // recognised setuid path — likely legitimate.
+    struct task_struct *task = (void *)bpf_get_current_task();
+    if (!task) return 0;
+
+    struct mm_struct *mm = BPF_CORE_READ(task, mm);
+    if (!mm) return 0;
+
+    struct file *exe = BPF_CORE_READ(mm, exe_file);
+    if (!exe) return 0;
+
+    struct inode *exe_ino = BPF_CORE_READ(exe, f_inode);
+    if (!exe_ino) return 0;
+
+    __u64 ino = BPF_CORE_READ(exe_ino, i_ino);
+    if (bpf_map_lookup_elem(&cfm_setuid_inodes, &ino)) {
+        // Legitimate setuid path; skip.
+        return 0;
+    }
+
+    // Unrecognised path → fingerprint emission.
+    emit_event(CFM_LSM_POLICY_CRED_ESCAL, exe, 0, "cred_prepare");
+    return 0; // monitor mode
+}
+```
+
+**Setuid-binary set population.** The cfm daemon walks the host
+at attach time and stat()s every file with mode bits including
+`S_ISUID`. Resulting inodes go into the pinned
+`cfm_setuid_inodes` map. The walk is refreshed periodically
+(every config-reload tick) so newly-installed setuid binaries
+(after a package install) don't trigger FPs forever. Default
+roots to walk: `/usr/bin`, `/usr/sbin`, `/usr/libexec`,
+`/bin`, `/sbin`, plus any operator-listed extras in
+`lsm.conf`.
+
+**vmlinux.h extensions needed.**
+- `struct cred { kuid_t uid, euid, suid, fsuid; kgid_t gid,
+   egid, sgid, fsgid; ... }`. We read only `euid.val`.
+- `kuid_t` and `kgid_t` are just typedef wrappers; carry as
+   `struct kuid_t { __u32 val; }`.
+- `struct mm_struct { struct file *exe_file; ... }`.
+- `struct task_struct` already extended in EXEC-003; add the
+   `mm` field to the existing partial definition.
+
+**Verifier complexity.** Medium. Five BPF_CORE_READ chains
+plus one map lookup. Should fit comfortably under the 1M-insn
+budget on modern kernels and even older RHEL kernels. Watch
+for the cred-walk specifically — `cred_prepare` runs with the
+old/new cred passed in as args (not via `bpf_get_current_task()`),
+so we get cheap access to them.
+
+**FP risk and mitigations.**
+
+- **`pkexec`, `sudo`, `su`, `passwd`, `mount`, `ping`, `chsh`,
+  `chfn`, `gpasswd`, `newgrp`, `crontab`, `at`**: every standard
+  setuid root binary will pass `cfm_setuid_inodes` lookup and
+  emit no event. The walk has to find them all on the host
+  type. CageFS-cloned `/usr/bin` may have a different inode for
+  the cage's copy — does the cred_prepare fire with the cage's
+  inode or the host's? Likely the cage's, since the running
+  process is inside the namespace. The map population walk
+  must therefore happen INSIDE the namespace too, or include
+  both. Open question; see below.
+- **systemd ambient capabilities.** Service workers spawned by
+  systemd with `AmbientCapabilities=CAP_NET_BIND_SERVICE` (etc.)
+  go through `cred_prepare` with new caps. They do *not*
+  transition to uid 0 in the typical case, so the
+  `new_euid == 0 && old_euid != 0` guard filters them out.
+  Worth testing.
+- **Container runtimes.** runc / containerd / podman set up
+  creds inside their stage-0 init via paths that bypass the
+  standard setuid model. Mitigation: an operator-editable
+  process-name allowlist:
+  ```
+  [policy "CFML-CRED-002"]
+  mode = monitor
+  allow_comm = runc,containerd-shim,podman
+  ```
+- **Polkit / systemd-resolved / accounts-daemon**. Modern
+  desktop and some server systems use polkit IPC patterns that
+  involve cred transitions over dbus. CFM target stacks
+  (hosting, hypervisor) rarely have polkit running. If polkit
+  IS running, allowlist it.
+
+**Stack-specific behavior.**
+
+- **cPanel + CloudLinux + KernelCare.** Apply. KernelCare's
+  live-patch-loader (`kcare` binary) does run setuid-ish
+  operations; needs verification that it's in the setuid set
+  or in the allowlist. CageFS adds a wrinkle (host vs cage
+  inode numbers) — needs empirical resolution.
+- **DirectAdmin + CloudLinux + KernelCare.** Same as cPanel.
+- **Proxmox Debian KVM ZFS.** Apply. Watch the LXC/QEMU
+  helper binaries — `lxc-start-ephemeral`, `qm`, `pveproxy`,
+  etc. — for setuid behaviour; allowlist as needed.
+- **Plain hosting.** Apply. Smallest setuid set; cleanest
+  signal.
+
+**Event shape.** Same `cfm_lsm_event` struct as the others.
+`filename` field carries the path of `current->mm->exe_file`.
+A new `extra` field — or repurpose `path_class` from FS-005 —
+carries the old_euid and new_euid for forensic context.
+
+**Enforcement strategy.**
+
+**Monitor only. Possibly never enforce.** Returning `-EPERM`
+from `cred_prepare` is *dangerous* — it can deadlock the boot
+sequence, crash systemd helpers mid-transition, and produce
+hard-to-debug states. The value of CRED-002 is in the *alert*,
+not the block. Even if we wanted enforce, the safe path is to
+emit a notify event with very high severity and let downstream
+take action (kill the process out-of-band, isolate the host,
+etc.) rather than denying the cred install in-kernel. This
+policy stays monitor-only by design.
+
+**60-day monitor window** (vs 30 for the others) because the
+FP surface for cred transitions is broader and varies by
+distro+workload more than exec patterns do.
+
+**Open questions for CRED-002.**
+
+1. **CageFS inode mismatch.** Does the setuid-binary inode walk
+   need to happen inside every CageFS namespace, or does the
+   host walk suffice? Empirical, needs a CL host.
+2. **`task_fix_setuid` vs `cred_prepare`.** `task_fix_setuid`
+   is more specific (only fires on actual setuid() syscall);
+   `cred_prepare` is broader. v1 uses `cred_prepare` for
+   broader coverage, but evaluate whether `task_fix_setuid`
+   gives a higher signal/noise on real hosts.
+3. **Capability-only transitions.** A process that gains
+   `CAP_SYS_ADMIN` without becoming uid 0 (via ambient caps
+   or capability inheritance) is also suspicious. v1 only
+   watches uid transitions; capability transitions are a
+   v1.1 extension to scope.
+
+### Continuation context for future implementation sessions
+
+A future session picking up either policy cold should start
+here. The MVP shipped (PRs #848 through #853) leaves the
+following implementation surface ready to extend:
+
+**Where existing code lives.**
+
+```
+internal/lsm/
+├── bpf/
+│   ├── cfmlsm.bpf.c        # both shipped programs (memfd, revshell)
+│   ├── common.bpf.h        # event struct, policy enum, ringbuf decl
+│   └── vmlinux.h           # hand-written CO-RE types (extend here)
+├── bpf_generate.go         # go:generate directive (no change needed)
+├── cfmlsm_x86_bpfel.{go,o} # committed artifacts (regenerate after C edits)
+├── cfmlsm_arm64_bpfel.{go,o}
+├── conf.go / conf_test.go  # /etc/cfm/lsm.conf parser
+├── enable.go               # `cfm lsm enable` orchestration + pinning
+├── events.go               # Go-side Event struct + wire-format parser
+├── lifecycle.go            # daemon-side adoption + notify emission
+├── loader.go               # NewLoader / AdoptPinned / UnpinAll
+├── policy.go               # AllPolicies(), PolicyID constants
+├── preflight.go            # six kernel checks
+├── probe.go                # `cfm lsm probe`
+└── status.go / preview.go / cli.go / init.go
+```
+
+**Per-policy implementation recipe.**
+
+For each new policy `CFML-XXX-NNN`:
+
+1. **Add the constant in `policy.go`** under the existing
+   `PolicyMemfdExec` / `PolicyReverseShell` block. Append a
+   new entry to `AllPolicies()` with `ID`, `Title`, `Hook`,
+   `DefaultMode = ModeDisabled`, `Description`.
+
+2. **Extend `internal/lsm/bpf/common.bpf.h`** with a new
+   `CFM_LSM_POLICY_*` enum value. Keep value numbering stable
+   across releases — operators reference these IDs in
+   alerts and `lsm.conf`.
+
+3. **Extend `internal/lsm/bpf/vmlinux.h`** with any new kernel
+   types the new hook touches. Keep additions minimal —
+   only the fields the program actually reads. See the file
+   for the canonical pattern (preserve_access_index attribute
+   via `___NCO`).
+
+4. **Write the new program block in
+   `internal/lsm/bpf/cfmlsm.bpf.c`.** Use `BPF_PROG` macro,
+   match the existing return-0-on-monitor pattern. Helpers
+   shared across policies can be `static __always_inline` in
+   the same file (no separate `.bpf.h` for now).
+
+5. **Add the corresponding Go program field in
+   `loader.go::programFor`**: switch case for the new
+   `PolicyID` returning `l.objs.cfmlsmPrograms.NewProgramName`.
+
+6. **Add the pin filename in `loader.go::pinLinkFile`**:
+   switch case returning the new `pinFileLink*` constant.
+   Add the constant alongside the existing ones.
+
+7. **Regenerate**: `make bpf` (or `go generate
+   ./internal/lsm/...`). Verify both `.o` files updated.
+
+8. **Update `events.go::parseEvent`** if the wire-format
+   added or repositioned fields. Update `wireEventSize`
+   constant and `bpfPolicy*` Go-side enum values in lockstep
+   with `common.bpf.h`.
+
+9. **Update `events_test.go::TestPolicyByID_BPFConstantsMatchGoConstants`**
+   to assert the new constant pair stays in sync.
+
+10. **Add a per-policy test in `policy_test.go`** to verify
+    the policy appears in `AllPolicies()` with a non-empty
+    Title / Hook / Description.
+
+11. **Default `configs/lsm.conf`**: add a new
+    `[policy "CFML-XXX-NNN"]` block with `mode = disabled`.
+
+12. **`cfm lsm probe` automatically picks up the new policy**
+    via `AllPolicies()`. No probe-side change needed.
+
+13. **`cfm lsm enable` / `disable` automatically picks up the
+    new policy** via the loader's iteration over
+    `LoaderOptions.Policies`. No CLI-side change needed.
+
+14. **The daemon adoption path automatically picks up the new
+    policy** via `AdoptPinned`'s iteration over
+    `AllPolicies()`. No `lifecycle.go` change needed for the
+    drain path. The new emission may want enriched fields in
+    `emitNotify` — extend the `extra` map there.
+
+**Pattern caveats already discovered.**
+
+- **bpf2go does not generate non-Linux stubs.** The
+  Loader struct is defined in `loader.go` with `//go:build
+  linux`. CFM is linux-only in practice; no stub needed.
+- **CGO_ENABLED=0 stays.** cilium/ebpf is pure Go.
+- **Distro vendoring of `bpf` LSM**: RHEL 9 / CL9 build their
+  kernel without `CONFIG_BPF_LSM=y`. Preflight detects this
+  and reports specifically. Do not assume "EL9+ supported";
+  assume "EL10+ and modern Debian/Ubuntu supported, with
+  EL9 stock specifically blocked."
+- **Pinned-vs-unpinned Loader modes**: `LoaderOptions.PinDir`
+  controls whether `NewLoader` pins everything to bpffs. The
+  daemon uses `AdoptPinned(pinDir)` instead — different
+  constructor, takes already-pinned objects.
+- **Event ringbuf is shared.** All policies emit through the
+  same `cfm_events` map; the `policy_id` field disambiguates.
+  Don't add a per-policy ringbuf — it complicates the daemon
+  drain.
+- **Verifier complexity scales with kernel version**: a
+  program that loads cleanly on 6.x may be rejected on 5.14.
+  Test on RHEL 10's 5.14 kernel before claiming verifier-clean.
+  Use the integration test's `CFM_LSM_REQUIRE_FULL_ATTACH=1`
+  env-var path to harden CI on a dedicated bpf-load runner
+  once one exists.
+
+**Where to find the prior-art examples in this repo.**
+
+- The cleanest example of "policy with allowlist map" pattern
+  is not yet in the repo — FS-005 will be the first.
+- The cleanest example of "policy with bounded-loop fd walk"
+  is `cfm_revshell` in `cfmlsm.bpf.c`. Read that before
+  implementing FS-005's dentry-walk (if the inode-match
+  approach turns out not to work).
+- The cleanest example of "host-profile-conditional
+  behaviour" is in `internal/kernsec/profile.go`. cfm-lsm
+  should consume `kernsec.DetectHostProfile()` to populate
+  watched-uid sets for FS-005 and the setuid-binary set for
+  CRED-002.
+
+**Recommended slicing for the next branch.**
+
+1. PR-A: CFML-FS-005 in monitor mode, with the watched-uids
+   and watched-inodes maps populated by daemon, no `lsm.conf`
+   allowlist UI yet. Smallest viable slice.
+2. PR-B: `lsm.conf` extensions for per-policy `allow_uids`,
+   `allow_paths`, `allow_comm` etc. Lift the maps from
+   hardcoded sets to operator-configurable.
+3. PR-C: CFML-CRED-002 in monitor mode, including the
+   setuid-binary walker, with the CageFS-inode question
+   resolved against a real CL host.
+
+Each PR is roughly the size of the EXEC-001 or EXEC-003 PRs
+that already shipped — manageable, reviewable, no surprises.
+
 
 
 ## Open questions
