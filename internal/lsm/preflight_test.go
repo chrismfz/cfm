@@ -29,6 +29,12 @@ type stubProc struct {
 	lsmList     string // /sys/kernel/security/lsm contents
 	btfPresent  bool
 	procStatus  string // /proc/self/status contents
+
+	// bpffsMountpoint, when non-empty, is the mountpoint to inject
+	// into the fake /proc/mounts with fstype "bpf". Defaults to
+	// "/sys/fs/bpf" when the stub is used to model a passing host;
+	// leave empty to model the "bpffs not mounted" case.
+	bpffsMountpoint string
 }
 
 func (s stubProc) install(t *testing.T) {
@@ -71,6 +77,17 @@ func (s stubProc) install(t *testing.T) {
 		_ = writeFile(t, tmp, "sys/kernel/btf/vmlinux", "BTF\x9feeb")
 	}
 
+	// /proc/mounts — always write a fixture, but only include the
+	// bpf line when bpffsMountpoint is non-empty. Other rows mimic a
+	// realistic mounts table to make the parser do real work.
+	mountsBody := "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n" +
+		"sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n" +
+		"tmpfs /run tmpfs rw,nosuid,nodev,size=1620848k,mode=755 0 0\n"
+	if s.bpffsMountpoint != "" {
+		mountsBody += "bpf " + s.bpffsMountpoint + " bpf rw,nosuid,nodev,noexec,relatime,mode=700 0 0\n"
+	}
+	mountsPath := writeFile(t, tmp, "proc/mounts", mountsBody)
+
 	// Swap globals.
 	prevVersion := preflightProcVersionPath
 	prevConfigGz := preflightProcConfigGzPath
@@ -78,6 +95,8 @@ func (s stubProc) install(t *testing.T) {
 	prevLSMList := preflightLSMListPath
 	prevBTF := preflightBTFPath
 	prevStatus := preflightProcSelfStatus
+	prevMounts := preflightProcMounts
+	prevBPFFSPath := preflightBPFFSPath
 
 	preflightProcVersionPath = procVerPath
 	preflightProcConfigGzPath = configGzPath
@@ -85,6 +104,10 @@ func (s stubProc) install(t *testing.T) {
 	preflightLSMListPath = lsmListPath
 	preflightBTFPath = btfPath
 	preflightProcSelfStatus = statusPath
+	preflightProcMounts = mountsPath
+	if s.bpffsMountpoint != "" {
+		preflightBPFFSPath = s.bpffsMountpoint
+	}
 
 	t.Cleanup(func() {
 		preflightProcVersionPath = prevVersion
@@ -93,6 +116,8 @@ func (s stubProc) install(t *testing.T) {
 		preflightLSMListPath = prevLSMList
 		preflightBTFPath = prevBTF
 		preflightProcSelfStatus = prevStatus
+		preflightProcMounts = prevMounts
+		preflightBPFFSPath = prevBPFFSPath
 	})
 }
 
@@ -242,11 +267,12 @@ CONFIG_QUX="some-string"
 
 func TestPreflight_AllPass(t *testing.T) {
 	stub := stubProc{
-		procVersion: "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
-		bootConfig:  "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
-		lsmList:     "lockdown,capability,landlock,yama,apparmor,bpf",
-		btfPresent:  true,
-		procStatus:  "Name:\tcfm\nCapEff:\t000001ffffffffff\n",
+		procVersion:     "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		bootConfig:      "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
+		lsmList:         "lockdown,capability,landlock,yama,apparmor,bpf",
+		btfPresent:      true,
+		procStatus:      "Name:\tcfm\nCapEff:\t000001ffffffffff\n",
+		bpffsMountpoint: "/sys/fs/bpf",
 	}
 	stub.install(t)
 
@@ -359,11 +385,12 @@ func TestPreflight_NoCaps(t *testing.T) {
 func TestPreflight_ConfigUnknownWithNoFiles(t *testing.T) {
 	// /proc/config.gz absent, /boot/config-<release> absent → UNKNOWN
 	stub := stubProc{
-		procVersion: "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		procVersion:     "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
 		// bootConfig empty
-		lsmList:    "lockdown,bpf",
-		btfPresent: true,
-		procStatus: "CapEff:\t000001ffffffffff\n",
+		lsmList:         "lockdown,bpf",
+		btfPresent:      true,
+		procStatus:      "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint: "/sys/fs/bpf",
 	}
 	stub.install(t)
 
@@ -373,5 +400,76 @@ func TestPreflight_ConfigUnknownWithNoFiles(t *testing.T) {
 		if c.Name == "kernel-config" && c.Status != CheckUnknown {
 			t.Errorf("kernel-config: got %s, want UNKNOWN (no config files)", c.Status)
 		}
+	}
+}
+
+func TestPreflight_BPFFSMissing(t *testing.T) {
+	stub := stubProc{
+		procVersion: "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		bootConfig:  "CONFIG_BPF_LSM=y\n",
+		lsmList:     "lockdown,bpf",
+		btfPresent:  true,
+		procStatus:  "CapEff:\t000001ffffffffff\n",
+		// bpffsMountpoint deliberately empty → /proc/mounts will not
+		// list a bpf filesystem.
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if pf.OK {
+		t.Fatal("expected preflight to FAIL when /sys/fs/bpf is not mounted")
+	}
+	for _, c := range pf.Checks {
+		if c.Name == "bpffs-mounted" {
+			if c.Status != CheckFail {
+				t.Errorf("bpffs-mounted: got %s, want FAIL", c.Status)
+			}
+			if c.Remediation == "" {
+				t.Error("FAIL must carry operator-facing remediation")
+			}
+			return
+		}
+	}
+	t.Error("bpffs-mounted check not found in results")
+}
+
+func TestProcMountsHasBPFFS(t *testing.T) {
+	cases := []struct {
+		name   string
+		mounts string
+		path   string
+		want   bool
+	}{
+		{
+			name:   "bpf line present at exact path",
+			mounts: "proc /proc proc rw 0 0\nbpf /sys/fs/bpf bpf rw 0 0\n",
+			path:   "/sys/fs/bpf",
+			want:   true,
+		},
+		{
+			name:   "different mountpoint",
+			mounts: "bpf /run/bpf bpf rw 0 0\n",
+			path:   "/sys/fs/bpf",
+			want:   false,
+		},
+		{
+			name:   "wrong fstype at the right path",
+			mounts: "tmpfs /sys/fs/bpf tmpfs rw 0 0\n",
+			path:   "/sys/fs/bpf",
+			want:   false,
+		},
+		{
+			name:   "empty mounts table",
+			mounts: "",
+			path:   "/sys/fs/bpf",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := procMountsHasBPFFS(tc.mounts, tc.path); got != tc.want {
+				t.Errorf("procMountsHasBPFFS: got %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

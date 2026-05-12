@@ -10,17 +10,21 @@ import (
 
 // RunCLI is the entry point invoked from cmd/cfm/main.go for `cfm lsm`.
 //
-// Scaffolding subcommands (this slice):
+// Subcommands:
 //
 //	cfm lsm                  -> alias for `status`
-//	cfm lsm status [--json]  -> preflight + per-policy state
-//	cfm lsm preview          -> what would attach given conf + kernel
+//	cfm lsm status [--json]  -> preflight + per-policy state (read-only)
+//	cfm lsm preview          -> what would attach given conf + kernel (read-only)
+//	cfm lsm enable           -> attach + pin to bpffs (survives daemon restart)
+//	cfm lsm disable          -> unpin + detach all programs
 //	cfm lsm init             -> write default /etc/cfm/lsm.conf if absent
 //	cfm lsm help / -h        -> usage
 //
-// Subcommands that mutate runtime state (`enable`, `disable`, `test`,
-// `policy`) are deliberately absent until the BPF backend lands; they
-// would have nothing to act on yet.
+// `enable` and `disable` are the only subcommands that touch kernel
+// state. Once enabled, the BPF programs stay attached across cfm
+// daemon restarts, crashes, and stops. The daemon's role becomes
+// "drain the pinned ringbuf and forward events" — protection does
+// not depend on the daemon.
 func RunCLI(args []string) int {
 	if len(args) == 0 {
 		return runStatusCmd(nil, os.Stdout)
@@ -30,6 +34,10 @@ func RunCLI(args []string) int {
 		return runStatusCmd(args[1:], os.Stdout)
 	case "preview":
 		return runPreviewCmd(args[1:], os.Stdout)
+	case "enable":
+		return runEnableCmd(args[1:], os.Stdout)
+	case "disable":
+		return runDisableCmd(args[1:], os.Stdout)
 	case "init":
 		return RunInit(os.Stdout)
 	case "help", "-h", "--help":
@@ -40,6 +48,24 @@ func RunCLI(args []string) int {
 		printUsage(os.Stderr)
 		return 2
 	}
+}
+
+func runEnableCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("lsm enable", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if rc, done := handleFlagErr("lsm enable", fs.Parse(args), w); done {
+		return rc
+	}
+	return RunEnable(w)
+}
+
+func runDisableCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("lsm disable", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if rc, done := handleFlagErr("lsm disable", fs.Parse(args), w); done {
+		return rc
+	}
+	return RunDisable(w)
 }
 
 func runStatusCmd(args []string, w io.Writer) int {
@@ -90,8 +116,12 @@ func printUsage(w io.Writer) {
 
 Subcommands:
   (default)           Alias for "status"
-  status              Print kernel preflight + per-policy state
-  preview             Show what would attach given conf + kernel (read-only dry run)
+  status              Print kernel preflight + per-policy state (read-only)
+  preview             Show what would attach given conf + kernel (read-only)
+  enable              Attach the BPF programs and pin them to /sys/fs/bpf/cfm so
+                      they stay attached across daemon restarts and crashes.
+                      Needs root.
+  disable             Unpin and detach. Needs root.
   init                Write default /etc/cfm/lsm.conf if absent
   help                Show this message
 
@@ -100,11 +130,10 @@ Status flags:
   --check             Exit non-zero when preflight FAILs or lsm.conf is unreadable
 
 Notes:
-  cfm-lsm is design-phase. This release ships only the preflight, config
-  parser, and CLI scaffolding. The BPF programs that actually enforce
-  CFML-EXEC-001 (memfd exec) and CFML-EXEC-003 (reverse shell) are not
-  loaded yet -- operators can run 'cfm lsm status' to audit fleet
-  readiness ahead of the rollout.
+  status / preview do not touch the kernel; they only read /proc, /sys, and
+  /etc/cfm/lsm.conf. enable / disable are the only subcommands that mutate
+  kernel state, and they do so via bpffs pinning — once enabled, protection
+  survives daemon restarts. Run cfm lsm disable to detach.
 
 See docs/cfm-lsm.md for the full design.`)
 }

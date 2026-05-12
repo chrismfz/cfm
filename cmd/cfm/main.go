@@ -381,8 +381,10 @@ Usage:
   cfm kernsec monitor <action>    -- periodic drift-check systemd timer: enable | disable | remove | status
 
   cfm lsm                         -- alias for "cfm lsm status"
-  cfm lsm status [--json --check] -- BPF LSM kernel preflight + per-policy state (scaffolding only; BPF not yet loaded)
+  cfm lsm status [--json --check] -- BPF LSM kernel preflight + per-policy state (read-only)
   cfm lsm preview                 -- read-only dry run: what would attach given /etc/cfm/lsm.conf + kernel
+  cfm lsm enable                  -- attach + pin BPF programs to /sys/fs/bpf/cfm (survives daemon restart)
+  cfm lsm disable                 -- unpin + detach BPF programs
   cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
 
   cfm clam ping

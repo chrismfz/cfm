@@ -6,12 +6,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+)
+
+// DefaultPinDir is the canonical bpffs location for cfm-lsm pinned
+// state. Override per-instance via LoaderOptions.PinDir (used in
+// tests; production should keep this default).
+const DefaultPinDir = "/sys/fs/bpf/cfm"
+
+// Layout under the pin directory:
+//
+//   <pinDir>/maps/cfm_events       — the shared ringbuf map
+//   <pinDir>/links/cfm_memfd_exec  — CFML-EXEC-001 attached link
+//   <pinDir>/links/cfm_revshell    — CFML-EXEC-003 attached link
+//
+// Each pinned object exists for as long as the bpffs file exists;
+// the kernel only detaches when the last reference is dropped.
+// Removing the bpffs file is enough to trigger detach.
+const (
+	pinSubdirMaps  = "maps"
+	pinSubdirLinks = "links"
+
+	pinFileMap         = "cfm_events"
+	pinFileLinkMemfd   = "cfm_memfd_exec"
+	pinFileLinkRevshell = "cfm_revshell"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -47,10 +72,31 @@ type AttachResult struct {
 // The Loader does not block. Events flow from a goroutine started by
 // Start into a buffered channel returned by Events. Callers consume
 // the channel and forward into the wider CFM event bus.
+//
+// Lifetime model — three modes:
+//
+//   - Unpinned (default): NewLoader with PinDir="". Programs attached
+//     for the loader's lifetime; Close() detaches and frees everything.
+//     This is the probe-style "verify it works then exit" mode.
+//
+//   - Pinned-load: NewLoader with PinDir set. Programs attached AND
+//     pinned to bpffs. Close() releases the userspace fds but the
+//     kernel keeps the pinned programs running. UnpinAll(pinDir)
+//     is required to actually detach.
+//
+//   - Pinned-adopt: AdoptPinned(pinDir). Opens previously-pinned
+//     programs and a previously-pinned ringbuf map without
+//     reattaching anything. Used by the cfm daemon to read events
+//     from programs the operator already enabled via CLI.
 type Loader struct {
 	objs   cfmlsmObjects
 	links  map[PolicyID]link.Link
 	reader *ringbuf.Reader
+
+	// pinned is true when the loader is in pinned-load or
+	// pinned-adopt mode. Close() then skips link/map detach so the
+	// kernel-side state survives the loader's lifetime.
+	pinned bool
 
 	attach  AttachResult
 	events  chan Event
@@ -74,6 +120,17 @@ type LoaderOptions struct {
 	// IDs are ignored. Use this to load only a subset (e.g. for
 	// per-policy testing).
 	Policies []PolicyID
+
+	// PinDir, when non-empty, asks NewLoader to pin the ringbuf map
+	// and every successfully-attached link to <PinDir>/maps/ and
+	// <PinDir>/links/ respectively. The pin operation is part of
+	// NewLoader's atomic-or-fail contract: if any pin fails, every
+	// already-pinned entry is removed and the loader rolls back.
+	//
+	// When PinDir is set, Loader.Close() does NOT remove the pins.
+	// It only releases userspace fds; the kernel keeps the pinned
+	// programs and map attached. Use UnpinAll(pinDir) to detach.
+	PinDir string
 }
 
 // NewLoader loads the embedded BPF objects, attaches the requested
@@ -158,7 +215,224 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	}
 	l.reader = reader
 
+	// Pinning happens last, after every attach + ringbuf open
+	// succeeded. If any individual pin fails, every entry written so
+	// far is rolled back and the loader is torn down.
+	if opts.PinDir != "" {
+		if err := l.pinAll(opts.PinDir); err != nil {
+			// Roll back: remove anything we managed to pin, then
+			// close userspace fds so the kernel detaches.
+			_ = unpinFiles(opts.PinDir)
+			_ = reader.Close()
+			for _, lk := range l.links {
+				_ = lk.Close()
+			}
+			l.objs.Close()
+			return nil, fmt.Errorf("%w: pin to %s: %v", ErrBPFLSMUnavailable, opts.PinDir, err)
+		}
+		l.pinned = true
+	}
+
 	return l, nil
+}
+
+// pinAll writes the loader's links and ringbuf map to bpffs under
+// pinDir. Called only from NewLoader when LoaderOptions.PinDir is
+// set; expects the loader's fields to be fully populated.
+func (l *Loader) pinAll(pinDir string) error {
+	mapsDir := filepath.Join(pinDir, pinSubdirMaps)
+	linksDir := filepath.Join(pinDir, pinSubdirLinks)
+	for _, d := range []string{pinDir, mapsDir, linksDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("mkdir %s: %w", d, err)
+		}
+	}
+	mapPath := filepath.Join(mapsDir, pinFileMap)
+	if err := l.objs.cfmlsmMaps.CfmEvents.Pin(mapPath); err != nil {
+		return fmt.Errorf("pin map %s: %w", mapPath, err)
+	}
+	for id, lk := range l.links {
+		name := pinLinkFile(id)
+		if name == "" {
+			continue
+		}
+		path := filepath.Join(linksDir, name)
+		if err := lk.Pin(path); err != nil {
+			return fmt.Errorf("pin link %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// pinLinkFile returns the bpffs filename to use for a given
+// policy's pinned link. Returns "" for unknown policy IDs.
+func pinLinkFile(id PolicyID) string {
+	switch id {
+	case PolicyMemfdExec:
+		return pinFileLinkMemfd
+	case PolicyReverseShell:
+		return pinFileLinkRevshell
+	}
+	return ""
+}
+
+// AdoptPinned opens previously-pinned cfm-lsm state at pinDir and
+// returns a Loader whose Start/Events/Errors/Close work the same
+// as an unpinned Loader, except that Close does not detach — the
+// kernel-side programs and map remain attached and pinned. Use
+// UnpinAll(pinDir) when you want to actually detach.
+//
+// Intended for the cfm daemon's startup path: the operator runs
+// `cfm lsm enable` ahead of time (which pins the state), and the
+// daemon then adopts that state to read events.
+//
+// Returns ErrBPFLSMUnavailable wrapped with the underlying cause
+// when the pinned state is absent, malformed, or the kernel has
+// since dropped it.
+func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
+	if opts.EventBufferSize <= 0 {
+		opts.EventBufferSize = 256
+	}
+	mapPath := filepath.Join(pinDir, pinSubdirMaps, pinFileMap)
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open pinned map %s: %v", ErrBPFLSMUnavailable, mapPath, err)
+	}
+	l := &Loader{
+		links:  make(map[PolicyID]link.Link, 2),
+		events: make(chan Event, opts.EventBufferSize),
+		errors: make(chan error, 1),
+		attach: AttachResult{Failed: make(map[PolicyID]error)},
+		pinned: true,
+	}
+	l.objs.cfmlsmMaps.CfmEvents = m
+
+	// Walk each known policy's pinned link. Missing links are not
+	// fatal — they just mean that policy wasn't enabled at pin time.
+	linksDir := filepath.Join(pinDir, pinSubdirLinks)
+	for _, p := range AllPolicies() {
+		name := pinLinkFile(p.ID)
+		if name == "" {
+			continue
+		}
+		path := filepath.Join(linksDir, name)
+		lk, err := link.LoadPinnedLink(path, nil)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			l.attach.Failed[p.ID] = fmt.Errorf("open pinned link %s: %w", path, err)
+			continue
+		}
+		l.links[p.ID] = lk
+		l.attach.Attached = append(l.attach.Attached, p.ID)
+	}
+	if len(l.attach.Attached) == 0 {
+		_ = m.Close()
+		return nil, fmt.Errorf("%w: no pinned links found under %s", ErrBPFLSMUnavailable, linksDir)
+	}
+	reader, err := ringbuf.NewReader(m)
+	if err != nil {
+		for _, lk := range l.links {
+			_ = lk.Close()
+		}
+		_ = m.Close()
+		return nil, fmt.Errorf("%w: open ringbuf on pinned map: %v", ErrBPFLSMUnavailable, err)
+	}
+	l.reader = reader
+	return l, nil
+}
+
+// UnpinAll removes every pinned cfm-lsm entry under pinDir. The
+// kernel detaches programs and frees maps once the last reference
+// is dropped, which on bpffs means once the file is unlinked. Safe
+// to call when pinDir does not exist; returns nil in that case.
+func UnpinAll(pinDir string) error {
+	if _, err := os.Stat(pinDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return unpinFiles(pinDir)
+}
+
+func unpinFiles(pinDir string) error {
+	var first error
+	for _, sub := range []string{pinSubdirLinks, pinSubdirMaps} {
+		dir := filepath.Join(pinDir, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		for _, e := range entries {
+			path := filepath.Join(dir, e.Name())
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				if first == nil {
+					first = err
+				}
+			}
+		}
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	if err := os.Remove(pinDir); err != nil && !os.IsNotExist(err) {
+		if first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// PinnedState describes what currently exists under pinDir without
+// actually opening anything. Useful for `cfm lsm status` so it can
+// report the live attach state without hitting the kernel.
+type PinnedState struct {
+	// PinDir is the directory inspected. Always set.
+	PinDir string
+
+	// Exists is true when pinDir is present on disk. False when
+	// cfm-lsm has not been enabled (or was disabled and cleaned up).
+	Exists bool
+
+	// MapPresent indicates the shared ringbuf map is pinned.
+	MapPresent bool
+
+	// Links lists which policy links are currently pinned.
+	Links []PolicyID
+}
+
+// InspectPinned returns the structured pin state without opening
+// any BPF objects. Safe to call without CAP_BPF — it only stats
+// files under pinDir.
+func InspectPinned(pinDir string) PinnedState {
+	st := PinnedState{PinDir: pinDir}
+	if _, err := os.Stat(pinDir); err != nil {
+		return st
+	}
+	st.Exists = true
+	if _, err := os.Stat(filepath.Join(pinDir, pinSubdirMaps, pinFileMap)); err == nil {
+		st.MapPresent = true
+	}
+	for _, p := range AllPolicies() {
+		name := pinLinkFile(p.ID)
+		if name == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(pinDir, pinSubdirLinks, name)); err == nil {
+			st.Links = append(st.Links, p.ID)
+		}
+	}
+	return st
 }
 
 // programFor returns the BPF program in this Loader's collection for
@@ -203,9 +477,15 @@ func (l *Loader) Errors() <-chan error {
 	return l.errors
 }
 
-// Close detaches the BPF programs, closes the ringbuf reader, and
-// frees BPF objects. Safe to call multiple times; the actual
-// teardown runs once.
+// Close releases the loader's userspace fds.
+//
+// In unpinned mode this detaches every BPF program (closing the
+// last fd on a link is what triggers kernel detach). In pinned mode
+// the pinned bpffs entries keep their own kernel references, so
+// closing the userspace fds here does NOT detach — the programs
+// remain attached until UnpinAll(pinDir).
+//
+// Safe to call multiple times; the actual teardown runs once.
 func (l *Loader) Close() error {
 	var first error
 	l.stopOne.Do(func() {
@@ -219,6 +499,14 @@ func (l *Loader) Close() error {
 			if err := lk.Close(); err != nil && first == nil {
 				first = err
 			}
+		}
+		if l.pinned {
+			// objs holds program + map fds we got from
+			// loadCfmlsmObjects (unpinned path) or from
+			// LoadPinnedMap (pinned-adopt path). Closing those just
+			// drops userspace refs; the bpffs entries keep the
+			// kernel-side state alive. AdoptPinned populates only
+			// the map field, so this Close is still correct.
 		}
 		if err := l.objs.Close(); err != nil && first == nil {
 			first = err
