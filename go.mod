@@ -26,6 +26,7 @@ require (
 	github.com/alexedwards/argon2id v1.0.0 // indirect
 	github.com/alexedwards/scs/v2 v2.9.0 // indirect
 	github.com/boombuler/barcode v1.1.0 // indirect
+	github.com/cilium/ebpf v0.21.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
