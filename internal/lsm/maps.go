@@ -129,14 +129,60 @@ func populateWatchedUids(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("nil map")
 	}
+
+	// Read /etc/passwd ONCE into a name→uid map. Both code paths
+	// (web-user-name match + panel-manifest lookup) consume the
+	// same map, so a host with 500 cPanel accounts walks
+	// /etc/passwd once total instead of 501 times.
+	nameToUID, err := loadPasswdMap()
+	if err != nil {
+		return 0, err
+	}
+
 	uids := map[uint32]struct{}{}
 
+	// Static web-user-name match.
+	for name, uid := range nameToUID {
+		if isWebUserName(name) {
+			uids[uid] = struct{}{}
+		}
+	}
+
+	// Panel-managed accounts: every uid that owns a hosted vhost is
+	// also a web-class user. Best-effort — missing manifest files
+	// just mean no panel accounts to add.
+	for _, uid := range panelDomainOwnersToUIDs(cpanelUserDomainsTSV, nameToUID) {
+		uids[uid] = struct{}{}
+	}
+	for _, uid := range panelDomainOwnersToUIDs(directAdminDomainsTSV, nameToUID) {
+		uids[uid] = struct{}{}
+	}
+
+	one := uint8(1)
+	count := 0
+	for uid := range uids {
+		key := uid
+		if err := m.Put(key, one); err != nil {
+			// Best-effort: keep going on per-uid failures (e.g. a
+			// transient EBUSY on map mutation). The map remains a
+			// useful partial subset.
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// loadPasswdMap reads /etc/passwd once and returns username→uid for
+// every parseable line. Used by populateWatchedUids and the panel-
+// manifest path to avoid re-opening the file per user.
+func loadPasswdMap() (map[string]uint32, error) {
+	out := map[string]uint32{}
 	f, err := os.Open(passwdPath)
 	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", passwdPath, err)
+		return nil, fmt.Errorf("open %s: %w", passwdPath, err)
 	}
 	defer f.Close()
-
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -147,41 +193,16 @@ func populateWatchedUids(m *ebpf.Map) (int, error) {
 		if len(fields) < 3 {
 			continue
 		}
-		name := fields[0]
-		uidStr := fields[2]
-		uid, err := strconv.ParseUint(uidStr, 10, 32)
+		uid, err := strconv.ParseUint(fields[2], 10, 32)
 		if err != nil {
 			continue
 		}
-		if isWebUserName(name) {
-			uids[uint32(uid)] = struct{}{}
-		}
+		out[fields[0]] = uint32(uid)
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("scan %s: %w", passwdPath, err)
+		return out, fmt.Errorf("scan %s: %w", passwdPath, err)
 	}
-
-	// Panel-managed accounts: every uid that has a hosted vhost is a
-	// web-class user. We don't need to be exhaustive — best-effort
-	// merge with the static set.
-	for _, uid := range readCpanelUserUIDs() {
-		uids[uid] = struct{}{}
-	}
-	for _, uid := range readDirectAdminUserUIDs() {
-		uids[uid] = struct{}{}
-	}
-
-	one := uint8(1)
-	count := 0
-	for uid := range uids {
-		key := uid
-		if err := m.Put(key, one); err != nil {
-			// Log-style: keep going, just record the partial count
-			continue
-		}
-		count++
-	}
-	return count, nil
+	return out, nil
 }
 
 // isWebUserName matches static names and known web-user prefixes
@@ -200,37 +221,16 @@ func isWebUserName(name string) bool {
 	return false
 }
 
-// readCpanelUserUIDs reads /etc/userdomains (cPanel/WHM format:
-// `domain.com: username`) and returns the unique uid set of those
-// usernames. Returns nil on any error — best-effort.
-func readCpanelUserUIDs() []uint32 {
-	return panelDomainOwnersToUIDs(cpanelUserDomainsTSV, func(line string) string {
-		// `domain.com: username`
-		idx := strings.LastIndex(line, ":")
-		if idx < 0 {
-			return ""
-		}
-		return strings.TrimSpace(line[idx+1:])
-	})
-}
-
-// readDirectAdminUserUIDs reads /etc/virtual/domainowners (DirectAdmin
-// format: `domain.com: username`) and returns the unique uid set.
-// Same shape as cPanel — happens to use the same colon format.
-func readDirectAdminUserUIDs() []uint32 {
-	return panelDomainOwnersToUIDs(directAdminDomainsTSV, func(line string) string {
-		idx := strings.LastIndex(line, ":")
-		if idx < 0 {
-			return ""
-		}
-		return strings.TrimSpace(line[idx+1:])
-	})
-}
-
-// panelDomainOwnersToUIDs is the shared parser. extract extracts the
-// username from one line of the panel manifest; nil lookup errors
-// produce a nil slice.
-func panelDomainOwnersToUIDs(path string, extract func(string) string) []uint32 {
+// panelDomainOwnersToUIDs reads a panel manifest (cPanel
+// /etc/userdomains or DirectAdmin /etc/virtual/domainowners — both
+// use `domain.com: username` per line) and resolves usernames to
+// uids via the supplied passwd map. Returns nil on any IO error
+// (best-effort: missing manifest = no panel accounts).
+//
+// The passwd map is shared with the caller so we do not re-read
+// /etc/passwd per manifest file. Was O(panel_accounts * passwd_lines)
+// before this refactor; now O(panel_accounts + passwd_lines).
+func panelDomainOwnersToUIDs(path string, nameToUID map[string]uint32) []uint32 {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -240,7 +240,12 @@ func panelDomainOwnersToUIDs(path string, extract func(string) string) []uint32 
 	users := map[string]struct{}{}
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		username := extract(scanner.Text())
+		line := scanner.Text()
+		idx := strings.LastIndex(line, ":")
+		if idx < 0 {
+			continue
+		}
+		username := strings.TrimSpace(line[idx+1:])
 		if username == "" {
 			continue
 		}
@@ -249,36 +254,11 @@ func panelDomainOwnersToUIDs(path string, extract func(string) string) []uint32 
 
 	uids := []uint32{}
 	for username := range users {
-		if uid, ok := lookupUID(username); ok {
+		if uid, ok := nameToUID[username]; ok {
 			uids = append(uids, uid)
 		}
 	}
 	return uids
-}
-
-// lookupUID resolves a username to its uid via /etc/passwd. Returns
-// (uid, true) on success, (0, false) when the user is absent.
-func lookupUID(username string) (uint32, bool) {
-	f, err := os.Open(passwdPath)
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.SplitN(scanner.Text(), ":", 4)
-		if len(fields) < 3 {
-			continue
-		}
-		if fields[0] != username {
-			continue
-		}
-		uid, err := strconv.ParseUint(fields[2], 10, 32)
-		if err == nil {
-			return uint32(uid), true
-		}
-	}
-	return 0, false
 }
 
 // populateWatchedInodes stat()s every path in `paths`, looks up the

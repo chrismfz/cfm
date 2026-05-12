@@ -216,6 +216,73 @@ bounded (cap at fd ≤ 2) and the socket-state read must use existing CO-RE
 relocations rather than custom field offsets. Budget verifier complexity
 explicitly before committing the design to that hook layout.
 
+### `CFML-FS-005` — Sensitive-file modification by web user
+
+| | |
+|---|---|
+| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr` |
+| Default mode | `monitor`; enforce is opt-in |
+| FP risk | Very low on CageFS hosts; low–medium on plain hosts |
+| Perf impact | Negligible — only fires on rare write-class operations against a small inode set |
+
+**Description.** Six BPF LSM programs share one check helper. On every
+write-class inode operation, the program looks up the calling task's uid
+in the daemon-populated `cfm_watched_uids` hash (web-class names —
+apache, nginx, php-fpm, lsphp, alt-php-* — plus every cPanel and
+DirectAdmin account uid). If matched, it looks up the target inode in
+`cfm_watched_inodes` (the daemon stats every path in
+`internal/lsm/maps.go::DefaultSensitivePaths` and records inode
+numbers). Both hits → emit event; if enforce mode is active for this
+policy, return `-EPERM` and the syscall fails outright.
+
+**Inode-number matching avoids BPF-side path walking entirely.** For
+operations that create new files under a watched directory (e.g.
+`/etc/sudoers.d/backdoor`), the `inode_create` hook reads the parent
+dentry's inode and matches that against the same set — the daemon
+includes the dir inodes alongside the file inodes.
+
+**Rationale.** This is the high-value catch for kernel 0-day cash-ins.
+A Dirty Pipe or pwnkit attacker that successfully escalated still has
+to *use* the privilege — typically by writing to `/etc/shadow`,
+`/etc/sudoers`, or `/root/.ssh/authorized_keys`. Those writes go
+through the standard syscall path even when the privesc primitive
+bypassed earlier LSM hooks, so cfm-lsm sees them.
+
+**Enforcement.** Available via `mode = enforce` in `lsm.conf`. The
+volatile-const flip applies to this policy the same way as EXEC-001
+and EXEC-003.
+
+### `CFML-CRED-002` — Privilege escalation without setuid path
+
+| | |
+|---|---|
+| Hook | `cred_prepare` |
+| Default mode | `monitor` (only) |
+| FP risk | Low — daemon walks `/usr/bin`, `/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` for setuid binaries and whitelists their inodes |
+| Perf impact | Hot — fires on every credential install; bounded by a single map lookup |
+
+**Description.** One BPF program at `cred_prepare`. Reads the new and
+old credential structs. Only continues when `new.euid == 0 && old.euid != 0`
+(non-root → root). Then resolves `current->mm->exe_file`'s inode and
+looks it up in `cfm_setuid_inodes`. If the inode is NOT in the
+whitelist, the process is gaining root through a code path that did
+not go through a recognised setuid binary — the canonical
+kernel-exploit-completion fingerprint. Emit event; never block.
+
+**Monitor-only by design.** Returning `-EPERM` from `cred_prepare` can
+deadlock systemd helpers mid-transition (kernel auth bugs, polkit
+weirdness, container runtime cred manipulation). The value is in the
+alert, not the block. `cfm lsm enable` silently downgrades a
+`mode = enforce` setting on this policy to `monitor` with a clear
+warning, so an operator who copies an enforce setting from a different
+policy still gets safe behaviour.
+
+**Companion kernsec rule.** `KSEC-LSM-bpf-001` (in `internal/kernsec/`)
+appends `bpf` to the operator's existing `lsm=` boot argument when
+forced in `/etc/cfm/kernsec.conf`. Required on distros where `bpf` is
+not in the default LSM list (most non-EL10 kernels). Opt-in via
+`[rule "KSEC-LSM-bpf-001"] state = force`. Symmetric unmerge on disable.
+
 ## Out of scope (with rationale)
 
 For each excluded policy ID, one short paragraph on what already covers
@@ -1279,7 +1346,151 @@ For each new policy `CFML-XXX-NNN`:
 Each PR is roughly the size of the EXEC-001 or EXEC-003 PRs
 that already shipped — manageable, reviewable, no surprises.
 
+## Suggested next policies — non-CageFS host classes
 
+The four shipping policies (EXEC-001, EXEC-003, FS-005, CRED-002)
+were sized for the cPanel + CloudLinux + KernelCare baseline.
+That stack is generous to cfm-lsm: CageFS pre-empties most of
+the legitimate access surface, so the FP rate on FS-005 is near
+zero, and the rest of the operator-facing tuning surface is
+narrow. Operators running *other* host classes need a different
+default policy mix.
+
+This section sketches candidate policies for the hosting shapes
+CFM also runs on and explicitly is NOT optimised for in the
+shipped catalog: **single-purpose nameservers, monitoring VMs,
+plain nginx app hosting, Virtualmin / Webmin / DirectAdmin
+without CageFS, and Proxmox hypervisors with or without
+DirectAdmin in the guests.** None of these have an
+account-namespacing layer (CageFS) doing the heavy lifting, so
+the FS-005 FP surface is wider and other detections become more
+useful in compensation.
+
+### Host-class taxonomy
+
+| Class | Distinguishing trait | What "normal" looks like |
+|---|---|---|
+| **Nameserver** (ns1/ns2/ns3) | Single service (BIND / unbound / PowerDNS). No webserver, no panel. | `named` / `unbound` answers DNS; root SSH for admin; package updates. No exec from `named` user. No outbound connect by `named`. |
+| **Monitoring node** | zabbix-agent / prometheus-exporter / node_exporter. | Read-only system access; periodic outbound HTTP push to the metrics server. No shell spawns by the agent user. |
+| **Plain nginx host** | Single application; no panel; nginx + a Go/Node/Python backend. | Backend forks workers, reads docroot, writes logs. No `/etc/*` writes by the app user. No shell exec. |
+| **Virtualmin / Webmin / DA (no CageFS)** | Panel-managed users but no CageFS isolation. | Cron jobs, mail delivery, FTP uploads, occasional `composer install`. Web users touch their own home dirs only. |
+| **Proxmox hypervisor** | Hosts QEMU/LXC guests; no application workload. | `pveproxy`, `qm`, `lxc-start-ephemeral` run as root. No PHP at all. Guest activity is opaque from the host. |
+
+### Candidate rules
+
+The five rules below cover the broad surface across those host
+classes. Each is sized similarly to the existing four — single
+BPF program (or small group), one allowlist map, monitor-mode
+default, optional enforce.
+
+**CFML-EXEC-004 — Shell exec by service-account user.**
+Hook `bprm_check_security`. Blocks `bash` / `sh` / `dash` / `zsh`
+(plus `python`, `perl`, `ruby` interactive REPLs) when invoked
+by uid in a configurable "service account" set: `named`,
+`unbound`, `prometheus`, `zabbix`, `node_exporter`, `nginx`,
+plus any operator-listed extras. On nameservers and monitoring
+nodes this is the highest-signal rule — the named user has no
+legitimate reason to spawn a shell. FP risk: low; needs an
+allowlist for diagnostic tooling that legitimately runs
+ad-hoc python scripts as those users (rare). Hook surface
+identical to EXEC-001 / EXEC-003, complexity comparable.
+
+**CFML-NET-002 — Outbound connect by service-account user.**
+Hook `socket_connect`. Fires when a uid in the watched set
+initiates a `connect()` to a non-local address. Nameservers,
+monitoring agents, and most service users have a fixed and
+narrow outbound allowlist (upstream resolvers, metrics
+push targets, NTP). A connect outside the allowlist is a
+post-exploit C2 fingerprint or a data-exfiltration attempt.
+This rule overlaps with `internal/outbound/` (the per-uid NFLOG
+collector) but operates one layer lower — catching the syscall
+attempt before the packet leaves; outbound is observation-only
+at the netfilter layer. Likely the cleanest path is to extend
+`internal/outbound/` with a per-user enforcement mode, not
+to add a new LSM rule — but worth evaluating both.
+
+**CFML-FS-009 — Boot/kernel-tree modification by non-package-manager.**
+Hook `inode_create` / `inode_setattr` / `inode_unlink` on a
+watched-paths set covering `/boot/*`, `/lib/modules/*`,
+`/etc/grub*`, `/boot/efi/*`. Watched uids: ALL non-root uids
+(root is allowlisted only when the parent process chain
+matches a package manager: `apt`, `dnf`, `yum`, `rpm`, `dpkg`,
+`pveupgrade`). Catches bootkit / rootkit persistence — the
+classic "I've gained root, now I want to survive a reboot"
+move. Very high signal across every host class. FP risk: low,
+but needs the package-manager parent-process allowlist done
+right.
+
+**CFML-FS-010 — systemd unit installation.**
+Hook `inode_create` / `inode_setattr` on `/etc/systemd/system/`
+and `/usr/lib/systemd/system/`. Same parent-process allowlist
+as FS-009 (package managers + systemctl daemon-reload via
+operator session). Catches persistence via systemd unit
+installation — the second most common post-exploit persistence
+pattern after authorized_keys editing.
+
+**CFML-MOD-001 — Kernel module load by non-init process.**
+Hook `kernel_module_request` (or `bpf` LSM's `bpf_prog_load`
+for a tighter scope). Watched uids: all non-root, or with
+parent-process allowlist for `modprobe` / `insmod` invoked by
+systemd / `kcare-cli` / `uptrack-prereq` (KernelCare) /
+`ksplice-uptrack`. Catches loadable-kernel-module rootkits.
+Per-host-profile tuning: aggressive on nameservers (no
+modules should load post-boot), looser on hypervisors (LXC /
+qemu sometimes pull in modules on guest start).
+
+### Per-host-class default mix
+
+```
+                       EXEC-001  EXEC-003  FS-005  CRED-002  EXEC-004  NET-002  FS-009  FS-010  MOD-001
+nameserver              monitor   monitor   skip    monitor   monitor   monitor  monitor monitor monitor
+monitoring node         monitor   monitor   skip    monitor   monitor   skip*    monitor monitor monitor
+plain nginx host        monitor   monitor   monitor monitor   monitor   skip     monitor monitor skip
+virtualmin/webmin/DA    monitor   monitor   monitor monitor   skip**    skip     monitor monitor skip
+proxmox hypervisor      monitor   skip***   skip    monitor   skip      skip     monitor monitor skip
+cpanel + CageFS         monitor   monitor   monitor monitor   skip      skip     monitor monitor skip
+```
+
+`*` Monitoring nodes push metrics outbound — needs a wide allowlist
+that probably costs more than the rule is worth.
+`**` Panels legitimately spawn shells for cron job execution.
+`***` Hypervisors have little PHP workload; reverse-shell vector
+is mostly about hypervisor compromise rather than guest.
+
+### Implementation order if you pursue this
+
+1. **CFML-FS-009 (boot/kernel-tree)** — highest signal across every
+   host class, lowest FP, smallest verifier surface. Same shape as
+   FS-005 with a different watched-paths set.
+2. **CFML-EXEC-004 (service-user shell)** — nameservers and
+   monitoring nodes get most benefit. Watched-uid set is the inverse
+   of FS-005's (system users, not panel users).
+3. **CFML-MOD-001 (module load)** — catches the rootkit case across
+   every host class. Needs the KernelCare / Ksplice / Uptrack
+   allowlist done before enforce is safe.
+4. **CFML-FS-010 (systemd units)** — persistence catch. Smallest
+   in scope.
+5. **CFML-NET-002** — actually probably an extension to
+   `internal/outbound/` rather than a new LSM rule.
+
+### Host-profile detection extensions worth doing alongside
+
+`internal/kernsec/profile_probe.go::HostProfile` already detects
+cPanel, DirectAdmin, CloudLinux LVE, CageFS, Imunify360, KernelCare,
+Ksplice, Proxmox, ZFS, NVIDIA, etc. To make the per-host-class
+default mix automatic, extend it with:
+
+- `IsNameserverHost bool` — `named` / `unbound` / `pdns` process
+  running, no web server.
+- `IsMonitoringNode bool` — node_exporter / zabbix-agent /
+  prometheus / telegraf service present, no web workload.
+- `IsSimpleWebHost bool` — nginx or apache present, no panel
+  (`!HasHostingPanelWorkload`).
+- `IsHybridDAOnly bool` — DirectAdmin present, CageFS absent.
+
+Then `cfm lsm init` can pick a sensible default mix per profile
+rather than shipping every policy at `mode = disabled` and asking
+the operator to figure out which to flip.
 
 ## Open questions
 
