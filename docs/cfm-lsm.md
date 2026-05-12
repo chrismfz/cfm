@@ -20,18 +20,36 @@ on distros where `bpf` is not in the default LSM list (most non-EL10
 kernels). Opt-in.
 
 All BPF LSM policies are implemented, compiled, and verified to
-load on EL10 (kernel 6.12). The full end-to-end flow is:
+load on EL10 (kernel 6.12). The end-to-end flow:
 
 ```
-operator: cfm lsm enable     →  loads + attaches + pins to /sys/fs/bpf/cfm/
-kernel  : detects events     →  bprm_check_security fires for matches
-cfm daemon: adopts pinned    →  drains ringbuf, emits notify events
-operator: cfm lsm disable    →  unpins, kernel detaches
+operator: edit /etc/cfm/lsm.conf  →  enabled = true; pick per-policy mode
+operator: systemctl restart cfm   →  daemon auto-enables on startup
+cfm daemon: ApplyConfig           →  if pins absent (post-reboot or fresh):
+                                       preflight + load + attach + pin
+                                     if pins present (operator pre-enabled):
+                                       adopt them
+kernel  : detects events          →  BPF LSM hooks fire on matches
+cfm daemon: drain ringbuf         →  emit notify + log + dmesg DETECT lines
+operator: cfm lsm disable         →  unpin, kernel detaches (daemon stays up)
 ```
 
-Protection is independent of the cfm daemon's lifecycle — once
-`cfm lsm enable` has run, the BPF programs stay attached across
-daemon restarts, daemon crashes, and `systemctl stop cfm`. Event
+**Reboot semantics.** `/sys/fs/bpf` is a RAM-only kernel filesystem,
+so a reboot wipes every pinned BPF object. The daemon handles this:
+on every startup it inspects bpffs, and if no pins are found it
+re-runs the load + attach + pin work itself. From the operator's
+perspective, `enabled = true` in `lsm.conf` is the long-lived
+declarative state; everything else is plumbing.
+
+**`cfm lsm enable` is still useful.** Operators who want to
+activate cfm-lsm immediately without restarting the daemon — or
+who want the interactive enforce-mode confirmation prompt — can
+run it directly. The daemon's auto-enable picks the same path.
+
+Protection survives daemon restarts (the pins live in bpffs, not
+in the daemon process), daemon crashes, and `systemctl stop cfm`
+WITHIN the same kernel boot. After a reboot, the daemon's
+auto-enable re-establishes protection on the way back up. Event
 *collection* depends on the daemon (it drains the pinned ringbuf
 and forwards events into the notify pipeline); event *detection*
 does not.
@@ -42,15 +60,17 @@ a match, failing the calling process's syscall) is **available but
 opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, and `CFML-FS-005`;
 `CFML-CRED-002` is monitor-only by design (returning -EPERM from
 the cred-install hook can deadlock systemd helpers and pkexec
-mid-transition). Set `mode = enforce` in `/etc/cfm/lsm.conf` and
-re-run `cfm lsm enable`. The mechanism is a `volatile const`
-global in the BPF program rewritten at load time via
-`cilium/ebpf`'s `spec.Variables[name].Set()`, so enforce/monitor
-is baked into the program's instruction stream — one byte-compare
-per match path, no runtime branching cost. `cfm lsm enable`
-prompts for confirmation when any policy is enforce; `--yes`
-skips the prompt for unattended scripts. Recovery from a
-false-positive enforce block is one command: `cfm lsm disable`.
+mid-transition; enable.go and lifecycle.go both downgrade an
+enforce setting to monitor with a warning). Set `mode = enforce`
+in `/etc/cfm/lsm.conf` and restart cfm (or run `cfm lsm disable`
+then re-enable). The mechanism is a `volatile const` global in the
+BPF program rewritten at load time via `cilium/ebpf`'s
+`spec.Variables[name].Set()`, so enforce/monitor is baked into the
+program's instruction stream — one byte-compare per match path, no
+runtime branching cost. `cfm lsm enable` prompts for confirmation
+when any policy is enforce; `--yes` skips the prompt for unattended
+scripts. Recovery from a false-positive enforce block is one
+command: `cfm lsm disable`.
 
 This document supersedes an earlier broader draft that proposed a
 fifteen-policy BPF LSM component spanning exec, credential, filesystem,

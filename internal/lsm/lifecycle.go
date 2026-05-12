@@ -4,6 +4,7 @@ package lsm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -13,31 +14,33 @@ import (
 	"cfm/internal/notify"
 )
 
-// Lifecycle owns the daemon-side adoption of cfm-lsm. Mirrors the
+// Lifecycle owns the daemon-side activation of cfm-lsm. Mirrors the
 // shape of internal/outbound's Lifecycle: created once in
 // cmd/cfm/main.go, ApplyConfig is called on every config-reload tick,
-// and the first call where conditions are met spawns the adopt
-// goroutine. Subsequent calls are no-ops.
+// and the first call where conditions are met activates the BPF
+// programs and starts the drain goroutine. Subsequent calls are
+// no-ops.
 //
-// Conditions for activation:
+// Activation flow when /etc/cfm/lsm.conf has enabled=true and at
+// least one policy is non-disabled:
 //
-//   - /etc/cfm/lsm.conf has enabled=true.
-//   - At least one policy in lsm.conf is mode=monitor or mode=enforce.
-//   - InspectPinned(DefaultPinDir) reports Exists=true (the operator
-//     has already run `cfm lsm enable`).
+//  1. InspectPinned(DefaultPinDir) — does bpffs already have our pins?
+//  2. If YES (a previous daemon already enabled, or the operator ran
+//     `cfm lsm enable` directly): AdoptPinned and start draining.
+//  3. If NO (fresh boot — bpffs is RAM-only, so reboots wipe pins):
+//     run preflight, then NewLoader{PinDir=…} to load + attach + pin
+//     in one shot, then start draining from that loader.
 //
-// When any of those is false the lifecycle stays dormant. The
-// daemon's start path does NOT auto-pin — that is an explicit
-// operator action so cfm-lsm protection is never silently activated
-// without consent. (If the operator wants auto-attach on daemon start
-// they can run `cfm lsm enable` once; subsequent daemon restarts
-// adopt the existing pinned state.)
+// This makes "enabled = true" in lsm.conf a self-healing state:
+// after reboot, the first daemon start re-pins and resumes
+// protection. Operators can still use `cfm lsm enable` for ad-hoc
+// or interactive activation, but the daemon does not depend on it.
 type Lifecycle struct {
 	mu      sync.Mutex
 	started bool
 
-	// loader is the live AdoptPinned result. Held so Stop can close
-	// it cleanly. Nil before ApplyConfig has activated.
+	// loader is the live AdoptPinned-or-NewLoader result. Held so
+	// Stop can close it cleanly. Nil before ApplyConfig has activated.
 	loader *Loader
 
 	// drainCancel cancels the ringbuf drain goroutine on Stop.
@@ -50,10 +53,11 @@ type Lifecycle struct {
 func NewLifecycle() *Lifecycle { return &Lifecycle{} }
 
 // ApplyConfig checks whether cfm-lsm should be active and, if so,
-// adopts the operator's pre-pinned BPF state.
+// either adopts the existing pinned state or creates fresh pins
+// (the auto-enable path used after reboot, when bpffs is empty).
 //
 // Called on every daemon config-reload tick. The activation is
-// start-once — if cfm-lsm was already adopted in this daemon
+// start-once — if cfm-lsm was already started in this daemon
 // process, this is a no-op even if lsm.conf changed. Stop the
 // daemon and run `cfm lsm disable` / `cfm lsm enable` to apply a
 // fresh policy set.
@@ -69,8 +73,8 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 
 	conf, err := LoadConf(false)
 	if err != nil {
-		// Absent or unreadable config — nothing to adopt. Quiet: the
-		// `cfm lsm status` command surfaces the underlying error.
+		// Absent or unreadable config — nothing to activate. Quiet:
+		// the `cfm lsm status` command surfaces the underlying error.
 		l.mu.Unlock()
 		return
 	}
@@ -82,28 +86,16 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 		return
 	}
 	// At least one policy must be enabled in conf, otherwise there
-	// is nothing meaningful to drain even if pinned state exists.
+	// is nothing meaningful to activate.
 	if !anyEnabled(conf) {
 		l.mu.Unlock()
 		return
 	}
 
-	pinned := InspectPinned(DefaultPinDir)
-	if !pinned.Exists || len(pinned.Links) == 0 {
-		// Operator has set enabled=true in lsm.conf but has not run
-		// `cfm lsm enable` yet. Log once and stay dormant — the
-		// next reload tick will pick up the change.
-		logging.Logf("[lsm] config enabled but no pinned BPF state at %s; run `cfm lsm enable`", DefaultPinDir)
-		l.mu.Unlock()
-		return
-	}
-
-	loader, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
+	loader, fresh, err := openOrCreateLoader(conf)
 	if err != nil {
-		logging.Logf("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
-		KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
 		l.mu.Unlock()
-		return
+		return // openOrCreateLoader already logged + emitted to kmsg
 	}
 
 	drainCtx, drainCancel := context.WithCancel(ctx)
@@ -117,30 +109,111 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	go l.run(loader)
 
 	attach := loader.Attach()
-	logging.Logf("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
-	KmsgStatef("ADOPT", "daemon attached to pinned state at %s, draining ringbuf (policies: %s)",
-		DefaultPinDir, policyModeSummary(conf, attach.Attached))
+	summary := policyModeSummary(conf, attach.Attached)
+	if fresh {
+		logging.Logf("[lsm] auto-enabled at %s (policies: %v)", DefaultPinDir, attach.Attached)
+		KmsgStatef("ALIVE", "daemon auto-enabled %s pinned=%s", summary, DefaultPinDir)
+	} else {
+		logging.Logf("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
+		KmsgStatef("ADOPT", "daemon attached to pinned state at %s, draining ringbuf (policies: %s)",
+			DefaultPinDir, summary)
+	}
 
-	// Repopulate FS-005 + CRED-002 maps. The maps survived in
-	// bpffs but their contents may be stale — uids may have changed
-	// since the operator's last `cfm lsm enable` (new cPanel
-	// accounts, package upgrades that brought new setuid binaries),
-	// and refreshing on every daemon start is cheap.
+	// Always refresh the FS-005 + CRED-002 maps from the live host.
+	// On the fresh path this is part of activation; on the adopt
+	// path the pinned maps survived in bpffs but their contents may
+	// be stale (new cPanel/DA accounts, newly-installed setuid
+	// binaries) so refreshing on every daemon start is cheap and
+	// keeps the detector accurate.
 	uids, inodes, setuid, perr := PopulateMaps(loader)
 	if perr != nil {
-		logging.Logf("[lsm] partial map population on adopt: %v (uids=%d inodes=%d setuid=%d)",
+		logging.Logf("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
 			perr, uids, inodes, setuid)
-		KmsgStatef("ISSUE", "partial map population on adopt: %v", perr)
+		KmsgStatef("ISSUE", "partial map population: %v", perr)
 	} else {
-		logging.Logf("[lsm] maps refreshed: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
+		logging.Logf("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
 			uids, inodes, setuid)
 	}
 }
 
-// Stop tears down the adoption goroutine and releases the userspace
+// openOrCreateLoader is the activation core: either adopt existing
+// pinned state, or run preflight + NewLoader to create fresh pins.
+// Returns the loader, a `fresh` boolean indicating which path was
+// taken, and any error. On error the caller stays dormant — every
+// failure path here also logs and emits to kmsg so the operator
+// sees what happened.
+//
+// The fresh path is what makes "enabled = true" survive a reboot:
+// bpffs is RAM-only, so on every boot the daemon comes up to find
+// no pins, runs the same load+attach+pin work `cfm lsm enable` would
+// have done, and resumes protection without operator intervention.
+func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
+	pinned := InspectPinned(DefaultPinDir)
+	if pinned.Exists && len(pinned.Links) > 0 {
+		l, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
+		if err != nil {
+			logging.Logf("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
+			KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
+			return nil, false, err
+		}
+		return l, false, nil
+	}
+
+	// No pinned state — auto-enable. Run preflight first; if it
+	// fails (kernel too old, CONFIG_BPF_LSM not set, `bpf` not in
+	// /sys/kernel/security/lsm, BTF missing, caps missing, bpffs
+	// not mounted) we stay dormant and the daemon continues
+	// normally. `cfm lsm status` will report the failing checks.
+	pf := RunPreflight()
+	if !pf.OK {
+		logging.Logf("[lsm] auto-enable skipped: kernel preflight FAIL (run `cfm lsm status` for details)")
+		return nil, false, errors.New("preflight failed")
+	}
+
+	// Build the same policies + modes map that `cfm lsm enable`
+	// would have built. Apply the CRED-002 enforce-downgrade so an
+	// operator who set mode=enforce on CRED-002 in lsm.conf still
+	// gets safe monitor-mode behaviour from the daemon-driven path.
+	var policies []PolicyID
+	modes := map[PolicyID]Mode{}
+	for _, p := range AllPolicies() {
+		m := conf.ModeFor(p.ID)
+		if m == ModeDisabled {
+			continue
+		}
+		if p.ID == PolicyCredEscal && m == ModeEnforce {
+			logging.Logf("[lsm] auto-enable: CFML-CRED-002 enforce downgraded to monitor (cred-install enforce can deadlock systemd; see docs/cfm-lsm.md)")
+			m = ModeMonitor
+		}
+		policies = append(policies, p.ID)
+		modes[p.ID] = m
+	}
+
+	l, lerr := NewLoader(LoaderOptions{
+		EventBufferSize: 1024,
+		Policies:        policies,
+		Modes:           modes,
+		PinDir:          DefaultPinDir,
+	})
+	if lerr != nil {
+		logging.Logf("[lsm] auto-enable failed: %v", lerr)
+		KmsgStatef("ISSUE", "auto-enable failed: %v", lerr)
+		// Try to clean up any partial pin state so the next reload
+		// tick starts from scratch rather than half-pinned.
+		_ = UnpinAll(DefaultPinDir)
+		return nil, false, lerr
+	}
+	return l, true, nil
+}
+
+// Stop tears down the activation goroutine and releases the userspace
 // fds. It does NOT unpin — the pinned BPF programs remain attached
 // at the kernel level past daemon shutdown. `cfm lsm disable` is the
-// only path that actually detaches.
+// only path that actually detaches at the kernel level.
+//
+// (Note: bpffs is RAM-only, so a reboot DOES detach everything. That
+// is fine — the next daemon start re-runs ApplyConfig and the
+// auto-enable path re-pins from scratch.)
 func (l *Lifecycle) Stop() {
 	if l == nil {
 		return
@@ -195,8 +268,8 @@ func (l *Lifecycle) run(loader *Loader) {
 }
 
 // anyEnabled reports whether any policy in conf has a non-disabled
-// mode. If every policy is disabled there is no reason to adopt
-// the pinned state — even if it exists.
+// mode. If every policy is disabled there is no reason to activate
+// even if pinned state exists.
 func anyEnabled(c *Conf) bool {
 	if c == nil {
 		return false
