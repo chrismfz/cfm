@@ -97,6 +97,19 @@ type MountRule struct {
 	// MySQL temp tables, session files, the /var/tmp-survives-reboot
 	// contract, etc.) and stay tip-only.
 	CanEnable bool
+
+	// DefaultLiveOptions lists the subset of Recommended that the
+	// kernel / systemd / distro already applies at boot without
+	// kernsec doing anything. /dev/shm is the canonical case: every
+	// modern distro mounts it via systemd PID 1's mount-setup table
+	// with nosuid,nodev already on, so the only option kernsec
+	// effectively adds is noexec. Disable consults this field to
+	// avoid the obvious foot-gun of remounting /dev/shm with
+	// `dev,suid,exec` — that would leave the host *less* hardened
+	// than a fresh distro install. With DefaultLiveOptions set,
+	// disable reverts only the options kernsec actually added on
+	// top of the distro baseline, never the baseline itself.
+	DefaultLiveOptions string
 }
 
 // KSPPSysctls is the server-safe sysctl profile from kspp.sh.

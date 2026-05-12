@@ -219,48 +219,149 @@ func TestEnableMount_RemountFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestDisableMount_StripsManagedOptions(t *testing.T) {
-	// Operator had a /dev/shm line WITHOUT the cfm marker (so they
-	// owned it themselves), then ran enable, which added the three
-	// managed options to it. Disable must strip those three and
-	// keep the operator's other options.
+func TestDisableMount_StripsOnlyKernsecAdditions_PreservesDistroDefaults(t *testing.T) {
+	// /dev/shm on every modern distro mounts with nosuid,nodev
+	// already on (systemd PID 1 mount-setup table). Kernsec only
+	// adds `noexec` on top. Disable must therefore strip ONLY
+	// noexec — leaving nodev,nosuid (and any operator-set options
+	// like size=, mode=) untouched. Remounting with `dev,suid,exec`
+	// would land the host *below* the distro baseline; that was a
+	// real bug observed against findmnt /dev/shm on Alma, Debian,
+	// and Ubuntu hosts.
 	withFakeFstab(t, `tmpfs /dev/shm tmpfs defaults,size=8G,mode=1777,nodev,nosuid,noexec 0 0
 `)
 	stub := &stubExec{}
 	stub.install(t)
 
-	rule := MountRule{MountPoint: "/dev/shm", Recommended: "nodev,nosuid,noexec", CanEnable: true}
+	rule := MountRule{
+		MountPoint:         "/dev/shm",
+		Recommended:        "nodev,nosuid,noexec",
+		DefaultLiveOptions: "nodev,nosuid",
+		CanEnable:          true,
+	}
 	var w bytes.Buffer
 	if err := DisableMount(rule, &w, EnableMountOptions{}); err != nil {
 		t.Fatalf("DisableMount returned %v", err)
 	}
 	got, _ := os.ReadFile(PathFstab)
-	for _, opt := range []string{"defaults", "size=8G", "mode=1777"} {
+	// Operator's own options + the distro-default kernsec-managed
+	// options stay in fstab.
+	for _, opt := range []string{"defaults", "size=8G", "mode=1777", "nodev", "nosuid"} {
 		if !strings.Contains(string(got), opt) {
-			t.Errorf("disable must preserve operator option %q; got:\n%s", opt, got)
+			t.Errorf("disable must preserve %q (operator or distro-default); got:\n%s", opt, got)
 		}
 	}
-	for _, opt := range []string{",nodev", ",nosuid", ",noexec"} {
-		if strings.Contains(string(got), opt) {
-			t.Errorf("disable must strip kernsec-managed option %q; got:\n%s", opt, got)
-		}
+	// Only the kernsec-effective addition gets stripped.
+	if strings.Contains(string(got), "noexec") {
+		t.Errorf("disable must strip noexec from fstab; got:\n%s", got)
 	}
-	// Revert remount must run with explicit-negation flags.
-	if len(stub.remounts) != 1 || !strings.Contains(stub.remounts[0], "dev,suid,exec") {
-		t.Errorf("disable should remount with explicit negations; got %v", stub.remounts)
+	// Runtime revert must use ONLY the anti-option of the
+	// kernsec-effective addition. `dev,suid,exec` would weaken the
+	// host below the distro baseline and is the bug we are fixing.
+	// Inspect just the opts portion (after the ":") so the "dev" in
+	// "/dev/shm" doesn't false-positive the substring check.
+	if len(stub.remounts) != 1 {
+		t.Fatalf("expected exactly one remount; got %v", stub.remounts)
+	}
+	colon := strings.Index(stub.remounts[0], ":")
+	if colon < 0 {
+		t.Fatalf("malformed remount record: %q", stub.remounts[0])
+	}
+	gotOpts := stub.remounts[0][colon+1:]
+	if gotOpts != "exec" {
+		t.Errorf("remount opts must be exactly `exec` (the anti-option of noexec); got %q", gotOpts)
+	}
+}
+
+func TestDisableMount_NoOpWhenRecommendationFullyCoveredByDefaults(t *testing.T) {
+	// Defensive: if every Recommended option is in
+	// DefaultLiveOptions (a hypothetical future rule where the
+	// distro defaults are already perfect), disable should report
+	// "nothing to do" and not run a daemon-reload or a remount.
+	withFakeFstab(t, ``)
+	stub := &stubExec{}
+	stub.install(t)
+
+	rule := MountRule{
+		MountPoint:         "/some/path",
+		Recommended:        "nodev,nosuid",
+		DefaultLiveOptions: "nodev,nosuid",
+		CanEnable:          true,
+	}
+	var w bytes.Buffer
+	if err := DisableMount(rule, &w, EnableMountOptions{}); err != nil {
+		t.Fatalf("DisableMount returned %v", err)
+	}
+	if !strings.Contains(w.String(), "already a distro default") {
+		t.Errorf("expected 'already a distro default' explanation; got:\n%s", w.String())
+	}
+	if stub.daemonReloads != 0 || len(stub.remounts) != 0 {
+		t.Errorf("no kernel-affecting actions should run; got reloads=%d remounts=%v",
+			stub.daemonReloads, stub.remounts)
+	}
+}
+
+func TestKernsecEffectiveAdditions(t *testing.T) {
+	tests := []struct {
+		name string
+		rule MountRule
+		want []string
+	}{
+		{
+			name: "dev/shm typical: noexec only",
+			rule: MountRule{
+				Recommended:        "nodev,nosuid,noexec",
+				DefaultLiveOptions: "nodev,nosuid",
+			},
+			want: []string{"noexec"},
+		},
+		{
+			name: "no defaults declared: all managed are additions",
+			rule: MountRule{Recommended: "nodev,nosuid,noexec"},
+			want: []string{"nodev", "nosuid", "noexec"},
+		},
+		{
+			name: "defaults cover everything: empty additions",
+			rule: MountRule{
+				Recommended:        "nodev,nosuid",
+				DefaultLiveOptions: "nodev,nosuid",
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := kernsecEffectiveAdditions(tc.rule)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("element %d: got %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 
 func TestDisableMount_RemovesEntireKernsecOwnedLine(t *testing.T) {
 	// kernsec appended its own line and tagged it with the marker
 	// comment. Disable must remove the whole line so the host
-	// returns to the pre-cfm state (systemd PID 1 defaults).
+	// returns to the pre-cfm state (systemd PID 1 defaults: nodev,
+	// nosuid). The runtime revert still runs but it only undoes the
+	// kernsec-effective addition (noexec) — NOT all three managed
+	// options — so the host lands on the distro baseline, not below.
 	managed := defaultFstabLineFor(MountRule{MountPoint: "/dev/shm", Recommended: "nodev,nosuid,noexec"})
 	withFakeFstab(t, "UUID=abc / ext4 defaults 0 1\n"+managed+"\n")
 	stub := &stubExec{}
 	stub.install(t)
 
-	rule := MountRule{MountPoint: "/dev/shm", Recommended: "nodev,nosuid,noexec", CanEnable: true}
+	rule := MountRule{
+		MountPoint:         "/dev/shm",
+		Recommended:        "nodev,nosuid,noexec",
+		DefaultLiveOptions: "nodev,nosuid",
+		CanEnable:          true,
+	}
 	var w bytes.Buffer
 	if err := DisableMount(rule, &w, EnableMountOptions{}); err != nil {
 		t.Fatalf("DisableMount returned %v", err)
@@ -271,6 +372,10 @@ func TestDisableMount_RemovesEntireKernsecOwnedLine(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "UUID=abc") {
 		t.Errorf("other operator lines must be preserved; got:\n%s", got)
+	}
+	// Runtime revert must run with `exec` only (not dev,suid,exec).
+	if len(stub.remounts) != 1 || !strings.Contains(stub.remounts[0], ":exec") {
+		t.Errorf("expected one remount with `exec`; got %v", stub.remounts)
 	}
 }
 

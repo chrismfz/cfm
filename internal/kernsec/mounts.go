@@ -290,8 +290,15 @@ var Tier1Mounts = []MountRule{
 		// state, the /var/tmp-survives-reboot contract, and the
 		// dedicated-filesystem provisioning step make auto-apply
 		// unsafe. Those rows stay tip-only.
-		CanEnable:   true,
-		Description: "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
-		Affects:     "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
+		CanEnable: true,
+		// Every modern distro (EL, Alma, Debian, Ubuntu, Arch) has
+		// systemd PID 1 mount /dev/shm with nosuid,nodev already on
+		// — that's hard-coded in src/core/mount-setup.c. Disable
+		// therefore reverts only the kernsec-added option (noexec)
+		// rather than blindly remounting with dev,suid,exec, which
+		// would land the host BELOW the distro baseline.
+		DefaultLiveOptions: "nodev,nosuid",
+		Description:        "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
+		Affects:            "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
 	},
 }

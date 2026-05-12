@@ -109,18 +109,34 @@ func EnableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	return nil
 }
 
-// DisableMount strips kernsec's managed options from the rule's
-// fstab line and remounts so the running kernel reverts. Idempotent;
-// safe to re-run on an already-disabled mount. The fstab line itself
-// is preserved if the operator had non-kernsec options on it (e.g.
-// `size=`, `mode=`); only kernsec's managed options are removed. If
-// kernsec is the sole owner of the line (we appended it ourselves
-// and the operator never edited it), the line is removed entirely.
+// DisableMount strips kernsec's effective additions from the rule's
+// fstab line and remounts so the running kernel reverts to its
+// pre-cfm state. "Effective additions" means Recommended minus
+// DefaultLiveOptions — the options kernsec actually adds on top of
+// what the kernel/systemd/distro mount with by default. /dev/shm is
+// the canonical example: every distro mounts it with nosuid,nodev
+// already on, so kernsec really only adds noexec. Disabling reverts
+// only the noexec — leaving nodev,nosuid in place so the host
+// returns to its baseline, never below it.
+//
+// Idempotent; safe to re-run. If kernsec authored the fstab line
+// (managed-by-cfm comment present), the whole line is removed so
+// the host returns to PID 1's built-in /dev/shm mount on next boot.
+// If the operator had a pre-existing fstab line, only the kernsec-
+// effective additions are stripped; the operator's other options
+// (including any explicit nodev/nosuid they wrote) stay intact.
 func DisableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	if !rule.CanEnable {
 		return nil // audit-only rule; nothing kernsec-owned to disable
 	}
-	managed := splitCSV(rule.Recommended)
+	effectiveAdditions := kernsecEffectiveAdditions(rule)
+	if len(effectiveAdditions) == 0 {
+		// Distro defaults already cover everything kernsec
+		// recommends. Nothing to disable, nothing to revert.
+		fmt.Fprintf(w, "[Mount] %s: every recommended option is already a distro default — no disable action needed.\n",
+			rule.MountPoint)
+		return nil
+	}
 
 	content, err := os.ReadFile(PathFstab)
 	if err != nil {
@@ -131,7 +147,7 @@ func DisableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	}
 	lines := strings.Split(string(content), "\n")
 
-	updated, action := applyDisableToFstabLines(lines, rule, managed)
+	updated, action := applyDisableToFstabLines(lines, rule, effectiveAdditions)
 	if action == fstabActionNoChange {
 		fmt.Fprintf(w, "[Mount] %s already absent / not kernsec-managed in %s — no fstab edit needed.\n",
 			rule.MountPoint, PathFstab)
@@ -144,11 +160,12 @@ func DisableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 		}
 		switch action {
 		case fstabActionRemoved:
-			fmt.Fprintf(w, "[Mount] removed kernsec-owned %s line from %s.\n",
+			fmt.Fprintf(w, "[Mount] removed kernsec-owned %s line from %s (distro PID 1 default will mount it on next boot).\n",
 				rule.MountPoint, PathFstab)
 		case fstabActionEdited:
-			fmt.Fprintf(w, "[Mount] stripped %s from existing %s line in %s.\n",
-				rule.Recommended, rule.MountPoint, PathFstab)
+			fmt.Fprintf(w, "[Mount] stripped %s from existing %s line in %s (distro-default options like %s preserved).\n",
+				strings.Join(effectiveAdditions, ","), rule.MountPoint, PathFstab,
+				rule.DefaultLiveOptions)
 		}
 	}
 
@@ -162,21 +179,54 @@ func DisableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 			rule.MountPoint)
 		return nil
 	}
-	// Disable remount: reset to the kernel/systemd defaults. For
-	// /dev/shm the systemd PID 1 defaults are nosuid,nodev,mode=1777
-	// — but `mount -o remount,rw,exec,suid,dev` removes our flags
-	// explicitly. This is the operator-observable disable.
-	revertOpts := revertOptionsFor(rule.MountPoint, managed)
-	if revertOpts != "" {
-		if err := runRemount(rule.MountPoint, revertOpts); err != nil {
-			fmt.Fprintf(w, "[Mount] revert remount of %s failed: %v — fstab edit IS persisted, reboot will apply.\n",
-				rule.MountPoint, err)
-		} else {
-			fmt.Fprintf(w, "[Mount] remounted %s with %s (kernsec hardening reverted at runtime).\n",
-				rule.MountPoint, revertOpts)
+	revertOpts := antiOptionsCSV(effectiveAdditions)
+	if revertOpts == "" {
+		return nil
+	}
+	if err := runRemount(rule.MountPoint, revertOpts); err != nil {
+		fmt.Fprintf(w, "[Mount] revert remount of %s failed: %v — fstab edit IS persisted, reboot will apply.\n",
+			rule.MountPoint, err)
+		return nil
+	}
+	fmt.Fprintf(w, "[Mount] remounted %s with %s (kernsec hardening reverted; distro-default %s preserved).\n",
+		rule.MountPoint, revertOpts, rule.DefaultLiveOptions)
+	return nil
+}
+
+// kernsecEffectiveAdditions returns the subset of rule.Recommended
+// that kernsec actually adds on top of DefaultLiveOptions — the
+// options that are NOT already applied by the kernel/systemd/distro
+// at boot. For /dev/shm (Recommended=nodev,nosuid,noexec;
+// DefaultLiveOptions=nodev,nosuid) this returns ["noexec"]. Used by
+// DisableMount so the runtime revert and the fstab strip operate on
+// only what kernsec really changed, never on the distro baseline.
+func kernsecEffectiveAdditions(rule MountRule) []string {
+	defaults := map[string]struct{}{}
+	for _, o := range splitCSV(rule.DefaultLiveOptions) {
+		defaults[o] = struct{}{}
+	}
+	var out []string
+	for _, o := range splitCSV(rule.Recommended) {
+		if _, isDefault := defaults[o]; isDefault {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// antiOptionsCSV joins the explicit-negation form of every entry in
+// `opts` into a comma-separated string suitable for `mount -o
+// remount,…`. Entries with no anti-option are dropped. Empty result
+// means "nothing to revert at runtime".
+func antiOptionsCSV(opts []string) string {
+	var out []string
+	for _, o := range opts {
+		if a := antiOption(o); a != "" {
+			out = append(out, a)
 		}
 	}
-	return nil
+	return strings.Join(out, ",")
 }
 
 // fstabAction is the outcome of applying enable/disable to the
@@ -367,20 +417,6 @@ func antiOption(opt string) string {
 		return "dev"
 	}
 	return ""
-}
-
-// revertOptionsFor returns the explicit-negation form of every
-// managed option, joined for `mount -o remount,…`. Used by
-// DisableMount to clear kernsec's flags from the running kernel.
-// Empty string if there's nothing to revert.
-func revertOptionsFor(mountPoint string, managed []string) string {
-	var rev []string
-	for _, o := range managed {
-		if a := antiOption(o); a != "" {
-			rev = append(rev, a)
-		}
-	}
-	return strings.Join(rev, ",")
 }
 
 // containsOption returns true if `opt` is in `set`.

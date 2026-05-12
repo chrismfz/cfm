@@ -81,7 +81,7 @@ func mount_impacting_risks(mountsToEnable []MountRule) []string {
 		switch m.MountPoint {
 		case "/dev/shm":
 			risks = append(risks,
-				"/dev/shm: live remount with nodev,nosuid,noexec. Pre-15 PostgreSQL JIT and headless Chromium can break — revert with `mount -o remount,exec /dev/shm` then `cfm kernsec disable`.")
+				"/dev/shm: live remount with nodev,nosuid,noexec. Pre-15 PostgreSQL JIT and headless Chromium can break — revert with `mount -o remount,exec /dev/shm` then `cfm kernsec disable` (disable only un-does noexec; the distro-default nodev,nosuid stay live).")
 		default:
 			risks = append(risks,
 				fmt.Sprintf("%s: live remount with %s.", m.MountPoint, m.Recommended))

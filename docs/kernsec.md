@@ -321,7 +321,9 @@ The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` 
 
 For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for automation.
 
-`/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten, and `cfm kernsec disable` strips only the kernsec-managed options (or removes the whole line if kernsec authored it).
+`/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, and an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten.
+
+Disable for `/dev/shm` reverts only the options kernsec actually added on top of the distro baseline. Every modern distro mounts `/dev/shm` with `nosuid,nodev` already on (systemd PID 1's `mount-setup.c`), so the kernsec-effective addition is `noexec` alone — disable's runtime revert is `mount -o remount,exec /dev/shm`, never `dev,suid,exec` which would land the host below the distro baseline. The set of "already a default" options per rule lives in `MountRule.DefaultLiveOptions`. If kernsec authored the fstab line, the whole line is removed (so PID 1's built-in defaults take over on next boot); if the line is operator-owned, only the kernsec-effective additions are stripped and the operator's other options stay.
 
 ## Intentionally unsupported
 
