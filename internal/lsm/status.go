@@ -179,7 +179,8 @@ func emitText(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 	switch {
 	case !res.Pinned.Exists && conf.Enabled && pf.OK:
 		fmt.Fprintln(w, "Note: lsm.conf has enabled=true and preflight passes, but no BPF programs")
-		fmt.Fprintln(w, "      are currently attached. Run `cfm lsm enable` to activate.")
+		fmt.Fprintln(w, "      are currently attached. Run `cfm lsm probe` to verify the kernel will")
+		fmt.Fprintln(w, "      accept them, then `cfm lsm enable` to actually activate.")
 	case res.Pinned.Exists && !conf.Enabled:
 		fmt.Fprintln(w, "Note: BPF programs are attached at the kernel level (pinned) but")
 		fmt.Fprintf(w, "      %s has enabled=false. This is a config/runtime mismatch — either run\n", ConfPath)
@@ -240,6 +241,8 @@ func emitJSON(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 // describeRuntime is the human-readable verdict for one policy. It
 // reports the live pinned state when available, falling back to
 // "would-attach" predictions when the policy is not currently pinned.
+// `cfm lsm probe` is the non-destructive way to verify a "would-attach"
+// prediction without committing to a persistent enable.
 func describeRuntime(pf Preflight, conf *Conf, pinned PinnedState, mode Mode, id PolicyID) string {
 	// Live state first — what is actually attached right now beats
 	// any prediction.
@@ -262,5 +265,5 @@ func describeRuntime(pf Preflight, conf *Conf, pinned PinnedState, mode Mode, id
 	if pinned.Exists {
 		return "would-attach (run `cfm lsm disable` then `cfm lsm enable` to add this policy to the pin set)"
 	}
-	return "would-attach (run `cfm lsm enable` to activate)"
+	return "would-attach (run `cfm lsm probe` to verify, then `cfm lsm enable` to activate)"
 }

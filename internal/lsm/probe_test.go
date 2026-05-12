@@ -1,0 +1,152 @@
+//go:build linux
+
+package lsm
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestEmitProbeText_SkippedWhenPreflightFails verifies the text
+// output path for the most common case — a host whose preflight
+// says it cannot accept BPF LSM programs. We do not need to load
+// anything for this; the formatter is purely a function of the
+// ProbeResult struct.
+func TestEmitProbeText_SkippedWhenPreflightFails(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{PreflightOK: false})
+
+	out := buf.String()
+	if !strings.Contains(out, "SKIPPED") {
+		t.Errorf("expected SKIPPED in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Preflight failed") {
+		t.Errorf("expected 'Preflight failed' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "cfm lsm status") {
+		t.Errorf("expected pointer to `cfm lsm status` for remediation, got:\n%s", out)
+	}
+}
+
+func TestEmitProbeText_SkippedWhenEveryPolicyDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: false,
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "SKIPPED") {
+		t.Errorf("expected SKIPPED, got:\n%s", out)
+	}
+	if !strings.Contains(out, "mode=disabled") {
+		t.Errorf("expected explanation about mode=disabled, got:\n%s", out)
+	}
+}
+
+func TestEmitProbeText_PassWithAttached(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: true,
+		Attached:        []PolicyID{PolicyMemfdExec, PolicyReverseShell},
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "Result: PASS") {
+		t.Errorf("expected Result: PASS, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CFML-EXEC-001") {
+		t.Errorf("expected EXEC-001 listed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CFML-EXEC-003") {
+		t.Errorf("expected EXEC-003 listed, got:\n%s", out)
+	}
+}
+
+func TestEmitProbeText_PartialMode(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: true,
+		Attached:        []PolicyID{PolicyMemfdExec},
+		Failed: map[PolicyID]error{
+			PolicyReverseShell: errVerifierStub{},
+		},
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "Result: PARTIAL") {
+		t.Errorf("expected PARTIAL, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CFML-EXEC-001") || !strings.Contains(out, "[Attached]") {
+		t.Errorf("expected attached list to mention EXEC-001, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CFML-EXEC-003") || !strings.Contains(out, "[Failed]") {
+		t.Errorf("expected failed list to mention EXEC-003, got:\n%s", out)
+	}
+}
+
+func TestEmitProbeText_SpontaneousEventReported(t *testing.T) {
+	var buf bytes.Buffer
+	ev := Event{
+		PolicyID: PolicyMemfdExec,
+		PID:      12345,
+		Comm:     "php-fpm",
+		Filename: "memfd:payload",
+	}
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:       true,
+		AttachAttempted:   true,
+		Attached:          []PolicyID{PolicyMemfdExec},
+		SpontaneousEvents: 1,
+		FirstEvent:        &ev,
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "Spontaneous events observed: 1") {
+		t.Errorf("expected event count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "pid=12345") {
+		t.Errorf("expected pid in first-event line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "php-fpm") {
+		t.Errorf("expected comm in first-event line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "investigate") {
+		t.Errorf("expected guidance to investigate spontaneous events, got:\n%s", out)
+	}
+}
+
+// errVerifierStub stands in for a real attach error in formatter tests.
+// Wrapping ErrBPFLSMUnavailable would couple the test to the exact
+// loader error path; this stub keeps the formatter test isolated.
+type errVerifierStub struct{}
+
+func (errVerifierStub) Error() string { return "stub verifier rejection" }
+
+// TestRunProbeOnce_SkipsCleanlyOnUnsupportedHost is the live counterpart:
+// it actually calls RunProbeOnce on the test host. On any runner that
+// fails preflight the result must come back with PreflightOK=false
+// and AttachAttempted=false — confirming the early-exit path works.
+func TestRunProbeOnce_SkipsCleanlyOnUnsupportedHost(t *testing.T) {
+	if RunPreflight().OK {
+		t.Skip("host actually supports BPF LSM; this test is for the unsupported-host code path")
+	}
+
+	res := RunProbeOnce(10 * time.Millisecond)
+	if res.PreflightOK {
+		t.Fatal("RunPreflight reported NOT OK above but ProbeResult.PreflightOK is true")
+	}
+	if res.AttachAttempted {
+		t.Errorf("AttachAttempted should be false when preflight fails, got true")
+	}
+	if res.LoadError != nil {
+		t.Errorf("LoadError should be nil when preflight fails (we never tried to load), got: %v", res.LoadError)
+	}
+	if len(res.Attached) != 0 {
+		t.Errorf("Attached should be empty when preflight fails, got: %v", res.Attached)
+	}
+}
