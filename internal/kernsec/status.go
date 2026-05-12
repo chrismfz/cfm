@@ -249,6 +249,22 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	}
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "[LSM cmdline merge rule]")
+	// KSEC-LSM-bpf-001 is the kernsec follow-up to cfm-lsm: it
+	// merges `bpf` into the operator's existing lsm= boot argument
+	// when forced. Default state is "not forced" (operator opts in
+	// because changing the LSM list requires a reboot to take effect).
+	switch state, msg := LSMBPFStatus(conf); state {
+	case LSMBPFForcedAndLive:
+		fmt.Fprintln(w, "OK    "+msg)
+	case LSMBPFForcedNotApplied:
+		fmt.Fprintln(w, "WARN  "+msg)
+		res.warn()
+	default:
+		fmt.Fprintln(w, "OFF   "+msg)
+	}
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "[Copy Fail / algif_aead mitigation]")
 	mitigation := BootArg{Key: "initcall_blacklist", Value: "algif_aead_init"}
 	// This is the kernsec-managed boot-arg rule KSEC-BOOT-kspp-005, so

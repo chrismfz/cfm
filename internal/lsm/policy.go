@@ -16,6 +16,23 @@ const (
 	// PolicyReverseShell — CFML-EXEC-003: detect a process about
 	// to exec with fds 0/1/2 dup'd onto a remote-connected socket.
 	PolicyReverseShell PolicyID = "CFML-EXEC-003"
+
+	// PolicySensitiveWrite — CFML-FS-005: detect a web-class user
+	// (apache / nginx / php-fpm / panel-managed account) attempting
+	// to modify a host-sensitive file (/etc/passwd, /etc/shadow,
+	// /etc/sudoers*, /etc/cron*, /etc/ssh/*, /root/.ssh/,
+	// /home/<other>/.ssh/, /etc/pam.d/). Covers the post-exploit
+	// cash-in after any privesc — including kernel 0-days like
+	// Dirty Pipe / Dirty COW that bypass other LSM hooks.
+	PolicySensitiveWrite PolicyID = "CFML-FS-005"
+
+	// PolicyCredEscal — CFML-CRED-002: detect a process gaining
+	// effective uid 0 from non-zero without going through a
+	// recognised setuid binary in its mm->exe_file. The canonical
+	// kernel-exploit-completion fingerprint. Monitor-only by
+	// design: returning -EPERM from cred_prepare can deadlock
+	// systemd helpers mid-transition.
+	PolicyCredEscal PolicyID = "CFML-CRED-002"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -76,6 +93,20 @@ func AllPolicies() []Policy {
 			Hook:        "bprm_check_security",
 			DefaultMode: ModeDisabled,
 			Description: "Detect exec where stdin/stdout/stderr are dup'd to a remote-connected socket.",
+		},
+		{
+			ID:          PolicySensitiveWrite,
+			Title:       "Sensitive-file modification by web user",
+			Hook:        "inode_{setattr,create,unlink,link,rename,setxattr}",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a web-class user (apache/nginx/php-fpm/panel account) modifying host-sensitive files (/etc/passwd, /etc/shadow, /etc/sudoers*, /root/.ssh/, ...).",
+		},
+		{
+			ID:          PolicyCredEscal,
+			Title:       "Privilege escalation without setuid path",
+			Hook:        "task_fix_setuid",
+			DefaultMode: ModeDisabled,
+			Description: "Detect uid → 0 transitions through code paths that did not go through a recognised setuid binary. Monitor-only by design.",
 		},
 	}
 }

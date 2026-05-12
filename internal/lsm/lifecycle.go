@@ -120,6 +120,21 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	logging.Logf("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
 	KmsgStatef("ADOPT", "daemon attached to pinned state at %s, draining ringbuf (policies: %s)",
 		DefaultPinDir, policyModeSummary(conf, attach.Attached))
+
+	// Repopulate FS-005 + CRED-002 maps. The maps survived in
+	// bpffs but their contents may be stale — uids may have changed
+	// since the operator's last `cfm lsm enable` (new cPanel
+	// accounts, package upgrades that brought new setuid binaries),
+	// and refreshing on every daemon start is cheap.
+	uids, inodes, setuid, perr := PopulateMaps(loader)
+	if perr != nil {
+		logging.Logf("[lsm] partial map population on adopt: %v (uids=%d inodes=%d setuid=%d)",
+			perr, uids, inodes, setuid)
+		KmsgStatef("ISSUE", "partial map population on adopt: %v", perr)
+	} else {
+		logging.Logf("[lsm] maps refreshed: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
+			uids, inodes, setuid)
+	}
 }
 
 // Stop tears down the adoption goroutine and releases the userspace

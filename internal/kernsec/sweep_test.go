@@ -168,6 +168,62 @@ func (e *errorReadBackend) NextBootCmdline() (string, error)  { return "", e.rea
 func (e *errorReadBackend) WriteCmdline(args []BootArg) error { return e.readErr }
 func (e *errorReadBackend) Refresh() error                    { return nil }
 
+// staticCmdlineBackend is a BootBackend that returns a fixed
+// next-boot cmdline. Used to exercise buildDesiredCmdlineWithConf
+// against realistic operator-edited cmdlines.
+type staticCmdlineBackend struct{ cmdline string }
+
+func (s *staticCmdlineBackend) Label() string                     { return "static fake" }
+func (s *staticCmdlineBackend) NextBootCmdline() (string, error)  { return s.cmdline, nil }
+func (s *staticCmdlineBackend) WriteCmdline(args []BootArg) error { return nil }
+func (s *staticCmdlineBackend) Refresh() error                    { return nil }
+
+// TestBuildDesiredCmdlineWithConf_PreservesOperatorBPF locks in the
+// fix for the silent-strip regression. When KSEC-LSM-bpf-001 is NOT
+// forced (default state), buildDesiredCmdlineWithConf must leave
+// the operator's `lsm=...,bpf` token untouched — the lsm key is not
+// in ManagedBootArgKeys, so it's outside kernsec's managed surface.
+// Earlier behaviour ran UnmergeLSMBPF on every apply and silently
+// rewrote the operator's manual `bpf` addition.
+func TestBuildDesiredCmdlineWithConf_PreservesOperatorBPF(t *testing.T) {
+	be := &staticCmdlineBackend{
+		cmdline: "BOOT_IMAGE=/vmlinuz root=UUID=abc ro quiet lsm=lockdown,yama,apparmor,bpf",
+	}
+	conf := &Conf{Tier: 1, Overrides: map[string]RuleOverride{}}
+	got, err := buildDesiredCmdlineWithConf(be, nil, conf)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(got, "lsm=lockdown,yama,apparmor,bpf") {
+		t.Fatalf("operator-added bpf was stripped: %q", got)
+	}
+}
+
+// TestBuildDesiredCmdlineWithConf_PreviewMatchesApplyWhenForced is
+// the regression test for the preview/apply divergence: when the
+// rule IS forced and the cmdline already contains `bpf`, both code
+// paths (preview and apply) must compute the same desired cmdline.
+// Prior to the fix, preview forwarded conf=nil and unmerged `bpf`
+// while apply (with conf) merged it.
+func TestBuildDesiredCmdlineWithConf_PreviewMatchesApplyWhenForced(t *testing.T) {
+	be := &staticCmdlineBackend{
+		cmdline: "BOOT_IMAGE=/vmlinuz root=UUID=abc ro quiet lsm=lockdown,capability,bpf,yama",
+	}
+	conf := &Conf{
+		Tier: 1,
+		Overrides: map[string]RuleOverride{
+			LSMBPFRuleID: OverrideForce,
+		},
+	}
+	got, err := buildDesiredCmdlineWithConf(be, nil, conf)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(got, "bpf") {
+		t.Fatalf("forced rule should preserve bpf in lsm=; got %q", got)
+	}
+}
+
 // equalSlices returns true if a and b have the same length and equal
 // elements at every index.
 func equalSlices(a, b []string) bool {

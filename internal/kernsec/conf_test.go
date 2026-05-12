@@ -259,6 +259,7 @@ func TestAllRuleIDs_CoversEveryRegistry(t *testing.T) {
 		"KSEC-BOOT-kspp-001",           // boot arg
 		"KSEC-MOD-net.legacy-001",      // module
 		"KSEC-FS-mount.tmp-001",        // mount
+		LSMBPFRuleID,                   // one-off cmdline mutator, not in any registry
 	} {
 		if _, ok := ids[want]; !ok {
 			t.Errorf("AllRuleIDs missing %q", want)
@@ -285,6 +286,9 @@ func TestValidateConfOverrideIDs_KnownIDsHaveNoWarning(t *testing.T) {
 			"KSEC-SCT-kspp.kernel-001":  OverrideSkip,
 			"KSEC-MOD-net.legacy-001":   OverrideForce,
 			"KSEC-FS-mount.tmp-001":     OverrideSkip,
+			// KSEC-LSM-bpf-001 is the documented activation override
+			// for the BPF LSM cmdline merger. Must not warn when set.
+			LSMBPFRuleID:                OverrideForce,
 		},
 	}
 	if got := ValidateConfOverrideIDs(c); got != nil {

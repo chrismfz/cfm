@@ -67,6 +67,17 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		if m == ModeDisabled {
 			continue
 		}
+		// CFML-CRED-002 is monitor-only by design (returning -EPERM
+		// from the cred-install path can deadlock systemd helpers
+		// and pkexec mid-transition; see docs/cfm-lsm.md). Warn and
+		// downgrade if an operator set enforce — better than silently
+		// respecting it and then not blocking, which would mislead them.
+		if p.ID == PolicyCredEscal && m == ModeEnforce {
+			fmt.Fprintln(w, "Note: CFML-CRED-002 is monitor-only by design; downgrading lsm.conf's enforce setting.")
+			fmt.Fprintln(w, "      See docs/cfm-lsm.md → CFML-CRED-002 → Enforcement strategy.")
+			fmt.Fprintln(w)
+			m = ModeMonitor
+		}
 		policies = append(policies, p.ID)
 		modes[p.ID] = m
 		if m == ModeEnforce {
@@ -118,6 +129,19 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		return 1
 	}
 	defer l.Close() // releases userspace fds; pinned state persists.
+
+	// Populate the FS-005 + CRED-002 maps from the live host so the
+	// BPF programs have something to match against. Best-effort:
+	// partial population is far better than failing the enable.
+	if uids, inodes, setuid, perr := PopulateMaps(l); perr != nil {
+		fmt.Fprintf(w, "Warning: partial map population: %v\n", perr)
+		fmt.Fprintf(w, "         watched_uids=%d watched_inodes=%d setuid_inodes=%d (populated before error)\n",
+			uids, inodes, setuid)
+	} else {
+		fmt.Fprintf(w, "Maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d\n",
+			uids, inodes, setuid)
+		fmt.Fprintln(w)
+	}
 
 	attach := l.Attach()
 	fmt.Fprintln(w, "Attached and pinned:")

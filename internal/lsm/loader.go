@@ -23,20 +23,41 @@ const DefaultPinDir = "/sys/fs/bpf/cfm"
 
 // Layout under the pin directory:
 //
-//   <pinDir>/maps/cfm_events       — the shared ringbuf map
-//   <pinDir>/links/cfm_memfd_exec  — CFML-EXEC-001 attached link
-//   <pinDir>/links/cfm_revshell    — CFML-EXEC-003 attached link
+//   <pinDir>/maps/cfm_events            — the shared ringbuf map
+//   <pinDir>/maps/cfm_watched_uids      — FS-005 watched uids hash
+//   <pinDir>/maps/cfm_watched_inodes    — FS-005 watched inodes hash
+//   <pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid allowlist hash
+//   <pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
+//   <pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
+//   <pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (6)
+//   <pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
 //
 // Each pinned object exists for as long as the bpffs file exists;
 // the kernel only detaches when the last reference is dropped.
 // Removing the bpffs file is enough to trigger detach.
+//
+// The three FS-005 / CRED-002 hash maps are pinned alongside the
+// ringbuf so the daemon's AdoptPinned path can refresh their contents
+// on every start (pick up new cPanel/DA accounts, newly-installed
+// setuid binaries) — without the pins, AdoptPinned would observe the
+// in-kernel maps but have no fd to mutate.
 const (
 	pinSubdirMaps  = "maps"
 	pinSubdirLinks = "links"
 
-	pinFileMap         = "cfm_events"
-	pinFileLinkMemfd   = "cfm_memfd_exec"
-	pinFileLinkRevshell = "cfm_revshell"
+	pinFileMap               = "cfm_events"
+	pinFileMapWatchedUids    = "cfm_watched_uids"
+	pinFileMapWatchedInodes  = "cfm_watched_inodes"
+	pinFileMapSetuidInodes   = "cfm_setuid_inodes"
+	pinFileLinkMemfd         = "cfm_memfd_exec"
+	pinFileLinkRevshell      = "cfm_revshell"
+	pinFileLinkFs005Setattr  = "cfm_fs005_setattr"
+	pinFileLinkFs005Create   = "cfm_fs005_create"
+	pinFileLinkFs005Unlink   = "cfm_fs005_unlink"
+	pinFileLinkFs005Link     = "cfm_fs005_link"
+	pinFileLinkFs005Rename   = "cfm_fs005_rename"
+	pinFileLinkFs005Setxattr = "cfm_fs005_setxattr"
+	pinFileLinkCred002       = "cfm_cred002"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -90,7 +111,11 @@ type AttachResult struct {
 //     from programs the operator already enabled via CLI.
 type Loader struct {
 	objs   cfmlsmObjects
-	links  map[PolicyID]link.Link
+	// links is one slice of attached links per policy. Most policies
+	// have a single link; CFML-FS-005 has six (one per LSM hook in
+	// the inode_setattr / create / unlink / link / rename / setxattr
+	// family). Iteration order matches programsFor(id).
+	links map[PolicyID][]link.Link
 	reader *ringbuf.Reader
 
 	// pinned is true when the loader is in pinned-load or
@@ -168,7 +193,7 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	}
 
 	l := &Loader{
-		links:  make(map[PolicyID]link.Link, 2),
+		links:  make(map[PolicyID][]link.Link, 2),
 		events: make(chan Event, opts.EventBufferSize),
 		errors: make(chan error, 1),
 		attach: AttachResult{Failed: make(map[PolicyID]error)},
@@ -200,19 +225,35 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	}
 
 	for _, id := range wanted {
-		prog := l.programFor(id)
-		if prog == nil {
-			// Unknown ID or program absent from this build. Treat as
-			// a per-policy failure, not a fatal error.
+		entries := l.programsFor(id)
+		if len(entries) == 0 {
+			// Unknown ID or programs absent from this build. Treat
+			// as a per-policy failure, not a fatal error.
 			l.attach.Failed[id] = fmt.Errorf("no BPF program for policy %s", id)
 			continue
 		}
-		link, err := link.AttachLSM(link.LSMOptions{Program: prog})
-		if err != nil {
-			l.attach.Failed[id] = fmt.Errorf("attach lsm: %w", err)
+		// Attach every sub-program. FS-005 has 6 (one per LSM hook);
+		// the others have 1 each. If ANY sub-program fails to attach,
+		// roll back the ones already attached for this policy so the
+		// kernel state stays consistent.
+		attached := make([]link.Link, 0, len(entries))
+		var attachErr error
+		for _, e := range entries {
+			lk, err := link.AttachLSM(link.LSMOptions{Program: e.prog})
+			if err != nil {
+				attachErr = fmt.Errorf("attach lsm %s: %w", e.pinName, err)
+				break
+			}
+			attached = append(attached, lk)
+		}
+		if attachErr != nil {
+			for _, lk := range attached {
+				_ = lk.Close()
+			}
+			l.attach.Failed[id] = attachErr
 			continue
 		}
-		l.links[id] = link
+		l.links[id] = attached
 		l.attach.Attached = append(l.attach.Attached, id)
 	}
 
@@ -233,8 +274,10 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 
 	reader, err := ringbuf.NewReader(l.objs.cfmlsmMaps.CfmEvents)
 	if err != nil {
-		for _, lk := range l.links {
-			_ = lk.Close()
+		for _, links := range l.links {
+			for _, lk := range links {
+				_ = lk.Close()
+			}
 		}
 		l.objs.Close()
 		return nil, fmt.Errorf("%w: open ringbuf: %v", ErrBPFLSMUnavailable, err)
@@ -250,8 +293,10 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 			// close userspace fds so the kernel detaches.
 			_ = unpinFiles(opts.PinDir)
 			_ = reader.Close()
-			for _, lk := range l.links {
-				_ = lk.Close()
+			for _, links := range l.links {
+				for _, lk := range links {
+					_ = lk.Close()
+				}
 			}
 			l.objs.Close()
 			return nil, fmt.Errorf("%w: pin to %s: %v", ErrBPFLSMUnavailable, opts.PinDir, err)
@@ -273,18 +318,44 @@ func (l *Loader) pinAll(pinDir string) error {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
+	// Pin the ringbuf first so a partial-fail rollback removes
+	// every map regardless of which Pin call returned the error.
 	mapPath := filepath.Join(mapsDir, pinFileMap)
 	if err := l.objs.cfmlsmMaps.CfmEvents.Pin(mapPath); err != nil {
 		return fmt.Errorf("pin map %s: %w", mapPath, err)
 	}
-	for id, lk := range l.links {
-		name := pinLinkFile(id)
-		if name == "" {
-			continue
+	// FS-005 / CRED-002 hash maps — pinned so the daemon's
+	// AdoptPinned path can refresh their contents on every start
+	// (new cPanel/DA accounts, newly-installed setuid binaries).
+	// Without these pins PopulateMaps would hit nil-map on every
+	// daemon adopt and the "refresh on every start" contract from
+	// docs/cfm-lsm.md would be dead.
+	for _, p := range []struct {
+		m    *ebpf.Map
+		name string
+	}{
+		{l.objs.cfmlsmMaps.CfmWatchedUids, pinFileMapWatchedUids},
+		{l.objs.cfmlsmMaps.CfmWatchedInodes, pinFileMapWatchedInodes},
+		{l.objs.cfmlsmMaps.CfmSetuidInodes, pinFileMapSetuidInodes},
+	} {
+		path := filepath.Join(mapsDir, p.name)
+		if err := p.m.Pin(path); err != nil {
+			return fmt.Errorf("pin map %s: %w", path, err)
 		}
-		path := filepath.Join(linksDir, name)
-		if err := lk.Pin(path); err != nil {
-			return fmt.Errorf("pin link %s: %w", path, err)
+	}
+	// Each policy has one or more sub-programs; iterate both the
+	// link slice we accumulated at attach time AND the matching
+	// programEntry slice so we know each link's pin name.
+	for id, links := range l.links {
+		entries := l.programsFor(id)
+		if len(entries) != len(links) {
+			return fmt.Errorf("internal: policy %s has %d links but %d entries", id, len(links), len(entries))
+		}
+		for i, lk := range links {
+			path := filepath.Join(linksDir, entries[i].pinName)
+			if err := lk.Pin(path); err != nil {
+				return fmt.Errorf("pin link %s: %w", path, err)
+			}
 		}
 	}
 	return nil
@@ -303,8 +374,14 @@ func (l *Loader) pinAll(pinDir string) error {
 // than silently falling back to monitor.
 func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode) error {
 	rewrites := map[string]uint8{
-		"cfm_enforce_memfd_exec": enforceByte(modes[PolicyMemfdExec]),
-		"cfm_enforce_revshell":   enforceByte(modes[PolicyReverseShell]),
+		"cfm_enforce_memfd_exec":      enforceByte(modes[PolicyMemfdExec]),
+		"cfm_enforce_revshell":        enforceByte(modes[PolicyReverseShell]),
+		"cfm_enforce_sensitive_write": enforceByte(modes[PolicySensitiveWrite]),
+		// CFML-CRED-002 is monitor-only by design (returning -EPERM
+		// from the cred-install path can deadlock systemd helpers
+		// and pkexec). No enforce constant in cfmlsm.bpf.c —
+		// intentionally absent here too. enable.go warns and
+		// downgrades when an operator sets mode=enforce on CRED-002.
 	}
 	for name, val := range rewrites {
 		vs, ok := spec.Variables[name]
@@ -330,14 +407,45 @@ func enforceByte(m Mode) uint8 {
 	return 0
 }
 
+// pinLinkFile returns the primary bpffs filename for a policy's
+// pinned links. For policies with a single program (EXEC-001 /
+// EXEC-003 / CRED-002) this is THE pin file; for FS-005 it is the
+// first of six. Used as a convenience by tests and by anywhere
+// the code only needs ONE canonical filename per policy.
+//
+// Most production paths should use pinLinkFiles (plural) instead.
 func pinLinkFile(id PolicyID) string {
+	names := pinLinkFiles(id)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+// pinLinkFiles returns every bpffs filename a policy's pinned links
+// occupy. Empty for unknown policies. Used by InspectPinned to
+// recognise a policy's presence (any one file is enough to imply
+// the policy is enabled) and by UnpinAll to find the files to
+// remove. The names match programsFor's pinName values.
+func pinLinkFiles(id PolicyID) []string {
 	switch id {
 	case PolicyMemfdExec:
-		return pinFileLinkMemfd
+		return []string{pinFileLinkMemfd}
 	case PolicyReverseShell:
-		return pinFileLinkRevshell
+		return []string{pinFileLinkRevshell}
+	case PolicySensitiveWrite:
+		return []string{
+			pinFileLinkFs005Setattr,
+			pinFileLinkFs005Create,
+			pinFileLinkFs005Unlink,
+			pinFileLinkFs005Link,
+			pinFileLinkFs005Rename,
+			pinFileLinkFs005Setxattr,
+		}
+	case PolicyCredEscal:
+		return []string{pinFileLinkCred002}
 	}
-	return ""
+	return nil
 }
 
 // AdoptPinned opens previously-pinned cfm-lsm state at pinDir and
@@ -357,13 +465,14 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 	if opts.EventBufferSize <= 0 {
 		opts.EventBufferSize = 256
 	}
-	mapPath := filepath.Join(pinDir, pinSubdirMaps, pinFileMap)
+	mapsDir := filepath.Join(pinDir, pinSubdirMaps)
+	mapPath := filepath.Join(mapsDir, pinFileMap)
 	m, err := ebpf.LoadPinnedMap(mapPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open pinned map %s: %v", ErrBPFLSMUnavailable, mapPath, err)
 	}
 	l := &Loader{
-		links:  make(map[PolicyID]link.Link, 2),
+		links:  make(map[PolicyID][]link.Link, 2),
 		events: make(chan Event, opts.EventBufferSize),
 		errors: make(chan error, 1),
 		attach: AttachResult{Failed: make(map[PolicyID]error)},
@@ -371,24 +480,82 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 	}
 	l.objs.cfmlsmMaps.CfmEvents = m
 
-	// Walk each known policy's pinned link. Missing links are not
-	// fatal — they just mean that policy wasn't enabled at pin time.
-	linksDir := filepath.Join(pinDir, pinSubdirLinks)
-	for _, p := range AllPolicies() {
-		name := pinLinkFile(p.ID)
-		if name == "" {
-			continue
-		}
-		path := filepath.Join(linksDir, name)
-		lk, err := link.LoadPinnedLink(path, nil)
-		if err != nil {
-			if os.IsNotExist(err) {
+	// FS-005 / CRED-002 hash maps. Missing pins are tolerated for
+	// forward-compat with hosts that ran an older `cfm lsm enable`
+	// (pre-pinning): PopulateMaps will then surface the nil map via
+	// its existing partial-population path. The maps may also be
+	// genuinely absent on a kernel that rejected the policies'
+	// programs at enable time. Failures to *load* an existing pin
+	// are fatal (corruption or wrong-fs-type), but ENOENT is fine.
+	for _, p := range []struct {
+		name   string
+		assign func(*ebpf.Map)
+	}{
+		{pinFileMapWatchedUids, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmWatchedUids = mp }},
+		{pinFileMapWatchedInodes, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmWatchedInodes = mp }},
+		{pinFileMapSetuidInodes, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmSetuidInodes = mp }},
+	} {
+		path := filepath.Join(mapsDir, p.name)
+		if _, statErr := os.Stat(path); statErr != nil {
+			if os.IsNotExist(statErr) {
 				continue
 			}
-			l.attach.Failed[p.ID] = fmt.Errorf("open pinned link %s: %w", path, err)
+			_ = m.Close()
+			return nil, fmt.Errorf("%w: stat pinned map %s: %v", ErrBPFLSMUnavailable, path, statErr)
+		}
+		mp, err := ebpf.LoadPinnedMap(path, nil)
+		if err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("%w: open pinned map %s: %v", ErrBPFLSMUnavailable, path, err)
+		}
+		p.assign(mp)
+	}
+
+	// Walk each known policy's pinned links. Missing links are not
+	// fatal — they just mean that policy wasn't enabled at pin time.
+	// A policy with MULTIPLE sub-links (FS-005) is treated as
+	// attached if ALL of its sub-links open successfully; partial-pin
+	// state would mean an interrupted enable or a manual rm — we
+	// surface that as a Failed entry rather than half-adopting.
+	linksDir := filepath.Join(pinDir, pinSubdirLinks)
+	for _, p := range AllPolicies() {
+		names := pinLinkFiles(p.ID)
+		if len(names) == 0 {
 			continue
 		}
-		l.links[p.ID] = lk
+		// First pass: do any of this policy's links exist? If none,
+		// the policy was simply not enabled.
+		anyExists := false
+		for _, name := range names {
+			if _, err := os.Stat(filepath.Join(linksDir, name)); err == nil {
+				anyExists = true
+				break
+			}
+		}
+		if !anyExists {
+			continue
+		}
+		// Second pass: open each link. Track them in a temp slice so
+		// we can roll back if any one fails.
+		adopted := make([]link.Link, 0, len(names))
+		var adoptErr error
+		for _, name := range names {
+			path := filepath.Join(linksDir, name)
+			lk, err := link.LoadPinnedLink(path, nil)
+			if err != nil {
+				adoptErr = fmt.Errorf("open pinned link %s: %w", path, err)
+				break
+			}
+			adopted = append(adopted, lk)
+		}
+		if adoptErr != nil {
+			for _, lk := range adopted {
+				_ = lk.Close()
+			}
+			l.attach.Failed[p.ID] = adoptErr
+			continue
+		}
+		l.links[p.ID] = adopted
 		l.attach.Attached = append(l.attach.Attached, p.ID)
 	}
 	if len(l.attach.Attached) == 0 {
@@ -397,8 +564,10 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 	}
 	reader, err := ringbuf.NewReader(m)
 	if err != nil {
-		for _, lk := range l.links {
-			_ = lk.Close()
+		for _, links := range l.links {
+			for _, lk := range links {
+				_ = lk.Close()
+			}
 		}
 		_ = m.Close()
 		return nil, fmt.Errorf("%w: open ringbuf on pinned map: %v", ErrBPFLSMUnavailable, err)
@@ -488,27 +657,82 @@ func InspectPinned(pinDir string) PinnedState {
 		st.MapPresent = true
 	}
 	for _, p := range AllPolicies() {
-		name := pinLinkFile(p.ID)
-		if name == "" {
+		names := pinLinkFiles(p.ID)
+		if len(names) == 0 {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(pinDir, pinSubdirLinks, name)); err == nil {
-			st.Links = append(st.Links, p.ID)
+		// A policy is considered "pinned" when at least one of its
+		// sub-link files exists. For FS-005 a partial pin set means
+		// a previous enable was interrupted; the policy still shows
+		// up here so the operator sees something to clean up.
+		for _, name := range names {
+			if _, err := os.Stat(filepath.Join(pinDir, pinSubdirLinks, name)); err == nil {
+				st.Links = append(st.Links, p.ID)
+				break
+			}
 		}
 	}
 	return st
 }
 
-// programFor returns the BPF program in this Loader's collection for
-// the given policy, or nil if the policy is unknown.
-func (l *Loader) programFor(id PolicyID) *ebpf.Program {
+// programEntry pairs a BPF program with its bpffs pin filename. One
+// policy maps to one entry for the simple cases (EXEC-001 / EXEC-003
+// / CRED-002) and to six entries for CFML-FS-005 (one per LSM hook
+// in the inode_* family).
+type programEntry struct {
+	prog    *ebpf.Program
+	pinName string
+}
+
+// programsFor returns every BPF program a policy attaches to,
+// alongside the bpffs filename each one pins to. Empty for unknown
+// policies. Iteration order is stable so pin layout is deterministic.
+func (l *Loader) programsFor(id PolicyID) []programEntry {
+	progs := l.objs.cfmlsmPrograms
 	switch id {
 	case PolicyMemfdExec:
-		return l.objs.cfmlsmPrograms.CfmMemfdExec
+		return []programEntry{{progs.CfmMemfdExec, pinFileLinkMemfd}}
 	case PolicyReverseShell:
-		return l.objs.cfmlsmPrograms.CfmRevshell
+		return []programEntry{{progs.CfmRevshell, pinFileLinkRevshell}}
+	case PolicySensitiveWrite:
+		return []programEntry{
+			{progs.CfmFs005Setattr, pinFileLinkFs005Setattr},
+			{progs.CfmFs005Create, pinFileLinkFs005Create},
+			{progs.CfmFs005Unlink, pinFileLinkFs005Unlink},
+			{progs.CfmFs005Link, pinFileLinkFs005Link},
+			{progs.CfmFs005Rename, pinFileLinkFs005Rename},
+			{progs.CfmFs005Setxattr, pinFileLinkFs005Setxattr},
+		}
+	case PolicyCredEscal:
+		return []programEntry{{progs.CfmCred002, pinFileLinkCred002}}
 	}
 	return nil
+}
+
+// WatchedUidsMap returns the BPF hash map that CFML-FS-005 consults
+// to decide whether the calling task's uid is "watched" (a web-class
+// user / panel-managed account / etc.). The map's keys are uid
+// (__u32); presence-of-key means watched. Populated by the daemon
+// (see internal/lsm/maps.go) at adoption time.
+func (l *Loader) WatchedUidsMap() *ebpf.Map {
+	return l.objs.cfmlsmMaps.CfmWatchedUids
+}
+
+// WatchedInodesMap returns the BPF hash map that CFML-FS-005 consults
+// for sensitive-file inode numbers. Keys are inode numbers (__u64).
+// Populated by the daemon from the operator-configurable
+// sensitive-paths list at adoption time.
+func (l *Loader) WatchedInodesMap() *ebpf.Map {
+	return l.objs.cfmlsmMaps.CfmWatchedInodes
+}
+
+// SetuidInodesMap returns the BPF hash map that CFML-CRED-002 consults
+// for the "legitimate setuid binary" allowlist. Keys are inode
+// numbers of every file on disk with S_ISUID set; presence means
+// "uid 0 transition through this binary is expected." Populated by
+// the daemon walking standard setuid paths at adoption time.
+func (l *Loader) SetuidInodesMap() *ebpf.Map {
+	return l.objs.cfmlsmMaps.CfmSetuidInodes
 }
 
 // Attach returns a snapshot of which policies are currently attached
@@ -559,9 +783,11 @@ func (l *Loader) Close() error {
 			}
 		}
 		l.wg.Wait()
-		for _, lk := range l.links {
-			if err := lk.Close(); err != nil && first == nil {
-				first = err
+		for _, links := range l.links {
+			for _, lk := range links {
+				if err := lk.Close(); err != nil && first == nil {
+					first = err
+				}
 			}
 		}
 		if l.pinned {

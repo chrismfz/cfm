@@ -144,7 +144,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 
 	sysctlContent := RenderSysctlFile(sysctls)
 	modprobeContent := RenderModprobeFile(modules)
-	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	desiredCmdline, cmdlineErr := buildDesiredCmdlineWithConf(backend, bootArgs, conf)
 	// BLS divergence is auto-reconciled — WriteCmdline writes the
 	// desired managed set to every non-recovery kernel, aligning all
 	// entries on the next pass. Other cmdline-read failures remain
@@ -549,11 +549,34 @@ func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBacke
 // auto-reconcile can ignore err==ErrBLSDivergence and proceed to write;
 // callers that want to halt can check errors.Is(err, ErrBLSDivergence).
 func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
+	return buildDesiredCmdlineWithConf(backend, args, nil)
+}
+
+// buildDesiredCmdlineWithConf is the conf-aware variant. KSEC-LSM-bpf-001
+// is the only rule today that depends on conf overrides at cmdline-build
+// time (it merges `bpf` into the existing lsm= value rather than
+// replacing it via ManagedBootArgKeys), so the conf is plumbed in
+// here. When conf is nil the merger is a no-op.
+//
+// Important: the not-forced branch is INTENTIONALLY a no-op. The `lsm`
+// key is not in ManagedBootArgKeys (rebuildManagedCmdline preserves
+// it byte-for-byte from the operator's current cmdline). Running
+// UnmergeLSMBPF here on every apply would silently strip
+// operator-added `bpf` from the lsm= value on Debian/Ubuntu hosts
+// where the operator enabled BPF LSM manually before installing cfm,
+// violating the contract in profile.go that operator args outside
+// ManagedBootArgKeys are not rewritten. The unmerge is therefore
+// only invoked from the explicit kernsec disable path (see
+// disable.go), where the operator has asked us to roll back.
+func buildDesiredCmdlineWithConf(backend BootBackend, args []BootArg, conf *Conf) (string, error) {
 	current, err := backend.NextBootCmdline()
 	if err != nil && !errors.Is(err, ErrBLSDivergence) {
 		return "", fmt.Errorf("read current cmdline: %w", err)
 	}
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
+	if IsLSMBPFForced(conf) {
+		tokens = MergeLSMBPF(tokens)
+	}
 	return strings.Join(tokens, " "), err
 }
 
