@@ -3,11 +3,15 @@ package lsm
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/features"
 )
 
 // Preflight paths. Declared as vars so tests can redirect them to
@@ -24,12 +28,28 @@ var (
 	preflightProcKallsyms     = "/proc/kallsyms"
 )
 
-// minKernelMajor / minKernelMinor pin the earliest kernel that
-// supports BPF LSM (merged in 5.7).
+// preflightProgramTypeProbe is the function used by
+// checkBPFLSMProgramType to verify that the running kernel accepts
+// BPF_PROG_TYPE_LSM at the bpf() syscall layer. Declared as a var so
+// tests can stub it out without performing a real syscall. The
+// default delegates to cilium/ebpf's feature probe, which attempts a
+// minimal LSM program load against the file_mprotect hook.
+var preflightProgramTypeProbe = func() error {
+	return features.HaveProgramType(ebpf.LSM)
+}
+
+// upstreamBPFLSMMajor / upstreamBPFLSMMinor record the upstream
+// kernel version where BPF LSM was merged. The numbers are used only
+// in informational output: RHEL-family vendor kernels (AlmaLinux 8.6+,
+// CloudLinux 9, etc.) backport BPF LSM to 4.18, so a uname-based
+// comparison is the wrong proxy for capability. The bpf-lsm-program-type
+// runtime probe is the authoritative gate.
 const (
-	minKernelMajor = 5
-	minKernelMinor = 7
+	upstreamBPFLSMMajor = 5
+	upstreamBPFLSMMinor = 7
 )
+
+
 
 // CheckStatus is the result of one preflight check.
 type CheckStatus int
@@ -98,8 +118,10 @@ type Preflight struct {
 	OK bool
 }
 
-// RunPreflight runs all six kernel checks and returns the aggregate
-// result. Pure: reads only from /proc and /sys; never writes anything.
+// RunPreflight runs all kernel checks and returns the aggregate
+// result. Reads from /proc and /sys, and performs one tiny bpf()
+// syscall via checkBPFLSMProgramType to feature-probe the verifier;
+// no writes are made.
 func RunPreflight() Preflight {
 	checks := []CheckResult{
 		checkKernelVersion(),
@@ -108,6 +130,7 @@ func RunPreflight() Preflight {
 		checkBTFAvailable(),
 		checkCapabilities(),
 		checkBPFFSMounted(),
+		checkBPFLSMProgramType(),
 	}
 	ok := true
 	for _, c := range checks {
@@ -140,12 +163,16 @@ func checkDirectCredInstallAvailability() PolicyAvailability {
 	return pa
 }
 
-// checkKernelVersion verifies that the running kernel is ≥ 5.7,
-// which is when BPF LSM was merged upstream.
+// checkKernelVersion reports the running kernel version. It is
+// informational: BPF LSM availability is decided by the
+// bpf-lsm-program-type probe, not by uname. RHEL-family vendor
+// kernels backport BPF LSM to 4.18 (verified on AlmaLinux 8.10), so
+// a version comparison would wrongly reject hosts that actually
+// support the feature.
 func checkKernelVersion() CheckResult {
 	res := CheckResult{
 		Name:        "kernel-version",
-		Description: fmt.Sprintf("Kernel ≥ %d.%d (BPF LSM merged in 5.7)", minKernelMajor, minKernelMinor),
+		Description: "running kernel (informational; capability is probed separately)",
 	}
 	b, err := os.ReadFile(preflightProcVersionPath)
 	if err != nil {
@@ -159,16 +186,59 @@ func checkKernelVersion() CheckResult {
 		res.Detail = fmt.Sprintf("cannot parse %s: %v", preflightProcVersionPath, err)
 		return res
 	}
-	res.Detail = fmt.Sprintf("running kernel %s", raw)
-	if major > minKernelMajor || (major == minKernelMajor && minor >= minKernelMinor) {
+	res.Status = CheckPass
+	if major < upstreamBPFLSMMajor || (major == upstreamBPFLSMMajor && minor < upstreamBPFLSMMinor) {
+		res.Detail = fmt.Sprintf("running kernel %s (older than upstream %d.%d; vendor backports decide capability — see bpf-lsm-program-type)", raw, upstreamBPFLSMMajor, upstreamBPFLSMMinor)
+	} else {
+		res.Detail = fmt.Sprintf("running kernel %s", raw)
+	}
+	return res
+}
+
+// checkBPFLSMProgramType is the authoritative gate for "can this
+// kernel load BPF LSM programs at all". It attempts a tiny no-op LSM
+// program load via cilium/ebpf's features.HaveProgramType, which
+// makes a real bpf(BPF_PROG_LOAD, …) syscall against the file_mprotect
+// hook. The kernel responds in one of three ways:
+//
+//   - nil → verifier engaged → BPF_PROG_TYPE_LSM is supported (PASS).
+//   - ebpf.ErrNotSupported → bpf() dispatch rejected the program type
+//     at the EINVAL/E2BIG layer → kernel does not expose BPF LSM to
+//     userspace, even if CONFIG_BPF_LSM=y is set (FAIL).
+//   - any other error → ambiguous (UNKNOWN), typically EPERM when
+//     the process lacks caps, or transient kernel/library state.
+//
+// The CONFIG_BPF_LSM=y check is a useful diagnostic signal but is
+// not sufficient on its own: some vendor kernels (CloudLinux 8 lve
+// kernels observed in the wild) set the config flag for the kernel-
+// internal subsystem but leave the userspace-loadable program type
+// unwired. This probe distinguishes those hosts from AlmaLinux 8.6+,
+// AlmaLinux 9+, AlmaLinux 10, CloudLinux 9+, RHEL 9+, Debian 12+,
+// and Ubuntu 22.04+, which all accept the program type.
+func checkBPFLSMProgramType() CheckResult {
+	res := CheckResult{
+		Name:        "bpf-lsm-program-type",
+		Description: "kernel accepts BPF_PROG_TYPE_LSM via bpf() syscall",
+	}
+	err := preflightProgramTypeProbe()
+	if err == nil {
 		res.Status = CheckPass
+		res.Detail = "BPF_PROG_TYPE_LSM accepted (file_mprotect attach probe loaded)"
 		return res
 	}
-	res.Status = CheckFail
-	res.Remediation = fmt.Sprintf(
-		"running kernel %d.%d is too old; upgrade to ≥ %d.%d (EL9 / Debian 12 / Ubuntu 22.04 ship a supported kernel)",
-		major, minor, minKernelMajor, minKernelMinor,
-	)
+	if errors.Is(err, ebpf.ErrNotSupported) {
+		res.Status = CheckFail
+		res.Detail = "kernel rejected BPF_PROG_TYPE_LSM at bpf() syscall"
+		res.Remediation = "the running kernel does not expose BPF LSM program loading to userspace. " +
+			"Observed on CloudLinux 8 (lve) kernels which ship CONFIG_BPF_LSM=y for the internal " +
+			"subsystem only. Supported targets: AlmaLinux 8.6+ / 9+ / 10, CloudLinux 9+, RHEL 9+, " +
+			"Debian 12+, Ubuntu 22.04+."
+		return res
+	}
+	res.Status = CheckUnknown
+	res.Detail = fmt.Sprintf("program-type probe inconclusive: %v", err)
+	res.Remediation = "ensure /sys/fs/bpf is mounted and the process has CAP_SYS_ADMIN " +
+		"(or CAP_BPF + CAP_PERFMON); rerun `cfm lsm status`"
 	return res
 }
 
@@ -192,7 +262,7 @@ func checkBPFLSMConfig() CheckResult {
 	if !ok {
 		res.Status = CheckFail
 		res.Detail = fmt.Sprintf("CONFIG_BPF_LSM not set in %s", source)
-		res.Remediation = "kernel was built without BPF LSM support; use a distro kernel ≥ EL9 / Debian 12 / Ubuntu 22.04 (or rebuild with CONFIG_BPF_LSM=y)"
+		res.Remediation = "kernel was built without BPF LSM support; use a distro kernel that ships CONFIG_BPF_LSM=y (AlmaLinux 8.6+ / 9+ / 10, CloudLinux 9+, RHEL 9+, Debian 12+, Ubuntu 22.04+) or rebuild with CONFIG_BPF_LSM=y"
 		return res
 	}
 	if val == "y" {
@@ -247,7 +317,7 @@ func checkBTFAvailable() CheckResult {
 	if err != nil {
 		res.Status = CheckFail
 		res.Detail = fmt.Sprintf("%s: %v", preflightBTFPath, err)
-		res.Remediation = "kernel was built without CONFIG_DEBUG_INFO_BTF=y; cfm-lsm requires CO-RE BTF (use a distro kernel ≥ EL9 / Debian 12 / Ubuntu 22.04)"
+		res.Remediation = "kernel was built without CONFIG_DEBUG_INFO_BTF=y; cfm-lsm requires CO-RE BTF (available on AlmaLinux 8.6+, RHEL 9+, Debian 12+, Ubuntu 22.04+, and newer)"
 		return res
 	}
 	res.Status = CheckPass

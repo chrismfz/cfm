@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cilium/ebpf"
 )
 
 // writeFile is a test helper that writes data to dir/name and returns
@@ -36,6 +38,14 @@ type stubProc struct {
 	// "/sys/fs/bpf" when the stub is used to model a passing host;
 	// leave empty to model the "bpffs not mounted" case.
 	bpffsMountpoint string
+
+	// programTypeProbeErr is the value the stubbed
+	// preflightProgramTypeProbe will return. nil models a host that
+	// accepts BPF_PROG_TYPE_LSM (e.g. AlmaLinux 8.6+, EL9+,
+	// Debian 12+). Set to ebpf.ErrNotSupported to model a host
+	// where the kernel rejects the program type at the bpf() syscall
+	// (e.g. CloudLinux 8 lve kernels).
+	programTypeProbeErr error
 }
 
 func (s stubProc) install(t *testing.T) {
@@ -105,6 +115,7 @@ func (s stubProc) install(t *testing.T) {
 	prevMounts := preflightProcMounts
 	prevBPFFSPath := preflightBPFFSPath
 	prevKallsyms := preflightProcKallsyms
+	prevProbe := preflightProgramTypeProbe
 
 	preflightProcVersionPath = procVerPath
 	preflightProcConfigGzPath = configGzPath
@@ -117,6 +128,8 @@ func (s stubProc) install(t *testing.T) {
 	if s.bpffsMountpoint != "" {
 		preflightBPFFSPath = s.bpffsMountpoint
 	}
+	probeErr := s.programTypeProbeErr
+	preflightProgramTypeProbe = func() error { return probeErr }
 
 	t.Cleanup(func() {
 		preflightProcVersionPath = prevVersion
@@ -128,6 +141,7 @@ func (s stubProc) install(t *testing.T) {
 		preflightProcMounts = prevMounts
 		preflightBPFFSPath = prevBPFFSPath
 		preflightProcKallsyms = prevKallsyms
+		preflightProgramTypeProbe = prevProbe
 	})
 }
 
@@ -295,30 +309,66 @@ func TestPreflight_AllPass(t *testing.T) {
 	}
 }
 
-func TestPreflight_OldKernel(t *testing.T) {
+func TestPreflight_OldKernelStillPassesWhenProgramTypeProbeSucceeds(t *testing.T) {
+	// Models AlmaLinux 8.6+ / CloudLinux 9 vendor backport: uname says
+	// 4.18 but the kernel accepts BPF_PROG_TYPE_LSM at the bpf()
+	// syscall. The kernel-version check must be informational PASS
+	// (not a gate), and overall preflight must succeed because the
+	// authoritative bpf-lsm-program-type probe returned nil.
 	stub := stubProc{
-		procVersion: "Linux version 4.18.0-553.el8.x86_64 (mockbuild) #1 SMP",
-		bootConfig:  "CONFIG_BPF_LSM=y\n",
-		lsmList:     "lockdown,yama,integrity,bpf",
-		btfPresent:  true,
-		procStatus:  "CapEff:\t000001ffffffffff\n",
+		procVersion:     "Linux version 4.18.0-553.el8.x86_64 (mockbuild) #1 SMP",
+		bootConfig:      "CONFIG_BPF_LSM=y\n",
+		lsmList:         "lockdown,yama,integrity,bpf",
+		btfPresent:      true,
+		procStatus:      "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint: "/sys/fs/bpf",
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if !pf.OK {
+		t.Fatalf("expected preflight to PASS on 4.18 with successful program-type probe; got: %+v", pf)
+	}
+	for _, c := range pf.Checks {
+		if c.Name == "kernel-version" && c.Status != CheckPass {
+			t.Errorf("kernel-version is informational and must always PASS when /proc/version parses; got %s", c.Status)
+		}
+	}
+}
+
+func TestPreflight_BPFLSMProgramTypeNotSupported(t *testing.T) {
+	// Models CloudLinux 8 (lve) kernels: CONFIG_BPF_LSM=y is set,
+	// `bpf` is in /sys/kernel/security/lsm, BTF is present — but the
+	// bpf() syscall rejects BPF_PROG_TYPE_LSM at the dispatch layer.
+	// The bpf-lsm-program-type check must FAIL with a remediation,
+	// and overall preflight must be not-OK.
+	stub := stubProc{
+		procVersion:         "Linux version 4.18.0-553.111.1.lve.el8.x86_64 (mockbuild) #1 SMP",
+		bootConfig:          "CONFIG_BPF_LSM=y\n",
+		lsmList:             "capability,yama,bpf",
+		btfPresent:          true,
+		procStatus:          "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint:     "/sys/fs/bpf",
+		programTypeProbeErr: ebpf.ErrNotSupported,
 	}
 	stub.install(t)
 
 	pf := RunPreflight()
 	if pf.OK {
-		t.Fatal("expected preflight to FAIL on 4.18 kernel")
+		t.Fatal("expected preflight to FAIL when BPF_PROG_TYPE_LSM is unsupported")
 	}
-	found := false
 	for _, c := range pf.Checks {
-		if c.Name == "kernel-version" && c.Status == CheckFail {
-			found = true
-			break
+		if c.Name == "bpf-lsm-program-type" {
+			if c.Status != CheckFail {
+				t.Errorf("bpf-lsm-program-type: got %s, want FAIL", c.Status)
+			}
+			if c.Remediation == "" {
+				t.Error("FAIL must carry operator-facing remediation")
+			}
+			return
 		}
 	}
-	if !found {
-		t.Error("expected kernel-version check to FAIL")
-	}
+	t.Error("bpf-lsm-program-type check not found in results")
 }
 
 func TestPreflight_BPFNotInLSMList(t *testing.T) {
