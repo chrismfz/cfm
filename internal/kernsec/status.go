@@ -449,12 +449,23 @@ func auditRowErrors(rows []AuditRow) []string {
 }
 
 // printMountState surfaces the fstab audit rules. kernsec never
-// auto-mutates fstab — every MISSING line is operator-actionable
-// advice, not a kernsec bug. Counts as a warning so that
+// auto-mutates fstab — every PARTIAL/MISSING line is operator-
+// actionable advice, not a kernsec bug. Counts as a warning so that
 // `cfm kernsec status --check` exits non-zero when an operator-
 // reviewable item exists, matching the boot-arg / module sections.
 // Each row also passes through the resolver so OFF / SKIP rows
 // surface honestly instead of being lumped into MISSING.
+//
+// The render distinguishes:
+//
+//   - OK       — every recommended option is live.
+//   - PARTIAL  — some recommended options are live, some aren't. Names
+//                only the still-missing options in the remediation hint.
+//   - MISSING  — the mount exists but none of the recommended options
+//                are live; the remediation hint names all of them.
+//   - SKIP     — not a separate mount, the path is a symlink to
+//                another audited point, or the path is a bind sibling
+//                of another audited point. Defers to the canonical row.
 func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 	fmt.Fprintln(w, "[Mount audit (read-only — fstab is operator-managed)]")
 	for i, m := range Tier1Mounts {
@@ -469,19 +480,56 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 				m.MountPoint, rr.Reason)
 			continue
 		}
-		state, current := CheckMount(m)
-		switch state {
+		d := CheckMountDetail(m, Tier1Mounts)
+		switch d.State {
 		case MountOK:
 			fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
+		case MountPartialOptions:
+			fmt.Fprintf(w, "PARTIAL    %s  has %s; still missing: %s  (current: %s)\n",
+				m.MountPoint,
+				strings.Join(d.Present, ","),
+				strings.Join(d.Missing, ","),
+				d.CurrentOptions,
+			)
+			printMountRemediation(w, m.MountPoint, d.Missing)
+			res.warn()
 		case MountMissingOptions:
-			fmt.Fprintf(w, "MISSING    %s  recommend %s  (current: %s)\n",
-				m.MountPoint, m.Recommended, current)
+			fmt.Fprintf(w, "MISSING    %s  none of %s applied  (current: %s)\n",
+				m.MountPoint, m.Recommended, d.CurrentOptions)
+			printMountRemediation(w, m.MountPoint, d.Missing)
 			res.warn()
 		case MountNotSeparate:
-			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n", m.MountPoint)
+			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n",
+				m.MountPoint)
+		case MountSymlink:
+			if d.SymlinkTarget != "" {
+				fmt.Fprintf(w, "SKIP       %s → %s  (symlink; audit defers to the target row)\n",
+					m.MountPoint, d.SymlinkTarget)
+			} else {
+				fmt.Fprintf(w, "SKIP       %s  is a symlink (audit defers to the target)\n",
+					m.MountPoint)
+			}
+		case MountBindOfAnother:
+			fmt.Fprintf(w, "SKIP       %s  bind of %s  (same source %s; remount the primary mount point)\n",
+				m.MountPoint, d.BindPrimaryPath, d.Source)
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+// printMountRemediation emits the two-line "how to fix" hint under a
+// PARTIAL or MISSING row. Names only the still-missing options in the
+// runtime remount command so the operator can paste it as-is, and
+// reminds them the persistence path is fstab / systemd .mount, which
+// kernsec does NOT mutate.
+func printMountRemediation(w io.Writer, mountPoint string, missing []string) {
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "           fix runtime:  mount -o remount,%s %s\n",
+		strings.Join(missing, ","), mountPoint)
+	fmt.Fprintf(w, "           persist:      add %s to the %s line in /etc/fstab (or the matching systemd .mount unit)\n",
+		strings.Join(missing, ","), mountPoint)
 }
 
 // applyBootKeysFromResolved returns the bare keys (without value) of

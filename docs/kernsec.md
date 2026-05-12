@@ -317,6 +317,8 @@ edits `/etc/fstab`.
 
 `/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
 
+The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and reminds the operator to mirror the change in `/etc/fstab` or the relevant systemd `.mount` unit — kernsec does not mutate either.
+
 ## Intentionally unsupported
 
 `kernel.modules_disabled=1` is intentionally unsupported. It is a one-way
