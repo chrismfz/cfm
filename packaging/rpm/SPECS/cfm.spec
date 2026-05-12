@@ -209,6 +209,19 @@ else
     echo "WARNING: CFM proxy config deploy helper missing: /usr/share/cfm/scripts/package-proxy-config-deploy.sh"
 fi
 
+# Reload edge proxies if they are currently active, so the updated panel
+# listener template (and any other shipped config) takes effect without
+# operator intervention. We never enable or start a service here: hosts
+# may run neither, only one, or both (e.g. for testing).
+if command -v systemctl >/dev/null 2>&1; then
+    for svc in angie.service openresty.service; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo "CFM: reloading $svc to apply updated config..."
+            systemctl reload "$svc" || true
+        fi
+    done
+fi
+
 # Ensure correct SELinux context in case older versions used /lib path
 [ -f /lib/systemd/system/cfm.service ] && \
   chcon -h system_u:object_r:systemd_unit_file_t:s0 /lib/systemd/system/cfm.service || true
