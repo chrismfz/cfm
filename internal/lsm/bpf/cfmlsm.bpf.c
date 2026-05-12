@@ -11,11 +11,11 @@
  *   cfm_memfd_exec  — CFML-EXEC-001 (memfd exec detector)
  *   cfm_revshell    — CFML-EXEC-003 (reverse-shell-pattern detector)
  *
- * Both hook bprm_check_security and currently run in monitor mode
- * (always return 0). Per docs/cfm-lsm.md the enforce-mode flip
- * happens via a bpf2go constant rewrite once telemetry justifies
- * it; the structure of each program is identical between the two
- * modes apart from that return value.
+ * Both hook bprm_check_security and default to monitor mode. Per
+ * docs/cfm-lsm.md the enforce-mode flip happens via a bpf2go
+ * constant rewrite once telemetry justifies it; audit emission is
+ * best-effort, but enforce/allow verdicts must not depend on
+ * ringbuf capacity or daemon availability.
  *
  * Verifier strategy
  * -----------------
@@ -72,6 +72,16 @@ volatile const __u8 cfm_enforce_revshell   = 0;
  * the exec. Keeps the negative-errno convention explicit. */
 #define CFM_LSM_DENY (-1)
 
+/* Audit emission is best-effort. Once a policy match is established,
+ * the final LSM verdict depends only on the policy's enforce constant,
+ * not on whether the shared ringbuf has room for an audit event. */
+static __always_inline int cfm_exec_verdict(__u8 enforce)
+{
+    if (enforce)
+        return CFM_LSM_DENY;
+    return 0;
+}
+
 /* ------------------------------------------------------------------- *
  * CFML-EXEC-001 — Block exec from memfd.
  *
@@ -82,8 +92,8 @@ volatile const __u8 cfm_enforce_revshell   = 0;
  * memfd_create()'d payload being exec'd — the canonical fileless
  * post-exploit pattern.
  *
- * Mode: monitor only (return 0). Enforce (return -EPERM) is the
- * follow-up flip once telemetry confirms a near-zero FP rate.
+ * Mode: defaults to monitor (return 0). Enforce mode returns
+ * -EPERM once telemetry confirms a near-zero FP rate.
  * ------------------------------------------------------------------- */
 
 static __always_inline bool dentry_name_is_memfd(struct dentry *d)
@@ -141,10 +151,11 @@ int BPF_PROG(cfm_memfd_exec, struct linux_binprm *bprm, int ret)
     if (!dentry_name_is_memfd(dentry))
         return 0;
 
-    /* Match. Emit event; do not block (monitor mode). */
+    /* Match. Audit emission is best-effort; the enforce verdict still
+     * applies if the shared ringbuf is full or unavailable. */
     struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
     if (!e)
-        return 0;
+        return cfm_exec_verdict(cfm_enforce_memfd_exec);
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u64 uid_gid  = bpf_get_current_uid_gid();
@@ -171,9 +182,7 @@ int BPF_PROG(cfm_memfd_exec, struct linux_binprm *bprm, int ret)
     bpf_ringbuf_submit(e, 0);
 
     /* Enforce mode: block the exec. Monitor mode: allow. */
-    if (cfm_enforce_memfd_exec)
-        return CFM_LSM_DENY;
-    return 0;
+    return cfm_exec_verdict(cfm_enforce_memfd_exec);
 }
 
 /* ------------------------------------------------------------------- *
@@ -193,10 +202,10 @@ int BPF_PROG(cfm_memfd_exec, struct linux_binprm *bprm, int ret)
  * f_op against &socket_file_ops because the former needs no kernel
  * symbol lookup and is exactly as specific.
  *
- * Mode: monitor only (return 0). Per docs/cfm-lsm.md this stays in
- * monitor mode for 30 days before any enforce promotion — fd-walk
- * detectors traditionally surface unanticipated legitimate patterns
- * for the first month.
+ * Mode: defaults to monitor (return 0). Per docs/cfm-lsm.md this
+ * stays in monitor mode for 30 days before any enforce promotion —
+ * fd-walk detectors traditionally surface unanticipated legitimate
+ * patterns for the first month.
  * ------------------------------------------------------------------- */
 
 static __always_inline int fd_is_remote_tcp(struct file **fdarr,
@@ -284,10 +293,11 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     if (!fd_is_remote_tcp(fdarr, max_fds, 2))
         return 0;
 
-    /* Match. Emit event; do not block (monitor mode). */
+    /* Match. Audit emission is best-effort; the enforce verdict still
+     * applies if the shared ringbuf is full or unavailable. */
     struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
     if (!e)
-        return 0;
+        return cfm_exec_verdict(cfm_enforce_revshell);
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u64 uid_gid  = bpf_get_current_uid_gid();
@@ -315,9 +325,7 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     bpf_ringbuf_submit(e, 0);
 
     /* Enforce mode: block the exec. Monitor mode: allow. */
-    if (cfm_enforce_revshell)
-        return CFM_LSM_DENY;
-    return 0;
+    return cfm_exec_verdict(cfm_enforce_revshell);
 }
 
 /* ------------------------------------------------------------------- *
