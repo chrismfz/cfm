@@ -23,27 +23,41 @@ const DefaultPinDir = "/sys/fs/bpf/cfm"
 
 // Layout under the pin directory:
 //
-//   <pinDir>/maps/cfm_events       — the shared ringbuf map
-//   <pinDir>/links/cfm_memfd_exec  — CFML-EXEC-001 attached link
-//   <pinDir>/links/cfm_revshell    — CFML-EXEC-003 attached link
+//   <pinDir>/maps/cfm_events            — the shared ringbuf map
+//   <pinDir>/maps/cfm_watched_uids      — FS-005 watched uids hash
+//   <pinDir>/maps/cfm_watched_inodes    — FS-005 watched inodes hash
+//   <pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid allowlist hash
+//   <pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
+//   <pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
+//   <pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (6)
+//   <pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
 //
 // Each pinned object exists for as long as the bpffs file exists;
 // the kernel only detaches when the last reference is dropped.
 // Removing the bpffs file is enough to trigger detach.
+//
+// The three FS-005 / CRED-002 hash maps are pinned alongside the
+// ringbuf so the daemon's AdoptPinned path can refresh their contents
+// on every start (pick up new cPanel/DA accounts, newly-installed
+// setuid binaries) — without the pins, AdoptPinned would observe the
+// in-kernel maps but have no fd to mutate.
 const (
 	pinSubdirMaps  = "maps"
 	pinSubdirLinks = "links"
 
-	pinFileMap         = "cfm_events"
-	pinFileLinkMemfd            = "cfm_memfd_exec"
-	pinFileLinkRevshell         = "cfm_revshell"
-	pinFileLinkFs005Setattr     = "cfm_fs005_setattr"
-	pinFileLinkFs005Create      = "cfm_fs005_create"
-	pinFileLinkFs005Unlink      = "cfm_fs005_unlink"
-	pinFileLinkFs005Link        = "cfm_fs005_link"
-	pinFileLinkFs005Rename      = "cfm_fs005_rename"
-	pinFileLinkFs005Setxattr    = "cfm_fs005_setxattr"
-	pinFileLinkCred002          = "cfm_cred002"
+	pinFileMap               = "cfm_events"
+	pinFileMapWatchedUids    = "cfm_watched_uids"
+	pinFileMapWatchedInodes  = "cfm_watched_inodes"
+	pinFileMapSetuidInodes   = "cfm_setuid_inodes"
+	pinFileLinkMemfd         = "cfm_memfd_exec"
+	pinFileLinkRevshell      = "cfm_revshell"
+	pinFileLinkFs005Setattr  = "cfm_fs005_setattr"
+	pinFileLinkFs005Create   = "cfm_fs005_create"
+	pinFileLinkFs005Unlink   = "cfm_fs005_unlink"
+	pinFileLinkFs005Link     = "cfm_fs005_link"
+	pinFileLinkFs005Rename   = "cfm_fs005_rename"
+	pinFileLinkFs005Setxattr = "cfm_fs005_setxattr"
+	pinFileLinkCred002       = "cfm_cred002"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -304,9 +318,30 @@ func (l *Loader) pinAll(pinDir string) error {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
+	// Pin the ringbuf first so a partial-fail rollback removes
+	// every map regardless of which Pin call returned the error.
 	mapPath := filepath.Join(mapsDir, pinFileMap)
 	if err := l.objs.cfmlsmMaps.CfmEvents.Pin(mapPath); err != nil {
 		return fmt.Errorf("pin map %s: %w", mapPath, err)
+	}
+	// FS-005 / CRED-002 hash maps — pinned so the daemon's
+	// AdoptPinned path can refresh their contents on every start
+	// (new cPanel/DA accounts, newly-installed setuid binaries).
+	// Without these pins PopulateMaps would hit nil-map on every
+	// daemon adopt and the "refresh on every start" contract from
+	// docs/cfm-lsm.md would be dead.
+	for _, p := range []struct {
+		m    *ebpf.Map
+		name string
+	}{
+		{l.objs.cfmlsmMaps.CfmWatchedUids, pinFileMapWatchedUids},
+		{l.objs.cfmlsmMaps.CfmWatchedInodes, pinFileMapWatchedInodes},
+		{l.objs.cfmlsmMaps.CfmSetuidInodes, pinFileMapSetuidInodes},
+	} {
+		path := filepath.Join(mapsDir, p.name)
+		if err := p.m.Pin(path); err != nil {
+			return fmt.Errorf("pin map %s: %w", path, err)
+		}
 	}
 	// Each policy has one or more sub-programs; iterate both the
 	// link slice we accumulated at attach time AND the matching
@@ -342,11 +377,11 @@ func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode)
 		"cfm_enforce_memfd_exec":      enforceByte(modes[PolicyMemfdExec]),
 		"cfm_enforce_revshell":        enforceByte(modes[PolicyReverseShell]),
 		"cfm_enforce_sensitive_write": enforceByte(modes[PolicySensitiveWrite]),
-		// CFML-CRED-002 is monitor-only by design (cred_prepare
-		// enforce can deadlock systemd). No enforce constant in
-		// cfmlsm.bpf.c — intentionally absent here too. enable.go
-		// warns and downgrades when an operator sets mode=enforce
-		// on CRED-002.
+		// CFML-CRED-002 is monitor-only by design (returning -EPERM
+		// from the cred-install path can deadlock systemd helpers
+		// and pkexec). No enforce constant in cfmlsm.bpf.c —
+		// intentionally absent here too. enable.go warns and
+		// downgrades when an operator sets mode=enforce on CRED-002.
 	}
 	for name, val := range rewrites {
 		vs, ok := spec.Variables[name]
@@ -430,7 +465,8 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 	if opts.EventBufferSize <= 0 {
 		opts.EventBufferSize = 256
 	}
-	mapPath := filepath.Join(pinDir, pinSubdirMaps, pinFileMap)
+	mapsDir := filepath.Join(pinDir, pinSubdirMaps)
+	mapPath := filepath.Join(mapsDir, pinFileMap)
 	m, err := ebpf.LoadPinnedMap(mapPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open pinned map %s: %v", ErrBPFLSMUnavailable, mapPath, err)
@@ -443,6 +479,37 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 		pinned: true,
 	}
 	l.objs.cfmlsmMaps.CfmEvents = m
+
+	// FS-005 / CRED-002 hash maps. Missing pins are tolerated for
+	// forward-compat with hosts that ran an older `cfm lsm enable`
+	// (pre-pinning): PopulateMaps will then surface the nil map via
+	// its existing partial-population path. The maps may also be
+	// genuinely absent on a kernel that rejected the policies'
+	// programs at enable time. Failures to *load* an existing pin
+	// are fatal (corruption or wrong-fs-type), but ENOENT is fine.
+	for _, p := range []struct {
+		name   string
+		assign func(*ebpf.Map)
+	}{
+		{pinFileMapWatchedUids, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmWatchedUids = mp }},
+		{pinFileMapWatchedInodes, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmWatchedInodes = mp }},
+		{pinFileMapSetuidInodes, func(mp *ebpf.Map) { l.objs.cfmlsmMaps.CfmSetuidInodes = mp }},
+	} {
+		path := filepath.Join(mapsDir, p.name)
+		if _, statErr := os.Stat(path); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			_ = m.Close()
+			return nil, fmt.Errorf("%w: stat pinned map %s: %v", ErrBPFLSMUnavailable, path, statErr)
+		}
+		mp, err := ebpf.LoadPinnedMap(path, nil)
+		if err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("%w: open pinned map %s: %v", ErrBPFLSMUnavailable, path, err)
+		}
+		p.assign(mp)
+	}
 
 	// Walk each known policy's pinned links. Missing links are not
 	// fatal — they just mean that policy wasn't enabled at pin time.

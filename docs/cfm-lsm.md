@@ -4,7 +4,7 @@
 
 **Four policies shipping. Monitor mode by default; enforce opt-in
 for EXEC-001 / EXEC-003 / FS-005. CRED-002 is monitor-only by
-design (cred_prepare enforce can deadlock systemd).**
+design (cred-install enforce can deadlock systemd).**
 
 Catalog:
 
@@ -36,10 +36,13 @@ daemon restarts, daemon crashes, and `systemctl stop cfm`. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-Both policies default to monitor mode — matches are logged and
-notified but exec proceeds. Enforce mode (return `-EPERM` on a
-match, failing the calling process's `execve()`) is **available
-but opt-in**: set `mode = enforce` in `/etc/cfm/lsm.conf` and
+All four policies default to monitor mode — matches are logged and
+notified but the syscall proceeds. Enforce mode (return `-EPERM` on
+a match, failing the calling process's syscall) is **available but
+opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, and `CFML-FS-005`;
+`CFML-CRED-002` is monitor-only by design (returning -EPERM from
+the cred-install hook can deadlock systemd helpers and pkexec
+mid-transition). Set `mode = enforce` in `/etc/cfm/lsm.conf` and
 re-run `cfm lsm enable`. The mechanism is a `volatile const`
 global in the BPF program rewritten at load time via
 `cilium/ebpf`'s `spec.Variables[name].Set()`, so enforce/monitor
@@ -62,10 +65,14 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: exactly two LSM policies,
-`CFML-EXEC-001` and `CFML-EXEC-003`. Nothing is deferred, nothing is on
-a watch-list. Anything beyond those two requires a separate, named
-proposal — not a TODO inside this doc.
+The scope here is intentionally narrow: four shipping LSM policies
+covering exec (CFML-EXEC-001 / CFML-EXEC-003), sensitive-file write
+(CFML-FS-005), and post-setuid credential transitions
+(CFML-CRED-002). The MVP shipped with EXEC-001 + EXEC-003 only;
+FS-005 + CRED-002 landed as the next-policies pass once the MVP's
+verifier and pinning behaviour proved stable on EL10. Anything
+beyond these four requires a separate, named proposal — not a TODO
+inside this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
 existing CFM daemon at `internal/lsm/`, loading CO-RE BPF LSM programs
@@ -256,26 +263,43 @@ and EXEC-003.
 
 | | |
 |---|---|
-| Hook | `cred_prepare` |
+| Hook | `task_fix_setuid` |
 | Default mode | `monitor` (only) |
 | FP risk | Low — daemon walks `/usr/bin`, `/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` for setuid binaries and whitelists their inodes |
-| Perf impact | Hot — fires on every credential install; bounded by a single map lookup |
+| Perf impact | Cold — fires only on setuid-family syscalls (setresuid / setuid / setreuid / setfsuid), bounded by a single map lookup |
 
-**Description.** One BPF program at `cred_prepare`. Reads the new and
-old credential structs. Only continues when `new.euid == 0 && old.euid != 0`
-(non-root → root). Then resolves `current->mm->exe_file`'s inode and
-looks it up in `cfm_setuid_inodes`. If the inode is NOT in the
-whitelist, the process is gaining root through a code path that did
-not go through a recognised setuid binary — the canonical
-kernel-exploit-completion fingerprint. Emit event; never block.
+**Description.** One BPF program at `task_fix_setuid`. Reads the new
+and old credential structs after the setuid syscall has written them.
+Only continues when `new.euid == 0 && old.euid != 0` (non-root →
+root). Then resolves `current->mm->exe_file`'s inode and looks it
+up in `cfm_setuid_inodes`. If the inode is NOT in the whitelist, the
+process is gaining root via a setuid syscall from a binary that does
+not carry the suid bit on disk — the canonical post-exploit
+fingerprint where a kernel exploit installed root creds and the
+attacker pivots through `setresuid(0,0,0)` from a webshell or
+similar. Emit event; never block.
 
-**Monitor-only by design.** Returning `-EPERM` from `cred_prepare` can
-deadlock systemd helpers mid-transition (kernel auth bugs, polkit
-weirdness, container runtime cred manipulation). The value is in the
-alert, not the block. `cfm lsm enable` silently downgrades a
-`mode = enforce` setting on this policy to `monitor` with a clear
-warning, so an operator who copies an enforce setting from a different
-policy still gets safe behaviour.
+**Hook choice — task_fix_setuid, not cred_prepare.** The earlier
+draft attached to `cred_prepare`, but `cred_prepare` runs inside
+`prepare_creds()` *before* the caller has mutated `new->euid` —
+at that point `new` is a byte-for-byte copy of `old`, so a
+"non-root → root" gate is mathematically unsatisfiable and the
+program emits zero events. `task_fix_setuid` fires from the setuid
+syscall paths *after* the new cred's uid fields have been written,
+so the comparison is meaningful. The narrower hook does mean
+CRED-002 does not catch kernel exploits that install creds directly
+via `commit_creds(prepare_kernel_cred(NULL))` without going through
+a userspace setuid syscall; that class is tracked as a known gap
+and is a follow-up (a kprobe on `commit_creds` is the canonical
+fix).
+
+**Monitor-only by design.** Returning `-EPERM` from the cred-install
+path can deadlock systemd helpers and pkexec mid-transition (kernel
+auth bugs, polkit weirdness, container runtime cred manipulation).
+The value is in the alert, not the block. `cfm lsm enable` silently
+downgrades a `mode = enforce` setting on this policy to `monitor`
+with a clear warning, so an operator who copies an enforce setting
+from a different policy still gets safe behaviour.
 
 **Companion kernsec rule.** `KSEC-LSM-bpf-001` (in `internal/kernsec/`)
 appends `bpf` to the operator's existing `lsm=` boot argument when
@@ -694,37 +718,47 @@ Tomoyo and Smack are untested and not on CFM's supported distros.
 
 ## Phased roadmap
 
-Two phases, both about the same two policies.
+The MVP roadmap shipped two phases, both about the exec-pair
+(EXEC-001 / EXEC-003); the FS-005 / CRED-002 next-policies pass
+added two more policies on top once the MVP had proven stable.
 
-**Phase 1 — MVP, monitor mode. (Shipping.)**
-`internal/lsm/` is stood up. The two BPF C sources live at
+**Phase 1 — MVP, monitor mode. (Shipped.)**
+`internal/lsm/` is stood up. The BPF C sources live at
 `internal/lsm/bpf/`, with `bpf2go` `go generate` wiring and committed
 compiled objects + Go bindings (so `go build` works with stock Go,
-no clang). Both `CFML-EXEC-001` and `CFML-EXEC-003` attach in
-monitor mode. Operator surface: `cfm lsm status` / `preview` /
-`probe` / `enable` / `disable` / `init`. Activation is two-process:
-operator runs `cfm lsm enable` (loads + pins to `/sys/fs/bpf/cfm/`),
-the cfm daemon's `internal/lsm/lifecycle.go` adopts the pinned state
-on every config-reload tick and forwards events into the existing
+no clang). `CFML-EXEC-001` and `CFML-EXEC-003` attach in monitor
+mode. Operator surface: `cfm lsm status` / `preview` / `probe` /
+`enable` / `disable` / `init`. Activation is two-process: operator
+runs `cfm lsm enable` (loads + pins to `/sys/fs/bpf/cfm/`), the cfm
+daemon's `internal/lsm/lifecycle.go` adopts the pinned state on
+every config-reload tick and forwards events into the existing
 notify pipeline. Protection survives daemon restarts.
 30-day telemetry collection runs on representative cPanel and
 Proxmox hosts before any enforce promotion.
 
-**Phase 2 — Promote to enforce.** `CFML-EXEC-001` to `enforce` once
-Phase 1 telemetry confirms zero or near-zero legitimate triggers.
-`CFML-EXEC-003` to `enforce` once the FP rate is verified against
-Phase 1 telemetry — likely later than `EXEC-001` because of the
-behavioural fd walk. The flip is a bpf2go constant rewrite — the
-program returns `-EPERM` instead of `0` on a match; the rest of
-the architecture is unchanged.
+**Phase 2 — Promote MVP exec pair to enforce.** `CFML-EXEC-001` to
+`enforce` once Phase 1 telemetry confirms zero or near-zero
+legitimate triggers. `CFML-EXEC-003` to `enforce` once the FP rate
+is verified against Phase 1 telemetry — likely later than
+`EXEC-001` because of the behavioural fd walk. The flip is a bpf2go
+constant rewrite — the program returns `-EPERM` instead of `0` on
+a match; the rest of the architecture is unchanged.
 
-**Future kernsec integration (separate PR).** Adding `bpf` to the
-kernel `lsm=` command line is currently a manual operator step.
-`kernsec` is the natural owner of boot-arg management; a follow-up
-PR would add a new kernsec rule (`KSEC-LSM-bpf-001`, Tier 2,
-default not forced) that appends `bpf` to the existing `lsm=` value
-without disrupting the operator's other LSM choices. Out of scope
-for this MVP; mentioned here as the known follow-up.
+**Next-policies pass — FS-005 + CRED-002 (shipped).** Two
+additional policies were folded into the same `cfmlsm.bpf.c`
+translation unit once the MVP's verifier and pinning behaviour
+proved stable on EL10. FS-005 (sensitive-file modification by web
+user) ships in monitor mode with an opt-in enforce flip; CRED-002
+(post-setuid root transition outside the suid-binary allowlist) is
+monitor-only by design because returning -EPERM from the
+cred-install path can deadlock systemd.
+
+**Kernsec integration — KSEC-LSM-bpf-001 (shipped).** Adding `bpf`
+to the kernel `lsm=` command line is owned by kernsec via rule
+`KSEC-LSM-bpf-001` (Tier 2, not forced by default). Forcing the
+rule in `/etc/cfm/kernsec.conf` makes `cfm kernsec apply` merge
+`bpf` into the operator's existing `lsm=` value without disrupting
+the other LSMs; takes effect on the next reboot.
 
 ## Future Policies — Detailed Planning
 
@@ -746,14 +780,16 @@ no longer theoretical — EXEC-003's fd-walk taught us how the
 verifier reacts to bounded loops on older kernels, which informs
 the design choices below.
 
-Both policies follow the same architectural shape as the MVP:
+FS-005 and CRED-002 follow the same architectural shape as the
+EXEC-001 / EXEC-003 MVP:
 - compiled into the shared `cfmlsm.bpf.c` translation unit,
 - attached via the existing Loader (`internal/lsm/loader.go`),
 - pinned to `/sys/fs/bpf/cfm/links/<name>` by `cfm lsm enable`,
 - events delivered through the existing ringbuf into the existing
   `notify.Event{kind=lsm_detect, section=lsm}` pipeline,
-- monitor-only on first ship, enforce-mode flip behind a bpf2go
-  constant rewrite after 30-day FP telemetry.
+- monitor-only on first ship; FS-005 has an opt-in enforce flip
+  behind a bpf2go constant rewrite, CRED-002 stays monitor-only by
+  design (cred-install enforce can deadlock systemd).
 
 Both stay focused on the "post-exploit cash-in" observable rather
 than trying to detect the underlying kernel primitive. That is the
@@ -988,10 +1024,10 @@ turn it into the shipped allowlist, *then* consider enforce.
 
 | | |
 |---|---|
-| Hook | `cred_prepare` (read-only observation), with optional `task_fix_setuid` follow-up |
+| Hook | `task_fix_setuid` (fires after the setuid syscall has written new->euid) |
 | Default mode | `monitor` (extended window — 60 days, see below) |
 | FP risk | Medium-low (whitelist of legitimate uid-0 transitions) |
-| Perf impact | Higher than EXEC-001 / FS-005 — `cred_prepare` fires on every credential install, not just on suspicious paths |
+| Perf impact | Cold — fires only on setuid-family syscalls (not every credential install) |
 | Maps to add | `cfm_setuid_inodes` (hash, key=u64 inode, val=u8 — pre-populated set of legitimate setuid binaries) |
 
 **Threat model.** A process gains effective uid 0 — or gains a
@@ -1050,15 +1086,18 @@ NOT a setuid binary, and the cleanest detection lands.
 **Detection logic (BPF C pseudo-shape).**
 
 ```c
-SEC("lsm/cred_prepare")
-int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, gfp_t gfp, int ret)
+SEC("lsm/task_fix_setuid")
+int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, int flags, int ret)
 {
     if (ret != 0) return ret;
 
     __u32 new_euid = BPF_CORE_READ(new, euid.val);
     __u32 old_euid = BPF_CORE_READ(old, euid.val);
 
-    // Only care about non-root → root transitions.
+    // Only care about non-root → root transitions. (task_fix_setuid
+    // fires AFTER the syscall has written new->euid, so this gate is
+    // satisfiable. cred_prepare fires before the mutation and would
+    // see new == old here, which is why we don't hook it.)
     if (new_euid != 0 || old_euid == 0) return 0;
 
     // Resolve current task's exe_file inode. If it's in the
@@ -1083,7 +1122,7 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, gfp_t gfp, i
     }
 
     // Unrecognised path → fingerprint emission.
-    emit_event(CFM_LSM_POLICY_CRED_ESCAL, exe, 0, "cred_prepare");
+    emit_event(CFM_LSM_POLICY_CRED_ESCAL, exe, 0, "task_fix_setuid");
     return 0; // monitor mode
 }
 ```
@@ -1187,11 +1226,16 @@ distro+workload more than exec patterns do.
 1. **CageFS inode mismatch.** Does the setuid-binary inode walk
    need to happen inside every CageFS namespace, or does the
    host walk suffice? Empirical, needs a CL host.
-2. **`task_fix_setuid` vs `cred_prepare`.** `task_fix_setuid`
-   is more specific (only fires on actual setuid() syscall);
-   `cred_prepare` is broader. v1 uses `cred_prepare` for
-   broader coverage, but evaluate whether `task_fix_setuid`
-   gives a higher signal/noise on real hosts.
+2. **`task_fix_setuid` vs `cred_prepare`.** Resolved. v1 ships
+   on `task_fix_setuid`. `cred_prepare` runs *before* the caller
+   has mutated `new->euid` (new is a byte-for-byte copy of old
+   at the time the hook fires) which makes a non-root → root gate
+   unsatisfiable. `task_fix_setuid` fires from the setuid syscall
+   paths after the new cred's uid fields have been written, so
+   the comparison is meaningful. The trade-off is that a kernel
+   exploit installing creds directly via `commit_creds()` without
+   going through a userspace setuid syscall is not caught — a
+   kprobe on `commit_creds` is the canonical follow-up.
 3. **Capability-only transitions.** A process that gains
    `CAP_SYS_ADMIN` without becoming uid 0 (via ambient caps
    or capability inheritance) is also suspicious. v1 only

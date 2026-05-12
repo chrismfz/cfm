@@ -252,9 +252,16 @@ func splitKV(line string) (key, value string, ok bool) {
 // AllRuleIDs returns the union of every rule ID kernsec knows about
 // across sysctls, boot args, modules, and mount rules. Used to
 // cross-check operator-authored conf overrides against the registry.
+//
+// KSEC-LSM-bpf-001 is not part of any registered rule list (it is a
+// one-off cmdline mutator, not a BootArg rule) so we register it
+// explicitly here. Without this, ValidateConfOverrideIDs warns on
+// every apply / preview / status for operators who followed the
+// documented activation path (state = force in kernsec.conf) — and
+// `status --check` exits non-zero, paging monitoring agents.
 func AllRuleIDs() map[string]struct{} {
 	out := make(map[string]struct{},
-		len(AllSysctls())+len(AllBootArgs())+len(AllModules())+len(Tier1Mounts))
+		len(AllSysctls())+len(AllBootArgs())+len(AllModules())+len(Tier1Mounts)+1)
 	for _, r := range AllSysctls() {
 		out[r.ID] = struct{}{}
 	}
@@ -267,6 +274,7 @@ func AllRuleIDs() map[string]struct{} {
 	for _, r := range Tier1Mounts {
 		out[r.ID] = struct{}{}
 	}
+	out[LSMBPFRuleID] = struct{}{}
 	return out
 }
 

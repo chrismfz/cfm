@@ -67,11 +67,11 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		if m == ModeDisabled {
 			continue
 		}
-		// CFML-CRED-002 is monitor-only by design (cred_prepare
-		// enforce can deadlock systemd helpers mid-transition; see
-		// docs/cfm-lsm.md). Warn and downgrade if an operator set
-		// enforce — better than silently respecting it and then
-		// not blocking, which would mislead them.
+		// CFML-CRED-002 is monitor-only by design (returning -EPERM
+		// from the cred-install path can deadlock systemd helpers
+		// and pkexec mid-transition; see docs/cfm-lsm.md). Warn and
+		// downgrade if an operator set enforce — better than silently
+		// respecting it and then not blocking, which would mislead them.
 		if p.ID == PolicyCredEscal && m == ModeEnforce {
 			fmt.Fprintln(w, "Note: CFML-CRED-002 is monitor-only by design; downgrading lsm.conf's enforce setting.")
 			fmt.Fprintln(w, "      See docs/cfm-lsm.md → CFML-CRED-002 → Enforcement strategy.")

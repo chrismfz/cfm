@@ -104,7 +104,7 @@ func AllPolicies() []Policy {
 		{
 			ID:          PolicyCredEscal,
 			Title:       "Privilege escalation without setuid path",
-			Hook:        "cred_prepare",
+			Hook:        "task_fix_setuid",
 			DefaultMode: ModeDisabled,
 			Description: "Detect uid → 0 transitions through code paths that did not go through a recognised setuid binary. Monitor-only by design.",
 		},

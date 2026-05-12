@@ -65,7 +65,7 @@ func RunPreview(w io.Writer, opts PreviewOptions) int {
 		fmt.Fprintln(w)
 	}
 
-	readErr := printPreviewApplyPlan(w, rs)
+	readErr := printPreviewApplyPlan(w, conf, rs)
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "[Summary]")
@@ -260,7 +260,7 @@ func applyAdHocOverrides(conf *Conf, opts PreviewOptions) *Conf {
 // detection/read paths without touching the real host bootloader state.
 var previewFSFactory = func() FS { return RealFS{} }
 
-func printPreviewApplyPlan(w io.Writer, rs ResolvedSet) bool {
+func printPreviewApplyPlan(w io.Writer, conf *Conf, rs ResolvedSet) bool {
 	sysctls := rs.ApplySysctls()
 	bootArgs := rs.ApplyBootArgs()
 	modules := rs.ApplyModules()
@@ -276,7 +276,13 @@ func printPreviewApplyPlan(w io.Writer, rs ResolvedSet) bool {
 	fmt.Fprintf(w, "  modprobe target: %s\n", ModprobePath)
 	printBootTarget(w, backend)
 
-	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	// conf is threaded in so KSEC-LSM-bpf-001 (which is conf-gated via
+	// IsLSMBPFForced) produces the same desired cmdline here as in
+	// apply. Otherwise preview and apply silently disagree when the
+	// rule is forced — preview would show `bpf` stripped while apply
+	// would keep it, breaking preview's "faithful diff of apply"
+	// contract.
+	desiredCmdline, cmdlineErr := buildDesiredCmdlineWithConf(backend, bootArgs, conf)
 	if cmdlineErr != nil && !errors.Is(cmdlineErr, ErrBLSDivergence) {
 		fmt.Fprintf(w, "  boot read error: %v\n", cmdlineErr)
 		fmt.Fprintln(w, "  status: cannot compute desired cmdline without reading current next-boot config")

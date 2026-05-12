@@ -406,38 +406,61 @@ static __always_inline void cfm_fs005_emit(struct dentry *target,
     bpf_ringbuf_submit(e, 0);
 }
 
+/* Look up one dentry's d_inode->i_ino in cfm_watched_inodes. Returns
+ * true on match. NULL dentry / NULL inode are both treated as "no
+ * match" (the dentry passed at create-time has no inode yet — the
+ * caller must pass d_parent in that case). */
+static __always_inline bool cfm_fs005_inode_watched(struct dentry *d)
+{
+    if (!d)
+        return false;
+    struct inode *ino = BPF_CORE_READ(d, d_inode);
+    if (!ino)
+        return false;
+    __u64 n = BPF_CORE_READ(ino, i_ino);
+    return bpf_map_lookup_elem(&cfm_watched_inodes, &n) != NULL;
+}
+
 /* Shared check helper. Returns:
  *   0       — not a watched (uid, inode) pair — allow.
  *   0       — watched, monitor mode — emit event, allow.
  *  -EPERM   — watched, enforce mode — emit event, block.
  *
- * dir_or_target: prefer the file's own dentry; for inode_create the
- * caller passes the dir dentry (we treat the dir as the watched
- * target). The function is callsite-flexible. */
-static __always_inline int cfm_fs005_check(struct dentry *watched,
-                                           struct dentry *event_dentry,
-                                           const char *fname_fallback,
-                                           __u8 op, int ret)
+ * Looks up TWO inodes against cfm_watched_inodes: `primary` and
+ * `secondary`. Either being in the set is a match. Callers pick the
+ * pair that fits the LSM hook's semantics:
+ *
+ *   setattr / setxattr:   primary = file dentry,        secondary = NULL
+ *   create:               primary = parent dir dentry,  secondary = NULL
+ *                         (new dentry has no inode yet)
+ *   unlink:               primary = file dentry,        secondary = parent
+ *                         (catches rm /etc/passwd AND rm /etc/cron.d/foo)
+ *   link / rename:        primary = new_dentry's parent, secondary = old_dentry's parent
+ *                         (catches "into watched dir" AND "out of watched dir")
+ *
+ * Two map lookups is well under any verifier complexity budget; both
+ * legs short-circuit via the uid pre-check (most calls return 0
+ * without touching the inode set at all). */
+static __always_inline int cfm_fs005_check2(struct dentry *primary,
+                                            struct dentry *secondary,
+                                            struct dentry *event_dentry,
+                                            const char *fname_fallback,
+                                            __u8 op, int ret)
 {
     if (ret != 0)
         return ret;
 
     __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
-    __u8 *uid_match = bpf_map_lookup_elem(&cfm_watched_uids, &uid);
-    if (!uid_match)
+    if (!bpf_map_lookup_elem(&cfm_watched_uids, &uid))
         return 0;
 
-    if (!watched)
-        return 0;
-    struct inode *target = BPF_CORE_READ(watched, d_inode);
-    if (!target)
-        return 0;
-    __u64 ino = BPF_CORE_READ(target, i_ino);
-    __u8 *ino_match = bpf_map_lookup_elem(&cfm_watched_inodes, &ino);
-    if (!ino_match)
+    if (!cfm_fs005_inode_watched(primary) && !cfm_fs005_inode_watched(secondary))
         return 0;
 
-    cfm_fs005_emit(event_dentry ? event_dentry : watched, fname_fallback, op);
+    struct dentry *ev = event_dentry;
+    if (!ev)
+        ev = primary ? primary : secondary;
+    cfm_fs005_emit(ev, fname_fallback, op);
 
     if (cfm_enforce_sensitive_write)
         return CFM_LSM_DENY;
@@ -445,9 +468,14 @@ static __always_inline int cfm_fs005_check(struct dentry *watched,
 }
 
 SEC("lsm/inode_setattr")
-int BPF_PROG(cfm_fs005_setattr, struct dentry *dentry, struct iattr *attr, int ret)
+int BPF_PROG(cfm_fs005_setattr, struct mnt_idmap *idmap, struct dentry *dentry,
+             struct iattr *attr, int ret)
 {
-    return cfm_fs005_check(dentry, dentry, NULL, CFM_FS_OP_SETATTR, ret);
+    /* mnt_idmap was added to inode_setattr in kernel 6.3. Without it
+     * in the signature, BPF_PROG silently shifts arg offsets and the
+     * verifier rejects with "R2 pointer arithmetic with <<= operator
+     * prohibited" when extracting `ret`. We don't read idmap fields. */
+    return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETATTR, ret);
 }
 
 SEC("lsm/inode_create")
@@ -455,63 +483,98 @@ int BPF_PROG(cfm_fs005_create, struct inode *dir, struct dentry *dentry,
              umode_t mode, int ret)
 {
     /* For create, the dir's inode is what's already in our watched
-     * set (e.g. /etc/sudoers.d/). We cast the dir inode lookup by
-     * extracting the dir_dentry via the new dentry's d_parent. */
+     * set (e.g. /etc/sudoers.d/). The new dentry has no inode yet,
+     * so we extract the parent via d_parent. */
     if (ret != 0)
         return ret;
     if (!dentry)
         return 0;
-    struct dentry *dir_dentry = BPF_CORE_READ(dentry, d_parent);
-    return cfm_fs005_check(dir_dentry, dentry, NULL, CFM_FS_OP_CREATE, 0);
+    struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
+    return cfm_fs005_check2(parent, NULL, dentry, NULL, CFM_FS_OP_CREATE, 0);
 }
 
 SEC("lsm/inode_unlink")
 int BPF_PROG(cfm_fs005_unlink, struct inode *dir, struct dentry *dentry, int ret)
 {
-    return cfm_fs005_check(dentry, dentry, NULL, CFM_FS_OP_UNLINK, ret);
+    /* Two cases:
+     *   - rm /etc/passwd            — dentry's own inode is watched.
+     *   - rm /etc/cron.d/backdoor   — parent dir's inode is watched
+     *                                  (post-exploit evidence-clearing).
+     * Both fire the event. */
+    struct dentry *parent = dentry ? BPF_CORE_READ(dentry, d_parent) : NULL;
+    return cfm_fs005_check2(dentry, parent, dentry, NULL, CFM_FS_OP_UNLINK, ret);
 }
 
 SEC("lsm/inode_link")
 int BPF_PROG(cfm_fs005_link, struct dentry *old_dentry, struct inode *dir,
              struct dentry *new_dentry, int ret)
 {
-    return cfm_fs005_check(old_dentry, new_dentry, NULL, CFM_FS_OP_LINK, ret);
+    /* `dir` is the parent inode of `new_dentry`. We walk d_parent on
+     * both dentries so the helper can rely on dentry->d_inode for
+     * uniformity. Catches `ln /tmp/payload /etc/sudoers.d/x` (target
+     * parent watched) and `ln /etc/cron.d/x /tmp/y` (source parent
+     * watched — moving a watched file). */
+    struct dentry *new_parent = new_dentry ? BPF_CORE_READ(new_dentry, d_parent) : NULL;
+    struct dentry *old_parent = old_dentry ? BPF_CORE_READ(old_dentry, d_parent) : NULL;
+    return cfm_fs005_check2(new_parent, old_parent, new_dentry, NULL, CFM_FS_OP_LINK, ret);
 }
 
 SEC("lsm/inode_rename")
 int BPF_PROG(cfm_fs005_rename, struct inode *old_dir, struct dentry *old_dentry,
              struct inode *new_dir, struct dentry *new_dentry, int ret)
 {
-    return cfm_fs005_check(old_dentry, new_dentry, NULL, CFM_FS_OP_RENAME, ret);
+    /* Catches `mv /tmp/payload /etc/sudoers.d/x` (drop-via-rename:
+     * a common way to evade inode_create-only hooks) AND moves
+     * out of a watched dir. */
+    struct dentry *new_parent = new_dentry ? BPF_CORE_READ(new_dentry, d_parent) : NULL;
+    struct dentry *old_parent = old_dentry ? BPF_CORE_READ(old_dentry, d_parent) : NULL;
+    return cfm_fs005_check2(new_parent, old_parent, new_dentry, NULL, CFM_FS_OP_RENAME, ret);
 }
 
 SEC("lsm/inode_setxattr")
-int BPF_PROG(cfm_fs005_setxattr, struct dentry *dentry, const char *name,
-             const void *value, size_t size, int flags, int ret)
+int BPF_PROG(cfm_fs005_setxattr, struct mnt_idmap *idmap, struct dentry *dentry,
+             const char *name, const void *value, size_t size, int flags, int ret)
 {
-    return cfm_fs005_check(dentry, dentry, NULL, CFM_FS_OP_SETXATTR, ret);
+    /* mnt_idmap was added to inode_setxattr in kernel 6.3 — same
+     * fix as inode_setattr above. */
+    return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETXATTR, ret);
 }
 
 /* ------------------------------------------------------------------- *
  * CFML-CRED-002 — Privilege escalation without setuid path.
  *
- * Hook: cred_prepare (LSM)
+ * Hook: task_fix_setuid (LSM)
  *
- * Mechanism: on every credential install, compare:
+ * We hook task_fix_setuid rather than cred_prepare because
+ * cred_prepare runs inside prepare_creds() *before* the caller has
+ * mutated new->euid — at that point new is a byte-for-byte copy of
+ * old, so a "new_euid==0 && old_euid!=0" gate is mathematically
+ * unsatisfiable. task_fix_setuid fires from __sys_setresuid /
+ * __sys_setuid / __sys_setreuid / __sys_setfsuid *after* the new
+ * cred's uid fields have been written, so the comparison is
+ * meaningful.
+ *
+ * Mechanism: on every setuid-family syscall, compare:
  *   - new cred's euid is 0
  *   - old cred's euid is not 0
  *   - current task's mm->exe_file's inode is NOT in
  *     `cfm_setuid_inodes` (populated by the daemon walking the host
  *     for files with S_ISUID set).
  *
- * If all three hold, the task is gaining root through a code path
- * that did not go through a recognised setuid binary. That is the
- * canonical kernel-exploit-completion fingerprint.
+ * If all three hold, the task is gaining root via a setuid()-family
+ * call from a binary that is not on disk with the suid bit set.
+ * That covers ordinary post-exploit pivots where a webshell calls
+ * setresuid(0,0,0) after a kernel exploit installed root creds.
  *
- * Mode: monitor ONLY. The design doc is explicit: returning -EPERM
- * from cred_prepare can deadlock systemd helpers mid-transition
- * and produce hard-to-debug states. CRED-002's value is in the
- * alert, not the block. No enforce constant for this policy.
+ * Scope note: task_fix_setuid does NOT fire when a kernel exploit
+ * installs creds directly via commit_creds() / prepare_kernel_cred()
+ * without going through a userspace setuid syscall. That class is
+ * tracked as a known gap in docs/cfm-lsm.md — a kprobe on
+ * commit_creds is the canonical fix and is a separate follow-up.
+ *
+ * Mode: monitor ONLY. Returning -EPERM from this hook can deadlock
+ * systemd helpers and pkexec mid-transition. CRED-002's value is
+ * in the alert, not the block. No enforce constant for this policy.
  * ------------------------------------------------------------------- */
 
 struct {
@@ -521,9 +584,9 @@ struct {
     __type(value, __u8);
 } cfm_setuid_inodes SEC(".maps");
 
-SEC("lsm/cred_prepare")
+SEC("lsm/task_fix_setuid")
 int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
-             gfp_t gfp, int ret)
+             int flags, int ret)
 {
     if (ret != 0)
         return ret;

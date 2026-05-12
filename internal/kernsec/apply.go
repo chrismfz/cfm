@@ -557,6 +557,17 @@ func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
 // time (it merges `bpf` into the existing lsm= value rather than
 // replacing it via ManagedBootArgKeys), so the conf is plumbed in
 // here. When conf is nil the merger is a no-op.
+//
+// Important: the not-forced branch is INTENTIONALLY a no-op. The `lsm`
+// key is not in ManagedBootArgKeys (rebuildManagedCmdline preserves
+// it byte-for-byte from the operator's current cmdline). Running
+// UnmergeLSMBPF here on every apply would silently strip
+// operator-added `bpf` from the lsm= value on Debian/Ubuntu hosts
+// where the operator enabled BPF LSM manually before installing cfm,
+// violating the contract in profile.go that operator args outside
+// ManagedBootArgKeys are not rewritten. The unmerge is therefore
+// only invoked from the explicit kernsec disable path (see
+// disable.go), where the operator has asked us to roll back.
 func buildDesiredCmdlineWithConf(backend BootBackend, args []BootArg, conf *Conf) (string, error) {
 	current, err := backend.NextBootCmdline()
 	if err != nil && !errors.Is(err, ErrBLSDivergence) {
@@ -565,15 +576,6 @@ func buildDesiredCmdlineWithConf(backend BootBackend, args []BootArg, conf *Conf
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
 	if IsLSMBPFForced(conf) {
 		tokens = MergeLSMBPF(tokens)
-	} else {
-		// Whenever the rule is NOT forced, the disable / unforce
-		// path runs: ensure `bpf` is not present in our managed
-		// state. Operators who added `bpf` themselves keep their
-		// edit only if it was present in their *current* cmdline
-		// AND they did not previously force this rule (so we
-		// never added it). This is the same lifecycle as other
-		// kernsec-managed args.
-		tokens = UnmergeLSMBPF(tokens)
 	}
 	return strings.Join(tokens, " "), err
 }
