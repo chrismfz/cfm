@@ -33,6 +33,11 @@ type Conf struct {
 	// always ModeDisabled).
 	Modes map[PolicyID]Mode
 
+	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
+	// section of lsm.conf; defaults from DefaultKmsgConf() if the
+	// section is absent.
+	Kmsg KmsgConf
+
 	// Source is the path the conf was loaded from, or a synthesised
 	// description ("(default — no <path>)") when no file was present.
 	Source string
@@ -40,7 +45,7 @@ type Conf struct {
 
 // DefaultConf returns the default configuration that `cfm lsm init`
 // writes on a fresh host: cfm-lsm globally disabled, every policy at
-// its DefaultMode.
+// its DefaultMode, kmsg emission on with the documented defaults.
 func DefaultConf() *Conf {
 	modes := map[PolicyID]Mode{}
 	for _, p := range AllPolicies() {
@@ -49,6 +54,7 @@ func DefaultConf() *Conf {
 	return &Conf{
 		Enabled: false,
 		Modes:   modes,
+		Kmsg:    DefaultKmsgConf(),
 	}
 }
 
@@ -104,10 +110,21 @@ func LoadConf(createDefault bool) (*Conf, error) {
 // Unknown policy IDs and unknown keys are rejected with a line number
 // so merge artifacts and typos surface immediately instead of
 // silently dropping rules at runtime.
+// sectionKind classifies what kind of section the parser is currently
+// in. Empty means top-level (before any section header).
+type sectionKind int
+
+const (
+	sectionTopLevel sectionKind = iota
+	sectionPolicy
+	sectionKmsg
+)
+
 func ParseConf(r io.Reader) (*Conf, error) {
 	c := &Conf{
 		Enabled: false,
 		Modes:   map[PolicyID]Mode{},
+		Kmsg:    DefaultKmsgConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
 	// even if the file declared a subset. Per-policy stanzas override.
@@ -119,10 +136,13 @@ func ParseConf(r io.Reader) (*Conf, error) {
 	scanner.Buffer(make([]byte, 0, 4*1024), 1<<20)
 
 	var (
-		currentPolicy  PolicyID // non-empty when inside a [policy "..."] stanza
+		current        sectionKind     // which section we are inside
+		currentPolicy  PolicyID        // valid when current == sectionPolicy
 		lineno         int
 		seenPolicies   = map[PolicyID]int{}
 		seenTopLevel   = map[string]int{}
+		seenKmsgKeys   = map[string]int{}
+		kmsgSeen       int
 	)
 
 	for scanner.Scan() {
@@ -134,20 +154,32 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		}
 
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			id, err := parseSectionHeader(line)
+			kind, id, err := parseSectionHeader(line)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineno, err)
 			}
-			if _, ok := PolicyByID(id); !ok {
-				return nil, fmt.Errorf("line %d: unknown policy ID %q (known IDs: %s)",
-					lineno, id, knownPolicyIDsList())
+			switch kind {
+			case sectionPolicy:
+				if _, ok := PolicyByID(id); !ok {
+					return nil, fmt.Errorf("line %d: unknown policy ID %q (known IDs: %s)",
+						lineno, id, knownPolicyIDsList())
+				}
+				if firstLine, dup := seenPolicies[id]; dup {
+					return nil, fmt.Errorf("line %d: duplicate policy section %q (first at line %d)",
+						lineno, id, firstLine)
+				}
+				seenPolicies[id] = lineno
+				current = sectionPolicy
+				currentPolicy = id
+			case sectionKmsg:
+				if kmsgSeen > 0 {
+					return nil, fmt.Errorf("line %d: duplicate [kmsg] section (first at line %d)",
+						lineno, kmsgSeen)
+				}
+				kmsgSeen = lineno
+				current = sectionKmsg
+				currentPolicy = ""
 			}
-			if firstLine, dup := seenPolicies[id]; dup {
-				return nil, fmt.Errorf("line %d: duplicate policy section %q (first at line %d)",
-					lineno, id, firstLine)
-			}
-			seenPolicies[id] = lineno
-			currentPolicy = id
 			continue
 		}
 
@@ -156,7 +188,8 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			return nil, fmt.Errorf("line %d: malformed (expected `key = value`): %q", lineno, line)
 		}
 
-		if currentPolicy == "" {
+		switch current {
+		case sectionTopLevel:
 			lk := strings.ToLower(key)
 			if firstLine, dup := seenTopLevel[lk]; dup {
 				return nil, fmt.Errorf("line %d: duplicate top-level key %q (first at line %d)",
@@ -173,18 +206,46 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			default:
 				return nil, fmt.Errorf("line %d: unknown top-level key %q", lineno, key)
 			}
-			continue
-		}
-
-		switch strings.ToLower(key) {
-		case "mode":
-			m, err := parseMode(val)
-			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", lineno, err)
+		case sectionPolicy:
+			switch strings.ToLower(key) {
+			case "mode":
+				m, err := parseMode(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.Modes[currentPolicy] = m
+			default:
+				return nil, fmt.Errorf("line %d: unknown policy key %q (only `mode` is supported)", lineno, key)
 			}
-			c.Modes[currentPolicy] = m
-		default:
-			return nil, fmt.Errorf("line %d: unknown policy key %q (only `mode` is supported)", lineno, key)
+		case sectionKmsg:
+			lk := strings.ToLower(key)
+			if firstLine, dup := seenKmsgKeys[lk]; dup {
+				return nil, fmt.Errorf("line %d: duplicate kmsg key %q (first at line %d)",
+					lineno, lk, firstLine)
+			}
+			seenKmsgKeys[lk] = lineno
+			switch lk {
+			case "state_transitions":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: state_transitions must be true|false (got %q)", lineno, val)
+				}
+				c.Kmsg.StateTransitions = b
+			case "detect_events":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: detect_events must be true|false (got %q)", lineno, val)
+				}
+				c.Kmsg.DetectEvents = b
+			case "detect_rate_per_min":
+				n, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("line %d: detect_rate_per_min must be a non-negative integer (got %q)", lineno, val)
+				}
+				c.Kmsg.DetectRatePerMin = n
+			default:
+				return nil, fmt.Errorf("line %d: unknown kmsg key %q (state_transitions | detect_events | detect_rate_per_min)", lineno, key)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -212,6 +273,15 @@ func FormatConf(c *Conf) string {
 		fmt.Fprintf(&b, "[policy %q]\n", string(p.ID))
 		fmt.Fprintf(&b, "mode = %s  # disabled | monitor | enforce\n", mode)
 	}
+	b.WriteString("\n")
+	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
+	b.WriteString("# in `dmesg`, `journalctl -k`, and (on most distros) /var/log/messages.\n")
+	b.WriteString("# Route to a dedicated file via /etc/rsyslog.d/99-cfm-lsm.conf — see\n")
+	b.WriteString("# configs/rsyslog/cfm-lsm.conf for a ready-to-drop-in example.\n")
+	b.WriteString("[kmsg]\n")
+	fmt.Fprintf(&b, "state_transitions   = %t   # ALIVE / ADOPT / STATE / ISSUE on enable/disable/adopt/stop\n", c.Kmsg.StateTransitions)
+	fmt.Fprintf(&b, "detect_events       = %t   # one DETECT line per detection (rate-limited below)\n", c.Kmsg.DetectEvents)
+	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap DETECT lines per policy per minute; 0 disables cap (not recommended)\n", c.Kmsg.DetectRatePerMin)
 	return b.String()
 }
 
@@ -235,17 +305,30 @@ func WriteDefaultConf() (created bool, err error) {
 	return true, nil
 }
 
-func parseSectionHeader(line string) (PolicyID, error) {
+// parseSectionHeader recognises two header shapes:
+//
+//	[kmsg]                 -> sectionKmsg
+//	[policy "CFML-EXEC-001"] -> sectionPolicy with the quoted ID
+//
+// Anything else is a parse error. The PolicyID return is valid only
+// when kind == sectionPolicy; it is the empty string otherwise.
+func parseSectionHeader(line string) (sectionKind, PolicyID, error) {
 	inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 	inner = strings.TrimSpace(inner)
+
+	// Bare-word section: currently only "kmsg".
+	if inner == "kmsg" {
+		return sectionKmsg, "", nil
+	}
+
 	if !strings.HasPrefix(inner, "policy") {
-		return "", fmt.Errorf("unknown section header: %q (expected `[policy \"...\"]`)", line)
+		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[kmsg]` or `[policy \"...\"]`)", line)
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(inner, "policy"))
 	if !strings.HasPrefix(rest, `"`) || !strings.HasSuffix(rest, `"`) || len(rest) < 2 {
-		return "", fmt.Errorf("malformed policy section header: %q", line)
+		return sectionTopLevel, "", fmt.Errorf("malformed policy section header: %q", line)
 	}
-	return PolicyID(rest[1 : len(rest)-1]), nil
+	return sectionPolicy, PolicyID(rest[1 : len(rest)-1]), nil
 }
 
 func parseMode(s string) (Mode, error) {

@@ -255,3 +255,107 @@ func TestModeFor_DefaultsWhenSilent(t *testing.T) {
 		t.Errorf("nil receiver: got %v, want disabled", got)
 	}
 }
+
+func TestParseConf_KmsgSection(t *testing.T) {
+	body := `
+enabled = true
+
+[kmsg]
+state_transitions   = true
+detect_events       = false
+detect_rate_per_min = 25
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	if !c.Kmsg.StateTransitions {
+		t.Error("state_transitions=true was not parsed")
+	}
+	if c.Kmsg.DetectEvents {
+		t.Error("detect_events=false was not parsed")
+	}
+	if c.Kmsg.DetectRatePerMin != 25 {
+		t.Errorf("detect_rate_per_min: got %d, want 25", c.Kmsg.DetectRatePerMin)
+	}
+}
+
+func TestParseConf_KmsgSection_Defaults(t *testing.T) {
+	// No [kmsg] section at all → DefaultKmsgConf() applies.
+	body := `enabled = true`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	def := DefaultKmsgConf()
+	if c.Kmsg != def {
+		t.Errorf("kmsg defaults not applied: got %+v, want %+v", c.Kmsg, def)
+	}
+}
+
+func TestParseConf_KmsgSection_Errors(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "unknown kmsg key",
+			body: "[kmsg]\nturbo = true\n",
+			want: "unknown kmsg key",
+		},
+		{
+			name: "non-bool state_transitions",
+			body: "[kmsg]\nstate_transitions = sometimes\n",
+			want: "state_transitions must be",
+		},
+		{
+			name: "negative rate",
+			body: "[kmsg]\ndetect_rate_per_min = -1\n",
+			want: "detect_rate_per_min must be",
+		},
+		{
+			name: "non-numeric rate",
+			body: "[kmsg]\ndetect_rate_per_min = many\n",
+			want: "detect_rate_per_min must be",
+		},
+		{
+			name: "duplicate [kmsg] section",
+			body: "[kmsg]\nstate_transitions = true\n\n[kmsg]\ndetect_events = false\n",
+			want: "duplicate [kmsg] section",
+		},
+		{
+			name: "duplicate key inside kmsg",
+			body: "[kmsg]\nstate_transitions = true\nstate_transitions = false\n",
+			want: "duplicate kmsg key",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseConf(strings.NewReader(tc.body))
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatConf_KmsgRoundTrip(t *testing.T) {
+	original := DefaultConf()
+	original.Enabled = true
+	original.Kmsg.StateTransitions = true
+	original.Kmsg.DetectEvents = false
+	original.Kmsg.DetectRatePerMin = 7
+
+	rendered := FormatConf(original)
+	roundtrip, err := ParseConf(strings.NewReader(rendered))
+	if err != nil {
+		t.Fatalf("ParseConf(FormatConf): %v\n--- rendered ---\n%s", err, rendered)
+	}
+	if roundtrip.Kmsg != original.Kmsg {
+		t.Errorf("kmsg round-trip drift: got %+v, want %+v", roundtrip.Kmsg, original.Kmsg)
+	}
+}

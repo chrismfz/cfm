@@ -74,6 +74,9 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 		l.mu.Unlock()
 		return
 	}
+	// Apply kmsg config early so subsequent emissions honour the
+	// operator's state_transitions / detect_events toggles.
+	ConfigureKmsg(conf.Kmsg)
 	if !conf.Enabled {
 		l.mu.Unlock()
 		return
@@ -98,6 +101,7 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	loader, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
 	if err != nil {
 		logging.Logf("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
+		KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
 		l.mu.Unlock()
 		return
 	}
@@ -114,6 +118,8 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 
 	attach := loader.Attach()
 	logging.Logf("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
+	KmsgStatef("ADOPT", "daemon attached to pinned state at %s, draining ringbuf (policies: %s)",
+		DefaultPinDir, policyModeSummary(conf, attach.Attached))
 }
 
 // Stop tears down the adoption goroutine and releases the userspace
@@ -144,6 +150,7 @@ func (l *Lifecycle) Stop() {
 		if err := loader.Close(); err != nil {
 			logging.Logf("[lsm] loader close: %v", err)
 		}
+		KmsgStatef("STATE", "daemon stopping; pinned BPF state remains attached")
 	}
 }
 
@@ -164,6 +171,7 @@ func (l *Lifecycle) run(loader *Loader) {
 				return
 			}
 			logging.Logf("[lsm] drain error: %v", err)
+			KmsgStatef("ISSUE", "drain error: %v", err)
 			// Errors() has capacity 1; the loader's drain has
 			// already exited. Wait for the events channel to close
 			// rather than spinning on the same error.
@@ -225,4 +233,9 @@ func emitNotify(ev Event) {
 		Extra:    extra,
 	})
 	logging.Logf("[lsm] %s", reason)
+	// Emit a DETECT line to dmesg / /var/log/messages too. Rate-
+	// limited per-policy by KmsgDetect so a burst cannot flood the
+	// kernel log. The notify pipeline + cfm.log always get the
+	// full stream regardless.
+	KmsgDetect(ev)
 }

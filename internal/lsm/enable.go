@@ -35,6 +35,7 @@ func RunEnable(w io.Writer) int {
 	fmt.Fprintln(w)
 
 	conf, _ := loadStatusConf()
+	ConfigureKmsg(conf.Kmsg)
 	var policies []PolicyID
 	for _, p := range AllPolicies() {
 		if conf.ModeFor(p.ID) != ModeDisabled {
@@ -97,7 +98,29 @@ func RunEnable(w io.Writer) int {
 	fmt.Fprintln(w, "Run `cfm lsm disable` to detach.")
 	fmt.Fprintln(w, "Run `cfm lsm status` to inspect live state.")
 
+	// Emit a one-line ALIVE record to dmesg so the activation shows
+	// up in /var/log/messages / journalctl alongside other kernel-
+	// adjacent state changes. Mirrors LKRG's ALIVE convention.
+	KmsgStatef("ALIVE", "enabled %s pinned=%s", policyModeSummary(conf, attach.Attached), DefaultPinDir)
+
 	return 0
+}
+
+// policyModeSummary builds a compact "CFML-EXEC-001=monitor CFML-EXEC-003=monitor"
+// string suitable for one-line dmesg / log emission.
+func policyModeSummary(conf *Conf, attached []PolicyID) string {
+	parts := make([]string, 0, len(attached))
+	for _, id := range attached {
+		parts = append(parts, fmt.Sprintf("%s=%s", id, conf.ModeFor(id)))
+	}
+	if len(parts) == 0 {
+		return "(none attached)"
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += " " + p
+	}
+	return out
 }
 
 // RunDisable is the operator-facing `cfm lsm disable` entry point.
@@ -136,6 +159,13 @@ func RunDisable(w io.Writer) int {
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "cfm-lsm disabled. All BPF programs detached.")
+	// Load conf so the kmsg config (state-transitions toggle) is
+	// applied before the STATE emission. Disable predates a started
+	// daemon process; the writer may not have been configured yet.
+	if conf, _ := loadStatusConf(); conf != nil {
+		ConfigureKmsg(conf.Kmsg)
+	}
+	KmsgStatef("STATE", "disabled, all programs detached")
 	return 0
 }
 
