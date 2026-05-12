@@ -388,6 +388,20 @@ func RunTUI() (switchToText bool, err error) {
 			}
 			fmt.Fprintln(&b, "")
 			fmt.Fprintln(&b, "  [Note:](fg:cyan,mod:bold) audit-only — kernsec never edits /etc/fstab.")
+			// Render a one-line tip summary; the full copy-pasteable
+			// guide lives in `cfm kernsec status` text output where
+			// it isn't subject to TUI line-truncation.
+			for _, mr := range Tier1Mounts {
+				if mr.ID != r.ID {
+					continue
+				}
+				if tip := BuildMountTip(mr); tip.Headline != "" {
+					fmt.Fprintln(&b, "")
+					fmt.Fprintf(&b, "  [Tip:](fg:yellow,mod:bold) %s\n", tip.Headline)
+					fmt.Fprintln(&b, "  Run `cfm kernsec status` for the full copy-pasteable guide.")
+				}
+				break
+			}
 		}
 		detail.Text = b.String()
 	}
