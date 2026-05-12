@@ -261,7 +261,8 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		}
 	}
 
-	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, bootReconcileReason, LoadSysctl); rc != 0 {
+	loader := func() error { return LoadSysctlTo(w) }
+	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, bootReconcileReason, loader); rc != 0 {
 		return rc
 	}
 
@@ -391,11 +392,12 @@ func applyWrites(
 	// 5. Runtime sysctl apply LAST: the only step that mutates the running kernel.
 	if err := loader(); err != nil {
 		fmt.Fprintln(w, "kernsec apply: runtime sysctl apply:", err)
-		fmt.Fprintln(w, "  files are on disk and bootloader is updated; runtime sysctl values may be partially loaded.")
-		fmt.Fprintln(w, "  inspect with `sysctl -a` and re-run apply once the cause is fixed.")
+		fmt.Fprintln(w, "  Only the key(s) named above were rejected; every other rule applied normally.")
+		fmt.Fprintln(w, "  Files are on disk and the bootloader is updated, so the rejected key(s) are the only drift.")
+		fmt.Fprintln(w, "  Inspect with `sysctl -a` / `cfm kernsec status` and re-run apply once the cause is fixed.")
 		return 1
 	}
-	fmt.Fprintln(w, "[Sysctl] runtime sysctl apply completed via per-key sysctl -w (rules now live).")
+	fmt.Fprintln(w, "[Sysctl] runtime sysctl apply completed via per-key sysctl -w (rules now live; any kernel-locked keys printed above will land after reboot).")
 	return 0
 }
 

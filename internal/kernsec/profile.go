@@ -28,6 +28,17 @@ type SysctlRule struct {
 	Value       string // expected value as string
 	Description string // one-line "what this does"
 	Affects     string // one-line "what enabling this breaks"
+
+	// AcceptValues lists additional live values that should be treated
+	// as OK even though they don't match Value exactly. Used for
+	// knobs where multiple settings deliver the same primary security
+	// stance and the "ideal" value cannot be set at runtime (e.g.
+	// kernel.unprivileged_bpf_disabled: 1 and 2 both block unprivileged
+	// BPF; 2 additionally locks the knob; CONFIG_BPF_UNPRIV_DEFAULT_OFF
+	// kernels boot at 1 and refuse runtime upgrade to 2). Empty for
+	// the vast majority of rules where the desired value is the only
+	// acceptable one.
+	AcceptValues []string
 }
 
 // BootArg is one expected kernel boot argument.
@@ -86,8 +97,16 @@ var KSPPSysctls = []SysctlRule{
 	{
 		ID: "KSEC-SCT-kspp.kernel-003", Group: "kspp.kernel", Tier: Tier1,
 		Key: "kernel.unprivileged_bpf_disabled", Value: "2",
-		Description: "Block unprivileged BPF program loading and lock the setting until reboot. Value 2 differs from 1 in that it cannot be lowered back to 0 at runtime — closes the window where a kernel CVE or root-equivalent process re-enables unprivileged BPF without a reboot.",
-		Affects:     "Kills a major LPE primitive class (eBPF-assisted privesc chains). Root BPF (cilium, imunify360 syscall tracing, bcc/bpftrace as root) unchanged. On kernels older than ~5.13 that don't recognise =2, the runtime apply may report 'not exposed' and the value falls back to whatever the kernel accepts.",
+		// Live=1 already blocks unprivileged BPF; the only thing
+		// Value=2 adds is "knob can no longer be changed", which
+		// matters for defence-in-depth against root-equivalent
+		// processes flipping it back. For the audit's green/OK
+		// signal both are acceptable — flagging =1 as WARN would
+		// be noise on CONFIG_BPF_UNPRIV_DEFAULT_OFF=y kernels where
+		// =1 is the boot-time default and runtime upgrade is locked.
+		AcceptValues: []string{"1"},
+		Description:  "Block unprivileged BPF program loading and lock the setting until reboot. Value 2 differs from 1 in that it cannot be lowered back to 0 at runtime — closes the window where a kernel CVE or root-equivalent process re-enables unprivileged BPF without a reboot.",
+		Affects:      "Kills a major LPE primitive class (eBPF-assisted privesc chains). Root BPF (cilium, imunify360 syscall tracing, bcc/bpftrace as root) unchanged. NOTE: kernels built with CONFIG_BPF_UNPRIV_DEFAULT_OFF=y (RHEL/Alma 9/10, recent stable kernels) boot with this knob already set to 1; once non-zero the kernel locks it and refuses every further sysctl write with EPERM. =1 is treated as an acceptable runtime value (still blocks unprivileged BPF); landing on the stricter =2 requires the paired boot arg KSEC-BOOT-bpf-001 (`unprivileged_bpf_disabled=2`) plus reboot. On kernels older than ~5.13 that don't recognise =2, the runtime apply may report 'not exposed' and the value falls back to whatever the kernel accepts.",
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-004", Group: "kspp.kernel", Tier: Tier1,
@@ -237,6 +256,18 @@ var Tier1BootArgsExt = []BootArg{
 		Description: "Disable Intel Transactional Synchronization Extensions — removes the hardware primitives exploited by TAA (CVE-2019-11135) and related MDS variants. TSX is unused by any standard hosting or KVM workload.",
 		Affects:     "None on hosting / KVM servers; TSX is not used by MySQL, nginx, PHP, Python, etc. Non-Intel CPUs and Intel CPUs with the TSX deprecation microcode already applied ignore the parameter.",
 	},
+	// --- boot.bpf: pair the sticky kernel.unprivileged_bpf_disabled sysctl
+	// with the only path that actually lands on value 2 on locked kernels.
+	// CONFIG_BPF_UNPRIV_DEFAULT_OFF=y kernels (RHEL/Alma 9/10) boot the
+	// sysctl at 1 and refuse every later runtime write with EPERM, so the
+	// matching sysctl rule (KSEC-SCT-kspp.kernel-003) cannot reach 2
+	// without this cmdline arg + reboot.
+	{
+		ID: "KSEC-BOOT-bpf-001", Group: "boot.bpf", Tier: Tier1,
+		Key: "unprivileged_bpf_disabled", Value: "2",
+		Description: "Boot the kernel with kernel.unprivileged_bpf_disabled already set to 2 — the only way to land on value 2 on kernels built with CONFIG_BPF_UNPRIV_DEFAULT_OFF=y, which boot the knob at 1 and lock it against further sysctl writes.",
+		Affects:     "Same surface as the paired sysctl rule. Older kernels that don't recognise =2 ignore the arg silently.",
+	},
 }
 
 // MemExploitSysctls is the memory/exploit-mitigation sysctl group.
@@ -373,6 +404,7 @@ var ManagedBootArgKeys = []string{
 	"kfence.sample_interval",
 	"efi",
 	"tsx",
+	"unprivileged_bpf_disabled",
 	// Tier 2
 	"oops",
 }

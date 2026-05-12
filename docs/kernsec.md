@@ -268,6 +268,7 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 | `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Enables low-overhead KFENCE sampling. |
 | `boot.dma` | 1 | `efi=disable_early_pci_dma` | EFI-only pre-IOMMU DMA hardening; skipped on non-EFI hosts. |
 | `boot.sidechannel` | 1 | `tsx=off` | Disables Intel TSX side-channel surface; no expected hosting impact. |
+| `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the `kernel.unprivileged_bpf_disabled=2` sysctl. On kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10, recent stable) the sysctl is locked at boot — only this boot arg can land the value at 2. |
 | `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
 
 kernsec only owns the managed boot-argument keys listed above. It strips stale

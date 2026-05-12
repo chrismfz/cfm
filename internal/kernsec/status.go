@@ -160,6 +160,9 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	profile := DetectHostProfile()
 	resolved := Resolve(conf, profile)
 
+	currentTokens := ParseCmdline(currentCmdline)
+	nextTokens := ParseCmdline(nextCmdline)
+
 	fmt.Fprintln(w, "[Expected runtime sysctl verification]")
 	for i, rule := range AllSysctls() {
 		rr := resolved.Sysctls[i]
@@ -192,18 +195,35 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 		}
 		switch state {
 		case SysctlOK:
-			fmt.Fprintf(w, "OK    %s=%s\n", rule.Key, found)
+			if found != rule.Value {
+				// Accepted-variant path (AcceptValues hit). Render
+				// as OK so the audit's green signal isn't polluted
+				// for an OS-level invariant, but tell the operator
+				// the stricter target value exists and how to land
+				// on it (next-boot cmdline + reboot).
+				if note, ok := stickyMismatchNote(rule.Key, found, rule.Value, nextTokens); ok {
+					fmt.Fprintf(w, "OK    %s=%s (target %s — %s)\n",
+						rule.Key, found, rule.Value, note)
+				} else {
+					fmt.Fprintf(w, "OK    %s=%s (target %s — accepted variant)\n",
+						rule.Key, found, rule.Value)
+				}
+			} else {
+				fmt.Fprintf(w, "OK    %s=%s\n", rule.Key, found)
+			}
 		case SysctlMismatch:
-			fmt.Fprintf(w, "WARN  %s expected %s, found %s\n", rule.Key, rule.Value, found)
+			if note, ok := stickyMismatchNote(rule.Key, found, rule.Value, nextTokens); ok {
+				fmt.Fprintf(w, "WARN  %s expected %s, found %s — %s\n",
+					rule.Key, rule.Value, found, note)
+			} else {
+				fmt.Fprintf(w, "WARN  %s expected %s, found %s\n", rule.Key, rule.Value, found)
+			}
 			res.warn()
 		case SysctlMissing:
 			fmt.Fprintf(w, "SKIP  %s missing on this kernel\n", rule.Key)
 		}
 	}
 	fmt.Fprintln(w)
-
-	currentTokens := ParseCmdline(currentCmdline)
-	nextTokens := ParseCmdline(nextCmdline)
 
 	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved, nil)
 	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved, nextErr)
@@ -591,3 +611,39 @@ func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 	}
 	fmt.Fprintln(w)
 }
+
+// stickyMismatchNote returns a short hint explaining a sysctl WARN
+// when the key is a known one-way kernel knob (see stickyOneWaySysctls)
+// and the live value can never be reconciled at runtime — runtime
+// writes return EPERM, only a reboot onto the matching boot arg lands
+// the desired value. Returns (note, true) when the rule is in that
+// special case; (_, false) for every other sysctl, leaving the
+// existing terse WARN line untouched. nextTokens is the parsed
+// next-boot cmdline; if the matching boot arg is already on it, the
+// note says "reboot will fix", otherwise it tells the operator to
+// re-run apply / add the boot arg first.
+func stickyMismatchNote(key, found, want string, nextTokens []string) (string, bool) {
+	if !stickyOneWaySysctls[key] {
+		return "", false
+	}
+	if found == "0" || found == "" {
+		// Live value is still 0, so a runtime write to `want` should
+		// have worked. The mismatch is genuine drift, not a kernel
+		// lock — fall back to the plain WARN line.
+		return "", false
+	}
+	arg := stickyAdvisoryBootArg[key]
+	if arg == "" {
+		return fmt.Sprintf("kernel locked this knob at boot (value %s); only a reboot can change it",
+			found), true
+	}
+	for _, tok := range nextTokens {
+		if tok == arg {
+			return fmt.Sprintf("kernel locked this knob at boot (value %s); `%s` is on the next-boot cmdline, reboot to land on %s",
+				found, arg, want), true
+		}
+	}
+	return fmt.Sprintf("kernel locked this knob at boot (value %s); add `%s` to the kernel cmdline (run `cfm kernsec apply`) and reboot to land on %s",
+		found, arg, want), true
+}
+
