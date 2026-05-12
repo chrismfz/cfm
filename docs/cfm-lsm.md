@@ -644,24 +644,29 @@ explicit `cfm lsm disable` detaches.
 
 ### Kernel preflight
 
-Before any load attempt, six things must hold. `cfm lsm status`
-runs all six and reports each one with a pass/fail/unknown verdict
+Before any load attempt, seven things must hold. `cfm lsm status`
+runs all seven and reports each one with a pass/fail/unknown verdict
 and a specific remediation hint:
 
-1. **Kernel version ≥ 5.7.** BPF LSM was merged in 5.7. Read from
-   `/proc/version`.
+1. **Kernel version (informational).** Read from `/proc/version`.
+   Reported but NOT a gate: RHEL-family vendor kernels backport BPF
+   LSM to 4.18 (verified on AlmaLinux 8.10), so a uname comparison
+   is the wrong proxy for capability. Capability is decided by the
+   bpf-lsm-program-type probe below.
 2. **`CONFIG_BPF_LSM=y` in the running kernel.** Verified via
    `/proc/config.gz` or `/boot/config-$(uname -r)`. Shipped enabled
-   on EL10+, Debian 12+, Ubuntu 22.04+. **Notably NOT enabled in
-   stock RHEL 9 / CL9 builds** — those hosts cannot run cfm-lsm
-   without a custom kernel.
-3. **`bpf` in `/sys/kernel/security/lsm`.** Most distros need the
-   operator to add `bpf` to the kernel `lsm=` command line. The
-   preflight prints the exact line to write to GRUB /
-   `/etc/default/grub` / `/etc/kernel/cmdline` based on the
-   detected bootloader.
+   on AlmaLinux 8.6+ / 9+ / 10, CloudLinux 8 / 9+, RHEL 8.6+ / 9+,
+   Debian 12+, Ubuntu 22.04+. Useful diagnostic, but on its own
+   not sufficient — see (7).
+3. **`bpf` in `/sys/kernel/security/lsm`.** EL-family stock kernels
+   include `bpf` in the compile-time default LSM list. Debian /
+   Ubuntu typically need the operator to add `bpf` to the kernel
+   `lsm=` command line. The preflight prints the exact line to
+   write to GRUB / `/etc/default/grub` / `/etc/kernel/cmdline`
+   based on the detected bootloader.
 4. **`/sys/kernel/btf/vmlinux` exists.** Required for CO-RE
-   relocation. Present on all supported distros.
+   relocation. Present on AlmaLinux 8.6+, RHEL 9+, Debian 12+,
+   Ubuntu 22.04+, and newer.
 5. **The process has `CAP_BPF + CAP_PERFMON` or `CAP_SYS_ADMIN`.**
    `cfm` runs as root in production, so this passes; running an
    unprivileged `cfm lsm status` will see this check FAIL and
@@ -670,6 +675,15 @@ and a specific remediation hint:
    the pin-to-disk path. Systemd has mounted bpffs by default
    since v229 so this passes on every modern distro; the check
    exists for the rare stripped-down host.
+7. **`BPF_PROG_TYPE_LSM` accepted by the bpf() syscall.** The
+   authoritative capability gate: attempts a tiny no-op LSM program
+   load via cilium/ebpf's `features.HaveProgramType(ebpf.LSM)`.
+   Returns PASS when the verifier engages, FAIL when the kernel
+   rejects the program type at dispatch (EINVAL). Required because
+   some vendor kernels (notably CloudLinux 8's lve kernel) set
+   `CONFIG_BPF_LSM=y` for the kernel-internal subsystem but do not
+   expose the program type to userspace; this probe is the only
+   way to tell those hosts apart from genuinely capable ones.
 
 Preflight is read-only and can be run by anyone at any time —
 it does not touch the kernel. Optional per-policy probes are reported
@@ -761,8 +775,8 @@ or `bpftool prog show` / `bpftool link show`.
 
 | Condition | CFM behaviour |
 |---|---|
-| Kernel < 5.7 | Preflight fail; `cfm-lsm` unavailable; daemon runs normally. |
-| `CONFIG_BPF_LSM` absent | Preflight fail with "kernel does not include BPF LSM support; recompile or use a distro kernel ≥ EL9 / Debian 12 / Ubuntu 22.04." |
+| Kernel rejects `BPF_PROG_TYPE_LSM` at bpf() syscall | Preflight fail on `bpf-lsm-program-type` (the authoritative gate); `cfm-lsm` unavailable; daemon runs normally. Observed on CloudLinux 8 lve kernels which set `CONFIG_BPF_LSM=y` for the internal subsystem only. |
+| `CONFIG_BPF_LSM` absent | Preflight fail with "kernel was built without BPF LSM support; use a distro kernel that ships CONFIG_BPF_LSM=y (AlmaLinux 8.6+ / 9+ / 10, CloudLinux 9+, RHEL 9+, Debian 12+, Ubuntu 22.04+) or rebuild with CONFIG_BPF_LSM=y." |
 | `bpf` not in `/sys/kernel/security/lsm` | Preflight fail with the exact remediation: which file to edit (`/etc/default/grub`, `/etc/kernel/cmdline`, or BLS entry), the `lsm=…` line to write, and the boot-args refresh command for the detected bootloader. |
 | `vmlinux` BTF missing | Preflight fail; CO-RE not possible on this kernel. |
 | Verifier rejects program | Log the verifier log at error level; mark that one policy as `failed`; other policies continue. |
