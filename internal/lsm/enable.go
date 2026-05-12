@@ -3,11 +3,26 @@
 package lsm
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
+
+// EnableOptions controls RunEnable behaviour.
+type EnableOptions struct {
+	// AssumeYes skips the interactive confirmation prompt that is
+	// otherwise shown when any policy in /etc/cfm/lsm.conf is set to
+	// `mode = enforce`. Required for unattended runs (cron, ansible,
+	// systemd-unit-driven activations).
+	AssumeYes bool
+
+	// In is the stream the prompt reads from. Defaults to os.Stdin
+	// when nil. Tests inject a strings.Reader to drive the prompt.
+	In io.Reader
+}
 
 // RunEnable is the operator-facing `cfm lsm enable` entry point.
 // It runs preflight, attaches every non-disabled policy in
@@ -16,7 +31,14 @@ import (
 // The pinned state survives the CLI process exiting and any
 // subsequent daemon restart. To turn cfm-lsm off, run `cfm lsm
 // disable`. Restarting the daemon does not detach.
-func RunEnable(w io.Writer) int {
+//
+// When any enabled policy has `mode = enforce`, RunEnable prompts
+// for confirmation before proceeding — enforce mode returns -EPERM
+// from bprm_check_security on a match, which fails the calling
+// process's exec() and can break a legitimate workflow if the
+// detection has a false-positive. Pass --yes (EnableOptions.AssumeYes)
+// for unattended runs.
+func RunEnable(w io.Writer, opts EnableOptions) int {
 	fmt.Fprintln(w, "===== CFM lsm ENABLE =====")
 	fmt.Fprintln(w)
 
@@ -36,10 +58,19 @@ func RunEnable(w io.Writer) int {
 
 	conf, _ := loadStatusConf()
 	ConfigureKmsg(conf.Kmsg)
+
 	var policies []PolicyID
+	modes := map[PolicyID]Mode{}
+	enforceList := []PolicyID{}
 	for _, p := range AllPolicies() {
-		if conf.ModeFor(p.ID) != ModeDisabled {
-			policies = append(policies, p.ID)
+		m := conf.ModeFor(p.ID)
+		if m == ModeDisabled {
+			continue
+		}
+		policies = append(policies, p.ID)
+		modes[p.ID] = m
+		if m == ModeEnforce {
+			enforceList = append(enforceList, p.ID)
 		}
 	}
 	if len(policies) == 0 {
@@ -50,17 +81,30 @@ func RunEnable(w io.Writer) int {
 
 	// Refuse to enable on top of an already-enabled state. The
 	// operator should `cfm lsm disable` first if they want to change
-	// the policy set. Quietly re-pinning would leak old links.
+	// the policy set. Quietly re-pinning would leak old links AND
+	// (worse) silently swallow a mode change — the new mode would
+	// not take effect until disable+enable.
 	if st := InspectPinned(DefaultPinDir); st.Exists {
 		fmt.Fprintf(w, "cfm-lsm is already enabled (pinned state at %s).\n", DefaultPinDir)
 		fmt.Fprintln(w, "Run `cfm lsm status` to see the live attach state.")
-		fmt.Fprintln(w, "To change the policy set, run `cfm lsm disable` first, then re-enable.")
+		fmt.Fprintln(w, "To change the policy set or mode, run `cfm lsm disable` first, then re-enable.")
 		return 1
+	}
+
+	// Enforce-mode confirmation. enforce returns -EPERM from
+	// bprm_check_security on a match, which fails the calling
+	// process's execve(). Operators need to actively opt in.
+	if len(enforceList) > 0 && !opts.AssumeYes {
+		if !confirmEnforce(w, opts.In, conf, enforceList) {
+			fmt.Fprintln(w, "Aborted. No changes made.")
+			return 1
+		}
 	}
 
 	l, err := NewLoader(LoaderOptions{
 		EventBufferSize: 16,
 		Policies:        policies,
+		Modes:           modes,
 		PinDir:          DefaultPinDir,
 	})
 	if err != nil {
@@ -78,10 +122,15 @@ func RunEnable(w io.Writer) int {
 	attach := l.Attach()
 	fmt.Fprintln(w, "Attached and pinned:")
 	for _, id := range attach.Attached {
+		mode := conf.ModeFor(id)
+		marker := ""
+		if mode == ModeEnforce {
+			marker = "  [ENFORCE — will return -EPERM on match]"
+		}
 		if p, ok := PolicyByID(id); ok {
-			fmt.Fprintf(w, "  %s  %s\n", id, p.Title)
+			fmt.Fprintf(w, "  %s  %s  (mode=%s)%s\n", id, p.Title, mode, marker)
 		} else {
-			fmt.Fprintf(w, "  %s\n", id)
+			fmt.Fprintf(w, "  %s  (mode=%s)%s\n", id, mode, marker)
 		}
 	}
 	if len(attach.Failed) > 0 {
@@ -104,6 +153,48 @@ func RunEnable(w io.Writer) int {
 	KmsgStatef("ALIVE", "enabled %s pinned=%s", policyModeSummary(conf, attach.Attached), DefaultPinDir)
 
 	return 0
+}
+
+// confirmEnforce prints the enforce-mode warning and reads a y/N
+// response. Returns true only on an explicit "y" or "yes" (case
+// insensitive). Anything else — including EOF, empty input, or an
+// unexpected error — is treated as "no" so an accidentally piped
+// stdin cannot greenlight an enforce attach.
+func confirmEnforce(w io.Writer, in io.Reader, conf *Conf, enforceList []PolicyID) bool {
+	fmt.Fprintln(w, "WARNING: enabling cfm-lsm with ENFORCE mode active.")
+	fmt.Fprintln(w)
+	for _, id := range enforceList {
+		title := string(id)
+		if p, ok := PolicyByID(id); ok {
+			title = p.Title
+		}
+		fmt.Fprintf(w, "  %s  %s\n", id, title)
+		fmt.Fprintln(w, "    → on match the BPF program returns -EPERM, which fails the calling")
+		fmt.Fprintln(w, "      process's execve(). A false-positive will crash a legitimate workload.")
+	}
+	for _, p := range AllPolicies() {
+		m := conf.ModeFor(p.ID)
+		if m == ModeMonitor {
+			fmt.Fprintf(w, "  %s  (mode=monitor — events only, no block)\n", p.ID)
+		}
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Recovery if a legitimate workflow breaks: run `cfm lsm disable` (one CLI command).")
+	fmt.Fprintln(w, "Pass --yes to skip this prompt in unattended scripts.")
+	fmt.Fprintln(w)
+	fmt.Fprint(w, "Continue? [y/N]: ")
+
+	if in == nil {
+		in = os.Stdin
+	}
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		fmt.Fprintf(w, "(read error: %v) — treating as N\n", err)
+		return false
+	}
+	answer := strings.TrimSpace(strings.ToLower(line))
+	return answer == "y" || answer == "yes"
 }
 
 // policyModeSummary builds a compact "CFML-EXEC-001=monitor CFML-EXEC-003=monitor"
