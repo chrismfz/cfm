@@ -1,8 +1,7 @@
-# cfm-lsm — Userspace Behaviour Enforcement (scoped MVP)
+# cfm-lsm — Userspace Behaviour Enforcement
 
 ## Status
 
-**MVP shipping. Monitor mode.**
 
 Both BPF LSM policies are implemented, compiled, and verified to
 load on EL10 (kernel 6.12). The full end-to-end flow is:
