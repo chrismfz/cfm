@@ -56,7 +56,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua verify-bpf-bindings
 
 # -------------------------------
 # Help
@@ -119,7 +119,17 @@ update: ## Update all dependencies
 # -------------------------------
 # Build
 # -------------------------------
-build: ## Build the binary into ./bin/
+# Pre-build guard: cross-check the bpf2go-generated Go bindings in
+# internal/lsm/cfmlsm_*_bpfel.go against the .o files they //go:embed.
+# Pure Go (no clang dependency), runs in milliseconds. Refuses to
+# build if cfmlsm.bpf.c was edited but the .o was never regenerated
+# (or vice versa) — the failure mode that produced the runtime error
+# `field CfmCred003: unknown program cfm_cred003` after PR #863.
+verify-bpf-bindings: ## Verify embedded .o matches the bpf2go Go bindings (catches stale BPF bytecode)
+	@echo "→ Verifying internal/lsm/cfmlsm_*_bpfel.{go,o} are in sync"
+	@go run ./scripts/verify-bpf-bindings
+
+build: verify-bpf-bindings ## Build the binary into ./bin/
 	@mkdir -p $(BIN_DIR)
 	@echo "→ Building for $(GOOS)/$(GOARCH) (GOAMD64=$(GOAMD64), CGO_ENABLED=$(CGO_ENABLED))"
 	env -u GOAMD64 \
