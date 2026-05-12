@@ -64,6 +64,7 @@ func (s *stubFirewallBackend) DNATStatus(string, string) (bool, error)          
 func (s *stubFirewallBackend) DNATShow(string, string) (string, error)           { return "", nil }
 func (s *stubFirewallBackend) DNATOn(string, string, int, int) error             { return nil }
 func (s *stubFirewallBackend) DNATOff(string, string) error                      { return nil }
+func (s *stubFirewallBackend) EnsureDNATAccepts() error                          { return nil }
 func (s *stubFirewallBackend) PanelDNATOn(int) error                             { return nil }
 func (s *stubFirewallBackend) PanelDNATOff() error                               { return nil }
 func (s *stubFirewallBackend) PanelDNATStatus() (bool, string, error)            { return false, "", nil }

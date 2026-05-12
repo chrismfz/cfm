@@ -129,6 +129,12 @@ type Backend interface {
 	DNATShow(family, table string) (string, error)
 	DNATOn(family, table string, httpPort, httpsPort int) error
 	DNATOff(family, table string) error
+	// EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules
+	// in inet cfm/input for whatever web-DNAT mapping is currently active.
+	// Idempotent and a no-op when web DNAT is OFF. Intended to be called
+	// after ApplyPortsPolicy on every reload so the accepts survive the
+	// drop-rule rewrite.
+	EnsureDNATAccepts() error
 
 	// Panel DNAT APIs manage cPanel/DirectAdmin panel redirects and scoped input accepts.
 	PanelDNATOn(priority int) error
