@@ -1,6 +1,7 @@
 # CFM – Configurable Firewall Manager
 <p align="center">
-  High-performance L3–L7 firewall, WAF & challenge engine for modern hosting stacks
+  <b>L3–L7 firewall · WAF · interactive challenge · behavioural BPF LSM detection · KSPP-grade kernel hardening</b><br>
+  <i>a single Go daemon, layered defence-in-depth for modern hosting stacks</i>
 </p>
 
 <p align="center">
@@ -12,13 +13,35 @@
   <img src="https://img.shields.io/badge/nftables-native-green">
   <img src="https://img.shields.io/badge/WAF-integrated-red">
   <img src="https://img.shields.io/badge/Challenge-engine-purple">
+  <img src="https://img.shields.io/badge/BPF%20LSM-cfm--lsm-orange">
+  <img src="https://img.shields.io/badge/Kernel%20hardening-kernsec-darkgreen">
 </p>
 
 
-CFM is a modern Go-based firewall + detection + mitigation daemon.
-It combines nftables policy enforcement, log-driven detectors, enrichment, notifications,
-and an HTTP challenge engine that can be enforced either via nftables redirect/DNAT or directly
-in-path through a decision socket read from an edge proxy.
+CFM is a modern Go-based firewall + detection + mitigation daemon that
+spans **five defence layers from the HTTP edge down to the kernel
+surface**, all driven from one binary.
+
+At the request edge it combines **nftables policy enforcement**,
+**log-driven detectors**, enrichment, notifications, and an
+**HTTP challenge engine** that can be enforced either via nftables
+redirect/DNAT or directly in-path through a decision socket read from
+an edge proxy.
+
+Beyond the request path, CFM ships two kernel-adjacent layers that
+catch what the HTTP / log layers structurally cannot see:
+
+- **cfm-lsm** — a BPF LSM subsystem (CO-RE BPF programs, no kernel
+  module, no DKMS, no clang on the customer host) that watches
+  userspace behaviour at the syscall boundary and catches
+  post-exploit patterns like memfd-backed shellcode exec and
+  reverse-shell fd patterns. Programs pin to bpffs so detection
+  survives daemon restarts.
+- **kernsec** — a preemptive kernel-surface hardener that applies
+  **KSPP-derived sysctls, boot-arg policies, mount-option audits,
+  and module blacklists** so an attacker who lands has less to
+  pivot through. Tier-able, fully reversible, with safety preview
+  before apply.
 
 The in-path edge proxy can be either **OpenResty** (the original/default) or **Angie**
 (an nginx fork by former nginx core developers, supported as of CFM 1.0+). Either one
@@ -107,46 +130,118 @@ backend and no iptables dependency.
 
 ### Defence-in-Depth Layers
 
-CFM is not one monolithic blocker — it is a stack of independent layers,
-each looking at the host from a different angle. They do not duplicate
-each other; each catches the threats the others structurally cannot
-see.
+CFM is not one monolithic blocker — it is a stack of **five
+independent layers**, each looking at the host from a different
+angle. They do not duplicate each other; each catches the threats
+the others structurally cannot see. A live attack typically
+traverses every one of them, and every one of them ships from a
+single daemon binary plus an optional edge proxy.
 
 ```
-HTTP / mail / SSH / panel layer       detectors + webdetector
-                                      (log-driven, per-protocol)
-                                                   ↓
-Userspace process behaviour           cfm-lsm
-                                      (BPF LSM: memfd exec,
-                                       reverse shell patterns)
-                                                   ↓
-Kernel surface                        kernsec
-                                      (sysctls, boot args,
-                                       modules, mount audit)
+        incoming request / login / connection / abuse signal
+                                  ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  [1] CHALLENGE ENGINE        interactive proof-of-work          │
+│      (request edge)          + browser/bot fingerprinting       │
+└─────────────────────────────────────────────────────────────────┘
+                                  ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  [2] WAF                     OpenResty/Angie Lua rule layer     │
+│      (in-path)               + ModSecurity integration          │
+└─────────────────────────────────────────────────────────────────┘
+                                  ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  [3] DETECTORS + WEBDET.     log-driven, per-protocol           │
+│      (post-fact)             SSH / mail / FTP / panel / WAF     │
+└─────────────────────────────────────────────────────────────────┘
+                                  ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  [4] cfm-lsm (BPF LSM)       userspace behavioural enforcement  │
+│      (runtime kernel hook)   memfd exec, reverse shell pattern  │
+└─────────────────────────────────────────────────────────────────┘
+                                  ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  [5] kernsec                 KSPP-grade preemptive hardening    │
+│      (boot-time + runtime)   sysctls, boot args, modules, mount │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**How the layers pair.** Each layer can act on its own, but together
-they form a chain. A live attack typically traverses all three:
+**How the layers pair.** Each can act on its own, but together
+they form a chain — earlier layers shed the easy attacks; later
+layers backstop the leaks.
 
-1. **detectors / webdetector** see the request that *causes* the
-   compromise — a malicious POST, a brute-force burst on SSH, a
-   webshell drop URL. They can challenge or block at the HTTP /
-   protocol layer before the workload ever touches userspace.
-2. **cfm-lsm** sees the *consequence* once an exploit has landed — a
-   PHP-FPM worker spawning a process from a `memfd` payload, or a
-   compromised process exec'ing with stdin/stdout/stderr wired to a
-   remote socket. These behaviours are invisible to the HTTP layer
-   (the request has already returned) and to the kernel layer (no
-   sysctl can express them). Implemented as BPF LSM programs that
-   the operator pins to bpffs once via `cfm lsm enable` — detection
-   then survives daemon restarts and crashes.
-3. **kernsec** removes the *kernel surface* an attacker would
-   otherwise pivot through after step 2 — disables risky legacy
-   modules, hardens sysctls (`kernel.yama.ptrace_scope`,
-   `kernel.kptr_restrict`, etc.), audits `noexec` mounts, manages
-   boot args. It is preemptive: it shapes the host before any
-   attack arrives, so even a successful userspace foothold has less
-   to work with.
+#### [1] **Challenge Engine** — *make the abuser prove they are a real user*
+
+The first checkpoint for any request that triggered a soft signal
+(suspicious country, high request rate, missing browser
+fingerprint). Issues an interactive cookie/JS challenge via
+nftables DNAT or directly in-path through the edge proxy. Costs
+the operator nothing if the visitor is legitimate; blocks the
+flow entirely if it is a script. Tunable per-vhost and per-rule;
+see [Section 7](#7-challenge-system). Provides clean separation
+between **"definitely block"** and **"probably suspicious but let
+the user prove themselves"** — which keeps false-positive rates
+liveable on real hosting traffic.
+
+#### [2] **WAF** — *block known attack signatures before they reach the app*
+
+The OpenResty / Angie in-path layer runs a fast Lua rule pipeline
+plus an optional ModSecurity engine. Inspects URLs, query
+strings, request bodies (up to a configurable budget) and headers
+for OWASP-style patterns — SQLi, XSS, RFI, command injection,
+shell-upload paths, malicious user-agents, scanner fingerprints.
+Decisions feed back into the daemon's allow/block sets and into
+the challenge layer (suspicious requests get challenged instead
+of hard-blocked, where appropriate). See
+[Section 8](#8-in-path-mode-openresty--angie) for the Lua / Angie
+trade-off.
+
+#### [3] **Detectors + webdetector** — *post-fact log intelligence*
+
+Twelve+ protocol-specific detectors (SSH, Exim, Dovecot, FTP,
+MySQL, MySQL Governor, cPanel, ModSec, postfix, health,
+webdetector) read live from server logs, score events, and feed
+the autoblock engine with timed bans. Webdetector additionally
+correlates HTTP requests over time per vhost (suspicious-path
+hits, scanner cadence, repeat-offender patterns) and can escalate
+to challenge or hard-block. This is the layer that catches
+brute-force, distributed scanning, and pattern abuse that the
+WAF / challenge layers individually cannot — they only see one
+request at a time; detectors see the campaign.
+
+#### [4] **cfm-lsm (BPF LSM)** — *catch the post-exploit cash-in*
+
+When request-layer defences miss and code is running, cfm-lsm
+takes over. BPF LSM programs (CO-RE; no kernel module; no DKMS)
+hook `bprm_check_security` and observe userspace behaviour at the
+syscall boundary. It catches the **consequence** of any successful
+compromise — including kernel 0-days — that no log line ever
+shows: a PHP-FPM worker spawning a process from a `memfd_create`
+payload (the canonical fileless-malware pattern), or a process
+exec'ing with stdin/stdout/stderr dup'd onto a connected remote
+TCP socket (the reverse-shell fingerprint). BPF programs pin to
+`/sys/fs/bpf/cfm/` via `cfm lsm enable`, so kernel-side detection
+**survives daemon restarts and crashes** — the daemon's role
+becomes "drain events into the notify pipeline," not "keep
+protection alive." See [`docs/cfm-lsm.md`](docs/cfm-lsm.md).
+
+#### [5] **kernsec** — *preemptive kernel-surface reduction*
+
+The bottom layer is also the earliest one in time: kernsec applies
+**KSPP-derived sysctls** (`kernel.yama.ptrace_scope`,
+`kernel.kptr_restrict`, `kernel.dmesg_restrict`,
+`kernel.unprivileged_bpf_disabled`, ASLR, panic-on-oops, etc.),
+**boot-arg policies** (`slab_nomerge`, `init_on_alloc=1`,
+`page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `tsx=off`,
+`oops=panic`, plus `lsm=…` ordering), **module blacklists** for
+risky legacy kernel modules, and a **mount-option audit**
+covering `noexec` / `nosuid` / `nodev` on `/tmp`, `/var/tmp`,
+`/dev/shm`, `/home`. Tier-based (Tier 1 safe-everywhere; Tier 2
+opt-in stricter), fully reversible via `cfm kernsec rollback`,
+with a safety preview before any apply. It is the hardening that
+shapes the host *before* any attack arrives, so even a
+successful userspace foothold has less to pivot through. See
+[`docs/kernsec.md`](docs/kernsec.md).
 
 **Two-process model for cfm-lsm.** Unlike the other layers,
 cfm-lsm separates *protection* (kernel-side, lives independent of
@@ -160,30 +255,41 @@ full picture.
 
 **Read order:**
 
-- [`docs/kernsec.md`](docs/kernsec.md) — kernel-surface reduction
-  (sysctls, boot args, modules, mounts).
-- [`docs/cfm-lsm.md`](docs/cfm-lsm.md) — userspace-behaviour
-  enforcement (BPF LSM, two-policy MVP, six-step preflight,
-  pin-to-bpffs lifetime, daemon adoption).
+- [`docs/cfm-lsm.md`](docs/cfm-lsm.md) — **BPF LSM userspace-
+  behaviour enforcement** (two-policy MVP, six-step preflight,
+  pin-to-bpffs lifetime, daemon adoption, plus detailed design
+  for the next two policies CFML-FS-005 / CFML-CRED-002).
+- [`docs/kernsec.md`](docs/kernsec.md) — **kernel-surface
+  reduction** (sysctls, boot args, modules, mounts, host-profile
+  gates, intentional non-overlap with cfm-lsm).
 - [`docs/DETECTORS.md`](docs/DETECTORS.md) — protocol-layer
   detectors and per-section block policy.
 
-**Status.** All three layers are shipping. `kernsec` and
-`detectors` / `webdetector` are production. `cfm-lsm` is MVP-
-shipping in monitor mode — both BPF programs verified to load on
-EL10 (`6.12`) and other modern distros (Debian 12+, Ubuntu 22.04+).
-RHEL 9 / CL9 stock kernels are unsupported because they ship
+**Status.** All five layers are shipping. Challenge, WAF,
+detectors, webdetector, and `kernsec` are production-mature.
+`cfm-lsm` is **MVP-shipping in monitor mode** — both BPF programs
+(CFML-EXEC-001 memfd exec, CFML-EXEC-003 reverse-shell pattern)
+verified to load on EL10 (kernel 6.12), Debian 12+, Ubuntu 22.04+.
+**RHEL 9 / CL9 stock kernels are unsupported** because they ship
 without `CONFIG_BPF_LSM=y`; `cfm lsm status` reports this
-specifically. Enforce-mode flip waits on 30-day FP telemetry.
+specifically with remediation guidance. Enforce-mode flip waits
+on 30-day FP telemetry.
 
-**Quick start for cfm-lsm:**
+**Quick start for the bottom two layers:**
 
 ```bash
-cfm lsm status                                  # check kernel preflight + state
-cfm lsm probe                                   # one-shot: verify attach works (detaches)
-cfm lsm enable                                  # load + pin (persists across daemon restarts)
-systemctl restart cfm                           # daemon adopts pinned state, drains events
-cfm lsm disable                                 # turn off + unpin
+# Kernel hardening (preemptive, kernsec)
+cfm kernsec status              # audit current host
+cfm kernsec preview             # what `apply` would change
+cfm kernsec apply               # write sysctls + boot args, refresh bootloader
+cfm kernsec monitor enable      # periodic drift-check systemd timer
+
+# BPF LSM (runtime, cfm-lsm)
+cfm lsm status                  # kernel preflight + state
+cfm lsm probe                   # verify the kernel accepts attach (detaches)
+cfm lsm enable                  # load + pin (persists past daemon restart)
+systemctl restart cfm           # daemon adopts pinned state, drains events
+cfm lsm disable                 # turn off + unpin
 ```
 
 ---
