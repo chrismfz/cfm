@@ -113,10 +113,11 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	}
 
 	l, err := NewLoader(LoaderOptions{
-		EventBufferSize: 16,
-		Policies:        policies,
-		Modes:           modes,
-		PinDir:          DefaultPinDir,
+		EventBufferSize:       16,
+		Policies:              policies,
+		Modes:                 modes,
+		FS005WebOriginMonitor: conf.FS005WebOriginMonitor,
+		PinDir:                DefaultPinDir,
 	})
 	if err != nil {
 		fmt.Fprintln(w, "Enable FAILED.")

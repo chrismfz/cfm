@@ -158,6 +158,9 @@ func KmsgDetect(ev Event) {
 	if ev.Filename != "" {
 		msg += " path=" + ev.Filename
 	}
+	if ev.PolicyID == PolicySensitiveWrite && ev.Flags&EventFlagWebOrigin != 0 {
+		msg += " origin=web"
+	}
 	defaultKmsg.writeLine(kmsgPriWarning, "DETECT", msg)
 }
 

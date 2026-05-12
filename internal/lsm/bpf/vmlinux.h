@@ -63,14 +63,23 @@ typedef unsigned long  size_t;
 typedef __SIZE_TYPE__  size_t;
 #endif
 
-/* BPF map type enum subset. Mirrors include/uapi/linux/bpf.h. Only
- * the value cfm-lsm uses today (ringbuf) needs to be correct. */
+/* BPF map type enum subset. Mirrors include/uapi/linux/bpf.h for
+ * the map kinds cfm-lsm uses. */
 enum bpf_map_type {
     BPF_MAP_TYPE_UNSPEC                = 0,
     BPF_MAP_TYPE_HASH                  = 1,
     BPF_MAP_TYPE_ARRAY                 = 2,
     BPF_MAP_TYPE_RINGBUF               = 27,
+    BPF_MAP_TYPE_INODE_STORAGE         = 28,
+    BPF_MAP_TYPE_TASK_STORAGE          = 29,
 };
+
+#ifndef BPF_F_NO_PREALLOC
+#define BPF_F_NO_PREALLOC (1U << 0)
+#endif
+#ifndef BPF_LOCAL_STORAGE_GET_F_CREATE
+#define BPF_LOCAL_STORAGE_GET_F_CREATE (1U << 0)
+#endif
 
 /* CO-RE-relocated structs. Only the fields cfm-lsm reads are listed;
  * absent kernel fields are not a problem for BPF_CORE_READ as long
@@ -201,6 +210,7 @@ struct mm_struct {
 struct task_struct {
     struct mm_struct      *mm;
     struct files_struct   *files;
+    const struct cred     *cred;
 } ___NCO;
 
 /* Used by CFML-FS-005 (sensitive-file modification by web user).

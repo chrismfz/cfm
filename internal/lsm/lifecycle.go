@@ -190,10 +190,11 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	}
 
 	l, lerr := NewLoader(LoaderOptions{
-		EventBufferSize: 1024,
-		Policies:        policies,
-		Modes:           modes,
-		PinDir:          DefaultPinDir,
+		EventBufferSize:       1024,
+		Policies:              policies,
+		Modes:                 modes,
+		FS005WebOriginMonitor: conf.FS005WebOriginMonitor,
+		PinDir:                DefaultPinDir,
 	})
 	if lerr != nil {
 		logging.Logf("[lsm] auto-enable failed: %v", lerr)
@@ -298,6 +299,9 @@ func emitNotify(ev Event) {
 	if ev.Filename != "" {
 		reason += " path=" + ev.Filename
 	}
+	if ev.PolicyID == PolicySensitiveWrite && ev.Flags&EventFlagWebOrigin != 0 {
+		reason += " origin=web"
+	}
 
 	extra := map[string]string{
 		"policy_id": string(ev.PolicyID),
@@ -310,6 +314,9 @@ func emitNotify(ev Event) {
 	}
 	if ev.Filename != "" {
 		extra["path"] = ev.Filename
+	}
+	if ev.PolicyID == PolicySensitiveWrite && ev.Flags&EventFlagWebOrigin != 0 {
+		extra["origin"] = "web"
 	}
 
 	_ = notify.Emit(notify.Event{

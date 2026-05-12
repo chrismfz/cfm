@@ -38,6 +38,9 @@ enum cfm_fs_op {
 #define CFM_TASK_COMM_LEN 16
 #define CFM_FILENAME_LEN  64
 
+/* CFML-FS-005 flags. */
+#define CFM_LSM_F_WEB_ORIGIN  (1U << 0)
+
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem
  * identity (super_block->s_dev encoded like stat(2) st_dev), and
@@ -62,7 +65,7 @@ struct cfm_inode_key {
  *       20     4  uid
  *       24     4  gid
  *       28     1  op         (enum cfm_fs_op; 0 for non-FS policies)
- *       29     1  flags      (per-policy semantics; 0 reserved)
+ *       29     1  flags      (CFML-FS-005: bit 0 means web-origin match)
  *       30     2  _pad
  *       32    16  comm
  *       48    64  filename

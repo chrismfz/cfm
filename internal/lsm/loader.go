@@ -29,7 +29,7 @@ const DefaultPinDir = "/sys/fs/bpf/cfm"
 //	<pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid filesystem+inode hash
 //	<pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
 //	<pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
-//	<pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (6)
+//	<pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (9)
 //	<pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
 //
 // Each pinned object exists for as long as the bpffs file exists;
@@ -45,19 +45,22 @@ const (
 	pinSubdirMaps  = "maps"
 	pinSubdirLinks = "links"
 
-	pinFileMap               = "cfm_events"
-	pinFileMapWatchedUids    = "cfm_watched_uids"
-	pinFileMapWatchedInodes  = "cfm_watched_inodes"
-	pinFileMapSetuidInodes   = "cfm_setuid_inodes"
-	pinFileLinkMemfd         = "cfm_memfd_exec"
-	pinFileLinkRevshell      = "cfm_revshell"
-	pinFileLinkFs005Setattr  = "cfm_fs005_setattr"
-	pinFileLinkFs005Create   = "cfm_fs005_create"
-	pinFileLinkFs005Unlink   = "cfm_fs005_unlink"
-	pinFileLinkFs005Link     = "cfm_fs005_link"
-	pinFileLinkFs005Rename   = "cfm_fs005_rename"
-	pinFileLinkFs005Setxattr = "cfm_fs005_setxattr"
-	pinFileLinkCred002       = "cfm_cred002"
+	pinFileMap                    = "cfm_events"
+	pinFileMapWatchedUids         = "cfm_watched_uids"
+	pinFileMapWatchedInodes       = "cfm_watched_inodes"
+	pinFileMapSetuidInodes        = "cfm_setuid_inodes"
+	pinFileLinkMemfd              = "cfm_memfd_exec"
+	pinFileLinkRevshell           = "cfm_revshell"
+	pinFileLinkFs005Setattr       = "cfm_fs005_setattr"
+	pinFileLinkFs005Create        = "cfm_fs005_create"
+	pinFileLinkFs005Unlink        = "cfm_fs005_unlink"
+	pinFileLinkFs005Link          = "cfm_fs005_link"
+	pinFileLinkFs005Rename        = "cfm_fs005_rename"
+	pinFileLinkFs005Setxattr      = "cfm_fs005_setxattr"
+	pinFileLinkFs005MarkExec      = "cfm_fs005_mark_exec"
+	pinFileLinkFs005MarkSetuid    = "cfm_fs005_mark_setuid"
+	pinFileLinkFs005MarkTaskAlloc = "cfm_fs005_mark_task_alloc"
+	pinFileLinkCred002            = "cfm_cred002"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -112,7 +115,7 @@ type AttachResult struct {
 type Loader struct {
 	objs cfmlsmObjects
 	// links is one slice of attached links per policy. Most policies
-	// have a single link; CFML-FS-005 has six (one per LSM hook in
+	// have a single link; CFML-FS-005 has nine (six inode hooks plus origin markers in
 	// the inode_setattr / create / unlink / link / rename / setxattr
 	// family). Iteration order matches programsFor(id).
 	links  map[PolicyID][]link.Link
@@ -157,6 +160,11 @@ type LoaderOptions struct {
 	// To change a policy's mode the operator must `cfm lsm disable`
 	// and re-enable so the constants are rewritten.
 	Modes map[PolicyID]Mode
+
+	// FS005WebOriginMonitor enables CFML-FS-005 web-origin tracking.
+	// The BPF side uses this only for monitor-only origin matches;
+	// current-uid matches keep the normal per-policy mode semantics.
+	FS005WebOriginMonitor bool
 
 	// PinDir, when non-empty, asks NewLoader to pin the ringbuf map
 	// and every successfully-attached link to <PinDir>/maps/ and
@@ -210,8 +218,8 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: load BPF spec: %v", ErrBPFLSMUnavailable, err)
 	}
-	if err := rewriteEnforceConstants(spec, opts.Modes); err != nil {
-		return nil, fmt.Errorf("%w: rewrite enforce constants: %v", ErrBPFLSMUnavailable, err)
+	if err := rewriteConstants(spec, opts.Modes, opts.FS005WebOriginMonitor); err != nil {
+		return nil, fmt.Errorf("%w: rewrite BPF constants: %v", ErrBPFLSMUnavailable, err)
 	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
@@ -232,7 +240,7 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 			l.attach.Failed[id] = fmt.Errorf("no BPF program for policy %s", id)
 			continue
 		}
-		// Attach every sub-program. FS-005 has 6 (one per LSM hook);
+		// Attach every sub-program. FS-005 has 9 (six inode hooks plus origin markers);
 		// the others have 1 each. If ANY sub-program fails to attach,
 		// roll back the ones already attached for this policy so the
 		// kernel state stays consistent.
@@ -372,24 +380,38 @@ func (l *Loader) pinAll(pinDir string) error {
 // The constant names must match the C-side declarations in
 // cfmlsm.bpf.c. If a name drifts, the rewrite fails loudly rather
 // than silently falling back to monitor.
-func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode) error {
-	rewrites := map[string]uint8{
-		"cfm_enforce_memfd_exec":      enforceByte(modes[PolicyMemfdExec]),
-		"cfm_enforce_revshell":        enforceByte(modes[PolicyReverseShell]),
-		"cfm_enforce_sensitive_write": enforceByte(modes[PolicySensitiveWrite]),
+func rewriteConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode, fs005WebOriginMonitor bool) error {
+	// Required enforcement constants must exist in every embedded object.
+	// Keep this ordered so missing-variable diagnostics are deterministic.
+	for _, r := range []struct {
+		name string
+		val  uint8
+	}{
+		{"cfm_enforce_memfd_exec", enforceByte(modes[PolicyMemfdExec])},
+		{"cfm_enforce_revshell", enforceByte(modes[PolicyReverseShell])},
+		{"cfm_enforce_sensitive_write", enforceByte(modes[PolicySensitiveWrite])},
 		// CFML-CRED-002 is monitor-only by design (returning -EPERM
 		// from the cred-install path can deadlock systemd helpers
 		// and pkexec). No enforce constant in cfmlsm.bpf.c —
 		// intentionally absent here too. enable.go warns and
 		// downgrades when an operator sets mode=enforce on CRED-002.
-	}
-	for name, val := range rewrites {
-		vs, ok := spec.Variables[name]
+	} {
+		vs, ok := spec.Variables[r.name]
 		if !ok {
-			return fmt.Errorf("BPF spec missing variable %q — C/Go const names out of sync", name)
+			return fmt.Errorf("BPF spec missing variable %q — C/Go const names out of sync", r.name)
 		}
-		if err := vs.Set(val); err != nil {
-			return fmt.Errorf("set %s=%d: %w", name, val, err)
+		if err := vs.Set(r.val); err != nil {
+			return fmt.Errorf("set %s=%d: %w", r.name, r.val, err)
+		}
+	}
+
+	originMonitor := uint8(0)
+	if fs005WebOriginMonitor {
+		originMonitor = 1
+	}
+	if vs, ok := spec.Variables["cfm_fs005_web_origin_monitor"]; ok {
+		if err := vs.Set(originMonitor); err != nil {
+			return fmt.Errorf("set cfm_fs005_web_origin_monitor=%d: %w", originMonitor, err)
 		}
 	}
 	return nil
@@ -400,6 +422,11 @@ func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode)
 // (a disabled policy still has its program linked but never matches
 // because the operator omitted it from LoaderOptions.Policies; the
 // enforce flag is irrelevant in that path).
+
+func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode) error {
+	return rewriteConstants(spec, modes, false)
+}
+
 func enforceByte(m Mode) uint8 {
 	if m == ModeEnforce {
 		return 1
@@ -441,6 +468,9 @@ func pinLinkFiles(id PolicyID) []string {
 			pinFileLinkFs005Link,
 			pinFileLinkFs005Rename,
 			pinFileLinkFs005Setxattr,
+			pinFileLinkFs005MarkExec,
+			pinFileLinkFs005MarkSetuid,
+			pinFileLinkFs005MarkTaskAlloc,
 		}
 	case PolicyCredEscal:
 		return []string{pinFileLinkCred002}
@@ -677,8 +707,8 @@ func InspectPinned(pinDir string) PinnedState {
 
 // programEntry pairs a BPF program with its bpffs pin filename. One
 // policy maps to one entry for the simple cases (EXEC-001 / EXEC-003
-// / CRED-002) and to six entries for CFML-FS-005 (one per LSM hook
-// in the inode_* family).
+// / CRED-002) and to nine entries for CFML-FS-005 (six inode hooks
+// plus bprm/task hooks for web-origin tracking).
 type programEntry struct {
 	prog    *ebpf.Program
 	pinName string
@@ -702,6 +732,9 @@ func (l *Loader) programsFor(id PolicyID) []programEntry {
 			{progs.CfmFs005Link, pinFileLinkFs005Link},
 			{progs.CfmFs005Rename, pinFileLinkFs005Rename},
 			{progs.CfmFs005Setxattr, pinFileLinkFs005Setxattr},
+			{progs.CfmFs005MarkExec, pinFileLinkFs005MarkExec},
+			{progs.CfmFs005MarkSetuid, pinFileLinkFs005MarkSetuid},
+			{progs.CfmFs005MarkTaskAlloc, pinFileLinkFs005MarkTaskAlloc},
 		}
 	case PolicyCredEscal:
 		return []programEntry{{progs.CfmCred002, pinFileLinkCred002}}
