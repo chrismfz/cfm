@@ -363,16 +363,31 @@ such a change:
 
 | Tool | Version | Used for |
 |---|---|---|
-| `clang` | ≥ 11 (12+ recommended) | Compiles the BPF C sources via `go generate` |
+| `clang` | ≥ 11 (12+ recommended; EL10 ships `clang18`) | Compiles the BPF C sources via `go generate` |
 | `libbpf-dev` (Debian/Ubuntu) / `libbpf-devel` (EL) | ≥ 0.8 | Provides `<bpf/bpf_helpers.h>` and friends |
 | `bpftool` | ≥ 5.10 | Optional — only needed to regenerate `vmlinux.h` from a real `/sys/kernel/btf/vmlinux`. The MVP ships a hand-written minimal `vmlinux.h` so `bpftool` is not in the critical path. |
 
 Regenerate with:
 
 ```bash
-# Debian/Ubuntu
+# Debian / Ubuntu
 apt install clang libbpf-dev linux-tools-common
 
+# RHEL 10 / Alma 10 / Rocky 10 / CentOS Stream 10
+#   libbpf-devel lives in CRB (CodeReady Builder); clang18 lives in EPEL.
+dnf install epel-release
+dnf config-manager --set-enabled crb
+dnf install clang18 libbpf-devel bpftool
+
+# RHEL 9 / Alma 9 / Rocky 9 / CentOS Stream 9 (contributors only;
+#   note that EL9 stock kernels do NOT ship CONFIG_BPF_LSM=y, so the
+#   compiled object only runs on EL10+/Debian 12+/Ubuntu 22.04+ —
+#   but EL9 is fine as a build environment if that's what you have)
+dnf install epel-release
+dnf config-manager --set-enabled crb
+dnf install clang libbpf-devel bpftool
+
+# Regenerate (any distro)
 go generate ./internal/lsm/...
 git add internal/lsm/cfmlsm_*_bpfel.{go,o}
 ```
