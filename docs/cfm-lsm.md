@@ -444,6 +444,145 @@ program at load time** via a `bpf2go` constant rewrite, so the hot
 path does not branch on the mode and runtime cost is identical in
 both modes.
 
+## How it works — lifecycle, CLI, and kernel preflight
+
+The component will not work on every kernel CFM runs on today. That is
+fine — it has to fail safely on hosts that do not support it, and the
+operator has to be able to find out exactly why before they enable it.
+This section describes the operating model.
+
+### Default state — off
+
+`cfm-lsm` ships **disabled by default**, matching the pattern
+`internal/outbound/` already uses (`OUTBOUND_ENABLED = 0` in
+`configs/cfm.conf`). The operator opts in by setting `LSM_ENABLED = 1`
+in `cfm.conf` (or by toggling individual policies in `lsm.conf`).
+There is no scenario where a fresh CFM install starts attaching BPF
+LSM programs without an explicit operator decision.
+
+### Kernel preflight
+
+Before attaching any program the daemon runs a preflight check, in the
+same spirit as `kernsec`'s host-profile detection. Five things must
+hold; if any fails, `cfm-lsm` logs a clear diagnostic, marks itself
+**unavailable**, and the rest of the CFM daemon continues normally:
+
+1. **Kernel version ≥ 5.7.** BPF LSM was merged in 5.7. Verified via
+   `uname` syscall.
+2. **`CONFIG_BPF_LSM=y` in the running kernel.** Verified via
+   `/proc/config.gz` or `/boot/config-$(uname -r)`. Distros: present
+   on RHEL 9+, Alma 9+, Rocky 9+, Debian 12+, Ubuntu 22.04+; needs
+   verification on CloudLinux 9/10 (open question).
+3. **`bpf` in `/sys/kernel/security/lsm`.** Most distros do not enable
+   the BPF LSM at boot by default. The operator must add `bpf` to the
+   `lsm=` kernel command line (preserving the existing order — e.g.
+   on Ubuntu the default is
+   `lockdown,capability,landlock,yama,apparmor,bpf` *only if* it has
+   been opted in; on EL it is typically `lockdown,yama,integrity` and
+   `bpf` is absent). The preflight detects this and prints the exact
+   `lsm=…` line to add to GRUB / `/etc/default/grub` /
+   `/etc/kernel/cmdline`. `kernsec` does not own this boot arg today;
+   adding `lsm=` management to `kernsec` is a candidate follow-up but
+   not part of this MVP.
+4. **`/sys/kernel/btf/vmlinux` exists.** Required for CO-RE
+   relocation. Present on all supported distros.
+5. **The daemon has `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_ADMIN`.**
+   `cfm.service` already runs CFM with the privileges it needs; the
+   preflight just verifies the caps are actually in the effective set
+   at runtime.
+
+Preflight output is structured: each check passes, fails with a
+remediation hint, or is skipped. `cfm lsm status` always shows the
+preflight result first, before any per-policy state.
+
+### Load / unload — automatic, not operator-driven
+
+Once preflight passes and the operator has set `LSM_ENABLED = 1`, the
+BPF programs **load automatically as part of CFM daemon startup**, and
+detach as part of orderly daemon shutdown. There is no
+"`systemctl start cfm-lsm`" step; there is no separate unit. Same as
+how `internal/outbound/` is just on when `OUTBOUND_ENABLED = 1` — it
+is a subsystem of the daemon, not a sibling service.
+
+On daemon startup:
+1. Preflight runs.
+2. If preflight fails: log, mark unavailable, return.
+3. For each enabled policy: CO-RE-relocate the embedded BPF object
+   for the running kernel, load into the kernel, attach to the LSM
+   hook. If attach fails for one policy, log and continue with the
+   others — partial mode is better than no mode.
+4. Spawn the ringbuf reader goroutine. Events flow onto the CFM event
+   bus.
+
+On daemon shutdown: detach links, close maps, free programs. Standard
+`cilium/ebpf` lifecycle. The kernel automatically reclaims everything
+on process exit; explicit teardown is for cleanliness, not safety.
+
+### CLI surface
+
+Mirrors the `cfm kernsec` shape that operators are already used to.
+All read paths are safe to run any time; only `enable` / `disable`
+mutate state.
+
+| Command | Behaviour |
+|---|---|
+| `cfm lsm` | TUI on a TTY; text status otherwise. Read-only. |
+| `cfm lsm status` | Print preflight results, per-policy state (loaded / monitor / enforce / unavailable / failed), event counters since daemon start. Read-only. |
+| `cfm lsm status --json` | Machine-readable variant for automation. Read-only. |
+| `cfm lsm preview` | Show which policies *would* attach given the current `lsm.conf` and preflight result. Read-only; never loads anything. |
+| `cfm lsm policy <id>` | Detail view for one policy: hook, mode, exemption list, recent events. Read-only. |
+| `cfm lsm enable` | Set `LSM_ENABLED = 1` in `cfm.conf` and signal the daemon to run preflight + attach. Mutates config. |
+| `cfm lsm disable` | Detach all programs, set `LSM_ENABLED = 0`. Mutates config. The opposite of `enable`. |
+| `cfm lsm test --policy <id>` | Run a controlled synthetic trigger for a policy and report whether the program fired. See "Test mode" below. Mutates nothing. |
+| `cfm lsm reload` | Re-read `lsm.conf` and re-attach affected programs. Phase 2 only — see open question #2. |
+
+`enable` and `disable` are intentionally separate commands rather than
+a `cfm lsm apply`-style verb, because the only thing being decided is
+"on or off." There is no rule catalogue to roll forward incrementally
+the way `kernsec` has.
+
+### Test mode — proving it actually works
+
+`cfm lsm test --policy CFML-EXEC-001` runs a small synthetic trigger in
+a controlled subprocess and reports whether the BPF program observed
+the event. For `EXEC-001` that is: fork, `memfd_create`, write a
+trivial `/bin/true`-equivalent ELF into the memfd, `execveat` it, and
+check the ringbuf for a matching event with the test subprocess's
+PID.
+
+For `EXEC-003` it is: fork, create a TCP socket pair to a local
+listener, dup the socket fd to 0/1/2 in the child, `execve` a stub
+binary, and check the ringbuf for a matching event.
+
+Both tests are non-destructive: the synthetic triggers run as the
+calling user (typically root invoking `cfm lsm test`), do not touch
+real data paths, and clean up their sockets/memfds on exit. They also
+work in `monitor` mode (event fires, exec proceeds) and `enforce`
+mode (event fires, exec returns `-EPERM` — the test then verifies
+the `-EPERM` rather than the event).
+
+The intent is that an operator standing up `cfm-lsm` on a new host
+runs `cfm lsm test --policy CFML-EXEC-001 --policy CFML-EXEC-003`
+as part of the install verification and gets a clear pass/fail before
+trusting it in production.
+
+### Failure modes and what happens
+
+| Condition | CFM behaviour |
+|---|---|
+| Kernel < 5.7 | Preflight fail; `cfm-lsm` unavailable; daemon runs normally. |
+| `CONFIG_BPF_LSM` absent | Preflight fail with "kernel does not include BPF LSM support; recompile or use a distro kernel ≥ EL9 / Debian 12 / Ubuntu 22.04." |
+| `bpf` not in `/sys/kernel/security/lsm` | Preflight fail with the exact remediation: which file to edit (`/etc/default/grub`, `/etc/kernel/cmdline`, or BLS entry), the `lsm=…` line to write, and the boot-args refresh command for the detected bootloader. |
+| `vmlinux` BTF missing | Preflight fail; CO-RE not possible on this kernel. |
+| Verifier rejects program | Log the verifier log at error level; mark that one policy as `failed`; other policies continue. |
+| One LSM hook attach fails | Log; that one policy becomes `unavailable`; others continue. |
+| Ringbuf full | Drop events with a counter increment; surfaced in `cfm lsm status`. |
+
+The principle, lifted directly from `kernsec`'s posture: never break
+the host. A misconfigured or unsupported `cfm-lsm` reduces to a no-op
+plus a clear log message, never to a crashed daemon or a wedged
+machine.
+
 ## Coexistence
 
 **Imunify360 Proactive Defense.** Imunify PD is a Zend extension
