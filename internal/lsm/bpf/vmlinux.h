@@ -91,18 +91,86 @@ struct super_block {
 } ___NCO;
 
 struct inode {
+    __u16                  i_mode;
     struct super_block    *i_sb;
 } ___NCO;
 
 struct file {
     struct path            f_path;
     struct inode          *f_inode;
+    void                  *private_data;
 } ___NCO;
 
 struct linux_binprm {
     struct file           *file;
     const char            *filename;
     const char            *interp;
+} ___NCO;
+
+/* Types used by CFML-EXEC-003 (reverse-shell fd-walk).
+ *
+ * The fd table layout is:
+ *
+ *   current()->files (struct files_struct *)
+ *     ->fdt (struct fdtable *)
+ *       ->fd (struct file **)
+ *
+ * From the file we read f_inode->i_mode & S_IFMT to confirm it is a
+ * socket (cheaper than comparing f_op against &socket_file_ops, and
+ * does not require any kernel-symbol lookup). For sockets the
+ * private_data points at the struct socket, which carries the sock.
+ * From the sock we read sk_family (skip AF_UNIX) and sk_state
+ * (require TCP_ESTABLISHED). */
+
+#ifndef S_IFMT
+#define S_IFMT  0170000
+#endif
+#ifndef S_IFSOCK
+#define S_IFSOCK 0140000
+#endif
+
+#ifndef AF_INET
+#define AF_INET  2
+#endif
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
+
+/* TCP states from include/net/tcp_states.h. Only ESTABLISHED is
+ * meaningful for a reverse shell; LISTEN/SYN_SENT etc. are filtered
+ * out so this does not fire on accept loops or half-open handshakes. */
+#ifndef TCP_ESTABLISHED
+#define TCP_ESTABLISHED 1
+#endif
+
+struct fdtable {
+    unsigned int           max_fds;
+    struct file          **fd;
+} ___NCO;
+
+struct files_struct {
+    struct fdtable        *fdt;
+} ___NCO;
+
+struct task_struct {
+    struct files_struct   *files;
+} ___NCO;
+
+/* sock_common holds the cheap-to-read state and family fields that
+ * union into both struct sock and struct inet_sock. Reading them via
+ * struct sock's __sk_common embedded member is the canonical CO-RE
+ * idiom and is portable across kernel versions. */
+struct sock_common {
+    unsigned short         skc_family;
+    unsigned char          skc_state;
+} ___NCO;
+
+struct sock {
+    struct sock_common     __sk_common;
+} ___NCO;
+
+struct socket {
+    struct sock           *sk;
 } ___NCO;
 
 #endif /* __CFM_VMLINUX_H__ */

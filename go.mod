@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/chrismfz/goauth v0.0.0-20260418131111-bb92ffe218a5
+	github.com/cilium/ebpf v0.21.0
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gizak/termui/v3 v3.1.0
@@ -26,7 +27,6 @@ require (
 	github.com/alexedwards/argon2id v1.0.0 // indirect
 	github.com/alexedwards/scs/v2 v2.9.0 // indirect
 	github.com/boombuler/barcode v1.1.0 // indirect
-	github.com/cilium/ebpf v0.21.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect

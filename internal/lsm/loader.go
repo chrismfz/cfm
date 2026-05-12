@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -20,19 +21,38 @@ import (
 // actual load attempt fails.
 var ErrBPFLSMUnavailable = errors.New("BPF LSM unavailable on this kernel")
 
+// AttachResult records what NewLoader actually managed to attach.
+//
+// Partial mode is a first-class outcome: a kernel may accept
+// CFML-EXEC-001 (whose verifier surface is trivial) but reject
+// CFML-EXEC-003 (whose fd-walk hits a complexity ceiling on older
+// kernels per docs/cfm-lsm.md). When that happens we prefer
+// "one policy live and reported" over "nothing loaded because
+// something failed."
+type AttachResult struct {
+	// Attached is the set of policies whose BPF program is now
+	// attached to its LSM hook. Iteration order is stable
+	// (matches AllPolicies()).
+	Attached []PolicyID
+
+	// Failed maps a policy whose attach attempt failed to the
+	// underlying error. A non-empty Failed map combined with a
+	// non-empty Attached slice means partial mode.
+	Failed map[PolicyID]error
+}
+
 // Loader owns the lifecycle of cfm-lsm's BPF programs: load, attach
 // to LSM hooks, drain the ring buffer, detach on Close.
 //
 // The Loader does not block. Events flow from a goroutine started by
 // Start into a buffered channel returned by Events. Callers consume
 // the channel and forward into the wider CFM event bus.
-//
-// Phase-1 scope: only CFML-EXEC-001 (memfd exec) is wired up.
 type Loader struct {
-	objs      cfmlsmObjects
-	memfdLink link.Link
-	reader    *ringbuf.Reader
+	objs   cfmlsmObjects
+	links  map[PolicyID]link.Link
+	reader *ringbuf.Reader
 
+	attach  AttachResult
 	events  chan Event
 	errors  chan error
 	stopOne sync.Once
@@ -48,17 +68,23 @@ type LoaderOptions struct {
 	// drop counter (visible via the ringbuf's Read.Lost field).
 	// Zero defaults to 256.
 	EventBufferSize int
+
+	// Policies optionally restricts which policies to attach. Empty
+	// or nil means "attach every policy in AllPolicies()." Unknown
+	// IDs are ignored. Use this to load only a subset (e.g. for
+	// per-policy testing).
+	Policies []PolicyID
 }
 
-// NewLoader loads the embedded BPF objects, attaches the enabled
+// NewLoader loads the embedded BPF objects, attaches the requested
 // policy programs to their LSM hooks, and opens the ringbuf reader.
 // Call Start to begin draining events; Close to detach + free.
 //
 // Returns ErrBPFLSMUnavailable wrapped with the underlying cause if
-// the kernel refuses to load or attach (BPF LSM not enabled in
-// /sys/kernel/security/lsm, verifier rejection, missing BTF, no
-// CAP_BPF). Callers should treat that as "host cannot run cfm-lsm"
-// and report it via cfm lsm status rather than crashing the daemon.
+// the kernel refuses to load *any* program — that is the "host cannot
+// run cfm-lsm at all" case. If at least one policy attaches, NewLoader
+// succeeds and exposes the per-policy outcome via Attach(); callers
+// can inspect Attach().Failed to surface partial-mode warnings.
 func NewLoader(opts LoaderOptions) (*Loader, error) {
 	if opts.EventBufferSize <= 0 {
 		opts.EventBufferSize = 256
@@ -73,36 +99,86 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	}
 
 	l := &Loader{
+		links:  make(map[PolicyID]link.Link, 2),
 		events: make(chan Event, opts.EventBufferSize),
 		errors: make(chan error, 1),
+		attach: AttachResult{Failed: make(map[PolicyID]error)},
 	}
 
 	if err := loadCfmlsmObjects(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
-	prog := l.objs.cfmlsmPrograms.CfmMemfdExec
-	if prog == nil {
-		l.objs.Close()
-		return nil, fmt.Errorf("%w: cfm_memfd_exec program missing from collection", ErrBPFLSMUnavailable)
+	wanted := opts.Policies
+	if len(wanted) == 0 {
+		for _, p := range AllPolicies() {
+			wanted = append(wanted, p.ID)
+		}
 	}
 
-	attached, err := link.AttachLSM(link.LSMOptions{Program: prog})
-	if err != nil {
-		l.objs.Close()
-		return nil, fmt.Errorf("%w: attach lsm/bprm_check_security: %v", ErrBPFLSMUnavailable, err)
+	for _, id := range wanted {
+		prog := l.programFor(id)
+		if prog == nil {
+			// Unknown ID or program absent from this build. Treat as
+			// a per-policy failure, not a fatal error.
+			l.attach.Failed[id] = fmt.Errorf("no BPF program for policy %s", id)
+			continue
+		}
+		link, err := link.AttachLSM(link.LSMOptions{Program: prog})
+		if err != nil {
+			l.attach.Failed[id] = fmt.Errorf("attach lsm: %w", err)
+			continue
+		}
+		l.links[id] = link
+		l.attach.Attached = append(l.attach.Attached, id)
 	}
-	l.memfdLink = attached
+
+	if len(l.attach.Attached) == 0 {
+		// Nothing attached — close objects and surface the first
+		// failure so the caller has a concrete reason.
+		var firstErr error
+		for _, e := range l.attach.Failed {
+			firstErr = e
+			break
+		}
+		l.objs.Close()
+		if firstErr == nil {
+			firstErr = errors.New("no policies attached")
+		}
+		return nil, fmt.Errorf("%w: %v", ErrBPFLSMUnavailable, firstErr)
+	}
 
 	reader, err := ringbuf.NewReader(l.objs.cfmlsmMaps.CfmEvents)
 	if err != nil {
-		_ = attached.Close()
+		for _, lk := range l.links {
+			_ = lk.Close()
+		}
 		l.objs.Close()
 		return nil, fmt.Errorf("%w: open ringbuf: %v", ErrBPFLSMUnavailable, err)
 	}
 	l.reader = reader
 
 	return l, nil
+}
+
+// programFor returns the BPF program in this Loader's collection for
+// the given policy, or nil if the policy is unknown.
+func (l *Loader) programFor(id PolicyID) *ebpf.Program {
+	switch id {
+	case PolicyMemfdExec:
+		return l.objs.cfmlsmPrograms.CfmMemfdExec
+	case PolicyReverseShell:
+		return l.objs.cfmlsmPrograms.CfmRevshell
+	}
+	return nil
+}
+
+// Attach returns a snapshot of which policies are currently attached
+// and which failed to attach. Safe to call any time after NewLoader
+// returns; the underlying state is set once at NewLoader time and
+// never mutated thereafter.
+func (l *Loader) Attach() AttachResult {
+	return l.attach
 }
 
 // Start begins draining the ring buffer in a goroutine. The provided
@@ -139,8 +215,8 @@ func (l *Loader) Close() error {
 			}
 		}
 		l.wg.Wait()
-		if l.memfdLink != nil {
-			if err := l.memfdLink.Close(); err != nil && first == nil {
+		for _, lk := range l.links {
+			if err := lk.Close(); err != nil && first == nil {
 				first = err
 			}
 		}
