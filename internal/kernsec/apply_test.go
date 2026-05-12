@@ -241,6 +241,7 @@ func TestApplyWrites_LoaderRunsLastOnSuccess(t *testing.T) {
 		nil, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 0 {
 		t.Fatalf("expected rc=0 on success, got %d. Output:\n%s", rc, w.String())
@@ -265,6 +266,7 @@ func TestApplyWrites_LoaderNotCalledWhenWriteCmdlineFails(t *testing.T) {
 		nil, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on WriteCmdline failure, got %d", rc)
@@ -293,6 +295,7 @@ func TestApplyWrites_LoaderNotCalledWhenRefreshFails(t *testing.T) {
 		nil, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on Refresh failure, got %d", rc)
@@ -347,6 +350,7 @@ func TestApplyWrites_GrubBackendRollsBackOnRefreshFailure(t *testing.T) {
 		nil, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on Refresh failure, got %d, output:\n%s", rc, w.String())
@@ -396,6 +400,7 @@ func TestApplyWrites_NoRefreshSkipsRefreshButStillLoadsSysctl(t *testing.T) {
 		ApplyOptions{NoRefresh: true},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 0 {
 		t.Fatalf("expected rc=0, got %d. Output:\n%s", rc, w.String())
@@ -419,6 +424,7 @@ func TestApplyWrites_LoaderFailureIsReportedButFilesAreWritten(t *testing.T) {
 		nil, nil, ApplyOptions{},
 		"",
 		func() error { return errors.New("simulated runtime sysctl apply failure") },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1, got %d", rc)
@@ -507,6 +513,7 @@ func TestApplyWrites_ProxmoxRefreshFailureRollsBackCmdline(t *testing.T) {
 		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
@@ -553,6 +560,7 @@ func TestApplyWrites_ProxmoxRefreshFailureRollbackFailurePrintsManualRecovery(t 
 		[]BootArg{{Key: "slab_nomerge"}}, nil, ApplyOptions{},
 		"",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
@@ -590,6 +598,7 @@ func TestApplyWrites_ProxmoxRollbackPreservesUnmanagedOperatorArgs(t *testing.T)
 		[]BootArg{{Key: "slab_nomerge"}, {Key: "init_on_alloc", Value: "1"}}, nil, ApplyOptions{},
 		"",
 		func() error { return nil },
+		ResolvedSet{},
 	)
 	if rc != 1 {
 		t.Fatalf("expected rc=1 on Proxmox Refresh failure, got %d, output:\n%s", rc, w.String())
@@ -630,6 +639,7 @@ func TestApplyWrites_ReconcileOnDivergence(t *testing.T) {
 		[]BootArg{{Key: "slab_nomerge"}}, nil, ApplyOptions{},
 		"BLS kernel entries diverge on managed args from /boot/vmlinuz-new — stale on: /boot/vmlinuz-old",
 		func() error { loaderCalled = true; return nil },
+		ResolvedSet{},
 	)
 	if rc != 0 {
 		t.Fatalf("expected rc=0 on reconcile, got %d. Output:\n%s", rc, w.String())

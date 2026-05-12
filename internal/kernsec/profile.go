@@ -67,8 +67,15 @@ type ModuleRule struct {
 	Affects     string
 }
 
-// MountRule is one fstab audit entry. Phase 2 audit is report-only;
-// kernsec never auto-mutates /etc/fstab.
+// MountRule is one fstab audit entry. Most rules are report-only and
+// kernsec NEVER auto-mutates /etc/fstab for them — the operator
+// applies the recommendation by hand using the per-row tip. The
+// narrow CanEnable=true exception lets `cfm kernsec apply` add the
+// recommended options to /etc/fstab and remount for paths where
+// auto-application is safe in every realistic context (currently
+// only /dev/shm: tmpfs with no on-disk data to migrate, remount
+// preserves contents, kernel noexec is a soft flag that does not
+// kill running processes).
 type MountRule struct {
 	ID          string
 	Group       string
@@ -77,6 +84,32 @@ type MountRule struct {
 	Recommended string // e.g. "nodev,nosuid,noexec"
 	Description string
 	Affects     string
+
+	// CanEnable means `cfm kernsec apply` is allowed to add this
+	// rule's recommended options to /etc/fstab + remount the mount
+	// point in-place. Defaults to false: every audit-only mount row
+	// stays operator-managed. Set to true ONLY when:
+	//   - the mount has no on-disk state to migrate;
+	//   - remount with the recommended options is safe on a live
+	//     production host (no risk of killing existing workloads);
+	//   - the operator-recovery path is one short remount.
+	// /dev/shm meets all three; /tmp and /var/tmp do not (live
+	// MySQL temp tables, session files, the /var/tmp-survives-reboot
+	// contract, etc.) and stay tip-only.
+	CanEnable bool
+
+	// DefaultLiveOptions lists the subset of Recommended that the
+	// kernel / systemd / distro already applies at boot without
+	// kernsec doing anything. /dev/shm is the canonical case: every
+	// modern distro mounts it via systemd PID 1's mount-setup table
+	// with nosuid,nodev already on, so the only option kernsec
+	// effectively adds is noexec. Disable consults this field to
+	// avoid the obvious foot-gun of remounting /dev/shm with
+	// `dev,suid,exec` — that would leave the host *less* hardened
+	// than a fresh distro install. With DefaultLiveOptions set,
+	// disable reverts only the options kernsec actually added on
+	// top of the distro baseline, never the baseline itself.
+	DefaultLiveOptions string
 }
 
 // KSPPSysctls is the server-safe sysctl profile from kspp.sh.

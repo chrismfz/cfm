@@ -34,15 +34,21 @@ func preflightSummary(
 	bootArgs []BootArg,
 	modules []ModuleRule,
 	profile HostProfile,
+	mountsToEnable []MountRule,
 ) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "[!] About to %s:\n", strings.ToLower(label))
 	fmt.Fprintf(w, "    - sysctl:    %-50s (%d rules)\n", SysctlPath, len(sysctls))
 	fmt.Fprintf(w, "    - boot args: next-boot cmdline                              (%d args)\n", len(bootArgs))
 	fmt.Fprintf(w, "    - modules:   %-50s (%d modules)\n", ModprobePath, len(modules))
+	for _, m := range mountsToEnable {
+		fmt.Fprintf(w, "    - mounts:    %-50s (+ %s on %s; remount live)\n",
+			PathFstab, m.Recommended, m.MountPoint)
+	}
 
 	risks := boot_impacting_risks(bootArgs, modules, profile)
 	risks = append(risks, sysctl_impacting_risks(sysctls, profile)...)
+	risks = append(risks, mount_impacting_risks(mountsToEnable)...)
 	if len(risks) > 0 {
 		fmt.Fprintln(w, "[!] Boot-impacting changes — read carefully:")
 		for _, r := range risks {
@@ -54,10 +60,34 @@ func preflightSummary(
 	fmt.Fprintf(w, "    - %s%s\n", PathDefaultGrub, BackupSuffix)
 	fmt.Fprintf(w, "    - %s%s\n", SysctlPath, BackupSuffix)
 	fmt.Fprintf(w, "    - %s%s\n", ModprobePath, BackupSuffix)
+	if len(mountsToEnable) > 0 {
+		fmt.Fprintf(w, "    - %s%s\n", PathFstab, BackupSuffix)
+	}
 	fmt.Fprintln(w, "    (timestamped per-run backups go alongside if a managed file already had operator edits)")
 
 	fmt.Fprintln(w, "[!] Pass --yes to skip this prompt in unattended runs.")
 	fmt.Fprintln(w)
+}
+
+// mount_impacting_risks names every CanEnable mount rule about to be
+// applied so the operator sees exactly which mount points will be
+// remounted live. /dev/shm noexec is the documented workload-
+// breaker; surface the recovery command up-front so an operator who
+// realises mid-prompt that they run headless Chromium has it in
+// scrollback.
+func mount_impacting_risks(mountsToEnable []MountRule) []string {
+	var risks []string
+	for _, m := range mountsToEnable {
+		switch m.MountPoint {
+		case "/dev/shm":
+			risks = append(risks,
+				"/dev/shm: live remount with nodev,nosuid,noexec. Pre-15 PostgreSQL JIT and headless Chromium can break — revert with `mount -o remount,exec /dev/shm` then `cfm kernsec disable` (disable only un-does noexec; the distro-default nodev,nosuid stay live).")
+		default:
+			risks = append(risks,
+				fmt.Sprintf("%s: live remount with %s.", m.MountPoint, m.Recommended))
+		}
+	}
+	return risks
 }
 
 func sysctl_impacting_risks(sysctls []SysctlRule, profile HostProfile) []string {

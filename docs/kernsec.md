@@ -317,7 +317,13 @@ edits `/etc/fstab`.
 
 `/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
 
-The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and reminds the operator to mirror the change in `/etc/fstab` or the relevant systemd `.mount` unit — kernsec does not mutate either.
+The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and the matching `/etc/fstab` or systemd `.mount` change.
+
+For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for automation.
+
+`/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, and an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten.
+
+Disable for `/dev/shm` reverts only the options kernsec actually added on top of the distro baseline. Every modern distro mounts `/dev/shm` with `nosuid,nodev` already on (systemd PID 1's `mount-setup.c`), so the kernsec-effective addition is `noexec` alone — disable's runtime revert is `mount -o remount,exec /dev/shm`, never `dev,suid,exec` which would land the host below the distro baseline. The set of "already a default" options per rule lives in `MountRule.DefaultLiveOptions`. If kernsec authored the fstab line, the whole line is removed (so PID 1's built-in defaults take over on next boot); if the line is operator-owned, only the kernsec-effective additions are stripped and the operator's other options stay.
 
 ## Intentionally unsupported
 

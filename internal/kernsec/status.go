@@ -481,6 +481,7 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 			continue
 		}
 		d := CheckMountDetail(m, Tier1Mounts)
+		tip := buildMountTip(m, d, realFstabReader, realSystemdUnitFinder)
 		switch d.State {
 		case MountOK:
 			fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
@@ -491,16 +492,17 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 				strings.Join(d.Missing, ","),
 				d.CurrentOptions,
 			)
-			printMountRemediation(w, m.MountPoint, d.Missing)
+			printMountTip(w, tip)
 			res.warn()
 		case MountMissingOptions:
 			fmt.Fprintf(w, "MISSING    %s  none of %s applied  (current: %s)\n",
 				m.MountPoint, m.Recommended, d.CurrentOptions)
-			printMountRemediation(w, m.MountPoint, d.Missing)
+			printMountTip(w, tip)
 			res.warn()
 		case MountNotSeparate:
 			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n",
 				m.MountPoint)
+			printMountTip(w, tip)
 		case MountSymlink:
 			if d.SymlinkTarget != "" {
 				fmt.Fprintf(w, "SKIP       %s → %s  (symlink; audit defers to the target row)\n",
@@ -509,27 +511,30 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 				fmt.Fprintf(w, "SKIP       %s  is a symlink (audit defers to the target)\n",
 					m.MountPoint)
 			}
+			printMountTip(w, tip)
 		case MountBindOfAnother:
 			fmt.Fprintf(w, "SKIP       %s  bind of %s  (same source %s; remount the primary mount point)\n",
 				m.MountPoint, d.BindPrimaryPath, d.Source)
+			printMountTip(w, tip)
 		}
 	}
 	fmt.Fprintln(w)
 }
 
-// printMountRemediation emits the two-line "how to fix" hint under a
-// PARTIAL or MISSING row. Names only the still-missing options in the
-// runtime remount command so the operator can paste it as-is, and
-// reminds them the persistence path is fstab / systemd .mount, which
-// kernsec does NOT mutate.
-func printMountRemediation(w io.Writer, mountPoint string, missing []string) {
-	if len(missing) == 0 {
+// printMountTip emits the per-row remediation tip computed by
+// BuildMountTip. Tip body lines are pre-formatted with the indent
+// expected under a status row. Empty tips (OK rows) are silently
+// skipped so green mounts stay terse.
+func printMountTip(w io.Writer, tip MountTip) {
+	if tip.Headline == "" && len(tip.Body) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "           fix runtime:  mount -o remount,%s %s\n",
-		strings.Join(missing, ","), mountPoint)
-	fmt.Fprintf(w, "           persist:      add %s to the %s line in /etc/fstab (or the matching systemd .mount unit)\n",
-		strings.Join(missing, ","), mountPoint)
+	if tip.Headline != "" {
+		fmt.Fprintf(w, "           Tip: %s\n", tip.Headline)
+	}
+	for _, line := range tip.Body {
+		fmt.Fprintln(w, line)
+	}
 }
 
 // applyBootKeysFromResolved returns the bare keys (without value) of

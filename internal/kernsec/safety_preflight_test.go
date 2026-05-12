@@ -96,6 +96,7 @@ func TestPreflightSummary_RendersFiles(t *testing.T) {
 		[]BootArg{{Key: "slab_nomerge"}},
 		[]ModuleRule{{Name: "ksmbd", ID: "Y"}},
 		HostProfile{},
+		nil,
 	)
 	out := w.String()
 	for _, want := range []string{SysctlPath, ModprobePath, "Apply",
