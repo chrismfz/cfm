@@ -23,14 +23,14 @@ const DefaultPinDir = "/sys/fs/bpf/cfm"
 
 // Layout under the pin directory:
 //
-//   <pinDir>/maps/cfm_events            — the shared ringbuf map
-//   <pinDir>/maps/cfm_watched_uids      — FS-005 watched uids hash
-//   <pinDir>/maps/cfm_watched_inodes    — FS-005 watched inodes hash
-//   <pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid allowlist hash
-//   <pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
-//   <pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
-//   <pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (6)
-//   <pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
+//	<pinDir>/maps/cfm_events            — the shared ringbuf map
+//	<pinDir>/maps/cfm_watched_uids      — FS-005 watched uids hash
+//	<pinDir>/maps/cfm_watched_inodes    — FS-005 watched filesystem+inode hash
+//	<pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid filesystem+inode hash
+//	<pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
+//	<pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
+//	<pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (6)
+//	<pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
 //
 // Each pinned object exists for as long as the bpffs file exists;
 // the kernel only detaches when the last reference is dropped.
@@ -110,12 +110,12 @@ type AttachResult struct {
 //     reattaching anything. Used by the cfm daemon to read events
 //     from programs the operator already enabled via CLI.
 type Loader struct {
-	objs   cfmlsmObjects
+	objs cfmlsmObjects
 	// links is one slice of attached links per policy. Most policies
 	// have a single link; CFML-FS-005 has six (one per LSM hook in
 	// the inode_setattr / create / unlink / link / rename / setxattr
 	// family). Iteration order matches programsFor(id).
-	links map[PolicyID][]link.Link
+	links  map[PolicyID][]link.Link
 	reader *ringbuf.Reader
 
 	// pinned is true when the loader is in pinned-load or
@@ -719,18 +719,18 @@ func (l *Loader) WatchedUidsMap() *ebpf.Map {
 }
 
 // WatchedInodesMap returns the BPF hash map that CFML-FS-005 consults
-// for sensitive-file inode numbers. Keys are inode numbers (__u64).
-// Populated by the daemon from the operator-configurable
+// for sensitive-file filesystem+inode identities. Keys are cfm_inode_key
+// (dev + ino). Populated by the daemon from the operator-configurable
 // sensitive-paths list at adoption time.
 func (l *Loader) WatchedInodesMap() *ebpf.Map {
 	return l.objs.cfmlsmMaps.CfmWatchedInodes
 }
 
 // SetuidInodesMap returns the BPF hash map that CFML-CRED-002 consults
-// for the "legitimate setuid binary" allowlist. Keys are inode
-// numbers of every file on disk with S_ISUID set; presence means
-// "uid 0 transition through this binary is expected." Populated by
-// the daemon walking standard setuid paths at adoption time.
+// for the "legitimate setuid binary" allowlist. Keys are cfm_inode_key
+// values (dev + ino) for every file on disk with S_ISUID set; presence
+// means "uid 0 transition through this binary is expected." Populated
+// by the daemon walking standard setuid paths at adoption time.
 func (l *Loader) SetuidInodesMap() *ebpf.Map {
 	return l.objs.cfmlsmMaps.CfmSetuidInodes
 }

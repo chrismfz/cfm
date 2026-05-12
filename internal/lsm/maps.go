@@ -18,11 +18,20 @@ import (
 // Map populator paths. Declared as vars so tests can redirect them
 // to fixtures in t.TempDir().
 var (
-	passwdPath           = "/etc/passwd"
-	cpanelUserDomainsTSV = "/etc/userdomains"
+	passwdPath            = "/etc/passwd"
+	cpanelUserDomainsTSV  = "/etc/userdomains"
 	directAdminDomainsTSV = "/etc/virtual/domainowners"
-	setuidWalkRoots      = []string{"/usr/bin", "/usr/sbin", "/usr/libexec", "/bin", "/sbin"}
+	setuidWalkRoots       = []string{"/usr/bin", "/usr/sbin", "/usr/libexec", "/bin", "/sbin"}
 )
+
+// inodeKey mirrors struct cfm_inode_key in internal/lsm/bpf/common.bpf.h.
+// Dev is syscall.Stat_t.Dev (the filesystem identity exposed by stat(2));
+// Ino is syscall.Stat_t.Ino. Together they match the BPF-side
+// stat-compatible super_block->s_dev encoding + inode->i_ino key.
+type inodeKey struct {
+	Dev uint64
+	Ino uint64
+}
 
 // WebUserNames is the static set of system user names that are
 // considered "web-class" — i.e. any uid we should watch for
@@ -33,7 +42,7 @@ var (
 // The list is conservative: an extra match (treating a non-web
 // system user as watched) is a false positive on the FS-005 detector,
 // not a false negative on a real attack — and even FPs are gated
-// by also requiring an inode match against the sensitive-paths set.
+// by also requiring a filesystem+inode match against the sensitive-paths set.
 var WebUserNames = []string{
 	"apache",
 	"nginx",
@@ -102,9 +111,9 @@ var DefaultSensitivePaths = []string{
 //
 // The three maps:
 //   - cfm_watched_uids:    web-class user uids (from /etc/passwd +
-//                          panel manifests)
-//   - cfm_watched_inodes:  sensitive-path inodes (DefaultSensitivePaths)
-//   - cfm_setuid_inodes:   setuid-binary inodes (walks setuidWalkRoots)
+//     panel manifests)
+//   - cfm_watched_inodes:  sensitive-path filesystem+inode keys (DefaultSensitivePaths)
+//   - cfm_setuid_inodes:   setuid-binary filesystem+inode keys (walks setuidWalkRoots)
 func PopulateMaps(l *Loader) (uidsAdded, inodesAdded, setuidAdded int, err error) {
 	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap())
 	if err != nil {
@@ -262,7 +271,7 @@ func panelDomainOwnersToUIDs(path string, nameToUID map[string]uint32) []uint32 
 }
 
 // populateWatchedInodes stat()s every path in `paths`, looks up the
-// inode number, and writes it to the BPF map with value 1. Paths
+// compound filesystem+inode key, and writes it to the BPF map with value 1. Paths
 // that don't exist are silently skipped — `/etc/sudoers.d/` may not
 // exist on minimal distros, and that's fine, we just don't watch it.
 func populateWatchedInodes(m *ebpf.Map, paths []string) (int, error) {
@@ -272,11 +281,11 @@ func populateWatchedInodes(m *ebpf.Map, paths []string) (int, error) {
 	one := uint8(1)
 	count := 0
 	for _, p := range paths {
-		ino, ok := statInode(p)
+		key, ok := statInodeKey(p)
 		if !ok {
 			continue
 		}
-		if err := m.Put(ino, one); err != nil {
+		if err := m.Put(key, one); err != nil {
 			continue
 		}
 		count++
@@ -284,20 +293,22 @@ func populateWatchedInodes(m *ebpf.Map, paths []string) (int, error) {
 	return count, nil
 }
 
-// statInode returns the kernel-visible inode number for path. Used
-// to populate maps whose keys match what BPF programs read via
-// BPF_CORE_READ(inode, i_ino). Returns (0, false) on stat failure.
-func statInode(path string) (uint64, bool) {
+// statInodeKey returns the kernel-visible filesystem identity and inode
+// number for path. Used to populate maps whose keys match what BPF
+// programs read via BPF_CORE_READ(inode, i_sb)->s_dev and
+// BPF_CORE_READ(inode, i_ino). Returns (inodeKey{}, false) on stat
+// failure.
+func statInodeKey(path string) (inodeKey, bool) {
 	var st syscall.Stat_t
 	if err := syscall.Stat(path, &st); err != nil {
-		return 0, false
+		return inodeKey{}, false
 	}
-	return uint64(st.Ino), true
+	return inodeKey{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, true
 }
 
 // populateSetuidInodes walks every directory in `roots`, finds files
-// with the setuid bit set, and writes their inode numbers to the
-// BPF map. Used by CFML-CRED-002 as a whitelist: a uid→0 transition
+// with the setuid bit set, and writes their filesystem+inode keys to
+// the BPF map. Used by CFML-CRED-002 as a whitelist: a uid→0 transition
 // in a process whose mm->exe_file is in this map is treated as
 // legitimate.
 //
@@ -332,11 +343,11 @@ func populateSetuidInodes(m *ebpf.Map, roots []string) (int, error) {
 			if info.Mode()&os.ModeSetuid == 0 {
 				return nil
 			}
-			ino, ok := statInode(path)
+			key, ok := statInodeKey(path)
 			if !ok {
 				return nil
 			}
-			if perr := m.Put(ino, one); perr == nil {
+			if perr := m.Put(key, one); perr == nil {
 				count++
 			}
 			return nil

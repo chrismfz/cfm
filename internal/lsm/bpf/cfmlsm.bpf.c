@@ -337,11 +337,12 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
  * Mechanism: at every write-class inode op, look up the calling
  * uid in `cfm_watched_uids` (populated by the cfm daemon from
  * /etc/passwd / panel manifests at attach time). If matched, look
- * up the target inode in `cfm_watched_inodes` (populated by the
- * daemon stat()ing each sensitive path). If THAT also matches,
+ * up the target filesystem+inode key in `cfm_watched_inodes`
+ * (populated by the daemon stat()ing each sensitive path). If THAT also matches,
  * emit an event tagged with the op kind.
  *
- * The inode-number match avoids BPF-side path walking entirely.
+ * The filesystem+inode match avoids BPF-side path walking entirely
+ * while disambiguating identical inode numbers on different mounts.
  * For paths under sensitive directories (e.g. a new file in
  * /etc/sudoers.d/), the daemon also pins the parent directory's
  * inode and inode_create checks the dir's inode (which the hook
@@ -365,7 +366,7 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
-    __type(key, __u64);
+    __type(key, struct cfm_inode_key);
     __type(value, __u8);
 } cfm_watched_inodes SEC(".maps");
 
@@ -414,19 +415,48 @@ static __always_inline void cfm_fs005_emit(struct dentry *target,
     bpf_ringbuf_submit(e, 0);
 }
 
-/* Look up one dentry's d_inode->i_ino in cfm_watched_inodes. Returns
- * true on match. NULL dentry / NULL inode are both treated as "no
- * match" (the dentry passed at create-time has no inode yet — the
- * caller must pass d_parent in that case). */
+/* Convert kernel-internal dev_t (super_block->s_dev) to the same
+ * encoding userspace sees in stat(2)'s st_dev. */
+static __always_inline __u64 cfm_stat_dev_from_sdev(__u32 s_dev)
+{
+    __u32 major = s_dev >> 20;
+    __u32 minor = s_dev & ((1U << 20) - 1);
+
+    return (__u64)(minor & 0xff) | ((__u64)major << 8) |
+           ((__u64)(minor & ~0xff) << 12);
+}
+
+/* Build the compound filesystem+inode key used by inode maps. */
+static __always_inline bool cfm_inode_key_from_inode(struct inode *inode,
+                                                     struct cfm_inode_key *key)
+{
+    if (!inode || !key)
+        return false;
+
+    struct super_block *sb = BPF_CORE_READ(inode, i_sb);
+    if (!sb)
+        return false;
+
+    __u32 s_dev = BPF_CORE_READ(sb, s_dev);
+    key->dev = cfm_stat_dev_from_sdev(s_dev);
+    key->ino = (__u64)BPF_CORE_READ(inode, i_ino);
+    return true;
+}
+
+/* Look up one dentry's d_inode as a filesystem+inode key in
+ * cfm_watched_inodes. Returns true on match. NULL dentry / NULL inode
+ * are both treated as "no match" (the dentry passed at create-time has
+ * no inode yet — the caller must pass d_parent in that case). */
 static __always_inline bool cfm_fs005_inode_watched(struct dentry *d)
 {
     if (!d)
         return false;
     struct inode *ino = BPF_CORE_READ(d, d_inode);
-    if (!ino)
+
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(ino, &key))
         return false;
-    __u64 n = BPF_CORE_READ(ino, i_ino);
-    return bpf_map_lookup_elem(&cfm_watched_inodes, &n) != NULL;
+    return bpf_map_lookup_elem(&cfm_watched_inodes, &key) != NULL;
 }
 
 /* Shared check helper. Returns:
@@ -434,8 +464,8 @@ static __always_inline bool cfm_fs005_inode_watched(struct dentry *d)
  *   0       — watched, monitor mode — emit event, allow.
  *  -EPERM   — watched, enforce mode — emit event, block.
  *
- * Looks up TWO inodes against cfm_watched_inodes: `primary` and
- * `secondary`. Either being in the set is a match. Callers pick the
+ * Looks up TWO filesystem+inode keys against cfm_watched_inodes:
+ * `primary` and `secondary`. Either being in the set is a match. Callers pick the
  * pair that fits the LSM hook's semantics:
  *
  *   setattr / setxattr:   primary = file dentry,        secondary = NULL
@@ -565,7 +595,7 @@ int BPF_PROG(cfm_fs005_setxattr, struct mnt_idmap *idmap, struct dentry *dentry,
  * Mechanism: on every setuid-family syscall, compare:
  *   - new cred's euid is 0
  *   - old cred's euid is not 0
- *   - current task's mm->exe_file's inode is NOT in
+ *   - current task's mm->exe_file's filesystem+inode key is NOT in
  *     `cfm_setuid_inodes` (populated by the daemon walking the host
  *     for files with S_ISUID set).
  *
@@ -588,7 +618,7 @@ int BPF_PROG(cfm_fs005_setxattr, struct mnt_idmap *idmap, struct dentry *dentry,
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
-    __type(key, __u64);
+    __type(key, struct cfm_inode_key);
     __type(value, __u8);
 } cfm_setuid_inodes SEC(".maps");
 
@@ -621,10 +651,12 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
     struct inode *exe_ino = BPF_CORE_READ(exe, f_inode);
     if (!exe_ino)
         return 0;
-    __u64 ino = BPF_CORE_READ(exe_ino, i_ino);
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(exe_ino, &key))
+        return 0;
 
     /* Whitelist hit — legitimate setuid binary path. */
-    if (bpf_map_lookup_elem(&cfm_setuid_inodes, &ino))
+    if (bpf_map_lookup_elem(&cfm_setuid_inodes, &key))
         return 0;
 
     /* Match. Emit event. Never block (monitor-only by design). */
