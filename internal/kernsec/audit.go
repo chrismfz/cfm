@@ -275,18 +275,21 @@ func moduleRowStateForDecision(d Decision, blacklisted, loaded, presentOnKernel 
 
 // mountRowState maps a mount probe result to a row state for an
 // Apply-decision mount row. kernsec never auto-mutates fstab so even
-// MountMissingOptions is information, not a failure to act on — the
-// operator decides whether `nodev,nosuid,noexec` is compatible with
-// their workload.
+// MountMissingOptions / MountPartialOptions is information, not a
+// failure to act on — the operator decides whether `nodev,nosuid,noexec`
+// is compatible with their workload.
 //
 //   - MountOK              → OK
-//   - MountMissingOptions  → DIFF (mount exists but options missing)
+//   - MountPartialOptions  → DIFF (some recommended options missing)
+//   - MountMissingOptions  → DIFF (no recommended options applied)
 //   - MountNotSeparate     → SKIP (not a distinct mount; recs N/A)
+//   - MountSymlink         → SKIP (audit defers to symlink target row)
+//   - MountBindOfAnother   → SKIP (audit defers to bind source row)
 func mountRowState(s MountState) RuleState {
 	switch s {
 	case MountOK:
 		return StateOK
-	case MountMissingOptions:
+	case MountPartialOptions, MountMissingOptions:
 		return StateDIFF
 	}
 	return StateSKIP

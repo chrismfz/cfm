@@ -160,6 +160,9 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	profile := DetectHostProfile()
 	resolved := Resolve(conf, profile)
 
+	currentTokens := ParseCmdline(currentCmdline)
+	nextTokens := ParseCmdline(nextCmdline)
+
 	fmt.Fprintln(w, "[Expected runtime sysctl verification]")
 	for i, rule := range AllSysctls() {
 		rr := resolved.Sysctls[i]
@@ -192,18 +195,35 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 		}
 		switch state {
 		case SysctlOK:
-			fmt.Fprintf(w, "OK    %s=%s\n", rule.Key, found)
+			if found != rule.Value {
+				// Accepted-variant path (AcceptValues hit). Render
+				// as OK so the audit's green signal isn't polluted
+				// for an OS-level invariant, but tell the operator
+				// the stricter target value exists and how to land
+				// on it (next-boot cmdline + reboot).
+				if note, ok := stickyMismatchNote(rule.Key, found, rule.Value, nextTokens); ok {
+					fmt.Fprintf(w, "OK    %s=%s (target %s — %s)\n",
+						rule.Key, found, rule.Value, note)
+				} else {
+					fmt.Fprintf(w, "OK    %s=%s (target %s — accepted variant)\n",
+						rule.Key, found, rule.Value)
+				}
+			} else {
+				fmt.Fprintf(w, "OK    %s=%s\n", rule.Key, found)
+			}
 		case SysctlMismatch:
-			fmt.Fprintf(w, "WARN  %s expected %s, found %s\n", rule.Key, rule.Value, found)
+			if note, ok := stickyMismatchNote(rule.Key, found, rule.Value, nextTokens); ok {
+				fmt.Fprintf(w, "WARN  %s expected %s, found %s — %s\n",
+					rule.Key, rule.Value, found, note)
+			} else {
+				fmt.Fprintf(w, "WARN  %s expected %s, found %s\n", rule.Key, rule.Value, found)
+			}
 			res.warn()
 		case SysctlMissing:
 			fmt.Fprintf(w, "SKIP  %s missing on this kernel\n", rule.Key)
 		}
 	}
 	fmt.Fprintln(w)
-
-	currentTokens := ParseCmdline(currentCmdline)
-	nextTokens := ParseCmdline(nextCmdline)
 
 	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved, nil)
 	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved, nextErr)
@@ -429,12 +449,23 @@ func auditRowErrors(rows []AuditRow) []string {
 }
 
 // printMountState surfaces the fstab audit rules. kernsec never
-// auto-mutates fstab — every MISSING line is operator-actionable
-// advice, not a kernsec bug. Counts as a warning so that
+// auto-mutates fstab — every PARTIAL/MISSING line is operator-
+// actionable advice, not a kernsec bug. Counts as a warning so that
 // `cfm kernsec status --check` exits non-zero when an operator-
 // reviewable item exists, matching the boot-arg / module sections.
 // Each row also passes through the resolver so OFF / SKIP rows
 // surface honestly instead of being lumped into MISSING.
+//
+// The render distinguishes:
+//
+//   - OK       — every recommended option is live.
+//   - PARTIAL  — some recommended options are live, some aren't. Names
+//                only the still-missing options in the remediation hint.
+//   - MISSING  — the mount exists but none of the recommended options
+//                are live; the remediation hint names all of them.
+//   - SKIP     — not a separate mount, the path is a symlink to
+//                another audited point, or the path is a bind sibling
+//                of another audited point. Defers to the canonical row.
 func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 	fmt.Fprintln(w, "[Mount audit (read-only — fstab is operator-managed)]")
 	for i, m := range Tier1Mounts {
@@ -449,19 +480,56 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 				m.MountPoint, rr.Reason)
 			continue
 		}
-		state, current := CheckMount(m)
-		switch state {
+		d := CheckMountDetail(m, Tier1Mounts)
+		switch d.State {
 		case MountOK:
 			fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
+		case MountPartialOptions:
+			fmt.Fprintf(w, "PARTIAL    %s  has %s; still missing: %s  (current: %s)\n",
+				m.MountPoint,
+				strings.Join(d.Present, ","),
+				strings.Join(d.Missing, ","),
+				d.CurrentOptions,
+			)
+			printMountRemediation(w, m.MountPoint, d.Missing)
+			res.warn()
 		case MountMissingOptions:
-			fmt.Fprintf(w, "MISSING    %s  recommend %s  (current: %s)\n",
-				m.MountPoint, m.Recommended, current)
+			fmt.Fprintf(w, "MISSING    %s  none of %s applied  (current: %s)\n",
+				m.MountPoint, m.Recommended, d.CurrentOptions)
+			printMountRemediation(w, m.MountPoint, d.Missing)
 			res.warn()
 		case MountNotSeparate:
-			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n", m.MountPoint)
+			fmt.Fprintf(w, "SKIP       %s  not a separate mount (recommendations N/A)\n",
+				m.MountPoint)
+		case MountSymlink:
+			if d.SymlinkTarget != "" {
+				fmt.Fprintf(w, "SKIP       %s → %s  (symlink; audit defers to the target row)\n",
+					m.MountPoint, d.SymlinkTarget)
+			} else {
+				fmt.Fprintf(w, "SKIP       %s  is a symlink (audit defers to the target)\n",
+					m.MountPoint)
+			}
+		case MountBindOfAnother:
+			fmt.Fprintf(w, "SKIP       %s  bind of %s  (same source %s; remount the primary mount point)\n",
+				m.MountPoint, d.BindPrimaryPath, d.Source)
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+// printMountRemediation emits the two-line "how to fix" hint under a
+// PARTIAL or MISSING row. Names only the still-missing options in the
+// runtime remount command so the operator can paste it as-is, and
+// reminds them the persistence path is fstab / systemd .mount, which
+// kernsec does NOT mutate.
+func printMountRemediation(w io.Writer, mountPoint string, missing []string) {
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "           fix runtime:  mount -o remount,%s %s\n",
+		strings.Join(missing, ","), mountPoint)
+	fmt.Fprintf(w, "           persist:      add %s to the %s line in /etc/fstab (or the matching systemd .mount unit)\n",
+		strings.Join(missing, ","), mountPoint)
 }
 
 // applyBootKeysFromResolved returns the bare keys (without value) of
@@ -591,3 +659,39 @@ func (res *StatusResult) printModuleState(w io.Writer, resolved ResolvedSet) {
 	}
 	fmt.Fprintln(w)
 }
+
+// stickyMismatchNote returns a short hint explaining a sysctl WARN
+// when the key is a known one-way kernel knob (see stickyOneWaySysctls)
+// and the live value can never be reconciled at runtime — runtime
+// writes return EPERM, only a reboot onto the matching boot arg lands
+// the desired value. Returns (note, true) when the rule is in that
+// special case; (_, false) for every other sysctl, leaving the
+// existing terse WARN line untouched. nextTokens is the parsed
+// next-boot cmdline; if the matching boot arg is already on it, the
+// note says "reboot will fix", otherwise it tells the operator to
+// re-run apply / add the boot arg first.
+func stickyMismatchNote(key, found, want string, nextTokens []string) (string, bool) {
+	if !stickyOneWaySysctls[key] {
+		return "", false
+	}
+	if found == "0" || found == "" {
+		// Live value is still 0, so a runtime write to `want` should
+		// have worked. The mismatch is genuine drift, not a kernel
+		// lock — fall back to the plain WARN line.
+		return "", false
+	}
+	arg := stickyAdvisoryBootArg[key]
+	if arg == "" {
+		return fmt.Sprintf("kernel locked this knob at boot (value %s); only a reboot can change it",
+			found), true
+	}
+	for _, tok := range nextTokens {
+		if tok == arg {
+			return fmt.Sprintf("kernel locked this knob at boot (value %s); `%s` is on the next-boot cmdline, reboot to land on %s",
+				found, arg, want), true
+		}
+	}
+	return fmt.Sprintf("kernel locked this knob at boot (value %s); add `%s` to the kernel cmdline (run `cfm kernsec apply`) and reboot to land on %s",
+		found, arg, want), true
+}
+

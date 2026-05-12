@@ -90,6 +90,35 @@ func TestKSPPProfileSanity(t *testing.T) {
 	}
 }
 
+func TestCheckSysctl_AcceptValuesTreatedAsOK(t *testing.T) {
+	// kernel.unprivileged_bpf_disabled rule: target =2, accepts =1.
+	// On CONFIG_BPF_UNPRIV_DEFAULT_OFF=y kernels the live value is 1
+	// and runtime upgrade is locked — flagging this as WARN would
+	// pollute the audit's green signal forever.
+	var rule SysctlRule
+	for _, r := range KSPPSysctls {
+		if r.Key == "kernel.unprivileged_bpf_disabled" {
+			rule = r
+			break
+		}
+	}
+	if rule.Key == "" {
+		t.Fatal("kernel.unprivileged_bpf_disabled rule missing from KSPPSysctls")
+	}
+	if len(rule.AcceptValues) == 0 {
+		t.Fatal("kernel.unprivileged_bpf_disabled rule must list =1 in AcceptValues")
+	}
+	found := false
+	for _, v := range rule.AcceptValues {
+		if v == "1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AcceptValues=%v should contain \"1\"", rule.AcceptValues)
+	}
+}
+
 func TestRemovedSysctlRulesAbsentFromRegistry(t *testing.T) {
 	removedIDs := []string{
 		strings.Join([]string{"KSEC-SCT-net", "harden-006"}, "."),

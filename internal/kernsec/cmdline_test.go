@@ -123,6 +123,7 @@ func TestManagedBootArgKeysExactOwnedSet(t *testing.T) {
 		"kfence.sample_interval",
 		"efi",
 		"tsx",
+		"unprivileged_bpf_disabled",
 		"oops",
 	}
 	if !reflect.DeepEqual(ManagedBootArgKeys, want) {

@@ -1,6 +1,46 @@
 package kernsec
 
-import "testing"
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"reflect"
+	"testing"
+	"time"
+)
+
+// stubFileInfo is a minimal os.FileInfo implementation that lets tests
+// drive the symlink branch of checkMountDetail without touching the
+// real filesystem.
+type stubFileInfo struct {
+	mode os.FileMode
+}
+
+func (s stubFileInfo) Name() string       { return "" }
+func (s stubFileInfo) Size() int64        { return 0 }
+func (s stubFileInfo) Mode() os.FileMode  { return s.mode }
+func (s stubFileInfo) ModTime() time.Time { return time.Time{} }
+func (s stubFileInfo) IsDir() bool        { return s.mode.IsDir() }
+func (s stubFileInfo) Sys() any           { return nil }
+
+// stubFS bundles lstat+readlink overrides for one test, keyed by
+// audit path. Missing entries fall through to "not a symlink".
+type stubFS struct {
+	links map[string]string // path -> symlink target
+}
+
+func (s stubFS) lstat(p string) (os.FileInfo, error) {
+	if _, ok := s.links[p]; ok {
+		return stubFileInfo{mode: os.ModeSymlink}, nil
+	}
+	return stubFileInfo{mode: 0o755}, nil
+}
+func (s stubFS) readlink(p string) (string, error) {
+	if target, ok := s.links[p]; ok {
+		return target, nil
+	}
+	return "", &fs.PathError{Op: "readlink", Path: p, Err: errors.New("not a link")}
+}
 
 func TestHasAllMountOptions(t *testing.T) {
 	tests := []struct {
@@ -27,13 +67,55 @@ func TestHasAllMountOptions(t *testing.T) {
 	}
 }
 
+func TestSplitMountOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     string
+		recommended string
+		wantPresent []string
+		wantMissing []string
+	}{
+		{
+			name:        "two of three present",
+			current:     "rw,nosuid,noexec,relatime,discard",
+			recommended: "nodev,nosuid,noexec",
+			wantPresent: []string{"nosuid", "noexec"},
+			wantMissing: []string{"nodev"},
+		},
+		{
+			name:        "all present",
+			current:     "rw,nodev,nosuid,noexec",
+			recommended: "nodev,nosuid,noexec",
+			wantPresent: []string{"nodev", "nosuid", "noexec"},
+			wantMissing: nil,
+		},
+		{
+			name:        "none present",
+			current:     "rw,relatime",
+			recommended: "nodev,nosuid,noexec",
+			wantPresent: nil,
+			wantMissing: []string{"nodev", "nosuid", "noexec"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotP, gotM := splitMountOptions(tc.current, tc.recommended)
+			if !reflect.DeepEqual(gotP, tc.wantPresent) {
+				t.Errorf("present: got %v, want %v", gotP, tc.wantPresent)
+			}
+			if !reflect.DeepEqual(gotM, tc.wantMissing) {
+				t.Errorf("missing: got %v, want %v", gotM, tc.wantMissing)
+			}
+		})
+	}
+}
+
 func TestCheckMountFromProc(t *testing.T) {
 	procMounts := `rootfs / rootfs rw 0 0
 sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 tmpfs /tmp tmpfs rw,nosuid,nodev,seclabel,size=8128124k,nr_inodes=409600,inode64 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
-/dev/sda1 /home ext4 rw,relatime 0 0
 `
 	tests := []struct {
 		name      string
@@ -41,12 +123,13 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
 		wantState MountState
 	}{
 		{
-			name: "/tmp missing noexec",
+			name: "/tmp partial (missing noexec)",
 			rule: MountRule{
 				MountPoint:  "/tmp",
 				Recommended: "nodev,nosuid,noexec",
 			},
-			wantState: MountMissingOptions,
+			// Two of three recommended options present; one missing.
+			wantState: MountPartialOptions,
 		},
 		{
 			name: "/dev/shm has all options",
@@ -55,14 +138,6 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
 				Recommended: "nodev,nosuid,noexec",
 			},
 			wantState: MountOK,
-		},
-		{
-			name: "/home missing nodev,nosuid",
-			rule: MountRule{
-				MountPoint:  "/home",
-				Recommended: "nodev,nosuid",
-			},
-			wantState: MountMissingOptions,
 		},
 		{
 			name: "/var/tmp not a separate mount",
@@ -83,6 +158,94 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel,inode64 0 0
 	}
 }
 
+func TestCheckMountDetail_PartialNamesMissingOnly(t *testing.T) {
+	// The orion case from the field: /dev/loop0 mounted at /tmp with
+	// nosuid,noexec but no nodev. PARTIAL must report nodev as the
+	// only missing option so the renderer's remount command names
+	// just `nodev`, not the whole recommended set.
+	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,noexec,relatime,discard 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State != MountPartialOptions {
+		t.Fatalf("state = %d, want MountPartialOptions", d.State)
+	}
+	if !reflect.DeepEqual(d.Present, []string{"nosuid", "noexec"}) {
+		t.Errorf("present = %v, want [nosuid noexec]", d.Present)
+	}
+	if !reflect.DeepEqual(d.Missing, []string{"nodev"}) {
+		t.Errorf("missing = %v, want [nodev]", d.Missing)
+	}
+}
+
+func TestCheckMountDetail_FullyMissingHasEmptyPresent(t *testing.T) {
+	procMounts := `/dev/sda1 /home ext4 rw,noatime 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/home", Recommended: "nodev,nosuid"},
+		nil, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State != MountMissingOptions {
+		t.Fatalf("state = %d, want MountMissingOptions", d.State)
+	}
+	if len(d.Present) != 0 {
+		t.Errorf("present = %v, want empty", d.Present)
+	}
+}
+
+func TestCheckMountDetail_Symlink(t *testing.T) {
+	// /var/tmp → /tmp is the cPanel/CloudLinux pattern. The audit
+	// must defer rather than re-audit and double-warn.
+	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,noexec 0 0
+`
+	links := map[string]string{"/var/tmp": "/tmp"}
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{links: links}.lstat, stubFS{links: links}.readlink)
+	if d.State != MountSymlink {
+		t.Fatalf("state = %d, want MountSymlink", d.State)
+	}
+	if d.SymlinkTarget != "/tmp" {
+		t.Errorf("symlink target = %q, want /tmp", d.SymlinkTarget)
+	}
+}
+
+func TestCheckMountDetail_BindOfAnother(t *testing.T) {
+	// The cPanel pattern: /usr/tmpDSK bind-mounted onto both /tmp and
+	// /var/tmp. /tmp appears first in Tier1Mounts; /var/tmp's audit
+	// row must defer to /tmp.
+	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,noexec,relatime,discard 0 0
+/dev/loop0 /var/tmp ext4 rw,nosuid,noexec,relatime,discard 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State != MountBindOfAnother {
+		t.Fatalf("state = %d, want MountBindOfAnother", d.State)
+	}
+	if d.BindPrimaryPath != "/tmp" {
+		t.Errorf("bind primary = %q, want /tmp", d.BindPrimaryPath)
+	}
+}
+
+func TestCheckMountDetail_GenericSourcesAreNotBinds(t *testing.T) {
+	// Two tmpfs mounts (/tmp + /dev/shm) share the source string
+	// "tmpfs" but are NOT bind mounts of each other. The audit must
+	// not treat them as siblings.
+	procMounts := `tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/dev/shm", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State == MountBindOfAnother {
+		t.Fatal("/dev/shm tmpfs must not be flagged as a bind of /tmp tmpfs (shared generic source)")
+	}
+	if d.State != MountOK {
+		t.Errorf("state = %d, want MountOK", d.State)
+	}
+}
+
 func TestMountRowState(t *testing.T) {
 	tests := []struct {
 		name string
@@ -90,8 +253,11 @@ func TestMountRowState(t *testing.T) {
 		want RuleState
 	}{
 		{name: "ok mount maps to OK", s: MountOK, want: StateOK},
+		{name: "partial maps to DIFF", s: MountPartialOptions, want: StateDIFF},
 		{name: "missing options maps to DIFF", s: MountMissingOptions, want: StateDIFF},
 		{name: "not separate maps to SKIP", s: MountNotSeparate, want: StateSKIP},
+		{name: "symlink maps to SKIP", s: MountSymlink, want: StateSKIP},
+		{name: "bind sibling maps to SKIP", s: MountBindOfAnother, want: StateSKIP},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +279,7 @@ func TestMountRowStateForDecision(t *testing.T) {
 		{name: "per-rule skip -> OFF", d: SkipByConf, s: MountOK, want: StateOFF},
 		{name: "host-profile skip -> SKIP", d: SkipByHostProfile, s: MountMissingOptions, want: StateSKIP},
 		{name: "apply + ok -> OK", d: Apply, s: MountOK, want: StateOK},
+		{name: "apply + partial -> DIFF", d: Apply, s: MountPartialOptions, want: StateDIFF},
 		{name: "apply + missing -> DIFF", d: Apply, s: MountMissingOptions, want: StateDIFF},
 		{name: "apply + not-separate -> SKIP", d: Apply, s: MountNotSeparate, want: StateSKIP},
 	}
@@ -130,9 +297,8 @@ func TestBuildAuditRows_IncludesMountRows(t *testing.T) {
 	// across host filesystems.
 	origReader := readProcMounts
 	readProcMounts = func() string {
-		return `tmpfs /tmp tmpfs rw,nosuid,nodev,seclabel 0 0
+		return `tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
-/dev/sda1 /home ext4 rw,nodev,nosuid,relatime 0 0
 `
 	}
 	t.Cleanup(func() { readProcMounts = origReader })
@@ -155,20 +321,21 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
 	if mountRows != len(Tier1Mounts) {
 		t.Errorf("got %d mount rows, want %d", mountRows, len(Tier1Mounts))
 	}
-	// /tmp lacks noexec → DIFF.
-	if got := stateByMountPoint["/tmp"]; got != StateDIFF {
-		t.Errorf("/tmp state = %s, want DIFF (missing noexec)", got)
+	// /tmp has full recommended set in the fixture → OK.
+	if got := stateByMountPoint["/tmp"]; got != StateOK {
+		t.Errorf("/tmp state = %s, want OK", got)
 	}
 	// /dev/shm has full set → OK.
 	if got := stateByMountPoint["/dev/shm"]; got != StateOK {
 		t.Errorf("/dev/shm state = %s, want OK", got)
 	}
-	// /home has nodev,nosuid → OK.
-	if got := stateByMountPoint["/home"]; got != StateOK {
-		t.Errorf("/home state = %s, want OK", got)
-	}
 	// /var/tmp not in the fixture → SKIP (not a separate mount).
 	if got := stateByMountPoint["/var/tmp"]; got != StateSKIP {
 		t.Errorf("/var/tmp state = %s, want SKIP (not separate)", got)
+	}
+	// /home was deliberately removed from Tier1Mounts — make sure no
+	// mount row references it any more.
+	if _, ok := stateByMountPoint["/home"]; ok {
+		t.Errorf("/home should no longer appear in Tier1Mounts audit rows")
 	}
 }

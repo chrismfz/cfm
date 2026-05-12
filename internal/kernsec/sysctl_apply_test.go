@@ -1,12 +1,27 @@
 package kernsec
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// withStubLiveSysctl swaps readLiveSysctl for a map-backed stub and
+// restores the original at test end. Used to drive the sticky-lock
+// advisory branch without touching /proc/sys.
+func withStubLiveSysctl(t *testing.T, values map[string]string) {
+	t.Helper()
+	orig := readLiveSysctl
+	readLiveSysctl = func(key string) (string, bool) {
+		v, ok := values[key]
+		return v, ok
+	}
+	t.Cleanup(func() { readLiveSysctl = orig })
+}
 
 func TestRenderSysctlFile_Empty(t *testing.T) {
 	got := string(RenderSysctlFile(nil))
@@ -202,6 +217,188 @@ func TestRenderSysctlFile_SkippedRulesAreCommented(t *testing.T) {
 		if strings.HasPrefix(ln, "kernel.this.does.not.exist.zzz") {
 			t.Errorf("nonexistent key emitted as live rule line %q in:\n%s", ln, got)
 		}
+	}
+}
+
+func TestLoadSysctlTo_SkipsWriteWhenLiveInAcceptValues(t *testing.T) {
+	// The kernel.unprivileged_bpf_disabled scenario from the field:
+	// live=1 (CONFIG_BPF_UNPRIV_DEFAULT_OFF=y kernels boot at 1 and
+	// lock the knob), target=2. AcceptValues=["1"] means 1 is already
+	// the security stance we want at runtime; the loader must NOT call
+	// `sysctl -w` (the kernel would EPERM) and must NOT print any
+	// advisory — there is nothing to advise about. The status output
+	// shows OK for live=1 separately; this test is purely about the
+	// apply path being quiet for an already-fine knob.
+	withTempSysctlPath(t)
+	content := []byte("kernel.kptr_restrict = 2\n" +
+		"kernel.unprivileged_bpf_disabled = 2\n" +
+		"fs.protected_hardlinks = 1\n")
+	if err := os.WriteFile(SysctlPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newSysctlStub()
+	origCmd := sysctlSetCommand
+	sysctlSetCommand = stub.cmd
+	t.Cleanup(func() { sysctlSetCommand = origCmd })
+
+	withStubLiveSysctl(t, map[string]string{
+		"kernel.unprivileged_bpf_disabled": "1",
+	})
+
+	var buf bytes.Buffer
+	err := LoadSysctlTo(&buf)
+	if err != nil {
+		t.Fatalf("acceptable-variant skip must not surface as a failure; got: %v", err)
+	}
+
+	for _, c := range stub.calls {
+		if strings.HasPrefix(c, "kernel.unprivileged_bpf_disabled=") {
+			t.Errorf("loader must NOT call `sysctl -w` for sticky knob whose live value is in AcceptValues; calls: %v", stub.calls)
+		}
+	}
+	if len(stub.calls) != 2 {
+		t.Errorf("expected the other two keys to apply normally, got calls: %v", stub.calls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("no advisory expected for accepted-variant skip; got:\n%s", buf.String())
+	}
+}
+
+func TestLoadSysctlTo_SkipsWriteWhenLiveEqualsTarget(t *testing.T) {
+	// Same logic as the accept-variant path, but for live=target.
+	// On locked kernels a same-value write still EPERMs because the
+	// kernel rejects every write once the knob is non-zero. Skipping
+	// the call is the only way to avoid noise on hosts that boot
+	// straight to 2 (CONFIG_BPF_UNPRIV_DEFAULT_OFF=y variants that
+	// pick 2 instead of 1).
+	withTempSysctlPath(t)
+	content := []byte("kernel.unprivileged_bpf_disabled = 2\n")
+	if err := os.WriteFile(SysctlPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newSysctlStub()
+	origCmd := sysctlSetCommand
+	sysctlSetCommand = stub.cmd
+	t.Cleanup(func() { sysctlSetCommand = origCmd })
+
+	withStubLiveSysctl(t, map[string]string{
+		"kernel.unprivileged_bpf_disabled": "2",
+	})
+
+	var buf bytes.Buffer
+	if err := LoadSysctlTo(&buf); err != nil {
+		t.Fatalf("same-value sticky knob must not error; got: %v", err)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("loader must skip sysctl -w when live already at target; calls: %v", stub.calls)
+	}
+}
+
+func TestLoadSysctlTo_StickyEPERMWithZeroLiveIsHardFailure(t *testing.T) {
+	// If the live value is still 0 the kernel hasn't locked the knob,
+	// so EPERM on a write is a genuine failure (LSM block, container
+	// without CAP_SYS_ADMIN, etc) — not the sticky-lock case. The
+	// advisory path must NOT swallow it.
+	withTempSysctlPath(t)
+	content := []byte("kernel.unprivileged_bpf_disabled = 2\n")
+	if err := os.WriteFile(SysctlPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newSysctlStub()
+	stub.failOn["kernel.unprivileged_bpf_disabled"] = errors.New("exit status 1")
+	stub.failOut["kernel.unprivileged_bpf_disabled"] = "Operation not permitted"
+
+	origCmd := sysctlSetCommand
+	sysctlSetCommand = stub.cmd
+	t.Cleanup(func() { sysctlSetCommand = origCmd })
+
+	withStubLiveSysctl(t, map[string]string{
+		"kernel.unprivileged_bpf_disabled": "0",
+	})
+
+	err := LoadSysctlTo(io.Discard)
+	if err == nil {
+		t.Fatal("EPERM with live=0 must surface as a hard failure (no sticky lock yet)")
+	}
+	if !strings.Contains(err.Error(), "kernel.unprivileged_bpf_disabled") {
+		t.Errorf("error should name the rejected key; got: %v", err)
+	}
+}
+
+func TestLoadSysctlTo_NonStickyKeyAlwaysHardFails(t *testing.T) {
+	// Plain EPERM on a non-sticky key (e.g. an LSM block) must remain
+	// a hard failure even if its live value is "non-zero" — the sticky
+	// advisory only applies to the documented one-way knobs.
+	withTempSysctlPath(t)
+	content := []byte("kernel.kptr_restrict = 2\n")
+	if err := os.WriteFile(SysctlPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newSysctlStub()
+	stub.failOn["kernel.kptr_restrict"] = errors.New("exit status 1")
+	stub.failOut["kernel.kptr_restrict"] = "Operation not permitted"
+
+	origCmd := sysctlSetCommand
+	sysctlSetCommand = stub.cmd
+	t.Cleanup(func() { sysctlSetCommand = origCmd })
+
+	withStubLiveSysctl(t, map[string]string{"kernel.kptr_restrict": "1"})
+
+	err := LoadSysctlTo(io.Discard)
+	if err == nil {
+		t.Fatal("non-sticky key EPERM must be a hard failure")
+	}
+}
+
+func TestStickyMismatchNote_NextCmdlineHasArg(t *testing.T) {
+	note, ok := stickyMismatchNote(
+		"kernel.unprivileged_bpf_disabled", "1", "2",
+		[]string{"ro", "quiet", "unprivileged_bpf_disabled=2", "tsx=off"},
+	)
+	if !ok {
+		t.Fatal("expected sticky-mismatch note for unprivileged_bpf_disabled")
+	}
+	if !strings.Contains(note, "next-boot cmdline") {
+		t.Errorf("note should tell operator the boot arg is staged; got: %s", note)
+	}
+	if !strings.Contains(note, "reboot") {
+		t.Errorf("note should mention reboot; got: %s", note)
+	}
+}
+
+func TestStickyMismatchNote_NextCmdlineMissingArg(t *testing.T) {
+	note, ok := stickyMismatchNote(
+		"kernel.unprivileged_bpf_disabled", "1", "2",
+		[]string{"ro", "quiet"},
+	)
+	if !ok {
+		t.Fatal("expected sticky-mismatch note")
+	}
+	if !strings.Contains(note, "add `unprivileged_bpf_disabled=2`") {
+		t.Errorf("note should tell operator to add the boot arg; got: %s", note)
+	}
+	if !strings.Contains(note, "cfm kernsec apply") {
+		t.Errorf("note should point at the apply command; got: %s", note)
+	}
+}
+
+func TestStickyMismatchNote_NotASticky(t *testing.T) {
+	_, ok := stickyMismatchNote("kernel.kptr_restrict", "0", "2", nil)
+	if ok {
+		t.Error("non-sticky key must not trigger the special-case note")
+	}
+}
+
+func TestStickyMismatchNote_LiveZeroIsPlainDrift(t *testing.T) {
+	_, ok := stickyMismatchNote(
+		"kernel.unprivileged_bpf_disabled", "0", "2", nil,
+	)
+	if ok {
+		t.Error("live=0 means no kernel lock yet — should be plain drift, not sticky")
 	}
 }
 

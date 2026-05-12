@@ -268,6 +268,7 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 | `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Enables low-overhead KFENCE sampling. |
 | `boot.dma` | 1 | `efi=disable_early_pci_dma` | EFI-only pre-IOMMU DMA hardening; skipped on non-EFI hosts. |
 | `boot.sidechannel` | 1 | `tsx=off` | Disables Intel TSX side-channel surface; no expected hosting impact. |
+| `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the `kernel.unprivileged_bpf_disabled=2` sysctl. On kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10, recent stable) the sysctl is locked at boot — only this boot arg can land the value at 2. |
 | `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
 
 kernsec only owns the managed boot-argument keys listed above. It strips stale
@@ -313,7 +314,10 @@ edits `/etc/fstab`.
 | `KSEC-FS-mount.tmp-001` | `fs.mount.tmp` | `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
 | `KSEC-FS-mount.tmp-002` | `fs.mount.tmp` | `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
 | `KSEC-FS-mount.tmp-003` | `fs.mount.tmp` | `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
-| `KSEC-FS-mount.home-001` | `fs.mount.home` | `/home` | `nodev,nosuid` | `noexec` is intentionally not recommended for `/home`. |
+
+`/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
+
+The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and reminds the operator to mirror the change in `/etc/fstab` or the relevant systemd `.mount` unit — kernsec does not mutate either.
 
 ## Intentionally unsupported
 
