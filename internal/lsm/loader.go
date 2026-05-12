@@ -215,17 +215,20 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		}
 	}
 
-	// Load the spec, prune programs for disabled/unwanted policies,
-	// rewrite per-policy enforce constants, then commit. Pruning before
-	// LoadAndAssign matters for optional tracing policies such as
-	// CFML-CRED-003: if the operator did not request the policy (or
-	// preflight marked it unavailable), its fentry target must not make
-	// the whole collection fail to load.
+	// Load the spec, rewrite per-policy enforce constants, then
+	// commit. We deliberately load every program embedded in the
+	// .o, even ones the operator disabled in lsm.conf, because the
+	// bpf2go-generated cfmlsmObjects struct has a field for each
+	// program and cilium/ebpf's LoadAndAssign fails the whole load
+	// if any field has no matching entry in the spec. The attach
+	// loop below is what enforces the operator's policy selection:
+	// only programs in `wanted` are hooked to LSM/fentry targets.
+	// Disabled programs occupy a few KB of kernel memory but have
+	// zero runtime cost (nothing dispatches to them).
 	spec, err := loadCfmlsm()
 	if err != nil {
 		return nil, fmt.Errorf("%w: load BPF spec: %v", ErrBPFLSMUnavailable, err)
 	}
-	pruneUnwantedPrograms(spec, wanted)
 	if err := rewriteConstants(spec, opts.Modes, opts.FS005WebOriginMonitor); err != nil {
 		return nil, fmt.Errorf("%w: rewrite BPF constants: %v", ErrBPFLSMUnavailable, err)
 	}
@@ -370,44 +373,6 @@ func (l *Loader) pinAll(pinDir string) error {
 	return nil
 }
 
-// pruneUnwantedPrograms removes BPF programs for policies that will not be
-// attached by this loader. Maps are left intact: shared maps are harmless, and
-// CRED-002 uses the credential-transition task-storage map to coordinate with
-// CRED-003 when both are enabled.
-func pruneUnwantedPrograms(spec *ebpf.CollectionSpec, wanted []PolicyID) {
-	want := map[PolicyID]bool{}
-	for _, id := range wanted {
-		want[id] = true
-	}
-	for id, names := range programSpecNamesByPolicy() {
-		if want[id] {
-			continue
-		}
-		for _, name := range names {
-			delete(spec.Programs, name)
-		}
-	}
-}
-
-func programSpecNamesByPolicy() map[PolicyID][]string {
-	return map[PolicyID][]string{
-		PolicyMemfdExec:    {"cfm_memfd_exec"},
-		PolicyReverseShell: {"cfm_revshell"},
-		PolicySensitiveWrite: {
-			"cfm_fs005_setattr",
-			"cfm_fs005_create",
-			"cfm_fs005_unlink",
-			"cfm_fs005_link",
-			"cfm_fs005_rename",
-			"cfm_fs005_setxattr",
-			"cfm_fs005_mark_exec",
-			"cfm_fs005_mark_setuid",
-			"cfm_fs005_mark_task_alloc",
-		},
-		PolicyCredEscal:         {"cfm_cred002"},
-		PolicyDirectCredInstall: {"cfm_cred003"},
-	}
-}
 
 // pinLinkFile returns the bpffs filename to use for a given
 // policy's pinned link. Returns "" for unknown policy IDs.
