@@ -134,12 +134,9 @@ function _M.detect_exploit_method(method)
   -- triage even though the action is unchanged.
   if method == "connect" then return "block",     "CONNECT_NOT_PROXY" end
 
-  -- DAV methods. We don't host WebDAV by default, so any of these is
-  -- out-of-place too. Operators who do run WebDAV should use a per-vhost
-  -- exclusion (rule_id 607) on the affected host rather than relax the
-  -- global default.
-  if method == "propfind" then return "challenge", "DAV_PROPFIND" end
-  if method == "search"   then return "challenge", "DAV_SEARCH"   end
+  -- DAV methods (PROPFIND/SEARCH) are intentionally NOT flagged: ownCloud,
+  -- Nextcloud, Outlook and other legit WebDAV clients depend on them and
+  -- flagging them globally breaks login/sync for those vhosts.
 
   return nil, nil
 end
