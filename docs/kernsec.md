@@ -482,6 +482,50 @@ The service treats exit code `2` from `apply --check` as a soft success so
 transient indeterminate checks retry on the next timer fire. Drift remains a
 failure and is visible through `systemctl is-failed` and the journal.
 
+## Coexistence with cfm-lsm
+
+`kernsec` (preemptive kernel-surface reduction) and `cfm-lsm`
+(runtime userspace-behaviour enforcement via BPF LSM) are paired
+defence layers — each catches what the other structurally cannot.
+The two components do not overlap on managed surface:
+
+- `kernsec` manages **sysctls, boot args, modules, mounts**. It
+  shapes the kernel ahead of time so that even a successful
+  userspace compromise has less to pivot through.
+- `cfm-lsm` manages **BPF LSM hooks at runtime**. It detects (and
+  in enforce mode blocks) post-exploit patterns — memfd exec,
+  reverse-shell fd patterns — that no sysctl can express.
+
+A few intentional non-overlaps worth recording:
+
+- `kernel.yama.ptrace_scope=1` is shipped by kernsec (Tier 1). The
+  `CFML-OBS-001` ptrace-lockdown idea from cfm-lsm's original
+  scope was dropped specifically because kernsec already covers
+  that ground at a cheaper layer.
+- The `lsm=…,bpf` kernel command-line argument is **not yet
+  managed by kernsec**. cfm-lsm's preflight detects when `bpf` is
+  absent from `/sys/kernel/security/lsm` and prints the exact
+  remediation line for the operator's bootloader. A follow-up
+  proposal will add a new kernsec rule (`KSEC-LSM-bpf-001`,
+  Tier 2, default not forced) that appends `bpf` to the existing
+  `lsm=` value via the same backend that already manages
+  `unprivileged_bpf_disabled` and friends. Tracked in
+  [`docs/cfm-lsm.md`](./cfm-lsm.md) under "Phased roadmap → Future
+  kernsec integration."
+- `kernsec`'s module-load lockdown rules (and the broader
+  CFML-SELF-002 idea from the original cfm-lsm draft) are
+  deliberately excluded because they conflict with
+  KernelCare / Ksplice live-patch module reloads. The component
+  boundary is: kernsec hardens what can stay static; cfm-lsm
+  watches what has to stay live.
+
+Reading order: when both components are active, an operator should
+expect to see kernsec rules in `cfm kernsec status` and cfm-lsm
+state in `cfm lsm status`. Events from cfm-lsm flow through the
+same notify pipeline as outbound and detector events.
+[`docs/cfm-lsm.md`](./cfm-lsm.md) is the design+ops doc for the
+runtime layer.
+
 ## Compatibility notes
 
 - Unsupported sysctl keys are commented as skipped in the managed drop-in rather
