@@ -116,7 +116,7 @@ see.
 HTTP / mail / SSH / panel layer       detectors + webdetector
                                       (log-driven, per-protocol)
                                                    ↓
-Userspace process behaviour           cfm-lsm                      [design phase]
+Userspace process behaviour           cfm-lsm
                                       (BPF LSM: memfd exec,
                                        reverse shell patterns)
                                                    ↓
@@ -137,7 +137,9 @@ they form a chain. A live attack typically traverses all three:
    compromised process exec'ing with stdin/stdout/stderr wired to a
    remote socket. These behaviours are invisible to the HTTP layer
    (the request has already returned) and to the kernel layer (no
-   sysctl can express them).
+   sysctl can express them). Implemented as BPF LSM programs that
+   the operator pins to bpffs once via `cfm lsm enable` — detection
+   then survives daemon restarts and crashes.
 3. **kernsec** removes the *kernel surface* an attacker would
    otherwise pivot through after step 2 — disables risky legacy
    modules, hardens sysctls (`kernel.yama.ptrace_scope`,
@@ -146,24 +148,43 @@ they form a chain. A live attack typically traverses all three:
    attack arrives, so even a successful userspace foothold has less
    to work with.
 
+**Two-process model for cfm-lsm.** Unlike the other layers,
+cfm-lsm separates *protection* (kernel-side, lives independent of
+userspace) from *event collection* (cfm daemon, drains the
+ringbuf into the notify pipeline). After `cfm lsm enable`, the
+BPF programs stay attached even with `systemctl stop cfm` — block
+decisions happen inside the kernel. The daemon's role is to ship
+events out; not to keep cfm-lsm alive. See
+[`docs/cfm-lsm.md`](docs/cfm-lsm.md) → "Two-process model" for the
+full picture.
+
 **Read order:**
 
 - [`docs/kernsec.md`](docs/kernsec.md) — kernel-surface reduction
   (sysctls, boot args, modules, mounts).
 - [`docs/cfm-lsm.md`](docs/cfm-lsm.md) — userspace-behaviour
-  enforcement design (BPF LSM, two-policy MVP, kernel preflight,
-  CLI shape). Implementation is incremental; see
-  `cfm lsm status` for fleet-readiness preflight.
+  enforcement (BPF LSM, two-policy MVP, six-step preflight,
+  pin-to-bpffs lifetime, daemon adoption).
 - [`docs/DETECTORS.md`](docs/DETECTORS.md) — protocol-layer
   detectors and per-section block policy.
 
-**Status.** `kernsec` and `detectors` / `webdetector` are shipping
-production layers. `cfm-lsm` is in design phase: the
-preflight, config, and CLI scaffolding are in this release, but
-the BPF programs that enforce `CFML-EXEC-001` (memfd exec) and
-`CFML-EXEC-003` (reverse shell) land in subsequent commits.
-Operators can already run `cfm lsm status` to audit fleet
-readiness ahead of the BPF rollout.
+**Status.** All three layers are shipping. `kernsec` and
+`detectors` / `webdetector` are production. `cfm-lsm` is MVP-
+shipping in monitor mode — both BPF programs verified to load on
+EL10 (`6.12`) and other modern distros (Debian 12+, Ubuntu 22.04+).
+RHEL 9 / CL9 stock kernels are unsupported because they ship
+without `CONFIG_BPF_LSM=y`; `cfm lsm status` reports this
+specifically. Enforce-mode flip waits on 30-day FP telemetry.
+
+**Quick start for cfm-lsm:**
+
+```bash
+cfm lsm status                                  # check kernel preflight + state
+cfm lsm probe                                   # one-shot: verify attach works (detaches)
+cfm lsm enable                                  # load + pin (persists across daemon restarts)
+systemctl restart cfm                           # daemon adopts pinned state, drains events
+cfm lsm disable                                 # turn off + unpin
+```
 
 ---
 

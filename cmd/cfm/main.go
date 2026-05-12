@@ -843,6 +843,13 @@ func runDaemon(args []string) {
 	// Outbound Abuse Sentinel lifecycle (phase 1: observe + warn)
 	outboundLc := outbound.NewLifecycle()
 
+	// cfm-lsm daemon-side adoption lifecycle. Reads /etc/cfm/lsm.conf
+	// and the operator's pre-pinned BPF state at /sys/fs/bpf/cfm/
+	// (created by `cfm lsm enable`) and drains events into the
+	// notify pipeline. Does not auto-pin — explicit operator action.
+	lsmLc := lsm.NewLifecycle()
+	defer lsmLc.Stop()
+
 	// Ensure base data dirs exist with correct permissions.
 	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty worker
 	// (running as the cfm user) can write the cert snapshot there.
@@ -1063,6 +1070,13 @@ func runDaemon(args []string) {
 			logging.Logf("[outbound] observe chain applied (group=%d)", cfg.Outbound.NFLOGGroup)
 		}
 		outboundLc.ApplyConfig(ctx, &cfg.Outbound)
+
+		// cfm-lsm: adopt pinned BPF state if /sys/fs/bpf/cfm/ exists
+		// AND /etc/cfm/lsm.conf has enabled=true. Start-once; no
+		// auto-pin. The operator runs `cfm lsm enable` to activate
+		// (which writes the pinned state); the daemon picks it up
+		// here on the next reload tick.
+		lsmLc.ApplyConfig(ctx)
 	}
 
 	// ── onCFMConfChanged ─────────────────────────────────────────────────────────
