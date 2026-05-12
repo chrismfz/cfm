@@ -247,9 +247,26 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	// ModprobeDiffers cover the three managed surfaces. A BLS
 	// divergence forces a write even if drift.BootDiffers is false
 	// for the first entry, since the stale entries still need aligning.
-	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != ""
+	// Mount rules that are about to be enabled (CanEnable + Apply
+	// decision). Surfaced in the preflight summary so the operator
+	// sees the planned fstab edit + live remount before approving.
+	// Tracked here at top level so applyWrites can re-use the same
+	// list and the disable path (tier=0 -> all SkipByTier) gets a
+	// nil slice, suppressing the mount section in the summary.
+	var mountsToEnable []MountRule
+	if len(rs.Mounts) == len(Tier1Mounts) {
+		for i, m := range Tier1Mounts {
+			if !m.CanEnable {
+				continue
+			}
+			if rs.Mounts[i].Decision == Apply {
+				mountsToEnable = append(mountsToEnable, m)
+			}
+		}
+	}
+	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != "" || len(mountsToEnable) > 0
 	if mutating && !opts.AssumeYes {
-		preflightSummary(w, label, sysctls, bootArgs, modules, profile)
+		preflightSummary(w, label, sysctls, bootArgs, modules, profile, mountsToEnable)
 		ok, err := confirmApply(w, opts.Stdin)
 		if err != nil {
 			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)
@@ -262,7 +279,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 
 	loader := func() error { return LoadSysctlTo(w) }
-	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, bootReconcileReason, loader); rc != 0 {
+	if rc := applyWrites(w, backend, sysctlContent, modprobeContent, bootArgs, loadedManaged, opts, bootReconcileReason, loader, rs); rc != 0 {
 		return rc
 	}
 
@@ -310,6 +327,7 @@ func applyWrites(
 	opts ApplyOptions,
 	bootReconcileReason string,
 	loader func() error,
+	resolved ResolvedSet,
 ) int {
 	// 1. Sysctl drop-in file.
 	if err := WriteSysctlFile(w, sysctlContent); err != nil {
@@ -398,6 +416,48 @@ func applyWrites(
 		return 1
 	}
 	fmt.Fprintln(w, "[Sysctl] runtime sysctl apply completed via per-key sysctl -w (rules now live; any kernel-locked keys printed above will land after reboot).")
+
+	// 6. Mount apply (CanEnable rules only). Strictly opt-in per-rule:
+	// only mount rules whose .CanEnable is true get an automated
+	// /etc/fstab edit + daemon-reload + remount. /tmp and /var/tmp
+	// stay tip-only — only /dev/shm meets the safety bar today (no
+	// on-disk state to migrate; tmpfs remount preserves contents;
+	// kernel noexec is a soft flag).
+	//
+	// Resolver decision drives the direction:
+	//   Apply        → EnableMount  (adds managed opts + remounts)
+	//   SkipByTier
+	//   SkipByConf   → DisableMount (strips managed opts + remounts)
+	// SkipByHostProfile is also disable — the profile says don't apply
+	// this rule on this host, so a previous apply's edits should be
+	// rolled back. Keeps `cfm kernsec disable` and per-rule skips
+	// symmetric without a separate disable code path.
+	mountFailures := 0
+	if len(resolved.Mounts) == len(Tier1Mounts) {
+		for i, m := range Tier1Mounts {
+			if !m.CanEnable {
+				continue
+			}
+			rr := resolved.Mounts[i]
+			switch rr.Decision {
+			case Apply:
+				if err := EnableMount(m, w, EnableMountOptions{}); err != nil {
+					fmt.Fprintf(w, "kernsec apply: mount %s: %v\n", m.MountPoint, err)
+					mountFailures++
+				}
+			case SkipByTier, SkipByConf, SkipByHostProfile:
+				if err := DisableMount(m, w, EnableMountOptions{}); err != nil {
+					fmt.Fprintf(w, "kernsec apply: mount %s (disable): %v\n", m.MountPoint, err)
+					mountFailures++
+				}
+			}
+		}
+	}
+	if mountFailures > 0 {
+		fmt.Fprintln(w, "  Sysctl / boot / modules changes are persisted; mount apply(s) above failed.")
+		fmt.Fprintln(w, "  Re-run apply once the mount cause is fixed (e.g. resolve the fstab conflict).")
+		return 1
+	}
 	return 0
 }
 

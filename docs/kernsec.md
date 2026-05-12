@@ -317,7 +317,11 @@ edits `/etc/fstab`.
 
 `/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
 
-The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and reminds the operator to mirror the change in `/etc/fstab` or the relevant systemd `.mount` unit — kernsec does not mutate either.
+The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and the matching `/etc/fstab` or systemd `.mount` change.
+
+For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for automation.
+
+`/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten, and `cfm kernsec disable` strips only the kernsec-managed options (or removes the whole line if kernsec authored it).
 
 ## Intentionally unsupported
 

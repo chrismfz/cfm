@@ -277,6 +277,20 @@ var Tier1Mounts = []MountRule{
 		ID: "KSEC-FS-mount.tmp-003", Group: "fs.mount.tmp", Tier: Tier1,
 		MountPoint:  "/dev/shm",
 		Recommended: "nodev,nosuid,noexec",
+		// Auto-application is enabled for /dev/shm only:
+		// - it is always tmpfs (no on-disk state to migrate);
+		// - kernel tmpfs remount preserves contents;
+		// - kernel `noexec` is a soft flag that takes effect for
+		//   NEW exec calls only, not running processes;
+		// - the realistic blast-radius workloads (Chromium headless
+		//   sandbox, pre-15 PostgreSQL with JIT enabled) are easy to
+		//   detect and roll back with one `mount -o remount,exec
+		//   /dev/shm` if anything breaks.
+		// /tmp and /var/tmp do NOT get CanEnable: live database temp
+		// state, the /var/tmp-survives-reboot contract, and the
+		// dedicated-filesystem provisioning step make auto-apply
+		// unsafe. Those rows stay tip-only.
+		CanEnable:   true,
 		Description: "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
 		Affects:     "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
 	},
