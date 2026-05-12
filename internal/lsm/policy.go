@@ -33,6 +33,12 @@ const (
 	// design: returning -EPERM from cred_prepare can deadlock
 	// systemd helpers mid-transition.
 	PolicyCredEscal PolicyID = "CFML-CRED-002"
+
+	// PolicyDirectCredInstall — CFML-CRED-003: detect direct
+	// commit_creds() installation of root credentials that bypassed
+	// task_fix_setuid. Monitor-only by design because commit_creds()
+	// is not an LSM decision point.
+	PolicyDirectCredInstall PolicyID = "CFML-CRED-003"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -107,6 +113,13 @@ func AllPolicies() []Policy {
 			Hook:        "task_fix_setuid",
 			DefaultMode: ModeDisabled,
 			Description: "Detect uid → 0 transitions through code paths that did not go through a recognised setuid binary. Monitor-only by design.",
+		},
+		{
+			ID:          PolicyDirectCredInstall,
+			Title:       "Direct root credential install",
+			Hook:        "fentry/commit_creds",
+			DefaultMode: ModeDisabled,
+			Description: "Detect direct commit_creds() installation of root credentials that bypassed task_fix_setuid. Monitor-only by design.",
 		},
 	}
 }

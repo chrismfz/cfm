@@ -21,6 +21,7 @@ var (
 	preflightProcSelfStatus   = "/proc/self/status"
 	preflightBPFFSPath        = "/sys/fs/bpf"
 	preflightProcMounts       = "/proc/mounts"
+	preflightProcKallsyms     = "/proc/kallsyms"
 )
 
 // minKernelMajor / minKernelMinor pin the earliest kernel that
@@ -78,11 +79,22 @@ type CheckResult struct {
 }
 
 // Preflight is the aggregate preflight result.
+type PolicyAvailability struct {
+	PolicyID  PolicyID
+	Available bool
+	Reason    string
+}
+
 type Preflight struct {
 	// Checks are the individual check results in display order.
 	Checks []CheckResult
-	// OK is true iff every check passed. UNKNOWN counts as not-OK
-	// because we cannot confirm the host can load BPF LSM programs.
+	// PolicyAvailability reports per-policy optional attachment
+	// prerequisites. An unavailable optional policy does not make OK
+	// false; the loader will attach the rest of cfm-lsm in partial mode.
+	PolicyAvailability []PolicyAvailability
+	// OK is true iff every component-wide check passed. UNKNOWN counts
+	// as not-OK because we cannot confirm the host can load BPF LSM
+	// programs. Optional per-policy availability is reported separately.
 	OK bool
 }
 
@@ -104,7 +116,28 @@ func RunPreflight() Preflight {
 			break
 		}
 	}
-	return Preflight{Checks: checks, OK: ok}
+	return Preflight{Checks: checks, PolicyAvailability: checkPolicyAvailability(), OK: ok}
+}
+
+func checkPolicyAvailability() []PolicyAvailability {
+	return []PolicyAvailability{checkDirectCredInstallAvailability()}
+}
+
+func checkDirectCredInstallAvailability() PolicyAvailability {
+	pa := PolicyAvailability{PolicyID: PolicyDirectCredInstall, Available: true}
+	body, err := os.ReadFile(preflightProcKallsyms)
+	if err != nil {
+		pa.Available = false
+		pa.Reason = fmt.Sprintf("cannot read %s to confirm commit_creds fentry target: %v", preflightProcKallsyms, err)
+		return pa
+	}
+	if !kallsymsHasSymbol(string(body), "commit_creds") {
+		pa.Available = false
+		pa.Reason = "commit_creds is not visible in /proc/kallsyms; CFML-CRED-003 fentry telemetry unavailable"
+		return pa
+	}
+	pa.Reason = "commit_creds fentry target visible in /proc/kallsyms"
+	return pa
 }
 
 // checkKernelVersion verifies that the running kernel is ≥ 5.7,
@@ -436,4 +469,14 @@ func extractCapEff(status string) (uint64, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+func kallsymsHasSymbol(kallsyms, symbol string) bool {
+	for _, line := range strings.Split(kallsyms, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == symbol {
+			return true
+		}
+	}
+	return false
 }

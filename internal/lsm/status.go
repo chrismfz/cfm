@@ -43,14 +43,15 @@ type StatusResult struct {
 
 // statusJSON is the wire format for `cfm lsm status --json`.
 type statusJSON struct {
-	OK          bool                  `json:"ok"`
-	PreflightOK bool                  `json:"preflight_ok"`
-	Enabled     bool                  `json:"enabled"`
-	Source      string                `json:"source"`
-	ConfError   string                `json:"conf_error,omitempty"`
-	Pinned      pinnedJSON            `json:"pinned"`
-	Preflight   []preflightJSONCheck  `json:"preflight"`
-	Policies    []policyJSON          `json:"policies"`
+	OK                 bool                     `json:"ok"`
+	PreflightOK        bool                     `json:"preflight_ok"`
+	Enabled            bool                     `json:"enabled"`
+	Source             string                   `json:"source"`
+	ConfError          string                   `json:"conf_error,omitempty"`
+	Pinned             pinnedJSON               `json:"pinned"`
+	Preflight          []preflightJSONCheck     `json:"preflight"`
+	PolicyAvailability []policyAvailabilityJSON `json:"policy_availability,omitempty"`
+	Policies           []policyJSON             `json:"policies"`
 }
 
 type pinnedJSON struct {
@@ -68,12 +69,18 @@ type preflightJSONCheck struct {
 	Remediation string `json:"remediation,omitempty"`
 }
 
+type policyAvailabilityJSON struct {
+	ID        string `json:"id"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 type policyJSON struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Hook        string `json:"hook"`
-	Mode        string `json:"mode"`
-	Runtime     string `json:"runtime"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Hook    string `json:"hook"`
+	Mode    string `json:"mode"`
+	Runtime string `json:"runtime"`
 }
 
 // RunStatus prints the cfm-lsm preflight and per-policy status to w.
@@ -147,6 +154,21 @@ func emitText(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 		}
 		if c.Remediation != "" {
 			fmt.Fprintf(w, "       remediation: %s\n", c.Remediation)
+		}
+	}
+	if len(pf.PolicyAvailability) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Optional policy probes:")
+		for _, pa := range pf.PolicyAvailability {
+			label := "available"
+			if !pa.Available {
+				label = "unavailable"
+			}
+			fmt.Fprintf(w, "    %s: %s", pa.PolicyID, label)
+			if pa.Reason != "" {
+				fmt.Fprintf(w, " — %s", pa.Reason)
+			}
+			fmt.Fprintln(w)
 		}
 	}
 	fmt.Fprintln(w)
@@ -223,6 +245,13 @@ func emitJSON(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 			Remediation: c.Remediation,
 		})
 	}
+	for _, pa := range pf.PolicyAvailability {
+		out.PolicyAvailability = append(out.PolicyAvailability, policyAvailabilityJSON{
+			ID:        string(pa.PolicyID),
+			Available: pa.Available,
+			Reason:    pa.Reason,
+		})
+	}
 	for _, p := range AllPolicies() {
 		mode := conf.ModeFor(p.ID)
 		out.Policies = append(out.Policies, policyJSON{
@@ -262,8 +291,20 @@ func describeRuntime(pf Preflight, conf *Conf, pinned PinnedState, mode Mode, id
 	if mode == ModeDisabled {
 		return "skip (policy disabled)"
 	}
+	if reason, unavailable := unavailablePolicyReason(pf, id); unavailable {
+		return "unavailable (" + reason + ")"
+	}
 	if pinned.Exists {
 		return "would-attach (run `cfm lsm disable` then `cfm lsm enable` to add this policy to the pin set)"
 	}
 	return "would-attach (run `cfm lsm probe` to verify, then `cfm lsm enable` to activate)"
+}
+
+func unavailablePolicyReason(pf Preflight, id PolicyID) (string, bool) {
+	for _, pa := range pf.PolicyAvailability {
+		if pa.PolicyID == id && !pa.Available {
+			return pa.Reason, true
+		}
+	}
+	return "", false
 }

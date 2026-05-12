@@ -61,6 +61,7 @@ const (
 	pinFileLinkFs005MarkSetuid    = "cfm_fs005_mark_setuid"
 	pinFileLinkFs005MarkTaskAlloc = "cfm_fs005_mark_task_alloc"
 	pinFileLinkCred002            = "cfm_cred002"
+	pinFileLinkCred003            = "cfm_cred003"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -207,29 +208,29 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		attach: AttachResult{Failed: make(map[PolicyID]error)},
 	}
 
-	// Load the spec, rewrite per-policy enforce constants, then
-	// commit. The const-rewrite must happen BEFORE LoadAndAssign so
-	// the BPF program is loaded with the right enforce flags baked
-	// in. Once loaded, the mode is permanent for this Loader's
-	// lifetime — to change a policy's mode the operator must
-	// `cfm lsm disable` and re-enable (so a fresh spec is loaded
-	// with new constants).
-	spec, err := loadCfmlsm()
-	if err != nil {
-		return nil, fmt.Errorf("%w: load BPF spec: %v", ErrBPFLSMUnavailable, err)
-	}
-	if err := rewriteConstants(spec, opts.Modes, opts.FS005WebOriginMonitor); err != nil {
-		return nil, fmt.Errorf("%w: rewrite BPF constants: %v", ErrBPFLSMUnavailable, err)
-	}
-	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
-		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
-	}
-
 	wanted := opts.Policies
 	if len(wanted) == 0 {
 		for _, p := range AllPolicies() {
 			wanted = append(wanted, p.ID)
 		}
+	}
+
+	// Load the spec, prune programs for disabled/unwanted policies,
+	// rewrite per-policy enforce constants, then commit. Pruning before
+	// LoadAndAssign matters for optional tracing policies such as
+	// CFML-CRED-003: if the operator did not request the policy (or
+	// preflight marked it unavailable), its fentry target must not make
+	// the whole collection fail to load.
+	spec, err := loadCfmlsm()
+	if err != nil {
+		return nil, fmt.Errorf("%w: load BPF spec: %v", ErrBPFLSMUnavailable, err)
+	}
+	pruneUnwantedPrograms(spec, wanted)
+	if err := rewriteConstants(spec, opts.Modes, opts.FS005WebOriginMonitor); err != nil {
+		return nil, fmt.Errorf("%w: rewrite BPF constants: %v", ErrBPFLSMUnavailable, err)
+	}
+	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
+		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
 	for _, id := range wanted {
@@ -247,9 +248,9 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		attached := make([]link.Link, 0, len(entries))
 		var attachErr error
 		for _, e := range entries {
-			lk, err := link.AttachLSM(link.LSMOptions{Program: e.prog})
+			lk, err := e.attach()
 			if err != nil {
-				attachErr = fmt.Errorf("attach lsm %s: %w", e.pinName, err)
+				attachErr = fmt.Errorf("attach %s %s: %w", e.kind, e.pinName, err)
 				break
 			}
 			attached = append(attached, lk)
@@ -369,6 +370,45 @@ func (l *Loader) pinAll(pinDir string) error {
 	return nil
 }
 
+// pruneUnwantedPrograms removes BPF programs for policies that will not be
+// attached by this loader. Maps are left intact: shared maps are harmless, and
+// CRED-002 uses the credential-transition task-storage map to coordinate with
+// CRED-003 when both are enabled.
+func pruneUnwantedPrograms(spec *ebpf.CollectionSpec, wanted []PolicyID) {
+	want := map[PolicyID]bool{}
+	for _, id := range wanted {
+		want[id] = true
+	}
+	for id, names := range programSpecNamesByPolicy() {
+		if want[id] {
+			continue
+		}
+		for _, name := range names {
+			delete(spec.Programs, name)
+		}
+	}
+}
+
+func programSpecNamesByPolicy() map[PolicyID][]string {
+	return map[PolicyID][]string{
+		PolicyMemfdExec:    {"cfm_memfd_exec"},
+		PolicyReverseShell: {"cfm_revshell"},
+		PolicySensitiveWrite: {
+			"cfm_fs005_setattr",
+			"cfm_fs005_create",
+			"cfm_fs005_unlink",
+			"cfm_fs005_link",
+			"cfm_fs005_rename",
+			"cfm_fs005_setxattr",
+			"cfm_fs005_mark_exec",
+			"cfm_fs005_mark_setuid",
+			"cfm_fs005_mark_task_alloc",
+		},
+		PolicyCredEscal:         {"cfm_cred002"},
+		PolicyDirectCredInstall: {"cfm_cred003"},
+	}
+}
+
 // pinLinkFile returns the bpffs filename to use for a given
 // policy's pinned link. Returns "" for unknown policy IDs.
 // rewriteEnforceConstants updates the BPF spec's `volatile const __u8
@@ -474,6 +514,8 @@ func pinLinkFiles(id PolicyID) []string {
 		}
 	case PolicyCredEscal:
 		return []string{pinFileLinkCred002}
+	case PolicyDirectCredInstall:
+		return []string{pinFileLinkCred003}
 	}
 	return nil
 }
@@ -712,32 +754,77 @@ func InspectPinned(pinDir string) PinnedState {
 type programEntry struct {
 	prog    *ebpf.Program
 	pinName string
+	kind    string
+	attach  func() (link.Link, error)
+}
+
+// programsFor returns every BPF program a policy attaches to,
+// alongside the bpffs filename each one pins to. Empty for unknown
+// policies. Iteration order is stable so pin layout is deterministic.
+func lsmProgramEntry(prog *ebpf.Program, pinName string) programEntry {
+	if prog == nil {
+		return programEntry{}
+	}
+	return programEntry{
+		prog:    prog,
+		pinName: pinName,
+		kind:    "lsm",
+		attach: func() (link.Link, error) {
+			return link.AttachLSM(link.LSMOptions{Program: prog})
+		},
+	}
+}
+
+func fentryProgramEntry(prog *ebpf.Program, pinName, symbol string) programEntry {
+	if prog == nil {
+		return programEntry{}
+	}
+	return programEntry{
+		prog:    prog,
+		pinName: pinName,
+		kind:    "fentry/" + symbol,
+		attach: func() (link.Link, error) {
+			return link.AttachTracing(link.TracingOptions{Program: prog})
+		},
+	}
 }
 
 // programsFor returns every BPF program a policy attaches to,
 // alongside the bpffs filename each one pins to. Empty for unknown
 // policies. Iteration order is stable so pin layout is deterministic.
 func (l *Loader) programsFor(id PolicyID) []programEntry {
+	compact := func(entries ...programEntry) []programEntry {
+		out := make([]programEntry, 0, len(entries))
+		for _, e := range entries {
+			if e.prog != nil {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
 	progs := l.objs.cfmlsmPrograms
 	switch id {
 	case PolicyMemfdExec:
-		return []programEntry{{progs.CfmMemfdExec, pinFileLinkMemfd}}
+		return compact(lsmProgramEntry(progs.CfmMemfdExec, pinFileLinkMemfd))
 	case PolicyReverseShell:
-		return []programEntry{{progs.CfmRevshell, pinFileLinkRevshell}}
+		return compact(lsmProgramEntry(progs.CfmRevshell, pinFileLinkRevshell))
 	case PolicySensitiveWrite:
-		return []programEntry{
-			{progs.CfmFs005Setattr, pinFileLinkFs005Setattr},
-			{progs.CfmFs005Create, pinFileLinkFs005Create},
-			{progs.CfmFs005Unlink, pinFileLinkFs005Unlink},
-			{progs.CfmFs005Link, pinFileLinkFs005Link},
-			{progs.CfmFs005Rename, pinFileLinkFs005Rename},
-			{progs.CfmFs005Setxattr, pinFileLinkFs005Setxattr},
-			{progs.CfmFs005MarkExec, pinFileLinkFs005MarkExec},
-			{progs.CfmFs005MarkSetuid, pinFileLinkFs005MarkSetuid},
-			{progs.CfmFs005MarkTaskAlloc, pinFileLinkFs005MarkTaskAlloc},
-		}
+		return compact(
+			lsmProgramEntry(progs.CfmFs005Setattr, pinFileLinkFs005Setattr),
+			lsmProgramEntry(progs.CfmFs005Create, pinFileLinkFs005Create),
+			lsmProgramEntry(progs.CfmFs005Unlink, pinFileLinkFs005Unlink),
+			lsmProgramEntry(progs.CfmFs005Link, pinFileLinkFs005Link),
+			lsmProgramEntry(progs.CfmFs005Rename, pinFileLinkFs005Rename),
+			lsmProgramEntry(progs.CfmFs005Setxattr, pinFileLinkFs005Setxattr),
+			lsmProgramEntry(progs.CfmFs005MarkExec, pinFileLinkFs005MarkExec),
+			lsmProgramEntry(progs.CfmFs005MarkSetuid, pinFileLinkFs005MarkSetuid),
+			lsmProgramEntry(progs.CfmFs005MarkTaskAlloc, pinFileLinkFs005MarkTaskAlloc),
+		)
 	case PolicyCredEscal:
-		return []programEntry{{progs.CfmCred002, pinFileLinkCred002}}
+		return compact(lsmProgramEntry(progs.CfmCred002, pinFileLinkCred002))
+	case PolicyDirectCredInstall:
+		return compact(fentryProgramEntry(progs.CfmCred003, pinFileLinkCred003, "commit_creds"))
 	}
 	return nil
 }

@@ -59,6 +59,11 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	conf, _ := loadStatusConf()
 	ConfigureKmsg(conf.Kmsg)
 
+	availability := map[PolicyID]PolicyAvailability{}
+	for _, pa := range pf.PolicyAvailability {
+		availability[pa.PolicyID] = pa
+	}
+
 	var policies []PolicyID
 	modes := map[PolicyID]Mode{}
 	enforceList := []PolicyID{}
@@ -67,14 +72,22 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		if m == ModeDisabled {
 			continue
 		}
+		if pa, ok := availability[p.ID]; ok && !pa.Available {
+			fmt.Fprintf(w, "Note: %s is unavailable on this kernel; skipping this policy without disabling cfm-lsm.\n", p.ID)
+			if pa.Reason != "" {
+				fmt.Fprintf(w, "      %s\n", pa.Reason)
+			}
+			fmt.Fprintln(w)
+			continue
+		}
 		// CFML-CRED-002 is monitor-only by design (returning -EPERM
 		// from the cred-install path can deadlock systemd helpers
 		// and pkexec mid-transition; see docs/cfm-lsm.md). Warn and
 		// downgrade if an operator set enforce — better than silently
 		// respecting it and then not blocking, which would mislead them.
-		if p.ID == PolicyCredEscal && m == ModeEnforce {
-			fmt.Fprintln(w, "Note: CFML-CRED-002 is monitor-only by design; downgrading lsm.conf's enforce setting.")
-			fmt.Fprintln(w, "      See docs/cfm-lsm.md → CFML-CRED-002 → Enforcement strategy.")
+		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
+			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
+			fmt.Fprintln(w, "      See docs/cfm-lsm.md → credential policies → monitor-only strategy.")
 			fmt.Fprintln(w)
 			m = ModeMonitor
 		}

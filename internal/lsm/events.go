@@ -14,6 +14,7 @@ const (
 	bpfPolicyReverseShell   uint32 = 3
 	bpfPolicySensitiveWrite uint32 = 5
 	bpfPolicyCredEscal      uint32 = 7
+	bpfPolicyDirectCred     uint32 = 9
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -70,7 +71,10 @@ const (
 	bpfFilenameLen = 64
 )
 
-const EventFlagWebOrigin uint8 = 1 << 0
+const (
+	EventFlagWebOrigin         uint8 = 1 << 0
+	EventFlagDirectCredInstall uint8 = 1 << 1
+)
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
 // the BPF programs over the ring buffer. The binary layout is
@@ -166,6 +170,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicySensitiveWrite
 	case bpfPolicyCredEscal:
 		e.PolicyID = PolicyCredEscal
+	case bpfPolicyDirectCred:
+		e.PolicyID = PolicyDirectCredInstall
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

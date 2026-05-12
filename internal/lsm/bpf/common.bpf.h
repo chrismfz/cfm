@@ -20,6 +20,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_REVERSE_SHELL    = 3,  /* CFML-EXEC-003 */
     CFM_LSM_POLICY_SENSITIVE_WRITE  = 5,  /* CFML-FS-005   */
     CFM_LSM_POLICY_CRED_ESCAL       = 7,  /* CFML-CRED-002 */
+    CFM_LSM_POLICY_DIRECT_CRED      = 9,  /* CFML-CRED-003 */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -38,8 +39,9 @@ enum cfm_fs_op {
 #define CFM_TASK_COMM_LEN 16
 #define CFM_FILENAME_LEN  64
 
-/* CFML-FS-005 flags. */
-#define CFM_LSM_F_WEB_ORIGIN  (1U << 0)
+/* Event flags. */
+#define CFM_LSM_F_WEB_ORIGIN          (1U << 0)
+#define CFM_LSM_F_DIRECT_CRED_INSTALL (1U << 1)
 
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem
