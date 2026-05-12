@@ -19,6 +19,8 @@ var (
 	preflightLSMListPath      = "/sys/kernel/security/lsm"
 	preflightBTFPath          = "/sys/kernel/btf/vmlinux"
 	preflightProcSelfStatus   = "/proc/self/status"
+	preflightBPFFSPath        = "/sys/fs/bpf"
+	preflightProcMounts       = "/proc/mounts"
 )
 
 // minKernelMajor / minKernelMinor pin the earliest kernel that
@@ -84,7 +86,7 @@ type Preflight struct {
 	OK bool
 }
 
-// RunPreflight runs all five kernel checks and returns the aggregate
+// RunPreflight runs all six kernel checks and returns the aggregate
 // result. Pure: reads only from /proc and /sys; never writes anything.
 func RunPreflight() Preflight {
 	checks := []CheckResult{
@@ -93,6 +95,7 @@ func RunPreflight() Preflight {
 		checkBPFInLSMList(),
 		checkBTFAvailable(),
 		checkCapabilities(),
+		checkBPFFSMounted(),
 	}
 	ok := true
 	for _, c := range checks {
@@ -254,6 +257,57 @@ func checkCapabilities() CheckResult {
 	res.Status = CheckFail
 	res.Remediation = "run cfm as root or grant CAP_SYS_ADMIN (or both CAP_BPF and CAP_PERFMON) via systemd's AmbientCapabilities="
 	return res
+}
+
+// checkBPFFSMounted verifies that /sys/fs/bpf is mounted with type
+// `bpf`. The bpffs is required to pin BPF programs and maps so they
+// survive the loading process exiting — without it, `cfm lsm enable`
+// would attach programs that immediately detach the moment the CLI
+// exits.
+//
+// Systemd has mounted bpffs by default since 2015 (v229), so this
+// check passes everywhere CFM is actually deployed. The check exists
+// to give a clear remediation message on the rare stripped-down or
+// containerised host where it is missing.
+func checkBPFFSMounted() CheckResult {
+	res := CheckResult{
+		Name:        "bpffs-mounted",
+		Description: "/sys/fs/bpf is a mounted bpf filesystem",
+	}
+	body, err := os.ReadFile(preflightProcMounts)
+	if err != nil {
+		res.Status = CheckUnknown
+		res.Detail = fmt.Sprintf("cannot read %s: %v", preflightProcMounts, err)
+		return res
+	}
+	if procMountsHasBPFFS(string(body), preflightBPFFSPath) {
+		res.Status = CheckPass
+		res.Detail = preflightBPFFSPath + " is a bpf filesystem"
+		return res
+	}
+	res.Status = CheckFail
+	res.Detail = preflightBPFFSPath + " is not mounted as type bpf"
+	res.Remediation = "mount the BPF filesystem: `mount -t bpf bpf " + preflightBPFFSPath +
+		"`; for a persistent mount add `bpf " + preflightBPFFSPath +
+		" bpf defaults 0 0` to /etc/fstab (systemd-mounted by default on EL9+, Debian 11+, Ubuntu 20.04+)"
+	return res
+}
+
+// procMountsHasBPFFS scans a /proc/mounts payload for an entry where
+// the mountpoint matches path AND the filesystem type is "bpf". A
+// match means bpffs is ready for pinning.
+func procMountsHasBPFFS(mounts, path string) bool {
+	for _, line := range strings.Split(mounts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		// /proc/mounts columns: device mountpoint fstype options dump pass
+		if fields[1] == path && fields[2] == "bpf" {
+			return true
+		}
+	}
+	return false
 }
 
 // readKernelConfig returns the kernel config body and a description of
