@@ -101,6 +101,7 @@ struct path {
 
 struct super_block {
     unsigned long          s_magic;
+    __u32                  s_dev;
 } ___NCO;
 
 struct inode {

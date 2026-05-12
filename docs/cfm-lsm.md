@@ -256,17 +256,17 @@ explicitly before committing the design to that hook layout.
 write-class inode operation, the program looks up the calling task's uid
 in the daemon-populated `cfm_watched_uids` hash (web-class names —
 apache, nginx, php-fpm, lsphp, alt-php-* — plus every cPanel and
-DirectAdmin account uid). If matched, it looks up the target inode in
-`cfm_watched_inodes` (the daemon stats every path in
-`internal/lsm/maps.go::DefaultSensitivePaths` and records inode
-numbers). Both hits → emit event; if enforce mode is active for this
+DirectAdmin account uid). If matched, it looks up the target
+filesystem+inode key in `cfm_watched_inodes` (the daemon stats every path in
+`internal/lsm/maps.go::DefaultSensitivePaths` and records `st_dev` +
+`st_ino`). Both hits → emit event; if enforce mode is active for this
 policy, return `-EPERM` and the syscall fails outright.
 
-**Inode-number matching avoids BPF-side path walking entirely.** For
+**Filesystem+inode matching avoids BPF-side path walking entirely.** For
 operations that create new files under a watched directory (e.g.
 `/etc/sudoers.d/backdoor`), the `inode_create` hook reads the parent
-dentry's inode and matches that against the same set — the daemon
-includes the dir inodes alongside the file inodes.
+dentry's filesystem+inode identity and matches that against the
+same set — the daemon includes the dir keys alongside the file keys.
 
 **Rationale.** This is the high-value catch for kernel 0-day cash-ins.
 A Dirty Pipe or pwnkit attacker that successfully escalated still has
@@ -285,14 +285,14 @@ and EXEC-003.
 |---|---|
 | Hook | `task_fix_setuid` |
 | Default mode | `monitor` (only) |
-| FP risk | Low — daemon walks `/usr/bin`, `/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` for setuid binaries and whitelists their inodes |
+| FP risk | Low — daemon walks `/usr/bin`, `/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` for setuid binaries and whitelists their filesystem+inode keys |
 | Perf impact | Cold — fires only on setuid-family syscalls (setresuid / setuid / setreuid / setfsuid), bounded by a single map lookup |
 
 **Description.** One BPF program at `task_fix_setuid`. Reads the new
 and old credential structs after the setuid syscall has written them.
 Only continues when `new.euid == 0 && old.euid != 0` (non-root →
-root). Then resolves `current->mm->exe_file`'s inode and looks it
-up in `cfm_setuid_inodes`. If the inode is NOT in the whitelist, the
+root). Then resolves `current->mm->exe_file`'s filesystem+inode key
+and looks it up in `cfm_setuid_inodes`. If the key is NOT in the whitelist, the
 process is gaining root via a setuid syscall from a binary that does
 not carry the suid bit on disk — the canonical post-exploit
 fingerprint where a kernel exploit installed root creds and the
@@ -831,7 +831,7 @@ the corruption. The two layers are complementary, not competitive.
 | Default mode | `monitor` |
 | FP risk | Very low (CageFS makes legitimate access impossible) |
 | Perf impact | Negligible — only fires on rare write-class operations against a small set of paths |
-| Maps to add | `cfm_watched_uids` (hash, key=uid, val=u8), `cfm_watched_inodes` (hash, key=u64 inode, val=path-class enum) |
+| Maps to add | `cfm_watched_uids` (hash, key=uid, val=u8), `cfm_watched_inodes` (hash, key=`cfm_inode_key` dev+ino, val=u8) |
 
 **Threat model.** A compromised web-tier user (apache, nginx,
 php-fpm, lsphp, alt-php-N, plus every cPanel/DirectAdmin account
@@ -897,17 +897,17 @@ int BPF_PROG(cfm_fs005_setattr, struct dentry *dentry, struct iattr *attr, int r
     __u8 *watch = bpf_map_lookup_elem(&cfm_watched_uids, &uid);
     if (!watch) return 0;
 
-    // Resolve target inode. Walk dentry chain up to MAX_DEPTH,
-    // attempting to match against pinned inode set.
+    // Resolve target filesystem+inode key.
     struct inode *target = BPF_CORE_READ(dentry, d_inode);
     if (!target) return 0;
-    __u64 ino = BPF_CORE_READ(target, i_ino);
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(target, &key)) return 0;
 
-    __u32 *pathClass = bpf_map_lookup_elem(&cfm_watched_inodes, &ino);
-    if (!pathClass) return 0;
+    __u8 *watched = bpf_map_lookup_elem(&cfm_watched_inodes, &key);
+    if (!watched) return 0;
 
     // Match. Emit event.
-    emit_event(CFM_LSM_POLICY_SENSITIVE_WRITE, dentry, *pathClass, "setattr");
+    emit_event(CFM_LSM_POLICY_SENSITIVE_WRITE, dentry, 0, "setattr");
     return 0; // monitor mode
 }
 ```
@@ -930,9 +930,10 @@ pinned map populated by `cfm lsm enable`):
 - `cfm_watched_inodes`: stat()s each path in a pinned
   sensitive-paths list (initially a hard-coded set, later read
   from `/etc/cfm/lsm.conf`'s new `[policy "CFML-FS-005"]
-  paths = ...` key), records inode numbers. Inode-based matching
-  avoids the BPF-side dentry-walk-then-compare-string problem
-  entirely.
+  paths = ...` key), records `st_dev` + `st_ino`.
+  Filesystem+inode-based matching avoids the BPF-side
+  dentry-walk-then-compare-string problem entirely while preventing
+  cross-filesystem inode-number collisions.
 
 **vmlinux.h extensions needed.**
 - `struct iattr` (for `inode_setattr` hook). Only fields we
@@ -1027,16 +1028,16 @@ turn it into the shipped allowlist, *then* consider enforce.
 **Open questions for FS-005.**
 
 1. **Dentry path resolution in BPF.** The detection logic above
-   uses inode-number matching to avoid path-walking in BPF
-   (which is verifier-painful). But inode numbers are
-   filesystem-local — `/etc/passwd` on a chroot has a different
+   uses filesystem+inode matching to avoid path-walking in BPF
+   (which is verifier-painful). Inode numbers are filesystem-local, so the
+   key includes stat-compatible `st_dev`/`s_dev` — `/etc/passwd` on a chroot has a different
    inode than the host's. CageFS exposes a different inode for
    the cage. Empirical question: does an attacker that has
    bypassed CageFS see the *host* inode for `/etc/shadow` or
    the cage's version? Needs a real CL host to test.
 2. **Bind mounts.** A bind mount of `/etc/sudoers.d/` into a
-   different path bypasses inode-number matching unless we
-   also record the bind-mount target. Worth checking how often
+   different path still resolves to the same filesystem+inode key; confirm
+   any idmapped/overlay corner cases empirically. Worth checking how often
    operators bind-mount sensitive paths in practice.
 3. **`/home/*/.ssh/` for other users.** Detecting "user A
    writing to user B's `.ssh/`" is the highest-value case,
@@ -1054,7 +1055,7 @@ turn it into the shipped allowlist, *then* consider enforce.
 | Default mode | `monitor` (extended window — 60 days, see below) |
 | FP risk | Medium-low (whitelist of legitimate uid-0 transitions) |
 | Perf impact | Cold — fires only on setuid-family syscalls (not every credential install) |
-| Maps to add | `cfm_setuid_inodes` (hash, key=u64 inode, val=u8 — pre-populated set of legitimate setuid binaries) |
+| Maps to add | `cfm_setuid_inodes` (hash, key=`cfm_inode_key` dev+ino, val=u8 — pre-populated set of legitimate setuid binaries) |
 
 **Threat model.** A process gains effective uid 0 — or gains a
 capability set it should not have — without going through a
@@ -1141,8 +1142,9 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, int flags, i
     struct inode *exe_ino = BPF_CORE_READ(exe, f_inode);
     if (!exe_ino) return 0;
 
-    __u64 ino = BPF_CORE_READ(exe_ino, i_ino);
-    if (bpf_map_lookup_elem(&cfm_setuid_inodes, &ino)) {
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(exe_ino, &key)) return 0;
+    if (bpf_map_lookup_elem(&cfm_setuid_inodes, &key)) {
         // Legitimate setuid path; skip.
         return 0;
     }
@@ -1155,7 +1157,7 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old, int flags, i
 
 **Setuid-binary set population.** The cfm daemon walks the host
 at attach time and stat()s every file with mode bits including
-`S_ISUID`. Resulting inodes go into the pinned
+`S_ISUID`. Resulting filesystem+inode keys go into the pinned
 `cfm_setuid_inodes` map. The walk is refreshed periodically
 (every config-reload tick) so newly-installed setuid binaries
 (after a package install) don't trigger FPs forever. Default
@@ -1218,7 +1220,7 @@ so we get cheap access to them.
   live-patch-loader (`kcare` binary) does run setuid-ish
   operations; needs verification that it's in the setuid set
   or in the allowlist. CageFS adds a wrinkle (host vs cage
-  inode numbers) — needs empirical resolution.
+  filesystem+inode keys) — needs empirical resolution.
 - **DirectAdmin + CloudLinux + KernelCare.** Same as cPanel.
 - **Proxmox Debian KVM ZFS.** Apply. Watch the LXC/QEMU
   helper binaries — `lxc-start-ephemeral`, `qm`, `pveproxy`,

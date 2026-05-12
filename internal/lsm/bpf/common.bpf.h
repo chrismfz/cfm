@@ -38,6 +38,17 @@ enum cfm_fs_op {
 #define CFM_TASK_COMM_LEN 16
 #define CFM_FILENAME_LEN  64
 
+/* Compound inode map key shared by the watched-inode and setuid-inode
+ * maps. `dev` is the target inode's stat-compatible filesystem
+ * identity (super_block->s_dev encoded like stat(2) st_dev), and
+ * `ino` is inode->i_ino. Pairing both
+ * fields avoids collisions between different filesystems that reuse
+ * the same inode number. */
+struct cfm_inode_key {
+    __u64 dev;
+    __u64 ino;
+};
+
 /* Event record. Size deliberately fixed and small (well under the
  * 256 KiB ringbuf budget) so a busy host can buffer many events
  * before the Go reader drains them.

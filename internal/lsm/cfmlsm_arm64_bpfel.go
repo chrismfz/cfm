@@ -8,9 +8,16 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type cfmlsmCfmInodeKey struct {
+	_   structs.HostLayout
+	Dev uint64
+	Ino uint64
+}
 
 // loadCfmlsm returns the embedded CollectionSpec for cfmlsm.
 func loadCfmlsm() (*ebpf.CollectionSpec, error) {
