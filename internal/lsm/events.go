@@ -70,6 +70,8 @@ const (
 	bpfFilenameLen = 64
 )
 
+const EventFlagWebOrigin uint8 = 1 << 0
+
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
 // the BPF programs over the ring buffer. The binary layout is
 // position-fixed: any change to the struct on the BPF side requires
@@ -95,7 +97,9 @@ type Event struct {
 	// FSOpNone for events from other policies.
 	Op FSOp
 
-	// Flags is reserved for per-policy semantics. Currently always 0.
+	// Flags carries per-policy semantics. For CFML-FS-005, bit 0
+	// means the match came from web-origin tracking after the current
+	// uid was no longer watched.
 	Flags uint8
 
 	// Comm is the task's 16-byte command name (TASK_COMM_LEN).

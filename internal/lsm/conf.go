@@ -33,6 +33,12 @@ type Conf struct {
 	// always ModeDisabled).
 	Modes map[PolicyID]Mode
 
+	// FS005WebOriginMonitor enables CFML-FS-005 origin tracking in
+	// monitor-only mode. When true, the BPF program records tasks whose
+	// real/effective/fs uid matches cfm_watched_uids and reports later
+	// sensitive writes by those tasks even after their current uid changes.
+	FS005WebOriginMonitor bool
+
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
 	// section is absent.
@@ -52,9 +58,10 @@ func DefaultConf() *Conf {
 		modes[p.ID] = p.DefaultMode
 	}
 	return &Conf{
-		Enabled: false,
-		Modes:   modes,
-		Kmsg:    DefaultKmsgConf(),
+		Enabled:               false,
+		Modes:                 modes,
+		FS005WebOriginMonitor: true,
+		Kmsg:                  DefaultKmsgConf(),
 	}
 }
 
@@ -122,9 +129,10 @@ const (
 
 func ParseConf(r io.Reader) (*Conf, error) {
 	c := &Conf{
-		Enabled: false,
-		Modes:   map[PolicyID]Mode{},
-		Kmsg:    DefaultKmsgConf(),
+		Enabled:               false,
+		Modes:                 map[PolicyID]Mode{},
+		FS005WebOriginMonitor: false,
+		Kmsg:                  DefaultKmsgConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
 	// even if the file declared a subset. Per-policy stanzas override.
@@ -136,13 +144,13 @@ func ParseConf(r io.Reader) (*Conf, error) {
 	scanner.Buffer(make([]byte, 0, 4*1024), 1<<20)
 
 	var (
-		current        sectionKind     // which section we are inside
-		currentPolicy  PolicyID        // valid when current == sectionPolicy
-		lineno         int
-		seenPolicies   = map[PolicyID]int{}
-		seenTopLevel   = map[string]int{}
-		seenKmsgKeys   = map[string]int{}
-		kmsgSeen       int
+		current       sectionKind // which section we are inside
+		currentPolicy PolicyID    // valid when current == sectionPolicy
+		lineno        int
+		seenPolicies  = map[PolicyID]int{}
+		seenTopLevel  = map[string]int{}
+		seenKmsgKeys  = map[string]int{}
+		kmsgSeen      int
 	)
 
 	for scanner.Scan() {
@@ -214,8 +222,17 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.Modes[currentPolicy] = m
+			case "origin_tracking":
+				if currentPolicy != PolicySensitiveWrite {
+					return nil, fmt.Errorf("line %d: origin_tracking is only valid for %s", lineno, PolicySensitiveWrite)
+				}
+				monitor, err := parseOriginTracking(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.FS005WebOriginMonitor = monitor
 			default:
-				return nil, fmt.Errorf("line %d: unknown policy key %q (only `mode` is supported)", lineno, key)
+				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking`)", lineno, key, PolicySensitiveWrite)
 			}
 		case sectionKmsg:
 			lk := strings.ToLower(key)
@@ -272,6 +289,13 @@ func FormatConf(c *Conf) string {
 		fmt.Fprintf(&b, "# Hook: %s\n", p.Hook)
 		fmt.Fprintf(&b, "[policy %q]\n", string(p.ID))
 		fmt.Fprintf(&b, "mode = %s  # disabled | monitor | enforce\n", mode)
+		if p.ID == PolicySensitiveWrite {
+			state := "disabled"
+			if c.FS005WebOriginMonitor {
+				state = "monitor"
+			}
+			fmt.Fprintf(&b, "origin_tracking = %s  # disabled | monitor (origin-only matches never enforce yet)\n", state)
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -312,6 +336,16 @@ func WriteDefaultConf() (created bool, err error) {
 //
 // Anything else is a parse error. The PolicyID return is valid only
 // when kind == sectionPolicy; it is the empty string otherwise.
+func parseOriginTracking(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "disabled", "off", "false", "0":
+		return false, nil
+	case "monitor", "observe", "on", "true", "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid origin_tracking %q (want disabled|monitor)", s)
+}
+
 func parseSectionHeader(line string) (sectionKind, PolicyID, error) {
 	inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 	inner = strings.TrimSpace(inner)

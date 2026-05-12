@@ -32,6 +32,10 @@ mode = enforce
 
 [policy "CFML-EXEC-003"]
 mode = monitor
+
+[policy "CFML-FS-005"]
+mode = monitor
+origin_tracking = monitor
 `
 	c, err := ParseConf(strings.NewReader(body))
 	if err != nil {
@@ -45,6 +49,9 @@ mode = monitor
 	}
 	if got := c.Modes[PolicyReverseShell]; got != ModeMonitor {
 		t.Errorf("revshell mode: got %v, want monitor", got)
+	}
+	if !c.FS005WebOriginMonitor {
+		t.Fatal("origin_tracking=monitor was not parsed")
 	}
 }
 
@@ -130,6 +137,16 @@ func TestParseConf_Errors(t *testing.T) {
 			want: "unknown policy key",
 		},
 		{
+			name: "origin tracking on wrong policy",
+			body: "[policy \"CFML-EXEC-001\"]\norigin_tracking = monitor\n",
+			want: "origin_tracking is only valid",
+		},
+		{
+			name: "invalid origin tracking",
+			body: "[policy \"CFML-FS-005\"]\norigin_tracking = enforce\n",
+			want: "invalid origin_tracking",
+		},
+		{
 			name: "malformed line",
 			body: "enabled\n",
 			want: "malformed",
@@ -181,6 +198,7 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	original.Enabled = true
 	original.Modes[PolicyMemfdExec] = ModeEnforce
 	original.Modes[PolicyReverseShell] = ModeMonitor
+	original.FS005WebOriginMonitor = true
 
 	rendered := FormatConf(original)
 	roundtrip, err := ParseConf(strings.NewReader(rendered))
@@ -194,6 +212,9 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 		if a, b := original.Modes[p.ID], roundtrip.Modes[p.ID]; a != b {
 			t.Errorf("policy %s: original %v, roundtrip %v", p.ID, a, b)
 		}
+	}
+	if roundtrip.FS005WebOriginMonitor != original.FS005WebOriginMonitor {
+		t.Errorf("origin tracking: got %t, want %t", roundtrip.FS005WebOriginMonitor, original.FS005WebOriginMonitor)
 	}
 }
 

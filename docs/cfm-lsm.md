@@ -247,20 +247,31 @@ explicitly before committing the design to that hook layout.
 
 | | |
 |---|---|
-| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr` |
+| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr`; origin markers on `bprm_check_security`, `task_fix_setuid`, and `task_alloc` |
 | Default mode | `monitor`; enforce is opt-in |
 | FP risk | Very low on CageFS hosts; low–medium on plain hosts |
 | Perf impact | Negligible — only fires on rare write-class operations against a small inode set |
 
-**Description.** Six BPF LSM programs share one check helper. On every
-write-class inode operation, the program looks up the calling task's uid
-in the daemon-populated `cfm_watched_uids` hash (web-class names —
-apache, nginx, php-fpm, lsphp, alt-php-* — plus every cPanel and
-DirectAdmin account uid). If matched, it looks up the target
-filesystem+inode key in `cfm_watched_inodes` (the daemon stats every path in
+**Description.** Six write-class BPF LSM programs share one check helper.
+Historically, that helper matched only the task's **current uid**: on every
+write-class inode operation, it looks up the calling task's uid in the
+daemon-populated `cfm_watched_uids` hash (web-class names — apache, nginx,
+php-fpm, lsphp, alt-php-* — plus every cPanel and DirectAdmin account uid).
+If matched, it looks up the target filesystem+inode key in
+`cfm_watched_inodes` (the daemon stats every path in
 `internal/lsm/maps.go::DefaultSensitivePaths` and records `st_dev` +
 `st_ino`). Both hits → emit event; if enforce mode is active for this
 policy, return `-EPERM` and the syscall fails outright.
+
+**Web-origin matching.** FS-005 can also run an origin tracker gated by
+`origin_tracking = monitor` in `/etc/cfm/lsm.conf`. The tracker uses
+task-local BPF storage to mark tasks whose real/effective/fs uid matches
+`cfm_watched_uids`, refreshes that mark on exec and setuid-family transitions, and copies it to children on
+fork/clone through the `task_alloc` hook. A later sensitive write therefore
+still matches even if the process has become uid 0 by the time it touches the
+file. Origin-only events set the FS-005 web-origin flag and are
+**monitor-only** for now: they are reported even if `mode = enforce`, but they
+do not return `-EPERM` until telemetry shows the false-positive rate is safe.
 
 **Filesystem+inode matching avoids BPF-side path walking entirely.** For
 operations that create new files under a watched directory (e.g.
@@ -275,9 +286,18 @@ to *use* the privilege — typically by writing to `/etc/shadow`,
 through the standard syscall path even when the privesc primitive
 bypassed earlier LSM hooks, so cfm-lsm sees them.
 
-**Enforcement.** Available via `mode = enforce` in `lsm.conf`. The
-volatile-const flip applies to this policy the same way as EXEC-001
-and EXEC-003.
+**Enforcement.** Available via `mode = enforce` in `lsm.conf` for
+current-uid matches. Web-origin-only matches deliberately stay monitor-only
+under the separate `origin_tracking = monitor` flag while operators build a
+baseline.
+
+**False-positive profile.** Current-uid matches retain the original FS-005
+profile: very low on CageFS hosts and low–medium on plain hosts. Web-origin
+matching is intentionally broader. It can alert on legitimate root helpers,
+package hooks, or panel maintenance workers that were launched by a web/panel
+account and later acquired uid 0 before touching a watched path. Those are
+valuable forensic breadcrumbs during compromise response, but they need
+monitor-mode review before any blocking decision.
 
 ### `CFML-CRED-002` — Privilege escalation without setuid path
 
@@ -827,11 +847,11 @@ the corruption. The two layers are complementary, not competitive.
 
 | | |
 |---|---|
-| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr` |
+| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr`; `bprm_check_security` / `task_fix_setuid` / `task_alloc` for origin state |
 | Default mode | `monitor` |
 | FP risk | Very low (CageFS makes legitimate access impossible) |
 | Perf impact | Negligible — only fires on rare write-class operations against a small set of paths |
-| Maps to add | `cfm_watched_uids` (hash, key=uid, val=u8), `cfm_watched_inodes` (hash, key=`cfm_inode_key` dev+ino, val=u8) |
+| Maps to add | `cfm_watched_uids` (hash, key=uid, val=u8), `cfm_watched_inodes` (hash, key=`cfm_inode_key` dev+ino, val=u8), `cfm_web_origin_tasks` (task-local storage for origin state) |
 
 **Threat model.** A compromised web-tier user (apache, nginx,
 php-fpm, lsphp, alt-php-N, plus every cPanel/DirectAdmin account
@@ -893,9 +913,10 @@ int BPF_PROG(cfm_fs005_setattr, struct dentry *dentry, struct iattr *attr, int r
 
     __u32 uid = bpf_get_current_uid_gid() & 0xffffffff;
 
-    // Cheap reject: is this uid one we watch?
-    __u8 *watch = bpf_map_lookup_elem(&cfm_watched_uids, &uid);
-    if (!watch) return 0;
+    // Cheap reject: is this uid watched, or was the task marked web-origin?
+    bool uid_watch = bpf_map_lookup_elem(&cfm_watched_uids, &uid) != NULL;
+    bool origin_watch = cfm_task_is_web_origin(bpf_get_current_task());
+    if (!uid_watch && !origin_watch) return 0;
 
     // Resolve target filesystem+inode key.
     struct inode *target = BPF_CORE_READ(dentry, d_inode);
@@ -963,6 +984,7 @@ kernel-vendor blocker, not a verifier blocker).
   ```
   [policy "CFML-FS-005"]
   mode = monitor
+  origin_tracking = monitor
   allow_uids = cert-renewer,custom-cron
   allow_paths = /etc/letsencrypt/live/*
   ```

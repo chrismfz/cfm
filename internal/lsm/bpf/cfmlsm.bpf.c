@@ -372,11 +372,90 @@ struct {
 
 volatile const __u8 cfm_enforce_sensitive_write = 0;
 
-/* Emit one FS-005 event. Caller has already established that uid
+/* Conservative feature gate for origin tracking. 0 preserves the
+ * historical current-uid-only FS-005 behaviour; 1 tracks tasks that
+ * started under web/panel uids and reports origin-only matches in
+ * monitor mode, even if FS-005 itself is later set to enforce. */
+volatile const __u8 cfm_fs005_web_origin_monitor = 0;
+
+struct cfm_web_origin_state {
+    __u8 web_origin;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, __u32);
+    __type(value, struct cfm_web_origin_state);
+} cfm_web_origin_tasks SEC(".maps");
+
+static __always_inline bool cfm_uid_watched(__u32 uid)
+{
+    return bpf_map_lookup_elem(&cfm_watched_uids, &uid) != NULL;
+}
+
+static __always_inline bool cfm_cred_has_watched_uid(const struct cred *cred)
+{
+    if (!cred)
+        return false;
+
+    __u32 uid = BPF_CORE_READ(cred, uid.val);
+    if (cfm_uid_watched(uid))
+        return true;
+    uid = BPF_CORE_READ(cred, euid.val);
+    if (cfm_uid_watched(uid))
+        return true;
+    uid = BPF_CORE_READ(cred, fsuid.val);
+    return cfm_uid_watched(uid);
+}
+
+static __always_inline bool cfm_current_cred_has_watched_uid(void)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (!task)
+        return false;
+
+    return cfm_cred_has_watched_uid(BPF_CORE_READ(task, cred));
+}
+
+static __always_inline bool cfm_task_is_web_origin(struct task_struct *task)
+{
+    if (!cfm_fs005_web_origin_monitor || !task)
+        return false;
+
+    struct cfm_web_origin_state *state =
+        bpf_task_storage_get(&cfm_web_origin_tasks, task, 0, 0);
+    return state && state->web_origin != 0;
+}
+
+static __always_inline void cfm_mark_current_web_origin(void)
+{
+    if (!cfm_fs005_web_origin_monitor)
+        return;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (!task)
+        return;
+
+    struct cfm_web_origin_state *state =
+        bpf_task_storage_get(&cfm_web_origin_tasks, task, 0,
+                             BPF_LOCAL_STORAGE_GET_F_CREATE);
+    if (state)
+        state->web_origin = 1;
+}
+
+static __always_inline void cfm_mark_current_web_origin_if_needed(void)
+{
+    if (!cfm_current_cred_has_watched_uid())
+        return;
+    cfm_mark_current_web_origin();
+}
+
+/* Emit one FS-005 event. Caller has already established that uid/origin
  * + target inode are both in the watched sets. */
 static __always_inline void cfm_fs005_emit(struct dentry *target,
                                            const char *fname_fallback,
-                                           __u8 op)
+                                           __u8 op, __u8 flags)
 {
     struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
     if (!e)
@@ -392,7 +471,7 @@ static __always_inline void cfm_fs005_emit(struct dentry *target,
     e->uid       = (__u32)(uid_gid & 0xffffffffu);
     e->gid       = (__u32)(uid_gid >> 32);
     e->op        = op;
-    e->flags     = 0;
+    e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
 
@@ -488,8 +567,12 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     if (ret != 0)
         return ret;
 
+    cfm_mark_current_web_origin_if_needed();
+
     __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
-    if (!bpf_map_lookup_elem(&cfm_watched_uids, &uid))
+    bool current_uid_watched = cfm_uid_watched(uid);
+    bool origin_watched = cfm_task_is_web_origin((struct task_struct *)bpf_get_current_task());
+    if (!current_uid_watched && !origin_watched)
         return 0;
 
     if (!cfm_fs005_inode_watched(primary) && !cfm_fs005_inode_watched(secondary))
@@ -498,10 +581,61 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     struct dentry *ev = event_dentry;
     if (!ev)
         ev = primary ? primary : secondary;
-    cfm_fs005_emit(ev, fname_fallback, op);
 
-    if (cfm_enforce_sensitive_write)
+    __u8 flags = 0;
+    if (origin_watched && !current_uid_watched)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+    cfm_fs005_emit(ev, fname_fallback, op, flags);
+
+    /* Origin-only matches are intentionally monitor-only while we gather
+     * production telemetry. Current-uid matches preserve the historical
+     * FS-005 enforcement semantics. */
+    if (current_uid_watched && cfm_enforce_sensitive_write)
         return CFM_LSM_DENY;
+    return 0;
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_fs005_mark_exec, struct linux_binprm *bprm, int ret)
+{
+    if (ret != 0)
+        return ret;
+    cfm_mark_current_web_origin_if_needed();
+    return 0;
+}
+
+SEC("lsm/task_fix_setuid")
+int BPF_PROG(cfm_fs005_mark_setuid, struct cred *new, const struct cred *old,
+             int flags, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!cfm_fs005_web_origin_monitor)
+        return 0;
+
+    if (cfm_cred_has_watched_uid(old) || cfm_cred_has_watched_uid(new))
+        cfm_mark_current_web_origin();
+    return 0;
+}
+
+SEC("lsm/task_alloc")
+int BPF_PROG(cfm_fs005_mark_task_alloc, struct task_struct *task,
+             unsigned long clone_flags, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!cfm_fs005_web_origin_monitor || !task)
+        return 0;
+
+    cfm_mark_current_web_origin_if_needed();
+    if (!cfm_task_is_web_origin((struct task_struct *)bpf_get_current_task()))
+        return 0;
+
+    struct cfm_web_origin_state *state =
+        bpf_task_storage_get(&cfm_web_origin_tasks, task, 0,
+                             BPF_LOCAL_STORAGE_GET_F_CREATE);
+    if (state)
+        state->web_origin = 1;
     return 0;
 }
 

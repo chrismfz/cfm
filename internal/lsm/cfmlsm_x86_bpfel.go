@@ -19,6 +19,11 @@ type cfmlsmCfmInodeKey struct {
 	Ino uint64
 }
 
+type cfmlsmCfmWebOriginState struct {
+	_         structs.HostLayout
+	WebOrigin uint8
+}
+
 // loadCfmlsm returns the embedded CollectionSpec for cfmlsm.
 func loadCfmlsm() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_CfmlsmBytes)
@@ -61,25 +66,29 @@ type cfmlsmSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
-	CfmCred002       *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
-	CfmFs005Create   *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
-	CfmFs005Link     *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
-	CfmFs005Rename   *ebpf.ProgramSpec `ebpf:"cfm_fs005_rename"`
-	CfmFs005Setattr  *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
-	CfmFs005Setxattr *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
-	CfmFs005Unlink   *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
-	CfmMemfdExec     *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
-	CfmRevshell      *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
+	CfmCred002            *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
+	CfmFs005Create        *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
+	CfmFs005Link          *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
+	CfmFs005MarkExec      *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
+	CfmFs005MarkSetuid    *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_setuid"`
+	CfmFs005MarkTaskAlloc *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_task_alloc"`
+	CfmFs005Rename        *ebpf.ProgramSpec `ebpf:"cfm_fs005_rename"`
+	CfmFs005Setattr       *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
+	CfmFs005Setxattr      *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
+	CfmFs005Unlink        *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
+	CfmMemfdExec          *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmRevshell           *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
 
 // cfmlsmMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmMapSpecs struct {
-	CfmEvents        *ebpf.MapSpec `ebpf:"cfm_events"`
-	CfmSetuidInodes  *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
-	CfmWatchedInodes *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
-	CfmWatchedUids   *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
+	CfmEvents         *ebpf.MapSpec `ebpf:"cfm_events"`
+	CfmSetuidInodes   *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes  *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids    *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
+	CfmWebOriginTasks *ebpf.MapSpec `ebpf:"cfm_web_origin_tasks"`
 }
 
 // cfmlsmVariableSpecs contains global variables before they are loaded into the kernel.
@@ -89,6 +98,7 @@ type cfmlsmVariableSpecs struct {
 	CfmEnforceMemfdExec      *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
 	CfmEnforceRevshell       *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
+	CfmFs005WebOriginMonitor *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
 }
 
 // cfmlsmObjects contains all objects after they have been loaded into the kernel.
@@ -111,10 +121,11 @@ func (o *cfmlsmObjects) Close() error {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmMaps struct {
-	CfmEvents        *ebpf.Map `ebpf:"cfm_events"`
-	CfmSetuidInodes  *ebpf.Map `ebpf:"cfm_setuid_inodes"`
-	CfmWatchedInodes *ebpf.Map `ebpf:"cfm_watched_inodes"`
-	CfmWatchedUids   *ebpf.Map `ebpf:"cfm_watched_uids"`
+	CfmEvents         *ebpf.Map `ebpf:"cfm_events"`
+	CfmSetuidInodes   *ebpf.Map `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes  *ebpf.Map `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids    *ebpf.Map `ebpf:"cfm_watched_uids"`
+	CfmWebOriginTasks *ebpf.Map `ebpf:"cfm_web_origin_tasks"`
 }
 
 func (m *cfmlsmMaps) Close() error {
@@ -123,6 +134,7 @@ func (m *cfmlsmMaps) Close() error {
 		m.CfmSetuidInodes,
 		m.CfmWatchedInodes,
 		m.CfmWatchedUids,
+		m.CfmWebOriginTasks,
 	)
 }
 
@@ -133,21 +145,25 @@ type cfmlsmVariables struct {
 	CfmEnforceMemfdExec      *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
 	CfmEnforceRevshell       *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
+	CfmFs005WebOriginMonitor *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
 }
 
 // cfmlsmPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
-	CfmCred002       *ebpf.Program `ebpf:"cfm_cred002"`
-	CfmFs005Create   *ebpf.Program `ebpf:"cfm_fs005_create"`
-	CfmFs005Link     *ebpf.Program `ebpf:"cfm_fs005_link"`
-	CfmFs005Rename   *ebpf.Program `ebpf:"cfm_fs005_rename"`
-	CfmFs005Setattr  *ebpf.Program `ebpf:"cfm_fs005_setattr"`
-	CfmFs005Setxattr *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
-	CfmFs005Unlink   *ebpf.Program `ebpf:"cfm_fs005_unlink"`
-	CfmMemfdExec     *ebpf.Program `ebpf:"cfm_memfd_exec"`
-	CfmRevshell      *ebpf.Program `ebpf:"cfm_revshell"`
+	CfmCred002            *ebpf.Program `ebpf:"cfm_cred002"`
+	CfmFs005Create        *ebpf.Program `ebpf:"cfm_fs005_create"`
+	CfmFs005Link          *ebpf.Program `ebpf:"cfm_fs005_link"`
+	CfmFs005MarkExec      *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
+	CfmFs005MarkSetuid    *ebpf.Program `ebpf:"cfm_fs005_mark_setuid"`
+	CfmFs005MarkTaskAlloc *ebpf.Program `ebpf:"cfm_fs005_mark_task_alloc"`
+	CfmFs005Rename        *ebpf.Program `ebpf:"cfm_fs005_rename"`
+	CfmFs005Setattr       *ebpf.Program `ebpf:"cfm_fs005_setattr"`
+	CfmFs005Setxattr      *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
+	CfmFs005Unlink        *ebpf.Program `ebpf:"cfm_fs005_unlink"`
+	CfmMemfdExec          *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmRevshell           *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
 func (p *cfmlsmPrograms) Close() error {
@@ -155,6 +171,9 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmCred002,
 		p.CfmFs005Create,
 		p.CfmFs005Link,
+		p.CfmFs005MarkExec,
+		p.CfmFs005MarkSetuid,
+		p.CfmFs005MarkTaskAlloc,
 		p.CfmFs005Rename,
 		p.CfmFs005Setattr,
 		p.CfmFs005Setxattr,
