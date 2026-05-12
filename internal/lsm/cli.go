@@ -15,16 +15,22 @@ import (
 //	cfm lsm                  -> alias for `status`
 //	cfm lsm status [--json]  -> preflight + per-policy state (read-only)
 //	cfm lsm preview          -> what would attach given conf + kernel (read-only)
+//	cfm lsm probe            -> attach briefly to verify the kernel accepts; detach
 //	cfm lsm enable           -> attach + pin to bpffs (survives daemon restart)
 //	cfm lsm disable          -> unpin + detach all programs
 //	cfm lsm init             -> write default /etc/cfm/lsm.conf if absent
 //	cfm lsm help / -h        -> usage
 //
-// `enable` and `disable` are the only subcommands that touch kernel
-// state. Once enabled, the BPF programs stay attached across cfm
-// daemon restarts, crashes, and stops. The daemon's role becomes
-// "drain the pinned ringbuf and forward events" — protection does
-// not depend on the daemon.
+// Three subcommands touch kernel state:
+//   - `probe` loads + attaches + detaches; nothing persists. Use to
+//     verify the kernel accepts the BPF programs without committing.
+//   - `enable` loads + attaches + pins. Programs stay attached past
+//     CLI and daemon exit; only `disable` detaches them.
+//   - `disable` removes everything pinned under /sys/fs/bpf/cfm/.
+//
+// The cfm daemon does not auto-pin. It only adopts pre-existing
+// pinned state (created by `cfm lsm enable`) to drain events into
+// the notify pipeline.
 func RunCLI(args []string) int {
 	if len(args) == 0 {
 		return runStatusCmd(nil, os.Stdout)
@@ -34,6 +40,8 @@ func RunCLI(args []string) int {
 		return runStatusCmd(args[1:], os.Stdout)
 	case "preview":
 		return runPreviewCmd(args[1:], os.Stdout)
+	case "probe":
+		return runProbeCmd(args[1:], os.Stdout)
 	case "enable":
 		return runEnableCmd(args[1:], os.Stdout)
 	case "disable":
@@ -95,6 +103,18 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	return RunPreview(w)
 }
 
+func runProbeCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("lsm probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if rc, done := handleFlagErr("lsm probe", fs.Parse(args), w); done {
+		return rc
+	}
+	if !requireRoot(w, "probe") {
+		return 1
+	}
+	return RunProbe(w)
+}
+
 // handleFlagErr mirrors kernsec's pattern: --help renders usage to w
 // and returns 0; a parse error renders the message to stderr plus
 // usage and returns 2.
@@ -118,6 +138,8 @@ Subcommands:
   (default)           Alias for "status"
   status              Print kernel preflight + per-policy state (read-only)
   preview             Show what would attach given conf + kernel (read-only)
+  probe               Briefly attach the BPF programs to verify the kernel
+                      accepts them, then detach. Needs root.
   enable              Attach the BPF programs and pin them to /sys/fs/bpf/cfm so
                       they stay attached across daemon restarts and crashes.
                       Needs root.
@@ -131,9 +153,9 @@ Status flags:
 
 Notes:
   status / preview do not touch the kernel; they only read /proc, /sys, and
-  /etc/cfm/lsm.conf. enable / disable are the only subcommands that mutate
-  kernel state, and they do so via bpffs pinning — once enabled, protection
-  survives daemon restarts. Run cfm lsm disable to detach.
+  /etc/cfm/lsm.conf. probe / enable / disable mutate kernel state. probe is
+  ephemeral (attach + detach, no persistence). enable pins to bpffs so
+  programs stay attached across daemon restarts; only disable detaches.
 
 See docs/cfm-lsm.md for the full design.`)
 }

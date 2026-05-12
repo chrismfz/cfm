@@ -45,9 +45,9 @@ func RunPreview(w io.Writer) int {
 		fmt.Fprintln(w)
 	}
 
-	fmt.Fprintln(w, "Note: BPF programs are not yet implemented. Even on a host where")
-	fmt.Fprintln(w, "      preflight passes and policies are enabled in lsm.conf, no")
-	fmt.Fprintln(w, "      programs will actually attach until the BPF backend lands.")
+	fmt.Fprintln(w, "Note: preview is a read-only prediction. It does not touch the kernel.")
+	fmt.Fprintln(w, "      Run `cfm lsm probe` to actually load the BPF programs briefly and")
+	fmt.Fprintln(w, "      confirm the kernel accepts them on this host.")
 	return 0
 }
 

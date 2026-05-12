@@ -383,6 +383,7 @@ Usage:
   cfm lsm                         -- alias for "cfm lsm status"
   cfm lsm status [--json --check] -- BPF LSM kernel preflight + per-policy state (read-only)
   cfm lsm preview                 -- read-only dry run: what would attach given /etc/cfm/lsm.conf + kernel
+  cfm lsm probe                   -- briefly attach the BPF programs to verify the kernel accepts them, then detach (needs root)
   cfm lsm enable                  -- attach + pin BPF programs to /sys/fs/bpf/cfm (survives daemon restart)
   cfm lsm disable                 -- unpin + detach BPF programs
   cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
