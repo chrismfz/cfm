@@ -269,7 +269,7 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     if (ret != 0)
         return ret;
 
-    task = (struct task_struct *)bpf_get_current_task();
+    task = bpf_get_current_task_btf();
     if (!task)
         return 0;
 
@@ -412,7 +412,7 @@ static __always_inline bool cfm_cred_has_watched_uid(const struct cred *cred)
 
 static __always_inline bool cfm_current_cred_has_watched_uid(void)
 {
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *task = bpf_get_current_task_btf();
     if (!task)
         return false;
 
@@ -434,7 +434,7 @@ static __always_inline void cfm_mark_current_web_origin(void)
     if (!cfm_fs005_web_origin_monitor)
         return;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *task = bpf_get_current_task_btf();
     if (!task)
         return;
 
@@ -572,7 +572,7 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
 
     __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
     bool current_uid_watched = cfm_uid_watched(uid);
-    bool origin_watched = cfm_task_is_web_origin((struct task_struct *)bpf_get_current_task());
+    bool origin_watched = cfm_task_is_web_origin(bpf_get_current_task_btf());
     if (!current_uid_watched && !origin_watched)
         return 0;
 
@@ -629,7 +629,7 @@ int BPF_PROG(cfm_fs005_mark_task_alloc, struct task_struct *task,
         return 0;
 
     cfm_mark_current_web_origin_if_needed();
-    if (!cfm_task_is_web_origin((struct task_struct *)bpf_get_current_task()))
+    if (!cfm_task_is_web_origin(bpf_get_current_task_btf()))
         return 0;
 
     struct cfm_web_origin_state *state =
@@ -847,7 +847,7 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
     if (new_euid != 0 || old_euid == 0)
         return 0;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *task = bpf_get_current_task_btf();
     if (!task)
         return 0;
 
@@ -900,7 +900,7 @@ int BPF_PROG(cfm_cred003, struct cred *new)
     if (!new)
         return 0;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *task = bpf_get_current_task_btf();
     if (!task)
         return 0;
 
