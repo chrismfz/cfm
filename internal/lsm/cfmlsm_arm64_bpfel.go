@@ -54,23 +54,34 @@ type cfmlsmSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
-	CfmMemfdExec *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
-	CfmRevshell  *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
+	CfmCred002       *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
+	CfmFs005Create   *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
+	CfmFs005Link     *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
+	CfmFs005Rename   *ebpf.ProgramSpec `ebpf:"cfm_fs005_rename"`
+	CfmFs005Setattr  *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
+	CfmFs005Setxattr *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
+	CfmFs005Unlink   *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
+	CfmMemfdExec     *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmRevshell      *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
 
 // cfmlsmMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmMapSpecs struct {
-	CfmEvents *ebpf.MapSpec `ebpf:"cfm_events"`
+	CfmEvents        *ebpf.MapSpec `ebpf:"cfm_events"`
+	CfmSetuidInodes  *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids   *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
 }
 
 // cfmlsmVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmVariableSpecs struct {
-	CfmEnforceMemfdExec *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
-	CfmEnforceRevshell  *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceMemfdExec      *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforceRevshell       *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceSensitiveWrite *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
 }
 
 // cfmlsmObjects contains all objects after they have been loaded into the kernel.
@@ -93,12 +104,18 @@ func (o *cfmlsmObjects) Close() error {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmMaps struct {
-	CfmEvents *ebpf.Map `ebpf:"cfm_events"`
+	CfmEvents        *ebpf.Map `ebpf:"cfm_events"`
+	CfmSetuidInodes  *ebpf.Map `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes *ebpf.Map `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids   *ebpf.Map `ebpf:"cfm_watched_uids"`
 }
 
 func (m *cfmlsmMaps) Close() error {
 	return _CfmlsmClose(
 		m.CfmEvents,
+		m.CfmSetuidInodes,
+		m.CfmWatchedInodes,
+		m.CfmWatchedUids,
 	)
 }
 
@@ -106,20 +123,35 @@ func (m *cfmlsmMaps) Close() error {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmVariables struct {
-	CfmEnforceMemfdExec *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
-	CfmEnforceRevshell  *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceMemfdExec      *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforceRevshell       *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceSensitiveWrite *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
 }
 
 // cfmlsmPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
-	CfmMemfdExec *ebpf.Program `ebpf:"cfm_memfd_exec"`
-	CfmRevshell  *ebpf.Program `ebpf:"cfm_revshell"`
+	CfmCred002       *ebpf.Program `ebpf:"cfm_cred002"`
+	CfmFs005Create   *ebpf.Program `ebpf:"cfm_fs005_create"`
+	CfmFs005Link     *ebpf.Program `ebpf:"cfm_fs005_link"`
+	CfmFs005Rename   *ebpf.Program `ebpf:"cfm_fs005_rename"`
+	CfmFs005Setattr  *ebpf.Program `ebpf:"cfm_fs005_setattr"`
+	CfmFs005Setxattr *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
+	CfmFs005Unlink   *ebpf.Program `ebpf:"cfm_fs005_unlink"`
+	CfmMemfdExec     *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmRevshell      *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
 func (p *cfmlsmPrograms) Close() error {
 	return _CfmlsmClose(
+		p.CfmCred002,
+		p.CfmFs005Create,
+		p.CfmFs005Link,
+		p.CfmFs005Rename,
+		p.CfmFs005Setattr,
+		p.CfmFs005Setxattr,
+		p.CfmFs005Unlink,
 		p.CfmMemfdExec,
 		p.CfmRevshell,
 	)

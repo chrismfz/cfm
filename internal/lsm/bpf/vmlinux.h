@@ -51,6 +51,18 @@ typedef __u32  __wsum;
 typedef _Bool  bool;
 enum { false = 0, true = 1 };
 
+/* Kernel typedefs used by LSM hook signatures. umode_t is the mode
+ * field type used by inode_create; size_t by inode_setxattr. We use
+ * the kernel ABI definitions, not stddef ones, to avoid pulling
+ * platform headers into the BPF compile. */
+typedef __u16  umode_t;
+typedef __u32  gfp_t;
+#ifndef __SIZE_TYPE__
+typedef unsigned long  size_t;
+#else
+typedef __SIZE_TYPE__  size_t;
+#endif
+
 /* BPF map type enum subset. Mirrors include/uapi/linux/bpf.h. Only
  * the value cfm-lsm uses today (ringbuf) needs to be correct. */
 enum bpf_map_type {
@@ -80,6 +92,7 @@ struct qstr {
 struct dentry {
     struct qstr            d_name;
     struct dentry         *d_parent;
+    struct inode          *d_inode;
 } ___NCO;
 
 struct path {
@@ -92,6 +105,7 @@ struct super_block {
 
 struct inode {
     __u16                  i_mode;
+    unsigned long          i_ino;
     struct super_block    *i_sb;
 } ___NCO;
 
@@ -152,9 +166,46 @@ struct files_struct {
     struct fdtable        *fdt;
 } ___NCO;
 
+/* Types used by CFML-CRED-002 (priv-esc-without-setuid).
+ *
+ * kuid_t is a single-field wrapper around __u32. cred_prepare hands
+ * the program both `new` and `old` cred pointers; we only read .euid.val.
+ *
+ * mm_struct.exe_file is the file currently mmaped as the process's
+ * primary executable. We resolve its inode and compare against the
+ * setuid-binary inode map. */
+struct kuid_t {
+    __u32 val;
+} ___NCO;
+
+struct kgid_t {
+    __u32 val;
+} ___NCO;
+
+struct cred {
+    struct kuid_t          uid;
+    struct kgid_t          gid;
+    struct kuid_t          suid;
+    struct kgid_t          sgid;
+    struct kuid_t          euid;
+    struct kgid_t          egid;
+    struct kuid_t          fsuid;
+    struct kgid_t          fsgid;
+} ___NCO;
+
+struct mm_struct {
+    struct file           *exe_file;
+} ___NCO;
+
 struct task_struct {
+    struct mm_struct      *mm;
     struct files_struct   *files;
 } ___NCO;
+
+/* Used by CFML-FS-005 (sensitive-file modification by web user).
+ * Empty struct definition is enough — we only need the type to exist
+ * for BPF_PROG signature compatibility; we don't read any fields. */
+struct iattr {} ___NCO;
 
 /* sock_common holds the cheap-to-read state and family fields that
  * union into both struct sock and struct inet_sock. Reading them via

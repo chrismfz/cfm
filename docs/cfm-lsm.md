@@ -2,8 +2,24 @@
 
 ## Status
 
+**Four policies shipping. Monitor mode by default; enforce opt-in
+for EXEC-001 / EXEC-003 / FS-005. CRED-002 is monitor-only by
+design (cred_prepare enforce can deadlock systemd).**
 
-Both BPF LSM policies are implemented, compiled, and verified to
+Catalog:
+
+- `CFML-EXEC-001` — Block exec from memfd
+- `CFML-EXEC-003` — Reverse shell pattern
+- `CFML-FS-005`   — Sensitive-file modification by web user
+- `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
+
+Companion kernsec rule `KSEC-LSM-bpf-001` merges `bpf` into the
+operator's existing `lsm=` boot argument when forced in
+`/etc/cfm/kernsec.conf`, without disrupting other LSMs. Required
+on distros where `bpf` is not in the default LSM list (most non-EL10
+kernels). Opt-in.
+
+All BPF LSM policies are implemented, compiled, and verified to
 load on EL10 (kernel 6.12). The full end-to-end flow is:
 
 ```

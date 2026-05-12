@@ -16,8 +16,23 @@
 /* On-wire event policy IDs. Stable across releases — Go-side parsing
  * keys off these values, not strings. */
 enum cfm_lsm_policy_id {
-    CFM_LSM_POLICY_MEMFD_EXEC   = 1,  /* CFML-EXEC-001 */
-    CFM_LSM_POLICY_REVERSE_SHELL = 3, /* CFML-EXEC-003 (placeholder, not yet implemented) */
+    CFM_LSM_POLICY_MEMFD_EXEC       = 1,  /* CFML-EXEC-001 */
+    CFM_LSM_POLICY_REVERSE_SHELL    = 3,  /* CFML-EXEC-003 */
+    CFM_LSM_POLICY_SENSITIVE_WRITE  = 5,  /* CFML-FS-005   */
+    CFM_LSM_POLICY_CRED_ESCAL       = 7,  /* CFML-CRED-002 */
+};
+
+/* File-system operation kind for CFML-FS-005 events. Carried in the
+ * `op` byte of cfm_lsm_event (formerly _pad). 0 means "other / not
+ * an FS event" and is the default for non-FS policy emissions. */
+enum cfm_fs_op {
+    CFM_FS_OP_NONE      = 0,
+    CFM_FS_OP_SETATTR   = 1,
+    CFM_FS_OP_CREATE    = 2,
+    CFM_FS_OP_UNLINK    = 3,
+    CFM_FS_OP_LINK      = 4,
+    CFM_FS_OP_RENAME    = 5,
+    CFM_FS_OP_SETXATTR  = 6,
 };
 
 #define CFM_TASK_COMM_LEN 16
@@ -25,7 +40,25 @@ enum cfm_lsm_policy_id {
 
 /* Event record. Size deliberately fixed and small (well under the
  * 256 KiB ringbuf budget) so a busy host can buffer many events
- * before the Go reader drains them. */
+ * before the Go reader drains them.
+ *
+ * Wire layout (112 bytes, stable since EXEC-001):
+ *   offset  size  field
+ *        0     8  ts_ns
+ *        8     4  policy_id
+ *       12     4  pid
+ *       16     4  tgid
+ *       20     4  uid
+ *       24     4  gid
+ *       28     1  op         (enum cfm_fs_op; 0 for non-FS policies)
+ *       29     1  flags      (per-policy semantics; 0 reserved)
+ *       30     2  _pad
+ *       32    16  comm
+ *       48    64  filename
+ *
+ * Total size unchanged from the EXEC-001 release — `_pad` was 4
+ * bytes; FS-005 splits it into op + flags + 2 trailing pad bytes so
+ * the Go parser does not need a wire-version bump. */
 struct cfm_lsm_event {
     __u64 ts_ns;
     __u32 policy_id;
@@ -33,7 +66,10 @@ struct cfm_lsm_event {
     __u32 tgid;
     __u32 uid;
     __u32 gid;
-    __u32 _pad;
+    __u8  op;
+    __u8  flags;
+    __u8  _pad1;
+    __u8  _pad2;
     char  comm[CFM_TASK_COMM_LEN];
     char  filename[CFM_FILENAME_LEN];
 } __attribute__((packed));

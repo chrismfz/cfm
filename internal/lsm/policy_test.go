@@ -2,18 +2,23 @@ package lsm
 
 import "testing"
 
-func TestAllPolicies_MVPScope(t *testing.T) {
+// TestAllPolicies_Scope confirms exactly the four currently-supported
+// policies are registered. Bumping the count requires updating
+// docs/cfm-lsm.md and configs/lsm.conf in lockstep.
+func TestAllPolicies_Scope(t *testing.T) {
 	policies := AllPolicies()
-	if len(policies) != 2 {
-		t.Fatalf("MVP scope is exactly two policies; got %d", len(policies))
+	if len(policies) != 4 {
+		t.Fatalf("policy catalog should have exactly four entries; got %d", len(policies))
 	}
 	want := map[PolicyID]bool{
-		PolicyMemfdExec:    false,
-		PolicyReverseShell: false,
+		PolicyMemfdExec:      false,
+		PolicyReverseShell:   false,
+		PolicySensitiveWrite: false,
+		PolicyCredEscal:      false,
 	}
 	for _, p := range policies {
 		if _, ok := want[p.ID]; !ok {
-			t.Errorf("unexpected policy %s in MVP scope", p.ID)
+			t.Errorf("unexpected policy %s in catalog", p.ID)
 			continue
 		}
 		want[p.ID] = true
@@ -26,15 +31,15 @@ func TestAllPolicies_MVPScope(t *testing.T) {
 		if p.Description == "" {
 			t.Errorf("policy %s has empty Description", p.ID)
 		}
-		// Default mode is disabled until the BPF backend lands; flipping
-		// this requires updating docs/cfm-lsm.md too.
+		// Every policy defaults to disabled; the operator opts in
+		// per policy via /etc/cfm/lsm.conf.
 		if p.DefaultMode != ModeDisabled {
-			t.Errorf("policy %s default mode is %v; expected disabled in this slice", p.ID, p.DefaultMode)
+			t.Errorf("policy %s default mode is %v; expected disabled", p.ID, p.DefaultMode)
 		}
 	}
 	for id, seen := range want {
 		if !seen {
-			t.Errorf("MVP policy %s missing from AllPolicies()", id)
+			t.Errorf("policy %s missing from AllPolicies()", id)
 		}
 	}
 }

@@ -144,7 +144,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 
 	sysctlContent := RenderSysctlFile(sysctls)
 	modprobeContent := RenderModprobeFile(modules)
-	desiredCmdline, cmdlineErr := buildDesiredCmdline(backend, bootArgs)
+	desiredCmdline, cmdlineErr := buildDesiredCmdlineWithConf(backend, bootArgs, conf)
 	// BLS divergence is auto-reconciled — WriteCmdline writes the
 	// desired managed set to every non-recovery kernel, aligning all
 	// entries on the next pass. Other cmdline-read failures remain
@@ -549,11 +549,32 @@ func computeDrift(sysctlContent []byte, desiredCmdline string, backend BootBacke
 // auto-reconcile can ignore err==ErrBLSDivergence and proceed to write;
 // callers that want to halt can check errors.Is(err, ErrBLSDivergence).
 func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
+	return buildDesiredCmdlineWithConf(backend, args, nil)
+}
+
+// buildDesiredCmdlineWithConf is the conf-aware variant. KSEC-LSM-bpf-001
+// is the only rule today that depends on conf overrides at cmdline-build
+// time (it merges `bpf` into the existing lsm= value rather than
+// replacing it via ManagedBootArgKeys), so the conf is plumbed in
+// here. When conf is nil the merger is a no-op.
+func buildDesiredCmdlineWithConf(backend BootBackend, args []BootArg, conf *Conf) (string, error) {
 	current, err := backend.NextBootCmdline()
 	if err != nil && !errors.Is(err, ErrBLSDivergence) {
 		return "", fmt.Errorf("read current cmdline: %w", err)
 	}
 	tokens := rebuildManagedCmdline(ParseCmdline(current), args)
+	if IsLSMBPFForced(conf) {
+		tokens = MergeLSMBPF(tokens)
+	} else {
+		// Whenever the rule is NOT forced, the disable / unforce
+		// path runs: ensure `bpf` is not present in our managed
+		// state. Operators who added `bpf` themselves keep their
+		// edit only if it was present in their *current* cmdline
+		// AND they did not previously force this rule (so we
+		// never added it). This is the same lifecycle as other
+		// kernsec-managed args.
+		tokens = UnmergeLSMBPF(tokens)
+	}
 	return strings.Join(tokens, " "), err
 }
 
