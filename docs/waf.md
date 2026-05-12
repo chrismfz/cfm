@@ -274,10 +274,21 @@ Whole-WAF wins on collision. Two rule-scoped entries on the same host/path get m
 ### CLI
 
 ```
-cfm webtop exclude add <host> <path> --rule N|Nxx|N-M[,…]
-cfm webtop exclude add <host> <path>          # whole-WAF entry (no --rule flag)
-cfm webtop exclude remove <host> <path> --rule …
+cfm webtop waf exclude list
+cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...]
+cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...]
 ```
+
+`<value>` is matched with `strings.Contains` (plain text) or as a glob when it
+contains any of `* ? [ ]`. `--type host` matches against the request host;
+`--type path` matches against the request path. `--type` defaults to `host`.
+Each entry is single-axis — host **or** path, not both — so to scope a path
+exclusion to one site, pick a path string that's unique to that site, or use
+a glob like `*/plexusnet/*`.
+
+Omitting `--rule` creates a **whole-WAF** entry (legacy "WAF off for this
+scope"). Pass `--rule` one or more times to create a **rule-scoped** entry
+that suppresses only the listed `waf_rule_id`s.
 
 Rule-ID spec accepts:
 
@@ -285,12 +296,46 @@ Rule-ID spec accepts:
 - Wildcard: `--rule 3xx` → expanded to 300-399 at parse time
 - Range: `--rule 310-317`
 - List: `--rule 320,3xx,605` (deduped)
+- Repeat: `--rule 201 --rule 605` (merged)
+
+### Worked example — desktop-client false positive
+
+A Greek clinical-software vendor's desktop activator phones home from many
+residential IPs without sending `User-Agent`, `Accept`, or `Referer`. It
+trips `rule_bad_ua` (`waf_rule_id=201`, reason `WAF_BAD_UA:UA_EMPTY+NO_ACCEPT+NO_REFERER:score=4`)
+on every check-in. The traffic is legit; the rule is doing exactly what it
+should for everyone *else*.
+
+Right answer — narrow path-scoped exclusion of just rule 201:
+
+```
+cfm webtop waf exclude add /plexusnet/updates_v4/plexus4activator.php --type path --rule 201
+```
+
+Now `rule_bad_ua` keeps firing on every other URL on every other vhost, the
+activator URL stops being challenged, and the rest of the WAF still inspects
+the request (SQLi, RCE, upload rules, etc. all still apply). Confirm with:
+
+```
+cfm webtop waf exclude list
+```
+
+Wrong answers, for reference:
+- `cfm webtop waf exclude add www.iqdevelopment.gr --type host` — disables the **entire WAF** for that vhost. Way too broad.
+- `cfm webtop waf set rule_bad_ua disabled` — disables rule 201 globally. Worse.
+- Editing the Lua detector — rule 201's bot signal is correct in general; the fix is operator-side configuration.
 
 ### API
 
-`POST /api/v1/exclude` accepts `rule_ids` as a CSV string in the same spec format. Empty / missing → whole-WAF entry.
+```
+GET  /api/v1/waf/exclude/list
+POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317]
+POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201
+```
 
-`GET /api/v1/exclude` returns each entry's `rule_ids` (sorted, deduped) when set; the field is omitted otherwise.
+`rule_ids` is a CSV string in the same spec format as `--rule`. Empty / missing → whole-WAF entry.
+
+`GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) when set; the field is omitted otherwise.
 
 ### Lua wiring
 
