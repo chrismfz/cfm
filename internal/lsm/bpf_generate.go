@@ -22,4 +22,4 @@
 // See docs/cfm-lsm.md (Architecture → Build model) for the rationale.
 package lsm
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -Wall -Werror -I./bpf" cfmlsm bpf/memfd_exec.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -Wall -Werror -I./bpf" cfmlsm bpf/cfmlsm.bpf.c

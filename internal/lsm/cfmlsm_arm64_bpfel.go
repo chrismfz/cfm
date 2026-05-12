@@ -55,6 +55,7 @@ type cfmlsmSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
 	CfmMemfdExec *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmRevshell  *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
 
 // cfmlsmMapSpecs contains maps before they are loaded into the kernel.
@@ -110,11 +111,13 @@ type cfmlsmVariables struct {
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
 	CfmMemfdExec *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmRevshell  *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
 func (p *cfmlsmPrograms) Close() error {
 	return _CfmlsmClose(
 		p.CfmMemfdExec,
+		p.CfmRevshell,
 	)
 }
 
