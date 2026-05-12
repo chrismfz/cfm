@@ -220,6 +220,49 @@ useradd --system --gid cfm --no-create-home \
 
 The `cfm` group is required for the SSLCollector unix socket and token file to be readable by OpenResty/Angie workers. The cfm daemon logs a warning at startup if the group is missing and the socket server is enabled.
 
+#### Build-time dependencies
+
+**Default `go build` — no new tools.** The standard build path is
+`make build` / `go build` with `CGO_ENABLED=0`. It does not need
+clang, libbpf-dev, or kernel headers. cfm-lsm's BPF objects are
+**pre-compiled and committed** to the repo as `.o` files; `go build`
+embeds them via `go:embed`. End users, distro packagers, and CI all
+work with stock Go.
+
+**Contributors who change BPF C — additional tools.** Only required
+when editing files under `internal/lsm/bpf/*.bpf.c` (or the shared
+`vmlinux.h` / `common.bpf.h`). To regenerate the BPF objects after
+such a change:
+
+| Tool | Version | Used for |
+|---|---|---|
+| `clang` | ≥ 11 (12+ recommended) | Compiles the BPF C sources via `go generate` |
+| `libbpf-dev` (Debian/Ubuntu) / `libbpf-devel` (EL) | ≥ 0.8 | Provides `<bpf/bpf_helpers.h>` and friends |
+| `bpftool` | ≥ 5.10 | Optional — only needed to regenerate `vmlinux.h` from a real `/sys/kernel/btf/vmlinux`. The MVP ships a hand-written minimal `vmlinux.h` so `bpftool` is not in the critical path. |
+
+Regenerate with:
+
+```bash
+# Debian/Ubuntu
+apt install clang libbpf-dev linux-tools-common
+
+go generate ./internal/lsm/...
+git add internal/lsm/cfmlsm_*_bpfel.{go,o}
+```
+
+The four generated artifacts
+(`cfmlsm_x86_bpfel.{go,o}`, `cfmlsm_arm64_bpfel.{go,o}`) are
+committed alongside the BPF C sources. Reviewers can sanity-check
+that a `go generate` against the same `clang` version produces a
+matching diff.
+
+**Runtime, not build-time.** Loading the compiled BPF programs at
+runtime needs `CONFIG_BPF_LSM=y`, `bpf` listed in
+`/sys/kernel/security/lsm`, a `/sys/kernel/btf/vmlinux` BTF, and
+`CAP_BPF` + `CAP_PERFMON` (or `CAP_SYS_ADMIN`). Run `cfm lsm status`
+to audit fleet readiness — see [`docs/cfm-lsm.md`](docs/cfm-lsm.md)
+for the full preflight detail.
+
 ### nftlib-only deployment requirement clarity
 
 For `CFM_FIREWALL_ENGINE=nftlib`, all mutation and feed-management paths are zero-fork (pure netlink). Structured inspection (`ListTableJSON`, `ListSetJSON`) is also native.

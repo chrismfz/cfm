@@ -130,6 +130,20 @@ build: ## Build the binary into ./bin/
 		-o $(BINARY) ./$(MAIN_DIR)
 	@echo "✅ Built: $(BINARY)"
 
+bpf: ## Regenerate cfm-lsm BPF objects (contributors only; needs clang + libbpf-dev)
+	@command -v clang >/dev/null 2>&1 || { \
+	  echo "✗ clang not found. apt install clang  /  dnf install clang"; exit 1; }
+	@test -f /usr/include/bpf/bpf_helpers.h \
+	  || test -f /usr/include/x86_64-linux-gnu/bpf/bpf_helpers.h \
+	  || { echo "✗ libbpf headers missing. apt install libbpf-dev  /  dnf install libbpf-devel"; exit 1; }
+	@echo "→ Regenerating cfm-lsm BPF objects via bpf2go"
+	go generate ./internal/lsm/...
+	@echo "✅ BPF objects regenerated. Review the diff:"
+	@echo "    git status -- internal/lsm/cfmlsm_*.o internal/lsm/cfmlsm_*.go"
+	@echo "    git diff   -- internal/lsm/cfmlsm_*.go"
+	@echo "Commit the regenerated artifacts alongside your .bpf.c changes so"
+	@echo "downstream builds (go build, deb, rpm) keep working without clang."
+
 run: build ## Run the application
 	@./$(BINARY)
 
