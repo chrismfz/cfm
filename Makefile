@@ -132,10 +132,17 @@ build: ## Build the binary into ./bin/
 
 bpf: ## Regenerate cfm-lsm BPF objects (contributors only; needs clang + libbpf-dev)
 	@command -v clang >/dev/null 2>&1 || { \
-	  echo "✗ clang not found. apt install clang  /  dnf install clang"; exit 1; }
+	  echo "✗ clang not found."; \
+	  echo "    Debian/Ubuntu:           apt install clang"; \
+	  echo "    EL10 (Alma/Rocky/CS10):  dnf install epel-release && dnf install clang18"; \
+	  echo "    EL9  (Alma/Rocky/CS9):   dnf install epel-release && dnf install clang"; \
+	  exit 1; }
 	@test -f /usr/include/bpf/bpf_helpers.h \
 	  || test -f /usr/include/x86_64-linux-gnu/bpf/bpf_helpers.h \
-	  || { echo "✗ libbpf headers missing. apt install libbpf-dev  /  dnf install libbpf-devel"; exit 1; }
+	  || { echo "✗ libbpf headers missing."; \
+	       echo "    Debian/Ubuntu: apt install libbpf-dev"; \
+	       echo "    EL9 / EL10:    dnf config-manager --set-enabled crb && dnf install libbpf-devel"; \
+	       exit 1; }
 	@echo "→ Regenerating cfm-lsm BPF objects via bpf2go"
 	go generate ./internal/lsm/...
 	@echo "✅ BPF objects regenerated. Review the diff:"
