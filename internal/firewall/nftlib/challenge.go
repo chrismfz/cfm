@@ -782,6 +782,44 @@ func (b *Backend) cleanupChallengeRedirectUnlocked(family, table string) error {
 	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceChallenge)
 }
 
+// EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules in
+// inet cfm/input for whatever unconditional (edge) web DNAT is currently
+// active. No-op when the DNAT table is absent or no edge rules are present.
+// Safe to call repeatedly; intended to run after ApplyPortsPolicy so the
+// accepts survive the drop-rule rewrite.
+func (b *Backend) EnsureDNATAccepts() error {
+	family, table := dnatDefaults("", "")
+	b.mu.Lock()
+	t, ch, err := b.getDNATTableAndChain(family, table)
+	if err != nil || ch == nil {
+		b.mu.Unlock()
+		return err
+	}
+	rules, err := b.conn.GetRules(t, ch)
+	b.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	wanted := make([]dnatRuleSpec, 0, 3)
+	for _, r := range rules {
+		if !managedDNATRule(r.UserData) || !dnatRuleInNamespace(r, dnatRuleNamespaceEdge) {
+			continue
+		}
+		spec, ok := parseDNATRuleSpecID(string(r.UserData))
+		if !ok {
+			continue
+		}
+		if spec.sourceSet != "" {
+			continue
+		}
+		wanted = append(wanted, spec)
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(dnatRuleNamespaceEdge), wanted)
+}
+
 func (b *Backend) DNATOff(family, table string) (err error) {
 	start := time.Now()
 	b.logPhase("DNATOff", "start", 0, nil, "")

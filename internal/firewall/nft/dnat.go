@@ -175,6 +175,83 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	return b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority()))
 }
 
+// parseDNATListenerPorts scans the `list table inet cfm_redirect` output for
+// the unconditional listener rules created by dnatScript and returns the
+// post-DNAT http/https ports. Returns (0, 0, false) if either is missing.
+func parseDNATListenerPorts(out string) (httpPort, httpsPort int, ok bool) {
+	for _, line := range strings.Split(out, "\n") {
+		norm := strings.TrimSpace(strings.ReplaceAll(line, `"`, ""))
+		if !strings.Contains(norm, "dnat to ") {
+			continue
+		}
+		fields := strings.Fields(norm)
+		// expected forms:
+		//   tcp dport 80  dnat to :9080
+		//   tcp dport 443 dnat to :9043
+		//   udp dport 443 dnat to :9043
+		if len(fields) < 6 {
+			continue
+		}
+		if fields[1] != "dport" {
+			continue
+		}
+		from, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		var target string
+		for i := 3; i+1 < len(fields); i++ {
+			if fields[i] == "to" {
+				target = fields[i+1]
+				break
+			}
+		}
+		if target == "" {
+			continue
+		}
+		// drop leading host (e.g. ":9080", "127.0.0.1:9080")
+		if idx := strings.LastIndex(target, ":"); idx >= 0 {
+			target = target[idx+1:]
+		}
+		to, err := strconv.Atoi(target)
+		if err != nil || to <= 0 || to > 65535 {
+			continue
+		}
+		switch from {
+		case 80:
+			if fields[0] == "tcp" {
+				httpPort = to
+			}
+		case 443:
+			if fields[0] == "tcp" || fields[0] == "udp" {
+				// tcp+udp both target the same https listener; either is fine.
+				httpsPort = to
+			}
+		}
+	}
+	return httpPort, httpsPort, httpPort > 0 && httpsPort > 0
+}
+
+// EnsureDNATAccepts re-asserts the scoped `ct status dnat` accepts in the
+// inet cfm input chain when web DNAT is active. No-op when the cfm_redirect
+// table is absent. Safe to call repeatedly; intended to run after
+// ApplyPortsPolicy so the accepts survive the drop-rule rewrite.
+func (b *Backend) EnsureDNATAccepts() error {
+	fam, tbl := dnatDefaults("", "")
+	if !b.dnatTableExists(fam, tbl) {
+		return nil
+	}
+	show, err := b.nftOut(fmt.Sprintf("list table %s %s", fam, tbl))
+	if err != nil {
+		return nil
+	}
+	httpPort, httpsPort, ok := parseDNATListenerPorts(show)
+	if !ok {
+		return nil
+	}
+	return b.ensureScopedDNATAccepts(httpPort, httpsPort)
+}
+
 func (b *Backend) DNATOff(fam, tbl string) (err error) {
 	start := time.Now()
 	b.logPhase("DNATOff", "start", 0, nil, "")

@@ -1007,6 +1007,24 @@ func runDaemon(args []string) {
 		}
 		logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
+		// ApplyPortsPolicy rewrites the default-drop rules at the end of the
+		// input chain. Re-assert the scoped `ct status dnat` accepts that
+		// `cfm dnat on` / `cfm dnat cpanel on` installed so DNAT-translated
+		// traffic to listener ports (e.g. 9080/9043/12082..) continues to be
+		// accepted without needing those ports in TCP_IN.
+		if err := be.EnsureDNATAccepts(); err != nil {
+			fmt.Fprintln(os.Stderr, "ensure dnat accepts error:", err)
+		}
+		if on, _, perr := be.PanelDNATStatus(); perr == nil && on {
+			if changes, err := be.EnsurePanelDNATAccepts(); err != nil {
+				fmt.Fprintln(os.Stderr, "ensure panel dnat accepts error:", err)
+			} else if len(changes) > 0 {
+				for _, ch := range changes {
+					logging.Logf("[ports] panel dnat reassert: %s", ch)
+				}
+			}
+		}
+
 		if cfg.SMTPBlock.Enabled {
 			if err := be.ApplySMTPBlock(&cfg.SMTPBlock); err != nil {
 				fmt.Fprintln(os.Stderr, "smtpblock apply error:", err)
