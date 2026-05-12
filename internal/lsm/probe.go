@@ -82,14 +82,25 @@ func RunProbeOnce(observe time.Duration) ProbeResult {
 
 	conf, _ := loadStatusConf()
 
+	availability := map[PolicyID]PolicyAvailability{}
+	for _, pa := range pf.PolicyAvailability {
+		availability[pa.PolicyID] = pa
+	}
+
 	// Build the policy subset from lsm.conf: any policy with a
-	// non-disabled mode is included. If every policy is disabled,
-	// the probe skips the attach step.
+	// non-disabled mode is included unless optional preflight marked it
+	// unavailable. If every policy is disabled/unavailable, the probe
+	// skips the attach step.
 	var policies []PolicyID
 	for _, p := range AllPolicies() {
-		if conf.ModeFor(p.ID) != ModeDisabled {
-			policies = append(policies, p.ID)
+		if conf.ModeFor(p.ID) == ModeDisabled {
+			continue
 		}
+		if pa, ok := availability[p.ID]; ok && !pa.Available {
+			res.Failed[p.ID] = errors.New(pa.Reason)
+			continue
+		}
+		policies = append(policies, p.ID)
 	}
 	if len(policies) == 0 {
 		return res

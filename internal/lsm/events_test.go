@@ -20,7 +20,7 @@ func buildWireEvent(t *testing.T, policyID, pid, tgid, uid, gid uint32, ts uint6
 	le.PutUint32(buf[16:20], tgid)
 	le.PutUint32(buf[20:24], uid)
 	le.PutUint32(buf[24:28], gid)
-	// buf[28:32] _pad stays zero
+	// buf[28:32] op + flags + pad stays zero
 	copy(buf[32:32+bpfTaskCommLen], comm)
 	copy(buf[48:48+bpfFilenameLen], filename)
 	return buf
@@ -28,8 +28,8 @@ func buildWireEvent(t *testing.T, policyID, pid, tgid, uid, gid uint32, ts uint6
 
 func TestParseEvent_MemfdExec(t *testing.T) {
 	raw := buildWireEvent(t,
-		bpfPolicyMemfdExec, /* pid */ 12345, /* tgid */ 12345,
-		/* uid */ 1001, /* gid */ 1001, /* ts */ 999_888_777,
+		bpfPolicyMemfdExec /* pid */, 12345 /* tgid */, 12345,
+		/* uid */ 1001 /* gid */, 1001 /* ts */, 999_888_777,
 		"php-fpm", "memfd:payload",
 	)
 	ev, err := parseEvent(raw)
@@ -72,6 +72,21 @@ func TestParseEvent_TrimsTrailingNUL(t *testing.T) {
 	}
 	if ev.Filename != "memfd:x" {
 		t.Errorf("Filename: got %q, want %q (everything after NUL must be dropped)", ev.Filename, "memfd:x")
+	}
+}
+
+func TestParseEvent_DirectCredInstall(t *testing.T) {
+	raw := buildWireEvent(t, bpfPolicyDirectCred, 77, 77, 1000, 1000, 123, "exploit", "php-fpm")
+	raw[29] = EventFlagDirectCredInstall
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyDirectCredInstall {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyDirectCredInstall)
+	}
+	if ev.Flags&EventFlagDirectCredInstall == 0 {
+		t.Fatalf("direct credential flag missing: flags=%08b", ev.Flags)
 	}
 }
 
@@ -124,6 +139,12 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	}
 	if bpfPolicyReverseShell != 3 {
 		t.Errorf("bpfPolicyReverseShell mismatch: Go=%d, BPF=3 (see common.bpf.h)", bpfPolicyReverseShell)
+	}
+	if bpfPolicyCredEscal != 7 {
+		t.Errorf("bpfPolicyCredEscal mismatch: Go=%d, BPF=7 (see common.bpf.h)", bpfPolicyCredEscal)
+	}
+	if bpfPolicyDirectCred != 9 {
+		t.Errorf("bpfPolicyDirectCred mismatch: Go=%d, BPF=9 (see common.bpf.h)", bpfPolicyDirectCred)
 	}
 }
 

@@ -29,6 +29,7 @@ type stubProc struct {
 	lsmList     string // /sys/kernel/security/lsm contents
 	btfPresent  bool
 	procStatus  string // /proc/self/status contents
+	kallsyms    string // /proc/kallsyms contents
 
 	// bpffsMountpoint, when non-empty, is the mountpoint to inject
 	// into the fake /proc/mounts with fstype "bpf". Defaults to
@@ -49,6 +50,12 @@ func (s stubProc) install(t *testing.T) {
 
 	// /proc/self/status
 	statusPath := writeFile(t, tmp, "proc/self/status", s.procStatus)
+
+	kallsyms := s.kallsyms
+	if kallsyms == "" {
+		kallsyms = "0000000000000000 T commit_creds\n"
+	}
+	kallsymsPath := writeFile(t, tmp, "proc/kallsyms", kallsyms)
 
 	// /proc/config.gz (optional)
 	configGzPath := filepath.Join(tmp, "proc/config.gz")
@@ -97,6 +104,7 @@ func (s stubProc) install(t *testing.T) {
 	prevStatus := preflightProcSelfStatus
 	prevMounts := preflightProcMounts
 	prevBPFFSPath := preflightBPFFSPath
+	prevKallsyms := preflightProcKallsyms
 
 	preflightProcVersionPath = procVerPath
 	preflightProcConfigGzPath = configGzPath
@@ -105,6 +113,7 @@ func (s stubProc) install(t *testing.T) {
 	preflightBTFPath = btfPath
 	preflightProcSelfStatus = statusPath
 	preflightProcMounts = mountsPath
+	preflightProcKallsyms = kallsymsPath
 	if s.bpffsMountpoint != "" {
 		preflightBPFFSPath = s.bpffsMountpoint
 	}
@@ -118,6 +127,7 @@ func (s stubProc) install(t *testing.T) {
 		preflightProcSelfStatus = prevStatus
 		preflightProcMounts = prevMounts
 		preflightBPFFSPath = prevBPFFSPath
+		preflightProcKallsyms = prevKallsyms
 	})
 }
 
@@ -385,7 +395,7 @@ func TestPreflight_NoCaps(t *testing.T) {
 func TestPreflight_ConfigUnknownWithNoFiles(t *testing.T) {
 	// /proc/config.gz absent, /boot/config-<release> absent → UNKNOWN
 	stub := stubProc{
-		procVersion:     "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		procVersion: "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
 		// bootConfig empty
 		lsmList:         "lockdown,bpf",
 		btfPresent:      true,
@@ -471,5 +481,46 @@ func TestProcMountsHasBPFFS(t *testing.T) {
 				t.Errorf("procMountsHasBPFFS: got %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPreflight_DirectCredPolicyUnavailableDoesNotFailComponent(t *testing.T) {
+	stub := stubProc{
+		procVersion:     "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		bootConfig:      "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
+		lsmList:         "lockdown,capability,landlock,yama,apparmor,bpf",
+		btfPresent:      true,
+		procStatus:      "Name:\tcfm\nCapEff:\t000001ffffffffff\n",
+		bpffsMountpoint: "/sys/fs/bpf",
+		kallsyms:        "0000000000000000 T unrelated_symbol\n",
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if !pf.OK {
+		t.Fatalf("optional policy unavailability must not fail component preflight: %+v", pf)
+	}
+	if len(pf.PolicyAvailability) == 0 {
+		t.Fatal("expected per-policy availability results")
+	}
+	got := pf.PolicyAvailability[0]
+	if got.PolicyID != PolicyDirectCredInstall {
+		t.Fatalf("availability policy = %s, want %s", got.PolicyID, PolicyDirectCredInstall)
+	}
+	if got.Available {
+		t.Fatal("CFML-CRED-003 should be unavailable when commit_creds is absent from kallsyms")
+	}
+	if got.Reason == "" {
+		t.Fatal("unavailable policy should include a reason")
+	}
+}
+
+func TestKallsymsHasSymbol(t *testing.T) {
+	body := "0000000000000000 T prepare_creds\n0000000000000000 T commit_creds\n"
+	if !kallsymsHasSymbol(body, "commit_creds") {
+		t.Fatal("expected commit_creds to be found")
+	}
+	if kallsymsHasSymbol(body, "not_commit_creds") {
+		t.Fatal("unexpected symbol match")
 	}
 }

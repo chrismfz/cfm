@@ -10,6 +10,7 @@
  * --------
  *   cfm_memfd_exec  — CFML-EXEC-001 (memfd exec detector)
  *   cfm_revshell    — CFML-EXEC-003 (reverse-shell-pattern detector)
+ *   cfm_cred003     — CFML-CRED-003 (direct root cred install detector)
  *
  * Both hook bprm_check_security and default to monitor mode. Per
  * docs/cfm-lsm.md the enforce-mode flip happens via a bpf2go
@@ -740,9 +741,8 @@ int BPF_PROG(cfm_fs005_setxattr, struct mnt_idmap *idmap, struct dentry *dentry,
  *
  * Scope note: task_fix_setuid does NOT fire when a kernel exploit
  * installs creds directly via commit_creds() / prepare_kernel_cred()
- * without going through a userspace setuid syscall. That class is
- * tracked as a known gap in docs/cfm-lsm.md — a kprobe on
- * commit_creds is the canonical fix and is a separate follow-up.
+ * without going through a userspace setuid syscall. CFML-CRED-003
+ * complements this hook with monitor-only commit_creds telemetry.
  *
  * Mode: monitor ONLY. Returning -EPERM from this hook can deadlock
  * systemd helpers and pkexec mid-transition. CRED-002's value is
@@ -755,6 +755,81 @@ struct {
     __type(key, struct cfm_inode_key);
     __type(value, __u8);
 } cfm_setuid_inodes SEC(".maps");
+
+struct cfm_cred_transition_state {
+    __u64 task_fix_setuid_cred;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, __u32);
+    __type(value, struct cfm_cred_transition_state);
+} cfm_cred_transition_tasks SEC(".maps");
+
+static __always_inline void cfm_mark_task_fix_setuid_cred(struct task_struct *task,
+                                                          const struct cred *new)
+{
+    if (!task || !new)
+        return;
+
+    struct cfm_cred_transition_state *state =
+        bpf_task_storage_get(&cfm_cred_transition_tasks, task, 0,
+                             BPF_LOCAL_STORAGE_GET_F_CREATE);
+    if (state)
+        state->task_fix_setuid_cred = (__u64)new;
+}
+
+static __always_inline bool cfm_task_fix_setuid_expected(struct task_struct *task,
+                                                         const struct cred *new)
+{
+    if (!task || !new)
+        return false;
+
+    struct cfm_cred_transition_state *state =
+        bpf_task_storage_get(&cfm_cred_transition_tasks, task, 0, 0);
+    if (!state)
+        return false;
+
+    bool match = state->task_fix_setuid_cred == (__u64)new;
+    if (match)
+        state->task_fix_setuid_cred = 0;
+    return match;
+}
+
+static __always_inline void cfm_cred_emit(__u32 policy_id, __u8 flags, struct file *exe)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = policy_id;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    struct dentry *exe_dentry = exe ? BPF_CORE_READ(exe, f_path.dentry) : NULL;
+    const unsigned char *name = NULL;
+    if (exe_dentry)
+        name = BPF_CORE_READ(exe_dentry, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
 
 SEC("lsm/task_fix_setuid")
 int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
@@ -776,6 +851,10 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
     if (!task)
         return 0;
 
+    /* Let CFML-CRED-003 distinguish syscall-mediated setuid-family
+     * transitions from direct commit_creds() installs. */
+    cfm_mark_task_fix_setuid_cred(task, new);
+
     struct mm_struct *mm = BPF_CORE_READ(task, mm);
     if (!mm)
         return 0;
@@ -794,39 +873,62 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
         return 0;
 
     /* Match. Emit event. Never block (monitor-only by design). */
-    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
-    if (!e)
+    cfm_cred_emit(CFM_LSM_POLICY_CRED_ESCAL, 0, exe);
+    return 0; /* monitor-only by design */
+}
+
+/* ------------------------------------------------------------------- *
+ * CFML-CRED-003 — Direct root credential install.
+ *
+ * Hook: fentry/commit_creds
+ *
+ * Mechanism: compare the current task's active credentials (old) with
+ * the cred pointer being passed to commit_creds() (new). Alert only on
+ * non-root → root transitions where uid/euid become 0 and the new cred
+ * pointer was not just observed by task_fix_setuid. That makes this
+ * complementary to CFML-CRED-002: CRED-002 covers setuid-family syscall
+ * paths, while CRED-003 covers direct commit_creds() completion paths
+ * used by kernel exploits.
+ *
+ * Mode: monitor ONLY. fentry tracing is telemetry, not an LSM decision
+ * hook, so this program never attempts enforcement.
+ * ------------------------------------------------------------------- */
+
+SEC("fentry/commit_creds")
+int BPF_PROG(cfm_cred003, struct cred *new)
+{
+    if (!new)
         return 0;
 
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u64 uid_gid  = bpf_get_current_uid_gid();
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (!task)
+        return 0;
 
-    e->ts_ns     = bpf_ktime_get_ns();
-    e->policy_id = CFM_LSM_POLICY_CRED_ESCAL;
-    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
-    e->tgid      = (__u32)(pid_tgid >> 32);
-    e->uid       = (__u32)(uid_gid & 0xffffffffu);
-    e->gid       = (__u32)(uid_gid >> 32);
-    e->op        = 0;
-    e->flags     = 0;  /* reserved for future: old_euid byte */
-    e->_pad1     = 0;
-    e->_pad2     = 0;
+    const struct cred *old = BPF_CORE_READ(task, cred);
+    if (!old)
+        return 0;
 
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    __u32 old_uid = BPF_CORE_READ(old, uid.val);
+    __u32 old_euid = BPF_CORE_READ(old, euid.val);
+    __u32 new_uid = BPF_CORE_READ(new, uid.val);
+    __u32 new_euid = BPF_CORE_READ(new, euid.val);
 
-    /* Filename: the executable inode that took the cred. Operator
-     * uses this to identify the offending binary in forensics. */
-    struct dentry *exe_dentry = BPF_CORE_READ(exe, f_path.dentry);
-    const unsigned char *name = NULL;
-    if (exe_dentry)
-        name = BPF_CORE_READ(exe_dentry, d_name.name);
-    if (name)
-        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
-    else
-        e->filename[0] = '\0';
+    /* Only suspicious: non-root current task installing root creds. */
+    if (new_uid != 0 || new_euid != 0)
+        return 0;
+    if (old_uid == 0 || old_euid == 0)
+        return 0;
 
-    bpf_ringbuf_submit(e, 0);
-    return 0; /* monitor-only by design */
+    /* task_fix_setuid already saw this exact cred pointer, so leave it
+     * to CFML-CRED-002 and avoid duplicate telemetry. */
+    if (cfm_task_fix_setuid_expected(task, new))
+        return 0;
+
+    struct mm_struct *mm = BPF_CORE_READ(task, mm);
+    struct file *exe = mm ? BPF_CORE_READ(mm, exe_file) : NULL;
+
+    cfm_cred_emit(CFM_LSM_POLICY_DIRECT_CRED, CFM_LSM_F_DIRECT_CRED_INSTALL, exe);
+    return 0;
 }
 
 char LICENSE[] SEC("license") = "GPL";

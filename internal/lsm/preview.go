@@ -41,7 +41,7 @@ func RunPreview(w io.Writer) int {
 		fmt.Fprintf(w, "  %s  %s\n", p.ID, p.Title)
 		fmt.Fprintf(w, "    hook:    %s\n", p.Hook)
 		fmt.Fprintf(w, "    mode:    %s\n", mode)
-		fmt.Fprintf(w, "    action:  %s\n", describePreviewAction(pf, conf, mode))
+		fmt.Fprintf(w, "    action:  %s\n", describePreviewAction(pf, conf, mode, p.ID))
 		fmt.Fprintln(w)
 	}
 
@@ -51,12 +51,15 @@ func RunPreview(w io.Writer) int {
 	return 0
 }
 
-func describePreviewAction(pf Preflight, conf *Conf, mode Mode) string {
+func describePreviewAction(pf Preflight, conf *Conf, mode Mode, id PolicyID) string {
 	if !conf.Enabled {
 		return "skip — cfm-lsm globally disabled in lsm.conf (set `enabled = true` to activate)"
 	}
 	if !pf.OK {
 		return "skip — preflight failed; see `cfm lsm status`"
+	}
+	if reason, unavailable := unavailablePolicyReason(pf, id); unavailable {
+		return "skip — policy unavailable on this kernel: " + reason
 	}
 	switch mode {
 	case ModeDisabled:

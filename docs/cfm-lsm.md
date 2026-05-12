@@ -2,9 +2,10 @@
 
 ## Status
 
-**Four policies shipping. Monitor mode by default; enforce opt-in
-for EXEC-001 / EXEC-003 / FS-005. CRED-002 is monitor-only by
-design (cred-install enforce can deadlock systemd).**
+**Five policies shipping. Monitor mode by default; enforce opt-in
+for EXEC-001 / EXEC-003 / FS-005. CRED-002 and CRED-003 are
+monitor-only by design (credential telemetry is not a safe blocking
+point).**
 
 Catalog:
 
@@ -12,6 +13,7 @@ Catalog:
 - `CFML-EXEC-003` — Reverse shell pattern
 - `CFML-FS-005`   — Sensitive-file modification by web user
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
+- `CFML-CRED-003` — Direct root credential install *(monitor-only)*
 
 Companion kernsec rule `KSEC-LSM-bpf-001` merges `bpf` into the
 operator's existing `lsm=` boot argument when forced in
@@ -54,14 +56,15 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All four policies default to monitor mode — matches are logged and
+All five policies default to monitor mode — matches are logged and
 notified but the syscall proceeds. Enforce mode (return `-EPERM` on
 a match, failing the calling process's syscall) is **available but
 opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, and `CFML-FS-005`;
-`CFML-CRED-002` is monitor-only by design (returning -EPERM from
-the cred-install hook can deadlock systemd helpers and pkexec
-mid-transition; enable.go and lifecycle.go both downgrade an
-enforce setting to monitor with a warning). Set `mode = enforce`
+`CFML-CRED-002` and `CFML-CRED-003` are monitor-only by design
+(returning -EPERM from credential hooks can deadlock systemd helpers
+and pkexec mid-transition, and CRED-003 is fentry telemetry rather
+than an LSM decision point; enable.go and lifecycle.go both downgrade
+an enforce setting to monitor with a warning). Set `mode = enforce`
 in `/etc/cfm/lsm.conf` and restart cfm (or run `cfm lsm disable`
 then re-enable). The mechanism is a `volatile const` global in the
 BPF program rewritten at load time via `cilium/ebpf`'s
@@ -85,14 +88,16 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: four shipping LSM policies
+The scope here is intentionally narrow: five shipping policies
 covering exec (CFML-EXEC-001 / CFML-EXEC-003), sensitive-file write
-(CFML-FS-005), and post-setuid credential transitions
-(CFML-CRED-002). The MVP shipped with EXEC-001 + EXEC-003 only;
-FS-005 + CRED-002 landed as the next-policies pass once the MVP's
-verifier and pinning behaviour proved stable on EL10. Anything
-beyond these four requires a separate, named proposal — not a TODO
-inside this doc.
+(CFML-FS-005), post-setuid credential transitions (CFML-CRED-002),
+and direct root credential installs (CFML-CRED-003). The MVP shipped
+with EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the
+next-policies pass once the MVP's verifier and pinning behaviour
+proved stable on EL10. CRED-003 closes the documented direct
+`commit_creds()` gap as monitor-only telemetry. Anything beyond
+these five requires a separate, named proposal — not a TODO inside
+this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
 existing CFM daemon at `internal/lsm/`, loading CO-RE BPF LSM programs
@@ -329,9 +334,8 @@ syscall paths *after* the new cred's uid fields have been written,
 so the comparison is meaningful. The narrower hook does mean
 CRED-002 does not catch kernel exploits that install creds directly
 via `commit_creds(prepare_kernel_cred(NULL))` without going through
-a userspace setuid syscall; that class is tracked as a known gap
-and is a follow-up (a kprobe on `commit_creds` is the canonical
-fix).
+a userspace setuid syscall; `CFML-CRED-003` is the complementary
+monitor-only rule for that direct install path.
 
 **Monitor-only by design.** Returning `-EPERM` from the cred-install
 path can deadlock systemd helpers and pkexec mid-transition (kernel
@@ -340,6 +344,39 @@ The value is in the alert, not the block. `cfm lsm enable` silently
 downgrades a `mode = enforce` setting on this policy to `monitor`
 with a clear warning, so an operator who copies an enforce setting
 from a different policy still gets safe behaviour.
+
+
+### `CFML-CRED-003` — Direct root credential install
+
+| | |
+|---|---|
+| Hook | `fentry/commit_creds` (optional per-policy telemetry; skipped when unavailable) |
+| Default mode | `monitor` (only) |
+| FP risk | Low — emits only for non-root current credentials installing uid/euid 0 and suppresses transitions already observed by `task_fix_setuid` |
+| Perf impact | Cold — fires on credential commits only; event path is gated by simple uid comparisons |
+
+**Description.** A tracing program attaches to `commit_creds` and compares
+the current task's active credential state with the credential pointer being
+installed. It emits only when a non-root task (`old.uid != 0` and
+`old.euid != 0`) installs root credentials (`new.uid == 0` and
+`new.euid == 0`). The BPF side marks credential pointers observed by
+`task_fix_setuid`; if `commit_creds` receives that exact pointer, CRED-003
+suppresses its event and leaves the transition to `CFML-CRED-002`. This
+keeps CRED-003 focused on direct credential installation paths that bypass
+`task_fix_setuid`, such as kernel exploit payloads that call
+`commit_creds(prepare_kernel_cred(NULL))`.
+
+**Relationship to CRED-002.** CRED-002 is the setuid-family syscall view:
+it has old/new credentials from the LSM hook and can apply the setuid-binary
+inode whitelist. CRED-003 is the direct install view: it sees the final
+`commit_creds` call even when no setuid syscall LSM hook fired. The rules are
+therefore complementary rather than replacements. Operators should enable both
+in monitor mode when investigating privilege-escalation attempts.
+
+**Monitor-only by design.** `fentry/commit_creds` is telemetry, not an LSM
+decision hook, so CRED-003 never blocks. If a kernel does not expose a usable
+`commit_creds` tracing target, preflight reports only `CFML-CRED-003` as
+unavailable; the rest of cfm-lsm remains usable and can still attach.
 
 **Companion kernsec rule.** `KSEC-LSM-bpf-001` (in `internal/kernsec/`)
 appends `bpf` to the operator's existing `lsm=` boot argument when
@@ -635,7 +672,11 @@ and a specific remediation hint:
    exists for the rare stripped-down host.
 
 Preflight is read-only and can be run by anyone at any time —
-it does not touch the kernel.
+it does not touch the kernel. Optional per-policy probes are reported
+separately from component-wide preflight. Today that means
+`CFML-CRED-003` checks whether `commit_creds` is visible as a tracing
+target; if it is unavailable, `cfm lsm status` reports that policy as
+unavailable but does not mark the whole LSM component failed.
 
 ### CLI surface
 
@@ -1227,6 +1268,9 @@ so we get cheap access to them.
   process-name allowlist:
   ```
   [policy "CFML-CRED-002"]
+  mode = monitor
+
+  [policy "CFML-CRED-003"]
   mode = monitor
   allow_comm = runc,containerd-shim,podman
   ```

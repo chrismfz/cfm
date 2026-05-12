@@ -5,14 +5,15 @@ import (
 	"testing"
 )
 
-// TestNewPoliciesRegistered confirms FS-005 and CRED-002 are in
+// TestNewPoliciesRegistered confirms FS-005 and credential policies are in
 // AllPolicies with reasonable metadata. A renamed PolicyID would
 // break every operator's lsm.conf — the test ensures the constants
 // stay stable.
 func TestNewPoliciesRegistered(t *testing.T) {
 	want := map[PolicyID]string{
-		PolicySensitiveWrite: "CFML-FS-005",
-		PolicyCredEscal:      "CFML-CRED-002",
+		PolicySensitiveWrite:    "CFML-FS-005",
+		PolicyCredEscal:         "CFML-CRED-002",
+		PolicyDirectCredInstall: "CFML-CRED-003",
 	}
 	got := map[PolicyID]bool{}
 	for _, p := range AllPolicies() {
@@ -123,19 +124,19 @@ func TestWireEventSize_StableAfterOpField(t *testing.T) {
 
 func TestIsWebUserName(t *testing.T) {
 	cases := map[string]bool{
-		"apache":       true,
-		"nginx":        true,
-		"www-data":     true,
-		"http":         true,
-		"php":          true,
-		"lsphp":        true,
-		"proxy":        true,
-		"alt-php-N81":  true,
+		"apache":          true,
+		"nginx":           true,
+		"www-data":        true,
+		"http":            true,
+		"php":             true,
+		"lsphp":           true,
+		"proxy":           true,
+		"alt-php-N81":     true,
 		"alt-php-fpm-N81": true,
-		"root":         false,
-		"systemd":      false,
-		"random":       false,
-		"":             false,
+		"root":            false,
+		"systemd":         false,
+		"random":          false,
+		"":                false,
 	}
 	for name, want := range cases {
 		if got := isWebUserName(name); got != want {

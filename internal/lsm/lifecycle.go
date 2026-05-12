@@ -174,6 +174,11 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	// would have built. Apply the CRED-002 enforce-downgrade so an
 	// operator who set mode=enforce on CRED-002 in lsm.conf still
 	// gets safe monitor-mode behaviour from the daemon-driven path.
+	availability := map[PolicyID]PolicyAvailability{}
+	for _, pa := range pf.PolicyAvailability {
+		availability[pa.PolicyID] = pa
+	}
+
 	var policies []PolicyID
 	modes := map[PolicyID]Mode{}
 	for _, p := range AllPolicies() {
@@ -181,12 +186,21 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 		if m == ModeDisabled {
 			continue
 		}
-		if p.ID == PolicyCredEscal && m == ModeEnforce {
-			logging.Logf("[lsm] auto-enable: CFML-CRED-002 enforce downgraded to monitor (cred-install enforce can deadlock systemd; see docs/cfm-lsm.md)")
+		if pa, ok := availability[p.ID]; ok && !pa.Available {
+			logging.Logf("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
+			continue
+		}
+		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
+			logging.Logf("[lsm] auto-enable: %s enforce downgraded to monitor (cred-install telemetry is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
 		policies = append(policies, p.ID)
 		modes[p.ID] = m
+	}
+
+	if len(policies) == 0 {
+		logging.Logf("[lsm] auto-enable skipped: no configured policies are available on this kernel")
+		return nil, false, errors.New("no configured policies available")
 	}
 
 	l, lerr := NewLoader(LoaderOptions{

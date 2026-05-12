@@ -13,6 +13,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type cfmlsmCfmCredTransitionState struct {
+	_                 structs.HostLayout
+	TaskFixSetuidCred uint64
+}
+
 type cfmlsmCfmInodeKey struct {
 	_   structs.HostLayout
 	Dev uint64
@@ -67,6 +72,7 @@ type cfmlsmSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
 	CfmCred002            *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
+	CfmCred003            *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
 	CfmFs005Create        *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
 	CfmFs005Link          *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec      *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
@@ -84,11 +90,12 @@ type cfmlsmProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmMapSpecs struct {
-	CfmEvents         *ebpf.MapSpec `ebpf:"cfm_events"`
-	CfmSetuidInodes   *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
-	CfmWatchedInodes  *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
-	CfmWatchedUids    *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
-	CfmWebOriginTasks *ebpf.MapSpec `ebpf:"cfm_web_origin_tasks"`
+	CfmCredTransitionTasks *ebpf.MapSpec `ebpf:"cfm_cred_transition_tasks"`
+	CfmEvents              *ebpf.MapSpec `ebpf:"cfm_events"`
+	CfmSetuidInodes        *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes       *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids         *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
+	CfmWebOriginTasks      *ebpf.MapSpec `ebpf:"cfm_web_origin_tasks"`
 }
 
 // cfmlsmVariableSpecs contains global variables before they are loaded into the kernel.
@@ -121,15 +128,17 @@ func (o *cfmlsmObjects) Close() error {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmMaps struct {
-	CfmEvents         *ebpf.Map `ebpf:"cfm_events"`
-	CfmSetuidInodes   *ebpf.Map `ebpf:"cfm_setuid_inodes"`
-	CfmWatchedInodes  *ebpf.Map `ebpf:"cfm_watched_inodes"`
-	CfmWatchedUids    *ebpf.Map `ebpf:"cfm_watched_uids"`
-	CfmWebOriginTasks *ebpf.Map `ebpf:"cfm_web_origin_tasks"`
+	CfmCredTransitionTasks *ebpf.Map `ebpf:"cfm_cred_transition_tasks"`
+	CfmEvents              *ebpf.Map `ebpf:"cfm_events"`
+	CfmSetuidInodes        *ebpf.Map `ebpf:"cfm_setuid_inodes"`
+	CfmWatchedInodes       *ebpf.Map `ebpf:"cfm_watched_inodes"`
+	CfmWatchedUids         *ebpf.Map `ebpf:"cfm_watched_uids"`
+	CfmWebOriginTasks      *ebpf.Map `ebpf:"cfm_web_origin_tasks"`
 }
 
 func (m *cfmlsmMaps) Close() error {
 	return _CfmlsmClose(
+		m.CfmCredTransitionTasks,
 		m.CfmEvents,
 		m.CfmSetuidInodes,
 		m.CfmWatchedInodes,
@@ -153,6 +162,7 @@ type cfmlsmVariables struct {
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
 	CfmCred002            *ebpf.Program `ebpf:"cfm_cred002"`
+	CfmCred003            *ebpf.Program `ebpf:"cfm_cred003"`
 	CfmFs005Create        *ebpf.Program `ebpf:"cfm_fs005_create"`
 	CfmFs005Link          *ebpf.Program `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec      *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
@@ -169,6 +179,7 @@ type cfmlsmPrograms struct {
 func (p *cfmlsmPrograms) Close() error {
 	return _CfmlsmClose(
 		p.CfmCred002,
+		p.CfmCred003,
 		p.CfmFs005Create,
 		p.CfmFs005Link,
 		p.CfmFs005MarkExec,
