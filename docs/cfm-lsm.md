@@ -20,10 +20,18 @@ daemon restarts, daemon crashes, and `systemctl stop cfm`. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-Both policies ship in monitor-only mode: matches are logged and
-notified but exec proceeds. The enforce-mode flip (return `-EPERM`)
-is held back until 30-day fleet telemetry confirms FP rates per the
-phased roadmap below.
+Both policies default to monitor mode — matches are logged and
+notified but exec proceeds. Enforce mode (return `-EPERM` on a
+match, failing the calling process's `execve()`) is **available
+but opt-in**: set `mode = enforce` in `/etc/cfm/lsm.conf` and
+re-run `cfm lsm enable`. The mechanism is a `volatile const`
+global in the BPF program rewritten at load time via
+`cilium/ebpf`'s `spec.Variables[name].Set()`, so enforce/monitor
+is baked into the program's instruction stream — one byte-compare
+per match path, no runtime branching cost. `cfm lsm enable`
+prompts for confirmation when any policy is enforce; `--yes`
+skips the prompt for unattended scripts. Recovery from a
+false-positive enforce block is one command: `cfm lsm disable`.
 
 This document supersedes an earlier broader draft that proposed a
 fifteen-policy BPF LSM component spanning exec, credential, filesystem,

@@ -121,6 +121,18 @@ type LoaderOptions struct {
 	// per-policy testing).
 	Policies []PolicyID
 
+	// Modes maps a policy ID to its enforcement mode. Rewritten into
+	// the BPF programs' `volatile const __u8 cfm_enforce_*` globals
+	// at load time via spec.RewriteConstants. Policies not present
+	// in this map default to monitor (0). Enforce mode (1) makes
+	// the BPF program return -EPERM on a match, blocking the exec.
+	//
+	// Once loaded, the mode is baked into the program's instruction
+	// stream — there is no runtime cost beyond a single byte compare.
+	// To change a policy's mode the operator must `cfm lsm disable`
+	// and re-enable so the constants are rewritten.
+	Modes map[PolicyID]Mode
+
 	// PinDir, when non-empty, asks NewLoader to pin the ringbuf map
 	// and every successfully-attached link to <PinDir>/maps/ and
 	// <PinDir>/links/ respectively. The pin operation is part of
@@ -162,7 +174,21 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		attach: AttachResult{Failed: make(map[PolicyID]error)},
 	}
 
-	if err := loadCfmlsmObjects(&l.objs, nil); err != nil {
+	// Load the spec, rewrite per-policy enforce constants, then
+	// commit. The const-rewrite must happen BEFORE LoadAndAssign so
+	// the BPF program is loaded with the right enforce flags baked
+	// in. Once loaded, the mode is permanent for this Loader's
+	// lifetime — to change a policy's mode the operator must
+	// `cfm lsm disable` and re-enable (so a fresh spec is loaded
+	// with new constants).
+	spec, err := loadCfmlsm()
+	if err != nil {
+		return nil, fmt.Errorf("%w: load BPF spec: %v", ErrBPFLSMUnavailable, err)
+	}
+	if err := rewriteEnforceConstants(spec, opts.Modes); err != nil {
+		return nil, fmt.Errorf("%w: rewrite enforce constants: %v", ErrBPFLSMUnavailable, err)
+	}
+	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
@@ -266,6 +292,44 @@ func (l *Loader) pinAll(pinDir string) error {
 
 // pinLinkFile returns the bpffs filename to use for a given
 // policy's pinned link. Returns "" for unknown policy IDs.
+// rewriteEnforceConstants updates the BPF spec's `volatile const __u8
+// cfm_enforce_*` globals to the per-policy mode the operator asked for.
+// Called before LoadAndAssign so the values are baked into the
+// program at load time. Policies absent from modes default to monitor
+// (the spec's default value of 0).
+//
+// The constant names must match the C-side declarations in
+// cfmlsm.bpf.c. If a name drifts, the rewrite fails loudly rather
+// than silently falling back to monitor.
+func rewriteEnforceConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode) error {
+	rewrites := map[string]uint8{
+		"cfm_enforce_memfd_exec": enforceByte(modes[PolicyMemfdExec]),
+		"cfm_enforce_revshell":   enforceByte(modes[PolicyReverseShell]),
+	}
+	for name, val := range rewrites {
+		vs, ok := spec.Variables[name]
+		if !ok {
+			return fmt.Errorf("BPF spec missing variable %q — C/Go const names out of sync", name)
+		}
+		if err := vs.Set(val); err != nil {
+			return fmt.Errorf("set %s=%d: %w", name, val, err)
+		}
+	}
+	return nil
+}
+
+// enforceByte maps a Mode to the byte the BPF program checks. Only
+// ModeEnforce maps to 1; ModeMonitor and ModeDisabled both map to 0
+// (a disabled policy still has its program linked but never matches
+// because the operator omitted it from LoaderOptions.Policies; the
+// enforce flag is irrelevant in that path).
+func enforceByte(m Mode) uint8 {
+	if m == ModeEnforce {
+		return 1
+	}
+	return 0
+}
+
 func pinLinkFile(id PolicyID) string {
 	switch id {
 	case PolicyMemfdExec:

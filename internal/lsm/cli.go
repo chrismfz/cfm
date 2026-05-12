@@ -61,10 +61,11 @@ func RunCLI(args []string) int {
 func runEnableCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("lsm enable", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "skip the enforce-mode confirmation prompt (required for unattended runs)")
 	if rc, done := handleFlagErr("lsm enable", fs.Parse(args), w); done {
 		return rc
 	}
-	return RunEnable(w)
+	return RunEnable(w, EnableOptions{AssumeYes: *yes})
 }
 
 func runDisableCmd(args []string, w io.Writer) int {
@@ -140,9 +141,11 @@ Subcommands:
   preview             Show what would attach given conf + kernel (read-only)
   probe               Briefly attach the BPF programs to verify the kernel
                       accepts them, then detach. Needs root.
-  enable              Attach the BPF programs and pin them to /sys/fs/bpf/cfm so
+  enable [--yes]      Attach the BPF programs and pin them to /sys/fs/bpf/cfm so
                       they stay attached across daemon restarts and crashes.
-                      Needs root.
+                      Prompts for confirmation when any policy is set to
+                      mode=enforce in lsm.conf; --yes skips the prompt for
+                      unattended runs. Needs root.
   disable             Unpin and detach. Needs root.
   init                Write default /etc/cfm/lsm.conf if absent
   help                Show this message

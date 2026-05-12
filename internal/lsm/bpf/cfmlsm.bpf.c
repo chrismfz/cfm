@@ -49,6 +49,29 @@ struct {
     __uint(max_entries, 256 * 1024);
 } cfm_events SEC(".maps");
 
+/* Per-policy enforcement mode. Rewritten by the Go loader at load
+ * time via spec.RewriteConstants() — see internal/lsm/loader.go.
+ *
+ * Values:
+ *   0  monitor mode  — emit event, allow (return 0)
+ *   1  enforce mode  — emit event, block  (return -EPERM)
+ *
+ * Defaults are 0 (monitor) so an operator who forgets to rewrite —
+ * or a partial / out-of-tree integration that loads the object
+ * directly — gets the safe behaviour. Enforce mode is opt-in.
+ *
+ * `volatile const` is the canonical pattern: const so the verifier
+ * accepts the load as a global, volatile so the compiler does not
+ * fold the comparison at compile time (otherwise the unreachable
+ * branch would be dead code stripped and the rewrite would have
+ * nothing to flip). */
+volatile const __u8 cfm_enforce_memfd_exec = 0;
+volatile const __u8 cfm_enforce_revshell   = 0;
+
+/* EPERM (1) — what bprm_check_security returns when an LSM denies
+ * the exec. Keeps the negative-errno convention explicit. */
+#define CFM_LSM_DENY (-1)
+
 /* ------------------------------------------------------------------- *
  * CFML-EXEC-001 — Block exec from memfd.
  *
@@ -144,6 +167,9 @@ int BPF_PROG(cfm_memfd_exec, struct linux_binprm *bprm, int ret)
 
     bpf_ringbuf_submit(e, 0);
 
+    /* Enforce mode: block the exec. Monitor mode: allow. */
+    if (cfm_enforce_memfd_exec)
+        return CFM_LSM_DENY;
     return 0;
 }
 
@@ -282,6 +308,9 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
 
     bpf_ringbuf_submit(e, 0);
 
+    /* Enforce mode: block the exec. Monitor mode: allow. */
+    if (cfm_enforce_revshell)
+        return CFM_LSM_DENY;
     return 0;
 }
 
