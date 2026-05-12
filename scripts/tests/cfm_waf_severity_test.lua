@@ -713,14 +713,18 @@ do
   check(action == "block",                        "44: B2 ext — block action preserved")
 end
 
--- ── Test 45: B2 ext — PROPFIND emits DAV_PROPFIND sub-tag ───────────────────
+-- ── Test 45: PROPFIND/SEARCH no longer trigger rule_exploit_methods ─────────
+-- DAV methods are used by ownCloud/Nextcloud/Outlook; flagging them globally
+-- breaks login/sync. They must pass through even when the rule is set to block.
 do
   disable_all_rules()
-  waf.set_rule("rule_exploit_methods", "challenge")
+  waf.set_rule("rule_exploit_methods", "block")
 
-  local _hit, reason = waf.check(fresh_ctx({ method = "PROPFIND" }))
-  check(reason == "WAF_EXPLOIT_METHOD:DAV_PROPFIND",
-        "45: B2 ext — DAV_PROPFIND sub-tag")
+  local hit_p = waf.check(fresh_ctx({ method = "PROPFIND" }))
+  check(hit_p ~= true, "45: PROPFIND not flagged by rule_exploit_methods")
+
+  local hit_s = waf.check(fresh_ctx({ method = "SEARCH" }))
+  check(hit_s ~= true, "45: SEARCH not flagged by rule_exploit_methods")
 end
 
 -- ── Test 46: X2-stratum ext — stratum+tcp:// fires rule 701 ─────────────────
