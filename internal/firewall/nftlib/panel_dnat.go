@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"cfm/internal/firewall"
 
@@ -34,7 +35,16 @@ func panelDNATAcceptID(from, to int) string {
 	return fmt.Sprintf("%s:%d:%d", panelDNATAcceptUserData, from, to)
 }
 
-func (b *Backend) PanelDNATOn(priority int) error {
+func (b *Backend) PanelDNATOn(priority int) (err error) {
+	start := time.Now()
+	b.logPhase("PanelDNATOn", "start", 0, nil, fmt.Sprintf("op=dnat scope=cpanel priority=%d", priority))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("PanelDNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat scope=cpanel priority=%d", priority))
+	}()
 	if priority < -300 {
 		priority = -300
 	}
@@ -62,12 +72,21 @@ func (b *Backend) PanelDNATOn(priority int) error {
 	return b.conn.Flush()
 }
 
-func (b *Backend) PanelDNATOff() error {
+func (b *Backend) PanelDNATOff() (err error) {
+	start := time.Now()
+	b.logPhase("PanelDNATOff", "start", 0, nil, "op=dnat scope=cpanel")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("PanelDNATOff", st, time.Since(start), err, "op=dnat scope=cpanel")
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	t, err := b.findTable(panelDNATTableName, nftables.TableFamilyINet)
-	if err != nil || t == nil {
-		return err
+	t, ferr := b.findTable(panelDNATTableName, nftables.TableFamilyINet)
+	if ferr != nil || t == nil {
+		return ferr
 	}
 	b.conn.DelTable(t)
 	return b.conn.Flush()
