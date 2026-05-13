@@ -27,8 +27,16 @@ type ProbeResult struct {
 	// immediately).
 	Attached []PolicyID
 
-	// Failed maps a policy whose attach failed to the reason.
+	// Failed maps a policy whose attach failed to the reason. These are
+	// actual load/attach failures, not optional per-policy availability
+	// skips reported by preflight.
 	Failed map[PolicyID]error
+
+	// Unavailable maps an optional policy that preflight proved cannot
+	// attach on this kernel to its reason. This does not fail the
+	// component-wide probe as long as at least one requested policy can
+	// still be attempted.
+	Unavailable map[PolicyID]string
 
 	// LoadError, when non-nil, indicates the loader could not bring
 	// up *any* policy (NewLoader returned error). Mutually
@@ -72,7 +80,10 @@ func RunProbe(w io.Writer) int {
 // The observe duration controls how long the probe drains the ring
 // buffer before closing. 50ms is the default for the CLI.
 func RunProbeOnce(observe time.Duration) ProbeResult {
-	res := ProbeResult{Failed: map[PolicyID]error{}}
+	res := ProbeResult{
+		Failed:      map[PolicyID]error{},
+		Unavailable: map[PolicyID]string{},
+	}
 
 	pf := RunPreflight()
 	res.PreflightOK = pf.OK
@@ -97,7 +108,7 @@ func RunProbeOnce(observe time.Duration) ProbeResult {
 			continue
 		}
 		if pa, ok := availability[p.ID]; ok && !pa.Available {
-			res.Failed[p.ID] = errors.New(pa.Reason)
+			res.Unavailable[p.ID] = pa.Reason
 			continue
 		}
 		policies = append(policies, p.ID)
@@ -156,6 +167,13 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 	}
 	if !r.AttachAttempted {
 		fmt.Fprintln(w, "Result: SKIPPED")
+		if len(r.Unavailable) > 0 {
+			fmt.Fprintln(w, "Every enabled policy is unavailable on this kernel.")
+			fmt.Fprintln(w, "Unavailable optional policies do not fail component-wide preflight.")
+			fmt.Fprintln(w)
+			emitProbeUnavailable(w, r.Unavailable)
+			return
+		}
 		fmt.Fprintln(w, "Every policy in /etc/cfm/lsm.conf has mode=disabled.")
 		fmt.Fprintln(w, "Set at least one policy to monitor or enforce to probe attach.")
 		return
@@ -172,8 +190,10 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 	}
 
 	switch {
-	case len(r.Attached) > 0 && len(r.Failed) == 0:
+	case len(r.Attached) > 0 && len(r.Failed) == 0 && len(r.Unavailable) == 0:
 		fmt.Fprintln(w, "Result: PASS — all enabled policies attached cleanly")
+	case len(r.Attached) > 0 && len(r.Failed) == 0 && len(r.Unavailable) > 0:
+		fmt.Fprintln(w, "Result: PASS — enabled policies attached; optional policies unavailable")
 	case len(r.Attached) > 0 && len(r.Failed) > 0:
 		fmt.Fprintln(w, "Result: PARTIAL — some policies attached, others failed")
 	case len(r.Attached) == 0 && len(r.Failed) > 0:
@@ -191,6 +211,9 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 			}
 		}
 		fmt.Fprintln(w)
+	}
+	if len(r.Unavailable) > 0 {
+		emitProbeUnavailable(w, r.Unavailable)
 	}
 	if len(r.Failed) > 0 {
 		fmt.Fprintln(w, "[Failed]")
@@ -217,6 +240,17 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 	fmt.Fprintln(w, "Note: this probe attached the BPF programs briefly, then detached.")
 	fmt.Fprintln(w, "      The daemon does not yet attach them at startup — that wiring is the")
 	fmt.Fprintln(w, "      next slice. For now, `cfm lsm probe` is the way to verify attach.")
+}
+
+func emitProbeUnavailable(w io.Writer, unavailable map[PolicyID]string) {
+	fmt.Fprintln(w, "[Unavailable]")
+	for id, reason := range unavailable {
+		if reason == "" {
+			reason = "optional policy prerequisite unavailable on this kernel"
+		}
+		fmt.Fprintf(w, "  %s: %s\n", id, reason)
+	}
+	fmt.Fprintln(w)
 }
 
 // requireRoot bails out of any subcommand that needs CAP_BPF /
