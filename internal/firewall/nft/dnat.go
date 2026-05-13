@@ -146,13 +146,13 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 
 func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	start := time.Now()
-	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("op=dnat http_port=%d https_port=%d", httpPort, httpsPort))
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat http_port=%d https_port=%d", httpPort, httpsPort))
 	}()
 	fam, tbl = dnatDefaults(fam, tbl)
 
@@ -254,13 +254,13 @@ func (b *Backend) EnsureDNATAccepts() error {
 
 func (b *Backend) DNATOff(fam, tbl string) (err error) {
 	start := time.Now()
-	b.logPhase("DNATOff", "start", 0, nil, "")
+	b.logPhase("DNATOff", "start", 0, nil, "op=dnat")
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("DNATOff", st, time.Since(start), err, "")
+		b.logPhase("DNATOff", st, time.Since(start), err, "op=dnat")
 	}()
 	fam, tbl = dnatDefaults(fam, tbl)
 

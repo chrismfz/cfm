@@ -81,6 +81,164 @@ func TestStartDNATFailSafeRunnerThresholdCleanupAndReset(t *testing.T) {
 	}
 }
 
+func TestStartDNATFailSafeRunnerRecoverPath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	on := false
+	intent := true
+	probeOK := true
+	probes := 0
+	recoveries := 0
+	var recoverCounts []int
+
+	startDNATFailSafe(ctx, dnatFailSafeTarget{
+		Name:             "test",
+		LogPrefix:        "[dnat:test:failsafe]",
+		Interval:         3 * time.Millisecond,
+		FailureThreshold: 1,
+		StatusCheck: func() (bool, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return on, nil
+		},
+		HealthProbe: func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			probes++
+			if probeOK {
+				return nil
+			}
+			return errors.New("down")
+		},
+		Cleanup: func(int, error) {
+			t.Errorf("cleanup must not run when status is OFF")
+		},
+		IntentCheck: func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return intent
+		},
+		RecoverThreshold: 3,
+		Recover: func(okCount int) {
+			mu.Lock()
+			defer mu.Unlock()
+			recoveries++
+			recoverCounts = append(recoverCounts, okCount)
+			on = true
+		},
+	})
+
+	waitUntil(t, 200*time.Millisecond, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return recoveries == 1
+	})
+
+	mu.Lock()
+	if recoveries != 1 {
+		t.Fatalf("expected exactly one recovery, got %d", recoveries)
+	}
+	if recoverCounts[0] < 3 {
+		t.Fatalf("expected recover after RecoverThreshold consecutive ok probes, got okCount=%d", recoverCounts[0])
+	}
+	if probes < 3 {
+		t.Fatalf("expected at least RecoverThreshold probes before recover, got %d", probes)
+	}
+	mu.Unlock()
+}
+
+func TestStartDNATFailSafeRunnerRecoverResetsOnProbeFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	probeSeq := []bool{true, true, false, true}
+	probeIdx := 0
+	recoveries := 0
+
+	startDNATFailSafe(ctx, dnatFailSafeTarget{
+		Name:             "test",
+		LogPrefix:        "[dnat:test:failsafe]",
+		Interval:         3 * time.Millisecond,
+		FailureThreshold: 1,
+		StatusCheck:      func() (bool, error) { return false, nil },
+		HealthProbe: func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			if probeIdx >= len(probeSeq) {
+				return errors.New("down")
+			}
+			ok := probeSeq[probeIdx]
+			probeIdx++
+			if ok {
+				return nil
+			}
+			return errors.New("transient")
+		},
+		Cleanup:          func(int, error) {},
+		IntentCheck:      func() bool { return true },
+		RecoverThreshold: 3,
+		Recover: func(int) {
+			mu.Lock()
+			defer mu.Unlock()
+			recoveries++
+		},
+	})
+
+	waitUntil(t, 200*time.Millisecond, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return probeIdx >= len(probeSeq)
+	})
+
+	// Give the runner a few more ticks past the sequence to confirm no late
+	// recovery sneaks in — okCount must have been reset by the failed probe
+	// at index 2.
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if recoveries != 0 {
+		t.Fatalf("expected zero recoveries after probe-fail resets okCount, got %d", recoveries)
+	}
+}
+
+func TestStartDNATFailSafeRunnerRecoverSkippedWhenIntentOff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	probes := 0
+
+	startDNATFailSafe(ctx, dnatFailSafeTarget{
+		Name:             "test",
+		LogPrefix:        "[dnat:test:failsafe]",
+		Interval:         3 * time.Millisecond,
+		FailureThreshold: 1,
+		StatusCheck:      func() (bool, error) { return false, nil },
+		HealthProbe: func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			probes++
+			return nil
+		},
+		Cleanup:          func(int, error) {},
+		IntentCheck:      func() bool { return false },
+		RecoverThreshold: 1,
+		Recover: func(int) {
+			t.Errorf("recover must not run when intent is OFF")
+		},
+	})
+
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if probes != 0 {
+		t.Fatalf("expected zero probes when intent OFF + status OFF, got %d", probes)
+	}
+}
+
 func TestStartDNATFailSafeRunnerOffSkipsProbeAndStatusErrorsDoNotCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

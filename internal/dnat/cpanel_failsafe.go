@@ -117,6 +117,16 @@ func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 				LogTransition(ScopeCPanel, "OFF", "failsafe-recover", fmt.Sprintf("enable failed: %v", err))
 				return
 			}
+			// PanelDNATOn only reinstalls the redirect table. If Cleanup
+			// previously removed the allowlist accepts (autoRemoveAllowlist
+			// path), reinstall them here so redirected traffic can pass
+			// the firewall input chain — otherwise we'd recover the
+			// redirect but immediately drop the traffic.
+			if _, err := backend.EnsurePanelDNATAccepts(); err != nil {
+				LogTransition(ScopeCPanel, "ON", "failsafe-recover", fmt.Sprintf("redirect ok but allowlist failed: %v", err))
+				setPanelFirewallHealth("PARTIAL", err.Error(), true)
+				return
+			}
 			setPanelFirewallHealth("OK", "", true)
 			LogTransition(ScopeCPanel, "ON", "failsafe-recover", "")
 		},
@@ -124,6 +134,11 @@ func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 }
 
 func StartPanelFailSafe(ctx context.Context, backend firewall.Backend) {
+	if backend == nil {
+		// Without a backend we cannot probe or recover; refuse to start so we
+		// don't burn ticks logging "no backend" forever.
+		return
+	}
 	panelFailSafeMu.Lock()
 	panelFailSafe.Enabled = true
 	panelFailSafeMu.Unlock()

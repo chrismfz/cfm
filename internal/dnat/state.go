@@ -48,7 +48,9 @@ func IntentPath(scope DNATScope) string { return intentPath(scope) }
 // PersistIntent writes the operator's ON/OFF intent for the given scope so it
 // can survive reboots. The runtime nftables state remains the source of truth
 // for "is DNAT live right now"; this file is the source of truth for "should
-// DNAT be live".
+// DNAT be live". The web file is created 0o600 (root-only) since it controls
+// boot behavior; the cpanel file path is shared with legacy code that uses
+// 0o644 and is left unchanged here for compatibility.
 func PersistIntent(scope DNATScope, enabled bool) error {
 	p := intentPath(scope)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -58,7 +60,11 @@ func PersistIntent(scope DNATScope, enabled bool) error {
 	if enabled {
 		v = "1\n"
 	}
-	return os.WriteFile(p, []byte(v), 0o644)
+	mode := os.FileMode(0o600)
+	if scope == ScopeCPanel {
+		mode = 0o644
+	}
+	return os.WriteFile(p, []byte(v), mode)
 }
 
 // LoadIntent returns the persisted intent for the given scope. `present`

@@ -78,7 +78,16 @@ func scopeStatus(scope DNATScope, backend firewall.Backend) (bool, error) {
 
 func scopeEnable(scope DNATScope, backend firewall.Backend) error {
 	if scope == ScopeCPanel {
-		return backend.PanelDNATOn(getenvInt("NFT_PANEL_DNAT_PRIORITY", -101))
+		if err := backend.PanelDNATOn(getenvInt("NFT_PANEL_DNAT_PRIORITY", -101)); err != nil {
+			return err
+		}
+		// PanelDNATOn only reinstalls the redirect table; the input-chain
+		// accept rules live separately and must be reasserted here so
+		// redirected traffic isn't dropped by the firewall after a reboot.
+		_, err := backend.EnsurePanelDNATAccepts()
+		return err
 	}
+	// backend.DNATOn already calls ensureScopedDNATAccepts internally, so
+	// the web path needs no extra accept reassert here.
 	return backend.DNATOn("inet", "cfm_redirect", getenvInt("HTTP_PORT", 9080), getenvInt("HTTPS_PORT", 9043))
 }

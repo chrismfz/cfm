@@ -223,18 +223,15 @@ func newWebDNATFailSafeTarget(backend firewall.Backend) (dnatFailSafeTarget, boo
 	// keep these aligned with RunCLI defaults
 	family := "inet"
 	table := "cfm_redirect"
-	httpPort := getenvInt("HTTP_PORT", 9080)
-	httpsPort := getenvInt("HTTPS_PORT", 9043)
 
 	interval := time.Duration(getenvInt("CFM_DNAT_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
 	failNeed := getenvInt("CFM_DNAT_FAILSAFE_CONSECUTIVE_FAILS", 3)
 	recoverOK := getenvInt("CFM_DNAT_FAILSAFE_RECOVER_OK", 5)
 
-	ports := WebEdgePorts()
 	probe := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		ok, reason := probeEdgeHealthy(ctx, ScopeWeb, ports)
+		ok, reason := probeEdgeHealthy(ctx, ScopeWeb, WebEdgePorts())
 		if ok {
 			return nil
 		}
@@ -266,7 +263,11 @@ func newWebDNATFailSafeTarget(backend firewall.Backend) (dnatFailSafeTarget, boo
 		},
 		RecoverThreshold: recoverOK,
 		Recover: func(_ int) {
-			if err := backend.DNATOn(family, table, httpPort, httpsPort); err != nil {
+			// Re-read ports so a runtime env change is honored on recover
+			// instead of pinning to whatever was active at daemon start.
+			hp := getenvInt("HTTP_PORT", 9080)
+			hsp := getenvInt("HTTPS_PORT", 9043)
+			if err := backend.DNATOn(family, table, hp, hsp); err != nil {
 				LogTransition(ScopeWeb, "OFF", "failsafe-recover", fmt.Sprintf("enable failed: %v", err))
 				return
 			}
@@ -355,12 +356,12 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		return 0
 
 	case "off":
-		if err := PersistIntent(ScopeWeb, false); err != nil {
-			fmt.Fprintln(os.Stderr, "dnat off: warning: persist intent:", err)
-		}
 		if err := backend.DNATOff(*family, *table); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat off failed:", err)
 			return 1
+		}
+		if err := PersistIntent(ScopeWeb, false); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat off: warning: persist intent:", err)
 		}
 		LogTransition(ScopeWeb, "OFF", "manual", "")
 		fmt.Println("DNAT: OFF")
