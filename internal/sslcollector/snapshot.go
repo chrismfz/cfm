@@ -145,9 +145,12 @@ func readSnapshotCounts(path string) (int, int, bool) {
 }
 
 // writeSnapshotAtomic writes body to path via a sibling .tmp file +
-// rename. The chown to the cfm group happens best-effort so OpenResty
-// workers (cfm group) can read the file; the daemon-side directory
-// chown in cmd/cfm/main.go handles the bootstrap when the group exists.
+// rename. Explicit Chmod calls bypass the daemon's umask (which is
+// often 0077 from systemd), ensuring the snapshot ends up mode 0640
+// so OpenResty/Angie workers (cfm group) can read it. Without the
+// explicit Chmod, `os.OpenFile(..., 0o640)` produces 0600 under a
+// 0077 umask and the workers silently fall through to the fallback
+// cert path on every reload.
 func writeSnapshotAtomic(path string, body []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o770); err != nil {
@@ -172,12 +175,31 @@ func writeSnapshotAtomic(path string, body []byte) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close %s: %w", tmp, cerr)
 	}
+	// Force the on-disk mode independently of the process umask. See
+	// writeLuaToken in token.go for the same pattern.
+	if cerr := os.Chmod(tmp, 0o640); cerr != nil {
+		logging.Logf("[sslcollector] snapshot: WARNING chmod tmp %s: %v", tmp, cerr)
+	}
 	if gid := CfmGroupID(); gid > 0 {
-		_ = os.Chown(tmp, 0, gid)
+		if cerr := os.Chown(tmp, 0, gid); cerr != nil {
+			logging.Logf("[sslcollector] snapshot: WARNING chown tmp %s to root:%d: %v", tmp, gid, cerr)
+		}
 	}
 	if rerr := os.Rename(tmp, path); rerr != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s -> %s: %w", tmp, path, rerr)
+	}
+	// Re-assert mode + ownership on the final path. os.Rename keeps
+	// the inode (and its attributes from .tmp), but defensive re-set
+	// guards against edge cases where the destination already existed
+	// with stricter perms.
+	if cerr := os.Chmod(path, 0o640); cerr != nil {
+		logging.Logf("[sslcollector] snapshot: WARNING chmod final %s: %v", path, cerr)
+	}
+	if gid := CfmGroupID(); gid > 0 {
+		if cerr := os.Chown(path, 0, gid); cerr != nil {
+			logging.Logf("[sslcollector] snapshot: WARNING chown final %s to root:%d: %v", path, gid, cerr)
+		}
 	}
 	return nil
 }
