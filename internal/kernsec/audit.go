@@ -81,6 +81,13 @@ type AuditRow struct {
 	MountPoint         string `json:"mount_point,omitempty"`         // e.g. "/tmp"
 	RecommendedOptions string `json:"recommended_options,omitempty"` // e.g. "nodev,nosuid,noexec"
 	CurrentOptions     string `json:"current_options,omitempty"`     // active mount options or "" if not separately mounted
+	// BindPrimaryPath is populated when this mount point shares its
+	// source device with an earlier-listed peer (e.g. /var/tmp is a
+	// bind of /tmp after `cfm kernsec secure-tmp`). For an otherwise-
+	// fully-hardened mount it lets the renderer add an "inherits
+	// hardening from <primary>" note on an OK row instead of
+	// surfacing as a SKIP that the operator has to mentally resolve.
+	BindPrimaryPath string `json:"bind_primary_path,omitempty"`
 }
 
 // StatusJSON is the top-level structure for `cfm kernsec status --json`.
@@ -202,7 +209,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 
 	for i, m := range Tier1Mounts {
 		rr := rs.Mounts[i]
-		mountState, current := CheckMount(m)
+		d := CheckMountDetail(m, Tier1Mounts)
 		row := AuditRow{
 			ID:                 m.ID,
 			Kind:               KindMount,
@@ -215,9 +222,10 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Reason:             rr.Reason,
 			MountPoint:         m.MountPoint,
 			RecommendedOptions: m.Recommended,
-			CurrentOptions:     current,
+			CurrentOptions:     d.CurrentOptions,
+			BindPrimaryPath:    d.BindPrimaryPath,
 		}
-		row.State = mountRowStateForDecision(rr.Decision, mountState)
+		row.State = mountRowStateForDecision(rr.Decision, d.State)
 		rows = append(rows, row)
 	}
 

@@ -386,6 +386,17 @@ func RunTUI() (switchToText bool, err error) {
 			} else {
 				fmt.Fprintf(&b, "  current /proc/mounts: %s\n", r.CurrentOptions)
 			}
+			// Bind sibling: surface the inheritance explicitly so an
+			// operator looking at /var/tmp can see at a glance why
+			// it's green ("inherits from /tmp") rather than wonder
+			// whether the audit was correctly evaluating it.
+			if r.BindPrimaryPath != "" {
+				if r.State == StateOK {
+					fmt.Fprintf(&b, "  bind of:            %s  (inherits hardening)\n", r.BindPrimaryPath)
+				} else {
+					fmt.Fprintf(&b, "  bind of:            %s  (fix the primary row to inherit)\n", r.BindPrimaryPath)
+				}
+			}
 			fmt.Fprintln(&b, "")
 			fmt.Fprintln(&b, "  [Note:](fg:cyan,mod:bold) audit-only — kernsec never edits /etc/fstab.")
 			// Render a one-line tip summary; the full copy-pasteable

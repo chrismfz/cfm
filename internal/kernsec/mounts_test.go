@@ -213,7 +213,10 @@ func TestCheckMountDetail_Symlink(t *testing.T) {
 func TestCheckMountDetail_BindOfAnother(t *testing.T) {
 	// The cPanel pattern: /usr/tmpDSK bind-mounted onto both /tmp and
 	// /var/tmp. /tmp appears first in Tier1Mounts; /var/tmp's audit
-	// row must defer to /tmp.
+	// row must defer to /tmp. This fixture is missing `nodev` on both
+	// sides, so the bind sibling /var/tmp still surfaces as
+	// MountBindOfAnother — remediation is "fix the primary row to
+	// inherit", not "remount this side directly".
 	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,noexec,relatime,discard 0 0
 /dev/loop0 /var/tmp ext4 rw,nosuid,noexec,relatime,discard 0 0
 `
@@ -225,6 +228,50 @@ func TestCheckMountDetail_BindOfAnother(t *testing.T) {
 	}
 	if d.BindPrimaryPath != "/tmp" {
 		t.Errorf("bind primary = %q, want /tmp", d.BindPrimaryPath)
+	}
+}
+
+func TestCheckMountDetail_BindOfAnotherFullyHardened(t *testing.T) {
+	// The post-`cfm kernsec secure-tmp` shape from a real production
+	// host: same source on /tmp and /var/tmp, both with the full
+	// recommended option set live. The bind sibling /var/tmp must
+	// render as MountOK (green) but keep BindPrimaryPath populated so
+	// the renderer can add the "inherits hardening from /tmp" note.
+	// Previously this row surfaced as a SKIP that operators had to
+	// mentally resolve.
+	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,nodev,noexec,relatime 0 0
+/dev/loop0 /var/tmp ext4 rw,nosuid,nodev,noexec,relatime 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State != MountOK {
+		t.Fatalf("state = %d, want MountOK (fully-hardened bind sibling)", d.State)
+	}
+	if d.BindPrimaryPath != "/tmp" {
+		t.Errorf("bind primary = %q, want /tmp (kept for the 'inherits' note)", d.BindPrimaryPath)
+	}
+	if len(d.Missing) != 0 {
+		t.Errorf("Missing = %v, want []", d.Missing)
+	}
+}
+
+func TestCheckMountDetail_BindPrimaryRowItselfStillOK(t *testing.T) {
+	// The primary side of a bind pair (/tmp, first in Tier1Mounts)
+	// must not pick up BindPrimaryPath — it IS the primary; nothing
+	// "earlier" in the peer list shares its source. Sanity check the
+	// peer-iteration short-circuit at p.MountPoint == rule.MountPoint.
+	procMounts := `/dev/loop0 /tmp ext4 rw,nosuid,nodev,noexec,relatime 0 0
+/dev/loop0 /var/tmp ext4 rw,nosuid,nodev,noexec,relatime 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+	if d.State != MountOK {
+		t.Fatalf("state = %d, want MountOK", d.State)
+	}
+	if d.BindPrimaryPath != "" {
+		t.Errorf("primary row should not carry BindPrimaryPath, got %q", d.BindPrimaryPath)
 	}
 }
 

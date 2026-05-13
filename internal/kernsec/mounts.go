@@ -145,6 +145,14 @@ func checkMountDetail(
 	// list mounts the same source, this row is the bind sibling.
 	// "Earlier in the list" gives us a deterministic primary so
 	// /tmp/<-> /var/tmp tie-break the same way every audit run.
+	//
+	// We capture BindPrimaryPath here but DON'T early-return: a bind
+	// sibling that inherits a fully-hardened option set from its
+	// primary (e.g. `cfm kernsec secure-tmp` puts the same
+	// nodev,nosuid,noexec on both /tmp and /var/tmp via the bind) is
+	// effectively OK and should render as such. Only when the
+	// inherited option set is incomplete do we fall back to the
+	// MountBindOfAnother "fix the primary" guidance below.
 	if d.Source != "" && !isGenericMountSource(d.Source) {
 		for _, p := range peers {
 			if p.MountPoint == rule.MountPoint {
@@ -152,8 +160,7 @@ func checkMountDetail(
 			}
 			if peer, ok := mountByPath[p.MountPoint]; ok && peer[0] == d.Source {
 				d.BindPrimaryPath = p.MountPoint
-				d.State = MountBindOfAnother
-				return d
+				break
 			}
 		}
 	}
@@ -161,7 +168,15 @@ func checkMountDetail(
 	d.Present, d.Missing = splitMountOptions(d.CurrentOptions, rule.Recommended)
 	switch {
 	case len(d.Missing) == 0:
+		// Fully hardened. If it's a bind sibling, BindPrimaryPath is
+		// already populated and the renderer will note the inheritance;
+		// otherwise this is just a plain OK mount.
 		d.State = MountOK
+	case d.BindPrimaryPath != "":
+		// Bind sibling that's missing one or more recommended options.
+		// Remediation guidance is "fix the primary row to inherit",
+		// distinct from the standalone partial / missing cases.
+		d.State = MountBindOfAnother
 	case len(d.Present) == 0:
 		d.State = MountMissingOptions
 	default:
