@@ -284,10 +284,50 @@ are no longer registered here.
 per selected rule. This prevents both alias-based autoloading and direct
 `modprobe` loads.
 
+After the modprobe drop-in is written, `apply` also runs a **default-on
+unload pass**: for every managed module currently in `/proc/modules` it
+invokes `modprobe -r <name>` and prints a per-row status table:
+
+```
+[Modules] unload pass (modprobe -r) over N managed-and-loaded module(s):
+            UNLOADED   esp4
+            UNLOADED   esp6
+            BUSY       rxrpc            in use by another holder — will clear at reboot
+            BUILTIN    sctp             compiled into the kernel — modprobe.d blacklist has no effect; needs kernel rebuild or cmdline change
+[Modules] 2 unloaded, 1 busy (will clear at reboot), 1 builtin (kernel rebuild required). Blacklist on disk persists across reboot.
+          Reboot at convenience to clear any busy modules and sync the initramfs.
+```
+
+This closes the running-kernel window (Fragnesia / Dirty Frag class) the
+same minute apply runs, while the blacklist on disk guarantees the
+module stays gone across the next boot. Host-profile-gated rules
+(`modules.ipsec` on a host with active IPsec policies, `modules.bus.*`
+on a host with matching hardware, etc.) are filtered out of the apply
+set upstream, so the unload pass never touches a module that the
+profile says is in legitimate use. `BUSY` modules are reported and
+otherwise ignored — apply does not fail on refcount-busy unloads, since
+the blacklist on disk prevents them coming back and reboot finishes the
+job.
+
+Operators who need the older "write config, unload manually" behaviour
+can pass `--no-unload` to `cfm kernsec apply` or `cfm kernsec disable`.
+Initramfs rebuild is not run automatically: for the modules shipped
+today none are loaded by the initramfs phase, so `/etc/modprobe.d/`
+alone is sufficient. Operators who want a tidy `lsinitrd | grep
+cfm-kernsec.conf` can run `dracut --force` (RHEL family) or
+`update-initramfs -u` (Debian family) by hand after apply.
+
+The TUI's per-rule / per-group disable action calls the same apply
+path, so the unload pass also runs there. The bottom-bar flash
+includes a one-line summary (e.g. "applied 7 change(s) — 5 unloaded, 2
+busy (will clear at reboot)") so the operator sees the running-kernel
+status without dropping back to the shell.
+
 | Group | Tier | Modules | Notes |
 |---|---:|---|---|
 | `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
-| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, and similar dead network stacks | Intended to be safe on normal hosting servers. |
+| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `pptp`, the `l2tp_*` family (`l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp`), and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually terminates L2TP/PPTP. |
+| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface` | Kernel XFRM/ESP transforms and the routing-based XFRM virtual interface. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
 | `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
 | `modules.net.iot` | 1 | `ieee802154`, `mac802154`, `6lowpan` | IEEE 802.15.4 / low-power wireless PAN stack — no 802.15.4 radios on hosting boxes. |
 | `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs` | Override if the host genuinely mounts one of these filesystems. |
@@ -303,6 +343,17 @@ per selected rule. This prevents both alias-based autoloading and direct
 NFS, CIFS/SMB clients, `io_uring`, and wifi modules are intentionally not
 blacklisted by the shipped registry. These have legitimate operator-managed use
 cases on some hosts.
+
+IPsec/XFRM modules (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`,
+`xfrm_interface`) are shipped in `modules.ipsec` and blacklisted by
+default in response to the XFRM/ESP LPE class (CVE-2026-46300
+"Fragnesia" and the related "Dirty Frag"). The AH and IPcomp transforms
+ride the same XFRM data path as ESP and would be reachable by future
+bugs in the same layer; `xfrm_interface` adds net-new XFRM surface with
+no hosting use outside IPsec. The whole group is auto-skipped on hosts
+where the IPsec host-profile gate fires (`/proc/net/xfrm_policy` or
+`/proc/net/pfkey` non-empty), so hosts that actually terminate or
+transit IPsec tunnels keep the kernel data path.
 
 ### fstab / mount audit rules
 
@@ -332,9 +383,9 @@ runtime switch until reboot and requires very careful late-boot orchestration so
 cfm, the kernel, and host-specific services can finish loading required modules
 before module loading is disabled globally.
 
-NFS, CIFS/SMB clients, `io_uring`, wifi modules, and IPsec/XFRM modules are
-also intentionally not blacklisted by the shipped registry. These have
-legitimate operator-managed use cases on some hosts.
+NFS, CIFS/SMB clients, `io_uring`, and wifi modules are also intentionally not
+blacklisted by the shipped registry. These have legitimate operator-managed use
+cases on some hosts.
 
 ## Host-profile gates
 
@@ -364,7 +415,7 @@ the operator can force a rule only after accepting the workload impact.
 | kdump | Crash-kernel/kdump indicators. | Skips global coredump suppression so crash capture remains available. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips global coredump suppression to preserve vendor diagnostics. |
 | Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips global coredump suppression. |
-| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Recorded as host context; shipped IPsec/XFRM modules are intentionally not blacklisted. |
+| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`) so the kernel XFRM data path stays available on hosts that actually use it. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |

@@ -205,6 +205,42 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "Breaks PPTP if anyone is still using it (don't).",
 	},
 	{
+		ID: "KSEC-MOD-net.legacy-028", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_core",
+		Description: "L2TP VPN core; multiple LPE CVEs over the years and no hosting use case.",
+		Affects:     "Breaks L2TP VPN if in use; override per-rule if the host actually terminates L2TP.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-029", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_ip",
+		Description: "L2TPv3 IP encapsulation (IPv4).",
+		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-030", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_ip6",
+		Description: "L2TPv3 IP encapsulation (IPv6).",
+		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-031", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_eth",
+		Description: "L2TP Ethernet pseudowires.",
+		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-032", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_netlink",
+		Description: "Netlink configuration interface for L2TP.",
+		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-033", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "l2tp_ppp",
+		Description: "PPP over L2TP transport.",
+		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+	},
+	{
 		ID: "KSEC-MOD-net.legacy-020", Group: "modules.net.legacy", Tier: Tier1,
 		Name:        "gtp",
 		Description: "GPRS Tunneling Protocol.",
@@ -251,6 +287,68 @@ var Tier1Modules = []ModuleRule{
 		Name:        "hsr",
 		Description: "High-availability Seamless Redundancy; industrial fieldbus, not hosting.",
 		Affects:     "None.",
+	},
+
+	// --- modules.ipsec: kernel ESP transforms -----------------------
+	//
+	// esp4 / esp6 are the kernel-side ESP transforms used by IPsec.
+	// They became a critical attack surface with CVE-2026-46300
+	// ("Fragnesia") in the espintcp ULP and CVE-2026-XXXX-class
+	// ("Dirty Frag") in the same XFRM/ESP path: an unprivileged local
+	// user can splice file pages into a TCP socket, switch the socket
+	// into ESP-in-TCP ULP mode, and have the kernel decrypt-in-place
+	// into the page cache — a deterministic one-byte arbitrary write
+	// per trigger into any readable file (the public PoC overwrites
+	// /usr/bin/su).
+	//
+	// While patched kernels and KernelCare livepatches are still in
+	// build/test, blacklisting these modules is the upstream-recommended
+	// mitigation. Host-profile gating (HasIPsec via SkipReason on
+	// `modules.ipsec`) auto-skips the rule when `/proc/net/xfrm_policy`
+	// or `/proc/net/pfkey` is non-empty, so hosts that terminate or
+	// transit IPsec / strongSwan / Libreswan tunnels are not affected.
+
+	{
+		ID: "KSEC-MOD-ipsec-001", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "esp4",
+		Description: "IPv4 ESP transform; entry point for CVE-2026-46300 (Fragnesia) and the related Dirty Frag XFRM/ESP LPE class.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-002", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "esp6",
+		Description: "IPv6 ESP transform; same XFRM/ESP exploit class as esp4 (Fragnesia, Dirty Frag).",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-003", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "ah4",
+		Description: "IPv4 IPsec Authentication Header transform — same XFRM transform layer as esp4, reachable by future ULP/transform-confusion bugs in that path. AH is almost never used in practice (ESP+AEAD replaced it).",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-004", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "ah6",
+		Description: "IPv6 IPsec Authentication Header transform; same XFRM family as ah4.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-005", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "ipcomp",
+		Description: "IPv4 IPsec payload compression transform — XFRM data-path sibling of esp4/ah4.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-006", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "ipcomp6",
+		Description: "IPv6 IPsec payload compression transform; same XFRM family as ipcomp.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-007", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "xfrm_interface",
+		Description: "Routing-based XFRM virtual interface — net-new XFRM attack surface with no hosting use outside IPsec.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
 	},
 
 	// --- modules.net.virt: virt-only socket families ----------------
