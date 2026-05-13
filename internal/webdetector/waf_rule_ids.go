@@ -49,17 +49,17 @@ var wafRuleIDs = []WAFRule{
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "challenge"},
-	{ID: 306, Name: "rule_serialize", ReasonFamily: "WAF_SERIALIZE", DefaultMode: "logonly"},
+	{ID: 306, Name: "rule_serialize", ReasonFamily: "WAF_SERIALIZE", DefaultMode: "challenge"},
 	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "challenge"},
 	{ID: 308, Name: "rule_shellshock", ReasonFamily: "WAF_SHELLSHOCK", DefaultMode: "challenge"},
 	{ID: 310, Name: "rule_cmd_params", ReasonFamily: "WAF_CMD_PARAM", DefaultMode: "challenge"},
-	{ID: 311, Name: "rule_cmd_payload", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "logonly"},
+	{ID: 311, Name: "rule_cmd_payload", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 312, Name: "rule_cmd_payload_semi_cmd", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 313, Name: "rule_cmd_payload_pipe_wget", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 314, Name: "rule_cmd_payload_pipe_curl", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 315, Name: "rule_cmd_payload_pipe_bash", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 316, Name: "rule_cmd_payload_pipe_sh", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
-	{ID: 317, Name: "rule_cmd_payload_backtick", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "logonly"},
+	{ID: 317, Name: "rule_cmd_payload_backtick", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 320, Name: "rule_rce", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge"},
 	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
@@ -87,22 +87,22 @@ var wafRuleIDs = []WAFRule{
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
 
 	// 6xx header / protocol anomaly
-	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "logonly"},
-	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "logonly"},
+	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge"},
+	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "challenge"},
 	{ID: 603, Name: "rule_header_vulns", ReasonFamily: "WAF_HEADER_VULN", DefaultMode: "challenge"},
 	{ID: 604, Name: "rule_content_type_anomaly", ReasonFamily: "WAF_CT_ANOMALY", DefaultMode: "logonly"},
 	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "challenge"},
 	{ID: 606, Name: "rule_http_smuggling", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "logonly"},
 	{ID: 607, Name: "rule_exploit_methods", ReasonFamily: "WAF_EXPLOIT_METHOD", DefaultMode: "challenge"},
 	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "logonly"},
-	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "logonly"},
+	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge"},
 
 	// 7xx SSRF
 	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "logonly"},
 	{ID: 702, Name: "rule_c2_tunnel", ReasonFamily: "WAF_C2", DefaultMode: "logonly"},
 
 	// 8xx info disclosure / debug
-	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "logonly"},
+	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
