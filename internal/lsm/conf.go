@@ -39,6 +39,18 @@ type Conf struct {
 	// sensitive writes by those tasks even after their current uid changes.
 	FS005WebOriginMonitor bool
 
+	// AllowExe is the operator-supplied per-policy executable allowlist.
+	// Each entry is an absolute path to a binary whose (dev, inode)
+	// key should be treated as legitimate for the policy. Today only
+	// CFML-CRED-002 consumes it (merged into cfm_setuid_inodes alongside
+	// the disk-walked suid-bit binaries) so that panel daemons like
+	// directadmin / cpanel that legitimately call setresuid(0,…) without
+	// the suid bit on disk stop firing CRED-002 false positives.
+	//
+	// Stored generically so future policies (FS-005, EXEC-003) can
+	// adopt the same `allow_exe = …` syntax without re-parsing.
+	AllowExe map[PolicyID][]string
+
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
 	// section is absent.
@@ -61,8 +73,18 @@ func DefaultConf() *Conf {
 		Enabled:               false,
 		Modes:                 modes,
 		FS005WebOriginMonitor: true,
+		AllowExe:              map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
+}
+
+// AllowExeFor returns the configured allow_exe paths for id, or nil
+// when none are set. Safe on a nil receiver.
+func (c *Conf) AllowExeFor(id PolicyID) []string {
+	if c == nil || c.AllowExe == nil {
+		return nil
+	}
+	return c.AllowExe[id]
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -132,6 +154,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		Enabled:               false,
 		Modes:                 map[PolicyID]Mode{},
 		FS005WebOriginMonitor: false,
+		AllowExe:              map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
@@ -231,8 +254,17 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.FS005WebOriginMonitor = monitor
+			case "allow_exe":
+				if currentPolicy != PolicyCredEscal {
+					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s", lineno, PolicyCredEscal)
+				}
+				p, err := parseAllowExe(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.AllowExe[currentPolicy] = append(c.AllowExe[currentPolicy], p)
 			default:
-				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking`)", lineno, key, PolicySensitiveWrite)
+				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking`; %s also supports `allow_exe`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal)
 			}
 		case sectionKmsg:
 			lk := strings.ToLower(key)
@@ -296,6 +328,20 @@ func FormatConf(c *Conf) string {
 			}
 			fmt.Fprintf(&b, "origin_tracking = %s  # disabled | monitor (origin-only matches never enforce yet)\n", state)
 		}
+		if p.ID == PolicyCredEscal {
+			paths := c.AllowExeFor(p.ID)
+			if len(paths) == 0 {
+				b.WriteString("# Allowlist binaries that legitimately call setresuid(0,…) without\n")
+				b.WriteString("# the suid bit on disk (panel daemons, custom helpers). Repeat the\n")
+				b.WriteString("# key per entry; absolute paths only. Resolved at daemon start.\n")
+				b.WriteString("# allow_exe = /usr/local/directadmin/directadmin\n")
+				b.WriteString("# allow_exe = /usr/local/cpanel/cpanel\n")
+			} else {
+				for _, ap := range paths {
+					fmt.Fprintf(&b, "allow_exe = %s\n", ap)
+				}
+			}
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -336,6 +382,26 @@ func WriteDefaultConf() (created bool, err error) {
 //
 // Anything else is a parse error. The PolicyID return is valid only
 // when kind == sectionPolicy; it is the empty string otherwise.
+// parseAllowExe validates one `allow_exe = …` value. The path must be
+// non-empty, absolute, and free of NUL bytes — anything fancier (glob,
+// resolution against $PATH, …) belongs in userspace before reaching
+// here. Existence is NOT checked at parse time: the daemon does a stat
+// at map-population time so a missing path is a runtime warning, not
+// a fatal config error.
+func parseAllowExe(s string) (string, error) {
+	p := strings.TrimSpace(s)
+	if p == "" {
+		return "", fmt.Errorf("allow_exe must be a non-empty path")
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("allow_exe must be an absolute path (got %q)", p)
+	}
+	if strings.ContainsRune(p, 0) {
+		return "", fmt.Errorf("allow_exe must not contain NUL bytes")
+	}
+	return p, nil
+}
+
 func parseOriginTracking(s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "disabled", "off", "false", "0":

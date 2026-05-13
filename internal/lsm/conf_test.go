@@ -199,6 +199,10 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	original.Modes[PolicyMemfdExec] = ModeEnforce
 	original.Modes[PolicyReverseShell] = ModeMonitor
 	original.FS005WebOriginMonitor = true
+	original.AllowExe[PolicyCredEscal] = []string{
+		"/usr/local/directadmin/directadmin",
+		"/usr/local/cpanel/cpanel",
+	}
 
 	rendered := FormatConf(original)
 	roundtrip, err := ParseConf(strings.NewReader(rendered))
@@ -215,6 +219,77 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	}
 	if roundtrip.FS005WebOriginMonitor != original.FS005WebOriginMonitor {
 		t.Errorf("origin tracking: got %t, want %t", roundtrip.FS005WebOriginMonitor, original.FS005WebOriginMonitor)
+	}
+	gotAllow := roundtrip.AllowExeFor(PolicyCredEscal)
+	wantAllow := original.AllowExe[PolicyCredEscal]
+	if len(gotAllow) != len(wantAllow) {
+		t.Fatalf("allow_exe round-trip count: got %d, want %d (rendered: %s)", len(gotAllow), len(wantAllow), rendered)
+	}
+	for i := range wantAllow {
+		if gotAllow[i] != wantAllow[i] {
+			t.Errorf("allow_exe[%d]: got %q, want %q", i, gotAllow[i], wantAllow[i])
+		}
+	}
+}
+
+func TestParseConf_AllowExe(t *testing.T) {
+	body := `
+[policy "CFML-CRED-002"]
+mode = monitor
+allow_exe = /usr/local/directadmin/directadmin
+allow_exe = /usr/local/cpanel/cpanel
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	got := c.AllowExeFor(PolicyCredEscal)
+	want := []string{
+		"/usr/local/directadmin/directadmin",
+		"/usr/local/cpanel/cpanel",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("allow_exe count: got %d (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("allow_exe[%d]: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseConf_AllowExe_Errors(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "allow_exe on wrong policy",
+			body: "[policy \"CFML-FS-005\"]\nallow_exe = /bin/sh\n",
+			want: "allow_exe is only valid",
+		},
+		{
+			name: "relative path",
+			body: "[policy \"CFML-CRED-002\"]\nallow_exe = directadmin\n",
+			want: "must be an absolute path",
+		},
+		{
+			name: "empty path",
+			body: "[policy \"CFML-CRED-002\"]\nallow_exe =\n",
+			want: "non-empty path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseConf(strings.NewReader(tc.body))
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
 	}
 }
 

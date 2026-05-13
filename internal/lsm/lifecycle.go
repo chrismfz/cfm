@@ -125,7 +125,7 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// be stale (new cPanel/DA accounts, newly-installed setuid
 	// binaries) so refreshing on every daemon start is cheap and
 	// keeps the detector accurate.
-	uids, inodes, setuid, perr := PopulateMaps(loader)
+	uids, inodes, setuid, perr := PopulateMaps(loader, conf)
 	if perr != nil {
 		logging.Logf("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
 			perr, uids, inodes, setuid)

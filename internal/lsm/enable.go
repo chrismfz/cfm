@@ -147,7 +147,7 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	// Populate the FS-005 + CRED-002 maps from the live host so the
 	// BPF programs have something to match against. Best-effort:
 	// partial population is far better than failing the enable.
-	if uids, inodes, setuid, perr := PopulateMaps(l); perr != nil {
+	if uids, inodes, setuid, perr := PopulateMaps(l, conf); perr != nil {
 		fmt.Fprintf(w, "Warning: partial map population: %v\n", perr)
 		fmt.Fprintf(w, "         watched_uids=%d watched_inodes=%d setuid_inodes=%d (populated before error)\n",
 			uids, inodes, setuid)
