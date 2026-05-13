@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"cfm/internal/firewall"
 )
@@ -28,12 +29,30 @@ func panelDNATScript(priority int) string {
 	return b.String()
 }
 
-func (b *Backend) PanelDNATOn(priority int) error {
+func (b *Backend) PanelDNATOn(priority int) (err error) {
+	start := time.Now()
+	b.logPhase("PanelDNATOn", "start", 0, nil, fmt.Sprintf("op=dnat scope=cpanel priority=%d", priority))
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("PanelDNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat scope=cpanel priority=%d", priority))
+	}()
 	_ = b.nftCmd("delete table inet cfm_panel_redirect")
 	return b.nftExpr(panelDNATScript(priority))
 }
 
-func (b *Backend) PanelDNATOff() error {
+func (b *Backend) PanelDNATOff() (err error) {
+	start := time.Now()
+	b.logPhase("PanelDNATOff", "start", 0, nil, "op=dnat scope=cpanel")
+	defer func() {
+		st := "ok"
+		if err != nil {
+			st = "fail"
+		}
+		b.logPhase("PanelDNATOff", st, time.Since(start), err, "op=dnat scope=cpanel")
+	}()
 	_ = b.nftCmd("delete table inet cfm_panel_redirect")
 	return nil
 }

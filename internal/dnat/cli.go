@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"cfm/internal/logging"
 )
 
 type unixSockProbe struct {
@@ -225,55 +223,66 @@ func newWebDNATFailSafeTarget(backend firewall.Backend) (dnatFailSafeTarget, boo
 	// keep these aligned with RunCLI defaults
 	family := "inet"
 	table := "cfm_redirect"
-	httpPort := getenvInt("HTTP_PORT", 9080)
-	httpsPort := getenvInt("HTTPS_PORT", 9043)
 
-	// simple, stable defaults
-	dialTimeout := 300 * time.Millisecond
+	interval := time.Duration(getenvInt("CFM_DNAT_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
+	failNeed := getenvInt("CFM_DNAT_FAILSAFE_CONSECUTIVE_FAILS", 3)
+	recoverOK := getenvInt("CFM_DNAT_FAILSAFE_RECOVER_OK", 5)
 
-	addrHTTP := fmt.Sprintf("127.0.0.1:%d", httpPort)
-	addrHTTPS := fmt.Sprintf("127.0.0.1:%d", httpsPort)
-
-	check := func(addr string) error {
-		c, err := net.DialTimeout("tcp", addr, dialTimeout)
-		if err != nil {
-			return err
+	probe := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ok, reason := probeEdgeHealthy(ctx, ScopeWeb, WebEdgePorts())
+		if ok {
+			return nil
 		}
-		_ = c.Close()
-		return nil
+		return webDNATProbeError{addr: reason, err: errProbeFailed}
 	}
 
 	return dnatFailSafeTarget{
 		Name:             "web",
 		LogPrefix:        "[dnat:failsafe]",
-		Interval:         2 * time.Second,
-		FailureThreshold: 3,
+		Interval:         interval,
+		FailureThreshold: failNeed,
 		StatusCheck: func() (bool, error) {
 			return backend.DNATStatus(family, table)
 		},
-		HealthProbe: func() error {
-			// DNAT is ON -> both ports must be listening.
-			if err := check(addrHTTPS); err != nil {
-				return webDNATProbeError{addr: addrHTTPS, err: err}
-			}
-			if err := check(addrHTTP); err != nil {
-				return webDNATProbeError{addr: addrHTTP, err: err}
-			}
-			return nil
-		},
+		HealthProbe: probe,
 		Cleanup: func(_ int, probeErr error) {
 			_ = backend.DNATOff(family, table)
-			if probeErr != nil {
-				if webErr, ok := probeErr.(webDNATProbeError); ok {
-					logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; last=%s err=%v)", webErr.addr, webErr.err)
-					return
-				}
-				logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening; err=%v)", probeErr)
+			reason := ""
+			if webErr, ok := probeErr.(webDNATProbeError); ok && webErr.addr != "" {
+				reason = webErr.addr
+			} else if probeErr != nil {
+				reason = probeErr.Error()
+			}
+			LogTransition(ScopeWeb, "OFF", "failsafe-off", reason)
+		},
+		IntentCheck: func() bool {
+			enabled, present := LoadIntent(ScopeWeb)
+			return present && enabled
+		},
+		RecoverThreshold: recoverOK,
+		Recover: func(_ int) {
+			// Re-read ports so a runtime env change is honored on recover
+			// instead of pinning to whatever was active at daemon start.
+			hp := getenvInt("HTTP_PORT", 9080)
+			hsp := getenvInt("HTTPS_PORT", 9043)
+			if err := backend.DNATOn(family, table, hp, hsp); err != nil {
+				LogTransition(ScopeWeb, "OFF", "failsafe-recover", fmt.Sprintf("enable failed: %v", err))
 				return
 			}
-			logging.Logf("[dnat:failsafe] DNAT OFF (ports not listening)")
+			LogTransition(ScopeWeb, "ON", "failsafe-recover", "")
 		},
 	}, true
+}
+
+var errProbeFailed = fmt.Errorf("probe failed")
+
+func boolOnOff(b bool) string {
+	if b {
+		return "ON"
+	}
+	return "OFF"
 }
 
 // StartFailSafe runs a simple DNAT watchdog:
@@ -339,6 +348,10 @@ func RunCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
 		}
+		if err := PersistIntent(ScopeWeb, true); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat on: warning: persist intent:", err)
+		}
+		LogTransition(ScopeWeb, "ON", "manual", "")
 		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", *priority, *httpPort, *httpsPort)
 		return 0
 
@@ -347,6 +360,10 @@ func RunCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat off failed:", err)
 			return 1
 		}
+		if err := PersistIntent(ScopeWeb, false); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat off: warning: persist intent:", err)
+		}
+		LogTransition(ScopeWeb, "OFF", "manual", "")
 		fmt.Println("DNAT: OFF")
 		return 0
 
@@ -380,6 +397,31 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		}
 	} else {
 		fmt.Println("State: OFF")
+	}
+
+	if intentEnabled, present := LoadIntent(ScopeWeb); present {
+		fmt.Printf("Persisted intent: %s (file=%s)\n", boolOnOff(intentEnabled), IntentPath(ScopeWeb))
+	} else {
+		fmt.Printf("Persisted intent: <none> (file=%s)\n", IntentPath(ScopeWeb))
+	}
+	// Transition + probe live in the daemon's process memory; fetch
+	// them over the apiserver. When the daemon or apiserver is down
+	// daemonSnapshot returns the zero value and these lines are
+	// suppressed (same as before).
+	snap := daemonSnapshot(ScopeWeb)
+	if pr := snap.LastProbe; !pr.At.IsZero() {
+		if pr.OK {
+			fmt.Printf("Last health probe: ok at %s\n", pr.At.Format(time.RFC3339))
+		} else {
+			fmt.Printf("Last health probe: fail at %s reason=%q\n", pr.At.Format(time.RFC3339), pr.Reason)
+		}
+	}
+	if lt := snap.LastTransition; !lt.At.IsZero() {
+		if lt.Reason == "" {
+			fmt.Printf("Last transition: %s state=%s action=%s\n", lt.At.Format(time.RFC3339), lt.State, lt.Action)
+		} else {
+			fmt.Printf("Last transition: %s state=%s action=%s reason=%q\n", lt.At.Format(time.RFC3339), lt.State, lt.Action, lt.Reason)
+		}
 	}
 
 	fmt.Println()
@@ -558,10 +600,14 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := persistPanelChallengeEnabled(true); err != nil {
-			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
-			return 1
-		}
+		// Intent is persisted only AFTER the full pipeline (listener
+		// reload, nft DNAT, allowlist accepts) succeeds. Writing it up
+		// front meant a mid-pipeline failure or the rollback branch left
+		// intent=ON on disk; RestoreOnStartup would then silently
+		// re-install DNAT on the next daemon restart, undoing the
+		// rollback. Any failure path below returns without touching the
+		// intent file, so the on-disk state is consistent with what was
+		// actually applied.
 		if err := applyPanelChallengeModeToPaths("forced", panelListenerChallengeConfigPaths); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
@@ -585,6 +631,16 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			return 1
 		}
 		setPanelFirewallHealth("OK", "", true)
+		if err := persistPanelChallengeEnabled(true); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist intent:", err)
+		}
+		// Persist the operator-chosen priority so failsafe-recover and
+		// RestoreOnStartup re-apply this exact value instead of falling
+		// back to the -101 default.
+		if err := PersistPanelPriority(*priority); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist priority:", err)
+		}
+		LogTransition(ScopeCPanel, "ON", "manual", fmt.Sprintf("mode=%s priority=%d", selected, *priority))
 		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority)
 		fmt.Println("Phase 2/2 (firewall): OK")
 		if len(changes) == 0 {
@@ -602,6 +658,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
 			return 1
 		}
+		LogTransition(ScopeCPanel, "OFF", "manual", "")
 		fmt.Println("DNAT cpanel: OFF")
 		for _, ch := range changes {
 			fmt.Println("Firewall:", ch)
@@ -677,6 +734,30 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		if h.LastReason != "" {
 			fmt.Printf("Firewall last failure: %s\n", h.LastReason)
+		}
+		if intentEnabled, present := LoadIntent(ScopeCPanel); present {
+			fmt.Printf("Persisted intent: %s (file=%s)\n", boolOnOff(intentEnabled), IntentPath(ScopeCPanel))
+		} else {
+			fmt.Printf("Persisted intent: <none> (file=%s)\n", IntentPath(ScopeCPanel))
+		}
+		// Transition + probe live in the daemon's process memory;
+		// fetch them over the apiserver. Zero value when the daemon
+		// or apiserver is unreachable, in which case both lines are
+		// suppressed by the guards below.
+		snap := daemonSnapshot(ScopeCPanel)
+		if pr := snap.LastProbe; !pr.At.IsZero() {
+			if pr.OK {
+				fmt.Printf("Last health probe: ok at %s\n", pr.At.Format(time.RFC3339))
+			} else {
+				fmt.Printf("Last health probe: fail at %s reason=%q\n", pr.At.Format(time.RFC3339), pr.Reason)
+			}
+		}
+		if lt := snap.LastTransition; !lt.At.IsZero() {
+			if lt.Reason == "" {
+				fmt.Printf("Last transition: %s state=%s action=%s\n", lt.At.Format(time.RFC3339), lt.State, lt.Action)
+			} else {
+				fmt.Printf("Last transition: %s state=%s action=%s reason=%q\n", lt.At.Format(time.RFC3339), lt.State, lt.Action, lt.Reason)
+			}
 		}
 		fmt.Printf("Detected Imunify mappings: %s\n", strings.Join(detectedImunifyMappings(), ", "))
 		fmt.Println("Active panel mappings: 2082->12082, 2083->12083, 2086->12086, 2087->12087, 2095->12095, 2096->12096, 2222->12222")

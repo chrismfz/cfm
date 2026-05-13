@@ -74,6 +74,29 @@ func panelOffWithOptionsAndBackend(autoRemoveAllowlist bool, backend firewall.Ba
 	return result, nil
 }
 
+// panelOffPreserveIntent tears down the cPanel DNAT nft table (and optionally
+// the allowlist) without touching the persisted intent, the listener
+// challenge-mode config, or reloading angie/openresty. It is used by the
+// failsafe so a transient edge breakage doesn't require manual re-enable
+// once the edge recovers — the failsafe's Recover path can flip DNAT back
+// ON immediately because the listener is still in forced mode.
+func panelOffPreserveIntent(autoRemoveAllowlist bool) (panelOffResult, error) {
+	result := panelOffResult{}
+	health := panelGetFirewallHealthFn()
+	_ = panelDeleteRedirectTableFn()
+	if autoRemoveAllowlist {
+		changes, err := panelRemoveAllowlistFn()
+		result.FirewallChanges = changes
+		if err != nil {
+			result.AllowlistError = err
+			panelSetFirewallHealthFn("FAILED", err.Error(), health.Attempted)
+			return result, err
+		}
+	}
+	panelSetFirewallHealthFn("OK", "", health.Attempted)
+	return result, nil
+}
+
 func panelOffFirewallSummary(changes []string) string {
 	if len(changes) == 0 {
 		return "no allowlist changes"

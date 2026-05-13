@@ -320,13 +320,13 @@ func (b *Backend) CleanupChallengeRedirect() error {
 
 func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
 	start := time.Now()
-	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "")
+	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "op=dnat scope=challenge")
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "")
+		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "op=dnat scope=challenge")
 	}()
 	if !b.challengeRedirectEnabled {
 		return b.CleanupChallengeRedirect()
@@ -651,13 +651,13 @@ func (b *Backend) ensureScopedDNATAccepts(namespace string, specs []dnatRuleSpec
 
 func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err error) {
 	start := time.Now()
-	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("op=dnat http_port=%d https_port=%d", httpPort, httpsPort))
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat http_port=%d https_port=%d", httpPort, httpsPort))
 	}()
 	family, table = dnatDefaults(family, table)
 	if httpPort <= 0 || httpsPort <= 0 || httpPort > 65535 || httpsPort > 65535 {
@@ -671,13 +671,13 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err err
 
 func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, httpsHost string, httpsPort int) (err error) {
 	start := time.Now()
-	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("op=dnat scope=challenge http_port=%d https_port=%d", httpPort, httpsPort))
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("http_port=%d https_port=%d", httpPort, httpsPort))
+		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat scope=challenge http_port=%d https_port=%d", httpPort, httpsPort))
 	}()
 	family, table = dnatDefaults(family, table)
 	if httpPort <= 0 || httpsPort <= 0 || httpPort > 65535 || httpsPort > 65535 {
@@ -822,13 +822,13 @@ func (b *Backend) EnsureDNATAccepts() error {
 
 func (b *Backend) DNATOff(family, table string) (err error) {
 	start := time.Now()
-	b.logPhase("DNATOff", "start", 0, nil, "")
+	b.logPhase("DNATOff", "start", 0, nil, "op=dnat")
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("DNATOff", st, time.Since(start), err, "")
+		b.logPhase("DNATOff", st, time.Since(start), err, "op=dnat")
 	}()
 	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
 		return err

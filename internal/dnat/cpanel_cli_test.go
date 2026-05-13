@@ -424,8 +424,12 @@ func TestPanelOn_DefaultChallengeAppliesForcedAndPersists(t *testing.T) {
 		t.Fatalf("expected non-zero code in test env due missing nft/iptables dependencies")
 	}
 
-	if got := loadPersistedPanelChallengeMode(); got != "forced" {
-		t.Fatalf("persisted mode=%q want forced", got)
+	// Intent must NOT be persisted when the on pipeline fails before
+	// the firewall step succeeds. Otherwise a partial-apply leaves
+	// intent=ON on disk and RestoreOnStartup silently re-applies DNAT
+	// on the next daemon restart, undoing the rollback.
+	if got := loadPersistedPanelChallengeMode(); got != "off" {
+		t.Fatalf("persisted mode=%q want off (intent must not advance after failed on)", got)
 	}
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {

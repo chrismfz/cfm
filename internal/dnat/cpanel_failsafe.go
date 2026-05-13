@@ -2,7 +2,6 @@ package dnat
 
 import (
 	"cfm/internal/firewall"
-	"cfm/internal/logging"
 	"context"
 	"fmt"
 	"net"
@@ -47,26 +46,45 @@ func setPanelFailSafeAction(reason string) {
 
 var panelStatusFn = panelStatus
 var panelProbeFn = probePanelTargets
-var panelOffFn = panelOffWithOptions
+var panelOffFn = panelOffPreserveIntent
 
-func newPanelDNATFailSafeTarget() dnatFailSafeTarget {
+func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 	every := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
 	failNeed := getenvInt("CFM_PANEL_FAILSAFE_CONSECUTIVE_FAILS", 3)
-	probeTimeout := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_PROBE_TIMEOUT_MS", 300)) * time.Millisecond
+	recoverOK := getenvInt("CFM_PANEL_FAILSAFE_RECOVER_OK", 5)
+	probeTimeout := time.Duration(getenvInt("CFM_PANEL_FAILSAFE_PROBE_TIMEOUT_MS", 2000)) * time.Millisecond
 	autoRemoveAllowlist := strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST")), "true")
+
+	probe := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		// Combine the panel listener TCP probe with the canonical Lua-aware
+		// healthz on 9080/9043. Either failure mode (panel port down, or
+		// edge Lua broken) trips the failsafe.
+		if err := panelProbeFn(probeTimeout); err != nil {
+			recordProbe(ScopeCPanel, false, err.Error())
+			return err
+		}
+		ok, reason := probeEdgeHealthy(ctx, ScopeCPanel, []EdgePort{
+			{Port: getenvInt("HTTP_PORT", 9080), TLS: false, Healthz: true},
+			{Port: getenvInt("HTTPS_PORT", 9043), TLS: true, Healthz: true},
+		})
+		if ok {
+			return nil
+		}
+		return fmt.Errorf("%s", reason)
+	}
 
 	return dnatFailSafeTarget{
 		Name:             "cpanel",
-		LogPrefix:        "[dnat:cpanel:failsafe]",
+		LogPrefix:        "[dnat:cpanel]",
 		Interval:         every,
 		FailureThreshold: failNeed,
 		StatusCheck: func() (bool, error) {
 			on, _, err := panelStatusFn()
 			return on, err
 		},
-		HealthProbe: func() error {
-			return panelProbeFn(probeTimeout)
-		},
+		HealthProbe: probe,
 		Cleanup: func(failCount int, probeErr error) {
 			offResult, offErr := panelOffFn(autoRemoveAllowlist)
 			reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
@@ -81,18 +99,51 @@ func newPanelDNATFailSafeTarget() dnatFailSafeTarget {
 			}
 			setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
 			setPanelFailSafeAction(reason)
-			logging.Logf("[dnat:cpanel:failsafe] %s", reason)
+			LogTransition(ScopeCPanel, "OFF", "failsafe-off", reason)
 		},
 		UpdateFailCount: setPanelFailSafeCounter,
+		IntentCheck: func() bool {
+			enabled, present := LoadIntent(ScopeCPanel)
+			return present && enabled
+		},
+		RecoverThreshold: recoverOK,
+		Recover: func(_ int) {
+			if backend == nil {
+				LogTransition(ScopeCPanel, "OFF", "failsafe-recover", "no backend")
+				return
+			}
+			priority := PanelStartupPriority()
+			if err := backend.PanelDNATOn(priority); err != nil {
+				LogTransition(ScopeCPanel, "OFF", "failsafe-recover", fmt.Sprintf("enable failed: %v", err))
+				return
+			}
+			// PanelDNATOn only reinstalls the redirect table. If Cleanup
+			// previously removed the allowlist accepts (autoRemoveAllowlist
+			// path), reinstall them here so redirected traffic can pass
+			// the firewall input chain — otherwise we'd recover the
+			// redirect but immediately drop the traffic.
+			if _, err := backend.EnsurePanelDNATAccepts(); err != nil {
+				LogTransition(ScopeCPanel, "ON", "failsafe-recover", fmt.Sprintf("redirect ok but allowlist failed: %v", err))
+				setPanelFirewallHealth("PARTIAL", err.Error(), true)
+				return
+			}
+			setPanelFirewallHealth("OK", "", true)
+			LogTransition(ScopeCPanel, "ON", "failsafe-recover", "")
+		},
 	}
 }
 
-func StartPanelFailSafe(ctx context.Context, _ firewall.Backend) {
+func StartPanelFailSafe(ctx context.Context, backend firewall.Backend) {
+	if backend == nil {
+		// Without a backend we cannot probe or recover; refuse to start so we
+		// don't burn ticks logging "no backend" forever.
+		return
+	}
 	panelFailSafeMu.Lock()
 	panelFailSafe.Enabled = true
 	panelFailSafeMu.Unlock()
 
-	startDNATFailSafe(ctx, newPanelDNATFailSafeTarget())
+	startDNATFailSafe(ctx, newPanelDNATFailSafeTarget(backend))
 }
 
 var panelProbePorts = []int{12082, 12083, 12086, 12087, 12095, 12096, 12222}
