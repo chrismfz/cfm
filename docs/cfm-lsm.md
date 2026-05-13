@@ -2,8 +2,8 @@
 
 ## Status
 
-**Five policies shipping. Monitor mode by default; enforce opt-in
-for EXEC-001 / EXEC-003 / FS-005. CRED-002 and CRED-003 are
+**Six policies shipping. Monitor mode by default; enforce opt-in
+for EXEC-001 / EXEC-003 / EXEC-004 / FS-005. CRED-002 and CRED-003 are
 monitor-only by design (credential telemetry is not a safe blocking
 point).**
 
@@ -11,6 +11,7 @@ Catalog:
 
 - `CFML-EXEC-001` — Block exec from memfd
 - `CFML-EXEC-003` — Reverse shell pattern
+- `CFML-EXEC-004` — Deleted-file exec by web user
 - `CFML-FS-005`   — Sensitive-file modification by web user
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
 - `CFML-CRED-003` — Direct root credential install *(monitor-only)*
@@ -56,11 +57,11 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All five policies default to monitor mode — matches are logged and
+All six policies default to monitor mode — matches are logged and
 notified but the syscall proceeds. Enforce mode (return `-EPERM` on
 a match, failing the calling process's syscall) is **available but
-opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, and `CFML-FS-005`;
-`CFML-CRED-002` and `CFML-CRED-003` are monitor-only by design
+opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, `CFML-EXEC-004`,
+and `CFML-FS-005`; `CFML-CRED-002` and `CFML-CRED-003` are monitor-only by design
 (returning -EPERM from credential hooks can deadlock systemd helpers
 and pkexec mid-transition, and CRED-003 is fentry telemetry rather
 than an LSM decision point; enable.go and lifecycle.go both downgrade
@@ -88,15 +89,15 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: five shipping policies
-covering exec (CFML-EXEC-001 / CFML-EXEC-003), sensitive-file write
-(CFML-FS-005), post-setuid credential transitions (CFML-CRED-002),
-and direct root credential installs (CFML-CRED-003). The MVP shipped
+The scope here is intentionally narrow: six shipping policies
+covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004),
+sensitive-file write (CFML-FS-005), post-setuid credential transitions
+(CFML-CRED-002), and direct root credential installs (CFML-CRED-003). The MVP shipped
 with EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the
 next-policies pass once the MVP's verifier and pinning behaviour
 proved stable on EL10. CRED-003 closes the documented direct
 `commit_creds()` gap as monitor-only telemetry. Anything beyond
-these five requires a separate, named proposal — not a TODO inside
+these six requires a separate, named proposal — not a TODO inside
 this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
@@ -247,6 +248,51 @@ verifier-complexity risk on older RHEL 9 kernels. The hot loop must be
 bounded (cap at fd ≤ 2) and the socket-state read must use existing CO-RE
 relocations rather than custom field offsets. Budget verifier complexity
 explicitly before committing the design to that hook layout.
+
+### `CFML-EXEC-004` — Deleted-file exec by web user
+
+| | |
+|---|---|
+| Hook | `bprm_check_security` |
+| Default mode | `monitor`; enforce is opt-in after telemetry |
+| FP risk | Unknown-low; intentionally monitor-first |
+| Perf impact | Negligible (exec is not a hot path) |
+
+**Description.** At `bprm_check_security`, inspect
+`bprm->file->f_path.dentry` and the backing inode. A process that
+opens a payload, unlinks it, and then executes the still-open file
+typically leaves two kernel-side clues: the inode link count is zero
+and/or the dentry has been unhashed from the namespace. `CFML-EXEC-004`
+emits an event when either state is present and the calling uid is in
+`cfm_watched_uids` (the daemon-populated web-class uid set used by
+`CFML-FS-005`). The implementation also consumes the web-origin task
+state when that tracker is enabled, but origin-only matches remain
+monitor-only while telemetry is gathered.
+
+**Rationale.** Deleted-file exec is a common stealth step after web
+compromise: stage a binary on disk, open it, unlink it to evade simple
+path-based scanners and cleanup sweeps, then execute via the open file
+descriptor. The behaviour is more specific than “web user execs from
+/tmp” and complements `CFML-EXEC-001`: memfd/fileless payloads stay
+owned by EXEC-001, while EXEC-004 covers ordinary filesystem payloads
+that were subsequently unlinked.
+
+**Enforcement.** The default and recommended production rollout is
+`mode = monitor`. `mode = enforce` is supported but should be enabled
+only after host-local telemetry confirms no legitimate panel helpers,
+backup tools, deployment systems, or AV/updater workflows execute
+unlinked files under web-class uids. Web-origin-only matches are
+reported but not blocked even when the policy is set to enforce.
+
+**Example config.**
+
+```ini
+[policy "CFML-EXEC-004"]
+mode = monitor   # start here; promote to enforce only after telemetry
+
+# Later, on hosts with a clean baseline:
+# mode = enforce
+```
 
 ### `CFML-FS-005` — Sensitive-file modification by web user
 
@@ -618,8 +664,22 @@ into a per-CPU ringbuf; the Go side enriches it (pid → cgroup → user
 `/etc/cfm/kernsec.conf`. The earlier draft proposed TOML; align with
 the existing format in the rest of CFM instead. Three modes per
 policy: `disabled`, `monitor`, `enforce`. Per-vhost overrides are
-reserved for future use; the two MVP policies are not vhost-keyed
-and do not need them.
+reserved for future use; these policies are not vhost-keyed and do
+not need them.
+
+Example monitor-first rollout for deleted/unlinked executable telemetry:
+
+```ini
+[policy "CFML-EXEC-004"]
+mode = monitor
+```
+
+Promote only after reviewing telemetry from the local host:
+
+```ini
+[policy "CFML-EXEC-004"]
+mode = enforce
+```
 
 The `enforce` vs `monitor` decision is **compiled into the BPF
 program at load time** via a `bpf2go` constant rewrite, so the hot
@@ -1532,11 +1592,11 @@ useful in compensation.
 ### Candidate rules
 
 The five rules below cover the broad surface across those host
-classes. Each is sized similarly to the existing four — single
+classes. Each is sized similarly to the existing shipped policies — single
 BPF program (or small group), one allowlist map, monitor-mode
 default, optional enforce.
 
-**CFML-EXEC-004 — Shell exec by service-account user.**
+**CFML-EXEC-005 — Shell exec by service-account user.**
 Hook `bprm_check_security`. Blocks `bash` / `sh` / `dash` / `zsh`
 (plus `python`, `perl`, `ruby` interactive REPLs) when invoked
 by uid in a configurable "service account" set: `named`,
@@ -1595,7 +1655,7 @@ qemu sometimes pull in modules on guest start).
 ### Per-host-class default mix
 
 ```
-                       EXEC-001  EXEC-003  FS-005  CRED-002  EXEC-004  NET-002  FS-009  FS-010  MOD-001
+                       EXEC-001  EXEC-003  FS-005  CRED-002  EXEC-005  NET-002  FS-009  FS-010  MOD-001
 nameserver              monitor   monitor   skip    monitor   monitor   monitor  monitor monitor monitor
 monitoring node         monitor   monitor   skip    monitor   monitor   skip*    monitor monitor monitor
 plain nginx host        monitor   monitor   monitor monitor   monitor   skip     monitor monitor skip
@@ -1615,7 +1675,7 @@ is mostly about hypervisor compromise rather than guest.
 1. **CFML-FS-009 (boot/kernel-tree)** — highest signal across every
    host class, lowest FP, smallest verifier surface. Same shape as
    FS-005 with a different watched-paths set.
-2. **CFML-EXEC-004 (service-user shell)** — nameservers and
+2. **CFML-EXEC-005 (service-user shell)** — nameservers and
    monitoring nodes get most benefit. Watched-uid set is the inverse
    of FS-005's (system users, not panel users).
 3. **CFML-MOD-001 (module load)** — catches the rootkit case across

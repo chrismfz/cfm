@@ -17,6 +17,12 @@ const (
 	// to exec with fds 0/1/2 dup'd onto a remote-connected socket.
 	PolicyReverseShell PolicyID = "CFML-EXEC-003"
 
+	// PolicyDeletedFileExec — CFML-EXEC-004: detect a web-class
+	// user (or later, web-origin task) executing a file whose backing
+	// inode has been unlinked/deleted after open. Monitor-first by
+	// default; enforce is opt-in only after telemetry.
+	PolicyDeletedFileExec PolicyID = "CFML-EXEC-004"
+
 	// PolicySensitiveWrite — CFML-FS-005: detect a web-class user
 	// (apache / nginx / php-fpm / panel-managed account) attempting
 	// to modify a host-sensitive file (/etc/passwd, /etc/shadow,
@@ -99,6 +105,13 @@ func AllPolicies() []Policy {
 			Hook:        "bprm_check_security",
 			DefaultMode: ModeDisabled,
 			Description: "Detect exec where stdin/stdout/stderr are dup'd to a remote-connected socket.",
+		},
+		{
+			ID:          PolicyDeletedFileExec,
+			Title:       "Deleted-file exec by web user",
+			Hook:        "bprm_check_security",
+			DefaultMode: ModeDisabled,
+			Description: "Detect web-class users or web-origin tasks executing deleted/unlinked files; monitor-first, enforce only after telemetry.",
 		},
 		{
 			ID:          PolicySensitiveWrite,

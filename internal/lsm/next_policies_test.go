@@ -11,6 +11,7 @@ import (
 // stay stable.
 func TestNewPoliciesRegistered(t *testing.T) {
 	want := map[PolicyID]string{
+		PolicyDeletedFileExec:   "CFML-EXEC-004",
 		PolicySensitiveWrite:    "CFML-FS-005",
 		PolicyCredEscal:         "CFML-CRED-002",
 		PolicyDirectCredInstall: "CFML-CRED-003",

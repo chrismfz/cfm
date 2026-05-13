@@ -56,6 +56,28 @@ func TestParseEvent_MemfdExec(t *testing.T) {
 	}
 }
 
+func TestParseEvent_DeletedFileExec(t *testing.T) {
+	raw := buildWireEvent(t,
+		bpfPolicyDeletedFileExec, 222, 222, 1001, 1001, 123456,
+		"php-fpm", "payload",
+	)
+	raw[29] = EventFlagUnlinkedInode | EventFlagUnhashedDentry
+
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyDeletedFileExec {
+		t.Errorf("PolicyID: got %q, want %q", ev.PolicyID, PolicyDeletedFileExec)
+	}
+	if ev.Flags&(EventFlagUnlinkedInode|EventFlagUnhashedDentry) == 0 {
+		t.Errorf("Flags: got %#x, want deleted/unhashed bits", ev.Flags)
+	}
+	if ev.Filename != "payload" {
+		t.Errorf("Filename: got %q, want payload", ev.Filename)
+	}
+}
+
 func TestParseEvent_TrimsTrailingNUL(t *testing.T) {
 	// Simulate what the BPF program actually writes: comm + NUL + garbage,
 	// which is the standard kernel convention.
@@ -134,11 +156,17 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	if PolicyReverseShell == "" {
 		t.Fatal("PolicyReverseShell is the empty string — was the constant accidentally removed?")
 	}
+	if PolicyDeletedFileExec == "" {
+		t.Fatal("PolicyDeletedFileExec is the empty string — was the constant accidentally removed?")
+	}
 	if bpfPolicyMemfdExec != 1 {
 		t.Errorf("bpfPolicyMemfdExec mismatch: Go=%d, BPF=1 (see common.bpf.h)", bpfPolicyMemfdExec)
 	}
 	if bpfPolicyReverseShell != 3 {
 		t.Errorf("bpfPolicyReverseShell mismatch: Go=%d, BPF=3 (see common.bpf.h)", bpfPolicyReverseShell)
+	}
+	if bpfPolicyDeletedFileExec != 4 {
+		t.Errorf("bpfPolicyDeletedFileExec mismatch: Go=%d, BPF=4 (see common.bpf.h)", bpfPolicyDeletedFileExec)
 	}
 	if bpfPolicyCredEscal != 7 {
 		t.Errorf("bpfPolicyCredEscal mismatch: Go=%d, BPF=7 (see common.bpf.h)", bpfPolicyCredEscal)

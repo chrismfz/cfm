@@ -34,17 +34,21 @@ func TestRewriteEnforceConstants_RealSpec(t *testing.T) {
 		t.Fatalf("loadCfmlsm: %v", err)
 	}
 
-	// Both globals should be present in the freshly-loaded spec.
+	// Existing embedded-object globals should be present in the freshly-loaded spec.
+	// CFML-EXEC-004's source is committed without the regenerated .o; operators
+	// run `make bpf` locally to add cfm_enforce_deleted_file_exec.
 	for _, name := range []string{"cfm_enforce_memfd_exec", "cfm_enforce_revshell"} {
 		if _, ok := spec.Variables[name]; !ok {
 			t.Errorf("spec.Variables missing %q — BPF C / Go names out of sync", name)
 		}
 	}
 
-	// Rewrite: EXEC-001 enforce, EXEC-003 monitor.
+	// Rewrite: EXEC-001 enforce, EXEC-003 monitor, EXEC-004 disabled until
+	// this checkout's embedded .o is regenerated with `make bpf`.
 	err = rewriteEnforceConstants(spec, map[PolicyID]Mode{
-		PolicyMemfdExec:    ModeEnforce,
-		PolicyReverseShell: ModeMonitor,
+		PolicyMemfdExec:       ModeEnforce,
+		PolicyReverseShell:    ModeMonitor,
+		PolicyDeletedFileExec: ModeDisabled,
 	})
 	if err != nil {
 		t.Fatalf("rewriteEnforceConstants: %v", err)
@@ -64,6 +68,32 @@ func TestRewriteEnforceConstants_RealSpec(t *testing.T) {
 	}
 	if revshell != 0 {
 		t.Errorf("revshell = %d after rewrite, want 0", revshell)
+	}
+	if vs, ok := spec.Variables["cfm_enforce_deleted_file_exec"]; ok {
+		var deleted uint8
+		if err := vs.Get(&deleted); err != nil {
+			t.Fatalf("Get deleted_file_exec: %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("deleted_file_exec = %d after disabled rewrite, want 0", deleted)
+		}
+	}
+}
+
+func TestRewriteEnforceConstants_DeletedFileExecRequiresRegeneratedObjectWhenEnabled(t *testing.T) {
+	spec, err := loadCfmlsm()
+	if err != nil {
+		t.Fatalf("loadCfmlsm: %v", err)
+	}
+	if _, ok := spec.Variables["cfm_enforce_deleted_file_exec"]; ok {
+		t.Skip("embedded object has been regenerated; compatibility error path no longer applies")
+	}
+	err = rewriteEnforceConstants(spec, map[PolicyID]Mode{PolicyDeletedFileExec: ModeMonitor})
+	if err == nil {
+		t.Fatal("expected enabling CFML-EXEC-004 to require a regenerated BPF object")
+	}
+	if !strings.Contains(err.Error(), "make bpf") {
+		t.Errorf("error %q should tell operator to run make bpf", err.Error())
 	}
 }
 

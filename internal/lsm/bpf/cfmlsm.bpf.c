@@ -10,9 +10,11 @@
  * --------
  *   cfm_memfd_exec  — CFML-EXEC-001 (memfd exec detector)
  *   cfm_revshell    — CFML-EXEC-003 (reverse-shell-pattern detector)
+ *   cfm_deleted_file_exec
+ *                   — CFML-EXEC-004 (deleted/unlinked exec by web user)
  *   cfm_cred003     — CFML-CRED-003 (direct root cred install detector)
  *
- * Both hook bprm_check_security and default to monitor mode. Per
+ * Exec policies hook bprm_check_security and default to monitor mode. Per
  * docs/cfm-lsm.md the enforce-mode flip happens via a bpf2go
  * constant rewrite once telemetry justifies it; audit emission is
  * best-effort, but enforce/allow verdicts must not depend on
@@ -66,8 +68,9 @@ struct {
  * fold the comparison at compile time (otherwise the unreachable
  * branch would be dead code stripped and the rewrite would have
  * nothing to flip). */
-volatile const __u8 cfm_enforce_memfd_exec = 0;
-volatile const __u8 cfm_enforce_revshell   = 0;
+volatile const __u8 cfm_enforce_memfd_exec         = 0;
+volatile const __u8 cfm_enforce_revshell           = 0;
+volatile const __u8 cfm_enforce_deleted_file_exec  = 0;
 
 /* EPERM (1) — what bprm_check_security returns when an LSM denies
  * the exec. Keeps the negative-errno convention explicit. */
@@ -450,6 +453,124 @@ static __always_inline void cfm_mark_current_web_origin_if_needed(void)
     if (!cfm_current_cred_has_watched_uid())
         return;
     cfm_mark_current_web_origin();
+}
+
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-004 — Deleted-file exec by web user.
+ *
+ * Hook: bprm_check_security (LSM)
+ *
+ * Mechanism: inspect bprm->file->f_path.dentry and the backing inode.
+ * A regular executable that was opened and then unlinked typically has
+ * inode->__i_nlink == 0, and its dentry is commonly unhashed
+ * (d_hash.pprev == NULL). Either state is suspicious when the calling
+ * task is a web-class uid. If web-origin task storage is enabled, tasks
+ * that originated under a watched uid also emit telemetry after uid
+ * transitions, but those origin-only matches remain monitor-only.
+ *
+ * Mode: monitor by default. Enforcement is deliberately opt-in via
+ * cfm_enforce_deleted_file_exec only after production telemetry proves
+ * the signal is clean.
+ * ------------------------------------------------------------------- */
+
+static __always_inline bool cfm_dentry_unhashed(struct dentry *d)
+{
+    if (!d)
+        return false;
+
+    return BPF_CORE_READ(d, d_hash.pprev) == NULL;
+}
+
+static __always_inline int cfm_deleted_file_exec_flags(struct dentry *dentry,
+                                                       struct inode *inode,
+                                                       __u8 *flags)
+{
+    if (!dentry || !inode || !flags)
+        return 0;
+
+    /* EXEC-001 owns anonymous memfd telemetry. Do not double-report it
+     * as a deleted-file exec just because memfd inodes also have no
+     * durable link from a normal filesystem namespace. */
+    if (dentry_name_is_memfd(dentry))
+        return 0;
+
+    __u8 f = 0;
+    unsigned int nlink = BPF_CORE_READ(inode, __i_nlink);
+    if (nlink == 0)
+        f |= CFM_LSM_F_UNLINKED_INODE;
+    if (cfm_dentry_unhashed(dentry))
+        f |= CFM_LSM_F_UNHASHED_DENTRY;
+
+    *flags = f;
+    return f != 0;
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_deleted_file_exec, struct linux_binprm *bprm, int ret)
+{
+    if (ret != 0)
+        return ret;
+
+    cfm_mark_current_web_origin_if_needed();
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool current_uid_watched = cfm_uid_watched(uid);
+    bool origin_watched = cfm_task_is_web_origin(bpf_get_current_task_btf());
+    if (!current_uid_watched && !origin_watched)
+        return 0;
+
+    struct file *file = BPF_CORE_READ(bprm, file);
+    if (!file)
+        return 0;
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    if (!inode)
+        return 0;
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (!dentry)
+        return 0;
+
+    __u8 flags = 0;
+    if (!cfm_deleted_file_exec_flags(dentry, inode, &flags))
+        return 0;
+    if (origin_watched && !current_uid_watched)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e) {
+        if (current_uid_watched && cfm_enforce_deleted_file_exec)
+            return CFM_LSM_DENY;
+        return 0;
+    }
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_DELETED_FILE_EXEC;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+
+    /* Origin-only matches stay monitor-only while the origin signal is
+     * still being proven out. Current web-class uid enforcement is opt-in. */
+    if (current_uid_watched && cfm_enforce_deleted_file_exec)
+        return CFM_LSM_DENY;
+    return 0;
 }
 
 /* Emit one FS-005 event. Caller has already established that uid/origin
