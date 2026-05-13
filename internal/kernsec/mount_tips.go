@@ -210,61 +210,31 @@ func tipFixExistingMount(
 
 // tipCreateSeparateMount handles MountNotSeparate — /tmp or /var/tmp
 // is on the root filesystem, so the audit cannot apply mount options
-// here without first carving out a dedicated filesystem. We give the
-// operator both common patterns (RAM-backed tmpfs, disk-backed loop
-// file in the cPanel `securetmp` style) so they can pick the one that
-// matches the host's workload + RAM budget.
+// here without first carving out a dedicated filesystem. We point the
+// operator at `cfm kernsec secure-tmp`, which handles the size+free-
+// space pre-flights, ext4 loop-file creation, /var/tmp staging, and
+// fstab edit in one command. The full step-by-step was previously
+// inline here but moved into the subcommand so status output stays
+// compact and there's exactly one canonical recipe.
 func tipCreateSeparateMount(rule MountRule) MountTip {
 	switch rule.MountPoint {
 	case "/tmp":
 		return MountTip{
-			Headline: "/tmp is on /; create a dedicated mount before hardening",
+			Headline: "/tmp is on /; run `cfm kernsec secure-tmp --size <N>G` to harden (reboot required)",
 			Body: []string{
 				"  /tmp has no dedicated filesystem — it lives on the root partition.",
-				"  Two common patterns to give it its own filesystem (pick one):",
-				"",
-				"  Option A — RAM-backed tmpfs (fast, no disk I/O, lost on reboot):",
-				"    Append to /etc/fstab:",
-				"      tmpfs /tmp tmpfs nodev,nosuid,noexec,size=4G,mode=1777 0 0",
-				"    Apply now (will move existing /tmp contents to RAM):",
-				"      mount /tmp",
-				"    Caveats: tmpfs counts against RAM; size= caps it. Increase only",
-				"    if you have headroom. Do not use on hosts with tiny RAM.",
-				"",
-				"  Option B — disk-backed loop file (cPanel `securetmp` style):",
-				"    fallocate -l 4G /var/tmpDSK",
-				"    mkfs.ext4 -F /var/tmpDSK",
-				"    Append to /etc/fstab:",
-				"      /var/tmpDSK /tmp ext4 nodev,nosuid,noexec,loop 0 0",
-				"    Migrate existing contents first if /tmp isn't empty:",
-				"      mkdir /tmp.new && mount /var/tmpDSK /tmp.new",
-				"      cp -a /tmp/. /tmp.new/ && umount /tmp.new && rmdir /tmp.new",
-				"    Then:",
-				"      mount /tmp",
-				"",
-				"  Verify either way:  findmnt /tmp",
+				"  Run `cfm kernsec secure-tmp --size 16G --dry-run` to preview, then",
+				"  `cfm kernsec secure-tmp --size 16G` to carve a hardened /tmp +",
+				"  /var/tmp pair. Reboot is required (live remount would break every",
+				"  service with PrivateTmp=yes — mysqld, named, php-fpm, nginx, exim).",
 			},
 		}
 	case "/var/tmp":
 		return MountTip{
-			Headline: "/var/tmp is on /; bind to /tmp once /tmp is a separate mount",
+			Headline: "/var/tmp is on /; covered by the same `cfm kernsec secure-tmp` flow as /tmp",
 			Body: []string{
-				"  /var/tmp has no dedicated filesystem. The simplest correct fix is",
-				"  to make it a bind of /tmp (which must itself be a separate mount),",
-				"  so both directories share the same hardening.",
-				"",
-				"  1. First make /tmp a separate mount — see the /tmp row's tip.",
-				"",
-				"  2. Then bind /var/tmp to /tmp.  Append to /etc/fstab:",
-				"       /tmp /var/tmp none bind 0 0",
-				"     Apply:",
-				"       mount /var/tmp",
-				"",
-				"  Alternative: replace /var/tmp with a symlink to /tmp (older",
-				"  cPanel pattern). Bind is preferred — preserves the directory",
-				"  inode and most package managers expect /var/tmp to be a real path.",
-				"",
-				"  Verify:  findmnt /var/tmp",
+				"  secure-tmp binds /var/tmp to /tmp once the new /tmp filesystem is",
+				"  in place. See the /tmp row above for the command.",
 			},
 		}
 	case "/dev/shm":

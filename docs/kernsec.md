@@ -370,7 +370,34 @@ edits `/etc/fstab`.
 
 The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and the matching `/etc/fstab` or systemd `.mount` change.
 
-For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for automation.
+For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them via the regular `apply` path. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for the unattended apply flow. Operators who want to harden them can run `cfm kernsec secure-tmp --size <N>G` as a separate explicit step — see the dedicated section below.
+
+#### `cfm kernsec secure-tmp` — operator-invoked /tmp + /var/tmp hardening
+
+`cfm kernsec secure-tmp --size <N>G` carves `/tmp` and `/var/tmp` out into a dedicated hardened filesystem in one command. It is intentionally a separate verb (not part of `apply`) because activating the new mounts requires a reboot, and that's a decision the operator should make explicitly.
+
+What it does:
+
+1. **Pre-flights.** Refuses if `/tmp` or `/var/tmp` is already a separate mount, if `/etc/fstab` already has an entry for either path, if `/var/tmpDSK` already exists, if free space on `/var` is less than `<size> + 1G` headroom, or if `<size>` would consume more than 50% of available free space.
+2. **Creates the backing file.** `fallocate -l <size> /var/tmpDSK` (mode `0600`), then `mkfs.ext4 -F -L cfm-securetmp /var/tmpDSK`.
+3. **Stages `/var/tmp` contents.** Mounts the new filesystem at `/mnt/.cfm-newtmp`, `chmod 1777`, copies every top-level entry of `/var/tmp` into it (skipping `systemd-private-*` directories — those are recreated by systemd when each service restarts after boot). `/tmp` is intentionally *not* copied since `systemd-tmpfiles` wipes `/tmp` on every boot by design.
+4. **Unmounts the scratch path** and removes the empty `/mnt/.cfm-newtmp` directory.
+5. **Appends `/etc/fstab`** with a `BackupOnce` of the original to `/etc/fstab.cfm-kernsec.bak`:
+   ```
+   /var/tmpDSK  /tmp      ext4  loop,nodev,nosuid,noexec,rw  0 0
+   /tmp         /var/tmp  none  bind                          0 0
+   ```
+6. **Stops.** The operator reboots when convenient. Activation is reboot-only; the subcommand never tries to `umount /tmp` on the running host.
+
+Why reboot-only: every service with `PrivateTmp=yes` (`mysqld`, `named`, `nginx`, `php-fpm`, `exim`, `memcached`, `dbus-broker`, `chronyd`, `irqbalance`, `systemd-logind`, …) holds a kernel bind mount that pins the live `/tmp` inode. `umount /tmp` returns `EBUSY` until every one of those services is restarted, and remounting under them risks stale file descriptors for in-flight temp files. The reboot is the only clean way to clear both problems at once and pick up the new fstab entries.
+
+`--dry-run` previews the plan (size, device path, fstab lines, staged entry count) without creating the loop file or editing fstab.
+
+To revert a `secure-tmp` install:
+
+1. `cp /etc/fstab.cfm-kernsec.bak /etc/fstab`
+2. `umount /var/tmp /tmp` (or `systemctl reboot`)
+3. `rm /var/tmpDSK`
 
 `/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, and an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten.
 

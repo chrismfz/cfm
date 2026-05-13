@@ -140,15 +140,21 @@ func TestBuildMountTip_NotSeparate_Tmp(t *testing.T) {
 	d := MountDetail{State: MountNotSeparate}
 	tip := buildMountTip(rule, d, stubFstab(""), stubUnitFinder(nil))
 
+	if !strings.Contains(tip.Headline, "cfm kernsec secure-tmp") {
+		t.Errorf("/tmp headline should point at the secure-tmp subcommand; got: %s", tip.Headline)
+	}
 	body := strings.Join(tip.Body, "\n")
-	if !strings.Contains(body, "Option A") || !strings.Contains(body, "Option B") {
-		t.Errorf("the not-separate tip should offer tmpfs AND loop options; got:\n%s", body)
+	if !strings.Contains(body, "cfm kernsec secure-tmp --size") {
+		t.Errorf("/tmp body should reference the secure-tmp command with --size; got:\n%s", body)
 	}
-	if !strings.Contains(body, "fallocate -l 4G /var/tmpDSK") {
-		t.Errorf("loop option should include fallocate command; got:\n%s", body)
+	if !strings.Contains(body, "Reboot is required") {
+		t.Errorf("/tmp body should call out that reboot is required (PrivateTmp); got:\n%s", body)
 	}
-	if !strings.Contains(body, "tmpfs /tmp tmpfs nodev,nosuid,noexec,size=4G,mode=1777 0 0") {
-		t.Errorf("tmpfs option should include a concrete fstab line; got:\n%s", body)
+	// The verbose Option-A/B walkthrough that used to live here was
+	// intentionally moved into the secure-tmp subcommand's own
+	// preview output — keep the status tip short.
+	if strings.Contains(body, "Option A") || strings.Contains(body, "Option B") {
+		t.Errorf("status tip should no longer carry the long Option A/B walkthrough; got:\n%s", body)
 	}
 }
 
@@ -157,9 +163,12 @@ func TestBuildMountTip_NotSeparate_VarTmp(t *testing.T) {
 	d := MountDetail{State: MountNotSeparate}
 	tip := buildMountTip(rule, d, stubFstab(""), stubUnitFinder(nil))
 
+	if !strings.Contains(tip.Headline, "secure-tmp") {
+		t.Errorf("/var/tmp tip should point at the secure-tmp flow; got: %s", tip.Headline)
+	}
 	body := strings.Join(tip.Body, "\n")
-	if !strings.Contains(body, "/tmp /var/tmp none bind 0 0") {
-		t.Errorf("/var/tmp tip should recommend a bind mount to /tmp; got:\n%s", body)
+	if !strings.Contains(body, "binds /var/tmp to /tmp") {
+		t.Errorf("/var/tmp body should explain the bind relationship; got:\n%s", body)
 	}
 }
 

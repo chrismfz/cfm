@@ -66,6 +66,8 @@ func RunCLI(args []string) int {
 		return runRollbackCmd(args[1:], os.Stdout)
 	case "modules":
 		return runModulesCmd(args[1:], os.Stdout)
+	case "secure-tmp":
+		return runSecureTmpCmd(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -211,6 +213,31 @@ func runMonitorCmd(args []string, w io.Writer) int {
 	})
 }
 
+// runSecureTmpCmd parses the secure-tmp subcommand flags. `--size` is
+// the only required argument; everything else (device path, bind
+// /var/tmp) is fixed per the cPanel-style convention to keep the
+// command memorable (`cfm kernsec secure-tmp --size 16G`). `--dry-run`
+// surfaces the plan without writing.
+func runSecureTmpCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("kernsec secure-tmp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	size := fs.String("size", "", "size of /var/tmpDSK (e.g. 16G; minimum 1G, maximum 256G)")
+	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
+
+	if rc, done := handleFlagErr("kernsec secure-tmp", fs.Parse(args), w); done {
+		return rc
+	}
+	sizeBytes, err := ParseSecureTmpSize(*size)
+	if err != nil {
+		fmt.Fprintln(w, "kernsec secure-tmp:", err)
+		return 2
+	}
+	return RunSecureTmp(w, SecureTmpOptions{
+		SizeBytes: sizeBytes,
+		DryRun:    *dryRun,
+	})
+}
+
 func runRollbackCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("kernsec rollback", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -314,6 +341,7 @@ Subcommands:
   rollback            Restore bootloader config from .cfm-kernsec.bak and refresh (operator recovery path)
   monitor             Manage the periodic drift-check systemd timer (enable | disable | remove | status)
   modules             Module signature audit (audit subcommand: cfm kernsec modules audit)
+  secure-tmp          Carve /tmp + /var/tmp into a dedicated hardened filesystem (reboot required)
   help                Show this message
 
 Status / text flags:
@@ -343,6 +371,10 @@ Disable flags:
   --no-unload         Skip the post-write modprobe -r over managed-and-loaded modules (default: unload now)
   --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
+
+Secure-tmp flags:
+  --size <N>G         Size of /var/tmpDSK (required; 1G..256G, must be <50% of free space on /var)
+  --dry-run           Show the plan without creating the loop file or editing fstab
 
 Rollback flags:
   --dry-run           Show what would be restored without writing
