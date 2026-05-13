@@ -72,6 +72,12 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	// keep memo map; it will be updated by stat loop
 	c.filesMu.Unlock()
 
+	// Persist the snapshot so workers (angie/openresty) can load it on
+	// init_worker before the sslcollector socket is reachable. Best-effort:
+	// errors are logged inside WriteSnapshot; do not propagate, since a
+	// failed snapshot write must never break the running daemon.
+	c.WriteSnapshot()
+
 	return nil
 }
 

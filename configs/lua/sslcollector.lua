@@ -103,7 +103,11 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 
 -- Poll backoff: starts at POLL_SECS_MIN, doubles on each /stats failure.
 -- Resets to POLL_SECS_MIN on any successful /stats response.
-local POLL_SECS_MIN = 300   -- 5m  base (healthy)
+-- 90s baseline: a new cert added on the cfm host is visible to running
+-- workers within ~90s of the daemon's Refresh() picking it up (fsnotify
+-- watcher fires within ~2s, so end-to-end is typically <2 minutes). The
+-- /stats roundtrip is a few hundred bytes — cost is trivial.
+local POLL_SECS_MIN = 90    -- 90s base (healthy)
 local POLL_SECS_MAX = 1200  -- 20m ceiling (sustained failures)
 
 -- Lock TTL for do_dumpall(). High enough to cover large payloads + latency.
@@ -138,14 +142,16 @@ local REQUIRE_VERSION_FIELD = false
 -- Disk snapshot paths (never used on the handshake path)
 local SNAP_DIR  = "/var/lib/cfm/sslcollector"
 local SNAP_FILE = SNAP_DIR .. "/dump.json"
-local SNAP_TMP  = SNAP_DIR .. "/dump.json.tmp"
+-- SNAP_TMP intentionally removed: the worker no longer writes the
+-- snapshot. The cfm daemon writes /var/lib/cfm/sslcollector/dump.json
+-- via an atomic .tmp + rename inside internal/sslcollector/snapshot.go.
 
 -- ---------------------------------------------------------------------------
 -- Worker-local state
 -- ---------------------------------------------------------------------------
 
 local poll_interval       = POLL_SECS_MIN  -- per-worker mutable backoff level
-local snap_dir_ok         = false          -- ensures os.execute runs once per worker
+-- (snap_dir_ok removed with the worker-side write path)
 -- Per-worker version and freshness tracking.
 -- Must NOT use the shared dict for version comparison: when storage was
 -- shared, one worker's fetch covered all workers so version-dedup was
@@ -298,55 +304,15 @@ local function validate_dumpall_body(body)
 end
 
 -- ---------------------------------------------------------------------------
--- Disk snapshot: write / read
+-- Disk snapshot: read (write is owned by the cfm daemon — see
+-- internal/sslcollector/snapshot.go). The worker no longer writes
+-- /var/lib/cfm/sslcollector/dump.json: doing so created a chicken-and-egg
+-- where a worker calling /dumpall while cfm's first Refresh was still
+-- mid-scan would persist a partial payload over a previously-good
+-- snapshot, and the next reboot would only see the partial certs.
+-- The daemon now writes the snapshot after every full Refresh swap, so
+-- the file always reflects a complete cert index when present.
 -- ---------------------------------------------------------------------------
-
-local function ensure_snap_dir()
-  if snap_dir_ok then return end
-  -- Directory is created and owned by the cfm daemon at startup (root:cfm 0770).
-  -- Verify it exists; log and abort if missing rather than trying to create it
-  -- from inside an nginx worker (which may lack the necessary permissions).
-  local ok = os.execute("test -d " .. SNAP_DIR)
-  if not ok then
-    ngx.log(ngx.ERR, "[sslcollector] snapshot dir missing: ", SNAP_DIR,
-      " — ensure cfm daemon has started at least once")
-    return
-  end
-  snap_dir_ok = true
-end
-
--- [FIX-B] write_snapshot is only called when has_version=true.
--- The check is enforced in do_dumpall(); this function assumes the caller
--- has already verified version presence. It re-validates for safety.
-local function write_snapshot(body, parsed_data)
-  -- Double-check version gate (defensive; caller should already have checked)
-  local ver = (parsed_data and (parsed_data.Version or parsed_data.version)) or ""
-  if ver == "" then
-    return false, "refused: no Version field in payload (would overwrite versioned snapshot)"
-  end
-
-  ensure_snap_dir()
-
-  local f, ferr = io.open(SNAP_TMP, "wb")
-  if not f then
-    return false, "open tmp: " .. (ferr or "?")
-  end
-  f:write(body)
-  f:close()
-
-  local ok, ren_err = os.rename(SNAP_TMP, SNAP_FILE)
-  if not ok then
-    return false, "rename: " .. (ren_err or "?")
-  end
-
--- best-effort tighten permissions on the snapshot file (contains private keys).
--- Directory permissions are managed by the cfm daemon (root:cfm 0770) — do
--- not chmod the directory here or it will fight the daemon setting.
-os.execute("chmod 0640 " .. SNAP_FILE .. " >/dev/null 2>&1")
-
-  dict:set("meta:snapshot_written_at", ngx.time(), 0)
-  return true
-end
 
 local function read_snapshot()
   local f = io.open(SNAP_FILE, "rb")
@@ -511,19 +477,15 @@ local function do_dumpall()
     -- Always update RAM cache (soft: version optional)
     ingest_dumpall(vdata, "dumpall")
 
-    -- [FIX-B] Only write disk snapshot if payload carries a Version field AND
-    -- offline cache is enabled (SSLCOLLECTOR_OFFLINE_CACHE).
-    if not OFFLINE_CACHE then
-      -- offline cache disabled: skip snapshot write entirely
-    elseif has_version then
-      local wok, we = write_snapshot(r.body, vdata)
-      if not wok then
-        ngx.log(ngx.WARN, "[sslcollector] snapshot write skipped: ", we)
-        set_last_error("snapshot write: " .. tostring(we))
-      end
-    else
-      ngx.log(ngx.WARN, "[sslcollector] skipping snapshot write: payload has no Version field")
-    end
+    -- Worker no longer writes the disk snapshot. The cfm daemon owns
+    -- /var/lib/cfm/sslcollector/dump.json — it writes after every
+    -- Refresh() with the full cert index. The previous worker-side
+    -- write created a chicken-and-egg on reboot: if angie called
+    -- /dumpall while cfm's first Refresh was still mid-scan, the
+    -- worker would persist a partial payload over a previously-good
+    -- snapshot, and the next reboot would only see the partial certs.
+    -- Daemon-owned writes use the atomically-swapped full index, so
+    -- there is no partial-write window.
   end)
 
   -- Always release the lock
