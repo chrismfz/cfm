@@ -493,7 +493,11 @@ func RunTUI() (switchToText bool, err error) {
 		}
 		pending = map[string]RuleOverride{}
 		refresh()
-		flash(fmt.Sprintf("applied %d change(s)", count))
+		msg := fmt.Sprintf("applied %d change(s)", count)
+		if summary := unloadSummaryLine(buf.String()); summary != "" {
+			msg += " — " + summary
+		}
+		flash(msg)
 	}
 
 	applyFilter()

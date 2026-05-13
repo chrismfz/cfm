@@ -30,6 +30,18 @@ type ApplyOptions struct {
 	// a "[!] about to mutate" preview and require a `y` answer
 	// before any write happens. Phase 6 audit C1.
 	AssumeYes bool
+	// NoUnload disables the post-write `modprobe -r` pass over the
+	// managed-and-loaded module set. By default kernsec calls
+	// `modprobe -r` on every module it just blacklisted that is
+	// currently in /proc/modules, so the running-kernel attack
+	// surface closes the same minute apply runs (Fragnesia / Dirty
+	// Frag class). BUSY modules (refcount > 0, an in-use IPsec host
+	// that operator-forced through the HasIPsec gate, etc.) are
+	// reported and otherwise ignored — the blacklist on disk
+	// guarantees they don't come back, and reboot finishes the job.
+	// Set NoUnload to keep the older "write config, operator unloads
+	// manually" behaviour.
+	NoUnload bool
 	// Stdin is where the confirmation prompt reads from. Default
 	// (nil) means os.Stdin via the prompt helper. Tests inject a
 	// strings.Reader.
@@ -342,11 +354,23 @@ func applyWrites(
 		return 1
 	}
 	fmt.Fprintf(w, "[Modules] wrote %s.\n", ModprobePath)
+
+	// 2b. Default-on unload pass: `modprobe -r` each managed module
+	// that's currently loaded. Closes the running-kernel window
+	// (Fragnesia / Dirty Frag class) the same minute apply runs.
+	// BUSY/BUILTIN/ERROR rows are reported and ignored — the
+	// blacklist on disk persists either way, and reboot finishes
+	// any holdouts. NoUnload preserves the older "operator unloads
+	// manually" behaviour for callers that need it.
 	if len(loadedManaged) > 0 {
-		fmt.Fprintf(w, "[Modules] %d managed modules already loaded — reboot or rmmod required for them to be effective:\n",
-			len(loadedManaged))
-		for _, name := range loadedManaged {
-			fmt.Fprintf(w, "            %s\n", name)
+		if opts.NoUnload {
+			fmt.Fprintf(w, "[Modules] %d managed modules already loaded — --no-unload set; reboot or `modprobe -r` required for them to be effective:\n",
+				len(loadedManaged))
+			for _, name := range loadedManaged {
+				fmt.Fprintf(w, "            %s\n", name)
+			}
+		} else {
+			renderUnloadReport(w, UnloadManaged(loadedManaged))
 		}
 	}
 
@@ -631,6 +655,90 @@ func loadedAndManaged(modules []ModuleRule) []string {
 		}
 	}
 	return out
+}
+
+// unloadSummaryLine extracts the one-line unload summary that
+// renderUnloadReport prints (e.g. "5 unloaded, 1 busy (will clear at
+// reboot). Blacklist on disk persists across reboot."). Used by the
+// TUI to surface the same status in its bottom-bar flash without
+// dumping the full apply transcript on top of the rule table.
+//
+// Returns "" if no summary line is present (NoUnload set, no managed
+// modules were loaded, etc.).
+func unloadSummaryLine(applyOutput string) string {
+	for _, ln := range strings.Split(applyOutput, "\n") {
+		ln = strings.TrimSpace(ln)
+		const marker = "[Modules]"
+		if !strings.HasPrefix(ln, marker) {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(ln, marker))
+		// Match the summary line specifically — both single-status
+		// ("5 unloaded.") and multi-status ("5 unloaded, 1 busy …")
+		// shapes start with a digit, which lets us skip the header
+		// "[Modules] unload pass (modprobe -r) over N module(s):"
+		// without parsing it.
+		if body == "" || body[0] < '0' || body[0] > '9' {
+			continue
+		}
+		return body
+	}
+	return ""
+}
+
+// renderUnloadReport prints the per-module rows from the default-on
+// unload pass plus a one-line summary. Kept here (next to its only
+// caller in applyWrites) so the formatting stays in sync with the
+// rest of the [Modules] section. Builtin/error counts get their own
+// summary tally so the operator notices them even in a noisy run.
+func renderUnloadReport(w io.Writer, results []UnloadResult) {
+	if len(results) == 0 {
+		return
+	}
+	var unloaded, busy, builtin, notLoaded, errored int
+	for _, r := range results {
+		switch r.State {
+		case UnloadStateUnloaded:
+			unloaded++
+		case UnloadStateBusy:
+			busy++
+		case UnloadStateBuiltin:
+			builtin++
+		case UnloadStateNotLoaded:
+			notLoaded++
+		case UnloadStateError:
+			errored++
+		}
+	}
+	fmt.Fprintf(w, "[Modules] unload pass (modprobe -r) over %d managed-and-loaded module(s):\n",
+		len(results))
+	for _, r := range results {
+		if r.Detail != "" {
+			fmt.Fprintf(w, "            %-10s %-16s %s\n", r.State, r.Name, r.Detail)
+		} else {
+			fmt.Fprintf(w, "            %-10s %s\n", r.State, r.Name)
+		}
+	}
+	var parts []string
+	if unloaded > 0 {
+		parts = append(parts, fmt.Sprintf("%d unloaded", unloaded))
+	}
+	if busy > 0 {
+		parts = append(parts, fmt.Sprintf("%d busy (will clear at reboot)", busy))
+	}
+	if builtin > 0 {
+		parts = append(parts, fmt.Sprintf("%d builtin (kernel rebuild required)", builtin))
+	}
+	if notLoaded > 0 {
+		parts = append(parts, fmt.Sprintf("%d already absent", notLoaded))
+	}
+	if errored > 0 {
+		parts = append(parts, fmt.Sprintf("%d error", errored))
+	}
+	fmt.Fprintf(w, "[Modules] %s. Blacklist on disk persists across reboot.\n", strings.Join(parts, ", "))
+	if busy > 0 || builtin > 0 {
+		fmt.Fprintln(w, "          Reboot at convenience to clear any busy modules and sync the initramfs.")
+	}
 }
 
 // verifyAfterApply runs the audit rows pass and reports pass/fail.

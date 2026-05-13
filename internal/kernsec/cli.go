@@ -173,6 +173,7 @@ func runApplyCmd(args []string, w io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "show what would be written / refreshed without doing it")
 	check := fs.Bool("check", false, "exit non-zero on drift; implies no writes (for monitoring)")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step (proxmox-boot-tool / update-grub)")
+	noUnload := fs.Bool("no-unload", false, "skip the post-write modprobe -r pass over managed-and-loaded modules (default: unload now)")
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 
 	if rc, done := handleFlagErr("kernsec apply", fs.Parse(args), w); done {
@@ -182,6 +183,7 @@ func runApplyCmd(args []string, w io.Writer) int {
 		DryRun:    *dryRun,
 		Check:     *check,
 		NoRefresh: *noRefresh,
+		NoUnload:  *noUnload,
 		AssumeYes: *yes,
 	})
 }
@@ -226,6 +228,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 	purge := fs.Bool("purge", false, "also remove /etc/cfm/kernsec.conf and managed sysctl file")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step")
+	noUnload := fs.Bool("no-unload", false, "skip the post-write modprobe -r pass over managed-and-loaded modules (default: unload now)")
 	force := fs.Bool("force", false, "proceed even if the existing kernsec.conf is malformed or unreadable (overrides will be lost)")
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 
@@ -236,6 +239,7 @@ func runDisableCmd(args []string, w io.Writer) int {
 		Purge:     *purge,
 		DryRun:    *dryRun,
 		NoRefresh: *noRefresh,
+		NoUnload:  *noUnload,
 		Force:     *force,
 		AssumeYes: *yes,
 	})
@@ -329,12 +333,14 @@ Apply flags:
   --dry-run           Show what would change without writing
   --check             Exit non-zero on drift (implies no writes; for monitoring)
   --no-refresh        Skip the bootloader refresh after writing the cmdline
+  --no-unload         Skip the post-write modprobe -r over managed-and-loaded modules (default: unload now)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
 
 Disable flags:
   --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
   --dry-run           Show what would happen without writing
   --no-refresh        Skip the bootloader refresh step
+  --no-unload         Skip the post-write modprobe -r over managed-and-loaded modules (default: unload now)
   --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
 

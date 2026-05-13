@@ -19,6 +19,10 @@ type DisableOptions struct {
 	// NoRefresh skips the bootloader refresh step. The cmdline file
 	// is still updated; operator runs the refresh later.
 	NoRefresh bool
+	// NoUnload skips the post-write `modprobe -r` pass that the
+	// inherited applyCore runs by default. See
+	// ApplyOptions.NoUnload for the semantic.
+	NoUnload bool
 	// Force allows disable to proceed when the existing conf cannot
 	// be read or parsed. Without --force a malformed or unreadable
 	// conf aborts disable rather than silently overwriting it with a
@@ -89,6 +93,7 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 	rc := applyCore(w, conf, ApplyOptions{
 		DryRun:    opts.DryRun,
 		NoRefresh: opts.NoRefresh,
+		NoUnload:  opts.NoUnload,
 		AssumeYes: opts.AssumeYes,
 	}, "DISABLE")
 	if rc != 0 {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -189,6 +190,143 @@ func buildModuleFileCache() map[string]struct{} {
 func ResetModuleFileCache() {
 	moduleFileCacheOnce = sync.Once{}
 	moduleFileCacheVal = nil
+}
+
+// UnloadState classifies the per-module result of an `UnloadManaged`
+// pass. Surfaced unchanged into apply's output and the TUI flash so
+// operators see "removed from running kernel" vs "will clear at
+// reboot" without parsing free text.
+type UnloadState string
+
+const (
+	// UnloadStateUnloaded means `modprobe -r` succeeded and the module
+	// is no longer in /proc/modules.
+	UnloadStateUnloaded UnloadState = "UNLOADED"
+	// UnloadStateBusy means the module is still in use (refcount > 0
+	// or held by a sibling we can't pull). Blacklist on disk prevents
+	// future loads; the live module clears at reboot.
+	UnloadStateBusy UnloadState = "BUSY"
+	// UnloadStateBuiltin means the module is built into the running
+	// kernel (not loadable). The modprobe.d blacklist is a no-op for
+	// builtins; only kernel cmdline / rebuild can change them.
+	UnloadStateBuiltin UnloadState = "BUILTIN"
+	// UnloadStateNotLoaded means the module was already absent from
+	// /proc/modules by the time the unload pass ran. Treated as a
+	// success row — nothing to do.
+	UnloadStateNotLoaded UnloadState = "NOT-LOADED"
+	// UnloadStateError covers everything else: missing modprobe
+	// binary, permission denied, parse failures, exec errors.
+	UnloadStateError UnloadState = "ERROR"
+)
+
+// UnloadResult is one row in the unload report.
+type UnloadResult struct {
+	Name   string
+	State  UnloadState
+	Detail string // operator-facing hint when State != UNLOADED
+}
+
+// modprobeRunner is the test seam for UnloadManaged: real callers
+// spawn `modprobe -r <name>` and collect stdout+stderr. Tests override
+// this to inject UNLOADED / BUSY / BUILTIN / ERROR responses without
+// touching the system modprobe.
+var modprobeRunner = func(name string) (output string, err error) {
+	cmd := exec.Command("modprobe", "-r", name)
+	out, runErr := cmd.CombinedOutput()
+	return string(out), runErr
+}
+
+// loadedModulesForUnload is the test seam for UnloadManaged's
+// pre-flight "is this module actually loaded?" check. Default
+// delegates to LoadedModules (reads /proc/modules); tests override to
+// simulate a custom loaded set without depending on kernel state.
+var loadedModulesForUnload = LoadedModules
+
+// UnloadManaged attempts to remove every name in `names` from the
+// running kernel using `modprobe -r`. Names that aren't currently in
+// /proc/modules are reported as NOT-LOADED (success).
+//
+// Each row is classified independently — a BUSY module never fails
+// the whole pass, the blacklist is already on disk and reboot
+// finishes the job. BUILTIN means the module is compiled into vmlinuz
+// (the modprobe.d blacklist is a no-op for those; only a kernel
+// cmdline change or rebuild can disable them).
+//
+// `modprobe -r` (not `rmmod`) is used so the kernel's dep graph is
+// respected: unloading e.g. `esp4` will also unload `xfrm_algo` only
+// if no other transform still holds it. Raw `rmmod` would either fail
+// on deps or, with `--force`, risk a crash — neither acceptable from
+// an automated security tool.
+func UnloadManaged(names []string) []UnloadResult {
+	if len(names) == 0 {
+		return nil
+	}
+	loadedBefore := loadedModulesForUnload()
+	out := make([]UnloadResult, 0, len(names))
+	for _, name := range names {
+		if _, live := loadedBefore[name]; !live {
+			out = append(out, UnloadResult{
+				Name:  name,
+				State: UnloadStateNotLoaded,
+			})
+			continue
+		}
+		output, err := modprobeRunner(name)
+		out = append(out, classifyUnload(name, output, err))
+	}
+	return out
+}
+
+// classifyUnload parses modprobe's combined output + exit error into
+// an UnloadResult. modprobe's error strings vary slightly across
+// distros (kmod versions) but the substrings checked here are stable
+// across the RHEL/Debian families.
+func classifyUnload(name, output string, err error) UnloadResult {
+	low := strings.ToLower(output)
+	switch {
+	case err == nil:
+		return UnloadResult{Name: name, State: UnloadStateUnloaded}
+	case strings.Contains(low, "in use"),
+		strings.Contains(low, "is in use"),
+		strings.Contains(low, "module is busy"):
+		return UnloadResult{
+			Name:   name,
+			State:  UnloadStateBusy,
+			Detail: "in use by another holder — will clear at reboot",
+		}
+	case strings.Contains(low, "is builtin"),
+		strings.Contains(low, "built-in"):
+		return UnloadResult{
+			Name:   name,
+			State:  UnloadStateBuiltin,
+			Detail: "compiled into the kernel — modprobe.d blacklist has no effect; needs kernel rebuild or cmdline change",
+		}
+	}
+	// Other failure (exec error, permission, missing modprobe). Keep
+	// the operator-facing detail short — full output stays in
+	// stderr/journal for them to read if they need it.
+	detail := strings.TrimSpace(output)
+	if detail == "" {
+		detail = err.Error()
+	}
+	return UnloadResult{
+		Name:   name,
+		State:  UnloadStateError,
+		Detail: firstLine(detail),
+	}
+}
+
+// firstLine returns the first non-empty line of s. Used to keep the
+// per-row Detail field human-readable in apply's table even when
+// modprobe spilled a multi-line error.
+func firstLine(s string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln != "" {
+			return ln
+		}
+	}
+	return ""
 }
 
 // LoadedModules returns the set of module names currently in

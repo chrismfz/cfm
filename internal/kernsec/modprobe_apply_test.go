@@ -2,6 +2,7 @@ package kernsec
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -327,6 +328,199 @@ func TestWriteModprobeFile_AtomicWithBackup(t *testing.T) {
 	if string(bak2) != string(first) {
 		t.Errorf("backup overwritten on third write — should be one-shot:\n  got:  %s\n  want: %s",
 			bak2, first)
+	}
+}
+
+func TestClassifyUnload(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		runErr     error
+		wantState  UnloadState
+		detailHint string // substring expected in Detail (skipped if "")
+	}{
+		{
+			name:      "success",
+			output:    "",
+			runErr:    nil,
+			wantState: UnloadStateUnloaded,
+		},
+		{
+			name:       "in use — RHEL/kmod phrasing",
+			output:     "modprobe: FATAL: Module esp4 is in use.\n",
+			runErr:     fakeExitErr{code: 1},
+			wantState:  UnloadStateBusy,
+			detailHint: "will clear at reboot",
+		},
+		{
+			name:       "in use — debian/kmod phrasing",
+			output:     "rmmod: ERROR: Module xfrm_algo is in use by: esp4 esp6\n",
+			runErr:     fakeExitErr{code: 1},
+			wantState:  UnloadStateBusy,
+			detailHint: "will clear at reboot",
+		},
+		{
+			name:       "builtin",
+			output:     "modprobe: FATAL: Module sctp is builtin.\n",
+			runErr:     fakeExitErr{code: 1},
+			wantState:  UnloadStateBuiltin,
+			detailHint: "kernel",
+		},
+		{
+			name:       "permission denied (other error)",
+			output:     "modprobe: ERROR: could not remove module nfc: Operation not permitted\n",
+			runErr:     fakeExitErr{code: 1},
+			wantState:  UnloadStateError,
+			detailHint: "Operation not permitted",
+		},
+		{
+			name:       "exec failure with empty output",
+			output:     "",
+			runErr:     fakeExitErr{code: 127, msg: "modprobe not found"},
+			wantState:  UnloadStateError,
+			detailHint: "modprobe not found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyUnload("modX", tc.output, tc.runErr)
+			if got.State != tc.wantState {
+				t.Errorf("state: got %q want %q", got.State, tc.wantState)
+			}
+			if got.Name != "modX" {
+				t.Errorf("name not preserved: got %q", got.Name)
+			}
+			if tc.detailHint != "" && !strings.Contains(got.Detail, tc.detailHint) {
+				t.Errorf("detail missing %q: got %q", tc.detailHint, got.Detail)
+			}
+		})
+	}
+}
+
+// fakeExitErr is a stand-in for *exec.ExitError that lets classifyUnload
+// distinguish "modprobe ran and returned non-zero" from "we never managed
+// to spawn modprobe at all". Only its Error() string is read by the
+// classifier — the exit code is informational for test readers.
+type fakeExitErr struct {
+	code int
+	msg  string
+}
+
+func (e fakeExitErr) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
+func TestUnloadManaged_HappyPath(t *testing.T) {
+	// Override the loaded-set probe and the modprobe runner so the
+	// test never touches /proc/modules or spawns a real binary.
+	origLoaded := loadedModulesForUnload
+	origRunner := modprobeRunner
+	t.Cleanup(func() {
+		loadedModulesForUnload = origLoaded
+		modprobeRunner = origRunner
+	})
+
+	loadedModulesForUnload = func() map[string]struct{} {
+		return map[string]struct{}{
+			"esp4":  {},
+			"esp6":  {},
+			"rxrpc": {},
+			// "ah4" is intentionally absent → NOT-LOADED row.
+		}
+	}
+	// Per-module scripted responses: esp4 unloads, esp6 is busy, rxrpc
+	// is builtin. ah4 should never reach the runner (filtered upstream).
+	modprobeRunner = func(name string) (string, error) {
+		switch name {
+		case "esp4":
+			return "", nil
+		case "esp6":
+			return "modprobe: FATAL: Module esp6 is in use.\n", fakeExitErr{code: 1}
+		case "rxrpc":
+			return "modprobe: FATAL: Module rxrpc is builtin.\n", fakeExitErr{code: 1}
+		case "ah4":
+			t.Errorf("modprobeRunner should not be called for non-loaded module ah4")
+			return "", nil
+		default:
+			t.Errorf("unexpected module passed to runner: %s", name)
+			return "", nil
+		}
+	}
+
+	got := UnloadManaged([]string{"esp4", "esp6", "rxrpc", "ah4"})
+	if len(got) != 4 {
+		t.Fatalf("want 4 results, got %d: %+v", len(got), got)
+	}
+	want := map[string]UnloadState{
+		"esp4":  UnloadStateUnloaded,
+		"esp6":  UnloadStateBusy,
+		"rxrpc": UnloadStateBuiltin,
+		"ah4":   UnloadStateNotLoaded,
+	}
+	for _, r := range got {
+		if want[r.Name] != r.State {
+			t.Errorf("%s: state %q, want %q", r.Name, r.State, want[r.Name])
+		}
+	}
+}
+
+func TestUnloadManaged_EmptyInput(t *testing.T) {
+	if got := UnloadManaged(nil); got != nil {
+		t.Errorf("want nil for empty input, got %v", got)
+	}
+}
+
+func TestRenderUnloadReport_SummaryShape(t *testing.T) {
+	var buf bytes.Buffer
+	renderUnloadReport(&buf, []UnloadResult{
+		{Name: "esp4", State: UnloadStateUnloaded},
+		{Name: "esp6", State: UnloadStateBusy, Detail: "in use — will clear at reboot"},
+		{Name: "sctp", State: UnloadStateBuiltin, Detail: "compiled into the kernel"},
+		{Name: "ah4", State: UnloadStateNotLoaded},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"unload pass (modprobe -r) over 4 managed-and-loaded module(s)",
+		"UNLOADED",
+		"BUSY",
+		"BUILTIN",
+		"NOT-LOADED",
+		"1 unloaded",
+		"1 busy (will clear at reboot)",
+		"1 builtin (kernel rebuild required)",
+		"1 already absent",
+		"Blacklist on disk persists across reboot.",
+		"Reboot at convenience to clear any busy modules and sync the initramfs.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestUnloadSummaryLine_PicksTallyLine(t *testing.T) {
+	apply := strings.Join([]string{
+		"[Sysctl] wrote /etc/sysctl.d/cfm-kernsec.conf (not yet applied).",
+		"[Modules] wrote /etc/modprobe.d/cfm-kernsec.conf.",
+		"[Modules] unload pass (modprobe -r) over 2 managed-and-loaded module(s):",
+		"            UNLOADED   esp4",
+		"            BUSY       esp6              in use by another holder",
+		"[Modules] 1 unloaded, 1 busy (will clear at reboot). Blacklist on disk persists across reboot.",
+		"[Boot args] rewrote next-boot cmdline via grubby.",
+	}, "\n")
+	got := unloadSummaryLine(apply)
+	if !strings.HasPrefix(got, "1 unloaded") {
+		t.Errorf("want summary starting with '1 unloaded', got %q", got)
+	}
+}
+
+func TestUnloadSummaryLine_NoUnloadSection(t *testing.T) {
+	apply := "[Sysctl] wrote /etc/sysctl.d/cfm-kernsec.conf (not yet applied).\n[Modules] wrote /etc/modprobe.d/cfm-kernsec.conf.\n"
+	if got := unloadSummaryLine(apply); got != "" {
+		t.Errorf("want empty when no summary present, got %q", got)
 	}
 }
 
