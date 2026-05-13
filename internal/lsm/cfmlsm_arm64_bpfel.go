@@ -71,6 +71,7 @@ type cfmlsmSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
+	CfmBpf001             *ebpf.ProgramSpec `ebpf:"cfm_bpf001"`
 	CfmCred002            *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
 	CfmCred003            *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
 	CfmDeletedFileExec    *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
@@ -83,6 +84,7 @@ type cfmlsmProgramSpecs struct {
 	CfmFs005Setattr       *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
 	CfmFs005Setxattr      *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
 	CfmFs005Unlink        *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
+	CfmInterpNetStdio     *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec          *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
 	CfmRevshell           *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
@@ -164,6 +166,7 @@ type cfmlsmVariables struct {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
+	CfmBpf001             *ebpf.Program `ebpf:"cfm_bpf001"`
 	CfmCred002            *ebpf.Program `ebpf:"cfm_cred002"`
 	CfmCred003            *ebpf.Program `ebpf:"cfm_cred003"`
 	CfmDeletedFileExec    *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
@@ -176,12 +179,14 @@ type cfmlsmPrograms struct {
 	CfmFs005Setattr       *ebpf.Program `ebpf:"cfm_fs005_setattr"`
 	CfmFs005Setxattr      *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
 	CfmFs005Unlink        *ebpf.Program `ebpf:"cfm_fs005_unlink"`
+	CfmInterpNetStdio     *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec          *ebpf.Program `ebpf:"cfm_memfd_exec"`
 	CfmRevshell           *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
 func (p *cfmlsmPrograms) Close() error {
 	return _CfmlsmClose(
+		p.CfmBpf001,
 		p.CfmCred002,
 		p.CfmCred003,
 		p.CfmDeletedFileExec,
@@ -194,6 +199,7 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs005Setattr,
 		p.CfmFs005Setxattr,
 		p.CfmFs005Unlink,
+		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
 		p.CfmRevshell,
 	)
