@@ -22,19 +22,22 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_SENSITIVE_WRITE  = 5,  /* CFML-FS-005   */
     CFM_LSM_POLICY_CRED_ESCAL       = 7,  /* CFML-CRED-002 */
     CFM_LSM_POLICY_DIRECT_CRED      = 9,  /* CFML-CRED-003 */
+    CFM_LSM_POLICY_UNEXPECTED_BPF   = 10, /* CFML-BPF-001  */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
  * `op` byte of cfm_lsm_event (formerly _pad). 0 means "other / not
  * an FS event" and is the default for non-FS policy emissions. */
-enum cfm_fs_op {
-    CFM_FS_OP_NONE      = 0,
-    CFM_FS_OP_SETATTR   = 1,
-    CFM_FS_OP_CREATE    = 2,
-    CFM_FS_OP_UNLINK    = 3,
-    CFM_FS_OP_LINK      = 4,
-    CFM_FS_OP_RENAME    = 5,
-    CFM_FS_OP_SETXATTR  = 6,
+enum cfm_event_op {
+    CFM_OP_NONE           = 0,
+    CFM_FS_OP_SETATTR     = 1,
+    CFM_FS_OP_CREATE      = 2,
+    CFM_FS_OP_UNLINK      = 3,
+    CFM_FS_OP_LINK        = 4,
+    CFM_FS_OP_RENAME      = 5,
+    CFM_FS_OP_SETXATTR    = 6,
+    CFM_BPF_OP_MAP_CREATE = 20,
+    CFM_BPF_OP_PROG_LOAD  = 21,
 };
 
 #define CFM_TASK_COMM_LEN 16
@@ -69,7 +72,7 @@ struct cfm_inode_key {
  *       16     4  tgid
  *       20     4  uid
  *       24     4  gid
- *       28     1  op         (enum cfm_fs_op; 0 for non-FS policies)
+ *       28     1  op         (enum cfm_event_op; 0 for policies without an op)
  *       29     1  flags      (CFML-FS-005: bit 0 means web-origin match)
  *       30     2  _pad
  *       32    16  comm

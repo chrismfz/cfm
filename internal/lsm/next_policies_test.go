@@ -15,6 +15,7 @@ func TestNewPoliciesRegistered(t *testing.T) {
 		PolicySensitiveWrite:    "CFML-FS-005",
 		PolicyCredEscal:         "CFML-CRED-002",
 		PolicyDirectCredInstall: "CFML-CRED-003",
+		PolicyUnexpectedBPF:     "CFML-BPF-001",
 	}
 	got := map[PolicyID]bool{}
 	for _, p := range AllPolicies() {
@@ -45,6 +46,8 @@ func TestFSOp_StringRoundTrip(t *testing.T) {
 		{FSOpLink, "link"},
 		{FSOpRename, "rename"},
 		{FSOpSetxattr, "setxattr"},
+		{BPFOpMapCreate, "bpf_map_create"},
+		{BPFOpProgLoad, "bpf_prog_load"},
 	}
 	for _, tc := range cases {
 		if got := tc.op.String(); got != tc.want {

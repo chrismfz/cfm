@@ -85,9 +85,9 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		// and pkexec mid-transition; see docs/cfm-lsm.md). Warn and
 		// downgrade if an operator set enforce — better than silently
 		// respecting it and then not blocking, which would mislead them.
-		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
+		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF) && m == ModeEnforce {
 			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
-			fmt.Fprintln(w, "      See docs/cfm-lsm.md → credential policies → monitor-only strategy.")
+			fmt.Fprintln(w, "      See docs/cfm-lsm.md → monitor-only telemetry policies.")
 			fmt.Fprintln(w)
 			m = ModeMonitor
 		}

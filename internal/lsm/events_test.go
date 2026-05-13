@@ -112,6 +112,28 @@ func TestParseEvent_DirectCredInstall(t *testing.T) {
 	}
 }
 
+func TestParseEvent_UnexpectedBPF(t *testing.T) {
+	raw := buildWireEvent(t, bpfPolicyUnexpectedBPF, 4242, 4242, 1001, 1001, 456, "php-fpm", "BPF_PROG_LOAD")
+	raw[28] = bpfBPFOpProgLoad
+	raw[29] = EventFlagWebOrigin
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyUnexpectedBPF {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyUnexpectedBPF)
+	}
+	if ev.Op != BPFOpProgLoad {
+		t.Fatalf("Op: got %v, want BPFOpProgLoad", ev.Op)
+	}
+	if ev.Flags&EventFlagWebOrigin == 0 {
+		t.Fatalf("web-origin flag missing: flags=%08b", ev.Flags)
+	}
+	if ev.Filename != "BPF_PROG_LOAD" {
+		t.Fatalf("Filename: got %q, want BPF_PROG_LOAD", ev.Filename)
+	}
+}
+
 func TestParseEvent_Truncated(t *testing.T) {
 	raw := make([]byte, wireEventSize-1)
 	_, err := parseEvent(raw)
@@ -173,6 +195,9 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	}
 	if bpfPolicyDirectCred != 9 {
 		t.Errorf("bpfPolicyDirectCred mismatch: Go=%d, BPF=9 (see common.bpf.h)", bpfPolicyDirectCred)
+	}
+	if bpfPolicyUnexpectedBPF != 10 {
+		t.Errorf("bpfPolicyUnexpectedBPF mismatch: Go=%d, BPF=10 (see common.bpf.h)", bpfPolicyUnexpectedBPF)
 	}
 }
 

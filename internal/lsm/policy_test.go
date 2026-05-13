@@ -2,13 +2,13 @@ package lsm
 
 import "testing"
 
-// TestAllPolicies_Scope confirms exactly the six currently-supported
+// TestAllPolicies_Scope confirms exactly the seven currently-supported
 // policies are registered. Bumping the count requires updating
 // docs/cfm-lsm.md and configs/lsm.conf in lockstep.
 func TestAllPolicies_Scope(t *testing.T) {
 	policies := AllPolicies()
-	if len(policies) != 6 {
-		t.Fatalf("policy catalog should have exactly six entries; got %d", len(policies))
+	if len(policies) != 7 {
+		t.Fatalf("policy catalog should have exactly seven entries; got %d", len(policies))
 	}
 	want := map[PolicyID]bool{
 		PolicyMemfdExec:         false,
@@ -17,6 +17,7 @@ func TestAllPolicies_Scope(t *testing.T) {
 		PolicySensitiveWrite:    false,
 		PolicyCredEscal:         false,
 		PolicyDirectCredInstall: false,
+		PolicyUnexpectedBPF:     false,
 	}
 	for _, p := range policies {
 		if _, ok := want[p.ID]; !ok {
