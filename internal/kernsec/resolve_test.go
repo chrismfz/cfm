@@ -161,8 +161,8 @@ func TestResolve_OverrideForceBeatsHostProfile(t *testing.T) {
 	// But operator forces a specific rule → Apply wins.
 	hostHasIPsec := HostProfile{HasIPsec: true}
 
-	// We don't ship modules.ipsec rules until later phases; use a
-	// synthetic rule ID forced by conf to exercise the path. The
+	// Use a synthetic rule ID forced by conf to exercise the path
+	// without coupling the test to a specific shipped rule. The
 	// effective behaviour we care about: OverrideForce returns Apply
 	// even when a SkipReason would otherwise fire.
 	conf := &Conf{

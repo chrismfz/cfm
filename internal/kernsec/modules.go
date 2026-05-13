@@ -253,6 +253,38 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 
+	// --- modules.ipsec: kernel ESP transforms -----------------------
+	//
+	// esp4 / esp6 are the kernel-side ESP transforms used by IPsec.
+	// They became a critical attack surface with CVE-2026-46300
+	// ("Fragnesia") in the espintcp ULP and CVE-2026-XXXX-class
+	// ("Dirty Frag") in the same XFRM/ESP path: an unprivileged local
+	// user can splice file pages into a TCP socket, switch the socket
+	// into ESP-in-TCP ULP mode, and have the kernel decrypt-in-place
+	// into the page cache — a deterministic one-byte arbitrary write
+	// per trigger into any readable file (the public PoC overwrites
+	// /usr/bin/su).
+	//
+	// While patched kernels and KernelCare livepatches are still in
+	// build/test, blacklisting these modules is the upstream-recommended
+	// mitigation. Host-profile gating (HasIPsec via SkipReason on
+	// `modules.ipsec`) auto-skips the rule when `/proc/net/xfrm_policy`
+	// or `/proc/net/pfkey` is non-empty, so hosts that terminate or
+	// transit IPsec / strongSwan / Libreswan tunnels are not affected.
+
+	{
+		ID: "KSEC-MOD-ipsec-001", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "esp4",
+		Description: "IPv4 ESP transform; entry point for CVE-2026-46300 (Fragnesia) and the related Dirty Frag XFRM/ESP LPE class.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-002", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "esp6",
+		Description: "IPv6 ESP transform; same XFRM/ESP exploit class as esp4 (Fragnesia, Dirty Frag).",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+
 	// --- modules.net.virt: virt-only socket families ----------------
 	//
 	// Single-module group so host-profile gating can target it
