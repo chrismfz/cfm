@@ -103,7 +103,11 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 
 -- Poll backoff: starts at POLL_SECS_MIN, doubles on each /stats failure.
 -- Resets to POLL_SECS_MIN on any successful /stats response.
-local POLL_SECS_MIN = 300   -- 5m  base (healthy)
+-- 90s baseline: a new cert added on the cfm host is visible to running
+-- workers within ~90s of the daemon's Refresh() picking it up (fsnotify
+-- watcher fires within ~2s, so end-to-end is typically <2 minutes). The
+-- /stats roundtrip is a few hundred bytes — cost is trivial.
+local POLL_SECS_MIN = 90    -- 90s base (healthy)
 local POLL_SECS_MAX = 1200  -- 20m ceiling (sustained failures)
 
 -- Lock TTL for do_dumpall(). High enough to cover large payloads + latency.
@@ -511,19 +515,15 @@ local function do_dumpall()
     -- Always update RAM cache (soft: version optional)
     ingest_dumpall(vdata, "dumpall")
 
-    -- [FIX-B] Only write disk snapshot if payload carries a Version field AND
-    -- offline cache is enabled (SSLCOLLECTOR_OFFLINE_CACHE).
-    if not OFFLINE_CACHE then
-      -- offline cache disabled: skip snapshot write entirely
-    elseif has_version then
-      local wok, we = write_snapshot(r.body, vdata)
-      if not wok then
-        ngx.log(ngx.WARN, "[sslcollector] snapshot write skipped: ", we)
-        set_last_error("snapshot write: " .. tostring(we))
-      end
-    else
-      ngx.log(ngx.WARN, "[sslcollector] skipping snapshot write: payload has no Version field")
-    end
+    -- Worker no longer writes the disk snapshot. The cfm daemon owns
+    -- /var/lib/cfm/sslcollector/dump.json — it writes after every
+    -- Refresh() with the full cert index. The previous worker-side
+    -- write created a chicken-and-egg on reboot: if angie called
+    -- /dumpall while cfm's first Refresh was still mid-scan, the
+    -- worker would persist a partial payload over a previously-good
+    -- snapshot, and the next reboot would only see the partial certs.
+    -- Daemon-owned writes use the atomically-swapped full index, so
+    -- there is no partial-write window.
   end)
 
   -- Always release the lock

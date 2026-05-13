@@ -1181,6 +1181,13 @@ func runDaemon(args []string) {
 	dnat.StartFailSafe(ctx, be)
 	dnat.StartPanelFailSafe(ctx, be)
 
+	// On cold boot the edge service (angie/openresty) starts long before
+	// cfm and its workers seed an empty cert store. After our sslcollector
+	// is bound and has loaded at least one cert, reload the edge once so
+	// init_worker_by_lua_block re-runs against the now-ready snapshot.
+	// No-op if disabled via env or if the edge started after us.
+	sslcollector.NudgeEdgeOnFirstReady(ctx, sslcol)
+
 	// ── Main tick loop ───────────────────────────────────────────────────────────
 	t := time.NewTicker(*interval)
 	defer t.Stop()
