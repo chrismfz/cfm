@@ -902,14 +902,6 @@ func runDaemon(args []string) {
 		}
 	}
 
-	// Deploy the canonical sslcollector.lua module bundled with this
-	// cfm binary. Guards against the binary-only-update hazard where
-	// the operator ships a new cfm but their package install left the
-	// old /var/lib/cfm/lua/sslcollector.lua on disk — the worker would
-	// then talk an older protocol to the new daemon. Idempotent: a
-	// no-op when the on-disk content already matches the embed.
-	sslcollector.DeploySSLCollectorLua(sslcollector.CfmGroupID())
-
 	// ── Lifecycle managers ──────────────────────────────────────────────────────
 	mmdbLc := mmdb.NewLifecycle()
 	defer mmdbLc.Stop()

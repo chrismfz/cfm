@@ -215,6 +215,33 @@ func TestCollectorWriteSnapshot_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestWriteSnapshotAtomic_OverridesRestrictiveUmask is the regression
+// test for the operator's reported bug: under a daemon umask of 0077
+// (systemd's default for hardened services) `os.OpenFile(..., 0o640)`
+// produced 0600 on disk, making /var/lib/cfm/sslcollector/dump.json
+// unreadable to the cfm-group worker user. Workers then reported
+// "no snapshot on disk (first boot?)" on every reload. The fix is the
+// explicit os.Chmod calls in writeSnapshotAtomic; this test flips the
+// process umask in-test and verifies the mode still ends up 0640.
+func TestWriteSnapshotAtomic_OverridesRestrictiveUmask(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dump.json")
+
+	prevMask := syscallUmask(0o077)
+	defer syscallUmask(prevMask)
+
+	if err := writeSnapshotAtomic(path, []byte(`{"version":"x","exact":[],"wild":[]}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o640 {
+		t.Fatalf("under umask 0077 the explicit chmod did not stick: mode=%o want 640", perm)
+	}
+}
+
 // TestCollectorWriteSnapshot_SkipsZeroEntries verifies the first guard:
 // a Collector with no certs must NOT overwrite the on-disk snapshot.
 func TestCollectorWriteSnapshot_SkipsZeroEntries(t *testing.T) {
