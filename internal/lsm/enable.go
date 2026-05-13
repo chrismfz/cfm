@@ -80,12 +80,12 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 			fmt.Fprintln(w)
 			continue
 		}
-		// CFML-CRED-002 is monitor-only by design (returning -EPERM
-		// from the cred-install path can deadlock systemd helpers
-		// and pkexec mid-transition; see docs/cfm-lsm.md). Warn and
-		// downgrade if an operator set enforce — better than silently
-		// respecting it and then not blocking, which would mislead them.
-		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF) && m == ModeEnforce {
+		// Some policies are monitor-only by design: EXEC-005 is weak
+		// companion telemetry; CRED-002/CRED-003 are not safe blocking
+		// points; BPF-001 is tracepoint telemetry. Warn and downgrade
+		// if an operator set enforce — better than silently respecting
+		// it and then not blocking, which would mislead them.
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF) && m == ModeEnforce {
 			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
 			fmt.Fprintln(w, "      See docs/cfm-lsm.md → monitor-only telemetry policies.")
 			fmt.Fprintln(w)

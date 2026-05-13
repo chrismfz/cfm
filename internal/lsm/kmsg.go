@@ -164,6 +164,9 @@ func KmsgDetect(ev Event) {
 	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
 		msg += " origin=web"
 	}
+	if signal := ev.ExecStdioSignal(); signal != "" {
+		msg += " stdio=" + signal
+	}
 	defaultKmsg.writeLine(kmsgPriWarning, "DETECT", msg)
 }
 

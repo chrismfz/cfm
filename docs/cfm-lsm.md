@@ -2,16 +2,19 @@
 
 ## Status
 
-**Seven policies shipping. Monitor mode by default; enforce opt-in
-for EXEC-001 / EXEC-003 / EXEC-004 / FS-005. CRED-002, CRED-003, and
-BPF-001 are monitor-only by design (credential telemetry and syscall
-tracepoints are not safe blocking points).**
+**Eight policies shipping. Disabled by default in `lsm.conf`; monitor is
+the safe first enabled mode. Enforce is opt-in for EXEC-001 / EXEC-003 /
+EXEC-004 / FS-005. EXEC-005, CRED-002,
+CRED-003, and BPF-001 are monitor-only by design (weak stdio
+telemetry, credential telemetry, and syscall tracepoints are not safe
+blocking points).**
 
 Catalog:
 
 - `CFML-EXEC-001` — Block exec from memfd
 - `CFML-EXEC-003` — Reverse shell pattern
 - `CFML-EXEC-004` — Deleted-file exec by web user
+- `CFML-EXEC-005` — Suspicious interpreter network stdio *(monitor-only)*
 - `CFML-FS-005`   — Sensitive-file modification by web user
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
 - `CFML-CRED-003` — Direct root credential install *(monitor-only)*
@@ -58,12 +61,13 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All seven policies default to monitor mode — matches are logged and
-notified but the syscall proceeds. Enforce mode (return `-EPERM` on
+All eight policies default to `mode = disabled` in the packaged
+configuration. When an operator enables a policy in `mode = monitor`,
+matches are logged and notified but the syscall proceeds. Enforce mode (return `-EPERM` on
 a match, failing the calling process's syscall) is **available but
 opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, `CFML-EXEC-004`,
-and `CFML-FS-005`; `CFML-CRED-002`, `CFML-CRED-003`, and `CFML-BPF-001`
-are monitor-only by design (returning -EPERM from credential hooks can
+and `CFML-FS-005`; `CFML-EXEC-005`, `CFML-CRED-002`,
+`CFML-CRED-003`, and `CFML-BPF-001` are monitor-only by design (returning -EPERM from credential hooks can
 deadlock systemd helpers and pkexec mid-transition, CRED-003 is fentry
 telemetry, and BPF-001 is syscall tracepoint telemetry rather than an
 LSM decision point; enable.go and lifecycle.go both downgrade an enforce
@@ -91,17 +95,18 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: seven shipping policies
-covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004),
-sensitive-file write (CFML-FS-005), post-setuid credential transitions
+The scope here is intentionally narrow: eight shipping policies
+covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004 /
+CFML-EXEC-005), sensitive-file write (CFML-FS-005), post-setuid credential transitions
 (CFML-CRED-002), direct root credential installs (CFML-CRED-003), and
 advanced-threat BPF-use telemetry (CFML-BPF-001). The MVP shipped with
 EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the next-policies
 pass once the MVP's verifier and pinning behaviour proved stable on
 EL10. CRED-003 closes the documented direct `commit_creds()` gap as
 monitor-only telemetry, and BPF-001 adds monitor-only visibility into
-unexpected BPF map creation / program load attempts. Anything beyond
-these seven requires a separate, named proposal — not a TODO inside
+unexpected BPF map creation / program load attempts. EXEC-005 adds
+monitor-only weak stdio telemetry next to the strict reverse-shell
+rule. Anything beyond these eight requires a separate, named proposal — not a TODO inside
 this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
@@ -148,7 +153,7 @@ came for.
 
 ## Scope rationale
 
-The original draft listed fifteen policies; this design ships two.
+The original draft listed fifteen policies; this design now ships eight narrowly scoped policies.
 Every other ID from that draft is excluded for a specific reason — not
 deferred, excluded — because some other layer in CFM's expected stack
 already covers it, or because the policy actively conflicts with
@@ -158,6 +163,7 @@ something else CFM relies on.
 |---|---|---|
 | `CFML-EXEC-001` (memfd exec) | **In, enforce** | High-signal, low-FP; Imunify PD cannot see past the PHP→child process boundary; no other CFM layer covers this. |
 | `CFML-EXEC-003` (reverse shell pattern) | **In, monitor → enforce** | Behavioural detection; covers ground Imunify PD blocks at *launch* but cannot catch *post-spawn*; no other CFM layer covers this. |
+| `CFML-EXEC-005` (suspicious interpreter network stdio) | **In, monitor-only** | Weak companion telemetry for one/two remote stdio fds on shell/interpreter/socket-helper execs; intentionally not a default block due inetd/admin/debug FPs. |
 | `CFML-EXEC-002` (Trusted Path Execution) | **Out** | High FP from composer / npm / pip / wp-cli; CageFS + Imunify PD + `kernsec`'s `noexec` mount audit already cover the realistic vector. |
 | `CFML-OBS-001` (ptrace lockdown) | **Out — already covered by `kernsec`** | `kernel.yama.ptrace_scope=1` is shipped today by `kernsec` (see `internal/kernsec/profile.go:188`). If stricter is wanted, ship `=2` as a `kernsec` Tier 2 sysctl rule — no new code, no new LSM hook. |
 | `CFML-NET-001` (outbound per vhost) | **Out — wrong component** | `internal/outbound/analyzer.go` already does per-uid NFLOG-based outbound observation. Promoting that path to enforce + per-vhost policy is the right home for this; it works on EL8 with no DKMS and reuses an existing event pipeline. |
@@ -290,6 +296,44 @@ verifier-complexity risk on older RHEL 9 kernels. The hot loop must be
 bounded (cap at fd ≤ 2) and the socket-state read must use existing CO-RE
 relocations rather than custom field offsets. Budget verifier complexity
 explicitly before committing the design to that hook layout.
+
+### `CFML-EXEC-005` — Suspicious interpreter network stdio
+
+| | |
+|---|---|
+| Hook | `bprm_check_security` |
+| Default mode | `disabled` / monitor-only when enabled; never enforce by default |
+| FP risk | Medium; weak telemetry by design |
+| Perf impact | Negligible (exec-time fd 0/1/2 inspection only) |
+
+**Description.** This is a monitor-only companion to `CFML-EXEC-003`.
+It reuses the same fd inspection helper that identifies established
+remote TCP sockets on stdin/stdout/stderr, but it matches the weaker
+case where exactly one or two of fd 0/1/2 are remote TCP and the
+executable basename is one of a small static shell/interpreter/helper
+set: `sh`, `bash`, `dash`, `zsh`, `python`, `python3`, `perl`, `php`,
+`ruby`, `node`, `nc`, `ncat`, or `socat`. If all three stdio fds are
+remote TCP, the strict `CFML-EXEC-003` reverse-shell rule owns that
+event instead.
+
+**Event flags.** Strict reverse-shell events set
+`CFM_LSM_F_REVSHELL_STRICT`. EXEC-005 events set
+`CFM_LSM_F_INTERP_STDIO_WEAK` plus either
+`CFM_LSM_F_STDIO_ONE_REMOTE` or `CFM_LSM_F_STDIO_TWO_REMOTE`, allowing
+the daemon and downstream analytics to separate weak telemetry from
+strict all-three-fd reverse-shell matches without changing the event
+wire layout.
+
+**Expected false positives.** This rule intentionally observes
+patterns that can be legitimate: inetd-style services and socket
+activators that hand a network socket to a child process, administrator
+one-liners that use `nc`, `socat`, or an interpreter over a socket, and
+live debugging / incident-response sessions where one side of stdio is
+redirected over TCP. Operators should start with `mode = monitor` (or
+leave it disabled) and use the event flags and executable path as
+triage context. Do not promote this companion rule to default enforce;
+blocking belongs to `CFML-EXEC-003` after its stricter all-three-fd
+telemetry has been validated locally.
 
 ### `CFML-EXEC-004` — Deleted-file exec by web user
 
@@ -1669,7 +1713,7 @@ classes. Each is sized similarly to the existing shipped policies — single
 BPF program (or small group), one allowlist map, monitor-mode
 default, optional enforce.
 
-**CFML-EXEC-005 — Shell exec by service-account user.**
+**CFML-EXEC-006 — Shell exec by service-account user.**
 Hook `bprm_check_security`. Blocks `bash` / `sh` / `dash` / `zsh`
 (plus `python`, `perl`, `ruby` interactive REPLs) when invoked
 by uid in a configurable "service account" set: `named`,
@@ -1728,7 +1772,7 @@ qemu sometimes pull in modules on guest start).
 ### Per-host-class default mix
 
 ```
-                       EXEC-001  EXEC-003  FS-005  CRED-002  EXEC-005  NET-002  FS-009  FS-010  MOD-001
+                       EXEC-001  EXEC-003  FS-005  CRED-002  EXEC-006  NET-002  FS-009  FS-010  MOD-001
 nameserver              monitor   monitor   skip    monitor   monitor   monitor  monitor monitor monitor
 monitoring node         monitor   monitor   skip    monitor   monitor   skip*    monitor monitor monitor
 plain nginx host        monitor   monitor   monitor monitor   monitor   skip     monitor monitor skip
@@ -1748,7 +1792,7 @@ is mostly about hypervisor compromise rather than guest.
 1. **CFML-FS-009 (boot/kernel-tree)** — highest signal across every
    host class, lowest FP, smallest verifier surface. Same shape as
    FS-005 with a different watched-paths set.
-2. **CFML-EXEC-005 (service-user shell)** — nameservers and
+2. **CFML-EXEC-006 (service-user shell)** — nameservers and
    monitoring nodes get most benefit. Watched-uid set is the inverse
    of FS-005's (system users, not panel users).
 3. **CFML-MOD-001 (module load)** — catches the rootkit case across

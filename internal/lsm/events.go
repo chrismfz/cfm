@@ -10,13 +10,14 @@ import (
 // On-wire event policy IDs. Must stay in sync with
 // internal/lsm/bpf/common.bpf.h's enum cfm_lsm_policy_id.
 const (
-	bpfPolicyMemfdExec       uint32 = 1
-	bpfPolicyReverseShell    uint32 = 3
-	bpfPolicyDeletedFileExec uint32 = 4
-	bpfPolicySensitiveWrite  uint32 = 5
-	bpfPolicyCredEscal       uint32 = 7
-	bpfPolicyDirectCred      uint32 = 9
-	bpfPolicyUnexpectedBPF   uint32 = 10
+	bpfPolicyMemfdExec           uint32 = 1
+	bpfPolicyReverseShell        uint32 = 3
+	bpfPolicyDeletedFileExec     uint32 = 4
+	bpfPolicySensitiveWrite      uint32 = 5
+	bpfPolicyInterpreterNetStdio uint32 = 6
+	bpfPolicyCredEscal           uint32 = 7
+	bpfPolicyDirectCred          uint32 = 9
+	bpfPolicyUnexpectedBPF       uint32 = 10
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -82,10 +83,14 @@ const (
 )
 
 const (
-	EventFlagWebOrigin         uint8 = 1 << 0
-	EventFlagDirectCredInstall uint8 = 1 << 1
-	EventFlagUnlinkedInode     uint8 = 1 << 2
-	EventFlagUnhashedDentry    uint8 = 1 << 3
+	EventFlagWebOrigin            uint8 = 1 << 0
+	EventFlagDirectCredInstall    uint8 = 1 << 1
+	EventFlagUnlinkedInode        uint8 = 1 << 2
+	EventFlagUnhashedDentry       uint8 = 1 << 3
+	EventFlagRevshellStrict       uint8 = 1 << 4
+	EventFlagInterpreterStdioWeak uint8 = 1 << 5
+	EventFlagStdioOneRemote       uint8 = 1 << 6
+	EventFlagStdioTwoRemote       uint8 = 1 << 7
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -115,7 +120,9 @@ type Event struct {
 
 	// Flags carries per-policy semantics. For CFML-FS-005 and
 	// CFML-BPF-001, bit 0 means the match involved a web/panel-origin
-	// uid or origin signal.
+	// uid or origin signal. For EXEC stdio detectors, bits 4-7 distinguish
+	// strict all-three-fd reverse shells from weak one/two-fd interpreter
+	// telemetry.
 	Flags uint8
 
 	// Comm is the task's 16-byte command name (TASK_COMM_LEN).
@@ -123,8 +130,8 @@ type Event struct {
 
 	// Filename is the policy-specific context payload. For
 	// CFML-EXEC-001 this is the memfd's d_name. For CFML-EXEC-003
-	// the binary being exec'd. For CFML-EXEC-004 this is the
-	// deleted/unlinked executable dentry name. For CFML-FS-005 the
+	// and CFML-EXEC-005 the binary being exec'd. For CFML-EXEC-004
+	// this is the deleted/unlinked executable dentry name. For CFML-FS-005 the
 	// watched file's name. For CFML-CRED-002 the offending executable's
 	// name. For CFML-BPF-001 this is the bpf() command label.
 	Filename string
@@ -135,6 +142,25 @@ type Event struct {
 // daemon start) to anchor the monotonic ts_ns value to UTC.
 func (e Event) Time(bootTime time.Time) time.Time {
 	return bootTime.Add(time.Duration(e.TimestampNS))
+}
+
+// ExecStdioSignal renders the EXEC-003/EXEC-005 stdio signal encoded in
+// Event.Flags. Empty means the event is not from an exec stdio detector or
+// carries no stdio signal bits.
+func (e Event) ExecStdioSignal() string {
+	if e.Flags&EventFlagRevshellStrict != 0 {
+		return "strict_all_stdio_remote"
+	}
+	if e.Flags&EventFlagInterpreterStdioWeak == 0 {
+		return ""
+	}
+	if e.Flags&EventFlagStdioTwoRemote != 0 {
+		return "weak_two_stdio_remote"
+	}
+	if e.Flags&EventFlagStdioOneRemote != 0 {
+		return "weak_one_stdio_remote"
+	}
+	return "weak_stdio_remote"
 }
 
 // parseEvent decodes one ringbuf record into a Go Event. The wire
@@ -182,6 +208,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyReverseShell
 	case bpfPolicyDeletedFileExec:
 		e.PolicyID = PolicyDeletedFileExec
+	case bpfPolicyInterpreterNetStdio:
+		e.PolicyID = PolicyInterpreterNetStdio
 	case bpfPolicySensitiveWrite:
 		e.PolicyID = PolicySensitiveWrite
 	case bpfPolicyCredEscal:
