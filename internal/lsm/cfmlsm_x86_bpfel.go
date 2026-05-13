@@ -73,6 +73,7 @@ type cfmlsmSpecs struct {
 type cfmlsmProgramSpecs struct {
 	CfmCred002            *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
 	CfmCred003            *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
+	CfmDeletedFileExec    *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
 	CfmFs005Create        *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
 	CfmFs005Link          *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec      *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
@@ -102,10 +103,11 @@ type cfmlsmMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmVariableSpecs struct {
-	CfmEnforceMemfdExec      *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
-	CfmEnforceRevshell       *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
-	CfmEnforceSensitiveWrite *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
-	CfmFs005WebOriginMonitor *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
+	CfmEnforceDeletedFileExec *ebpf.VariableSpec `ebpf:"cfm_enforce_deleted_file_exec"`
+	CfmEnforceMemfdExec       *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforceRevshell        *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceSensitiveWrite  *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
+	CfmFs005WebOriginMonitor  *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
 }
 
 // cfmlsmObjects contains all objects after they have been loaded into the kernel.
@@ -151,10 +153,11 @@ func (m *cfmlsmMaps) Close() error {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmVariables struct {
-	CfmEnforceMemfdExec      *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
-	CfmEnforceRevshell       *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
-	CfmEnforceSensitiveWrite *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
-	CfmFs005WebOriginMonitor *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
+	CfmEnforceDeletedFileExec *ebpf.Variable `ebpf:"cfm_enforce_deleted_file_exec"`
+	CfmEnforceMemfdExec       *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforceRevshell        *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
+	CfmEnforceSensitiveWrite  *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
+	CfmFs005WebOriginMonitor  *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
 }
 
 // cfmlsmPrograms contains all programs after they have been loaded into the kernel.
@@ -163,6 +166,7 @@ type cfmlsmVariables struct {
 type cfmlsmPrograms struct {
 	CfmCred002            *ebpf.Program `ebpf:"cfm_cred002"`
 	CfmCred003            *ebpf.Program `ebpf:"cfm_cred003"`
+	CfmDeletedFileExec    *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
 	CfmFs005Create        *ebpf.Program `ebpf:"cfm_fs005_create"`
 	CfmFs005Link          *ebpf.Program `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec      *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
@@ -180,6 +184,7 @@ func (p *cfmlsmPrograms) Close() error {
 	return _CfmlsmClose(
 		p.CfmCred002,
 		p.CfmCred003,
+		p.CfmDeletedFileExec,
 		p.CfmFs005Create,
 		p.CfmFs005Link,
 		p.CfmFs005MarkExec,

@@ -56,6 +56,28 @@ func TestParseEvent_MemfdExec(t *testing.T) {
 	}
 }
 
+func TestParseEvent_DeletedFileExec(t *testing.T) {
+	raw := buildWireEvent(t,
+		bpfPolicyDeletedFileExec, 222, 222, 1001, 1001, 123456,
+		"php-fpm", "payload",
+	)
+	raw[29] = EventFlagUnlinkedInode | EventFlagUnhashedDentry
+
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyDeletedFileExec {
+		t.Errorf("PolicyID: got %q, want %q", ev.PolicyID, PolicyDeletedFileExec)
+	}
+	if ev.Flags&(EventFlagUnlinkedInode|EventFlagUnhashedDentry) == 0 {
+		t.Errorf("Flags: got %#x, want deleted/unhashed bits", ev.Flags)
+	}
+	if ev.Filename != "payload" {
+		t.Errorf("Filename: got %q, want payload", ev.Filename)
+	}
+}
+
 func TestParseEvent_TrimsTrailingNUL(t *testing.T) {
 	// Simulate what the BPF program actually writes: comm + NUL + garbage,
 	// which is the standard kernel convention.
@@ -87,6 +109,64 @@ func TestParseEvent_DirectCredInstall(t *testing.T) {
 	}
 	if ev.Flags&EventFlagDirectCredInstall == 0 {
 		t.Fatalf("direct credential flag missing: flags=%08b", ev.Flags)
+	}
+}
+
+func TestEventExecStdioSignal(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags uint8
+		want  string
+	}{
+		{"strict", EventFlagRevshellStrict, "strict_all_stdio_remote"},
+		{"weak two", EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote, "weak_two_stdio_remote"},
+		{"weak one", EventFlagInterpreterStdioWeak | EventFlagStdioOneRemote, "weak_one_stdio_remote"},
+		{"none", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Event{Flags: tc.flags}).ExecStdioSignal(); got != tc.want {
+				t.Fatalf("ExecStdioSignal() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEvent_InterpreterNetStdio(t *testing.T) {
+	raw := buildWireEvent(t, bpfPolicyInterpreterNetStdio, 123, 123, 1001, 1001, 789, "bash", "/bin/bash")
+	raw[29] = EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote
+
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyInterpreterNetStdio {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyInterpreterNetStdio)
+	}
+	if ev.Flags&(EventFlagInterpreterStdioWeak|EventFlagStdioTwoRemote) == 0 {
+		t.Fatalf("Flags: got %#x, want weak two-remote bits", ev.Flags)
+	}
+}
+
+func TestParseEvent_UnexpectedBPF(t *testing.T) {
+	raw := buildWireEvent(t, bpfPolicyUnexpectedBPF, 4242, 4242, 1001, 1001, 456, "php-fpm", "BPF_PROG_LOAD")
+	raw[28] = bpfBPFOpProgLoad
+	raw[29] = EventFlagWebOrigin
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyUnexpectedBPF {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyUnexpectedBPF)
+	}
+	if ev.Op != BPFOpProgLoad {
+		t.Fatalf("Op: got %v, want BPFOpProgLoad", ev.Op)
+	}
+	if ev.Flags&EventFlagWebOrigin == 0 {
+		t.Fatalf("web-origin flag missing: flags=%08b", ev.Flags)
+	}
+	if ev.Filename != "BPF_PROG_LOAD" {
+		t.Fatalf("Filename: got %q, want BPF_PROG_LOAD", ev.Filename)
 	}
 }
 
@@ -134,17 +214,29 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	if PolicyReverseShell == "" {
 		t.Fatal("PolicyReverseShell is the empty string — was the constant accidentally removed?")
 	}
+	if PolicyDeletedFileExec == "" {
+		t.Fatal("PolicyDeletedFileExec is the empty string — was the constant accidentally removed?")
+	}
 	if bpfPolicyMemfdExec != 1 {
 		t.Errorf("bpfPolicyMemfdExec mismatch: Go=%d, BPF=1 (see common.bpf.h)", bpfPolicyMemfdExec)
 	}
 	if bpfPolicyReverseShell != 3 {
 		t.Errorf("bpfPolicyReverseShell mismatch: Go=%d, BPF=3 (see common.bpf.h)", bpfPolicyReverseShell)
 	}
+	if bpfPolicyDeletedFileExec != 4 {
+		t.Errorf("bpfPolicyDeletedFileExec mismatch: Go=%d, BPF=4 (see common.bpf.h)", bpfPolicyDeletedFileExec)
+	}
 	if bpfPolicyCredEscal != 7 {
 		t.Errorf("bpfPolicyCredEscal mismatch: Go=%d, BPF=7 (see common.bpf.h)", bpfPolicyCredEscal)
 	}
 	if bpfPolicyDirectCred != 9 {
 		t.Errorf("bpfPolicyDirectCred mismatch: Go=%d, BPF=9 (see common.bpf.h)", bpfPolicyDirectCred)
+	}
+	if bpfPolicyInterpreterNetStdio != 6 {
+		t.Errorf("bpfPolicyInterpreterNetStdio mismatch: Go=%d, BPF=6 (see common.bpf.h)", bpfPolicyInterpreterNetStdio)
+	}
+	if bpfPolicyUnexpectedBPF != 10 {
+		t.Errorf("bpfPolicyUnexpectedBPF mismatch: Go=%d, BPF=10 (see common.bpf.h)", bpfPolicyUnexpectedBPF)
 	}
 }
 

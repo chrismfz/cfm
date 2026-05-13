@@ -10,9 +10,13 @@
  * --------
  *   cfm_memfd_exec  — CFML-EXEC-001 (memfd exec detector)
  *   cfm_revshell    — CFML-EXEC-003 (reverse-shell-pattern detector)
+ *   cfm_interp_net_stdio
+ *                   — CFML-EXEC-005 (weak interpreter net-stdio telemetry)
+ *   cfm_deleted_file_exec
+ *                   — CFML-EXEC-004 (deleted/unlinked exec by web user)
  *   cfm_cred003     — CFML-CRED-003 (direct root cred install detector)
  *
- * Both hook bprm_check_security and default to monitor mode. Per
+ * Exec policies hook bprm_check_security and default to monitor mode. Per
  * docs/cfm-lsm.md the enforce-mode flip happens via a bpf2go
  * constant rewrite once telemetry justifies it; audit emission is
  * best-effort, but enforce/allow verdicts must not depend on
@@ -66,8 +70,10 @@ struct {
  * fold the comparison at compile time (otherwise the unreachable
  * branch would be dead code stripped and the rewrite would have
  * nothing to flip). */
-volatile const __u8 cfm_enforce_memfd_exec = 0;
-volatile const __u8 cfm_enforce_revshell   = 0;
+volatile const __u8 cfm_enforce_memfd_exec         = 0;
+volatile const __u8 cfm_enforce_revshell           = 0;
+volatile const __u8 cfm_enforce_deleted_file_exec  = 0;
+/* CFML-EXEC-005 is monitor-only by default/design; no enforce constant. */
 
 /* EPERM (1) — what bprm_check_security returns when an LSM denies
  * the exec. Keeps the negative-errno convention explicit. */
@@ -310,7 +316,7 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     e->uid       = (__u32)(uid_gid & 0xffffffffu);
     e->gid       = (__u32)(uid_gid >> 32);
     e->op        = 0;
-    e->flags     = 0;
+    e->flags     = CFM_LSM_F_REVSHELL_STRICT;
     e->_pad1     = 0;
     e->_pad2     = 0;
 
@@ -329,6 +335,175 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     return cfm_exec_verdict(cfm_enforce_revshell);
 }
 
+
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-005 — Suspicious interpreter network stdio.
+ *
+ * Hook: bprm_check_security (LSM)
+ *
+ * Mechanism: reuse CFML-EXEC-003's fd inspection and look for a weaker
+ * companion signal: one or two of fd 0/1/2 are established remote TCP
+ * sockets AND the executable basename is a shell/interpreter/network
+ * stdio helper commonly used in one-liners. Three remote stdio fds are
+ * left to the strict CFML-EXEC-003 rule to avoid duplicate telemetry.
+ *
+ * Mode: monitor-only. This intentionally has no enforce constant; weak
+ * telemetry catches context around inetd-style services, admin one-liners,
+ * and debugging sessions, so enforcement belongs only in the strict rule.
+ * ------------------------------------------------------------------- */
+
+static __always_inline int cfm_str_eq(const char *s, const char *lit, int lit_len)
+{
+    int i;
+
+#pragma unroll
+    for (i = 0; i < 16; i++) {
+        if (i > lit_len)
+            break;
+        char c = s[i];
+        char want = lit[i];
+        if (c != want)
+            return 0;
+        if (want == '\0')
+            return 1;
+    }
+
+    return 0;
+}
+
+static __always_inline int cfm_suspicious_exec_basename(const char *base)
+{
+    if (cfm_str_eq(base, "sh", 2)) return 1;
+    if (cfm_str_eq(base, "bash", 4)) return 1;
+    if (cfm_str_eq(base, "dash", 4)) return 1;
+    if (cfm_str_eq(base, "zsh", 3)) return 1;
+    if (cfm_str_eq(base, "python", 6)) return 1;
+    if (cfm_str_eq(base, "python3", 7)) return 1;
+    if (cfm_str_eq(base, "perl", 4)) return 1;
+    if (cfm_str_eq(base, "php", 3)) return 1;
+    if (cfm_str_eq(base, "ruby", 4)) return 1;
+    if (cfm_str_eq(base, "node", 4)) return 1;
+    if (cfm_str_eq(base, "nc", 2)) return 1;
+    if (cfm_str_eq(base, "ncat", 4)) return 1;
+    if (cfm_str_eq(base, "socat", 5)) return 1;
+
+    return 0;
+}
+
+static __always_inline int cfm_path_is_suspicious_basename(const char *path)
+{
+    char buf[CFM_FILENAME_LEN] = {};
+    int base = 0;
+    int i;
+
+    if (!path)
+        return 0;
+
+    if (bpf_probe_read_kernel_str(buf, sizeof(buf), path) <= 0)
+        return 0;
+
+#pragma unroll
+    for (i = 0; i < CFM_FILENAME_LEN; i++) {
+        char c = buf[i];
+        if (c == '/')
+            base = i + 1;
+        if (c == '\0')
+            break;
+    }
+
+    if (base >= CFM_FILENAME_LEN)
+        return 0;
+
+    return cfm_suspicious_exec_basename(&buf[base]);
+}
+
+static __always_inline void cfm_emit_exec_stdio_event(struct linux_binprm *bprm,
+                                                      __u32 policy_id,
+                                                      __u8 flags)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = policy_id;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const char *fname = BPF_CORE_READ(bprm, filename);
+    if (fname)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), fname);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_interp_net_stdio, struct linux_binprm *bprm, int ret)
+{
+    struct task_struct *task;
+    struct files_struct *files;
+    struct fdtable *fdt;
+    struct file **fdarr;
+    unsigned int max_fds;
+    int remote = 0;
+    const char *fname;
+    __u8 flags = CFM_LSM_F_INTERP_STDIO_WEAK;
+
+    if (ret != 0)
+        return ret;
+
+    fname = BPF_CORE_READ(bprm, filename);
+    if (!cfm_path_is_suspicious_basename(fname))
+        return 0;
+
+    task = bpf_get_current_task_btf();
+    if (!task)
+        return 0;
+
+    files = BPF_CORE_READ(task, files);
+    if (!files)
+        return 0;
+
+    fdt = BPF_CORE_READ(files, fdt);
+    if (!fdt)
+        return 0;
+
+    max_fds = BPF_CORE_READ(fdt, max_fds);
+    fdarr   = BPF_CORE_READ(fdt, fd);
+    if (!fdarr || max_fds < 3)
+        return 0;
+
+    if (fd_is_remote_tcp(fdarr, max_fds, 0))
+        remote++;
+    if (fd_is_remote_tcp(fdarr, max_fds, 1))
+        remote++;
+    if (fd_is_remote_tcp(fdarr, max_fds, 2))
+        remote++;
+
+    if (remote == 1)
+        flags |= CFM_LSM_F_STDIO_ONE_REMOTE;
+    else if (remote == 2)
+        flags |= CFM_LSM_F_STDIO_TWO_REMOTE;
+    else
+        return 0;
+
+    cfm_emit_exec_stdio_event(bprm, CFM_LSM_POLICY_INTERP_NET_STDIO, flags);
+    return 0;
+}
+
 /* ------------------------------------------------------------------- *
  * CFML-FS-005 — Sensitive-file modification by web user.
  *
@@ -339,8 +514,10 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
  * uid in `cfm_watched_uids` (populated by the cfm daemon from
  * /etc/passwd / panel manifests at attach time). If matched, look
  * up the target filesystem+inode key in `cfm_watched_inodes`
- * (populated by the daemon stat()ing each sensitive path). If THAT also matches,
- * emit an event tagged with the op kind.
+ * (populated by the daemon stat()ing each sensitive or persistence path). The
+ * map value distinguishes stable core paths that may enforce from broader
+ * persistence paths that are always monitor-only. If THAT also matches, emit
+ * an event tagged with the op kind.
  *
  * The filesystem+inode match avoids BPF-side path walking entirely
  * while disambiguating identical inode numbers on different mounts.
@@ -350,8 +527,9 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
  * argument gives us directly).
  *
  * Enforcement: opt-in via volatile-const flip, same model as
- * EXEC-001 / EXEC-003. On enforce, return -EPERM so the write
- * fails outright.
+ * EXEC-001 / EXEC-003, but only for map entries marked enforceable by
+ * userspace. Persistence-path entries report only, even when the policy mode
+ * is enforce.
  *
  * Verifier complexity: lower than EXEC-003 (no bounded loops, no
  * fd walking; just two map lookups + a few CO-RE reads).
@@ -372,6 +550,9 @@ struct {
 } cfm_watched_inodes SEC(".maps");
 
 volatile const __u8 cfm_enforce_sensitive_write = 0;
+
+#define CFM_FS005_WATCH_ENFORCEABLE 1
+#define CFM_FS005_WATCH_MONITOR_ONLY 2
 
 /* Conservative feature gate for origin tracking. 0 preserves the
  * historical current-uid-only FS-005 behaviour; 1 tracks tasks that
@@ -452,6 +633,124 @@ static __always_inline void cfm_mark_current_web_origin_if_needed(void)
     cfm_mark_current_web_origin();
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-004 — Deleted-file exec by web user.
+ *
+ * Hook: bprm_check_security (LSM)
+ *
+ * Mechanism: inspect bprm->file->f_path.dentry and the backing inode.
+ * A regular executable that was opened and then unlinked typically has
+ * inode->__i_nlink == 0, and its dentry is commonly unhashed
+ * (d_hash.pprev == NULL). Either state is suspicious when the calling
+ * task is a web-class uid. If web-origin task storage is enabled, tasks
+ * that originated under a watched uid also emit telemetry after uid
+ * transitions, but those origin-only matches remain monitor-only.
+ *
+ * Mode: monitor by default. Enforcement is deliberately opt-in via
+ * cfm_enforce_deleted_file_exec only after production telemetry proves
+ * the signal is clean.
+ * ------------------------------------------------------------------- */
+
+static __always_inline bool cfm_dentry_unhashed(struct dentry *d)
+{
+    if (!d)
+        return false;
+
+    return BPF_CORE_READ(d, d_hash.pprev) == NULL;
+}
+
+static __always_inline int cfm_deleted_file_exec_flags(struct dentry *dentry,
+                                                       struct inode *inode,
+                                                       __u8 *flags)
+{
+    if (!dentry || !inode || !flags)
+        return 0;
+
+    /* EXEC-001 owns anonymous memfd telemetry. Do not double-report it
+     * as a deleted-file exec just because memfd inodes also have no
+     * durable link from a normal filesystem namespace. */
+    if (dentry_name_is_memfd(dentry))
+        return 0;
+
+    __u8 f = 0;
+    unsigned int nlink = BPF_CORE_READ(inode, __i_nlink);
+    if (nlink == 0)
+        f |= CFM_LSM_F_UNLINKED_INODE;
+    if (cfm_dentry_unhashed(dentry))
+        f |= CFM_LSM_F_UNHASHED_DENTRY;
+
+    *flags = f;
+    return f != 0;
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_deleted_file_exec, struct linux_binprm *bprm, int ret)
+{
+    if (ret != 0)
+        return ret;
+
+    cfm_mark_current_web_origin_if_needed();
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool current_uid_watched = cfm_uid_watched(uid);
+    bool origin_watched = cfm_task_is_web_origin(bpf_get_current_task_btf());
+    if (!current_uid_watched && !origin_watched)
+        return 0;
+
+    struct file *file = BPF_CORE_READ(bprm, file);
+    if (!file)
+        return 0;
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    if (!inode)
+        return 0;
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (!dentry)
+        return 0;
+
+    __u8 flags = 0;
+    if (!cfm_deleted_file_exec_flags(dentry, inode, &flags))
+        return 0;
+    if (origin_watched && !current_uid_watched)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e) {
+        if (current_uid_watched && cfm_enforce_deleted_file_exec)
+            return CFM_LSM_DENY;
+        return 0;
+    }
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_DELETED_FILE_EXEC;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+
+    /* Origin-only matches stay monitor-only while the origin signal is
+     * still being proven out. Current web-class uid enforcement is opt-in. */
+    if (current_uid_watched && cfm_enforce_deleted_file_exec)
+        return CFM_LSM_DENY;
+    return 0;
+}
+
 /* Emit one FS-005 event. Caller has already established that uid/origin
  * + target inode are both in the watched sets. */
 static __always_inline void cfm_fs005_emit(struct dentry *target,
@@ -524,19 +823,23 @@ static __always_inline bool cfm_inode_key_from_inode(struct inode *inode,
 }
 
 /* Look up one dentry's d_inode as a filesystem+inode key in
- * cfm_watched_inodes. Returns true on match. NULL dentry / NULL inode
- * are both treated as "no match" (the dentry passed at create-time has
- * no inode yet — the caller must pass d_parent in that case). */
-static __always_inline bool cfm_fs005_inode_watched(struct dentry *d)
+ * cfm_watched_inodes. Returns the userspace-supplied watch value on match.
+ * NULL dentry / NULL inode are both treated as "no match" (the dentry
+ * passed at create-time has no inode yet — the caller must pass d_parent in
+ * that case). */
+static __always_inline __u8 cfm_fs005_inode_watch_mode(struct dentry *d)
 {
     if (!d)
-        return false;
+        return 0;
     struct inode *ino = BPF_CORE_READ(d, d_inode);
 
     struct cfm_inode_key key = {};
     if (!cfm_inode_key_from_inode(ino, &key))
-        return false;
-    return bpf_map_lookup_elem(&cfm_watched_inodes, &key) != NULL;
+        return 0;
+    __u8 *mode = bpf_map_lookup_elem(&cfm_watched_inodes, &key);
+    if (!mode)
+        return 0;
+    return *mode;
 }
 
 /* Shared check helper. Returns:
@@ -576,7 +879,10 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     if (!current_uid_watched && !origin_watched)
         return 0;
 
-    if (!cfm_fs005_inode_watched(primary) && !cfm_fs005_inode_watched(secondary))
+    __u8 primary_watch = cfm_fs005_inode_watch_mode(primary);
+    __u8 secondary_watch = cfm_fs005_inode_watch_mode(secondary);
+    __u8 watch_mode = primary_watch ? primary_watch : secondary_watch;
+    if (!watch_mode)
         return 0;
 
     struct dentry *ev = event_dentry;
@@ -591,7 +897,8 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     /* Origin-only matches are intentionally monitor-only while we gather
      * production telemetry. Current-uid matches preserve the historical
      * FS-005 enforcement semantics. */
-    if (current_uid_watched && cfm_enforce_sensitive_write)
+    if (current_uid_watched && cfm_enforce_sensitive_write &&
+        watch_mode == CFM_FS005_WATCH_ENFORCEABLE)
         return CFM_LSM_DENY;
     return 0;
 }
@@ -928,6 +1235,138 @@ int BPF_PROG(cfm_cred003, struct cred *new)
     struct file *exe = mm ? BPF_CORE_READ(mm, exe_file) : NULL;
 
     cfm_cred_emit(CFM_LSM_POLICY_DIRECT_CRED, CFM_LSM_F_DIRECT_CRED_INSTALL, exe);
+    return 0;
+}
+
+
+/* ------------------------------------------------------------------- *
+ * CFML-BPF-001 — Unexpected BPF use.
+ *
+ * Hook: tracepoint/syscalls/sys_enter_bpf
+ *
+ * Mechanism: observe bpf() syscall entry for BPF_MAP_CREATE and
+ * BPF_PROG_LOAD commands. Trusted CFM/distro agent comm names are
+ * suppressed unless the current uid is one of the daemon-populated
+ * web/panel uids; web/panel attempts are always reported.
+ *
+ * Mode: monitor ONLY. This tracepoint is telemetry, not an LSM decision
+ * hook, and broad unprivileged BPF reduction remains a kernsec/sysctl
+ * responsibility (kernel.unprivileged_bpf_disabled, bpf_jit_harden, ...).
+ * ------------------------------------------------------------------- */
+
+#ifndef BPF_MAP_CREATE
+#define BPF_MAP_CREATE 0
+#endif
+#ifndef BPF_PROG_LOAD
+#define BPF_PROG_LOAD 5
+#endif
+
+struct trace_event_raw_sys_enter {
+    unsigned short common_type;
+    unsigned char common_flags;
+    unsigned char common_preempt_count;
+    int common_pid;
+    long id;
+    unsigned long args[6];
+} ___NCO;
+
+static __always_inline bool cfm_comm_is_trusted_bpf_agent(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* CFM's own CLI/daemon identity. */
+    if (comm[0] == 'c' && comm[1] == 'f' && comm[2] == 'm' && comm[3] == '\0')
+        return true;
+
+    /* Known distro/platform agents that legitimately manage BPF state. */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'u' && comm[9] == 'd' && comm[10] == 'e' && comm[11] == 'v' &&
+        comm[12] == 'd' && comm[13] == '\0')
+        return true;
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'n' && comm[9] == 'e' && comm[10] == 't' && comm[11] == 'w' &&
+        comm[12] == 'o' && comm[13] == 'r' && comm[14] == 'k')
+        return true;
+    if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'w' &&
+        comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'k' && comm[7] == 'M' &&
+        comm[8] == 'a' && comm[9] == 'n' && comm[10] == 'a' && comm[11] == 'g' &&
+        comm[12] == 'e' && comm[13] == 'r' && comm[14] == '\0')
+        return true;
+    if (comm[0] == 'b' && comm[1] == 'p' && comm[2] == 'f' && comm[3] == 't' &&
+        comm[4] == 'o' && comm[5] == 'o' && comm[6] == 'l' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' &&
+        comm[4] == 't' && comm[5] == 'd' && comm[6] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_bpf001_emit(__u8 op, __u8 flags, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_UNEXPECTED_BPF;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+    if (op == CFM_BPF_OP_MAP_CREATE)
+        __builtin_memcpy(e->filename, "BPF_MAP_CREATE", 15);
+    else if (op == CFM_BPF_OP_PROG_LOAD)
+        __builtin_memcpy(e->filename, "BPF_PROG_LOAD", 14);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_bpf")
+int cfm_bpf001(struct trace_event_raw_sys_enter *ctx)
+{
+    __u32 cmd = (__u32)ctx->args[0];
+    __u8 op = CFM_OP_NONE;
+
+    if (cmd == BPF_MAP_CREATE) {
+        op = CFM_BPF_OP_MAP_CREATE;
+    } else if (cmd == BPF_PROG_LOAD) {
+        op = CFM_BPF_OP_PROG_LOAD;
+    } else {
+        return 0;
+    }
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool web_uid = cfm_uid_watched(uid);
+
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    if (!web_uid && cfm_comm_is_trusted_bpf_agent(comm))
+        return 0;
+
+    __u8 flags = 0;
+    if (web_uid)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    cfm_bpf001_emit(op, flags, comm);
     return 0;
 }
 

@@ -36,6 +36,7 @@ mode = monitor
 [policy "CFML-FS-005"]
 mode = monitor
 origin_tracking = monitor
+persistence_path = /opt/panel/hooks
 `
 	c, err := ParseConf(strings.NewReader(body))
 	if err != nil {
@@ -52,6 +53,10 @@ origin_tracking = monitor
 	}
 	if !c.FS005WebOriginMonitor {
 		t.Fatal("origin_tracking=monitor was not parsed")
+	}
+	gotPersistence := c.PersistencePathsFor(PolicySensitiveWrite)
+	if len(gotPersistence) != 1 || gotPersistence[0] != "/opt/panel/hooks" {
+		t.Fatalf("persistence_path parse: got %v", gotPersistence)
 	}
 }
 
@@ -199,6 +204,10 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	original.Modes[PolicyMemfdExec] = ModeEnforce
 	original.Modes[PolicyReverseShell] = ModeMonitor
 	original.FS005WebOriginMonitor = true
+	original.PersistencePaths[PolicySensitiveWrite] = []string{
+		"/etc/systemd/system",
+		"/usr/local/directadmin/scripts/custom",
+	}
 	original.AllowExe[PolicyCredEscal] = []string{
 		"/usr/local/directadmin/directadmin",
 		"/usr/local/cpanel/cpanel",
@@ -220,6 +229,17 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	if roundtrip.FS005WebOriginMonitor != original.FS005WebOriginMonitor {
 		t.Errorf("origin tracking: got %t, want %t", roundtrip.FS005WebOriginMonitor, original.FS005WebOriginMonitor)
 	}
+	gotPersistence := roundtrip.PersistencePathsFor(PolicySensitiveWrite)
+	wantPersistence := original.PersistencePaths[PolicySensitiveWrite]
+	if len(gotPersistence) != len(wantPersistence) {
+		t.Fatalf("persistence_path round-trip count: got %d, want %d (rendered: %s)", len(gotPersistence), len(wantPersistence), rendered)
+	}
+	for i := range wantPersistence {
+		if gotPersistence[i] != wantPersistence[i] {
+			t.Errorf("persistence_path[%d]: got %q, want %q", i, gotPersistence[i], wantPersistence[i])
+		}
+	}
+
 	gotAllow := roundtrip.AllowExeFor(PolicyCredEscal)
 	wantAllow := original.AllowExe[PolicyCredEscal]
 	if len(gotAllow) != len(wantAllow) {
@@ -228,6 +248,32 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 	for i := range wantAllow {
 		if gotAllow[i] != wantAllow[i] {
 			t.Errorf("allow_exe[%d]: got %q, want %q", i, gotAllow[i], wantAllow[i])
+		}
+	}
+}
+
+func TestParseConf_PersistencePath(t *testing.T) {
+	body := `
+[policy "CFML-FS-005"]
+mode = monitor
+persistence_path = /etc/systemd/system
+persistence_path = /usr/local/cpanel/hooks
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	got := c.PersistencePathsFor(PolicySensitiveWrite)
+	want := []string{
+		"/etc/systemd/system",
+		"/usr/local/cpanel/hooks",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("persistence_path count: got %d (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("persistence_path[%d]: got %q, want %q", i, got[i], want[i])
 		}
 	}
 }
@@ -258,7 +304,7 @@ allow_exe = /usr/local/cpanel/cpanel
 	}
 }
 
-func TestParseConf_AllowExe_Errors(t *testing.T) {
+func TestParseConf_Path_Errors(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
@@ -270,8 +316,18 @@ func TestParseConf_AllowExe_Errors(t *testing.T) {
 			want: "allow_exe is only valid",
 		},
 		{
-			name: "relative path",
+			name: "persistence_path on wrong policy",
+			body: "[policy \"CFML-CRED-002\"]\npersistence_path = /etc/systemd/system\n",
+			want: "persistence_path is only valid",
+		},
+		{
+			name: "relative allow_exe path",
 			body: "[policy \"CFML-CRED-002\"]\nallow_exe = directadmin\n",
+			want: "must be an absolute path",
+		},
+		{
+			name: "relative persistence_path",
+			body: "[policy \"CFML-FS-005\"]\npersistence_path = etc/cron.d\n",
 			want: "must be an absolute path",
 		},
 		{

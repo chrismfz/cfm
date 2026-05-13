@@ -17,6 +17,19 @@ const (
 	// to exec with fds 0/1/2 dup'd onto a remote-connected socket.
 	PolicyReverseShell PolicyID = "CFML-EXEC-003"
 
+	// PolicyDeletedFileExec — CFML-EXEC-004: detect a web-class
+	// user (or later, web-origin task) executing a file whose backing
+	// inode has been unlinked/deleted after open. Monitor-first by
+	// default; enforce is opt-in only after telemetry.
+	PolicyDeletedFileExec PolicyID = "CFML-EXEC-004"
+
+	// PolicyInterpreterNetStdio — CFML-EXEC-005: monitor suspicious
+	// interpreter / shell / socket-helper execs when one or two of
+	// stdin/stdout/stderr point at established remote TCP sockets. This
+	// is weak companion telemetry for CFML-EXEC-003, not a default
+	// enforce policy.
+	PolicyInterpreterNetStdio PolicyID = "CFML-EXEC-005"
+
 	// PolicySensitiveWrite — CFML-FS-005: detect a web-class user
 	// (apache / nginx / php-fpm / panel-managed account) attempting
 	// to modify a host-sensitive file (/etc/passwd, /etc/shadow,
@@ -39,6 +52,13 @@ const (
 	// task_fix_setuid. Monitor-only by design because commit_creds()
 	// is not an LSM decision point.
 	PolicyDirectCredInstall PolicyID = "CFML-CRED-003"
+
+	// PolicyUnexpectedBPF — CFML-BPF-001: detect unexpected use of
+	// the bpf() syscall to create maps or load programs outside CFM
+	// and a small set of trusted distro agents. Monitor-only advanced
+	// threat telemetry; broad unprivileged BPF reduction belongs in
+	// kernsec sysctls.
+	PolicyUnexpectedBPF PolicyID = "CFML-BPF-001"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -101,6 +121,20 @@ func AllPolicies() []Policy {
 			Description: "Detect exec where stdin/stdout/stderr are dup'd to a remote-connected socket.",
 		},
 		{
+			ID:          PolicyDeletedFileExec,
+			Title:       "Deleted-file exec by web user",
+			Hook:        "bprm_check_security",
+			DefaultMode: ModeDisabled,
+			Description: "Detect web-class users or web-origin tasks executing deleted/unlinked files; monitor-first, enforce only after telemetry.",
+		},
+		{
+			ID:          PolicyInterpreterNetStdio,
+			Title:       "Suspicious interpreter network stdio",
+			Hook:        "bprm_check_security",
+			DefaultMode: ModeDisabled,
+			Description: "Monitor suspicious shell/interpreter/socket-helper execs when one or two stdio fds are established remote TCP sockets; companion telemetry to strict reverse-shell detection.",
+		},
+		{
 			ID:          PolicySensitiveWrite,
 			Title:       "Sensitive-file modification by web user",
 			Hook:        "inode_{setattr,create,unlink,link,rename,setxattr}",
@@ -120,6 +154,13 @@ func AllPolicies() []Policy {
 			Hook:        "fentry/commit_creds",
 			DefaultMode: ModeDisabled,
 			Description: "Detect direct commit_creds() installation of root credentials that bypassed task_fix_setuid. Monitor-only by design.",
+		},
+		{
+			ID:          PolicyUnexpectedBPF,
+			Title:       "Unexpected BPF use",
+			Hook:        "tracepoint/syscalls/sys_enter_bpf",
+			DefaultMode: ModeDisabled,
+			Description: "Monitor-only telemetry for unexpected bpf() map creation and program load attempts outside CFM and trusted distro agents; use kernsec sysctls for broad unprivileged BPF reduction.",
 		},
 	}
 }
