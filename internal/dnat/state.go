@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,61 @@ func PersistIntent(scope DNATScope, enabled bool) error {
 		mode = 0o644
 	}
 	return os.WriteFile(p, []byte(v), mode)
+}
+
+// panelDNATPriorityPath records the operator's last explicit cpanel DNAT
+// priority choice. It is read by RestoreOnStartup and the failsafe
+// recover path so an operator-chosen priority (e.g. -99 for Imunify-first)
+// is honored after reboot or auto-recovery instead of being silently
+// reverted to the -101 default. getenvInt() rejects negative values, and
+// the CLI flag is not propagated to the daemon, which is why a dedicated
+// state file is necessary.
+var panelDNATPriorityPath = "/var/lib/cfm/dnat_panel_priority"
+
+// defaultPanelDNATPriority is the fallback panel DNAT priority used when
+// no operator choice is persisted and no env override is set.
+const defaultPanelDNATPriority = -101
+
+// PersistPanelPriority writes the operator-chosen cpanel DNAT priority so
+// failsafe-recover and startup restore can re-apply it after reboot. The
+// directory is shared with the daemon's /var/lib/cfm tree.
+func PersistPanelPriority(priority int) error {
+	if err := os.MkdirAll(filepath.Dir(panelDNATPriorityPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(panelDNATPriorityPath, []byte(strconv.Itoa(priority)+"\n"), 0o644)
+}
+
+// LoadPanelPriority returns (value, true) when a previously persisted
+// priority exists and parses, (0, false) otherwise.
+func LoadPanelPriority() (int, bool) {
+	b, err := os.ReadFile(panelDNATPriorityPath)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// PanelStartupPriority resolves the priority to use when the daemon
+// re-applies cpanel DNAT autonomously (RestoreOnStartup, failsafe
+// Recover). Preference order: persisted state file → env var
+// NFT_PANEL_DNAT_PRIORITY (parsed as signed int) → default -101. The
+// env-var arm is kept for emergency override even though normal operation
+// goes through the persisted state file.
+func PanelStartupPriority() int {
+	if n, ok := LoadPanelPriority(); ok {
+		return n
+	}
+	if v := strings.TrimSpace(os.Getenv("NFT_PANEL_DNAT_PRIORITY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return defaultPanelDNATPriority
 }
 
 // LoadIntent returns the persisted intent for the given scope. `present`

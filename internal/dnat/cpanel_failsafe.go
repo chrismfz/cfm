@@ -112,7 +112,7 @@ func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 				LogTransition(ScopeCPanel, "OFF", "failsafe-recover", "no backend")
 				return
 			}
-			priority := getenvInt("NFT_PANEL_DNAT_PRIORITY", -101)
+			priority := PanelStartupPriority()
 			if err := backend.PanelDNATOn(priority); err != nil {
 				LogTransition(ScopeCPanel, "OFF", "failsafe-recover", fmt.Sprintf("enable failed: %v", err))
 				return

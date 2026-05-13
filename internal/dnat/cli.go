@@ -595,10 +595,14 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := persistPanelChallengeEnabled(true); err != nil {
-			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
-			return 1
-		}
+		// Intent is persisted only AFTER the full pipeline (listener
+		// reload, nft DNAT, allowlist accepts) succeeds. Writing it up
+		// front meant a mid-pipeline failure or the rollback branch left
+		// intent=ON on disk; RestoreOnStartup would then silently
+		// re-install DNAT on the next daemon restart, undoing the
+		// rollback. Any failure path below returns without touching the
+		// intent file, so the on-disk state is consistent with what was
+		// actually applied.
 		if err := applyPanelChallengeModeToPaths("forced", panelListenerChallengeConfigPaths); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on failed:", err)
 			return 1
@@ -622,6 +626,15 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			return 1
 		}
 		setPanelFirewallHealth("OK", "", true)
+		if err := persistPanelChallengeEnabled(true); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist intent:", err)
+		}
+		// Persist the operator-chosen priority so failsafe-recover and
+		// RestoreOnStartup re-apply this exact value instead of falling
+		// back to the -101 default.
+		if err := PersistPanelPriority(*priority); err != nil {
+			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist priority:", err)
+		}
 		LogTransition(ScopeCPanel, "ON", "manual", fmt.Sprintf("mode=%s priority=%d", selected, *priority))
 		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority)
 		fmt.Println("Phase 2/2 (firewall): OK")

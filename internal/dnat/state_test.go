@@ -65,6 +65,44 @@ func TestPersistAndLoadIntentCPanel(t *testing.T) {
 	}
 }
 
+func TestPanelStartupPriorityPreference(t *testing.T) {
+	dir := t.TempDir()
+	orig := panelDNATPriorityPath
+	panelDNATPriorityPath = filepath.Join(dir, "dnat_panel_priority")
+	t.Cleanup(func() { panelDNATPriorityPath = orig })
+
+	// No file, no env → default -101.
+	if _, ok := LoadPanelPriority(); ok {
+		t.Fatalf("expected LoadPanelPriority absent initially")
+	}
+	t.Setenv("NFT_PANEL_DNAT_PRIORITY", "")
+	if got := PanelStartupPriority(); got != defaultPanelDNATPriority {
+		t.Fatalf("default: got %d want %d", got, defaultPanelDNATPriority)
+	}
+
+	// Env override with a negative value must be honored (getenvInt
+	// would have rejected it as <=0). This is the bug we are guarding
+	// against — the original code silently fell back to -101.
+	t.Setenv("NFT_PANEL_DNAT_PRIORITY", "-99")
+	if got := PanelStartupPriority(); got != -99 {
+		t.Fatalf("env override: got %d want -99", got)
+	}
+
+	// Persisted state must win over env override (it represents the
+	// operator's last explicit CLI choice).
+	if err := PersistPanelPriority(-99); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	t.Setenv("NFT_PANEL_DNAT_PRIORITY", "-101")
+	if got := PanelStartupPriority(); got != -99 {
+		t.Fatalf("persisted wins: got %d want -99", got)
+	}
+	n, ok := LoadPanelPriority()
+	if !ok || n != -99 {
+		t.Fatalf("LoadPanelPriority: got (%d,%v) want (-99,true)", n, ok)
+	}
+}
+
 func TestProbeEdgeHealthyOK(t *testing.T) {
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != edgeHealthPath {

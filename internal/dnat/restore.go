@@ -21,8 +21,7 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 	if backend == nil {
 		return
 	}
-	enabled, present := LoadIntent(scope)
-	if !present || !enabled {
+	if enabled, present := LoadIntent(scope); !present || !enabled {
 		return
 	}
 
@@ -40,6 +39,16 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 	deadline := time.Now().Add(waitTotal)
 	var lastReason string
 	for {
+		// Re-read intent each tick. The polling window is up to
+		// ~60s during which the operator can run `cfm dnat off` to
+		// flip intent to OFF (e.g. boot-time triage). Without this
+		// re-check, the cached "intent was ON at startup" value
+		// would silently revert that decision once the edge comes up.
+		// The failsafe loop already does the same per-tick re-check
+		// via IntentCheck; restore should match.
+		if enabled, present := LoadIntent(scope); !present || !enabled {
+			return
+		}
 		on, _ := scopeStatus(scope, backend)
 		if on {
 			return
@@ -78,7 +87,7 @@ func scopeStatus(scope DNATScope, backend firewall.Backend) (bool, error) {
 
 func scopeEnable(scope DNATScope, backend firewall.Backend) error {
 	if scope == ScopeCPanel {
-		if err := backend.PanelDNATOn(getenvInt("NFT_PANEL_DNAT_PRIORITY", -101)); err != nil {
+		if err := backend.PanelDNATOn(PanelStartupPriority()); err != nil {
 			return err
 		}
 		// PanelDNATOn only reinstalls the redirect table; the input-chain
