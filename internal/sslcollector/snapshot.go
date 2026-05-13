@@ -5,20 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"cfm/internal/logging"
 )
 
-// snapshotPath is the on-disk JSON used by the OpenResty/Angie workers'
-// load_from_snapshot() to seed their in-memory cert store at init_worker
-// time. Until this change the file was written by the workers themselves
-// after a successful /dumpall round-trip; the worker could be tricked
-// into overwriting a good snapshot with a partial one if it called
-// /dumpall while the daemon's Refresh was still mid-scan. Making the
-// daemon the sole writer removes that race because Refresh swaps in the
-// fully-populated cert index atomically before this function ever runs.
-const snapshotPath = "/var/lib/cfm/sslcollector/dump.json"
+// regressionGuardMaxStale is the maximum age of the existing on-disk
+// snapshot before the >33%-shrink guard automatically releases. Without
+// this release valve, a legitimate bulk cert deletion (operator removes
+// half their domains) would be permanently refused and the stale
+// snapshot would resurface on every reboot. One hour is short enough
+// that the next discovery tick (15min) plus its follow-ups will give us
+// a clean post-deletion snapshot well within the window.
+var regressionGuardMaxStale = 1 * time.Hour
+
+func forceSnapshot() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CFM_SSLCOLLECTOR_FORCE_SNAPSHOT")))
+	return v == "1" || v == "true" || v == "on" || v == "yes"
+}
+
+// snapshotPathForTests is the on-disk JSON used by the OpenResty/Angie
+// workers' load_from_snapshot() to seed their in-memory cert store at
+// init_worker time. The daemon is the sole writer; workers are readers
+// only. This eliminates the race where a worker calling /dumpall mid-
+// Refresh would overwrite a previously-good snapshot with a partial
+// payload.
+//
+// Exposed as a var rather than a const so tests can point it at a
+// tempdir; production code must not mutate it.
+var snapshotPathForTests = "/var/lib/cfm/sslcollector/dump.json"
+
+func snapshotPath() string { return snapshotPathForTests }
 
 // snapshotMu serializes concurrent snapshot writes. Refresh() can be
 // invoked from the watcher goroutine, the discovery ticker, the stat
@@ -68,27 +87,45 @@ func (c *Collector) WriteSnapshot() {
 		return
 	}
 
-	if prevExact, prevWild, ok := readSnapshotCounts(snapshotPath); ok {
+	path := snapshotPath()
+	if prevExact, prevWild, ok := readSnapshotCounts(path); ok {
 		prev := prevExact + prevWild
 		next := exactN + wildN
 		// Allow shrinking by at most one third of the previous size in a
 		// single tick. A small drop is normal during cert renewal (one
 		// pair replaced by another); a large drop is suspicious and
-		// likely a mid-scan partial. The threshold is intentionally
-		// loose so we don't get stuck refusing real shrinkage forever.
-		if next < (prev-prev/3) {
-			logging.Logf("[sslcollector] snapshot: skip write (regression guard: existing has %d entries, new has %d; > 33%% drop)",
-				prev, next)
-			return
+		// likely a mid-scan partial.
+		//
+		// Release valves so an operator who legitimately removed many
+		// certs isn't stuck on a stale snapshot forever:
+		//   1. CFM_SSLCOLLECTOR_FORCE_SNAPSHOT=1 — emergency manual override.
+		//   2. Time-based: if the existing snapshot is older than
+		//      regressionGuardMaxStale (default 1h), accept the shrink.
+		//      Real cert deletions will pass the guard on the next
+		//      Refresh tick after this window.
+		// Using next*3 < prev*2 (strict 33%) avoids integer-division
+		// asymmetry at small counts.
+		shrunkTooFar := next*3 < prev*2
+		if shrunkTooFar {
+			if forceSnapshot() {
+				logging.Logf("[sslcollector] snapshot: regression guard bypassed by CFM_SSLCOLLECTOR_FORCE_SNAPSHOT (existing=%d new=%d)", prev, next)
+			} else if st, sterr := os.Stat(path); sterr == nil && time.Since(st.ModTime()) > regressionGuardMaxStale {
+				logging.Logf("[sslcollector] snapshot: regression guard released by staleness (existing=%d new=%d, snapshot age=%s > %s)",
+					prev, next, time.Since(st.ModTime()).Truncate(time.Second), regressionGuardMaxStale)
+			} else {
+				logging.Logf("[sslcollector] snapshot: skip write (regression guard: existing has %d entries, new has %d; >33%% drop). Set CFM_SSLCOLLECTOR_FORCE_SNAPSHOT=1 to override.",
+					prev, next)
+				return
+			}
 		}
 	}
 
-	if err := writeSnapshotAtomic(snapshotPath, body); err != nil {
+	if err := writeSnapshotAtomic(path, body); err != nil {
 		logging.Logf("[sslcollector] snapshot: write failed: %v", err)
 		return
 	}
 	logging.Logf("[sslcollector] snapshot: wrote %d exact + %d wild entries to %s",
-		exactN, wildN, snapshotPath)
+		exactN, wildN, path)
 }
 
 // readSnapshotCounts returns (exactN, wildN, ok). ok=false when the file

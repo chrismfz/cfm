@@ -66,13 +66,6 @@ type pemCacheItem struct {
 	cachedAt time.Time
 }
 
-type dumpAllResponse struct {
-    Version     string    `json:"version"`
-    GeneratedAt time.Time `json:"generated_at"`
-    Exact       []any     `json:"exact"`
-    Wild        []any     `json:"wild"`
-}
-
 type sockServer struct {
 	col *Collector
 	cfg SockServerConfig
