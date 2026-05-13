@@ -347,7 +347,11 @@ func FormatConf(c *Conf) string {
 		fmt.Fprintf(&b, "# %s — %s\n", p.ID, p.Title)
 		fmt.Fprintf(&b, "# Hook: %s\n", p.Hook)
 		fmt.Fprintf(&b, "[policy %q]\n", string(p.ID))
-		fmt.Fprintf(&b, "mode = %s  # disabled | monitor | enforce\n", mode)
+		if p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF {
+			fmt.Fprintf(&b, "mode = %s  # disabled | monitor; enforce is downgraded to monitor\n", mode)
+		} else {
+			fmt.Fprintf(&b, "mode = %s  # disabled | monitor | enforce\n", mode)
+		}
 		if p.ID == PolicySensitiveWrite {
 			state := "disabled"
 			if c.FS005WebOriginMonitor {

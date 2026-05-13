@@ -313,7 +313,10 @@ func emitNotify(ev Event) {
 	if ev.Filename != "" {
 		reason += " path=" + ev.Filename
 	}
-	if ev.PolicyID == PolicySensitiveWrite && ev.Flags&EventFlagWebOrigin != 0 {
+	if ev.PolicyID == PolicyUnexpectedBPF && ev.Op != FSOpNone {
+		reason += " op=" + ev.Op.String()
+	}
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
 		reason += " origin=web"
 	}
 
@@ -329,7 +332,10 @@ func emitNotify(ev Event) {
 	if ev.Filename != "" {
 		extra["path"] = ev.Filename
 	}
-	if ev.PolicyID == PolicySensitiveWrite && ev.Flags&EventFlagWebOrigin != 0 {
+	if ev.PolicyID == PolicyUnexpectedBPF && ev.Op != FSOpNone {
+		extra["op"] = ev.Op.String()
+	}
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
 	}
 

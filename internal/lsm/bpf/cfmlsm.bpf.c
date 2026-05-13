@@ -1066,4 +1066,136 @@ int BPF_PROG(cfm_cred003, struct cred *new)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------- *
+ * CFML-BPF-001 — Unexpected BPF use.
+ *
+ * Hook: tracepoint/syscalls/sys_enter_bpf
+ *
+ * Mechanism: observe bpf() syscall entry for BPF_MAP_CREATE and
+ * BPF_PROG_LOAD commands. Trusted CFM/distro agent comm names are
+ * suppressed unless the current uid is one of the daemon-populated
+ * web/panel uids; web/panel attempts are always reported.
+ *
+ * Mode: monitor ONLY. This tracepoint is telemetry, not an LSM decision
+ * hook, and broad unprivileged BPF reduction remains a kernsec/sysctl
+ * responsibility (kernel.unprivileged_bpf_disabled, bpf_jit_harden, ...).
+ * ------------------------------------------------------------------- */
+
+#ifndef BPF_MAP_CREATE
+#define BPF_MAP_CREATE 0
+#endif
+#ifndef BPF_PROG_LOAD
+#define BPF_PROG_LOAD 5
+#endif
+
+struct trace_event_raw_sys_enter {
+    unsigned short common_type;
+    unsigned char common_flags;
+    unsigned char common_preempt_count;
+    int common_pid;
+    long id;
+    unsigned long args[6];
+} ___NCO;
+
+static __always_inline bool cfm_comm_is_trusted_bpf_agent(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* CFM's own CLI/daemon identity. */
+    if (comm[0] == 'c' && comm[1] == 'f' && comm[2] == 'm' && comm[3] == '\0')
+        return true;
+
+    /* Known distro/platform agents that legitimately manage BPF state. */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'u' && comm[9] == 'd' && comm[10] == 'e' && comm[11] == 'v' &&
+        comm[12] == 'd' && comm[13] == '\0')
+        return true;
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'n' && comm[9] == 'e' && comm[10] == 't' && comm[11] == 'w' &&
+        comm[12] == 'o' && comm[13] == 'r' && comm[14] == 'k')
+        return true;
+    if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'w' &&
+        comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'k' && comm[7] == 'M' &&
+        comm[8] == 'a' && comm[9] == 'n' && comm[10] == 'a' && comm[11] == 'g' &&
+        comm[12] == 'e' && comm[13] == 'r' && comm[14] == '\0')
+        return true;
+    if (comm[0] == 'b' && comm[1] == 'p' && comm[2] == 'f' && comm[3] == 't' &&
+        comm[4] == 'o' && comm[5] == 'o' && comm[6] == 'l' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' &&
+        comm[4] == 't' && comm[5] == 'd' && comm[6] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_bpf001_emit(__u8 op, __u8 flags, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_UNEXPECTED_BPF;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+    if (op == CFM_BPF_OP_MAP_CREATE)
+        __builtin_memcpy(e->filename, "BPF_MAP_CREATE", 15);
+    else if (op == CFM_BPF_OP_PROG_LOAD)
+        __builtin_memcpy(e->filename, "BPF_PROG_LOAD", 14);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_bpf")
+int cfm_bpf001(struct trace_event_raw_sys_enter *ctx)
+{
+    __u32 cmd = (__u32)ctx->args[0];
+    __u8 op = CFM_OP_NONE;
+
+    if (cmd == BPF_MAP_CREATE) {
+        op = CFM_BPF_OP_MAP_CREATE;
+    } else if (cmd == BPF_PROG_LOAD) {
+        op = CFM_BPF_OP_PROG_LOAD;
+    } else {
+        return 0;
+    }
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool web_uid = cfm_uid_watched(uid);
+
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    if (!web_uid && cfm_comm_is_trusted_bpf_agent(comm))
+        return 0;
+
+    __u8 flags = 0;
+    if (web_uid)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    cfm_bpf001_emit(op, flags, comm);
+    return 0;
+}
+
 char LICENSE[] SEC("license") = "GPL";

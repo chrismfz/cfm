@@ -16,18 +16,21 @@ const (
 	bpfPolicySensitiveWrite  uint32 = 5
 	bpfPolicyCredEscal       uint32 = 7
 	bpfPolicyDirectCred      uint32 = 9
+	bpfPolicyUnexpectedBPF   uint32 = 10
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
 // internal/lsm/bpf/common.bpf.h's enum cfm_fs_op.
 const (
-	bpfFSOpNone     uint8 = 0
-	bpfFSOpSetattr  uint8 = 1
-	bpfFSOpCreate   uint8 = 2
-	bpfFSOpUnlink   uint8 = 3
-	bpfFSOpLink     uint8 = 4
-	bpfFSOpRename   uint8 = 5
-	bpfFSOpSetxattr uint8 = 6
+	bpfFSOpNone       uint8 = 0
+	bpfFSOpSetattr    uint8 = 1
+	bpfFSOpCreate     uint8 = 2
+	bpfFSOpUnlink     uint8 = 3
+	bpfFSOpLink       uint8 = 4
+	bpfFSOpRename     uint8 = 5
+	bpfFSOpSetxattr   uint8 = 6
+	bpfBPFOpMapCreate uint8 = 20
+	bpfBPFOpProgLoad  uint8 = 21
 )
 
 // FSOp is the Go-side label for the file-system operation that
@@ -36,13 +39,15 @@ const (
 type FSOp uint8
 
 const (
-	FSOpNone     FSOp = 0
-	FSOpSetattr  FSOp = 1
-	FSOpCreate   FSOp = 2
-	FSOpUnlink   FSOp = 3
-	FSOpLink     FSOp = 4
-	FSOpRename   FSOp = 5
-	FSOpSetxattr FSOp = 6
+	FSOpNone       FSOp = 0
+	FSOpSetattr    FSOp = 1
+	FSOpCreate     FSOp = 2
+	FSOpUnlink     FSOp = 3
+	FSOpLink       FSOp = 4
+	FSOpRename     FSOp = 5
+	FSOpSetxattr   FSOp = 6
+	BPFOpMapCreate FSOp = 20
+	BPFOpProgLoad  FSOp = 21
 )
 
 // String renders the operation as a short token suitable for logs
@@ -61,6 +66,10 @@ func (o FSOp) String() string {
 		return "rename"
 	case FSOpSetxattr:
 		return "setxattr"
+	case BPFOpMapCreate:
+		return "bpf_map_create"
+	case BPFOpProgLoad:
+		return "bpf_prog_load"
 	}
 	return "none"
 }
@@ -104,9 +113,9 @@ type Event struct {
 	// FSOpNone for events from other policies.
 	Op FSOp
 
-	// Flags carries per-policy semantics. For CFML-FS-005, bit 0
-	// means the match came from web-origin tracking after the current
-	// uid was no longer watched.
+	// Flags carries per-policy semantics. For CFML-FS-005 and
+	// CFML-BPF-001, bit 0 means the match involved a web/panel-origin
+	// uid or origin signal.
 	Flags uint8
 
 	// Comm is the task's 16-byte command name (TASK_COMM_LEN).
@@ -116,8 +125,8 @@ type Event struct {
 	// CFML-EXEC-001 this is the memfd's d_name. For CFML-EXEC-003
 	// the binary being exec'd. For CFML-EXEC-004 this is the
 	// deleted/unlinked executable dentry name. For CFML-FS-005 the
-	// watched file's
-	// name. For CFML-CRED-002 the offending executable's name.
+	// watched file's name. For CFML-CRED-002 the offending executable's
+	// name. For CFML-BPF-001 this is the bpf() command label.
 	Filename string
 }
 
@@ -179,6 +188,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyCredEscal
 	case bpfPolicyDirectCred:
 		e.PolicyID = PolicyDirectCredInstall
+	case bpfPolicyUnexpectedBPF:
+		e.PolicyID = PolicyUnexpectedBPF
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

@@ -2,10 +2,10 @@
 
 ## Status
 
-**Six policies shipping. Monitor mode by default; enforce opt-in
-for EXEC-001 / EXEC-003 / EXEC-004 / FS-005. CRED-002 and CRED-003 are
-monitor-only by design (credential telemetry is not a safe blocking
-point).**
+**Seven policies shipping. Monitor mode by default; enforce opt-in
+for EXEC-001 / EXEC-003 / EXEC-004 / FS-005. CRED-002, CRED-003, and
+BPF-001 are monitor-only by design (credential telemetry and syscall
+tracepoints are not safe blocking points).**
 
 Catalog:
 
@@ -15,6 +15,7 @@ Catalog:
 - `CFML-FS-005`   — Sensitive-file modification by web user
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
 - `CFML-CRED-003` — Direct root credential install *(monitor-only)*
+- `CFML-BPF-001`  — Unexpected BPF use *(monitor-only advanced-threat telemetry)*
 
 Companion kernsec rule `KSEC-LSM-bpf-001` merges `bpf` into the
 operator's existing `lsm=` boot argument when forced in
@@ -57,15 +58,16 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All six policies default to monitor mode — matches are logged and
+All seven policies default to monitor mode — matches are logged and
 notified but the syscall proceeds. Enforce mode (return `-EPERM` on
 a match, failing the calling process's syscall) is **available but
 opt-in** for `CFML-EXEC-001`, `CFML-EXEC-003`, `CFML-EXEC-004`,
-and `CFML-FS-005`; `CFML-CRED-002` and `CFML-CRED-003` are monitor-only by design
-(returning -EPERM from credential hooks can deadlock systemd helpers
-and pkexec mid-transition, and CRED-003 is fentry telemetry rather
-than an LSM decision point; enable.go and lifecycle.go both downgrade
-an enforce setting to monitor with a warning). Set `mode = enforce`
+and `CFML-FS-005`; `CFML-CRED-002`, `CFML-CRED-003`, and `CFML-BPF-001`
+are monitor-only by design (returning -EPERM from credential hooks can
+deadlock systemd helpers and pkexec mid-transition, CRED-003 is fentry
+telemetry, and BPF-001 is syscall tracepoint telemetry rather than an
+LSM decision point; enable.go and lifecycle.go both downgrade an enforce
+setting to monitor with a warning). Set `mode = enforce`
 in `/etc/cfm/lsm.conf` and restart cfm (or run `cfm lsm disable`
 then re-enable). The mechanism is a `volatile const` global in the
 BPF program rewritten at load time via `cilium/ebpf`'s
@@ -89,15 +91,17 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: six shipping policies
+The scope here is intentionally narrow: seven shipping policies
 covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004),
 sensitive-file write (CFML-FS-005), post-setuid credential transitions
-(CFML-CRED-002), and direct root credential installs (CFML-CRED-003). The MVP shipped
-with EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the
-next-policies pass once the MVP's verifier and pinning behaviour
-proved stable on EL10. CRED-003 closes the documented direct
-`commit_creds()` gap as monitor-only telemetry. Anything beyond
-these six requires a separate, named proposal — not a TODO inside
+(CFML-CRED-002), direct root credential installs (CFML-CRED-003), and
+advanced-threat BPF-use telemetry (CFML-BPF-001). The MVP shipped with
+EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the next-policies
+pass once the MVP's verifier and pinning behaviour proved stable on
+EL10. CRED-003 closes the documented direct `commit_creds()` gap as
+monitor-only telemetry, and BPF-001 adds monitor-only visibility into
+unexpected BPF map creation / program load attempts. Anything beyond
+these seven requires a separate, named proposal — not a TODO inside
 this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
@@ -158,6 +162,44 @@ something else CFM relies on.
 | `CFML-OBS-001` (ptrace lockdown) | **Out — already covered by `kernsec`** | `kernel.yama.ptrace_scope=1` is shipped today by `kernsec` (see `internal/kernsec/profile.go:188`). If stricter is wanted, ship `=2` as a `kernsec` Tier 2 sysctl rule — no new code, no new LSM hook. |
 | `CFML-NET-001` (outbound per vhost) | **Out — wrong component** | `internal/outbound/analyzer.go` already does per-uid NFLOG-based outbound observation. Promoting that path to enforce + per-vhost policy is the right home for this; it works on EL8 with no DKMS and reuses an existing event pipeline. |
 | `CFML-FS-001`, `CFML-SELF-001`, `CFML-CRED-*`, `CFML-RATE-*`, `CFML-SELF-002`, `CFML-FS-002`, `CFML-FS-003` | **Out** | Each is covered by an existing layer: CageFS for FS-write vectors on caged users, LVE for fork/rate, `kernsec` for module surface (and `CFML-SELF-002` would actively conflict with KernelCare/Ksplice live-patch module reloads), webdetector for webshell-drop correlation. If any one of these later proves necessary it will be added in a separate, named proposal — not as an open TODO in this doc. |
+
+### `CFML-BPF-001` — Unexpected BPF use
+
+| | |
+|---|---|
+| Hook | `tracepoint/syscalls/sys_enter_bpf` |
+| Default mode | `disabled` |
+| Enforcement | Monitor-only |
+| FP risk | Medium on hosts running observability/security agents |
+| Perf impact | Negligible (only `bpf()` syscall entry for map/program creation) |
+
+**Description.** `CFML-BPF-001` reports `bpf()` syscall attempts for
+`BPF_MAP_CREATE` and `BPF_PROG_LOAD` when the caller is not CFM itself
+or a small allowlist of known distro/platform agents. Attempts by the
+daemon-populated web/panel uid set are always reported, even if the
+process name resembles a trusted helper. The event payload uses the
+shared cfm-lsm ring buffer: `op=bpf_map_create` or `op=bpf_prog_load`,
+`comm=<caller>`, and `path=<BPF command label>`.
+
+**Rationale.** Unexpected BPF program loading is an advanced-threat
+signal: successful attackers increasingly use eBPF for stealth, packet
+inspection, credential capture, or persistence after they already have
+meaningful local execution. Hosting web users and panel-managed uids
+should not be creating BPF maps or loading BPF programs during normal
+operation.
+
+**Not baseline hardening.** This policy deliberately does not block. The
+tracepoint observes attempts before syscall completion and cannot provide
+a reliable LSM-style denial decision. Operators should rely on `kernsec`
+for broad unprivileged BPF surface reduction (`kernel.unprivileged_bpf_disabled`,
+BPF JIT hardening, and related sysctls), then enable `CFML-BPF-001` only
+where advanced-threat telemetry is desired.
+
+**Build note.** This source tree may carry BPF policy source without
+committed regenerated bytecode. After editing `internal/lsm/bpf/`,
+operators or release builders regenerate local bindings and objects with
+`make bpf`; PRs should not add updated `.o` files unless the release
+process explicitly requests bytecode artifacts.
 
 ## Stack-specific notes
 
@@ -606,9 +648,10 @@ for `cfm-lsm`. The mechanics:
   [`bpf2go`](https://github.com/cilium/ebpf/tree/main/cmd/bpf2go) from
   `cilium/ebpf`, which calls clang to produce the compiled BPF object
   plus Go bindings that wrap it.
-- The compiled `.o` and the generated Go bindings are **committed to
-  the repo**. `go build` does not call clang; it just embeds the
-  pre-compiled bytecode via `go:embed`.
+- Release builders regenerate the compiled `.o` and Go bindings with
+  `make bpf` when BPF C sources change. Feature PRs should not ship
+  regenerated bytecode artifacts unless the release process explicitly
+  requests them; this keeps review focused on source changes.
 - `CGO_ENABLED=0` continues to work because `cilium/ebpf` is pure Go
   — it talks to the kernel via `bpf(2)` syscalls through
   `golang.org/x/sys/unix`, not via libbpf.
@@ -638,8 +681,8 @@ internal/lsm/
 │   ├── revshell.bpf.c   # CFML-EXEC-003 BPF LSM program
 │   ├── common.bpf.h     # shared helpers, map definitions, event struct
 │   └── vmlinux.h        # CO-RE kernel type definitions (committed)
-├── bpf_bpfel.go         # bpf2go-generated bindings (committed)
-├── bpf_bpfel.o          # bpf2go-compiled BPF object (committed)
+├── cfmlsm_*_bpfel.go    # bpf2go-generated bindings (release artifact)
+├── cfmlsm_*_bpfel.o     # bpf2go-compiled BPF object (release artifact)
 └── doc.go
 ```
 
@@ -1457,7 +1500,7 @@ internal/lsm/
 │   ├── common.bpf.h        # event struct, policy enum, ringbuf decl
 │   └── vmlinux.h           # hand-written CO-RE types (extend here)
 ├── bpf_generate.go         # go:generate directive (no change needed)
-├── cfmlsm_x86_bpfel.{go,o} # committed artifacts (regenerate after C edits)
+├── cfmlsm_x86_bpfel.{go,o} # generated artifacts (release builders regenerate after C edits)
 ├── cfmlsm_arm64_bpfel.{go,o}
 ├── conf.go / conf_test.go  # /etc/cfm/lsm.conf parser
 ├── enable.go               # `cfm lsm enable` orchestration + pinning
@@ -1465,7 +1508,7 @@ internal/lsm/
 ├── lifecycle.go            # daemon-side adoption + notify emission
 ├── loader.go               # NewLoader / AdoptPinned / UnpinAll
 ├── policy.go               # AllPolicies(), PolicyID constants
-├── preflight.go            # six kernel checks
+├── preflight.go            # kernel compatibility checks
 ├── probe.go                # `cfm lsm probe`
 └── status.go / preview.go / cli.go / init.go
 ```

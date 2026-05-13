@@ -45,6 +45,13 @@ const (
 	// task_fix_setuid. Monitor-only by design because commit_creds()
 	// is not an LSM decision point.
 	PolicyDirectCredInstall PolicyID = "CFML-CRED-003"
+
+	// PolicyUnexpectedBPF — CFML-BPF-001: detect unexpected use of
+	// the bpf() syscall to create maps or load programs outside CFM
+	// and a small set of trusted distro agents. Monitor-only advanced
+	// threat telemetry; broad unprivileged BPF reduction belongs in
+	// kernsec sysctls.
+	PolicyUnexpectedBPF PolicyID = "CFML-BPF-001"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -133,6 +140,13 @@ func AllPolicies() []Policy {
 			Hook:        "fentry/commit_creds",
 			DefaultMode: ModeDisabled,
 			Description: "Detect direct commit_creds() installation of root credentials that bypassed task_fix_setuid. Monitor-only by design.",
+		},
+		{
+			ID:          PolicyUnexpectedBPF,
+			Title:       "Unexpected BPF use",
+			Hook:        "tracepoint/syscalls/sys_enter_bpf",
+			DefaultMode: ModeDisabled,
+			Description: "Monitor-only telemetry for unexpected bpf() map creation and program load attempts outside CFM and trusted distro agents; use kernsec sysctls for broad unprivileged BPF reduction.",
 		},
 	}
 }
