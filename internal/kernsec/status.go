@@ -500,7 +500,16 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 		tip := buildMountTip(m, d, realFstabReader, realSystemdUnitFinder)
 		switch d.State {
 		case MountOK:
-			fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
+			// A fully-hardened bind sibling renders as OK but should
+			// say so — the operator who set up `cfm kernsec secure-tmp`
+			// wants to see that /var/tmp is green BECAUSE it inherits
+			// from /tmp, not by accident.
+			if d.BindPrimaryPath != "" {
+				fmt.Fprintf(w, "OK         %s  has %s  (bind of %s; inherits hardening)\n",
+					m.MountPoint, m.Recommended, d.BindPrimaryPath)
+			} else {
+				fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
+			}
 		case MountPartialOptions:
 			fmt.Fprintf(w, "PARTIAL    %s  has %s; still missing: %s  (current: %s)\n",
 				m.MountPoint,
