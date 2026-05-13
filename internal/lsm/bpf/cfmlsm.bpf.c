@@ -411,7 +411,10 @@ static __always_inline int cfm_path_is_suspicious_basename(const char *path)
             break;
     }
 
-    if (base >= CFM_FILENAME_LEN)
+    /* cfm_str_eq() reads up to 16 bytes from the returned pointer; keep
+     * the whole window inside buf so the verifier can prove the access
+     * in-bounds for the variable-offset interior stack pointer. */
+    if (base > CFM_FILENAME_LEN - 16)
         return 0;
 
     return cfm_suspicious_exec_basename(&buf[base]);
