@@ -114,7 +114,12 @@ var DefaultSensitivePaths = []string{
 //     panel manifests)
 //   - cfm_watched_inodes:  sensitive-path filesystem+inode keys (DefaultSensitivePaths)
 //   - cfm_setuid_inodes:   setuid-binary filesystem+inode keys (walks setuidWalkRoots)
-func PopulateMaps(l *Loader) (uidsAdded, inodesAdded, setuidAdded int, err error) {
+//     plus the operator-supplied allow_exe paths from conf for
+//     CFML-CRED-002.
+//
+// conf may be nil; in that case the allow_exe merge is skipped and
+// only the disk-walked suid binaries seed cfm_setuid_inodes.
+func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded int, err error) {
 	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap())
 	if err != nil {
 		return uidsAdded, 0, 0, fmt.Errorf("watched uids: %w", err)
@@ -123,7 +128,7 @@ func PopulateMaps(l *Loader) (uidsAdded, inodesAdded, setuidAdded int, err error
 	if err != nil {
 		return uidsAdded, inodesAdded, 0, fmt.Errorf("watched inodes: %w", err)
 	}
-	setuidAdded, err = populateSetuidInodes(l.SetuidInodesMap(), setuidWalkRoots)
+	setuidAdded, err = populateSetuidInodes(l.SetuidInodesMap(), setuidWalkRoots, conf.AllowExeFor(PolicyCredEscal))
 	if err != nil {
 		return uidsAdded, inodesAdded, setuidAdded, fmt.Errorf("setuid inodes: %w", err)
 	}
@@ -312,10 +317,17 @@ func statInodeKey(path string) (inodeKey, bool) {
 // in a process whose mm->exe_file is in this map is treated as
 // legitimate.
 //
+// allowExe is the operator-supplied list of additional executable
+// paths to whitelist (e.g. /usr/local/directadmin/directadmin). These
+// are not required to have the suid bit on disk — that's the whole
+// point of the list. Each path is stat()d once; entries that fail to
+// resolve are silently skipped (logged by the caller via the count
+// delta).
+//
 // Walk is bounded: roots are short, walks stay on a single
 // filesystem (no symlinked traversal into sibling mounts), and
 // per-entry stat is cheap.
-func populateSetuidInodes(m *ebpf.Map, roots []string) (int, error) {
+func populateSetuidInodes(m *ebpf.Map, roots []string, allowExe []string) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("nil map")
 	}
@@ -354,6 +366,21 @@ func populateSetuidInodes(m *ebpf.Map, roots []string) (int, error) {
 		})
 		if err != nil {
 			return count, fmt.Errorf("walk %s: %w", root, err)
+		}
+	}
+
+	// Operator-supplied allowlist. Same map, same key shape; the BPF
+	// program does not distinguish suid-walked entries from explicit
+	// allowlist entries. Missing paths are not an error: panels move
+	// between releases and a stale lsm.conf entry should not block
+	// daemon start.
+	for _, p := range allowExe {
+		key, ok := statInodeKey(p)
+		if !ok {
+			continue
+		}
+		if perr := m.Put(key, one); perr == nil {
+			count++
 		}
 	}
 	return count, nil
