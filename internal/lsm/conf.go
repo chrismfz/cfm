@@ -39,6 +39,13 @@ type Conf struct {
 	// sensitive writes by those tasks even after their current uid changes.
 	FS005WebOriginMonitor bool
 
+	// PersistencePaths is the operator-supplied per-policy list of additional
+	// host-persistence paths to monitor. Today only CFML-FS-005 consumes it;
+	// every configured path is treated as monitor-only even when FS-005 mode is
+	// enforce. Paths are absolute, concrete paths resolved to (dev,inode) at
+	// daemon start.
+	PersistencePaths map[PolicyID][]string
+
 	// AllowExe is the operator-supplied per-policy executable allowlist.
 	// Each entry is an absolute path to a binary whose (dev, inode)
 	// key should be treated as legitimate for the policy. Today only
@@ -73,9 +80,19 @@ func DefaultConf() *Conf {
 		Enabled:               false,
 		Modes:                 modes,
 		FS005WebOriginMonitor: true,
+		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
+}
+
+// PersistencePathsFor returns configured persistence_path additions for id, or nil
+// when none are set. Safe on a nil receiver.
+func (c *Conf) PersistencePathsFor(id PolicyID) []string {
+	if c == nil || c.PersistencePaths == nil {
+		return nil
+	}
+	return c.PersistencePaths[id]
 }
 
 // AllowExeFor returns the configured allow_exe paths for id, or nil
@@ -154,6 +171,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		Enabled:               false,
 		Modes:                 map[PolicyID]Mode{},
 		FS005WebOriginMonitor: false,
+		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
@@ -254,6 +272,15 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.FS005WebOriginMonitor = monitor
+			case "persistence_path":
+				if currentPolicy != PolicySensitiveWrite {
+					return nil, fmt.Errorf("line %d: persistence_path is only valid for %s", lineno, PolicySensitiveWrite)
+				}
+				p, err := parseAbsolutePath(val, "persistence_path")
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.PersistencePaths[currentPolicy] = append(c.PersistencePaths[currentPolicy], p)
 			case "allow_exe":
 				if currentPolicy != PolicyCredEscal {
 					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s", lineno, PolicyCredEscal)
@@ -264,7 +291,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				c.AllowExe[currentPolicy] = append(c.AllowExe[currentPolicy], p)
 			default:
-				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking`; %s also supports `allow_exe`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal)
+				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking` and `persistence_path`; %s also supports `allow_exe`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal)
 			}
 		case sectionKmsg:
 			lk := strings.ToLower(key)
@@ -327,6 +354,17 @@ func FormatConf(c *Conf) string {
 				state = "monitor"
 			}
 			fmt.Fprintf(&b, "origin_tracking = %s  # disabled | monitor (origin-only matches never enforce yet)\n", state)
+			paths := c.PersistencePathsFor(p.ID)
+			if len(paths) == 0 {
+				b.WriteString("# Add host-persistence locations to monitor. Repeat the key per entry;\n")
+				b.WriteString("# absolute concrete paths only. Additions are monitor-only even if mode=enforce.\n")
+				b.WriteString("# persistence_path = /etc/systemd/system\n")
+				b.WriteString("# persistence_path = /usr/local/directadmin/scripts/custom\n")
+			} else {
+				for _, ap := range paths {
+					fmt.Fprintf(&b, "persistence_path = %s\n", ap)
+				}
+			}
 		}
 		if p.ID == PolicyCredEscal {
 			paths := c.AllowExeFor(p.ID)
@@ -375,31 +413,26 @@ func WriteDefaultConf() (created bool, err error) {
 	return true, nil
 }
 
-// parseSectionHeader recognises two header shapes:
-//
-//	[kmsg]                 -> sectionKmsg
-//	[policy "CFML-EXEC-001"] -> sectionPolicy with the quoted ID
-//
-// Anything else is a parse error. The PolicyID return is valid only
-// when kind == sectionPolicy; it is the empty string otherwise.
-// parseAllowExe validates one `allow_exe = …` value. The path must be
-// non-empty, absolute, and free of NUL bytes — anything fancier (glob,
-// resolution against $PATH, …) belongs in userspace before reaching
-// here. Existence is NOT checked at parse time: the daemon does a stat
-// at map-population time so a missing path is a runtime warning, not
-// a fatal config error.
-func parseAllowExe(s string) (string, error) {
+// parseAbsolutePath validates a config path value. The path must be non-empty,
+// absolute, and free of NUL bytes. Existence is deliberately checked later, at
+// map-population time, so one stale panel path does not invalidate lsm.conf.
+func parseAbsolutePath(s, key string) (string, error) {
 	p := strings.TrimSpace(s)
 	if p == "" {
-		return "", fmt.Errorf("allow_exe must be a non-empty path")
+		return "", fmt.Errorf("%s must be a non-empty path", key)
 	}
-	if !strings.HasPrefix(p, "/") {
-		return "", fmt.Errorf("allow_exe must be an absolute path (got %q)", p)
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("%s must be an absolute path (got %q)", key, p)
 	}
 	if strings.ContainsRune(p, 0) {
-		return "", fmt.Errorf("allow_exe must not contain NUL bytes")
+		return "", fmt.Errorf("%s must not contain NUL bytes", key)
 	}
 	return p, nil
+}
+
+// parseAllowExe validates one `allow_exe = …` value.
+func parseAllowExe(s string) (string, error) {
+	return parseAbsolutePath(s, "allow_exe")
 }
 
 func parseOriginTracking(s string) (bool, error) {

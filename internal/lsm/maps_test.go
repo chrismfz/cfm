@@ -53,3 +53,36 @@ func TestStatInodeKeyIncludesDeviceAndInode(t *testing.T) {
 		t.Fatal("statInodeKey returned zero Ino")
 	}
 }
+
+func TestFS005PersistencePathsSeparateFromCore(t *testing.T) {
+	core := map[string]struct{}{}
+	for _, p := range DefaultCoreSensitivePaths {
+		core[p] = struct{}{}
+	}
+	for _, p := range []string{"/etc/passwd", "/etc/shadow", "/etc/sudoers"} {
+		if _, ok := core[p]; !ok {
+			t.Fatalf("DefaultCoreSensitivePaths missing stable core path %s", p)
+		}
+	}
+	for _, p := range []string{"/etc/systemd/system", "/etc/cron.d", "/etc/sudoers.d", "/etc/pam.d", "/root/.ssh"} {
+		if _, ok := core[p]; ok {
+			t.Fatalf("%s should be monitor-only persistence, not enforceable core", p)
+		}
+	}
+
+	persistence := strings.Join(DefaultPersistencePaths, "\n")
+	for _, p := range []string{
+		"/etc/systemd/system",
+		"/etc/cron.d",
+		"/etc/sudoers.d",
+		"/etc/pam.d",
+		"/root/.ssh",
+		"/usr/local/cpanel/hooks",
+		"/var/cpanel/hooks",
+		"/usr/local/directadmin/scripts/custom",
+	} {
+		if !strings.Contains(persistence, p) {
+			t.Fatalf("DefaultPersistencePaths missing %s", p)
+		}
+	}
+}

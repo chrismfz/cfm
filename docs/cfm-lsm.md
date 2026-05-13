@@ -309,10 +309,12 @@ write-class inode operation, it looks up the calling task's uid in the
 daemon-populated `cfm_watched_uids` hash (web-class names — apache, nginx,
 php-fpm, lsphp, alt-php-* — plus every cPanel and DirectAdmin account uid).
 If matched, it looks up the target filesystem+inode key in
-`cfm_watched_inodes` (the daemon stats every path in
-`internal/lsm/maps.go::DefaultSensitivePaths` and records `st_dev` +
-`st_ino`). Both hits → emit event; if enforce mode is active for this
-policy, return `-EPERM` and the syscall fails outright.
+`cfm_watched_inodes` (the daemon stats the stable core list in
+`internal/lsm/maps.go::DefaultCoreSensitivePaths`, the persistence list in
+`DefaultPersistencePaths`, and any operator `persistence_path = ...` additions,
+then records `st_dev` + `st_ino`). Both hits → emit event. Enforce mode can
+return `-EPERM` only for entries marked as stable core paths; persistence-path
+entries are monitor-only by default even when `mode = enforce`.
 
 **Web-origin matching.** FS-005 can also run an origin tracker gated by
 `origin_tracking = monitor` in `/etc/cfm/lsm.conf`. The tracker uses
@@ -338,9 +340,37 @@ through the standard syscall path even when the privesc primitive
 bypassed earlier LSM hooks, so cfm-lsm sees them.
 
 **Enforcement.** Available via `mode = enforce` in `lsm.conf` for
-current-uid matches. Web-origin-only matches deliberately stay monitor-only
-under the separate `origin_tracking = monitor` flag while operators build a
-baseline.
+current-uid matches on the stable core path set (`/etc/passwd`, `/etc/shadow`,
+`/etc/group`, `/etc/gshadow`, `/etc/sudoers`). Web-origin-only matches and all
+host-persistence path matches deliberately stay monitor-only while operators
+build a baseline. This keeps the new persistence coverage inside `CFML-FS-005`
+rather than creating `CFML-FS-006`, while preserving the original low-risk
+enforcement boundary.
+
+**Host-persistence paths.** The default monitor-only persistence set includes
+common distro and panel locations used for durable post-exploit hooks:
+
+| Host class | Example paths |
+|---|---|
+| Debian / Ubuntu / EL10 | `/etc/systemd/system`, `/etc/systemd/user`, `/etc/cron.d`, `/etc/cron.daily`, `/etc/cron.hourly`, `/etc/cron.weekly`, `/etc/cron.monthly`, `/etc/crontab`, `/etc/sudoers.d`, `/etc/pam.d`, `/etc/ssh/sshd_config.d`, `/root/.ssh` |
+| cPanel / WHM | `/usr/local/cpanel/hooks`, `/var/cpanel/hooks`, `/usr/local/cpanel/scripts/postupcp`, `/usr/local/cpanel/scripts/preupcp`, `/var/cpanel/perl5/lib`, `/var/cpanel/easy/apache/profile/custom` |
+| DirectAdmin | `/usr/local/directadmin/scripts/custom`, `/usr/local/directadmin/data/templates/custom` |
+
+Operators can add site-specific persistence locations without widening the
+enforceable core set:
+
+```ini
+[policy "CFML-FS-005"]
+mode = monitor
+origin_tracking = monitor
+persistence_path = /etc/systemd/system
+persistence_path = /opt/vendor-panel/hooks
+```
+
+`persistence_path` values must be absolute concrete paths; glob expansion is not
+performed in the BPF path. Missing paths are skipped at map-population time so a
+single panel-specific entry can be present in a shared config across cPanel,
+DirectAdmin, Debian/Ubuntu, and EL10 hosts.
 
 **False-positive profile.** Current-uid matches retain the original FS-005
 profile: very low on CageFS hosts and low–medium on plain hosts. Web-origin
@@ -1064,10 +1094,11 @@ pinned map populated by `cfm lsm enable`):
   `/etc/userdomains` or `/etc/trueuserdomains`, plus every
   DirectAdmin-managed uid from `/etc/virtual/domainowners`).
   Refreshed on every config-reload tick.
-- `cfm_watched_inodes`: stat()s each path in a pinned
-  sensitive-paths list (initially a hard-coded set, later read
-  from `/etc/cfm/lsm.conf`'s new `[policy "CFML-FS-005"]
-  paths = ...` key), records `st_dev` + `st_ino`.
+- `cfm_watched_inodes`: stat()s each path in the hard-coded stable core
+  sensitive list, the hard-coded monitor-only persistence list, and operator
+  additions from `/etc/cfm/lsm.conf`'s `[policy "CFML-FS-005"]
+  persistence_path = ...` keys. The key is `(st_dev, st_ino)` and the value
+  records whether the entry is enforceable core or monitor-only persistence.
   Filesystem+inode-based matching avoids the BPF-side
   dentry-walk-then-compare-string problem entirely while preventing
   cross-filesystem inode-number collisions.
@@ -1095,14 +1126,14 @@ kernel-vendor blocker, not a verifier blocker).
 - **Non-trivial on non-CageFS hosts** in edge cases: tools that
   legitimately run as a web user and modify `/etc/`, e.g. a
   custom panel cron job, a Let's Encrypt renewal hook run as
-  `www-data`, etc. Mitigation: an operator-editable allowlist
-  in `lsm.conf` like:
+  `www-data`, etc. Mitigation: keep FS-005 in monitor mode on that host until
+  the helper is moved away from a watched web uid. Site-specific durable-hook
+  directories can still be added as monitor-only telemetry in `lsm.conf`:
   ```
   [policy "CFML-FS-005"]
   mode = monitor
   origin_tracking = monitor
-  allow_uids = cert-renewer,custom-cron
-  allow_paths = /etc/letsencrypt/live/*
+  persistence_path = /etc/letsencrypt/renewal-hooks/deploy
   ```
 - **systemd-managed paths.** systemd's tmpfiles.d / udev rules
   can write to `/etc/` paths owned by services. The watched-uid
@@ -1123,8 +1154,8 @@ kernel-vendor blocker, not a verifier blocker).
   so the policy is mostly latent — but the moment a compromised
   guest reaches the host, the cash-in attempt fires.
 - **Plain hosting (no panel)**. Watched-uid set populated from
-  standard web server users. Operator can extend via the
-  `allow_uids` mechanism noted above.
+  standard web server users. Operator can add extra monitor-only
+  persistence paths with repeated `persistence_path = ...` entries.
 
 **Event shape (extends existing `cfm_lsm_event`).**
 
@@ -1547,11 +1578,10 @@ For each new policy `CFML-XXX-NNN`:
 **Recommended slicing for the next branch.**
 
 1. PR-A: CFML-FS-005 in monitor mode, with the watched-uids
-   and watched-inodes maps populated by daemon, no `lsm.conf`
-   allowlist UI yet. Smallest viable slice.
-2. PR-B: `lsm.conf` extensions for per-policy `allow_uids`,
-   `allow_paths`, `allow_comm` etc. Lift the maps from
-   hardcoded sets to operator-configurable.
+   and watched-inodes maps populated by daemon. Smallest viable slice.
+2. PR-B: `lsm.conf` extensions for per-policy monitor-only
+   `persistence_path` entries, plus any future allowlist maps once production
+   telemetry proves they are needed.
 3. PR-C: CFML-CRED-002 in monitor mode, including the
    setuid-binary walker, with the CageFS-inode question
    resolved against a real CL host.

@@ -62,10 +62,19 @@ var WebUserNamePrefixes = []string{
 	"alt-php-fpm-",
 }
 
-// DefaultSensitivePaths is the initial set of host paths whose
-// inodes the CFML-FS-005 detector watches for write-class
-// operations. Operators extend this via /etc/cfm/lsm.conf in a
-// later PR; today it is the shipped baseline.
+const (
+	// fs005WatchEnforceable marks stable core sensitive paths whose
+	// current-uid matches may be denied when CFML-FS-005 is in enforce mode.
+	fs005WatchEnforceable uint8 = 1
+	// fs005WatchMonitorOnly marks host-persistence paths. They emit events but
+	// are not denied by CFML-FS-005 even if the policy is otherwise enforcing.
+	fs005WatchMonitorOnly uint8 = 2
+)
+
+// DefaultCoreSensitivePaths is the stable, narrow set of host-sensitive paths
+// whose inodes the CFML-FS-005 detector watches for write-class operations.
+// Current-uid matches on these paths may be denied when the operator opts into
+// `mode = enforce`.
 //
 // Two categories of entry:
 //   - file paths: the file's own inode is watched (matches inode_setattr,
@@ -75,15 +84,24 @@ var WebUserNamePrefixes = []string{
 //     files INSIDE the directory, since the BPF program checks
 //     dentry->d_parent for create operations).
 //
-// Globs are NOT supported in the bpf path — we resolve a glob at
-// population time and add each matched inode individually.
-var DefaultSensitivePaths = []string{
+// Globs are NOT supported in the bpf path — entries are stat()ed as concrete
+// paths at population time.
+var DefaultCoreSensitivePaths = []string{
 	"/etc/passwd",
 	"/etc/shadow",
 	"/etc/group",
 	"/etc/gshadow",
 	"/etc/sudoers",
-	"/etc/sudoers.d",
+}
+
+// DefaultPersistencePaths extends CFML-FS-005 to monitor host-persistence
+// locations commonly targeted after a web compromise. These entries are kept
+// separate from DefaultCoreSensitivePaths because they are broader and more
+// distro/panel-dependent; they default to monitor-only even when FS-005 is
+// otherwise enforcing.
+var DefaultPersistencePaths = []string{
+	"/etc/systemd/system",
+	"/etc/systemd/user",
 	"/etc/cron.d",
 	"/etc/cron.daily",
 	"/etc/cron.hourly",
@@ -94,14 +112,31 @@ var DefaultSensitivePaths = []string{
 	"/etc/cron.deny",
 	"/etc/at.allow",
 	"/etc/at.deny",
+	"/etc/sudoers.d",
 	"/etc/pam.d",
 	"/etc/ssh/sshd_config",
 	"/etc/ssh/sshd_config.d",
-	"/root",
 	"/root/.ssh",
 	"/root/.bashrc",
 	"/root/.profile",
+	// cPanel hook and include directories that can create durable panel-level
+	// persistence or root-executed callbacks on cPanel/WHM hosts.
+	"/usr/local/cpanel/scripts/postupcp",
+	"/usr/local/cpanel/scripts/preupcp",
+	"/usr/local/cpanel/hooks",
+	"/var/cpanel/hooks",
+	"/var/cpanel/perl5/lib",
+	"/var/cpanel/easy/apache/profile/custom",
+	// DirectAdmin custom hook directories. Missing paths are skipped silently on
+	// non-DirectAdmin hosts.
+	"/usr/local/directadmin/scripts/custom",
+	"/usr/local/directadmin/data/templates/custom",
 }
+
+// DefaultSensitivePaths is retained for callers/tests that need the full
+// shipped FS-005 watch baseline. New code should use DefaultCoreSensitivePaths
+// and DefaultPersistencePaths separately so enforcement semantics stay clear.
+var DefaultSensitivePaths = append(append([]string{}, DefaultCoreSensitivePaths...), DefaultPersistencePaths...)
 
 // PopulateMaps populates the cfm-lsm map state from the live host
 // at adoption time. Called by the daemon's lifecycle.go after
@@ -112,7 +147,7 @@ var DefaultSensitivePaths = []string{
 // The three maps:
 //   - cfm_watched_uids:    web-class user uids (from /etc/passwd +
 //     panel manifests)
-//   - cfm_watched_inodes:  sensitive-path filesystem+inode keys (DefaultSensitivePaths)
+//   - cfm_watched_inodes:  core sensitive keys plus monitor-only persistence keys
 //   - cfm_setuid_inodes:   setuid-binary filesystem+inode keys (walks setuidWalkRoots)
 //     plus the operator-supplied allow_exe paths from conf for
 //     CFML-CRED-002.
@@ -124,7 +159,7 @@ func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded in
 	if err != nil {
 		return uidsAdded, 0, 0, fmt.Errorf("watched uids: %w", err)
 	}
-	inodesAdded, err = populateWatchedInodes(l.WatchedInodesMap(), DefaultSensitivePaths)
+	inodesAdded, err = populateWatchedInodes(l.WatchedInodesMap(), DefaultCoreSensitivePaths, DefaultPersistencePaths, conf.PersistencePathsFor(PolicySensitiveWrite))
 	if err != nil {
 		return uidsAdded, inodesAdded, 0, fmt.Errorf("watched inodes: %w", err)
 	}
@@ -275,27 +310,35 @@ func panelDomainOwnersToUIDs(path string, nameToUID map[string]uint32) []uint32 
 	return uids
 }
 
-// populateWatchedInodes stat()s every path in `paths`, looks up the
-// compound filesystem+inode key, and writes it to the BPF map with value 1. Paths
-// that don't exist are silently skipped — `/etc/sudoers.d/` may not
-// exist on minimal distros, and that's fine, we just don't watch it.
-func populateWatchedInodes(m *ebpf.Map, paths []string) (int, error) {
+// populateWatchedInodes stat()s each configured path, looks up the compound
+// filesystem+inode key, and writes it to the BPF map. The value records whether
+// a match may be enforced (stable core path) or must remain monitor-only
+// (persistence/default operator additions). Paths that don't exist are silently
+// skipped — panel-specific directories are absent on most hosts, and that's fine.
+func populateWatchedInodes(m *ebpf.Map, corePaths, persistencePaths, extraPersistencePaths []string) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("nil map")
 	}
-	one := uint8(1)
+	count := 0
+	count += putWatchedInodePaths(m, corePaths, fs005WatchEnforceable)
+	count += putWatchedInodePaths(m, persistencePaths, fs005WatchMonitorOnly)
+	count += putWatchedInodePaths(m, extraPersistencePaths, fs005WatchMonitorOnly)
+	return count, nil
+}
+
+func putWatchedInodePaths(m *ebpf.Map, paths []string, value uint8) int {
 	count := 0
 	for _, p := range paths {
 		key, ok := statInodeKey(p)
 		if !ok {
 			continue
 		}
-		if err := m.Put(key, one); err != nil {
+		if err := m.Put(key, value); err != nil {
 			continue
 		}
 		count++
 	}
-	return count, nil
+	return count
 }
 
 // statInodeKey returns the kernel-visible filesystem identity and inode
