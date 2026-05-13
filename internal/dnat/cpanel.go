@@ -133,7 +133,7 @@ func applyPanelChallengeModeToPaths(mode string, paths []string) error {
 }
 
 func persistPanelChallengeEnabled(enabled bool) error {
-	if err := os.MkdirAll(filepath.Dir(panelChallengeModeStatePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(panelChallengeModeStatePath), cfmStateDirMode); err != nil {
 		return err
 	}
 	v := "0\n"

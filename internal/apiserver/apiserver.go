@@ -204,6 +204,11 @@ func Start(
 	// ── Debug API (admin-only) ───────────────────────────────────────────────
 	RegisterDebugEndpoints(m)
 
+	// ── DNAT state (admin-only; CLI status reads daemon's in-memory
+	// transition/probe via this endpoint since the CLI runs in a
+	// separate process) ─────────────────────────────────────────────
+	RegisterDNATState(m)
+
 	// ── Notifier admin API (admin-only) ─────────────────────────────────────
 	RegisterNotifierEndpoints(m, cfgDir)
 	RegisterDetectorsEndpoints(m, cfgDir)

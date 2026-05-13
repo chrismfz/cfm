@@ -75,7 +75,14 @@ func startDNATFailSafe(ctx context.Context, target dnatFailSafeTarget) {
 					}
 					okCount++
 					if okCount >= target.RecoverThreshold {
-						if on2, _ := target.StatusCheck(); !on2 {
+						// Recover only on a *confirmed* OFF. The recheck
+						// used to drop the StatusCheck error, so a
+						// transient nft failure (zero-value on2=false)
+						// tripped Recover — the symmetric concern to
+						// Cleanup, which already requires a confirmed
+						// ON. If StatusCheck errors, skip this tick and
+						// let the next one retry.
+						if on2, err := target.StatusCheck(); err == nil && !on2 {
 							target.Recover(okCount)
 						}
 						okCount = 0

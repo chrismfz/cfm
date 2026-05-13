@@ -404,14 +404,19 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	} else {
 		fmt.Printf("Persisted intent: <none> (file=%s)\n", IntentPath(ScopeWeb))
 	}
-	if pr := GetLastProbe(ScopeWeb); !pr.At.IsZero() {
+	// Transition + probe live in the daemon's process memory; fetch
+	// them over the apiserver. When the daemon or apiserver is down
+	// daemonSnapshot returns the zero value and these lines are
+	// suppressed (same as before).
+	snap := daemonSnapshot(ScopeWeb)
+	if pr := snap.LastProbe; !pr.At.IsZero() {
 		if pr.OK {
 			fmt.Printf("Last health probe: ok at %s\n", pr.At.Format(time.RFC3339))
 		} else {
 			fmt.Printf("Last health probe: fail at %s reason=%q\n", pr.At.Format(time.RFC3339), pr.Reason)
 		}
 	}
-	if lt := GetLastTransition(ScopeWeb); !lt.At.IsZero() {
+	if lt := snap.LastTransition; !lt.At.IsZero() {
 		if lt.Reason == "" {
 			fmt.Printf("Last transition: %s state=%s action=%s\n", lt.At.Format(time.RFC3339), lt.State, lt.Action)
 		} else {
@@ -735,14 +740,19 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		} else {
 			fmt.Printf("Persisted intent: <none> (file=%s)\n", IntentPath(ScopeCPanel))
 		}
-		if pr := GetLastProbe(ScopeCPanel); !pr.At.IsZero() {
+		// Transition + probe live in the daemon's process memory;
+		// fetch them over the apiserver. Zero value when the daemon
+		// or apiserver is unreachable, in which case both lines are
+		// suppressed by the guards below.
+		snap := daemonSnapshot(ScopeCPanel)
+		if pr := snap.LastProbe; !pr.At.IsZero() {
 			if pr.OK {
 				fmt.Printf("Last health probe: ok at %s\n", pr.At.Format(time.RFC3339))
 			} else {
 				fmt.Printf("Last health probe: fail at %s reason=%q\n", pr.At.Format(time.RFC3339), pr.Reason)
 			}
 		}
-		if lt := GetLastTransition(ScopeCPanel); !lt.At.IsZero() {
+		if lt := snap.LastTransition; !lt.At.IsZero() {
 			if lt.Reason == "" {
 				fmt.Printf("Last transition: %s state=%s action=%s\n", lt.At.Format(time.RFC3339), lt.State, lt.Action)
 			} else {

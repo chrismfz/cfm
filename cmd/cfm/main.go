@@ -280,6 +280,11 @@ func main() {
 		sslcollector.RunCLI(os.Args[2:], sock, token)
 
 	case "dnat":
+		// Set the apiserver base URL + admin token so status commands
+		// can fetch the daemon's in-memory transition/probe state
+		// (which is invisible to this CLI process otherwise).
+		dnat.SetAPIBase(apiBaseURL())
+		clihttp.SetToken(apiAuthToken())
 		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
 	case "firewall":
 		be := mustBackend()

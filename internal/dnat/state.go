@@ -46,6 +46,16 @@ func intentPath(scope DNATScope) string {
 // DNAT intent for the given scope.
 func IntentPath(scope DNATScope) string { return intentPath(scope) }
 
+// cfmStateDirMode matches the daemon's intentional mode for
+// /var/lib/cfm in cmd/cfm/main.go (0o701: root-only listing, world-x so
+// specific subdirs the OpenResty worker needs can be traversed). MkdirAll
+// here is a no-op when the daemon has already created the directory, but
+// CLI invocations that run before the daemon's first start would
+// otherwise leave the dir 0o755 — world-readable — which gosec flagged
+// (code-scanning #898/#900). Keeping the two paths in lockstep means no
+// matter which process creates /var/lib/cfm first, the permissions match.
+const cfmStateDirMode = 0o701
+
 // PersistIntent writes the operator's ON/OFF intent for the given scope so it
 // can survive reboots. The runtime nftables state remains the source of truth
 // for "is DNAT live right now"; this file is the source of truth for "should
@@ -54,7 +64,7 @@ func IntentPath(scope DNATScope) string { return intentPath(scope) }
 // 0o644 and is left unchanged here for compatibility.
 func PersistIntent(scope DNATScope, enabled bool) error {
 	p := intentPath(scope)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), cfmStateDirMode); err != nil {
 		return err
 	}
 	v := "0\n"
@@ -85,7 +95,7 @@ const defaultPanelDNATPriority = -101
 // failsafe-recover and startup restore can re-apply it after reboot. The
 // directory is shared with the daemon's /var/lib/cfm tree.
 func PersistPanelPriority(priority int) error {
-	if err := os.MkdirAll(filepath.Dir(panelDNATPriorityPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(panelDNATPriorityPath), cfmStateDirMode); err != nil {
 		return err
 	}
 	return os.WriteFile(panelDNATPriorityPath, []byte(strconv.Itoa(priority)+"\n"), 0o644)
@@ -206,6 +216,26 @@ func recordProbe(scope DNATScope, ok bool, reason string) {
 	probeMu.Lock()
 	lastProbes[scope] = ProbeResult{At: time.Now().UTC(), OK: ok, Reason: reason}
 	probeMu.Unlock()
+}
+
+// StateSnapshot captures the daemon's view of one DNAT scope. It is the
+// payload of /api/v1/dnat/state — the CLI status command runs in a
+// separate process from the daemon, so the in-process transition/probe
+// maps are otherwise invisible.
+type StateSnapshot struct {
+	Scope          string         `json:"scope"`
+	LastTransition LastTransition `json:"last_transition"`
+	LastProbe      ProbeResult    `json:"last_probe"`
+}
+
+// SnapshotScope returns the daemon's in-memory state for one scope. Safe
+// to call concurrently with LogTransition / recordProbe.
+func SnapshotScope(scope DNATScope) StateSnapshot {
+	return StateSnapshot{
+		Scope:          string(scope),
+		LastTransition: GetLastTransition(scope),
+		LastProbe:      GetLastProbe(scope),
+	}
 }
 
 func newProbeHTTPClient() *http.Client {
