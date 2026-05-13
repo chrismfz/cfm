@@ -27,7 +27,7 @@ func TestPanelDNATFailSafeTargetCleanupWiring(t *testing.T) {
 	}
 	t.Setenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST", "false")
 
-	target := newPanelDNATFailSafeTarget()
+	target := newPanelDNATFailSafeTarget(nil)
 	target.Cleanup(4, errors.New("panel down"))
 
 	if called != 1 {
@@ -62,7 +62,7 @@ func TestPanelDNATFailSafeTargetReportsAllowlistRemoval(t *testing.T) {
 	}
 	t.Setenv("CFM_PANEL_FAILSAFE_AUTO_REMOVE_ALLOWLIST", "true")
 
-	target := newPanelDNATFailSafeTarget()
+	target := newPanelDNATFailSafeTarget(nil)
 	target.Cleanup(3, errors.New("panel probe failed"))
 
 	health := getPanelFirewallHealth()

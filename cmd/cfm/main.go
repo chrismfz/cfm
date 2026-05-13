@@ -1166,7 +1166,13 @@ func runDaemon(args []string) {
 	}
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
-	// DNAT failsafe: if OpenResty ports die while DNAT is ON, turn it OFF.
+	// DNAT failsafe: if the edge proxy stops serving (TCP listener down or
+	// /__ssl_debug Lua broken) while DNAT is ON, turn it OFF; when the edge
+	// recovers, the failsafe self-heals back to ON because intent is sticky.
+	// RestoreOnStartup honors the persisted intent so a reboot doesn't drop
+	// DNAT silently: it waits for the edge to be ready before re-enabling.
+	go dnat.RestoreOnStartup(ctx, dnat.ScopeWeb, be)
+	go dnat.RestoreOnStartup(ctx, dnat.ScopeCPanel, be)
 	dnat.StartFailSafe(ctx, be)
 	dnat.StartPanelFailSafe(ctx, be)
 
