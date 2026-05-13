@@ -29,6 +29,7 @@ const DefaultPinDir = "/sys/fs/bpf/cfm"
 //	<pinDir>/maps/cfm_setuid_inodes     — CRED-002 setuid filesystem+inode hash
 //	<pinDir>/links/cfm_memfd_exec       — CFML-EXEC-001 attached link
 //	<pinDir>/links/cfm_revshell         — CFML-EXEC-003 attached link
+//	<pinDir>/links/cfm_deleted_file_exec — CFML-EXEC-004 attached link
 //	<pinDir>/links/cfm_fs005_*          — CFML-FS-005 attached links (9)
 //	<pinDir>/links/cfm_cred002          — CFML-CRED-002 attached link
 //
@@ -51,6 +52,7 @@ const (
 	pinFileMapSetuidInodes        = "cfm_setuid_inodes"
 	pinFileLinkMemfd              = "cfm_memfd_exec"
 	pinFileLinkRevshell           = "cfm_revshell"
+	pinFileLinkDeletedFileExec    = "cfm_deleted_file_exec"
 	pinFileLinkFs005Setattr       = "cfm_fs005_setattr"
 	pinFileLinkFs005Create        = "cfm_fs005_create"
 	pinFileLinkFs005Unlink        = "cfm_fs005_unlink"
@@ -373,7 +375,6 @@ func (l *Loader) pinAll(pinDir string) error {
 	return nil
 }
 
-
 // pinLinkFile returns the bpffs filename to use for a given
 // policy's pinned link. Returns "" for unknown policy IDs.
 // rewriteEnforceConstants updates the BPF spec's `volatile const __u8
@@ -408,6 +409,18 @@ func rewriteConstants(spec *ebpf.CollectionSpec, modes map[PolicyID]Mode, fs005W
 		if err := vs.Set(r.val); err != nil {
 			return fmt.Errorf("set %s=%d: %w", r.name, r.val, err)
 		}
+	}
+
+	// CFML-EXEC-004 is intentionally source-only in this PR: operators
+	// regenerate the embedded .o locally with `make bpf`. Keep old embedded
+	// objects usable for disabled-policy tests, but fail loudly if someone
+	// tries to enable EXEC-004 before regenerating.
+	if vs, ok := spec.Variables["cfm_enforce_deleted_file_exec"]; ok {
+		if err := vs.Set(enforceByte(modes[PolicyDeletedFileExec])); err != nil {
+			return fmt.Errorf("set cfm_enforce_deleted_file_exec=%d: %w", enforceByte(modes[PolicyDeletedFileExec]), err)
+		}
+	} else if modes[PolicyDeletedFileExec] != ModeDisabled {
+		return fmt.Errorf("BPF spec missing variable %q — run `make bpf` before enabling %s", "cfm_enforce_deleted_file_exec", PolicyDeletedFileExec)
 	}
 
 	originMonitor := uint8(0)
@@ -465,6 +478,8 @@ func pinLinkFiles(id PolicyID) []string {
 		return []string{pinFileLinkMemfd}
 	case PolicyReverseShell:
 		return []string{pinFileLinkRevshell}
+	case PolicyDeletedFileExec:
+		return []string{pinFileLinkDeletedFileExec}
 	case PolicySensitiveWrite:
 		return []string{
 			pinFileLinkFs005Setattr,
@@ -774,6 +789,8 @@ func (l *Loader) programsFor(id PolicyID) []programEntry {
 		return compact(lsmProgramEntry(progs.CfmMemfdExec, pinFileLinkMemfd))
 	case PolicyReverseShell:
 		return compact(lsmProgramEntry(progs.CfmRevshell, pinFileLinkRevshell))
+	case PolicyDeletedFileExec:
+		return compact(lsmProgramEntry(progs.CfmDeletedFileExec, pinFileLinkDeletedFileExec))
 	case PolicySensitiveWrite:
 		return compact(
 			lsmProgramEntry(progs.CfmFs005Setattr, pinFileLinkFs005Setattr),

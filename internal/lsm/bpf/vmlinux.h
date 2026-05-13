@@ -98,7 +98,13 @@ struct qstr {
     const unsigned char *name;
 } ___NCO;
 
+struct hlist_bl_node {
+    struct hlist_bl_node  *next;
+    struct hlist_bl_node **pprev;
+} ___NCO;
+
 struct dentry {
+    struct hlist_bl_node   d_hash;
     struct qstr            d_name;
     struct dentry         *d_parent;
     struct inode          *d_inode;
@@ -115,6 +121,7 @@ struct super_block {
 
 struct inode {
     __u16                  i_mode;
+    unsigned int           __i_nlink;
     unsigned long          i_ino;
     struct super_block    *i_sb;
 } ___NCO;

@@ -10,11 +10,12 @@ import (
 // On-wire event policy IDs. Must stay in sync with
 // internal/lsm/bpf/common.bpf.h's enum cfm_lsm_policy_id.
 const (
-	bpfPolicyMemfdExec      uint32 = 1
-	bpfPolicyReverseShell   uint32 = 3
-	bpfPolicySensitiveWrite uint32 = 5
-	bpfPolicyCredEscal      uint32 = 7
-	bpfPolicyDirectCred     uint32 = 9
+	bpfPolicyMemfdExec       uint32 = 1
+	bpfPolicyReverseShell    uint32 = 3
+	bpfPolicyDeletedFileExec uint32 = 4
+	bpfPolicySensitiveWrite  uint32 = 5
+	bpfPolicyCredEscal       uint32 = 7
+	bpfPolicyDirectCred      uint32 = 9
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -74,6 +75,8 @@ const (
 const (
 	EventFlagWebOrigin         uint8 = 1 << 0
 	EventFlagDirectCredInstall uint8 = 1 << 1
+	EventFlagUnlinkedInode     uint8 = 1 << 2
+	EventFlagUnhashedDentry    uint8 = 1 << 3
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -111,7 +114,9 @@ type Event struct {
 
 	// Filename is the policy-specific context payload. For
 	// CFML-EXEC-001 this is the memfd's d_name. For CFML-EXEC-003
-	// the binary being exec'd. For CFML-FS-005 the watched file's
+	// the binary being exec'd. For CFML-EXEC-004 this is the
+	// deleted/unlinked executable dentry name. For CFML-FS-005 the
+	// watched file's
 	// name. For CFML-CRED-002 the offending executable's name.
 	Filename string
 }
@@ -166,6 +171,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyMemfdExec
 	case bpfPolicyReverseShell:
 		e.PolicyID = PolicyReverseShell
+	case bpfPolicyDeletedFileExec:
+		e.PolicyID = PolicyDeletedFileExec
 	case bpfPolicySensitiveWrite:
 		e.PolicyID = PolicySensitiveWrite
 	case bpfPolicyCredEscal:
