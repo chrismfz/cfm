@@ -89,6 +89,51 @@ func TestEmitProbeText_PartialMode(t *testing.T) {
 	}
 }
 
+func TestEmitProbeText_UnavailablePolicyDoesNotFailAttachedProbe(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: true,
+		Attached:        []PolicyID{PolicyMemfdExec},
+		Unavailable: map[PolicyID]string{
+			PolicyDirectCredInstall: "commit_creds is not visible",
+		},
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "Result: PASS") {
+		t.Errorf("expected unavailable optional policy to keep probe PASS, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[Unavailable]") || !strings.Contains(out, "CFML-CRED-003") {
+		t.Errorf("expected unavailable list to mention CRED-003, got:\n%s", out)
+	}
+	if strings.Contains(out, "[Failed]") {
+		t.Errorf("optional unavailability should not be reported as failure, got:\n%s", out)
+	}
+}
+
+func TestEmitProbeText_SkippedWhenOnlyEnabledPoliciesUnavailable(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: false,
+		Unavailable: map[PolicyID]string{
+			PolicyDirectCredInstall: "commit_creds is not visible",
+		},
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "Result: SKIPPED") {
+		t.Errorf("expected skipped result, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Every enabled policy is unavailable") {
+		t.Errorf("expected unavailable explanation, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[Unavailable]") || !strings.Contains(out, "CFML-CRED-003") {
+		t.Errorf("expected unavailable policy listing, got:\n%s", out)
+	}
+}
+
 func TestEmitProbeText_SpontaneousEventReported(t *testing.T) {
 	var buf bytes.Buffer
 	ev := Event{

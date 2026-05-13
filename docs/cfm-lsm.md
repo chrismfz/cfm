@@ -689,8 +689,9 @@ Preflight is read-only and can be run by anyone at any time —
 it does not touch the kernel. Optional per-policy probes are reported
 separately from component-wide preflight. Today that means
 `CFML-CRED-003` checks whether `commit_creds` is visible as a tracing
-target; if it is unavailable, `cfm lsm status` reports that policy as
-unavailable but does not mark the whole LSM component failed.
+target; if it is unavailable, `cfm lsm status` and `cfm lsm probe` report
+that policy as unavailable but do not mark the whole LSM component failed
+or prevent other enabled policies from attaching.
 
 ### CLI surface
 
