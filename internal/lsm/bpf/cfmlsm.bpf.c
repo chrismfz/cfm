@@ -342,8 +342,10 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
  * uid in `cfm_watched_uids` (populated by the cfm daemon from
  * /etc/passwd / panel manifests at attach time). If matched, look
  * up the target filesystem+inode key in `cfm_watched_inodes`
- * (populated by the daemon stat()ing each sensitive path). If THAT also matches,
- * emit an event tagged with the op kind.
+ * (populated by the daemon stat()ing each sensitive or persistence path). The
+ * map value distinguishes stable core paths that may enforce from broader
+ * persistence paths that are always monitor-only. If THAT also matches, emit
+ * an event tagged with the op kind.
  *
  * The filesystem+inode match avoids BPF-side path walking entirely
  * while disambiguating identical inode numbers on different mounts.
@@ -353,8 +355,9 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
  * argument gives us directly).
  *
  * Enforcement: opt-in via volatile-const flip, same model as
- * EXEC-001 / EXEC-003. On enforce, return -EPERM so the write
- * fails outright.
+ * EXEC-001 / EXEC-003, but only for map entries marked enforceable by
+ * userspace. Persistence-path entries report only, even when the policy mode
+ * is enforce.
  *
  * Verifier complexity: lower than EXEC-003 (no bounded loops, no
  * fd walking; just two map lookups + a few CO-RE reads).
@@ -375,6 +378,9 @@ struct {
 } cfm_watched_inodes SEC(".maps");
 
 volatile const __u8 cfm_enforce_sensitive_write = 0;
+
+#define CFM_FS005_WATCH_ENFORCEABLE 1
+#define CFM_FS005_WATCH_MONITOR_ONLY 2
 
 /* Conservative feature gate for origin tracking. 0 preserves the
  * historical current-uid-only FS-005 behaviour; 1 tracks tasks that
@@ -645,19 +651,23 @@ static __always_inline bool cfm_inode_key_from_inode(struct inode *inode,
 }
 
 /* Look up one dentry's d_inode as a filesystem+inode key in
- * cfm_watched_inodes. Returns true on match. NULL dentry / NULL inode
- * are both treated as "no match" (the dentry passed at create-time has
- * no inode yet — the caller must pass d_parent in that case). */
-static __always_inline bool cfm_fs005_inode_watched(struct dentry *d)
+ * cfm_watched_inodes. Returns the userspace-supplied watch value on match.
+ * NULL dentry / NULL inode are both treated as "no match" (the dentry
+ * passed at create-time has no inode yet — the caller must pass d_parent in
+ * that case). */
+static __always_inline __u8 cfm_fs005_inode_watch_mode(struct dentry *d)
 {
     if (!d)
-        return false;
+        return 0;
     struct inode *ino = BPF_CORE_READ(d, d_inode);
 
     struct cfm_inode_key key = {};
     if (!cfm_inode_key_from_inode(ino, &key))
-        return false;
-    return bpf_map_lookup_elem(&cfm_watched_inodes, &key) != NULL;
+        return 0;
+    __u8 *mode = bpf_map_lookup_elem(&cfm_watched_inodes, &key);
+    if (!mode)
+        return 0;
+    return *mode;
 }
 
 /* Shared check helper. Returns:
@@ -697,7 +707,10 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     if (!current_uid_watched && !origin_watched)
         return 0;
 
-    if (!cfm_fs005_inode_watched(primary) && !cfm_fs005_inode_watched(secondary))
+    __u8 primary_watch = cfm_fs005_inode_watch_mode(primary);
+    __u8 secondary_watch = cfm_fs005_inode_watch_mode(secondary);
+    __u8 watch_mode = primary_watch ? primary_watch : secondary_watch;
+    if (!watch_mode)
         return 0;
 
     struct dentry *ev = event_dentry;
@@ -712,7 +725,8 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
     /* Origin-only matches are intentionally monitor-only while we gather
      * production telemetry. Current-uid matches preserve the historical
      * FS-005 enforcement semantics. */
-    if (current_uid_watched && cfm_enforce_sensitive_write)
+    if (current_uid_watched && cfm_enforce_sensitive_write &&
+        watch_mode == CFM_FS005_WATCH_ENFORCEABLE)
         return CFM_LSM_DENY;
     return 0;
 }
