@@ -190,8 +190,8 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 			logging.Logf("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
 			continue
 		}
-		if (p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
-			logging.Logf("[lsm] auto-enable: %s enforce downgraded to monitor (cred-install telemetry is monitor-only; see docs/cfm-lsm.md)", p.ID)
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
+			logging.Logf("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
 		policies = append(policies, p.ID)
@@ -319,6 +319,9 @@ func emitNotify(ev Event) {
 	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
 		reason += " origin=web"
 	}
+	if signal := ev.ExecStdioSignal(); signal != "" {
+		reason += " stdio=" + signal
+	}
 
 	extra := map[string]string{
 		"policy_id": string(ev.PolicyID),
@@ -337,6 +340,9 @@ func emitNotify(ev Event) {
 	}
 	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
+	}
+	if signal := ev.ExecStdioSignal(); signal != "" {
+		extra["stdio_signal"] = signal
 	}
 
 	_ = notify.Emit(notify.Event{

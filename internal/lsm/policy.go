@@ -23,6 +23,13 @@ const (
 	// default; enforce is opt-in only after telemetry.
 	PolicyDeletedFileExec PolicyID = "CFML-EXEC-004"
 
+	// PolicyInterpreterNetStdio — CFML-EXEC-005: monitor suspicious
+	// interpreter / shell / socket-helper execs when one or two of
+	// stdin/stdout/stderr point at established remote TCP sockets. This
+	// is weak companion telemetry for CFML-EXEC-003, not a default
+	// enforce policy.
+	PolicyInterpreterNetStdio PolicyID = "CFML-EXEC-005"
+
 	// PolicySensitiveWrite — CFML-FS-005: detect a web-class user
 	// (apache / nginx / php-fpm / panel-managed account) attempting
 	// to modify a host-sensitive file (/etc/passwd, /etc/shadow,
@@ -119,6 +126,13 @@ func AllPolicies() []Policy {
 			Hook:        "bprm_check_security",
 			DefaultMode: ModeDisabled,
 			Description: "Detect web-class users or web-origin tasks executing deleted/unlinked files; monitor-first, enforce only after telemetry.",
+		},
+		{
+			ID:          PolicyInterpreterNetStdio,
+			Title:       "Suspicious interpreter network stdio",
+			Hook:        "bprm_check_security",
+			DefaultMode: ModeDisabled,
+			Description: "Monitor suspicious shell/interpreter/socket-helper execs when one or two stdio fds are established remote TCP sockets; companion telemetry to strict reverse-shell detection.",
 		},
 		{
 			ID:          PolicySensitiveWrite,

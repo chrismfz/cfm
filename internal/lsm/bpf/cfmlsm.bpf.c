@@ -10,6 +10,8 @@
  * --------
  *   cfm_memfd_exec  — CFML-EXEC-001 (memfd exec detector)
  *   cfm_revshell    — CFML-EXEC-003 (reverse-shell-pattern detector)
+ *   cfm_interp_net_stdio
+ *                   — CFML-EXEC-005 (weak interpreter net-stdio telemetry)
  *   cfm_deleted_file_exec
  *                   — CFML-EXEC-004 (deleted/unlinked exec by web user)
  *   cfm_cred003     — CFML-CRED-003 (direct root cred install detector)
@@ -71,6 +73,7 @@ struct {
 volatile const __u8 cfm_enforce_memfd_exec         = 0;
 volatile const __u8 cfm_enforce_revshell           = 0;
 volatile const __u8 cfm_enforce_deleted_file_exec  = 0;
+/* CFML-EXEC-005 is monitor-only by default/design; no enforce constant. */
 
 /* EPERM (1) — what bprm_check_security returns when an LSM denies
  * the exec. Keeps the negative-errno convention explicit. */
@@ -313,7 +316,7 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     e->uid       = (__u32)(uid_gid & 0xffffffffu);
     e->gid       = (__u32)(uid_gid >> 32);
     e->op        = 0;
-    e->flags     = 0;
+    e->flags     = CFM_LSM_F_REVSHELL_STRICT;
     e->_pad1     = 0;
     e->_pad2     = 0;
 
@@ -330,6 +333,175 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
 
     /* Enforce mode: block the exec. Monitor mode: allow. */
     return cfm_exec_verdict(cfm_enforce_revshell);
+}
+
+
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-005 — Suspicious interpreter network stdio.
+ *
+ * Hook: bprm_check_security (LSM)
+ *
+ * Mechanism: reuse CFML-EXEC-003's fd inspection and look for a weaker
+ * companion signal: one or two of fd 0/1/2 are established remote TCP
+ * sockets AND the executable basename is a shell/interpreter/network
+ * stdio helper commonly used in one-liners. Three remote stdio fds are
+ * left to the strict CFML-EXEC-003 rule to avoid duplicate telemetry.
+ *
+ * Mode: monitor-only. This intentionally has no enforce constant; weak
+ * telemetry catches context around inetd-style services, admin one-liners,
+ * and debugging sessions, so enforcement belongs only in the strict rule.
+ * ------------------------------------------------------------------- */
+
+static __always_inline int cfm_str_eq(const char *s, const char *lit, int lit_len)
+{
+    int i;
+
+#pragma unroll
+    for (i = 0; i < 16; i++) {
+        if (i > lit_len)
+            break;
+        char c = s[i];
+        char want = lit[i];
+        if (c != want)
+            return 0;
+        if (want == '\0')
+            return 1;
+    }
+
+    return 0;
+}
+
+static __always_inline int cfm_suspicious_exec_basename(const char *base)
+{
+    if (cfm_str_eq(base, "sh", 2)) return 1;
+    if (cfm_str_eq(base, "bash", 4)) return 1;
+    if (cfm_str_eq(base, "dash", 4)) return 1;
+    if (cfm_str_eq(base, "zsh", 3)) return 1;
+    if (cfm_str_eq(base, "python", 6)) return 1;
+    if (cfm_str_eq(base, "python3", 7)) return 1;
+    if (cfm_str_eq(base, "perl", 4)) return 1;
+    if (cfm_str_eq(base, "php", 3)) return 1;
+    if (cfm_str_eq(base, "ruby", 4)) return 1;
+    if (cfm_str_eq(base, "node", 4)) return 1;
+    if (cfm_str_eq(base, "nc", 2)) return 1;
+    if (cfm_str_eq(base, "ncat", 4)) return 1;
+    if (cfm_str_eq(base, "socat", 5)) return 1;
+
+    return 0;
+}
+
+static __always_inline int cfm_path_is_suspicious_basename(const char *path)
+{
+    char buf[CFM_FILENAME_LEN] = {};
+    int base = 0;
+    int i;
+
+    if (!path)
+        return 0;
+
+    if (bpf_probe_read_kernel_str(buf, sizeof(buf), path) <= 0)
+        return 0;
+
+#pragma unroll
+    for (i = 0; i < CFM_FILENAME_LEN; i++) {
+        char c = buf[i];
+        if (c == '/')
+            base = i + 1;
+        if (c == '\0')
+            break;
+    }
+
+    if (base >= CFM_FILENAME_LEN)
+        return 0;
+
+    return cfm_suspicious_exec_basename(&buf[base]);
+}
+
+static __always_inline void cfm_emit_exec_stdio_event(struct linux_binprm *bprm,
+                                                      __u32 policy_id,
+                                                      __u8 flags)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = policy_id;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const char *fname = BPF_CORE_READ(bprm, filename);
+    if (fname)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), fname);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_interp_net_stdio, struct linux_binprm *bprm, int ret)
+{
+    struct task_struct *task;
+    struct files_struct *files;
+    struct fdtable *fdt;
+    struct file **fdarr;
+    unsigned int max_fds;
+    int remote = 0;
+    const char *fname;
+    __u8 flags = CFM_LSM_F_INTERP_STDIO_WEAK;
+
+    if (ret != 0)
+        return ret;
+
+    fname = BPF_CORE_READ(bprm, filename);
+    if (!cfm_path_is_suspicious_basename(fname))
+        return 0;
+
+    task = bpf_get_current_task_btf();
+    if (!task)
+        return 0;
+
+    files = BPF_CORE_READ(task, files);
+    if (!files)
+        return 0;
+
+    fdt = BPF_CORE_READ(files, fdt);
+    if (!fdt)
+        return 0;
+
+    max_fds = BPF_CORE_READ(fdt, max_fds);
+    fdarr   = BPF_CORE_READ(fdt, fd);
+    if (!fdarr || max_fds < 3)
+        return 0;
+
+    if (fd_is_remote_tcp(fdarr, max_fds, 0))
+        remote++;
+    if (fd_is_remote_tcp(fdarr, max_fds, 1))
+        remote++;
+    if (fd_is_remote_tcp(fdarr, max_fds, 2))
+        remote++;
+
+    if (remote == 1)
+        flags |= CFM_LSM_F_STDIO_ONE_REMOTE;
+    else if (remote == 2)
+        flags |= CFM_LSM_F_STDIO_TWO_REMOTE;
+    else
+        return 0;
+
+    cfm_emit_exec_stdio_event(bprm, CFM_LSM_POLICY_INTERP_NET_STDIO, flags);
+    return 0;
 }
 
 /* ------------------------------------------------------------------- *

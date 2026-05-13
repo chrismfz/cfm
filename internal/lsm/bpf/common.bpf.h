@@ -19,6 +19,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_MEMFD_EXEC       = 1,  /* CFML-EXEC-001 */
     CFM_LSM_POLICY_REVERSE_SHELL    = 3,  /* CFML-EXEC-003 */
     CFM_LSM_POLICY_DELETED_FILE_EXEC = 4,  /* CFML-EXEC-004 */
+    CFM_LSM_POLICY_INTERP_NET_STDIO  = 6,  /* CFML-EXEC-005 */
     CFM_LSM_POLICY_SENSITIVE_WRITE  = 5,  /* CFML-FS-005   */
     CFM_LSM_POLICY_CRED_ESCAL       = 7,  /* CFML-CRED-002 */
     CFM_LSM_POLICY_DIRECT_CRED      = 9,  /* CFML-CRED-003 */
@@ -48,6 +49,10 @@ enum cfm_event_op {
 #define CFM_LSM_F_DIRECT_CRED_INSTALL (1U << 1)
 #define CFM_LSM_F_UNLINKED_INODE      (1U << 2)
 #define CFM_LSM_F_UNHASHED_DENTRY     (1U << 3)
+#define CFM_LSM_F_REVSHELL_STRICT     (1U << 4)
+#define CFM_LSM_F_INTERP_STDIO_WEAK   (1U << 5)
+#define CFM_LSM_F_STDIO_ONE_REMOTE    (1U << 6)
+#define CFM_LSM_F_STDIO_TWO_REMOTE    (1U << 7)
 
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem
@@ -73,7 +78,7 @@ struct cfm_inode_key {
  *       20     4  uid
  *       24     4  gid
  *       28     1  op         (enum cfm_event_op; 0 for policies without an op)
- *       29     1  flags      (CFML-FS-005: bit 0 means web-origin match)
+ *       29     1  flags      (per-policy event flags; see CFM_LSM_F_*)
  *       30     2  _pad
  *       32    16  comm
  *       48    64  filename

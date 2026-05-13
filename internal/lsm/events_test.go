@@ -112,6 +112,42 @@ func TestParseEvent_DirectCredInstall(t *testing.T) {
 	}
 }
 
+func TestEventExecStdioSignal(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags uint8
+		want  string
+	}{
+		{"strict", EventFlagRevshellStrict, "strict_all_stdio_remote"},
+		{"weak two", EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote, "weak_two_stdio_remote"},
+		{"weak one", EventFlagInterpreterStdioWeak | EventFlagStdioOneRemote, "weak_one_stdio_remote"},
+		{"none", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Event{Flags: tc.flags}).ExecStdioSignal(); got != tc.want {
+				t.Fatalf("ExecStdioSignal() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEvent_InterpreterNetStdio(t *testing.T) {
+	raw := buildWireEvent(t, bpfPolicyInterpreterNetStdio, 123, 123, 1001, 1001, 789, "bash", "/bin/bash")
+	raw[29] = EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote
+
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyInterpreterNetStdio {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyInterpreterNetStdio)
+	}
+	if ev.Flags&(EventFlagInterpreterStdioWeak|EventFlagStdioTwoRemote) == 0 {
+		t.Fatalf("Flags: got %#x, want weak two-remote bits", ev.Flags)
+	}
+}
+
 func TestParseEvent_UnexpectedBPF(t *testing.T) {
 	raw := buildWireEvent(t, bpfPolicyUnexpectedBPF, 4242, 4242, 1001, 1001, 456, "php-fpm", "BPF_PROG_LOAD")
 	raw[28] = bpfBPFOpProgLoad
@@ -195,6 +231,9 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	}
 	if bpfPolicyDirectCred != 9 {
 		t.Errorf("bpfPolicyDirectCred mismatch: Go=%d, BPF=9 (see common.bpf.h)", bpfPolicyDirectCred)
+	}
+	if bpfPolicyInterpreterNetStdio != 6 {
+		t.Errorf("bpfPolicyInterpreterNetStdio mismatch: Go=%d, BPF=6 (see common.bpf.h)", bpfPolicyInterpreterNetStdio)
 	}
 	if bpfPolicyUnexpectedBPF != 10 {
 		t.Errorf("bpfPolicyUnexpectedBPF mismatch: Go=%d, BPF=10 (see common.bpf.h)", bpfPolicyUnexpectedBPF)

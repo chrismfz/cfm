@@ -11,11 +11,12 @@ import (
 // stay stable.
 func TestNewPoliciesRegistered(t *testing.T) {
 	want := map[PolicyID]string{
-		PolicyDeletedFileExec:   "CFML-EXEC-004",
-		PolicySensitiveWrite:    "CFML-FS-005",
-		PolicyCredEscal:         "CFML-CRED-002",
-		PolicyDirectCredInstall: "CFML-CRED-003",
-		PolicyUnexpectedBPF:     "CFML-BPF-001",
+		PolicyDeletedFileExec:     "CFML-EXEC-004",
+		PolicyInterpreterNetStdio: "CFML-EXEC-005",
+		PolicySensitiveWrite:      "CFML-FS-005",
+		PolicyCredEscal:           "CFML-CRED-002",
+		PolicyDirectCredInstall:   "CFML-CRED-003",
+		PolicyUnexpectedBPF:       "CFML-BPF-001",
 	}
 	got := map[PolicyID]bool{}
 	for _, p := range AllPolicies() {
