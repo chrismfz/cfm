@@ -779,6 +779,91 @@ end
 -- AUDIT-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Shell-command word list for value-aware cmd_param checks.
+-- These tokens, when they appear as a stand-alone word in a parameter value,
+-- mark the value as "shelly" — i.e. a real RCE attempt — versus benign uses
+-- of generic dispatcher keys like cmd=open / system=rewards / command=viewres
+-- found in WP plugins (elFinder, LWS WooRewards) and themes (WooCommerce
+-- mini-cart, auto-parts visualizers).
+local CMD_PARAM_SHELL_WORDS = {
+  -- recon
+  id = true, whoami = true, uname = true, pwd = true, hostname = true,
+  ls = true, ps = true, w = true, env = true,
+  cat = true, head = true, tail = true, less = true, more = true,
+  -- file system / privilege
+  rm = true, mv = true, cp = true, mkdir = true, touch = true, ln = true,
+  chmod = true, chown = true,
+  -- network / fetch
+  wget = true, curl = true, fetch = true, nc = true, netcat = true,
+  socat = true, telnet = true, ssh = true, scp = true,
+  nslookup = true, dig = true, ping = true, host = true,
+  ifconfig = true, netstat = true, iptables = true, arp = true, route = true,
+  -- shells / interpreters
+  bash = true, sh = true, dash = true, zsh = true, ksh = true, csh = true,
+  python = true, python2 = true, python3 = true, perl = true, ruby = true,
+  php = true, lua = true, node = true,
+  -- exec primitives (PHP function names used as command verbs)
+  exec = true, system = true, passthru = true, eval = true,
+  ["shell_exec"] = true,
+}
+
+-- Does the value of a generic dispatcher param (cmd=, system=, command=)
+-- look like a real shell command? Two ways for it to count:
+--   1) contains a shell metacharacter (;  |  `  &&  $(  ${  >  <),
+--   2) contains a known shell-command token as a whole word.
+-- The args string has already been normalize()d — fully URL-decoded twice
+-- and lowercased — so we only check raw chars.
+local function value_looks_shelly(v)
+  if not v or v == "" then return false end
+
+  -- Shell metacharacters that have no business in a benign verb value.
+  if v:find(";", 1, true)  then return true end
+  if v:find("|", 1, true)  then return true end
+  if v:find("`", 1, true)  then return true end
+  if v:find("&&", 1, true) then return true end
+  if v:find("$(", 1, true) then return true end
+  if v:find("${", 1, true) then return true end
+  if v:find(">",  1, true) then return true end
+  if v:find("<",  1, true) then return true end
+
+  -- Path indicators that wouldn't appear in a benign dispatcher verb.
+  if has(v, "/bin/") or has(v, "/tmp/") or has(v, "/dev/")
+     or has(v, "/etc/") or has(v, "/usr/") or has(v, "/var/") then
+    return true
+  end
+
+  -- Word-tokenise on space / + (form-encoded space). Lua's %s matches
+  -- whitespace; we add "+" explicitly. The value is then split into
+  -- alphanumeric words; if any token (or the whole value) matches a
+  -- known shell-command name, this is a real RCE probe.
+  if CMD_PARAM_SHELL_WORDS[v] then return true end
+  for word in v:gmatch("[%w_]+") do
+    if CMD_PARAM_SHELL_WORDS[word] then return true end
+  end
+
+  return false
+end
+
+-- Extract the value of a top-level query parameter named k from a
+-- normalize()'d args string. Returns the substring from the byte after
+-- "k=" up to the next "&" (or end-of-string). Returns nil if the key
+-- is not present at position 1 or after an "&".
+local function arg_value(a, k)
+  local p
+  local prefix = k .. "="
+  if string.sub(a, 1, #prefix) == prefix then
+    p = #prefix + 1
+  else
+    local s, e = a:find("&" .. prefix, 1, true)
+    if s then p = e + 1 end
+  end
+  if not p then return nil end
+  local rest = string.sub(a, p)
+  local amp = rest:find("&", 1, true)
+  if amp then rest = string.sub(rest, 1, amp - 1) end
+  return rest
+end
+
 function _M.detect_cmd_param_key(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -789,14 +874,32 @@ function _M.detect_cmd_param_key(args)
     return false
   end
 
+  -- PHP-dangerous function names: presence of the key alone is suspicious
+  -- because no legitimate app names a query param after exec / passthru /
+  -- shell_exec / eval / assert.
   if key("exec")       then return "CMD_EXEC" end
   if key("passthru")   then return "CMD_PASSTHRU" end
   if key("shell_exec") then return "CMD_SHELL_EXEC" end
   if key("eval")       then return "CMD_EVAL" end
   if key("assert")     then return "CMD_ASSERT" end
-  if key("system")     then return "CMD_SYSTEM" end
-  if key("cmd")        then return "CMD_CMD" end
-  if key("command")    then return "CMD_COMMAND" end
+
+  -- Generic dispatcher keys (cmd=, system=, command=) are routinely used
+  -- by legitimate WP plugins and themes as a verb selector, so a bare
+  -- key match produces false positives (elFinder cmd=open, LWS WooRewards
+  -- system=rewards, theme command=viewres). Require the value to look
+  -- shelly — metachars or a known shell-command word — before firing.
+  if key("system") then
+    local v = arg_value(a, "system")
+    if value_looks_shelly(v) then return "CMD_SYSTEM" end
+  end
+  if key("cmd") then
+    local v = arg_value(a, "cmd")
+    if value_looks_shelly(v) then return "CMD_CMD" end
+  end
+  if key("command") then
+    local v = arg_value(a, "command")
+    if value_looks_shelly(v) then return "CMD_COMMAND" end
+  end
 
   return nil
 end
@@ -1313,10 +1416,19 @@ function _M.detect_content_type_anomaly(headers)
   return nil
 end
 
--- [top-8] Single-quote SQLi / non-string values in proxy IP headers.
+-- [top-8] Single-quote SQLi in proxy IP headers.
 -- Source: uusec proxy-header-sql-injection.lua.
 -- Why: some apps log or query-build using XFF/X-Real-IP without sanitization.
--- A non-string (table) value = multiple headers sent = header injection attempt.
+--
+-- Note: the original detector also flagged "non-string (table) value" as
+-- PROXY_HDR_INJECT — i.e. the same header sent more than once. A 2026-05
+-- log review found that branch was an FP factory: carrier-grade NAT (Vodafone
+-- TR) and chained edge proxies legitimately produce multiple XFF headers,
+-- and real users browsing normal pages were getting challenged. The
+-- duplicate-header signal is too weak to act on by itself, so we drop it
+-- and keep only the single-quote SQLi check (which is unambiguous).
+-- header_string() collapses any table value to the first non-empty string
+-- so the quote scan still works on duplicated XFFs.
 function _M.detect_proxy_header_sqli(headers)
   headers = headers or {}
   local suspects = {
@@ -1327,10 +1439,8 @@ function _M.detect_proxy_header_sqli(headers)
   }
   for hname, hval in pairs(suspects) do
     if hval ~= nil then
-      if type(hval) ~= "string" then
-        return "PROXY_HDR_INJECT:" .. hname
-      end
-      if has(hval, "'") then
+      local s = header_string(hval)
+      if has(s, "'") then
         return "PROXY_HDR_SQLI:" .. hname
       end
     end

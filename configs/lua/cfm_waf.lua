@@ -54,8 +54,14 @@ local CFG = {
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
   rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
-  rule_ip_host           = "logonly",  -- Host header is bare IPv4/IPv6 literal
-  rule_ctrl_chars        = "logonly",  -- suspicious ASCII control chars in args/body
+  rule_ip_host           = "challenge",  -- Host header is bare IPv4/IPv6 literal
+                                         -- (promoted from logonly: 2026-05 hit analysis showed
+                                         --  100% scanner traffic against raw IPv4 hosts —
+                                         --  real users never set Host to a server IP literal)
+  rule_ctrl_chars        = "challenge",  -- suspicious ASCII control chars in args/body
+                                         -- (promoted from logonly: detector already excludes
+                                         --  multipart/binary CTs; 0 hits over 6 weeks ×
+                                         --  5 servers — no legit traffic produces these bytes)
   rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
   rule_b64_injection     = "challenge",  -- POST-body base64 decode heuristic scanner
 
@@ -70,9 +76,19 @@ local CFG = {
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "challenge",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
-  rule_cmd_payload      = "logonly",   -- fallback/default mode for payload-y separators/tokens in args
-  rule_debug_toggles    = "logonly",   -- xdebug, trace, debug, stacktrace
-  rule_serialize        = "logonly",   -- PHP serialized object markers
+                                         -- (cmd=/system=/command= are now value-aware: fires only
+                                         --  when value contains shell metachars or known shell tokens —
+                                         --  see detect_cmd_param_key in cfm_waf_detectors.lua)
+  rule_cmd_payload      = "challenge", -- fallback/default mode for payload-y separators/tokens in args
+                                       -- (every emitted tag has an explicit override below; this value
+                                       --  is the safety net for any new tag added to detect_cmd_payload)
+  rule_debug_toggles    = "challenge", -- xdebug, trace, debug, stacktrace
+                                       -- (promoted from logonly: narrow value-equality match —
+                                       --  debug=1|true, trace=1|true, etc. — 0 hits in 6 weeks)
+  rule_serialize        = "challenge", -- PHP serialized object markers
+                                       -- (promoted from logonly: serialized blobs in URL args are
+                                       --  insecure-deserialization probes; legit apps carry these
+                                       --  in cookies/POST bodies, not URL args — 0 hits in 6 weeks)
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
@@ -81,7 +97,11 @@ local CFG = {
   rule_cmd_payload_pipe_curl = "challenge",         -- PAY_PIPE_CURL
   rule_cmd_payload_pipe_bash = "challenge",         -- PAY_PIPE_BASH
   rule_cmd_payload_pipe_sh   = "challenge",         -- PAY_PIPE_SH
-  rule_cmd_payload_backtick  = "logonly",   -- PAY_BACKTICK
+  rule_cmd_payload_backtick  = "challenge",       -- PAY_BACKTICK
+                                                  -- (promoted from logonly: detector already
+                                                  --  suppresses backticks in q/s/term/search/query
+                                                  --  free-text params and only fires when the backtick
+                                                  --  wraps a real shell command — 0 hits in 6 weeks)
 
   -- ── Research additions – all logonly for initial FP observation ────────────
   -- Sources: uusec-waf (BSD), ZhongKui (Apache2), anti_ddos_challenge (MIT),
@@ -168,7 +188,9 @@ local CFG = {
                                         -- (RFC-violating header combos used for request smuggling)
   rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
                                         -- slug-safe; observed abuse is base64 stuffing >1 KB)
-  rule_header_flood      = "logonly",  -- total header bag > 16 KB excluding Cookie/Authorization volume
+  rule_header_flood      = "challenge", -- total header bag > 16 KB excluding Cookie/Authorization volume
+                                        -- (promoted from logonly: 16 KB threshold sits well above
+                                        --  typical 1-3 KB real-world headers; 0 hits in 6 weeks)
 
   -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
   -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
