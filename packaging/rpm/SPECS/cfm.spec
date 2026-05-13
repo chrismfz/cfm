@@ -183,6 +183,16 @@ if [ -n "$lua_src_dir" ]; then
         elif [ "$cur_hash" = "$new_hash" ]; then
             echo "CFM Lua sync: already current $dst"
             printf '%s\n' "$new_hash" > "$stamp"
+            # Refresh dst mtime even though the content didn't change, so
+            # `ls -la /var/lib/cfm/lua/` is a useful at-a-glance check:
+            # every .lua file's mtime reflects "processed in this install"
+            # rather than "last time the content happened to change",
+            # which could be weeks ago. The other branches already get
+            # current mtime implicitly because `install` (no -p) writes
+            # the file; this branch is the only no-op path where we'd
+            # otherwise leave stale mtimes that look alarming on a fresh
+            # deploy ("why are these files 10 days old?").
+            touch "$dst" 2>/dev/null || true
         else
             backup="$dst.local-prepkg.$(date +%s)"
             cp -a "$dst" "$backup" || true
