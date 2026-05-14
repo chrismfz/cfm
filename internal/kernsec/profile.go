@@ -210,20 +210,26 @@ var KSPPSysctls = []SysctlRule{
 	{
 		ID: "KSEC-SCT-kspp.kernel-006", Group: "kspp.kernel", Tier: Tier1,
 		Key: "kernel.yama.ptrace_scope", Value: "2",
-		// Live=1 still blocks the classic same-uid ptrace_attach
+		// Mode 1 still blocks the classic same-uid ptrace_attach
 		// against non-children, but it does NOT block the
 		// pidfd_getfd() exit-window race against setuid helpers
 		// (the attacker fork+exec's the helper so it IS the
-		// parent, which mode 1 allows through). Mode 2 routes the
-		// check via security_ptrace_access_check() and requires
-		// CAP_SYS_PTRACE, closing that primitive. Operators who
-		// need same-uid debuggability (gdb/strace/py-spy without
-		// sudo) can leave the knob at 1 — both are accepted as
-		// green by the audit. See Linus commit 31e62c2ebbfd
-		// (ptrace: slightly saner get_dumpable() logic).
-		AcceptValues: []string{"1"},
-		Description:  "Require CAP_SYS_PTRACE for any ptrace attach. Beyond mode 1's child-only restriction, mode 2 also blocks the same-uid pidfd_getfd() exit-window race against setuid helpers — the ssh-keysign host-key theft chain reported by Qualys (kernel fix: Linus commit 31e62c2ebbfd).",
-		Affects:      "gdb --attach, strace -p, py-spy, bpftrace -p, rr record -p and similar attach-style debuggers/profilers need sudo even on the user's own processes. Crash reporters that opt in via PR_SET_PTRACER (Chrome crashpad, Firefox, drkonqi, abrt) can no longer produce minidumps — irrelevant on headless servers. Mode 1 stays acceptable for hosts that need same-uid debuggability and accept the residual exit-window race.",
+		// parent, which mode 1 allows through — confirmed live on
+		// the ssh-keysign-pwn / chage_pwn reproducer chain). Mode 2
+		// routes the check via security_ptrace_access_check() and
+		// requires CAP_SYS_PTRACE, closing that primitive. Mode 1
+		// used to be accepted as also-green here for hosts that
+		// preferred same-uid debuggability (gdb/strace/py-spy
+		// without sudo); we now require =2 because the residual
+		// exit-window race is a working /etc/shadow disclosure
+		// primitive against any setuid helper that opens a
+		// sensitive file (chage, ssh-keysign, unix_chkpwd, ...).
+		// Operators who genuinely need same-uid debuggability must
+		// opt out explicitly via `[rule "KSEC-SCT-kspp.kernel-006"]
+		// state = skip` in kernsec.conf. See Linus commit
+		// 31e62c2ebbfd (ptrace: slightly saner get_dumpable() logic).
+		Description: "Require CAP_SYS_PTRACE for any ptrace attach. Mode 2 also blocks the same-uid pidfd_getfd() exit-window race against setuid helpers — the ssh-keysign / chage fd-leak chain reported by Qualys (kernel fix: Linus commit 31e62c2ebbfd) — which mode 1 leaves wide open.",
+		Affects:     "gdb --attach, strace -p, py-spy, bpftrace -p, rr record -p and similar attach-style debuggers/profilers need sudo even on the user's own processes. Crash reporters that opt in via PR_SET_PTRACER (Chrome crashpad, Firefox, drkonqi, abrt) can no longer produce minidumps — irrelevant on headless servers. Hosts that need same-uid debuggability without sudo must `state = skip` this rule; they keep the residual setuid-helper fd-leak race in exchange.",
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-007", Group: "kspp.kernel", Tier: Tier1,

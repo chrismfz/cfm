@@ -237,7 +237,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 
 | Group | Tier | Rules / settings | Operator impact |
 |---|---:|---|---|
-| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `=2` for mainline-vanilla kernels and `=4` for hardened forks), `kernel.yama.ptrace_scope=2` (accepts `=1`), `vm.mmap_min_addr=65536` (accepts `=131072` / `=262144`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` also closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign host-key theft chain — Linus commit `31e62c2ebbfd`); operators who need same-uid debuggability without sudo can leave the knob at 1 and the audit stays green. `vm.mmap_min_addr=65536` blocks NULL-deref-to-userspace exploit primitives and is the default on modern distros. |
+| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `=2` for mainline-vanilla kernels and `=4` for hardened forks), `kernel.yama.ptrace_scope=2`, `vm.mmap_min_addr=65536` (accepts `=131072` / `=262144`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign / chage `/etc/shadow` disclosure chain — Linus commit `31e62c2ebbfd`); `=1` was previously accepted as also-green but is no longer, because the residual race is a working exploit primitive. Hosts that need same-uid debuggability without sudo must `state = skip` `KSEC-SCT-kspp.kernel-006` in `kernsec.conf`. `vm.mmap_min_addr=65536` blocks NULL-deref-to-userspace exploit primitives and is the default on modern distros. |
 | `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=2` | Protects sticky/world-writable directories; normally no production impact. |
 | `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT performance cost. |
 | `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
@@ -649,10 +649,16 @@ The two components do not overlap on managed surface:
 
 A few intentional non-overlaps worth recording:
 
-- `kernel.yama.ptrace_scope=2` is shipped by kernsec (Tier 1, accepts `=1` as also-green for hosts that want same-uid debuggability). The
-  `CFML-OBS-001` ptrace-lockdown idea from cfm-lsm's original
-  scope was dropped specifically because kernsec already covers
-  that ground at a cheaper layer.
+- `kernel.yama.ptrace_scope=2` is shipped by kernsec (Tier 1). `=1`
+  was previously accepted as also-green but was removed once the
+  ssh-keysign / chage `pidfd_getfd()` exit-window race was confirmed
+  to be a working `/etc/shadow` disclosure primitive against mode 1
+  hosts. Operators who need same-uid debuggability must `state = skip`
+  `KSEC-SCT-kspp.kernel-006` in `kernsec.conf` and accept the
+  residual setuid-helper fd-leak race. The `CFML-OBS-001`
+  ptrace-lockdown idea from cfm-lsm's original scope was dropped
+  specifically because kernsec already covers that ground at a
+  cheaper layer.
 - The `lsm=…,bpf` kernel command-line argument is **not yet
   managed by kernsec**. cfm-lsm's preflight detects when `bpf` is
   absent from `/sys/kernel/security/lsm` and prints the exact
