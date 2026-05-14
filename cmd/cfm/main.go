@@ -570,7 +570,16 @@ func runDaemon(args []string) {
 	// have no effect on shutdown. If discoverPairs ever becomes
 	// ctx-aware, switch this to ctx so SIGTERM can interrupt a slow
 	// startup scan.
+	//
+	// The step() wrapper surfaces this scan's duration in the startup
+	// log. On busy hosts (1000+ cert pairs scanning many /home/*/ssl
+	// directories) the synchronous scan can take multiple seconds and
+	// blocks backend setup — without the wrapper there is no visible
+	// line saying "sslcollector took 3s", and operators chasing slow
+	// startup have to guess.
+	doneSSL := step("initial:sslcollector.Refresh")
 	_ = sslcol.Refresh(context.Background())
+	doneSSL()
 	st := sslcol.Stats()
 	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
 		st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
