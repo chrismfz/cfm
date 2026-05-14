@@ -576,6 +576,16 @@ local function poll_stats(premature)
 
   dict:set("meta:poll_interval", poll_interval, 0)
 
+  -- Retry the on-disk snapshot if this worker has never ingested anything.
+  -- start_background() calls load_from_snapshot() once at boot, but that
+  -- can legitimately fail when the worker raced cfm (snapshot not yet
+  -- written, wrong perms from a pre-fix install, late mount, ...) — and
+  -- without a retry the worker stays empty until /stats first succeeds.
+  -- Cheap: io.open + JSON decode of a ~few-hundred-KB file. Idempotent.
+  if _worker_last_dumpall == 0 then
+    load_from_snapshot()
+  end
+
   local r, err = sock_get("/stats")
 
   if r and r.status == 200 then

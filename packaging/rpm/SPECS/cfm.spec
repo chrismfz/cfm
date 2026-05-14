@@ -224,25 +224,12 @@ else
     echo "WARNING: CFM proxy config deploy helper missing: /usr/share/cfm/scripts/package-proxy-config-deploy.sh"
 fi
 
-# Reload edge proxies if they are currently active, so the updated panel
-# listener template (and any other shipped config) takes effect without
-# operator intervention. We never enable or start a service here: hosts
-# may run neither, only one, or both (e.g. for testing).
-if command -v systemctl >/dev/null 2>&1; then
-    # Belt-and-suspenders: even though init_worker_by_lua_block in
-    # angie.conf/openresty.conf is now resilient to a transient require
-    # failure, give the filesystem a moment to settle after the
-    # `install -m 0640 ...` of every shipped lua file above. Workers
-    # re-exec on `reload` and immediately re-run init_worker; a short
-    # pause here keeps the boring path boring.
-    sleep 2
-    for svc in angie.service openresty.service; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            echo "CFM: reloading $svc to apply updated config..."
-            systemctl reload "$svc" || true
-        fi
-    done
-fi
+# Reload edge proxies if they are currently active. We do this AFTER
+# the cfm restart cycle below, not before — that way fresh angie/openresty
+# workers run init_worker_by_lua against a cfm that is already up and
+# has its socket + snapshot ready, instead of racing the restart and
+# falling back through soft-start retries. We never enable or start a
+# service here: hosts may run neither, only one, or both.
 
 # Ensure correct SELinux context in case older versions used /lib path
 [ -f /lib/systemd/system/cfm.service ] && \
@@ -270,6 +257,21 @@ if [ "$was_active" -eq 1 ]; then
     systemctl start cfm.service || true
 else
     echo "CFM was not running — leaving stopped."
+fi
+
+# Step 4: now that cfm is back up (or staying down deliberately), reload
+# the edge proxies so their workers re-init against the ready state.
+# Short sleep gives cfm a moment to create /var/run/sslcollector.sock and
+# rewrite /var/lib/cfm/sslcollector/dump.json with the correct 0640
+# perms — both prerequisites for a clean init_worker_by_lua run.
+if command -v systemctl >/dev/null 2>&1; then
+    sleep 2
+    for svc in angie.service openresty.service; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo "CFM: reloading $svc to apply updated config..."
+            systemctl reload "$svc" || true
+        fi
+    done
 fi
 
 
