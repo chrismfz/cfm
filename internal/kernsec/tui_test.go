@@ -1,6 +1,10 @@
 package kernsec
 
-import "testing"
+import (
+	"testing"
+
+	ui "github.com/gizak/termui/v3"
+)
 
 func TestBootRowState(t *testing.T) {
 	tests := []struct {
@@ -228,4 +232,79 @@ func TestBuildAuditRows_ForceOverrideReasonVisibleAgainstHostingPanelGate(t *tes
 		return
 	}
 	t.Fatal("namespace audit row not found")
+}
+
+func TestGroupWorstColor_SkipAndOffAreNeutralAlongsideOK(t *testing.T) {
+	g := groupKey{Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace"}
+	rows := []AuditRow{
+		// universal rule applied OK
+		{ID: "a", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateOK},
+		// Debian-only sibling that doesn't exist on this kernel
+		{ID: "b", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateSKIP},
+	}
+	if got := groupWorstColor(rows, g, nil); got != ui.ColorGreen {
+		t.Errorf("group with OK + SKIP sibling should render GREEN, got %v", got)
+	}
+
+	// All neutral (no OK to anchor on) stays WHITE — operator
+	// hasn't enforced anything in this group.
+	allNeutral := []AuditRow{
+		{ID: "a", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateSKIP},
+		{ID: "b", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateOFF},
+	}
+	if got := groupWorstColor(allNeutral, g, nil); got != ui.ColorWhite {
+		t.Errorf("group with all SKIP/OFF should stay WHITE, got %v", got)
+	}
+
+	// Yellow / red still dominates a green sibling — neutrality is
+	// asymmetric (it can't lift a real failure off the group).
+	withYellow := []AuditRow{
+		{ID: "a", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateOK},
+		{ID: "b", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateDIFF},
+	}
+	if got := groupWorstColor(withYellow, g, nil); got != ui.ColorYellow {
+		t.Errorf("group with DIFF should be YELLOW, got %v", got)
+	}
+
+	withDrift := []AuditRow{
+		{ID: "a", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateOK},
+		{ID: "b", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateDRIFT},
+	}
+	if got := groupWorstColor(withDrift, g, nil); got != ui.ColorRed {
+		t.Errorf("group with DRIFT should be RED, got %v", got)
+	}
+}
+
+func TestGroupWorstColor_EXTGreensWhenLiveValueMatches(t *testing.T) {
+	g := groupKey{Tier: Tier1, Kind: KindSysctl, Group: "net.ipv4"}
+	// EXT row with matching live value contributes green.
+	rows := []AuditRow{
+		{ID: "a", Tier: Tier1, Kind: KindSysctl, Group: "net.ipv4",
+			State: StateEXT, LiveValue: "1", ExpectedValue: "1"},
+	}
+	if got := groupWorstColor(rows, g, nil); got != ui.ColorGreen {
+		t.Errorf("EXT with matching value should render GREEN at group level, got %v", got)
+	}
+
+	// EXT row with mismatched live value is neutral — alone, the
+	// group is WHITE (nothing reliably enforced for the operator's
+	// glance).
+	mismatch := []AuditRow{
+		{ID: "a", Tier: Tier1, Kind: KindSysctl, Group: "net.ipv4",
+			State: StateEXT, LiveValue: "0", ExpectedValue: "1"},
+	}
+	if got := groupWorstColor(mismatch, g, nil); got != ui.ColorWhite {
+		t.Errorf("EXT with mismatched value alone should be WHITE, got %v", got)
+	}
+}
+
+func TestGroupWorstColor_PendingStillMagenta(t *testing.T) {
+	g := groupKey{Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace"}
+	rows := []AuditRow{
+		{ID: "a", Tier: Tier2, Kind: KindSysctl, Group: "tier2.namespace", State: StateOK},
+	}
+	pending := map[string]RuleOverride{"a": OverrideForce}
+	if got := groupWorstColor(rows, g, pending); got != ui.ColorMagenta {
+		t.Errorf("pending override should override group color to magenta, got %v", got)
+	}
 }

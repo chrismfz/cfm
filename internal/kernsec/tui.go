@@ -829,6 +829,21 @@ func buildGroupList(rows []AuditRow) []groupKey {
 // group, so the LEFT pane's row color flags any group that contains a
 // drifted/diff/missing rule. Pending overrides anywhere in the group
 // promote the row to magenta, matching the rule-pane convention.
+//
+// SKIP / OFF / EXT-with-mismatched-live contribute *nothing* to the
+// rollup — they are neutral. A group with one rule OK and a sibling
+// rule SKIP (e.g. tier2.namespace-001 universal + tier2.namespace-002
+// Debian-only with the kernel.unprivileged_userns_clone key absent on
+// RHEL family) therefore renders GREEN: the surface is covered by the
+// kernel-applicable rule and the operator doesn't need to mentally
+// reconcile "why is half this group white". EXT rules contribute green
+// only when their live value matches what kernsec would write — the
+// other component is enforcing the same target, so the surface is
+// effectively protected.
+//
+// Groups whose rules are entirely neutral (all SKIP / OFF / EXT-
+// mismatched) keep the previous WHITE rendering: nothing is enforced
+// for the operator to anchor "green" on.
 func groupWorstColor(rows []AuditRow, g groupKey, pending map[string]RuleOverride) ui.Color {
 	rank := func(c ui.Color) int {
 		switch c {
@@ -836,14 +851,13 @@ func groupWorstColor(rows []AuditRow, g groupKey, pending map[string]RuleOverrid
 			return 4
 		case ui.ColorYellow:
 			return 3
-		case ui.ColorWhite:
-			return 2
 		case ui.ColorGreen:
 			return 1
 		}
 		return 0
 	}
 	worst := ui.ColorGreen
+	hasNonNeutral := false
 	hasPending := false
 	for _, r := range rows {
 		if r.Tier != g.Tier || r.Kind != g.Kind || r.Group != g.Group {
@@ -852,14 +866,52 @@ func groupWorstColor(rows []AuditRow, g groupKey, pending map[string]RuleOverrid
 		if _, p := pending[r.ID]; p {
 			hasPending = true
 		}
-		if c := StateColor(r.State); rank(c) > rank(worst) {
+		c, neutral := groupContribColor(r)
+		if neutral {
+			continue
+		}
+		hasNonNeutral = true
+		if rank(c) > rank(worst) {
 			worst = c
 		}
 	}
 	if hasPending {
 		return ui.ColorMagenta
 	}
+	if !hasNonNeutral {
+		return ui.ColorWhite
+	}
 	return worst
+}
+
+// groupContribColor maps an audit row to the colour it contributes to
+// its group's left-pane rollup. The second return is true when the row
+// is neutral (SKIP / OFF / EXT-with-mismatch) and shouldn't pull the
+// group toward white when other rules are green.
+func groupContribColor(r AuditRow) (ui.Color, bool) {
+	switch r.State {
+	case StateOK:
+		return ui.ColorGreen, false
+	case StateEXT:
+		// Another cfm component owns the key. Count as green when
+		// its live value matches what kernsec would write — the
+		// surface is protected regardless of who applied it. A
+		// mismatch is neutral: the rule row still surfaces the
+		// divergence in its LiveValue column for operators who drill
+		// in, but the group glance shouldn't go green on a wrong
+		// value.
+		if r.LiveValue != "" && r.LiveValue == r.ExpectedValue {
+			return ui.ColorGreen, false
+		}
+		return 0, true
+	case StateSKIP, StateOFF:
+		return 0, true
+	case StateDIFF, StateWARN, StateMISSING, StatePEND:
+		return ui.ColorYellow, false
+	case StateDRIFT:
+		return ui.ColorRed, false
+	}
+	return 0, true
 }
 
 // paneBorderStyle / paneTitleStyle make the focused pane's border and
