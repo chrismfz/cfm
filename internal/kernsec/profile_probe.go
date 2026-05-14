@@ -43,34 +43,34 @@ func anyGlobMatches(patterns ...string) bool {
 // as `SKIP (host profile: <reason>)` in audit output. Operators
 // override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
-	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
-	HasLibvirt              bool   `json:"has_libvirt"`                // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
-	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
-	HasActiveUserNamespaces bool   `json:"has_active_user_namespaces"` // at least one process lives in a non-init user namespace right now (Chromium sandbox, bwrap, rootless podman, …) → don't kill userns
+	IsKVMHost                bool   `json:"is_kvm_host"`                           // kvm_intel / kvm_amd loaded → KVM hypervisor host
+	HasLibvirt               bool   `json:"has_libvirt"`                           // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
+	HasContainers            bool   `json:"has_containers"`                        // runc / containerd / lxc / podman process running → don't kill userns
+	HasActiveUserNamespaces  bool   `json:"has_active_user_namespaces"`            // at least one process lives in a non-init user namespace right now (Chromium sandbox, bwrap, rootless podman, …) → don't kill userns
 	ActiveUserNamespacesNote string `json:"active_user_namespaces_note,omitempty"` // human-readable summary surfaced as the SkipByHostProfile reason
-	UsesBridge              bool   `json:"uses_bridge"`                // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
-	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasDKMS                 bool   `json:"has_dkms"`                   // out-of-tree module evidence detected
-	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep coredump gates conservative
-	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
-	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
-	HasNFS                  bool   `json:"has_nfs"`                    // active NFS mounts → keep NFS untouched (already excluded by policy)
-	IsEFIBoot               bool   `json:"is_efi_boot"`                // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
-	IsCPanel                bool   `json:"is_cpanel"`                  // /usr/local/cpanel exists → cPanel/WHM host
-	IsDirectAdmin           bool   `json:"is_directadmin"`             // /usr/local/directadmin exists → DirectAdmin host
-	HasCloudLinuxLVE        bool   `json:"has_cloudlinux_lve"`         // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
-	HasCageFS               bool   `json:"has_cagefs"`                 // /etc/cagefs or cagefsctl → CageFS host
-	HasImunify360           bool   `json:"has_imunify360"`             // Imunify360 service/package/path indicators
-	HasKernelCare           bool   `json:"has_kernelcare"`             // KernelCare live-patching indicators
-	HasKsplice              bool   `json:"has_ksplice"`                // Ksplice live-patching indicators
-	HasLivePatchingModules  bool   `json:"has_live_patching_modules"`  // loaded live-patching modules
-	IsProxmox               bool   `json:"is_proxmox"`                 // Proxmox paths or proxmox-boot-tool present
-	HasZFS                  bool   `json:"has_zfs"`                    // loaded zfs or ZFS path indicators
-	HasNVIDIA               bool   `json:"has_nvidia"`                 // loaded NVIDIA modules
-	HasBackupWorkload       bool   `json:"has_backup_workload"`        // common backup agents/services present
-	HasMonitoringWorkload   bool   `json:"has_monitoring_workload"`    // common monitoring/crash-diagnostic agents present
-	HasHostingPanelWorkload bool   `json:"has_hosting_panel_workload"` // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
-	Reason                  string `json:"reason,omitempty"`           // freeform note used in --check output
+	UsesBridge               bool   `json:"uses_bridge"`                           // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
+	HasIPsec                 bool   `json:"has_ipsec"`                             // `ip xfrm policy` non-empty → don't blacklist IPsec modules
+	HasDKMS                  bool   `json:"has_dkms"`                              // out-of-tree module evidence detected
+	HasKdump                 bool   `json:"has_kdump"`                             // kdump enabled → keep coredump gates conservative
+	HasBluetoothHardware     bool   `json:"has_bluetooth_hardware"`                // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
+	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
+	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
+	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
+	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
+	IsDirectAdmin            bool   `json:"is_directadmin"`                        // /usr/local/directadmin exists → DirectAdmin host
+	HasCloudLinuxLVE         bool   `json:"has_cloudlinux_lve"`                    // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
+	HasCageFS                bool   `json:"has_cagefs"`                            // /etc/cagefs or cagefsctl → CageFS host
+	HasImunify360            bool   `json:"has_imunify360"`                        // Imunify360 service/package/path indicators
+	HasKernelCare            bool   `json:"has_kernelcare"`                        // KernelCare live-patching indicators
+	HasKsplice               bool   `json:"has_ksplice"`                           // Ksplice live-patching indicators
+	HasLivePatchingModules   bool   `json:"has_live_patching_modules"`             // loaded live-patching modules
+	IsProxmox                bool   `json:"is_proxmox"`                            // Proxmox paths or proxmox-boot-tool present
+	HasZFS                   bool   `json:"has_zfs"`                               // loaded zfs or ZFS path indicators
+	HasNVIDIA                bool   `json:"has_nvidia"`                            // loaded NVIDIA modules
+	HasBackupWorkload        bool   `json:"has_backup_workload"`                   // common backup agents/services present
+	HasMonitoringWorkload    bool   `json:"has_monitoring_workload"`               // common monitoring/crash-diagnostic agents present
+	HasHostingPanelWorkload  bool   `json:"has_hosting_panel_workload"`            // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
+	Reason                   string `json:"reason,omitempty"`                      // freeform note used in --check output
 }
 
 // DetectHostProfile runs the cheap probes (~few hundred ms total).
