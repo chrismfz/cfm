@@ -119,12 +119,14 @@ func TestCheckSysctl_AcceptValuesTreatedAsOK(t *testing.T) {
 	}
 }
 
-func TestCheckSysctl_PtraceScopeAcceptsMode1(t *testing.T) {
-	// kernel.yama.ptrace_scope rule: target =2 (closes the same-uid
-	// pidfd_getfd() exit-window race against setuid helpers — the
-	// ssh-keysign host-key theft chain fixed by Linus commit
-	// 31e62c2ebbfd), accepts =1 for hosts that prefer same-uid
-	// debuggability over closing that residual race.
+func TestCheckSysctl_PtraceScopeRequiresMode2(t *testing.T) {
+	// kernel.yama.ptrace_scope rule: target =2, no AcceptValues. Mode 1
+	// used to be accepted as also-green, but it leaves the same-uid
+	// pidfd_getfd() exit-window race against setuid helpers open — the
+	// ssh-keysign / chage fd-leak chain (Linus commit 31e62c2ebbfd) is
+	// a working /etc/shadow disclosure primitive. Operators who need
+	// same-uid debuggability must `state = skip` this rule in
+	// kernsec.conf instead of relying on a permissive AcceptValues.
 	var rule SysctlRule
 	for _, r := range KSPPSysctls {
 		if r.Key == "kernel.yama.ptrace_scope" {
@@ -138,14 +140,11 @@ func TestCheckSysctl_PtraceScopeAcceptsMode1(t *testing.T) {
 	if rule.Value != "2" {
 		t.Errorf("kernel.yama.ptrace_scope rule Value=%q, want \"2\"", rule.Value)
 	}
-	found := false
-	for _, v := range rule.AcceptValues {
-		if v == "1" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("AcceptValues=%v should contain \"1\"", rule.AcceptValues)
+	if len(rule.AcceptValues) != 0 {
+		t.Errorf("kernel.yama.ptrace_scope rule must not list AcceptValues "+
+			"(got %v) — =1 leaves the setuid-helper fd-leak race open and "+
+			"is no longer audit-green; operators wanting =1 must `state = skip`",
+			rule.AcceptValues)
 	}
 }
 

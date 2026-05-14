@@ -220,9 +220,6 @@ func describeProfile(p HostProfile) string {
 	if p.HasHostingPanelWorkload {
 		parts = append(parts, "hosting-panel")
 	}
-	if p.HasKdump {
-		parts = append(parts, "kdump")
-	}
 	if p.HasBluetoothHardware {
 		parts = append(parts, "bluetooth-hw")
 	}

@@ -194,7 +194,7 @@ func TestSkipReason_OldModulesBusNoLongerMatches(t *testing.T) {
 }
 
 func TestSkipReasonDoesNotGateRemovedSysctlGroups(t *testing.T) {
-	p := HostProfile{HasKdump: true, HasDKMS: true}
+	p := HostProfile{HasDKMS: true}
 	for _, group := range []string{
 		"sysctl.kernel." + "kexec",
 		"sysctl.kernel." + "lock" + "down",
@@ -231,11 +231,6 @@ func TestHasOutOfTreeModuleEvidence_NoEvidence(t *testing.T) {
 	_ = hasOutOfTreeModuleEvidence(HostProfile{})
 }
 
-func TestHasKdump_SmokeNoCrash(t *testing.T) {
-	// Smoke: no panic on stock CI host. Test environment is unlikely
-	// to have kdump configured, but don't assert false either.
-	_ = hasKdump()
-}
 
 func withHostProfileRoot(t *testing.T) string {
 	t.Helper()
