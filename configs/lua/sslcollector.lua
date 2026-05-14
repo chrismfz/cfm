@@ -329,13 +329,32 @@ end
 -- the file always reflects a complete cert index when present.
 -- ---------------------------------------------------------------------------
 
+-- read_snapshot returns (body, reason). On success body is the raw
+-- bytes and reason is nil. On failure body is nil and reason is a
+-- short human-readable string distinguishing the failure modes so the
+-- caller can log accurately:
+--   - "missing"       : file did not exist (genuine first boot)
+--   - "open: <err>"   : file existed but io.open failed (eg perms)
+--   - "empty"         : file existed and opened but had zero bytes
+-- The original log line "no snapshot on disk (first boot?)" silently
+-- conflated all three, which is exactly how the umask-0600 bug from
+-- PR #883 escaped detection for so long — workers said "first boot"
+-- when actually the file was right there but the worker (cfm user)
+-- couldn't read it.
 local function read_snapshot()
-  local f = io.open(SNAP_FILE, "rb")
-  if not f then return nil end
+  local f, oerr = io.open(SNAP_FILE, "rb")
+  if not f then
+    -- io.open returns a Lua error string that typically embeds
+    -- "ENOENT" or "permission denied". Surface it verbatim.
+    if oerr and oerr:find("[Nn]o such file") then
+      return nil, "missing"
+    end
+    return nil, "open: " .. tostring(oerr or "?")
+  end
   local body = f:read("*a")
   f:close()
-  if not body or body == "" then return nil end
-  return body
+  if not body or body == "" then return nil, "empty" end
+  return body, nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -437,9 +456,24 @@ local function load_from_snapshot()
     ngx.log(ngx.INFO, "[sslcollector] offline cache disabled (SSLCOLLECTOR_OFFLINE_CACHE=0), skipping snapshot load")
     return
   end
-  local body = read_snapshot()
+  local body, rerr = read_snapshot()
   if not body then
-    ngx.log(ngx.WARN, "[sslcollector] no snapshot on disk (first boot?)")
+    -- Distinguish "file genuinely missing" (legitimate first boot)
+    -- from "file present but unreadable" (the permissions/umask
+    -- failure mode that was the original bug). Both used to log
+    -- the same misleading "first boot?" line.
+    if rerr == "missing" then
+      ngx.log(ngx.WARN, "[sslcollector] no snapshot on disk (first boot?)")
+    elseif rerr == "empty" then
+      ngx.log(ngx.WARN, "[sslcollector] snapshot exists but is empty; ignoring")
+      set_last_error("startup: snapshot empty")
+    else
+      -- "open: <reason>" — almost always perms-related on a healthy host.
+      ngx.log(ngx.ERR, "[sslcollector] snapshot present but unreadable: ", tostring(rerr),
+        " — check ownership/mode on ", SNAP_FILE,
+        " (expected mode 0640, owner root:cfm)")
+      set_last_error("startup: snapshot " .. tostring(rerr))
+    end
     return
   end
 

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cfm/internal/logging"
@@ -16,6 +17,20 @@ import (
 
 type Collector struct {
 	cfg Config
+
+	// refreshedOnce flips to true after the first successful Refresh()
+	// completes. Run() consults this to skip its own initial Refresh
+	// when the daemon already kicked one off synchronously at startup
+	// (eg in cmd/cfm/main.go's early-start block). Avoids a redundant
+	// filesystem walk + identical snapshot write on every cfm boot.
+	refreshedOnce atomic.Bool
+
+	// refreshCallCount is incremented at the START of every Refresh().
+	// Used by tests to assert the Run() dedup guard actually skips
+	// the call rather than just relying on refreshedOnce being true
+	// (which says nothing about whether Run did or didn't try). Not
+	// load-bearing in production; an atomic.Int32 is cheap.
+	refreshCallCount atomic.Int32
 
 	// host index
 	mu         sync.RWMutex
@@ -149,8 +164,17 @@ func (c *Collector) Run(ctx context.Context) error {
 		return nil
 	}
 
-	// initial refresh
-	_ = c.Refresh(ctx)
+	// Skip the initial refresh when the daemon already invoked one
+	// synchronously before launching this goroutine (the early-start
+	// path in cmd/cfm/main.go does exactly this so the snapshot lands
+	// on disk before any near-simultaneous edge reload). Without this
+	// guard, every cfm start did the filesystem walk + snapshot write
+	// twice — once at line ~480 of main.go and once here — which on
+	// busy hosts is 1-2 seconds of redundant work plus a 17 MB
+	// duplicate disk write.
+	if !c.refreshedOnce.Load() {
+		_ = c.Refresh(ctx)
+	}
 
 	// START WATCHER (NEW)
 	roots := []string{

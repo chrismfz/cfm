@@ -469,6 +469,155 @@ func runDaemon(args []string) {
 			}
 		}
 	}
+
+	// Ensure base data dirs exist with correct permissions BEFORE any
+	// subsystem (sslcollector, lua deploy, panel-auth socket, etc.)
+	// tries to write into them. Putting this at the very top of
+	// runDaemon closes the brief root:root window that previously left
+	// daemon-written files (eg /var/lib/cfm/sslcollector/dump.json)
+	// unreadable to the cfm-group worker user — chown was happening
+	// AFTER the daemon's first writes elsewhere in startup, races
+	// possible with edge reloads.
+	//
+	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty
+	// worker (running as the cfm user) can read the cert snapshot there.
+	// cfmGID is 0 when the cfm group does not exist yet
+	// (install-openresty.sh not yet run); os.Chown with GID 0 is a
+	// no-op — permissions stay root:root and the daemon logs a warning
+	// when the socket server starts.
+	cfmGID := sslcollector.CfmGroupID()
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{"/var/lib/cfm", 0o701},
+		{"/var/lib/cfm/lua", 0o750},
+		{"/var/lib/cfm/sslcollector", 0o770},
+		{"/var/lib/cfm/scanner", 0o700},
+		{"/var/lib/cfm/scanner/pending", 0o700},
+		{"/var/lib/cfm/scanner/infected", 0o700},
+		{"/var/log/cfm", 0o700},
+		// /var/run is tmpfs on systemd systems — recreate on every
+		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
+		// creation fails on boot. 0750 root:cfm: OpenResty/Angie workers
+		// (cfm group) need to traverse in to reach sockets; no other
+		// local user has a reason to list this dir. The chown to cfm gid
+		// happens below alongside the other cfm-group dirs.
+		{"/var/run/cfm", 0o750},
+	} {
+		_ = os.MkdirAll(d.path, d.mode)
+		_ = os.Chmod(d.path, d.mode)
+	}
+	if cfmGID > 0 {
+		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		_ = os.Chown("/var/run/cfm", 0, cfmGID)
+		// Chown the snapshot file if it already exists (eg written as
+		// root:root before the cfm group was in place). Without this,
+		// OpenResty (cfm user) cannot read the snapshot on startup
+		// until it successfully writes a new one.
+		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
+		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm
+		// group) can write.
+		for _, d := range []string{
+			"/var/cache/nginx/cfm_static",
+			"/var/cache/nginx/cfm_micro",
+		} {
+			_ = os.MkdirAll(d, 0o770)
+			_ = os.Chmod(d, 0o770)
+			_ = os.Chown(d, 0, cfmGID)
+		}
+	}
+
+	// Daemon context — created early so sslcollector (started right
+	// below) and any other early-start subsystem can use it for their
+	// background goroutines. The deferred cancel propagates to every
+	// derived ctx when runDaemon returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// === SSL collector early-start ===
+	// Start sslcollector BEFORE the firewall (backend, EnsureBase,
+	// dyndns, blocklists, loadAll, detectors, applyXxx phases) so:
+	//   - the disk snapshot is on disk within ~500ms of cfm start
+	//     (was 11 seconds on hosts with 1k+ cert pairs)
+	//   - the unix socket is bound within ~600ms (was 13 seconds)
+	//   - the fsnotify watcher is live within ~700ms (was 13 seconds)
+	// sslcollector has no firewall dependency: it scans /etc/letsencrypt,
+	// /var/cpanel/ssl, /home/*/ssl etc. and serves /dumpall over a
+	// unix socket. Putting it before EnsureBase costs ~500ms of delay
+	// to backend setup — the kernel's pre-cfm rule state is the same
+	// as t=0 either way, so the host is no less protected during that
+	// window. The win: workers spawned by an angie/openresty reload
+	// during cfm restart find snapshot+socket+watcher all ready,
+	// instead of falling through to the self-signed fallback cert and
+	// tripping HSTS in browsers (the original bug PR #883 began
+	// addressing).
+	sslcol := sslcollector.New(sslcollector.Config{
+		Enabled:        true,
+		CacheDir:       "/var/lib/cfm/sslcollector",
+		StatEvery:      60 * time.Second,
+		DiscoveryEvery: 6 * time.Hour,
+		NegativeTTL:    30 * time.Second,
+		MaxCertCache:   20000,
+	})
+
+	// Synchronous Refresh writes the snapshot to disk before any worker
+	// from an in-flight edge reload tries to load_from_snapshot.
+	// Uses context.Background() rather than the daemon ctx because
+	// discoverPairs() (the actual filesystem walk) does not currently
+	// honor ctx cancellation anyway — passing the daemon ctx would
+	// have no effect on shutdown. If discoverPairs ever becomes
+	// ctx-aware, switch this to ctx so SIGTERM can interrupt a slow
+	// startup scan.
+	//
+	// The step() wrapper surfaces this scan's duration in the startup
+	// log. On busy hosts (1000+ cert pairs scanning many /home/*/ssl
+	// directories) the synchronous scan can take multiple seconds and
+	// blocks backend setup — without the wrapper there is no visible
+	// line saying "sslcollector took 3s", and operators chasing slow
+	// startup have to guess.
+	doneSSL := step("initial:sslcollector.Refresh")
+	_ = sslcol.Refresh(context.Background())
+	doneSSL()
+	st := sslcol.Stats()
+	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
+		st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
+
+	// Background loop for ongoing refresh + fsnotify watcher.
+	go func() {
+		if err := sslcol.Run(ctx); err != nil && ctx.Err() == nil {
+			logging.Logf("[sslcollector] stopped: %v", err)
+		}
+	}()
+
+	webdet.SetSSLCollector(sslcol)
+	logging.Logf("[sslcollector] started")
+
+	// Bind the sslcollector unix socket NOW with the config we already
+	// parsed at the top of runDaemon. Without this early call the
+	// socket would not bind until applyCFMConfigRemaining at the end
+	// of startup — 13+ seconds late on busy hosts. The matching call
+	// inside applyCFMConfigRemaining (later in this function) stays
+	// as a no-op-on-first-start path that picks up operator edits to
+	// /etc/cfm/cfm.conf.
+	//
+	// engineCfg is nil only when /etc/cfm/cfm.conf is absent or fails
+	// to parse. In that case we skip the early bind and rely on the
+	// later applyCFMConfigRemaining path — but that path is itself
+	// gated by loadCFMConfigIfChanged() returning ok=true, which
+	// requires a successful parse. So on a host with truly broken
+	// cfm.conf the socket simply does not bind during this daemon
+	// lifetime: same behavior as before this commit (pre-existing
+	// limitation), surfaced here only because the gate is now visible
+	// at the top of startup. Operators with parse errors will see the
+	// usual "cfm.conf parse error" line and need to fix the config.
+	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
+	defer sslSockLc.Stop()
+	if engineCfg != nil {
+		sslSockLc.ApplyConfig(ctx, &engineCfg.SSLCollectorSock)
+	}
+
 	rawEngine, engine, engineSource := resolveFirewallEngine(engineCfg)
 	logging.Logf("[startup] firewall engine raw=%q normalized=%q source=%s", rawEngine, engine, engineSource)
 
@@ -785,9 +934,12 @@ func runDaemon(args []string) {
 	agLc := agentpkg.NewLifecycle(Version, be, cfgDir)
 	defer agLc.Stop()
 
-	// cfm.conf loader/applier (single place)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// (ctx, sslcol, sslSockLc moved to top of runDaemon — see the
+	// "SSL collector early-start" block right after cfm.conf is parsed.
+	// They're created BEFORE backend setup so the snapshot/socket/
+	// watcher are ready in <1s instead of 11-13s on busy hosts. The
+	// matching sslSockLc.ApplyConfig in applyCFMConfigRemaining stays
+	// as a no-op-on-first-start path that picks up operator edits.)
 
 	// periodic clam bridge retry
 	go func() {
@@ -805,36 +957,6 @@ func runDaemon(args []string) {
 
 	// NOTE: detectors should be started early so config-only sections (like mysql_governor)
 	// can populate pending configs before applyDebugServer() tries to consume them.
-
-	// --- SSL collector (start once; used later by webdetector TLS proxy) ---
-	sslcol := sslcollector.New(sslcollector.Config{
-		Enabled:        true,
-		CacheDir:       "/var/lib/cfm/sslcollector",
-		StatEvery:      60 * time.Second,
-		DiscoveryEvery: 6 * time.Hour,
-		NegativeTTL:    30 * time.Second,
-		MaxCertCache:   20000,
-	})
-
-	// Do one refresh now so we can log totals immediately
-	_ = sslcol.Refresh(context.Background())
-	st := sslcol.Stats()
-	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
-		st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
-
-	// Background loop for ongoing refresh
-	go func() {
-		if err := sslcol.Run(ctx); err != nil && ctx.Err() == nil {
-			logging.Logf("[sslcollector] stopped: %v", err)
-		}
-	}()
-
-	webdet.SetSSLCollector(sslcol)
-	logging.Logf("[sslcollector] started")
-
-	// --- sslcollector sock server lifecycle (driven by config reload) ---
-	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
-	defer sslSockLc.Stop()
 
 	go func() {
 		if err := panelauth.Serve(ctx, "/var/run/cfm-auth.sock"); err != nil && ctx.Err() == nil {
@@ -855,52 +977,11 @@ func runDaemon(args []string) {
 	lsmLc := lsm.NewLifecycle()
 	defer lsmLc.Stop()
 
-	// Ensure base data dirs exist with correct permissions.
-	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty worker
-	// (running as the cfm user) can write the cert snapshot there.
-	// cfmGID is 0 when the cfm group does not exist yet (install-openresty.sh
-	// not yet run); os.Chown with GID 0 is a no-op — permissions stay root:root
-	// and the daemon logs a warning when the socket server starts.
-	cfmGID := sslcollector.CfmGroupID()
-	for _, d := range []struct {
-		path string
-		mode os.FileMode
-	}{
-		{"/var/lib/cfm", 0o701},
-		{"/var/lib/cfm/lua", 0o750},
-		{"/var/lib/cfm/sslcollector", 0o770},
-		{"/var/lib/cfm/scanner", 0o700},
-		{"/var/lib/cfm/scanner/pending", 0o700},
-		{"/var/lib/cfm/scanner/infected", 0o700},
-		{"/var/log/cfm", 0o700},
-		// /var/run is tmpfs on systemd systems — recreate on every daemon start.
-		// Without this the bridge socket (OPENRESTY_SOCK) creation fails on boot.
-		// 0750 root:cfm: OpenResty/Angie workers (cfm group) need to traverse in
-		// to reach sockets; no other local user has a reason to list this dir.
-		// The chown to cfm gid happens below alongside the other cfm-group dirs.
-		{"/var/run/cfm", 0o750},
-	} {
-		_ = os.MkdirAll(d.path, d.mode)
-		_ = os.Chmod(d.path, d.mode)
-	}
-	if cfmGID > 0 {
-		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
-		_ = os.Chown("/var/run/cfm", 0, cfmGID)
-		// Chown the snapshot file if it already exists (e.g. written as root:root
-		// before the cfm group was in place). Without this, OpenResty (cfm user)
-		// cannot read the snapshot on startup until it successfully writes a new one.
-		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
-		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm group) can write.
-		for _, d := range []string{
-			"/var/cache/nginx/cfm_static",
-			"/var/cache/nginx/cfm_micro",
-		} {
-			_ = os.MkdirAll(d, 0o770)
-			_ = os.Chmod(d, 0o770)
-			_ = os.Chown(d, 0, cfmGID)
-		}
-	}
+	// (state-dir mkdir+chown moved to the top of runDaemon — see the
+	// block right after cfm.conf is parsed. Keeping it there ensures
+	// every subsystem that writes into /var/lib/cfm finds correct
+	// permissions on first write, instead of racing with the chown
+	// that previously happened here.)
 
 	// ── Lifecycle managers ──────────────────────────────────────────────────────
 	mmdbLc := mmdb.NewLifecycle()

@@ -19,6 +19,7 @@ type Pair struct {
 }
 
 func (c *Collector) Refresh(ctx context.Context) error {
+	c.refreshCallCount.Add(1)
 	pairs := c.discoverPairs()
 
 	nextExact := map[string]*Entry{}
@@ -77,6 +78,11 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	// errors are logged inside WriteSnapshot; do not propagate, since a
 	// failed snapshot write must never break the running daemon.
 	c.WriteSnapshot()
+
+	// Mark as refreshed so Run()'s startup path can skip its own
+	// initial Refresh when the caller already invoked one
+	// synchronously (eg the early-start path in cmd/cfm/main.go).
+	c.refreshedOnce.Store(true)
 
 	return nil
 }
