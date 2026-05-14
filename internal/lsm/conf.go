@@ -47,16 +47,31 @@ type Conf struct {
 	PersistencePaths map[PolicyID][]string
 
 	// AllowExe is the operator-supplied per-policy executable allowlist.
-	// Each entry is an absolute path to a binary whose (dev, inode)
-	// key should be treated as legitimate for the policy. Today only
-	// CFML-CRED-002 consumes it (merged into cfm_setuid_inodes alongside
-	// the disk-walked suid-bit binaries) so that panel daemons like
-	// directadmin / cpanel that legitimately call setresuid(0,…) without
-	// the suid bit on disk stop firing CRED-002 false positives.
+	// Each entry is an absolute path to a binary whose match should be
+	// treated as legitimate for the policy.
 	//
-	// Stored generically so future policies (FS-005, EXEC-003) can
-	// adopt the same `allow_exe = …` syntax without re-parsing.
+	// CFML-CRED-002 merges these into cfm_setuid_inodes alongside the
+	// disk-walked suid-bit binaries so panel daemons (directadmin /
+	// cpanel) that legitimately call setresuid(0,…) without the suid
+	// bit on disk stop firing CRED-002. CFML-EXEC-003 / CFML-EXEC-005
+	// use the basename of each entry as a userspace post-filter against
+	// the event's bprm filename, so site-specific postfix spawn(8)
+	// inetd-style helper scripts can be excluded from the strict
+	// reverse-shell detector.
 	AllowExe map[PolicyID][]string
+
+	// AllowComm is the operator-supplied per-policy comm-name
+	// allowlist. Each entry is matched literally against the event's
+	// 16-byte TASK_COMM_LEN comm string. Used by the userspace
+	// post-filter to suppress events from processes whose comm is
+	// known-legitimate but whose exe path is not stable (containerised
+	// daemons, kernel-thread-style helpers, runtimes whose argv0 the
+	// operator controls).
+	//
+	// CFML-BPF-001 is the primary consumer today — operators add
+	// container-runtime comm names that are not in the compiled-in
+	// default list (custom orchestrators, vendor agents).
+	AllowComm map[PolicyID][]string
 
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
@@ -82,6 +97,7 @@ func DefaultConf() *Conf {
 		FS005WebOriginMonitor: true,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
+		AllowComm:             map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
 }
@@ -102,6 +118,15 @@ func (c *Conf) AllowExeFor(id PolicyID) []string {
 		return nil
 	}
 	return c.AllowExe[id]
+}
+
+// AllowCommFor returns the configured allow_comm names for id, or
+// nil when none are set. Safe on a nil receiver.
+func (c *Conf) AllowCommFor(id PolicyID) []string {
+	if c == nil || c.AllowComm == nil {
+		return nil
+	}
+	return c.AllowComm[id]
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -173,6 +198,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		FS005WebOriginMonitor: false,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
+		AllowComm:             map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
@@ -282,16 +308,25 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				c.PersistencePaths[currentPolicy] = append(c.PersistencePaths[currentPolicy], p)
 			case "allow_exe":
-				if currentPolicy != PolicyCredEscal {
-					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s", lineno, PolicyCredEscal)
+				if !allowExePolicy(currentPolicy) {
+					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s, %s, %s", lineno, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
 				}
 				p, err := parseAllowExe(val)
 				if err != nil {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.AllowExe[currentPolicy] = append(c.AllowExe[currentPolicy], p)
+			case "allow_comm":
+				if !allowCommPolicy(currentPolicy) {
+					return nil, fmt.Errorf("line %d: allow_comm is only valid for %s, %s, %s, %s", lineno, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
+				}
+				comm, err := parseAllowComm(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.AllowComm[currentPolicy] = append(c.AllowComm[currentPolicy], comm)
 			default:
-				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking` and `persistence_path`; %s also supports `allow_exe`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal)
+				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking` and `persistence_path`; %s, %s, %s also support `allow_exe`; %s, %s, %s, %s also support `allow_comm`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
 			}
 		case sectionKmsg:
 			lk := strings.ToLower(key)
@@ -384,6 +419,33 @@ func FormatConf(c *Conf) string {
 				}
 			}
 		}
+		if p.ID == PolicyReverseShell || p.ID == PolicyInterpreterNetStdio {
+			paths := c.AllowExeFor(p.ID)
+			if len(paths) == 0 {
+				b.WriteString("# Allowlist exec targets whose stdio is structurally remote — postfix\n")
+				b.WriteString("# spawn(8) inetd-style workers receive the accepted inet socket on\n")
+				b.WriteString("# stdin/stdout/stderr from master before exec, so every child trips\n")
+				b.WriteString("# the strict three-fd-remote detector. Match is by basename.\n")
+				b.WriteString("# allow_exe = /usr/local/bin/whitelist_forwardinghosts.sh\n")
+			} else {
+				for _, ap := range paths {
+					fmt.Fprintf(&b, "allow_exe = %s\n", ap)
+				}
+			}
+		}
+		if allowCommPolicy(p.ID) {
+			comms := c.AllowCommFor(p.ID)
+			if len(comms) == 0 && p.ID == PolicyUnexpectedBPF {
+				b.WriteString("# Allowlist process comm names that legitimately use bpf() — common\n")
+				b.WriteString("# container runtimes (runc, containerd, dockerd, podman, conmon, ...)\n")
+				b.WriteString("# are included by default. Add site-specific orchestrators here.\n")
+				b.WriteString("# allow_comm = my-orchestrator\n")
+			} else if len(comms) > 0 {
+				for _, c := range comms {
+					fmt.Fprintf(&b, "allow_comm = %s\n", c)
+				}
+			}
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -437,6 +499,49 @@ func parseAbsolutePath(s, key string) (string, error) {
 // parseAllowExe validates one `allow_exe = …` value.
 func parseAllowExe(s string) (string, error) {
 	return parseAbsolutePath(s, "allow_exe")
+}
+
+// parseAllowComm validates one `allow_comm = …` value. The kernel
+// stores comm in a 16-byte TASK_COMM_LEN field; cap operator-supplied
+// entries at 15 visible characters (1 reserved for NUL) so a typo
+// can't silently fail to match.
+func parseAllowComm(s string) (string, error) {
+	v := strings.TrimSpace(s)
+	if v == "" {
+		return "", fmt.Errorf("allow_comm must be a non-empty comm name")
+	}
+	if strings.ContainsRune(v, 0) {
+		return "", fmt.Errorf("allow_comm must not contain NUL bytes")
+	}
+	if len(v) > 15 {
+		return "", fmt.Errorf("allow_comm %q exceeds 15 chars (kernel truncates comm to TASK_COMM_LEN-1)", v)
+	}
+	return v, nil
+}
+
+// allowExePolicy reports whether allow_exe is accepted under the
+// given policy section. CRED-002 has used it since first ship; the
+// strict and weak reverse-shell detectors gained it so operators can
+// allow postfix spawn(8) inetd-style worker scripts.
+func allowExePolicy(id PolicyID) bool {
+	switch id {
+	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+		return true
+	}
+	return false
+}
+
+// allowCommPolicy reports whether allow_comm is accepted under the
+// given policy section. BPF-001 is the primary consumer (container
+// runtimes); the other monitor-only-by-design policies expose it for
+// symmetry with allow_exe so site-specific comms can be silenced
+// without a BPF rebuild.
+func allowCommPolicy(id PolicyID) bool {
+	switch id {
+	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+		return true
+	}
+	return false
 }
 
 func parseOriginTracking(s string) (bool, error) {
