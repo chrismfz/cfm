@@ -78,6 +78,11 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	// failed snapshot write must never break the running daemon.
 	c.WriteSnapshot()
 
+	// Mark as refreshed so Run()'s startup path can skip its own
+	// initial Refresh when the caller already invoked one
+	// synchronously (eg the early-start path in cmd/cfm/main.go).
+	c.refreshedOnce.Store(true)
+
 	return nil
 }
 
