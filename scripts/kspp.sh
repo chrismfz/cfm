@@ -65,8 +65,12 @@ KSPP_SYSCTL=(
   # Stronger perf restriction, usually safe on servers.
   "kernel.perf_event_paranoid=3"
 
-  # Keep this at 1 for compatibility/debuggability.
-  "kernel.yama.ptrace_scope=1"
+  # Mode 2: ptrace attach requires CAP_SYS_PTRACE in init_user_ns.
+  # Beyond mode 1's child-only restriction, mode 2 also closes the
+  # same-uid pidfd_getfd() exit-window race against setuid helpers
+  # (the ssh-keysign host-key theft chain — Linus commit 31e62c2ebbfd).
+  # Cost: gdb --attach / strace -p / py-spy etc. need sudo.
+  "kernel.yama.ptrace_scope=2"
 )
 
 # ------------------------------------------------------------
@@ -764,7 +768,7 @@ Server-safe profile includes:
   Sysctl:
     kptr_restrict, dmesg_restrict, unprivileged_bpf_disabled,
     randomize_va_space, protected hardlinks/symlinks/fifos/regular,
-    bpf_jit_harden, perf_event_paranoid=3, yama.ptrace_scope=1
+    bpf_jit_harden, perf_event_paranoid=3, yama.ptrace_scope=2
 
   Boot args:
     slab_nomerge

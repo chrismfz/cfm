@@ -237,7 +237,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 
 | Group | Tier | Rules / settings | Operator impact |
 |---|---:|---|---|
-| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2`, `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3`, `kernel.yama.ptrace_scope=1` | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. |
+| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3`, `kernel.yama.ptrace_scope=2` (accepts `=1`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` also closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign host-key theft chain — Linus commit `31e62c2ebbfd`); operators who need same-uid debuggability without sudo can leave the knob at 1 and the audit stays green. |
 | `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=2` | Protects sticky/world-writable directories; normally no production impact. |
 | `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT performance cost. |
 | `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
@@ -576,7 +576,7 @@ The two components do not overlap on managed surface:
 
 A few intentional non-overlaps worth recording:
 
-- `kernel.yama.ptrace_scope=1` is shipped by kernsec (Tier 1). The
+- `kernel.yama.ptrace_scope=2` is shipped by kernsec (Tier 1, accepts `=1` as also-green for hosts that want same-uid debuggability). The
   `CFML-OBS-001` ptrace-lockdown idea from cfm-lsm's original
   scope was dropped specifically because kernsec already covers
   that ground at a cheaper layer.
