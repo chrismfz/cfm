@@ -14,6 +14,7 @@ func TestNewPoliciesRegistered(t *testing.T) {
 		PolicyDeletedFileExec:     "CFML-EXEC-004",
 		PolicyInterpreterNetStdio: "CFML-EXEC-005",
 		PolicySensitiveWrite:      "CFML-FS-005",
+		PolicyFdCredMismatch:      "CFML-FS-006",
 		PolicyCredEscal:           "CFML-CRED-002",
 		PolicyDirectCredInstall:   "CFML-CRED-003",
 		PolicyUnexpectedBPF:       "CFML-BPF-001",
