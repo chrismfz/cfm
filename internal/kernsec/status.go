@@ -510,6 +510,22 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 			} else {
 				fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
 			}
+		case MountPending:
+			if d.BindPrimaryPath != "" && d.CurrentOptions == "" {
+				// Bind-line PEND: /var/tmp not yet mounted, fstab
+				// has `<bindprimary> /var/tmp none bind`. Reboot
+				// makes /var/tmp inherit BindPrimaryPath's options.
+				fmt.Fprintf(w, "PEND       %s  bind of %s queued in %s; reboot to mount (will inherit %s's hardening)\n",
+					m.MountPoint, d.BindPrimaryPath, d.PersistedSource, d.BindPrimaryPath)
+			} else if d.CurrentOptions == "" {
+				fmt.Fprintf(w, "PEND       %s  not yet mounted; %s declares it for next boot\n",
+					m.MountPoint, d.PersistedSource)
+			} else {
+				fmt.Fprintf(w, "PEND       %s  persisted via %s (next reboot will apply); live still missing: %s\n",
+					m.MountPoint, d.PersistedSource, strings.Join(d.Missing, ","))
+				fmt.Fprintf(w, "           reboot, or run `mount -o remount,%s %s` once nothing has PrivateTmp=yes bind mounts open\n",
+					strings.Join(d.Missing, ","), m.MountPoint)
+			}
 		case MountPartialOptions:
 			fmt.Fprintf(w, "PARTIAL    %s  has %s; still missing: %s  (current: %s)\n",
 				m.MountPoint,

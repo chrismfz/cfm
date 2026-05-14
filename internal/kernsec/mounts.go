@@ -21,6 +21,15 @@ import (
 //     shares its source device with another audited mount point — it
 //     is a bind mount and the operator should remount the source, not
 //     this path.
+//   - MountPending: the persistence layer (/etc/fstab line OR the
+//     resolved systemd .mount Options=, including any .d/ drop-ins)
+//     already carries every recommended option, but the live mount in
+//     /proc/mounts hasn't been remounted with them yet. Typical state
+//     between `cfm kernsec apply` and the next reboot for /tmp and
+//     /var/tmp, where kernsec deliberately skips the live remount
+//     (every service with PrivateTmp=yes has bind mounts rooted in
+//     the current /tmp namespace; restarting tmp.mount mid-flight is
+//     unsafe). Reboot clears it.
 type MountState int
 
 const (
@@ -49,6 +58,11 @@ const (
 	// /usr/tmpDSK onto both /tmp and /var/tmp). Audit defers to the
 	// "primary" mount point's row.
 	MountBindOfAnother
+	// MountPending means the next-boot config (fstab line or systemd
+	// .mount Options=, including drop-ins) already carries every
+	// recommended option, but the live mount hasn't picked them up
+	// yet. Resolved by reboot or an explicit `mount -o remount`.
+	MountPending
 )
 
 // MountDetail is the rich per-rule probe result used by the status
@@ -66,13 +80,24 @@ type MountDetail struct {
 	Source          string   // /proc/mounts source column (device or label)
 	SymlinkTarget   string   // resolved target when State == MountSymlink
 	BindPrimaryPath string   // sibling mount point when State == MountBindOfAnother
+	// NextBootOptions is the merged options column kernsec resolved
+	// from /etc/fstab + systemd .mount unit (+ drop-ins). Empty if
+	// neither source carries an entry for this mount point. Used by
+	// MountPending detection: when NextBootOptions covers every
+	// recommended option but CurrentOptions doesn't, the live state
+	// will catch up at reboot and the row renders PEND, not MISSING.
+	NextBootOptions string
+	// PersistedSource describes which file the NextBootOptions came
+	// from, for operator-facing rendering. One of "fstab",
+	// "systemd-unit", or "" when neither is present.
+	PersistedSource string
 }
 
 // CheckMount preserves the previous (state, currentOptions) return
 // shape used by audit.go's BuildAuditRows; the richer per-option
 // breakdown lives in CheckMountDetail.
 func CheckMount(rule MountRule) (state MountState, currentOptions string) {
-	d := checkMountDetail(readProcMounts(), rule, Tier1Mounts, realLstat, realReadlink)
+	d := checkMountDetail(readProcMounts(), rule, Tier1Mounts, realLstat, realReadlink, realFstabReader, realSystemdUnitFinderWithDropins)
 	return d.State, d.CurrentOptions
 }
 
@@ -81,7 +106,7 @@ func CheckMount(rule MountRule) (state MountState, currentOptions string) {
 // renderer. peers lets the bind-mount check ignore non-audited mount
 // points; production callers pass Tier1Mounts.
 func CheckMountDetail(rule MountRule, peers []MountRule) MountDetail {
-	return checkMountDetail(readProcMounts(), rule, peers, realLstat, realReadlink)
+	return checkMountDetail(readProcMounts(), rule, peers, realLstat, realReadlink, realFstabReader, realSystemdUnitFinderWithDropins)
 }
 
 // checkMountDetail is the testable inner function. It operates on
@@ -107,6 +132,8 @@ func checkMountDetail(
 	peers []MountRule,
 	lstat func(string) (os.FileInfo, error),
 	readlink func(string) (string, error),
+	readFstab func() ([]fstabLine, error),
+	findUnit func(unitName string) (path, options string, ok bool),
 ) MountDetail {
 	d := MountDetail{State: MountNotSeparate}
 
@@ -136,6 +163,21 @@ func checkMountDetail(
 
 	entry, ok := mountByPath[rule.MountPoint]
 	if !ok {
+		// Not separately mounted at runtime. Before declaring
+		// MountNotSeparate look at fstab: if an entry exists for
+		// this mount point, the next reboot WILL materialise the
+		// mount (typical case: kernsec just wrote a bind line for
+		// /var/tmp via Enable; live state catches up at reboot).
+		// Upgrade to MountPending and surface what the operator
+		// configured.
+		d.NextBootOptions, d.PersistedSource = resolveNextBootOptions(rule.MountPoint, readFstab, nil)
+		if d.NextBootOptions != "" {
+			d.State = MountPending
+			d.Missing = splitCSV(rule.Recommended)
+			if fl, found := findFstabBindSource(readFstab, rule.MountPoint); found {
+				d.BindPrimaryPath = fl
+			}
+		}
 		return d
 	}
 	d.Source = entry[0]
@@ -166,6 +208,12 @@ func checkMountDetail(
 	}
 
 	d.Present, d.Missing = splitMountOptions(d.CurrentOptions, rule.Recommended)
+
+	// Resolve next-boot options from fstab + systemd unit + drop-ins.
+	// readFstab/findUnit can be nil in legacy test callers; treat that
+	// as "no persisted source" and fall through to the live-only logic.
+	d.NextBootOptions, d.PersistedSource = resolveNextBootOptions(rule.MountPoint, readFstab, findUnit)
+
 	switch {
 	case len(d.Missing) == 0:
 		// Fully hardened. If it's a bind sibling, BindPrimaryPath is
@@ -177,12 +225,80 @@ func checkMountDetail(
 		// Remediation guidance is "fix the primary row to inherit",
 		// distinct from the standalone partial / missing cases.
 		d.State = MountBindOfAnother
+	case d.NextBootOptions != "" && nextBootCoversRecommended(d.NextBootOptions, rule.Recommended):
+		// Next-boot config already carries every recommended option;
+		// the live mount just hasn't been remounted yet. Reboot (or a
+		// manual `mount -o remount`) clears this.
+		d.State = MountPending
 	case len(d.Present) == 0:
 		d.State = MountMissingOptions
 	default:
 		d.State = MountPartialOptions
 	}
 	return d
+}
+
+// resolveNextBootOptions returns the merged options column kernsec
+// expects to see on `mountPoint` after the next reboot, based on the
+// persistence sources visible on disk. /etc/fstab wins if present
+// (systemd's fstab generator gives fstab lines priority over .mount
+// units). If no fstab line exists, we fall back to the systemd .mount
+// unit's Options= line, with any /etc/systemd/system/<unit>.d/*.conf
+// drop-ins layered on top in lexical order — same precedence systemd
+// itself uses.
+//
+// Returns ("", "") when neither source exists (e.g. /dev/shm on a host
+// where systemd PID 1 mounts it with its built-in defaults).
+func resolveNextBootOptions(
+	mountPoint string,
+	readFstab func() ([]fstabLine, error),
+	findUnit func(unitName string) (path, options string, ok bool),
+) (opts, source string) {
+	if readFstab != nil {
+		if lines, err := readFstab(); err == nil {
+			if fl, ok := findFstabEntry(lines, mountPoint); ok {
+				return fl.Options, "fstab"
+			}
+		}
+	}
+	if findUnit != nil {
+		unit := unitNameForMountPath(mountPoint)
+		if _, unitOpts, ok := findUnit(unit); ok {
+			return unitOpts, "systemd-unit"
+		}
+	}
+	return "", ""
+}
+
+// nextBootCoversRecommended returns true when every comma-separated
+// option in `recommended` is present in `nextBoot`.
+func nextBootCoversRecommended(nextBoot, recommended string) bool {
+	_, missing := splitMountOptions(nextBoot, recommended)
+	return len(missing) == 0
+}
+
+// findFstabBindSource returns the source column of the fstab line for
+// `mountPoint` when the line declares a bind mount (`bind` in either
+// the type or options column). Used by MountPending detection to
+// surface "/var/tmp will bind to /tmp at reboot" cleanly. The second
+// return is false when fstab is unreadable, the line isn't present,
+// or the line isn't a bind.
+func findFstabBindSource(readFstab func() ([]fstabLine, error), mountPoint string) (string, bool) {
+	if readFstab == nil {
+		return "", false
+	}
+	lines, err := readFstab()
+	if err != nil {
+		return "", false
+	}
+	fl, found := findFstabEntry(lines, mountPoint)
+	if !found {
+		return "", false
+	}
+	if fl.FSType != "bind" && !containsOption(splitCSV(fl.Options), "bind") {
+		return "", false
+	}
+	return fl.Source, true
 }
 
 // isGenericMountSource recognises the well-known pseudo-fs sources
@@ -234,9 +350,11 @@ func hasAllMountOptions(current, recommended string) bool {
 
 // checkMountFromProc preserves the legacy two-arg signature relied on
 // by older tests / callers. Computes MountDetail internally and
-// projects down to (state, current).
+// projects down to (state, current). Persistence sources are nil so
+// the result will never surface MountPending — callers that need PEND
+// detection must use CheckMountDetail / checkMountDetail directly.
 func checkMountFromProc(procMounts string, rule MountRule) (MountState, string) {
-	d := checkMountDetail(procMounts, rule, Tier1Mounts, realLstat, realReadlink)
+	d := checkMountDetail(procMounts, rule, Tier1Mounts, realLstat, realReadlink, nil, nil)
 	return d.State, d.CurrentOptions
 }
 
@@ -278,15 +396,41 @@ var Tier1Mounts = []MountRule{
 		ID: "KSEC-FS-mount.tmp-001", Group: "fs.mount.tmp", Tier: Tier1,
 		MountPoint:  "/tmp",
 		Recommended: "nodev,nosuid,noexec",
+		// Auto-application is enabled for /tmp. Persistence-only:
+		// EnableMount writes either an /etc/fstab edit (EL / cPanel
+		// / hosts with a /tmp line) or a systemd tmp.mount drop-in
+		// (Debian / Ubuntu / Arch — systemd PID 1 owns /tmp via
+		// /usr/lib/systemd/system/tmp.mount). The live `mount -o
+		// remount` is deliberately skipped: every service with
+		// PrivateTmp=yes (mysqld, named, php-fpm, nginx, exim, …)
+		// has bind mounts rooted in the current /tmp namespace and
+		// would either fail or end up pointing at a stale namespace
+		// after a live remount. The row therefore reports PEND
+		// until the next reboot converges live to next-boot.
+		// MountNotSeparate /tmp (root-fs /tmp on a host without
+		// either a fstab line or a tmp.mount unit, e.g. minimal EL)
+		// is refused with a pointer to `cfm kernsec secure-tmp`.
+		CanEnable:   true,
 		Description: "Recommend nodev,nosuid,noexec on /tmp to neutralize world-writable exec attacks.",
-		Affects:     "noexec breaks some composer / pip / cPanel workflows; review first.",
+		Affects:     "noexec breaks some composer / pip / cPanel workflows; review first. Reboot required to converge.",
 	},
 	{
 		ID: "KSEC-FS-mount.tmp-002", Group: "fs.mount.tmp", Tier: Tier1,
 		MountPoint:  "/var/tmp",
 		Recommended: "nodev,nosuid,noexec",
+		// Same persistence-only Enable contract as /tmp. When
+		// /var/tmp is NOT separately mounted (live on /), Enable
+		// adds a bind-mount fstab line: `/tmp /var/tmp none bind`
+		// so /var/tmp inherits /tmp's hardening after reboot
+		// without provisioning a second filesystem. Disable
+		// removes the bind line. Existing content under /var/tmp
+		// is shadowed by the bind (not deleted) — operators with
+		// state they care about under /var/tmp should use
+		// `cfm kernsec secure-tmp` instead, which provisions
+		// genuine separate mounts.
+		CanEnable:   true,
 		Description: "Same protection family for /var/tmp.",
-		Affects:     "Same compatibility considerations as /tmp.",
+		Affects:     "Same compatibility considerations as /tmp. Reboot required to converge.",
 	},
 	{
 		ID: "KSEC-FS-mount.tmp-003", Group: "fs.mount.tmp", Tier: Tier1,

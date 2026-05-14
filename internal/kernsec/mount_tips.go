@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -92,6 +93,18 @@ func buildMountTip(
 		}
 	case MountNotSeparate:
 		return tipCreateSeparateMount(rule)
+	case MountPending:
+		return MountTip{
+			Headline: fmt.Sprintf("hardening persisted via %s; reboot to converge", d.PersistedSource),
+			Body: []string{
+				fmt.Sprintf("  %s already has %s in its next-boot config (%s).",
+					rule.MountPoint, rule.Recommended, d.PersistedSource),
+				"  Live mount still missing the options — kernsec skipped the live remount",
+				"  because every service with PrivateTmp=yes (mysqld, named, php-fpm,",
+				"  nginx, exim, …) has bind mounts rooted in the current /tmp namespace.",
+				"  Reboot is the safe convergence point.",
+			},
+		}
 	case MountPartialOptions, MountMissingOptions:
 		return tipFixExistingMount(rule, d, readFstab, findUnit)
 	}
@@ -376,6 +389,56 @@ var realSystemdUnitFinder = func(unitName string) (string, string, bool) {
 		return path, opts, true
 	}
 	return "", "", false
+}
+
+// realSystemdUnitFinderWithDropins is realSystemdUnitFinder with
+// drop-in layering: after finding the base unit it scans
+// /etc/systemd/system/<unit>.d/*.conf (and /run/systemd/system/<unit>.d
+// for transient overrides) in lexical order. Each drop-in whose
+// [Mount] section sets Options= REPLACES the previous value — same
+// semantics systemd itself uses. The base-unit path is returned
+// unchanged so the operator-facing tip still points at the file they
+// own.
+var realSystemdUnitFinderWithDropins = func(unitName string) (string, string, bool) {
+	basePath, baseOpts, ok := realSystemdUnitFinder(unitName)
+	if !ok {
+		return "", "", false
+	}
+	mergedOpts := baseOpts
+	for _, parent := range systemdUnitDropinDirs {
+		dir := filepath.Join(parent, unitName+".d")
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") {
+				continue
+			}
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				continue
+			}
+			if v := parseUnitOptionsLine(string(b)); v != "" {
+				mergedOpts = v
+			}
+		}
+	}
+	return basePath, mergedOpts, true
+}
+
+// systemdUnitDropinDirs lists the parent directories systemd searches
+// for `.d/` drop-in directories. Mirrors systemd's actual precedence:
+// /etc wins over /run; both layer on top of the base unit in
+// /usr/lib.
+var systemdUnitDropinDirs = []string{
+	"/etc/systemd/system",
+	"/run/systemd/system",
 }
 
 // parseUnitOptionsLine returns the value of the `Options=` line in a

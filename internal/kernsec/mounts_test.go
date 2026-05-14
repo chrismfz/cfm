@@ -167,7 +167,7 @@ func TestCheckMountDetail_PartialNamesMissingOnly(t *testing.T) {
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/tmp", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State != MountPartialOptions {
 		t.Fatalf("state = %d, want MountPartialOptions", d.State)
 	}
@@ -184,7 +184,7 @@ func TestCheckMountDetail_FullyMissingHasEmptyPresent(t *testing.T) {
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/home", Recommended: "nodev,nosuid"},
-		nil, stubFS{}.lstat, stubFS{}.readlink)
+		nil, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State != MountMissingOptions {
 		t.Fatalf("state = %d, want MountMissingOptions", d.State)
 	}
@@ -201,7 +201,7 @@ func TestCheckMountDetail_Symlink(t *testing.T) {
 	links := map[string]string{"/var/tmp": "/tmp"}
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{links: links}.lstat, stubFS{links: links}.readlink)
+		Tier1Mounts, stubFS{links: links}.lstat, stubFS{links: links}.readlink, nil, nil)
 	if d.State != MountSymlink {
 		t.Fatalf("state = %d, want MountSymlink", d.State)
 	}
@@ -222,7 +222,7 @@ func TestCheckMountDetail_BindOfAnother(t *testing.T) {
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State != MountBindOfAnother {
 		t.Fatalf("state = %d, want MountBindOfAnother", d.State)
 	}
@@ -244,7 +244,7 @@ func TestCheckMountDetail_BindOfAnotherFullyHardened(t *testing.T) {
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State != MountOK {
 		t.Fatalf("state = %d, want MountOK (fully-hardened bind sibling)", d.State)
 	}
@@ -266,7 +266,7 @@ func TestCheckMountDetail_BindPrimaryRowItselfStillOK(t *testing.T) {
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/tmp", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State != MountOK {
 		t.Fatalf("state = %d, want MountOK", d.State)
 	}
@@ -284,7 +284,7 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec 0 0
 `
 	d := checkMountDetail(procMounts,
 		MountRule{MountPoint: "/dev/shm", Recommended: "nodev,nosuid,noexec"},
-		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink)
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink, nil, nil)
 	if d.State == MountBindOfAnother {
 		t.Fatal("/dev/shm tmpfs must not be flagged as a bind of /tmp tmpfs (shared generic source)")
 	}
