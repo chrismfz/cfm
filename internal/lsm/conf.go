@@ -290,12 +290,25 @@ var DefaultGlobalAllowExe = []string{
 // compromise. Comm strings are truncated to TASK_COMM_LEN-1 (15
 // chars) by the kernel — entries here must already be truncated.
 //
-// Today this is dominated by container-runtime entries; runc / crun /
-// containerd / dockerd / podman / conmon legitimately load BPF
-// programs and create BPF maps on every container start, and the
-// BPF-side cfm_comm_is_trusted_bpf_agent allowlist only covers
-// systemd / NetworkManager / bpftool / auditd.
+// Two flavours of entry:
+//
+//   - Container runtimes (runc / crun / containerd-shim / dockerd /
+//     podman / conmon / ...) that legitimately load BPF programs on
+//     every container start. The BPF-side cfm_comm_is_trusted_bpf_agent
+//     allowlist does not cover these, so userspace has to.
+//
+//   - BPF-side trusted agents (systemd / systemd-network /
+//     systemd-udevd / NetworkManager / bpftool / auditd) mirrored
+//     here for symmetry. The BPF program *bypasses* its own trust list
+//     when the calling uid is in cfm_watched_uids, on the theory that
+//     a web user shouldn't load BPF even under a trusted-looking comm.
+//     In practice a per-user systemd manager (`systemd --user`) for a
+//     panel-managed uid trips this on cgroup-v2 device-controller BPF
+//     loads, which is not an attack. We silence the web-origin variant
+//     in userspace where the trade-off is purely about noise, not
+//     enforcement.
 var DefaultGlobalAllowComm = []string{
+	// Container runtimes
 	"runc",
 	"crun",
 	"containerd",
@@ -314,6 +327,14 @@ var DefaultGlobalAllowComm = []string{
 	"buildkitd",
 	"buildah",
 	"nerdctl",
+
+	// BPF-side trusted agents, mirrored for the web-origin case.
+	"systemd",
+	"systemd-network",
+	"systemd-udevd",
+	"NetworkManager",
+	"bpftool",
+	"auditd",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
