@@ -467,3 +467,135 @@ func TestSkipReason_NamespaceGatesHostingPanels(t *testing.T) {
 		}
 	}
 }
+
+func TestSkipReason_NamespaceGatesActiveUserNamespaces(t *testing.T) {
+	// Active userns probe is the strongest signal — fires before
+	// HasContainers / hosting-panel because it catches Chromium /
+	// bwrap / flatpak / sshd-sandbox children the daemon-name probe
+	// misses.
+	p := HostProfile{
+		HasActiveUserNamespaces:  true,
+		ActiveUserNamespacesNote: "2 non-init user namespace(s), 5 process(es) (e.g. chrome, bwrap)",
+	}
+	got := p.SkipReason("tier2.namespace")
+	if got == "" {
+		t.Fatal("expected non-empty SkipReason for HasActiveUserNamespaces=true")
+	}
+	if !strings.Contains(got, "active user namespace") {
+		t.Errorf("SkipReason should cite active userns, got %q", got)
+	}
+	if !strings.Contains(got, "chrome") {
+		t.Errorf("SkipReason should surface probe note, got %q", got)
+	}
+	// Cleared profile must not skip — the probe is a positive signal,
+	// not a default-deny.
+	if r := (HostProfile{}).SkipReason("tier2.namespace"); r != "" {
+		t.Errorf("clean host should not skip tier2.namespace, got %q", r)
+	}
+}
+
+// makeFakeProcUserns builds a fake /proc tree where each pid has both
+// `comm` and a `ns/user` symlink with the supplied target. initTarget
+// is written under <procDir>/<initPID>/ns/user. otherPIDs maps pid →
+// (comm, nsTarget): nsTarget equal to initTarget means "in init userns";
+// anything else means non-init.
+func makeFakeProcUserns(t *testing.T, initPID, initTarget string, otherPIDs map[string]struct {
+	comm     string
+	nsTarget string
+}) string {
+	t.Helper()
+	procDir := t.TempDir()
+	mk := func(pid, comm, nsTarget string) {
+		dir := filepath.Join(procDir, pid, "ns")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(procDir, pid, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if nsTarget != "" {
+			if err := os.Symlink(nsTarget, filepath.Join(dir, "user")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk(initPID, "systemd", initTarget)
+	for pid, v := range otherPIDs {
+		mk(pid, v.comm, v.nsTarget)
+	}
+	return procDir
+}
+
+func TestUsernsProbe_AllInInitNamespace(t *testing.T) {
+	initTgt := "user:[4026531837]"
+	procDir := makeFakeProcUserns(t, "1", initTgt, map[string]struct {
+		comm     string
+		nsTarget string
+	}{
+		"100": {"sshd", initTgt},
+		"200": {"nginx", initTgt},
+	})
+	p := usernsProbe{procDir: procDir, initPID: "1"}
+	has, note := p.detect()
+	if has {
+		t.Errorf("all processes in init userns — detect() = (true, %q), want false", note)
+	}
+}
+
+func TestUsernsProbe_DetectsNonInitUserns(t *testing.T) {
+	initTgt := "user:[4026531837]"
+	procDir := makeFakeProcUserns(t, "1", initTgt, map[string]struct {
+		comm     string
+		nsTarget string
+	}{
+		"100": {"sshd", initTgt},
+		"500": {"chrome", "user:[4026532001]"},
+		"501": {"chrome", "user:[4026532001]"}, // same non-init ns — must dedupe
+		"600": {"bwrap", "user:[4026532002]"},
+	})
+	p := usernsProbe{procDir: procDir, initPID: "1"}
+	has, note := p.detect()
+	if !has {
+		t.Fatalf("expected detect() = true, got false (note=%q)", note)
+	}
+	if !strings.Contains(note, "2 non-init user namespace") {
+		t.Errorf("note should report 2 distinct namespaces, got %q", note)
+	}
+	if !strings.Contains(note, "3 process") {
+		t.Errorf("note should report 3 non-init processes, got %q", note)
+	}
+	if !strings.Contains(note, "chrome") && !strings.Contains(note, "bwrap") {
+		t.Errorf("note should sample comm names, got %q", note)
+	}
+}
+
+func TestUsernsProbe_MissingInitNS(t *testing.T) {
+	// fakeroot harnesses without symlink support leave ns/user
+	// missing. Probe must silently report "no signal" (false), not
+	// crash and not assume active namespaces.
+	procDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procDir, "1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := usernsProbe{procDir: procDir, initPID: "1"}
+	if has, _ := p.detect(); has {
+		t.Error("missing init ns/user — detect() must not report active")
+	}
+}
+
+func TestUsernsProbe_MissingProcDir(t *testing.T) {
+	p := usernsProbe{procDir: filepath.Join(t.TempDir(), "no-such-proc"), initPID: "1"}
+	if has, _ := p.detect(); has {
+		t.Error("missing procDir — detect() must not report active")
+	}
+}
+
+func TestDefaultUsernsProbe_ShapeOnly(t *testing.T) {
+	p := defaultUsernsProbe()
+	if p.procDir != "/proc" {
+		t.Errorf("default procDir = %q, want /proc", p.procDir)
+	}
+	if p.initPID != "1" {
+		t.Errorf("default initPID = %q, want 1", p.initPID)
+	}
+}

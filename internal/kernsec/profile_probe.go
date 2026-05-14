@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,32 +43,34 @@ func anyGlobMatches(patterns ...string) bool {
 // as `SKIP (host profile: <reason>)` in audit output. Operators
 // override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
-	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
-	HasLibvirt              bool   `json:"has_libvirt"`                // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
-	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
-	UsesBridge              bool   `json:"uses_bridge"`                // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
-	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
-	HasDKMS                 bool   `json:"has_dkms"`                   // out-of-tree module evidence detected
-	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep coredump gates conservative
-	HasBluetoothHardware    bool   `json:"has_bluetooth_hardware"`     // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
-	HasThunderbolt          bool   `json:"has_thunderbolt"`            // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
-	HasNFS                  bool   `json:"has_nfs"`                    // active NFS mounts → keep NFS untouched (already excluded by policy)
-	IsEFIBoot               bool   `json:"is_efi_boot"`                // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
-	IsCPanel                bool   `json:"is_cpanel"`                  // /usr/local/cpanel exists → cPanel/WHM host
-	IsDirectAdmin           bool   `json:"is_directadmin"`             // /usr/local/directadmin exists → DirectAdmin host
-	HasCloudLinuxLVE        bool   `json:"has_cloudlinux_lve"`         // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
-	HasCageFS               bool   `json:"has_cagefs"`                 // /etc/cagefs or cagefsctl → CageFS host
-	HasImunify360           bool   `json:"has_imunify360"`             // Imunify360 service/package/path indicators
-	HasKernelCare           bool   `json:"has_kernelcare"`             // KernelCare live-patching indicators
-	HasKsplice              bool   `json:"has_ksplice"`                // Ksplice live-patching indicators
-	HasLivePatchingModules  bool   `json:"has_live_patching_modules"`  // loaded live-patching modules
-	IsProxmox               bool   `json:"is_proxmox"`                 // Proxmox paths or proxmox-boot-tool present
-	HasZFS                  bool   `json:"has_zfs"`                    // loaded zfs or ZFS path indicators
-	HasNVIDIA               bool   `json:"has_nvidia"`                 // loaded NVIDIA modules
-	HasBackupWorkload       bool   `json:"has_backup_workload"`        // common backup agents/services present
-	HasMonitoringWorkload   bool   `json:"has_monitoring_workload"`    // common monitoring/crash-diagnostic agents present
-	HasHostingPanelWorkload bool   `json:"has_hosting_panel_workload"` // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
-	Reason                  string `json:"reason,omitempty"`           // freeform note used in --check output
+	IsKVMHost                bool   `json:"is_kvm_host"`                           // kvm_intel / kvm_amd loaded → KVM hypervisor host
+	HasLibvirt               bool   `json:"has_libvirt"`                           // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
+	HasContainers            bool   `json:"has_containers"`                        // runc / containerd / lxc / podman process running → don't kill userns
+	HasActiveUserNamespaces  bool   `json:"has_active_user_namespaces"`            // at least one process lives in a non-init user namespace right now (Chromium sandbox, bwrap, rootless podman, …) → don't kill userns
+	ActiveUserNamespacesNote string `json:"active_user_namespaces_note,omitempty"` // human-readable summary surfaced as the SkipByHostProfile reason
+	UsesBridge               bool   `json:"uses_bridge"`                           // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
+	HasIPsec                 bool   `json:"has_ipsec"`                             // `ip xfrm policy` non-empty → don't blacklist IPsec modules
+	HasDKMS                  bool   `json:"has_dkms"`                              // out-of-tree module evidence detected
+	HasKdump                 bool   `json:"has_kdump"`                             // kdump enabled → keep coredump gates conservative
+	HasBluetoothHardware     bool   `json:"has_bluetooth_hardware"`                // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
+	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
+	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
+	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
+	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
+	IsDirectAdmin            bool   `json:"is_directadmin"`                        // /usr/local/directadmin exists → DirectAdmin host
+	HasCloudLinuxLVE         bool   `json:"has_cloudlinux_lve"`                    // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
+	HasCageFS                bool   `json:"has_cagefs"`                            // /etc/cagefs or cagefsctl → CageFS host
+	HasImunify360            bool   `json:"has_imunify360"`                        // Imunify360 service/package/path indicators
+	HasKernelCare            bool   `json:"has_kernelcare"`                        // KernelCare live-patching indicators
+	HasKsplice               bool   `json:"has_ksplice"`                           // Ksplice live-patching indicators
+	HasLivePatchingModules   bool   `json:"has_live_patching_modules"`             // loaded live-patching modules
+	IsProxmox                bool   `json:"is_proxmox"`                            // Proxmox paths or proxmox-boot-tool present
+	HasZFS                   bool   `json:"has_zfs"`                               // loaded zfs or ZFS path indicators
+	HasNVIDIA                bool   `json:"has_nvidia"`                            // loaded NVIDIA modules
+	HasBackupWorkload        bool   `json:"has_backup_workload"`                   // common backup agents/services present
+	HasMonitoringWorkload    bool   `json:"has_monitoring_workload"`               // common monitoring/crash-diagnostic agents present
+	HasHostingPanelWorkload  bool   `json:"has_hosting_panel_workload"`            // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
+	Reason                   string `json:"reason,omitempty"`                      // freeform note used in --check output
 }
 
 // DetectHostProfile runs the cheap probes (~few hundred ms total).
@@ -100,6 +103,7 @@ func DetectHostProfile() HostProfile {
 	}
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
+	p.HasActiveUserNamespaces, p.ActiveUserNamespacesNote = defaultUsernsProbe().detect()
 	return p
 }
 
@@ -442,7 +446,16 @@ func (p HostProfile) SkipReason(group string) string {
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0
 		// break Chromium sandbox, bwrap, rootless podman, cPanel jails,
-		// CloudLinux/CageFS isolation, and hosting panel workloads.
+		// CloudLinux/CageFS isolation, and hosting panel workloads. The
+		// active-userns probe is the strongest signal — it catches
+		// userns consumers the daemon-name probe misses (Chromium
+		// renderer, bwrap, flatpak, sshd-sandboxed children, …).
+		if p.HasActiveUserNamespaces {
+			if p.ActiveUserNamespacesNote != "" {
+				return "active user namespace workload — " + p.ActiveUserNamespacesNote
+			}
+			return "host has processes in non-init user namespaces"
+		}
 		if p.HasContainers {
 			return "host has containers running (runc / containerd / lxc / podman)"
 		}
@@ -753,6 +766,96 @@ func dirHasEntries(dir string) bool {
 		return false
 	}
 	return len(entries) > 0
+}
+
+// usernsProbe walks /proc/<pid>/ns/user symlinks and reports whether any
+// running process lives in a user namespace other than init's. This is
+// the cheapest possible "is something actually using namespaces right
+// now" signal — same flavour as `lsns -t user` and the kernel-bridge
+// probe from PR 891. It catches userns consumers the container-daemon
+// probe misses on its own: Chromium sandbox, bwrap, flatpak, rootless
+// podman, sshd-sandboxed children, CageFS jails.
+//
+// Inode comparison is via symlink target ("user:[4026531837]") rather
+// than stat — readlink works without CAP_SYS_PTRACE for symlinks the
+// caller can see, and the package-test harness can build a fake /proc
+// out of plain symlinks.
+type usernsProbe struct {
+	procDir string
+	initPID string
+}
+
+func defaultUsernsProbe() usernsProbe {
+	return usernsProbe{
+		procDir: hostProfilePath("/proc"),
+		initPID: "1",
+	}
+}
+
+// detect returns (hasNonInit, summary). summary is empty when no
+// non-init userns are observed; otherwise it carries a short
+// human-readable note (count + a few comm names) suitable for the
+// SkipByHostProfile reason rendered in the audit row.
+//
+// Probe failure (unreadable /proc, missing /proc/1/ns/user — common in
+// fakeroot test harnesses without symlinks) is treated as "no signal",
+// not as "active": false-negative bias matches the rest of the
+// host-profile probe set, and the resolver's other signals
+// (HasContainers, hosting-panel) still gate the rule when this one
+// can't see anything.
+func (p usernsProbe) detect() (bool, string) {
+	initTarget, err := os.Readlink(filepath.Join(p.procDir, p.initPID, "ns", "user"))
+	if err != nil {
+		return false, ""
+	}
+	entries, err := os.ReadDir(p.procDir)
+	if err != nil {
+		return false, ""
+	}
+	seenNS := map[string]struct{}{}
+	var sampleNames []string
+	totalProcs := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := strconvAtoi(e.Name()); err != nil {
+			continue
+		}
+		if e.Name() == p.initPID {
+			continue
+		}
+		tgt, err := os.Readlink(filepath.Join(p.procDir, e.Name(), "ns", "user"))
+		if err != nil {
+			continue
+		}
+		if tgt == initTarget {
+			continue
+		}
+		totalProcs++
+		if _, ok := seenNS[tgt]; ok {
+			continue
+		}
+		seenNS[tgt] = struct{}{}
+		if len(sampleNames) < 3 {
+			name := e.Name()
+			if b, err := os.ReadFile(filepath.Join(p.procDir, e.Name(), "comm")); err == nil {
+				if c := strings.TrimSpace(string(b)); c != "" {
+					name = c
+				}
+			}
+			sampleNames = append(sampleNames, name)
+		}
+	}
+	if len(seenNS) == 0 {
+		return false, ""
+	}
+	suffix := ""
+	if len(seenNS) > len(sampleNames) {
+		suffix = ", …"
+	}
+	return true, fmt.Sprintf("%d non-init user namespace(s), %d process(es) (e.g. %s%s)",
+		len(seenNS), totalProcs, strings.Join(sampleNames, ", "), suffix)
 }
 
 // procMountsHasFS returns true if /proc/mounts lists any mount whose
