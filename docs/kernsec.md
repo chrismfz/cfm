@@ -238,7 +238,6 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | Group | Tier | Rules / settings | Operator impact |
 |---|---:|---|---|
 | `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `=2` for mainline-vanilla kernels and `=4` for hardened forks), `kernel.yama.ptrace_scope=2` (accepts `=1`), `vm.mmap_min_addr=65536` (accepts `=131072` / `=262144`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` also closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign host-key theft chain — Linus commit `31e62c2ebbfd`); operators who need same-uid debuggability without sudo can leave the knob at 1 and the audit stays green. `vm.mmap_min_addr=65536` blocks NULL-deref-to-userspace exploit primitives and is the default on modern distros. |
-| `tier2.iouring` | 2 | `kernel.io_uring_disabled=2` (accepts `=1`) | Closes the io_uring substitute for unprivileged BPF (afflicted.sh Class-C bypass). Auto-skipped when `/proc/*/fd` shows any process holding an io_uring fd; `=1` (privileged-only) accepted as also-green. |
 | `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=2` | Protects sticky/world-writable directories; normally no production impact. |
 | `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT performance cost. |
 | `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
@@ -272,8 +271,6 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 | `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the `kernel.unprivileged_bpf_disabled=2` sysctl. On kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10, recent stable) the sysctl is locked at boot — only this boot arg can land the value at 2. |
 | `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
 | `tier3.mempaint` | 3 | `init_on_free=1` | Stacks with Tier 1 `init_on_alloc=1` to fully eliminate UAF-read primitives (the afflicted.sh writeup names `INIT_ON_FREE=off` as the kernel gap that keeps UAF-read viable). Combined perf ceiling ~3-8% in the worst case; brick-safe. Operator opt-in only — `conf.Tier = 3`. |
-| `tier3.legacycompat` | 3 | `vsyscall=none` | Disables the legacy fixed-address vsyscall page; closes a small but historically-abused ROP target. Auto-skipped when pre-glibc-2.14 / statically-linked binaries are detected in `/usr/bin` or `/usr/local/bin`. Operator opt-in only. |
-| `tier3.observability` | 3 | `debugfs=off` | Refuses to expose debugfs; removes a broad kernel-internal attack surface that has historically harboured info-leak and UAF bugs. tracefs at `/sys/kernel/tracing` is NOT affected. Auto-skipped when bpftrace, bcc-tools, intel-gpu-tools, libvirt, or processes holding open fds under `/sys/kernel/debug` are detected. Operator opt-in only. |
 
 kernsec only owns the managed boot-argument keys listed above. It strips stale
 instances of those keys before appending the desired managed set and preserves
@@ -417,6 +414,78 @@ before module loading is disabled globally.
 NFS, CIFS/SMB clients, `io_uring`, and wifi modules are also intentionally not
 blacklisted by the shipped registry. These have legitimate operator-managed use
 cases on some hosts.
+
+## Considered but not shipped
+
+The following three knobs from the afflicted.sh "every kernel mitigation on
+Resolute" writeup were prototyped, reviewed, and **held back** because the
+auto-skip probes that gate them are not yet reliable enough to ship without
+hurting more operators than they help. Each entry below records the rule, the
+probe approach that was tried, and the specific issues that need to be solved
+before re-landing.
+
+### `kernel.io_uring_disabled=2` — Tier 2
+
+Closes the io_uring substitute primitive named in the writeup (once
+`unprivileged_bpf_disabled=2` blocks BPF maps, io_uring's SQE/CQE rings and
+registered-buffer allocations otherwise replace them as a controllable
+kernel-spray primitive). Sysctl added in kernel 6.6.
+
+**Held back because:** the auto-skip probe walked `/proc/[0-9]*/fd/*` on every
+`kernsec` invocation looking for `anon_inode:[io_uring]` symlinks. Correctness
+is fine but the cost runs on every `status`, `apply`, `preview`, and TUI call
+via `DetectHostProfile()`. On a busy host (10k+ pids) that is hundreds of
+thousands of `readlink()` syscalls per invocation.
+
+**Re-land when:** the host-profile probe layer supports lazy / on-demand probes
+(only run the io_uring walk when `tier2.iouring` is actually being decided, not
+on every CLI call), or `DetectHostProfile()` gains a result cache with mtime
+invalidation.
+
+### `vsyscall=none` — Tier 3
+
+Disables the legacy fixed-address vsyscall page at `0xffffffffff600000` — a
+small but historically-abused ROP target. The kernel default `vsyscall=xonly`
+still mitigates the worst patterns; `=none` is the strict step.
+
+**Held back because:** the legacy-binary probe (`legacyBinaryProbe` in the
+prototype) opened up to 4000 ELFs in `/usr/bin` + `/usr/local/bin` per
+`DetectHostProfile()` call and flagged every static binary as "potentially
+legacy." That false-positives on every modern Go binary (`kubectl`, `docker`,
+`runc`, `containerd`, `cfm` itself) because Go statics have no `PT_DYNAMIC`.
+The follow-up plan to "only flag dynamic binaries with pre-2.14 glibc
+references" is also unreliable: binaries reference *all* glibc symbol versions
+they use, so even modern dynamic binaries carry `GLIBC_2.0` strings in their
+`.dynstr`. The probe needs proper `Elf_Verneed` table walking to pick the
+*highest* glibc version each library is bound at — that's the only signal that
+actually correlates with vsyscall-page reliance. Additionally, on cPanel /
+CloudLinux / CageFS hosts the binaries that would actually break live in
+customer chroots (`/home/*/public_html`, CageFS images), not `/usr/bin` — the
+probe missed those entirely.
+
+**Re-land when:** the probe is rewritten to parse `Elf_Verneed` properly, the
+scan paths are extended to cover hosting-panel chroots, and the per-invocation
+cost is bounded (mtime pre-filter, lazy probe, or result cache).
+
+### `debugfs=off` — Tier 3
+
+Refuses to expose the `debugfs` filesystem at all — removes a broad
+kernel-internal attack surface (debug-only hooks across drivers / subsystems
+that have historically harboured info-leak and UAF bugs). `tracefs` at
+`/sys/kernel/tracing` is a separate mount since kernel 4.1 and is not affected.
+
+**Held back because:** the rule was added to `ManagedBootArgKeys` so kernsec
+would strip stale instances on apply. That regresses the contract that
+operator-set boot args outside the managed set are preserved — a host that
+deliberately set `debugfs=` for diagnostics would have it silently stripped on
+the next `kernsec apply`, even when Tier 3 wasn't enabled. The companion
+`debugfsConsumerProbe` was correct but inherited the same
+`DetectHostProfile()` per-invocation cost issue as the io_uring probe.
+
+**Re-land when:** the apply path can strip a managed key only when its
+governing rule is actually being applied (or the boot-arg writer gains a "this
+rule is held by Tier N — don't touch the key unless tier >= N" flag), and the
+probe is moved to the on-demand path described under io_uring above.
 
 ## Host-profile gates
 

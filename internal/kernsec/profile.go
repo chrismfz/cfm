@@ -299,23 +299,6 @@ var Tier2Sysctls = []SysctlRule{
 		Description: "Debian-flavoured alternative for blocking unprivileged userns. Reversible without breaking root use.",
 		Affects:     "Same surface as user.max_user_namespaces=0. Skipped if containers or hosting panels detected. Skipped if kernel doesn't expose the key (non-Debian).",
 	},
-	{
-		ID: "KSEC-SCT-tier2.iouring-001", Group: "tier2.iouring", Tier: Tier2,
-		Key: "kernel.io_uring_disabled", Value: "2",
-		// Live=1 already blocks unprivileged use; =2 disables io_uring
-		// entirely (including root). Treat =1 as also-green for hosts
-		// that need root-side io_uring (admin tools, fio benchmarks).
-		// The afflicted.sh "Resolute mitigation map" article calls
-		// io_uring out by name as the Class-C substitute primitive
-		// once unprivileged_bpf_disabled=2 closes the BPF gate —
-		// IORING_REGISTER_BUFFERS / IORING_OP_PROVIDE_BUFFERS / SQE
-		// ring allocations stand in for BPF maps as controllable
-		// kernel-spray primitives. Auto-skipped if any process is
-		// holding an io_uring fd.
-		AcceptValues: []string{"1"},
-		Description:  "Disable io_uring. Closes the Class-C substitute primitive for unprivileged_bpf_disabled — io_uring's SQE/CQE rings and registered-buffer allocations otherwise replace BPF maps as controllable kernel-spray primitives. Sysctl was added in kernel 6.6; older kernels will report 'not exposed' and the rule no-ops.",
-		Affects:      "Disables io_uring entirely. Hosts running PostgreSQL with io_method=io_uring, MySQL 8.4+, fio benchmarks, nginx with io_uring aio_write, Node ≥ 20 with the io_uring backend, or other modern storage stacks will lose those code paths. Auto-skipped if /proc/*/fd shows any io_uring fd in use; =1 (privileged-only) accepted as also-green for hosts that need root-side io_uring.",
-	},
 }
 
 // Tier2BootArgs is the server-aggressive boot-arg profile (Phase 4).
@@ -335,32 +318,24 @@ var Tier2BootArgs = []BootArg{
 //
 // Tier 3 entries are not applied unless the operator raises conf.Tier
 // to 3 explicitly. Each entry pairs with either a host-profile probe
-// that auto-skips it on hosts where the break would be guaranteed
-// (vsyscall=none + HasLegacyBinaries; debugfs=off + HasDebugfsConsumers)
+// that auto-skips it on hosts where the break would be guaranteed,
 // or a preflight notice that surfaces the cost the operator is
 // signing up for (init_on_free + stacked perf cost on top of the
 // Tier 1 init_on_alloc=1).
 //
 // Each also adds an entry to ManagedBootArgKeys so disable / apply
 // --remove strip it cleanly.
+//
+// Held-back candidates documented in docs/kernsec.md
+// ("Considered but not shipped"): kernel.io_uring_disabled=2,
+// vsyscall=none, debugfs=off. Bring them back once the probes /
+// audit-only path identified in that section are reliable.
 var Tier3BootArgs = []BootArg{
 	{
 		ID: "KSEC-BOOT-tier3.mempaint-001", Group: "tier3.mempaint", Tier: Tier3,
 		Key: "init_on_free", Value: "1",
 		Description: "Zero pages at free time. Pairs with the Tier 1 init_on_alloc=1 (KSEC-BOOT-kspp-002) to fully eliminate use-after-free read primitives: init_on_alloc defeats UAF-read-of-stale-data, init_on_free defeats UAF-read-of-just-freed. The afflicted.sh \"Resolute mitigation map\" writeup specifically names INIT_ON_FREE=off as the kernel-side gap that keeps UAF-read viable on otherwise fully-hardened distros.",
 		Affects:     "Additional ~1-3% memory-allocation perf cost on free paths, stacked on top of init_on_alloc=1's ~0-5%. Brick-safe — no compatibility breakages, only measurable throughput cost. Apply only on hosts where the combined ceiling (~3-8% worst-case) is acceptable.",
-	},
-	{
-		ID: "KSEC-BOOT-tier3.legacycompat-001", Group: "tier3.legacycompat", Tier: Tier3,
-		Key: "vsyscall", Value: "none",
-		Description: "Disable the legacy fixed-address vsyscall page (gettimeofday / time / getcpu at 0xffffffffff600000). Closes a small but historically-abused fixed-address ROP target. Modern userspace uses vDSO instead; vsyscall has been deprecated since glibc 2.14 (2011).",
-		Affects:     "Breaks statically-linked binaries built against pre-2.14 glibc (CentOS-6-vintage software), very old Go binaries (pre-1.6), some ancient embedded toolchain output, very old wine builds. Auto-skipped when the legacy-binary probe finds glibc<2.14 ELFs in standard paths. The kernel default `vsyscall=xonly` still mitigates the worst data-read patterns; =none is the strict step.",
-	},
-	{
-		ID: "KSEC-BOOT-tier3.observability-001", Group: "tier3.observability", Tier: Tier3,
-		Key: "debugfs", Value: "off",
-		Description: "Refuse to expose the debugfs filesystem at all. Removes a broad kernel-internal attack surface (debug-only hooks across drivers and subsystems) that has historically harboured info-leak and UAF bugs. tracefs (used by ftrace / bpftrace / perf) is mounted separately at /sys/kernel/tracing since kernel 4.1 and is NOT affected.",
-		Affects:     "Breaks bpftool map-dump on older kernels, libvirt's debug introspection, intel_gpu_top (/sys/kernel/debug/dri), some legacy hardware-monitoring tools, very old bcc/bpftrace versions. Auto-skipped when active debugfs consumers (bpftrace, bcc-tools, intel-gpu-tools, processes holding open fds under /sys/kernel/debug, systemd units referencing /sys/kernel/debug) are detected.",
 	},
 }
 
@@ -540,8 +515,6 @@ var ManagedBootArgKeys = []string{
 	"oops",
 	// Tier 3
 	"init_on_free",
-	"vsyscall",
-	"debugfs",
 }
 
 // String returns the cmdline form of a boot arg ("key" or "key=value").

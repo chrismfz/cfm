@@ -110,14 +110,6 @@ func sysctl_impacting_risks(sysctls []SysctlRule, profile HostProfile) []string 
 				detail += " Host-profile diagnostics risk was detected; this rule should only be present if forced."
 			}
 			risks = append(risks, detail)
-		case "kernel.io_uring_disabled":
-			if s.Value == "2" {
-				detail := "kernel.io_uring_disabled=2 disables io_uring entirely (=1 in AcceptValues for hosts that still want root-side use). Modern PostgreSQL (io_method=io_uring), MySQL 8.4+, nginx aio_write over io_uring, fio benchmarks, and Node ≥ 20 will lose those code paths."
-				if profile.IsIoUringUser {
-					detail += " The io_uring fd probe found active consumers — the rule would auto-skip unless forced."
-				}
-				risks = append(risks, detail)
-			}
 		}
 	}
 	return risks
@@ -141,14 +133,6 @@ func boot_impacting_risks(bootArgs []BootArg, modules []ModuleRule, profile Host
 				risks = append(risks, a.Key+"="+a.Value+": ~1-3% additional memory-allocation perf cost on free paths, stacked on top of init_on_alloc=1 (~0-5%); combined ceiling ~3-8% in the worst case. Brick-safe.")
 			} else {
 				risks = append(risks, a.Key+"="+a.Value+": ~0-5% memory-allocation perf cost on alloc paths; brick-safe.")
-			}
-		case "vsyscall":
-			if a.Value == "none" {
-				risks = append(risks, "vsyscall=none: disables the legacy fixed-address vsyscall page. Statically-linked pre-2.14-glibc binaries will segfault hard. The legacy-binary probe auto-skips when such ELFs are found in /usr/bin or /usr/local/bin; opting in past the skip is one-way until reboot with a different cmdline.")
-			}
-		case "debugfs":
-			if a.Value == "off" {
-				risks = append(risks, "debugfs=off: refuses to expose debugfs entirely. tracefs (/sys/kernel/tracing) is not affected, but bpftool map-dump, libvirt's debug introspection, intel_gpu_top, and some legacy hardware-monitoring tools will lose their data source. The debugfs-consumer probe auto-skips when those are detected.")
 			}
 		}
 	}
