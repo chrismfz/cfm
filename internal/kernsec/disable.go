@@ -32,6 +32,12 @@ type DisableOptions struct {
 	// applyCore inherits. Required for unattended runs. Phase 6
 	// audit C1.
 	AssumeYes bool
+	// ForceUnsafe propagates to ApplyOptions so disable can also
+	// proceed when the conf carries forced-but-host-profile-skipped
+	// rules. Recovery path: `--purge` removes the conf entirely and
+	// sidesteps the guard; `--force-unsafe` keeps the force overrides
+	// while acknowledging the breakage.
+	ForceUnsafe bool
 }
 
 // RunDisable is the friendly wrapper around `tier=0 + apply`. Strips
@@ -91,10 +97,11 @@ func RunDisable(w io.Writer, opts DisableOptions) int {
 	// applyCore owns the banner + mode line + the closing banner. We
 	// pipe in DISABLE as the label so the operator sees the intent.
 	rc := applyCore(w, conf, ApplyOptions{
-		DryRun:    opts.DryRun,
-		NoRefresh: opts.NoRefresh,
-		NoUnload:  opts.NoUnload,
-		AssumeYes: opts.AssumeYes,
+		DryRun:      opts.DryRun,
+		NoRefresh:   opts.NoRefresh,
+		NoUnload:    opts.NoUnload,
+		AssumeYes:   opts.AssumeYes,
+		ForceUnsafe: opts.ForceUnsafe,
 	}, "DISABLE")
 	if rc != 0 {
 		return rc

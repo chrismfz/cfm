@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -169,9 +170,111 @@ func TestResolve_OverrideForceBeatsHostProfile(t *testing.T) {
 		Tier:      Tier1,
 		Overrides: map[string]RuleOverride{"FAKE": OverrideForce},
 	}
-	d, _ := decide("FAKE", Tier1, "modules.ipsec", conf, hostHasIPsec)
+	d, _, _ := decide("FAKE", Tier1, "modules.ipsec", conf, hostHasIPsec)
 	if d != Apply {
 		t.Errorf("force override under hostprofile block: got %v, want Apply", d)
+	}
+}
+
+func TestResolve_ForceUnderGatePopulatesWouldSkipReason(t *testing.T) {
+	// llc forced on a Docker host: decision is Apply (force wins),
+	// but WouldSkipReason carries the gate's "you'd break the bridge
+	// module" warning so apply can refuse without --force-unsafe.
+	conf := &Conf{
+		Tier:      Tier1,
+		Overrides: map[string]RuleOverride{"KSEC-MOD-net.legacy-017": OverrideForce},
+	}
+	rs := Resolve(conf, HostProfile{HasContainers: true})
+	var got *ResolvedRule
+	for i := range rs.Modules {
+		if rs.Modules[i].ID == "KSEC-MOD-net.legacy-017" {
+			got = &rs.Modules[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("llc rule not in resolved set")
+	}
+	if got.Decision != Apply {
+		t.Errorf("decision = %v, want Apply", got.Decision)
+	}
+	if got.WouldSkipReason == "" {
+		t.Error("WouldSkipReason is empty; expected gate reason for HasContainers + llc")
+	}
+}
+
+func TestResolve_ForceWithoutGateLeavesWouldSkipReasonEmpty(t *testing.T) {
+	// Forcing a rule on a host where the gate does NOT fire must
+	// leave WouldSkipReason empty (i.e. apply will not refuse).
+	conf := &Conf{
+		Tier:      Tier1,
+		Overrides: map[string]RuleOverride{"KSEC-MOD-net.legacy-017": OverrideForce},
+	}
+	rs := Resolve(conf, HostProfile{})
+	for _, r := range rs.Modules {
+		if r.ID == "KSEC-MOD-net.legacy-017" {
+			if r.WouldSkipReason != "" {
+				t.Errorf("WouldSkipReason = %q on clean host, want empty", r.WouldSkipReason)
+			}
+			return
+		}
+	}
+	t.Fatal("llc rule not in resolved set")
+}
+
+func TestReportUnsafeForces_NamesRuleAndGateReason(t *testing.T) {
+	var w bytes.Buffer
+	unsafe := []ResolvedRule{
+		{
+			ID:              "KSEC-MOD-net.legacy-017",
+			Display:         "llc",
+			WouldSkipReason: "in-kernel bridge interface present",
+		},
+	}
+	reportUnsafeForces(&w, unsafe)
+	out := w.String()
+	if !strings.Contains(out, "UNSAFE FORCE detected") {
+		t.Errorf("output missing UNSAFE FORCE banner: %s", out)
+	}
+	if !strings.Contains(out, "KSEC-MOD-net.legacy-017") {
+		t.Errorf("output missing rule ID: %s", out)
+	}
+	if !strings.Contains(out, "in-kernel bridge interface present") {
+		t.Errorf("output missing gate reason: %s", out)
+	}
+}
+
+func TestUnsafeForcedRules(t *testing.T) {
+	// One forced-on-bridge-host rule, one normally-applied rule:
+	// only the first one shows up as unsafe.
+	conf := &Conf{
+		Tier: Tier1,
+		Overrides: map[string]RuleOverride{
+			"KSEC-MOD-net.legacy-017": OverrideForce,
+		},
+	}
+	rs := Resolve(conf, HostProfile{UsesBridge: true})
+	unsafe := unsafeForcedRules(rs)
+	if len(unsafe) == 0 {
+		t.Fatal("unsafeForcedRules returned no entries; expected llc on UsesBridge host")
+	}
+	found := false
+	for _, r := range unsafe {
+		if r.ID == "KSEC-MOD-net.legacy-017" {
+			found = true
+			if r.WouldSkipReason == "" {
+				t.Error("unsafe entry has empty WouldSkipReason")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected KSEC-MOD-net.legacy-017 in unsafe list; got %+v", unsafe)
+	}
+
+	// Clean host: same conf produces no unsafe entries.
+	rsClean := Resolve(conf, HostProfile{})
+	if got := unsafeForcedRules(rsClean); len(got) != 0 {
+		t.Errorf("unsafeForcedRules on clean host = %d entries, want 0; got %+v", len(got), got)
 	}
 }
 

@@ -30,6 +30,14 @@ type ApplyOptions struct {
 	// a "[!] about to mutate" preview and require a `y` answer
 	// before any write happens. Phase 6 audit C1.
 	AssumeYes bool
+	// ForceUnsafe acknowledges that one or more rules in the conf
+	// carry `state = force` overrides for groups the host-profile
+	// would have skipped (e.g. forcing llc blacklist on a Docker
+	// host, or forcing tier2.oops on a KVM hypervisor). Apply refuses
+	// to proceed in that case unless this flag is set — the same
+	// "I really mean it" pattern as --no-verify on a failing
+	// pre-commit hook. Does NOT bypass any other safety check.
+	ForceUnsafe bool
 	// NoUnload disables the post-write `modprobe -r` pass over the
 	// managed-and-loaded module set. By default kernsec calls
 	// `modprobe -r` on every module it just blacklisted that is
@@ -152,6 +160,23 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	if err := CheckSafeModuleRules(modules); err != nil {
 		fmt.Fprintln(w, err)
 		return 1
+	}
+
+	// Unsafe-force guard: refuse when the conf forces a rule the
+	// host-profile gate would have skipped (e.g. force llc blacklist
+	// on a Docker host, force tier2.oops on a KVM hypervisor).
+	// Operator must add --force-unsafe to acknowledge the breakage
+	// they're asking for. Mode==check / dry-run do NOT trigger the
+	// refusal: they're read-only and the warning is still printed.
+	unsafe := unsafeForcedRules(rs)
+	if len(unsafe) > 0 {
+		reportUnsafeForces(w, unsafe)
+		if !opts.Check && !opts.DryRun && !opts.ForceUnsafe {
+			fmt.Fprintln(w, "kernsec apply: refusing to apply unsafe forced rules without --force-unsafe.")
+			fmt.Fprintln(w, "  Resolve by removing the [rule \"...\"] / state = force section(s) from kernsec.conf,")
+			fmt.Fprintln(w, "  setting state = skip explicitly, or re-running with --force-unsafe to acknowledge the breakage.")
+			return 1
+		}
 	}
 
 	sysctlContent := RenderSysctlFile(sysctls)
@@ -821,6 +846,35 @@ func restoreGrubFromBackup() error {
 		return fmt.Errorf("write %s: %w", PathDefaultGrub, err)
 	}
 	return nil
+}
+
+// unsafeForcedRules returns every ResolvedRule in the set whose
+// Decision is Apply but whose WouldSkipReason is non-empty — i.e. an
+// operator `state = force` resurrected a rule the host-profile gate
+// would otherwise have skipped. Empty when the conf is safe.
+func unsafeForcedRules(rs ResolvedSet) []ResolvedRule {
+	var out []ResolvedRule
+	for _, group := range [][]ResolvedRule{rs.Sysctls, rs.BootArgs, rs.Modules, rs.Mounts} {
+		for _, r := range group {
+			if r.Decision == Apply && r.WouldSkipReason != "" {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// reportUnsafeForces prints the operator-facing warning block for the
+// unsafe-force guard. Always prints (check / dry-run / apply / etc.);
+// the refuse decision is made by the caller.
+func reportUnsafeForces(w io.Writer, unsafe []ResolvedRule) {
+	fmt.Fprintln(w, "[!] UNSAFE FORCE detected — the following rules are state = force in kernsec.conf")
+	fmt.Fprintln(w, "    but the host-profile gate would have auto-skipped them on this host:")
+	for _, r := range unsafe {
+		fmt.Fprintf(w, "      %-32s %s\n", r.ID, r.Display)
+		fmt.Fprintf(w, "        gate would have skipped: %s\n", r.WouldSkipReason)
+	}
+	fmt.Fprintln(w)
 }
 
 // reportCrossComponentConflicts surfaces ownership disagreements that
