@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -174,10 +175,22 @@ func enableFstabAppend(rule MountRule, w io.Writer, opts EnableMountOptions, lin
 	return finishEnable(rule, w, opts)
 }
 
+// systemdDropinMarker is the sentinel comment kernsec writes as the
+// first line of every drop-in it authors. Disable / re-enable check
+// for this marker before touching the file; a drop-in at the same
+// path without the marker is treated as operator-owned and refused
+// (Enable) or left in place (Disable). The exact string is part of
+// the file format — change it only with a backwards-compatible
+// migration that recognises BOTH old and new markers.
+const systemdDropinMarker = "# Written by `cfm kernsec`."
+
 // enableSystemdDropin handles strategy (c): write a drop-in under
 // /etc/systemd/system/<unit>.d/10-cfm-hardening.conf that sets
 // Options= to the merged option list. Idempotent — if the desired
-// drop-in is already on disk we skip the write.
+// drop-in is already on disk we skip the write. Refuses to overwrite
+// any file at the target path that isn't authored by kernsec (no
+// marker comment), so an operator who happens to use the same
+// filename for their own override never has it silently replaced.
 func enableSystemdDropin(rule MountRule, w io.Writer, opts EnableMountOptions, currentOpts string, recommended []string) error {
 	// Conflict check: existing Options= line has an explicit
 	// negation of a recommended option (e.g. `exec` vs `noexec`).
@@ -195,10 +208,24 @@ func enableSystemdDropin(rule MountRule, w io.Writer, opts EnableMountOptions, c
 		return finishEnable(rule, w, opts)
 	}
 	path := dropinPath(rule.MountPoint)
-	body := []byte(fmt.Sprintf("# Written by `cfm kernsec`. Remove with `cfm kernsec disable` or by hand.\n[Mount]\nOptions=%s\n", merged))
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == string(body) {
-		fmt.Fprintf(w, "[Mount] %s drop-in already in desired shape (%s).\n", rule.MountPoint, path)
-		return finishEnable(rule, w, opts)
+	body := []byte(fmt.Sprintf("%s Remove with `cfm kernsec disable` or by hand.\n[Mount]\nOptions=%s\n", systemdDropinMarker, merged))
+	if existing, err := os.ReadFile(path); err == nil {
+		// Refuse to clobber an operator-owned file at our chosen
+		// path. The marker is on the first line of every file we
+		// author; its absence means the file came from somewhere
+		// else (operator hand-edit, config-management tool,
+		// package, etc.) and we have no business overwriting it.
+		if !bytes.HasPrefix(existing, []byte(systemdDropinMarker)) {
+			return fmt.Errorf(
+				"%s: refusing to overwrite operator-owned drop-in at %s (no `cfm kernsec` marker on first line); resolve by hand or delete the file first",
+				rule.ID, path)
+		}
+		if string(existing) == string(body) {
+			fmt.Fprintf(w, "[Mount] %s drop-in already in desired shape (%s).\n", rule.MountPoint, path)
+			return finishEnable(rule, w, opts)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
@@ -325,21 +352,28 @@ func DisableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	// is the cleanest revert path on Debian / Ubuntu / Arch where
 	// Enable wrote a drop-in instead of touching fstab. Removing the
 	// drop-in returns the unit to its packaged defaults at the next
-	// daemon-reload + reboot.
+	// daemon-reload + reboot. We check for the kernsec marker before
+	// removing — a file at our chosen path without the marker is
+	// operator-owned (config-management tool, package, hand-edit) and
+	// disable must leave it in place. Same safety stance as Enable.
 	dropinRemoved := false
 	dp := dropinPath(rule.MountPoint)
-	if _, err := os.Stat(dp); err == nil {
-		if err := os.Remove(dp); err != nil {
-			return fmt.Errorf("remove %s: %w", dp, err)
+	if existing, err := os.ReadFile(dp); err == nil {
+		if !bytes.HasPrefix(existing, []byte(systemdDropinMarker)) {
+			fmt.Fprintf(w, "[Mount] %s exists but is operator-owned (no `cfm kernsec` marker); leaving untouched.\n", dp)
+		} else {
+			if err := os.Remove(dp); err != nil {
+				return fmt.Errorf("remove %s: %w", dp, err)
+			}
+			// Best-effort: remove the now-empty .d/ parent so the host
+			// looks the way it did before Enable. Ignore errors — a
+			// non-empty dir (operator added their own drop-in) is fine.
+			_ = os.Remove(filepath.Dir(dp))
+			fmt.Fprintf(w, "[Mount] removed kernsec drop-in %s.\n", dp)
+			dropinRemoved = true
 		}
-		// Best-effort: remove the now-empty .d/ parent so the host
-		// looks the way it did before Enable. Ignore errors — a
-		// non-empty dir (operator added their own drop-in) is fine.
-		_ = os.Remove(filepath.Dir(dp))
-		fmt.Fprintf(w, "[Mount] removed kernsec drop-in %s.\n", dp)
-		dropinRemoved = true
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat %s: %w", dp, err)
+		return fmt.Errorf("read %s: %w", dp, err)
 	}
 
 	effectiveAdditions := kernsecEffectiveAdditions(rule)

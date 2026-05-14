@@ -266,7 +266,9 @@ func TestDisableMount_RemovesSystemdDropin(t *testing.T) {
 		t.Fatal(err)
 	}
 	dropinFile := filepath.Join(dropinDir, "10-cfm-hardening.conf")
-	if err := os.WriteFile(dropinFile, []byte("[Mount]\nOptions=nodev,nosuid,noexec\n"), 0o644); err != nil {
+	// Marker on the first line is what tells Disable this is our
+	// file (vs. an operator hand-edit at the same path).
+	if err := os.WriteFile(dropinFile, []byte(systemdDropinMarker+" test fixture.\n[Mount]\nOptions=nodev,nosuid,noexec\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,6 +291,96 @@ func TestDisableMount_RemovesSystemdDropin(t *testing.T) {
 	}
 	if len(stub.remounts) != 0 {
 		t.Errorf("expected NO live remount for /tmp on Disable; got %v", stub.remounts)
+	}
+}
+
+func TestEnableMount_RefusesToOverwriteOperatorOwnedDropin(t *testing.T) {
+	// Operator already has /etc/systemd/system/tmp.mount.d/10-cfm-hardening.conf
+	// — maybe they copy-pasted it from our README and tuned it by
+	// hand. Same filename but no kernsec marker on the first line.
+	// EnableMount must refuse rather than silently overwrite.
+	withFakeFstab(t, `UUID=abc / ext4 defaults 0 1
+`)
+	dir := t.TempDir()
+	origEtc, origFinder := systemdSystemEtcDir, realSystemdUnitFinderWithDropins
+	systemdSystemEtcDir = dir
+	realSystemdUnitFinderWithDropins = fakeUnit("mode=1777,nodev,nosuid,size=50%")
+	t.Cleanup(func() {
+		systemdSystemEtcDir = origEtc
+		realSystemdUnitFinderWithDropins = origFinder
+	})
+	origProc := readProcMounts
+	readProcMounts = func() string {
+		return "tmpfs /tmp tmpfs rw,nosuid,nodev,size=50% 0 0\n"
+	}
+	t.Cleanup(func() { readProcMounts = origProc })
+
+	// Pre-stage operator-owned drop-in at the path kernsec uses.
+	operatorDir := filepath.Join(dir, "tmp.mount.d")
+	if err := os.MkdirAll(operatorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	operatorFile := filepath.Join(operatorDir, "10-cfm-hardening.conf")
+	operatorBody := "[Mount]\nOptions=mode=1777,nodev,nosuid,noexec,size=4G\nTimeoutSec=30\n"
+	if err := os.WriteFile(operatorFile, []byte(operatorBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := MountRule{
+		ID: "KSEC-FS-mount.tmp-001", MountPoint: "/tmp",
+		Recommended: "nodev,nosuid,noexec", CanEnable: true,
+	}
+	var w bytes.Buffer
+	err := EnableMount(rule, &w, EnableMountOptions{})
+	if err == nil {
+		t.Fatal("expected refusal when operator-owned drop-in is at our path")
+	}
+	if !strings.Contains(err.Error(), "operator-owned") {
+		t.Errorf("error should call out the operator-owned condition; got %v", err)
+	}
+	got, _ := os.ReadFile(operatorFile)
+	if string(got) != operatorBody {
+		t.Errorf("operator file must be byte-identical after refusal; got:\n%s", got)
+	}
+}
+
+func TestDisableMount_PreservesOperatorOwnedDropin(t *testing.T) {
+	// Symmetric to the Enable test above: Disable must NOT remove
+	// a drop-in at our path that lacks the kernsec marker.
+	withFakeFstab(t, `UUID=abc / ext4 defaults 0 1
+`)
+	dir := t.TempDir()
+	origEtc := systemdSystemEtcDir
+	systemdSystemEtcDir = dir
+	t.Cleanup(func() { systemdSystemEtcDir = origEtc })
+
+	operatorDir := filepath.Join(dir, "tmp.mount.d")
+	if err := os.MkdirAll(operatorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	operatorFile := filepath.Join(operatorDir, "10-cfm-hardening.conf")
+	operatorBody := "[Mount]\nOptions=mode=1777,nodev,nosuid,noexec\n"
+	if err := os.WriteFile(operatorFile, []byte(operatorBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &stubExec{}
+	stub.install(t)
+
+	rule := MountRule{
+		ID: "KSEC-FS-mount.tmp-001", MountPoint: "/tmp",
+		Recommended: "nodev,nosuid,noexec", CanEnable: true,
+	}
+	var w bytes.Buffer
+	if err := DisableMount(rule, &w, EnableMountOptions{}); err != nil {
+		t.Fatalf("DisableMount returned %v", err)
+	}
+	got, err := os.ReadFile(operatorFile)
+	if err != nil {
+		t.Fatalf("operator drop-in must still exist after Disable; got %v", err)
+	}
+	if string(got) != operatorBody {
+		t.Errorf("operator drop-in body changed; got:\n%s", got)
 	}
 }
 
