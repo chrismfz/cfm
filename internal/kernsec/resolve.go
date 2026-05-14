@@ -238,6 +238,8 @@ func (t Tier) label() string {
 		return "1"
 	case Tier2:
 		return "2"
+	case Tier3:
+		return "3"
 	}
 	return "?"
 }

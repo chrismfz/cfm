@@ -58,16 +58,16 @@ func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 			t.Errorf("Tier 1 sysctl %q (group %q) at tier 1: decision %v reason=%q, want %v",
 				r.ID, r.Group, r.Decision, r.Reason, want)
 		}
-		if r.Tier == Tier2 && r.Decision != SkipByTier {
-			t.Errorf("Tier 2 sysctl %q at tier 1: decision %v, want SkipByTier", r.ID, r.Decision)
+		if (r.Tier == Tier2 || r.Tier == Tier3) && r.Decision != SkipByTier {
+			t.Errorf("Tier %d sysctl %q at tier 1: decision %v, want SkipByTier", r.Tier, r.ID, r.Decision)
 		}
 	}
 	for _, r := range rs.BootArgs {
 		if r.Tier == Tier1 && r.Decision != Apply {
 			t.Errorf("Tier 1 boot %q at tier 1: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
 		}
-		if r.Tier == Tier2 && r.Decision != SkipByTier {
-			t.Errorf("Tier 2 boot %q at tier 1: decision %v, want SkipByTier", r.ID, r.Decision)
+		if (r.Tier == Tier2 || r.Tier == Tier3) && r.Decision != SkipByTier {
+			t.Errorf("Tier %d boot %q at tier 1: decision %v, want SkipByTier", r.Tier, r.ID, r.Decision)
 		}
 	}
 }
@@ -75,12 +75,18 @@ func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 func TestResolve_Tier2AppliesAll(t *testing.T) {
 	// IsEFIBoot: true so boot.dma rules apply (they're skipped on non-EFI hosts).
 	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{IsEFIBoot: true})
-	// At tier=2 with an EFI host profile, every rule should Apply
-	// EXCEPT KSEC-SCT-net.* which the managedsysctl registry marks
-	// as ManagedExternally (owned by cfm-sysctl-tweaks). That's the
-	// Phase 6 cross-component contract: kernsec audits but doesn't
-	// write keys another cfm component owns.
+	// At tier=2 with an EFI host profile, every Tier 1 + Tier 2 rule
+	// should Apply EXCEPT KSEC-SCT-net.* (ManagedExternally — owned
+	// by cfm-sysctl-tweaks). Tier 3 rules remain SkipByTier — that's
+	// the explicit opt-in semantic and is exercised separately by
+	// TestResolve_Tier3AppliesAll.
 	for _, r := range rs.Sysctls {
+		if r.Tier == Tier3 {
+			if r.Decision != SkipByTier {
+				t.Errorf("Tier 3 sysctl %q at tier 2: decision %v, want SkipByTier", r.ID, r.Decision)
+			}
+			continue
+		}
 		want := Apply
 		if r.Group == "sysctl.net" {
 			want = ManagedExternally
@@ -91,8 +97,41 @@ func TestResolve_Tier2AppliesAll(t *testing.T) {
 		}
 	}
 	for _, r := range rs.BootArgs {
+		if r.Tier == Tier3 {
+			if r.Decision != SkipByTier {
+				t.Errorf("Tier 3 boot %q at tier 2: decision %v, want SkipByTier", r.ID, r.Decision)
+			}
+			continue
+		}
 		if r.Decision != Apply {
 			t.Errorf("boot %q at tier 2: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
+		}
+	}
+}
+
+func TestResolve_Tier3AppliesAll(t *testing.T) {
+	// At tier=3 with an empty host profile, every rule across all
+	// tiers should Apply (modulo ManagedExternally for sys_tweaks-owned
+	// keys). This is the operator-opt-in semantic: raise conf.Tier to
+	// 3 and the article-borrow Tier 3 boot args (init_on_free,
+	// vsyscall=none, debugfs=off) land. Host-profile probes that
+	// auto-skip individual entries (HasLegacyBinaries → vsyscall;
+	// HasDebugfsConsumers → debugfs) are exercised separately by
+	// TestResolve_Tier3HostProfileGates.
+	rs := Resolve(&Conf{Tier: Tier3}, HostProfile{IsEFIBoot: true})
+	for _, r := range rs.Sysctls {
+		want := Apply
+		if r.Group == "sysctl.net" {
+			want = ManagedExternally
+		}
+		if r.Decision != want {
+			t.Errorf("sysctl %q (group %q) at tier 3: decision %v reason=%q, want %v",
+				r.ID, r.Group, r.Decision, r.Reason, want)
+		}
+	}
+	for _, r := range rs.BootArgs {
+		if r.Decision != Apply {
+			t.Errorf("boot %q at tier 3: decision %v reason=%q, want Apply", r.ID, r.Decision, r.Reason)
 		}
 	}
 }

@@ -41,13 +41,27 @@ func TestParseConf_Tier(t *testing.T) {
 
 func TestParseConf_TierInvalid(t *testing.T) {
 	for _, in := range []string{
-		"tier = 3\n",
+		"tier = 4\n",
 		"tier = -1\n",
 		"tier = banana\n",
 	} {
 		if _, err := ParseConf(strings.NewReader(in)); err == nil {
 			t.Errorf("parse %q: expected error, got nil", in)
 		}
+	}
+}
+
+func TestParseConf_TierThreeValid(t *testing.T) {
+	// Tier 3 was added for the audit-only-by-default opt-in hardening
+	// borrowed from the afflicted.sh "Resolute mitigation map" writeup
+	// (init_on_free, vsyscall=none, debugfs=off). Operators raise
+	// conf.Tier to 3 to opt in.
+	c, err := ParseConf(strings.NewReader("tier = 3\n"))
+	if err != nil {
+		t.Fatalf("parse tier=3: %v", err)
+	}
+	if c.Tier != Tier3 {
+		t.Fatalf("parse tier=3: got Tier %d, want Tier3", c.Tier)
 	}
 }
 

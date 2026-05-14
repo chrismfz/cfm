@@ -70,6 +70,12 @@ type HostProfile struct {
 	HasBackupWorkload        bool   `json:"has_backup_workload"`                   // common backup agents/services present
 	HasMonitoringWorkload    bool   `json:"has_monitoring_workload"`               // common monitoring/crash-diagnostic agents present
 	HasHostingPanelWorkload  bool   `json:"has_hosting_panel_workload"`            // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
+	IsIoUringUser            bool   `json:"is_io_uring_user"`                      // at least one process holds an io_uring fd (anon_inode:[io_uring]) → don't apply kernel.io_uring_disabled=2
+	IoUringUserNote          string `json:"io_uring_user_note,omitempty"`          // human-readable summary (count + sample process names)
+	HasLegacyBinaries        bool   `json:"has_legacy_binaries"`                   // pre-glibc-2.14 / static-no-glibc ELFs found in scanned paths → don't disable vsyscall page
+	LegacyBinariesNote       string `json:"legacy_binaries_note,omitempty"`        // sample paths surfaced as the audit-side notice
+	HasDebugfsConsumers      bool   `json:"has_debugfs_consumers"`                 // bpftrace / bcc-tools / intel-gpu-tools installed, processes with open fds under /sys/kernel/debug → don't disable debugfs
+	DebugfsConsumersNote     string `json:"debugfs_consumers_note,omitempty"`      // sample consumers surfaced as the audit-side notice
 	Reason                   string `json:"reason,omitempty"`                      // freeform note used in --check output
 }
 
@@ -104,6 +110,9 @@ func DetectHostProfile() HostProfile {
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
 	p.HasActiveUserNamespaces, p.ActiveUserNamespacesNote = defaultUsernsProbe().detect()
+	p.IsIoUringUser, p.IoUringUserNote = defaultIoUringProbe().detect()
+	p.HasLegacyBinaries, p.LegacyBinariesNote = defaultLegacyBinaryProbe().detect()
+	p.HasDebugfsConsumers, p.DebugfsConsumersNote = defaultDebugfsConsumerProbe().detect()
 	return p
 }
 
@@ -495,6 +504,46 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 		if p.HasContainers {
 			return "container runtime active — in-container coredumps may route through host kernel.core_pattern"
+		}
+	case "tier2.iouring":
+		// kernel.io_uring_disabled=2 turns off io_uring entirely. On
+		// hosts where Postgres/MySQL/nginx/fio/Node etc. are actively
+		// using io_uring, that strips a kernel code path the
+		// workload depends on. The /proc/*/fd probe is definitive —
+		// it catches custom binaries / renamed processes / future
+		// adopters that any allowlist would miss.
+		if p.IsIoUringUser {
+			if p.IoUringUserNote != "" {
+				return "host has io_uring consumers — " + p.IoUringUserNote
+			}
+			return "host has io_uring consumers (/proc/*/fd shows an active io_uring fd)"
+		}
+	case "tier3.legacycompat":
+		// vsyscall=none breaks statically-linked binaries built
+		// against pre-2.14 glibc (CentOS-6-vintage software) and a
+		// handful of similarly ancient outputs. The probe scans
+		// /usr/bin, /usr/local/bin and (when present) common
+		// hosting-panel chroot roots for ELFs that reference glibc
+		// versions < 2.14 or no glibc at all. If anything turns up,
+		// skip rather than risk a silent segfault on opt-in.
+		if p.HasLegacyBinaries {
+			if p.LegacyBinariesNote != "" {
+				return "legacy binaries that may rely on the vsyscall page found: " + p.LegacyBinariesNote
+			}
+			return "legacy binaries that may rely on the vsyscall page were found in standard paths"
+		}
+	case "tier3.observability":
+		// debugfs=off refuses to expose the debugfs filesystem at
+		// all. bpftrace, bcc-tools, intel-gpu-tools, legacy
+		// hardware-monitoring tools and libvirt's debug introspection
+		// all break. Note: tracefs (used by ftrace / perf / modern
+		// bpftrace) is mounted separately at /sys/kernel/tracing
+		// since kernel 4.1 and is NOT affected by this knob.
+		if p.HasDebugfsConsumers {
+			if p.DebugfsConsumersNote != "" {
+				return "active debugfs consumers detected — " + p.DebugfsConsumersNote
+			}
+			return "active debugfs consumers detected"
 		}
 	case "tier2.oops":
 		// kernel.panic_on_oops=1 + kernel.panic=10 + oops=panic turn

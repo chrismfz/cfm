@@ -486,7 +486,11 @@ args="ro"
 	if strings.Contains(updateCall, "rescue") {
 		t.Errorf("rescue kernel must NOT appear in update call: %q", updateCall)
 	}
-	if strings.Contains(updateCall, "debug") {
+	// Match the actual debug-kernel path rather than the bare
+	// substring "debug" — ManagedBootArgKeys now legitimately
+	// contains "debugfs" (Tier 3 boot arg), and the bare-substring
+	// check would false-positive on its appearance in --remove-args.
+	if strings.Contains(updateCall, "vmlinuz-6.1.0+debug") {
 		t.Errorf("debug kernel must NOT appear in update call: %q", updateCall)
 	}
 	if !strings.Contains(updateCall, "vmlinuz-6.1.0 ") && !strings.HasSuffix(strings.SplitN(updateCall, "--remove-args=", 2)[0], "vmlinuz-6.1.0 ") {

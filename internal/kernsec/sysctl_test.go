@@ -45,7 +45,7 @@ func TestKSPPProfileSanity(t *testing.T) {
 		if a.ID == "" {
 			t.Errorf("%q has empty ID", a.Key)
 		}
-		if a.Tier != Tier1 && a.Tier != Tier2 {
+		if a.Tier != Tier1 && a.Tier != Tier2 && a.Tier != Tier3 {
 			t.Errorf("%q has invalid Tier %d", a.Key, a.Tier)
 		}
 	}
@@ -63,7 +63,7 @@ func TestKSPPProfileSanity(t *testing.T) {
 		if r.ID == "" {
 			t.Errorf("sysctl %q has empty ID", r.Key)
 		}
-		if r.Tier != Tier1 && r.Tier != Tier2 {
+		if r.Tier != Tier1 && r.Tier != Tier2 && r.Tier != Tier3 {
 			t.Errorf("sysctl %q has invalid Tier %d", r.Key, r.Tier)
 		}
 	}
