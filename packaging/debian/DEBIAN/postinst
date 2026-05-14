@@ -142,6 +142,13 @@ fi
 # operator intervention. We never enable or start a service here: hosts
 # may run neither, only one, or both (e.g. for testing).
 if command -v systemctl >/dev/null 2>&1; then
+    # Belt-and-suspenders: even though init_worker_by_lua_block in
+    # angie.conf/openresty.conf is now resilient to a transient require
+    # failure, give the filesystem a moment to settle after the
+    # `install -m 0640 ...` of every shipped lua file above. Workers
+    # re-exec on `reload` and immediately re-run init_worker; a short
+    # pause here keeps the boring path boring.
+    sleep 2
     for svc in angie.service openresty.service; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             echo "CFM: reloading $svc to apply updated config..."
