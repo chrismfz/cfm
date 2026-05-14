@@ -469,6 +469,66 @@ func runDaemon(args []string) {
 			}
 		}
 	}
+
+	// Ensure base data dirs exist with correct permissions BEFORE any
+	// subsystem (sslcollector, lua deploy, panel-auth socket, etc.)
+	// tries to write into them. Putting this at the very top of
+	// runDaemon closes the brief root:root window that previously left
+	// daemon-written files (eg /var/lib/cfm/sslcollector/dump.json)
+	// unreadable to the cfm-group worker user — chown was happening
+	// AFTER the daemon's first writes elsewhere in startup, races
+	// possible with edge reloads.
+	//
+	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty
+	// worker (running as the cfm user) can read the cert snapshot there.
+	// cfmGID is 0 when the cfm group does not exist yet
+	// (install-openresty.sh not yet run); os.Chown with GID 0 is a
+	// no-op — permissions stay root:root and the daemon logs a warning
+	// when the socket server starts.
+	cfmGID := sslcollector.CfmGroupID()
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{"/var/lib/cfm", 0o701},
+		{"/var/lib/cfm/lua", 0o750},
+		{"/var/lib/cfm/sslcollector", 0o770},
+		{"/var/lib/cfm/scanner", 0o700},
+		{"/var/lib/cfm/scanner/pending", 0o700},
+		{"/var/lib/cfm/scanner/infected", 0o700},
+		{"/var/log/cfm", 0o700},
+		// /var/run is tmpfs on systemd systems — recreate on every
+		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
+		// creation fails on boot. 0750 root:cfm: OpenResty/Angie workers
+		// (cfm group) need to traverse in to reach sockets; no other
+		// local user has a reason to list this dir. The chown to cfm gid
+		// happens below alongside the other cfm-group dirs.
+		{"/var/run/cfm", 0o750},
+	} {
+		_ = os.MkdirAll(d.path, d.mode)
+		_ = os.Chmod(d.path, d.mode)
+	}
+	if cfmGID > 0 {
+		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		_ = os.Chown("/var/run/cfm", 0, cfmGID)
+		// Chown the snapshot file if it already exists (eg written as
+		// root:root before the cfm group was in place). Without this,
+		// OpenResty (cfm user) cannot read the snapshot on startup
+		// until it successfully writes a new one.
+		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
+		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm
+		// group) can write.
+		for _, d := range []string{
+			"/var/cache/nginx/cfm_static",
+			"/var/cache/nginx/cfm_micro",
+		} {
+			_ = os.MkdirAll(d, 0o770)
+			_ = os.Chmod(d, 0o770)
+			_ = os.Chown(d, 0, cfmGID)
+		}
+	}
+
 	rawEngine, engine, engineSource := resolveFirewallEngine(engineCfg)
 	logging.Logf("[startup] firewall engine raw=%q normalized=%q source=%s", rawEngine, engine, engineSource)
 
@@ -855,52 +915,11 @@ func runDaemon(args []string) {
 	lsmLc := lsm.NewLifecycle()
 	defer lsmLc.Stop()
 
-	// Ensure base data dirs exist with correct permissions.
-	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty worker
-	// (running as the cfm user) can write the cert snapshot there.
-	// cfmGID is 0 when the cfm group does not exist yet (install-openresty.sh
-	// not yet run); os.Chown with GID 0 is a no-op — permissions stay root:root
-	// and the daemon logs a warning when the socket server starts.
-	cfmGID := sslcollector.CfmGroupID()
-	for _, d := range []struct {
-		path string
-		mode os.FileMode
-	}{
-		{"/var/lib/cfm", 0o701},
-		{"/var/lib/cfm/lua", 0o750},
-		{"/var/lib/cfm/sslcollector", 0o770},
-		{"/var/lib/cfm/scanner", 0o700},
-		{"/var/lib/cfm/scanner/pending", 0o700},
-		{"/var/lib/cfm/scanner/infected", 0o700},
-		{"/var/log/cfm", 0o700},
-		// /var/run is tmpfs on systemd systems — recreate on every daemon start.
-		// Without this the bridge socket (OPENRESTY_SOCK) creation fails on boot.
-		// 0750 root:cfm: OpenResty/Angie workers (cfm group) need to traverse in
-		// to reach sockets; no other local user has a reason to list this dir.
-		// The chown to cfm gid happens below alongside the other cfm-group dirs.
-		{"/var/run/cfm", 0o750},
-	} {
-		_ = os.MkdirAll(d.path, d.mode)
-		_ = os.Chmod(d.path, d.mode)
-	}
-	if cfmGID > 0 {
-		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
-		_ = os.Chown("/var/run/cfm", 0, cfmGID)
-		// Chown the snapshot file if it already exists (e.g. written as root:root
-		// before the cfm group was in place). Without this, OpenResty (cfm user)
-		// cannot read the snapshot on startup until it successfully writes a new one.
-		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
-		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm group) can write.
-		for _, d := range []string{
-			"/var/cache/nginx/cfm_static",
-			"/var/cache/nginx/cfm_micro",
-		} {
-			_ = os.MkdirAll(d, 0o770)
-			_ = os.Chmod(d, 0o770)
-			_ = os.Chown(d, 0, cfmGID)
-		}
-	}
+	// (state-dir mkdir+chown moved to the top of runDaemon — see the
+	// block right after cfm.conf is parsed. Keeping it there ensures
+	// every subsystem that writes into /var/lib/cfm finds correct
+	// permissions on first write, instead of racing with the chown
+	// that previously happened here.)
 
 	// ── Lifecycle managers ──────────────────────────────────────────────────────
 	mmdbLc := mmdb.NewLifecycle()
