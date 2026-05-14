@@ -16,6 +16,7 @@ Catalog:
 - `CFML-EXEC-004` — Deleted-file exec by web user
 - `CFML-EXEC-005` — Suspicious interpreter network stdio *(monitor-only)*
 - `CFML-FS-005`   — Sensitive-file modification by web user
+- `CFML-FS-006`   — Sensitive read via root-owned fd from unprivileged task *(monitor-only)*
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
 - `CFML-CRED-003` — Direct root credential install *(monitor-only)*
 - `CFML-BPF-001`  — Unexpected BPF use *(monitor-only advanced-threat telemetry)*
@@ -168,6 +169,7 @@ something else CFM relies on.
 | `CFML-EXEC-004` (deleted-file exec by web user) | **In** | Catches the upload-open-unlink-exec staging pattern by web-class uids. Enforce available after local telemetry confirms backup/deploy agents do not match. |
 | `CFML-EXEC-005` (suspicious interpreter network stdio) | **In, monitor-only** | Weak companion telemetry for one or two remote stdio fds on shell/interpreter/socket-helper execs; intentionally not a default block due to inetd/admin/debug FPs. |
 | `CFML-FS-005` (sensitive-file write by web user) | **In** | High-signal post-exploit cash-in catch. CageFS hides the paths from caged users, so any FS-005 fire on a caged host is itself a compromise indicator. Enforce available for current-uid matches on the core auth set; persistence-path additions and origin-only matches stay monitor-only. |
+| `CFML-FS-006` (sensitive read via root-owned fd from unprivileged task) | **In, monitor-only** | Kernel-side fingerprint of the setuid-helper fd-leak class — `pidfd_getfd()` exit-window race against ssh-keysign / chage / unix_chkpwd (Qualys / Linus commit `31e62c2ebbfd`), plus older `CLONE_FILES` + setuid-exec and `/proc/<pid>/fd/<n>` variants. Kernsec `kernel.yama.ptrace_scope=2` kills the modern `pidfd_getfd()` primitive, but operators who `state = skip` that rule for same-uid debuggability lose the kernel-level block — FS-006 is their belt-and-braces layer. Monitor-only by design: passwd / pkexec / sudo / dovecot-auth / postfix workers legitimately read the FS-005 watched-inodes set after dropping privs. |
 | `CFML-CRED-002` (privesc without setuid path) | **In, monitor-only** | Canonical post-exploit fingerprint: non-root → root via a setuid syscall from a binary not on the suid-bit allowlist. Enforce is unsafe (cred-install deadlocks systemd / pkexec mid-transition) so it is permanently monitor-only. |
 | `CFML-CRED-003` (direct root cred install) | **In, monitor-only** | Complements CRED-002 for kernel-exploit payloads that bypass the setuid syscall entirely via `commit_creds(prepare_kernel_cred(NULL))`. `fentry` tracing, not an LSM decision point — monitor-only by construction. |
 | `CFML-BPF-001` (unexpected BPF use) | **In, monitor-only** | Advanced-threat telemetry for `bpf()` `BPF_MAP_CREATE` / `BPF_PROG_LOAD` outside CFM + a small trusted-agent set, plus watched web/panel uids. Broad surface reduction belongs in `kernsec` sysctls (`unprivileged_bpf_disabled`, `bpf_jit_harden`); this rule is monitor-only by construction. |
@@ -441,6 +443,107 @@ package hooks, or panel maintenance workers that were launched by a web/panel
 account and later acquired uid 0 before touching a watched path. Those are
 valuable forensic breadcrumbs during compromise response, but they need
 monitor-mode review before any blocking decision.
+
+### `CFML-FS-006` — Sensitive read via root-owned fd from unprivileged task
+
+**Threat.** A setuid-root helper (`ssh-keysign`, `chage`, `unix_chkpwd`,
+`passwd`, …) opens a sensitive file as root and an unprivileged task obtains a
+reference to that already-opened `struct file` before the helper closes it.
+The unprivileged task then reads the file via the leaked fd — its own
+`current_cred()` stays at the original uid, but `file->f_cred->euid` is 0 and
+the fd grants whatever access root had at open time. Working primitives in
+this class include:
+
+- **`pidfd_getfd()` exit-window race** — the modern variant. Attacker
+  `fork+exec`s the setuid helper (so the attacker IS the parent, which Yama
+  `ptrace_scope=1` allows through), opens a pidfd to the helper, and races
+  `pidfd_getfd()` against the helper's exit window to clone the fd that
+  pointed at `/etc/shadow`. Reported by Qualys against `ssh-keysign`; kernel
+  fix at Linus commit `31e62c2ebbfd`. Reproducers like `chage_pwn` /
+  `sshkeysign_pwn` (the README "try=N" loop counts the race iterations)
+  succeed on stock RHEL/Alma/Rocky with `ptrace_scope=1`.
+- **`CLONE_FILES` + setuid-exec** — older variant; parent and child share an
+  fd table, child `execve`s the setuid helper, helper opens `/etc/shadow`,
+  parent reads it through the shared table. Largely closed by modern kernels
+  refusing setuid-exec across a shared `files_struct`, but worth blocking at
+  the LSM layer anyway.
+- **`/proc/<helper-pid>/fd/<n>`** — opportunistic; needs the
+  `dumpable`-relaxed window. Lower yield on modern kernels but still feasible
+  with `fs.suid_dumpable=1`.
+
+**Hook.** `lsm/file_permission` — fires on every read/write through any fd,
+which is the only point where the kernel knows both `current_cred()` (who is
+acting now) and `file->f_cred` (who opened the file). `file_open` is too
+early — the open happens in the privileged helper, not the attacker.
+`file_receive` only fires on SCM_RIGHTS, which misses every primitive in this
+class. The hook cost is paid on every `read(2)`/`write(2)` system-wide, so
+the program early-returns on the cheap path (current is uid 0) before doing
+any map lookup.
+
+**Mechanism.** The BPF program performs three checks in order, fastest
+first:
+
+1. `current_cred()->euid != 0` — skip uid-0 callers entirely (root reading
+   `/etc/shadow` is uninteresting and would dominate the event volume).
+2. `file->f_cred->euid == 0` — only fires when the fd was opened in a
+   privileged context. `BPF_CORE_READ(file, f_cred, euid.val)` keeps it
+   CO-RE-portable across kernel versions.
+3. `cfm_watched_inodes` lookup against the dentry's `(fs_id, ino)` — reuses
+   the same map FS-005 populates from the sensitive-path table
+   (`/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/sudoers.d/*`,
+   `/root/.ssh/*`, `/etc/ssh/ssh_host_*_key`, host-persistence additions).
+
+All three pass → emit one `cfm_lsm_event` to the shared ringbuf with policy
+id `CFML-FS-006`. The hook does not block — see "Mode" below.
+
+**Mode.** Monitor-only by default and for the foreseeable future. Enforce is
+unsafe because several legitimate authentication chains open the watched
+files as root in one task and `read(2)` from a worker after dropping privs:
+
+- `passwd`, `pkexec`, `sudo` — open `/etc/shadow` as root, then drop to the
+  caller's uid for the readback compare.
+- `unix_chkpwd` — invoked by PAM with the caller's uid; opens
+  `/etc/shadow` via setuid root, reads it back from the same task after the
+  setuid bit has dropped via `setresuid()`.
+- `dovecot-auth` worker pool, `postfix smtpd_pickup`, some IMAP/SMTP MTAs
+  — preopen `/etc/shadow` in a privileged supervisor and hand the fd (or
+  the worker forks) to an unprivileged auth worker for the actual read.
+
+Enforce would deny those reads and break authentication. Telemetry first; if
+an enforce mode ever lands, the allow-list of `(comm, exe_inode)` pairs
+permitted to do this has to be scrubbed against weeks of production data,
+not guessed.
+
+**Relationship to kernsec.** `kernsec` ships `kernel.yama.ptrace_scope=2`
+(`KSEC-SCT-kspp.kernel-006`) in Tier 1, which closes the `pidfd_getfd()`
+primitive at the kernel layer — that is the cheapest, broadest mitigation
+for hosts that can accept it. FS-006 exists for hosts that cannot:
+debug-heavy workstations, CI runners, observability hosts that need
+`gdb --attach` / `strace -p` / `py-spy` without sudo. Those hosts
+`state = skip` `KSEC-SCT-kspp.kernel-006` in `kernsec.conf` and accept
+the residual exit-window race. FS-006 then gives them telemetry on any
+read of a watched inode through a leaked root fd, regardless of which
+primitive established the leak (pidfd_getfd, CLONE_FILES, /proc/fd, or a
+future variant). It is defence-in-depth, not a replacement for the
+sysctl.
+
+**Why not enforce on a curated allow-list day one.** The legitimate-helper
+set above varies by distro release, PAM stack, MTA choice, and panel
+vendor (DirectAdmin, cPanel, CloudLinux, mailcow each spawn workers with
+slightly different `comm` / exe-inode shapes). Enforce-by-allow-list
+would need a stable inventory of "every `(comm, exe_inode)` that may
+legitimately read a watched file through a root-opened fd," and that
+inventory is only knowable empirically — which is what the monitor
+telemetry window is for. The same reasoning applies as for CRED-002:
+returning `-EPERM` from this hook mid-PAM-stack would deadlock the auth
+session, not just block one read.
+
+**False-positive profile.** Expected mid-volume during the monitor window
+on any host that exercises PAM (every interactive `su`, every `sshd`
+password auth, every `crond` PAM session). Operators are expected to
+review the captured `(comm, exe_inode)` distribution and either accept
+the noise as expected baseline or build an allow-list before any
+enforce conversation.
 
 ### `CFML-CRED-002` — Privilege escalation without setuid path
 

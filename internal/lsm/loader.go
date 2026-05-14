@@ -68,6 +68,7 @@ const (
 	pinFileLinkCred002            = "cfm_cred002"
 	pinFileLinkCred003            = "cfm_cred003"
 	pinFileLinkBpf001             = "cfm_bpf001"
+	pinFileLinkFs006              = "cfm_fs006"
 )
 
 // ErrBPFLSMUnavailable is returned by NewLoader when the running
@@ -511,6 +512,8 @@ func pinLinkFiles(id PolicyID) []string {
 		return []string{pinFileLinkCred003}
 	case PolicyUnexpectedBPF:
 		return []string{pinFileLinkBpf001}
+	case PolicyFdCredMismatch:
+		return []string{pinFileLinkFs006}
 	}
 	return nil
 }
