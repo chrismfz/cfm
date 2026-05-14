@@ -94,6 +94,32 @@ func EnableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	// systemd unit → secure-tmp refusal; etc.).
 	detail := CheckMountDetail(rule, Tier1Mounts)
 
+	// Symlink no-op: typical /var/tmp → /tmp on cPanel / CloudLinux.
+	// The audit row already reads "symlink → /tmp; harden the
+	// target". There's nothing to write here — hardening /tmp is
+	// what covers this row, and applying mount options to a symlink
+	// is meaningless. Surface the situation and exit cleanly so the
+	// TUI's E key doesn't look broken when the operator hits it.
+	if detail.State == MountSymlink {
+		target := detail.SymlinkTarget
+		if target == "" {
+			target = "<unresolved>"
+		}
+		fmt.Fprintf(w, "[Mount] %s is a symlink to %s — no action needed; hardening %s covers this path.\n",
+			rule.MountPoint, target, target)
+		return nil
+	}
+
+	// Bind-of-another no-op: /var/tmp is already bind-mounted from
+	// /tmp at runtime (or the cPanel /usr/tmpDSK shared-source
+	// pattern). The audit row defers to the primary; Enable should
+	// do the same rather than re-mounting a sibling.
+	if detail.State == MountBindOfAnother {
+		fmt.Fprintf(w, "[Mount] %s is a bind sibling of %s — no action needed; harden %s instead.\n",
+			rule.MountPoint, detail.BindPrimaryPath, detail.BindPrimaryPath)
+		return nil
+	}
+
 	// /var/tmp bind strategy: when /var/tmp has no separate mount,
 	// add `/tmp /var/tmp none bind 0 0` to fstab. The bind picks up
 	// /tmp's hardening at reboot without provisioning a second

@@ -267,6 +267,56 @@ func TestEnableMount_TmpRefusedWhenNotSeparateAndNoUnit(t *testing.T) {
 	}
 }
 
+func TestEnableMount_VarTmpSymlinkIsNoop(t *testing.T) {
+	// cPanel / CloudLinux pattern: /var/tmp → /tmp. The audit row
+	// defers to /tmp; Enable on /var/tmp must do nothing (no fstab
+	// edit, no drop-in, no error) — hardening /tmp covers it.
+	fstabPath := withFakeFstab(t, `UUID=abc / ext4 defaults 0 1
+`)
+	dir := t.TempDir()
+	origEtc, origFinder := systemdSystemEtcDir, realSystemdUnitFinderWithDropins
+	systemdSystemEtcDir = dir
+	realSystemdUnitFinderWithDropins = noUnit()
+	t.Cleanup(func() {
+		systemdSystemEtcDir = origEtc
+		realSystemdUnitFinderWithDropins = origFinder
+	})
+	origProc, origLstat, origReadlink := readProcMounts, realLstat, realReadlink
+	readProcMounts = func() string {
+		return "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0\n"
+	}
+	realLstat = stubFS{links: map[string]string{"/var/tmp": "/tmp"}}.lstat
+	realReadlink = stubFS{links: map[string]string{"/var/tmp": "/tmp"}}.readlink
+	t.Cleanup(func() {
+		readProcMounts = origProc
+		realLstat = origLstat
+		realReadlink = origReadlink
+	})
+
+	stub := &stubExec{}
+	stub.install(t)
+
+	rule := MountRule{
+		ID: "KSEC-FS-mount.tmp-002", MountPoint: "/var/tmp",
+		Recommended: "nodev,nosuid,noexec", CanEnable: true,
+	}
+	var w bytes.Buffer
+	if err := EnableMount(rule, &w, EnableMountOptions{}); err != nil {
+		t.Fatalf("EnableMount on symlinked /var/tmp returned error: %v", err)
+	}
+	if !strings.Contains(w.String(), "symlink") {
+		t.Errorf("output should mention symlink; got:\n%s", w.String())
+	}
+	// fstab untouched, no drop-in written, no daemon-reload triggered.
+	got, _ := os.ReadFile(fstabPath)
+	if strings.Contains(string(got), "/var/tmp") {
+		t.Errorf("fstab must be untouched on symlink no-op; got:\n%s", got)
+	}
+	if stub.daemonReloads != 0 {
+		t.Errorf("symlink no-op should not trigger daemon-reload; got %d", stub.daemonReloads)
+	}
+}
+
 func TestEnableMount_TmpRefusedWhenUnitExistsButNotMounted(t *testing.T) {
 	// /usr/lib/systemd/system/tmp.mount exists (every Debian) but
 	// /tmp isn't actually mounted via it on this host — masked,
