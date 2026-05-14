@@ -119,6 +119,36 @@ func TestCheckSysctl_AcceptValuesTreatedAsOK(t *testing.T) {
 	}
 }
 
+func TestCheckSysctl_PtraceScopeAcceptsMode1(t *testing.T) {
+	// kernel.yama.ptrace_scope rule: target =2 (closes the same-uid
+	// pidfd_getfd() exit-window race against setuid helpers — the
+	// ssh-keysign host-key theft chain fixed by Linus commit
+	// 31e62c2ebbfd), accepts =1 for hosts that prefer same-uid
+	// debuggability over closing that residual race.
+	var rule SysctlRule
+	for _, r := range KSPPSysctls {
+		if r.Key == "kernel.yama.ptrace_scope" {
+			rule = r
+			break
+		}
+	}
+	if rule.Key == "" {
+		t.Fatal("kernel.yama.ptrace_scope rule missing from KSPPSysctls")
+	}
+	if rule.Value != "2" {
+		t.Errorf("kernel.yama.ptrace_scope rule Value=%q, want \"2\"", rule.Value)
+	}
+	found := false
+	for _, v := range rule.AcceptValues {
+		if v == "1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AcceptValues=%v should contain \"1\"", rule.AcceptValues)
+	}
+}
+
 func TestRemovedSysctlRulesAbsentFromRegistry(t *testing.T) {
 	removedIDs := []string{
 		strings.Join([]string{"KSEC-SCT-net", "harden-006"}, "."),

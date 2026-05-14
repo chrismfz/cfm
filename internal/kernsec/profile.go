@@ -185,9 +185,21 @@ var KSPPSysctls = []SysctlRule{
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-006", Group: "kspp.kernel", Tier: Tier1,
-		Key: "kernel.yama.ptrace_scope", Value: "1",
-		Description: "Limit ptrace() to direct children.",
-		Affects:     "gdb attaching to an existing PID needs CAP_SYS_PTRACE / sudo.",
+		Key: "kernel.yama.ptrace_scope", Value: "2",
+		// Live=1 still blocks the classic same-uid ptrace_attach
+		// against non-children, but it does NOT block the
+		// pidfd_getfd() exit-window race against setuid helpers
+		// (the attacker fork+exec's the helper so it IS the
+		// parent, which mode 1 allows through). Mode 2 routes the
+		// check via security_ptrace_access_check() and requires
+		// CAP_SYS_PTRACE, closing that primitive. Operators who
+		// need same-uid debuggability (gdb/strace/py-spy without
+		// sudo) can leave the knob at 1 — both are accepted as
+		// green by the audit. See Linus commit 31e62c2ebbfd
+		// (ptrace: slightly saner get_dumpable() logic).
+		AcceptValues: []string{"1"},
+		Description:  "Require CAP_SYS_PTRACE for any ptrace attach. Beyond mode 1's child-only restriction, mode 2 also blocks the same-uid pidfd_getfd() exit-window race against setuid helpers — the ssh-keysign host-key theft chain reported by Qualys (kernel fix: Linus commit 31e62c2ebbfd).",
+		Affects:      "gdb --attach, strace -p, py-spy, bpftrace -p, rr record -p and similar attach-style debuggers/profilers need sudo even on the user's own processes. Crash reporters that opt in via PR_SET_PTRACER (Chrome crashpad, Firefox, drkonqi, abrt) can no longer produce minidumps — irrelevant on headless servers. Mode 1 stays acceptable for hosts that need same-uid debuggability and accept the residual exit-window race.",
 	},
 }
 
