@@ -355,6 +355,36 @@ func TestReviewedRulesTierAndHostProfileDecisions(t *testing.T) {
 		{
 			name: "core_pattern skips backup workloads", tier: Tier2, profile: HostProfile{HasBackupWorkload: true}, id: "KSEC-SCT-kernel.coredump-001", want: SkipByHostProfile,
 		},
+		{
+			name: "core_pattern skips KVM host", tier: Tier2, profile: HostProfile{IsKVMHost: true}, id: "KSEC-SCT-kernel.coredump-001", want: SkipByHostProfile,
+		},
+		{
+			name: "core_pattern skips container host", tier: Tier2, profile: HostProfile{HasContainers: true}, id: "KSEC-SCT-kernel.coredump-001", want: SkipByHostProfile,
+		},
+		{
+			name: "llc applies on clean host", tier: Tier1, id: "KSEC-MOD-net.legacy-017", want: Apply,
+		},
+		{
+			name: "llc skipped when bridges in use", tier: Tier1, profile: HostProfile{UsesBridge: true}, id: "KSEC-MOD-net.legacy-017", want: SkipByHostProfile,
+		},
+		{
+			name: "llc2 skipped on Docker host", tier: Tier1, profile: HostProfile{HasContainers: true}, id: "KSEC-MOD-net.legacy-018", want: SkipByHostProfile,
+		},
+		{
+			name: "llc skipped on KVM host", tier: Tier1, profile: HostProfile{IsKVMHost: true}, id: "KSEC-MOD-net.legacy-017", want: SkipByHostProfile,
+		},
+		{
+			name: "llc skipped on Proxmox host", tier: Tier1, profile: HostProfile{IsProxmox: true}, id: "KSEC-MOD-net.legacy-017", want: SkipByHostProfile,
+		},
+		{
+			name: "panic_on_oops skipped on KVM host", tier: Tier2, profile: HostProfile{IsKVMHost: true}, id: "KSEC-SCT-mem.exploit-006", want: SkipByHostProfile,
+		},
+		{
+			name: "oops=panic bootarg skipped on container host", tier: Tier2, profile: HostProfile{HasContainers: true}, id: "KSEC-BOOT-tier2.oops-001", want: SkipByHostProfile,
+		},
+		{
+			name: "panic=10 skipped on Proxmox host", tier: Tier2, profile: HostProfile{IsProxmox: true}, id: "KSEC-SCT-mem.exploit-008", want: SkipByHostProfile,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

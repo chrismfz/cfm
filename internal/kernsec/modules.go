@@ -187,16 +187,16 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-017", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-017", Group: "modules.net.legacy.llc", Tier: Tier1,
 		Name:        "llc",
-		Description: "Logical Link Control.",
-		Affects:     "None.",
+		Description: "Logical Link Control — only used by dead net protocols (IPX, AppleTalk, Token Ring) on the userland side, BUT the in-kernel `bridge` module hard-depends on llc (bridge → stp → llc).",
+		Affects:     "Breaks every in-kernel bridge user: Docker (docker0, br-*), Podman, libvirt/KVM (virbr*), Proxmox (vmbr*), LXC/LXD, K8s CNIs, manual `brctl`/`ip link add type bridge`. Auto-skipped when a bridge interface, container runtime, KVM hypervisor, libvirt or Proxmox is detected. Force only on hosts that genuinely never bridge.",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-018", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-018", Group: "modules.net.legacy.llc", Tier: Tier1,
 		Name:        "llc2",
-		Description: "LLC type 2.",
-		Affects:     "None.",
+		Description: "LLC type 2 — same family as llc and pulled in alongside it by the bridge stack.",
+		Affects:     "Same as llc (KSEC-MOD-net.legacy-017): paired blacklist breaks any in-kernel bridge user. Same auto-skip gate.",
 	},
 	{
 		ID: "KSEC-MOD-net.legacy-019", Group: "modules.net.legacy", Tier: Tier1,

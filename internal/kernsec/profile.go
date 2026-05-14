@@ -262,7 +262,7 @@ var Tier2BootArgs = []BootArg{
 		ID: "KSEC-BOOT-tier2.oops-001", Group: "tier2.oops", Tier: Tier2,
 		Key: "oops", Value: "panic",
 		Description: "Pair with kernel.panic_on_oops=1 to stop oops-spray exploit techniques cold.",
-		Affects:     "Aggressive: any kernel oops becomes a reboot. Trade reliability for exploit mitigation.",
+		Affects:     "Aggressive: any kernel oops becomes a reboot. On a multi-tenant host (KVM hypervisor, libvirt, Proxmox, container engine) one oops reboots every guest/container at once. Auto-skipped on multi-tenant hosts; defensible on single-tenant boxes.",
 	},
 }
 
@@ -343,7 +343,7 @@ var MemExploitSysctls = []SysctlRule{
 		ID: "KSEC-SCT-mem.exploit-006", Group: "tier2.oops", Tier: Tier2,
 		Key: "kernel.panic_on_oops", Value: "1",
 		Description: "Fail closed on a kernel oops instead of continuing after possible kernel memory corruption.",
-		Affects:     "Aggressive: any kernel oops can reboot the host. Tier 2 only; pair with oops=panic and kernel.panic=10.",
+		Affects:     "Aggressive: any kernel oops can reboot the host. On a multi-tenant host (KVM hypervisor, libvirt, Proxmox, container engine) the reboot takes down every guest/container at once. Tier 2 only; auto-skipped on multi-tenant hosts; pair with oops=panic and kernel.panic=10 on single-tenant boxes.",
 	},
 	{
 		ID: "KSEC-SCT-mem.exploit-007", Group: "sysctl.mem.exploit", Tier: Tier1,
@@ -355,7 +355,7 @@ var MemExploitSysctls = []SysctlRule{
 		ID: "KSEC-SCT-mem.exploit-008", Group: "tier2.oops", Tier: Tier2,
 		Key: "kernel.panic", Value: "10",
 		Description: "Reboot ten seconds after a panic so Tier 2 oops=panic hosts recover automatically after fail-closed crashes.",
-		Affects:     "Aggressive: panic reboots may reduce forensic time on the console. Tier 2 only.",
+		Affects:     "Aggressive: panic reboots may reduce forensic time on the console. On a multi-tenant host the reboot takes down every guest/container at once. Tier 2 only; auto-skipped on multi-tenant hosts.",
 	},
 }
 
