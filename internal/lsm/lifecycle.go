@@ -81,6 +81,9 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// Apply kmsg config early so subsequent emissions honour the
 	// operator's state_transitions / detect_events toggles.
 	ConfigureKmsg(conf.Kmsg)
+	// Install the userspace allowlist before the drain goroutine
+	// starts so the first event already goes through the filter.
+	SetEventFilter(BuildEventFilter(conf))
 	if !conf.Enabled {
 		l.mu.Unlock()
 		return
@@ -267,6 +270,9 @@ func (l *Lifecycle) run(loader *Loader) {
 		case ev, ok := <-loader.Events():
 			if !ok {
 				return
+			}
+			if shouldSuppressEvent(ev) {
+				continue
 			}
 			emitNotify(ev)
 		case err, ok := <-loader.Errors():

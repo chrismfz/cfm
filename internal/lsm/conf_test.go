@@ -240,14 +240,44 @@ func TestFormatConf_RoundTrip(t *testing.T) {
 		}
 	}
 
+	// The effective allowlist (global [allow] entries plus per-policy
+	// allow_exe) must survive the round trip exactly. Compare via the
+	// accessor so the test is agnostic to which section each entry
+	// originated from.
 	gotAllow := roundtrip.AllowExeFor(PolicyCredEscal)
-	wantAllow := original.AllowExe[PolicyCredEscal]
+	wantAllow := original.AllowExeFor(PolicyCredEscal)
 	if len(gotAllow) != len(wantAllow) {
 		t.Fatalf("allow_exe round-trip count: got %d, want %d (rendered: %s)", len(gotAllow), len(wantAllow), rendered)
 	}
 	for i := range wantAllow {
 		if gotAllow[i] != wantAllow[i] {
 			t.Errorf("allow_exe[%d]: got %q, want %q", i, gotAllow[i], wantAllow[i])
+		}
+	}
+	// Also pin down the source-section roundtrip — the per-policy
+	// AllowExe map should hold exactly what was written under
+	// [policy "..."], not the global section's entries.
+	gotPerPolicy := roundtrip.AllowExe[PolicyCredEscal]
+	wantPerPolicy := original.AllowExe[PolicyCredEscal]
+	if len(gotPerPolicy) != len(wantPerPolicy) {
+		t.Fatalf("per-policy allow_exe round-trip count: got %d (%v), want %d (%v)", len(gotPerPolicy), gotPerPolicy, len(wantPerPolicy), wantPerPolicy)
+	}
+	for i := range wantPerPolicy {
+		if gotPerPolicy[i] != wantPerPolicy[i] {
+			t.Errorf("per-policy allow_exe[%d]: got %q, want %q", i, gotPerPolicy[i], wantPerPolicy[i])
+		}
+	}
+	// Global [allow] entries should match DefaultGlobalAllowExe in
+	// order — operators read the file top-to-bottom and we don't want
+	// reordering churn between writes.
+	gotGlobal := roundtrip.GlobalAllowExe
+	wantGlobal := original.GlobalAllowExe
+	if len(gotGlobal) != len(wantGlobal) {
+		t.Fatalf("global allow_exe round-trip count: got %d, want %d", len(gotGlobal), len(wantGlobal))
+	}
+	for i := range wantGlobal {
+		if gotGlobal[i] != wantGlobal[i] {
+			t.Errorf("global allow_exe[%d]: got %q, want %q", i, gotGlobal[i], wantGlobal[i])
 		}
 	}
 }
