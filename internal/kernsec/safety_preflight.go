@@ -42,8 +42,12 @@ func preflightSummary(
 	fmt.Fprintf(w, "    - boot args: next-boot cmdline                              (%d args)\n", len(bootArgs))
 	fmt.Fprintf(w, "    - modules:   %-50s (%d modules)\n", ModprobePath, len(modules))
 	for _, m := range mountsToEnable {
-		fmt.Fprintf(w, "    - mounts:    %-50s (+ %s on %s; remount live)\n",
-			PathFstab, m.Recommended, m.MountPoint)
+		liveNote := "remount live"
+		if !liveRemountSafe(m) {
+			liveNote = "PEND until reboot"
+		}
+		fmt.Fprintf(w, "    - mounts:    %-50s (+ %s on %s; %s)\n",
+			PathFstab, m.Recommended, m.MountPoint, liveNote)
 	}
 
 	risks := boot_impacting_risks(bootArgs, modules, profile)
@@ -82,6 +86,12 @@ func mount_impacting_risks(mountsToEnable []MountRule) []string {
 		case "/dev/shm":
 			risks = append(risks,
 				"/dev/shm: live remount with nodev,nosuid,noexec. Pre-15 PostgreSQL JIT and headless Chromium can break — revert with `mount -o remount,exec /dev/shm` then `cfm kernsec disable` (disable only un-does noexec; the distro-default nodev,nosuid stay live).")
+		case "/tmp":
+			risks = append(risks,
+				"/tmp: persistence-only (fstab line or systemd tmp.mount drop-in). Live remount deliberately skipped — services with PrivateTmp=yes (mysqld, named, php-fpm, nginx, exim) hold bind mounts in the current /tmp namespace. Row reports PEND until next reboot; noexec breaks some composer / pip / cPanel workflows, review first.")
+		case "/var/tmp":
+			risks = append(risks,
+				"/var/tmp: persistence-only. If /var/tmp is not separately mounted today, kernsec adds a bind fstab line `/tmp /var/tmp none bind` so /var/tmp inherits /tmp's hardening at reboot. Existing /var/tmp content is SHADOWED (not deleted) by the bind — if you keep state under /var/tmp, run `cfm kernsec secure-tmp` instead.")
 		default:
 			risks = append(risks,
 				fmt.Sprintf("%s: live remount with %s.", m.MountPoint, m.Recommended))

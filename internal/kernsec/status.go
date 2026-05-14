@@ -510,6 +510,11 @@ func (res *StatusResult) printMountState(w io.Writer, resolved ResolvedSet) {
 			} else {
 				fmt.Fprintf(w, "OK         %s  has %s\n", m.MountPoint, m.Recommended)
 			}
+		case MountPending:
+			fmt.Fprintf(w, "PEND       %s  persisted via %s (next reboot will apply); live still missing: %s\n",
+				m.MountPoint, d.PersistedSource, strings.Join(d.Missing, ","))
+			fmt.Fprintf(w, "           reboot, or run `mount -o remount,%s %s` once nothing has PrivateTmp=yes bind mounts open\n",
+				strings.Join(d.Missing, ","), m.MountPoint)
 		case MountPartialOptions:
 			fmt.Fprintf(w, "PARTIAL    %s  has %s; still missing: %s  (current: %s)\n",
 				m.MountPoint,

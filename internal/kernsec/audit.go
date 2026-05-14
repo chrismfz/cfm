@@ -36,6 +36,14 @@ const (
 	// tracks live runtime state — the operator sees whether the
 	// other component's intent is actually live.
 	StateEXT RuleState = "EXT"
+	// StatePEND means the rule has been persisted (fstab edited or
+	// systemd drop-in written) but the live runtime hasn't picked it
+	// up yet. Today only mount rows use this — /tmp and /var/tmp are
+	// deliberately NOT live-remounted by Enable because every service
+	// with PrivateTmp=yes has bind mounts rooted in the current /tmp
+	// namespace; reboot is the safe convergence point. Module rows
+	// use StateLOADED for the same idea ("configured, not yet live").
+	StatePEND RuleState = "PEND"
 )
 
 // AuditRow is one rule's audit summary for the TUI / structured output.
@@ -288,6 +296,7 @@ func moduleRowStateForDecision(d Decision, blacklisted, loaded, presentOnKernel 
 // is compatible with their workload.
 //
 //   - MountOK              → OK
+//   - MountPending         → PEND (persisted; live remount pending reboot)
 //   - MountPartialOptions  → DIFF (some recommended options missing)
 //   - MountMissingOptions  → DIFF (no recommended options applied)
 //   - MountNotSeparate     → SKIP (not a distinct mount; recs N/A)
@@ -297,6 +306,8 @@ func mountRowState(s MountState) RuleState {
 	switch s {
 	case MountOK:
 		return StateOK
+	case MountPending:
+		return StatePEND
 	case MountPartialOptions, MountMissingOptions:
 		return StateDIFF
 	}

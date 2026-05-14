@@ -398,7 +398,12 @@ func RunTUI() (switchToText bool, err error) {
 				}
 			}
 			fmt.Fprintln(&b, "")
-			fmt.Fprintln(&b, "  [Note:](fg:cyan,mod:bold) audit-only — kernsec never edits /etc/fstab.")
+			if r.State == StatePEND {
+				fmt.Fprintln(&b, "  [Note:](fg:yellow,mod:bold) hardening persisted but live remount pending.")
+				fmt.Fprintln(&b, "  Reboot to converge — services with PrivateTmp=yes make a live remount unsafe.")
+			} else {
+				fmt.Fprintln(&b, "  [Note:](fg:cyan,mod:bold) kernsec edits /etc/fstab or systemd drop-ins only on Enable.")
+			}
 			// Render a one-line tip summary; the full copy-pasteable
 			// guide lives in `cfm kernsec status` text output where
 			// it isn't subject to TUI line-truncation.
@@ -703,7 +708,7 @@ func StateColor(s RuleState) ui.Color {
 		return ui.ColorGreen
 	case StateSKIP, StateOFF, StateEXT:
 		return ui.ColorWhite
-	case StateDIFF, StateWARN, StateMISSING:
+	case StateDIFF, StateWARN, StateMISSING, StatePEND:
 		return ui.ColorYellow
 	case StateDRIFT:
 		return ui.ColorRed
@@ -719,7 +724,7 @@ func StateColorName(s RuleState) string {
 		return "green"
 	case StateSKIP, StateOFF, StateEXT:
 		return "white"
-	case StateDIFF, StateWARN, StateMISSING:
+	case StateDIFF, StateWARN, StateMISSING, StatePEND:
 		return "yellow"
 	case StateDRIFT:
 		return "red"
