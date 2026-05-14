@@ -25,6 +25,13 @@ type Collector struct {
 	// filesystem walk + identical snapshot write on every cfm boot.
 	refreshedOnce atomic.Bool
 
+	// refreshCallCount is incremented at the START of every Refresh().
+	// Used by tests to assert the Run() dedup guard actually skips
+	// the call rather than just relying on refreshedOnce being true
+	// (which says nothing about whether Run did or didn't try). Not
+	// load-bearing in production; an atomic.Int32 is cheap.
+	refreshCallCount atomic.Int32
+
 	// host index
 	mu         sync.RWMutex
 	exact      map[string]*Entry // host -> entry

@@ -12,16 +12,13 @@ import (
 // goroutine, Run() must not Refresh again. Without this dedup, every
 // cfm boot did the filesystem walk + WriteSnapshot twice.
 //
-// We exercise the optimization without mocking the filesystem walk:
-// after a real Refresh on a Collector with no source dirs to scan
-// (refreshedOnce flips to true at the end of Refresh regardless of
-// the result), Run with a quick-cancelled ctx must NOT trigger
-// another Refresh. We assert by snapshotting the empty-state
-// fingerprint hash before and after — if Run silently re-Refreshed,
-// the fingerprint would still match because the source is empty,
-// but refreshedOnce would already be true after the first call so
-// the second call would be a no-op anyway. The clearer signal is to
-// check that c.refreshedOnce was already true when Run started.
+// The audit caught a previous version of this test that asserted only
+// `refreshedOnce.Load() == true` after Run returned — a value that
+// was already true from the explicit pre-Refresh, so the assertion
+// passed regardless of whether Run's internal `if !refreshedOnce`
+// guard existed at all. Removing the guard would have been an
+// undetected regression. The fix: assert on refreshCallCount so any
+// future regression that drops the guard immediately fails this test.
 func TestRunSkipsRefreshWhenAlreadyRefreshed(t *testing.T) {
 	col := New(Config{
 		Enabled:        true,
@@ -36,27 +33,25 @@ func TestRunSkipsRefreshWhenAlreadyRefreshed(t *testing.T) {
 	if err := col.Refresh(context.Background()); err != nil {
 		t.Fatalf("initial Refresh: %v", err)
 	}
+	if got := col.refreshCallCount.Load(); got != 1 {
+		t.Fatalf("after first Refresh: refreshCallCount=%d want 1", got)
+	}
 	if !col.refreshedOnce.Load() {
 		t.Fatalf("expected refreshedOnce=true after first Refresh")
 	}
 
 	// Run with an immediately-cancelled context. If Run honors the
-	// dedup, it skips its own initial Refresh and falls through to
-	// the watcher/ticker setup; the cancelled ctx then immediately
-	// stops the loop. Without the dedup, Run would invoke Refresh
-	// before any cancellation check (Refresh ignores ctx for the
-	// scan portion) and we would observe a second filesystem walk.
-	//
-	// The signal we assert: refreshedOnce was already true when Run
-	// was called. The dedup branch in Run reads exactly this flag,
-	// so any future regression that removes the check would fail
-	// against this state — Run would call Refresh (a no-op on this
-	// fixture, but the wasted disk write is what we're guarding
-	// against in production).
+	// dedup guard it skips its own initial Refresh, the cancelled ctx
+	// then immediately stops the loop, and refreshCallCount stays at 1.
+	// Without the dedup guard, Run would Refresh once before reaching
+	// the select-on-ctx, and refreshCallCount would become 2.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = col.Run(ctx)
 
+	if got := col.refreshCallCount.Load(); got != 1 {
+		t.Fatalf("Run did NOT skip the initial Refresh: refreshCallCount=%d want 1 (dedup guard regression)", got)
+	}
 	if !col.refreshedOnce.Load() {
 		t.Fatalf("refreshedOnce flipped back to false during Run")
 	}
@@ -79,11 +74,17 @@ func TestRunRefreshesWhenNotYetRefreshed(t *testing.T) {
 	if col.refreshedOnce.Load() {
 		t.Fatalf("expected refreshedOnce=false on a fresh Collector")
 	}
+	if got := col.refreshCallCount.Load(); got != 0 {
+		t.Fatalf("expected refreshCallCount=0 on a fresh Collector, got %d", got)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = col.Run(ctx)
 
+	if got := col.refreshCallCount.Load(); got != 1 {
+		t.Fatalf("Run did NOT call its initial Refresh: refreshCallCount=%d want 1", got)
+	}
 	if !col.refreshedOnce.Load() {
 		t.Fatalf("expected refreshedOnce=true after Run's initial Refresh")
 	}

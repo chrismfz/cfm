@@ -19,6 +19,7 @@ type Pair struct {
 }
 
 func (c *Collector) Refresh(ctx context.Context) error {
+	c.refreshCallCount.Add(1)
 	pairs := c.discoverPairs()
 
 	nextExact := map[string]*Entry{}

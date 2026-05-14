@@ -564,6 +564,12 @@ func runDaemon(args []string) {
 
 	// Synchronous Refresh writes the snapshot to disk before any worker
 	// from an in-flight edge reload tries to load_from_snapshot.
+	// Uses context.Background() rather than the daemon ctx because
+	// discoverPairs() (the actual filesystem walk) does not currently
+	// honor ctx cancellation anyway — passing the daemon ctx would
+	// have no effect on shutdown. If discoverPairs ever becomes
+	// ctx-aware, switch this to ctx so SIGTERM can interrupt a slow
+	// startup scan.
 	_ = sslcol.Refresh(context.Background())
 	st := sslcol.Stats()
 	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
@@ -586,6 +592,17 @@ func runDaemon(args []string) {
 	// inside applyCFMConfigRemaining (later in this function) stays
 	// as a no-op-on-first-start path that picks up operator edits to
 	// /etc/cfm/cfm.conf.
+	//
+	// engineCfg is nil only when /etc/cfm/cfm.conf is absent or fails
+	// to parse. In that case we skip the early bind and rely on the
+	// later applyCFMConfigRemaining path — but that path is itself
+	// gated by loadCFMConfigIfChanged() returning ok=true, which
+	// requires a successful parse. So on a host with truly broken
+	// cfm.conf the socket simply does not bind during this daemon
+	// lifetime: same behavior as before this commit (pre-existing
+	// limitation), surfaced here only because the gate is now visible
+	// at the top of startup. Operators with parse errors will see the
+	// usual "cfm.conf parse error" line and need to fix the config.
 	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
 	defer sslSockLc.Stop()
 	if engineCfg != nil {
