@@ -140,13 +140,18 @@ func DefaultConf() *Conf {
 //   - OpenSSH privsep helpers (sshd, sshd-session, sshd-auth).
 //   - systemd executor + unit-spawn shims.
 //   - Postfix master and the standard service daemons that master
-//     forks (pickup, qmgr, cleanup, smtpd, ...); the spawn(8)
-//     inetd-style worker scripts are NOT in this list because they
-//     are site-specific (mailcow ships them under /usr/local/bin/...).
+//     forks (pickup, qmgr, cleanup, smtpd, postscreen, spawn, ...);
+//     the bare spawn(8) inetd-style worker scripts are NOT in this
+//     list because they are site-specific (mailcow ships them under
+//     /usr/local/bin/...), but well-known mailcow helpers are.
 //   - Dovecot core daemons + indexer-worker (the noisiest CRED-002
 //     match on mailcow/dovecot hosts).
 //   - /usr/bin/logger — the canonical postfix spawn(8) descendant
 //     whose stdio comes from master pre-exec.
+//   - Package managers (apt, dpkg, dnf, yum, rpm) — drop to a
+//     download-only user (_apt) and re-elevate to root mid-run, so
+//     they routinely trip CRED-002 during system updates.
+//   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
 //
 // New entries should be host-class-universal: a path that exists on
 // one panel only belongs in a panel-specific seed (see cPanel /
@@ -191,6 +196,32 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/libexec/postfix/virtual",
 	"/usr/lib/postfix/sbin/bounce",
 	"/usr/libexec/postfix/bounce",
+	"/usr/lib/postfix/sbin/postscreen",
+	"/usr/libexec/postfix/postscreen",
+	"/usr/lib/postfix/sbin/spawn",
+	"/usr/libexec/postfix/spawn",
+	"/usr/lib/postfix/sbin/error",
+	"/usr/libexec/postfix/error",
+	"/usr/lib/postfix/sbin/showq",
+	"/usr/libexec/postfix/showq",
+	"/usr/lib/postfix/sbin/scache",
+	"/usr/libexec/postfix/scache",
+	"/usr/lib/postfix/sbin/verify",
+	"/usr/libexec/postfix/verify",
+	"/usr/lib/postfix/sbin/oqmgr",
+	"/usr/libexec/postfix/oqmgr",
+	"/usr/lib/postfix/sbin/discard",
+	"/usr/libexec/postfix/discard",
+	"/usr/lib/postfix/sbin/lmtp",
+	"/usr/libexec/postfix/lmtp",
+	"/usr/lib/postfix/sbin/smtp",
+	"/usr/libexec/postfix/smtp",
+	"/usr/lib/postfix/sbin/pipe",
+	"/usr/libexec/postfix/pipe",
+	"/usr/lib/postfix/sbin/dnsblog",
+	"/usr/libexec/postfix/dnsblog",
+	"/usr/lib/postfix/sbin/tlsproxy",
+	"/usr/libexec/postfix/tlsproxy",
 
 	// Dovecot core
 	"/usr/sbin/dovecot",
@@ -221,6 +252,37 @@ var DefaultGlobalAllowExe = []string{
 	// Postfix spawn(8) descendant — universal
 	"/usr/bin/logger",
 	"/bin/logger",
+
+	// Package managers — drop to a download-only user (_apt on Debian)
+	// then re-elevate to root mid-run; trips CRED-002 on every update.
+	"/usr/bin/apt",
+	"/usr/bin/apt-get",
+	"/usr/bin/apt-cache",
+	"/usr/bin/apt-key",
+	"/usr/bin/aptitude",
+	"/usr/bin/dpkg",
+	"/usr/bin/dpkg-deb",
+	"/usr/bin/dpkg-divert",
+	"/usr/bin/dpkg-trigger",
+	"/usr/bin/unattended-upgrade",
+	"/usr/bin/unattended-upgrades",
+	"/usr/bin/dnf",
+	"/usr/bin/dnf-3",
+	"/usr/bin/yum",
+	"/usr/bin/rpm",
+	"/usr/bin/rpmbuild",
+	"/usr/bin/microdnf",
+	"/usr/sbin/apk", // Alpine
+
+	// Mailcow's stock spawn(8) helper scripts. The dockerized
+	// postfix-mailcow image installs these under /usr/local/bin/ and
+	// dispatches them via `master.cf` spawn entries, so every fork
+	// inherits the accepted inet socket on stdin/stdout/stderr and
+	// trips the strict three-fd-remote reverse-shell detector.
+	"/usr/local/bin/whitelist_forwardinghosts.sh",
+	"/usr/local/bin/postfix_sender_login_maps.sh",
+	"/usr/local/bin/outgoing-from-tls.sh",
+	"/usr/local/bin/outgoing-tls-policy.sh",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -228,12 +290,25 @@ var DefaultGlobalAllowExe = []string{
 // compromise. Comm strings are truncated to TASK_COMM_LEN-1 (15
 // chars) by the kernel — entries here must already be truncated.
 //
-// Today this is dominated by container-runtime entries; runc / crun /
-// containerd / dockerd / podman / conmon legitimately load BPF
-// programs and create BPF maps on every container start, and the
-// BPF-side cfm_comm_is_trusted_bpf_agent allowlist only covers
-// systemd / NetworkManager / bpftool / auditd.
+// Two flavours of entry:
+//
+//   - Container runtimes (runc / crun / containerd-shim / dockerd /
+//     podman / conmon / ...) that legitimately load BPF programs on
+//     every container start. The BPF-side cfm_comm_is_trusted_bpf_agent
+//     allowlist does not cover these, so userspace has to.
+//
+//   - BPF-side trusted agents (systemd / systemd-network /
+//     systemd-udevd / NetworkManager / bpftool / auditd) mirrored
+//     here for symmetry. The BPF program *bypasses* its own trust list
+//     when the calling uid is in cfm_watched_uids, on the theory that
+//     a web user shouldn't load BPF even under a trusted-looking comm.
+//     In practice a per-user systemd manager (`systemd --user`) for a
+//     panel-managed uid trips this on cgroup-v2 device-controller BPF
+//     loads, which is not an attack. We silence the web-origin variant
+//     in userspace where the trade-off is purely about noise, not
+//     enforcement.
 var DefaultGlobalAllowComm = []string{
+	// Container runtimes
 	"runc",
 	"crun",
 	"containerd",
@@ -252,6 +327,14 @@ var DefaultGlobalAllowComm = []string{
 	"buildkitd",
 	"buildah",
 	"nerdctl",
+
+	// BPF-side trusted agents, mirrored for the web-origin case.
+	"systemd",
+	"systemd-network",
+	"systemd-udevd",
+	"NetworkManager",
+	"bpftool",
+	"auditd",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
