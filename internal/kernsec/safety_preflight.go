@@ -106,7 +106,7 @@ func sysctl_impacting_risks(sysctls []SysctlRule, profile HostProfile) []string 
 		switch s.Key {
 		case "kernel.core_pattern":
 			detail := "kernel.core_pattern=|/bin/false suppresses coredumps globally for every process; this can disable crash diagnostics until the sysctl is changed back and affected services are retried."
-			if profile.HasHostingPanelWorkload || profile.HasBackupWorkload || profile.HasMonitoringWorkload || profile.HasKdump {
+			if profile.HasHostingPanelWorkload || profile.HasBackupWorkload || profile.HasMonitoringWorkload {
 				detail += " Host-profile diagnostics risk was detected; this rule should only be present if forced."
 			}
 			risks = append(risks, detail)

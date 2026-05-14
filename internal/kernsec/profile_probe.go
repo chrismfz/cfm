@@ -51,7 +51,6 @@ type HostProfile struct {
 	UsesBridge               bool   `json:"uses_bridge"`                           // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
 	HasIPsec                 bool   `json:"has_ipsec"`                             // `ip xfrm policy` non-empty → don't blacklist IPsec modules
 	HasDKMS                  bool   `json:"has_dkms"`                              // out-of-tree module evidence detected
-	HasKdump                 bool   `json:"has_kdump"`                             // kdump enabled → keep coredump gates conservative
 	HasBluetoothHardware     bool   `json:"has_bluetooth_hardware"`                // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
@@ -82,7 +81,6 @@ func DetectHostProfile() HostProfile {
 		HasContainers:          defaultContainerProbe().detect(),
 		UsesBridge:             detectInKernelBridge(),
 		HasIPsec:               hasIPsecPolicies(),
-		HasKdump:               hasKdump(),
 		HasBluetoothHardware:   dirHasEntries("/sys/class/bluetooth"),
 		HasThunderbolt:         dirHasEntries("/sys/bus/thunderbolt/devices"),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
@@ -471,11 +469,10 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 	case "sysctl.kernel.coredump":
 		// kernel.core_pattern=|/bin/false disables coredumps globally.
-		// kdump relies on crash dumps captured via kexec; suppressing
-		// core_pattern would silently break crash capture.
-		if p.HasKdump {
-			return "host has kdump enabled — kernel.core_pattern must remain writable for crash capture"
-		}
+		// kdump (kexec/vmcore) is independent of core_pattern, so it
+		// does not gate this rule — the remaining checks cover the
+		// userspace-coredump-consuming workloads (hosting panels,
+		// backup/monitoring agents, multi-tenant diagnostics).
 		if reason := p.hostingPanelReason(); reason != "" {
 			return "hosting panel/vendor diagnostics may require coredumps: " + reason
 		}
@@ -705,53 +702,6 @@ func (e *profileProbeErr) Error() string { return e.s }
 func hasIPsecPolicies() bool {
 	for _, p := range []string{"/proc/net/xfrm_policy", "/proc/net/pfkey"} {
 		if b, err := os.ReadFile(hostProfilePath(p)); err == nil && len(strings.TrimSpace(string(b))) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// hasKdump looks for kdump indicators across distros. Layered so a
-// kdump-equipped host that hasn't yet armed (kexec_crash_loaded=0
-// because the service hasn't run since last boot) still registers
-// via the config-file / unit paths.
-//
-// Audit found `/etc/sysconfig/kdump` (RHEL family) was missing from
-// the original probe — added here, plus a `systemctl is-enabled
-// kdump.service` style check via the unit-file presence in standard
-// systemd dirs (cheaper than shelling out).
-func hasKdump() bool {
-	// 1. Kernel-side indicator — set when crashkernel= reservation
-	// happened AND `kdumpctl start` (or equivalent) loaded the
-	// crash kernel. False on freshly-rebooted host; defensive
-	// because the file-based checks below cover that.
-	if b, err := os.ReadFile(hostProfilePath("/sys/kernel/kexec_crash_loaded")); err == nil {
-		if strings.TrimSpace(string(b)) == "1" {
-			return true
-		}
-	}
-	// 2. Distro config files. RHEL / Alma / Rocky / CentOS use
-	// `/etc/sysconfig/kdump` (default install) and `/etc/kdump.conf`
-	// (configuration). Debian / Ubuntu use `kdump-tools`.
-	for _, p := range []string{
-		"/etc/kdump.conf",
-		"/etc/sysconfig/kdump",
-		"/etc/default/kdump-tools",
-	} {
-		if _, err := os.Stat(hostProfilePath(p)); err == nil {
-			return true
-		}
-	}
-	// 3. Unit-file presence (the service may not be enabled but
-	// presence shows the operator chose to install kdump). Cheap
-	// lookup vs shelling out to systemctl.
-	for _, p := range []string{
-		"/usr/lib/systemd/system/kdump.service",
-		"/lib/systemd/system/kdump.service",
-		"/usr/lib/systemd/system/kdump-tools.service",
-		"/lib/systemd/system/kdump-tools.service",
-	} {
-		if _, err := os.Stat(hostProfilePath(p)); err == nil {
 			return true
 		}
 	}
