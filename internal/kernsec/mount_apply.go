@@ -115,9 +115,22 @@ func EnableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 		return enableFstabEdit(rule, w, opts, lines, recommended)
 	}
 
-	// No fstab line — try the systemd .mount unit branch.
+	// No fstab line — try the systemd .mount unit branch. Gate on
+	// "the unit actually owns the live mount": if /proc/mounts shows
+	// the mountpoint as not separately mounted (e.g. masked
+	// tmp.mount, container overlayfs, operator disabled the unit),
+	// the package-shipped unit file in /usr/lib still exists but
+	// writing a drop-in for it produces a dead override that doesn't
+	// help at reboot. Refuse and point at secure-tmp instead.
 	unitName := unitNameForMountPath(rule.MountPoint)
 	if _, currentOpts, ok := realSystemdUnitFinderWithDropins(unitName); ok {
+		if detail.State == MountNotSeparate {
+			return fmt.Errorf(
+				"%s: systemd unit %s exists but %s is not separately mounted (unit may be masked or disabled); "+
+					"writing a drop-in would be a dead override — run `cfm kernsec secure-tmp` to provision a dedicated /tmp filesystem instead",
+				rule.ID, unitName, rule.MountPoint,
+			)
+		}
 		return enableSystemdDropin(rule, w, opts, currentOpts, recommended)
 	}
 

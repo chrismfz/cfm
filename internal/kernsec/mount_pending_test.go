@@ -267,6 +267,50 @@ func TestEnableMount_TmpRefusedWhenNotSeparateAndNoUnit(t *testing.T) {
 	}
 }
 
+func TestEnableMount_TmpRefusedWhenUnitExistsButNotMounted(t *testing.T) {
+	// /usr/lib/systemd/system/tmp.mount exists (every Debian) but
+	// /tmp isn't actually mounted via it on this host — masked,
+	// disabled, container overlayfs, whatever. Writing a drop-in
+	// would be a dead override; EnableMount must refuse and point
+	// at secure-tmp, not silently write a useless file.
+	fstabPath := withFakeFstab(t, `UUID=abc / ext4 defaults 0 1
+`)
+	dir := t.TempDir()
+	origEtc, origFinder := systemdSystemEtcDir, realSystemdUnitFinderWithDropins
+	systemdSystemEtcDir = dir
+	realSystemdUnitFinderWithDropins = fakeUnit("mode=1777,size=50%")
+	t.Cleanup(func() {
+		systemdSystemEtcDir = origEtc
+		realSystemdUnitFinderWithDropins = origFinder
+	})
+	origProc := readProcMounts
+	readProcMounts = func() string { return "" } // no /tmp in /proc/mounts
+	t.Cleanup(func() { readProcMounts = origProc })
+
+	rule := MountRule{
+		ID: "KSEC-FS-mount.tmp-001", MountPoint: "/tmp",
+		Recommended: "nodev,nosuid,noexec", CanEnable: true,
+	}
+	var w bytes.Buffer
+	err := EnableMount(rule, &w, EnableMountOptions{})
+	if err == nil {
+		t.Fatal("expected refusal when tmp.mount exists but doesn't mount /tmp on this host")
+	}
+	if !strings.Contains(err.Error(), "secure-tmp") {
+		t.Errorf("error should redirect to secure-tmp; got %v", err)
+	}
+	// No drop-in should have been written.
+	deadPath := filepath.Join(dir, "tmp.mount.d", "10-cfm-hardening.conf")
+	if _, err := os.Stat(deadPath); !os.IsNotExist(err) {
+		t.Errorf("no drop-in should be written when refusing; stat err = %v", err)
+	}
+	// fstab untouched.
+	got, _ := os.ReadFile(fstabPath)
+	if strings.Contains(string(got), "/tmp ") {
+		t.Errorf("fstab must be untouched on refusal; got:\n%s", got)
+	}
+}
+
 func TestEnableMount_VarTmpBindWhenNotSeparate(t *testing.T) {
 	// /var/tmp lives on /. Enable must add a bind fstab line so
 	// /var/tmp inherits /tmp's hardening at reboot.
