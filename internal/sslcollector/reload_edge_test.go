@@ -50,47 +50,56 @@ func resetNudgeState() {
 
 // withStubs swaps the package-level injection points for the duration of
 // a test. Returns a function the test must defer to restore originals.
-func withStubs(stub *stubSystemctl, ready bool, startFn func(int) (time.Time, error)) func() {
+// The `now` value is what nowFn returns — fixing it lets tests assert
+// the socketReadyAt comparison deterministically. Use time.Time{} to
+// keep real wall-clock time (legacy behaviour).
+func withStubs(stub *stubSystemctl, ready bool, startFn func(int) (time.Time, error), now time.Time) func() {
 	origRun := systemctlRunner
 	origReady := socketReady
 	origStart := processStartTimeFn
+	origNow := nowFn
 	origInterval := nudgePollInterval
 	origBudget := nudgeTotalBudget
 	systemctlRunner = stub.run
 	socketReady = func() bool { return ready }
 	processStartTimeFn = startFn
+	if !now.IsZero() {
+		nowFn = func() time.Time { return now }
+	}
 	nudgePollInterval = 5 * time.Millisecond
 	nudgeTotalBudget = 1 * time.Second
 	return func() {
 		systemctlRunner = origRun
 		socketReady = origReady
 		processStartTimeFn = origStart
+		nowFn = origNow
 		nudgePollInterval = origInterval
 		nudgeTotalBudget = origBudget
 	}
 }
 
-func TestNudgeEdge_ReloadsWhenEdgeStartedBeforeCFM(t *testing.T) {
+// Base time used by tests for deterministic timestamp comparisons.
+// socketReadyAt = base + 100s in tests that fix nowFn — edge start
+// times below that are "before ready" (→ reload); above are "after
+// ready" (→ skip).
+var testBase = time.Unix(1_700_000_000, 0)
+var testReadyAt = testBase.Add(100 * time.Second)
+
+func TestNudgeEdge_ReloadsWhenEdgeStartedBeforeSocketReady(t *testing.T) {
 	resetNudgeState()
 	stub := &stubSystemctl{
 		isAct:   map[string]bool{"angie": true},
 		mainPID: map[string]string{"angie": "111"},
 	}
-	cfmPid := 999
-	// edge pid 111 started at boot+10s; cfm pid 999 started at boot+30s.
+	// edge pid 111 started 90s before socketReady — classic case where
+	// the edge predates cfm or raced cfm at cold boot.
 	startFn := func(pid int) (time.Time, error) {
-		base := time.Unix(1_700_000_000, 0)
-		switch pid {
-		case 111:
-			return base.Add(10 * time.Second), nil
-		case cfmPid, 0: // os.Getpid() in test
-			return base.Add(30 * time.Second), nil
+		if pid == 111 {
+			return testBase.Add(10 * time.Second), nil
 		}
-		// Real os.Getpid() in tests — accept any pid that's not the
-		// stubbed edge pid and treat it as cfm.
-		return base.Add(30 * time.Second), nil
+		return testBase.Add(30 * time.Second), nil
 	}
-	defer withStubs(stub, true, startFn)()
+	defer withStubs(stub, true, startFn, testReadyAt)()
 
 	col := New(Config{})
 	col.exact = map[string]*Entry{"x.example.com": {Fingerprint: "fp1"}}
@@ -116,20 +125,63 @@ func TestNudgeEdge_ReloadsWhenEdgeStartedBeforeCFM(t *testing.T) {
 	}
 }
 
-func TestNudgeEdge_SkipsWhenEdgeStartedAfterCFM(t *testing.T) {
+// Regression test for the "cold boot, cfm wins race by 2s" case (the
+// mars edge bug). Edge starts AFTER cfm's pid but BEFORE cfm's socket
+// is bound; the old gate (comparing to cfm.pid.start) wrongly skipped
+// reload, leaving workers with an empty _store until manual reload.
+func TestNudgeEdge_ReloadsWhenEdgeStartedAfterCFMButBeforeSocketReady(t *testing.T) {
 	resetNudgeState()
 	stub := &stubSystemctl{
 		isAct:   map[string]bool{"angie": true},
 		mainPID: map[string]string{"angie": "111"},
 	}
+	// Timeline: cfm pid at t+30s, edge pid at t+50s, socket ready at
+	// t+100s. Edge.start > cfm.start would have skipped under the old
+	// gate; edge.start < socketReadyAt correctly reloads.
 	startFn := func(pid int) (time.Time, error) {
-		base := time.Unix(1_700_000_000, 0)
 		if pid == 111 {
-			return base.Add(60 * time.Second), nil // edge: after cfm
+			return testBase.Add(50 * time.Second), nil
 		}
-		return base.Add(30 * time.Second), nil // cfm
+		return testBase.Add(30 * time.Second), nil
 	}
-	defer withStubs(stub, true, startFn)()
+	defer withStubs(stub, true, startFn, testReadyAt)()
+
+	col := New(Config{})
+	col.exact = map[string]*Entry{"x.example.com": {Fingerprint: "fp1"}}
+
+	done := make(chan struct{})
+	go func() { nudgeEdge(context.Background(), col); close(done) }()
+	<-done
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	var sawReload bool
+	for _, c := range stub.calls {
+		if strings.HasPrefix(c, "reload angie") {
+			sawReload = true
+		}
+	}
+	if !sawReload {
+		t.Fatalf("expected reload for cold-boot race (edge after cfm but before sockReady); calls=%v", stub.calls)
+	}
+}
+
+func TestNudgeEdge_SkipsWhenEdgeStartedAfterSocketReady(t *testing.T) {
+	resetNudgeState()
+	stub := &stubSystemctl{
+		isAct:   map[string]bool{"angie": true},
+		mainPID: map[string]string{"angie": "111"},
+	}
+	// Edge starts 50s AFTER socketReadyAt — admin started angie long
+	// after cfm was already up. No reload needed; workers init against
+	// a healthy state on their first try.
+	startFn := func(pid int) (time.Time, error) {
+		if pid == 111 {
+			return testReadyAt.Add(50 * time.Second), nil
+		}
+		return testBase.Add(30 * time.Second), nil
+	}
+	defer withStubs(stub, true, startFn, testReadyAt)()
 
 	col := New(Config{})
 	col.exact = map[string]*Entry{"x.example.com": {Fingerprint: "fp1"}}
@@ -142,7 +194,7 @@ func TestNudgeEdge_SkipsWhenEdgeStartedAfterCFM(t *testing.T) {
 	defer stub.mu.Unlock()
 	for _, c := range stub.calls {
 		if strings.HasPrefix(c, "reload angie") {
-			t.Fatalf("did not expect reload when edge started after cfm; calls=%v", stub.calls)
+			t.Fatalf("did not expect reload when edge started after socketReady; calls=%v", stub.calls)
 		}
 	}
 }
@@ -156,7 +208,7 @@ func TestNudgeEdge_ProceedsToReloadWhenStarttimeUnreadable(t *testing.T) {
 	startFn := func(pid int) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("simulated /proc parse failure")
 	}
-	defer withStubs(stub, true, startFn)()
+	defer withStubs(stub, true, startFn, testReadyAt)()
 
 	col := New(Config{})
 	col.exact = map[string]*Entry{"x.example.com": {Fingerprint: "fp1"}}
@@ -181,8 +233,8 @@ func TestNudgeEdge_ProceedsToReloadWhenStarttimeUnreadable(t *testing.T) {
 func TestNudgeEdge_NoActiveService(t *testing.T) {
 	resetNudgeState()
 	stub := &stubSystemctl{isAct: map[string]bool{}}
-	startFn := func(int) (time.Time, error) { return time.Unix(1_700_000_000, 0), nil }
-	defer withStubs(stub, true, startFn)()
+	startFn := func(int) (time.Time, error) { return testBase, nil }
+	defer withStubs(stub, true, startFn, testReadyAt)()
 
 	col := New(Config{})
 	col.exact = map[string]*Entry{"x.example.com": {Fingerprint: "fp1"}}
@@ -203,8 +255,9 @@ func TestNudgeEdge_NoActiveService(t *testing.T) {
 func TestNudgeEdge_TimesOutWaitingForCerts(t *testing.T) {
 	resetNudgeState()
 	stub := &stubSystemctl{}
-	startFn := func(int) (time.Time, error) { return time.Unix(1_700_000_000, 0), nil }
-	restore := withStubs(stub, true, startFn)
+	startFn := func(int) (time.Time, error) { return testBase, nil }
+	// Real wall-clock here so the deadline can actually trip.
+	restore := withStubs(stub, true, startFn, time.Time{})
 	nudgeTotalBudget = 50 * time.Millisecond
 	nudgePollInterval = 2 * time.Millisecond
 	defer restore()
@@ -238,9 +291,10 @@ func TestNudgeEdge_SocketNotReadyHoldsOffReload(t *testing.T) {
 		isAct:   map[string]bool{"angie": true},
 		mainPID: map[string]string{"angie": "111"},
 	}
-	startFn := func(int) (time.Time, error) { return time.Unix(1_700_000_000, 0), nil }
+	startFn := func(int) (time.Time, error) { return testBase, nil }
 	// socketReady stays false → nudge times out → no reload.
-	restore := withStubs(stub, false, startFn)
+	// Real wall-clock so the deadline can actually trip.
+	restore := withStubs(stub, false, startFn, time.Time{})
 	nudgeTotalBudget = 50 * time.Millisecond
 	defer restore()
 

@@ -16,7 +16,7 @@ import (
 // NudgeEdgeOnFirstReady runs once per cfm daemon lifetime. It waits for
 // the sslcollector socket to be bound AND the daemon's cert index to
 // have at least one entry; if the active edge service (angie or
-// openresty) was started before the cfm daemon itself, it issues one
+// openresty) was started before that ready state, it issues one
 // `systemctl reload <edge>` so the worker pool re-runs init_worker_by_lua_block
 // against a now-ready socket (and, after the snapshot-writer change, a
 // freshly-written dump.json on disk).
@@ -29,12 +29,22 @@ import (
 // reload solves it: workers re-init, load_from_snapshot() reads the
 // daemon-written dump.json, certs are live.
 //
-// The "edge started before us" comparison uses /proc/<pid>/stat
-// starttimes (timezone-free) so the gate works on hosts running in any
-// local timezone. An older version that parsed `systemctl show
-// ActiveEnterTimestamp` silently failed on named zones like EEST/MSK
-// and always fell through to a reload, defeating the gate on a normal
-// `systemctl restart cfm`.
+// The gate compares the edge's main-process start time to the moment
+// cfm's socket+cert index became ready ("socketReadyAt"). Earlier
+// versions used cfm's own pid start time, which misses the cold-boot
+// case where cfm wins the systemd race by a couple of seconds but the
+// edge still starts BEFORE cfm finishes binding the socket — the edge
+// reports a later pid timestamp than cfm's, the old gate concluded
+// "edge started after us, skip" and left workers permanently empty
+// until the next manual reload. The socket-ready anchor handles that
+// case (edge.start < socketReadyAt → reload) while still skipping the
+// "admin started angie minutes after cfm came up" case (edge.start >
+// socketReadyAt → skip).
+//
+// The comparison uses /proc/<pid>/stat starttimes (timezone-free) so
+// the gate works on hosts running in any local timezone. An older
+// version that parsed `systemctl show ActiveEnterTimestamp` silently
+// failed on named zones like EEST/MSK.
 //
 // Disabled with CFM_SSLCOLLECTOR_RELOAD_EDGE_ON_READY=0.
 func NudgeEdgeOnFirstReady(ctx context.Context, col *Collector) {
@@ -78,8 +88,12 @@ var socketReady = func() bool {
 // processStartTimeFn is replaced in tests.
 var processStartTimeFn = processStartTime
 
+// nowFn returns the current wall-clock time and is replaced in tests so
+// the socket-ready anchor is deterministic.
+var nowFn = time.Now
+
 func nudgeEdge(ctx context.Context, col *Collector) {
-	deadline := time.Now().Add(nudgeTotalBudget)
+	deadline := nowFn().Add(nudgeTotalBudget)
 
 	// Phase 1: wait for the socket to accept connections + at least one
 	// cert in the index. Until both are true, an edge reload would just
@@ -88,7 +102,7 @@ func nudgeEdge(ctx context.Context, col *Collector) {
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Now().After(deadline) {
+		if nowFn().After(deadline) {
 			logging.Logf("[sslcollector] nudge: timed out waiting for socket+certs (60s); not reloading edge")
 			return
 		}
@@ -102,13 +116,12 @@ func nudgeEdge(ctx context.Context, col *Collector) {
 		}
 	}
 
-	// Find our own start time once. If /proc parsing fails (extremely
-	// unusual on Linux), fall back to the safe-but-noisy "always reload"
-	// behaviour.
-	ourStart, ourErr := processStartTimeFn(os.Getpid())
-	if ourErr != nil {
-		logging.Logf("[sslcollector] nudge: cannot read own start time (%v); reload-gate disabled, proceeding to reload", ourErr)
-	}
+	// Capture the moment everything became ready. Any edge worker whose
+	// init_worker_by_lua_block ran before this point saw an unready
+	// state (no socket bind, possibly no snapshot, no certs in the
+	// index) and seeded an empty _store. Wall-clock precision is fine —
+	// the gate uses second-granularity comparison.
+	socketReadyAt := nowFn()
 
 	svc, ok := activeEdgeService(ctx)
 	if !ok {
@@ -116,21 +129,25 @@ func nudgeEdge(ctx context.Context, col *Collector) {
 		return
 	}
 
-	// Only reload if the edge was running before this cfm daemon
-	// process started. On `systemctl restart cfm` after a long uptime
-	// the edge has been alive for hours; an earlier version compared
-	// edge start to "moment certs first loaded" which always tripped
-	// "edge predates us" on a healthy restart and reloaded
-	// unnecessarily. The correct anchor is cfm's own pid start time.
-	if ourErr == nil {
-		edgeStart, eerr := edgeStartTime(ctx, svc)
-		if eerr != nil {
-			logging.Logf("[sslcollector] nudge: cannot read %s start time (%v); proceeding to reload defensively", svc, eerr)
-		} else if !edgeStart.IsZero() && edgeStart.After(ourStart) {
-			logging.Logf("[sslcollector] nudge: edge %s started after cfm (%s vs %s); skipping reload",
-				svc, edgeStart.Format(time.RFC3339), ourStart.Format(time.RFC3339))
-			return
-		}
+	// Reload if the edge's main process started before we became ready.
+	// Three cases trip the gate, all correctly:
+	//   1. Cold boot, edge wins race: edge.start < cfm.start < ready
+	//   2. Cold boot, cfm wins race: cfm.start < edge.start < ready
+	//      (previously skipped — this is the mars-style regression)
+	//   3. `systemctl restart cfm` on long-lived edge: edge.start far
+	//      before ready → reload. Workers had healthy state before the
+	//      restart and would self-heal via /stats polling, but one
+	//      explicit reload is cheaper than waiting for that recovery.
+	// Skip only when the edge started AFTER we were ready (admin starts
+	// angie minutes after cfm came up — workers init against a healthy
+	// state on their first try, no reload needed).
+	edgeStart, eerr := edgeStartTime(ctx, svc)
+	if eerr != nil {
+		logging.Logf("[sslcollector] nudge: cannot read %s start time (%v); proceeding to reload defensively", svc, eerr)
+	} else if !edgeStart.IsZero() && edgeStart.After(socketReadyAt) {
+		logging.Logf("[sslcollector] nudge: edge %s started after sslcollector ready (%s vs %s); skipping reload",
+			svc, edgeStart.Format(time.RFC3339), socketReadyAt.Format(time.RFC3339))
+		return
 	}
 
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -140,7 +157,7 @@ func nudgeEdge(ctx context.Context, col *Collector) {
 		logging.Logf("[sslcollector] nudge: systemctl reload %s failed: %v (%s)", svc, err, strings.TrimSpace(string(out)))
 		return
 	}
-	logging.Logf("[sslcollector] nudge: reloaded %s after first sslcollector-ready (edge started before cfm; workers now re-init against ready socket+snapshot)", svc)
+	logging.Logf("[sslcollector] nudge: reloaded %s after first sslcollector-ready (edge predated socket+cert readiness; workers now re-init against ready state)", svc)
 }
 
 // activeEdgeService returns the first edge service systemd reports as
