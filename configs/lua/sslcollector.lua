@@ -101,7 +101,11 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 -- Tunables
 -- ---------------------------------------------------------------------------
 
--- Poll backoff: starts at POLL_SECS_MIN, doubles on each /stats failure.
+-- Poll backoff: starts at POLL_SECS_MIN, doubles on each /stats failure
+-- (but see _first_stats_ok below — a worker that has never seen a
+-- successful /stats yet stays at SOFT_START_RETRY_SECS instead of
+-- climbing exponentially, to handle the brief cfm-not-up-yet window
+-- after a reboot).
 -- Resets to POLL_SECS_MIN on any successful /stats response.
 -- 90s baseline: a new cert added on the cfm host is visible to running
 -- workers within ~90s of the daemon's Refresh() picking it up (fsnotify
@@ -151,6 +155,17 @@ local SNAP_FILE = SNAP_DIR .. "/dump.json"
 -- ---------------------------------------------------------------------------
 
 local poll_interval       = POLL_SECS_MIN  -- per-worker mutable backoff level
+
+-- Soft-start: until this worker has ever seen a successful /stats response,
+-- we treat failures as "cfm not up yet, sock will appear any second" rather
+-- than "sustained outage, back off hard". Without this, a worker that
+-- bootstrapped from disk snapshot while cfm was still starting would jump
+-- straight to 120s/240s/... backoff after one or two sock-not-ready
+-- failures — and stay out of sync for ~2 minutes even though the sock
+-- comes up within seconds. After the first /stats success the flag is
+-- latched and the normal exponential backoff takes over for real outages.
+local _first_stats_ok       = false
+local SOFT_START_RETRY_SECS = 5    -- short interval while cfm sock not yet healthy
 -- (snap_dir_ok removed with the worker-side write path)
 -- Per-worker version and freshness tracking.
 -- Must NOT use the shared dict for version comparison: when storage was
@@ -565,6 +580,7 @@ local function poll_stats(premature)
 
   if r and r.status == 200 then
     poll_interval = POLL_SECS_MIN
+    _first_stats_ok = true
     dict:set("meta:last_stats_at", ngx.time(), 0)
 
     local st = json.decode(r.body)
@@ -591,10 +607,19 @@ local function poll_stats(premature)
 
   else
     local prev = poll_interval
-    poll_interval = math.min(poll_interval * 2, POLL_SECS_MAX)
+    if not _first_stats_ok then
+      -- Bootstrap window: cfm sock probably just hasn't come up yet. Keep
+      -- polling at a short interval instead of climbing into exponential
+      -- backoff, so we reconnect within seconds once /var/run/sslcollector.sock
+      -- appears. Exponential kicks in only after we've seen at least one OK.
+      poll_interval = SOFT_START_RETRY_SECS
+    else
+      poll_interval = math.min(poll_interval * 2, POLL_SECS_MAX)
+    end
     ngx.log(ngx.WARN,
       "[sslcollector] /stats failed (", (err or (r and r.status) or "?"), ")",
-      " backoff ", prev, "s -> ", poll_interval, "s")
+      " backoff ", prev, "s -> ", poll_interval, "s",
+      _first_stats_ok and "" or " (soft-start)")
     set_last_error("stats: " .. tostring(err or (r and r.status) or "?"))
   end
 
