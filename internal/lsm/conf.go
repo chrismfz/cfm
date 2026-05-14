@@ -140,13 +140,18 @@ func DefaultConf() *Conf {
 //   - OpenSSH privsep helpers (sshd, sshd-session, sshd-auth).
 //   - systemd executor + unit-spawn shims.
 //   - Postfix master and the standard service daemons that master
-//     forks (pickup, qmgr, cleanup, smtpd, ...); the spawn(8)
-//     inetd-style worker scripts are NOT in this list because they
-//     are site-specific (mailcow ships them under /usr/local/bin/...).
+//     forks (pickup, qmgr, cleanup, smtpd, postscreen, spawn, ...);
+//     the bare spawn(8) inetd-style worker scripts are NOT in this
+//     list because they are site-specific (mailcow ships them under
+//     /usr/local/bin/...), but well-known mailcow helpers are.
 //   - Dovecot core daemons + indexer-worker (the noisiest CRED-002
 //     match on mailcow/dovecot hosts).
 //   - /usr/bin/logger — the canonical postfix spawn(8) descendant
 //     whose stdio comes from master pre-exec.
+//   - Package managers (apt, dpkg, dnf, yum, rpm) — drop to a
+//     download-only user (_apt) and re-elevate to root mid-run, so
+//     they routinely trip CRED-002 during system updates.
+//   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
 //
 // New entries should be host-class-universal: a path that exists on
 // one panel only belongs in a panel-specific seed (see cPanel /
@@ -191,6 +196,32 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/libexec/postfix/virtual",
 	"/usr/lib/postfix/sbin/bounce",
 	"/usr/libexec/postfix/bounce",
+	"/usr/lib/postfix/sbin/postscreen",
+	"/usr/libexec/postfix/postscreen",
+	"/usr/lib/postfix/sbin/spawn",
+	"/usr/libexec/postfix/spawn",
+	"/usr/lib/postfix/sbin/error",
+	"/usr/libexec/postfix/error",
+	"/usr/lib/postfix/sbin/showq",
+	"/usr/libexec/postfix/showq",
+	"/usr/lib/postfix/sbin/scache",
+	"/usr/libexec/postfix/scache",
+	"/usr/lib/postfix/sbin/verify",
+	"/usr/libexec/postfix/verify",
+	"/usr/lib/postfix/sbin/oqmgr",
+	"/usr/libexec/postfix/oqmgr",
+	"/usr/lib/postfix/sbin/discard",
+	"/usr/libexec/postfix/discard",
+	"/usr/lib/postfix/sbin/lmtp",
+	"/usr/libexec/postfix/lmtp",
+	"/usr/lib/postfix/sbin/smtp",
+	"/usr/libexec/postfix/smtp",
+	"/usr/lib/postfix/sbin/pipe",
+	"/usr/libexec/postfix/pipe",
+	"/usr/lib/postfix/sbin/dnsblog",
+	"/usr/libexec/postfix/dnsblog",
+	"/usr/lib/postfix/sbin/tlsproxy",
+	"/usr/libexec/postfix/tlsproxy",
 
 	// Dovecot core
 	"/usr/sbin/dovecot",
@@ -221,6 +252,37 @@ var DefaultGlobalAllowExe = []string{
 	// Postfix spawn(8) descendant — universal
 	"/usr/bin/logger",
 	"/bin/logger",
+
+	// Package managers — drop to a download-only user (_apt on Debian)
+	// then re-elevate to root mid-run; trips CRED-002 on every update.
+	"/usr/bin/apt",
+	"/usr/bin/apt-get",
+	"/usr/bin/apt-cache",
+	"/usr/bin/apt-key",
+	"/usr/bin/aptitude",
+	"/usr/bin/dpkg",
+	"/usr/bin/dpkg-deb",
+	"/usr/bin/dpkg-divert",
+	"/usr/bin/dpkg-trigger",
+	"/usr/bin/unattended-upgrade",
+	"/usr/bin/unattended-upgrades",
+	"/usr/bin/dnf",
+	"/usr/bin/dnf-3",
+	"/usr/bin/yum",
+	"/usr/bin/rpm",
+	"/usr/bin/rpmbuild",
+	"/usr/bin/microdnf",
+	"/usr/sbin/apk", // Alpine
+
+	// Mailcow's stock spawn(8) helper scripts. The dockerized
+	// postfix-mailcow image installs these under /usr/local/bin/ and
+	// dispatches them via `master.cf` spawn entries, so every fork
+	// inherits the accepted inet socket on stdin/stdout/stderr and
+	// trips the strict three-fd-remote reverse-shell detector.
+	"/usr/local/bin/whitelist_forwardinghosts.sh",
+	"/usr/local/bin/postfix_sender_login_maps.sh",
+	"/usr/local/bin/outgoing-from-tls.sh",
+	"/usr/local/bin/outgoing-tls-policy.sh",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
