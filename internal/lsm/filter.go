@@ -113,20 +113,24 @@ func (f *EventFilter) Match(ev Event) bool {
 // as it appears in dmesg.
 func BuildEventFilter(c *Conf) *EventFilter {
 	f := &EventFilter{rules: map[PolicyID]policyAllow{}}
-	for id, basenames := range defaultExeBasenames {
-		f.addExeBasenames(id, basenames)
-	}
-	for id, comms := range defaultComms {
-		f.addComms(id, comms)
-	}
 	if c != nil {
-		for id, paths := range c.AllowExe {
-			for _, p := range paths {
-				f.addExeBasenames(id, []string{filepath.Base(p)})
+		// Drive the merge through AllowExeFor / AllowCommFor so the
+		// global [allow] section is honoured without the filter caring
+		// about storage layout. Iterate the policy catalogue rather
+		// than ranging the per-policy map so policies that consume the
+		// allowlist but have no per-policy entry still pick up the
+		// global fanout.
+		for _, p := range AllPolicies() {
+			if allowExePolicy(p.ID) {
+				for _, path := range c.AllowExeFor(p.ID) {
+					f.addExeBasenames(p.ID, []string{filepath.Base(path)})
+				}
 			}
-		}
-		for id, comms := range c.AllowComm {
-			f.addComms(id, comms)
+			if allowCommPolicy(p.ID) {
+				if comms := c.AllowCommFor(p.ID); len(comms) > 0 {
+					f.addComms(p.ID, comms)
+				}
+			}
 		}
 	}
 	return f
@@ -168,140 +172,10 @@ func (f *EventFilter) addComms(id PolicyID, names []string) {
 	f.rules[id] = r
 }
 
-// defaultExeBasenames lists the well-known exe basenames whose CFM-LSM
-// match is structural to the daemon's normal operation rather than a
-// real privilege-escalation or reverse-shell attempt.
-//
-// CFML-CRED-002: system daemons whose privilege model is "start as
-// root → drop to a service uid → re-elevate to root for a specific
-// operation" (sshd's privsep, postfix master switching between
-// postfix/root, dovecot indexer-worker, systemd's sd-executor, the
-// pam_systemd user-manager spawn). None of these binaries carry the
-// suid bit on disk, so the on-disk cfm_setuid_inodes allowlist does
-// not cover them; we suppress in userspace by basename to also catch
-// the containerised variants (mailcow, official Postfix/Dovecot images)
-// where the exe inode differs from any host-walked path.
-//
-// CFML-EXEC-003: `logger` is the canonical syslog helper exec'd from
-// postfix spawn(8) inetd-style worker scripts. The worker's stdio is
-// already wired to the accepted inet socket by master before exec, so
-// every child trips the strict three-fd-remote detector. Operators
-// add their site-specific spawn-helper scripts via allow_exe.
-var defaultExeBasenames = map[PolicyID][]string{
-	PolicyCredEscal: {
-		"sshd",
-		"sshd-session",
-		"sshd-auth",
-		"systemd",
-		"systemd-executor",
-		"(systemd)",
-		"master",          // postfix master
-		"pickup",          // postfix
-		"qmgr",            // postfix
-		"smtpd",           // postfix
-		"cleanup",         // postfix
-		"local",           // postfix local delivery
-		"virtual",         // postfix virtual delivery
-		"trivial-rewrite", // postfix
-		"proxymap",        // postfix
-		"tlsmgr",          // postfix
-		"anvil",           // postfix
-		"verify",          // postfix
-		"bounce",          // postfix
-		"oqmgr",           // postfix
-		"showq",           // postfix
-		"postdrop",
-		"postqueue",
-		"dovecot",
-		"imap",
-		"imap-login",
-		"pop3",
-		"pop3-login",
-		"lmtp",
-		"managesieve",
-		"managesieve-login",
-		"indexer",
-		"indexer-worker",
-		"auth",        // dovecot auth
-		"auth-worker", // dovecot
-		"director",    // dovecot
-		"stats",       // dovecot
-		"config",      // dovecot
-		"log",         // dovecot
-		"dict",        // dovecot
-		"anvil",       // dovecot (shares name with postfix; both legitimate)
-		"replicator",  // dovecot
-		"script-login",
-		"cron",
-		"CRON",
-		"crond",
-		"atd",
-		"agetty",
-		"login",
-		"su",
-		"sudo",
-		"polkitd",
-		"pkexec",
-		"dbus-daemon",
-		"dbus-broker",
-		"dbus-broker-lau", // truncated comm "dbus-broker-launch"
-		"accounts-daemon",
-		"unbound",
-		"named",
-		"rspamd",
-		"clamd",
-		"freshclam",
-		"rpcbind",
-		"snmpd",
-		"chronyd",
-		"ntpd",
-		"qemu-ga",
-		"syslog-ng",
-		"rsyslogd",
-		"supervisord",
-	},
-	PolicyReverseShell: {
-		"logger", // postfix spawn(8) calls logger from inetd-style worker scripts
-	},
-	PolicyInterpreterNetStdio: {
-		// EXEC-005 is the weak companion of EXEC-003; same logger
-		// pattern dominates the noise on postfix hosts.
-		"logger",
-	},
-}
-
-// defaultComms lists comm names whose CFML-BPF-001 match is the
-// container runtime's normal initialisation: runc / crun load seccomp
-// programs and BPF maps on every container start, containerd-shim
-// proxies the same calls, dockerd / podman / cri-o orchestrate them.
-// The BPF-side cfm_comm_is_trusted_bpf_agent allowlist already
-// suppresses systemd, NetworkManager, bpftool, and auditd; userspace
-// adds the container-runtime layer without a BPF rebuild.
-//
-// Comm strings here must already be truncated to the kernel's
-// TASK_COMM_LEN-1 width (15 chars). `containerd-shim-runc-v2` for
-// instance presents as `containerd-shim` in bpf_get_current_comm.
-var defaultComms = map[PolicyID][]string{
-	PolicyUnexpectedBPF: {
-		"runc",
-		"runc:[1:CHILD]",
-		"runc:[2:INIT]",
-		"crun",
-		"containerd",
-		"containerd-shim",
-		"dockerd",
-		"docker",
-		"docker-init",
-		"docker-proxy",
-		"docker-untar",
-		"podman",
-		"conmon",
-		"crio",
-		"cri-dockerd",
-		"kubelet",
-		"kube-proxy",
-		"buildkitd",
-		"buildah",
-		"nerdctl",
-	},
-}
+// All baseline allowlist entries now live in the conf layer
+// (DefaultGlobalAllowExe / DefaultGlobalAllowComm in conf.go). Having
+// a single source of truth means an operator who edits /etc/cfm/lsm.conf
+// is editing the actual effective allowlist — no compiled-in defaults
+// silently re-add entries the operator deliberately removed. A daemon
+// running against a config that pre-dates `[allow]` will see no
+// suppression and the operator can regenerate via `cfm lsm init`.

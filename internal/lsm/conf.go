@@ -73,6 +73,27 @@ type Conf struct {
 	// default list (custom orchestrators, vendor agents).
 	AllowComm map[PolicyID][]string
 
+	// GlobalAllowExe is the operator-supplied global executable
+	// allowlist from the `[allow]` section. Every entry is fanned out
+	// to every policy that consults an exe allowlist (CRED-002,
+	// EXEC-003, EXEC-005) at read time via AllowExeFor. Stored
+	// separately from the per-policy map so FormatConf can render a
+	// clean roundtrip and operators can see at a glance which entries
+	// are universal versus surgically scoped.
+	//
+	// Missing paths are silently skipped at daemon start: stat() that
+	// fails just contributes nothing to the BPF-side cfm_setuid_inodes
+	// map, while the userspace filter still suppresses by basename so
+	// cross-distro path lists are safe to ship as defaults.
+	GlobalAllowExe []string
+
+	// GlobalAllowComm is the operator-supplied global comm allowlist
+	// from the `[allow]` section. Every entry is fanned out to every
+	// policy that consults a comm allowlist (BPF-001, plus the other
+	// monitor-only-by-design policies for symmetry) at read time via
+	// AllowCommFor.
+	GlobalAllowComm []string
+
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
 	// section is absent.
@@ -85,7 +106,9 @@ type Conf struct {
 
 // DefaultConf returns the default configuration that `cfm lsm init`
 // writes on a fresh host: cfm-lsm globally disabled, every policy at
-// its DefaultMode, kmsg emission on with the documented defaults.
+// its DefaultMode, kmsg emission on with the documented defaults, and
+// a curated global allowlist that silences the structural detector
+// matches every reasonably-configured Linux host exhibits.
 func DefaultConf() *Conf {
 	modes := map[PolicyID]Mode{}
 	for _, p := range AllPolicies() {
@@ -98,8 +121,137 @@ func DefaultConf() *Conf {
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
+		GlobalAllowExe:        append([]string{}, DefaultGlobalAllowExe...),
+		GlobalAllowComm:       append([]string{}, DefaultGlobalAllowComm...),
 		Kmsg:                  DefaultKmsgConf(),
 	}
+}
+
+// DefaultGlobalAllowExe is the curated cross-distro list of exe paths
+// whose detector match is structural to the daemon's normal operation
+// rather than evidence of compromise. Shipped uncommented in the
+// default lsm.conf via FormatConf; missing paths are silently skipped
+// at daemon start, so the list stays safe across Debian / RHEL /
+// Alpine path conventions and through panel installs that replace
+// system daemons with vendor builds.
+//
+// Categories:
+//
+//   - OpenSSH privsep helpers (sshd, sshd-session, sshd-auth).
+//   - systemd executor + unit-spawn shims.
+//   - Postfix master and the standard service daemons that master
+//     forks (pickup, qmgr, cleanup, smtpd, ...); the spawn(8)
+//     inetd-style worker scripts are NOT in this list because they
+//     are site-specific (mailcow ships them under /usr/local/bin/...).
+//   - Dovecot core daemons + indexer-worker (the noisiest CRED-002
+//     match on mailcow/dovecot hosts).
+//   - /usr/bin/logger — the canonical postfix spawn(8) descendant
+//     whose stdio comes from master pre-exec.
+//
+// New entries should be host-class-universal: a path that exists on
+// one panel only belongs in a panel-specific seed (see cPanel /
+// DirectAdmin auto-seeding in maps.go) or in operator conf, not here.
+var DefaultGlobalAllowExe = []string{
+	// OpenSSH privsep
+	"/usr/sbin/sshd",
+	"/usr/lib/openssh/sshd",
+	"/usr/lib/openssh/sshd-session",
+	"/usr/lib/openssh/sshd-auth",
+	"/usr/libexec/openssh/sshd-session",
+	"/usr/libexec/openssh/sshd-auth",
+
+	// systemd
+	"/usr/lib/systemd/systemd",
+	"/lib/systemd/systemd",
+	"/usr/lib/systemd/systemd-executor",
+	"/lib/systemd/systemd-executor",
+
+	// Postfix master + standard service daemons (Debian + RHEL paths)
+	"/usr/lib/postfix/sbin/master",
+	"/usr/libexec/postfix/master",
+	"/usr/lib/postfix/sbin/pickup",
+	"/usr/libexec/postfix/pickup",
+	"/usr/lib/postfix/sbin/qmgr",
+	"/usr/libexec/postfix/qmgr",
+	"/usr/lib/postfix/sbin/cleanup",
+	"/usr/libexec/postfix/cleanup",
+	"/usr/lib/postfix/sbin/smtpd",
+	"/usr/libexec/postfix/smtpd",
+	"/usr/lib/postfix/sbin/proxymap",
+	"/usr/libexec/postfix/proxymap",
+	"/usr/lib/postfix/sbin/trivial-rewrite",
+	"/usr/libexec/postfix/trivial-rewrite",
+	"/usr/lib/postfix/sbin/tlsmgr",
+	"/usr/libexec/postfix/tlsmgr",
+	"/usr/lib/postfix/sbin/anvil",
+	"/usr/libexec/postfix/anvil",
+	"/usr/lib/postfix/sbin/local",
+	"/usr/libexec/postfix/local",
+	"/usr/lib/postfix/sbin/virtual",
+	"/usr/libexec/postfix/virtual",
+	"/usr/lib/postfix/sbin/bounce",
+	"/usr/libexec/postfix/bounce",
+
+	// Dovecot core
+	"/usr/sbin/dovecot",
+	"/usr/lib/dovecot/imap",
+	"/usr/lib/dovecot/imap-login",
+	"/usr/lib/dovecot/pop3",
+	"/usr/lib/dovecot/pop3-login",
+	"/usr/lib/dovecot/lmtp",
+	"/usr/lib/dovecot/managesieve",
+	"/usr/lib/dovecot/managesieve-login",
+	"/usr/lib/dovecot/indexer",
+	"/usr/lib/dovecot/indexer-worker",
+	"/usr/lib/dovecot/auth",
+	"/usr/lib/dovecot/anvil",
+	"/usr/lib/dovecot/director",
+	"/usr/lib/dovecot/replicator",
+	"/usr/lib/dovecot/stats",
+	"/usr/lib/dovecot/config",
+	"/usr/lib/dovecot/log",
+	"/usr/lib/dovecot/dict",
+	"/usr/lib/dovecot/script-login",
+	"/usr/libexec/dovecot/imap",
+	"/usr/libexec/dovecot/imap-login",
+	"/usr/libexec/dovecot/lmtp",
+	"/usr/libexec/dovecot/indexer-worker",
+	"/usr/libexec/dovecot/auth",
+
+	// Postfix spawn(8) descendant — universal
+	"/usr/bin/logger",
+	"/bin/logger",
+}
+
+// DefaultGlobalAllowComm is the curated cross-distro list of comm
+// names whose detector match is structural rather than evidence of
+// compromise. Comm strings are truncated to TASK_COMM_LEN-1 (15
+// chars) by the kernel — entries here must already be truncated.
+//
+// Today this is dominated by container-runtime entries; runc / crun /
+// containerd / dockerd / podman / conmon legitimately load BPF
+// programs and create BPF maps on every container start, and the
+// BPF-side cfm_comm_is_trusted_bpf_agent allowlist only covers
+// systemd / NetworkManager / bpftool / auditd.
+var DefaultGlobalAllowComm = []string{
+	"runc",
+	"crun",
+	"containerd",
+	"containerd-shim",
+	"dockerd",
+	"docker",
+	"docker-init",
+	"docker-proxy",
+	"docker-untar",
+	"podman",
+	"conmon",
+	"crio",
+	"cri-dockerd",
+	"kubelet",
+	"kube-proxy",
+	"buildkitd",
+	"buildah",
+	"nerdctl",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
@@ -111,22 +263,50 @@ func (c *Conf) PersistencePathsFor(id PolicyID) []string {
 	return c.PersistencePaths[id]
 }
 
-// AllowExeFor returns the configured allow_exe paths for id, or nil
-// when none are set. Safe on a nil receiver.
+// AllowExeFor returns the merged allow_exe paths for id — global
+// `[allow]` entries plus the per-policy section's entries. Returns
+// nil when id does not consume an exe allowlist or when nothing has
+// been configured. Safe on a nil receiver.
+//
+// The global slice is prepended in declaration order so per-policy
+// overrides land last and operators can read the final effective
+// allowlist by scanning top-to-bottom.
 func (c *Conf) AllowExeFor(id PolicyID) []string {
-	if c == nil || c.AllowExe == nil {
+	if c == nil {
 		return nil
 	}
-	return c.AllowExe[id]
+	if !allowExePolicy(id) {
+		return nil
+	}
+	var out []string
+	if len(c.GlobalAllowExe) > 0 {
+		out = append(out, c.GlobalAllowExe...)
+	}
+	if c.AllowExe != nil {
+		out = append(out, c.AllowExe[id]...)
+	}
+	return out
 }
 
-// AllowCommFor returns the configured allow_comm names for id, or
-// nil when none are set. Safe on a nil receiver.
+// AllowCommFor returns the merged allow_comm names for id — global
+// `[allow]` entries plus the per-policy section's entries. Returns
+// nil when id does not consume a comm allowlist or when nothing has
+// been configured. Safe on a nil receiver.
 func (c *Conf) AllowCommFor(id PolicyID) []string {
-	if c == nil || c.AllowComm == nil {
+	if c == nil {
 		return nil
 	}
-	return c.AllowComm[id]
+	if !allowCommPolicy(id) {
+		return nil
+	}
+	var out []string
+	if len(c.GlobalAllowComm) > 0 {
+		out = append(out, c.GlobalAllowComm...)
+	}
+	if c.AllowComm != nil {
+		out = append(out, c.AllowComm[id]...)
+	}
+	return out
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -189,6 +369,7 @@ const (
 	sectionTopLevel sectionKind = iota
 	sectionPolicy
 	sectionKmsg
+	sectionAllow
 )
 
 func ParseConf(r io.Reader) (*Conf, error) {
@@ -218,6 +399,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		seenTopLevel  = map[string]int{}
 		seenKmsgKeys  = map[string]int{}
 		kmsgSeen      int
+		allowSeen     int
 	)
 
 	for scanner.Scan() {
@@ -253,6 +435,14 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				kmsgSeen = lineno
 				current = sectionKmsg
+				currentPolicy = ""
+			case sectionAllow:
+				if allowSeen > 0 {
+					return nil, fmt.Errorf("line %d: duplicate [allow] section (first at line %d)",
+						lineno, allowSeen)
+				}
+				allowSeen = lineno
+				current = sectionAllow
 				currentPolicy = ""
 			}
 			continue
@@ -357,6 +547,23 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			default:
 				return nil, fmt.Errorf("line %d: unknown kmsg key %q (state_transitions | detect_events | detect_rate_per_min)", lineno, key)
 			}
+		case sectionAllow:
+			switch strings.ToLower(key) {
+			case "allow_exe":
+				p, err := parseAllowExe(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.GlobalAllowExe = append(c.GlobalAllowExe, p)
+			case "allow_comm":
+				comm, err := parseAllowComm(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.GlobalAllowComm = append(c.GlobalAllowComm, comm)
+			default:
+				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm)", lineno, key)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -405,47 +612,58 @@ func FormatConf(c *Conf) string {
 				}
 			}
 		}
-		if p.ID == PolicyCredEscal {
-			paths := c.AllowExeFor(p.ID)
-			if len(paths) == 0 {
-				b.WriteString("# Allowlist binaries that legitimately call setresuid(0,…) without\n")
-				b.WriteString("# the suid bit on disk (panel daemons, custom helpers). Repeat the\n")
-				b.WriteString("# key per entry; absolute paths only. Resolved at daemon start.\n")
-				b.WriteString("# allow_exe = /usr/local/directadmin/directadmin\n")
-				b.WriteString("# allow_exe = /usr/local/cpanel/cpanel\n")
-			} else {
-				for _, ap := range paths {
-					fmt.Fprintf(&b, "allow_exe = %s\n", ap)
+		if allowExePolicy(p.ID) {
+			// Only render the per-policy AllowExe map here. Global
+			// [allow] entries live in their own section so a
+			// write-modify-write round trip stays stable.
+			perPolicy := c.AllowExe[p.ID]
+			if len(perPolicy) == 0 {
+				switch p.ID {
+				case PolicyCredEscal:
+					b.WriteString("# Narrow this policy further by adding allow_exe lines here, or use the\n")
+					b.WriteString("# global [allow] section below to apply across every cfm-lsm detector.\n")
+					b.WriteString("# allow_exe = /usr/local/directadmin/directadmin\n")
+					b.WriteString("# allow_exe = /usr/local/cpanel/cpanel\n")
+				case PolicyReverseShell, PolicyInterpreterNetStdio:
+					b.WriteString("# Site-specific spawn(8) helper scripts (mailcow / custom inetd-style\n")
+					b.WriteString("# services). Global cross-distro entries already live in [allow] below.\n")
+					b.WriteString("# allow_exe = /usr/local/bin/whitelist_forwardinghosts.sh\n")
 				}
-			}
-		}
-		if p.ID == PolicyReverseShell || p.ID == PolicyInterpreterNetStdio {
-			paths := c.AllowExeFor(p.ID)
-			if len(paths) == 0 {
-				b.WriteString("# Allowlist exec targets whose stdio is structurally remote — postfix\n")
-				b.WriteString("# spawn(8) inetd-style workers receive the accepted inet socket on\n")
-				b.WriteString("# stdin/stdout/stderr from master before exec, so every child trips\n")
-				b.WriteString("# the strict three-fd-remote detector. Match is by basename.\n")
-				b.WriteString("# allow_exe = /usr/local/bin/whitelist_forwardinghosts.sh\n")
 			} else {
-				for _, ap := range paths {
+				for _, ap := range perPolicy {
 					fmt.Fprintf(&b, "allow_exe = %s\n", ap)
 				}
 			}
 		}
 		if allowCommPolicy(p.ID) {
-			comms := c.AllowCommFor(p.ID)
-			if len(comms) == 0 && p.ID == PolicyUnexpectedBPF {
-				b.WriteString("# Allowlist process comm names that legitimately use bpf() — common\n")
-				b.WriteString("# container runtimes (runc, containerd, dockerd, podman, conmon, ...)\n")
-				b.WriteString("# are included by default. Add site-specific orchestrators here.\n")
-				b.WriteString("# allow_comm = my-orchestrator\n")
-			} else if len(comms) > 0 {
-				for _, c := range comms {
-					fmt.Fprintf(&b, "allow_comm = %s\n", c)
+			perPolicy := c.AllowComm[p.ID]
+			if len(perPolicy) == 0 {
+				if p.ID == PolicyUnexpectedBPF {
+					b.WriteString("# Narrow this policy further by adding allow_comm lines here, or use\n")
+					b.WriteString("# the global [allow] section below to apply across every cfm-lsm\n")
+					b.WriteString("# detector that consults a comm allowlist.\n")
+					b.WriteString("# allow_comm = my-orchestrator\n")
+				}
+			} else {
+				for _, cc := range perPolicy {
+					fmt.Fprintf(&b, "allow_comm = %s\n", cc)
 				}
 			}
 		}
+	}
+	b.WriteString("\n")
+	b.WriteString("# Global allowlist — applied to every cfm-lsm detector that consults\n")
+	b.WriteString("# an exe or comm allowlist (today: CFML-CRED-002, CFML-EXEC-003,\n")
+	b.WriteString("# CFML-EXEC-005, CFML-BPF-001). allow_exe is matched by basename in the\n")
+	b.WriteString("# userspace post-filter and additionally fed into the BPF-side\n")
+	b.WriteString("# cfm_setuid_inodes map for CFML-CRED-002 when the path stat()s OK.\n")
+	b.WriteString("# Missing paths are silently skipped, so cross-distro lists are safe.\n")
+	b.WriteString("[allow]\n")
+	for _, p := range c.GlobalAllowExe {
+		fmt.Fprintf(&b, "allow_exe = %s\n", p)
+	}
+	for _, cc := range c.GlobalAllowComm {
+		fmt.Fprintf(&b, "allow_comm = %s\n", cc)
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -558,13 +776,16 @@ func parseSectionHeader(line string) (sectionKind, PolicyID, error) {
 	inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 	inner = strings.TrimSpace(inner)
 
-	// Bare-word section: currently only "kmsg".
-	if inner == "kmsg" {
+	// Bare-word sections.
+	switch inner {
+	case "kmsg":
 		return sectionKmsg, "", nil
+	case "allow":
+		return sectionAllow, "", nil
 	}
 
 	if !strings.HasPrefix(inner, "policy") {
-		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[kmsg]` or `[policy \"...\"]`)", line)
+		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[allow]`, `[kmsg]`, or `[policy \"...\"]`)", line)
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(inner, "policy"))
 	if !strings.HasPrefix(rest, `"`) || !strings.HasSuffix(rest, `"`) || len(rest) < 2 {
