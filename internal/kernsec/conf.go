@@ -172,8 +172,8 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			switch lk {
 			case "tier":
 				n, err := strconv.Atoi(val)
-				if err != nil || n < 0 || n > 2 {
-					return nil, fmt.Errorf("line %d: tier must be 0, 1, or 2 (got %q)", lineno, val)
+				if err != nil || n < 0 || n > 3 {
+					return nil, fmt.Errorf("line %d: tier must be 0, 1, 2, or 3 (got %q)", lineno, val)
 				}
 				c.Tier = Tier(n)
 			default:

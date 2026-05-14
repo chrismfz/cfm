@@ -11,11 +11,20 @@ package kernsec
 //
 //	Tier1: safe-everywhere on hosting / KVM / cPanel / EL / Debian.
 //	Tier2: server-aggressive — opt-in per host role, host-profile gated.
+//	Tier3: aggressive — operator must explicitly opt in by raising
+//	       conf.Tier to 3. Rules carry an audit-surfaced notice (stacked
+//	       perf cost, legacy-binary risk, observability impact) that
+//	       describes what the operator is signing up for. Host-profile
+//	       probes still auto-skip individual entries on hosts where the
+//	       break would be guaranteed (e.g. debugfs=off on a host with
+//	       active bpftrace), exactly the same SkipReason mechanism Tier
+//	       2 uses.
 type Tier int
 
 const (
 	Tier1 Tier = 1
 	Tier2 Tier = 2
+	Tier3 Tier = 3
 )
 
 // SysctlRule is one expected sysctl key/value pair plus the human-readable
@@ -180,8 +189,23 @@ var KSPPSysctls = []SysctlRule{
 	{
 		ID: "KSEC-SCT-kspp.kernel-005", Group: "kspp.kernel", Tier: Tier1,
 		Key: "kernel.perf_event_paranoid", Value: "3",
-		Description: "Restrict perf_event_open() to root.",
-		Affects:     "Developer profiling tools (perf, flamegraph) need sudo.",
+		// Upstream Documentation/admin-guide/sysctl/kernel.rst only
+		// defines -1, 0, 1, 2. Value 3 is the Debian/Ubuntu/RHEL
+		// downstream patch (Kees Cook, ~2014, never upstreamed) that
+		// adds "disallow perf_event_open() entirely for users without
+		// CAP_SYS_ADMIN / CAP_PERFMON" — the right default for a
+		// multi-tenant hosting box and what kernsec ships. Some
+		// hardened forks (Ubuntu hardened streams, grsec derivatives)
+		// extend the patch further with value 4. Treat both ends as
+		// also-green:
+		//   "2" → mainline-vanilla kernels physically cannot reach 3;
+		//         the sysctl handler clamps any write > the highest
+		//         known constant. Audit would crywolf on those hosts.
+		//   "4" → operators on a fork that defines 4 are STRICTER than
+		//         the recommendation; equality-check would fail them.
+		AcceptValues: []string{"2", "4"},
+		Description:  "Restrict perf_event_open() to root. Debian/Ubuntu/EL downstream patch defines =3; some hardened forks define =4. Stricter values are also-green; =2 (upstream max) is also-green on mainline-vanilla kernels that don't carry the Debian patch.",
+		Affects:      "Developer profiling tools (perf, flamegraph) need sudo.",
 	},
 	{
 		ID: "KSEC-SCT-kspp.kernel-006", Group: "kspp.kernel", Tier: Tier1,
@@ -200,6 +224,18 @@ var KSPPSysctls = []SysctlRule{
 		AcceptValues: []string{"1"},
 		Description:  "Require CAP_SYS_PTRACE for any ptrace attach. Beyond mode 1's child-only restriction, mode 2 also blocks the same-uid pidfd_getfd() exit-window race against setuid helpers — the ssh-keysign host-key theft chain reported by Qualys (kernel fix: Linus commit 31e62c2ebbfd).",
 		Affects:      "gdb --attach, strace -p, py-spy, bpftrace -p, rr record -p and similar attach-style debuggers/profilers need sudo even on the user's own processes. Crash reporters that opt in via PR_SET_PTRACER (Chrome crashpad, Firefox, drkonqi, abrt) can no longer produce minidumps — irrelevant on headless servers. Mode 1 stays acceptable for hosts that need same-uid debuggability and accept the residual exit-window race.",
+	},
+	{
+		ID: "KSEC-SCT-kspp.kernel-007", Group: "kspp.kernel", Tier: Tier1,
+		Key: "vm.mmap_min_addr", Value: "65536",
+		// Modern x86_64 distros (Debian, Ubuntu, RHEL >= 7, Arch)
+		// already default to 65536. Some EL configs ship 128K/256K;
+		// stricter is also-green. The afflicted.sh "Resolute mitigation
+		// map" article calls this out by name as the knob that blocks
+		// NULL-deref-to-userspace exploitation primitives.
+		AcceptValues: []string{"131072", "262144"},
+		Description:  "Block userspace mmap() below 64 KiB. Defeats NULL-deref-to-userspace exploit primitives by ensuring no controllable userspace mapping can sit at low addresses where a kernel NULL pointer dereference would land.",
+		Affects:      "Negligible on modern distros — this is already the default. Pre-2015 wine for 16-bit Windows, dosbox in raw mode, very old QEMU configs, and a handful of legacy emulators may need a per-binary override via prctl(PR_SET_MM_MAP_MIN_ADDR).",
 	},
 }
 
@@ -263,6 +299,23 @@ var Tier2Sysctls = []SysctlRule{
 		Description: "Debian-flavoured alternative for blocking unprivileged userns. Reversible without breaking root use.",
 		Affects:     "Same surface as user.max_user_namespaces=0. Skipped if containers or hosting panels detected. Skipped if kernel doesn't expose the key (non-Debian).",
 	},
+	{
+		ID: "KSEC-SCT-tier2.iouring-001", Group: "tier2.iouring", Tier: Tier2,
+		Key: "kernel.io_uring_disabled", Value: "2",
+		// Live=1 already blocks unprivileged use; =2 disables io_uring
+		// entirely (including root). Treat =1 as also-green for hosts
+		// that need root-side io_uring (admin tools, fio benchmarks).
+		// The afflicted.sh "Resolute mitigation map" article calls
+		// io_uring out by name as the Class-C substitute primitive
+		// once unprivileged_bpf_disabled=2 closes the BPF gate —
+		// IORING_REGISTER_BUFFERS / IORING_OP_PROVIDE_BUFFERS / SQE
+		// ring allocations stand in for BPF maps as controllable
+		// kernel-spray primitives. Auto-skipped if any process is
+		// holding an io_uring fd.
+		AcceptValues: []string{"1"},
+		Description:  "Disable io_uring. Closes the Class-C substitute primitive for unprivileged_bpf_disabled — io_uring's SQE/CQE rings and registered-buffer allocations otherwise replace BPF maps as controllable kernel-spray primitives. Sysctl was added in kernel 6.6; older kernels will report 'not exposed' and the rule no-ops.",
+		Affects:      "Disables io_uring entirely. Hosts running PostgreSQL with io_method=io_uring, MySQL 8.4+, fio benchmarks, nginx with io_uring aio_write, Node ≥ 20 with the io_uring backend, or other modern storage stacks will lose those code paths. Auto-skipped if /proc/*/fd shows any io_uring fd in use; =1 (privileged-only) accepted as also-green for hosts that need root-side io_uring.",
+	},
 }
 
 // Tier2BootArgs is the server-aggressive boot-arg profile (Phase 4).
@@ -275,6 +328,39 @@ var Tier2BootArgs = []BootArg{
 		Key: "oops", Value: "panic",
 		Description: "Pair with kernel.panic_on_oops=1 to stop oops-spray exploit techniques cold.",
 		Affects:     "Aggressive: any kernel oops becomes a reboot. On a multi-tenant host (KVM hypervisor, libvirt, Proxmox, container engine) one oops reboots every guest/container at once. Auto-skipped on multi-tenant hosts; defensible on single-tenant boxes.",
+	},
+}
+
+// Tier3BootArgs is the aggressive opt-in boot-arg profile.
+//
+// Tier 3 entries are not applied unless the operator raises conf.Tier
+// to 3 explicitly. Each entry pairs with either a host-profile probe
+// that auto-skips it on hosts where the break would be guaranteed
+// (vsyscall=none + HasLegacyBinaries; debugfs=off + HasDebugfsConsumers)
+// or a preflight notice that surfaces the cost the operator is
+// signing up for (init_on_free + stacked perf cost on top of the
+// Tier 1 init_on_alloc=1).
+//
+// Each also adds an entry to ManagedBootArgKeys so disable / apply
+// --remove strip it cleanly.
+var Tier3BootArgs = []BootArg{
+	{
+		ID: "KSEC-BOOT-tier3.mempaint-001", Group: "tier3.mempaint", Tier: Tier3,
+		Key: "init_on_free", Value: "1",
+		Description: "Zero pages at free time. Pairs with the Tier 1 init_on_alloc=1 (KSEC-BOOT-kspp-002) to fully eliminate use-after-free read primitives: init_on_alloc defeats UAF-read-of-stale-data, init_on_free defeats UAF-read-of-just-freed. The afflicted.sh \"Resolute mitigation map\" writeup specifically names INIT_ON_FREE=off as the kernel-side gap that keeps UAF-read viable on otherwise fully-hardened distros.",
+		Affects:     "Additional ~1-3% memory-allocation perf cost on free paths, stacked on top of init_on_alloc=1's ~0-5%. Brick-safe — no compatibility breakages, only measurable throughput cost. Apply only on hosts where the combined ceiling (~3-8% worst-case) is acceptable.",
+	},
+	{
+		ID: "KSEC-BOOT-tier3.legacycompat-001", Group: "tier3.legacycompat", Tier: Tier3,
+		Key: "vsyscall", Value: "none",
+		Description: "Disable the legacy fixed-address vsyscall page (gettimeofday / time / getcpu at 0xffffffffff600000). Closes a small but historically-abused fixed-address ROP target. Modern userspace uses vDSO instead; vsyscall has been deprecated since glibc 2.14 (2011).",
+		Affects:     "Breaks statically-linked binaries built against pre-2.14 glibc (CentOS-6-vintage software), very old Go binaries (pre-1.6), some ancient embedded toolchain output, very old wine builds. Auto-skipped when the legacy-binary probe finds glibc<2.14 ELFs in standard paths. The kernel default `vsyscall=xonly` still mitigates the worst data-read patterns; =none is the strict step.",
+	},
+	{
+		ID: "KSEC-BOOT-tier3.observability-001", Group: "tier3.observability", Tier: Tier3,
+		Key: "debugfs", Value: "off",
+		Description: "Refuse to expose the debugfs filesystem at all. Removes a broad kernel-internal attack surface (debug-only hooks across drivers and subsystems) that has historically harboured info-leak and UAF bugs. tracefs (used by ftrace / bpftrace / perf) is mounted separately at /sys/kernel/tracing since kernel 4.1 and is NOT affected.",
+		Affects:     "Breaks bpftool map-dump on older kernels, libvirt's debug introspection, intel_gpu_top (/sys/kernel/debug/dri), some legacy hardware-monitoring tools, very old bcc/bpftrace versions. Auto-skipped when active debugfs consumers (bpftrace, bcc-tools, intel-gpu-tools, processes holding open fds under /sys/kernel/debug, systemd units referencing /sys/kernel/debug) are detected.",
 	},
 }
 
@@ -452,6 +538,10 @@ var ManagedBootArgKeys = []string{
 	"unprivileged_bpf_disabled",
 	// Tier 2
 	"oops",
+	// Tier 3
+	"init_on_free",
+	"vsyscall",
+	"debugfs",
 }
 
 // String returns the cmdline form of a boot arg ("key" or "key=value").
@@ -542,12 +632,14 @@ var NetSysctls = []SysctlRule{
 }
 
 // AllBootArgs returns the full boot-arg rule set across tiers.
-// Order: Tier 1 KSPP baseline, Tier 1 extensions, Tier 2 opt-in.
+// Order: Tier 1 KSPP baseline, Tier 1 extensions, Tier 2 opt-in,
+// Tier 3 explicit opt-in.
 func AllBootArgs() []BootArg {
-	out := make([]BootArg, 0, len(KSPPBootArgs)+len(Tier1BootArgsExt)+len(Tier2BootArgs))
+	out := make([]BootArg, 0, len(KSPPBootArgs)+len(Tier1BootArgsExt)+len(Tier2BootArgs)+len(Tier3BootArgs))
 	out = append(out, KSPPBootArgs...)
 	out = append(out, Tier1BootArgsExt...)
 	out = append(out, Tier2BootArgs...)
+	out = append(out, Tier3BootArgs...)
 	return out
 }
 

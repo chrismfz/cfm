@@ -139,7 +139,7 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	onlyApply := fs.Bool("only-apply", false, "hide rules that would be skipped")
 	group := fs.String("group", "", "filter by group prefix (e.g. modules.net.legacy)")
-	tier := fs.Int("tier", -1, "override conf.Tier for this preview (0|1|2; default: honor conf)")
+	tier := fs.Int("tier", -1, "override conf.Tier for this preview (0|1|2|3; default: honor conf)")
 	ids := fs.String("id", "", "comma-separated rule IDs to include")
 	skip := fs.String("skip", "", "comma-separated rule IDs to ad-hoc skip (not persisted)")
 	force := fs.String("force-id", "", "comma-separated rule IDs to ad-hoc force (not persisted)")
@@ -147,8 +147,8 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	if rc, done := handleFlagErr("kernsec preview", fs.Parse(args), w); done {
 		return rc
 	}
-	if *tier < -1 || *tier > 2 {
-		fmt.Fprintln(os.Stderr, "kernsec preview: --tier must be 0, 1, or 2")
+	if *tier < -1 || *tier > 3 {
+		fmt.Fprintln(os.Stderr, "kernsec preview: --tier must be 0, 1, 2, or 3")
 		return 2
 	}
 	// Sentinel: -1 means "operator did not pass --tier"; PreviewOptions
@@ -356,7 +356,7 @@ Status / text flags:
 Preview flags:
   --only-apply        Hide skipped rules
   --group <prefix>    Filter by group prefix (e.g. modules.net.legacy)
-  --tier <0|1|2>      Override conf.Tier for this preview (0 renders every rule as OFF; 1 hides Tier 2; 2 shows all)
+  --tier <0|1|2|3>    Override conf.Tier for this preview (0 renders every rule as OFF; 1 hides Tier 2+3; 2 hides Tier 3; 3 shows all)
   --id  <ids>         Comma-separated rule IDs to include
   --skip <ids>        Comma-separated ad-hoc skip overrides (not persisted)
   --force-id <ids>    Comma-separated ad-hoc force overrides (not persisted)

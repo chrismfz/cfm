@@ -165,7 +165,7 @@ func TestRunStatusJSON_IncludesMalformedConfigError(t *testing.T) {
 	if out.Tier != Tier1 {
 		t.Fatalf("status JSON tier = %d, want default tier 1 after malformed config", out.Tier)
 	}
-	if !containsString(out.Errors, "kernsec config read failed") || !containsString(out.Errors, "tier must be 0, 1, or 2") {
+	if !containsString(out.Errors, "kernsec config read failed") || !containsString(out.Errors, "tier must be 0, 1, 2, or 3") {
 		t.Fatalf("status JSON errors missing malformed config details: %#v", out.Errors)
 	}
 }
