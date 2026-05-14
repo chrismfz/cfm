@@ -529,6 +529,69 @@ func runDaemon(args []string) {
 		}
 	}
 
+	// Daemon context — created early so sslcollector (started right
+	// below) and any other early-start subsystem can use it for their
+	// background goroutines. The deferred cancel propagates to every
+	// derived ctx when runDaemon returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// === SSL collector early-start ===
+	// Start sslcollector BEFORE the firewall (backend, EnsureBase,
+	// dyndns, blocklists, loadAll, detectors, applyXxx phases) so:
+	//   - the disk snapshot is on disk within ~500ms of cfm start
+	//     (was 11 seconds on hosts with 1k+ cert pairs)
+	//   - the unix socket is bound within ~600ms (was 13 seconds)
+	//   - the fsnotify watcher is live within ~700ms (was 13 seconds)
+	// sslcollector has no firewall dependency: it scans /etc/letsencrypt,
+	// /var/cpanel/ssl, /home/*/ssl etc. and serves /dumpall over a
+	// unix socket. Putting it before EnsureBase costs ~500ms of delay
+	// to backend setup — the kernel's pre-cfm rule state is the same
+	// as t=0 either way, so the host is no less protected during that
+	// window. The win: workers spawned by an angie/openresty reload
+	// during cfm restart find snapshot+socket+watcher all ready,
+	// instead of falling through to the self-signed fallback cert and
+	// tripping HSTS in browsers (the original bug PR #883 began
+	// addressing).
+	sslcol := sslcollector.New(sslcollector.Config{
+		Enabled:        true,
+		CacheDir:       "/var/lib/cfm/sslcollector",
+		StatEvery:      60 * time.Second,
+		DiscoveryEvery: 6 * time.Hour,
+		NegativeTTL:    30 * time.Second,
+		MaxCertCache:   20000,
+	})
+
+	// Synchronous Refresh writes the snapshot to disk before any worker
+	// from an in-flight edge reload tries to load_from_snapshot.
+	_ = sslcol.Refresh(context.Background())
+	st := sslcol.Stats()
+	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
+		st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
+
+	// Background loop for ongoing refresh + fsnotify watcher.
+	go func() {
+		if err := sslcol.Run(ctx); err != nil && ctx.Err() == nil {
+			logging.Logf("[sslcollector] stopped: %v", err)
+		}
+	}()
+
+	webdet.SetSSLCollector(sslcol)
+	logging.Logf("[sslcollector] started")
+
+	// Bind the sslcollector unix socket NOW with the config we already
+	// parsed at the top of runDaemon. Without this early call the
+	// socket would not bind until applyCFMConfigRemaining at the end
+	// of startup — 13+ seconds late on busy hosts. The matching call
+	// inside applyCFMConfigRemaining (later in this function) stays
+	// as a no-op-on-first-start path that picks up operator edits to
+	// /etc/cfm/cfm.conf.
+	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
+	defer sslSockLc.Stop()
+	if engineCfg != nil {
+		sslSockLc.ApplyConfig(ctx, &engineCfg.SSLCollectorSock)
+	}
+
 	rawEngine, engine, engineSource := resolveFirewallEngine(engineCfg)
 	logging.Logf("[startup] firewall engine raw=%q normalized=%q source=%s", rawEngine, engine, engineSource)
 
@@ -845,9 +908,12 @@ func runDaemon(args []string) {
 	agLc := agentpkg.NewLifecycle(Version, be, cfgDir)
 	defer agLc.Stop()
 
-	// cfm.conf loader/applier (single place)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// (ctx, sslcol, sslSockLc moved to top of runDaemon — see the
+	// "SSL collector early-start" block right after cfm.conf is parsed.
+	// They're created BEFORE backend setup so the snapshot/socket/
+	// watcher are ready in <1s instead of 11-13s on busy hosts. The
+	// matching sslSockLc.ApplyConfig in applyCFMConfigRemaining stays
+	// as a no-op-on-first-start path that picks up operator edits.)
 
 	// periodic clam bridge retry
 	go func() {
@@ -865,36 +931,6 @@ func runDaemon(args []string) {
 
 	// NOTE: detectors should be started early so config-only sections (like mysql_governor)
 	// can populate pending configs before applyDebugServer() tries to consume them.
-
-	// --- SSL collector (start once; used later by webdetector TLS proxy) ---
-	sslcol := sslcollector.New(sslcollector.Config{
-		Enabled:        true,
-		CacheDir:       "/var/lib/cfm/sslcollector",
-		StatEvery:      60 * time.Second,
-		DiscoveryEvery: 6 * time.Hour,
-		NegativeTTL:    30 * time.Second,
-		MaxCertCache:   20000,
-	})
-
-	// Do one refresh now so we can log totals immediately
-	_ = sslcol.Refresh(context.Background())
-	st := sslcol.Stats()
-	logging.Logf("[sslcollector] pairs=%d exact_hosts=%d wildcards=%d files=%d src=%v",
-		st.UniquePairs, st.ExactHosts, st.WildcardZones, st.KnownFiles, st.BySource)
-
-	// Background loop for ongoing refresh
-	go func() {
-		if err := sslcol.Run(ctx); err != nil && ctx.Err() == nil {
-			logging.Logf("[sslcollector] stopped: %v", err)
-		}
-	}()
-
-	webdet.SetSSLCollector(sslcol)
-	logging.Logf("[sslcollector] started")
-
-	// --- sslcollector sock server lifecycle (driven by config reload) ---
-	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
-	defer sslSockLc.Stop()
 
 	go func() {
 		if err := panelauth.Serve(ctx, "/var/run/cfm-auth.sock"); err != nil && ctx.Err() == nil {
