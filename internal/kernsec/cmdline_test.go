@@ -126,8 +126,6 @@ func TestManagedBootArgKeysExactOwnedSet(t *testing.T) {
 		"unprivileged_bpf_disabled",
 		"oops",
 		"init_on_free",
-		"vsyscall",
-		"debugfs",
 	}
 	if !reflect.DeepEqual(ManagedBootArgKeys, want) {
 		t.Fatalf("ManagedBootArgKeys changed:\ngot  %#v\nwant %#v", ManagedBootArgKeys, want)

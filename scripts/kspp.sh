@@ -777,13 +777,13 @@ Server-safe profile includes:
     randomize_kstack_offset=on
     initcall_blacklist=algif_aead_init
 
-Tier 2 (host-profile gated, applied when conf tier >= 2):
-  kernel.io_uring_disabled=2 (=1 also-green) — auto-skipped if any process holds an io_uring fd
-
 Tier 3 (operator opt-in, applied when conf tier == 3):
   init_on_free=1 — stacks on init_on_alloc=1 (~3-8% combined ceiling)
-  vsyscall=none — auto-skipped if pre-glibc-2.14 / static binaries found
-  debugfs=off  — auto-skipped if bpftrace / bcc-tools / debugfs fd holders found
+
+Considered but not shipped (see docs/kernsec.md "Considered but not shipped"):
+  kernel.io_uring_disabled=2 — held: probe cost on every DetectHostProfile()
+  vsyscall=none              — held: static-Go false-positives in probe + Elf_Verneed parsing needed
+  debugfs=off                — held: ManagedBootArgKeys regression for operator-set values
 
 Boot backend support:
   Proxmox boot tool / systemd-boot
