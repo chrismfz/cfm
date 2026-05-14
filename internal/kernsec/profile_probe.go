@@ -43,7 +43,9 @@ func anyGlobMatches(patterns ...string) bool {
 // override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
 	IsKVMHost               bool   `json:"is_kvm_host"`                // kvm_intel / kvm_amd loaded → KVM hypervisor host
+	HasLibvirt              bool   `json:"has_libvirt"`                // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
 	HasContainers           bool   `json:"has_containers"`             // runc / containerd / lxc / podman process running → don't kill userns
+	UsesBridge              bool   `json:"uses_bridge"`                // in-kernel bridge in use (docker0, br-*, virbr*, vmbr*, manual brctl) → llc/llc2 are required
 	HasIPsec                bool   `json:"has_ipsec"`                  // `ip xfrm policy` non-empty → don't blacklist IPsec modules
 	HasDKMS                 bool   `json:"has_dkms"`                   // out-of-tree module evidence detected
 	HasKdump                bool   `json:"has_kdump"`                  // kdump enabled → keep coredump gates conservative
@@ -73,7 +75,9 @@ type HostProfile struct {
 func DetectHostProfile() HostProfile {
 	p := HostProfile{
 		IsKVMHost:              anyModuleLoaded("kvm_intel", "kvm_amd"),
+		HasLibvirt:             detectLibvirt(),
 		HasContainers:          defaultContainerProbe().detect(),
+		UsesBridge:             detectInKernelBridge(),
 		HasIPsec:               hasIPsecPolicies(),
 		HasKdump:               hasKdump(),
 		HasBluetoothHardware:   dirHasEntries("/sys/class/bluetooth"),
@@ -245,6 +249,48 @@ func detectLivePatchingModules() bool {
 	return anyModuleLoaded("kcare", "kpatch", "kgraft", "uptrack", "ksplice") || anyModuleLoadedWithPrefix("livepatch", "kpatch_", "ksplice_")
 }
 
+// detectLibvirt reports whether libvirt is installed/running on this
+// host. libvirt drives QEMU/KVM via its own virbr* bridges and depends
+// on the in-kernel bridge module the same way Docker / Proxmox / LXC
+// do. Layered probe so a stopped-but-installed libvirtd still gates
+// (it'll start back up and try to bring up virbr0).
+func detectLibvirt() bool {
+	return anyPathExists(
+		"/var/run/libvirt/libvirt-sock",
+		"/run/libvirt/libvirt-sock",
+		"/var/run/libvirt/libvirt-sock-ro",
+		"/run/libvirt/libvirt-sock-ro",
+		"/usr/sbin/libvirtd",
+		"/usr/bin/virsh",
+		"/etc/libvirt",
+		"/usr/lib/systemd/system/libvirtd.service",
+		"/lib/systemd/system/libvirtd.service",
+	)
+}
+
+// detectInKernelBridge reports whether the host currently has any
+// in-kernel bridge interface. This catches every userland that uses
+// the `bridge` module: Docker (docker0, br-*), libvirt (virbr*),
+// Proxmox (vmbr*), LXC/LXD, K8s CNIs, manual `brctl`/`ip link add type
+// bridge`. The signal is a sysfs directory: /sys/class/net/<iface>/bridge
+// exists iff <iface> is a kernel bridge.
+//
+// Blacklisting the bridge module's hard dependencies (llc, llc2) on
+// such a host breaks bridging the next time the module reloads
+// (kernel update, reboot, manual rmmod/modprobe).
+func detectInKernelBridge() bool {
+	entries, err := os.ReadDir(hostProfilePath("/sys/class/net"))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if _, err := os.Stat(filepath.Join(hostProfilePath("/sys/class/net"), e.Name(), "bridge")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func detectProxmox() bool {
 	return anyPathExists(
 		"/etc/pve",
@@ -353,6 +399,30 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasContainers {
 			return "host runs containers — erofs may back container image layers"
 		}
+	case "modules.net.legacy.llc":
+		// llc / llc2 are hard dependencies of the in-kernel `bridge`
+		// module (bridge → stp → llc). Blacklisting them on any host
+		// that uses bridges breaks the bridge driver the next time it
+		// reloads: Docker (docker0), Podman, libvirt/KVM (virbr*),
+		// Proxmox (vmbr*), LXC/LXD, K8s CNIs, OpenStack Neutron,
+		// manual brctl. UsesBridge is the catch-all sysfs probe; the
+		// other signals provide better skip-reason text and catch
+		// installed-but-not-yet-running cases.
+		if p.UsesBridge {
+			return "in-kernel bridge interface present (/sys/class/net/*/bridge) — `bridge` module requires llc"
+		}
+		if p.HasContainers {
+			return "container runtime active (Docker / Podman / LXC) — needs the `bridge` module which requires llc"
+		}
+		if p.IsKVMHost {
+			return "KVM hypervisor — libvirt/QEMU bridges need the `bridge` module which requires llc"
+		}
+		if p.HasLibvirt {
+			return "libvirt installed — virbr* bridges need the `bridge` module which requires llc"
+		}
+		if p.IsProxmox {
+			return "Proxmox host — vmbr* bridges need the `bridge` module which requires llc"
+		}
 	case "modules.bus.bluetooth":
 		// Blacklisting bluetooth/btusb/bnep/hci_uart on a host with
 		// real Bluetooth hardware would break paired keyboards / mice
@@ -401,6 +471,36 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 		if p.HasMonitoringWorkload {
 			return "monitoring/crash-diagnostic workload detected — preserve global coredump handling"
+		}
+		// Multi-tenant diagnostics: on KVM hosts (libvirt-managed
+		// QEMU writes guest cores via core_pattern) and container
+		// hosts (in-container crashes can escape to the host pattern
+		// for CI/image-build debugging), suppressing core_pattern
+		// silently loses post-mortem evidence.
+		if p.IsKVMHost || p.HasLibvirt {
+			return "KVM / libvirt host — QEMU guest coredumps go through kernel.core_pattern"
+		}
+		if p.HasContainers {
+			return "container runtime active — in-container coredumps may route through host kernel.core_pattern"
+		}
+	case "tier2.oops":
+		// kernel.panic_on_oops=1 + kernel.panic=10 + oops=panic turn
+		// any kernel oops/WARN into a reboot. On a multi-tenant host
+		// (KVM hypervisor, libvirt, Docker / container engine) that
+		// single oops can take down every guest / container at once.
+		// Tier 2 still applies on single-tenant boxes where the
+		// fail-closed-on-oops trade is defensible.
+		if p.IsKVMHost {
+			return "KVM hypervisor — a kernel oops here would reboot every guest at once"
+		}
+		if p.HasLibvirt {
+			return "libvirt host — a kernel oops here would reboot every libvirt-managed guest at once"
+		}
+		if p.IsProxmox {
+			return "Proxmox host — a kernel oops here would reboot every VM/CT at once"
+		}
+		if p.HasContainers {
+			return "container runtime active — a kernel oops here would reboot every running container at once"
 		}
 	}
 	return ""

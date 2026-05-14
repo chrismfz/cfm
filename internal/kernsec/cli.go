@@ -177,16 +177,18 @@ func runApplyCmd(args []string, w io.Writer) int {
 	noRefresh := fs.Bool("no-refresh", false, "skip the bootloader refresh step (proxmox-boot-tool / update-grub)")
 	noUnload := fs.Bool("no-unload", false, "skip the post-write modprobe -r pass over managed-and-loaded modules (default: unload now)")
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
+	forceUnsafe := fs.Bool("force-unsafe", false, "acknowledge state = force overrides for rules the host-profile would have skipped (e.g. forcing llc on a Docker host)")
 
 	if rc, done := handleFlagErr("kernsec apply", fs.Parse(args), w); done {
 		return rc
 	}
 	return RunApply(w, ApplyOptions{
-		DryRun:    *dryRun,
-		Check:     *check,
-		NoRefresh: *noRefresh,
-		NoUnload:  *noUnload,
-		AssumeYes: *yes,
+		DryRun:      *dryRun,
+		Check:       *check,
+		NoRefresh:   *noRefresh,
+		NoUnload:    *noUnload,
+		AssumeYes:   *yes,
+		ForceUnsafe: *forceUnsafe,
 	})
 }
 
@@ -258,17 +260,19 @@ func runDisableCmd(args []string, w io.Writer) int {
 	noUnload := fs.Bool("no-unload", false, "skip the post-write modprobe -r pass over managed-and-loaded modules (default: unload now)")
 	force := fs.Bool("force", false, "proceed even if the existing kernsec.conf is malformed or unreadable (overrides will be lost)")
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
+	forceUnsafe := fs.Bool("force-unsafe", false, "acknowledge state = force overrides for rules the host-profile would have skipped")
 
 	if rc, done := handleFlagErr("kernsec disable", fs.Parse(args), w); done {
 		return rc
 	}
 	return RunDisable(w, DisableOptions{
-		Purge:     *purge,
-		DryRun:    *dryRun,
-		NoRefresh: *noRefresh,
-		NoUnload:  *noUnload,
-		Force:     *force,
-		AssumeYes: *yes,
+		Purge:       *purge,
+		DryRun:      *dryRun,
+		NoRefresh:   *noRefresh,
+		NoUnload:    *noUnload,
+		Force:       *force,
+		AssumeYes:   *yes,
+		ForceUnsafe: *forceUnsafe,
 	})
 }
 
@@ -363,6 +367,8 @@ Apply flags:
   --no-refresh        Skip the bootloader refresh after writing the cmdline
   --no-unload         Skip the post-write modprobe -r over managed-and-loaded modules (default: unload now)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
+  --force-unsafe      Acknowledge state = force overrides for rules the host-profile would have skipped
+                        (e.g. forcing llc blacklist on a Docker host). Apply refuses without this flag.
 
 Disable flags:
   --purge             Also remove /etc/cfm/kernsec.conf and managed sysctl file (full uninstall)
@@ -371,6 +377,7 @@ Disable flags:
   --no-unload         Skip the post-write modprobe -r over managed-and-loaded modules (default: unload now)
   --force             Proceed even if /etc/cfm/kernsec.conf is malformed or unreadable (overrides will be lost)
   --yes               Skip the interactive safety preview + confirmation (required for unattended runs)
+  --force-unsafe      Acknowledge state = force overrides for rules the host-profile would have skipped
 
 Secure-tmp flags:
   --size <N>G         Size of /var/tmpDSK (required; 1G..256G, must be <50% of free space on /var)

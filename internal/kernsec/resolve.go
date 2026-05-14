@@ -45,14 +45,21 @@ func (d Decision) String() string {
 
 // ResolvedRule pairs a rule's metadata (kind/id/tier/group/display)
 // with the decision the conf+profile produced and the optional reason.
+//
+// WouldSkipReason is set when Decision==Apply but the host-profile
+// would have produced a SkipByHostProfile decision in the absence of
+// an operator `state = force` override. apply uses this to refuse the
+// unsafe-force case by default, requiring --force-unsafe to proceed.
+// Empty on safe rules.
 type ResolvedRule struct {
-	ID       string
-	Kind     RuleKind
-	Group    string
-	Tier     Tier
-	Display  string
-	Decision Decision
-	Reason   string
+	ID              string
+	Kind            RuleKind
+	Group           string
+	Tier            Tier
+	Display         string
+	Decision        Decision
+	Reason          string
+	WouldSkipReason string
 }
 
 // ResolvedSet is the full set of resolved rules in stable order
@@ -140,7 +147,7 @@ func decideSysctl(r SysctlRule, conf *Conf, profile HostProfile) ResolvedRule {
 		ID: r.ID, Kind: KindSysctl, Group: r.Group, Tier: r.Tier,
 		Display: r.Key + "=" + r.Value,
 	}
-	rr.Decision, rr.Reason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
 	// Cross-component check: if another cfm component (sys_tweaks /
 	// firewall / etc.) owns this key per the managedsysctl registry,
 	// flip the decision to ManagedExternally — kernsec audits but
@@ -166,7 +173,7 @@ func decideBootArg(r BootArg, conf *Conf, profile HostProfile) ResolvedRule {
 		ID: r.ID, Kind: KindBoot, Group: r.Group, Tier: r.Tier,
 		Display: r.String(),
 	}
-	rr.Decision, rr.Reason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
 	return rr
 }
 
@@ -175,7 +182,7 @@ func decideModule(r ModuleRule, conf *Conf, profile HostProfile) ResolvedRule {
 		ID: r.ID, Kind: "module", Group: r.Group, Tier: r.Tier,
 		Display: r.Name,
 	}
-	rr.Decision, rr.Reason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
 	return rr
 }
 
@@ -184,7 +191,7 @@ func decideMount(r MountRule, conf *Conf, profile HostProfile) ResolvedRule {
 		ID: r.ID, Kind: "mount", Group: r.Group, Tier: r.Tier,
 		Display: r.MountPoint,
 	}
-	rr.Decision, rr.Reason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
 	return rr
 }
 
@@ -197,14 +204,17 @@ func decideMount(r MountRule, conf *Conf, profile HostProfile) ResolvedRule {
 //  5. Otherwise                         → Apply.
 //
 // Step 1 is intentionally first: `force` exists exactly so operators
-// can override host-profile blocks.
-func decide(id string, tier Tier, group string, conf *Conf, profile HostProfile) (Decision, string) {
+// can override host-profile blocks. The third return value
+// (wouldSkipReason) is populated only on step 1 when the host-profile
+// would have blocked the rule absent the force; it lets apply refuse
+// the unsafe-force case by default.
+func decide(id string, tier Tier, group string, conf *Conf, profile HostProfile) (Decision, string, string) {
 	if conf != nil {
 		switch conf.Overrides[id] {
 		case OverrideForce:
-			return Apply, "forced by conf"
+			return Apply, "forced by conf", profile.SkipReason(group)
 		case OverrideSkip:
-			return SkipByConf, "skip = state in conf"
+			return SkipByConf, "skip = state in conf", ""
 		}
 	}
 	if conf == nil || int(tier) > int(conf.Tier) {
@@ -212,12 +222,12 @@ func decide(id string, tier Tier, group string, conf *Conf, profile HostProfile)
 		if conf != nil {
 			t = conf.Tier
 		}
-		return SkipByTier, "rule tier " + tier.label() + " > conf tier " + t.label()
+		return SkipByTier, "rule tier " + tier.label() + " > conf tier " + t.label(), ""
 	}
 	if reason := profile.SkipReason(group); reason != "" {
-		return SkipByHostProfile, reason
+		return SkipByHostProfile, reason, ""
 	}
-	return Apply, ""
+	return Apply, "", ""
 }
 
 func (t Tier) label() string {

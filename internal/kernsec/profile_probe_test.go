@@ -325,6 +325,135 @@ func TestDetectHostProfile_LivePatchProxmoxZFSAndNVIDIAIndicators(t *testing.T) 
 	}
 }
 
+func TestDetectInKernelBridge(t *testing.T) {
+	t.Run("no bridges", func(t *testing.T) {
+		root := withHostProfileRoot(t)
+		mkdirHostPath(t, root, "/sys/class/net/eth0")
+		mkdirHostPath(t, root, "/sys/class/net/lo")
+		if got := DetectHostProfile(); got.UsesBridge {
+			t.Errorf("UsesBridge=true with no bridge sysfs entries; got %+v", got)
+		}
+	})
+	t.Run("docker0 bridge", func(t *testing.T) {
+		root := withHostProfileRoot(t)
+		mkdirHostPath(t, root, "/sys/class/net/eth0")
+		mkdirHostPath(t, root, "/sys/class/net/docker0/bridge")
+		if got := DetectHostProfile(); !got.UsesBridge {
+			t.Errorf("UsesBridge=false with docker0/bridge present; got %+v", got)
+		}
+	})
+	t.Run("proxmox vmbr0", func(t *testing.T) {
+		root := withHostProfileRoot(t)
+		mkdirHostPath(t, root, "/sys/class/net/vmbr0/bridge")
+		if got := DetectHostProfile(); !got.UsesBridge {
+			t.Errorf("UsesBridge=false with vmbr0/bridge present; got %+v", got)
+		}
+	})
+	t.Run("libvirt virbr0", func(t *testing.T) {
+		root := withHostProfileRoot(t)
+		mkdirHostPath(t, root, "/sys/class/net/virbr0/bridge")
+		if got := DetectHostProfile(); !got.UsesBridge {
+			t.Errorf("UsesBridge=false with virbr0/bridge present; got %+v", got)
+		}
+	})
+}
+
+func TestDetectLibvirt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"socket", "/var/run/libvirt/libvirt-sock"},
+		{"socket run", "/run/libvirt/libvirt-sock"},
+		{"libvirtd binary", "/usr/sbin/libvirtd"},
+		{"virsh binary", "/usr/bin/virsh"},
+		{"etc libvirt", "/etc/libvirt"},
+		{"systemd unit", "/usr/lib/systemd/system/libvirtd.service"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := withHostProfileRoot(t)
+			if strings.HasSuffix(tc.path, "/libvirt") || strings.HasSuffix(tc.path, "/libvirt-sock") || strings.HasSuffix(tc.path, "/libvirt-sock-ro") {
+				touchHostPath(t, root, tc.path)
+			} else {
+				touchHostPath(t, root, tc.path)
+			}
+			if got := DetectHostProfile(); !got.HasLibvirt {
+				t.Errorf("HasLibvirt=false with %s present; got %+v", tc.path, got)
+			}
+		})
+	}
+}
+
+func TestSkipReason_LLCGatesBridgeUsers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile HostProfile
+		wantSub string
+	}{
+		{"UsesBridge", HostProfile{UsesBridge: true}, "in-kernel bridge interface"},
+		{"HasContainers", HostProfile{HasContainers: true}, "container runtime"},
+		{"IsKVMHost", HostProfile{IsKVMHost: true}, "KVM hypervisor"},
+		{"HasLibvirt", HostProfile{HasLibvirt: true}, "libvirt installed"},
+		{"IsProxmox", HostProfile{IsProxmox: true}, "Proxmox host"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.profile.SkipReason("modules.net.legacy.llc")
+			if got == "" || !strings.Contains(got, tc.wantSub) {
+				t.Errorf("SkipReason(modules.net.legacy.llc) on %+v = %q, want substring %q", tc.profile, got, tc.wantSub)
+			}
+		})
+	}
+	t.Run("clean host applies", func(t *testing.T) {
+		if got := (HostProfile{}).SkipReason("modules.net.legacy.llc"); got != "" {
+			t.Errorf("clean host SkipReason(modules.net.legacy.llc) = %q, want empty", got)
+		}
+	})
+}
+
+func TestSkipReason_Tier2OopsGatesMultiTenant(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile HostProfile
+		wantSub string
+	}{
+		{"IsKVMHost", HostProfile{IsKVMHost: true}, "KVM hypervisor"},
+		{"HasLibvirt", HostProfile{HasLibvirt: true}, "libvirt host"},
+		{"IsProxmox", HostProfile{IsProxmox: true}, "Proxmox host"},
+		{"HasContainers", HostProfile{HasContainers: true}, "container runtime"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.profile.SkipReason("tier2.oops")
+			if got == "" || !strings.Contains(got, tc.wantSub) {
+				t.Errorf("SkipReason(tier2.oops) on %+v = %q, want substring %q", tc.profile, got, tc.wantSub)
+			}
+		})
+	}
+	t.Run("clean host applies", func(t *testing.T) {
+		if got := (HostProfile{}).SkipReason("tier2.oops"); got != "" {
+			t.Errorf("clean host SkipReason(tier2.oops) = %q, want empty", got)
+		}
+	})
+}
+
+func TestSkipReason_CoredumpGatesMultiTenant(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile HostProfile
+		wantSub string
+	}{
+		{"IsKVMHost", HostProfile{IsKVMHost: true}, "KVM / libvirt host"},
+		{"HasLibvirt", HostProfile{HasLibvirt: true}, "KVM / libvirt host"},
+		{"HasContainers", HostProfile{HasContainers: true}, "container runtime"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.profile.SkipReason("sysctl.kernel.coredump")
+			if got == "" || !strings.Contains(got, tc.wantSub) {
+				t.Errorf("SkipReason(sysctl.kernel.coredump) on %+v = %q, want substring %q", tc.profile, got, tc.wantSub)
+			}
+		})
+	}
+}
+
 func TestSkipReason_NamespaceGatesHostingPanels(t *testing.T) {
 	for _, tc := range []HostProfile{
 		{IsCPanel: true, HasHostingPanelWorkload: true},

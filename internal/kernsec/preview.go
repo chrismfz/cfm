@@ -169,8 +169,14 @@ func describeProfile(p HostProfile) string {
 	if p.IsKVMHost {
 		parts = append(parts, "kvm-host")
 	}
+	if p.HasLibvirt {
+		parts = append(parts, "libvirt")
+	}
 	if p.HasContainers {
 		parts = append(parts, "containers")
+	}
+	if p.UsesBridge {
+		parts = append(parts, "uses-bridge")
 	}
 	if p.HasIPsec {
 		parts = append(parts, "ipsec")
