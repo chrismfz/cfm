@@ -163,6 +163,21 @@ func checkMountDetail(
 
 	entry, ok := mountByPath[rule.MountPoint]
 	if !ok {
+		// Not separately mounted at runtime. Before declaring
+		// MountNotSeparate look at fstab: if an entry exists for
+		// this mount point, the next reboot WILL materialise the
+		// mount (typical case: kernsec just wrote a bind line for
+		// /var/tmp via Enable; live state catches up at reboot).
+		// Upgrade to MountPending and surface what the operator
+		// configured.
+		d.NextBootOptions, d.PersistedSource = resolveNextBootOptions(rule.MountPoint, readFstab, nil)
+		if d.NextBootOptions != "" {
+			d.State = MountPending
+			d.Missing = splitCSV(rule.Recommended)
+			if fl, found := findFstabBindSource(readFstab, rule.MountPoint); found {
+				d.BindPrimaryPath = fl
+			}
+		}
 		return d
 	}
 	d.Source = entry[0]
@@ -260,6 +275,30 @@ func resolveNextBootOptions(
 func nextBootCoversRecommended(nextBoot, recommended string) bool {
 	_, missing := splitMountOptions(nextBoot, recommended)
 	return len(missing) == 0
+}
+
+// findFstabBindSource returns the source column of the fstab line for
+// `mountPoint` when the line declares a bind mount (`bind` in either
+// the type or options column). Used by MountPending detection to
+// surface "/var/tmp will bind to /tmp at reboot" cleanly. The second
+// return is false when fstab is unreadable, the line isn't present,
+// or the line isn't a bind.
+func findFstabBindSource(readFstab func() ([]fstabLine, error), mountPoint string) (string, bool) {
+	if readFstab == nil {
+		return "", false
+	}
+	lines, err := readFstab()
+	if err != nil {
+		return "", false
+	}
+	fl, found := findFstabEntry(lines, mountPoint)
+	if !found {
+		return "", false
+	}
+	if fl.FSType != "bind" && !containsOption(splitCSV(fl.Options), "bind") {
+		return "", false
+	}
+	return fl.Source, true
 }
 
 // isGenericMountSource recognises the well-known pseudo-fs sources

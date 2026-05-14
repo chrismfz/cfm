@@ -82,6 +82,63 @@ func TestCheckMountDetail_PartialWhenPersistedDoesNotCover(t *testing.T) {
 	}
 }
 
+func TestCheckMountDetail_PendingViaFstabBindLine(t *testing.T) {
+	// Post-Enable on /var/tmp when /var/tmp isn't separately mounted:
+	// fstab now has `/tmp /var/tmp none bind 0 0`. /proc/mounts still
+	// doesn't have /var/tmp (mount happens at reboot). The audit row
+	// must show PEND with BindPrimaryPath=/tmp, NOT MountNotSeparate.
+	procMounts := `tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0
+`
+	fstab := `UUID=abc / ext4 defaults 0 1
+/tmp /var/tmp none bind 0 0
+`
+	d := checkMountDetail(procMounts,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink,
+		fakeFstab(fstab), noUnit())
+	if d.State != MountPending {
+		t.Fatalf("state = %d, want MountPending (fstab bind queued, reboot will mount)", d.State)
+	}
+	if d.BindPrimaryPath != "/tmp" {
+		t.Errorf("BindPrimaryPath = %q, want /tmp", d.BindPrimaryPath)
+	}
+	if d.PersistedSource != "fstab" {
+		t.Errorf("PersistedSource = %q, want fstab", d.PersistedSource)
+	}
+}
+
+func TestCheckMountDetail_PendingViaFstabWhenNotMountedYet(t *testing.T) {
+	// /var/tmp isn't in /proc/mounts AND fstab has a non-bind line
+	// for it. Still PEND — the line will materialise the mount at
+	// reboot. No BindPrimaryPath because it's not a bind.
+	fstab := `UUID=abc / ext4 defaults 0 1
+/dev/sda2 /var/tmp ext4 defaults,nodev,nosuid,noexec 0 2
+`
+	d := checkMountDetail(``,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink,
+		fakeFstab(fstab), noUnit())
+	if d.State != MountPending {
+		t.Fatalf("state = %d, want MountPending", d.State)
+	}
+	if d.BindPrimaryPath != "" {
+		t.Errorf("BindPrimaryPath should be empty for non-bind PEND, got %q", d.BindPrimaryPath)
+	}
+}
+
+func TestCheckMountDetail_NotSeparateWhenNoFstab(t *testing.T) {
+	// Sanity: when /proc/mounts doesn't have it AND fstab has no
+	// line, we still return MountNotSeparate so the secure-tmp tip
+	// surfaces. (Don't regress to PEND on plain root-fs /var/tmp.)
+	d := checkMountDetail(``,
+		MountRule{MountPoint: "/var/tmp", Recommended: "nodev,nosuid,noexec"},
+		Tier1Mounts, stubFS{}.lstat, stubFS{}.readlink,
+		fakeFstab(""), noUnit())
+	if d.State != MountNotSeparate {
+		t.Fatalf("state = %d, want MountNotSeparate", d.State)
+	}
+}
+
 func TestEnableMount_TmpSystemdDropin(t *testing.T) {
 	// Debian-style: /tmp is mounted via systemd tmp.mount; no fstab
 	// line exists. EnableMount must write a drop-in under our
