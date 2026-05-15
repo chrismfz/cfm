@@ -16,7 +16,7 @@ import (
 // ProbeResult struct.
 func TestEmitProbeText_SkippedWhenPreflightFails(t *testing.T) {
 	var buf bytes.Buffer
-	emitProbeText(&buf, ProbeResult{PreflightOK: false})
+	emitProbeText(&buf, ProbeResult{PreflightOK: false}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "SKIPPED") {
@@ -30,12 +30,66 @@ func TestEmitProbeText_SkippedWhenPreflightFails(t *testing.T) {
 	}
 }
 
+// TestEmitProbeText_VerboseShowsDriftPicks confirms that --verbose
+// surfaces the BTF-probed LSM hook variant selections in a stable,
+// sorted order and that the section is silent in non-verbose mode.
+func TestEmitProbeText_VerboseShowsDriftPicks(t *testing.T) {
+	res := ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: true,
+		Attached:        []PolicyID{PolicyMemfdExec},
+		DriftPicks: map[string]string{
+			"bpf_lsm_inode_setattr":  "cfm_fs005_setattr_idmap",
+			"bpf_lsm_inode_setxattr": "cfm_fs005_setxattr_idmap",
+		},
+	}
+
+	var quiet bytes.Buffer
+	emitProbeText(&quiet, res, false)
+	if strings.Contains(quiet.String(), "BTF probe") {
+		t.Errorf("non-verbose probe output leaked the BTF-probe section:\n%s", quiet.String())
+	}
+
+	var loud bytes.Buffer
+	emitProbeText(&loud, res, true)
+	out := loud.String()
+	if !strings.Contains(out, "[BTF probe — LSM hook variant picks]") {
+		t.Errorf("verbose probe output missing the BTF-probe section:\n%s", out)
+	}
+	if !strings.Contains(out, "bpf_lsm_inode_setattr → cfm_fs005_setattr_idmap") {
+		t.Errorf("verbose probe output missing setattr pick:\n%s", out)
+	}
+	if !strings.Contains(out, "bpf_lsm_inode_setxattr → cfm_fs005_setxattr_idmap") {
+		t.Errorf("verbose probe output missing setxattr pick:\n%s", out)
+	}
+	// Sort stability: setattr line must appear before setxattr line
+	// because the section iterates keys via sort.Strings.
+	if idxA, idxB := strings.Index(out, "bpf_lsm_inode_setattr"), strings.Index(out, "bpf_lsm_inode_setxattr"); idxA < 0 || idxB < 0 || idxA > idxB {
+		t.Errorf("verbose probe output picks not sorted: setattr=%d setxattr=%d\n%s", idxA, idxB, out)
+	}
+}
+
+// TestEmitProbeText_VerboseSilentWhenNoPicks confirms the verbose
+// section is omitted when DriftPicks is empty — e.g. on a kernel
+// without any drifting hooks in scope, or in AdoptPinned mode.
+func TestEmitProbeText_VerboseSilentWhenNoPicks(t *testing.T) {
+	var buf bytes.Buffer
+	emitProbeText(&buf, ProbeResult{
+		PreflightOK:     true,
+		AttachAttempted: true,
+		Attached:        []PolicyID{PolicyMemfdExec},
+	}, true)
+	if strings.Contains(buf.String(), "BTF probe") {
+		t.Errorf("verbose probe with empty picks should omit the section:\n%s", buf.String())
+	}
+}
+
 func TestEmitProbeText_SkippedWhenEveryPolicyDisabled(t *testing.T) {
 	var buf bytes.Buffer
 	emitProbeText(&buf, ProbeResult{
 		PreflightOK:     true,
 		AttachAttempted: false,
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "SKIPPED") {
@@ -52,7 +106,7 @@ func TestEmitProbeText_PassWithAttached(t *testing.T) {
 		PreflightOK:     true,
 		AttachAttempted: true,
 		Attached:        []PolicyID{PolicyMemfdExec, PolicyReverseShell},
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "Result: PASS") {
@@ -75,7 +129,7 @@ func TestEmitProbeText_PartialMode(t *testing.T) {
 		Failed: map[PolicyID]error{
 			PolicyReverseShell: errVerifierStub{},
 		},
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "Result: PARTIAL") {
@@ -98,7 +152,7 @@ func TestEmitProbeText_UnavailablePolicyDoesNotFailAttachedProbe(t *testing.T) {
 		Unavailable: map[PolicyID]string{
 			PolicyDirectCredInstall: "commit_creds is not visible",
 		},
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "Result: PASS") {
@@ -120,7 +174,7 @@ func TestEmitProbeText_SkippedWhenOnlyEnabledPoliciesUnavailable(t *testing.T) {
 		Unavailable: map[PolicyID]string{
 			PolicyDirectCredInstall: "commit_creds is not visible",
 		},
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "Result: SKIPPED") {
@@ -148,7 +202,7 @@ func TestEmitProbeText_SpontaneousEventReported(t *testing.T) {
 		Attached:          []PolicyID{PolicyMemfdExec},
 		SpontaneousEvents: 1,
 		FirstEvent:        &ev,
-	})
+	}, false)
 
 	out := buf.String()
 	if !strings.Contains(out, "Spontaneous events observed: 1") {

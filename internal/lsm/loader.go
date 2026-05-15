@@ -819,6 +819,27 @@ func tracepointProgramEntry(prog *ebpf.Program, pinName, category, name string) 
 	}
 }
 
+// DriftPicks returns a snapshot of the BPF program variant chosen for
+// each drifting LSM hook (currently inode_setattr / inode_setxattr).
+// Keyed by kernel BTF symbol (e.g. "bpf_lsm_inode_setattr"), value is
+// the program name actually loaded. Empty when no drifting hook is in
+// scope on this kernel, and nil for loaders constructed by AdoptPinned
+// (the kernel-side selection happened at enable time so the running
+// loader has no record of which variant the pin references).
+//
+// Used by `cfm lsm probe --verbose` to show operators which kernel
+// signature the loader resolved to.
+func (l *Loader) DriftPicks() map[string]string {
+	if l.driftPicks == nil {
+		return nil
+	}
+	out := make(map[string]string, len(l.driftPicks))
+	for k, v := range l.driftPicks {
+		out[k] = v
+	}
+	return out
+}
+
 // pickedDriftProgram returns the *ebpf.Program for the variant of a
 // drifting LSM hook that the BTF probe selected (see btfprobe.go).
 // Returns nil if the probe didn't run (AdoptPinned path) or if neither

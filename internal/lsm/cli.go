@@ -107,13 +107,20 @@ func runPreviewCmd(args []string, w io.Writer) int {
 func runProbeCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("lsm probe", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	// --verbose / -v adds a "[BTF probe — LSM hook variant picks]"
+	// section to the report so operators can confirm the loader picked
+	// the right BPF program variant for their kernel (EL9 vs EL10 vs
+	// Debian/Ubuntu signatures of inode_setattr / inode_setxattr).
+	var verbose bool
+	fs.BoolVar(&verbose, "verbose", false, "include BTF-probe drift-variant picks in the report")
+	fs.BoolVar(&verbose, "v", false, "shorthand for --verbose")
 	if rc, done := handleFlagErr("lsm probe", fs.Parse(args), w); done {
 		return rc
 	}
 	if !requireRoot(w, "probe") {
 		return 1
 	}
-	return RunProbe(w)
+	return RunProbe(w, verbose)
 }
 
 // handleFlagErr mirrors kernsec's pattern: --help renders usage to w
@@ -139,8 +146,11 @@ Subcommands:
   (default)           Alias for "status"
   status              Print kernel preflight + per-policy state (read-only)
   preview             Show what would attach given conf + kernel (read-only)
-  probe               Briefly attach the BPF programs to verify the kernel
+  probe [-v]          Briefly attach the BPF programs to verify the kernel
                       accepts them, then detach. Needs root.
+                      -v / --verbose adds the BTF-probe drift-variant picks
+                      (which inode_setattr / inode_setxattr variant the loader
+                      chose for this kernel).
   enable [--yes]      Attach the BPF programs and pin them to /sys/fs/bpf/cfm so
                       they stay attached across daemon restarts and crashes.
                       Prompts for confirmation when any policy is set to

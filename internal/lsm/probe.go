@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -54,6 +55,13 @@ type ProbeResult struct {
 	// captured. Useful so the CLI can show "memfd exec from pid X
 	// (comm=Y)" rather than just "1 event".
 	FirstEvent *Event
+
+	// DriftPicks records which BPF program variant was selected for
+	// each drifting LSM hook (see internal/lsm/btfprobe.go). Populated
+	// for any probe that successfully constructed a Loader; nil when
+	// the load failed before the BTF probe ran. Surfaced by
+	// `cfm lsm probe --verbose`.
+	DriftPicks map[string]string
 }
 
 // RunProbe attempts to actually load + attach the cfm-lsm BPF
@@ -66,9 +74,14 @@ type ProbeResult struct {
 // are skipped. If lsm.conf has enabled=false, the probe still runs
 // (an operator running `cfm lsm probe` explicitly wants to test
 // attach capability regardless of the daemon-level enable flag).
-func RunProbe(w io.Writer) int {
+//
+// When verbose is true the printed report includes the BTF-probed LSM
+// hook variant picks (which `cfm_fs005_setattr_*` variant the loader
+// chose for this kernel, etc.) — useful for fleets that span EL9 +
+// EL10 + Debian + Ubuntu where the picks should diverge by host.
+func RunProbe(w io.Writer, verbose bool) int {
 	res := RunProbeOnce(50 * time.Millisecond)
-	emitProbeText(w, res)
+	emitProbeText(w, res, verbose)
 	if res.PreflightOK && res.LoadError == nil && len(res.Failed) == 0 {
 		return 0
 	}
@@ -128,6 +141,7 @@ func RunProbeOnce(observe time.Duration) ProbeResult {
 	}
 	defer l.Close()
 
+	res.DriftPicks = l.DriftPicks()
 	attach := l.Attach()
 	res.Attached = append(res.Attached, attach.Attached...)
 	for id, e := range attach.Failed {
@@ -155,7 +169,7 @@ func RunProbeOnce(observe time.Duration) ProbeResult {
 	return res
 }
 
-func emitProbeText(w io.Writer, r ProbeResult) {
+func emitProbeText(w io.Writer, r ProbeResult, verbose bool) {
 	fmt.Fprintln(w, "===== CFM lsm PROBE =====")
 	fmt.Fprintln(w)
 
@@ -235,10 +249,36 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 		}
 	}
 
+	if verbose {
+		emitProbeDriftPicks(w, r.DriftPicks)
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Note: this probe attached the BPF programs briefly, then detached.")
 	fmt.Fprintln(w, "      The daemon does not yet attach them at startup — that wiring is the")
 	fmt.Fprintln(w, "      next slice. For now, `cfm lsm probe` is the way to verify attach.")
+}
+
+// emitProbeDriftPicks lists which BPF program variant was selected for
+// each LSM hook whose signature drifts across the kernels we support.
+// Quiet when picks is empty (kernel has no drifting hooks in scope —
+// e.g. a future kernel where the hook stops drifting, or AdoptPinned
+// mode where this loader didn't run the BTF probe).
+func emitProbeDriftPicks(w io.Writer, picks map[string]string) {
+	if len(picks) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "[BTF probe — LSM hook variant picks]")
+	keys := make([]string, 0, len(picks))
+	for k := range picks {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, hook := range keys {
+		fmt.Fprintf(w, "  %s → %s\n", hook, picks[hook])
+	}
+	fmt.Fprintln(w, "  (one per hook whose kernel signature varies across distros — see internal/lsm/btfprobe.go)")
 }
 
 func emitProbeUnavailable(w io.Writer, unavailable map[PolicyID]string) {

@@ -73,18 +73,9 @@ var lsmDriftVariants = []lsmDriftVariant{
 		hook:          "bpf_lsm_inode_setxattr",
 		noidmap:       "cfm_fs005_setxattr_noidmap",
 		idmap:         "cfm_fs005_setxattr_idmap",
-		noidmapParams: 7, // (dentry, name, value, size, flags, ret) — 6 hook args + ret
-		idmapParams:   8, // + first arg mnt_userns/mnt_idmap
+		noidmapParams: 6, // (dentry, name, value, size, flags, ret) — 5 hook args + ret
+		idmapParams:   7, // + first arg mnt_userns/mnt_idmap
 	},
-}
-
-// driftPick records which variant of a drifting hook the BTF probe
-// selected. Stored on the Loader so programsFor() can return the
-// surviving program. Keyed by the canonical pin filename (which
-// matches between variants — a setattr link is just `cfm_fs005_setattr`
-// regardless of which C variant produced it).
-type driftPick struct {
-	chosen string // program name actually loaded for this hook
 }
 
 // selectLsmDriftVariants inspects the kernel's BTF for each drifting
@@ -129,13 +120,37 @@ func selectLsmDriftVariants(spec *ebpf.CollectionSpec) (map[string]string, error
 				"and `bpftool btf dump file /sys/kernel/btf/vmlinux | grep -A2 '%s'` output upstream.",
 				d.hook, n, d.noidmapParams, d.idmapParams, d.hook)
 		}
+		// The chosen variant must actually be in the spec, otherwise
+		// programsFor() would silently drop the entry at attach time
+		// (FS-005 would attach only 7 of 9 sub-programs without saying
+		// why). Surface that here as a load failure instead.
+		if _, ok := spec.Programs[keep]; !ok {
+			return nil, fmt.Errorf("kernel needs %s variant %q for %s but it is not in the embedded BPF object; "+
+				"run `make bpf` to regenerate, or check that cfmlsm.bpf.c carries both _noidmap and _idmap variants",
+				humanArity(n), keep, d.hook)
+		}
 		if err := neutraliseProgramSpec(spec, drop); err != nil {
-			return nil, fmt.Errorf("neutralise %s: %w", drop, err)
+			// Drop variant missing is fine — there's just nothing
+			// to neutralise. Any other error is real.
+			if !errors.Is(err, errProgramNotInSpec) {
+				return nil, fmt.Errorf("neutralise %s: %w", drop, err)
+			}
 		}
 		chosen[d.hook] = keep
 	}
 	return chosen, nil
 }
+
+// humanArity labels an arity for diagnostic messages.
+func humanArity(n int) string {
+	return fmt.Sprintf("%d-param", n)
+}
+
+// errProgramNotInSpec is returned by neutraliseProgramSpec when the
+// caller asked it to rewrite a program that isn't in the spec. The
+// selector treats it as non-fatal — there's no wrong-arity variant
+// to disable. Other neutralisation failures bubble up.
+var errProgramNotInSpec = errors.New("program not in spec")
 
 // neutraliseProgramSpec rewrites name's instructions to a minimal
 // `r0 = 0; exit` no-op. The program type and attach target stay
@@ -145,7 +160,7 @@ func selectLsmDriftVariants(spec *ebpf.CollectionSpec) (map[string]string, error
 func neutraliseProgramSpec(spec *ebpf.CollectionSpec, name string) error {
 	ps, ok := spec.Programs[name]
 	if !ok {
-		return errors.New("not in spec")
+		return errProgramNotInSpec
 	}
 	ps.Instructions = asm.Instructions{
 		asm.Mov.Imm(asm.R0, 0),
