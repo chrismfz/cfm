@@ -288,6 +288,7 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 		"/usr/lib/postfix/sbin/master",
 		"/usr/lib/dovecot/indexer-worker",
 		"/usr/bin/logger",
+		"/usr/sbin/logrotate",
 		// CloudLinux / cPanel / SpamAssassin entries — see the
 		// CageFS / cpsrvd / dccproc categories in DefaultGlobalAllowExe.
 		"/usr/sbin/cagefs.server",
