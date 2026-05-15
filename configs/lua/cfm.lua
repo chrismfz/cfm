@@ -218,7 +218,31 @@ local CFG = {
 }
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
-if clamav_ok then clamav.init({ token = CFG.token, sock_path = CFG.sock_path }) end
+if clamav_ok then
+  -- Hook on/off lives in /var/lib/cfm/lua/cfm_clamav_config.lua, written
+  -- by the cfm daemon on every cfm.conf reload (CLAMD_ENABLED &&
+  -- CLAMD_NGINX_HOOK_ENABLED). Missing/unloadable file falls back to
+  -- enabled=true so an upgrade lag (cfm daemon old, Lua new) does not
+  -- silently turn the hook off.
+  local _CLAMAV_CONFIG_FILE = "/var/lib/cfm/lua/cfm_clamav_config.lua"
+  local clamav_hook_enabled = true
+  do
+    local chunk = loadfile(_CLAMAV_CONFIG_FILE)
+    if chunk then
+      local ok, val = pcall(chunk)
+      if ok and type(val) == "table" and val.enabled ~= nil then
+        clamav_hook_enabled = (val.enabled ~= false)
+      else
+        ngx.log(ngx.WARN, "[cfm] clamav config file did not return a table: ", _CLAMAV_CONFIG_FILE)
+      end
+    end
+  end
+  clamav.init({
+    token     = CFG.token,
+    sock_path = CFG.sock_path,
+    enabled   = clamav_hook_enabled,
+  })
+end
 
 -- [R3] cfm_rules is optional (throttle enforcement)
 local rules_ok, rules = pcall(require, "cfm_rules")

@@ -393,6 +393,10 @@ Usage:
   cfm lsm disable                 -- unpin + detach BPF programs
   cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
 
+  cfm clam status                  -- pipeline + hook state, recent infections
+  cfm clam enable | disable        -- master pipeline (CLAMD_ENABLED)
+  cfm clam hook enable | disable   -- Lua upload interception only (CLI scan keeps working)
+  cfm clam hook status
   cfm clam ping
   cfm clam version
   cfm clam scan <file-or-dir>
@@ -1056,14 +1060,28 @@ func runDaemon(args []string) {
 				}(cfg.Clam.PendingDir)
 			}
 
-			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s",
+			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s nginx_hook=%v",
 				cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
 				cfg.Clam.MaxWorkers, cfg.Clam.QueueSize,
-				cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
+				cfg.Clam.PendingDir, cfg.Clam.InfectedDir, cfg.Clam.NginxHookEnabled)
 		} else {
 			detpkg.SetClamManager(nil)
 			detpkg.ResetClamBridgeWireState()
 			logging.LogfCLAM("[clam] disabled")
+		}
+
+		// Render the cfm_clamav.lua hook switch every reload, even when
+		// the master pipeline is disabled. The Lua hook should also be
+		// off when CLAMD_ENABLED=false — there is nothing for it to
+		// notify, so we squash both flags together for the Lua side.
+		// Angie picks up the new file via loadfile() in cfm.lua on the
+		// next worker init / cycle; no SIGHUP needed.
+		hookEnabled := cfg.Clam.Enabled && cfg.Clam.NginxHookEnabled
+		const clamavLuaConfigPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
+		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfmGID); err != nil {
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua write failed path=%s err=%v", clamavLuaConfigPath, err)
+		} else {
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v", clamavLuaConfigPath, hookEnabled)
 		}
 
 		for _, ln := range cfg.Summary() {
