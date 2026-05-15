@@ -94,6 +94,21 @@ const (
 	// for enforce, if it ever lands, has to be scrubbed against
 	// production data.
 	PolicyFdCredMismatch PolicyID = "CFML-FS-006"
+
+	// PolicyEphemeralExec — CFML-EXEC-006: detect a web-class user
+	// executing a binary whose backing file is on an ephemeral /
+	// writeable-by-web-user filesystem — /tmp/, /var/tmp/, /dev/shm/,
+	// or /run/user/<uid>/. The execution-phase companion to Imunify
+	// Proactive Defense's write-phase guard: if a webshell stages a
+	// payload to /tmp/.<obfuscated> and the PHP-layer block is absent
+	// or bypassed, the kernel still sees the execve and EXEC-006 fires.
+	//
+	// Hook: bprm_check_security. Monitor-first; enforce returns -EPERM.
+	// Enforce on a host with operator-installed software that legitimately
+	// extracts-and-execs from /tmp (package installers mid-transaction,
+	// cPanel easyapache builds) needs allowlist tuning first — see
+	// docs/cfm-lsm.md and the lsm.conf allow_exe / allow_path keys.
+	PolicyEphemeralExec PolicyID = "CFML-EXEC-006"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -203,6 +218,13 @@ func AllPolicies() []Policy {
 			Hook:        "file_permission",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a non-root task reading a sensitive file (the FS-005 watched-inodes set: /etc/shadow, /etc/sudoers*, /root/.ssh/*, ...) through a struct file whose f_cred is root. Kernel-side fingerprint of the setuid-helper fd-leak class (pidfd_getfd exit-window race against ssh-keysign / chage / unix_chkpwd, plus CLONE_FILES + setuid-exec and /proc/<pid>/fd races). Belt-and-braces layer for hosts that `state = skip` kernel.yama.ptrace_scope=2 for same-uid debuggability. Monitor-only by design — passwd / pkexec / sudo / dovecot-auth / postfix workers legitimately read these files post-uid-drop.",
+		},
+		{
+			ID:          PolicyEphemeralExec,
+			Title:       "Web-user exec from ephemeral filesystem",
+			Hook:        "bprm_check_security",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a web-class user executing a binary whose backing file lives on tmpfs (/dev/shm, /run/user/<uid>/, distro /tmp mounted as tmpfs) or under /tmp/ or /var/tmp/ on a non-tmpfs root. Execution-phase companion to Imunify Proactive Defense's write-phase guard: catches the staged-payload-and-exec pattern at the kernel layer. Monitor-first; enforce returns -EPERM.",
 		},
 	}
 }

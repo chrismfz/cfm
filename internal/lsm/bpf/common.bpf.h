@@ -25,6 +25,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_DIRECT_CRED       = 9,  /* CFML-CRED-003 */
     CFM_LSM_POLICY_UNEXPECTED_BPF    = 10, /* CFML-BPF-001  */
     CFM_LSM_POLICY_FD_CRED_MISMATCH  = 11, /* CFML-FS-006   */
+    CFM_LSM_POLICY_EPHEMERAL_EXEC    = 12, /* CFML-EXEC-006 */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -54,6 +55,16 @@ enum cfm_event_op {
 #define CFM_LSM_F_INTERP_STDIO_WEAK   (1U << 5)
 #define CFM_LSM_F_STDIO_ONE_REMOTE    (1U << 6)
 #define CFM_LSM_F_STDIO_TWO_REMOTE    (1U << 7)
+
+/* CFML-EXEC-006 — distinguishing how the ephemeral-fs match was reached.
+ * F_TMPFS_BACKED  : superblock magic is TMPFS_MAGIC (covers /dev/shm,
+ *                   /run, distro /tmp mounted as tmpfs).
+ * F_EPHEMERAL_DIR : dentry walk matched /tmp/ or /var/tmp/ on a non-
+ *                   tmpfs (EL9 default /tmp on the root filesystem).
+ *                   The two bits may coexist if both signals fire
+ *                   on the same exec. */
+#define CFM_LSM_F_TMPFS_BACKED        (1U << 6)
+#define CFM_LSM_F_EPHEMERAL_DIR       (1U << 7)
 
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem

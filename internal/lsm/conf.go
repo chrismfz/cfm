@@ -788,7 +788,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				c.PersistencePaths[currentPolicy] = append(c.PersistencePaths[currentPolicy], p)
 			case "allow_exe":
 				if !allowExePolicy(currentPolicy) {
-					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s, %s, %s", lineno, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
+					return nil, fmt.Errorf("line %d: allow_exe is only valid for %s, %s, %s, %s", lineno, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec)
 				}
 				p, err := parseAllowExe(val)
 				if err != nil {
@@ -797,7 +797,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				c.AllowExe[currentPolicy] = append(c.AllowExe[currentPolicy], p)
 			case "allow_comm":
 				if !allowCommPolicy(currentPolicy) {
-					return nil, fmt.Errorf("line %d: allow_comm is only valid for %s, %s, %s, %s", lineno, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
+					return nil, fmt.Errorf("line %d: allow_comm is only valid for %s, %s, %s, %s, %s", lineno, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec)
 				}
 				comm, err := parseAllowComm(val)
 				if err != nil {
@@ -805,7 +805,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				c.AllowComm[currentPolicy] = append(c.AllowComm[currentPolicy], comm)
 			default:
-				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking` and `persistence_path`; %s, %s, %s also support `allow_exe`; %s, %s, %s, %s also support `allow_comm`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio)
+				return nil, fmt.Errorf("line %d: unknown policy key %q (supported: `mode`; %s also supports `origin_tracking` and `persistence_path`; %s, %s, %s, %s also support `allow_exe`; %s, %s, %s, %s, %s also support `allow_comm`)", lineno, key, PolicySensitiveWrite, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec, PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec)
 			}
 		case sectionKmsg:
 			lk := strings.ToLower(key)
@@ -956,6 +956,11 @@ func FormatConf(c *Conf) string {
 					b.WriteString("# Site-specific spawn(8) helper scripts (mailcow / custom inetd-style\n")
 					b.WriteString("# services). Global cross-distro entries already live in [allow] below.\n")
 					b.WriteString("# allow_exe = /usr/local/bin/whitelist_forwardinghosts.sh\n")
+				case PolicyEphemeralExec:
+					b.WriteString("# Allowlist legitimate ephemeral-fs execs (package installer extractions,\n")
+					b.WriteString("# cPanel easyapache builds, distro ldconfig re-runs). The userspace\n")
+					b.WriteString("# post-filter matches event basenames against the entries here.\n")
+					b.WriteString("# allow_exe = /tmp/easyapache/build-helper\n")
 				}
 			} else {
 				for _, ap := range perPolicy {
@@ -1122,10 +1127,13 @@ func parseAllowComm(s string) (string, error) {
 // allowExePolicy reports whether allow_exe is accepted under the
 // given policy section. CRED-002 has used it since first ship; the
 // strict and weak reverse-shell detectors gained it so operators can
-// allow postfix spawn(8) inetd-style worker scripts.
+// allow postfix spawn(8) inetd-style worker scripts. EXEC-006 needs
+// it for the (small) set of legitimate ephemeral-fs execs: package
+// installer extractions, cPanel easyapache builds, distro ldconfig
+// re-runs that drop helpers under /tmp/.
 func allowExePolicy(id PolicyID) bool {
 	switch id {
-	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec:
 		return true
 	}
 	return false
@@ -1135,10 +1143,12 @@ func allowExePolicy(id PolicyID) bool {
 // given policy section. BPF-001 is the primary consumer (container
 // runtimes); the other monitor-only-by-design policies expose it for
 // symmetry with allow_exe so site-specific comms can be silenced
-// without a BPF rebuild.
+// without a BPF rebuild. EXEC-006 follows the same pattern so
+// operators can allowlist a known-good tooling comm without pinning
+// its (possibly versioned) exe path.
 func allowCommPolicy(id PolicyID) bool {
 	switch id {
-	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec:
 		return true
 	}
 	return false
@@ -1150,9 +1160,11 @@ func allowCommPolicy(id PolicyID) bool {
 // as argv[1]); the reverse-shell + interpreter-net-stdio policies
 // expose it for the same reason — both fire on `interpreter argv[1]`
 // shapes where argv[1] is what actually identifies the legit caller.
+// EXEC-006 consumes it as a path-prefix allowlist for trusted
+// ephemeral-root subtrees (e.g. operator-managed build directories).
 func allowPathPolicy(id PolicyID) bool {
 	switch id {
-	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec:
 		return true
 	}
 	return false

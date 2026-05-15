@@ -115,6 +115,7 @@ func TestBPFExecRingbufReserveFailureUsesEnforceVerdict(t *testing.T) {
 	}{
 		{name: "CFML-EXEC-001", enforceConst: "cfm_enforce_memfd_exec"},
 		{name: "CFML-EXEC-003", enforceConst: "cfm_enforce_revshell"},
+		{name: "CFML-EXEC-006", enforceConst: "cfm_enforce_ephemeral_exec"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

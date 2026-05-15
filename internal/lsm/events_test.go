@@ -269,6 +269,52 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	if bpfPolicyFdCredMismatch != 11 {
 		t.Errorf("bpfPolicyFdCredMismatch mismatch: Go=%d, BPF=11 (see common.bpf.h)", bpfPolicyFdCredMismatch)
 	}
+	if bpfPolicyEphemeralExec != 12 {
+		t.Errorf("bpfPolicyEphemeralExec mismatch: Go=%d, BPF=12 (see common.bpf.h)", bpfPolicyEphemeralExec)
+	}
+	if PolicyEphemeralExec == "" {
+		t.Fatal("PolicyEphemeralExec is the empty string — was the constant accidentally removed?")
+	}
+}
+
+func TestParseEvent_EphemeralExec(t *testing.T) {
+	// Tmpfs-backed match: a web user (uid 1001) execs /tmp/.payload
+	// where /tmp is mounted as tmpfs.
+	raw := buildWireEvent(t, bpfPolicyEphemeralExec, 4242, 4242, 1001, 1001, 555,
+		"php-fpm", "/tmp/.payload")
+	raw[29] = EventFlagTmpfsBacked
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyEphemeralExec {
+		t.Errorf("PolicyID: got %q, want %q", ev.PolicyID, PolicyEphemeralExec)
+	}
+	if ev.UID != 1001 {
+		t.Errorf("UID: got %d, want 1001 (web-class uid)", ev.UID)
+	}
+	if ev.Flags&EventFlagTmpfsBacked == 0 {
+		t.Errorf("Flags: got %#x, want CFM_LSM_F_TMPFS_BACKED bit set", ev.Flags)
+	}
+	if ev.Filename != "/tmp/.payload" {
+		t.Errorf("Filename: got %q, want /tmp/.payload", ev.Filename)
+	}
+
+	// Non-tmpfs /tmp (EL9 default): the dentry-walk branch fires,
+	// setting the EphemeralDir bit instead.
+	raw = buildWireEvent(t, bpfPolicyEphemeralExec, 9090, 9090, 1100, 1100, 666,
+		"httpd", "/var/tmp/staged")
+	raw[29] = EventFlagEphemeralDir
+	ev, err = parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyEphemeralExec {
+		t.Errorf("PolicyID: got %q, want %q", ev.PolicyID, PolicyEphemeralExec)
+	}
+	if ev.Flags&EventFlagEphemeralDir == 0 {
+		t.Errorf("Flags: got %#x, want CFM_LSM_F_EPHEMERAL_DIR bit set", ev.Flags)
+	}
 }
 
 func TestWireEventSize_Stable(t *testing.T) {
