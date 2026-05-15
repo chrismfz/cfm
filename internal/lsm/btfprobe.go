@@ -11,10 +11,17 @@ import (
 	"github.com/cilium/ebpf/btf"
 )
 
-// lsmHookParamCount reports the BPF trampoline param count for the
-// given LSM hook (e.g. "bpf_lsm_inode_setattr"). The returned number
-// includes the synthetic `ret` parameter that BPF appends, so a hook
-// declared in the kernel as `inode_setattr(dentry, iattr)` reports 3.
+// lsmHookParamCount reports the kernel LSM hook's argument count for
+// the given BPF trampoline symbol (e.g. "bpf_lsm_inode_setattr"). The
+// returned number is the number of *hook arguments* the kernel
+// declares — it does NOT include the synthetic `ret` slot that the
+// BPF trampoline appends and that BPF_PROG sees.
+//
+// Empirically (cilium/ebpf v0.21 against EL9 5.14): bpftool dumps
+// `bpf_lsm_inode_setattr` with vlen=3 (dentry, attr, ret) but
+// cilium/ebpf's FuncProto.Params returns 2 (dentry, attr). This
+// function returns the cilium/ebpf view because that is what the
+// caller will compare against the per-variant declared arg counts.
 //
 // Resolves against the live kernel BTF via cilium/ebpf's
 // btf.LoadKernelSpec(); the daemon's preflight has already verified
@@ -50,31 +57,35 @@ type lsmDriftVariant struct {
 	// signature (upstream 5.12+ / EL10).
 	idmap string
 
-	// noidmapParams is the BPF trampoline param count (including the
-	// synthetic ret arg) expected for the `noidmap` variant.
-	noidmapParams int
+	// noidmapHookArgs is the kernel-declared hook argument count
+	// matching the `noidmap` variant, as reported by
+	// lsmHookParamCount (i.e. WITHOUT the synthetic ret slot).
+	noidmapHookArgs int
 
-	// idmapParams is the matching param count for the `idmap` variant.
-	idmapParams int
+	// idmapHookArgs is the matching hook arg count for `idmap`.
+	idmapHookArgs int
 }
 
 // lsmDriftVariants is the set of LSM hooks whose BPF trampoline arity
 // differs across the kernels we support. Add to this slice if a future
 // hook starts drifting.
+//
+// The expected counts are kernel HOOK arg counts (no ret slot) because
+// that's what lsmHookParamCount reports — see its godoc for why.
 var lsmDriftVariants = []lsmDriftVariant{
 	{
-		hook:          "bpf_lsm_inode_setattr",
-		noidmap:       "cfm_fs005_setattr_noidmap",
-		idmap:         "cfm_fs005_setattr_idmap",
-		noidmapParams: 3, // (dentry, iattr, ret)
-		idmapParams:   4, // (mnt_userns_or_idmap, dentry, iattr, ret)
+		hook:            "bpf_lsm_inode_setattr",
+		noidmap:         "cfm_fs005_setattr_noidmap",
+		idmap:           "cfm_fs005_setattr_idmap",
+		noidmapHookArgs: 2, // (dentry, iattr) — EL9 / pre-5.12
+		idmapHookArgs:   3, // (mnt_userns_or_idmap, dentry, iattr)
 	},
 	{
-		hook:          "bpf_lsm_inode_setxattr",
-		noidmap:       "cfm_fs005_setxattr_noidmap",
-		idmap:         "cfm_fs005_setxattr_idmap",
-		noidmapParams: 6, // (dentry, name, value, size, flags, ret) — 5 hook args + ret
-		idmapParams:   7, // + first arg mnt_userns/mnt_idmap
+		hook:            "bpf_lsm_inode_setxattr",
+		noidmap:         "cfm_fs005_setxattr_noidmap",
+		idmap:           "cfm_fs005_setxattr_idmap",
+		noidmapHookArgs: 5, // (dentry, name, value, size, flags)
+		idmapHookArgs:   6, // + first arg mnt_userns/mnt_idmap
 	},
 }
 
@@ -110,15 +121,15 @@ func selectLsmDriftVariants(spec *ebpf.CollectionSpec) (map[string]string, error
 		}
 		var keep, drop string
 		switch n {
-		case d.noidmapParams:
+		case d.noidmapHookArgs:
 			keep, drop = d.noidmap, d.idmap
-		case d.idmapParams:
+		case d.idmapHookArgs:
 			keep, drop = d.idmap, d.noidmap
 		default:
-			return nil, fmt.Errorf("kernel exposes %s with %d params; expected %d (no-idmap) or %d (idmap). "+
+			return nil, fmt.Errorf("kernel exposes %s with %d hook args; expected %d (no-idmap) or %d (idmap). "+
 				"This kernel may have introduced a third LSM hook signature; report the kernel version "+
-				"and `bpftool btf dump file /sys/kernel/btf/vmlinux | grep -A2 '%s'` output upstream.",
-				d.hook, n, d.noidmapParams, d.idmapParams, d.hook)
+				"and `bpftool btf dump file /sys/kernel/btf/vmlinux | grep -A8 'bpf_lsm_inode_'` output upstream.",
+				d.hook, n, d.noidmapHookArgs, d.idmapHookArgs)
 		}
 		// The chosen variant must actually be in the spec, otherwise
 		// programsFor() would silently drop the entry at attach time
@@ -143,7 +154,7 @@ func selectLsmDriftVariants(spec *ebpf.CollectionSpec) (map[string]string, error
 
 // humanArity labels an arity for diagnostic messages.
 func humanArity(n int) string {
-	return fmt.Sprintf("%d-param", n)
+	return fmt.Sprintf("%d-hook-arg", n)
 }
 
 // errProgramNotInSpec is returned by neutraliseProgramSpec when the
