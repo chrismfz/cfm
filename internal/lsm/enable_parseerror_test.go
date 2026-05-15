@@ -35,7 +35,7 @@ func TestRunEnable_ParseErrorIsSurfacedNotMasked(t *testing.T) {
 	tmp := t.TempDir()
 	conf := filepath.Join(tmp, "lsm.conf")
 	// Garbage that ParseConf rejects: unknown [allow] key — the same
-	// shape that bit the live host (allow_script_prefix appended to
+	// shape that bit the live host (allow_path appended to
 	// a conf parsed by a binary that didn't yet know the key).
 	if err := os.WriteFile(conf, []byte(
 		"enabled = true\n[allow]\nallow_made_up_key = /nope\n",

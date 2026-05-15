@@ -94,16 +94,22 @@ type Conf struct {
 	// AllowCommFor.
 	GlobalAllowComm []string
 
-	// GlobalAllowScriptPrefix is the operator-supplied global
-	// script-path-prefix allowlist. Distinct dimension from
-	// GlobalAllowExe / GlobalAllowComm because Python / Perl daemons
-	// share a generic exe (python3.11 / perl) and a generic comm
-	// (python3), so neither of the other two can identify them.
-	// At event time the filter reads /proc/<pid>/cmdline and matches
-	// any arg against these prefixes. Useful for things like
-	// `/usr/share/lve-stats/` (CloudLinux LVE stats daemon) and
-	// `/opt/cloudlinux/` (CloudLinux internal Python tooling).
-	GlobalAllowScriptPrefix []string
+	// GlobalAllowPath is the operator-supplied global path-prefix
+	// allowlist. Distinct dimension from GlobalAllowExe / GlobalAllowComm
+	// because Python / Perl daemons share a generic exe (python3.11 /
+	// perl) and a generic comm (python3) — neither of the other two
+	// can identify them. The filter reads /proc/<pid>/cmdline at event
+	// time and matches any argument against these prefixes; this also
+	// covers plain binaries whose argv[0] starts with the prefix, so
+	// one entry like `/usr/local/cpanel/` blankets every cPanel daemon.
+	//
+	// SECURITY TRADE-OFF: this is the broadest allowlist dimension and
+	// the most dangerous to misuse. Adding `/tmp/` or `/home/` would
+	// silence CRED-002 / EXEC-003 / EXEC-005 for anything launched from
+	// those trees. Reserve for vendor-owned, root-managed directories
+	// (CloudLinux / cPanel / Imunify360 trees); operator-writable paths
+	// turn the detector into a no-op for that subtree.
+	GlobalAllowPath []string
 
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
@@ -138,11 +144,11 @@ func DefaultConf() *Conf {
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
-		GlobalAllowExe:          append([]string{}, DefaultGlobalAllowExe...),
-		GlobalAllowComm:         append([]string{}, DefaultGlobalAllowComm...),
-		GlobalAllowScriptPrefix: append([]string{}, DefaultGlobalAllowScriptPrefix...),
-		Kmsg:                    DefaultKmsgConf(),
-		EventSink:               DefaultEventSinkConf(),
+		GlobalAllowExe:        append([]string{}, DefaultGlobalAllowExe...),
+		GlobalAllowComm:       append([]string{}, DefaultGlobalAllowComm...),
+		GlobalAllowPath:       append([]string{}, DefaultGlobalAllowPath...),
+		Kmsg:                  DefaultKmsgConf(),
+		EventSink:             DefaultEventSinkConf(),
 	}
 }
 
@@ -425,21 +431,33 @@ var DefaultGlobalAllowComm = []string{
 	"spamd child",
 }
 
-// DefaultGlobalAllowScriptPrefix lists script-path prefixes that
-// identify legitimate root daemons by their argv[1] rather than by
-// exe / comm. The userspace filter reads /proc/<pid>/cmdline at event
-// time and matches any arg against these prefixes.
+// DefaultGlobalAllowPath lists path prefixes that identify legitimate
+// root daemons by their argv. The userspace filter reads
+// /proc/<pid>/cmdline at event time and matches any arg against
+// these prefixes — so the dimension covers BOTH:
+//
+//   - interpreter+script daemons (cmdline = "python3.11 /usr/share/lve-stats/...")
+//     where argv[1] is what identifies the legitimate caller
+//   - plain binaries (cmdline = "/usr/local/cpanel/xml-api ...") where
+//     argv[0] is the binary itself
 //
 // Needed because Python and Perl daemons share a generic exe
 // (python3.11 / perl) and often a generic comm (python3 / perl), so
 // allow_exe and allow_comm cannot distinguish CloudLinux LVE Stats
-// from a malicious python3.11 invocation. The script path is what's
-// actually unique.
+// from a malicious python3.11 invocation. The path is what's actually
+// unique.
 //
 // Entries should be directory prefixes, trailing slash included, so
 // `/usr/share/lve-stats/` matches `/usr/share/lve-stats/lvestats-server.py`
 // but not `/tmp/lve-stats-fake.py`.
-var DefaultGlobalAllowScriptPrefix = []string{
+//
+// SECURITY TRADE-OFF: this is the broadest allowlist dimension. An
+// entry says "anything launched from this directory tree is fine to
+// elevate to root without going through a setuid binary." Restrict
+// to vendor-owned, root-managed trees (CloudLinux / cPanel / Imunify);
+// `allow_path = /tmp/` or `allow_path = /home/` would turn CRED-002
+// into a no-op for those trees, and the parser cannot detect intent.
+var DefaultGlobalAllowPath = []string{
 	// CloudLinux LVE Stats daemon (lvestats-server.py polls per-user
 	// resource counters every ~30s and trips CFML-CRED-002 on each uid
 	// transition).
@@ -521,22 +539,22 @@ func (c *Conf) AllowCommFor(id PolicyID) []string {
 	return out
 }
 
-// AllowScriptPrefixFor returns the configured script-path-prefix
+// AllowPathFor returns the configured script-path-prefix
 // allowlist for id. Only global entries today — per-policy script
 // prefixes can be added later if a single policy needs to narrow
 // further. Returns nil when id does not consume the script-prefix
 // allowlist or when nothing has been configured.
-func (c *Conf) AllowScriptPrefixFor(id PolicyID) []string {
+func (c *Conf) AllowPathFor(id PolicyID) []string {
 	if c == nil {
 		return nil
 	}
-	if !allowScriptPrefixPolicy(id) {
+	if !allowPathPolicy(id) {
 		return nil
 	}
-	if len(c.GlobalAllowScriptPrefix) == 0 {
+	if len(c.GlobalAllowPath) == 0 {
 		return nil
 	}
-	return append([]string{}, c.GlobalAllowScriptPrefix...)
+	return append([]string{}, c.GlobalAllowPath...)
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -803,14 +821,14 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.GlobalAllowComm = append(c.GlobalAllowComm, comm)
-			case "allow_script_prefix":
-				p, err := parseAllowScriptPrefix(val)
+			case "allow_path":
+				p, err := parseAllowPath(val)
 				if err != nil {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
-				c.GlobalAllowScriptPrefix = append(c.GlobalAllowScriptPrefix, p)
+				c.GlobalAllowPath = append(c.GlobalAllowPath, p)
 			default:
-				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm | allow_script_prefix)", lineno, key)
+				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm | allow_path)", lineno, key)
 			}
 		case sectionEvents:
 			lk := strings.ToLower(key)
@@ -924,7 +942,7 @@ func FormatConf(c *Conf) string {
 	b.WriteString("#                          map for CFML-CRED-002 when the path exists.\n")
 	b.WriteString("#   allow_comm           — exact-match against task->comm (kernel truncates\n")
 	b.WriteString("#                          to TASK_COMM_LEN-1 = 15 chars).\n")
-	b.WriteString("#   allow_script_prefix  — directory prefix matched against any arg of\n")
+	b.WriteString("#   allow_path  — directory prefix matched against any arg of\n")
 	b.WriteString("#                          /proc/<pid>/cmdline at event time. Needed for\n")
 	b.WriteString("#                          Python / Perl daemons where exe is the generic\n")
 	b.WriteString("#                          interpreter and comm is generic (e.g. `python3`)\n")
@@ -937,8 +955,8 @@ func FormatConf(c *Conf) string {
 	for _, cc := range c.GlobalAllowComm {
 		fmt.Fprintf(&b, "allow_comm = %s\n", cc)
 	}
-	for _, p := range c.GlobalAllowScriptPrefix {
-		fmt.Fprintf(&b, "allow_script_prefix = %s\n", p)
+	for _, p := range c.GlobalAllowPath {
+		fmt.Fprintf(&b, "allow_path = %s\n", p)
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -1003,24 +1021,36 @@ func parseAllowExe(s string) (string, error) {
 	return parseAbsolutePath(s, "allow_exe")
 }
 
-// parseAllowScriptPrefix validates one `allow_script_prefix = …` value.
+// parseAllowPath validates one `allow_path = …` value.
+//
+// Be deliberate about what you put here — see the SECURITY TRADE-OFF
+// note on DefaultGlobalAllowPath. The parser can only enforce shape
+// (absolute, trailing slash, no NULs), not intent: it cannot tell
+// `/usr/share/lve-stats/` from `/tmp/`. Reserve for vendor-owned,
+// root-managed directories.
 // The prefix must be absolute (so it cannot match arbitrary user-
 // controlled relative paths) and should end with `/` to make
 // "directory prefix" semantics unambiguous — `/usr/share/lve-stats`
 // without a trailing slash would also match `/usr/share/lve-stats-fake`.
-func parseAllowScriptPrefix(s string) (string, error) {
+func parseAllowPath(s string) (string, error) {
 	v := strings.TrimSpace(s)
 	if v == "" {
-		return "", fmt.Errorf("allow_script_prefix must be a non-empty path prefix")
+		return "", fmt.Errorf("allow_path must be a non-empty path prefix")
 	}
 	if strings.ContainsRune(v, 0) {
-		return "", fmt.Errorf("allow_script_prefix must not contain NUL bytes")
+		return "", fmt.Errorf("allow_path must not contain NUL bytes")
 	}
 	if !strings.HasPrefix(v, "/") {
-		return "", fmt.Errorf("allow_script_prefix %q must be absolute (start with `/`)", v)
+		return "", fmt.Errorf("allow_path %q must be absolute (start with `/`)", v)
 	}
 	if !strings.HasSuffix(v, "/") {
-		return "", fmt.Errorf("allow_script_prefix %q must end with `/` to be a directory prefix", v)
+		return "", fmt.Errorf("allow_path %q must end with `/` to be a directory prefix", v)
+	}
+	// `/` would allowlist every cmdline arg starting with `/` — i.e.
+	// every absolute path on the system. Refuse rather than let an
+	// operator footgun themselves into a fully no-op detector.
+	if v == "/" {
+		return "", fmt.Errorf("allow_path `/` would allowlist every absolute cmdline arg; pick a real prefix")
 	}
 	return v, nil
 }
@@ -1068,13 +1098,13 @@ func allowCommPolicy(id PolicyID) bool {
 	return false
 }
 
-// allowScriptPrefixPolicy reports whether allow_script_prefix is
+// allowPathPolicy reports whether allow_path is
 // honoured for the given policy. CRED-002 is the primary consumer
 // (Python / Perl daemons that exec the interpreter and pass the script
 // as argv[1]); the reverse-shell + interpreter-net-stdio policies
 // expose it for the same reason — both fire on `interpreter argv[1]`
 // shapes where argv[1] is what actually identifies the legit caller.
-func allowScriptPrefixPolicy(id PolicyID) bool {
+func allowPathPolicy(id PolicyID) bool {
 	switch id {
 	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
 		return true
