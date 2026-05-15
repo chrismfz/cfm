@@ -175,9 +175,11 @@ func DefaultConf() *Conf {
 //     transitions into per-account cages), plus the per-cage PHP
 //     session cleanup cron.
 //   - cPanel server daemon and its variant entry points
-//     (cpsrvd / webmaild / whostmgrd / cpdavd share the cpsrvd
-//     binary), the quota-status helper, and the update_quota_cache
-//     binary that the cron-driven cache updater invokes.
+//     (cpsrvd / webmaild / whostmgrd share the cpsrvd binary;
+//     xml-api / cpdavd / queueprocd / cpanellogd are sibling binaries
+//     with separate exe inodes), the quota-status helper, and the
+//     update_quota_cache binary that the cron-driven cache updater
+//     invokes.
 //   - SpamAssassin's DCC client (dccproc).
 //
 // New entries should cover a widely-deployed host class. Missing paths
@@ -330,8 +332,14 @@ var DefaultGlobalAllowExe = []string{
 	// cPanel server daemon and its variant entry points. cPanel ships
 	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
 	// under different names; the exe the kernel reports is cpsrvd, so
-	// one basename-match entry covers the family.
+	// one basename-match entry covers the family. xml-api / cpdavd /
+	// queueprocd / cpanellogd are siblings that ship as separate
+	// binaries (different exe inode) — covered by their own entries.
 	"/usr/local/cpanel/cpsrvd",
+	"/usr/local/cpanel/xml-api",
+	"/usr/local/cpanel/cpdavd",
+	"/usr/local/cpanel/queueprocd",
+	"/usr/local/cpanel/cpanellogd",
 	"/usr/local/cpanel/bin/quota-status",
 	"/usr/local/cpanel/bin/update_quota_cache",
 	"/usr/local/cpanel/scripts/update_quota_cache",
@@ -440,6 +448,14 @@ var DefaultGlobalAllowScriptPrefix = []string{
 	// CloudLinux internal Python tooling rooted at /opt/cloudlinux/
 	// (lve-stats wrappers, cl-smart-advice, cloudlinux-config, etc.).
 	"/opt/cloudlinux/",
+
+	// cPanel tree — safety net for cPanel daemons / helpers not
+	// individually listed in DefaultGlobalAllowExe. Specific binaries
+	// we already know about (cpsrvd, xml-api, cpdavd, queueprocd,
+	// cpanellogd, quota-status, update_quota_cache) have explicit
+	// allow_exe entries so the BPF program short-circuits on the
+	// inode; this prefix catches the rest at the userspace filter.
+	"/usr/local/cpanel/",
 
 	// CloudLinux CageFS Python helpers (cagefsctl is comm-allowlisted
 	// above; this catches any other CageFS-rooted Python tooling).
