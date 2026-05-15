@@ -368,6 +368,7 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/local/cpanel/cpdavd",
 	"/usr/local/cpanel/queueprocd",
 	"/usr/local/cpanel/cpanellogd",
+	"/usr/local/cpanel/bin/autossl_check",
 	"/usr/local/cpanel/bin/quota-status",
 	"/usr/local/cpanel/bin/update_quota_cache",
 	"/usr/local/cpanel/scripts/update_quota_cache",
