@@ -1462,11 +1462,21 @@ int BPF_PROG(cfm_fs006, struct file *file, int mask, int ret)
     if (!file)
         return ret;
 
-    /* Skip privileged callers. euid==0 covers both real root and
-     * setuid-elevated tasks (sudo, setuid binaries pre-drop); neither
-     * is the fd-leak pattern. Read current's euid directly off the
-     * task struct rather than bpf_get_current_uid_gid() (which returns
-     * real uid, not euid, and would miss the sudo case). */
+    /* Hot-path optimisation: file_permission fires on every read /
+     * write / access through any fd system-wide, so the cost of the
+     * common-case early-return matters. Cheap check first —
+     * bpf_get_current_uid_gid() is a single helper call (no
+     * bpf_probe_read_kernel chase). The low 32 bits are the real uid;
+     * on real-root callers (kworkers, kthreads, every root daemon
+     * doing fs activity) this is zero and we return immediately,
+     * skipping the two-deref task_struct chase below. */
+    if ((__u32)(bpf_get_current_uid_gid() & 0xffffffffu) == 0)
+        return ret;
+
+    /* Sudo / setuid-elevated edge case: real uid != 0 but euid == 0
+     * (the task is acting as root via a setuid binary or sudo-style
+     * cred elevation). Neither is the fd-leak pattern; skip. Reads
+     * euid directly off task->cred via BPF_CORE_READ. */
     struct task_struct *task = bpf_get_current_task_btf();
     if (!task)
         return ret;
