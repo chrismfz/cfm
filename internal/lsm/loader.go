@@ -866,6 +866,8 @@ func (l *Loader) programsFor(id PolicyID) []programEntry {
 		return compact(fentryProgramEntry(progs.CfmCred003, pinFileLinkCred003, "commit_creds"))
 	case PolicyUnexpectedBPF:
 		return compact(tracepointProgramEntry(generatedProgramByName(&progs, "cfm_bpf001"), pinFileLinkBpf001, "syscalls", "sys_enter_bpf"))
+	case PolicyFdCredMismatch:
+		return compact(lsmProgramEntry(generatedProgramByName(&progs, "cfm_fs006"), pinFileLinkFs006))
 	}
 	return nil
 }

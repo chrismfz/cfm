@@ -170,6 +170,34 @@ func TestParseEvent_UnexpectedBPF(t *testing.T) {
 	}
 }
 
+func TestParseEvent_FdCredMismatch(t *testing.T) {
+	// Synthesise a CFML-FS-006 event: non-root attacker pid 9999 (uid
+	// 1000, common DirectAdmin/cPanel hosting uid) reading /etc/shadow
+	// through a fd that was opened in a root context (the setuid-helper
+	// fd-leak primitive). No op byte (FS-006 doesn't carry one);
+	// filename is the watched inode's dentry name.
+	raw := buildWireEvent(t, bpfPolicyFdCredMismatch, 9999, 9999, 1000, 1000, 700, "chage_pwn", "shadow")
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PolicyID != PolicyFdCredMismatch {
+		t.Fatalf("PolicyID: got %q, want %q", ev.PolicyID, PolicyFdCredMismatch)
+	}
+	if ev.UID != 1000 {
+		t.Errorf("UID: got %d, want 1000 (non-root attacker)", ev.UID)
+	}
+	if ev.Op != FSOpNone {
+		t.Errorf("Op: got %v, want FSOpNone (FS-006 doesn't use op)", ev.Op)
+	}
+	if ev.Comm != "chage_pwn" {
+		t.Errorf("Comm: got %q, want chage_pwn", ev.Comm)
+	}
+	if ev.Filename != "shadow" {
+		t.Errorf("Filename: got %q, want shadow", ev.Filename)
+	}
+}
+
 func TestParseEvent_Truncated(t *testing.T) {
 	raw := make([]byte, wireEventSize-1)
 	_, err := parseEvent(raw)
@@ -237,6 +265,9 @@ func TestPolicyByID_BPFConstantsMatchGoConstants(t *testing.T) {
 	}
 	if bpfPolicyUnexpectedBPF != 10 {
 		t.Errorf("bpfPolicyUnexpectedBPF mismatch: Go=%d, BPF=10 (see common.bpf.h)", bpfPolicyUnexpectedBPF)
+	}
+	if bpfPolicyFdCredMismatch != 11 {
+		t.Errorf("bpfPolicyFdCredMismatch mismatch: Go=%d, BPF=11 (see common.bpf.h)", bpfPolicyFdCredMismatch)
 	}
 }
 

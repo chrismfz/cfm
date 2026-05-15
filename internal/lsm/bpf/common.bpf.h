@@ -16,14 +16,15 @@
 /* On-wire event policy IDs. Stable across releases — Go-side parsing
  * keys off these values, not strings. */
 enum cfm_lsm_policy_id {
-    CFM_LSM_POLICY_MEMFD_EXEC       = 1,  /* CFML-EXEC-001 */
-    CFM_LSM_POLICY_REVERSE_SHELL    = 3,  /* CFML-EXEC-003 */
+    CFM_LSM_POLICY_MEMFD_EXEC        = 1,  /* CFML-EXEC-001 */
+    CFM_LSM_POLICY_REVERSE_SHELL     = 3,  /* CFML-EXEC-003 */
     CFM_LSM_POLICY_DELETED_FILE_EXEC = 4,  /* CFML-EXEC-004 */
     CFM_LSM_POLICY_INTERP_NET_STDIO  = 6,  /* CFML-EXEC-005 */
-    CFM_LSM_POLICY_SENSITIVE_WRITE  = 5,  /* CFML-FS-005   */
-    CFM_LSM_POLICY_CRED_ESCAL       = 7,  /* CFML-CRED-002 */
-    CFM_LSM_POLICY_DIRECT_CRED      = 9,  /* CFML-CRED-003 */
-    CFM_LSM_POLICY_UNEXPECTED_BPF   = 10, /* CFML-BPF-001  */
+    CFM_LSM_POLICY_SENSITIVE_WRITE   = 5,  /* CFML-FS-005   */
+    CFM_LSM_POLICY_CRED_ESCAL        = 7,  /* CFML-CRED-002 */
+    CFM_LSM_POLICY_DIRECT_CRED       = 9,  /* CFML-CRED-003 */
+    CFM_LSM_POLICY_UNEXPECTED_BPF    = 10, /* CFML-BPF-001  */
+    CFM_LSM_POLICY_FD_CRED_MISMATCH  = 11, /* CFML-FS-006   */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the

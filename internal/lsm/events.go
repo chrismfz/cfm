@@ -18,6 +18,7 @@ const (
 	bpfPolicyCredEscal           uint32 = 7
 	bpfPolicyDirectCred          uint32 = 9
 	bpfPolicyUnexpectedBPF       uint32 = 10
+	bpfPolicyFdCredMismatch      uint32 = 11
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -218,6 +219,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyDirectCredInstall
 	case bpfPolicyUnexpectedBPF:
 		e.PolicyID = PolicyUnexpectedBPF
+	case bpfPolicyFdCredMismatch:
+		e.PolicyID = PolicyFdCredMismatch
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

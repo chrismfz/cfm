@@ -1373,4 +1373,126 @@ int cfm_bpf001(struct trace_event_raw_sys_enter *ctx)
     return 0;
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-FS-006 — Sensitive read via root-owned fd from unprivileged task.
+ *
+ * Hook: file_permission (LSM)
+ *
+ * Threat: a setuid-root helper (ssh-keysign, chage, unix_chkpwd,
+ * passwd, ...) opens a sensitive file as root; an unprivileged task
+ * obtains a reference to that already-opened struct file before the
+ * helper closes it (pidfd_getfd exit-window race — Qualys ssh-keysign
+ * chain, Linus commit 31e62c2ebbfd; CLONE_FILES + setuid-exec;
+ * /proc/<pid>/fd/<n>). The unprivileged task then reads/writes the
+ * file via the leaked fd: its own current_cred() stays at the original
+ * uid, but file->f_cred->euid is 0 and the fd grants whatever access
+ * root had at open time.
+ *
+ * Mechanism: emit one event when current task's effective uid is
+ * non-zero, file->f_cred->euid is zero, and the dentry's (fs_id, ino)
+ * is in cfm_watched_inodes (the same map FS-005 maintains).
+ *
+ * Mask: file_permission fires on every read/write/access through any
+ * fd. We do NOT filter on mask — both reads (the canonical exfil
+ * primitive) and writes (an exploited fd that points at a sensitive
+ * file with write intent is a stronger compromise indicator) are
+ * interesting. The cred-check filters keep the lookup cost bounded.
+ *
+ * Mode: monitor-only by design and for the foreseeable future. Several
+ * legitimate authentication chains (passwd, pkexec, sudo, unix_chkpwd,
+ * dovecot-auth, postfix smtpd_pickup) open the watched files as root
+ * and read(2) after dropping privs; returning -EPERM here would
+ * deadlock the auth session, not just block one read. Telemetry first;
+ * enforce — if it ever lands — needs a curated (comm, exe_inode)
+ * allow-list scrubbed against production data, not guessed. No
+ * cfm_enforce_fd_cred_mismatch knob exists in this BPF program.
+ *
+ * Relationship to kernsec: kernsec ships kernel.yama.ptrace_scope=2
+ * (KSEC-SCT-kspp.kernel-006) which closes the modern pidfd_getfd()
+ * primitive at the kernel layer. FS-006 covers hosts that
+ * `state = skip` that rule for same-uid debuggability + future
+ * fd-leak variants that don't go through ptrace.
+ * ------------------------------------------------------------------- */
+
+static __always_inline void cfm_fs006_emit(struct file *file)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_FD_CRED_MISMATCH;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = CFM_OP_NONE;
+    e->flags     = 0;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    /* Filename: best-effort from the file's dentry. The full path is
+     * not reconstructed (bpf_d_path is restricted to a few hooks and
+     * file_permission is not on its allow-list across kernel versions);
+     * userspace correlates via (uid, comm, inode) when needed. */
+    struct dentry *d = BPF_CORE_READ(file, f_path.dentry);
+    const unsigned char *name = NULL;
+    if (d)
+        name = BPF_CORE_READ(d, d_name.name);
+    if (name) {
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    } else {
+        e->filename[0] = '\0';
+    }
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("lsm/file_permission")
+int BPF_PROG(cfm_fs006, struct file *file, int mask, int ret)
+{
+    /* `mask` is intentionally unused — see header comment. */
+    (void)mask;
+
+    if (!file)
+        return ret;
+
+    /* Skip privileged callers. euid==0 covers both real root and
+     * setuid-elevated tasks (sudo, setuid binaries pre-drop); neither
+     * is the fd-leak pattern. Read current's euid directly off the
+     * task struct rather than bpf_get_current_uid_gid() (which returns
+     * real uid, not euid, and would miss the sudo case). */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (!task)
+        return ret;
+    __u32 cur_euid = BPF_CORE_READ(task, cred, euid.val);
+    if (cur_euid == 0)
+        return ret;
+
+    /* Only fire when the file was opened by a privileged context.
+     * f_cred is captured at open time and never updated, which is
+     * exactly the property the fd-leak attack exploits. */
+    __u32 fcred_euid = BPF_CORE_READ(file, f_cred, euid.val);
+    if (fcred_euid != 0)
+        return ret;
+
+    /* Only fire on inodes in the FS-005 watched-inode set
+     * (shadow, sudoers, .ssh keys, host keys, plus
+     * operator-configured persistence paths). */
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(inode, &key))
+        return ret;
+    if (!bpf_map_lookup_elem(&cfm_watched_inodes, &key))
+        return ret;
+
+    cfm_fs006_emit(file);
+    return ret;  /* monitor-only — never deny */
+}
+
 char LICENSE[] SEC("license") = "GPL";

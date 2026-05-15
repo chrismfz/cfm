@@ -130,6 +130,11 @@ struct file {
     struct path            f_path;
     struct inode          *f_inode;
     void                  *private_data;
+    /* f_cred is captured at open(2) time and never updated; CFML-FS-006
+     * compares its euid against current's euid to detect fd leaks from
+     * setuid helpers. The struct cred forward decl lives further down,
+     * just above struct task_struct. */
+    const struct cred     *f_cred;
 } ___NCO;
 
 struct linux_binprm {
