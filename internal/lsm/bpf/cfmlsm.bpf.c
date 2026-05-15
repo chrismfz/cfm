@@ -915,10 +915,10 @@ int BPF_PROG(cfm_ephemeral_exec, struct linux_binprm *bprm, int ret)
     if (magic == TMPFS_MAGIC)
         flags |= CFM_LSM_F_TMPFS_BACKED;
 
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (flags == 0) {
         /* Non-tmpfs path: check /tmp/ and /var/tmp/ via dentry walk.
          * EL9 / CloudLinux 9 ship /tmp on the root filesystem. */
-        struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
         if (cfm_dentry_under_ephemeral_root(dentry))
             flags |= CFM_LSM_F_EPHEMERAL_DIR;
     }
@@ -928,7 +928,6 @@ int BPF_PROG(cfm_ephemeral_exec, struct linux_binprm *bprm, int ret)
 
     /* EXEC-001 owns memfd telemetry. Avoid double-emitting for memfd
      * payloads whose superblock magic also happens to be TMPFS. */
-    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (dentry && dentry_name_is_memfd(dentry))
         return 0;
 
