@@ -49,14 +49,15 @@ type SSLCollectorSockConfig struct {
 }
 
 type ClamConfig struct {
-	Enabled     bool          // CLAMD_ENABLED
-	Network     string        // CLAMD_NETWORK (unix|tcp)
-	Address     string        // CLAMD_SOCKET or 127.0.0.1:3310
-	Timeout     time.Duration // CLAMD_TIMEOUT
-	MaxWorkers  int
-	QueueSize   int
-	PendingDir  string // CLAMD_PENDING_DIR  default /var/lib/cfm/scanner/pending
-	InfectedDir string // CLAMD_INFECTED_DIR default /var/lib/cfm/scanner/infected
+	Enabled          bool          // CLAMD_ENABLED
+	NginxHookEnabled bool          // CLAMD_NGINX_HOOK_ENABLED (default true; controls whether cfm_clamav.lua intercepts uploads)
+	Network          string        // CLAMD_NETWORK (unix|tcp)
+	Address          string        // CLAMD_SOCKET or 127.0.0.1:3310
+	Timeout          time.Duration // CLAMD_TIMEOUT
+	MaxWorkers       int
+	QueueSize        int
+	PendingDir       string // CLAMD_PENDING_DIR  default /var/lib/cfm/scanner/pending
+	InfectedDir      string // CLAMD_INFECTED_DIR default /var/lib/cfm/scanner/infected
 }
 
 // DebugConfig — controls the internal debug/metrics HTTP server
@@ -588,6 +589,9 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	s := bufio.NewScanner(r)
 	cfg := &Config{}
 	cfg.Debug.AuthMFALoginVerifyEnabled = true
+	// Clam pipeline knobs that default to true: ParseCFMConf only flips
+	// them when the key is present, so initialise here.
+	cfg.Clam.NginxHookEnabled = true
 	outboundDNSDeprecatedSeen := false
 	lineNo := 0
 	for s.Scan() {
@@ -935,6 +939,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 
 		case "CLAMD_ENABLED":
 			cfg.Clam.Enabled = parseBool(val)
+		case "CLAMD_NGINX_HOOK_ENABLED":
+			cfg.Clam.NginxHookEnabled = parseBool(val)
 		case "CLAMD_NETWORK":
 			cfg.Clam.Network = strings.ToLower(strings.TrimSpace(val))
 		case "CLAMD_SOCKET", "CLAMD_ADDRESS":
@@ -1047,7 +1053,7 @@ func IsKnownKey(key string) bool {
 		"SSLCOLLECTOR_SOCK_ENABLE", "SSLCOLLECTOR_SOCK_PATH", "SSLCOLLECTOR_SOCK_TOKEN", "SSLCOLLECTOR_SOCK_PEM_TTL", "SSLCOLLECTOR_SOCK_PEM_MAX", "SSLCOLLECTOR_OFFLINE_CACHE",
 		"BLOCK_BAD_TCP_FLAGS", "NEW_RATE", "NEW_BURST", "ICMP_RATE_LIMIT", "ICMP_RATE_BURST",
 		"CLAM_LOG_STDOUT", "CLAM_LOG_FILE", "SOCKET_LOG_STDOUT", "SOCKET_LOG_FILE",
-		"CLAMD_ENABLED", "CLAMD_NETWORK", "CLAMD_SOCKET", "CLAMD_ADDRESS", "CLAMD_TIMEOUT", "CLAMD_MAX_WORKERS", "CLAMD_QUEUE_SIZE",
+		"CLAMD_ENABLED", "CLAMD_NGINX_HOOK_ENABLED", "CLAMD_NETWORK", "CLAMD_SOCKET", "CLAMD_ADDRESS", "CLAMD_TIMEOUT", "CLAMD_MAX_WORKERS", "CLAMD_QUEUE_SIZE",
 		"SYS_TWEAKS_ENABLE", "SYS_TWEAKS_PERSIST", "SYS_CT_PER_GB", "SYS_CT_MIN", "SYS_CT_MAX", "SYS_TCP_LOOSE_STRICT", "SYS_TCP_SYN_RETRIES", "SYS_TCP_SYNACK_RETRIES", "SYS_TCP_FIN_TIMEOUT", "SYS_CT_TIMEWAIT", "SYS_CT_FINWAIT", "SYS_CT_CLOSEWAIT", "SYS_RP_FILTER", "SYS_ACCEPT_REDIRECTS", "SYS_SEND_REDIRECTS", "SYS_ROUTE_LOCALNET", "SYS_ROUTE_LOCALNET_IF":
 		return true
 	default:

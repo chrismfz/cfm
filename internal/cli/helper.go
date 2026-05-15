@@ -9,8 +9,78 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 )
+
+// UpsertConfKey rewrites cfm.conf so that `key = value` is set, preserving
+// the rest of the file (comments, ordering, surrounding keys). If the key
+// is already present (case-insensitive match on the key, ignoring spaces
+// around '='), its value is replaced; otherwise the key is appended.
+//
+// Mirrors the regex-and-rewrite approach used by
+// sslcollector.ValidateOrGenerateTokenKey for token rotation, so both
+// daemon-side and CLI-side mutations of cfm.conf stay shape-compatible.
+// The daemon's fsnotify watcher on cfm.conf picks up the change and
+// triggers the existing reload path — no SIGHUP needed.
+//
+// path must be absolute. key must match `[A-Za-z0-9_]+`.
+func UpsertConfKey(path, key, value string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("UpsertConfKey: path must be absolute, got %q", path)
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_]+$`).MatchString(key) {
+		return fmt.Errorf("UpsertConfKey: invalid key %q", key)
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 -- caller-supplied admin path
+	if err != nil {
+		return fmt.Errorf("UpsertConfKey: read %s: %w", path, err)
+	}
+	mode := os.FileMode(0640)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode()
+	}
+
+	re := regexp.MustCompile(`(?mi)^(` + regexp.QuoteMeta(key) + `\s*=\s*).*$`)
+	var updated string
+	if re.Match(data) {
+		updated = re.ReplaceAllString(string(data), "${1}"+value)
+	} else {
+		s := string(data)
+		if len(s) > 0 && s[len(s)-1] != '\n' {
+			s += "\n"
+		}
+		updated = s + key + " = " + value + "\n"
+	}
+	if updated == string(data) {
+		return nil
+	}
+	// tmp + rename: a crash, ENOSPC, or signal between truncate and the
+	// final write must not leave cfm.conf half-written — the daemon's
+	// fsnotify watcher would then re-parse garbage and could zero out
+	// unrelated keys. The sibling Lua writers (WriteWebdetectorBridgeConfig,
+	// WriteClamavLuaConfig) already follow this pattern.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(updated), mode); err != nil { // #nosec G306 -- preserve existing perms
+		return fmt.Errorf("UpsertConfKey: write tmp %s: %w", tmp, err)
+	}
+	// Preserve owner across the rename when caller is root and the target
+	// is owned by a different uid:gid (e.g. root:cfm). Best-effort — if we
+	// cannot stat we fall through to the rename, accepting that the new
+	// file inherits the writer's effective uid/gid.
+	if info, statErr := os.Stat(path); statErr == nil {
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			_ = os.Chown(tmp, int(st.Uid), int(st.Gid))
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("UpsertConfKey: rename %s: %w", tmp, err)
+	}
+	return nil
+}
 
 // ----------------------------------------------------------------------------
 // Binary / module detection

@@ -393,6 +393,10 @@ Usage:
   cfm lsm disable                 -- unpin + detach BPF programs
   cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
 
+  cfm clam status                  -- pipeline + hook state, recent infections
+  cfm clam enable | disable        -- master pipeline (CLAMD_ENABLED)
+  cfm clam hook enable | disable   -- Lua upload interception only (CLI scan keeps working)
+  cfm clam hook status
   cfm clam ping
   cfm clam version
   cfm clam scan <file-or-dir>
@@ -493,9 +497,16 @@ func runDaemon(args []string) {
 		{"/var/lib/cfm", 0o701},
 		{"/var/lib/cfm/lua", 0o750},
 		{"/var/lib/cfm/sslcollector", 0o770},
-		{"/var/lib/cfm/scanner", 0o700},
-		{"/var/lib/cfm/scanner/pending", 0o700},
-		{"/var/lib/cfm/scanner/infected", 0o700},
+		// scanner dirs: root:cfm 0770. The Angie worker (cfm user)
+		// writes upload spool files here via cfm_clamav.lua when the
+		// request body is not already on disk as nginx's client body
+		// temp. Without group-write the worker logs "[cfm_clamav]
+		// cannot write temp: Permission denied" on every multipart
+		// POST; the chown happens below alongside the other cfm-group
+		// dirs.
+		{"/var/lib/cfm/scanner", 0o770},
+		{"/var/lib/cfm/scanner/pending", 0o770},
+		{"/var/lib/cfm/scanner/infected", 0o770},
 		{"/var/log/cfm", 0o700},
 		// /var/run is tmpfs on systemd systems — recreate on every
 		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
@@ -511,6 +522,9 @@ func runDaemon(args []string) {
 	if cfmGID > 0 {
 		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
 		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner/pending", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner/infected", 0, cfmGID)
 		_ = os.Chown("/var/run/cfm", 0, cfmGID)
 		// Chown the snapshot file if it already exists (eg written as
 		// root:root before the cfm group was in place). Without this,
@@ -1046,14 +1060,28 @@ func runDaemon(args []string) {
 				}(cfg.Clam.PendingDir)
 			}
 
-			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s",
+			logging.LogfCLAM("[clam] enabled network=%s address=%s timeout=%s workers=%d queue=%d pending=%s infected=%s nginx_hook=%v",
 				cfg.Clam.Network, cfg.Clam.Address, cfg.Clam.Timeout,
 				cfg.Clam.MaxWorkers, cfg.Clam.QueueSize,
-				cfg.Clam.PendingDir, cfg.Clam.InfectedDir)
+				cfg.Clam.PendingDir, cfg.Clam.InfectedDir, cfg.Clam.NginxHookEnabled)
 		} else {
 			detpkg.SetClamManager(nil)
 			detpkg.ResetClamBridgeWireState()
 			logging.LogfCLAM("[clam] disabled")
+		}
+
+		// Render the cfm_clamav.lua hook switch every reload, even when
+		// the master pipeline is disabled. The Lua hook should also be
+		// off when CLAMD_ENABLED=false — there is nothing for it to
+		// notify, so we squash both flags together for the Lua side.
+		// Angie picks up the new file via loadfile() in cfm.lua on the
+		// next worker init / cycle; no SIGHUP needed.
+		hookEnabled := cfg.Clam.Enabled && cfg.Clam.NginxHookEnabled
+		const clamavLuaConfigPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
+		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfmGID); err != nil {
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua write failed path=%s err=%v", clamavLuaConfigPath, err)
+		} else {
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v", clamavLuaConfigPath, hookEnabled)
 		}
 
 		for _, ln := range cfg.Summary() {

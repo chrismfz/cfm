@@ -296,6 +296,16 @@ func (m *Manager) InfectedDir() string {
 	return m.cfg.InfectedDir
 }
 
+// QueueDepth returns the current number of jobs buffered in the worker
+// channel and its capacity. Both zero when the manager is nil. Cheap
+// snapshot intended for `cfm clam status`; not for hot-path metrics.
+func (m *Manager) QueueDepth() (int, int) {
+	if m == nil || m.jobs == nil {
+		return 0, 0
+	}
+	return len(m.jobs), cap(m.jobs)
+}
+
 func (m *Manager) SetEnricher(e *enrich.Enricher) {
 	if m == nil {
 		return
