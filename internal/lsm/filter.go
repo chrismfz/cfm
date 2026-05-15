@@ -54,7 +54,7 @@ type EventFilter struct {
 type policyAllow struct {
 	exeBasenames   map[string]struct{}
 	comms          map[string]struct{}
-	scriptPrefixes []string // matched against /proc/<pid>/cmdline args
+	pathPrefixes []string // matched against /proc/<pid>/cmdline args
 }
 
 // defaultEventFilter is the package-internal singleton consulted by
@@ -106,15 +106,15 @@ func (f *EventFilter) Match(ev Event) bool {
 	// Only consulted when comm + exe haven't already decided, and only
 	// when the policy actually has any prefixes configured — keeps the
 	// fast path zero-syscall.
-	if len(rule.scriptPrefixes) > 0 && ev.PID != 0 {
-		if cmdlineHasScriptPrefix(ev.PID, rule.scriptPrefixes) {
+	if len(rule.pathPrefixes) > 0 && ev.PID != 0 {
+		if cmdlineHasPathPrefix(ev.PID, rule.pathPrefixes) {
 			return true
 		}
 	}
 	return false
 }
 
-// cmdlineHasScriptPrefix reads /proc/<pid>/cmdline and reports whether
+// cmdlineHasPathPrefix reads /proc/<pid>/cmdline and reports whether
 // any argument has one of the given path prefixes. Best-effort: a
 // missing /proc entry (race with process exit) or a read error returns
 // false — the event flows normally rather than being silently dropped.
@@ -122,8 +122,8 @@ func (f *EventFilter) Match(ev Event) bool {
 // The prefix match is on full argument strings, not just basename. So
 // `/usr/share/lve-stats/` matches an arg `/usr/share/lve-stats/lvestats-server.py`
 // but not an arg `/tmp/lve-stats-fake.py`. Operators configure prefixes
-// via `allow_script_prefix` in lsm.conf.
-func cmdlineHasScriptPrefix(pid uint32, prefixes []string) bool {
+// via `allow_path` in lsm.conf.
+func cmdlineHasPathPrefix(pid uint32, prefixes []string) bool {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return false
@@ -171,9 +171,9 @@ func BuildEventFilter(c *Conf) *EventFilter {
 					f.addComms(p.ID, comms)
 				}
 			}
-			if allowScriptPrefixPolicy(p.ID) {
-				if prefixes := c.AllowScriptPrefixFor(p.ID); len(prefixes) > 0 {
-					f.addScriptPrefixes(p.ID, prefixes)
+			if allowPathPolicy(p.ID) {
+				if prefixes := c.AllowPathFor(p.ID); len(prefixes) > 0 {
+					f.addPathPrefixes(p.ID, prefixes)
 				}
 			}
 		}
@@ -217,7 +217,7 @@ func (f *EventFilter) addComms(id PolicyID, names []string) {
 	f.rules[id] = r
 }
 
-func (f *EventFilter) addScriptPrefixes(id PolicyID, prefixes []string) {
+func (f *EventFilter) addPathPrefixes(id PolicyID, prefixes []string) {
 	if len(prefixes) == 0 {
 		return
 	}
@@ -227,7 +227,7 @@ func (f *EventFilter) addScriptPrefixes(id PolicyID, prefixes []string) {
 		if p == "" {
 			continue
 		}
-		r.scriptPrefixes = append(r.scriptPrefixes, p)
+		r.pathPrefixes = append(r.pathPrefixes, p)
 	}
 	f.rules[id] = r
 }

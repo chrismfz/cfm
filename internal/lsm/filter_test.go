@@ -292,6 +292,7 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 		// CageFS / cpsrvd / dccproc categories in DefaultGlobalAllowExe.
 		"/usr/sbin/cagefs.server",
 		"/usr/local/cpanel/cpsrvd",
+		"/usr/local/cpanel/xml-api",
 		"/usr/bin/dccproc",
 	}
 	for _, w := range wantExe {

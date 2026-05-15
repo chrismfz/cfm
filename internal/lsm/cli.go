@@ -46,6 +46,8 @@ func RunCLI(args []string) int {
 		return runEnableCmd(args[1:], os.Stdout)
 	case "disable":
 		return runDisableCmd(args[1:], os.Stdout)
+	case "restart":
+		return runRestartCmd(args[1:], os.Stdout)
 	case "init":
 		return RunInit(os.Stdout)
 	case "help", "-h", "--help":
@@ -75,6 +77,35 @@ func runDisableCmd(args []string, w io.Writer) int {
 		return rc
 	}
 	return RunDisable(w)
+}
+
+// runRestartCmd is the operator convenience for reloading /etc/cfm/lsm.conf:
+// disable (no-op if not currently enabled) followed by enable. Picks up
+// changes to allow_* lists, [events] / [kmsg] knobs, and per-policy modes
+// in one go — the BPF program enforce-constants are baked at load time,
+// so a process restart is the only way to re-rewrite them.
+//
+// Honours the same --yes / -y flag as `cfm lsm enable` so unattended
+// reloads after a conf-management change (Ansible / Salt / cron) can skip
+// the enforce-mode confirmation prompt.
+func runRestartCmd(args []string, w io.Writer) int {
+	fs := flag.NewFlagSet("lsm restart", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "skip the enforce-mode confirmation prompt (passed through to enable)")
+	short := fs.Bool("y", false, "shorthand for --yes")
+	if rc, done := handleFlagErr("lsm restart", fs.Parse(args), w); done {
+		return rc
+	}
+	fmt.Fprintln(w, "===== CFM lsm RESTART =====")
+	fmt.Fprintln(w)
+	// Disable first. If cfm-lsm isn't currently enabled, RunDisable
+	// is already idempotent (prints "Nothing to do." and returns 0) so
+	// `restart` doubles as "ensure enabled with current conf".
+	if rc := RunDisable(w); rc != 0 {
+		return rc
+	}
+	fmt.Fprintln(w)
+	return RunEnable(w, EnableOptions{AssumeYes: *yes || *short})
 }
 
 func runStatusCmd(args []string, w io.Writer) int {
@@ -157,6 +188,10 @@ Subcommands:
                       mode=enforce in lsm.conf; --yes skips the prompt for
                       unattended runs. Needs root.
   disable             Unpin and detach. Needs root.
+  restart [--yes]     Reload /etc/cfm/lsm.conf: disable (no-op if not
+                      enabled) then enable. Picks up changed allow_* lists,
+                      [events] / [kmsg] knobs, and per-policy modes.
+                      Needs root.
   init                Write default /etc/cfm/lsm.conf if absent
   help                Show this message
 

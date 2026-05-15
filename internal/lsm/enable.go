@@ -56,7 +56,22 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	fmt.Fprintln(w, "Preflight: PASS")
 	fmt.Fprintln(w)
 
-	conf, _ := loadStatusConf()
+	conf, confErr := loadStatusConf()
+	if confErr != nil {
+		// Parse error. loadStatusConf already absorbs ENOENT into a
+		// usable default + nil err, so anything reaching here is a
+		// real parse / read failure. Surface it loudly instead of
+		// silently proceeding against DefaultConf — every policy in
+		// DefaultConf has DefaultMode=ModeDisabled, which would
+		// otherwise surface as the misleading "every policy has
+		// mode=disabled" error a few lines down.
+		fmt.Fprintf(w, "Could not parse %s: %v\n", ConfPath, confErr)
+		fmt.Fprintln(w, "Fix the parse error and re-run; `cfm lsm enable` refuses to proceed against")
+		fmt.Fprintln(w, "a fallback config because that would silently disable every policy.")
+		fmt.Fprintln(w, "Hint: a likely cause is an `allow_*` key the running binary does not yet")
+		fmt.Fprintln(w, "      recognise — match your lsm.conf to the deployed cfm version.")
+		return 1
+	}
 	ConfigureKmsg(conf.Kmsg)
 	ConfigureEventSink(conf.EventSink)
 
