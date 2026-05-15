@@ -288,6 +288,11 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 		"/usr/lib/postfix/sbin/master",
 		"/usr/lib/dovecot/indexer-worker",
 		"/usr/bin/logger",
+		// CloudLinux / cPanel / SpamAssassin entries — see the
+		// CageFS / cpsrvd / dccproc categories in DefaultGlobalAllowExe.
+		"/usr/sbin/cagefs.server",
+		"/usr/local/cpanel/cpsrvd",
+		"/usr/bin/dccproc",
 	}
 	for _, w := range wantExe {
 		found := false
@@ -301,7 +306,7 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 			t.Errorf("DefaultGlobalAllowExe missing %q", w)
 		}
 	}
-	wantComm := []string{"runc", "containerd-shim", "dockerd"}
+	wantComm := []string{"runc", "containerd-shim", "dockerd", "cagefsctl", "spamd child"}
 	for _, w := range wantComm {
 		found := false
 		for _, e := range c.GlobalAllowComm {

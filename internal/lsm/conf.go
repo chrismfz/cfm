@@ -152,10 +152,18 @@ func DefaultConf() *Conf {
 //     download-only user (_apt) and re-elevate to root mid-run, so
 //     they routinely trip CRED-002 during system updates.
 //   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
+//   - CloudLinux CageFS server + control tools (legitimate uid
+//     transitions into per-account cages).
+//   - cPanel server daemon and its variant entry points
+//     (cpsrvd / webmaild / whostmgrd / cpdavd share the cpsrvd
+//     binary), plus the quota-status helper.
+//   - SpamAssassin's DCC client (dccproc).
 //
-// New entries should be host-class-universal: a path that exists on
-// one panel only belongs in a panel-specific seed (see cPanel /
-// DirectAdmin auto-seeding in maps.go) or in operator conf, not here.
+// New entries should cover a widely-deployed host class. Missing paths
+// are silently skipped at daemon start, so adding a CloudLinux- or
+// cPanel-specific path costs zero on non-CloudLinux / non-cPanel
+// hosts. Truly site-specific entries (one operator's custom helper
+// script) belong in operator conf, not here.
 var DefaultGlobalAllowExe = []string{
 	// OpenSSH privsep
 	"/usr/sbin/sshd",
@@ -283,6 +291,27 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/local/bin/postfix_sender_login_maps.sh",
 	"/usr/local/bin/outgoing-from-tls.sh",
 	"/usr/local/bin/outgoing-tls-policy.sh",
+
+	// CloudLinux CageFS — its server and control tools transition uids
+	// into per-account cages via setuid, which is the entire point of
+	// the product. cagefsctl is a Python script; the kernel sees
+	// python3.11 as the exe — its comm "cagefsctl" is allowlisted in
+	// DefaultGlobalAllowComm below.
+	"/usr/sbin/cagefs.server",
+	"/usr/sbin/cagefsctl",
+
+	// cPanel server daemon and its variant entry points. cPanel ships
+	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
+	// under different names; the exe the kernel reports is cpsrvd, so
+	// one basename-match entry covers the family.
+	"/usr/local/cpanel/cpsrvd",
+	"/usr/local/cpanel/bin/quota-status",
+
+	// SpamAssassin's DCC client — DCC (Distributed Checksum
+	// Clearinghouse) ships a small C helper that legitimately calls
+	// setuid as part of its reporting protocol.
+	"/usr/bin/dccproc",
+	"/usr/local/bin/dccproc",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -335,6 +364,17 @@ var DefaultGlobalAllowComm = []string{
 	"NetworkManager",
 	"bpftool",
 	"auditd",
+
+	// CloudLinux CageFS — cagefsctl is a Python script run by root
+	// during account lifecycle ops; its task comm is "cagefsctl" but
+	// the exe the kernel sees is "python3.11" (or similar). Allow_exe
+	// on python3.11 would be far too broad — we pin on comm instead.
+	"cagefsctl",
+
+	// SpamAssassin's per-message child does setuid as part of normal
+	// scanning; comm is fixed to "spamd child". The exe is "perl",
+	// which we deliberately do NOT allowlist.
+	"spamd child",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
