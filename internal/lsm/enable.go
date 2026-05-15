@@ -58,6 +58,7 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 
 	conf, _ := loadStatusConf()
 	ConfigureKmsg(conf.Kmsg)
+	ConfigureEventSink(conf.EventSink)
 
 	availability := map[PolicyID]PolicyAvailability{}
 	for _, pa := range pf.PolicyAvailability {
@@ -294,6 +295,7 @@ func RunDisable(w io.Writer) int {
 	// daemon process; the writer may not have been configured yet.
 	if conf, _ := loadStatusConf(); conf != nil {
 		ConfigureKmsg(conf.Kmsg)
+		ConfigureEventSink(conf.EventSink)
 	}
 	KmsgStatef("STATE", "disabled, all programs detached")
 	return 0

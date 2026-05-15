@@ -99,6 +99,12 @@ type Conf struct {
 	// section is absent.
 	Kmsg KmsgConf
 
+	// EventSink controls userspace DETECT emission (cfm.log + notify).
+	// Populated from the `[events]` section of lsm.conf; defaults from
+	// DefaultEventSinkConf() if absent. Independent of Kmsg — the two
+	// sinks have separate per-policy rate caps.
+	EventSink EventSinkConf
+
 	// Source is the path the conf was loaded from, or a synthesised
 	// description ("(default — no <path>)") when no file was present.
 	Source string
@@ -124,6 +130,7 @@ func DefaultConf() *Conf {
 		GlobalAllowExe:        append([]string{}, DefaultGlobalAllowExe...),
 		GlobalAllowComm:       append([]string{}, DefaultGlobalAllowComm...),
 		Kmsg:                  DefaultKmsgConf(),
+		EventSink:             DefaultEventSinkConf(),
 	}
 }
 
@@ -152,10 +159,18 @@ func DefaultConf() *Conf {
 //     download-only user (_apt) and re-elevate to root mid-run, so
 //     they routinely trip CRED-002 during system updates.
 //   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
+//   - CloudLinux CageFS server + control tools (legitimate uid
+//     transitions into per-account cages).
+//   - cPanel server daemon and its variant entry points
+//     (cpsrvd / webmaild / whostmgrd / cpdavd share the cpsrvd
+//     binary), plus the quota-status helper.
+//   - SpamAssassin's DCC client (dccproc).
 //
-// New entries should be host-class-universal: a path that exists on
-// one panel only belongs in a panel-specific seed (see cPanel /
-// DirectAdmin auto-seeding in maps.go) or in operator conf, not here.
+// New entries should cover a widely-deployed host class. Missing paths
+// are silently skipped at daemon start, so adding a CloudLinux- or
+// cPanel-specific path costs zero on non-CloudLinux / non-cPanel
+// hosts. Truly site-specific entries (one operator's custom helper
+// script) belong in operator conf, not here.
 var DefaultGlobalAllowExe = []string{
 	// OpenSSH privsep
 	"/usr/sbin/sshd",
@@ -283,6 +298,27 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/local/bin/postfix_sender_login_maps.sh",
 	"/usr/local/bin/outgoing-from-tls.sh",
 	"/usr/local/bin/outgoing-tls-policy.sh",
+
+	// CloudLinux CageFS — its server and control tools transition uids
+	// into per-account cages via setuid, which is the entire point of
+	// the product. cagefsctl is a Python script; the kernel sees
+	// python3.11 as the exe — its comm "cagefsctl" is allowlisted in
+	// DefaultGlobalAllowComm below.
+	"/usr/sbin/cagefs.server",
+	"/usr/sbin/cagefsctl",
+
+	// cPanel server daemon and its variant entry points. cPanel ships
+	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
+	// under different names; the exe the kernel reports is cpsrvd, so
+	// one basename-match entry covers the family.
+	"/usr/local/cpanel/cpsrvd",
+	"/usr/local/cpanel/bin/quota-status",
+
+	// SpamAssassin's DCC client — DCC (Distributed Checksum
+	// Clearinghouse) ships a small C helper that legitimately calls
+	// setuid as part of its reporting protocol.
+	"/usr/bin/dccproc",
+	"/usr/local/bin/dccproc",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -335,6 +371,17 @@ var DefaultGlobalAllowComm = []string{
 	"NetworkManager",
 	"bpftool",
 	"auditd",
+
+	// CloudLinux CageFS — cagefsctl is a Python script run by root
+	// during account lifecycle ops; its task comm is "cagefsctl" but
+	// the exe the kernel sees is "python3.11" (or similar). Allow_exe
+	// on python3.11 would be far too broad — we pin on comm instead.
+	"cagefsctl",
+
+	// SpamAssassin's per-message child does setuid as part of normal
+	// scanning; comm is fixed to "spamd child". The exe is "perl",
+	// which we deliberately do NOT allowlist.
+	"spamd child",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
@@ -453,6 +500,7 @@ const (
 	sectionPolicy
 	sectionKmsg
 	sectionAllow
+	sectionEvents
 )
 
 func ParseConf(r io.Reader) (*Conf, error) {
@@ -464,6 +512,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
+		EventSink:             DefaultEventSinkConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
 	// even if the file declared a subset. Per-policy stanzas override.
@@ -480,9 +529,11 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		lineno        int
 		seenPolicies  = map[PolicyID]int{}
 		seenTopLevel  = map[string]int{}
-		seenKmsgKeys  = map[string]int{}
-		kmsgSeen      int
-		allowSeen     int
+		seenKmsgKeys   = map[string]int{}
+		seenEventsKeys = map[string]int{}
+		kmsgSeen       int
+		allowSeen      int
+		eventsSeen     int
 	)
 
 	for scanner.Scan() {
@@ -526,6 +577,14 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				allowSeen = lineno
 				current = sectionAllow
+				currentPolicy = ""
+			case sectionEvents:
+				if eventsSeen > 0 {
+					return nil, fmt.Errorf("line %d: duplicate [events] section (first at line %d)",
+						lineno, eventsSeen)
+				}
+				eventsSeen = lineno
+				current = sectionEvents
 				currentPolicy = ""
 			}
 			continue
@@ -647,6 +706,22 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			default:
 				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm)", lineno, key)
 			}
+		case sectionEvents:
+			lk := strings.ToLower(key)
+			if firstLine, dup := seenEventsKeys[lk]; dup {
+				return nil, fmt.Errorf("line %d: duplicate [events] key %q (first at line %d)", lineno, lk, firstLine)
+			}
+			seenEventsKeys[lk] = lineno
+			switch lk {
+			case "detect_rate_per_min":
+				n, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("line %d: detect_rate_per_min must be a non-negative integer (got %q)", lineno, val)
+				}
+				c.EventSink.DetectRatePerMin = n
+			default:
+				return nil, fmt.Errorf("line %d: unknown [events] key %q (detect_rate_per_min)", lineno, key)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -757,6 +832,15 @@ func FormatConf(c *Conf) string {
 	fmt.Fprintf(&b, "state_transitions   = %t   # ALIVE / ADOPT / STATE / ISSUE on enable/disable/adopt/stop\n", c.Kmsg.StateTransitions)
 	fmt.Fprintf(&b, "detect_events       = %t   # one DETECT line per detection (rate-limited below)\n", c.Kmsg.DetectEvents)
 	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap DETECT lines per policy per minute; 0 disables cap (not recommended)\n", c.Kmsg.DetectRatePerMin)
+	b.WriteString("\n")
+	b.WriteString("# Userspace DETECT emission (cfm.log + notify pipeline) per-policy\n")
+	b.WriteString("# rate cap. Independent of the [kmsg] cap above so an operator can\n")
+	b.WriteString("# tighten cfm.log without losing dmesg signal (or vice versa). When\n")
+	b.WriteString("# the cap is hit, surplus events accumulate and a single\n")
+	b.WriteString("# `suppressed=N in_last=60s` summary line is emitted on window roll —\n")
+	b.WriteString("# the operator sees the burst happened without being buried in detail.\n")
+	b.WriteString("[events]\n")
+	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap cfm.log + notify emissions per policy per minute; 0 disables cap\n", c.EventSink.DetectRatePerMin)
 	return b.String()
 }
 
@@ -865,10 +949,12 @@ func parseSectionHeader(line string) (sectionKind, PolicyID, error) {
 		return sectionKmsg, "", nil
 	case "allow":
 		return sectionAllow, "", nil
+	case "events":
+		return sectionEvents, "", nil
 	}
 
 	if !strings.HasPrefix(inner, "policy") {
-		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[allow]`, `[kmsg]`, or `[policy \"...\"]`)", line)
+		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[allow]`, `[events]`, `[kmsg]`, or `[policy \"...\"]`)", line)
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(inner, "policy"))
 	if !strings.HasPrefix(rest, `"`) || !strings.HasSuffix(rest, `"`) || len(rest) < 2 {

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"cfm/internal/logging"
-	"cfm/internal/notify"
 )
 
 // Lifecycle owns the daemon-side activation of cfm-lsm. Mirrors the
@@ -81,6 +80,7 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// Apply kmsg config early so subsequent emissions honour the
 	// operator's state_transitions / detect_events toggles.
 	ConfigureKmsg(conf.Kmsg)
+	ConfigureEventSink(conf.EventSink)
 	// Install the userspace allowlist before the drain goroutine
 	// starts so the first event already goes through the filter.
 	SetEventFilter(BuildEventFilter(conf))
@@ -351,18 +351,9 @@ func emitNotify(ev Event) {
 		extra["stdio_signal"] = signal
 	}
 
-	_ = notify.Emit(notify.Event{
-		Kind:     "lsm_detect",
-		Section:  "lsm",
-		When:     time.Now(),
-		Reason:   reason,
-		Severity: "warning",
-		Extra:    extra,
-	})
-	logging.Logf("[lsm] %s", reason)
-	// Emit a DETECT line to dmesg / /var/log/messages too. Rate-
-	// limited per-policy by KmsgDetect so a burst cannot flood the
-	// kernel log. The notify pipeline + cfm.log always get the
-	// full stream regardless.
+	// Userspace sinks (cfm.log + notify) and the kmsg sink have
+	// independent per-policy rate caps so a chatty trigger cannot
+	// flood any one of them. See eventsink.go and kmsg.go.
+	emitDetectEvent(ev, reason, extra)
 	KmsgDetect(ev)
 }
