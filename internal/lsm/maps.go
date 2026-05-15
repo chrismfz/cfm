@@ -37,20 +37,40 @@ type inodeKey struct {
 // considered "web-class" — i.e. any uid we should watch for
 // sensitive-file modification attempts. Extended at runtime with
 // every uid managed by cPanel / DirectAdmin if those panels are
-// detected.
+// detected, and optionally by the `watched_uid_fallback_min` conf
+// knob (see populateWatchedUids).
 //
 // The list is conservative: an extra match (treating a non-web
 // system user as watched) is a false positive on the FS-005 detector,
 // not a false negative on a real attack — and even FPs are gated
 // by also requiring a filesystem+inode match against the sensitive-paths set.
 var WebUserNames = []string{
+	// Static web daemon system users — same uid range across distros
+	// (typically <100) so they NEVER get picked up by a uid-threshold
+	// fallback. Must be enumerated by name here.
 	"apache",
 	"nginx",
 	"www-data",
 	"http",
+	"httpd",
+	"lighttpd",
+	"caddy",
+	"tomcat",
 	"php",
 	"lsphp",
 	"proxy",
+
+	// cPanel legacy / EA3 / pre-suexec hosts ran Apache children as
+	// `nobody` (uid 99 on RHEL/CL, 65534 on Debian). Modern EA4 +
+	// suexec puts each PHP worker under the account uid, but a
+	// misconfigured or downgraded host can still have web workers
+	// running plain `nobody`, and CGI scripts that bypass suexec
+	// fall through to nobody too. Including it gates on the actual
+	// uid running the code; the secondary detector filters (sensitive
+	// inode for FS-005, deleted-file for EXEC-004, ephemeral path for
+	// the proposed EXEC-006) keep FPs from NFS root-squash and
+	// container fallbacks bounded.
+	"nobody",
 }
 
 // WebUserNamePrefixes is the prefix-match set. CloudLinux's
@@ -155,7 +175,11 @@ var DefaultSensitivePaths = append(append([]string{}, DefaultCoreSensitivePaths.
 // conf may be nil; in that case the allow_exe merge is skipped and
 // only the disk-walked suid binaries seed cfm_setuid_inodes.
 func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded int, err error) {
-	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap())
+	fallback := -1
+	if conf != nil {
+		fallback = conf.WatchedUidFallbackMin
+	}
+	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap(), fallback)
 	if err != nil {
 		return uidsAdded, 0, 0, fmt.Errorf("watched uids: %w", err)
 	}
@@ -170,11 +194,48 @@ func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded in
 	return uidsAdded, inodesAdded, setuidAdded, nil
 }
 
+// resolveWatchedUidFallback decides whether to apply the uid-threshold
+// fallback and which threshold to use, given the operator-supplied
+// Conf.WatchedUidFallbackMin and whether a panel manifest was found.
+//
+// Behaviour by input:
+//   - cfg == -1 (auto): apply with min=1000 when no panel is present;
+//     skip when a panel manifest contributed uids.
+//   - cfg == 0:         skip unconditionally.
+//   - cfg >  0:         apply with min=cfg regardless of panel state.
+//   - cfg <  -1:        treated as auto (ParseConf already rejects
+//                       negatives <-1, this is paranoia for direct
+//                       struct construction).
+func resolveWatchedUidFallback(cfg int, panelPresent bool) (threshold uint32, apply bool) {
+	switch {
+	case cfg <= -1:
+		if panelPresent {
+			return 0, false
+		}
+		return 1000, true
+	case cfg == 0:
+		return 0, false
+	default:
+		return uint32(cfg), true
+	}
+}
+
 // populateWatchedUids walks /etc/passwd, identifies web-class
 // system users, and adds every cPanel / DirectAdmin account user.
 // Writes uid → 1 to the supplied BPF map. Returns the count of
 // uids added.
-func populateWatchedUids(m *ebpf.Map) (int, error) {
+//
+// fallbackMin extends the watched set on hosts without a panel
+// manifest (standalone web servers — Nextcloud, GitLab, plain LAMP).
+// Sentinel values match Conf.WatchedUidFallbackMin:
+//   - -1: auto. Apply min=1000 if no panel manifest is found; disable
+//     otherwise. The panel manifest itself contributes account uids
+//     via the panelDomainOwnersToUIDs path above, so an auto-applied
+//     fallback would be redundant noise on those hosts.
+//   - 0:  disable the fallback entirely.
+//   - >0: explicit threshold; every uid in /etc/passwd at or above
+//     this value joins the watched set.
+func populateWatchedUids(m *ebpf.Map, fallbackMin int) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("nil map")
 	}
@@ -200,11 +261,29 @@ func populateWatchedUids(m *ebpf.Map) (int, error) {
 	// Panel-managed accounts: every uid that owns a hosted vhost is
 	// also a web-class user. Best-effort — missing manifest files
 	// just mean no panel accounts to add.
-	for _, uid := range panelDomainOwnersToUIDs(cpanelUserDomainsTSV, nameToUID) {
+	cpanelUIDs := panelDomainOwnersToUIDs(cpanelUserDomainsTSV, nameToUID)
+	for _, uid := range cpanelUIDs {
 		uids[uid] = struct{}{}
 	}
-	for _, uid := range panelDomainOwnersToUIDs(directAdminDomainsTSV, nameToUID) {
+	directAdminUIDs := panelDomainOwnersToUIDs(directAdminDomainsTSV, nameToUID)
+	for _, uid := range directAdminUIDs {
 		uids[uid] = struct{}{}
+	}
+
+	// Fallback for hosts without a panel manifest: treat every uid
+	// >= threshold as web-class. Auto mode (-1) only kicks in when
+	// no panel manifest was found — on panel hosts the manifest is
+	// the source of truth and adding a uid-range sweep on top would
+	// pull in non-web sysadmin accounts that happen to have uid >=
+	// 1000. Operators can force the fallback on with an explicit
+	// positive value, or off with 0.
+	threshold, apply := resolveWatchedUidFallback(fallbackMin, len(cpanelUIDs)+len(directAdminUIDs) > 0)
+	if apply {
+		for _, uid := range nameToUID {
+			if uid >= threshold {
+				uids[uid] = struct{}{}
+			}
+		}
 	}
 
 	one := uint8(1)

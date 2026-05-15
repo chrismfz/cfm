@@ -28,6 +28,27 @@ type Conf struct {
 	// modes set. Operators opt in by setting `enabled = true`.
 	Enabled bool
 
+	// WatchedUidFallbackMin extends cfm_watched_uids on hosts whose
+	// /etc/passwd does not have one of the static WebUserNames AND
+	// has no cPanel/DirectAdmin manifest to draw account uids from
+	// (e.g. a standalone Nextcloud / GitLab / plain LAMP server).
+	// Every uid in /etc/passwd at or above this value is added to
+	// the watched set alongside the static names.
+	//
+	// Sentinel values:
+	//   -1  (default)  auto: fallback to 1000 when no panel manifest
+	//                  is detected; disabled (0) when one is present.
+	//    0             disable the fallback entirely (rely on static
+	//                  names + panel manifest only).
+	//   >0             explicit threshold (typical: 1000, the
+	//                  /etc/login.defs UID_MIN on modern distros).
+	//
+	// Watching extra uids is bounded by the per-detector secondary
+	// filter (sensitive-inode for FS-005, deleted-file for EXEC-004),
+	// so a permissive fallback adds candidates without flooding event
+	// volume. See WebUserNames godoc.
+	WatchedUidFallbackMin int
+
 	// Modes maps a policy ID to its configured mode. Policies absent
 	// from this map fall back to the policy's DefaultMode (currently
 	// always ModeDisabled).
@@ -139,6 +160,7 @@ func DefaultConf() *Conf {
 	}
 	return &Conf{
 		Enabled:               false,
+		WatchedUidFallbackMin: -1,
 		Modes:                 modes,
 		FS005WebOriginMonitor: true,
 		PersistencePaths:      map[PolicyID][]string{},
@@ -624,6 +646,7 @@ const (
 func ParseConf(r io.Reader) (*Conf, error) {
 	c := &Conf{
 		Enabled:               false,
+		WatchedUidFallbackMin: -1,
 		Modes:                 map[PolicyID]Mode{},
 		FS005WebOriginMonitor: false,
 		PersistencePaths:      map[PolicyID][]string{},
@@ -728,6 +751,12 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: enabled must be true|false|1|0|on|off (got %q)", lineno, val)
 				}
 				c.Enabled = b
+			case "watched_uid_fallback_min":
+				n, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil || n < -1 {
+					return nil, fmt.Errorf("line %d: watched_uid_fallback_min must be an integer >= -1 (got %q; -1=auto, 0=disable, >0=threshold)", lineno, val)
+				}
+				c.WatchedUidFallbackMin = n
 			default:
 				return nil, fmt.Errorf("line %d: unknown top-level key %q", lineno, key)
 			}
@@ -865,6 +894,23 @@ func FormatConf(c *Conf) string {
 	b.WriteString("# Global on/off. cfm-lsm runs kernel preflight and attaches BPF\n")
 	b.WriteString("# programs only when this is true AND preflight passes.\n")
 	fmt.Fprintf(&b, "enabled = %t\n", c.Enabled)
+	b.WriteString("\n")
+	b.WriteString("# Fallback uid threshold for cfm_watched_uids on hosts WITHOUT a\n")
+	b.WriteString("# cPanel / DirectAdmin manifest. Every uid in /etc/passwd at or\n")
+	b.WriteString("# above this value joins the watched-uid set, alongside the static\n")
+	b.WriteString("# WebUserNames (apache / nginx / www-data / nobody / lighttpd /\n")
+	b.WriteString("# caddy / tomcat / php / lsphp / proxy / alt-php-*).\n")
+	b.WriteString("#\n")
+	b.WriteString("#   -1  (default)  auto: 1000 if no panel found, disabled if panel present\n")
+	b.WriteString("#    0             disable the fallback entirely\n")
+	b.WriteString("#   >0             explicit threshold (typical: 1000 = login.defs UID_MIN)\n")
+	b.WriteString("#\n")
+	b.WriteString("# Use 0 on panel hosts where the manifest is authoritative; use 1000\n")
+	b.WriteString("# (or just leave at -1) on standalone web hosts — Nextcloud, GitLab,\n")
+	b.WriteString("# plain LAMP. Watching extra uids is bounded by each detector's\n")
+	b.WriteString("# secondary filter (sensitive-inode, deleted-file, ephemeral-path)\n")
+	b.WriteString("# so a permissive fallback adds candidates without flooding events.\n")
+	fmt.Fprintf(&b, "watched_uid_fallback_min = %d\n", c.WatchedUidFallbackMin)
 	for _, p := range AllPolicies() {
 		mode := c.ModeFor(p.ID)
 		b.WriteString("\n")
