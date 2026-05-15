@@ -2,9 +2,9 @@
 
 ## Status
 
-**Eight policies shipping. Disabled by default in `lsm.conf`; monitor is
+**Ten policies shipping. Disabled by default in `lsm.conf`; monitor is
 the safe first enabled mode. Enforce is opt-in for EXEC-001 / EXEC-003 /
-EXEC-004 / FS-005. EXEC-005, CRED-002,
+EXEC-004 / EXEC-006 / FS-005. EXEC-005, FS-006, CRED-002,
 CRED-003, and BPF-001 are monitor-only by design (weak stdio
 telemetry, credential telemetry, and syscall tracepoints are not safe
 blocking points).**
@@ -15,6 +15,7 @@ Catalog:
 - `CFML-EXEC-003` — Reverse shell pattern
 - `CFML-EXEC-004` — Deleted-file exec by web user
 - `CFML-EXEC-005` — Suspicious interpreter network stdio *(monitor-only)*
+- `CFML-EXEC-006` — Web-user exec from ephemeral filesystem
 - `CFML-FS-005`   — Sensitive-file modification by web user
 - `CFML-FS-006`   — Sensitive read via root-owned fd from unprivileged task *(monitor-only)*
 - `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
@@ -62,11 +63,11 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All eight policies default to `mode = disabled` in the shipped
+All ten policies default to `mode = disabled` in the shipped
 `lsm.conf`; the operator opts in per policy by setting `monitor`
 or `enforce`. Enforce mode (return `-EPERM` on a match, failing the
 calling process's syscall) is **available** for `CFML-EXEC-001`,
-`CFML-EXEC-003`, `CFML-EXEC-004`, and `CFML-FS-005`.
+`CFML-EXEC-003`, `CFML-EXEC-004`, `CFML-EXEC-006`, and `CFML-FS-005`.
 `CFML-EXEC-005`, `CFML-CRED-002`, `CFML-CRED-003`, and
 `CFML-BPF-001` are monitor-only by design (returning -EPERM from
 credential hooks can deadlock systemd helpers and pkexec
@@ -98,19 +99,23 @@ KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
 and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
 ptrace LSM rule).
 
-The scope here is intentionally narrow: eight shipping policies
+The scope here is intentionally narrow: ten shipping policies
 covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004 /
-CFML-EXEC-005), sensitive-file write (CFML-FS-005), post-setuid credential transitions
-(CFML-CRED-002), direct root credential installs (CFML-CRED-003), and
-advanced-threat BPF-use telemetry (CFML-BPF-001). The MVP shipped with
-EXEC-001 + EXEC-003 only; FS-005 + CRED-002 landed as the next-policies
-pass once the MVP's verifier and pinning behaviour proved stable on
-EL10. CRED-003 closes the documented direct `commit_creds()` gap as
-monitor-only telemetry, and BPF-001 adds monitor-only visibility into
-unexpected BPF map creation / program load attempts. EXEC-005 adds
-monitor-only weak stdio telemetry next to the strict reverse-shell
-rule. Anything beyond these eight requires a separate, named proposal — not a TODO inside
-this doc.
+CFML-EXEC-005 / CFML-EXEC-006), sensitive-file write (CFML-FS-005),
+sensitive-read fd-leak telemetry (CFML-FS-006), post-setuid credential
+transitions (CFML-CRED-002), direct root credential installs
+(CFML-CRED-003), and advanced-threat BPF-use telemetry (CFML-BPF-001).
+The MVP shipped with EXEC-001 + EXEC-003 only; FS-005 + CRED-002
+landed as the next-policies pass once the MVP's verifier and pinning
+behaviour proved stable on EL10. CRED-003 closes the documented direct
+`commit_creds()` gap as monitor-only telemetry, and BPF-001 adds
+monitor-only visibility into unexpected BPF map creation / program
+load attempts. EXEC-005 adds monitor-only weak stdio telemetry next to
+the strict reverse-shell rule. EXEC-006 covers the
+write-to-ephemeral-fs-then-exec pattern that the other exec detectors
+miss, complementing Imunify Proactive Defense's PHP-layer write block.
+Anything beyond these ten requires a separate, named proposal — not a
+TODO inside this doc.
 
 The implementation shape is also fixed: an in-binary subsystem of the
 existing CFM daemon at `internal/lsm/`, loading CO-RE BPF LSM programs
@@ -156,7 +161,7 @@ came for.
 
 ## Scope rationale
 
-The original draft listed fifteen policies; this design now ships eight narrowly scoped policies.
+The original draft listed fifteen policies; this design now ships ten narrowly scoped policies.
 Every other ID from that draft is excluded for a specific reason — not
 deferred, excluded — because some other layer in CFM's expected stack
 already covers it, or because the policy actively conflicts with
@@ -168,6 +173,7 @@ something else CFM relies on.
 | `CFML-EXEC-003` (reverse shell pattern) | **In** | Behavioural detection; covers ground Imunify PD blocks at *launch* but cannot catch *post-spawn*; no other CFM layer covers this. Enforce available. |
 | `CFML-EXEC-004` (deleted-file exec by web user) | **In** | Catches the upload-open-unlink-exec staging pattern by web-class uids. Enforce available after local telemetry confirms backup/deploy agents do not match. |
 | `CFML-EXEC-005` (suspicious interpreter network stdio) | **In, monitor-only** | Weak companion telemetry for one or two remote stdio fds on shell/interpreter/socket-helper execs; intentionally not a default block due to inetd/admin/debug FPs. |
+| `CFML-EXEC-006` (web-user exec from ephemeral filesystem) | **In** | Execution-phase companion to Imunify PD's write-phase guard. Catches a watched uid exec'ing a binary on tmpfs (/dev/shm, /run/user/, distro /tmp on tmpfs) or under /tmp/ or /var/tmp/ on EL9-style root-filesystem /tmp. Enforce available after monitor-mode telemetry confirms legitimate /tmp-based workflows (package installers, easyapache builds) are allowlisted. |
 | `CFML-FS-005` (sensitive-file write by web user) | **In** | High-signal post-exploit cash-in catch. CageFS hides the paths from caged users, so any FS-005 fire on a caged host is itself a compromise indicator. Enforce available for current-uid matches on the core auth set; persistence-path additions and origin-only matches stay monitor-only. |
 | `CFML-FS-006` (sensitive read via root-owned fd from unprivileged task) | **In, monitor-only** | Kernel-side fingerprint of the setuid-helper fd-leak class — `pidfd_getfd()` exit-window race against ssh-keysign / chage / unix_chkpwd (Qualys / Linus commit `31e62c2ebbfd`), plus older `CLONE_FILES` + setuid-exec and `/proc/<pid>/fd/<n>` variants. Kernsec `kernel.yama.ptrace_scope=2` kills the modern `pidfd_getfd()` primitive, but operators who `state = skip` that rule for same-uid debuggability lose the kernel-level block — FS-006 is their belt-and-braces layer. Monitor-only by design: passwd / pkexec / sudo / dovecot-auth / postfix workers legitimately read the FS-005 watched-inodes set after dropping privs. |
 | `CFML-CRED-002` (privesc without setuid path) | **In, monitor-only** | Canonical post-exploit fingerprint: non-root → root via a setuid syscall from a binary not on the suid-bit allowlist. Enforce is unsafe (cred-install deadlocks systemd / pkexec mid-transition) so it is permanently monitor-only. |
@@ -180,7 +186,7 @@ something else CFM relies on.
 
 ## Stack-specific notes
 
-**cPanel + CloudLinux + KernelCare.** All eight policies apply. Per-user
+**cPanel + CloudLinux + KernelCare.** All ten policies apply. Per-user
 CageFS already namespaces PHP-FPM workers away from the FS-write vectors
 the excluded `CFML-FS-*` policies aimed at, and lifts FS-005's
 false-positive floor to near zero: a caged web user reaching `/etc/shadow`
@@ -356,6 +362,92 @@ mode = monitor   # start here; promote to enforce only after telemetry
 # Later, on hosts with a clean baseline:
 # mode = enforce
 ```
+
+### `CFML-EXEC-006` — Web-user exec from ephemeral filesystem
+
+| | |
+|---|---|
+| Hook | `bprm_check_security` |
+| Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
+| Enforce | Available after monitor-mode telemetry and allowlist tuning |
+| FP risk | Medium until allowlist tuned (package installers, easyapache mid-build steps, distro ldconfig helpers) |
+| Perf impact | Negligible (exec is not a hot path; a single super-block magic read plus a bounded dentry walk on the non-tmpfs branch) |
+
+**Description.** At `bprm_check_security`, if the calling uid is in
+`cfm_watched_uids` (the daemon-populated web-class uid set used by
+FS-005 / EXEC-004), inspect the file being exec'd. Match when either:
+
+  1. the backing super-block magic is `TMPFS_MAGIC` — covering `/dev/shm`
+     (always tmpfs), `/run/user/<uid>/` (per-user systemd runtime), and
+     distro `/tmp` mounted as tmpfs (most modern Linux); or
+  2. the dentry walks up to `/tmp/...` or `/var/tmp/...` on a non-tmpfs
+     root filesystem (EL9 / CloudLinux 9 default).
+
+The walk is bounded by `#pragma unroll` so the verifier accepts it on
+every supported kernel. The magic-check path is O(1); the dentry walk
+adds at most 16 `d_parent` reads. memfd payloads (which also have
+`TMPFS_MAGIC`) are deliberately skipped here — `CFML-EXEC-001` owns
+that telemetry.
+
+**Rationale.** This is the execution-phase companion to Imunify
+Proactive Defense's write-phase guard. Imunify catches `fopen` /
+`fwrite` from the PHP VM into `/tmp/.<hidden>`; `CFML-EXEC-006` catches
+the resulting `execve` from kernel space. On a representative
+production host (titan.myip.gr), Imunify blocked 275 staged PHP
+payloads against `/tmp/.<obfuscated>` paths in a single hour from one
+web user — every one of those payloads, if the write had succeeded
+past Imunify, would have produced an EXEC-006 event when the worker
+exec'd it. The two layers are complementary: PD covers the launch,
+`cfm-lsm` covers the kernel-side execve.
+
+Distinct from the other exec detectors:
+
+  - `EXEC-001` (memfd exec) — fires only on `memfd_create()`-backed
+    exec; not on real files in `/tmp`.
+  - `EXEC-003` (reverse shell) — fires on remote-socket stdio at
+    exec; not about the file's location.
+  - `EXEC-004` (deleted-file exec) — fires when the backing dentry is
+    unlinked at exec time; misses the "wrote a payload to /tmp and
+    exec'd it without unlinking" case that EXEC-006 catches.
+
+**Enforcement.** `mode = enforce` returns `-EPERM` from
+`bprm_check_security`, failing the calling task's `execve()`.
+Operators should run in monitor for at least a week on a
+representative host and review the resulting FPs before promoting:
+package-manager extractions, cPanel `easyapache` build steps, distro
+`ldconfig` re-runs, container runtime helpers, and similar legitimate
+ephemeral-fs execs need explicit allowlisting first.
+
+**Allowlist surface.** The policy honours per-policy `allow_exe`,
+`allow_comm`, and `allow_path` plus the global `[allow]` section.
+Match shape:
+
+  - `allow_exe = /tmp/easyapache/build-helper` — basename match against
+    the event's emitted filename in the userspace filter.
+  - `allow_comm = my-installer` — `task->comm` match (kernel truncates
+    to 15 chars).
+  - `allow_path = /tmp/known-good-build-area/` — directory-prefix
+    match against any `argv` element in `/proc/<pid>/cmdline` at event
+    time. Useful when the operator can scope a trusted subtree under
+    an otherwise-ephemeral root.
+
+**Example config.**
+
+```ini
+[policy "CFML-EXEC-006"]
+mode = monitor   # start here; review FPs for ~1 week
+# allow_exe = /tmp/easyapache/build-helper
+
+# Later, on hosts with a clean baseline:
+# mode = enforce
+```
+
+**Out of scope for this slice.** Per-uid `/run/user/<uid>/` path
+narrowing (the super-block magic covers it; the dentry-walk branch
+deliberately does not match `/run/user/...` since tmpfs already
+catches it). RPM/dpkg-database signed-binary checking is left out by
+design — operators who want fmpath-style exception lists add them via
+`allow_exe` / `allow_path`.
 
 ### `CFML-FS-005` — Sensitive-file modification by web user
 

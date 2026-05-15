@@ -73,6 +73,7 @@ struct {
 volatile const __u8 cfm_enforce_memfd_exec         = 0;
 volatile const __u8 cfm_enforce_revshell           = 0;
 volatile const __u8 cfm_enforce_deleted_file_exec  = 0;
+volatile const __u8 cfm_enforce_ephemeral_exec     = 0;
 /* CFML-EXEC-005 is monitor-only by default/design; no enforce constant. */
 
 /* EPERM (1) — what bprm_check_security returns when an LSM denies
@@ -752,6 +753,223 @@ int BPF_PROG(cfm_deleted_file_exec, struct linux_binprm *bprm, int ret)
     if (current_uid_watched && cfm_enforce_deleted_file_exec)
         return CFM_LSM_DENY;
     return 0;
+}
+
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-006 — Web-user exec from ephemeral / writeable-by-web-user
+ *                 filesystem (/tmp, /var/tmp, /dev/shm, /run/user/<uid>).
+ *
+ * Hook: bprm_check_security (LSM)
+ *
+ * Mechanism: at exec, if the calling task's uid is in cfm_watched_uids,
+ * inspect the file being exec'd:
+ *
+ *   1. If the backing superblock's magic is TMPFS_MAGIC, treat the
+ *      file as ephemeral. This covers /dev/shm (always tmpfs),
+ *      /run/user/<uid>/ (per-user systemd runtime dir, tmpfs), and
+ *      /tmp on distros that mount it as tmpfs (most modern Linux
+ *      distros do).
+ *
+ *   2. Otherwise, walk the file's dentry up to the filesystem root
+ *      via d_parent and compare the top-level directory name. EL9
+ *      and CloudLinux 9 default to /tmp on the root filesystem
+ *      rather than tmpfs, so the magic check alone is not enough.
+ *      Prefixes matched: /tmp/, /var/tmp/.
+ *
+ * The walk is bounded (#pragma unroll on a small loop) so the verifier
+ * is happy on every supported kernel; the magic-check fast path covers
+ * the common case in O(1) reads.
+ *
+ * Threat model: webshells stage payloads under /tmp/.<obfuscated> and
+ * exec them via the same PHP-FPM worker that wrote the file. Imunify
+ * Proactive Defense catches the WRITE at the PHP VM layer; this
+ * detector catches the EXEC at the kernel layer when the PHP-layer
+ * guard is absent or bypassed.
+ *
+ * Mode: monitor by default. Enforce returns -EPERM from
+ * bprm_check_security, failing the execve. Enforce should be enabled
+ * only after monitor-mode telemetry confirms the host has no
+ * legitimate exec-from-/tmp workflows (package extractions, custom
+ * build pipelines) that would FP.
+ * ------------------------------------------------------------------- */
+
+/* Walk the file's dentry up to (but not past) the filesystem root.
+ * Returns the immediate child of root via *top_out, and the level just
+ * below it (if any) via *second_out. Both may be NULL on a degenerate
+ * chain (e.g. the file IS root, which cannot be exec'd anyway).
+ *
+ * The walk is unrolled to 16 levels — long enough for any realistic
+ * exec path, short enough that the verifier accepts it without
+ * complexity-budget churn. */
+static __always_inline void cfm_walk_to_top(struct dentry *d,
+                                            struct dentry **top_out,
+                                            struct dentry **second_out)
+{
+    struct dentry *prev = NULL;
+    struct dentry *prev_prev = NULL;
+    struct dentry *cur = d;
+
+    *top_out = NULL;
+    *second_out = NULL;
+    if (!cur)
+        return;
+
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+        struct dentry *parent = BPF_CORE_READ(cur, d_parent);
+        if (!parent || parent == cur)
+            break;
+        prev_prev = prev;
+        prev = cur;
+        cur = parent;
+    }
+
+    /* After the loop, `cur` is either the filesystem root (parent ==
+     * cur) or the topmost dentry we could reach within the unroll
+     * budget. `prev` is the immediate child of `cur` — i.e. the
+     * top-level directory in the path. `prev_prev` is the level below
+     * that. */
+    *top_out = prev;
+    *second_out = prev_prev;
+}
+
+/* Compare the dentry's d_name to a literal of up to 7 chars. Reads
+ * the name into a small stack buffer so the verifier can prove the
+ * byte-by-byte compares are in-bounds. */
+static __always_inline bool cfm_dentry_name_eq(struct dentry *d,
+                                               const char *lit, int lit_len)
+{
+    if (!d)
+        return false;
+
+    const unsigned char *name = BPF_CORE_READ(d, d_name.name);
+    if (!name)
+        return false;
+
+    char buf[8] = {};
+    long n = bpf_probe_read_kernel_str(buf, sizeof(buf), name);
+    if (n <= 0)
+        return false;
+    /* bpf_probe_read_kernel_str returns the number of bytes written
+     * including the trailing NUL; need length+1 for a clean match. */
+    if (n != lit_len + 1)
+        return false;
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= lit_len) {
+            return buf[i] == '\0';
+        }
+        if (buf[i] != lit[i])
+            return false;
+    }
+    return true;
+}
+
+/* Path-prefix match. Returns true when the dentry sits under one of:
+ *   /tmp/...        (top_name == "tmp")
+ *   /var/tmp/...    (top_name == "var", second == "tmp")
+ *
+ * /dev/shm and /run/user/<uid>/ are caught by the tmpfs-magic fast
+ * path in the caller; we don't bother matching their non-tmpfs
+ * variants. */
+static __always_inline bool cfm_dentry_under_ephemeral_root(struct dentry *d)
+{
+    struct dentry *top = NULL;
+    struct dentry *second = NULL;
+    cfm_walk_to_top(d, &top, &second);
+    if (!top)
+        return false;
+
+    if (cfm_dentry_name_eq(top, "tmp", 3))
+        return true;
+    if (cfm_dentry_name_eq(top, "var", 3) &&
+        cfm_dentry_name_eq(second, "tmp", 3))
+        return true;
+    return false;
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(cfm_ephemeral_exec, struct linux_binprm *bprm, int ret)
+{
+    if (ret != 0)
+        return ret;
+
+    /* Web-class uid gate — same set FS-005 / EXEC-004 consult. */
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    struct file *file = BPF_CORE_READ(bprm, file);
+    if (!file)
+        return 0;
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    if (!inode)
+        return 0;
+    struct super_block *sb = BPF_CORE_READ(inode, i_sb);
+    if (!sb)
+        return 0;
+
+    __u8 flags = 0;
+    unsigned long magic = BPF_CORE_READ(sb, s_magic);
+    if (magic == TMPFS_MAGIC)
+        flags |= CFM_LSM_F_TMPFS_BACKED;
+
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (flags == 0) {
+        /* Non-tmpfs path: check /tmp/ and /var/tmp/ via dentry walk.
+         * EL9 / CloudLinux 9 ship /tmp on the root filesystem. */
+        if (cfm_dentry_under_ephemeral_root(dentry))
+            flags |= CFM_LSM_F_EPHEMERAL_DIR;
+    }
+
+    if (flags == 0)
+        return 0;
+
+    /* EXEC-001 owns memfd telemetry. Avoid double-emitting for memfd
+     * payloads whose superblock magic also happens to be TMPFS. */
+    if (dentry && dentry_name_is_memfd(dentry))
+        return 0;
+
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return cfm_exec_verdict(cfm_enforce_ephemeral_exec);
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_EPHEMERAL_EXEC;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = 0;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    /* Prefer the bprm filename (the path the kernel actually
+     * exec()'d) over the dentry d_name, which is just the basename.
+     * Operators want the full path for incident triage. */
+    const char *fname = BPF_CORE_READ(bprm, filename);
+    if (fname)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), fname);
+    else if (dentry) {
+        const unsigned char *base = BPF_CORE_READ(dentry, d_name.name);
+        if (base)
+            bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), base);
+        else
+            e->filename[0] = '\0';
+    } else {
+        e->filename[0] = '\0';
+    }
+
+    bpf_ringbuf_submit(e, 0);
+
+    return cfm_exec_verdict(cfm_enforce_ephemeral_exec);
 }
 
 /* Emit one FS-005 event. Caller has already established that uid/origin

@@ -13,6 +13,7 @@ func TestNewPoliciesRegistered(t *testing.T) {
 	want := map[PolicyID]string{
 		PolicyDeletedFileExec:     "CFML-EXEC-004",
 		PolicyInterpreterNetStdio: "CFML-EXEC-005",
+		PolicyEphemeralExec:       "CFML-EXEC-006",
 		PolicySensitiveWrite:      "CFML-FS-005",
 		PolicyFdCredMismatch:      "CFML-FS-006",
 		PolicyCredEscal:           "CFML-CRED-002",

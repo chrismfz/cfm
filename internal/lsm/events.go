@@ -19,6 +19,7 @@ const (
 	bpfPolicyDirectCred          uint32 = 9
 	bpfPolicyUnexpectedBPF       uint32 = 10
 	bpfPolicyFdCredMismatch      uint32 = 11
+	bpfPolicyEphemeralExec       uint32 = 12
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -92,6 +93,17 @@ const (
 	EventFlagInterpreterStdioWeak uint8 = 1 << 5
 	EventFlagStdioOneRemote       uint8 = 1 << 6
 	EventFlagStdioTwoRemote       uint8 = 1 << 7
+
+	// EventFlagTmpfsBacked and EventFlagEphemeralDir distinguish how
+	// CFML-EXEC-006 matched the execve. The two bits share numeric
+	// values with the stdio-remote flags above; PolicyID disambiguates
+	// per event. TmpfsBacked means the superblock magic was TMPFS_MAGIC
+	// (/dev/shm, /run/user/, distro /tmp on tmpfs); EphemeralDir means
+	// the dentry walk matched /tmp/ or /var/tmp/ on a non-tmpfs (EL9
+	// default). Both bits may coexist if a future kernel exposes both
+	// signals simultaneously.
+	EventFlagTmpfsBacked  uint8 = 1 << 6
+	EventFlagEphemeralDir uint8 = 1 << 7
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -221,6 +233,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyUnexpectedBPF
 	case bpfPolicyFdCredMismatch:
 		e.PolicyID = PolicyFdCredMismatch
+	case bpfPolicyEphemeralExec:
+		e.PolicyID = PolicyEphemeralExec
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}
