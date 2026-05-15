@@ -5,8 +5,10 @@ import (
 	"cfm/internal/clam"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -427,34 +429,39 @@ type infectedEntry struct {
 	size  int64
 }
 
+// listInfected returns the newest `max` files in dir, ordered by name
+// descending (filenames begin with `upload_<unix-millis>_...`, so a
+// lexicographic descending sort gives newest-first without an O(N) stat
+// pass on the whole directory). Stat is done only on the top max
+// entries, so the cost is bounded even when the dir holds many
+// thousands of retained samples.
 func listInfected(dir string, max int) []infectedEntry {
-	if dir == "" {
+	if dir == "" || max <= 0 {
 		return nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-	out := make([]infectedEntry, 0, len(entries))
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		fi, err := e.Info()
+		names = append(names, e.Name())
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	if len(names) > max {
+		names = names[:max]
+	}
+	out := make([]infectedEntry, 0, len(names))
+	for _, name := range names {
+		full := filepath.Join(dir, name)
+		fi, err := os.Stat(full)
 		if err != nil {
 			continue
 		}
-		out = append(out, infectedEntry{
-			path:  filepath.Join(dir, e.Name()),
-			mtime: fi.ModTime(),
-			size:  fi.Size(),
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].mtime.After(out[j].mtime)
-	})
-	if len(out) > max {
-		out = out[:max]
+		out = append(out, infectedEntry{path: full, mtime: fi.ModTime(), size: fi.Size()})
 	}
 	return out
 }
@@ -463,8 +470,14 @@ func listInfected(dir string, max int) []infectedEntry {
 // lines containing "result=INFECTED". Reads the whole file because clam
 // logs are bounded; we don't need a fancy reverse reader for the sizes
 // involved (logging rotates them).
+//
+// A missing log file is NOT an error: a fresh-install box that never
+// had a clam event should look like "no events yet", not a read error.
 func tailGrepInfected(path string, max int) ([]string, error) {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied admin path
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

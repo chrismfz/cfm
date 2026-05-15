@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 // UpsertConfKey rewrites cfm.conf so that `key = value` is set, preserving
@@ -56,7 +57,29 @@ func UpsertConfKey(path, key, value string) error {
 	if updated == string(data) {
 		return nil
 	}
-	return os.WriteFile(path, []byte(updated), mode) // #nosec G306 -- preserve existing perms
+	// tmp + rename: a crash, ENOSPC, or signal between truncate and the
+	// final write must not leave cfm.conf half-written — the daemon's
+	// fsnotify watcher would then re-parse garbage and could zero out
+	// unrelated keys. The sibling Lua writers (WriteWebdetectorBridgeConfig,
+	// WriteClamavLuaConfig) already follow this pattern.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(updated), mode); err != nil { // #nosec G306 -- preserve existing perms
+		return fmt.Errorf("UpsertConfKey: write tmp %s: %w", tmp, err)
+	}
+	// Preserve owner across the rename when caller is root and the target
+	// is owned by a different uid:gid (e.g. root:cfm). Best-effort — if we
+	// cannot stat we fall through to the rename, accepting that the new
+	// file inherits the writer's effective uid/gid.
+	if info, statErr := os.Stat(path); statErr == nil {
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			_ = os.Chown(tmp, int(st.Uid), int(st.Gid))
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("UpsertConfKey: rename %s: %w", tmp, err)
+	}
+	return nil
 }
 
 // ----------------------------------------------------------------------------
