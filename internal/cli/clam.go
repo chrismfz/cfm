@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -369,21 +370,31 @@ func runClamStatus(client *clam.Client, cfg *cfgpkg.Config, cfgDir string) int {
 	return 0
 }
 
+// clamavHookSentinelRE matches the daemon-emitted header line
+//
+//	-- CFM_HOOK_ENABLED=true|false
+//
+// in /var/lib/cfm/lua/cfm_clamav_config.lua. The sentinel is the writer's
+// contract with the CLI — independent of the Lua-table body that follows.
+// Anchored at start-of-line, tolerant of surrounding whitespace; tab/space
+// between the `--` and the key is allowed but no comment-text in between.
+var clamavHookSentinelRE = regexp.MustCompile(`(?m)^--\s*CFM_HOOK_ENABLED=(true|false)\s*$`)
+
+// readDeployedClamavHookEnabled parses the sentinel from the deployed lua
+// config and returns (enabled, ok). ok=false means the file is missing,
+// unreadable, or did not contain the sentinel — in which case the CLI
+// surfaces "unknown" rather than guessing.
 func readDeployedClamavHookEnabled() (bool, bool) {
 	const luaPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
 	b, err := os.ReadFile(luaPath) // #nosec G304 -- fixed daemon-managed path
 	if err != nil {
 		return false, false
 	}
-	s := string(b)
-	switch {
-	case strings.Contains(s, "enabled = true"):
-		return true, true
-	case strings.Contains(s, "enabled = false"):
-		return false, true
-	default:
+	m := clamavHookSentinelRE.FindSubmatch(b)
+	if m == nil {
 		return false, false
 	}
+	return string(m[1]) == "true", true
 }
 
 func dirSummary(dir string) (int, string, string, error) {
