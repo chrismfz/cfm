@@ -92,7 +92,7 @@ func emitDetectEvent(ev Event, reason string, extra map[string]string) {
 	if summary != "" {
 		// Window-roll summary. Emitted at most once per minute per
 		// policy regardless of cap, so it cannot itself flood.
-		logging.Logf("[lsm] %s", summary)
+		logging.LogfLSM("[lsm] %s", summary)
 		_ = notify.Emit(notify.Event{
 			Kind:     "lsm_detect_summary",
 			Section:  "lsm",
@@ -104,7 +104,7 @@ func emitDetectEvent(ev Event, reason string, extra map[string]string) {
 	if !allow {
 		return
 	}
-	logging.Logf("[lsm] %s", reason)
+	logging.LogfLSM("[lsm] %s", reason)
 	_ = notify.Emit(notify.Event{
 		Kind:     "lsm_detect",
 		Section:  "lsm",

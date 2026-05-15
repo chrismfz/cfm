@@ -333,6 +333,12 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/bin/microdnf",
 	"/usr/sbin/apk", // Alpine
 
+	// System log maintenance — logrotate transitions to per-log uids
+	// (e.g. dropping to `nginx` to rotate /var/log/nginx/*) and back
+	// to root to install the rotated file. Stable across every distro
+	// that ships logrotate.
+	"/usr/sbin/logrotate",
+
 	// Mailcow's stock spawn(8) helper scripts. The dockerized
 	// postfix-mailcow image installs these under /usr/local/bin/ and
 	// dispatches them via `master.cf` spawn entries, so every fork
