@@ -94,6 +94,17 @@ type Conf struct {
 	// AllowCommFor.
 	GlobalAllowComm []string
 
+	// GlobalAllowScriptPrefix is the operator-supplied global
+	// script-path-prefix allowlist. Distinct dimension from
+	// GlobalAllowExe / GlobalAllowComm because Python / Perl daemons
+	// share a generic exe (python3.11 / perl) and a generic comm
+	// (python3), so neither of the other two can identify them.
+	// At event time the filter reads /proc/<pid>/cmdline and matches
+	// any arg against these prefixes. Useful for things like
+	// `/usr/share/lve-stats/` (CloudLinux LVE stats daemon) and
+	// `/opt/cloudlinux/` (CloudLinux internal Python tooling).
+	GlobalAllowScriptPrefix []string
+
 	// Kmsg controls dmesg emission. Populated from the `[kmsg]`
 	// section of lsm.conf; defaults from DefaultKmsgConf() if the
 	// section is absent.
@@ -127,10 +138,11 @@ func DefaultConf() *Conf {
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
-		GlobalAllowExe:        append([]string{}, DefaultGlobalAllowExe...),
-		GlobalAllowComm:       append([]string{}, DefaultGlobalAllowComm...),
-		Kmsg:                  DefaultKmsgConf(),
-		EventSink:             DefaultEventSinkConf(),
+		GlobalAllowExe:          append([]string{}, DefaultGlobalAllowExe...),
+		GlobalAllowComm:         append([]string{}, DefaultGlobalAllowComm...),
+		GlobalAllowScriptPrefix: append([]string{}, DefaultGlobalAllowScriptPrefix...),
+		Kmsg:                    DefaultKmsgConf(),
+		EventSink:               DefaultEventSinkConf(),
 	}
 }
 
@@ -160,10 +172,12 @@ func DefaultConf() *Conf {
 //     they routinely trip CRED-002 during system updates.
 //   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
 //   - CloudLinux CageFS server + control tools (legitimate uid
-//     transitions into per-account cages).
+//     transitions into per-account cages), plus the per-cage PHP
+//     session cleanup cron.
 //   - cPanel server daemon and its variant entry points
 //     (cpsrvd / webmaild / whostmgrd / cpdavd share the cpsrvd
-//     binary), plus the quota-status helper.
+//     binary), the quota-status helper, and the update_quota_cache
+//     binary that the cron-driven cache updater invokes.
 //   - SpamAssassin's DCC client (dccproc).
 //
 // New entries should cover a widely-deployed host class. Missing paths
@@ -307,12 +321,20 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/sbin/cagefs.server",
 	"/usr/sbin/cagefsctl",
 
+	// CloudLinux PHP-session cleanup cron — runs once per cage, also
+	// invokes python3.11 as the exe. comm allowlist below covers the
+	// kernel-side match (script name).
+	"/usr/sbin/clean_user_php_sessions",
+	"/usr/share/cagefs/clean_user_php_sessions",
+
 	// cPanel server daemon and its variant entry points. cPanel ships
 	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
 	// under different names; the exe the kernel reports is cpsrvd, so
 	// one basename-match entry covers the family.
 	"/usr/local/cpanel/cpsrvd",
 	"/usr/local/cpanel/bin/quota-status",
+	"/usr/local/cpanel/bin/update_quota_cache",
+	"/usr/local/cpanel/scripts/update_quota_cache",
 
 	// SpamAssassin's DCC client — DCC (Distributed Checksum
 	// Clearinghouse) ships a small C helper that legitimately calls
@@ -378,10 +400,54 @@ var DefaultGlobalAllowComm = []string{
 	// on python3.11 would be far too broad — we pin on comm instead.
 	"cagefsctl",
 
-	// SpamAssassin's per-message child does setuid as part of normal
-	// scanning; comm is fixed to "spamd child". The exe is "perl",
-	// which we deliberately do NOT allowlist.
+	// CloudLinux per-cage PHP session cleanup. Real name is
+	// clean_user_php_sessions; TASK_COMM_LEN=16 truncates to 15 chars.
+	// Runs python3.11; comm match is the only safe handle.
+	"clean_user_php_",
+
+	// cPanel quota cache updater. Real name update_quota_cache,
+	// truncated by TASK_COMM_LEN.
+	"update_quota_ca",
+
+	// SpamAssassin daemons — master `spamd` and per-message children
+	// `spamd child`. Both legitimately setuid as part of scanning.
+	// The exe is "perl"; we deliberately do NOT allowlist perl, so
+	// comm match is the handle.
+	"spamd",
 	"spamd child",
+}
+
+// DefaultGlobalAllowScriptPrefix lists script-path prefixes that
+// identify legitimate root daemons by their argv[1] rather than by
+// exe / comm. The userspace filter reads /proc/<pid>/cmdline at event
+// time and matches any arg against these prefixes.
+//
+// Needed because Python and Perl daemons share a generic exe
+// (python3.11 / perl) and often a generic comm (python3 / perl), so
+// allow_exe and allow_comm cannot distinguish CloudLinux LVE Stats
+// from a malicious python3.11 invocation. The script path is what's
+// actually unique.
+//
+// Entries should be directory prefixes, trailing slash included, so
+// `/usr/share/lve-stats/` matches `/usr/share/lve-stats/lvestats-server.py`
+// but not `/tmp/lve-stats-fake.py`.
+var DefaultGlobalAllowScriptPrefix = []string{
+	// CloudLinux LVE Stats daemon (lvestats-server.py polls per-user
+	// resource counters every ~30s and trips CFML-CRED-002 on each uid
+	// transition).
+	"/usr/share/lve-stats/",
+
+	// CloudLinux internal Python tooling rooted at /opt/cloudlinux/
+	// (lve-stats wrappers, cl-smart-advice, cloudlinux-config, etc.).
+	"/opt/cloudlinux/",
+
+	// CloudLinux CageFS Python helpers (cagefsctl is comm-allowlisted
+	// above; this catches any other CageFS-rooted Python tooling).
+	"/usr/share/cagefs/",
+
+	// Imunify360 agent + scanner Python components.
+	"/opt/imunify360/",
+	"/usr/share/imunify360/",
 }
 
 // PersistencePathsFor returns configured persistence_path additions for id, or nil
@@ -437,6 +503,24 @@ func (c *Conf) AllowCommFor(id PolicyID) []string {
 		out = append(out, c.AllowComm[id]...)
 	}
 	return out
+}
+
+// AllowScriptPrefixFor returns the configured script-path-prefix
+// allowlist for id. Only global entries today — per-policy script
+// prefixes can be added later if a single policy needs to narrow
+// further. Returns nil when id does not consume the script-prefix
+// allowlist or when nothing has been configured.
+func (c *Conf) AllowScriptPrefixFor(id PolicyID) []string {
+	if c == nil {
+		return nil
+	}
+	if !allowScriptPrefixPolicy(id) {
+		return nil
+	}
+	if len(c.GlobalAllowScriptPrefix) == 0 {
+		return nil
+	}
+	return append([]string{}, c.GlobalAllowScriptPrefix...)
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -703,8 +787,14 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: %w", lineno, err)
 				}
 				c.GlobalAllowComm = append(c.GlobalAllowComm, comm)
+			case "allow_script_prefix":
+				p, err := parseAllowScriptPrefix(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineno, err)
+				}
+				c.GlobalAllowScriptPrefix = append(c.GlobalAllowScriptPrefix, p)
 			default:
-				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm)", lineno, key)
+				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm | allow_script_prefix)", lineno, key)
 			}
 		case sectionEvents:
 			lk := strings.ToLower(key)
@@ -811,10 +901,18 @@ func FormatConf(c *Conf) string {
 	}
 	b.WriteString("\n")
 	b.WriteString("# Global allowlist — applied to every cfm-lsm detector that consults\n")
-	b.WriteString("# an exe or comm allowlist (today: CFML-CRED-002, CFML-EXEC-003,\n")
-	b.WriteString("# CFML-EXEC-005, CFML-BPF-001). allow_exe is matched by basename in the\n")
-	b.WriteString("# userspace post-filter and additionally fed into the BPF-side\n")
-	b.WriteString("# cfm_setuid_inodes map for CFML-CRED-002 when the path stat()s OK.\n")
+	b.WriteString("# an exe / comm / script-prefix allowlist (today: CFML-CRED-002,\n")
+	b.WriteString("# CFML-EXEC-003, CFML-EXEC-005, CFML-BPF-001).\n")
+	b.WriteString("#   allow_exe            — matched by basename in the userspace post-filter;\n")
+	b.WriteString("#                          also stat()'d into the BPF-side cfm_setuid_inodes\n")
+	b.WriteString("#                          map for CFML-CRED-002 when the path exists.\n")
+	b.WriteString("#   allow_comm           — exact-match against task->comm (kernel truncates\n")
+	b.WriteString("#                          to TASK_COMM_LEN-1 = 15 chars).\n")
+	b.WriteString("#   allow_script_prefix  — directory prefix matched against any arg of\n")
+	b.WriteString("#                          /proc/<pid>/cmdline at event time. Needed for\n")
+	b.WriteString("#                          Python / Perl daemons where exe is the generic\n")
+	b.WriteString("#                          interpreter and comm is generic (e.g. `python3`)\n")
+	b.WriteString("#                          — the script path is what actually identifies them.\n")
 	b.WriteString("# Missing paths are silently skipped, so cross-distro lists are safe.\n")
 	b.WriteString("[allow]\n")
 	for _, p := range c.GlobalAllowExe {
@@ -822,6 +920,9 @@ func FormatConf(c *Conf) string {
 	}
 	for _, cc := range c.GlobalAllowComm {
 		fmt.Fprintf(&b, "allow_comm = %s\n", cc)
+	}
+	for _, p := range c.GlobalAllowScriptPrefix {
+		fmt.Fprintf(&b, "allow_script_prefix = %s\n", p)
 	}
 	b.WriteString("\n")
 	b.WriteString("# dmesg / /dev/kmsg emission. Lines tagged `CFM-LSM:` show up\n")
@@ -886,6 +987,28 @@ func parseAllowExe(s string) (string, error) {
 	return parseAbsolutePath(s, "allow_exe")
 }
 
+// parseAllowScriptPrefix validates one `allow_script_prefix = …` value.
+// The prefix must be absolute (so it cannot match arbitrary user-
+// controlled relative paths) and should end with `/` to make
+// "directory prefix" semantics unambiguous — `/usr/share/lve-stats`
+// without a trailing slash would also match `/usr/share/lve-stats-fake`.
+func parseAllowScriptPrefix(s string) (string, error) {
+	v := strings.TrimSpace(s)
+	if v == "" {
+		return "", fmt.Errorf("allow_script_prefix must be a non-empty path prefix")
+	}
+	if strings.ContainsRune(v, 0) {
+		return "", fmt.Errorf("allow_script_prefix must not contain NUL bytes")
+	}
+	if !strings.HasPrefix(v, "/") {
+		return "", fmt.Errorf("allow_script_prefix %q must be absolute (start with `/`)", v)
+	}
+	if !strings.HasSuffix(v, "/") {
+		return "", fmt.Errorf("allow_script_prefix %q must end with `/` to be a directory prefix", v)
+	}
+	return v, nil
+}
+
 // parseAllowComm validates one `allow_comm = …` value. The kernel
 // stores comm in a 16-byte TASK_COMM_LEN field; cap operator-supplied
 // entries at 15 visible characters (1 reserved for NUL) so a typo
@@ -924,6 +1047,20 @@ func allowExePolicy(id PolicyID) bool {
 func allowCommPolicy(id PolicyID) bool {
 	switch id {
 	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
+		return true
+	}
+	return false
+}
+
+// allowScriptPrefixPolicy reports whether allow_script_prefix is
+// honoured for the given policy. CRED-002 is the primary consumer
+// (Python / Perl daemons that exec the interpreter and pass the script
+// as argv[1]); the reverse-shell + interpreter-net-stdio policies
+// expose it for the same reason — both fire on `interpreter argv[1]`
+// shapes where argv[1] is what actually identifies the legit caller.
+func allowScriptPrefixPolicy(id PolicyID) bool {
+	switch id {
+	case PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio:
 		return true
 	}
 	return false
