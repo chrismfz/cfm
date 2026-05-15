@@ -84,6 +84,7 @@ type cfmlsmProgramSpecs struct {
 	CfmFs005Setattr       *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
 	CfmFs005Setxattr      *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
 	CfmFs005Unlink        *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
+	CfmFs006              *ebpf.ProgramSpec `ebpf:"cfm_fs006"`
 	CfmInterpNetStdio     *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec          *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
 	CfmRevshell           *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
@@ -179,6 +180,7 @@ type cfmlsmPrograms struct {
 	CfmFs005Setattr       *ebpf.Program `ebpf:"cfm_fs005_setattr"`
 	CfmFs005Setxattr      *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
 	CfmFs005Unlink        *ebpf.Program `ebpf:"cfm_fs005_unlink"`
+	CfmFs006              *ebpf.Program `ebpf:"cfm_fs006"`
 	CfmInterpNetStdio     *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec          *ebpf.Program `ebpf:"cfm_memfd_exec"`
 	CfmRevshell           *ebpf.Program `ebpf:"cfm_revshell"`
@@ -199,6 +201,7 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs005Setattr,
 		p.CfmFs005Setxattr,
 		p.CfmFs005Unlink,
+		p.CfmFs006,
 		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
 		p.CfmRevshell,

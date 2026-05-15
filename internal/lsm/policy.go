@@ -59,6 +59,41 @@ const (
 	// threat telemetry; broad unprivileged BPF reduction belongs in
 	// kernsec sysctls.
 	PolicyUnexpectedBPF PolicyID = "CFML-BPF-001"
+
+	// PolicyFdCredMismatch — CFML-FS-006: detect a non-root task
+	// reading a sensitive file through a struct file whose f_cred
+	// is root, i.e. the file was opened in a privileged context and
+	// the descriptor is now being used by an unprivileged one. This
+	// is the kernel-side fingerprint of the setuid-helper fd-leak
+	// class — `pidfd_getfd()` exit-window race against ssh-keysign /
+	// chage / unix_chkpwd, plus the older `CLONE_FILES` + setuid-exec
+	// and `/proc/<pid>/fd/<n>` race variants. Kernsec already ships
+	// `kernel.yama.ptrace_scope=2` (KSEC-SCT-kspp.kernel-006) which
+	// kills the modern `pidfd_getfd()` primitive, but operators who
+	// explicitly need same-uid debuggability (`gdb --attach`, `strace
+	// -p`, `py-spy` without sudo) `state = skip` that rule and lose
+	// the kernel-level block — CFML-FS-006 is their belt-and-braces
+	// layer, and also catches future fd-leak variants that don't go
+	// through ptrace at all.
+	//
+	// Hook: lsm/file_permission (every read/write through any fd).
+	// Mechanism: compare `current_cred()->euid` against
+	// `file->f_cred->euid`. When current is non-root, f_cred is root,
+	// AND the dentry's (fs_id, ino) is in cfm_watched_inodes (the
+	// same sensitive-path table FS-005 already maintains —
+	// /etc/shadow, /etc/gshadow, /etc/sudoers*, /root/.ssh/*,
+	// /etc/ssh/ssh_host_*_key, ...), emit a telemetry event.
+	//
+	// Mode: monitor-only by default and for the foreseeable future.
+	// Several legitimate setuid helpers (passwd, pkexec, sudo,
+	// unix_chkpwd, dovecot's auth worker pool, postfix's smtpd_pickup)
+	// open these files as root in one task and read(2) from a worker
+	// that has dropped privileges; those workers are legitimate
+	// cross-cred consumers of the fd. Enforce mode would deny their
+	// read and break authentication. Telemetry first; the allow-list
+	// for enforce, if it ever lands, has to be scrubbed against
+	// production data.
+	PolicyFdCredMismatch PolicyID = "CFML-FS-006"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -161,6 +196,13 @@ func AllPolicies() []Policy {
 			Hook:        "tracepoint/syscalls/sys_enter_bpf",
 			DefaultMode: ModeDisabled,
 			Description: "Monitor-only telemetry for unexpected bpf() map creation and program load attempts outside CFM and trusted distro agents; use kernsec sysctls for broad unprivileged BPF reduction.",
+		},
+		{
+			ID:          PolicyFdCredMismatch,
+			Title:       "Sensitive read via root-owned fd from unprivileged task",
+			Hook:        "file_permission",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a non-root task reading a sensitive file (the FS-005 watched-inodes set: /etc/shadow, /etc/sudoers*, /root/.ssh/*, ...) through a struct file whose f_cred is root. Kernel-side fingerprint of the setuid-helper fd-leak class (pidfd_getfd exit-window race against ssh-keysign / chage / unix_chkpwd, plus CLONE_FILES + setuid-exec and /proc/<pid>/fd races). Belt-and-braces layer for hosts that `state = skip` kernel.yama.ptrace_scope=2 for same-uid debuggability. Monitor-only by design — passwd / pkexec / sudo / dovecot-auth / postfix workers legitimately read these files post-uid-drop.",
 		},
 	}
 }

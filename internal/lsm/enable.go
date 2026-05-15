@@ -82,10 +82,12 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		}
 		// Some policies are monitor-only by design: EXEC-005 is weak
 		// companion telemetry; CRED-002/CRED-003 are not safe blocking
-		// points; BPF-001 is tracepoint telemetry. Warn and downgrade
-		// if an operator set enforce — better than silently respecting
-		// it and then not blocking, which would mislead them.
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF) && m == ModeEnforce {
+		// points; BPF-001 is tracepoint telemetry; FS-006 would
+		// deadlock PAM auth chains that legitimately read sensitive
+		// files post-uid-drop. Warn and downgrade if an operator set
+		// enforce — better than silently respecting it and then not
+		// blocking, which would mislead them.
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch) && m == ModeEnforce {
 			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
 			fmt.Fprintln(w, "      See docs/cfm-lsm.md → monitor-only telemetry policies.")
 			fmt.Fprintln(w)
