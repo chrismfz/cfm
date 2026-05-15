@@ -493,9 +493,16 @@ func runDaemon(args []string) {
 		{"/var/lib/cfm", 0o701},
 		{"/var/lib/cfm/lua", 0o750},
 		{"/var/lib/cfm/sslcollector", 0o770},
-		{"/var/lib/cfm/scanner", 0o700},
-		{"/var/lib/cfm/scanner/pending", 0o700},
-		{"/var/lib/cfm/scanner/infected", 0o700},
+		// scanner dirs: root:cfm 0770. The Angie worker (cfm user)
+		// writes upload spool files here via cfm_clamav.lua when the
+		// request body is not already on disk as nginx's client body
+		// temp. Without group-write the worker logs "[cfm_clamav]
+		// cannot write temp: Permission denied" on every multipart
+		// POST; the chown happens below alongside the other cfm-group
+		// dirs.
+		{"/var/lib/cfm/scanner", 0o770},
+		{"/var/lib/cfm/scanner/pending", 0o770},
+		{"/var/lib/cfm/scanner/infected", 0o770},
 		{"/var/log/cfm", 0o700},
 		// /var/run is tmpfs on systemd systems — recreate on every
 		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
@@ -511,6 +518,9 @@ func runDaemon(args []string) {
 	if cfmGID > 0 {
 		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
 		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner/pending", 0, cfmGID)
+		_ = os.Chown("/var/lib/cfm/scanner/infected", 0, cfmGID)
 		_ = os.Chown("/var/run/cfm", 0, cfmGID)
 		// Chown the snapshot file if it already exists (eg written as
 		// root:root before the cfm group was in place). Without this,

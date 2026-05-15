@@ -444,11 +444,22 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 	b.clamMgr = m
 	b.clamPending = pendingDir
 	b.clamInfected = infectedDir
-	if pendingDir != "" {
-		_ = os.MkdirAll(pendingDir, 0o700)
-	}
-	if infectedDir != "" {
-		_ = os.MkdirAll(infectedDir, 0o700)
+	// 0770 root:cfm so the Angie worker (cfm user) can write upload
+	// spool files here directly from cfm_clamav.lua's write_temp when
+	// the body is not already on disk as nginx's client body temp.
+	// runDaemon() in cmd/cfm/main.go pre-creates these with the same
+	// mode and chowns to the cfm group; we redo it here in case the
+	// admin overrode PendingDir/InfectedDir to a non-default path.
+	gid := sslcollector.CfmGroupID()
+	for _, d := range []string{pendingDir, infectedDir} {
+		if d == "" {
+			continue
+		}
+		_ = os.MkdirAll(d, 0o770)
+		_ = os.Chmod(d, 0o770)
+		if gid > 0 {
+			_ = os.Chown(d, 0, gid)
+		}
 	}
 }
 
