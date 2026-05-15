@@ -23,6 +23,7 @@ var (
 	once              sync.Once
 	cfg               *config.LoggingConfig
 	clamLogFile       *os.File
+	lsmLogFile        *os.File // cfm-lsm DETECT + lifecycle lines
 )
 
 var debugEnabled = os.Getenv("CFM_DEBUG") == "1"
@@ -79,6 +80,23 @@ func Init(c *config.LoggingConfig) {
 			clamLogFile = f
 		} else {
 			fmt.Printf("failed to open clam log file %s: %v\n", clamPath, err)
+		}
+
+		// LSM log (/var/log/cfm/lsm.log). Honours LSM_LOG_FILE if set
+		// in cfm.conf; otherwise defaults to /var/log/cfm/lsm.log so
+		// operators get cfm-lsm DETECT + lifecycle lines in a dedicated
+		// file rather than mixed into the main cfm.log. Same opening
+		// rules as the other per-subsystem sinks: O_APPEND|O_CREATE,
+		// failure falls back transparently to logFile (cfm.log) so a
+		// permissions hiccup doesn't drop events.
+		lsmPath := cfg.LSMFile
+		if lsmPath == "" {
+			lsmPath = "/var/log/cfm/lsm.log"
+		}
+		if f, err := os.OpenFile(lsmPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+			lsmLogFile = f
+		} else {
+			fmt.Printf("failed to open lsm log file %s: %v\n", lsmPath, err)
 		}
 
 		// SMTP log (cfm.smtp.log). If SMTPFile empty, derive from main log path.
@@ -357,6 +375,28 @@ func LogfCLAM(format string, args ...interface{}) {
 	}
 	if clamLogFile != nil {
 		_, _ = clamLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
+}
+
+// LogfLSM writes cfm-lsm DETECT + lifecycle events to the dedicated
+// lsm log (default /var/log/cfm/lsm.log; configurable via LSM_LOG_FILE
+// in cfm.conf). Falls back to the main cfm.log when the dedicated file
+// could not be opened — so a permissions hiccup never drops events.
+//
+// kmsg emission is independent (see internal/lsm/kmsg.go) so an
+// operator who routes /dev/kmsg via rsyslog still gets the same lines.
+func LogfLSM(format string, args ...interface{}) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
+
+	if cfg == nil || cfg.LSMStdout {
+		fmt.Print(line)
+	}
+	if lsmLogFile != nil {
+		_, _ = lsmLogFile.WriteString(line)
 	} else if logFile != nil {
 		_, _ = logFile.WriteString(line)
 	}

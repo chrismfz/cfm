@@ -114,10 +114,10 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	attach := loader.Attach()
 	summary := policyModeSummary(conf, attach.Attached)
 	if fresh {
-		logging.Logf("[lsm] auto-enabled at %s (policies: %v)", DefaultPinDir, attach.Attached)
+		logging.LogfLSM("[lsm] auto-enabled at %s (policies: %v)", DefaultPinDir, attach.Attached)
 		KmsgStatef("ALIVE", "daemon auto-enabled %s pinned=%s", summary, DefaultPinDir)
 	} else {
-		logging.Logf("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
+		logging.LogfLSM("[lsm] adopted pinned state at %s (policies: %v)", DefaultPinDir, attach.Attached)
 		KmsgStatef("ADOPT", "daemon attached to pinned state at %s, draining ringbuf (policies: %s)",
 			DefaultPinDir, summary)
 	}
@@ -130,11 +130,11 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// keeps the detector accurate.
 	uids, inodes, setuid, perr := PopulateMaps(loader, conf)
 	if perr != nil {
-		logging.Logf("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
+		logging.LogfLSM("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
 			perr, uids, inodes, setuid)
 		KmsgStatef("ISSUE", "partial map population: %v", perr)
 	} else {
-		logging.Logf("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
+		logging.LogfLSM("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
 			uids, inodes, setuid)
 	}
 }
@@ -155,7 +155,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	if pinned.Exists && len(pinned.Links) > 0 {
 		l, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
 		if err != nil {
-			logging.Logf("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
+			logging.LogfLSM("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
 			KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
 			return nil, false, err
 		}
@@ -169,7 +169,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	// normally. `cfm lsm status` will report the failing checks.
 	pf := RunPreflight()
 	if !pf.OK {
-		logging.Logf("[lsm] auto-enable skipped: kernel preflight FAIL (run `cfm lsm status` for details)")
+		logging.LogfLSM("[lsm] auto-enable skipped: kernel preflight FAIL (run `cfm lsm status` for details)")
 		return nil, false, errors.New("preflight failed")
 	}
 
@@ -190,11 +190,11 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 			continue
 		}
 		if pa, ok := availability[p.ID]; ok && !pa.Available {
-			logging.Logf("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
+			logging.LogfLSM("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
 			continue
 		}
 		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
-			logging.Logf("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
+			logging.LogfLSM("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
 		policies = append(policies, p.ID)
@@ -202,7 +202,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	}
 
 	if len(policies) == 0 {
-		logging.Logf("[lsm] auto-enable skipped: no configured policies are available on this kernel")
+		logging.LogfLSM("[lsm] auto-enable skipped: no configured policies are available on this kernel")
 		return nil, false, errors.New("no configured policies available")
 	}
 
@@ -214,7 +214,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 		PinDir:                DefaultPinDir,
 	})
 	if lerr != nil {
-		logging.Logf("[lsm] auto-enable failed: %v", lerr)
+		logging.LogfLSM("[lsm] auto-enable failed: %v", lerr)
 		KmsgStatef("ISSUE", "auto-enable failed: %v", lerr)
 		// Try to clean up any partial pin state so the next reload
 		// tick starts from scratch rather than half-pinned.
@@ -249,12 +249,12 @@ func (l *Lifecycle) Stop() {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			logging.Logf("[lsm] drain goroutine did not exit within 2s; continuing shutdown")
+			logging.LogfLSM("[lsm] drain goroutine did not exit within 2s; continuing shutdown")
 		}
 	}
 	if loader != nil {
 		if err := loader.Close(); err != nil {
-			logging.Logf("[lsm] loader close: %v", err)
+			logging.LogfLSM("[lsm] loader close: %v", err)
 		}
 		KmsgStatef("STATE", "daemon stopping; pinned BPF state remains attached")
 	}
@@ -279,7 +279,7 @@ func (l *Lifecycle) run(loader *Loader) {
 			if !ok {
 				return
 			}
-			logging.Logf("[lsm] drain error: %v", err)
+			logging.LogfLSM("[lsm] drain error: %v", err)
 			KmsgStatef("ISSUE", "drain error: %v", err)
 			// Errors() has capacity 1; the loader's drain has
 			// already exited. Wait for the events channel to close
