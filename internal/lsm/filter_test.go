@@ -306,7 +306,11 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 			t.Errorf("DefaultGlobalAllowExe missing %q", w)
 		}
 	}
-	wantComm := []string{"runc", "containerd-shim", "dockerd", "cagefsctl", "spamd child"}
+	wantComm := []string{
+		"runc", "containerd-shim", "dockerd",
+		"cagefsctl", "clean_user_php_", "update_quota_ca",
+		"spamd", "spamd child",
+	}
 	for _, w := range wantComm {
 		found := false
 		for _, e := range c.GlobalAllowComm {

@@ -160,10 +160,12 @@ func DefaultConf() *Conf {
 //     they routinely trip CRED-002 during system updates.
 //   - Mailcow's stock spawn(8) helper scripts under /usr/local/bin/.
 //   - CloudLinux CageFS server + control tools (legitimate uid
-//     transitions into per-account cages).
+//     transitions into per-account cages), plus the per-cage PHP
+//     session cleanup cron.
 //   - cPanel server daemon and its variant entry points
 //     (cpsrvd / webmaild / whostmgrd / cpdavd share the cpsrvd
-//     binary), plus the quota-status helper.
+//     binary), the quota-status helper, and the update_quota_cache
+//     binary that the cron-driven cache updater invokes.
 //   - SpamAssassin's DCC client (dccproc).
 //
 // New entries should cover a widely-deployed host class. Missing paths
@@ -307,12 +309,20 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/sbin/cagefs.server",
 	"/usr/sbin/cagefsctl",
 
+	// CloudLinux PHP-session cleanup cron — runs once per cage, also
+	// invokes python3.11 as the exe. comm allowlist below covers the
+	// kernel-side match (script name).
+	"/usr/sbin/clean_user_php_sessions",
+	"/usr/share/cagefs/clean_user_php_sessions",
+
 	// cPanel server daemon and its variant entry points. cPanel ships
 	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
 	// under different names; the exe the kernel reports is cpsrvd, so
 	// one basename-match entry covers the family.
 	"/usr/local/cpanel/cpsrvd",
 	"/usr/local/cpanel/bin/quota-status",
+	"/usr/local/cpanel/bin/update_quota_cache",
+	"/usr/local/cpanel/scripts/update_quota_cache",
 
 	// SpamAssassin's DCC client — DCC (Distributed Checksum
 	// Clearinghouse) ships a small C helper that legitimately calls
@@ -378,9 +388,20 @@ var DefaultGlobalAllowComm = []string{
 	// on python3.11 would be far too broad — we pin on comm instead.
 	"cagefsctl",
 
-	// SpamAssassin's per-message child does setuid as part of normal
-	// scanning; comm is fixed to "spamd child". The exe is "perl",
-	// which we deliberately do NOT allowlist.
+	// CloudLinux per-cage PHP session cleanup. Real name is
+	// clean_user_php_sessions; TASK_COMM_LEN=16 truncates to 15 chars.
+	// Runs python3.11; comm match is the only safe handle.
+	"clean_user_php_",
+
+	// cPanel quota cache updater. Real name update_quota_cache,
+	// truncated by TASK_COMM_LEN.
+	"update_quota_ca",
+
+	// SpamAssassin daemons — master `spamd` and per-message children
+	// `spamd child`. Both legitimately setuid as part of scanning.
+	// The exe is "perl"; we deliberately do NOT allowlist perl, so
+	// comm match is the handle.
+	"spamd",
 	"spamd child",
 }
 
