@@ -71,23 +71,25 @@ type cfmlsmSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cfmlsmProgramSpecs struct {
-	CfmBpf001             *ebpf.ProgramSpec `ebpf:"cfm_bpf001"`
-	CfmCred002            *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
-	CfmCred003            *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
-	CfmDeletedFileExec    *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
-	CfmFs005Create        *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
-	CfmFs005Link          *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
-	CfmFs005MarkExec      *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
-	CfmFs005MarkSetuid    *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_setuid"`
-	CfmFs005MarkTaskAlloc *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_task_alloc"`
-	CfmFs005Rename        *ebpf.ProgramSpec `ebpf:"cfm_fs005_rename"`
-	CfmFs005Setattr       *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr"`
-	CfmFs005Setxattr      *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr"`
-	CfmFs005Unlink        *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
-	CfmFs006              *ebpf.ProgramSpec `ebpf:"cfm_fs006"`
-	CfmInterpNetStdio     *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
-	CfmMemfdExec          *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
-	CfmRevshell           *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
+	CfmBpf001               *ebpf.ProgramSpec `ebpf:"cfm_bpf001"`
+	CfmCred002              *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
+	CfmCred003              *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
+	CfmDeletedFileExec      *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
+	CfmFs005Create          *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
+	CfmFs005Link            *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
+	CfmFs005MarkExec        *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
+	CfmFs005MarkSetuid      *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_setuid"`
+	CfmFs005MarkTaskAlloc   *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_task_alloc"`
+	CfmFs005Rename          *ebpf.ProgramSpec `ebpf:"cfm_fs005_rename"`
+	CfmFs005SetattrIdmap    *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr_idmap"`
+	CfmFs005SetattrNoidmap  *ebpf.ProgramSpec `ebpf:"cfm_fs005_setattr_noidmap"`
+	CfmFs005SetxattrIdmap   *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr_idmap"`
+	CfmFs005SetxattrNoidmap *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr_noidmap"`
+	CfmFs005Unlink          *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
+	CfmFs006                *ebpf.ProgramSpec `ebpf:"cfm_fs006"`
+	CfmInterpNetStdio       *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
+	CfmMemfdExec            *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmRevshell             *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
 
 // cfmlsmMapSpecs contains maps before they are loaded into the kernel.
@@ -167,23 +169,25 @@ type cfmlsmVariables struct {
 //
 // It can be passed to loadCfmlsmObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cfmlsmPrograms struct {
-	CfmBpf001             *ebpf.Program `ebpf:"cfm_bpf001"`
-	CfmCred002            *ebpf.Program `ebpf:"cfm_cred002"`
-	CfmCred003            *ebpf.Program `ebpf:"cfm_cred003"`
-	CfmDeletedFileExec    *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
-	CfmFs005Create        *ebpf.Program `ebpf:"cfm_fs005_create"`
-	CfmFs005Link          *ebpf.Program `ebpf:"cfm_fs005_link"`
-	CfmFs005MarkExec      *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
-	CfmFs005MarkSetuid    *ebpf.Program `ebpf:"cfm_fs005_mark_setuid"`
-	CfmFs005MarkTaskAlloc *ebpf.Program `ebpf:"cfm_fs005_mark_task_alloc"`
-	CfmFs005Rename        *ebpf.Program `ebpf:"cfm_fs005_rename"`
-	CfmFs005Setattr       *ebpf.Program `ebpf:"cfm_fs005_setattr"`
-	CfmFs005Setxattr      *ebpf.Program `ebpf:"cfm_fs005_setxattr"`
-	CfmFs005Unlink        *ebpf.Program `ebpf:"cfm_fs005_unlink"`
-	CfmFs006              *ebpf.Program `ebpf:"cfm_fs006"`
-	CfmInterpNetStdio     *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
-	CfmMemfdExec          *ebpf.Program `ebpf:"cfm_memfd_exec"`
-	CfmRevshell           *ebpf.Program `ebpf:"cfm_revshell"`
+	CfmBpf001               *ebpf.Program `ebpf:"cfm_bpf001"`
+	CfmCred002              *ebpf.Program `ebpf:"cfm_cred002"`
+	CfmCred003              *ebpf.Program `ebpf:"cfm_cred003"`
+	CfmDeletedFileExec      *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
+	CfmFs005Create          *ebpf.Program `ebpf:"cfm_fs005_create"`
+	CfmFs005Link            *ebpf.Program `ebpf:"cfm_fs005_link"`
+	CfmFs005MarkExec        *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
+	CfmFs005MarkSetuid      *ebpf.Program `ebpf:"cfm_fs005_mark_setuid"`
+	CfmFs005MarkTaskAlloc   *ebpf.Program `ebpf:"cfm_fs005_mark_task_alloc"`
+	CfmFs005Rename          *ebpf.Program `ebpf:"cfm_fs005_rename"`
+	CfmFs005SetattrIdmap    *ebpf.Program `ebpf:"cfm_fs005_setattr_idmap"`
+	CfmFs005SetattrNoidmap  *ebpf.Program `ebpf:"cfm_fs005_setattr_noidmap"`
+	CfmFs005SetxattrIdmap   *ebpf.Program `ebpf:"cfm_fs005_setxattr_idmap"`
+	CfmFs005SetxattrNoidmap *ebpf.Program `ebpf:"cfm_fs005_setxattr_noidmap"`
+	CfmFs005Unlink          *ebpf.Program `ebpf:"cfm_fs005_unlink"`
+	CfmFs006                *ebpf.Program `ebpf:"cfm_fs006"`
+	CfmInterpNetStdio       *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
+	CfmMemfdExec            *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmRevshell             *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
 func (p *cfmlsmPrograms) Close() error {
@@ -198,8 +202,10 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs005MarkSetuid,
 		p.CfmFs005MarkTaskAlloc,
 		p.CfmFs005Rename,
-		p.CfmFs005Setattr,
-		p.CfmFs005Setxattr,
+		p.CfmFs005SetattrIdmap,
+		p.CfmFs005SetattrNoidmap,
+		p.CfmFs005SetxattrIdmap,
+		p.CfmFs005SetxattrNoidmap,
 		p.CfmFs005Unlink,
 		p.CfmFs006,
 		p.CfmInterpNetStdio,

@@ -230,22 +230,22 @@ struct task_struct {
  * for BPF_PROG signature compatibility; we don't read any fields. */
 struct iattr {} ___NCO;
 
-/* `mnt_idmap` was added as the first argument of inode_setattr /
- * inode_setxattr / a handful of other inode LSM hooks in kernel 6.3
- * (commit `9452e93e` and friends, "fs: port to mnt_idmap"). BPF LSM
- * programs attaching to those hooks must carry it in their signature
- * or BPF_PROG silently shifts argument offsets and the verifier
- * rejects the program with "R2 pointer arithmetic with <<= operator
- * prohibited" when it tries to extract the `ret` arg.
+/* The first argument of inode_setattr / inode_setxattr drifted across
+ * kernels (commit `9452e93e` and friends, "fs: port to mnt_idmap"):
+ *   - Pre-5.12 / EL9 5.14 backport: no first arg
+ *   - 5.12-6.2:                     struct user_namespace *mnt_userns
+ *   - 6.3+ / EL10 6.12:             struct mnt_idmap *idmap
+ * BPF_PROG argument count must exactly match the kernel's trampoline
+ * arity or the verifier rejects with "doesn't have N-th argument".
+ * We carry two C variants per drifting hook (`_noidmap` and `_idmap`)
+ * and the Go loader BTF-probes the kernel at load time to neutralise
+ * the wrong one. See cfmlsm.bpf.c near `cfm_fs005_setattr_noidmap`
+ * and internal/lsm/btfprobe.go.
  *
- * On kernels < 6.3 the same hook had no idmap argument. We don't
- * support those kernels for FS-005 today — EL10 / kernel 6.12 is the
- * baseline. Older kernels would need a per-hook conditional build
- * (e.g. via libbpf's CO-RE-based field-extraction) or a separate
- * program; out of scope for this PR.
- *
- * Empty struct is enough — we only need the type to exist for
- * BPF_PROG signature compatibility; we never read any fields. */
+ * The empty struct is enough because the `_idmap` variant takes its
+ * first arg as `void *` — we never read fields. Keeping the struct
+ * declared makes earlier-version vmlinux.h headers from contributors
+ * cross-compile without diff churn. */
 struct mnt_idmap {} ___NCO;
 
 /* sock_common holds the cheap-to-read state and family fields that

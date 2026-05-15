@@ -950,14 +950,36 @@ int BPF_PROG(cfm_fs005_mark_task_alloc, struct task_struct *task,
     return 0;
 }
 
+/* The `inode_setattr` LSM hook drifted across kernels:
+ *   - Pre-5.12 upstream / EL9 5.14 backport: (dentry, iattr)
+ *   - 5.12-6.2 upstream:                     (mnt_userns, dentry, iattr)
+ *   - 6.3+ upstream / EL10 6.12:             (mnt_idmap, dentry, iattr)
+ *
+ * BPF_PROG's argument count must exactly match the kernel's BPF
+ * trampoline arity (hook args + ret) or the verifier rejects the
+ * program with "doesn't have N-th argument". We ship both variants
+ * and the Go loader BTF-probes `bpf_lsm_inode_setattr` at load time,
+ * neutralising the wrong-arity variant to a no-op before LoadAndAssign.
+ * See internal/lsm/btfprobe.go.
+ *
+ * The 5.12-6.2 and 6.3+ shapes are both 3-hook-arg; we treat them
+ * with one variant whose first arg is `void *` so the type identity
+ * (mnt_userns vs mnt_idmap) doesn't matter — we never read it. */
+
+/* noidmap: EL9 / pre-5.12 upstream — 2 hook args, no idmap/userns. */
 SEC("lsm/inode_setattr")
-int BPF_PROG(cfm_fs005_setattr, struct mnt_idmap *idmap, struct dentry *dentry,
-             struct iattr *attr, int ret)
+int BPF_PROG(cfm_fs005_setattr_noidmap,
+             struct dentry *dentry, struct iattr *attr, int ret)
 {
-    /* mnt_idmap was added to inode_setattr in kernel 6.3. Without it
-     * in the signature, BPF_PROG silently shifts arg offsets and the
-     * verifier rejects with "R2 pointer arithmetic with <<= operator
-     * prohibited" when extracting `ret`. We don't read idmap fields. */
+    return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETATTR, ret);
+}
+
+/* idmap: upstream 5.12+ / EL10 — 3 hook args, first is mnt_userns
+ * (5.12-6.2) or mnt_idmap (6.3+). We never read it; `void *` is fine. */
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs005_setattr_idmap, void *idmap_or_ns,
+             struct dentry *dentry, struct iattr *attr, int ret)
+{
     return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETATTR, ret);
 }
 
@@ -1014,12 +1036,23 @@ int BPF_PROG(cfm_fs005_rename, struct inode *old_dir, struct dentry *old_dentry,
     return cfm_fs005_check2(new_parent, old_parent, new_dentry, NULL, CFM_FS_OP_RENAME, ret);
 }
 
+/* inode_setxattr drifted with the same shape as inode_setattr — see
+ * the long comment above for kernel version map. Two BPF_PROG variants,
+ * the Go loader picks one via BTF probe of `bpf_lsm_inode_setxattr`. */
+
+/* noidmap: EL9 / pre-5.12 upstream — 6 hook args (no idmap/userns). */
 SEC("lsm/inode_setxattr")
-int BPF_PROG(cfm_fs005_setxattr, struct mnt_idmap *idmap, struct dentry *dentry,
+int BPF_PROG(cfm_fs005_setxattr_noidmap, struct dentry *dentry,
              const char *name, const void *value, size_t size, int flags, int ret)
 {
-    /* mnt_idmap was added to inode_setxattr in kernel 6.3 — same
-     * fix as inode_setattr above. */
+    return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETXATTR, ret);
+}
+
+/* idmap: upstream 5.12+ / EL10 — 7 hook args, first is mnt_userns/mnt_idmap. */
+SEC("lsm/inode_setxattr")
+int BPF_PROG(cfm_fs005_setxattr_idmap, void *idmap_or_ns, struct dentry *dentry,
+             const char *name, const void *value, size_t size, int flags, int ret)
+{
     return cfm_fs005_check2(dentry, NULL, dentry, NULL, CFM_FS_OP_SETXATTR, ret);
 }
 
