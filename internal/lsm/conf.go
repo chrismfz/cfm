@@ -99,6 +99,12 @@ type Conf struct {
 	// section is absent.
 	Kmsg KmsgConf
 
+	// EventSink controls userspace DETECT emission (cfm.log + notify).
+	// Populated from the `[events]` section of lsm.conf; defaults from
+	// DefaultEventSinkConf() if absent. Independent of Kmsg — the two
+	// sinks have separate per-policy rate caps.
+	EventSink EventSinkConf
+
 	// Source is the path the conf was loaded from, or a synthesised
 	// description ("(default — no <path>)") when no file was present.
 	Source string
@@ -124,6 +130,7 @@ func DefaultConf() *Conf {
 		GlobalAllowExe:        append([]string{}, DefaultGlobalAllowExe...),
 		GlobalAllowComm:       append([]string{}, DefaultGlobalAllowComm...),
 		Kmsg:                  DefaultKmsgConf(),
+		EventSink:             DefaultEventSinkConf(),
 	}
 }
 
@@ -493,6 +500,7 @@ const (
 	sectionPolicy
 	sectionKmsg
 	sectionAllow
+	sectionEvents
 )
 
 func ParseConf(r io.Reader) (*Conf, error) {
@@ -504,6 +512,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
 		Kmsg:                  DefaultKmsgConf(),
+		EventSink:             DefaultEventSinkConf(),
 	}
 	// Seed defaults for every known policy so the result is complete
 	// even if the file declared a subset. Per-policy stanzas override.
@@ -520,9 +529,11 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		lineno        int
 		seenPolicies  = map[PolicyID]int{}
 		seenTopLevel  = map[string]int{}
-		seenKmsgKeys  = map[string]int{}
-		kmsgSeen      int
-		allowSeen     int
+		seenKmsgKeys   = map[string]int{}
+		seenEventsKeys = map[string]int{}
+		kmsgSeen       int
+		allowSeen      int
+		eventsSeen     int
 	)
 
 	for scanner.Scan() {
@@ -566,6 +577,14 @@ func ParseConf(r io.Reader) (*Conf, error) {
 				}
 				allowSeen = lineno
 				current = sectionAllow
+				currentPolicy = ""
+			case sectionEvents:
+				if eventsSeen > 0 {
+					return nil, fmt.Errorf("line %d: duplicate [events] section (first at line %d)",
+						lineno, eventsSeen)
+				}
+				eventsSeen = lineno
+				current = sectionEvents
 				currentPolicy = ""
 			}
 			continue
@@ -687,6 +706,22 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			default:
 				return nil, fmt.Errorf("line %d: unknown [allow] key %q (allow_exe | allow_comm)", lineno, key)
 			}
+		case sectionEvents:
+			lk := strings.ToLower(key)
+			if firstLine, dup := seenEventsKeys[lk]; dup {
+				return nil, fmt.Errorf("line %d: duplicate [events] key %q (first at line %d)", lineno, lk, firstLine)
+			}
+			seenEventsKeys[lk] = lineno
+			switch lk {
+			case "detect_rate_per_min":
+				n, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("line %d: detect_rate_per_min must be a non-negative integer (got %q)", lineno, val)
+				}
+				c.EventSink.DetectRatePerMin = n
+			default:
+				return nil, fmt.Errorf("line %d: unknown [events] key %q (detect_rate_per_min)", lineno, key)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -797,6 +832,15 @@ func FormatConf(c *Conf) string {
 	fmt.Fprintf(&b, "state_transitions   = %t   # ALIVE / ADOPT / STATE / ISSUE on enable/disable/adopt/stop\n", c.Kmsg.StateTransitions)
 	fmt.Fprintf(&b, "detect_events       = %t   # one DETECT line per detection (rate-limited below)\n", c.Kmsg.DetectEvents)
 	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap DETECT lines per policy per minute; 0 disables cap (not recommended)\n", c.Kmsg.DetectRatePerMin)
+	b.WriteString("\n")
+	b.WriteString("# Userspace DETECT emission (cfm.log + notify pipeline) per-policy\n")
+	b.WriteString("# rate cap. Independent of the [kmsg] cap above so an operator can\n")
+	b.WriteString("# tighten cfm.log without losing dmesg signal (or vice versa). When\n")
+	b.WriteString("# the cap is hit, surplus events accumulate and a single\n")
+	b.WriteString("# `suppressed=N in_last=60s` summary line is emitted on window roll —\n")
+	b.WriteString("# the operator sees the burst happened without being buried in detail.\n")
+	b.WriteString("[events]\n")
+	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap cfm.log + notify emissions per policy per minute; 0 disables cap\n", c.EventSink.DetectRatePerMin)
 	return b.String()
 }
 
@@ -905,10 +949,12 @@ func parseSectionHeader(line string) (sectionKind, PolicyID, error) {
 		return sectionKmsg, "", nil
 	case "allow":
 		return sectionAllow, "", nil
+	case "events":
+		return sectionEvents, "", nil
 	}
 
 	if !strings.HasPrefix(inner, "policy") {
-		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[allow]`, `[kmsg]`, or `[policy \"...\"]`)", line)
+		return sectionTopLevel, "", fmt.Errorf("unknown section header: %q (expected `[allow]`, `[events]`, `[kmsg]`, or `[policy \"...\"]`)", line)
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(inner, "policy"))
 	if !strings.HasPrefix(rest, `"`) || !strings.HasSuffix(rest, `"`) || len(rest) < 2 {
