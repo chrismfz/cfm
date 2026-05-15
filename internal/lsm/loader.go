@@ -129,6 +129,14 @@ type Loader struct {
 	links  map[PolicyID][]link.Link
 	reader *ringbuf.Reader
 
+	// driftPicks records which BPF program variant was selected for each
+	// drifting LSM hook (currently inode_setattr / inode_setxattr — see
+	// btfprobe.go for the kernel-version map). Keyed by kernel hook name
+	// (e.g. "bpf_lsm_inode_setattr"), value is the chosen program name in
+	// the spec (e.g. "cfm_fs005_setattr_idmap"). nil in AdoptPinned mode
+	// — kernel-side selection already happened at enable time.
+	driftPicks map[string]string
+
 	// pinned is true when the loader is in pinned-load or
 	// pinned-adopt mode. Close() then skips link/map detach so the
 	// kernel-side state survives the loader's lifetime.
@@ -239,6 +247,16 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	if err := rewriteConstants(spec, opts.Modes, opts.FS005WebOriginMonitor); err != nil {
 		return nil, fmt.Errorf("%w: rewrite BPF constants: %v", ErrBPFLSMUnavailable, err)
 	}
+	// BTF-probe the kernel for drifting LSM hook signatures (inode_setattr /
+	// inode_setxattr gained mnt_userns / mnt_idmap upstream; EL9 kept the
+	// pre-5.12 shape). Neutralises the wrong-arity variant to a no-op before
+	// LoadAndAssign so the verifier doesn't reject the whole load with
+	// "doesn't have N-th argument".
+	picks, err := selectLsmDriftVariants(spec)
+	if err != nil {
+		return nil, fmt.Errorf("%w: probe LSM hook signatures: %v", ErrBPFLSMUnavailable, err)
+	}
+	l.driftPicks = picks
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
@@ -801,6 +819,23 @@ func tracepointProgramEntry(prog *ebpf.Program, pinName, category, name string) 
 	}
 }
 
+// pickedDriftProgram returns the *ebpf.Program for the variant of a
+// drifting LSM hook that the BTF probe selected (see btfprobe.go).
+// Returns nil if the probe didn't run (AdoptPinned path) or if neither
+// variant is in the generated bindings — programsFor's compact() then
+// drops the entry, surfacing as a per-policy failure rather than a nil
+// deref at attach time.
+func (l *Loader) pickedDriftProgram(hook string) *ebpf.Program {
+	if l.driftPicks == nil {
+		return nil
+	}
+	name, ok := l.driftPicks[hook]
+	if !ok {
+		return nil
+	}
+	return generatedProgramByName(&l.objs.cfmlsmPrograms, name)
+}
+
 // generatedProgramByName fetches a BPF program by its ebpf tag without taking a
 // compile-time dependency on regenerated bpf2go fields. That keeps source-only
 // policy additions buildable when the PR intentionally does not ship updated
@@ -850,12 +885,12 @@ func (l *Loader) programsFor(id PolicyID) []programEntry {
 		return compact(lsmProgramEntry(generatedProgramByName(&progs, "cfm_interp_net_stdio"), pinFileLinkInterpNetStdio))
 	case PolicySensitiveWrite:
 		return compact(
-			lsmProgramEntry(progs.CfmFs005Setattr, pinFileLinkFs005Setattr),
+			lsmProgramEntry(l.pickedDriftProgram("bpf_lsm_inode_setattr"), pinFileLinkFs005Setattr),
 			lsmProgramEntry(progs.CfmFs005Create, pinFileLinkFs005Create),
 			lsmProgramEntry(progs.CfmFs005Unlink, pinFileLinkFs005Unlink),
 			lsmProgramEntry(progs.CfmFs005Link, pinFileLinkFs005Link),
 			lsmProgramEntry(progs.CfmFs005Rename, pinFileLinkFs005Rename),
-			lsmProgramEntry(progs.CfmFs005Setxattr, pinFileLinkFs005Setxattr),
+			lsmProgramEntry(l.pickedDriftProgram("bpf_lsm_inode_setxattr"), pinFileLinkFs005Setxattr),
 			lsmProgramEntry(progs.CfmFs005MarkExec, pinFileLinkFs005MarkExec),
 			lsmProgramEntry(progs.CfmFs005MarkSetuid, pinFileLinkFs005MarkSetuid),
 			lsmProgramEntry(progs.CfmFs005MarkTaskAlloc, pinFileLinkFs005MarkTaskAlloc),

@@ -183,8 +183,7 @@ func emitProbeText(w io.Writer, r ProbeResult) {
 		fmt.Fprintf(w, "Loader error: %v\n", r.LoadError)
 		if errors.Is(r.LoadError, ErrBPFLSMUnavailable) {
 			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Preflight passed but the kernel still refused the BPF load.")
-			fmt.Fprintln(w, "This usually means SELinux/AppArmor denied bpf() — check audit.log.")
+			emitLoadFailureHint(w, r.LoadError)
 		}
 		return
 	}

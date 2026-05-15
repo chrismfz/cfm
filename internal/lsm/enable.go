@@ -139,8 +139,7 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		fmt.Fprintf(w, "Loader error: %v\n", err)
 		if errors.Is(err, ErrBPFLSMUnavailable) {
 			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Preflight passed but the kernel still refused the BPF load.")
-			fmt.Fprintln(w, "This usually means SELinux/AppArmor denied bpf() — check audit.log.")
+			emitLoadFailureHint(w, err)
 		}
 		return 1
 	}
