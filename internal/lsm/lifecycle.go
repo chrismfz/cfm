@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"cfm/internal/logging"
@@ -45,6 +48,19 @@ type Lifecycle struct {
 	// drainCancel cancels the ringbuf drain goroutine on Stop.
 	drainCancel context.CancelFunc
 	drainDone   chan struct{}
+
+	// pinnedRingbufIno is the bpffs inode of the pinned ringbuf at
+	// activation time. Re-checked on every ApplyConfig tick: a missing
+	// pin (ENOENT) or a changed inode means the kernel state was torn
+	// down (`cfm lsm disable`) or rebuilt (`cfm lsm enable` / `restart`)
+	// under the running daemon — the loader's fd points at the orphan,
+	// no new events flow, so we tear down and re-adopt.
+	//
+	// Zero when no activation has occurred yet, or when the underlying
+	// stat could not produce a meaningful inode (legacy bpffs without
+	// stat support, platform anomalies). In that case drift detection
+	// is a no-op and the start-once invariant holds.
+	pinnedRingbufIno uint64
 }
 
 // NewLifecycle returns a fresh lifecycle. Safe to call before any
@@ -66,8 +82,62 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	}
 	l.mu.Lock()
 	if l.started {
+		// Drift check: if the pinned ringbuf inode has changed (CLI
+		// disable+enable rebuilt the pin) or the pin is gone (CLI
+		// disable left it absent), our loader is reading from an
+		// orphaned ringbuf. Tear the stale drain down here so the
+		// rest of this function falls through to the normal adopt /
+		// auto-enable path. This is what makes `cfm lsm restart`
+		// (CLI-only) actually take effect on the daemon without
+		// requiring a `systemctl restart cfm`.
+		curIno, statErr := pinnedRingbufIno()
+		if statErr == nil && curIno != 0 && curIno == l.pinnedRingbufIno {
+			l.mu.Unlock()
+			return
+		}
+		// Capture for teardown and clear in-flight state under lock,
+		// then release the mutex — Close() / drain shutdown can block
+		// up to 2s and must not hold up other ApplyConfig callers.
+		oldIno := l.pinnedRingbufIno
+		cancel := l.drainCancel
+		done := l.drainDone
+		loader := l.loader
+		l.started = false
+		l.loader = nil
+		l.drainCancel = nil
+		l.drainDone = nil
+		l.pinnedRingbufIno = 0
 		l.mu.Unlock()
-		return
+
+		if statErr != nil {
+			logging.LogfLSM("[lsm] pinned ringbuf gone under daemon (%v); tearing down stale drain", statErr)
+			KmsgStatef("STATE", "pinned ringbuf gone; tearing down stale drain")
+		} else {
+			logging.LogfLSM("[lsm] pinned ringbuf rebuilt under daemon (was_ino=%d now_ino=%d); re-adopting", oldIno, curIno)
+			KmsgStatef("ADOPT", "pinned ringbuf rebuilt under daemon; re-adopting")
+		}
+
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				logging.LogfLSM("[lsm] drain goroutine did not exit within 2s during re-adopt; continuing")
+			}
+		}
+		if loader != nil {
+			if err := loader.Close(); err != nil {
+				logging.LogfLSM("[lsm] stale loader close: %v", err)
+			}
+		}
+
+		// Re-acquire and fall through to normal activation. A racing
+		// Stop() between unlock and re-lock would have left started
+		// false (we just zeroed it), so the standard checks below
+		// handle the case where conf.Enabled has since flipped.
+		l.mu.Lock()
 	}
 
 	conf, err := LoadConf(false)
@@ -106,6 +176,15 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	l.drainCancel = drainCancel
 	l.drainDone = make(chan struct{})
 	l.started = true
+	// Snapshot the pinned ringbuf inode under lock — future ticks
+	// compare against this to spot a CLI rebuild (different inode) or
+	// a CLI disable (ENOENT) and trigger the re-adopt branch above. A
+	// stat failure here leaves the field at zero, which the drift
+	// check treats as "no record, no drift" — equivalent to the old
+	// pure start-once behaviour on legacy bpffs.
+	if ino, err := pinnedRingbufIno(); err == nil {
+		l.pinnedRingbufIno = ino
+	}
 	l.mu.Unlock()
 
 	loader.Start(drainCtx)
@@ -356,4 +435,29 @@ func emitNotify(ev Event) {
 	// flood any one of them. See eventsink.go and kmsg.go.
 	emitDetectEvent(ev, reason, extra)
 	KmsgDetect(ev)
+}
+
+// pinnedRingbufIno returns the bpffs inode of the pinned ringbuf
+// map at /sys/fs/bpf/cfm/maps/cfm_events. Used by the drift check in
+// ApplyConfig: the CLI's disable+enable sequence (`cfm lsm restart`)
+// unlinks and recreates the pin, which the kernel allocates a fresh
+// inode for. Comparing inodes across ticks is the cheapest signal
+// that the daemon's loader fd has been orphaned by the rebuild.
+//
+// Returns 0 with an error when the pin is absent (typical "operator
+// ran `cfm lsm disable`" case — ENOENT here is informational, not a
+// failure) or the platform doesn't surface inode info via stat. The
+// caller treats both as "drift": tear down the stale drain and let
+// the normal adopt / auto-enable path re-run.
+func pinnedRingbufIno() (uint64, error) {
+	path := filepath.Join(DefaultPinDir, pinSubdirMaps, pinFileMap)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	sys, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat %s: sys is %T, want *syscall.Stat_t", path, fi.Sys())
+	}
+	return sys.Ino, nil
 }

@@ -33,6 +33,7 @@
 /var/log/cfm/cfm.log
 /var/log/cfm/cfm-service.log
 /var/log/cfm/cfm.smtp.log
+/var/log/cfm/lsm.log
 /var/log/cfm/challenge.access.log {
     daily
     rotate 14
