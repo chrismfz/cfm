@@ -319,20 +319,27 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					}
 				}
 
-				// Look up WAF/detector reason BEFORE bridge.ClearIP() deletes the entry.
-				// The hook is called before ClearIP in challenge_server.go, so this is safe.
+				// Look up WAF/detector reason + rule id BEFORE bridge.ClearIP()
+				// deletes the entry. The hook is called before ClearIP in
+				// challenge_server.go, so this is safe.
 				reason := ""
+				wafRuleID := 0
 				if b := w.eng.NginxBridge(); b != nil {
 					reason = b.GetReason(ip)
+					wafRuleID = b.GetWAFRuleID(ip)
 				}
 				reasonPart := ""
 				if reason != "" {
 					reasonPart = " reason=" + reason
 				}
+				ridPart := ""
+				if wafRuleID > 0 {
+					ridPart = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
+				}
 
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s%s",
-					ip, host, uri, ms, diff, reasonPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s%s%s",
+					ip, host, uri, ms, diff, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)
@@ -340,8 +347,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 			})
 
-			// Hook WAF trigger events (from cfm_waf.lua via POST /nginx/ip with a reason)
-			// into cfm.challenges.log so trigger + solved appear in the same log.
+			// Hook WAF trigger events (from cfm_waf.lua via POST /nginx/ip)
+			// into cfm.waf.log as one JSON record per trigger. The matching
+			// "solved" entry lands in cfm.challenges.log with the same
+			// reason + waf_rule_id so the two halves correlate.
 			// action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
 			if b := w.eng.NginxBridge(); b != nil {
 				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string) {

@@ -182,9 +182,10 @@ func (w *statusCaptureWriter) WriteHeader(code int) {
 }
 
 type bridgeIPEntry struct {
-	Action  string // "challenge" | "block" | "logonly"
-	Expires time.Time
-	Reason  string
+	Action    string // "challenge" | "block" | "logonly"
+	Expires   time.Time
+	Reason    string
+	WAFRuleID int // cfm_waf RULE_IDS handle (e.g. 302). 0 if unknown.
 }
 
 type bridgeVhostEntry struct {
@@ -855,6 +856,16 @@ func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.ipState[ip].Reason
+}
+
+// GetWAFRuleID returns the numeric cfm_waf rule id that originally
+// produced the active challenge/block for this IP (0 if unknown).
+// Paired with GetReason so the solved hook can record the same rule
+// id in cfm.challenges.log that fired into cfm.waf.log.
+func (b *NginxBridge) GetWAFRuleID(ip string) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.ipState[ip].WAFRuleID
 }
 
 // Also adds the IP to the solved-ok set so it bypasses vhost-wide challenge
@@ -1625,9 +1636,10 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	if msg.Action != "logonly" {
 		b.mu.Lock()
 		b.ipState[msg.IP] = bridgeIPEntry{
-			Action:  msg.Action,
-			Expires: time.Now().Add(ttl),
-			Reason:  reason,
+			Action:    msg.Action,
+			Expires:   time.Now().Add(ttl),
+			Reason:    reason,
+			WAFRuleID: msg.WAFRuleID,
 		}
 		b.mu.Unlock()
 	}
@@ -1938,9 +1950,10 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			if msg.Action != "logonly" {
 				b.mu.Lock()
 				b.ipState[msg.IP] = bridgeIPEntry{
-					Action:  msg.Action,
-					Expires: now.Add(ttl),
-					Reason:  reason,
+					Action:    msg.Action,
+					Expires:   now.Add(ttl),
+					Reason:    reason,
+					WAFRuleID: msg.WAFRuleID,
 				}
 				b.mu.Unlock()
 			}

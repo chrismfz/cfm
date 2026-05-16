@@ -2334,8 +2334,13 @@ local LONG_PATH_THRESHOLD = 800
 -- other detectors (RCE, traversal, SQLi, base64 obfuscation scorer)
 -- still inspect the path content irrespective of LONG_PATH.
 local function path_has_data_uri_artifact(path)
-  if string.find(path, ";base64,", 1, true) then return true end
-  if string.find(path, "data:[%w][%w.+-]*/[%w][%w.+-]*[,;]", 1, false) then return true end
+  -- Defensive case-fold: every real-world FP in 2026-05 logs was
+  -- lowercase, but case-folding is cheap on the slow path (this rule
+  -- only matters for paths approaching LONG_PATH_THRESHOLD) and
+  -- future-proofs against templates that emit `Data:` or `DATA:`.
+  local lp = string.lower(path)
+  if string.find(lp, ";base64,", 1, true) then return true end
+  if string.find(lp, "data:[%w][%w.+-]*/[%w][%w.+-]*[,;]", 1, false) then return true end
   return false
 end
 
