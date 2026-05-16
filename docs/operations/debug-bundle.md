@@ -51,7 +51,7 @@ whoever is helping triage.
 | `goroutines.txt` | Goroutine dump (`debug=2`) — every goroutine's stack. |
 | `worker-mem-trace.txt` | Per-worker RSS / VmSize / threads / FDs / maps-count sampled every 30 s. |
 | `daemon-cpu-trace.txt` | Daemon CPU% sampled every 30 s. |
-| `logs-tail.txt` | Last ~500 lines from cfm.log, cfm.waf.log, cfm.waf.sampled.log, cfm.error.log, api.log. |
+| `logs-tail.txt` | Last ~500 lines from cfm.log, cfm.waf.log, cfm.error.log, api.log. |
 | `journal-tail.txt` | `journalctl -u cfm` over the trace window (when systemd is the service manager). |
 | `ss-listen.txt` | `ss -lntp` — every listening socket on the box. |
 | `bridge-conn.txt` | Connection state on `/var/run/cfm/cfm_nginx.sock` — current bridge clients. |

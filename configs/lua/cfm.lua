@@ -211,10 +211,6 @@ local CFG = {
   waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
   waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
 
-  -- Sampled hit log: this fraction of WAF triggers gets a richer log entry
-  -- written to cfm.waf.sampled.log (URI, UA, Referer, content-type).
-  -- 0 disables sampling entirely; default 0.01 = 1% of hits.
-  waf_sample_rate     = tonumber(os.getenv("CFM_WAF_SAMPLE_RATE") or "0.01"),
 }
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -1261,22 +1257,18 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       end
 
       if waf.should_push and waf.should_push(SH, ip, reason) then
+        -- Forensic fields (UA / Referer / Content-Type) are always
+        -- attached. The single cfm.waf.log now emits one JSON record
+        -- per trigger carrying everything Go knows: timestamp, action,
+        -- TTL, ASN/country enrichment + these per-request headers.
         local push = {
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
           reason = reason, host = p_host, uri = p_uri, method = p_meth,
-          waf_rule_id = waf_rule_id,
+          waf_rule_id  = waf_rule_id,
+          ua           = req_headers["user-agent"],
+          referer      = req_headers["referer"],
+          content_type = req_headers["content-type"],
         }
-        -- Sampled hit log: include extra forensic context for a fraction of
-        -- triggers so operators can verify FP suspicions without needing
-        -- per-event headers in the main log. Sample-rate is configurable
-        -- via CFM_WAF_SAMPLE_RATE (default 0.01).
-        local sr = CFG.waf_sample_rate or 0
-        if sr > 0 and math.random() < sr then
-          push.sample        = true
-          push.ua            = req_headers["user-agent"]
-          push.referer       = req_headers["referer"]
-          push.content_type  = req_headers["content-type"]
-        end
         rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode(push),
           { ip = ip, host = p_host, uri = p_uri, method = p_meth })
       end

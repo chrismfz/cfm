@@ -697,7 +697,6 @@ func captureLogTails(logRoot string) []byte {
 	candidates := []string{
 		"cfm.log",
 		"cfm.waf.log",
-		"cfm.waf.sampled.log",
 		"cfm.error.log",
 		"api.log",
 	}

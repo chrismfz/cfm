@@ -344,8 +344,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// into cfm.challenges.log so trigger + solved appear in the same log.
 			// action = "challenge" or "block"; reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
 			if b := w.eng.NginxBridge(); b != nil {
-				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string) {
-					suffix := ""
+				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string) {
 					var asn uint
 					var asnName, country string
 					if enr := w.eng.Enricher(); enr != nil {
@@ -353,77 +352,34 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						asn = r.ASN
 						asnName = r.ASNName
 						country = r.Country
-						parts := []string{}
-						if r.ASN > 0 {
-							if r.ASNName != "" {
-								parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
-							} else {
-								parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
-							}
-						}
-						if r.Country != "" {
-							parts = append(parts, r.Country)
-						}
-						if len(parts) > 0 {
-							suffix = " - (" + strings.Join(parts, ", ") + ")"
-						}
 					}
 
-					// Optional meta fields from Lua (host/uri/method)
-					// Keep same format as CHALLENGE_* lines when available.
-					meta := ""
-					if host != "" {
-						meta += " host=" + host
+					// One JSON object per trigger to cfm.waf.log. The
+					// previous split (compact text in cfm.waf.log + a
+					// sampled JSON in cfm.waf.sampled.log) is gone —
+					// every record carries enrichment + per-request
+					// forensic fields (UA / Referer / Content-Type).
+					entry := map[string]any{
+						"ip":          ip,
+						"host":        host,
+						"uri":         uri,
+						"method":      method,
+						"action":      action,
+						"reason":      reason,
+						"waf_rule_id": wafRuleID,
+						"ttl_sec":     int(ttl / time.Second),
+						"ua":          ua,
+						"referer":     referer,
+						"ct":          contentType,
+						"asn":         asn,
+						"asn_name":    asnName,
+						"country":     country,
 					}
-					if uri != "" {
-						meta += " uri=" + uri
-					}
-					if method != "" {
-						meta += " method=" + method
+					if buf, err := json.Marshal(entry); err == nil {
+						logging.LogfWAF("%s", string(buf))
 					}
 
-					ridFmt := ""
-					if wafRuleID > 0 {
-						ridFmt = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
-					}
-					logging.LogfWAF(
-						"[waf_engine] ip=%s%s result=%s reason=%s%s ttl=%s%s",
-						ip,
-						meta,
-						action+"_triggered",
-						reason,
-						ridFmt,
-						ttl.String(),
-						suffix,
-					)
 					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID)
-
-					// Sampled hit log: richer JSON line for FP investigation.
-					// Lua picks the sample (CFM_WAF_SAMPLE_RATE) and only then
-					// sends the UA/Referer/Content-Type — so the cost is paid
-					// for the sampled fraction only.
-					if sample {
-						entry := map[string]any{
-							"ip":          ip,
-							"host":        host,
-							"uri":         uri,
-							"method":      method,
-							"action":      action,
-							"reason":      reason,
-							"waf_rule_id": wafRuleID,
-							"ttl_sec":     int(ttl / time.Second),
-							"ua":          ua,
-							"referer":     referer,
-							"ct":          contentType,
-							"asn":         asn,
-							"asn_name":    asnName,
-							"country":     country,
-						}
-						if b, err := json.Marshal(entry); err == nil {
-							logging.LogfWAFSampled("%s", string(b))
-						}
-					}
-
 				})
 
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
