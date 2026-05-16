@@ -86,15 +86,11 @@ type NginxBridge struct {
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
-	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), and TTL so the caller
-	// can log to cfm.challenges.log with enrichment. Optional metadata
-	// Set via SetTriggerHook. Called without b.mu held.
-	//
-	// `sample` mirrors nginxIPMsg.Sample — when true, the ua/referer/contentType
-	// strings are populated from the request and the consumer should write a
-	// richer line to cfm.waf.sampled.log. Non-sampled triggers pass empty
-	// strings for those three fields.
-	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string)
+	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), TTL, and the per-
+	// request forensic fields (UA / Referer / Content-Type) that Lua
+	// attaches to every push. Set via SetTriggerHook. Called without
+	// b.mu held.
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string)
 
 	// OnWAFStats is called once per row of the snapshot pushed by Lua.
 	// Each call carries an absolute count for the (hour_unix, host) tuple;
@@ -186,9 +182,10 @@ func (w *statusCaptureWriter) WriteHeader(code int) {
 }
 
 type bridgeIPEntry struct {
-	Action  string // "challenge" | "block" | "logonly"
-	Expires time.Time
-	Reason  string
+	Action    string // "challenge" | "block" | "logonly"
+	Expires   time.Time
+	Reason    string
+	WAFRuleID int // cfm_waf RULE_IDS handle (e.g. 302). 0 if unknown.
 }
 
 type bridgeVhostEntry struct {
@@ -319,9 +316,10 @@ type nginxIPMsg struct {
 	// /nginx/decision (that one is for TrafficRuleEvalInput rules).
 	WAFRuleID int `json:"waf_rule_id,omitempty"`
 
-	// Sampled-hit-log fields. Present only when Lua decided to sample this
-	// trigger (CFM_WAF_SAMPLE_RATE). Used to write the richer
-	// cfm.waf.sampled.log entry without bloating every trigger push.
+	// Forensic fields attached to every trigger by Lua. Logged with the
+	// rest of the record into cfm.waf.log (one JSON object per line).
+	// `Sample` is retained as a no-op for backward compatibility with
+	// older Lua clients that may still set it; the field is unused.
 	Sample      bool   `json:"sample,omitempty"`
 	UA          string `json:"ua,omitempty"`
 	Referer     string `json:"referer,omitempty"`
@@ -763,7 +761,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, sample bool, ua, referer, contentType string)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string)) {
 	if b == nil {
 		return
 	}
@@ -858,6 +856,16 @@ func (b *NginxBridge) GetReason(ip string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.ipState[ip].Reason
+}
+
+// GetWAFRuleID returns the numeric cfm_waf rule id that originally
+// produced the active challenge/block for this IP (0 if unknown).
+// Paired with GetReason so the solved hook can record the same rule
+// id in cfm.challenges.log that fired into cfm.waf.log.
+func (b *NginxBridge) GetWAFRuleID(ip string) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.ipState[ip].WAFRuleID
 }
 
 // Also adds the IP to the solved-ok set so it bypasses vhost-wide challenge
@@ -1628,9 +1636,10 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	if msg.Action != "logonly" {
 		b.mu.Lock()
 		b.ipState[msg.IP] = bridgeIPEntry{
-			Action:  msg.Action,
-			Expires: time.Now().Add(ttl),
-			Reason:  reason,
+			Action:    msg.Action,
+			Expires:   time.Now().Add(ttl),
+			Reason:    reason,
+			WAFRuleID: msg.WAFRuleID,
 		}
 		b.mu.Unlock()
 	}
@@ -1643,9 +1652,9 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// allowed to exceed the Lua client's decision_timeout_ms.
 	if reason != "" && b.OnTrigger != nil {
 		ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
-		sample, ua, referer, ct := msg.Sample, msg.UA, msg.Referer, msg.ContentType
+		ua, referer, ct := msg.UA, msg.Referer, msg.ContentType
 		b.dispatchHook(func() {
-			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, sample, ua, referer, ct)
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct)
 		})
 	}
 
@@ -1941,17 +1950,18 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			if msg.Action != "logonly" {
 				b.mu.Lock()
 				b.ipState[msg.IP] = bridgeIPEntry{
-					Action:  msg.Action,
-					Expires: now.Add(ttl),
-					Reason:  reason,
+					Action:    msg.Action,
+					Expires:   now.Add(ttl),
+					Reason:    reason,
+					WAFRuleID: msg.WAFRuleID,
 				}
 				b.mu.Unlock()
 			}
 			if reason != "" && b.OnTrigger != nil {
 				ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
-				sample, ua, referer, ct := msg.Sample, msg.UA, msg.Referer, msg.ContentType
+				ua, referer, ct := msg.UA, msg.Referer, msg.ContentType
 				b.dispatchHook(func() {
-					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, sample, ua, referer, ct)
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct)
 				})
 			}
 			processed++

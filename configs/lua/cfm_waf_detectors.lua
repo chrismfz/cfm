@@ -464,8 +464,21 @@ function _M.detect_xss(uri, args, _s)
   if has(s, "=javascript:")   then return true end
   if has(s, "=\"javascript:") then return true end
   if has(s, "='javascript:")  then return true end
-  if has(s, "onerror=")     or has(s, "onload=")  then return true end
-  if has(s, "onmouseover=") or has(s, "onfocus=") then return true end
+
+  -- Event-handler attributes. Anchored on a non-word boundary so an
+  -- "on*=" token embedded inside a longer identifier is not flagged.
+  -- WPML's Advanced Translation Editor returns to wp-admin with
+  -- `?ateJobCreationError=101` — the substring "onerror=" literally
+  -- occurs inside "creationError=" (…creati**onerror**=…), which the
+  -- plain-substring check matched. Real reflected XSS always carries
+  -- a delimiter (space, quote, `<`, `=`, `&`, `;`, `/`) before the
+  -- handler name, so a frontier check loses no real-attack coverage.
+  -- Fast-path: keep the cheap plain-find as a precheck before the
+  -- pattern engine pays for backtracking.
+  if has(s, "onerror=")     and string.find(s, "%f[%w]onerror=",     1, false) then return true end
+  if has(s, "onload=")      and string.find(s, "%f[%w]onload=",      1, false) then return true end
+  if has(s, "onmouseover=") and string.find(s, "%f[%w]onmouseover=", 1, false) then return true end
+  if has(s, "onfocus=")     and string.find(s, "%f[%w]onfocus=",     1, false) then return true end
 
   return false
 end
@@ -2300,10 +2313,43 @@ end
 -- below all observed scanner payloads. Returns "SEG_<len>".
 local LONG_PATH_THRESHOLD = 800
 
+-- A path that carries a data: URI artifact is a template bug, not an
+-- attack. Three known sources from the 2026-05-13..16 FP audit:
+--   * Bricks Builder (WP) injects `<script src="data:text/javascript,...">`
+--     and Facebook's OG-preview crawler dereferences it as a relative URL
+--     (52 hits on mobian.eu, 11 on www.ezbeauty.gr).
+--   * SP Page Builder slick_carousel (Joomla) emits an unquoted
+--     `url(data:image/svg+xml;base64,...)` in a CSS rule, so the browser
+--     resolves it relative to the stylesheet (saneco.gr).
+--   * `<img src="image/jpeg;base64,...">` (data: prefix omitted by a
+--     broken template) — single Greek visitor on tehni.eu hit it 10x in
+--     one session.
+-- The check is path-wide (not per-segment) because base64 payloads
+-- contain `/` and the URI parser splits them into many short segments
+-- followed by one extremely long one — the trailing chunk has no
+-- contextual marker of its own. Two markers cover every observed FP:
+--   1. literal `data:<type>/<subtype>` followed by `,` or `;`
+--   2. literal `;base64,` somewhere in the path
+-- Neither token is needed by a real attacker to deliver a payload:
+-- other detectors (RCE, traversal, SQLi, base64 obfuscation scorer)
+-- still inspect the path content irrespective of LONG_PATH.
+local function path_has_data_uri_artifact(path)
+  -- Defensive case-fold: every real-world FP in 2026-05 logs was
+  -- lowercase, but case-folding is cheap on the slow path (this rule
+  -- only matters for paths approaching LONG_PATH_THRESHOLD) and
+  -- future-proofs against templates that emit `Data:` or `DATA:`.
+  local lp = string.lower(path)
+  if string.find(lp, ";base64,", 1, true) then return true end
+  if string.find(lp, "data:[%w][%w.+-]*/[%w][%w.+-]*[,;]", 1, false) then return true end
+  return false
+end
+
 function _M.detect_long_path_segment(uri)
   if not uri or uri == "" then return nil end
 
   local path = uri:match("^([^?#]+)") or uri
+  if path_has_data_uri_artifact(path) then return nil end
+
   local max_len = 0
   for seg in path:gmatch("[^/]+") do
     local n = #seg

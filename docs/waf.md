@@ -5,9 +5,9 @@
 The WAF rebuild is complete. **51 detectors across 9 rule-ID groups** (1xx-9xx)
 inspect every dynamic request before it reaches origin. Severity-aggregation
 returns the strongest rule's action; per-vhost exclusions let operators
-whitelist specific rules on noisy hosts; hit-rate counters and a sampled hit
-log give operators data-driven evidence before promoting any rule from
-`logonly` to `challenge` to `block`.
+whitelist specific rules on noisy hosts; hit-rate counters and the per-
+trigger JSON hit log (`cfm.waf.log`) give operators data-driven evidence
+before promoting any rule from `logonly` to `challenge` to `block`.
 
 Open follow-ups (none blocking):
 
@@ -75,7 +75,7 @@ the hint, look up the rule, decide what to do:
 |---|---|---|
 | `ok_to_promote` | hits > 0 AND rate < 0.01% | Safe to promote one mode level. |
 | `silent` | inspected > 0 AND hits == 0 | Verify the rule isn't broken before promoting. Run a known-positive sample (see "Testing a rule fires" below). If it fires, leave at logonly and wait. If not, debug. |
-| `review` | 0.01% ≤ rate < 1% | Investigate FP candidates in `cfm.waf.sampled.log` before promoting. Tighten the rule or add per-vhost exclusions for noisy hosts. |
+| `review` | 0.01% ≤ rate < 1% | Investigate FP candidates in `cfm.waf.log` before promoting. Tighten the rule or add per-vhost exclusions for noisy hosts. |
 | `noisy` | rate ≥ 1% | Clear FP source. Either tighten the detector or add per-vhost exclusions. Don't promote. |
 | `n_a` | inspected == 0 | Insufficient data — wait for the flusher (~1 minute) or for traffic. |
 
@@ -145,29 +145,26 @@ hit=true reason=WAF_PHP_WEBSHELL_BODY:RAW_DYN_INCLUDE action=challenge rule_id=4
 This is exactly what `cfm.lua` would see at access-phase time. Useful for:
 
 - **`silent` rules** — confirm the detector is wired up and reachable.
-- **`review`/`noisy` rules** — feed real samples from `cfm.waf.sampled.log` to
+- **`review`/`noisy` rules** — feed real samples from `cfm.waf.log` to
   see what triggers them.
 - **New detectors** — sanity-check before pushing to production.
 
-### Investigating FPs in `cfm.waf.sampled.log`
+### Investigating FPs in `cfm.waf.log`
 
-Production-side, a configurable fraction of WAF hits (`CFM_WAF_SAMPLE_RATE`,
-default `0.01` = 1%) gets a richer entry in `cfm.waf.sampled.log` carrying
-UA, Referer, Content-Type, ASN, country. Format: one JSON object per line.
+Every WAF trigger writes one JSON object per line to `cfm.waf.log`, with
+all fields needed for FP investigation: UA, Referer, Content-Type, ASN,
+country, action, TTL, and the rule id.
 
 ```bash
 # Hits for a specific rule
-grep '"waf_rule_id":410' /var/log/cfm/cfm.waf.sampled.log | jq
+grep '"waf_rule_id":410' /var/log/cfm/cfm.waf.log | jq
 
 # Hits with a specific reason family
-grep '"reason":"WAF_DYN_INCLUDE' /var/log/cfm/cfm.waf.sampled.log | jq
+grep '"reason":"WAF_DYN_INCLUDE' /var/log/cfm/cfm.waf.log | jq
 
 # Last 24h of hits on a specific vhost
-grep '"host":"example.com"' /var/log/cfm/cfm.waf.sampled.log | jq
+grep '"host":"example.com"' /var/log/cfm/cfm.waf.log | jq
 ```
-
-The compact `cfm.waf.log` is for high-volume monitoring. The sampled log is
-for FP investigation — that's why the extra fields are there.
 
 ---
 
@@ -405,9 +402,11 @@ Response (one row per registered rule, even when `hits=0`):
 
 Per-rule precision uses `json_extract(payload_json, '$.waf_rule_id')` so families with multiple rules (e.g. all `WAF_AUTH_BURST` tags) are counted separately. Events from before the rule-IDs PR have NULL `waf_rule_id` and are excluded from the per-rule view (they still appear in the legacy `WAFByRule` reason-aggregation).
 
-### Sampled hit log
+### Hit log format
 
-A configurable fraction of WAF triggers (`CFM_WAF_SAMPLE_RATE`, default `0.01` = 1%) gets a richer entry in `cfm.waf.sampled.log`. Format: one JSON object per line.
+Every WAF trigger writes one JSON object per line to `cfm.waf.log`,
+carrying enrichment (ASN / country) and the per-request forensic fields
+(UA, Referer, Content-Type) that drive FP investigation.
 
 ```json
 {"ip":"1.2.3.4","host":"example.com","uri":"/admin/upload",
@@ -417,7 +416,9 @@ A configurable fraction of WAF triggers (`CFM_WAF_SAMPLE_RATE`, default `0.01` =
  "asn":12345,"asn_name":"EXAMPLE-AS","country":"US"}
 ```
 
-The compact `cfm.waf.log` stays for high-volume monitoring. Operators tail `cfm.waf.sampled.log` for FP investigation.
+The earlier split (compact text in `cfm.waf.log` + a sampled JSON in
+`cfm.waf.sampled.log`, gated by `CFM_WAF_SAMPLE_RATE`) is gone. Operators
+tail / grep `cfm.waf.log` directly for FP investigation.
 
 ### Cost / regression notes
 
@@ -425,8 +426,7 @@ The compact `cfm.waf.log` stays for high-volume monitoring. Operators tail `cfm.
 |---|---|---|
 | Per WAF check | ~3-5µs | Two shdict incr + one get-and-compare. <1% of WAF check cost. |
 | Per flush (~1/min cluster-wide) | ~3µs on the lock winner | Snapshot+RPC runs in `ngx.timer.at(0, …)`; RPC latency is 100% off the request path. |
-| Sampling (per request) | sub-µs | `math.random() < sr` and integer compare. |
-| Sampled trigger (1% of triggers) | ~50µs | Three extra string fields in JSON + one file write. |
+| Per WAF trigger | ~50µs | Forensic fields (UA / Referer / CT) attached on every push; JSON encode + one file write. |
 | `/api/v1/waf/hit-rates` | <100ms typical | `json_extract` is O(N events in window); operator-pulled, never on hot path. |
 
 #### Body-aware scan path (php_wrappers / ssrf_proto / js_proto)
@@ -447,7 +447,7 @@ End-to-end ceiling in production is bounded by `CFM_WAF_BODY_MAX_LEN` (default 8
 
 Backward compat: all new wire fields are `omitempty`; `CREATE TABLE IF NOT EXISTS` upgrades existing SQLite DBs silently.
 
-Kill switches: `CFM_WAF_STATS_ENABLE=0` disables counters + flushing; `CFM_WAF_SAMPLE_RATE=0` disables sampled log.
+Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
 
 ---
 
@@ -577,7 +577,7 @@ These are real and worth addressing, but not blocking:
 
 1. **Body truncation.** `CFM_WAF_BODY_MAX_LEN=8192` (in `cfm.lua`) means uploads/payloads larger than 8 KB skip body-inspection rules silently. The Content-Type-keyed `body_scan_budget` (added in PR #764) raises the WAF-internal cap to 32 KB for JSON / 16 KB for multipart+XML / 8 KB for urlencoded, but the upstream env-var ceiling still bottlenecks effective inspection at 8 KB. Phase W2/W3/W4 won't deliver until `CFM_WAF_BODY_MAX_LEN` is raised in lockstep (or inspection is streamed) for upload endpoints.
 2. **No multipart parser.** Polyglot upload detection (W4), upload context for W2/W3, and X1-in-body assume part-aware inspection. Today the WAF runs literal `has()` over raw bytes — works for finding `<?php` in image content, but can't distinguish multipart parts (claimed CT, filename, content).
-3. ~~**No hit-rate measurement.**~~ DONE — see "Hit-rate measurement" above. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, plus `cfm.waf.sampled.log` for FP investigation.
+3. ~~**No hit-rate measurement.**~~ DONE — see "Hit-rate measurement" above. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, plus `cfm.waf.log` (one JSON record per trigger with UA/Referer/CT) for FP investigation.
 4. **shdict pressure.** Auth-burst counters use shdict. Adding more counters scales contention. Per-rule benchmarks needed before Phase 5 lands.
 5. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
 6. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
@@ -673,7 +673,7 @@ Follow the existing patterns; new code should look like the rules already in the
 | Detectors | 42 detector functions invoked from `_M.check` (39 base + W1/R1/B5) | `configs/lua/cfm_waf_detectors.lua` |
 | Util | `scan_str`, `normalize` (no-`%` fast path), `url_decode_once`, `header_string`, `body_budget` (Content-Type-keyed scan cap), IP literal helpers | `configs/lua/cfm_waf_util.lua` |
 | Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
-| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, sampled log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
+| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, JSON hit log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
 | Per-vhost exclusions | `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI, `rule_ids` API param, `ctx.skip_rule_ids` Lua gate, vhost-controls panel toggle ignores rule-scoped entries | `internal/webdetector/exclude_store.go`, `exclude_rule_ids.go`, `cli_exclude.go`, `configs/lua/cfm.lua` (`waf_skip_for`) |
 | CI | `Build & Test` job in `.github/workflows/security.yml` runs `go vet`, `make lua`, `make test-lua`, `check_*` shell guards alongside `go build` and `go test -race`. luajit installed explicitly per matrix run. | `.github/workflows/security.yml` |
 | Security audit | Critical+High CodeQL alerts triaged 2026-05-09 (1 real XSS fixed, 10 FPs documented at the call sites). Inspector-as-attack-surface sweep summary in "Known gaps" item 8. | `docs/security/code-scanning-triage-2026-05-09.md` |
@@ -761,7 +761,7 @@ Follow the existing patterns; new code should look like the rules already in the
 
 - `docs/waf-analysis-2026-05-08.md` — Tier 1/2/3 analysis of three production servers. **Read before adding rules in any family already represented**, to avoid recreating known-FP patterns. Key takeaways: Facebook scrapers hit `/.../<path>` literals (handled in `detect_traversal`'s FB-skip); vitolighting/3xK Tech is the canonical "scraper triggers `WAF_PROXY_HDR`" pattern, solved by per-vhost exclusions; `WAF_BAD_UA` scoring covers most scanner UAs without explicit per-tool literals.
 - `docs/security/code-scanning-triage-2026-05-09.md` — Critical+High CodeQL alert triage from 2026-05-09 (1 real XSS fixed, 10 FPs documented, inspector-audit follow-ups).
-- `cfm.waf.log` and `cfm.waf.sampled.log` on a running production server — replay representative attack samples through a new detector before promoting.
+- `cfm.waf.log` on a running production server — one JSON record per trigger; replay representative attack samples through a new detector before promoting.
 
 ---
 

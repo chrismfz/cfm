@@ -16,8 +16,7 @@ var (
 	detectorLogFile   *os.File
 	smtpLogFile       *os.File
 	challengesLogFile *os.File
-	wafLogFile        *os.File
-	wafSampledLogFile *os.File
+	wafLogFile *os.File
 	mysqlLogFile      *os.File // mysql enforcer
 	socketLogFile     *os.File
 	once              sync.Once
@@ -176,26 +175,6 @@ func Init(c *config.LoggingConfig) {
 			fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
 		}
 
-		// Sampled WAF log: derived path next to the main WAF log. Separate file
-		// so high-volume regular events don't drown out the richer per-sample
-		// JSON entries used for FP investigation.
-		var sampledPath string
-		if wafPath != "" {
-			ext := filepath.Ext(wafPath)
-			if ext == "" {
-				sampledPath = wafPath + ".sampled"
-			} else {
-				sampledPath = strings.TrimSuffix(wafPath, ext) + ".sampled" + ext
-			}
-		}
-		if sampledPath != "" {
-			if f, err := os.OpenFile(sampledPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-				wafSampledLogFile = f
-			} else {
-				fmt.Printf("failed to open waf sampled log file %s: %v\n", sampledPath, err)
-			}
-		}
-
 		// MYSQL GOVERNOR log
 		mysqlPath := cfg.MYSQLFile
 		if mysqlPath == "" && cfg.File != "" {
@@ -313,29 +292,6 @@ func LogfWAF(format string, args ...interface{}) {
 	}
 }
 
-// LogfWAFSampled writes to cfm.waf.sampled.log — a separate log used for
-// the fraction of WAF triggers that are sampled with extra forensic context
-// (UA, Referer, Content-Type). The main cfm.waf.log stays compact for
-// high-volume monitoring; this file is for FP investigation tailing.
-//
-// Falls back to the main WAF log if the sampled file failed to open, then
-// to the global log. Same stdout policy as LogfWAF.
-func LogfWAFSampled(format string, args ...interface{}) {
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("%s %s\n", ts, msg)
-
-	if cfg == nil || cfg.WAFStdout {
-		fmt.Print(line)
-	}
-	if wafSampledLogFile != nil {
-		_, _ = wafSampledLogFile.WriteString(line)
-	} else if wafLogFile != nil {
-		_, _ = wafLogFile.WriteString(line)
-	} else if logFile != nil {
-		_, _ = logFile.WriteString(line)
-	}
-}
 
 func LogfSMTP(format string, args ...interface{}) {
 	ts := time.Now().Format("2006-01-02 15:04:05")
