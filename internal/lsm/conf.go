@@ -401,6 +401,33 @@ var DefaultGlobalAllowExe = []string{
 	// ships the unversioned symlink alongside.
 	"/usr/local/lsws/fcgi-bin/lscgid",
 	"/usr/local/lsws/bin/lscgid",
+
+	// DirectAdmin control panel daemon. Architecturally similar to
+	// cPanel's cpsrvd: a single root-owned daemon that handles every
+	// panel HTTP request and setuids into the operating user for
+	// per-account work (mail, FTP, file operations). Trips
+	// CFML-CRED-002 on every account-touching request. Companion
+	// allow_path = /usr/local/directadmin/ below covers the tree's
+	// Perl / shell helpers (build / da-popb4smtp / dataskq cron).
+	"/usr/local/directadmin/directadmin",
+
+	// ProFTPD. The master listens on 21 and forks a child per session;
+	// the child setuids to the authenticating user's uid before chroot
+	// — that's the whole protocol, every login looks like CRED-002 by
+	// design. Allow the parent exe path here; the comm allowlist below
+	// also catches session children that share the comm "proftpd".
+	"/usr/sbin/proftpd",
+	"/usr/local/sbin/proftpd",
+
+	// Pure-FTPd. Same architecture as ProFTPD — server master forks a
+	// child on accept, child setuids to the per-account uid. Quiet on
+	// hosts where nobody has authenticated during the observation
+	// window, but every real login will trip CRED-002 once. The
+	// (SERVER) suffix in `ps` is set via argv-rewriting; the kernel's
+	// task->comm stays as "pure-ftpd" so the comm allowlist below
+	// catches both master and per-session children uniformly.
+	"/usr/sbin/pure-ftpd",
+	"/usr/local/sbin/pure-ftpd",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -487,6 +514,25 @@ var DefaultGlobalAllowComm = []string{
 	// entry per LSWS upgrade; comm is the stable handle. Sets its own
 	// comm via prctl on launch so it reports as plain "lscgid".
 	"lscgid",
+
+	// DirectAdmin control panel daemon. Comm handle for the version-
+	// independent match — the allow_exe entry above covers the
+	// canonical install path; this catches the case where DA ships
+	// from a non-default prefix.
+	"directadmin",
+
+	// ProFTPD per-session children. The parent's comm is also
+	// "proftpd"; children inherit it through fork+setuid. Allow_exe
+	// above pins the master inode for the BPF-side setuid_inodes map;
+	// this comm entry catches anything the userspace post-filter sees
+	// where the per-session child's exe lookup races the d_name
+	// resolution (rare but recorded in field reports).
+	"proftpd",
+
+	// Pure-FTPd master + per-session children. Same rationale as
+	// proftpd: comm is the stable handle across master and forked
+	// session workers.
+	"pure-ftpd",
 }
 
 // DefaultGlobalAllowPath lists path prefixes that identify legitimate
@@ -532,6 +578,14 @@ var DefaultGlobalAllowPath = []string{
 	// allow_exe entries so the BPF program short-circuits on the
 	// inode; this prefix catches the rest at the userspace filter.
 	"/usr/local/cpanel/",
+
+	// DirectAdmin tree — mirror of the cPanel safety net for DA's
+	// daemon and its helper scripts (build, da-popb4smtp, dataskq,
+	// custombuild). The main `directadmin` binary is in
+	// DefaultGlobalAllowExe above so the BPF map short-circuit
+	// covers the hot path; this prefix catches the Perl / shell
+	// helpers DA ships under the same tree.
+	"/usr/local/directadmin/",
 
 	// CloudLinux CageFS Python helpers (cagefsctl is comm-allowlisted
 	// above; this catches any other CageFS-rooted Python tooling).
