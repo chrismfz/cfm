@@ -1190,6 +1190,12 @@ func runDaemon(args []string) {
 		// auto-pin. The operator runs `cfm lsm enable` to activate
 		// (which writes the pinned state); the daemon picks it up
 		// here on the next reload tick.
+		//
+		// Also re-invoked unconditionally from the main tick loop —
+		// lsm.conf is independent of cfm.conf, so an operator who
+		// flips `enabled = false → true` in lsm.conf without touching
+		// cfm.conf would otherwise wait until the next cfm.conf edit
+		// (or daemon restart) for the lifecycle to notice.
 		lsmLc.ApplyConfig(ctx)
 	}
 
@@ -1304,6 +1310,14 @@ func runDaemon(args []string) {
 		reloadBlocklists() // only if cfm.blocklists changed
 		loadAll()          // only if cfm.allow / cfm.deny / cfm.ignore changed
 		onCFMConfChanged() // only if cfm.conf changed
+
+		// cfm-lsm activation is gated by /etc/cfm/lsm.conf, which is
+		// independent of cfm.conf — so the cfm.conf-only path above
+		// would miss a fresh `enabled = true` until cfm.conf itself
+		// gets touched. ApplyConfig is start-once internally (cheap
+		// no-op when the lifecycle is already activated), so calling
+		// it every tick is safe.
+		lsmLc.ApplyConfig(ctx)
 
 		// DumpFloodCounters and LoadPortScanner are internally non-blocking:
 		// each launches its own goroutine with an overlap guard (if a previous

@@ -384,6 +384,23 @@ var DefaultGlobalAllowExe = []string{
 	// setuid as part of its reporting protocol.
 	"/usr/bin/dccproc",
 	"/usr/local/bin/dccproc",
+
+	// CloudLinux Smart Advice agent. Ships under /opt/cloudlinux/ but
+	// some distros symlink the entry point into /usr/{bin,sbin}/ — the
+	// kernel resolves the symlink so the exe is the generic interpreter
+	// (python3.11). Comm match below is the primary handle; we add
+	// allow_exe for the wrapper paths so both layouts are covered.
+	"/usr/bin/cl-smart-advice",
+	"/usr/sbin/cl-smart-advice",
+
+	// LiteSpeed Web Server's CGI daemon. Setuids into the per-vhost
+	// uid for each CGI invocation, which is the entire point of the
+	// product. The binary on disk is versioned (lscgid.6.3.2 etc) so
+	// the comm allowlist below is the version-stable handle; the
+	// allow_exe entries below cover known install layouts when LSWS
+	// ships the unversioned symlink alongside.
+	"/usr/local/lsws/fcgi-bin/lscgid",
+	"/usr/local/lsws/bin/lscgid",
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -458,6 +475,18 @@ var DefaultGlobalAllowComm = []string{
 	// comm match is the handle.
 	"spamd",
 	"spamd child",
+
+	// CloudLinux Smart Advice agent. Runs python3.11 as the exe and
+	// trips CFML-CRED-002 each time it transitions uids while
+	// gathering per-cage advice. Real comm is "cl-smart-advice"
+	// (exactly TASK_COMM_LEN-1 = 15 chars, fits without truncation).
+	"cl-smart-advice",
+
+	// LiteSpeed Web Server's CGI daemon. The exe d_name is versioned
+	// (e.g. "lscgid.6.3.2") so allow_exe basename match would need an
+	// entry per LSWS upgrade; comm is the stable handle. Sets its own
+	// comm via prctl on launch so it reports as plain "lscgid".
+	"lscgid",
 }
 
 // DefaultGlobalAllowPath lists path prefixes that identify legitimate
